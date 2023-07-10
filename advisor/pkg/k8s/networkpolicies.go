@@ -5,15 +5,20 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
+type NetworkPolicyRule struct {
+	Ports  []networkingv1.NetworkPolicyPort
+	FromTo []networkingv1.NetworkPolicyPeer
+}
+
 type NetworkPolicySpec struct {
 	PodSelector metav1.LabelSelector
 	PolicyTypes []networkingv1.PolicyType
-	Ingress     []networkingv1.NetworkPolicyIngressRule
-	Egress      []networkingv1.NetworkPolicyEgressRule
+	Ingress     []NetworkPolicyRule
+	Egress      []NetworkPolicyRule
 }
 
 func CreateNetworkPolicy(name, namespace string, spec NetworkPolicySpec) *networkingv1.NetworkPolicy {
-	return &networkingv1.NetworkPolicy{
+	networkPolicy := &networkingv1.NetworkPolicy{
 		TypeMeta: metav1.TypeMeta{
 			APIVersion: "networking.k8s.io/v1",
 			Kind:       "NetworkPolicy",
@@ -25,8 +30,22 @@ func CreateNetworkPolicy(name, namespace string, spec NetworkPolicySpec) *networ
 		Spec: networkingv1.NetworkPolicySpec{
 			PodSelector: spec.PodSelector,
 			PolicyTypes: spec.PolicyTypes,
-			Ingress:     spec.Ingress,
-			Egress:      spec.Egress,
 		},
 	}
+
+	for _, rule := range spec.Ingress {
+		networkPolicy.Spec.Ingress = append(networkPolicy.Spec.Ingress, networkingv1.NetworkPolicyIngressRule{
+			Ports: rule.Ports,
+			From:  rule.FromTo,
+		})
+	}
+
+	for _, rule := range spec.Egress {
+		networkPolicy.Spec.Egress = append(networkPolicy.Spec.Egress, networkingv1.NetworkPolicyEgressRule{
+			Ports: rule.Ports,
+			To:    rule.FromTo,
+		})
+	}
+
+	return networkPolicy
 }
