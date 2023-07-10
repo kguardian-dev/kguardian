@@ -57,8 +57,8 @@ func (dbc *DBConnection) Close() error {
 	return dbc.db.Close()
 }
 
-func (dbc *DBConnection) GetPodTraffic(uuid string) (*PodTraffic, error) {
-	row := dbc.db.QueryRow("SELECT * FROM pod_traffic WHERE uuid = $1", uuid)
+func (dbc *DBConnection) GetPodTraffic(podName string) (*PodTraffic, error) {
+	row := dbc.db.QueryRow("SELECT * FROM pod_traffic WHERE pod_name = $1", podName)
 
 	podTraffic := new(PodTraffic)
 	err := row.Scan(&podTraffic.UUID, &podTraffic.SrcPodName, &podTraffic.SrcIP, &podTraffic.SrcNamespace,

@@ -23,7 +23,8 @@ For Pod get all the traffic relating to it
 Get the PodSpec for the Pod
 Iterate all Ingress for each Source Pod
   - Iterate all the ports for the pod where ingress is expected
-  - Add the namespace (respect kubernetes.io/metadata.name) and labels (respect app.kubernetes.io/name and/or app.kubernetes.io/instance)
+  - Add the namespace (respect kubernetes.io/metadata.name)
+  -  Checkdeployment controller -> labels (can't respect app.kubernetes.io/name and/or app.kubernetes.io/instance)
 Iterate all Egress for each Source Pod
   - Iterate all the ports for the pod where egress is expected
   - Add the namespace (respect kubernetes.io/metadata.name) and labels (respect app.kubernetes.io/name and/or app.kubernetes.io/instance)
