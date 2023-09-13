@@ -4,25 +4,11 @@ import (
 	"fmt"
 	"log"
 
-	db "github.com/arx-inc/advisor/pkg/database"
-	v1 "k8s.io/api/core/v1"
+	api "github.com/arx-inc/advisor/pkg/api"
 	networkingv1 "k8s.io/api/networking/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"sigs.k8s.io/yaml"
-)
-
-const (
-	// TODO: Remove these hardcoded values
-	name      = "test-network-policy"
-	namespace = "default"
-
-	// TODO: replace these with your actual PostgreSQL connection details
-	host     = "localhost"
-	port     = 5432
-	user     = "youruser"
-	password = "yourpassword"
-	dbname   = "yourdb"
 )
 
 type NetworkPolicyRule struct {
@@ -37,94 +23,36 @@ type NetworkPolicySpec struct {
 	Egress      []NetworkPolicyRule
 }
 
-func GenerateNetworkPolicy(podName string) {
-	// Decide whether to use real DB or stub
-	var podTrafficGetter db.PodTrafficGetter
-	useDB := false // change this to false to use the stub
+type RuleSets struct {
+	Ingress []networkingv1.NetworkPolicyIngressRule
+	Egress  []networkingv1.NetworkPolicyEgressRule
+}
 
-	if useDB {
-		var err error
-		podTrafficGetter, err = db.NewDBConnection(host, port, user, password, dbname)
-		if err != nil {
-			log.Fatalf("Error opening database connection: %v\n", err)
-			return
-		}
-		defer podTrafficGetter.(*db.DBConnection).Close()
-	} else {
-		podTrafficGetter = &db.PodTrafficStub{}
-	}
+func GenerateNetworkPolicy(podName, namespace string) {
 
-	// example of querying for a specific UUID
-	podTraffic, err := podTrafficGetter.GetPodTraffic(podName)
+	podTraffic, err := api.GetPodTraffic(podName)
 	if err != nil {
 		log.Fatalf("Error retrieving pod traffic: %v\n", err)
 		return
 	}
 
-	if podTraffic != nil {
-		fmt.Printf("Pod traffic for pod %s: %+v\n", podName, podTraffic)
-	} else {
+	if podTraffic == nil {
 		fmt.Printf("No pod traffic found for pod %s\n", podName)
+		return
 	}
 
-	podSpec, err := podTrafficGetter.GetPodSpec(podTraffic.SrcPodName)
+	podDetail, err := api.GetPodSpec(podTraffic[0].SrcIP)
 	if err != nil {
 		log.Fatalf("Error retrieving pod spec: %v\n", err)
 		return
 	}
 
-	if podSpec != nil {
-		fmt.Printf("Pod spec for pod %s: %+v\n", podSpec.Name, podSpec.Spec)
-	} else {
-		fmt.Printf("No pod spec found for pod %s\n", podSpec)
+	if podDetail == nil {
+		fmt.Printf("No pod spec found for pod %s\n", podDetail.Name)
+		return
 	}
 
-	// TODO: replace this with your actual network policy spec from the database
-	spec := NetworkPolicySpec{
-		PodSelector: metav1.LabelSelector{
-			MatchLabels: map[string]string{
-				"app": "MyApp",
-			},
-		},
-		PolicyTypes: []networkingv1.PolicyType{networkingv1.PolicyTypeIngress, networkingv1.PolicyTypeEgress},
-		Ingress: []NetworkPolicyRule{
-			{
-				Ports: []networkingv1.NetworkPolicyPort{
-					{
-						Protocol: protoPtr(v1.ProtocolTCP),
-						Port:     intStrPtr(8080),
-					},
-				},
-				FromTo: []networkingv1.NetworkPolicyPeer{
-					{
-						PodSelector: &metav1.LabelSelector{
-							MatchLabels: map[string]string{
-								"access": "allowed",
-							},
-						},
-						NamespaceSelector: &metav1.LabelSelector{
-							MatchLabels: map[string]string{
-								"kubernetes.io/metadata.name:": "some-namespace",
-							},
-						},
-					},
-				},
-			},
-		},
-		Egress: []NetworkPolicyRule{
-			{
-				// No ports specified, so all ports are allowed
-				Ports: []networkingv1.NetworkPolicyPort{},
-				FromTo: []networkingv1.NetworkPolicyPeer{
-					{
-						// No pod selector or namespace selector specified, so all destinations are allowed
-					},
-				},
-			},
-		},
-	}
-
-	policy := CreateNetworkPolicy(name, namespace, spec)
+	policy := TransformToNetworkPolicy(&podTraffic, podDetail)
 	policyYAML, err := yaml.Marshal(policy)
 	if err != nil {
 		fmt.Printf("Error converting policy to YAML: %v", err)
@@ -134,43 +62,79 @@ func GenerateNetworkPolicy(podName string) {
 	fmt.Println(string(policyYAML))
 }
 
-func CreateNetworkPolicy(name, namespace string, spec NetworkPolicySpec) *networkingv1.NetworkPolicy {
+func TransformToNetworkPolicy(podTraffic *[]api.PodTraffic, podDetail *api.PodDetail) *networkingv1.NetworkPolicy {
+	var ingressRules []networkingv1.NetworkPolicyIngressRule
+	var egressRules []networkingv1.NetworkPolicyEgressRule
+
+	for _, traffic := range *podTraffic {
+
+		// Get pod spec for the pod that is sending traffic
+		origin, err := api.GetPodSpec(traffic.DstIP)
+		if err != nil {
+			// TODO: Handle errors, for now just continue as this is not a fatal error and it assumes the traffic originated from outside the cluster
+			continue
+		}
+
+		port := intstr.Parse(traffic.SrcPodPort)
+		networkPolicyPort := networkingv1.NetworkPolicyPort{
+			Protocol: &traffic.Protocol,
+			Port:     &port,
+		}
+
+		peer := networkingv1.NetworkPolicyPeer{}
+		// If the traffic originated from in-cluster as either a pod or service
+		if origin != nil {
+			peer = networkingv1.NetworkPolicyPeer{
+				PodSelector: &metav1.LabelSelector{
+					// TODO: Check if this is the correct label to use
+					MatchLabels: map[string]string{"app.kubernetes.io/name": origin.Pod.ObjectMeta.Labels["app.kubernetes.io/name"]},
+				},
+				NamespaceSelector: &metav1.LabelSelector{
+					MatchLabels: map[string]string{"kubernetes.io/metadata.name": origin.Pod.ObjectMeta.Namespace},
+				},
+			}
+		}
+
+		if traffic.TrafficType == "INGRESS" {
+			ingressRules = append(ingressRules, networkingv1.NetworkPolicyIngressRule{
+				Ports: []networkingv1.NetworkPolicyPort{networkPolicyPort},
+				From:  []networkingv1.NetworkPolicyPeer{peer},
+			})
+		} else if traffic.TrafficType == "EGRESS" {
+			egressRules = append(egressRules, networkingv1.NetworkPolicyEgressRule{
+				Ports: []networkingv1.NetworkPolicyPort{networkPolicyPort},
+				To:    []networkingv1.NetworkPolicyPeer{peer},
+			})
+		}
+	}
+
 	networkPolicy := &networkingv1.NetworkPolicy{
 		TypeMeta: metav1.TypeMeta{
 			APIVersion: "networking.k8s.io/v1",
 			Kind:       "NetworkPolicy",
 		},
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      name,
-			Namespace: namespace,
+			Name:      podDetail.Name,
+			Namespace: podDetail.Namespace,
+			// TODO: What labels should we use?
+			Labels: map[string]string{
+				"advisor.arx.io/managed-by": "arx",
+				"advisor.arx.io/version":    "0.0.1",
+			},
 		},
 		Spec: networkingv1.NetworkPolicySpec{
-			PodSelector: spec.PodSelector,
-			PolicyTypes: spec.PolicyTypes,
+			PodSelector: metav1.LabelSelector{
+				// TODO: Check if this is the correct label to use
+				MatchLabels: map[string]string{"app.kubernetes.io/name": podDetail.Pod.ObjectMeta.Labels["app.kubernetes.io/name"]},
+			},
+			PolicyTypes: []networkingv1.PolicyType{
+				networkingv1.PolicyTypeIngress,
+				networkingv1.PolicyTypeEgress,
+			},
+			Ingress: ingressRules,
+			Egress:  egressRules,
 		},
-	}
-
-	for _, rule := range spec.Ingress {
-		networkPolicy.Spec.Ingress = append(networkPolicy.Spec.Ingress, networkingv1.NetworkPolicyIngressRule{
-			Ports: rule.Ports,
-			From:  rule.FromTo,
-		})
-	}
-
-	for _, rule := range spec.Egress {
-		networkPolicy.Spec.Egress = append(networkPolicy.Spec.Egress, networkingv1.NetworkPolicyEgressRule{
-			Ports: rule.Ports,
-			To:    rule.FromTo,
-		})
 	}
 
 	return networkPolicy
-}
-
-func protoPtr(protocol v1.Protocol) *v1.Protocol {
-	return &protocol
-}
-
-func intStrPtr(port int32) *intstr.IntOrString {
-	return &intstr.IntOrString{IntVal: port}
 }

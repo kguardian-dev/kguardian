@@ -4,12 +4,14 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/arx-inc/advisor/pkg/k8s"
 	"github.com/spf13/cobra"
 )
 
 func init() {
 	genCmd.AddCommand(networkPolicyCmd, seccompCmd)
+	genCmd.PersistentFlags().String("kubeconfig", "", "Path to the kubeconfig file to use for CLI requests.")
+	genCmd.PersistentFlags().String("namespace", "", "If present, the namespace scope for this CLI request")
+
 	rootCmd.AddCommand(genCmd)
 }
 
@@ -21,32 +23,6 @@ var rootCmd = &cobra.Command{
 	       policies, seccomp profiles, and more to ensure that your applications meet
 	       best security practices.
 	       Complete documentation is available at [Your Documentation URL]`,
-}
-
-var genCmd = &cobra.Command{
-	Use:   "gen",
-	Short: "Generate resources",
-}
-
-var networkPolicyCmd = &cobra.Command{
-	Use:   "networkpolicy [pod-name]",
-	Short: "Generate network policy",
-	Args:  cobra.ExactArgs(1),
-	Run: func(cmd *cobra.Command, args []string) {
-		podName := args[0]
-		fmt.Printf("Generating network policy for pod: %s\n", podName)
-		k8s.GenerateNetworkPolicy(podName)
-	},
-}
-
-var seccompCmd = &cobra.Command{
-	Use:   "seccomp [pod-name]",
-	Short: "Generate seccomp profile",
-	Args:  cobra.ExactArgs(1),
-	Run: func(cmd *cobra.Command, args []string) {
-		podName := args[0]
-		fmt.Printf("Generating seccomp profile for pod: %s\n", podName)
-	},
 }
 
 func Execute() {
