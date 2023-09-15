@@ -1,4 +1,4 @@
-FROM golang:1.14-alpine as build
+FROM golang:1.21.1-alpine3.18 as build
 
 # Buildx build-in ARGs
 ARG TARGETOS
@@ -25,7 +25,7 @@ RUN go mod download
 COPY . .
 
 RUN go build -a -installsuffix cgo \
-  -ldflags="-w -extldflags '-static' -X 'main.ApplicationName=Advisor' -X 'main.Version=${VERSION}' -X 'main.SHA=${SHA}'" \
+  -ldflags="-w -extldflags '-static' -X 'main.ApplicationName=${APPLICATION_NAME}}' -X 'main.Version=${VERSION}' -X 'main.SHA=${SHA}'" \
   -o advisor .
 
 FROM gcr.io/distroless/static:nonroot

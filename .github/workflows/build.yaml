@@ -40,6 +40,7 @@ jobs:
         uses: docker/build-push-action@v2
         with:
           build-args: |
+            APPLICATION_NAME=advisor
             VERSION=0.0.1
             SHA=${{ github.sha }}
           context: ./advisor
