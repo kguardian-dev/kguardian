@@ -43,7 +43,7 @@ var networkPolicyCmd = &cobra.Command{
 			}
 		}()
 		fmt.Println("Port forwarding set up successfully.")
-		k8s.GenerateNetworkPolicy(podName, config.Namespace)
+		k8s.GenerateNetworkPolicy(podName, config)
 		close(stopChan)
 	},
 }

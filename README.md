@@ -46,13 +46,13 @@ mv arx /usr/local/bin/
 ### 🔒 Generate Network Policies
 
 ```bash
-kubectl arx gen networkpolicy [pod-name] --namespace my-namespace
+kubectl arx gen networkpolicy [pod-name] --namespace [namespace-name]
 ```
 
 ### 🛡️ Generate Seccomp Profiles
 
 ```bash
-kubectl arx gen seccomp [pod-name] --namespace my-namespace
+kubectl arx gen seccomp [pod-name] --namespace [namespace-name]
 ```
 
 For more details on the commands:

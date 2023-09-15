@@ -28,7 +28,7 @@ type RuleSets struct {
 	Egress  []networkingv1.NetworkPolicyEgressRule
 }
 
-func GenerateNetworkPolicy(podName, namespace string) {
+func GenerateNetworkPolicy(podName string, config *Config) {
 
 	podTraffic, err := api.GetPodTraffic(podName)
 	if err != nil {
@@ -37,7 +37,7 @@ func GenerateNetworkPolicy(podName, namespace string) {
 	}
 
 	if podTraffic == nil {
-		fmt.Printf("No pod traffic found for pod %s\n", podName)
+		log.Fatalf("No pod traffic found for pod %s\n", podName)
 		return
 	}
 
@@ -48,11 +48,11 @@ func GenerateNetworkPolicy(podName, namespace string) {
 	}
 
 	if podDetail == nil {
-		fmt.Printf("No pod spec found for pod %s\n", podDetail.Name)
+		log.Fatalf("No pod spec found for pod %s\n", podDetail.Name)
 		return
 	}
 
-	policy := TransformToNetworkPolicy(&podTraffic, podDetail)
+	policy := TransformToNetworkPolicy(&podTraffic, podDetail, config)
 	policyYAML, err := yaml.Marshal(policy)
 	if err != nil {
 		fmt.Printf("Error converting policy to YAML: %v", err)
@@ -62,23 +62,36 @@ func GenerateNetworkPolicy(podName, namespace string) {
 	fmt.Println(string(policyYAML))
 }
 
-func TransformToNetworkPolicy(podTraffic *[]api.PodTraffic, podDetail *api.PodDetail) *networkingv1.NetworkPolicy {
+func TransformToNetworkPolicy(podTraffic *[]api.PodTraffic, podDetail *api.PodDetail, config *Config) *networkingv1.NetworkPolicy {
 	var ingressRules []networkingv1.NetworkPolicyIngressRule
 	var egressRules []networkingv1.NetworkPolicyEgressRule
 
+	// TODO: How to perform this action offline
+	podSelectorLabels, err := DetectSelectorLabels(config.Clientset, &podDetail.Pod)
+	if err != nil {
+		fmt.Println(err)
+		// TODO: Handle errors, this would mean a controller was detected but may no longer exist due to the pod being deleted but still present in the database
+		fmt.Println("Detect Labels of pod", err)
+		return nil
+	}
+
 	for _, traffic := range *podTraffic {
+
+		// TODO: Check PODCIDR and SVCCIDR to determine if IP originated from inside or outside the cluster
 
 		// Get pod spec for the pod that is sending traffic
 		origin, err := api.GetPodSpec(traffic.DstIP)
 		if err != nil {
 			// TODO: Handle errors, for now just continue as this is not a fatal error and it assumes the traffic originated from outside the cluster
+			fmt.Println("Get Pod Spec of origin", traffic.DstIP, err)
 			continue
 		}
 
-		port := intstr.Parse(traffic.SrcPodPort)
-		networkPolicyPort := networkingv1.NetworkPolicyPort{
-			Protocol: &traffic.Protocol,
-			Port:     &port,
+		peerSelectorLabels, err := DetectSelectorLabels(config.Clientset, &origin.Pod)
+		if err != nil {
+			// TODO: Handle errors, this would mean a controller was detected but may no longer exist due to the pod being deleted but still present in the database
+			fmt.Println("Detect Labels", origin.Name, err)
+			continue
 		}
 
 		peer := networkingv1.NetworkPolicyPeer{}
@@ -86,8 +99,7 @@ func TransformToNetworkPolicy(podTraffic *[]api.PodTraffic, podDetail *api.PodDe
 		if origin != nil {
 			peer = networkingv1.NetworkPolicyPeer{
 				PodSelector: &metav1.LabelSelector{
-					// TODO: Check if this is the correct label to use
-					MatchLabels: map[string]string{"app.kubernetes.io/name": origin.Pod.ObjectMeta.Labels["app.kubernetes.io/name"]},
+					MatchLabels: peerSelectorLabels,
 				},
 				NamespaceSelector: &metav1.LabelSelector{
 					MatchLabels: map[string]string{"kubernetes.io/metadata.name": origin.Pod.ObjectMeta.Namespace},
@@ -96,14 +108,26 @@ func TransformToNetworkPolicy(podTraffic *[]api.PodTraffic, podDetail *api.PodDe
 		}
 
 		if traffic.TrafficType == "INGRESS" {
+			port := intstr.Parse(traffic.SrcPodPort)
 			ingressRules = append(ingressRules, networkingv1.NetworkPolicyIngressRule{
-				Ports: []networkingv1.NetworkPolicyPort{networkPolicyPort},
-				From:  []networkingv1.NetworkPolicyPeer{peer},
+				Ports: []networkingv1.NetworkPolicyPort{
+					{
+						Protocol: &traffic.Protocol,
+						Port:     &port,
+					},
+				},
+				From: []networkingv1.NetworkPolicyPeer{peer},
 			})
 		} else if traffic.TrafficType == "EGRESS" {
+			port := intstr.Parse(traffic.DstPort)
 			egressRules = append(egressRules, networkingv1.NetworkPolicyEgressRule{
-				Ports: []networkingv1.NetworkPolicyPort{networkPolicyPort},
-				To:    []networkingv1.NetworkPolicyPeer{peer},
+				Ports: []networkingv1.NetworkPolicyPort{
+					{
+						Protocol: &traffic.Protocol,
+						Port:     &port,
+					},
+				},
+				To: []networkingv1.NetworkPolicyPeer{peer},
 			})
 		}
 	}
@@ -124,8 +148,7 @@ func TransformToNetworkPolicy(podTraffic *[]api.PodTraffic, podDetail *api.PodDe
 		},
 		Spec: networkingv1.NetworkPolicySpec{
 			PodSelector: metav1.LabelSelector{
-				// TODO: Check if this is the correct label to use
-				MatchLabels: map[string]string{"app.kubernetes.io/name": podDetail.Pod.ObjectMeta.Labels["app.kubernetes.io/name"]},
+				MatchLabels: podSelectorLabels,
 			},
 			PolicyTypes: []networkingv1.PolicyType{
 				networkingv1.PolicyTypeIngress,
