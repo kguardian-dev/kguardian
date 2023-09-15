@@ -19,7 +19,7 @@ on:
     branches:
       - main
     paths:
-      - ".github/workflows/schedule-renovate.yml"
+      - ".github/workflows/renovate.yml"
       - ".github/renovate.json5"
       - ".github/renovate/*"
 

@@ -25,8 +25,8 @@ RUN go mod download
 COPY . .
 
 RUN go build -a -installsuffix cgo \
-  -ldflags="-w -extldflags '-static' -X 'main.ApplicationName=${APPLICATION_NAME}' -X 'main.Version=${VERSION}' -X 'main.SHA=${SHA}'" \
-  -o example .
+  -ldflags="-w -extldflags '-static' -X 'main.ApplicationName=Advisor' -X 'main.Version=${VERSION}' -X 'main.SHA=${SHA}'" \
+  -o advisor .
 
 FROM gcr.io/distroless/static:nonroot
 
