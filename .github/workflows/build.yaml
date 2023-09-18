@@ -37,7 +37,7 @@ jobs:
 
       - name: Build and Push
         if: github.ref != 'refs/heads/master'
-        uses: docker/build-push-action@v2
+        uses: docker/build-push-action@0565240e2d4ab88bba5387d719585280857ece09 # v5
         with:
           build-args: |
             APPLICATION_NAME=advisor
