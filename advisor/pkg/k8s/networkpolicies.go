@@ -76,21 +76,49 @@ func TransformToNetworkPolicy(podTraffic *[]api.PodTraffic, podDetail *api.PodDe
 	}
 
 	for _, traffic := range *podTraffic {
-
+		var origin interface{}
 		// TODO: Check PODCIDR and SVCCIDR to determine if IP originated from inside or outside the cluster
 
 		// Get pod spec for the pod that is sending traffic
-		origin, err := api.GetPodSpec(traffic.DstIP)
+		podOrigin, err := api.GetPodSpec(traffic.DstIP)
 		if err != nil {
-			// TODO: Handle errors, for now just continue as this is not a fatal error and it assumes the traffic originated from outside the cluster
 			fmt.Println("Get Pod Spec of origin", traffic.DstIP, err)
+		} else if podOrigin != nil {
+			origin = podOrigin
+		}
+
+		// If we couldn't get the Pod details, try getting the Service details
+		if origin == nil {
+			svcOrigin, err := api.GetSvcSpec(traffic.DstIP)
+			if err != nil {
+				fmt.Println("Get Svc Spec of origin", traffic.DstIP, err)
+				continue
+			} else if svcOrigin != nil {
+				origin = svcOrigin
+			}
+		}
+
+		if origin == nil {
+			fmt.Println("Could not find details for origin", traffic.DstIP)
 			continue
 		}
 
-		peerSelectorLabels, err := DetectSelectorLabels(config.Clientset, &origin.Pod)
+		peerSelectorLabels, err := DetectSelectorLabels(config.Clientset, origin)
 		if err != nil {
 			// TODO: Handle errors, this would mean a controller was detected but may no longer exist due to the pod being deleted but still present in the database
-			fmt.Println("Detect Labels", origin.Name, err)
+			fmt.Println("Detect Labels", origin, err)
+			continue
+		}
+
+		var metadata metav1.ObjectMeta
+
+		switch o := origin.(type) {
+		case *api.PodDetail:
+			metadata = o.Pod.ObjectMeta
+		case *api.SvcDetail:
+			metadata = o.Service.ObjectMeta
+		default:
+			fmt.Println("Unknown type for origin")
 			continue
 		}
 
@@ -102,7 +130,7 @@ func TransformToNetworkPolicy(podTraffic *[]api.PodTraffic, podDetail *api.PodDe
 					MatchLabels: peerSelectorLabels,
 				},
 				NamespaceSelector: &metav1.LabelSelector{
-					MatchLabels: map[string]string{"kubernetes.io/metadata.name": origin.Pod.ObjectMeta.Namespace},
+					MatchLabels: map[string]string{"kubernetes.io/metadata.name": metadata.Namespace},
 				},
 			}
 		}
@@ -142,8 +170,8 @@ func TransformToNetworkPolicy(podTraffic *[]api.PodTraffic, podDetail *api.PodDe
 			Namespace: podDetail.Namespace,
 			// TODO: What labels should we use?
 			Labels: map[string]string{
-				"advisor.arx.io/managed-by": "arx",
-				"advisor.arx.io/version":    "0.0.1",
+				"advisor.xentra.ai/managed-by": "xentra",
+				"advisor.xentra.ai/version":    "0.0.1",
 			},
 		},
 		Spec: networkingv1.NetworkPolicySpec{
