@@ -121,7 +121,6 @@ func TransformToNetworkPolicy(podTraffic *[]api.PodTraffic, podDetail *api.PodDe
 			fmt.Println("Unknown type for origin")
 			continue
 		}
-
 		peer := networkingv1.NetworkPolicyPeer{}
 		// If the traffic originated from in-cluster as either a pod or service
 		if origin != nil {
@@ -134,13 +133,13 @@ func TransformToNetworkPolicy(podTraffic *[]api.PodTraffic, podDetail *api.PodDe
 				},
 			}
 		}
-
+		protocol := traffic.Protocol
 		if traffic.TrafficType == "INGRESS" {
 			port := intstr.Parse(traffic.SrcPodPort)
 			ingressRules = append(ingressRules, networkingv1.NetworkPolicyIngressRule{
 				Ports: []networkingv1.NetworkPolicyPort{
 					{
-						Protocol: &traffic.Protocol,
+						Protocol: &protocol,
 						Port:     &port,
 					},
 				},
@@ -148,10 +147,11 @@ func TransformToNetworkPolicy(podTraffic *[]api.PodTraffic, podDetail *api.PodDe
 			})
 		} else if traffic.TrafficType == "EGRESS" {
 			port := intstr.Parse(traffic.DstPort)
+
 			egressRules = append(egressRules, networkingv1.NetworkPolicyEgressRule{
 				Ports: []networkingv1.NetworkPolicyPort{
 					{
-						Protocol: &traffic.Protocol,
+						Protocol: &protocol,
 						Port:     &port,
 					},
 				},

@@ -35,7 +35,7 @@ type SvcDetail struct {
 	SvcIp        string     `yaml:"svc_ip" json:"svc_ip"`
 	SvcName      string     `yaml:"svc_name" json:"svc_name"`
 	SvcNamespace string     `yaml:"svc_namespace" json:"svc_namespace"`
-	Service      v1.Service `yaml:"endpoint_spec" json:"endpoint_spec"`
+	Service      v1.Service `yaml:"service_spec" json:"service_spec"`
 }
 
 func GetPodTraffic(podName string) ([]PodTraffic, error) {
@@ -90,7 +90,7 @@ func GetPodSpec(ip string) (*PodDetail, error) {
 
 	// Check the HTTP status code.
 	if resp.StatusCode != http.StatusOK {
-		fmt.Printf("received non-OK HTTP status code: %v", resp.StatusCode)
+		//fmt.Printf("received non-OK HTTP status code: %v", resp.StatusCode)
 		return nil, nil
 	}
 
@@ -108,7 +108,7 @@ func GetPodSpec(ip string) (*PodDetail, error) {
 func GetSvcSpec(svcIp string) (*SvcDetail, error) {
 
 	// Specify the URL of the RESTAPI endpoint you want to invoke.
-	apiURL := "http://127.0.0.1:9090//netpol/svc/" + svcIp
+	apiURL := "http://127.0.0.1:9090/netpol/svc/" + svcIp
 
 	// Send an HTTP GET request to the API endpoint.
 	resp, err := http.Get(apiURL)
