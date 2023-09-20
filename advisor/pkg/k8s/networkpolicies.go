@@ -130,6 +130,12 @@ func TransformToNetworkPolicy(podTraffic *[]api.PodTraffic, podDetail *api.PodDe
 					MatchLabels: map[string]string{"kubernetes.io/metadata.name": metadata.Namespace},
 				},
 			}
+		} else {
+			peer = networkingv1.NetworkPolicyPeer{
+				IPBlock: &networkingv1.IPBlock{
+					CIDR: traffic.DstIP + "/32",
+				},
+			}
 		}
 
 		protocol := traffic.Protocol

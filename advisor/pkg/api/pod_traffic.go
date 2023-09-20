@@ -120,7 +120,8 @@ func GetSvcSpec(svcIp string) (*SvcDetail, error) {
 
 	// Check the HTTP status code.
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("received non-OK HTTP status code: %v", resp.StatusCode)
+		//fmt.Printf("received non-OK HTTP status code: %v", resp.StatusCode)
+		return nil, nil
 	}
 
 	var details SvcDetail
