@@ -76,43 +76,75 @@ func TransformToNetworkPolicy(podTraffic *[]api.PodTraffic, podDetail *api.PodDe
 	}
 
 	for _, traffic := range *podTraffic {
-
+		var origin interface{}
 		// TODO: Check PODCIDR and SVCCIDR to determine if IP originated from inside or outside the cluster
 
 		// Get pod spec for the pod that is sending traffic
-		origin, err := api.GetPodSpec(traffic.DstIP)
+		podOrigin, err := api.GetPodSpec(traffic.DstIP)
 		if err != nil {
-			// TODO: Handle errors, for now just continue as this is not a fatal error and it assumes the traffic originated from outside the cluster
 			fmt.Println("Get Pod Spec of origin", traffic.DstIP, err)
-			continue
+		} else if podOrigin != nil {
+			origin = podOrigin
 		}
 
-		peerSelectorLabels, err := DetectSelectorLabels(config.Clientset, &origin.Pod)
-		if err != nil {
-			// TODO: Handle errors, this would mean a controller was detected but may no longer exist due to the pod being deleted but still present in the database
-			fmt.Println("Detect Labels", origin.Name, err)
-			continue
+		// If we couldn't get the Pod details, try getting the Service details
+		if origin == nil {
+			svcOrigin, err := api.GetSvcSpec(traffic.DstIP)
+			if err != nil {
+				fmt.Println("Get Svc Spec of origin", traffic.DstIP, err)
+				continue
+			} else if svcOrigin != nil {
+				origin = svcOrigin
+			}
 		}
 
+		if origin == nil {
+			fmt.Println("Could not find details for origin assuming IP is external", traffic.DstIP)
+		}
+
+		var metadata metav1.ObjectMeta
+		var peerSelectorLabels map[string]string
 		peer := networkingv1.NetworkPolicyPeer{}
 		// If the traffic originated from in-cluster as either a pod or service
 		if origin != nil {
+			peerSelectorLabels, err = DetectSelectorLabels(config.Clientset, origin)
+			if err != nil {
+				// TODO: Handle errors, this would mean a controller was detected but may no longer exist due to the pod being deleted but still present in the database
+				fmt.Println("Detect Labels", origin, err)
+				continue
+			}
+			switch o := origin.(type) {
+			case *api.PodDetail:
+				metadata = o.Pod.ObjectMeta
+			case *api.SvcDetail:
+				metadata = o.Service.ObjectMeta
+			default:
+				fmt.Println("Unknown type for origin")
+				continue
+			}
 			peer = networkingv1.NetworkPolicyPeer{
 				PodSelector: &metav1.LabelSelector{
 					MatchLabels: peerSelectorLabels,
 				},
 				NamespaceSelector: &metav1.LabelSelector{
-					MatchLabels: map[string]string{"kubernetes.io/metadata.name": origin.Pod.ObjectMeta.Namespace},
+					MatchLabels: map[string]string{"kubernetes.io/metadata.name": metadata.Namespace},
+				},
+			}
+		} else {
+			peer = networkingv1.NetworkPolicyPeer{
+				IPBlock: &networkingv1.IPBlock{
+					CIDR: traffic.DstIP + "/32",
 				},
 			}
 		}
 
+		protocol := traffic.Protocol
 		if traffic.TrafficType == "INGRESS" {
 			port := intstr.Parse(traffic.SrcPodPort)
 			ingressRules = append(ingressRules, networkingv1.NetworkPolicyIngressRule{
 				Ports: []networkingv1.NetworkPolicyPort{
 					{
-						Protocol: &traffic.Protocol,
+						Protocol: &protocol,
 						Port:     &port,
 					},
 				},
@@ -120,10 +152,11 @@ func TransformToNetworkPolicy(podTraffic *[]api.PodTraffic, podDetail *api.PodDe
 			})
 		} else if traffic.TrafficType == "EGRESS" {
 			port := intstr.Parse(traffic.DstPort)
+
 			egressRules = append(egressRules, networkingv1.NetworkPolicyEgressRule{
 				Ports: []networkingv1.NetworkPolicyPort{
 					{
-						Protocol: &traffic.Protocol,
+						Protocol: &protocol,
 						Port:     &port,
 					},
 				},
@@ -142,8 +175,8 @@ func TransformToNetworkPolicy(podTraffic *[]api.PodTraffic, podDetail *api.PodDe
 			Namespace: podDetail.Namespace,
 			// TODO: What labels should we use?
 			Labels: map[string]string{
-				"advisor.arx.io/managed-by": "arx",
-				"advisor.arx.io/version":    "0.0.1",
+				"advisor.xentra.ai/managed-by": "xentra",
+				"advisor.xentra.ai/version":    "0.0.1",
 			},
 		},
 		Spec: networkingv1.NetworkPolicySpec{

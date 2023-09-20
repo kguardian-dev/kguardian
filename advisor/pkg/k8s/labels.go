@@ -3,17 +3,36 @@ package k8s
 import (
 	"context"
 	"fmt"
+	"reflect"
 
+	api "github.com/arx-inc/advisor/pkg/api"
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 )
 
 // DetectLabels detects the labels of a pod.
-func DetectSelectorLabels(clientset *kubernetes.Clientset, pod *v1.Pod) (map[string]string, error) {
-	ctx := context.TODO()
+func DetectSelectorLabels(clientset *kubernetes.Clientset, origin interface{}) (map[string]string, error) {
 
-	// Check if the Pod has an owner
+	fmt.Println(reflect.TypeOf(origin))
+	// You can use type assertion to check the specific type
+	switch o := origin.(type) {
+	case *v1.Pod:
+		return GetOwnerRef(clientset, o)
+	case *api.PodDetail:
+		return GetOwnerRef(clientset, &o.Pod)
+	case *api.SvcDetail:
+		var svc v1.Service
+		svc = o.Service
+		return svc.Spec.Selector, nil
+	default:
+		return nil, fmt.Errorf("unknown type")
+	}
+}
+
+func GetOwnerRef(clientset *kubernetes.Clientset, pod *v1.Pod) (map[string]string, error) {
+	ctx := context.TODO()
+	// Check if the& Pod has an owner
 	if len(pod.OwnerReferences) > 0 {
 		owner := pod.OwnerReferences[0]
 
@@ -50,7 +69,5 @@ func DetectSelectorLabels(clientset *kubernetes.Clientset, pod *v1.Pod) (map[str
 			return nil, fmt.Errorf("unknown or unsupported owner kind: %s", owner.Kind)
 		}
 	}
-
-	// If we reach here, the Pod has no owner and we return its own labels
 	return pod.Labels, nil
 }

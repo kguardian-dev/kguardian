@@ -9,7 +9,6 @@ import (
 	"time"
 
 	v1 "k8s.io/api/core/v1"
-	v1beta1 "k8s.io/api/discovery/v1beta1"
 )
 
 type PodTraffic struct {
@@ -33,10 +32,10 @@ type PodDetail struct {
 }
 
 type SvcDetail struct {
-	SvcIp         string                `yaml:"svc_ip" json:"svc_ip"`
-	SvcName       string                `yaml:"svc_name" json:"svc_name"`
-	SvcNamespace  string                `yaml:"svc_namespace" json:"svc_namespace"`
-	EndPointSlice v1beta1.EndpointSlice `yaml:"endpoint_spec" json:"endpoint_spec"`
+	SvcIp        string     `yaml:"svc_ip" json:"svc_ip"`
+	SvcName      string     `yaml:"svc_name" json:"svc_name"`
+	SvcNamespace string     `yaml:"svc_namespace" json:"svc_namespace"`
+	Service      v1.Service `yaml:"service_spec" json:"service_spec"`
 }
 
 func GetPodTraffic(podName string) ([]PodTraffic, error) {
@@ -91,24 +90,25 @@ func GetPodSpec(ip string) (*PodDetail, error) {
 
 	// Check the HTTP status code.
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("received non-OK HTTP status code: %v", resp.StatusCode)
+		//fmt.Printf("received non-OK HTTP status code: %v", resp.StatusCode)
+		return nil, nil
 	}
 
-	var podDetails PodDetail
+	var details PodDetail
 
 	// Parse the JSON response and unmarshal it into the Go struct.
-	if err := json.NewDecoder(resp.Body).Decode(&podDetails); err != nil {
+	if err := json.NewDecoder(resp.Body).Decode(&details); err != nil {
 		fmt.Printf("Error decoding JSON: %v\n", err)
 		return nil, err
 	}
 
-	return &podDetails, nil
+	return &details, nil
 }
 
 func GetSvcSpec(svcIp string) (*SvcDetail, error) {
 
 	// Specify the URL of the RESTAPI endpoint you want to invoke.
-	apiURL := "http://127.0.0.1:9090//netpol/svc/" + svcIp
+	apiURL := "http://127.0.0.1:9090/netpol/svc/" + svcIp
 
 	// Send an HTTP GET request to the API endpoint.
 	resp, err := http.Get(apiURL)
@@ -120,16 +120,17 @@ func GetSvcSpec(svcIp string) (*SvcDetail, error) {
 
 	// Check the HTTP status code.
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("received non-OK HTTP status code: %v", resp.StatusCode)
+		//fmt.Printf("received non-OK HTTP status code: %v", resp.StatusCode)
+		return nil, nil
 	}
 
-	var svcDetail SvcDetail
+	var details SvcDetail
 
 	// Parse the JSON response and unmarshal it into the Go struct.
-	if err := json.NewDecoder(resp.Body).Decode(&svcDetail); err != nil {
+	if err := json.NewDecoder(resp.Body).Decode(&details); err != nil {
 		fmt.Printf("Error decoding JSON: %v\n", err)
 		return nil, err
 	}
 
-	return &svcDetail, nil
+	return &details, nil
 }
