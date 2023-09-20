@@ -25,6 +25,7 @@ var networkPolicyCmd = &cobra.Command{
 		if err != nil {
 			log.Fatal().Err(err).Msg("Error initializing Kubernetes client")
 		}
+		log.Debug().Msg("test")
 
 		log.Info().Msgf("Using kubeconfig file: %s", config.Kubeconfig)
 		log.Info().Msgf("Using namespace: %s", config.Namespace)
@@ -37,7 +38,7 @@ var networkPolicyCmd = &cobra.Command{
 				log.Fatal().Err(err).Msg("Error setting up port-forwarding")
 			}
 		}()
-		log.Info().Msg("Port forwarding set up successfully.")
+		log.Debug().Msg("Port forwarding set up successfully.")
 		k8s.GenerateNetworkPolicy(podName, config)
 		close(stopChan)
 	},
