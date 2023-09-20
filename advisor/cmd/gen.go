@@ -25,7 +25,6 @@ var networkPolicyCmd = &cobra.Command{
 		if err != nil {
 			log.Fatal().Err(err).Msg("Error initializing Kubernetes client")
 		}
-		log.Debug().Msg("test")
 
 		log.Info().Msgf("Using kubeconfig file: %s", config.Kubeconfig)
 		log.Info().Msgf("Using namespace: %s", config.Namespace)

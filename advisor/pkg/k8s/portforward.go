@@ -2,7 +2,7 @@ package k8s
 
 import (
 	"context"
-	"io/ioutil"
+	"io"
 	"net/http"
 	"os"
 
@@ -58,7 +58,7 @@ func PortForward(config *Config) (chan struct{}, chan error, chan bool) {
 
 		dialer := spdy.NewDialer(upgrader, &http.Client{Transport: transport}, "POST", url)
 
-		pf, err := portforward.New(dialer, ports, make(chan struct{}, 1), make(chan struct{}, 1), ioutil.Discard, os.Stderr)
+		pf, err := portforward.New(dialer, ports, make(chan struct{}, 1), make(chan struct{}, 1), io.Discard, os.Stderr)
 		if err != nil {
 			errChan <- err
 			return

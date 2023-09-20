@@ -95,7 +95,7 @@ func TransformToNetworkPolicy(podTraffic *[]api.PodTraffic, podDetail *api.PodDe
 		}
 
 		if origin == nil {
-			log.Info().Msgf("Could not find details for origin assuming IP is external %s", traffic.DstIP)
+			log.Debug().Msgf("Could not find details for origin assuming IP is external %s", traffic.DstIP)
 		}
 
 		var metadata metav1.ObjectMeta

@@ -3,7 +3,7 @@ package api
 import (
 	"encoding/json"
 	"fmt"
-	"io/ioutil"
+	"io"
 	"net/http"
 	"time"
 
@@ -60,7 +60,7 @@ func GetPodTraffic(podName string) ([]PodTraffic, error) {
 
 	var podTraffic []PodTraffic
 
-	body, err := ioutil.ReadAll(resp.Body)
+	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		log.Error().Err(err).Msg("Error reading response body")
 		return nil, err
