@@ -17,7 +17,7 @@ jobs:
         uses: actions/checkout@v2
 
       - name: Set up QEMU
-        uses: docker/setup-qemu-action@v1
+        uses: docker/setup-qemu-action@68827325e0b33c7199eb31dd4e31fbe9023e06e3 # v3
         with:
           platforms: all
 
