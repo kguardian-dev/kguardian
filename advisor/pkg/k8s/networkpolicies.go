@@ -99,31 +99,29 @@ func TransformToNetworkPolicy(podTraffic *[]api.PodTraffic, podDetail *api.PodDe
 		}
 
 		if origin == nil {
-			fmt.Println("Could not find details for origin", traffic.DstIP)
-			continue
-		}
-
-		peerSelectorLabels, err := DetectSelectorLabels(config.Clientset, origin)
-		if err != nil {
-			// TODO: Handle errors, this would mean a controller was detected but may no longer exist due to the pod being deleted but still present in the database
-			fmt.Println("Detect Labels", origin, err)
-			continue
+			fmt.Println("Could not find details for origin assuming IP is external", traffic.DstIP)
 		}
 
 		var metadata metav1.ObjectMeta
-
-		switch o := origin.(type) {
-		case *api.PodDetail:
-			metadata = o.Pod.ObjectMeta
-		case *api.SvcDetail:
-			metadata = o.Service.ObjectMeta
-		default:
-			fmt.Println("Unknown type for origin")
-			continue
-		}
+		var peerSelectorLabels map[string]string
 		peer := networkingv1.NetworkPolicyPeer{}
 		// If the traffic originated from in-cluster as either a pod or service
 		if origin != nil {
+			peerSelectorLabels, err = DetectSelectorLabels(config.Clientset, origin)
+			if err != nil {
+				// TODO: Handle errors, this would mean a controller was detected but may no longer exist due to the pod being deleted but still present in the database
+				fmt.Println("Detect Labels", origin, err)
+				continue
+			}
+			switch o := origin.(type) {
+			case *api.PodDetail:
+				metadata = o.Pod.ObjectMeta
+			case *api.SvcDetail:
+				metadata = o.Service.ObjectMeta
+			default:
+				fmt.Println("Unknown type for origin")
+				continue
+			}
 			peer = networkingv1.NetworkPolicyPeer{
 				PodSelector: &metav1.LabelSelector{
 					MatchLabels: peerSelectorLabels,
@@ -133,6 +131,7 @@ func TransformToNetworkPolicy(podTraffic *[]api.PodTraffic, podDetail *api.PodDe
 				},
 			}
 		}
+
 		protocol := traffic.Protocol
 		if traffic.TrafficType == "INGRESS" {
 			port := intstr.Parse(traffic.SrcPodPort)
