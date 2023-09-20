@@ -1,9 +1,9 @@
-# ARX: Advisor for Kubernetes
+# Xentra: Advisor for Kubernetes
 
-ARX is a powerful kubectl plugin designed to enhance the security of your Kubernetes clusters. The Advisor component allows users to automatically generate crucial security resources like Network Policies, Seccomp Profiles, and more for Kubernetes pods or services.
+Xentra is a powerful kubectl plugin designed to enhance the security of your Kubernetes clusters. The Advisor component allows users to automatically generate crucial security resources like Network Policies, Seccomp Profiles, and more for Kubernetes pods or services.
 
 ## Table of Contents
-- [ARX: Advisor for Kubernetes](#arx-advisor-for-kubernetes)
+- [Xentra: Advisor for Kubernetes](#xentra-advisor-for-kubernetes)
   - [Table of Contents](#table-of-contents)
   - [🌟 Features](#-features)
   - [🛠️ Prequisites](#️-prequisites)
@@ -26,19 +26,19 @@ WIP
 
 ## 📦 Installation
 
-You can install ARX via Krew, the plugin manager for kubectl:
+You can install Xentra via Krew, the plugin manager for kubectl:
 
 ```bash
-kubectl krew install arx
+kubectl krew install xentra
 ```
 
 Or manually download the release and place it in your PATH:
 
 ```bash
 # Download the release and set it as executable
-wget https://github.com/arx-inc/advisor/releases/download/v1.0.0/arx
-chmod +x arx
-mv arx /usr/local/bin/
+wget https://github.com/xentra-ai/advisor/releases/download/v0.0.1/xentra
+chmod +x xentra
+mv xentra /usr/local/bin/
 ```
 
 ## 🔨 Usage
@@ -46,19 +46,19 @@ mv arx /usr/local/bin/
 ### 🔒 Generate Network Policies
 
 ```bash
-kubectl arx gen networkpolicy [pod-name] --namespace [namespace-name]
+kubectl xentra gen networkpolicy [pod-name] --namespace [namespace-name]
 ```
 
 ### 🛡️ Generate Seccomp Profiles
 
 ```bash
-kubectl arx gen seccomp [pod-name] --namespace [namespace-name]
+kubectl xentra gen seccomp [pod-name] --namespace [namespace-name]
 ```
 
 For more details on the commands:
 
 ```bash
-kubectl arx --help
+kubectl xentra --help
 ```
 
 ## 🤝 Contributing

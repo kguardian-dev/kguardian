@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"os"
 
+	log "github.com/rs/zerolog/log"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/tools/portforward"
 	"k8s.io/client-go/transport/spdy"
@@ -39,6 +40,8 @@ func PortForward(config *Config) (chan struct{}, chan error, chan bool) {
 
 		// Use the first pod in the pods list and return its metadata
 		pod := pods.Items[0].ObjectMeta
+		// TODO: Only use goroutine for port-forward logic
+		log.Debug().Msgf("Using pod: %s", pod.Name)
 
 		// Set up Port Forwarding
 		url := config.Clientset.CoreV1().RESTClient().Post().

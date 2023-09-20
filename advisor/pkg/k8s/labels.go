@@ -3,9 +3,8 @@ package k8s
 import (
 	"context"
 	"fmt"
-	"reflect"
 
-	api "github.com/arx-inc/advisor/pkg/api"
+	api "github.com/xentra-ai/advisor/pkg/api"
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
@@ -13,9 +12,7 @@ import (
 
 // DetectLabels detects the labels of a pod.
 func DetectSelectorLabels(clientset *kubernetes.Clientset, origin interface{}) (map[string]string, error) {
-
-	fmt.Println(reflect.TypeOf(origin))
-	// You can use type assertion to check the specific type
+	// Use type assertion to check the specific type
 	switch o := origin.(type) {
 	case *v1.Pod:
 		return GetOwnerRef(clientset, o)
@@ -32,6 +29,7 @@ func DetectSelectorLabels(clientset *kubernetes.Clientset, origin interface{}) (
 
 func GetOwnerRef(clientset *kubernetes.Clientset, pod *v1.Pod) (map[string]string, error) {
 	ctx := context.TODO()
+
 	// Check if the& Pod has an owner
 	if len(pod.OwnerReferences) > 0 {
 		owner := pod.OwnerReferences[0]

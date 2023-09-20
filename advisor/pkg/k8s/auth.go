@@ -1,10 +1,10 @@
 package k8s
 
 import (
-	"fmt"
 	"os"
 	"path/filepath"
 
+	log "github.com/rs/zerolog/log"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
@@ -29,15 +29,14 @@ func NewConfig(kubeconfig string, namespace string) (*Config, error) {
 	if kubeconfig == "" {
 		home, err := os.UserHomeDir()
 		if err != nil {
-			fmt.Println("Unable to get user home directory: ", err)
-			os.Exit(1)
+			log.Fatal().Err(err).Msg("Unable to get user home directory")
 		}
 		kubeconfig = filepath.Join(home, ".kube", "config")
 	}
 
 	currentConfig, err := clientcmd.LoadFromFile(kubeconfig)
 	if err != nil {
-		fmt.Printf("Error reading kubeconfig: %v\n", err)
+		log.Error().Err(err).Msgf("Error reading kubeconfig: %v", err)
 		return nil, err
 	}
 

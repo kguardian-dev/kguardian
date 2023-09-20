@@ -1,10 +1,8 @@
 package k8s
 
 import (
-	"fmt"
-	"log"
-
-	api "github.com/arx-inc/advisor/pkg/api"
+	log "github.com/rs/zerolog/log"
+	api "github.com/xentra-ai/advisor/pkg/api"
 	networkingv1 "k8s.io/api/networking/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
@@ -32,58 +30,56 @@ func GenerateNetworkPolicy(podName string, config *Config) {
 
 	podTraffic, err := api.GetPodTraffic(podName)
 	if err != nil {
-		log.Fatalf("Error retrieving pod traffic: %v\n", err)
+		log.Fatal().Err(err).Msg("Error retrieving pod traffic")
 		return
 	}
 
 	if podTraffic == nil {
-		log.Fatalf("No pod traffic found for pod %s\n", podName)
+		log.Fatal().Msgf("No pod traffic found for pod %s\n", podName)
 		return
 	}
 
 	podDetail, err := api.GetPodSpec(podTraffic[0].SrcIP)
 	if err != nil {
-		log.Fatalf("Error retrieving pod spec: %v\n", err)
+		log.Fatal().Err(err).Msg("Error retrieving pod spec")
 		return
 	}
 
 	if podDetail == nil {
-		log.Fatalf("No pod spec found for pod %s\n", podDetail.Name)
+		log.Fatal().Msgf("No pod spec found for pod %s\n", podTraffic[0].SrcIP)
 		return
 	}
 
 	policy := TransformToNetworkPolicy(&podTraffic, podDetail, config)
 	policyYAML, err := yaml.Marshal(policy)
 	if err != nil {
-		fmt.Printf("Error converting policy to YAML: %v", err)
+		log.Error().Err(err).Msg("Error converting policy to YAML")
 		return
 	}
-
-	fmt.Println(string(policyYAML))
+	log.Info().Msgf("Generated policy for pod %s:\n%s", podName, string(policyYAML))
 }
 
 func TransformToNetworkPolicy(podTraffic *[]api.PodTraffic, podDetail *api.PodDetail, config *Config) *networkingv1.NetworkPolicy {
 	var ingressRules []networkingv1.NetworkPolicyIngressRule
 	var egressRules []networkingv1.NetworkPolicyEgressRule
 
-	// TODO: How to perform this action offline
 	podSelectorLabels, err := DetectSelectorLabels(config.Clientset, &podDetail.Pod)
 	if err != nil {
-		fmt.Println(err)
-		// TODO: Handle errors, this would mean a controller was detected but may no longer exist due to the pod being deleted but still present in the database
-		fmt.Println("Detect Labels of pod", err)
+		// This would mean a controller was detected but may no longer exist due to the pod being deleted but still present in the database
+		// TODO: Handle this case
+		log.Error().Err(err).Msg("Detect Pod Labels")
 		return nil
 	}
 
 	for _, traffic := range *podTraffic {
 		var origin interface{}
-		// TODO: Check PODCIDR and SVCCIDR to determine if IP originated from inside or outside the cluster
 
 		// Get pod spec for the pod that is sending traffic
 		podOrigin, err := api.GetPodSpec(traffic.DstIP)
 		if err != nil {
-			fmt.Println("Get Pod Spec of origin", traffic.DstIP, err)
-		} else if podOrigin != nil {
+			log.Error().Err(err).Msg("Get Pod Spec of origin")
+		}
+		if podOrigin != nil {
 			origin = podOrigin
 		}
 
@@ -91,7 +87,7 @@ func TransformToNetworkPolicy(podTraffic *[]api.PodTraffic, podDetail *api.PodDe
 		if origin == nil {
 			svcOrigin, err := api.GetSvcSpec(traffic.DstIP)
 			if err != nil {
-				fmt.Println("Get Svc Spec of origin", traffic.DstIP, err)
+				log.Error().Err(err).Msg("Get Svc Spec of origin")
 				continue
 			} else if svcOrigin != nil {
 				origin = svcOrigin
@@ -99,7 +95,7 @@ func TransformToNetworkPolicy(podTraffic *[]api.PodTraffic, podDetail *api.PodDe
 		}
 
 		if origin == nil {
-			fmt.Println("Could not find details for origin assuming IP is external", traffic.DstIP)
+			log.Info().Msgf("Could not find details for origin assuming IP is external %s", traffic.DstIP)
 		}
 
 		var metadata metav1.ObjectMeta
@@ -109,8 +105,7 @@ func TransformToNetworkPolicy(podTraffic *[]api.PodTraffic, podDetail *api.PodDe
 		if origin != nil {
 			peerSelectorLabels, err = DetectSelectorLabels(config.Clientset, origin)
 			if err != nil {
-				// TODO: Handle errors, this would mean a controller was detected but may no longer exist due to the pod being deleted but still present in the database
-				fmt.Println("Detect Labels", origin, err)
+				log.Error().Err(err).Msg("Detect Peer Labels")
 				continue
 			}
 			switch o := origin.(type) {
@@ -119,7 +114,7 @@ func TransformToNetworkPolicy(podTraffic *[]api.PodTraffic, podDetail *api.PodDe
 			case *api.SvcDetail:
 				metadata = o.Service.ObjectMeta
 			default:
-				fmt.Println("Unknown type for origin")
+				log.Error().Msg("Unknown type for origin")
 				continue
 			}
 			peer = networkingv1.NetworkPolicyPeer{

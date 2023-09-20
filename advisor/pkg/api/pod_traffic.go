@@ -4,9 +4,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"io/ioutil"
-
 	"net/http"
 	"time"
+
+	log "github.com/rs/zerolog/log"
 
 	v1 "k8s.io/api/core/v1"
 )
@@ -47,7 +48,7 @@ func GetPodTraffic(podName string) ([]PodTraffic, error) {
 	// Send an HTTP GET request to the API endpoint.
 	resp, err := http.Get(apiURL)
 	if err != nil {
-		fmt.Printf("Error making GET request: %v\n", err)
+		log.Error().Err(err).Msg("Error making GET request")
 		return nil, err
 	}
 	defer resp.Body.Close()
@@ -61,13 +62,13 @@ func GetPodTraffic(podName string) ([]PodTraffic, error) {
 
 	body, err := ioutil.ReadAll(resp.Body)
 	if err != nil {
-		fmt.Println("Error reading response body:", err)
+		log.Error().Err(err).Msg("Error reading response body")
 		return nil, err
 	}
 
 	// Parse the JSON response and unmarshal it into the Go struct.
 	if err := json.Unmarshal([]byte(body), &podTraffic); err != nil {
-		fmt.Printf("Error decoding JSON: %v\n", err)
+		log.Error().Err(err).Msg("Error unmarshal JSON")
 		return nil, err
 	}
 
@@ -83,14 +84,14 @@ func GetPodSpec(ip string) (*PodDetail, error) {
 	// Send an HTTP GET request to the API endpoint.
 	resp, err := http.Get(apiURL)
 	if err != nil {
-		fmt.Printf("Error making GET request: %v\n", err)
+		log.Error().Err(err).Msg("Error making GET request")
 		return nil, err
 	}
 	defer resp.Body.Close()
 
 	// Check the HTTP status code.
 	if resp.StatusCode != http.StatusOK {
-		//fmt.Printf("received non-OK HTTP status code: %v", resp.StatusCode)
+		log.Debug().Msgf("received non-OK HTTP status code: %v", resp.StatusCode)
 		return nil, nil
 	}
 
@@ -98,7 +99,7 @@ func GetPodSpec(ip string) (*PodDetail, error) {
 
 	// Parse the JSON response and unmarshal it into the Go struct.
 	if err := json.NewDecoder(resp.Body).Decode(&details); err != nil {
-		fmt.Printf("Error decoding JSON: %v\n", err)
+		log.Error().Err(err).Msg("Error decoding JSON")
 		return nil, err
 	}
 
@@ -113,14 +114,14 @@ func GetSvcSpec(svcIp string) (*SvcDetail, error) {
 	// Send an HTTP GET request to the API endpoint.
 	resp, err := http.Get(apiURL)
 	if err != nil {
-		fmt.Printf("Error making GET request: %v\n", err)
+		log.Error().Err(err).Msg("Error making GET request")
 		return nil, err
 	}
 	defer resp.Body.Close()
 
 	// Check the HTTP status code.
 	if resp.StatusCode != http.StatusOK {
-		//fmt.Printf("received non-OK HTTP status code: %v", resp.StatusCode)
+		log.Debug().Msgf("received non-OK HTTP status code: %v", resp.StatusCode)
 		return nil, nil
 	}
 
@@ -128,7 +129,7 @@ func GetSvcSpec(svcIp string) (*SvcDetail, error) {
 
 	// Parse the JSON response and unmarshal it into the Go struct.
 	if err := json.NewDecoder(resp.Body).Decode(&details); err != nil {
-		fmt.Printf("Error decoding JSON: %v\n", err)
+		log.Error().Err(err).Msg("Error decoding JSON")
 		return nil, err
 	}
 

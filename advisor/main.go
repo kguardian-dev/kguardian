@@ -1,7 +1,7 @@
 package main
 
 import (
-	"github.com/arx-inc/advisor/cmd"
+	"github.com/xentra-ai/advisor/cmd"
 )
 
 func main() {

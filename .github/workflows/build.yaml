@@ -48,5 +48,5 @@ jobs:
           platforms: linux/amd64,linux/arm64
           push: true
           tags: |
-            ghcr.io/arx-inc/images/advisor:${{ github.sha }}
-            ghcr.io/arx-inc/images/advisor:latest
+            ghcr.io/xentra-ai/images/advisor:${{ github.sha }}
+            ghcr.io/xentra-ai/images/advisor:latest

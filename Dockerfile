@@ -16,7 +16,7 @@ ENV GO111MODULE=on \
   GOARCH=${TARGETARCH} \
   GOARM=${TARGETVARIANT}
 
-WORKDIR /go/src/github.com/arx-inc/advisor/
+WORKDIR /go/src/github.com/xentra-ai/advisor/
 
 COPY go.mod go.sum ./
 
@@ -38,7 +38,7 @@ ENV LOG_INFO=${LOG_INFO} \
 
 WORKDIR /
 
-COPY --from=build --chown=nonroot /go/src/github.com/arx-inc/advisor/advisor .
+COPY --from=build --chown=nonroot /go/src/github.com/xentra-ai/advisor/advisor .
 
 USER nonroot:nonroot
 

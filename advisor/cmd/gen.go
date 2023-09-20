@@ -1,12 +1,9 @@
 package cmd
 
 import (
-	"fmt"
-	"log"
-	"os"
-
-	"github.com/arx-inc/advisor/pkg/k8s"
+	log "github.com/rs/zerolog/log"
 	"github.com/spf13/cobra"
+	"github.com/xentra-ai/advisor/pkg/k8s"
 )
 
 var genCmd = &cobra.Command{
@@ -26,23 +23,21 @@ var networkPolicyCmd = &cobra.Command{
 
 		config, err := k8s.NewConfig(kubeconfig, namespace)
 		if err != nil {
-			fmt.Println("Error initializing Kubernetes client:", err)
-			os.Exit(1)
+			log.Fatal().Err(err).Msg("Error initializing Kubernetes client")
 		}
 
-		fmt.Printf("Using kubeconfig file: %s\n", config.Kubeconfig)
-		fmt.Printf("Using namespace: %s\n", config.Namespace)
-
+		log.Info().Msgf("Using kubeconfig file: %s", config.Kubeconfig)
+		log.Info().Msgf("Using namespace: %s", config.Namespace)
 		podName := args[0]
 
 		stopChan, errChan, done := k8s.PortForward(config)
 		<-done // Block until we receive a notification from the goroutine that port-forwarding has been set up
 		go func() {
 			for err := range errChan {
-				log.Fatalf("Failed to start port-forwarding: %v", err)
+				log.Fatal().Err(err).Msg("Error setting up port-forwarding")
 			}
 		}()
-		fmt.Println("Port forwarding set up successfully.")
+		log.Info().Msg("Port forwarding set up successfully.")
 		k8s.GenerateNetworkPolicy(podName, config)
 		close(stopChan)
 	},
@@ -55,6 +50,6 @@ var seccompCmd = &cobra.Command{
 	Args:    cobra.ExactArgs(1),
 	Run: func(cmd *cobra.Command, args []string) {
 		podName := args[0]
-		fmt.Printf("Generating seccomp profile for pod: %s\n", podName)
+		log.Info().Msgf("Generating seccomp profile for pod: %s", podName)
 	},
 }
