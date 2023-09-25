@@ -3,7 +3,7 @@ module github.com/xentra-ai/advisor
 go 1.20
 
 require (
-	github.com/rs/zerolog v1.30.0
+	github.com/rs/zerolog v1.31.0
 	github.com/spf13/cobra v1.7.0
 	k8s.io/api v0.28.2
 	k8s.io/apimachinery v0.28.2
