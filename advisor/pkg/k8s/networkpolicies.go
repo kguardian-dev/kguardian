@@ -100,7 +100,7 @@ func TransformToNetworkPolicy(podTraffic *[]api.PodTraffic, podDetail *api.PodDe
 
 		var metadata metav1.ObjectMeta
 		var peerSelectorLabels map[string]string
-		peer := networkingv1.NetworkPolicyPeer{}
+		var peer *networkingv1.NetworkPolicyPeer
 		// If the traffic originated from in-cluster as either a pod or service
 		if origin != nil {
 			peerSelectorLabels, err = DetectSelectorLabels(config.Clientset, origin)
@@ -117,7 +117,7 @@ func TransformToNetworkPolicy(podTraffic *[]api.PodTraffic, podDetail *api.PodDe
 				log.Error().Msg("Unknown type for origin")
 				continue
 			}
-			peer = networkingv1.NetworkPolicyPeer{
+			peer = &networkingv1.NetworkPolicyPeer{
 				PodSelector: &metav1.LabelSelector{
 					MatchLabels: peerSelectorLabels,
 				},
@@ -126,7 +126,7 @@ func TransformToNetworkPolicy(podTraffic *[]api.PodTraffic, podDetail *api.PodDe
 				},
 			}
 		} else {
-			peer = networkingv1.NetworkPolicyPeer{
+			peer = &networkingv1.NetworkPolicyPeer{
 				IPBlock: &networkingv1.IPBlock{
 					CIDR: traffic.DstIP + "/32",
 				},
@@ -143,7 +143,7 @@ func TransformToNetworkPolicy(podTraffic *[]api.PodTraffic, podDetail *api.PodDe
 						Port:     &port,
 					},
 				},
-				From: []networkingv1.NetworkPolicyPeer{peer},
+				From: []networkingv1.NetworkPolicyPeer{*peer},
 			})
 		} else if traffic.TrafficType == "EGRESS" {
 			port := intstr.Parse(traffic.DstPort)
@@ -155,7 +155,7 @@ func TransformToNetworkPolicy(podTraffic *[]api.PodTraffic, podDetail *api.PodDe
 						Port:     &port,
 					},
 				},
-				To: []networkingv1.NetworkPolicyPeer{peer},
+				To: []networkingv1.NetworkPolicyPeer{*peer},
 			})
 		}
 	}

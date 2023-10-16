@@ -18,12 +18,16 @@ on:
 permissions:
   contents: read
 
+defaults:
+  run:
+    working-directory: ./advisor
+
 jobs:
   lint:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        go-version: [ '1.19', '1.20', '1.21.x' ]
+        go-version: [ '1.21.x' ]
     steps:
       - uses: actions/checkout@v4
 
@@ -38,13 +42,14 @@ jobs:
         with:
           version: v1.54
           working-directory: ./advisor
+          args: --timeout=5m
 
   build:
     runs-on: ubuntu-latest
     needs: [lint]
     strategy:
       matrix:
-        go-version: [ '1.19', '1.20', '1.21.x' ]
+        go-version: [ '1.21.x' ]
     steps:
       - uses: actions/checkout@v4
 
@@ -54,15 +59,12 @@ jobs:
           go-version: ${{ matrix.go-version }}
 
       - name: Install dependencies
-        working-directory: ./advisor
         run: go get -v ./...
 
       - name: Build
-        working-directory: ./advisor
         run: go build -v ./...
 
       - name: Test with the Go CLI
-        working-directory: ./advisor
         run: go test -v ./... > test-results-${{ matrix.go-version }}.json
 
       - name: Upload Go test results
