@@ -6,7 +6,7 @@ on:
     branches:
       - main
     paths:
-      - .github/workflows/build.yaml
+      - .github/workflows/build-docker.yaml
       - Dockerfile
 
 jobs:

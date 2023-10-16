@@ -48,21 +48,19 @@ func GetPodTraffic(podName string) ([]PodTraffic, error) {
 	// Send an HTTP GET request to the API endpoint.
 	resp, err := http.Get(apiURL)
 	if err != nil {
-		log.Error().Err(err).Msg("Error making GET request")
+		log.Error().Err(err).Msg("GetPodTraffic: Error making GET request")
 		return nil, err
 	}
 	defer resp.Body.Close()
-
 	// Check the HTTP status code.
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("received non-OK HTTP status code: %v", resp.StatusCode)
 	}
-
 	var podTraffic []PodTraffic
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		log.Error().Err(err).Msg("Error reading response body")
+		log.Error().Err(err).Msg("GetPodTraffic: Error reading response body")
 		return nil, err
 	}
 
@@ -72,6 +70,11 @@ func GetPodTraffic(podName string) ([]PodTraffic, error) {
 		return nil, err
 	}
 
+	// If no pod traffic is found, return nil
+	if len(podTraffic) == 0 {
+		log.Error().Err(err).Msg("No pod traffic found")
+		return nil, nil
+	}
 	return podTraffic, nil
 }
 

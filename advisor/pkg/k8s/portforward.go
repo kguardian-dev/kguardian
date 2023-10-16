@@ -2,9 +2,11 @@ package k8s
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"net/http"
 	"os"
+	"strings"
 
 	log "github.com/rs/zerolog/log"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -14,7 +16,7 @@ import (
 
 var (
 	serviceNamespace = "kube-guardian"
-	serviceName      = "kubeguardian-api"
+	serviceName      = "broker"
 	ports            = []string{"9090:9090"}
 )
 
@@ -24,7 +26,7 @@ func PortForward(config *Config) (chan struct{}, chan error, chan bool) {
 	stopChan := make(chan struct{}, 1)
 	errChan := make(chan error, 1)
 	done := make(chan bool)
-
+	log.Debug().Msg("Configuring port-forwarding")
 	go func() {
 		service, err := config.Clientset.CoreV1().Services(serviceNamespace).Get(context.TODO(), serviceName, metav1.GetOptions{})
 		if err != nil {
@@ -32,16 +34,30 @@ func PortForward(config *Config) (chan struct{}, chan error, chan bool) {
 			return
 		}
 
-		pods, err := config.Clientset.CoreV1().Pods(serviceNamespace).List(context.TODO(), metav1.ListOptions{LabelSelector: service.Spec.Selector["app"]})
+		// Convert the service's selector map to a label selector string
+		selectors := make([]string, 0)
+		for key, val := range service.Spec.Selector {
+			selectors = append(selectors, fmt.Sprintf("%s=%s", key, val))
+		}
+		labelSelectorString := strings.Join(selectors, ",")
+
+		log.Debug().Msgf("Using port-forwarding pod with selector: %s", labelSelectorString)
+		pods, err := config.Clientset.CoreV1().Pods(serviceNamespace).List(context.TODO(), metav1.ListOptions{LabelSelector: labelSelectorString})
 		if err != nil {
 			errChan <- err
 			return
 		}
 
+		podNames := []string{}
+		for _, pod := range pods.Items {
+			podNames = append(podNames, pod.Name)
+		}
+		log.Debug().Msgf("Available port-forwarding pods: %s", podNames)
+
 		// Use the first pod in the pods list and return its metadata
 		pod := pods.Items[0].ObjectMeta
 		// TODO: Only use goroutine for port-forward logic
-		log.Debug().Msgf("Using pod: %s", pod.Name)
+		log.Debug().Msgf("Using port-forwarding pod: %s", pod.Name)
 
 		// Set up Port Forwarding
 		url := config.Clientset.CoreV1().RESTClient().Post().
@@ -50,6 +66,7 @@ func PortForward(config *Config) (chan struct{}, chan error, chan bool) {
 			Name(pod.Name).
 			SubResource("portforward").URL()
 
+		log.Debug().Msgf("Configuring port-forwarding url: %s", url.String())
 		transport, upgrader, err := spdy.RoundTripperFor(config.Config)
 		if err != nil {
 			errChan <- err
