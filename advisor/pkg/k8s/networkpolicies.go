@@ -2,7 +2,6 @@ package k8s
 
 import (
 	"encoding/json"
-	"fmt"
 	"strings"
 
 	log "github.com/rs/zerolog/log"
@@ -62,15 +61,21 @@ func GenerateNetworkPolicy(podName string, config *Config) {
 }
 
 func transformToNetworkPolicy(podTraffic []api.PodTraffic, podDetail *api.PodDetail, config *Config) (*networkingv1.NetworkPolicy, error) {
-	ingressRulesRaw := processTrafficRules(podTraffic, "INGRESS", config)
-	egressRulesRaw := processTrafficRules(podTraffic, "EGRESS", config)
+	ingressRulesRaw, err := processIngressRules(podTraffic, config)
+	if err != nil {
+		return nil, err
+	}
+	egressRulesRaw, err := processEgressRules(podTraffic, config)
+	if err != nil {
+		return nil, err
+	}
 
-	ingressRules := deduplicateRules(ingressRulesRaw).([]networkingv1.NetworkPolicyIngressRule)
-	egressRules := deduplicateRules(egressRulesRaw).([]networkingv1.NetworkPolicyEgressRule)
+	ingressRules := deduplicateIngressRules(ingressRulesRaw)
+	egressRules := deduplicateEgressRules(egressRulesRaw)
 
 	podSelectorLabels, err := detectSelectorLabels(config.Clientset, &podDetail.Pod)
 	if err != nil {
-		return nil, fmt.Errorf("error detecting selector labels: %w", err)
+		return nil, err
 	}
 
 	networkPolicy := &networkingv1.NetworkPolicy{
@@ -102,57 +107,74 @@ func transformToNetworkPolicy(podTraffic []api.PodTraffic, podDetail *api.PodDet
 	return networkPolicy, nil
 }
 
-func processTrafficRules(podTraffic []api.PodTraffic, trafficType string, config *Config) interface{} {
-	var rules interface{}
-
+func processIngressRules(podTraffic []api.PodTraffic, config *Config) ([]networkingv1.NetworkPolicyIngressRule, error) {
+	var ingressRules []networkingv1.NetworkPolicyIngressRule
 	for _, traffic := range podTraffic {
-		if strings.ToUpper(traffic.TrafficType) != trafficType {
+		if strings.ToUpper(traffic.TrafficType) != "INGRESS" {
 			continue
 		}
-		peer := determinePeerForTraffic(traffic, config)
-		protocol := traffic.Protocol
-		portIntOrString := intstr.Parse(traffic.SrcPodPort) // Adjusted this line
-		portPtr := &portIntOrString                         // Adjusted this line
-
-		switch trafficType {
-		case "INGRESS":
-			rules = append(rules.([]networkingv1.NetworkPolicyIngressRule), networkingv1.NetworkPolicyIngressRule{
-				Ports: []networkingv1.NetworkPolicyPort{
-					{
-						Protocol: &protocol,
-						Port:     portPtr,
-					},
-				},
-				From: []networkingv1.NetworkPolicyPeer{*peer},
-			})
-
-		case "EGRESS":
-			portIntOrString := intstr.Parse(traffic.DstPort) // Adjusted this line for destination port
-			portPtr := &portIntOrString                      // Adjusted this line for destination port
-			rules = append(rules.([]networkingv1.NetworkPolicyEgressRule), networkingv1.NetworkPolicyEgressRule{
-				Ports: []networkingv1.NetworkPolicyPort{
-					{
-						Protocol: &protocol,
-						Port:     portPtr,
-					},
-				},
-				To: []networkingv1.NetworkPolicyPeer{*peer},
-			})
+		peer, err := determinePeerForTraffic(traffic, config)
+		if err != nil {
+			return nil, err
 		}
+		protocol := traffic.Protocol
+		portIntOrString := intstr.Parse(traffic.SrcPodPort)
+		portPtr := &portIntOrString
+		ingressRules = append(ingressRules, networkingv1.NetworkPolicyIngressRule{
+			Ports: []networkingv1.NetworkPolicyPort{
+				{
+					Protocol: &protocol,
+					Port:     portPtr,
+				},
+			},
+			From: []networkingv1.NetworkPolicyPeer{*peer},
+		})
 	}
-	return rules
+	return ingressRules, nil
 }
 
-func determinePeerForTraffic(traffic api.PodTraffic, config *Config) *networkingv1.NetworkPolicyPeer {
-	var origin interface{}
+func processEgressRules(podTraffic []api.PodTraffic, config *Config) ([]networkingv1.NetworkPolicyEgressRule, error) {
+	var egressRules []networkingv1.NetworkPolicyEgressRule
+	for _, traffic := range podTraffic {
+		if strings.ToUpper(traffic.TrafficType) != "EGRESS" {
+			continue
+		}
+		peer, err := determinePeerForTraffic(traffic, config)
+		if err != nil {
+			return nil, err
+		}
+		protocol := traffic.Protocol
+		portIntOrString := intstr.Parse(traffic.DstPort)
+		portPtr := &portIntOrString
+		egressRules = append(egressRules, networkingv1.NetworkPolicyEgressRule{
+			Ports: []networkingv1.NetworkPolicyPort{
+				{
+					Protocol: &protocol,
+					Port:     portPtr,
+				},
+			},
+			To: []networkingv1.NetworkPolicyPeer{*peer},
+		})
+	}
+	return egressRules, nil
+}
+
+func determinePeerForTraffic(traffic api.PodTraffic, config *Config) (*networkingv1.NetworkPolicyPeer, error) {
+	var origin interface{} = nil
 
 	podOrigin, err := api.GetPodSpec(traffic.DstIP)
-	if err == nil && podOrigin != nil {
+	if err != nil {
+		return nil, err
+	}
+	if podOrigin != nil {
 		origin = podOrigin
 	}
 
 	if origin == nil {
-		svcOrigin, _ := api.GetSvcSpec(traffic.DstIP) // Error handling can be enhanced.
+		svcOrigin, err := api.GetSvcSpec(traffic.DstIP)
+		if err != nil {
+			return nil, err
+		}
 		if svcOrigin != nil {
 			origin = svcOrigin
 		}
@@ -164,12 +186,15 @@ func determinePeerForTraffic(traffic api.PodTraffic, config *Config) *networking
 			IPBlock: &networkingv1.IPBlock{
 				CIDR: traffic.DstIP + "/32",
 			},
-		}
+		}, nil
 	}
 
-	peerSelectorLabels, _ := detectSelectorLabels(config.Clientset, origin) // error handling was done internally within the function.
-	var metadata metav1.ObjectMeta
+	peerSelectorLabels, err := detectSelectorLabels(config.Clientset, origin)
+	if err != nil {
+		return nil, err
+	}
 
+	var metadata metav1.ObjectMeta
 	switch o := origin.(type) {
 	case *api.PodDetail:
 		metadata = o.Pod.ObjectMeta
@@ -184,35 +209,33 @@ func determinePeerForTraffic(traffic api.PodTraffic, config *Config) *networking
 		NamespaceSelector: &metav1.LabelSelector{
 			MatchLabels: map[string]string{"kubernetes.io/metadata.name": metadata.Namespace},
 		},
-	}
+	}, nil
 }
 
-func deduplicateRules(rules interface{}) interface{} {
+func deduplicateIngressRules(rules []networkingv1.NetworkPolicyIngressRule) []networkingv1.NetworkPolicyIngressRule {
 	seen := make(map[string]bool)
+	var deduplicated []networkingv1.NetworkPolicyIngressRule
 
-	switch v := rules.(type) {
-	case []networkingv1.NetworkPolicyIngressRule:
-		var deduplicated []networkingv1.NetworkPolicyIngressRule
-		for _, rule := range v {
-			ruleStr, _ := json.Marshal(rule)
-			if !seen[string(ruleStr)] {
-				seen[string(ruleStr)] = true
-				deduplicated = append(deduplicated, rule)
-			}
+	for _, rule := range rules {
+		ruleStr, _ := json.Marshal(rule)
+		if !seen[string(ruleStr)] {
+			seen[string(ruleStr)] = true
+			deduplicated = append(deduplicated, rule)
 		}
-		return deduplicated
-
-	case []networkingv1.NetworkPolicyEgressRule:
-		var deduplicated []networkingv1.NetworkPolicyEgressRule
-		for _, rule := range v {
-			ruleStr, _ := json.Marshal(rule)
-			if !seen[string(ruleStr)] {
-				seen[string(ruleStr)] = true
-				deduplicated = append(deduplicated, rule)
-			}
-		}
-		return deduplicated
 	}
+	return deduplicated
+}
 
-	return nil
+func deduplicateEgressRules(rules []networkingv1.NetworkPolicyEgressRule) []networkingv1.NetworkPolicyEgressRule {
+	seen := make(map[string]bool)
+	var deduplicated []networkingv1.NetworkPolicyEgressRule
+
+	for _, rule := range rules {
+		ruleStr, _ := json.Marshal(rule)
+		if !seen[string(ruleStr)] {
+			seen[string(ruleStr)] = true
+			deduplicated = append(deduplicated, rule)
+		}
+	}
+	return deduplicated
 }
