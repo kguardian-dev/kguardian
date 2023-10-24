@@ -14,8 +14,9 @@
 name: SLSA Go releaser
 on:
   workflow_dispatch:
-  release:
-    types: [created]
+  push:
+    tags:
+      - "*"
 
 permissions: read-all
 
@@ -50,6 +51,7 @@ jobs:
       id-token: write # To sign the provenance.
       contents: write # To upload assets to release.
       actions: read # To read the workflow path.
+    needs: [args]
     strategy:
       matrix:
         os:
