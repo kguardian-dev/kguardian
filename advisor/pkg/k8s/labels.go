@@ -11,7 +11,7 @@ import (
 )
 
 // DetectLabels detects the labels of a pod.
-func DetectSelectorLabels(clientset *kubernetes.Clientset, origin interface{}) (map[string]string, error) {
+func detectSelectorLabels(clientset *kubernetes.Clientset, origin interface{}) (map[string]string, error) {
 	// Use type assertion to check the specific type
 	switch o := origin.(type) {
 	case *v1.Pod:
@@ -23,7 +23,7 @@ func DetectSelectorLabels(clientset *kubernetes.Clientset, origin interface{}) (
 		svc = o.Service
 		return svc.Spec.Selector, nil
 	default:
-		return nil, fmt.Errorf("unknown type")
+		return nil, fmt.Errorf("detectSelectorLabels: unknown type")
 	}
 }
 

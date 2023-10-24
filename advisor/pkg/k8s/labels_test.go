@@ -38,18 +38,18 @@ func TestDetectSelectorLabels(t *testing.T) {
 		},
 	}
 
-	labels1, err1 := DetectSelectorLabels(clientset, pod)
+	labels1, err1 := detectSelectorLabels(clientset, pod)
 	assert.NoError(t, err1)
 	assert.Equal(t, map[string]string{"app": "test-app"}, labels1)
 
-	labels2, err2 := DetectSelectorLabels(clientset, podDetail)
+	labels2, err2 := detectSelectorLabels(clientset, podDetail)
 	assert.NoError(t, err2)
 	assert.Equal(t, map[string]string{"app": "test-app"}, labels2)
 
-	labels3, err3 := DetectSelectorLabels(clientset, serviceDetail)
+	labels3, err3 := detectSelectorLabels(clientset, serviceDetail)
 	assert.NoError(t, err3)
 	assert.Equal(t, map[string]string{"app": "test-app"}, labels3)
 
-	_, err4 := DetectSelectorLabels(clientset, "unknown type")
+	_, err4 := detectSelectorLabels(clientset, "unknown type")
 	assert.Error(t, err4)
 }
