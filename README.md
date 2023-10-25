@@ -40,7 +40,7 @@ Example:
 # Download the release and set it as executable
 wget -O advisor https://github.com/xentra-ai/advisor-client/releases/download/v0.0.1/binary-linux-amd64
 chmod +x advisor
-mv advisor /usr/local/bin/
+mv advisor /usr/local/bin/kubectl-advisor
 ```
 
 ## 🔨 Usage
