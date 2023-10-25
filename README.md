@@ -26,7 +26,15 @@ WIP
 
 ## 📦 Installation
 
-You can install Xentra via Krew, the plugin manager for kubectl:
+There are several options to install the advisor client.
+
+To use the quick install use the following command:
+
+```bash
+sh -c "$(curl -fsSL https://raw.githubusercontent.com/xentra-ai/advisor-client/main/scripts/quick-install.sh)"
+```
+
+You can also install Xentra via Krew, the plugin manager for kubectl:
 
 ```bash
 kubectl krew install xentra
