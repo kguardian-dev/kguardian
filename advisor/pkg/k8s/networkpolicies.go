@@ -88,7 +88,7 @@ func transformToNetworkPolicy(podTraffic []api.PodTraffic, podDetail *api.PodDet
 			Namespace: podDetail.Namespace,
 			Labels: map[string]string{
 				"advisor.xentra.ai/managed-by": "xentra",
-				"advisor.xentra.ai/version":    "0.0.1",
+				"advisor.xentra.ai/version":    "0.0.2",
 			},
 		},
 		Spec: networkingv1.NetworkPolicySpec{
