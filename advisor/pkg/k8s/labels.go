@@ -11,7 +11,7 @@ import (
 )
 
 // DetectLabels detects the labels of a pod.
-func DetectSelectorLabels(clientset *kubernetes.Clientset, origin interface{}) (map[string]string, error) {
+func detectSelectorLabels(clientset *kubernetes.Clientset, origin interface{}) (map[string]string, error) {
 	// Use type assertion to check the specific type
 	switch o := origin.(type) {
 	case *v1.Pod:
@@ -23,14 +23,14 @@ func DetectSelectorLabels(clientset *kubernetes.Clientset, origin interface{}) (
 		svc = o.Service
 		return svc.Spec.Selector, nil
 	default:
-		return nil, fmt.Errorf("unknown type")
+		return nil, fmt.Errorf("detectSelectorLabels: unknown type")
 	}
 }
 
 func GetOwnerRef(clientset *kubernetes.Clientset, pod *v1.Pod) (map[string]string, error) {
 	ctx := context.TODO()
 
-	// Check if the& Pod has an owner
+	// Check if the Pod has an owner
 	if len(pod.OwnerReferences) > 0 {
 		owner := pod.OwnerReferences[0]
 
@@ -61,10 +61,17 @@ func GetOwnerRef(clientset *kubernetes.Clientset, pod *v1.Pod) (map[string]strin
 			}
 			return daemonSet.Spec.Selector.MatchLabels, nil
 
+		case "Job":
+			job, err := clientset.BatchV1().Jobs(pod.Namespace).Get(ctx, owner.Name, metav1.GetOptions{})
+			if err != nil {
+				return nil, err
+			}
+			return job.Spec.Selector.MatchLabels, nil
+
 		// Add more controller kinds here if needed
 
 		default:
-			return nil, fmt.Errorf("unknown or unsupported owner kind: %s", owner.Kind)
+			return nil, fmt.Errorf("unknown or unsupported ownerReference: %s", owner.String())
 		}
 	}
 	return pod.Labels, nil

@@ -26,7 +26,15 @@ WIP
 
 ## 📦 Installation
 
-You can install Xentra via Krew, the plugin manager for kubectl:
+There are several options to install the advisor client.
+
+To use the quick install use the following command:
+
+```bash
+sh -c "$(curl -fsSL https://raw.githubusercontent.com/xentra-ai/advisor-client/main/scripts/quick-install.sh)"
+```
+
+You can also install Xentra via Krew, the plugin manager for kubectl:
 
 ```bash
 kubectl krew install xentra
@@ -34,11 +42,13 @@ kubectl krew install xentra
 
 Or manually download the release and place it in your PATH:
 
+Example:
+
 ```bash
 # Download the release and set it as executable
-wget https://github.com/xentra-ai/advisor/releases/download/v0.0.1/xentra
-chmod +x xentra
-mv xentra /usr/local/bin/
+wget -O advisor https://github.com/xentra-ai/advisor-client/releases/download/v0.0.1/binary-linux-amd64
+chmod +x advisor
+mv advisor /usr/local/bin/kubectl-advisor
 ```
 
 ## 🔨 Usage
@@ -46,19 +56,19 @@ mv xentra /usr/local/bin/
 ### 🔒 Generate Network Policies
 
 ```bash
-kubectl xentra gen networkpolicy [pod-name] --namespace [namespace-name]
+kubectl advisor gen networkpolicy [pod-name] --namespace [namespace-name]
 ```
 
 ### 🛡️ Generate Seccomp Profiles
 
 ```bash
-kubectl xentra gen seccomp [pod-name] --namespace [namespace-name]
+kubectl advisor gen seccomp [pod-name] --namespace [namespace-name]
 ```
 
 For more details on the commands:
 
 ```bash
-kubectl xentra --help
+kubectl advisor --help
 ```
 
 ## 🤝 Contributing
