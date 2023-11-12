@@ -1,14 +1,20 @@
 package cmd
 
 import (
+	"context"
 	"os"
 
 	"github.com/rs/zerolog"
 	log "github.com/rs/zerolog/log"
 	"github.com/spf13/cobra"
+	"github.com/xentra-ai/advisor/pkg/k8s"
+	"k8s.io/cli-runtime/pkg/genericclioptions"
 )
 
-var debug bool // To store the value of the --debug flag
+var (
+	kubeConfigFlags *genericclioptions.ConfigFlags
+	debug           bool // To store the value of the --debug flag
+)
 
 func init() {
 	// Set up logging to console
@@ -16,11 +22,13 @@ func init() {
 	zerolog.SetGlobalLevel(zerolog.InfoLevel)
 
 	// Add your sub-commands
-	genCmd.AddCommand(networkPolicyCmd, seccompCmd)
+	genCmd.AddCommand(networkPolicyCmd)
 
-	// Add flags
-	genCmd.PersistentFlags().String("kubeconfig", "", "Path to the kubeconfig file to use for CLI requests.")
-	genCmd.PersistentFlags().String("namespace", "", "If present, the namespace scope for this CLI request")
+	// Initialize kubeConfigFlags
+	kubeConfigFlags = genericclioptions.NewConfigFlags(true)
+
+	// Add global flags from kubeConfigFlags to rootCmd
+	kubeConfigFlags.AddFlags(rootCmd.PersistentFlags())
 
 	// Add debug flag to rootCmd so it's available for all sub-commands
 	rootCmd.PersistentFlags().BoolVar(&debug, "debug", false, "sets log level to debug")
@@ -45,6 +53,29 @@ var rootCmd = &cobra.Command{
 		if debug {
 			zerolog.SetGlobalLevel(zerolog.DebugLevel)
 		}
+
+		// Initialize Kubernetes config and logging
+		config, err := k8s.NewConfig(kubeConfigFlags)
+		if err != nil {
+			log.Fatal().Err(err).Msg("Error initializing Kubernetes client")
+		}
+
+		kubeconfigPath := kubeConfigFlags.ToRawKubeConfigLoader().ConfigAccess().GetDefaultFilename()
+		if err != nil {
+			log.Fatal().Err(err).Msg("Error initializing Kubernetes client")
+		}
+
+		namespace, _, err := kubeConfigFlags.ToRawKubeConfigLoader().Namespace()
+		if err != nil {
+			log.Fatal().Err(err).Msg("Failed to get namespace")
+		}
+
+		log.Info().Msgf("Using kubeconfig file: %s", kubeconfigPath)
+		log.Info().Msgf("Using namespace: %s", namespace)
+
+		// Create a new context with the config and assign it to the command
+		ctx := context.WithValue(cmd.Context(), k8s.ConfigKey, config)
+		cmd.SetContext(ctx)
 	},
 }
 

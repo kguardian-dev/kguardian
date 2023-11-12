@@ -17,17 +17,11 @@ var networkPolicyCmd = &cobra.Command{
 	Short:   "Generate network policy",
 	Args:    cobra.ExactArgs(1),
 	Run: func(cmd *cobra.Command, args []string) {
-
-		kubeconfig, _ := cmd.Flags().GetString("kubeconfig")
-		namespace, _ := cmd.Flags().GetString("namespace")
-
-		config, err := k8s.NewConfig(kubeconfig, namespace)
-		if err != nil {
-			log.Fatal().Err(err).Msg("Error initializing Kubernetes client")
+		// Retrieve the config from the command context
+		config, ok := cmd.Context().Value(k8s.ConfigKey).(*k8s.Config)
+		if !ok {
+			log.Fatal().Msg("Failed to retrieve Kubernetes configuration")
 		}
-
-		log.Info().Msgf("Using kubeconfig file: %s", config.Kubeconfig)
-		log.Info().Msgf("Using namespace: %s", config.Namespace)
 		podName := args[0]
 
 		stopChan, errChan, done := k8s.PortForward(config)
@@ -40,16 +34,5 @@ var networkPolicyCmd = &cobra.Command{
 		log.Debug().Msg("Port forwarding set up successfully.")
 		k8s.GenerateNetworkPolicy(podName, config)
 		close(stopChan)
-	},
-}
-
-var seccompCmd = &cobra.Command{
-	Use:     "seccomp [pod-name]",
-	Aliases: []string{"sc"},
-	Short:   "Generate seccomp profile",
-	Args:    cobra.ExactArgs(1),
-	Run: func(cmd *cobra.Command, args []string) {
-		podName := args[0]
-		log.Info().Msgf("Generating seccomp profile for pod: %s", podName)
 	},
 }

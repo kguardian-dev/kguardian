@@ -25,7 +25,10 @@ RUN go mod download
 COPY . .
 
 RUN go build -a -installsuffix cgo \
-  -ldflags="-w -extldflags '-static' -X 'main.ApplicationName=${APPLICATION_NAME}}' -X 'main.Version=${VERSION}' -X 'main.SHA=${SHA}'" \
+  -ldflags="-w -extldflags '-static' \
+  -X 'main.ApplicationName=${APPLICATION_NAME}}' \
+  -X 'main.Version=${VERSION}' -X 'main.SHA=${SHA}' \
+  -X 'github.com/xentra-ai/advisor/pkg/k8s.Version=${VERSION}'" \
   -o advisor .
 
 FROM gcr.io/distroless/static:nonroot
