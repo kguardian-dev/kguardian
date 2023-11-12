@@ -12,6 +12,9 @@ import (
 	"sigs.k8s.io/yaml"
 )
 
+// Version is set at build time using -ldflags
+var Version = "development" // default value
+
 type NetworkPolicyRule struct {
 	Ports  []networkingv1.NetworkPolicyPort
 	FromTo []networkingv1.NetworkPolicyPeer
@@ -88,7 +91,7 @@ func transformToNetworkPolicy(podTraffic []api.PodTraffic, podDetail *api.PodDet
 			Namespace: podDetail.Namespace,
 			Labels: map[string]string{
 				"advisor.xentra.ai/managed-by": "xentra",
-				"advisor.xentra.ai/version":    "0.0.2",
+				"advisor.xentra.ai/version":    Version,
 			},
 		},
 		Spec: networkingv1.NetworkPolicySpec{
