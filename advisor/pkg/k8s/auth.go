@@ -1,57 +1,27 @@
 package k8s
 
 import (
-	"os"
-	"path/filepath"
-
-	log "github.com/rs/zerolog/log"
+	"k8s.io/cli-runtime/pkg/genericclioptions"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
-	"k8s.io/client-go/tools/clientcmd"
 )
+
+// ConfigKey is used to store/retrieve *Config in context
+type contextKey string
+
+const ConfigKey contextKey = "k8sConfig"
 
 // Config stores Kubernetes client and other flag-based configurations
 type Config struct {
-	Clientset  *kubernetes.Clientset
-	Kubeconfig string
-	Namespace  string
-	Config     *rest.Config
+	Clientset   *kubernetes.Clientset
+	ConfigFlags *genericclioptions.ConfigFlags
+	Config      *rest.Config
 }
 
 // NewConfig returns a new Config struct initialized with a Kubernetes client
-func NewConfig(kubeconfig string, namespace string) (*Config, error) {
-	// If kubeconfig flag is not set, fallback to environment variable
-	if kubeconfig == "" {
-		kubeconfig = os.Getenv("KUBECONFIG")
-	}
+func NewConfig(configFlags *genericclioptions.ConfigFlags) (*Config, error) {
 
-	// If neither flag nor environment variable is set, fallback to default path
-	if kubeconfig == "" {
-		home, err := os.UserHomeDir()
-		if err != nil {
-			log.Fatal().Err(err).Msg("Unable to get user home directory")
-		}
-		kubeconfig = filepath.Join(home, ".kube", "config")
-	}
-
-	currentConfig, err := clientcmd.LoadFromFile(kubeconfig)
-	if err != nil {
-		log.Error().Err(err).Msgf("Error reading kubeconfig: %v", err)
-		return nil, err
-	}
-
-	// If namespace flag is not set, fallback to current context
-	if namespace == "" {
-		if context, ok := currentConfig.Contexts[currentConfig.CurrentContext]; ok {
-			namespace = context.Namespace
-			// If namespace flag is not set, and no current context, fallback to default namespace
-			if namespace == "" {
-				namespace = "default"
-			}
-		}
-	}
-
-	config, err := clientcmd.BuildConfigFromFlags("", kubeconfig)
+	config, err := configFlags.ToRESTConfig()
 	if err != nil {
 		return nil, err
 	}
@@ -62,9 +32,8 @@ func NewConfig(kubeconfig string, namespace string) (*Config, error) {
 	}
 
 	return &Config{
-		Clientset:  clientset,
-		Kubeconfig: kubeconfig,
-		Namespace:  namespace,
-		Config:     config,
+		Clientset:   clientset,
+		ConfigFlags: configFlags,
+		Config:      config,
 	}, nil
 }
