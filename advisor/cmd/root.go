@@ -48,7 +48,7 @@ var rootCmd = &cobra.Command{
 	       policies, seccomp profiles, and more to ensure that your applications meet
 	       best security practices.
 	       Complete documentation is available at [Your Documentation URL]`,
-	PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
+	PersistentPreRun: func(cmd *cobra.Command, args []string) {
 		// Adjust log level according to the flag
 		if debug {
 			zerolog.SetGlobalLevel(zerolog.DebugLevel)
@@ -76,7 +76,6 @@ var rootCmd = &cobra.Command{
 		// Create a new context with the config and assign it to the command
 		ctx := context.WithValue(cmd.Context(), k8s.ConfigKey, config)
 		cmd.SetContext(ctx)
-		return nil
 	},
 }
 
