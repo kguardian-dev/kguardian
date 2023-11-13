@@ -48,7 +48,7 @@ var networkPolicyCmd = &cobra.Command{
 		} else {
 			// Validate that a pod name is provided
 			if len(args) != 1 {
-				cmd.Usage()
+				_ = cmd.Usage()
 				return
 			}
 			options.Mode = k8s.SinglePod
