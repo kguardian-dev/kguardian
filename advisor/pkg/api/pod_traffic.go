@@ -66,13 +66,13 @@ func GetPodTraffic(podName string) ([]PodTraffic, error) {
 
 	// Parse the JSON response and unmarshal it into the Go struct.
 	if err := json.Unmarshal([]byte(body), &podTraffic); err != nil {
-		log.Error().Err(err).Msg("Error unmarshal JSON")
+		log.Warn().Err(err).Msg("Error unmarshal JSON")
 		return nil, err
 	}
 
 	// If no pod traffic is found, return nil
 	if len(podTraffic) == 0 {
-		log.Error().Err(err).Msg("No pod traffic found")
+		log.Warn().Err(err).Msg("No pod traffic found in database")
 		return nil, nil
 	}
 	return podTraffic, nil
