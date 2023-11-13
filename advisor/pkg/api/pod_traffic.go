@@ -66,15 +66,15 @@ func GetPodTraffic(podName string) ([]PodTraffic, error) {
 
 	// Parse the JSON response and unmarshal it into the Go struct.
 	if err := json.Unmarshal([]byte(body), &podTraffic); err != nil {
-		log.Warn().Err(err).Msg("Error unmarshal JSON")
+		log.Error().Err(err).Msg("Error unmarshal JSON")
 		return nil, err
 	}
 
-	// If no pod traffic is found, return nil
+	// If no pod traffic is found, return err
 	if len(podTraffic) == 0 {
-		log.Warn().Err(err).Msg("No pod traffic found in database")
-		return nil, nil
+		return nil, fmt.Errorf("No pod traffic found in database")
 	}
+
 	return podTraffic, nil
 }
 
@@ -98,7 +98,7 @@ func GetPodSpec(ip string) (*PodDetail, error) {
 		return nil, nil
 	}
 
-	var details PodDetail
+	var details *PodDetail
 
 	// Parse the JSON response and unmarshal it into the Go struct.
 	if err := json.NewDecoder(resp.Body).Decode(&details); err != nil {
@@ -106,7 +106,12 @@ func GetPodSpec(ip string) (*PodDetail, error) {
 		return nil, err
 	}
 
-	return &details, nil
+	// If no pod details are found, return err
+	if details == nil {
+		return nil, fmt.Errorf("no pod traffic found in database")
+	}
+
+	return details, nil
 }
 
 func GetSvcSpec(svcIp string) (*SvcDetail, error) {

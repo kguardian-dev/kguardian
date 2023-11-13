@@ -87,19 +87,9 @@ func GenerateNetworkPolicy(options GenerateOptions, config *Config) {
 			continue
 		}
 
-		if podTraffic == nil {
-			log.Error().Msgf("No pod traffic found for pod %s\n", pod.Name)
-			continue
-		}
-
 		podDetail, err := api.GetPodSpec(podTraffic[0].SrcIP)
 		if err != nil {
 			log.Error().Err(err).Msg("Error retrieving pod spec")
-			continue
-		}
-
-		if podDetail == nil {
-			log.Error().Msgf("No pod spec found for pod %s\n", podTraffic[0].SrcIP)
 			continue
 		}
 
@@ -239,7 +229,7 @@ func determinePeerForTraffic(traffic api.PodTraffic, config *Config) (*networkin
 	}
 
 	if origin == nil {
-		log.Debug().Msgf("Could not find details for origin assuming IP is external %s", traffic.DstIP)
+		log.Warn().Msgf("Could not find details for origin assuming IP is external %s", traffic.DstIP)
 		return &networkingv1.NetworkPolicyPeer{
 			IPBlock: &networkingv1.IPBlock{
 				CIDR: traffic.DstIP + "/32",
@@ -302,9 +292,9 @@ func deduplicateEgressRules(rules []networkingv1.NetworkPolicyEgressRule) []netw
 func fetchSinglePodInNamespace(podName, namespace string, config *Config) (*corev1.Pod, error) {
 	pod, err := config.Clientset.CoreV1().Pods(namespace).Get(context.TODO(), podName, metav1.GetOptions{})
 	if err != nil {
-		// Handle the error according to your application's requirements
 		return nil, err
 	}
+
 	return pod, nil
 }
 
