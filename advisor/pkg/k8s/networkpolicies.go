@@ -1,11 +1,13 @@
 package k8s
 
 import (
+	"context"
 	"encoding/json"
 	"strings"
 
 	log "github.com/rs/zerolog/log"
 	api "github.com/xentra-ai/advisor/pkg/api"
+	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
@@ -14,6 +16,22 @@ import (
 
 // Version is set at build time using -ldflags
 var Version = "development" // default value
+
+// ModeType defines the mode of operation for generating network policies
+type ModeType int
+
+const (
+	SinglePod ModeType = iota
+	AllPodsInNamespace
+	AllPodsInAllNamespaces
+)
+
+// GenerateOptions holds options for the GenerateNetworkPolicy function
+type GenerateOptions struct {
+	Mode      ModeType
+	PodName   string // Used if Mode is SinglePod
+	Namespace string // Used if Mode is AllPodsInNamespace or SinglePod
+}
 
 type NetworkPolicyRule struct {
 	Ports  []networkingv1.NetworkPolicyPort
@@ -32,35 +50,62 @@ type RuleSets struct {
 	Egress  []networkingv1.NetworkPolicyEgressRule
 }
 
-func GenerateNetworkPolicy(podName string, config *Config) {
-	podTraffic, err := api.GetPodTraffic(podName)
-	if err != nil {
-		log.Fatal().Err(err).Msg("Error retrieving pod traffic")
+func GenerateNetworkPolicy(options GenerateOptions, config *Config) {
+	var pods []corev1.Pod
+
+	switch options.Mode {
+	case SinglePod:
+		// Fetch all pods in the given namespace
+		fetchedPod, err := fetchSinglePodInNamespace(options.PodName, options.Namespace, config)
+		if err != nil {
+			log.Fatal().Err(err).Msgf("failed to fetch pods in namespace %s", options.Namespace)
+		}
+		pods = append(pods, *fetchedPod)
+
+	case AllPodsInNamespace:
+		// Fetch all pods in the given namespace
+		fetchedPods, err := fetchAllPodsInNamespace(options.Namespace, config)
+		if err != nil {
+			log.Fatal().Err(err).Msgf("failed to fetch pods in namespace %s", options.Namespace)
+		}
+		pods = append(pods, fetchedPods...)
+
+	case AllPodsInAllNamespaces:
+		// Fetch all pods in all namespaces
+		fetchedPods, err := fetchAllPodsInAllNamespaces(config)
+		if err != nil {
+			log.Fatal().Err(err).Msgf("failed to fetch all pods in all namespaces")
+		}
+		pods = append(pods, fetchedPods...)
 	}
 
-	if podTraffic == nil {
-		log.Fatal().Msgf("No pod traffic found for pod %s\n", podName)
-	}
+	// Generate network policies for each pod in pods
+	for _, pod := range pods {
+		podTraffic, err := api.GetPodTraffic(pod.Name)
+		if err != nil {
+			log.Error().Err(err).Msg("Error retrieving pod traffic")
+			continue
+		}
 
-	podDetail, err := api.GetPodSpec(podTraffic[0].SrcIP)
-	if err != nil {
-		log.Fatal().Err(err).Msg("Error retrieving pod spec")
-	}
+		podDetail, err := api.GetPodSpec(podTraffic[0].SrcIP)
+		if err != nil {
+			log.Error().Err(err).Msg("Error retrieving pod spec")
+			continue
+		}
 
-	if podDetail == nil {
-		log.Fatal().Msgf("No pod spec found for pod %s\n", podTraffic[0].SrcIP)
-	}
+		policy, err := transformToNetworkPolicy(podTraffic, podDetail, config)
+		if err != nil {
+			log.Error().Err(err).Msg("Error transforming policy")
+			continue
+		}
 
-	policy, err := transformToNetworkPolicy(podTraffic, podDetail, config)
-	if err != nil {
-		log.Error().Err(err).Msg("Error transforming policy")
+		policyYAML, err := yaml.Marshal(policy)
+		if err != nil {
+			log.Error().Err(err).Msg("Error converting policy to YAML")
+			continue
+		}
+		log.Info().Msgf("Generated policy for pod %s:\n%s", pod.Name, string(policyYAML))
 	}
-
-	policyYAML, err := yaml.Marshal(policy)
-	if err != nil {
-		log.Error().Err(err).Msg("Error converting policy to YAML")
-	}
-	log.Info().Msgf("Generated policy for pod %s:\n%s", podName, string(policyYAML))
 }
 
 func transformToNetworkPolicy(podTraffic []api.PodTraffic, podDetail *api.PodDetail, config *Config) (*networkingv1.NetworkPolicy, error) {
@@ -184,7 +229,7 @@ func determinePeerForTraffic(traffic api.PodTraffic, config *Config) (*networkin
 	}
 
 	if origin == nil {
-		log.Debug().Msgf("Could not find details for origin assuming IP is external %s", traffic.DstIP)
+		log.Warn().Msgf("Could not find details for origin assuming IP is external %s", traffic.DstIP)
 		return &networkingv1.NetworkPolicyPeer{
 			IPBlock: &networkingv1.IPBlock{
 				CIDR: traffic.DstIP + "/32",
@@ -241,4 +286,34 @@ func deduplicateEgressRules(rules []networkingv1.NetworkPolicyEgressRule) []netw
 		}
 	}
 	return deduplicated
+}
+
+// fetchSinglePodInNamespace fetches a single pods in a specific namespace
+func fetchSinglePodInNamespace(podName, namespace string, config *Config) (*corev1.Pod, error) {
+	pod, err := config.Clientset.CoreV1().Pods(namespace).Get(context.TODO(), podName, metav1.GetOptions{})
+	if err != nil {
+		return nil, err
+	}
+
+	return pod, nil
+}
+
+// fetchAllPodsInNamespace fetches all pods in a specific namespace
+func fetchAllPodsInNamespace(namespace string, config *Config) ([]corev1.Pod, error) {
+	podList, err := config.Clientset.CoreV1().Pods(namespace).List(context.TODO(), metav1.ListOptions{})
+	if err != nil {
+		return nil, err
+	}
+
+	return podList.Items, nil
+}
+
+// fetchAllPodsInAllNamespaces fetches all pods in all namespaces
+func fetchAllPodsInAllNamespaces(config *Config) ([]corev1.Pod, error) {
+	podList, err := config.Clientset.CoreV1().Pods(metav1.NamespaceAll).List(context.TODO(), metav1.ListOptions{})
+	if err != nil {
+		return nil, err
+	}
+
+	return podList.Items, nil
 }

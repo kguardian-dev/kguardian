@@ -10,7 +10,6 @@ Xentra is a powerful kubectl plugin designed to enhance the security of your Kub
   - [📦 Installation](#-installation)
   - [🔨 Usage](#-usage)
     - [🔒 Generate Network Policies](#-generate-network-policies)
-    - [🛡️ Generate Seccomp Profiles](#️-generate-seccomp-profiles)
   - [🤝 Contributing](#-contributing)
   - [📄 License](#-license)
   - [🙏 Acknowledgments](#-acknowledgments)
@@ -55,14 +54,22 @@ mv advisor /usr/local/bin/kubectl-advisor
 
 ### 🔒 Generate Network Policies
 
+Create a network policy for a single pod in a namespace
+
 ```bash
 kubectl advisor gen networkpolicy [pod-name] --namespace [namespace-name]
 ```
 
-### 🛡️ Generate Seccomp Profiles
+Create a network policy for a all pod(s) in a namespace
 
 ```bash
-kubectl advisor gen seccomp [pod-name] --namespace [namespace-name]
+kubectl advisor gen networkpolicy --namespace [namespace-name] --all
+```
+
+Create a network policy for a all pod(s) in all namespace(s)
+
+```bash
+kubectl advisor gen networkpolicy -A
 ```
 
 For more details on the commands:
@@ -77,7 +84,7 @@ Contributions are welcome! Please read the contributing guide to get started.
 
 ## 📄 License
 
-This project is licensed under the [PLACEHOLDER] License - see the [LICENSE.md](LICENSE.md) file for details.
+This project is licensed under the Apache 2.0 License - see the [LICENSE](LICENSE) file for details.
 
 ## 🙏 Acknowledgments
 
