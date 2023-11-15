@@ -60,7 +60,7 @@ jobs:
         arch:
           - amd64
           - arm64
-    uses: slsa-framework/slsa-github-generator/.github/workflows/builder_go_slsa3.yml@07e64b653f10a80b6510f4568f685f8b7b9ea830 # v1.9.0
+    uses: slsa-framework/slsa-github-generator/.github/workflows/builder_go_slsa3.yml@v1.9.0 # v1.9.0
     with:
       go-version: 1.21
       config-file: .slsa-goreleaser/${{matrix.os}}-${{matrix.arch}}.yml
