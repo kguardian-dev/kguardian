@@ -1,6 +1,6 @@
 ARG DEBIAN_VERSION="11.7"
 
-FROM --platform=$BUILDPLATFORM ubuntu:22.04 as builder
+FROM --platform=$BUILDPLATFORM ubuntu:24.04 as builder
 
 # Filled by docker buildx
 
