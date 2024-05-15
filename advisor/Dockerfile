@@ -1,4 +1,4 @@
-FROM golang:1.21.5-alpine3.18 as build
+FROM golang:1.22.3-alpine3.18 as build
 
 # Buildx build-in ARGs
 ARG TARGETOS
