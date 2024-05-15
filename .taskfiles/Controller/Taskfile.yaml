@@ -11,8 +11,7 @@ tasks:
   all:
     desc: "Run all controller tasks"
     cmds:
-      - task: controller:build
-      - task: controller:install
+      - task: build
 
   build:
     desc: "Build the controller with Cargo and cross"
@@ -24,17 +23,6 @@ tasks:
       - docker build -t {{.CONTROLLER_IMAGE_NAME}}:{{.IMAGE_VERSION}} . -f controller/docker/local.Dockerfile
       - kind load docker-image {{.CONTROLLER_IMAGE_NAME}}:{{.IMAGE_VERSION}}
       - rm -rf localbin
-
-  install:
-    desc: "Install Controller using Helm"
-    cmds:
-      - helm repo add xentra https://xentra-ai.github.io/charts || true
-      - helm upgrade --install kube-guardian xentra/kube-guardian --namespace kube-guardian --create-namespace --set image.tag={{.IMAGE_VERSION}}
-
-  install-oci:
-    desc: "Install Controller using OCI Helm chart"
-    cmds:
-      - helm template kube-guardian oci://ghcr.io/xentra-ai/charts/kube-guardian --namespace kube-guardian --create-namespace
 
   preflight:
     desc: "Run preflight checks for Controller"
