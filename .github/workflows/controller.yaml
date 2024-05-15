@@ -64,7 +64,7 @@ jobs:
 
           cross build --target ${{ steps.args.outputs.BUILD }} --release
 
-      - uses: actions/upload-artifact@v3
+      - uses: actions/upload-artifact@65462800fd760344b1a7b4382951275a0abb4808 # v4
         with:
           name: ${{ steps.args.outputs.BUILD }}-binary
           path: controller/target/${{ steps.args.outputs.BUILD }}/release/kube-guardian
@@ -96,12 +96,12 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - uses: actions/download-artifact@v3
+      - uses: actions/download-artifact@65a9edc5881444af0b9093a5e628f2fe47ea3b2e # v4
         with:
           name: x86_64-unknown-linux-gnu-binary
           path: controller/linux/amd64
 
-      - uses: actions/download-artifact@v3
+      - uses: actions/download-artifact@65a9edc5881444af0b9093a5e628f2fe47ea3b2e # v4
         with:
           name: aarch64-unknown-linux-gnu-binary
           path: controller/linux/arm64
