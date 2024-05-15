@@ -83,13 +83,14 @@ func GenerateNetworkPolicy(options GenerateOptions, config *Config) {
 	for _, pod := range pods {
 		podTraffic, err := api.GetPodTraffic(pod.Name)
 		if err != nil {
-			log.Error().Err(err).Msg("Error retrieving pod traffic")
+			// TODO: Handle policy when pod don't require ingress and/or egress
+			log.Debug().Err(err).Msgf("Error retrieving %s pod traffic", pod.Name)
 			continue
 		}
 
 		podDetail, err := api.GetPodSpec(podTraffic[0].SrcIP)
 		if err != nil {
-			log.Error().Err(err).Msg("Error retrieving pod spec")
+			log.Error().Err(err).Msgf("Error retrieving %s pod spec", pod.Name)
 			continue
 		}
 
@@ -104,7 +105,7 @@ func GenerateNetworkPolicy(options GenerateOptions, config *Config) {
 			log.Error().Err(err).Msg("Error converting policy to YAML")
 			continue
 		}
-		log.Info().Msgf("Generated policy for pod %s:\n%s", pod.Name, string(policyYAML))
+		log.Info().Msgf("Generated policy for pod %s\n%s", pod.Name, string(policyYAML))
 	}
 }
 
@@ -140,9 +141,6 @@ func transformToNetworkPolicy(podTraffic []api.PodTraffic, podDetail *api.PodDet
 			},
 		},
 		Spec: networkingv1.NetworkPolicySpec{
-			PodSelector: metav1.LabelSelector{
-				MatchLabels: podSelectorLabels,
-			},
 			PolicyTypes: []networkingv1.PolicyType{
 				networkingv1.PolicyTypeIngress,
 				networkingv1.PolicyTypeEgress,
@@ -150,6 +148,14 @@ func transformToNetworkPolicy(podTraffic []api.PodTraffic, podDetail *api.PodDet
 			Ingress: ingressRules,
 			Egress:  egressRules,
 		},
+	}
+
+	if podSelectorLabels != nil {
+		networkPolicy.Spec.PodSelector = metav1.LabelSelector{
+			MatchLabels: podSelectorLabels,
+		}
+	} else {
+		log.Debug().Msgf("Failed to detect MatchLabels for target %s", podDetail.Name)
 	}
 
 	return networkPolicy, nil
@@ -214,6 +220,16 @@ func determinePeerForTraffic(traffic api.PodTraffic, config *Config) (*networkin
 	if err != nil {
 		return nil, err
 	}
+	// TODO: Should we add HostNetwork blocks or ignore them?
+	// Handle pods with hostNetwork: true where the IP will be Node IP
+	if podOrigin != nil && podOrigin.Pod.Spec.HostNetwork {
+		log.Debug().Msgf("Pod traffic detected is using HostNetwork %s", podOrigin.PodIP)
+		return &networkingv1.NetworkPolicyPeer{
+			IPBlock: &networkingv1.IPBlock{
+				CIDR: traffic.DstIP + "/32",
+			},
+		}, nil
+	}
 	if podOrigin != nil {
 		origin = podOrigin
 	}
@@ -229,7 +245,7 @@ func determinePeerForTraffic(traffic api.PodTraffic, config *Config) (*networkin
 	}
 
 	if origin == nil {
-		log.Warn().Msgf("Could not find details for origin assuming IP is external %s", traffic.DstIP)
+		log.Debug().Msgf("Could not find details for origin assuming IP is external %s", traffic.DstIP)
 		return &networkingv1.NetworkPolicyPeer{
 			IPBlock: &networkingv1.IPBlock{
 				CIDR: traffic.DstIP + "/32",

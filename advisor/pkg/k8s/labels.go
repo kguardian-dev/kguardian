@@ -34,6 +34,8 @@ func GetOwnerRef(clientset *kubernetes.Clientset, pod *v1.Pod) (map[string]strin
 	if len(pod.OwnerReferences) > 0 {
 		owner := pod.OwnerReferences[0]
 
+		// TODO: If the resource no longer exists but the database has the log/entry this will cause it to break for this netpol
+
 		// Based on the owner, get the controller object to check its labels
 		switch owner.Kind {
 		case "ReplicaSet":

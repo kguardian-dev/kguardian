@@ -22,6 +22,7 @@ WIP
 
 - Kubernetes cluster v1.18+
 - kubectl v1.18+
+- [Kube Guardian](https://github.com/xentra-ai/charts/tree/main/charts/kube-guardian) **MUST** be running in-cluster
 
 ## 📦 Installation
 
@@ -45,7 +46,7 @@ Example:
 
 ```bash
 # Download the release and set it as executable
-wget -O advisor https://github.com/xentra-ai/advisor-client/releases/download/v0.0.3/advisor-linux-amd64 
+wget -O advisor https://github.com/xentra-ai/advisor-client/releases/download/v0.0.3/advisor-linux-amd64
 chmod +x advisor
 mv advisor /usr/local/bin/kubectl-advisor
 ```
