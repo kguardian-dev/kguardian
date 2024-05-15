@@ -2,10 +2,6 @@ name: Build and Push Broker Docker Images
 
 on:
   workflow_dispatch: {}
-  push:
-    paths:
-      - '.github/workflows/broker.yaml'
-      - 'broker/broker.Dockerfile'
 
 jobs:
   build_and_push:
