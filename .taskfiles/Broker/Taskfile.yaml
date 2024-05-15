@@ -1,0 +1,31 @@
+---
+# yaml-language-server: $schema=https://taskfile.dev/schema.json
+version: '3'
+
+vars:
+  BROKER_IMAGE_NAME: ghcr.io/xentra-ai/images/guardian-broker
+  IMAGE_VERSION: local
+
+tasks:
+  all:
+    desc: "Run all broker tasks"
+    cmds:
+      - task: broker:build
+      - task: broker:install
+
+  build:
+    desc: "Build and load the broker Docker image"
+    cmds:
+      - docker build -t {{.BROKER_IMAGE_NAME}}:{{.IMAGE_VERSION}} broker -f broker/broker.Dockerfile
+      - kind load docker-image {{.BROKER_IMAGE_NAME}}:{{.IMAGE_VERSION}}
+
+  install:
+    desc: "Install Broker"
+    cmds:
+      - echo "Installing Broker..."
+
+  preflight:
+    desc: "Run preflight checks for Broker"
+    cmds:
+      - command -v docker || echo "docker is not installed"
+      - command -v kind || echo "kind is not installed"

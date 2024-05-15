@@ -1,0 +1,29 @@
+---
+# yaml-language-server: $schema=https://taskfile.dev/schema.json
+version: '3'
+
+includes:
+  advisor: .taskfiles/Advisor
+  broker: .taskfiles/Broker
+  controller: .taskfiles/Controller
+
+tasks:
+  all:
+    desc: "Run all tasks"
+    cmds:
+      - task: advisor:all
+      - task: broker:all
+      - task: controller:all
+
+  preflight:
+    desc: "Run preflight checks for all components"
+    cmds:
+      - task: advisor:preflight
+      - task: broker:preflight
+      - task: controller:preflight
+
+  preflight-all:
+    desc: "Run preflight checks and then all tasks"
+    cmds:
+      - task: preflight
+      - task: all

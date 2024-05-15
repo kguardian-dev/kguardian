@@ -25,7 +25,7 @@ on:
     branches:
       - main
     paths:
-      - .github/workflows/renovate.yml
+      - .github/workflows/renovate.yaml
       - .github/renovate.json5
       - .github/renovate/**.json5
 

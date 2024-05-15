@@ -1,0 +1,20 @@
+---
+# yaml-language-server: $schema=https://taskfile.dev/schema.json
+version: '3'
+
+tasks:
+  all:
+    desc: "Run all advisor tasks"
+    cmds:
+      - task: advisor:install
+
+  install:
+    desc: "Install Advisor"
+    cmds:
+      - echo "Installing Advisor..."
+
+  preflight:
+    desc: "Run preflight checks for Advisor"
+    cmds:
+      - command -v go || echo "Go is not installed"
+      - command -v golangci-lint || echo "golangci-lint is not installed"
