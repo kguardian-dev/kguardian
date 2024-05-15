@@ -22,7 +22,7 @@ WIP
 
 - Kubernetes cluster v1.18+
 - kubectl v1.18+
-- [Kube Guardian](https://github.com/xentra-ai/charts/tree/main/charts/kube-guardian) **MUST** be running in-cluster
+- [Kube Guardian](https://github.com/xentra-ai/kube-guardian/tree/main/charts/kube-guardian) **MUST** be running in-cluster
 
 ## 📦 Installation
 
@@ -31,7 +31,7 @@ There are several options to install the advisor client.
 To use the quick install use the following command:
 
 ```bash
-sh -c "$(curl -fsSL https://raw.githubusercontent.com/xentra-ai/advisor-client/main/scripts/quick-install.sh)"
+sh -c "$(curl -fsSL https://raw.githubusercontent.com/xentra-ai/kube-guardian/main/scripts/quick-install.sh)"
 ```
 
 You can also install Xentra via Krew, the plugin manager for kubectl:
@@ -46,7 +46,7 @@ Example:
 
 ```bash
 # Download the release and set it as executable
-wget -O advisor https://github.com/xentra-ai/advisor-client/releases/download/v0.0.3/advisor-linux-amd64
+wget -O advisor https://github.com/xentra-ai/kube-guardian/releases/download/v0.0.4/advisor-linux-amd64
 chmod +x advisor
 mv advisor /usr/local/bin/kubectl-advisor
 ```
