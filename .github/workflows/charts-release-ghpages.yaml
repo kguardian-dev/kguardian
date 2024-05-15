@@ -10,7 +10,7 @@ on:
       - 'charts/**'
 
 env:
-  CHARTS_SRC_DIR: "charts"
+  CHARTS_SRC_DIR: "kube-guardian"
   TARGET_REGISTRY: ghcr.io
 
 jobs:
