@@ -2,7 +2,7 @@
 
 This chart bootstraps the [Xentra]() controlplane onto a [Kubernetes](http://kubernetes.io) cluster using the [Helm](https://helm.sh) package manager.
 
-![Version: 0.0.7](https://img.shields.io/badge/Version-0.0.7-informational?style=flat-square)
+![Version: 0.0.8](https://img.shields.io/badge/Version-0.0.8-informational?style=flat-square)
 
 ## Overview
 
@@ -113,10 +113,10 @@ The following table lists the configurable parameters of the Xentra chart and th
 | controller.image.pullPolicy | string | `"Always"` |  |
 | controller.image.repository | string | `"ghcr.io/xentra-ai/images/guardian-controller"` |  |
 | controller.image.sha | string | `""` | Overrides the image tag. |
-| controller.image.tag | string | `"latest"` |  |
+| controller.image.tag | string | `"edge"` |  |
 | controller.imagePullSecrets | list | `[]` |  |
 | controller.nameOverride | string | `""` |  |
-| controller.nodeSelector | object | `{"kubernetes.io/arch":"amd64"}` | Node labels for the kube-guardian controller pod assignment |
+| controller.nodeSelector | object | `{"kubernetes.io/os":"linux"}` | Node labels for the kube-guardian controller pod assignment |
 | controller.podAnnotations | object | `{}` |  |
 | controller.podSecurityContext | object | `{}` |  |
 | controller.priorityClassName | string | `""` | Priority class to be used for the kube-guardian controller pods |
@@ -159,7 +159,7 @@ The following table lists the configurable parameters of the Xentra chart and th
 | database.serviceAccount.create | bool | `true` |  |
 | database.serviceAccount.name | string | `""` |  |
 | database.tolerations | list | `[]` | Tolerations for the kube-guardian database pod assignment |
-| global.annotations | object | `{}` | Annotations to apply to all resources |
+| global.annotations | object | `{"foo":"bar"}` | Annotations to apply to all resources |
 | global.labels | object | `{}` | Labels to apply to all resources |
 | global.priorityClassName | string | `""` | Priority class to be used for the kube-guardian pods |
 | namespace.annotations | object | `{}` | Annotations to add to the namespace |
