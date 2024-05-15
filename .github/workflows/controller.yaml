@@ -2,10 +2,6 @@ name: Build and Push controller Docker Images
 
 on:
   workflow_dispatch: {}
-  push:
-    paths:
-      - '.github/workflows/controller.yaml'
-      - 'controller/Dockerfile'
 
 jobs:
   build:
