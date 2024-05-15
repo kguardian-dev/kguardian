@@ -1,0 +1,18 @@
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .Values.database.service.name }}
+  labels:
+    app: postgresdb
+  annotations:
+    {{- include "kube-guardian.annotations" . | nindent 4 }}
+spec:
+  type: {{ .Values.database.service.type }}
+  ports:
+    - port: 5432
+      # targetPort: postgresdb
+      protocol: TCP
+      name: http
+  selector:
+    app: postgresdb
