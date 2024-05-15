@@ -1,0 +1,6 @@
+[workspace]
+members = [
+  "kube-guardian",
+   "kube-guardian-common",
+   "xtask"
+]

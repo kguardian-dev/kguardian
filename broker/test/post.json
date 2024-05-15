@@ -1,0 +1,8 @@
+{
+    "uuid": "3313-113-1313-13-131",
+    "src_ip": "10.09.10.11:443",
+    "src_pod_name": "nginx",
+    "src_pod_namespace": "kube-system",
+    "dst_ip": "10.09.10.10:443",
+    "time_stamp": "2007-04-05T14:30:30"
+}
