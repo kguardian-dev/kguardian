@@ -35,7 +35,7 @@ jobs:
 
       - name: Build and Push
         if: github.ref == 'refs/heads/main'
-        uses: docker/build-push-action@v2
+        uses: docker/build-push-action@2cdde995de11925a030ce8070c3d77a52ffcf1c0 # v5
         with:
           context: broker/
           file: broker/broker.Dockerfile
