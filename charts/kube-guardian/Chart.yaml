@@ -25,7 +25,7 @@ keywords:
   - Troubleshooting
 
 sources:
-  - https://github.com/xentra-ai/charts
+  - https://github.com/xentra-ai/kube-guardian
 
 maintainers:
   # Mahesh Rayas
