@@ -15,6 +15,7 @@ import (
 )
 
 var (
+	// TODO: This namespace should be configurable if overridden
 	serviceNamespace = "kube-guardian"
 	serviceName      = "broker"
 	ports            = []string{"9090:9090"}
@@ -30,6 +31,7 @@ func PortForward(config *Config) (chan struct{}, chan error, chan bool) {
 	go func() {
 		service, err := config.Clientset.CoreV1().Services(serviceNamespace).Get(context.TODO(), serviceName, metav1.GetOptions{})
 		if err != nil {
+			log.Error().Err(err).Msg("Error collecting broker service")
 			errChan <- err
 			return
 		}
@@ -44,6 +46,7 @@ func PortForward(config *Config) (chan struct{}, chan error, chan bool) {
 		log.Debug().Msgf("Using port-forwarding pod with selector: %s", labelSelectorString)
 		pods, err := config.Clientset.CoreV1().Pods(serviceNamespace).List(context.TODO(), metav1.ListOptions{LabelSelector: labelSelectorString})
 		if err != nil {
+			log.Error().Err(err).Msg("Error collecting broker pods")
 			errChan <- err
 			return
 		}
