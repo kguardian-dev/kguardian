@@ -41,15 +41,17 @@ pub async fn watch_pods(
     ebpf: EbpfPgm,
     container_map: Arc<Mutex<BTreeMap<u32, PodInspect>>>,
     node_name: String,
-) -> Result<(), Error> {
+) -> Result<(), crate::Error> {
     let c = Client::try_default().await?;
     let pods: Api<Pod> = Api::all(c.clone());
+
     #[cfg(not(debug_assertions))]
     let wc = watcher::Config::default().fields(&format!("spec.nodeName={}", node_name));
-    // .fields(&format!("metadata.namespace!={}", "kube-system"));
     #[cfg(debug_assertions)]
     let wc = watcher::Config::default();
+
     let ebpf = Arc::new(Mutex::new(ebpf));
+
     watcher(pods, wc)
         .applied_objects()
         .default_backoff()
@@ -57,61 +59,109 @@ pub async fn watch_pods(
             let container_map = Arc::clone(&container_map);
             let ebpf = Arc::clone(&ebpf);
             async move {
-                if let Some(con_ids) = pod_unready(&p) {
-                    // will use the con_id later
-                    // TODO error handling
-                    let pod_ip = update_pods_details(&p).await;
-                    if !p.metadata.namespace.eq(&Some("kube-system".to_string())) {
-                        if let Ok(Some(pod_ip)) = pod_ip {
-                            for con_id in con_ids {
-                                // if pod has a Ip pod_ip
-                                let pod_info: PodInfo = PodInfo {
-                                    pod_name: p.name_any(),
-                                    pod_namespace: p.metadata.namespace.to_owned(),
-                                    pod_ip: pod_ip.clone(),
-                                };
-                                let pod_inspect = PodInspect {
-                                    status: pod_info,
-                                    ..Default::default()
-                                };
-
-                                info!("pod name {}", p.name_any());
-
-                                if let Some(pod_inspect) =
-                                    pod_inspect.get_pod_inspect(&con_id).await
-                                {
-                                    let mut cm = container_map.lock().await;
-
-                                    if let Some(cgro_path) = pod_inspect.cgroup_path.to_owned() {
-                                        // loop thru both host and container if index and store the pod details
-                                        pod_inspect.if_index.map(|i| {
-                                            if let Some(if_index) = i {
-                                                cm.insert(if_index, pod_inspect.clone());
-                                            }
-                                        });
-                                        if pod_inspect.if_index.len() > 0 {
-                                            let cgrp_attach =
-                                                attach_cgroup(&cgro_path, ebpf.clone()).await;
-                                            if let Err(e) = cgrp_attach {
-                                                error!(
-                                                    "Failed to attach cgroup to pod {} {:?} {}",
-                                                    p.name_any(),
-                                                    cgro_path,
-                                                    e
-                                                );
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
+                let p = process_pod(&p, container_map, ebpf).await;
+                if p.is_err() {
+                    //dont panic and the error is already printed, so no point of reporting again
+                    // maybe find a better way of handling error
                 }
                 Ok(())
             }
         })
         .await?;
+
     Ok(())
+}
+
+async fn process_pod(
+    pod: &Pod,
+    container_map: Arc<Mutex<BTreeMap<u32, PodInspect>>>,
+    ebpf: Arc<Mutex<EbpfPgm>>,
+) -> Result<(), Error> {
+    if let Some(con_ids) = pod_unready(pod) {
+        let pod_ip = update_pods_details(pod).await;
+        if should_process_pod(&pod.metadata.namespace) {
+            if let Ok(Some(pod_ip)) = pod_ip {
+                process_container_ids(&con_ids, &pod, &pod_ip, container_map, ebpf).await?;
+            }
+        }
+    }
+    Ok(())
+}
+
+async fn process_container_ids(
+    con_ids: &[String],
+    pod: &Pod,
+    pod_ip: &String,
+    container_map: Arc<Mutex<BTreeMap<u32, PodInspect>>>,
+    ebpf: Arc<Mutex<EbpfPgm>>,
+) -> Result<(), Error> {
+    for con_id in con_ids {
+        let pod_info = create_pod_info(pod, pod_ip);
+        let pod_inspect = PodInspect {
+            status: pod_info,
+            ..Default::default()
+        };
+
+        info!("pod name {}", pod.name_any());
+
+        if let Some(pod_inspect) = pod_inspect.get_pod_inspect(&con_id).await {
+            update_container_map(&pod_inspect, container_map.clone()).await?;
+            attach_cgroup_if_needed(&pod_inspect, ebpf.clone(), pod).await?;
+        }
+    }
+    Ok(())
+}
+
+async fn update_container_map(
+    pod_inspect: &PodInspect,
+    container_map: Arc<Mutex<BTreeMap<u32, PodInspect>>>,
+) -> Result<(), Error> {
+    let mut cm = container_map.lock().await;
+    if pod_inspect.cgroup_path.is_some() {
+        pod_inspect.if_index.iter().for_each(|i| {
+            if let Some(if_index) = i {
+                cm.insert(*if_index, pod_inspect.clone());
+            }
+        });
+    }
+    Ok(())
+}
+
+async fn attach_cgroup_if_needed(
+    pod_inspect: &PodInspect,
+    ebpf: Arc<Mutex<EbpfPgm>>,
+    pod: &Pod,
+) -> Result<(), Error> {
+    if !pod_inspect.if_index.is_empty() {
+        if let Some(cgro_path) = &pod_inspect.cgroup_path {
+            let cgrp_attach = attach_cgroup(cgro_path, ebpf.clone()).await;
+            if let Err(e) = cgrp_attach {
+                error!(
+                    "Failed to attach cgroup to pod {} {:?} {}",
+                    pod.name_any(),
+                    cgro_path,
+                    e
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+fn create_pod_info(pod: &Pod, pod_ip: &String) -> PodInfo {
+    PodInfo {
+        pod_name: pod.name_any(),
+        pod_namespace: pod.metadata.namespace.to_owned(),
+        pod_ip: pod_ip.clone(),
+    }
+}
+
+fn should_process_pod(namespace: &Option<String>) -> bool {
+    // TODO : excluded_namespace needs to be paratermized
+    let excluded_namespaces: [&str; 1] = ["kube-system"];
+    !namespace
+        .as_ref()
+        .map_or(false, |ns| excluded_namespaces.contains(&ns.as_str()))
 }
 
 fn pod_unready(p: &Pod) -> Option<Vec<String>> {

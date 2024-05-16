@@ -44,7 +44,6 @@ fn try_kube_guardian(mut ctx: SkBuffContext, traffic: u32) -> Result<i32, i32> {
     let protocol = unsafe { (*ctx.skb.skb).protocol };
     let if_index = unsafe {(*ctx.skb.skb).ifindex};
     let local_ip4 =  unsafe {(*ctx.skb.skb).local_ip4};
-    let mmm = unsafe { (*ctx.skb.skb).protocol };
     if protocol != ETH_P_IP {
         return Ok(1);
     }
@@ -63,7 +62,7 @@ fn try_kube_guardian(mut ctx: SkBuffContext, traffic: u32) -> Result<i32, i32> {
                 Err(_) => return Ok(1),
             };
 
-            (u16::from_be(unsafe { tcp_hdr.source}), u16::from_be(unsafe { tcp_hdr.dest}), tcp_hdr.syn(), tcp_hdr.ack())
+            (u16::from_be(tcp_hdr.source), u16::from_be(tcp_hdr.dest), tcp_hdr.syn(), tcp_hdr.ack())
         }
         IpProto::Udp => {
             let udp_hdr = match ctx.load::<UdpHdr>(Ipv4Hdr::LEN).map_err(|_| ()) {
@@ -77,7 +76,7 @@ fn try_kube_guardian(mut ctx: SkBuffContext, traffic: u32) -> Result<i32, i32> {
             // first time ingress, 
             // track the src_ip, dest_ip, dest_port and set the mark as 99
             ctx.set_mark(99);
-            (0, u16::from_be(unsafe { udp_hdr.dest}), 2, 2)
+            (0, u16::from_be(udp_hdr.dest), 2, 2)
 
         }else{
             return Ok(1)
