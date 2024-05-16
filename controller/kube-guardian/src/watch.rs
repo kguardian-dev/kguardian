@@ -185,7 +185,9 @@ fn pod_unready(p: &Pod) -> Option<Vec<String>> {
     if let Some(con_status) = &status.container_statuses {
         let mut container_ids: Vec<String> = vec![];
         for container in con_status {
-            container_ids.push(container.container_id.to_owned().unwrap())
+            if let Some(container_id) = container.container_id.to_owned() {
+                container_ids.push(container_id)
+            }
         }
         return Some(container_ids);
     }
