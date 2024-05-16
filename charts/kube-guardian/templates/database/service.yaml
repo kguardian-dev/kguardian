@@ -5,8 +5,6 @@ metadata:
   name: {{ .Values.database.service.name }}
   labels:
     app: postgresdb
-  annotations:
-    {{- include "kube-guardian.annotations" . | nindent 4 }}
 spec:
   type: {{ .Values.database.service.type }}
   ports:

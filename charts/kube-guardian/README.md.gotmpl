@@ -16,8 +16,6 @@ This Helm chart deploys:
 - Kubernetes 1.19+
 - Helm 3.0+
 
-**Note:** *If you're using cilium ensure the following setting is set otherwise PodIPs are not correctly aggregated when determining traffic origin and desgination: `bpf.masquerade: false`*
-
 ## Install the Chart
 
 To install the chart with the release name `my-release`:
@@ -25,7 +23,7 @@ To install the chart with the release name `my-release`:
 Add the chart repo
 
 ```bash
-helm repo add xentra https://xentra-ai.github.io/charts
+helm repo add xentra https://xentra-ai.github.io/kube-guardian
 ```
 
 You can then run `helm search repo xentra` to search the charts.

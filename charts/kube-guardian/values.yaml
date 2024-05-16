@@ -5,8 +5,7 @@ global:
   # -- Labels to apply to all resources
   labels: {}
   # -- Annotations to apply to all resources
-  annotations:
-    "foo": "bar"
+  annotations: {}
 
   # -- Priority class to be used for the kube-guardian pods
   priorityClassName: ""

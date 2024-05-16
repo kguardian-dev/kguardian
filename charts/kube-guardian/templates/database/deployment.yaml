@@ -5,8 +5,6 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: {{ .Values.database.name }}
-  annotations:
-    {{- include "kube-guardian.annotations" . | nindent 4 }}
 spec:
   replicas: 1
   selector:

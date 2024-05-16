@@ -5,8 +5,6 @@ metadata:
   name: {{ .Values.broker.service.name }}
   labels:
     {{- include "kube-guardian.labels" . | nindent 4 }}
-  annotations:
-    {{- include "kube-guardian.annotations" . | nindent 4 }}
 spec:
   type: {{ .Values.broker.service.type }}
   ports:
