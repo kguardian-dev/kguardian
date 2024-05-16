@@ -19,16 +19,14 @@ async fn health(_: HttpRequest) -> impl Responder {
     HttpResponse::Ok().json("healthy")
 }
 
-
-
-
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     telemetry::init_logger();
 
     let c: Arc<Mutex<BTreeMap<u32, PodInspect>>> = Arc::new(Mutex::new(BTreeMap::new()));
 
-    let traced_addresses_cache:Arc<Mutex<HashSet<TracedAddrRecord>>> = Arc::new(Mutex::new(HashSet::new()));
+    let traced_addresses_cache: Arc<Mutex<HashSet<TracedAddrRecord>>> =
+        Arc::new(Mutex::new(HashSet::new()));
 
     // load ebpf
     let bpf = EbpfPgm::load_ebpf(Arc::clone(&c), Arc::clone(&traced_addresses_cache))?;

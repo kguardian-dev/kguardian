@@ -1,20 +1,5 @@
 use std::env;
-
-use opentelemetry::trace::TraceId;
-
 use tracing_subscriber::{fmt, prelude::*, EnvFilter, Registry};
-
-///  Fetch an opentelemetry::trace::TraceId as hex through the full tracing stack
-pub fn get_trace_id() -> TraceId {
-    use opentelemetry::trace::TraceContextExt as _; // opentelemetry::Context -> opentelemetry::trace::Span
-    use tracing_opentelemetry::OpenTelemetrySpanExt as _; // tracing::Span to opentelemetry::Context
-
-    tracing::Span::current()
-        .context()
-        .span()
-        .span_context()
-        .trace_id()
-}
 
 pub fn init_logger() {
     // check the rust log
@@ -94,22 +79,4 @@ pub async fn init() {
 
     // Initialize tracing
     tracing::subscriber::set_global_default(collector).unwrap();
-}
-
-#[cfg(test)]
-mod test {
-    // This test only works when telemetry is initialized fully
-    // and requires OPENTELEMETRY_ENDPOINT_URL pointing to a valid server
-    #[cfg(feature = "telemetry")]
-    #[tokio::test]
-    #[ignore = "requires a trace exporter"]
-    async fn get_trace_id_returns_valid_traces() {
-        use super::*;
-        super::init().await;
-        #[tracing::instrument(name = "test_span")] // need to be in an instrumented fn
-        fn test_trace_id() -> TraceId {
-            get_trace_id()
-        }
-        assert_ne!(test_trace_id(), TraceId::INVALID, "valid trace");
-    }
 }

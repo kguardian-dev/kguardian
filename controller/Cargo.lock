@@ -1608,7 +1608,7 @@ dependencies = [
  "network-types",
  "once_cell",
  "openssl",
- "opentelemetry 0.22.0",
+ "opentelemetry 0.23.0",
  "opentelemetry-otlp",
  "regex",
  "reqwest",

@@ -13,16 +13,16 @@ use chrono::{NaiveDateTime, Utc};
 use kube_guardian_common::TrafficLog;
 use serde::Serialize;
 use serde_json::json;
-use tracing_subscriber::fmt::format::debug_fn;
-use std::{collections::HashSet, net::Ipv4Addr};
 use std::sync::Arc;
 use std::{collections::BTreeMap, env};
+use std::{collections::HashSet, net::Ipv4Addr};
 use tokio::fs::File;
 use tokio::{sync::Mutex, task};
 use tracing::{debug, error, info};
+use tracing_subscriber::fmt::format::debug_fn;
 use uuid::Uuid;
 
-pub type TracedAddrRecord = (String,String, u16, String, u16);
+pub type TracedAddrRecord = (String, String, u16, String, u16);
 
 #[derive(Debug, Default, Serialize)]
 pub struct PodTraffic {
@@ -40,8 +40,6 @@ pub struct PodTraffic {
 pub struct EbpfPgm {
     bpf: Bpf,
 }
-
-
 
 pub async fn attach_cgroup(cgroup_path: &str, bpf: Arc<Mutex<EbpfPgm>>) -> Result<()> {
     let cgroup_file = tokio::fs::File::open(cgroup_path).await?;
@@ -91,7 +89,8 @@ fn attach_cgroup_path(
 
 impl EbpfPgm {
     pub fn load_ebpf(
-        container_map: Arc<Mutex<BTreeMap<u32, PodInspect>>>,traced_address:Arc<Mutex<HashSet<TracedAddrRecord>>> ,
+        container_map: Arc<Mutex<BTreeMap<u32, PodInspect>>>,
+        traced_address: Arc<Mutex<HashSet<TracedAddrRecord>>>,
     ) -> Result<EbpfPgm, crate::Error> {
         #[cfg(debug_assertions)]
         let mut bpf = Bpf::load(include_bytes_aligned!(
@@ -154,7 +153,6 @@ impl EbpfPgm {
                                 pod_ip: pod_info.status.pod_ip.to_string(),
                             };
 
-                        
                             let t = Traffic {
                                 pod_data: p,
                                 src_addr: Ipv4Addr::from(data.source_addr).to_string(),
@@ -166,19 +164,17 @@ impl EbpfPgm {
                             };
                             // check if data exists in cache
                             let mut cache = traced_address_cache.lock().await;
-                            let traced_traffic= t.define_traffic(&pod_ip);
+                            let traced_traffic = t.define_traffic(&pod_ip);
                             if !cache.contains(&traced_traffic) {
-
-                            let parse = t.parse_message(&pod_ip).await;
-                            cache.insert(traced_traffic);
-                            if let Err(e) = parse {
-                                error!("{}", e);
+                                let parse = t.parse_message(&pod_ip).await;
+                                cache.insert(traced_traffic);
+                                if let Err(e) = parse {
+                                    error!("{}", e);
+                                }
+                                drop(cache)
+                            } else {
+                                info!("Record exists");
                             }
-                            drop(cache)
-                        }else{
-                            info!("Record exists");
-                        }
-                        
                         } else {
                             debug!(
                                 "Couldn't find the pods details for the if_index {}, but src add {}:{} dest add {}:{}, traffic {}, protocol {}",
@@ -205,7 +201,7 @@ impl UserObj {
 }
 
 impl Traffic {
-    pub  fn define_traffic(&self, pod_ip: &str) -> (String,String, u16,String,u16) {
+    pub fn define_traffic(&self, pod_ip: &str) -> (String, String, u16, String, u16) {
         // compare the src ip == pod_ip
         // TCP: if ingress and src_ip != pod_ip then
         // pod_ip= pod_ip and pod_port=dst_port and traffic_in_out_ip = src_ip and traffic_in_out_port = 0
@@ -216,8 +212,7 @@ impl Traffic {
         // UDP: if egress and src_ip == pod_ip then
         // pod_ip = pod_ip and pod_port=0 and traffic_in_out_ip = dst_ip and traffic_in_out_port = dst_port
         let pod_ip = pod_ip.to_string();
-        return 
-         if self.traffic_type == 1 {
+        return if self.traffic_type == 1 {
             // DERIVE INGRESS
             if self.ip_protocol.eq(&"TCP") {
                 (
@@ -258,10 +253,8 @@ impl Traffic {
                 )
             }
         };
-
-
     }
-    pub async fn parse_message(&self,pod_ip:&str) -> Result<(), Error> {
+    pub async fn parse_message(&self, pod_ip: &str) -> Result<(), Error> {
         let pod_namespace = &self.pod_data.pod_namespace;
         let pod_name = &self.pod_data.pod_name;
         let (traffic_type, pod_ip, pod_port, traffic_in_out_ip, traffic_in_out_port) =
