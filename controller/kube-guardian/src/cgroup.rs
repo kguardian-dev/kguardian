@@ -6,7 +6,7 @@ use aya::{
         cgroup_skb::CgroupSkbLinkId, CgroupSkb, CgroupSkbAttachType, Program, ProgramError,
     },
     util::online_cpus,
-    Bpf,
+    Ebpf,
 };
 use bytes::BytesMut;
 use chrono::{NaiveDateTime, Utc};
@@ -19,7 +19,6 @@ use std::{collections::HashSet, net::Ipv4Addr};
 use tokio::fs::File;
 use tokio::{sync::Mutex, task};
 use tracing::{debug, error, info};
-use tracing_subscriber::fmt::format::debug_fn;
 use uuid::Uuid;
 
 pub type TracedAddrRecord = (String, String, u16, String, u16);
@@ -38,7 +37,7 @@ pub struct PodTraffic {
     pub time_stamp: NaiveDateTime,
 }
 pub struct EbpfPgm {
-    bpf: Bpf,
+    bpf: Ebpf,
 }
 
 pub async fn attach_cgroup(cgroup_path: &str, bpf: Arc<Mutex<EbpfPgm>>) -> Result<()> {
@@ -93,11 +92,11 @@ impl EbpfPgm {
         traced_address: Arc<Mutex<HashSet<TracedAddrRecord>>>,
     ) -> Result<EbpfPgm, crate::Error> {
         #[cfg(debug_assertions)]
-        let mut bpf = Bpf::load(include_bytes_aligned!(
+        let mut bpf = Ebpf::load(include_bytes_aligned!(
             "../../target/bpfel-unknown-none/debug/kube-guardian"
         ))?;
         #[cfg(not(debug_assertions))]
-        let mut bpf = Bpf::load(include_bytes_aligned!(
+        let mut bpf = Ebpf::load(include_bytes_aligned!(
             "../../target/bpfel-unknown-none/release/kube-guardian"
         ))?;
 
