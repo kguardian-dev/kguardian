@@ -14,7 +14,7 @@ tasks:
   build:
     desc: "Build and load the broker Docker image"
     cmds:
-      - docker build -t {{.BROKER_IMAGE_NAME}}:{{.IMAGE_VERSION}} broker -f broker/broker.Dockerfile
+      - docker build -t {{.BROKER_IMAGE_NAME}}:{{.IMAGE_VERSION}} broker -f broker/Dockerfile
       - kind load docker-image {{.BROKER_IMAGE_NAME}}:{{.IMAGE_VERSION}}
 
   preflight:
