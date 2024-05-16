@@ -23,7 +23,7 @@ pub enum Error {
     #[error("Ebpf Error: {source}")]
     BpfError {
         #[from]
-        source: aya::EbpfError
+        source: aya::EbpfError,
     },
 
     #[error("Ebpf Program Load Error: {source}")]
