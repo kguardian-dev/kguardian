@@ -2,13 +2,10 @@ ARG DEBIAN_VERSION="11.7"
 
 FROM --platform=$BUILDPLATFORM ubuntu:24.04 as builder
 
-# Filled by docker buildx
-
 RUN mkdir -p \
     /artifacts/localbin
 
 COPY localbin/kube-guardian /artifacts/localbin
-
 
 FROM debian:${DEBIAN_VERSION}-slim
 
