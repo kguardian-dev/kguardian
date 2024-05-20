@@ -144,16 +144,9 @@ impl EbpfPgm {
 
                         let tracker = container_map.lock().await;
                         let key_value = tracker.get(&data.if_index);
-                        if let Some(pod_info) = key_value {
-                            let pod_ip = pod_info.status.pod_ip.to_string();
-                            let p = PodInfo {
-                                pod_name: pod_info.status.pod_name.to_string(),
-                                pod_namespace: pod_info.status.pod_namespace.to_owned(),
-                                pod_ip: pod_info.status.pod_ip.to_string(),
-                            };
-
+                        if let Some(pod_inspect) = key_value {
+                            let pod_data = &pod_inspect.status;
                             let t = Traffic {
-                                pod_data: p,
                                 src_addr: Ipv4Addr::from(data.source_addr).to_string(),
                                 dst_addr: Ipv4Addr::from(data.dest_addr).to_string(),
                                 src_port: data.src_port,
@@ -163,14 +156,16 @@ impl EbpfPgm {
                             };
                             // check if data exists in cache
                             let mut cache = traced_address_cache.lock().await;
-                            let traced_traffic = t.define_traffic(&pod_ip);
+                            let traced_traffic = t.define_traffic(&pod_data.pod_ip);
                             if !cache.contains(&traced_traffic) {
-                                let parse = t.parse_message(&pod_ip).await;
-                                cache.insert(traced_traffic);
-                                if let Err(e) = parse {
-                                    error!("{}", e);
+                                match t.parse_message(pod_data).await {
+                                    Ok(_) => {
+                                        cache.insert(traced_traffic);
+                                    }
+                                    Err(e) => {
+                                        error!("{}", e);
+                                    }
                                 }
-                                drop(cache)
                             } else {
                                 info!("Record exists");
                             }
@@ -253,15 +248,16 @@ impl Traffic {
             }
         };
     }
-    pub async fn parse_message(&self, pod_ip: &str) -> Result<(), Error> {
-        let pod_namespace = &self.pod_data.pod_namespace;
-        let pod_name = &self.pod_data.pod_name;
+    pub async fn parse_message(&self, pod_data: &PodInfo) -> Result<(), Error> {
+        let pod_name = pod_data.pod_name.to_string();
+        let pod_namespace = pod_data.pod_namespace.to_owned();
+        let pod_ip = &pod_data.pod_ip;
         let (traffic_type, pod_ip, pod_port, traffic_in_out_ip, traffic_in_out_port) =
             self.define_traffic(pod_ip);
         let z = json!(PodTraffic {
             uuid: Uuid::new_v4().to_string(),
             pod_name: pod_name.to_string(),
-            pod_namespace: pod_namespace.to_owned(),
+            pod_namespace: pod_namespace,
             pod_ip,
             pod_port: Some(pod_port.to_string()),
             traffic_in_out_ip: Some(traffic_in_out_ip.to_string()),
