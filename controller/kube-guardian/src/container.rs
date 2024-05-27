@@ -117,6 +117,7 @@ impl PodInspect {
             if_indexes[0] = pod_idex;
             if_indexes[1] = host_idex;
             self.if_index = if_indexes;
+            info!("If index of containerid  {:?} {:?}", self.container_id , self.if_index);
         } else {
             error!(
                 "failed to extract the process id of container {:?}",

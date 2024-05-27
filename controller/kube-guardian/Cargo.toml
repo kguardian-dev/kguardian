@@ -41,3 +41,4 @@ uuid = { version = "1.3.4", features = ["v4"]}
 lazy_static = "1.4"
 containerd-client = { git = "https://github.com/containerd/rust-extensions", branch = "main" }
 time = {version="0.3.30" , features = ["local-offset"]}
+procfs = "0.16.0"

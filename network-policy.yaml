@@ -1,0 +1,68 @@
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  creationTimestamp: null
+  name: guardian-db-network
+  namespace: kube-guardian
+spec:
+  ingress:
+  - from:
+    - podSelector:
+        matchLabels:
+          app: broker
+          app.kubernetes.io/name: broker
+    ports:
+    - port: 5432
+      protocol: TCP
+  podSelector:
+    matchLabels:
+      app: postgresdb
+  policyTypes:
+  - Ingress
+  - Egress
+status: {}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  creationTimestamp: null
+  name: kube-guardian-broker-network
+  namespace: kube-guardian
+spec:
+  egress:
+  - ports:
+    - port: 5432
+      protocol: TCP
+    to:
+    - podSelector:
+        matchLabels:
+          app: postgresdb
+          app.kubernetes.io/managed-by: Helm
+  - ports:
+    - port: 53
+      protocol: UDP
+    to:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: kube-system
+      podSelector:
+        matchLabels:
+          addonmanager.kubernetes.io/mode: Reconcile
+          k8s-app: kube-dns
+          kubernetes.io/cluster-service: "true"
+          kubernetes.io/name: KubeDNS
+  ingress:
+  - from:
+    - ipBlock:
+        cidr: 10.64.0.1/32
+    ports:
+    - port: 9090
+      protocol: TCP
+  podSelector:
+    matchLabels:
+      app: broker
+      app.kubernetes.io/name: broker
+  policyTypes:
+  - Ingress
+  - Egress
+status: {}

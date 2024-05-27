@@ -3,7 +3,7 @@ use aya::{
     include_bytes_aligned,
     maps::perf::AsyncPerfEventArray,
     programs::{
-        cgroup_skb::CgroupSkbLinkId, CgroupSkb, CgroupSkbAttachType, Program, ProgramError,
+        cgroup_skb::CgroupSkbLinkId, CgroupSkb, CgroupSkbAttachType, Program, ProgramError, TracePoint,
     },
     util::online_cpus,
     Ebpf,
@@ -20,6 +20,7 @@ use tokio::fs::File;
 use tokio::{sync::Mutex, task};
 use tracing::{debug, error, info};
 use uuid::Uuid;
+use procfs::process::Process;
 
 pub type TracedAddrRecord = (String, String, u16, String, u16);
 
@@ -86,6 +87,28 @@ fn attach_cgroup_path(
     None
 }
 
+fn trace_to_root(pid: i32) {
+    let mut current_pid = pid;
+    loop {
+        match Process::new(current_pid) {
+            Ok(process) => {
+                println!("---ebpf-pid----{}----pid-{}",pid, current_pid); 
+                if process.stat().unwrap().ppid == 0 || process.stat().unwrap().pid == 1 {
+                    // Reached the root process
+                    break;
+                }
+                current_pid = process.stat().unwrap().ppid;
+            }
+            Err(_) => {
+                eprintln!("Failed to get process information for PID {}", current_pid);
+                break;
+            }
+        }
+    }
+
+    
+}
+
 impl EbpfPgm {
     pub fn load_ebpf(
         container_map: Arc<Mutex<BTreeMap<u32, PodInspect>>>,
@@ -100,17 +123,15 @@ impl EbpfPgm {
             "../../target/bpfel-unknown-none/release/kube-guardian"
         ))?;
 
-        let program_ingress: &mut CgroupSkb = bpf
-            .program_mut("kube_guardian_ingress")
-            .unwrap()
-            .try_into()?;
-        program_ingress.load()?;
+        let program: &mut TracePoint = bpf.program_mut("kube_guardian").unwrap().try_into()?;
+        program.load()?;
+        program.attach("net", "net_dev_queue")?;
 
-        let program_egress: &mut CgroupSkb = bpf
-            .program_mut("kube_guardian_egress")
-            .unwrap()
-            .try_into()?;
-        program_egress.load()?;
+        // let program_egress: &mut CgroupSkb = bpf
+        //     .program_mut("kube_guardian_egress")
+        //     .unwrap()
+        //     .try_into()?;
+        // program_egress.load()?;
 
         let mut perf_array = AsyncPerfEventArray::try_from(bpf.take_map("EVENTS").unwrap())?;
         for cpu_id in online_cpus()? {
@@ -129,52 +150,58 @@ impl EbpfPgm {
                     for buf in buffers.iter_mut().take(events.read) {
                         let ptr = UserObj(buf.as_ptr() as *const TrafficLog);
                         let data = unsafe { ptr.as_ptr().read_unaligned() };
-                        let ip_protocol = if data.syn.eq(&2) { "UDP" } else { "TCP" };
-                        debug!(
-                            "src {}, srcport {}, dst {},dstport{}, syn{} ack {} traffic_type {} if_index {}",
-                            Ipv4Addr::from(data.source_addr),
-                            data.src_port,
-                            Ipv4Addr::from(data.dest_addr),
-                            data.dst_port,
-                            data.syn,
-                            data.ack,
-                            data.traffic,
-                            data.if_index,
-                        );
+                        let process_id = data.cgroup_id;
+                    
+                        let z =  trace_to_root(process_id as i32);
+                        
+                        
+                        
+                        // let ip_protocol = if data.syn.eq(&2) { "U.P" } else { "TCP" };
+                        // debug!(
+                        //     "src {}, srcport {}, dst {},dstport{}, syn{} ack {} traffic_type {} if_index {}",
+                        //     Ipv4Addr::from(data.source_addr),
+                        //     data.src_port,
+                        //     Ipv4Addr::from(data.dest_addr),
+                        //     data.dst_port,
+                        //     data.syn,
+                        //     data.ack,
+                        //     data.traffic,
+                        //     data.if_index,
+                        // );
 
-                        let tracker = container_map.lock().await;
-                        let key_value = tracker.get(&data.if_index);
-                        if let Some(pod_inspect) = key_value {
-                            let pod_data = &pod_inspect.status;
-                            let t = Traffic {
-                                src_addr: Ipv4Addr::from(data.source_addr).to_string(),
-                                dst_addr: Ipv4Addr::from(data.dest_addr).to_string(),
-                                src_port: data.src_port,
-                                dst_port: data.dst_port,
-                                traffic_type: data.traffic,
-                                ip_protocol: ip_protocol.to_string(),
-                            };
-                            // check if data exists in cache
-                            let mut cache = traced_address_cache.lock().await;
-                            let traced_traffic = t.define_traffic(&pod_data.pod_ip);
-                            if !cache.contains(&traced_traffic) {
-                                match t.parse_message(pod_data).await {
-                                    Ok(_) => {
-                                        cache.insert(traced_traffic);
-                                    }
-                                    Err(e) => {
-                                        error!("{}", e);
-                                    }
-                                }
-                            } else {
-                                info!("Record exists");
-                            }
-                        } else {
-                            debug!(
-                                "Couldn't find the pods details for the if_index {}, but src add {}:{} dest add {}:{}, traffic {}, protocol {}",
-                                &data.if_index,Ipv4Addr::from(data.source_addr).to_string(),data.src_port,Ipv4Addr::from(data.dest_addr).to_string(),data.dst_port,data.traffic,ip_protocol
-                            )
-                        }
+                        // let tracker = container_map.lock().await;
+                        // let key_value = tracker.get(&data.if_index);
+                        // if let Some(pod_inspect) = key_value {
+                        //     let pod_data = &pod_inspect.status;
+                        //     let t = Traffic {
+                        //         src_addr: Ipv4Addr::from(data.source_addr).to_string(),
+                        //         dst_addr: Ipv4Addr::from(data.dest_addr).to_string(),
+                        //         src_port: data.src_port,
+                        //         dst_port: data.dst_port,
+                        //         traffic_type: data.traffic,
+                        //         ip_protocol: ip_protocol.to_string(),
+                        //     };
+                        //     // check if data exists in cache
+                        //     let mut cache = traced_address_cache.lock().await;
+                        //     let traced_traffic = t.define_traffic(&pod_data.pod_ip);
+                        //     if !cache.contains(&traced_traffic) {
+                        //         match t.parse_message(pod_data).await {
+                        //             Ok(_) => {
+                        //                 cache.insert(traced_traffic);
+                        //             }
+                        //             Err(e) => {
+                        //                 error!("{}", e);
+                        //             }
+                        //         }
+                        //     } else {
+                        //         info!("Record exists");
+                        //     }
+                        // } else {
+                        //     debug!(
+                        //         "Couldn't find the pods details for the if_index {}, but src add {}:{} dest add {}:{}, traffic {}, protocol {}",
+                        //         &data.if_index,Ipv4Addr::from(data.source_addr).to_string(),data.src_port,Ipv4Addr::from(data.dest_addr).to_string(),data.dst_port,data.traffic,ip_protocol
+                        //     )
+                        // }
                     }
                 }
             });

@@ -106,7 +106,7 @@ async fn process_container_ids(
 
         if let Some(pod_inspect) = pod_inspect.get_pod_inspect(&con_id).await {
             update_container_map(&pod_inspect, container_map.clone()).await?;
-            attach_cgroup_if_needed(&pod_inspect, ebpf.clone(), pod).await?;
+            //attach_cgroup_if_needed(&pod_inspect, ebpf.clone(), pod).await?;
         }
     }
     Ok(())
