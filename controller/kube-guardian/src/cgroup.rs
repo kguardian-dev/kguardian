@@ -87,28 +87,6 @@ fn attach_cgroup_path(
     None
 }
 
-fn trace_to_root(pid: i32) {
-    let mut current_pid = pid;
-    loop {
-        match Process::new(current_pid) {
-            Ok(process) => {
-                println!("---ebpf-pid----{}----pid-{}",pid, current_pid); 
-                if process.stat().unwrap().ppid == 0 || process.stat().unwrap().pid == 1 {
-                    // Reached the root process
-                    break;
-                }
-                current_pid = process.stat().unwrap().ppid;
-            }
-            Err(_) => {
-                eprintln!("Failed to get process information for PID {}", current_pid);
-                break;
-            }
-        }
-    }
-
-    
-}
-
 impl EbpfPgm {
     pub fn load_ebpf(
         container_map: Arc<Mutex<BTreeMap<u32, PodInspect>>>,
@@ -125,13 +103,19 @@ impl EbpfPgm {
 
         let program: &mut TracePoint = bpf.program_mut("kube_guardian").unwrap().try_into()?;
         program.load()?;
-        program.attach("net", "net_dev_queue")?;
+        program.attach("net", "netif_receive_skb")?;
 
         // let program_egress: &mut CgroupSkb = bpf
         //     .program_mut("kube_guardian_egress")
         //     .unwrap()
         //     .try_into()?;
         // program_egress.load()?;
+
+        // let program_ingress: &mut CgroupSkb = bpf
+        // .program_mut("kube_guardian_ingress")
+        // .unwrap()
+        // .try_into()?;
+        // program_ingress.load()?;
 
         let mut perf_array = AsyncPerfEventArray::try_from(bpf.take_map("EVENTS").unwrap())?;
         for cpu_id in online_cpus()? {
@@ -148,11 +132,26 @@ impl EbpfPgm {
                 loop {
                     let events = perf_buffer.read_events(&mut buffers).await.unwrap();
                     for buf in buffers.iter_mut().take(events.read) {
+                       
                         let ptr = UserObj(buf.as_ptr() as *const TrafficLog);
                         let data = unsafe { ptr.as_ptr().read_unaligned() };
-                        let process_id = data.cgroup_id;
+
+                        info!(
+                            " source {}:{}, port {}:{}, syn {}, ack {}, inum {}",
+                            Ipv4Addr::from(data.saddr.to_be()),
+                            data.sport,
+                            Ipv4Addr::from(data.daddr.to_be()),
+                            data.dport,
+                            data.syn,
+                            data.ack,
+                            data.inum
+                        );
+                        // let m = get_container_pid(data.pid);
+                        // if m.is_ok(){
+                        //     info!("container {}",m.unwrap())
+                        // }
                     
-                        let z =  trace_to_root(process_id as i32);
+                        // let z =  trace_to_root(data.pid as i32, data.parent_id);
                         
                         
                         

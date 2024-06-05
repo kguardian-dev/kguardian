@@ -4,17 +4,13 @@
 #[repr(C)]
 
 pub struct TrafficLog {
-    // pub source_addr: u32, // ipv4 source IP address
-    // pub dest_addr: u32,   // ipv4 destination IP address
-    // pub src_port: u16,    // TCP or UDP remote port (sport for ingress)
-    // pub dst_port: u16,    // TCP or UDP local port (dport for ingress)
-    // pub syn: u16,
-    // pub ack: u16,
-    // pub traffic: u32,
-    // pub if_index: u32,
-    // pub local_ip4: u32,
-    pub cgroup_id: u32,
-    pub thread_id: u32,
+    pub saddr: u32, // source address
+    pub daddr: u32, // destination address
+    pub sport: u16, //src port
+    pub dport: u16, // dest port
+    pub syn: u16,
+    pub ack: u16,
+    pub inum: u32, // i node numbner
 }
 #[cfg(feature = "user")]
 pub mod user {

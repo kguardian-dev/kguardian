@@ -20,10 +20,10 @@ spec:
       imagePullSecrets:
         {{ toYaml .Values.controller.imagePullSecrets | indent 8 }}
       {{- end }}
-      initContainers:
-      - name: wait-for-api
-        image: busybox
-        command: ["sh", "-c", "until wget -qO- http://{{ .Values.broker.service.name }}.{{ include "kube-guardian.namespace" . }}.svc.cluster.local:{{ .Values.broker.container.port }}/health; do sleep 5; done"]
+      # initContainers:
+      # - name: wait-for-api
+      #   image: busybox
+      #   command: ["sh", "-c", "until wget -qO- http://{{ .Values.broker.service.name }}.{{ include "kube-guardian.namespace" . }}.svc.cluster.local:{{ .Values.broker.container.port }}/health; do sleep 5; done"]
       containers:
       - name: controller
         {{- if .Values.controller.image.sha }}
@@ -50,6 +50,9 @@ spec:
         - name: API_ENDPOINT
           value: "http://{{ .Values.broker.service.name }}.{{ include "kube-guardian.namespace" . }}.svc.cluster.local:{{ .Values.broker.container.port }}"
         volumeMounts:
+        - mountPath: /sys/kernel/debug
+          name: debugfs
+          readOnly: false
         - name: bpffs
           mountPath: /sys/fs/bpf
           readOnly: true
@@ -93,6 +96,9 @@ spec:
           path: /proc
           type: Directory
         name: hostproc
+      - hostPath:
+          path: /sys/kernel/debug
+        name: debugfs
       - hostPath:
           path: /sys/fs/cgroup
           type: Directory
