@@ -6,39 +6,59 @@ const IPV6_PROTOCOL_NUMBER: u16 = 41u16;
 const TCP_PROTOCOL_NUMBER: u16 = 6u16;
 const UDP_PROTOCOL_NUMBER: u16 = 17u16;
 
+use aya_log_ebpf::{debug, info};
+
 type TaskStructPtr = *mut task_struct;
 
 use aya_ebpf::{ 
  cty::c_long, helpers::{ bpf_get_current_task, bpf_probe_read, bpf_probe_read_kernel}, macros::{map, tracepoint}, maps::PerfEventArray, programs::TracePointContext
 };
-use aya_log_ebpf::{debug, info};
+
+use core::fmt::{Write, Error};
+
 use kube_guardian_common::TrafficLog;
+
 
 #[allow(non_camel_case_types)]
 #[allow(non_upper_case_globals)]
 #[allow(non_snake_case)] 
 mod bindings;
 
-use bindings::{iphdr, ns_common, nsproxy, pid_namespace, sk_buff, task_struct, tcphdr, udphdr};
+use bindings::{iphdr, net_device, ns_common, nsproxy, pid_namespace, sk_buff, task_struct, tcphdr, udphdr};
 
 
 #[map]
 pub static EVENTS: PerfEventArray<TrafficLog> = PerfEventArray::new(0);
 
 
-
 #[tracepoint]
-pub fn kube_guardian(ctx: TracePointContext) -> u32 {
-    match unsafe { try_kube_guardian(ctx) } {
+pub fn kube_guardian_egress(ctx: TracePointContext) -> u32 {
+    match unsafe { try_kube_guardian(ctx,0) } {
         Ok(ret) => ret as u32,
         Err(ret) => ret as u32,
     }
 }
 
-unsafe fn try_kube_guardian(ctx: TracePointContext) -> Result<c_long, c_long> {
+#[tracepoint]
+pub fn kube_guardian_ingress(ctx: TracePointContext) -> u32 {
+    match unsafe { try_kube_guardian(ctx,1) } {
+        Ok(ret) => ret as u32,
+        Err(ret) => ret as u32,
+    }
+}
 
+unsafe fn try_kube_guardian(ctx: TracePointContext, traffic_type: i32) -> Result<c_long, c_long> {
+    
+    // /sys/kernel/debug/tracing/events/net/net_dev_queue
     let tp: *const sk_buff = ctx.read_at(8)?;
     let eth_proto = bpf_probe_read(&(*tp).__bindgen_anon_5.headers.as_ref().protocol as *const u16).map_err(|_| 100u32)?;
+
+  
+
+    let dev_ptr = bpf_probe_read(&(*tp).__bindgen_anon_1.__bindgen_anon_1.__bindgen_anon_1.dev as *const *mut net_device).map_err(|_| 100u32)?;
+
+    let if_index= bpf_probe_read(&(*dev_ptr).ifindex as *const i32).map_err(|_|100i32)?;
+
 
     if eth_proto != IPV4_PROTOCOL_NUMBER && eth_proto != IPV6_PROTOCOL_NUMBER {
         return Ok(0);
@@ -53,6 +73,8 @@ unsafe fn try_kube_guardian(ctx: TracePointContext) -> Result<c_long, c_long> {
 
       // Calculate the network header position
       let network_header_offset = bpf_probe_read(&(*tp).__bindgen_anon_5.__bindgen_anon_1.as_ref().network_header  as *const u16).map_err(|_| 100u16)?;
+
+  ;
 
       // Read IPv4 header
       let nw_hdr_ptr = head.add(network_header_offset as usize);
@@ -76,31 +98,26 @@ unsafe fn try_kube_guardian(ctx: TracePointContext) -> Result<c_long, c_long> {
     let mut syn : u16 = 0;
     let mut ack: u16= 0 ;
 
+
     match proto {
         TCP_PROTOCOL_NUMBER => {
-            let transport_header_offset =
-                bpf_probe_read(&(*tp).__bindgen_anon_5.headers.as_ref().transport_header as *const u16).map_err(|_| 100u16)?;
-
-            let trans_hdr_ptr = head.add(transport_header_offset as usize);
-            let trans_hdr = bpf_probe_read(trans_hdr_ptr as *const tcphdr).map_err(|_| 101u8)?;
-            sport = u16::from_be(trans_hdr.source);
-            dport = u16::from_be(trans_hdr.dest);
-            syn = trans_hdr.syn();
-            ack = trans_hdr.ack()
+            if let Ok((s, d, sy, a)) = process_tcp(tp, head) {
+                sport = s;
+                dport = d;
+                syn = sy;
+                ack = a;
+            }
         },
         UDP_PROTOCOL_NUMBER => {
-            let transport_header_offset =
-                bpf_probe_read(&(*tp).__bindgen_anon_5.headers.as_ref().transport_header as *const u16).map_err(|_| 100u16)?;
-
-            let trans_hdr_ptr = head.add(transport_header_offset as usize);
-            let trans_hdr = bpf_probe_read(trans_hdr_ptr as *const udphdr).map_err(|_| 101u8)?;
-            sport = u16::from_be(trans_hdr.source);
-            dport = u16::from_be(trans_hdr.dest);
-            syn = 2;
-            ack = 2;
+            if let Ok((s, d, sy, a)) = process_udp(tp, head) {
+                sport = s;
+                dport = d;
+                syn = sy;
+                ack = a;
+            }
         },
         _ => (),
-    };
+    }
 
   let task: TaskStructPtr = bpf_get_current_task() as TaskStructPtr;
         let inum = match get_ns_proxy(task){
@@ -108,7 +125,6 @@ unsafe fn try_kube_guardian(ctx: TracePointContext) -> Result<c_long, c_long> {
         Err(_)=> return Ok(1)
     };
     
-    // info!(&ctx, " common_type {}:{} -> {}:{}", saddr,sport,daddr);
     let log_entry = TrafficLog {
        saddr,
        daddr,
@@ -117,6 +133,8 @@ unsafe fn try_kube_guardian(ctx: TracePointContext) -> Result<c_long, c_long> {
         inum,
         syn,
         ack,
+        if_index,
+        traffic_type,
         };
         EVENTS.output(&ctx, &log_entry, 0);
     Ok(0)
@@ -134,3 +152,36 @@ unsafe fn get_ns_proxy(task: TaskStructPtr) -> Result<u32, i64> {
     let ns: u32 = nsc.inum;
     Ok(ns)
 }
+
+unsafe fn get_transport_header_ptr(tp: *const sk_buff , head: *const u8) -> Result<*const u8, u16> {
+    let transport_header_offset =
+        bpf_probe_read(&(*tp).__bindgen_anon_5.headers.as_ref().transport_header as *const u16).map_err(|_| 100u16)?;
+    
+    let trans_hdr_ptr = head.add(transport_header_offset as usize);
+    Ok(trans_hdr_ptr)
+}
+
+unsafe fn process_tcp(tp: *const sk_buff, head: *const u8) -> Result<(u16, u16, u16, u16), u16> {
+    let trans_hdr_ptr = get_transport_header_ptr(tp, head)?;
+    let trans_hdr = bpf_probe_read(trans_hdr_ptr as *const tcphdr).map_err(|_| 101u8)?;
+    
+    let sport = u16::from_be(trans_hdr.source);
+    let dport = u16::from_be(trans_hdr.dest);
+    let syn = trans_hdr.syn();
+    let ack = trans_hdr.ack();
+    
+    Ok((sport, dport, syn, ack))
+}
+
+unsafe fn process_udp(tp: *const sk_buff , head: *const u8) -> Result<(u16, u16, u16, u16), u16> {
+    let trans_hdr_ptr = get_transport_header_ptr(tp, head)?;
+    let trans_hdr = bpf_probe_read(trans_hdr_ptr as *const udphdr).map_err(|_| 101u8)?;
+    
+    let sport = u16::from_be(trans_hdr.source);
+    let dport = u16::from_be(trans_hdr.dest);
+    let syn = 2;
+    let ack = 2;
+    
+    Ok((sport, dport, syn, ack))
+}
+

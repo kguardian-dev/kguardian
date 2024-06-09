@@ -1,9 +1,7 @@
 #[allow(unused_imports)]
 use crate::{api_post_call, Error, PodInspect, Traffic};
-use crate::{
-    cgroup::{attach_cgroup, EbpfPgm},
-    PodInfo,
-};
+use crate::PodInfo;
+
 use chrono::{NaiveDateTime, Utc};
 use futures::TryStreamExt;
 use k8s_openapi::api::core::v1::{Pod, Service};
@@ -12,10 +10,11 @@ use kube::{
     runtime::{watcher, WatchStreamExt},
     Client,
 };
+use procfs::process::Process;
 use serde::Deserialize;
 use serde_derive::Serialize;
 use serde_json::json;
-use std::{collections::BTreeMap, env, sync::Arc};
+use std::{collections::BTreeMap, env, ffi::{OsStr, OsString}, sync::Arc};
 use tokio::sync::Mutex;
 use tracing::{error, info, warn};
 
@@ -38,7 +37,6 @@ pub struct PodDetail {
 }
 
 pub async fn watch_pods(
-    ebpf: EbpfPgm,
     container_map: Arc<Mutex<BTreeMap<u32, PodInspect>>>,
     node_name: String,
 ) -> Result<(), crate::Error> {
@@ -50,16 +48,14 @@ pub async fn watch_pods(
     #[cfg(debug_assertions)]
     let wc = watcher::Config::default();
 
-    let ebpf = Arc::new(Mutex::new(ebpf));
 
     watcher(pods, wc)
         .applied_objects()
         .default_backoff()
         .try_for_each(|p| {
             let container_map = Arc::clone(&container_map);
-            let ebpf = Arc::clone(&ebpf);
             async move {
-                let p = process_pod(&p, container_map, ebpf).await;
+                let p = process_pod(&p, container_map).await;
                 if p.is_err() {
                     //dont panic and the error is already printed, so no point of reporting again
                     // maybe find a better way of handling error
@@ -75,13 +71,12 @@ pub async fn watch_pods(
 async fn process_pod(
     pod: &Pod,
     container_map: Arc<Mutex<BTreeMap<u32, PodInspect>>>,
-    ebpf: Arc<Mutex<EbpfPgm>>,
 ) -> Result<(), Error> {
     if let Some(con_ids) = pod_unready(pod) {
         let pod_ip = update_pods_details(pod).await;
         if should_process_pod(&pod.metadata.namespace) {
             if let Ok(Some(pod_ip)) = pod_ip {
-                process_container_ids(&con_ids, &pod, &pod_ip, container_map, ebpf).await?;
+                process_container_ids(&con_ids, &pod, &pod_ip, container_map).await?;
             }
         }
     }
@@ -93,7 +88,6 @@ async fn process_container_ids(
     pod: &Pod,
     pod_ip: &String,
     container_map: Arc<Mutex<BTreeMap<u32, PodInspect>>>,
-    ebpf: Arc<Mutex<EbpfPgm>>,
 ) -> Result<(), Error> {
     for con_id in con_ids {
         let pod_info = create_pod_info(pod, pod_ip);
@@ -101,52 +95,23 @@ async fn process_container_ids(
             status: pod_info,
             ..Default::default()
         };
-
         info!("pod name {}", pod.name_any());
-
         if let Some(pod_inspect) = pod_inspect.get_pod_inspect(&con_id).await {
-            update_container_map(&pod_inspect, container_map.clone()).await?;
-            //attach_cgroup_if_needed(&pod_inspect, ebpf.clone(), pod).await?;
-        }
-    }
-    Ok(())
-}
+            // get the inum of container 
+            if pod_inspect.pid.is_some() {
+                // let inum = get_pid_for_children_namespace_id(pod_inspect.pid.unwrap() as i32);
+                let mut cm = container_map.lock().await;
+                if let Some(if_index) = pod_inspect.if_index {
+                    info!("inode_num of pod {} is {}", pod_inspect.status.pod_name, if_index);
+                    cm.insert(if_index, pod_inspect.clone());
 
-async fn update_container_map(
-    pod_inspect: &PodInspect,
-    container_map: Arc<Mutex<BTreeMap<u32, PodInspect>>>,
-) -> Result<(), Error> {
-    let mut cm = container_map.lock().await;
-    if pod_inspect.cgroup_path.is_some() {
-        pod_inspect.if_index.iter().for_each(|i| {
-            if let Some(if_index) = i {
-                cm.insert(*if_index, pod_inspect.clone());
-            }
-        });
-    }
-    Ok(())
-}
-
-async fn attach_cgroup_if_needed(
-    pod_inspect: &PodInspect,
-    ebpf: Arc<Mutex<EbpfPgm>>,
-    pod: &Pod,
-) -> Result<(), Error> {
-    if !pod_inspect.if_index.is_empty() {
-        if let Some(cgro_path) = &pod_inspect.cgroup_path {
-            let cgrp_attach = attach_cgroup(cgro_path, ebpf.clone()).await;
-            if let Err(e) = cgrp_attach {
-                error!(
-                    "Failed to attach cgroup to pod {} {:?} {}",
-                    pod.name_any(),
-                    cgro_path,
-                    e
-                );
+                } 
             }
         }
     }
     Ok(())
 }
+
 
 fn create_pod_info(pod: &Pod, pod_ip: &String) -> PodInfo {
     PodInfo {
@@ -158,7 +123,7 @@ fn create_pod_info(pod: &Pod, pod_ip: &String) -> PodInfo {
 
 fn should_process_pod(namespace: &Option<String>) -> bool {
     // TODO : excluded_namespace needs to be paratermized
-    let excluded_namespaces: [&str; 1] = ["kube-system"];
+    let excluded_namespaces: [&str; 2] = ["kube-system","kube-guardian"];
     !namespace
         .as_ref()
         .map_or(false, |ns| excluded_namespaces.contains(&ns.as_str()))
@@ -276,6 +241,16 @@ fn svc_unready(p: &Service) -> Option<String> {
             .join(",");
         if !failed.is_empty() {
             return Some(format!("Unready Service {}: {}", p.name_any(), failed));
+        }
+    }
+    None
+}
+
+fn get_pid_for_children_namespace_id(pid: i32) -> Option<u64> {
+    let process = Process::new(pid).ok()?;
+    if let Ok(ns) = process.namespaces() {
+        if let Some(pid_for_children) = ns.0.get(&OsString::from("pid_for_children")) {
+            return Some(pid_for_children.identifier);
         }
     }
     None
