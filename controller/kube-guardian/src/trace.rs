@@ -57,11 +57,29 @@ impl EbpfPgm {
         ))?;
 
         let program: &mut TracePoint = bpf.program_mut("kube_guardian_egress").unwrap().try_into()?;
-        program.load()?;
-        program.attach("net", "net_dev_xmit")?; // EGRESS 0
-        let program: &mut TracePoint = bpf.program_mut("kube_guardian_ingress").unwrap().try_into()?;
-        program.load()?; 
-        program.attach("net", "netif_receive_skb")?; // INGRESS 1
+
+        if let Err(e) = program.load(){ 
+            error!("Failed to load  kube_guardian_egress {}", e);
+            return Err(Error::BpfProgramError { source: e })
+        };
+        if let Err(e) = program.attach("net", "net_dev_xmit") { // EGRESS 0
+            error!("Failed to attach net_dev_xmit {}", e);
+            return Err(Error::BpfProgramError { source: e })
+
+        };
+
+        let program_ingress: &mut TracePoint = bpf.program_mut("kube_guardian_ingress").unwrap().try_into()?;
+       
+        if let Err(e) = program_ingress.load(){ 
+            error!("Failed to load  kube_guardian_ingress {}", e);
+            return Err(Error::BpfProgramError { source: e })
+        };
+
+        if let Err(e) = program_ingress.attach("net", "netif_receive_skb") { // INGRESS 1
+            error!("Failed to attach netif_receive_skb {}", e);
+            return Err(Error::BpfProgramError { source: e })
+
+        };
 
         let mut perf_array = AsyncPerfEventArray::try_from(bpf.take_map("EVENTS").unwrap())?;
         for cpu_id in online_cpus()? {
@@ -95,6 +113,19 @@ async fn process_buffer(buf: &mut BytesMut, container_map: & Arc<Mutex<BTreeMap<
     let tracker = container_map.lock().await;
     if let Some(valid_pod) = tracker.get(&(data.if_index as u32)) {
         info!("podname {}", valid_pod.status.pod_name);
+        info!(
+            "source {}:{}, port {}:{}, syn {}, ack {}, inum {} ifindex {} traffic_type {}",
+            Ipv4Addr::from(data.saddr.to_be()),
+            data.sport,
+            Ipv4Addr::from(data.daddr.to_be()),
+            data.dport,
+            data.syn,
+            data.ack,
+            data.inum,
+            data.if_index,
+            data.traffic_type,
+        );
+    
 
         let mut t = Traffic {
             src_addr: Ipv4Addr::from(data.saddr.to_be()).to_string(),
@@ -106,18 +137,6 @@ async fn process_buffer(buf: &mut BytesMut, container_map: & Arc<Mutex<BTreeMap<
 
         if t.src_addr == valid_pod.status.pod_ip {
             if data.syn == 1 && data.ack == 0 && data.traffic_type == 0 {
-                info!(
-                    "source {}:{}, port {}:{}, syn {}, ack {}, inum {} ifindex {} traffic_type {}",
-                    Ipv4Addr::from(data.saddr.to_be()),
-                    data.sport,
-                    Ipv4Addr::from(data.daddr.to_be()),
-                    data.dport,
-                    data.syn,
-                    data.ack,
-                    data.inum,
-                    data.if_index,
-                    data.traffic_type,
-                );
                 // Egress
                 t.ip_protocol = String::from("TCP");
                 t.traffic_type = 0;

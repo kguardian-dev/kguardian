@@ -49,7 +49,7 @@ pub fn kube_guardian_ingress(ctx: TracePointContext) -> u32 {
 
 unsafe fn try_kube_guardian(ctx: TracePointContext, traffic_type: i32) -> Result<c_long, c_long> {
     
-    // /sys/kernel/debug/tracing/events/net/net_dev_queue
+    ///sys/kernel/debug/tracing/events/net/net_dev_queue
     let tp: *const sk_buff = ctx.read_at(8)?;
     let eth_proto = bpf_probe_read(&(*tp).__bindgen_anon_5.headers.as_ref().protocol as *const u16).map_err(|_| 100u32)?;
 
@@ -73,8 +73,6 @@ unsafe fn try_kube_guardian(ctx: TracePointContext, traffic_type: i32) -> Result
 
       // Calculate the network header position
       let network_header_offset = bpf_probe_read(&(*tp).__bindgen_anon_5.__bindgen_anon_1.as_ref().network_header  as *const u16).map_err(|_| 100u16)?;
-
-  ;
 
       // Read IPv4 header
       let nw_hdr_ptr = head.add(network_header_offset as usize);
