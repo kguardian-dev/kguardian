@@ -31,8 +31,6 @@ spec:
         {{- else }}
         image: "{{ .Values.controller.image.repository }}:{{ .Values.controller.image.tag }}"
         {{- end }}
-        args:
-          - "cilium"
         imagePullPolicy: {{ .Values.controller.image.pullPolicy }}
         securityContext:
           privileged: true
@@ -42,7 +40,7 @@ spec:
             - CAP_BPF
         env:
         - name: RUST_LOG
-          value: DEBUG
+          value: INFO
         - name: CURRENT_NODE
           valueFrom:
             fieldRef:
@@ -64,9 +62,6 @@ spec:
           readOnly: true
         - mountPath: /proc
           name: hostproc
-          readOnly: true
-        - mountPath: /sys/fs/cgroup
-          name: cgroup
           readOnly: true
          {{- with .Values.broker.resources }}
           resources:
@@ -99,10 +94,6 @@ spec:
       - hostPath:
           path: /sys/kernel/debug
         name: debugfs
-      - hostPath:
-          path: /sys/fs/cgroup
-          type: Directory
-        name: cgroup
       nodeSelector:
         {{- if .Values.controller.nodeSelector }}
           {{- toYaml .Values.controller.nodeSelector | nindent 8 }}

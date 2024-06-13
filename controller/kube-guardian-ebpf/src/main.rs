@@ -6,17 +6,16 @@ const IPV6_PROTOCOL_NUMBER: u16 = 41u16;
 const TCP_PROTOCOL_NUMBER: u16 = 6u16;
 const UDP_PROTOCOL_NUMBER: u16 = 17u16;
 
-use aya_log_ebpf::{debug, info};
+
 
 type TaskStructPtr = *mut task_struct;
 
 use aya_ebpf::{ 
- cty::c_long, helpers::{ bpf_get_current_task, bpf_probe_read, bpf_probe_read_kernel}, macros::{map, tracepoint}, maps::PerfEventArray, programs::TracePointContext
+ cty::c_long, helpers::{ bpf_get_current_task, bpf_probe_read, bpf_probe_read_kernel}, macros::{map, tracepoint}, maps::{HashMap, PerfEventArray}, programs::TracePointContext
 };
 
-use core::fmt::{Write, Error};
 
-use kube_guardian_common::TrafficLog;
+use kube_guardian_common::{TrafficLog, BPF_MAPS_CAPACITY};
 
 
 #[allow(non_camel_case_types)]
@@ -29,6 +28,10 @@ use bindings::{iphdr, net_device, ns_common, nsproxy, pid_namespace, sk_buff, ta
 
 #[map]
 pub static EVENTS: PerfEventArray<TrafficLog> = PerfEventArray::new(0);
+
+#[map(name = "IFINDEX_MAP")]
+static mut IFINDEX_MAP: HashMap<u32, u32> =
+    HashMap::<u32, u32>::with_max_entries(BPF_MAPS_CAPACITY, 0);
 
 
 #[tracepoint]
@@ -49,15 +52,17 @@ pub fn kube_guardian_ingress(ctx: TracePointContext) -> u32 {
 
 unsafe fn try_kube_guardian(ctx: TracePointContext, traffic_type: i32) -> Result<c_long, c_long> {
     
-    ///sys/kernel/debug/tracing/events/net/net_dev_queue
+    ///sys/kernel/debug/tracing/events/net/net_*
     let tp: *const sk_buff = ctx.read_at(8)?;
-    let eth_proto = bpf_probe_read(&(*tp).__bindgen_anon_5.headers.as_ref().protocol as *const u16).map_err(|_| 100u32)?;
-
-  
-
     let dev_ptr = bpf_probe_read(&(*tp).__bindgen_anon_1.__bindgen_anon_1.__bindgen_anon_1.dev as *const *mut net_device).map_err(|_| 100u32)?;
-
+  
     let if_index= bpf_probe_read(&(*dev_ptr).ifindex as *const i32).map_err(|_|100i32)?;
+
+    let if_index_map = unsafe { IFINDEX_MAP.get(&(if_index as u32)) }.ok_or(0)?;
+
+    if if_index_map.eq(&1){
+
+    let eth_proto = bpf_probe_read(&(*tp).__bindgen_anon_5.headers.as_ref().protocol as *const u16).map_err(|_| 100u32)?;
 
 
     if eth_proto != IPV4_PROTOCOL_NUMBER && eth_proto != IPV6_PROTOCOL_NUMBER {
@@ -135,6 +140,7 @@ unsafe fn try_kube_guardian(ctx: TracePointContext, traffic_type: i32) -> Result
         traffic_type,
         };
         EVENTS.output(&ctx, &log_entry, 0);
+    }
     Ok(0)
 }
 

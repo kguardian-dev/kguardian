@@ -1,5 +1,7 @@
 #![no_std]
 
+pub const BPF_MAPS_CAPACITY: u32 = 128;
+
 #[derive(Debug, Copy, Clone)]
 #[repr(C)]
 

@@ -1,7 +1,9 @@
 #[allow(unused_imports)]
 use crate::{api_post_call, Error, PodInspect, Traffic};
-use crate::PodInfo;
+use crate::{trace::EbpfPgm, PodInfo};
 
+use actix_web::error;
+use aya::maps::{Array, HashMap, MapError};
 use chrono::{NaiveDateTime, Utc};
 use futures::TryStreamExt;
 use k8s_openapi::api::core::v1::{Pod, Service};
@@ -14,9 +16,14 @@ use procfs::process::Process;
 use serde::Deserialize;
 use serde_derive::Serialize;
 use serde_json::json;
-use std::{collections::BTreeMap, env, ffi::{OsStr, OsString}, sync::Arc};
+use std::{
+    collections::BTreeMap,
+    env,
+    ffi::{OsStr, OsString},
+    sync::Arc,
+};
 use tokio::sync::Mutex;
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct SvcDetail {
@@ -37,6 +44,7 @@ pub struct PodDetail {
 }
 
 pub async fn watch_pods(
+    ebpf: EbpfPgm,
     container_map: Arc<Mutex<BTreeMap<u32, PodInspect>>>,
     node_name: String,
 ) -> Result<(), crate::Error> {
@@ -48,17 +56,21 @@ pub async fn watch_pods(
     #[cfg(debug_assertions)]
     let wc = watcher::Config::default();
 
+    let ebpf = Arc::new(Mutex::new(ebpf));
 
     watcher(pods, wc)
         .applied_objects()
         .default_backoff()
         .try_for_each(|p| {
             let container_map = Arc::clone(&container_map);
+            let ebpf = Arc::clone(&ebpf);
             async move {
-                let p = process_pod(&p, container_map).await;
-                if p.is_err() {
+                let p = process_pod(&p, container_map, ebpf).await;
+                if let Err(e) = p{
                     //dont panic and the error is already printed, so no point of reporting again
                     // maybe find a better way of handling error
+                    error!("Error  processsing pod{}",e)
+                    
                 }
                 Ok(())
             }
@@ -71,12 +83,13 @@ pub async fn watch_pods(
 async fn process_pod(
     pod: &Pod,
     container_map: Arc<Mutex<BTreeMap<u32, PodInspect>>>,
+    ebpf: Arc<Mutex<EbpfPgm>>,
 ) -> Result<(), Error> {
     if let Some(con_ids) = pod_unready(pod) {
         let pod_ip = update_pods_details(pod).await;
         if should_process_pod(&pod.metadata.namespace) {
             if let Ok(Some(pod_ip)) = pod_ip {
-                process_container_ids(&con_ids, &pod, &pod_ip, container_map).await?;
+                process_container_ids(&con_ids, &pod, &pod_ip, container_map, ebpf).await?;
             }
         }
     }
@@ -88,6 +101,7 @@ async fn process_container_ids(
     pod: &Pod,
     pod_ip: &String,
     container_map: Arc<Mutex<BTreeMap<u32, PodInspect>>>,
+    ebpf: Arc<Mutex<EbpfPgm>>,
 ) -> Result<(), Error> {
     for con_id in con_ids {
         let pod_info = create_pod_info(pod, pod_ip);
@@ -97,21 +111,40 @@ async fn process_container_ids(
         };
         info!("pod name {}", pod.name_any());
         if let Some(pod_inspect) = pod_inspect.get_pod_inspect(&con_id).await {
-            // get the inum of container 
+            // get the inum of container
             if pod_inspect.pid.is_some() {
                 // let inum = get_pid_for_children_namespace_id(pod_inspect.pid.unwrap() as i32);
                 let mut cm = container_map.lock().await;
                 if let Some(if_index) = pod_inspect.if_index {
-                    info!("inode_num of pod {} is {}", pod_inspect.status.pod_name, if_index);
+                    info!(
+                        "inode_num of pod {} is {}",
+                        pod_inspect.status.pod_name, if_index
+                    );
                     cm.insert(if_index, pod_inspect.clone());
-
-                } 
+                    let mut ebpf_pgm = ebpf.lock().await;
+                       
+                        let mut ifindex_map: HashMap<_, u32, u32> =
+                        HashMap::try_from(ebpf_pgm.bpf.map_mut("IFINDEX_MAP").unwrap())?;
+                      
+                        match ifindex_map.get(&if_index, 0)  {
+                            Ok(_) => {
+                                info!("{} ifindex already exists", if_index);
+                            }
+                            Err(MapError::KeyNotFound) => {
+                                info!(" Key not found, insert");
+                                ifindex_map.insert(if_index , 1, 0)?;
+                            }
+                            Err(e) => {
+                               return Err(Error::BpfMapError { source: e })
+                            }
+                        }
+                }
             }
         }
     }
+
     Ok(())
 }
-
 
 fn create_pod_info(pod: &Pod, pod_ip: &String) -> PodInfo {
     PodInfo {
@@ -123,7 +156,7 @@ fn create_pod_info(pod: &Pod, pod_ip: &String) -> PodInfo {
 
 fn should_process_pod(namespace: &Option<String>) -> bool {
     // TODO : excluded_namespace needs to be paratermized
-    let excluded_namespaces: [&str; 2] = ["kube-system","kube-guardian"];
+    let excluded_namespaces: [&str; 2] = ["kube-system", "kube-guardian"];
     !namespace
         .as_ref()
         .map_or(false, |ns| excluded_namespaces.contains(&ns.as_str()))
