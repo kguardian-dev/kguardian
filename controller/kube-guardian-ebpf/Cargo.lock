@@ -90,9 +90,9 @@ dependencies = [
 
 [[package]]
 name = "network-types"
-version = "0.0.5"
+version = "0.0.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f07952b48f02537f3088f517a3cf87372a25372d51991328938531b83a31cb3a"
+checksum = "41b13eba62f530cd2ea031938ac4472b9b649694baa1e587c2a2fadc07844d3c"
 
 [[package]]
 name = "num_enum"

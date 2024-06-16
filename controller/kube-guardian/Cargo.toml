@@ -32,7 +32,7 @@ aya = { git = "https://github.com/aya-rs/aya", branch = "main", features=["async
 aya-log = { git = "https://github.com/aya-rs/aya", branch = "main" }
 kube-guardian-common = { path = "../kube-guardian-common", features = ["user"] }
 bytes = "1.3"
-network-types = "0.0.5"
+network-types = "0.0.6"
 openssl = { version = "0.10", features = ["vendored"] }
 regex = "1.7.3"
 once_cell = "1.17.1"
