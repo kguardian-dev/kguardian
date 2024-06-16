@@ -6,7 +6,7 @@ toolchain go1.22.3
 
 require (
 	github.com/rs/zerolog v1.33.0
-	github.com/spf13/cobra v1.8.0
+	github.com/spf13/cobra v1.8.1
 	github.com/stretchr/testify v1.9.0
 	k8s.io/api v0.30.1
 	k8s.io/apimachinery v0.30.1
