@@ -1,6 +1,6 @@
 use actix_web::{get, HttpRequest, HttpResponse, Responder};
-use kube_guardian::cgroup::TracedAddrRecord;
-use kube_guardian::{cgroup::EbpfPgm, telemetry, watch_pods, watch_service, PodInspect};
+use kube_guardian::trace::TracedAddrRecord;
+use kube_guardian::{telemetry, trace::EbpfPgm, watch_pods, watch_service, PodInspect};
 use std::collections::HashSet;
 use std::env;
 use std::{collections::BTreeMap, sync::Arc};

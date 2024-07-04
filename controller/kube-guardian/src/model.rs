@@ -5,7 +5,7 @@ pub struct PodInspect {
     pub container_id: Option<String>,
     pub status: PodInfo,
     pub info: Info,
-    pub if_index: [std::option::Option<u32>; 2],
+    pub if_index: Option<u32>,
     pub namespace_pid: Option<u32>,
     pub pid: Option<u32>,
     pub cgroup_path: Option<String>,
@@ -33,7 +33,7 @@ pub struct Config {
     pub metadata: Metadata,
 }
 
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Clone, Default)]
 pub struct Traffic {
     pub(crate) src_addr: String,
     pub(crate) dst_addr: String,

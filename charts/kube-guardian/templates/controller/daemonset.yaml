@@ -31,8 +31,6 @@ spec:
         {{- else }}
         image: "{{ .Values.controller.image.repository }}:{{ .Values.controller.image.tag }}"
         {{- end }}
-        args:
-          - "cilium"
         imagePullPolicy: {{ .Values.controller.image.pullPolicy }}
         securityContext:
           privileged: true
@@ -42,7 +40,7 @@ spec:
             - CAP_BPF
         env:
         - name: RUST_LOG
-          value: DEBUG
+          value: INFO
         - name: CURRENT_NODE
           valueFrom:
             fieldRef:
@@ -50,6 +48,9 @@ spec:
         - name: API_ENDPOINT
           value: "http://{{ .Values.broker.service.name }}.{{ include "kube-guardian.namespace" . }}.svc.cluster.local:{{ .Values.broker.container.port }}"
         volumeMounts:
+        - mountPath: /sys/kernel/debug
+          name: debugfs
+          readOnly: false
         - name: bpffs
           mountPath: /sys/fs/bpf
           readOnly: true
@@ -61,9 +62,6 @@ spec:
           readOnly: true
         - mountPath: /proc
           name: hostproc
-          readOnly: true
-        - mountPath: /sys/fs/cgroup
-          name: cgroup
           readOnly: true
          {{- with .Values.broker.resources }}
           resources:
@@ -94,9 +92,8 @@ spec:
           type: Directory
         name: hostproc
       - hostPath:
-          path: /sys/fs/cgroup
-          type: Directory
-        name: cgroup
+          path: /sys/kernel/debug
+        name: debugfs
       nodeSelector:
         {{- if .Values.controller.nodeSelector }}
           {{- toYaml .Values.controller.nodeSelector | nindent 8 }}

@@ -74,9 +74,9 @@ pub use Error::*;
 pub mod telemetry;
 pub use crate::telemetry::*;
 
-pub mod cgroup;
 pub mod container;
 pub mod model;
+pub mod trace;
 
 pub use crate::model::*;
 

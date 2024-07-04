@@ -434,7 +434,7 @@ dependencies = [
 [[package]]
 name = "aya"
 version = "0.12.0"
-source = "git+https://github.com/aya-rs/aya?branch=main#bde4b5f86b12a3e4ac2f99898edb1b564fe9dd7e"
+source = "git+https://github.com/aya-rs/aya?branch=main#5e13283f59b0c3b4cb47de1e31d8d0960e80b4cc"
 dependencies = [
  "assert_matches",
  "aya-obj 0.1.0 (git+https://github.com/aya-rs/aya?branch=main)",
@@ -443,7 +443,7 @@ dependencies = [
  "lazy_static",
  "libc",
  "log",
- "object 0.35.0",
+ "object 0.36.0",
  "thiserror",
  "tokio",
 ]
@@ -451,7 +451,7 @@ dependencies = [
 [[package]]
 name = "aya-log"
 version = "0.2.0"
-source = "git+https://github.com/aya-rs/aya?branch=main#bde4b5f86b12a3e4ac2f99898edb1b564fe9dd7e"
+source = "git+https://github.com/aya-rs/aya?branch=main#5e13283f59b0c3b4cb47de1e31d8d0960e80b4cc"
 dependencies = [
  "aya 0.12.0 (git+https://github.com/aya-rs/aya?branch=main)",
  "aya-log-common",
@@ -464,7 +464,7 @@ dependencies = [
 [[package]]
 name = "aya-log-common"
 version = "0.1.14"
-source = "git+https://github.com/aya-rs/aya?branch=main#bde4b5f86b12a3e4ac2f99898edb1b564fe9dd7e"
+source = "git+https://github.com/aya-rs/aya?branch=main#5e13283f59b0c3b4cb47de1e31d8d0960e80b4cc"
 dependencies = [
  "num_enum",
 ]
@@ -486,13 +486,25 @@ dependencies = [
 [[package]]
 name = "aya-obj"
 version = "0.1.0"
-source = "git+https://github.com/aya-rs/aya?branch=main#bde4b5f86b12a3e4ac2f99898edb1b564fe9dd7e"
+source = "git+https://github.com/aya-rs/aya?branch=main#5e13283f59b0c3b4cb47de1e31d8d0960e80b4cc"
 dependencies = [
  "bytes",
  "core-error",
  "hashbrown 0.14.5",
  "log",
- "object 0.35.0",
+ "object 0.36.0",
+ "thiserror",
+]
+
+[[package]]
+name = "aya-tool"
+version = "0.1.0"
+source = "git+https://github.com/aya-rs/aya?branch=main#5e13283f59b0c3b4cb47de1e31d8d0960e80b4cc"
+dependencies = [
+ "anyhow",
+ "bindgen",
+ "clap",
+ "tempfile",
  "thiserror",
 ]
 
@@ -533,6 +545,29 @@ name = "base64"
 version = "0.22.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "72b3254f16251a8381aa12e40e3c4d2f0199f8c6508fbecb9d91f575e0fbb8c6"
+
+[[package]]
+name = "bindgen"
+version = "0.69.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a00dc851838a2120612785d195287475a3ac45514741da670b735818822129a0"
+dependencies = [
+ "bitflags 2.5.0",
+ "cexpr",
+ "clang-sys",
+ "itertools",
+ "lazy_static",
+ "lazycell",
+ "log",
+ "prettyplease",
+ "proc-macro2",
+ "quote",
+ "regex",
+ "rustc-hash",
+ "shlex",
+ "syn 2.0.63",
+ "which",
+]
 
 [[package]]
 name = "bitflags"
@@ -609,6 +644,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "cexpr"
+version = "0.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6fac387a98bb7c37292057cffc56d62ecb629900026402633ae9160df93a8766"
+dependencies = [
+ "nom",
+]
+
+[[package]]
 name = "cfg-if"
 version = "1.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -627,6 +671,17 @@ dependencies = [
  "serde",
  "wasm-bindgen",
  "windows-targets 0.52.5",
+]
+
+[[package]]
+name = "clang-sys"
+version = "1.8.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0b023947811758c97c59bf9d1c188fd619ad4718dcaa767947df1cadb14f39f4"
+dependencies = [
+ "glob",
+ "libc",
+ "libloading",
 ]
 
 [[package]]
@@ -1160,6 +1215,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d231dfb89cfffdbc30e7fc41579ed6066ad03abda9e567ccafae602b97ec5024"
 
 [[package]]
+name = "hex"
+version = "0.4.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7f24254aa9a54b5c858eaee2f5bccdb46aaf0e486a595ed5fd8f86ba55232a70"
+
+[[package]]
 name = "home"
 version = "0.5.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1613,6 +1674,7 @@ dependencies = [
  "openssl",
  "opentelemetry 0.23.0",
  "opentelemetry-otlp",
+ "procfs",
  "regex",
  "reqwest",
  "schemars",
@@ -1677,10 +1739,26 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e2abad23fbc42b3700f2f279844dc832adb2b2eb069b2df918f455c4e18cc646"
 
 [[package]]
+name = "lazycell"
+version = "1.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "830d08ce1d1d941e6b30645f1a0eb5643013d835ce3779a5fc208261dbe10f55"
+
+[[package]]
 name = "libc"
 version = "0.2.154"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ae743338b92ff9146ce83992f766a31066a91a8c84a45e0e9f21e7cf6de6d346"
+
+[[package]]
+name = "libloading"
+version = "0.8.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0c2a198fb6b0eada2a8df47933734e6d35d350665a33a3593d7164fa52c75c19"
+dependencies = [
+ "cfg-if",
+ "windows-targets 0.52.5",
+]
 
 [[package]]
 name = "linux-raw-sys"
@@ -1749,6 +1827,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6877bb514081ee2a7ff5ef9de3281f14a4dd4bceac4c09388074a6b5df8a139a"
 
 [[package]]
+name = "minimal-lexical"
+version = "0.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "68354c5c6bd36d73ff3feceb05efa59b6acb7626617f4962be322a825e61f79a"
+
+[[package]]
 name = "miniz_oxide"
 version = "0.7.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1798,6 +1882,16 @@ name = "network-types"
 version = "0.0.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "41b13eba62f530cd2ea031938ac4472b9b649694baa1e587c2a2fadc07844d3c"
+
+[[package]]
+name = "nom"
+version = "7.1.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d273983c5a657a70a3e8f2a01329822f3b8c8172b73826411a55751e404a0a4a"
+dependencies = [
+ "memchr",
+ "minimal-lexical",
+]
 
 [[package]]
 name = "nu-ansi-term"
@@ -1874,9 +1968,9 @@ dependencies = [
 
 [[package]]
 name = "object"
-version = "0.35.0"
+version = "0.36.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b8ec7ab813848ba4522158d5517a6093db1ded27575b070f4177b8d12b41db5e"
+checksum = "576dfe1fc8f9df304abb159d767a29d0476f7750fbf8aa7ad07816004a207434"
 dependencies = [
  "crc32fast",
  "hashbrown 0.14.5",
@@ -2242,6 +2336,32 @@ dependencies = [
 ]
 
 [[package]]
+name = "procfs"
+version = "0.16.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "731e0d9356b0c25f16f33b5be79b1c57b562f141ebfcdb0ad8ac2c13a24293b4"
+dependencies = [
+ "bitflags 2.5.0",
+ "chrono",
+ "flate2",
+ "hex",
+ "lazy_static",
+ "procfs-core",
+ "rustix",
+]
+
+[[package]]
+name = "procfs-core"
+version = "0.16.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2d3554923a69f4ce04c4a754260c338f505ce22642d3830e049a399fc2059a29"
+dependencies = [
+ "bitflags 2.5.0",
+ "chrono",
+ "hex",
+]
+
+[[package]]
 name = "prost"
 version = "0.12.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2454,6 +2574,12 @@ name = "rustc-demangle"
 version = "0.1.24"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "719b953e2095829ee67db738b3bfa9fa368c94900df327b3f07fe6e794d2fe1f"
+
+[[package]]
+name = "rustc-hash"
+version = "1.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "08d43f7aa6b08d49f382cde6a7982047c3426db949b1424bc4b7ec9ae12c6ce2"
 
 [[package]]
 name = "rustc_version"
@@ -2730,6 +2856,12 @@ checksum = "f40ca3c46823713e0d4209592e8d6e826aa57e928f09752619fc696c499637f6"
 dependencies = [
  "lazy_static",
 ]
+
+[[package]]
+name = "shlex"
+version = "1.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0fda2ff0d084019ba4d7c6f371c95d8fd75ce3524c3cb8fb653a3023f6323e64"
 
 [[package]]
 name = "signal-hook-registry"
@@ -3402,6 +3534,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "which"
+version = "4.4.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "87ba24419a2078cd2b0f2ede2691b6c66d8e47836da3b6db8265ebad47afbfc7"
+dependencies = [
+ "either",
+ "home",
+ "once_cell",
+ "rustix",
+]
+
+[[package]]
 name = "winapi"
 version = "0.3.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3586,6 +3730,7 @@ name = "xtask"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "aya-tool",
  "clap",
 ]
 

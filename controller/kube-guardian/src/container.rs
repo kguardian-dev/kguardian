@@ -27,9 +27,7 @@ impl PodInspect {
                 error!("Error connect to containerd sock {}", e);
                 return None;
             }
-
             let channel = channel.unwrap();
-
             let mut ps = ContainersClient::new(channel.clone());
             let req = GetContainerRequest {
                 id: container_id.to_string(),
@@ -50,7 +48,6 @@ impl PodInspect {
                     self.set_container_id(container_id)
                         .get_pid(channel)
                         .await
-                        .get_cgroup_path()
                         .extract_namespace_pid(container)
                         .get_peer_ifindex(),
                 );
@@ -92,7 +89,7 @@ impl PodInspect {
     fn get_peer_ifindex(mut self) -> Self {
         if self.namespace_pid.is_some() {
             // store if index both from host side and pod side
-            let mut if_indexes: [Option<u32>; 2] = [None, None];
+            let mut if_index: Option<u32> = None;
             let ns_enter = Command::new("nsenter")
                 .arg("-t")
                 .arg(&self.namespace_pid.unwrap().to_string())
@@ -112,14 +109,16 @@ impl PodInspect {
             //eth0@if(?P<index>[0-9]*)
             // TODO Error Handling
             let re = Regex::new("(?P<pod>[0-9]*): eth0@if(?P<host>[0-9]*)").unwrap();
-            let pod_idex: Option<u32> = re.captures(ns_enter).map(|c| c["pod"].parse().unwrap());
+            //let pod_idex: Option<u32> = re.captures(ns_enter).map(|c| c["pod"].parse().unwrap());
             let host_idex: Option<u32> = re.captures(ns_enter).map(|c| c["host"].parse().unwrap());
-            if_indexes[0] = pod_idex;
-            if_indexes[1] = host_idex;
-            self.if_index = if_indexes;
+            self.if_index = host_idex;
+            info!(
+                "If index of containerid  {:?} {:?}",
+                self.container_id, self.if_index
+            );
         } else {
             error!(
-                "failed to extract the process id of container {:?}",
+                "failed to extract the ifindex container {:?}",
                 self.container_id
             )
         }
@@ -147,27 +146,6 @@ impl PodInspect {
             let container_resp = container_resp.unwrap().into_inner();
             self.pid = Some(container_resp.process.unwrap().pid);
         }
-        self
-    }
-
-    fn get_cgroup_path(mut self) -> Self {
-        if self.pid.is_some() {
-            let pid = self.pid.unwrap();
-            // get the cgroup path
-            // https://www.kernel.org/doc/html/latest/admin-guide/cgroup-v2.html
-            // cgroupv2 contains only single entry
-            let pod_cgroup_path = std::fs::read_to_string(format!("/proc/{}/cgroup", pid));
-            if let Err(e) = pod_cgroup_path {
-                error!("Failed to get process details for PID {} : {}", pid, e);
-            } else {
-                let cgrp = pod_cgroup_path.unwrap();
-                let parts: Vec<&str> = cgrp.split("::").collect();
-                self.cgroup_path = parts
-                    .get(1)
-                    .map(|value| format!("/sys/fs/cgroup{}", value.trim()))
-            }
-        }
-
         self
     }
 }
