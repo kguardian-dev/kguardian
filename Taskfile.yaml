@@ -8,7 +8,8 @@ includes:
   controller: .taskfiles/Controller
 
 vars:
-  IMAGE_VERSION: 0.88
+  IMAGE_VERSION: local
+
 tasks:
   all:
     deps: [kind]
