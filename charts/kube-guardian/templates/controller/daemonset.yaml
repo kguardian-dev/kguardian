@@ -20,10 +20,10 @@ spec:
       imagePullSecrets:
         {{ toYaml .Values.controller.imagePullSecrets | indent 8 }}
       {{- end }}
-      # initContainers:
-      # - name: wait-for-api
-      #   image: busybox
-      #   command: ["sh", "-c", "until wget -qO- http://{{ .Values.broker.service.name }}.{{ include "kube-guardian.namespace" . }}.svc.cluster.local:{{ .Values.broker.container.port }}/health; do sleep 5; done"]
+      initContainers:
+      - name: wait-for-api
+        image: busybox
+        command: ["sh", "-c", "until wget -qO- http://{{ .Values.broker.service.name }}.{{ include "kube-guardian.namespace" . }}.svc.cluster.local:{{ .Values.broker.container.port }}/health; do sleep 5; done"]
       containers:
       - name: controller
         {{- if .Values.controller.image.sha }}
