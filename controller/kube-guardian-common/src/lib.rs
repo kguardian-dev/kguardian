@@ -14,7 +14,7 @@ pub struct TrafficLog {
     pub ack: u16,
     pub inum: u32, // i node numbner
     pub if_index: i32,
-    pub traffic_type : i32,
+    pub traffic_type: i32,
 }
 #[cfg(feature = "user")]
 pub mod user {
@@ -24,6 +24,3 @@ pub mod user {
 }
 
 unsafe impl Send for TrafficLog {}
-
-
-

@@ -33,7 +33,7 @@ pub struct Config {
     pub metadata: Metadata,
 }
 
-#[derive(Debug, Deserialize, Clone,Default)]
+#[derive(Debug, Deserialize, Clone, Default)]
 pub struct Traffic {
     pub(crate) src_addr: String,
     pub(crate) dst_addr: String,

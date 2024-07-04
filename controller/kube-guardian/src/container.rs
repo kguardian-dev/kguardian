@@ -89,7 +89,7 @@ impl PodInspect {
     fn get_peer_ifindex(mut self) -> Self {
         if self.namespace_pid.is_some() {
             // store if index both from host side and pod side
-            let mut if_index:Option<u32> = None;
+            let mut if_index: Option<u32> = None;
             let ns_enter = Command::new("nsenter")
                 .arg("-t")
                 .arg(&self.namespace_pid.unwrap().to_string())
@@ -112,7 +112,10 @@ impl PodInspect {
             //let pod_idex: Option<u32> = re.captures(ns_enter).map(|c| c["pod"].parse().unwrap());
             let host_idex: Option<u32> = re.captures(ns_enter).map(|c| c["host"].parse().unwrap());
             self.if_index = host_idex;
-            info!("If index of containerid  {:?} {:?}", self.container_id , self.if_index);
+            info!(
+                "If index of containerid  {:?} {:?}",
+                self.container_id, self.if_index
+            );
         } else {
             error!(
                 "failed to extract the ifindex container {:?}",

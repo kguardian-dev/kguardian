@@ -66,11 +66,10 @@ pub async fn watch_pods(
             let ebpf = Arc::clone(&ebpf);
             async move {
                 let p = process_pod(&p, container_map, ebpf).await;
-                if let Err(e) = p{
+                if let Err(e) = p {
                     //dont panic and the error is already printed, so no point of reporting again
                     // maybe find a better way of handling error
-                    error!("Error  processsing pod{}",e)
-                    
+                    error!("Error  processsing pod{}", e)
                 }
                 Ok(())
             }
@@ -122,22 +121,20 @@ async fn process_container_ids(
                     );
                     cm.insert(if_index, pod_inspect.clone());
                     let mut ebpf_pgm = ebpf.lock().await;
-                       
-                        let mut ifindex_map: HashMap<_, u32, u32> =
+
+                    let mut ifindex_map: HashMap<_, u32, u32> =
                         HashMap::try_from(ebpf_pgm.bpf.map_mut("IFINDEX_MAP").unwrap())?;
-                      
-                        match ifindex_map.get(&if_index, 0)  {
-                            Ok(_) => {
-                                info!("{} ifindex already exists", if_index);
-                            }
-                            Err(MapError::KeyNotFound) => {
-                                info!(" Key not found, insert");
-                                ifindex_map.insert(if_index , 1, 0)?;
-                            }
-                            Err(e) => {
-                               return Err(Error::BpfMapError { source: e })
-                            }
+
+                    match ifindex_map.get(&if_index, 0) {
+                        Ok(_) => {
+                            info!("{} ifindex already exists", if_index);
                         }
+                        Err(MapError::KeyNotFound) => {
+                            info!(" Key not found, insert");
+                            ifindex_map.insert(if_index, 1, 0)?;
+                        }
+                        Err(e) => return Err(Error::BpfMapError { source: e }),
+                    }
                 }
             }
         }

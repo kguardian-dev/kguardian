@@ -3,7 +3,8 @@ use aya::{
     include_bytes_aligned,
     maps::perf::AsyncPerfEventArray,
     programs::{
-        cgroup_skb::CgroupSkbLinkId, CgroupSkb, CgroupSkbAttachType, Program, ProgramError, TracePoint,
+        cgroup_skb::CgroupSkbLinkId, CgroupSkb, CgroupSkbAttachType, Program, ProgramError,
+        TracePoint,
     },
     util::online_cpus,
     Ebpf,
@@ -11,6 +12,7 @@ use aya::{
 use bytes::BytesMut;
 use chrono::{NaiveDateTime, Utc};
 use kube_guardian_common::TrafficLog;
+use procfs::process::Process;
 use serde::Serialize;
 use serde_json::json;
 use std::sync::Arc;
@@ -20,7 +22,6 @@ use tokio::fs::File;
 use tokio::{sync::Mutex, task};
 use tracing::{debug, error, info};
 use uuid::Uuid;
-use procfs::process::Process;
 
 pub type TracedAddrRecord = (String, String, u16, String, u16);
 
@@ -41,7 +42,6 @@ pub struct EbpfPgm {
     pub bpf: Ebpf,
 }
 
-
 impl EbpfPgm {
     pub fn load_ebpf(
         container_map: Arc<Mutex<BTreeMap<u32, PodInspect>>>,
@@ -58,7 +58,7 @@ impl EbpfPgm {
 
         // let program: &mut TracePoint = bpf.program_mut("kube_guardian_egress").unwrap().try_into()?;
 
-        // if let Err(e) = program.load(){ 
+        // if let Err(e) = program.load(){
         //     error!("Failed to load  kube_guardian_egress {}", e);
         //     return Err(Error::BpfProgramError { source: e })
         // };
@@ -68,17 +68,20 @@ impl EbpfPgm {
 
         // };
 
-        let program_ingress: &mut TracePoint = bpf.program_mut("kube_guardian_ingress").unwrap().try_into()?;
-       
-        if let Err(e) = program_ingress.load(){ 
+        let program_ingress: &mut TracePoint = bpf
+            .program_mut("kube_guardian_ingress")
+            .unwrap()
+            .try_into()?;
+
+        if let Err(e) = program_ingress.load() {
             error!("Failed to load  kube_guardian_ingress {}", e);
-            return Err(Error::BpfProgramError { source: e })
+            return Err(Error::BpfProgramError { source: e });
         };
 
-        if let Err(e) = program_ingress.attach("net", "netif_receive_skb") { // INGRESS 1
+        if let Err(e) = program_ingress.attach("net", "netif_receive_skb") {
+            // INGRESS 1
             error!("Failed to attach netif_receive_skb {}", e);
-            return Err(Error::BpfProgramError { source: e })
-
+            return Err(Error::BpfProgramError { source: e });
         };
 
         let mut perf_array = AsyncPerfEventArray::try_from(bpf.take_map("EVENTS").unwrap())?;
@@ -93,12 +96,14 @@ impl EbpfPgm {
                     .map(|_| BytesMut::with_capacity(1024))
                     .collect::<Vec<_>>();
 
-                    loop {
-                        let events = perf_buffer.read_events(&mut buffers).await.unwrap();
-                        for buf in buffers.iter_mut().take(events.read) {
-                            process_buffer(buf, &container_map, &traced_address_cache).await.unwrap();
-                        }
+                loop {
+                    let events = perf_buffer.read_events(&mut buffers).await.unwrap();
+                    for buf in buffers.iter_mut().take(events.read) {
+                        process_buffer(buf, &container_map, &traced_address_cache)
+                            .await
+                            .unwrap();
                     }
+                }
             });
         }
 
@@ -106,7 +111,11 @@ impl EbpfPgm {
     }
 }
 
-async fn process_buffer(buf: &mut BytesMut, container_map: & Arc<Mutex<BTreeMap<u32, PodInspect>>>, traced_address_cache: &Arc<Mutex<HashSet<(String, String, u16, String, u16)>>>) -> Result<(), Box<dyn std::error::Error>> {
+async fn process_buffer(
+    buf: &mut BytesMut,
+    container_map: &Arc<Mutex<BTreeMap<u32, PodInspect>>>,
+    traced_address_cache: &Arc<Mutex<HashSet<(String, String, u16, String, u16)>>>,
+) -> Result<(), Box<dyn std::error::Error>> {
     let ptr = UserObj(buf.as_ptr() as *const TrafficLog);
     let data = unsafe { ptr.as_ptr().read_unaligned() };
 
@@ -121,7 +130,6 @@ async fn process_buffer(buf: &mut BytesMut, container_map: & Arc<Mutex<BTreeMap<
         };
 
         if t.src_addr == valid_pod.status.pod_ip {
-
             info!(
                 "source {}:{}, port {}:{}, syn {}, ack {}, inum {} ifindex {} traffic_type {}",
                 Ipv4Addr::from(data.saddr.to_be()),
@@ -134,7 +142,7 @@ async fn process_buffer(buf: &mut BytesMut, container_map: & Arc<Mutex<BTreeMap<
                 data.if_index,
                 data.traffic_type,
             );
-       
+
             if data.syn == 1 && data.ack == 0 {
                 // Egress when the traffic is iniated from
                 t.ip_protocol = String::from("TCP");
@@ -144,12 +152,11 @@ async fn process_buffer(buf: &mut BytesMut, container_map: & Arc<Mutex<BTreeMap<
                 // The inode num points to the client
                 t.ip_protocol = String::from("TCP");
                 t.traffic_type = 1;
-            } else if data.syn == 2 && data.ack == 2  {
+            } else if data.syn == 2 && data.ack == 2 {
                 // Egress
                 t.ip_protocol = String::from("UDP");
                 t.traffic_type = 0;
-            }
-            else {
+            } else {
                 return Ok(());
             }
 
@@ -202,7 +209,7 @@ impl Traffic {
                     self.src_addr.to_string(),
                     self.src_port,
                     self.dst_addr.to_string(),
-                    0
+                    0,
                 )
             }
         } else {
