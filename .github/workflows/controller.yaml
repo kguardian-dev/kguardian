@@ -49,13 +49,18 @@ jobs:
 
       - name: Install bpf-linker
         run: |
+         
+          apt install linux-tools-common linux-tools-generic linux-tools-$(uname -r) -y
+
           cd controller
 
           cargo install bpf-linker
 
           cargo install cross --git https://github.com/cross-rs/cross
 
-          # # # build ebpf byte code
+          cargo xtask codegen
+
+          # build ebpf byte code
           cargo xtask build-ebpf --release
 
           cross build --target ${{ steps.args.outputs.BUILD }} --release
