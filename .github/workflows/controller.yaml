@@ -49,8 +49,9 @@ jobs:
 
       - name: Install bpf-linker
         run: |
-         
-          apt install linux-tools-common linux-tools-generic linux-tools-$(uname -r) -y
+          sudo apt update -y
+          
+          sudo apt install linux-tools-common linux-tools-generic linux-tools-$(uname -r) -y
 
           cd controller
 
