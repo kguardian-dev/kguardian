@@ -2,7 +2,7 @@
 
 This chart bootstraps the [Xentra]() controlplane onto a [Kubernetes](http://kubernetes.io) cluster using the [Helm](https://helm.sh) package manager.
 
-![Version: 0.0.12](https://img.shields.io/badge/Version-0.0.12-informational?style=flat-square)
+![Version: 0.0.15](https://img.shields.io/badge/Version-0.0.15-informational?style=flat-square)
 
 ## Overview
 
@@ -13,7 +13,9 @@ This Helm chart deploys:
 
 ## Prerequisites
 
+- Linux Kernel 6.2+
 - Kubernetes 1.19+
+- kubectl v1.19+
 - Helm 3.0+
 
 ## Install the Chart
