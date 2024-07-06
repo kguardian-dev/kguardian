@@ -21,7 +21,7 @@ WIP
 ## 🛠️ Prequisites
 
 - Linux Kernel 6.2+
-- Kubernetes cluster v1.18+
+- Kubernetes 1.19+
 - kubectl v1.18+
 - [Kube Guardian](https://github.com/xentra-ai/kube-guardian/tree/main/charts/kube-guardian) **MUST** be running in-cluster
 
