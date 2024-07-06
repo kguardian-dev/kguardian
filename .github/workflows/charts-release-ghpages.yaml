@@ -40,15 +40,15 @@ jobs:
         uses: azure/setup-helm@fe7b79cd5ee1e45176fcad797de68ecaf3ca4814 # v4
 
       - name: Run chart-releaser
-        uses: helm/chart-releaser-action@a917fd15b20e8b64b94d9158ad54cd6345335584 # v1.6.0
+        uses: helm/chart-releaser-action@v1.6.0
         with:
-          charts_dir: ${{ env.CHARTS_SRC_DIR }}
+          charts_dir: charts/${{ env.CHARTS_SRC_DIR }}
         env:
           CR_TOKEN: "${{ secrets.GITHUB_TOKEN }}"
 
       - name: Publish Helm Chart to GHCR
         run: |
-          helm package charts/kube-guardian
-          helm push kube-guardian-*.tgz oci://${{ env.TARGET_REGISTRY }}/${{ github.repository_owner }}/charts
+          helm package charts/${{ env.CHARTS_SRC_DIR }}
+          helm push ${{ env.CHARTS_SRC_DIR }}-*.tgz oci://${{ env.TARGET_REGISTRY }}/${{ github.repository_owner }}/charts
         env:
           GITHUB_TOKEN: "${{ secrets.GITHUB_TOKEN }}"
