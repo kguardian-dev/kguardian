@@ -40,7 +40,7 @@ jobs:
         uses: azure/setup-helm@fe7b79cd5ee1e45176fcad797de68ecaf3ca4814 # v4
 
       - name: Run chart-releaser
-        uses: helm/chart-releaser-action@v1.6.1
+        uses: helm/chart-releaser-action@v1.6.0
         # TODO: Remove if not required
         # with:
         #   charts_dir: charts
