@@ -112,7 +112,7 @@ jobs:
         env:
           BUILDX_NO_DEFAULT_ATTESTATIONS: 1
         if: github.ref == 'refs/heads/main'
-        uses: docker/build-push-action@v5
+        uses: docker/build-push-action@16ebe778df0e7752d2cfcbd924afdbbd89c1a755 # v6
         with:
           context: controller/
           platforms: linux/amd64, linux/arm64,
