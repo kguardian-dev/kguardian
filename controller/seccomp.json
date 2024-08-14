@@ -1,0 +1,37 @@
+{
+    "defaultAction": "SCMP_ACT_ERRNO",
+    "architectures": [
+      "SCMP_ARCH_X86_64"
+    ],
+    "syscalls": [
+      {
+        "names": [
+          "bpf",
+          "epoll_pwait",
+          "brk",
+          "close_range",
+          "openat",
+          "getpid",
+          "sendmsg",
+          "write",
+          "close",
+          "ioctl",
+          "epoll_wait"
+        ],
+        "action": "SCMP_ACT_ALLOW"
+      }
+    ]
+  }
+  
+
+288: accept4
+233: epoll_ctl
+45: brk
+262: close_range
+257: openat
+20: getpid
+40: sendmsg
+1: write
+3: close
+54: setsockopt
+232: epoll_wait

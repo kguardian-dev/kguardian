@@ -1,0 +1,37 @@
+use serde_derive::Deserialize;
+
+#[derive(Debug, Default, Deserialize, Clone)]
+pub struct PodInspect {
+    pub container_id: Option<String>,
+    pub status: PodInfo,
+    pub info: Info,
+    pub if_index: Option<u32>,
+    pub namespace_pid: Option<u32>,
+    pub pid: Option<u32>,
+    pub inode_num: Option<u64>,
+}
+
+#[derive(Debug, Default, Deserialize, Clone)]
+pub struct Info {
+    pub config: Config,
+}
+
+#[derive(Debug, Default, Deserialize, Clone)]
+pub struct PodInfo {
+    pub pod_name: String,
+    pub pod_namespace: Option<String>,
+    pub pod_ip: String,
+}
+
+#[derive(Debug, Default, Deserialize, Clone)]
+pub struct Config {
+    pub metadata: Metadata,
+}
+
+
+#[derive(Debug, Default, Deserialize, Clone)]
+pub struct Metadata {
+    pub name: String,
+    pub namespace: String,
+    pub uid: String,
+}

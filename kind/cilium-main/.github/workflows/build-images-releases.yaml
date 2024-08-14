@@ -1,0 +1,222 @@
+name: Image Release Build
+
+on:
+  push:
+    tags:
+      - v[0-9]+.[0-9]+.[0-9]+
+      - v[0-9]+.[0-9]+.[0-9]+-*
+
+permissions:
+  # To be able to access the repository with `actions/checkout`
+  contents: read
+  # Required to generate OIDC tokens for `sigstore/cosign-installer` authentication
+  id-token: write
+
+jobs:
+  build-and-push:
+    timeout-minutes: 45
+    name: Build and Push Images
+    environment: release
+    runs-on: ubuntu-22.04
+    strategy:
+      matrix:
+        include:
+          - name: cilium
+            dockerfile: ./images/cilium/Dockerfile
+
+          - name: operator
+            dockerfile: ./images/operator/Dockerfile
+
+          - name: operator-aws
+            dockerfile: ./images/operator/Dockerfile
+
+          - name: operator-azure
+            dockerfile: ./images/operator/Dockerfile
+
+          - name: operator-alibabacloud
+            dockerfile: ./images/operator/Dockerfile
+
+          - name: operator-generic
+            dockerfile: ./images/operator/Dockerfile
+
+          - name: hubble-relay
+            dockerfile: ./images/hubble-relay/Dockerfile
+
+          - name: clustermesh-apiserver
+            dockerfile: ./images/clustermesh-apiserver/Dockerfile
+
+          - name: docker-plugin
+            dockerfile: ./images/cilium-docker-plugin/Dockerfile
+
+    steps:
+      - name: Checkout main branch to access local actions
+        uses: actions/checkout@a5ac7e51b41094c92402da3b24376905380afc29 # v4.1.6
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          persist-credentials: false
+
+      - name: Set Environment Variables
+        uses: ./.github/actions/set-env-variables
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@d70bba72b1f3fd22344832f00baa16ece964efeb # v3.3.0
+
+      - name: Login to DockerHub
+        uses: docker/login-action@0d4c9c5ea7693da7b068278f7b52bda2a190a446 # v3.2.0
+        if: ${{ env.PUSH_TO_DOCKER_HUB == 'true' }}
+        with:
+          username: ${{ secrets.DOCKER_HUB_RELEASE_USERNAME }}
+          password: ${{ secrets.DOCKER_HUB_RELEASE_PASSWORD }}
+
+      - name: Login to quay.io
+        uses: docker/login-action@0d4c9c5ea7693da7b068278f7b52bda2a190a446 # v3.2.0
+        with:
+          registry: quay.io
+          username: ${{ secrets.QUAY_USERNAME_RELEASE_USERNAME }}
+          password: ${{ secrets.QUAY_PASSWORD_RELEASE_PASSWORD }}
+
+      - name: Getting image tag
+        id: tag
+        run: |
+          tag=${GITHUB_REF##*/}
+          echo tag=$tag >> $GITHUB_OUTPUT
+          if [ "${{ env.PUSH_TO_DOCKER_HUB }}" == "true" ]; then
+            echo image_tags=${{ github.repository_owner }}/${{ matrix.name }}:$tag,quay.io/${{ env.QUAY_ORGANIZATION }}/${{ matrix.name }}:$tag >> $GITHUB_OUTPUT
+          else
+            echo image_tags=quay.io/${{ env.QUAY_ORGANIZATION }}/${{ matrix.name }}:$tag >> $GITHUB_OUTPUT
+          fi
+
+      - name: Checkout Source Code
+        uses: actions/checkout@a5ac7e51b41094c92402da3b24376905380afc29 # v4.1.6
+        with:
+          persist-credentials: false
+
+      - name: Release Build ${{ matrix.name }}
+        uses: docker/build-push-action@2cdde995de11925a030ce8070c3d77a52ffcf1c0 # v5.3.0
+        id: docker_build_release
+        with:
+          provenance: false
+          context: .
+          file: ${{ matrix.dockerfile }}
+          push: true
+          platforms: linux/amd64,linux/arm64
+          tags: ${{ steps.tag.outputs.image_tags }}
+          target: release
+          build-args: |
+            OPERATOR_VARIANT=${{ matrix.name }}
+
+      - name: Install Cosign
+        uses: sigstore/cosign-installer@59acb6260d9c0ba8f4a2f9d9b48431a222b68e20 # v3.5.0
+
+      - name: Sign Container Image
+        run: |
+          if [ "${{ env.PUSH_TO_DOCKER_HUB }}" == "true" ]; then
+            cosign sign -y docker.io/${{ github.repository_owner }}/${{ matrix.name }}@${{ steps.docker_build_release.outputs.digest }}
+          fi
+          cosign sign -y quay.io/${{ env.QUAY_ORGANIZATION }}/${{ matrix.name }}@${{ steps.docker_build_release.outputs.digest }}
+
+      - name: Generate SBOM
+        uses: anchore/sbom-action@e8d2a6937ecead383dfe75190d104edd1f9c5751 # v0.16.0
+        with:
+          artifact-name: sbom_${{ matrix.name }}_${{ steps.tag.outputs.tag }}.spdx.json
+          output-file: ./sbom_${{ matrix.name }}_${{ steps.tag.outputs.tag }}.spdx.json
+          image: quay.io/${{ env.QUAY_ORGANIZATION_DEV }}/${{ matrix.name }}:${{ steps.tag.outputs.tag }}
+
+      - name: Attach SBOM to container images
+        run: |
+          if [ "${{ env.PUSH_TO_DOCKER_HUB }}" == "true" ]; then
+            cosign attach sbom --sbom sbom_${{ matrix.name }}_${{ steps.tag.outputs.tag }}.spdx.json docker.io/${{ github.repository_owner }}/${{ matrix.name }}@${{ steps.docker_build_release.outputs.digest }}
+          fi
+          cosign attach sbom --sbom sbom_${{ matrix.name }}_${{ steps.tag.outputs.tag }}.spdx.json quay.io/${{ env.QUAY_ORGANIZATION }}/${{ matrix.name }}@${{ steps.docker_build_release.outputs.digest }}
+
+      - name: Sign SBOM Image
+        run: |
+          if [ "${{ env.PUSH_TO_DOCKER_HUB }}" == "true" ]; then
+            docker_build_release_digest="${{ steps.docker_build_release.outputs.digest }}"
+            image_name="docker.io/${{ github.repository_owner }}/${{ matrix.name }}:${docker_build_release_digest/:/-}.sbom"
+            docker_build_release_sbom_digest="sha256:$(docker buildx imagetools inspect --raw ${image_name} | sha256sum | head -c 64)"
+            cosign sign -y "docker.io/${{ github.repository_owner }}/${{ matrix.name }}@${docker_build_release_sbom_digest}"
+          fi
+
+          docker_build_release_digest="${{ steps.docker_build_release.outputs.digest }}"
+          image_name="quay.io/${{ env.QUAY_ORGANIZATION }}/${{ matrix.name }}:${docker_build_release_digest/:/-}.sbom"
+          docker_build_release_sbom_digest="sha256:$(docker buildx imagetools inspect --raw ${image_name} | sha256sum | head -c 64)"
+          cosign sign -y "quay.io/${{ env.QUAY_ORGANIZATION }}/${{ matrix.name }}@${docker_build_release_sbom_digest}"
+
+      - name: Image Release Digest
+        shell: bash
+        run: |
+          mkdir -p image-digest/
+          job_name=${{ matrix.name }}
+          job_name_capital=${job_name^^}
+          job_name_underscored=${job_name_capital//-/_}
+          echo "${job_name_underscored}_DIGEST := \"${{ steps.docker_build_release.outputs.digest }}\"" > image-digest/makefile-digest.txt
+
+          echo "### ${{ matrix.name }}" > image-digest/${{ matrix.name }}.txt
+          echo "" >> image-digest/${{ matrix.name }}.txt
+          if [ "${{ env.PUSH_TO_DOCKERHUB }}" == "true" ]; then
+            echo "\`docker.io/${{ github.repository_owner }}/${{ matrix.name }}:${{ steps.tag.outputs.tag }}@${{ steps.docker_build_release.outputs.digest }}\`" >> image-digest/${{ matrix.name }}.txt
+          fi
+          echo "\`quay.io/${{ env.QUAY_ORGANIZATION }}/${{ matrix.name }}:${{ steps.tag.outputs.tag }}@${{ steps.docker_build_release.outputs.digest }}\`" >> image-digest/${{ matrix.name }}.txt
+          echo "" >> image-digest/${{ matrix.name }}.txt
+
+      # Upload artifact digests
+      - name: Upload artifact digests
+        uses: actions/upload-artifact@65462800fd760344b1a7b4382951275a0abb4808 # v4.3.3
+        with:
+          name: image-digest ${{ matrix.name }}
+          path: image-digest
+          retention-days: 10
+
+  image-digests:
+    name: Display Digests
+    runs-on: ubuntu-22.04
+    needs: build-and-push
+    steps:
+      - name: Getting image tag
+        id: tag
+        run: |
+          echo tag=${GITHUB_REF##*/} >> $GITHUB_OUTPUT
+      - name: Downloading Image Digests
+        shell: bash
+        run: |
+          mkdir -p image-digest/
+
+      - name: Download digests of all images built
+        uses: actions/download-artifact@65a9edc5881444af0b9093a5e628f2fe47ea3b2e # v4.1.7
+        with:
+          path: image-digest/
+
+      - name: Image Digests Output
+        shell: bash
+        run: |
+          cd image-digest/
+          echo "## Docker Manifests" > ../image-digest-output.txt
+          echo "" >> ../image-digest-output.txt
+          find -type f -regex ".*image-digest .*" -not -name "makefile-digest.txt" | sort | xargs -d '\n' cat >> ../image-digest-output.txt
+
+      - name: Image Makefile Digests
+        shell: bash
+        run: |
+          cd image-digest/
+          echo "# File generated by .github/workflows/build-images-releases.yaml; DO NOT EDIT." > ../Makefile.digests
+          echo "# Copyright "$(date +'%Y')" Authors of Cilium" >> ../Makefile.digests
+          echo "# SPDX-License-Identifier: Apache-2.0" >> ../Makefile.digests
+          echo "" >> ../Makefile.digests
+          find -type f  -name "makefile-digest.txt" | sort | xargs -d '\n' awk '{print "export " $0}' >> ../Makefile.digests
+
+      # Upload artifact digests
+      - name: Upload artifact digests
+        uses: actions/upload-artifact@65462800fd760344b1a7b4382951275a0abb4808 # v4.3.3
+        with:
+          name: image-digest-output.txt-${{ steps.tag.outputs.tag }}
+          path: image-digest-output.txt
+          retention-days: 10
+
+      # Upload artifact digests
+      - name: Upload artifact digests
+        uses: actions/upload-artifact@65462800fd760344b1a7b4382951275a0abb4808 # v4.3.3
+        with:
+          name: Makefile.digests-${{ steps.tag.outputs.tag }}
+          path: Makefile.digests
+          retention-days: 10
