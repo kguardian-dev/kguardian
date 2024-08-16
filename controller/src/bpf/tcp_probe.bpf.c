@@ -7,23 +7,31 @@
 #define IPV4_ADDR_LEN 4
 #define IPV6_ADDR_LEN 16
 
-struct tcp_event_data {
+struct tcp_event_data
+{
     __u64 inum;
     __u32 saddr;
+    __u16 sport;
     __u32 daddr;
+    __u16 dport;
+    __u16 old_state;
+    __u16 new_state;
+    __u16 kind; // 1-> Ingress, 2- Egress
 };
 
-struct {
-	__uint(type, BPF_MAP_TYPE_PERF_EVENT_ARRAY);
-	__uint(key_size, sizeof(u32));
-	__uint(value_size, sizeof(u32));
+struct
+{
+    __uint(type, BPF_MAP_TYPE_PERF_EVENT_ARRAY);
+    __uint(key_size, sizeof(u32));
+    __uint(value_size, sizeof(u32));
 } tracept_events SEC(".maps");
 
-struct {
-	__uint(type, BPF_MAP_TYPE_HASH);
-	__uint(max_entries, 10240);
-	__type(key, u64);
-	__type(value, u32);
+struct
+{
+    __uint(type, BPF_MAP_TYPE_HASH);
+    __uint(max_entries, 10240);
+    __type(key, u64);
+    __type(value, u32);
 } inode_num SEC(".maps");
 
 /**
@@ -35,53 +43,65 @@ struct {
     6: TCP_TIME_WAIT
     7: TCP_CLOSE
     8: TCP_CLOSE_WAIT
+    https://brendangregg.com/blog/2018-03-22/tcp-tracepoints.html
  */
 
 SEC("tracepoint/sock/inet_sock_set_state")
-int trace_tcp_connect(struct trace_event_raw_inet_sock_set_state *ctx) {
+int trace_tcp_connect(struct trace_event_raw_inet_sock_set_state *ctx)
+{
     struct task_struct *task;
     struct tcp_event_data tcp_event = {};
     task = (struct task_struct *)bpf_get_current_task();
-      __u64 pid_ns = BPF_CORE_READ(task, nsproxy, pid_ns_for_children, ns.inum);
+    __u64 pid_ns = BPF_CORE_READ(task, nsproxy, pid_ns_for_children, ns.inum);
 
-    u32 *inum  = 0;
+    u32 *inum = 0;
+
+    tcp_event.kind = 0;
 
     inum = bpf_map_lookup_elem(&inode_num, &pid_ns);
- 
-    if (inum){
 
+    if (inum)
+    {
         bpf_printk("%u---%u\n",
-                   ctx->oldstate,ctx->newstate);
-
+                   ctx->oldstate, ctx->newstate);
         tcp_event.inum = pid_ns;
-
         struct sock *sk = (struct sock *)ctx->skaddr;
- 
         __u16 family = ctx->family;
+        __u16 old_state = ctx->oldstate;
+        __u16 new_state = ctx->newstate;
+         u16 lport, dport;
 
         // IPv4 address handling
-        if (family == 2) {
-           bpf_probe_read_kernel(&tcp_event.saddr, sizeof(tcp_event.saddr), &sk->__sk_common.skc_rcv_saddr);
-           bpf_probe_read_kernel(&tcp_event.daddr, sizeof(tcp_event.daddr), &sk->__sk_common.skc_daddr);
+        if (family == 2)
+        
+        {
+            bpf_probe_read(&lport, sizeof(lport), &sk->__sk_common.skc_num);
+            bpf_probe_read(&dport, sizeof(dport), &sk->__sk_common.skc_dport);
+            bpf_probe_read_kernel(&tcp_event.saddr, sizeof(tcp_event.saddr), &sk->__sk_common.skc_rcv_saddr);
+            bpf_probe_read_kernel(&tcp_event.daddr, sizeof(tcp_event.daddr), &sk->__sk_common.skc_daddr);
+            tcp_event.sport = lport;
+            tcp_event.dport = bpf_ntohs(dport);
+            tcp_event.old_state = old_state;
+            tcp_event.new_state = new_state;
+         
+            if ((old_state == 1) && (new_state == 4))
+            {
+                // egress
+                tcp_event.kind = 2;
+            }
+            else if ((old_state == 8) && (new_state == 9))
+            {
+                // ingress
+                tcp_event.kind = 1;
+            };
         }
 
-// Egress 
-old (1) -> new(4)
-//Ingress
-old (4) -> new (5)
-    // char saddr[28];
-    // char daddr[28];
-    // struct sockaddr_in *ipv4_addr;
-
-    // ipv4_addr = (struct sockaddr_in *)ctx->saddr;
-    // saddr=  ipv4_addr->sin_addr->s_addr;
-    // ipv4_addr = (struct sockaddr_in *)ctx->daddr;
-    // tcp_event.dst_ip = &ipv4_addr->sin_addr;
-
-     bpf_perf_event_output(ctx, &tracept_events, BPF_F_CURRENT_CPU, &tcp_event, sizeof(tcp_event));
+        if ((tcp_event.kind == 1) || (tcp_event.kind == 2))
+        {
+            bpf_perf_event_output(ctx, &tracept_events, BPF_F_CURRENT_CPU, &tcp_event, sizeof(tcp_event));
+        }
     }
-    return 0;    
+    return 0;
 }
-
 
 char LICENSE[] SEC("license") = "GPL";

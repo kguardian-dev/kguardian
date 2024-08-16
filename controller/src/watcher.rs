@@ -80,7 +80,6 @@ async fn process_pod(
         if should_process_pod(&pod.metadata.namespace) {
           
             if let Ok(Some(pod_ip)) = pod_ip {
-                
                 return process_container_ids(&con_ids, &pod, &pod_ip, container_map).await;
             }
         }

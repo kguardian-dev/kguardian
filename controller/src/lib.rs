@@ -1,5 +1,4 @@
 pub mod tcp;
-use tcp::load_sock_set_sock_inet;
 
 pub mod watcher;
 use watcher::watch_pods;
@@ -12,3 +11,6 @@ use models::*;
 
 pub mod container;
 use container::*;
+
+pub mod client;
+use client::*;

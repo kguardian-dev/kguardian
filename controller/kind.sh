@@ -18,10 +18,10 @@ mkdir -p localbin
 
 cp ./target/x86_64-unknown-linux-gnu/release/rust-libbpf ./localbin/
 
-DOCKER_BUILDKIT=1 docker build . -f Dockerfile -t maheshrayas/ebpf-libbpf-syscalls:v0.1.62
+DOCKER_BUILDKIT=1 docker build . -f Dockerfile -t maheshrayas/ebpf-libbpf-syscalls:v0.1.75
 
 #docker push maheshrayas/ebpf-libbpf-syscalls:v0.1.48
 
-kind load docker-image maheshrayas/ebpf-libbpf-syscalls:v0.1.62
+kind load docker-image maheshrayas/ebpf-libbpf-syscalls:v0.1.75
 
 kubectl apply -f kubernetes.yaml

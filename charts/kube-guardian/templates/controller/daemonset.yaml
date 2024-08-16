@@ -60,6 +60,9 @@ spec:
         - name: containerd-sock
           mountPath: /run/containerd/containerd.sock
           readOnly: true
+        - mountPath: /sys/kernel/tracing
+          name: tracefs
+          readOnly: true
         - mountPath: /proc
           name: hostproc
           readOnly: true
@@ -94,6 +97,10 @@ spec:
       - hostPath:
           path: /sys/kernel/debug
         name: debugfs
+      - hostPath:
+          path: /sys/kernel/tracing
+          type: Directory
+        name: tracefs
       nodeSelector:
         {{- if .Values.controller.nodeSelector }}
           {{- toYaml .Values.controller.nodeSelector | nindent 8 }}

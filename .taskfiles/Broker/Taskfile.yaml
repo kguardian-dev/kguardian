@@ -3,7 +3,7 @@
 version: '3'
 vars:
   BROKER_IMAGE_NAME: ghcr.io/xentra-ai/images/guardian-broker
-  IMAGE_VERSION: local
+  IMAGE_VERSION: 0.1
 
 tasks:
   all:

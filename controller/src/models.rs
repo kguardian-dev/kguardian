@@ -1,3 +1,5 @@
+use chrono::NaiveDateTime;
+use serde::Serialize;
 use serde_derive::Deserialize;
 
 #[derive(Debug, Default, Deserialize, Clone)]
@@ -34,4 +36,18 @@ pub struct Metadata {
     pub name: String,
     pub namespace: String,
     pub uid: String,
+}
+
+#[derive(Debug, Default, Serialize)]
+pub struct PodTraffic {
+    pub uuid: String,
+    pub pod_name: String,
+    pub pod_namespace: Option<String>,
+    pub pod_ip: String,
+    pub pod_port: Option<String>,
+    pub traffic_type: Option<String>,
+    pub traffic_in_out_ip: Option<String>,
+    pub traffic_in_out_port: Option<String>,
+    pub ip_protocol: Option<String>,
+    pub time_stamp: NaiveDateTime,
 }

@@ -23,11 +23,11 @@ use libbpf_rs::MapFlags;
 use libbpf_rs::PerfBufferBuilder;
 
 use plain::Plain;
-use rust_libbpf::models::PodInspect;
-use rust_libbpf::tcp;
-use rust_libbpf::tcp::handle_event;
-use rust_libbpf::tcp::TcpData;
-use rust_libbpf::watcher::watch_pods;
+use kube_guardian::models::PodInspect;
+use kube_guardian::tcp;
+use kube_guardian::tcp::handle_event;
+use kube_guardian::tcp::TcpData;
+use kube_guardian::watcher::watch_pods;
 use std::thread;
 use time::macros::format_description;
 use time::OffsetDateTime;
@@ -36,7 +36,7 @@ use time::OffsetDateTime;
 
 
 
-use rust_libbpf::watcher::tcpprobe::TcpProbeSkelBuilder;
+use kube_guardian::watcher::tcpprobe::TcpProbeSkelBuilder;
 
 mod syscall {
     include!(concat!(
@@ -91,6 +91,8 @@ fn handle_lost_events(cpu: i32, count: u64) {
 #[tokio::main]
 async fn main() -> Result<()> {
 
+
+    let runtime = tokio::runtime::Runtime::new().unwrap();
     init_logger();
 
     let c: Arc<tokio::sync::Mutex<BTreeMap<u64, PodInspect>>> = Arc::new(tokio::sync::Mutex::new(BTreeMap::new()));
@@ -98,15 +100,19 @@ async fn main() -> Result<()> {
     // pod watcher
     let node_name = env::var("CURRENT_NODE").expect("cannot find node name: CURRENT_NODE ");
     let (tx, rx) = std::sync::mpsc::channel();
-
-    let pods = tokio::spawn(async move {
-        watch_pods( node_name, tx, c).await;
+    let pod_c = Arc::clone(&c);
+    let pods = tokio::spawn(
+        
+        async move {
+        watch_pods( node_name, tx,pod_c).await;
     });
-
+  
 
     thread::scope(|s| {
         let rx_thread:Arc<Mutex<std::sync::mpsc::Receiver<u64>>> = Arc::new(Mutex::new(rx));
+       
         s.spawn(move|| {
+            
             let rx_thread = Arc::clone(&rx_thread);
             let mut open_object = MaybeUninit::uninit();
             let skel_builder = TcpProbeSkelBuilder::default();
@@ -115,7 +121,15 @@ async fn main() -> Result<()> {
             sk.attach().unwrap();
             let perf = PerfBufferBuilder::new(&sk.maps.tracept_events).sample_cb(|_cpu, data: &[u8]| {
             let data: &TcpData = unsafe { &*(data.as_ptr() as *const TcpData) };
-                handle_event(data);
+                // get the inum data
+                let inum =  data.inum;
+                let c_locked = runtime.block_on(c.lock());
+                // get pod details
+                let p : Option<&PodInspect> = c_locked.get(&inum);
+                if p.is_some() {
+                    
+                    handle_event(data, p.unwrap());
+                }
             }).build().unwrap();
             loop {
                 perf.poll(std::time::Duration::from_millis(100)).unwrap();
