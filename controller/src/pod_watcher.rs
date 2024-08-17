@@ -1,34 +1,24 @@
+use chrono::Utc;
 use futures::TryStreamExt;
 use k8s_openapi::api::core::v1::Pod;
 use kube::{
     runtime::{reflector::Lookup, watcher, WatchStreamExt},
     Api, Client, ResourceExt,
 };
+use serde_json::json;
 use std::{collections::BTreeMap, sync::Arc};
 use tokio::sync::Mutex;
+use tracing::{warn,info,error};
+use crate::{api_post_call, Error, PodDetail, PodInfo, PodInspect};
 
-use libbpf_rs::{
-    skel::{OpenSkel, Skel, SkelBuilder},
-    MapCore, MapFlags, PerfBufferBuilder,
-};
-use tcpprobe::{TcpProbeSkel, TcpProbeSkelBuilder};
-use tracing::info;
 
-use crate::{error, PodInfo, PodInspect};
-
-pub mod tcpprobe {
-    include!(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/src/bpf/tcp_probe.skel.rs"
-    ));
-}
 
 use tokio::sync::mpsc;
 pub async fn watch_pods(
     node_name: String,
     tx: mpsc::Sender<u64>,
     container_map: Arc<Mutex<BTreeMap<u64, PodInspect>>>,
-) -> Result<(), crate::Error> {
+) -> Result<(), Error> {
     let c = Client::try_default().await?;
     let pods: Api<Pod> = Api::all(c.clone());
     #[cfg(not(debug_assertions))]
@@ -87,9 +77,6 @@ fn pod_unready(p: &Pod) -> Option<Vec<String>> {
             .collect::<Vec<_>>()
             .join(",");
         if !failed.is_empty() {
-            // if p.metadata.labels.as_ref().unwrap().contains_key("job-name") {
-            //     return None; // ignore job based pods, they are meant to exit 0
-            // }
             info!("Unready pod {}: {}", p.name_any(), failed);
             return None;
         }
@@ -108,21 +95,21 @@ fn pod_unready(p: &Pod) -> Option<Vec<String>> {
     None
 }
 
-async fn update_pods_details(pod: &Pod) -> Result<Option<String>, crate::Error> {
+async fn update_pods_details(pod: &Pod) -> Result<Option<String>, Error> {
     let pod_name = pod.name_any();
-    // let pod_namespace = pod.namespace();
+    let pod_namespace = pod.metadata.namespace.to_owned();
     let pod_status = pod.status.as_ref().unwrap();
     let mut pod_ip_address: Option<String> = None;
     if pod_status.pod_ip.is_some() {
         let pod_ip = pod_status.pod_ip.as_ref().unwrap();
-        // let z = PodDetail {
-        //     pod_ip: pod_ip.to_string(),
-        //     pod_name,
-        //     pod_namespace,
-        //     pod_obj: Some(json!(pod)),
-        //     time_stamp: Utc::now().naive_utc(),
-        // };
-        // api_post_call(json!(z), "netpol/podspec").await?;
+        let z = PodDetail {
+            pod_ip: pod_ip.to_string(),
+            pod_name,
+            pod_namespace,
+            pod_obj: Some(json!(pod)),
+            time_stamp: Utc::now().naive_utc(),
+        };
+        api_post_call(json!(z), "netpol/podspec").await?;
         pod_ip_address = Some(pod_ip.to_string());
         return Ok(pod_ip_address);
     }
@@ -156,7 +143,6 @@ async fn process_container_ids(
     }
     None
 }
-
 
 fn create_pod_info(pod: &Pod, pod_ip: &String) -> PodInfo {
     PodInfo {

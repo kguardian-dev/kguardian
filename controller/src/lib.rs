@@ -1,7 +1,11 @@
-pub mod tcp;
+pub mod network;
 
-pub mod watcher;
-use watcher::watch_pods;
+pub mod pod_watcher;
+use pod_watcher::watch_pods;
+
+pub mod service_watcher;
+use service_watcher::watch_service;
+
 
 pub mod error;
 use error::*;

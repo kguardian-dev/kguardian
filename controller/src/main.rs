@@ -10,6 +10,8 @@ use std::str;
 use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
+use kube_guardian::network::tcpprobe::TcpProbeSkelBuilder;
+use kube_guardian::service_watcher::watch_service;
 use tokio::sync::mpsc;
 use tokio::sync::Mutex;
 
@@ -23,15 +25,12 @@ use libbpf_rs::MapCore;
 use libbpf_rs::MapFlags;
 use libbpf_rs::PerfBufferBuilder;
 
-use plain::Plain;
+
 use kube_guardian::models::PodInspect;
-use kube_guardian::tcp::handle_event;
-use kube_guardian::tcp::TcpData;
-use kube_guardian::watcher::watch_pods;
+use kube_guardian::network::handle_event;
+use kube_guardian::network::TcpData;
+use kube_guardian::pod_watcher::watch_pods;
 use kube_guardian::error::Error;
-
-
-use kube_guardian::watcher::tcpprobe::TcpProbeSkelBuilder;
 
 mod syscall {
     include!(concat!(
@@ -78,17 +77,9 @@ async fn main() -> Result<()> {
     let (event_sender, event_receiver) = mpsc::channel::<EventData>(1000);
     let container_map_tcp = Arc::clone(&c);
 
-    // Spawn the pod watcher task
-    let pods:JoinHandle<Result<(), Error>>  = tokio::spawn(async move {
-        watch_pods(node_name, tx, pod_c).await
-    });
-
-    // Spawn the event handler task
-    let event_handler:JoinHandle<Result<(), Error>>  = tokio::spawn(async move {
-        handle_events(event_receiver, container_map_tcp).await;
-        Ok(())
-    });
-
+    let pods = watch_pods(node_name, tx, pod_c);
+    let service = watch_service();
+    let event_handler = handle_events(event_receiver, container_map_tcp);
 
     // Spawn the eBPF handling task
     let ebpf_handle:JoinHandle<Result<(), Error>>  = task::spawn_blocking(move || {
@@ -123,13 +114,14 @@ async fn main() -> Result<()> {
                 sk.maps.inode_num.update(&inum.to_ne_bytes(), &1_u32.to_ne_bytes(), MapFlags::ANY).unwrap();
             }
         }
-        Ok(())
+        
     });
 
     // Wait for all tasks to complete (they should run indefinitely)
     _ = tokio::try_join!(
-        async { pods.await.unwrap() },
-        async { event_handler.await.unwrap() },
+        service,
+        pods,
+        event_handler,
         async { ebpf_handle.await.unwrap() }
     ).unwrap();
     Ok(())
@@ -144,13 +136,14 @@ struct EventData {
 async fn handle_events(
     mut event_receiver: tokio::sync::mpsc::Receiver<EventData>,
     container_map_tcp: Arc<TokioMutex<BTreeMap<u64, PodInspect>>>,
-) {
+)->Result<(), Error> {
     while let Some(event) = event_receiver.recv().await {
         let container_map = container_map_tcp.lock().await;
         if let Some(pod_inspect) = container_map.get(&event.inum) {
             handle_event(&event.tcp_data, pod_inspect).await;
         }
     }
+    Ok(())
 }
 
 pub fn init_logger() {

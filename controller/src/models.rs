@@ -51,3 +51,21 @@ pub struct PodTraffic {
     pub ip_protocol: Option<String>,
     pub time_stamp: NaiveDateTime,
 }
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct SvcDetail {
+    pub svc_ip: String,
+    pub svc_name: String,
+    pub svc_namespace: Option<String>,
+    pub service_spec: Option<serde_json::Value>,
+    pub time_stamp: NaiveDateTime,
+}
+
+#[derive(Debug, Deserialize, Clone, Serialize)]
+pub struct PodDetail {
+    pub pod_ip: String,
+    pub pod_name: String,
+    pub pod_namespace: Option<String>,
+    pub pod_obj: Option<serde_json::Value>,
+    pub time_stamp: NaiveDateTime,
+}
