@@ -5,7 +5,6 @@ use std::path::PathBuf;
 use libbpf_cargo::SkeletonBuilder;
 
 const SYSCALL_SRC: &str = "src/bpf/syscall.bpf.c";
-const XDP_SRC: &str = "src/bpf/xdp.bpf.c";
 const TCP_PROBE_SRC: &str = "src/bpf/tcp_probe.bpf.c";
 
 fn main() {
@@ -15,13 +14,6 @@ fn main() {
     .join("src")
     .join("bpf")
     .join("syscall.skel.rs");
-
-    let xdp_out = PathBuf::from(
-        env::var_os("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR must be set in build script"),
-    )
-    .join("src")
-    .join("bpf")
-    .join("xdp.skel.rs");
 
     let tcp_probe_out = PathBuf::from(
         env::var_os("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR must be set in build script"),
@@ -40,15 +32,6 @@ fn main() {
             OsStr::new("-I"),
         ])
         .build_and_generate(&out)
-        .unwrap();
-
-    
-        SkeletonBuilder::new()
-        .source(XDP_SRC)
-        .clang_args([
-            OsStr::new("-I"),
-        ])
-        .build_and_generate(&xdp_out)
         .unwrap();
 
         SkeletonBuilder::new()

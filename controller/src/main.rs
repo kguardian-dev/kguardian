@@ -33,13 +33,7 @@ use std::thread;
 use time::macros::format_description;
 use time::OffsetDateTime;
 
-
-
-
-
 use kube_guardian::watcher::tcpprobe::TcpProbeSkelBuilder;
-use udpprobe::UdpProbeSkelBuilder;
-
 
 mod syscall {
     include!(concat!(
@@ -48,26 +42,8 @@ mod syscall {
     ));
 }
 
-mod xdp {
-    include!(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/src/bpf/xdp.skel.rs"
-    ));
-}
-
-mod udpprobe {
-    include!(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/src/bpf/udp_probe.skel.rs"
-    ));
-}
-
-
-
-
-
 use syscall::*;
-use xdp::XdpSkelBuilder;
+
 
 
 // fn handle_event(_cpu: i32, data: &[u8]) {
