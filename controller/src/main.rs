@@ -96,7 +96,7 @@ async fn main() -> Result<()> {
     let pod_c = Arc::clone(&c);
     let pods = tokio::spawn(
         
-        async move {
+    async move {
         watch_pods( node_name, tx,pod_c).await;
     });
   
@@ -139,7 +139,6 @@ async fn main() -> Result<()> {
                 perf.poll(std::time::Duration::from_millis(100)).unwrap();
                 perf_udp.poll(std::time::Duration::from_millis(100)).unwrap();
                 if let Ok(inum) = rx_thread_tcp.lock().unwrap().try_recv() {
-                    println!("I am here in  tcp");
                     sk.maps.inode_num.update(&inum.to_ne_bytes(), &1_u32.to_ne_bytes(), MapFlags::ANY).unwrap();
                 }
             }
