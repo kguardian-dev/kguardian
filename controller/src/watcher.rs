@@ -14,7 +14,7 @@ use libbpf_rs::{
 use tcpprobe::{TcpProbeSkel, TcpProbeSkelBuilder};
 use tracing::info;
 
-use crate::{PodInfo, PodInspect};
+use crate::{error, PodInfo, PodInspect};
 
 pub mod tcpprobe {
     include!(concat!(
@@ -23,22 +23,18 @@ pub mod tcpprobe {
     ));
 }
 
+use tokio::sync::mpsc;
 pub async fn watch_pods(
-    // container_map: Arc<Mutex<BTreeMap<u32, PodInspect>>>,
     node_name: String,
-    tx: std::sync::mpsc::Sender<u64>,
+    tx: mpsc::Sender<u64>,
     container_map: Arc<Mutex<BTreeMap<u64, PodInspect>>>,
 ) -> Result<(), crate::Error> {
     let c = Client::try_default().await?;
     let pods: Api<Pod> = Api::all(c.clone());
-
     #[cfg(not(debug_assertions))]
     let wc = watcher::Config::default().fields(&format!("spec.nodeName={}", node_name));
     #[cfg(debug_assertions)]
     let wc = watcher::Config::default();
-
-    // let ebpf = Arc::new(Mutex::new(ebpf));
-
     watcher(pods, wc)
         .applied_objects()
         .default_backoff()
@@ -46,27 +42,16 @@ pub async fn watch_pods(
             let t = tx.clone();
             let container_map = Arc::clone(&container_map);
             async move {
-                
-                let inode_num = process_pod(&p, container_map).await;
-                if let Some(inum) = inode_num {
-                    _ = t.send(inum);
+                if let Some(inum) = process_pod(&p, container_map).await {
+                    if let Err(e) = t.send(inum).await {
+                        tracing::error!("Failed to send inode number: {:?}", e);
+                    }
                     info!("Pod {:?}, inode num {:?}", p.name(), inum);
                 }
-
-                //let container_map = Arc::clone(&container_map);
-                // let ebpf = Arc::clone(&ebpf);
-                // let p = process_pod(&p, container_map, ebpf).await;
-                // if let Err(e) = p {
-                //dont panic and the error is already printed, so no point of reporting again
-                // maybe find a better way of handling error
-                //     error!("Error  processsing pod{}", e)
-                // }
-
                 Ok(())
             }
         })
         .await?;
-
     Ok(())
 }
 
@@ -75,18 +60,15 @@ async fn process_pod(
     container_map: Arc<Mutex<BTreeMap<u64, PodInspect>>>,
 ) -> Option<u64> {
     if let Some(con_ids) = pod_unready(pod) {
-        
         let pod_ip = update_pods_details(pod).await;
         if should_process_pod(&pod.metadata.namespace) {
-          
             if let Ok(Some(pod_ip)) = pod_ip {
-                return process_container_ids(&con_ids, &pod, &pod_ip, container_map).await;
+                return process_container_ids(&con_ids, pod, &pod_ip, container_map).await;
             }
         }
     }
-    return None;
+    None
 }
-
 fn should_process_pod(namespace: &Option<String>) -> bool {
     // TODO : excluded_namespace needs to be paratermized
     let excluded_namespaces: [&str; 2] = ["kube-system", "kube-guardian"];
@@ -153,7 +135,6 @@ async fn process_container_ids(
     pod_ip: &String,
     container_map: Arc<Mutex<BTreeMap<u64, PodInspect>>>,
 ) -> Option<u64> {
-   
     for con_id in con_ids {
         let pod_info = create_pod_info(pod, pod_ip);
         let pod_inspect = PodInspect {
@@ -161,8 +142,7 @@ async fn process_container_ids(
             ..Default::default()
         };
         info!("pod name {}", pod.name_any());
-        if let Some(pod_inspect) = pod_inspect.get_pod_inspect(&con_id).await {
-            // get the inum of container
+        if let Some(pod_inspect) = pod_inspect.get_pod_inspect(con_id).await {
             let mut cm = container_map.lock().await;
             if let Some(inode_num) = pod_inspect.inode_num {
                 info!(
@@ -174,9 +154,9 @@ async fn process_container_ids(
             }
         }
     }
-
     None
 }
+
 
 fn create_pod_info(pod: &Pod, pod_ip: &String) -> PodInfo {
     PodInfo {

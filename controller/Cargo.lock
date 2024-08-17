@@ -1341,6 +1341,7 @@ dependencies = [
  "futures",
  "k8s-openapi",
  "kube",
+ "lazy_static",
  "libbpf-cargo",
  "libbpf-rs",
  "libbpf-sys",

@@ -7,10 +7,9 @@ use std::mem::MaybeUninit;
 use std::net::IpAddr;
 use std::net::Ipv4Addr;
 use std::str;
-use std::sync::mpsc;
 use std::sync::Arc;
-use std::sync::Mutex;
 use std::time::Duration;
+use tokio::sync::Mutex;
 
 use anyhow::bail;
 use anyhow::Result;
@@ -32,6 +31,7 @@ use procfs::net::udp;
 use std::thread;
 use time::macros::format_description;
 use time::OffsetDateTime;
+use tokio::runtime::Handle;
 
 use kube_guardian::watcher::tcpprobe::TcpProbeSkelBuilder;
 
@@ -43,31 +43,6 @@ mod syscall {
 }
 
 use syscall::*;
-
-
-
-// fn handle_event(_cpu: i32, data: &[u8]) {
-//     let mut event = syscall::types::event::default();
-//     plain::copy_from_bytes(&mut event, data).expect("Data buffer was too short");
-
-//     let now = if let Ok(now) = OffsetDateTime::now_local() {
-//         let format = format_description!("[hour]:[minute]:[second]");
-//         now.format(&format)
-//             .unwrap_or_else(|_| "00:00:00".to_string())
-//     } else {
-//         "00:00:00".to_string()
-//     };
-
-//     let task = str::from_utf8(&event.task).unwrap();
-
-//     println!(
-//         "{:8} {:16} {:<7} {:<14}",
-//         now,
-//         task.trim_end_matches(char::from(0)),
-//         event.pid,
-//         event.delta_us
-//     );
-// }
 
 
 
@@ -85,148 +60,101 @@ fn handle_lost_events(cpu: i32, count: u64) {
 }
 
 
+use tokio::sync::mpsc;
+use tokio::task;
+use tokio::sync::Mutex as TokioMutex;
+use futures::StreamExt;
+
 #[tokio::main]
 async fn main() -> Result<()> {
     init_logger();
-    let c: Arc<tokio::sync::Mutex<BTreeMap<u64, PodInspect>>> = Arc::new(tokio::sync::Mutex::new(BTreeMap::new()));
+    let c: Arc<TokioMutex<BTreeMap<u64, PodInspect>>> = Arc::new(TokioMutex::new(BTreeMap::new()));
 
-    // pod watcher
     let node_name = env::var("CURRENT_NODE").expect("cannot find node name: CURRENT_NODE ");
-    let (tx, rx) = std::sync::mpsc::channel();
+    let (tx, mut rx) = mpsc::channel(100); // Use tokio's mpsc channel
     let pod_c = Arc::clone(&c);
-    let pods = tokio::spawn(
-        
-    async move {
-        watch_pods( node_name, tx,pod_c).await;
+
+    let (event_sender, event_receiver) = mpsc::channel::<EventData>(1000); // Adjust buffer size as needed
+    let container_map_tcp = Arc::clone(&c);
+
+
+
+    // Spawn the pod watcher task
+    let pods = tokio::spawn(async move {
+        watch_pods(node_name, tx, pod_c).await
     });
-  
-    let rx_thread:Arc<Mutex<std::sync::mpsc::Receiver<u64>>> = Arc::new(Mutex::new(rx));
-    thread::scope(|s| {
-        let rx_thread_tcp = Arc::clone(&rx_thread);
-        // let rx_thread_udp = Arc::clone(&rx_thread);
-        let container_map_tcp =  Arc::clone(&c);
-        // let container_map_udp =  Arc::clone(&c);
-        s.spawn(move|| { 
+
+    // Spawn the eBPF handling task
+    let ebpf_handle = task::spawn_blocking(move || async move {
+        let mut open_object = MaybeUninit::uninit();
+        let skel_builder = TcpProbeSkelBuilder::default();
+        let tcp_probe_skel = skel_builder.open(&mut open_object).unwrap();
+        let mut sk = tcp_probe_skel.load().unwrap();
+        sk.attach().unwrap();
+
+        let perf = PerfBufferBuilder::new(&sk.maps.tracept_events)
+        .sample_cb(move |_cpu, data: &[u8]| {
+            let tcp_data: &TcpData = unsafe { &*(data.as_ptr() as *const TcpData) };
+            let inum = tcp_data.inum;
+            
+            // Clone the data if necessary
+            let event_data = EventData {
+                inum,
+                tcp_data: *tcp_data.clone(), // Implement Clone for TcpData if needed
+            };
+    
+            // Send the data to the channel
+            if let Err(e) = event_sender.try_send(event_data) {
+                eprintln!("Failed to send event: {:?}", e);
+            }
+        })
+        .build()
+        .unwrap();
+    let perf_udp = PerfBufferBuilder::new(&sk.maps.udp_events)
+    .sample_cb(move |_cpu, data: &[u8]| {
+        let tcp_data: &TcpData = unsafe { &*(data.as_ptr() as *const TcpData) };
+        let inum = tcp_data.inum;
         
-            let mut open_object = MaybeUninit::uninit();
-            let skel_builder = TcpProbeSkelBuilder::default();
-            let tcp_probe_skel = skel_builder.open(&mut open_object).unwrap();
-            let mut sk = tcp_probe_skel.load().unwrap();
-            sk.attach().unwrap();
-            let perf = PerfBufferBuilder::new(&sk.maps.tracept_events).sample_cb(|_cpu, data: &[u8]| {
-            let data: &TcpData = unsafe { &*(data.as_ptr() as *const TcpData) };
-                // get the inum data
-                let inum =  data.inum;
-                let c_locked = tokio::runtime::Runtime::new().unwrap().block_on(container_map_tcp.lock());
-                // get pod details
-                let p : Option<&PodInspect> = c_locked.get(&inum);
-                if p.is_some() {
-                    handle_event(data, p.unwrap());
-                }
-            }).build().unwrap();
-            let perf_udp = PerfBufferBuilder::new(&sk.maps.udp_events).sample_cb(|_cpu, data: &[u8]| {
-                let data: &TcpData = unsafe { &*(data.as_ptr() as *const TcpData) };
-                    // get the inum data
-                    let inum =  data.inum;
-                    let c_locked = tokio::runtime::Runtime::new().unwrap().block_on(container_map_tcp.lock());
-                    // get pod details
-                    let p : Option<&PodInspect> = c_locked.get(&inum);
-                    if p.is_some() {
-                        handle_event(data, p.unwrap());
-                    }
-                }).build().unwrap();
-            loop {
-                perf.poll(std::time::Duration::from_millis(100)).unwrap();
-                perf_udp.poll(std::time::Duration::from_millis(100)).unwrap();
-                if let Ok(inum) = rx_thread_tcp.lock().unwrap().try_recv() {
+        // Clone the data if necessary
+        let event_data = EventData {
+            inum,
+            tcp_data: *tcp_data.clone(), // Implement Clone for TcpData if needed
+        };
+
+        // Send the data to the channel
+        if let Err(e) = event_sender.try_send(event_data) {
+            eprintln!("Failed to send event: {:?}", e);
+        }
+    })
+    .build()
+    .unwrap();
+
+        let runtime = tokio::runtime::Handle::current();
+        loop {
+            perf.poll(std::time::Duration::from_millis(100)).unwrap();
+            perf_udp.poll(std::time::Duration::from_millis(100)).unwrap();
+
+            // Process any incoming messages from the pod watcher
+            runtime.block_on(async {
+                while let Ok(inum) = rx.try_recv() {
+                    println!("Received inode number: {}", inum);
                     sk.maps.inode_num.update(&inum.to_ne_bytes(), &1_u32.to_ne_bytes(), MapFlags::ANY).unwrap();
                 }
-            }
-        });
-        // s.spawn(move|| {
-        //     let mut open_object = MaybeUninit::uninit();
-        //     let skel_builder = UdpProbeSkelBuilder::default();
-        //     let udp_probe_skel = skel_builder.open(&mut open_object).unwrap();
-        //     let mut sk = udp_probe_skel.load().unwrap();
-        //     sk.attach();
-        //     let perf = PerfBufferBuilder::new(&sk.maps.udp_events).sample_cb(|_cpu, data: &[u8]| {
-        //         let data: &UdpData = unsafe { &*(data.as_ptr() as *const UdpData) };
-        //             // get the inum data
-        //             let inum =  data.inum;
-        //             let c_locked = tokio::runtime::Runtime::new().unwrap().block_on(container_map_udp.lock());
-        //             // get pod details
-        //             let p : Option<&PodInspect> = c_locked.get(&inum);
-        //             if p.is_some() {
-        //                 let src = u32::from_be(data.saddr);
-        //                 let dst = u32::from_be(data.daddr);
-        //                 let sport = data.sport;
-        //                 let dport = data.dport;
-        //                 println!( "udpData {}-> {}:{}, {}:{}", inum, IpAddr::V4(Ipv4Addr::from(src)).to_string(),sport,IpAddr::V4(Ipv4Addr::from(dst)).to_string(), dport);
-        //             }
-        //         }).build().unwrap();
-        //         loop {
-        //             perf.poll(std::time::Duration::from_millis(100)).unwrap();
-        //             // TCP is already updating the values in maps
-        //             if let Ok(inum) = rx_thread_udp.lock().unwrap().try_recv() {
-        //                 println!("I am here in  udp");
-        //                 sk.maps.inode_num.update(&inum.to_ne_bytes(), &1_u32.to_ne_bytes(), MapFlags::ANY).unwrap();
-        //             }
-        //         }
-        // });
+            });
+        }
     });
 
-    println!("Now waiting on tokio");
-
-    // Join async tasks and wait for them to complete
-        let _ = tokio::runtime::Runtime::new().unwrap().block_on(async {
-        tokio::join!(pods);
-     });
-
-    println!("All tasks completed.");
-    // syscall
-    // let mut skel_builder = SyscallSkelBuilder::default();
-    // let open_skel = skel_builder.open()?;
-    // // Begin tracing
-    // let mut skel = open_skel.load()?;
-    // skel.attach()?;
-    // let perf = PerfBufferBuilder::new(&skel.maps_mut().events())
-    // .sample_cb(|_cpu, data: &[u8]| {
-    //     let data: &Data = unsafe { &*(data.as_ptr() as *const Data) };
-    //     handle_event(data);
-    // })
-    // .build()?;
-
-    // xdp
-    // let mut xdp_skel_builder = XdpSkelBuilder::default();
-    // let xdp_open_skel = xdp_skel_builder.open()?;
-    // let mut xdpSkel = xdp_open_skel.load()?;
-    // let link = xdpSkel.progs_mut().xdp_trace_packets().attach_xdp(7)?;
-    // println!("Link {:?}", link);
-    
-    // let perf = PerfBufferBuilder::new(&xdpSkel.maps_mut().xdp_events())
-    // .sample_cb(|_cpu, data: &[u8]| {
-    //     let data: &Data = unsafe { &*(data.as_ptr() as *const Data) };
-    //     handle_event(data);
-    // })
-    // .build()?;
-
-    // tracepoint
-
-    
-
-
-//     let link = skel.progs_mut().xdp_pass().attach_xdp(opts.ifindex)?;
-// .
-
-// load all the ebpf program
-// watcher to watch all the pods
-// get the inum when the pod is created and store in maps which will be used in filtering
-// store key as inum and value as pod details
+    // Wait for both tasks to complete (they should run indefinitely)
+    tokio::try_join!(pods, ebpf_handle)?;
 
     Ok(())
-
 }
 
+// Define a struct to hold the data we want to send through the channel
+struct EventData {
+    inum: u64,
+    tcp_data: TcpData,
+}
 
 
 pub fn init_logger() {
@@ -256,4 +184,16 @@ pub fn init_logger() {
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .with_timer(timer)
         .init();
+}
+
+async fn handle_events(
+    mut event_receiver: mpsc::Receiver<EventData>,
+    container_map_tcp: Arc<Mutex<BTreeMap<u64, PodInspect>>>,
+) {
+    while let Some(event) = event_receiver.recv().await {
+        let container_map = container_map_tcp.lock().await;
+        if let Some(pod_inspect) = container_map.get(&event.inum) {
+            handle_event(&event.tcp_data, pod_inspect);
+        }
+    }
 }
