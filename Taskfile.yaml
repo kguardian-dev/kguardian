@@ -8,10 +8,11 @@ includes:
   controller: .taskfiles/Controller
 
 vars:
-  IMAGE_VERSION: 0.1
+  IMAGE_VERSION: 0.8
 
 tasks:
   all:
+    # deps: [kind]
     desc: "Run all tasks"
     cmds:
       #- task: advisor:all

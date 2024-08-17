@@ -7,7 +7,7 @@
 #define IPV4_ADDR_LEN 4
 #define IPV6_ADDR_LEN 16
 
-struct tcp_event_data
+struct network_event_data
 {
     __u64 inum;
     __u32 saddr;
@@ -25,6 +25,13 @@ struct
     __uint(key_size, sizeof(u32));
     __uint(value_size, sizeof(u32));
 } tracept_events SEC(".maps");
+
+struct
+{
+    __uint(type, BPF_MAP_TYPE_PERF_EVENT_ARRAY);
+    __uint(key_size, sizeof(u32));
+    __uint(value_size, sizeof(u32));
+} udp_events SEC(".maps");
 
 struct
 {
@@ -50,7 +57,7 @@ SEC("tracepoint/sock/inet_sock_set_state")
 int trace_tcp_connect(struct trace_event_raw_inet_sock_set_state *ctx)
 {
     struct task_struct *task;
-    struct tcp_event_data tcp_event = {};
+    struct network_event_data tcp_event = {};
     task = (struct task_struct *)bpf_get_current_task();
     __u64 pid_ns = BPF_CORE_READ(task, nsproxy, pid_ns_for_children, ns.inum);
 
@@ -104,4 +111,31 @@ int trace_tcp_connect(struct trace_event_raw_inet_sock_set_state *ctx)
     return 0;
 }
 
-char LICENSE[] SEC("license") = "GPL";
+SEC("kprobe/udp_sendmsg")
+int trace_udp_send(struct pt_regs *ctx) {
+
+     struct task_struct *task;
+    task = (struct task_struct *)bpf_get_current_task();
+    __u64 pid_ns = BPF_CORE_READ(task, nsproxy, pid_ns_for_children, ns.inum);
+
+    u32 *inum = 0;
+    inum = bpf_map_lookup_elem(&inode_num, &pid_ns);
+     u16 lport, dport;
+
+    if (inum)
+    {
+        struct network_event_data event = {};
+        struct sock *sk = (struct sock *)PT_REGS_PARM1(ctx);
+        event.inum = pid_ns;
+        bpf_probe_read(&event.saddr, sizeof(event.saddr), &sk->__sk_common.skc_rcv_saddr);
+        bpf_probe_read(&event.daddr, sizeof(event.daddr), &sk->__sk_common.skc_daddr);
+        bpf_probe_read(&lport, sizeof(lport), &sk->__sk_common.skc_num);
+        bpf_probe_read(&dport, sizeof(dport), &sk->__sk_common.skc_dport);
+        event.kind = 3;
+        event.sport = lport;
+        event.dport = bpf_ntohs(dport);
+        bpf_perf_event_output(ctx, &udp_events, BPF_F_CURRENT_CPU, &event, sizeof(event));
+    }
+    return 0;
+}
+char _license[] SEC("license") = "GPL";

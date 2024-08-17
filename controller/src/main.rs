@@ -28,6 +28,7 @@ use kube_guardian::tcp;
 use kube_guardian::tcp::handle_event;
 use kube_guardian::tcp::TcpData;
 use kube_guardian::watcher::watch_pods;
+use procfs::net::udp;
 use std::thread;
 use time::macros::format_description;
 use time::OffsetDateTime;
@@ -37,6 +38,8 @@ use time::OffsetDateTime;
 
 
 use kube_guardian::watcher::tcpprobe::TcpProbeSkelBuilder;
+use udpprobe::UdpProbeSkelBuilder;
+
 
 mod syscall {
     include!(concat!(
@@ -49,6 +52,13 @@ mod xdp {
     include!(concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/src/bpf/xdp.skel.rs"
+    ));
+}
+
+mod udpprobe {
+    include!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/src/bpf/udp_probe.skel.rs"
     ));
 }
 
@@ -83,6 +93,17 @@ use xdp::XdpSkelBuilder;
 //     );
 // }
 
+
+
+#[repr(C)]
+pub struct UdpData {
+    pub inum: u64,
+    saddr: u32,
+    daddr: u32,
+    sport: u16,
+    dport: u16,
+}
+
 fn handle_lost_events(cpu: i32, count: u64) {
     eprintln!("Lost {count} events on CPU {cpu}");
 }
@@ -90,11 +111,7 @@ fn handle_lost_events(cpu: i32, count: u64) {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-
-
-    let runtime = tokio::runtime::Runtime::new().unwrap();
     init_logger();
-
     let c: Arc<tokio::sync::Mutex<BTreeMap<u64, PodInspect>>> = Arc::new(tokio::sync::Mutex::new(BTreeMap::new()));
 
     // pod watcher
@@ -107,13 +124,14 @@ async fn main() -> Result<()> {
         watch_pods( node_name, tx,pod_c).await;
     });
   
-
+    let rx_thread:Arc<Mutex<std::sync::mpsc::Receiver<u64>>> = Arc::new(Mutex::new(rx));
     thread::scope(|s| {
-        let rx_thread:Arc<Mutex<std::sync::mpsc::Receiver<u64>>> = Arc::new(Mutex::new(rx));
-       
-        s.spawn(move|| {
-            
-            let rx_thread = Arc::clone(&rx_thread);
+        let rx_thread_tcp = Arc::clone(&rx_thread);
+        // let rx_thread_udp = Arc::clone(&rx_thread);
+        let container_map_tcp =  Arc::clone(&c);
+        // let container_map_udp =  Arc::clone(&c);
+        s.spawn(move|| { 
+        
             let mut open_object = MaybeUninit::uninit();
             let skel_builder = TcpProbeSkelBuilder::default();
             let tcp_probe_skel = skel_builder.open(&mut open_object).unwrap();
@@ -123,25 +141,63 @@ async fn main() -> Result<()> {
             let data: &TcpData = unsafe { &*(data.as_ptr() as *const TcpData) };
                 // get the inum data
                 let inum =  data.inum;
-                let c_locked = runtime.block_on(c.lock());
+                let c_locked = tokio::runtime::Runtime::new().unwrap().block_on(container_map_tcp.lock());
                 // get pod details
                 let p : Option<&PodInspect> = c_locked.get(&inum);
                 if p.is_some() {
-                    
                     handle_event(data, p.unwrap());
                 }
             }).build().unwrap();
+            let perf_udp = PerfBufferBuilder::new(&sk.maps.udp_events).sample_cb(|_cpu, data: &[u8]| {
+                let data: &TcpData = unsafe { &*(data.as_ptr() as *const TcpData) };
+                    // get the inum data
+                    let inum =  data.inum;
+                    let c_locked = tokio::runtime::Runtime::new().unwrap().block_on(container_map_tcp.lock());
+                    // get pod details
+                    let p : Option<&PodInspect> = c_locked.get(&inum);
+                    if p.is_some() {
+                        handle_event(data, p.unwrap());
+                    }
+                }).build().unwrap();
             loop {
                 perf.poll(std::time::Duration::from_millis(100)).unwrap();
-                if let Ok(inum) = rx_thread.lock().unwrap().try_recv() {
+                perf_udp.poll(std::time::Duration::from_millis(100)).unwrap();
+                if let Ok(inum) = rx_thread_tcp.lock().unwrap().try_recv() {
+                    println!("I am here in  tcp");
                     sk.maps.inode_num.update(&inum.to_ne_bytes(), &1_u32.to_ne_bytes(), MapFlags::ANY).unwrap();
                 }
             }
         });
-        s.spawn(|| {
-            //syscall::raw_syscall();
-        
-        });
+        // s.spawn(move|| {
+        //     let mut open_object = MaybeUninit::uninit();
+        //     let skel_builder = UdpProbeSkelBuilder::default();
+        //     let udp_probe_skel = skel_builder.open(&mut open_object).unwrap();
+        //     let mut sk = udp_probe_skel.load().unwrap();
+        //     sk.attach();
+        //     let perf = PerfBufferBuilder::new(&sk.maps.udp_events).sample_cb(|_cpu, data: &[u8]| {
+        //         let data: &UdpData = unsafe { &*(data.as_ptr() as *const UdpData) };
+        //             // get the inum data
+        //             let inum =  data.inum;
+        //             let c_locked = tokio::runtime::Runtime::new().unwrap().block_on(container_map_udp.lock());
+        //             // get pod details
+        //             let p : Option<&PodInspect> = c_locked.get(&inum);
+        //             if p.is_some() {
+        //                 let src = u32::from_be(data.saddr);
+        //                 let dst = u32::from_be(data.daddr);
+        //                 let sport = data.sport;
+        //                 let dport = data.dport;
+        //                 println!( "udpData {}-> {}:{}, {}:{}", inum, IpAddr::V4(Ipv4Addr::from(src)).to_string(),sport,IpAddr::V4(Ipv4Addr::from(dst)).to_string(), dport);
+        //             }
+        //         }).build().unwrap();
+        //         loop {
+        //             perf.poll(std::time::Duration::from_millis(100)).unwrap();
+        //             // TCP is already updating the values in maps
+        //             if let Ok(inum) = rx_thread_udp.lock().unwrap().try_recv() {
+        //                 println!("I am here in  udp");
+        //                 sk.maps.inode_num.update(&inum.to_ne_bytes(), &1_u32.to_ne_bytes(), MapFlags::ANY).unwrap();
+        //             }
+        //         }
+        // });
     });
 
     println!("Now waiting on tokio");

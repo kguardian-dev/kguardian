@@ -52,6 +52,7 @@ pub fn handle_event(data: &TcpData, pod_data: &PodInspect) {
     let dst = u32::from_be(data.daddr);
     let sport = data.sport;
     let dport = data.dport;
+    let mut protocol = "";
     let mut pod_port = sport;
     let mut kind = "";
     let traffic_in_out_ip = IpAddr::V4(Ipv4Addr::from(dst)).to_string();
@@ -60,11 +61,19 @@ pub fn handle_event(data: &TcpData, pod_data: &PodInspect) {
 
     if data.kind.eq(&1) {
         traffic_type = "INGRESS";
-        traffic_in_out_port = 0
+        traffic_in_out_port = 0;
+        protocol = "TCP";
  
     }else if data.kind.eq(&2) {
         traffic_type = "EGRESS";
-        pod_port = 0
+        pod_port = 0;
+        protocol = "TCP";
+    }else if data.kind.eq(&3){
+        traffic_type = "EGRESS";
+        pod_port = 0;
+        traffic_in_out_port = dport;
+        protocol = "UDP"
+
     }
  // println!("Inum: {} src ip {}, syn {}, ack {}, ingress_index {}", data.inum,ip_addr, data.syn, data.ack, data.ingress_ifindex);
     println!("Inum: {} src {}:{},dst {}:{}, kind {}, old state {}. new state {}", data.inum,IpAddr::V4(Ipv4Addr::from(src)),sport, IpAddr::V4(Ipv4Addr::from(dst)), dport, kind, data.old_state, data.new_state);
@@ -82,7 +91,7 @@ pub fn handle_event(data: &TcpData, pod_data: &PodInspect) {
         traffic_in_out_ip: Some(traffic_in_out_ip.to_string()),
         traffic_in_out_port: Some(traffic_in_out_port.to_string()),
         traffic_type: Some(traffic_type.to_string()),
-        ip_protocol: Some("TCP".to_string()),
+        ip_protocol: Some(protocol.to_string()),
         // example: 2007-04-05T14:30:30
         time_stamp: Utc::now().naive_utc() // .format("%Y-%m-%dT%H:%M:%S.%fZ")
                                            // .to_string(),
