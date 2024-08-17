@@ -36,6 +36,7 @@ mod tcpprobe {
 
 
 #[repr(C)]
+#[derive(Clone,Copy)]
 pub struct TcpData {
     pub inum: u64,
     saddr: u32,
@@ -44,10 +45,10 @@ pub struct TcpData {
     dport: u16,
     old_state: u16,
     new_state : u16,
-    kind: u16,
+    pub kind: u16,
 }
 
-pub fn handle_event(data: &TcpData, pod_data: &PodInspect) {
+pub async fn handle_event(data: &TcpData, pod_data: &PodInspect) {
     let src = u32::from_be(data.saddr);
     let dst = u32::from_be(data.daddr);
     let sport = data.sport;
@@ -97,10 +98,8 @@ pub fn handle_event(data: &TcpData, pod_data: &PodInspect) {
                                            // .to_string(),
     });
     info!("Record to be inserted {}", z.to_string());
-    let rt = tokio::runtime::Runtime::new().unwrap();
-    rt.block_on(async {
-        api_post_call(z, "netpol/pods").await;
-    });
+    api_post_call(z, "netpol/pods").await;
+
     // this should await, but we in blocking thread
     // TODO, think of doing of better way, we wont know if the post call is done or not
     

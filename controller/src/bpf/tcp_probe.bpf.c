@@ -26,12 +26,6 @@ struct
     __uint(value_size, sizeof(u32));
 } tracept_events SEC(".maps");
 
-struct
-{
-    __uint(type, BPF_MAP_TYPE_PERF_EVENT_ARRAY);
-    __uint(key_size, sizeof(u32));
-    __uint(value_size, sizeof(u32));
-} udp_events SEC(".maps");
 
 struct
 {
@@ -134,7 +128,7 @@ int trace_udp_send(struct pt_regs *ctx) {
         event.kind = 3;
         event.sport = lport;
         event.dport = bpf_ntohs(dport);
-        bpf_perf_event_output(ctx, &udp_events, BPF_F_CURRENT_CPU, &event, sizeof(event));
+        bpf_perf_event_output(ctx, &tracept_events, BPF_F_CURRENT_CPU, &event, sizeof(event));
     }
     return 0;
 }
