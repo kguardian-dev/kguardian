@@ -7,4 +7,6 @@ libelf-dev\
    build-essential\
     libbpf-dev gcc-multilib\
      protobuf-compiler\
-      libprotobuf-dev
+      libprotobuf-dev\ 
+      pkgconf\
+       rustfmt 
