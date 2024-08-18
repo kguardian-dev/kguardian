@@ -57,6 +57,8 @@ jobs:
           cd controller
 
           cargo install cross --git https://github.com/cross-rs/cross
+
+          rustup target add ${{ steps.args.outputs.BUILD }}
      
           cross build --target ${{ steps.args.outputs.BUILD }} --release
 
