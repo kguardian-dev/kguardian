@@ -2,6 +2,7 @@ name: Build and Push controller Docker Images
 
 on:
   workflow_dispatch: {}
+  push:
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -10,7 +11,7 @@ jobs:
      matrix:
         arch:
           - linux/amd64
-          # - linux/arm64
+          - linux/arm64
 
     steps:
       - name: Checkout
@@ -55,8 +56,6 @@ jobs:
           cd controller
 
           cargo install cross --git https://github.com/cross-rs/cross
-
-          rustup target add ${{ steps.args.outputs.BUILD }}
      
           cross build --target ${{ steps.args.outputs.BUILD }} --release
 
