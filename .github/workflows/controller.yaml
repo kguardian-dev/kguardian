@@ -48,6 +48,7 @@ jobs:
             echo "BUILD=x86_64-unknown-linux-gnu" >> $GITHUB_OUTPUT
           fi
 
+      - name: Install bpf-linker
         run: |
           sudo apt update -y
           
