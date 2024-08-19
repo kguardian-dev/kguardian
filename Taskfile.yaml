@@ -8,11 +8,11 @@ includes:
   controller: .taskfiles/Controller
 
 vars:
-  IMAGE_VERSION: 0.8
+  IMAGE_VERSION: local
 
 tasks:
   all:
-    # deps: [kind]
+    deps: [kind]
     desc: "Run all tasks"
     cmds:
       #- task: advisor:all
@@ -30,7 +30,7 @@ tasks:
     desc: "Install in KinD cluster"
     cmds:
       - helm repo add xentra https://xentra-ai.github.io/kube-guardian || true
-      - helm upgrade kube-guardian xentra/kube-guardian --namespace kube-guardian 
+      - helm install kube-guardian xentra/kube-guardian --namespace kube-guardian 
         --create-namespace --set controller.image.tag={{.IMAGE_VERSION}} 
         --set broker.image.tag={{.IMAGE_VERSION}} 
         --set controller.image.pullPolicy=IfNotPresent 

@@ -3,7 +3,7 @@
 version: '3'
 vars:
   BROKER_IMAGE_NAME: ghcr.io/xentra-ai/images/guardian-broker
-  IMAGE_VERSION: 0.1
+  IMAGE_VERSION: local
 
 tasks:
   all:
@@ -15,6 +15,7 @@ tasks:
     desc: "Build and load the broker Docker image"
     cmds:
       - docker build -t {{.BROKER_IMAGE_NAME}}:{{.IMAGE_VERSION}} broker -f broker/Dockerfile
+      #- docker push {{.BROKER_IMAGE_NAME}}:{{.IMAGE_VERSION}} 
       - kind load docker-image {{.BROKER_IMAGE_NAME}}:{{.IMAGE_VERSION}}
 
   preflight:
