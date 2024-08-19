@@ -6,8 +6,8 @@ on:
     branches:
       - main
     paths:
-      - '.github/workflows/charts-release-ghpages.yaml'
-      - 'charts/**'
+      - ".github/workflows/charts-release-ghpages.yaml"
+      - "charts/**"
 
 env:
   CHARTS_SRC_DIR: "kube-guardian"
@@ -41,9 +41,9 @@ jobs:
 
       - name: Run chart-releaser
         uses: helm/chart-releaser-action@v1.6.0
-        # TODO: Remove if not required
-        # with:
-        #   charts_dir: charts
+        with:
+          # REQUIRED: We don't want this to override latest when the latest is used by the quick-install.sh for the advisor client
+          mark_as_latest: false
         env:
           CR_TOKEN: "${{ secrets.GITHUB_TOKEN }}"
 
