@@ -4,7 +4,7 @@ echo "Starting the installation of kubectl-advisor..."
 
 # Define the GitHub owner and repository
 GITHUB_OWNER="xentra-ai"
-GITHUB_REPO="advisor-client"
+GITHUB_REPO="kube-guardian"
 BINARY_NAME="advisor"
 INSTALL_DIR="/usr/local/bin"
 TMP_DIR=$(mktemp -d)
