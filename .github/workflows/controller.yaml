@@ -47,7 +47,7 @@ jobs:
             echo "BUILD=x86_64-unknown-linux-gnu" >> $GITHUB_OUTPUT
           fi
 
-      - name: Install bpf-linker
+      - name: Build Rust
         run: |
           sudo apt update -y
           
@@ -55,15 +55,8 @@ jobs:
 
           cd controller
 
-          cargo install bpf-linker
-
           cargo install cross --git https://github.com/cross-rs/cross
-
-          cargo xtask codegen
-
-          # build ebpf byte code
-          cargo xtask build-ebpf --release
-
+     
           cross build --target ${{ steps.args.outputs.BUILD }} --release
 
       - uses: actions/upload-artifact@834a144ee995460fba8ed112a2fc961b36a5ec5a # v4

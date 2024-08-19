@@ -1,10 +1,18 @@
-[target.aarch64-unknown-linux-gnu.dockerfile]
-file = "./docker/cross.Dockerfile"        
-context = "."                
-build-args = { ARCH = "aarch64-unknown-linux-gnu", DPKG_ARCH = "arm64" }
 
 
-[target.x86_64-unknown-linux-gnu.dockerfile]
-file = "./docker/cross.Dockerfile"        
-context = "."                
-build-args = { ARCH = "x86_64-unknown-linux-gnu", DPKG_ARCH = "amd64" }
+[target.aarch64-unknown-linux-gnu]
+image = "ghcr.io/cross-rs/aarch64-unknown-linux-gnu:edge"
+
+pre-build = [
+    "dpkg --add-architecture $CROSS_DEB_ARCH", 
+    "apt-get update -y",
+    "apt-get install -y libelf-dev:arm64 zlib1g-dev:arm64 gcc-aarch64-linux-gnu protobuf-compiler libbpf-dev libc6-dev-arm64-cross clang"
+]
+
+[target.x86_64-unknown-linux-gnu]
+image = "ghcr.io/cross-rs/x86_64-unknown-linux-gnu:edge"
+pre-build = [
+    "dpkg --add-architecture $CROSS_DEB_ARCH", 
+    "apt-get update -y",
+    "apt-get install -y libelf-dev zlib1g-dev  gcc-multilib protobuf-compiler libbpf-dev libc6 clang"
+]
