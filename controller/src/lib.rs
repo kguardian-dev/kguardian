@@ -1,4 +1,5 @@
 pub mod network;
+pub mod syscall;
 
 pub mod pod_watcher;
 use pod_watcher::watch_pods;

@@ -1,4 +1,4 @@
-use crate::schema::{pod_details, pod_traffic, svc_details};
+use crate::schema::{pod_details, pod_traffic, svc_details, pod_syscalls};
 use chrono::NaiveDateTime;
 use diesel::{AsChangeset, Identifiable, Insertable, Queryable, Selectable};
 use serde::{Deserialize, Serialize};
@@ -68,5 +68,26 @@ pub struct SvcDetail {
     pub svc_name: Option<String>,
     pub svc_namespace: Option<String>,
     pub service_spec: Option<serde_json::Value>,
+    pub time_stamp: NaiveDateTime,
+}
+
+#[derive(
+    Default,
+    Debug,
+    Insertable,
+    Queryable,
+    Identifiable,
+    AsChangeset,
+    Serialize,
+    Deserialize,
+    Selectable,
+)]
+#[diesel(table_name = pod_syscalls)]
+#[diesel(primary_key(uuid))]
+pub struct PodSyscalls{
+    pub uuid: String,
+    pub pod_name: Option<String>,
+    pub pod_namespace: Option<String>,
+    pub syscalls: Option<String>,
     pub time_stamp: NaiveDateTime,
 }

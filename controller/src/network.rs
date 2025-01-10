@@ -48,7 +48,7 @@ pub struct TcpData {
     pub kind: u16,
 }
 
-pub async fn handle_event(data: &TcpData, pod_data: &PodInspect) {
+pub async fn handle_network_event(data: &TcpData, pod_data: &PodInspect) {
     let src = u32::from_be(data.saddr);
     let dst = u32::from_be(data.daddr);
     let sport = data.sport;

@@ -1,23 +1,15 @@
-// SPDX-License-Identifier: (LGPL-2.1 OR BSD-2-Clause)
-
 use std::collections::BTreeMap;
 use std::env;
-use std::fmt;
 use std::mem::MaybeUninit;
-use std::net::IpAddr;
-use std::net::Ipv4Addr;
-use std::str;
 use std::sync::Arc;
-use std::thread;
-use std::time::Duration;
 use kube_guardian::network::tcpprobe::TcpProbeSkelBuilder;
 use kube_guardian::service_watcher::watch_service;
+use kube_guardian::syscall::handle_syscall_event;
+use kube_guardian::syscall::sycallprobe::SyscallSkelBuilder;
+use kube_guardian::syscall::SyscallData;
 use tokio::sync::mpsc;
 use tokio::sync::Mutex;
-
-use anyhow::bail;
 use anyhow::Result;
-use futures::channel::mpsc::Receiver;
 use libbpf_rs::skel::OpenSkel;
 use libbpf_rs::skel::Skel;
 use libbpf_rs::skel::SkelBuilder;
@@ -27,41 +19,11 @@ use libbpf_rs::PerfBufferBuilder;
 
 
 use kube_guardian::models::PodInspect;
-use kube_guardian::network::handle_event;
 use kube_guardian::network::TcpData;
 use kube_guardian::pod_watcher::watch_pods;
 use kube_guardian::error::Error;
-
-mod syscall {
-    include!(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/src/bpf/syscall.skel.rs"
-    ));
-}
-
-use syscall::*;
-
-
-
-#[repr(C)]
-pub struct UdpData {
-    pub inum: u64,
-    saddr: u32,
-    daddr: u32,
-    sport: u16,
-    dport: u16,
-}
-
-fn handle_lost_events(cpu: i32, count: u64) {
-    eprintln!("Lost {count} events on CPU {cpu}");
-}
-
-
-
 use tokio::task;
-
 use tokio::sync::Mutex as TokioMutex;
-use futures::StreamExt;
 use tokio::task::JoinHandle;
 
 
@@ -74,30 +36,53 @@ async fn main() -> Result<()> {
     let (tx, mut rx) = mpsc::channel(100); // Use tokio's mpsc channel
     let pod_c = Arc::clone(&c);
 
-    let (event_sender, event_receiver) = mpsc::channel::<EventData>(1000);
-    let container_map_tcp = Arc::clone(&c);
+    let (network_event_sender, network_event_receiver) = mpsc::channel::<NetworkEventData>(1000);
+    let (syscall_event_sender, syscall_event_receiver) = mpsc::channel::<SyscallEventData>(1000);
+    let container_map = Arc::clone(&c);
 
     let pods = watch_pods(node_name, tx, pod_c);
     let service = watch_service();
-    let event_handler = handle_events(event_receiver, container_map_tcp);
+    let network_event_handler = handle_network_events(network_event_receiver, Arc::clone(&container_map));
+    let syscall_event_handler = handle_syscall_events(syscall_event_receiver, container_map);
 
     // Spawn the eBPF handling task
     let ebpf_handle:JoinHandle<Result<(), Error>>  = task::spawn_blocking(move || {
         let mut open_object = MaybeUninit::uninit();
         let skel_builder = TcpProbeSkelBuilder::default();
         let tcp_probe_skel = skel_builder.open(&mut open_object).unwrap();
-        let mut sk = tcp_probe_skel.load().unwrap();
-        sk.attach().unwrap();
+        let mut network_sk = tcp_probe_skel.load().unwrap();
+        network_sk.attach().unwrap();
 
-        let perf = PerfBufferBuilder::new(&sk.maps.tracept_events)
+        let mut open_object = MaybeUninit::uninit();
+
+        let skel_builder = SyscallSkelBuilder::default();
+        let syscall_probe_skel = skel_builder.open(&mut open_object).unwrap();
+        let mut syscall_sk = syscall_probe_skel.load().unwrap();
+        syscall_sk.attach().unwrap();
+
+
+        let network_perf = PerfBufferBuilder::new(&network_sk.maps.tracept_events)
             .sample_cb(move |_cpu, data: &[u8]| {
                 let tcp_data: TcpData = unsafe { *(data.as_ptr() as *const TcpData) };
-                let event_data = EventData {
+                let event_data = NetworkEventData {
                     inum: tcp_data.inum,
                     tcp_data,
                 };
-                if let Err(e) = event_sender.blocking_send(event_data) {
+                if let Err(e) = network_event_sender.blocking_send(event_data) {
                     eprintln!("Failed to send TCP event: {:?}", e);
+                }
+            })
+            .build()
+            .unwrap();
+
+            let syscall_perf = PerfBufferBuilder::new(&syscall_sk.maps.syscall_events)
+            .sample_cb(move |_cpu: i32, data: &[u8]| {
+                let syscall_data: SyscallData = unsafe { *(data.as_ptr() as *const SyscallData) };
+                let syscall_event_data = SyscallEventData {
+                    syscall_data: syscall_data,
+                };
+                if let Err(e) = syscall_event_sender.blocking_send(syscall_event_data) {
+                    eprintln!("Failed to send Syscakll event: {:?}", e);
                 }
             })
             .build()
@@ -105,14 +90,17 @@ async fn main() -> Result<()> {
 
  
         loop {
-            perf.poll(std::time::Duration::from_millis(100)).unwrap();
-            // perf_udp.poll(std::time::Duration::from_millis(100)).unwrap();
+            network_perf.poll(std::time::Duration::from_millis(100)).unwrap();
+            syscall_perf.poll(std::time::Duration::from_millis(100)).unwrap();
+        
 
             // Process any incoming messages from the pod watcher
             if let Ok(inum) = rx.try_recv() {
                 println!("Received inode number: {}", inum);
-                sk.maps.inode_num.update(&inum.to_ne_bytes(), &1_u32.to_ne_bytes(), MapFlags::ANY).unwrap();
+                network_sk.maps.inode_num.update(&inum.to_ne_bytes(), &1_u32.to_ne_bytes(), MapFlags::ANY).unwrap();
+                syscall_sk.maps.inode_num.update(&inum.to_ne_bytes(), &1_u32.to_ne_bytes(), MapFlags::ANY).unwrap();
             }
+           
         }
         
     });
@@ -121,30 +109,55 @@ async fn main() -> Result<()> {
     _ = tokio::try_join!(
         service,
         pods,
-        event_handler,
+        network_event_handler,
+        syscall_event_handler,
         async { ebpf_handle.await.unwrap() }
     ).unwrap();
     Ok(())
 }
 
 #[derive(Clone)]
-struct EventData {
+struct NetworkEventData {
     inum: u64,
     tcp_data: TcpData,
 }
 
-async fn handle_events(
-    mut event_receiver: tokio::sync::mpsc::Receiver<EventData>,
+#[derive(Clone)]
+struct SyscallEventData {
+    syscall_data: SyscallData,
+}
+
+
+async fn handle_network_events(
+    mut event_receiver: tokio::sync::mpsc::Receiver<NetworkEventData>,
     container_map_tcp: Arc<TokioMutex<BTreeMap<u64, PodInspect>>>,
 )->Result<(), Error> {
     while let Some(event) = event_receiver.recv().await {
         let container_map = container_map_tcp.lock().await;
         if let Some(pod_inspect) = container_map.get(&event.inum) {
-            handle_event(&event.tcp_data, pod_inspect).await;
+            //handle_network_event(&event.tcp_data, pod_inspect).await;
         }
     }
     Ok(())
 }
+
+
+async fn handle_syscall_events(
+    mut event_receiver: mpsc::Receiver<SyscallEventData>,
+    container_map_udp: Arc<Mutex<BTreeMap<u64, PodInspect>>>,
+) -> Result<(), Error> {
+    while let Some(event) = event_receiver.recv().await {
+       
+        let container_map = container_map_udp.lock().await;
+        if let Some(pod_inspect) = container_map.get(&event.syscall_data.inum ) {
+            println!("Pod {} made a syscall {}", pod_inspect.status.pod_name ,event.syscall_data.sysnbr );
+          
+            // handle_syscall_event(&event.syscall_data, pod_inspect).await;
+        }
+    }
+    Ok(())
+}
+
 
 pub fn init_logger() {
     // check the rust log

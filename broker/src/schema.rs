@@ -26,6 +26,17 @@ diesel::table! {
 }
 
 diesel::table! {
+    pod_syscalls (uuid) {
+        uuid -> Varchar,
+        pod_name -> Nullable<Varchar>,
+        pod_namespace -> Nullable<Varchar>,
+        syscalls -> Nullable<Varchar>,
+        time_stamp -> Timestamp,
+    }
+}
+
+
+diesel::table! {
     svc_details (svc_ip) {
         svc_ip -> Varchar,
         svc_name -> Nullable<Varchar>,
