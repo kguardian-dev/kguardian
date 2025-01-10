@@ -49,7 +49,7 @@ Example:
 # Download the release and set it as executable
 wget -O advisor https://github.com/xentra-ai/kube-guardian/releases/download/v0.0.4/advisor-linux-amd64
 chmod +x advisor
-mv advisor /usr/local/bin/kubectl-advisor
+sudo mv advisor /usr/local/bin/kubectl-advisor
 ```
 
 ## 🔨 Usage
