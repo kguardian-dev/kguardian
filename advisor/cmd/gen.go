@@ -68,3 +68,54 @@ var networkPolicyCmd = &cobra.Command{
 		close(stopChan)
 	},
 }
+
+var seccompCmd = &cobra.Command{
+	Use:     "seccomp [pod-name]",
+	Aliases: []string{"secp"},
+	Short:   "Generate seccomp profile",
+	Args:    cobra.MaximumNArgs(1),
+	Run: func(cmd *cobra.Command, args []string) {
+		config, ok := cmd.Context().Value(k8s.ConfigKey).(*k8s.Config)
+		if !ok {
+			log.Fatal().Msg("Failed to retrieve Kubernetes configuration")
+		}
+
+		// Get the namespace from kubeConfigFlags
+		namespace, _, err := kubeConfigFlags.ToRawKubeConfigLoader().Namespace()
+		if err != nil {
+			log.Fatal().Err(err).Msg("Failed to get namespace")
+		}
+
+		options := k8s.GenerateOptions{}
+
+		if allNamespaces {
+			options.Mode = k8s.AllPodsInAllNamespaces
+		} else if allInNamespace {
+			options.Mode = k8s.AllPodsInNamespace
+			options.Namespace = namespace
+		} else {
+			// Validate that a pod name is provided
+			if len(args) != 1 {
+				_ = cmd.Usage()
+				return
+			}
+			options.Mode = k8s.SinglePod
+			options.PodName = args[0]
+			options.Namespace = namespace
+		}
+
+		// Set up port forwarding
+		stopChan, errChan, done := k8s.PortForward(config)
+		<-done // Block until port-forwarding is set up
+		go func() {
+			for err := range errChan {
+				log.Fatal().Err(err).Msg("Error setting up port-forwarding")
+			}
+		}()
+		log.Debug().Msg("Port forwarding set up successfully.")
+
+		// Generate seccomp profiles
+		k8s.GenerateSeccompProfile(options, config)
+		close(stopChan)
+	},
+}
