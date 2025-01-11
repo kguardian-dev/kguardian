@@ -2,7 +2,7 @@ use std::error::Error;
 
 use actix_web::{get, web, App, HttpResponse, HttpServer};
 use api::{
-    add_pod_details, add_pods, add_svc_details, establish_connection, get_pod_by_ip,
+    add_pod_details, add_pods, add_svc_details, add_pods_syscalls, establish_connection, get_pod_by_ip,
     get_pod_details, get_pod_traffic, get_pod_traffic_name, get_svc_by_ip,
 };
 
@@ -43,6 +43,7 @@ async fn main() -> Result<(), std::io::Error> {
             .app_data(web::Data::new(pool.clone()))
             .service(add_pods)
             .service(add_pod_details)
+            .service(add_pods_syscalls)
             .service(get_pod_traffic)
             .service(get_pod_details)
             .service(add_svc_details)

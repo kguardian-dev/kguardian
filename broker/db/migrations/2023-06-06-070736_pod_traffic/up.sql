@@ -32,9 +32,10 @@ CREATE TABLE svc_details (
 
 
 CREATE TABLE pod_syscalls (
-  uuid VARCHAR PRIMARY KEY,
-  pod_name VARCHAR,
+  pod_name VARCHAR PRIMARY KEY,
   pod_namespace VARCHAR,
-  syscall VARCHAR,
+  syscalls VARCHAR,
+  arch VARCHAR,
+  time_stamp TIMESTAMP NOT NULL
 );
 

@@ -26,15 +26,14 @@ diesel::table! {
 }
 
 diesel::table! {
-    pod_syscalls (uuid) {
-        uuid -> Varchar,
-        pod_name -> Nullable<Varchar>,
-        pod_namespace -> Nullable<Varchar>,
-        syscalls -> Nullable<Varchar>,
+    pod_syscalls (pod_name) {
+        pod_name -> Varchar,
+        pod_namespace -> Varchar,
+        syscalls -> Varchar,
+        arch -> Varchar,
         time_stamp -> Timestamp,
     }
 }
-
 
 diesel::table! {
     svc_details (svc_ip) {
@@ -46,4 +45,4 @@ diesel::table! {
     }
 }
 
-diesel::allow_tables_to_appear_in_same_query!(pod_details, pod_traffic, svc_details,);
+diesel::allow_tables_to_appear_in_same_query!(pod_details, pod_traffic, svc_details,pod_syscalls,);

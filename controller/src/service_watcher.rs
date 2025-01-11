@@ -55,7 +55,7 @@ async fn update_serviceinfo(svc: Service) -> Result<(), Error> {
         service_spec: Some(json!(svc)),
         time_stamp: Utc::now().naive_utc(),
     };
-    api_post_call(json!(z), "netpol/svc").await?;
+    api_post_call(json!(z), "svc/spec").await?;
     Ok(())
 }
 

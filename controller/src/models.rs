@@ -69,3 +69,12 @@ pub struct PodDetail {
     pub pod_obj: Option<serde_json::Value>,
     pub time_stamp: NaiveDateTime,
 }
+
+#[derive(Debug, Default, Serialize)]
+pub struct SyscallData {
+    pub pod_name: String,
+    pub pod_namespace: String,
+    pub syscalls: String,
+    pub arch: String,
+    pub time_stamp: NaiveDateTime,
+}

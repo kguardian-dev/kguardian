@@ -109,7 +109,7 @@ async fn update_pods_details(pod: &Pod) -> Result<Option<String>, Error> {
             pod_obj: Some(json!(pod)),
             time_stamp: Utc::now().naive_utc(),
         };
-        api_post_call(json!(z), "netpol/podspec").await?;
+        api_post_call(json!(z), "pod/spec").await?;
         pod_ip_address = Some(pod_ip.to_string());
         return Ok(pod_ip_address);
     }

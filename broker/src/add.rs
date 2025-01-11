@@ -1,17 +1,17 @@
-use crate::{schema, PodDetail, PodTraffic, SvcDetail};
+use crate::{schema, PodDetail, PodSyscalls, PodTraffic, SvcDetail};
 use actix_web::{post, web, Error, HttpResponse};
 use diesel::pg::PgConnection;
 use diesel::r2d2::{self, ConnectionManager};
+use std::clone::Clone;
 
 use diesel::prelude::*;
 use tracing::{debug, info};
 
 type DbPool = r2d2::Pool<ConnectionManager<PgConnection>>;
 type DbError = Box<dyn std::error::Error + Send + Sync>;
-/// Inserts new user with name defined in form.
-///
 
-#[post("/netpol/pods")]
+
+#[post("/pod/traffic")]
 pub async fn add_pods(
     pool: web::Data<DbPool>,
     form: web::Json<PodTraffic>,
@@ -56,7 +56,7 @@ pub fn create_pod_traffic(
     Ok(w.0)
 }
 
-#[post("/netpol/podspec")]
+#[post("/pod/spec")]
 pub async fn add_pod_details(
     pool: web::Data<DbPool>,
     form: web::Json<PodDetail>,
@@ -97,7 +97,7 @@ pub fn upsert_pod_details(
     Ok(w.0)
 }
 
-#[post("/netpol/svc")]
+#[post("/svc/spec")]
 pub async fn add_svc_details(
     pool: web::Data<DbPool>,
     form: web::Json<SvcDetail>,
@@ -177,4 +177,82 @@ impl PodTraffic {
             .optional()?;
         Ok(row)
     }
+}
+
+impl PodSyscalls {
+    pub fn get_row(&self, conn: &mut PgConnection) -> Result<Option<PodSyscalls>, DbError> {
+        use schema::pod_syscalls::dsl::*;
+
+        info!(
+            "pod_name: {:?}, pod_namespace: {:?}, syscalls: {:?}, arch: {:?}",
+            &self.pod_name, &self.pod_namespace, &self.syscalls, &self.arch
+        );
+
+        let row = pod_syscalls
+            .filter(pod_name.eq(&self.pod_name))
+            .filter(pod_namespace.eq(&self.pod_namespace))
+            .filter(arch.eq(&self.arch))
+            .first::<PodSyscalls>(conn)
+            .optional()?;
+
+        Ok(row)
+    }
+}
+
+#[post("/pod/syscalls")]
+pub async fn add_pods_syscalls(
+    pool: web::Data<DbPool>,
+    form: web::Json<PodSyscalls>,
+) -> Result<HttpResponse, Error> {
+    info!("Insert pod syscall details table");
+
+    let pods = web::block(move || {
+        let mut conn = pool.get()?;
+        create_pod_syscalls(&mut conn, form)
+    })
+    .await?
+    .map_err(actix_web::error::ErrorInternalServerError)?;
+
+    Ok(HttpResponse::Ok().json(pods))
+}
+
+pub fn create_pod_syscalls(
+    conn: &mut PgConnection,
+    w: web::Json<PodSyscalls>,
+) -> Result<PodSyscalls, DbError> {
+    use schema::pod_syscalls::dsl::*;
+
+    debug!(
+        "Storing pod details {:?} into pod_syscalls table",
+        w.pod_name
+    );
+
+    let existing_row = w.get_row(conn)?;
+    let new_syscall_number = &w.syscalls.clone();
+
+    if let Some(mut row) = existing_row {
+        let mut syscall_list: Vec<&str> =
+            row.syscalls.split(',').collect();
+        if !syscall_list.contains(&new_syscall_number.as_str()) {
+            syscall_list.push(new_syscall_number);
+            row.syscalls = syscall_list.join(",");
+
+            diesel::update(pod_syscalls.filter(pod_name.eq(&row.pod_name)))
+                .set(syscalls.eq(row.syscalls.clone()))
+                .execute(conn)
+                .expect("Error updating pod_syscalls");
+        }
+    } else {
+        diesel::insert_into(pod_syscalls)
+            .values(&*w)
+            .execute(conn)
+            .expect("Error inserting data into pod_syscalls");
+
+        info!(
+            "Success: pod {:?} inserted in pod_syscalls table",
+            w.pod_name
+        );
+    }
+
+    Ok(w.into_inner())
 }

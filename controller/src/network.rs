@@ -98,7 +98,7 @@ pub async fn handle_network_event(data: &TcpData, pod_data: &PodInspect) {
                                            // .to_string(),
     });
     info!("Record to be inserted {}", z.to_string());
-    api_post_call(z, "netpol/pods").await;
+    api_post_call(z, "pod/traffic").await;
 
     // this should await, but we in blocking thread
     // TODO, think of doing of better way, we wont know if the post call is done or not

@@ -6,7 +6,7 @@ use kube_guardian::network::tcpprobe::TcpProbeSkelBuilder;
 use kube_guardian::service_watcher::watch_service;
 use kube_guardian::syscall::handle_syscall_event;
 use kube_guardian::syscall::sycallprobe::SyscallSkelBuilder;
-use kube_guardian::syscall::SyscallData;
+use kube_guardian::syscall::SyscallTrace;
 use tokio::sync::mpsc;
 use tokio::sync::Mutex;
 use anyhow::Result;
@@ -77,7 +77,7 @@ async fn main() -> Result<()> {
 
             let syscall_perf = PerfBufferBuilder::new(&syscall_sk.maps.syscall_events)
             .sample_cb(move |_cpu: i32, data: &[u8]| {
-                let syscall_data: SyscallData = unsafe { *(data.as_ptr() as *const SyscallData) };
+                let syscall_data: SyscallTrace = unsafe { *(data.as_ptr() as *const SyscallTrace) };
                 let syscall_event_data = SyscallEventData {
                     syscall_data: syscall_data,
                 };
@@ -124,7 +124,7 @@ struct NetworkEventData {
 
 #[derive(Clone)]
 struct SyscallEventData {
-    syscall_data: SyscallData,
+    syscall_data: SyscallTrace,
 }
 
 
@@ -147,12 +147,9 @@ async fn handle_syscall_events(
     container_map_udp: Arc<Mutex<BTreeMap<u64, PodInspect>>>,
 ) -> Result<(), Error> {
     while let Some(event) = event_receiver.recv().await {
-       
         let container_map = container_map_udp.lock().await;
         if let Some(pod_inspect) = container_map.get(&event.syscall_data.inum ) {
-            println!("Pod {} made a syscall {}", pod_inspect.status.pod_name ,event.syscall_data.sysnbr );
-          
-            // handle_syscall_event(&event.syscall_data, pod_inspect).await;
+            handle_syscall_event(&event.syscall_data, pod_inspect).await;
         }
     }
     Ok(())
