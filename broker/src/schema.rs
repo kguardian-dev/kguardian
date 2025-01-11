@@ -45,4 +45,4 @@ diesel::table! {
     }
 }
 
-diesel::allow_tables_to_appear_in_same_query!(pod_details, pod_traffic, svc_details,pod_syscalls,);
+diesel::allow_tables_to_appear_in_same_query!(pod_details, pod_traffic, svc_details, pod_syscalls,);

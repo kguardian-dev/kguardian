@@ -1,5 +1,4 @@
 use std::env;
-use tracing_subscriber;
 
 pub fn init_logging() {
     // check the rust log

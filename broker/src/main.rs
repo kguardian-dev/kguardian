@@ -2,8 +2,9 @@ use std::error::Error;
 
 use actix_web::{get, web, App, HttpResponse, HttpServer};
 use api::{
-    add_pod_details, add_pods, add_svc_details, add_pods_syscalls, establish_connection, get_pod_by_ip,
-    get_pod_details, get_pod_traffic, get_pod_traffic_name, get_svc_by_ip,
+    add_pod_details, add_pods, add_pods_syscalls, add_svc_details, establish_connection,
+    get_pod_by_ip, get_pod_details, get_pod_syscall_name, get_pod_traffic, get_pod_traffic_name,
+    get_svc_by_ip,
 };
 
 use diesel::r2d2;
@@ -11,7 +12,7 @@ use telemetry::init_logging;
 mod telemetry;
 
 use diesel_migrations::{embed_migrations, EmbeddedMigrations, MigrationHarness};
-use tracing::{error, info};
+use tracing::info;
 pub const MIGRATIONS: EmbeddedMigrations = embed_migrations!("./db/migrations");
 
 type DB = diesel::pg::Pg;
@@ -34,7 +35,7 @@ async fn main() -> Result<(), std::io::Error> {
     let mut x = pool.get().unwrap();
     let r = run_migrations(&mut x);
     if let Err(e) = r {
-        panic!("DB Set up failed");
+        panic!("DB Set up failed {}",e);
     } else {
         info!("DB setup success");
     }
@@ -50,6 +51,7 @@ async fn main() -> Result<(), std::io::Error> {
             .service(get_pod_by_ip)
             .service(get_svc_by_ip)
             .service(get_pod_traffic_name)
+            .service(get_pod_syscall_name)
             .service(health_check)
     })
     .bind(("0.0.0.0", 9090))?
@@ -57,7 +59,6 @@ async fn main() -> Result<(), std::io::Error> {
     .await
 }
 
-/// Inserts new user with name defined in form.
 #[get("/health")]
 pub async fn health_check() -> HttpResponse {
     HttpResponse::Ok()
