@@ -1,15 +1,14 @@
+use crate::{api_post_call, Error, SvcDetail};
 use chrono::Utc;
 use futures::TryStreamExt;
 use k8s_openapi::api::core::v1::Service;
 use kube::{
-    runtime::{ watcher, WatchStreamExt},
+    runtime::{watcher, WatchStreamExt},
     Api, Client, ResourceExt,
 };
 use serde_json::json;
-use tracing::{warn,error};
 use tracing::info;
-use crate::{api_post_call, Error,  SvcDetail};
-
+use tracing::{error, warn};
 
 pub async fn watch_service() -> Result<(), Error> {
     let c = Client::try_default().await?;

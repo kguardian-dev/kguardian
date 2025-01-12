@@ -1,3 +1,4 @@
+use crate::{api_post_call, Error, PodDetail, PodInfo, PodInspect};
 use chrono::Utc;
 use futures::TryStreamExt;
 use k8s_openapi::api::core::v1::Pod;
@@ -9,9 +10,6 @@ use serde_json::json;
 use std::{collections::BTreeMap, sync::Arc};
 use tokio::sync::Mutex;
 use tracing::info;
-use crate::{api_post_call, Error, PodDetail, PodInfo, PodInspect};
-
-
 
 use tokio::sync::mpsc;
 pub async fn watch_pods(

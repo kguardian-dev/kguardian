@@ -22,23 +22,17 @@ fn main() {
     .join("bpf")
     .join("tcp_probe.skel.rs");
 
-
-
-        SkeletonBuilder::new()
+    SkeletonBuilder::new()
         .source(SYSCALL_SRC)
-        .clang_args([
-            OsStr::new("-I"),
-        ])
+        .clang_args([OsStr::new("-I")])
         .build_and_generate(&out)
         .unwrap();
 
-        SkeletonBuilder::new()
+    SkeletonBuilder::new()
         .source(TCP_PROBE_SRC)
-        .clang_args([
-            OsStr::new("-I"),
-        ])
+        .clang_args([OsStr::new("-I")])
         .build_and_generate(&tcp_probe_out)
         .unwrap();
 
-        println!("cargo:rerun-if-changed=src/bpf");
+    println!("cargo:rerun-if-changed=src/bpf");
 }

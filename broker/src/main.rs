@@ -35,7 +35,7 @@ async fn main() -> Result<(), std::io::Error> {
     let mut x = pool.get().unwrap();
     let r = run_migrations(&mut x);
     if let Err(e) = r {
-        panic!("DB Set up failed {}",e);
+        panic!("DB Set up failed {}", e);
     } else {
         info!("DB setup success");
     }

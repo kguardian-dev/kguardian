@@ -1,32 +1,30 @@
-use std::collections::BTreeMap;
-use std::env;
-use std::mem::MaybeUninit;
-use std::sync::Arc;
+use anyhow::Result;
 use kube_guardian::network::handle_network_event;
 use kube_guardian::network::tcpprobe::TcpProbeSkelBuilder;
 use kube_guardian::service_watcher::watch_service;
 use kube_guardian::syscall::handle_syscall_event;
 use kube_guardian::syscall::sycallprobe::SyscallSkelBuilder;
 use kube_guardian::syscall::SyscallTrace;
-use tokio::sync::mpsc;
-use tokio::sync::Mutex;
-use anyhow::Result;
 use libbpf_rs::skel::OpenSkel;
 use libbpf_rs::skel::Skel;
 use libbpf_rs::skel::SkelBuilder;
 use libbpf_rs::MapCore;
 use libbpf_rs::MapFlags;
 use libbpf_rs::PerfBufferBuilder;
+use std::collections::BTreeMap;
+use std::env;
+use std::mem::MaybeUninit;
+use std::sync::Arc;
+use tokio::sync::mpsc;
+use tokio::sync::Mutex;
 
-
+use kube_guardian::error::Error;
 use kube_guardian::models::PodInspect;
 use kube_guardian::network::TcpData;
 use kube_guardian::pod_watcher::watch_pods;
-use kube_guardian::error::Error;
-use tokio::task;
 use tokio::sync::Mutex as TokioMutex;
+use tokio::task;
 use tokio::task::JoinHandle;
-
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -43,11 +41,12 @@ async fn main() -> Result<()> {
 
     let pods = watch_pods(node_name, tx, pod_c);
     let service = watch_service();
-    let network_event_handler = handle_network_events(network_event_receiver, Arc::clone(&container_map));
+    let network_event_handler =
+        handle_network_events(network_event_receiver, Arc::clone(&container_map));
     let syscall_event_handler = handle_syscall_events(syscall_event_receiver, container_map);
 
     // Spawn the eBPF handling task
-    let ebpf_handle:JoinHandle<Result<(), Error>>  = task::spawn_blocking(move || {
+    let ebpf_handle: JoinHandle<Result<(), Error>> = task::spawn_blocking(move || {
         let mut open_object = MaybeUninit::uninit();
         let skel_builder = TcpProbeSkelBuilder::default();
         let tcp_probe_skel = skel_builder.open(&mut open_object).unwrap();
@@ -60,7 +59,6 @@ async fn main() -> Result<()> {
         let syscall_probe_skel = skel_builder.open(&mut open_object).unwrap();
         let mut syscall_sk = syscall_probe_skel.load().unwrap();
         syscall_sk.attach().unwrap();
-
 
         let network_perf = PerfBufferBuilder::new(&network_sk.maps.tracept_events)
             .sample_cb(move |_cpu, data: &[u8]| {
@@ -76,12 +74,10 @@ async fn main() -> Result<()> {
             .build()
             .unwrap();
 
-            let syscall_perf = PerfBufferBuilder::new(&syscall_sk.maps.syscall_events)
+        let syscall_perf = PerfBufferBuilder::new(&syscall_sk.maps.syscall_events)
             .sample_cb(move |_cpu: i32, data: &[u8]| {
                 let syscall_data: SyscallTrace = unsafe { *(data.as_ptr() as *const SyscallTrace) };
-                let syscall_event_data = SyscallEventData {
-                    syscall_data,
-                };
+                let syscall_event_data = SyscallEventData { syscall_data };
                 if let Err(e) = syscall_event_sender.blocking_send(syscall_event_data) {
                     eprintln!("Failed to send Syscakll event: {:?}", e);
                 }
@@ -89,21 +85,29 @@ async fn main() -> Result<()> {
             .build()
             .unwrap();
 
- 
         loop {
-            network_perf.poll(std::time::Duration::from_millis(100)).unwrap();
-            syscall_perf.poll(std::time::Duration::from_millis(100)).unwrap();
-        
+            network_perf
+                .poll(std::time::Duration::from_millis(100))
+                .unwrap();
+            syscall_perf
+                .poll(std::time::Duration::from_millis(100))
+                .unwrap();
 
             // Process any incoming messages from the pod watcher
             if let Ok(inum) = rx.try_recv() {
                 println!("Received inode number: {}", inum);
-                network_sk.maps.inode_num.update(&inum.to_ne_bytes(), &1_u32.to_ne_bytes(), MapFlags::ANY).unwrap();
-                syscall_sk.maps.inode_num.update(&inum.to_ne_bytes(), &1_u32.to_ne_bytes(), MapFlags::ANY).unwrap();
+                network_sk
+                    .maps
+                    .inode_num
+                    .update(&inum.to_ne_bytes(), &1_u32.to_ne_bytes(), MapFlags::ANY)
+                    .unwrap();
+                syscall_sk
+                    .maps
+                    .inode_num
+                    .update(&inum.to_ne_bytes(), &1_u32.to_ne_bytes(), MapFlags::ANY)
+                    .unwrap();
             }
-           
         }
-        
     });
 
     // Wait for all tasks to complete (they should run indefinitely)
@@ -113,7 +117,8 @@ async fn main() -> Result<()> {
         network_event_handler,
         syscall_event_handler,
         async { ebpf_handle.await.unwrap() }
-    ).unwrap();
+    )
+    .unwrap();
     Ok(())
 }
 
@@ -128,11 +133,10 @@ struct SyscallEventData {
     syscall_data: SyscallTrace,
 }
 
-
 async fn handle_network_events(
     mut event_receiver: tokio::sync::mpsc::Receiver<NetworkEventData>,
     container_map_tcp: Arc<TokioMutex<BTreeMap<u64, PodInspect>>>,
-)->Result<(), Error> {
+) -> Result<(), Error> {
     while let Some(event) = event_receiver.recv().await {
         let container_map = container_map_tcp.lock().await;
         if let Some(pod_inspect) = container_map.get(&event.inum) {
@@ -142,20 +146,18 @@ async fn handle_network_events(
     Ok(())
 }
 
-
 async fn handle_syscall_events(
     mut event_receiver: mpsc::Receiver<SyscallEventData>,
     container_map_udp: Arc<Mutex<BTreeMap<u64, PodInspect>>>,
 ) -> Result<(), Error> {
     while let Some(event) = event_receiver.recv().await {
         let container_map = container_map_udp.lock().await;
-        if let Some(pod_inspect) = container_map.get(&event.syscall_data.inum ) {
+        if let Some(pod_inspect) = container_map.get(&event.syscall_data.inum) {
             handle_syscall_event(&event.syscall_data, pod_inspect).await?
         }
     }
     Ok(())
 }
-
 
 pub fn init_logger() {
     // check the rust log
@@ -185,4 +187,3 @@ pub fn init_logger() {
         .with_timer(timer)
         .init();
 }
-

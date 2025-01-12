@@ -1,7 +1,7 @@
-use serde_json::json;
 use chrono::Utc;
-use tracing::info;
 use libseccomp::{ScmpArch, ScmpSyscall};
+use serde_json::json;
+use tracing::info;
 
 use crate::{api_post_call, Error, PodInspect, SyscallData};
 
@@ -13,18 +13,18 @@ pub mod sycallprobe {
 }
 
 #[repr(C)]
-#[derive(Clone,Copy)]
+#[derive(Clone, Copy)]
 pub struct SyscallTrace {
     pub inum: u64,
     pub sysnbr: u32,
 }
 
-
 pub async fn handle_syscall_event(data: &SyscallTrace, pod_data: &PodInspect) -> Result<(), Error> {
     let pod_name = pod_data.status.pod_name.to_string();
     let pod_namespace = pod_data.status.pod_namespace.to_owned().unwrap();
     let syscall_number = data.sysnbr;
-    let syscall_name = get_syscall_name(syscall_number.try_into().unwrap()).unwrap_or_else(|| format!( "{}", syscall_number));
+    let syscall_name = get_syscall_name(syscall_number.try_into().unwrap())
+        .unwrap_or_else(|| format!("{}", syscall_number));
 
     let z = json!(SyscallData {
         pod_name,
@@ -35,7 +35,6 @@ pub async fn handle_syscall_event(data: &SyscallTrace, pod_data: &PodInspect) ->
     });
     info!("Record to be inserted {}", z.to_string());
     api_post_call(z, "pod/syscalls").await
-    
 }
 
 fn get_syscall_name(syscall_number: i32) -> Option<String> {

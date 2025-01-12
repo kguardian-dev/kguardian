@@ -1,9 +1,7 @@
 use crate::PodInspect;
 use containerd_client::{
     connect,
-    services::v1::{
-       tasks_client::TasksClient,  GetRequest,
-    },
+    services::v1::{tasks_client::TasksClient, GetRequest},
     tonic::{transport::Channel, Request},
     with_namespace,
 };
@@ -33,7 +31,6 @@ impl PodInspect {
             None
         }
     }
-
 
     fn set_container_id(mut self, container_id: String) -> Self {
         self.container_id = Some(container_id);
@@ -67,7 +64,7 @@ impl PodInspect {
 
     fn get_pid_for_children_namespace_id(mut self) -> Self {
         if self.pid.is_some() {
-            if let Ok(process) = Process::new(self.pid.unwrap() as i32){
+            if let Ok(process) = Process::new(self.pid.unwrap() as i32) {
                 if let Ok(ns) = process.namespaces() {
                     if let Some(pid_for_children) = ns.0.get(&OsString::from("pid_for_children")) {
                         self.inode_num = Some(pid_for_children.identifier);

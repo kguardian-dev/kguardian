@@ -30,7 +30,6 @@ pub struct Config {
     pub metadata: Metadata,
 }
 
-
 #[derive(Debug, Default, Deserialize, Clone)]
 pub struct Metadata {
     pub name: String,

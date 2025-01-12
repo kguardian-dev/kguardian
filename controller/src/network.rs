@@ -1,6 +1,6 @@
-use std::net::{IpAddr, Ipv4Addr};
-use serde_json::json;
 use chrono::Utc;
+use serde_json::json;
+use std::net::{IpAddr, Ipv4Addr};
 use tracing::{debug, info};
 use uuid::Uuid;
 
@@ -14,7 +14,7 @@ pub mod tcpprobe {
 }
 
 #[repr(C)]
-#[derive(Clone,Copy)]
+#[derive(Clone, Copy)]
 pub struct TcpData {
     pub inum: u64,
     saddr: u32,
@@ -22,7 +22,7 @@ pub struct TcpData {
     daddr: u32,
     dport: u16,
     old_state: u16,
-    new_state : u16,
+    new_state: u16,
     pub kind: u16,
 }
 
@@ -35,27 +35,33 @@ pub async fn handle_network_event(data: &TcpData, pod_data: &PodInspect) -> Resu
     let mut pod_port = sport;
     let traffic_in_out_ip = IpAddr::V4(Ipv4Addr::from(dst)).to_string();
     let mut traffic_in_out_port = dport;
-    let mut traffic_type="" ;
+    let mut traffic_type = "";
 
     if data.kind.eq(&1) {
         traffic_type = "INGRESS";
         traffic_in_out_port = 0;
         protocol = "TCP";
- 
-    }else if data.kind.eq(&2) {
+    } else if data.kind.eq(&2) {
         traffic_type = "EGRESS";
         pod_port = 0;
         protocol = "TCP";
-    }else if data.kind.eq(&3){
+    } else if data.kind.eq(&3) {
         traffic_type = "EGRESS";
         pod_port = 0;
         traffic_in_out_port = dport;
         protocol = "UDP"
-
     }
-    debug!("Inum: {} src {}:{},dst {}:{}, old state {}. new state {}", data.inum,IpAddr::V4(Ipv4Addr::from(src)),sport, IpAddr::V4(Ipv4Addr::from(dst)), dport, data.old_state, data.new_state);
+    debug!(
+        "Inum: {} src {}:{},dst {}:{}, old state {}. new state {}",
+        data.inum,
+        IpAddr::V4(Ipv4Addr::from(src)),
+        sport,
+        IpAddr::V4(Ipv4Addr::from(dst)),
+        dport,
+        data.old_state,
+        data.new_state
+    );
 
-    
     let pod_name = pod_data.status.pod_name.to_string();
     let pod_namespace = pod_data.status.pod_namespace.to_owned();
     let pod_ip = pod_data.status.pod_ip.to_string();
@@ -75,5 +81,4 @@ pub async fn handle_network_event(data: &TcpData, pod_data: &PodInspect) -> Resu
     });
     info!("Record to be inserted {}", z.to_string());
     api_post_call(z, "pod/traffic").await
-
 }
