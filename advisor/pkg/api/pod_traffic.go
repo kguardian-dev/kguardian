@@ -108,7 +108,7 @@ func GetPodSpec(ip string) (*PodDetail, error) {
 
 	// If no pod details are found, return err
 	if details == nil {
-		return nil, fmt.Errorf("no pod traffic found in database")
+		return nil, fmt.Errorf("no pod details found in database")
 	}
 
 	return details, nil
