@@ -31,11 +31,16 @@ type ProfileOptions struct {
 }
 
 func GenerateSeccompProfile(options GenerateOptions, config *Config) {
+
+	var Architectures = map[string][]string{
+		"x86_64": {"SCMP_ARCH_X86_64"},
+		"ARM64":  {"SCMP_ARCH_ARM64"},
+	}
+
 	// Default profile options
 	profileOpts := ProfileOptions{
 		OutputDir:     "seccomp-profiles",
 		DefaultAction: "SCMP_ACT_ERRNO",
-		Architectures: []string{"SCMP_ARCH_X86_64", "SCMP_ARCH_ARM64"},
 	}
 
 	// Fetch pods based on options
@@ -56,10 +61,10 @@ func GenerateSeccompProfile(options GenerateOptions, config *Config) {
 
 		profile := SeccompProfile{
 			DefaultAction: profileOpts.DefaultAction,
-			Architectures: profileOpts.Architectures,
+			Architectures: Architectures[podSysCalls.Arch],
 			Syscalls: []Rule{
 				{
-					Names:  podSysCalls, // Assuming podSysCalls is []string
+					Names:  podSysCalls.Syscalls,
 					Action: "SCMP_ACT_ALLOW",
 				},
 			},

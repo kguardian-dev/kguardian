@@ -12,42 +12,52 @@ import (
 )
 
 type PodSysCall struct {
+	Syscalls []string `json:"syscalls"`
+	Arch     string   `json:"arch"`
+}
+
+type PodSysCallResponse struct {
 	PodName      string `json:"pod_name"`
 	PodNamespace string `json:"pod_namespace"`
 	Syscalls     string `json:"syscalls"`
 	Arch         string `json:"arch"`
 }
 
-func GetPodSysCall(podName string) ([]string, error) {
+func GetPodSysCall(podName string) (PodSysCall, error) {
 	time.Sleep(3 * time.Second)
 	apiURL := "http://127.0.0.1:9090/pod/syscalls/" + podName
 
 	resp, err := http.Get(apiURL)
 	if err != nil {
 		log.Error().Err(err).Msg("GetPodSysCall: Error making GET request")
-		return nil, err
+		return PodSysCall{}, err
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("GetPodSysCall: received non-OK HTTP status code: %v", resp.StatusCode)
+		return PodSysCall{}, fmt.Errorf("GetPodSysCall: received non-OK HTTP status code: %v", resp.StatusCode)
 	}
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		log.Error().Err(err).Msg("GetPodSysCall: Error reading response body")
-		return nil, err
+		return PodSysCall{}, err
 	}
 
-	var podSysCalls []PodSysCall
-	if err := json.Unmarshal(body, &podSysCalls); err != nil {
+	var podSysCallsResponse []PodSysCallResponse
+	if err := json.Unmarshal(body, &podSysCallsResponse); err != nil {
 		log.Error().Err(err).Msg("GetPodSysCall: Error unmarshalling JSON")
-		return nil, err
+		return PodSysCall{}, err
 	}
 
-	if len(podSysCalls) == 0 {
-		return nil, fmt.Errorf("GetPodSysCall: No pod syscall found in database")
+	if len(podSysCallsResponse) == 0 {
+		return PodSysCall{}, fmt.Errorf("GetPodSysCall: No pod syscall found in database")
 	}
 
-	return strings.Split(podSysCalls[0].Syscalls, ","), nil
+	var podSysCalls PodSysCall
+
+	podSysCalls.Syscalls = strings.Split(podSysCallsResponse[0].Syscalls, ",")
+	podSysCalls.Arch = podSysCallsResponse[0].Arch
+
+	return podSysCalls, nil
 }
