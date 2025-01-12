@@ -8,7 +8,7 @@ use kube::{
 use serde_json::json;
 use std::{collections::BTreeMap, sync::Arc};
 use tokio::sync::Mutex;
-use tracing::{warn,info,error};
+use tracing::info;
 use crate::{api_post_call, Error, PodDetail, PodInfo, PodInspect};
 
 
@@ -144,10 +144,10 @@ async fn process_container_ids(
     None
 }
 
-fn create_pod_info(pod: &Pod, pod_ip: &String) -> PodInfo {
+fn create_pod_info(pod: &Pod, pod_ip: &str) -> PodInfo {
     PodInfo {
         pod_name: pod.name_any(),
         pod_namespace: pod.metadata.namespace.to_owned(),
-        pod_ip: pod_ip.clone(),
+        pod_ip: pod_ip.to_string(),
     }
 }

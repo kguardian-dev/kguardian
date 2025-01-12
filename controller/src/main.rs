@@ -2,6 +2,7 @@ use std::collections::BTreeMap;
 use std::env;
 use std::mem::MaybeUninit;
 use std::sync::Arc;
+use kube_guardian::network::handle_network_event;
 use kube_guardian::network::tcpprobe::TcpProbeSkelBuilder;
 use kube_guardian::service_watcher::watch_service;
 use kube_guardian::syscall::handle_syscall_event;
@@ -79,7 +80,7 @@ async fn main() -> Result<()> {
             .sample_cb(move |_cpu: i32, data: &[u8]| {
                 let syscall_data: SyscallTrace = unsafe { *(data.as_ptr() as *const SyscallTrace) };
                 let syscall_event_data = SyscallEventData {
-                    syscall_data: syscall_data,
+                    syscall_data,
                 };
                 if let Err(e) = syscall_event_sender.blocking_send(syscall_event_data) {
                     eprintln!("Failed to send Syscakll event: {:?}", e);
@@ -135,7 +136,7 @@ async fn handle_network_events(
     while let Some(event) = event_receiver.recv().await {
         let container_map = container_map_tcp.lock().await;
         if let Some(pod_inspect) = container_map.get(&event.inum) {
-            //handle_network_event(&event.tcp_data, pod_inspect).await;
+            handle_network_event(&event.tcp_data, pod_inspect).await?
         }
     }
     Ok(())
@@ -149,7 +150,7 @@ async fn handle_syscall_events(
     while let Some(event) = event_receiver.recv().await {
         let container_map = container_map_udp.lock().await;
         if let Some(pod_inspect) = container_map.get(&event.syscall_data.inum ) {
-            handle_syscall_event(&event.syscall_data, pod_inspect).await;
+            handle_syscall_event(&event.syscall_data, pod_inspect).await?
         }
     }
     Ok(())

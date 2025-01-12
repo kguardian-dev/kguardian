@@ -1,15 +1,9 @@
-use std::{mem::MaybeUninit, net::{IpAddr, Ipv4Addr}};
-
-use libbpf_rs::{skel::{OpenSkel, Skel, SkelBuilder}, MapCore, PerfBufferBuilder};
 use serde_json::json;
-use sycallprobe::{SyscallSkel, SyscallSkelBuilder};
-use anyhow::Result;
-use chrono::{NaiveDateTime, Utc};
-use tracing::{debug, info};
-use uuid::Uuid;
-use libseccomp::{ScmpAction, ScmpArch, ScmpFilterContext, ScmpSyscall};
+use chrono::Utc;
+use tracing::info;
+use libseccomp::{ScmpArch, ScmpSyscall};
 
-use crate::{api_post_call, PodInspect, PodTraffic, SyscallData};
+use crate::{api_post_call, Error, PodInspect, SyscallData};
 
 pub mod sycallprobe {
     include!(concat!(
@@ -26,10 +20,7 @@ pub struct SyscallTrace {
 }
 
 
-pub async fn handle_syscall_event(data: &SyscallTrace, pod_data: &PodInspect) {
-    println!("Syscall event: {:?} for pod {}", data.sysnbr, pod_data.status.pod_name);
-
-     
+pub async fn handle_syscall_event(data: &SyscallTrace, pod_data: &PodInspect) -> Result<(), Error> {
     let pod_name = pod_data.status.pod_name.to_string();
     let pod_namespace = pod_data.status.pod_namespace.to_owned().unwrap();
     let syscall_number = data.sysnbr;
@@ -43,7 +34,7 @@ pub async fn handle_syscall_event(data: &SyscallTrace, pod_data: &PodInspect) {
         time_stamp: Utc::now().naive_utc()
     });
     info!("Record to be inserted {}", z.to_string());
-    api_post_call(z, "pod/syscalls").await;
+    api_post_call(z, "pod/syscalls").await
     
 }
 

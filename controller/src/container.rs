@@ -2,15 +2,14 @@ use crate::PodInspect;
 use containerd_client::{
     connect,
     services::v1::{
-        containers_client::ContainersClient, tasks_client::TasksClient, Container,
-        GetContainerRequest, GetRequest,
+       tasks_client::TasksClient,  GetRequest,
     },
     tonic::{transport::Channel, Request},
     with_namespace,
 };
 use procfs::process::Process;
 use regex::Regex;
-use std::{ffi::OsString, process::Command};
+use std::ffi::OsString;
 use tracing::*;
 
 static REGEX_CONTAINERD: &str = "containerd://(?P<container_id>[0-9a-zA-Z]*)";
@@ -24,13 +23,6 @@ impl PodInspect {
 
         if let Some(container_id) = container_id {
             let channel = connect("/run/containerd/containerd.sock").await.unwrap();
-            let mut ps = ContainersClient::new(channel.clone());
-            let req = GetContainerRequest {
-                id: container_id.to_string(),
-            };
-            let req: Request<GetContainerRequest> = with_namespace!(req, "k8s.io");
-            let container_resp = ps.get(req).await.unwrap();
-
             Some(
                 self.set_container_id(container_id)
                     .get_pid(channel)
@@ -75,7 +67,7 @@ impl PodInspect {
 
     fn get_pid_for_children_namespace_id(mut self) -> Self {
         if self.pid.is_some() {
-            if let Some(process) = Process::new(self.pid.unwrap() as i32).ok() {
+            if let Ok(process) = Process::new(self.pid.unwrap() as i32){
                 if let Ok(ns) = process.namespaces() {
                     if let Some(pid_for_children) = ns.0.get(&OsString::from("pid_for_children")) {
                         self.inode_num = Some(pid_for_children.identifier);

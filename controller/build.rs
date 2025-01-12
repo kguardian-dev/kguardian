@@ -22,8 +22,6 @@ fn main() {
     .join("bpf")
     .join("tcp_probe.skel.rs");
 
-    let arch = env::var("CARGO_CFG_TARGET_ARCH")
-        .expect("CARGO_CFG_TARGET_ARCH must be set in build script");
 
 
         SkeletonBuilder::new()
