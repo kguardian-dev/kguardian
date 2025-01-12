@@ -5,29 +5,33 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 	"time"
 
-	log "github.com/rs/zerolog/log"
+	"github.com/rs/zerolog/log"
 )
 
+type PodSysCall struct {
+	PodName      string `json:"pod_name"`
+	PodNamespace string `json:"pod_namespace"`
+	Syscalls     string `json:"syscalls"`
+	Arch         string `json:"arch"`
+}
+
 func GetPodSysCall(podName string) ([]string, error) {
-
 	time.Sleep(3 * time.Second)
-	// Specify the URL of the REST API endpoint you want to invoke.
-	apiURL := "http://127.0.0.1:9090/podsyscall/pod/" + podName
+	apiURL := "http://127.0.0.1:9090/pod/syscalls/" + podName
 
-	// Send an HTTP GET request to the API endpoint.
 	resp, err := http.Get(apiURL)
 	if err != nil {
 		log.Error().Err(err).Msg("GetPodSysCall: Error making GET request")
 		return nil, err
 	}
 	defer resp.Body.Close()
-	// Check the HTTP status code.
+
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("GetPodSysCall: received non-OK HTTP status code: %v", resp.StatusCode)
 	}
-	var podSysCall []string
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
@@ -35,16 +39,15 @@ func GetPodSysCall(podName string) ([]string, error) {
 		return nil, err
 	}
 
-	// Parse the JSON response and unmarshal it into the Go struct.
-	if err := json.Unmarshal([]byte(body), &podSysCall); err != nil {
-		log.Error().Err(err).Msg("GetPodSysCall: Error unmarshal JSON")
+	var podSysCalls []PodSysCall
+	if err := json.Unmarshal(body, &podSysCalls); err != nil {
+		log.Error().Err(err).Msg("GetPodSysCall: Error unmarshalling JSON")
 		return nil, err
 	}
 
-	// If no pod syscall is found, return err
-	if len(podSysCall) == 0 {
+	if len(podSysCalls) == 0 {
 		return nil, fmt.Errorf("GetPodSysCall: No pod syscall found in database")
 	}
 
-	return podSysCall, nil
+	return strings.Split(podSysCalls[0].Syscalls, ","), nil
 }
