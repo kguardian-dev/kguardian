@@ -1,3 +1,4 @@
+use crate::{api_post_call, Error, PodDetail, PodInfo, PodInspect};
 use chrono::Utc;
 use futures::TryStreamExt;
 use k8s_openapi::api::core::v1::Pod;
@@ -8,10 +9,7 @@ use kube::{
 use serde_json::json;
 use std::{collections::BTreeMap, sync::Arc};
 use tokio::sync::Mutex;
-use tracing::{warn,info,error};
-use crate::{api_post_call, Error, PodDetail, PodInfo, PodInspect};
-
-
+use tracing::info;
 
 use tokio::sync::mpsc;
 pub async fn watch_pods(
@@ -109,7 +107,7 @@ async fn update_pods_details(pod: &Pod) -> Result<Option<String>, Error> {
             pod_obj: Some(json!(pod)),
             time_stamp: Utc::now().naive_utc(),
         };
-        api_post_call(json!(z), "netpol/podspec").await?;
+        api_post_call(json!(z), "pod/spec").await?;
         pod_ip_address = Some(pod_ip.to_string());
         return Ok(pod_ip_address);
     }
@@ -144,10 +142,10 @@ async fn process_container_ids(
     None
 }
 
-fn create_pod_info(pod: &Pod, pod_ip: &String) -> PodInfo {
+fn create_pod_info(pod: &Pod, pod_ip: &str) -> PodInfo {
     PodInfo {
         pod_name: pod.name_any(),
         pod_namespace: pod.metadata.namespace.to_owned(),
-        pod_ip: pod_ip.clone(),
+        pod_ip: pod_ip.to_string(),
     }
 }

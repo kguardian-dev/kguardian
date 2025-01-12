@@ -26,6 +26,16 @@ diesel::table! {
 }
 
 diesel::table! {
+    pod_syscalls (pod_name) {
+        pod_name -> Varchar,
+        pod_namespace -> Varchar,
+        syscalls -> Varchar,
+        arch -> Varchar,
+        time_stamp -> Timestamp,
+    }
+}
+
+diesel::table! {
     svc_details (svc_ip) {
         svc_ip -> Varchar,
         svc_name -> Nullable<Varchar>,
@@ -35,4 +45,4 @@ diesel::table! {
     }
 }
 
-diesel::allow_tables_to_appear_in_same_query!(pod_details, pod_traffic, svc_details,);
+diesel::allow_tables_to_appear_in_same_query!(pod_details, pod_traffic, svc_details, pod_syscalls,);

@@ -1,20 +1,13 @@
 pub mod network;
-
-pub mod pod_watcher;
-use pod_watcher::watch_pods;
-
-pub mod service_watcher;
-use service_watcher::watch_service;
-
+pub mod syscall;
 
 pub mod error;
+pub mod pod_watcher;
+pub mod service_watcher;
 use error::*;
 
 pub mod models;
 use models::*;
-
-pub mod container;
-use container::*;
-
 pub mod client;
+pub mod container;
 use client::*;

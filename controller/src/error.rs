@@ -2,7 +2,6 @@ use thiserror::Error;
 
 #[derive(Error, Debug)]
 pub enum Error {
-
     #[error("Kubernetes reported error: {source}")]
     KubeError {
         #[from]

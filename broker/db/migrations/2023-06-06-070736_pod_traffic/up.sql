@@ -31,9 +31,11 @@ CREATE TABLE svc_details (
 );
 
 
--- UUID| POD_NAME | POD_NAMESPACE | POD_IP   |POD_PORT| TRAFFIC_TYPE | TRAFFIC_IN_OUT_IP| TRAFFIC_IN_OUT_PORT|
--- ----|----------|---------------|----------|--------|--------------|------------------|--------------------|
--- xxxx| ngix-123 | web           | 10.2.3.10|  8080  | INGRESS      | 10.3.4.10        | 9090               |
--- xxxx| ngix-123 | web           | 10.2.3.10|  6222  | EGRESS       | 10.3.4.10        | 9090               |
-
+CREATE TABLE pod_syscalls (
+  pod_name VARCHAR PRIMARY KEY,
+  pod_namespace VARCHAR,
+  syscalls VARCHAR,
+  arch VARCHAR,
+  time_stamp TIMESTAMP NOT NULL
+);
 

@@ -43,7 +43,7 @@ func GetPodTraffic(podName string) ([]PodTraffic, error) {
 
 	time.Sleep(3 * time.Second)
 	// Specify the URL of the REST API endpoint you want to invoke.
-	apiURL := "http://127.0.0.1:9090/podtraffic/pod/" + podName
+	apiURL := "http://127.0.0.1:9090/pod/traffic" + podName
 
 	// Send an HTTP GET request to the API endpoint.
 	resp, err := http.Get(apiURL)
@@ -82,7 +82,7 @@ func GetPodTraffic(podName string) ([]PodTraffic, error) {
 func GetPodSpec(ip string) (*PodDetail, error) {
 
 	// Specify the URL of the REST API endpoint you want to invoke.
-	apiURL := "http://127.0.0.1:9090/netpol/pod/" + ip
+	apiURL := "http://127.0.0.1:9090/pod/ip/" + ip
 
 	// Send an HTTP GET request to the API endpoint.
 	resp, err := http.Get(apiURL)
@@ -117,7 +117,7 @@ func GetPodSpec(ip string) (*PodDetail, error) {
 func GetSvcSpec(svcIp string) (*SvcDetail, error) {
 
 	// Specify the URL of the RESTAPI endpoint you want to invoke.
-	apiURL := "http://127.0.0.1:9090/netpol/svc/" + svcIp
+	apiURL := "http://127.0.0.1:9090/svc/ip/" + svcIp
 
 	// Send an HTTP GET request to the API endpoint.
 	resp, err := http.Get(apiURL)
