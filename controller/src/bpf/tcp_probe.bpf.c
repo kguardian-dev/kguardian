@@ -119,7 +119,7 @@ int trace_udp_send(struct pt_regs *ctx) {
     if (inum)
     {
         struct network_event_data event = {};
-        struct sock *sk = (struct sock *)PT_REGS_PARM1(ctx);
+        struct sock *sk = (struct sock *)(ctx);
         event.inum = pid_ns;
         bpf_probe_read(&event.saddr, sizeof(event.saddr), &sk->__sk_common.skc_rcv_saddr);
         bpf_probe_read(&event.daddr, sizeof(event.daddr), &sk->__sk_common.skc_daddr);
