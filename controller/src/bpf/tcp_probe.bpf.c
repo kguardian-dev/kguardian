@@ -80,6 +80,12 @@ int trace_tcp_connect(struct trace_event_raw_inet_sock_set_state *ctx)
             bpf_probe_read(&dport, sizeof(dport), &sk->__sk_common.skc_dport);
             bpf_probe_read_kernel(&tcp_event.saddr, sizeof(tcp_event.saddr), &sk->__sk_common.skc_rcv_saddr);
             bpf_probe_read_kernel(&tcp_event.daddr, sizeof(tcp_event.daddr), &sk->__sk_common.skc_daddr);
+
+            // Check for loopback destination (127.0.0.1 in network byte order)
+            if (tcp_event.daddr == bpf_htonl(0x7F000001)) {
+                return 0;
+            }
+
             tcp_event.sport = lport;
             tcp_event.dport = bpf_ntohs(dport);
             tcp_event.old_state = old_state;
