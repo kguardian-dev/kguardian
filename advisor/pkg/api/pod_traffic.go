@@ -54,7 +54,7 @@ func GetPodTraffic(podName string) ([]PodTraffic, error) {
 	defer resp.Body.Close()
 	// Check the HTTP status code.
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("received non-OK HTTP status code: %v", resp.StatusCode)
+		return nil, fmt.Errorf("GetPodTraffic: received non-OK HTTP status code: %v", resp.StatusCode)
 	}
 	var podTraffic []PodTraffic
 
@@ -66,13 +66,13 @@ func GetPodTraffic(podName string) ([]PodTraffic, error) {
 
 	// Parse the JSON response and unmarshal it into the Go struct.
 	if err := json.Unmarshal([]byte(body), &podTraffic); err != nil {
-		log.Error().Err(err).Msg("Error unmarshal JSON")
+		log.Error().Err(err).Msg("GetPodTraffic: Error unmarshal JSON")
 		return nil, err
 	}
 
 	// If no pod traffic is found, return err
 	if len(podTraffic) == 0 {
-		return nil, fmt.Errorf("No pod traffic found in database")
+		return nil, fmt.Errorf("GetPodTraffic: No pod traffic found in database")
 	}
 
 	return podTraffic, nil
@@ -108,7 +108,7 @@ func GetPodSpec(ip string) (*PodDetail, error) {
 
 	// If no pod details are found, return err
 	if details == nil {
-		return nil, fmt.Errorf("no pod traffic found in database")
+		return nil, fmt.Errorf("no pod details found in database")
 	}
 
 	return details, nil

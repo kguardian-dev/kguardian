@@ -23,6 +23,7 @@ func init() {
 
 	// Add your sub-commands
 	genCmd.AddCommand(networkPolicyCmd)
+	genCmd.AddCommand(seccompCmd)
 
 	// Initialize kubeConfigFlags
 	kubeConfigFlags = genericclioptions.NewConfigFlags(true)
