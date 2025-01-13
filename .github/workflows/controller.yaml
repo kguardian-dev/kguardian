@@ -11,7 +11,7 @@ jobs:
      matrix:
         arch:
           - linux/amd64
-          # - linux/arm64
+          - linux/arm64
 
     steps:
       - name: Checkout
@@ -96,10 +96,10 @@ jobs:
           name: x86_64-unknown-linux-gnu-binary
           path: controller/linux/amd64
 
-      # - uses: actions/download-artifact@fa0a91b85d4f404e444e00e005971372dc801d16 # v4
-      #   with:
-      #     name: aarch64-unknown-linux-gnu-binary
-      #     path: controller/linux/arm64
+      - uses: actions/download-artifact@fa0a91b85d4f404e444e00e005971372dc801d16 # v4
+        with:
+          name: aarch64-unknown-linux-gnu-binary
+          path: controller/linux/arm64
 
       - name: Build and Push
         env:
@@ -108,7 +108,7 @@ jobs:
         uses: docker/build-push-action@b32b51a8eda65d6793cd0494a773d4f6bcef32dc # v6
         with:
           context: controller/
-          platforms: linux/amd64 #, linux/arm64,
+          platforms: linux/amd64,linux/arm64,
           file: controller/Dockerfile
           push: true
           tags: |
