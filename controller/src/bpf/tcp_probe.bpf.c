@@ -108,6 +108,7 @@ int trace_tcp_connect(struct trace_event_raw_inet_sock_set_state *ctx)
 SEC("kprobe/udp_sendmsg")
 int trace_udp_send(struct pt_regs *ctx) {
 
+
      struct task_struct *task;
     task = (struct task_struct *)bpf_get_current_task();
     __u64 pid_ns = BPF_CORE_READ(task, nsproxy, pid_ns_for_children, ns.inum);
@@ -119,7 +120,7 @@ int trace_udp_send(struct pt_regs *ctx) {
     if (inum)
     {
         struct network_event_data event = {};
-        struct sock *sk = (struct sock *)(ctx);
+        struct sock *sk = (struct sock *)PT_REGS_PARM1(ctx);
         event.inum = pid_ns;
         bpf_probe_read(&event.saddr, sizeof(event.saddr), &sk->__sk_common.skc_rcv_saddr);
         bpf_probe_read(&event.daddr, sizeof(event.daddr), &sk->__sk_common.skc_daddr);
