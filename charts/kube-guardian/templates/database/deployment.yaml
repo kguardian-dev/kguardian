@@ -1,6 +1,3 @@
-
----
-# TODO This resource should be a statefulset
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -15,6 +12,7 @@ spec:
       labels:
         app: postgresdb
     spec:
+      serviceAccountName: {{ default "database" .Values.database.serviceAccount.name }}
       automountServiceAccountToken: true
       containers:
         - name: postgresdb
