@@ -20,6 +20,7 @@ spec:
         {{- toYaml . | nindent 8 }}
       {{- end }}
       labels:
+        {{- include "kube-guardian.labels" . | nindent 8 }}
         app: {{ .Values.broker.service.name }}
         app.kubernetes.io/name: {{ .Values.broker.service.name }}
     spec:

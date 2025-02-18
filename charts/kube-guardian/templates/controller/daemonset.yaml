@@ -13,6 +13,7 @@ spec:
     metadata:
       labels:
         app.kubernetes.io/name: kube-guardian
+        {{- include "kube-guardian.labels" . | nindent 8 }}
     spec:
       automountServiceAccountToken: true
       hostNetwork: true
