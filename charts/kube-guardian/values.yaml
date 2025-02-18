@@ -24,6 +24,7 @@ controller:
     tag: "edge"
     # -- Overrides the image tag.
     sha: ""
+  initContainerImage: busybox
 
   imagePullSecrets: []
   nameOverride: ""
