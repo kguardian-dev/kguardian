@@ -2,7 +2,7 @@
 
 This chart bootstraps the [Xentra]() controlplane onto a [Kubernetes](http://kubernetes.io) cluster using the [Helm](https://helm.sh) package manager.
 
-![Version: 0.0.20](https://img.shields.io/badge/Version-0.0.20-informational?style=flat-square)
+![Version: 0.0.21](https://img.shields.io/badge/Version-0.0.21-informational?style=flat-square)
 
 ## Overview
 
