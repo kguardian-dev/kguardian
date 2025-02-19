@@ -2,7 +2,7 @@
 
 This chart bootstraps the [Xentra]() controlplane onto a [Kubernetes](http://kubernetes.io) cluster using the [Helm](https://helm.sh) package manager.
 
-![Version: 0.0.19](https://img.shields.io/badge/Version-0.0.19-informational?style=flat-square)
+![Version: 0.0.20](https://img.shields.io/badge/Version-0.0.20-informational?style=flat-square)
 
 ## Overview
 
@@ -102,6 +102,7 @@ The following table lists the configurable parameters of the Xentra chart and th
 | broker.resources | object | `{}` |  |
 | broker.securityContext.allowPrivilegeEscalation | bool | `false` |  |
 | broker.securityContext.capabilities.drop[0] | string | `"ALL"` |  |
+| broker.securityContext.privileged | bool | `false` |  |
 | broker.securityContext.readOnlyRootFilesystem | bool | `true` |  |
 | broker.securityContext.runAsNonRoot | bool | `true` |  |
 | broker.securityContext.runAsUser | int | `1000` |  |
@@ -139,7 +140,7 @@ The following table lists the configurable parameters of the Xentra chart and th
 | controller.podSecurityContext.supplementalGroups[0] | int | `1000` |  |
 | controller.priorityClassName | string | `""` | Priority class to be used for the kube-guardian controller pods |
 | controller.resources | object | `{}` |  |
-| controller.securityContext.allowPrivilegeEscalation | bool | `false` |  |
+| controller.securityContext.allowPrivilegeEscalation | bool | `true` |  |
 | controller.securityContext.capabilities.add[0] | string | `"CAP_BPF"` |  |
 | controller.securityContext.privileged | bool | `true` |  |
 | controller.securityContext.readOnlyRootFilesystem | bool | `true` |  |
@@ -160,7 +161,7 @@ The following table lists the configurable parameters of the Xentra chart and th
 | database.image.pullPolicy | string | `"Always"` |  |
 | database.image.repository | string | `"postgres"` |  |
 | database.image.sha | string | `""` |  |
-| database.image.tag | string | `"latest"` |  |
+| database.image.tag | string | `"17"` |  |
 | database.imagePullSecrets | list | `[]` |  |
 | database.name | string | `"guardian-db"` |  |
 | database.nameOverride | string | `""` |  |
@@ -178,6 +179,7 @@ The following table lists the configurable parameters of the Xentra chart and th
 | database.resources | object | `{}` |  |
 | database.securityContext.allowPrivilegeEscalation | bool | `false` |  |
 | database.securityContext.capabilities.drop[0] | string | `"ALL"` |  |
+| database.securityContext.privileged | bool | `false` |  |
 | database.securityContext.readOnlyRootFilesystem | bool | `true` |  |
 | database.securityContext.runAsNonRoot | bool | `true` |  |
 | database.securityContext.runAsUser | int | `1000` |  |
