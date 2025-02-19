@@ -14,11 +14,15 @@ spec:
     spec:
       serviceAccountName: {{ default "database" .Values.database.serviceAccount.name }}
       automountServiceAccountToken: true
+      securityContext:
+        {{- toYaml .Values.database.podSecurityContext | nindent 8 }}
       containers:
         - name: postgresdb
           image: postgres
           ports:
             - containerPort: 5432
+          securityContext:
+            {{- toYaml .Values.database.securityContext | nindent 12 }}
           env:
             - name: POSTGRES_USER
               value: rust

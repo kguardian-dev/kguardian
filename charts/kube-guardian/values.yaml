@@ -43,16 +43,23 @@ controller:
 
   podAnnotations: {}
 
-  podSecurityContext: {}
-    # fsGroup: 2000
+  podSecurityContext:
+    runAsUser: 1000
+    runAsGroup: 1000
+    fsGroup: 1000
+    fsGroupChangePolicy: OnRootMismatch
+    supplementalGroups: [1000]
+    seccompProfile:
+      type: RuntimeDefault
 
-  securityContext: {}
-    # capabilities:
-    #   drop:
-    #   - ALL
-    # readOnlyRootFilesystem: true
-    # runAsNonRoot: true
-    # runAsUser: 1000
+  securityContext:
+    privileged: true
+    readOnlyRootFilesystem: true
+    capabilities:
+      add:
+      - CAP_BPF
+    allowPrivilegeEscalation: false
+
 
   service:
     type: ClusterIP
@@ -122,16 +129,24 @@ broker:
 
   podAnnotations: {}
 
-  podSecurityContext: {}
-    # fsGroup: 2000
+  podSecurityContext:
+    runAsUser: 1000
+    runAsGroup: 1000
+    fsGroup: 1000
+    fsGroupChangePolicy: OnRootMismatch
+    supplementalGroups: [1000]
+    seccompProfile:
+      type: RuntimeDefault
 
-  securityContext: {}
-    # capabilities:
-    #   drop:
-    #   - ALL
-    # readOnlyRootFilesystem: true
-    # runAsNonRoot: true
-    # runAsUser: 1000
+
+  securityContext:
+    capabilities:
+      drop:
+      - ALL
+    readOnlyRootFilesystem: true
+    runAsNonRoot: true
+    runAsUser: 1000
+    allowPrivilegeEscalation: false
 
   service:
     name: "broker"
@@ -159,7 +174,7 @@ broker:
 
   # -- Node labels for the kube-guardian broker pod assignment
   nodeSelector:
-    kubernetes.io/arch: amd64
+    kubernetes.io/os: linux
 
   # -- Tolerations for the kube-guardian broker pod assignment
   tolerations: []
@@ -202,16 +217,24 @@ database:
 
   podAnnotations: {}
 
-  podSecurityContext: {}
-    # fsGroup: 2000
+  podSecurityContext:
+    runAsUser: 1000
+    runAsGroup: 1000
+    fsGroup: 1000
+    fsGroupChangePolicy: OnRootMismatch
+    supplementalGroups: [1000]
+    seccompProfile:
+      type: RuntimeDefault
 
-  securityContext: {}
-    # capabilities:
-    #   drop:
-    #   - ALL
-    # readOnlyRootFilesystem: true
-    # runAsNonRoot: true
-    # runAsUser: 1000
+
+  securityContext:
+    capabilities:
+      drop:
+      - ALL
+    readOnlyRootFilesystem: true
+    runAsNonRoot: true
+    runAsUser: 1000
+    allowPrivilegeEscalation: false
 
   service:
     name: "guardian-db"
@@ -238,7 +261,8 @@ database:
     # targetMemoryUtilizationPercentage: 80
 
   # -- Node labels for the kube-guardian database pod assignment
-  nodeSelector: {}
+  nodeSelector:
+    kubernetes.io/os: linux
 
   # -- Tolerations for the kube-guardian database pod assignment
   tolerations: []
