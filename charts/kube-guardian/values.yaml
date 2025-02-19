@@ -63,7 +63,7 @@ controller:
     capabilities:
       add:
       - CAP_BPF
-    allowPrivilegeEscalation: false
+    allowPrivilegeEscalation: true
 
 
   service:
@@ -144,6 +144,7 @@ broker:
       type: RuntimeDefault
 
   securityContext:
+    privileged: false
     capabilities:
       drop:
       - ALL
@@ -193,7 +194,7 @@ database:
   image:
     repository: postgres
     pullPolicy: Always
-    tag: "latest"
+    tag: "17"
     # Overrides the image tag.
     sha: ""
 
@@ -231,6 +232,7 @@ database:
       type: RuntimeDefault
 
   securityContext:
+    privileged: false
     capabilities:
       drop:
       - ALL
