@@ -23,8 +23,15 @@ spec:
       {{- end }}
       initContainers:
         - name: wait-for-api
-          image: {{ .Values.controller.initContainerImage }}
+          {{- if .Values.controller.initContainer.image.sha }}
+          image: "{{ .Values.controller.initContainer.image.repository }}@{{ .Values.controller.initContainer.image.sha }}"
+          {{- else }}
+          image: "{{ .Values.controller.initContainer.image.repository }}:{{ .Values.controller.initContainer.image.tag }}"
+          {{- end }}
+          imagePullPolicy: {{ .Values.controller.initContainer.image.pullPolicy }}
           command: ["sh", "-c", "until wget -qO- http://{{ .Values.broker.service.name }}.{{ include "kube-guardian.namespace" . }}.svc.cluster.local:{{ .Values.broker.container.port }}/health; do sleep 5; done"]
+          securityContext:
+            {{- toYaml .Values.controller.initContainer.securityContext | nindent 12 }}
       containers:
         - name: controller
           {{- if .Values.controller.image.sha }}
@@ -34,7 +41,7 @@ spec:
           {{- end }}
           imagePullPolicy: {{ .Values.controller.image.pullPolicy }}
           securityContext:
-            {{- toYaml .Values.controller.podSecurityContext | nindent 12 }}
+            {{- toYaml .Values.controller.securityContext | nindent 12 }}
           env:
           - name: RUST_LOG
             value: INFO

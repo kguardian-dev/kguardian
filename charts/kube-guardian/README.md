@@ -2,7 +2,7 @@
 
 This chart bootstraps the [Xentra]() controlplane onto a [Kubernetes](http://kubernetes.io) cluster using the [Helm](https://helm.sh) package manager.
 
-![Version: 0.0.18](https://img.shields.io/badge/Version-0.0.18-informational?style=flat-square)
+![Version: 0.0.19](https://img.shields.io/badge/Version-0.0.19-informational?style=flat-square)
 
 ## Overview
 
@@ -124,7 +124,10 @@ The following table lists the configurable parameters of the Xentra chart and th
 | controller.image.sha | string | `""` | Overrides the image tag. |
 | controller.image.tag | string | `"edge"` |  |
 | controller.imagePullSecrets | list | `[]` |  |
-| controller.initContainerImage | string | `"busybox"` |  |
+| controller.initContainer.image.pullPolicy | string | `"Always"` |  |
+| controller.initContainer.image.repository | string | `"busybox"` |  |
+| controller.initContainer.image.tag | string | `"stable"` |  |
+| controller.initContainer.securityContext | object | `{}` |  |
 | controller.nameOverride | string | `""` |  |
 | controller.nodeSelector | object | `{"kubernetes.io/os":"linux"}` | Node labels for the kube-guardian controller pod assignment |
 | controller.podAnnotations | object | `{}` |  |
