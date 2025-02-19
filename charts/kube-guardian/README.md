@@ -89,13 +89,22 @@ The following table lists the configurable parameters of the Xentra chart and th
 | broker.image.tag | string | `"latest"` |  |
 | broker.imagePullSecrets | list | `[]` |  |
 | broker.nameOverride | string | `""` |  |
-| broker.nodeSelector | object | `{"kubernetes.io/arch":"amd64"}` | Node labels for the kube-guardian broker pod assignment |
+| broker.nodeSelector | object | `{"kubernetes.io/os":"linux"}` | Node labels for the kube-guardian broker pod assignment |
 | broker.podAnnotations | object | `{}` |  |
-| broker.podSecurityContext | object | `{}` |  |
+| broker.podSecurityContext.fsGroup | int | `1000` |  |
+| broker.podSecurityContext.fsGroupChangePolicy | string | `"OnRootMismatch"` |  |
+| broker.podSecurityContext.runAsGroup | int | `1000` |  |
+| broker.podSecurityContext.runAsUser | int | `1000` |  |
+| broker.podSecurityContext.seccompProfile.type | string | `"RuntimeDefault"` |  |
+| broker.podSecurityContext.supplementalGroups[0] | int | `1000` |  |
 | broker.priorityClassName | string | `""` |  |
 | broker.replicaCount | int | `1` | Number of broker replicas to deploy |
 | broker.resources | object | `{}` |  |
-| broker.securityContext | object | `{}` |  |
+| broker.securityContext.allowPrivilegeEscalation | bool | `false` |  |
+| broker.securityContext.capabilities.drop[0] | string | `"ALL"` |  |
+| broker.securityContext.readOnlyRootFilesystem | bool | `true` |  |
+| broker.securityContext.runAsNonRoot | bool | `true` |  |
+| broker.securityContext.runAsUser | int | `1000` |  |
 | broker.service.name | string | `"broker"` |  |
 | broker.service.port | int | `9090` |  |
 | broker.service.type | string | `"ClusterIP"` |  |
@@ -119,10 +128,18 @@ The following table lists the configurable parameters of the Xentra chart and th
 | controller.nameOverride | string | `""` |  |
 | controller.nodeSelector | object | `{"kubernetes.io/os":"linux"}` | Node labels for the kube-guardian controller pod assignment |
 | controller.podAnnotations | object | `{}` |  |
-| controller.podSecurityContext | object | `{}` |  |
+| controller.podSecurityContext.fsGroup | int | `1000` |  |
+| controller.podSecurityContext.fsGroupChangePolicy | string | `"OnRootMismatch"` |  |
+| controller.podSecurityContext.runAsGroup | int | `1000` |  |
+| controller.podSecurityContext.runAsUser | int | `1000` |  |
+| controller.podSecurityContext.seccompProfile.type | string | `"RuntimeDefault"` |  |
+| controller.podSecurityContext.supplementalGroups[0] | int | `1000` |  |
 | controller.priorityClassName | string | `""` | Priority class to be used for the kube-guardian controller pods |
 | controller.resources | object | `{}` |  |
-| controller.securityContext | object | `{}` |  |
+| controller.securityContext.allowPrivilegeEscalation | bool | `false` |  |
+| controller.securityContext.capabilities.add[0] | string | `"CAP_BPF"` |  |
+| controller.securityContext.privileged | bool | `true` |  |
+| controller.securityContext.readOnlyRootFilesystem | bool | `true` |  |
 | controller.service.port | int | `80` |  |
 | controller.service.type | string | `"ClusterIP"` |  |
 | controller.serviceAccount.annotations | object | `{}` | Annotations to add to the service account |
@@ -144,14 +161,23 @@ The following table lists the configurable parameters of the Xentra chart and th
 | database.imagePullSecrets | list | `[]` |  |
 | database.name | string | `"guardian-db"` |  |
 | database.nameOverride | string | `""` |  |
-| database.nodeSelector | object | `{}` | Node labels for the kube-guardian database pod assignment |
+| database.nodeSelector | object | `{"kubernetes.io/os":"linux"}` | Node labels for the kube-guardian database pod assignment |
 | database.persistence.enabled | bool | `false` |  |
 | database.persistence.existingClaim | string | `""` |  |
 | database.podAnnotations | object | `{}` |  |
-| database.podSecurityContext | object | `{}` |  |
+| database.podSecurityContext.fsGroup | int | `1000` |  |
+| database.podSecurityContext.fsGroupChangePolicy | string | `"OnRootMismatch"` |  |
+| database.podSecurityContext.runAsGroup | int | `1000` |  |
+| database.podSecurityContext.runAsUser | int | `1000` |  |
+| database.podSecurityContext.seccompProfile.type | string | `"RuntimeDefault"` |  |
+| database.podSecurityContext.supplementalGroups[0] | int | `1000` |  |
 | database.priorityClassName | string | `""` | Priority class to be used for the kube-guardian database pods |
 | database.resources | object | `{}` |  |
-| database.securityContext | object | `{}` |  |
+| database.securityContext.allowPrivilegeEscalation | bool | `false` |  |
+| database.securityContext.capabilities.drop[0] | string | `"ALL"` |  |
+| database.securityContext.readOnlyRootFilesystem | bool | `true` |  |
+| database.securityContext.runAsNonRoot | bool | `true` |  |
+| database.securityContext.runAsUser | int | `1000` |  |
 | database.service.name | string | `"guardian-db"` |  |
 | database.service.port | int | `80` |  |
 | database.service.type | string | `"ClusterIP"` |  |
