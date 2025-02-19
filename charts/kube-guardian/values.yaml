@@ -24,7 +24,12 @@ controller:
     tag: "edge"
     # -- Overrides the image tag.
     sha: ""
-  initContainerImage: busybox
+  initContainer:
+    image:
+      repository: busybox
+      pullPolicy: Always
+      tag: stable
+    securityContext: {}
 
   imagePullSecrets: []
   nameOverride: ""
@@ -138,7 +143,6 @@ broker:
     seccompProfile:
       type: RuntimeDefault
 
-
   securityContext:
     capabilities:
       drop:
@@ -225,7 +229,6 @@ database:
     supplementalGroups: [1000]
     seccompProfile:
       type: RuntimeDefault
-
 
   securityContext:
     capabilities:
