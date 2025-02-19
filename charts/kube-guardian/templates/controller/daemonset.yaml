@@ -13,6 +13,7 @@ spec:
     metadata:
       labels:
         app.kubernetes.io/name: kube-guardian
+        {{- include "kube-guardian.labels" . | nindent 8 }}
     spec:
       automountServiceAccountToken: true
       hostNetwork: true
@@ -21,56 +22,54 @@ spec:
         {{ toYaml .Values.controller.imagePullSecrets | indent 8 }}
       {{- end }}
       initContainers:
-      - name: wait-for-api
-        image: busybox
-        command: ["sh", "-c", "until wget -qO- http://{{ .Values.broker.service.name }}.{{ include "kube-guardian.namespace" . }}.svc.cluster.local:{{ .Values.broker.container.port }}/health; do sleep 5; done"]
+        - name: wait-for-api
+          image: {{ .Values.controller.initContainerImage }}
+          command: ["sh", "-c", "until wget -qO- http://{{ .Values.broker.service.name }}.{{ include "kube-guardian.namespace" . }}.svc.cluster.local:{{ .Values.broker.container.port }}/health; do sleep 5; done"]
       containers:
-      - name: controller
-        {{- if .Values.controller.image.sha }}
-        image: "{{ .Values.controller.image.repository }}@{{ .Values.controller.image.sha }}"
-        {{- else }}
-        image: "{{ .Values.controller.image.repository }}:{{ .Values.controller.image.tag }}"
-        {{- end }}
-        imagePullPolicy: {{ .Values.controller.image.pullPolicy }}
-        securityContext:
-          privileged: true
-          readOnlyRootFilesystem: true
-          capabilities:
-            add:
-            - CAP_BPF
-        env:
-        - name: RUST_LOG
-          value: INFO
-        - name: CURRENT_NODE
-          valueFrom:
-            fieldRef:
-              fieldPath: spec.nodeName
-        - name: API_ENDPOINT
-          value: "http://{{ .Values.broker.service.name }}.{{ include "kube-guardian.namespace" . }}.svc.cluster.local:{{ .Values.broker.container.port }}"
-        volumeMounts:
-        - mountPath: /sys/kernel/debug
-          name: debugfs
-          readOnly: false
-        - name: bpffs
-          mountPath: /sys/fs/bpf
-          readOnly: true
-        - name: run-containerd-bundle
-          mountPath: /run/containerd/io.containerd.runtime.v2.task
-          readOnly: true
-        - name: containerd-sock
-          mountPath: /run/containerd/containerd.sock
-          readOnly: true
-        - mountPath: /sys/kernel/tracing
-          name: tracefs
-          readOnly: true
-        - mountPath: /proc
-          name: hostproc
-          readOnly: true
-         {{- with .Values.broker.resources }}
-          resources:
-            {{- toYaml . | nindent 12 }}
+        - name: controller
+          {{- if .Values.controller.image.sha }}
+          image: "{{ .Values.controller.image.repository }}@{{ .Values.controller.image.sha }}"
+          {{- else }}
+          image: "{{ .Values.controller.image.repository }}:{{ .Values.controller.image.tag }}"
           {{- end }}
+          imagePullPolicy: {{ .Values.controller.image.pullPolicy }}
+          securityContext:
+            {{- toYaml .Values.controller.podSecurityContext | nindent 12 }}
+          env:
+          - name: RUST_LOG
+            value: INFO
+          - name: CURRENT_NODE
+            valueFrom:
+              fieldRef:
+                fieldPath: spec.nodeName
+          - name: API_ENDPOINT
+            value: "http://{{ .Values.broker.service.name }}.{{ include "kube-guardian.namespace" . }}.svc.cluster.local:{{ .Values.broker.container.port }}"
+          volumeMounts:
+          - mountPath: /sys/kernel/debug
+            name: debugfs
+            readOnly: false
+          - name: bpffs
+            mountPath: /sys/fs/bpf
+            readOnly: true
+          - name: run-containerd-bundle
+            mountPath: /run/containerd/io.containerd.runtime.v2.task
+            readOnly: true
+          - name: containerd-sock
+            mountPath: /run/containerd/containerd.sock
+            readOnly: true
+          - mountPath: /sys/kernel/tracing
+            name: tracefs
+            readOnly: true
+          - mountPath: /proc
+            name: hostproc
+            readOnly: true
+          {{- with .Values.broker.resources }}
+            resources:
+              {{- toYaml . | nindent 12 }}
+            {{- end }}
       serviceAccountName: {{ default "controller" .Values.controller.serviceAccount.name }}
+      securityContext:
+        {{- toYaml .Values.controller.podSecurityContext | nindent 8 }}
       dnsPolicy: ClusterFirstWithHostNet
       {{- with .Values.controller.tolerations }}
       tolerations:

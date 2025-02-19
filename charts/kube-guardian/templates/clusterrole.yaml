@@ -6,7 +6,7 @@ metadata:
     {{- include "kube-guardian.labels" . | nindent 4 }}
     {{- include "kube-guardian.annotations" . | nindent 2 }}
 rules:
-- apiGroups: ["*"]
+- apiGroups: [""]
   resources: ["namespaces", "pods", "services"]
   verbs:
     - get
