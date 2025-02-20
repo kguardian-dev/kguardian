@@ -9,7 +9,7 @@ libbpf-cargo = "0.24.8"
 vmlinux = { version = "0.0", git = "https://github.com/libbpf/vmlinux.h.git", rev = "83a228cf37fc65f2d14e4896a04922b5ee531a94" }
 
 [dependencies]
-anyhow = "1.0.95"
+anyhow = "1.0.96"
 libbpf-rs = "0.24.8"
 libbpf-sys = "1.5.0+v1"
 plain = "0.2"
@@ -18,18 +18,19 @@ tokio = { version = "1.43.0", features = ["macros", "rt-multi-thread", "fs"] }
 kube = { version = "0.98.0", features = ["runtime", "derive"] }
 k8s-openapi = { version = "0.24.0", features = ["latest"] }
 futures = "0.3.31"
-thiserror = "2.0.10"
+thiserror = "2.0.11"
 tracing = "0.1.37"
-serde = "1.0.217"
-serde_derive = "1.0.217"
-serde_json = "1.0.135"
+serde = "1.0.218"
+serde_derive = "1.0.218"
+serde_json = "1.0.139"
 tracing-subscriber = { version = "0.3.16", features = ["json", "env-filter", "local-time"] }
 containerd-client = "0.6.0"
 regex = "1.11.1"
 procfs = "0.17.0"
 reqwest = "0.12.12"
-uuid = { version = "1.11.1", features = ["v4"]}
+uuid = { version = "1.13.2", features = ["v4"]}
 chrono = { version = "0.4.23", features = ["serde"] }
-openssl = { version = "0.10.68", features = ["vendored"] }
+openssl = { version = "0.10.71", features = ["vendored"] }
 lazy_static = "1.5.0"
 libseccomp = "0.3"
+moka = { version = "0.12.10", features = ["future"]}

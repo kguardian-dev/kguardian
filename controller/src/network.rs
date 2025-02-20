@@ -1,7 +1,7 @@
 use chrono::Utc;
 use serde_json::json;
 use std::net::{IpAddr, Ipv4Addr};
-use tracing::{debug, info};
+use tracing::debug;
 use uuid::Uuid;
 
 use crate::{api_post_call, Error, PodInspect, PodTraffic};

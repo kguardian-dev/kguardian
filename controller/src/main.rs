@@ -1,9 +1,9 @@
 use anyhow::Result;
 use kube_guardian::network::handle_network_event;
+use kube_guardian::network::network_probe::NetworkProbeSkelBuilder;
 use kube_guardian::service_watcher::watch_service;
 use kube_guardian::syscall::handle_syscall_event;
 use kube_guardian::syscall::sycallprobe::SyscallSkelBuilder;
-use kube_guardian::network::network_probe::NetworkProbeSkelBuilder;
 use kube_guardian::syscall::SyscallTrace;
 use libbpf_rs::skel::OpenSkel;
 use libbpf_rs::skel::Skel;
@@ -63,7 +63,7 @@ async fn main() -> Result<()> {
         let network_perf = PerfBufferBuilder::new(&network_sk.maps.tracept_events)
             .sample_cb(move |_cpu, data: &[u8]| {
                 let tcp_data: NetworkData = unsafe { *(data.as_ptr() as *const NetworkData) };
-              
+
                 if let Err(e) = network_event_sender.blocking_send(tcp_data) {
                     eprintln!("Failed to send TCP event: {:?}", e);
                 }
@@ -117,7 +117,6 @@ async fn main() -> Result<()> {
     .unwrap();
     Ok(())
 }
-
 
 #[derive(Clone)]
 struct SyscallEventData {
