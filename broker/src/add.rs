@@ -15,7 +15,6 @@ pub async fn add_pods(
     pool: web::Data<DbPool>,
     form: web::Json<PodTraffic>,
 ) -> Result<HttpResponse, Error> {
-    info!("Insert pod details table");
     let pods = web::block(move || {
         let mut conn = pool.get()?;
         create_pod_traffic(&mut conn, form)
@@ -54,7 +53,6 @@ pub async fn add_pod_details(
     pool: web::Data<DbPool>,
     form: web::Json<PodDetail>,
 ) -> Result<HttpResponse, Error> {
-    info!("Insert pod details table");
     let pods = web::block(move || {
         let mut conn = pool.get()?;
         upsert_pod_details(&mut conn, form)

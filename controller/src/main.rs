@@ -1,9 +1,9 @@
 use anyhow::Result;
 use kube_guardian::network::handle_network_event;
-use kube_guardian::network::tcpprobe::TcpProbeSkelBuilder;
 use kube_guardian::service_watcher::watch_service;
 use kube_guardian::syscall::handle_syscall_event;
 use kube_guardian::syscall::sycallprobe::SyscallSkelBuilder;
+use kube_guardian::network::network_probe::NetworkProbeSkelBuilder;
 use kube_guardian::syscall::SyscallTrace;
 use libbpf_rs::skel::OpenSkel;
 use libbpf_rs::skel::Skel;
@@ -20,7 +20,7 @@ use tokio::sync::Mutex;
 
 use kube_guardian::error::Error;
 use kube_guardian::models::PodInspect;
-use kube_guardian::network::TcpData;
+use kube_guardian::network::NetworkData;
 use kube_guardian::pod_watcher::watch_pods;
 use tokio::sync::Mutex as TokioMutex;
 use tokio::task;
@@ -35,7 +35,7 @@ async fn main() -> Result<()> {
     let (tx, mut rx) = mpsc::channel(100); // Use tokio's mpsc channel
     let pod_c = Arc::clone(&c);
 
-    let (network_event_sender, network_event_receiver) = mpsc::channel::<NetworkEventData>(1000);
+    let (network_event_sender, network_event_receiver) = mpsc::channel::<NetworkData>(1000);
     let (syscall_event_sender, syscall_event_receiver) = mpsc::channel::<SyscallEventData>(1000);
     let container_map = Arc::clone(&c);
 
@@ -48,9 +48,9 @@ async fn main() -> Result<()> {
     // Spawn the eBPF handling task
     let ebpf_handle: JoinHandle<Result<(), Error>> = task::spawn_blocking(move || {
         let mut open_object = MaybeUninit::uninit();
-        let skel_builder = TcpProbeSkelBuilder::default();
-        let tcp_probe_skel = skel_builder.open(&mut open_object).unwrap();
-        let mut network_sk = tcp_probe_skel.load().unwrap();
+        let skel_builder = NetworkProbeSkelBuilder::default();
+        let network_probe_skel = skel_builder.open(&mut open_object).unwrap();
+        let mut network_sk = network_probe_skel.load().unwrap();
         network_sk.attach().unwrap();
 
         let mut open_object = MaybeUninit::uninit();
@@ -62,12 +62,9 @@ async fn main() -> Result<()> {
 
         let network_perf = PerfBufferBuilder::new(&network_sk.maps.tracept_events)
             .sample_cb(move |_cpu, data: &[u8]| {
-                let tcp_data: TcpData = unsafe { *(data.as_ptr() as *const TcpData) };
-                let event_data = NetworkEventData {
-                    inum: tcp_data.inum,
-                    tcp_data,
-                };
-                if let Err(e) = network_event_sender.blocking_send(event_data) {
+                let tcp_data: NetworkData = unsafe { *(data.as_ptr() as *const NetworkData) };
+              
+                if let Err(e) = network_event_sender.blocking_send(tcp_data) {
                     eprintln!("Failed to send TCP event: {:?}", e);
                 }
             })
@@ -95,7 +92,6 @@ async fn main() -> Result<()> {
 
             // Process any incoming messages from the pod watcher
             if let Ok(inum) = rx.try_recv() {
-                println!("Received inode number: {}", inum);
                 network_sk
                     .maps
                     .inode_num
@@ -122,11 +118,6 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-#[derive(Clone)]
-struct NetworkEventData {
-    inum: u64,
-    tcp_data: TcpData,
-}
 
 #[derive(Clone)]
 struct SyscallEventData {
@@ -134,13 +125,13 @@ struct SyscallEventData {
 }
 
 async fn handle_network_events(
-    mut event_receiver: tokio::sync::mpsc::Receiver<NetworkEventData>,
+    mut event_receiver: tokio::sync::mpsc::Receiver<NetworkData>,
     container_map_tcp: Arc<TokioMutex<BTreeMap<u64, PodInspect>>>,
 ) -> Result<(), Error> {
     while let Some(event) = event_receiver.recv().await {
         let container_map = container_map_tcp.lock().await;
         if let Some(pod_inspect) = container_map.get(&event.inum) {
-            handle_network_event(&event.tcp_data, pod_inspect).await?
+            handle_network_event(&event, pod_inspect).await?
         }
     }
     Ok(())

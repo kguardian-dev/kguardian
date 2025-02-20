@@ -6,7 +6,7 @@ use libbpf_cargo::SkeletonBuilder;
 use vmlinux;
 
 const SYSCALL_SRC: &str = "src/bpf/syscall.bpf.c";
-const TCP_PROBE_SRC: &str = "src/bpf/tcp_probe.bpf.c";
+const TCP_PROBE_SRC: &str = "src/bpf/network_probe.bpf.c";
 
 fn main() {
     let out = PathBuf::from(
@@ -21,7 +21,7 @@ fn main() {
     )
     .join("src")
     .join("bpf")
-    .join("tcp_probe.skel.rs");
+    .join("network_probe.skel.rs");
 
     let arch = env::var("CARGO_CFG_TARGET_ARCH")
         .expect("CARGO_CFG_TARGET_ARCH must be set in build script");

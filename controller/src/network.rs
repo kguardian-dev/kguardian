@@ -6,16 +6,16 @@ use uuid::Uuid;
 
 use crate::{api_post_call, Error, PodInspect, PodTraffic};
 
-pub mod tcpprobe {
+pub mod network_probe {
     include!(concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/src/bpf/tcp_probe.skel.rs"
+        "/src/bpf/network_probe.skel.rs"
     ));
 }
 
 #[repr(C)]
 #[derive(Clone, Copy)]
-pub struct TcpData {
+pub struct NetworkData {
     pub inum: u64,
     saddr: u32,
     sport: u16,
@@ -26,7 +26,7 @@ pub struct TcpData {
     pub kind: u16,
 }
 
-pub async fn handle_network_event(data: &TcpData, pod_data: &PodInspect) -> Result<(), Error> {
+pub async fn handle_network_event(data: &NetworkData, pod_data: &PodInspect) -> Result<(), Error> {
     let src = u32::from_be(data.saddr);
     let dst = u32::from_be(data.daddr);
     let sport = data.sport;
@@ -51,15 +51,17 @@ pub async fn handle_network_event(data: &TcpData, pod_data: &PodInspect) -> Resu
         traffic_in_out_port = dport;
         protocol = "UDP"
     }
+
     debug!(
-        "Inum: {} src {}:{},dst {}:{}, old state {}. new state {}",
+        "Inum : {} src {}:{},dst {}:{}, old state {}. new state {} trafic type {:?}",
         data.inum,
         IpAddr::V4(Ipv4Addr::from(src)),
         sport,
         IpAddr::V4(Ipv4Addr::from(dst)),
         dport,
         data.old_state,
-        data.new_state
+        data.new_state,
+        traffic_type
     );
 
     let pod_name = pod_data.status.pod_name.to_string();
@@ -79,6 +81,6 @@ pub async fn handle_network_event(data: &TcpData, pod_data: &PodInspect) -> Resu
         time_stamp: Utc::now().naive_utc() // .format("%Y-%m-%dT%H:%M:%S.%fZ")
                                            // .to_string(),
     });
-    info!("Record to be inserted {}", z.to_string());
+    debug!("Record to be inserted {}", z.to_string());
     api_post_call(z, "pod/traffic").await
 }

@@ -130,6 +130,10 @@ int trace_udp_send(struct pt_regs *ctx) {
         event.inum = pid_ns;
         bpf_probe_read(&event.saddr, sizeof(event.saddr), &sk->__sk_common.skc_rcv_saddr);
         bpf_probe_read(&event.daddr, sizeof(event.daddr), &sk->__sk_common.skc_daddr);
+        if (event.daddr == bpf_htonl(0x7F000001) || event.daddr == bpf_htonl(0x00000000)) {
+            return 0;   
+        }
+
         bpf_probe_read(&lport, sizeof(lport), &sk->__sk_common.skc_num);
         bpf_probe_read(&dport, sizeof(dport), &sk->__sk_common.skc_dport);
         event.kind = 3;
@@ -139,4 +143,5 @@ int trace_udp_send(struct pt_regs *ctx) {
     }
     return 0;
 }
+
 char _license[] SEC("license") = "GPL";
