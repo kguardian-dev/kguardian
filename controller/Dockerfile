@@ -15,7 +15,7 @@ FROM debian:${DEBIAN_VERSION}-slim
 
 ARG TARGETPLATFORM
 
-RUN apt-get update && apt-get install -y util-linux iproute2 libelf-dev
+RUN apt-get update && apt-get install -y libc-bin util-linux iproute2 libelf-dev
 
 COPY --from=builder --chown=root:root --chmod=0755 /artifacts/$TARGETPLATFORM/kube-guardian /usr/local/bin
 
