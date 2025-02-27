@@ -4,13 +4,13 @@ kind: Service
 metadata:
   name: {{ .Values.database.service.name }}
   labels:
-    app: postgresdb
+    {{- include "kube-guardian.labels" . | nindent 4 }}
 spec:
   type: {{ .Values.database.service.type }}
   ports:
-    - port: 5432
+    - port: {{ .Values.database.service.port }}
       # targetPort: postgresdb
       protocol: TCP
       name: http
   selector:
-    app: postgresdb
+    app.kubernetes.io/name: {{ .Values.database.service.name }}

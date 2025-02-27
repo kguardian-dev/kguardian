@@ -6,7 +6,7 @@ spec:
   replicas: 1
   selector:
     matchLabels:
-      app: postgresdb
+      app.kubernetes.io/name: {{ .Values.database.service.name }}
   template:
     metadata:
       {{- with .Values.database.podAnnotations }}
@@ -15,7 +15,6 @@ spec:
       {{- end }}
       labels:
         {{- include "kube-guardian.labels" . | nindent 8 }}
-        app: postgresdb
         app.kubernetes.io/name: {{ .Values.database.service.name }}
     spec:
       serviceAccountName: {{ default "database" .Values.database.serviceAccount.name }}

@@ -66,6 +66,5 @@ Common Annotations
 Selector labels
 */}}
 {{- define "kube-guardian.selectorLabels" -}}
-app.kubernetes.io/name: {{ include "kube-guardian.name" . }}
 app.kubernetes.io/instance: {{ .Release.Name }}
 {{- end }}
