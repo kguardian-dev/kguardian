@@ -2,7 +2,7 @@
 
 This chart bootstraps the [Xentra]() controlplane onto a [Kubernetes](http://kubernetes.io) cluster using the [Helm](https://helm.sh) package manager.
 
-![Version: 0.0.21](https://img.shields.io/badge/Version-0.0.21-informational?style=flat-square)
+![Version: 0.0.22](https://img.shields.io/badge/Version-0.0.22-informational?style=flat-square)
 
 ## Overview
 
@@ -132,12 +132,7 @@ The following table lists the configurable parameters of the Xentra chart and th
 | controller.nameOverride | string | `""` |  |
 | controller.nodeSelector | object | `{"kubernetes.io/os":"linux"}` | Node labels for the kube-guardian controller pod assignment |
 | controller.podAnnotations | object | `{}` |  |
-| controller.podSecurityContext.fsGroup | int | `1000` |  |
-| controller.podSecurityContext.fsGroupChangePolicy | string | `"OnRootMismatch"` |  |
-| controller.podSecurityContext.runAsGroup | int | `1000` |  |
-| controller.podSecurityContext.runAsUser | int | `1000` |  |
 | controller.podSecurityContext.seccompProfile.type | string | `"RuntimeDefault"` |  |
-| controller.podSecurityContext.supplementalGroups[0] | int | `1000` |  |
 | controller.priorityClassName | string | `""` | Priority class to be used for the kube-guardian controller pods |
 | controller.resources | object | `{}` |  |
 | controller.securityContext.allowPrivilegeEscalation | bool | `true` |  |
@@ -169,22 +164,22 @@ The following table lists the configurable parameters of the Xentra chart and th
 | database.persistence.enabled | bool | `false` |  |
 | database.persistence.existingClaim | string | `""` |  |
 | database.podAnnotations | object | `{}` |  |
-| database.podSecurityContext.fsGroup | int | `1000` |  |
+| database.podSecurityContext.fsGroup | int | `999` |  |
 | database.podSecurityContext.fsGroupChangePolicy | string | `"OnRootMismatch"` |  |
-| database.podSecurityContext.runAsGroup | int | `1000` |  |
-| database.podSecurityContext.runAsUser | int | `1000` |  |
+| database.podSecurityContext.runAsGroup | int | `999` |  |
+| database.podSecurityContext.runAsUser | int | `999` |  |
 | database.podSecurityContext.seccompProfile.type | string | `"RuntimeDefault"` |  |
-| database.podSecurityContext.supplementalGroups[0] | int | `1000` |  |
+| database.podSecurityContext.supplementalGroups[0] | int | `999` |  |
 | database.priorityClassName | string | `""` | Priority class to be used for the kube-guardian database pods |
 | database.resources | object | `{}` |  |
 | database.securityContext.allowPrivilegeEscalation | bool | `false` |  |
 | database.securityContext.capabilities.drop[0] | string | `"ALL"` |  |
 | database.securityContext.privileged | bool | `false` |  |
-| database.securityContext.readOnlyRootFilesystem | bool | `true` |  |
+| database.securityContext.readOnlyRootFilesystem | bool | `false` |  |
 | database.securityContext.runAsNonRoot | bool | `true` |  |
-| database.securityContext.runAsUser | int | `1000` |  |
+| database.securityContext.runAsUser | int | `999` |  |
 | database.service.name | string | `"guardian-db"` |  |
-| database.service.port | int | `80` |  |
+| database.service.port | int | `5432` |  |
 | database.service.type | string | `"ClusterIP"` |  |
 | database.serviceAccount.annotations | object | `{}` |  |
 | database.serviceAccount.automountServiceAccountToken | bool | `false` |  |
