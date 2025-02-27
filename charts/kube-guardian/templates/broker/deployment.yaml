@@ -11,7 +11,6 @@ spec:
   {{- end }}
   selector:
     matchLabels:
-      app: {{ .Values.broker.service.name }}
       app.kubernetes.io/name: {{ .Values.broker.service.name }}
   template:
     metadata:
@@ -21,7 +20,6 @@ spec:
       {{- end }}
       labels:
         {{- include "kube-guardian.labels" . | nindent 8 }}
-        app: {{ .Values.broker.service.name }}
         app.kubernetes.io/name: {{ .Values.broker.service.name }}
     spec:
       automountServiceAccountToken: true

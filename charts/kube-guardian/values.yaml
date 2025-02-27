@@ -49,11 +49,11 @@ controller:
   podAnnotations: {}
 
   podSecurityContext:
-    runAsUser: 1000
-    runAsGroup: 1000
-    fsGroup: 1000
-    fsGroupChangePolicy: OnRootMismatch
-    supplementalGroups: [1000]
+    # runAsUser: 1000
+    # runAsGroup: 1000
+    # fsGroup: 1000
+    # fsGroupChangePolicy: OnRootMismatch
+    # supplementalGroups: [1000]
     seccompProfile:
       type: RuntimeDefault
 
@@ -64,7 +64,6 @@ controller:
       add:
       - CAP_BPF
     allowPrivilegeEscalation: true
-
 
   service:
     type: ClusterIP
@@ -223,11 +222,11 @@ database:
   podAnnotations: {}
 
   podSecurityContext:
-    runAsUser: 1000
-    runAsGroup: 1000
-    fsGroup: 1000
+    runAsUser: 999
+    runAsGroup: 999
+    fsGroup: 999
     fsGroupChangePolicy: OnRootMismatch
-    supplementalGroups: [1000]
+    supplementalGroups: [999]
     seccompProfile:
       type: RuntimeDefault
 
@@ -236,15 +235,15 @@ database:
     capabilities:
       drop:
       - ALL
-    readOnlyRootFilesystem: true
+    readOnlyRootFilesystem: false
     runAsNonRoot: true
-    runAsUser: 1000
+    runAsUser: 999
     allowPrivilegeEscalation: false
 
   service:
     name: "guardian-db"
     type: ClusterIP
-    port: 80
+    port: 5432
 
   resources: {}
     # We usually recommend not to specify default resources and to leave this as a conscious
