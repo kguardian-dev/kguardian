@@ -21,14 +21,14 @@ controller:
   image:
     repository: ghcr.io/xentra-ai/images/guardian-controller
     pullPolicy: Always
-    tag: "edge"
+    tag: "latest"
     # -- Overrides the image tag.
     sha: ""
   initContainer:
     image:
       repository: busybox
       pullPolicy: Always
-      tag: stable
+      tag: latest
     securityContext: {}
 
   imagePullSecrets: []
@@ -193,7 +193,7 @@ database:
   image:
     repository: postgres
     pullPolicy: Always
-    tag: "17"
+    tag: "latest"
     # Overrides the image tag.
     sha: ""
 
