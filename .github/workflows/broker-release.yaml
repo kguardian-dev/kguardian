@@ -1,7 +1,10 @@
-name: Build and Push Broker Docker Images 
+name: Build and Push Broker Docker Images
 
 on:
-  workflow_dispatch: {}
+  workflow_dispatch:
+  push:
+    tags:
+      - "*"
 
 jobs:
   build_and_push:

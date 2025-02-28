@@ -3,10 +3,11 @@ name: "Charts: Release to GHCR OCI"
 on:
   workflow_dispatch: {}
   push:
+    tags:
+      - "*"
     branches:
       - main
     paths:
-      - ".github/workflows/charts-release-ghpages.yaml"
       - "charts/**"
 
 env:

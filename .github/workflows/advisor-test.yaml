@@ -1,4 +1,4 @@
-name: Build and Test Go
+name: Build and Test Advisor
 
 on:
   workflow_dispatch: {}
@@ -7,13 +7,13 @@ on:
       - main
     paths:
       - .github/workflows/build-go.yaml
-      - '**/*.go'
+      - 'advisor/*.go'
   pull_request:
     branches:
       - main
     paths:
       - .github/workflows/build-go.yaml
-      - '**/*.go'
+      - 'advisor/*.go'
 
 permissions:
   contents: read
