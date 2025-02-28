@@ -1,0 +1,39 @@
+name: "Charts: Update README"
+
+on:
+  pull_request:
+    branches:
+      - main
+    paths:
+      - '.github/workflows/charts-readme-docs.yaml'
+      - 'charts/**'
+
+env:
+  HELM_DOCS_VERSION: 1.11.2
+
+jobs:
+  chart-readme:
+    name: Update README
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@692973e3d937129bcbf40652eb9f2f61becf3332 # v4
+        with:
+          ref: ${{ github.event.pull_request.head.ref }}
+
+      - name: install helm-docs
+        run: |
+          cd /tmp
+          wget https://github.com/norwoodj/helm-docs/releases/download/v${{env.HELM_DOCS_VERSION}}/helm-docs_Linux_x86_64.tar.gz
+          tar -xvf helm-docs_Linux_x86_64.tar.gz
+          sudo mv helm-docs /usr/local/sbin
+
+      - name: run helm-docs
+        run: |
+          helm-docs -t README.md.gotmpl -o README.md
+
+      - name: Commit changes
+        uses: stefanzweifel/git-auto-commit-action@8621497c8c39c72f3e2a999a26b4ca1b5058a842 # v5
+        id: auto-commit
+        with:
+          branch: ${{ github.event.pull_request.head.ref }}
