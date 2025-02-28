@@ -101,6 +101,10 @@ jobs:
           name: aarch64-unknown-linux-gnu-binary
           path: controller/linux/arm64
 
+      - name: Extract tag name
+        id: extract_tag
+        run: echo "TAG_NAME=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+
       - name: Build and Push
         env:
           BUILDX_NO_DEFAULT_ATTESTATIONS: 1
@@ -111,5 +115,5 @@ jobs:
           file: controller/Dockerfile
           push: true
           tags: |
-            ghcr.io/xentra-ai/images/guardian-controller:${{ github.ref }}
+            ghcr.io/xentra-ai/images/guardian-controller:${{ steps.extract_tag.outputs.TAG_NAME }}
             ghcr.io/xentra-ai/images/guardian-controller:latest
