@@ -1,4 +1,4 @@
-name: Build and Push controller Docker Images
+name: Build and Push Controller Docker Images
 
 on:
   workflow_dispatch:
@@ -104,7 +104,6 @@ jobs:
       - name: Build and Push
         env:
           BUILDX_NO_DEFAULT_ATTESTATIONS: 1
-        if: github.ref == 'refs/heads/main'
         uses: docker/build-push-action@0adf9959216b96bec444f325f1e493d4aa344497 # v6
         with:
           context: controller/

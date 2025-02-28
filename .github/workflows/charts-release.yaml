@@ -45,6 +45,7 @@ jobs:
         with:
           # REQUIRED: We don't want this to override latest when the latest is used by the quick-install.sh for the advisor client
           mark_as_latest: false
+          skip_existing: true
         env:
           CR_TOKEN: "${{ secrets.GITHUB_TOKEN }}"
 
