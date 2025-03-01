@@ -73,7 +73,7 @@ pub struct PodDetail {
 pub struct SyscallData {
     pub pod_name: String,
     pub pod_namespace: String,
-    pub syscalls: String,
+    pub syscalls: Vec<String>,
     pub arch: String,
     pub time_stamp: NaiveDateTime,
 }

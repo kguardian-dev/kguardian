@@ -1,4 +1,4 @@
-use crate::{schema, PodDetail, PodSyscalls, PodTraffic, SvcDetail};
+use crate::{schema, PodDetail, PodInputSyscalls, PodSyscalls, PodTraffic, SvcDetail};
 use actix_web::{post, web, Error, HttpResponse};
 use diesel::pg::PgConnection;
 use diesel::r2d2::{self, ConnectionManager};
@@ -47,6 +47,45 @@ pub fn create_pod_traffic(
     }
     Ok(w.0)
 }
+
+impl PodTraffic {
+    pub fn get_row(&self, conn: &mut PgConnection) -> Result<Option<PodTraffic>, DbError> {
+        use schema::pod_traffic::dsl::*;
+        if self.ip_protocol.eq(&Some("UDP".to_string())) {
+            let out: Option<PodTraffic> = pod_traffic
+                .filter(pod_ip.eq(&self.pod_ip))
+                .filter(traffic_type.eq(&self.traffic_type))
+                .filter(traffic_in_out_ip.eq(&self.traffic_in_out_ip))
+                .filter(traffic_in_out_port.eq(&self.traffic_in_out_port))
+                .first::<PodTraffic>(conn)
+                .optional()?;
+            if out.is_none() {
+                let second: Option<PodTraffic> = pod_traffic
+                    .filter(pod_ip.eq(&self.pod_ip))
+                    .filter(pod_port.eq(&self.pod_port))
+                    .filter(traffic_type.eq(&self.traffic_type))
+                    .filter(traffic_in_out_ip.eq(&self.traffic_in_out_ip))
+                    .first::<PodTraffic>(conn)
+                    .optional()?;
+                return Ok(second);
+            }
+            return Ok(out);
+        }
+
+        debug!("pod_ip {:?}\n pod_port {:?}\n pod_trafic_type {:?}\n traffic_in_out_ip {:?}\n traffic_in_out_port {:?}\n_", &self.pod_ip, &self.pod_port,&self.traffic_type,&self.traffic_in_out_ip,&self.traffic_in_out_port);
+        let row = pod_traffic
+            .filter(pod_ip.eq(&self.pod_ip))
+            .filter(pod_port.eq(&self.pod_port))
+            .filter(traffic_type.eq(&self.traffic_type))
+            .filter(traffic_in_out_ip.eq(&self.traffic_in_out_ip))
+            .filter(traffic_in_out_port.eq(&self.traffic_in_out_port))
+            .first::<PodTraffic>(conn)
+            .optional()?;
+        Ok(row)
+    }
+}
+
+
 
 #[post("/pod/spec")]
 pub async fn add_pod_details(
@@ -117,44 +156,8 @@ pub fn upsert_svc_details(
     Ok(w.0)
 }
 
-impl PodTraffic {
-    pub fn get_row(&self, conn: &mut PgConnection) -> Result<Option<PodTraffic>, DbError> {
-        use schema::pod_traffic::dsl::*;
-        if self.ip_protocol.eq(&Some("UDP".to_string())) {
-            let out: Option<PodTraffic> = pod_traffic
-                .filter(pod_ip.eq(&self.pod_ip))
-                .filter(traffic_type.eq(&self.traffic_type))
-                .filter(traffic_in_out_ip.eq(&self.traffic_in_out_ip))
-                .filter(traffic_in_out_port.eq(&self.traffic_in_out_port))
-                .first::<PodTraffic>(conn)
-                .optional()?;
-            if out.is_none() {
-                let second: Option<PodTraffic> = pod_traffic
-                    .filter(pod_ip.eq(&self.pod_ip))
-                    .filter(pod_port.eq(&self.pod_port))
-                    .filter(traffic_type.eq(&self.traffic_type))
-                    .filter(traffic_in_out_ip.eq(&self.traffic_in_out_ip))
-                    .first::<PodTraffic>(conn)
-                    .optional()?;
-                return Ok(second);
-            }
-            return Ok(out);
-        }
 
-        debug!("pod_ip {:?}\n pod_port {:?}\n pod_trafic_type {:?}\n traffic_in_out_ip {:?}\n traffic_in_out_port {:?}\n_", &self.pod_ip, &self.pod_port,&self.traffic_type,&self.traffic_in_out_ip,&self.traffic_in_out_port);
-        let row = pod_traffic
-            .filter(pod_ip.eq(&self.pod_ip))
-            .filter(pod_port.eq(&self.pod_port))
-            .filter(traffic_type.eq(&self.traffic_type))
-            .filter(traffic_in_out_ip.eq(&self.traffic_in_out_ip))
-            .filter(traffic_in_out_port.eq(&self.traffic_in_out_port))
-            .first::<PodTraffic>(conn)
-            .optional()?;
-        Ok(row)
-    }
-}
-
-impl PodSyscalls {
+impl PodInputSyscalls {
     pub fn get_row(&self, conn: &mut PgConnection) -> Result<Option<PodSyscalls>, DbError> {
         use schema::pod_syscalls::dsl::*;
 
@@ -177,7 +180,7 @@ impl PodSyscalls {
 #[post("/pod/syscalls")]
 pub async fn add_pods_syscalls(
     pool: web::Data<DbPool>,
-    form: web::Json<PodSyscalls>,
+    form: web::Json<Vec<PodInputSyscalls>>,
 ) -> Result<HttpResponse, Error> {
     debug!("Insert pod syscall details table");
     let pods = web::block(move || {
@@ -192,39 +195,46 @@ pub async fn add_pods_syscalls(
 
 pub fn create_pod_syscalls(
     conn: &mut PgConnection,
-    w: web::Json<PodSyscalls>,
-) -> Result<PodSyscalls, DbError> {
+    w: web::Json<Vec<PodInputSyscalls>>,
+) -> Result<(), DbError> {
     use schema::pod_syscalls::dsl::*;
 
-    debug!(
-        "Storing pod details {:?} into pod_syscalls table",
-        w.pod_name
-    );
+    for pod_syscall in w.iter() {
+        debug!(
+            "Storing pod details {:?} into pod_syscalls table",
+            pod_syscall.pod_name
+        );
 
-    let existing_row = w.get_row(conn)?;
-    let new_syscall_number = &w.syscalls.clone();
+        let existing_row = pod_syscall.get_row(conn)?;
+        let new_syscall_number = pod_syscall.syscalls.join(",");
 
-    if let Some(mut row) = existing_row {
-        let mut syscall_list: Vec<&str> = row.syscalls.split(',').collect();
-        if !syscall_list.contains(&new_syscall_number.as_str()) {
-            syscall_list.push(new_syscall_number);
-            row.syscalls = syscall_list.join(",");
+        if let Some(mut row) = existing_row {
+            row.syscalls = new_syscall_number;
 
             diesel::update(pod_syscalls.filter(pod_name.eq(&row.pod_name)))
                 .set(syscalls.eq(row.syscalls.clone()))
                 .execute(conn)
                 .expect("Error updating pod_syscalls");
-        }
-    } else {
-        diesel::insert_into(pod_syscalls)
-            .values(&*w)
-            .execute(conn)
-            .expect("Error inserting data into pod_syscalls");
-    }
-    debug!(
-        "Success: pod {:?} inserted in pod_syscalls table",
-        w.pod_name
-    );
+        } else {
+            let new_pod_syscall = PodSyscalls {
+                syscalls: new_syscall_number,
+                pod_name: pod_syscall.pod_name.clone(),
+                pod_namespace: pod_syscall.pod_namespace.clone(),
+                arch: pod_syscall.arch.clone(),
+                time_stamp: pod_syscall.time_stamp
+            };
 
-    Ok(w.into_inner())
+            diesel::insert_into(pod_syscalls)
+                .values(&new_pod_syscall)
+                .execute(conn)
+                .expect("Error inserting data into pod_syscalls");
+        }
+
+        debug!(
+            "Success: pod {:?} processed in pod_syscalls table",
+            pod_syscall.pod_name
+        );
+    }
+
+    Ok(())
 }

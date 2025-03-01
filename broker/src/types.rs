@@ -1,7 +1,7 @@
 use crate::schema::{pod_details, pod_syscalls, pod_traffic, svc_details};
 use chrono::NaiveDateTime;
 use diesel::{AsChangeset, Identifiable, Insertable, Queryable, Selectable};
-use serde::{Deserialize, Serialize};
+use serde::{de, Deserialize, Serialize};
 
 #[derive(
     Default,
@@ -88,6 +88,16 @@ pub struct PodSyscalls {
     pub pod_name: String,
     pub pod_namespace: String,
     pub syscalls: String,
+    pub arch: String,
+    pub time_stamp: NaiveDateTime,
+}
+
+#[derive(Serialize,Deserialize)]
+
+pub struct PodInputSyscalls {
+    pub pod_name: String,
+    pub pod_namespace: String,
+    pub syscalls: Vec<String>,
     pub arch: String,
     pub time_stamp: NaiveDateTime,
 }

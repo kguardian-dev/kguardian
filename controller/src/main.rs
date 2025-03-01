@@ -3,6 +3,7 @@ use kube_guardian::network::handle_network_event;
 use kube_guardian::network::network_probe::NetworkProbeSkelBuilder;
 use kube_guardian::service_watcher::watch_service;
 use kube_guardian::syscall::handle_syscall_event;
+use kube_guardian::syscall::send_syscall_cache_periodically;
 use kube_guardian::syscall::sycallprobe::SyscallSkelBuilder;
 use kube_guardian::syscall::SyscallTrace;
 use libbpf_rs::skel::OpenSkel;
@@ -106,12 +107,15 @@ async fn main() -> Result<()> {
         }
     });
 
+    let syscall_recorder = send_syscall_cache_periodically();
+
     // Wait for all tasks to complete (they should run indefinitely)
     _ = tokio::try_join!(
         service,
         pods,
         network_event_handler,
         syscall_event_handler,
+        syscall_recorder,
         async { ebpf_handle.await.unwrap() }
     )
     .unwrap();
