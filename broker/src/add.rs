@@ -85,8 +85,6 @@ impl PodTraffic {
     }
 }
 
-
-
 #[post("/pod/spec")]
 pub async fn add_pod_details(
     pool: web::Data<DbPool>,
@@ -156,7 +154,6 @@ pub fn upsert_svc_details(
     Ok(w.0)
 }
 
-
 impl PodInputSyscalls {
     pub fn get_row(&self, conn: &mut PgConnection) -> Result<Option<PodSyscalls>, DbError> {
         use schema::pod_syscalls::dsl::*;
@@ -221,7 +218,7 @@ pub fn create_pod_syscalls(
                 pod_name: pod_syscall.pod_name.clone(),
                 pod_namespace: pod_syscall.pod_namespace.clone(),
                 arch: pod_syscall.arch.clone(),
-                time_stamp: pod_syscall.time_stamp
+                time_stamp: pod_syscall.time_stamp,
             };
 
             diesel::insert_into(pod_syscalls)

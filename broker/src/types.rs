@@ -92,7 +92,7 @@ pub struct PodSyscalls {
     pub time_stamp: NaiveDateTime,
 }
 
-#[derive(Serialize,Deserialize)]
+#[derive(Serialize, Deserialize)]
 
 pub struct PodInputSyscalls {
     pub pod_name: String,

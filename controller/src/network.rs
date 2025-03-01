@@ -2,9 +2,9 @@ use chrono::Utc;
 use moka::future::Cache;
 use serde_json::json;
 use std::net::{IpAddr, Ipv4Addr};
+use std::sync::Arc;
 use tracing::debug;
 use uuid::Uuid;
-use std::sync::Arc;
 
 use crate::{api_post_call, Error, PodInspect, PodTraffic};
 lazy_static::lazy_static! {
