@@ -9,13 +9,14 @@ use kube::{
 use serde_json::json;
 use std::{collections::BTreeMap, sync::Arc};
 use tokio::sync::Mutex;
-use tracing::{error, info};
+use tracing::{debug, error, info};
 
 use tokio::sync::mpsc;
 pub async fn watch_pods(
     node_name: String,
     tx: mpsc::Sender<u64>,
     container_map: Arc<Mutex<BTreeMap<u64, PodInspect>>>,
+    excluded_namespaces: &[String],
 ) -> Result<(), Error> {
     let c = Client::try_default().await?;
     let pods: Api<Pod> = Api::all(c.clone());
@@ -30,7 +31,7 @@ pub async fn watch_pods(
             let t = tx.clone();
             let container_map = Arc::clone(&container_map);
             async move {
-                if let Some(inum) = process_pod(&p, container_map).await {
+                if let Some(inum) = process_pod(&p, container_map, excluded_namespaces).await {
                     if let Err(e) = t.send(inum).await {
                         tracing::error!("Failed to send inode number: {:?}", e);
                     }
@@ -46,10 +47,11 @@ pub async fn watch_pods(
 async fn process_pod(
     pod: &Pod,
     container_map: Arc<Mutex<BTreeMap<u64, PodInspect>>>,
+    excluded_namespaces: &[String],
 ) -> Option<u64> {
     if let Some(con_ids) = pod_unready(pod) {
         let pod_ip = update_pods_details(pod).await;
-        if should_process_pod(&pod.metadata.namespace) {
+        if should_process_pod(&pod.metadata.namespace, excluded_namespaces) {
             if let Ok(Some(pod_ip)) = pod_ip {
                 return process_container_ids(&con_ids, pod, &pod_ip, container_map).await;
             }
@@ -57,12 +59,10 @@ async fn process_pod(
     }
     None
 }
-fn should_process_pod(namespace: &Option<String>) -> bool {
-    // TODO : excluded_namespace needs to be paratermized
-    let excluded_namespaces: [&str; 2] = ["kube-system", "kube-guardian"];
+fn should_process_pod(namespace: &Option<String>, excluded_namespaces: &[String]) -> bool {
     !namespace
         .as_ref()
-        .map_or(false, |ns| excluded_namespaces.contains(&ns.as_str()))
+        .map_or(false, |ns| excluded_namespaces.contains(ns))
 }
 
 fn pod_unready(p: &Pod) -> Option<Vec<String>> {
@@ -75,7 +75,7 @@ fn pod_unready(p: &Pod) -> Option<Vec<String>> {
             .collect::<Vec<_>>()
             .join(",");
         if !failed.is_empty() {
-            info!("Unready pod {}: {}", p.name_any(), failed);
+            debug!("Unready pod {}: {}", p.name_any(), failed);
             return None;
         }
     }

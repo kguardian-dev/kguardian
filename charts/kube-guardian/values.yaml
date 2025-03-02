@@ -103,6 +103,11 @@ controller:
   # -- Priority class to be used for the kube-guardian controller pods
   priorityClassName: ""
 
+  # -- Namespaces to be excluded from monitoring
+  excludedNamespaces: 
+    - kube-guardian
+    - kube-system
+
 broker:
   # -- Number of broker replicas to deploy
   replicaCount: 1

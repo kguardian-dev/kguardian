@@ -4,6 +4,7 @@ use libbpf_rs::{MapCore, MapFlags, PerfBufferBuilder};
 use std::{collections::BTreeMap, env, mem::MaybeUninit, sync::Arc};
 use tokio::sync::{mpsc, Mutex};
 use tokio::{task, task::JoinHandle};
+use tracing::info;
 
 use kube_guardian::network::{handle_network_events, network_probe::NetworkProbeSkelBuilder};
 use kube_guardian::service_watcher::watch_service;
@@ -20,6 +21,14 @@ async fn main() -> Result<()> {
     init_logger();
     let c: Arc<Mutex<BTreeMap<u64, PodInspect>>> = Arc::new(Mutex::new(BTreeMap::new()));
 
+    let excluded_namespaces: Vec<String> = env::var("EXCLUDED_NAMESPACES")
+        .unwrap_or_else(|_| "kube-system,kube-guardian".to_string())
+        .split(',')
+        .map(|s| s.to_string())
+        .collect();
+
+    info!("Ignoring namespaces: {:?}", excluded_namespaces);
+
     let node_name = env::var("CURRENT_NODE").expect("cannot find node name: CURRENT_NODE ");
     let (tx, mut rx) = mpsc::channel(100); // Use tokio's mpsc channel
     let pod_c = Arc::clone(&c);
@@ -28,7 +37,7 @@ async fn main() -> Result<()> {
     let (syscall_event_sender, syscall_event_receiver) = mpsc::channel::<SyscallEventData>(1000);
     let container_map = Arc::clone(&c);
 
-    let pods = watch_pods(node_name, tx, pod_c);
+    let pods = watch_pods(node_name, tx, pod_c, &excluded_namespaces);
     let service = watch_service();
     let network_event_handler =
         handle_network_events(network_event_receiver, Arc::clone(&container_map));
