@@ -77,7 +77,7 @@ async fn main() -> Result<()> {
                 let syscall_data: SyscallTrace = unsafe { *(data.as_ptr() as *const SyscallTrace) };
                 let syscall_event_data = SyscallEventData { syscall_data };
                 if let Err(e) = syscall_event_sender.blocking_send(syscall_event_data) {
-                    eprintln!("Failed to send Syscakll event: {:?}", e);
+                    //eprintln!("Failed to send Syscall event: {:?}", e);
                 }
             })
             .build()
@@ -150,6 +150,7 @@ async fn handle_syscall_events(
             handle_syscall_event(&event.syscall_data, pod_inspect).await?
         }
     }
+    tracing::error!("Syscall event receiver exited unexpectedly!");
     Ok(())
 }
 

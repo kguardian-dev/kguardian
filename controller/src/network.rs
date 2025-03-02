@@ -3,14 +3,14 @@ use moka::future::Cache;
 use serde_json::json;
 use std::net::{IpAddr, Ipv4Addr};
 use std::sync::Arc;
-use tracing::debug;
+use tracing::{debug, error};
 use uuid::Uuid;
-
 use crate::{api_post_call, Error, PodInspect, PodTraffic};
+
 lazy_static::lazy_static! {
-    static ref TRAFFIC_CACHE: Arc<Cache<String, (String, String, String, String, String, String)>> =
-        Arc::new(Cache::new(1000));
+    static ref TRAFFIC_CACHE: Arc<Cache<TrafficKey, ()>> = Arc::new(Cache::new(10000));
 }
+
 
 pub mod network_probe {
     include!(concat!(
@@ -18,6 +18,18 @@ pub mod network_probe {
         "/src/bpf/network_probe.skel.rs"
     ));
 }
+
+#[derive(Hash, Eq, PartialEq, Clone)]
+struct TrafficKey {
+    pod_name: String,
+    pod_ip: String,
+    pod_port: String,
+    traffic_in_out_ip: String,
+    traffic_in_out_port: String,
+    traffic_type: String,
+    ip_protocol: String,
+}
+
 
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -79,20 +91,17 @@ pub async fn handle_network_event(data: &NetworkData, pod_data: &PodInspect) -> 
     let traffic_type_str = traffic_type.to_string();
     let protocol_str = protocol.to_string();
 
-    let cache_key = pod_name.clone();
-    let cache_value = (
-        pod_ip.clone(),
-        pod_port_str.clone(),
-        traffic_in_out_ip_str.clone(),
-        traffic_in_out_port_str.clone(),
-        traffic_type_str.clone(),
-        protocol_str.clone(),
-    );
+    let cache_key = TrafficKey {
+        pod_name: pod_name.clone(),
+        pod_ip: pod_ip.clone(),
+        pod_port: pod_port_str.clone(),
+        traffic_in_out_ip: traffic_in_out_ip_str.clone(),
+        traffic_in_out_port: traffic_in_out_port_str.clone(),
+        traffic_type: traffic_type_str.clone(),
+        ip_protocol: protocol_str.clone(),
+    };
 
     if !TRAFFIC_CACHE.contains_key(&cache_key) {
-        TRAFFIC_CACHE
-            .insert(cache_key.clone(), cache_value.clone())
-            .await;
         let z = json!(PodTraffic {
             uuid: Uuid::new_v4().to_string(),
             pod_name,
@@ -106,7 +115,13 @@ pub async fn handle_network_event(data: &NetworkData, pod_data: &PodInspect) -> 
             time_stamp: Utc::now().naive_utc(),
         });
         debug!("Record to be inserted {}", z.to_string());
-        api_post_call(z, "pod/traffic").await?
+        if let Err(e) = api_post_call(z, "pod/traffic").await {
+            error!("Failed to post traffic data: {}", e);
+        } else {
+            TRAFFIC_CACHE.insert(cache_key.clone(), ()).await;
+        }
+    }else{
+        debug!("Skipping duplicate network event for pod: {}", pod_name);
     }
     Ok(())
 }

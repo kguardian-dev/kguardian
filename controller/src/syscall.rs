@@ -5,7 +5,7 @@ use serde_json::json;
 use std::collections::HashSet;
 use std::sync::Arc;
 use tokio::sync::Mutex;
-use tracing::{debug, info};
+use tracing::{debug, info, error};
 
 use crate::{api_post_call, Error, PodInspect, SyscallData};
 
@@ -81,14 +81,14 @@ pub async fn send_syscall_cache_periodically() -> Result<(), Error> {
                 });
                 batch.push(z);
                 debug!("Sending batch of {} syscalls to API", batch.len());
-
                 *last_sent_lock = syscalls_lock.clone();
             }
         }
 
         if !batch.is_empty() {
-            debug!("Sending batch of {} syscalls to API", batch.len());
-            api_post_call(json!(batch), "pod/syscalls").await?;
+            if let Err(e) = api_post_call(json!(batch), "pod/syscalls").await {
+                error!("Cannot send syscalls data to broker, check if the broker is up {}", e);
+            }
         }
 
         tokio::time::sleep(interval_duration).await;
