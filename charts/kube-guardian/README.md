@@ -2,7 +2,7 @@
 
 This chart bootstraps the [Xentra]() controlplane onto a [Kubernetes](http://kubernetes.io) cluster using the [Helm](https://helm.sh) package manager.
 
-![Version: 0.0.22](https://img.shields.io/badge/Version-0.0.22-informational?style=flat-square)
+![Version: 0.0.24](https://img.shields.io/badge/Version-0.0.24-informational?style=flat-square)
 
 ## Overview
 
@@ -119,15 +119,16 @@ The following table lists the configurable parameters of the Xentra chart and th
 | controller.autoscaling.maxReplicas | int | `100` |  |
 | controller.autoscaling.minReplicas | int | `1` |  |
 | controller.autoscaling.targetCPUUtilizationPercentage | int | `80` |  |
+| controller.excludedNamespaces | list | `["kube-guardian","kube-system"]` | Namespaces to be excluded from monitoring |
 | controller.fullnameOverride | string | `""` |  |
 | controller.image.pullPolicy | string | `"Always"` |  |
 | controller.image.repository | string | `"ghcr.io/xentra-ai/images/guardian-controller"` |  |
 | controller.image.sha | string | `""` | Overrides the image tag. |
-| controller.image.tag | string | `"edge"` |  |
+| controller.image.tag | string | `"latest"` |  |
 | controller.imagePullSecrets | list | `[]` |  |
 | controller.initContainer.image.pullPolicy | string | `"Always"` |  |
 | controller.initContainer.image.repository | string | `"busybox"` |  |
-| controller.initContainer.image.tag | string | `"stable"` |  |
+| controller.initContainer.image.tag | string | `"latest"` |  |
 | controller.initContainer.securityContext | object | `{}` |  |
 | controller.nameOverride | string | `""` |  |
 | controller.nodeSelector | object | `{"kubernetes.io/os":"linux"}` | Node labels for the kube-guardian controller pod assignment |
@@ -156,7 +157,7 @@ The following table lists the configurable parameters of the Xentra chart and th
 | database.image.pullPolicy | string | `"Always"` |  |
 | database.image.repository | string | `"postgres"` |  |
 | database.image.sha | string | `""` |  |
-| database.image.tag | string | `"17"` |  |
+| database.image.tag | string | `"latest"` |  |
 | database.imagePullSecrets | list | `[]` |  |
 | database.name | string | `"guardian-db"` |  |
 | database.nameOverride | string | `""` |  |
