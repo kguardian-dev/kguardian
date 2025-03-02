@@ -2,10 +2,10 @@ use chrono::Utc;
 use libseccomp::{ScmpArch, ScmpSyscall};
 use moka::future::Cache;
 use serde_json::json;
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::sync::Arc;
 use tokio::sync::Mutex;
-use tracing::{debug, info, error};
+use tracing::{debug, error};
 
 use crate::{api_post_call, Error, PodInspect, SyscallData};
 
@@ -25,12 +25,29 @@ lazy_static::lazy_static! {
 
 #[repr(C)]
 #[derive(Clone, Copy)]
-pub struct SyscallTrace {
+pub struct SyscallEventData {
     pub inum: u64,
     pub sysnbr: u32,
 }
 
-pub async fn handle_syscall_event(data: &SyscallTrace, pod_data: &PodInspect) -> Result<(), Error> {
+pub async fn handle_syscall_events(
+    mut event_receiver: tokio::sync::mpsc::Receiver<SyscallEventData>,
+    container_map_udp: Arc<Mutex<BTreeMap<u64, PodInspect>>>,
+) -> Result<(), Error> {
+    while let Some(event) = event_receiver.recv().await {
+        let container_map = container_map_udp.lock().await;
+        if let Some(pod_inspect) = container_map.get(&event.inum) {
+            process_syscall_event(&event, pod_inspect).await?
+        }
+    }
+    tracing::error!("Syscall event receiver exited unexpectedly!");
+    Ok(())
+}
+
+pub async fn process_syscall_event(
+    data: &SyscallEventData,
+    pod_data: &PodInspect,
+) -> Result<(), Error> {
     let pod_name = pod_data.status.pod_name.to_string();
     let syscall_number = data.sysnbr;
     let syscall_name = get_syscall_name(syscall_number.try_into().unwrap())
@@ -87,10 +104,9 @@ pub async fn send_syscall_cache_periodically() -> Result<(), Error> {
 
         if !batch.is_empty() {
             if let Err(e) = api_post_call(json!(batch), "pod/syscalls").await {
-                error!("Cannot send syscalls data to broker, check if the broker is up {}", e);
+                error!("Failed to post Syscall Event: {}", e);
             }
         }
-
         tokio::time::sleep(interval_duration).await;
     }
 

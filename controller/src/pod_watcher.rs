@@ -9,7 +9,7 @@ use kube::{
 use serde_json::json;
 use std::{collections::BTreeMap, sync::Arc};
 use tokio::sync::Mutex;
-use tracing::info;
+use tracing::{error, info};
 
 use tokio::sync::mpsc;
 pub async fn watch_pods(
@@ -107,7 +107,10 @@ async fn update_pods_details(pod: &Pod) -> Result<Option<String>, Error> {
             pod_obj: Some(json!(pod)),
             time_stamp: Utc::now().naive_utc(),
         };
-        api_post_call(json!(z), "pod/spec").await?;
+
+        if let Err(e) = api_post_call(json!(z), "pod/spec").await {
+            error!("Failed to post Pod details: {}", e);
+        }
         pod_ip_address = Some(pod_ip.to_string());
         return Ok(pod_ip_address);
     }

@@ -2,7 +2,7 @@ use crate::Error;
 use reqwest::header;
 use serde_json::Value;
 use std::env;
-use tracing::{debug, error};
+use tracing::debug;
 
 use lazy_static::lazy_static;
 
@@ -23,11 +23,7 @@ pub(crate) async fn api_post_call(v: Value, path: &str) -> Result<(), Error> {
         .body(v.to_string())
         .send()
         .await
-        .map_err(|e| {
-            error!("Failed to send the traffic logs to API {}", url);
-            error!("Msg {}", e);
-            Error::CustomError(format!("API call failed: {}", e))
-        })?;
+        .map_err(|e| Error::ApiError(format!("{}", e)))?;
 
     debug!("Post url {} : Success", url);
     debug!("Post call response {:?}", res);

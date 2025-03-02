@@ -26,8 +26,8 @@ pub enum Error {
     #[error("IllegalDocument")]
     IllegalDocument,
 
-    #[error("CustomError {0}")]
-    CustomError(String),
+    #[error("ApiError - {0}")]
+    ApiError(String),
 }
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;

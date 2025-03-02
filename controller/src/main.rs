@@ -1,42 +1,30 @@
 use anyhow::Result;
-use kube_guardian::network::handle_network_event;
-use kube_guardian::network::network_probe::NetworkProbeSkelBuilder;
-use kube_guardian::service_watcher::watch_service;
-use kube_guardian::syscall::handle_syscall_event;
-use kube_guardian::syscall::send_syscall_cache_periodically;
-use kube_guardian::syscall::sycallprobe::SyscallSkelBuilder;
-use kube_guardian::syscall::SyscallTrace;
-use libbpf_rs::skel::OpenSkel;
-use libbpf_rs::skel::Skel;
-use libbpf_rs::skel::SkelBuilder;
-use libbpf_rs::MapCore;
-use libbpf_rs::MapFlags;
-use libbpf_rs::PerfBufferBuilder;
-use std::collections::BTreeMap;
-use std::env;
-use std::mem::MaybeUninit;
-use std::sync::Arc;
-use tokio::sync::mpsc;
-use tokio::sync::Mutex;
+use libbpf_rs::skel::{OpenSkel, Skel, SkelBuilder};
+use libbpf_rs::{MapCore, MapFlags, PerfBufferBuilder};
+use std::{collections::BTreeMap, env, mem::MaybeUninit, sync::Arc};
+use tokio::sync::{mpsc, Mutex};
+use tokio::{task, task::JoinHandle};
 
-use kube_guardian::error::Error;
-use kube_guardian::models::PodInspect;
-use kube_guardian::network::NetworkData;
-use kube_guardian::pod_watcher::watch_pods;
-use tokio::sync::Mutex as TokioMutex;
-use tokio::task;
-use tokio::task::JoinHandle;
+use kube_guardian::network::{handle_network_events, network_probe::NetworkProbeSkelBuilder};
+use kube_guardian::service_watcher::watch_service;
+use kube_guardian::syscall::{
+    handle_syscall_events, send_syscall_cache_periodically, sycallprobe::SyscallSkelBuilder,
+    SyscallEventData,
+};
+use kube_guardian::{
+    error::Error, models::PodInspect, network::NetworkEventData, pod_watcher::watch_pods,
+};
 
 #[tokio::main]
 async fn main() -> Result<()> {
     init_logger();
-    let c: Arc<TokioMutex<BTreeMap<u64, PodInspect>>> = Arc::new(TokioMutex::new(BTreeMap::new()));
+    let c: Arc<Mutex<BTreeMap<u64, PodInspect>>> = Arc::new(Mutex::new(BTreeMap::new()));
 
     let node_name = env::var("CURRENT_NODE").expect("cannot find node name: CURRENT_NODE ");
     let (tx, mut rx) = mpsc::channel(100); // Use tokio's mpsc channel
     let pod_c = Arc::clone(&c);
 
-    let (network_event_sender, network_event_receiver) = mpsc::channel::<NetworkData>(1000);
+    let (network_event_sender, network_event_receiver) = mpsc::channel::<NetworkEventData>(1000);
     let (syscall_event_sender, syscall_event_receiver) = mpsc::channel::<SyscallEventData>(1000);
     let container_map = Arc::clone(&c);
 
@@ -63,10 +51,12 @@ async fn main() -> Result<()> {
 
         let network_perf = PerfBufferBuilder::new(&network_sk.maps.tracept_events)
             .sample_cb(move |_cpu, data: &[u8]| {
-                let tcp_data: NetworkData = unsafe { *(data.as_ptr() as *const NetworkData) };
+                let network_event_data: NetworkEventData =
+                    unsafe { *(data.as_ptr() as *const NetworkEventData) };
 
-                if let Err(e) = network_event_sender.blocking_send(tcp_data) {
-                    eprintln!("Failed to send TCP event: {:?}", e);
+                if let Err(e) = network_event_sender.blocking_send(network_event_data) {
+                    // eprintln!("Failed to send TCP event: {:?}", e);
+                    // TODO: If SendError, possibly the receiver is closed, restart the controller
                 }
             })
             .build()
@@ -74,10 +64,11 @@ async fn main() -> Result<()> {
 
         let syscall_perf = PerfBufferBuilder::new(&syscall_sk.maps.syscall_events)
             .sample_cb(move |_cpu: i32, data: &[u8]| {
-                let syscall_data: SyscallTrace = unsafe { *(data.as_ptr() as *const SyscallTrace) };
-                let syscall_event_data = SyscallEventData { syscall_data };
+                let syscall_event_data: SyscallEventData =
+                    unsafe { *(data.as_ptr() as *const SyscallEventData) };
                 if let Err(e) = syscall_event_sender.blocking_send(syscall_event_data) {
                     //eprintln!("Failed to send Syscall event: {:?}", e);
+                    //TODO: If SendError, possibly the receiver is closed, restart the controller
                 }
             })
             .build()
@@ -119,38 +110,6 @@ async fn main() -> Result<()> {
         async { ebpf_handle.await.unwrap() }
     )
     .unwrap();
-    Ok(())
-}
-
-#[derive(Clone)]
-struct SyscallEventData {
-    syscall_data: SyscallTrace,
-}
-
-async fn handle_network_events(
-    mut event_receiver: tokio::sync::mpsc::Receiver<NetworkData>,
-    container_map_tcp: Arc<TokioMutex<BTreeMap<u64, PodInspect>>>,
-) -> Result<(), Error> {
-    while let Some(event) = event_receiver.recv().await {
-        let container_map = container_map_tcp.lock().await;
-        if let Some(pod_inspect) = container_map.get(&event.inum) {
-            handle_network_event(&event, pod_inspect).await?
-        }
-    }
-    Ok(())
-}
-
-async fn handle_syscall_events(
-    mut event_receiver: mpsc::Receiver<SyscallEventData>,
-    container_map_udp: Arc<Mutex<BTreeMap<u64, PodInspect>>>,
-) -> Result<(), Error> {
-    while let Some(event) = event_receiver.recv().await {
-        let container_map = container_map_udp.lock().await;
-        if let Some(pod_inspect) = container_map.get(&event.syscall_data.inum) {
-            handle_syscall_event(&event.syscall_data, pod_inspect).await?
-        }
-    }
-    tracing::error!("Syscall event receiver exited unexpectedly!");
     Ok(())
 }
 

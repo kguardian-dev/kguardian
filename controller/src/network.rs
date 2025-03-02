@@ -1,16 +1,17 @@
+use crate::{api_post_call, Error, PodInspect, PodTraffic};
 use chrono::Utc;
 use moka::future::Cache;
 use serde_json::json;
+use std::collections::BTreeMap;
 use std::net::{IpAddr, Ipv4Addr};
 use std::sync::Arc;
+use tokio::sync::Mutex;
 use tracing::{debug, error};
 use uuid::Uuid;
-use crate::{api_post_call, Error, PodInspect, PodTraffic};
 
 lazy_static::lazy_static! {
     static ref TRAFFIC_CACHE: Arc<Cache<TrafficKey, ()>> = Arc::new(Cache::new(10000));
 }
-
 
 pub mod network_probe {
     include!(concat!(
@@ -30,10 +31,9 @@ struct TrafficKey {
     ip_protocol: String,
 }
 
-
 #[repr(C)]
 #[derive(Clone, Copy)]
-pub struct NetworkData {
+pub struct NetworkEventData {
     pub inum: u64,
     saddr: u32,
     sport: u16,
@@ -44,7 +44,23 @@ pub struct NetworkData {
     pub kind: u16,
 }
 
-pub async fn handle_network_event(data: &NetworkData, pod_data: &PodInspect) -> Result<(), Error> {
+pub async fn handle_network_events(
+    mut event_receiver: tokio::sync::mpsc::Receiver<NetworkEventData>,
+    container_map_tcp: Arc<Mutex<BTreeMap<u64, PodInspect>>>,
+) -> Result<(), Error> {
+    while let Some(event) = event_receiver.recv().await {
+        let container_map = container_map_tcp.lock().await;
+        if let Some(pod_inspect) = container_map.get(&event.inum) {
+            process_network_event(&event, pod_inspect).await?
+        }
+    }
+    Ok(())
+}
+
+pub async fn process_network_event(
+    data: &NetworkEventData,
+    pod_data: &PodInspect,
+) -> Result<(), Error> {
     let src = u32::from_be(data.saddr);
     let dst = u32::from_be(data.daddr);
     let sport = data.sport;
@@ -116,11 +132,11 @@ pub async fn handle_network_event(data: &NetworkData, pod_data: &PodInspect) -> 
         });
         debug!("Record to be inserted {}", z.to_string());
         if let Err(e) = api_post_call(z, "pod/traffic").await {
-            error!("Failed to post traffic data: {}", e);
+            error!("Failed to post Network event: {}", e);
         } else {
             TRAFFIC_CACHE.insert(cache_key.clone(), ()).await;
         }
-    }else{
+    } else {
         debug!("Skipping duplicate network event for pod: {}", pod_name);
     }
     Ok(())
