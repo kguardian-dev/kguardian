@@ -28,6 +28,12 @@ pub enum Error {
 
     #[error("ApiError - {0}")]
     ApiError(String),
+
+    #[error("Tokio Join error: {source}")]
+    JoinError {
+        #[from]
+        source: tokio::task::JoinError,
+    },
 }
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
