@@ -20,18 +20,33 @@ async fn main() -> Result<(), Error> {
     init_logger();
 
     let node_name = env::var("CURRENT_NODE").expect("cannot find node name: CURRENT_NODE ");
+
     let excluded_namespaces: Vec<String> = env::var("EXCLUDED_NAMESPACES")
         .unwrap_or_else(|_| "kube-system,kube-guardian".to_string())
         .split(',')
         .map(|s| s.to_string())
         .collect();
 
-    let (tx, rx) = mpsc::channel(100); // Use tokio's mpsc channel
+    let ignore_daemonset_traffic = env::var("IGNORE_DAEMONSET_TRAFFIC")
+        .unwrap_or_else(|_| "true".to_string()) // Default to true, dont log the daemonset traffic
+        .parse::<bool>()
+        .unwrap_or(true);
+
+    let (tx, rx) = mpsc::channel(1000); // Use tokio's mpsc channel
+
+    let (sender_ip, recv_ip) = mpsc::channel(1000); // Use tokio's mpsc channel
 
     let c: Arc<Mutex<BTreeMap<u64, PodInspect>>> = Arc::new(Mutex::new(BTreeMap::new()));
     let pod_c = Arc::clone(&c);
     let container_map = Arc::clone(&c);
-    let pods = watch_pods(node_name, tx, pod_c, &excluded_namespaces);
+    let pods = watch_pods(
+        node_name,
+        tx,
+        pod_c,
+        &excluded_namespaces,
+        sender_ip,
+        ignore_daemonset_traffic,
+    );
     info!("Ignoring namespaces: {:?}", excluded_namespaces);
 
     let service = watch_service();
@@ -43,7 +58,13 @@ async fn main() -> Result<(), Error> {
         handle_network_events(network_event_receiver, Arc::clone(&container_map));
     let syscall_event_handler = handle_syscall_events(syscall_event_receiver, container_map);
 
-    let ebpf_handle = ebpf_handle(network_event_sender, syscall_event_sender, rx);
+    let ebpf_handle = ebpf_handle(
+        network_event_sender,
+        syscall_event_sender,
+        rx,
+        recv_ip,
+        ignore_daemonset_traffic,
+    );
 
     let syscall_recorder = send_syscall_cache_periodically();
 

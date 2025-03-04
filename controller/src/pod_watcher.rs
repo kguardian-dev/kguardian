@@ -17,6 +17,8 @@ pub async fn watch_pods(
     tx: mpsc::Sender<u64>,
     container_map: Arc<Mutex<BTreeMap<u64, PodInspect>>>,
     excluded_namespaces: &[String],
+    sender_ip: mpsc::Sender<String>,
+    ignore_daemonset_traffic: bool,
 ) -> Result<(), Error> {
     let c = Client::try_default().await?;
     let pods: Api<Pod> = Api::all(c.clone());
@@ -29,9 +31,18 @@ pub async fn watch_pods(
         .default_backoff()
         .try_for_each(|p| {
             let t = tx.clone();
+            let sender_ip = sender_ip.clone();
             let container_map = Arc::clone(&container_map);
             async move {
-                if let Some(inum) = process_pod(&p, container_map, excluded_namespaces).await {
+                if let Some(inum) = process_pod(
+                    &p,
+                    container_map,
+                    excluded_namespaces,
+                    sender_ip,
+                    ignore_daemonset_traffic,
+                )
+                .await
+                {
                     if let Err(e) = t.send(inum).await {
                         tracing::error!("Failed to send inode number: {:?}", e);
                     }
@@ -48,11 +59,23 @@ async fn process_pod(
     pod: &Pod,
     container_map: Arc<Mutex<BTreeMap<u64, PodInspect>>>,
     excluded_namespaces: &[String],
+    sender_ip: mpsc::Sender<String>,
+    ignore_daemonset_traffic: bool,
 ) -> Option<u64> {
     if let Some(con_ids) = pod_unready(pod) {
         let pod_ip = update_pods_details(pod).await;
         if should_process_pod(&pod.metadata.namespace, excluded_namespaces) {
             if let Ok(Some(pod_ip)) = pod_ip {
+                if ignore_daemonset_traffic && is_backed_by_daemonset(pod) {
+                    info!(
+                        "Ignoring daemonset pod: {}, {}",
+                        pod.name_any(),
+                        pod_ip.clone()
+                    );
+                    if let Err(e) = sender_ip.send(pod_ip.clone()).await {
+                        error!("Failed to send pod ip: {}", e);
+                    }
+                }
                 return process_container_ids(&con_ids, pod, &pod_ip, container_map).await;
             }
         }
@@ -151,4 +174,15 @@ fn create_pod_info(pod: &Pod, pod_ip: &str) -> PodInfo {
         pod_namespace: pod.metadata.namespace.to_owned(),
         pod_ip: pod_ip.to_string(),
     }
+}
+
+fn is_backed_by_daemonset(pod: &Pod) -> bool {
+    if let Some(owner_references) = &pod.metadata.owner_references {
+        for owner in owner_references {
+            if owner.kind == "DaemonSet" {
+                return true;
+            }
+        }
+    }
+    false
 }

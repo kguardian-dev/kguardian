@@ -28,7 +28,10 @@ fn main() {
 
     SkeletonBuilder::new()
         .source(SYSCALL_SRC)
-        .clang_args([OsStr::new("-I")])
+        .clang_args([
+            OsStr::new("-I"),
+            vmlinux::include_path_root().join(&arch).as_os_str(),
+        ])
         .build_and_generate(&out)
         .unwrap();
 

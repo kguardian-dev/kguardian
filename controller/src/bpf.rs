@@ -5,13 +5,17 @@ use anyhow::Result;
 use libbpf_rs::skel::{OpenSkel, Skel, SkelBuilder};
 use libbpf_rs::{MapCore, MapFlags, PerfBufferBuilder};
 use std::mem::MaybeUninit;
+use std::net::Ipv4Addr;
 use tokio::sync::mpsc::{Receiver, Sender};
 use tokio::{task, task::JoinHandle};
+use tracing::info;
 
 pub fn ebpf_handle(
     network_event_sender: Sender<NetworkEventData>,
     syscall_event_sender: Sender<SyscallEventData>,
     mut rx: Receiver<u64>,
+    mut ignore_ips: Receiver<String>,
+    ignore_daemonset_traffic: bool,
 ) -> JoinHandle<Result<(), Error>> {
     task::spawn_blocking(move || {
         let mut open_object = MaybeUninit::uninit();
@@ -72,6 +76,17 @@ pub fn ebpf_handle(
                     .inode_num
                     .update(&inum.to_ne_bytes(), &1_u32.to_ne_bytes(), MapFlags::ANY)
                     .unwrap();
+            }
+            if ignore_daemonset_traffic {
+                if let Ok(ip) = ignore_ips.try_recv() {
+                    let ip: Ipv4Addr = ip.parse().unwrap();
+                    let ip_u32 = u32::to_be(u32::from(ip));
+                    network_sk
+                        .maps
+                        .ignore_ips
+                        .update(&ip_u32.to_ne_bytes(), &1_u32.to_ne_bytes(), MapFlags::ANY)
+                        .unwrap();
+                }
             }
         }
     })

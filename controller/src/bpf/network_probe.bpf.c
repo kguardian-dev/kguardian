@@ -35,6 +35,14 @@ struct
     __type(value, u32);
 } inode_num SEC(".maps");
 
+struct
+{
+    __uint(type, BPF_MAP_TYPE_HASH);
+    __uint(max_entries, 10240);
+    __type(key, u32);
+    __type(value, u32);
+} ignore_ips SEC(".maps");
+
 /**
     1: TCP_ESTABLISHED
     2: TCP_SYN_SENT
@@ -83,6 +91,11 @@ int trace_tcp_connect(struct trace_event_raw_inet_sock_set_state *ctx)
 
             // Check for loopback destination (127.0.0.1 in network byte order)
             if (tcp_event.daddr == bpf_htonl(0x7F000001)) {
+                return 0;
+            }
+
+            // if the source or destination IP is in the ignore list, return
+            if (bpf_map_lookup_elem(&ignore_ips, &tcp_event.saddr) || bpf_map_lookup_elem(&ignore_ips, &tcp_event.daddr)) {
                 return 0;
             }
 
