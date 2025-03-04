@@ -108,6 +108,9 @@ controller:
     - kube-guardian
     - kube-system
 
+  # -- Ignore traffic from daemonset pods
+  ignoreDaemonSet: true
+
 broker:
   # -- Number of broker replicas to deploy
   replicaCount: 1

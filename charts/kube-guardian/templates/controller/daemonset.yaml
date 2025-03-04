@@ -53,6 +53,8 @@ spec:
             value: "http://{{ .Values.broker.service.name }}.{{ include "kube-guardian.namespace" . }}.svc.cluster.local:{{ .Values.broker.container.port }}"
           - name: EXCLUDED_NAMESPACES
             value: "{{ .Values.controller.excludedNamespaces | join "," }}"
+          - name: IGNORE_DAEMONSET_TRAFFIC
+            value: "{{ .Values.controller.ignoreDaemonSet }}"
           volumeMounts:
           - mountPath: /sys/kernel/debug
             name: debugfs
