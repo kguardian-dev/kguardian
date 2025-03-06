@@ -107,6 +107,10 @@ pub async fn process_network_event(
     let traffic_type_str = traffic_type.to_string();
     let protocol_str = protocol.to_string();
 
+    if pod_ip.eq(&traffic_in_out_ip_str) {
+        return Ok(());
+    }
+
     let cache_key = TrafficKey {
         pod_name: pod_name.clone(),
         pod_ip: pod_ip.clone(),
