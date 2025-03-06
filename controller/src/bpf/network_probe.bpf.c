@@ -99,6 +99,12 @@ int trace_tcp_connect(struct trace_event_raw_inet_sock_set_state *ctx)
                 return 0;
             }
 
+
+            // Ignore if source and destination IP are the same
+            if (tcp_event.saddr == tcp_event.daddr) {
+                return 0;
+            }
+
             tcp_event.sport = lport;
             tcp_event.dport = bpf_ntohs(dport);
             tcp_event.old_state = old_state;
@@ -145,6 +151,18 @@ int trace_udp_send(struct pt_regs *ctx) {
         bpf_probe_read(&event.daddr, sizeof(event.daddr), &sk->__sk_common.skc_daddr);
         if (event.daddr == bpf_htonl(0x7F000001) || event.daddr == bpf_htonl(0x00000000)) {
             return 0;   
+        }
+
+
+        // if the source or destination IP is in the ignore list, return
+        if (bpf_map_lookup_elem(&ignore_ips, &event.saddr) || bpf_map_lookup_elem(&ignore_ips, &event.daddr)) {
+            return 0;
+        }
+
+
+        // Ignore if source and destination IP are the same
+        if (event.saddr == event.daddr) {
+            return 0;
         }
 
         bpf_probe_read(&lport, sizeof(lport), &sk->__sk_common.skc_num);
