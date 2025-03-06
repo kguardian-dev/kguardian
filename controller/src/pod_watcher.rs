@@ -64,26 +64,20 @@ async fn process_pod(
 ) -> Option<u64> {
     if let Some(con_ids) = pod_unready(pod) {
         let pod_ip = update_pods_details(pod).await;
+        if let Ok(Some(pod_ip)) = pod_ip {
+            if ignore_daemonset_traffic && is_backed_by_daemonset(pod) {
+                info!("Ignoring daemonset pod: {}, {}", pod.name_any(), pod_ip);
 
-        if ignore_daemonset_traffic && is_backed_by_daemonset(pod) {
-            info!(
-                "Ignoring daemonset pod: {}, {}",
-                pod.name_any(),
-                pod_ip.clone().unwrap_or_default()
-            );
-            if let Ok(Some(pod_ip)) = pod_ip {
                 if let Err(e) = sender_ip.send(pod_ip.clone()).await {
                     error!("Failed to send pod ip: {}", e);
                 }
             }
-        }
-
-        if should_process_pod(&pod.metadata.namespace, excluded_namespaces) {
-            if let Ok(Some(pod_ip)) = pod_ip {
+            if should_process_pod(&pod.metadata.namespace, excluded_namespaces) {
                 return process_container_ids(&con_ids, pod, &pod_ip, container_map).await;
             }
         }
     }
+
     None
 }
 
