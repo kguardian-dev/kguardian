@@ -55,56 +55,74 @@ struct
     __type(value, struct sock *);
 } accepted_sockets SEC(".maps");
 
+
+
 SEC("kprobe/udp_sendmsg")
 int trace_udp_send(struct pt_regs *ctx)
 {
+    struct network_event_data event = {};
+    struct sock *sk = (struct sock *)PT_REGS_PARM1(ctx);
+    if (!sk)
+        return 0;
 
-    struct task_struct *task;
-    task = (struct task_struct *)bpf_get_current_task();
-    __u64 pid_ns = BPF_CORE_READ(task, nsproxy, pid_ns_for_children, ns.inum);
+    __u32 inum = 0;
+    __u64 key = 0;
+    __u32 *user_space_inum_ptr = NULL;
 
-    u32 *inum = 0;
-    inum = bpf_map_lookup_elem(&inode_num, &pid_ns);
+    BPF_CORE_READ_INTO(&inum, sk, __sk_common.skc_net.net, ns.inum);
+
+    key = (__u64)inum;
+    user_space_inum_ptr = bpf_map_lookup_elem(&inode_num, &key);
+
+    if (!user_space_inum_ptr)
+        return 0;
+
     u16 lport, dport;
 
-    if (inum)
+    event.inum = key;
+    bpf_probe_read(&event.saddr, sizeof(event.saddr), &sk->__sk_common.skc_rcv_saddr);
+    bpf_probe_read(&event.daddr, sizeof(event.daddr), &sk->__sk_common.skc_daddr);
+    if (event.daddr == bpf_htonl(0x7F000001) || event.daddr == bpf_htonl(0x00000000))
     {
-        struct network_event_data event = {};
-        struct sock *sk = (struct sock *)PT_REGS_PARM1(ctx);
-        event.inum = pid_ns;
-        bpf_probe_read(&event.saddr, sizeof(event.saddr), &sk->__sk_common.skc_rcv_saddr);
-        bpf_probe_read(&event.daddr, sizeof(event.daddr), &sk->__sk_common.skc_daddr);
-        if (event.daddr == bpf_htonl(0x7F000001) || event.daddr == bpf_htonl(0x00000000))
-        {
-            return 0;
-        }
-
-        // if the source or destination IP is in the ignore list, return
-        if (bpf_map_lookup_elem(&ignore_ips, &event.saddr) || bpf_map_lookup_elem(&ignore_ips, &event.daddr))
-        {
-            return 0;
-        }
-
-        // Ignore if source and destination IP are the same
-        if (event.saddr == event.daddr)
-        {
-            return 0;
-        }
-
-        bpf_probe_read(&lport, sizeof(lport), &sk->__sk_common.skc_num);
-        bpf_probe_read(&dport, sizeof(dport), &sk->__sk_common.skc_dport);
-        event.kind = 3;
-        event.sport = lport;
-        event.dport = bpf_ntohs(dport);
-        bpf_perf_event_output(ctx, &tracept_events, BPF_F_CURRENT_CPU, &event, sizeof(event));
+        return 0;
     }
+
+    // if the source or destination IP is in the ignore list, return
+    if (bpf_map_lookup_elem(&ignore_ips, &event.saddr) || bpf_map_lookup_elem(&ignore_ips, &event.daddr))
+    {
+        return 0;
+    }
+
+    // Ignore if source and destination IP are the same
+    if (event.saddr == event.daddr)
+    {
+        return 0;
+    }
+
+    bpf_probe_read(&lport, sizeof(lport), &sk->__sk_common.skc_num);
+    bpf_probe_read(&dport, sizeof(dport), &sk->__sk_common.skc_dport);
+    event.kind = 3;
+    event.sport = lport;
+    event.dport = bpf_ntohs(dport);
+    bpf_perf_event_output(ctx, &tracept_events, BPF_F_CURRENT_CPU, &event, sizeof(event));
+
     return 0;
 }
 
-// Store `sk` in the map in kprobe
 SEC("kprobe/tcp_v4_connect")
 int BPF_KPROBE(tcp_v4_connect_entry, struct sock *sk)
 {
+    __u32 inum = 0;
+    __u64 key = 0;
+    __u32 *user_space_inum_ptr = NULL;
+
+    BPF_CORE_READ_INTO(&inum, sk, __sk_common.skc_net.net, ns.inum);
+
+    key = (__u64)inum;
+    user_space_inum_ptr = bpf_map_lookup_elem(&inode_num, &key);
+
+    if (!user_space_inum_ptr)
+        return 0;
 
     __u32 tid = bpf_get_current_pid_tgid();
     bpf_map_update_elem(&sockets, &tid, &sk, BPF_ANY);
@@ -157,6 +175,12 @@ int BPF_KRETPROBE(tcp_v4_connect_exit, int ret)
         return 0;
     }
 
+    // Ignore if source and destination IP are the same
+    if (saddr == daddr)
+    {
+        return 0;
+    }
+
     tcp_event.saddr = saddr;
     tcp_event.daddr = daddr;
     tcp_event.sport = sport;
@@ -170,10 +194,20 @@ int BPF_KRETPROBE(tcp_v4_connect_exit, int ret)
     return 0;
 }
 
-// kprobe to store listening socket
 SEC("kprobe/inet_csk_accept")
 int BPF_KPROBE(tcp_accept_entry, struct sock *sk)
 {
+    __u32 inum = 0;
+    __u64 key = 0;
+    __u32 *user_space_inum_ptr = NULL;
+
+    BPF_CORE_READ_INTO(&inum, sk, __sk_common.skc_net.net, ns.inum);
+
+    key = (__u64)inum;
+    user_space_inum_ptr = bpf_map_lookup_elem(&inode_num, &key);
+
+    if (!user_space_inum_ptr)
+        return 0;
 
     __u32 tid = bpf_get_current_pid_tgid();
     bpf_map_update_elem(&accepted_sockets, &tid, &sk, BPF_ANY);
@@ -181,7 +215,6 @@ int BPF_KPROBE(tcp_accept_entry, struct sock *sk)
     return 0;
 }
 
-// kretprobe to extract details of the accepted connection
 SEC("kretprobe/inet_csk_accept")
 int BPF_KRETPROBE(tcp_accept_exit, struct sock *new_sk)
 {
@@ -217,6 +250,11 @@ int BPF_KRETPROBE(tcp_accept_exit, struct sock *new_sk)
     BPF_CORE_READ_INTO(&sport, new_sk, __sk_common.skc_num);
     BPF_CORE_READ_INTO(&dport, new_sk, __sk_common.skc_dport);
 
+    // Ignore if source and destination IP are the same
+    if (saddr == daddr)
+    {
+        return 0;
+    }
     // Convert ports to host byte order
     dport = __bpf_ntohs(dport);
 
