@@ -84,7 +84,7 @@ pub async fn process_network_event(
         protocol = "UDP"
     }
 
-    info!(
+    debug!(
         "Inum : {} src {}:{},dst {}:{}, trafic type {:?} kind {:?}",
         data.inum,
         IpAddr::V4(Ipv4Addr::from(src)),

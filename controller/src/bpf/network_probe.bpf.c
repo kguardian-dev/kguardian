@@ -55,6 +55,17 @@ struct
     __type(value, struct sock *);
 } accepted_sockets SEC(".maps");
 
+static __always_inline __u32 *get_user_space_inum_ptr(struct sock *sk, __u64 *key)
+{
+    __u32 inum = 0;
+    __u32 *user_space_inum_ptr = NULL;
+
+    BPF_CORE_READ_INTO(&inum, sk, __sk_common.skc_net.net, ns.inum);
+    *key = (__u64)inum;
+    user_space_inum_ptr = bpf_map_lookup_elem(&inode_num, key);
+
+    return user_space_inum_ptr;
+}
 
 
 SEC("kprobe/udp_sendmsg")
@@ -65,14 +76,8 @@ int trace_udp_send(struct pt_regs *ctx)
     if (!sk)
         return 0;
 
-    __u32 inum = 0;
     __u64 key = 0;
-    __u32 *user_space_inum_ptr = NULL;
-
-    BPF_CORE_READ_INTO(&inum, sk, __sk_common.skc_net.net, ns.inum);
-
-    key = (__u64)inum;
-    user_space_inum_ptr = bpf_map_lookup_elem(&inode_num, &key);
+    __u32 *user_space_inum_ptr = get_user_space_inum_ptr(sk, &key);
 
     if (!user_space_inum_ptr)
         return 0;
@@ -112,14 +117,8 @@ int trace_udp_send(struct pt_regs *ctx)
 SEC("kprobe/tcp_v4_connect")
 int BPF_KPROBE(tcp_v4_connect_entry, struct sock *sk)
 {
-    __u32 inum = 0;
     __u64 key = 0;
-    __u32 *user_space_inum_ptr = NULL;
-
-    BPF_CORE_READ_INTO(&inum, sk, __sk_common.skc_net.net, ns.inum);
-
-    key = (__u64)inum;
-    user_space_inum_ptr = bpf_map_lookup_elem(&inode_num, &key);
+    __u32 *user_space_inum_ptr = get_user_space_inum_ptr(sk, &key);
 
     if (!user_space_inum_ptr)
         return 0;
@@ -142,20 +141,14 @@ int BPF_KRETPROBE(tcp_v4_connect_exit, int ret)
 
     bpf_map_delete_elem(&sockets, &tid);
 
-    __u32 inum = 0;
+    if (!sk || ret)
+        return 0; // Ignore failed connections
+
     __u64 key = 0;
-    __u32 *user_space_inum_ptr = NULL;
-
-    BPF_CORE_READ_INTO(&inum, sk, __sk_common.skc_net.net, ns.inum);
-
-    key = (__u64)inum;
-    user_space_inum_ptr = bpf_map_lookup_elem(&inode_num, &key);
+    __u32 *user_space_inum_ptr = get_user_space_inum_ptr(sk, &key);
 
     if (!user_space_inum_ptr)
         return 0;
-
-    if (!sk || ret)
-        return 0; // Ignore failed connections
 
     struct network_event_data tcp_event = {};
     __u32 saddr = 0, daddr = 0;
@@ -197,14 +190,8 @@ int BPF_KRETPROBE(tcp_v4_connect_exit, int ret)
 SEC("kprobe/inet_csk_accept")
 int BPF_KPROBE(tcp_accept_entry, struct sock *sk)
 {
-    __u32 inum = 0;
     __u64 key = 0;
-    __u32 *user_space_inum_ptr = NULL;
-
-    BPF_CORE_READ_INTO(&inum, sk, __sk_common.skc_net.net, ns.inum);
-
-    key = (__u64)inum;
-    user_space_inum_ptr = bpf_map_lookup_elem(&inode_num, &key);
+    __u32 *user_space_inum_ptr = get_user_space_inum_ptr(sk, &key);
 
     if (!user_space_inum_ptr)
         return 0;
@@ -226,14 +213,8 @@ int BPF_KRETPROBE(tcp_accept_exit, struct sock *new_sk)
     struct sock *sk = *skpp;
     bpf_map_delete_elem(&accepted_sockets, &tid); // Cleanup
 
-    __u32 inum = 0;
     __u64 key = 0;
-    __u32 *user_space_inum_ptr = NULL;
-
-    BPF_CORE_READ_INTO(&inum, sk, __sk_common.skc_net.net, ns.inum);
-
-    key = (__u64)inum;
-    user_space_inum_ptr = bpf_map_lookup_elem(&inode_num, &key);
+    __u32 *user_space_inum_ptr = get_user_space_inum_ptr(sk, &key);
 
     if (!user_space_inum_ptr)
         return 0;
