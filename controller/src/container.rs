@@ -25,7 +25,7 @@ impl PodInspect {
                 self.set_container_id(container_id)
                     .get_pid(channel)
                     .await
-                    .get_pid_for_children_namespace_id(),
+                    .get_net_namespace_id(),
             )
         } else {
             None
@@ -62,12 +62,12 @@ impl PodInspect {
         self
     }
 
-    fn get_pid_for_children_namespace_id(mut self) -> Self {
+    fn get_net_namespace_id(mut self) -> Self {
         if self.pid.is_some() {
             if let Ok(process) = Process::new(self.pid.unwrap() as i32) {
                 if let Ok(ns) = process.namespaces() {
-                    if let Some(pid_for_children) = ns.0.get(&OsString::from("pid_for_children")) {
-                        self.inode_num = Some(pid_for_children.identifier);
+                    if let Some(netns) = ns.0.get(&OsString::from("net")) {
+                        self.inode_num = Some(netns.identifier);
                     }
                 }
             }

@@ -6,7 +6,7 @@ use std::collections::BTreeMap;
 use std::net::{IpAddr, Ipv4Addr};
 use std::sync::Arc;
 use tokio::sync::Mutex;
-use tracing::{debug, error};
+use tracing::{debug, error, info};
 use uuid::Uuid;
 
 lazy_static::lazy_static! {
@@ -39,8 +39,6 @@ pub struct NetworkEventData {
     sport: u16,
     daddr: u32,
     dport: u16,
-    old_state: u16,
-    new_state: u16,
     pub kind: u16,
 }
 
@@ -71,11 +69,11 @@ pub async fn process_network_event(
     let mut traffic_in_out_port = dport;
     let mut traffic_type = "";
 
-    if data.kind.eq(&1) {
+    if data.kind.eq(&2) {
         traffic_type = "INGRESS";
         traffic_in_out_port = 0;
         protocol = "TCP";
-    } else if data.kind.eq(&2) {
+    } else if data.kind.eq(&1) {
         traffic_type = "EGRESS";
         pod_port = 0;
         protocol = "TCP";
@@ -86,16 +84,15 @@ pub async fn process_network_event(
         protocol = "UDP"
     }
 
-    debug!(
-        "Inum : {} src {}:{},dst {}:{}, old state {}. new state {} trafic type {:?}",
+    info!(
+        "Inum : {} src {}:{},dst {}:{}, trafic type {:?} kind {:?}",
         data.inum,
         IpAddr::V4(Ipv4Addr::from(src)),
         sport,
         IpAddr::V4(Ipv4Addr::from(dst)),
         dport,
-        data.old_state,
-        data.new_state,
-        traffic_type
+        traffic_type,
+        data.kind
     );
 
     let pod_name = pod_data.status.pod_name.to_string();

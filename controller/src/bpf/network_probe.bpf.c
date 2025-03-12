@@ -3,7 +3,6 @@
 #include <bpf/bpf_helpers.h>
 #include <bpf/bpf_endian.h>
 #include <bpf/bpf_tracing.h>
-
 #define IPV4_ADDR_LEN 4
 #define IPV6_ADDR_LEN 16
 
@@ -14,9 +13,7 @@ struct network_event_data
     __u16 sport;
     __u32 daddr;
     __u16 dport;
-    __u16 old_state;
-    __u16 new_state;
-    __u16 kind; // 1-> Ingress, 2- Egress
+    __u16 kind; // 2-> Ingress, 1- Egress
 };
 
 struct
@@ -25,7 +22,6 @@ struct
     __uint(key_size, sizeof(u32));
     __uint(value_size, sizeof(u32));
 } tracept_events SEC(".maps");
-
 
 struct
 {
@@ -43,104 +39,33 @@ struct
     __type(value, u32);
 } ignore_ips SEC(".maps");
 
-/**
-    1: TCP_ESTABLISHED
-    2: TCP_SYN_SENT
-    3: TCP_SYN_RECV
-    4: TCP_FIN_WAIT1
-    5: TCP_FIN_WAIT2
-    6: TCP_TIME_WAIT
-    7: TCP_CLOSE
-    8: TCP_CLOSE_WAIT
-    https://brendangregg.com/blog/2018-03-22/tcp-tracepoints.html
- */
-
-SEC("tracepoint/sock/inet_sock_set_state")
-int trace_tcp_connect(struct trace_event_raw_inet_sock_set_state *ctx)
+struct
 {
-    struct task_struct *task;
-    struct network_event_data tcp_event = {};
-    task = (struct task_struct *)bpf_get_current_task();
-    __u64 pid_ns = BPF_CORE_READ(task, nsproxy, pid_ns_for_children, ns.inum);
+    __uint(type, BPF_MAP_TYPE_HASH);
+    __uint(max_entries, 10240);
+    __type(key, __u32);
+    __type(value, struct sock *);
+} sockets SEC(".maps");
 
-    u32 *inum = 0;
-
-    tcp_event.kind = 0;
-
-    inum = bpf_map_lookup_elem(&inode_num, &pid_ns);
-
-    if (inum)
-    {
-        bpf_printk("%u---%u\n",
-                   ctx->oldstate, ctx->newstate);
-        tcp_event.inum = pid_ns;
-        struct sock *sk = (struct sock *)ctx->skaddr;
-        __u16 family = ctx->family;
-        __u16 old_state = ctx->oldstate;
-        __u16 new_state = ctx->newstate;
-         u16 lport, dport;
-
-        // IPv4 address handling
-        if (family == 2)
-        
-        {
-            bpf_probe_read(&lport, sizeof(lport), &sk->__sk_common.skc_num);
-            bpf_probe_read(&dport, sizeof(dport), &sk->__sk_common.skc_dport);
-            bpf_probe_read_kernel(&tcp_event.saddr, sizeof(tcp_event.saddr), &sk->__sk_common.skc_rcv_saddr);
-            bpf_probe_read_kernel(&tcp_event.daddr, sizeof(tcp_event.daddr), &sk->__sk_common.skc_daddr);
-
-            // Check for loopback destination (127.0.0.1 in network byte order)
-            if (tcp_event.daddr == bpf_htonl(0x7F000001)) {
-                return 0;
-            }
-
-            // if the source or destination IP is in the ignore list, return
-            if (bpf_map_lookup_elem(&ignore_ips, &tcp_event.saddr) || bpf_map_lookup_elem(&ignore_ips, &tcp_event.daddr)) {
-                return 0;
-            }
-
-
-            // Ignore if source and destination IP are the same
-            if (tcp_event.saddr == tcp_event.daddr) {
-                return 0;
-            }
-
-            tcp_event.sport = lport;
-            tcp_event.dport = bpf_ntohs(dport);
-            tcp_event.old_state = old_state;
-            tcp_event.new_state = new_state;
-         
-            if ((old_state == 1) && (new_state == 4))
-            {
-                // egress
-                tcp_event.kind = 2;
-            }
-            else if ((old_state == 8) && (new_state == 9))
-            {
-                // ingress
-                tcp_event.kind = 1;
-            };
-        }
-
-        if ((tcp_event.kind == 1) || (tcp_event.kind == 2))
-        {
-            bpf_perf_event_output(ctx, &tracept_events, BPF_F_CURRENT_CPU, &tcp_event, sizeof(tcp_event));
-        }
-    }
-    return 0;
-}
+struct
+{
+    __uint(type, BPF_MAP_TYPE_HASH);
+    __uint(max_entries, 10240);
+    __type(key, __u32);
+    __type(value, struct sock *);
+} accepted_sockets SEC(".maps");
 
 SEC("kprobe/udp_sendmsg")
-int trace_udp_send(struct pt_regs *ctx) {
+int trace_udp_send(struct pt_regs *ctx)
+{
 
-
-     struct task_struct *task;
+    struct task_struct *task;
     task = (struct task_struct *)bpf_get_current_task();
     __u64 pid_ns = BPF_CORE_READ(task, nsproxy, pid_ns_for_children, ns.inum);
 
     u32 *inum = 0;
     inum = bpf_map_lookup_elem(&inode_num, &pid_ns);
-     u16 lport, dport;
+    u16 lport, dport;
 
     if (inum)
     {
@@ -149,19 +74,20 @@ int trace_udp_send(struct pt_regs *ctx) {
         event.inum = pid_ns;
         bpf_probe_read(&event.saddr, sizeof(event.saddr), &sk->__sk_common.skc_rcv_saddr);
         bpf_probe_read(&event.daddr, sizeof(event.daddr), &sk->__sk_common.skc_daddr);
-        if (event.daddr == bpf_htonl(0x7F000001) || event.daddr == bpf_htonl(0x00000000)) {
-            return 0;   
-        }
-
-
-        // if the source or destination IP is in the ignore list, return
-        if (bpf_map_lookup_elem(&ignore_ips, &event.saddr) || bpf_map_lookup_elem(&ignore_ips, &event.daddr)) {
+        if (event.daddr == bpf_htonl(0x7F000001) || event.daddr == bpf_htonl(0x00000000))
+        {
             return 0;
         }
 
+        // if the source or destination IP is in the ignore list, return
+        if (bpf_map_lookup_elem(&ignore_ips, &event.saddr) || bpf_map_lookup_elem(&ignore_ips, &event.daddr))
+        {
+            return 0;
+        }
 
         // Ignore if source and destination IP are the same
-        if (event.saddr == event.daddr) {
+        if (event.saddr == event.daddr)
+        {
             return 0;
         }
 
@@ -172,6 +98,138 @@ int trace_udp_send(struct pt_regs *ctx) {
         event.dport = bpf_ntohs(dport);
         bpf_perf_event_output(ctx, &tracept_events, BPF_F_CURRENT_CPU, &event, sizeof(event));
     }
+    return 0;
+}
+
+// Store `sk` in the map in kprobe
+SEC("kprobe/tcp_v4_connect")
+int BPF_KPROBE(tcp_v4_connect_entry, struct sock *sk)
+{
+
+    __u32 tid = bpf_get_current_pid_tgid();
+    bpf_map_update_elem(&sockets, &tid, &sk, BPF_ANY);
+
+    return 0;
+}
+
+SEC("kretprobe/tcp_v4_connect")
+int BPF_KRETPROBE(tcp_v4_connect_exit, int ret)
+{
+    __u32 tid = bpf_get_current_pid_tgid();
+    struct sock **skpp = bpf_map_lookup_elem(&sockets, &tid);
+    if (!skpp)
+        return 0;
+
+    struct sock *sk = *skpp;
+
+    bpf_map_delete_elem(&sockets, &tid);
+
+    __u32 inum = 0;
+    __u64 key = 0;
+    __u32 *user_space_inum_ptr = NULL;
+
+    BPF_CORE_READ_INTO(&inum, sk, __sk_common.skc_net.net, ns.inum);
+
+    key = (__u64)inum;
+    user_space_inum_ptr = bpf_map_lookup_elem(&inode_num, &key);
+
+    if (!user_space_inum_ptr)
+        return 0;
+
+    if (!sk || ret)
+        return 0; // Ignore failed connections
+
+    struct network_event_data tcp_event = {};
+    __u32 saddr = 0, daddr = 0;
+    __u16 sport = 0, dport = 0;
+
+    BPF_CORE_READ_INTO(&saddr, sk, __sk_common.skc_rcv_saddr);
+    BPF_CORE_READ_INTO(&daddr, sk, __sk_common.skc_daddr);
+    BPF_CORE_READ_INTO(&sport, sk, __sk_common.skc_num);
+    BPF_CORE_READ_INTO(&dport, sk, __sk_common.skc_dport);
+
+    sport = __bpf_ntohs(sport);
+    dport = __bpf_ntohs(dport);
+
+    if (saddr == 0 || daddr == 0)
+    {
+        bpf_printk("Warning: Source or destination address is 0\n");
+        return 0;
+    }
+
+    tcp_event.saddr = saddr;
+    tcp_event.daddr = daddr;
+    tcp_event.sport = sport;
+    tcp_event.dport = dport;
+    tcp_event.inum = key;
+    tcp_event.kind = 1; // egress
+
+    // bpf_printk("TCP Connect (ret): Src %pI4:%d -> Dst %pI4:%d\n", &saddr, sport, &daddr, dport);
+    bpf_perf_event_output(ctx, &tracept_events, BPF_F_CURRENT_CPU, &tcp_event, sizeof(tcp_event));
+
+    return 0;
+}
+
+// kprobe to store listening socket
+SEC("kprobe/inet_csk_accept")
+int BPF_KPROBE(tcp_accept_entry, struct sock *sk)
+{
+
+    __u32 tid = bpf_get_current_pid_tgid();
+    bpf_map_update_elem(&accepted_sockets, &tid, &sk, BPF_ANY);
+
+    return 0;
+}
+
+// kretprobe to extract details of the accepted connection
+SEC("kretprobe/inet_csk_accept")
+int BPF_KRETPROBE(tcp_accept_exit, struct sock *new_sk)
+{
+    __u32 tid = bpf_get_current_pid_tgid();
+    struct sock **skpp = bpf_map_lookup_elem(&accepted_sockets, &tid);
+    if (!skpp)
+        return 0;
+
+    struct sock *sk = *skpp;
+    bpf_map_delete_elem(&accepted_sockets, &tid); // Cleanup
+
+    __u32 inum = 0;
+    __u64 key = 0;
+    __u32 *user_space_inum_ptr = NULL;
+
+    BPF_CORE_READ_INTO(&inum, sk, __sk_common.skc_net.net, ns.inum);
+
+    key = (__u64)inum;
+    user_space_inum_ptr = bpf_map_lookup_elem(&inode_num, &key);
+
+    if (!user_space_inum_ptr)
+        return 0;
+
+    if (!new_sk)
+        return 0; // Failed accept
+
+    struct network_event_data accept_event = {};
+    __u32 saddr = 0, daddr = 0;
+    __u16 sport = 0, dport = 0;
+
+    BPF_CORE_READ_INTO(&saddr, new_sk, __sk_common.skc_rcv_saddr);
+    BPF_CORE_READ_INTO(&daddr, new_sk, __sk_common.skc_daddr);
+    BPF_CORE_READ_INTO(&sport, new_sk, __sk_common.skc_num);
+    BPF_CORE_READ_INTO(&dport, new_sk, __sk_common.skc_dport);
+
+    // Convert ports to host byte order
+    dport = __bpf_ntohs(dport);
+
+    accept_event.saddr = saddr;
+    accept_event.daddr = daddr;
+    accept_event.sport = sport;
+    accept_event.dport = dport;
+    accept_event.inum = key;
+    accept_event.kind = 2; // Ingress
+
+    // bpf_printk("TCP Accept: Src %pI4:%d -> Dst %pI4:%d\n", &saddr, sport, &daddr, dport);
+    bpf_perf_event_output(ctx, &tracept_events, BPF_F_CURRENT_CPU, &accept_event, sizeof(accept_event));
+
     return 0;
 }
 
