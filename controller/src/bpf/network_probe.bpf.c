@@ -67,7 +67,6 @@ static __always_inline __u32 *get_user_space_inum_ptr(struct sock *sk, __u64 *ke
     return user_space_inum_ptr;
 }
 
-
 SEC("kprobe/udp_sendmsg")
 int trace_udp_send(struct pt_regs *ctx)
 {
@@ -162,6 +161,12 @@ int BPF_KRETPROBE(tcp_v4_connect_exit, int ret)
     sport = __bpf_ntohs(sport);
     dport = __bpf_ntohs(dport);
 
+    // if the source or destination IP is in the ignore list, return
+    if (bpf_map_lookup_elem(&ignore_ips, &saddr) || bpf_map_lookup_elem(&ignore_ips, &daddr))
+    {
+        return 0;
+    }
+
     if (saddr == 0 || daddr == 0)
     {
         bpf_printk("Warning: Source or destination address is 0\n");
@@ -230,6 +235,12 @@ int BPF_KRETPROBE(tcp_accept_exit, struct sock *new_sk)
     BPF_CORE_READ_INTO(&daddr, new_sk, __sk_common.skc_daddr);
     BPF_CORE_READ_INTO(&sport, new_sk, __sk_common.skc_num);
     BPF_CORE_READ_INTO(&dport, new_sk, __sk_common.skc_dport);
+
+    // if the source or destination IP is in the ignore list, return
+    if (bpf_map_lookup_elem(&ignore_ips, &saddr) || bpf_map_lookup_elem(&ignore_ips, &daddr))
+    {
+        return 0;
+    }
 
     // Ignore if source and destination IP are the same
     if (saddr == daddr)

@@ -80,7 +80,7 @@ pub fn ebpf_handle(
             if ignore_daemonset_traffic {
                 if let Ok(ip) = ignore_ips.try_recv() {
                     let ip: Ipv4Addr = ip.parse().unwrap();
-                    let ip_u32 = u32::to_be(u32::from(ip));
+                    let ip_u32 = u32::from(ip).to_be(); // Ensure the IP is in network byte order
                     network_sk
                         .maps
                         .ignore_ips
