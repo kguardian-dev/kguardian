@@ -10,6 +10,8 @@ Xentra is a powerful kubectl plugin designed to enhance the security of your Kub
   - [📦 Installation](#-installation)
   - [🔨 Usage](#-usage)
     - [🔒 Generate Network Policies](#-generate-network-policies)
+      - [Kubernetes Network Policies](#kubernetes-network-policies)
+      - [Cilium Network Policies](#cilium-network-policies)
   - [🤝 Contributing](#-contributing)
   - [📄 License](#-license)
   - [🙏 Acknowledgments](#-acknowledgments)
@@ -56,22 +58,46 @@ sudo mv advisor /usr/local/bin/kubectl-advisor
 
 ### 🔒 Generate Network Policies
 
-Create a network policy for a single pod in a namespace
+Xentra can generate both Kubernetes native NetworkPolicies and Cilium CiliumNetworkPolicies.
+
+#### Kubernetes Network Policies
+
+Create a Kubernetes network policy for a single pod in a namespace:
 
 ```bash
 kubectl advisor gen networkpolicy [pod-name] --namespace [namespace-name]
 ```
 
-Create a network policy for a all pod(s) in a namespace
+Create a Kubernetes network policy for all pod(s) in a namespace:
 
 ```bash
 kubectl advisor gen networkpolicy --namespace [namespace-name] --all
 ```
 
-Create a network policy for a all pod(s) in all namespace(s)
+Create a Kubernetes network policy for all pod(s) in all namespace(s):
 
 ```bash
 kubectl advisor gen networkpolicy -A
+```
+
+#### Cilium Network Policies
+
+Create a Cilium network policy for a single pod in a namespace:
+
+```bash
+kubectl advisor gen networkpolicy [pod-name] --namespace [namespace-name] --type cilium
+```
+
+Create a Cilium network policy for all pod(s) in a namespace:
+
+```bash
+kubectl advisor gen networkpolicy --namespace [namespace-name] --all --type cilium
+```
+
+Create a Cilium network policy for all pod(s) in all namespace(s):
+
+```bash
+kubectl advisor gen networkpolicy -A --type cilium
 ```
 
 For more details on the commands:
