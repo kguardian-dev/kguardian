@@ -24,13 +24,28 @@ type GenerateOptions struct {
 	Namespace string // Used if Mode is AllPodsInNamespace or SinglePod
 }
 
+// Exportable function variables for testing
+var (
+	fetchSinglePodInNamespaceFunc = func(podName, namespace string, config *Config) (*corev1.Pod, error) {
+		return fetchSinglePodInNamespace(podName, namespace, config)
+	}
+
+	fetchAllPodsInNamespaceFunc = func(namespace string, config *Config) ([]corev1.Pod, error) {
+		return fetchAllPodsInNamespace(namespace, config)
+	}
+
+	fetchAllPodsInAllNamespacesFunc = func(config *Config) ([]corev1.Pod, error) {
+		return fetchAllPodsInAllNamespaces(config)
+	}
+)
+
 func GetResource(options GenerateOptions, config *Config) []corev1.Pod {
 	var pods []corev1.Pod
 
 	switch options.Mode {
 	case SinglePod:
 		// Fetch all pods in the given namespace
-		fetchedPod, err := fetchSinglePodInNamespace(options.PodName, options.Namespace, config)
+		fetchedPod, err := fetchSinglePodInNamespaceFunc(options.PodName, options.Namespace, config)
 		if err != nil {
 			log.Fatal().Err(err).Msgf("failed to fetch pods in namespace %s", options.Namespace)
 		}
@@ -38,7 +53,7 @@ func GetResource(options GenerateOptions, config *Config) []corev1.Pod {
 
 	case AllPodsInNamespace:
 		// Fetch all pods in the given namespace
-		fetchedPods, err := fetchAllPodsInNamespace(options.Namespace, config)
+		fetchedPods, err := fetchAllPodsInNamespaceFunc(options.Namespace, config)
 		if err != nil {
 			log.Fatal().Err(err).Msgf("failed to fetch pods in namespace %s", options.Namespace)
 		}
@@ -46,7 +61,7 @@ func GetResource(options GenerateOptions, config *Config) []corev1.Pod {
 
 	case AllPodsInAllNamespaces:
 		// Fetch all pods in all namespaces
-		fetchedPods, err := fetchAllPodsInAllNamespaces(config)
+		fetchedPods, err := fetchAllPodsInAllNamespacesFunc(config)
 		if err != nil {
 			log.Fatal().Err(err).Msgf("failed to fetch all pods in all namespaces")
 		}

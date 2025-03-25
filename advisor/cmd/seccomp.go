@@ -8,7 +8,6 @@ import (
 
 // Additional flags specific to seccomp profiles
 var (
-	outputDir     string
 	defaultAction string
 )
 
@@ -28,10 +27,23 @@ var seccompCmd = &cobra.Command{
 	Short:   "Generate seccomp profile",
 	Args:    cobra.MaximumNArgs(1),
 	Run: func(cmd *cobra.Command, args []string) {
+		// Set up the logger first, so we get useful debug output
+		setupLogger()
+
+		// For seccomp profiles, always ensure outputDir is set to "seccomp-profiles"
+		// if not explicitly changed by the user
+		if !cmd.Flags().Changed("output-dir") {
+			outputDir = "seccomp-profiles"
+		}
+
 		config, ok := cmd.Context().Value(k8s.ConfigKey).(*k8s.Config)
 		if !ok {
 			log.Fatal().Msg("Failed to retrieve Kubernetes configuration")
 		}
+
+		// Set output directory in config
+		config.OutputDir = outputDir
+		log.Debug().Msgf("Using output directory: %s", outputDir)
 
 		// Get the namespace from kubeConfigFlags
 		namespace, _, err := kubeConfigFlags.ToRawKubeConfigLoader().Namespace()

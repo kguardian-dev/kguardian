@@ -3,6 +3,7 @@ package cmd
 import (
 	"context"
 	"os"
+	"time"
 
 	"github.com/rs/zerolog"
 	log "github.com/rs/zerolog/log"
@@ -17,8 +18,8 @@ var (
 )
 
 func init() {
-	// Set up logging to console
-	zerolog.TimeFieldFormat = zerolog.TimeFormatUnix
+	// Set up logging to console with consistent full timestamp format
+	zerolog.TimeFieldFormat = time.RFC3339
 	zerolog.SetGlobalLevel(zerolog.InfoLevel)
 
 	// Add your sub-commands
@@ -34,22 +35,16 @@ func init() {
 	// Add debug flag to rootCmd so it's available for all sub-commands
 	rootCmd.PersistentFlags().BoolVar(&debug, "debug", false, "sets log level to debug")
 
-	rootCmd.AddCommand(genCmd)
+	// Add version flag to rootCmd
+	rootCmd.Flags().BoolP("version", "v", false, "print version information and exit")
 
-	// Set up colored output
-	consoleWriter := zerolog.ConsoleWriter{Out: os.Stderr, TimeFormat: zerolog.TimeFieldFormat, NoColor: false}
-	log.Logger = log.Output(consoleWriter)
-}
+	// Add PersistentPreRun for handling Kubernetes setup
+	rootCmd.PersistentPreRun = func(cmd *cobra.Command, args []string) {
+		// Skip version command to avoid unnecessary Kubernetes setup
+		if cmd.Name() == "version" {
+			return
+		}
 
-var rootCmd = &cobra.Command{
-	Use:   "xentra",
-	Short: "Xentra is a security tool for enhancing Kubernetes application profiles",
-	Long: `Xentra is designed to improve the security profile of applications running in
-	       Kubernetes clusters. It provides various functionalities like generating network
-	       policies, seccomp profiles, and more to ensure that your applications meet
-	       best security practices.
-	       Complete documentation is available at [Your Documentation URL]`,
-	PersistentPreRun: func(cmd *cobra.Command, args []string) {
 		// Adjust log level according to the flag
 		if debug {
 			zerolog.SetGlobalLevel(zerolog.DebugLevel)
@@ -77,10 +72,37 @@ var rootCmd = &cobra.Command{
 		// Create a new context with the config and assign it to the command
 		ctx := context.WithValue(cmd.Context(), k8s.ConfigKey, config)
 		cmd.SetContext(ctx)
-	},
+	}
+
+	rootCmd.AddCommand(genCmd)
+
+	// Set up colored output with consistent RFC3339 timestamp format
+	consoleWriter := zerolog.ConsoleWriter{
+		Out:        os.Stderr,
+		TimeFormat: time.RFC3339,
+		NoColor:    false,
+	}
+	log.Logger = log.Output(consoleWriter)
+}
+
+var rootCmd = &cobra.Command{
+	Use:   "xentra",
+	Short: "Xentra is a security tool for enhancing Kubernetes application profiles",
+	Long: `Xentra is designed to improve the security profile of applications running in
+	       Kubernetes clusters. It provides various functionalities like generating network
+	       policies, seccomp profiles, and more to ensure that your applications meet
+	       best security practices.
+	       Complete documentation is available at [Your Documentation URL]`,
 }
 
 func Execute() {
+	// Check if --version or -v flag is provided as the only argument
+	if len(os.Args) == 2 && (os.Args[1] == "--version" || os.Args[1] == "-v") {
+		// Manually run the version command
+		versionCmd.Run(versionCmd, []string{})
+		return
+	}
+
 	if err := rootCmd.Execute(); err != nil {
 		log.Fatal().Err(err).Msg("Error executing command")
 	}

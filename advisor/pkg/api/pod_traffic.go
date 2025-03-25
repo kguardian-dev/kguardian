@@ -39,8 +39,30 @@ type SvcDetail struct {
 	Service      v1.Service `yaml:"service_spec" json:"service_spec"`
 }
 
-func GetPodTraffic(podName string) ([]PodTraffic, error) {
+// Function variables for easier mocking in tests
+var (
+	GetPodTrafficFunc = getRealPodTraffic
+	GetPodSpecFunc = getRealPodSpec
+	GetSvcSpecFunc = getRealSvcSpec
+)
 
+// GetPodTraffic gets pod traffic information
+func GetPodTraffic(podName string) ([]PodTraffic, error) {
+	return GetPodTrafficFunc(podName)
+}
+
+// GetPodSpec gets pod specification
+func GetPodSpec(podIP string) (*PodDetail, error) {
+	return GetPodSpecFunc(podIP)
+}
+
+// GetSvcSpec gets service specification
+func GetSvcSpec(svcIP string) (*SvcDetail, error) {
+	return GetSvcSpecFunc(svcIP)
+}
+
+// Real implementations
+func getRealPodTraffic(podName string) ([]PodTraffic, error) {
 	time.Sleep(3 * time.Second)
 	// Specify the URL of the REST API endpoint you want to invoke.
 	apiURL := "http://127.0.0.1:9090/pod/traffic/" + podName
@@ -79,8 +101,7 @@ func GetPodTraffic(podName string) ([]PodTraffic, error) {
 }
 
 // Should we just get the pod spec directly from the cluster and only use the DB for the SaaS version where it contains the pod spec? Would this help with reducing unnecessary chatter?And just let the client do it?
-func GetPodSpec(ip string) (*PodDetail, error) {
-
+func getRealPodSpec(ip string) (*PodDetail, error) {
 	// Specify the URL of the REST API endpoint you want to invoke.
 	apiURL := "http://127.0.0.1:9090/pod/ip/" + ip
 
@@ -114,8 +135,7 @@ func GetPodSpec(ip string) (*PodDetail, error) {
 	return details, nil
 }
 
-func GetSvcSpec(svcIp string) (*SvcDetail, error) {
-
+func getRealSvcSpec(svcIp string) (*SvcDetail, error) {
 	// Specify the URL of the RESTAPI endpoint you want to invoke.
 	apiURL := "http://127.0.0.1:9090/svc/ip/" + svcIp
 
