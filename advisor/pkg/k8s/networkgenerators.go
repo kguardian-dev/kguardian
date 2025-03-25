@@ -16,18 +16,6 @@ func GenerateCiliumNetworkPoliciesForAllNamespaces(config *Config) {
 
 	log.Info().Msg("Generating Cilium network policies for all pods in all namespaces")
 
-	// Handle test mode
-	if config.Clientset == nil {
-		log.Warn().Msg("Running in test mode with nil Kubernetes clientset")
-		// Create mock namespaces
-		mockNamespaces := []string{"default", "kube-system", "app"}
-		for _, ns := range mockNamespaces {
-			log.Info().Msgf("Test mode: Processing namespace: %s", ns)
-			GenerateCiliumNetworkPoliciesForNamespace(config, ns)
-		}
-		return
-	}
-
 	// Get all namespaces
 	namespaces, err := config.Clientset.CoreV1().Namespaces().List(context.Background(), metav1.ListOptions{})
 	if err != nil {
@@ -55,18 +43,6 @@ func GenerateNetworkPoliciesForAllNamespaces(config *Config) {
 	}
 
 	log.Info().Msg("Generating Kubernetes network policies for all pods in all namespaces")
-
-	// Handle test mode
-	if config.Clientset == nil {
-		log.Warn().Msg("Running in test mode with nil Kubernetes clientset")
-		// Create mock namespaces
-		mockNamespaces := []string{"default", "kube-system", "app"}
-		for _, ns := range mockNamespaces {
-			log.Info().Msgf("Test mode: Processing namespace: %s", ns)
-			GenerateNetworkPoliciesForNamespace(config, ns)
-		}
-		return
-	}
 
 	// Get all namespaces
 	namespaces, err := config.Clientset.CoreV1().Namespaces().List(context.Background(), metav1.ListOptions{})
@@ -101,16 +77,6 @@ func GenerateCiliumNetworkPoliciesForNamespace(config *Config, namespace string)
 
 	log.Info().Msgf("Generating Cilium network policies for all pods in namespace: %s", namespace)
 
-	// Handle test mode
-	if config.Clientset == nil {
-		log.Warn().Msg("Running in test mode with nil Kubernetes clientset")
-		// Create a mock test pod
-		mockPodName := "example-pod"
-		log.Info().Msgf("Test mode: Generating Cilium network policy for mock pod %s in namespace %s", mockPodName, namespace)
-		CreateCiliumNetworkPolicy(config, namespace, mockPodName)
-		return
-	}
-
 	// Get all pods in the namespace
 	pods, err := config.Clientset.CoreV1().Pods(namespace).List(context.Background(), metav1.ListOptions{})
 	if err != nil {
@@ -143,16 +109,6 @@ func GenerateNetworkPoliciesForNamespace(config *Config, namespace string) {
 	}
 
 	log.Info().Msgf("Generating Kubernetes network policies for all pods in namespace: %s", namespace)
-
-	// Handle test mode
-	if config.Clientset == nil {
-		log.Warn().Msg("Running in test mode with nil Kubernetes clientset")
-		// Create a mock test pod
-		mockPodName := "example-pod"
-		log.Info().Msgf("Test mode: Generating Kubernetes network policy for mock pod %s in namespace %s", mockPodName, namespace)
-		CreateKubernetesNetworkPolicy(config, namespace, mockPodName)
-		return
-	}
 
 	// Get all pods in the namespace
 	pods, err := config.Clientset.CoreV1().Pods(namespace).List(context.Background(), metav1.ListOptions{})

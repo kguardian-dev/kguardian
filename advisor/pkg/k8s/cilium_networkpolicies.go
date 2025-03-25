@@ -3,12 +3,14 @@ package k8s
 import (
 	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 
 	ciliumv2 "github.com/cilium/cilium/pkg/k8s/apis/cilium.io/v2"
-	"github.com/cilium/cilium/pkg/policy/api"
 	slim_metav1 "github.com/cilium/cilium/pkg/k8s/slim/k8s/apis/meta/v1"
+	"github.com/cilium/cilium/pkg/policy/api"
 	log "github.com/rs/zerolog/log"
 	apiapi "github.com/xentra-ai/advisor/pkg/api"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -19,28 +21,23 @@ import (
 func GenerateCiliumNetworkPolicy(options GenerateOptions, config *Config) {
 	// Safety check for nil config
 	if config == nil {
-		log.Warn().Msg("Running in test mode with nil Kubernetes configuration")
-		log.Info().Msgf("Would generate Cilium network policy for pod %s in namespace %s", options.PodName, options.Namespace)
-		return
-	}
-
-	// Test mode handling - clientset will be nil
-	if config.Clientset == nil {
-		log.Warn().Msg("Running in test mode with nil Kubernetes clientset")
-		log.Info().Msgf("Would generate Cilium network policy for pod %s in namespace %s", options.PodName, options.Namespace)
-
-		// Create mock YAML output for demonstration
-		mockPolicy := createMockCiliumNetworkPolicy(options.PodName, options.Namespace)
-
-		// Convert to YAML and print
-		policyYAML, _ := yaml.Marshal(mockPolicy)
-		fmt.Println(string(policyYAML))
+		log.Error().Msg("Kubernetes configuration is nil")
 		return
 	}
 
 	// Check for dry run mode
 	if config.DryRun {
 		log.Info().Msgf("Dry run: Would generate Cilium network policy for pod(s) in namespace %s", options.Namespace)
+	}
+
+	// Setup output directory if specified
+	if config.OutputDir != "" {
+		// Create output directory if it doesn't exist
+		if err := os.MkdirAll(config.OutputDir, 0755); err != nil {
+			log.Error().Err(err).Msgf("Failed to create output directory %s", config.OutputDir)
+			return
+		}
+		log.Info().Msgf("Cilium network policies will be saved to %s", config.OutputDir)
 	}
 
 	// Fetch pods based on options
@@ -94,11 +91,28 @@ func GenerateCiliumNetworkPolicy(options GenerateOptions, config *Config) {
 			continue
 		}
 
+		// Save policy to file if output directory is specified
+		if config.OutputDir != "" {
+			filename := filepath.Join(config.OutputDir, fmt.Sprintf("%s-%s-cilium-networkpolicy.yaml", podDetail.Namespace, podDetail.Name))
+			if err := os.WriteFile(filename, policyYAML, 0644); err != nil {
+				log.Error().Err(err).Msgf("Failed to write Cilium policy for pod %s to file %s", pod.Name, filename)
+			} else {
+				log.Info().Msgf("Generated Cilium network policy for pod %s saved to %s", pod.Name, filename)
+			}
+		}
+
 		if config.DryRun {
-			log.Info().Msgf("Dry run: Generated Cilium policy for pod %s (not applied)\n%s", pod.Name, string(policyYAML))
+			// Only print the policy to console if we're not saving to file
+			if config.OutputDir == "" {
+				log.Info().Msgf("Dry run: Generated Cilium policy for pod %s (not applied)\n%s", pod.Name, string(policyYAML))
+			}
 		} else {
-			log.Info().Msgf("Generated Cilium policy for pod %s\n%s", pod.Name, string(policyYAML))
-			// TODO: Apply the policy if not in dry-run mode (future implementation)
+			// Apply the policy to the cluster
+			log.Info().Msgf("Applying Cilium network policy for pod %s", pod.Name)
+
+			// TODO: Implement applying the policy to the cluster
+			// For now, just log it
+			log.Warn().Msg("Applying Cilium network policies is not yet implemented - only saving to files")
 		}
 	}
 }

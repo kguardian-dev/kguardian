@@ -1,6 +1,8 @@
 package k8s
 
 import (
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -12,24 +14,8 @@ import (
 	"k8s.io/client-go/kubernetes"
 )
 
-// Mock API functions
-var (
-	apiGetPodTraffic = func(podName string) ([]api.PodTraffic, error) {
-		return nil, nil
-	}
-
-	apiGetPodSpec = func(podIP string) (*api.PodDetail, error) {
-		return nil, nil
-	}
-
-	apiGetSvcSpec = func(svcIP string) (*api.SvcDetail, error) {
-		return nil, nil
-	}
-
-	getPodFunc = func(clientset *kubernetes.Clientset, namespace, name string) (*corev1.Pod, error) {
-		return nil, nil
-	}
-)
+// The old mock API functions (apiGetPodTraffic, apiGetPodSpec, etc.) have been replaced
+// with function variables in the api package (api.GetPodTrafficFunc, api.GetPodSpecFunc, etc.)
 
 func TestGenerateNetworkPolicy(t *testing.T) {
 	// Save original functions
@@ -54,7 +40,7 @@ func TestGenerateNetworkPolicy(t *testing.T) {
 	fetchSinglePodInNamespaceFunc = func(podName, namespace string, config *Config) (*corev1.Pod, error) {
 		return &corev1.Pod{
 			ObjectMeta: metav1.ObjectMeta{
-				Name: "test-pod",
+				Name:      "test-pod",
 				Namespace: "default",
 				Labels: map[string]string{
 					"app": "test-pod",
@@ -67,7 +53,7 @@ func TestGenerateNetworkPolicy(t *testing.T) {
 		return []corev1.Pod{
 			{
 				ObjectMeta: metav1.ObjectMeta{
-					Name: "test-pod",
+					Name:      "test-pod",
 					Namespace: "default",
 					Labels: map[string]string{
 						"app": "test-pod",
@@ -81,7 +67,7 @@ func TestGenerateNetworkPolicy(t *testing.T) {
 		return []corev1.Pod{
 			{
 				ObjectMeta: metav1.ObjectMeta{
-					Name: "test-pod",
+					Name:      "test-pod",
 					Namespace: "default",
 					Labels: map[string]string{
 						"app": "test-pod",
@@ -123,11 +109,11 @@ func TestGenerateNetworkPolicy(t *testing.T) {
 	// Mock API GetSvcSpec to return test data
 	api.GetSvcSpecFunc = func(svcIP string) (*api.SvcDetail, error) {
 		return &api.SvcDetail{
-			SvcName: "test-svc",
+			SvcName:      "test-svc",
 			SvcNamespace: "default",
 			Service: corev1.Service{
 				ObjectMeta: metav1.ObjectMeta{
-					Name: "test-svc",
+					Name:      "test-svc",
 					Namespace: "default",
 				},
 				Spec: corev1.ServiceSpec{
@@ -150,14 +136,16 @@ func TestGenerateNetworkPolicy(t *testing.T) {
 	// Test with nil config
 	GenerateNetworkPolicy(GenerateOptions{}, nil)
 
-	// Test with clientset nil (test mode)
+	// Test with output directory
 	config := &Config{
-		DryRun: false,
+		DryRun:    true,
+		OutputDir: t.TempDir(), // Use temporary directory for test
 	}
 	GenerateNetworkPolicy(GenerateOptions{}, config)
 
 	// Test with dry run mode
 	config.DryRun = true
+	config.OutputDir = ""
 	GenerateNetworkPolicy(GenerateOptions{}, config)
 
 	// Create a config with clientset
@@ -241,11 +229,11 @@ func TestTransformToNetworkPolicy(t *testing.T) {
 
 	api.GetSvcSpecFunc = func(svcIP string) (*api.SvcDetail, error) {
 		return &api.SvcDetail{
-			SvcName: "test-svc",
+			SvcName:      "test-svc",
 			SvcNamespace: "default",
 			Service: corev1.Service{
 				ObjectMeta: metav1.ObjectMeta{
-					Name: "test-svc",
+					Name:      "test-svc",
 					Namespace: "default",
 				},
 				Spec: corev1.ServiceSpec{
@@ -260,29 +248,29 @@ func TestTransformToNetworkPolicy(t *testing.T) {
 	// Create test data
 	podTraffic := []api.PodTraffic{
 		{
-			SrcIP: "10.0.0.1",
-			DstIP: "10.0.0.2",
-			SrcPodPort: "80",
-			DstPort: "8080",
+			SrcIP:       "10.0.0.1",
+			DstIP:       "10.0.0.2",
+			SrcPodPort:  "80",
+			DstPort:     "8080",
 			TrafficType: "INGRESS",
-			Protocol: corev1.ProtocolTCP,
+			Protocol:    corev1.ProtocolTCP,
 		},
 		{
-			SrcIP: "10.0.0.1",
-			DstIP: "10.0.0.3",
-			SrcPodPort: "80",
-			DstPort: "443",
+			SrcIP:       "10.0.0.1",
+			DstIP:       "10.0.0.3",
+			SrcPodPort:  "80",
+			DstPort:     "443",
 			TrafficType: "EGRESS",
-			Protocol: corev1.ProtocolTCP,
+			Protocol:    corev1.ProtocolTCP,
 		},
 	}
 
 	podDetail := &api.PodDetail{
-		Name: "test-pod",
+		Name:      "test-pod",
 		Namespace: "default",
 		Pod: corev1.Pod{
 			ObjectMeta: metav1.ObjectMeta{
-				Name: "test-pod",
+				Name:      "test-pod",
 				Namespace: "default",
 				Labels: map[string]string{
 					"app": "test-pod",
@@ -368,20 +356,20 @@ func TestProcessIngressRules(t *testing.T) {
 	// Create test data
 	podTraffic := []api.PodTraffic{
 		{
-			SrcIP: "10.0.0.1",
-			DstIP: "10.0.0.2",
-			SrcPodPort: "80",
-			DstPort: "8080",
+			SrcIP:       "10.0.0.1",
+			DstIP:       "10.0.0.2",
+			SrcPodPort:  "80",
+			DstPort:     "8080",
 			TrafficType: "INGRESS",
-			Protocol: corev1.ProtocolTCP,
+			Protocol:    corev1.ProtocolTCP,
 		},
 		{
-			SrcIP: "10.0.0.1",
-			DstIP: "10.0.0.3",
-			SrcPodPort: "443",
-			DstPort: "8443",
-			TrafficType: "EGRESS",  // This one should be skipped
-			Protocol: corev1.ProtocolTCP,
+			SrcIP:       "10.0.0.1",
+			DstIP:       "10.0.0.3",
+			SrcPodPort:  "443",
+			DstPort:     "8443",
+			TrafficType: "EGRESS", // This one should be skipped
+			Protocol:    corev1.ProtocolTCP,
 		},
 	}
 
@@ -434,20 +422,20 @@ func TestProcessEgressRules(t *testing.T) {
 	// Create test data
 	podTraffic := []api.PodTraffic{
 		{
-			SrcIP: "10.0.0.1",
-			DstIP: "10.0.0.2",
-			SrcPodPort: "80",
-			DstPort: "8080",
+			SrcIP:       "10.0.0.1",
+			DstIP:       "10.0.0.2",
+			SrcPodPort:  "80",
+			DstPort:     "8080",
 			TrafficType: "INGRESS", // This one should be skipped
-			Protocol: corev1.ProtocolTCP,
+			Protocol:    corev1.ProtocolTCP,
 		},
 		{
-			SrcIP: "10.0.0.1",
-			DstIP: "10.0.0.3",
-			SrcPodPort: "443",
-			DstPort: "8443",
+			SrcIP:       "10.0.0.1",
+			DstIP:       "10.0.0.3",
+			SrcPodPort:  "443",
+			DstPort:     "8443",
 			TrafficType: "EGRESS",
-			Protocol: corev1.ProtocolTCP,
+			Protocol:    corev1.ProtocolTCP,
 		},
 	}
 
@@ -507,12 +495,12 @@ func TestDeterminePeerForTraffic(t *testing.T) {
 
 	// Create test traffic
 	traffic := api.PodTraffic{
-		SrcIP: "10.0.0.1",
-		DstIP: "10.0.0.2",
-		SrcPodPort: "80",
-		DstPort: "443",
+		SrcIP:       "10.0.0.1",
+		DstIP:       "10.0.0.2",
+		SrcPodPort:  "80",
+		DstPort:     "443",
 		TrafficType: "INGRESS",
-		Protocol: corev1.ProtocolTCP,
+		Protocol:    corev1.ProtocolTCP,
 	}
 
 	config := &Config{
@@ -549,12 +537,12 @@ func TestDeterminePeerForTraffic(t *testing.T) {
 	// Test normal pod
 	api.GetPodSpecFunc = func(podIP string) (*api.PodDetail, error) {
 		return &api.PodDetail{
-			PodIP: "10.0.0.2",
-			Name: "test-pod",
+			PodIP:     "10.0.0.2",
+			Name:      "test-pod",
 			Namespace: "default",
 			Pod: corev1.Pod{
 				ObjectMeta: metav1.ObjectMeta{
-					Name: "test-pod",
+					Name:      "test-pod",
 					Namespace: "default",
 					Labels: map[string]string{
 						"app": "test-pod",
@@ -582,7 +570,7 @@ func TestDeterminePeerForTraffic(t *testing.T) {
 		return &api.SvcDetail{
 			Service: corev1.Service{
 				ObjectMeta: metav1.ObjectMeta{
-					Name: "test-svc",
+					Name:      "test-svc",
 					Namespace: "default",
 				},
 				Spec: corev1.ServiceSpec{
@@ -681,4 +669,93 @@ func TestDeduplicateRules(t *testing.T) {
 	assert.Len(t, deduplicatedRules, 2) // Should deduplicate to 2 rules
 }
 
-	// Create a test config
+func TestNetworkPolicyFileOutput(t *testing.T) {
+	// Save original functions
+	origFetchSinglePod := fetchSinglePodInNamespaceFunc
+	origGetPodTrafficFunc := api.GetPodTrafficFunc
+	origGetPodSpecFunc := api.GetPodSpecFunc
+	origDetectSelectorLabels := detectSelectorLabelsFunc
+
+	// Restore original functions when test completes
+	defer func() {
+		fetchSinglePodInNamespaceFunc = origFetchSinglePod
+		api.GetPodTrafficFunc = origGetPodTrafficFunc
+		api.GetPodSpecFunc = origGetPodSpecFunc
+		detectSelectorLabelsFunc = origDetectSelectorLabels
+	}()
+
+	// Create a temporary directory for the test
+	tempDir := t.TempDir()
+
+	// Set up a test pod
+	testPod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-pod",
+			Namespace: "default",
+			Labels: map[string]string{
+				"app": "test-pod",
+			},
+		},
+	}
+
+	// Mock the functions
+	fetchSinglePodInNamespaceFunc = func(podName, namespace string, config *Config) (*corev1.Pod, error) {
+		return testPod, nil
+	}
+
+	api.GetPodTrafficFunc = func(podName string) ([]api.PodTraffic, error) {
+		return []api.PodTraffic{
+			{
+				SrcIP:       "10.0.0.1",
+				TrafficType: "INGRESS",
+				SrcPodPort:  "80",
+				Protocol:    corev1.ProtocolTCP,
+			},
+		}, nil
+	}
+
+	api.GetPodSpecFunc = func(podIP string) (*api.PodDetail, error) {
+		return &api.PodDetail{
+			Name:      "test-pod",
+			Namespace: "default",
+			Pod:       *testPod,
+		}, nil
+	}
+
+	detectSelectorLabelsFunc = func(clientset *kubernetes.Clientset, origin interface{}) (map[string]string, error) {
+		return map[string]string{"app": "test-pod"}, nil
+	}
+
+	// Create a config with output directory
+	config := &Config{
+		Clientset: &kubernetes.Clientset{},
+		DryRun:    true,
+		OutputDir: tempDir,
+	}
+
+	// Define options
+	options := GenerateOptions{
+		Mode:      SinglePod,
+		PodName:   "test-pod",
+		Namespace: "default",
+	}
+
+	// Call the function
+	GenerateNetworkPolicy(options, config)
+
+	// Check if the file was created
+	expectedFilePath := filepath.Join(tempDir, "default-test-pod-networkpolicy.yaml")
+	_, err := os.Stat(expectedFilePath)
+	assert.NoError(t, err, "File should exist")
+
+	// Verify file content
+	content, err := os.ReadFile(expectedFilePath)
+	assert.NoError(t, err, "Should be able to read file")
+
+	// Basic checks on content
+	assert.Contains(t, string(content), "kind: NetworkPolicy", "File should contain NetworkPolicy resource")
+	assert.Contains(t, string(content), "name: test-pod", "File should reference the pod name")
+	assert.Contains(t, string(content), "namespace: default", "File should reference the namespace")
+}
+
+// Create a test config

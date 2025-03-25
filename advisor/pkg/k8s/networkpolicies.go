@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 
 	log "github.com/rs/zerolog/log"
@@ -20,8 +22,8 @@ import (
 
 // Function variables to make mocking easier in tests
 var (
-	processIngressRulesFunc = processIngressRules
-	processEgressRulesFunc = processEgressRules
+	processIngressRulesFunc  = processIngressRules
+	processEgressRulesFunc   = processEgressRules
 	detectSelectorLabelsFunc = func(clientset *kubernetes.Clientset, origin interface{}) (map[string]string, error) {
 		return detectSelectorLabels(clientset, origin)
 	}
@@ -50,28 +52,23 @@ type RuleSets struct {
 func GenerateNetworkPolicy(options GenerateOptions, config *Config) {
 	// Safety check for nil config
 	if config == nil {
-		log.Warn().Msg("Running in test mode with nil Kubernetes configuration")
-		log.Info().Msgf("Would generate Kubernetes network policy for pod %s in namespace %s", options.PodName, options.Namespace)
-		return
-	}
-
-	// Test mode handling - clientset will be nil
-	if config.Clientset == nil {
-		log.Warn().Msg("Running in test mode with nil Kubernetes clientset")
-		log.Info().Msgf("Would generate Kubernetes network policy for pod %s in namespace %s", options.PodName, options.Namespace)
-
-		// Create mock YAML output for demonstration
-		mockPolicy := createMockKubernetesNetworkPolicy(options.PodName, options.Namespace)
-
-		// Convert to YAML and print
-		policyYAML, _ := yaml.Marshal(mockPolicy)
-		fmt.Println(string(policyYAML))
+		log.Error().Msg("Kubernetes configuration is nil")
 		return
 	}
 
 	// Check for dry run mode
 	if config.DryRun {
 		log.Info().Msgf("Dry run: Would generate Kubernetes network policy for pod(s) in namespace %s", options.Namespace)
+	}
+
+	// Setup output directory if specified
+	if config.OutputDir != "" {
+		// Create output directory if it doesn't exist
+		if err := os.MkdirAll(config.OutputDir, 0755); err != nil {
+			log.Error().Err(err).Msgf("Failed to create output directory %s", config.OutputDir)
+			return
+		}
+		log.Info().Msgf("Network policies will be saved to %s", config.OutputDir)
 	}
 
 	// Fetch pods based on options
@@ -109,11 +106,28 @@ func GenerateNetworkPolicy(options GenerateOptions, config *Config) {
 			continue
 		}
 
+		// Save policy to file if output directory is specified
+		if config.OutputDir != "" {
+			filename := filepath.Join(config.OutputDir, fmt.Sprintf("%s-%s-networkpolicy.yaml", podDetail.Namespace, podDetail.Name))
+			if err := os.WriteFile(filename, policyYAML, 0644); err != nil {
+				log.Error().Err(err).Msgf("Failed to write policy for pod %s to file %s", pod.Name, filename)
+			} else {
+				log.Info().Msgf("Generated network policy for pod %s saved to %s", pod.Name, filename)
+			}
+		}
+
 		if config.DryRun {
-			log.Info().Msgf("Dry run: Generated policy for pod %s (not applied)\n%s", pod.Name, string(policyYAML))
+			// Only print the policy to console if we're not saving to file
+			if config.OutputDir == "" {
+				log.Info().Msgf("Dry run: Generated policy for pod %s (not applied)\n%s", pod.Name, string(policyYAML))
+			}
 		} else {
-			log.Info().Msgf("Generated policy for pod %s\n%s", pod.Name, string(policyYAML))
-			// TODO: Apply the policy if not in dry-run mode (future implementation)
+			// Apply the policy to the cluster
+			log.Info().Msgf("Applying network policy for pod %s", pod.Name)
+
+			// TODO: Implement applying the policy to the cluster
+			// For now, just log it
+			log.Warn().Msg("Applying network policies is not yet implemented - only saving to files")
 		}
 	}
 }
@@ -490,7 +504,7 @@ type PolicyGenerator interface {
 func CreateMockPod(name, namespace string) *corev1.Pod {
 	return &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
-			Name: name,
+			Name:      name,
 			Namespace: namespace,
 			Labels: map[string]string{
 				"app": name,

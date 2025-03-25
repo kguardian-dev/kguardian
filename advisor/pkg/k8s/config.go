@@ -9,10 +9,10 @@ import (
 	log "github.com/rs/zerolog/log"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/cli-runtime/pkg/genericclioptions"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
-	"k8s.io/cli-runtime/pkg/genericclioptions"
 )
 
 // ConfigKey is used to store/retrieve *Config in context
@@ -26,6 +26,7 @@ type Config struct {
 	ConfigFlags *genericclioptions.ConfigFlags
 	Config      *rest.Config
 	DryRun      bool
+	OutputDir   string
 }
 
 // Function variables for testing
@@ -37,7 +38,7 @@ var (
 	nonInteractiveDeferredLoadingClientConfigFunc = func(
 		loadingRules *clientcmd.ClientConfigLoadingRules,
 		overrides *clientcmd.ConfigOverrides) clientcmd.ClientConfig {
-			return clientcmd.NewNonInteractiveDeferredLoadingClientConfig(loadingRules, overrides)
+		return clientcmd.NewNonInteractiveDeferredLoadingClientConfig(loadingRules, overrides)
 	}
 
 	configFlagsToRESTConfigFunc = func(configFlags *genericclioptions.ConfigFlags) (*rest.Config, error) {
