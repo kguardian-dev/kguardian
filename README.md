@@ -61,6 +61,7 @@ This table provides a high-level comparison of Xentra Advisor with other popular
 
 ## 🛠️ Prerequisites
 
+*   Linux Kernel 6.2+
 *   Kubernetes cluster v1.19+
 *   `kubectl` v1.19+
 *   [Kube Guardian Controller](https://github.com/xentra-ai/kube-guardian/tree/main/charts/kube-guardian) **MUST** be installed and running in the cluster to collect the necessary data.
