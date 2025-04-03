@@ -10,6 +10,8 @@ import (
 	log "github.com/rs/zerolog/log"
 	"github.com/spf13/cobra"
 	"github.com/xentra-ai/advisor/pkg/k8s"
+	"github.com/xentra-ai/advisor/pkg/network"
+	corev1 "k8s.io/api/core/v1"
 )
 
 var genCmd = &cobra.Command{
@@ -29,7 +31,7 @@ var networkPolicyCmd = &cobra.Command{
 	Use:     "networkpolicy [pod-name]",
 	Aliases: []string{"netpol"},
 	Short:   "Generate Kubernetes NetworkPolicies to secure your cluster",
-	Long:    `Generate Kubernetes NetworkPolicies for pods in your Kubernetes cluster, based on network traffic collected from the broker.`,
+	Long:    `Generate Kubernetes NetworkPolicies for pods in your Kubernetes cluster, based on network traffic collected from the controller(s).`,
 	Args:    cobra.MaximumNArgs(1),
 	Run: func(cmd *cobra.Command, args []string) {
 		// Set up the logger first, so we get useful debug output
@@ -101,31 +103,43 @@ var networkPolicyCmd = &cobra.Command{
 		// Set dry run mode in config
 		config.DryRun = dryRun
 
+		// Create policy service with appropriate configuration
+		var policyServiceType network.PolicyType
+		if policyType == "cilium" {
+			policyServiceType = network.CiliumPolicy
+		} else {
+			policyServiceType = network.StandardPolicy
+		}
+
+		// Create the policy service
+		policyService := createPolicyService(config, policyServiceType)
+
+		// Initialize output directory
+		if err := policyService.InitOutputDirectory(); err != nil {
+			log.Error().Err(err).Msg("Failed to initialize output directory")
+			os.Exit(1)
+		}
+
 		// Check for --all or --all-namespaces flags
 		if allNamespaces {
 			log.Info().Msg("Generating policies for all pods in all namespaces")
-			if policyType == "cilium" {
-				k8s.GenerateCiliumNetworkPoliciesForAllNamespaces(config)
-			} else {
-				k8s.GenerateNetworkPoliciesForAllNamespaces(config)
+			// Get all running pods across all namespaces
+			pods, err := k8s.GetAllPodsInAllNamespaces(ctx, config)
+			if err != nil {
+				log.Error().Err(err).Msg("Error getting pods in all namespaces")
+				os.Exit(1)
 			}
+			processPods(pods, policyService, policyServiceType)
 		} else if allInNamespace {
-			namespace, _ := cmd.Flags().GetString("namespace")
-			if namespace == "" {
-				var err error
-				namespace, err = k8s.GetCurrentNamespace(config)
-				if err != nil {
-					log.Error().Err(err).Msg("Error getting current namespace")
-					fmt.Fprintf(os.Stderr, "Failed to get current namespace: %v\n", err)
-					os.Exit(1)
-				}
+			// Determine namespace (use targetNamespace which was resolved earlier)
+			log.Info().Msgf("Generating policies for all pods in namespace: %s", targetNamespace)
+			// Get all running pods in the specified namespace
+			pods, err := k8s.GetPodsInNamespace(ctx, config, targetNamespace)
+			if err != nil {
+				log.Error().Err(err).Msgf("Error getting pods in namespace %s", targetNamespace)
+				os.Exit(1)
 			}
-			log.Info().Msgf("Generating policies for all pods in namespace: %s", namespace)
-			if policyType == "cilium" {
-				k8s.GenerateCiliumNetworkPoliciesForNamespace(config, namespace)
-			} else {
-				k8s.GenerateNetworkPoliciesForNamespace(config, namespace)
-			}
+			processPods(pods, policyService, policyServiceType)
 		} else {
 			// Check if a pod name was provided
 			if len(args) != 1 {
@@ -135,31 +149,56 @@ var networkPolicyCmd = &cobra.Command{
 			}
 
 			podName := args[0]
-			namespace, _ := cmd.Flags().GetString("namespace")
-			if namespace == "" {
-				var err error
-				namespace, err = k8s.GetCurrentNamespace(config)
-				if err != nil {
-					log.Error().Err(err).Msg("Error getting current namespace")
-					fmt.Fprintf(os.Stderr, "Failed to get current namespace: %v\n", err)
-					os.Exit(1)
-				}
-			}
-
-			log.Info().Msgf("Generating policy for pod %s in namespace %s", podName, namespace)
-			options := k8s.GenerateOptions{
-				Mode:      k8s.SinglePod,
-				PodName:   podName,
-				Namespace: namespace,
-			}
-
-			if policyType == "cilium" {
-				k8s.GenerateCiliumNetworkPolicy(options, config)
-			} else {
-				k8s.GenerateNetworkPolicy(options, config)
+			log.Info().Msgf("Generating policy for pod %s in namespace %s", podName, targetNamespace)
+			if err := policyService.GenerateAndHandlePolicy(podName, policyServiceType); err != nil {
+				log.Error().Err(err).Msgf("Error generating policy for pod %s", podName)
+				os.Exit(1)
 			}
 		}
 	},
+}
+
+// processPods processes a list of pods and generates policies for them
+func processPods(pods []corev1.Pod, policyService *network.PolicyService, policyType network.PolicyType) {
+	podNames := make([]string, len(pods))
+	for i, pod := range pods {
+		podNames[i] = pod.Name
+	}
+	if err := policyService.BatchGenerateAndHandlePolicies(podNames, policyType); err != nil {
+		log.Error().Err(err).Msg("Error generating policies for pods")
+	}
+}
+
+// createPolicyService creates and initializes a policy service
+func createPolicyService(config *k8s.Config, defaultType network.PolicyType) *network.PolicyService {
+	// Create a config adapter to implement the ConfigProvider interface
+	configAdapter := &k8sConfigAdapter{config: config}
+
+	// Create the policy service
+	policyService := network.NewPolicyService(configAdapter, defaultType)
+
+	// Register generators
+	policyService.RegisterGenerator(network.NewStandardPolicyGenerator())
+	policyService.RegisterGenerator(network.NewCiliumPolicyGenerator())
+
+	return policyService
+}
+
+// k8sConfigAdapter adapts the k8s.Config to the network.ConfigProvider interface
+type k8sConfigAdapter struct {
+	config *k8s.Config
+}
+
+func (a *k8sConfigAdapter) GetClientset() interface{} {
+	return a.config.Clientset
+}
+
+func (a *k8sConfigAdapter) IsDryRun() bool {
+	return a.config.DryRun
+}
+
+func (a *k8sConfigAdapter) GetOutputDir() string {
+	return a.config.OutputDir
 }
 
 func init() {

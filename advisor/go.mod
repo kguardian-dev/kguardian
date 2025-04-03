@@ -16,6 +16,15 @@ require (
 	sigs.k8s.io/yaml v1.4.0
 )
 
+// Add replace directives for local packages
+replace github.com/xentra-ai/advisor/pkg/api => ./pkg/api
+
+replace github.com/xentra-ai/advisor/pkg/common => ./pkg/common
+
+replace github.com/xentra-ai/advisor/pkg/k8s => ./pkg/k8s
+
+replace github.com/xentra-ai/advisor/pkg/network => ./pkg/network
+
 require (
 	github.com/Azure/go-ansiterm v0.0.0-20210617225240-d185dfc1b5a1 // indirect
 	github.com/asaskevich/govalidator v0.0.0-20230301143203-a9d515a09cc2 // indirect
