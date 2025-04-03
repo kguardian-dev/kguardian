@@ -10,8 +10,6 @@
     ":disableRateLimiting",
     ":dependencyDashboard",
     ":semanticCommits",
-    ":separatePatchReleases",
-    ":skipStatusChecks",
     ":timezone(Australia/Melbourne)",
     "github>xentra-ai/kube-guardian//.github/renovate/autoMerge.json5",
   ],
