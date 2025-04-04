@@ -78,7 +78,6 @@ var networkPolicyCmd = &cobra.Command{
 				fmt.Fprintf(os.Stderr, "Failed to get current namespace: %v\n", err)
 				os.Exit(1)
 			}
-			log.Info().Msgf("Using namespace from current context: %s", targetNamespace)
 		}
 
 		log.Debug().Msg("Starting port forwarding")
