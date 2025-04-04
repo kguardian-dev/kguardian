@@ -5,7 +5,7 @@ echo "Starting the installation of kubectl-advisor..."
 # Define the GitHub owner and repository
 GITHUB_OWNER="xentra-ai"
 GITHUB_REPO="kube-guardian"
-BINARY_NAME="advisor"
+BINARY_NAME="xentra"
 INSTALL_DIR="/usr/local/bin"
 TMP_DIR=$(mktemp -d)
 BINARY_PATH="$TMP_DIR/$BINARY_NAME"
@@ -63,7 +63,7 @@ echo "You may need to provide your password for sudo access."
 sudo mv "$BINARY_PATH" "$INSTALL_DIR/kubectl-$BINARY_NAME"
 
 echo "Installation successful! 'kubectl-$BINARY_NAME' is now available in your PATH."
-echo "You can start using it with 'kubectl advisor'."
+echo "You can start using it with 'kubectl xentra'."
 
 # Cleanup is handled by the trap, but you can call it explicitly if desired
 cleanup
