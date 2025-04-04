@@ -201,8 +201,6 @@ func (a *k8sConfigAdapter) GetOutputDir() string {
 }
 
 func init() {
-	genCmd.AddCommand(networkPolicyCmd)
-
 	// Add flags
 	networkPolicyCmd.Flags().StringP("namespace", "n", "", "Namespace (defaults to current context namespace)")
 	networkPolicyCmd.Flags().BoolVarP(&allInNamespace, "all", "a", false, "Generate policies for all pods in the specified or current namespace")
