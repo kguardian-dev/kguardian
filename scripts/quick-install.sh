@@ -1,7 +1,5 @@
 #!/bin/bash
 
-echo "Starting the installation of kubectl-advisor..."
-
 # Define the GitHub owner and repository
 GITHUB_OWNER="xentra-ai"
 GITHUB_REPO="kube-guardian"
@@ -9,6 +7,10 @@ BINARY_NAME="xentra"
 INSTALL_DIR="/usr/local/bin"
 TMP_DIR=$(mktemp -d)
 BINARY_PATH="$TMP_DIR/$BINARY_NAME"
+
+echo "Starting the installation of kubectl-$BINARY_NAME..."
+
+
 
 # Trap to ensure that the temporary directory gets cleaned up
 cleanup() {
@@ -46,7 +48,7 @@ BINARY_URL="https://github.com/$GITHUB_OWNER/$GITHUB_REPO/releases/download/$LAT
 echo "Download URL: $BINARY_URL"
 
 # Download the release and set it as executable
-echo "Downloading the kubectl-advisor binary..."
+echo "Downloading the kubectl-$BINARY_NAME binary..."
 curl -sL "$BINARY_URL" -o "$BINARY_PATH"
 if [ $? -ne 0 ]; then
     echo "Error: Failed to download the binary."
@@ -56,14 +58,14 @@ fi
 chmod +x "$BINARY_PATH"
 
 # Notify user about the need for elevated permissions
-echo "The kubectl-advisor binary needs to be moved to $INSTALL_DIR, which requires elevated permissions."
+echo "The kubectl-$BINARY_NAME binary needs to be moved to $INSTALL_DIR, which requires elevated permissions."
 echo "You may need to provide your password for sudo access."
 
 # Move the binary to /usr/local/bin and rename it
 sudo mv "$BINARY_PATH" "$INSTALL_DIR/kubectl-$BINARY_NAME"
 
 echo "Installation successful! 'kubectl-$BINARY_NAME' is now available in your PATH."
-echo "You can start using it with 'kubectl xentra'."
+echo "You can start using it with 'kubectl $BINARY_NAME'."
 
 # Cleanup is handled by the trap, but you can call it explicitly if desired
 cleanup
