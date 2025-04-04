@@ -3,6 +3,7 @@
 # Define the GitHub owner and repository
 GITHUB_OWNER="xentra-ai"
 GITHUB_REPO="kube-guardian"
+RELEASE_BINARY_NAME="advisor"
 BINARY_NAME="xentra"
 INSTALL_DIR="/usr/local/bin"
 TMP_DIR=$(mktemp -d)
@@ -44,7 +45,7 @@ fi
 echo "Latest release tag: $LATEST_RELEASE_TAG"
 
 # Construct the download URL
-BINARY_URL="https://github.com/$GITHUB_OWNER/$GITHUB_REPO/releases/download/$LATEST_RELEASE_TAG/$BINARY_NAME-$OS-$ARCH"
+BINARY_URL="https://github.com/$GITHUB_OWNER/$GITHUB_REPO/releases/download/$LATEST_RELEASE_TAG/$RELEASE_BINARY_NAME-$OS-$ARCH"
 echo "Download URL: $BINARY_URL"
 
 # Download the release and set it as executable
