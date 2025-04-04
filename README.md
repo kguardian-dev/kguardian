@@ -96,7 +96,7 @@ Example (Linux AMD64, replace version/binary name as needed):
 
 ```bash
 # Replace with the correct release URL
-wget -O xentra https://github.com/xentra-ai/kube-guardian/releases/download/vX.Y.Z/xentra-linux-amd64
+wget -O xentra https://github.com/xentra-ai/kube-guardian/releases/download/vX.Y.Z/advisor-linux-amd64
 chmod +x xentra
 sudo mv xentra /usr/local/bin/kubectl-xentra
 
