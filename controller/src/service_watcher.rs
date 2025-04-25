@@ -44,17 +44,20 @@ pub async fn watch_service() -> Result<(), Error> {
 async fn update_serviceinfo(svc: Service) -> Result<(), Error> {
     let svc_name = svc.name_any();
     let svc_namespace = svc.metadata.namespace.to_owned();
-    let svc_spec = &svc.spec;
-    let svc_ip = svc_spec.as_ref().unwrap().cluster_ip.as_ref().unwrap();
 
-    let z = SvcDetail {
+    let Some(svc_ip) = svc.spec.as_ref().and_then(|spec| spec.cluster_ip.as_ref()) else {
+        warn!("Service {} has no cluster IP", svc_name);
+        return Ok(());
+    };
+    
+    let svc_details = SvcDetail {
         svc_ip: svc_ip.to_owned(),
         svc_name: svc_name.to_owned(),
         svc_namespace: svc_namespace.to_owned(),
         service_spec: Some(json!(svc)),
         time_stamp: Utc::now().naive_utc(),
     };
-    if let Err(e) = api_post_call(json!(z), "svc/spec").await {
+    if let Err(e) = api_post_call(json!(svc_details), "svc/spec").await {
         error!("Failed to post Service details: {}", e);
     }
     Ok(())
