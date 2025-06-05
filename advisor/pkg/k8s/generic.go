@@ -1,6 +1,8 @@
 package k8s
 
 import (
+	"context"
+
 	log "github.com/rs/zerolog/log"
 	corev1 "k8s.io/api/core/v1"
 )
@@ -24,48 +26,45 @@ type GenerateOptions struct {
 	Namespace string // Used if Mode is AllPodsInNamespace or SinglePod
 }
 
-// Exportable function variables for testing
-var (
-	fetchSinglePodInNamespaceFunc = func(podName, namespace string, config *Config) (*corev1.Pod, error) {
-		return fetchSinglePodInNamespace(podName, namespace, config)
-	}
-
-	fetchAllPodsInNamespaceFunc = func(namespace string, config *Config) ([]corev1.Pod, error) {
-		return fetchAllPodsInNamespace(namespace, config)
-	}
-
-	fetchAllPodsInAllNamespacesFunc = func(config *Config) ([]corev1.Pod, error) {
-		return fetchAllPodsInAllNamespaces(config)
-	}
-)
+// Exportable function variables for testing - REMOVED
 
 func GetResource(options GenerateOptions, config *Config) []corev1.Pod {
 	var pods []corev1.Pod
+	ctx := context.TODO() // Or pass a context if available
 
 	switch options.Mode {
 	case SinglePod:
-		// Fetch all pods in the given namespace
-		fetchedPod, err := fetchSinglePodInNamespaceFunc(options.PodName, options.Namespace, config)
+		// Fetch the specified pod
+		fetchedPod, err := GetPod(ctx, config, options.Namespace, options.PodName)
 		if err != nil {
-			log.Fatal().Err(err).Msgf("failed to fetch pods in namespace %s", options.Namespace)
+			// Log the error and return an empty slice instead of fatally exiting.
+			log.Error().Err(err).Msgf("failed to get running pod %s in namespace %s", options.PodName, options.Namespace)
+			return []corev1.Pod{}
 		}
 		pods = append(pods, *fetchedPod)
 
 	case AllPodsInNamespace:
-		// Fetch all pods in the given namespace
-		fetchedPods, err := fetchAllPodsInNamespaceFunc(options.Namespace, config)
+		// Fetch all running pods in the given namespace
+		fetchedPods, err := GetPodsInNamespace(ctx, config, options.Namespace)
 		if err != nil {
-			log.Fatal().Err(err).Msgf("failed to fetch pods in namespace %s", options.Namespace)
+			log.Error().Err(err).Msgf("failed to fetch running pods in namespace %s", options.Namespace)
+			// Return empty list on error, or handle differently as needed
+			return []corev1.Pod{}
 		}
 		pods = append(pods, fetchedPods...)
 
 	case AllPodsInAllNamespaces:
-		// Fetch all pods in all namespaces
-		fetchedPods, err := fetchAllPodsInAllNamespacesFunc(config)
+		// Fetch all running pods in all namespaces
+		fetchedPods, err := GetAllPodsInAllNamespaces(ctx, config)
 		if err != nil {
-			log.Fatal().Err(err).Msgf("failed to fetch all pods in all namespaces")
+			log.Error().Err(err).Msgf("failed to fetch all running pods in all namespaces")
+			// Return empty list on error, or handle differently as needed
+			return []corev1.Pod{}
 		}
 		pods = append(pods, fetchedPods...)
+	default:
+		log.Error().Msgf("Unknown mode type: %v", options.Mode)
+		return []corev1.Pod{}
 	}
 	return pods
 }
