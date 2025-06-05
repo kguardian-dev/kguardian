@@ -6,7 +6,7 @@ toolchain go1.23.8
 
 require (
 	github.com/cilium/cilium v1.15.16
-	github.com/rs/zerolog v1.33.0
+	github.com/rs/zerolog v1.34.0
 	github.com/spf13/cobra v1.8.1
 	github.com/stretchr/testify v1.10.0
 	k8s.io/api v0.30.1
