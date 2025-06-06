@@ -11,7 +11,7 @@ vmlinux = { version = "0.0", git = "https://github.com/libbpf/vmlinux.h.git", re
 [dependencies]
 anyhow = "1.0.96"
 libbpf-rs = "0.25.0"
-libbpf-sys = "0.6"
+libbpf-sys = "1.5.1"
 plain = "0.2"
 time = { version = "0.3", features = ["formatting", "local-offset", "macros"]}
 tokio = { version = "1.45", features = ["macros", "rt-multi-thread", "fs", "time"] }
