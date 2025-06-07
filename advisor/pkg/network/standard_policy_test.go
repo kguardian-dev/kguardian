@@ -93,8 +93,26 @@ func TestStandardPolicyGenerator_Generate_BasicIngressEgress(t *testing.T) {
 	gen := NewStandardPolicyGenerator()
 	podDetail := mockPodDetail("test-pod", "default", "192.168.1.10", map[string]string{"app": "test"})
 	podTraffic := []api.PodTraffic{
-		{SrcIP: "10.0.0.1", DstIP: "192.168.1.10", DstPort: "80", Protocol: corev1.ProtocolTCP},  // Ingress from client-pod
-		{SrcIP: "192.168.1.10", DstIP: "10.0.0.2", DstPort: "443", Protocol: corev1.ProtocolTCP}, // Egress to backend-svc
+		{
+			// INGRESS: client-pod (10.0.0.1) -> test-pod (192.168.1.10:80)
+			SrcPodName:  "test-pod",
+			SrcIP:       "192.168.1.10", // test-pod's IP
+			SrcPodPort:  "80",           // port on test-pod receiving traffic
+			DstIP:       "10.0.0.1",     // client-pod's IP (the peer)
+			DstPort:     "80",           // not used for ingress
+			Protocol:    corev1.ProtocolTCP,
+			TrafficType: "INGRESS",
+		},
+		{
+			// EGRESS: test-pod (192.168.1.10) -> backend-svc (10.0.0.2:443)
+			SrcPodName:  "test-pod",
+			SrcIP:       "192.168.1.10", // test-pod's IP
+			SrcPodPort:  "0",            // not used for egress
+			DstIP:       "10.0.0.2",     // backend-svc's IP (the peer)
+			DstPort:     "443",          // port on backend-svc
+			Protocol:    corev1.ProtocolTCP,
+			TrafficType: "EGRESS",
+		},
 	}
 
 	policyInterface, err := gen.Generate("test-pod", podTraffic, podDetail)
@@ -156,8 +174,26 @@ func TestStandardPolicyGenerator_Generate_IpBlockFallback(t *testing.T) {
 	gen := NewStandardPolicyGenerator()
 	podDetail := mockPodDetail("test-pod", "default", "192.168.1.10", map[string]string{"app": "test"})
 	podTraffic := []api.PodTraffic{
-		{SrcIP: "10.0.0.5", DstIP: "192.168.1.10", DstPort: "8080", Protocol: corev1.ProtocolTCP}, // Ingress from unknown IP
-		{SrcIP: "192.168.1.10", DstIP: "8.8.8.8", DstPort: "53", Protocol: corev1.ProtocolUDP},    // Egress to external IP
+		{
+			// INGRESS: unknown-peer (10.0.0.5) -> test-pod (192.168.1.10:8080)
+			SrcPodName:  "test-pod",
+			SrcIP:       "192.168.1.10", // test-pod's IP
+			SrcPodPort:  "8080",         // port on test-pod receiving traffic
+			DstIP:       "10.0.0.5",     // unknown peer IP
+			DstPort:     "8080",         // not used for ingress
+			Protocol:    corev1.ProtocolTCP,
+			TrafficType: "INGRESS",
+		},
+		{
+			// EGRESS: test-pod (192.168.1.10) -> external DNS (8.8.8.8:53)
+			SrcPodName:  "test-pod",
+			SrcIP:       "192.168.1.10", // test-pod's IP
+			SrcPodPort:  "0",            // not used for egress
+			DstIP:       "8.8.8.8",      // external DNS IP
+			DstPort:     "53",           // DNS port
+			Protocol:    corev1.ProtocolUDP,
+			TrafficType: "EGRESS",
+		},
 	}
 
 	policyInterface, err := gen.Generate("test-pod", podTraffic, podDetail)
@@ -188,6 +224,97 @@ func TestStandardPolicyGenerator_Generate_IpBlockFallback(t *testing.T) {
 	assert.Len(t, egressRule.Ports, 1)
 	assert.Equal(t, intstr.FromInt(53), *egressRule.Ports[0].Port)
 	assert.Equal(t, corev1.ProtocolUDP, *egressRule.Ports[0].Protocol)
+}
+
+func TestStandardPolicyGenerator_Generate_CorrectedTrafficLogic(t *testing.T) {
+	// --- Setup Mocks ---
+	origGetPodSpecFunc := api.GetPodSpecFunc
+	origGetSvcSpecFunc := api.GetSvcSpecFunc
+	defer func() {
+		api.GetPodSpecFunc = origGetPodSpecFunc
+		api.GetSvcSpecFunc = origGetSvcSpecFunc
+	}()
+
+	api.GetPodSpecFunc = func(ip string) (*api.PodDetail, error) {
+		if ip == "10.0.1.100" {
+			return mockPodDetail("frontend-pod", "web", ip, map[string]string{"app": "frontend", "tier": "web"}), nil
+		}
+		return nil, nil // Not found
+	}
+	api.GetSvcSpecFunc = func(ip string) (*api.SvcDetail, error) {
+		if ip == "10.0.2.200" {
+			return mockSvcDetail("database-svc", "data", ip, map[string]string{"app": "database", "tier": "data"}), nil
+		}
+		return nil, nil // Not found
+	}
+	// --- End Mocks ---
+
+	gen := NewStandardPolicyGenerator()
+	podDetail := mockPodDetail("my-app", "default", "10.0.1.50", map[string]string{"app": "my-app", "version": "v1"})
+
+	// Traffic data with corrected understanding:
+	// - SrcPodName, SrcIP, SrcPodPort: represent the target pod (the one we're generating policy for)
+	// - DstIP, DstPort: represent the peer/remote entity
+	// - TrafficType: direction relative to the target pod
+	podTraffic := []api.PodTraffic{
+		{
+			// INGRESS: frontend-pod (10.0.1.100) -> my-app (10.0.1.50:8080)
+			SrcPodName:  "my-app",
+			SrcIP:       "10.0.1.50",  // my-app's IP
+			SrcPodPort:  "8080",       // port on my-app receiving traffic
+			DstIP:       "10.0.1.100", // frontend-pod's IP (the peer)
+			DstPort:     "0",          // not relevant for ingress
+			Protocol:    corev1.ProtocolTCP,
+			TrafficType: "INGRESS",
+		},
+		{
+			// EGRESS: my-app (10.0.1.50) -> database-svc (10.0.2.200:5432)
+			SrcPodName:  "my-app",
+			SrcIP:       "10.0.1.50",  // my-app's IP
+			SrcPodPort:  "0",          // not relevant for egress
+			DstIP:       "10.0.2.200", // database-svc's IP (the peer)
+			DstPort:     "5432",       // port on database-svc
+			Protocol:    corev1.ProtocolTCP,
+			TrafficType: "EGRESS",
+		},
+	}
+
+	policyInterface, err := gen.Generate("my-app", podTraffic, podDetail)
+	assert.NoError(t, err)
+	assert.NotNil(t, policyInterface)
+
+	policy, ok := policyInterface.(*networkingv1.NetworkPolicy)
+	assert.True(t, ok)
+	assert.Equal(t, GetPolicyName("my-app", "standard-policy"), policy.Name)
+	assert.Equal(t, "default", policy.Namespace)
+	assert.Equal(t, map[string]string{"app": "my-app", "version": "v1"}, policy.Spec.PodSelector.MatchLabels)
+	assert.Len(t, policy.Spec.PolicyTypes, 2)
+	assert.Contains(t, policy.Spec.PolicyTypes, networkingv1.PolicyTypeIngress)
+	assert.Contains(t, policy.Spec.PolicyTypes, networkingv1.PolicyTypeEgress)
+
+	// Verify Ingress Rule: frontend-pod -> my-app:8080
+	assert.Len(t, policy.Spec.Ingress, 1)
+	ingressRule := policy.Spec.Ingress[0]
+	assert.Len(t, ingressRule.From, 1)
+	assert.NotNil(t, ingressRule.From[0].PodSelector)
+	assert.Equal(t, map[string]string{"app": "frontend", "tier": "web"}, ingressRule.From[0].PodSelector.MatchLabels)
+	assert.NotNil(t, ingressRule.From[0].NamespaceSelector)
+	assert.Equal(t, map[string]string{"kubernetes.io/metadata.name": "web"}, ingressRule.From[0].NamespaceSelector.MatchLabels)
+	assert.Len(t, ingressRule.Ports, 1)
+	assert.Equal(t, intstr.FromInt(8080), *ingressRule.Ports[0].Port) // Port on my-app
+	assert.Equal(t, corev1.ProtocolTCP, *ingressRule.Ports[0].Protocol)
+
+	// Verify Egress Rule: my-app -> database-svc:5432
+	assert.Len(t, policy.Spec.Egress, 1)
+	egressRule := policy.Spec.Egress[0]
+	assert.Len(t, egressRule.To, 1)
+	assert.NotNil(t, egressRule.To[0].PodSelector)
+	assert.Equal(t, map[string]string{"app": "database", "tier": "data"}, egressRule.To[0].PodSelector.MatchLabels)
+	assert.NotNil(t, egressRule.To[0].NamespaceSelector)
+	assert.Equal(t, map[string]string{"kubernetes.io/metadata.name": "data"}, egressRule.To[0].NamespaceSelector.MatchLabels)
+	assert.Len(t, egressRule.Ports, 1)
+	assert.Equal(t, intstr.FromInt(5432), *egressRule.Ports[0].Port) // Port on database-svc
+	assert.Equal(t, corev1.ProtocolTCP, *egressRule.Ports[0].Protocol)
 }
 
 // --- Test Helpers ---

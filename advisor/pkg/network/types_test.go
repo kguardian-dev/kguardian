@@ -43,25 +43,25 @@ func TestCreateObjectMeta(t *testing.T) {
 func TestIsIngressTraffic(t *testing.T) {
 	podDetail := &api.PodDetail{PodIP: "192.168.1.100"}
 
-	ingressTraffic := api.PodTraffic{DstIP: "192.168.1.100", SrcIP: "10.0.0.1"}
+	ingressTraffic := api.PodTraffic{TrafficType: "INGRESS"}
 	assert.True(t, IsIngressTraffic(ingressTraffic, podDetail))
 
-	egressTraffic := api.PodTraffic{SrcIP: "192.168.1.100", DstIP: "8.8.8.8"}
+	egressTraffic := api.PodTraffic{TrafficType: "EGRESS"}
 	assert.False(t, IsIngressTraffic(egressTraffic, podDetail))
 
-	otherTraffic := api.PodTraffic{SrcIP: "10.0.0.1", DstIP: "10.0.0.2"}
+	otherTraffic := api.PodTraffic{TrafficType: "OTHER"}
 	assert.False(t, IsIngressTraffic(otherTraffic, podDetail))
 }
 
 func TestIsEgressTraffic(t *testing.T) {
 	podDetail := &api.PodDetail{PodIP: "192.168.1.100"}
 
-	ingressTraffic := api.PodTraffic{DstIP: "192.168.1.100", SrcIP: "10.0.0.1"}
+	ingressTraffic := api.PodTraffic{TrafficType: "INGRESS"}
 	assert.False(t, IsEgressTraffic(ingressTraffic, podDetail))
 
-	egressTraffic := api.PodTraffic{SrcIP: "192.168.1.100", DstIP: "8.8.8.8"}
+	egressTraffic := api.PodTraffic{TrafficType: "EGRESS"}
 	assert.True(t, IsEgressTraffic(egressTraffic, podDetail))
 
-	otherTraffic := api.PodTraffic{SrcIP: "10.0.0.1", DstIP: "10.0.0.2"}
+	otherTraffic := api.PodTraffic{TrafficType: "OTHER"}
 	assert.False(t, IsEgressTraffic(otherTraffic, podDetail))
 }

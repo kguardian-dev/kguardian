@@ -94,10 +94,10 @@ func CreateObjectMeta(name, namespace string, labels map[string]string) metav1.O
 
 // IsIngressTraffic checks if traffic is ingress to the pod
 func IsIngressTraffic(traffic api.PodTraffic, podDetail *api.PodDetail) bool {
-	return traffic.DstIP == podDetail.PodIP
+	return traffic.TrafficType == "INGRESS"
 }
 
 // IsEgressTraffic checks if traffic is egress from the pod
 func IsEgressTraffic(traffic api.PodTraffic, podDetail *api.PodDetail) bool {
-	return traffic.SrcIP == podDetail.PodIP
+	return traffic.TrafficType == "EGRESS"
 }

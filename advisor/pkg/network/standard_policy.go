@@ -100,28 +100,97 @@ func (g *StandardPolicyGenerator) generateDefaultDenyPolicy(podDetail *api.PodDe
 }
 
 // processTrafficRules groups traffic rules by direction
+//
+// IMPORTANT: Traffic Data Structure Understanding
+// The PodTraffic struct has a confusing naming convention. Here's the correct interpretation:
+//
+// Fields prefixed with "Src" represent the TARGET POD (the pod we're generating policy for):
+// - SrcPodName, SrcIP, SrcPodPort: These refer to the pod we're protecting
+//
+// Fields prefixed with "Dst" represent the PEER/REMOTE ENTITY:
+// - DstIP, DstPort: These refer to the external entity communicating with our pod
+//
+// For NetworkPolicy generation:
+//
+// INGRESS Rules (external -> our pod):
+// - Peer: DstIP (the external source sending traffic to us)
+// - Port: SrcPodPort (the port on our pod receiving the traffic)
+// - Example: Allow frontend-pod (DstIP) to reach our pod on port 8080 (SrcPodPort)
+//
+// EGRESS Rules (our pod -> external):
+// - Peer: DstIP (the external destination we're sending to)
+// - Port: DstPort (the port on the external service/pod)
+// - Example: Allow our pod to reach database-svc (DstIP) on port 5432 (DstPort)
 func (g *StandardPolicyGenerator) processTrafficRules(podTraffic []api.PodTraffic, podDetail *api.PodDetail) ([]NetworkPolicyRule, []NetworkPolicyRule) {
 	var ingressRules, egressRules []NetworkPolicyRule
 
 	for _, traffic := range podTraffic {
-		// Convert string port to int, handle potential errors
-		portInt, err := parsePort(traffic.DstPort)
-		if err != nil {
-			log.Warn().Err(err).Msgf("Skipping traffic record due to invalid port: %s", traffic.DstPort)
-			continue
-		}
-		port := intstr.FromInt(portInt)
-		protocolStr := string(traffic.Protocol)
+		var portInt int
+		var err error
+		var peer string
+		var port intstr.IntOrString
+		var protocolStr string
 
 		if IsIngressTraffic(traffic, podDetail) {
-			peer := traffic.SrcIP
+			// For INGRESS traffic: External peer -> Our Pod
+			// - Peer is the source sending to us (traffic.DstIP - the external entity)
+			// - Port is the port on our pod receiving the traffic (traffic.SrcPodPort)
+			peer = traffic.DstIP
+
+			// Skip if peer is empty or same as pod's own IP (self-traffic)
+			if peer == "" {
+				log.Debug().Msgf("Skipping ingress traffic with empty peer IP")
+				continue
+			}
+			if peer == podDetail.PodIP {
+				log.Debug().Msgf("Skipping ingress self-traffic (peer %s == pod IP %s)", peer, podDetail.PodIP)
+				continue
+			}
+
+			portInt, err = parsePort(traffic.SrcPodPort)
+			if err != nil {
+				log.Warn().Err(err).Msgf("Skipping ingress traffic record due to invalid pod port: %s", traffic.SrcPodPort)
+				continue
+			}
+			port = intstr.FromInt(portInt)
+			protocolStr = string(traffic.Protocol)
+
+			log.Debug().Msgf("Processing INGRESS: allowing peer %s to reach our pod port %d (%s)", peer, portInt, protocolStr)
 			ingressRules = g.addOrUpdateRule(ingressRules, peer, port, protocolStr)
+
 		} else if IsEgressTraffic(traffic, podDetail) {
-			peer := traffic.DstIP
+			// For EGRESS traffic: Our Pod -> External destination
+			// - Peer is the destination (traffic.DstIP - where our pod is connecting to)
+			// - Port is the destination port (traffic.DstPort - the port on the target service/pod)
+			peer = traffic.DstIP
+
+			// Skip if peer is empty or same as pod's own IP (self-traffic)
+			if peer == "" {
+				log.Debug().Msgf("Skipping egress traffic with empty peer IP")
+				continue
+			}
+			if peer == podDetail.PodIP {
+				log.Debug().Msgf("Skipping egress self-traffic (peer %s == pod IP %s)", peer, podDetail.PodIP)
+				continue
+			}
+
+			portInt, err = parsePort(traffic.DstPort)
+			if err != nil {
+				log.Warn().Err(err).Msgf("Skipping egress traffic record due to invalid destination port: %s", traffic.DstPort)
+				continue
+			}
+			port = intstr.FromInt(portInt)
+			protocolStr = string(traffic.Protocol)
+
+			log.Debug().Msgf("Processing EGRESS: allowing our pod to reach peer %s on port %d (%s)", peer, portInt, protocolStr)
 			egressRules = g.addOrUpdateRule(egressRules, peer, port, protocolStr)
+		} else {
+			log.Debug().Msgf("Skipping traffic record with unknown type: %s", traffic.TrafficType)
 		}
-		// else: Traffic is neither ingress nor egress for this pod (e.g., traffic between other pods)
 	}
+
+	log.Info().Msgf("Generated %d ingress rules and %d egress rules for pod %s",
+		len(ingressRules), len(egressRules), podDetail.Name)
 
 	return ingressRules, egressRules
 }
@@ -219,62 +288,71 @@ func (g *StandardPolicyGenerator) transformToNetworkPolicyEgressRules(rules []Ne
 // createNetworkPolicyPeer determines the NetworkPolicyPeer based on the IP address.
 // It prioritizes Service selectors, then Pod selectors, then falls back to IPBlock.
 func (g *StandardPolicyGenerator) createNetworkPolicyPeer(peerIP string) *networkingv1.NetworkPolicyPeer {
+	log.Debug().Msgf("Creating network policy peer for IP: %s", peerIP)
+
 	// Try to get Service info first
 	svcSpec, err := api.GetSvcSpec(peerIP)
-	if err == nil && svcSpec != nil && len(svcSpec.Service.Spec.Selector) > 0 {
-		log.Debug().Msgf("Using service selector for peer %s: %v in namespace %s",
-			peerIP, svcSpec.Service.Spec.Selector, svcSpec.SvcNamespace)
-		return &networkingv1.NetworkPolicyPeer{
-			PodSelector: &metav1.LabelSelector{
-				MatchLabels: svcSpec.Service.Spec.Selector,
-			},
-			NamespaceSelector: &metav1.LabelSelector{
-				MatchLabels: map[string]string{
-					"kubernetes.io/metadata.name": svcSpec.SvcNamespace,
+	if err == nil && svcSpec != nil {
+		// Validate service has selectors before using it
+		if len(svcSpec.Service.Spec.Selector) > 0 {
+			log.Debug().Msgf("Found service %s/%s with selector %v for IP %s",
+				svcSpec.SvcNamespace, svcSpec.SvcName, svcSpec.Service.Spec.Selector, peerIP)
+
+			return &networkingv1.NetworkPolicyPeer{
+				PodSelector: &metav1.LabelSelector{
+					MatchLabels: svcSpec.Service.Spec.Selector,
 				},
-			},
+				NamespaceSelector: &metav1.LabelSelector{
+					MatchLabels: map[string]string{
+						"kubernetes.io/metadata.name": svcSpec.SvcNamespace,
+					},
+				},
+			}
+		} else {
+			log.Debug().Msgf("Service %s/%s found for IP %s but has no selector, trying pod lookup",
+				svcSpec.SvcNamespace, svcSpec.SvcName, peerIP)
 		}
-	}
-	// If error or no service found, log it and try Pod info
-	if err != nil {
-		log.Debug().Err(err).Msgf("Error fetching service spec for IP %s, trying pod spec.", peerIP)
-	} else if svcSpec == nil {
-		log.Debug().Msgf("No service found for IP %s, trying pod spec.", peerIP)
-	} else { // Service found but no selector
-		log.Debug().Msgf("Service %s/%s found for IP %s, but it has no selector. Trying pod spec.", svcSpec.SvcNamespace, svcSpec.SvcName, peerIP)
+	} else if err != nil {
+		log.Debug().Err(err).Msgf("Error fetching service spec for IP %s, trying pod spec", peerIP)
+	} else {
+		log.Debug().Msgf("No service found for IP %s, trying pod spec", peerIP)
 	}
 
 	// Try to get Pod info
 	podSpec, err := api.GetPodSpec(peerIP)
-	if err == nil && podSpec != nil && len(podSpec.Pod.Labels) > 0 {
-		log.Debug().Msgf("Using pod selector for peer %s: %v in namespace %s",
-			peerIP, podSpec.Pod.Labels, podSpec.Namespace)
-		return &networkingv1.NetworkPolicyPeer{
-			PodSelector: &metav1.LabelSelector{
-				MatchLabels: podSpec.Pod.Labels,
-			},
-			NamespaceSelector: &metav1.LabelSelector{
-				MatchLabels: map[string]string{
-					"kubernetes.io/metadata.name": podSpec.Namespace,
+	if err == nil && podSpec != nil {
+		// Validate pod has labels before using it
+		if len(podSpec.Pod.Labels) > 0 {
+			log.Debug().Msgf("Found pod %s/%s with labels %v for IP %s",
+				podSpec.Namespace, podSpec.Name, podSpec.Pod.Labels, peerIP)
+
+			return &networkingv1.NetworkPolicyPeer{
+				PodSelector: &metav1.LabelSelector{
+					MatchLabels: podSpec.Pod.Labels,
 				},
-			},
+				NamespaceSelector: &metav1.LabelSelector{
+					MatchLabels: map[string]string{
+						"kubernetes.io/metadata.name": podSpec.Namespace,
+					},
+				},
+			}
+		} else {
+			log.Debug().Msgf("Pod %s/%s found for IP %s but has no labels, falling back to IPBlock",
+				podSpec.Namespace, podSpec.Name, peerIP)
 		}
-	}
-	// If error or no pod found, log it and fall back to IPBlock
-	if err != nil {
-		log.Debug().Err(err).Msgf("Error fetching pod spec for IP %s, falling back to IPBlock.", peerIP)
-	} else if podSpec == nil {
-		log.Debug().Msgf("No pod found for IP %s, falling back to IPBlock.", peerIP)
-	} else { // Pod found but no labels
-		log.Debug().Msgf("Pod %s/%s found for IP %s, but it has no labels. Falling back to IPBlock.", podSpec.Namespace, podSpec.Name, peerIP)
+	} else if err != nil {
+		log.Debug().Err(err).Msgf("Error fetching pod spec for IP %s, falling back to IPBlock", peerIP)
+	} else {
+		log.Debug().Msgf("No pod found for IP %s, falling back to IPBlock", peerIP)
 	}
 
-	// Fall back to IPBlock
-	log.Debug().Msgf("Using IP block for peer %s", peerIP)
-	ipBlock := &networkingv1.IPBlock{
-		CIDR: fmt.Sprintf("%s/32", peerIP),
+	// Fall back to IPBlock for external IPs or unresolvable cluster IPs
+	log.Debug().Msgf("Using IPBlock for peer %s", peerIP)
+	return &networkingv1.NetworkPolicyPeer{
+		IPBlock: &networkingv1.IPBlock{
+			CIDR: fmt.Sprintf("%s/32", peerIP),
+		},
 	}
-	return &networkingv1.NetworkPolicyPeer{IPBlock: ipBlock}
 }
 
 // Helper functions

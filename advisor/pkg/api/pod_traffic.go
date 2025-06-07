@@ -13,15 +13,21 @@ import (
 )
 
 type PodTraffic struct {
-	UUID         string      `yaml:"uuid" json:"uuid"`
-	SrcPodName   string      `yaml:"pod_name" json:"pod_name"`
-	SrcIP        string      `yaml:"pod_ip" json:"pod_ip"`
-	SrcNamespace string      `yaml:"pod_namespace" json:"pod_namespace"`
-	SrcPodPort   string      `yaml:"pod_port" json:"pod_port"`
-	TrafficType  string      `yaml:"traffic_type" json:"traffic_type"`
-	DstIP        string      `yaml:"traffic_in_out_ip" json:"traffic_in_out_ip"`
-	DstPort      string      `yaml:"traffic_in_out_port" json:"traffic_in_out_port"`
-	Protocol     v1.Protocol `yaml:"ip_protocol" json:"ip_protocol"`
+	UUID string `yaml:"uuid" json:"uuid"`
+	// Source pod fields - represent the target pod for which we're generating the policy
+	SrcPodName   string `yaml:"pod_name" json:"pod_name"`           // Name of the target pod
+	SrcIP        string `yaml:"pod_ip" json:"pod_ip"`               // IP of the target pod
+	SrcNamespace string `yaml:"pod_namespace" json:"pod_namespace"` // Namespace of the target pod
+	SrcPodPort   string `yaml:"pod_port" json:"pod_port"`           // Port on the target pod (used for INGRESS rules)
+
+	// Traffic metadata
+	TrafficType string `yaml:"traffic_type" json:"traffic_type"` // "INGRESS" or "EGRESS" relative to the target pod
+
+	// Destination/peer fields - represent the remote entity communicating with the target pod
+	DstIP   string `yaml:"traffic_in_out_ip" json:"traffic_in_out_ip"`     // IP of the peer (external entity)
+	DstPort string `yaml:"traffic_in_out_port" json:"traffic_in_out_port"` // Port on the peer (used for EGRESS rules)
+
+	Protocol v1.Protocol `yaml:"ip_protocol" json:"ip_protocol"` // Network protocol (TCP, UDP, etc.)
 }
 
 type PodDetail struct {
@@ -42,8 +48,8 @@ type SvcDetail struct {
 // Function variables for easier mocking in tests
 var (
 	GetPodTrafficFunc = getRealPodTraffic
-	GetPodSpecFunc = getRealPodSpec
-	GetSvcSpecFunc = getRealSvcSpec
+	GetPodSpecFunc    = getRealPodSpec
+	GetSvcSpecFunc    = getRealSvcSpec
 )
 
 // GetPodTraffic gets pod traffic information

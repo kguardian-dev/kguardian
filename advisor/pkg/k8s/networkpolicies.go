@@ -50,8 +50,9 @@ func transformToNetworkPolicy(pod *corev1.Pod, podTraffic []api.PodTraffic, podD
 
 	for _, traffic := range podTraffic {
 		var err error
-		isIngress := traffic.DstIP == podDetail.PodIP
-		isEgress := traffic.SrcIP == podDetail.PodIP
+		log.Info().Msgf("YOLO: %+v", traffic.TrafficType)
+		isIngress := traffic.TrafficType == "INGRESS"
+		isEgress := traffic.TrafficType == "EGRESS"
 
 		if isIngress {
 			rule, err := processIngressRulesFunc(traffic, config)
@@ -89,13 +90,14 @@ func transformToNetworkPolicy(pod *corev1.Pod, podTraffic []api.PodTraffic, podD
 }
 
 func processIngressRules(traffic api.PodTraffic, config *Config) (*networkingv1.NetworkPolicyIngressRule, error) {
-	peer, err := determinePeerForTrafficFunc(traffic.SrcIP, config)
+	log.Info().Msgf("YOLO: %+v", traffic.DstIP)
+	peer, err := determinePeerForTrafficFunc(traffic.DstIP, config)
 	if err != nil {
-		return nil, fmt.Errorf("error determining peer for ingress traffic from %s: %w", traffic.SrcIP, err)
+		return nil, fmt.Errorf("error determining peer for ingress traffic from %s: %w", traffic.DstIP, err)
 	}
 
 	portInt := 0
-	fmt.Sscanf(traffic.DstPort, "%d", &portInt)
+	fmt.Sscanf(traffic.SrcPodPort, "%d", &portInt)
 	port := intstr.FromInt(portInt)
 	protocol := traffic.Protocol
 
