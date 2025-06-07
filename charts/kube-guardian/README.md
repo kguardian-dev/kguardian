@@ -2,7 +2,7 @@
 
 This chart bootstraps the [Xentra]() controlplane onto a [Kubernetes](http://kubernetes.io) cluster using the [Helm](https://helm.sh) package manager.
 
-![Version: 0.0.24](https://img.shields.io/badge/Version-0.0.24-informational?style=flat-square)
+![Version: 0.0.32](https://img.shields.io/badge/Version-0.0.32-informational?style=flat-square)
 
 ## Overview
 
@@ -121,6 +121,7 @@ The following table lists the configurable parameters of the Xentra chart and th
 | controller.autoscaling.targetCPUUtilizationPercentage | int | `80` |  |
 | controller.excludedNamespaces | list | `["kube-guardian","kube-system"]` | Namespaces to be excluded from monitoring |
 | controller.fullnameOverride | string | `""` |  |
+| controller.ignoreDaemonSet | bool | `true` | Ignore traffic from daemonset pods |
 | controller.image.pullPolicy | string | `"Always"` |  |
 | controller.image.repository | string | `"ghcr.io/xentra-ai/images/guardian-controller"` |  |
 | controller.image.sha | string | `""` | Overrides the image tag. |

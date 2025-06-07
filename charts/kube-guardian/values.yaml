@@ -104,7 +104,7 @@ controller:
   priorityClassName: ""
 
   # -- Namespaces to be excluded from monitoring
-  excludedNamespaces: 
+  excludedNamespaces:
     - kube-guardian
     - kube-system
 
