@@ -77,37 +77,33 @@ int trace_udp_send(struct pt_regs *ctx)
 
     __u64 key = 0;
     __u32 *user_space_inum_ptr = get_user_space_inum_ptr(sk, &key);
-
     if (!user_space_inum_ptr)
         return 0;
 
-    u16 lport, dport;
-
     event.inum = key;
-    bpf_probe_read(&event.saddr, sizeof(event.saddr), &sk->__sk_common.skc_rcv_saddr);
-    bpf_probe_read(&event.daddr, sizeof(event.daddr), &sk->__sk_common.skc_daddr);
+
+
+    event.saddr = BPF_CORE_READ(sk, __sk_common.skc_rcv_saddr);
+    event.daddr = BPF_CORE_READ(sk, __sk_common.skc_daddr);
+
     if (event.daddr == bpf_htonl(0x7F000001) || event.daddr == bpf_htonl(0x00000000))
-    {
         return 0;
-    }
 
-    // if the source or destination IP is in the ignore list, return
+    // Ignore if IP is in ignore list
     if (bpf_map_lookup_elem(&ignore_ips, &event.saddr) || bpf_map_lookup_elem(&ignore_ips, &event.daddr))
-    {
         return 0;
-    }
 
-    // Ignore if source and destination IP are the same
+    // Ignore if source and dest IPs are the same
     if (event.saddr == event.daddr)
-    {
         return 0;
-    }
 
-    bpf_probe_read(&lport, sizeof(lport), &sk->__sk_common.skc_num);
-    bpf_probe_read(&dport, sizeof(dport), &sk->__sk_common.skc_dport);
+    __u16 lport = BPF_CORE_READ(sk, __sk_common.skc_num);
+    __u16 dport = BPF_CORE_READ(sk, __sk_common.skc_dport);
+
     event.kind = 3;
     event.sport = lport;
     event.dport = bpf_ntohs(dport);
+
     bpf_perf_event_output(ctx, &tracept_events, BPF_F_CURRENT_CPU, &event, sizeof(event));
 
     return 0;
