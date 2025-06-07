@@ -73,7 +73,6 @@ spec:
             readOnly: true
           - mountPath: /proc
             name: hostproc
-            readOnly: true
           {{- with .Values.broker.resources }}
             resources:
               {{- toYaml . | nindent 12 }}
