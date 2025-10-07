@@ -7,7 +7,7 @@ toolchain go1.24.4
 require (
 	github.com/cilium/cilium v1.18.2
 	github.com/rs/zerolog v1.34.0
-	github.com/spf13/cobra v1.9.1
+	github.com/spf13/cobra v1.10.1
 	github.com/stretchr/testify v1.11.0
 	k8s.io/api v0.33.3
 	k8s.io/apimachinery v0.33.3
@@ -118,7 +118,7 @@ require (
 	github.com/spf13/afero v1.14.0 // indirect
 	github.com/spf13/cast v1.9.2 // indirect
 	github.com/spf13/jwalterweatherman v1.1.0 // indirect
-	github.com/spf13/pflag v1.0.7 // indirect
+	github.com/spf13/pflag v1.0.9 // indirect
 	github.com/spf13/viper v1.20.1 // indirect
 	github.com/subosito/gotenv v1.6.0 // indirect
 	github.com/tklauser/go-sysconf v0.3.11 // indirect
