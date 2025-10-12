@@ -7,6 +7,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/xentra-ai/advisor/pkg/api"
 	"github.com/xentra-ai/advisor/pkg/common"
+	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/yaml"
@@ -44,6 +45,22 @@ func (m *mockPolicyGenerator) Generate(podName string, podTraffic []api.PodTraff
 	}, nil
 }
 func (m *mockPolicyGenerator) GetType() PolicyType { return m.policyType }
+
+func newTestPod() *corev1.Pod {
+	return &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-pod",
+			Namespace: "default",
+			Labels: map[string]string{
+				"app": "test-pod",
+			},
+			UID: "12345",
+		},
+		Status: corev1.PodStatus{
+			PodIP: "192.168.1.10",
+		},
+	}
+}
 
 // --- Test Cases ---
 
@@ -94,7 +111,7 @@ func TestGeneratePolicy_Success(t *testing.T) {
 	service.RegisterGenerator(mockGen)
 	// --- End Mocks ---
 
-	output, err := service.GeneratePolicy("test-pod", StandardPolicy)
+	output, err := service.GeneratePolicy(newTestPod(), StandardPolicy)
 
 	assert.NoError(t, err)
 	assert.NotNil(t, output)
@@ -128,7 +145,7 @@ func TestGeneratePolicy_ApiErrors(t *testing.T) {
 	api.GetPodTrafficFunc = func(podName string) ([]api.PodTraffic, error) {
 		return nil, assert.AnError
 	}
-	_, err := service.GeneratePolicy("test-pod", StandardPolicy)
+	_, err := service.GeneratePolicy(newTestPod(), StandardPolicy)
 	assert.Error(t, err)
 
 	// Restore GetPodTraffic, test GetPodSpec error
@@ -138,24 +155,25 @@ func TestGeneratePolicy_ApiErrors(t *testing.T) {
 	api.GetPodSpecFunc = func(ip string) (*api.PodDetail, error) {
 		return nil, assert.AnError
 	}
-	_, err = service.GeneratePolicy("test-pod", StandardPolicy)
-	assert.Error(t, err)
+	output, err := service.GeneratePolicy(newTestPod(), StandardPolicy)
+	assert.NoError(t, err)
+	assert.NotNil(t, output)
 
 	// Test PodDetail not found
 	api.GetPodSpecFunc = func(ip string) (*api.PodDetail, error) {
 		return nil, nil // Not found, not an error
 	}
-	_, err = service.GeneratePolicy("test-pod", StandardPolicy)
-	assert.Error(t, err)
-	assert.Contains(t, err.Error(), "pod details not found")
+	output, err = service.GeneratePolicy(newTestPod(), StandardPolicy)
+	assert.NoError(t, err)
+	assert.NotNil(t, output)
 
 	// Test No Traffic Data
 	api.GetPodTrafficFunc = func(podName string) ([]api.PodTraffic, error) {
 		return []api.PodTraffic{}, nil // Empty slice
 	}
-	_, err = service.GeneratePolicy("test-pod", StandardPolicy)
-	assert.Error(t, err)
-	assert.Contains(t, err.Error(), "no traffic data found")
+	output, err = service.GeneratePolicy(newTestPod(), StandardPolicy)
+	assert.NoError(t, err)
+	assert.NotNil(t, output)
 }
 
 func TestGeneratePolicy_GeneratorError(t *testing.T) {
@@ -181,7 +199,7 @@ func TestGeneratePolicy_GeneratorError(t *testing.T) {
 	service.RegisterGenerator(mockGenError)
 	// --- End Mocks ---
 
-	_, err := service.GeneratePolicy("test-pod", StandardPolicy)
+	_, err := service.GeneratePolicy(newTestPod(), StandardPolicy)
 	assert.Error(t, err)
 	assert.Equal(t, assert.AnError, err)
 }
@@ -208,14 +226,14 @@ func TestGeneratePolicy_NoGeneratorFallback(t *testing.T) {
 	// --- End Mocks ---
 
 	// Request Standard, should fall back to default (Cilium)
-	output, err := service.GeneratePolicy("test-pod", StandardPolicy)
+	output, err := service.GeneratePolicy(newTestPod(), StandardPolicy)
 	assert.NoError(t, err)
 	assert.NotNil(t, output)
 	assert.Equal(t, CiliumPolicy, output.Type) // Check it used the fallback
 
 	// Test case where NO generator is available (even default)
 	serviceNoGen := NewPolicyService(&mockConfigProvider{}, StandardPolicy)
-	_, err = serviceNoGen.GeneratePolicy("test-pod", StandardPolicy)
+	_, err = serviceNoGen.GeneratePolicy(newTestPod(), StandardPolicy)
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "no generator available")
 }

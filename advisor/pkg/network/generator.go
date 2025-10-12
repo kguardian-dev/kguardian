@@ -1,11 +1,13 @@
 package network
 
 import (
+	"errors"
 	"fmt"
 
 	log "github.com/rs/zerolog/log"
 	api "github.com/xentra-ai/advisor/pkg/api"
 	"github.com/xentra-ai/advisor/pkg/common"
+	corev1 "k8s.io/api/core/v1"
 	"sigs.k8s.io/yaml"
 )
 
@@ -31,41 +33,59 @@ func (s *PolicyService) RegisterGenerator(generator PolicyGenerator) {
 }
 
 // GeneratePolicy generates a network policy for a pod
-func (s *PolicyService) GeneratePolicy(podName string, policyType PolicyType) (*PolicyOutput, error) {
+func (s *PolicyService) GeneratePolicy(pod *corev1.Pod, policyType PolicyType) (*PolicyOutput, error) {
+	if pod == nil {
+		return nil, fmt.Errorf("pod reference is nil")
+	}
+
 	// Get the pod traffic data
-	podTraffic, err := api.GetPodTraffic(podName)
+	podTraffic, err := api.GetPodTraffic(pod.Name)
 	if err != nil {
-		log.Debug().Err(err).Msgf("Error retrieving %s pod traffic", podName)
-		return nil, err
+		if errors.Is(err, api.ErrNoPodTraffic) {
+			log.Info().Msgf("No traffic data available for pod %s; generating baseline policy", pod.Name)
+			podTraffic = nil
+		} else {
+			log.Debug().Err(err).Msgf("Error retrieving %s pod traffic", pod.Name)
+			return nil, err
+		}
 	}
 
-	if len(podTraffic) == 0 {
-		return nil, fmt.Errorf("no traffic data found for pod %s", podName)
-	}
-
-	// Use the first traffic record's source IP to get pod details.
-	// This assumes all traffic records for a pod will have the same relevant source/dest IP for spec lookup.
-	lookupIP := ""
+	var lookupIP string
 	if len(podTraffic) > 0 {
 		if podTraffic[0].SrcIP != "" {
 			lookupIP = podTraffic[0].SrcIP
-		} else if podTraffic[0].DstIP != "" { // Fallback if SrcIP is empty for some reason
+		} else if podTraffic[0].DstIP != "" {
 			lookupIP = podTraffic[0].DstIP
 		}
 	}
+
 	if lookupIP == "" {
-		return nil, fmt.Errorf("could not determine IP for pod spec lookup for pod %s", podName)
+		lookupIP = pod.Status.PodIP
 	}
 
 	// Get the pod details
-	podDetail, err := api.GetPodSpec(lookupIP)
-	if err != nil {
-		log.Error().Err(err).Msgf("Error retrieving pod spec using IP %s for pod %s", lookupIP, podName)
-		return nil, err
+	var podDetail *api.PodDetail
+	if lookupIP != "" {
+		var detailErr error
+		podDetail, detailErr = api.GetPodSpec(lookupIP)
+		if detailErr != nil {
+			log.Debug().Err(detailErr).Msgf("Falling back to live pod metadata for %s", pod.Name)
+		}
+	} else {
+		log.Debug().Msgf("No lookup IP available for pod %s; using live pod metadata", pod.Name)
 	}
 
 	if podDetail == nil {
-		return nil, fmt.Errorf("pod details not found using IP %s for pod %s", lookupIP, podName)
+		if pod.Status.PodIP == "" {
+			return nil, fmt.Errorf("pod details unavailable for %s and pod IP is empty", pod.Name)
+		}
+		podDetail = &api.PodDetail{
+			UUID:      string(pod.UID),
+			PodIP:     pod.Status.PodIP,
+			Name:      pod.Name,
+			Namespace: pod.Namespace,
+			Pod:       *pod,
+		}
 	}
 
 	// Select the appropriate generator
@@ -80,9 +100,9 @@ func (s *PolicyService) GeneratePolicy(podName string, policyType PolicyType) (*
 	}
 
 	// Generate the policy
-	policy, err := generator.Generate(podName, podTraffic, podDetail)
+	policy, err := generator.Generate(pod.Name, podTraffic, podDetail)
 	if err != nil {
-		log.Error().Err(err).Msgf("Error generating %s policy for pod %s", policyType, podName)
+		log.Error().Err(err).Msgf("Error generating %s policy for pod %s", policyType, pod.Name)
 		return nil, err
 	}
 
@@ -147,13 +167,13 @@ func (s *PolicyService) InitOutputDirectory() error {
 }
 
 // GenerateAndHandlePolicy generates and handles a policy in a single call
-func (s *PolicyService) GenerateAndHandlePolicy(podName string, policyType PolicyType) error {
-	output, err := s.GeneratePolicy(podName, policyType)
+func (s *PolicyService) GenerateAndHandlePolicy(pod *corev1.Pod, policyType PolicyType) error {
+	output, err := s.GeneratePolicy(pod, policyType)
 	if err != nil {
 		return err
 	}
 	if output == nil { // Handle case where policy generation results in nil output (e.g., no traffic)
-		log.Info().Msgf("No policy generated for pod %s (policy type: %s), likely due to no traffic data or other issue.", podName, policyType)
+		log.Info().Msgf("No policy generated for pod %s (policy type: %s), likely due to no traffic data or other issue.", pod.Name, policyType)
 		return nil
 	}
 
@@ -161,12 +181,12 @@ func (s *PolicyService) GenerateAndHandlePolicy(podName string, policyType Polic
 }
 
 // BatchGenerateAndHandlePolicies generates and handles policies for multiple pods
-func (s *PolicyService) BatchGenerateAndHandlePolicies(podNames []string, policyType PolicyType) error {
+func (s *PolicyService) BatchGenerateAndHandlePolicies(pods []corev1.Pod, policyType PolicyType) error {
 	var firstError error // Store the first error encountered
 
-	for _, podName := range podNames {
-		if err := s.GenerateAndHandlePolicy(podName, policyType); err != nil {
-			log.Error().Err(err).Msgf("Error generating and handling policy for pod %s", podName)
+	for i := range pods {
+		if err := s.GenerateAndHandlePolicy(&pods[i], policyType); err != nil {
+			log.Error().Err(err).Msgf("Error generating and handling policy for pod %s", pods[i].Name)
 			// Store the first error but continue processing other pods
 			if firstError == nil {
 				firstError = err

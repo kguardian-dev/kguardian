@@ -2,6 +2,7 @@ package api
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -52,6 +53,15 @@ var (
 	GetSvcSpecFunc    = getRealSvcSpec
 )
 
+var (
+	defaultHTTPClient = &http.Client{
+		Timeout: 10 * time.Second,
+	}
+
+	// ErrNoPodTraffic indicates that no traffic data was available for the requested pod.
+	ErrNoPodTraffic = errors.New("no pod traffic found in broker datastore")
+)
+
 // GetPodTraffic gets pod traffic information
 func GetPodTraffic(podName string) ([]PodTraffic, error) {
 	return GetPodTrafficFunc(podName)
@@ -69,12 +79,11 @@ func GetSvcSpec(svcIP string) (*SvcDetail, error) {
 
 // Real implementations
 func getRealPodTraffic(podName string) ([]PodTraffic, error) {
-	time.Sleep(3 * time.Second)
 	// Specify the URL of the REST API endpoint you want to invoke.
 	apiURL := "http://127.0.0.1:9090/pod/traffic/" + podName
 
 	// Send an HTTP GET request to the API endpoint.
-	resp, err := http.Get(apiURL)
+	resp, err := defaultHTTPClient.Get(apiURL)
 	if err != nil {
 		log.Error().Err(err).Msg("GetPodTraffic: Error making GET request")
 		return nil, err
@@ -100,7 +109,7 @@ func getRealPodTraffic(podName string) ([]PodTraffic, error) {
 
 	// If no pod traffic is found, return err
 	if len(podTraffic) == 0 {
-		return nil, fmt.Errorf("GetPodTraffic: No pod traffic found in database")
+		return nil, ErrNoPodTraffic
 	}
 
 	return podTraffic, nil
@@ -112,7 +121,7 @@ func getRealPodSpec(ip string) (*PodDetail, error) {
 	apiURL := "http://127.0.0.1:9090/pod/ip/" + ip
 
 	// Send an HTTP GET request to the API endpoint.
-	resp, err := http.Get(apiURL)
+	resp, err := defaultHTTPClient.Get(apiURL)
 	if err != nil {
 		log.Error().Err(err).Msg("Error making GET request")
 		return nil, err
@@ -146,7 +155,7 @@ func getRealSvcSpec(svcIp string) (*SvcDetail, error) {
 	apiURL := "http://127.0.0.1:9090/svc/ip/" + svcIp
 
 	// Send an HTTP GET request to the API endpoint.
-	resp, err := http.Get(apiURL)
+	resp, err := defaultHTTPClient.Get(apiURL)
 	if err != nil {
 		log.Error().Err(err).Msg("Error making GET request")
 		return nil, err

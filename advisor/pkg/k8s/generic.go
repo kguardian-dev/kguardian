@@ -24,6 +24,9 @@ type GenerateOptions struct {
 	Mode      ModeType
 	PodName   string // Used if Mode is SinglePod
 	Namespace string // Used if Mode is AllPodsInNamespace or SinglePod
+	OutputDir string
+	// DefaultAction is used by generators that need an action parameter (e.g., seccomp)
+	DefaultAction string
 }
 
 // Exportable function variables for testing - REMOVED

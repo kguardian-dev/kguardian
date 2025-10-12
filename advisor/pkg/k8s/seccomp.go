@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	log "github.com/rs/zerolog/log"
 	api "github.com/xentra-ai/advisor/pkg/api"
@@ -23,31 +24,34 @@ type Rule struct {
 	Action string   `json:"action"`
 }
 
-// ProfileOptions contains configuration for profile generation
-type ProfileOptions struct {
-	OutputDir     string
-	DefaultAction string
-	Architectures []string
-}
-
 func GenerateSeccompProfile(options GenerateOptions, config *Config) {
 
-	var Architectures = map[string][]string{
+	var architectures = map[string][]string{
 		"x86_64": {"SCMP_ARCH_X86_64"},
-		"ARM64":  {"SCMP_ARCH_ARM64"},
+		"arm64":  {"SCMP_ARCH_ARM64"},
 	}
 
-	// Default profile options
-	profileOpts := ProfileOptions{
-		OutputDir:     "seccomp-profiles",
-		DefaultAction: "SCMP_ACT_ERRNO",
+	defaultAction := options.DefaultAction
+	if defaultAction == "" {
+		defaultAction = "SCMP_ACT_ERRNO"
+	}
+
+	outputDir := options.OutputDir
+	if outputDir == "" && config != nil {
+		outputDir = config.OutputDir
+	}
+	if outputDir == "" {
+		outputDir = "seccomp-profiles"
+	}
+	if config != nil {
+		config.OutputDir = outputDir
 	}
 
 	// Fetch pods based on options
 	pods := GetResource(options, config)
 
 	// Create output directory if it doesn't exist
-	if err := os.MkdirAll(profileOpts.OutputDir, 0755); err != nil {
+	if err := os.MkdirAll(outputDir, 0755); err != nil {
 		log.Fatal().Err(err).Msgf("failed to create output directory")
 	}
 
@@ -59,15 +63,27 @@ func GenerateSeccompProfile(options GenerateOptions, config *Config) {
 			continue
 		}
 
+		archKey := strings.ToLower(podSysCalls.Arch)
+		archList, ok := architectures[archKey]
+		if !ok || len(archList) == 0 {
+			log.Warn().Msgf("Unknown architecture %q for pod %s, defaulting to SCMP_ARCH_X86_64", podSysCalls.Arch, pod.Name)
+			archList = []string{"SCMP_ARCH_X86_64"}
+		}
+
 		profile := SeccompProfile{
-			DefaultAction: profileOpts.DefaultAction,
-			Architectures: Architectures[podSysCalls.Arch],
+			DefaultAction: defaultAction,
+			Architectures: archList,
 			Syscalls: []Rule{
 				{
 					Names:  podSysCalls.Syscalls,
 					Action: "SCMP_ACT_ALLOW",
 				},
 			},
+		}
+
+		if err := ValidateProfile(profile); err != nil {
+			log.Error().Err(err).Msgf("Generated profile for pod %s failed validation", pod.Name)
+			continue
 		}
 
 		// Generate profile JSON
@@ -78,7 +94,7 @@ func GenerateSeccompProfile(options GenerateOptions, config *Config) {
 		}
 
 		// Write profile to file
-		filename := filepath.Join(profileOpts.OutputDir, fmt.Sprintf("%s-seccomp.json", pod.Name))
+		filename := filepath.Join(outputDir, fmt.Sprintf("%s-seccomp.json", pod.Name))
 		if err := os.WriteFile(filename, profileJSON, 0644); err != nil {
 			log.Error().Err(err).Msgf("Failed to write profile for pod %s", pod.Name)
 			continue

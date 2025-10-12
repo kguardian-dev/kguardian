@@ -51,7 +51,10 @@ var seccompCmd = &cobra.Command{
 			log.Fatal().Err(err).Msg("Failed to get namespace")
 		}
 
-		options := k8s.GenerateOptions{}
+		options := k8s.GenerateOptions{
+			OutputDir:     outputDir,
+			DefaultAction: defaultAction,
+		}
 
 		if allNamespaces {
 			options.Mode = k8s.AllPodsInAllNamespaces
@@ -67,6 +70,11 @@ var seccompCmd = &cobra.Command{
 			options.Mode = k8s.SinglePod
 			options.PodName = args[0]
 			options.Namespace = namespace
+		}
+
+		// Ensure config output directory mirrors requested option
+		if options.OutputDir != "" {
+			config.OutputDir = options.OutputDir
 		}
 
 		// Set up port forwarding

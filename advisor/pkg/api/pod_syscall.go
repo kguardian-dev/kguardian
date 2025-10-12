@@ -6,7 +6,6 @@ import (
 	"io"
 	"net/http"
 	"strings"
-	"time"
 
 	"github.com/rs/zerolog/log"
 )
@@ -24,10 +23,9 @@ type PodSysCallResponse struct {
 }
 
 func GetPodSysCall(podName string) (PodSysCall, error) {
-	time.Sleep(3 * time.Second)
 	apiURL := "http://127.0.0.1:9090/pod/syscalls/" + podName
 
-	resp, err := http.Get(apiURL)
+	resp, err := defaultHTTPClient.Get(apiURL)
 	if err != nil {
 		log.Error().Err(err).Msg("GetPodSysCall: Error making GET request")
 		return PodSysCall{}, err

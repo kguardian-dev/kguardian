@@ -128,7 +128,9 @@ var networkPolicyCmd = &cobra.Command{
 				log.Error().Err(err).Msg("Error getting pods in all namespaces")
 				os.Exit(1)
 			}
-			processPods(pods, policyService, policyServiceType)
+			if err := policyService.BatchGenerateAndHandlePolicies(pods, policyServiceType); err != nil {
+				log.Error().Err(err).Msg("Completed with errors while generating policies for all namespaces")
+			}
 		} else if allInNamespace {
 			// Determine namespace (use targetNamespace which was resolved earlier)
 			log.Info().Msgf("Generating policies for all pods in namespace: %s", targetNamespace)
@@ -138,7 +140,9 @@ var networkPolicyCmd = &cobra.Command{
 				log.Error().Err(err).Msgf("Error getting pods in namespace %s", targetNamespace)
 				os.Exit(1)
 			}
-			processPods(pods, policyService, policyServiceType)
+			if err := policyService.BatchGenerateAndHandlePolicies(pods, policyServiceType); err != nil {
+				log.Error().Err(err).Msgf("Completed with errors while generating policies in namespace %s", targetNamespace)
+			}
 		} else {
 			// Check if a pod name was provided
 			if len(args) != 1 {
@@ -149,23 +153,21 @@ var networkPolicyCmd = &cobra.Command{
 
 			podName := args[0]
 			log.Info().Msgf("Generating policy for pod %s in namespace %s", podName, targetNamespace)
-			if err := policyService.GenerateAndHandlePolicy(podName, policyServiceType); err != nil {
+
+			podCtx, podCancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer podCancel()
+			pod, err := k8s.GetPod(podCtx, config, targetNamespace, podName)
+			if err != nil {
+				log.Error().Err(err).Msgf("Error retrieving pod %s in namespace %s", podName, targetNamespace)
+				os.Exit(1)
+			}
+
+			if err := policyService.GenerateAndHandlePolicy(pod, policyServiceType); err != nil {
 				log.Error().Err(err).Msgf("Error generating policy for pod %s", podName)
 				os.Exit(1)
 			}
 		}
 	},
-}
-
-// processPods processes a list of pods and generates policies for them
-func processPods(pods []corev1.Pod, policyService *network.PolicyService, policyType network.PolicyType) {
-	podNames := make([]string, len(pods))
-	for i, pod := range pods {
-		podNames[i] = pod.Name
-	}
-	if err := policyService.BatchGenerateAndHandlePolicies(podNames, policyType); err != nil {
-		log.Error().Err(err).Msg("Error generating policies for pods")
-	}
 }
 
 // createPolicyService creates and initializes a policy service
