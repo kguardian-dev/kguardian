@@ -3,6 +3,7 @@
 #include <bpf/bpf_core_read.h>
 #include <bpf/bpf_endian.h>
 #include <bpf/bpf_tracing.h>
+#include "helper.h"
 
 struct
 {
@@ -17,13 +18,6 @@ struct data_t
     __u64 sysnbr;
 };
 
-struct
-{
-    __uint(type, BPF_MAP_TYPE_HASH);
-    __uint(max_entries, 10240);
-    __type(key, u64);
-    __type(value, u32);
-} inode_num SEC(".maps");
 
 SEC("tracepoint/raw_syscalls/sys_enter")
 int trace_execve(struct trace_event_raw_sys_enter *ctx)

@@ -1,5 +1,6 @@
 use crate::network::network_probe::NetworkProbeSkelBuilder;
 use crate::syscall::{sycallprobe::SyscallSkelBuilder, SyscallEventData};
+use crate::http::{http_probe::HttpSkelBuilder, HttpEventData};
 use crate::{error::Error, network::NetworkEventData};
 use anyhow::Result;
 use libbpf_rs::skel::{OpenSkel, Skel, SkelBuilder};
@@ -13,6 +14,7 @@ use tracing::info;
 pub fn ebpf_handle(
     network_event_sender: Sender<NetworkEventData>,
     syscall_event_sender: Sender<SyscallEventData>,
+    http_event_sender: Sender<HttpEventData>,
     mut rx: Receiver<u64>,
     mut ignore_ips: Receiver<String>,
     ignore_daemonset_traffic: bool,
@@ -25,11 +27,16 @@ pub fn ebpf_handle(
         network_sk.attach().unwrap();
 
         let mut open_object = MaybeUninit::uninit();
-
         let skel_builder = SyscallSkelBuilder::default();
         let syscall_probe_skel = skel_builder.open(&mut open_object).unwrap();
         let mut syscall_sk = syscall_probe_skel.load().unwrap();
         syscall_sk.attach().unwrap();
+
+        let mut open_object = MaybeUninit::uninit();
+        let skel_builder = HttpSkelBuilder::default();
+        let http_probe_skel = skel_builder.open(&mut open_object).unwrap();
+        let mut http_sk = http_probe_skel.load().unwrap();
+        http_sk.attach().unwrap();
 
         let network_perf = PerfBufferBuilder::new(&network_sk.maps.tracept_events)
             .sample_cb(move |_cpu, data: &[u8]| {
@@ -56,6 +63,19 @@ pub fn ebpf_handle(
             .build()
             .unwrap();
 
+        let http_perf = PerfBufferBuilder::new(&http_sk.maps.http_events)
+            .sample_cb(move |_cpu: i32, data: &[u8]| {
+                let http_event_data: HttpEventData =
+                    unsafe { *(data.as_ptr() as *const HttpEventData) };
+                if let Err(e) = http_event_sender.blocking_send(http_event_data) {
+                    //eprintln!("Failed to send Syscall event: {:?}", e);
+                    //TODO: If SendError, possibly the receiver is closed, restart the controller
+                }
+            })
+            .build()
+            .unwrap();
+
+
         loop {
             network_perf
                 .poll(std::time::Duration::from_millis(100))
@@ -63,6 +83,11 @@ pub fn ebpf_handle(
             syscall_perf
                 .poll(std::time::Duration::from_millis(100))
                 .unwrap();
+        
+            http_perf
+                .poll(std::time::Duration::from_millis(100))
+                .unwrap();
+
 
             // Process any incoming messages from the pod watcher
             if let Ok(inum) = rx.try_recv() {
@@ -72,6 +97,11 @@ pub fn ebpf_handle(
                     .update(&inum.to_ne_bytes(), &1_u32.to_ne_bytes(), MapFlags::ANY)
                     .unwrap();
                 syscall_sk
+                    .maps
+                    .inode_num
+                    .update(&inum.to_ne_bytes(), &1_u32.to_ne_bytes(), MapFlags::ANY)
+                    .unwrap();
+                http_sk
                     .maps
                     .inode_num
                     .update(&inum.to_ne_bytes(), &1_u32.to_ne_bytes(), MapFlags::ANY)

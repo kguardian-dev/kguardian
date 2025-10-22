@@ -1,10 +1,12 @@
 pub mod network;
 pub mod syscall;
+pub mod http;
 
 pub mod error;
 pub mod pod_watcher;
 pub mod service_watcher;
 use error::*;
+
 
 pub mod models;
 use models::*;

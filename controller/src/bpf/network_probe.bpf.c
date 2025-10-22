@@ -3,6 +3,8 @@
 #include <bpf/bpf_helpers.h>
 #include <bpf/bpf_endian.h>
 #include <bpf/bpf_tracing.h>
+#include "helper.h"
+
 #define IPV4_ADDR_LEN 4
 #define IPV6_ADDR_LEN 16
 
@@ -22,14 +24,6 @@ struct
     __uint(key_size, sizeof(u32));
     __uint(value_size, sizeof(u32));
 } tracept_events SEC(".maps");
-
-struct
-{
-    __uint(type, BPF_MAP_TYPE_HASH);
-    __uint(max_entries, 10240);
-    __type(key, u64);
-    __type(value, u32);
-} inode_num SEC(".maps");
 
 struct
 {
