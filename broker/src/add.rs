@@ -1,4 +1,4 @@
-use crate::{schema, PodDetail, PodInputSyscalls, PodSyscalls, PodTraffic, SvcDetail};
+use crate::{schema, PodDetail, PodInputSyscalls, PodSyscalls, PodTraffic, SvcDetail, HttpPodTraffic};
 use actix_web::{post, web, Error, HttpResponse};
 use diesel::pg::PgConnection;
 use diesel::r2d2::{self, ConnectionManager};
@@ -84,6 +84,65 @@ impl PodTraffic {
         Ok(row)
     }
 }
+
+#[post("/pod/l7traffic")]
+pub async fn add_pod_http_traffic(
+    pool: web::Data<DbPool>,
+    form: web::Json<HttpPodTraffic>,
+) -> Result<HttpResponse, Error> {
+    let pods = web::block(move || {
+        let mut conn = pool.get()?;
+        create_pod_http_traffic(&mut conn, form)
+    })
+    .await?
+    .map_err(actix_web::error::ErrorInternalServerError)?;
+
+    Ok(HttpResponse::Ok().json(pods))
+}
+
+pub fn create_pod_http_traffic(
+    conn: &mut PgConnection,
+    w: web::Json<HttpPodTraffic>,
+) -> Result<HttpPodTraffic, DbError> {
+    use schema::pod_http_traffic::dsl::*;
+    debug!(
+        "storing the pod details {:?} into pod_http_traffic table",
+        w.uuid
+    );
+    if w.get_row(conn)?.is_none() {
+        info!("Insert pod {:?}, in pod_http_traffic table", w.uuid);
+        let _ = diesel::insert_into(pod_http_traffic)
+            .values(&*w)
+            .execute(conn)
+            .expect("Error saving data into pod_http_traffic");
+
+        debug!("Success: pod {:?} inserted in pod_http_traffic table", w.uuid);
+    } else {
+        debug!("Data already exists");
+    }
+    Ok(w.0)
+}
+impl HttpPodTraffic {
+    pub fn get_row(&self, conn: &mut PgConnection) -> Result<Option<HttpPodTraffic>, DbError> {
+        use schema::pod_http_traffic::dsl::*;
+
+        debug!(
+            "pod_ip {:?}\n pod_port {:?}\n pod_trafic_type {:?}\n traffic_in_out_ip {:?}\n traffic_in_out_port {:?}\n http_path {:?}\n_",
+            &self.pod_ip, &self.pod_port,&self.traffic_type,&self.traffic_in_out_ip,&self.traffic_in_out_port,&self.http_path
+        );
+        let row = pod_http_traffic
+            .filter(pod_ip.eq(&self.pod_ip))
+            .filter(pod_port.eq(&self.pod_port))
+            .filter(traffic_type.eq(&self.traffic_type))
+            .filter(traffic_in_out_ip.eq(&self.traffic_in_out_ip))
+            .filter(traffic_in_out_port.eq(&self.traffic_in_out_port))
+            .filter(http_path.eq(&self.http_path))
+            .first::<HttpPodTraffic>(conn)
+            .optional()?;
+        Ok(row)
+    }
+}
+
 
 #[post("/pod/spec")]
 pub async fn add_pod_details(

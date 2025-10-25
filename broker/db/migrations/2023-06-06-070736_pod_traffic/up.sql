@@ -12,6 +12,22 @@ CREATE TABLE pod_traffic (
   time_stamp TIMESTAMP NOT NULL
 );
 
+
+CREATE TABLE pod_http_traffic (
+  uuid VARCHAR PRIMARY KEY,
+  pod_name VARCHAR,
+  pod_namespace VARCHAR,
+  pod_ip VARCHAR,
+  pod_port VARCHAR,
+  ip_protocol VARCHAR,
+  http_path VARCHAR,
+  http_method VARCHAR,
+  traffic_type VARCHAR,
+  traffic_in_out_ip VARCHAR,
+  traffic_in_out_port VARCHAR,
+  time_stamp TIMESTAMP NOT NULL
+);
+
 -- Your SQL goes here
 CREATE TABLE pod_details (
   pod_name VARCHAR PRIMARY KEY,

@@ -3,7 +3,7 @@ mod error;
 mod get;
 mod telemetry;
 mod types;
-pub use add::{add_pod_details, add_pods, add_pods_syscalls, add_svc_details};
+pub use add::{add_pod_details, add_pods, add_pods_syscalls, add_svc_details, add_pod_http_traffic};
 pub use error::*;
 pub use telemetry::*;
 pub use types::*;

@@ -1,0 +1,35 @@
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: grpc-ingress-egress
+  namespace: default
+spec:
+  endpointSelector:
+    matchLabels:
+      app: backend     # Apply to backend pods
+  ingress:
+    - fromEndpoints:
+        - matchLabels:
+            app: frontend
+      toPorts:
+        - ports:
+            - port: "50051"
+              protocol: TCP
+          rules:
+            http:
+              # Allow only gRPC method calls on MyService/MyMethod
+              - method: POST
+                path: "/my.package.MyService/MyMethod"
+  egress:
+    - toEndpoints:
+        - matchLabels:
+            app: database
+      toPorts:
+        - ports:
+            - port: "50052"
+              protocol: TCP
+          rules:
+            http:
+              # Allow only gRPC method calls on DbService/Query
+              - method: POST
+                path: "/db.package.DbService/Query"

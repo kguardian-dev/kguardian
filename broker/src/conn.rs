@@ -1,5 +1,3 @@
-extern crate dotenv;
-
 use diesel::pg::PgConnection;
 use diesel::r2d2::ConnectionManager;
 use dotenv::dotenv;

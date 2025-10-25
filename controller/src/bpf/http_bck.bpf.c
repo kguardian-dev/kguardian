@@ -4,49 +4,16 @@
 #include <bpf/bpf_core_read.h>
 #include "helper.h"
 
-#ifndef bpf_ntohs
-#define bpf_ntohs(x) __builtin_bswap16(x)
-#endif
-#ifndef bpf_htons
-#define bpf_htons(x) __builtin_bswap16(x)
-#endif
-
 char LICENSE[] SEC("license") = "Dual BSD/GPL";
 
-/* Reduce stack usage: shrink capture size to fit BPF stack.
- * If you need larger captures, use a per-cpu array map to hold buffers.
- */
-#define MAX_HTTP_DATA_LEN 128
+#define MAX_HTTP_DATA_LEN 256
 #define MAX_HTTP_PATH_LEN 128
-
-struct conn_info {
-    __u32 saddr;
-    __u32 daddr;
-    __u16 sport;
-    __u16 dport;
-     __u64 inum;           // namespace inum
-};
-
-struct write_args_t {
-    __u64 buf_addr;
-    __u32 fd;
-};
-
-struct {
-    __uint(type, BPF_MAP_TYPE_HASH);
-    __uint(max_entries, 1024);
-    __type(key, __u64);
-    __type(value, struct write_args_t);
-} write_args SEC(".maps");
-
-
-
+#define MAX_BUF_SIZE 256
 
 struct event_t
 {
     __u64 inum;               // net namespace inum
     __u32 saddr;              // peer IPv4 in network byte order
-    __u32 daddr;
     __u16 sport;              // peer port in network byte order
     __u16 dport;              // local/host port in network byte order (ADDED)
     u8 is_request;
@@ -120,7 +87,7 @@ static __always_inline int is_http_data(char *data, size_t len)
         (len >= 4 && data[0] == 'P' && data[1] == 'U' && data[2] == 'T' && data[3] == ' ') ||
         (len >= 4 && data[0] == 'H' && data[1] == 'E' && data[2] == 'A' && data[3] == 'D') ||
         (len >= 5 && data[0] == 'P' && data[1] == 'A' && data[2] == 'T' && data[3] == 'C' && data[4] == 'H') ||
-        (len >= 7 && data[0] == 'D' && data[1] == 'E' && data[2] == 'L' && data[3] == 'E' &&
+        (len >= 7 && data[0] == 'D' && data[1] == 'E' && data[2] == 'L' && data[3] == 'E' && 
          data[4] == 'T' && data[5] == 'E' && data[6] == ' ') ||
         (len >= 8 && data[0] == 'O' && data[1] == 'P' && data[2] == 'T' && data[3] == 'I' &&
          data[4] == 'O' && data[5] == 'N' && data[6] == 'S' && data[7] == ' '))
@@ -129,7 +96,7 @@ static __always_inline int is_http_data(char *data, size_t len)
     }
 
     // Check for HTTP response
-    if (len >= 8 && data[0] == 'H' && data[1] == 'T' && data[2] == 'T' && data[3] == 'P' &&
+    if (len >= 8 && data[0] == 'H' && data[1] == 'T' && data[2] == 'T' && data[3] == 'P' && 
         data[4] == '/' && data[5] == '1' && data[6] == '.')
     {
         return 2; // HTTP response
@@ -144,7 +111,7 @@ static __always_inline int check_target_namespace()
         return 0;
 
     __u64 net_ns = BPF_CORE_READ(task, nsproxy, net_ns, ns.inum);
-
+    
     // Check if this net namespace exists in the inode_num map
     u32 *exists = bpf_map_lookup_elem(&inode_num, &net_ns);
     return (exists != NULL) ? 1 : 0;
@@ -161,10 +128,10 @@ int accept4_enter(struct pt_regs *ctx)
     u64 pid_tgid = bpf_get_current_pid_tgid();
     __u8 one = 1;
     bpf_map_update_elem(&accept_pending, &pid_tgid, &one, BPF_ANY);
-
+    
     u32 pid = pid_tgid >> 32;
     bpf_map_update_elem(&target_namespace_pids, &pid, &one, BPF_ANY);
-
+    
     bpf_printk("accept4_enter: marked pid=%d\n", pid);
     return 0;
 }
@@ -202,7 +169,7 @@ int accept4_exit(struct pt_regs *ctx)
 }
 
 // Generic helper to handle recv entry
-static __always_inline int handle_recv_entry(struct pt_regs *ctx, int fd, void *buf,int is_read)
+static __always_inline int handle_recv_entry(struct pt_regs *ctx, int fd, void *buf, int is_read)
 {
     u64 pid_tgid = bpf_get_current_pid_tgid();
     __u32 pid = (u32)(pid_tgid >> 32);
@@ -221,7 +188,7 @@ static __always_inline int handle_recv_entry(struct pt_regs *ctx, int fd, void *
     key.fd = (__u32)fd;
 
     __u8 *exists = bpf_map_lookup_elem(&active_app_sockets, &key);
-
+    
     if (!exists)
         return 0;
 
@@ -294,7 +261,7 @@ static __always_inline int handle_recv_exit(struct pt_regs *ctx, const char *sys
     // read IPv4 peer addr/port from sock common fields (network byte order)
     __u32 peer_ip = BPF_CORE_READ(sk, __sk_common.skc_daddr);
     __u16 peer_port = BPF_CORE_READ(sk, __sk_common.skc_dport);
-
+    
     // ADDED: Read local/host port (network byte order)
     __u16 local_port = BPF_CORE_READ(sk, __sk_common.skc_num);
 
@@ -303,7 +270,6 @@ static __always_inline int handle_recv_exit(struct pt_regs *ctx, const char *sys
     evt.dport = local_port;  // ADDED: Store host port
 
     size_t data_len = bytes_read < MAX_HTTP_DATA_LEN ? bytes_read : MAX_HTTP_DATA_LEN;
-
     if (bpf_probe_read_user(evt.data, data_len, buf) != 0) {
         bpf_printk("recv_exit: failed to read user buffer\n");
         return 0;
@@ -317,8 +283,8 @@ static __always_inline int handle_recv_exit(struct pt_regs *ctx, const char *sys
     evt.is_request = (http_type == 1) ? 1 : 0;
 
     bpf_printk("HTTP DETECTED! net_ns=%llu remote=%u:%u local=%u type=%s len=%d\n",
-               evt.inum, evt.saddr, evt.sport, evt.dport,
-               http_type == 1 ? "req" : "resp", (int)data_len);
+               evt.inum, evt.saddr, evt.sport, evt.dport, 
+               http_type == 1 ? "req" : "resp", data_len);
 
     bpf_perf_event_output(ctx, &http_events, BPF_F_CURRENT_CPU, &evt, sizeof(evt));
     return 0;
@@ -339,142 +305,19 @@ int kretprobe_ksys_read_exit(struct pt_regs *ctx)
     return handle_recv_exit(ctx, "read");
 }
 
-
-struct http_event {
-    __u32 pid;
-    __be32 daddr;
-    __u16 dport;
-    __u32 data_len;
-    char data[128];
-};
-
-struct {
-    __uint(type, BPF_MAP_TYPE_HASH);
-    __uint(max_entries, 10240);
-    __type(key, __u32);
-    __type(value, struct conn_info);
-} active_conns SEC(".maps");
-
-struct {
-    __uint(type, BPF_MAP_TYPE_RINGBUF);
-    __uint(max_entries, 1 << 24);
-} events SEC(".maps");
-
-
-static __always_inline __u64 make_pid_fd_key(__u32 pid, int fd) {
-    return ((__u64)pid << 32) | (__u32)fd;
-}
-
-
-SEC("kprobe/__sys_connect")
-int BPF_KPROBE(trace_connect, int fd, struct sockaddr *uservaddr, int addrlen)
+SEC("kprobe/ksys_write")
+int kprobe_ksys_write_entry(struct pt_regs *ctx)
 {
-     if (!check_target_namespace())
-        return 0;
-
-    __u64 pid_tgid = bpf_get_current_pid_tgid();
-    __u32 pid = pid_tgid >> 32;
-    
-    // Read sockaddr
-    struct sockaddr_in sa = {};
-    bpf_probe_read_user(&sa, sizeof(sa), uservaddr);
-    
-    // Only track IPv4 connections
-    if (sa.sin_family != 2) // AF_INET
-        return 0;
-    
-    struct task_struct *task = (struct task_struct *)bpf_get_current_task();
-    if (!task)
-        return 0;
-
-    __u64 inum = BPF_CORE_READ(task, nsproxy, net_ns, ns.inum);
-
-    bpf_printk("__sys_connect called fd=%d\n", inum);
-    
-    // Store connection info
-    struct conn_info info = {};
-    info.daddr = sa.sin_addr.s_addr;
-    info.dport = sa.sin_port;
-    info.inum = inum;
-    
-    // Note: saddr and sport will be filled when we see actual traffic
-    // For now, we only know the destination
-    
-    __u64 key = make_pid_fd_key(pid, fd);
-    bpf_map_update_elem(&active_conns, &key, &info, BPF_ANY);
-    
-    return 0;
+    int fd = (int)PT_REGS_PARM1(ctx);
+    char *buf = (char *)PT_REGS_PARM2(ctx);
+    return handle_recv_entry(ctx, fd, buf, 0);  // is_read = 0
 }
 
-static __always_inline int process_http_data(void *ctx, int fd, void *buff, size_t len, __u32 pid) {
-    // Lookup connection info
-    __u64 key = make_pid_fd_key(pid, fd);
-    struct conn_info *conn = bpf_map_lookup_elem(&active_conns, &key);
-    if (!conn)
-        return 0;
-    
-    bpf_printk("process_http_data=%d\n", fd);
-    
-    // Read the data buffer
-    char tmp_data[MAX_HTTP_DATA_LEN];
-    __builtin_memset(tmp_data, 0, sizeof(tmp_data));
-    
-    size_t read_size = len < MAX_HTTP_DATA_LEN ? len : MAX_HTTP_DATA_LEN;
-    if (bpf_probe_read_user(tmp_data, read_size, buff) < 0)
-        return 0;
-    
-    bpf_printk("bpf_probe_read_user=%d\n", fd);
-    
-    // Check if it looks like an HTTP request
-    if (!is_http_data(tmp_data, read_size))
-        return 0;
-    
-    bpf_printk("is_http_data=%d\n", fd);
-    
-    // Prepare event
-    struct event_t event = {};
-    event.inum = conn->inum;
-    event.saddr = conn->saddr;  // May be 0 if not yet known
-    event.daddr = conn->daddr;
-    event.sport = conn->sport;  // May be 0 if not yet known
-    event.dport = conn->dport;
-    event.is_request = 0;
-    event.data_len = read_size;
-    
-    // Copy HTTP data
-    #pragma unroll
-    for (int i = 0; i < MAX_HTTP_DATA_LEN; i++) {
-        if (i >= read_size)
-            break;
-        event.data[i] = tmp_data[i];
-    }
-    
-    // Send event to userspace
-    bpf_perf_event_output(ctx, &http_events, BPF_F_CURRENT_CPU, &event, sizeof(event));
-    
-    return 0;
-}
-
-
-// Track sys_sendto to capture HTTP requests
-SEC("kprobe/__sys_sendto")
-int BPF_KPROBE(trace_sendto, int fd, void *buff, size_t len)
+SEC("kretprobe/ksys_write")
+int kretprobe_ksys_write_exit(struct pt_regs *ctx)
 {
-    __u64 pid_tgid = bpf_get_current_pid_tgid();
-    __u32 pid = pid_tgid >> 32;
-    
-    return process_http_data(ctx, fd, buff, len, pid);
+    return handle_recv_exit(ctx, "write");
 }
-
-// Also hook sys_write as some apps use write() instead of sendto()
-// SEC("kprobe/__sys_write")
-// int BPF_KPROBE(trace_write, int fd, const void *buff, size_t len)
-// {
-//     __u64 pid_tgid = bpf_get_current_pid_tgid();
-//     __u32 pid = pid_tgid >> 32;
-    
-//     return process_http_data(ctx, fd, (void *)buff, len, pid);
-// }
 
 
 
@@ -484,7 +327,7 @@ int kprobe_ksys_close(struct pt_regs *ctx)
 {
     u64 pid_tgid = bpf_get_current_pid_tgid();
     __u32 pid = (u32)(pid_tgid >> 32);
-
+    
     if (!bpf_map_lookup_elem(&target_namespace_pids, &pid))
         return 0;
 
@@ -499,16 +342,10 @@ int kprobe_ksys_close(struct pt_regs *ctx)
     struct sock_key_t key = {};
     key.net_ns = net_ns;
     key.fd = (__u32)fd;
-
+    
     if (bpf_map_delete_elem(&active_app_sockets, &key) == 0) {
         bpf_printk("close: removed socket net_ns=%llu fd=%d\n", net_ns, fd);
     }
-
-    __u64 k = make_pid_fd_key(pid, fd);
-    if (bpf_map_delete_elem(&active_conns, &k) == 0) {
-        bpf_printk("close: removed connection pid=%u fd=%d\n", pid, fd);
-    }
-
-
+    
     return 0;
 }
