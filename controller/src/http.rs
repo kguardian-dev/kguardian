@@ -64,12 +64,17 @@ pub async fn handle_http_events(
 // ...existing code...
 fn parse_http_headers(s: &str) -> Option<(String, Vec<(String, String)>, &str)> {
     // split headers and body
+    
     let mut parts = s.splitn(2, "\r\n\r\n");
     let header_block = parts.next()?;
     let body = parts.next().unwrap_or("");
 
     let mut lines = header_block.split("\r\n");
     let start_line = lines.next()?.to_string();
+
+    println!("start_line: {}", start_line);
+
+   
 
     let mut headers = Vec::new();
     for line in lines {
@@ -108,27 +113,19 @@ pub async fn process_http_event(evt: &HttpEventData, pod_data: &PodInspect) -> R
 
     // try to parse start-line / headers once so we can extract HTTP path
     let parsed = parse_http_headers(&data_string);
-    let http_path_opt: Option<String> = parsed.as_ref().and_then(|(start_line, _headers, _body)| {
-        if evt.is_request == 1 {
-            // start_line like: "GET /path HTTP/1.1" -> path is 2nd token
+    let http_path_opt: Option<String> = parsed.as_ref().and_then(|(start_line, _headers, _body)| 
             start_line.split_whitespace().nth(1).map(|s| s.to_string())
-        } else {
-            None
-        }
-    });
+    );
     
-    let http_method_opt: Option<String> = parsed.as_ref().and_then(|(start_line, _headers, _body)| {
-        if evt.is_request == 1 {
-            start_line.split_whitespace().next().map(|s| s.to_string())
-        } else {
-            None
-        }
-    });
+    let http_method_opt: Option<String> = parsed.as_ref().and_then(|(start_line, _headers, _body)| 
+        start_line.split_whitespace().next().map(|s| s.to_string())
+    );
 
     // Determine traffic metadata for caching / POST payload
     let pod_name = pod_data.status.pod_name.to_string();
     let pod_namespace = pod_data.status.pod_namespace.to_owned();
     let pod_ip = pod_data.status.pod_ip.to_string();
+    let mut pod_port_str = String::new();
     let mut traffic_in_out_ip_str = String::new();
     let mut traffic_in_out_port_str = String::new();
     // For L7 events the "traffic_in_out_ip" is the remote/client IP
@@ -137,19 +134,16 @@ pub async fn process_http_event(evt: &HttpEventData, pod_data: &PodInspect) -> R
     // Determine direction: requests are INGRESS, responses are EGRESS
     let traffic_type_str = if evt.is_request == 1 { 
      traffic_in_out_ip_str = IpAddr::V4(src_ip).to_string();
-    traffic_in_out_port_str = src_port.to_string();
+    traffic_in_out_port_str = 0.to_string();
+    pod_port_str = evt.dport.to_string();
         "INGRESS" 
-        
-    
     } else { 
     traffic_in_out_ip_str = IpAddr::V4(_dst_ip).to_string();
     traffic_in_out_port_str = host_port.to_string();
+    pod_port_str = host_port.to_string();
         "EGRESS" }.to_string();
     
     let protocol_str = "TCP".to_string();
-
-    // Pod port is unknown from L7 event; leave "pod_port" empty (or "0")
-    let pod_port_str = host_port.to_string();
 
     if pod_ip.eq(&traffic_in_out_ip_str) {
         // skip localhost/pod-internal traffic
