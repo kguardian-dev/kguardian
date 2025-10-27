@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useState, useEffect } from 'react';
 import type { PodNodeData } from '../types';
 import { ArrowRight, Activity } from 'lucide-react';
 
@@ -7,6 +7,12 @@ interface DataTableProps {
 }
 
 const DataTable: React.FC<DataTableProps> = ({ selectedPod }) => {
+  const [expandedSyscalls, setExpandedSyscalls] = useState<Set<number>>(new Set());
+
+  // Reset expanded state when pod changes
+  useEffect(() => {
+    setExpandedSyscalls(new Set());
+  }, [selectedPod?.id]);
   if (!selectedPod) {
     return (
       <div className="h-full flex items-center justify-center text-gray-400">
@@ -122,6 +128,21 @@ const DataTable: React.FC<DataTableProps> = ({ selectedPod }) => {
                 <tbody>
                   {selectedPod.syscalls?.map((syscall, index) => {
                     const syscallList = syscall.syscalls.split(',').filter(s => s.trim());
+                    const isExpanded = expandedSyscalls.has(index);
+                    const displayedSyscalls = isExpanded ? syscallList : syscallList.slice(0, 10);
+
+                    const toggleExpanded = () => {
+                      setExpandedSyscalls(prev => {
+                        const newSet = new Set(prev);
+                        if (newSet.has(index)) {
+                          newSet.delete(index);
+                        } else {
+                          newSet.add(index);
+                        }
+                        return newSet;
+                      });
+                    };
+
                     return (
                       <tr
                         key={index}
@@ -134,15 +155,22 @@ const DataTable: React.FC<DataTableProps> = ({ selectedPod }) => {
                         </td>
                         <td className="px-4 py-2 text-gray-200">
                           <div className="flex flex-wrap gap-1">
-                            {syscallList.slice(0, 10).map((sc, i) => (
+                            {displayedSyscalls.map((sc, i) => (
                               <span key={i} className="px-2 py-1 bg-hubble-warning/20 text-hubble-warning rounded text-xs font-mono">
                                 {sc.trim()}
                               </span>
                             ))}
                             {syscallList.length > 10 && (
-                              <span className="px-2 py-1 bg-gray-700 text-gray-300 rounded text-xs">
-                                +{syscallList.length - 10} more
-                              </span>
+                              <button
+                                onClick={toggleExpanded}
+                                className="px-2 py-1 bg-gray-700 text-gray-300 rounded text-xs hover:bg-gray-600
+                                           transition-colors cursor-pointer"
+                              >
+                                {isExpanded
+                                  ? 'Show less'
+                                  : `+${syscallList.length - 10} more`
+                                }
+                              </button>
                             )}
                           </div>
                         </td>
