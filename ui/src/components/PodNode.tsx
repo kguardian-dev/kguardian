@@ -10,7 +10,12 @@ interface PodNodeProps {
 
 const PodNode: React.FC<PodNodeProps> = ({ data, selected }) => {
   const trafficCount = data.traffic?.length || 0;
-  const syscallCount = data.syscalls?.length || 0;
+
+  // Count total syscalls from comma-separated strings
+  const syscallCount = data.syscalls?.reduce((total, syscallRecord) => {
+    const syscalls = syscallRecord.syscalls.split(',').filter(s => s.trim());
+    return total + syscalls.length;
+  }, 0) || 0;
 
   return (
     <div
