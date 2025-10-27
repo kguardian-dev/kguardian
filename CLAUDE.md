@@ -1,0 +1,210 @@
+# CLAUDE.md
+
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+
+## Project Overview
+
+Kube Guardian (Xentra Advisor) is a Kubernetes security tool consisting of four main components that work together to enhance security profiles for Kubernetes applications:
+
+1. **Controller** (Rust + eBPF): Runs as a DaemonSet, uses eBPF programs to monitor network traffic and syscalls at the kernel level
+2. **Broker** (Rust + Actix-web): REST API server that stores collected telemetry data in PostgreSQL
+3. **Advisor** (Go): kubectl plugin CLI that generates Network Policies and Seccomp profiles from observed runtime behavior
+4. **UI** (React + TypeScript): Modern web interface for visualizing network traffic and pod connections in real-time
+
+The system works by: Controller monitors pods via eBPF → sends data to Broker → Advisor generates policies / UI visualizes data.
+
+## Build and Development Commands
+
+This project uses [Task](https://taskfile.dev/) for build orchestration. All commands use `task` (not `make`).
+
+### Prerequisites Check
+```bash
+task preflight           # Check all dependencies
+task advisor:preflight   # Check Go and golangci-lint
+task broker:preflight    # Check Docker and Kind
+task controller:preflight # Check Cargo, cross, Docker, Kind, Helm
+task ui:preflight        # Check Node.js and npm
+```
+
+Required tools:
+- **Controller**: Rust, Cargo, `cross` (for cross-compilation), Docker, Kind, Helm, Linux Kernel 6.2+
+- **Broker**: Docker, Kind, PostgreSQL (via Docker)
+- **Advisor**: Go 1.x, golangci-lint
+- **UI**: Node.js 20+, npm
+
+### Build Commands
+```bash
+# Build individual components
+task controller:build    # Cross-compiles Rust with eBPF, builds Docker image, loads into Kind
+task broker:build        # Builds Docker image, loads into Kind
+task advisor:install     # Installs Go binary
+task ui:build           # Builds React app for production
+task ui:docker          # Builds UI Docker image and loads into Kind
+
+# Build all (controller + broker)
+task all                 # Builds broker and controller, creates fresh Kind cluster
+```
+
+### Testing and Development
+```bash
+# For Controller (Rust)
+cd controller
+cargo test               # Run tests
+cargo build --release --target x86_64-unknown-linux-gnu  # Build release
+cross build --release --target x86_64-unknown-linux-gnu  # Cross-compile
+
+# For Broker (Rust)
+cd broker
+cargo test
+cargo run               # Run locally (needs DATABASE_URL env var)
+
+# For Advisor (Go)
+cd advisor
+go test ./...           # Run tests
+go build -o xentra      # Build binary
+
+# For UI (React + TypeScript)
+cd ui
+npm install             # Install dependencies
+npm run dev             # Start dev server (http://localhost:5173)
+npm run build           # Build for production
+npm run lint            # Lint code
+```
+
+### Deployment
+```bash
+task kind               # Create fresh Kind cluster
+task install            # Build all + install Helm chart in Kind cluster
+```
+
+The Helm chart installs both controller and broker with:
+```bash
+helm install kube-guardian xentra/kube-guardian \
+  --namespace kube-guardian --create-namespace \
+  --set controller.image.tag=local \
+  --set broker.image.tag=local
+```
+
+### Using the Advisor CLI
+```bash
+# Generate Network Policies
+kubectl xentra gen networkpolicy <pod-name> -n <namespace> --output-dir ./policies
+kubectl xentra gen netpol --all -n staging --type cilium  # Cilium policies for all pods
+
+# Generate Seccomp Profiles
+kubectl xentra gen seccomp <pod-name> -n <namespace> --output-dir ./seccomp
+kubectl xentra gen secp -A --output-dir ./seccomp  # All pods, all namespaces
+
+# Flags
+# --dry-run: Preview without applying (default: true for netpol)
+# -A, --all-namespaces: Target all namespaces
+# -a, --all: All pods in namespace
+# --type: kubernetes or cilium (for network policies)
+```
+
+## Architecture Details
+
+### Controller (Rust + eBPF)
+- **Location**: `controller/src/`
+- **eBPF Programs**: `controller/src/bpf/` contains:
+  - `network_probe.bpf.c`: Monitors TCP/network traffic
+  - `syscall.bpf.c`: Tracks syscall usage
+  - Build process uses `libbpf-cargo` to generate Rust skeletons (`.skel.rs` files)
+- **Key Modules**:
+  - `bpf.rs`: Loads eBPF programs, sets up perf buffers for kernel→userspace events
+  - `pod_watcher.rs`: Watches K8s pods via kube-rs, filters by node and excluded namespaces
+  - `network.rs`: Processes network events from eBPF, enriches with pod metadata
+  - `syscall.rs`: Aggregates syscall events, caches and sends to Broker periodically
+  - `container.rs`: Queries containerd for container network namespace inodes
+- **Build**: Uses `cross` for cross-compilation, `build.rs` compiles eBPF C → skeletons
+- **Environment Variables**:
+  - `CURRENT_NODE`: Node name for filtering pods
+  - `EXCLUDED_NAMESPACES`: Comma-separated (default: "kube-system,kube-guardian")
+  - `IGNORE_DAEMONSET_TRAFFIC`: Boolean (default: "true")
+
+### Broker (Rust + Actix-web)
+- **Location**: `broker/src/`
+- **Database**: PostgreSQL with Diesel ORM, migrations in `broker/db/migrations/`
+- **API Endpoints** (port 9090):
+  - POST `/pods` - Add pod info
+  - POST `/pod/spec` - Add pod details with full spec
+  - POST `/pods/syscalls` - Add syscall data
+  - POST `/svc/spec` - Add service details
+  - GET `/pod/traffic/:pod_ip` - Get network traffic for pod
+  - GET `/pod/traffic/name/:namespace/:pod_name` - Get traffic by name
+  - GET `/pod/syscalls/name/:namespace/:pod_name` - Get syscalls by name
+  - GET `/health` - Health check
+- **Schema**: `broker/src/schema.rs` defines tables for pods, services, network traffic, syscalls
+
+### Advisor (Go kubectl plugin)
+- **Location**: `advisor/`
+- **Command Structure**: Uses Cobra CLI framework
+  - `cmd/root.go`: Root command setup, K8s config initialization
+  - `cmd/networkpolicy.go`: Network policy generation logic
+  - `cmd/seccomp.go`: Seccomp profile generation logic
+- **Key Packages**:
+  - `pkg/k8s/`: Kubernetes client utilities, CRD handling (Cilium policies)
+  - `pkg/api/`: HTTP client for Broker API communication
+  - `pkg/network/`: Network policy generation logic
+  - `pkg/common/`: Shared utilities
+- **Flow**: Queries Broker API → aggregates data → generates YAML manifests → optionally applies to cluster
+
+### UI (React + TypeScript)
+- **Location**: `ui/`
+- **Tech Stack**: React 19, TypeScript, Vite, TailwindCSS 4, React Flow
+- **Key Components**:
+  - `App.tsx`: Main application container with header, graph, and table
+  - `components/NetworkGraph.tsx`: Network visualization using React Flow
+  - `components/PodNode.tsx`: Collapsible pod node component
+  - `components/NamespaceSelector.tsx`: Namespace dropdown
+  - `components/DataTable.tsx`: Pod details and traffic table
+- **Services**:
+  - `services/api.ts`: Centralized Broker API client (Axios)
+  - `hooks/usePodData.ts`: Custom hook for data fetching and state management
+- **Styling**: Dark theme inspired by Cilium Hubble (see `index.css` for color scheme)
+- **Build**: Vite for dev server and production builds, outputs to `dist/`
+- **Deployment**: Multi-stage Docker build with nginx for serving static files
+
+## Important Implementation Notes
+
+### eBPF Development
+- eBPF programs in `controller/src/bpf/*.bpf.c` require kernel 6.2+
+- Changes to `.bpf.c` files require rebuild via `task controller:build`
+- Network namespace inodes are used to correlate kernel events with pods
+- Perf buffers used for high-throughput event streaming from kernel to userspace
+
+### Data Flow
+1. Controller's eBPF hooks capture network/syscall events with container inode
+2. Controller matches inode → pod via containerd API and K8s pod watcher
+3. Controller sends enriched events to Broker API (HTTP POST)
+4. Broker stores in PostgreSQL with timestamps
+5. Advisor queries Broker, aggregates historical data, generates policies
+
+### Namespace Filtering
+- Controller excludes namespaces via `EXCLUDED_NAMESPACES` (default: kube-system, kube-guardian)
+- Controller optionally ignores DaemonSet traffic via `IGNORE_DAEMONSET_TRAFFIC`
+- Advisor targets specific namespaces via `-n` or all via `-A`
+
+### Testing in Kind
+- `task kind` creates a fresh cluster and tears down the old one
+- `task all` builds images with tag `local` and loads into Kind
+- Controller runs privileged with `CAP_BPF` capability
+- Broker needs DATABASE_URL pointing to PostgreSQL (configured in Helm values)
+
+## Common Issues
+
+### Controller Build Failures
+- Missing `cross`: Install via `cargo install cross`
+- eBPF compilation errors: Ensure vmlinux.h matches target kernel architecture
+- Kernel version: Requires 6.2+, check with `uname -r`
+
+### Broker Database Connectivity
+- Ensure PostgreSQL is running and reachable
+- Check DATABASE_URL format: `postgres://user:password@host:port/dbname`
+- Migrations run automatically on startup via `diesel_migrations`
+
+### Advisor CLI Issues
+- Must have Kube Guardian Controller deployed and collecting data first
+- Broker must be accessible from Advisor (usually via kubectl port-forward)
+- Network policies require observed traffic to generate meaningful rules
+- Seccomp profiles require pods to have executed syscalls
