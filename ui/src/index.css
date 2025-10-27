@@ -1,0 +1,55 @@
+@import "tailwindcss";
+
+@theme {
+  --color-hubble-dark: #0E1726;
+  --color-hubble-darker: #0A0F1C;
+  --color-hubble-card: #1A2332;
+  --color-hubble-border: #2A3647;
+  --color-hubble-accent: #3B82F6;
+  --color-hubble-success: #10B981;
+  --color-hubble-warning: #F59E0B;
+  --color-hubble-error: #EF4444;
+}
+
+@layer base {
+  body {
+    background-color: var(--color-hubble-darker);
+    color: rgb(243 244 246);
+    margin: 0;
+    font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+  }
+
+  #root {
+    width: 100%;
+    height: 100vh;
+  }
+}
+
+/* React Flow custom styles for dark theme */
+.react-flow {
+  @apply bg-hubble-dark;
+}
+
+.react-flow__node {
+  @apply rounded-lg shadow-lg;
+}
+
+.react-flow__edge-path {
+  stroke-width: 2;
+}
+
+.react-flow__handle {
+  @apply opacity-0;
+}
+
+.react-flow__controls {
+  @apply bg-hubble-card border-hubble-border;
+}
+
+.react-flow__controls-button {
+  @apply bg-hubble-card border-hubble-border text-gray-300;
+}
+
+.react-flow__controls-button:hover {
+  @apply bg-hubble-dark;
+}

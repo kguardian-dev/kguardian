@@ -6,6 +6,7 @@ includes:
   advisor: .taskfiles/Advisor
   broker: .taskfiles/Broker
   controller: .taskfiles/Controller
+  ui: .taskfiles/UI
 
 vars:
   IMAGE_VERSION: local
@@ -42,6 +43,7 @@ tasks:
       - task: advisor:preflight
       - task: broker:preflight
       - task: controller:preflight
+      - task: ui:preflight
 
   preflight-all:
     desc: "Run preflight checks and then all tasks"
