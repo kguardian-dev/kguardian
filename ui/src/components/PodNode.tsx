@@ -46,10 +46,10 @@ const PodNode: React.FC<PodNodeProps> = ({ data, selected }) => {
           <Server className="w-5 h-5 text-hubble-accent" />
 
           <div className="flex-1">
-            <div className="font-semibold text-sm text-gray-100">
+            <div className="font-semibold text-sm text-primary">
               {data.label}
             </div>
-            <div className="text-xs text-gray-400">
+            <div className="text-xs text-tertiary">
               {data.pod.pod_namespace}
             </div>
           </div>
@@ -58,7 +58,7 @@ const PodNode: React.FC<PodNodeProps> = ({ data, selected }) => {
 
       {data.isExpanded && (
         <div className="mt-3 pt-3 border-t border-hubble-border space-y-2">
-          <div className="text-xs text-gray-400">
+          <div className="text-xs text-tertiary">
             <div className="flex items-center gap-1">
               <span className="font-mono">{data.pod.pod_ip}</span>
             </div>
@@ -67,14 +67,14 @@ const PodNode: React.FC<PodNodeProps> = ({ data, selected }) => {
           <div className="flex gap-3 text-xs">
             <div className="flex items-center gap-1">
               <Network className="w-3 h-3 text-hubble-success" />
-              <span className="text-gray-300">
+              <span className="text-secondary">
                 {trafficCount} connections
               </span>
             </div>
 
             {syscallCount > 0 && (
               <div className="flex items-center gap-1">
-                <span className="text-gray-300">
+                <span className="text-secondary">
                   {syscallCount} syscalls
                 </span>
               </div>
