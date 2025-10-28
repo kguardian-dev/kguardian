@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import type { PodNodeData } from '../types';
-import { ArrowRight, Activity } from 'lucide-react';
+import { ArrowRight, Activity, ChevronDown, ChevronRight } from 'lucide-react';
 
 interface DataTableProps {
   selectedPod: PodNodeData | null;
@@ -8,6 +8,8 @@ interface DataTableProps {
 
 const DataTable: React.FC<DataTableProps> = ({ selectedPod }) => {
   const [expandedSyscalls, setExpandedSyscalls] = useState<Set<number>>(new Set());
+  const [isTrafficExpanded, setIsTrafficExpanded] = useState(true);
+  const [isSyscallsExpanded, setIsSyscallsExpanded] = useState(true);
 
   // Reset expanded state when pod changes
   useEffect(() => {
@@ -45,12 +47,20 @@ const DataTable: React.FC<DataTableProps> = ({ selectedPod }) => {
 
       {/* Network Traffic Section */}
       <div>
-        <h4 className="text-md font-semibold text-primary mb-3 flex items-center gap-2">
+        <button
+          onClick={() => setIsTrafficExpanded(!isTrafficExpanded)}
+          className="w-full text-md font-semibold text-primary mb-3 flex items-center gap-2 hover:text-hubble-accent transition-colors"
+        >
+          {isTrafficExpanded ? (
+            <ChevronDown className="w-4 h-4 text-hubble-success" />
+          ) : (
+            <ChevronRight className="w-4 h-4 text-hubble-success" />
+          )}
           <ArrowRight className="w-4 h-4 text-hubble-success" />
           Network Traffic ({selectedPod.traffic?.length || 0})
-        </h4>
+        </button>
 
-        {hasTraffic ? (
+        {isTrafficExpanded && hasTraffic && (
           <div className="bg-hubble-card rounded-lg border border-hubble-border overflow-hidden">
             <div className="overflow-x-auto">
               <table className="w-full text-sm">
@@ -100,7 +110,9 @@ const DataTable: React.FC<DataTableProps> = ({ selectedPod }) => {
               </table>
             </div>
           </div>
-        ) : (
+        )}
+
+        {isTrafficExpanded && !hasTraffic && (
           <div className="bg-hubble-card p-4 rounded-lg border border-hubble-border text-tertiary text-sm">
             No network traffic recorded
           </div>
@@ -110,12 +122,21 @@ const DataTable: React.FC<DataTableProps> = ({ selectedPod }) => {
       {/* Syscalls Section */}
       {hasSyscalls && (
         <div>
-          <h4 className="text-md font-semibold text-primary mb-3 flex items-center gap-2">
+          <button
+            onClick={() => setIsSyscallsExpanded(!isSyscallsExpanded)}
+            className="w-full text-md font-semibold text-primary mb-3 flex items-center gap-2 hover:text-hubble-accent transition-colors"
+          >
+            {isSyscallsExpanded ? (
+              <ChevronDown className="w-4 h-4 text-hubble-warning" />
+            ) : (
+              <ChevronRight className="w-4 h-4 text-hubble-warning" />
+            )}
             <Activity className="w-4 h-4 text-hubble-warning" />
             System Calls
-          </h4>
+          </button>
 
-          <div className="bg-hubble-card rounded-lg border border-hubble-border overflow-hidden">
+          {isSyscallsExpanded && (
+            <div className="bg-hubble-card rounded-lg border border-hubble-border overflow-hidden">
             <div className="overflow-x-auto">
               <table className="w-full text-sm">
                 <thead className="bg-hubble-dark border-b border-hubble-border">
@@ -184,6 +205,7 @@ const DataTable: React.FC<DataTableProps> = ({ selectedPod }) => {
               </table>
             </div>
           </div>
+          )}
         </div>
       )}
     </div>
