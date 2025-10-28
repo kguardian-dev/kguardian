@@ -3,6 +3,7 @@ import { RefreshCw, Shield } from 'lucide-react';
 import NetworkGraph from './components/NetworkGraph';
 import NamespaceSelector from './components/NamespaceSelector';
 import DataTable from './components/DataTable';
+import ThemeToggle from './components/ThemeToggle';
 import { usePodData } from './hooks/usePodData';
 import { useNamespaces } from './hooks/useNamespaces';
 import type { PodNodeData } from './types';
@@ -26,10 +27,10 @@ function App() {
           <div className="flex items-center gap-3">
             <Shield className="w-8 h-8 text-hubble-accent" />
             <div>
-              <h1 className="text-2xl font-bold text-gray-100">
+              <h1 className="text-2xl font-bold text-primary">
                 Kube Guardian
               </h1>
-              <p className="text-sm text-gray-400">
+              <p className="text-sm text-tertiary">
                 Network Traffic & Security Monitoring
               </p>
             </div>
@@ -42,11 +43,13 @@ function App() {
               namespaces={namespaces}
             />
 
+            <ThemeToggle />
+
             <button
               onClick={refreshData}
               disabled={loading}
               className="flex items-center gap-2 px-4 py-2 bg-hubble-card border border-hubble-border
-                         rounded-lg text-gray-300 hover:bg-hubble-dark hover:border-hubble-accent
+                         rounded-lg text-secondary hover:bg-hubble-dark hover:border-hubble-accent
                          transition-all disabled:opacity-50 disabled:cursor-not-allowed"
               title="Refresh data"
             >
@@ -69,7 +72,7 @@ function App() {
           <div className="flex-1 flex items-center justify-center">
             <div className="text-center">
               <RefreshCw className="w-8 h-8 text-hubble-accent animate-spin mx-auto mb-4" />
-              <p className="text-gray-400">Loading pod data...</p>
+              <p className="text-secondary">Loading pod data...</p>
             </div>
           </div>
         ) : (
@@ -93,7 +96,7 @@ function App() {
       </div>
 
       {/* Footer */}
-      <footer className="bg-hubble-dark border-t border-hubble-border px-6 py-2 text-center text-xs text-gray-500">
+      <footer className="bg-hubble-dark border-t border-hubble-border px-6 py-2 text-center text-xs text-tertiary">
         <p>Kube Guardian v0.1.0 | Namespace: {namespace} | Pods: {pods.length}</p>
       </footer>
     </div>
