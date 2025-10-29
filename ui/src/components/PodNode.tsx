@@ -1,10 +1,13 @@
 import React from 'react';
 import { Handle, Position } from 'reactflow';
-import { ChevronDown, ChevronRight, Network, Server } from 'lucide-react';
+import { ChevronDown, ChevronRight, Network, Server, FileCode } from 'lucide-react';
 import type { PodNodeData } from '../types';
 
 interface PodNodeProps {
-  data: PodNodeData & { onToggle: (id: string) => void };
+  data: PodNodeData & {
+    onToggle: (id: string) => void;
+    onBuildPolicy?: (pod: PodNodeData) => void;
+  };
   selected?: boolean;
 }
 
@@ -80,6 +83,20 @@ const PodNode: React.FC<PodNodeProps> = ({ data, selected }) => {
               </div>
             )}
           </div>
+
+          <button
+            onClick={(e) => {
+              e.stopPropagation();
+              data.onBuildPolicy?.(data);
+            }}
+            className="w-full mt-2 px-3 py-1.5 bg-hubble-success/10 border border-hubble-success/30
+                       rounded text-hubble-success hover:bg-hubble-success/20 hover:border-hubble-success
+                       transition-all flex items-center justify-center gap-2 text-xs font-medium"
+            title="Build Network Policy"
+          >
+            <FileCode className="w-3 h-3" />
+            Build Policy
+          </button>
         </div>
       )}
 

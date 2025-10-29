@@ -5,6 +5,7 @@ import NamespaceSelector from './components/NamespaceSelector';
 import DataTable from './components/DataTable';
 import ThemeToggle from './components/ThemeToggle';
 import AIAssistant from './components/AIAssistant';
+import NetworkPolicyEditor from './components/NetworkPolicyEditor';
 import { usePodData } from './hooks/usePodData';
 import { useNamespaces } from './hooks/useNamespaces';
 import type { PodNodeData } from './types';
@@ -13,12 +14,19 @@ function App() {
   const [namespace, setNamespace] = useState('default');
   const [selectedPod, setSelectedPod] = useState<PodNodeData | null>(null);
   const [isAIAssistantOpen, setIsAIAssistantOpen] = useState(false);
+  const [isPolicyEditorOpen, setIsPolicyEditorOpen] = useState(false);
+  const [policyEditorPod, setPolicyEditorPod] = useState<PodNodeData | null>(null);
 
   const { namespaces } = useNamespaces();
   const { pods, loading, error, togglePodExpansion, refreshData } = usePodData(namespace);
 
   const handlePodSelect = (pod: PodNodeData | null) => {
     setSelectedPod(pod);
+  };
+
+  const handleBuildPolicy = (pod: PodNodeData) => {
+    setPolicyEditorPod(pod);
+    setIsPolicyEditorOpen(true);
   };
 
   return (
@@ -97,6 +105,7 @@ function App() {
                 onPodToggle={togglePodExpansion}
                 onPodSelect={handlePodSelect}
                 selectedPodId={selectedPod?.id || null}
+                onBuildPolicy={handleBuildPolicy}
               />
             </div>
 
@@ -117,6 +126,14 @@ function App() {
       <AIAssistant
         isOpen={isAIAssistantOpen}
         onClose={() => setIsAIAssistantOpen(false)}
+      />
+
+      {/* Network Policy Editor Modal */}
+      <NetworkPolicyEditor
+        isOpen={isPolicyEditorOpen}
+        onClose={() => setIsPolicyEditorOpen(false)}
+        pod={policyEditorPod}
+        allPods={pods}
       />
     </div>
   );

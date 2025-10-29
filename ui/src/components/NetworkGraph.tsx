@@ -18,6 +18,7 @@ interface NetworkGraphProps {
   onPodToggle: (podId: string) => void;
   onPodSelect: (pod: PodNodeData | null) => void;
   selectedPodId: string | null;
+  onBuildPolicy?: (pod: PodNodeData) => void;
 }
 
 const nodeTypes = {
@@ -29,6 +30,7 @@ const NetworkGraph: React.FC<NetworkGraphProps> = ({
   onPodToggle,
   onPodSelect,
   selectedPodId,
+  onBuildPolicy,
 }) => {
   // Convert pod data to React Flow nodes
   const initialNodes: Node[] = useMemo(() => {
@@ -42,10 +44,11 @@ const NetworkGraph: React.FC<NetworkGraphProps> = ({
       data: {
         ...pod,
         onToggle: onPodToggle,
+        onBuildPolicy,
       },
       selected: pod.id === selectedPodId,
     }));
-  }, [pods, onPodToggle, selectedPodId]);
+  }, [pods, onPodToggle, selectedPodId, onBuildPolicy]);
 
   // Generate edges from network traffic data
   const initialEdges: Edge[] = useMemo(() => {
