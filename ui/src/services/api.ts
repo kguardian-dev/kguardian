@@ -1,6 +1,6 @@
 import axios from 'axios';
 import type { AxiosInstance } from 'axios';
-import type { PodInfo, NetworkTraffic, SyscallInfo } from '../types';
+import type { PodInfo, NetworkTraffic, SyscallInfo, ServiceInfo } from '../types';
 
 class BrokerAPIClient {
   private client: AxiosInstance;
@@ -70,7 +70,7 @@ class BrokerAPIClient {
   /**
    * Get service details by IP address
    */
-  async getServiceByIP(serviceIP: string): Promise<any> {
+  async getServiceByIP(serviceIP: string): Promise<ServiceInfo | null> {
     try {
       const response = await this.client.get(`/svc/ip/${serviceIP}`);
       return response.data;
