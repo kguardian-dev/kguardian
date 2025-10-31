@@ -1,5 +1,6 @@
 pub mod network;
 pub mod syscall;
+pub mod pkt_drop;
 
 pub mod error;
 pub mod pod_watcher;

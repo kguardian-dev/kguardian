@@ -4,7 +4,7 @@ use actix_web::{get, web, App, HttpResponse, HttpServer};
 use api::{
     add_pod_details, add_pods, add_pods_syscalls, add_svc_details, establish_connection,
     get_pod_by_ip, get_pod_details, get_pod_syscall_name, get_pod_traffic, get_pod_traffic_name,
-    get_svc_by_ip,
+    get_svc_by_ip,add_drop_packets, get_pod_packet_drop_name, get_pod_packet_drop,
 };
 
 use diesel::r2d2;
@@ -43,6 +43,7 @@ async fn main() -> Result<(), std::io::Error> {
         App::new()
             .app_data(web::Data::new(pool.clone()))
             .service(add_pods)
+            .service(add_drop_packets)
             .service(add_pod_details)
             .service(add_pods_syscalls)
             .service(get_pod_traffic)
@@ -50,6 +51,8 @@ async fn main() -> Result<(), std::io::Error> {
             .service(add_svc_details)
             .service(get_pod_by_ip)
             .service(get_svc_by_ip)
+            .service(get_pod_packet_drop) 
+            .service(get_pod_packet_drop_name)  
             .service(get_pod_traffic_name)
             .service(get_pod_syscall_name)
             .service(health_check)
