@@ -2,18 +2,18 @@
 apiVersion: apps/v1
 kind: DaemonSet
 metadata:
-  name: {{ include "kube-guardian.name" . }}-controller
+  name: {{ include "kguardian.name" . }}-controller
   labels:
-    {{- include "kube-guardian.labels" . | nindent 4 }}
+    {{- include "kguardian.labels" . | nindent 4 }}
 spec:
   selector:
     matchLabels:
-      app.kubernetes.io/name: kube-guardian
+      app.kubernetes.io/name: kguardian
   template:
     metadata:
       labels:
-        app.kubernetes.io/name: kube-guardian
-        {{- include "kube-guardian.labels" . | nindent 8 }}
+        app.kubernetes.io/name: kguardian
+        {{- include "kguardian.labels" . | nindent 8 }}
     spec:
       automountServiceAccountToken: true
       hostNetwork: true
@@ -29,7 +29,7 @@ spec:
           image: "{{ .Values.controller.initContainer.image.repository }}:{{ .Values.controller.initContainer.image.tag }}"
           {{- end }}
           imagePullPolicy: {{ .Values.controller.initContainer.image.pullPolicy }}
-          command: ["sh", "-c", "until wget -qO- http://{{ .Values.broker.service.name }}.{{ include "kube-guardian.namespace" . }}.svc.cluster.local:{{ .Values.broker.container.port }}/health; do sleep 5; done"]
+          command: ["sh", "-c", "until wget -qO- http://{{ .Values.broker.service.name }}.{{ include "kguardian.namespace" . }}.svc.cluster.local:{{ .Values.broker.container.port }}/health; do sleep 5; done"]
           securityContext:
             {{- toYaml .Values.controller.initContainer.securityContext | nindent 12 }}
       containers:
@@ -50,7 +50,7 @@ spec:
               fieldRef:
                 fieldPath: spec.nodeName
           - name: API_ENDPOINT
-            value: "http://{{ .Values.broker.service.name }}.{{ include "kube-guardian.namespace" . }}.svc.cluster.local:{{ .Values.broker.container.port }}"
+            value: "http://{{ .Values.broker.service.name }}.{{ include "kguardian.namespace" . }}.svc.cluster.local:{{ .Values.broker.container.port }}"
           - name: EXCLUDED_NAMESPACES
             value: "{{ .Values.controller.excludedNamespaces | join "," }}"
           - name: IGNORE_DAEMONSET_TRAFFIC

@@ -2,7 +2,7 @@
 # yaml-language-server: $schema=https://taskfile.dev/schema.json
 version: '3'
 vars:
-  BROKER_IMAGE_NAME: ghcr.io/xentra-ai/images/guardian-broker
+  BROKER_IMAGE_NAME: ghcr.io/kguardian-dev/kguardian/guardian-broker
   IMAGE_VERSION: local
 
 tasks:

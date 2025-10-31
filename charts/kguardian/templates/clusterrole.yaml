@@ -1,10 +1,10 @@
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
-  name: {{ include "kube-guardian.name" . }}-viewer
+  name: {{ include "kguardian.name" . }}-viewer
   labels:
-    {{- include "kube-guardian.labels" . | nindent 4 }}
-    {{- include "kube-guardian.annotations" . | nindent 2 }}
+    {{- include "kguardian.labels" . | nindent 4 }}
+    {{- include "kguardian.annotations" . | nindent 2 }}
 rules:
 - apiGroups: [""]
   resources: ["namespaces", "pods", "services"]

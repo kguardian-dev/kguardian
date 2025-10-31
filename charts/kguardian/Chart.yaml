@@ -1,7 +1,7 @@
 apiVersion: v2
-name: kube-guardian
-description: A Helm chart for Kubernetes
-home: https://xentra.ai/
+name: kguardian
+description: Kubernetes security profile generator using eBPF
+home: https://github.com/kguardian-dev/kguardian
 
 # This is the chart version. This version number should be incremented each time you make changes
 # to the chart and its templates, including the app version.
@@ -25,12 +25,10 @@ keywords:
   - Troubleshooting
 
 sources:
-  - https://github.com/xentra-ai/kube-guardian
+  - https://github.com/kguardian-dev/kguardian
 
 maintainers:
   # Mahesh Rayas
   - name: maheshrayas
-    email: mahesh.rayas@xentra-ai.com
   # Michael Fornaro
   - name: xunholy
-    email: michael.fornaro@xentra-ai.com

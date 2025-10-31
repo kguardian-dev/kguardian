@@ -14,7 +14,7 @@ spec:
         {{- toYaml . | nindent 8 }}
       {{- end }}
       labels:
-        {{- include "kube-guardian.labels" . | nindent 8 }}
+        {{- include "kguardian.labels" . | nindent 8 }}
         app.kubernetes.io/name: {{ .Values.database.service.name }}
     spec:
       serviceAccountName: {{ default "database" .Values.database.serviceAccount.name }}

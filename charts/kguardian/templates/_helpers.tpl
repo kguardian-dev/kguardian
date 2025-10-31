@@ -1,7 +1,7 @@
 {{/*
 Expand the name of the chart.
 */}}
-{{- define "kube-guardian.name" -}}
+{{- define "kguardian.name" -}}
 {{- default .Chart.Name .Values.nameOverride | trunc 63 | trimSuffix "-" }}
 {{- end }}
 
@@ -10,7 +10,7 @@ Create a default fully qualified app name.
 We truncate at 63 chars because some Kubernetes name fields are limited to this (by the DNS naming spec).
 If release name contains chart name it will be used as a full name.
 */}}
-{{- define "kube-guardian.fullname" -}}
+{{- define "kguardian.fullname" -}}
 {{- if .Values.fullnameOverride }}
 {{- .Values.fullnameOverride | trunc 63 | trimSuffix "-" }}
 {{- else }}
@@ -27,23 +27,23 @@ If release name contains chart name it will be used as a full name.
 This gets around an problem within helm discussed here
 https://github.com/helm/helm/issues/5358
 */}}
-{{- define "kube-guardian.namespace" -}}
+{{- define "kguardian.namespace" -}}
     {{ .Values.namespace.name | default .Release.Namespace }}
 {{- end -}}
 
 {{/*
 Create chart name and version as used by the chart label.
 */}}
-{{- define "kube-guardian.chart" -}}
+{{- define "kguardian.chart" -}}
 {{- printf "%s-%s" .Chart.Name .Chart.Version | replace "+" "_" | trunc 63 | trimSuffix "-" }}
 {{- end }}
 
 {{/*
 Common labels
 */}}
-{{- define "kube-guardian.labels" -}}
-helm.sh/chart: {{ include "kube-guardian.chart" . }}
-{{ include "kube-guardian.selectorLabels" . }}
+{{- define "kguardian.labels" -}}
+helm.sh/chart: {{ include "kguardian.chart" . }}
+{{ include "kguardian.selectorLabels" . }}
 {{- if .Chart.AppVersion }}
 app.kubernetes.io/version: {{ .Chart.AppVersion | quote }}
 {{- end }}
@@ -56,7 +56,7 @@ app.kubernetes.io/managed-by: {{ .Release.Service }}
 {{/*
 Common Annotations
 */}}
-{{- define "kube-guardian.annotations" -}}
+{{- define "kguardian.annotations" -}}
 {{- if .Values.global.annotations -}}
   {{- toYaml .Values.global.annotations | nindent 2 }}
 {{- end }}
@@ -65,6 +65,6 @@ Common Annotations
 {{/*
 Selector labels
 */}}
-{{- define "kube-guardian.selectorLabels" -}}
+{{- define "kguardian.selectorLabels" -}}
 app.kubernetes.io/instance: {{ .Release.Name }}
 {{- end }}

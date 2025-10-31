@@ -12,7 +12,7 @@ import (
 	slim_metav1 "github.com/cilium/cilium/pkg/k8s/slim/k8s/apis/meta/v1"
 	"github.com/cilium/cilium/pkg/policy/api"
 	log "github.com/rs/zerolog/log"
-	apiapi "github.com/xentra-ai/advisor/pkg/api"
+	apiapi "github.com/kguardian-dev/kguardian/advisor/pkg/api"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/yaml"
 )
@@ -249,8 +249,8 @@ func transformToCiliumNetworkPolicy(podTraffic []apiapi.PodTraffic, podDetail *a
 			Name:      podDetail.Name,
 			Namespace: podDetail.Namespace,
 			Labels: map[string]string{
-				"advisor.xentra.ai/managed-by": "xentra",
-				"advisor.xentra.ai/version":    Version,
+				"kguardian.dev/managed-by": "kguardian",
+				"kguardian.dev/version":    Version,
 			},
 		},
 		Spec: rule,

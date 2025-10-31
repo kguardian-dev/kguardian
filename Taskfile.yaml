@@ -30,8 +30,8 @@ tasks:
     deps: [all]
     desc: "Install in KinD cluster"
     cmds:
-      - helm repo add xentra https://xentra-ai.github.io/kube-guardian || true
-      - helm install kube-guardian xentra/kube-guardian --namespace kube-guardian
+      - helm repo add kguardian https://kguardian-dev.github.io/kguardian || true
+      - helm install kguardian kguardian/kguardian --namespace kguardian
         --create-namespace --set controller.image.tag={{.IMAGE_VERSION}}
         --set broker.image.tag={{.IMAGE_VERSION}}
         --set controller.image.pullPolicy=IfNotPresent

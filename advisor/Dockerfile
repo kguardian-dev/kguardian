@@ -16,7 +16,7 @@ ENV GO111MODULE=on \
   GOARCH=${TARGETARCH} \
   GOARM=${TARGETVARIANT}
 
-WORKDIR /go/src/github.com/xentra-ai/advisor/
+WORKDIR /go/src/github.com/kguardian-dev/kguardian/advisor/
 
 COPY go.mod go.sum ./
 
@@ -28,7 +28,7 @@ RUN go build -a -installsuffix cgo \
   -ldflags="-w -extldflags '-static' \
   -X 'main.ApplicationName=${APPLICATION_NAME}}' \
   -X 'main.Version=${VERSION}' -X 'main.SHA=${SHA}' \
-  -X 'github.com/xentra-ai/advisor/pkg/k8s.Version=${VERSION}'" \
+  -X 'github.com/kguardian-dev/kguardian/advisor/pkg/k8s.Version=${VERSION}'" \
   -o advisor .
 
 FROM gcr.io/distroless/static:nonroot
@@ -41,7 +41,7 @@ ENV LOG_INFO=${LOG_INFO} \
 
 WORKDIR /
 
-COPY --from=build --chown=nonroot /go/src/github.com/xentra-ai/advisor/advisor .
+COPY --from=build --chown=nonroot /go/src/github.com/kguardian-dev/kguardian/advisor/advisor .
 
 USER nonroot:nonroot
 

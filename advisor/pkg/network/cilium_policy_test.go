@@ -6,7 +6,7 @@ import (
 	ciliumv2 "github.com/cilium/cilium/pkg/k8s/apis/cilium.io/v2"
 	ciliumapi "github.com/cilium/cilium/pkg/policy/api"
 	"github.com/stretchr/testify/assert"
-	"github.com/xentra-ai/advisor/pkg/api"
+	"github.com/kguardian-dev/kguardian/advisor/pkg/api"
 	corev1 "k8s.io/api/core/v1"
 )
 

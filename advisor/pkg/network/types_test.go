@@ -4,7 +4,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
-	"github.com/xentra-ai/advisor/pkg/api"
+	"github.com/kguardian-dev/kguardian/advisor/pkg/api"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
@@ -17,7 +17,7 @@ func TestCreateStandardLabels(t *testing.T) {
 	expected := map[string]string{
 		"app.kubernetes.io/name":      "my-pod",
 		"app.kubernetes.io/component": "networkpolicy",
-		"app.kubernetes.io/part-of":   "xentra-advisor",
+		"app.kubernetes.io/part-of":   "kguardian",
 	}
 	assert.Equal(t, expected, CreateStandardLabels("my-pod", "networkpolicy"))
 }

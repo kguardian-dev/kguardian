@@ -11,7 +11,7 @@ on:
       - "charts/**"
 
 env:
-  CHARTS_SRC_DIR: "kube-guardian"
+  CHARTS_SRC_DIR: "kguardian"
   TARGET_REGISTRY: ghcr.io
 
 jobs:
@@ -52,6 +52,6 @@ jobs:
       - name: Publish Helm Chart to GHCR
         run: |
           helm package charts/${{ env.CHARTS_SRC_DIR }}
-          helm push ${{ env.CHARTS_SRC_DIR }}-*.tgz oci://${{ env.TARGET_REGISTRY }}/${{ github.repository_owner }}/charts
+          helm push kguardian-*.tgz oci://${{ env.TARGET_REGISTRY }}/${{ github.repository_owner }}/charts
         env:
           GITHUB_TOKEN: "${{ secrets.GITHUB_TOKEN }}"

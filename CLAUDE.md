@@ -4,14 +4,14 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-Kube Guardian (Xentra Advisor) is a Kubernetes security tool consisting of four main components that work together to enhance security profiles for Kubernetes applications:
+kguardian is a Kubernetes security tool consisting of four main components that work together to enhance security profiles for Kubernetes applications:
 
 1. **Controller** (Rust + eBPF): Runs as a DaemonSet, uses eBPF programs to monitor network traffic and syscalls at the kernel level
 2. **Broker** (Rust + Actix-web): REST API server that stores collected telemetry data in PostgreSQL
-3. **Advisor** (Go): kubectl plugin CLI that generates Network Policies and Seccomp profiles from observed runtime behavior
+3. **CLI** (Go): kubectl plugin that generates Network Policies and Seccomp profiles from observed runtime behavior
 4. **UI** (React + TypeScript): Modern web interface for visualizing network traffic and pod connections in real-time
 
-The system works by: Controller monitors pods via eBPF → sends data to Broker → Advisor generates policies / UI visualizes data.
+The system works by: Controller monitors pods via eBPF → sends data to Broker → CLI generates policies / UI visualizes data.
 
 ## Build and Development Commands
 
@@ -61,7 +61,7 @@ cargo run               # Run locally (needs DATABASE_URL env var)
 # For Advisor (Go)
 cd advisor
 go test ./...           # Run tests
-go build -o xentra      # Build binary
+go build -o advisor     # Build binary
 
 # For UI (React + TypeScript)
 cd ui
@@ -79,21 +79,21 @@ task install            # Build all + install Helm chart in Kind cluster
 
 The Helm chart installs both controller and broker with:
 ```bash
-helm install kube-guardian xentra/kube-guardian \
-  --namespace kube-guardian --create-namespace \
+helm install kguardian kguardian/kguardian \
+  --namespace kguardian --create-namespace \
   --set controller.image.tag=local \
   --set broker.image.tag=local
 ```
 
-### Using the Advisor CLI
+### Using the CLI
 ```bash
 # Generate Network Policies
-kubectl xentra gen networkpolicy <pod-name> -n <namespace> --output-dir ./policies
-kubectl xentra gen netpol --all -n staging --type cilium  # Cilium policies for all pods
+kubectl kguardian gen networkpolicy <pod-name> -n <namespace> --output-dir ./policies
+kubectl kguardian gen netpol --all -n staging --type cilium  # Cilium policies for all pods
 
 # Generate Seccomp Profiles
-kubectl xentra gen seccomp <pod-name> -n <namespace> --output-dir ./seccomp
-kubectl xentra gen secp -A --output-dir ./seccomp  # All pods, all namespaces
+kubectl kguardian gen seccomp <pod-name> -n <namespace> --output-dir ./seccomp
+kubectl kguardian gen secp -A --output-dir ./seccomp  # All pods, all namespaces
 
 # Flags
 # --dry-run: Preview without applying (default: true for netpol)
@@ -119,7 +119,7 @@ kubectl xentra gen secp -A --output-dir ./seccomp  # All pods, all namespaces
 - **Build**: Uses `cross` for cross-compilation, `build.rs` compiles eBPF C → skeletons
 - **Environment Variables**:
   - `CURRENT_NODE`: Node name for filtering pods
-  - `EXCLUDED_NAMESPACES`: Comma-separated (default: "kube-system,kube-guardian")
+  - `EXCLUDED_NAMESPACES`: Comma-separated (default: "kube-system,kguardian")
   - `IGNORE_DAEMONSET_TRAFFIC`: Boolean (default: "true")
 
 ### Broker (Rust + Actix-web)
@@ -136,7 +136,7 @@ kubectl xentra gen secp -A --output-dir ./seccomp  # All pods, all namespaces
   - GET `/health` - Health check
 - **Schema**: `broker/src/schema.rs` defines tables for pods, services, network traffic, syscalls
 
-### Advisor (Go kubectl plugin)
+### CLI (Go kubectl plugin)
 - **Location**: `advisor/`
 - **Command Structure**: Uses Cobra CLI framework
   - `cmd/root.go`: Root command setup, K8s config initialization
@@ -178,12 +178,12 @@ kubectl xentra gen secp -A --output-dir ./seccomp  # All pods, all namespaces
 2. Controller matches inode → pod via containerd API and K8s pod watcher
 3. Controller sends enriched events to Broker API (HTTP POST)
 4. Broker stores in PostgreSQL with timestamps
-5. Advisor queries Broker, aggregates historical data, generates policies
+5. CLI queries Broker, aggregates historical data, generates policies
 
 ### Namespace Filtering
-- Controller excludes namespaces via `EXCLUDED_NAMESPACES` (default: kube-system, kube-guardian)
+- Controller excludes namespaces via `EXCLUDED_NAMESPACES` (default: kube-system, kguardian)
 - Controller optionally ignores DaemonSet traffic via `IGNORE_DAEMONSET_TRAFFIC`
-- Advisor targets specific namespaces via `-n` or all via `-A`
+- CLI targets specific namespaces via `-n` or all via `-A`
 
 ### Testing in Kind
 - `task kind` creates a fresh cluster and tears down the old one

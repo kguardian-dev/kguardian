@@ -63,7 +63,7 @@ jobs:
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: ${{ steps.args.outputs.BUILD }}-binary
-          path: controller/target/${{ steps.args.outputs.BUILD }}/release/kube-guardian
+          path: controller/target/${{ steps.args.outputs.BUILD }}/release/kguardian
 
   push:
     runs-on: ubuntu-latest
@@ -115,5 +115,5 @@ jobs:
           file: controller/Dockerfile
           push: true
           tags: |
-            ghcr.io/xentra-ai/images/guardian-controller:${{ steps.extract_tag.outputs.TAG_NAME }}
-            ghcr.io/xentra-ai/images/guardian-controller:latest
+            ghcr.io/kguardian-dev/kguardian/guardian-controller:${{ steps.extract_tag.outputs.TAG_NAME }}
+            ghcr.io/kguardian-dev/kguardian/guardian-controller:latest
