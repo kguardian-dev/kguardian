@@ -1,22 +1,61 @@
 import type { PodNodeData } from '../types';
 import type { NetworkPolicy, NetworkPolicyRule, NetworkPolicyPeer } from '../types/networkPolicy';
+import { apiClient } from '../services/api';
 
-export function generateNetworkPolicy(pod: PodNodeData, allPods: PodNodeData[] = []): NetworkPolicy {
+interface TrafficIdentity {
+  podName?: string;
+  podNamespace?: string;
+  svcName?: string;
+  svcNamespace?: string;
+  isExternal: boolean;
+}
+
+// Helper to resolve traffic identity following advisor priority
+async function resolveTrafficIdentity(ip: string): Promise<TrafficIdentity> {
+  if (!ip) {
+    return { isExternal: true };
+  }
+
+  // Priority 1: Try to get service info from API
+  try {
+    const serviceInfo = await apiClient.getServiceByIP(ip);
+    if (serviceInfo && serviceInfo.svc_name) {
+      return {
+        svcName: serviceInfo.svc_name,
+        svcNamespace: serviceInfo.svc_namespace || undefined,
+        isExternal: false,
+      };
+    }
+  } catch (error) {
+    // Service lookup failed, continue to pod lookup
+  }
+
+  // Priority 2: Try to get pod info from API (checks all namespaces)
+  try {
+    const podInfo = await apiClient.getPodDetailsByIP(ip);
+    if (podInfo && podInfo.pod_name) {
+      return {
+        podName: podInfo.pod_name,
+        podNamespace: podInfo.pod_namespace || undefined,
+        isExternal: false,
+      };
+    }
+  } catch (error) {
+    // Pod lookup failed, continue to external
+  }
+
+  // Priority 3: External traffic
+  return { isExternal: true };
+}
+
+export async function generateNetworkPolicy(pod: PodNodeData, _allPods: PodNodeData[] = []): Promise<NetworkPolicy> {
   const ingressRules: NetworkPolicyRule[] = [];
   const egressRules: NetworkPolicyRule[] = [];
 
-  // Create a map of IP -> Pod for quick lookups
-  const podByIP = new Map<string, PodNodeData>();
-  allPods.forEach(p => {
-    if (p.pod.pod_ip) {
-      podByIP.set(p.pod.pod_ip, p);
-    }
-  });
-
-  // Create one rule per unique peer (IP or pod) with all its ports
+  // Create one rule per unique peer with all its ports
   interface PeerInfo {
     ip: string;
-    matchedPod?: PodNodeData;
+    identity: TrafficIdentity;
   }
   const ingressMap = new Map<string, { peer: PeerInfo; ports: Set<string> }>();
   const egressMap = new Map<string, { peer: PeerInfo; ports: Set<string> }>();
@@ -24,6 +63,22 @@ export function generateNetworkPolicy(pod: PodNodeData, allPods: PodNodeData[] =
   console.log('Generating policy for pod:', pod.pod.pod_name);
   console.log('Traffic entries:', pod.traffic?.length || 0);
 
+  // Resolve all unique IPs to identities
+  const uniqueIPs = new Set<string>();
+  pod.traffic?.forEach((traffic) => {
+    if (traffic.traffic_in_out_ip) {
+      uniqueIPs.add(traffic.traffic_in_out_ip);
+    }
+  });
+
+  const identityMap = new Map<string, TrafficIdentity>();
+  for (const ip of uniqueIPs) {
+    const identity = await resolveTrafficIdentity(ip);
+    identityMap.set(ip, identity);
+    console.log(`Resolved ${ip}:`, identity);
+  }
+
+  // Process traffic rules
   pod.traffic?.forEach((traffic, idx) => {
     console.log(`Traffic ${idx}:`, {
       type: traffic.traffic_type,
@@ -43,9 +98,9 @@ export function generateNetworkPolicy(pod: PodNodeData, allPods: PodNodeData[] =
       return; // Skip if no remote IP
     }
 
-    // Check if this IP belongs to a pod in the cluster
-    const matchedPod = podByIP.get(remoteIP);
-    console.log(`Traffic ${idx} matched pod:`, matchedPod ? matchedPod.pod.pod_name : 'none (external)');
+    // Get the resolved identity for this IP
+    const identity = identityMap.get(remoteIP) || { isExternal: true };
+    console.log(`Traffic ${idx} identity:`, identity);
 
     const trafficType = traffic.traffic_type?.toLowerCase();
     console.log(`Traffic ${idx} type check:`, {
@@ -55,14 +110,23 @@ export function generateNetworkPolicy(pod: PodNodeData, allPods: PodNodeData[] =
       isEgress: trafficType === 'egress'
     });
 
+    // Create a unique key for this peer
+    let key: string;
+    if (identity.svcName) {
+      key = `svc-${identity.svcNamespace || 'default'}-${identity.svcName}`;
+    } else if (identity.podName) {
+      key = `pod-${identity.podNamespace || 'default'}-${identity.podName}`;
+    } else {
+      key = `ip-${remoteIP}`;
+    }
+
     if (trafficType === 'ingress') {
       // For ingress: allow traffic FROM remote IP TO this pod's port
       const port = traffic.pod_port || '80';
-      const key = matchedPod ? `pod-${matchedPod.pod.pod_name}` : `ip-${remoteIP}`;
 
       if (!ingressMap.has(key)) {
         ingressMap.set(key, {
-          peer: { ip: remoteIP, matchedPod },
+          peer: { ip: remoteIP, identity },
           ports: new Set()
         });
       }
@@ -71,11 +135,10 @@ export function generateNetworkPolicy(pod: PodNodeData, allPods: PodNodeData[] =
     } else if (trafficType === 'egress') {
       // For egress: allow traffic TO remote IP:port
       const port = traffic.traffic_in_out_port || '80';
-      const key = matchedPod ? `pod-${matchedPod.pod.pod_name}` : `ip-${remoteIP}`;
 
       if (!egressMap.has(key)) {
         egressMap.set(key, {
-          peer: { ip: remoteIP, matchedPod },
+          peer: { ip: remoteIP, identity },
           ports: new Set()
         });
       }
@@ -87,24 +150,45 @@ export function generateNetworkPolicy(pod: PodNodeData, allPods: PodNodeData[] =
   console.log('Ingress rules count:', ingressMap.size);
   console.log('Egress rules count:', egressMap.size);
 
-  // Helper function to create peer based on whether it's a pod or external IP
+  // Helper function to create peer based on identity type
   const createPeer = (peerInfo: PeerInfo): NetworkPolicyPeer => {
-    if (peerInfo.matchedPod) {
-      // This is an in-cluster pod - use pod selector
-      const targetPod = peerInfo.matchedPod;
+    const { identity } = peerInfo;
+
+    if (identity.svcName) {
+      // Service - use podSelector with service label
       const peer: NetworkPolicyPeer = {
         podSelector: {
           matchLabels: {
-            app: targetPod.pod.pod_name,
+            app: identity.svcName,
+          },
+        },
+      };
+
+      // If the service is in a different namespace, add namespace selector
+      if (identity.svcNamespace && identity.svcNamespace !== pod.pod.pod_namespace) {
+        peer.namespaceSelector = {
+          matchLabels: {
+            'kubernetes.io/metadata.name': identity.svcNamespace,
+          },
+        };
+      }
+
+      return peer;
+    } else if (identity.podName) {
+      // Pod - use podSelector
+      const peer: NetworkPolicyPeer = {
+        podSelector: {
+          matchLabels: {
+            app: identity.podName,
           },
         },
       };
 
       // If the pod is in a different namespace, add namespace selector
-      if (targetPod.pod.pod_namespace !== pod.pod.pod_namespace) {
+      if (identity.podNamespace && identity.podNamespace !== pod.pod.pod_namespace) {
         peer.namespaceSelector = {
           matchLabels: {
-            'kubernetes.io/metadata.name': targetPod.pod.pod_namespace || 'default',
+            'kubernetes.io/metadata.name': identity.podNamespace,
           },
         };
       }
@@ -210,8 +294,9 @@ export function policyToYAML(policy: NetworkPolicy): string {
     policy.spec.ingress.forEach((rule) => {
       yaml.push('  - from:');
       rule.peers.forEach((peer) => {
+        yaml.push('    -');
         if (peer.ipBlock) {
-          yaml.push('    - ipBlock:');
+          yaml.push('      ipBlock:');
           yaml.push(`        cidr: ${peer.ipBlock.cidr}`);
           if (peer.ipBlock.except) {
             yaml.push('        except:');
@@ -219,14 +304,14 @@ export function policyToYAML(policy: NetworkPolicy): string {
           }
         }
         if (peer.podSelector) {
-          yaml.push('    - podSelector:');
+          yaml.push('      podSelector:');
           yaml.push('        matchLabels:');
           Object.entries(peer.podSelector.matchLabels).forEach(([key, value]) => {
             yaml.push(`          ${key}: ${value}`);
           });
         }
         if (peer.namespaceSelector) {
-          yaml.push('    - namespaceSelector:');
+          yaml.push('      namespaceSelector:');
           yaml.push('        matchLabels:');
           Object.entries(peer.namespaceSelector.matchLabels).forEach(([key, value]) => {
             yaml.push(`          ${key}: ${value}`);
@@ -248,8 +333,9 @@ export function policyToYAML(policy: NetworkPolicy): string {
     policy.spec.egress.forEach((rule) => {
       yaml.push('  - to:');
       rule.peers.forEach((peer) => {
+        yaml.push('    -');
         if (peer.ipBlock) {
-          yaml.push('    - ipBlock:');
+          yaml.push('      ipBlock:');
           yaml.push(`        cidr: ${peer.ipBlock.cidr}`);
           if (peer.ipBlock.except) {
             yaml.push('        except:');
@@ -257,14 +343,14 @@ export function policyToYAML(policy: NetworkPolicy): string {
           }
         }
         if (peer.podSelector) {
-          yaml.push('    - podSelector:');
+          yaml.push('      podSelector:');
           yaml.push('        matchLabels:');
           Object.entries(peer.podSelector.matchLabels).forEach(([key, value]) => {
             yaml.push(`          ${key}: ${value}`);
           });
         }
         if (peer.namespaceSelector) {
-          yaml.push('    - namespaceSelector:');
+          yaml.push('      namespaceSelector:');
           yaml.push('        matchLabels:');
           Object.entries(peer.namespaceSelector.matchLabels).forEach(([key, value]) => {
             yaml.push(`          ${key}: ${value}`);

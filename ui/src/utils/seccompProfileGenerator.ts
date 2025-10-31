@@ -1,6 +1,6 @@
 import type { PodNodeData } from '../types';
 import type { SeccompProfile, SeccompSyscall } from '../types/seccompProfile';
-import { isValidSyscall, parseSyscallString } from './syscalls';
+import { parseSyscallString } from './syscalls';
 
 export function generateSeccompProfile(pod: PodNodeData): SeccompProfile {
   console.log('Generating seccomp profile for pod:', pod.pod.pod_name);

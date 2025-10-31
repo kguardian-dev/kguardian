@@ -111,7 +111,7 @@ function App() {
 
             {/* Data Table */}
             <div className="h-80 border-t border-hubble-border bg-hubble-dark overflow-hidden">
-              <DataTable selectedPod={selectedPod} />
+              <DataTable selectedPod={selectedPod} allPods={pods} />
             </div>
           </>
         )}

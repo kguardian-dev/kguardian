@@ -39,14 +39,10 @@ export interface PodNodeData {
   isExpanded: boolean;
 }
 
+// Matches broker's SvcDetail type
 export interface ServiceInfo {
-  service_name: string;
-  service_namespace: string;
-  service_ip: string;
-  cluster_ip?: string;
-  ports?: Array<{
-    port: number;
-    protocol: string;
-    targetPort: number;
-  }>;
+  svc_ip: string;
+  svc_name: string | null;
+  svc_namespace: string | null;
+  service_spec?: any; // Full Kubernetes Service object
 }

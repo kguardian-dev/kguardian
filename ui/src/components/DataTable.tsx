@@ -1,9 +1,19 @@
 import React, { useState, useEffect } from 'react';
-import type { PodNodeData } from '../types';
+import type { PodNodeData, NetworkTraffic } from '../types';
 import { ArrowRight, Activity, ChevronDown, ChevronRight } from 'lucide-react';
+import { apiClient } from '../services/api';
 
 interface DataTableProps {
   selectedPod: PodNodeData | null;
+  allPods: PodNodeData[];
+}
+
+interface TrafficIdentity {
+  podName?: string;
+  podNamespace?: string;
+  svcName?: string;
+  svcNamespace?: string;
+  isExternal: boolean;
 }
 
 const DataTable: React.FC<DataTableProps> = ({ selectedPod }) => {
@@ -11,10 +21,94 @@ const DataTable: React.FC<DataTableProps> = ({ selectedPod }) => {
   const [isTrafficExpanded, setIsTrafficExpanded] = useState(true);
   const [isSyscallsExpanded, setIsSyscallsExpanded] = useState(true);
 
-  // Reset expanded state when pod changes
+  // Cache for service and pod lookups by IP
+  const [identityCache, setIdentityCache] = useState<Map<string, TrafficIdentity>>(new Map());
+
+  // Helper to resolve traffic identity
+  // Follows advisor priority: service first, then pod, then external
+  const resolveTrafficIdentity = async (traffic: NetworkTraffic): Promise<TrafficIdentity> => {
+    if (!traffic.traffic_in_out_ip) {
+      return { isExternal: true };
+    }
+
+    const ip = traffic.traffic_in_out_ip;
+
+    // Check cache first
+    if (identityCache.has(ip)) {
+      return identityCache.get(ip)!;
+    }
+
+    // Priority 1: Try to get service info from API
+    try {
+      const serviceInfo = await apiClient.getServiceByIP(ip);
+      if (serviceInfo && serviceInfo.svc_name) {
+        const identity: TrafficIdentity = {
+          svcName: serviceInfo.svc_name,
+          svcNamespace: serviceInfo.svc_namespace || undefined,
+          isExternal: false,
+        };
+
+        // Cache the result
+        setIdentityCache(prev => new Map(prev).set(ip, identity));
+        return identity;
+      }
+    } catch (error) {
+      // Service lookup failed, continue to pod lookup
+    }
+
+    // Priority 2: Try to get pod info from API (checks all namespaces)
+    try {
+      const podInfo = await apiClient.getPodDetailsByIP(ip);
+      if (podInfo && podInfo.pod_name) {
+        const identity: TrafficIdentity = {
+          podName: podInfo.pod_name,
+          podNamespace: podInfo.pod_namespace || undefined,
+          isExternal: false,
+        };
+
+        // Cache the result
+        setIdentityCache(prev => new Map(prev).set(ip, identity));
+        return identity;
+      }
+    } catch (error) {
+      // Pod lookup failed, continue to external
+    }
+
+    // Priority 3: External traffic
+    const identity: TrafficIdentity = { isExternal: true };
+    setIdentityCache(prev => new Map(prev).set(ip, identity));
+    return identity;
+  };
+
+  // State for resolved identities
+  const [resolvedIdentities, setResolvedIdentities] = useState<Map<string, TrafficIdentity>>(new Map());
+
+  // Reset expanded state and identities when pod changes
   useEffect(() => {
     setExpandedSyscalls(new Set());
+    setResolvedIdentities(new Map());
   }, [selectedPod?.id]);
+
+  // Resolve identities for all traffic when selected pod changes
+  useEffect(() => {
+    if (!selectedPod || !selectedPod.traffic) return;
+
+    const resolveAllIdentities = async () => {
+      const identities = new Map<string, TrafficIdentity>();
+
+      for (const traffic of selectedPod.traffic) {
+        if (traffic.traffic_in_out_ip && !identities.has(traffic.traffic_in_out_ip)) {
+          const identity = await resolveTrafficIdentity(traffic);
+          identities.set(traffic.traffic_in_out_ip, identity);
+        }
+      }
+
+      setResolvedIdentities(identities);
+    };
+
+    resolveAllIdentities();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedPod]);
   if (!selectedPod) {
     return (
       <div className="h-full flex items-center justify-center text-tertiary">
@@ -90,11 +184,73 @@ const DataTable: React.FC<DataTableProps> = ({ selectedPod }) => {
                       </td>
                       <td className="px-4 py-2 text-secondary font-mono text-xs">
                         {traffic.pod_ip}
-                        {traffic.pod_port && `:${traffic.pod_port}`}
+                        {/* For ingress, pod port is destination (meaningful). For egress, pod port is ephemeral source (hide if 0) */}
+                        {traffic.traffic_type?.toLowerCase() === 'ingress' && traffic.pod_port && traffic.pod_port !== '0' && `:${traffic.pod_port}`}
+                        {traffic.traffic_type?.toLowerCase() === 'egress' && traffic.pod_port && traffic.pod_port !== '0' && `:${traffic.pod_port}`}
                       </td>
-                      <td className="px-4 py-2 text-secondary font-mono text-xs">
-                        {traffic.traffic_in_out_ip}
-                        {traffic.traffic_in_out_port && `:${traffic.traffic_in_out_port}`}
+                      <td className="px-4 py-2 text-secondary text-xs">
+                        {(() => {
+                          const identity = resolvedIdentities.get(traffic.traffic_in_out_ip || '') || { isExternal: true };
+
+                          if (identity.podName) {
+                            // In-cluster pod
+                            return (
+                              <div className="flex flex-col gap-1">
+                                <div className="flex items-center gap-1">
+                                  <span className="px-2 py-0.5 bg-hubble-success/20 text-hubble-success rounded text-xs">
+                                    Pod
+                                  </span>
+                                  <span className="font-semibold text-primary">{identity.podName}</span>
+                                </div>
+                                {identity.podNamespace && (
+                                  <span className="text-tertiary text-xs">ns: {identity.podNamespace}</span>
+                                )}
+                                <span className="font-mono text-xs text-tertiary">
+                                  {traffic.traffic_in_out_ip}
+                                  {/* For ingress, remote port is ephemeral source (hide if 0). For egress, remote port is destination (show if not 0) */}
+                                  {traffic.traffic_type?.toLowerCase() === 'egress' && traffic.traffic_in_out_port && traffic.traffic_in_out_port !== '0' && `:${traffic.traffic_in_out_port}`}
+                                  {traffic.traffic_type?.toLowerCase() === 'ingress' && traffic.traffic_in_out_port && traffic.traffic_in_out_port !== '0' && `:${traffic.traffic_in_out_port}`}
+                                </span>
+                              </div>
+                            );
+                          } else if (identity.svcName) {
+                            // In-cluster service
+                            return (
+                              <div className="flex flex-col gap-1">
+                                <div className="flex items-center gap-1">
+                                  <span className="px-2 py-0.5 bg-hubble-accent/20 text-hubble-accent rounded text-xs">
+                                    Svc
+                                  </span>
+                                  <span className="font-semibold text-primary">{identity.svcName}</span>
+                                </div>
+                                {identity.svcNamespace && (
+                                  <span className="text-tertiary text-xs">ns: {identity.svcNamespace}</span>
+                                )}
+                                <span className="font-mono text-xs text-tertiary">
+                                  {traffic.traffic_in_out_ip}
+                                  {/* For ingress, remote port is ephemeral source (hide if 0). For egress, remote port is destination (show if not 0) */}
+                                  {traffic.traffic_type?.toLowerCase() === 'egress' && traffic.traffic_in_out_port && traffic.traffic_in_out_port !== '0' && `:${traffic.traffic_in_out_port}`}
+                                  {traffic.traffic_type?.toLowerCase() === 'ingress' && traffic.traffic_in_out_port && traffic.traffic_in_out_port !== '0' && `:${traffic.traffic_in_out_port}`}
+                                </span>
+                              </div>
+                            );
+                          } else {
+                            // External traffic
+                            return (
+                              <div className="flex flex-col gap-1">
+                                <span className="px-2 py-0.5 bg-gray-500/20 text-gray-400 rounded text-xs w-fit">
+                                  External
+                                </span>
+                                <span className="font-mono text-xs">
+                                  {traffic.traffic_in_out_ip}
+                                  {/* For ingress, remote port is ephemeral source (hide if 0). For egress, remote port is destination (show if not 0) */}
+                                  {traffic.traffic_type?.toLowerCase() === 'egress' && traffic.traffic_in_out_port && traffic.traffic_in_out_port !== '0' && `:${traffic.traffic_in_out_port}`}
+                                  {traffic.traffic_type?.toLowerCase() === 'ingress' && traffic.traffic_in_out_port && traffic.traffic_in_out_port !== '0' && `:${traffic.traffic_in_out_port}`}
+                                </span>
+                              </div>
+                            );
+                          }
+                        })()}
                       </td>
                       <td className="px-4 py-2">
                         <span className="px-2 py-1 bg-hubble-accent/20 text-hubble-accent rounded text-xs">

@@ -1,7 +1,7 @@
 # Xentra Advisor: Kubernetes Security Profile Enhancer
 
 [![Go Report Card](https://goreportcard.com/badge/github.com/xentra-ai/kube-guardian)](https://goreportcard.com/report/github.com/xentra-ai/kube-guardian)
-[![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
+[![License](https://img.shields.io/badge/License-BSL%201.1-blue.svg)](https://mariadb.com/bsl11/)
 
 Xentra Advisor is a powerful `kubectl` plugin designed to enhance the security posture of your Kubernetes applications. It analyzes runtime behavior (via the [Kube Guardian Controller](https://github.com/xentra-ai/kube-guardian)) and generates tailored security resources like Network Policies and Seccomp Profiles.
 
@@ -230,4 +230,9 @@ Contributions are welcome! Please read the contributing guide (TODO: Create CONT
 
 ## 📄 License
 
-This project is licensed under the Apache 2.0 License - see the [LICENSE](LICENSE) file for details.
+This project is licensed under the Business Source License 1.1 - see the [LICENSE](LICENSE) file for details.
+
+**Summary:**
+- **Free for:** Development, testing, evaluation, and non-production/non-commercial use
+- **Commercial use:** Requires a commercial license (contact the licensors)
+- **Converts to:** Apache License 2.0 on January 1, 2029
