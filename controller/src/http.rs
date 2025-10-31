@@ -110,7 +110,7 @@ pub async fn process_http_event(evt: &HttpEventData, pod_data: &PodInspect) -> R
     };
 
     
-
+    println!("HTTP Data String: {} : sport {}, sport_be {}, dport {}, dport_be {}", data_string, evt.sport, src_port, evt.dport, host_port);
     // try to parse start-line / headers once so we can extract HTTP path
     let parsed = parse_http_headers(&data_string);
     let http_path_opt: Option<String> = parsed.as_ref().and_then(|(start_line, _headers, _body)| 
@@ -132,23 +132,23 @@ pub async fn process_http_event(evt: &HttpEventData, pod_data: &PodInspect) -> R
 
 
     // Determine direction: requests are INGRESS, responses are EGRESS
-    let traffic_type_str = if evt.is_request == 1 { 
-     traffic_in_out_ip_str = IpAddr::V4(src_ip).to_string();
+    let traffic_type_str = if evt.is_request == 0 { 
+     traffic_in_out_ip_str = IpAddr::V4(_dst_ip).to_string();
     traffic_in_out_port_str = 0.to_string();
-    pod_port_str = evt.dport.to_string();
+    pod_port_str = evt.sport.to_string();
         "INGRESS" 
     } else { 
     traffic_in_out_ip_str = IpAddr::V4(_dst_ip).to_string();
     traffic_in_out_port_str = host_port.to_string();
-    pod_port_str = host_port.to_string();
+    pod_port_str = 0.to_string();
         "EGRESS" }.to_string();
     
     let protocol_str = "TCP".to_string();
 
-    if pod_ip.eq(&traffic_in_out_ip_str) {
-        // skip localhost/pod-internal traffic
-        return Ok(());
-    }
+    // if pod_ip.eq(&traffic_in_out_ip_str) {
+    //     // skip localhost/pod-internal traffic
+    //     return Ok(());
+    // }
 
     let cache_key = HttpKey {
         pod_name: pod_name.clone(),

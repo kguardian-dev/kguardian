@@ -13,34 +13,15 @@
 
 char LICENSE[] SEC("license") = "Dual BSD/GPL";
 
-/* Reduce stack usage: shrink capture size to fit BPF stack.
- * If you need larger captures, use a per-cpu array map to hold buffers.
- */
 #define MAX_HTTP_DATA_LEN 128
-#define MAX_HTTP_PATH_LEN 128
 
 struct conn_info {
     __u32 saddr;
     __u32 daddr;
     __u16 sport;
     __u16 dport;
-     __u64 inum;           // namespace inum
+    __u64 inum;           // namespace inum
 };
-
-struct write_args_t {
-    __u64 buf_addr;
-    __u32 fd;
-};
-
-struct {
-    __uint(type, BPF_MAP_TYPE_HASH);
-    __uint(max_entries, 1024);
-    __type(key, __u64);
-    __type(value, struct write_args_t);
-} write_args SEC(".maps");
-
-
-
 
 struct event_t
 {
@@ -48,7 +29,7 @@ struct event_t
     __u32 saddr;              // peer IPv4 in network byte order
     __u32 daddr;
     __u16 sport;              // peer port in network byte order
-    __u16 dport;              // local/host port in network byte order (ADDED)
+    __u16 dport;              // local/host port in network byte order
     u8 is_request;
     u8 _pad;                  // pad to align data_len at 16
     u32 data_len;
@@ -58,13 +39,6 @@ struct event_t
 struct recv_args_t {
     __u64 addr;
     __u32 fd;
-    // implicit padding to 16 bytes
-};
-
-struct sock_key_t {
-    __u64 net_ns;
-    __u32 fd;
-    // implicit padding to 16 bytes
 };
 
 struct
@@ -82,32 +56,19 @@ struct
     __uint(value_size, sizeof(u8));
 } accept_pending SEC(".maps");
 
-// Track all accepted sockets in target namespace
-struct
-{
-    __uint(type, BPF_MAP_TYPE_HASH);
-    __uint(max_entries, 10240);
-    __uint(key_size, sizeof(struct sock_key_t));  // composite key: net_ns + fd
-    __uint(value_size, sizeof(__u8));
-} active_app_sockets SEC(".maps");
-
-
-struct
-{
-    __uint(type, BPF_MAP_TYPE_HASH);
-    __uint(max_entries, 1024);
-    __uint(key_size, sizeof(u64));  // pid_tgid
-    __uint(value_size, sizeof(struct recv_args_t)); // buffer addr + fd
-} recv_args_map SEC(".maps");
-
-
-// Track PIDs in target namespace
 struct {
     __uint(type, BPF_MAP_TYPE_HASH);
-    __uint(max_entries, 1024);
-    __uint(key_size, sizeof(__u32));
-    __uint(value_size, sizeof(__u8));
-} target_namespace_pids SEC(".maps");
+    __uint(max_entries, 10240);
+    __type(key, __u64);
+    __type(value, struct recv_args_t);
+} recv_args_map SEC(".maps");
+
+struct {
+    __uint(type, BPF_MAP_TYPE_HASH);
+    __uint(max_entries, 10240);
+    __type(key, __u64);
+    __type(value, struct conn_info);
+} active_conns SEC(".maps");
 
 static __always_inline int is_http_data(char *data, size_t len)
 {
@@ -150,8 +111,10 @@ static __always_inline int check_target_namespace()
     return (exists != NULL) ? 1 : 0;
 }
 
+static __always_inline __u64 make_pid_fd_key(__u32 pid, int fd) {
+    return ((__u64)pid << 32) | (__u32)fd;
+}
 
-// Track accepted connections
 SEC("kprobe/__sys_accept4")
 int accept4_enter(struct pt_regs *ctx)
 {
@@ -161,11 +124,6 @@ int accept4_enter(struct pt_regs *ctx)
     u64 pid_tgid = bpf_get_current_pid_tgid();
     __u8 one = 1;
     bpf_map_update_elem(&accept_pending, &pid_tgid, &one, BPF_ANY);
-
-    u32 pid = pid_tgid >> 32;
-    bpf_map_update_elem(&target_namespace_pids, &pid, &one, BPF_ANY);
-
-    bpf_printk("accept4_enter: marked pid=%d\n", pid);
     return 0;
 }
 
@@ -176,100 +134,25 @@ int accept4_exit(struct pt_regs *ctx)
     if (new_fd < 0)
         return 0;
 
-    // verify we previously saw accept_enter for this pid
     u64 pid_tgid = bpf_get_current_pid_tgid();
-    if (bpf_map_lookup_elem(&accept_pending, &pid_tgid) == 0)
+    if (!bpf_map_lookup_elem(&accept_pending, &pid_tgid))
         return 0;
-
+    
     bpf_map_delete_elem(&accept_pending, &pid_tgid);
 
-    // fetch current task's net namespace inum
+    __u32 pid = pid_tgid >> 32;
+    
+    // Get namespace and task
     struct task_struct *task = (struct task_struct *)bpf_get_current_task();
     if (!task)
         return 0;
+    __u64 inum = BPF_CORE_READ(task, nsproxy, net_ns, ns.inum);
 
-    __u64 net_ns = BPF_CORE_READ(task, nsproxy, net_ns, ns.inum);
-
-    struct sock_key_t key = {};
-    key.net_ns = net_ns;
-    key.fd = (__u32)new_fd;
-
-    __u8 one = 1;
-    bpf_map_update_elem(&active_app_sockets, &key, &one, BPF_ANY);
-
-    bpf_printk("accept4_exit: tracked socket net_ns=%llu fd=%d\n", net_ns, new_fd);
-    return 0;
-}
-
-// Generic helper to handle recv entry
-static __always_inline int handle_recv_entry(struct pt_regs *ctx, int fd, void *buf,int is_read)
-{
-    u64 pid_tgid = bpf_get_current_pid_tgid();
-    __u32 pid = (u32)(pid_tgid >> 32);
-
-    if (!bpf_map_lookup_elem(&target_namespace_pids, &pid))
-        return 0;
-
-    // get current task net namespace
-    struct task_struct *task = (struct task_struct *)bpf_get_current_task();
-    if (!task)
-        return 0;
-    __u64 net_ns = BPF_CORE_READ(task, nsproxy, net_ns, ns.inum);
-
-    struct sock_key_t key = {};
-    key.net_ns = net_ns;
-    key.fd = (__u32)fd;
-
-    __u8 *exists = bpf_map_lookup_elem(&active_app_sockets, &key);
-
-    if (!exists)
-        return 0;
-
-    bpf_printk("recv_entry: TRACKED net_ns=%llu fd=%d\n", net_ns, fd);
-
-    // FIX: Store both buffer address AND file descriptor
-    struct recv_args_t args = {};
-    args.addr = (u64)buf;
-    args.fd = (__u32)fd;
-    bpf_map_update_elem(&recv_args_map, &pid_tgid, &args, BPF_ANY);
-    return 0;
-}
-
-// Generic helper to handle recv exit
-static __always_inline int handle_recv_exit(struct pt_regs *ctx, const char *syscall_name)
-{
-    u64 pid_tgid = bpf_get_current_pid_tgid();
-    u32 pid = pid_tgid >> 32;
-
-    struct recv_args_t *rv = bpf_map_lookup_elem(&recv_args_map, &pid_tgid);
-    if (!rv)
-        return 0;
-
-    struct recv_args_t rv_copy = {};
-    // copy to stack to avoid later map access
-    bpf_probe_read_kernel(&rv_copy, sizeof(rv_copy), rv);
-    bpf_map_delete_elem(&recv_args_map, &pid_tgid);
-
-    char *buf = (char *)rv_copy.addr;
-    int fd = rv_copy.fd;
-    long bytes_read = PT_REGS_RC(ctx);
-    if (bytes_read <= 0)
-        return 0;
-
-    bpf_printk("recv_exit: pid=%d fd=%d bytes=%ld\n", pid, fd, bytes_read);
-
-    struct event_t evt = {};
-
-    // populate event with current task's net namespace inum
-    struct task_struct *task = (struct task_struct *)bpf_get_current_task();
-    if (!task)
-        return 0;
-    evt.inum = BPF_CORE_READ(task, nsproxy, net_ns, ns.inum);
-
-    // locate struct file * for fd: files->fdt->fd[fd]
+    // Get the socket structure to extract connection details
     struct files_struct *files = BPF_CORE_READ(task, files);
     if (!files)
         return 0;
+    
     struct fdtable *fdt = BPF_CORE_READ(files, fdt);
     if (!fdt)
         return 0;
@@ -278,8 +161,7 @@ static __always_inline int handle_recv_exit(struct pt_regs *ctx, const char *sys
     bpf_probe_read_kernel(&fd_array, sizeof(fd_array), &fdt->fd);
 
     struct file *f = NULL;
-    // read pointer at fd_array + fd * sizeof(void*)
-    bpf_probe_read_kernel(&f, sizeof(f), (void *)((char *)fd_array + (__u64)fd * sizeof(void *)));
+    bpf_probe_read_kernel(&f, sizeof(f), (void *)((char *)fd_array + (__u64)new_fd * sizeof(void *)));
     if (!f)
         return 0;
 
@@ -291,80 +173,27 @@ static __always_inline int handle_recv_exit(struct pt_regs *ctx, const char *sys
     if (!sk)
         return 0;
 
-    // read IPv4 peer addr/port from sock common fields (network byte order)
-    __u32 peer_ip = BPF_CORE_READ(sk, __sk_common.skc_daddr);
-    __u16 peer_port = BPF_CORE_READ(sk, __sk_common.skc_dport);
+    // Read connection details from socket
+    __u32 saddr = BPF_CORE_READ(sk, __sk_common.skc_rcv_saddr);  // local IP
+    __u32 daddr = BPF_CORE_READ(sk, __sk_common.skc_daddr);       // remote IP
+    __u16 sport = BPF_CORE_READ(sk, __sk_common.skc_num);         // local port (host order)
+    __u16 dport = BPF_CORE_READ(sk, __sk_common.skc_dport);       // remote port (network order)
 
-    // ADDED: Read local/host port (network byte order)
-    __u16 local_port = BPF_CORE_READ(sk, __sk_common.skc_num);
-
-    evt.saddr = peer_ip;
-    evt.sport = peer_port;
-    evt.dport = local_port;  // ADDED: Store host port
-
-    size_t data_len = bytes_read < MAX_HTTP_DATA_LEN ? bytes_read : MAX_HTTP_DATA_LEN;
-
-    if (bpf_probe_read_user(evt.data, data_len, buf) != 0) {
-        bpf_printk("recv_exit: failed to read user buffer\n");
-        return 0;
-    }
-
-    int http_type = is_http_data(evt.data, data_len);
-    if (http_type == 0)
-        return 0;
-
-    evt.data_len = data_len;
-    evt.is_request = (http_type == 1) ? 1 : 0;
-
-    bpf_printk("HTTP DETECTED! net_ns=%llu remote=%u:%u local=%u type=%s len=%d\n",
-               evt.inum, evt.saddr, evt.sport, evt.dport,
-               http_type == 1 ? "req" : "resp", (int)data_len);
-
-    bpf_perf_event_output(ctx, &http_events, BPF_F_CURRENT_CPU, &evt, sizeof(evt));
+    // Store accepted connection info with full details
+    struct conn_info info = {};
+    info.inum = inum;
+    info.saddr = saddr;
+    info.daddr = daddr;
+    info.sport = sport;
+    info.dport = dport;
+    
+    __u64 key = make_pid_fd_key(pid, new_fd);
+    bpf_map_update_elem(&active_conns, &key, &info, BPF_ANY);
+    
+    bpf_printk("accept4: fd=%d saddr=%u:%u daddr=%u:%u\n", 
+               new_fd, saddr, sport, daddr, dport);
     return 0;
 }
-
-// Hook read (common for simple servers)
-SEC("kprobe/ksys_read")
-int kprobe_ksys_read_entry(struct pt_regs *ctx)
-{
-    int fd = (int)PT_REGS_PARM1(ctx);
-    char *buf = (char *)PT_REGS_PARM2(ctx);
-    return handle_recv_entry(ctx, fd, buf,1);
-}
-
-SEC("kretprobe/ksys_read")
-int kretprobe_ksys_read_exit(struct pt_regs *ctx)
-{
-    return handle_recv_exit(ctx, "read");
-}
-
-
-struct http_event {
-    __u32 pid;
-    __be32 daddr;
-    __u16 dport;
-    __u32 data_len;
-    char data[128];
-};
-
-struct {
-    __uint(type, BPF_MAP_TYPE_HASH);
-    __uint(max_entries, 10240);
-    __type(key, __u32);
-    __type(value, struct conn_info);
-} active_conns SEC(".maps");
-
-struct {
-    __uint(type, BPF_MAP_TYPE_RINGBUF);
-    __uint(max_entries, 1 << 24);
-} events SEC(".maps");
-
-
-static __always_inline __u64 make_pid_fd_key(__u32 pid, int fd) {
-    return ((__u64)pid << 32) | (__u32)fd;
-}
-
 
 SEC("kprobe/__sys_connect")
 int BPF_KPROBE(trace_connect, int fd, struct sockaddr *uservaddr, int addrlen)
@@ -406,42 +235,34 @@ int BPF_KPROBE(trace_connect, int fd, struct sockaddr *uservaddr, int addrlen)
     return 0;
 }
 
-static __always_inline int process_http_data(void *ctx, int fd, void *buff, size_t len, __u32 pid) {
-    // Lookup connection info
+static __always_inline int process_http_data(void *ctx, int fd, void *buff, size_t len, __u32 pid, int in_out ) {
     __u64 key = make_pid_fd_key(pid, fd);
     struct conn_info *conn = bpf_map_lookup_elem(&active_conns, &key);
     if (!conn)
         return 0;
-    
-    bpf_printk("process_http_data=%d\n", fd);
-    
-    // Read the data buffer
+
+    // Read data buffer
     char tmp_data[MAX_HTTP_DATA_LEN];
     __builtin_memset(tmp_data, 0, sizeof(tmp_data));
-    
     size_t read_size = len < MAX_HTTP_DATA_LEN ? len : MAX_HTTP_DATA_LEN;
+    
     if (bpf_probe_read_user(tmp_data, read_size, buff) < 0)
         return 0;
-    
-    bpf_printk("bpf_probe_read_user=%d\n", fd);
-    
-    // Check if it looks like an HTTP request
-    if (!is_http_data(tmp_data, read_size))
+
+    int http_type = is_http_data(tmp_data, read_size);
+    if (http_type == 0 || http_type != 1)
         return 0;
-    
-    bpf_printk("is_http_data=%d\n", fd);
-    
+
     // Prepare event
     struct event_t event = {};
     event.inum = conn->inum;
-    event.saddr = conn->saddr;  // May be 0 if not yet known
+    event.saddr = conn->saddr;
     event.daddr = conn->daddr;
-    event.sport = conn->sport;  // May be 0 if not yet known
+    event.sport = conn->sport;
     event.dport = conn->dport;
-    event.is_request = 0;
+    event.is_request = (in_out == 1) ? 1 : 0;  // in ingress, out egress
     event.data_len = read_size;
-    
-    // Copy HTTP data
+
     #pragma unroll
     for (int i = 0; i < MAX_HTTP_DATA_LEN; i++) {
         if (i >= read_size)
@@ -449,66 +270,126 @@ static __always_inline int process_http_data(void *ctx, int fd, void *buff, size
         event.data[i] = tmp_data[i];
     }
     
-    // Send event to userspace
-    bpf_perf_event_output(ctx, &http_events, BPF_F_CURRENT_CPU, &event, sizeof(event));
+    bpf_printk("net_ns=%llu remote=%u:%u local=%u type=%s len=%d\n",
+               event.inum, event.saddr, event.sport, event.dport,
+               http_type == 1 ? "req" : "resp", (int)event.data_len);
     
+    bpf_perf_event_output(ctx, &http_events, BPF_F_CURRENT_CPU, &event, sizeof(event));
     return 0;
 }
 
-
-// Track sys_sendto to capture HTTP requests
 SEC("kprobe/__sys_sendto")
 int BPF_KPROBE(trace_sendto, int fd, void *buff, size_t len)
 {
     __u64 pid_tgid = bpf_get_current_pid_tgid();
     __u32 pid = pid_tgid >> 32;
     
-    return process_http_data(ctx, fd, buff, len, pid);
+    return process_http_data(ctx, fd, buff, len, pid, 1);
 }
 
-// Also hook sys_write as some apps use write() instead of sendto()
-// SEC("kprobe/__sys_write")
-// int BPF_KPROBE(trace_write, int fd, const void *buff, size_t len)
-// {
-//     __u64 pid_tgid = bpf_get_current_pid_tgid();
-//     __u32 pid = pid_tgid >> 32;
+SEC("kprobe/__sys_recvfrom")
+int BPF_KPROBE(trace_recvfrom_entry, int fd, void *buff, size_t len)
+{
+    __u64 pid_tgid = bpf_get_current_pid_tgid();
+    __u32 pid = pid_tgid >> 32;
     
-//     return process_http_data(ctx, fd, (void *)buff, len, pid);
-// }
+    // Store buffer info for kretprobe
+    struct recv_args_t args = {};
+    args.addr = (u64)buff;
+    args.fd = fd;
+    bpf_map_update_elem(&recv_args_map, &pid_tgid, &args, BPF_ANY);
+    return 0;
+}
 
+SEC("kretprobe/__sys_recvfrom")
+int BPF_KRETPROBE(trace_recvfrom_exit)
+{
+    __u64 pid_tgid = bpf_get_current_pid_tgid();
+    __u32 pid = pid_tgid >> 32;
+    
+    struct recv_args_t *args = bpf_map_lookup_elem(&recv_args_map, &pid_tgid);
+    if (!args)
+        return 0;
+    
+    struct recv_args_t args_copy = *args;
+    bpf_map_delete_elem(&recv_args_map, &pid_tgid);
+    
+    long bytes_read = PT_REGS_RC(ctx);
+    if (bytes_read <= 0)
+        return 0;
+    
+    return process_http_data(ctx, args_copy.fd, (void *)args_copy.addr, bytes_read, pid, 0);
+}
 
+SEC("kprobe/ksys_read")
+int kprobe_ksys_read_entry(struct pt_regs *ctx)
+{
+    int fd = (int)PT_REGS_PARM1(ctx);
+    char *buf = (char *)PT_REGS_PARM2(ctx);
+    
+    __u64 pid_tgid = bpf_get_current_pid_tgid();
+    
+    // Store buffer info for kretprobe
+    struct recv_args_t args = {};
+    args.addr = (u64)buf;
+    args.fd = fd;
+    bpf_map_update_elem(&recv_args_map, &pid_tgid, &args, BPF_ANY);
+    return 0;
+}
 
-// Track socket close to cleanup
+SEC("kretprobe/ksys_read")
+int kretprobe_ksys_read_exit(struct pt_regs *ctx)
+{
+    __u64 pid_tgid = bpf_get_current_pid_tgid();
+    __u32 pid = pid_tgid >> 32;
+    
+    struct recv_args_t *args = bpf_map_lookup_elem(&recv_args_map, &pid_tgid);
+    if (!args)
+        return 0;
+    
+    struct recv_args_t args_copy = *args;
+    bpf_map_delete_elem(&recv_args_map, &pid_tgid);
+    
+    long bytes_read = PT_REGS_RC(ctx);
+    if (bytes_read <= 0)
+        return 0;
+    
+    return process_http_data(ctx, args_copy.fd, (void *)args_copy.addr, bytes_read, pid, 0);
+}
+
+SEC("uprobe/SSL_write")
+int uprobe_ssl_write(struct pt_regs *ctx)
+{
+    void *ssl = (void *)PT_REGS_PARM1(ctx);
+    const void *buf = (const void *)PT_REGS_PARM2(ctx);
+    int num = (int)PT_REGS_PARM3(ctx);
+    
+    // Now 'buf' contains plaintext HTTP data before encryption
+    char data[128];
+    bpf_probe_read_user(data, sizeof(data), buf);
+
+    bpf_printk("uprobe/SSL_write");
+    
+    // Check if it's HTTP and extract method/path
+    if (is_http_data(data, num)) {
+        
+    }
+    
+    return 0;
+}
+
 SEC("kprobe/__x64_sys_close")
 int kprobe_ksys_close(struct pt_regs *ctx)
 {
     u64 pid_tgid = bpf_get_current_pid_tgid();
     __u32 pid = (u32)(pid_tgid >> 32);
 
-    if (!bpf_map_lookup_elem(&target_namespace_pids, &pid))
-        return 0;
+    int fd = (int)PT_REGS_PARM1(ctx);
 
-    int fd = PT_REGS_PARM1(ctx);
-
-    // obtain current task net namespace
-    struct task_struct *task = (struct task_struct *)bpf_get_current_task();
-    if (!task)
-        return 0;
-    __u64 net_ns = BPF_CORE_READ(task, nsproxy, net_ns, ns.inum);
-
-    struct sock_key_t key = {};
-    key.net_ns = net_ns;
-    key.fd = (__u32)fd;
-
-    if (bpf_map_delete_elem(&active_app_sockets, &key) == 0) {
-        bpf_printk("close: removed socket net_ns=%llu fd=%d\n", net_ns, fd);
-    }
-
-    __u64 k = make_pid_fd_key(pid, fd);
-    if (bpf_map_delete_elem(&active_conns, &k) == 0) {
+    __u64 key = make_pid_fd_key(pid, fd);
+    if (bpf_map_delete_elem(&active_conns, &key) == 0) {
         bpf_printk("close: removed connection pid=%u fd=%d\n", pid, fd);
     }
-
 
     return 0;
 }

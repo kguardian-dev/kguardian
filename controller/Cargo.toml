@@ -5,13 +5,14 @@ license = "LGPL-2.1-only OR BSD-2-Clause"
 edition = "2021"
 
 [build-dependencies]
-libbpf-cargo = "0.25.0"
+libbpf-cargo = "0.24.0"
 vmlinux = { version = "0.0", git = "https://github.com/libbpf/vmlinux.h.git", rev = "83a228cf37fc65f2d14e4896a04922b5ee531a94" }
 
 [dependencies]
 anyhow = "1.0.96"
-libbpf-rs = "0.25.0"
-libbpf-sys = "1.5.1"
+libbpf-cargo = "0.24"
+libbpf-rs = "0.24"
+libbpf-sys = "1.4.0"
 plain = "0.2"
 time = { version = "0.3", features = ["formatting", "local-offset", "macros"]}
 tokio = { version = "1.47", features = ["macros", "rt-multi-thread", "fs", "time"] }
