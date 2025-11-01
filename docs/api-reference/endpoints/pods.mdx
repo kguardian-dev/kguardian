@@ -1,0 +1,78 @@
+---
+title: "Pod Endpoints"
+description: "Add and retrieve pod metadata"
+---
+
+## POST /pods
+
+Add or update pod metadata.
+
+### Request
+
+```json
+{
+  "pod_ip": "10.244.1.5",
+  "pod_name": "my-app-7d9f6b8c4-x5z2w",
+  "pod_namespace": "production"
+}
+```
+
+### Response
+
+```json
+{
+  "uuid": "550e8400-e29b-41d4-a716-446655440000",
+  "pod_ip": "10.244.1.5",
+  "pod_name": "my-app-7d9f6b8c4-x5z2w",
+  "pod_namespace": "production"
+}
+```
+
+---
+
+## POST /pod/spec
+
+Add full pod specification including labels and metadata.
+
+### Request
+
+```json
+{
+  "pod_ip": "10.244.1.5",
+  "pod_name": "my-app",
+  "pod_namespace": "production",
+  "pod_obj": {
+    "metadata": {
+      "labels": {
+        "app": "my-app",
+        "version": "v1.0.0"
+      }
+    },
+    "spec": { /* full pod spec */ }
+  }
+}
+```
+
+---
+
+## GET /pod/ip/:ip
+
+Retrieve pod details by IP address.
+
+### Example
+
+```bash
+curl http://localhost:9090/pod/ip/10.244.1.5
+```
+
+### Response
+
+```json
+{
+  "uuid": "550e8400-e29b-41d4-a716-446655440000",
+  "pod_ip": "10.244.1.5",
+  "pod_name": "my-app",
+  "pod_namespace": "production",
+  "pod_obj": { /* full pod spec */ }
+}
+```

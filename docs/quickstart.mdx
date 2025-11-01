@@ -1,80 +1,393 @@
 ---
-title: "Quickstart"
-description: "Start building awesome documentation in minutes"
+title: "Quickstart Guide"
+description: "Get kguardian up and running in your Kubernetes cluster in 5 minutes"
+icon: "rocket"
 ---
 
-## Get started in three steps
+This guide will help you install kguardian and generate your first security policy.
 
-Get your documentation site running locally and make your first customization.
+## Prerequisites
 
-### Step 1: Set up your local environment
+Before you begin, ensure you have:
 
 <AccordionGroup>
-  <Accordion icon="copy" title="Clone your docs locally">
-    During the onboarding process, you created a GitHub repository with your docs content if you didn't already have one. You can find a link to this repository in your [dashboard](https://dashboard.mintlify.com).
-    
-    To clone the repository locally so that you can make and preview changes to your docs, follow the [Cloning a repository](https://docs.github.com/en/repositories/creating-and-managing-repositories/cloning-a-repository) guide in the GitHub docs.
+  <Accordion icon="kubernetes" title="Kubernetes Cluster">
+    - Kubernetes v1.19 or later
+    - Linux nodes with kernel 6.2+ (for eBPF support)
+    - `kubectl` configured and connected to your cluster
   </Accordion>
-  <Accordion icon="rectangle-terminal" title="Start the preview server">
-    1. Install the Mintlify CLI: `npm i -g mint`
-    2. Navigate to your docs directory and run: `mint dev`
-    3. Open `http://localhost:3000` to see your docs live!
-    
-    <Tip>Your preview updates automatically as you edit files.</Tip>
+
+  <Accordion icon="helm" title="Helm (Recommended)">
+    - Helm v3.0 or later
+    - Or use raw manifests if you prefer
+  </Accordion>
+
+  <Accordion icon="circle-check" title="Cluster Permissions">
+    - Admin access to install the controller (DaemonSet, RBAC, etc.)
+    - Permission to create resources in your target namespaces
   </Accordion>
 </AccordionGroup>
 
-### Step 2: Deploy your changes
+<Warning>
+**Kernel Version Check:** kguardian requires Linux kernel 6.2+ for eBPF functionality. Run `uname -r` on your nodes to verify.
+</Warning>
 
-<AccordionGroup>
-  <Accordion icon="github" title="Install our GitHub app">
-    Install the Mintlify GitHub app from your [dashboard](https://dashboard.mintlify.com/settings/organization/github-app).
-    
-    Our GitHub app automatically deploys your changes to your docs site, so you don't need to manage deployments yourself.
-</Accordion>
-<Accordion icon="palette" title="Update your site name and colors">
-    For a first change, let's update the name and colors of your docs site.
+## Step 1: Install the Controller
 
-    1. Open `docs.json` in your editor.
-    2. Change the `"name"` field to your project name.
-    3. Update the `"colors"` to match your brand.
-    4. Save and see your changes instantly at `http://localhost:3000`.
+The kguardian controller runs as a DaemonSet and uses eBPF to observe your workloads.
 
-    <Tip>Try changing the primary color to see an immediate difference!</Tip>
-  </Accordion>
-</AccordionGroup>
+<Tabs>
+  <Tab title="Helm (Recommended)">
+    ```bash
+    # Add the kguardian Helm repository
+    helm repo add kguardian https://kguardian-dev.github.io/charts
+    helm repo update
 
-### Step 3: Go live
+    # Install kguardian in the 'kguardian' namespace
+    helm install kguardian kguardian/kguardian \
+      --namespace kguardian \
+      --create-namespace \
+      --wait
+    ```
 
-<Accordion icon="rocket" title="Publish your docs">
-  1. Commit and push your changes.
-  2. Your docs will update and be live in moments!
-</Accordion>
+    <Tip>
+    The controller will automatically start monitoring pods across your cluster (excluding kube-system and kguardian namespaces by default).
+    </Tip>
+  </Tab>
 
-## Next steps
+  <Tab title="OCI Registry">
+    ```bash
+    # Install directly from GitHub Container Registry
+    helm install kguardian oci://ghcr.io/kguardian-dev/charts/kguardian \
+      --version 1.0.0 \
+      --namespace kguardian \
+      --create-namespace \
+      --wait
+    ```
+  </Tab>
 
-Now that you have your docs running, explore these key features:
+  <Tab title="Custom Values">
+    ```bash
+    # Create a custom values file
+    cat > values.yaml <<EOF
+    controller:
+      resources:
+        limits:
+          memory: "512Mi"
+          cpu: "500m"
+      excludedNamespaces: "kube-system,kguardian,monitoring"
+
+    broker:
+      replicas: 2
+      persistence:
+        enabled: true
+        size: 10Gi
+    EOF
+
+    # Install with custom values
+    helm install kguardian kguardian/kguardian \
+      --namespace kguardian \
+      --create-namespace \
+      --values values.yaml \
+      --wait
+    ```
+  </Tab>
+</Tabs>
+
+### Verify Installation
+
+Check that all components are running:
+
+```bash
+kubectl get pods -n kguardian
+
+# Expected output:
+# NAME                              READY   STATUS    RESTARTS   AGE
+# kguardian-controller-xxxxx        1/1     Running   0          2m
+# kguardian-broker-xxxxxxxxxx-xxxxx 1/1     Running   0          2m
+# kguardian-ui-xxxxxxxxxx-xxxxx     1/1     Running   0          2m
+```
+
+<Check>
+All pods should show `Running` status. If not, see [Troubleshooting](/advanced/troubleshooting).
+</Check>
+
+## Step 2: Install the CLI Plugin
+
+The kguardian CLI is a kubectl plugin for generating policies.
+
+<Tabs>
+  <Tab title="Krew (Recommended)">
+    ```bash
+    # Install via Krew plugin manager
+    kubectl krew install kguardian
+
+    # Verify installation
+    kubectl kguardian --version
+    ```
+
+    <Note>
+    Don't have Krew? Install it from [krew.sigs.k8s.io](https://krew.sigs.k8s.io/docs/user-guide/setup/install/)
+    </Note>
+  </Tab>
+
+  <Tab title="Quick Install Script">
+    ```bash
+    # Download and install the latest release
+    sh -c "$(curl -fsSL https://raw.githubusercontent.com/kguardian-dev/kguardian/main/scripts/quick-install.sh)"
+
+    # Verify installation
+    kubectl kguardian --version
+    ```
+  </Tab>
+
+  <Tab title="Manual Download">
+    ```bash
+    # Download the binary for your platform
+    # Replace {VERSION}, {OS}, and {ARCH} with appropriate values
+    VERSION="v1.0.0"
+    OS="linux"  # or darwin, windows
+    ARCH="amd64"  # or arm64
+
+    curl -LO "https://github.com/kguardian-dev/kguardian/releases/download/${VERSION}/kguardian-${OS}-${ARCH}"
+
+    # Make it executable and move to PATH
+    chmod +x kguardian-${OS}-${ARCH}
+    sudo mv kguardian-${OS}-${ARCH} /usr/local/bin/kubectl-kguardian
+
+    # Verify installation
+    kubectl kguardian --version
+    ```
+  </Tab>
+</Tabs>
+
+## Step 3: Let Your Workloads Run
+
+kguardian learns from actual runtime behavior, so let your applications run normally for **5-15 minutes** to collect meaningful data.
+
+<Steps>
+  <Step title="Deploy Test Workload (Optional)">
+    If you don't have existing workloads, deploy a simple app:
+
+    ```bash
+    kubectl create deployment nginx --image=nginx:latest
+    kubectl expose deployment nginx --port=80
+    kubectl run curl-pod --image=curlimages/curl --command -- sleep 3600
+
+    # Generate some traffic
+    kubectl exec curl-pod -- curl nginx
+    ```
+  </Step>
+
+  <Step title="Monitor Data Collection">
+    Check that the broker is receiving data:
+
+    ```bash
+    # Port-forward to the broker
+    kubectl port-forward -n kguardian svc/kguardian-broker 9090:9090 &
+
+    # Check for traffic data (replace 'nginx' with your pod name)
+    curl http://localhost:9090/pod/traffic/name/default/nginx
+    ```
+
+    <Tip>
+    The longer you let workloads run, the more comprehensive your policies will be.
+    </Tip>
+  </Step>
+</Steps>
+
+## Step 4: Generate Your First Network Policy
+
+Now generate a network policy based on observed traffic:
+
+```bash
+# Generate policy for a specific pod
+kubectl kguardian gen networkpolicy nginx -n default \
+  --output-dir ./policies
+
+# View the generated policy
+cat ./policies/default-nginx-networkpolicy.yaml
+```
+
+<CodeGroup>
+```yaml Example Output
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: nginx
+  namespace: default
+  labels:
+    kguardian.dev/managed-by: kguardian
+    kguardian.dev/version: v1.0.0
+spec:
+  podSelector:
+    matchLabels:
+      app: nginx
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              run: curl-pod
+          namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: default
+      ports:
+        - protocol: TCP
+          port: 80
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - protocol: UDP
+          port: 53
+```
+</CodeGroup>
+
+<Check>
+**Success!** kguardian automatically discovered that your nginx pod receives traffic from the curl-pod on port 80 and makes DNS queries.
+</Check>
+
+### Apply the Policy
+
+Review the generated policy and apply it:
+
+```bash
+# Review first (always recommended)
+kubectl apply --dry-run=client -f ./policies/default-nginx-networkpolicy.yaml
+
+# Apply to cluster
+kubectl apply -f ./policies/default-nginx-networkpolicy.yaml
+
+# Verify it's created
+kubectl get networkpolicies -n default
+```
+
+## Step 5: Generate a Seccomp Profile
+
+Generate a seccomp profile to restrict syscalls:
+
+```bash
+# Generate seccomp profile for nginx
+kubectl kguardian gen seccomp nginx -n default \
+  --output-dir ./seccomp
+
+# View the generated profile
+cat ./seccomp/default-nginx-seccomp.json
+```
+
+<CodeGroup>
+```json Example Seccomp Profile
+{
+  "defaultAction": "SCMP_ACT_ERRNO",
+  "architectures": ["SCMP_ARCH_X86_64"],
+  "syscalls": [
+    {
+      "names": ["read", "write", "open", "close", "stat"],
+      "action": "SCMP_ACT_ALLOW"
+    },
+    {
+      "names": ["socket", "connect", "accept", "bind", "listen"],
+      "action": "SCMP_ACT_ALLOW"
+    },
+    {
+      "names": ["mmap", "munmap", "brk", "mprotect"],
+      "action": "SCMP_ACT_ALLOW"
+    }
+  ]
+}
+```
+</CodeGroup>
+
+### Apply the Seccomp Profile
+
+To use the profile, you need to:
+
+1. **Copy to nodes** (for local profiles):
+   ```bash
+   kubectl cp ./seccomp/default-nginx-seccomp.json \
+     kguardian-controller-xxxxx:/var/lib/kubelet/seccomp/nginx-profile.json \
+     -n kguardian
+   ```
+
+2. **Update your deployment** to reference it:
+   ```yaml
+   apiVersion: v1
+   kind: Pod
+   metadata:
+     name: nginx
+   spec:
+     securityContext:
+       seccompProfile:
+         type: Localhost
+         localhostProfile: nginx-profile.json
+     containers:
+     - name: nginx
+       image: nginx:latest
+   ```
+
+<Info>
+Future versions will support automatic seccomp profile management via the Security Profiles Operator.
+</Info>
+
+## Next Steps
 
 <CardGroup cols={2}>
-
-<Card title="Write Content" icon="pen-to-square" href="/essentials/markdown">
-  Learn MDX syntax and start writing your documentation.
-</Card>
-
-<Card title="Customize style" icon="palette" href="/essentials/settings">
-  Make your docs match your brand perfectly.
-</Card>
-
-<Card title="Add code examples" icon="square-code" href="/essentials/code">
-  Include syntax-highlighted code blocks.
-</Card>
-
-<Card title="API documentation" icon="code" href="/api-reference/introduction">
-  Auto-generate API docs from OpenAPI specs.
-</Card>
-
+  <Card title="Explore the UI" icon="chart-network" href="/guides/using-the-ui">
+    Visualize pod communication in real-time
+  </Card>
+  <Card title="Generate Cilium Policies" icon="network-wired" href="/guides/generating-network-policies">
+    Create enhanced L7-aware policies
+  </Card>
+  <Card title="Batch Generation" icon="layer-group" href="/cli/gen-networkpolicy">
+    Generate policies for all pods at once
+  </Card>
+  <Card title="GitOps Integration" icon="code-branch" href="/guides/gitops-integration">
+    Integrate with your CI/CD pipeline
+  </Card>
 </CardGroup>
 
-<Note>
-  **Need help?** See our [full documentation](https://mintlify.com/docs) or join our [community](https://mintlify.com/community).
-</Note>
+## Common Issues
+
+<AccordionGroup>
+  <Accordion icon="triangle-exclamation" title="No traffic data found">
+    **Solution:** Ensure your pods have been running and generating traffic for at least 5 minutes. Check broker logs:
+    ```bash
+    kubectl logs -n kguardian deployment/kguardian-broker
+    ```
+  </Accordion>
+
+  <Accordion icon="triangle-exclamation" title="Controller pods not starting">
+    **Solution:** Verify kernel version (6.2+) and that nodes support eBPF:
+    ```bash
+    kubectl describe pod -n kguardian kguardian-controller-xxxxx
+    ```
+  </Accordion>
+
+  <Accordion icon="triangle-exclamation" title="CLI can't connect to broker">
+    **Solution:** The CLI auto-discovers the broker via port-forwarding. Ensure you have permissions:
+    ```bash
+    kubectl auth can-i create pods/portforward -n kguardian
+    ```
+  </Accordion>
+</AccordionGroup>
+
+For more troubleshooting, see the [Troubleshooting Guide](/advanced/troubleshooting).
+
+---
+
+<Card
+  title="Learn more about kguardian's architecture"
+  icon="sitemap"
+  href="/architecture"
+  horizontal
+>
+  Understand how the components work together →
+</Card>

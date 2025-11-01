@@ -1,0 +1,171 @@
+---
+title: "Troubleshooting Guide"
+description: "Diagnose and fix common kguardian issues"
+icon: "wrench"
+---
+
+## Controller Issues
+
+### Controller Pods Not Starting
+
+**Symptoms:**
+```
+kubectl get pods -n kguardian
+# kguardian-controller-xxxxx   0/1     CrashLoopBackOff
+```
+
+**Common Causes:**
+
+<AccordionGroup>
+  <Accordion title="Kernel version too old" icon="linux">
+    kguardian requires Linux kernel 6.2+.
+
+    **Check:**
+    ```bash
+    kubectl get nodes -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.status.nodeInfo.kernelVersion}{"\n"}{end}'
+    ```
+
+    **Solution:** Upgrade nodes to kernel 6.2+ or use a distribution with eBPF CO-RE support.
+  </Accordion>
+
+  <Accordion title="eBPF not enabled" icon="toggle-off">
+    Some cloud providers disable eBPF by default.
+
+    **Check controller logs:**
+    ```bash
+    kubectl logs -n kguardian daemonset/kguardian-controller
+    ```
+
+    Look for errors like: "failed to load BPF programs"
+
+    **Solution:** Enable eBPF in cloud provider settings or use privileged security context.
+  </Accordion>
+
+  <Accordion title="Insufficient privileges" icon="lock">
+    Controller needs CAP_BPF, CAP_PERFMON, CAP_SYS_RESOURCE.
+
+    **Check pod security:**
+    ```bash
+    kubectl get pod -n kguardian kguardian-controller-xxxxx -o jsonpath='{.spec.containers[0].securityContext}'
+    ```
+
+    **Solution:** Ensure pod has `privileged: true` or the required capabilities.
+  </Accordion>
+</AccordionGroup>
+
+---
+
+## Broker Issues
+
+### No Traffic Data
+
+**Symptoms:**
+- CLI says "No traffic data found"
+- Empty response from `/pod/traffic/` endpoint
+
+**Solutions:**
+
+<Steps>
+  <Step title="Check pods are generating traffic">
+    ```bash
+    # Generate some traffic
+    kubectl exec my-pod -- curl http://google.com
+    ```
+  </Step>
+
+  <Step title="Check controller is sending data">
+    ```bash
+    kubectl logs -n kguardian daemonset/kguardian-controller | grep "Sending traffic"
+    ```
+  </Step>
+
+  <Step title="Check broker is receiving data">
+    ```bash
+    kubectl logs -n kguardian deployment/kguardian-broker | grep POST
+    ```
+  </Step>
+
+  <Step title="Query database directly">
+    ```bash
+    kubectl port-forward -n kguardian svc/kguardian-broker 9090:9090
+    curl http://localhost:9090/pod/traffic/10.244.1.5  # Use actual pod IP
+    ```
+  </Step>
+</Steps>
+
+---
+
+## CLI Issues
+
+### Can't Connect to Broker
+
+**Symptoms:**
+```
+Error: failed to connect to broker: connection refused
+```
+
+**Solution:**
+
+The CLI auto-discovers the broker via port-forwarding. Ensure you have permissions:
+
+```bash
+kubectl auth can-i create pods/portforward -n kguardian
+```
+
+If not, ask your cluster admin for permissions or manually port-forward:
+
+```bash
+kubectl port-forward -n kguardian svc/kguardian-broker 9090:9090 &
+```
+
+---
+
+## Policy Generation Issues
+
+### Generated Policy Too Permissive
+
+**Cause:** Pods lack specific labels, so broader selectors are used.
+
+**Solution:**
+
+1. Add specific labels to your pods
+2. Manually edit generated policies
+3. Re-generate after labeling
+
+### Policy Breaks Communication
+
+**Cause:** Incomplete observation - not all traffic was captured.
+
+**Solution:**
+
+1. Extend observation period (let app run longer)
+2. Check pod logs for connection errors
+3. Manually add missing rules to the policy
+
+---
+
+## Debug Mode
+
+Enable debug logging for more details:
+
+```bash
+# For controller
+helm upgrade kguardian kguardian/kguardian \
+  --namespace kguardian \
+  --set controller.debug=true \
+  --reuse-values
+
+# For CLI
+kubectl kguardian gen netpol my-app --debug
+```
+
+---
+
+<Card
+  title="Still having issues?"
+  icon="comments"
+  href="https://github.com/kguardian-dev/kguardian/discussions"
+  horizontal
+>
+  Ask for help in GitHub Discussions →
+</Card>

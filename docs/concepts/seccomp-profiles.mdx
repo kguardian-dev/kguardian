@@ -1,0 +1,50 @@
+---
+title: "Seccomp Profiles"
+description: "Understanding seccomp and how kguardian generates syscall allowlists"
+icon: "shield-check"
+---
+
+## What is Seccomp?
+
+Seccomp (Secure Computing Mode) is a Linux kernel feature that restricts which **system calls** (syscalls) a process can make.
+
+### Why Limit Syscalls?
+
+Most applications use only 50-100 of Linux's 300+ syscalls. Blocking unused syscalls:
+- Reduces attack surface
+- Prevents privilege escalation exploits
+- Stops malicious code from using dangerous syscalls
+
+## How kguardian Generates Profiles
+
+1. **Observes** all syscalls made by the container via eBPF
+2. **Aggregates** unique syscall names over observation period
+3. **Generates** JSON profile with allowlist
+
+Example generated profile:
+
+```json
+{
+  "defaultAction": "SCMP_ACT_ERRNO",
+  "architectures": ["SCMP_ARCH_X86_64"],
+  "syscalls": [
+    {
+      "names": ["read", "write", "open", "close", "socket", "connect"],
+      "action": "SCMP_ACT_ALLOW"
+    }
+  ]
+}
+```
+
+## Actions
+
+- `SCMP_ACT_ALLOW`: Allow the syscall
+- `SCMP_ACT_ERRNO`: Block with error (default for unlisted)
+- `SCMP_ACT_LOG`: Log the syscall but allow it
+- `SCMP_ACT_KILL`: Kill the process (most restrictive)
+
+---
+
+**Next steps:**
+- [Generate Seccomp Profiles](/guides/generating-seccomp-profiles)
+- [CLI Reference](/cli/gen-seccomp)
