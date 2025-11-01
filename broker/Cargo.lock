@@ -268,7 +268,11 @@ dependencies = [
 
 [[package]]
 name = "broker"
+<<<<<<< Updated upstream
 version = "1.1.1"
+=======
+version = "1.0.0"
+>>>>>>> Stashed changes
 dependencies = [
  "actix-cors",
  "actix-web",
