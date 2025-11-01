@@ -17,6 +17,8 @@ import (
 )
 
 // monkeyPatchGetFunction patches a function and returns a function to restore the original
+//
+//nolint:unused // Reserved for future testing use
 func monkeyPatchGetFunction(original interface{}, replacement interface{}) func() {
 	return func() {
 		// In a real implementation, this would restore the original function
@@ -98,12 +100,12 @@ func TestGetConfig(t *testing.T) {
 	oldHome := os.Getenv("HOME")
 	oldKubeconfig := os.Getenv("KUBECONFIG")
 	defer func() {
-		os.Setenv("HOME", oldHome)
-		os.Setenv("KUBECONFIG", oldKubeconfig)
+		_ = os.Setenv("HOME", oldHome)
+		_ = os.Setenv("KUBECONFIG", oldKubeconfig)
 	}()
 
 	// Setup HOME for default kubeconfig path
-	os.Setenv("HOME", tempDir)
+	_ = os.Setenv("HOME", tempDir)
 
 	// Mock ALL the necessary functions
 	originalStat := osStatFunc
@@ -173,7 +175,7 @@ func TestGetConfig(t *testing.T) {
 	assert.NotNil(t, config)
 
 	// Test with default path
-	os.Unsetenv("KUBECONFIG")
+	_ = os.Unsetenv("KUBECONFIG")
 	config, err = GetConfig(false)
 	assert.NoError(t, err)
 	assert.NotNil(t, config)
@@ -199,18 +201,18 @@ func TestGetCurrentNamespace(t *testing.T) {
 	oldKubeconfig := os.Getenv("KUBECONFIG")
 	oldHome := os.Getenv("HOME")
 	defer func() {
-		os.Setenv("POD_NAMESPACE", oldPodNamespace)
-		os.Setenv("KUBECONFIG", oldKubeconfig)
-		os.Setenv("HOME", oldHome)
+		_ = os.Setenv("POD_NAMESPACE", oldPodNamespace)
+		_ = os.Setenv("KUBECONFIG", oldKubeconfig)
+		_ = os.Setenv("HOME", oldHome)
 	}()
 
 	// Clear environment variables
-	os.Unsetenv("POD_NAMESPACE")
-	os.Unsetenv("KUBECONFIG")
+	_ = os.Unsetenv("POD_NAMESPACE")
+	_ = os.Unsetenv("KUBECONFIG")
 
 	// Setup temp directory with kubeconfig
 	tempDir, _ := setupKubeconfigDirectory(t)
-	os.Setenv("HOME", tempDir)
+	_ = os.Setenv("HOME", tempDir)
 
 	// Mock os.Stat to ensure kubeconfig file is found
 	originalStat := osStatFunc

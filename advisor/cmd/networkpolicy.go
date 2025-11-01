@@ -210,7 +210,7 @@ func init() {
 	networkPolicyCmd.Flags().StringVar(&outputDir, "output-dir", "network-policies", "Directory to store generated network policies")
 
 	// Add completion for the policy type flag
-	networkPolicyCmd.RegisterFlagCompletionFunc("type", func(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
+	_ = networkPolicyCmd.RegisterFlagCompletionFunc("type", func(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
 		return []string{"kubernetes", "cilium"}, cobra.ShellCompDirectiveNoFileComp
 	})
 }
