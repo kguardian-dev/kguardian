@@ -1,6 +1,6 @@
 [package]
 name = "broker"
-version = "0.1.0"  #:version
+version = "1.0.0"  #:version
 authors = ["Mahesh Rayas"]
 description = """
 API server for kguardian - stores telemetry data from eBPF controller
@@ -10,7 +10,7 @@ homepage = "https://github.com/kguardian-dev/kguardian"
 repository = "https://github.com/kguardian-dev/kguardian"
 readme = "README.md"
 keywords = ["kubernetes", "k8s"]
-license = "Unlicense OR MIT"
+license = "BUSL-1.1"
 edition = "2021"
 
 [[bin]]

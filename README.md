@@ -228,6 +228,8 @@ kubectl kguardian gen secp -A --default-action SCMP_ACT_LOG --output-dir ./all-s
 
 Contributions are welcome! Please read the contributing guide (TODO: Create CONTRIBUTING.md) to get started.
 
+For information on the release process and versioning strategy, see [RELEASES.md](RELEASES.md).
+
 ## 📄 License
 
 This project is licensed under the Business Source License 1.1 - see the [LICENSE](LICENSE) file for details.

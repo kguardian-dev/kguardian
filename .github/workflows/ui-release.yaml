@@ -1,10 +1,10 @@
-name: Build and Push Broker Docker Images
+name: Build and Push UI Docker Images
 
 on:
   workflow_dispatch:
   push:
     tags:
-      - "broker/v*"
+      - "ui/v*"
 
 jobs:
   build_and_push:
@@ -36,16 +36,16 @@ jobs:
         id: extract_tag
         run: |
           TAG="${GITHUB_REF#refs/tags/}"
-          VERSION="${TAG#broker/}"
+          VERSION="${TAG#ui/}"
           echo "TAG_NAME=${VERSION}" >> $GITHUB_OUTPUT
 
       - name: Build and Push
         uses: docker/build-push-action@263435318d21b8e681c14492fe198d362a7d2c83 # v6
         with:
-          context: broker/
-          file: broker/Dockerfile
-          platforms: linux/amd64 #,linux/arm64
+          context: ui/
+          file: ui/Dockerfile
+          platforms: linux/amd64,linux/arm64
           push: true
           tags: |
-            ghcr.io/kguardian-dev/kguardian/guardian-broker:${{ steps.extract_tag.outputs.TAG_NAME }}
-            ghcr.io/kguardian-dev/kguardian/guardian-broker:latest
+            ghcr.io/kguardian-dev/kguardian/guardian-ui:${{ steps.extract_tag.outputs.TAG_NAME }}
+            ghcr.io/kguardian-dev/kguardian/guardian-ui:latest

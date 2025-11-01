@@ -191,6 +191,57 @@ kubectl kguardian gen secp -A --output-dir ./seccomp  # All pods, all namespaces
 - Controller runs privileged with `CAP_BPF` capability
 - Broker needs DATABASE_URL pointing to PostgreSQL (configured in Helm values)
 
+## Release Management
+
+kguardian uses **automated component-based versioning** powered by [release-please](https://github.com/googleapis/release-please). See [RELEASES.md](RELEASES.md) for comprehensive documentation and [.github/RELEASE_GUIDE.md](.github/RELEASE_GUIDE.md) for quick reference.
+
+### Quick Reference - Automated Releases
+
+**Use Conventional Commits:**
+```bash
+# Feature (minor bump: 1.0.0 → 1.1.0)
+git commit -m "feat(controller): add IPv6 monitoring support"
+
+# Bug fix (patch bump: 1.0.0 → 1.0.1)
+git commit -m "fix(broker): resolve connection pool leak"
+
+# Breaking change (major bump: 1.0.0 → 2.0.0)
+git commit -m "feat(ui)!: redesign API integration
+
+BREAKING CHANGE: Requires broker v2.0.0 or higher"
+
+# Push to main
+git push origin main
+```
+
+**Release-please workflow:**
+1. Analyzes conventional commits
+2. Creates/updates Release PR with version bumps and changelogs
+3. When merged, creates tags and triggers builds
+4. Publishes artifacts automatically
+
+**Git Tag Format (Auto-created):** `<component>/v<semver>`
+- Tags are created automatically by release-please
+- Examples: `controller/v1.0.0`, `broker/v1.2.3`, `ui/v2.0.0`
+
+**Version Tracking:**
+- `.release-please-manifest.json` - Current versions
+- `<component>/VERSION` - Component version files
+- `<component>/CHANGELOG.md` - Auto-generated changelogs
+
+**CI Workflows:**
+- `.github/workflows/release-please.yaml` - Main automation (runs on push to main)
+- `.github/workflows/controller-release.yaml` - Controller builds
+- `.github/workflows/broker-release.yaml` - Broker builds
+- `.github/workflows/ui-release.yaml` - UI builds
+- `.github/workflows/advisor-release.yml` - Advisor builds
+- `.github/workflows/charts-release.yaml` - Chart publishing
+
+**Published Artifacts:**
+- Docker images: `ghcr.io/kguardian-dev/kguardian/guardian-{controller,broker,ui}:vX.Y.Z`
+- Helm chart: `oci://ghcr.io/kguardian-dev/charts/kguardian:X.Y.Z`
+- Advisor binaries: GitHub Releases with SLSA3 attestation
+
 ## Common Issues
 
 ### Controller Build Failures

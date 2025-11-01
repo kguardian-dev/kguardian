@@ -1,0 +1,7 @@
+{
+  "controller": "1.0.0",
+  "broker": "1.0.0",
+  "ui": "1.0.0",
+  "advisor": "1.0.0",
+  "charts/kguardian": "1.0.0"
+}
