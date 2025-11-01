@@ -1,23 +1,89 @@
 # Changelog
 
-All notable changes to the kguardian Controller component will be documented in this file.
+## [1.1.0](https://github.com/kguardian-dev/kguardian/compare/controller/v1.0.0...controller/v1.1.0) (2025-11-01)
 
-The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
-and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
-
-## [Unreleased]
-
-## [1.0.0] - 2025-11-01
 
 ### Features
 
-- Initial release of kguardian Controller
-- eBPF-based network traffic monitoring
-- Syscall monitoring and aggregation
-- Pod awareness via Kubernetes API
-- Namespace filtering support
-- DaemonSet traffic filtering
-- Integration with Broker API for telemetry storage
+* Allow user to ignore the traffic from Daemonset pods ([f13d42e](https://github.com/kguardian-dev/kguardian/commit/f13d42ea769bf919aeba3b49474347f376e11c03))
+* Allow users to ignore Namespace from being monitored ([ae96c2b](https://github.com/kguardian-dev/kguardian/commit/ae96c2b9943b01760779ed2a11536bdea29ded6d))
+* cleanup and better error messages ([473c22b](https://github.com/kguardian-dev/kguardian/commit/473c22bfb891aaed1556f27a4aafb0817c9705ae))
+* Code modularization ([f05926a](https://github.com/kguardian-dev/kguardian/commit/f05926a70a5c92b5a1aeece1efa99c250f867cac))
+* Dont capture traffic if the dest is localhost ([0aec04c](https://github.com/kguardian-dev/kguardian/commit/0aec04c81c466fb140094d7147908829976e7b29))
+* Dont capture traffic if the dest is localhost ([655fc8e](https://github.com/kguardian-dev/kguardian/commit/655fc8ee9fa56d26b4205584ff1b85513d3be2ef))
+* Dont log traffic if src and dst are same ([29cd2b6](https://github.com/kguardian-dev/kguardian/commit/29cd2b652f467a889e50de505ed999fcbbf789e5))
+* fix cargo clippy warning ([7810c4e](https://github.com/kguardian-dev/kguardian/commit/7810c4ee57ad19437ab84aebfb78b97e8544e86b))
+* generate arch specific vmlinux bindings ([aa4a93e](https://github.com/kguardian-dev/kguardian/commit/aa4a93efb70c528c4d9d367f8f2efb71bdaa4058))
+* generate arch specific vmlinux bindings ([e110cc2](https://github.com/kguardian-dev/kguardian/commit/e110cc273e5dc31e24475c0b41e988bcb316e401))
+* Ignore daemonset ip in the ebpf ([266323e](https://github.com/kguardian-dev/kguardian/commit/266323eb3c37bc1f7fafd08b7c89f102428660a4))
+* Netpol tracing using tracepoint ([b41ca0c](https://github.com/kguardian-dev/kguardian/commit/b41ca0c29d3e39f0b741a0edd628dcf0267a4abb))
+* New program type-&gt; Tracepoint ([f1347a1](https://github.com/kguardian-dev/kguardian/commit/f1347a1a739b46a926fadda2983fef719174ebcf))
+* optimize and reorganize ebpf code ([5a43010](https://github.com/kguardian-dev/kguardian/commit/5a430109626fc5ac04ef2d3652954a3e946c386c))
+* reusable function ([d3be704](https://github.com/kguardian-dev/kguardian/commit/d3be704e2fd34cb92baae05f9605e948f7a46c32))
+* Store syscall details in db ([934cab2](https://github.com/kguardian-dev/kguardian/commit/934cab22c591a4f443da5a33a720f8cce60cc15a))
+* update packages ([8ac1788](https://github.com/kguardian-dev/kguardian/commit/8ac17889634e3fdfd73253de47a80c87a3d7c012))
+* update udp probe ([d3512b6](https://github.com/kguardian-dev/kguardian/commit/d3512b62458556b4a99fa47d77a6780a4042a948))
+* uplift crates and add caching to syscalls ([4b57c26](https://github.com/kguardian-dev/kguardian/commit/4b57c261df4b6ffa26841ad55693f0fa166c0e9c))
+* use kprobe instead of tracepoints ([edfa05a](https://github.com/kguardian-dev/kguardian/commit/edfa05aff71e013dbe165aefeffa9198e11ab7cb))
 
-[Unreleased]: https://github.com/kguardian-dev/kguardian/compare/controller/v1.0.0...HEAD
-[1.0.0]: https://github.com/kguardian-dev/kguardian/releases/tag/controller/v1.0.0
+
+### Bug Fixes
+
+* Check if pod needs to ignore before the namespace is ignored ([2767fc2](https://github.com/kguardian-dev/kguardian/commit/2767fc24c565294e442839c9ea4bf54a68f3a789))
+* clean dockerfile ([5941379](https://github.com/kguardian-dev/kguardian/commit/59413793f9cd48a5eb54540e6fc06bc2acbf7a4a))
+* cleanup ([613f16a](https://github.com/kguardian-dev/kguardian/commit/613f16a89c24b4d3ff5e4d299da0ef61cd6260ae))
+* deprecated types and remove unused files ([ada3945](https://github.com/kguardian-dev/kguardian/commit/ada394577c8d0539ad21f58f6289c5b36499b641))
+* **deps:** update rust crate actix-web to v4.6.0 ([6f45faf](https://github.com/kguardian-dev/kguardian/commit/6f45fafff5089b866318a2f0d578bebf8d74fd66))
+* **deps:** update rust crate actix-web to v4.6.0 ([3de2e08](https://github.com/kguardian-dev/kguardian/commit/3de2e08b2975b3cd10e07bcd69d7f2606866f6c7))
+* **deps:** update rust crate actix-web to v4.7.0 ([bf2b9ac](https://github.com/kguardian-dev/kguardian/commit/bf2b9ac8f2c8cf332641abae3583ca1ff954603b))
+* **deps:** update rust crate actix-web to v4.7.0 ([2e2768d](https://github.com/kguardian-dev/kguardian/commit/2e2768d54a7b3dc0e20eb49e25591ec0cde6edd0))
+* **deps:** update rust crate anyhow to v1.0.98 ([b28d00b](https://github.com/kguardian-dev/kguardian/commit/b28d00bb30d3a128f26ab7587c5981a73cffc745))
+* **deps:** update rust crate anyhow to v1.0.99 ([f22a03a](https://github.com/kguardian-dev/kguardian/commit/f22a03a124c43ce43b06b4e7e77e8a9b9363979c))
+* **deps:** update rust crate chrono to v0.4.39 ([6cadd09](https://github.com/kguardian-dev/kguardian/commit/6cadd0922b08e1eab86a7804e684d4179fc3f6a2))
+* **deps:** update rust crate chrono to v0.4.39 ([00c1d4a](https://github.com/kguardian-dev/kguardian/commit/00c1d4a37805a351f3ca03e7d5f0f856b648a8ab))
+* **deps:** update rust crate k8s-openapi to 0.24.0 ([210c5ed](https://github.com/kguardian-dev/kguardian/commit/210c5edc1100caf8aa95276b79908b0894ce9cca))
+* **deps:** update rust crate k8s-openapi to 0.24.0 ([ea001c1](https://github.com/kguardian-dev/kguardian/commit/ea001c18b36212f62c0a48d369104100e5e4a9c4))
+* **deps:** update rust crate kube to 0.99.0 ([bdfedb2](https://github.com/kguardian-dev/kguardian/commit/bdfedb2c17a570a629b5d33b0d4062c2d0f7c7ca))
+* **deps:** update rust crate kube to v2 ([#335](https://github.com/kguardian-dev/kguardian/issues/335)) ([9f3c70c](https://github.com/kguardian-dev/kguardian/commit/9f3c70ca09f366317eb0d88ba022e62fb2dbbd06))
+* **deps:** update rust crate libseccomp to 0.4 ([6962023](https://github.com/kguardian-dev/kguardian/commit/6962023d93273bf6b6a0b4b118b8fd3805580eb1))
+* **deps:** update rust crate network-types to 0.0.6 ([8ded84e](https://github.com/kguardian-dev/kguardian/commit/8ded84ed28078817c497ceb538b0209cfb64234e))
+* **deps:** update rust crate network-types to 0.0.6 ([1c042ee](https://github.com/kguardian-dev/kguardian/commit/1c042ee3a0ba22749eb21f0e9fb9940206819936))
+* **deps:** update rust crate openssl to v0.10.72 [security] ([ee6000b](https://github.com/kguardian-dev/kguardian/commit/ee6000bdd3a14fdc42294f4e4d6ede587050bd21))
+* **deps:** update rust crate procfs to 0.18.0 ([#329](https://github.com/kguardian-dev/kguardian/issues/329)) ([c4f683e](https://github.com/kguardian-dev/kguardian/commit/c4f683e979e1dfee0678b7b135fd4c27d89e1ddb))
+* **deps:** update rust crate regex to v1.10.5 ([66c0c14](https://github.com/kguardian-dev/kguardian/commit/66c0c14ddca649222829f1c3e05e39d0ee68c6fa))
+* **deps:** update rust crate regex to v1.10.5 ([8bb64cf](https://github.com/kguardian-dev/kguardian/commit/8bb64cf4e37994f6c48b159db5bdeb9de8b0e9f0))
+* **deps:** update rust crate reqwest to v0.12.15 ([6b3b399](https://github.com/kguardian-dev/kguardian/commit/6b3b39915b57ae47d5c85115ce7645605e6052fb))
+* **deps:** update rust crate serde_json to v1.0.139 ([293950f](https://github.com/kguardian-dev/kguardian/commit/293950fbaf4a98d5b939a966d745fbc5582c1ca5))
+* **deps:** update rust crate serde_json to v1.0.140 ([2c66b1d](https://github.com/kguardian-dev/kguardian/commit/2c66b1d4ff94d41585cd2c93cc688c7999c5cd22))
+* **deps:** update rust crate thiserror to v1.0.61 ([3a8a540](https://github.com/kguardian-dev/kguardian/commit/3a8a54098a3ce3de15705f854734d4f4b7e86685))
+* **deps:** update rust crate thiserror to v1.0.61 ([1a9480d](https://github.com/kguardian-dev/kguardian/commit/1a9480d55eb33792ea22f2fb83ba636e8d04bc6b))
+* **deps:** update rust crate thiserror to v2 ([d9636c0](https://github.com/kguardian-dev/kguardian/commit/d9636c09b59d94df7a62e0c7560b3c0fd2e78d8a))
+* **deps:** update rust crate thiserror to v2 ([43c36bb](https://github.com/kguardian-dev/kguardian/commit/43c36bb1efdb448d4b94ad8d2e9b159e53b93bda))
+* **deps:** update rust crate thiserror to v2.0.12 ([ab1f6a5](https://github.com/kguardian-dev/kguardian/commit/ab1f6a5599e58d8fe745d7c966fe9c2f99d6c52f))
+* **deps:** update rust crate time to v0.3.37 ([1bd7ceb](https://github.com/kguardian-dev/kguardian/commit/1bd7cebd3323dc0308f18f664b50981505ba8237))
+* **deps:** update rust crate time to v0.3.37 ([9cd083a](https://github.com/kguardian-dev/kguardian/commit/9cd083afe38326e92ce35f23f698e2b6ff7a5ac8))
+* **deps:** update rust crate time to v0.3.37 ([14c615d](https://github.com/kguardian-dev/kguardian/commit/14c615ddf815b262adf5c697e8dbdf67e937de59))
+* **deps:** update rust crate time to v0.3.37 ([6a451f9](https://github.com/kguardian-dev/kguardian/commit/6a451f9291d7a3cf2c01e7d9ef51ded26794745f))
+* **deps:** update rust crate time to v0.3.41 ([145a1ed](https://github.com/kguardian-dev/kguardian/commit/145a1ed1cf582215f6bac8884093ddae94128c28))
+* **deps:** update rust crate tokio to v1.43.1 [security] ([9094489](https://github.com/kguardian-dev/kguardian/commit/90944891348bba71ce8b5a076617d79313687301))
+* **deps:** update rust crate uuid to v1.18.1 ([#317](https://github.com/kguardian-dev/kguardian/issues/317)) ([1385d0a](https://github.com/kguardian-dev/kguardian/commit/1385d0a9a139c3def236181ae5b94fcc7c6cddcc))
+* **deps:** update serde monorepo to v1.0.218 ([8be989b](https://github.com/kguardian-dev/kguardian/commit/8be989b2e33f2253362d8785b183d8f0dbff94e1))
+* **deps:** update serde monorepo to v1.0.219 ([04694dc](https://github.com/kguardian-dev/kguardian/commit/04694dcbce8c9d6c539db5a9f24167a5ae7254bf))
+* **deps:** update tokio-tracing monorepo ([a3a2db5](https://github.com/kguardian-dev/kguardian/commit/a3a2db5916163c0bfd1185c443b80b47b25a6ba1))
+* **deps:** update tokio-tracing monorepo ([2e0ade3](https://github.com/kguardian-dev/kguardian/commit/2e0ade381fee773ef414ae058d382847b263d04c))
+* Dockefile cleanups ([1dce05d](https://github.com/kguardian-dev/kguardian/commit/1dce05d032914290b2580c9b341a7c6497b75e86))
+* Dockefile cleanups ([823da4c](https://github.com/kguardian-dev/kguardian/commit/823da4ce93a6999e3a7e8a720d5fdbd4f6d28641))
+* Get the network namespace in syscall ebpf ([7ee9da1](https://github.com/kguardian-dev/kguardian/commit/7ee9da1532d5b44abbcca7166a3cf76c5a1559f1))
+* ignore the self traffic in use space ([1c07d12](https://github.com/kguardian-dev/kguardian/commit/1c07d12538e6b4bac194f2ff55d18de7d91e8425))
+* Insert to container list only if it contains container id ([60fdfa5](https://github.com/kguardian-dev/kguardian/commit/60fdfa555dd902d8e7e494093a1c83f35fb6776a))
+* Insert to container list only if it contains container id ([b39ee49](https://github.com/kguardian-dev/kguardian/commit/b39ee497d8404d309c43c56cf463cf594c67e85d))
+* libbpf files ([1248cf1](https://github.com/kguardian-dev/kguardian/commit/1248cf1572fb71bb4ee4947bae6898c8774d4fa0))
+* linting ([6728f10](https://github.com/kguardian-dev/kguardian/commit/6728f1046bfc6361178dde0d796b1f8abc2aa0cc))
+* prevent panic when service has no cluster ip ([ed006f8](https://github.com/kguardian-dev/kguardian/commit/ed006f8c3fd2073092a4e77735d93c6babc63d8e))
+* remove unused types and code cleanup ([2e4c27a](https://github.com/kguardian-dev/kguardian/commit/2e4c27a7f8329e8129efdb886aa892faaade6283))
+* remove unused types and code cleanup ([bfbadbd](https://github.com/kguardian-dev/kguardian/commit/bfbadbd5edc4aa20f84449ed3835e6b4762046cb))
+* send the syscall data as a batch and also introduce caching in network ([d13e517](https://github.com/kguardian-dev/kguardian/commit/d13e517d196f30dc42f7825881926cee9f3b29b5))
+* testing ([4410a32](https://github.com/kguardian-dev/kguardian/commit/4410a32a0d4b4460242f8eb2be1648835bb175d4))
+* udp ([8c46c40](https://github.com/kguardian-dev/kguardian/commit/8c46c40ac17da92f55e9836943931fd983ed0e80))
+* vmlinux ([bab0144](https://github.com/kguardian-dev/kguardian/commit/bab014449b8fedcf31fd058457f069456a818e9c))
+* When broker is offline, don't panic controller ([15a30de](https://github.com/kguardian-dev/kguardian/commit/15a30de1256f7101311eae9c584f27a73aa7decc))
