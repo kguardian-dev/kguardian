@@ -51,7 +51,6 @@ pub struct PodTraffic {
     pub time_stamp: NaiveDateTime,
 }
 
-
 #[derive(Debug, Default, Serialize)]
 pub struct PodPacketDrop {
     pub uuid: String,

@@ -49,7 +49,7 @@ async fn update_serviceinfo(svc: Service) -> Result<(), Error> {
         warn!("Service {} has no cluster IP", svc_name);
         return Ok(());
     };
-    
+
     let svc_details = SvcDetail {
         svc_ip: svc_ip.to_owned(),
         svc_name: svc_name.to_owned(),
