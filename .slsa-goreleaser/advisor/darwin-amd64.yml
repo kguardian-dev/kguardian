@@ -34,4 +34,4 @@ ldflags:
   - "-X main.Commit={{ .Env.COMMIT }}"
   - "-X main.CommitDate={{ .Env.COMMIT_DATE }}"
   - "-X main.TreeState={{ .Env.TREE_STATE }}"
-  - "-X github.com/xentra-ai/advisor/pkg/k8s.Version={{ .Env.VERSION }}"
+  - "-X github.com/kguardian-dev/kguardian/advisor/pkg/k8s.Version={{ .Env.VERSION }}"

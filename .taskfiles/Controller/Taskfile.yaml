@@ -3,7 +3,7 @@
 version: '3'
 
 vars:
-  CONTROLLER_IMAGE_NAME: ghcr.io/xentra-ai/images/guardian-controller
+  CONTROLLER_IMAGE_NAME: ghcr.io/kguardian-dev/kguardian/guardian-controller
   IMAGE_VERSION: local
   TARGET: x86_64-unknown-linux-gnu
 
@@ -18,9 +18,9 @@ tasks:
     cmds:
       - cd controller && cross build --release --target {{.TARGET}}
       - mkdir -p localbin
-      - cp controller/target/{{.TARGET}}/release/kube-guardian localbin
+      - cp controller/target/{{.TARGET}}/release/kguardian localbin
       - docker build -t {{.CONTROLLER_IMAGE_NAME}}:{{.IMAGE_VERSION}} . -f controller/Dockerfile
-      #- docker push {{.CONTROLLER_IMAGE_NAME}}:{{.IMAGE_VERSION}} 
+      #- docker push {{.CONTROLLER_IMAGE_NAME}}:{{.IMAGE_VERSION}}
       - kind load docker-image {{.CONTROLLER_IMAGE_NAME}}:{{.IMAGE_VERSION}}
       - rm -rf localbin
 

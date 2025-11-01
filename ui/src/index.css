@@ -1,0 +1,87 @@
+@import "tailwindcss";
+
+/* Internal theme variables */
+:root,
+:root.dark {
+  --theme-bg-dark: #0E1726;
+  --theme-bg-darker: #0A0F1C;
+  --theme-bg-card: #1A2332;
+  --theme-border: #2A3647;
+  --theme-text-primary: #F3F4F6;
+  --theme-text-secondary: #9CA3AF;
+  --theme-text-tertiary: #6B7280;
+}
+
+/* Light theme override */
+:root.light {
+  --theme-bg-dark: #F3F4F6;
+  --theme-bg-darker: #FFFFFF;
+  --theme-bg-card: #F9FAFB;
+  --theme-border: #E5E7EB;
+  --theme-text-primary: #111827;
+  --theme-text-secondary: #4B5563;
+  --theme-text-tertiary: #6B7280;
+}
+
+@theme {
+  /* Hubble colors using theme-aware CSS variables */
+  --color-hubble-dark: var(--theme-bg-dark);
+  --color-hubble-darker: var(--theme-bg-darker);
+  --color-hubble-card: var(--theme-bg-card);
+  --color-hubble-border: var(--theme-border);
+
+  /* Theme-aware text colors (generates text-primary, text-secondary, text-tertiary) */
+  --color-primary: var(--theme-text-primary);
+  --color-secondary: var(--theme-text-secondary);
+  --color-tertiary: var(--theme-text-tertiary);
+
+  /* Accent colors (same for both themes) */
+  --color-hubble-accent: #3B82F6;
+  --color-hubble-success: #10B981;
+  --color-hubble-warning: #F59E0B;
+  --color-hubble-error: #EF4444;
+}
+
+@layer base {
+  body {
+    background-color: var(--theme-bg-darker);
+    color: var(--theme-text-primary);
+    margin: 0;
+    font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+    transition: background-color 0.3s ease, color 0.3s ease;
+  }
+
+  #root {
+    width: 100%;
+    height: 100vh;
+  }
+}
+
+/* React Flow custom styles */
+.react-flow {
+  @apply bg-hubble-dark;
+}
+
+.react-flow__node {
+  @apply rounded-lg shadow-lg;
+}
+
+.react-flow__edge-path {
+  stroke-width: 2;
+}
+
+.react-flow__handle {
+  @apply opacity-0;
+}
+
+.react-flow__controls {
+  @apply bg-hubble-card border-hubble-border;
+}
+
+.react-flow__controls-button {
+  @apply bg-hubble-card border-hubble-border text-secondary;
+}
+
+.react-flow__controls-button:hover {
+  @apply bg-hubble-dark;
+}

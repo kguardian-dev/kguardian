@@ -1,4 +1,4 @@
-module github.com/xentra-ai/advisor
+module github.com/kguardian-dev/kguardian/advisor
 
 go 1.24.0
 
@@ -17,13 +17,13 @@ require (
 )
 
 // Add replace directives for local packages
-replace github.com/xentra-ai/advisor/pkg/api => ./pkg/api
+replace github.com/kguardian-dev/kguardian/advisor/pkg/api => ./pkg/api
 
-replace github.com/xentra-ai/advisor/pkg/common => ./pkg/common
+replace github.com/kguardian-dev/kguardian/advisor/pkg/common => ./pkg/common
 
-replace github.com/xentra-ai/advisor/pkg/k8s => ./pkg/k8s
+replace github.com/kguardian-dev/kguardian/advisor/pkg/k8s => ./pkg/k8s
 
-replace github.com/xentra-ai/advisor/pkg/network => ./pkg/network
+replace github.com/kguardian-dev/kguardian/advisor/pkg/network => ./pkg/network
 
 require (
 	github.com/Azure/go-ansiterm v0.0.0-20250102033503-faa5f7b0171c // indirect

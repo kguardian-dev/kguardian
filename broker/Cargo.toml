@@ -1,16 +1,16 @@
 [package]
 name = "broker"
-version = "0.1.0"  #:version
+version = "1.0.0"  #:version
 authors = ["Mahesh Rayas"]
 description = """
-api to perform db operation for xentra 
+API server for kguardian - stores telemetry data from eBPF controller
 """
-documentation = "https://docs.rs/arx-api"
-homepage = "https://github.com/<todo>"
-repository = "https://github.com/<todo>"
+documentation = "https://github.com/kguardian-dev/kguardian"
+homepage = "https://github.com/kguardian-dev/kguardian"
+repository = "https://github.com/kguardian-dev/kguardian"
 readme = "README.md"
 keywords = ["kubernetes", "k8s"]
-license = "Unlicense OR MIT"
+license = "BUSL-1.1"
 edition = "2021"
 
 [[bin]]
@@ -25,6 +25,7 @@ bench = false
 [dependencies]
 dotenv = "0.15"
 actix-web = "4.11"
+actix-cors = "0.7"
 diesel = { version = "2.2.6", features = ["postgres","chrono","serde_json","r2d2"] }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.143"

@@ -22,3 +22,4 @@ go.work
 
 # rust target
 **/target/**
+*.tgz
