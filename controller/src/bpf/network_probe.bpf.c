@@ -24,7 +24,6 @@ struct
     __uint(value_size, sizeof(u32));
 } tracept_events SEC(".maps");
 
-
 struct
 {
     __uint(type, BPF_MAP_TYPE_HASH);
