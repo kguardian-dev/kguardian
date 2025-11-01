@@ -7,6 +7,6 @@
   "frontend+FILLER": "0.0.0",
   "advisor": "1.1.0",
   "advisor+FILLER": "0.0.0",
-  "charts/kguardian": "1.0.1",
+  "charts/kguardian": "1.1.0",
   "charts/kguardian+FILLER": "0.0.0"
 }
