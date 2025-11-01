@@ -15,8 +15,6 @@ static __always_inline __u16 ntohs_manual(__u16 val)
 #endif
 }
 
-
-
 struct drop_event {
     __u64 timestamp;
     __u64 inum;
@@ -33,14 +31,6 @@ struct {
     __uint(key_size, sizeof(__u32));
     __uint(value_size, sizeof(__u32));
 } drop_events SEC(".maps");
-
-struct {
-    __uint(type, BPF_MAP_TYPE_HASH);
-    __uint(max_entries, 10240);
-    __type(key, __u64);
-    __type(value, __u64);  // Counter
-} drop_stats SEC(".maps");
-
 
 // Helper to read TCP header
 static __always_inline int read_tcp_ports(unsigned char *head,
@@ -98,7 +88,6 @@ int trace_kfree_skb(struct trace_event_raw_kfree_skb *ctx)
     evt.timestamp = bpf_ktime_get_ns();
     evt.drop_location = (__u64)location;
      
-    // Read sk_buff headers
     unsigned char *head = BPF_CORE_READ(skb, head);
     __u16 network_header = BPF_CORE_READ(skb, network_header);
     __u16 transport_header = BPF_CORE_READ(skb, transport_header);
@@ -116,7 +105,6 @@ int trace_kfree_skb(struct trace_event_raw_kfree_skb *ctx)
     // Only process IPv4
     if (ip.version != 4)
         return 0;
-
 
    // Check if destination is in 127.0.0.0/8 (loopback) range
     __u32 daddr = ntohs_manual(ip.daddr);  // Convert to host byte order
@@ -151,20 +139,6 @@ int trace_kfree_skb(struct trace_event_raw_kfree_skb *ctx)
     }
     
     bpf_perf_event_output(ctx, &drop_events, BPF_F_CURRENT_CPU, &evt, sizeof(evt));
-    
-    // FIX: Uncomment to update stats
-    __u64 key = ((__u64)evt.saddr << 32) | evt.daddr;
-    __u64 *count = bpf_map_lookup_elem(&drop_stats, &key);
-    if (count) {
-        __sync_fetch_and_add(count, 1);
-    } else {
-        __u64 init_val = 1;
-        bpf_map_update_elem(&drop_stats, &key, &init_val, BPF_ANY);
-    }
-    
-    // FIX: Add detailed logging with ports and drop reason
-    bpf_printk("DROP: net_ns=%llu proto=%d sport=%d dport=%d\n",
-               net_ns, evt.protocol, evt.sport, evt.dport);
     
     return 0;
 }
