@@ -64,7 +64,7 @@ go test ./...           # Run tests
 go build -o advisor     # Build binary
 
 # For UI (React + TypeScript)
-cd ui
+cd frontend
 npm install             # Install dependencies
 npm run dev             # Start dev server (http://localhost:5173)
 npm run build           # Build for production
@@ -157,7 +157,7 @@ kubectl kguardian gen secp -A --output-dir ./seccomp  # All pods, all namespaces
 - **Flow**: Queries Broker API → aggregates data → generates YAML manifests → optionally applies to cluster
 
 ### UI (React + TypeScript)
-- **Location**: `ui/`
+- **Location**: `frontend/`
 - **Tech Stack**: React 19, TypeScript, Vite, TailwindCSS 4, React Flow
 - **Key Components**:
   - `App.tsx`: Main application container with header, graph, and table
@@ -171,6 +171,9 @@ kubectl kguardian gen secp -A --output-dir ./seccomp  # All pods, all namespaces
 - **Styling**: Dark theme inspired by Cilium Hubble (see `index.css` for color scheme)
 - **Build**: Vite for dev server and production builds, outputs to `dist/`
 - **Deployment**: Multi-stage Docker build with nginx for serving static files
+- **Configuration**:
+  - `vite.config.ts`: Uses `VITE_API_URL` environment variable for broker URL (defaults to `http://broker.kguardian.svc.cluster.local:9090`)
+  - `.env.example`: Example environment variables for local development
 
 ## Important Implementation Notes
 
