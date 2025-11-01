@@ -159,7 +159,11 @@ func getRealSvcSpec(svcIp string) (*SvcDetail, error) {
 		log.Error().Err(err).Msg("Error making GET request")
 		return nil, err
 	}
-	defer resp.Body.Close()
+	defer func() {
+		if closeErr := resp.Body.Close(); closeErr != nil {
+			log.Error().Err(closeErr).Msg("getRealSvcSpec: Error closing response body")
+		}
+	}()
 
 	// Check the HTTP status code.
 	if resp.StatusCode != http.StatusOK {

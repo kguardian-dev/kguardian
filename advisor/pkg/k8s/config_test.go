@@ -169,7 +169,7 @@ func TestGetConfig(t *testing.T) {
 	}
 
 	// Test with KUBECONFIG env var
-	os.Setenv("KUBECONFIG", kubeconfigPath)
+	_ = os.Setenv("KUBECONFIG", kubeconfigPath)
 	config, err := GetConfig(false)
 	assert.NoError(t, err)
 	assert.NotNil(t, config)
@@ -239,7 +239,7 @@ func TestGetCurrentNamespace(t *testing.T) {
 	assert.Equal(t, "default", namespace)
 
 	// Test with POD_NAMESPACE environment variable
-	os.Setenv("POD_NAMESPACE", "test-namespace")
+	_ = os.Setenv("POD_NAMESPACE", "test-namespace")
 	namespace, err = GetCurrentNamespace(config)
 	assert.NoError(t, err)
 	assert.Equal(t, "test-namespace", namespace)
