@@ -17,7 +17,6 @@
 * adding command twice ([e7ac73c](https://github.com/kguardian-dev/kguardian/commit/e7ac73c18d4a66fb5ed492184cfab78cccc1df39))
 * adding missing file ([2d0bdf5](https://github.com/kguardian-dev/kguardian/commit/2d0bdf5a94aea14e869d417da137c4d7beae898c))
 * advisor ingress netpol generation ([f3579fc](https://github.com/kguardian-dev/kguardian/commit/f3579fc83f18df11ae549d4ff57e09f36c68144f))
-* **deps:** update kubernetes packages to v0.30.1 ([8435e77](https://github.com/kguardian-dev/kguardian/commit/8435e7741a4f9aafc1a91ab1880450d04aa4282e))
 * **deps:** update kubernetes packages to v0.33.1 ([4e08aa7](https://github.com/kguardian-dev/kguardian/commit/4e08aa76e95592e61f12678264d72dd5e41761f7))
 * **deps:** update kubernetes packages to v0.33.1 ([1668477](https://github.com/kguardian-dev/kguardian/commit/16684774faaa234399cd1ec9bfb2ce740858abd4))
 * **deps:** update module github.com/cilium/cilium to v1.14.19 [security] ([449da14](https://github.com/kguardian-dev/kguardian/commit/449da142e08c485dc17eb7beb1cc85a46c7f0473))
