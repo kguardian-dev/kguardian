@@ -1,16 +1,14 @@
-use libbpf_rs::PerfBufferBuilder;
-use libbpf_rs::skel::{OpenSkel, Skel, SkelBuilder};
-use uuid::Uuid;
 use crate::models::PodPacketDrop;
-use crate::{api_post_call, Error, PodInspect, PodTraffic};
+use crate::{api_post_call, Error, PodInspect};
 use chrono::Utc;
 use moka::future::Cache;
 use serde_json::json;
 use std::collections::BTreeMap;
-use std::net::{IpAddr, Ipv4Addr};
+use std::net::Ipv4Addr;
 use std::sync::Arc;
 use tokio::sync::Mutex;
-use tracing::{debug, error, info};
+use tracing::{debug, error};
+use uuid::Uuid;
 
 #[derive(Hash, Eq, PartialEq, Clone)]
 struct TrafficKey {
@@ -38,7 +36,7 @@ pub use packet_drop::*;
 #[derive(Debug, Clone, Copy)]
 pub struct PacketDropEvent {
     pub timestamp: u64,
-    pub inum:  u64,
+    pub inum: u64,
     pub saddr: u32,
     pub daddr: u32,
     pub sport: u16,
@@ -49,17 +47,18 @@ pub struct PacketDropEvent {
 
 fn proto_to_string(proto: u8) -> String {
     match proto {
-        6  => "TCP".to_string(),
+        6 => "TCP".to_string(),
         17 => "UDP".to_string(),
-        1  => "ICMP".to_string(),
-        58 => "ICMPv6".to_string(),      // common IPv6 ICMP
-        _  => format!("UNKNOWN({})", proto),
+        1 => "ICMP".to_string(),
+        58 => "ICMPv6".to_string(), // common IPv6 ICMP
+        _ => format!("UNKNOWN({})", proto),
     }
 }
 
-
-pub async fn handle_packet_events( mut event_receiver: tokio::sync::mpsc::Receiver<PacketDropEvent>,
-    container_map_tcp: Arc<Mutex<BTreeMap<u64, PodInspect>>>)-> Result<(), Error> {
+pub async fn handle_packet_events(
+    mut event_receiver: tokio::sync::mpsc::Receiver<PacketDropEvent>,
+    container_map_tcp: Arc<Mutex<BTreeMap<u64, PodInspect>>>,
+) -> Result<(), Error> {
     while let Some(event) = event_receiver.recv().await {
         let container_map = container_map_tcp.lock().await;
         if let Some(pod_inspect) = container_map.get(&event.inum) {
@@ -77,7 +76,7 @@ pub async fn process_pkt_drop_event(
     let d_ip = Ipv4Addr::from(u32::from_be(data.daddr));
     let s_port = data.sport;
     let d_port = data.dport;
-    println!("Packet Drop Event: Pod: {}, Namespace: {:?}, Src: {}:{}, Dst: {}:{}, Protocol: {}, Drop Location: 0x{:x}",
+    debug!("Packet Drop Event: Pod: {}, Namespace: {:?}, Src: {}:{}, Dst: {}:{}, Protocol: {}, Drop Location: 0x{:x}",
         pod_data.status.pod_name,
         pod_data.status.pod_namespace,
         s_ip,
@@ -119,11 +118,11 @@ pub async fn process_pkt_drop_event(
             traffic_in_out_ip: Some(traffic_in_out_ip_str),
             traffic_in_out_port: Some(traffic_in_out_port_str),
             traffic_type: Some(traffic_type_str),
-            drop_reason : Some("Network Policy".to_string()),
+            drop_reason: Some("Network Policy".to_string()),
             ip_protocol: Some(protocol_str),
             time_stamp: Utc::now().naive_utc(),
         });
-        info!("Record to be inserted {}", z.to_string());
+        debug!("Record to be inserted {}", z.to_string());
         if let Err(e) = api_post_call(z, "pod/packet_drop").await {
             error!("Failed to post Network event: {}", e);
         } else {
@@ -134,5 +133,4 @@ pub async fn process_pkt_drop_event(
     }
 
     Ok(())
-
 }

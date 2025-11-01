@@ -1313,6 +1313,39 @@ dependencies = [
 ]
 
 [[package]]
+name = "kguardian"
+version = "1.1.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "containerd-client",
+ "futures",
+ "k8s-openapi",
+ "kube",
+ "lazy_static",
+ "libbpf-cargo",
+ "libbpf-rs",
+ "libbpf-sys",
+ "libseccomp",
+ "moka",
+ "openssl",
+ "plain",
+ "procfs",
+ "regex",
+ "reqwest",
+ "serde",
+ "serde_derive",
+ "serde_json",
+ "thiserror 2.0.17",
+ "time",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
+ "vmlinux",
+]
+
+[[package]]
 name = "kube"
 version = "2.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1392,39 +1425,6 @@ dependencies = [
  "serde",
  "serde_json",
  "syn",
-]
-
-[[package]]
-name = "kguardian"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "chrono",
- "containerd-client",
- "futures",
- "k8s-openapi",
- "kube",
- "lazy_static",
- "libbpf-cargo",
- "libbpf-rs",
- "libbpf-sys",
- "libseccomp",
- "moka",
- "openssl",
- "plain",
- "procfs",
- "regex",
- "reqwest",
- "serde",
- "serde_derive",
- "serde_json",
- "thiserror 2.0.17",
- "time",
- "tokio",
- "tracing",
- "tracing-subscriber",
- "uuid",
- "vmlinux",
 ]
 
 [[package]]
