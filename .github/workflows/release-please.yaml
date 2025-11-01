@@ -1,0 +1,118 @@
+name: Release Please
+
+on:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  release-please:
+    runs-on: ubuntu-latest
+    outputs:
+      controller-release-created: ${{ steps.release.outputs['controller--release_created'] }}
+      controller-tag-name: ${{ steps.release.outputs['controller--tag_name'] }}
+      broker-release-created: ${{ steps.release.outputs['broker--release_created'] }}
+      broker-tag-name: ${{ steps.release.outputs['broker--tag_name'] }}
+      ui-release-created: ${{ steps.release.outputs['ui--release_created'] }}
+      ui-tag-name: ${{ steps.release.outputs['ui--tag_name'] }}
+      advisor-release-created: ${{ steps.release.outputs['advisor--release_created'] }}
+      advisor-tag-name: ${{ steps.release.outputs['advisor--tag_name'] }}
+      chart-release-created: ${{ steps.release.outputs['charts/kguardian--release_created'] }}
+      chart-tag-name: ${{ steps.release.outputs['charts/kguardian--tag_name'] }}
+    steps:
+      - name: Run release-please
+        id: release
+        uses: googleapis/release-please-action@v4
+        with:
+          # Optional: customize using config file
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json
+
+  # Trigger controller release workflow when a controller release is created
+  trigger-controller-release:
+    needs: release-please
+    if: ${{ needs.release-please.outputs.controller-release-created == 'true' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trigger controller release workflow
+        uses: actions/github-script@v7
+        with:
+          script: |
+            await github.rest.actions.createWorkflowDispatch({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              workflow_id: 'controller-release.yaml',
+              ref: '${{ needs.release-please.outputs.controller-tag-name }}'
+            });
+
+  # Trigger broker release workflow when a broker release is created
+  trigger-broker-release:
+    needs: release-please
+    if: ${{ needs.release-please.outputs.broker-release-created == 'true' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trigger broker release workflow
+        uses: actions/github-script@v7
+        with:
+          script: |
+            await github.rest.actions.createWorkflowDispatch({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              workflow_id: 'broker-release.yaml',
+              ref: '${{ needs.release-please.outputs.broker-tag-name }}'
+            });
+
+  # Trigger UI release workflow when a UI release is created
+  trigger-ui-release:
+    needs: release-please
+    if: ${{ needs.release-please.outputs.ui-release-created == 'true' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trigger UI release workflow
+        uses: actions/github-script@v7
+        with:
+          script: |
+            await github.rest.actions.createWorkflowDispatch({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              workflow_id: 'ui-release.yaml',
+              ref: '${{ needs.release-please.outputs.ui-tag-name }}'
+            });
+
+  # Trigger advisor release workflow when an advisor release is created
+  trigger-advisor-release:
+    needs: release-please
+    if: ${{ needs.release-please.outputs.advisor-release-created == 'true' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trigger advisor release workflow
+        uses: actions/github-script@v7
+        with:
+          script: |
+            await github.rest.actions.createWorkflowDispatch({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              workflow_id: 'advisor-release.yml',
+              ref: '${{ needs.release-please.outputs.advisor-tag-name }}'
+            });
+
+  # Trigger chart release workflow when a chart release is created
+  trigger-chart-release:
+    needs: release-please
+    if: ${{ needs.release-please.outputs.chart-release-created == 'true' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trigger chart release workflow
+        uses: actions/github-script@v7
+        with:
+          script: |
+            await github.rest.actions.createWorkflowDispatch({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              workflow_id: 'charts-release.yaml',
+              ref: '${{ needs.release-please.outputs.chart-tag-name }}'
+            });

@@ -8,7 +8,7 @@ import (
 	"github.com/rs/zerolog"
 	log "github.com/rs/zerolog/log"
 	"github.com/spf13/cobra"
-	"github.com/xentra-ai/advisor/pkg/k8s"
+	"github.com/kguardian-dev/kguardian/advisor/pkg/k8s"
 	"k8s.io/cli-runtime/pkg/genericclioptions"
 )
 
@@ -86,13 +86,13 @@ func init() {
 }
 
 var rootCmd = &cobra.Command{
-	Use:   "xentra",
-	Short: "Xentra is a security tool for enhancing Kubernetes application profiles",
-	Long: `Xentra is designed to improve the security profile of applications running in
-	       Kubernetes clusters. It provides various functionalities like generating network
-	       policies, seccomp profiles, and more to ensure that your applications meet
-	       best security practices.
-	       Complete documentation is available at [Your Documentation URL]`,
+	Use:   "kguardian",
+	Short: "kguardian is a Kubernetes security profile generator using eBPF",
+	Long: `kguardian analyzes runtime behavior using eBPF and generates tailored security
+	       resources like Network Policies and Seccomp Profiles. It helps improve the
+	       security posture of applications running in Kubernetes clusters by creating
+	       least-privilege security policies based on observed behavior.
+	       Complete documentation is available at https://github.com/kguardian-dev/kguardian`,
 }
 
 func Execute() {

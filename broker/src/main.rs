@@ -1,6 +1,7 @@
 use std::error::Error;
 
 use actix_web::{get, web, App, HttpResponse, HttpServer};
+use actix_cors::Cors;
 use api::{
     add_pod_details, add_pods, add_pods_syscalls, add_svc_details, establish_connection,
     get_pod_by_ip, get_pod_details, get_pod_syscall_name, get_pod_traffic, get_pod_traffic_name,
@@ -40,7 +41,14 @@ async fn main() -> Result<(), std::io::Error> {
         info!("DB setup success");
     }
     HttpServer::new(move || {
+        let cors = Cors::default()
+            .allow_any_origin()
+            .allow_any_method()
+            .allow_any_header()
+            .max_age(3600);
+
         App::new()
+            .wrap(cors)
             .app_data(web::Data::new(pool.clone()))
             .service(add_pods)
             .service(add_pod_details)

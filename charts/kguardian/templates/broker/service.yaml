@@ -1,0 +1,16 @@
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .Values.broker.service.name }}
+  labels:
+    {{- include "kguardian.labels" . | nindent 4 }}
+spec:
+  type: {{ .Values.broker.service.type }}
+  ports:
+    - port: {{ .Values.broker.service.port }}
+      targetPort: http
+      protocol: TCP
+      name: http
+  selector:
+    app.kubernetes.io/name: {{ .Values.broker.service.name }}

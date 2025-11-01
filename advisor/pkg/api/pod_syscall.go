@@ -32,7 +32,11 @@ func GetPodSysCall(podName string) (PodSysCall, error) {
 		log.Error().Err(err).Msg("GetPodSysCall: Error making GET request")
 		return PodSysCall{}, err
 	}
-	defer resp.Body.Close()
+	defer func() {
+		if closeErr := resp.Body.Close(); closeErr != nil {
+			log.Error().Err(closeErr).Msg("GetPodSysCall: Error closing response body")
+		}
+	}()
 
 	if resp.StatusCode != http.StatusOK {
 		return PodSysCall{}, fmt.Errorf("GetPodSysCall: received non-OK HTTP status code: %v", resp.StatusCode)

@@ -1,0 +1,50 @@
+---
+# yaml-language-server: $schema=https://taskfile.dev/schema.json
+version: '3'
+
+vars:
+  UI_IMAGE_NAME: ghcr.io/kguardian-dev/kguardian/guardian-ui
+  IMAGE_VERSION: local
+
+tasks:
+  all:
+    desc: "Run all UI tasks"
+    cmds:
+      - task: build
+
+  install:
+    desc: "Install UI dependencies"
+    dir: ui
+    cmds:
+      - npm install
+
+  dev:
+    desc: "Start UI development server"
+    dir: ui
+    cmds:
+      - npm run dev
+
+  build:
+    desc: "Build and package the UI"
+    dir: ui
+    cmds:
+      - npm run build
+
+  docker:
+    desc: "Build UI Docker image and load into Kind"
+    deps: [build]
+    cmds:
+      - docker build -t {{.UI_IMAGE_NAME}}:{{.IMAGE_VERSION}} ui
+      - kind load docker-image {{.UI_IMAGE_NAME}}:{{.IMAGE_VERSION}}
+
+  lint:
+    desc: "Lint UI code"
+    dir: ui
+    cmds:
+      - npm run lint
+
+  preflight:
+    desc: "Run preflight checks for UI"
+    cmds:
+      - command -v node || echo "Node.js is not installed"
+      - command -v npm || echo "npm is not installed"

@@ -9,8 +9,8 @@ import (
 	"github.com/rs/zerolog"
 	log "github.com/rs/zerolog/log"
 	"github.com/spf13/cobra"
-	"github.com/xentra-ai/advisor/pkg/k8s"
-	"github.com/xentra-ai/advisor/pkg/network"
+	"github.com/kguardian-dev/kguardian/advisor/pkg/k8s"
+	"github.com/kguardian-dev/kguardian/advisor/pkg/network"
 	corev1 "k8s.io/api/core/v1"
 )
 
@@ -210,7 +210,7 @@ func init() {
 	networkPolicyCmd.Flags().StringVar(&outputDir, "output-dir", "network-policies", "Directory to store generated network policies")
 
 	// Add completion for the policy type flag
-	networkPolicyCmd.RegisterFlagCompletionFunc("type", func(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
+	_ = networkPolicyCmd.RegisterFlagCompletionFunc("type", func(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
 		return []string{"kubernetes", "cilium"}, cobra.ShellCompDirectiveNoFileComp
 	})
 }

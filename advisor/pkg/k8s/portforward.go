@@ -17,7 +17,7 @@ import (
 
 var (
 	// TODO: This namespace should be configurable if overridden
-	serviceNamespace = "kube-guardian"
+	serviceNamespace = "kguardian"
 	serviceName      = "broker"
 	ports            = []string{"9090:9090"}
 )
@@ -75,20 +75,20 @@ func PortForward(config *Config) (chan struct{}, chan error, chan bool) {
 				service, err = config.Clientset.CoreV1().Services("kube-system").Get(ctx, serviceName, metav1.GetOptions{})
 				if err != nil {
 					log.Error().Err(err).Msg("Error collecting broker service in fallback namespace kube-system")
-					errChan <- fmt.Errorf("failed to find kube-guardian broker service in any namespace: %w", err)
+					errChan <- fmt.Errorf("failed to find kguardian broker service in any namespace: %w", err)
 					close(done)
 					return
 				}
 				actualNamespace = "kube-system"
 			} else {
 				log.Error().Err(err).Msgf("Error collecting broker service in namespace %s", actualNamespace)
-				errChan <- fmt.Errorf("failed to find kube-guardian broker service: %w", err)
+				errChan <- fmt.Errorf("failed to find kguardian broker service: %w", err)
 				close(done)
 				return
 			}
 		}
 
-		if service.Spec.Selector == nil || len(service.Spec.Selector) == 0 {
+		if len(service.Spec.Selector) == 0 {
 			err := fmt.Errorf("service %s/%s has no selectors", actualNamespace, serviceName)
 			log.Error().Msg(err.Error())
 			errChan <- err
@@ -109,7 +109,7 @@ func PortForward(config *Config) (chan struct{}, chan error, chan bool) {
 		pods, err := config.Clientset.CoreV1().Pods(actualNamespace).List(ctx, metav1.ListOptions{LabelSelector: labelSelectorString})
 		if err != nil {
 			log.Error().Err(err).Msg("Error collecting broker pods")
-			errChan <- fmt.Errorf("failed to list kube-guardian broker pods: %w", err)
+			errChan <- fmt.Errorf("failed to list kguardian broker pods: %w", err)
 			close(done) // Signal completion to avoid blocking
 			return
 		}

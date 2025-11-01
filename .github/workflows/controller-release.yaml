@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
   push:
     tags:
-      - "v*"
+      - "controller/v*"
 
 jobs:
   build:
@@ -63,7 +63,7 @@ jobs:
       - uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
         with:
           name: ${{ steps.args.outputs.BUILD }}-binary
-          path: controller/target/${{ steps.args.outputs.BUILD }}/release/kube-guardian
+          path: controller/target/${{ steps.args.outputs.BUILD }}/release/kguardian
 
   push:
     runs-on: ubuntu-latest
@@ -103,7 +103,10 @@ jobs:
 
       - name: Extract tag name
         id: extract_tag
-        run: echo "TAG_NAME=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+        run: |
+          TAG="${GITHUB_REF#refs/tags/}"
+          VERSION="${TAG#controller/}"
+          echo "TAG_NAME=${VERSION}" >> $GITHUB_OUTPUT
 
       - name: Build and Push
         env:
@@ -115,5 +118,5 @@ jobs:
           file: controller/Dockerfile
           push: true
           tags: |
-            ghcr.io/xentra-ai/images/guardian-controller:${{ steps.extract_tag.outputs.TAG_NAME }}
-            ghcr.io/xentra-ai/images/guardian-controller:latest
+            ghcr.io/kguardian-dev/kguardian/guardian-controller:${{ steps.extract_tag.outputs.TAG_NAME }}
+            ghcr.io/kguardian-dev/kguardian/guardian-controller:latest

@@ -1,7 +1,7 @@
 package main
 
 import (
-	"github.com/xentra-ai/advisor/cmd"
+	"github.com/kguardian-dev/kguardian/advisor/cmd"
 )
 
 func main() {

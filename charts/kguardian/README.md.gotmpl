@@ -1,0 +1,85 @@
+# kguardian Helm Chart
+
+This chart bootstraps the [kguardian]() controlplane onto a [Kubernetes](http://kubernetes.io) cluster using the [Helm](https://helm.sh) package manager.
+
+{{ template "chart.versionBadge" . }}
+
+## Overview
+
+This Helm chart deploys:
+
+- A kguardian control plane configured to your specifications
+- Additional features and components (optional)
+
+## Prerequisites
+
+- Linux Kernel 6.2+
+- Kubernetes 1.19+
+- kubectl v1.19+
+- Helm 3.0+
+
+## Install the Chart
+
+To install the chart with the release name `my-release`:
+
+Add the chart repo
+
+```bash
+helm repo add kguardian https://kguardian-dev.github.io/kguardian
+```
+
+You can then run `helm search repo kguardian` to search the charts.
+
+Install chart using Helm v3.0+
+
+```bash
+helm install kguardian kguardian/kguardian --namespace kguardian --create-namespace
+```
+
+If you want to use the OCI variant of the helm chart, you can use the following command:
+
+```bash
+helm template kguardian oci://ghcr.io/kguardian-dev/charts/kguardian --namespace kguardian --create-namespace
+```
+
+**Note:** *If you have the [Pod Securty Admission](https://kubernetes.io/docs/concepts/security/pod-security-admission/) enabled for your cluster you will need to add the following annotation to the namespace that the chart is deployed*
+
+Example:
+
+```yaml
+apiVersion: v1
+kind: Namespace
+metadata:
+  labels:
+    pod-security.kubernetes.io/enforce: privileged
+    pod-security.kubernetes.io/warn: privileged
+  name: kguardian
+```
+
+## Directory Structure
+
+The following shows the directory structure of the Helm chart.
+
+```bash
+charts/kguardian/
+├── .helmignore   # Contains patterns to ignore when packaging Helm charts.
+├── Chart.yaml    # Information about your chart
+├── values.yaml   # The default values for your templates
+├── charts/       # Charts that this chart depends on
+└── templates/    # The template files
+    └── tests/    # The test files
+```
+
+## Configuration
+
+The following table lists the configurable parameters of the kguardian chart and their default values.
+
+{{ template "chart.valuesTable" . }}
+
+## Uninstalling the Chart
+
+To uninstall/delete the my-release deployment:
+
+```bash
+helm uninstall my-release
+```
