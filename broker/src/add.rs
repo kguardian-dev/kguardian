@@ -1,4 +1,4 @@
-use crate::{schema, PodDetail, PodInputSyscalls, PodSyscalls, PodTraffic, SvcDetail};
+use crate::{PodDetail, PodInputSyscalls, PodPacketDrop, PodSyscalls, PodTraffic, SvcDetail, schema};
 use actix_web::{post, web, Error, HttpResponse};
 use diesel::pg::PgConnection;
 use diesel::r2d2::{self, ConnectionManager};
@@ -9,6 +9,64 @@ use tracing::{debug, info};
 
 type DbPool = r2d2::Pool<ConnectionManager<PgConnection>>;
 type DbError = Box<dyn std::error::Error + Send + Sync>;
+
+
+
+
+#[post("/pod/packet_drop")]
+pub async fn add_drop_packets(
+    pool: web::Data<DbPool>,
+    form: web::Json<PodPacketDrop>,
+) -> Result<HttpResponse, Error> {
+    let pods = web::block(move || {
+        let mut conn = pool.get()?;
+        create_pod_packet_drop(&mut conn, form)
+    })
+    .await?
+    .map_err(actix_web::error::ErrorInternalServerError)?;
+
+    Ok(HttpResponse::Ok().json(pods))
+}
+fn  create_pod_packet_drop(
+    conn: &mut PgConnection,
+    w: web::Json<PodPacketDrop>,
+) -> Result<PodPacketDrop, DbError> {
+    use schema::pod_packet_drop::dsl::*;
+    debug!(
+        "storing the pod packet drop details {:?} into pod_traffic table",
+        w.uuid
+    );
+    if w.get_row(conn)?.is_none() {
+        info!("Insert pod {:?}, in pod_traffic table", w.uuid);
+        let _ = diesel::insert_into(pod_packet_drop)
+            .values(&*w)
+            .execute(conn)
+            .expect("Error saving data into pod_traffic");
+
+        debug!(
+            "Success: pod {:?} inserted in pod_traffic table",
+            w.uuid
+        );
+    } else {
+        debug!("Data already exists");
+    }
+    Ok(w.0)
+}
+
+impl PodPacketDrop {
+    pub fn get_row(&self, conn: &mut PgConnection) -> Result<Option<PodPacketDrop>, DbError> {
+        use schema::pod_packet_drop::dsl::*;
+        let row = pod_packet_drop
+            .filter(pod_ip.eq(&self.pod_ip))
+            .filter(traffic_in_out_ip.eq(&self.traffic_in_out_ip))
+            .filter(traffic_in_out_port.eq(&self.traffic_in_out_port))
+            .filter(pod_name.eq(&self.pod_name))
+            .filter(drop_reason.eq(&self.drop_reason))
+            .first::<PodPacketDrop>(conn)
+            .optional()?;
+        Ok(row)
+    }
+}
 
 #[post("/pod/traffic")]
 pub async fn add_pods(
@@ -25,7 +83,9 @@ pub async fn add_pods(
     Ok(HttpResponse::Ok().json(pods))
 }
 
-pub fn create_pod_traffic(
+
+
+fn create_pod_traffic(
     conn: &mut PgConnection,
     w: web::Json<PodTraffic>,
 ) -> Result<PodTraffic, DbError> {

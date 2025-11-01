@@ -8,6 +8,7 @@ use kube_guardian::bpf::ebpf_handle;
 use kube_guardian::log::init_logger;
 use kube_guardian::network::handle_network_events;
 use kube_guardian::service_watcher::watch_service;
+use kube_guardian::pkt_drop::{PacketDropEvent, handle_packet_events};
 use kube_guardian::syscall::{
     handle_syscall_events, send_syscall_cache_periodically, SyscallEventData,
 };
@@ -53,14 +54,19 @@ async fn main() -> Result<(), Error> {
 
     let (network_event_sender, network_event_receiver) = mpsc::channel::<NetworkEventData>(1000);
     let (syscall_event_sender, syscall_event_receiver) = mpsc::channel::<SyscallEventData>(1000);
+    let (pktdrp_event_sender, pktdrp_event_receiver) = mpsc::channel::<PacketDropEvent>(1000);
 
     let network_event_handler =
         handle_network_events(network_event_receiver, Arc::clone(&container_map));
+    
+    let pktdrop_event_handler = handle_packet_events(pktdrp_event_receiver , Arc::clone(&container_map) );
     let syscall_event_handler = handle_syscall_events(syscall_event_receiver, container_map);
+   
 
     let ebpf_handle = ebpf_handle(
         network_event_sender,
         syscall_event_sender,
+        pktdrp_event_sender,
         rx,
         recv_ip,
         ignore_daemonset_traffic,
@@ -74,6 +80,7 @@ async fn main() -> Result<(), Error> {
         pods,
         network_event_handler,
         syscall_event_handler,
+        pktdrop_event_handler,
         syscall_recorder,
         async { ebpf_handle.await.unwrap() }
     )

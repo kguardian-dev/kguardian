@@ -26,6 +26,23 @@ diesel::table! {
 }
 
 diesel::table! {
+    pod_packet_drop (uuid) {
+        uuid -> Varchar,
+        pod_name -> Nullable<Varchar>,
+        pod_namespace -> Nullable<Varchar>,
+        pod_ip -> Nullable<Varchar>,
+        pod_port -> Nullable<Varchar>,
+        ip_protocol -> Nullable<Varchar>,
+        traffic_type -> Nullable<Varchar>,
+        traffic_in_out_ip -> Nullable<Varchar>,
+        traffic_in_out_port -> Nullable<Varchar>,
+        drop_reason -> Nullable<Varchar>,
+        time_stamp -> Timestamp,
+    }
+}
+
+
+diesel::table! {
     pod_syscalls (pod_name) {
         pod_name -> Varchar,
         pod_namespace -> Varchar,
