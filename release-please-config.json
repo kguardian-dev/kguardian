@@ -7,7 +7,7 @@
     "controller": {
       "component": "controller",
       "release-type": "rust",
-      "package-name": "kguardian-controller",
+      "package-name": "controller",
       "changelog-path": "CHANGELOG.md",
       "extra-files": [
         "controller/VERSION"
@@ -17,7 +17,7 @@
     "broker": {
       "component": "broker",
       "release-type": "rust",
-      "package-name": "kguardian-broker",
+      "package-name": "broker",
       "changelog-path": "CHANGELOG.md",
       "extra-files": [
         "broker/VERSION"
@@ -27,7 +27,7 @@
     "frontend": {
       "component": "frontend",
       "release-type": "node",
-      "package-name": "kguardian-frontend",
+      "package-name": "frontend",
       "changelog-path": "CHANGELOG.md",
       "extra-files": [
         "frontend/VERSION"
@@ -37,7 +37,7 @@
     "advisor": {
       "component": "advisor",
       "release-type": "go",
-      "package-name": "kguardian-advisor",
+      "package-name": "advisor",
       "changelog-path": "CHANGELOG.md",
       "extra-files": [
         "advisor/VERSION"
