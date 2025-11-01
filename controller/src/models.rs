@@ -51,6 +51,21 @@ pub struct PodTraffic {
     pub time_stamp: NaiveDateTime,
 }
 
+#[derive(Debug, Default, Serialize)]
+pub struct PodPacketDrop {
+    pub uuid: String,
+    pub pod_name: String,
+    pub pod_namespace: Option<String>,
+    pub pod_ip: String,
+    pub pod_port: Option<String>,
+    pub traffic_type: Option<String>,
+    pub traffic_in_out_ip: Option<String>,
+    pub traffic_in_out_port: Option<String>,
+    pub ip_protocol: Option<String>,
+    pub drop_reason: Option<String>,
+    pub time_stamp: NaiveDateTime,
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct SvcDetail {
     pub svc_ip: String,

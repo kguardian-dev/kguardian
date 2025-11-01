@@ -13,7 +13,7 @@ vars:
 
 tasks:
   all:
-    deps: [kind]
+    #deps: [kind]
     desc: "Run all tasks"
     cmds:
       #- task: advisor:all
@@ -30,12 +30,12 @@ tasks:
     deps: [all]
     desc: "Install in KinD cluster"
     cmds:
-      - helm repo add kguardian https://kguardian-dev.github.io/kguardian || true
-      - helm install kguardian kguardian/kguardian --namespace kguardian
-        --create-namespace --set controller.image.tag={{.IMAGE_VERSION}}
-        --set broker.image.tag={{.IMAGE_VERSION}}
-        --set controller.image.pullPolicy=IfNotPresent
-        --set broker.image.pullPolicy=IfNotPresent
+        - helm repo add kguardian https://kguardian-dev.github.io/kguardian || true
+        - helm install kguardian kguardian/kguardian --namespace kguardian
+          --create-namespace --set controller.image.tag={{.IMAGE_VERSION}}
+          --set broker.image.tag={{.IMAGE_VERSION}}
+          --set controller.image.pullPolicy=IfNotPresent
+          --set broker.image.pullPolicy=IfNotPresent
 
   preflight:
     desc: "Run preflight checks for all components"

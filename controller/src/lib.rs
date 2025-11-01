@@ -1,4 +1,5 @@
 pub mod network;
+pub mod pkt_drop;
 pub mod syscall;
 
 pub mod error;
