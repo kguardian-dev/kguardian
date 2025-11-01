@@ -3,6 +3,30 @@ entries:
   kguardian:
   - apiVersion: v2
     appVersion: 1.0.0
+    created: "2025-11-01T10:43:47.987010729Z"
+    description: Kubernetes security profile generator using eBPF
+    digest: e8ec7501521295a44b38c205bfecc3fef64e4308586356aac4c56f1affefac0f
+    home: https://github.com/kguardian-dev/kguardian
+    keywords:
+    - BPF
+    - eBPF
+    - Kubernetes
+    - Networking
+    - Security
+    - Observability
+    - Troubleshooting
+    kubeVersion: '>= 1.18.0-0'
+    maintainers:
+    - name: maheshrayas
+    - name: xunholy
+    name: kguardian
+    sources:
+    - https://github.com/kguardian-dev/kguardian
+    urls:
+    - https://github.com/kguardian-dev/kguardian/releases/download/kguardian-1.1.2/kguardian-1.1.2.tgz
+    version: 1.1.2
+  - apiVersion: v2
+    appVersion: 1.0.0
     created: "2025-11-01T07:04:11.26471524Z"
     description: Kubernetes security profile generator using eBPF
     digest: a4d9637976574acd553d4101996ae344c9520cb14af8c5a056c6b78417ef47d4
@@ -520,4 +544,4 @@ entries:
     urls:
     - https://github.com/xentra-ai/kube-guardian/releases/download/kube-guardian-0.0.15/kube-guardian-0.0.15.tgz
     version: 0.0.15
-generated: "2025-11-01T07:04:11.264770233Z"
+generated: "2025-11-01T10:43:47.98706863Z"
