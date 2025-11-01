@@ -2,7 +2,7 @@
 
 This chart bootstraps the [kguardian]() controlplane onto a [Kubernetes](http://kubernetes.io) cluster using the [Helm](https://helm.sh) package manager.
 
-![Version: 0.0.33](https://img.shields.io/badge/Version-0.0.33-informational?style=flat-square)
+![Version: 1.0.0](https://img.shields.io/badge/Version-1.0.0-informational?style=flat-square)
 
 ## Overview
 
@@ -86,7 +86,7 @@ The following table lists the configurable parameters of the kguardian chart and
 | broker.image.pullPolicy | string | `"Always"` |  |
 | broker.image.repository | string | `"ghcr.io/kguardian-dev/kguardian/guardian-broker"` |  |
 | broker.image.sha | string | `""` |  |
-| broker.image.tag | string | `"latest"` |  |
+| broker.image.tag | string | `"latest"` | Broker version tag. Use component version (e.g., "v1.0.0") or "latest" |
 | broker.imagePullSecrets | list | `[]` |  |
 | broker.nameOverride | string | `""` |  |
 | broker.nodeSelector | object | `{"kubernetes.io/os":"linux"}` | Node labels for the kguardian broker pod assignment |
@@ -125,7 +125,7 @@ The following table lists the configurable parameters of the kguardian chart and
 | controller.image.pullPolicy | string | `"Always"` |  |
 | controller.image.repository | string | `"ghcr.io/kguardian-dev/kguardian/guardian-controller"` |  |
 | controller.image.sha | string | `""` | Overrides the image tag. |
-| controller.image.tag | string | `"latest"` |  |
+| controller.image.tag | string | `"latest"` | Controller version tag. Use component version (e.g., "v1.0.0") or "latest" |
 | controller.imagePullSecrets | list | `[]` |  |
 | controller.initContainer.image.pullPolicy | string | `"Always"` |  |
 | controller.initContainer.image.repository | string | `"busybox"` |  |
@@ -194,6 +194,44 @@ The following table lists the configurable parameters of the kguardian chart and
 | namespace.annotations | object | `{}` | Annotations to add to the namespace |
 | namespace.labels | object | `{}` | Labels to add to the namespace |
 | namespace.name | string | `""` |  |
+| ui.affinity | object | `{}` |  |
+| ui.autoscaling.enabled | bool | `false` |  |
+| ui.autoscaling.maxReplicas | int | `100` |  |
+| ui.autoscaling.minReplicas | int | `1` |  |
+| ui.autoscaling.targetCPUUtilizationPercentage | int | `80` |  |
+| ui.container.port | int | `80` |  |
+| ui.fullnameOverride | string | `""` |  |
+| ui.image.pullPolicy | string | `"Always"` |  |
+| ui.image.repository | string | `"ghcr.io/kguardian-dev/kguardian/guardian-ui"` |  |
+| ui.image.sha | string | `""` |  |
+| ui.image.tag | string | `"latest"` | UI version tag. Use component version (e.g., "v1.0.0") or "latest" |
+| ui.imagePullSecrets | list | `[]` |  |
+| ui.nameOverride | string | `""` |  |
+| ui.nodeSelector | object | `{"kubernetes.io/os":"linux"}` | Node labels for the kguardian UI pod assignment |
+| ui.podAnnotations | object | `{}` |  |
+| ui.podSecurityContext.fsGroup | int | `101` |  |
+| ui.podSecurityContext.fsGroupChangePolicy | string | `"OnRootMismatch"` |  |
+| ui.podSecurityContext.runAsGroup | int | `101` |  |
+| ui.podSecurityContext.runAsUser | int | `101` |  |
+| ui.podSecurityContext.seccompProfile.type | string | `"RuntimeDefault"` |  |
+| ui.podSecurityContext.supplementalGroups[0] | int | `101` |  |
+| ui.priorityClassName | string | `""` | Priority class to be used for the kguardian UI pods |
+| ui.replicaCount | int | `1` | Number of UI replicas to deploy |
+| ui.resources | object | `{}` |  |
+| ui.securityContext.allowPrivilegeEscalation | bool | `false` |  |
+| ui.securityContext.capabilities.drop[0] | string | `"ALL"` |  |
+| ui.securityContext.privileged | bool | `false` |  |
+| ui.securityContext.readOnlyRootFilesystem | bool | `true` |  |
+| ui.securityContext.runAsNonRoot | bool | `true` |  |
+| ui.securityContext.runAsUser | int | `101` |  |
+| ui.service.name | string | `"ui"` |  |
+| ui.service.port | int | `80` |  |
+| ui.service.type | string | `"ClusterIP"` |  |
+| ui.serviceAccount.annotations | object | `{}` |  |
+| ui.serviceAccount.automountServiceAccountToken | bool | `false` |  |
+| ui.serviceAccount.create | bool | `true` |  |
+| ui.serviceAccount.name | string | `""` |  |
+| ui.tolerations | list | `[]` | Tolerations for the kguardian UI pod assignment |
 
 ## Uninstalling the Chart
 
