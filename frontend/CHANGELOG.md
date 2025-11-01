@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.2.8](https://github.com/kguardian-dev/kguardian/compare/frontend/v1.2.7...frontend/v1.2.8) (2025-11-01)
+
+
+### Bug Fixes
+
+* vite hosts ([283be54](https://github.com/kguardian-dev/kguardian/commit/283be548e716b13ce91856e5063d5d2b64942521))
+
 ## [1.2.7](https://github.com/kguardian-dev/kguardian/compare/frontend/v1.2.6...frontend/v1.2.7) (2025-11-01)
 
 
