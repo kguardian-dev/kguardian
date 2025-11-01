@@ -77,8 +77,15 @@ task kind               # Create fresh Kind cluster
 task install            # Build all + install Helm chart in Kind cluster
 ```
 
-The Helm chart installs both controller and broker with:
+The Helm chart can be installed from OCI registry (recommended):
 ```bash
+# Production installation (from OCI registry)
+helm install kguardian oci://ghcr.io/kguardian-dev/charts/kguardian \
+  --namespace kguardian \
+  --create-namespace
+
+# Local development installation (using task install)
+# This uses the local Helm repo with locally-built images
 helm install kguardian kguardian/kguardian \
   --namespace kguardian --create-namespace \
   --set controller.image.tag=local \

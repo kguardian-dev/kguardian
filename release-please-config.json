@@ -45,11 +45,12 @@
       "include-component-in-tag": true
     },
     "charts/kguardian": {
-      "component": "chart",
+      "component": "kguardian",
       "release-type": "helm",
       "package-name": "kguardian",
       "changelog-path": "CHANGELOG.md",
-      "include-component-in-tag": true
+      "include-component-in-tag": true,
+      "tag-separator": "-"
     }
   },
   "release-search-depth": 20,
