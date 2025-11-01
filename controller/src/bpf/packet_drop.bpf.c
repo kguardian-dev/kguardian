@@ -116,6 +116,24 @@ int trace_kfree_skb(struct trace_event_raw_kfree_skb *ctx)
     // Only process IPv4
     if (ip.version != 4)
         return 0;
+
+
+   // Check if destination is in 127.0.0.0/8 (loopback) range
+    __u32 daddr = ntohs_manual(ip.daddr);  // Convert to host byte order
+    if ((daddr & 0xFF000000) == 0x7F000000)  // Check if first byte is 127
+        return 0;
+
+    // Also ignore 0.0.0.0
+    if (ip.daddr == 0)
+        return 0;
+
+    // Ignore if IP is in ignore list
+    if (bpf_map_lookup_elem(&ignore_ips, &ip.saddr) || bpf_map_lookup_elem(&ignore_ips, &ip.daddr))
+        return 0;
+
+    // Ignore if source and dest IPs are the same
+    if (ip.saddr == ip.daddr)
+        return 0;
     
     evt.saddr = ip.saddr;
     evt.daddr = ip.daddr;

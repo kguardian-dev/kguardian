@@ -114,6 +114,11 @@ pub fn ebpf_handle(
                         .ignore_ips
                         .update(&ip_u32.to_ne_bytes(), &1_u32.to_ne_bytes(), MapFlags::ANY)
                         .unwrap();
+                    pktdrp_sk
+                        .maps
+                        .ignore_ips
+                        .update(&ip_u32.to_ne_bytes(), &1_u32.to_ne_bytes(), MapFlags::ANY)
+                        .unwrap();
                 }
             }
         }
