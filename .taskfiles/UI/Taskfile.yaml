@@ -3,7 +3,7 @@
 version: '3'
 
 vars:
-  UI_IMAGE_NAME: ghcr.io/xentra-ai/images/guardian-ui
+  UI_IMAGE_NAME: ghcr.io/kguardian-dev/kguardian/guardian-ui
   IMAGE_VERSION: local
 
 tasks:

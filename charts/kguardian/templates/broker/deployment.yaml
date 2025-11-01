@@ -2,9 +2,9 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: {{ include "kube-guardian.name" . }}-broker
+  name: {{ include "kguardian.name" . }}-broker
   labels:
-    {{- include "kube-guardian.labels" . | nindent 4 }}
+    {{- include "kguardian.labels" . | nindent 4 }}
 spec:
   {{- if not .Values.broker.autoscaling.enabled }}
   replicas: {{ .Values.broker.replicaCount }}
@@ -19,7 +19,7 @@ spec:
         {{- toYaml . | nindent 8 }}
       {{- end }}
       labels:
-        {{- include "kube-guardian.labels" . | nindent 8 }}
+        {{- include "kguardian.labels" . | nindent 8 }}
         app.kubernetes.io/name: {{ .Values.broker.service.name }}
     spec:
       automountServiceAccountToken: true
@@ -46,7 +46,7 @@ spec:
               protocol: TCP
           env:
             - name: DATABASE_URL
-              value: "postgres://rust@{{ .Values.database.name }}.{{ include "kube-guardian.namespace" . }}.svc.cluster.local:{{ .Values.database.container.port }}/kube"
+              value: "postgres://rust@{{ .Values.database.name }}.{{ include "kguardian.namespace" . }}.svc.cluster.local:{{ .Values.database.container.port }}/kube"
          {{- with .Values.broker.resources }}
           resources:
             {{- toYaml . | nindent 12 }}

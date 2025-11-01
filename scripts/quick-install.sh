@@ -1,10 +1,10 @@
 #!/bin/bash
 
 # Define the GitHub owner and repository
-GITHUB_OWNER="xentra-ai"
-GITHUB_REPO="kube-guardian"
+GITHUB_OWNER="kguardian-dev"
+GITHUB_REPO="kguardian"
 RELEASE_BINARY_NAME="advisor"
-BINARY_NAME="xentra"
+BINARY_NAME="kguardian"
 INSTALL_DIR="/usr/local/bin"
 TMP_DIR=$(mktemp -d)
 BINARY_PATH="$TMP_DIR/$BINARY_NAME"

@@ -1,5 +1,5 @@
 [package]
-name = "kube-guardian"
+name = "kguardian"
 version = "0.1.0"
 license = "LGPL-2.1-only OR BSD-2-Clause"
 edition = "2021"

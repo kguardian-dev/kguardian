@@ -5,8 +5,8 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
-	"github.com/xentra-ai/advisor/pkg/api"
-	"github.com/xentra-ai/advisor/pkg/common"
+	"github.com/kguardian-dev/kguardian/advisor/pkg/api"
+	"github.com/kguardian-dev/kguardian/advisor/pkg/common"
 	networkingv1 "k8s.io/api/networking/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/yaml"

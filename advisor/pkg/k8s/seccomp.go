@@ -7,7 +7,7 @@ import (
 	"path/filepath"
 
 	log "github.com/rs/zerolog/log"
-	api "github.com/xentra-ai/advisor/pkg/api"
+	api "github.com/kguardian-dev/kguardian/advisor/pkg/api"
 )
 
 // SeccompProfile represents the structure of a seccomp security profile

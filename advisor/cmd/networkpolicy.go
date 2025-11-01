@@ -9,8 +9,8 @@ import (
 	"github.com/rs/zerolog"
 	log "github.com/rs/zerolog/log"
 	"github.com/spf13/cobra"
-	"github.com/xentra-ai/advisor/pkg/k8s"
-	"github.com/xentra-ai/advisor/pkg/network"
+	"github.com/kguardian-dev/kguardian/advisor/pkg/k8s"
+	"github.com/kguardian-dev/kguardian/advisor/pkg/network"
 	corev1 "k8s.io/api/core/v1"
 )
 

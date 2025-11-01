@@ -3,7 +3,7 @@ package network
 import (
 	"fmt"
 
-	"github.com/xentra-ai/advisor/pkg/api"
+	"github.com/kguardian-dev/kguardian/advisor/pkg/api"
 	networkingv1 "k8s.io/api/networking/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
@@ -71,7 +71,7 @@ func CreateStandardLabels(podName, resourceType string) map[string]string {
 	return map[string]string{
 		"app.kubernetes.io/name":      podName,
 		"app.kubernetes.io/component": resourceType,
-		"app.kubernetes.io/part-of":   "xentra-advisor",
+		"app.kubernetes.io/part-of":   "kguardian",
 	}
 }
 

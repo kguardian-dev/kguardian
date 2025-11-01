@@ -1,12 +1,12 @@
-# Xentra Advisor: Kubernetes Security Profile Enhancer
+# kguardian: Kubernetes Security Profile Generator
 
-[![Go Report Card](https://goreportcard.com/badge/github.com/xentra-ai/kube-guardian)](https://goreportcard.com/report/github.com/xentra-ai/kube-guardian)
+[![Go Report Card](https://goreportcard.com/badge/github.com/kguardian-dev/kguardian)](https://goreportcard.com/report/github.com/kguardian-dev/kguardian)
 [![License](https://img.shields.io/badge/License-BSL%201.1-blue.svg)](https://mariadb.com/bsl11/)
 
-Xentra Advisor is a powerful `kubectl` plugin designed to enhance the security posture of your Kubernetes applications. It analyzes runtime behavior (via the [Kube Guardian Controller](https://github.com/xentra-ai/kube-guardian)) and generates tailored security resources like Network Policies and Seccomp Profiles.
+kguardian is a powerful Kubernetes security toolkit that analyzes runtime behavior using eBPF and generates tailored security resources like Network Policies and Seccomp Profiles.
 
 ## Table of Contents
-- [Xentra Advisor: Kubernetes Security Profile Enhancer](#xentra-advisor-kubernetes-security-profile-enhancer)
+- [kguardian: Kubernetes Security Profile Generator](#kguardian-kubernetes-security-profile-generator)
   - [Table of Contents](#table-of-contents)
   - [🌟 Features](#-features)
   - [🛠️ Prerequisites](#️-prerequisites)
@@ -35,16 +35,16 @@ Xentra Advisor is a powerful `kubectl` plugin designed to enhance the security p
 
 ## Comparison with Other Tools
 
-This table provides a high-level comparison of Xentra Advisor with other popular open-source tools in the Kubernetes security space. The landscape evolves quickly, so features may change.
+This table provides a high-level comparison of kguardian with other popular open-source tools in the Kubernetes security space. The landscape evolves quickly, so features may change.
 
-| Feature                       | Xentra Advisor                    | Inspektor Gadget                   | Security Profiles Operator (SPO) |
+| Feature                       | kguardian                         | Inspektor Gadget                   | Security Profiles Operator (SPO) |
 | :---------------------------- | :-------------------------------- | :--------------------------------- | :------------------------------- |
 | **Network Policy (K8s)**      | ✅                                | ✅ (Network Policy Advisor)        | ❌                               |
 | **Network Policy (Cilium)**   | ✅                                | ❌                                 | ❌                               |
 | **Seccomp Profile Generation**| ✅                                | 📝 (Provides syscall trace data)   | ✅ (Via Log Enricher/Recorder)   |
 | **AppArmor Profile Mgmt**     | ❌                                | ❌                                 | ✅                               |
 | **SELinux Profile Mgmt**      | ❌                                | ❌                                 | ✅                               |
-| **Data Source**               | Kube Guardian Controller (eBPF) | eBPF                             | Seccomp Logs / BPF Recorder    |
+| **Data Source**               | kguardian Controller (eBPF)      | eBPF                             | Seccomp Logs / BPF Recorder    |
 | **Operational Model**         | Client CLI + Server Controller    | Client CLI + Server Gadgets      | Server Operator + CRDs         |
 | **Dry Run / Preview**         | ✅ (NetPol)                       | ✅ (YAML output for advisor)       | N/A                              |
 | **Save to File**              | ✅ (NetPol, Seccomp)              | ✅ (YAML output for advisor)       | N/A (Uses CRDs)                  |
@@ -53,10 +53,10 @@ This table provides a high-level comparison of Xentra Advisor with other popular
 
 *Legend: ✅ = Supported, ❌ = Not Supported, 📝 = Partial/Requires Manual Steps, N/A = Not Applicable*
 
-**Note on Operational Models:** Xentra Advisor and Inspektor Gadget use client CLIs that interact with dedicated server-side components (Controller/Gadgets) primarily for data retrieval. SPO operates as a full Kubernetes operator managing security profiles via Custom Resource Definitions (CRDs).
+**Note on Operational Models:** kguardian and Inspektor Gadget use client CLIs that interact with dedicated server-side components (Controller/Gadgets) primarily for data retrieval. SPO operates as a full Kubernetes operator managing security profiles via Custom Resource Definitions (CRDs).
 
-**Key Differentiators for Xentra Advisor:**
-*   Generates both Network Policies (K8s Native & Cilium) and Seccomp profiles from a single data source (Kube Guardian).
+**Key Differentiators for kguardian:**
+*   Generates both Network Policies (K8s Native & Cilium) and Seccomp profiles from a single data source.
 *   Provides options for direct application (Network Policy) or saving to files for GitOps workflows.
 
 ## 🛠️ Prerequisites
@@ -64,7 +64,7 @@ This table provides a high-level comparison of Xentra Advisor with other popular
 *   Linux Kernel 6.2+
 *   Kubernetes cluster v1.19+
 *   `kubectl` v1.19+
-*   [Kube Guardian Controller](https://github.com/xentra-ai/kube-guardian/tree/main/charts/kube-guardian) **MUST** be installed and running in the cluster to collect the necessary data.
+*   kguardian Controller **MUST** be installed and running in the cluster to collect the necessary data.
 *   (For Seccomp) Linux Kernel supporting seccomp (most modern kernels).
 
 ## 📦 Installation
@@ -76,7 +76,7 @@ Choose one of the following methods:
 This script downloads the latest release binary and attempts to install it.
 
 ```bash
-sh -c "$(curl -fsSL https://raw.githubusercontent.com/xentra-ai/kube-guardian/main/scripts/quick-install.sh)"
+sh -c "$(curl -fsSL https://raw.githubusercontent.com/kguardian-dev/kguardian/main/scripts/quick-install.sh)"
 ```
 
 ### Krew (Recommended)
@@ -85,47 +85,47 @@ Use [Krew](https://krew.sigs.k8s.io/), the plugin manager for `kubectl`:
 
 ```bash
 # Ensure Krew is installed: https://krew.sigs.k8s.io/docs/user-guide/setup/install/
-kubectl krew install xentra
+kubectl krew install kguardian
 ```
 
 ### Manual Download
 
-Download the appropriate binary for your system from the [Releases page](https://github.com/xentra-ai/kube-guardian/releases) and place it in your `PATH` named `kubectl-xentra`.
+Download the appropriate binary for your system from the [Releases page](https://github.com/kguardian-dev/kguardian/releases) and place it in your `PATH` named `kubectl-kguardian`.
 
 Example (Linux AMD64, replace version/binary name as needed):
 
 ```bash
 # Replace with the correct release URL
-wget -O xentra https://github.com/xentra-ai/kube-guardian/releases/download/vX.Y.Z/advisor-linux-amd64
-chmod +x xentra
-sudo mv xentra /usr/local/bin/kubectl-xentra
+wget -O kguardian https://github.com/kguardian-dev/kguardian/releases/download/vX.Y.Z/kguardian-linux-amd64
+chmod +x kguardian
+sudo mv kguardian /usr/local/bin/kubectl-kguardian
 
 # Verify installation
-kubectl xentra --help
+kubectl kguardian --help
 ```
 
 ## 🚀 Quick Start
 
-Once the Kube Guardian controller is running and collecting data, you can generate policies.
+Once the kguardian controller is running and collecting data, you can generate policies.
 
 1.  **Generate a Network Policy (Dry Run, Save to File):**
 
     ```bash
     # Generate for a specific pod in the 'default' namespace
-    kubectl xentra gen networkpolicy my-pod -n default --output-dir ./policies
+    kubectl kguardian gen networkpolicy my-pod -n default --output-dir ./policies
 
     # Generate for all pods in the 'staging' namespace
-    kubectl xentra gen networkpolicy --all -n staging --output-dir ./policies
+    kubectl kguardian gen networkpolicy --all -n staging --output-dir ./policies
     ```
 
 2.  **Generate a Seccomp Profile (Save to File):**
 
     ```bash
     # Generate for a specific pod in the 'default' namespace
-    kubectl xentra gen seccomp my-pod -n default --output-dir ./seccomp
+    kubectl kguardian gen seccomp my-pod -n default --output-dir ./seccomp
 
     # Generate for all pods in all namespaces
-    kubectl xentra gen seccomp -A --output-dir ./seccomp
+    kubectl kguardian gen seccomp -A --output-dir ./seccomp
     ```
 
 3.  **Review** the generated YAML files in the specified output directories.
@@ -135,7 +135,7 @@ Once the Kube Guardian controller is running and collecting data, you can genera
 The plugin follows the standard `kubectl` command structure:
 
 ```bash
-kubecl xentra [command] [subcommand] [flags]
+kubectl kguardian [command] [subcommand] [flags]
 ```
 
 ### Global Flags
@@ -158,7 +158,7 @@ Generates Kubernetes or Cilium Network Policies based on observed traffic.
 **Usage:**
 
 ```bash
-kubectl xentra gen networkpolicy [pod-name] [flags]
+kubectl kguardian gen networkpolicy [pod-name] [flags]
 ```
 
 **Arguments:**
@@ -178,16 +178,16 @@ kubectl xentra gen networkpolicy [pod-name] [flags]
 
 ```bash
 # Generate Kubernetes policy for 'my-app-pod' in 'prod' namespace (dry-run, save to ./netpols)
-kubectl xentra gen networkpolicy my-app-pod -n prod --output-dir ./netpols
+kubectl kguardian gen networkpolicy my-app-pod -n prod --output-dir ./netpols
 
 # Generate Cilium policies for all pods in 'dev' namespace (dry-run, save to ./cilium-pols)
-kubectl xentra gen netpol --all -n dev --type cilium --output-dir ./cilium-pols
+kubectl kguardian gen netpol --all -n dev --type cilium --output-dir ./cilium-pols
 
 # Generate and APPLY Kubernetes policies for all pods in all namespaces (save to default dir)
-kubectl xentra gen netpol -A --dry-run=false
+kubectl kguardian gen netpol -A --dry-run=false
 
 # Generate Kubernetes policy for 'my-pod' (dry-run, print to stdout only)
-kubectl xentra gen netpol my-pod --output-dir=""
+kubectl kguardian gen netpol my-pod --output-dir=""
 ```
 
 #### 🛡️ Seccomp Profiles (`seccomp`, `secp`)
@@ -197,7 +197,7 @@ Generates Seccomp profiles based on observed syscalls.
 **Usage:**
 
 ```bash
-kubectl xentra gen seccomp [pod-name] [flags]
+kubectl kguardian gen seccomp [pod-name] [flags]
 ```
 
 **Arguments:**
@@ -215,13 +215,13 @@ kubectl xentra gen seccomp [pod-name] [flags]
 
 ```bash
 # Generate seccomp profile for 'db-pod' in 'data' namespace (save to ./secp)
-kubectl xentra gen seccomp db-pod -n data --output-dir ./secp
+kubectl kguardian gen seccomp db-pod -n data --output-dir ./secp
 
 # Generate seccomp profiles for all pods in 'staging' namespace (save to default dir)
-kubectl xentra gen secp --all -n staging
+kubectl kguardian gen secp --all -n staging
 
 # Generate seccomp profiles for all pods in all namespaces, logging unlisted calls (save to ./all-secp)
-kubectl xentra gen secp -A --default-action SCMP_ACT_LOG --output-dir ./all-secp
+kubectl kguardian gen secp -A --default-action SCMP_ACT_LOG --output-dir ./all-secp
 ```
 
 ## 🤝 Contributing

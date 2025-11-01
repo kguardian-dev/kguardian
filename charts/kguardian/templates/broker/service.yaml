@@ -4,7 +4,7 @@ kind: Service
 metadata:
   name: {{ .Values.broker.service.name }}
   labels:
-    {{- include "kube-guardian.labels" . | nindent 4 }}
+    {{- include "kguardian.labels" . | nindent 4 }}
 spec:
   type: {{ .Values.broker.service.type }}
   ports:

@@ -3,11 +3,11 @@ name = "broker"
 version = "0.1.0"  #:version
 authors = ["Mahesh Rayas"]
 description = """
-api to perform db operation for xentra 
+API server for kguardian - stores telemetry data from eBPF controller
 """
-documentation = "https://docs.rs/arx-api"
-homepage = "https://github.com/<todo>"
-repository = "https://github.com/<todo>"
+documentation = "https://github.com/kguardian-dev/kguardian"
+homepage = "https://github.com/kguardian-dev/kguardian"
+repository = "https://github.com/kguardian-dev/kguardian"
 readme = "README.md"
 keywords = ["kubernetes", "k8s"]
 license = "Unlicense OR MIT"

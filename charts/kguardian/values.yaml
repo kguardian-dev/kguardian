@@ -1,4 +1,4 @@
-# Default values for kube-guardian.
+# Default values for kguardian.
 # This is a YAML-formatted file.
 # Declare variables to be passed into your templates.
 global:
@@ -7,7 +7,7 @@ global:
   # -- Annotations to apply to all resources
   annotations: {}
 
-  # -- Priority class to be used for the kube-guardian pods
+  # -- Priority class to be used for the kguardian pods
   priorityClassName: ""
 
 namespace:
@@ -19,7 +19,7 @@ namespace:
 
 controller:
   image:
-    repository: ghcr.io/xentra-ai/images/guardian-controller
+    repository: ghcr.io/kguardian-dev/kguardian/guardian-controller
     pullPolicy: Always
     tag: "latest"
     # -- Overrides the image tag.
@@ -88,11 +88,11 @@ controller:
     targetCPUUtilizationPercentage: 80
     # targetMemoryUtilizationPercentage: 80
 
-  # -- Node labels for the kube-guardian controller pod assignment
+  # -- Node labels for the kguardian controller pod assignment
   nodeSelector:
     kubernetes.io/os: linux
 
-  # -- Tolerations for the kube-guardian controller pod assignment
+  # -- Tolerations for the kguardian controller pod assignment
   tolerations:
   - key: "node-role.kubernetes.io/control-plane"
     operator: "Exists"
@@ -100,12 +100,12 @@ controller:
 
   affinity: {}
 
-  # -- Priority class to be used for the kube-guardian controller pods
+  # -- Priority class to be used for the kguardian controller pods
   priorityClassName: ""
 
   # -- Namespaces to be excluded from monitoring
   excludedNamespaces:
-    - kube-guardian
+    - kguardian
     - kube-system
 
   # -- Ignore traffic from daemonset pods
@@ -115,7 +115,7 @@ broker:
   # -- Number of broker replicas to deploy
   replicaCount: 1
   image:
-    repository: ghcr.io/xentra-ai/images/guardian-broker
+    repository: ghcr.io/kguardian-dev/kguardian/guardian-broker
     pullPolicy: Always
     tag: "latest"
     # Overrides the image tag.
@@ -184,16 +184,16 @@ broker:
     targetCPUUtilizationPercentage: 80
     # targetMemoryUtilizationPercentage: 80
 
-  # -- Node labels for the kube-guardian broker pod assignment
+  # -- Node labels for the kguardian broker pod assignment
   nodeSelector:
     kubernetes.io/os: linux
 
-  # -- Tolerations for the kube-guardian broker pod assignment
+  # -- Tolerations for the kguardian broker pod assignment
   tolerations: []
 
   affinity: {}
 
-  # Optional priority class to be used for the kube-guardian broker pods
+  # Optional priority class to be used for the kguardian broker pods
   priorityClassName: ""
 
 database:
@@ -272,14 +272,14 @@ database:
     targetCPUUtilizationPercentage: 80
     # targetMemoryUtilizationPercentage: 80
 
-  # -- Node labels for the kube-guardian database pod assignment
+  # -- Node labels for the kguardian database pod assignment
   nodeSelector:
     kubernetes.io/os: linux
 
-  # -- Tolerations for the kube-guardian database pod assignment
+  # -- Tolerations for the kguardian database pod assignment
   tolerations: []
 
   affinity: {}
 
-  # -- Priority class to be used for the kube-guardian database pods
+  # -- Priority class to be used for the kguardian database pods
   priorityClassName: ""
