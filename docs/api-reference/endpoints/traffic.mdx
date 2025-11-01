@@ -1,0 +1,55 @@
+---
+title: "Traffic Endpoints"
+description: "Query network traffic data"
+---
+
+## GET /pod/traffic/:pod_ip
+
+Get all observed traffic for a pod by IP address.
+
+### Example
+
+```bash
+curl http://localhost:9090/pod/traffic/10.244.1.5
+```
+
+### Response
+
+```json
+[
+  {
+    "uuid": "123e4567-e89b-12d3-a456-426614174000",
+    "pod_name": "my-app",
+    "pod_ip": "10.244.1.5",
+    "pod_namespace": "production",
+    "pod_port": "8080",
+    "traffic_type": "INGRESS",
+    "traffic_in_out_ip": "10.244.2.10",
+    "traffic_in_out_port": "52341",
+    "ip_protocol": "TCP"
+  },
+  {
+    "uuid": "234e5678-e89b-12d3-a456-426614174001",
+    "pod_name": "my-app",
+    "pod_ip": "10.244.1.5",
+    "pod_namespace": "production",
+    "pod_port": "35821",
+    "traffic_type": "EGRESS",
+    "traffic_in_out_ip": "10.244.3.15",
+    "traffic_in_out_port": "5432",
+    "ip_protocol": "TCP"
+  }
+]
+```
+
+---
+
+## GET /pod/traffic/name/:namespace/:pod_name
+
+Get traffic by pod name and namespace.
+
+### Example
+
+```bash
+curl http://localhost:9090/pod/traffic/name/production/my-app
+```

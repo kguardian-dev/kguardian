@@ -1,0 +1,473 @@
+---
+title: "Generating Network Policies"
+description: "Complete guide to creating least-privilege network policies with kguardian"
+icon: "network-wired"
+---
+
+Learn how to generate Kubernetes and Cilium Network Policies from observed runtime traffic.
+
+## Overview
+
+Network Policies in Kubernetes are like firewalls for your pods - they control which pods can communicate with each other. kguardian observes actual traffic patterns and generates policies that allow **only** the connections your application actually uses.
+
+<Info>
+**Best Practice:** Let your application run under normal load for at least 5-15 minutes before generating policies. This ensures you capture all typical communication patterns.
+</Info>
+
+---
+
+## Basic Usage
+
+### Generate for a Single Pod
+
+The simplest use case - generate a policy for one specific pod:
+
+```bash
+kubectl kguardian gen networkpolicy my-app -n production \
+  --output-dir ./policies
+```
+
+<Steps>
+  <Step title="kguardian discovers the pod">
+    The CLI queries the broker for all traffic involving `my-app` in the `production` namespace
+  </Step>
+
+  <Step title="Analyzes traffic patterns">
+    - Identifies all unique source IPs (for ingress rules)
+    - Identifies all destination IPs (for egress rules)
+    - Resolves IPs to pods/services
+    - Groups by port and protocol
+  </Step>
+
+  <Step title="Generates YAML">
+    Creates `production-my-app-networkpolicy.yaml` in the `./policies` directory
+  </Step>
+</Steps>
+
+**Generated policy example:**
+
+```yaml
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: my-app
+  namespace: production
+  labels:
+    kguardian.dev/managed-by: kguardian
+    kguardian.dev/version: v1.0.0
+spec:
+  podSelector:
+    matchLabels:
+      app: my-app
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app: api-gateway
+          namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: production
+      ports:
+        - protocol: TCP
+          port: 8080
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              app: postgres
+          namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: production
+      ports:
+        - protocol: TCP
+          port: 5432
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - protocol: UDP
+          port: 53
+```
+
+---
+
+## Batch Generation
+
+### All Pods in a Namespace
+
+Generate policies for every pod in a namespace:
+
+```bash
+kubectl kguardian gen networkpolicy --all -n staging \
+  --output-dir ./staging-policies
+```
+
+This will create one policy file per pod in the namespace.
+
+### All Pods Across All Namespaces
+
+For cluster-wide policy generation:
+
+```bash
+kubectl kguardian gen networkpolicy -A \
+  --output-dir ./cluster-policies
+```
+
+<Warning>
+This can generate hundreds of files in large clusters. Use with caution and review before applying.
+</Warning>
+
+---
+
+## Cilium Network Policies
+
+[Cilium](https://cilium.io/) is an advanced CNI that provides enhanced network policies with L7 (HTTP, gRPC, Kafka) visibility and identity-based rules.
+
+### Generate Cilium Policies
+
+```bash
+kubectl kguardian gen networkpolicy my-app -n production \
+  --type cilium \
+  --output-dir ./cilium-policies
+```
+
+**Cilium policy example:**
+
+```yaml
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: my-app
+  namespace: production
+  labels:
+    kguardian.dev/managed-by: kguardian
+    kguardian.dev/version: v1.0.0
+spec:
+  endpointSelector:
+    matchLabels:
+      app: my-app
+  ingress:
+    - fromEndpoints:
+        - matchLabels:
+            app: api-gateway
+        - matchLabels:
+            io.kubernetes.pod.namespace: production
+      toPorts:
+        - ports:
+            - port: "8080"
+              protocol: TCP
+  egress:
+    - toEndpoints:
+        - matchLabels:
+            app: postgres
+        - matchLabels:
+            io.kubernetes.pod.namespace: production
+      toPorts:
+        - ports:
+            - port: "5432"
+              protocol: TCP
+    - toCIDR:
+        - "10.96.0.10/32"  # kube-dns
+      toPorts:
+        - ports:
+            - port: "53"
+              protocol: UDP
+```
+
+### Cilium vs Kubernetes Policies
+
+| Feature | Kubernetes | Cilium |
+|---------|-----------|--------|
+| Namespace selectors | ✅ | ✅ |
+| Pod selectors | ✅ | ✅ |
+| Port/protocol rules | ✅ | ✅ |
+| CIDR blocks | ✅ | ✅ |
+| L7 rules (HTTP, gRPC) | ❌ | ✅ |
+| DNS-based rules | ❌ | ✅ |
+| Identity-based | ❌ | ✅ |
+| Cluster-wide policies | ❌ | ✅ |
+
+<Tip>
+If you're running Cilium CNI, use `--type cilium` for better security and features. Otherwise, stick with `--type kubernetes` (the default).
+</Tip>
+
+---
+
+## Dry Run vs Apply
+
+### Dry Run (Default)
+
+By default, `gen networkpolicy` runs in dry-run mode - it saves policies to files **without** applying them to the cluster:
+
+```bash
+kubectl kguardian gen netpol my-app -n prod --output-dir ./policies
+
+# Policies are saved but NOT applied
+# Review them first:
+cat ./policies/prod-my-app-networkpolicy.yaml
+```
+
+### Direct Apply
+
+To generate **and immediately apply** policies:
+
+```bash
+kubectl kguardian gen netpol my-app -n prod \
+  --dry-run=false \
+  --output-dir ./policies
+```
+
+<Warning>
+**Use with caution!** Applying network policies can break communication if the observed traffic was incomplete. Always test in non-production first.
+</Warning>
+
+### Recommended Workflow
+
+1. **Generate** policies in dry-run mode
+2. **Review** the generated YAML files
+3. **Test** in a staging environment
+4. **Apply** manually after validation:
+
+```bash
+kubectl apply -f ./policies/
+```
+
+---
+
+## Advanced Options
+
+### Custom Output Directory
+
+Save policies to a specific location:
+
+```bash
+kubectl kguardian gen netpol my-app -n prod \
+  --output-dir /path/to/gitops/repo/network-policies
+```
+
+### Print to Stdout Only
+
+Skip file creation and just print the policy:
+
+```bash
+kubectl kguardian gen netpol my-app -n prod --output-dir=""
+```
+
+Useful for piping to other tools:
+
+```bash
+kubectl kguardian gen netpol my-app -n prod --output-dir="" | kubectl apply -f -
+```
+
+---
+
+## Understanding Generated Policies
+
+### Policy Structure
+
+Every generated policy includes:
+
+1. **podSelector**: Identifies which pods this policy applies to
+2. **policyTypes**: Declares whether it has Ingress, Egress, or both
+3. **ingress**: List of allowed incoming connections
+4. **egress**: List of allowed outgoing connections
+
+### How Peers are Identified
+
+kguardian resolves IPs to Kubernetes resources:
+
+<AccordionGroup>
+  <Accordion title="Pod-to-Pod Traffic" icon="cubes">
+    When traffic is between pods, kguardian generates:
+    ```yaml
+    - podSelector:
+        matchLabels:
+          app: my-service
+      namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: production
+    ```
+
+    This allows traffic from any pod with `app=my-service` in the `production` namespace.
+  </Accordion>
+
+  <Accordion title="Service Traffic" icon="cloud">
+    For traffic to a Kubernetes Service, kguardian uses the service's selector:
+    ```yaml
+    - podSelector:
+        matchLabels:
+          app: postgres  # Service selector
+      namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: databases
+    ```
+  </Accordion>
+
+  <Accordion title="External Traffic" icon="globe">
+    For traffic to external IPs (e.g., public APIs), kguardian generates CIDR blocks:
+    ```yaml
+    - to:
+        - ipBlock:
+            cidr: 52.1.2.3/32
+      ports:
+        - protocol: TCP
+          port: 443
+    ```
+  </Accordion>
+
+  <Accordion title="DNS Traffic" icon="magnifying-glass">
+    kguardian automatically detects DNS queries:
+    ```yaml
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - protocol: UDP
+          port: 53
+    ```
+  </Accordion>
+</AccordionGroup>
+
+---
+
+## Common Scenarios
+
+### Scenario 1: Microservices Application
+
+You have a 3-tier app: `frontend` → `backend` → `database`.
+
+```bash
+# Generate policies for all three
+kubectl kguardian gen netpol frontend -n myapp --output-dir ./policies
+kubectl kguardian gen netpol backend -n myapp --output-dir ./policies
+kubectl kguardian gen netpol database -n myapp --output-dir ./policies
+
+# Review and apply
+kubectl apply -f ./policies/
+```
+
+**Result:**
+- `frontend` policy allows ingress from ingress controller, egress to `backend`
+- `backend` policy allows ingress from `frontend`, egress to `database`
+- `database` policy allows ingress from `backend` only
+
+### Scenario 2: Multi-Namespace Communication
+
+Your app in `staging` talks to a shared database in `data`:
+
+```bash
+kubectl kguardian gen netpol my-app -n staging --output-dir ./policies
+```
+
+**Generated egress rule includes:**
+```yaml
+egress:
+  - to:
+      - namespaceSelector:
+          matchLabels:
+            kubernetes.io/metadata.name: data
+        podSelector:
+          matchLabels:
+            app: postgres
+    ports:
+      - protocol: TCP
+        port: 5432
+```
+
+### Scenario 3: Default Deny + Allowlist
+
+Start with default-deny, then allowlist only observed traffic:
+
+```bash
+# 1. Apply default deny policy
+cat <<EOF | kubectl apply -f -
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-all
+  namespace: production
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+    - Egress
+EOF
+
+# 2. Generate allowlist policies
+kubectl kguardian gen netpol --all -n production \
+  --output-dir ./production-policies
+
+# 3. Apply allowlist policies
+kubectl apply -f ./production-policies/
+```
+
+<Check>
+Now your namespace has zero-trust networking - only explicitly observed communication is allowed.
+</Check>
+
+---
+
+## Troubleshooting
+
+### No Traffic Data
+
+**Symptom:** CLI says "No traffic data found for pod"
+
+**Solutions:**
+1. Ensure the pod has been running for at least 5 minutes
+2. Generate some traffic (hit HTTP endpoints, trigger background jobs, etc.)
+3. Check broker has data:
+   ```bash
+   kubectl port-forward -n kguardian svc/kguardian-broker 9090:9090 &
+   curl http://localhost:9090/pod/traffic/name/myns/mypod
+   ```
+
+### Generated Policy Too Permissive
+
+**Symptom:** Policy allows more than expected (e.g., allows entire namespace)
+
+**Cause:** Pods may lack specific labels, so kguardian falls back to broader selectors.
+
+**Solution:**
+1. Add specific labels to your pods
+2. Manually edit generated policies to tighten selectors
+3. Re-generate after labeling
+
+### Policy Breaks Communication
+
+**Symptom:** After applying policy, some connections fail
+
+**Cause:** Incomplete observation period - not all traffic was captured
+
+**Solution:**
+1. Check pod logs for connection errors
+2. Identify missing ingress/egress rules
+3. Manually add missing rules or extend observation period
+
+---
+
+<CardGroup cols={2}>
+  <Card title="Generate Seccomp Profiles" icon="shield-check" href="/guides/generating-seccomp-profiles">
+    Restrict syscalls based on observed behavior
+  </Card>
+  <Card title="Cilium Policies Deep Dive" icon="circle-nodes" href="/advanced/cilium-policies">
+    Advanced Cilium NetworkPolicy features
+  </Card>
+  <Card title="CLI Reference" icon="terminal" href="/cli/gen-networkpolicy">
+    Complete flag documentation
+  </Card>
+  <Card title="GitOps Integration" icon="code-branch" href="/guides/gitops-integration">
+    Automate policy generation in CI/CD
+  </Card>
+</CardGroup>

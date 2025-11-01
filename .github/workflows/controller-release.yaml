@@ -118,5 +118,5 @@ jobs:
           file: controller/Dockerfile
           push: true
           tags: |
-            ghcr.io/kguardian-dev/kguardian/guardian-controller:${{ steps.extract_tag.outputs.TAG_NAME }}
-            ghcr.io/kguardian-dev/kguardian/guardian-controller:latest
+            ghcr.io/kguardian-dev/kguardian/controller:${{ steps.extract_tag.outputs.TAG_NAME }}
+            ghcr.io/kguardian-dev/kguardian/controller:latest
