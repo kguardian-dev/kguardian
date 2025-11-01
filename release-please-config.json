@@ -1,6 +1,8 @@
 {
   "$schema": "https://raw.githubusercontent.com/googleapis/release-please/main/schemas/config.json",
-  "bootstrap-sha": "88d5d4dc",
+  "include-v-in-tag": true,
+  "separate-pull-requests": false,
+  "tag-separator": "/",
   "packages": {
     "controller": {
       "component": "controller",
@@ -10,7 +12,6 @@
       "extra-files": [
         "controller/VERSION"
       ],
-      "tag-separator": "/",
       "include-component-in-tag": true
     },
     "broker": {
@@ -21,7 +22,6 @@
       "extra-files": [
         "broker/VERSION"
       ],
-      "tag-separator": "/",
       "include-component-in-tag": true
     },
     "ui": {
@@ -32,7 +32,6 @@
       "extra-files": [
         "ui/VERSION"
       ],
-      "tag-separator": "/",
       "include-component-in-tag": true
     },
     "advisor": {
@@ -43,7 +42,6 @@
       "extra-files": [
         "advisor/VERSION"
       ],
-      "tag-separator": "/",
       "include-component-in-tag": true
     },
     "charts/kguardian": {
@@ -51,7 +49,6 @@
       "release-type": "helm",
       "package-name": "kguardian",
       "changelog-path": "charts/kguardian/CHANGELOG.md",
-      "tag-separator": "/",
       "include-component-in-tag": true
     }
   },
