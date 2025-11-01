@@ -1,7 +1,7 @@
 {
   "name": "ui",
   "private": true,
-  "version": "1.2.8",
+  "version": "1.2.9",
   "type": "module",
   "license": "BUSL-1.1",
   "scripts": {
