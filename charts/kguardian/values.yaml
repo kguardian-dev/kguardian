@@ -359,7 +359,7 @@ ui:
 
   container:
     # -- UI container port
-    port: 80
+    port: 5173
 
   # -- List of image pull secrets for private registries
   imagePullSecrets: []
@@ -381,13 +381,13 @@ ui:
   # -- Annotations to add to UI pods
   podAnnotations: {}
 
-  # -- UI pod security context. Runs as nginx user (101)
+  # -- UI pod security context.
   podSecurityContext:
-    runAsUser: 101
-    runAsGroup: 101
-    fsGroup: 101
+    runAsUser: 999
+    runAsGroup: 999
+    fsGroup: 999
     fsGroupChangePolicy: OnRootMismatch
-    supplementalGroups: [101]
+    supplementalGroups: [999]
     seccompProfile:
       type: RuntimeDefault
 
@@ -399,7 +399,7 @@ ui:
       - ALL
     readOnlyRootFilesystem: true
     runAsNonRoot: true
-    runAsUser: 101
+    runAsUser: 999
     allowPrivilegeEscalation: false
 
   service:
