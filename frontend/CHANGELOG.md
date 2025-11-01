@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.2.7](https://github.com/kguardian-dev/kguardian/compare/frontend/v1.2.6...frontend/v1.2.7) (2025-11-01)
+
+
+### Bug Fixes
+
+* update frontend to allow all hosts ([6a7d405](https://github.com/kguardian-dev/kguardian/commit/6a7d405ab3341e4a32bbe2846e6d367f2d3efa24))
+
 ## [1.2.6](https://github.com/kguardian-dev/kguardian/compare/frontend/v1.2.5...frontend/v1.2.6) (2025-11-01)
 
 
