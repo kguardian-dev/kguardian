@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
   push:
     tags:
-      - "v*"
+      - "controller/v*"
 
 jobs:
   build:
@@ -103,7 +103,10 @@ jobs:
 
       - name: Extract tag name
         id: extract_tag
-        run: echo "TAG_NAME=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+        run: |
+          TAG="${GITHUB_REF#refs/tags/}"
+          VERSION="${TAG#controller/}"
+          echo "TAG_NAME=${VERSION}" >> $GITHUB_OUTPUT
 
       - name: Build and Push
         env:

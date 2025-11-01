@@ -1,0 +1,116 @@
+{
+  "$schema": "https://raw.githubusercontent.com/googleapis/release-please/main/schemas/config.json",
+  "bootstrap-sha": "88d5d4dc",
+  "packages": {
+    "controller": {
+      "component": "controller",
+      "release-type": "rust",
+      "package-name": "kguardian-controller",
+      "changelog-path": "controller/CHANGELOG.md",
+      "extra-files": [
+        "controller/VERSION"
+      ],
+      "tag-separator": "/",
+      "include-component-in-tag": true
+    },
+    "broker": {
+      "component": "broker",
+      "release-type": "rust",
+      "package-name": "kguardian-broker",
+      "changelog-path": "broker/CHANGELOG.md",
+      "extra-files": [
+        "broker/VERSION"
+      ],
+      "tag-separator": "/",
+      "include-component-in-tag": true
+    },
+    "ui": {
+      "component": "ui",
+      "release-type": "node",
+      "package-name": "kguardian-ui",
+      "changelog-path": "ui/CHANGELOG.md",
+      "extra-files": [
+        "ui/VERSION"
+      ],
+      "tag-separator": "/",
+      "include-component-in-tag": true
+    },
+    "advisor": {
+      "component": "advisor",
+      "release-type": "go",
+      "package-name": "kguardian-advisor",
+      "changelog-path": "advisor/CHANGELOG.md",
+      "extra-files": [
+        "advisor/VERSION"
+      ],
+      "tag-separator": "/",
+      "include-component-in-tag": true
+    },
+    "charts/kguardian": {
+      "component": "chart",
+      "release-type": "helm",
+      "package-name": "kguardian",
+      "changelog-path": "charts/kguardian/CHANGELOG.md",
+      "tag-separator": "/",
+      "include-component-in-tag": true
+    }
+  },
+  "release-search-depth": 500,
+  "changelog-sections": [
+    {
+      "type": "feat",
+      "section": "Features",
+      "hidden": false
+    },
+    {
+      "type": "fix",
+      "section": "Bug Fixes",
+      "hidden": false
+    },
+    {
+      "type": "perf",
+      "section": "Performance Improvements",
+      "hidden": false
+    },
+    {
+      "type": "revert",
+      "section": "Reverts",
+      "hidden": false
+    },
+    {
+      "type": "docs",
+      "section": "Documentation",
+      "hidden": false
+    },
+    {
+      "type": "style",
+      "section": "Styles",
+      "hidden": true
+    },
+    {
+      "type": "chore",
+      "section": "Miscellaneous Chores",
+      "hidden": true
+    },
+    {
+      "type": "refactor",
+      "section": "Code Refactoring",
+      "hidden": false
+    },
+    {
+      "type": "test",
+      "section": "Tests",
+      "hidden": true
+    },
+    {
+      "type": "build",
+      "section": "Build System",
+      "hidden": true
+    },
+    {
+      "type": "ci",
+      "section": "Continuous Integration",
+      "hidden": true
+    }
+  ]
+}

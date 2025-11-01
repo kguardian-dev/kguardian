@@ -21,6 +21,7 @@ controller:
   image:
     repository: ghcr.io/kguardian-dev/kguardian/guardian-controller
     pullPolicy: Always
+    # -- Controller version tag. Use component version (e.g., "v1.0.0") or "latest"
     tag: "latest"
     # -- Overrides the image tag.
     sha: ""
@@ -117,6 +118,7 @@ broker:
   image:
     repository: ghcr.io/kguardian-dev/kguardian/guardian-broker
     pullPolicy: Always
+    # -- Broker version tag. Use component version (e.g., "v1.0.0") or "latest"
     tag: "latest"
     # Overrides the image tag.
     sha: ""
@@ -282,4 +284,90 @@ database:
   affinity: {}
 
   # -- Priority class to be used for the kguardian database pods
+  priorityClassName: ""
+
+ui:
+  # -- Number of UI replicas to deploy
+  replicaCount: 1
+  image:
+    repository: ghcr.io/kguardian-dev/kguardian/guardian-ui
+    pullPolicy: Always
+    # -- UI version tag. Use component version (e.g., "v1.0.0") or "latest"
+    tag: "latest"
+    # Overrides the image tag.
+    sha: ""
+
+  container:
+    port: 80
+
+  imagePullSecrets: []
+  nameOverride: ""
+  fullnameOverride: ""
+
+  serviceAccount:
+    # Specifies whether a service account should be created
+    create: true
+    # Annotations to add to the service account
+    annotations: {}
+    # The name of the service account to use.
+    # If not set and create is true, a name is generated using the fullname template
+    name: ""
+    # Automount API credentials for a service account
+    automountServiceAccountToken: false
+
+  podAnnotations: {}
+
+  podSecurityContext:
+    runAsUser: 101
+    runAsGroup: 101
+    fsGroup: 101
+    fsGroupChangePolicy: OnRootMismatch
+    supplementalGroups: [101]
+    seccompProfile:
+      type: RuntimeDefault
+
+  securityContext:
+    privileged: false
+    capabilities:
+      drop:
+      - ALL
+    readOnlyRootFilesystem: true
+    runAsNonRoot: true
+    runAsUser: 101
+    allowPrivilegeEscalation: false
+
+  service:
+    name: "ui"
+    type: ClusterIP
+    port: 80
+
+  resources: {}
+    # We usually recommend not to specify default resources and to leave this as a conscious
+    # choice for the user. This also increases chances charts run on environments with little
+    # resources, such as Minikube. If you do want to specify resources, uncomment the following
+    # lines, adjust them as necessary, and remove the curly braces after 'resources:'.
+    # limits:
+    #   cpu: 100m
+    #   memory: 128Mi
+    # requests:
+    #   cpu: 100m
+    #   memory: 128Mi
+
+  autoscaling:
+    enabled: false
+    minReplicas: 1
+    maxReplicas: 100
+    targetCPUUtilizationPercentage: 80
+    # targetMemoryUtilizationPercentage: 80
+
+  # -- Node labels for the kguardian UI pod assignment
+  nodeSelector:
+    kubernetes.io/os: linux
+
+  # -- Tolerations for the kguardian UI pod assignment
+  tolerations: []
+
+  affinity: {}
+
+  # -- Priority class to be used for the kguardian UI pods
   priorityClassName: ""
