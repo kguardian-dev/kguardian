@@ -10,3 +10,11 @@ struct
     __type(key, u64);
     __type(value, u32);
 } inode_num SEC(".maps");
+
+struct
+{
+    __uint(type, BPF_MAP_TYPE_HASH);
+    __uint(max_entries, 10240);
+    __type(key, u32);
+    __type(value, u32);
+} ignore_ips SEC(".maps");
