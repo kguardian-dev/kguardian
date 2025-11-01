@@ -38,6 +38,6 @@
 * **deps:** update tokio-tracing monorepo ([a3a2db5](https://github.com/kguardian-dev/kguardian/commit/a3a2db5916163c0bfd1185c443b80b47b25a6ba1))
 * **deps:** update tokio-tracing monorepo ([2e0ade3](https://github.com/kguardian-dev/kguardian/commit/2e0ade381fee773ef414ae058d382847b263d04c))
 * Dockefile cleanups ([1dce05d](https://github.com/kguardian-dev/kguardian/commit/1dce05d032914290b2580c9b341a7c6497b75e86))
-* Dockefile cleanups ([823da4c](https://github.com/kguardian-dev/kguardian/commit/823da4ce93a6999e3a7e8a720d5fdbd4f6d28641))
 * linting ([6728f10](https://github.com/kguardian-dev/kguardian/commit/6728f1046bfc6361178dde0d796b1f8abc2aa0cc))
 * send the syscall data as a batch and also introduce caching in network ([d13e517](https://github.com/kguardian-dev/kguardian/commit/d13e517d196f30dc42f7825881926cee9f3b29b5))
+* When broker is offline, don't panic controller ([15a30de](https://github.com/kguardian-dev/kguardian/commit/15a30de1256f7101311eae9c584f27a73aa7decc))
