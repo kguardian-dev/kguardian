@@ -1,0 +1,55 @@
+---
+title: "Syscall Endpoints"
+description: "Retrieve syscall observations"
+---
+
+## POST /pods/syscalls
+
+Add syscall observation data.
+
+### Request
+
+```json
+{
+  "pod_name": "my-app",
+  "pod_namespace": "production",
+  "syscalls": ["read", "write", "open", "close", "socket"],
+  "arch": "x86_64"
+}
+```
+
+---
+
+## GET /pod/syscalls/name/:namespace/:pod_name
+
+Get observed syscalls for a pod.
+
+### Example
+
+```bash
+curl http://localhost:9090/pod/syscalls/name/production/my-app
+```
+
+### Response
+
+```json
+{
+  "pod_name": "my-app",
+  "pod_namespace": "production",
+  "syscalls": [
+    "accept",
+    "bind",
+    "brk",
+    "close",
+    "connect",
+    "listen",
+    "mmap",
+    "munmap",
+    "open",
+    "read",
+    "socket",
+    "write"
+  ],
+  "arch": "x86_64"
+}
+```

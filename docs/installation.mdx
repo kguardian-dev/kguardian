@@ -1,0 +1,491 @@
+---
+title: "Installation Guide"
+description: "Comprehensive installation instructions for all kguardian components"
+icon: "download"
+---
+
+This guide covers all installation methods for kguardian, from quick setups to production deployments.
+
+## Prerequisites
+
+Before installing kguardian, verify your environment meets these requirements:
+
+<AccordionGroup>
+  <Accordion icon="server" title="Kubernetes Cluster">
+    **Required:**
+    - Kubernetes version: **1.19+**
+    - Node OS: **Linux**
+    - Kernel version: **6.2+** (for eBPF support)
+    - Container runtime: **containerd** (Docker/CRI-O supported with limitations)
+
+    **Verify kernel version:**
+    ```bash
+    kubectl get nodes -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.status.nodeInfo.kernelVersion}{"\n"}{end}'
+    ```
+  </Accordion>
+
+  <Accordion icon="helm" title="Helm (Recommended)">
+    - Helm **3.0+**
+
+    **Install Helm:**
+    ```bash
+    curl https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
+    ```
+  </Accordion>
+
+  <Accordion icon="terminal" title="kubectl Access">
+    - `kubectl` **1.19+** configured with admin privileges
+
+    **Verify access:**
+    ```bash
+    kubectl auth can-i create daemonsets --all-namespaces
+    kubectl auth can-i create clusterroles
+    ```
+  </Accordion>
+</AccordionGroup>
+
+<Warning>
+**Kernel Compatibility:** kguardian requires Linux kernel 6.2+ for eBPF CO-RE (Compile Once, Run Everywhere) support. Older kernels may work with manual BPF program compilation but are not officially supported.
+</Warning>
+
+---
+
+## Installation Methods
+
+<Tabs>
+  <Tab title="Helm (Recommended)">
+    ### Install via Helm Repository
+
+    The simplest method for production deployments.
+
+    ```bash
+    # 1. Add the kguardian Helm repository
+    helm repo add kguardian https://kguardian-dev.github.io/charts
+    helm repo update
+
+    # 2. Review default values (optional)
+    helm show values kguardian/kguardian > values.yaml
+
+    # 3. Install kguardian
+    helm install kguardian kguardian/kguardian \
+      --namespace kguardian \
+      --create-namespace \
+      --wait
+
+    # 4. Verify installation
+    kubectl get pods -n kguardian
+    ```
+
+    <Check>
+    All three pods (controller, broker, UI) should be in `Running` state within 2-3 minutes.
+    </Check>
+
+    ### Install from OCI Registry
+
+    Alternatively, install directly from GitHub Container Registry:
+
+    ```bash
+    helm install kguardian oci://ghcr.io/kguardian-dev/charts/kguardian \
+      --version 1.0.0 \
+      --namespace kguardian \
+      --create-namespace \
+      --wait
+    ```
+  </Tab>
+
+  <Tab title="Kubectl (Manifests)">
+    ### Install from Raw Manifests
+
+    For environments without Helm or for customization.
+
+    ```bash
+    # 1. Download manifests
+    kubectl apply -f https://raw.githubusercontent.com/kguardian-dev/kguardian/main/deploy/kubernetes/namespace.yaml
+    kubectl apply -f https://raw.githubusercontent.com/kguardian-dev/kguardian/main/deploy/kubernetes/broker.yaml
+    kubectl apply -f https://raw.githubusercontent.com/kguardian-dev/kguardian/main/deploy/kubernetes/controller.yaml
+    kubectl apply -f https://raw.githubusercontent.com/kguardian-dev/kguardian/main/deploy/kubernetes/ui.yaml
+
+    # 2. Verify installation
+    kubectl get all -n kguardian
+    ```
+
+    <Note>
+    This method requires manual configuration of environment variables and secrets. See [Custom Configurations](/advanced/custom-configurations) for details.
+    </Note>
+  </Tab>
+
+  <Tab title="Kind (Local Development)">
+    ### Install in Kind Cluster
+
+    Perfect for local testing and development.
+
+    ```bash
+    # 1. Install Task (build tool)
+    sh -c "$(curl --location https://taskfile.dev/install.sh)" -- -d -b /usr/local/bin
+
+    # 2. Clone the repository
+    git clone https://github.com/kguardian-dev/kguardian.git
+    cd kguardian
+
+    # 3. Create Kind cluster and install everything
+    task install
+
+    # This will:
+    # - Create a Kind cluster with appropriate settings
+    # - Build controller and broker images
+    # - Load images into Kind
+    # - Install via Helm with local tags
+    ```
+
+    <Tip>
+    The `task install` command is perfect for development. It rebuilds images and reloads them automatically.
+    </Tip>
+  </Tab>
+</Tabs>
+
+---
+
+## Configuration Options
+
+### Common Helm Values
+
+Customize your installation by creating a `values.yaml` file:
+
+```yaml
+# Controller configuration
+controller:
+  # Resource limits
+  resources:
+    requests:
+      cpu: "100m"
+      memory: "128Mi"
+    limits:
+      cpu: "500m"
+      memory: "512Mi"
+
+  # Exclude namespaces from monitoring
+  excludedNamespaces: "kube-system,kguardian,monitoring,istio-system"
+
+  # Enable debug logging
+  debug: true
+
+  # Image configuration
+  image:
+    repository: ghcr.io/kguardian-dev/controller
+    tag: "1.0.0"
+    pullPolicy: IfNotPresent
+
+# Broker configuration
+broker:
+  # Number of replicas for HA
+  replicas: 2
+
+  # PostgreSQL connection
+  postgresql:
+    host: "kguardian-postgresql"
+    port: 5432
+    database: "kguardian"
+    username: "kguardian"
+    # Password from secret (created automatically)
+
+  # Persistence
+  persistence:
+    enabled: true
+    size: "10Gi"
+    storageClass: "standard"
+
+  # Resource limits
+  resources:
+    requests:
+      cpu: "100m"
+      memory: "256Mi"
+    limits:
+      cpu: "1000m"
+      memory: "1Gi"
+
+# UI configuration
+ui:
+  # Number of replicas
+  replicas: 2
+
+  # Ingress (optional)
+  ingress:
+    enabled: true
+    className: "nginx"
+    hosts:
+      - host: kguardian.example.com
+        paths:
+          - path: /
+            pathType: Prefix
+    tls:
+      - secretName: kguardian-tls
+        hosts:
+          - kguardian.example.com
+
+# PostgreSQL configuration (uses bitnami/postgresql chart)
+postgresql:
+  enabled: true
+  auth:
+    username: kguardian
+    password: "change-me-in-production"
+    database: kguardian
+  primary:
+    persistence:
+      enabled: true
+      size: 20Gi
+    resources:
+      requests:
+        memory: "256Mi"
+        cpu: "250m"
+```
+
+Install with custom values:
+
+```bash
+helm install kguardian kguardian/kguardian \
+  --namespace kguardian \
+  --create-namespace \
+  --values values.yaml \
+  --wait
+```
+
+### Use External PostgreSQL
+
+For production, use a managed database:
+
+```yaml
+# Disable built-in PostgreSQL
+postgresql:
+  enabled: false
+
+# Configure broker to use external DB
+broker:
+  postgresql:
+    host: "my-postgres.rds.amazonaws.com"
+    port: 5432
+    database: "kguardian_prod"
+    username: "kguardian_user"
+    existingSecret: "kguardian-db-secret"  # Create this manually
+    existingSecretPasswordKey: "password"
+```
+
+Create the secret:
+
+```bash
+kubectl create secret generic kguardian-db-secret \
+  --namespace kguardian \
+  --from-literal=password='your-secure-password'
+```
+
+---
+
+## Install the CLI Plugin
+
+After deploying the controller, install the CLI to generate policies.
+
+<Tabs>
+  <Tab title="Krew (Recommended)">
+    ```bash
+    # 1. Install Krew (if not already installed)
+    (
+      set -x; cd "$(mktemp -d)" &&
+      OS="$(uname | tr '[:upper:]' '[:lower:]')" &&
+      ARCH="$(uname -m | sed -e 's/x86_64/amd64/' -e 's/\(arm\)\(64\)\?.*/\1\2/' -e 's/aarch64$/arm64/')" &&
+      KREW="krew-${OS}_${ARCH}" &&
+      curl -fsSLO "https://github.com/kubernetes-sigs/krew/releases/latest/download/${KREW}.tar.gz" &&
+      tar zxvf "${KREW}.tar.gz" &&
+      ./"${KREW}" install krew
+    )
+
+    # 2. Add Krew to PATH (add to ~/.bashrc or ~/.zshrc)
+    export PATH="${KREW_ROOT:-$HOME/.krew}/bin:$PATH"
+
+    # 3. Install kguardian plugin
+    kubectl krew install kguardian
+
+    # 4. Verify
+    kubectl kguardian --version
+    ```
+  </Tab>
+
+  <Tab title="Quick Install Script">
+    ```bash
+    # One-line installer
+    sh -c "$(curl -fsSL https://raw.githubusercontent.com/kguardian-dev/kguardian/main/scripts/quick-install.sh)"
+
+    # Verify
+    kubectl kguardian --version
+    ```
+
+    This script:
+    - Detects your OS and architecture
+    - Downloads the latest CLI release
+    - Installs to `/usr/local/bin/kubectl-kguardian`
+    - Validates the installation
+  </Tab>
+
+  <Tab title="Manual Download">
+    ```bash
+    # 1. Download binary from GitHub Releases
+    VERSION="v1.0.0"
+    OS="linux"  # or darwin, windows
+    ARCH="amd64"  # or arm64
+
+    curl -LO "https://github.com/kguardian-dev/kguardian/releases/download/${VERSION}/kguardian-${OS}-${ARCH}"
+
+    # 2. Verify checksum (optional but recommended)
+    curl -LO "https://github.com/kguardian-dev/kguardian/releases/download/${VERSION}/checksums.txt"
+    sha256sum --check --ignore-missing checksums.txt
+
+    # 3. Install
+    chmod +x kguardian-${OS}-${ARCH}
+    sudo mv kguardian-${OS}-${ARCH} /usr/local/bin/kubectl-kguardian
+
+    # 4. Verify
+    kubectl kguardian --version
+    ```
+  </Tab>
+
+  <Tab title="From Source">
+    ```bash
+    # 1. Clone repository
+    git clone https://github.com/kguardian-dev/kguardian.git
+    cd kguardian/advisor
+
+    # 2. Build binary
+    go build -o kubectl-kguardian .
+
+    # 3. Install
+    sudo mv kubectl-kguardian /usr/local/bin/
+
+    # 4. Verify
+    kubectl kguardian --version
+    ```
+  </Tab>
+</Tabs>
+
+---
+
+## Verification
+
+After installation, verify all components are working:
+
+### 1. Check Pod Status
+
+```bash
+kubectl get pods -n kguardian
+
+# Expected output:
+# NAME                                 READY   STATUS    RESTARTS   AGE
+# kguardian-controller-xxxxx           1/1     Running   0          5m
+# kguardian-broker-xxxxxxxxxx-xxxxx    1/1     Running   0          5m
+# kguardian-postgresql-0               1/1     Running   0          5m
+# kguardian-ui-xxxxxxxxxx-xxxxx        1/1     Running   0          5m
+```
+
+### 2. Check Controller Logs
+
+```bash
+kubectl logs -n kguardian daemonset/kguardian-controller --tail=50
+
+# Look for:
+# - "eBPF programs loaded successfully"
+# - "Watching pods on node: <node-name>"
+# - No error messages
+```
+
+### 3. Check Broker Connectivity
+
+```bash
+# Port-forward to broker
+kubectl port-forward -n kguardian svc/kguardian-broker 9090:9090 &
+
+# Test health endpoint
+curl http://localhost:9090/health
+
+# Expected: {"status":"ok"}
+```
+
+### 4. Test CLI Connection
+
+```bash
+# List some pods (controller auto-forwards to broker)
+kubectl kguardian gen networkpolicy --help
+
+# Try generating a policy for a test pod
+kubectl run test-nginx --image=nginx
+sleep 30  # Let controller observe it
+kubectl kguardian gen networkpolicy test-nginx -n default --dry-run
+```
+
+<Check>
+If all checks pass, kguardian is ready to use!
+</Check>
+
+---
+
+## Upgrade
+
+To upgrade kguardian to a newer version:
+
+```bash
+# 1. Update Helm repository
+helm repo update
+
+# 2. Check available versions
+helm search repo kguardian/kguardian --versions
+
+# 3. Upgrade (preserves your values.yaml)
+helm upgrade kguardian kguardian/kguardian \
+  --namespace kguardian \
+  --values values.yaml \
+  --wait
+
+# 4. Verify new version
+kubectl get pods -n kguardian -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.spec.containers[0].image}{"\n"}{end}'
+```
+
+<Warning>
+Always review the [Release Notes](https://github.com/kguardian-dev/kguardian/releases) before upgrading, especially for breaking changes in major versions.
+</Warning>
+
+---
+
+## Uninstall
+
+To completely remove kguardian:
+
+```bash
+# 1. Uninstall Helm release
+helm uninstall kguardian --namespace kguardian
+
+# 2. Delete namespace (removes all resources)
+kubectl delete namespace kguardian
+
+# 3. Remove CLI plugin (if using Krew)
+kubectl krew uninstall kguardian
+
+# Or remove manual installation
+sudo rm /usr/local/bin/kubectl-kguardian
+```
+
+<Info>
+This will **not** remove generated policies that were already applied to your namespaces. Clean those up separately if needed.
+</Info>
+
+---
+
+<CardGroup cols={2}>
+  <Card title="Quick Start" icon="rocket" href="/quickstart">
+    Jump right into generating policies
+  </Card>
+  <Card title="Configuration Guide" icon="sliders" href="/advanced/custom-configurations">
+    Deep dive into configuration options
+  </Card>
+  <Card title="Troubleshooting" icon="wrench" href="/advanced/troubleshooting">
+    Fix common installation issues
+  </Card>
+  <Card title="Architecture" icon="sitemap" href="/architecture">
+    Understand how components work
+  </Card>
+</CardGroup>

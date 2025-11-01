@@ -1,0 +1,48 @@
+---
+title: "CLI Overview"
+description: "kubectl kguardian command reference"
+icon: "terminal"
+---
+
+## kubectl kguardian
+
+The kguardian CLI is a kubectl plugin that generates security policies from observed runtime behavior.
+
+## Installation
+
+See the [Installation Guide](/installation#install-the-cli-plugin) for detailed instructions.
+
+## Global Flags
+
+Available for all commands:
+
+| Flag | Description | Default |
+|------|-------------|---------|
+| `--kubeconfig` | Path to kubeconfig file | `$KUBECONFIG` or `~/.kube/config` |
+| `--context` | Kubernetes context to use | Current context |
+| `-n, --namespace` | Namespace scope | Current namespace |
+| `--debug` | Enable debug logging | `false` |
+
+## Commands
+
+<CardGroup cols={2}>
+  <Card title="gen networkpolicy" icon="network-wired" href="/cli/gen-networkpolicy">
+    Generate Network Policies from observed traffic
+  </Card>
+  <Card title="gen seccomp" icon="shield-check" href="/cli/gen-seccomp">
+    Generate Seccomp profiles from syscall usage
+  </Card>
+</CardGroup>
+
+## Examples
+
+```bash
+# Generate network policy for a pod
+kubectl kguardian gen networkpolicy my-app -n production
+
+# Generate seccomp for all pods in namespace
+kubectl kguardian gen seccomp --all -n staging
+
+# Generate Cilium policies cluster-wide
+kubectl kguardian gen netpol -A --type cilium
+```

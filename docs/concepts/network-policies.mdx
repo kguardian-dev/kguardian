@@ -1,0 +1,74 @@
+---
+title: "Network Policies"
+description: "Understanding Kubernetes Network Policies and how kguardian generates them"
+icon: "network-wired"
+---
+
+## What are Network Policies?
+
+Kubernetes Network Policies are firewall rules for your pods. They control:
+- **Ingress**: What can connect TO your pod
+- **Egress**: What your pod can connect TO
+
+Without Network Policies, all pods can communicate with all other pods (flat network).
+
+## Structure of a Network Policy
+
+```yaml
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: my-app
+spec:
+  podSelector:          # Which pods this policy applies to
+    matchLabels:
+      app: my-app
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:              # Allow incoming from...
+    - from:
+        - podSelector:
+            matchLabels:
+              app: frontend
+      ports:
+        - port: 8080
+  egress:               # Allow outgoing to...
+    - to:
+        - podSelector:
+            matchLabels:
+              app: database
+```
+
+## How kguardian Generates Policies
+
+1. **Observes traffic** via eBPF for 5+ minutes
+2. **Identifies peers** by resolving IPs to pods/services
+3. **Groups rules** by protocol and port
+4. **Deduplicates** to create minimal policies
+5. **Generates YAML** ready to apply
+
+## Default-Deny Strategy
+
+Best practice: Start with default-deny, then allowlist:
+
+```yaml
+# 1. Deny all traffic
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+    - Egress
+
+# 2. Apply kguardian-generated allowlist policies
+```
+
+---
+
+**Next steps:**
+- [Generate Network Policies](/guides/generating-network-policies)
+- [Cilium Policies](/advanced/cilium-policies)

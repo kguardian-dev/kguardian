@@ -1,33 +1,67 @@
 ---
-title: 'Introduction'
-description: 'Example section for showcasing API endpoints'
+title: "Broker API Reference"
+description: "REST API for querying kguardian telemetry data"
+icon: "code"
 ---
 
-<Note>
-  If you're not looking to build API reference documentation, you can delete
-  this section by removing the api-reference folder.
-</Note>
+## Overview
 
-## Welcome
+The kguardian Broker exposes a REST API for querying collected telemetry data. The CLI uses this API internally, but you can also integrate directly with it for custom workflows.
 
-There are two ways to build API documentation: [OpenAPI](https://mintlify.com/docs/api-playground/openapi/setup) and [MDX components](https://mintlify.com/docs/api-playground/mdx/configuration). For the starter kit, we are using the following OpenAPI specification.
+## Base URL
 
-<Card
-  title="Plant Store Endpoints"
-  icon="leaf"
-  href="https://github.com/mintlify/starter/blob/main/api-reference/openapi.json"
->
-  View the OpenAPI specification file
-</Card>
+```
+http://kguardian-broker.kguardian.svc.cluster.local:9090
+```
+
+For external access, use port-forwarding:
+
+```bash
+kubectl port-forward -n kguardian svc/kguardian-broker 9090:9090
+```
 
 ## Authentication
 
-All API endpoints are authenticated using Bearer tokens and picked up from the specification file.
+<Warning>
+The current version (v1.0.0) has **no authentication**. The API should only be accessible within the cluster network. For production deployments, consider using NetworkPolicies, service mesh, or an API gateway with authentication.
+</Warning>
 
-```json
-"security": [
-  {
-    "bearerAuth": []
-  }
-]
-```
+## API Endpoints
+
+<CardGroup cols={2}>
+  <Card title="Pods" icon="cube" href="/api-reference/endpoints/pods">
+    Add and retrieve pod metadata
+  </Card>
+  <Card title="Traffic" icon="arrow-right-arrow-left" href="/api-reference/endpoints/traffic">
+    Query network traffic data
+  </Card>
+  <Card title="Syscalls" icon="terminal" href="/api-reference/endpoints/syscalls">
+    Retrieve syscall observations
+  </Card>
+  <Card title="Services" icon="cloud" href="/api-reference/endpoints/services">
+    Service IP to metadata mapping
+  </Card>
+</CardGroup>
+
+## Response Format
+
+All responses are JSON with standard HTTP status codes:
+
+- `200 OK` - Success
+- `400 Bad Request` - Invalid parameters
+- `404 Not Found` - Resource not found
+- `500 Internal Server Error` - Server error
+
+## Common Patterns
+
+### Pagination
+
+Currently not supported. All matching records are returned.
+
+### Filtering
+
+Some endpoints support filtering by namespace, pod name, or time range (coming soon).
+
+### Rate Limiting
+
+No rate limiting is currently enforced.

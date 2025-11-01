@@ -1,0 +1,61 @@
+---
+title: "Service Endpoints"
+description: "Service IP to metadata mapping"
+---
+
+## POST /svc/spec
+
+Add or update service metadata.
+
+### Request
+
+```json
+{
+  "svc_ip": "10.96.0.100",
+  "svc_name": "my-service",
+  "svc_namespace": "production",
+  "service_spec": {
+    "metadata": { /* service metadata */ },
+    "spec": {
+      "selector": {
+        "app": "my-app"
+      },
+      "ports": [
+        {
+          "port": 80,
+          "targetPort": 8080
+        }
+      ]
+    }
+  }
+}
+```
+
+---
+
+## GET /svc/ip/:ip
+
+Retrieve service details by cluster IP.
+
+### Example
+
+```bash
+curl http://localhost:9090/svc/ip/10.96.0.100
+```
+
+### Response
+
+```json
+{
+  "svc_ip": "10.96.0.100",
+  "svc_name": "my-service",
+  "svc_namespace": "production",
+  "service_spec": {
+    "spec": {
+      "selector": {
+        "app": "my-app"
+      }
+    }
+  }
+}
+```

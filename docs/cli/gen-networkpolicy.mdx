@@ -1,0 +1,45 @@
+---
+title: "gen networkpolicy"
+description: "Generate Kubernetes or Cilium Network Policies"
+icon: "network-wired"
+---
+
+## Synopsis
+
+Generate Network Policies based on observed pod traffic.
+
+```bash
+kubectl kguardian gen networkpolicy [POD_NAME] [flags]
+kubectl kguardian gen netpol [POD_NAME] [flags]  # Alias
+```
+
+## Flags
+
+| Flag | Type | Description | Default |
+|------|------|-------------|---------|
+| `-n, --namespace` | string | Namespace of the pod | Current namespace |
+| `-a, --all` | bool | Generate for all pods in namespace | `false` |
+| `-A, --all-namespaces` | bool | Generate for all pods cluster-wide | `false` |
+| `-t, --type` | string | Policy type: `kubernetes` or `cilium` | `kubernetes` |
+| `--output-dir` | string | Directory to save policies | `network-policies` |
+| `--dry-run` | bool | Generate without applying | `true` |
+
+## Examples
+
+```bash
+# Single pod
+kubectl kguardian gen networkpolicy my-app -n prod --output-dir ./policies
+
+# All pods in namespace
+kubectl kguardian gen netpol --all -n staging --output-dir ./staging-policies
+
+# Cilium policies cluster-wide
+kubectl kguardian gen netpol -A --type cilium --output-dir ./cilium
+
+# Generate and apply
+kubectl kguardian gen netpol my-app --dry-run=false
+```
+
+---
+
+See [Generating Network Policies](/guides/generating-network-policies) for detailed usage.

@@ -1,0 +1,361 @@
+---
+title: "Future Supported Resources"
+description: "Planned security resources and features coming to kguardian"
+icon: "map"
+---
+
+##  Roadmap Overview
+
+kguardian is continuously evolving to support more Kubernetes security resources. This page outlines our plans for future capabilities.
+
+<Note>
+**Want to contribute?** Check out our [GitHub Discussions](https://github.com/kguardian-dev/kguardian/discussions) to participate in roadmap planning or our [Contributing Guide](/development/overview) to help build these features!
+</Note>
+
+## Planned Resources
+
+<CardGroup cols={2}>
+  <Card title="✅ Network Policies" icon="check-circle" color="#16A34A">
+    **Status:** Generally Available (v1.0.0)
+
+    - Kubernetes NetworkPolicy
+    - Cilium NetworkPolicy
+    - Cilium ClusterwideNetworkPolicy
+  </Card>
+
+  <Card title="✅ Seccomp Profiles" icon="check-circle" color="#16A34A">
+    **Status:** Generally Available (v1.0.0)
+
+    - OCI seccomp JSON format
+    - Architecture-aware profiles
+    - Customizable default actions
+  </Card>
+
+  <Card title="🚧 AppArmor Profiles" icon="hammer" color="#F59E0B">
+    **Status:** In Development (Target: v1.2.0)
+
+    - Generate from observed file access
+    - Network capability restrictions
+    - Integration with Security Profiles Operator
+  </Card>
+
+  <Card title="📋 SELinux Policies" icon="clipboard-list" color="#3B82F6">
+    **Status:** Planned (Target: v1.3.0)
+
+    - Type enforcement rules
+    - File context generation
+    - Process domain transitions
+  </Card>
+
+  <Card title="📋 Pod Security Standards" icon="shield-check" color="#3B82F6">
+    **Status:** Planned (Target: v1.4.0)
+
+    - Auto-generate PSS labels
+    - Compliance validation
+    - Migration recommendations
+  </Card>
+
+  <Card title="💡 Resource Quotas & Limits" icon="lightbulb" color="#8B5CF6">
+    **Status:** Under Consideration
+
+    - Observed CPU/memory usage
+    - Suggested request/limit values
+    - Autoscaling recommendations
+  </Card>
+</CardGroup>
+
+---
+
+## AppArmor Profiles (v1.2.0)
+
+<Info>
+**Target Release:** Q2 2025
+**Status:** In active development
+</Info>
+
+AppArmor provides mandatory access control (MAC) for Linux applications, restricting file access, network capabilities, and more.
+
+### Capabilities
+
+<AccordionGroup>
+  <Accordion title="File Access Rules" icon="folder-open">
+    kguardian will observe:
+    - File read/write operations via eBPF (`openat`, `read`, `write` syscalls)
+    - Directory listings and creation
+    - Execution of binaries
+
+    Generated rules:
+    ```apparmor
+    # Allow read access to config files
+    /etc/nginx/** r,
+    /etc/ssl/certs/** r,
+
+    # Allow write to logs
+    /var/log/nginx/** w,
+
+    # Allow execute for application binary
+    /usr/sbin/nginx ix,
+    ```
+  </Accordion>
+
+  <Accordion title="Network Capabilities" icon="network-wired">
+    Based on observed network activity:
+    ```apparmor
+    # Allow TCP connections
+    network inet stream,
+
+    # Allow UDP for DNS
+    network inet dgram,
+    ```
+  </Accordion>
+
+  <Accordion title="Capability Restrictions" icon="lock">
+    Limit Linux capabilities:
+    ```apparmor
+    # Allow binding to privileged ports
+    capability net_bind_service,
+
+    # Allow changing UID/GID
+    capability setuid,
+    capability setgid,
+    ```
+  </Accordion>
+
+  <Accordion title="Integration" icon="puzzle-piece">
+    - Export as standalone AppArmor profiles
+    - Integration with [Security Profiles Operator](https://github.com/kubernetes-sigs/security-profiles-operator)
+    - Auto-apply via `AppArmorProfile` CRD
+  </Accordion>
+</AccordionGroup>
+
+### CLI Usage (Planned)
+
+```bash
+# Generate AppArmor profile for a pod
+kubectl kguardian gen apparmor nginx -n production \
+  --output-dir ./apparmor
+
+# View generated profile
+cat ./apparmor/production-nginx-apparmor.profile
+
+# Apply via Security Profiles Operator
+kubectl apply -f ./apparmor/production-nginx-apparmorprofile.yaml
+```
+
+---
+
+## SELinux Policies (v1.3.0)
+
+<Info>
+**Target Release:** Q3 2025
+**Status:** Planning phase
+</Info>
+
+SELinux provides fine-grained access control using security contexts and policies.
+
+### Capabilities
+
+<AccordionGroup>
+  <Accordion title="Type Enforcement" icon="tags">
+    Generate custom SELinux types for pods:
+    - Observe process domains and transitions
+    - File type associations
+    - Network access rules per type
+
+    Example policy:
+    ```selinux
+    type nginx_t;
+    type nginx_exec_t;
+    type nginx_log_t;
+
+    # Allow nginx to read config files
+    allow nginx_t nginx_conf_t:file { read open };
+
+    # Allow nginx to write logs
+    allow nginx_t nginx_log_t:file { write create append };
+
+    # Allow nginx to bind to port 80
+    allow nginx_t http_port_t:tcp_socket name_bind;
+    ```
+  </Accordion>
+
+  <Accordion title="File Contexts" icon="file-shield">
+    Auto-generate file context mappings:
+    ```selinux
+    /usr/sbin/nginx     -- gen_context(system_u:object_r:nginx_exec_t,s0)
+    /etc/nginx(/.*)?       gen_context(system_u:object_r:nginx_conf_t,s0)
+    /var/log/nginx(/.*)?   gen_context(system_u:object_r:nginx_log_t,s0)
+    ```
+  </Accordion>
+
+  <Accordion title="Integration Challenges" icon="triangle-exclamation">
+    SELinux support is complex:
+    - Requires kernel support and enabled enforcement
+    - Policy compilation and loading
+    - Container runtime integration
+
+    We're exploring:
+    - Using `udica` for container policy generation
+    - CRI-O selinuxOptions integration
+    - Collaboration with SELinux community
+  </Accordion>
+</AccordionGroup>
+
+---
+
+## Pod Security Standards (v1.4.0)
+
+<Info>
+**Target Release:** Q4 2025
+**Status:** Research phase
+</Info>
+
+[Pod Security Standards](https://kubernetes.io/docs/concepts/security/pod-security-standards/) define three security profiles: Privileged, Baseline, and Restricted.
+
+### Capabilities
+
+<AccordionGroup>
+  <Accordion title="Compliance Detection" icon="magnifying-glass">
+    Analyze observed pod behavior and suggest appropriate PSS level:
+    - **Privileged**: Uses host namespaces, runs as root, etc.
+    - **Baseline**: Minimal restrictions, prevents known privilege escalations
+    - **Restricted**: Hardened, follows current security best practices
+
+    Example:
+    ```bash
+    kubectl kguardian audit pss nginx -n production
+
+    # Output:
+    # Pod: nginx
+    # Current PSS Level: Privileged
+    # Recommended: Baseline
+    # Violations:
+    #   - Running as root (UID 0)
+    #   - hostNetwork: true
+    # Suggested fixes:
+    #   - Set runAsNonRoot: true
+    #   - Remove hostNetwork
+    ```
+  </Accordion>
+
+  <Accordion title="Automatic Labeling" icon="tags">
+    Generate namespace labels for PSS enforcement:
+    ```yaml
+    apiVersion: v1
+    kind: Namespace
+    metadata:
+      name: production
+      labels:
+        pod-security.kubernetes.io/enforce: baseline
+        pod-security.kubernetes.io/audit: restricted
+        pod-security.kubernetes.io/warn: restricted
+    ```
+  </Accordion>
+
+  <Accordion title="Migration Assistance" icon="arrows-turn-right">
+    Help migrate from PSPs or insecure configurations:
+    - Identify pods violating target PSS level
+    - Suggest PodSecurityContext changes
+    - Generate compliant manifests
+  </Accordion>
+</AccordionGroup>
+
+---
+
+## Resource Recommendations
+
+<Warning>
+**Status:** Under consideration - feedback welcome!
+</Warning>
+
+Generate CPU/memory requests and limits based on observed usage.
+
+### Concept
+
+```bash
+kubectl kguardian gen resources nginx -n production \
+  --observation-period 7d \
+  --percentile 95
+
+# Output: Recommended resource configuration
+apiVersion: v1
+kind: Pod
+metadata:
+  name: nginx
+spec:
+  containers:
+  - name: nginx
+    resources:
+      requests:
+        cpu: "100m"        # 95th percentile observed usage
+        memory: "128Mi"
+      limits:
+        cpu: "500m"        # Max observed + 20% headroom
+        memory: "256Mi"
+```
+
+### Challenges
+
+- Requires metrics-server or Prometheus integration
+- Observation period must cover peak loads
+- Needs statistical analysis (percentiles, outliers)
+- May overlap with VPA (Vertical Pod Autoscaler)
+
+**Decision pending:** Is this in scope for kguardian, or should we focus on security resources?
+
+---
+
+## Other Ideas
+
+We're collecting community feedback on:
+
+<CardGroup cols={2}>
+  <Card title="Falco Rules Generation" icon="bell">
+    Generate runtime security rules from observed behavior
+  </Card>
+
+  <Card title="OPA/Gatekeeper Policies" icon="gavel">
+    Create admission control policies based on cluster patterns
+  </Card>
+
+  <Card title="Service Mesh Policies" icon="diagram-project">
+    Generate Istio/Linkerd AuthorizationPolicies
+  </Card>
+
+  <Card title="RBAC Recommendations" icon="users-gear">
+    Suggest least-privilege RBAC roles
+  </Card>
+</CardGroup>
+
+---
+
+## How You Can Help
+
+<Steps>
+  <Step title="Vote on Features">
+    Star or comment on [GitHub Issues](https://github.com/kguardian-dev/kguardian/issues) for features you want most.
+  </Step>
+
+  <Step title="Share Use Cases">
+    Tell us how you'd use these resources in [Discussions](https://github.com/kguardian-dev/kguardian/discussions).
+  </Step>
+
+  <Step title="Contribute Code">
+    Pick up an issue labeled `help-wanted` or `good-first-issue` and submit a PR!
+  </Step>
+
+  <Step title="Sponsor Development">
+    Commercial licenses help fund feature development. Contact us for enterprise support.
+  </Step>
+</Steps>
+
+---
+
+<Card
+  title="Check out planned features and milestones"
+  icon="flag-checkered"
+  href="/roadmap/planned-features"
+  horizontal
+>
+  See the full release roadmap →
+</Card>

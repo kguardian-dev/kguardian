@@ -24,13 +24,13 @@
       ],
       "include-component-in-tag": true
     },
-    "ui": {
-      "component": "ui",
+    "frontend": {
+      "component": "frontend",
       "release-type": "node",
-      "package-name": "kguardian-ui",
-      "changelog-path": "ui/CHANGELOG.md",
+      "package-name": "kguardian-frontend",
+      "changelog-path": "frontend/CHANGELOG.md",
       "extra-files": [
-        "ui/VERSION"
+        "frontend/VERSION"
       ],
       "include-component-in-tag": true
     },
@@ -52,7 +52,7 @@
       "include-component-in-tag": true
     }
   },
-  "release-search-depth": 500,
+  "release-search-depth": 20,
   "changelog-sections": [
     {
       "type": "feat",
