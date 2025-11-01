@@ -17,7 +17,7 @@ fn main() {
     .join("bpf")
     .join("syscall.skel.rs");
 
-     let pkt_drop_out = PathBuf::from(
+    let pkt_drop_out = PathBuf::from(
         env::var_os("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR must be set in build script"),
     )
     .join("src")
@@ -52,7 +52,7 @@ fn main() {
         .build_and_generate(&tcp_probe_out)
         .unwrap();
 
-     SkeletonBuilder::new()
+    SkeletonBuilder::new()
         .source(PACKET_DROP_SRC)
         .clang_args([
             OsStr::new("-I"),

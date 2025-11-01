@@ -10,7 +10,6 @@ use std::mem::MaybeUninit;
 use std::net::Ipv4Addr;
 use tokio::sync::mpsc::{Receiver, Sender};
 use tokio::{task, task::JoinHandle};
-use tracing::info;
 
 pub fn ebpf_handle(
     network_event_sender: Sender<NetworkEventData>,
@@ -34,20 +33,18 @@ pub fn ebpf_handle(
         let mut pktdrp_sk = packet_drop_skel.load().unwrap();
         pktdrp_sk.attach().unwrap();
 
-
         let mut open_object = MaybeUninit::uninit();
         let skel_builder = SyscallSkelBuilder::default();
         let syscall_probe_skel = skel_builder.open(&mut open_object).unwrap();
         let mut syscall_sk = syscall_probe_skel.load().unwrap();
         syscall_sk.attach().unwrap();
 
-
         let network_perf = PerfBufferBuilder::new(&network_sk.maps.tracept_events)
             .sample_cb(move |_cpu, data: &[u8]| {
                 let network_event_data: NetworkEventData =
                     unsafe { *(data.as_ptr() as *const NetworkEventData) };
 
-                if let Err(e) = network_event_sender.blocking_send(network_event_data) {
+                if let Err(_) = network_event_sender.blocking_send(network_event_data) {
                     // eprintln!("Failed to send TCP event: {:?}", e);
                     // TODO: If SendError, possibly the receiver is closed, restart the controller
                 }
@@ -59,7 +56,7 @@ pub fn ebpf_handle(
             .sample_cb(move |_cpu: i32, data: &[u8]| {
                 let syscall_event_data: SyscallEventData =
                     unsafe { *(data.as_ptr() as *const SyscallEventData) };
-                if let Err(e) = syscall_event_sender.blocking_send(syscall_event_data) {
+                if let Err(_) = syscall_event_sender.blocking_send(syscall_event_data) {
                     //eprintln!("Failed to send Syscall event: {:?}", e);
                     //TODO: If SendError, possibly the receiver is closed, restart the controller
                 }
@@ -67,12 +64,11 @@ pub fn ebpf_handle(
             .build()
             .unwrap();
 
-
         let pktdrp_perf = PerfBufferBuilder::new(&pktdrp_sk.maps.drop_events)
             .sample_cb(move |_cpu: i32, data: &[u8]| {
                 let syscall_event_data: PacketDropEvent =
                     unsafe { *(data.as_ptr() as *const PacketDropEvent) };
-                if let Err(e) = pktevent_sender.blocking_send(syscall_event_data) {
+                if let Err(_) = pktevent_sender.blocking_send(syscall_event_data) {
                     //eprintln!("Failed to send Syscall event: {:?}", e);
                     //TODO: If SendError, possibly the receiver is closed, restart the controller
                 }
@@ -87,7 +83,8 @@ pub fn ebpf_handle(
             syscall_perf
                 .poll(std::time::Duration::from_millis(100))
                 .unwrap();
-            pktdrp_perf.poll(std::time::Duration::from_millis(100))
+            pktdrp_perf
+                .poll(std::time::Duration::from_millis(100))
                 .unwrap();
 
             // Process any incoming messages from the pod watcher
