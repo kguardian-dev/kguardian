@@ -1,33 +1,18 @@
 # Changelog
 
-All notable changes to the kguardian Helm Chart will be documented in this file.
+## [1.1.0](https://github.com/kguardian-dev/kguardian/compare/chart/v1.0.1...chart/v1.1.0) (2025-11-01)
 
-The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
-and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
-
-## [Unreleased]
-
-## [1.0.0] - 2025-11-01
 
 ### Features
 
-- Initial v1.0.0 release of kguardian Helm chart
-- Complete deployment of all kguardian components:
-  - Controller DaemonSet with eBPF capabilities
-  - Broker API server deployment
-  - PostgreSQL database deployment
-  - UI web interface deployment
-- Comprehensive configuration via values.yaml
-- Support for component-specific version pinning
-- Security contexts and RBAC for all components
-- Service accounts with configurable automount
-- Configurable resource limits and requests
-- Node selectors, tolerations, and affinity rules
-- Autoscaling support for broker and UI
-- Persistent volume support for database
-- Health probes for all components
-- Namespace filtering configuration
-- Image pull secrets support
+* update helm-docs ([1ed301c](https://github.com/kguardian-dev/kguardian/commit/1ed301c4e99073c35bfc2c19ddb24a85f94e9e3a))
+* updating docs ([6193d8c](https://github.com/kguardian-dev/kguardian/commit/6193d8c93dd6ce2cb8ad7561e4af9fbc0cff51cf))
+* updating docs ([1c92c65](https://github.com/kguardian-dev/kguardian/commit/1c92c6510dfd8c69e65ad9c3258af043390b33b8))
 
-[Unreleased]: https://github.com/kguardian-dev/kguardian/compare/chart/v1.0.0...HEAD
-[1.0.0]: https://github.com/kguardian-dev/kguardian/releases/tag/chart/v1.0.0
+## [1.0.1](https://github.com/kguardian-dev/kguardian/compare/chart/v1.0.0...chart/v1.0.1) (2025-11-01)
+
+
+### Bug Fixes
+
+* **deps:** update rust crate time to v0.3.37 ([1bd7ceb](https://github.com/kguardian-dev/kguardian/commit/1bd7cebd3323dc0308f18f664b50981505ba8237))
+* **deps:** update rust crate time to v0.3.37 ([9cd083a](https://github.com/kguardian-dev/kguardian/commit/9cd083afe38326e92ce35f23f698e2b6ff7a5ac8))
