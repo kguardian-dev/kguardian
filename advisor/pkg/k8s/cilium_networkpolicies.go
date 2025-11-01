@@ -118,6 +118,8 @@ func GenerateCiliumNetworkPolicy(options GenerateOptions, config *Config) {
 }
 
 // Helper function to create a mock Cilium NetworkPolicy for test mode
+//
+//nolint:unused // Reserved for future testing use
 func createMockCiliumNetworkPolicy(podName, namespace string) *ciliumv2.CiliumNetworkPolicy {
 	return &ciliumv2.CiliumNetworkPolicy{
 		TypeMeta: metav1.TypeMeta{
@@ -218,7 +220,7 @@ func transformToCiliumNetworkPolicy(podTraffic []apiapi.PodTraffic, podDetail *a
 	}
 
 	// Ensure we have selector labels
-	if podSelectorLabels == nil || len(podSelectorLabels) == 0 {
+	if len(podSelectorLabels) == 0 {
 		log.Warn().Msg("No selector labels found, using default labels")
 		podSelectorLabels = map[string]string{
 			"app": podDetail.Name,
@@ -444,7 +446,7 @@ func determineCiliumEndpointForTraffic(traffic apiapi.PodTraffic, config *Config
 		return emptySelectors, nil
 	}
 
-	if peerSelectorLabels == nil || len(peerSelectorLabels) == 0 {
+	if len(peerSelectorLabels) == 0 {
 		log.Debug().Msg("No peer selector labels found, using empty selectors")
 		return emptySelectors, nil
 	}

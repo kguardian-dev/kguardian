@@ -88,7 +88,7 @@ func PortForward(config *Config) (chan struct{}, chan error, chan bool) {
 			}
 		}
 
-		if service.Spec.Selector == nil || len(service.Spec.Selector) == 0 {
+		if len(service.Spec.Selector) == 0 {
 			err := fmt.Errorf("service %s/%s has no selectors", actualNamespace, serviceName)
 			log.Error().Msg(err.Error())
 			errChan <- err
