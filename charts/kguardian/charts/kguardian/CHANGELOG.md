@@ -1,5 +1,14 @@
 # Changelog
 
+## [1.1.0](https://github.com/kguardian-dev/kguardian/compare/chart/v1.0.1...chart/v1.1.0) (2025-11-01)
+
+
+### Features
+
+* update helm-docs ([1ed301c](https://github.com/kguardian-dev/kguardian/commit/1ed301c4e99073c35bfc2c19ddb24a85f94e9e3a))
+* updating docs ([6193d8c](https://github.com/kguardian-dev/kguardian/commit/6193d8c93dd6ce2cb8ad7561e4af9fbc0cff51cf))
+* updating docs ([1c92c65](https://github.com/kguardian-dev/kguardian/commit/1c92c6510dfd8c69e65ad9c3258af043390b33b8))
+
 ## [1.0.1](https://github.com/kguardian-dev/kguardian/compare/chart/v1.0.0...chart/v1.0.1) (2025-11-01)
 
 
