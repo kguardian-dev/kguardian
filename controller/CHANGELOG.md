@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.2.0](https://github.com/kguardian-dev/kguardian/compare/controller/v1.1.1...controller/v1.2.0) (2025-11-01)
+
+
+### Features
+
+* Remove redundant code in packet drops ([#412](https://github.com/kguardian-dev/kguardian/issues/412)) ([bbc6382](https://github.com/kguardian-dev/kguardian/commit/bbc6382fa8c93b03187a4c8ce1580734731fdaeb))
+
 ## [1.1.1](https://github.com/kguardian-dev/kguardian/compare/controller/v1.1.0...controller/v1.1.1) (2025-11-01)
 
 
