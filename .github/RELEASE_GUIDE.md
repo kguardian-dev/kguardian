@@ -175,9 +175,23 @@ git push origin main component/v1.2.3
 - Make additional commits
 - release-please will create a new PR with all changes
 
+## Validation and Testing
+
+Before pushing to production, validate your configuration:
+
+```bash
+# Run validation script
+.github/scripts/validate-release-config.sh
+
+# Should output: ✓ All validations passed!
+```
+
+For advanced testing (dry-runs, mock commits, etc.), see [TESTING_RELEASES.md](TESTING_RELEASES.md).
+
 ## Learn More
 
 - [Full Release Documentation](../../RELEASES.md)
+- [Testing Release Configuration](TESTING_RELEASES.md)
 - [Conventional Commits](https://www.conventionalcommits.org/)
 - [Release Please Docs](https://github.com/googleapis/release-please)
 - [Semantic Versioning](https://semver.org/)

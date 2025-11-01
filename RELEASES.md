@@ -398,6 +398,24 @@ Previously, the project used a single `v*` tag for all components. With release-
 
 **Important:** With release-please, you no longer manually create tags. The automation handles all versioning, tagging, and changelog generation.
 
+## Validation and Testing
+
+Before using release-please in production, validate your configuration:
+
+```bash
+# Run the validation script
+./.github/scripts/validate-release-config.sh
+```
+
+This validates:
+- JSON syntax and structure
+- Component consistency
+- Version file existence and consistency
+- Workflow configuration
+- Conventional commit parsing
+
+For comprehensive testing including dry-runs, mock commits, and using the release-please CLI, see [.github/TESTING_RELEASES.md](.github/TESTING_RELEASES.md).
+
 ## Examples
 
 ### Example 1: Hotfix Release (Patch) - Automated with Release-Please
