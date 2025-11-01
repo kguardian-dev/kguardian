@@ -45,7 +45,7 @@
       "include-component-in-tag": true
     },
     "charts/kguardian": {
-      "component": "charts/kguardian",
+      "component": "chart",
       "release-type": "helm",
       "package-name": "kguardian",
       "changelog-path": "CHANGELOG.md",
