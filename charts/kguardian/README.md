@@ -2,7 +2,7 @@
 
 This chart bootstraps the [kguardian]() controlplane onto a [Kubernetes](http://kubernetes.io) cluster using the [Helm](https://helm.sh) package manager.
 
-![Version: 1.1.2](https://img.shields.io/badge/Version-1.1.2-informational?style=flat-square)
+![Version: 1.2.0](https://img.shields.io/badge/Version-1.2.0-informational?style=flat-square)
 
 ## Overview
 
@@ -20,26 +20,23 @@ This Helm chart deploys:
 
 ## Install the Chart
 
-To install the chart with the release name `my-release`:
+To install the chart with the release name `kguardian`:
 
-Add the chart repo
+### Install from OCI Registry (Recommended)
 
 ```bash
-helm repo add kguardian https://kguardian-dev.github.io/kguardian
+helm install kguardian oci://ghcr.io/kguardian-dev/charts/kguardian \
+  --namespace kguardian \
+  --create-namespace
 ```
 
-You can then run `helm search repo kguardian` to search the charts.
-
-Install chart using Helm v3.0+
+You can also specify a version:
 
 ```bash
-helm install kguardian kguardian/kguardian --namespace kguardian --create-namespace
-```
-
-If you want to use the OCI variant of the helm chart, you can use the following command:
-
-```bash
-helm template kguardian oci://ghcr.io/kguardian-dev/charts/kguardian --namespace kguardian --create-namespace
+helm install kguardian oci://ghcr.io/kguardian-dev/charts/kguardian \
+  --version 1.1.1 \
+  --namespace kguardian \
+  --create-namespace
 ```
 
 **Note:** *If you have the [Pod Securty Admission](https://kubernetes.io/docs/concepts/security/pod-security-admission/) enabled for your cluster you will need to add the following annotation to the namespace that the chart is deployed*
@@ -176,7 +173,7 @@ The following table lists the configurable parameters of the kguardian chart and
 | ui.autoscaling.maxReplicas | int | `100` | Maximum number of UI replicas |
 | ui.autoscaling.minReplicas | int | `1` | Minimum number of UI replicas |
 | ui.autoscaling.targetCPUUtilizationPercentage | int | `80` | Target CPU utilization percentage for autoscaling |
-| ui.container.port | int | `80` | UI container port |
+| ui.container.port | int | `5173` | UI container port |
 | ui.fullnameOverride | string | `""` | Override the full name of the UI resources |
 | ui.image.pullPolicy | string | `"Always"` | UI image pull policy |
 | ui.image.repository | string | `"ghcr.io/kguardian-dev/kguardian/frontend"` | UI container image repository |
@@ -186,11 +183,11 @@ The following table lists the configurable parameters of the kguardian chart and
 | ui.nameOverride | string | `""` | Override the name of the UI resources |
 | ui.nodeSelector | object | `{"kubernetes.io/os":"linux"}` | Node labels for the kguardian UI pod assignment |
 | ui.podAnnotations | object | `{}` | Annotations to add to UI pods |
-| ui.podSecurityContext | object | `{"fsGroup":101,"fsGroupChangePolicy":"OnRootMismatch","runAsGroup":101,"runAsUser":101,"seccompProfile":{"type":"RuntimeDefault"},"supplementalGroups":[101]}` | UI pod security context. Runs as nginx user (101) |
+| ui.podSecurityContext | object | `{"fsGroup":999,"fsGroupChangePolicy":"OnRootMismatch","runAsGroup":999,"runAsUser":999,"seccompProfile":{"type":"RuntimeDefault"},"supplementalGroups":[999]}` | UI pod security context. |
 | ui.priorityClassName | string | `""` | Priority class to be used for the kguardian UI pods |
 | ui.replicaCount | int | `1` | Number of UI replicas to deploy |
 | ui.resources | object | `{}` | UI pod resource requests and limits |
-| ui.securityContext | object | `{"allowPrivilegeEscalation":false,"capabilities":{"drop":["ALL"]},"privileged":false,"readOnlyRootFilesystem":true,"runAsNonRoot":true,"runAsUser":101}` | UI container security context. Hardened with read-only root filesystem |
+| ui.securityContext | object | `{"allowPrivilegeEscalation":false,"capabilities":{"drop":["ALL"]},"privileged":false,"readOnlyRootFilesystem":true,"runAsNonRoot":true,"runAsUser":999}` | UI container security context. Hardened with read-only root filesystem |
 | ui.service.name | string | `"ui"` | UI service name |
 | ui.service.port | int | `80` | UI service port |
 | ui.service.type | string | `"ClusterIP"` | UI service type |
