@@ -11,6 +11,7 @@ global:
   priorityClassName: ""
 
 namespace:
+  # -- Namespace name. If empty, uses the release namespace
   name: ""
   # -- Labels to add to the namespace
   labels: {}
@@ -19,21 +20,30 @@ namespace:
 
 controller:
   image:
+    # -- Controller container image repository
     repository: ghcr.io/kguardian-dev/kguardian/controller
+    # -- Controller image pull policy
     pullPolicy: Always
     # -- Controller version tag. Use component version (e.g., "v1.0.0") or "latest"
     tag: "latest"
-    # -- Overrides the image tag.
+    # -- Overrides the image tag using SHA digest
     sha: ""
   initContainer:
     image:
+      # -- Init container image repository
       repository: busybox
+      # -- Init container image pull policy
       pullPolicy: Always
+      # -- Init container image tag
       tag: latest
+    # -- Init container security context
     securityContext: {}
 
+  # -- List of image pull secrets for private registries
   imagePullSecrets: []
+  # -- Override the name of the controller resources
   nameOverride: ""
+  # -- Override the full name of the controller resources
   fullnameOverride: ""
 
   serviceAccount:
@@ -41,14 +51,15 @@ controller:
     create: true
     # -- Annotations to add to the service account
     annotations: {}
-    # -- The name of the service account to use.
-    # If not set and create is true, a name is generated using the fullname template
+    # -- The name of the service account to use. If not set and create is true, a name is generated using the fullname template
     name: ""
     # -- Automount API credentials for a service account
     automountServiceAccountToken: false
 
+  # -- Annotations to add to controller pods
   podAnnotations: {}
 
+  # -- Controller pod security context. Runs with seccomp RuntimeDefault profile
   podSecurityContext:
     # runAsUser: 1000
     # runAsGroup: 1000
@@ -58,6 +69,7 @@ controller:
     seccompProfile:
       type: RuntimeDefault
 
+  # -- Controller container security context. Requires privileged mode for eBPF
   securityContext:
     privileged: true
     readOnlyRootFilesystem: true
@@ -67,9 +79,12 @@ controller:
     allowPrivilegeEscalation: true
 
   service:
+    # -- Controller service type
     type: ClusterIP
+    # -- Controller service port
     port: 80
 
+  # -- Controller pod resource requests and limits
   resources: {}
     # We usually recommend not to specify default resources and to leave this as a conscious
     # choice for the user. This also increases chances charts run on environments with little
@@ -83,9 +98,13 @@ controller:
     #   memory: 128Mi
 
   autoscaling:
+    # -- Enable horizontal pod autoscaling for controller
     enabled: false
+    # -- Minimum number of controller replicas
     minReplicas: 1
+    # -- Maximum number of controller replicas
     maxReplicas: 100
+    # -- Target CPU utilization percentage for autoscaling
     targetCPUUtilizationPercentage: 80
     # targetMemoryUtilizationPercentage: 80
 
@@ -99,50 +118,58 @@ controller:
     operator: "Exists"
     effect: "NoSchedule"
 
+  # -- Affinity rules for controller pod assignment
   affinity: {}
 
   # -- Priority class to be used for the kguardian controller pods
   priorityClassName: ""
 
-  # -- Namespaces to be excluded from monitoring
+  # -- Namespaces to be excluded from monitoring (comma-separated list)
   excludedNamespaces:
     - kguardian
     - kube-system
 
-  # -- Ignore traffic from daemonset pods
+  # -- Ignore traffic from daemonset pods to reduce noise
   ignoreDaemonSet: true
 
 broker:
   # -- Number of broker replicas to deploy
   replicaCount: 1
   image:
+    # -- Broker container image repository
     repository: ghcr.io/kguardian-dev/kguardian/broker
+    # -- Broker image pull policy
     pullPolicy: Always
     # -- Broker version tag. Use component version (e.g., "v1.0.0") or "latest"
     tag: "latest"
-    # Overrides the image tag.
+    # -- Overrides the image tag using SHA digest
     sha: ""
 
   container:
+    # -- Broker container port
     port: 9090
 
+  # -- List of image pull secrets for private registries
   imagePullSecrets: []
+  # -- Override the name of the broker resources
   nameOverride: ""
+  # -- Override the full name of the broker resources
   fullnameOverride: ""
 
   serviceAccount:
-    # Specifies whether a service account should be created
+    # -- Specifies whether a service account should be created
     create: true
-    # Annotations to add to the service account
+    # -- Annotations to add to the service account
     annotations: {}
-    # The name of the service account to use.
-    # If not set and create is true, a name is generated using the fullname template
+    # -- The name of the service account to use. If not set and create is true, a name is generated using the fullname template
     name: ""
-    # Automount API credentials for a service account
+    # -- Automount API credentials for a service account
     automountServiceAccountToken: false
 
+  # -- Annotations to add to broker pods
   podAnnotations: {}
 
+  # -- Broker pod security context. Runs as non-root user 1000
   podSecurityContext:
     runAsUser: 1000
     runAsGroup: 1000
@@ -152,6 +179,7 @@ broker:
     seccompProfile:
       type: RuntimeDefault
 
+  # -- Broker container security context. Hardened with read-only root filesystem
   securityContext:
     privileged: false
     capabilities:
@@ -163,10 +191,14 @@ broker:
     allowPrivilegeEscalation: false
 
   service:
+    # -- Broker service name
     name: "broker"
+    # -- Broker service type
     type: ClusterIP
+    # -- Broker service port
     port: 9090
 
+  # -- Broker pod resource requests and limits
   resources: {}
     # We usually recommend not to specify default resources and to leave this as a conscious
     # choice for the user. This also increases chances charts run on environments with little
@@ -180,9 +212,13 @@ broker:
     #   memory: 128Mi
 
   autoscaling:
+    # -- Enable horizontal pod autoscaling for broker
     enabled: false
+    # -- Minimum number of broker replicas
     minReplicas: 1
+    # -- Maximum number of broker replicas
     maxReplicas: 100
+    # -- Target CPU utilization percentage for autoscaling
     targetCPUUtilizationPercentage: 80
     # targetMemoryUtilizationPercentage: 80
 
@@ -193,44 +229,56 @@ broker:
   # -- Tolerations for the kguardian broker pod assignment
   tolerations: []
 
+  # -- Affinity rules for broker pod assignment
   affinity: {}
 
-  # Optional priority class to be used for the kguardian broker pods
+  # -- Priority class to be used for the kguardian broker pods
   priorityClassName: ""
 
 database:
+  # -- Database name for PostgreSQL
   name: guardian-db
   image:
+    # -- PostgreSQL container image repository
     repository: postgres
+    # -- PostgreSQL image pull policy
     pullPolicy: Always
+    # -- PostgreSQL image tag
     tag: "latest"
-    # Overrides the image tag.
+    # -- Overrides the image tag using SHA digest
     sha: ""
 
   persistence:
+    # -- Enable persistent storage for database
     enabled: false
+    # -- Use an existing PersistentVolumeClaim instead of creating a new one
     existingClaim: ""
 
   container:
+    # -- PostgreSQL container port
     port: 5432
 
+  # -- List of image pull secrets for private registries
   imagePullSecrets: []
+  # -- Override the name of the database resources
   nameOverride: ""
+  # -- Override the full name of the database resources
   fullnameOverride: ""
 
   serviceAccount:
-    # Specifies whether a service account should be created
+    # -- Specifies whether a service account should be created
     create: true
-    # Annotations to add to the service account
+    # -- Annotations to add to the service account
     annotations: {}
-    # The name of the service account to use.
-    # If not set and create is true, a name is generated using the fullname template
+    # -- The name of the service account to use. If not set and create is true, a name is generated using the fullname template
     name: ""
-    # Automount API credentials for a service account
+    # -- Automount API credentials for a service account
     automountServiceAccountToken: false
 
+  # -- Annotations to add to database pods
   podAnnotations: {}
 
+  # -- Database pod security context. Runs as postgres user (999)
   podSecurityContext:
     runAsUser: 999
     runAsGroup: 999
@@ -240,6 +288,7 @@ database:
     seccompProfile:
       type: RuntimeDefault
 
+  # -- Database container security context. Non-root with dropped capabilities
   securityContext:
     privileged: false
     capabilities:
@@ -251,10 +300,14 @@ database:
     allowPrivilegeEscalation: false
 
   service:
+    # -- Database service name
     name: "guardian-db"
+    # -- Database service type
     type: ClusterIP
+    # -- Database service port
     port: 5432
 
+  # -- Database pod resource requests and limits
   resources: {}
     # We usually recommend not to specify default resources and to leave this as a conscious
     # choice for the user. This also increases chances charts run on environments with little
@@ -268,9 +321,13 @@ database:
     #   memory: 128Mi
 
   autoscaling:
+    # -- Enable horizontal pod autoscaling for database
     enabled: false
+    # -- Minimum number of database replicas
     minReplicas: 1
+    # -- Maximum number of database replicas
     maxReplicas: 100
+    # -- Target CPU utilization percentage for autoscaling
     targetCPUUtilizationPercentage: 80
     # targetMemoryUtilizationPercentage: 80
 
@@ -281,6 +338,7 @@ database:
   # -- Tolerations for the kguardian database pod assignment
   tolerations: []
 
+  # -- Affinity rules for database pod assignment
   affinity: {}
 
   # -- Priority class to be used for the kguardian database pods
@@ -290,33 +348,40 @@ ui:
   # -- Number of UI replicas to deploy
   replicaCount: 1
   image:
+    # -- UI container image repository
     repository: ghcr.io/kguardian-dev/kguardian/frontend
+    # -- UI image pull policy
     pullPolicy: Always
     # -- UI version tag. Use component version (e.g., "v1.0.0") or "latest"
     tag: "latest"
-    # Overrides the image tag.
+    # -- Overrides the image tag using SHA digest
     sha: ""
 
   container:
+    # -- UI container port
     port: 80
 
+  # -- List of image pull secrets for private registries
   imagePullSecrets: []
+  # -- Override the name of the UI resources
   nameOverride: ""
+  # -- Override the full name of the UI resources
   fullnameOverride: ""
 
   serviceAccount:
-    # Specifies whether a service account should be created
+    # -- Specifies whether a service account should be created
     create: true
-    # Annotations to add to the service account
+    # -- Annotations to add to the service account
     annotations: {}
-    # The name of the service account to use.
-    # If not set and create is true, a name is generated using the fullname template
+    # -- The name of the service account to use. If not set and create is true, a name is generated using the fullname template
     name: ""
-    # Automount API credentials for a service account
+    # -- Automount API credentials for a service account
     automountServiceAccountToken: false
 
+  # -- Annotations to add to UI pods
   podAnnotations: {}
 
+  # -- UI pod security context. Runs as nginx user (101)
   podSecurityContext:
     runAsUser: 101
     runAsGroup: 101
@@ -326,6 +391,7 @@ ui:
     seccompProfile:
       type: RuntimeDefault
 
+  # -- UI container security context. Hardened with read-only root filesystem
   securityContext:
     privileged: false
     capabilities:
@@ -337,10 +403,14 @@ ui:
     allowPrivilegeEscalation: false
 
   service:
+    # -- UI service name
     name: "ui"
+    # -- UI service type
     type: ClusterIP
+    # -- UI service port
     port: 80
 
+  # -- UI pod resource requests and limits
   resources: {}
     # We usually recommend not to specify default resources and to leave this as a conscious
     # choice for the user. This also increases chances charts run on environments with little
@@ -354,9 +424,13 @@ ui:
     #   memory: 128Mi
 
   autoscaling:
+    # -- Enable horizontal pod autoscaling for UI
     enabled: false
+    # -- Minimum number of UI replicas
     minReplicas: 1
+    # -- Maximum number of UI replicas
     maxReplicas: 100
+    # -- Target CPU utilization percentage for autoscaling
     targetCPUUtilizationPercentage: 80
     # targetMemoryUtilizationPercentage: 80
 
@@ -367,6 +441,7 @@ ui:
   # -- Tolerations for the kguardian UI pod assignment
   tolerations: []
 
+  # -- Affinity rules for UI pod assignment
   affinity: {}
 
   # -- Priority class to be used for the kguardian UI pods
