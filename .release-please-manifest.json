@@ -1,12 +1,12 @@
 {
-  "controller": "1.0.0",
+  "controller": "1.1.0",
   "controller+FILLER": "0.0.0",
-  "broker": "1.0.0",
+  "broker": "1.1.0",
   "broker+FILLER": "0.0.0",
-  "frontend": "1.0.0",
+  "frontend": "1.1.0",
   "frontend+FILLER": "0.0.0",
-  "advisor": "1.0.0",
+  "advisor": "1.1.0",
   "advisor+FILLER": "0.0.0",
-  "charts/kguardian": "1.0.0",
+  "charts/kguardian": "1.0.1",
   "charts/kguardian+FILLER": "0.0.0"
 }
