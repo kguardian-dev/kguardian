@@ -27,9 +27,7 @@ RUN adduser -D -u 1337 -s /bin/sh appuser && \
 # Copy package files and built assets from builder stage
 COPY --from=builder --chown=1337:1337 /app/package*.json ./
 COPY --from=builder --chown=1337:1337 /app/dist ./dist
-
-# Install only production dependencies (includes vite for preview)
-RUN npm ci --omit=dev
+COPY --from=builder --chown=1337:1337 /app/node_modules ./node_modules
 
 # Switch to non-root user
 USER 1337
