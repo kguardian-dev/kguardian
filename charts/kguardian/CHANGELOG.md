@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.1.2](https://github.com/kguardian-dev/kguardian/compare/chart/v1.1.1...chart/v1.1.2) (2025-11-01)
+
+
+### Bug Fixes
+
+* remove nested charts/kguardian directory causing helm packaging failure ([a4f68e0](https://github.com/kguardian-dev/kguardian/commit/a4f68e0b6683ca77bbc3e3cd81ee182819e1d0f9))
+
 ## [1.1.1](https://github.com/kguardian-dev/kguardian/compare/chart/v1.1.0...chart/v1.1.1) (2025-11-01)
 
 
