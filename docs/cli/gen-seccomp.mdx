@@ -1,0 +1,47 @@
+---
+title: "gen seccomp"
+description: "Generate Seccomp profiles from syscall observations"
+icon: "shield-check"
+---
+
+## Synopsis
+
+Generate Seccomp profiles based on observed syscall usage.
+
+```bash
+kubectl kguardian gen seccomp [POD_NAME] [flags]
+kubectl kguardian gen secp [POD_NAME] [flags]  # Alias
+```
+
+## Flags
+
+| Flag | Type | Description | Default |
+|------|------|-------------|---------|
+| `-n, --namespace` | string | Namespace of the pod | Current namespace |
+| `-a, --all` | bool | Generate for all pods in namespace | `false` |
+| `-A, --all-namespaces` | bool | Generate for all pods cluster-wide | `false` |
+| `--output-dir` | string | Directory to save profiles | `seccomp-profiles` |
+| `--default-action` | string | Action for unlisted syscalls | `SCMP_ACT_ERRNO` |
+
+## Default Actions
+
+- `SCMP_ACT_ERRNO` - Return error for unlisted syscalls (recommended)
+- `SCMP_ACT_LOG` - Log unlisted syscalls but allow them (audit mode)
+- `SCMP_ACT_KILL` - Kill process on unlisted syscall (strictest)
+
+## Examples
+
+```bash
+# Single pod
+kubectl kguardian gen seccomp my-app -n prod --output-dir ./seccomp
+
+# All pods with logging for unlisted
+kubectl kguardian gen secp --all -n staging --default-action SCMP_ACT_LOG
+
+# Cluster-wide with strict mode
+kubectl kguardian gen secp -A --default-action SCMP_ACT_KILL
+```
+
+---
+
+See [Generating Seccomp Profiles](/guides/generating-seccomp-profiles) for detailed usage.

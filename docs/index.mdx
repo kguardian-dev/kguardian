@@ -1,97 +1,235 @@
 ---
-title: "Introduction"
-description: "Welcome to the new home for your documentation"
+title: "kguardian: Kubernetes Security Made Simple"
+description: "Automatically generate least-privilege Network Policies and Seccomp Profiles using eBPF-powered runtime behavior analysis"
 ---
 
-## Setting up
+<img
+  className="block dark:hidden rounded-lg"
+  src="/images/hero-light.svg"
+  alt="kguardian Hero Light"
+/>
+<img
+  className="hidden dark:block rounded-lg"
+  src="/images/hero-dark.svg"
+  alt="kguardian Hero Dark"
+/>
 
-Get your documentation site up and running in minutes.
+## What is kguardian?
+
+kguardian is a **Kubernetes security toolkit** that observes your applications at runtime using eBPF technology and automatically generates tailored security resources. Say goodbye to manual policy crafting and hello to zero-trust security that adapts to your workloads.
+
+<CardGroup cols={2}>
+  <Card
+    title="Network Policies"
+    icon="network-wired"
+    iconType="duotone"
+  >
+    Generate least-privilege network policies from observed pod communication patterns
+  </Card>
+  <Card
+    title="Seccomp Profiles"
+    icon="shield-check"
+    iconType="duotone"
+  >
+    Create syscall allowlists based on actual container behavior
+  </Card>
+  <Card
+    title="eBPF Monitoring"
+    icon="radar"
+    iconType="duotone"
+  >
+    Low-overhead kernel-level visibility without code changes
+  </Card>
+  <Card
+    title="Real-time Visualization"
+    icon="chart-network"
+    iconType="duotone"
+  >
+    Interactive UI to explore pod communication and traffic flows
+  </Card>
+</CardGroup>
+
+## Why kguardian?
+
+<AccordionGroup>
+  <Accordion icon="clock" title="Save Hours of Manual Work">
+    Writing Network Policies and Seccomp profiles by hand is tedious and error-prone. kguardian observes your running applications and generates policies automatically in seconds.
+  </Accordion>
+
+  <Accordion icon="lock" title="Implement Zero-Trust Security">
+    Start with a default-deny posture and allow only the exact network paths and syscalls your applications actually use. No guesswork, no over-permissioning.
+  </Accordion>
+
+  <Accordion icon="eye" title="Gain Runtime Visibility">
+    See exactly how your pods communicate and what system calls they make. The built-in UI provides real-time insights into your cluster's behavior.
+  </Accordion>
+
+  <Accordion icon="rocket" title="Integrate with GitOps">
+    Export policies as YAML files for review and version control. Perfect for Infrastructure as Code workflows and compliance audits.
+  </Accordion>
+</AccordionGroup>
+
+## How it Works
+
+kguardian consists of four components working together:
+
+<Steps>
+  <Step title="Controller Monitors">
+    The **Controller** (Rust + eBPF) runs as a DaemonSet on your nodes, using kernel-level eBPF programs to capture network traffic and syscall activity with minimal overhead.
+  </Step>
+
+  <Step title="Broker Stores">
+    The **Broker** (Rust + Actix-web) receives telemetry from controllers and stores it in PostgreSQL, providing a historical view of your workload behavior.
+  </Step>
+
+  <Step title="CLI Generates">
+    The **CLI** (`kubectl kguardian`) queries the broker, analyzes traffic patterns, and generates ready-to-apply Network Policies and Seccomp profiles.
+  </Step>
+
+  <Step title="UI Visualizes">
+    The **UI** (React + TypeScript) provides an interactive graph showing pod communication, making it easy to understand complex network topologies.
+  </Step>
+</Steps>
+
+## Quick Example
+
+Generate a Network Policy for a pod in seconds:
+
+```bash
+# Install the controller (one-time setup)
+helm install kguardian oci://ghcr.io/kguardian-dev/charts/kguardian \
+  --namespace kguardian --create-namespace
+
+# Let your app run normally for a few minutes...
+
+# Generate policy from observed traffic
+kubectl kguardian gen networkpolicy my-app -n production \
+  --output-dir ./policies
+
+# Review and apply
+kubectl apply -f ./policies/production-my-app-networkpolicy.yaml
+```
+
+<Check>
+**That's it!** You now have a least-privilege network policy based on real runtime behavior.
+</Check>
+
+## Supported Resources
+
+<CardGroup cols={2}>
+  <Card title="✅ Kubernetes NetworkPolicy" icon="check">
+    Standard K8s resource for ingress/egress rules
+  </Card>
+  <Card title="✅ Cilium NetworkPolicy" icon="check">
+    Enhanced policies with L7 visibility (Cilium CNI)
+  </Card>
+  <Card title="✅ Seccomp Profiles" icon="check">
+    Linux seccomp-bpf syscall filters
+  </Card>
+  <Card title="🔜 AppArmor Profiles" icon="hourglass">
+    Coming soon in future releases
+  </Card>
+  <Card title="🔜 SELinux Policies" icon="hourglass">
+    Planned for future versions
+  </Card>
+  <Card title="🔜 Pod Security Standards" icon="hourglass">
+    Auto-generate PSS labels and policies
+  </Card>
+</CardGroup>
+
+## Get Started
+
+<CardGroup cols={3}>
+  <Card
+    title="Quickstart"
+    icon="rocket"
+    href="/quickstart"
+  >
+    Get kguardian running in 5 minutes
+  </Card>
+  <Card
+    title="Architecture"
+    icon="sitemap"
+    href="/architecture"
+  >
+    Understand how components work together
+  </Card>
+  <Card
+    title="User Guides"
+    icon="book-open"
+    href="/guides/generating-network-policies"
+  >
+    Learn to generate security policies
+  </Card>
+</CardGroup>
+
+## Comparison with Other Tools
+
+| Feature                       | kguardian | Inspektor Gadget | Security Profiles Operator |
+| :---------------------------- | :-------: | :--------------: | :------------------------: |
+| **Network Policy (K8s)**      | ✅        | ✅               | ❌                         |
+| **Network Policy (Cilium)**   | ✅        | ❌               | ❌                         |
+| **Seccomp Profile Generation**| ✅        | 📝               | ✅                         |
+| **AppArmor Profile Mgmt**     | 🔜        | ❌               | ✅                         |
+| **Real-time UI**              | ✅        | ❌               | ❌                         |
+| **GitOps-friendly**           | ✅        | ✅               | Partial                    |
+| **eBPF-based**                | ✅        | ✅               | ✅                         |
+
+<Info>
+**kguardian's unique strength:** Generate both Network Policies (K8s + Cilium) and Seccomp profiles from a single eBPF data source with visual exploration via the UI.
+</Info>
+
+## Community & Support
+
+<CardGroup cols={2}>
+  <Card
+    title="GitHub Discussions"
+    icon="comments"
+    href="https://github.com/kguardian-dev/kguardian/discussions"
+  >
+    Ask questions, share ideas, and get help from the community
+  </Card>
+  <Card
+    title="Issues & Bugs"
+    icon="bug"
+    href="https://github.com/kguardian-dev/kguardian/issues"
+  >
+    Report bugs or request features on GitHub
+  </Card>
+  <Card
+    title="Contributing"
+    icon="code-pull-request"
+    href="/development/overview"
+  >
+    Learn how to contribute to kguardian
+  </Card>
+  <Card
+    title="Releases"
+    icon="tag"
+    href="https://github.com/kguardian-dev/kguardian/releases"
+  >
+    View release notes and download binaries
+  </Card>
+</CardGroup>
+
+## License
+
+kguardian is licensed under the **Business Source License 1.1** (BSL 1.1):
+
+- ✅ **Free** for development, testing, evaluation, and non-production use
+- ✅ **Free** for non-commercial use
+- ⚠️ Commercial production use requires a commercial license
+- 🔄 Converts to **Apache License 2.0** on January 1, 2029
+
+See the [LICENSE](https://github.com/kguardian-dev/kguardian/blob/main/LICENSE) for full details.
+
+---
 
 <Card
-  title="Start here"
-  icon="rocket"
+  title="Ready to secure your cluster?"
+  icon="shield-halved"
   href="/quickstart"
   horizontal
 >
-  Follow our three step quickstart guide.
-</Card>
-
-## Make it yours
-
-Design a docs site that looks great and empowers your users.
-
-<Columns cols={2}>
-  <Card
-    title="Edit locally"
-    icon="pen-to-square"
-    href="/development"
-  >
-    Edit your docs locally and preview them in real time.
-  </Card>
-  <Card
-    title="Customize your site"
-    icon="palette"
-    href="/essentials/settings"
-  >
-    Customize the design and colors of your site to match your brand.
-  </Card>
-    <Card
-    title="Set up navigation"
-    icon="map"
-    href="/essentials/navigation"
-  >
-    Organize your docs to help users find what they need and succeed with your product.
-  </Card>
-  <Card
-    title="API documentation"
-    icon="terminal"
-    href="/api-reference/introduction"
-  >
-    Auto-generate API documentation from OpenAPI specifications.
-  </Card>
-</Columns>
-
-## Create beautiful pages
-
-Everything you need to create world-class documentation.
-
-<Columns cols={2}>
-  <Card
-    title="Write with MDX"
-    icon="pen-fancy"
-    href="/essentials/markdown"
-  >
-    Use MDX to style your docs pages.
-  </Card>
-  <Card
-    title="Code samples"
-    icon="code"
-    href="/essentials/code"
-  >
-    Add sample code to demonstrate how to use your product.
-  </Card>
-  <Card
-    title="Images"
-    icon="image"
-    href="/essentials/images"
-  >
-    Display images and other media.
-  </Card>
-  <Card
-    title="Reusable snippets"
-    icon="recycle"
-    href="/essentials/reusable-snippets"
-  >
-    Write once and reuse across your docs.
-  </Card>
-</Columns>
-
-## Need inspiration?
-
-<Card
-  title="See complete examples"
-  icon="stars"
-  href="https://mintlify.com/customers"
->
-  Browse our showcase of exceptional documentation sites.
+  Get started with kguardian in just 5 minutes →
 </Card>

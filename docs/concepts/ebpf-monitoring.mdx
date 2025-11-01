@@ -1,0 +1,60 @@
+---
+title: "eBPF Monitoring"
+description: "How kguardian uses eBPF for kernel-level observability"
+icon: "radar"
+---
+
+## What is eBPF?
+
+eBPF (extended Berkeley Packet Filter) is a revolutionary Linux kernel technology that allows running custom programs inside the kernel without changing kernel source code or loading kernel modules.
+
+## How kguardian Uses eBPF
+
+kguardian attaches eBPF programs to kernel hooks to observe pod behavior:
+
+### Network Traffic Monitoring
+
+**Hook points:**
+- `tcp_connect` - Outbound TCP connections
+- `tcp_sendmsg` / `tcp_recvmsg` - Data transmission
+- `udp_sendmsg` / `udp_recvmsg` - UDP traffic
+
+**Captured data:**
+- Source and destination IP addresses
+- Source and destination ports
+- Protocol (TCP/UDP)
+- Network namespace (to map to containers)
+
+### Syscall Monitoring
+
+**Hook points:**
+- `sys_enter_*` - Entry to any syscall
+- `sys_exit_*` - Exit from syscall
+
+**Captured data:**
+- Syscall name (e.g., `open`, `read`, `socket`)
+- Process ID and container namespace
+- Architecture (x86_64, arm64, etc.)
+
+## Why eBPF?
+
+<CardGroup cols={2}>
+  <Card title="Performance" icon="gauge-high">
+    ~1-2% CPU overhead vs 10-20% for proxy-based solutions
+  </Card>
+  <Card title="Safety" icon="shield-check">
+    Verifier ensures programs can't crash the kernel
+  </Card>
+  <Card title="No Changes Required" icon="ban">
+    No code changes, sidecars, or pod restarts needed
+  </Card>
+  <Card title="Kernel-Level Visibility" icon="eye">
+    See everything, including encrypted connections
+  </Card>
+</CardGroup>
+
+---
+
+**Learn more:**
+- [Architecture Overview](/architecture)
+- [Controller Implementation](/development/controller)

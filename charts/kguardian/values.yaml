@@ -19,7 +19,7 @@ namespace:
 
 controller:
   image:
-    repository: ghcr.io/kguardian-dev/kguardian/guardian-controller
+    repository: ghcr.io/kguardian-dev/kguardian/controller
     pullPolicy: Always
     # -- Controller version tag. Use component version (e.g., "v1.0.0") or "latest"
     tag: "latest"
@@ -116,7 +116,7 @@ broker:
   # -- Number of broker replicas to deploy
   replicaCount: 1
   image:
-    repository: ghcr.io/kguardian-dev/kguardian/guardian-broker
+    repository: ghcr.io/kguardian-dev/kguardian/broker
     pullPolicy: Always
     # -- Broker version tag. Use component version (e.g., "v1.0.0") or "latest"
     tag: "latest"
@@ -290,7 +290,7 @@ ui:
   # -- Number of UI replicas to deploy
   replicaCount: 1
   image:
-    repository: ghcr.io/kguardian-dev/kguardian/guardian-ui
+    repository: ghcr.io/kguardian-dev/kguardian/frontend
     pullPolicy: Always
     # -- UI version tag. Use component version (e.g., "v1.0.0") or "latest"
     tag: "latest"
