@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.2.4](https://github.com/kguardian-dev/kguardian/compare/frontend/v1.2.3...frontend/v1.2.4) (2025-11-01)
+
+
+### Bug Fixes
+
+* chart and dockerfile ([4f3892b](https://github.com/kguardian-dev/kguardian/commit/4f3892b0b4f096606fa38f7c93443b05c301254f))
+* chart and dockerfile ([7914448](https://github.com/kguardian-dev/kguardian/commit/7914448f4cbe14616e33337a05d7d0f9e36a6d53))
+
 ## [1.2.3](https://github.com/kguardian-dev/kguardian/compare/frontend/v1.2.2...frontend/v1.2.3) (2025-11-01)
 
 
