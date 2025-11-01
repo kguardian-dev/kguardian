@@ -39,12 +39,8 @@ The kguardian controller runs as a DaemonSet and uses eBPF to observe your workl
 <Tabs>
   <Tab title="Helm (Recommended)">
     ```bash
-    # Add the kguardian Helm repository
-    helm repo add kguardian https://kguardian-dev.github.io/charts
-    helm repo update
-
-    # Install kguardian in the 'kguardian' namespace
-    helm install kguardian kguardian/kguardian \
+    # Install directly from OCI registry
+    helm install kguardian oci://ghcr.io/kguardian-dev/charts/kguardian \
       --namespace kguardian \
       --create-namespace \
       --wait
@@ -55,11 +51,11 @@ The kguardian controller runs as a DaemonSet and uses eBPF to observe your workl
     </Tip>
   </Tab>
 
-  <Tab title="OCI Registry">
+  <Tab title="Specific Version">
     ```bash
-    # Install directly from GitHub Container Registry
+    # Install a specific version from OCI registry
     helm install kguardian oci://ghcr.io/kguardian-dev/charts/kguardian \
-      --version 1.0.0 \
+      --version 1.1.1 \
       --namespace kguardian \
       --create-namespace \
       --wait
@@ -85,7 +81,7 @@ The kguardian controller runs as a DaemonSet and uses eBPF to observe your workl
     EOF
 
     # Install with custom values
-    helm install kguardian kguardian/kguardian \
+    helm install kguardian oci://ghcr.io/kguardian-dev/charts/kguardian \
       --namespace kguardian \
       --create-namespace \
       --values values.yaml \

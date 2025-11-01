@@ -98,7 +98,8 @@ Generate a Network Policy for a pod in seconds:
 ```bash
 # Install the controller (one-time setup)
 helm install kguardian oci://ghcr.io/kguardian-dev/charts/kguardian \
-  --namespace kguardian --create-namespace
+  --namespace kguardian \
+  --create-namespace
 
 # Let your app run normally for a few minutes...
 

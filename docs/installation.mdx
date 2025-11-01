@@ -54,25 +54,18 @@ Before installing kguardian, verify your environment meets these requirements:
 
 <Tabs>
   <Tab title="Helm (Recommended)">
-    ### Install via Helm Repository
+    ### Install from OCI Registry
 
-    The simplest method for production deployments.
+    The simplest and recommended method for production deployments.
 
     ```bash
-    # 1. Add the kguardian Helm repository
-    helm repo add kguardian https://kguardian-dev.github.io/charts
-    helm repo update
-
-    # 2. Review default values (optional)
-    helm show values kguardian/kguardian > values.yaml
-
-    # 3. Install kguardian
-    helm install kguardian kguardian/kguardian \
+    # 1. Install kguardian from OCI registry
+    helm install kguardian oci://ghcr.io/kguardian-dev/charts/kguardian \
       --namespace kguardian \
       --create-namespace \
       --wait
 
-    # 4. Verify installation
+    # 2. Verify installation
     kubectl get pods -n kguardian
     ```
 
@@ -80,15 +73,32 @@ Before installing kguardian, verify your environment meets these requirements:
     All three pods (controller, broker, UI) should be in `Running` state within 2-3 minutes.
     </Check>
 
-    ### Install from OCI Registry
+    ### Install Specific Version
 
-    Alternatively, install directly from GitHub Container Registry:
+    You can specify a particular version:
 
     ```bash
     helm install kguardian oci://ghcr.io/kguardian-dev/charts/kguardian \
-      --version 1.0.0 \
+      --version 1.1.1 \
       --namespace kguardian \
       --create-namespace \
+      --wait
+    ```
+
+    ### Review Default Values
+
+    To customize your installation, you can view and save the default values:
+
+    ```bash
+    # Pull and extract the chart to view values
+    helm pull oci://ghcr.io/kguardian-dev/charts/kguardian --untar
+    cat kguardian/values.yaml > my-values.yaml
+
+    # Install with custom values
+    helm install kguardian oci://ghcr.io/kguardian-dev/charts/kguardian \
+      --namespace kguardian \
+      --create-namespace \
+      --values my-values.yaml \
       --wait
     ```
   </Tab>
@@ -242,7 +252,7 @@ postgresql:
 Install with custom values:
 
 ```bash
-helm install kguardian kguardian/kguardian \
+helm install kguardian oci://ghcr.io/kguardian-dev/charts/kguardian \
   --namespace kguardian \
   --create-namespace \
   --values values.yaml \
@@ -429,19 +439,23 @@ If all checks pass, kguardian is ready to use!
 To upgrade kguardian to a newer version:
 
 ```bash
-# 1. Update Helm repository
-helm repo update
+# 1. Check available versions (optional)
+# You can view releases at https://github.com/kguardian-dev/kguardian/releases
 
-# 2. Check available versions
-helm search repo kguardian/kguardian --versions
-
-# 3. Upgrade (preserves your values.yaml)
-helm upgrade kguardian kguardian/kguardian \
+# 2. Upgrade to latest or specific version (preserves your values.yaml)
+helm upgrade kguardian oci://ghcr.io/kguardian-dev/charts/kguardian \
   --namespace kguardian \
   --values values.yaml \
   --wait
 
-# 4. Verify new version
+# Or upgrade to a specific version
+helm upgrade kguardian oci://ghcr.io/kguardian-dev/charts/kguardian \
+  --version 1.2.0 \
+  --namespace kguardian \
+  --values values.yaml \
+  --wait
+
+# 3. Verify new version
 kubectl get pods -n kguardian -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.spec.containers[0].image}{"\n"}{end}'
 ```
 

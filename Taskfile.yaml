@@ -28,7 +28,7 @@ tasks:
 
   install:
     deps: [all]
-    desc: "Install in KinD cluster"
+    desc: "Install in KinD cluster (local dev - uses local images)"
     cmds:
       - helm repo add kguardian https://kguardian-dev.github.io/kguardian || true
       - helm install kguardian kguardian/kguardian --namespace kguardian
@@ -36,6 +36,12 @@ tasks:
         --set broker.image.tag={{.IMAGE_VERSION}}
         --set controller.image.pullPolicy=IfNotPresent
         --set broker.image.pullPolicy=IfNotPresent
+
+  install:oci:
+    desc: "Install from OCI registry (production-style install)"
+    cmds:
+      - helm install kguardian oci://ghcr.io/kguardian-dev/charts/kguardian
+        --namespace kguardian --create-namespace
 
   preflight:
     desc: "Run preflight checks for all components"
