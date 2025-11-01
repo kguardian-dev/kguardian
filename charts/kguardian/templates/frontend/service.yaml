@@ -2,16 +2,16 @@
 apiVersion: v1
 kind: Service
 metadata:
-  name: {{ .Values.ui.service.name }}
+  name: {{ .Values.frontend.service.name }}
   namespace: {{ include "kguardian.namespace" . }}
   labels:
     {{- include "kguardian.labels" . | nindent 4 }}
 spec:
-  type: {{ .Values.ui.service.type }}
+  type: {{ .Values.frontend.service.type }}
   ports:
-    - port: {{ .Values.ui.service.port }}
+    - port: {{ .Values.frontend.service.port }}
       targetPort: http
       protocol: TCP
       name: http
   selector:
-    app.kubernetes.io/name: {{ .Values.ui.service.name }}
+    app.kubernetes.io/name: {{ .Values.frontend.service.name }}

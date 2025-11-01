@@ -2,47 +2,47 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: {{ include "kguardian.name" . }}-ui
+  name: {{ include "kguardian.name" . }}-frontend
   labels:
     {{- include "kguardian.labels" . | nindent 4 }}
 spec:
-  {{- if not .Values.ui.autoscaling.enabled }}
-  replicas: {{ .Values.ui.replicaCount }}
+  {{- if not .Values.frontend.autoscaling.enabled }}
+  replicas: {{ .Values.frontend.replicaCount }}
   {{- end }}
   selector:
     matchLabels:
-      app.kubernetes.io/name: {{ .Values.ui.service.name }}
+      app.kubernetes.io/name: {{ .Values.frontend.service.name }}
   template:
     metadata:
-      {{- with .Values.ui.podAnnotations }}
+      {{- with .Values.frontend.podAnnotations }}
       annotations:
         {{- toYaml . | nindent 8 }}
       {{- end }}
       labels:
         {{- include "kguardian.labels" . | nindent 8 }}
-        app.kubernetes.io/name: {{ .Values.ui.service.name }}
+        app.kubernetes.io/name: {{ .Values.frontend.service.name }}
     spec:
       automountServiceAccountToken: false
-      {{- with .Values.ui.imagePullSecrets }}
+      {{- with .Values.frontend.imagePullSecrets }}
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}
       {{- end }}
-      serviceAccountName: {{ default "ui" .Values.ui.serviceAccount.name }}
+      serviceAccountName: {{ default "frontend" .Values.frontend.serviceAccount.name }}
       securityContext:
-        {{- toYaml .Values.ui.podSecurityContext | nindent 8 }}
+        {{- toYaml .Values.frontend.podSecurityContext | nindent 8 }}
       containers:
-        - name: ui
+        - name: frontend
           securityContext:
-            {{- toYaml .Values.ui.securityContext | nindent 12 }}
-          {{- if .Values.ui.image.sha }}
-          image: "{{ .Values.ui.image.repository }}@{{ .Values.ui.image.sha }}"
+            {{- toYaml .Values.frontend.securityContext | nindent 12 }}
+          {{- if .Values.frontend.image.sha }}
+          image: "{{ .Values.frontend.image.repository }}@{{ .Values.frontend.image.sha }}"
           {{- else }}
-          image: "{{ .Values.ui.image.repository }}:{{ .Values.ui.image.tag }}"
+          image: "{{ .Values.frontend.image.repository }}:{{ .Values.frontend.image.tag }}"
           {{- end }}
-          imagePullPolicy: {{ .Values.ui.image.pullPolicy }}
+          imagePullPolicy: {{ .Values.frontend.image.pullPolicy }}
           ports:
             - name: http
-              containerPort: {{ .Values.ui.container.port }}
+              containerPort: {{ .Values.frontend.container.port }}
               protocol: TCP
           env:
             - name: VITE_API_URL
@@ -59,19 +59,19 @@ spec:
               port: http
             initialDelaySeconds: 5
             periodSeconds: 5
-         {{- with .Values.ui.resources }}
+         {{- with .Values.frontend.resources }}
           resources:
             {{- toYaml . | nindent 12 }}
           {{- end }}
-      {{- with .Values.ui.nodeSelector }}
+      {{- with .Values.frontend.nodeSelector }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}
       {{- end }}
-      {{- with .Values.ui.affinity }}
+      {{- with .Values.frontend.affinity }}
       affinity:
         {{- toYaml . | nindent 8 }}
       {{- end }}
-      {{- with .Values.ui.tolerations }}
+      {{- with .Values.frontend.tolerations }}
       tolerations:
         {{- toYaml . | nindent 8 }}
       {{- end }}

@@ -11,8 +11,8 @@ kguardian is a powerful Kubernetes security toolkit that analyzes runtime behavi
   - [🌟 Features](#-features)
   - [🛠️ Prerequisites](#️-prerequisites)
   - [📦 Installation](#-installation)
-    - [Quick Install Script](#quick-install-script)
-    - [Krew (Recommended)](#krew-recommended)
+    - [Quick Install Script (Recommended)](#quick-install-script-recommended)
+    - [Krew](#krew)
     - [Manual Download](#manual-download)
   - [🚀 Quick Start](#-quick-start)
   - [🔨 Usage](#-usage)
@@ -69,9 +69,24 @@ This table provides a high-level comparison of kguardian with other popular open
 
 ## 📦 Installation
 
+### Install the Controller Components
+
+Before using the CLI, you need to install the kguardian controller, broker, and UI in your cluster:
+
+```bash
+# Install from OCI registry (recommended)
+helm install kguardian oci://ghcr.io/kguardian-dev/charts/kguardian \
+  --namespace kguardian \
+  --create-namespace
+```
+
+For detailed installation options and configuration, see the [Installation Guide](https://docs.kguardian.dev/installation).
+
+### Install the CLI Plugin
+
 Choose one of the following methods:
 
-### Quick Install Script
+#### Quick Install Script (Recommended)
 
 This script downloads the latest release binary and attempts to install it.
 
@@ -79,7 +94,7 @@ This script downloads the latest release binary and attempts to install it.
 sh -c "$(curl -fsSL https://raw.githubusercontent.com/kguardian-dev/kguardian/main/scripts/quick-install.sh)"
 ```
 
-### Krew (Recommended)
+#### Krew
 
 Use [Krew](https://krew.sigs.k8s.io/), the plugin manager for `kubectl`:
 
@@ -88,7 +103,7 @@ Use [Krew](https://krew.sigs.k8s.io/), the plugin manager for `kubectl`:
 kubectl krew install kguardian
 ```
 
-### Manual Download
+#### Manual Download
 
 Download the appropriate binary for your system from the [Releases page](https://github.com/kguardian-dev/kguardian/releases) and place it in your `PATH` named `kubectl-kguardian`.
 
