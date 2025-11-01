@@ -177,11 +177,11 @@ The following table lists the configurable parameters of the kguardian chart and
 | frontend.nameOverride | string | `""` | Override the name of the frontend resources |
 | frontend.nodeSelector | object | `{"kubernetes.io/os":"linux"}` | Node labels for the kguardian frontend pod assignment |
 | frontend.podAnnotations | object | `{}` | Annotations to add to frontend pods |
-| frontend.podSecurityContext | object | `{"fsGroup":999,"fsGroupChangePolicy":"OnRootMismatch","runAsGroup":999,"runAsUser":999,"seccompProfile":{"type":"RuntimeDefault"},"supplementalGroups":[999]}` | Frontend pod security context. Runs as non-root user (999) |
+| frontend.podSecurityContext | object | `{"fsGroup":1337,"fsGroupChangePolicy":"OnRootMismatch","runAsGroup":1337,"runAsUser":1337,"seccompProfile":{"type":"RuntimeDefault"},"supplementalGroups":[1337]}` | Frontend pod security context. Runs as non-root user (1337) |
 | frontend.priorityClassName | string | `""` | Priority class to be used for the kguardian frontend pods |
 | frontend.replicaCount | int | `1` | Number of frontend replicas to deploy |
 | frontend.resources | object | `{}` | Frontend pod resource requests and limits |
-| frontend.securityContext | object | `{"allowPrivilegeEscalation":false,"capabilities":{"drop":["ALL"]},"privileged":false,"readOnlyRootFilesystem":true,"runAsNonRoot":true,"runAsUser":999}` | Frontend container security context. Hardened with read-only root filesystem |
+| frontend.securityContext | object | `{"allowPrivilegeEscalation":false,"capabilities":{"drop":["ALL"]},"privileged":false,"readOnlyRootFilesystem":true,"runAsNonRoot":true,"runAsUser":1337}` | Frontend container security context. Hardened with read-only root filesystem |
 | frontend.service.name | string | `"kguardian-frontend"` | Frontend service name |
 | frontend.service.port | int | `5173` | Frontend service port |
 | frontend.service.type | string | `"ClusterIP"` | Frontend service type |

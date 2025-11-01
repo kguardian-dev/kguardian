@@ -381,13 +381,13 @@ frontend:
   # -- Annotations to add to frontend pods
   podAnnotations: {}
 
-  # -- Frontend pod security context. Runs as non-root user (999)
+  # -- Frontend pod security context. Runs as non-root user (1337)
   podSecurityContext:
-    runAsUser: 999
-    runAsGroup: 999
-    fsGroup: 999
+    runAsUser: 1337
+    runAsGroup: 1337
+    fsGroup: 1337
     fsGroupChangePolicy: OnRootMismatch
-    supplementalGroups: [999]
+    supplementalGroups: [1337]
     seccompProfile:
       type: RuntimeDefault
 
@@ -399,7 +399,7 @@ frontend:
       - ALL
     readOnlyRootFilesystem: true
     runAsNonRoot: true
-    runAsUser: 999
+    runAsUser: 1337
     allowPrivilegeEscalation: false
 
   service:
