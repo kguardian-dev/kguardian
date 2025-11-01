@@ -52,7 +52,6 @@
       "include-component-in-tag": true
     }
   },
-  "release-search-depth": 20,
   "changelog-sections": [
     {
       "type": "feat",
