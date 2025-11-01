@@ -13,6 +13,20 @@ jobs:
       - name: Checkout
         uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5
 
+      - name: Cache Rust dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            broker/target/
+          key: ${{ runner.os }}-cargo-broker-${{ hashFiles('broker/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-broker-
+            ${{ runner.os }}-cargo-
+
       - name: Set up QEMU
         uses: docker/setup-qemu-action@29109295f81e9208d7d86ff1c6c12d2833863392 # v3
         with:
@@ -49,3 +63,5 @@ jobs:
           tags: |
             ghcr.io/kguardian-dev/kguardian/broker:${{ steps.extract_tag.outputs.TAG_NAME }}
             ghcr.io/kguardian-dev/kguardian/broker:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
