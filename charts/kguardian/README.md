@@ -84,7 +84,7 @@ The following table lists the configurable parameters of the kguardian chart and
 | broker.container.port | int | `9090` |  |
 | broker.fullnameOverride | string | `""` |  |
 | broker.image.pullPolicy | string | `"Always"` |  |
-| broker.image.repository | string | `"ghcr.io/kguardian-dev/kguardian/guardian-broker"` |  |
+| broker.image.repository | string | `"ghcr.io/kguardian-dev/kguardian/broker"` |  |
 | broker.image.sha | string | `""` |  |
 | broker.image.tag | string | `"latest"` | Broker version tag. Use component version (e.g., "v1.0.0") or "latest" |
 | broker.imagePullSecrets | list | `[]` |  |
@@ -123,7 +123,7 @@ The following table lists the configurable parameters of the kguardian chart and
 | controller.fullnameOverride | string | `""` |  |
 | controller.ignoreDaemonSet | bool | `true` | Ignore traffic from daemonset pods |
 | controller.image.pullPolicy | string | `"Always"` |  |
-| controller.image.repository | string | `"ghcr.io/kguardian-dev/kguardian/guardian-controller"` |  |
+| controller.image.repository | string | `"ghcr.io/kguardian-dev/kguardian/controller"` |  |
 | controller.image.sha | string | `""` | Overrides the image tag. |
 | controller.image.tag | string | `"latest"` | Controller version tag. Use component version (e.g., "v1.0.0") or "latest" |
 | controller.imagePullSecrets | list | `[]` |  |
@@ -202,7 +202,7 @@ The following table lists the configurable parameters of the kguardian chart and
 | ui.container.port | int | `80` |  |
 | ui.fullnameOverride | string | `""` |  |
 | ui.image.pullPolicy | string | `"Always"` |  |
-| ui.image.repository | string | `"ghcr.io/kguardian-dev/kguardian/guardian-ui"` |  |
+| ui.image.repository | string | `"ghcr.io/kguardian-dev/kguardian/frontend"` |  |
 | ui.image.sha | string | `""` |  |
 | ui.image.tag | string | `"latest"` | UI version tag. Use component version (e.g., "v1.0.0") or "latest" |
 | ui.imagePullSecrets | list | `[]` |  |
