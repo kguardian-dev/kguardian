@@ -1,0 +1,19 @@
+{{/*
+TODO: Ignore this file for now. It's not used yet.
+
+apiVersion: v1
+kind: Pod
+metadata:
+  name: "{{ include "kguardian.fullname" . }}-test-connection"
+  labels:
+    {{- include "kguardian.labels" . | nindent 4 }}
+  annotations:
+    "helm.sh/hook": test
+spec:
+  containers:
+    - name: wget
+      image: busybox
+      command: ['wget']
+      args: ['{{ include "kguardian.fullname" . }}:{{ .Values.service.port }}']
+  restartPolicy: Never
+*/}}

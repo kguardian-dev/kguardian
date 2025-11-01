@@ -1,0 +1,65 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Values.database.name }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ .Values.database.service.name }}
+  template:
+    metadata:
+      {{- with .Values.database.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      labels:
+        {{- include "kguardian.labels" . | nindent 8 }}
+        app.kubernetes.io/name: {{ .Values.database.service.name }}
+    spec:
+      serviceAccountName: {{ default "database" .Values.database.serviceAccount.name }}
+      automountServiceAccountToken: true
+      securityContext:
+        {{- toYaml .Values.database.podSecurityContext | nindent 8 }}
+      containers:
+        - name: postgresdb
+          {{- if .Values.database.image.sha }}
+          image: "{{ .Values.database.image.repository }}@{{ .Values.database.image.sha }}"
+          {{- else }}
+          image: "{{ .Values.database.image.repository }}:{{ .Values.database.image.tag }}"
+          {{- end }}
+          imagePullPolicy: {{ .Values.database.image.pullPolicy }}
+          ports:
+            - containerPort: 5432
+          securityContext:
+            {{- toYaml .Values.database.securityContext | nindent 12 }}
+          env:
+            - name: POSTGRES_USER
+              value: rust
+            - name: POSTGRES_HOST_AUTH_METHOD
+              value: trust
+            - name: POSTGRES_DB
+              value: kube
+          volumeMounts:
+            - mountPath: /var/lib/postgres/data
+              name: db-data
+      volumes:
+        - name: db-data
+          {{- if .Values.database.persistence.enabled }}
+          persistentVolumeClaim:
+            claimName: {{ .Values.database.persistence.existingClaim }}
+          {{- else }}
+          emptyDir: {}
+          {{- end -}}
+      {{- with .Values.database.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.database.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.database.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

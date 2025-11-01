@@ -4,8 +4,8 @@ import (
 	"fmt"
 
 	log "github.com/rs/zerolog/log"
-	api "github.com/xentra-ai/advisor/pkg/api"
-	"github.com/xentra-ai/advisor/pkg/common"
+	api "github.com/kguardian-dev/kguardian/advisor/pkg/api"
+	"github.com/kguardian-dev/kguardian/advisor/pkg/common"
 	"sigs.k8s.io/yaml"
 )
 

@@ -5,7 +5,7 @@ import (
 	"fmt"
 
 	log "github.com/rs/zerolog/log"
-	api "github.com/xentra-ai/advisor/pkg/api"
+	api "github.com/kguardian-dev/kguardian/advisor/pkg/api"
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -16,6 +16,8 @@ import (
 // API function variables are now defined in the api package
 
 // Function variables to make mocking easier in tests
+//
+//nolint:unused // Reserved for future testing/mocking use
 var (
 	processIngressRulesFunc  = processIngressRules
 	processEgressRulesFunc   = processEgressRules
@@ -45,6 +47,8 @@ type RuleSets struct {
 }
 
 // transformToNetworkPolicy transforms pod traffic data into Kubernetes NetworkPolicy rules.
+//
+//nolint:unused // Reserved for future refactoring
 func transformToNetworkPolicy(pod *corev1.Pod, podTraffic []api.PodTraffic, podDetail *api.PodDetail, config *Config) ([]networkingv1.NetworkPolicyIngressRule, []networkingv1.NetworkPolicyEgressRule, error) {
 	ruleSets := RuleSets{}
 
@@ -88,6 +92,7 @@ func transformToNetworkPolicy(pod *corev1.Pod, podTraffic []api.PodTraffic, podD
 	return deduplicatedIngress, deduplicatedEgress, nil
 }
 
+//nolint:unused // Reserved for future refactoring
 func processIngressRules(traffic api.PodTraffic, config *Config) (*networkingv1.NetworkPolicyIngressRule, error) {
 	peer, err := determinePeerForTrafficFunc(traffic.DstIP, config)
 	if err != nil {
@@ -95,7 +100,7 @@ func processIngressRules(traffic api.PodTraffic, config *Config) (*networkingv1.
 	}
 
 	portInt := 0
-	fmt.Sscanf(traffic.SrcPodPort, "%d", &portInt)
+	_, _ = fmt.Sscanf(traffic.SrcPodPort, "%d", &portInt)
 	port := intstr.FromInt(portInt)
 	protocol := traffic.Protocol
 
@@ -112,6 +117,7 @@ func processIngressRules(traffic api.PodTraffic, config *Config) (*networkingv1.
 	return rule, nil
 }
 
+//nolint:unused // Reserved for future refactoring
 func processEgressRules(traffic api.PodTraffic, config *Config) (*networkingv1.NetworkPolicyEgressRule, error) {
 	peer, err := determinePeerForTrafficFunc(traffic.DstIP, config)
 	if err != nil {
@@ -119,7 +125,7 @@ func processEgressRules(traffic api.PodTraffic, config *Config) (*networkingv1.N
 	}
 
 	portInt := 0
-	fmt.Sscanf(traffic.DstPort, "%d", &portInt)
+	_, _ = fmt.Sscanf(traffic.DstPort, "%d", &portInt)
 	port := intstr.FromInt(portInt)
 	protocol := traffic.Protocol
 
@@ -136,6 +142,7 @@ func processEgressRules(traffic api.PodTraffic, config *Config) (*networkingv1.N
 	return rule, nil
 }
 
+//nolint:unused // Reserved for future refactoring
 func determinePeerForTraffic(ip string, config *Config) (networkingv1.NetworkPolicyPeer, error) {
 	// Check if the IP corresponds to a known service or pod
 	origin, err := api.GetSvcSpec(ip) // Try service first
@@ -179,6 +186,8 @@ func determinePeerForTraffic(ip string, config *Config) (networkingv1.NetworkPol
 }
 
 // Deduplicate ingress rules based on From and Ports
+//
+//nolint:unused // Reserved for future refactoring
 func deduplicateIngressRules(rules []networkingv1.NetworkPolicyIngressRule) []networkingv1.NetworkPolicyIngressRule {
 	seen := make(map[string]bool)
 	deduplicated := []networkingv1.NetworkPolicyIngressRule{}
@@ -197,6 +206,8 @@ func deduplicateIngressRules(rules []networkingv1.NetworkPolicyIngressRule) []ne
 }
 
 // Deduplicate egress rules based on To and Ports
+//
+//nolint:unused // Reserved for future refactoring
 func deduplicateEgressRules(rules []networkingv1.NetworkPolicyEgressRule) []networkingv1.NetworkPolicyEgressRule {
 	seen := make(map[string]bool)
 	deduplicated := []networkingv1.NetworkPolicyEgressRule{}

@@ -16,7 +16,7 @@ on:
   workflow_dispatch:
   push:
     tags:
-      - "v*"
+      - "advisor/v*"
 
 permissions: read-all
 
@@ -39,7 +39,9 @@ jobs:
         run: |
           echo "commit-date=$(git log --date=iso8601-strict -1 --pretty=%ct)" >> "$GITHUB_OUTPUT"
           echo "commit=$GITHUB_SHA" >> "$GITHUB_OUTPUT"
-          echo "version=$(git describe --tags --always --dirty | cut -c2-)" >> "$GITHUB_OUTPUT"
+          TAG=$(git describe --tags --always --dirty)
+          VERSION="${TAG#advisor/v}"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
           echo "tree-state=$(if git diff --quiet; then echo "clean"; else echo "dirty"; fi)" >> "$GITHUB_OUTPUT"
 
   # ========================================================================================================================================
@@ -63,7 +65,7 @@ jobs:
     # TODO: Do not pin this action to a SHA!
     uses: slsa-framework/slsa-github-generator/.github/workflows/builder_go_slsa3.yml@v2.1.0 # v2.1.0
     with:
-      go-version: 1.21
+      go-version: "1.24"
       config-file: .slsa-goreleaser/advisor/${{matrix.os}}-${{matrix.arch}}.yml
       evaluated-envs: "COMMIT_DATE:${{needs.args.outputs.commit-date}}, COMMIT:${{needs.args.outputs.commit}}, VERSION:${{needs.args.outputs.version}}, TREE_STATE:${{needs.args.outputs.tree-state}}"
       upload-assets: true

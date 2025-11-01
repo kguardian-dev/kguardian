@@ -22,7 +22,7 @@ async fn main() -> Result<(), Error> {
     let node_name = env::var("CURRENT_NODE").expect("cannot find node name: CURRENT_NODE ");
 
     let excluded_namespaces: Vec<String> = env::var("EXCLUDED_NAMESPACES")
-        .unwrap_or_else(|_| "kube-system,kube-guardian".to_string())
+        .unwrap_or_else(|_| "kube-system,kguardian".to_string())
         .split(',')
         .map(|s| s.to_string())
         .collect();
