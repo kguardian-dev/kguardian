@@ -294,7 +294,23 @@ kubectl create secret generic kguardian-db-secret \
 After deploying the controller, install the CLI to generate policies.
 
 <Tabs>
-  <Tab title="Krew (Recommended)">
+  <Tab title="Quick Install Script (Recommended)">
+    ```bash
+    # One-line installer
+    sh -c "$(curl -fsSL https://raw.githubusercontent.com/kguardian-dev/kguardian/main/scripts/quick-install.sh)"
+
+    # Verify
+    kubectl kguardian --version
+    ```
+
+    This script:
+    - Detects your OS and architecture
+    - Downloads the latest CLI release
+    - Installs to `/usr/local/bin/kubectl-kguardian`
+    - Validates the installation
+  </Tab>
+
+  <Tab title="Krew">
     ```bash
     # 1. Install Krew (if not already installed)
     (
@@ -316,22 +332,6 @@ After deploying the controller, install the CLI to generate policies.
     # 4. Verify
     kubectl kguardian --version
     ```
-  </Tab>
-
-  <Tab title="Quick Install Script">
-    ```bash
-    # One-line installer
-    sh -c "$(curl -fsSL https://raw.githubusercontent.com/kguardian-dev/kguardian/main/scripts/quick-install.sh)"
-
-    # Verify
-    kubectl kguardian --version
-    ```
-
-    This script:
-    - Detects your OS and architecture
-    - Downloads the latest CLI release
-    - Installs to `/usr/local/bin/kubectl-kguardian`
-    - Validates the installation
   </Tab>
 
   <Tab title="Manual Download">

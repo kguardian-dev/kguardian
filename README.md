@@ -11,8 +11,8 @@ kguardian is a powerful Kubernetes security toolkit that analyzes runtime behavi
   - [🌟 Features](#-features)
   - [🛠️ Prerequisites](#️-prerequisites)
   - [📦 Installation](#-installation)
-    - [Quick Install Script](#quick-install-script)
-    - [Krew (Recommended)](#krew-recommended)
+    - [Quick Install Script (Recommended)](#quick-install-script-recommended)
+    - [Krew](#krew)
     - [Manual Download](#manual-download)
   - [🚀 Quick Start](#-quick-start)
   - [🔨 Usage](#-usage)
@@ -86,7 +86,7 @@ For detailed installation options and configuration, see the [Installation Guide
 
 Choose one of the following methods:
 
-#### Quick Install Script
+#### Quick Install Script (Recommended)
 
 This script downloads the latest release binary and attempts to install it.
 
@@ -94,7 +94,7 @@ This script downloads the latest release binary and attempts to install it.
 sh -c "$(curl -fsSL https://raw.githubusercontent.com/kguardian-dev/kguardian/main/scripts/quick-install.sh)"
 ```
 
-#### Krew (Recommended)
+#### Krew
 
 Use [Krew](https://krew.sigs.k8s.io/), the plugin manager for `kubectl`:
 
