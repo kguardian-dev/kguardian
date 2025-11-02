@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.2.10](https://github.com/kguardian-dev/kguardian/compare/frontend/v1.2.9...frontend/v1.2.10) (2025-11-01)
+
+
+### Bug Fixes
+
+* frontend lock ([a60b51c](https://github.com/kguardian-dev/kguardian/commit/a60b51c6527dbb88f67eca3082f34b89d6b3b32c))
+
 ## [1.2.9](https://github.com/kguardian-dev/kguardian/compare/frontend/v1.2.8...frontend/v1.2.9) (2025-11-01)
 
 
