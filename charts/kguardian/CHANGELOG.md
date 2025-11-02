@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.3.2](https://github.com/kguardian-dev/kguardian/compare/charts/kguardian/v1.3.1...charts/kguardian/v1.3.2) (2025-11-01)
+
+
+### Bug Fixes
+
+* chart and dockerfile ([4f3892b](https://github.com/kguardian-dev/kguardian/commit/4f3892b0b4f096606fa38f7c93443b05c301254f))
+* chart and dockerfile ([7914448](https://github.com/kguardian-dev/kguardian/commit/7914448f4cbe14616e33337a05d7d0f9e36a6d53))
+
 ## [1.3.1](https://github.com/kguardian-dev/kguardian/compare/charts/kguardian/v1.3.0...charts/kguardian/v1.3.1) (2025-11-01)
 
 
