@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.2.6](https://github.com/kguardian-dev/kguardian/compare/frontend/v1.2.5...frontend/v1.2.6) (2025-11-01)
+
+
+### Bug Fixes
+
+* update frontend ([b9bf89a](https://github.com/kguardian-dev/kguardian/commit/b9bf89a630d59da2675fc9cad477a2ff3db98123))
+
 ## [1.2.5](https://github.com/kguardian-dev/kguardian/compare/frontend/v1.2.4...frontend/v1.2.5) (2025-11-01)
 
 
