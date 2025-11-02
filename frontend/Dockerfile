@@ -28,10 +28,7 @@ RUN adduser -D -u 1337 -s /bin/sh appuser && \
 COPY --from=builder --chown=1337:1337 /app/package*.json ./
 COPY --from=builder --chown=1337:1337 /app/dist ./dist
 COPY --from=builder --chown=1337:1337 /app/node_modules ./node_modules
-
-# Copy entrypoint script
-COPY --chown=1337:1337 docker-entrypoint.sh /app/
-RUN chmod +x /app/docker-entrypoint.sh
+COPY --from=builder --chown=1337:1337 /app/vite.config.ts ./
 
 # Expose port 5173
 EXPOSE 5173
@@ -43,11 +40,5 @@ HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
 # Switch to non-root user
 USER 1337
 
-# Use entrypoint to configure runtime settings
-ENTRYPOINT ["/app/docker-entrypoint.sh"]
-
-# Use serve for production static file serving
-# -s: Single-page application mode (rewrites all not-found to index.html)
-# -l: Listen port
-# -n: No clipboard
-CMD ["npx", "serve", "-s", "dist", "-l", "5173", "-n"]
+# Use vite preview for production
+CMD ["npx", "vite", "preview", "--host", "0.0.0.0", "--port", "5173"]
