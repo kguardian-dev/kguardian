@@ -13,6 +13,16 @@ jobs:
       - name: Checkout
         uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5
 
+      - name: Cache Node modules
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.npm
+            frontend/node_modules
+          key: ${{ runner.os }}-node-${{ hashFiles('frontend/package-lock.json') }}
+          restore-keys: |
+            ${{ runner.os }}-node-
+
       - name: Set up QEMU
         uses: docker/setup-qemu-action@29109295f81e9208d7d86ff1c6c12d2833863392 # v3
         with:
@@ -49,3 +59,5 @@ jobs:
           tags: |
             ghcr.io/kguardian-dev/kguardian/frontend:${{ steps.extract_tag.outputs.TAG_NAME }}
             ghcr.io/kguardian-dev/kguardian/frontend:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
