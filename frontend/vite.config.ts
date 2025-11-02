@@ -49,9 +49,12 @@ export default defineConfig({
     assetsInlineLimit: 4096, // 4kb - inline assets smaller than this
   },
 
-  // Preview server configuration (for local testing only, not production)
+  // Preview server configuration (for production)
   preview: {
     port: 5173,
     host: '0.0.0.0',
+    strictPort: true,
+    // Allow all hosts since this will be behind ingress/load balancer
+    allowedHosts: 'all',
   },
 })
