@@ -29,8 +29,9 @@ COPY --from=builder --chown=1337:1337 /app/package*.json ./
 COPY --from=builder --chown=1337:1337 /app/dist ./dist
 COPY --from=builder --chown=1337:1337 /app/node_modules ./node_modules
 
-# Switch to non-root user
-USER 1337
+# Copy entrypoint script
+COPY --chown=1337:1337 docker-entrypoint.sh /app/
+RUN chmod +x /app/docker-entrypoint.sh
 
 # Expose port 5173
 EXPOSE 5173
@@ -38,6 +39,12 @@ EXPOSE 5173
 # Health check
 HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
   CMD wget --quiet --tries=1 --spider http://localhost:5173/ || exit 1
+
+# Switch to non-root user
+USER 1337
+
+# Use entrypoint to configure runtime settings
+ENTRYPOINT ["/app/docker-entrypoint.sh"]
 
 # Use serve for production static file serving
 # -s: Single-page application mode (rewrites all not-found to index.html)
