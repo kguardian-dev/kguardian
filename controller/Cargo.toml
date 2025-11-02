@@ -34,3 +34,4 @@ openssl = { version = "0.10.73", features = ["vendored"] }
 lazy_static = "1.5.0"
 libseccomp = "0.4"
 moka = { version = "0.12.10", features = ["future"]}
+dashmap = "6.1"

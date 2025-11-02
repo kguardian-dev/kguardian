@@ -1,11 +1,10 @@
 use crate::{api_post_call, Error, PodInspect, PodTraffic};
 use chrono::Utc;
+use dashmap::DashMap;
 use moka::future::Cache;
 use serde_json::json;
-use std::collections::BTreeMap;
 use std::net::{IpAddr, Ipv4Addr};
 use std::sync::Arc;
-use tokio::sync::Mutex;
 use tracing::{debug, error};
 use uuid::Uuid;
 
@@ -20,7 +19,7 @@ pub mod network_probe {
     ));
 }
 
-#[derive(Hash, Eq, PartialEq, Clone)]
+#[derive(Hash, Eq, PartialEq, Clone, Debug)]
 struct TrafficKey {
     pod_name: String,
     pod_ip: String,
@@ -44,21 +43,72 @@ pub struct NetworkEventData {
 
 pub async fn handle_network_events(
     mut event_receiver: tokio::sync::mpsc::Receiver<NetworkEventData>,
-    container_map_tcp: Arc<Mutex<BTreeMap<u64, PodInspect>>>,
+    container_map: Arc<DashMap<u64, PodInspect>>,
 ) -> Result<(), Error> {
-    while let Some(event) = event_receiver.recv().await {
-        let container_map = container_map_tcp.lock().await;
-        if let Some(pod_inspect) = container_map.get(&event.inum) {
-            process_network_event(&event, pod_inspect).await?
+    // Batching configuration
+    const BATCH_SIZE: usize = 100;
+    const BATCH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(1);
+
+    let mut batch = Vec::with_capacity(BATCH_SIZE);
+    let mut last_flush = tokio::time::Instant::now();
+
+    loop {
+        // Use timeout to ensure we flush even if batch not full
+        let event = tokio::time::timeout(BATCH_TIMEOUT, event_receiver.recv()).await;
+
+        match event {
+            Ok(Some(event)) => {
+                // DashMap provides lock-free reads - no need for explicit locking!
+                if let Some(pod_inspect) = container_map.get(&event.inum) {
+                    if let Some(traffic) = build_traffic_event(&event, &pod_inspect).await {
+                        batch.push(traffic);
+                    }
+                }
+
+                // Flush if batch is full
+                if batch.len() >= BATCH_SIZE {
+                    flush_network_batch(&mut batch).await;
+                    last_flush = tokio::time::Instant::now();
+                }
+            }
+            Ok(None) => {
+                // Channel closed, flush remaining and exit
+                if !batch.is_empty() {
+                    flush_network_batch(&mut batch).await;
+                }
+                break;
+            }
+            Err(_) => {
+                // Timeout reached, flush if we have any events
+                if !batch.is_empty() && last_flush.elapsed() >= BATCH_TIMEOUT {
+                    flush_network_batch(&mut batch).await;
+                    last_flush = tokio::time::Instant::now();
+                }
+            }
         }
     }
     Ok(())
 }
 
-pub async fn process_network_event(
+async fn flush_network_batch(batch: &mut Vec<PodTraffic>) {
+    if batch.is_empty() {
+        return;
+    }
+
+    debug!("Flushing network event batch of {} events", batch.len());
+
+    // Send batch to API
+    if let Err(e) = api_post_call(json!(batch), "pod/traffic/batch").await {
+        error!("Failed to post network event batch: {}", e);
+    }
+
+    batch.clear();
+}
+
+async fn build_traffic_event(
     data: &NetworkEventData,
     pod_data: &PodInspect,
-) -> Result<(), Error> {
+) -> Option<PodTraffic> {
     let src = u32::from_be(data.saddr);
     let dst = u32::from_be(data.daddr);
     let sport = data.sport;
@@ -85,7 +135,7 @@ pub async fn process_network_event(
     }
 
     debug!(
-        "Inum : {} src {}:{},dst {}:{}, trafic type {:?} kind {:?}",
+        "Inum : {} src {}:{},dst {}:{}, traffic type {:?} kind {:?}",
         data.inum,
         IpAddr::V4(Ipv4Addr::from(src)),
         sport,
@@ -104,8 +154,9 @@ pub async fn process_network_event(
     let traffic_type_str = traffic_type.to_string();
     let protocol_str = protocol.to_string();
 
+    // Skip if source and destination are the same
     if pod_ip.eq(&traffic_in_out_ip_str) {
-        return Ok(());
+        return None;
     }
 
     let cache_key = TrafficKey {
@@ -118,8 +169,9 @@ pub async fn process_network_event(
         ip_protocol: protocol_str.clone(),
     };
 
+    // Check cache to avoid duplicates
     if !TRAFFIC_CACHE.contains_key(&cache_key) {
-        let z = json!(PodTraffic {
+        let traffic = PodTraffic {
             uuid: Uuid::new_v4().to_string(),
             pod_name,
             pod_namespace,
@@ -130,15 +182,17 @@ pub async fn process_network_event(
             traffic_type: Some(traffic_type_str),
             ip_protocol: Some(protocol_str),
             time_stamp: Utc::now().naive_utc(),
-        });
-        debug!("Record to be inserted {}", z.to_string());
-        if let Err(e) = api_post_call(z, "pod/traffic").await {
-            error!("Failed to post Network event: {}", e);
-        } else {
-            TRAFFIC_CACHE.insert(cache_key.clone(), ()).await;
-        }
+        };
+
+        debug!("Adding traffic event to batch: {:?}", cache_key);
+
+        // Insert into cache immediately to prevent duplicates in same batch
+        TRAFFIC_CACHE.insert(cache_key, ()).await;
+
+        return Some(traffic);
     } else {
         debug!("Skipping duplicate network event for pod: {}", pod_name);
     }
-    Ok(())
+
+    None
 }

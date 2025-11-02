@@ -1,6 +1,7 @@
 use anyhow::Result;
-use std::{collections::BTreeMap, env, sync::Arc};
-use tokio::sync::{mpsc, Mutex};
+use dashmap::DashMap;
+use std::{env, sync::Arc};
+use tokio::sync::mpsc;
 
 use tracing::info;
 
@@ -37,9 +38,12 @@ async fn main() -> Result<(), Error> {
 
     let (sender_ip, recv_ip) = mpsc::channel(1000); // Use tokio's mpsc channel
 
-    let c: Arc<Mutex<BTreeMap<u64, PodInspect>>> = Arc::new(Mutex::new(BTreeMap::new()));
-    let pod_c = Arc::clone(&c);
-    let container_map = Arc::clone(&c);
+    // Use DashMap for lock-free concurrent access (much faster than Mutex<BTreeMap>)
+    let container_map: Arc<DashMap<u64, PodInspect>> = Arc::new(DashMap::new());
+    let pod_c = Arc::clone(&container_map);
+    let network_map = Arc::clone(&container_map);
+    let syscall_map = Arc::clone(&container_map);
+    let pktdrop_map = Arc::clone(&container_map);
     let pods = watch_pods(
         node_name,
         tx,
@@ -56,12 +60,9 @@ async fn main() -> Result<(), Error> {
     let (syscall_event_sender, syscall_event_receiver) = mpsc::channel::<SyscallEventData>(1000);
     let (pktdrp_event_sender, pktdrp_event_receiver) = mpsc::channel::<PacketDropEvent>(1000);
 
-    let network_event_handler =
-        handle_network_events(network_event_receiver, Arc::clone(&container_map));
-
-    let pktdrop_event_handler =
-        handle_packet_events(pktdrp_event_receiver, Arc::clone(&container_map));
-    let syscall_event_handler = handle_syscall_events(syscall_event_receiver, container_map);
+    let network_event_handler = handle_network_events(network_event_receiver, network_map);
+    let pktdrop_event_handler = handle_packet_events(pktdrp_event_receiver, pktdrop_map);
+    let syscall_event_handler = handle_syscall_events(syscall_event_receiver, syscall_map);
 
     let ebpf_handle = ebpf_handle(
         network_event_sender,

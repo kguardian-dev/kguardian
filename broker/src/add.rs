@@ -13,6 +13,65 @@ type DbError = Box<dyn std::error::Error + Send + Sync>;
 
 
 
+#[post("/pod/packet_drop/batch")]
+pub async fn add_drop_packets_batch(
+    pool: web::Data<DbPool>,
+    form: web::Json<Vec<PodPacketDrop>>,
+) -> Result<HttpResponse, Error> {
+    let count = form.len();
+    debug!("Received batch of {} packet drop events", count);
+
+    let result = web::block(move || {
+        let mut conn = pool.get()?;
+        create_pod_packet_drop_batch(&mut conn, form)
+    })
+    .await?
+    .map_err(actix_web::error::ErrorInternalServerError)?;
+
+    info!("Successfully inserted batch of {} packet drop events", count);
+    Ok(HttpResponse::Ok().json(result))
+}
+
+fn create_pod_packet_drop_batch(
+    conn: &mut PgConnection,
+    batch: web::Json<Vec<PodPacketDrop>>,
+) -> Result<usize, DbError> {
+    use schema::pod_packet_drop::dsl::*;
+
+    if batch.is_empty() {
+        return Ok(0);
+    }
+
+    debug!("Processing batch of {} packet drop events", batch.len());
+
+    // Filter out duplicates by checking each event against existing records
+    let mut events_to_insert = Vec::new();
+    for event in batch.iter() {
+        if event.get_row(conn)?.is_none() {
+            events_to_insert.push(event.clone());
+        } else {
+            debug!("Skipping duplicate packet drop event for pod: {:?}", event.pod_name);
+        }
+    }
+
+    if events_to_insert.is_empty() {
+        debug!("All events in batch were duplicates, nothing to insert");
+        return Ok(0);
+    }
+
+    debug!("Inserting {} new packet drop events (filtered {} duplicates)",
+           events_to_insert.len(),
+           batch.len() - events_to_insert.len());
+
+    // Bulk insert only the new events
+    let inserted = diesel::insert_into(pod_packet_drop)
+        .values(&events_to_insert)
+        .execute(conn)?;
+
+    debug!("Successfully inserted {} packet drop events", inserted);
+    Ok(inserted)
+}
+
 #[post("/pod/packet_drop")]
 pub async fn add_drop_packets(
     pool: web::Data<DbPool>,
@@ -66,6 +125,65 @@ impl PodPacketDrop {
             .optional()?;
         Ok(row)
     }
+}
+
+#[post("/pod/traffic/batch")]
+pub async fn add_pods_batch(
+    pool: web::Data<DbPool>,
+    form: web::Json<Vec<PodTraffic>>,
+) -> Result<HttpResponse, Error> {
+    let count = form.len();
+    debug!("Received batch of {} network traffic events", count);
+
+    let result = web::block(move || {
+        let mut conn = pool.get()?;
+        create_pod_traffic_batch(&mut conn, form)
+    })
+    .await?
+    .map_err(actix_web::error::ErrorInternalServerError)?;
+
+    info!("Successfully inserted batch of {} network traffic events", count);
+    Ok(HttpResponse::Ok().json(result))
+}
+
+fn create_pod_traffic_batch(
+    conn: &mut PgConnection,
+    batch: web::Json<Vec<PodTraffic>>,
+) -> Result<usize, DbError> {
+    use schema::pod_traffic::dsl::*;
+
+    if batch.is_empty() {
+        return Ok(0);
+    }
+
+    debug!("Processing batch of {} network traffic events", batch.len());
+
+    // Filter out duplicates by checking each event against existing records
+    let mut events_to_insert = Vec::new();
+    for event in batch.iter() {
+        if event.get_row(conn)?.is_none() {
+            events_to_insert.push(event.clone());
+        } else {
+            debug!("Skipping duplicate traffic event for pod: {:?}", event.pod_name);
+        }
+    }
+
+    if events_to_insert.is_empty() {
+        debug!("All events in batch were duplicates, nothing to insert");
+        return Ok(0);
+    }
+
+    debug!("Inserting {} new network traffic events (filtered {} duplicates)",
+           events_to_insert.len(),
+           batch.len() - events_to_insert.len());
+
+    // Bulk insert only the new events
+    let inserted = diesel::insert_into(pod_traffic)
+        .values(&events_to_insert)
+        .execute(conn)?;
+
+    debug!("Successfully inserted {} network traffic events", inserted);
+    Ok(inserted)
 }
 
 #[post("/pod/traffic")]

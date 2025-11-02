@@ -1,11 +1,12 @@
 use crate::schema::{pod_details, pod_syscalls, pod_traffic, pod_packet_drop,svc_details};
 use chrono::NaiveDateTime;
 use diesel::{AsChangeset, Identifiable, Insertable, Queryable, Selectable};
-use serde::{de, Deserialize, Serialize};
+use serde::{Deserialize, Serialize};
 
 #[derive(
     Default,
     Debug,
+    Clone,
     Insertable,
     Queryable,
     Identifiable,
@@ -32,6 +33,7 @@ pub struct PodTraffic {
 #[derive(
     Default,
     Debug,
+    Clone,
     Insertable,
     Queryable,
     Identifiable,

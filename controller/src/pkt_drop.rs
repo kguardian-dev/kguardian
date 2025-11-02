@@ -1,12 +1,11 @@
 use crate::models::PodPacketDrop;
 use crate::{api_post_call, Error, PodInspect};
 use chrono::Utc;
+use dashmap::DashMap;
 use moka::future::Cache;
 use serde_json::json;
-use std::collections::BTreeMap;
 use std::net::Ipv4Addr;
 use std::sync::Arc;
-use tokio::sync::Mutex;
 use tracing::{debug, error};
 use uuid::Uuid;
 
@@ -57,21 +56,72 @@ fn proto_to_string(proto: u8) -> String {
 
 pub async fn handle_packet_events(
     mut event_receiver: tokio::sync::mpsc::Receiver<PacketDropEvent>,
-    container_map_tcp: Arc<Mutex<BTreeMap<u64, PodInspect>>>,
+    container_map: Arc<DashMap<u64, PodInspect>>,
 ) -> Result<(), Error> {
-    while let Some(event) = event_receiver.recv().await {
-        let container_map = container_map_tcp.lock().await;
-        if let Some(pod_inspect) = container_map.get(&event.inum) {
-            process_pkt_drop_event(&event, pod_inspect).await?
+    // Batching configuration
+    const BATCH_SIZE: usize = 100;
+    const BATCH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(1);
+
+    let mut batch = Vec::with_capacity(BATCH_SIZE);
+    let mut last_flush = tokio::time::Instant::now();
+
+    loop {
+        // Use timeout to ensure we flush even if batch not full
+        let event = tokio::time::timeout(BATCH_TIMEOUT, event_receiver.recv()).await;
+
+        match event {
+            Ok(Some(event)) => {
+                // DashMap provides lock-free reads - no need for explicit locking!
+                if let Some(pod_inspect) = container_map.get(&event.inum) {
+                    if let Some(drop_event) = build_packet_drop_event(&event, &pod_inspect).await {
+                        batch.push(drop_event);
+                    }
+                }
+
+                // Flush if batch is full
+                if batch.len() >= BATCH_SIZE {
+                    flush_packet_drop_batch(&mut batch).await;
+                    last_flush = tokio::time::Instant::now();
+                }
+            }
+            Ok(None) => {
+                // Channel closed, flush remaining and exit
+                if !batch.is_empty() {
+                    flush_packet_drop_batch(&mut batch).await;
+                }
+                break;
+            }
+            Err(_) => {
+                // Timeout reached, flush if we have any events
+                if !batch.is_empty() && last_flush.elapsed() >= BATCH_TIMEOUT {
+                    flush_packet_drop_batch(&mut batch).await;
+                    last_flush = tokio::time::Instant::now();
+                }
+            }
         }
     }
     Ok(())
 }
 
-pub async fn process_pkt_drop_event(
+async fn flush_packet_drop_batch(batch: &mut Vec<PodPacketDrop>) {
+    if batch.is_empty() {
+        return;
+    }
+
+    debug!("Flushing packet drop event batch of {} events", batch.len());
+
+    // Send batch to API
+    if let Err(e) = api_post_call(json!(batch), "pod/packet_drop/batch").await {
+        error!("Failed to post packet drop event batch: {}", e);
+    }
+
+    batch.clear();
+}
+
+async fn build_packet_drop_event(
     data: &PacketDropEvent,
     pod_data: &PodInspect,
-) -> Result<(), Error> {
+) -> Option<PodPacketDrop> {
     let s_ip = Ipv4Addr::from(u32::from_be(data.saddr));
     let d_ip = Ipv4Addr::from(u32::from_be(data.daddr));
     let s_port = data.sport;
@@ -95,8 +145,9 @@ pub async fn process_pkt_drop_event(
     let traffic_type_str = "EGRESS".to_string();
     let protocol_str = proto_to_string(data.protocol);
 
+    // Skip if source and destination are the same
     if pod_ip.eq(&traffic_in_out_ip_str) {
-        return Ok(());
+        return None;
     }
 
     let cache_key = TrafficKey {
@@ -108,8 +159,9 @@ pub async fn process_pkt_drop_event(
         ip_protocol: protocol_str.clone(),
     };
 
+    // Check cache to avoid duplicates
     if !TRAFFIC_CACHE.contains_key(&cache_key) {
-        let z = json!(PodPacketDrop {
+        let drop_event = PodPacketDrop {
             uuid: Uuid::new_v4().to_string(),
             pod_name,
             pod_namespace,
@@ -121,16 +173,14 @@ pub async fn process_pkt_drop_event(
             drop_reason: Some("Network Policy".to_string()),
             ip_protocol: Some(protocol_str),
             time_stamp: Utc::now().naive_utc(),
-        });
-        debug!("Record to be inserted {}", z.to_string());
-        if let Err(e) = api_post_call(z, "pod/packet_drop").await {
-            error!("Failed to post Network event: {}", e);
-        } else {
-            TRAFFIC_CACHE.insert(cache_key.clone(), ()).await;
-        }
+        };
+        // Insert into cache immediately to prevent duplicates in same batch
+        TRAFFIC_CACHE.insert(cache_key, ()).await;
+
+        return Some(drop_event);
     } else {
-        debug!("Skipping duplicate network event for pod: {}", pod_name);
+        debug!("Skipping duplicate packet drop event for pod: {}", pod_name);
     }
 
-    Ok(())
+    None
 }

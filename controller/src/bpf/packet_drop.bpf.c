@@ -27,9 +27,8 @@ struct drop_event {
 };
 
 struct {
-    __uint(type, BPF_MAP_TYPE_PERF_EVENT_ARRAY);
-    __uint(key_size, sizeof(__u32));
-    __uint(value_size, sizeof(__u32));
+    __uint(type, BPF_MAP_TYPE_RINGBUF);
+    __uint(max_entries, 128 * 1024); // 128KB ring buffer
 } drop_events SEC(".maps");
 
 // Helper to read TCP header
@@ -84,61 +83,56 @@ int trace_kfree_skb(struct trace_event_raw_kfree_skb *ctx)
     if (!skb)
         return 0;
     
-    struct drop_event evt = {};
-    evt.timestamp = bpf_ktime_get_ns();
-    evt.drop_location = (__u64)location;
-     
     unsigned char *head = BPF_CORE_READ(skb, head);
     __u16 network_header = BPF_CORE_READ(skb, network_header);
     __u16 transport_header = BPF_CORE_READ(skb, transport_header);
-    
+
     // Check if network_header is set (0xFFFF means not set)
     if (network_header == 0xFFFF) {
         return 0;
     }
-    
+
     // Read IP header
     struct iphdr ip;
     if (bpf_probe_read_kernel(&ip, sizeof(ip), head + network_header) != 0)
         return 0;
-    
+
     // Only process IPv4
     if (ip.version != 4)
         return 0;
 
-   // Check if destination is in 127.0.0.0/8 (loopback) range
-    __u32 daddr = ntohs_manual(ip.daddr);  // Convert to host byte order
-    if ((daddr & 0xFF000000) == 0x7F000000)  // Check if first byte is 127
+    // Apply common filtering helper (replaces multiple duplicate checks)
+    if (should_filter_traffic(ip.saddr, ip.daddr))
         return 0;
 
-    // Also ignore 0.0.0.0
-    if (ip.daddr == 0)
-        return 0;
+    // Reserve space in ring buffer
+    struct drop_event *evt;
+    evt = bpf_ringbuf_reserve(&drop_events, sizeof(*evt), 0);
+    if (!evt)
+        return 0; // Buffer full, drop event
 
-    // Ignore if IP is in ignore list
-    if (bpf_map_lookup_elem(&ignore_ips, &ip.saddr) || bpf_map_lookup_elem(&ignore_ips, &ip.daddr))
-        return 0;
+    // Fill event data
+    evt->timestamp = bpf_ktime_get_ns();
+    evt->drop_location = (__u64)location;
+    evt->saddr = ip.saddr;
+    evt->daddr = ip.daddr;
+    evt->protocol = ip.protocol;
+    evt->inum = net_ns;
+    evt->sport = 0;
+    evt->dport = 0;
 
-    // Ignore if source and dest IPs are the same
-    if (ip.saddr == ip.daddr)
-        return 0;
-    
-    evt.saddr = ip.saddr;
-    evt.daddr = ip.daddr;
-    evt.protocol = ip.protocol;
-    evt.inum = net_ns;
-    
     // Check if transport_header is set
     if (transport_header != 0xFFFF) {
         // Read transport layer ports
         if (ip.protocol == IPPROTO_TCP) {
-            read_tcp_ports(head, transport_header, &evt.sport, &evt.dport);
+            read_tcp_ports(head, transport_header, &evt->sport, &evt->dport);
         } else if (ip.protocol == IPPROTO_UDP) {
-            read_udp_ports(head, transport_header, &evt.sport, &evt.dport);
+            read_udp_ports(head, transport_header, &evt->sport, &evt->dport);
         }
     }
-    
-    bpf_perf_event_output(ctx, &drop_events, BPF_F_CURRENT_CPU, &evt, sizeof(evt));
+
+    // Submit to userspace
+    bpf_ringbuf_submit(evt, 0);
     
     return 0;
 }
