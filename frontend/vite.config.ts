@@ -7,7 +7,7 @@ export default defineConfig({
   server: {
     proxy: {
       '/api': {
-        target: 'http://localhost:9090',
+        target: process.env.VITE_API_URL || 'http://broker.kguardian.svc.cluster.local:9090',
         changeOrigin: true,
         rewrite: (path) => path.replace(/^\/api/, ''),
       },
