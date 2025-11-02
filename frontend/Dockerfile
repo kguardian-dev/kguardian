@@ -39,6 +39,8 @@ EXPOSE 5173
 HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
   CMD wget --quiet --tries=1 --spider http://localhost:5173/ || exit 1
 
-# Use vite preview to serve the static files
-# Vite preview automatically serves SPA with proper routing
-CMD ["npm", "run", "preview", "--", "--host", "0.0.0.0", "--port", "5173"]
+# Use serve for production static file serving
+# -s: Single-page application mode (rewrites all not-found to index.html)
+# -l: Listen port
+# -n: No clipboard
+CMD ["npx", "serve", "-s", "dist", "-l", "5173", "-n"]
