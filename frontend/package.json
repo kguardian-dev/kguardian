@@ -15,8 +15,7 @@
     "lucide-react": "^0.552.0",
     "react": "^19.1.1",
     "react-dom": "^19.1.1",
-    "reactflow": "^11.11.4",
-    "serve": "^14.2.4"
+    "reactflow": "^11.11.4"
   },
   "devDependencies": {
     "@eslint/js": "^9.36.0",

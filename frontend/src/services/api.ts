@@ -6,16 +6,9 @@ class BrokerAPIClient {
   private client: AxiosInstance;
 
   constructor(baseURL?: string) {
-    // Priority order for API URL:
-    // 1. Explicit baseURL parameter
-    // 2. Runtime config (window.APP_CONFIG.apiUrl) - set by container at startup
-    // 3. Build-time environment variable (import.meta.env.VITE_API_URL)
-    // 4. Default to /api proxy (for development)
-    const runtimeConfig = (window as any).APP_CONFIG?.apiUrl;
-    const apiURL = baseURL
-      || (runtimeConfig && runtimeConfig !== '__API_URL__' ? runtimeConfig : null)
-      || import.meta.env.VITE_API_URL
-      || '/api';
+    // Use provided baseURL or default to relative /api path
+    // The /api path is proxied by Vite preview server to the broker service
+    const apiURL = baseURL || '/api';
 
     this.client = axios.create({
       baseURL: apiURL,

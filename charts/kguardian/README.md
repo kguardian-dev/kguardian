@@ -174,6 +174,11 @@ The following table lists the configurable parameters of the kguardian chart and
 | frontend.image.sha | string | `""` | Overrides the image tag using SHA digest |
 | frontend.image.tag | string | `"latest"` | Frontend version tag. Use component version (e.g., "v1.0.0") or "latest" |
 | frontend.imagePullSecrets | list | `[]` | List of image pull secrets for private registries |
+| frontend.ingress.annotations | object | `{}` | Ingress annotations |
+| frontend.ingress.className | string | `""` | Ingress class name |
+| frontend.ingress.enabled | bool | `false` | Enable ingress for frontend |
+| frontend.ingress.hosts | list | `[{"host":"kguardian.example.com","paths":[{"path":"/","pathType":"Prefix"}]}]` | Ingress hosts configuration |
+| frontend.ingress.tls | list | `[]` | Ingress TLS configuration |
 | frontend.nameOverride | string | `""` | Override the name of the frontend resources |
 | frontend.nodeSelector | object | `{"kubernetes.io/os":"linux"}` | Node labels for the kguardian frontend pod assignment |
 | frontend.podAnnotations | object | `{}` | Annotations to add to frontend pods |

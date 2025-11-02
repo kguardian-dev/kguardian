@@ -446,3 +446,24 @@ frontend:
 
   # -- Priority class to be used for the kguardian frontend pods
   priorityClassName: ""
+
+  ingress:
+    # -- Enable ingress for frontend
+    enabled: false
+    # -- Ingress class name
+    className: ""
+    # -- Ingress annotations
+    annotations: {}
+      # kubernetes.io/ingress.class: nginx
+      # cert-manager.io/cluster-issuer: letsencrypt-prod
+    # -- Ingress hosts configuration
+    hosts:
+      - host: kguardian.example.com
+        paths:
+          - path: /
+            pathType: Prefix
+    # -- Ingress TLS configuration
+    tls: []
+    #  - secretName: kguardian-tls
+    #    hosts:
+    #      - kguardian.example.com
