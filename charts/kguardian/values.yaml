@@ -192,7 +192,7 @@ broker:
 
   service:
     # -- Broker service name
-    name: "broker"
+    name: "kguardian-broker"
     # -- Broker service type
     type: ClusterIP
     # -- Broker service port
@@ -237,7 +237,7 @@ broker:
 
 database:
   # -- Database name for PostgreSQL
-  name: guardian-db
+  name: kguardian-db
   image:
     # -- PostgreSQL container image repository
     repository: postgres
@@ -301,7 +301,7 @@ database:
 
   service:
     # -- Database service name
-    name: "guardian-db"
+    name: "kguardian-db"
     # -- Database service type
     type: ClusterIP
     # -- Database service port
@@ -344,28 +344,28 @@ database:
   # -- Priority class to be used for the kguardian database pods
   priorityClassName: ""
 
-ui:
-  # -- Number of UI replicas to deploy
+frontend:
+  # -- Number of frontend replicas to deploy
   replicaCount: 1
   image:
-    # -- UI container image repository
+    # -- Frontend container image repository
     repository: ghcr.io/kguardian-dev/kguardian/frontend
-    # -- UI image pull policy
+    # -- Frontend image pull policy
     pullPolicy: Always
-    # -- UI version tag. Use component version (e.g., "v1.0.0") or "latest"
+    # -- Frontend version tag. Use component version (e.g., "v1.0.0") or "latest"
     tag: "latest"
     # -- Overrides the image tag using SHA digest
     sha: ""
 
   container:
-    # -- UI container port
+    # -- Frontend container port (serve)
     port: 5173
 
   # -- List of image pull secrets for private registries
   imagePullSecrets: []
-  # -- Override the name of the UI resources
+  # -- Override the name of the frontend resources
   nameOverride: ""
-  # -- Override the full name of the UI resources
+  # -- Override the full name of the frontend resources
   fullnameOverride: ""
 
   serviceAccount:
@@ -378,10 +378,10 @@ ui:
     # -- Automount API credentials for a service account
     automountServiceAccountToken: false
 
-  # -- Annotations to add to UI pods
+  # -- Annotations to add to frontend pods
   podAnnotations: {}
 
-  # -- UI pod security context.
+  # -- Frontend pod security context. Runs as non-root user (999)
   podSecurityContext:
     runAsUser: 999
     runAsGroup: 999
@@ -391,7 +391,7 @@ ui:
     seccompProfile:
       type: RuntimeDefault
 
-  # -- UI container security context. Hardened with read-only root filesystem
+  # -- Frontend container security context. Hardened with read-only root filesystem
   securityContext:
     privileged: false
     capabilities:
@@ -403,14 +403,14 @@ ui:
     allowPrivilegeEscalation: false
 
   service:
-    # -- UI service name
-    name: "ui"
-    # -- UI service type
+    # -- Frontend service name
+    name: "kguardian-frontend"
+    # -- Frontend service type
     type: ClusterIP
-    # -- UI service port
-    port: 80
+    # -- Frontend service port
+    port: 5173
 
-  # -- UI pod resource requests and limits
+  # -- Frontend pod resource requests and limits
   resources: {}
     # We usually recommend not to specify default resources and to leave this as a conscious
     # choice for the user. This also increases chances charts run on environments with little
@@ -424,25 +424,25 @@ ui:
     #   memory: 128Mi
 
   autoscaling:
-    # -- Enable horizontal pod autoscaling for UI
+    # -- Enable horizontal pod autoscaling for frontend
     enabled: false
-    # -- Minimum number of UI replicas
+    # -- Minimum number of frontend replicas
     minReplicas: 1
-    # -- Maximum number of UI replicas
+    # -- Maximum number of frontend replicas
     maxReplicas: 100
     # -- Target CPU utilization percentage for autoscaling
     targetCPUUtilizationPercentage: 80
     # targetMemoryUtilizationPercentage: 80
 
-  # -- Node labels for the kguardian UI pod assignment
+  # -- Node labels for the kguardian frontend pod assignment
   nodeSelector:
     kubernetes.io/os: linux
 
-  # -- Tolerations for the kguardian UI pod assignment
+  # -- Tolerations for the kguardian frontend pod assignment
   tolerations: []
 
-  # -- Affinity rules for UI pod assignment
+  # -- Affinity rules for frontend pod assignment
   affinity: {}
 
-  # -- Priority class to be used for the kguardian UI pods
+  # -- Priority class to be used for the kguardian frontend pods
   priorityClassName: ""

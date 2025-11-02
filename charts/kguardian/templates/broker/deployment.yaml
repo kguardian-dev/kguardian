@@ -46,7 +46,7 @@ spec:
               protocol: TCP
           env:
             - name: DATABASE_URL
-              value: "postgres://rust@{{ .Values.database.name }}.{{ include "kguardian.namespace" . }}.svc.cluster.local:{{ .Values.database.container.port }}/kube"
+              value: "postgres://rust@{{ .Values.database.service.name }}.{{ include "kguardian.namespace" . }}.svc.cluster.local:{{ .Values.database.container.port }}/kube"
          {{- with .Values.broker.resources }}
           resources:
             {{- toYaml . | nindent 12 }}

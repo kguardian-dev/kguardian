@@ -30,8 +30,11 @@ This is a modern, single-page web application for visualizing Kubernetes pod net
 
 ### HTTP Client
 - **Axios**: Promise-based HTTP client
-  - Connects to Broker API (default: localhost:9090)
-  - Centralized API client pattern
+  - Connects to Broker API via Vite dev server proxy
+  - Configured via `VITE_API_URL` environment variable in `vite.config.ts`
+  - Defaults to `http://broker.kguardian.svc.cluster.local:9090` (in-cluster)
+  - For local development: `http://localhost:9090`
+  - Centralized API client pattern in `services/api.ts`
 
 ## Architecture Patterns
 
