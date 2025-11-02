@@ -55,6 +55,6 @@ export default defineConfig({
     host: '0.0.0.0',
     strictPort: true,
     // Allow all hosts since this will be behind ingress/load balancer
-    allowedHosts: 'all',
+    allowedHosts: true,
   },
 })
