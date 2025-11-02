@@ -1,0 +1,346 @@
+---
+# yaml-language-server: $schema=https://json.schemastore.org/github-workflow.json
+name: Build PR Docker Images
+
+on:
+  pull_request:
+    branches:
+      - main
+    paths:
+      - 'controller/**'
+      - 'broker/**'
+      - 'frontend/**'
+      - '.github/workflows/pr-build.yaml'
+
+permissions:
+  contents: read
+  packages: write
+  pull-requests: write
+
+jobs:
+  # Detect which components changed
+  detect-changes:
+    runs-on: ubuntu-latest
+    outputs:
+      controller: ${{ steps.changes.outputs.controller }}
+      broker: ${{ steps.changes.outputs.broker }}
+      frontend: ${{ steps.changes.outputs.frontend }}
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5
+
+      - uses: dorny/paths-filter@v3
+        id: changes
+        with:
+          filters: |
+            controller:
+              - 'controller/**'
+            broker:
+              - 'broker/**'
+            frontend:
+              - 'frontend/**'
+
+  # Build Controller
+  build-controller:
+    runs-on: ubuntu-latest
+    needs: detect-changes
+    if: needs.detect-changes.outputs.controller == 'true'
+    strategy:
+      matrix:
+        arch:
+          - linux/amd64
+          - linux/arm64
+    steps:
+      - name: Checkout
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5
+
+      - name: Install Rust nightly
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly
+          targets: x86_64-unknown-linux-musl
+          components: rustfmt, clippy, miri, rust-src
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: stable
+          targets: x86_64-unknown-linux-musl
+          components: rustfmt, clippy
+
+      - name: Cache Rust dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            controller/target/
+          key: ${{ runner.os }}-cargo-${{ matrix.arch }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-${{ matrix.arch }}-
+            ${{ runner.os }}-cargo-
+
+      - name: Set Build Arguments
+        id: args
+        run: |
+          if [ "${{ matrix.arch }}" == "linux/arm64" ]; then
+            echo "BUILD=aarch64-unknown-linux-gnu" >> $GITHUB_OUTPUT
+          else
+            echo "BUILD=x86_64-unknown-linux-gnu" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Build Rust
+        run: |
+          sudo apt update -y
+          sudo apt install linux-tools-common linux-tools-generic linux-tools-$(uname -r) -y
+          cd controller
+          cargo install cross --git https://github.com/cross-rs/cross
+          cross build --target ${{ steps.args.outputs.BUILD }} --release
+
+      - uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
+        with:
+          name: ${{ steps.args.outputs.BUILD }}-binary
+          path: controller/target/${{ steps.args.outputs.BUILD }}/release/kguardian
+          retention-days: 7
+
+  push-controller:
+    runs-on: ubuntu-latest
+    needs: build-controller
+    steps:
+      - name: Checkout
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@29109295f81e9208d7d86ff1c6c12d2833863392 # v3
+        with:
+          platforms: all
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@e468171a9de216ec08956ac3ada2f0791b6bd435 # v3
+        with:
+          install: true
+          version: latest
+
+      - name: Login to GHCR
+        uses: docker/login-action@5e57cd118135c172c3672efd75eb46360885c0ef # v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6
+        with:
+          name: x86_64-unknown-linux-gnu-binary
+          path: controller/linux/amd64
+
+      - uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6
+        with:
+          name: aarch64-unknown-linux-gnu-binary
+          path: controller/linux/arm64
+
+      - name: Build and Push
+        env:
+          BUILDX_NO_DEFAULT_ATTESTATIONS: 1
+        uses: docker/build-push-action@263435318d21b8e681c14492fe198d362a7d2c83 # v6
+        with:
+          context: controller/
+          platforms: linux/amd64,linux/arm64
+          file: controller/Dockerfile
+          push: true
+          tags: |
+            ghcr.io/kguardian-dev/kguardian/controller:pr-${{ github.event.pull_request.number }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Comment PR
+        uses: actions/github-script@v7
+        with:
+          script: |
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: '✅ Controller image built and pushed:\n```\nghcr.io/kguardian-dev/kguardian/controller:pr-${{ github.event.pull_request.number }}\n```'
+            })
+
+  # Build Broker
+  build-broker:
+    runs-on: ubuntu-latest
+    needs: detect-changes
+    if: needs.detect-changes.outputs.broker == 'true'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5
+
+      - name: Cache Rust dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            broker/target/
+          key: ${{ runner.os }}-cargo-broker-${{ hashFiles('broker/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-broker-
+            ${{ runner.os }}-cargo-
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@29109295f81e9208d7d86ff1c6c12d2833863392 # v3
+        with:
+          platforms: all
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@e468171a9de216ec08956ac3ada2f0791b6bd435 # v3
+        with:
+          install: true
+          version: latest
+
+      - name: Login to GHCR
+        uses: docker/login-action@5e57cd118135c172c3672efd75eb46360885c0ef # v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and Push
+        uses: docker/build-push-action@263435318d21b8e681c14492fe198d362a7d2c83 # v6
+        with:
+          context: broker/
+          file: broker/Dockerfile
+          platforms: linux/amd64
+          push: true
+          tags: |
+            ghcr.io/kguardian-dev/kguardian/broker:pr-${{ github.event.pull_request.number }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Comment PR
+        uses: actions/github-script@v7
+        with:
+          script: |
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: '✅ Broker image built and pushed:\n```\nghcr.io/kguardian-dev/kguardian/broker:pr-${{ github.event.pull_request.number }}\n```'
+            })
+
+  # Build Frontend
+  build-frontend:
+    runs-on: ubuntu-latest
+    needs: detect-changes
+    if: needs.detect-changes.outputs.frontend == 'true'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5
+
+      - name: Cache Node modules
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.npm
+            frontend/node_modules
+          key: ${{ runner.os }}-node-${{ hashFiles('frontend/package-lock.json') }}
+          restore-keys: |
+            ${{ runner.os }}-node-
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@29109295f81e9208d7d86ff1c6c12d2833863392 # v3
+        with:
+          platforms: all
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@e468171a9de216ec08956ac3ada2f0791b6bd435 # v3
+        with:
+          install: true
+          version: latest
+
+      - name: Login to GHCR
+        uses: docker/login-action@5e57cd118135c172c3672efd75eb46360885c0ef # v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and Push
+        uses: docker/build-push-action@263435318d21b8e681c14492fe198d362a7d2c83 # v6
+        with:
+          context: frontend/
+          file: frontend/Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: |
+            ghcr.io/kguardian-dev/kguardian/frontend:pr-${{ github.event.pull_request.number }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Comment PR
+        uses: actions/github-script@v7
+        with:
+          script: |
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: '✅ Frontend image built and pushed:\n```\nghcr.io/kguardian-dev/kguardian/frontend:pr-${{ github.event.pull_request.number }}\n```'
+            })
+
+  # Summary comment with testing instructions
+  pr-summary:
+    runs-on: ubuntu-latest
+    needs: [detect-changes, push-controller, build-broker, build-frontend]
+    if: always()
+    steps:
+      - name: Create summary comment
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const controller = '${{ needs.detect-changes.outputs.controller }}' === 'true';
+            const broker = '${{ needs.detect-changes.outputs.broker }}' === 'true';
+            const frontend = '${{ needs.detect-changes.outputs.frontend }}' === 'true';
+
+            let body = '## 🚀 PR Build Summary\n\n';
+
+            if (!controller && !broker && !frontend) {
+              body += '⏭️ No component changes detected. Skipping image builds.\n';
+            } else {
+              body += '### Built Images\n\n';
+
+              if (controller) {
+                body += '✅ **Controller**: `ghcr.io/kguardian-dev/kguardian/controller:pr-${{ github.event.pull_request.number }}`\n';
+              }
+              if (broker) {
+                body += '✅ **Broker**: `ghcr.io/kguardian-dev/kguardian/broker:pr-${{ github.event.pull_request.number }}`\n';
+              }
+              if (frontend) {
+                body += '✅ **Frontend**: `ghcr.io/kguardian-dev/kguardian/frontend:pr-${{ github.event.pull_request.number }}`\n';
+              }
+
+              body += '\n### 🧪 Test These Images\n\n';
+              body += '```bash\n';
+              body += 'helm upgrade kguardian oci://ghcr.io/kguardian-dev/charts/kguardian \\\n';
+              body += '  --namespace kguardian \\\n';
+
+              if (controller) {
+                body += '  --set controller.image.tag=pr-${{ github.event.pull_request.number }} \\\n';
+              }
+              if (broker) {
+                body += '  --set broker.image.tag=pr-${{ github.event.pull_request.number }} \\\n';
+              }
+              if (frontend) {
+                body += '  --set frontend.image.tag=pr-${{ github.event.pull_request.number }} \\\n';
+              }
+
+              body += '  --wait\n';
+              body += '```\n';
+            }
+
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: body
+            })
