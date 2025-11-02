@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.2.9](https://github.com/kguardian-dev/kguardian/compare/frontend/v1.2.8...frontend/v1.2.9) (2025-11-01)
+
+
+### Bug Fixes
+
+* frontend to use serve ([cbadc00](https://github.com/kguardian-dev/kguardian/commit/cbadc001092b0a86c5f986d44e2698f6e2c91939))
+
 ## [1.2.8](https://github.com/kguardian-dev/kguardian/compare/frontend/v1.2.7...frontend/v1.2.8) (2025-11-01)
 
 
