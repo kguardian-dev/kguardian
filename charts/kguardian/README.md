@@ -93,7 +93,7 @@ The following table lists the configurable parameters of the kguardian chart and
 | broker.replicaCount | int | `1` | Number of broker replicas to deploy |
 | broker.resources | object | `{}` | Broker pod resource requests and limits |
 | broker.securityContext | object | `{"allowPrivilegeEscalation":false,"capabilities":{"drop":["ALL"]},"privileged":false,"readOnlyRootFilesystem":true,"runAsNonRoot":true,"runAsUser":1000}` | Broker container security context. Hardened with read-only root filesystem |
-| broker.service.name | string | `"broker"` | Broker service name |
+| broker.service.name | string | `"kguardian-broker"` | Broker service name |
 | broker.service.port | int | `9090` | Broker service port |
 | broker.service.type | string | `"ClusterIP"` | Broker service type |
 | broker.serviceAccount.annotations | object | `{}` | Annotations to add to the service account |
@@ -144,7 +144,7 @@ The following table lists the configurable parameters of the kguardian chart and
 | database.image.sha | string | `""` | Overrides the image tag using SHA digest |
 | database.image.tag | string | `"latest"` | PostgreSQL image tag |
 | database.imagePullSecrets | list | `[]` | List of image pull secrets for private registries |
-| database.name | string | `"guardian-db"` | Database name for PostgreSQL |
+| database.name | string | `"kguardian-db"` | Database name for PostgreSQL |
 | database.nameOverride | string | `""` | Override the name of the database resources |
 | database.nodeSelector | object | `{"kubernetes.io/os":"linux"}` | Node labels for the kguardian database pod assignment |
 | database.persistence.enabled | bool | `false` | Enable persistent storage for database |
@@ -154,7 +154,7 @@ The following table lists the configurable parameters of the kguardian chart and
 | database.priorityClassName | string | `""` | Priority class to be used for the kguardian database pods |
 | database.resources | object | `{}` | Database pod resource requests and limits |
 | database.securityContext | object | `{"allowPrivilegeEscalation":false,"capabilities":{"drop":["ALL"]},"privileged":false,"readOnlyRootFilesystem":false,"runAsNonRoot":true,"runAsUser":999}` | Database container security context. Non-root with dropped capabilities |
-| database.service.name | string | `"guardian-db"` | Database service name |
+| database.service.name | string | `"kguardian-db"` | Database service name |
 | database.service.port | int | `5432` | Database service port |
 | database.service.type | string | `"ClusterIP"` | Database service type |
 | database.serviceAccount.annotations | object | `{}` | Annotations to add to the service account |
@@ -162,40 +162,40 @@ The following table lists the configurable parameters of the kguardian chart and
 | database.serviceAccount.create | bool | `true` | Specifies whether a service account should be created |
 | database.serviceAccount.name | string | `""` | The name of the service account to use. If not set and create is true, a name is generated using the fullname template |
 | database.tolerations | list | `[]` | Tolerations for the kguardian database pod assignment |
+| frontend.affinity | object | `{}` | Affinity rules for frontend pod assignment |
+| frontend.autoscaling.enabled | bool | `false` | Enable horizontal pod autoscaling for frontend |
+| frontend.autoscaling.maxReplicas | int | `100` | Maximum number of frontend replicas |
+| frontend.autoscaling.minReplicas | int | `1` | Minimum number of frontend replicas |
+| frontend.autoscaling.targetCPUUtilizationPercentage | int | `80` | Target CPU utilization percentage for autoscaling |
+| frontend.container.port | int | `5173` | Frontend container port (serve) |
+| frontend.fullnameOverride | string | `""` | Override the full name of the frontend resources |
+| frontend.image.pullPolicy | string | `"Always"` | Frontend image pull policy |
+| frontend.image.repository | string | `"ghcr.io/kguardian-dev/kguardian/frontend"` | Frontend container image repository |
+| frontend.image.sha | string | `""` | Overrides the image tag using SHA digest |
+| frontend.image.tag | string | `"latest"` | Frontend version tag. Use component version (e.g., "v1.0.0") or "latest" |
+| frontend.imagePullSecrets | list | `[]` | List of image pull secrets for private registries |
+| frontend.nameOverride | string | `""` | Override the name of the frontend resources |
+| frontend.nodeSelector | object | `{"kubernetes.io/os":"linux"}` | Node labels for the kguardian frontend pod assignment |
+| frontend.podAnnotations | object | `{}` | Annotations to add to frontend pods |
+| frontend.podSecurityContext | object | `{"fsGroup":999,"fsGroupChangePolicy":"OnRootMismatch","runAsGroup":999,"runAsUser":999,"seccompProfile":{"type":"RuntimeDefault"},"supplementalGroups":[999]}` | Frontend pod security context. Runs as non-root user (999) |
+| frontend.priorityClassName | string | `""` | Priority class to be used for the kguardian frontend pods |
+| frontend.replicaCount | int | `1` | Number of frontend replicas to deploy |
+| frontend.resources | object | `{}` | Frontend pod resource requests and limits |
+| frontend.securityContext | object | `{"allowPrivilegeEscalation":false,"capabilities":{"drop":["ALL"]},"privileged":false,"readOnlyRootFilesystem":true,"runAsNonRoot":true,"runAsUser":999}` | Frontend container security context. Hardened with read-only root filesystem |
+| frontend.service.name | string | `"kguardian-frontend"` | Frontend service name |
+| frontend.service.port | int | `5173` | Frontend service port |
+| frontend.service.type | string | `"ClusterIP"` | Frontend service type |
+| frontend.serviceAccount.annotations | object | `{}` | Annotations to add to the service account |
+| frontend.serviceAccount.automountServiceAccountToken | bool | `false` | Automount API credentials for a service account |
+| frontend.serviceAccount.create | bool | `true` | Specifies whether a service account should be created |
+| frontend.serviceAccount.name | string | `""` | The name of the service account to use. If not set and create is true, a name is generated using the fullname template |
+| frontend.tolerations | list | `[]` | Tolerations for the kguardian frontend pod assignment |
 | global.annotations | object | `{}` | Annotations to apply to all resources |
 | global.labels | object | `{}` | Labels to apply to all resources |
 | global.priorityClassName | string | `""` | Priority class to be used for the kguardian pods |
 | namespace.annotations | object | `{}` | Annotations to add to the namespace |
 | namespace.labels | object | `{}` | Labels to add to the namespace |
 | namespace.name | string | `""` | Namespace name. If empty, uses the release namespace |
-| ui.affinity | object | `{}` | Affinity rules for UI pod assignment |
-| ui.autoscaling.enabled | bool | `false` | Enable horizontal pod autoscaling for UI |
-| ui.autoscaling.maxReplicas | int | `100` | Maximum number of UI replicas |
-| ui.autoscaling.minReplicas | int | `1` | Minimum number of UI replicas |
-| ui.autoscaling.targetCPUUtilizationPercentage | int | `80` | Target CPU utilization percentage for autoscaling |
-| ui.container.port | int | `5173` | UI container port |
-| ui.fullnameOverride | string | `""` | Override the full name of the UI resources |
-| ui.image.pullPolicy | string | `"Always"` | UI image pull policy |
-| ui.image.repository | string | `"ghcr.io/kguardian-dev/kguardian/frontend"` | UI container image repository |
-| ui.image.sha | string | `""` | Overrides the image tag using SHA digest |
-| ui.image.tag | string | `"latest"` | UI version tag. Use component version (e.g., "v1.0.0") or "latest" |
-| ui.imagePullSecrets | list | `[]` | List of image pull secrets for private registries |
-| ui.nameOverride | string | `""` | Override the name of the UI resources |
-| ui.nodeSelector | object | `{"kubernetes.io/os":"linux"}` | Node labels for the kguardian UI pod assignment |
-| ui.podAnnotations | object | `{}` | Annotations to add to UI pods |
-| ui.podSecurityContext | object | `{"fsGroup":999,"fsGroupChangePolicy":"OnRootMismatch","runAsGroup":999,"runAsUser":999,"seccompProfile":{"type":"RuntimeDefault"},"supplementalGroups":[999]}` | UI pod security context. |
-| ui.priorityClassName | string | `""` | Priority class to be used for the kguardian UI pods |
-| ui.replicaCount | int | `1` | Number of UI replicas to deploy |
-| ui.resources | object | `{}` | UI pod resource requests and limits |
-| ui.securityContext | object | `{"allowPrivilegeEscalation":false,"capabilities":{"drop":["ALL"]},"privileged":false,"readOnlyRootFilesystem":true,"runAsNonRoot":true,"runAsUser":999}` | UI container security context. Hardened with read-only root filesystem |
-| ui.service.name | string | `"ui"` | UI service name |
-| ui.service.port | int | `80` | UI service port |
-| ui.service.type | string | `"ClusterIP"` | UI service type |
-| ui.serviceAccount.annotations | object | `{}` | Annotations to add to the service account |
-| ui.serviceAccount.automountServiceAccountToken | bool | `false` | Automount API credentials for a service account |
-| ui.serviceAccount.create | bool | `true` | Specifies whether a service account should be created |
-| ui.serviceAccount.name | string | `""` | The name of the service account to use. If not set and create is true, a name is generated using the fullname template |
-| ui.tolerations | list | `[]` | Tolerations for the kguardian UI pod assignment |
 
 ## Uninstalling the Chart
 

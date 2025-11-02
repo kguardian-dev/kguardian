@@ -113,7 +113,17 @@ All pods should show `Running` status. If not, see [Troubleshooting](/advanced/t
 The kguardian CLI is a kubectl plugin for generating policies.
 
 <Tabs>
-  <Tab title="Krew (Recommended)">
+  <Tab title="Quick Install Script (Recommended)">
+    ```bash
+    # Download and install the latest release
+    sh -c "$(curl -fsSL https://raw.githubusercontent.com/kguardian-dev/kguardian/main/scripts/quick-install.sh)"
+
+    # Verify installation
+    kubectl kguardian --version
+    ```
+  </Tab>
+
+  <Tab title="Krew">
     ```bash
     # Install via Krew plugin manager
     kubectl krew install kguardian
@@ -125,16 +135,6 @@ The kguardian CLI is a kubectl plugin for generating policies.
     <Note>
     Don't have Krew? Install it from [krew.sigs.k8s.io](https://krew.sigs.k8s.io/docs/user-guide/setup/install/)
     </Note>
-  </Tab>
-
-  <Tab title="Quick Install Script">
-    ```bash
-    # Download and install the latest release
-    sh -c "$(curl -fsSL https://raw.githubusercontent.com/kguardian-dev/kguardian/main/scripts/quick-install.sh)"
-
-    # Verify installation
-    kubectl kguardian --version
-    ```
   </Tab>
 
   <Tab title="Manual Download">
