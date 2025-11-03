@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useCallback } from 'react';
 import { RefreshCw, Shield, Sparkles } from 'lucide-react';
 import NetworkGraph from './components/NetworkGraph';
 import NamespaceSelector from './components/NamespaceSelector';
@@ -16,9 +16,15 @@ function App() {
   const [isAIAssistantOpen, setIsAIAssistantOpen] = useState(false);
   const [isPolicyEditorOpen, setIsPolicyEditorOpen] = useState(false);
   const [policyEditorPod, setPolicyEditorPod] = useState<PodNodeData | null>(null);
+  const [aiSidePanel, setAISidePanel] = useState({ isSidePanel: false, isCollapsed: false });
 
   const { namespaces } = useNamespaces();
   const { pods, loading, error, togglePodExpansion, refreshData } = usePodData(namespace);
+
+  // Calculate the right padding for content when AI panel is docked
+  const contentPaddingRight = aiSidePanel.isSidePanel
+    ? (aiSidePanel.isCollapsed ? 'pr-12' : 'pr-[28rem]') // 48px collapsed, 448px (md) expanded
+    : '';
 
   const handlePodSelect = (pod: PodNodeData | null) => {
     setSelectedPod(pod);
@@ -29,8 +35,12 @@ function App() {
     setIsPolicyEditorOpen(true);
   };
 
+  const handleAILayoutChange = useCallback((isSidePanel: boolean, isCollapsed: boolean) => {
+    setAISidePanel({ isSidePanel, isCollapsed });
+  }, []);
+
   return (
-    <div className="flex flex-col h-screen bg-hubble-darker">
+    <div className={`flex flex-col h-screen bg-hubble-darker transition-all duration-300 ${contentPaddingRight}`}>
       {/* Header */}
       <header className="bg-hubble-dark border-b border-hubble-border px-6 py-4">
         <div className="flex items-center justify-between">
@@ -126,6 +136,7 @@ function App() {
       <AIAssistant
         isOpen={isAIAssistantOpen}
         onClose={() => setIsAIAssistantOpen(false)}
+        onLayoutChange={handleAILayoutChange}
       />
 
       {/* Network Policy Editor Modal */}
