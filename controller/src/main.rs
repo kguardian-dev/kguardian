@@ -7,7 +7,7 @@ use tracing::info;
 use kguardian::bpf::ebpf_handle;
 use kguardian::log::init_logger;
 use kguardian::network::handle_network_events;
-use kguardian::pkt_drop::{handle_packet_events, PacketDropEvent};
+use kguardian::netpolicy_drop::{handle_netpolicy_drop_events, PolicyDropEvent};
 use kguardian::service_watcher::watch_service;
 use kguardian::syscall::{
     handle_syscall_events, send_syscall_cache_periodically, SyscallEventData,
@@ -54,19 +54,20 @@ async fn main() -> Result<(), Error> {
 
     let (network_event_sender, network_event_receiver) = mpsc::channel::<NetworkEventData>(1000);
     let (syscall_event_sender, syscall_event_receiver) = mpsc::channel::<SyscallEventData>(1000);
-    let (pktdrp_event_sender, pktdrp_event_receiver) = mpsc::channel::<PacketDropEvent>(1000);
+    let (netpolicy_drop_sender, netpolicy_drop_receiver) = mpsc::channel::<PolicyDropEvent>(1000);
 
     let network_event_handler =
         handle_network_events(network_event_receiver, Arc::clone(&container_map));
 
-    let pktdrop_event_handler =
-        handle_packet_events(pktdrp_event_receiver, Arc::clone(&container_map));
-    let syscall_event_handler = handle_syscall_events(syscall_event_receiver, container_map);
+    let netpolicy_drop_handler =
+        handle_netpolicy_drop_events(netpolicy_drop_receiver, Arc::clone(&container_map));
+
+    let syscall_event_handler = handle_syscall_events(syscall_event_receiver, Arc::clone(&container_map));
 
     let ebpf_handle = ebpf_handle(
         network_event_sender,
         syscall_event_sender,
-        pktdrp_event_sender,
+        netpolicy_drop_sender,
         rx,
         recv_ip,
         ignore_daemonset_traffic,
@@ -80,7 +81,7 @@ async fn main() -> Result<(), Error> {
         pods,
         network_event_handler,
         syscall_event_handler,
-        pktdrop_event_handler,
+        netpolicy_drop_handler,
         syscall_recorder,
         async { ebpf_handle.await.unwrap() }
     )
