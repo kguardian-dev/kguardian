@@ -1,0 +1,48 @@
+{{- if .Values.frontend.ingress.enabled -}}
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ include "kguardian.name" . }}-frontend
+  labels:
+    {{- include "kguardian.labels" . | nindent 4 }}
+  {{- with .Values.frontend.ingress.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  {{- if .Values.frontend.ingress.className }}
+  ingressClassName: {{ .Values.frontend.ingress.className }}
+  {{- end }}
+  {{- if .Values.frontend.ingress.tls }}
+  tls:
+    {{- range .Values.frontend.ingress.tls }}
+    - hosts:
+        {{- range .hosts }}
+        - {{ . | quote }}
+        {{- end }}
+      secretName: {{ .secretName }}
+    {{- end }}
+  {{- end }}
+  rules:
+    {{- range .Values.frontend.ingress.hosts }}
+    - host: {{ .host | quote }}
+      http:
+        paths:
+          # Frontend static files
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ $.Values.frontend.service.name }}
+                port:
+                  number: {{ $.Values.frontend.service.port }}
+          # Proxy /api requests to broker
+          - path: /api
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ $.Values.broker.service.name }}
+                port:
+                  number: {{ $.Values.broker.service.port }}
+    {{- end }}
+{{- end }}

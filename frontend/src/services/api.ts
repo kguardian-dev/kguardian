@@ -5,9 +5,13 @@ import type { PodInfo, NetworkTraffic, SyscallInfo, ServiceInfo } from '../types
 class BrokerAPIClient {
   private client: AxiosInstance;
 
-  constructor(baseURL: string = '/api') {
+  constructor(baseURL?: string) {
+    // Use provided baseURL or default to relative /api path
+    // The /api path is proxied by Vite preview server to the broker service
+    const apiURL = baseURL || '/api';
+
     this.client = axios.create({
-      baseURL,
+      baseURL: apiURL,
       timeout: 10000,
       headers: {
         'Content-Type': 'application/json',
@@ -99,7 +103,12 @@ class BrokerAPIClient {
   async getAllPods(): Promise<PodInfo[]> {
     try {
       const response = await this.client.get('/pod/info');
-      return response.data || [];
+      // Ensure we always return an array
+      if (Array.isArray(response.data)) {
+        return response.data;
+      }
+      console.warn('API returned non-array data for /pod/info:', response.data);
+      return [];
     } catch (error) {
       console.error('Error fetching all pods:', error);
       return [];
@@ -112,6 +121,13 @@ class BrokerAPIClient {
   async getNamespaces(): Promise<string[]> {
     try {
       const pods = await this.getAllPods();
+
+      // Ensure pods is an array
+      if (!Array.isArray(pods)) {
+        console.error('getAllPods() did not return an array:', pods);
+        return ['default'];
+      }
+
       const namespaces = new Set<string>();
 
       pods.forEach(pod => {
