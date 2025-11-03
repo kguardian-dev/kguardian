@@ -1,5 +1,6 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { X, Send, Sparkles, Bot, User, Minimize2, Maximize2, ChevronRight, ChevronLeft } from 'lucide-react';
+import { sendChatMessage, type LLMProvider } from '../services/aiApi';
 
 interface Message {
   id: string;
@@ -55,20 +56,32 @@ const AIAssistant: React.FC<AIAssistantProps> = ({ isOpen, onClose, onLayoutChan
     };
 
     setMessages(prev => [...prev, userMessage]);
+    const currentMessage = inputValue;
     setInputValue('');
     setIsTyping(true);
 
-    // Simulate AI response (placeholder for future LLM integration)
-    setTimeout(() => {
+    try {
+      // Call the real AI API
+      const response = await sendChatMessage(currentMessage);
+
       const assistantMessage: Message = {
         id: (Date.now() + 1).toString(),
         role: 'assistant',
-        content: 'AI Assistant is not yet connected. This is a placeholder response. Future integration will connect to an LLM via MCP server.',
+        content: response.message,
         timestamp: new Date(),
       };
       setMessages(prev => [...prev, assistantMessage]);
+    } catch (error) {
+      const errorMessage: Message = {
+        id: (Date.now() + 1).toString(),
+        role: 'assistant',
+        content: `Error: ${error instanceof Error ? error.message : 'Failed to get AI response. Please check that your API keys are configured.'}`,
+        timestamp: new Date(),
+      };
+      setMessages(prev => [...prev, errorMessage]);
+    } finally {
       setIsTyping(false);
-    }, 1000);
+    }
   };
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
@@ -265,7 +278,7 @@ const AIAssistant: React.FC<AIAssistantProps> = ({ isOpen, onClose, onLayoutChan
               </button>
             </div>
             <p className="text-xs text-tertiary mt-2">
-              AI Assistant is currently in preview mode. Future updates will connect to an LLM for real-time assistance.
+              AI Assistant uses your configured LLM provider (OpenAI, Anthropic, Gemini, or GitHub Copilot). Configure API keys in Helm values.
             </p>
           </div>
         </div>
@@ -465,7 +478,7 @@ const AIAssistant: React.FC<AIAssistantProps> = ({ isOpen, onClose, onLayoutChan
           </button>
         </div>
         <p className="text-xs text-tertiary mt-2">
-          AI Assistant is currently in preview mode. Future updates will connect to an LLM for real-time assistance.
+          AI Assistant uses your configured LLM provider (OpenAI, Anthropic, Gemini, or GitHub Copilot). Configure API keys in Helm values.
         </p>
       </div>
     </div>

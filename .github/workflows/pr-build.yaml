@@ -10,6 +10,8 @@ on:
       - 'controller/**'
       - 'broker/**'
       - 'frontend/**'
+      - 'llm-bridge/**'
+      - 'mcp-server/**'
       - '.github/workflows/pr-build.yaml'
 
 permissions:
@@ -25,6 +27,8 @@ jobs:
       controller: ${{ steps.changes.outputs.controller }}
       broker: ${{ steps.changes.outputs.broker }}
       frontend: ${{ steps.changes.outputs.frontend }}
+      llm-bridge: ${{ steps.changes.outputs.llm-bridge }}
+      mcp-server: ${{ steps.changes.outputs.mcp-server }}
     steps:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5
 
@@ -38,6 +42,10 @@ jobs:
               - 'broker/**'
             frontend:
               - 'frontend/**'
+            llm-bridge:
+              - 'llm-bridge/**'
+            mcp-server:
+              - 'mcp-server/**'
 
   # Build Controller
   build-controller:
@@ -288,10 +296,132 @@ jobs:
               body: '✅ Frontend image built and pushed:\n```\nghcr.io/kguardian-dev/kguardian/frontend:pr-${{ github.event.pull_request.number }}\n```'
             })
 
+  # Build LLM Bridge
+  build-llm-bridge:
+    runs-on: ubuntu-latest
+    needs: detect-changes
+    if: needs.detect-changes.outputs.llm-bridge == 'true'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5
+
+      - name: Cache Node modules
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.npm
+            llm-bridge/node_modules
+          key: ${{ runner.os }}-node-llm-bridge-${{ hashFiles('llm-bridge/package-lock.json') }}
+          restore-keys: |
+            ${{ runner.os }}-node-llm-bridge-
+            ${{ runner.os }}-node-
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@29109295f81e9208d7d86ff1c6c12d2833863392 # v3
+        with:
+          platforms: all
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@e468171a9de216ec08956ac3ada2f0791b6bd435 # v3
+        with:
+          install: true
+          version: latest
+
+      - name: Login to GHCR
+        uses: docker/login-action@5e57cd118135c172c3672efd75eb46360885c0ef # v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and Push
+        uses: docker/build-push-action@263435318d21b8e681c14492fe198d362a7d2c83 # v6
+        with:
+          context: llm-bridge/
+          file: llm-bridge/Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: |
+            ghcr.io/kguardian-dev/kguardian/llm-bridge:pr-${{ github.event.pull_request.number }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Comment PR
+        uses: actions/github-script@v7
+        with:
+          script: |
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: '✅ LLM Bridge image built and pushed:\n```\nghcr.io/kguardian-dev/kguardian/llm-bridge:pr-${{ github.event.pull_request.number }}\n```'
+            })
+
+  # Build MCP Server
+  build-mcp-server:
+    runs-on: ubuntu-latest
+    needs: detect-changes
+    if: needs.detect-changes.outputs.mcp-server == 'true'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5
+
+      - name: Cache Node modules
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.npm
+            mcp-server/node_modules
+          key: ${{ runner.os }}-node-mcp-server-${{ hashFiles('mcp-server/package-lock.json') }}
+          restore-keys: |
+            ${{ runner.os }}-node-mcp-server-
+            ${{ runner.os }}-node-
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@29109295f81e9208d7d86ff1c6c12d2833863392 # v3
+        with:
+          platforms: all
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@e468171a9de216ec08956ac3ada2f0791b6bd435 # v3
+        with:
+          install: true
+          version: latest
+
+      - name: Login to GHCR
+        uses: docker/login-action@5e57cd118135c172c3672efd75eb46360885c0ef # v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and Push
+        uses: docker/build-push-action@263435318d21b8e681c14492fe198d362a7d2c83 # v6
+        with:
+          context: mcp-server/
+          file: mcp-server/Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: |
+            ghcr.io/kguardian-dev/kguardian/mcp-server:pr-${{ github.event.pull_request.number }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Comment PR
+        uses: actions/github-script@v7
+        with:
+          script: |
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: '✅ MCP Server image built and pushed:\n```\nghcr.io/kguardian-dev/kguardian/mcp-server:pr-${{ github.event.pull_request.number }}\n```'
+            })
+
   # Summary comment with testing instructions
   pr-summary:
     runs-on: ubuntu-latest
-    needs: [detect-changes, push-controller, build-broker, build-frontend]
+    needs: [detect-changes, push-controller, build-broker, build-frontend, build-llm-bridge, build-mcp-server]
     if: always()
     steps:
       - name: Create summary comment
@@ -301,10 +431,12 @@ jobs:
             const controller = '${{ needs.detect-changes.outputs.controller }}' === 'true';
             const broker = '${{ needs.detect-changes.outputs.broker }}' === 'true';
             const frontend = '${{ needs.detect-changes.outputs.frontend }}' === 'true';
+            const llmBridge = '${{ needs.detect-changes.outputs.llm-bridge }}' === 'true';
+            const mcpServer = '${{ needs.detect-changes.outputs.mcp-server }}' === 'true';
 
             let body = '## 🚀 PR Build Summary\n\n';
 
-            if (!controller && !broker && !frontend) {
+            if (!controller && !broker && !frontend && !llmBridge && !mcpServer) {
               body += '⏭️ No component changes detected. Skipping image builds.\n';
             } else {
               body += '### Built Images\n\n';
@@ -317,6 +449,12 @@ jobs:
               }
               if (frontend) {
                 body += '✅ **Frontend**: `ghcr.io/kguardian-dev/kguardian/frontend:pr-${{ github.event.pull_request.number }}`\n';
+              }
+              if (llmBridge) {
+                body += '✅ **LLM Bridge**: `ghcr.io/kguardian-dev/kguardian/llm-bridge:pr-${{ github.event.pull_request.number }}`\n';
+              }
+              if (mcpServer) {
+                body += '✅ **MCP Server**: `ghcr.io/kguardian-dev/kguardian/mcp-server:pr-${{ github.event.pull_request.number }}`\n';
               }
 
               body += '\n### 🧪 Test These Images\n\n';
@@ -332,6 +470,12 @@ jobs:
               }
               if (frontend) {
                 body += '  --set frontend.image.tag=pr-${{ github.event.pull_request.number }} \\\n';
+              }
+              if (llmBridge) {
+                body += '  --set llmBridge.image.tag=pr-${{ github.event.pull_request.number }} \\\n';
+              }
+              if (mcpServer) {
+                body += '  --set mcpServer.image.tag=pr-${{ github.event.pull_request.number }} \\\n';
               }
 
               body += '  --wait\n';
