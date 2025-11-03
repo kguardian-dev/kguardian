@@ -198,6 +198,45 @@ The following table lists the configurable parameters of the kguardian chart and
 | global.annotations | object | `{}` | Annotations to apply to all resources |
 | global.labels | object | `{}` | Labels to apply to all resources |
 | global.priorityClassName | string | `""` | Priority class to be used for the kguardian pods |
+| llmBridge.affinity | object | `{}` | Affinity rules for llm-bridge pod assignment |
+| llmBridge.autoscaling.enabled | bool | `false` | Enable horizontal pod autoscaling for llm-bridge |
+| llmBridge.autoscaling.maxReplicas | int | `10` | Maximum number of llm-bridge replicas |
+| llmBridge.autoscaling.minReplicas | int | `2` | Minimum number of llm-bridge replicas |
+| llmBridge.autoscaling.targetCPUUtilizationPercentage | int | `80` | Target CPU utilization percentage for autoscaling |
+| llmBridge.container.port | int | `8080` | LLM Bridge container port |
+| llmBridge.enabled | bool | `false` | Enable LLM Bridge service for AI assistant |
+| llmBridge.env | list | `[]` | Additional environment variables for llm-bridge |
+| llmBridge.fullnameOverride | string | `""` | Override the full name of the llm-bridge resources |
+| llmBridge.image.pullPolicy | string | `"Always"` | LLM Bridge image pull policy |
+| llmBridge.image.repository | string | `"ghcr.io/kguardian-dev/kguardian/llm-bridge"` | LLM Bridge container image repository |
+| llmBridge.image.sha | string | `""` | Overrides the image tag using SHA digest |
+| llmBridge.image.tag | string | `"latest"` | LLM Bridge version tag. Use component version (e.g., "v1.0.0") or "latest" |
+| llmBridge.imagePullSecrets | list | `[]` | List of image pull secrets for private registries |
+| llmBridge.nameOverride | string | `""` | Override the name of the llm-bridge resources |
+| llmBridge.nodeSelector | object | `{"kubernetes.io/os":"linux"}` | Node labels for the kguardian llm-bridge pod assignment |
+| llmBridge.podAnnotations | object | `{}` | Annotations to add to llm-bridge pods |
+| llmBridge.podSecurityContext | object | `{"fsGroup":1000,"fsGroupChangePolicy":"OnRootMismatch","runAsGroup":1000,"runAsUser":1000,"seccompProfile":{"type":"RuntimeDefault"},"supplementalGroups":[1000]}` | LLM Bridge pod security context. Runs as non-root user (node:1000) |
+| llmBridge.priorityClassName | string | `""` | Priority class to be used for the kguardian llm-bridge pods |
+| llmBridge.replicaCount | int | `2` | Number of llm-bridge replicas to deploy |
+| llmBridge.resources | object | `{"limits":{"cpu":"500m","memory":"512Mi"},"requests":{"cpu":"100m","memory":"256Mi"}}` | LLM Bridge pod resource requests and limits |
+| llmBridge.secrets.anthropic.enabled | bool | `false` | Enable Anthropic Claude provider |
+| llmBridge.secrets.anthropic.name | string | `"kguardian-anthropic"` | Secret name for Anthropic |
+| llmBridge.secrets.copilot.enabled | bool | `false` | Enable GitHub Copilot provider |
+| llmBridge.secrets.copilot.name | string | `"kguardian-copilot"` | Secret name for GitHub Copilot |
+| llmBridge.secrets.gemini.enabled | bool | `false` | Enable Google Gemini provider |
+| llmBridge.secrets.gemini.name | string | `"kguardian-gemini"` | Secret name for Gemini |
+| llmBridge.secrets.keyName | string | `"api-key"` | Normalized secret key name used for all providers |
+| llmBridge.secrets.openai.enabled | bool | `false` | Enable OpenAI provider |
+| llmBridge.secrets.openai.name | string | `"kguardian-openai"` | Secret name for OpenAI |
+| llmBridge.securityContext | object | `{"allowPrivilegeEscalation":false,"capabilities":{"drop":["ALL"]},"privileged":false,"readOnlyRootFilesystem":true,"runAsNonRoot":true,"runAsUser":1000}` | LLM Bridge container security context. Hardened with read-only root filesystem |
+| llmBridge.service.name | string | `"kguardian-llm-bridge"` | LLM Bridge service name |
+| llmBridge.service.port | int | `8080` | LLM Bridge service port |
+| llmBridge.service.type | string | `"ClusterIP"` | LLM Bridge service type |
+| llmBridge.serviceAccount.annotations | object | `{}` | Annotations to add to the service account |
+| llmBridge.serviceAccount.automountServiceAccountToken | bool | `false` | Automount API credentials for a service account |
+| llmBridge.serviceAccount.create | bool | `true` | Specifies whether a service account should be created |
+| llmBridge.serviceAccount.name | string | `""` | The name of the service account to use. If not set and create is true, a name is generated using the fullname template |
+| llmBridge.tolerations | list | `[]` | Tolerations for the kguardian llm-bridge pod assignment |
 | namespace.annotations | object | `{}` | Annotations to add to the namespace |
 | namespace.labels | object | `{}` | Labels to add to the namespace |
 | namespace.name | string | `""` | Namespace name. If empty, uses the release namespace |
