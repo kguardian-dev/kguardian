@@ -252,6 +252,40 @@ git push origin main
 - Helm chart: `oci://ghcr.io/kguardian-dev/charts/kguardian:X.Y.Z`
 - Advisor binaries: GitHub Releases with SLSA3 attestation
 
+## Documentation (Mintlify)
+
+The project documentation is located in the `docs/` directory and uses [Mintlify](https://mintlify.com).
+
+### Documentation Development
+```bash
+# Install Mintlify CLI
+npm i -g mint
+
+# Preview documentation locally (from docs/ directory)
+cd docs
+mint dev  # Opens at http://localhost:3000
+```
+
+### Documentation Structure
+The documentation follows a Talos Linux-inspired organization pattern:
+- **docs.json**: Navigation configuration with tabs and page groups
+- **Structure**: Getting Started → Core Concepts → User Guides → CLI Reference → Advanced → Roadmap
+- **File format**: MDX files with YAML frontmatter (title, description, icon)
+
+### Key Documentation Files
+- `docs.json`: Main navigation configuration
+- `roadmap/roadmap.mdx`: High-level roadmap and release timeline
+- `roadmap/feature-deep-dives.mdx`: Detailed technical specifications for planned features
+- Navigation groups follow logical progression from overview to advanced topics
+
+### Documentation Guidelines
+- ALWAYS prefer editing existing files over creating new ones
+- Only create new pages when explicitly required
+- Update `docs.json` navigation when adding/removing pages
+- Use descriptive titles and clear descriptions in frontmatter
+- Follow existing MDX patterns (Cards, Steps, Accordions, etc.)
+- Cross-reference related pages to maintain documentation cohesion
+
 ## Common Issues
 
 ### Controller Build Failures
