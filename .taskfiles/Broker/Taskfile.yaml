@@ -2,8 +2,8 @@
 # yaml-language-server: $schema=https://taskfile.dev/schema.json
 version: '3'
 vars:
-  BROKER_IMAGE_NAME: ghcr.io/kguardian-dev/kguardian/guardian-broker
-  IMAGE_VERSION: local
+  BROKER_IMAGE_NAME: ghcr.io/kguardian-dev/kguardian/broker
+  IMAGE_VERSION: v0.3.0
 
 tasks:
   all:
