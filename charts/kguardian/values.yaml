@@ -467,3 +467,140 @@ frontend:
     #  - secretName: kguardian-tls
     #    hosts:
     #      - kguardian.example.com
+llmBridge:
+  # -- Enable LLM Bridge service for AI assistant
+  enabled: false
+  # -- Number of llm-bridge replicas to deploy
+  replicaCount: 2
+  image:
+    # -- LLM Bridge container image repository
+    repository: ghcr.io/kguardian-dev/kguardian/llm-bridge
+    # -- LLM Bridge image pull policy
+    pullPolicy: Always
+    # -- LLM Bridge version tag. Use component version (e.g., "v1.0.0") or "latest"
+    tag: "latest"
+    # -- Overrides the image tag using SHA digest
+    sha: ""
+
+  container:
+    # -- LLM Bridge container port
+    port: 8080
+
+  # -- List of image pull secrets for private registries
+  imagePullSecrets: []
+  # -- Override the name of the llm-bridge resources
+  nameOverride: ""
+  # -- Override the full name of the llm-bridge resources
+  fullnameOverride: ""
+
+  serviceAccount:
+    # -- Specifies whether a service account should be created
+    create: true
+    # -- Annotations to add to the service account
+    annotations: {}
+    # -- The name of the service account to use. If not set and create is true, a name is generated using the fullname template
+    name: ""
+    # -- Automount API credentials for a service account
+    automountServiceAccountToken: false
+
+  # -- Annotations to add to llm-bridge pods
+  podAnnotations: {}
+
+  # -- LLM Bridge pod security context. Runs as non-root user (node:1000)
+  podSecurityContext:
+    runAsUser: 1000
+    runAsGroup: 1000
+    fsGroup: 1000
+    fsGroupChangePolicy: OnRootMismatch
+    supplementalGroups: [1000]
+    seccompProfile:
+      type: RuntimeDefault
+
+  # -- LLM Bridge container security context. Hardened with read-only root filesystem
+  securityContext:
+    privileged: false
+    capabilities:
+      drop:
+      - ALL
+    readOnlyRootFilesystem: true
+    runAsNonRoot: true
+    runAsUser: 1000
+    allowPrivilegeEscalation: false
+
+  service:
+    # -- LLM Bridge service name
+    name: "kguardian-llm-bridge"
+    # -- LLM Bridge service type
+    type: ClusterIP
+    # -- LLM Bridge service port
+    port: 8080
+
+  # -- LLM Bridge pod resource requests and limits
+  resources:
+    limits:
+      cpu: 500m
+      memory: 512Mi
+    requests:
+      cpu: 100m
+      memory: 256Mi
+
+  autoscaling:
+    # -- Enable horizontal pod autoscaling for llm-bridge
+    enabled: false
+    # -- Minimum number of llm-bridge replicas
+    minReplicas: 2
+    # -- Maximum number of llm-bridge replicas
+    maxReplicas: 10
+    # -- Target CPU utilization percentage for autoscaling
+    targetCPUUtilizationPercentage: 80
+    # targetMemoryUtilizationPercentage: 80
+
+  # -- Node labels for the kguardian llm-bridge pod assignment
+  nodeSelector:
+    kubernetes.io/os: linux
+
+  # -- Tolerations for the kguardian llm-bridge pod assignment
+  tolerations: []
+
+  # -- Affinity rules for llm-bridge pod assignment
+  affinity: {}
+
+  # -- Priority class to be used for the kguardian llm-bridge pods
+  priorityClassName: ""
+
+  # -- Additional environment variables for llm-bridge
+  env: []
+
+  # LLM Provider secrets configuration
+  # Each provider uses its own secret with a normalized key name 'api-key'
+  secrets:
+    # -- Normalized secret key name used for all providers
+    keyName: "api-key"
+
+    # OpenAI configuration
+    openai:
+      # -- Enable OpenAI provider
+      enabled: false
+      # -- Secret name for OpenAI
+      name: "kguardian-openai"
+
+    # Anthropic configuration
+    anthropic:
+      # -- Enable Anthropic Claude provider
+      enabled: false
+      # -- Secret name for Anthropic
+      name: "kguardian-anthropic"
+
+    # Google Gemini configuration
+    gemini:
+      # -- Enable Google Gemini provider
+      enabled: false
+      # -- Secret name for Gemini
+      name: "kguardian-gemini"
+
+    # GitHub Copilot configuration
+    copilot:
+      # -- Enable GitHub Copilot provider
+      enabled: false
+      # -- Secret name for GitHub Copilot
+      name: "kguardian-copilot"
