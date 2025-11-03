@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.2.11](https://github.com/kguardian-dev/kguardian/compare/frontend/v1.2.10...frontend/v1.2.11) (2025-11-03)
+
+
+### Bug Fixes
+
+* **deps:** update dependency @types/node to v24.10.0 ([4d0885c](https://github.com/kguardian-dev/kguardian/commit/4d0885cb8f6e0bec64cd3afc9bfb3367936eee95))
+
 ## [1.2.10](https://github.com/kguardian-dev/kguardian/compare/frontend/v1.2.9...frontend/v1.2.10) (2025-11-01)
 
 
