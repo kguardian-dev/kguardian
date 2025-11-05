@@ -10,13 +10,13 @@ import (
 
 // NetworkTrafficInput defines the input parameters for the network traffic tool
 type NetworkTrafficInput struct {
-	Namespace string `json:"namespace" jsonschema:"description=The Kubernetes namespace of the pod,required=true"`
-	PodName   string `json:"pod_name" jsonschema:"description=The name of the pod,required=true"`
+	Namespace string `json:"namespace" jsonschema:"The Kubernetes namespace of the pod"`
+	PodName   string `json:"pod_name" jsonschema:"The name of the pod"`
 }
 
 // NetworkTrafficOutput defines the output for the network traffic tool
 type NetworkTrafficOutput struct {
-	Data string `json:"data" jsonschema:"description=Network traffic data in JSON format"`
+	Data string `json:"data" jsonschema:"Network traffic data in JSON format"`
 }
 
 // NetworkTrafficHandler handles the get_pod_network_traffic tool

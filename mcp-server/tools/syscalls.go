@@ -10,13 +10,13 @@ import (
 
 // SyscallsInput defines the input parameters for the syscalls tool
 type SyscallsInput struct {
-	Namespace string `json:"namespace" jsonschema:"description=The Kubernetes namespace of the pod,required=true"`
-	PodName   string `json:"pod_name" jsonschema:"description=The name of the pod,required=true"`
+	Namespace string `json:"namespace" jsonschema:"The Kubernetes namespace of the pod"`
+	PodName   string `json:"pod_name" jsonschema:"The name of the pod"`
 }
 
 // SyscallsOutput defines the output for the syscalls tool
 type SyscallsOutput struct {
-	Data string `json:"data" jsonschema:"description=Syscall data in JSON format"`
+	Data string `json:"data" jsonschema:"Syscall data in JSON format"`
 }
 
 // SyscallsHandler handles the get_pod_syscalls tool
