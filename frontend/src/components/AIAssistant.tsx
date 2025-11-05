@@ -28,10 +28,10 @@ const AIAssistant: React.FC<AIAssistantProps> = ({ isOpen, onClose, onLayoutChan
 
   // Notify parent of layout changes
   useEffect(() => {
-    if (onLayoutChange) {
+    if (onLayoutChange && isOpen) {
       onLayoutChange(viewMode === 'side-panel', isCollapsed);
     }
-  }, [viewMode, isCollapsed, onLayoutChange]);
+  }, [viewMode, isCollapsed, onLayoutChange, isOpen]);
 
   // Auto-scroll to bottom when new messages arrive
   useEffect(() => {
