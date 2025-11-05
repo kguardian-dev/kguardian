@@ -2,9 +2,8 @@ FROM node:20-alpine AS builder
 
 WORKDIR /app
 
-# Copy package files
-COPY package*.json ./
-COPY tsconfig.json ./
+# Copy package files and TypeScript config
+COPY package*.json tsconfig.json ./
 
 # Install dependencies
 RUN npm ci

@@ -1,6 +1,6 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { X, Send, Sparkles, Bot, User, Minimize2, Maximize2, ChevronRight, ChevronLeft } from 'lucide-react';
-import { sendChatMessage, type LLMProvider } from '../services/aiApi';
+import { sendChatMessage } from '../services/aiApi';
 
 interface Message {
   id: string;
