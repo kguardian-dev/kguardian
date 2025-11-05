@@ -237,6 +237,36 @@ The following table lists the configurable parameters of the kguardian chart and
 | llmBridge.serviceAccount.create | bool | `true` | Specifies whether a service account should be created |
 | llmBridge.serviceAccount.name | string | `""` | The name of the service account to use. If not set and create is true, a name is generated using the fullname template |
 | llmBridge.tolerations | list | `[]` | Tolerations for the kguardian llm-bridge pod assignment |
+| mcpServer.affinity | object | `{}` | Affinity rules for mcp-server pod assignment |
+| mcpServer.autoscaling.enabled | bool | `false` | Enable horizontal pod autoscaling for mcp-server |
+| mcpServer.autoscaling.maxReplicas | int | `5` | Maximum number of mcp-server replicas |
+| mcpServer.autoscaling.minReplicas | int | `1` | Minimum number of mcp-server replicas |
+| mcpServer.autoscaling.targetCPUUtilizationPercentage | int | `80` | Target CPU utilization percentage for autoscaling |
+| mcpServer.container.port | int | `8081` | MCP Server container port (stdio mode, not HTTP) |
+| mcpServer.enabled | bool | `false` | Enable MCP Server for external integrations |
+| mcpServer.env | list | `[]` | Additional environment variables for mcp-server |
+| mcpServer.fullnameOverride | string | `""` | Override the full name of the mcp-server resources |
+| mcpServer.image.pullPolicy | string | `"Always"` | MCP Server image pull policy |
+| mcpServer.image.repository | string | `"ghcr.io/kguardian-dev/kguardian/mcp-server"` | MCP Server container image repository |
+| mcpServer.image.sha | string | `""` | Overrides the image tag using SHA digest |
+| mcpServer.image.tag | string | `"latest"` | MCP Server version tag. Use component version (e.g., "v1.0.0") or "latest" |
+| mcpServer.imagePullSecrets | list | `[]` | List of image pull secrets for private registries |
+| mcpServer.nameOverride | string | `""` | Override the name of the mcp-server resources |
+| mcpServer.nodeSelector | object | `{"kubernetes.io/os":"linux"}` | Node labels for the kguardian mcp-server pod assignment |
+| mcpServer.podAnnotations | object | `{}` | Annotations to add to mcp-server pods |
+| mcpServer.podSecurityContext | object | `{"fsGroup":1000,"fsGroupChangePolicy":"OnRootMismatch","runAsGroup":1000,"runAsUser":1000,"seccompProfile":{"type":"RuntimeDefault"},"supplementalGroups":[1000]}` | MCP Server pod security context. Runs as non-root user (node:1000) |
+| mcpServer.priorityClassName | string | `""` | Priority class to be used for the kguardian mcp-server pods |
+| mcpServer.replicaCount | int | `1` | Number of mcp-server replicas to deploy |
+| mcpServer.resources | object | `{"limits":{"cpu":"200m","memory":"256Mi"},"requests":{"cpu":"50m","memory":"128Mi"}}` | MCP Server pod resource requests and limits |
+| mcpServer.securityContext | object | `{"allowPrivilegeEscalation":false,"capabilities":{"drop":["ALL"]},"privileged":false,"readOnlyRootFilesystem":true,"runAsNonRoot":true,"runAsUser":1000}` | MCP Server container security context. Hardened with read-only root filesystem |
+| mcpServer.service.name | string | `"kguardian-mcp-server"` | MCP Server service name |
+| mcpServer.service.port | int | `8081` | MCP Server service port |
+| mcpServer.service.type | string | `"ClusterIP"` | MCP Server service type |
+| mcpServer.serviceAccount.annotations | object | `{}` | Annotations to add to the service account |
+| mcpServer.serviceAccount.automountServiceAccountToken | bool | `false` | Automount API credentials for a service account |
+| mcpServer.serviceAccount.create | bool | `true` | Specifies whether a service account should be created |
+| mcpServer.serviceAccount.name | string | `""` | The name of the service account to use. If not set and create is true, a name is generated using the fullname template |
+| mcpServer.tolerations | list | `[]` | Tolerations for the kguardian mcp-server pod assignment |
 | namespace.annotations | object | `{}` | Annotations to add to the namespace |
 | namespace.labels | object | `{}` | Labels to add to the namespace |
 | namespace.name | string | `""` | Namespace name. If empty, uses the release namespace |
