@@ -186,7 +186,7 @@ The following table lists the configurable parameters of the kguardian chart and
 | frontend.priorityClassName | string | `""` | Priority class to be used for the kguardian frontend pods |
 | frontend.replicaCount | int | `1` | Number of frontend replicas to deploy |
 | frontend.resources | object | `{}` | Frontend pod resource requests and limits |
-| frontend.securityContext | object | `{"allowPrivilegeEscalation":false,"capabilities":{"drop":["ALL"]},"privileged":false,"readOnlyRootFilesystem":true,"runAsNonRoot":true,"runAsUser":1337}` | Frontend container security context. Hardened with read-only root filesystem |
+| frontend.securityContext | object | `{"allowPrivilegeEscalation":false,"capabilities":{"drop":["ALL"]},"privileged":false,"readOnlyRootFilesystem":false,"runAsNonRoot":true,"runAsUser":1337}` | Frontend container security context. Hardened with read-only root filesystem |
 | frontend.service.name | string | `"kguardian-frontend"` | Frontend service name |
 | frontend.service.port | int | `5173` | Frontend service port |
 | frontend.service.type | string | `"ClusterIP"` | Frontend service type |
@@ -242,7 +242,7 @@ The following table lists the configurable parameters of the kguardian chart and
 | mcpServer.autoscaling.maxReplicas | int | `5` | Maximum number of mcp-server replicas |
 | mcpServer.autoscaling.minReplicas | int | `1` | Minimum number of mcp-server replicas |
 | mcpServer.autoscaling.targetCPUUtilizationPercentage | int | `80` | Target CPU utilization percentage for autoscaling |
-| mcpServer.container.port | int | `8081` | MCP Server container port (stdio mode, not HTTP) |
+| mcpServer.container.port | int | `8081` | MCP Server container HTTP port for StreamableHTTP transport |
 | mcpServer.enabled | bool | `false` | Enable MCP Server for external integrations |
 | mcpServer.env | list | `[]` | Additional environment variables for mcp-server |
 | mcpServer.fullnameOverride | string | `""` | Override the full name of the mcp-server resources |
