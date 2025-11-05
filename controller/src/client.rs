@@ -1,5 +1,4 @@
 use crate::Error;
-use reqwest::header;
 use serde_json::Value;
 use std::env;
 use tracing::debug;
@@ -11,16 +10,20 @@ lazy_static! {
 }
 
 pub(crate) async fn api_post_call(v: Value, path: &str) -> Result<(), Error> {
-    let api_endpoint = env::var("API_ENDPOINT").expect("$API_ENDPOINT is not set");
+    let api_endpoint = env::var("API_ENDPOINT")
+        .map_err(|_| Error::Custom("API_ENDPOINT environment variable not set".to_string()))?;
     let url = format!("{}/{}", api_endpoint, path);
-    let mut headers = header::HeaderMap::new();
-    headers.insert("content-type", "application/json".parse().unwrap());
-    debug!("input json {}", v.to_string());
+
+    debug!("Posting to {}", url);
+
+    // Serialize to bytes directly without intermediate string allocation
+    let json_bytes = serde_json::to_vec(&v)
+        .map_err(|e| Error::Custom(format!("Failed to serialize JSON: {}", e)))?;
 
     let res = CLIENT
         .post(&url)
-        .headers(headers)
-        .body(v.to_string())
+        .header("content-type", "application/json")
+        .body(json_bytes)
         .send()
         .await
         .map_err(|e| Error::ApiError(format!("{}", e)))?;

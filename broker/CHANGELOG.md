@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.2.0](https://github.com/kguardian-dev/kguardian/compare/broker/v1.1.1...broker/v1.2.0) (2025-11-05)
+
+
+### Features
+
+* performance improvements ([#418](https://github.com/kguardian-dev/kguardian/issues/418)) ([3fcbbb8](https://github.com/kguardian-dev/kguardian/commit/3fcbbb8a227885fd61e0a26812d5a429aec24803))
+
 ## [1.1.1](https://github.com/kguardian-dev/kguardian/compare/broker/v1.1.0...broker/v1.1.1) (2025-11-01)
 
 

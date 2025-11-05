@@ -1,4 +1,4 @@
-use crate::{PodDetail, PodInputSyscalls, PodPacketDrop, PodSyscalls, PodTraffic, SvcDetail, schema};
+use crate::{schema, PodDetail, PodInputSyscalls, PodSyscalls, PodTraffic, SvcDetail};
 use actix_web::{post, web, Error, HttpResponse};
 use diesel::pg::PgConnection;
 use diesel::r2d2::{self, ConnectionManager};
@@ -10,62 +10,71 @@ use tracing::{debug, info};
 type DbPool = r2d2::Pool<ConnectionManager<PgConnection>>;
 type DbError = Box<dyn std::error::Error + Send + Sync>;
 
-
-
-
-#[post("/pod/packet_drop")]
-pub async fn add_drop_packets(
+#[post("/pod/traffic/batch")]
+pub async fn add_pods_batch(
     pool: web::Data<DbPool>,
-    form: web::Json<PodPacketDrop>,
+    form: web::Json<Vec<PodTraffic>>,
 ) -> Result<HttpResponse, Error> {
-    let pods = web::block(move || {
+    let count = form.len();
+    debug!("Received batch of {} network traffic events", count);
+
+    let result = web::block(move || {
         let mut conn = pool.get()?;
-        create_pod_packet_drop(&mut conn, form)
+        create_pod_traffic_batch(&mut conn, form)
     })
     .await?
     .map_err(actix_web::error::ErrorInternalServerError)?;
 
-    Ok(HttpResponse::Ok().json(pods))
-}
-fn  create_pod_packet_drop(
-    conn: &mut PgConnection,
-    w: web::Json<PodPacketDrop>,
-) -> Result<PodPacketDrop, DbError> {
-    use schema::pod_packet_drop::dsl::*;
-    debug!(
-        "storing the pod packet drop details {:?} into pod_traffic table",
-        w.uuid
+    info!(
+        "Successfully inserted batch of {} network traffic events",
+        count
     );
-    if w.get_row(conn)?.is_none() {
-        info!("Insert pod {:?}, in pod_traffic table", w.uuid);
-        let _ = diesel::insert_into(pod_packet_drop)
-            .values(&*w)
-            .execute(conn)
-            .expect("Error saving data into pod_traffic");
-
-        debug!(
-            "Success: pod {:?} inserted in pod_traffic table",
-            w.uuid
-        );
-    } else {
-        debug!("Data already exists");
-    }
-    Ok(w.0)
+    Ok(HttpResponse::Ok().json(result))
 }
 
-impl PodPacketDrop {
-    pub fn get_row(&self, conn: &mut PgConnection) -> Result<Option<PodPacketDrop>, DbError> {
-        use schema::pod_packet_drop::dsl::*;
-        let row = pod_packet_drop
-            .filter(pod_ip.eq(&self.pod_ip))
-            .filter(traffic_in_out_ip.eq(&self.traffic_in_out_ip))
-            .filter(traffic_in_out_port.eq(&self.traffic_in_out_port))
-            .filter(pod_name.eq(&self.pod_name))
-            .filter(drop_reason.eq(&self.drop_reason))
-            .first::<PodPacketDrop>(conn)
-            .optional()?;
-        Ok(row)
+fn create_pod_traffic_batch(
+    conn: &mut PgConnection,
+    batch: web::Json<Vec<PodTraffic>>,
+) -> Result<usize, DbError> {
+    use schema::pod_traffic::dsl::*;
+
+    if batch.is_empty() {
+        return Ok(0);
     }
+
+    debug!("Processing batch of {} network traffic events", batch.len());
+
+    // Filter out duplicates by checking each event against existing records
+    let mut events_to_insert = Vec::new();
+    for event in batch.iter() {
+        if event.get_row(conn)?.is_none() {
+            events_to_insert.push(event.clone());
+        } else {
+            debug!(
+                "Skipping duplicate traffic event for pod: {:?}",
+                event.pod_name
+            );
+        }
+    }
+
+    if events_to_insert.is_empty() {
+        debug!("All events in batch were duplicates, nothing to insert");
+        return Ok(0);
+    }
+
+    debug!(
+        "Inserting {} new network traffic events (filtered {} duplicates)",
+        events_to_insert.len(),
+        batch.len() - events_to_insert.len()
+    );
+
+    // Bulk insert only the new events
+    let inserted = diesel::insert_into(pod_traffic)
+        .values(&events_to_insert)
+        .execute(conn)?;
+
+    debug!("Successfully inserted {} network traffic events", inserted);
+    Ok(inserted)
 }
 
 #[post("/pod/traffic")]
@@ -82,8 +91,6 @@ pub async fn add_pods(
 
     Ok(HttpResponse::Ok().json(pods))
 }
-
-
 
 fn create_pod_traffic(
     conn: &mut PgConnection,
@@ -117,6 +124,7 @@ impl PodTraffic {
                 .filter(traffic_type.eq(&self.traffic_type))
                 .filter(traffic_in_out_ip.eq(&self.traffic_in_out_ip))
                 .filter(traffic_in_out_port.eq(&self.traffic_in_out_port))
+                .filter(decision.eq(&self.decision))
                 .first::<PodTraffic>(conn)
                 .optional()?;
             if out.is_none() {
@@ -125,6 +133,7 @@ impl PodTraffic {
                     .filter(pod_port.eq(&self.pod_port))
                     .filter(traffic_type.eq(&self.traffic_type))
                     .filter(traffic_in_out_ip.eq(&self.traffic_in_out_ip))
+                    .filter(decision.eq(&self.decision))
                     .first::<PodTraffic>(conn)
                     .optional()?;
                 return Ok(second);
@@ -132,13 +141,14 @@ impl PodTraffic {
             return Ok(out);
         }
 
-        debug!("pod_ip {:?}\n pod_port {:?}\n pod_trafic_type {:?}\n traffic_in_out_ip {:?}\n traffic_in_out_port {:?}\n_", &self.pod_ip, &self.pod_port,&self.traffic_type,&self.traffic_in_out_ip,&self.traffic_in_out_port);
+        debug!("pod_ip {:?}\n pod_port {:?}\n pod_trafic_type {:?}\n traffic_in_out_ip {:?}\n traffic_in_out_port {:?}\n decision {:?}\n_", &self.pod_ip, &self.pod_port,&self.traffic_type,&self.traffic_in_out_ip,&self.traffic_in_out_port,&self.decision);
         let row = pod_traffic
             .filter(pod_ip.eq(&self.pod_ip))
             .filter(pod_port.eq(&self.pod_port))
             .filter(traffic_type.eq(&self.traffic_type))
             .filter(traffic_in_out_ip.eq(&self.traffic_in_out_ip))
             .filter(traffic_in_out_port.eq(&self.traffic_in_out_port))
+            .filter(decision.eq(&self.decision))
             .first::<PodTraffic>(conn)
             .optional()?;
         Ok(row)

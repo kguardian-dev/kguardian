@@ -1,7 +1,7 @@
 {
-  "controller": "1.2.0",
+  "controller": "1.3.0",
   "controller+FILLER": "0.0.0",
-  "broker": "1.1.1",
+  "broker": "1.2.0",
   "broker+FILLER": "0.0.0",
   "frontend": "1.2.11",
   "frontend+FILLER": "0.0.0",
