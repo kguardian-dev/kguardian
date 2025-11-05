@@ -33,9 +33,6 @@ export class BrokerClient {
         case "get_pod_syscalls":
           return await this.getPodSyscalls(args.namespace, args.pod_name);
 
-        case "get_pod_packet_drops":
-          return await this.getPodPacketDrops(args.namespace, args.pod_name);
-
         default:
           return {
             data: null,
@@ -96,29 +93,6 @@ export class BrokerClient {
     }
   }
 
-  private async getPodPacketDrops(
-    namespace: string,
-    podName: string
-  ): Promise<ToolResult> {
-    try {
-      const response = await this.client.get(
-        `/pod/packet_drop/name/${namespace}/${podName}`
-      );
-      return { data: response.data };
-    } catch (error) {
-      if (axios.isAxiosError(error)) {
-        return {
-          data: null,
-          error: `Failed to fetch packet drops: ${error.response?.status} - ${error.message}`,
-        };
-      }
-      return {
-        data: null,
-        error: `Failed to fetch packet drops: ${error}`,
-      };
-    }
-  }
-
   /**
    * Get available tools definition for LLMs
    */
@@ -162,25 +136,6 @@ export class BrokerClient {
           required: ["namespace", "pod_name"],
         },
       },
-      {
-        name: "get_pod_packet_drops",
-        description:
-          "Get packet drop events for a specific pod. Returns information about dropped network packets including reasons and statistics. Useful for debugging network issues.",
-        parameters: {
-          type: "object",
-          properties: {
-            namespace: {
-              type: "string",
-              description: "The Kubernetes namespace of the pod",
-            },
-            pod_name: {
-              type: "string",
-              description: "The name of the pod",
-            },
-          },
-          required: ["namespace", "pod_name"],
-        },
-      },
     ];
   }
 
@@ -192,24 +147,24 @@ export class BrokerClient {
 
 Your role is to help users understand their cluster's network traffic, security events, and system calls.
 
-You have access to these tools:
-- get_pod_network_traffic: Query network connections for a pod
-- get_pod_syscalls: Get system calls made by a pod
-- get_pod_packet_drops: Get packet drop information
+IMPORTANT: You have access to tools that can fetch real-time data from the cluster. ALWAYS USE THESE TOOLS when users ask about pods, network traffic, or syscalls:
 
-When answering questions:
+- get_pod_network_traffic: Query network connections for a pod (requires namespace and pod_name)
+- get_pod_syscalls: Get system calls made by a pod (requires namespace and pod_name)
+
+When a user provides a namespace and pod name (in ANY format), immediately use the appropriate tool to fetch the data. Do NOT ask for clarification if you already have both namespace and pod_name.
+
+Examples:
+- "Show syscalls for istio-gateway-74b9594467-mj48z in istio-ingress" → USE get_pod_syscalls immediately
+- "namespace: default, pod: nginx-123" → USE the appropriate tool immediately
+- "Get traffic for pod xyz in ns abc" → USE get_pod_network_traffic immediately
+
+When presenting results:
 1. Be concise and technical
-2. Use the available tools to fetch real data when needed
-3. Provide actionable insights about security and networking
+2. Format data in readable tables or lists
+3. Highlight security concerns or anomalies
 4. Suggest network policies or seccomp profiles when relevant
-5. Format data in readable tables or lists when appropriate
 
-Available data includes:
-- Pod network traffic (source/dest IPs, ports, protocols)
-- Syscall usage patterns
-- Packet drop events
-- Service mappings
-
-Remember to ask for specific pod names and namespaces when you need to query data.`;
+If you don't have both namespace and pod_name, ask ONCE for the missing information, then use the tool immediately.`;
   }
 }

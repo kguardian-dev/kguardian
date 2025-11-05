@@ -1,6 +1,6 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { X, Send, Sparkles, Bot, User, Minimize2, Maximize2, ChevronRight, ChevronLeft } from 'lucide-react';
-import { sendChatMessage } from '../services/aiApi';
+import { sendChatMessage, type HistoryMessage } from '../services/aiApi';
 
 interface Message {
   id: string;
@@ -61,8 +61,14 @@ const AIAssistant: React.FC<AIAssistantProps> = ({ isOpen, onClose, onLayoutChan
     setIsTyping(true);
 
     try {
-      // Call the real AI API
-      const response = await sendChatMessage(currentMessage);
+      // Build conversation history (exclude system messages)
+      const history: HistoryMessage[] = messages.map(msg => ({
+        role: msg.role,
+        content: msg.content,
+      }));
+
+      // Call the real AI API with conversation history
+      const response = await sendChatMessage(currentMessage, history);
 
       const assistantMessage: Message = {
         id: (Date.now() + 1).toString(),

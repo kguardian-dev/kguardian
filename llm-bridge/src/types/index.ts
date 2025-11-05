@@ -8,6 +8,14 @@ export enum LLMProvider {
   COPILOT = "copilot",
 }
 
+// Message history
+export const MessageSchema = z.object({
+  role: z.enum(['user', 'assistant', 'system']),
+  content: z.string(),
+});
+
+export type Message = z.infer<typeof MessageSchema>;
+
 // Request/Response schemas
 export const ChatRequestSchema = z.object({
   message: z.string().min(1),
@@ -15,6 +23,7 @@ export const ChatRequestSchema = z.object({
   model: z.string().optional(),
   conversationId: z.string().optional(),
   systemPrompt: z.string().optional(),
+  history: z.array(MessageSchema).optional(),
 });
 
 export type ChatRequest = z.infer<typeof ChatRequestSchema>;
