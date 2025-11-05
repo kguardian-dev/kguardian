@@ -1,6 +1,6 @@
 [package]
 name = "broker"
-version = "1.1.1"  #:version
+version = "1.2.0"  #:version
 authors = ["Mahesh Rayas"]
 description = """
 API server for kguardian - stores telemetry data from eBPF controller

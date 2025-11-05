@@ -1,5 +1,6 @@
 use crate::{api_post_call, Error, PodDetail, PodInfo, PodInspect};
 use chrono::Utc;
+use dashmap::DashMap;
 use futures::TryStreamExt;
 use k8s_openapi::api::core::v1::Pod;
 use kube::{
@@ -7,15 +8,14 @@ use kube::{
     Api, Client, ResourceExt,
 };
 use serde_json::json;
-use std::{collections::BTreeMap, sync::Arc};
-use tokio::sync::Mutex;
+use std::sync::Arc;
 use tracing::{debug, error, info};
 
 use tokio::sync::mpsc;
 pub async fn watch_pods(
     node_name: String,
     tx: mpsc::Sender<u64>,
-    container_map: Arc<Mutex<BTreeMap<u64, PodInspect>>>,
+    container_map: Arc<DashMap<u64, PodInspect>>,
     excluded_namespaces: &[String],
     sender_ip: mpsc::Sender<String>,
     ignore_daemonset_traffic: bool,
@@ -57,7 +57,7 @@ pub async fn watch_pods(
 
 async fn process_pod(
     pod: &Pod,
-    container_map: Arc<Mutex<BTreeMap<u64, PodInspect>>>,
+    container_map: Arc<DashMap<u64, PodInspect>>,
     excluded_namespaces: &[String],
     sender_ip: mpsc::Sender<String>,
     ignore_daemonset_traffic: bool,
@@ -88,7 +88,7 @@ fn should_process_pod(namespace: &Option<String>, excluded_namespaces: &[String]
 }
 
 fn pod_unready(p: &Pod) -> Option<Vec<String>> {
-    let status = p.status.as_ref().unwrap();
+    let status = p.status.as_ref()?;
     if let Some(conds) = &status.conditions {
         let failed = conds
             .iter()
@@ -143,7 +143,7 @@ async fn process_container_ids(
     con_ids: &[String],
     pod: &Pod,
     pod_ip: &String,
-    container_map: Arc<Mutex<BTreeMap<u64, PodInspect>>>,
+    container_map: Arc<DashMap<u64, PodInspect>>,
 ) -> Option<u64> {
     for con_id in con_ids {
         let pod_info = create_pod_info(pod, pod_ip);
@@ -153,13 +153,13 @@ async fn process_container_ids(
         };
         info!("pod name {}", pod.name_any());
         if let Some(pod_inspect) = pod_inspect.get_pod_inspect(con_id).await {
-            let mut cm = container_map.lock().await;
             if let Some(inode_num) = pod_inspect.inode_num {
                 info!(
                     "inode_num of pod {} is {}",
                     pod_inspect.status.pod_name, inode_num
                 );
-                cm.insert(inode_num, pod_inspect.clone());
+                // DashMap provides lock-free inserts!
+                container_map.insert(inode_num, pod_inspect.clone());
                 return Some(inode_num);
             }
         }

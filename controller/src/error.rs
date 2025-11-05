@@ -29,6 +29,9 @@ pub enum Error {
     #[error("ApiError - {0}")]
     ApiError(String),
 
+    #[error("Custom error: {0}")]
+    Custom(String),
+
     #[error("Tokio Join error: {source}")]
     JoinError {
         #[from]
