@@ -30,11 +30,21 @@ export async function callOpenAI(
   const systemPrompt =
     request.systemPrompt || BrokerClient.getSystemPrompt();
 
-  // Build messages
+  // Build messages with history
   const messages: OpenAIMessage[] = [
     { role: "system", content: systemPrompt },
-    { role: "user", content: request.message },
   ];
+
+  // Add conversation history if provided
+  if (request.history && request.history.length > 0) {
+    messages.push(...request.history.map(msg => ({
+      role: msg.role,
+      content: msg.content,
+    })));
+  }
+
+  // Add current user message
+  messages.push({ role: "user", content: request.message });
 
   // Build tools
   const tools: OpenAITool[] = BrokerClient.getToolDefinitions().map(

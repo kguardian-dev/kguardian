@@ -604,3 +604,109 @@ llmBridge:
       enabled: false
       # -- Secret name for GitHub Copilot
       name: "kguardian-copilot"
+
+# MCP Server Configuration (Model Context Protocol)
+# The MCP server provides external tools (like Claude Desktop) access to cluster data
+mcpServer:
+  # -- Enable MCP Server for external integrations
+  enabled: false
+  # -- Number of mcp-server replicas to deploy
+  replicaCount: 1
+  image:
+    # -- MCP Server container image repository
+    repository: ghcr.io/kguardian-dev/kguardian/mcp-server
+    # -- MCP Server image pull policy
+    pullPolicy: Always
+    # -- MCP Server version tag. Use component version (e.g., "v1.0.0") or "latest"
+    tag: "latest"
+    # -- Overrides the image tag using SHA digest
+    sha: ""
+
+  container:
+    # -- MCP Server container port (stdio mode, not HTTP)
+    port: 8081
+
+  # -- List of image pull secrets for private registries
+  imagePullSecrets: []
+  # -- Override the name of the mcp-server resources
+  nameOverride: ""
+  # -- Override the full name of the mcp-server resources
+  fullnameOverride: ""
+
+  serviceAccount:
+    # -- Specifies whether a service account should be created
+    create: true
+    # -- Annotations to add to the service account
+    annotations: {}
+    # -- The name of the service account to use. If not set and create is true, a name is generated using the fullname template
+    name: ""
+    # -- Automount API credentials for a service account
+    automountServiceAccountToken: false
+
+  # -- Annotations to add to mcp-server pods
+  podAnnotations: {}
+
+  # -- MCP Server pod security context. Runs as non-root user (node:1000)
+  podSecurityContext:
+    runAsUser: 1000
+    runAsGroup: 1000
+    fsGroup: 1000
+    fsGroupChangePolicy: OnRootMismatch
+    supplementalGroups: [1000]
+    seccompProfile:
+      type: RuntimeDefault
+
+  # -- MCP Server container security context. Hardened with read-only root filesystem
+  securityContext:
+    privileged: false
+    capabilities:
+      drop:
+      - ALL
+    readOnlyRootFilesystem: true
+    runAsNonRoot: true
+    runAsUser: 1000
+    allowPrivilegeEscalation: false
+
+  service:
+    # -- MCP Server service name
+    name: "kguardian-mcp-server"
+    # -- MCP Server service type
+    type: ClusterIP
+    # -- MCP Server service port
+    port: 8081
+
+  # -- MCP Server pod resource requests and limits
+  resources:
+    limits:
+      cpu: 200m
+      memory: 256Mi
+    requests:
+      cpu: 50m
+      memory: 128Mi
+
+  autoscaling:
+    # -- Enable horizontal pod autoscaling for mcp-server
+    enabled: false
+    # -- Minimum number of mcp-server replicas
+    minReplicas: 1
+    # -- Maximum number of mcp-server replicas
+    maxReplicas: 5
+    # -- Target CPU utilization percentage for autoscaling
+    targetCPUUtilizationPercentage: 80
+    # targetMemoryUtilizationPercentage: 80
+
+  # -- Node labels for the kguardian mcp-server pod assignment
+  nodeSelector:
+    kubernetes.io/os: linux
+
+  # -- Tolerations for the kguardian mcp-server pod assignment
+  tolerations: []
+
+  # -- Affinity rules for mcp-server pod assignment
+  affinity: {}
+
+  # -- Priority class to be used for the kguardian mcp-server pods
+  priorityClassName: ""
+
+  # -- Additional environment variables for mcp-server
+  env: []

@@ -7,12 +7,18 @@ const LLM_BRIDGE_URL = import.meta.env.PROD ? '/llm-api' : (import.meta.env.VITE
 
 export type LLMProvider = 'openai' | 'anthropic' | 'gemini' | 'copilot';
 
+export interface HistoryMessage {
+  role: 'user' | 'assistant' | 'system';
+  content: string;
+}
+
 export interface ChatMessage {
   message: string;
   conversation_id?: string;
   provider?: LLMProvider;
   model?: string;
   system_prompt?: string;
+  history?: HistoryMessage[];
 }
 
 export interface ChatResponse {
@@ -25,18 +31,21 @@ export interface ChatResponse {
 /**
  * Send a chat message to the AI assistant
  * @param message The user's message
+ * @param history Optional: Previous conversation messages for context
  * @param provider Optional: Specify which LLM provider to use (openai, anthropic, gemini, copilot)
  * @param conversationId Optional: Continue an existing conversation
  * @returns The AI's response
  */
 export async function sendChatMessage(
   message: string,
+  history?: HistoryMessage[],
   provider?: LLMProvider,
   conversationId?: string
 ): Promise<ChatResponse> {
   try {
     const response = await axios.post<ChatResponse>(`${LLM_BRIDGE_URL}/api/chat`, {
       message,
+      history,
       provider,
       conversationId,
     });

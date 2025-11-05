@@ -31,16 +31,28 @@ export async function callAnthropic(
     })
   );
 
+  // Build messages with history
+  const messages = [];
+
+  // Add conversation history if provided
+  if (request.history && request.history.length > 0) {
+    messages.push(...request.history.filter(msg => msg.role !== 'system').map(msg => ({
+      role: msg.role,
+      content: msg.content,
+    })));
+  }
+
+  // Add current user message
+  messages.push({
+    role: "user",
+    content: request.message,
+  });
+
   const payload = {
     model,
     max_tokens: 4096,
     system: systemPrompt,
-    messages: [
-      {
-        role: "user",
-        content: request.message,
-      },
-    ],
+    messages,
     tools,
   };
 
