@@ -1,0 +1,41 @@
+apiVersion: v1alpha1
+kind: MCPProject
+metadata:
+  name: kguardian-mcp-server
+  description: Model Context Protocol server for kguardian
+  version: 1.0.0
+
+spec:
+  # Language and framework
+  language: go
+  framework: mcp-go-sdk
+
+  # Module information
+  goModule: github.com/kguardian-dev/kguardian/mcp-server
+
+  # Tools provided by this MCP server
+  tools:
+    - name: get_pod_network_traffic
+      description: Get network traffic data for a specific pod by namespace and pod name
+
+    - name: get_pod_syscalls
+      description: Get system call data for a specific pod
+
+  # Build configuration
+  build:
+    dockerfile: Dockerfile
+    context: .
+
+  # Deployment configuration
+  deployment:
+    type: kubernetes
+    namespace: kguardian
+    port: 8081
+    transport: streamable-http
+
+    # Environment variables
+    env:
+      - name: BROKER_URL
+        value: http://kguardian-broker.kguardian.svc.cluster.local:9090
+      - name: PORT
+        value: "8081"

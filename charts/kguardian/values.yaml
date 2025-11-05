@@ -623,7 +623,7 @@ mcpServer:
     sha: ""
 
   container:
-    # -- MCP Server container port (stdio mode, not HTTP)
+    # -- MCP Server container HTTP port for StreamableHTTP transport
     port: 8081
 
   # -- List of image pull secrets for private registries
