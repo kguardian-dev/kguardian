@@ -1,8 +1,9 @@
 use chrono::Utc;
+use dashmap::DashMap;
 use libseccomp::{ScmpArch, ScmpSyscall};
 use moka::future::Cache;
 use serde_json::json;
-use std::collections::{BTreeMap, HashSet};
+use std::collections::HashSet;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use tracing::{debug, error};
@@ -32,12 +33,12 @@ pub struct SyscallEventData {
 
 pub async fn handle_syscall_events(
     mut event_receiver: tokio::sync::mpsc::Receiver<SyscallEventData>,
-    container_map_udp: Arc<Mutex<BTreeMap<u64, PodInspect>>>,
+    container_map: Arc<DashMap<u64, PodInspect>>,
 ) -> Result<(), Error> {
     while let Some(event) = event_receiver.recv().await {
-        let container_map = container_map_udp.lock().await;
+        // DashMap provides lock-free reads - no need for explicit locking!
         if let Some(pod_inspect) = container_map.get(&event.inum) {
-            process_syscall_event(&event, pod_inspect).await?
+            process_syscall_event(&event, &pod_inspect).await?
         }
     }
     tracing::error!("Syscall event receiver exited unexpectedly!");
@@ -74,7 +75,8 @@ pub async fn process_syscall_event(
 }
 
 pub async fn send_syscall_cache_periodically() -> Result<(), Error> {
-    let interval_duration = std::time::Duration::from_secs(60);
+    // Reduced from 60s to 10s for faster visibility of syscall data
+    let interval_duration = std::time::Duration::from_secs(10);
     for _ in 0.. {
         let mut batch = Vec::new();
 

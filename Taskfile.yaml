@@ -13,35 +13,30 @@ vars:
 
 tasks:
   all:
-    deps: [kind]
+    # deps: [kind]
     desc: "Run all tasks"
     cmds:
       #- task: advisor:all
       - task: broker:all
       - task: controller:all
 
-  kind:
-    desc: Create fresh kind cluster
-    cmds:
-      - kind delete cluster || true
-      - kind create cluster
+  # kind:
+  #   desc: Create fresh kind cluster
+  #   cmds:
+  #     - kind delete cluster || true
+  #     - kind create cluster
 
-  install:
+
+  install:oci:
     deps: [all]
-    desc: "Install in KinD cluster (local dev - uses local images)"
+    desc: "Install from OCI registry (production-style install)"
     cmds:
-      - helm repo add kguardian https://kguardian-dev.github.io/kguardian || true
-      - helm install kguardian kguardian/kguardian --namespace kguardian
-        --create-namespace --set controller.image.tag={{.IMAGE_VERSION}}
+      - helm upgrade kguardian oci://ghcr.io/kguardian-dev/charts/kguardian
+        --namespace kguardian --create-namespace --set controller.image.tag={{.IMAGE_VERSION}}
         --set broker.image.tag={{.IMAGE_VERSION}}
         --set controller.image.pullPolicy=IfNotPresent
         --set broker.image.pullPolicy=IfNotPresent
-
-  install:oci:
-    desc: "Install from OCI registry (production-style install)"
-    cmds:
-      - helm install kguardian oci://ghcr.io/kguardian-dev/charts/kguardian
-        --namespace kguardian --create-namespace
+        --set controller.initContainer.image.pullPolicy=IfNotPresent
 
   preflight:
     desc: "Run preflight checks for all components"
