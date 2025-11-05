@@ -14,6 +14,11 @@ export default defineConfig({
         changeOrigin: true,
         rewrite: (path) => path.replace(/^\/api/, ''),
       },
+      '/llm-api': {
+        target: process.env.VITE_LLM_BRIDGE_URL || 'http://localhost:8080',
+        changeOrigin: true,
+        rewrite: (path) => path.replace(/^\/llm-api/, ''),
+      },
     },
   },
 
@@ -61,6 +66,11 @@ export default defineConfig({
         target: process.env.VITE_API_URL || 'http://localhost:9090',
         changeOrigin: true,
         rewrite: (path) => path.replace(/^\/api/, ''),
+      },
+      '/llm-api': {
+        target: process.env.VITE_LLM_BRIDGE_URL || 'http://localhost:8080',
+        changeOrigin: true,
+        rewrite: (path) => path.replace(/^\/llm-api/, ''),
       },
     },
   },
