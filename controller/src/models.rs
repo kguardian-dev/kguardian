@@ -48,6 +48,7 @@ pub struct PodTraffic {
     pub traffic_in_out_ip: Option<String>,
     pub traffic_in_out_port: Option<String>,
     pub ip_protocol: Option<String>,
+    pub decision: Option<String>,
     pub time_stamp: NaiveDateTime,
 }
 

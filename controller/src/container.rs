@@ -14,19 +14,25 @@ static REGEX_CONTAINERD: &str = "containerd://(?P<container_id>[0-9a-zA-Z]*)";
 
 impl PodInspect {
     pub async fn get_pod_inspect(self, container_id: &str) -> Option<PodInspect> {
-        let re = Regex::new(REGEX_CONTAINERD).unwrap();
+        let re = Regex::new(REGEX_CONTAINERD).ok()?;
         let container_id: Option<String> = re
             .captures(container_id)
-            .map(|c| c["container_id"].parse().unwrap());
+            .and_then(|c| c.name("container_id"))
+            .and_then(|m| m.as_str().parse().ok());
 
         if let Some(container_id) = container_id {
-            let channel = connect("/run/containerd/containerd.sock").await.unwrap();
-            Some(
-                self.set_container_id(container_id)
-                    .get_pid(channel)
-                    .await
-                    .get_net_namespace_id(),
-            )
+            match connect("/run/containerd/containerd.sock").await {
+                Ok(channel) => Some(
+                    self.set_container_id(container_id)
+                        .get_pid(channel)
+                        .await
+                        .get_net_namespace_id(),
+                ),
+                Err(err) => {
+                    error!("Failed to connect to containerd socket: {:?}", err);
+                    None
+                }
+            }
         } else {
             None
         }
@@ -63,8 +69,8 @@ impl PodInspect {
     }
 
     fn get_net_namespace_id(mut self) -> Self {
-        if self.pid.is_some() {
-            if let Ok(process) = Process::new(self.pid.unwrap() as i32) {
+        if let Some(pid) = self.pid {
+            if let Ok(process) = Process::new(pid as i32) {
                 if let Ok(ns) = process.namespaces() {
                     if let Some(netns) = ns.0.get(&OsString::from("net")) {
                         self.inode_num = Some(netns.identifier);

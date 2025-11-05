@@ -7,7 +7,7 @@ use vmlinux;
 
 const SYSCALL_SRC: &str = "src/bpf/syscall.bpf.c";
 const TCP_PROBE_SRC: &str = "src/bpf/network_probe.bpf.c";
-const PACKET_DROP_SRC: &str = "src/bpf/packet_drop.bpf.c";
+const PACKET_DROP_SRC: &str = "src/bpf/netpolicy_drop.bpf.c";
 
 fn main() {
     let out = PathBuf::from(
@@ -22,7 +22,7 @@ fn main() {
     )
     .join("src")
     .join("bpf")
-    .join("packet_drop.skel.rs");
+    .join("netpolicy_drop.skel.rs");
 
     let tcp_probe_out = PathBuf::from(
         env::var_os("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR must be set in build script"),

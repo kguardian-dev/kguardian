@@ -3,7 +3,7 @@
 version: '3'
 
 vars:
-  CONTROLLER_IMAGE_NAME: ghcr.io/kguardian-dev/kguardian/guardian-controller
+  CONTROLLER_IMAGE_NAME: ghcr.io/kguardian-dev/kguardian/controller
   IMAGE_VERSION: local
   TARGET: x86_64-unknown-linux-gnu
 
