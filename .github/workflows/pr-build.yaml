@@ -152,6 +152,7 @@ jobs:
           path: controller/linux/arm64
 
       - name: Build and Push
+        id: build
         env:
           BUILDX_NO_DEFAULT_ATTESTATIONS: 1
         uses: docker/build-push-action@263435318d21b8e681c14492fe198d362a7d2c83 # v6
@@ -165,15 +166,42 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
+      - name: Delete old PR comments
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const comments = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+            });
+
+            for (const comment of comments.data) {
+              if (comment.body.includes('✅ Controller image built and pushed:')) {
+                await github.rest.issues.deleteComment({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  comment_id: comment.id,
+                });
+              }
+            }
+
       - name: Comment PR
         uses: actions/github-script@v7
         with:
           script: |
+            const digest = '${{ steps.build.outputs.digest }}';
+            const body = `✅ Controller image built and pushed:
+            \`\`\`
+            ghcr.io/kguardian-dev/kguardian/controller:pr-${{ github.event.pull_request.number }}
+            \`\`\`
+            **Digest:** \`${digest}\``;
+
             github.rest.issues.createComment({
               issue_number: context.issue.number,
               owner: context.repo.owner,
               repo: context.repo.repo,
-              body: '✅ Controller image built and pushed:\n```\nghcr.io/kguardian-dev/kguardian/controller:pr-${{ github.event.pull_request.number }}\n```'
+              body: body
             })
 
   # Build Broker
@@ -218,6 +246,7 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Build and Push
+        id: build
         uses: docker/build-push-action@263435318d21b8e681c14492fe198d362a7d2c83 # v6
         with:
           context: broker/
@@ -229,15 +258,42 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
+      - name: Delete old PR comments
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const comments = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+            });
+
+            for (const comment of comments.data) {
+              if (comment.body.includes('✅ Broker image built and pushed:')) {
+                await github.rest.issues.deleteComment({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  comment_id: comment.id,
+                });
+              }
+            }
+
       - name: Comment PR
         uses: actions/github-script@v7
         with:
           script: |
+            const digest = '${{ steps.build.outputs.digest }}';
+            const body = `✅ Broker image built and pushed:
+            \`\`\`
+            ghcr.io/kguardian-dev/kguardian/broker:pr-${{ github.event.pull_request.number }}
+            \`\`\`
+            **Digest:** \`${digest}\``;
+
             github.rest.issues.createComment({
               issue_number: context.issue.number,
               owner: context.repo.owner,
               repo: context.repo.repo,
-              body: '✅ Broker image built and pushed:\n```\nghcr.io/kguardian-dev/kguardian/broker:pr-${{ github.event.pull_request.number }}\n```'
+              body: body
             })
 
   # Build Frontend
@@ -278,6 +334,7 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Build and Push
+        id: build
         uses: docker/build-push-action@263435318d21b8e681c14492fe198d362a7d2c83 # v6
         with:
           context: frontend/
@@ -289,15 +346,42 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
+      - name: Delete old PR comments
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const comments = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+            });
+
+            for (const comment of comments.data) {
+              if (comment.body.includes('✅ Frontend image built and pushed:')) {
+                await github.rest.issues.deleteComment({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  comment_id: comment.id,
+                });
+              }
+            }
+
       - name: Comment PR
         uses: actions/github-script@v7
         with:
           script: |
+            const digest = '${{ steps.build.outputs.digest }}';
+            const body = `✅ Frontend image built and pushed:
+            \`\`\`
+            ghcr.io/kguardian-dev/kguardian/frontend:pr-${{ github.event.pull_request.number }}
+            \`\`\`
+            **Digest:** \`${digest}\``;
+
             github.rest.issues.createComment({
               issue_number: context.issue.number,
               owner: context.repo.owner,
               repo: context.repo.repo,
-              body: '✅ Frontend image built and pushed:\n```\nghcr.io/kguardian-dev/kguardian/frontend:pr-${{ github.event.pull_request.number }}\n```'
+              body: body
             })
 
   # Build LLM Bridge
@@ -339,6 +423,7 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Build and Push
+        id: build
         uses: docker/build-push-action@263435318d21b8e681c14492fe198d362a7d2c83 # v6
         with:
           context: llm-bridge/
@@ -350,15 +435,42 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
+      - name: Delete old PR comments
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const comments = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+            });
+
+            for (const comment of comments.data) {
+              if (comment.body.includes('✅ LLM Bridge image built and pushed:')) {
+                await github.rest.issues.deleteComment({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  comment_id: comment.id,
+                });
+              }
+            }
+
       - name: Comment PR
         uses: actions/github-script@v7
         with:
           script: |
+            const digest = '${{ steps.build.outputs.digest }}';
+            const body = `✅ LLM Bridge image built and pushed:
+            \`\`\`
+            ghcr.io/kguardian-dev/kguardian/llm-bridge:pr-${{ github.event.pull_request.number }}
+            \`\`\`
+            **Digest:** \`${digest}\``;
+
             github.rest.issues.createComment({
               issue_number: context.issue.number,
               owner: context.repo.owner,
               repo: context.repo.repo,
-              body: '✅ LLM Bridge image built and pushed:\n```\nghcr.io/kguardian-dev/kguardian/llm-bridge:pr-${{ github.event.pull_request.number }}\n```'
+              body: body
             })
 
   # Build MCP Server
@@ -400,6 +512,7 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Build and Push
+        id: build
         uses: docker/build-push-action@263435318d21b8e681c14492fe198d362a7d2c83 # v6
         with:
           context: mcp-server/
@@ -411,15 +524,42 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
+      - name: Delete old PR comments
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const comments = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+            });
+
+            for (const comment of comments.data) {
+              if (comment.body.includes('✅ MCP Server image built and pushed:')) {
+                await github.rest.issues.deleteComment({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  comment_id: comment.id,
+                });
+              }
+            }
+
       - name: Comment PR
         uses: actions/github-script@v7
         with:
           script: |
+            const digest = '${{ steps.build.outputs.digest }}';
+            const body = `✅ MCP Server image built and pushed:
+            \`\`\`
+            ghcr.io/kguardian-dev/kguardian/mcp-server:pr-${{ github.event.pull_request.number }}
+            \`\`\`
+            **Digest:** \`${digest}\``;
+
             github.rest.issues.createComment({
               issue_number: context.issue.number,
               owner: context.repo.owner,
               repo: context.repo.repo,
-              body: '✅ MCP Server image built and pushed:\n```\nghcr.io/kguardian-dev/kguardian/mcp-server:pr-${{ github.event.pull_request.number }}\n```'
+              body: body
             })
 
   # Build and publish Helm chart for PR testing
@@ -464,6 +604,26 @@ jobs:
           CHART_FILE=$(ls kguardian-*.tgz)
           helm push "${CHART_FILE}" oci://ghcr.io/kguardian-dev/charts
 
+      - name: Delete old Helm chart comments
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const comments = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+            });
+
+            for (const comment of comments.data) {
+              if (comment.body.includes('✅ Helm chart built and pushed for testing:')) {
+                await github.rest.issues.deleteComment({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  comment_id: comment.id,
+                });
+              }
+            }
+
       - name: Comment PR with Helm chart info
         uses: actions/github-script@v7
         with:
@@ -482,6 +642,26 @@ jobs:
     needs: [detect-changes, push-controller, build-broker, build-frontend, build-llm-bridge, build-mcp-server, build-helm-chart]
     if: always()
     steps:
+      - name: Delete old summary comments
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const comments = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+            });
+
+            for (const comment of comments.data) {
+              if (comment.body.includes('## 🚀 PR Build Summary')) {
+                await github.rest.issues.deleteComment({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  comment_id: comment.id,
+                });
+              }
+            }
+
       - name: Create summary comment
         uses: actions/github-script@v7
         with:
