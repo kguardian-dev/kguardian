@@ -1,5 +1,7 @@
-{{- if .Values.mcpServer.enabled }}
+{{- if and .Values.mcpServer.enabled (not .Values.mcpServer.useKmcp) }}
 ---
+# Standard Kubernetes Deployment (used when kmcp is disabled)
+# To use kmcp controller instead, set mcpServer.useKmcp: true
 apiVersion: apps/v1
 kind: Deployment
 metadata:

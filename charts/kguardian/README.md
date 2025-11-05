@@ -245,18 +245,29 @@ The following table lists the configurable parameters of the kguardian chart and
 | mcpServer.container.port | int | `8081` | MCP Server container HTTP port for StreamableHTTP transport |
 | mcpServer.enabled | bool | `false` | Enable MCP Server for external integrations |
 | mcpServer.env | list | `[]` | Additional environment variables for mcp-server |
+| mcpServer.env | list | `[]` | Additional environment variables for mcp-server |
 | mcpServer.fullnameOverride | string | `""` | Override the full name of the mcp-server resources |
 | mcpServer.image.pullPolicy | string | `"Always"` | MCP Server image pull policy |
 | mcpServer.image.repository | string | `"ghcr.io/kguardian-dev/kguardian/mcp-server"` | MCP Server container image repository |
 | mcpServer.image.sha | string | `""` | Overrides the image tag using SHA digest |
 | mcpServer.image.tag | string | `"latest"` | MCP Server version tag. Use component version (e.g., "v1.0.0") or "latest" |
 | mcpServer.imagePullSecrets | list | `[]` | List of image pull secrets for private registries |
+| mcpServer.kmcp.observability.logging.format | string | `"json"` |  |
+| mcpServer.kmcp.observability.logging.level | string | `"info"` |  |
+| mcpServer.kmcp.observability.metrics.enabled | bool | `false` |  |
+| mcpServer.kmcp.observability.metrics.path | string | `"/metrics"` |  |
+| mcpServer.kmcp.observability.metrics.port | int | `9090` |  |
+| mcpServer.kmcp.observability.tracing.enabled | bool | `false` |  |
+| mcpServer.kmcp.observability.tracing.endpoint | string | `""` |  |
+| mcpServer.kmcp.secretRefs | list | `[]` | Secret references for kmcp deployment |
+| mcpServer.kmcp.transport.alternativeTransports | list | `[]` | Alternative transports (kmcp can serve multiple simultaneously) |
+| mcpServer.kmcp.transport.type | string | `"streamable-http"` | Primary transport type: streamable-http, stdio, sse, or websocket |
 | mcpServer.nameOverride | string | `""` | Override the name of the mcp-server resources |
 | mcpServer.nodeSelector | object | `{"kubernetes.io/os":"linux"}` | Node labels for the kguardian mcp-server pod assignment |
 | mcpServer.podAnnotations | object | `{}` | Annotations to add to mcp-server pods |
 | mcpServer.podSecurityContext | object | `{"fsGroup":1000,"fsGroupChangePolicy":"OnRootMismatch","runAsGroup":1000,"runAsUser":1000,"seccompProfile":{"type":"RuntimeDefault"},"supplementalGroups":[1000]}` | MCP Server pod security context. Runs as non-root user (mcp:1000) |
 | mcpServer.priorityClassName | string | `""` | Priority class to be used for the kguardian mcp-server pods |
-| mcpServer.replicaCount | int | `1` | Number of mcp-server replicas to deploy |
+| mcpServer.replicaCount | int | `1` | Number of mcp-server replicas to deploy (ignored if useKmcp is true and autoscaling is enabled) |
 | mcpServer.resources | object | `{"limits":{"cpu":"200m","memory":"256Mi"},"requests":{"cpu":"50m","memory":"128Mi"}}` | MCP Server pod resource requests and limits |
 | mcpServer.securityContext | object | `{"allowPrivilegeEscalation":false,"capabilities":{"drop":["ALL"]},"privileged":false,"readOnlyRootFilesystem":true,"runAsNonRoot":true,"runAsUser":1000}` | MCP Server container security context. Hardened with read-only root filesystem |
 | mcpServer.service.name | string | `"kguardian-mcp-server"` | MCP Server service name |
@@ -267,6 +278,7 @@ The following table lists the configurable parameters of the kguardian chart and
 | mcpServer.serviceAccount.create | bool | `true` | Specifies whether a service account should be created |
 | mcpServer.serviceAccount.name | string | `""` | The name of the service account to use. If not set and create is true, a name is generated using the fullname template |
 | mcpServer.tolerations | list | `[]` | Tolerations for the kguardian mcp-server pod assignment |
+| mcpServer.useKmcp | bool | `false` | Use kmcp controller for MCP server management (requires kmcp controller installed) When enabled, uses MCPServer CRD instead of standard Deployment Benefits: Transport flexibility, better observability, kmcp CLI integration |
 | namespace.annotations | object | `{}` | Annotations to add to the namespace |
 | namespace.labels | object | `{}` | Labels to add to the namespace |
 | namespace.name | string | `""` | Namespace name. If empty, uses the release namespace |

@@ -1,0 +1,37 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - ../../
+
+namespace: kguardian
+
+# Production image tag (use specific version)
+images:
+  - name: ghcr.io/kguardian-dev/kguardian/mcp-server
+    newTag: v1.0.0
+
+# Production-specific patches
+patchesStrategicMerge:
+  - |-
+    apiVersion: mcp.kagent.dev/v1alpha1
+    kind: MCPServer
+    metadata:
+      name: kguardian-mcp-server
+    spec:
+      replicas: 3
+      autoscaling:
+        enabled: true
+        minReplicas: 2
+        maxReplicas: 10
+        targetCPUUtilizationPercentage: 70
+      resources:
+        requests:
+          cpu: 100m
+          memory: 256Mi
+        limits:
+          cpu: 500m
+          memory: 512Mi
+      env:
+        - name: LOG_LEVEL
+          value: info

@@ -1,0 +1,30 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: kguardian
+
+resources:
+  - mcpserver.yaml
+
+# Common labels applied to all resources
+commonLabels:
+  app.kubernetes.io/name: kguardian-mcp-server
+  app.kubernetes.io/part-of: kguardian
+  app.kubernetes.io/managed-by: kmcp
+
+# Image transformer (override in overlays)
+images:
+  - name: ghcr.io/kguardian-dev/kguardian/mcp-server
+    newTag: latest
+
+# ConfigMap generator for configuration
+configMapGenerator:
+  - name: kguardian-mcp-config
+    literals:
+      - LOG_LEVEL=info
+
+# Optional: Secret generator (use sealed-secrets or external-secrets in production)
+# secretGenerator:
+#   - name: kguardian-mcp-secrets
+#     literals:
+#       - BROKER_API_KEY=changeme

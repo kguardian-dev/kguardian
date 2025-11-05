@@ -1,37 +1,118 @@
-apiVersion: v1alpha1
+apiVersion: kmcp.kagent.dev/v1alpha1
 kind: MCPProject
+
 metadata:
   name: kguardian-mcp-server
-  description: Model Context Protocol server for kguardian
+  description: Model Context Protocol server for kguardian - provides tools for querying Kubernetes security and network telemetry data
   version: 1.0.0
+  author: kguardian-dev
+  license: BUSL-1.1
 
 spec:
-  # Language and framework
+  # Language and SDK
   language: go
-  framework: mcp-go-sdk
+  sdk: mcp-go-sdk
+  goVersion: "1.23"
 
-  # Module information
-  goModule: github.com/kguardian-dev/kguardian/mcp-server
+  # Go module configuration
+  module:
+    name: github.com/kguardian-dev/kguardian/mcp-server
+    path: .
 
-  # Tools provided by this MCP server
+  # Tools exposed by this MCP server
   tools:
     - name: get_pod_network_traffic
-      description: Get network traffic data for a specific pod by namespace and pod name
+      description: Get network traffic data for a specific pod by namespace and pod name. Returns source/destination IPs, ports, protocols, and connection counts.
+      input:
+        namespace: The Kubernetes namespace of the pod
+        pod_name: The name of the pod
+      output:
+        data: Network traffic data in JSON format
 
     - name: get_pod_syscalls
-      description: Get system call data for a specific pod
+      description: Get system call (syscall) data for a specific pod. Returns the syscalls made by the pod with their frequencies. Useful for security analysis and seccomp profile generation.
+      input:
+        namespace: The Kubernetes namespace of the pod
+        pod_name: The name of the pod
+      output:
+        data: Syscall data in JSON format
 
   # Build configuration
   build:
     dockerfile: Dockerfile
     context: .
+    platforms:
+      - linux/amd64
+      - linux/arm64
+    tags:
+      - latest
+      - "{{.Version}}"
+      - "{{.GitSHA}}"
+
+  # Local development configuration
+  dev:
+    port: 8081
+    brokerURL: http://localhost:9090
+    hotReload: true
 
   # Deployment configuration
   deployment:
-    type: kubernetes
-    namespace: kguardian
-    port: 8081
-    transport: streamable-http
+    # Transport configuration
+    transport:
+      type: streamable-http
+      port: 8081
+
+      # Support multiple transports
+      alternativeTransports:
+        - type: stdio
+        - type: sse
+          path: /sse
+
+    # Kubernetes configuration
+    kubernetes:
+      namespace: kguardian
+
+      # Resource requirements
+      resources:
+        requests:
+          cpu: 50m
+          memory: 128Mi
+        limits:
+          cpu: 200m
+          memory: 256Mi
+
+      # Autoscaling
+      autoscaling:
+        enabled: false
+        minReplicas: 1
+        maxReplicas: 5
+        targetCPUUtilizationPercentage: 80
+
+      # Health checks
+      livenessProbe:
+        httpGet:
+          path: /
+          port: 8081
+        initialDelaySeconds: 10
+        periodSeconds: 30
+
+      readinessProbe:
+        httpGet:
+          path: /
+          port: 8081
+        initialDelaySeconds: 5
+        periodSeconds: 10
+
+      # Security context
+      securityContext:
+        runAsUser: 1000
+        runAsGroup: 1000
+        runAsNonRoot: true
+        readOnlyRootFilesystem: true
+        allowPrivilegeEscalation: false
+        capabilities:
+          drop:
+            - ALL
 
     # Environment variables
     env:
@@ -39,3 +120,34 @@ spec:
         value: http://kguardian-broker.kguardian.svc.cluster.local:9090
       - name: PORT
         value: "8081"
+      - name: LOG_LEVEL
+        value: info
+
+    # Secrets (reference Kubernetes secrets)
+    secrets:
+      - name: BROKER_API_KEY
+        secretRef:
+          name: kguardian-mcp-secrets
+          key: broker-api-key
+        optional: true
+
+  # Testing configuration
+  testing:
+    enabled: true
+    inspector: true
+    localBroker: false
+
+  # Observability
+  observability:
+    metrics:
+      enabled: true
+      port: 9090
+      path: /metrics
+
+    tracing:
+      enabled: false
+      endpoint: ""
+
+    logging:
+      level: info
+      format: json

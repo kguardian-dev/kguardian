@@ -610,7 +610,13 @@ llmBridge:
 mcpServer:
   # -- Enable MCP Server for external integrations
   enabled: false
-  # -- Number of mcp-server replicas to deploy
+
+  # -- Use kmcp controller for MCP server management (requires kmcp controller installed)
+  # When enabled, uses MCPServer CRD instead of standard Deployment
+  # Benefits: Transport flexibility, better observability, kmcp CLI integration
+  useKmcp: false
+
+  # -- Number of mcp-server replicas to deploy (ignored if useKmcp is true and autoscaling is enabled)
   replicaCount: 1
   image:
     # -- MCP Server container image repository
@@ -705,8 +711,52 @@ mcpServer:
   # -- Affinity rules for mcp-server pod assignment
   affinity: {}
 
+  # -- Additional environment variables for mcp-server
+  env: []
+  # Example:
+  # - name: LOG_LEVEL
+  #   value: debug
+
   # -- Priority class to be used for the kguardian mcp-server pods
   priorityClassName: ""
+
+  # kmcp-specific configuration (only used when useKmcp: true)
+  kmcp:
+    # Transport configuration
+    transport:
+      # -- Primary transport type: streamable-http, stdio, sse, or websocket
+      type: streamable-http
+
+      # -- Alternative transports (kmcp can serve multiple simultaneously)
+      alternativeTransports: []
+      # Example:
+      # - type: stdio
+      # - type: sse
+      #   path: /sse
+
+    # -- Secret references for kmcp deployment
+    secretRefs: []
+    # Example:
+    # - name: kguardian-mcp-secrets
+    #   optional: true
+
+    # Observability configuration (if supported by kmcp controller)
+    observability:
+      # Metrics configuration
+      metrics:
+        enabled: false
+        port: 9090
+        path: /metrics
+
+      # Tracing configuration
+      tracing:
+        enabled: false
+        endpoint: ""
+
+      # Logging configuration
+      logging:
+        level: info
+        format: json
 
   # -- Additional environment variables for mcp-server
   env: []
