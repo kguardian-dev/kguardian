@@ -91,10 +91,10 @@ struct
     __type(value, struct tcp_connect_ctx);
 } tcp_ctx SEC(".maps");
 
-SEC("kprobe/udp_sendmsg")
-int trace_udp_send(struct pt_regs *ctx)
+// Use fentry instead of kprobe for better performance (lower overhead)
+SEC("fentry/udp_sendmsg")
+int BPF_PROG(trace_udp_send, struct sock *sk, struct msghdr *msg, size_t len)
 {
-    struct sock *sk = (struct sock *)PT_REGS_PARM1(ctx);
 
     // Validate socket and get inode - single lookup
     __u64 inum = 0;
@@ -155,21 +155,21 @@ int BPF_PROG(trace_tcp_state_change, struct sock *sk, int state)
     if (state != 1)
         return 0;
 
-    // Get network namespace inode
+    // Read socket common structure once (batch read) - do this early for family check
+    struct sock_common skc;
+    BPF_CORE_READ_INTO(&skc, sk, __sk_common);
+
+    // Check socket family first - only handle IPv4 (fast check, avoids other work for IPv6)
+    if (skc.skc_family != 2) // AF_INET = 2
+        return 0;
+
+    // Get network namespace inode (now only for IPv4 sockets)
     __u64 inum = 0;
     if (!get_and_validate_inum(sk, &inum))
         return 0;
 
-    // Read socket common structure once (batch read)
-    struct sock_common skc;
-    BPF_CORE_READ_INTO(&skc, sk, __sk_common);
-
     // Apply common filtering helper
     if (should_filter_traffic(skc.skc_rcv_saddr, skc.skc_daddr))
-        return 0;
-
-    // Check socket family - only handle IPv4
-    if (skc.skc_family != 2) // AF_INET = 2
         return 0;
 
     // Determine direction: if the source address is our pod IP, it's egress
