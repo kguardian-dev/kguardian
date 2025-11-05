@@ -39,6 +39,12 @@ function App() {
     setAISidePanel({ isSidePanel, isCollapsed });
   }, []);
 
+  const handleAIClose = useCallback(() => {
+    setIsAIAssistantOpen(false);
+    // Reset layout when closing to remove padding
+    setAISidePanel({ isSidePanel: false, isCollapsed: false });
+  }, []);
+
   return (
     <div className={`flex flex-col h-screen bg-hubble-darker transition-all duration-300 ${contentPaddingRight}`}>
       {/* Header */}
@@ -135,7 +141,7 @@ function App() {
       {/* AI Assistant Modal */}
       <AIAssistant
         isOpen={isAIAssistantOpen}
-        onClose={() => setIsAIAssistantOpen(false)}
+        onClose={handleAIClose}
         onLayoutChange={handleAILayoutChange}
       />
 
