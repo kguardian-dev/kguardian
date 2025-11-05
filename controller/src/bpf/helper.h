@@ -4,9 +4,10 @@
 #include <bpf/bpf_core_read.h>
 #include <bpf/bpf_endian.h>
 
+// Use LRU_HASH for automatic eviction of stale entries
 struct
 {
-    __uint(type, BPF_MAP_TYPE_HASH);
+    __uint(type, BPF_MAP_TYPE_LRU_HASH);
     __uint(max_entries, 10240);
     __type(key, u64);
     __type(value, u32);
@@ -14,7 +15,7 @@ struct
 
 struct
 {
-    __uint(type, BPF_MAP_TYPE_HASH);
+    __uint(type, BPF_MAP_TYPE_LRU_HASH);
     __uint(max_entries, 10240);
     __type(key, u32);
     __type(value, u32);
@@ -29,17 +30,26 @@ struct
 } allowed_syscalls SEC(".maps");
 
 // Common filtering helper to avoid code duplication
+// Optimized to check cheap conditions first before map lookups
 static __always_inline bool should_filter_traffic(__u32 saddr, __u32 daddr)
 {
+    // Fast path: check cheap conditions first (no map lookups)
+
     // Filter same source and destination
     if (saddr == daddr)
         return true;
 
-    // Filter localhost (127.0.0.1) and zero addresses
-    if (daddr == bpf_htonl(0x7F000001) || daddr == bpf_htonl(0x00000000))
+    // Filter localhost (127.0.0.1) - 0x7F000001 in network byte order is 0x0100007F
+    __u32 localhost = 0x0100007F;
+    if (saddr == localhost || daddr == localhost)
         return true;
 
-    // Filter if either IP is in ignore list
+    // Filter zero addresses
+    if (saddr == 0 || daddr == 0)
+        return true;
+
+    // Slow path: map lookups only if cheap checks passed
+    // Check ignore list (typically empty or small, so lookups are rare)
     if (bpf_map_lookup_elem(&ignore_ips, &saddr))
         return true;
 
