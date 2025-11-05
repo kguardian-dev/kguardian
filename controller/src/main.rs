@@ -7,9 +7,8 @@ use tracing::info;
 
 use kguardian::bpf::ebpf_handle;
 use kguardian::log::init_logger;
-use kguardian::network::handle_network_events;
+use kguardian::network::{handle_network_events, handle_policy_drop_events, PolicyDropEvent};
 use kguardian::service_watcher::watch_service;
-use kguardian::netpolicy_drop::{handle_netpolicy_drop_events, PolicyDropEvent};
 use kguardian::syscall::{
     handle_syscall_events, send_syscall_cache_periodically, SyscallEventData,
 };
@@ -21,7 +20,8 @@ use kguardian::{
 async fn main() -> Result<(), Error> {
     init_logger();
 
-    let node_name = env::var("CURRENT_NODE").expect("cannot find node name: CURRENT_NODE ");
+    let node_name = env::var("CURRENT_NODE")
+        .map_err(|_| Error::Custom("CURRENT_NODE environment variable not set".to_string()))?;
 
     let excluded_namespaces: Vec<String> = env::var("EXCLUDED_NAMESPACES")
         .unwrap_or_else(|_| "kube-system,kguardian".to_string())
@@ -58,11 +58,11 @@ async fn main() -> Result<(), Error> {
 
     let (network_event_sender, network_event_receiver) = mpsc::channel::<NetworkEventData>(1000);
     let (syscall_event_sender, syscall_event_receiver) = mpsc::channel::<SyscallEventData>(1000);
-       let (netpolicy_drop_sender, netpolicy_drop_receiver) = mpsc::channel::<PolicyDropEvent>(1000);
+    let (netpolicy_drop_sender, netpolicy_drop_receiver) = mpsc::channel::<PolicyDropEvent>(1000);
 
     let network_event_handler = handle_network_events(network_event_receiver, network_map);
     let netpolicy_drop_handler =
-        handle_netpolicy_drop_events(netpolicy_drop_receiver, Arc::clone(&container_map));
+        handle_policy_drop_events(netpolicy_drop_receiver, Arc::clone(&container_map));
     let syscall_event_handler = handle_syscall_events(syscall_event_receiver, syscall_map);
 
     let ebpf_handle = ebpf_handle(
@@ -77,15 +77,14 @@ async fn main() -> Result<(), Error> {
     let syscall_recorder = send_syscall_cache_periodically();
 
     // Wait for all tasks to complete (they should run indefinitely)
-    _ = tokio::try_join!(
+    tokio::try_join!(
         service,
         pods,
         network_event_handler,
         syscall_event_handler,
         netpolicy_drop_handler,
         syscall_recorder,
-        async { ebpf_handle.await.unwrap() }
-    )
-    .unwrap();
+        async { ebpf_handle.await? }
+    )?;
     Ok(())
 }

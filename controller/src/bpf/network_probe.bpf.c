@@ -143,46 +143,21 @@ int trace_udp_send(struct pt_regs *ctx)
     return 0;
 }
 
-SEC("kprobe/tcp_v4_connect")
-int BPF_KPROBE(tcp_v4_connect_entry, struct sock *sk)
+// Hook into tcp_set_state to detect ESTABLISHED connections (outbound)
+// This ensures we only record successful connections, not failed attempts
+SEC("fentry/tcp_set_state")
+int BPF_PROG(trace_tcp_state_change, struct sock *sk, int state)
 {
-    // Early validation - only store context if socket is in tracked namespace
+    if (!sk)
+        return 0;
+
+    // TCP_ESTABLISHED = 1 - only record when connection succeeds
+    if (state != 1)
+        return 0;
+
+    // Get network namespace inode
     __u64 inum = 0;
     if (!get_and_validate_inum(sk, &inum))
-        return 0;
-
-    // Store both socket pointer and inum for kretprobe
-    struct tcp_connect_ctx ctx_data = {
-        .sk = sk,
-        .inum = inum,
-    };
-
-    __u32 tid = bpf_get_current_pid_tgid();
-    bpf_map_update_elem(&tcp_ctx, &tid, &ctx_data, BPF_ANY);
-
-    return 0;
-}
-
-SEC("kretprobe/tcp_v4_connect")
-int BPF_KRETPROBE(tcp_v4_connect_exit, int ret)
-{
-    __u32 tid = bpf_get_current_pid_tgid();
-    struct tcp_connect_ctx *ctx_data = bpf_map_lookup_elem(&tcp_ctx, &tid);
-
-    // Always cleanup, even on failure
-    if (!ctx_data)
-        return 0;
-
-    struct sock *sk = ctx_data->sk;
-    __u64 inum = ctx_data->inum;
-
-    bpf_map_delete_elem(&tcp_ctx, &tid);
-
-    // Ignore failed connections
-    if (ret != 0)
-        return 0;
-
-    if (!sk)
         return 0;
 
     // Read socket common structure once (batch read)
@@ -193,18 +168,28 @@ int BPF_KRETPROBE(tcp_v4_connect_exit, int ret)
     if (should_filter_traffic(skc.skc_rcv_saddr, skc.skc_daddr))
         return 0;
 
-    // Check if this is a new connection (reduces duplicate events by 80-90%)
-    // Uses 4-tuple to handle ephemeral source port rotation
-    __u16 sport = __bpf_ntohs(skc.skc_num);
-    __u16 dport = __bpf_ntohs(skc.skc_dport);
+    // Check socket family - only handle IPv4
+    if (skc.skc_family != 2) // AF_INET = 2
+        return 0;
 
+    // Determine direction: if the source address is our pod IP, it's egress
+    // For established connections from tcp_set_state, we need to determine direction
+    // We'll consider it egress if skc_num (local port) is ephemeral (>1024)
+    __u16 sport = skc.skc_num;
+    __u16 dport = bpf_ntohs(skc.skc_dport);
+
+    // Assume egress if local port > 1024 (ephemeral), otherwise ingress
+    // This is a heuristic - most client connections use ephemeral ports
+    __u8 direction = (sport > 1024) ? 1 : 2; // 1=Egress, 2=Ingress
+
+    // Check if this is a new connection (reduces duplicate events)
     struct conn_key conn = {
         .inum = inum,
         .saddr = skc.skc_rcv_saddr,
         .daddr = skc.skc_daddr,
         .dport = dport,
         .protocol = 1, // TCP
-        .direction = 1, // Egress
+        .direction = direction,
     };
 
     if (!is_new_connection(&conn))
@@ -222,7 +207,7 @@ int BPF_KRETPROBE(tcp_v4_connect_exit, int ret)
     tcp_event->daddr = skc.skc_daddr;
     tcp_event->sport = sport;
     tcp_event->dport = dport;
-    tcp_event->kind = 1; // TCP Egress
+    tcp_event->kind = direction; // 1=Egress or 2=Ingress
 
     // Submit to userspace
     bpf_ringbuf_submit(tcp_event, 0);

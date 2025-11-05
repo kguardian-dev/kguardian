@@ -3,7 +3,7 @@
 version: '3'
 vars:
   BROKER_IMAGE_NAME: ghcr.io/kguardian-dev/kguardian/broker
-  IMAGE_VERSION: v0.3.0
+  IMAGE_VERSION: local
 
 tasks:
   all:

@@ -7,6 +7,10 @@
 
 char LICENSE[] SEC("license") = "GPL";
 
+// TCP connection states (from include/net/tcp_states.h)
+#define TCP_ESTABLISHED 1
+#define TCP_SYN_SENT    2
+
 // Track outgoing connection attempts
 struct conn_attempt {
     __u64 inum;           // Network namespace inode
@@ -15,6 +19,7 @@ struct conn_attempt {
     __u16 sport;          // Source port
     __u16 dport;          // Dest port
     __u8 protocol;        // TCP/UDP
+    __u8 _pad;            // Explicit padding for alignment
 };
 
 // Connection state tracking
@@ -33,6 +38,7 @@ struct policy_drop_event {
     __u16 sport;
     __u16 dport;
     __u8 protocol;
+    __u8 _pad;
     __u32 syn_retries;       // Number of SYN retransmissions before giving up
 };
 
@@ -72,8 +78,8 @@ int BPF_PROG(trace_tcp_retransmit, struct sock *sk, struct sk_buff *skb, int seg
     // Get TCP state - we only care about SYN_SENT state (retransmitting SYN)
     __u8 state = BPF_CORE_READ(sk, __sk_common.skc_state);
 
-    // TCP_SYN_SENT = 2 (connection attempt in progress)
-    if (state == 2) {
+    // Only track retransmits during connection attempt phase
+    if (state == TCP_SYN_SENT) {
         struct conn_attempt key = {
             .inum = inum,
             .saddr = skc.skc_rcv_saddr,
@@ -118,7 +124,7 @@ int BPF_PROG(trace_tcp_retransmit, struct sock *sk, struct sk_buff *skb, int seg
                 evt->dport = key.dport;
                 evt->protocol = 6;
                 evt->syn_retries = state_ptr->syn_count;
-                bpf_printk("I am here fentry/tcp_retransmit_skb");
+
                 // Submit to userspace
                 bpf_ringbuf_submit(evt, 0);
 
@@ -180,8 +186,8 @@ int BPF_PROG(trace_tcp_state_change, struct sock *sk, int state)
     if (!sk)
         return 0;
 
-    // TCP_ESTABLISHED = 1
-    if (state == 1) {
+    // Only process when connection becomes established
+    if (state == TCP_ESTABLISHED) {
         // Get network namespace inode
         __u64 inum = 0;
         if (!get_and_validate_inum(sk, &inum))
@@ -206,99 +212,6 @@ int BPF_PROG(trace_tcp_state_change, struct sock *sk, int state)
             state_ptr->established = 1;
         }
     }
-
-    return 0;
-}
-
-// Netfilter hook to catch ALL protocol drops (TCP, UDP, ICMP, etc.)
-// This is the authoritative source for network policy drops
-SEC("fexit/nf_hook_slow")
-int BPF_PROG(trace_netfilter_hook_exit, struct sk_buff *skb, struct nf_hook_state *state,
-             const struct nf_hook_entries *entries, unsigned int *index, int ret)
-{
-    // NF_DROP = 0, anything else is not a drop
-    if (ret != 0)
-        return 0;
-
-    if (!skb)
-        return 0;
-
-    // Get task and network namespace
-    struct task_struct *task = (struct task_struct *)bpf_get_current_task();
-    if (!task)
-        return 0;
-
-    __u64 net_ns = BPF_CORE_READ(task, nsproxy, net_ns, ns.inum);
-    u32 *exists = bpf_map_lookup_elem(&inode_num, &net_ns);
-    if (!exists)
-        return 0;
-
-    // Extract packet info from SKB
-    unsigned char *head = BPF_CORE_READ(skb, head);
-    __u16 network_header = BPF_CORE_READ(skb, network_header);
-    __u16 transport_header = BPF_CORE_READ(skb, transport_header);
-
-    if (network_header == 0xFFFF)
-        return 0;
-
-    // Read IP header
-    struct iphdr ip;
-    if (bpf_probe_read_kernel(&ip, sizeof(ip), head + network_header) != 0)
-        return 0;
-
-    if (ip.version != 4)
-        return 0;
-
-    // Apply filtering
-    if (should_filter_traffic(ip.saddr, ip.daddr))
-        return 0;
-
-    // Extract transport layer info based on protocol
-    __u16 sport = 0, dport = 0;
-
-    if (transport_header != 0xFFFF) {
-        if (ip.protocol == IPPROTO_TCP) {
-            // TCP: Extract source/dest ports
-            struct tcphdr tcp;
-            if (bpf_probe_read_kernel(&tcp, sizeof(tcp), head + transport_header) == 0) {
-                sport = bpf_ntohs(tcp.source);
-                dport = bpf_ntohs(tcp.dest);
-            }
-        } else if (ip.protocol == IPPROTO_UDP) {
-            // UDP: Extract source/dest ports
-            struct udphdr udp;
-            if (bpf_probe_read_kernel(&udp, sizeof(udp), head + transport_header) == 0) {
-                sport = bpf_ntohs(udp.source);
-                dport = bpf_ntohs(udp.dest);
-            }
-        } else if (ip.protocol == IPPROTO_ICMP) {
-            // ICMP: Use type/code as pseudo-ports for tracking
-            struct icmphdr icmp;
-            if (bpf_probe_read_kernel(&icmp, sizeof(icmp), head + transport_header) == 0) {
-                sport = icmp.type;
-                dport = icmp.code;
-            }
-        }
-    }
-
-    // Reserve space in ring buffer
-    struct policy_drop_event *evt;
-    evt = bpf_ringbuf_reserve(&policy_drop_events, sizeof(*evt), 0);
-    if (!evt)
-        return 0;
-
-    // Fill event data
-    evt->timestamp = bpf_ktime_get_ns();
-    evt->inum = net_ns;
-    evt->saddr = ip.saddr;
-    evt->daddr = ip.daddr;
-    evt->sport = sport;
-    evt->dport = dport;
-    evt->protocol = ip.protocol;
-    evt->syn_retries = 0;  // Immediate drop by netfilter
-    bpf_printk("I am here fexit/nf_hook_slow");
-    // Submit to userspace
-    bpf_ringbuf_submit(evt, 0);
 
     return 0;
 }

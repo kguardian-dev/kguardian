@@ -1,4 +1,4 @@
-use crate::{PodDetail, PodPacketDrop, PodSyscalls, PodTraffic, SvcDetail, schema};
+use crate::{schema, PodDetail, PodSyscalls, PodTraffic, SvcDetail};
 use actix_web::{get, web, HttpResponse, Responder};
 use diesel::prelude::*;
 use diesel::r2d2::{self, ConnectionManager};
@@ -6,57 +6,6 @@ use tracing::{debug, info};
 
 type DbPool = r2d2::Pool<ConnectionManager<PgConnection>>;
 type DbError = Box<dyn std::error::Error + Send + Sync>;
-
-#[get("/pod/packet_drop")]
-pub async fn get_pod_packet_drop(pool: web::Data<DbPool>) -> actix_web::Result<impl Responder> {
-    debug!("select pod packet drop table");
-    let pod_packet_drop = web::block(move || {
-        let mut conn = pool.get()?;
-        pod_packet_drops(&mut conn)
-    })
-    .await?
-    .map_err(actix_web::error::ErrorInternalServerError)?;          
-    Ok(match pod_packet_drop {
-        Some(p) => HttpResponse::Ok().json(p),
-        None => HttpResponse::NotFound().body("No data found"),
-    })
-}
-
-fn pod_packet_drops(conn: &mut PgConnection) -> Result<Option<Vec<PodPacketDrop>>, DbError> {
-    use schema::pod_packet_drop::dsl::*;
-    let pod = pod_packet_drop.load::<PodPacketDrop>(conn).optional()?;
-    Ok(pod)
-}
-
-#[get("/pod/packet_drop/{name}")]
-pub async fn get_pod_packet_drop_name<'a>(
-    pool: web::Data<DbPool>,
-    name: web::Path<String>,
-) -> actix_web::Result<impl Responder> {
-    info!("select pod packet drop for the pod name");
-    let pod_name = name.into_inner();
-    let pod_detail = web::block(move || {   
-        let mut conn = pool.get()?;
-        pod_packet_drop_by_name(&mut conn, &pod_name)
-    })
-    .await?
-    .map_err(actix_web::error::ErrorInternalServerError)?;                      
-    Ok(match pod_detail {
-        Some(p) => HttpResponse::Ok().json(p),
-        None => HttpResponse::NotFound().body("No data found"),
-    })
-}   
-fn pod_packet_drop_by_name(
-    conn: &mut PgConnection,
-    name: &str,
-) -> Result<Option<Vec<PodPacketDrop>>, DbError> {
-    use schema::pod_packet_drop::dsl::*;
-    let pod_tr = pod_packet_drop
-        .filter(pod_name.eq(name.to_string()))
-        .load::<PodPacketDrop>(conn)
-        .optional()?;
-    Ok(pod_tr)
-}
 
 #[get("/pod/traffic")]
 pub async fn get_pod_traffic(pool: web::Data<DbPool>) -> actix_web::Result<impl Responder> {

@@ -9,7 +9,7 @@ includes:
   ui: .taskfiles/UI
 
 vars:
-  IMAGE_VERSION: v0.3.0
+  IMAGE_VERSION: local
 
 tasks:
   all:
@@ -36,6 +36,7 @@ tasks:
         --set broker.image.tag={{.IMAGE_VERSION}}
         --set controller.image.pullPolicy=IfNotPresent
         --set broker.image.pullPolicy=IfNotPresent
+        --set controller.initContainer.image.pullPolicy=IfNotPresent
 
   preflight:
     desc: "Run preflight checks for all components"

@@ -88,7 +88,7 @@ fn should_process_pod(namespace: &Option<String>, excluded_namespaces: &[String]
 }
 
 fn pod_unready(p: &Pod) -> Option<Vec<String>> {
-    let status = p.status.as_ref().unwrap();
+    let status = p.status.as_ref()?;
     if let Some(conds) = &status.conditions {
         let failed = conds
             .iter()

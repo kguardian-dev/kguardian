@@ -1,5 +1,4 @@
 pub mod network;
-pub mod netpolicy_drop;
 pub mod syscall;
 
 pub mod error;

@@ -21,6 +21,7 @@ diesel::table! {
         traffic_type -> Nullable<Varchar>,
         traffic_in_out_ip -> Nullable<Varchar>,
         traffic_in_out_port -> Nullable<Varchar>,
+        decision -> Nullable<Varchar>,
         time_stamp -> Timestamp,
     }
 }
@@ -40,7 +41,6 @@ diesel::table! {
         time_stamp -> Timestamp,
     }
 }
-
 
 diesel::table! {
     pod_syscalls (pod_name) {

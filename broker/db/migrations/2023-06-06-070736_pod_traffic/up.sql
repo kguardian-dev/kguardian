@@ -9,22 +9,10 @@ CREATE TABLE pod_traffic (
   traffic_type VARCHAR,
   traffic_in_out_ip VARCHAR,
   traffic_in_out_port VARCHAR,
+  decision VARCHAR,
   time_stamp TIMESTAMP NOT NULL
 );
 
-CREATE TABLE pod_packet_drop (
-  uuid VARCHAR PRIMARY KEY,
-  pod_name VARCHAR,
-  pod_namespace VARCHAR,
-  pod_ip VARCHAR,
-  pod_port VARCHAR,
-  ip_protocol VARCHAR,
-  traffic_type VARCHAR,
-  traffic_in_out_ip VARCHAR,
-  traffic_in_out_port VARCHAR,
-  drop_reason VARCHAR,
-  time_stamp TIMESTAMP NOT NULL
-);
 
 -- Your SQL goes here
 CREATE TABLE pod_details (
