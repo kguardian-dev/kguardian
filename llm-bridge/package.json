@@ -25,7 +25,7 @@
     "cors": "^2.8.5",
     "axios": "^1.7.9",
     "zod": "^3.24.1",
-    "dotenv": "^16.4.7"
+    "dotenv": "^17.0.0"
   },
   "devDependencies": {
     "@types/express": "^5.0.0",
