@@ -1,0 +1,142 @@
+---
+# MCPServer Custom Resource for kguardian MCP Server
+# This resource is managed by the kmcp controller
+apiVersion: mcp.kagent.dev/v1alpha1
+kind: MCPServer
+metadata:
+  name: kguardian-mcp-server
+  namespace: kguardian
+  labels:
+    app.kubernetes.io/name: kguardian-mcp-server
+    app.kubernetes.io/part-of: kguardian
+    app.kubernetes.io/managed-by: kmcp
+spec:
+  # Image configuration
+  image:
+    repository: ghcr.io/kguardian-dev/kguardian/mcp-server
+    tag: latest
+    pullPolicy: Always
+
+  # Number of replicas
+  replicas: 1
+
+  # Transport configuration (can be changed without code changes)
+  transport:
+    type: streamable-http
+    port: 8081
+
+    # Optional: Enable multiple transports simultaneously
+    # alternativeTransports:
+    #   - type: stdio
+    #   - type: sse
+    #     path: /sse
+
+  # Environment variables
+  env:
+    - name: BROKER_URL
+      value: http://kguardian-broker.kguardian.svc.cluster.local:9090
+    - name: PORT
+      value: "8081"
+    - name: LOG_LEVEL
+      value: info
+
+  # Optional: Reference secrets
+  # envFrom:
+  #   - secretRef:
+  #       name: kguardian-mcp-secrets
+
+  # Resource limits
+  resources:
+    requests:
+      cpu: 50m
+      memory: 128Mi
+    limits:
+      cpu: 200m
+      memory: 256Mi
+
+  # Health checks
+  livenessProbe:
+    httpGet:
+      path: /
+      port: 8081
+    initialDelaySeconds: 10
+    periodSeconds: 30
+    timeoutSeconds: 5
+    failureThreshold: 3
+
+  readinessProbe:
+    httpGet:
+      path: /
+      port: 8081
+    initialDelaySeconds: 5
+    periodSeconds: 10
+    timeoutSeconds: 5
+    failureThreshold: 3
+
+  # Security context
+  securityContext:
+    runAsUser: 1000
+    runAsGroup: 1000
+    runAsNonRoot: true
+    readOnlyRootFilesystem: true
+    allowPrivilegeEscalation: false
+    capabilities:
+      drop:
+        - ALL
+    seccompProfile:
+      type: RuntimeDefault
+
+  # Pod security context
+  podSecurityContext:
+    runAsUser: 1000
+    runAsGroup: 1000
+    fsGroup: 1000
+    fsGroupChangePolicy: OnRootMismatch
+    seccompProfile:
+      type: RuntimeDefault
+
+  # Node selector
+  nodeSelector:
+    kubernetes.io/os: linux
+
+  # Tolerations (optional)
+  # tolerations:
+  #   - key: "node-role.kubernetes.io/control-plane"
+  #     operator: "Exists"
+  #     effect: "NoSchedule"
+
+  # Affinity rules (optional)
+  # affinity:
+  #   podAntiAffinity:
+  #     preferredDuringSchedulingIgnoredDuringExecution:
+  #       - weight: 100
+  #         podAffinityTerm:
+  #           labelSelector:
+  #             matchLabels:
+  #               app.kubernetes.io/name: kguardian-mcp-server
+  #           topologyKey: kubernetes.io/hostname
+
+  # Autoscaling (managed by kmcp controller)
+  autoscaling:
+    enabled: false
+    minReplicas: 1
+    maxReplicas: 5
+    targetCPUUtilizationPercentage: 80
+    # targetMemoryUtilizationPercentage: 80
+
+  # Service configuration
+  service:
+    type: ClusterIP
+    port: 8081
+    # annotations:
+    #   service.beta.kubernetes.io/aws-load-balancer-type: nlb
+
+  # Observability (optional)
+  # observability:
+  #   metrics:
+  #     enabled: true
+  #     port: 9090
+  #     path: /metrics
+  #   tracing:
+  #     enabled: false
+  #     endpoint: http://jaeger-collector:14268/api/traces
