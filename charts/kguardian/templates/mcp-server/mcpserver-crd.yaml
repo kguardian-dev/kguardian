@@ -2,7 +2,7 @@
 ---
 # MCPServer Custom Resource (managed by kmcp controller)
 # This replaces the standard Deployment when kmcp is enabled
-apiVersion: mcp.kagent.dev/v1alpha1
+apiVersion: kagent.dev/v1alpha1
 kind: MCPServer
 metadata:
   name: {{ .Values.mcpServer.service.name }}

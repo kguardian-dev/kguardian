@@ -143,7 +143,7 @@ kubectl patch mcpserver kguardian-mcp-server ...
 ```yaml
 # Easy per-tenant deployments
 ---
-apiVersion: mcp.kagent.dev/v1alpha1
+apiVersion: kagent.dev/v1alpha1
 kind: MCPServer
 metadata:
   name: kguardian-mcp-server
@@ -153,7 +153,7 @@ spec:
     - name: BROKER_URL
       value: http://broker-tenant-a:9090
 ---
-apiVersion: mcp.kagent.dev/v1alpha1
+apiVersion: kagent.dev/v1alpha1
 kind: MCPServer
 metadata:
   name: kguardian-mcp-server

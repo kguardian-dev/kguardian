@@ -172,7 +172,7 @@ images:
 
 patchesStrategicMerge:
   - |-
-    apiVersion: mcp.kagent.dev/v1alpha1
+    apiVersion: kagent.dev/v1alpha1
     kind: MCPServer
     metadata:
       name: kguardian-mcp-server
@@ -384,7 +384,7 @@ Deploy separate MCP servers per tenant:
 # Tenant A
 kubectl create namespace tenant-a
 kubectl apply -f - <<EOF
-apiVersion: mcp.kagent.dev/v1alpha1
+apiVersion: kagent.dev/v1alpha1
 kind: MCPServer
 metadata:
   name: kguardian-mcp-server
@@ -401,7 +401,7 @@ EOF
 # Tenant B
 kubectl create namespace tenant-b
 kubectl apply -f - <<EOF
-apiVersion: mcp.kagent.dev/v1alpha1
+apiVersion: kagent.dev/v1alpha1
 kind: MCPServer
 metadata:
   name: kguardian-mcp-server
