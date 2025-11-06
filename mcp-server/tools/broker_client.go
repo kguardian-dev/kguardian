@@ -26,13 +26,39 @@ func NewBrokerClient(baseURL string) *BrokerClient {
 
 // GetPodNetworkTraffic retrieves network traffic data for a pod
 func (c *BrokerClient) GetPodNetworkTraffic(namespace, podName string) (interface{}, error) {
-	url := fmt.Sprintf("%s/pod/traffic/name/%s/%s", c.baseURL, namespace, podName)
+	// Broker expects just the pod name in the URL
+	url := fmt.Sprintf("%s/pod/traffic/%s", c.baseURL, podName)
 	return c.get(url)
 }
 
 // GetPodSyscalls retrieves syscall data for a pod
 func (c *BrokerClient) GetPodSyscalls(namespace, podName string) (interface{}, error) {
-	url := fmt.Sprintf("%s/pod/syscalls/name/%s/%s", c.baseURL, namespace, podName)
+	// Broker expects just the pod name in the URL
+	url := fmt.Sprintf("%s/pod/syscalls/%s", c.baseURL, podName)
+	return c.get(url)
+}
+
+// GetPodByIP retrieves pod details by IP address
+func (c *BrokerClient) GetPodByIP(ip string) (interface{}, error) {
+	url := fmt.Sprintf("%s/pod/ip/%s", c.baseURL, ip)
+	return c.get(url)
+}
+
+// GetServiceByIP retrieves service details by IP address
+func (c *BrokerClient) GetServiceByIP(ip string) (interface{}, error) {
+	url := fmt.Sprintf("%s/svc/ip/%s", c.baseURL, ip)
+	return c.get(url)
+}
+
+// GetAllPodTraffic retrieves all pod traffic in the cluster
+func (c *BrokerClient) GetAllPodTraffic() (interface{}, error) {
+	url := fmt.Sprintf("%s/pod/traffic", c.baseURL)
+	return c.get(url)
+}
+
+// GetAllPods retrieves all pod details in the cluster
+func (c *BrokerClient) GetAllPods() (interface{}, error) {
+	url := fmt.Sprintf("%s/pod/info", c.baseURL)
 	return c.get(url)
 }
 

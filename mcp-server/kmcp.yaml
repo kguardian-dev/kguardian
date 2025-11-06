@@ -22,20 +22,46 @@ spec:
   # Tools exposed by this MCP server
   tools:
     - name: get_pod_network_traffic
-      description: Get network traffic data for a specific pod by namespace and pod name. Returns source/destination IPs, ports, protocols, and connection counts.
+      description: Get network traffic data for a specific pod by namespace and pod name. Returns source/destination IPs, ports, protocols, traffic types (ingress/egress), and packet decisions (allowed/dropped). Essential for generating network policies and understanding pod communication patterns.
       input:
         namespace: The Kubernetes namespace of the pod
         pod_name: The name of the pod
       output:
-        data: Network traffic data in JSON format
+        data: Network traffic data in JSON format including source/dest IPs, ports, protocols, traffic direction, and decisions
 
     - name: get_pod_syscalls
-      description: Get system call (syscall) data for a specific pod. Returns the syscalls made by the pod with their frequencies. Useful for security analysis and seccomp profile generation.
+      description: Get system call (syscall) data for a specific pod. Returns the syscalls made by the pod with their frequencies and architecture. Critical for security analysis, generating seccomp profiles, and identifying suspicious behavior.
       input:
         namespace: The Kubernetes namespace of the pod
         pod_name: The name of the pod
       output:
-        data: Syscall data in JSON format
+        data: Syscall data in JSON format with syscall names, frequencies, and architecture
+
+    - name: get_pod_details
+      description: Get detailed information about a pod by its IP address. Returns pod name, namespace, IP, and full Kubernetes pod object. Useful for correlating IP addresses to pod identities.
+      input:
+        ip: The IP address of the pod to query
+      output:
+        data: Pod details in JSON format including name, namespace, IP, and full K8s object
+
+    - name: get_service_details
+      description: Get detailed information about a Kubernetes service by its cluster IP. Returns service name, namespace, IP, ports, and full service object. Essential for understanding service-to-service communication.
+      input:
+        ip: The IP address of the service to query
+      output:
+        data: Service details in JSON format including name, namespace, IP, ports, and full K8s object
+
+    - name: get_cluster_traffic
+      description: Get all network traffic data across the entire cluster. Returns comprehensive traffic information for all monitored pods. Use this for cluster-wide network analysis, identifying communication patterns, and detecting anomalies. WARNING - This returns large datasets.
+      input: {}
+      output:
+        data: Array of all pod traffic data in the cluster
+
+    - name: get_cluster_pods
+      description: Get detailed information about all pods in the cluster. Returns pod names, namespaces, IPs, and full Kubernetes objects. Useful for cluster inventory and identifying monitored workloads. WARNING - This returns large datasets.
+      input: {}
+      output:
+        data: Array of all pod details in the cluster
 
   # Build configuration
   build:
