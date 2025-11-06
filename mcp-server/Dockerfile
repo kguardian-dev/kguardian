@@ -1,38 +1,47 @@
-FROM node:20-alpine AS builder
+FROM golang:1.23-alpine AS builder
 
 WORKDIR /app
 
-# Copy package files
-COPY package*.json ./
-COPY tsconfig.json ./
+# Install build dependencies
+RUN apk add --no-cache git ca-certificates
 
-# Install dependencies
-RUN npm ci
+# Copy go module files
+COPY go.mod go.sum ./
+
+# Download dependencies
+RUN go mod download
 
 # Copy source code
-COPY src ./src
+COPY main.go ./
+COPY tools ./tools
 
-# Build TypeScript
-RUN npm run build
+# Build the binary
+RUN CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo -o kguardian-mcp .
 
 # Production stage
-FROM node:20-alpine
+FROM alpine:latest
 
 WORKDIR /app
 
-# Copy package files and install production dependencies only
-COPY package*.json ./
-RUN npm ci --only=production
+# Install ca-certificates for HTTPS requests
+RUN apk --no-cache add ca-certificates
 
 # Copy built application from builder
-COPY --from=builder /app/dist ./dist
+COPY --from=builder /app/kguardian-mcp .
 
 # Set environment variables
-ENV NODE_ENV=production
 ENV BROKER_URL=http://broker.kguardian.svc.cluster.local:9090
+ENV PORT=8081
+
+# Create non-root user
+RUN addgroup -g 1000 mcp && \
+    adduser -D -u 1000 -G mcp mcp
 
 # Run as non-root user
-USER node
+USER mcp
+
+# Expose port
+EXPOSE 8081
 
 # Start the MCP server
-CMD ["node", "dist/index.js"]
+CMD ["./kguardian-mcp"]

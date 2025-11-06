@@ -48,25 +48,21 @@ spec:
           env:
             - name: BROKER_URL
               value: "http://{{ .Values.broker.service.name }}.{{ include "kguardian.namespace" . }}.svc.cluster.local:{{ .Values.broker.container.port }}"
-            - name: NODE_ENV
-              value: "production"
+            - name: PORT
+              value: "{{ .Values.mcpServer.container.port }}"
             {{- with .Values.mcpServer.env }}
             {{- toYaml . | nindent 12 }}
             {{- end }}
           livenessProbe:
-            exec:
-              command:
-              - node
-              - -e
-              - "console.log('alive')"
+            httpGet:
+              path: /
+              port: http
             initialDelaySeconds: 10
             periodSeconds: 30
           readinessProbe:
-            exec:
-              command:
-              - node
-              - -e
-              - "console.log('ready')"
+            httpGet:
+              path: /
+              port: http
             initialDelaySeconds: 5
             periodSeconds: 10
           {{- with .Values.mcpServer.resources }}

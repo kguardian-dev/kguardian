@@ -15,7 +15,7 @@ This MCP server exposes kguardian's broker API as MCP tools, allowing LLMs to qu
 ```
 ┌─────────────┐      ┌─────────────┐      ┌──────────────┐
 │  LLM Client │─────▶│ MCP Server  │─────▶│    Broker    │
-│  (AI Apps)  │      │ (TypeScript)│      │   (Rust)     │
+│  (AI Apps)  │      │    (Go)     │      │   (Rust)     │
 └─────────────┘      └─────────────┘      └──────────────┘
                                                   │
                                                   ▼
@@ -45,64 +45,33 @@ Get system call data for a specific pod.
 
 **Returns:** JSON with syscalls and their frequencies.
 
-### `get_pod_packet_drops`
-Get packet drop events for a pod.
-
-**Parameters:**
-- `namespace` (string, required): Kubernetes namespace
-- `pod_name` (string, required): Pod name
-
-**Returns:** JSON with packet drop reasons and statistics.
-
-### `list_all_pods`
-List all monitored pods across namespaces.
-
-**Parameters:** None
-
-**Returns:** List of pods with names, namespaces, and IPs.
-
-### `search_pods_by_namespace`
-Search for pods within a namespace.
-
-**Parameters:**
-- `namespace` (string, required): Namespace to search
-
-**Returns:** Pods in the specified namespace.
-
-### `analyze_security_events`
-Analyze security events across the cluster.
-
-**Parameters:**
-- `namespace` (string, optional): Filter by namespace
-
-**Returns:** Aggregated security analysis.
-
 ## Development
 
 ### Prerequisites
-- Node.js 20+
-- npm
+- Go 1.23+
+- kmcp CLI (optional, for scaffolding)
 
 ### Install Dependencies
 ```bash
-npm install
+go mod download
 ```
 
 ### Run Development Server
 ```bash
-npm run dev
+go run main.go
 ```
 
 ### Build
 ```bash
-npm run build
+go build -o bin/kguardian-mcp .
 ```
 
 ### Configuration
 
-Set the broker URL via environment variable:
+Set the broker URL and port via environment variables:
 ```bash
 export BROKER_URL=http://broker.kguardian.svc.cluster.local:9090
+export PORT=8081
 ```
 
 ## Docker
