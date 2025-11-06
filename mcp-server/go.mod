@@ -2,7 +2,7 @@ module github.com/kguardian-dev/kguardian/mcp-server
 
 go 1.23.0
 
-toolchain go1.23.3
+toolchain go1.25.4
 
 require github.com/modelcontextprotocol/go-sdk v0.7.0
 
