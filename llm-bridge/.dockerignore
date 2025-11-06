@@ -1,0 +1,41 @@
+# Dependencies (not needed in build context)
+node_modules/
+
+# Build artifacts (will be generated during build)
+dist/
+
+# Environment files (contain secrets)
+.env
+.env.*
+
+# Logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Git directory
+.git/
+
+# Documentation (not needed for runtime)
+*.md
+README.md
+
+# IDE and development files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# CI/CD files
+.github/
+
+# Other config files not needed in image
+.prettierrc
+.eslintrc*
+.editorconfig

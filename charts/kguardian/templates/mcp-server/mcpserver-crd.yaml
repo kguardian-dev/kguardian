@@ -1,0 +1,63 @@
+{{- if and .Values.mcpServer.enabled .Values.mcpServer.useKmcp }}
+---
+# MCPServer Custom Resource (managed by kmcp controller)
+# This replaces the standard Deployment when kmcp is enabled
+apiVersion: kagent.dev/v1alpha1
+kind: MCPServer
+metadata:
+  name: {{ .Values.mcpServer.service.name }}
+  namespace: {{ include "kguardian.namespace" . }}
+  labels:
+    {{- include "kguardian.labels" . | nindent 4 }}
+spec:
+  # Deployment configuration - defines the container-based MCP server
+  deployment:
+    # Container image for the MCP server
+    {{- if .Values.mcpServer.image.sha }}
+    image: {{ .Values.mcpServer.image.repository }}@{{ .Values.mcpServer.image.sha }}
+    {{- else }}
+    image: {{ .Values.mcpServer.image.repository }}:{{ .Values.mcpServer.image.tag }}
+    {{- end }}
+
+    # Port the MCP server listens on
+    port: {{ .Values.mcpServer.container.port }}
+
+    # Environment variables (as key-value map)
+    env:
+      BROKER_URL: "http://{{ .Values.broker.service.name }}.{{ include "kguardian.namespace" . }}.svc.cluster.local:{{ .Values.broker.container.port }}"
+      PORT: "{{ .Values.mcpServer.container.port }}"
+      {{- range .Values.mcpServer.env }}
+      {{ .name }}: {{ .value | quote }}
+      {{- end }}
+
+    # Optional: Secret references for sensitive data
+    {{- with .Values.mcpServer.kmcp.secretRefs }}
+    secretRefs:
+      {{- toYaml . | nindent 6 }}
+    {{- end }}
+
+  # Transport type - how clients communicate with the MCP server
+  # Valid values: stdio, http
+  transportType: {{ .Values.mcpServer.kmcp.transport.type | default "http" }}
+
+  # HTTP transport configuration
+  {{- if or (eq (.Values.mcpServer.kmcp.transport.type | default "http") "http") (not .Values.mcpServer.kmcp.transport.type) }}
+  httpTransport:
+    # Target port for HTTP service
+    targetPort: {{ .Values.mcpServer.container.port }}
+    # Path where MCP server is accessible
+    path: {{ .Values.mcpServer.kmcp.transport.path | default "/" }}
+  {{- end }}
+
+  # Optional: Authentication configuration
+  {{- with .Values.mcpServer.kmcp.authn }}
+  authn:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+
+  # Optional: Authorization rules (CEL-based)
+  {{- with .Values.mcpServer.kmcp.authz }}
+  authz:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+{{- end }}

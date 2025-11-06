@@ -1,0 +1,179 @@
+apiVersion: kkagent.dev/v1alpha1
+kind: MCPProject
+
+metadata:
+  name: kguardian-mcp-server
+  description: Model Context Protocol server for kguardian - provides tools for querying Kubernetes security and network telemetry data
+  version: 1.0.0
+  author: kguardian-dev
+  license: BUSL-1.1
+
+spec:
+  # Language and SDK
+  language: go
+  sdk: mcp-go-sdk
+  goVersion: "1.23"
+
+  # Go module configuration
+  module:
+    name: github.com/kguardian-dev/kguardian/mcp-server
+    path: .
+
+  # Tools exposed by this MCP server
+  tools:
+    - name: get_pod_network_traffic
+      description: Get network traffic data for a specific pod by namespace and pod name. Returns source/destination IPs, ports, protocols, traffic types (ingress/egress), and packet decisions (allowed/dropped). Essential for generating network policies and understanding pod communication patterns.
+      input:
+        namespace: The Kubernetes namespace of the pod
+        pod_name: The name of the pod
+      output:
+        data: Network traffic data in JSON format including source/dest IPs, ports, protocols, traffic direction, and decisions
+
+    - name: get_pod_syscalls
+      description: Get system call (syscall) data for a specific pod. Returns the syscalls made by the pod with their frequencies and architecture. Critical for security analysis, generating seccomp profiles, and identifying suspicious behavior.
+      input:
+        namespace: The Kubernetes namespace of the pod
+        pod_name: The name of the pod
+      output:
+        data: Syscall data in JSON format with syscall names, frequencies, and architecture
+
+    - name: get_pod_details
+      description: Get detailed information about a pod by its IP address. Returns pod name, namespace, IP, and full Kubernetes pod object. Useful for correlating IP addresses to pod identities.
+      input:
+        ip: The IP address of the pod to query
+      output:
+        data: Pod details in JSON format including name, namespace, IP, and full K8s object
+
+    - name: get_service_details
+      description: Get detailed information about a Kubernetes service by its cluster IP. Returns service name, namespace, IP, ports, and full service object. Essential for understanding service-to-service communication.
+      input:
+        ip: The IP address of the service to query
+      output:
+        data: Service details in JSON format including name, namespace, IP, ports, and full K8s object
+
+    - name: get_cluster_traffic
+      description: Get all network traffic data across the entire cluster. Returns comprehensive traffic information for all monitored pods. Use this for cluster-wide network analysis, identifying communication patterns, and detecting anomalies. WARNING - This returns large datasets.
+      input: {}
+      output:
+        data: Array of all pod traffic data in the cluster
+
+    - name: get_cluster_pods
+      description: Get detailed information about all pods in the cluster. Returns pod names, namespaces, IPs, and full Kubernetes objects. Useful for cluster inventory and identifying monitored workloads. WARNING - This returns large datasets.
+      input: {}
+      output:
+        data: Array of all pod details in the cluster
+
+  # Build configuration
+  build:
+    dockerfile: Dockerfile
+    context: .
+    platforms:
+      - linux/amd64
+      - linux/arm64
+    tags:
+      - latest
+      - "{{.Version}}"
+      - "{{.GitSHA}}"
+
+  # Local development configuration
+  dev:
+    port: 8081
+    brokerURL: http://localhost:9090
+    hotReload: true
+
+  # Deployment configuration
+  deployment:
+    # Transport configuration
+    transport:
+      type: streamable-http
+      port: 8081
+
+      # Support multiple transports
+      alternativeTransports:
+        - type: stdio
+        - type: sse
+          path: /sse
+
+    # Kubernetes configuration
+    kubernetes:
+      namespace: kguardian
+
+      # Resource requirements
+      resources:
+        requests:
+          cpu: 50m
+          memory: 128Mi
+        limits:
+          cpu: 200m
+          memory: 256Mi
+
+      # Autoscaling
+      autoscaling:
+        enabled: false
+        minReplicas: 1
+        maxReplicas: 5
+        targetCPUUtilizationPercentage: 80
+
+      # Health checks
+      livenessProbe:
+        httpGet:
+          path: /
+          port: 8081
+        initialDelaySeconds: 10
+        periodSeconds: 30
+
+      readinessProbe:
+        httpGet:
+          path: /
+          port: 8081
+        initialDelaySeconds: 5
+        periodSeconds: 10
+
+      # Security context
+      securityContext:
+        runAsUser: 1000
+        runAsGroup: 1000
+        runAsNonRoot: true
+        readOnlyRootFilesystem: true
+        allowPrivilegeEscalation: false
+        capabilities:
+          drop:
+            - ALL
+
+    # Environment variables
+    env:
+      - name: BROKER_URL
+        value: http://kguardian-broker.kguardian.svc.cluster.local:9090
+      - name: PORT
+        value: "8081"
+      - name: LOG_LEVEL
+        value: info
+
+    # Secrets (reference Kubernetes secrets)
+    secrets:
+      - name: BROKER_API_KEY
+        secretRef:
+          name: kguardian-mcp-secrets
+          key: broker-api-key
+        optional: true
+
+  # Testing configuration
+  testing:
+    enabled: true
+    inspector: true
+    localBroker: false
+
+  # Observability
+  observability:
+    metrics:
+      enabled: true
+      port: 9090
+      path: /metrics
+
+    tracing:
+      enabled: false
+      endpoint: ""
+
+    logging:
+      level: info
+      format: json

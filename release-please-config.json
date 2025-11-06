@@ -50,6 +50,20 @@
       "package-name": "kguardian",
       "changelog-path": "CHANGELOG.md",
       "include-component-in-tag": true
+    },
+    "llm-bridge": {
+      "component": "chart",
+      "release-type": "node",
+      "package-name": "llm-bridge",
+      "changelog-path": "CHANGELOG.md",
+      "include-component-in-tag": true
+    },
+    "mcp-server": {
+      "component": "chart",
+      "release-type": "node",
+      "package-name": "mcp-server",
+      "changelog-path": "CHANGELOG.md",
+      "include-component-in-tag": true
     }
   },
   "changelog-sections": [

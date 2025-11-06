@@ -1,0 +1,65 @@
+---
+# MCPServer Custom Resource for kguardian MCP Server
+# This resource is managed by the kmcp controller
+apiVersion: kagent.dev/v1alpha1
+kind: MCPServer
+metadata:
+  name: kguardian-mcp-server
+  namespace: kguardian
+  labels:
+    app.kubernetes.io/name: kguardian-mcp-server
+    app.kubernetes.io/part-of: kguardian
+    app.kubernetes.io/managed-by: kmcp
+spec:
+  # Deployment configuration - defines the container-based MCP server
+  deployment:
+    # Container image for the MCP server
+    image: ghcr.io/kguardian-dev/kguardian/mcp-server:latest
+
+    # Port the MCP server listens on
+    port: 8081
+
+    # Environment variables
+    env:
+      BROKER_URL: http://kguardian-broker.kguardian.svc.cluster.local:9090
+      PORT: "8081"
+      LOG_LEVEL: info
+
+    # Optional: Reference secrets for sensitive data
+    # secretRefs:
+    #   - name: kguardian-mcp-secrets
+    #     keys:
+    #       - BROKER_API_KEY
+
+  # Transport type - how clients communicate with the MCP server
+  # Valid values: stdio, http
+  transportType: http
+
+  # HTTP transport configuration
+  httpTransport:
+    # Target port for HTTP service
+    targetPort: 8081
+
+    # Path where MCP server is accessible
+    path: /
+
+  # Optional: Authentication configuration
+  # authn:
+  #   jwt:
+  #     issuer: https://your-auth-provider.com
+  #     audiences:
+  #       - kguardian-mcp
+  #     jwks:
+  #       name: kguardian-jwks-secret
+  #       key: jwks.json
+
+  # Optional: Authorization rules (CEL-based)
+  # authz:
+  #   server:
+  #     issuer: https://your-auth-provider.com
+  #     audience: kguardian-mcp
+  #     jwksURL: https://your-auth-provider.com/.well-known/jwks.json
+  #   rules: |
+  #     # Allow authenticated users to access tools
+  #     request.auth.claims.sub != "" &&
+  #     (request.tool in ["get_pod_network_traffic", "get_pod_syscalls"])
