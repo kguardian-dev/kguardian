@@ -47,6 +47,10 @@ spec:
           env:
             - name: VITE_API_URL
               value: "http://{{ .Values.broker.service.name }}.{{ include "kguardian.namespace" . }}.svc.cluster.local:{{ .Values.broker.container.port }}"
+            {{- if .Values.llmBridge.enabled }}
+            - name: VITE_LLM_BRIDGE_URL
+              value: "http://{{ .Values.llmBridge.service.name }}.{{ include "kguardian.namespace" . }}.svc.cluster.local:{{ .Values.llmBridge.service.port }}"
+            {{- end }}
           livenessProbe:
             httpGet:
               path: /

@@ -1,0 +1,120 @@
+{{- if .Values.llmBridge.enabled }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Values.llmBridge.service.name }}
+  labels:
+    {{- include "kguardian.labels" . | nindent 4 }}
+spec:
+  {{- if not .Values.llmBridge.autoscaling.enabled }}
+  replicas: {{ .Values.llmBridge.replicaCount }}
+  {{- end }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ .Values.llmBridge.service.name }}
+  template:
+    metadata:
+      {{- with .Values.llmBridge.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      labels:
+        {{- include "kguardian.labels" . | nindent 8 }}
+        app.kubernetes.io/name: {{ .Values.llmBridge.service.name }}
+    spec:
+      automountServiceAccountToken: false
+      {{- with .Values.llmBridge.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      serviceAccountName: {{ default "llm-bridge" .Values.llmBridge.serviceAccount.name }}
+      securityContext:
+        {{- toYaml .Values.llmBridge.podSecurityContext | nindent 8 }}
+      containers:
+        - name: llm-bridge
+          securityContext:
+            {{- toYaml .Values.llmBridge.securityContext | nindent 12 }}
+          {{- if .Values.llmBridge.image.sha }}
+          image: "{{ .Values.llmBridge.image.repository }}@{{ .Values.llmBridge.image.sha }}"
+          {{- else }}
+          image: "{{ .Values.llmBridge.image.repository }}:{{ .Values.llmBridge.image.tag }}"
+          {{- end }}
+          imagePullPolicy: {{ .Values.llmBridge.image.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.llmBridge.container.port }}
+              protocol: TCP
+          env:
+            - name: PORT
+              value: "{{ .Values.llmBridge.container.port }}"
+            - name: BROKER_URL
+              value: "http://{{ .Values.broker.service.name }}.{{ include "kguardian.namespace" . }}.svc.cluster.local:{{ .Values.broker.container.port }}"
+            - name: MCP_SERVER_URL
+              value: "http://{{ .Values.mcpServer.service.name }}.{{ include "kguardian.namespace" . }}.svc.cluster.local:{{ .Values.mcpServer.service.port }}"
+            - name: NODE_ENV
+              value: "production"
+            {{- if .Values.llmBridge.secrets.openai.enabled }}
+            - name: OPENAI_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.llmBridge.secrets.openai.name }}
+                  key: {{ .Values.llmBridge.secrets.keyName }}
+                  optional: true
+            {{- end }}
+            {{- if .Values.llmBridge.secrets.anthropic.enabled }}
+            - name: ANTHROPIC_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.llmBridge.secrets.anthropic.name }}
+                  key: {{ .Values.llmBridge.secrets.keyName }}
+                  optional: true
+            {{- end }}
+            {{- if .Values.llmBridge.secrets.gemini.enabled }}
+            - name: GOOGLE_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.llmBridge.secrets.gemini.name }}
+                  key: {{ .Values.llmBridge.secrets.keyName }}
+                  optional: true
+            {{- end }}
+            {{- if .Values.llmBridge.secrets.copilot.enabled }}
+            - name: GITHUB_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.llmBridge.secrets.copilot.name }}
+                  key: {{ .Values.llmBridge.secrets.keyName }}
+                  optional: true
+            {{- end }}
+            {{- with .Values.llmBridge.env }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          {{- with .Values.llmBridge.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+      {{- with .Values.llmBridge.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.llmBridge.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.llmBridge.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}
