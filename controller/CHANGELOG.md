@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.4.0](https://github.com/kguardian-dev/kguardian/compare/controller/v1.3.0...controller/v1.4.0) (2025-11-06)
+
+
+### Features
+
+* minor performance improvements ([#434](https://github.com/kguardian-dev/kguardian/issues/434)) ([70a0704](https://github.com/kguardian-dev/kguardian/commit/70a0704b43c71567d8630dea7dce9ae1d516dfbd))
+* Track pod liveliness in the cluster ([9b5b692](https://github.com/kguardian-dev/kguardian/commit/9b5b6920f495c3b40e073026e0bdfb75f496f101))
+
 ## [1.3.0](https://github.com/kguardian-dev/kguardian/compare/controller/v1.2.0...controller/v1.3.0) (2025-11-05)
 
 
