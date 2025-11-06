@@ -65,16 +65,22 @@ export async function callOpenAI(
     tool_choice: "auto",
   };
 
-  const response = await axios.post(
-    "https://api.openai.com/v1/chat/completions",
-    payload,
-    {
-      headers: {
-        Authorization: `Bearer ${apiKey}`,
-        "Content-Type": "application/json",
-      },
-    }
-  );
+  let response;
+  try {
+    response = await axios.post(
+      "https://api.openai.com/v1/chat/completions",
+      payload,
+      {
+        headers: {
+          Authorization: `Bearer ${apiKey}`,
+          "Content-Type": "application/json",
+        },
+      }
+    );
+  } catch (error: any) {
+    console.error("OpenAI API Error:", error.response?.data || error.message);
+    throw new Error(`OpenAI API error: ${error.response?.data?.error?.message || error.message}`);
+  }
 
   const choice = response.data.choices[0];
   const message = choice.message;
@@ -87,19 +93,37 @@ export async function callOpenAI(
           name: toolCall.function.name,
           arguments: JSON.parse(toolCall.function.arguments),
         });
+
+        // Format content - OpenAI requires string content for tool messages
+        let content: string;
+        if (result.error) {
+          content = `Error: ${result.error}`;
+        } else if (result.data) {
+          content = typeof result.data === 'string' ? result.data : JSON.stringify(result.data);
+        } else {
+          content = 'No data returned';
+        }
+
         return {
           tool_call_id: toolCall.id,
           role: "tool",
           name: toolCall.function.name,
-          content: result.error || JSON.stringify(result.data),
+          content,
         };
       })
     );
 
     // Make a second request with tool results
+    // Ensure assistant message has content (even if null for tool_calls)
+    const assistantMessage = {
+      role: message.role,
+      content: message.content || null,
+      tool_calls: message.tool_calls,
+    };
+
     const followUpMessages = [
       ...messages,
-      message,
+      assistantMessage,
       ...toolResults,
     ];
 
