@@ -7,6 +7,8 @@ diesel::table! {
         pod_namespace -> Nullable<Varchar>,
         pod_obj -> Nullable<Json>,
         time_stamp -> Timestamp,
+        node_name -> Varchar,
+        is_dead -> Bool,
     }
 }
 

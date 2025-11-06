@@ -189,6 +189,40 @@ pub fn upsert_pod_details(
     Ok(w.0)
 }
 
+// New API: Mark pod as dead
+#[derive(serde::Deserialize)]
+pub struct MarkDeadRequest {
+    pub pod_name: String,
+}
+
+#[post("/pod/mark_dead")]
+pub async fn mark_pod_dead(
+    pool: web::Data<DbPool>,
+    form: web::Json<MarkDeadRequest>,
+) -> Result<HttpResponse, Error> {
+    debug!("Marking pod {} as dead", form.pod_name);
+    let result = web::block(move || {
+        let mut conn = pool.get()?;
+        mark_pod_as_dead(&mut conn, &form.pod_name)
+    })
+    .await?
+    .map_err(actix_web::error::ErrorInternalServerError)?;
+
+    Ok(HttpResponse::Ok().json(result))
+}
+
+fn mark_pod_as_dead(conn: &mut PgConnection, pod: &str) -> Result<usize, DbError> {
+    use schema::pod_details::dsl::*;
+
+    let updated = diesel::update(pod_details)
+        .filter(pod_name.eq(pod))
+        .set(is_dead.eq(true))
+        .execute(conn)?;
+
+    info!("Marked pod {} as dead", pod);
+    Ok(updated)
+}
+
 #[post("/svc/spec")]
 pub async fn add_svc_details(
     pool: web::Data<DbPool>,

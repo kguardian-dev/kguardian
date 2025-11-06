@@ -20,7 +20,9 @@ CREATE TABLE pod_details (
   pod_ip VARCHAR,
   pod_namespace VARCHAR,
   pod_obj JSON,
-  time_stamp TIMESTAMP NOT NULL
+  time_stamp TIMESTAMP NOT NULL,
+  node_name VARCHAR NOT NULL,
+  is_dead BOOLEAN NOT NULL DEFAULT FALSE
 );
 
 

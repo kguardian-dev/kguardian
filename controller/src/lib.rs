@@ -3,6 +3,7 @@ pub mod syscall;
 
 pub mod error;
 pub mod pod_watcher;
+pub mod pod_reconciler;
 pub mod service_watcher;
 use error::*;
 

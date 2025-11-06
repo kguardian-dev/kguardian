@@ -83,6 +83,8 @@ pub struct PodDetail {
     pub pod_namespace: Option<String>,
     pub pod_obj: Option<serde_json::Value>,
     pub time_stamp: NaiveDateTime,
+    pub node_name: String,
+    pub is_dead: bool,
 }
 
 #[derive(Debug, Default, Serialize)]

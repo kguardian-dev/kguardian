@@ -53,6 +53,36 @@ pub fn pod_details(conn: &mut PgConnection) -> Result<Option<Vec<PodDetail>>, Db
     Ok(pod)
 }
 
+// New API: Get all pods for a specific node
+#[get("/pod/list/{node}")]
+pub async fn get_pods_by_node(
+    pool: web::Data<DbPool>,
+    node: web::Path<String>,
+) -> actix_web::Result<impl Responder> {
+    debug!("Getting pods for node: {}", node);
+    let node_name = node.into_inner();
+    let pods = web::block(move || {
+        let mut conn = pool.get()?;
+        pods_by_node(&mut conn, &node_name)
+    })
+    .await?
+    .map_err(actix_web::error::ErrorInternalServerError)?;
+
+    Ok(HttpResponse::Ok().json(pods))
+}
+
+pub fn pods_by_node(
+    conn: &mut PgConnection,
+    node: &str,
+) -> Result<Vec<PodDetail>, DbError> {
+    use schema::pod_details::dsl::*;
+    let pods = pod_details
+        .filter(node_name.eq(node))
+        .filter(is_dead.eq(false))
+        .load::<PodDetail>(conn)?;
+    Ok(pods)
+}
+
 #[get("/svc/ip/{ip}")]
 pub async fn get_svc_by_ip<'a>(
     pool: web::Data<DbPool>,

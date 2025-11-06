@@ -33,6 +33,7 @@ pub async fn watch_pods(
             let t = tx.clone();
             let sender_ip = sender_ip.clone();
             let container_map = Arc::clone(&container_map);
+            let node_name = node_name.clone();
             async move {
                 if let Some(inum) = process_pod(
                     &p,
@@ -40,6 +41,7 @@ pub async fn watch_pods(
                     excluded_namespaces,
                     sender_ip,
                     ignore_daemonset_traffic,
+                    &node_name,
                 )
                 .await
                 {
@@ -61,9 +63,10 @@ async fn process_pod(
     excluded_namespaces: &[String],
     sender_ip: mpsc::Sender<String>,
     ignore_daemonset_traffic: bool,
+    node_name: &str,
 ) -> Option<u64> {
     if let Some(con_ids) = pod_unready(pod) {
-        let pod_ip = update_pods_details(pod).await;
+        let pod_ip = update_pods_details(pod, node_name).await;
         if let Ok(Some(pod_ip)) = pod_ip {
             if ignore_daemonset_traffic && is_backed_by_daemonset(pod) {
                 info!("Ignoring daemonset pod: {}, {}", pod.name_any(), pod_ip);
@@ -115,7 +118,7 @@ fn pod_unready(p: &Pod) -> Option<Vec<String>> {
     None
 }
 
-async fn update_pods_details(pod: &Pod) -> Result<Option<String>, Error> {
+async fn update_pods_details(pod: &Pod, node_name: &str) -> Result<Option<String>, Error> {
     let pod_name = pod.name_any();
     let pod_namespace = pod.metadata.namespace.to_owned();
     let pod_status = pod.status.as_ref().unwrap();
@@ -128,6 +131,8 @@ async fn update_pods_details(pod: &Pod) -> Result<Option<String>, Error> {
             pod_namespace,
             pod_obj: Some(json!(pod)),
             time_stamp: Utc::now().naive_utc(),
+            node_name: node_name.to_string(),
+            is_dead: false,
         };
 
         if let Err(e) = api_post_call(json!(z), "pod/spec").await {
