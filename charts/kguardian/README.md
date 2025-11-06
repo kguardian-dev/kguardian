@@ -245,23 +245,17 @@ The following table lists the configurable parameters of the kguardian chart and
 | mcpServer.container.port | int | `8081` | MCP Server container HTTP port for StreamableHTTP transport |
 | mcpServer.enabled | bool | `false` | Enable MCP Server for external integrations |
 | mcpServer.env | list | `[]` | Additional environment variables for mcp-server |
-| mcpServer.env | list | `[]` | Additional environment variables for mcp-server |
 | mcpServer.fullnameOverride | string | `""` | Override the full name of the mcp-server resources |
 | mcpServer.image.pullPolicy | string | `"Always"` | MCP Server image pull policy |
 | mcpServer.image.repository | string | `"ghcr.io/kguardian-dev/kguardian/mcp-server"` | MCP Server container image repository |
 | mcpServer.image.sha | string | `""` | Overrides the image tag using SHA digest |
 | mcpServer.image.tag | string | `"latest"` | MCP Server version tag. Use component version (e.g., "v1.0.0") or "latest" |
 | mcpServer.imagePullSecrets | list | `[]` | List of image pull secrets for private registries |
-| mcpServer.kmcp.observability.logging.format | string | `"json"` |  |
-| mcpServer.kmcp.observability.logging.level | string | `"info"` |  |
-| mcpServer.kmcp.observability.metrics.enabled | bool | `false` |  |
-| mcpServer.kmcp.observability.metrics.path | string | `"/metrics"` |  |
-| mcpServer.kmcp.observability.metrics.port | int | `9090` |  |
-| mcpServer.kmcp.observability.tracing.enabled | bool | `false` |  |
-| mcpServer.kmcp.observability.tracing.endpoint | string | `""` |  |
+| mcpServer.kmcp.authn | object | `{}` | Authentication configuration (optional) |
+| mcpServer.kmcp.authz | object | `{}` | Authorization configuration (optional) |
 | mcpServer.kmcp.secretRefs | list | `[]` | Secret references for kmcp deployment |
-| mcpServer.kmcp.transport.alternativeTransports | list | `[]` | Alternative transports (kmcp can serve multiple simultaneously) |
-| mcpServer.kmcp.transport.type | string | `"streamable-http"` | Primary transport type: streamable-http, stdio, sse, or websocket |
+| mcpServer.kmcp.transport.path | string | `"/"` | HTTP path for MCP server endpoint (only used with http transport) |
+| mcpServer.kmcp.transport.type | string | `"http"` | Transport type: http or stdio |
 | mcpServer.nameOverride | string | `""` | Override the name of the mcp-server resources |
 | mcpServer.nodeSelector | object | `{"kubernetes.io/os":"linux"}` | Node labels for the kguardian mcp-server pod assignment |
 | mcpServer.podAnnotations | object | `{}` | Annotations to add to mcp-server pods |
