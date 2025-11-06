@@ -646,7 +646,7 @@ mcpServer:
   # -- Annotations to add to mcp-server pods
   podAnnotations: {}
 
-  # -- MCP Server pod security context. Runs as non-root user (node:1000)
+  # -- MCP Server pod security context. Runs as non-root user (mcp:1000)
   podSecurityContext:
     runAsUser: 1000
     runAsGroup: 1000
