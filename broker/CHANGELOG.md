@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.3.0](https://github.com/kguardian-dev/kguardian/compare/broker/v1.2.0...broker/v1.3.0) (2025-11-06)
+
+
+### Features
+
+* Add new endpoint to broker api to get pod details by name ([#437](https://github.com/kguardian-dev/kguardian/issues/437)) ([393b0c1](https://github.com/kguardian-dev/kguardian/commit/393b0c1e11bf999168c84cfa325dd11e7de0b9ee))
+* Track pod liveliness in the cluster ([9b5b692](https://github.com/kguardian-dev/kguardian/commit/9b5b6920f495c3b40e073026e0bdfb75f496f101))
+
 ## [1.2.0](https://github.com/kguardian-dev/kguardian/compare/broker/v1.1.1...broker/v1.2.0) (2025-11-05)
 
 
