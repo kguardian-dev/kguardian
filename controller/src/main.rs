@@ -13,7 +13,7 @@ use kguardian::syscall::{
     handle_syscall_events, send_syscall_cache_periodically, SyscallEventData,
 };
 use kguardian::{
-    error::Error, models::PodInspect, network::NetworkEventData, pod_watcher::watch_pods,
+    error::Error, models::PodInspect, network::NetworkEventData, pod_reconciler::reconcile_pods_task, pod_watcher::watch_pods,
 };
 
 #[tokio::main]
@@ -22,6 +22,9 @@ async fn main() -> Result<(), Error> {
 
     let node_name = env::var("CURRENT_NODE")
         .map_err(|_| Error::Custom("CURRENT_NODE environment variable not set".to_string()))?;
+
+    let broker_url = env::var("API_ENDPOINT")
+        .map_err(|_| Error::Custom("API_ENDPOINT environment variable not set".to_string()))?;
 
     let excluded_namespaces: Vec<String> = env::var("EXCLUDED_NAMESPACES")
         .unwrap_or_else(|_| "kube-system,kguardian".to_string())
@@ -45,7 +48,7 @@ async fn main() -> Result<(), Error> {
     let syscall_map = Arc::clone(&container_map);
 
     let pods = watch_pods(
-        node_name,
+        node_name.clone(),
         tx,
         pod_c,
         &excluded_namespaces,
@@ -55,6 +58,9 @@ async fn main() -> Result<(), Error> {
     info!("Ignoring namespaces: {:?}", excluded_namespaces);
 
     let service = watch_service();
+
+    // Start pod reconciliation task
+    let pod_reconciler = reconcile_pods_task(node_name, broker_url);
 
     let (network_event_sender, network_event_receiver) = mpsc::channel::<NetworkEventData>(1000);
     let (syscall_event_sender, syscall_event_receiver) = mpsc::channel::<SyscallEventData>(1000);
@@ -84,6 +90,7 @@ async fn main() -> Result<(), Error> {
         syscall_event_handler,
         netpolicy_drop_handler,
         syscall_recorder,
+        pod_reconciler,
         async { ebpf_handle.await? }
     )?;
     Ok(())
