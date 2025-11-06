@@ -33,10 +33,14 @@ jobs:
       charts: ${{ steps.changes.outputs.charts }}
     steps:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5
+        with:
+          fetch-depth: 2  # Fetch enough history to compare with previous commit
 
       - uses: dorny/paths-filter@v3
         id: changes
         with:
+          # Compare HEAD with previous commit (HEAD~1) to only detect changes in latest push
+          base: HEAD~1
           filters: |
             controller:
               - 'controller/**'
