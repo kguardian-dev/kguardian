@@ -1,5 +1,19 @@
 # Changelog
 
+## [1.3.0](https://github.com/kguardian-dev/kguardian/compare/frontend/v1.2.11...frontend/v1.3.0) (2025-11-06)
+
+
+### Features
+
+* add dock for ai assistant ([6a568eb](https://github.com/kguardian-dev/kguardian/commit/6a568eb0dd86911a9731f2564dd3d43c507945ae))
+* add LLM + MCP ([0364874](https://github.com/kguardian-dev/kguardian/commit/03648744eabcf6005ff6a35cf761df608e239a81))
+* add LLM + MCP integration ([a165a51](https://github.com/kguardian-dev/kguardian/commit/a165a5168ef91afe71bdb17e726baeb5df024511))
+
+
+### Bug Fixes
+
+* docker builds ([0a449c8](https://github.com/kguardian-dev/kguardian/commit/0a449c859b93e839333955bcb6dd574042eaedc1))
+
 ## [1.2.11](https://github.com/kguardian-dev/kguardian/compare/frontend/v1.2.10...frontend/v1.2.11) (2025-11-03)
 
 
