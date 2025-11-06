@@ -1,5 +1,24 @@
 # Changelog
 
+## [1.5.0](https://github.com/kguardian-dev/kguardian/compare/chart/v1.4.0...chart/v1.5.0) (2025-11-06)
+
+
+### Features
+
+* add LLM + MCP ([0364874](https://github.com/kguardian-dev/kguardian/commit/03648744eabcf6005ff6a35cf761df608e239a81))
+* add LLM + MCP integration ([a165a51](https://github.com/kguardian-dev/kguardian/commit/a165a5168ef91afe71bdb17e726baeb5df024511))
+* reimplement MCP server in Go using kmcp framework ([17f4ef4](https://github.com/kguardian-dev/kguardian/commit/17f4ef4eb3f853f5e7c5d11c33da277049e4e9b9))
+
+
+### Bug Fixes
+
+* connect llm-bridge to MCP server for all 6 tools ([d0e8d5a](https://github.com/kguardian-dev/kguardian/commit/d0e8d5a588ea7ddc46700de3f2c7b27875aba5f8))
+* correct MCPServer CRD to match actual kmcp specification ([560b9ab](https://github.com/kguardian-dev/kguardian/commit/560b9ab031ebee8f531f36405bb6d43bce768560))
+* default disable frontend value ([d975872](https://github.com/kguardian-dev/kguardian/commit/d9758725c406456ebfb224807876052a07414402))
+* mcp api version ([4b39ef7](https://github.com/kguardian-dev/kguardian/commit/4b39ef71c0ed48dd2c9c983660f46563f3519486))
+* update charts and align with kmcp ([cb850ab](https://github.com/kguardian-dev/kguardian/commit/cb850abae8aad484457ac69eb2f44b891b9af3f9))
+* update workflows and helm docs for Go-based MCP server ([1c4a86f](https://github.com/kguardian-dev/kguardian/commit/1c4a86f72669ca2b23c5027b9af1d601e14e63b9))
+
 ## [1.4.0](https://github.com/kguardian-dev/kguardian/compare/chart/v1.3.2...chart/v1.4.0) (2025-11-01)
 
 
