@@ -4,7 +4,7 @@ use actix_cors::Cors;
 use actix_web::{get, web, App, HttpResponse, HttpServer};
 use api::{
     add_pod_details, add_pods, add_pods_batch, add_pods_syscalls, add_svc_details, mark_pod_dead,
-    establish_connection, get_pod_by_ip, get_pod_details, get_pod_syscall_name, get_pod_traffic,
+    establish_connection, get_pod_by_ip, get_pod_by_name, get_pod_details, get_pod_syscall_name, get_pod_traffic,
     get_pod_traffic_name, get_pods_by_node, get_svc_by_ip,
 };
 
@@ -58,6 +58,7 @@ async fn main() -> Result<(), std::io::Error> {
             .service(get_pod_details)
             .service(add_svc_details)
             .service(get_pod_by_ip)
+            .service(get_pod_by_name)
             .service(get_svc_by_ip)
             .service(get_pod_traffic_name)
             .service(get_pod_syscall_name)

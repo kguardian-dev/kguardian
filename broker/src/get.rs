@@ -112,6 +112,36 @@ pub fn svc_ip(conn: &mut PgConnection, ip: &str) -> Result<Option<SvcDetail>, Db
     Ok(svc)
 }
 
+// POD BY NAME
+#[get("/pod/name/{name}")]
+pub async fn get_pod_by_name<'a>(
+    pool: web::Data<DbPool>,
+    name: web::Path<String>,
+) -> actix_web::Result<impl Responder> {
+    info!("select pod details by name");
+    let name = name.into_inner();
+    let pod_detail = web::block(move || {
+        let mut conn = pool.get()?;
+        pod_name(&mut conn, &name)
+    })
+    .await?
+    .map_err(actix_web::error::ErrorInternalServerError)?;
+
+    Ok(match pod_detail {
+        Some(p) => HttpResponse::Ok().json(p),
+        None => HttpResponse::NotFound().body("No data found"),
+    })
+}
+
+pub fn pod_name(conn: &mut PgConnection, name: &str) -> Result<Option<PodDetail>, DbError> {
+    use schema::pod_details::dsl::*;
+    let pod = pod_details
+        .filter(pod_name.eq(name.to_string()))
+        .first::<PodDetail>(conn)
+        .optional()?;
+    Ok(pod)
+}
+
 // POD BY IP
 #[get("/pod/ip/{ip}")]
 pub async fn get_pod_by_ip<'a>(
