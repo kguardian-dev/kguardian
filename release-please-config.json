@@ -52,14 +52,14 @@
       "include-component-in-tag": true
     },
     "llm-bridge": {
-      "component": "chart",
+      "component": "llm-bridge",
       "release-type": "node",
       "package-name": "llm-bridge",
       "changelog-path": "CHANGELOG.md",
       "include-component-in-tag": true
     },
     "mcp-server": {
-      "component": "chart",
+      "component": "mcp-server",
       "release-type": "node",
       "package-name": "mcp-server",
       "changelog-path": "CHANGELOG.md",
