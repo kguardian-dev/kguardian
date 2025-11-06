@@ -14,7 +14,7 @@ images:
 # Dev-specific patches
 patchesStrategicMerge:
   - |-
-    apiVersion: mcp.kagent.dev/v1alpha1
+    apiVersion: kagent.dev/v1alpha1
     kind: MCPServer
     metadata:
       name: kguardian-mcp-server

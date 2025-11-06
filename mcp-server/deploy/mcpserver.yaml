@@ -1,7 +1,7 @@
 ---
 # MCPServer Custom Resource for kguardian MCP Server
 # This resource is managed by the kmcp controller
-apiVersion: mcp.kagent.dev/v1alpha1
+apiVersion: kagent.dev/v1alpha1
 kind: MCPServer
 metadata:
   name: kguardian-mcp-server
