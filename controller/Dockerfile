@@ -1,6 +1,6 @@
 ARG DEBIAN_VERSION="12.9"
 
-FROM --platform=$BUILDPLATFORM ubuntu:24.04 as builder
+FROM --platform=$BUILDPLATFORM ubuntu:24.04 AS builder
 
 # Set the working directory to /artifacts
 WORKDIR /artifacts
