@@ -50,6 +50,8 @@ spec:
               value: "{{ .Values.llmBridge.container.port }}"
             - name: BROKER_URL
               value: "http://{{ .Values.broker.service.name }}.{{ include "kguardian.namespace" . }}.svc.cluster.local:{{ .Values.broker.container.port }}"
+            - name: MCP_SERVER_URL
+              value: "http://{{ .Values.mcpServer.service.name }}.{{ include "kguardian.namespace" . }}.svc.cluster.local:{{ .Values.mcpServer.service.port }}"
             - name: NODE_ENV
               value: "production"
             {{- if .Values.llmBridge.secrets.openai.enabled }}
