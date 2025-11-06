@@ -10,129 +10,54 @@ metadata:
   labels:
     {{- include "kguardian.labels" . | nindent 4 }}
 spec:
-  # Image configuration
-  image:
+  # Deployment configuration - defines the container-based MCP server
+  deployment:
+    # Container image for the MCP server
     {{- if .Values.mcpServer.image.sha }}
-    repository: {{ .Values.mcpServer.image.repository }}@{{ .Values.mcpServer.image.sha }}
+    image: {{ .Values.mcpServer.image.repository }}@{{ .Values.mcpServer.image.sha }}
     {{- else }}
-    repository: {{ .Values.mcpServer.image.repository }}
-    tag: {{ .Values.mcpServer.image.tag }}
+    image: {{ .Values.mcpServer.image.repository }}:{{ .Values.mcpServer.image.tag }}
     {{- end }}
-    pullPolicy: {{ .Values.mcpServer.image.pullPolicy }}
 
-  # Replicas
-  {{- if not .Values.mcpServer.autoscaling.enabled }}
-  replicas: {{ .Values.mcpServer.replicaCount }}
-  {{- end }}
-
-  # Transport configuration (kmcp advantage: can change without code changes)
-  transport:
-    type: {{ .Values.mcpServer.kmcp.transport.type | default "streamable-http" }}
+    # Port the MCP server listens on
     port: {{ .Values.mcpServer.container.port }}
-    {{- with .Values.mcpServer.kmcp.transport.alternativeTransports }}
-    alternativeTransports:
+
+    # Environment variables (as key-value map)
+    env:
+      BROKER_URL: "http://{{ .Values.broker.service.name }}.{{ include "kguardian.namespace" . }}.svc.cluster.local:{{ .Values.broker.container.port }}"
+      PORT: "{{ .Values.mcpServer.container.port }}"
+      {{- range .Values.mcpServer.env }}
+      {{ .name }}: {{ .value | quote }}
+      {{- end }}
+
+    # Optional: Secret references for sensitive data
+    {{- with .Values.mcpServer.kmcp.secretRefs }}
+    secretRefs:
       {{- toYaml . | nindent 6 }}
     {{- end }}
 
-  # Environment variables
-  env:
-    - name: BROKER_URL
-      value: "http://{{ .Values.broker.service.name }}.{{ include "kguardian.namespace" . }}.svc.cluster.local:{{ .Values.broker.container.port }}"
-    - name: PORT
-      value: "{{ .Values.mcpServer.container.port }}"
-    {{- with .Values.mcpServer.env }}
-    {{- toYaml . | nindent 4 }}
-    {{- end }}
+  # Transport type - how clients communicate with the MCP server
+  # Valid values: stdio, http
+  transportType: {{ .Values.mcpServer.kmcp.transport.type | default "http" }}
 
-  # Optional: Secret references
-  {{- with .Values.mcpServer.kmcp.secretRefs }}
-  envFrom:
-    {{- range . }}
-    - secretRef:
-        name: {{ .name }}
-        {{- if .optional }}
-        optional: {{ .optional }}
-        {{- end }}
-    {{- end }}
+  # HTTP transport configuration
+  {{- if or (eq (.Values.mcpServer.kmcp.transport.type | default "http") "http") (not .Values.mcpServer.kmcp.transport.type) }}
+  httpTransport:
+    # Target port for HTTP service
+    targetPort: {{ .Values.mcpServer.container.port }}
+    # Path where MCP server is accessible
+    path: {{ .Values.mcpServer.kmcp.transport.path | default "/" }}
   {{- end }}
 
-  # Resources
-  {{- with .Values.mcpServer.resources }}
-  resources:
+  # Optional: Authentication configuration
+  {{- with .Values.mcpServer.kmcp.authn }}
+  authn:
     {{- toYaml . | nindent 4 }}
   {{- end }}
 
-  # Health checks
-  livenessProbe:
-    httpGet:
-      path: /
-      port: {{ .Values.mcpServer.container.port }}
-    initialDelaySeconds: 10
-    periodSeconds: 30
-    timeoutSeconds: 5
-    failureThreshold: 3
-
-  readinessProbe:
-    httpGet:
-      path: /
-      port: {{ .Values.mcpServer.container.port }}
-    initialDelaySeconds: 5
-    periodSeconds: 10
-    timeoutSeconds: 5
-    failureThreshold: 3
-
-  # Security context
-  securityContext:
-    {{- toYaml .Values.mcpServer.securityContext | nindent 4 }}
-
-  # Pod security context
-  podSecurityContext:
-    {{- toYaml .Values.mcpServer.podSecurityContext | nindent 4 }}
-
-  # Node selector
-  {{- with .Values.mcpServer.nodeSelector }}
-  nodeSelector:
-    {{- toYaml . | nindent 4 }}
-  {{- end }}
-
-  # Tolerations
-  {{- with .Values.mcpServer.tolerations }}
-  tolerations:
-    {{- toYaml . | nindent 4 }}
-  {{- end }}
-
-  # Affinity
-  {{- with .Values.mcpServer.affinity }}
-  affinity:
-    {{- toYaml . | nindent 4 }}
-  {{- end }}
-
-  # Autoscaling
-  {{- if .Values.mcpServer.autoscaling.enabled }}
-  autoscaling:
-    enabled: true
-    minReplicas: {{ .Values.mcpServer.autoscaling.minReplicas }}
-    maxReplicas: {{ .Values.mcpServer.autoscaling.maxReplicas }}
-    {{- if .Values.mcpServer.autoscaling.targetCPUUtilizationPercentage }}
-    targetCPUUtilizationPercentage: {{ .Values.mcpServer.autoscaling.targetCPUUtilizationPercentage }}
-    {{- end }}
-    {{- if .Values.mcpServer.autoscaling.targetMemoryUtilizationPercentage }}
-    targetMemoryUtilizationPercentage: {{ .Values.mcpServer.autoscaling.targetMemoryUtilizationPercentage }}
-    {{- end }}
-  {{- end }}
-
-  # Service configuration
-  service:
-    type: {{ .Values.mcpServer.service.type }}
-    port: {{ .Values.mcpServer.service.port }}
-    {{- with .Values.mcpServer.service.annotations }}
-    annotations:
-      {{- toYaml . | nindent 6 }}
-    {{- end }}
-
-  # Observability (if kmcp controller supports it)
-  {{- with .Values.mcpServer.kmcp.observability }}
-  observability:
+  # Optional: Authorization rules (CEL-based)
+  {{- with .Values.mcpServer.kmcp.authz }}
+  authz:
     {{- toYaml . | nindent 4 }}
   {{- end }}
 {{- end }}

@@ -724,39 +724,39 @@ mcpServer:
   kmcp:
     # Transport configuration
     transport:
-      # -- Primary transport type: streamable-http, stdio, sse, or websocket
-      type: streamable-http
+      # -- Transport type: http or stdio
+      type: http
 
-      # -- Alternative transports (kmcp can serve multiple simultaneously)
-      alternativeTransports: []
-      # Example:
-      # - type: stdio
-      # - type: sse
-      #   path: /sse
+      # -- HTTP path for MCP server endpoint (only used with http transport)
+      path: /
 
     # -- Secret references for kmcp deployment
     secretRefs: []
     # Example:
     # - name: kguardian-mcp-secrets
-    #   optional: true
+    #   keys:
+    #     - BROKER_API_KEY
 
-    # Observability configuration (if supported by kmcp controller)
-    observability:
-      # Metrics configuration
-      metrics:
-        enabled: false
-        port: 9090
-        path: /metrics
+    # -- Authentication configuration (optional)
+    authn: {}
+    # Example JWT authentication:
+    # authn:
+    #   jwt:
+    #     issuer: https://your-auth-provider.com
+    #     audiences:
+    #       - kguardian-mcp
+    #     jwks:
+    #       name: kguardian-jwks-secret
+    #       key: jwks.json
 
-      # Tracing configuration
-      tracing:
-        enabled: false
-        endpoint: ""
-
-      # Logging configuration
-      logging:
-        level: info
-        format: json
-
-  # -- Additional environment variables for mcp-server
-  env: []
+    # -- Authorization configuration (optional)
+    authz: {}
+    # Example CEL-based authorization:
+    # authz:
+    #   server:
+    #     issuer: https://your-auth-provider.com
+    #     audience: kguardian-mcp
+    #     jwksURL: https://your-auth-provider.com/.well-known/jwks.json
+    #   rules: |
+    #     request.auth.claims.sub != "" &&
+    #     (request.tool in ["get_pod_network_traffic", "get_pod_syscalls"])
