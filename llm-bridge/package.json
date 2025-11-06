@@ -21,16 +21,16 @@
   "author": "kguardian-dev",
   "license": "BUSL-1.1",
   "dependencies": {
-    "express": "^4.21.2",
+    "express": "^5.0.0",
     "cors": "^2.8.5",
     "axios": "^1.7.9",
     "zod": "^4.0.0",
-    "dotenv": "^16.4.7"
+    "dotenv": "^17.0.0"
   },
   "devDependencies": {
     "@types/express": "^5.0.0",
     "@types/cors": "^2.8.17",
-    "@types/node": "^22.10.5",
+    "@types/node": "^24.0.0",
     "@typescript-eslint/eslint-plugin": "^8.19.1",
     "@typescript-eslint/parser": "^8.19.1",
     "eslint": "^9.18.0",
