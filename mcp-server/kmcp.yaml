@@ -1,4 +1,4 @@
-apiVersion: kkagent.dev/v1alpha1
+apiVersion: kagent.dev/v1alpha1
 kind: MCPProject
 
 metadata:
