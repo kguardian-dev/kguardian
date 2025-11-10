@@ -18,6 +18,7 @@ export interface NetworkTraffic {
   traffic_type: string | null;
   traffic_in_out_ip: string | null;
   traffic_in_out_port: string | null;
+  decision: string | null; // ALLOW or DROP
   time_stamp: string;
 }
 
