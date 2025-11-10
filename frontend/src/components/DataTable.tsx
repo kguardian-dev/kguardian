@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import type { PodNodeData, NetworkTraffic } from '../types';
-import { ArrowRight, Activity, ChevronDown, ChevronRight } from 'lucide-react';
+import { ArrowRight, Activity, ChevronDown, ChevronRight, Filter } from 'lucide-react';
 import { apiClient } from '../services/api';
 
 interface DataTableProps {
@@ -20,6 +20,10 @@ const DataTable: React.FC<DataTableProps> = ({ selectedPod }) => {
   const [expandedSyscalls, setExpandedSyscalls] = useState<Set<number>>(new Set());
   const [isTrafficExpanded, setIsTrafficExpanded] = useState(true);
   const [isSyscallsExpanded, setIsSyscallsExpanded] = useState(true);
+
+  // Traffic filters
+  const [decisionFilter, setDecisionFilter] = useState<'all' | 'ALLOW' | 'DROP'>('all');
+  const [trafficTypeFilter, setTrafficTypeFilter] = useState<'all' | 'ingress' | 'egress'>('all');
 
   // Cache for service and pod lookups by IP
   const [identityCache, setIdentityCache] = useState<Map<string, TrafficIdentity>>(new Map());
@@ -83,10 +87,12 @@ const DataTable: React.FC<DataTableProps> = ({ selectedPod }) => {
   // State for resolved identities
   const [resolvedIdentities, setResolvedIdentities] = useState<Map<string, TrafficIdentity>>(new Map());
 
-  // Reset expanded state and identities when pod changes
+  // Reset expanded state, identities, and filters when pod changes
   useEffect(() => {
     setExpandedSyscalls(new Set());
     setResolvedIdentities(new Map());
+    setDecisionFilter('all');
+    setTrafficTypeFilter('all');
   }, [selectedPod?.id]);
 
   // Resolve identities for all traffic when selected pod changes
@@ -120,6 +126,21 @@ const DataTable: React.FC<DataTableProps> = ({ selectedPod }) => {
   const hasTraffic = selectedPod.traffic && selectedPod.traffic.length > 0;
   const hasSyscalls = selectedPod.syscalls && selectedPod.syscalls.length > 0;
 
+  // Filter traffic based on selected filters
+  const filteredTraffic = selectedPod.traffic?.filter(traffic => {
+    // Filter by decision
+    if (decisionFilter !== 'all' && traffic.decision !== decisionFilter) {
+      return false;
+    }
+
+    // Filter by traffic type
+    if (trafficTypeFilter !== 'all' && traffic.traffic_type?.toLowerCase() !== trafficTypeFilter) {
+      return false;
+    }
+
+    return true;
+  }) || [];
+
   return (
     <div className="h-full overflow-auto p-4 space-y-4">
       {/* Pod Information Header */}
@@ -151,11 +172,61 @@ const DataTable: React.FC<DataTableProps> = ({ selectedPod }) => {
             <ChevronRight className="w-4 h-4 text-hubble-success" />
           )}
           <ArrowRight className="w-4 h-4 text-hubble-success" />
-          Network Traffic ({selectedPod.traffic?.length || 0})
+          Network Traffic ({filteredTraffic.length} / {selectedPod.traffic?.length || 0})
         </button>
 
         {isTrafficExpanded && hasTraffic && (
-          <div className="bg-hubble-card rounded-lg border border-hubble-border overflow-hidden">
+          <>
+            {/* Filter Controls */}
+            <div className="mb-3 flex items-center gap-4 flex-wrap">
+              <div className="flex items-center gap-2">
+                <Filter className="w-4 h-4 text-secondary" />
+                <span className="text-sm text-secondary">Filters:</span>
+              </div>
+
+              {/* Decision Filter */}
+              <div className="flex items-center gap-2">
+                <span className="text-xs text-tertiary">Decision:</span>
+                <select
+                  value={decisionFilter}
+                  onChange={(e) => setDecisionFilter(e.target.value as 'all' | 'ALLOW' | 'DROP')}
+                  className="bg-hubble-dark border border-hubble-border rounded px-2 py-1 text-xs text-secondary focus:outline-none focus:border-hubble-accent"
+                >
+                  <option value="all">All</option>
+                  <option value="ALLOW">Allow</option>
+                  <option value="DROP">Drop</option>
+                </select>
+              </div>
+
+              {/* Traffic Type Filter */}
+              <div className="flex items-center gap-2">
+                <span className="text-xs text-tertiary">Type:</span>
+                <select
+                  value={trafficTypeFilter}
+                  onChange={(e) => setTrafficTypeFilter(e.target.value as 'all' | 'ingress' | 'egress')}
+                  className="bg-hubble-dark border border-hubble-border rounded px-2 py-1 text-xs text-secondary focus:outline-none focus:border-hubble-accent"
+                >
+                  <option value="all">All</option>
+                  <option value="ingress">Ingress</option>
+                  <option value="egress">Egress</option>
+                </select>
+              </div>
+
+              {/* Clear Filters Button */}
+              {(decisionFilter !== 'all' || trafficTypeFilter !== 'all') && (
+                <button
+                  onClick={() => {
+                    setDecisionFilter('all');
+                    setTrafficTypeFilter('all');
+                  }}
+                  className="text-xs text-hubble-accent hover:text-hubble-accent/80 underline"
+                >
+                  Clear filters
+                </button>
+              )}
+            </div>
+
+            <div className="bg-hubble-card rounded-lg border border-hubble-border overflow-hidden">
             <div className="overflow-x-auto">
               <table className="w-full text-sm">
                 <thead className="bg-hubble-dark border-b border-hubble-border">
@@ -169,7 +240,7 @@ const DataTable: React.FC<DataTableProps> = ({ selectedPod }) => {
                   </tr>
                 </thead>
                 <tbody>
-                  {selectedPod.traffic.map((traffic, index) => (
+                  {filteredTraffic.map((traffic, index) => (
                     <tr
                       key={traffic.uuid || index}
                       className="border-b border-hubble-border hover:bg-hubble-dark/50 transition-colors"
@@ -282,6 +353,13 @@ const DataTable: React.FC<DataTableProps> = ({ selectedPod }) => {
                 </tbody>
               </table>
             </div>
+          </div>
+          </>
+        )}
+
+        {isTrafficExpanded && hasTraffic && filteredTraffic.length === 0 && (
+          <div className="bg-hubble-card p-4 rounded-lg border border-hubble-border text-tertiary text-sm">
+            No traffic matches the selected filters. Try adjusting or clearing the filters.
           </div>
         )}
 
