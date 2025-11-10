@@ -164,6 +164,7 @@ const DataTable: React.FC<DataTableProps> = ({ selectedPod }) => {
                     <th className="px-4 py-2 text-left text-secondary font-medium">Pod</th>
                     <th className="px-4 py-2 text-left text-secondary font-medium">Remote</th>
                     <th className="px-4 py-2 text-left text-secondary font-medium">Protocol</th>
+                    <th className="px-4 py-2 text-left text-secondary font-medium">Decision</th>
                     <th className="px-4 py-2 text-left text-secondary font-medium">Timestamp</th>
                   </tr>
                 </thead>
@@ -256,6 +257,22 @@ const DataTable: React.FC<DataTableProps> = ({ selectedPod }) => {
                         <span className="px-2 py-1 bg-hubble-accent/20 text-hubble-accent rounded text-xs">
                           {traffic.ip_protocol || 'TCP'}
                         </span>
+                      </td>
+                      <td className="px-4 py-2">
+                        {traffic.decision && (
+                          <span className={`px-2 py-1 rounded text-xs font-medium ${
+                            traffic.decision === 'ALLOW'
+                              ? 'bg-hubble-success/20 text-hubble-success'
+                              : traffic.decision === 'DROP'
+                              ? 'bg-red-500/20 text-red-400'
+                              : 'bg-gray-500/20 text-gray-400'
+                          }`}>
+                            {traffic.decision}
+                          </span>
+                        )}
+                        {!traffic.decision && (
+                          <span className="text-tertiary text-xs">-</span>
+                        )}
                       </td>
                       <td className="px-4 py-2 text-tertiary text-xs">
                         {new Date(traffic.time_stamp).toLocaleString()}
