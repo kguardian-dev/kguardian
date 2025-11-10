@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react';
 import type { PodNodeData, NetworkTraffic } from '../types';
 import { ArrowRight, Activity, ChevronDown, ChevronRight, Filter } from 'lucide-react';
 import { apiClient } from '../services/api';
+import { deriveIdentityName, getShortIdentityName } from '../utils/identity';
 
 interface DataTableProps {
   selectedPod: PodNodeData | null;
@@ -125,6 +126,7 @@ const DataTable: React.FC<DataTableProps> = ({ selectedPod }) => {
 
   const hasTraffic = selectedPod.traffic && selectedPod.traffic.length > 0;
   const hasSyscalls = selectedPod.syscalls && selectedPod.syscalls.length > 0;
+  const identityName = getShortIdentityName(deriveIdentityName(selectedPod.pod));
 
   // Filter traffic based on selected filters
   const filteredTraffic = selectedPod.traffic?.filter(traffic => {
@@ -146,12 +148,12 @@ const DataTable: React.FC<DataTableProps> = ({ selectedPod }) => {
       {/* Pod Information Header */}
       <div className="bg-hubble-card p-4 rounded-lg border border-hubble-border">
         <h3 className="text-lg font-semibold text-primary mb-2">
-          {selectedPod.pod.pod_name}
+          {identityName}
         </h3>
         <div className="grid grid-cols-2 gap-2 text-sm">
           <div>
-            <span className="text-tertiary">Namespace:</span>
-            <span className="ml-2 text-secondary">{selectedPod.pod.pod_namespace}</span>
+            <span className="text-tertiary">Pod:</span>
+            <span className="ml-2 text-secondary font-mono">{selectedPod.pod.pod_name}</span>
           </div>
           <div>
             <span className="text-tertiary">IP:</span>
