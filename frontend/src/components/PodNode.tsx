@@ -2,6 +2,7 @@ import React from 'react';
 import { Handle, Position } from 'reactflow';
 import { ChevronDown, ChevronRight, Network, Server, FileCode } from 'lucide-react';
 import type { PodNodeData } from '../types';
+import { deriveIdentityName, getShortIdentityName } from '../utils/identity';
 
 interface PodNodeProps {
   data: PodNodeData & {
@@ -13,6 +14,7 @@ interface PodNodeProps {
 
 const PodNode: React.FC<PodNodeProps> = ({ data, selected }) => {
   const trafficCount = data.traffic?.length || 0;
+  const identityName = getShortIdentityName(deriveIdentityName(data.pod));
 
   // Count total syscalls from comma-separated strings
   const syscallCount = data.syscalls?.reduce((total, syscallRecord) => {
@@ -50,10 +52,10 @@ const PodNode: React.FC<PodNodeProps> = ({ data, selected }) => {
 
           <div className="flex-1">
             <div className="font-semibold text-sm text-primary">
-              {data.label}
+              {identityName}
             </div>
             <div className="text-xs text-tertiary">
-              {data.pod.pod_namespace}
+              {data.pod.pod_name}
             </div>
           </div>
         </div>
