@@ -52,6 +52,7 @@ pub struct PodDetail {
     pub time_stamp: NaiveDateTime,
     pub node_name: String,
     pub is_dead: bool,
+    pub pod_identity: Option<String>,
 }
 
 #[derive(

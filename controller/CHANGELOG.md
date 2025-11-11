@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.5.0](https://github.com/kguardian-dev/kguardian/compare/controller/v1.4.0...controller/v1.5.0) (2025-11-11)
+
+
+### Features
+
+* Add a new field in pod_details to get store pod identity ([#467](https://github.com/kguardian-dev/kguardian/issues/467)) ([0d78fa2](https://github.com/kguardian-dev/kguardian/commit/0d78fa242da1ffd88c4c5f820546151cb11ac5e5))
+
 ## [1.4.0](https://github.com/kguardian-dev/kguardian/compare/controller/v1.3.0...controller/v1.4.0) (2025-11-06)
 
 
