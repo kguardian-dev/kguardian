@@ -1,5 +1,15 @@
 # Changelog
 
+## [1.4.0](https://github.com/kguardian-dev/kguardian/compare/frontend/v1.3.0...frontend/v1.4.0) (2025-11-11)
+
+
+### Features
+
+* add decision column to Network Traffic table ([d6f5566](https://github.com/kguardian-dev/kguardian/commit/d6f556637e3f9f33e273ff7f9f89d2540eaf9f06))
+* add filtering functionality to Network Traffic table ([c25829a](https://github.com/kguardian-dev/kguardian/commit/c25829a6cf7f1e9655248136837b321a922ceadd))
+* normalise identity names in frontend ([1b5a168](https://github.com/kguardian-dev/kguardian/commit/1b5a168c7eed2518dfe95031107f0f6666ccec1f))
+* normalise the names of identites ([48f3136](https://github.com/kguardian-dev/kguardian/commit/48f3136b480b799e912a0a95c14317ff24710ac6))
+
 ## [1.3.0](https://github.com/kguardian-dev/kguardian/compare/frontend/v1.2.11...frontend/v1.3.0) (2025-11-06)
 
 
