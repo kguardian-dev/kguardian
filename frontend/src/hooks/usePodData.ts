@@ -15,9 +15,9 @@ export const usePodData = (namespace: string) => {
       // Fetch all pods from broker
       const allPods = await apiClient.getAllPods();
 
-      // Filter by namespace
+      // Filter by namespace and only show active pods (is_dead = false)
       const filteredPods = allPods.filter(
-        (pod) => pod.pod_namespace === namespace
+        (pod) => pod.pod_namespace === namespace && !pod.is_dead
       );
 
       // Fetch traffic and syscalls for each pod in the namespace

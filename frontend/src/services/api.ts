@@ -46,6 +46,19 @@ class BrokerAPIClient {
   }
 
   /**
+   * Get pod details by pod name
+   */
+  async getPodDetailsByName(podName: string): Promise<PodInfo | null> {
+    try {
+      const response = await this.client.get(`/pod/name/${podName}`);
+      return response.data;
+    } catch (error) {
+      console.error('Error fetching pod details by name:', error);
+      return null;
+    }
+  }
+
+  /**
    * Get pod details by IP address
    */
   async getPodDetailsByIP(podIP: string): Promise<PodInfo | null> {

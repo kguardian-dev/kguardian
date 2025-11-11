@@ -5,6 +5,9 @@ export interface PodInfo {
   pod_namespace: string | null;
   pod_obj?: any;
   time_stamp: string;
+  node_name: string;
+  is_dead: boolean;
+  pod_identity?: string | null;
 }
 
 // Matches broker's PodTraffic type

@@ -2,7 +2,6 @@ import React from 'react';
 import { Handle, Position } from 'reactflow';
 import { ChevronDown, ChevronRight, Network, Server, FileCode } from 'lucide-react';
 import type { PodNodeData } from '../types';
-import { deriveIdentityName, getShortIdentityName } from '../utils/identity';
 
 interface PodNodeProps {
   data: PodNodeData & {
@@ -14,7 +13,7 @@ interface PodNodeProps {
 
 const PodNode: React.FC<PodNodeProps> = ({ data, selected }) => {
   const trafficCount = data.traffic?.length || 0;
-  const identityName = getShortIdentityName(deriveIdentityName(data.pod));
+  const identityName = data.pod.pod_identity || data.pod.pod_name;
 
   // Count total syscalls from comma-separated strings
   const syscallCount = data.syscalls?.reduce((total, syscallRecord) => {
@@ -54,18 +53,20 @@ const PodNode: React.FC<PodNodeProps> = ({ data, selected }) => {
             <div className="font-semibold text-sm text-primary">
               {identityName}
             </div>
-            <div className="text-xs text-tertiary">
-              {data.pod.pod_name}
-            </div>
           </div>
         </div>
       </div>
 
       {data.isExpanded && (
         <div className="mt-3 pt-3 border-t border-hubble-border space-y-2">
-          <div className="text-xs text-tertiary">
+          <div className="text-xs space-y-1">
             <div className="flex items-center gap-1">
-              <span className="font-mono">{data.pod.pod_ip}</span>
+              <span className="text-tertiary">Pod:</span>
+              <span className="font-mono text-secondary">{data.pod.pod_name}</span>
+            </div>
+            <div className="flex items-center gap-1">
+              <span className="text-tertiary">IP:</span>
+              <span className="font-mono text-secondary">{data.pod.pod_ip}</span>
             </div>
           </div>
 
