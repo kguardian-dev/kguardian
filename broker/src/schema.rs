@@ -9,6 +9,7 @@ diesel::table! {
         time_stamp -> Timestamp,
         node_name -> Varchar,
         is_dead -> Bool,
+        pod_identity -> Nullable<Varchar>,
     }
 }
 

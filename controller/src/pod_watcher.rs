@@ -2,6 +2,7 @@ use crate::{api_post_call, Error, PodDetail, PodInfo, PodInspect};
 use chrono::Utc;
 use dashmap::DashMap;
 use futures::TryStreamExt;
+use k8s_openapi::api::apps::v1::{Deployment, ReplicaSet, StatefulSet};
 use k8s_openapi::api::core::v1::Pod;
 use kube::{
     runtime::{reflector::Lookup, watcher, WatchStreamExt},
@@ -9,7 +10,7 @@ use kube::{
 };
 use serde_json::json;
 use std::sync::Arc;
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, warn};
 
 use tokio::sync::mpsc;
 pub async fn watch_pods(
@@ -34,6 +35,7 @@ pub async fn watch_pods(
             let sender_ip = sender_ip.clone();
             let container_map = Arc::clone(&container_map);
             let node_name = node_name.clone();
+            let c = c.clone();
             async move {
                 if let Some(inum) = process_pod(
                     &p,
@@ -42,6 +44,7 @@ pub async fn watch_pods(
                     sender_ip,
                     ignore_daemonset_traffic,
                     &node_name,
+                    &c,
                 )
                 .await
                 {
@@ -64,9 +67,10 @@ async fn process_pod(
     sender_ip: mpsc::Sender<String>,
     ignore_daemonset_traffic: bool,
     node_name: &str,
+    client: &Client,
 ) -> Option<u64> {
     if let Some(con_ids) = pod_unready(pod) {
-        let pod_ip = update_pods_details(pod, node_name).await;
+        let pod_ip = update_pods_details(pod, node_name, client).await;
         if let Ok(Some(pod_ip)) = pod_ip {
             if ignore_daemonset_traffic && is_backed_by_daemonset(pod) {
                 info!("Ignoring daemonset pod: {}, {}", pod.name_any(), pod_ip);
@@ -118,13 +122,17 @@ fn pod_unready(p: &Pod) -> Option<Vec<String>> {
     None
 }
 
-async fn update_pods_details(pod: &Pod, node_name: &str) -> Result<Option<String>, Error> {
+async fn update_pods_details(pod: &Pod, node_name: &str, client: &Client) -> Result<Option<String>, Error> {
     let pod_name = pod.name_any();
     let pod_namespace = pod.metadata.namespace.to_owned();
     let pod_status = pod.status.as_ref().unwrap();
     let mut pod_ip_address: Option<String> = None;
     if pod_status.pod_ip.is_some() {
         let pod_ip = pod_status.pod_ip.as_ref().unwrap();
+
+        // Extract pod identity
+        let pod_identity = extract_pod_identity(pod, client).await;
+
         let z = PodDetail {
             pod_ip: pod_ip.to_string(),
             pod_name,
@@ -133,6 +141,7 @@ async fn update_pods_details(pod: &Pod, node_name: &str) -> Result<Option<String
             time_stamp: Utc::now().naive_utc(),
             node_name: node_name.to_string(),
             is_dead: false,
+            pod_identity,
         };
 
         if let Err(e) = api_post_call(json!(z), "pod/spec").await {
@@ -189,4 +198,94 @@ fn is_backed_by_daemonset(pod: &Pod) -> bool {
         }
     }
     false
+}
+
+/// Extracts pod identity from labels or owner references
+/// Priority: app.kubernetes.io/name > app.kubernetes.io/component > k8s-app > owner references
+async fn extract_pod_identity(pod: &Pod, client: &Client) -> Option<String> {
+    // Check labels first in priority order
+    if let Some(labels) = &pod.metadata.labels {
+        // 1. Check for app.kubernetes.io/name
+        if let Some(name) = labels.get("app.kubernetes.io/name") {
+            return Some(name.clone());
+        }
+
+        // 2. Check for app.kubernetes.io/component
+        if let Some(component) = labels.get("app.kubernetes.io/component") {
+            return Some(component.clone());
+        }
+
+        // 3. Check for k8s-app
+        if let Some(k8s_app) = labels.get("k8s-app") {
+            return Some(k8s_app.clone());
+        }
+         // 34 Check for app
+        if let Some(k8s_app) = labels.get("app") {
+            return Some(k8s_app.clone());
+        }
+    }
+
+    // 4. If no labels found, trace back through owner references
+    trace_owner_to_workload(pod, client).await
+}
+
+/// Traces pod's owner references back to the ultimate workload (Deployment/StatefulSet)
+async fn trace_owner_to_workload(pod: &Pod, client: &Client) -> Option<String> {
+    let owner_references = pod.metadata.owner_references.as_ref()?;
+    let namespace = pod.metadata.namespace.as_ref()?;
+
+    for owner in owner_references {
+        match owner.kind.as_str() {
+            "ReplicaSet" => {
+                // Trace ReplicaSet to Deployment
+                if let Some(deployment_name) = trace_replicaset_to_deployment(
+                    &owner.name,
+                    namespace,
+                    client
+                ).await {
+                    return Some(deployment_name);
+                }
+            }
+            "Deployment" => {
+                return Some(owner.name.clone());
+            }
+            "StatefulSet" => {
+                return Some(owner.name.clone());
+            }
+            "DaemonSet" => {
+                return Some(owner.name.clone());
+            }
+            _ => {
+                debug!("Unknown owner kind: {}", owner.kind);
+            }
+        }
+    }
+
+    None
+}
+
+/// Traces a ReplicaSet back to its owning Deployment
+async fn trace_replicaset_to_deployment(
+    replicaset_name: &str,
+    namespace: &str,
+    client: &Client,
+) -> Option<String> {
+    let rs_api: Api<ReplicaSet> = Api::namespaced(client.clone(), namespace);
+
+    match rs_api.get(replicaset_name).await {
+        Ok(replicaset) => {
+            if let Some(owner_references) = &replicaset.metadata.owner_references {
+                for owner in owner_references {
+                    if owner.kind == "Deployment" {
+                        return Some(owner.name.clone());
+                    }
+                }
+            }
+        }
+        Err(e) => {
+            warn!("Failed to get ReplicaSet {}: {}", replicaset_name, e);
+        }
+    }
+
+    None
 }
