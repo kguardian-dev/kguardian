@@ -13,6 +13,7 @@ interface PodNodeProps {
 
 const PodNode: React.FC<PodNodeProps> = ({ data, selected }) => {
   const trafficCount = data.traffic?.length || 0;
+  const identityName = data.pod.pod_identity || data.pod.pod_name;
 
   // Count total syscalls from comma-separated strings
   const syscallCount = data.syscalls?.reduce((total, syscallRecord) => {
@@ -50,10 +51,7 @@ const PodNode: React.FC<PodNodeProps> = ({ data, selected }) => {
 
           <div className="flex-1">
             <div className="font-semibold text-sm text-primary">
-              {data.label}
-            </div>
-            <div className="text-xs text-tertiary">
-              {data.pod.pod_namespace}
+              {identityName}
             </div>
           </div>
         </div>
@@ -61,9 +59,14 @@ const PodNode: React.FC<PodNodeProps> = ({ data, selected }) => {
 
       {data.isExpanded && (
         <div className="mt-3 pt-3 border-t border-hubble-border space-y-2">
-          <div className="text-xs text-tertiary">
+          <div className="text-xs space-y-1">
             <div className="flex items-center gap-1">
-              <span className="font-mono">{data.pod.pod_ip}</span>
+              <span className="text-tertiary">Pod:</span>
+              <span className="font-mono text-secondary">{data.pod.pod_name}</span>
+            </div>
+            <div className="flex items-center gap-1">
+              <span className="text-tertiary">IP:</span>
+              <span className="font-mono text-secondary">{data.pod.pod_ip}</span>
             </div>
           </div>
 

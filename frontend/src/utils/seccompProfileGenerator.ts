@@ -64,14 +64,14 @@ export function profileToJSON(profile: SeccompProfile): string {
   return JSON.stringify(profile, null, 2);
 }
 
-export function profileToYAML(profile: SeccompProfile, podName: string, namespace: string): string {
+export function profileToYAML(profile: SeccompProfile, resourceName: string, namespace: string): string {
   const yaml: string[] = [];
 
   // Create a Kubernetes SeccompProfile CRD format
   yaml.push('apiVersion: security.kubernetes.io/v1alpha1');
   yaml.push('kind: SeccompProfile');
   yaml.push('metadata:');
-  yaml.push(`  name: ${podName}-seccomp`);
+  yaml.push(`  name: ${resourceName}-seccomp`);
   yaml.push(`  namespace: ${namespace}`);
   yaml.push('spec:');
   yaml.push(`  defaultAction: ${profile.defaultAction}`);

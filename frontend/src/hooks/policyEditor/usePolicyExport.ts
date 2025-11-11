@@ -11,6 +11,7 @@ interface UsePolicyExportProps {
   policy: NetworkPolicy | null;
   seccompProfile: SeccompProfile | null;
   podName: string;
+  podIdentity?: string;
   podNamespace: string;
   yamlView: boolean;
 }
@@ -20,6 +21,7 @@ export const usePolicyExport = ({
   policy,
   seccompProfile,
   podName,
+  podIdentity,
   podNamespace,
   yamlView,
 }: UsePolicyExportProps) => {
@@ -29,8 +31,10 @@ export const usePolicyExport = ({
     if (policyType === 'network' && policy) {
       return policyToYAML(policy);
     } else if (policyType === 'seccomp' && seccompProfile) {
+      // Use pod identity for resource name, fallback to pod name
+      const resourceName = podIdentity || podName;
       return yamlView
-        ? profileToYAML(seccompProfile, podName, podNamespace)
+        ? profileToYAML(seccompProfile, resourceName, podNamespace)
         : profileToJSON(seccompProfile);
     }
     return null;

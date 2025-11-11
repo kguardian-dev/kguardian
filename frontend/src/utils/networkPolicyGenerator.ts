@@ -237,11 +237,14 @@ export async function generateNetworkPolicy(pod: PodNodeData, _allPods: PodNodeD
   });
 
   // Create policy
+  // Use pod identity for resource name, fallback to pod name if not available
+  const resourceName = pod.pod.pod_identity || pod.pod.pod_name;
+
   const policy: NetworkPolicy = {
     apiVersion: 'networking.k8s.io/v1',
     kind: 'NetworkPolicy',
     metadata: {
-      name: `${pod.pod.pod_name}-policy`,
+      name: `${resourceName}-policy`,
       namespace: pod.pod.pod_namespace || 'default',
     },
     spec: {
