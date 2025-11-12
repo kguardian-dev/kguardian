@@ -1,4 +1,4 @@
-import React, { useState, useRef, useEffect } from 'react';
+import React, { useState, useRef, useEffect, useCallback } from 'react';
 import { X, Send, Sparkles, Bot, User, Minimize2, Maximize2, ChevronRight, ChevronLeft } from 'lucide-react';
 import { sendChatMessage, type HistoryMessage } from '../services/aiApi';
 
@@ -12,7 +12,7 @@ interface Message {
 interface AIAssistantProps {
   isOpen: boolean;
   onClose: () => void;
-  onLayoutChange?: (isSidePanel: boolean, isCollapsed: boolean) => void;
+  onLayoutChange?: (isSidePanel: boolean, isCollapsed: boolean, width?: number) => void;
 }
 
 type ViewMode = 'modal' | 'side-panel';
@@ -23,15 +23,17 @@ const AIAssistant: React.FC<AIAssistantProps> = ({ isOpen, onClose, onLayoutChan
   const [isTyping, setIsTyping] = useState(false);
   const [viewMode, setViewMode] = useState<ViewMode>('modal');
   const [isCollapsed, setIsCollapsed] = useState(false);
+  const [panelWidth, setPanelWidth] = useState(448); // Default 448px (max-w-md)
+  const [isResizing, setIsResizing] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
 
   // Notify parent of layout changes
   useEffect(() => {
     if (onLayoutChange && isOpen) {
-      onLayoutChange(viewMode === 'side-panel', isCollapsed);
+      onLayoutChange(viewMode === 'side-panel', isCollapsed, panelWidth);
     }
-  }, [viewMode, isCollapsed, onLayoutChange, isOpen]);
+  }, [viewMode, isCollapsed, panelWidth, onLayoutChange, isOpen]);
 
   // Auto-scroll to bottom when new messages arrive
   useEffect(() => {
@@ -112,6 +114,50 @@ const AIAssistant: React.FC<AIAssistantProps> = ({ isOpen, onClose, onLayoutChan
   const toggleCollapse = () => {
     setIsCollapsed(prev => !prev);
   };
+
+  const handleMouseDown = useCallback((e: React.MouseEvent) => {
+    e.preventDefault();
+    setIsResizing(true);
+  }, []);
+
+  const handleMouseMove = useCallback((e: MouseEvent) => {
+    if (!isResizing) return;
+
+    const windowWidth = window.innerWidth;
+    // Calculate width from right edge
+    const newWidth = windowWidth - e.clientX;
+
+    // Constrain between 300px and 80% of window width
+    const minWidth = 300;
+    const maxWidth = windowWidth * 0.8;
+    const constrainedWidth = Math.max(minWidth, Math.min(maxWidth, newWidth));
+
+    setPanelWidth(constrainedWidth);
+  }, [isResizing]);
+
+  const handleMouseUp = useCallback(() => {
+    setIsResizing(false);
+  }, []);
+
+  // Effect to manage resize listeners
+  useEffect(() => {
+    if (isResizing) {
+      document.addEventListener('mousemove', handleMouseMove);
+      document.addEventListener('mouseup', handleMouseUp);
+      document.body.style.userSelect = 'none';
+      document.body.style.cursor = 'ew-resize';
+    } else {
+      document.body.style.userSelect = '';
+      document.body.style.cursor = '';
+    }
+
+    return () => {
+      document.removeEventListener('mousemove', handleMouseMove);
+      document.removeEventListener('mouseup', handleMouseUp);
+      document.body.style.userSelect = '';
+      document.body.style.cursor = '';
+    };
+  }, [isResizing, handleMouseMove, handleMouseUp]);
 
   if (!isOpen) return null;
 
@@ -322,7 +368,26 @@ const AIAssistant: React.FC<AIAssistantProps> = ({ isOpen, onClose, onLayoutChan
 
   // Expanded side panel
   return (
-    <div className="fixed top-0 right-0 bottom-0 z-50 w-full max-w-md flex flex-col bg-hubble-card border-l border-hubble-border shadow-2xl transition-all duration-300">
+    <div
+      className="fixed top-0 right-0 bottom-0 z-50 flex flex-col bg-hubble-card border-l border-hubble-border shadow-2xl"
+      style={{ width: `${panelWidth}px` }}
+    >
+      {/* Resize Handle */}
+      <div
+        onMouseDown={handleMouseDown}
+        className={`absolute left-0 top-0 bottom-0 w-1 cursor-ew-resize hover:bg-hubble-accent/50 transition-colors ${
+          isResizing ? 'bg-hubble-accent' : 'bg-transparent'
+        }`}
+        title="Drag to resize"
+      >
+        {/* Visual indicator */}
+        <div className="absolute inset-y-0 left-1/2 -translate-x-1/2 flex flex-col justify-center opacity-0 hover:opacity-100 transition-opacity">
+          <div className="flex flex-col gap-1">
+            <div className="w-0.5 h-8 bg-hubble-accent rounded-full"></div>
+          </div>
+        </div>
+      </div>
+
       {/* Header */}
       <div className="flex items-center justify-between px-6 py-4 border-b border-hubble-border">
         <div className="flex items-center gap-3">
