@@ -83,6 +83,7 @@ const NetworkPolicyEditor: React.FC<NetworkPolicyEditorProps> = ({ isOpen, onClo
     policy,
     seccompProfile,
     podName: pod?.pod.pod_name || '',
+    podIdentity: pod?.pod.pod_identity || undefined,
     podNamespace: pod?.pod.pod_namespace || 'default',
     yamlView,
   });
@@ -128,7 +129,7 @@ const NetworkPolicyEditor: React.FC<NetworkPolicyEditorProps> = ({ isOpen, onClo
                   {policyType === 'network' && policy
                     ? policyToYAML(policy)
                     : policyType === 'seccomp' && seccompProfile
-                    ? profileToYAML(seccompProfile, pod.pod.pod_name, pod.pod.pod_namespace || 'default')
+                    ? profileToYAML(seccompProfile, pod.pod.pod_identity || pod.pod.pod_name, pod.pod.pod_namespace || 'default')
                     : ''}
                 </pre>
               </div>
