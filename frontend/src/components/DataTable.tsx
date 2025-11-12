@@ -204,20 +204,28 @@ const DataTable: React.FC<DataTableProps> = ({ selectedPod }) => {
 
   return (
     <div className="h-full overflow-auto p-4 space-y-4">
-      {/* Pod Information Header */}
+      {/* Identity Information Header */}
       <div className="bg-hubble-card p-4 rounded-lg border border-hubble-border">
         <h3 className="text-lg font-semibold text-primary mb-2">
           {identityName}
         </h3>
-        <div className="grid grid-cols-2 gap-2 text-sm">
+        <div className="text-sm space-y-2">
           <div>
-            <span className="text-tertiary">Pod:</span>
-            <span className="ml-2 text-secondary font-mono">{selectedPod.pod.pod_name}</span>
+            <span className="text-tertiary">Namespace:</span>
+            <span className="ml-2 text-secondary">{selectedPod.pod.pod_namespace || 'default'}</span>
           </div>
-          <div>
-            <span className="text-tertiary">IP:</span>
-            <span className="ml-2 text-secondary font-mono">{selectedPod.pod.pod_ip}</span>
-          </div>
+          {selectedPod.pods && selectedPod.pods.length > 0 && (
+            <div>
+              <span className="text-tertiary">Pods ({selectedPod.pods.length}):</span>
+              <div className="ml-2 mt-1 flex flex-wrap gap-2">
+                {selectedPod.pods.map((pod, index) => (
+                  <span key={index} className="px-2 py-1 bg-hubble-dark text-secondary font-mono text-xs rounded border border-hubble-border">
+                    {pod.pod_name}
+                  </span>
+                ))}
+              </div>
+            </div>
+          )}
         </div>
       </div>
 
