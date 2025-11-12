@@ -1,5 +1,18 @@
 # Changelog
 
+## [1.5.0](https://github.com/kguardian-dev/kguardian/compare/frontend/v1.4.0...frontend/v1.5.0) (2025-11-12)
+
+
+### Features
+
+* group by identity ([8160109](https://github.com/kguardian-dev/kguardian/commit/816010916a0027379c633bb6c15687929d1e8e59))
+
+
+### Bug Fixes
+
+* **deps:** update dependency lucide-react to ^0.553.0 ([19f53f5](https://github.com/kguardian-dev/kguardian/commit/19f53f5a8020dd80ef91ba4bc20775070181dc22))
+* scaling namespaces and AI chat ([bd898e8](https://github.com/kguardian-dev/kguardian/commit/bd898e86527b1cd42fd8d1fdad0f26ea67a99df7))
+
 ## [1.4.0](https://github.com/kguardian-dev/kguardian/compare/frontend/v1.3.0...frontend/v1.4.0) (2025-11-11)
 
 
