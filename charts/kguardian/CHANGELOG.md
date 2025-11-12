@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.6.1](https://github.com/kguardian-dev/kguardian/compare/chart/v1.6.0...chart/v1.6.1) (2025-11-12)
+
+
+### Bug Fixes
+
+* helm chart description ([7d3511c](https://github.com/kguardian-dev/kguardian/commit/7d3511c6054a9f4b39785e555fdfd117ffc32326))
+
 ## [1.6.0](https://github.com/kguardian-dev/kguardian/compare/chart/v1.5.0...chart/v1.6.0) (2025-11-11)
 
 
