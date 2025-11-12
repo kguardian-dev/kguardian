@@ -1,0 +1,12 @@
+# Chart Testing Configuration
+# https://github.com/helm/chart-testing/blob/main/doc/ct_lint.md
+
+# Disable chart version increment check since we use release-please for automated versioning
+check-version-increment: false
+
+# Path to charts directory
+chart-dirs:
+  - charts
+
+# Target branch for comparing changes
+target-branch: main
