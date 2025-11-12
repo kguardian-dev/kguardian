@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.6.2](https://github.com/kguardian-dev/kguardian/compare/chart/v1.6.1...chart/v1.6.2) (2025-11-12)
+
+
+### Bug Fixes
+
+* MCP resource will create its own managed service resource ([7ba395f](https://github.com/kguardian-dev/kguardian/commit/7ba395ffaaa2c8261c75812d53b3273a5a0c2cd5))
+
 ## [1.6.1](https://github.com/kguardian-dev/kguardian/compare/chart/v1.6.0...chart/v1.6.1) (2025-11-12)
 
 
