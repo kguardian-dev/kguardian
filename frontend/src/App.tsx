@@ -1,4 +1,4 @@
-import { useState, useCallback } from 'react';
+import { useState, useCallback, useEffect } from 'react';
 import { RefreshCw, Shield, Sparkles } from 'lucide-react';
 import NetworkGraph from './components/NetworkGraph';
 import NamespaceSelector from './components/NamespaceSelector';
@@ -16,15 +16,17 @@ function App() {
   const [isAIAssistantOpen, setIsAIAssistantOpen] = useState(false);
   const [isPolicyEditorOpen, setIsPolicyEditorOpen] = useState(false);
   const [policyEditorPod, setPolicyEditorPod] = useState<PodNodeData | null>(null);
-  const [aiSidePanel, setAISidePanel] = useState({ isSidePanel: false, isCollapsed: false });
+  const [aiSidePanel, setAISidePanel] = useState({ isSidePanel: false, isCollapsed: false, width: 448 });
+  const [tableHeight, setTableHeight] = useState(320); // Default 320px (h-80)
+  const [isResizing, setIsResizing] = useState(false);
 
   const { namespaces } = useNamespaces();
   const { pods, loading, error, togglePodExpansion, refreshData } = usePodData(namespace);
 
-  // Calculate the right padding for content when AI panel is docked
-  const contentPaddingRight = aiSidePanel.isSidePanel
-    ? (aiSidePanel.isCollapsed ? 'pr-12' : 'pr-[28rem]') // 48px collapsed, 448px (md) expanded
-    : '';
+  // Calculate the right padding for content when AI panel is docked (in pixels)
+  const contentPaddingRightPx = aiSidePanel.isSidePanel
+    ? (aiSidePanel.isCollapsed ? 48 : aiSidePanel.width) // 48px collapsed, dynamic width expanded
+    : 0;
 
   const handlePodSelect = (pod: PodNodeData | null) => {
     setSelectedPod(pod);
@@ -35,18 +37,70 @@ function App() {
     setIsPolicyEditorOpen(true);
   };
 
-  const handleAILayoutChange = useCallback((isSidePanel: boolean, isCollapsed: boolean) => {
-    setAISidePanel({ isSidePanel, isCollapsed });
+  const handleAILayoutChange = useCallback((isSidePanel: boolean, isCollapsed: boolean, width: number = 448) => {
+    setAISidePanel({ isSidePanel, isCollapsed, width });
   }, []);
 
   const handleAIClose = useCallback(() => {
     setIsAIAssistantOpen(false);
     // Reset layout when closing to remove padding
-    setAISidePanel({ isSidePanel: false, isCollapsed: false });
+    setAISidePanel({ isSidePanel: false, isCollapsed: false, width: 448 });
   }, []);
 
+  const handleMouseDown = useCallback((e: React.MouseEvent) => {
+    e.preventDefault();
+    setIsResizing(true);
+  }, []);
+
+  const handleMouseMove = useCallback((e: MouseEvent) => {
+    if (!isResizing) return;
+
+    const windowHeight = window.innerHeight;
+    const headerHeight = 73; // Approximate header height
+    const footerHeight = 34; // Approximate footer height
+    const availableHeight = windowHeight - headerHeight - footerHeight;
+
+    // Calculate height from bottom
+    const newHeight = windowHeight - e.clientY - footerHeight;
+
+    // Constrain between 100px and 80% of available height
+    const minHeight = 100;
+    const maxHeight = availableHeight * 0.8;
+    const constrainedHeight = Math.max(minHeight, Math.min(maxHeight, newHeight));
+
+    setTableHeight(constrainedHeight);
+  }, [isResizing]);
+
+  const handleMouseUp = useCallback(() => {
+    setIsResizing(false);
+  }, []);
+
+  // Effect to manage resize listeners
+  useEffect(() => {
+    if (isResizing) {
+      document.addEventListener('mousemove', handleMouseMove);
+      document.addEventListener('mouseup', handleMouseUp);
+      // Prevent text selection during resize
+      document.body.style.userSelect = 'none';
+      document.body.style.cursor = 'ns-resize';
+    } else {
+      document.body.style.userSelect = '';
+      document.body.style.cursor = '';
+    }
+
+    return () => {
+      document.removeEventListener('mousemove', handleMouseMove);
+      document.removeEventListener('mouseup', handleMouseUp);
+      document.body.style.userSelect = '';
+      document.body.style.cursor = '';
+    };
+  }, [isResizing, handleMouseMove, handleMouseUp]);
+
   return (
-    <div className={`flex flex-col h-screen bg-hubble-darker transition-all duration-300 ${contentPaddingRight}`}>
+    <div
+      className="flex flex-col h-screen bg-hubble-darker transition-all duration-300"
+      style={{ paddingRight: `${contentPaddingRightPx}px` }}
+    >
       {/* Header */}
       <header className="bg-hubble-dark border-b border-hubble-border px-6 py-4">
         <div className="flex items-center justify-between">
@@ -125,8 +179,27 @@ function App() {
               />
             </div>
 
+            {/* Resize Handle */}
+            <div
+              onMouseDown={handleMouseDown}
+              className={`h-1 border-t border-hubble-border cursor-ns-resize hover:bg-hubble-accent/50 transition-colors relative group ${
+                isResizing ? 'bg-hubble-accent' : 'bg-hubble-border'
+              }`}
+              title="Drag to resize"
+            >
+              {/* Visual indicator */}
+              <div className="absolute inset-x-0 top-1/2 -translate-y-1/2 flex justify-center opacity-0 group-hover:opacity-100 transition-opacity">
+                <div className="flex gap-1">
+                  <div className="w-8 h-0.5 bg-hubble-accent rounded-full"></div>
+                </div>
+              </div>
+            </div>
+
             {/* Data Table */}
-            <div className="h-80 border-t border-hubble-border bg-hubble-dark overflow-hidden">
+            <div
+              className="border-t border-hubble-border bg-hubble-dark overflow-hidden"
+              style={{ height: `${tableHeight}px` }}
+            >
               <DataTable selectedPod={selectedPod} allPods={pods} />
             </div>
           </>

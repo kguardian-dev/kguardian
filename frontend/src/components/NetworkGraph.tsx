@@ -1,4 +1,4 @@
-import React, { useCallback, useMemo } from 'react';
+import React, { useCallback, useMemo, useEffect } from 'react';
 import ReactFlow, {
   Controls,
   Background,
@@ -7,6 +7,8 @@ import ReactFlow, {
   useEdgesState,
   addEdge,
   MarkerType,
+  useReactFlow,
+  ReactFlowProvider,
 } from 'reactflow';
 import type { Node, Edge, Connection } from 'reactflow';
 import 'reactflow/dist/style.css';
@@ -25,13 +27,14 @@ const nodeTypes = {
   podNode: PodNode,
 };
 
-const NetworkGraph: React.FC<NetworkGraphProps> = ({
+const NetworkGraphInner: React.FC<NetworkGraphProps> = ({
   pods,
   onPodToggle,
   onPodSelect,
   selectedPodId,
   onBuildPolicy,
 }) => {
+  const { fitView } = useReactFlow();
   // Convert pod data to React Flow nodes
   const initialNodes: Node[] = useMemo(() => {
     return pods.map((pod, index) => ({
@@ -113,14 +116,24 @@ const NetworkGraph: React.FC<NetworkGraphProps> = ({
   const [edges, setEdges, onEdgesChange] = useEdgesState(initialEdges);
 
   // Update nodes when pods or selectedPodId changes
-  React.useEffect(() => {
+  useEffect(() => {
     setNodes(initialNodes);
   }, [initialNodes, setNodes]);
 
   // Update edges when traffic changes
-  React.useEffect(() => {
+  useEffect(() => {
     setEdges(initialEdges);
   }, [initialEdges, setEdges]);
+
+  // Auto-fit view when pods data changes (namespace load)
+  useEffect(() => {
+    if (nodes.length > 0) {
+      // Small delay to ensure nodes are rendered before fitting
+      setTimeout(() => {
+        fitView({ padding: 0.2, duration: 400 });
+      }, 100);
+    }
+  }, [nodes, fitView]);
 
   const onConnect = useCallback(
     (params: Connection) => setEdges((eds) => addEdge(params, eds)),
@@ -162,6 +175,15 @@ const NetworkGraph: React.FC<NetworkGraphProps> = ({
         />
       </ReactFlow>
     </div>
+  );
+};
+
+// Wrapper component to provide ReactFlow context
+const NetworkGraph: React.FC<NetworkGraphProps> = (props) => {
+  return (
+    <ReactFlowProvider>
+      <NetworkGraphInner {...props} />
+    </ReactFlowProvider>
   );
 };
 
