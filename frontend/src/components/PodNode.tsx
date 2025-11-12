@@ -11,9 +11,10 @@ interface PodNodeProps {
   selected?: boolean;
 }
 
-const PodNode: React.FC<PodNodeProps> = ({ data, selected }) => {
+const PodNode: React.FC<PodNodeProps> = React.memo(({ data, selected }) => {
   const trafficCount = data.traffic?.length || 0;
   const identityName = data.pod.pod_identity || data.pod.pod_name;
+  const podCount = data.pods?.length || 1;
 
   // Count total syscalls from comma-separated strings
   const syscallCount = data.syscalls?.reduce((total, syscallRecord) => {
@@ -53,23 +54,17 @@ const PodNode: React.FC<PodNodeProps> = ({ data, selected }) => {
             <div className="font-semibold text-sm text-primary">
               {identityName}
             </div>
+            {podCount > 1 && (
+              <div className="text-xs text-tertiary">
+                {podCount} replicas
+              </div>
+            )}
           </div>
         </div>
       </div>
 
       {data.isExpanded && (
         <div className="mt-3 pt-3 border-t border-hubble-border space-y-2">
-          <div className="text-xs space-y-1">
-            <div className="flex items-center gap-1">
-              <span className="text-tertiary">Pod:</span>
-              <span className="font-mono text-secondary">{data.pod.pod_name}</span>
-            </div>
-            <div className="flex items-center gap-1">
-              <span className="text-tertiary">IP:</span>
-              <span className="font-mono text-secondary">{data.pod.pod_ip}</span>
-            </div>
-          </div>
-
           <div className="flex gap-3 text-xs">
             <div className="flex items-center gap-1">
               <Network className="w-3 h-3 text-hubble-success" />
@@ -106,6 +101,16 @@ const PodNode: React.FC<PodNodeProps> = ({ data, selected }) => {
       <Handle type="source" position={Position.Right} />
     </div>
   );
-};
+}, (prevProps, nextProps) => {
+  // Custom comparison function for React.memo
+  // Only re-render if these specific props change
+  return (
+    prevProps.data.id === nextProps.data.id &&
+    prevProps.data.isExpanded === nextProps.data.isExpanded &&
+    prevProps.selected === nextProps.selected &&
+    prevProps.data.traffic?.length === nextProps.data.traffic?.length &&
+    prevProps.data.syscalls?.length === nextProps.data.syscalls?.length
+  );
+});
 
 export default PodNode;

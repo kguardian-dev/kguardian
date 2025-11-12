@@ -3,38 +3,18 @@ import type { SeccompProfile, SeccompSyscall } from '../types/seccompProfile';
 import { parseSyscallString } from './syscalls';
 
 export function generateSeccompProfile(pod: PodNodeData): SeccompProfile {
-  console.log('Generating seccomp profile for pod:', pod.pod.pod_name);
-  console.log('Syscall records:', pod.syscalls?.length || 0);
-
   // Collect all unique syscalls from the pod's observed behavior
   const uniqueSyscalls = new Set<string>();
-  const invalidSyscalls: string[] = [];
 
-  pod.syscalls?.forEach((syscallRecord, idx) => {
-    console.log(`Syscall record ${idx}:`, syscallRecord);
-
+  pod.syscalls?.forEach((syscallRecord) => {
     if (syscallRecord.syscalls) {
       // Split comma-separated syscalls and validate
-      const { valid, invalid } = parseSyscallString(syscallRecord.syscalls);
+      const { valid } = parseSyscallString(syscallRecord.syscalls);
 
       // Add valid syscalls to set
       valid.forEach(syscall => uniqueSyscalls.add(syscall));
-
-      // Track invalid syscalls for logging
-      if (invalid.length > 0) {
-        invalidSyscalls.push(...invalid);
-        console.warn(`  Invalid syscalls in record ${idx}:`, invalid);
-      }
-
-      console.log(`  Added ${valid.length} valid syscalls from record ${idx}`);
     }
   });
-
-  if (invalidSyscalls.length > 0) {
-    console.warn(`Total invalid syscalls filtered out: ${invalidSyscalls.length}`, invalidSyscalls);
-  }
-
-  console.log(`Total unique valid syscalls: ${uniqueSyscalls.size}`);
 
   // Create syscall rules - group all observed syscalls into one allow rule
   const syscallRules: SeccompSyscall[] = [];

@@ -37,7 +37,8 @@ export interface SyscallInfo {
 export interface PodNodeData {
   id: string;
   label: string;
-  pod: PodInfo;
+  pod: PodInfo; // Primary pod (for backward compatibility and single-pod identities)
+  pods: PodInfo[]; // All pods in this identity group
   traffic: NetworkTraffic[];
   syscalls?: SyscallInfo[];
   isExpanded: boolean;

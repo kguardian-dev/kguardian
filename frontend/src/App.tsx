@@ -1,4 +1,4 @@
-import { useState, useCallback } from 'react';
+import { useState, useCallback, useEffect } from 'react';
 import { RefreshCw, Shield, Sparkles } from 'lucide-react';
 import NetworkGraph from './components/NetworkGraph';
 import NamespaceSelector from './components/NamespaceSelector';
@@ -9,6 +9,7 @@ import NetworkPolicyEditor from './components/NetworkPolicyEditor';
 import { usePodData } from './hooks/usePodData';
 import { useNamespaces } from './hooks/useNamespaces';
 import type { PodNodeData } from './types';
+import { UI_DIMENSIONS } from './constants/ui';
 
 function App() {
   const [namespace, setNamespace] = useState('default');
@@ -16,15 +17,25 @@ function App() {
   const [isAIAssistantOpen, setIsAIAssistantOpen] = useState(false);
   const [isPolicyEditorOpen, setIsPolicyEditorOpen] = useState(false);
   const [policyEditorPod, setPolicyEditorPod] = useState<PodNodeData | null>(null);
-  const [aiSidePanel, setAISidePanel] = useState({ isSidePanel: false, isCollapsed: false });
+  const [aiSidePanel, setAISidePanel] = useState<{
+    isSidePanel: boolean;
+    isCollapsed: boolean;
+    width: number;
+  }>({
+    isSidePanel: false,
+    isCollapsed: false,
+    width: UI_DIMENSIONS.AI_PANEL_DEFAULT_WIDTH
+  });
+  const [tableHeight, setTableHeight] = useState<number>(UI_DIMENSIONS.TABLE_DEFAULT_HEIGHT);
+  const [isResizing, setIsResizing] = useState(false);
 
   const { namespaces } = useNamespaces();
   const { pods, loading, error, togglePodExpansion, refreshData } = usePodData(namespace);
 
-  // Calculate the right padding for content when AI panel is docked
-  const contentPaddingRight = aiSidePanel.isSidePanel
-    ? (aiSidePanel.isCollapsed ? 'pr-12' : 'pr-[28rem]') // 48px collapsed, 448px (md) expanded
-    : '';
+  // Calculate the right padding for content when AI panel is docked (in pixels)
+  const contentPaddingRightPx = aiSidePanel.isSidePanel
+    ? (aiSidePanel.isCollapsed ? UI_DIMENSIONS.AI_PANEL_COLLAPSED_WIDTH : aiSidePanel.width)
+    : 0;
 
   const handlePodSelect = (pod: PodNodeData | null) => {
     setSelectedPod(pod);
@@ -35,18 +46,74 @@ function App() {
     setIsPolicyEditorOpen(true);
   };
 
-  const handleAILayoutChange = useCallback((isSidePanel: boolean, isCollapsed: boolean) => {
-    setAISidePanel({ isSidePanel, isCollapsed });
+  const handleAILayoutChange = useCallback((isSidePanel: boolean, isCollapsed: boolean, width?: number) => {
+    setAISidePanel({ isSidePanel, isCollapsed, width: width ?? UI_DIMENSIONS.AI_PANEL_DEFAULT_WIDTH });
   }, []);
 
   const handleAIClose = useCallback(() => {
     setIsAIAssistantOpen(false);
     // Reset layout when closing to remove padding
-    setAISidePanel({ isSidePanel: false, isCollapsed: false });
+    setAISidePanel({
+      isSidePanel: false,
+      isCollapsed: false,
+      width: UI_DIMENSIONS.AI_PANEL_DEFAULT_WIDTH
+    });
   }, []);
 
+  const handleMouseDown = useCallback((e: React.MouseEvent) => {
+    e.preventDefault();
+    setIsResizing(true);
+  }, []);
+
+  const handleMouseMove = useCallback((e: MouseEvent) => {
+    if (!isResizing) return;
+
+    const windowHeight = window.innerHeight;
+    const availableHeight = windowHeight - UI_DIMENSIONS.HEADER_HEIGHT - UI_DIMENSIONS.FOOTER_HEIGHT;
+
+    // Calculate height from bottom
+    const newHeight = windowHeight - e.clientY - UI_DIMENSIONS.FOOTER_HEIGHT;
+
+    // Constrain between min and max heights
+    const maxHeight = availableHeight * UI_DIMENSIONS.TABLE_MAX_HEIGHT_RATIO;
+    const constrainedHeight = Math.max(
+      UI_DIMENSIONS.TABLE_MIN_HEIGHT,
+      Math.min(maxHeight, newHeight)
+    );
+
+    setTableHeight(constrainedHeight);
+  }, [isResizing]);
+
+  const handleMouseUp = useCallback(() => {
+    setIsResizing(false);
+  }, []);
+
+  // Effect to manage resize listeners
+  useEffect(() => {
+    if (isResizing) {
+      document.addEventListener('mousemove', handleMouseMove);
+      document.addEventListener('mouseup', handleMouseUp);
+      // Prevent text selection during resize
+      document.body.style.userSelect = 'none';
+      document.body.style.cursor = 'ns-resize';
+    } else {
+      document.body.style.userSelect = '';
+      document.body.style.cursor = '';
+    }
+
+    return () => {
+      document.removeEventListener('mousemove', handleMouseMove);
+      document.removeEventListener('mouseup', handleMouseUp);
+      document.body.style.userSelect = '';
+      document.body.style.cursor = '';
+    };
+  }, [isResizing, handleMouseMove, handleMouseUp]);
+
   return (
-    <div className={`flex flex-col h-screen bg-hubble-darker transition-all duration-300 ${contentPaddingRight}`}>
+    <div
+      className="flex flex-col h-screen bg-hubble-darker transition-all duration-300"
+      style={{ paddingRight: `${contentPaddingRightPx}px` }}
+    >
       {/* Header */}
       <header className="bg-hubble-dark border-b border-hubble-border px-6 py-4">
         <div className="flex items-center justify-between">
@@ -125,8 +192,27 @@ function App() {
               />
             </div>
 
+            {/* Resize Handle */}
+            <div
+              onMouseDown={handleMouseDown}
+              className={`h-1 border-t border-hubble-border cursor-ns-resize hover:bg-hubble-accent/50 transition-colors relative group ${
+                isResizing ? 'bg-hubble-accent' : 'bg-hubble-border'
+              }`}
+              title="Drag to resize"
+            >
+              {/* Visual indicator */}
+              <div className="absolute inset-x-0 top-1/2 -translate-y-1/2 flex justify-center opacity-0 group-hover:opacity-100 transition-opacity">
+                <div className="flex gap-1">
+                  <div className="w-8 h-0.5 bg-hubble-accent rounded-full"></div>
+                </div>
+              </div>
+            </div>
+
             {/* Data Table */}
-            <div className="h-80 border-t border-hubble-border bg-hubble-dark overflow-hidden">
+            <div
+              className="border-t border-hubble-border bg-hubble-dark overflow-hidden"
+              style={{ height: `${tableHeight}px` }}
+            >
               <DataTable selectedPod={selectedPod} allPods={pods} />
             </div>
           </>
