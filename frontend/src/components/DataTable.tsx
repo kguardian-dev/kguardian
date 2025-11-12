@@ -1,7 +1,6 @@
-import React, { useState, useEffect } from 'react';
-import type { PodNodeData, NetworkTraffic } from '../types';
+import React, { useState, useEffect, useMemo, useCallback } from 'react';
+import type { PodNodeData } from '../types';
 import { ArrowRight, Activity, ChevronDown, ChevronRight, Filter } from 'lucide-react';
-import { apiClient } from '../services/api';
 
 interface DataTableProps {
   selectedPod: PodNodeData | null;
@@ -17,7 +16,7 @@ interface TrafficIdentity {
   isExternal: boolean;
 }
 
-const DataTable: React.FC<DataTableProps> = ({ selectedPod }) => {
+const DataTable: React.FC<DataTableProps> = ({ selectedPod, allPods }) => {
   const [expandedSyscalls, setExpandedSyscalls] = useState<Set<number>>(new Set());
   const [isTrafficExpanded, setIsTrafficExpanded] = useState(true);
   const [isSyscallsExpanded, setIsSyscallsExpanded] = useState(true);
@@ -83,98 +82,123 @@ const DataTable: React.FC<DataTableProps> = ({ selectedPod }) => {
   const [decisionFilter, setDecisionFilter] = useState<'all' | 'ALLOW' | 'DROP'>('all');
   const [trafficTypeFilter, setTrafficTypeFilter] = useState<'all' | 'ingress' | 'egress'>('all');
 
-  // Cache for service and pod lookups by IP
-  const [identityCache, setIdentityCache] = useState<Map<string, TrafficIdentity>>(new Map());
+  // Pagination for large traffic tables
+  const [trafficPage, setTrafficPage] = useState(0);
+  const TRAFFIC_PAGE_SIZE = 100; // Show 100 rows at a time
 
-  // Helper to resolve traffic identity
-  // Follows advisor priority: service first, then pod, then external
-  const resolveTrafficIdentity = async (traffic: NetworkTraffic): Promise<TrafficIdentity> => {
-    if (!traffic.traffic_in_out_ip) {
+  // Create lookup maps from allPods (memoized to avoid recalculation)
+  const podLookupMaps = useMemo(() => {
+    const byIp = new Map<string, PodNodeData>();
+    const byName = new Map<string, PodNodeData>();
+
+    allPods.forEach((pod) => {
+      // Map by IP for backward compatibility
+      if (pod.pod.pod_ip) {
+        byIp.set(pod.pod.pod_ip, pod);
+      }
+      // Map by name - more reliable for traffic lookups
+      if (pod.pod.pod_name) {
+        byName.set(pod.pod.pod_name, pod);
+      }
+      // Map all pods in the identity group
+      pod.pods?.forEach((p) => {
+        if (p.pod_ip) byIp.set(p.pod_ip, pod);
+        if (p.pod_name) byName.set(p.pod_name, pod);
+      });
+    });
+
+    return { byIp, byName };
+  }, [allPods]);
+
+  // Synchronous identity resolution using in-memory lookups only
+  // No API calls, no state updates, no memory leaks
+  const resolveTrafficIdentity = useCallback((ip: string | null): TrafficIdentity => {
+    if (!ip) {
       return { isExternal: true };
     }
 
-    const ip = traffic.traffic_in_out_ip;
-
-    // Check cache first
-    if (identityCache.has(ip)) {
-      return identityCache.get(ip)!;
+    // Try to find pod by IP in our lookup map
+    const podData = podLookupMaps.byIp.get(ip);
+    if (podData) {
+      return {
+        podName: podData.pod.pod_name,
+        podIdentity: podData.pod.pod_identity || undefined,
+        podNamespace: podData.pod.pod_namespace || undefined,
+        isExternal: false,
+      };
     }
 
-    // Priority 1: Try to get service info from API
-    try {
-      const serviceInfo = await apiClient.getServiceByIP(ip);
-      if (serviceInfo && serviceInfo.svc_name) {
-        const identity: TrafficIdentity = {
-          svcName: serviceInfo.svc_name,
-          svcNamespace: serviceInfo.svc_namespace || undefined,
-          isExternal: false,
-        };
+    // If not found in our pods, it's external (service or internet)
+    return { isExternal: true };
+  }, [podLookupMaps]);
 
-        // Cache the result
-        setIdentityCache(prev => new Map(prev).set(ip, identity));
-        return identity;
+  // Memoize resolved identities map - recalculate only when traffic or pods change
+  const resolvedIdentities = useMemo(() => {
+    if (!selectedPod?.traffic) return new Map<string, TrafficIdentity>();
+
+    const identities = new Map<string, TrafficIdentity>();
+    const uniqueIPs = new Set(selectedPod.traffic.map(t => t.traffic_in_out_ip).filter(Boolean));
+
+    uniqueIPs.forEach((ip) => {
+      if (ip) {
+        identities.set(ip, resolveTrafficIdentity(ip));
       }
-    } catch (error) {
-      // Service lookup failed, continue to pod lookup
-    }
+    });
 
-    // Priority 2: Try to get pod info from API (checks all namespaces)
-    try {
-      const podInfo = await apiClient.getPodDetailsByIP(ip);
-      if (podInfo && podInfo.pod_name) {
-        console.log(`[Identity] Pod ${podInfo.pod_name}: pod_identity='${podInfo.pod_identity || 'null'}'`);
-        const identity: TrafficIdentity = {
-          podName: podInfo.pod_name,
-          podIdentity: podInfo.pod_identity || undefined,
-          podNamespace: podInfo.pod_namespace || undefined,
-          isExternal: false,
-        };
+    return identities;
+  }, [selectedPod?.traffic, resolveTrafficIdentity]);
 
-        // Cache the result
-        setIdentityCache(prev => new Map(prev).set(ip, identity));
-        return identity;
-      }
-    } catch (error) {
-      // Pod lookup failed, continue to external
-    }
-
-    // Priority 3: External traffic
-    const identity: TrafficIdentity = { isExternal: true };
-    setIdentityCache(prev => new Map(prev).set(ip, identity));
-    return identity;
-  };
-
-  // State for resolved identities
-  const [resolvedIdentities, setResolvedIdentities] = useState<Map<string, TrafficIdentity>>(new Map());
-
-  // Reset expanded state, identities, and filters when pod changes
+  // Reset expanded state, filters, and pagination when pod changes
   useEffect(() => {
     setExpandedSyscalls(new Set());
-    setResolvedIdentities(new Map());
     setDecisionFilter('all');
     setTrafficTypeFilter('all');
+    setTrafficPage(0);
   }, [selectedPod?.id]);
+  // Memoize expensive calculations
+  const hasTraffic = useMemo(
+    () => selectedPod?.traffic && selectedPod.traffic.length > 0,
+    [selectedPod?.traffic]
+  );
 
-  // Resolve identities for all traffic when selected pod changes
-  useEffect(() => {
-    if (!selectedPod || !selectedPod.traffic) return;
+  const hasSyscalls = useMemo(
+    () => selectedPod?.syscalls && selectedPod.syscalls.length > 0,
+    [selectedPod?.syscalls]
+  );
 
-    const resolveAllIdentities = async () => {
-      const identities = new Map<string, TrafficIdentity>();
+  const identityName = useMemo(
+    () => selectedPod?.pod.pod_identity || selectedPod?.pod.pod_name || '',
+    [selectedPod?.pod.pod_identity, selectedPod?.pod.pod_name]
+  );
 
-      for (const traffic of selectedPod.traffic) {
-        if (traffic.traffic_in_out_ip && !identities.has(traffic.traffic_in_out_ip)) {
-          const identity = await resolveTrafficIdentity(traffic);
-          identities.set(traffic.traffic_in_out_ip, identity);
-        }
+  // Memoize filtered traffic to avoid recalculation on every render
+  const filteredTraffic = useMemo(() => {
+    if (!selectedPod?.traffic) return [];
+
+    return selectedPod.traffic.filter(traffic => {
+      // Filter by decision
+      if (decisionFilter !== 'all' && traffic.decision !== decisionFilter) {
+        return false;
       }
 
-      setResolvedIdentities(identities);
-    };
+      // Filter by traffic type
+      if (trafficTypeFilter !== 'all' && traffic.traffic_type?.toLowerCase() !== trafficTypeFilter) {
+        return false;
+      }
 
-    resolveAllIdentities();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedPod]);
+      return true;
+    });
+  }, [selectedPod?.traffic, decisionFilter, trafficTypeFilter]);
+
+  // Paginated traffic for rendering (only render current page)
+  const paginatedTraffic = useMemo(() => {
+    const start = trafficPage * TRAFFIC_PAGE_SIZE;
+    const end = start + TRAFFIC_PAGE_SIZE;
+    return filteredTraffic.slice(start, end);
+  }, [filteredTraffic, trafficPage, TRAFFIC_PAGE_SIZE]);
+
+  const totalPages = Math.ceil(filteredTraffic.length / TRAFFIC_PAGE_SIZE);
+
   if (!selectedPod) {
     return (
       <div className="h-full flex items-center justify-center text-tertiary">
@@ -182,25 +206,6 @@ const DataTable: React.FC<DataTableProps> = ({ selectedPod }) => {
       </div>
     );
   }
-
-  const hasTraffic = selectedPod.traffic && selectedPod.traffic.length > 0;
-  const hasSyscalls = selectedPod.syscalls && selectedPod.syscalls.length > 0;
-  const identityName = selectedPod.pod.pod_identity || selectedPod.pod.pod_name;
-
-  // Filter traffic based on selected filters
-  const filteredTraffic = selectedPod.traffic?.filter(traffic => {
-    // Filter by decision
-    if (decisionFilter !== 'all' && traffic.decision !== decisionFilter) {
-      return false;
-    }
-
-    // Filter by traffic type
-    if (trafficTypeFilter !== 'all' && traffic.traffic_type?.toLowerCase() !== trafficTypeFilter) {
-      return false;
-    }
-
-    return true;
-  }) || [];
 
   return (
     <div className="h-full overflow-auto p-4 space-y-4">
@@ -258,7 +263,10 @@ const DataTable: React.FC<DataTableProps> = ({ selectedPod }) => {
                 <span className="text-xs text-tertiary">Decision:</span>
                 <select
                   value={decisionFilter}
-                  onChange={(e) => setDecisionFilter(e.target.value as 'all' | 'ALLOW' | 'DROP')}
+                  onChange={(e) => {
+                    setDecisionFilter(e.target.value as 'all' | 'ALLOW' | 'DROP');
+                    setTrafficPage(0); // Reset to first page when filter changes
+                  }}
                   className="bg-hubble-dark border border-hubble-border rounded px-2 py-1 text-xs text-secondary focus:outline-none focus:border-hubble-accent"
                 >
                   <option value="all">All</option>
@@ -272,7 +280,10 @@ const DataTable: React.FC<DataTableProps> = ({ selectedPod }) => {
                 <span className="text-xs text-tertiary">Type:</span>
                 <select
                   value={trafficTypeFilter}
-                  onChange={(e) => setTrafficTypeFilter(e.target.value as 'all' | 'ingress' | 'egress')}
+                  onChange={(e) => {
+                    setTrafficTypeFilter(e.target.value as 'all' | 'ingress' | 'egress');
+                    setTrafficPage(0); // Reset to first page when filter changes
+                  }}
                   className="bg-hubble-dark border border-hubble-border rounded px-2 py-1 text-xs text-secondary focus:outline-none focus:border-hubble-accent"
                 >
                   <option value="all">All</option>
@@ -287,6 +298,7 @@ const DataTable: React.FC<DataTableProps> = ({ selectedPod }) => {
                   onClick={() => {
                     setDecisionFilter('all');
                     setTrafficTypeFilter('all');
+                    setTrafficPage(0); // Reset to first page
                   }}
                   className="text-xs text-hubble-accent hover:text-hubble-accent/80 underline"
                 >
@@ -309,7 +321,7 @@ const DataTable: React.FC<DataTableProps> = ({ selectedPod }) => {
                   </tr>
                 </thead>
                 <tbody>
-                  {filteredTraffic.map((traffic, index) => {
+                  {paginatedTraffic.map((traffic, index) => {
                     const remoteIdentity = resolvedIdentities.get(traffic.traffic_in_out_ip || '') || { isExternal: true };
                     const isIngress = traffic.traffic_type?.toLowerCase() === 'ingress';
 
@@ -397,6 +409,34 @@ const DataTable: React.FC<DataTableProps> = ({ selectedPod }) => {
                 </tbody>
               </table>
             </div>
+
+            {/* Pagination Controls */}
+            {totalPages > 1 && (
+              <div className="px-4 py-3 bg-hubble-dark border-t border-hubble-border flex items-center justify-between">
+                <div className="text-xs text-secondary">
+                  Showing {trafficPage * TRAFFIC_PAGE_SIZE + 1} - {Math.min((trafficPage + 1) * TRAFFIC_PAGE_SIZE, filteredTraffic.length)} of {filteredTraffic.length} results
+                </div>
+                <div className="flex items-center gap-2">
+                  <button
+                    onClick={() => setTrafficPage(Math.max(0, trafficPage - 1))}
+                    disabled={trafficPage === 0}
+                    className="px-3 py-1 bg-hubble-card border border-hubble-border rounded text-xs text-secondary hover:bg-hubble-darker disabled:opacity-50 disabled:cursor-not-allowed"
+                  >
+                    Previous
+                  </button>
+                  <span className="text-xs text-tertiary">
+                    Page {trafficPage + 1} of {totalPages}
+                  </span>
+                  <button
+                    onClick={() => setTrafficPage(Math.min(totalPages - 1, trafficPage + 1))}
+                    disabled={trafficPage >= totalPages - 1}
+                    className="px-3 py-1 bg-hubble-card border border-hubble-border rounded text-xs text-secondary hover:bg-hubble-darker disabled:opacity-50 disabled:cursor-not-allowed"
+                  >
+                    Next
+                  </button>
+                </div>
+              </div>
+            )}
           </div>
           </>
         )}
