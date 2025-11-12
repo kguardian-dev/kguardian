@@ -1,6 +1,6 @@
 apiVersion: v2
 name: kguardian
-description: Kubernetes security profile generator using eBPF
+description: Kubernetes network traffic & security monitoring using eBPF
 home: https://github.com/kguardian-dev/kguardian
 
 # This is the chart version. This version number should be incremented each time you make changes
@@ -28,7 +28,5 @@ sources:
   - https://github.com/kguardian-dev/kguardian
 
 maintainers:
-  # Mahesh Rayas
   - name: maheshrayas
-  # Michael Fornaro
   - name: xunholy
