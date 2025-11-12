@@ -11,7 +11,7 @@ interface PodNodeProps {
   selected?: boolean;
 }
 
-const PodNode: React.FC<PodNodeProps> = ({ data, selected }) => {
+const PodNode: React.FC<PodNodeProps> = React.memo(({ data, selected }) => {
   const trafficCount = data.traffic?.length || 0;
   const identityName = data.pod.pod_identity || data.pod.pod_name;
   const podCount = data.pods?.length || 1;
@@ -101,6 +101,16 @@ const PodNode: React.FC<PodNodeProps> = ({ data, selected }) => {
       <Handle type="source" position={Position.Right} />
     </div>
   );
-};
+}, (prevProps, nextProps) => {
+  // Custom comparison function for React.memo
+  // Only re-render if these specific props change
+  return (
+    prevProps.data.id === nextProps.data.id &&
+    prevProps.data.isExpanded === nextProps.data.isExpanded &&
+    prevProps.selected === nextProps.selected &&
+    prevProps.data.traffic?.length === nextProps.data.traffic?.length &&
+    prevProps.data.syscalls?.length === nextProps.data.syscalls?.length
+  );
+});
 
 export default PodNode;

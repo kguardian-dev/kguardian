@@ -60,9 +60,6 @@ export async function generateNetworkPolicy(pod: PodNodeData, _allPods: PodNodeD
   const ingressMap = new Map<string, { peer: PeerInfo; ports: Set<string> }>();
   const egressMap = new Map<string, { peer: PeerInfo; ports: Set<string> }>();
 
-  console.log('Generating policy for pod:', pod.pod.pod_name);
-  console.log('Traffic entries:', pod.traffic?.length || 0);
-
   // Resolve all unique IPs to identities
   const uniqueIPs = new Set<string>();
   pod.traffic?.forEach((traffic) => {
@@ -75,40 +72,21 @@ export async function generateNetworkPolicy(pod: PodNodeData, _allPods: PodNodeD
   for (const ip of uniqueIPs) {
     const identity = await resolveTrafficIdentity(ip);
     identityMap.set(ip, identity);
-    console.log(`Resolved ${ip}:`, identity);
   }
 
   // Process traffic rules
-  pod.traffic?.forEach((traffic, idx) => {
-    console.log(`Traffic ${idx}:`, {
-      type: traffic.traffic_type,
-      type_typeof: typeof traffic.traffic_type,
-      pod_ip: traffic.pod_ip,
-      pod_port: traffic.pod_port,
-      remote_ip: traffic.traffic_in_out_ip,
-      remote_port: traffic.traffic_in_out_port,
-      protocol: traffic.ip_protocol
-    });
-
+  pod.traffic?.forEach((traffic) => {
     const protocol = traffic.ip_protocol || 'TCP';
     const remoteIP = traffic.traffic_in_out_ip;
 
     if (!remoteIP) {
-      console.log(`Skipping traffic ${idx}: no remote IP`);
       return; // Skip if no remote IP
     }
 
     // Get the resolved identity for this IP
     const identity = identityMap.get(remoteIP) || { isExternal: true };
-    console.log(`Traffic ${idx} identity:`, identity);
 
     const trafficType = traffic.traffic_type?.toLowerCase();
-    console.log(`Traffic ${idx} type check:`, {
-      original: traffic.traffic_type,
-      normalized: trafficType,
-      isIngress: trafficType === 'ingress',
-      isEgress: trafficType === 'egress'
-    });
 
     // Create a unique key for this peer
     let key: string;
@@ -131,7 +109,6 @@ export async function generateNetworkPolicy(pod: PodNodeData, _allPods: PodNodeD
         });
       }
       ingressMap.get(key)?.ports.add(`${protocol}:${port}`);
-      console.log(`Added ingress rule: ${key} -> ${protocol}:${port}`);
     } else if (trafficType === 'egress') {
       // For egress: allow traffic TO remote IP:port
       const port = traffic.traffic_in_out_port || '80';
@@ -143,12 +120,8 @@ export async function generateNetworkPolicy(pod: PodNodeData, _allPods: PodNodeD
         });
       }
       egressMap.get(key)?.ports.add(`${protocol}:${port}`);
-      console.log(`Added egress rule: ${key} -> ${protocol}:${port}`);
     }
   });
-
-  console.log('Ingress rules count:', ingressMap.size);
-  console.log('Egress rules count:', egressMap.size);
 
   // Helper function to create peer based on identity type
   const createPeer = (peerInfo: PeerInfo): NetworkPolicyPeer => {

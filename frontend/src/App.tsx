@@ -9,6 +9,7 @@ import NetworkPolicyEditor from './components/NetworkPolicyEditor';
 import { usePodData } from './hooks/usePodData';
 import { useNamespaces } from './hooks/useNamespaces';
 import type { PodNodeData } from './types';
+import { UI_DIMENSIONS } from './constants/ui';
 
 function App() {
   const [namespace, setNamespace] = useState('default');
@@ -16,8 +17,16 @@ function App() {
   const [isAIAssistantOpen, setIsAIAssistantOpen] = useState(false);
   const [isPolicyEditorOpen, setIsPolicyEditorOpen] = useState(false);
   const [policyEditorPod, setPolicyEditorPod] = useState<PodNodeData | null>(null);
-  const [aiSidePanel, setAISidePanel] = useState({ isSidePanel: false, isCollapsed: false, width: 448 });
-  const [tableHeight, setTableHeight] = useState(320); // Default 320px (h-80)
+  const [aiSidePanel, setAISidePanel] = useState<{
+    isSidePanel: boolean;
+    isCollapsed: boolean;
+    width: number;
+  }>({
+    isSidePanel: false,
+    isCollapsed: false,
+    width: UI_DIMENSIONS.AI_PANEL_DEFAULT_WIDTH
+  });
+  const [tableHeight, setTableHeight] = useState<number>(UI_DIMENSIONS.TABLE_DEFAULT_HEIGHT);
   const [isResizing, setIsResizing] = useState(false);
 
   const { namespaces } = useNamespaces();
@@ -25,7 +34,7 @@ function App() {
 
   // Calculate the right padding for content when AI panel is docked (in pixels)
   const contentPaddingRightPx = aiSidePanel.isSidePanel
-    ? (aiSidePanel.isCollapsed ? 48 : aiSidePanel.width) // 48px collapsed, dynamic width expanded
+    ? (aiSidePanel.isCollapsed ? UI_DIMENSIONS.AI_PANEL_COLLAPSED_WIDTH : aiSidePanel.width)
     : 0;
 
   const handlePodSelect = (pod: PodNodeData | null) => {
@@ -37,14 +46,18 @@ function App() {
     setIsPolicyEditorOpen(true);
   };
 
-  const handleAILayoutChange = useCallback((isSidePanel: boolean, isCollapsed: boolean, width: number = 448) => {
-    setAISidePanel({ isSidePanel, isCollapsed, width });
+  const handleAILayoutChange = useCallback((isSidePanel: boolean, isCollapsed: boolean, width?: number) => {
+    setAISidePanel({ isSidePanel, isCollapsed, width: width ?? UI_DIMENSIONS.AI_PANEL_DEFAULT_WIDTH });
   }, []);
 
   const handleAIClose = useCallback(() => {
     setIsAIAssistantOpen(false);
     // Reset layout when closing to remove padding
-    setAISidePanel({ isSidePanel: false, isCollapsed: false, width: 448 });
+    setAISidePanel({
+      isSidePanel: false,
+      isCollapsed: false,
+      width: UI_DIMENSIONS.AI_PANEL_DEFAULT_WIDTH
+    });
   }, []);
 
   const handleMouseDown = useCallback((e: React.MouseEvent) => {
@@ -56,17 +69,17 @@ function App() {
     if (!isResizing) return;
 
     const windowHeight = window.innerHeight;
-    const headerHeight = 73; // Approximate header height
-    const footerHeight = 34; // Approximate footer height
-    const availableHeight = windowHeight - headerHeight - footerHeight;
+    const availableHeight = windowHeight - UI_DIMENSIONS.HEADER_HEIGHT - UI_DIMENSIONS.FOOTER_HEIGHT;
 
     // Calculate height from bottom
-    const newHeight = windowHeight - e.clientY - footerHeight;
+    const newHeight = windowHeight - e.clientY - UI_DIMENSIONS.FOOTER_HEIGHT;
 
-    // Constrain between 100px and 80% of available height
-    const minHeight = 100;
-    const maxHeight = availableHeight * 0.8;
-    const constrainedHeight = Math.max(minHeight, Math.min(maxHeight, newHeight));
+    // Constrain between min and max heights
+    const maxHeight = availableHeight * UI_DIMENSIONS.TABLE_MAX_HEIGHT_RATIO;
+    const constrainedHeight = Math.max(
+      UI_DIMENSIONS.TABLE_MIN_HEIGHT,
+      Math.min(maxHeight, newHeight)
+    );
 
     setTableHeight(constrainedHeight);
   }, [isResizing]);

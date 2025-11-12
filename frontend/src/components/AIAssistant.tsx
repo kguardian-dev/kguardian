@@ -1,6 +1,7 @@
 import React, { useState, useRef, useEffect, useCallback } from 'react';
 import { X, Send, Sparkles, Bot, User, Minimize2, Maximize2, ChevronRight, ChevronLeft } from 'lucide-react';
 import { sendChatMessage, type HistoryMessage } from '../services/aiApi';
+import { UI_DIMENSIONS } from '../constants/ui';
 
 interface Message {
   id: string;
@@ -23,7 +24,7 @@ const AIAssistant: React.FC<AIAssistantProps> = ({ isOpen, onClose, onLayoutChan
   const [isTyping, setIsTyping] = useState(false);
   const [viewMode, setViewMode] = useState<ViewMode>('modal');
   const [isCollapsed, setIsCollapsed] = useState(false);
-  const [panelWidth, setPanelWidth] = useState(448); // Default 448px (max-w-md)
+  const [panelWidth, setPanelWidth] = useState<number>(UI_DIMENSIONS.AI_PANEL_DEFAULT_WIDTH);
   const [isResizing, setIsResizing] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
@@ -127,10 +128,12 @@ const AIAssistant: React.FC<AIAssistantProps> = ({ isOpen, onClose, onLayoutChan
     // Calculate width from right edge
     const newWidth = windowWidth - e.clientX;
 
-    // Constrain between 300px and 80% of window width
-    const minWidth = 300;
-    const maxWidth = windowWidth * 0.8;
-    const constrainedWidth = Math.max(minWidth, Math.min(maxWidth, newWidth));
+    // Constrain between min and max widths
+    const maxWidth = windowWidth * UI_DIMENSIONS.AI_PANEL_MAX_WIDTH_RATIO;
+    const constrainedWidth = Math.max(
+      UI_DIMENSIONS.AI_PANEL_MIN_WIDTH,
+      Math.min(maxWidth, newWidth)
+    );
 
     setPanelWidth(constrainedWidth);
   }, [isResizing]);

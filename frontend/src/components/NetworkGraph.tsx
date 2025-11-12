@@ -14,6 +14,7 @@ import type { Node, Edge, Connection } from 'reactflow';
 import 'reactflow/dist/style.css';
 import PodNode from './PodNode';
 import type { PodNodeData } from '../types';
+import { UI_TIMING } from '../constants/ui';
 
 interface NetworkGraphProps {
   pods: PodNodeData[];
@@ -23,9 +24,10 @@ interface NetworkGraphProps {
   onBuildPolicy?: (pod: PodNodeData) => void;
 }
 
+// Define nodeTypes outside component to prevent recreation
 const nodeTypes = {
   podNode: PodNode,
-};
+} as const;
 
 const NetworkGraphInner: React.FC<NetworkGraphProps> = ({
   pods,
@@ -58,26 +60,41 @@ const NetworkGraphInner: React.FC<NetworkGraphProps> = ({
     const edges: Edge[] = [];
     const edgeMap = new Map<string, number>();
 
+    // Create IP to pod lookup map for O(1) access
+    // Using IP for now since traffic records use traffic_in_out_ip
+    // This maps IPs to their pod identities (handles multiple replicas)
+    const ipToPodMap = new Map<string, PodNodeData>();
+    pods.forEach((pod) => {
+      // Map primary pod IP
+      if (pod.pod.pod_ip) {
+        ipToPodMap.set(pod.pod.pod_ip, pod);
+      }
+      // Map all replica IPs to the same identity
+      pod.pods?.forEach((p) => {
+        if (p.pod_ip) {
+          ipToPodMap.set(p.pod_ip, pod);
+        }
+      });
+    });
+
     pods.forEach((pod) => {
       pod.traffic?.forEach((traffic) => {
-        // Traffic has pod_ip and traffic_in_out_ip
         // Find the other pod based on traffic direction
         let sourcePod, destPod;
 
         if (traffic.traffic_type === 'egress') {
           // Pod is source, traffic_in_out_ip is destination
           sourcePod = pod;
-          destPod = pods.find((p) => p.pod.pod_ip === traffic.traffic_in_out_ip);
+          destPod = traffic.traffic_in_out_ip ? ipToPodMap.get(traffic.traffic_in_out_ip) : undefined;
         } else if (traffic.traffic_type === 'ingress') {
           // Pod is destination, traffic_in_out_ip is source
-          sourcePod = pods.find((p) => p.pod.pod_ip === traffic.traffic_in_out_ip);
+          sourcePod = traffic.traffic_in_out_ip ? ipToPodMap.get(traffic.traffic_in_out_ip) : undefined;
           destPod = pod;
         }
 
         if (sourcePod && destPod && sourcePod.id !== destPod.id) {
           const edgeKey = `${sourcePod.id}-${destPod.id}`;
-          const count = (edgeMap.get(edgeKey) || 0) + 1;
-          edgeMap.set(edgeKey, count);
+          edgeMap.set(edgeKey, (edgeMap.get(edgeKey) || 0) + 1);
         }
       });
     });
@@ -130,8 +147,8 @@ const NetworkGraphInner: React.FC<NetworkGraphProps> = ({
     if (nodes.length > 0) {
       // Small delay to ensure nodes are rendered before fitting
       setTimeout(() => {
-        fitView({ padding: 0.2, duration: 400 });
-      }, 100);
+        fitView({ padding: 0.2, duration: UI_TIMING.FIT_VIEW_DURATION });
+      }, UI_TIMING.FIT_VIEW_DELAY);
     }
   }, [nodes, fitView]);
 
