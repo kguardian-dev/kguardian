@@ -55,7 +55,7 @@ jobs:
         uses: suzuki-shunsuke/github-action-renovate-config-validator@c22827f47f4f4a5364bdba19e1fe36907ef1318e # v1.1.1
 
       - name: Generate Token
-        uses: actions/create-github-app-token@67018539274d69449ef7c02e8e71183d1719ab42 # v2
+        uses: actions/create-github-app-token@7e473efe3cb98aa54f8d4bac15400b15fad77d94 # v2
         id: app-token
         with:
           app-id: "${{ secrets.ARX_GITHUB_APP_ID }}"
