@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.7.0](https://github.com/kguardian-dev/kguardian/compare/chart/v1.6.2...chart/v1.7.0) (2025-11-29)
+
+
+### Features
+
+* Store the pod owners selector label ([#509](https://github.com/kguardian-dev/kguardian/issues/509)) ([ac6641b](https://github.com/kguardian-dev/kguardian/commit/ac6641bcfd1321781e7e6dde098ce592fd9dd0b6))
+
 ## [1.6.2](https://github.com/kguardian-dev/kguardian/compare/chart/v1.6.1...chart/v1.6.2) (2025-11-12)
 
 
