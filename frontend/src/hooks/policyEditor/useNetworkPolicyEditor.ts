@@ -11,6 +11,7 @@ interface UseNetworkPolicyEditorProps {
 
 export const useNetworkPolicyEditor = ({ pod, allPods, isOpen }: UseNetworkPolicyEditorProps) => {
   const [policy, setPolicy] = useState<NetworkPolicy | null>(null);
+  const [isLoading, setIsLoading] = useState(false);
   const [isIngressExpanded, setIsIngressExpanded] = useState(true);
   const [isEgressExpanded, setIsEgressExpanded] = useState(true);
   const [labelInputs, setLabelInputs] = useState<{ [key: string]: { key: string; value: string } }>({});
@@ -24,9 +25,14 @@ export const useNetworkPolicyEditor = ({ pod, allPods, isOpen }: UseNetworkPolic
     // Only generate if we have a pod and haven't generated for this pod yet
     if (isOpen && pod && currentPodId !== lastGeneratedPodId.current) {
       lastGeneratedPodId.current = currentPodId;
-      generateNetworkPolicy(pod, allPods).then((generatedPolicy) => {
-        setPolicy(generatedPolicy);
-      });
+      setIsLoading(true);
+      generateNetworkPolicy(pod, allPods)
+        .then((generatedPolicy) => {
+          setPolicy(generatedPolicy);
+        })
+        .finally(() => {
+          setIsLoading(false);
+        });
     }
   }, [isOpen, pod, allPods]);
 
@@ -630,6 +636,7 @@ export const useNetworkPolicyEditor = ({ pod, allPods, isOpen }: UseNetworkPolic
   return {
     policy,
     setPolicy,
+    isLoading,
     isIngressExpanded,
     setIsIngressExpanded,
     isEgressExpanded,
