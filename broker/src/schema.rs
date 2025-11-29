@@ -10,6 +10,7 @@ diesel::table! {
         node_name -> Varchar,
         is_dead -> Bool,
         pod_identity -> Nullable<Varchar>,
+        workload_selector_labels -> Nullable<Json>,
     }
 }
 
