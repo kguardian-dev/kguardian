@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { Plus, Trash2, X, ChevronDown, ChevronRight, AlertCircle } from 'lucide-react';
+import { Plus, Trash2, X, ChevronDown, ChevronRight, AlertCircle, RefreshCw } from 'lucide-react';
 import type { PodNodeData } from '../types';
 import type { SeccompAction } from '../types/seccompProfile';
 import { policyToYAML } from '../utils/networkPolicyGenerator';
@@ -29,6 +29,7 @@ const NetworkPolicyEditor: React.FC<NetworkPolicyEditorProps> = ({ isOpen, onClo
   const {
     policy,
     setPolicy,
+    isLoading: isNetworkPolicyLoading,
     isIngressExpanded,
     setIsIngressExpanded,
     isEgressExpanded,
@@ -89,8 +90,11 @@ const NetworkPolicyEditor: React.FC<NetworkPolicyEditorProps> = ({ isOpen, onClo
   });
 
   if (!isOpen || !pod) return null;
-  if (policyType === 'network' && !policy) return null;
-  if (policyType === 'seccomp' && !seccompProfile) return null;
+
+  // Show loading state while generating policy
+  const isLoading = (policyType === 'network' && isNetworkPolicyLoading) ||
+                     (policyType === 'network' && !policy) ||
+                     (policyType === 'seccomp' && !seccompProfile);
 
   return (
     <>
@@ -122,7 +126,20 @@ const NetworkPolicyEditor: React.FC<NetworkPolicyEditorProps> = ({ isOpen, onClo
 
           {/* Content */}
           <div className="flex-1 overflow-hidden flex">
-            {yamlView ? (
+            {isLoading ? (
+              /* Loading State */
+              <div className="flex-1 flex items-center justify-center">
+                <div className="text-center">
+                  <RefreshCw className="w-12 h-12 text-hubble-accent animate-spin mx-auto mb-4" />
+                  <p className="text-lg font-semibold text-primary mb-2">
+                    Generating {policyType === 'network' ? 'Network Policy' : 'Seccomp Profile'}
+                  </p>
+                  <p className="text-sm text-tertiary">
+                    Analyzing traffic patterns and building policy rules...
+                  </p>
+                </div>
+              </div>
+            ) : yamlView ? (
               /* YAML View */
               <div className="flex-1 p-6 overflow-auto">
                 <pre className="bg-hubble-dark text-secondary p-4 rounded-lg font-mono text-sm overflow-x-auto">
