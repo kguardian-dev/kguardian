@@ -9,6 +9,7 @@ kguardian is a powerful Kubernetes security toolkit that analyzes runtime behavi
 - [kguardian: Kubernetes Security Profile Generator](#kguardian-kubernetes-security-profile-generator)
   - [Table of Contents](#table-of-contents)
   - [🌟 Features](#-features)
+  - [🤖 AI-Powered Security Analysis (Optional)](#-ai-powered-security-analysis-optional)
   - [🛠️ Prerequisites](#️-prerequisites)
   - [📦 Installation](#-installation)
     - [Quick Install Script (Recommended)](#quick-install-script-recommended)
@@ -32,6 +33,11 @@ kguardian is a powerful Kubernetes security toolkit that analyzes runtime behavi
 *   **Flexible Targeting:** Generate policies/profiles for single pods, all pods in a namespace, or all pods across all namespaces.
 *   **Dry-Run Mode:** Preview generated resources without applying them to the cluster.
 *   **File Output:** Save generated resources to YAML files for review or integration into GitOps workflows.
+*   **AI-Powered Analysis (Optional):** Natural language interface for cluster security analysis powered by multiple LLM providers.
+    *   Ask questions about network traffic and syscall patterns in plain English
+    *   Get AI-driven security insights and recommendations
+    *   Supports OpenAI, Anthropic Claude, Google Gemini, and GitHub Copilot
+    *   Uses Model Context Protocol (MCP) for standardized tool access
 
 ## Comparison with Other Tools
 
@@ -58,6 +64,51 @@ This table provides a high-level comparison of kguardian with other popular open
 **Key Differentiators for kguardian:**
 *   Generates both Network Policies (K8s Native & Cilium) and Seccomp profiles from a single data source.
 *   Provides options for direct application (Network Policy) or saving to files for GitOps workflows.
+*   Optional AI assistant for natural language security analysis.
+
+## 🤖 AI-Powered Security Analysis (Optional)
+
+kguardian includes optional AI assistant capabilities that allow you to query your cluster's security posture using natural language. This feature is completely optional and can be enabled separately from the core policy generation functionality.
+
+### Features
+
+- **Natural Language Queries**: Ask questions about your cluster in plain English
+  - "What pods have the most network connections?"
+  - "Show me syscalls for nginx pods in production namespace"
+  - "Are there any suspicious network patterns?"
+
+- **Multi-Provider Support**: Choose your preferred LLM provider
+  - OpenAI (GPT-4, GPT-4o)
+  - Anthropic Claude (claude-sonnet-4-5)
+  - Google Gemini (gemini-2.0-flash)
+  - GitHub Copilot (gpt-4o)
+
+- **MCP Integration**: Uses Model Context Protocol for standardized access to cluster data
+  - 6 comprehensive tools for querying network traffic, syscalls, and pod information
+  - Can be used by external MCP clients (Claude Desktop, etc.)
+
+### Enabling AI Features
+
+```bash
+# Install with AI assistant enabled
+helm install kguardian oci://ghcr.io/kguardian-dev/charts/kguardian \
+  --set llmBridge.enabled=true \
+  --set mcpServer.enabled=true \
+  --set llmBridge.secrets.anthropic.enabled=true \
+  --namespace kguardian --create-namespace
+
+# Create secret with your API key
+kubectl create secret generic kguardian-anthropic \
+  --from-literal=api-key=YOUR_ANTHROPIC_API_KEY \
+  -n kguardian
+```
+
+### Documentation
+
+- [LLM Bridge Documentation](./llm-bridge/README.md) - AI assistant service architecture and configuration
+- [MCP Server Documentation](./mcp-server/README.md) - Model Context Protocol server for tool access
+
+**Note**: AI features require an API key from at least one supported LLM provider. The core kguardian functionality (policy generation via CLI) works without AI features enabled.
 
 ## 🛠️ Prerequisites
 

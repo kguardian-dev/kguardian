@@ -1,33 +1,50 @@
-import axios, { AxiosInstance } from "axios";
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import type { ToolCall, ToolResult } from "./types/index.js";
 
 export class BrokerClient {
-  private mcpClient: AxiosInstance;
-  private brokerClient: AxiosInstance;
+  private mcpClient: Client | null = null;
   private mcpUrl: string;
-  private brokerUrl: string;
+  private mcpInitialized: boolean = false;
 
   constructor(brokerUrl: string, mcpUrl?: string) {
-    this.brokerUrl = brokerUrl;
     this.mcpUrl = mcpUrl || process.env.MCP_SERVER_URL || "http://kguardian-mcp-server.kguardian.svc.cluster.local:8081";
+  }
 
-    // MCP server client for tool calls
-    this.mcpClient = axios.create({
-      baseURL: this.mcpUrl,
-      timeout: 30000,
-      headers: {
-        "Content-Type": "application/json",
-      },
-    });
+  /**
+   * Initialize MCP client connection
+   */
+  private async initializeMCPClient(): Promise<void> {
+    if (this.mcpInitialized && this.mcpClient) {
+      return;
+    }
 
-    // Keep broker client for backward compatibility if needed
-    this.brokerClient = axios.create({
-      baseURL: brokerUrl,
-      timeout: 10000,
-      headers: {
-        "Content-Type": "application/json",
-      },
-    });
+    try {
+      // Create Streamable HTTP transport (MCP spec 2025-03-26)
+      const transport = new StreamableHTTPClientTransport(new URL(this.mcpUrl));
+
+      // Create MCP client
+      this.mcpClient = new Client(
+        {
+          name: "kguardian-llm-bridge",
+          version: "1.1.0",
+        },
+        {
+          capabilities: {},
+        }
+      );
+
+      // Connect to MCP server
+      await this.mcpClient.connect(transport);
+      this.mcpInitialized = true;
+
+      console.log(`✓ Connected to MCP server at ${this.mcpUrl}`);
+    } catch (error) {
+      console.error("Failed to initialize MCP client:", error);
+      throw new Error(
+        `Failed to connect to MCP server at ${this.mcpUrl}: ${error instanceof Error ? error.message : String(error)}`
+      );
+    }
   }
 
   /**
@@ -35,51 +52,45 @@ export class BrokerClient {
    */
   async executeTool(toolCall: ToolCall): Promise<ToolResult> {
     try {
-      const { name, arguments: args } = toolCall;
+      // Ensure MCP client is initialized
+      await this.initializeMCPClient();
 
-      // All tools are now handled by MCP server via HTTP POST
-      const response = await this.mcpClient.post("/", {
-        jsonrpc: "2.0",
-        id: Date.now(),
-        method: "tools/call",
-        params: {
-          name,
-          arguments: args,
-        },
-      });
-
-      if (response.data.error) {
-        return {
-          data: null,
-          error: response.data.error.message || "MCP server returned an error",
-        };
+      if (!this.mcpClient) {
+        throw new Error("MCP client not initialized");
       }
 
-      // MCP server returns result in response.data.result.content
-      const result = response.data.result;
-      if (result && result.content) {
-        // Parse the JSON data from the content
-        const contentText = Array.isArray(result.content)
-          ? result.content[0].text
-          : result.content.text;
+      const { name, arguments: args } = toolCall;
 
-        try {
-          const parsedData = JSON.parse(contentText);
-          return { data: parsedData };
-        } catch {
-          // If not JSON, return as-is
-          return { data: contentText };
+      console.log(`Calling MCP tool: ${name} with args:`, args);
+
+      // Call the tool using MCP SDK
+      const result = await this.mcpClient.callTool({
+        name,
+        arguments: args || {},
+      });
+
+      console.log(`MCP tool ${name} returned:`, result);
+
+      // MCP SDK returns result with content array
+      if (result.content && Array.isArray(result.content)) {
+        // Extract text content from the response
+        const textContent = result.content.find((item) => item.type === "text");
+        if (textContent && "text" in textContent) {
+          try {
+            // Try to parse as JSON
+            const parsedData = JSON.parse(textContent.text);
+            return { data: parsedData };
+          } catch {
+            // If not JSON, return as-is
+            return { data: textContent.text };
+          }
         }
       }
 
+      // If we get here, return the raw result
       return { data: result };
     } catch (error) {
-      if (axios.isAxiosError(error)) {
-        return {
-          data: null,
-          error: `MCP server error: ${error.response?.status} - ${error.response?.data?.error?.message || error.message}`,
-        };
-      }
+      console.error(`Error calling MCP tool ${toolCall.name}:`, error);
       return {
         data: null,
         error: error instanceof Error ? error.message : String(error),
@@ -87,29 +98,53 @@ export class BrokerClient {
     }
   }
 
-  // Keeping these methods for backward compatibility but they now use MCP server
-  private async getPodNetworkTraffic(
-    namespace: string,
-    podName: string
-  ): Promise<ToolResult> {
-    return this.executeTool({
-      name: "get_pod_network_traffic",
-      arguments: { namespace, pod_name: podName },
-    });
-  }
+  /**
+   * Get available tools from MCP server
+   */
+  async getAvailableTools(): Promise<any[]> {
+    try {
+      await this.initializeMCPClient();
 
-  private async getPodSyscalls(
-    namespace: string,
-    podName: string
-  ): Promise<ToolResult> {
-    return this.executeTool({
-      name: "get_pod_syscalls",
-      arguments: { namespace, pod_name: podName },
-    });
+      if (!this.mcpClient) {
+        throw new Error("MCP client not initialized");
+      }
+
+      const response = await this.mcpClient.listTools();
+      return response.tools || [];
+    } catch (error) {
+      console.error("Error fetching tools from MCP server:", error);
+      return [];
+    }
   }
 
   /**
-   * Get available tools definition for LLMs
+   * Get tool definitions for LLMs
+   * This fetches the actual tools from the MCP server dynamically
+   */
+  static async getToolDefinitionsFromMCP(mcpUrl?: string): Promise<any[]> {
+    const client = new BrokerClient("", mcpUrl);
+    try {
+      const tools = await client.getAvailableTools();
+
+      // Convert MCP tool format to LLM provider format
+      return tools.map((tool: any) => ({
+        name: tool.name,
+        description: tool.description || "",
+        parameters: tool.inputSchema || {
+          type: "object",
+          properties: {},
+          required: [],
+        },
+      }));
+    } catch (error) {
+      console.error("Failed to fetch tools from MCP server, using fallback:", error);
+      // Fallback to static definitions if MCP server is unavailable
+      return BrokerClient.getToolDefinitions();
+    }
+  }
+
+  /**
+   * Get available tools definition for LLMs (static fallback)
    */
   static getToolDefinitions() {
     return [
@@ -242,5 +277,17 @@ When presenting results:
 5. For large datasets, summarize key findings first
 
 If you don't have required information, ask ONCE, then use the tool immediately.`;
+  }
+
+  /**
+   * Close the MCP client connection
+   */
+  async close(): Promise<void> {
+    if (this.mcpClient) {
+      await this.mcpClient.close();
+      this.mcpClient = null;
+      this.mcpInitialized = false;
+      console.log("MCP client connection closed");
+    }
   }
 }
