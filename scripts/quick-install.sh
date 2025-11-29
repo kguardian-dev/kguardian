@@ -32,17 +32,24 @@ fi
 
 echo "Detected OS: $OS, Arch: $ARCH"
 
-# Get the latest release tag
-echo "Fetching the latest release tag..."
-LATEST_RELEASE_TAG=$(curl -s "https://api.github.com/repos/$GITHUB_OWNER/$GITHUB_REPO/releases/latest" | grep tag_name | cut -d '"' -f 4)
+# Get the latest advisor release tag
+echo "Fetching the latest advisor release tag..."
+LATEST_RELEASE_TAG=$(curl -s "https://api.github.com/repos/$GITHUB_OWNER/$GITHUB_REPO/releases?per_page=100" | \
+    grep '"tag_name"' | \
+    grep 'advisor/' | \
+    cut -d '"' -f 4 | \
+    sed 's/advisor\///' | \
+    sort -V -r | \
+    head -n 1 | \
+    sed 's/^/advisor\//')
 
 # Check if the latest release was found
 if [ -z "$LATEST_RELEASE_TAG" ]; then
-    echo "Error: Failed to fetch the latest release."
+    echo "Error: Failed to fetch the latest advisor release."
     exit 1
 fi
 
-echo "Latest release tag: $LATEST_RELEASE_TAG"
+echo "Latest advisor release tag: $LATEST_RELEASE_TAG"
 
 # Construct the download URL
 BINARY_URL="https://github.com/$GITHUB_OWNER/$GITHUB_REPO/releases/download/$LATEST_RELEASE_TAG/$RELEASE_BINARY_NAME-$OS-$ARCH"
