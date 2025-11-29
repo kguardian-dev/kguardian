@@ -101,7 +101,7 @@ app.post("/api/chat", async (req: Request, res: Response<any>) => {
     if (error instanceof ZodError) {
       return res.status(400).json({
         error: "Invalid request format",
-        details: error.errors.map((e) => e.message).join(", "),
+        details: error.issues.map((e: any) => e.message).join(", "),
       } as ErrorResponse);
     }
 
