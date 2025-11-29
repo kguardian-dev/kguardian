@@ -2,13 +2,14 @@ use crate::{api_post_call, Error, PodDetail, PodInfo, PodInspect};
 use chrono::Utc;
 use dashmap::DashMap;
 use futures::TryStreamExt;
-use k8s_openapi::api::apps::v1::{Deployment, ReplicaSet, StatefulSet};
+use k8s_openapi::api::apps::v1::{DaemonSet, Deployment, ReplicaSet, StatefulSet};
 use k8s_openapi::api::core::v1::Pod;
 use kube::{
     runtime::{reflector::Lookup, watcher, WatchStreamExt},
     Api, Client, ResourceExt,
 };
 use serde_json::json;
+use std::collections::BTreeMap;
 use std::sync::Arc;
 use tracing::{debug, error, info, warn};
 
@@ -130,18 +131,24 @@ async fn update_pods_details(pod: &Pod, node_name: &str, client: &Client) -> Res
     if pod_status.pod_ip.is_some() {
         let pod_ip = pod_status.pod_ip.as_ref().unwrap();
 
-        // Extract pod identity
-        let pod_identity = extract_pod_identity(pod, client).await;
+        // Extract pod identity and workload selector labels
+        let (pod_identity, workload_selector_labels) = extract_pod_identity_and_selectors(pod, client).await;
+
+        info!(
+            "Pod {}: identity={:?}, workload_selector_labels={:?}",
+            pod_name, pod_identity, workload_selector_labels
+        );
 
         let z = PodDetail {
             pod_ip: pod_ip.to_string(),
-            pod_name,
+            pod_name: pod_name.clone(),
             pod_namespace,
             pod_obj: Some(json!(pod)),
             time_stamp: Utc::now().naive_utc(),
             node_name: node_name.to_string(),
             is_dead: false,
             pod_identity,
+            workload_selector_labels,
         };
 
         if let Err(e) = api_post_call(json!(z), "pod/spec").await {
@@ -200,60 +207,122 @@ fn is_backed_by_daemonset(pod: &Pod) -> bool {
     false
 }
 
-/// Extracts pod identity from labels or owner references
+/// Extracts pod identity and workload selector labels from labels or owner references
+/// Returns (identity, selector_labels)
 /// Priority: app.kubernetes.io/name > app.kubernetes.io/component > k8s-app > owner references
-async fn extract_pod_identity(pod: &Pod, client: &Client) -> Option<String> {
+async fn extract_pod_identity_and_selectors(pod: &Pod, client: &Client) -> (Option<String>, Option<BTreeMap<String, String>>) {
     // Check labels first in priority order
     if let Some(labels) = &pod.metadata.labels {
         // 1. Check for app.kubernetes.io/name
         if let Some(name) = labels.get("app.kubernetes.io/name") {
-            return Some(name.clone());
+            // Also try to get workload selector labels
+            let selectors = trace_owner_to_workload_with_selectors(pod, client).await;
+            return (Some(name.clone()), selectors);
         }
 
         // 2. Check for app.kubernetes.io/component
         if let Some(component) = labels.get("app.kubernetes.io/component") {
-            return Some(component.clone());
+            let selectors = trace_owner_to_workload_with_selectors(pod, client).await;
+            return (Some(component.clone()), selectors);
         }
 
         // 3. Check for k8s-app
         if let Some(k8s_app) = labels.get("k8s-app") {
-            return Some(k8s_app.clone());
+            let selectors = trace_owner_to_workload_with_selectors(pod, client).await;
+            return (Some(k8s_app.clone()), selectors);
         }
-         // 34 Check for app
+         // 4. Check for app
         if let Some(k8s_app) = labels.get("app") {
-            return Some(k8s_app.clone());
+            let selectors = trace_owner_to_workload_with_selectors(pod, client).await;
+            return (Some(k8s_app.clone()), selectors);
         }
     }
 
-    // 4. If no labels found, trace back through owner references
-    trace_owner_to_workload(pod, client).await
+    // 5. If no labels found, trace back through owner references
+    let (identity, selectors) = trace_owner_to_workload_with_selectors_and_name(pod, client).await;
+    (identity, selectors)
 }
 
-/// Traces pod's owner references back to the ultimate workload (Deployment/StatefulSet)
-async fn trace_owner_to_workload(pod: &Pod, client: &Client) -> Option<String> {
+/// Traces pod's owner references to get workload selector labels only
+async fn trace_owner_to_workload_with_selectors(pod: &Pod, client: &Client) -> Option<BTreeMap<String, String>> {
     let owner_references = pod.metadata.owner_references.as_ref()?;
     let namespace = pod.metadata.namespace.as_ref()?;
+
+    debug!("Tracing owner references for pod {} to get selector labels", pod.name_any());
+
+    for owner in owner_references {
+        debug!("Processing owner: kind={}, name={}", owner.kind, owner.name);
+        match owner.kind.as_str() {
+            "ReplicaSet" => {
+                // Trace ReplicaSet to Deployment and get selector
+                if let Some(selectors) = get_deployment_selector_from_replicaset(
+                    &owner.name,
+                    namespace,
+                    client
+                ).await {
+                    return Some(selectors);
+                }
+            }
+            "Deployment" => {
+                if let Some(selectors) = get_deployment_selector(&owner.name, namespace, client).await {
+                    return Some(selectors);
+                }
+            }
+            "StatefulSet" => {
+                if let Some(selectors) = get_statefulset_selector(&owner.name, namespace, client).await {
+                    return Some(selectors);
+                }
+            }
+            "DaemonSet" => {
+                debug!("Found DaemonSet owner: {}", owner.name);
+                if let Some(selectors) = get_daemonset_selector(&owner.name, namespace, client).await {
+                    return Some(selectors);
+                }
+            }
+            _ => {
+                debug!("Unknown owner kind for selector extraction: {}", owner.kind);
+            }
+        }
+    }
+
+    debug!("No selector labels found for pod {}", pod.name_any());
+    None
+}
+
+/// Traces pod's owner references to get both workload name and selector labels
+async fn trace_owner_to_workload_with_selectors_and_name(pod: &Pod, client: &Client) -> (Option<String>, Option<BTreeMap<String, String>>) {
+    let owner_references = match pod.metadata.owner_references.as_ref() {
+        Some(refs) => refs,
+        None => return (None, None),
+    };
+    let namespace = match pod.metadata.namespace.as_ref() {
+        Some(ns) => ns,
+        None => return (None, None),
+    };
 
     for owner in owner_references {
         match owner.kind.as_str() {
             "ReplicaSet" => {
                 // Trace ReplicaSet to Deployment
-                if let Some(deployment_name) = trace_replicaset_to_deployment(
+                if let Some((name, selectors)) = get_deployment_name_and_selector_from_replicaset(
                     &owner.name,
                     namespace,
                     client
                 ).await {
-                    return Some(deployment_name);
+                    return (Some(name), Some(selectors));
                 }
             }
             "Deployment" => {
-                return Some(owner.name.clone());
+                let selectors = get_deployment_selector(&owner.name, namespace, client).await;
+                return (Some(owner.name.clone()), selectors);
             }
             "StatefulSet" => {
-                return Some(owner.name.clone());
+                let selectors = get_statefulset_selector(&owner.name, namespace, client).await;
+                return (Some(owner.name.clone()), selectors);
             }
             "DaemonSet" => {
-                return Some(owner.name.clone());
+                let selectors = get_daemonset_selector(&owner.name, namespace, client).await;
+                return (Some(owner.name.clone()), selectors);
             }
             _ => {
                 debug!("Unknown owner kind: {}", owner.kind);
@@ -261,15 +330,92 @@ async fn trace_owner_to_workload(pod: &Pod, client: &Client) -> Option<String> {
         }
     }
 
-    None
+    (None, None)
 }
 
-/// Traces a ReplicaSet back to its owning Deployment
-async fn trace_replicaset_to_deployment(
+/// Gets selector labels from a Deployment
+async fn get_deployment_selector(
+    deployment_name: &str,
+    namespace: &str,
+    client: &Client,
+) -> Option<BTreeMap<String, String>> {
+    let deploy_api: Api<Deployment> = Api::namespaced(client.clone(), namespace);
+
+    match deploy_api.get(deployment_name).await {
+        Ok(deployment) => {
+            let selectors = deployment.spec
+                .and_then(|spec| spec.selector.match_labels);
+            if selectors.is_none() {
+                debug!("Deployment {} has no match_labels in selector", deployment_name);
+            } else {
+                debug!("Deployment {} selector labels: {:?}", deployment_name, selectors);
+            }
+            selectors
+        }
+        Err(e) => {
+            warn!("Failed to get Deployment {}: {}", deployment_name, e);
+            None
+        }
+    }
+}
+
+/// Gets selector labels from a StatefulSet
+async fn get_statefulset_selector(
+    statefulset_name: &str,
+    namespace: &str,
+    client: &Client,
+) -> Option<BTreeMap<String, String>> {
+    let sts_api: Api<StatefulSet> = Api::namespaced(client.clone(), namespace);
+
+    match sts_api.get(statefulset_name).await {
+        Ok(statefulset) => {
+            let selectors = statefulset.spec
+                .and_then(|spec| spec.selector.match_labels);
+            if selectors.is_none() {
+                debug!("StatefulSet {} has no match_labels in selector", statefulset_name);
+            } else {
+                debug!("StatefulSet {} selector labels: {:?}", statefulset_name, selectors);
+            }
+            selectors
+        }
+        Err(e) => {
+            warn!("Failed to get StatefulSet {}: {}", statefulset_name, e);
+            None
+        }
+    }
+}
+
+/// Gets selector labels from a DaemonSet
+async fn get_daemonset_selector(
+    daemonset_name: &str,
+    namespace: &str,
+    client: &Client,
+) -> Option<BTreeMap<String, String>> {
+    let ds_api: Api<DaemonSet> = Api::namespaced(client.clone(), namespace);
+
+    match ds_api.get(daemonset_name).await {
+        Ok(daemonset) => {
+            let selectors = daemonset.spec.map(|spec| spec.selector.match_labels).flatten();
+            if selectors.is_none() {
+                debug!("DaemonSet {} has no match_labels in selector", daemonset_name);
+            } else {
+                debug!("DaemonSet {} selector labels: {:?}", daemonset_name, selectors);
+            }
+            selectors
+        }
+        Err(e) => {
+            warn!("Failed to get DaemonSet {}: {}", daemonset_name, e);
+            None
+        }
+    }
+}
+
+/// Traces a ReplicaSet to its Deployment and gets the selector
+async fn get_deployment_selector_from_replicaset(
     replicaset_name: &str,
     namespace: &str,
     client: &Client,
-) -> Option<String> {
+) -> Option<BTreeMap<String, String>> {
     let rs_api: Api<ReplicaSet> = Api::namespaced(client.clone(), namespace);
 
     match rs_api.get(replicaset_name).await {
@@ -277,7 +423,35 @@ async fn trace_replicaset_to_deployment(
             if let Some(owner_references) = &replicaset.metadata.owner_references {
                 for owner in owner_references {
                     if owner.kind == "Deployment" {
-                        return Some(owner.name.clone());
+                        return get_deployment_selector(&owner.name, namespace, client).await;
+                    }
+                }
+            }
+        }
+        Err(e) => {
+            warn!("Failed to get ReplicaSet {}: {}", replicaset_name, e);
+        }
+    }
+
+    None
+}
+
+/// Traces a ReplicaSet to its Deployment and gets both name and selector
+async fn get_deployment_name_and_selector_from_replicaset(
+    replicaset_name: &str,
+    namespace: &str,
+    client: &Client,
+) -> Option<(String, BTreeMap<String, String>)> {
+    let rs_api: Api<ReplicaSet> = Api::namespaced(client.clone(), namespace);
+
+    match rs_api.get(replicaset_name).await {
+        Ok(replicaset) => {
+            if let Some(owner_references) = &replicaset.metadata.owner_references {
+                for owner in owner_references {
+                    if owner.kind == "Deployment" {
+                        if let Some(selectors) = get_deployment_selector(&owner.name, namespace, client).await {
+                            return Some((owner.name.clone(), selectors));
+                        }
                     }
                 }
             }

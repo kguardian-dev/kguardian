@@ -53,6 +53,7 @@ pub struct PodDetail {
     pub node_name: String,
     pub is_dead: bool,
     pub pod_identity: Option<String>,
+    pub workload_selector_labels: Option<serde_json::Value>,
 }
 
 #[derive(
