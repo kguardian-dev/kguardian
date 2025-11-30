@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.6.0](https://github.com/kguardian-dev/kguardian/compare/controller/v1.5.0...controller/v1.6.0) (2025-11-30)
+
+
+### Features
+
+* Store the pod owners selector label ([#509](https://github.com/kguardian-dev/kguardian/issues/509)) ([ac6641b](https://github.com/kguardian-dev/kguardian/commit/ac6641bcfd1321781e7e6dde098ce592fd9dd0b6))
+
 ## [1.5.0](https://github.com/kguardian-dev/kguardian/compare/controller/v1.4.0...controller/v1.5.0) (2025-11-11)
 
 
