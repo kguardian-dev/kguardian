@@ -1,5 +1,15 @@
 # Changelog
 
+## [1.1.2](https://github.com/kguardian-dev/kguardian/compare/advisor/v1.1.1...advisor/v1.1.2) (2025-11-30)
+
+
+### Bug Fixes
+
+* **deps:** update kubernetes packages to v0.34.2 ([1bb8d36](https://github.com/kguardian-dev/kguardian/commit/1bb8d36ac17475cbd3fe6a0d9104cc52fe59c1be))
+* **deps:** update kubernetes packages to v0.34.2 ([a8d9fa5](https://github.com/kguardian-dev/kguardian/commit/a8d9fa59fe89c2ed1bc5ceedd04537b9620bd573))
+* **deps:** update module github.com/cilium/cilium to v1.18.4 ([81b1036](https://github.com/kguardian-dev/kguardian/commit/81b10361afa398a7704b7095784f62b5c2565093))
+* **deps:** update module github.com/cilium/cilium to v1.18.4 ([2c757b8](https://github.com/kguardian-dev/kguardian/commit/2c757b874cff64c8875cfd17fd4c58fffbcb40ab))
+
 ## [1.1.1](https://github.com/kguardian-dev/kguardian/compare/advisor/v1.1.0...advisor/v1.1.1) (2025-11-01)
 
 
