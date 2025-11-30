@@ -1,9 +1,9 @@
 {
-  "controller": "1.6.0",
+  "controller": "1.5.0",
   "controller+FILLER": "0.0.0",
-  "broker": "1.5.0",
+  "broker": "1.4.0",
   "broker+FILLER": "0.0.0",
-  "frontend": "1.6.0",
+  "frontend": "1.5.0",
   "frontend+FILLER": "0.0.0",
   "advisor": "1.1.2",
   "advisor+FILLER": "0.0.0",
