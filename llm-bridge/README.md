@@ -14,10 +14,16 @@ A dedicated microservice that bridges the kguardian frontend with multiple LLM p
                             │                      │
                             ▼                      ▼
                      ┌─────────────┐      ┌──────────────┐
-                     │   Broker    │      │  Tool Calls  │
-                     │   (Rust)    │◀─────│  (Function   │
-                     │             │      │   Calling)   │
+                     │ MCP Server  │      │  Tool Calls  │
+                     │    (Go)     │      │ (6 MCP Tools)│
+                     │             │      │              │
                      └─────────────┘      └──────────────┘
+                            │                      │
+                            ▼                      │
+                     ┌─────────────┐               │
+                     │   Broker    │◀──────────────┘
+                     │   (Rust)    │
+                     └─────────────┘
                             │
                             ▼
                      ┌─────────────┐
@@ -37,11 +43,12 @@ A dedicated microservice that bridges the kguardian frontend with multiple LLM p
 ## Features
 
 - ✅ **Multi-Provider Support**: OpenAI, Anthropic, Gemini, GitHub Copilot
-- ✅ **Function Calling**: LLMs can query broker APIs for real data
+- ✅ **MCP Integration**: Uses Model Context Protocol (MCP) to access cluster data via MCP server
+- ✅ **Function Calling**: LLMs can call 6 MCP tools for real-time cluster data
 - ✅ **Automatic Provider Selection**: Uses first available API key
 - ✅ **Health Checks**: Monitor service and provider availability
-- ✅ **Error Handling**: Comprehensive error messages
-- ✅ **TypeScript**: Full type safety
+- ✅ **Error Handling**: Comprehensive error messages with graceful fallbacks
+- ✅ **TypeScript**: Full type safety with MCP SDK integration
 
 ## Supported LLM Providers
 
@@ -67,11 +74,16 @@ A dedicated microservice that bridges the kguardian frontend with multiple LLM p
 
 ## Available Tools
 
-The bridge provides these functions that LLMs can call:
+The bridge connects to the MCP server which provides 6 comprehensive tools that LLMs can call:
 
-1. **get_pod_network_traffic** - Query network connections for a pod
-2. **get_pod_syscalls** - Get system calls made by a pod
-3. **get_pod_packet_drops** - Get packet drop information
+1. **get_pod_network_traffic** - Query network connections for a specific pod
+2. **get_pod_syscalls** - Get system calls made by a specific pod
+3. **get_pod_details** - Get detailed pod information by IP address
+4. **get_service_details** - Get Kubernetes service information by cluster IP
+5. **get_cluster_traffic** - Get all network traffic across the entire cluster
+6. **get_cluster_pods** - Get detailed information about all pods in the cluster
+
+For detailed tool specifications, parameters, and use cases, see the [MCP Server documentation](../mcp-server/README.md#available-tools).
 
 ## Development
 
@@ -176,6 +188,7 @@ Send a chat message to the AI assistant.
 |----------|----------|-------------|
 | `PORT` | No | Server port (default: 8080) |
 | `BROKER_URL` | Yes | kguardian broker URL |
+| `MCP_SERVER_URL` | No | MCP server URL (default: http://kguardian-mcp-server.kguardian.svc.cluster.local:8081) |
 | `OPENAI_API_KEY` | No* | OpenAI API key |
 | `ANTHROPIC_API_KEY` | No* | Anthropic API key |
 | `GOOGLE_API_KEY` | No* | Google Gemini API key |
@@ -234,6 +247,19 @@ curl http://localhost:8080/health
 - Verify `BROKER_URL` is correct
 - Ensure broker service is running
 - Check network policies allow egress from llm-bridge to broker
+
+### Connection to MCP server fails
+- Verify `MCP_SERVER_URL` is correct
+- Ensure MCP server is running: `kubectl get pods -n kguardian | grep mcp-server`
+- Check MCP server logs: `kubectl logs -n kguardian deployment/kguardian-mcp-server`
+- Verify network policies allow llm-bridge → mcp-server communication
+- Look for MCP connection messages in llm-bridge startup logs
+
+### Tools not working / LLM can't access data
+- Check that MCP server successfully connected (look for "✓ Connected to MCP server" in logs)
+- Verify MCP server can reach broker
+- Test tool calls manually using the MCP Inspector (if using kmcp)
+- Check that all 6 tools are registered: Review MCP server logs for tool registration messages
 
 ### LLM API errors
 - Verify API keys are valid and have credits
