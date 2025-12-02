@@ -32,7 +32,7 @@ jobs:
       mcp-server: ${{ steps.changes.outputs.mcp-server }}
       charts: ${{ steps.changes.outputs.charts }}
     steps:
-      - uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6
+      - uses: actions/checkout@1af3b93b6815bc44a9784bd300feb67ff0d1eeb3 # v6
         with:
           fetch-depth: 2  # Fetch enough history to compare with previous commit
 
@@ -67,7 +67,7 @@ jobs:
           - linux/arm64
     steps:
       - name: Checkout
-        uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6
+        uses: actions/checkout@1af3b93b6815bc44a9784bd300feb67ff0d1eeb3 # v6
 
       - name: Install Rust nightly
         uses: dtolnay/rust-toolchain@master
@@ -125,7 +125,7 @@ jobs:
     needs: build-controller
     steps:
       - name: Checkout
-        uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6
+        uses: actions/checkout@1af3b93b6815bc44a9784bd300feb67ff0d1eeb3 # v6
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3
@@ -215,7 +215,7 @@ jobs:
     if: needs.detect-changes.outputs.broker == 'true'
     steps:
       - name: Checkout
-        uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6
+        uses: actions/checkout@1af3b93b6815bc44a9784bd300feb67ff0d1eeb3 # v6
 
       - name: Cache Rust dependencies
         uses: actions/cache@v4
@@ -307,7 +307,7 @@ jobs:
     if: needs.detect-changes.outputs.frontend == 'true'
     steps:
       - name: Checkout
-        uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6
+        uses: actions/checkout@1af3b93b6815bc44a9784bd300feb67ff0d1eeb3 # v6
 
       - name: Cache Node modules
         uses: actions/cache@v4
@@ -395,7 +395,7 @@ jobs:
     if: needs.detect-changes.outputs.llm-bridge == 'true'
     steps:
       - name: Checkout
-        uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6
+        uses: actions/checkout@1af3b93b6815bc44a9784bd300feb67ff0d1eeb3 # v6
 
       - name: Cache Node modules
         uses: actions/cache@v4
@@ -484,7 +484,7 @@ jobs:
     if: needs.detect-changes.outputs.mcp-server == 'true'
     steps:
       - name: Checkout
-        uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6
+        uses: actions/checkout@1af3b93b6815bc44a9784bd300feb67ff0d1eeb3 # v6
 
       - name: Cache Go modules
         uses: actions/cache@v4
@@ -573,7 +573,7 @@ jobs:
     if: needs.detect-changes.outputs.charts == 'true' || needs.detect-changes.outputs.controller == 'true' || needs.detect-changes.outputs.broker == 'true' || needs.detect-changes.outputs.frontend == 'true' || needs.detect-changes.outputs.llm-bridge == 'true' || needs.detect-changes.outputs.mcp-server == 'true'
     steps:
       - name: Checkout
-        uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6
+        uses: actions/checkout@1af3b93b6815bc44a9784bd300feb67ff0d1eeb3 # v6
 
       - name: Install Helm
         uses: azure/setup-helm@v4
