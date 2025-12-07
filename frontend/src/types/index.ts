@@ -8,6 +8,7 @@ export interface PodInfo {
   node_name: string;
   is_dead: boolean;
   pod_identity?: string | null;
+  workload_selector_labels?: Record<string, string> | null;
 }
 
 // Matches broker's PodTraffic type

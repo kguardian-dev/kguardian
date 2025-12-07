@@ -123,17 +123,41 @@ export async function generateNetworkPolicy(pod: PodNodeData, _allPods: PodNodeD
     }
   });
 
+  // Helper function to get labels for a pod (workload labels or pod labels)
+  const getLabelsForPod = async (podName: string): Promise<Record<string, string> | null> => {
+    try {
+      const podInfo = await apiClient.getPodDetailsByName(podName);
+
+      // First try workload selector labels
+      if (podInfo?.workload_selector_labels && Object.keys(podInfo.workload_selector_labels).length > 0) {
+        return podInfo.workload_selector_labels;
+      }
+
+      // Fall back to pod labels from pod spec
+      if (podInfo?.pod_obj?.metadata?.labels) {
+        const labels = podInfo.pod_obj.metadata.labels;
+        if (Object.keys(labels).length > 0) {
+          return labels;
+        }
+      }
+    } catch (error) {
+      // If we can't fetch labels, return null
+    }
+    return null;
+  };
+
   // Helper function to create peer based on identity type
-  const createPeer = (peerInfo: PeerInfo): NetworkPolicyPeer => {
+  const createPeer = async (peerInfo: PeerInfo): Promise<NetworkPolicyPeer> => {
     const { identity } = peerInfo;
 
     if (identity.svcName) {
       // Service - use podSelector with service label
+      // Try to get labels (workload or pod labels) for pods behind this service
+      const labels = await getLabelsForPod(identity.svcName);
+
       const peer: NetworkPolicyPeer = {
         podSelector: {
-          matchLabels: {
-            app: identity.svcName,
-          },
+          matchLabels: labels || { app: identity.svcName },
         },
       };
 
@@ -148,12 +172,12 @@ export async function generateNetworkPolicy(pod: PodNodeData, _allPods: PodNodeD
 
       return peer;
     } else if (identity.podName) {
-      // Pod - use podSelector
+      // Pod - use labels (workload selector labels or pod labels)
+      const labels = await getLabelsForPod(identity.podName);
+
       const peer: NetworkPolicyPeer = {
         podSelector: {
-          matchLabels: {
-            app: identity.podName,
-          },
+          matchLabels: labels || { app: identity.podName },
         },
       };
 
@@ -178,10 +202,10 @@ export async function generateNetworkPolicy(pod: PodNodeData, _allPods: PodNodeD
   };
 
   // Build ingress rules - one rule per peer with all its ports
-  ingressMap.forEach(({ peer, ports }) => {
+  for (const { peer, ports } of ingressMap.values()) {
     const rule: NetworkPolicyRule = {
       id: `ingress-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
-      peers: [createPeer(peer)],
+      peers: [await createPeer(peer)],
       ports: Array.from(ports).map((portStr) => {
         const [protocol, port] = portStr.split(':');
         return {
@@ -191,13 +215,13 @@ export async function generateNetworkPolicy(pod: PodNodeData, _allPods: PodNodeD
       }),
     };
     ingressRules.push(rule);
-  });
+  }
 
   // Build egress rules - one rule per peer with all its ports
-  egressMap.forEach(({ peer, ports }) => {
+  for (const { peer, ports } of egressMap.values()) {
     const rule: NetworkPolicyRule = {
       id: `egress-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
-      peers: [createPeer(peer)],
+      peers: [await createPeer(peer)],
       ports: Array.from(ports).map((portStr) => {
         const [protocol, port] = portStr.split(':');
         return {
@@ -207,11 +231,20 @@ export async function generateNetworkPolicy(pod: PodNodeData, _allPods: PodNodeD
       }),
     };
     egressRules.push(rule);
-  });
+  }
 
   // Create policy
   // Use pod identity for resource name, fallback to pod name if not available
   const resourceName = pod.pod.pod_identity || pod.pod.pod_name;
+
+  // Get labels for the target pod (workload selector labels or pod labels)
+  let targetPodLabels: Record<string, string> = { app: pod.pod.pod_name };
+
+  if (pod.pod.workload_selector_labels && Object.keys(pod.pod.workload_selector_labels).length > 0) {
+    targetPodLabels = pod.pod.workload_selector_labels;
+  } else if (pod.pod.pod_obj?.metadata?.labels && Object.keys(pod.pod.pod_obj.metadata.labels).length > 0) {
+    targetPodLabels = pod.pod.pod_obj.metadata.labels;
+  }
 
   const policy: NetworkPolicy = {
     apiVersion: 'networking.k8s.io/v1',
@@ -222,9 +255,7 @@ export async function generateNetworkPolicy(pod: PodNodeData, _allPods: PodNodeD
     },
     spec: {
       podSelector: {
-        matchLabels: {
-          app: pod.pod.pod_name,
-        },
+        matchLabels: targetPodLabels,
       },
       policyTypes: [],
       ...(ingressRules.length > 0 && { ingress: ingressRules }),
