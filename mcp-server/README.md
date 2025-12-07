@@ -251,7 +251,7 @@ The kguardian MCP server is designed to work seamlessly with the kguardian LLM b
 ```
 ┌─────────────┐      ┌──────────────┐      ┌─────────────┐      ┌──────────┐
 │  AI Client  │─────▶│  LLM Bridge  │─────▶│ MCP Server  │─────▶│  Broker  │
-│  (ChatGPT,  │      │  (Python)    │      │    (Go)     │      │  (Rust)  │
+│  (ChatGPT,  │      │ (TypeScript) │      │    (Go)     │      │  (Rust)  │
 │   Claude)   │      └──────────────┘      └─────────────┘      └──────────┘
 └─────────────┘              │                                          │
                              │                                          ▼
