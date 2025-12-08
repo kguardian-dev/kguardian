@@ -1,6 +1,7 @@
 use chrono::NaiveDateTime;
 use serde::Serialize;
 use serde_derive::Deserialize;
+use std::collections::BTreeMap;
 
 #[derive(Debug, Default, Deserialize, Clone)]
 pub struct PodInspect {
@@ -86,6 +87,7 @@ pub struct PodDetail {
     pub node_name: String,
     pub is_dead: bool,
     pub pod_identity: Option<String>,
+    pub workload_selector_labels: Option<BTreeMap<String, String>>,
 }
 
 #[derive(Debug, Default, Serialize)]

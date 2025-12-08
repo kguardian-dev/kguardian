@@ -1,5 +1,20 @@
 # Changelog
 
+## [1.6.0](https://github.com/kguardian-dev/kguardian/compare/frontend/v1.5.0...frontend/v1.6.0) (2025-11-30)
+
+
+### Features
+
+* enable visual data loading sequence on identity changes when building policies ([8195bb7](https://github.com/kguardian-dev/kguardian/commit/8195bb7dea7a5476591a58e278f670ab9e843c27))
+
+
+### Bug Fixes
+
+* **deps:** update dependency lucide-react to ^0.554.0 ([8576bbe](https://github.com/kguardian-dev/kguardian/commit/8576bbe91cc3c20751ff2286625ccbffd5e2bfe4))
+* **deps:** update dependency lucide-react to ^0.554.0 ([d1a97e4](https://github.com/kguardian-dev/kguardian/commit/d1a97e476fa42a49ab01338fce7d727336d60600))
+* **deps:** update dependency lucide-react to ^0.555.0 ([da35e5c](https://github.com/kguardian-dev/kguardian/commit/da35e5c46c8a970ce805a9332f1be31bf6b0bb55))
+* **deps:** update dependency lucide-react to ^0.555.0 ([75c7843](https://github.com/kguardian-dev/kguardian/commit/75c7843eac0b3506798476dfc068aa650c751251))
+
 ## [1.5.0](https://github.com/kguardian-dev/kguardian/compare/frontend/v1.4.0...frontend/v1.5.0) (2025-11-12)
 
 
