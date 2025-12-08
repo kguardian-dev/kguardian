@@ -1,5 +1,15 @@
 # Changelog
 
+## [1.6.1](https://github.com/kguardian-dev/kguardian/compare/frontend/v1.6.0...frontend/v1.6.1) (2025-12-07)
+
+
+### Bug Fixes
+
+* **deps:** update dependency lucide-react to ^0.556.0 ([2d92145](https://github.com/kguardian-dev/kguardian/commit/2d92145d55be6e0f30db20a02c021487d32c05a7))
+* **deps:** update dependency lucide-react to ^0.556.0 ([db5469f](https://github.com/kguardian-dev/kguardian/commit/db5469fa3042ef0a77980157451b531c4fac3251))
+* frontend label logic ([ffc3568](https://github.com/kguardian-dev/kguardian/commit/ffc356888beb93f255d485382ccb0b6aea427192))
+* frontend label logic ([3b111d0](https://github.com/kguardian-dev/kguardian/commit/3b111d04d2993ccd6110e2e568d1616f5694831f))
+
 ## [1.6.0](https://github.com/kguardian-dev/kguardian/compare/frontend/v1.5.0...frontend/v1.6.0) (2025-11-30)
 
 
