@@ -12,7 +12,7 @@
   },
   "dependencies": {
     "axios": "^1.12.2",
-    "lucide-react": "^0.556.0",
+    "lucide-react": "^0.560.0",
     "react": "^19.1.1",
     "react-dom": "^19.1.1",
     "reactflow": "^11.11.4"
