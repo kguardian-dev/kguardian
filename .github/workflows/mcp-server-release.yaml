@@ -1,0 +1,66 @@
+---
+# yaml-language-server: $schema=https://json.schemastore.org/github-workflow.json
+name: Build and Push MCP Server Docker Images
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "mcp-server/v*"
+
+jobs:
+  build_and_push:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6
+
+      - name: Cache Go modules
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/go-build
+            ~/go/pkg/mod
+          key: ${{ runner.os }}-go-mcp-server-${{ hashFiles('mcp-server/go.sum') }}
+          restore-keys: |
+            ${{ runner.os }}-go-mcp-server-
+            ${{ runner.os }}-go-
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3
+        with:
+          platforms: all
+
+      - name: Set up Docker Buildx
+        id: buildx
+        uses: docker/setup-buildx-action@e468171a9de216ec08956ac3ada2f0791b6bd435 # v3
+        with:
+          install: true
+          version: latest
+
+      - name: Login to GHCR
+        uses: docker/login-action@5e57cd118135c172c3672efd75eb46360885c0ef # v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract tag name
+        id: extract_tag
+        run: |
+          TAG="${GITHUB_REF#refs/tags/}"
+          VERSION="${TAG#mcp-server/}"
+          echo "TAG_NAME=${VERSION}" >> $GITHUB_OUTPUT
+
+      - name: Build and Push
+        uses: docker/build-push-action@263435318d21b8e681c14492fe198d362a7d2c83 # v6
+        with:
+          context: mcp-server/
+          file: mcp-server/Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: |
+            ghcr.io/kguardian-dev/kguardian/mcp-server:${{ steps.extract_tag.outputs.TAG_NAME }}
+            ghcr.io/kguardian-dev/kguardian/mcp-server:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
