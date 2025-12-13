@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.2.1](https://github.com/kguardian-dev/kguardian/compare/mcp-server/v1.2.0...mcp-server/v1.2.1) (2025-12-13)
+
+
+### Bug Fixes
+
+* llm with mcp ([0797192](https://github.com/kguardian-dev/kguardian/commit/079719225cabfdae169556af303a09c01d7e2243))
+* llm with mcp ([453003f](https://github.com/kguardian-dev/kguardian/commit/453003ff9fbf2b00be1bb12d5c4f75b9f398727a))
+
 ## [1.2.0](https://github.com/kguardian-dev/kguardian/compare/mcp-server/v1.1.0...mcp-server/v1.2.0) (2025-11-06)
 
 

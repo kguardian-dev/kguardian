@@ -9,8 +9,8 @@
   "advisor+FILLER": "0.0.0",
   "charts/kguardian": "1.7.0",
   "charts/kguardian+FILLER": "0.0.0",
-  "llm-bridge": "1.1.1",
+  "llm-bridge": "1.1.0",
   "llm-bridge+FILLER": "0.0.0",
-  "mcp-server": "1.2.0",
+  "mcp-server": "1.2.1",
   "mcp-server+FILLER": "0.0.0"
 }
