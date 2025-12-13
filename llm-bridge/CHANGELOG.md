@@ -1,6 +1,6 @@
 # Changelog
 
-## [1.1.1](https://github.com/kguardian-dev/kguardian/compare/llm-bridge/v1.1.0...llm-bridge/v1.1.1) (2025-12-12)
+## [1.1.1](https://github.com/kguardian-dev/kguardian/compare/llm-bridge/v1.1.0...llm-bridge/v1.1.1) (2025-12-13)
 
 
 ### Bug Fixes
