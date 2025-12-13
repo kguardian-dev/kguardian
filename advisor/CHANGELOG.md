@@ -1,5 +1,15 @@
 # Changelog
 
+## [1.1.3](https://github.com/kguardian-dev/kguardian/compare/advisor/v1.1.2...advisor/v1.1.3) (2025-12-13)
+
+
+### Bug Fixes
+
+* **deps:** update kubernetes packages to v0.34.3 ([05e7953](https://github.com/kguardian-dev/kguardian/commit/05e7953bb83e4b24d58e5324eb5ff0c105156d12))
+* **deps:** update kubernetes packages to v0.34.3 ([445b4ac](https://github.com/kguardian-dev/kguardian/commit/445b4ac76bf73e6074dce7df2045a9d04dee8fa3))
+* **deps:** update module github.com/spf13/cobra to v1.10.2 ([98800e9](https://github.com/kguardian-dev/kguardian/commit/98800e9f8c8ad7b4ddbe8416aa9b9ee8140fe805))
+* **deps:** update module github.com/spf13/cobra to v1.10.2 ([c1d8cbe](https://github.com/kguardian-dev/kguardian/commit/c1d8cbe010587fab0324d6aa8ec5f5e366e59660))
+
 ## [1.1.2](https://github.com/kguardian-dev/kguardian/compare/advisor/v1.1.1...advisor/v1.1.2) (2025-11-30)
 
 
