@@ -6,6 +6,9 @@ import (
 	"io"
 	"net/http"
 	"time"
+
+	"github.com/kguardian-dev/kguardian/mcp-server/logger"
+	"github.com/sirupsen/logrus"
 )
 
 // BrokerClient handles communication with the kguardian broker
@@ -19,7 +22,7 @@ func NewBrokerClient(baseURL string) *BrokerClient {
 	return &BrokerClient{
 		baseURL: baseURL,
 		httpClient: &http.Client{
-			Timeout: 10 * time.Second,
+			Timeout: 90 * time.Second, // Allow enough time for cluster-wide queries
 		},
 	}
 }
@@ -64,21 +67,66 @@ func (c *BrokerClient) GetAllPods() (interface{}, error) {
 
 // get performs an HTTP GET request and returns the response
 func (c *BrokerClient) get(url string) (interface{}, error) {
+	startTime := time.Now()
+
+	logger.Log.WithFields(logrus.Fields{
+		"url":     url,
+		"timeout": c.httpClient.Timeout.String(),
+	}).Debug("Making broker request")
+
 	resp, err := c.httpClient.Get(url)
+	requestDuration := time.Since(startTime)
+
 	if err != nil {
+		logger.Log.WithFields(logrus.Fields{
+			"url":              url,
+			"error":            err.Error(),
+			"request_duration": requestDuration.String(),
+			"timeout":          c.httpClient.Timeout.String(),
+		}).Error("Broker request failed")
 		return nil, fmt.Errorf("failed to make request: %w", err)
 	}
 	defer resp.Body.Close()
 
+	logger.Log.WithFields(logrus.Fields{
+		"url":              url,
+		"status_code":      resp.StatusCode,
+		"request_duration": requestDuration.String(),
+	}).Debug("Received broker response")
+
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
+		logger.Log.WithFields(logrus.Fields{
+			"url":              url,
+			"status_code":      resp.StatusCode,
+			"response_body":    string(body),
+			"request_duration": requestDuration.String(),
+		}).Error("Broker returned non-OK status")
 		return nil, fmt.Errorf("broker returned status %d: %s", resp.StatusCode, string(body))
 	}
 
+	decodeStart := time.Now()
 	var result interface{}
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		decodeDuration := time.Since(decodeStart)
+		logger.Log.WithFields(logrus.Fields{
+			"url":              url,
+			"error":            err.Error(),
+			"decode_duration":  decodeDuration.String(),
+			"request_duration": requestDuration.String(),
+		}).Error("Failed to decode broker response")
 		return nil, fmt.Errorf("failed to decode response: %w", err)
 	}
+	decodeDuration := time.Since(decodeStart)
+	totalDuration := time.Since(startTime)
+
+	logger.Log.WithFields(logrus.Fields{
+		"url":              url,
+		"status_code":      resp.StatusCode,
+		"request_duration": requestDuration.String(),
+		"decode_duration":  decodeDuration.String(),
+		"total_duration":   totalDuration.String(),
+	}).Info("Broker request completed successfully")
 
 	return result, nil
 }
