@@ -2,18 +2,26 @@ package main
 
 import (
 	"context"
-	"log"
 	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
 	"time"
 
+	"github.com/kguardian-dev/kguardian/mcp-server/logger"
 	"github.com/kguardian-dev/kguardian/mcp-server/tools"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
+	"github.com/sirupsen/logrus"
 )
 
 func main() {
+	// Initialize logger
+	logLevel := os.Getenv("LOG_LEVEL")
+	if logLevel == "" {
+		logLevel = "info"
+	}
+	logger.Init(logLevel)
+
 	// Get configuration from environment
 	brokerURL := os.Getenv("BROKER_URL")
 	if brokerURL == "" {
@@ -24,6 +32,12 @@ func main() {
 	if port == "" {
 		port = "8081"
 	}
+
+	logger.Log.WithFields(logrus.Fields{
+		"port":       port,
+		"broker_url": brokerURL,
+		"log_level":  logLevel,
+	}).Info("Initializing kguardian MCP server")
 
 	// Create MCP server
 	server := mcp.NewServer(
@@ -46,34 +60,38 @@ func main() {
 	httpServer := &http.Server{
 		Addr:         ":" + port,
 		Handler:      handler,
-		ReadTimeout:  15 * time.Second,
-		WriteTimeout: 15 * time.Second,
-		IdleTimeout:  60 * time.Second,
+		ReadTimeout:  30 * time.Second,
+		WriteTimeout: 120 * time.Second, // Allow enough time for broker queries and large responses
+		IdleTimeout:  120 * time.Second,
 	}
 
 	// Start server in a goroutine
 	go func() {
-		log.Printf("kguardian MCP server starting on port %s", port)
-		log.Printf("Broker URL: %s", brokerURL)
+		logger.Log.WithFields(logrus.Fields{
+			"port":    port,
+			"address": ":" + port,
+		}).Info("kguardian MCP server starting")
+
 		if err := httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			log.Fatalf("Failed to start HTTP server: %v", err)
+			logger.Log.WithField("error", err.Error()).Error("Failed to start HTTP server")
+			os.Exit(1)
 		}
 	}()
 
 	// Wait for interrupt signal
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
-	<-quit
+	sig := <-quit
 
-	log.Println("Shutting down server...")
+	logger.Log.WithField("signal", sig.String()).Info("Received shutdown signal")
 
 	// Graceful shutdown
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
 	if err := httpServer.Shutdown(ctx); err != nil {
-		log.Printf("Server forced to shutdown: %v", err)
+		logger.Log.WithField("error", err.Error()).Error("Server forced to shutdown")
 	}
 
-	log.Println("Server stopped")
+	logger.Log.Info("Server stopped gracefully")
 }
