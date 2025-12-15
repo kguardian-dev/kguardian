@@ -60,9 +60,12 @@
     },
     "mcp-server": {
       "component": "mcp-server",
-      "release-type": "node",
+      "release-type": "go",
       "package-name": "mcp-server",
       "changelog-path": "CHANGELOG.md",
+      "extra-files": [
+        "mcp-server/VERSION"
+      ],
       "include-component-in-tag": true
     }
   },
