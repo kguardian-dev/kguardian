@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.6.0](https://github.com/kguardian-dev/kguardian/compare/broker/v1.5.0...broker/v1.6.0) (2025-12-20)
+
+
+### Features
+
+* update rust crates ([#578](https://github.com/kguardian-dev/kguardian/issues/578)) ([8e07e0a](https://github.com/kguardian-dev/kguardian/commit/8e07e0a8b9caa68526f01fe90c0f27b1a23e6b38))
+
 ## [1.5.0](https://github.com/kguardian-dev/kguardian/compare/broker/v1.4.0...broker/v1.5.0) (2025-11-30)
 
 
