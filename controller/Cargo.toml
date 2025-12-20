@@ -16,19 +16,19 @@ plain = "0.2"
 time = { version = "0.3", features = ["formatting", "local-offset", "macros"]}
 tokio = { version = "1.48", features = ["macros", "rt-multi-thread", "fs", "time"] }
 kube = { version = "2.0.0", features = ["runtime", "derive"] }
-k8s-openapi = { version = "0.26", features = ["latest"] }
+k8s-openapi = { version = "0.26.1", features = ["latest"] }
 futures = "0.3.31"
 thiserror = "2.0.17"
-tracing = "0.1.37"
+tracing = "0.1.44"
 serde = "1.0.228"
 serde_derive = "1.0.228"
 serde_json = "1.0.143"
-tracing-subscriber = { version = "0.3.16", features = ["json", "env-filter", "local-time"] }
+tracing-subscriber = { version = "0.3.22", features = ["json", "env-filter", "local-time"] }
 containerd-client = "0.6.0"
 regex = "1.11.2"
 procfs = "0.18.0"
-reqwest = { version = "0.12.23", features = ["json"] }
-uuid = { version = "1.18.0", features = ["v4"]}
+reqwest = { version = "0.12.26", features = ["json"] }
+uuid = { version = "1.19.0", features = ["v4"]}
 chrono = { version = "0.4.41", features = ["serde"] }
 openssl = { version = "0.10.73", features = ["vendored"] }
 lazy_static = "1.5.0"
