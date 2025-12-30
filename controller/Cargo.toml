@@ -27,7 +27,7 @@ tracing-subscriber = { version = "0.3.22", features = ["json", "env-filter", "lo
 containerd-client = "0.6.0"
 regex = "1.11.2"
 procfs = "0.18.0"
-reqwest = { version = "0.12.26", features = ["json"] }
+reqwest = { version = "0.13.0", features = ["json"] }
 uuid = { version = "1.19.0", features = ["v4"]}
 chrono = { version = "0.4.41", features = ["serde"] }
 openssl = { version = "0.10.73", features = ["vendored"] }
