@@ -1,5 +1,15 @@
 # Changelog
 
+## [1.2.2](https://github.com/kguardian-dev/kguardian/compare/mcp-server/v1.2.1...mcp-server/v1.2.2) (2026-01-11)
+
+
+### Bug Fixes
+
+* add logging lib and improve overall logging ([3c437f7](https://github.com/kguardian-dev/kguardian/commit/3c437f7d7f75e683ccf33b59ca2ff4379a64eeb1))
+* **deps:** update module github.com/modelcontextprotocol/go-sdk to v1.2.0 ([4be1189](https://github.com/kguardian-dev/kguardian/commit/4be11895b6f2a7a40bd2383915344b53103bd791))
+* **deps:** update module github.com/modelcontextprotocol/go-sdk to v1.2.0 ([c9977ed](https://github.com/kguardian-dev/kguardian/commit/c9977ed7cc7af6b24ab8602146cf133acf672eca))
+* release-please ([ed7dcad](https://github.com/kguardian-dev/kguardian/commit/ed7dcadf1f09bd6d624e36c4a47f9e1de6805b58))
+
 ## [1.2.1](https://github.com/kguardian-dev/kguardian/compare/mcp-server/v1.2.0...mcp-server/v1.2.1) (2025-12-13)
 
 
