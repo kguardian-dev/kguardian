@@ -15,7 +15,7 @@ libbpf-sys = "1.5.1"
 plain = "0.2"
 time = { version = "0.3", features = ["formatting", "local-offset", "macros"]}
 tokio = { version = "1.48", features = ["macros", "rt-multi-thread", "fs", "time"] }
-kube = { version = "2.0.0", features = ["runtime", "derive"] }
+kube = { version = "3.0.0", features = ["runtime", "derive"] }
 k8s-openapi = { version = "0.26.1", features = ["latest"] }
 futures = "0.3.31"
 thiserror = "2.0.17"
