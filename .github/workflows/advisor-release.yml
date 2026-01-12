@@ -66,7 +66,7 @@ jobs:
           - amd64
           - arm64
     # TODO: Do not pin this action to a SHA!
-    uses: slsa-framework/slsa-github-generator/.github/workflows/builder_go_slsa3.yml@v2.1.0 # v2.1.0
+    uses: slsa-framework/slsa-github-generator/.github/workflows/builder_go_slsa3.yml@f7dd8c54c2067bafc12ca7a55595d5ee9b75204a # v2.1.0
     with:
       go-version: "1.24"
       config-file: .slsa-goreleaser/advisor/${{matrix.os}}-${{matrix.arch}}.yml
