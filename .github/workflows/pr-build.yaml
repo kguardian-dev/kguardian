@@ -32,7 +32,7 @@ jobs:
       mcp-server: ${{ steps.changes.outputs.mcp-server }}
       charts: ${{ steps.changes.outputs.charts }}
     steps:
-      - uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
           fetch-depth: 2  # Fetch enough history to compare with previous commit
 
@@ -67,7 +67,7 @@ jobs:
           - linux/arm64
     steps:
       - name: Checkout
-        uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
 
       - name: Install Rust nightly
         uses: dtolnay/rust-toolchain@master
@@ -84,7 +84,7 @@ jobs:
           components: rustfmt, clippy
 
       - name: Cache Rust dependencies
-        uses: actions/cache@9255dc7a253b0ccc959486e2bca901246202afeb # v5
+        uses: actions/cache@cdf6c1fa76f9f475f3d7449005a359c84ca0f306 # v5
         with:
           path: |
             ~/.cargo/bin/
@@ -125,7 +125,7 @@ jobs:
     needs: build-controller
     steps:
       - name: Checkout
-        uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3
@@ -170,43 +170,40 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-      - name: Delete old PR comments
+      - name: Update or create PR comment
         uses: actions/github-script@v7
         with:
           script: |
-            const comments = await github.rest.issues.listComments({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              issue_number: context.issue.number,
-            });
-
-            for (const comment of comments.data) {
-              if (comment.body.includes('✅ Controller image built and pushed:')) {
-                await github.rest.issues.deleteComment({
-                  owner: context.repo.owner,
-                  repo: context.repo.repo,
-                  comment_id: comment.id,
-                });
-              }
-            }
-
-      - name: Comment PR
-        uses: actions/github-script@v7
-        with:
-          script: |
+            const marker = '✅ Controller image built and pushed:';
             const digest = '${{ steps.build.outputs.digest }}';
-            const body = `✅ Controller image built and pushed:
+            const body = `${marker}
             \`\`\`
             ghcr.io/kguardian-dev/kguardian/controller:pr-${{ github.event.pull_request.number }}
             \`\`\`
             **Digest:** \`${digest}\``;
 
-            github.rest.issues.createComment({
-              issue_number: context.issue.number,
+            const comments = await github.rest.issues.listComments({
               owner: context.repo.owner,
               repo: context.repo.repo,
-              body: body
-            })
+              issue_number: context.issue.number,
+            });
+            const existing = comments.data.find(c => c.body.includes(marker));
+
+            if (existing) {
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: existing.id,
+                body: body,
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+                body: body,
+              });
+            }
 
   # Build Broker
   build-broker:
@@ -215,10 +212,10 @@ jobs:
     if: needs.detect-changes.outputs.broker == 'true'
     steps:
       - name: Checkout
-        uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
 
       - name: Cache Rust dependencies
-        uses: actions/cache@9255dc7a253b0ccc959486e2bca901246202afeb # v5
+        uses: actions/cache@cdf6c1fa76f9f475f3d7449005a359c84ca0f306 # v5
         with:
           path: |
             ~/.cargo/bin/
@@ -262,43 +259,40 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-      - name: Delete old PR comments
+      - name: Update or create PR comment
         uses: actions/github-script@v7
         with:
           script: |
-            const comments = await github.rest.issues.listComments({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              issue_number: context.issue.number,
-            });
-
-            for (const comment of comments.data) {
-              if (comment.body.includes('✅ Broker image built and pushed:')) {
-                await github.rest.issues.deleteComment({
-                  owner: context.repo.owner,
-                  repo: context.repo.repo,
-                  comment_id: comment.id,
-                });
-              }
-            }
-
-      - name: Comment PR
-        uses: actions/github-script@v7
-        with:
-          script: |
+            const marker = '✅ Broker image built and pushed:';
             const digest = '${{ steps.build.outputs.digest }}';
-            const body = `✅ Broker image built and pushed:
+            const body = `${marker}
             \`\`\`
             ghcr.io/kguardian-dev/kguardian/broker:pr-${{ github.event.pull_request.number }}
             \`\`\`
             **Digest:** \`${digest}\``;
 
-            github.rest.issues.createComment({
-              issue_number: context.issue.number,
+            const comments = await github.rest.issues.listComments({
               owner: context.repo.owner,
               repo: context.repo.repo,
-              body: body
-            })
+              issue_number: context.issue.number,
+            });
+            const existing = comments.data.find(c => c.body.includes(marker));
+
+            if (existing) {
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: existing.id,
+                body: body,
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+                body: body,
+              });
+            }
 
   # Build Frontend
   build-frontend:
@@ -307,10 +301,10 @@ jobs:
     if: needs.detect-changes.outputs.frontend == 'true'
     steps:
       - name: Checkout
-        uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
 
       - name: Cache Node modules
-        uses: actions/cache@9255dc7a253b0ccc959486e2bca901246202afeb # v5
+        uses: actions/cache@cdf6c1fa76f9f475f3d7449005a359c84ca0f306 # v5
         with:
           path: |
             ~/.npm
@@ -350,43 +344,40 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-      - name: Delete old PR comments
+      - name: Update or create PR comment
         uses: actions/github-script@v7
         with:
           script: |
-            const comments = await github.rest.issues.listComments({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              issue_number: context.issue.number,
-            });
-
-            for (const comment of comments.data) {
-              if (comment.body.includes('✅ Frontend image built and pushed:')) {
-                await github.rest.issues.deleteComment({
-                  owner: context.repo.owner,
-                  repo: context.repo.repo,
-                  comment_id: comment.id,
-                });
-              }
-            }
-
-      - name: Comment PR
-        uses: actions/github-script@v7
-        with:
-          script: |
+            const marker = '✅ Frontend image built and pushed:';
             const digest = '${{ steps.build.outputs.digest }}';
-            const body = `✅ Frontend image built and pushed:
+            const body = `${marker}
             \`\`\`
             ghcr.io/kguardian-dev/kguardian/frontend:pr-${{ github.event.pull_request.number }}
             \`\`\`
             **Digest:** \`${digest}\``;
 
-            github.rest.issues.createComment({
-              issue_number: context.issue.number,
+            const comments = await github.rest.issues.listComments({
               owner: context.repo.owner,
               repo: context.repo.repo,
-              body: body
-            })
+              issue_number: context.issue.number,
+            });
+            const existing = comments.data.find(c => c.body.includes(marker));
+
+            if (existing) {
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: existing.id,
+                body: body,
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+                body: body,
+              });
+            }
 
   # Build LLM Bridge
   build-llm-bridge:
@@ -395,10 +386,10 @@ jobs:
     if: needs.detect-changes.outputs.llm-bridge == 'true'
     steps:
       - name: Checkout
-        uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
 
       - name: Cache Node modules
-        uses: actions/cache@9255dc7a253b0ccc959486e2bca901246202afeb # v5
+        uses: actions/cache@cdf6c1fa76f9f475f3d7449005a359c84ca0f306 # v5
         with:
           path: |
             ~/.npm
@@ -439,43 +430,40 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-      - name: Delete old PR comments
+      - name: Update or create PR comment
         uses: actions/github-script@v7
         with:
           script: |
-            const comments = await github.rest.issues.listComments({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              issue_number: context.issue.number,
-            });
-
-            for (const comment of comments.data) {
-              if (comment.body.includes('✅ LLM Bridge image built and pushed:')) {
-                await github.rest.issues.deleteComment({
-                  owner: context.repo.owner,
-                  repo: context.repo.repo,
-                  comment_id: comment.id,
-                });
-              }
-            }
-
-      - name: Comment PR
-        uses: actions/github-script@v7
-        with:
-          script: |
+            const marker = '✅ LLM Bridge image built and pushed:';
             const digest = '${{ steps.build.outputs.digest }}';
-            const body = `✅ LLM Bridge image built and pushed:
+            const body = `${marker}
             \`\`\`
             ghcr.io/kguardian-dev/kguardian/llm-bridge:pr-${{ github.event.pull_request.number }}
             \`\`\`
             **Digest:** \`${digest}\``;
 
-            github.rest.issues.createComment({
-              issue_number: context.issue.number,
+            const comments = await github.rest.issues.listComments({
               owner: context.repo.owner,
               repo: context.repo.repo,
-              body: body
-            })
+              issue_number: context.issue.number,
+            });
+            const existing = comments.data.find(c => c.body.includes(marker));
+
+            if (existing) {
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: existing.id,
+                body: body,
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+                body: body,
+              });
+            }
 
   # Build MCP Server
   build-mcp-server:
@@ -484,10 +472,10 @@ jobs:
     if: needs.detect-changes.outputs.mcp-server == 'true'
     steps:
       - name: Checkout
-        uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
 
       - name: Cache Go modules
-        uses: actions/cache@9255dc7a253b0ccc959486e2bca901246202afeb # v5
+        uses: actions/cache@cdf6c1fa76f9f475f3d7449005a359c84ca0f306 # v5
         with:
           path: |
             ~/.cache/go-build
@@ -528,43 +516,40 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-      - name: Delete old PR comments
+      - name: Update or create PR comment
         uses: actions/github-script@v7
         with:
           script: |
-            const comments = await github.rest.issues.listComments({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              issue_number: context.issue.number,
-            });
-
-            for (const comment of comments.data) {
-              if (comment.body.includes('✅ MCP Server image built and pushed:')) {
-                await github.rest.issues.deleteComment({
-                  owner: context.repo.owner,
-                  repo: context.repo.repo,
-                  comment_id: comment.id,
-                });
-              }
-            }
-
-      - name: Comment PR
-        uses: actions/github-script@v7
-        with:
-          script: |
+            const marker = '✅ MCP Server image built and pushed:';
             const digest = '${{ steps.build.outputs.digest }}';
-            const body = `✅ MCP Server image built and pushed:
+            const body = `${marker}
             \`\`\`
             ghcr.io/kguardian-dev/kguardian/mcp-server:pr-${{ github.event.pull_request.number }}
             \`\`\`
             **Digest:** \`${digest}\``;
 
-            github.rest.issues.createComment({
-              issue_number: context.issue.number,
+            const comments = await github.rest.issues.listComments({
               owner: context.repo.owner,
               repo: context.repo.repo,
-              body: body
-            })
+              issue_number: context.issue.number,
+            });
+            const existing = comments.data.find(c => c.body.includes(marker));
+
+            if (existing) {
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: existing.id,
+                body: body,
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+                body: body,
+              });
+            }
 
   # Build and publish Helm chart for PR testing
   build-helm-chart:
@@ -573,7 +558,7 @@ jobs:
     if: needs.detect-changes.outputs.charts == 'true' || needs.detect-changes.outputs.controller == 'true' || needs.detect-changes.outputs.broker == 'true' || needs.detect-changes.outputs.frontend == 'true' || needs.detect-changes.outputs.llm-bridge == 'true' || needs.detect-changes.outputs.mcp-server == 'true'
     steps:
       - name: Checkout
-        uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
 
       - name: Install Helm
         uses: azure/setup-helm@v4
@@ -608,37 +593,36 @@ jobs:
           CHART_FILE=$(ls kguardian-*.tgz)
           helm push "${CHART_FILE}" oci://ghcr.io/kguardian-dev/charts
 
-      - name: Delete old Helm chart comments
+      - name: Update or create Helm chart comment
         uses: actions/github-script@v7
         with:
           script: |
+            const marker = '✅ Helm chart built and pushed for testing:';
+            const version = '${{ github.event.pull_request.number }}';
+            const body = marker + '\n```bash\n# Install PR Helm chart\nhelm install kguardian oci://ghcr.io/kguardian-dev/charts/kguardian \\\n  --version $(helm search repo kguardian-dev/kguardian --versions | grep pr' + version + ' | head -1 | awk \'{print $2}\') \\\n  --namespace kguardian \\\n  --create-namespace\n\n# Or upgrade existing installation\nhelm upgrade kguardian oci://ghcr.io/kguardian-dev/charts/kguardian \\\n  --version $(helm search repo kguardian-dev/kguardian --versions | grep pr' + version + ' | head -1 | awk \'{print $2}\') \\\n  --namespace kguardian\n```';
+
             const comments = await github.rest.issues.listComments({
               owner: context.repo.owner,
               repo: context.repo.repo,
               issue_number: context.issue.number,
             });
+            const existing = comments.data.find(c => c.body.includes(marker));
 
-            for (const comment of comments.data) {
-              if (comment.body.includes('✅ Helm chart built and pushed for testing:')) {
-                await github.rest.issues.deleteComment({
-                  owner: context.repo.owner,
-                  repo: context.repo.repo,
-                  comment_id: comment.id,
-                });
-              }
+            if (existing) {
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: existing.id,
+                body: body,
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+                body: body,
+              });
             }
-
-      - name: Comment PR with Helm chart info
-        uses: actions/github-script@v7
-        with:
-          script: |
-            const version = '${{ github.event.pull_request.number }}';
-            github.rest.issues.createComment({
-              issue_number: context.issue.number,
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              body: '✅ Helm chart built and pushed for testing:\n```bash\n# Install PR Helm chart\nhelm install kguardian oci://ghcr.io/kguardian-dev/charts/kguardian \\\n  --version $(helm search repo kguardian-dev/kguardian --versions | grep pr' + version + ' | head -1 | awk \'{print $2}\') \\\n  --namespace kguardian \\\n  --create-namespace\n\n# Or upgrade existing installation\nhelm upgrade kguardian oci://ghcr.io/kguardian-dev/charts/kguardian \\\n  --version $(helm search repo kguardian-dev/kguardian --versions | grep pr' + version + ' | head -1 | awk \'{print $2}\') \\\n  --namespace kguardian\n```'
-            })
 
   # Summary comment with testing instructions
   pr-summary:
@@ -646,30 +630,11 @@ jobs:
     needs: [detect-changes, push-controller, build-broker, build-frontend, build-llm-bridge, build-mcp-server, build-helm-chart]
     if: always()
     steps:
-      - name: Delete old summary comments
+      - name: Update or create summary comment
         uses: actions/github-script@v7
         with:
           script: |
-            const comments = await github.rest.issues.listComments({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              issue_number: context.issue.number,
-            });
-
-            for (const comment of comments.data) {
-              if (comment.body.includes('## 🚀 PR Build Summary')) {
-                await github.rest.issues.deleteComment({
-                  owner: context.repo.owner,
-                  repo: context.repo.repo,
-                  comment_id: comment.id,
-                });
-              }
-            }
-
-      - name: Create summary comment
-        uses: actions/github-script@v7
-        with:
-          script: |
+            const marker = '## 🚀 PR Build Summary';
             const controller = '${{ needs.detect-changes.outputs.controller }}' === 'true';
             const broker = '${{ needs.detect-changes.outputs.broker }}' === 'true';
             const frontend = '${{ needs.detect-changes.outputs.frontend }}' === 'true';
@@ -678,7 +643,7 @@ jobs:
             const charts = '${{ needs.detect-changes.outputs.charts }}' === 'true';
             const helmBuilt = '${{ needs.build-helm-chart.result }}' === 'success';
 
-            let body = '## 🚀 PR Build Summary\n\n';
+            let body = marker + '\n\n';
 
             if (!controller && !broker && !frontend && !llmBridge && !mcpServer && !charts) {
               body += '⏭️ No component changes detected. Skipping builds.\n';
@@ -745,9 +710,25 @@ jobs:
               body += '```\n';
             }
 
-            github.rest.issues.createComment({
-              issue_number: context.issue.number,
+            const comments = await github.rest.issues.listComments({
               owner: context.repo.owner,
               repo: context.repo.repo,
-              body: body
-            })
+              issue_number: context.issue.number,
+            });
+            const existing = comments.data.find(c => c.body.includes(marker));
+
+            if (existing) {
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: existing.id,
+                body: body,
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+                body: body,
+              });
+            }

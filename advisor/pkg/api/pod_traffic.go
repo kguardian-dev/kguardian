@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"time"
 
 	log "github.com/rs/zerolog/log"
 
@@ -69,7 +68,6 @@ func GetSvcSpec(svcIP string) (*SvcDetail, error) {
 
 // Real implementations
 func getRealPodTraffic(podName string) ([]PodTraffic, error) {
-	time.Sleep(3 * time.Second)
 	// Specify the URL of the REST API endpoint you want to invoke.
 	apiURL := "http://127.0.0.1:9090/pod/traffic/" + podName
 

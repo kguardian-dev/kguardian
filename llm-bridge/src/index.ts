@@ -108,7 +108,7 @@ app.post("/api/chat", async (req: Request, res: Response<any>) => {
     if (error instanceof Error) {
       return res.status(500).json({
         error: error.message,
-        details: error.stack,
+        ...(process.env.NODE_ENV !== "production" && { details: error.stack }),
       } as ErrorResponse);
     }
 
