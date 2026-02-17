@@ -40,6 +40,34 @@ spec:
               value: trust
             - name: POSTGRES_DB
               value: kube
+          livenessProbe:
+            exec:
+              command:
+                - pg_isready
+                - -U
+                - rust
+                - -d
+                - kube
+            initialDelaySeconds: 30
+            periodSeconds: 15
+            timeoutSeconds: 5
+            failureThreshold: 3
+          readinessProbe:
+            exec:
+              command:
+                - pg_isready
+                - -U
+                - rust
+                - -d
+                - kube
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          {{- with .Values.database.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
           volumeMounts:
             - mountPath: /var/lib/postgres/data
               name: db-data
