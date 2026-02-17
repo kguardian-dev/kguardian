@@ -38,11 +38,12 @@ export async function callGemini(
     tools: [{ functionDeclarations }],
   };
 
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`;
 
   const response = await axios.post(url, payload, {
     headers: {
       "Content-Type": "application/json",
+      "x-goog-api-key": apiKey,
     },
   });
 
@@ -95,6 +96,7 @@ export async function callGemini(
     const followUpResponse = await axios.post(url, followUpPayload, {
       headers: {
         "Content-Type": "application/json",
+        "x-goog-api-key": apiKey,
       },
     });
 

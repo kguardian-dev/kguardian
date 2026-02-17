@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"time"
 
 	"github.com/kguardian-dev/kguardian/mcp-server/logger"
@@ -30,39 +31,39 @@ func NewBrokerClient(baseURL string) *BrokerClient {
 // GetPodNetworkTraffic retrieves network traffic data for a pod
 func (c *BrokerClient) GetPodNetworkTraffic(namespace, podName string) (interface{}, error) {
 	// Broker expects just the pod name in the URL
-	url := fmt.Sprintf("%s/pod/traffic/%s", c.baseURL, podName)
-	return c.get(url)
+	reqURL := fmt.Sprintf("%s/pod/traffic/%s", c.baseURL, url.PathEscape(podName))
+	return c.get(reqURL)
 }
 
 // GetPodSyscalls retrieves syscall data for a pod
 func (c *BrokerClient) GetPodSyscalls(namespace, podName string) (interface{}, error) {
 	// Broker expects just the pod name in the URL
-	url := fmt.Sprintf("%s/pod/syscalls/%s", c.baseURL, podName)
-	return c.get(url)
+	reqURL := fmt.Sprintf("%s/pod/syscalls/%s", c.baseURL, url.PathEscape(podName))
+	return c.get(reqURL)
 }
 
 // GetPodByIP retrieves pod details by IP address
 func (c *BrokerClient) GetPodByIP(ip string) (interface{}, error) {
-	url := fmt.Sprintf("%s/pod/ip/%s", c.baseURL, ip)
-	return c.get(url)
+	reqURL := fmt.Sprintf("%s/pod/ip/%s", c.baseURL, url.PathEscape(ip))
+	return c.get(reqURL)
 }
 
 // GetServiceByIP retrieves service details by IP address
 func (c *BrokerClient) GetServiceByIP(ip string) (interface{}, error) {
-	url := fmt.Sprintf("%s/svc/ip/%s", c.baseURL, ip)
-	return c.get(url)
+	reqURL := fmt.Sprintf("%s/svc/ip/%s", c.baseURL, url.PathEscape(ip))
+	return c.get(reqURL)
 }
 
 // GetAllPodTraffic retrieves all pod traffic in the cluster
 func (c *BrokerClient) GetAllPodTraffic() (interface{}, error) {
-	url := fmt.Sprintf("%s/pod/traffic", c.baseURL)
-	return c.get(url)
+	reqURL := fmt.Sprintf("%s/pod/traffic", c.baseURL)
+	return c.get(reqURL)
 }
 
 // GetAllPods retrieves all pod details in the cluster
 func (c *BrokerClient) GetAllPods() (interface{}, error) {
-	url := fmt.Sprintf("%s/pod/info", c.baseURL)
-	return c.get(url)
+	reqURL := fmt.Sprintf("%s/pod/info", c.baseURL)
+	return c.get(reqURL)
 }
 
 // get performs an HTTP GET request and returns the response

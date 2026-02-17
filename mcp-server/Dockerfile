@@ -13,6 +13,7 @@ RUN go mod download
 
 # Copy source code
 COPY main.go ./
+COPY logger ./logger
 COPY tools ./tools
 
 # Build the binary
