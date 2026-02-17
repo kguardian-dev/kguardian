@@ -91,7 +91,7 @@ The following table lists the configurable parameters of the kguardian chart and
 | broker.podSecurityContext | object | `{"fsGroup":1000,"fsGroupChangePolicy":"OnRootMismatch","runAsGroup":1000,"runAsUser":1000,"seccompProfile":{"type":"RuntimeDefault"},"supplementalGroups":[1000]}` | Broker pod security context. Runs as non-root user 1000 |
 | broker.priorityClassName | string | `""` | Priority class to be used for the kguardian broker pods |
 | broker.replicaCount | int | `1` | Number of broker replicas to deploy |
-| broker.resources | object | `{}` | Broker pod resource requests and limits |
+| broker.resources | object | `{"limits":{"cpu":"500m","memory":"512Mi"},"requests":{"cpu":"100m","memory":"256Mi"}}` | Broker pod resource requests and limits |
 | broker.securityContext | object | `{"allowPrivilegeEscalation":false,"capabilities":{"drop":["ALL"]},"privileged":false,"readOnlyRootFilesystem":true,"runAsNonRoot":true,"runAsUser":1000}` | Broker container security context. Hardened with read-only root filesystem |
 | broker.service.name | string | `"kguardian-broker"` | Broker service name |
 | broker.service.port | int | `9090` | Broker service port |
@@ -123,7 +123,7 @@ The following table lists the configurable parameters of the kguardian chart and
 | controller.podAnnotations | object | `{}` | Annotations to add to controller pods |
 | controller.podSecurityContext | object | `{"seccompProfile":{"type":"RuntimeDefault"}}` | Controller pod security context. Runs with seccomp RuntimeDefault profile |
 | controller.priorityClassName | string | `""` | Priority class to be used for the kguardian controller pods |
-| controller.resources | object | `{}` | Controller pod resource requests and limits |
+| controller.resources | object | `{"limits":{"cpu":"500m","memory":"512Mi"},"requests":{"cpu":"100m","memory":"256Mi"}}` | Controller pod resource requests and limits. eBPF requires more memory. |
 | controller.securityContext | object | `{"allowPrivilegeEscalation":true,"capabilities":{"add":["CAP_BPF"]},"privileged":true,"readOnlyRootFilesystem":true}` | Controller container security context. Requires privileged mode for eBPF |
 | controller.service.port | int | `80` | Controller service port |
 | controller.service.type | string | `"ClusterIP"` | Controller service type |
@@ -152,7 +152,7 @@ The following table lists the configurable parameters of the kguardian chart and
 | database.podAnnotations | object | `{}` | Annotations to add to database pods |
 | database.podSecurityContext | object | `{"fsGroup":999,"fsGroupChangePolicy":"OnRootMismatch","runAsGroup":999,"runAsUser":999,"seccompProfile":{"type":"RuntimeDefault"},"supplementalGroups":[999]}` | Database pod security context. Runs as postgres user (999) |
 | database.priorityClassName | string | `""` | Priority class to be used for the kguardian database pods |
-| database.resources | object | `{}` | Database pod resource requests and limits |
+| database.resources | object | `{"limits":{"cpu":"500m","memory":"512Mi"},"requests":{"cpu":"100m","memory":"256Mi"}}` | Database pod resource requests and limits |
 | database.securityContext | object | `{"allowPrivilegeEscalation":false,"capabilities":{"drop":["ALL"]},"privileged":false,"readOnlyRootFilesystem":false,"runAsNonRoot":true,"runAsUser":999}` | Database container security context. Non-root with dropped capabilities |
 | database.service.name | string | `"kguardian-db"` | Database service name |
 | database.service.port | int | `5432` | Database service port |
@@ -185,7 +185,7 @@ The following table lists the configurable parameters of the kguardian chart and
 | frontend.podSecurityContext | object | `{"fsGroup":1337,"fsGroupChangePolicy":"OnRootMismatch","runAsGroup":1337,"runAsUser":1337,"seccompProfile":{"type":"RuntimeDefault"},"supplementalGroups":[1337]}` | Frontend pod security context. Runs as non-root user (1337) |
 | frontend.priorityClassName | string | `""` | Priority class to be used for the kguardian frontend pods |
 | frontend.replicaCount | int | `1` | Number of frontend replicas to deploy |
-| frontend.resources | object | `{}` | Frontend pod resource requests and limits |
+| frontend.resources | object | `{"limits":{"cpu":"200m","memory":"256Mi"},"requests":{"cpu":"50m","memory":"128Mi"}}` | Frontend pod resource requests and limits |
 | frontend.securityContext | object | `{"allowPrivilegeEscalation":false,"capabilities":{"drop":["ALL"]},"privileged":false,"readOnlyRootFilesystem":false,"runAsNonRoot":true,"runAsUser":1337}` | Frontend container security context. Hardened with read-only root filesystem |
 | frontend.service.name | string | `"kguardian-frontend"` | Frontend service name |
 | frontend.service.port | int | `5173` | Frontend service port |
