@@ -1,5 +1,27 @@
 # Changelog
 
+## [1.2.0](https://github.com/kguardian-dev/kguardian/compare/advisor/v1.1.2...advisor/v1.2.0) (2026-02-17)
+
+
+### Features
+
+* overall improvements and uplift ([2f6aa21](https://github.com/kguardian-dev/kguardian/commit/2f6aa216a217412bba14126365a96c4db0e7df62))
+* overall improvements and uplift ([e7c223c](https://github.com/kguardian-dev/kguardian/commit/e7c223cd00147071eefb3285b110c75585a05a3c))
+
+
+### Bug Fixes
+
+* **deps:** update kubernetes packages to v0.34.3 ([05e7953](https://github.com/kguardian-dev/kguardian/commit/05e7953bb83e4b24d58e5324eb5ff0c105156d12))
+* **deps:** update kubernetes packages to v0.34.3 ([445b4ac](https://github.com/kguardian-dev/kguardian/commit/445b4ac76bf73e6074dce7df2045a9d04dee8fa3))
+* **deps:** update kubernetes packages to v0.35.0 ([13cff80](https://github.com/kguardian-dev/kguardian/commit/13cff800cffb1f4e5e66875da17b2086bc2ab8cf))
+* **deps:** update kubernetes packages to v0.35.0 ([e759cef](https://github.com/kguardian-dev/kguardian/commit/e759cef12d7253bb863ef96a34fd4eed667ad84a))
+* **deps:** update kubernetes packages to v0.35.1 ([#644](https://github.com/kguardian-dev/kguardian/issues/644)) ([034e600](https://github.com/kguardian-dev/kguardian/commit/034e60095784240eb5879dbeef4146a2bc6e1733))
+* **deps:** update module github.com/cilium/cilium to v1.18.5 ([9038c8d](https://github.com/kguardian-dev/kguardian/commit/9038c8dd7374f7b7d44af930b7f790f0eaef45a0))
+* **deps:** update module github.com/cilium/cilium to v1.18.5 ([d90dd76](https://github.com/kguardian-dev/kguardian/commit/d90dd767b0569d7dd09cc12c0086f4f4b85eeb20))
+* **deps:** update module github.com/cilium/cilium to v1.19.1 ([#608](https://github.com/kguardian-dev/kguardian/issues/608)) ([53794fe](https://github.com/kguardian-dev/kguardian/commit/53794fe72359c2619ce782b6c1d0491acce85f9b))
+* **deps:** update module github.com/spf13/cobra to v1.10.2 ([98800e9](https://github.com/kguardian-dev/kguardian/commit/98800e9f8c8ad7b4ddbe8416aa9b9ee8140fe805))
+* **deps:** update module github.com/spf13/cobra to v1.10.2 ([c1d8cbe](https://github.com/kguardian-dev/kguardian/commit/c1d8cbe010587fab0324d6aa8ec5f5e366e59660))
+
 ## [1.1.3](https://github.com/kguardian-dev/kguardian/compare/advisor/v1.1.2...advisor/v1.1.3) (2025-12-20)
 
 
