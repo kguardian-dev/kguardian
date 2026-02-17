@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.8.0](https://github.com/kguardian-dev/kguardian/compare/chart/v1.7.0...chart/v1.8.0) (2026-02-17)
+
+
+### Features
+
+* overall improvements and uplift ([2f6aa21](https://github.com/kguardian-dev/kguardian/commit/2f6aa216a217412bba14126365a96c4db0e7df62))
+* overall improvements and uplift ([e7c223c](https://github.com/kguardian-dev/kguardian/commit/e7c223cd00147071eefb3285b110c75585a05a3c))
+
 ## [1.7.0](https://github.com/kguardian-dev/kguardian/compare/chart/v1.6.2...chart/v1.7.0) (2025-11-29)
 
 
