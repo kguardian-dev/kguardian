@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.6.3](https://github.com/kguardian-dev/kguardian/compare/frontend/v1.6.2...frontend/v1.6.3) (2026-02-17)
+
+
+### Bug Fixes
+
+* **deps:** update dependency lucide-react to ^0.574.0 ([#624](https://github.com/kguardian-dev/kguardian/issues/624)) ([8f30554](https://github.com/kguardian-dev/kguardian/commit/8f30554fd509a9f3ff1b40e0128156f9d577e072))
+
 ## [1.6.2](https://github.com/kguardian-dev/kguardian/compare/frontend/v1.6.1...frontend/v1.6.2) (2025-12-20)
 
 
