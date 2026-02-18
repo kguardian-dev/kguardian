@@ -68,5 +68,7 @@ func (h ClusterTrafficHandler) Call(
 		"total_duration":   totalDuration.String(),
 	}).Info("Successfully fetched cluster traffic")
 
-	return nil, ClusterTrafficOutput{Data: string(jsonData)}, nil
+	return &mcp.CallToolResult{
+		Content: []mcp.Content{&mcp.TextContent{Text: string(jsonData)}},
+	}, ClusterTrafficOutput{}, nil
 }

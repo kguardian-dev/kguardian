@@ -62,5 +62,7 @@ func (h ServiceDetailsHandler) Call(
 		"total_duration": time.Since(startTime).String(),
 	}).Info("Successfully fetched service details")
 
-	return nil, ServiceDetailsOutput{Data: string(jsonData)}, nil
+	return &mcp.CallToolResult{
+		Content: []mcp.Content{&mcp.TextContent{Text: string(jsonData)}},
+	}, ServiceDetailsOutput{}, nil
 }
