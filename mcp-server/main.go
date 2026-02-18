@@ -52,14 +52,22 @@ func main() {
 	tools.RegisterTools(server, brokerURL)
 
 	// Create HTTP handler using StreamableHTTPHandler
-	handler := mcp.NewStreamableHTTPHandler(func(req *http.Request) *mcp.Server {
+	mcpHandler := mcp.NewStreamableHTTPHandler(func(req *http.Request) *mcp.Server {
 		return server
 	}, nil)
+
+	// Wrap in ServeMux to add health endpoint for Kubernetes probes
+	mux := http.NewServeMux()
+	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("ok"))
+	})
+	mux.Handle("/", mcpHandler)
 
 	// Setup HTTP server
 	httpServer := &http.Server{
 		Addr:         ":" + port,
-		Handler:      handler,
+		Handler:      mux,
 		ReadTimeout:  30 * time.Second,
 		WriteTimeout: 120 * time.Second, // Allow enough time for broker queries and large responses
 		IdleTimeout:  120 * time.Second,
