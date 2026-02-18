@@ -48,9 +48,41 @@ export class BrokerClient {
   }
 
   /**
-   * Execute a tool call by routing to the MCP server
+   * Reset MCP client connection state so the next call will reconnect
+   */
+  private resetConnection(): void {
+    this.mcpClient = null;
+    this.mcpInitialized = false;
+    console.log("MCP client connection reset — will reconnect on next call");
+  }
+
+  /**
+   * Check if an error is a connection-level failure worth retrying
+   */
+  private isConnectionError(error: unknown): boolean {
+    if (!(error instanceof Error)) return false;
+    const msg = error.message.toLowerCase();
+    return (
+      msg.includes("econnrefused") ||
+      msg.includes("econnreset") ||
+      msg.includes("socket hang up") ||
+      msg.includes("fetch failed") ||
+      msg.includes("network error")
+    );
+  }
+
+  /**
+   * Execute a tool call by routing to the MCP server.
+   * On connection errors, resets state and retries once.
    */
   async executeTool(toolCall: ToolCall): Promise<ToolResult> {
+    return this.executeToolInner(toolCall, true);
+  }
+
+  private async executeToolInner(
+    toolCall: ToolCall,
+    allowRetry: boolean
+  ): Promise<ToolResult> {
     try {
       // Ensure MCP client is initialized
       await this.initializeMCPClient();
@@ -90,6 +122,16 @@ export class BrokerClient {
       // If we get here, return the raw result
       return { data: result };
     } catch (error) {
+      // On connection errors, reset and retry once
+      if (allowRetry && this.isConnectionError(error)) {
+        console.warn(
+          `Connection error calling MCP tool ${toolCall.name}, resetting and retrying:`,
+          error instanceof Error ? error.message : error
+        );
+        this.resetConnection();
+        return this.executeToolInner(toolCall, false);
+      }
+
       console.error(`Error calling MCP tool ${toolCall.name}:`, error);
       return {
         data: null,
