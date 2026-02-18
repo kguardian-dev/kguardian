@@ -1,5 +1,23 @@
 # Changelog
 
+## [1.3.0](https://github.com/kguardian-dev/kguardian/compare/mcp-server/v1.2.1...mcp-server/v1.3.0) (2026-02-17)
+
+
+### Features
+
+* overall improvements and uplift ([2f6aa21](https://github.com/kguardian-dev/kguardian/commit/2f6aa216a217412bba14126365a96c4db0e7df62))
+* overall improvements and uplift ([e7c223c](https://github.com/kguardian-dev/kguardian/commit/e7c223cd00147071eefb3285b110c75585a05a3c))
+
+
+### Bug Fixes
+
+* add logging lib and improve overall logging ([3c437f7](https://github.com/kguardian-dev/kguardian/commit/3c437f7d7f75e683ccf33b59ca2ff4379a64eeb1))
+* **deps:** update module github.com/modelcontextprotocol/go-sdk to v1.2.0 ([4be1189](https://github.com/kguardian-dev/kguardian/commit/4be11895b6f2a7a40bd2383915344b53103bd791))
+* **deps:** update module github.com/modelcontextprotocol/go-sdk to v1.2.0 ([c9977ed](https://github.com/kguardian-dev/kguardian/commit/c9977ed7cc7af6b24ab8602146cf133acf672eca))
+* **deps:** update module github.com/modelcontextprotocol/go-sdk to v1.3.0 ([#642](https://github.com/kguardian-dev/kguardian/issues/642)) ([48422f0](https://github.com/kguardian-dev/kguardian/commit/48422f078853e109b47f93812f38938eaf3ef6d5))
+* **deps:** update module github.com/sirupsen/logrus to v1.9.4 ([#611](https://github.com/kguardian-dev/kguardian/issues/611)) ([b09a37d](https://github.com/kguardian-dev/kguardian/commit/b09a37db79f4a439e8550b18d017c81c4b020216))
+* release-please ([ed7dcad](https://github.com/kguardian-dev/kguardian/commit/ed7dcadf1f09bd6d624e36c4a47f9e1de6805b58))
+
 ## [1.2.1](https://github.com/kguardian-dev/kguardian/compare/mcp-server/v1.2.0...mcp-server/v1.2.1) (2025-12-13)
 
 
