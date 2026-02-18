@@ -30,6 +30,17 @@ spec:
       serviceAccountName: {{ default "broker" .Values.broker.serviceAccount.name }}
       securityContext:
         {{- toYaml .Values.broker.podSecurityContext | nindent 8 }}
+      initContainers:
+        - name: wait-for-db
+          {{- if .Values.broker.initContainer.image.sha }}
+          image: "{{ .Values.broker.initContainer.image.repository }}@{{ .Values.broker.initContainer.image.sha }}"
+          {{- else }}
+          image: "{{ .Values.broker.initContainer.image.repository }}:{{ .Values.broker.initContainer.image.tag }}"
+          {{- end }}
+          imagePullPolicy: {{ .Values.broker.initContainer.image.pullPolicy }}
+          command: ["sh", "-c", "until nc -z {{ .Values.database.service.name }}.{{ include "kguardian.namespace" . }}.svc.cluster.local {{ .Values.database.container.port }}; do echo 'waiting for db'; sleep 2; done"]
+          securityContext:
+            {{- toYaml .Values.broker.initContainer.securityContext | nindent 12 }}
       containers:
         - name: broker
           securityContext:

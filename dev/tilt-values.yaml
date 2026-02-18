@@ -20,6 +20,9 @@ controller:
 broker:
   replicaCount: 1
   image: {}
+  initContainer:
+    image:
+      pullPolicy: IfNotPresent
   resources:
     limits:
       cpu: 250m

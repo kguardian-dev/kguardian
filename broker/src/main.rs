@@ -13,7 +13,7 @@ use telemetry::init_logging;
 mod telemetry;
 
 use diesel_migrations::{embed_migrations, EmbeddedMigrations, MigrationHarness};
-use tracing::info;
+use tracing::{info, warn};
 pub const MIGRATIONS: EmbeddedMigrations = embed_migrations!("./db/migrations");
 
 type DB = diesel::pg::Pg;
@@ -32,13 +32,39 @@ async fn main() -> Result<(), std::io::Error> {
     let pool = r2d2::Pool::builder()
         .build(manager)
         .expect("Failed to create pool.");
-    // RUN the migration schema
-    let mut x = pool.get().unwrap();
-    let r = run_migrations(&mut x);
-    if let Err(e) = r {
-        panic!("DB Set up failed {}", e);
-    } else {
-        info!("DB setup success");
+    // RUN the migration schema with retries
+    let max_retries = 5;
+    for attempt in 1..=max_retries {
+        match pool.get() {
+            Ok(mut conn) => match run_migrations(&mut conn) {
+                Ok(()) => {
+                    info!("DB setup success");
+                    break;
+                }
+                Err(e) => {
+                    if attempt == max_retries {
+                        panic!("DB migration failed after {} attempts: {}", max_retries, e);
+                    }
+                    warn!(
+                        "DB migration attempt {}/{} failed: {}. Retrying in 2s...",
+                        attempt, max_retries, e
+                    );
+                }
+            },
+            Err(e) => {
+                if attempt == max_retries {
+                    panic!(
+                        "Failed to get DB connection after {} attempts: {}",
+                        max_retries, e
+                    );
+                }
+                warn!(
+                    "DB connection attempt {}/{} failed: {}. Retrying in 2s...",
+                    attempt, max_retries, e
+                );
+            }
+        }
+        std::thread::sleep(std::time::Duration::from_secs(2));
     }
     HttpServer::new(move || {
         let cors = Cors::default()
@@ -72,8 +98,15 @@ async fn main() -> Result<(), std::io::Error> {
 }
 
 #[get("/health")]
-pub async fn health_check() -> HttpResponse {
-    HttpResponse::Ok()
-        .content_type("application/json")
-        .body("Healthy!")
+pub async fn health_check(
+    pool: web::Data<r2d2::Pool<r2d2::ConnectionManager<diesel::PgConnection>>>,
+) -> HttpResponse {
+    match pool.get() {
+        Ok(_) => HttpResponse::Ok()
+            .content_type("application/json")
+            .body("Healthy!"),
+        Err(_) => HttpResponse::ServiceUnavailable()
+            .content_type("application/json")
+            .body("Database unavailable"),
+    }
 }
