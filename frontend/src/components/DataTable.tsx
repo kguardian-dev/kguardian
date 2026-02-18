@@ -1,10 +1,10 @@
 import React, { useState, useEffect, useMemo, useCallback } from 'react';
-import type { PodNodeData } from '../types';
+import type { PodInfo, PodNodeData } from '../types';
 import { ArrowRight, Activity, ChevronDown, ChevronRight, Filter } from 'lucide-react';
 
 interface DataTableProps {
   selectedPod: PodNodeData | null;
-  allPods: PodNodeData[];
+  allPodsLookup: PodInfo[];
 }
 
 interface TrafficIdentity {
@@ -16,7 +16,7 @@ interface TrafficIdentity {
   isExternal: boolean;
 }
 
-const DataTable: React.FC<DataTableProps> = ({ selectedPod, allPods }) => {
+const DataTable: React.FC<DataTableProps> = ({ selectedPod, allPodsLookup }) => {
   const [expandedSyscalls, setExpandedSyscalls] = useState<Set<number>>(new Set());
   const [isTrafficExpanded, setIsTrafficExpanded] = useState(true);
   const [isSyscallsExpanded, setIsSyscallsExpanded] = useState(true);
@@ -86,49 +86,38 @@ const DataTable: React.FC<DataTableProps> = ({ selectedPod, allPods }) => {
   const [trafficPage, setTrafficPage] = useState(0);
   const TRAFFIC_PAGE_SIZE = 100; // Show 100 rows at a time
 
-  // Create lookup maps from allPods (memoized to avoid recalculation)
+  // Create lookup maps from allPodsLookup (all namespaces) for cross-namespace resolution
   const podLookupMaps = useMemo(() => {
-    const byIp = new Map<string, PodNodeData>();
-    const byName = new Map<string, PodNodeData>();
+    const byIp = new Map<string, PodInfo>();
+    const byName = new Map<string, PodInfo>();
 
-    allPods.forEach((pod) => {
-      // Map by IP for backward compatibility
-      if (pod.pod.pod_ip) {
-        byIp.set(pod.pod.pod_ip, pod);
-      }
-      // Map by name - more reliable for traffic lookups
-      if (pod.pod.pod_name) {
-        byName.set(pod.pod.pod_name, pod);
-      }
-      // Map all pods in the identity group
-      pod.pods?.forEach((p) => {
-        if (p.pod_ip) byIp.set(p.pod_ip, pod);
-        if (p.pod_name) byName.set(p.pod_name, pod);
-      });
+    allPodsLookup.forEach((pod) => {
+      if (pod.pod_ip) byIp.set(pod.pod_ip, pod);
+      if (pod.pod_name) byName.set(pod.pod_name, pod);
     });
 
     return { byIp, byName };
-  }, [allPods]);
+  }, [allPodsLookup]);
 
   // Synchronous identity resolution using in-memory lookups only
-  // No API calls, no state updates, no memory leaks
+  // Uses allPodsLookup (all namespaces) so cross-namespace traffic is correctly identified
   const resolveTrafficIdentity = useCallback((ip: string | null): TrafficIdentity => {
     if (!ip) {
       return { isExternal: true };
     }
 
-    // Try to find pod by IP in our lookup map
-    const podData = podLookupMaps.byIp.get(ip);
-    if (podData) {
+    // Try to find pod by IP in our lookup map (spans all namespaces)
+    const podInfo = podLookupMaps.byIp.get(ip);
+    if (podInfo) {
       return {
-        podName: podData.pod.pod_name,
-        podIdentity: podData.pod.pod_identity || undefined,
-        podNamespace: podData.pod.pod_namespace || undefined,
+        podName: podInfo.pod_name,
+        podIdentity: podInfo.pod_identity || undefined,
+        podNamespace: podInfo.pod_namespace || undefined,
         isExternal: false,
       };
     }
 
-    // If not found in our pods, it's external (service or internet)
+    // If not found in any namespace, it's truly external
     return { isExternal: true };
   }, [podLookupMaps]);
 
