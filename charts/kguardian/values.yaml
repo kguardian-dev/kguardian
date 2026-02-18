@@ -140,6 +140,18 @@ broker:
     tag: "latest"
     # -- Overrides the image tag using SHA digest
     sha: ""
+  initContainer:
+    image:
+      # -- Broker init container image repository
+      repository: busybox
+      # -- Broker init container image pull policy
+      pullPolicy: Always
+      # -- Broker init container image tag
+      tag: latest
+      # -- Overrides the init container image tag using SHA digest
+      sha: ""
+    # -- Broker init container security context
+    securityContext: {}
 
   container:
     # -- Broker container port

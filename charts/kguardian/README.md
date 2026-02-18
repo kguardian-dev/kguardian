@@ -85,6 +85,11 @@ The following table lists the configurable parameters of the kguardian chart and
 | broker.image.sha | string | `""` | Overrides the image tag using SHA digest |
 | broker.image.tag | string | `"latest"` | Broker version tag. Use component version (e.g., "v1.0.0") or "latest" |
 | broker.imagePullSecrets | list | `[]` | List of image pull secrets for private registries |
+| broker.initContainer.image.pullPolicy | string | `"Always"` | Broker init container image pull policy |
+| broker.initContainer.image.repository | string | `"busybox"` | Broker init container image repository |
+| broker.initContainer.image.sha | string | `""` | Overrides the init container image tag using SHA digest |
+| broker.initContainer.image.tag | string | `"latest"` | Broker init container image tag |
+| broker.initContainer.securityContext | object | `{}` | Broker init container security context |
 | broker.nameOverride | string | `""` | Override the name of the broker resources |
 | broker.nodeSelector | object | `{"kubernetes.io/os":"linux"}` | Node labels for the kguardian broker pod assignment |
 | broker.podAnnotations | object | `{}` | Annotations to add to broker pods |
