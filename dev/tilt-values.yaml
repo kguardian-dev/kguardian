@@ -1,0 +1,81 @@
+# Helm values override for Tilt local development.
+# Used automatically by the Tiltfile — do not apply manually.
+
+controller:
+  image: {}
+  # Include the dev namespace so the controller ignores its own traffic
+  excludedNamespaces:
+    - kguardian
+    - kube-system
+    - default
+  # Lower resource requests for local dev
+  resources:
+    limits:
+      cpu: 250m
+      memory: 256Mi
+    requests:
+      cpu: 50m
+      memory: 128Mi
+
+broker:
+  replicaCount: 1
+  image: {}
+  resources:
+    limits:
+      cpu: 250m
+      memory: 256Mi
+    requests:
+      cpu: 50m
+      memory: 128Mi
+
+database:
+  image:
+    pullPolicy: IfNotPresent
+    tag: "16-alpine"
+  # Relax security context for local dev — postgres entrypoint needs
+  # to chmod data directories and run as the postgres user (UID 70 on alpine).
+  podSecurityContext:
+    fsGroup: 70
+    runAsUser: 70
+    runAsGroup: 70
+    fsGroupChangePolicy: OnRootMismatch
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 70
+    allowPrivilegeEscalation: false
+    readOnlyRootFilesystem: false
+  resources:
+    limits:
+      cpu: 250m
+      memory: 256Mi
+    requests:
+      cpu: 50m
+      memory: 128Mi
+
+# Frontend runs locally via Vite dev server — no in-cluster pod needed
+frontend:
+  replicaCount: 0
+
+llmBridge:
+  enabled: true
+  replicaCount: 1
+  image: {}
+  resources:
+    limits:
+      cpu: 250m
+      memory: 256Mi
+    requests:
+      cpu: 50m
+      memory: 128Mi
+
+mcpServer:
+  enabled: true
+  replicaCount: 1
+  image: {}
+  resources:
+    limits:
+      cpu: 100m
+      memory: 128Mi
+    requests:
+      cpu: 25m
+      memory: 64Mi

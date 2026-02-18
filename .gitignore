@@ -23,3 +23,9 @@ go.work
 # rust target
 **/target/**
 *.tgz
+
+# Tilt local dev
+tilt-settings.yaml
+.tilt/
+tilt_modules/
+localbin/
