@@ -229,6 +229,8 @@ function App() {
         isOpen={isAIAssistantOpen}
         onClose={handleAIClose}
         onLayoutChange={handleAILayoutChange}
+        namespace={namespace}
+        podNames={pods.map(p => p.label)}
       />
 
       {/* Network Policy Editor Modal */}

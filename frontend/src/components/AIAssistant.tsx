@@ -16,11 +16,13 @@ interface AIAssistantProps {
   isOpen: boolean;
   onClose: () => void;
   onLayoutChange?: (isSidePanel: boolean, isCollapsed: boolean, width?: number) => void;
+  namespace?: string;
+  podNames?: string[];
 }
 
 type ViewMode = 'modal' | 'side-panel';
 
-const AIAssistant: React.FC<AIAssistantProps> = ({ isOpen, onClose, onLayoutChange }) => {
+const AIAssistant: React.FC<AIAssistantProps> = ({ isOpen, onClose, onLayoutChange, namespace, podNames }) => {
   const [messages, setMessages] = useState<Message[]>([]);
   const [inputValue, setInputValue] = useState('');
   const [isTyping, setIsTyping] = useState(false);
@@ -72,8 +74,17 @@ const AIAssistant: React.FC<AIAssistantProps> = ({ isOpen, onClose, onLayoutChan
         content: msg.content,
       }));
 
+      // Prepend viewing context on the first message of a conversation
+      let messageToSend = currentMessage;
+      if (messages.length === 0 && namespace) {
+        const podList = podNames && podNames.length > 0
+          ? `, with pods: ${podNames.join(', ')}`
+          : '';
+        messageToSend = `[Context: User is viewing namespace "${namespace}"${podList}]\n\n${currentMessage}`;
+      }
+
       // Call the real AI API with conversation history
-      const response = await sendChatMessage(currentMessage, history);
+      const response = await sendChatMessage(messageToSend, history);
 
       const assistantMessage: Message = {
         id: (Date.now() + 1).toString(),
