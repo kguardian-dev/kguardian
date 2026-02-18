@@ -5,7 +5,10 @@ import { BrokerClient } from "../brokerClient.js";
 
 interface OpenAIMessage {
   role: string;
-  content: string;
+  content: string | null;
+  tool_calls?: any[];
+  tool_call_id?: string;
+  name?: string;
 }
 
 interface OpenAITool {
@@ -16,6 +19,8 @@ interface OpenAITool {
     parameters: any;
   };
 }
+
+const MAX_TOOL_ROUNDS = 10;
 
 export async function callOpenAI(
   request: ChatRequest,
@@ -58,35 +63,46 @@ export async function callOpenAI(
     })
   );
 
-  const payload = {
-    model,
-    messages,
-    tools,
-    tool_choice: "auto",
+  const headers = {
+    Authorization: `Bearer ${apiKey}`,
+    "Content-Type": "application/json",
   };
 
-  let response;
-  try {
-    response = await axios.post(
-      "https://api.openai.com/v1/chat/completions",
-      payload,
-      {
-        headers: {
-          Authorization: `Bearer ${apiKey}`,
-          "Content-Type": "application/json",
-        },
-      }
-    );
-  } catch (error: any) {
-    console.error("OpenAI API Error:", error.response?.data || error.message);
-    throw new Error(`OpenAI API error: ${error.response?.data?.error?.message || error.message}`);
-  }
+  // Multi-round tool calling loop
+  for (let round = 0; round < MAX_TOOL_ROUNDS; round++) {
+    let response;
+    try {
+      response = await axios.post(
+        "https://api.openai.com/v1/chat/completions",
+        { model, messages, tools, tool_choice: "auto" },
+        { headers }
+      );
+    } catch (error: any) {
+      console.error("OpenAI API Error:", error.response?.data || error.message);
+      throw new Error(`OpenAI API error: ${error.response?.data?.error?.message || error.message}`);
+    }
 
-  const choice = response.data.choices[0];
-  const message = choice.message;
+    const choice = response.data.choices[0];
+    const message = choice.message;
 
-  // Handle tool calls if present
-  if (message.tool_calls && message.tool_calls.length > 0) {
+    // No tool calls — return final text response
+    if (!message.tool_calls || message.tool_calls.length === 0) {
+      return {
+        message: message.content,
+        provider: LLMProvider.OPENAI,
+        model: response.data.model,
+        conversationId: request.conversationId,
+      };
+    }
+
+    // Append assistant message with tool calls
+    messages.push({
+      role: message.role,
+      content: message.content || null,
+      tool_calls: message.tool_calls,
+    });
+
+    // Execute tool calls and append results
     const toolResults = await Promise.all(
       message.tool_calls.map(async (toolCall: any) => {
         const result = await brokerClient.executeTool({
@@ -94,7 +110,6 @@ export async function callOpenAI(
           arguments: JSON.parse(toolCall.function.arguments),
         });
 
-        // Format content - OpenAI requires string content for tool messages
         let content: string;
         if (result.error) {
           content = `Error: ${result.error}`;
@@ -113,48 +128,20 @@ export async function callOpenAI(
       })
     );
 
-    // Make a second request with tool results
-    // Ensure assistant message has content (even if null for tool_calls)
-    const assistantMessage = {
-      role: message.role,
-      content: message.content || null,
-      tool_calls: message.tool_calls,
-    };
-
-    const followUpMessages = [
-      ...messages,
-      assistantMessage,
-      ...toolResults,
-    ];
-
-    const followUpResponse = await axios.post(
-      "https://api.openai.com/v1/chat/completions",
-      {
-        model,
-        messages: followUpMessages,
-        tools,
-      },
-      {
-        headers: {
-          Authorization: `Bearer ${apiKey}`,
-          "Content-Type": "application/json",
-        },
-      }
-    );
-
-    const finalMessage = followUpResponse.data.choices[0].message.content;
-    return {
-      message: finalMessage,
-      provider: LLMProvider.OPENAI,
-      model: response.data.model,
-      conversationId: request.conversationId,
-    };
+    messages.push(...(toolResults as OpenAIMessage[]));
   }
 
+  // Max rounds reached — make one final request without tools to get a summary
+  const finalResponse = await axios.post(
+    "https://api.openai.com/v1/chat/completions",
+    { model, messages },
+    { headers }
+  );
+
   return {
-    message: message.content,
+    message: finalResponse.data.choices[0].message.content,
     provider: LLMProvider.OPENAI,
-    model: response.data.model,
+    model: finalResponse.data.model,
     conversationId: request.conversationId,
   };
 }

@@ -3,6 +3,16 @@ import type { ChatRequest, ChatResponse } from "../types/index.js";
 import { LLMProvider } from "../types/index.js";
 import { BrokerClient } from "../brokerClient.js";
 
+interface CopilotMessage {
+  role: string;
+  content: string | null;
+  tool_calls?: any[];
+  tool_call_id?: string;
+  name?: string;
+}
+
+const MAX_TOOL_ROUNDS = 10;
+
 // GitHub Copilot uses OpenAI-compatible API
 export async function callCopilot(
   request: ChatRequest,
@@ -17,11 +27,21 @@ export async function callCopilot(
   const systemPrompt =
     request.systemPrompt || BrokerClient.getSystemPrompt();
 
-  // Build messages
-  const messages = [
+  // Build messages with history
+  const messages: CopilotMessage[] = [
     { role: "system", content: systemPrompt },
-    { role: "user", content: request.message },
   ];
+
+  // Add conversation history if provided
+  if (request.history && request.history.length > 0) {
+    messages.push(...request.history.map(msg => ({
+      role: msg.role,
+      content: msg.content,
+    })));
+  }
+
+  // Add current user message
+  messages.push({ role: "user", content: request.message });
 
   // Build tools (OpenAI format)
   const tools = BrokerClient.getToolDefinitions().map((tool) => ({
@@ -33,75 +53,79 @@ export async function callCopilot(
     },
   }));
 
-  const payload = {
-    model,
-    messages,
-    tools,
-    tool_choice: "auto",
+  const headers = {
+    Authorization: `Bearer ${apiKey}`,
+    "Content-Type": "application/json",
   };
 
-  const response = await axios.post(
-    "https://api.githubcopilot.com/chat/completions",
-    payload,
-    {
-      headers: {
-        Authorization: `Bearer ${apiKey}`,
-        "Content-Type": "application/json",
-      },
+  // Multi-round tool calling loop
+  for (let round = 0; round < MAX_TOOL_ROUNDS; round++) {
+    const response = await axios.post(
+      "https://api.githubcopilot.com/chat/completions",
+      { model, messages, tools, tool_choice: "auto" },
+      { headers }
+    );
+
+    const choice = response.data.choices[0];
+    const message = choice.message;
+
+    // No tool calls — return final text response
+    if (!message.tool_calls || message.tool_calls.length === 0) {
+      return {
+        message: message.content,
+        provider: LLMProvider.COPILOT,
+        model: response.data.model,
+        conversationId: request.conversationId,
+      };
     }
-  );
 
-  const choice = response.data.choices[0];
-  const message = choice.message;
+    // Append assistant message with tool calls
+    messages.push({
+      role: message.role,
+      content: message.content || null,
+      tool_calls: message.tool_calls,
+    });
 
-  // Handle tool calls if present
-  if (message.tool_calls && message.tool_calls.length > 0) {
+    // Execute tool calls and append results
     const toolResults = await Promise.all(
       message.tool_calls.map(async (toolCall: any) => {
         const result = await brokerClient.executeTool({
           name: toolCall.function.name,
           arguments: JSON.parse(toolCall.function.arguments),
         });
+
+        let content: string;
+        if (result.error) {
+          content = `Error: ${result.error}`;
+        } else if (result.data) {
+          content = typeof result.data === 'string' ? result.data : JSON.stringify(result.data);
+        } else {
+          content = 'No data returned';
+        }
+
         return {
           tool_call_id: toolCall.id,
           role: "tool",
           name: toolCall.function.name,
-          content: result.error || JSON.stringify(result.data),
+          content,
         };
       })
     );
 
-    // Make a second request with tool results
-    const followUpMessages = [...messages, message, ...toolResults];
-
-    const followUpResponse = await axios.post(
-      "https://api.githubcopilot.com/chat/completions",
-      {
-        model,
-        messages: followUpMessages,
-        tools,
-      },
-      {
-        headers: {
-          Authorization: `Bearer ${apiKey}`,
-          "Content-Type": "application/json",
-        },
-      }
-    );
-
-    const finalMessage = followUpResponse.data.choices[0].message.content;
-    return {
-      message: finalMessage,
-      provider: LLMProvider.COPILOT,
-      model: response.data.model,
-      conversationId: request.conversationId,
-    };
+    messages.push(...(toolResults as CopilotMessage[]));
   }
 
+  // Max rounds reached — make one final request without tools
+  const finalResponse = await axios.post(
+    "https://api.githubcopilot.com/chat/completions",
+    { model, messages },
+    { headers }
+  );
+
   return {
-    message: message.content,
+    message: finalResponse.data.choices[0].message.content,
     provider: LLMProvider.COPILOT,
-    model: response.data.model,
+    model: finalResponse.data.model,
     conversationId: request.conversationId,
   };
 }

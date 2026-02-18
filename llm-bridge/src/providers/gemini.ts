@@ -3,6 +3,8 @@ import type { ChatRequest, ChatResponse } from "../types/index.js";
 import { LLMProvider } from "../types/index.js";
 import { BrokerClient } from "../brokerClient.js";
 
+const MAX_TOOL_ROUNDS = 10;
+
 export async function callGemini(
   request: ChatRequest,
   brokerClient: BrokerClient
@@ -25,38 +27,70 @@ export async function callGemini(
     })
   );
 
-  // Combine system prompt with user message
-  const userMessage = `${systemPrompt}\n\nUser: ${request.message}`;
+  // Build contents with history
+  const contents: any[] = [];
 
-  const payload = {
-    contents: [
-      {
-        role: "user",
-        parts: [{ text: userMessage }],
-      },
-    ],
-    tools: [{ functionDeclarations }],
-  };
+  // Add conversation history if provided
+  if (request.history && request.history.length > 0) {
+    for (const msg of request.history) {
+      if (msg.role === 'system') continue;
+      contents.push({
+        role: msg.role === 'assistant' ? 'model' : 'user',
+        parts: [{ text: msg.content }],
+      });
+    }
+  }
 
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`;
-
-  const response = await axios.post(url, payload, {
-    headers: {
-      "Content-Type": "application/json",
-      "x-goog-api-key": apiKey,
-    },
+  // Add current user message
+  contents.push({
+    role: "user",
+    parts: [{ text: request.message }],
   });
 
-  const candidate = response.data.candidates[0];
-  const content = candidate.content;
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`;
+  const headers = {
+    "Content-Type": "application/json",
+    "x-goog-api-key": apiKey,
+  };
 
-  // Check for function calls
-  const functionCalls = content.parts.filter(
-    (part: any) => part.functionCall
-  );
+  // Multi-round tool calling loop
+  for (let round = 0; round < MAX_TOOL_ROUNDS; round++) {
+    const response = await axios.post(
+      url,
+      {
+        systemInstruction: { parts: [{ text: systemPrompt }] },
+        contents,
+        tools: [{ functionDeclarations }],
+      },
+      { headers }
+    );
 
-  if (functionCalls.length > 0) {
-    // Execute function calls
+    const candidate = response.data.candidates[0];
+    const content = candidate.content;
+
+    // Check for function calls
+    const functionCalls = content.parts.filter(
+      (part: any) => part.functionCall
+    );
+
+    if (functionCalls.length === 0) {
+      // No function calls — return text response
+      const textPart = content.parts.find((part: any) => part.text);
+      return {
+        message: textPart?.text || "No response from Gemini",
+        provider: LLMProvider.GEMINI,
+        model,
+        conversationId: request.conversationId,
+      };
+    }
+
+    // Append model response with function calls
+    contents.push({
+      role: "model",
+      parts: content.parts,
+    });
+
+    // Execute function calls and build responses
     const functionResponses = await Promise.all(
       functionCalls.map(async (part: any) => {
         const result = await brokerClient.executeTool({
@@ -74,47 +108,28 @@ export async function callGemini(
       })
     );
 
-    // Make a follow-up request with function results
-    const followUpPayload = {
-      contents: [
-        {
-          role: "user",
-          parts: [{ text: userMessage }],
-        },
-        {
-          role: "model",
-          parts: content.parts,
-        },
-        {
-          role: "user",
-          parts: functionResponses,
-        },
-      ],
-      tools: [{ functionDeclarations }],
-    };
-
-    const followUpResponse = await axios.post(url, followUpPayload, {
-      headers: {
-        "Content-Type": "application/json",
-        "x-goog-api-key": apiKey,
-      },
+    // Append function responses as user turn
+    contents.push({
+      role: "user",
+      parts: functionResponses,
     });
-
-    const finalCandidate = followUpResponse.data.candidates[0];
-    const textPart = finalCandidate.content.parts.find(
-      (part: any) => part.text
-    );
-
-    return {
-      message: textPart?.text || "No response from Gemini",
-      provider: LLMProvider.GEMINI,
-      model,
-      conversationId: request.conversationId,
-    };
   }
 
-  // No function calls, return text response
-  const textPart = content.parts.find((part: any) => part.text);
+  // Max rounds reached — request final response without tools
+  const finalResponse = await axios.post(
+    url,
+    {
+      systemInstruction: { parts: [{ text: systemPrompt }] },
+      contents,
+    },
+    { headers }
+  );
+
+  const finalCandidate = finalResponse.data.candidates[0];
+  const textPart = finalCandidate.content.parts.find(
+    (part: any) => part.text
+  );
+
   return {
     message: textPart?.text || "No response from Gemini",
     provider: LLMProvider.GEMINI,
