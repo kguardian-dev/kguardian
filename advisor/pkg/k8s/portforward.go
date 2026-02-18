@@ -23,8 +23,10 @@ var (
 )
 
 // PortForward sets up a port-forwarding from the local machine to the given pod.
-// It runs the port-forwarding operation in a Goroutine and returns a channel to stop the port-forwarding
-func PortForward(config *Config) (chan struct{}, chan error, chan bool) {
+// It runs the port-forwarding operation in a Goroutine and returns a channel to stop the port-forwarding.
+// brokerNamespace and brokerService override the defaults when non-empty.
+// Priority: flag (parameter) > env var (KUBE_GUARDIAN_NAMESPACE) > hardcoded default.
+func PortForward(config *Config, brokerNamespace, brokerService string) (chan struct{}, chan error, chan bool) {
 	stopChan := make(chan struct{}, 1)
 	errChan := make(chan error, 1)
 	done := make(chan bool)
@@ -53,43 +55,38 @@ func PortForward(config *Config) (chan struct{}, chan error, chan bool) {
 	go func() {
 		var err error
 
-		// Try to find the namespace from environment first
-		actualNamespace := os.Getenv("KUBE_GUARDIAN_NAMESPACE")
+		// Resolve namespace: flag > env > default
+		actualNamespace := brokerNamespace
 		if actualNamespace == "" {
-			// Use the hardcoded value as fallback
+			actualNamespace = os.Getenv("KUBE_GUARDIAN_NAMESPACE")
+		}
+		if actualNamespace == "" {
 			actualNamespace = serviceNamespace
 		}
 
-		log.Debug().Msgf("Looking for broker service in namespace: %s", actualNamespace)
+		// Resolve service name: flag > default
+		actualService := brokerService
+		if actualService == "" {
+			actualService = serviceName
+		}
+
+		log.Debug().Msgf("Looking for broker service %s in namespace: %s", actualService, actualNamespace)
 
 		// Use a context with timeout for all operations
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
 
 		// Fetch the service
-		service, err := config.Clientset.CoreV1().Services(actualNamespace).Get(ctx, serviceName, metav1.GetOptions{})
+		service, err := config.Clientset.CoreV1().Services(actualNamespace).Get(ctx, actualService, metav1.GetOptions{})
 		if err != nil {
-			// Try fallback to alternative namespace
-			if actualNamespace != "kube-system" {
-				log.Warn().Err(err).Msgf("Service not found in %s, trying kube-system as fallback", actualNamespace)
-				service, err = config.Clientset.CoreV1().Services("kube-system").Get(ctx, serviceName, metav1.GetOptions{})
-				if err != nil {
-					log.Error().Err(err).Msg("Error collecting broker service in fallback namespace kube-system")
-					errChan <- fmt.Errorf("failed to find kguardian broker service in any namespace: %w", err)
-					close(done)
-					return
-				}
-				actualNamespace = "kube-system"
-			} else {
-				log.Error().Err(err).Msgf("Error collecting broker service in namespace %s", actualNamespace)
-				errChan <- fmt.Errorf("failed to find kguardian broker service: %w", err)
-				close(done)
-				return
-			}
+			log.Error().Err(err).Msgf("Error collecting broker service %s in namespace %s", actualService, actualNamespace)
+			errChan <- fmt.Errorf("failed to find kguardian broker service %s/%s: %w", actualNamespace, actualService, err)
+			close(done)
+			return
 		}
 
 		if len(service.Spec.Selector) == 0 {
-			err := fmt.Errorf("service %s/%s has no selectors", actualNamespace, serviceName)
+			err := fmt.Errorf("service %s/%s has no selectors", actualNamespace, actualService)
 			log.Error().Msg(err.Error())
 			errChan <- err
 			close(done)
@@ -116,7 +113,7 @@ func PortForward(config *Config) (chan struct{}, chan error, chan bool) {
 
 		if len(pods.Items) == 0 {
 			err := fmt.Errorf("no pods found for service %s/%s with selector %s",
-				actualNamespace, serviceName, labelSelectorString)
+				actualNamespace, actualService, labelSelectorString)
 			log.Error().Msg(err.Error())
 			errChan <- err
 			close(done)
@@ -151,7 +148,7 @@ func PortForward(config *Config) (chan struct{}, chan error, chan bool) {
 		}
 
 		if !foundReadyPod {
-			err := fmt.Errorf("no ready pods found for service %s/%s", actualNamespace, serviceName)
+			err := fmt.Errorf("no ready pods found for service %s/%s", actualNamespace, actualService)
 			log.Error().Msg(err.Error())
 			errChan <- err
 			close(done)

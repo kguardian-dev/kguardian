@@ -15,6 +15,8 @@ import (
 var (
 	kubeConfigFlags *genericclioptions.ConfigFlags
 	debug           bool // To store the value of the --debug flag
+	brokerNamespace string
+	brokerService   string
 )
 
 func init() {
@@ -34,6 +36,10 @@ func init() {
 
 	// Add debug flag to rootCmd so it's available for all sub-commands
 	rootCmd.PersistentFlags().BoolVar(&debug, "debug", false, "sets log level to debug")
+
+	// Add broker override flags
+	rootCmd.PersistentFlags().StringVar(&brokerNamespace, "broker-namespace", "", "Namespace where the kguardian broker is installed (default \"kguardian\")")
+	rootCmd.PersistentFlags().StringVar(&brokerService, "broker-service", "", "Name of the kguardian broker service (default \"broker\")")
 
 	// Add version flag to rootCmd
 	rootCmd.Flags().BoolP("version", "v", false, "print version information and exit")
