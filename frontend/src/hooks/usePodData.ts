@@ -1,9 +1,10 @@
 import { useState, useEffect, useCallback } from 'react';
-import type { PodNodeData } from '../types';
+import type { PodInfo, PodNodeData } from '../types';
 import { apiClient } from '../services/api';
 
 export const usePodData = (namespace: string) => {
   const [pods, setPods] = useState<PodNodeData[]>([]);
+  const [allPodsLookup, setAllPodsLookup] = useState<PodInfo[]>([]);
   const [loading, setLoading] = useState<boolean>(true);
   const [error, setError] = useState<string | null>(null);
 
@@ -14,6 +15,9 @@ export const usePodData = (namespace: string) => {
     try {
       // Fetch all pods from broker
       const allPods = await apiClient.getAllPods();
+
+      // Keep all active pods for cross-namespace IP resolution
+      setAllPodsLookup(allPods.filter((pod) => !pod.is_dead));
 
       // Filter by namespace and only show active pods (is_dead = false)
       const filteredPods = allPods.filter(
@@ -86,6 +90,7 @@ export const usePodData = (namespace: string) => {
 
   return {
     pods,
+    allPodsLookup,
     loading,
     error,
     togglePodExpansion,

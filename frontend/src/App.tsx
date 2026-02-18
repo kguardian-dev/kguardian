@@ -30,7 +30,7 @@ function App() {
   const [isResizing, setIsResizing] = useState(false);
 
   const { namespaces } = useNamespaces();
-  const { pods, loading, error, togglePodExpansion, refreshData } = usePodData(namespace);
+  const { pods, allPodsLookup, loading, error, togglePodExpansion, refreshData } = usePodData(namespace);
 
   // Calculate the right padding for content when AI panel is docked (in pixels)
   const contentPaddingRightPx = aiSidePanel.isSidePanel
@@ -213,7 +213,7 @@ function App() {
               className="border-t border-hubble-border bg-hubble-dark overflow-hidden"
               style={{ height: `${tableHeight}px` }}
             >
-              <DataTable selectedPod={selectedPod} allPods={pods} />
+              <DataTable selectedPod={selectedPod} allPodsLookup={allPodsLookup} />
             </div>
           </>
         )}
