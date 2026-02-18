@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.3.1](https://github.com/kguardian-dev/kguardian/compare/mcp-server/v1.3.0...mcp-server/v1.3.1) (2026-02-18)
+
+
+### Bug Fixes
+
+* **mcp-server:** add health endpoint for Kubernetes probes ([51bcdce](https://github.com/kguardian-dev/kguardian/commit/51bcdceff6c9fe5d33cf3d1fd57f86211887f7c2))
+* **mcp-server:** return raw JSON in tool responses ([9e39a74](https://github.com/kguardian-dev/kguardian/commit/9e39a746862bc33b2e9cec156357b86d897b9809))
+
 ## [1.3.0](https://github.com/kguardian-dev/kguardian/compare/mcp-server/v1.2.1...mcp-server/v1.3.0) (2026-02-17)
 
 
