@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.6.1](https://github.com/kguardian-dev/kguardian/compare/broker/v1.6.0...broker/v1.6.1) (2026-02-18)
+
+
+### Bug Fixes
+
+* **broker:** add DB readiness gate and migration retries ([#661](https://github.com/kguardian-dev/kguardian/issues/661)) ([3543a63](https://github.com/kguardian-dev/kguardian/commit/3543a63950a316c13782a055f52094c0d67339a5))
+
 ## [1.6.0](https://github.com/kguardian-dev/kguardian/compare/broker/v1.5.0...broker/v1.6.0) (2025-12-20)
 
 
