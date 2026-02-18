@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.8.1](https://github.com/kguardian-dev/kguardian/compare/chart/v1.8.0...chart/v1.8.1) (2026-02-18)
+
+
+### Bug Fixes
+
+* **mcp-server:** add health endpoint for Kubernetes probes ([51bcdce](https://github.com/kguardian-dev/kguardian/commit/51bcdceff6c9fe5d33cf3d1fd57f86211887f7c2))
+
 ## [1.8.0](https://github.com/kguardian-dev/kguardian/compare/chart/v1.7.0...chart/v1.8.0) (2026-02-17)
 
 
