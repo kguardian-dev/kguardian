@@ -1,5 +1,18 @@
 # Changelog
 
+## [1.7.0](https://github.com/kguardian-dev/kguardian/compare/frontend/v1.6.3...frontend/v1.7.0) (2026-02-18)
+
+
+### Features
+
+* **frontend:** pass namespace and pod context to AI assistant ([b41b5f6](https://github.com/kguardian-dev/kguardian/commit/b41b5f68b9000c28735a8d0815375c441ba4a777))
+* **frontend:** render AI responses as markdown ([61cc613](https://github.com/kguardian-dev/kguardian/commit/61cc6136cd31c689707c4667a8ecb3884096c086))
+
+
+### Bug Fixes
+
+* **frontend:** resolve cross-namespace traffic incorrectly shown as external ([01ab0ea](https://github.com/kguardian-dev/kguardian/commit/01ab0ea9c3d8ec9763e786173b32b5f33f3a524b))
+
 ## [1.6.3](https://github.com/kguardian-dev/kguardian/compare/frontend/v1.6.2...frontend/v1.6.3) (2026-02-17)
 
 
