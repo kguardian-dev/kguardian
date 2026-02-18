@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.3.0](https://github.com/kguardian-dev/kguardian/compare/advisor/v1.2.0...advisor/v1.3.0) (2026-02-18)
+
+
+### Features
+
+* **advisor:** add --broker-namespace and --broker-service CLI flags ([8c5f945](https://github.com/kguardian-dev/kguardian/commit/8c5f945cc9461a0c1eb63b2f59b0ce4c86b62e3d))
+
 ## [1.2.0](https://github.com/kguardian-dev/kguardian/compare/advisor/v1.1.2...advisor/v1.2.0) (2026-02-17)
 
 
