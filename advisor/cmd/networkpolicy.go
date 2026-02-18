@@ -81,7 +81,7 @@ var networkPolicyCmd = &cobra.Command{
 		}
 
 		log.Debug().Msg("Starting port forwarding")
-		stopChan, errChan, done := k8s.PortForward(config)
+		stopChan, errChan, done := k8s.PortForward(config, brokerNamespace, brokerService)
 		defer close(stopChan) // Ensure port forwarding is stopped when command finishes
 
 		// Wait for port forwarding to be ready or error

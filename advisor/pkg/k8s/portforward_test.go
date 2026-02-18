@@ -12,7 +12,7 @@ import (
 func TestPortForward(t *testing.T) {
 	// Test basic validation failures
 	// Test nil config
-	stopChan, errChan, done := PortForward(nil)
+	stopChan, errChan, done := PortForward(nil, "", "")
 	select {
 	case err := <-errChan:
 		assert.Error(t, err)
@@ -28,7 +28,7 @@ func TestPortForward(t *testing.T) {
 		Clientset: nil,
 		Config:    &rest.Config{},
 	}
-	stopChan, errChan, done = PortForward(nilClientConfig)
+	stopChan, errChan, done = PortForward(nilClientConfig, "", "")
 	select {
 	case err := <-errChan:
 		assert.Error(t, err)
@@ -44,7 +44,7 @@ func TestPortForward(t *testing.T) {
 		Clientset: &kubernetes.Clientset{},
 		Config:    nil,
 	}
-	stopChan, errChan, done = PortForward(nilRestConfig)
+	stopChan, errChan, done = PortForward(nilRestConfig, "", "")
 	select {
 	case err := <-errChan:
 		assert.Error(t, err)

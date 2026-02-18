@@ -70,7 +70,7 @@ var seccompCmd = &cobra.Command{
 		}
 
 		// Set up port forwarding
-		stopChan, errChan, done := k8s.PortForward(config)
+		stopChan, errChan, done := k8s.PortForward(config, brokerNamespace, brokerService)
 		<-done // Block until port-forwarding is set up
 		go func() {
 			for err := range errChan {
