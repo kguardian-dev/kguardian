@@ -9,6 +9,8 @@ interface AnthropicTool {
   input_schema: any;
 }
 
+const MAX_TOOL_ROUNDS = 10;
+
 export async function callAnthropic(
   request: ChatRequest,
   brokerClient: BrokerClient
@@ -32,7 +34,7 @@ export async function callAnthropic(
   );
 
   // Build messages with history
-  const messages = [];
+  const messages: any[] = [];
 
   // Add conversation history if provided
   if (request.history && request.history.length > 0) {
@@ -48,33 +50,43 @@ export async function callAnthropic(
     content: request.message,
   });
 
-  const payload = {
-    model,
-    max_tokens: 4096,
-    system: systemPrompt,
-    messages,
-    tools,
+  const headers = {
+    "x-api-key": apiKey,
+    "anthropic-version": "2023-06-01",
+    "Content-Type": "application/json",
   };
 
-  const response = await axios.post(
-    "https://api.anthropic.com/v1/messages",
-    payload,
-    {
-      headers: {
-        "x-api-key": apiKey,
-        "anthropic-version": "2023-06-01",
-        "Content-Type": "application/json",
-      },
+  // Multi-round tool calling loop
+  for (let round = 0; round < MAX_TOOL_ROUNDS; round++) {
+    const response = await axios.post(
+      "https://api.anthropic.com/v1/messages",
+      { model, max_tokens: 4096, system: systemPrompt, messages, tools },
+      { headers }
+    );
+
+    const content = response.data.content;
+
+    // Check if there are tool uses
+    const toolUses = content.filter((block: any) => block.type === "tool_use");
+
+    if (toolUses.length === 0) {
+      // No tool calls — return text response
+      const textContent = content.find((block: any) => block.type === "text");
+      return {
+        message: textContent?.text || "No response from Claude",
+        provider: LLMProvider.ANTHROPIC,
+        model: response.data.model,
+        conversationId: request.conversationId,
+      };
     }
-  );
 
-  const content = response.data.content;
+    // Append assistant message with full content (text + tool_use blocks)
+    messages.push({
+      role: "assistant",
+      content: content,
+    });
 
-  // Check if there are tool uses
-  const toolUses = content.filter((block: any) => block.type === "tool_use");
-
-  if (toolUses.length > 0) {
-    // Execute tool calls
+    // Execute tool calls and build tool results
     const toolResults = await Promise.all(
       toolUses.map(async (toolUse: any) => {
         const result = await brokerClient.executeTool({
@@ -89,58 +101,28 @@ export async function callAnthropic(
       })
     );
 
-    // Make a follow-up request with tool results
-    const followUpPayload = {
-      model,
-      max_tokens: 4096,
-      system: systemPrompt,
-      messages: [
-        {
-          role: "user",
-          content: request.message,
-        },
-        {
-          role: "assistant",
-          content: content,
-        },
-        {
-          role: "user",
-          content: toolResults,
-        },
-      ],
-      tools,
-    };
-
-    const followUpResponse = await axios.post(
-      "https://api.anthropic.com/v1/messages",
-      followUpPayload,
-      {
-        headers: {
-          "x-api-key": apiKey,
-          "anthropic-version": "2023-06-01",
-          "Content-Type": "application/json",
-        },
-      }
-    );
-
-    const finalContent = followUpResponse.data.content.find(
-      (block: any) => block.type === "text"
-    );
-
-    return {
-      message: finalContent?.text || "No response from Claude",
-      provider: LLMProvider.ANTHROPIC,
-      model: response.data.model,
-      conversationId: request.conversationId,
-    };
+    // Append tool results as a user message
+    messages.push({
+      role: "user",
+      content: toolResults,
+    });
   }
 
-  // No tool calls, return text response
-  const textContent = content.find((block: any) => block.type === "text");
+  // Max rounds reached — request a final response without tools
+  const finalResponse = await axios.post(
+    "https://api.anthropic.com/v1/messages",
+    { model, max_tokens: 4096, system: systemPrompt, messages },
+    { headers }
+  );
+
+  const finalContent = finalResponse.data.content.find(
+    (block: any) => block.type === "text"
+  );
+
   return {
-    message: textContent?.text || "No response from Claude",
+    message: finalContent?.text || "No response from Claude",
     provider: LLMProvider.ANTHROPIC,
-    model: response.data.model,
+    model: finalResponse.data.model,
     conversationId: request.conversationId,
   };
 }
