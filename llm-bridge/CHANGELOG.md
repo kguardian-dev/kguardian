@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.2.1](https://github.com/kguardian-dev/kguardian/compare/llm-bridge/v1.2.0...llm-bridge/v1.2.1) (2026-02-18)
+
+
+### Bug Fixes
+
+* **llm-bridge:** add MCP connection recovery on failure ([d1cd198](https://github.com/kguardian-dev/kguardian/commit/d1cd198e1feb788652a1b18571fd3dc18c0a4d33))
+* **llm-bridge:** implement multi-round tool calling and preserve conversation history ([fd25a8c](https://github.com/kguardian-dev/kguardian/commit/fd25a8cb2de57981219ec904be4f86b838a56312))
+
 ## [1.2.0](https://github.com/kguardian-dev/kguardian/compare/llm-bridge/v1.1.0...llm-bridge/v1.2.0) (2026-02-17)
 
 
