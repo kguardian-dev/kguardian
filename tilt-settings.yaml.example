@@ -1,0 +1,30 @@
+# Copy this file to tilt-settings.yaml and customise.
+# tilt-settings.yaml is gitignored and will not be committed.
+
+# Toggle individual components on/off
+enable_controller: true
+enable_llm_bridge: true
+enable_mcp_server: true
+
+# Local builds — set to true to build from source with live-reload.
+# When false (default), the component uses the latest published image from GHCR.
+build_broker: true
+build_llm_bridge: false
+build_mcp_server: false
+build_controller: false
+
+# LLM provider API keys — only enabled providers will have secrets created.
+# Keys are injected as Kubernetes Secrets and referenced by the LLM Bridge pod.
+llm_providers:
+  openai:
+    enabled: false
+    api_key: ""
+  anthropic:
+    enabled: false
+    api_key: ""
+  gemini:
+    enabled: false
+    api_key: ""
+  copilot:
+    enabled: false
+    api_key: ""
