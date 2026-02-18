@@ -65,7 +65,7 @@ func (h NetworkTrafficHandler) Call(
 		"total_duration": time.Since(startTime).String(),
 	}).Info("Successfully fetched network traffic")
 
-	return nil, NetworkTrafficOutput{
-		Data: string(jsonData),
-	}, nil
+	return &mcp.CallToolResult{
+		Content: []mcp.Content{&mcp.TextContent{Text: string(jsonData)}},
+	}, NetworkTrafficOutput{}, nil
 }

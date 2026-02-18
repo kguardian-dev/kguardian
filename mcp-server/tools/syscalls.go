@@ -65,7 +65,7 @@ func (h SyscallsHandler) Call(
 		"total_duration": time.Since(startTime).String(),
 	}).Info("Successfully fetched syscalls")
 
-	return nil, SyscallsOutput{
-		Data: string(jsonData),
-	}, nil
+	return &mcp.CallToolResult{
+		Content: []mcp.Content{&mcp.TextContent{Text: string(jsonData)}},
+	}, SyscallsOutput{}, nil
 }

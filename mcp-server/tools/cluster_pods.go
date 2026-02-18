@@ -53,5 +53,7 @@ func (h ClusterPodsHandler) Call(
 		"total_duration": time.Since(startTime).String(),
 	}).Info("Successfully fetched cluster pods")
 
-	return nil, ClusterPodsOutput{Data: string(jsonData)}, nil
+	return &mcp.CallToolResult{
+		Content: []mcp.Content{&mcp.TextContent{Text: string(jsonData)}},
+	}, ClusterPodsOutput{}, nil
 }
