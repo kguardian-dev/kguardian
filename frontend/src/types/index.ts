@@ -58,6 +58,8 @@ export interface PodNodeData {
   traffic: NetworkTraffic[];
   syscalls?: SyscallInfo[];
   isExpanded: boolean;
+  isExternal?: boolean; // True if this pod is outside the selected namespace
+  externalNamespace?: string; // The namespace this external pod belongs to
 }
 
 // Matches broker's SvcDetail type

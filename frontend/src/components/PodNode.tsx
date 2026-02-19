@@ -1,6 +1,6 @@
 import React from 'react';
 import { Handle, Position } from 'reactflow';
-import { ChevronDown, ChevronRight, Network, Server, FileCode } from 'lucide-react';
+import { ChevronDown, ChevronRight, Network, Server, Globe, FileCode } from 'lucide-react';
 import type { PodNodeData } from '../types';
 
 interface PodNodeProps {
@@ -15,6 +15,7 @@ const PodNode: React.FC<PodNodeProps> = React.memo(({ data, selected }) => {
   const trafficCount = data.traffic?.length || 0;
   const identityName = data.pod.pod_identity || data.pod.pod_name;
   const podCount = data.pods?.length || 1;
+  const isExternal = data.isExternal ?? false;
 
   // Count total syscalls from comma-separated strings
   const syscallCount = data.syscalls?.reduce((total, syscallRecord) => {
@@ -22,15 +23,22 @@ const PodNode: React.FC<PodNodeProps> = React.memo(({ data, selected }) => {
     return total + syscalls.length;
   }, 0) || 0;
 
+  const IconComponent = isExternal ? Globe : Server;
+  const accentColor = isExternal ? 'text-amber-500' : 'text-hubble-accent';
+
+  const borderClasses = isExternal
+    ? selected
+      ? 'border-amber-500 bg-hubble-card shadow-lg shadow-amber-500/20'
+      : 'border-amber-500/40 bg-hubble-card hover:border-amber-500/60'
+    : selected
+      ? 'border-hubble-accent bg-hubble-card shadow-lg shadow-hubble-accent/20'
+      : 'border-hubble-border bg-hubble-card hover:border-hubble-accent/50';
+
   return (
     <div
       className={`
         px-4 py-3 rounded-lg border-2 transition-all min-w-[200px]
-        ${
-          selected
-            ? 'border-hubble-accent bg-hubble-card shadow-lg shadow-hubble-accent/20'
-            : 'border-hubble-border bg-hubble-card hover:border-hubble-accent/50'
-        }
+        ${borderClasses}
       `}
     >
       <Handle type="target" position={Position.Left} />
@@ -39,7 +47,7 @@ const PodNode: React.FC<PodNodeProps> = React.memo(({ data, selected }) => {
         <div className="flex items-center gap-2 flex-1">
           <button
             onClick={() => data.onToggle(data.id)}
-            className="text-hubble-accent hover:text-blue-400 transition-colors"
+            className={`${accentColor} hover:opacity-75 transition-colors`}
           >
             {data.isExpanded ? (
               <ChevronDown className="w-4 h-4" />
@@ -48,12 +56,17 @@ const PodNode: React.FC<PodNodeProps> = React.memo(({ data, selected }) => {
             )}
           </button>
 
-          <Server className="w-5 h-5 text-hubble-accent" />
+          <IconComponent className={`w-5 h-5 ${accentColor}`} />
 
           <div className="flex-1">
             <div className="font-semibold text-sm text-primary">
               {identityName}
             </div>
+            {data.externalNamespace && (
+              <div className="text-xs text-tertiary">
+                ns: {data.externalNamespace}
+              </div>
+            )}
             {podCount > 1 && (
               <div className="text-xs text-tertiary">
                 {podCount} replicas
@@ -82,19 +95,21 @@ const PodNode: React.FC<PodNodeProps> = React.memo(({ data, selected }) => {
             )}
           </div>
 
-          <button
-            onClick={(e) => {
-              e.stopPropagation();
-              data.onBuildPolicy?.(data);
-            }}
-            className="w-full mt-2 px-3 py-1.5 bg-hubble-success/10 border border-hubble-success/30
-                       rounded text-hubble-success hover:bg-hubble-success/20 hover:border-hubble-success
-                       transition-all flex items-center justify-center gap-2 text-xs font-medium"
-            title="Build Network Policy"
-          >
-            <FileCode className="w-3 h-3" />
-            Build Policy
-          </button>
+          {!isExternal && (
+            <button
+              onClick={(e) => {
+                e.stopPropagation();
+                data.onBuildPolicy?.(data);
+              }}
+              className="w-full mt-2 px-3 py-1.5 bg-hubble-success/10 border border-hubble-success/30
+                         rounded text-hubble-success hover:bg-hubble-success/20 hover:border-hubble-success
+                         transition-all flex items-center justify-center gap-2 text-xs font-medium"
+              title="Build Network Policy"
+            >
+              <FileCode className="w-3 h-3" />
+              Build Policy
+            </button>
+          )}
         </div>
       )}
 
@@ -109,7 +124,8 @@ const PodNode: React.FC<PodNodeProps> = React.memo(({ data, selected }) => {
     prevProps.data.isExpanded === nextProps.data.isExpanded &&
     prevProps.selected === nextProps.selected &&
     prevProps.data.traffic?.length === nextProps.data.traffic?.length &&
-    prevProps.data.syscalls?.length === nextProps.data.syscalls?.length
+    prevProps.data.syscalls?.length === nextProps.data.syscalls?.length &&
+    prevProps.data.isExternal === nextProps.data.isExternal
   );
 });
 

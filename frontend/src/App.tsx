@@ -28,6 +28,7 @@ function App() {
   });
   const [tableHeight, setTableHeight] = useState<number>(UI_DIMENSIONS.TABLE_DEFAULT_HEIGHT);
   const [isResizing, setIsResizing] = useState(false);
+  const [showExternalNodes, setShowExternalNodes] = useState(true);
 
   const { namespaces } = useNamespaces();
   const { pods, allPodsLookup, loading, error, togglePodExpansion, refreshData } = usePodData(namespace);
@@ -189,31 +190,43 @@ function App() {
                 onPodSelect={handlePodSelect}
                 selectedPodId={selectedPod?.id || null}
                 onBuildPolicy={handleBuildPolicy}
+                allPodsLookup={allPodsLookup}
+                showExternalNodes={showExternalNodes}
+                onToggleExternalNodes={() => setShowExternalNodes(prev => !prev)}
               />
             </div>
 
-            {/* Resize Handle */}
+            {/* Collapsible Bottom Panel: Resize Handle + Data Table */}
             <div
-              onMouseDown={handleMouseDown}
-              className={`h-1 border-t border-hubble-border cursor-ns-resize hover:bg-hubble-accent/50 transition-colors relative group ${
-                isResizing ? 'bg-hubble-accent' : 'bg-hubble-border'
-              }`}
-              title="Drag to resize"
+              className="overflow-hidden transition-all duration-300 ease-in-out"
+              style={{
+                height: selectedPod ? `${tableHeight + 4}px` : '0px',
+                opacity: selectedPod ? 1 : 0,
+              }}
             >
-              {/* Visual indicator */}
-              <div className="absolute inset-x-0 top-1/2 -translate-y-1/2 flex justify-center opacity-0 group-hover:opacity-100 transition-opacity">
-                <div className="flex gap-1">
-                  <div className="w-8 h-0.5 bg-hubble-accent rounded-full"></div>
+              {/* Resize Handle */}
+              <div
+                onMouseDown={handleMouseDown}
+                className={`h-1 border-t border-hubble-border cursor-ns-resize hover:bg-hubble-accent/50 transition-colors relative group ${
+                  isResizing ? 'bg-hubble-accent' : 'bg-hubble-border'
+                }`}
+                title="Drag to resize"
+              >
+                {/* Visual indicator */}
+                <div className="absolute inset-x-0 top-1/2 -translate-y-1/2 flex justify-center opacity-0 group-hover:opacity-100 transition-opacity">
+                  <div className="flex gap-1">
+                    <div className="w-8 h-0.5 bg-hubble-accent rounded-full"></div>
+                  </div>
                 </div>
               </div>
-            </div>
 
-            {/* Data Table */}
-            <div
-              className="border-t border-hubble-border bg-hubble-dark overflow-hidden"
-              style={{ height: `${tableHeight}px` }}
-            >
-              <DataTable selectedPod={selectedPod} allPodsLookup={allPodsLookup} />
+              {/* Data Table */}
+              <div
+                className="border-t border-hubble-border bg-hubble-dark overflow-hidden"
+                style={{ height: `${tableHeight}px` }}
+              >
+                <DataTable selectedPod={selectedPod} allPodsLookup={allPodsLookup} />
+              </div>
             </div>
           </>
         )}
