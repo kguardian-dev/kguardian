@@ -60,8 +60,8 @@ controller:
     annotations: {}
     # -- The name of the service account to use. If not set and create is true, a name is generated using the fullname template
     name: ""
-    # -- Automount API credentials for a service account
-    automountServiceAccountToken: false
+    # -- Automount API credentials for a service account (controller needs K8s API access)
+    automountServiceAccountToken: true
 
   # -- Annotations to add to controller pods
   podAnnotations: {}
