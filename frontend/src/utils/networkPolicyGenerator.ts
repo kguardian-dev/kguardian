@@ -68,11 +68,12 @@ export async function generateNetworkPolicy(pod: PodNodeData, _allPods: PodNodeD
     }
   });
 
+  const uniqueIPArray = Array.from(uniqueIPs);
+  const identities = await Promise.all(uniqueIPArray.map(ip => resolveTrafficIdentity(ip)));
   const identityMap = new Map<string, TrafficIdentity>();
-  for (const ip of uniqueIPs) {
-    const identity = await resolveTrafficIdentity(ip);
-    identityMap.set(ip, identity);
-  }
+  uniqueIPArray.forEach((ip, i) => {
+    identityMap.set(ip, identities[i]);
+  });
 
   // Process traffic rules
   pod.traffic?.forEach((traffic) => {
@@ -274,19 +275,30 @@ export async function generateNetworkPolicy(pod: PodNodeData, _allPods: PodNodeD
   return policy;
 }
 
+// YAML special characters that require quoting a value
+const YAML_SPECIAL_RE = /[:#'"{}[\],&*?|<>=!%@`\n\r-]/;
+
+export function quoteYamlValue(value: string): string {
+  if (YAML_SPECIAL_RE.test(value)) {
+    // Use double quotes with internal double-quotes escaped
+    return `"${value.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`;
+  }
+  return value;
+}
+
 export function policyToYAML(policy: NetworkPolicy): string {
   const yaml: string[] = [];
 
-  yaml.push(`apiVersion: ${policy.apiVersion}`);
-  yaml.push(`kind: ${policy.kind}`);
+  yaml.push(`apiVersion: ${quoteYamlValue(policy.apiVersion)}`);
+  yaml.push(`kind: ${quoteYamlValue(policy.kind)}`);
   yaml.push('metadata:');
-  yaml.push(`  name: ${policy.metadata.name}`);
-  yaml.push(`  namespace: ${policy.metadata.namespace}`);
+  yaml.push(`  name: ${quoteYamlValue(policy.metadata.name)}`);
+  yaml.push(`  namespace: ${quoteYamlValue(policy.metadata.namespace)}`);
   yaml.push('spec:');
   yaml.push('  podSelector:');
   yaml.push('    matchLabels:');
   Object.entries(policy.spec.podSelector.matchLabels).forEach(([key, value]) => {
-    yaml.push(`      ${key}: ${value}`);
+    yaml.push(`      ${quoteYamlValue(key)}: ${quoteYamlValue(value)}`);
   });
 
   if (policy.spec.policyTypes.length > 0) {
@@ -304,31 +316,31 @@ export function policyToYAML(policy: NetworkPolicy): string {
         yaml.push('    -');
         if (peer.ipBlock) {
           yaml.push('      ipBlock:');
-          yaml.push(`        cidr: ${peer.ipBlock.cidr}`);
+          yaml.push(`        cidr: ${quoteYamlValue(peer.ipBlock.cidr)}`);
           if (peer.ipBlock.except) {
             yaml.push('        except:');
-            peer.ipBlock.except.forEach(e => yaml.push(`        - ${e}`));
+            peer.ipBlock.except.forEach(e => yaml.push(`        - ${quoteYamlValue(e)}`));
           }
         }
         if (peer.podSelector) {
           yaml.push('      podSelector:');
           yaml.push('        matchLabels:');
           Object.entries(peer.podSelector.matchLabels).forEach(([key, value]) => {
-            yaml.push(`          ${key}: ${value}`);
+            yaml.push(`          ${quoteYamlValue(key)}: ${quoteYamlValue(value)}`);
           });
         }
         if (peer.namespaceSelector) {
           yaml.push('      namespaceSelector:');
           yaml.push('        matchLabels:');
           Object.entries(peer.namespaceSelector.matchLabels).forEach(([key, value]) => {
-            yaml.push(`          ${key}: ${value}`);
+            yaml.push(`          ${quoteYamlValue(key)}: ${quoteYamlValue(value)}`);
           });
         }
       });
       if (rule.ports.length > 0) {
         yaml.push('    ports:');
         rule.ports.forEach((port) => {
-          yaml.push(`    - protocol: ${port.protocol}`);
+          yaml.push(`    - protocol: ${quoteYamlValue(port.protocol)}`);
           yaml.push(`      port: ${port.port}`);
         });
       }
@@ -343,31 +355,31 @@ export function policyToYAML(policy: NetworkPolicy): string {
         yaml.push('    -');
         if (peer.ipBlock) {
           yaml.push('      ipBlock:');
-          yaml.push(`        cidr: ${peer.ipBlock.cidr}`);
+          yaml.push(`        cidr: ${quoteYamlValue(peer.ipBlock.cidr)}`);
           if (peer.ipBlock.except) {
             yaml.push('        except:');
-            peer.ipBlock.except.forEach(e => yaml.push(`        - ${e}`));
+            peer.ipBlock.except.forEach(e => yaml.push(`        - ${quoteYamlValue(e)}`));
           }
         }
         if (peer.podSelector) {
           yaml.push('      podSelector:');
           yaml.push('        matchLabels:');
           Object.entries(peer.podSelector.matchLabels).forEach(([key, value]) => {
-            yaml.push(`          ${key}: ${value}`);
+            yaml.push(`          ${quoteYamlValue(key)}: ${quoteYamlValue(value)}`);
           });
         }
         if (peer.namespaceSelector) {
           yaml.push('      namespaceSelector:');
           yaml.push('        matchLabels:');
           Object.entries(peer.namespaceSelector.matchLabels).forEach(([key, value]) => {
-            yaml.push(`          ${key}: ${value}`);
+            yaml.push(`          ${quoteYamlValue(key)}: ${quoteYamlValue(value)}`);
           });
         }
       });
       if (rule.ports.length > 0) {
         yaml.push('    ports:');
         rule.ports.forEach((port) => {
-          yaml.push(`    - protocol: ${port.protocol}`);
+          yaml.push(`    - protocol: ${quoteYamlValue(port.protocol)}`);
           yaml.push(`      port: ${port.port}`);
         });
       }

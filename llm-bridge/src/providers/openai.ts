@@ -75,7 +75,7 @@ export async function callOpenAI(
       response = await axios.post(
         "https://api.openai.com/v1/chat/completions",
         { model, messages, tools, tool_choice: "auto" },
-        { headers }
+        { headers, timeout: 120000 }
       );
     } catch (error: any) {
       console.error("OpenAI API Error:", error.response?.data || error.message);
@@ -105,9 +105,21 @@ export async function callOpenAI(
     // Execute tool calls and append results
     const toolResults = await Promise.all(
       message.tool_calls.map(async (toolCall: any) => {
+        let parsedArgs: Record<string, any>;
+        try {
+          parsedArgs = JSON.parse(toolCall.function.arguments);
+        } catch {
+          return {
+            tool_call_id: toolCall.id,
+            role: "tool",
+            name: toolCall.function.name,
+            content: "Failed to parse tool arguments",
+          };
+        }
+
         const result = await brokerClient.executeTool({
           name: toolCall.function.name,
-          arguments: JSON.parse(toolCall.function.arguments),
+          arguments: parsedArgs,
         });
 
         let content: string;
@@ -135,7 +147,7 @@ export async function callOpenAI(
   const finalResponse = await axios.post(
     "https://api.openai.com/v1/chat/completions",
     { model, messages },
-    { headers }
+    { headers, timeout: 120000 }
   );
 
   return {

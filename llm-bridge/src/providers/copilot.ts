@@ -60,11 +60,17 @@ export async function callCopilot(
 
   // Multi-round tool calling loop
   for (let round = 0; round < MAX_TOOL_ROUNDS; round++) {
-    const response = await axios.post(
-      "https://api.githubcopilot.com/chat/completions",
-      { model, messages, tools, tool_choice: "auto" },
-      { headers }
-    );
+    let response;
+    try {
+      response = await axios.post(
+        "https://api.githubcopilot.com/chat/completions",
+        { model, messages, tools, tool_choice: "auto" },
+        { headers, timeout: 120000 }
+      );
+    } catch (error: any) {
+      console.error("Copilot API Error:", error.response?.data?.error?.message || error.message);
+      throw new Error(`Copilot API error: ${error.response?.data?.error?.message || error.message}`);
+    }
 
     const choice = response.data.choices[0];
     const message = choice.message;
@@ -89,9 +95,21 @@ export async function callCopilot(
     // Execute tool calls and append results
     const toolResults = await Promise.all(
       message.tool_calls.map(async (toolCall: any) => {
+        let parsedArgs: Record<string, any>;
+        try {
+          parsedArgs = JSON.parse(toolCall.function.arguments);
+        } catch {
+          return {
+            tool_call_id: toolCall.id,
+            role: "tool",
+            name: toolCall.function.name,
+            content: "Failed to parse tool arguments",
+          };
+        }
+
         const result = await brokerClient.executeTool({
           name: toolCall.function.name,
-          arguments: JSON.parse(toolCall.function.arguments),
+          arguments: parsedArgs,
         });
 
         let content: string;
@@ -119,7 +137,7 @@ export async function callCopilot(
   const finalResponse = await axios.post(
     "https://api.githubcopilot.com/chat/completions",
     { model, messages },
-    { headers }
+    { headers, timeout: 120000 }
   );
 
   return {

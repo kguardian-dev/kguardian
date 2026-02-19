@@ -212,8 +212,8 @@ const DataTable: React.FC<DataTableProps> = ({ selectedPod, allPodsLookup }) => 
             <div>
               <span className="text-tertiary">Pods ({selectedPod.pods.length}):</span>
               <div className="ml-2 mt-1 flex flex-wrap gap-2">
-                {selectedPod.pods.map((pod, index) => (
-                  <span key={index} className="px-2 py-1 bg-hubble-dark text-secondary font-mono text-xs rounded border border-hubble-border">
+                {selectedPod.pods.map((pod) => (
+                  <span key={pod.pod_name} className="px-2 py-1 bg-hubble-dark text-secondary font-mono text-xs rounded border border-hubble-border">
                     {pod.pod_name}
                   </span>
                 ))}

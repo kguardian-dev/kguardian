@@ -221,7 +221,7 @@ function App() {
 
       {/* Footer */}
       <footer className="bg-hubble-dark border-t border-hubble-border px-6 py-2 text-center text-xs text-tertiary">
-        <p>Kube Guardian v0.1.0 | Namespace: {namespace} | Pods: {pods.length}</p>
+        <p>Kube Guardian v{__APP_VERSION__} | Namespace: {namespace} | Pods: {pods.length}</p>
       </footer>
 
       {/* AI Assistant Modal */}

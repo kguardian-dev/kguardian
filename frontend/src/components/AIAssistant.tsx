@@ -56,7 +56,7 @@ const AIAssistant: React.FC<AIAssistantProps> = ({ isOpen, onClose, onLayoutChan
     if (!inputValue.trim()) return;
 
     const userMessage: Message = {
-      id: Date.now().toString(),
+      id: crypto.randomUUID(),
       role: 'user',
       content: inputValue,
       timestamp: new Date(),
@@ -87,7 +87,7 @@ const AIAssistant: React.FC<AIAssistantProps> = ({ isOpen, onClose, onLayoutChan
       const response = await sendChatMessage(messageToSend, history);
 
       const assistantMessage: Message = {
-        id: (Date.now() + 1).toString(),
+        id: crypto.randomUUID(),
         role: 'assistant',
         content: response.message,
         timestamp: new Date(),
@@ -95,7 +95,7 @@ const AIAssistant: React.FC<AIAssistantProps> = ({ isOpen, onClose, onLayoutChan
       setMessages(prev => [...prev, assistantMessage]);
     } catch (error) {
       const errorMessage: Message = {
-        id: (Date.now() + 1).toString(),
+        id: crypto.randomUUID(),
         role: 'assistant',
         content: `Error: ${error instanceof Error ? error.message : 'Failed to get AI response. Please check that your API keys are configured.'}`,
         timestamp: new Date(),
@@ -510,7 +510,13 @@ const AIAssistant: React.FC<AIAssistantProps> = ({ isOpen, onClose, onLayoutChan
                       : 'bg-hubble-dark text-primary'
                   }`}
                 >
-                  <p className="text-sm whitespace-pre-wrap">{message.content}</p>
+                  {message.role === 'assistant' ? (
+                    <div className="text-sm prose prose-sm prose-invert max-w-none prose-p:my-1 prose-headings:my-2 prose-ul:my-1 prose-ol:my-1 prose-li:my-0.5 prose-pre:my-2 prose-table:my-2 prose-th:px-2 prose-th:py-1 prose-td:px-2 prose-td:py-1 prose-code:text-hubble-accent prose-a:text-hubble-accent">
+                      <ReactMarkdown remarkPlugins={[remarkGfm]}>{message.content}</ReactMarkdown>
+                    </div>
+                  ) : (
+                    <p className="text-sm whitespace-pre-wrap">{message.content}</p>
+                  )}
                   <p
                     className={`text-xs mt-1 ${
                       message.role === 'user' ? 'text-blue-100' : 'text-tertiary'

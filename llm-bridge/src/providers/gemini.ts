@@ -55,15 +55,21 @@ export async function callGemini(
 
   // Multi-round tool calling loop
   for (let round = 0; round < MAX_TOOL_ROUNDS; round++) {
-    const response = await axios.post(
-      url,
-      {
-        systemInstruction: { parts: [{ text: systemPrompt }] },
-        contents,
-        tools: [{ functionDeclarations }],
-      },
-      { headers }
-    );
+    let response;
+    try {
+      response = await axios.post(
+        url,
+        {
+          systemInstruction: { parts: [{ text: systemPrompt }] },
+          contents,
+          tools: [{ functionDeclarations }],
+        },
+        { headers, timeout: 120000 }
+      );
+    } catch (error: any) {
+      console.error("Gemini API Error:", error.response?.data?.error?.message || error.message);
+      throw new Error(`Gemini API error: ${error.response?.data?.error?.message || error.message}`);
+    }
 
     const candidate = response.data.candidates[0];
     const content = candidate.content;
@@ -100,9 +106,7 @@ export async function callGemini(
         return {
           functionResponse: {
             name: part.functionCall.name,
-            response: {
-              data: result.error || result.data,
-            },
+            response: result.error ? { error: result.error } : result.data,
           },
         };
       })
@@ -122,7 +126,7 @@ export async function callGemini(
       systemInstruction: { parts: [{ text: systemPrompt }] },
       contents,
     },
-    { headers }
+    { headers, timeout: 120000 }
   );
 
   const finalCandidate = finalResponse.data.candidates[0];

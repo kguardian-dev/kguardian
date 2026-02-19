@@ -117,14 +117,14 @@ spec:
       # Health checks
       livenessProbe:
         httpGet:
-          path: /
+          path: /healthz
           port: 8081
         initialDelaySeconds: 10
         periodSeconds: 30
 
       readinessProbe:
         httpGet:
-          path: /
+          path: /healthz
           port: 8081
         initialDelaySeconds: 5
         periodSeconds: 10

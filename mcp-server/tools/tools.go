@@ -5,8 +5,8 @@ import (
 )
 
 // RegisterTools registers all kguardian MCP tools with the server.
-// This is a compatibility wrapper that delegates to RegisterAllTools.
-// Deprecated: Use RegisterAllTools directly for better kmcp integration.
+// It delegates to RegisterAllTools which is the single source of truth
+// for all tool definitions and handler registrations.
 func RegisterTools(server *mcp.Server, brokerURL string) {
 	RegisterAllTools(server, brokerURL)
 }

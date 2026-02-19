@@ -5,12 +5,11 @@ import ReactFlow, {
   BackgroundVariant,
   useNodesState,
   useEdgesState,
-  addEdge,
   MarkerType,
   useReactFlow,
   ReactFlowProvider,
 } from 'reactflow';
-import type { Node, Edge, Connection } from 'reactflow';
+import type { Node, Edge } from 'reactflow';
 import 'reactflow/dist/style.css';
 import PodNode from './PodNode';
 import type { PodNodeData } from '../types';
@@ -144,18 +143,13 @@ const NetworkGraphInner: React.FC<NetworkGraphProps> = ({
 
   // Auto-fit view when pods data changes (namespace load)
   useEffect(() => {
-    if (nodes.length > 0) {
+    if (initialNodes.length > 0) {
       // Small delay to ensure nodes are rendered before fitting
       setTimeout(() => {
         fitView({ padding: 0.2, duration: UI_TIMING.FIT_VIEW_DURATION });
       }, UI_TIMING.FIT_VIEW_DELAY);
     }
-  }, [nodes, fitView]);
-
-  const onConnect = useCallback(
-    (params: Connection) => setEdges((eds) => addEdge(params, eds)),
-    [setEdges]
-  );
+  }, [initialNodes.length, fitView]);
 
   const onNodeClick = useCallback(
     (_event: React.MouseEvent, node: Node) => {
@@ -176,8 +170,8 @@ const NetworkGraphInner: React.FC<NetworkGraphProps> = ({
         edges={edges}
         onNodesChange={onNodesChange}
         onEdgesChange={onEdgesChange}
-        onConnect={onConnect}
         onNodeClick={onNodeClick}
+        nodesConnectable={false}
         onPaneClick={onPaneClick}
         nodeTypes={nodeTypes}
         fitView
