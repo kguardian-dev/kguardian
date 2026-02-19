@@ -133,7 +133,7 @@ The following table lists the configurable parameters of the kguardian chart and
 | controller.service.port | int | `80` | Controller service port |
 | controller.service.type | string | `"ClusterIP"` | Controller service type |
 | controller.serviceAccount.annotations | object | `{}` | Annotations to add to the service account |
-| controller.serviceAccount.automountServiceAccountToken | bool | `false` | Automount API credentials for a service account |
+| controller.serviceAccount.automountServiceAccountToken | bool | `true` | Automount API credentials for a service account (controller needs K8s API access) |
 | controller.serviceAccount.create | bool | `true` | Specifies whether a service account should be created |
 | controller.serviceAccount.name | string | `""` | The name of the service account to use. If not set and create is true, a name is generated using the fullname template |
 | controller.tolerations | list | `[{"effect":"NoSchedule","key":"node-role.kubernetes.io/control-plane","operator":"Exists"}]` | Tolerations for the kguardian controller pod assignment |
