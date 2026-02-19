@@ -3,14 +3,15 @@ import type { PodInfo, PodNodeData } from '../types';
 import { apiClient } from '../services/api';
 
 async function withConcurrencyLimit<T>(tasks: (() => Promise<T>)[], limit: number): Promise<T[]> {
-  const results: T[] = [];
-  const executing: Promise<void>[] = [];
-  for (const task of tasks) {
-    const p = task().then(r => { results.push(r); });
-    executing.push(p);
-    if (executing.length >= limit) {
+  const results: T[] = new Array(tasks.length);
+  const executing = new Set<Promise<void>>();
+  for (let i = 0; i < tasks.length; i++) {
+    const index = i;
+    const p = tasks[index]().then(r => { results[index] = r; });
+    const tracked = p.then(() => { executing.delete(tracked); });
+    executing.add(tracked);
+    if (executing.size >= limit) {
       await Promise.race(executing);
-      executing.splice(executing.findIndex(e => e), 1);
     }
   }
   await Promise.all(executing);

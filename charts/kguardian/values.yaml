@@ -37,7 +37,14 @@ controller:
       # -- Init container image tag
       tag: latest
     # -- Init container security context
-    securityContext: {}
+    securityContext:
+      runAsNonRoot: true
+      runAsUser: 65534
+      readOnlyRootFilesystem: true
+      allowPrivilegeEscalation: false
+      capabilities:
+        drop:
+          - ALL
 
   # -- List of image pull secrets for private registries
   imagePullSecrets: []
@@ -151,7 +158,14 @@ broker:
       # -- Overrides the init container image tag using SHA digest
       sha: ""
     # -- Broker init container security context
-    securityContext: {}
+    securityContext:
+      runAsNonRoot: true
+      runAsUser: 65534
+      readOnlyRootFilesystem: true
+      allowPrivilegeEscalation: false
+      capabilities:
+        drop:
+          - ALL
 
   container:
     # -- Broker container port

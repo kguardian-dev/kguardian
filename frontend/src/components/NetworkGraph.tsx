@@ -268,11 +268,11 @@ const NetworkGraphInner: React.FC<NetworkGraphProps> = ({
         },
         label: `${count}`,
         labelStyle: {
-          fill: '#9CA3AF',
+          fill: 'var(--theme-text-secondary)',
           fontSize: 12,
         },
         labelBgStyle: {
-          fill: '#1A2332',
+          fill: 'var(--theme-bg-card)',
         },
         markerEnd: {
           type: MarkerType.ArrowClosed,
@@ -339,7 +339,7 @@ const NetworkGraphInner: React.FC<NetworkGraphProps> = ({
           variant={BackgroundVariant.Dots}
           gap={16}
           size={1}
-          color="#2A3647"
+          color="var(--theme-border)"
         />
 
         {/* External nodes toggle */}

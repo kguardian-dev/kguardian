@@ -21,8 +21,10 @@ export async function callAnthropic(
   }
 
   const model = request.model || "claude-sonnet-4-5-20250929";
-  const systemPrompt =
-    request.systemPrompt || BrokerClient.getSystemPrompt();
+  const basePrompt = BrokerClient.getSystemPrompt();
+  const systemPrompt = request.context
+    ? `${basePrompt}\n\nUser context: ${request.context}`
+    : basePrompt;
 
   // Build tools
   const tools: AnthropicTool[] = BrokerClient.getToolDefinitions().map(

@@ -71,10 +71,7 @@ pub async fn get_pods_by_node(
     Ok(HttpResponse::Ok().json(pods))
 }
 
-pub fn pods_by_node(
-    conn: &mut PgConnection,
-    node: &str,
-) -> Result<Vec<PodDetail>, DbError> {
+pub fn pods_by_node(conn: &mut PgConnection, node: &str) -> Result<Vec<PodDetail>, DbError> {
     use schema::pod_details::dsl::*;
     let pods = pod_details
         .filter(node_name.eq(node))

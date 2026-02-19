@@ -32,8 +32,10 @@ export async function callOpenAI(
   }
 
   const model = request.model || "gpt-4o";
-  const systemPrompt =
-    request.systemPrompt || BrokerClient.getSystemPrompt();
+  const basePrompt = BrokerClient.getSystemPrompt();
+  const systemPrompt = request.context
+    ? `${basePrompt}\n\nUser context: ${request.context}`
+    : basePrompt;
 
   // Build messages with history
   const messages: OpenAIMessage[] = [

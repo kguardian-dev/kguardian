@@ -112,9 +112,9 @@ app.post("/api/chat", chatLimiter, async (req: Request, res: Response<any>) => {
     }
 
     if (error instanceof Error) {
+      console.error("Chat error details:", error.message, error.stack);
       return res.status(500).json({
-        error: error.message,
-        ...(process.env.NODE_ENV !== "production" && { details: error.stack }),
+        error: "An internal error occurred while processing the chat request",
       } as ErrorResponse);
     }
 

@@ -15,8 +15,10 @@ export async function callGemini(
   }
 
   const model = request.model || "gemini-2.0-flash-exp";
-  const systemPrompt =
-    request.systemPrompt || BrokerClient.getSystemPrompt();
+  const basePrompt = BrokerClient.getSystemPrompt();
+  const systemPrompt = request.context
+    ? `${basePrompt}\n\nUser context: ${request.context}`
+    : basePrompt;
 
   // Build function declarations
   const functionDeclarations = BrokerClient.getToolDefinitions().map(

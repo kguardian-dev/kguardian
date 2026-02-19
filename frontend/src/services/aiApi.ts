@@ -17,7 +17,7 @@ export interface ChatMessage {
   conversation_id?: string;
   provider?: LLMProvider;
   model?: string;
-  system_prompt?: string;
+  context?: string;
   history?: HistoryMessage[];
 }
 

@@ -67,7 +67,7 @@ const DataTable: React.FC<DataTableProps> = ({ selectedPod, allPodsLookup }) => 
       // External
       return (
         <div className="flex flex-col gap-0.5">
-          <span className="px-1.5 py-0.5 bg-gray-500/20 text-gray-400 rounded text-xs font-medium w-fit">
+          <span className="px-1.5 py-0.5 bg-hubble-border/30 text-secondary rounded text-xs font-medium w-fit">
             External
           </span>
           <span className="font-mono text-xs text-secondary pl-1">
@@ -377,8 +377,8 @@ const DataTable: React.FC<DataTableProps> = ({ selectedPod, allPodsLookup }) => 
                               traffic.decision === 'ALLOW'
                                 ? 'bg-hubble-success/20 text-hubble-success'
                                 : traffic.decision === 'DROP'
-                                ? 'bg-red-500/20 text-red-400'
-                                : 'bg-gray-500/20 text-gray-400'
+                                ? 'bg-hubble-error/20 text-hubble-error'
+                                : 'bg-hubble-border/30 text-secondary'
                             }`}>
                               {traffic.decision}
                             </span>

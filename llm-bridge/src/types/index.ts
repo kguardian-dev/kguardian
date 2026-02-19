@@ -22,7 +22,7 @@ export const ChatRequestSchema = z.object({
   provider: z.nativeEnum(LLMProvider).optional(),
   model: z.string().optional(),
   conversationId: z.string().optional(),
-  systemPrompt: z.string().optional(),
+  context: z.string().max(2000).optional(),
   history: z.array(MessageSchema).max(100).optional(),
 });
 

@@ -286,7 +286,7 @@ const AIAssistant: React.FC<AIAssistantProps> = ({ isOpen, onClose, onLayoutChan
                       }`}
                     >
                       {message.role === 'assistant' ? (
-                        <div className="text-sm prose prose-sm prose-invert max-w-none prose-p:my-1 prose-headings:my-2 prose-ul:my-1 prose-ol:my-1 prose-li:my-0.5 prose-pre:my-2 prose-table:my-2 prose-th:px-2 prose-th:py-1 prose-td:px-2 prose-td:py-1 prose-code:text-hubble-accent prose-a:text-hubble-accent">
+                        <div className="text-sm prose prose-sm dark:prose-invert max-w-none prose-p:my-1 prose-headings:my-2 prose-ul:my-1 prose-ol:my-1 prose-li:my-0.5 prose-pre:my-2 prose-table:my-2 prose-th:px-2 prose-th:py-1 prose-td:px-2 prose-td:py-1 prose-code:text-hubble-accent prose-a:text-hubble-accent">
                           <ReactMarkdown remarkPlugins={[remarkGfm]}>{message.content}</ReactMarkdown>
                         </div>
                       ) : (
@@ -511,7 +511,7 @@ const AIAssistant: React.FC<AIAssistantProps> = ({ isOpen, onClose, onLayoutChan
                   }`}
                 >
                   {message.role === 'assistant' ? (
-                    <div className="text-sm prose prose-sm prose-invert max-w-none prose-p:my-1 prose-headings:my-2 prose-ul:my-1 prose-ol:my-1 prose-li:my-0.5 prose-pre:my-2 prose-table:my-2 prose-th:px-2 prose-th:py-1 prose-td:px-2 prose-td:py-1 prose-code:text-hubble-accent prose-a:text-hubble-accent">
+                    <div className="text-sm prose prose-sm dark:prose-invert max-w-none prose-p:my-1 prose-headings:my-2 prose-ul:my-1 prose-ol:my-1 prose-li:my-0.5 prose-pre:my-2 prose-table:my-2 prose-th:px-2 prose-th:py-1 prose-td:px-2 prose-td:py-1 prose-code:text-hubble-accent prose-a:text-hubble-accent">
                       <ReactMarkdown remarkPlugins={[remarkGfm]}>{message.content}</ReactMarkdown>
                     </div>
                   ) : (
