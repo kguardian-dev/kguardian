@@ -243,7 +243,7 @@ const NetworkGraphInner: React.FC<NetworkGraphProps> = ({
         }
 
         if (sourcePod && destPod && sourcePod.id !== destPod.id) {
-          const edgeKey = `${sourcePod.id}-${destPod.id}`;
+          const edgeKey = `${sourcePod.id}::${destPod.id}`;
           const isExternalEdge = !!(sourcePod.isExternal || destPod.isExternal);
           if (!edgeMap.has(edgeKey)) {
             edgeMap.set(edgeKey, { count: 0, isExternal: isExternalEdge });
@@ -254,7 +254,7 @@ const NetworkGraphInner: React.FC<NetworkGraphProps> = ({
     });
 
     edgeMap.forEach(({ count, isExternal }, key) => {
-      const [source, target] = key.split('-');
+      const [source, target] = key.split('::');
       const strokeColor = isExternal ? '#F59E0B' : '#3B82F6';
       edges.push({
         id: key,
