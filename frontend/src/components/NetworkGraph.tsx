@@ -106,12 +106,14 @@ const NetworkGraphInner: React.FC<NetworkGraphProps> = ({
       });
     });
 
-    // Group external pods by identity (like in-namespace pods)
+    // Group cross-namespace pods by identity, aggregate unknown IPs into one node
     const identityMap = new Map<string, {
       pods: PodInfo[];
       trafficCount: number;
       ip: string;
     }>();
+    let internetTrafficCount = 0;
+    const internetIps: PodInfo[] = [];
 
     externalMap.forEach((ext) => {
       if (ext.podInfo) {
@@ -125,12 +127,15 @@ const NetworkGraphInner: React.FC<NetworkGraphProps> = ({
         group.pods.push(ext.podInfo);
         group.trafficCount += ext.trafficCount;
       } else {
-        // Unknown external IP - no pod info
-        const key = `external-ip-${ext.ip}`;
-        identityMap.set(key, {
-          pods: [],
-          trafficCount: ext.trafficCount,
-          ip: ext.ip,
+        // Unknown external IP — aggregate into single Internet node
+        internetTrafficCount += ext.trafficCount;
+        internetIps.push({
+          pod_name: ext.ip,
+          pod_ip: ext.ip,
+          pod_namespace: 'internet',
+          time_stamp: '',
+          node_name: '',
+          is_dead: false,
         });
       }
     });
@@ -138,39 +143,39 @@ const NetworkGraphInner: React.FC<NetworkGraphProps> = ({
     // Convert to PodNodeData for rendering
     const externalPodNodes: PodNodeData[] = [];
     identityMap.forEach((group, key) => {
-      if (group.pods.length > 0) {
-        const primary = group.pods[0];
-        externalPodNodes.push({
-          id: key,
-          label: primary.pod_identity || primary.pod_name,
-          pod: primary,
-          pods: group.pods,
-          traffic: [],
-          isExpanded: false,
-          isExternal: true,
-          externalNamespace: primary.pod_namespace || 'unknown',
-        });
-      } else {
-        // Unknown external endpoint
-        externalPodNodes.push({
-          id: key,
-          label: group.ip,
-          pod: {
-            pod_name: group.ip,
-            pod_ip: group.ip,
-            pod_namespace: null,
-            time_stamp: '',
-            node_name: '',
-            is_dead: false,
-          },
-          pods: [],
-          traffic: [],
-          isExpanded: false,
-          isExternal: true,
-          externalNamespace: 'external',
-        });
-      }
+      const primary = group.pods[0];
+      externalPodNodes.push({
+        id: key,
+        label: primary.pod_identity || primary.pod_name,
+        pod: primary,
+        pods: group.pods,
+        traffic: [],
+        isExpanded: false,
+        isExternal: true,
+        externalNamespace: primary.pod_namespace || 'unknown',
+      });
     });
+
+    // Add single aggregated Internet node for all unknown external IPs
+    if (internetIps.length > 0) {
+      externalPodNodes.push({
+        id: 'external-internet',
+        label: `Internet (${internetIps.length} IPs)`,
+        pod: {
+          pod_name: 'Internet',
+          pod_ip: internetIps[0].pod_ip,
+          pod_namespace: 'internet',
+          time_stamp: '',
+          node_name: '',
+          is_dead: false,
+        },
+        pods: internetIps,
+        traffic: [],
+        isExpanded: false,
+        isExternal: true,
+        externalNamespace: 'internet',
+      });
+    }
 
     return externalPodNodes;
   }, [pods, showExternalNodes, ipToLocalPodMap, ipToAllPodsMap]);
