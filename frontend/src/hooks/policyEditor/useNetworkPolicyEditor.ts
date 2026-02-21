@@ -5,11 +5,10 @@ import { generateNetworkPolicy } from '../../utils/networkPolicyGenerator';
 
 interface UseNetworkPolicyEditorProps {
   pod: PodNodeData | null;
-  allPods: PodNodeData[];
   isOpen: boolean;
 }
 
-export const useNetworkPolicyEditor = ({ pod, allPods, isOpen }: UseNetworkPolicyEditorProps) => {
+export const useNetworkPolicyEditor = ({ pod, isOpen }: UseNetworkPolicyEditorProps) => {
   const [policy, setPolicy] = useState<NetworkPolicy | null>(null);
   const [isLoading, setIsLoading] = useState(false);
   const [isIngressExpanded, setIsIngressExpanded] = useState(true);
@@ -25,8 +24,9 @@ export const useNetworkPolicyEditor = ({ pod, allPods, isOpen }: UseNetworkPolic
     // Only generate if we have a pod and haven't generated for this pod yet
     if (isOpen && pod && currentPodId !== lastGeneratedPodId.current) {
       lastGeneratedPodId.current = currentPodId;
+      // eslint-disable-next-line react-hooks/set-state-in-effect
       setIsLoading(true);
-      generateNetworkPolicy(pod, allPods)
+      generateNetworkPolicy(pod)
         .then((generatedPolicy) => {
           setPolicy(generatedPolicy);
         })
@@ -34,7 +34,7 @@ export const useNetworkPolicyEditor = ({ pod, allPods, isOpen }: UseNetworkPolic
           setIsLoading(false);
         });
     }
-  }, [isOpen, pod, allPods]);
+  }, [isOpen, pod]);
 
   const addIngressRule = () => {
     if (!policy) return;
@@ -542,7 +542,8 @@ export const useNetworkPolicyEditor = ({ pod, allPods, isOpen }: UseNetworkPolic
             delete newLabels[labelKey];
 
             if (Object.keys(newLabels).length === 0) {
-              const { podSelector, ...rest } = peer;
+              // eslint-disable-next-line @typescript-eslint/no-unused-vars
+              const { podSelector: _podSelector, ...rest } = peer;
               return rest;
             }
 
@@ -555,7 +556,8 @@ export const useNetworkPolicyEditor = ({ pod, allPods, isOpen }: UseNetworkPolic
             delete newLabels[labelKey];
 
             if (Object.keys(newLabels).length === 0) {
-              const { namespaceSelector, ...rest } = peer;
+              // eslint-disable-next-line @typescript-eslint/no-unused-vars
+              const { namespaceSelector: _namespaceSelector, ...rest } = peer;
               return rest;
             }
 
@@ -600,7 +602,8 @@ export const useNetworkPolicyEditor = ({ pod, allPods, isOpen }: UseNetworkPolic
           if (i !== peerIndex) return peer;
 
           if (peer.podSelector) {
-            const { podSelector, ...rest } = peer;
+            // eslint-disable-next-line @typescript-eslint/no-unused-vars
+            const { podSelector: _podSelector, ...rest } = peer;
             return rest;
           } else {
             return {

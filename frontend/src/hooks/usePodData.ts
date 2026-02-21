@@ -38,8 +38,10 @@ export const usePodData = (namespace: string) => {
 
       setServices(allServices);
 
-      // Keep all active pods for cross-namespace IP resolution
-      setAllPodsLookup(allPods.filter((pod) => !pod.is_dead));
+      // Keep all pods (including dead) for cross-namespace IP resolution.
+      // Dead pods resolve so their IPs are recognised as cluster-internal
+      // and silently excluded from the graph rather than shown as "Internet".
+      setAllPodsLookup(allPods);
 
       // Filter by namespace and only show active pods (is_dead = false)
       const filteredPods = allPods.filter(

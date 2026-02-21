@@ -21,7 +21,7 @@ interface NetworkPolicyEditorProps {
   allPods?: PodNodeData[];
 }
 
-const NetworkPolicyEditor: React.FC<NetworkPolicyEditorProps> = ({ isOpen, onClose, pod, allPods = [] }) => {
+const NetworkPolicyEditor: React.FC<NetworkPolicyEditorProps> = ({ isOpen, onClose, pod }) => {
   const [policyType, setPolicyType] = useState<PolicyType>('network');
   const [yamlView, setYamlView] = useState(true); // Default to YAML view
 
@@ -50,7 +50,7 @@ const NetworkPolicyEditor: React.FC<NetworkPolicyEditorProps> = ({ isOpen, onClo
     addLabelToPeer,
     removeLabelFromPeer,
     togglePodSelector,
-  } = useNetworkPolicyEditor({ pod, allPods, isOpen: isOpen && policyType === 'network' });
+  } = useNetworkPolicyEditor({ pod, isOpen: isOpen && policyType === 'network' });
 
   // Seccomp profile management
   const {
@@ -261,7 +261,7 @@ const NetworkPolicyEditor: React.FC<NetworkPolicyEditorProps> = ({ isOpen, onClo
                                               ? 'inNamespace'
                                               : 'inCluster'
                                           }
-                                          onChange={(e) => changePeerType(rule.id, peerIndex, e.target.value as any, 'ingress')}
+                                          onChange={(e) => changePeerType(rule.id, peerIndex, e.target.value as 'external' | 'inNamespace' | 'inCluster', 'ingress')}
                                           className="bg-hubble-card text-secondary px-2 py-1 rounded border border-hubble-border
                                                      focus:outline-none focus:ring-1 focus:ring-hubble-accent text-xs"
                                         >
@@ -714,7 +714,7 @@ const NetworkPolicyEditor: React.FC<NetworkPolicyEditorProps> = ({ isOpen, onClo
                                               ? 'inNamespace'
                                               : 'inCluster'
                                           }
-                                          onChange={(e) => changePeerType(rule.id, peerIndex, e.target.value as any, 'egress')}
+                                          onChange={(e) => changePeerType(rule.id, peerIndex, e.target.value as 'external' | 'inNamespace' | 'inCluster', 'egress')}
                                           className="bg-hubble-card text-secondary px-2 py-1 rounded border border-hubble-border
                                                      focus:outline-none focus:ring-1 focus:ring-hubble-accent text-xs"
                                         >

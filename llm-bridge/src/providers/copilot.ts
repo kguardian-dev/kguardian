@@ -2,6 +2,7 @@ import axios from "axios";
 import type { ChatRequest, ChatResponse } from "../types/index.js";
 import { LLMProvider } from "../types/index.js";
 import { BrokerClient } from "../brokerClient.js";
+import { serializeToolResult } from "./truncate.js";
 
 interface CopilotMessage {
   role: string;
@@ -114,20 +115,11 @@ export async function callCopilot(
           arguments: parsedArgs,
         });
 
-        let content: string;
-        if (result.error) {
-          content = `Error: ${result.error}`;
-        } else if (result.data) {
-          content = typeof result.data === 'string' ? result.data : JSON.stringify(result.data);
-        } else {
-          content = 'No data returned';
-        }
-
         return {
           tool_call_id: toolCall.id,
           role: "tool",
           name: toolCall.function.name,
-          content,
+          content: serializeToolResult(result),
         };
       })
     );

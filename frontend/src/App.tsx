@@ -29,6 +29,8 @@ function App() {
   const [tableHeight, setTableHeight] = useState<number>(UI_DIMENSIONS.TABLE_DEFAULT_HEIGHT);
   const [isResizing, setIsResizing] = useState(false);
   const [showExternalNodes, setShowExternalNodes] = useState(true);
+  const [showTraffic, setShowTraffic] = useState(true);
+  const [layoutDirection, setLayoutDirection] = useState<'LR' | 'TB'>('LR');
 
   const { namespaces } = useNamespaces();
   const { pods, allPodsLookup, services, loading, error, togglePodExpansion, refreshData } = usePodData(namespace);
@@ -194,6 +196,10 @@ function App() {
                 services={services}
                 showExternalNodes={showExternalNodes}
                 onToggleExternalNodes={() => setShowExternalNodes(prev => !prev)}
+                showTraffic={showTraffic}
+                onToggleTraffic={() => setShowTraffic(prev => !prev)}
+                layoutDirection={layoutDirection}
+                onToggleLayoutDirection={() => setLayoutDirection(prev => prev === 'LR' ? 'TB' : 'LR')}
               />
             </div>
 
@@ -226,7 +232,7 @@ function App() {
                 className="border-t border-hubble-border bg-hubble-dark overflow-hidden"
                 style={{ height: `${tableHeight}px` }}
               >
-                <DataTable selectedPod={selectedPod} allPodsLookup={allPodsLookup} />
+                <DataTable selectedPod={selectedPod} allPodsLookup={allPodsLookup} services={services} />
               </div>
             </div>
           </>

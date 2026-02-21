@@ -5,6 +5,7 @@ import type { PodNodeData } from '../types';
 
 interface PodNodeProps {
   data: PodNodeData & {
+    layoutDirection?: 'LR' | 'TB';
     onToggle: (id: string) => void;
     onBuildPolicy?: (pod: PodNodeData) => void;
   };
@@ -13,9 +14,12 @@ interface PodNodeProps {
 
 const PodNode: React.FC<PodNodeProps> = React.memo(({ data, selected }) => {
   const trafficCount = data.traffic?.length || 0;
-  const identityName = data.pod.pod_identity || data.pod.pod_name;
+  const identityName = data.label || data.pod.pod_identity || data.pod.pod_name;
   const podCount = data.pods?.length || 1;
   const isExternal = data.isExternal ?? false;
+  const isTB = data.layoutDirection === 'TB';
+  const targetPosition = isTB ? Position.Top : Position.Left;
+  const sourcePosition = isTB ? Position.Bottom : Position.Right;
 
   // Count total syscalls from comma-separated strings
   const syscallCount = data.syscalls?.reduce((total, syscallRecord) => {
@@ -41,7 +45,7 @@ const PodNode: React.FC<PodNodeProps> = React.memo(({ data, selected }) => {
         ${borderClasses}
       `}
     >
-      <Handle type="target" position={Position.Left} />
+      <Handle type="target" position={targetPosition} />
 
       <div className="flex items-start justify-between gap-2">
         <div className="flex items-center gap-2 flex-1">
@@ -62,14 +66,14 @@ const PodNode: React.FC<PodNodeProps> = React.memo(({ data, selected }) => {
             <div className="font-semibold text-sm text-primary">
               {identityName}
             </div>
-            {data.externalNamespace && (
+            {data.externalNamespace && data.externalNamespace !== 'internet' && data.externalNamespace !== 'cluster' && (
               <div className="text-xs text-tertiary">
                 ns: {data.externalNamespace}
               </div>
             )}
             {podCount > 1 && (
               <div className="text-xs text-tertiary">
-                {podCount} {isExternal ? (data.externalNamespace === 'internet' ? 'IPs' : 'pods') : 'replicas'}
+                {podCount} {isExternal ? ((data.externalNamespace === 'internet' || data.externalNamespace === 'cluster') ? 'IPs' : 'pods') : 'replicas'}
               </div>
             )}
           </div>
@@ -119,7 +123,7 @@ const PodNode: React.FC<PodNodeProps> = React.memo(({ data, selected }) => {
         </div>
       )}
 
-      <Handle type="source" position={Position.Right} />
+      <Handle type="source" position={sourcePosition} />
     </div>
   );
 }, (prevProps, nextProps) => {
@@ -131,7 +135,8 @@ const PodNode: React.FC<PodNodeProps> = React.memo(({ data, selected }) => {
     prevProps.selected === nextProps.selected &&
     prevProps.data.traffic?.length === nextProps.data.traffic?.length &&
     prevProps.data.syscalls?.length === nextProps.data.syscalls?.length &&
-    prevProps.data.isExternal === nextProps.data.isExternal
+    prevProps.data.isExternal === nextProps.data.isExternal &&
+    prevProps.data.layoutDirection === nextProps.data.layoutDirection
   );
 });
 

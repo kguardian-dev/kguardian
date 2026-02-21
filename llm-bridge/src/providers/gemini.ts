@@ -2,6 +2,7 @@ import axios from "axios";
 import type { ChatRequest, ChatResponse } from "../types/index.js";
 import { LLMProvider } from "../types/index.js";
 import { BrokerClient } from "../brokerClient.js";
+import { serializeToolResult } from "./truncate.js";
 
 const MAX_TOOL_ROUNDS = 10;
 
@@ -108,7 +109,10 @@ export async function callGemini(
         return {
           functionResponse: {
             name: part.functionCall.name,
-            response: result.error ? { error: result.error } : result.data,
+            response: (() => {
+              const serialized = serializeToolResult(result);
+              try { return JSON.parse(serialized); } catch { return { data: serialized }; }
+            })(),
           },
         };
       })

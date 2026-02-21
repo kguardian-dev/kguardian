@@ -26,7 +26,7 @@ async function resolveTrafficIdentity(ip: string): Promise<TrafficIdentity> {
         isExternal: false,
       };
     }
-  } catch (error) {
+  } catch {
     // Service lookup failed, continue to pod lookup
   }
 
@@ -40,7 +40,7 @@ async function resolveTrafficIdentity(ip: string): Promise<TrafficIdentity> {
         isExternal: false,
       };
     }
-  } catch (error) {
+  } catch {
     // Pod lookup failed, continue to external
   }
 
@@ -48,7 +48,7 @@ async function resolveTrafficIdentity(ip: string): Promise<TrafficIdentity> {
   return { isExternal: true };
 }
 
-export async function generateNetworkPolicy(pod: PodNodeData, _allPods: PodNodeData[] = []): Promise<NetworkPolicy> {
+export async function generateNetworkPolicy(pod: PodNodeData): Promise<NetworkPolicy> {
   const ingressRules: NetworkPolicyRule[] = [];
   const egressRules: NetworkPolicyRule[] = [];
 
@@ -141,7 +141,7 @@ export async function generateNetworkPolicy(pod: PodNodeData, _allPods: PodNodeD
           return labels;
         }
       }
-    } catch (error) {
+    } catch {
       // If we can't fetch labels, return null
     }
     return null;

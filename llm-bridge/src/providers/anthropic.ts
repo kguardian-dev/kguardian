@@ -2,6 +2,7 @@ import axios from "axios";
 import type { ChatRequest, ChatResponse } from "../types/index.js";
 import { LLMProvider } from "../types/index.js";
 import { BrokerClient } from "../brokerClient.js";
+import { serializeToolResult } from "./truncate.js";
 
 interface AnthropicTool {
   name: string;
@@ -104,7 +105,7 @@ export async function callAnthropic(
         return {
           type: "tool_result",
           tool_use_id: toolUse.id,
-          content: result.error ? result.error : JSON.stringify(result.data),
+          content: serializeToolResult(result),
         };
       })
     );
