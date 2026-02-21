@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback } from 'react';
-import type { PodInfo, PodNodeData } from '../types';
+import type { PodInfo, PodNodeData, ServiceInfo } from '../types';
 import { apiClient } from '../services/api';
 
 async function withConcurrencyLimit<T>(tasks: (() => Promise<T>)[], limit: number): Promise<T[]> {
@@ -21,6 +21,7 @@ async function withConcurrencyLimit<T>(tasks: (() => Promise<T>)[], limit: numbe
 export const usePodData = (namespace: string) => {
   const [pods, setPods] = useState<PodNodeData[]>([]);
   const [allPodsLookup, setAllPodsLookup] = useState<PodInfo[]>([]);
+  const [services, setServices] = useState<ServiceInfo[]>([]);
   const [loading, setLoading] = useState<boolean>(true);
   const [error, setError] = useState<string | null>(null);
 
@@ -29,8 +30,13 @@ export const usePodData = (namespace: string) => {
     setError(null);
 
     try {
-      // Fetch all pods from broker
-      const allPods = await apiClient.getAllPods();
+      // Fetch all pods and services from broker
+      const [allPods, allServices] = await Promise.all([
+        apiClient.getAllPods(),
+        apiClient.getAllServices(),
+      ]);
+
+      setServices(allServices);
 
       // Keep all active pods for cross-namespace IP resolution
       setAllPodsLookup(allPods.filter((pod) => !pod.is_dead));
@@ -110,6 +116,7 @@ export const usePodData = (namespace: string) => {
   return {
     pods,
     allPodsLookup,
+    services,
     loading,
     error,
     togglePodExpansion,

@@ -31,7 +31,7 @@ function App() {
   const [showExternalNodes, setShowExternalNodes] = useState(true);
 
   const { namespaces } = useNamespaces();
-  const { pods, allPodsLookup, loading, error, togglePodExpansion, refreshData } = usePodData(namespace);
+  const { pods, allPodsLookup, services, loading, error, togglePodExpansion, refreshData } = usePodData(namespace);
 
   // Calculate the right padding for content when AI panel is docked (in pixels)
   const contentPaddingRightPx = aiSidePanel.isSidePanel
@@ -191,6 +191,7 @@ function App() {
                 selectedPodId={selectedPod?.id || null}
                 onBuildPolicy={handleBuildPolicy}
                 allPodsLookup={allPodsLookup}
+                services={services}
                 showExternalNodes={showExternalNodes}
                 onToggleExternalNodes={() => setShowExternalNodes(prev => !prev)}
               />

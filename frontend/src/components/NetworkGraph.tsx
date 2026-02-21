@@ -14,12 +14,13 @@ import type { Node, Edge } from 'reactflow';
 import 'reactflow/dist/style.css';
 import { Eye, EyeOff } from 'lucide-react';
 import PodNode from './PodNode';
-import type { PodNodeData, PodInfo } from '../types';
+import type { PodNodeData, PodInfo, ServiceInfo } from '../types';
 import { UI_TIMING } from '../constants/ui';
 
 interface NetworkGraphProps {
   pods: PodNodeData[];
   allPodsLookup: PodInfo[];
+  services: ServiceInfo[];
   showExternalNodes: boolean;
   onToggleExternalNodes: () => void;
   onPodToggle: (podId: string) => void;
@@ -39,6 +40,7 @@ const noopToggle = () => {};
 const NetworkGraphInner: React.FC<NetworkGraphProps> = ({
   pods,
   allPodsLookup,
+  services,
   showExternalNodes,
   onToggleExternalNodes,
   onPodToggle,
@@ -75,6 +77,38 @@ const NetworkGraphInner: React.FC<NetworkGraphProps> = ({
     return map;
   }, [pods]);
 
+  // Build service ClusterIP → local PodNodeData map by matching selectors
+  const svcIpToLocalPodMap = useMemo(() => {
+    const map = new Map<string, PodNodeData>();
+    if (!services.length) return map;
+
+    services.forEach((svc) => {
+      if (!svc.svc_ip) return;
+
+      // Extract selector from the service spec
+      const selector = (svc.service_spec as Record<string, unknown>)?.spec as
+        Record<string, unknown> | undefined;
+      const selectorLabels = selector?.selector as Record<string, string> | undefined;
+      if (!selectorLabels || Object.keys(selectorLabels).length === 0) return;
+
+      // Find a local pod whose workload_selector_labels match the service selector
+      for (const pod of pods) {
+        const podLabels = pod.pod.workload_selector_labels;
+        if (!podLabels) continue;
+
+        const matches = Object.entries(selectorLabels).every(
+          ([k, v]) => podLabels[k] === v
+        );
+        if (matches) {
+          map.set(svc.svc_ip, pod);
+          break;
+        }
+      }
+    });
+
+    return map;
+  }, [services, pods]);
+
   // Discover external endpoints from traffic data
   const externalNodes = useMemo(() => {
     if (!showExternalNodes) return [];
@@ -93,6 +127,9 @@ const NetworkGraphInner: React.FC<NetworkGraphProps> = ({
         // Skip if this IP belongs to an in-namespace pod
         if (ipToLocalPodMap.has(remoteIp)) return;
 
+        // Skip if this IP is a service ClusterIP that resolves to a local pod
+        if (svcIpToLocalPodMap.has(remoteIp)) return;
+
         // This is an external IP - either cross-namespace pod or unknown
         if (!externalMap.has(remoteIp)) {
           const remotePod = ipToAllPodsMap.get(remoteIp) || null;
@@ -104,6 +141,12 @@ const NetworkGraphInner: React.FC<NetworkGraphProps> = ({
         }
         externalMap.get(remoteIp)!.trafficCount++;
       });
+    });
+
+    // Build service IP lookup for classifying external IPs
+    const svcIpLookup = new Map<string, ServiceInfo>();
+    services.forEach((svc) => {
+      if (svc.svc_ip) svcIpLookup.set(svc.svc_ip, svc);
     });
 
     // Group cross-namespace pods by identity, aggregate unknown IPs into one node
@@ -127,16 +170,39 @@ const NetworkGraphInner: React.FC<NetworkGraphProps> = ({
         group.pods.push(ext.podInfo);
         group.trafficCount += ext.trafficCount;
       } else {
-        // Unknown external IP — aggregate into single Internet node
-        internetTrafficCount += ext.trafficCount;
-        internetIps.push({
-          pod_name: ext.ip,
-          pod_ip: ext.ip,
-          pod_namespace: 'internet',
-          time_stamp: '',
-          node_name: '',
-          is_dead: false,
-        });
+        // Check if this IP is a known service ClusterIP
+        const svc = svcIpLookup.get(ext.ip);
+        if (svc) {
+          // Show as a named service node instead of raw IP
+          const ns = svc.svc_namespace || 'unknown';
+          const name = svc.svc_name || ext.ip;
+          const key = `external-svc-${ns}-${name}`;
+          if (!identityMap.has(key)) {
+            identityMap.set(key, { pods: [], trafficCount: 0, ip: ext.ip });
+          }
+          const group = identityMap.get(key)!;
+          group.pods.push({
+            pod_name: name,
+            pod_ip: ext.ip,
+            pod_namespace: ns,
+            pod_identity: name,
+            time_stamp: '',
+            node_name: '',
+            is_dead: false,
+          });
+          group.trafficCount += ext.trafficCount;
+        } else {
+          // Unknown external IP — aggregate into single Internet node
+          internetTrafficCount += ext.trafficCount;
+          internetIps.push({
+            pod_name: ext.ip,
+            pod_ip: ext.ip,
+            pod_namespace: 'internet',
+            time_stamp: '',
+            node_name: '',
+            is_dead: false,
+          });
+        }
       }
     });
 
@@ -178,7 +244,7 @@ const NetworkGraphInner: React.FC<NetworkGraphProps> = ({
     }
 
     return externalPodNodes;
-  }, [pods, showExternalNodes, ipToLocalPodMap, ipToAllPodsMap]);
+  }, [pods, showExternalNodes, ipToLocalPodMap, ipToAllPodsMap, svcIpToLocalPodMap, services]);
 
   // Combine in-namespace and external pods for rendering
   const allDisplayPods = useMemo(() => {
@@ -221,7 +287,7 @@ const NetworkGraphInner: React.FC<NetworkGraphProps> = ({
     const edges: Edge[] = [];
     const edgeMap = new Map<string, { count: number; isExternal: boolean }>();
 
-    // Build combined IP lookup: local pods + external nodes
+    // Build combined IP lookup: local pods + external nodes + service ClusterIPs
     const ipToNodeMap = new Map<string, PodNodeData>();
     allDisplayPods.forEach((pod) => {
       if (pod.pod.pod_ip) {
@@ -232,6 +298,13 @@ const NetworkGraphInner: React.FC<NetworkGraphProps> = ({
           ipToNodeMap.set(p.pod_ip, pod);
         }
       });
+    });
+
+    // Add service ClusterIPs that resolve to local pods
+    svcIpToLocalPodMap.forEach((pod, svcIp) => {
+      if (!ipToNodeMap.has(svcIp)) {
+        ipToNodeMap.set(svcIp, pod);
+      }
     });
 
     pods.forEach((pod) => {
@@ -287,7 +360,7 @@ const NetworkGraphInner: React.FC<NetworkGraphProps> = ({
     });
 
     return edges;
-  }, [pods, allDisplayPods]);
+  }, [pods, allDisplayPods, svcIpToLocalPodMap]);
 
   const [nodes, setNodes, onNodesChange] = useNodesState(initialNodes);
   const [edges, setEdges, onEdgesChange] = useEdgesState(initialEdges);
