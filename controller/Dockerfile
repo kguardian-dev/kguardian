@@ -19,7 +19,7 @@ ENV DEBIAN_FRONTEND=noninteractive
 
 # RUN rm /var/lib/dpkg/info/libc-bin.*
 # RUN apt-get clean && apt-get update &&  apt-get install libc-bin -y
-RUN apt-get update && apt-get install -y util-linux iproute2 libelf-dev
+RUN apt-get update && apt-get install -y util-linux iproute2 libelf-dev ca-certificates && rm -rf /var/lib/apt/lists/*
 
 COPY --from=builder --chown=root:root --chmod=0755 /artifacts/$TARGETPLATFORM/kguardian /usr/local/bin
 
