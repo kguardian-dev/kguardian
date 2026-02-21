@@ -69,7 +69,7 @@ const PodNode: React.FC<PodNodeProps> = React.memo(({ data, selected }) => {
             )}
             {podCount > 1 && (
               <div className="text-xs text-tertiary">
-                {podCount} replicas
+                {podCount} {isExternal ? (data.externalNamespace === 'internet' ? 'IPs' : 'pods') : 'replicas'}
               </div>
             )}
           </div>
@@ -78,22 +78,28 @@ const PodNode: React.FC<PodNodeProps> = React.memo(({ data, selected }) => {
 
       {data.isExpanded && (
         <div className="mt-3 pt-3 border-t border-hubble-border space-y-2">
-          <div className="flex gap-3 text-xs">
-            <div className="flex items-center gap-1">
-              <Network className="w-3 h-3 text-hubble-success" />
-              <span className="text-secondary">
-                {trafficCount} connections
-              </span>
+          {trafficCount === 0 && syscallCount === 0 ? (
+            <div className="text-xs text-tertiary italic">
+              No traffic or syscalls recorded yet
             </div>
-
-            {syscallCount > 0 && (
+          ) : (
+            <div className="flex gap-3 text-xs">
               <div className="flex items-center gap-1">
+                <Network className="w-3 h-3 text-hubble-success" />
                 <span className="text-secondary">
-                  {syscallCount} syscalls
+                  {trafficCount} connections
                 </span>
               </div>
-            )}
-          </div>
+
+              {syscallCount > 0 && (
+                <div className="flex items-center gap-1">
+                  <span className="text-secondary">
+                    {syscallCount} syscalls
+                  </span>
+                </div>
+              )}
+            </div>
+          )}
 
           {!isExternal && (
             <button
