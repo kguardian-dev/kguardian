@@ -1,5 +1,17 @@
 # Changelog
 
+## [1.7.0](https://github.com/kguardian-dev/kguardian/compare/broker/v1.6.1...broker/v1.7.0) (2026-02-22)
+
+
+### Features
+
+* Upgrade crates ([#664](https://github.com/kguardian-dev/kguardian/issues/664)) ([0f8e1e0](https://github.com/kguardian-dev/kguardian/commit/0f8e1e0744d644bb5b588ceaaa740d07fbb514e8))
+
+
+### Bug Fixes
+
+* **frontend,llm-bridge,mcp-server:** remediate security, performance, and stability issues ([#670](https://github.com/kguardian-dev/kguardian/issues/670)) ([f319cc0](https://github.com/kguardian-dev/kguardian/commit/f319cc008a7134dc1b8382fbc8532696c5c8febe))
+
 ## [1.6.1](https://github.com/kguardian-dev/kguardian/compare/broker/v1.6.0...broker/v1.6.1) (2026-02-18)
 
 
