@@ -6,14 +6,19 @@ image = "ghcr.io/cross-rs/aarch64-unknown-linux-gnu:edge"
 pre-build = [
     "dpkg --add-architecture $CROSS_DEB_ARCH", 
     "apt-get update -y",
-    "apt-get install -y libelf-dev:arm64 zlib1g-dev:arm64 gcc-aarch64-linux-gnu protobuf-compiler libseccomp-dev:arm64 libbpf-dev libc6-dev-arm64-cross clang"
+    "apt-get install -y libelf-dev:arm64 zlib1g-dev:arm64 gcc-aarch64-linux-gnu libseccomp-dev:arm64 libbpf-dev libc6-dev-arm64-cross clang cmake curl unzip",
+    "apt-get clean",
+    "ln -sf /usr/bin/clang /usr/local/bin/cc",
+    "curl -fsSL -o /tmp/protoc.zip https://github.com/protocolbuffers/protobuf/releases/download/v25.6/protoc-25.6-linux-x86_64.zip && unzip -o /tmp/protoc.zip -d /usr/local bin/protoc 'include/*' && rm /tmp/protoc.zip"
 ]
 
 [target.x86_64-unknown-linux-gnu]
 image = "ghcr.io/cross-rs/x86_64-unknown-linux-gnu:edge"
 pre-build = [
-    "dpkg --add-architecture $CROSS_DEB_ARCH", 
+    "dpkg --add-architecture $CROSS_DEB_ARCH",
     "apt-get update",
-    "apt-get install -y libelf-dev zlib1g-dev  gcc-multilib protobuf-compiler libseccomp-dev libbpf-dev libc6 clang",
-    "apt-get clean"
+    "apt-get install -y libelf-dev zlib1g-dev gcc-multilib libseccomp-dev libbpf-dev libc6 clang cmake curl unzip",
+    "apt-get clean",
+    "ln -sf /usr/bin/clang /usr/local/bin/cc",
+    "curl -fsSL -o /tmp/protoc.zip https://github.com/protocolbuffers/protobuf/releases/download/v25.6/protoc-25.6-linux-x86_64.zip && unzip -o /tmp/protoc.zip -d /usr/local bin/protoc 'include/*' && rm /tmp/protoc.zip"
 ]
