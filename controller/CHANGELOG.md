@@ -1,5 +1,19 @@
 # Changelog
 
+## [1.8.0](https://github.com/kguardian-dev/kguardian/compare/controller/v1.7.0...controller/v1.8.0) (2026-02-22)
+
+
+### Features
+
+* Update fix containerd-client for arm arch ([#678](https://github.com/kguardian-dev/kguardian/issues/678)) ([ee4b2ab](https://github.com/kguardian-dev/kguardian/commit/ee4b2ab6ae89fbaffb0050e41a7faba6fb754c23))
+* Upgrade crates ([#664](https://github.com/kguardian-dev/kguardian/issues/664)) ([0f8e1e0](https://github.com/kguardian-dev/kguardian/commit/0f8e1e0744d644bb5b588ceaaa740d07fbb514e8))
+* Upgrade libbpf & containerd-client crates ([#676](https://github.com/kguardian-dev/kguardian/issues/676)) ([82c2dde](https://github.com/kguardian-dev/kguardian/commit/82c2dde276316d1146e4b7db736fc5c4cf44af0e))
+
+
+### Bug Fixes
+
+* **frontend,llm-bridge,mcp-server:** remediate security, performance, and stability issues ([#670](https://github.com/kguardian-dev/kguardian/issues/670)) ([f319cc0](https://github.com/kguardian-dev/kguardian/commit/f319cc008a7134dc1b8382fbc8532696c5c8febe))
+
 ## [1.7.0](https://github.com/kguardian-dev/kguardian/compare/controller/v1.6.0...controller/v1.7.0) (2025-12-20)
 
 
