@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.3.2](https://github.com/kguardian-dev/kguardian/compare/mcp-server/v1.3.1...mcp-server/v1.3.2) (2026-02-22)
+
+
+### Bug Fixes
+
+* **deps:** update module github.com/modelcontextprotocol/go-sdk to v1.3.1 ([#669](https://github.com/kguardian-dev/kguardian/issues/669)) ([4327a01](https://github.com/kguardian-dev/kguardian/commit/4327a0149c32d3c30640c143410d73a369edf7d9))
+* **frontend,llm-bridge,mcp-server:** remediate security, performance, and stability issues ([#670](https://github.com/kguardian-dev/kguardian/issues/670)) ([f319cc0](https://github.com/kguardian-dev/kguardian/commit/f319cc008a7134dc1b8382fbc8532696c5c8febe))
+
 ## [1.3.1](https://github.com/kguardian-dev/kguardian/compare/mcp-server/v1.3.0...mcp-server/v1.3.1) (2026-02-18)
 
 
