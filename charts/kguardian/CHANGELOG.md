@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.8.3](https://github.com/kguardian-dev/kguardian/compare/chart/v1.8.2...chart/v1.8.3) (2026-02-22)
+
+
+### Bug Fixes
+
+* **frontend,llm-bridge,mcp-server:** remediate security, performance, and stability issues ([#670](https://github.com/kguardian-dev/kguardian/issues/670)) ([f319cc0](https://github.com/kguardian-dev/kguardian/commit/f319cc008a7134dc1b8382fbc8532696c5c8febe))
+
 ## [1.8.2](https://github.com/kguardian-dev/kguardian/compare/chart/v1.8.1...chart/v1.8.2) (2026-02-18)
 
 
