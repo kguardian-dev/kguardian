@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.7.1](https://github.com/kguardian-dev/kguardian/compare/frontend/v1.7.0...frontend/v1.7.1) (2026-02-22)
+
+
+### Bug Fixes
+
+* **frontend,llm-bridge,mcp-server:** remediate security, performance, and stability issues ([#670](https://github.com/kguardian-dev/kguardian/issues/670)) ([f319cc0](https://github.com/kguardian-dev/kguardian/commit/f319cc008a7134dc1b8382fbc8532696c5c8febe))
+
 ## [1.7.0](https://github.com/kguardian-dev/kguardian/compare/frontend/v1.6.3...frontend/v1.7.0) (2026-02-18)
 
 
