@@ -13,7 +13,8 @@ use kguardian::syscall::{
     handle_syscall_events, send_syscall_cache_periodically, SyscallEventData,
 };
 use kguardian::{
-    error::Error, models::PodInspect, network::NetworkEventData, pod_reconciler::reconcile_pods_task, pod_watcher::watch_pods,
+    error::Error, models::PodInspect, network::NetworkEventData,
+    pod_reconciler::reconcile_pods_task, pod_watcher::watch_pods,
 };
 
 #[tokio::main]
@@ -87,16 +88,35 @@ async fn main() -> Result<(), Error> {
 
     let syscall_recorder = send_syscall_cache_periodically();
 
-    // Wait for all tasks to complete (they should run indefinitely)
-    tokio::try_join!(
-        service,
-        pods,
-        network_event_handler,
-        syscall_event_handler,
-        netpolicy_drop_handler,
-        syscall_recorder,
-        pod_reconciler,
-        async { ebpf_handle.await? }
-    )?;
+    // Graceful shutdown on SIGTERM/SIGINT
+    let shutdown = async {
+        let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+            .expect("Failed to register SIGTERM handler");
+        let sigint = tokio::signal::ctrl_c();
+        tokio::select! {
+            _ = sigterm.recv() => info!("Received SIGTERM, shutting down"),
+            _ = sigint => info!("Received SIGINT, shutting down"),
+        }
+        Ok::<(), Error>(())
+    };
+
+    // Wait for all tasks to complete or shutdown signal
+    tokio::select! {
+        result = async {
+            tokio::try_join!(
+                service,
+                pods,
+                network_event_handler,
+                syscall_event_handler,
+                netpolicy_drop_handler,
+                syscall_recorder,
+                pod_reconciler,
+                async { ebpf_handle.await? }
+            )
+        } => { result?; }
+        _ = shutdown => {
+            info!("Graceful shutdown complete");
+        }
+    }
     Ok(())
 }

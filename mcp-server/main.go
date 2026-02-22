@@ -25,7 +25,7 @@ func main() {
 	// Get configuration from environment
 	brokerURL := os.Getenv("BROKER_URL")
 	if brokerURL == "" {
-		brokerURL = "http://broker.kguardian.svc.cluster.local:9090"
+		brokerURL = "http://kguardian-broker.kguardian.svc.cluster.local:9090"
 	}
 
 	port := os.Getenv("PORT")
@@ -60,7 +60,9 @@ func main() {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
-		w.Write([]byte("ok"))
+		if _, err := w.Write([]byte("ok")); err != nil {
+			logger.Log.Errorf("health write: %v", err)
+		}
 	})
 	mux.Handle("/", mcpHandler)
 

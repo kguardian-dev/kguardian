@@ -22,7 +22,7 @@ spec:
         {{- include "kguardian.labels" . | nindent 8 }}
         app.kubernetes.io/name: {{ .Values.broker.service.name }}
     spec:
-      automountServiceAccountToken: true
+      automountServiceAccountToken: false
       {{- with .Values.broker.imagePullSecrets }}
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}
@@ -56,8 +56,13 @@ spec:
               containerPort: {{ .Values.broker.container.port }}
               protocol: TCP
           env:
+            - name: DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: kguardian-db-credentials
+                  key: password
             - name: DATABASE_URL
-              value: "postgres://rust@{{ .Values.database.service.name }}.{{ include "kguardian.namespace" . }}.svc.cluster.local:{{ .Values.database.container.port }}/kube"
+              value: "postgres://rust:$(DB_PASSWORD)@{{ .Values.database.service.name }}.{{ include "kguardian.namespace" . }}.svc.cluster.local:{{ .Values.database.container.port }}/kube"
           livenessProbe:
             httpGet:
               path: /health

@@ -1,10 +1,27 @@
 import { useState, useEffect, useCallback } from 'react';
-import type { PodInfo, PodNodeData } from '../types';
+import type { PodInfo, PodNodeData, ServiceInfo } from '../types';
 import { apiClient } from '../services/api';
+
+async function withConcurrencyLimit<T>(tasks: (() => Promise<T>)[], limit: number): Promise<T[]> {
+  const results: T[] = new Array(tasks.length);
+  const executing = new Set<Promise<void>>();
+  for (let i = 0; i < tasks.length; i++) {
+    const index = i;
+    const p = tasks[index]().then(r => { results[index] = r; });
+    const tracked = p.then(() => { executing.delete(tracked); });
+    executing.add(tracked);
+    if (executing.size >= limit) {
+      await Promise.race(executing);
+    }
+  }
+  await Promise.all(executing);
+  return results;
+}
 
 export const usePodData = (namespace: string) => {
   const [pods, setPods] = useState<PodNodeData[]>([]);
   const [allPodsLookup, setAllPodsLookup] = useState<PodInfo[]>([]);
+  const [services, setServices] = useState<ServiceInfo[]>([]);
   const [loading, setLoading] = useState<boolean>(true);
   const [error, setError] = useState<string | null>(null);
 
@@ -13,11 +30,18 @@ export const usePodData = (namespace: string) => {
     setError(null);
 
     try {
-      // Fetch all pods from broker
-      const allPods = await apiClient.getAllPods();
+      // Fetch all pods and services from broker
+      const [allPods, allServices] = await Promise.all([
+        apiClient.getAllPods(),
+        apiClient.getAllServices(),
+      ]);
 
-      // Keep all active pods for cross-namespace IP resolution
-      setAllPodsLookup(allPods.filter((pod) => !pod.is_dead));
+      setServices(allServices);
+
+      // Keep all pods (including dead) for cross-namespace IP resolution.
+      // Dead pods resolve so their IPs are recognised as cluster-internal
+      // and silently excluded from the graph rather than shown as "Internet".
+      setAllPodsLookup(allPods);
 
       // Filter by namespace and only show active pods (is_dead = false)
       const filteredPods = allPods.filter(
@@ -35,35 +59,38 @@ export const usePodData = (namespace: string) => {
         podsByIdentity.get(key)!.push(pod);
       });
 
-      // Fetch traffic and syscalls for each identity group
-      const podDataPromises = Array.from(podsByIdentity.entries()).map(async ([key, podsInGroup]) => {
+      // Fetch traffic and syscalls for each identity group with concurrency limit
+      const identityEntries = Array.from(podsByIdentity.entries());
+      const podDataTasks = identityEntries.map(([key, podsInGroup]) => () => {
         // Use first pod as the primary pod
         const primaryPod = podsInGroup[0];
         const identity = primaryPod.pod_identity || primaryPod.pod_name;
 
-        // Fetch traffic and syscalls for all pods in the group
-        const allTrafficPromises = podsInGroup.map(pod => apiClient.getPodTrafficByName(pod.pod_name));
-        const allSyscallsPromises = podsInGroup.map(pod => apiClient.getPodSyscalls(pod.pod_name));
+        // Fetch traffic and syscalls for all pods in the group with concurrency limit
+        const trafficTasks = podsInGroup.map(pod => () => apiClient.getPodTrafficByName(pod.pod_name));
+        const syscallTasks = podsInGroup.map(pod => () => apiClient.getPodSyscalls(pod.pod_name));
 
-        const allTraffic = await Promise.all(allTrafficPromises);
-        const allSyscalls = await Promise.all(allSyscallsPromises);
+        return Promise.all([
+          withConcurrencyLimit(trafficTasks, 10),
+          withConcurrencyLimit(syscallTasks, 10),
+        ]).then(([allTraffic, allSyscalls]) => {
+          // Merge all traffic and syscalls
+          const mergedTraffic = allTraffic.flat();
+          const mergedSyscalls = allSyscalls.flat();
 
-        // Merge all traffic and syscalls
-        const mergedTraffic = allTraffic.flat();
-        const mergedSyscalls = allSyscalls.flat();
-
-        return {
-          id: key,
-          label: identity,
-          pod: primaryPod, // Primary pod for backward compatibility
-          pods: podsInGroup, // All pods in this identity
-          traffic: mergedTraffic,
-          syscalls: mergedSyscalls.length > 0 ? mergedSyscalls : undefined,
-          isExpanded: false,
-        } as PodNodeData;
+          return {
+            id: key,
+            label: identity,
+            pod: primaryPod, // Primary pod for backward compatibility
+            pods: podsInGroup, // All pods in this identity
+            traffic: mergedTraffic,
+            syscalls: mergedSyscalls.length > 0 ? mergedSyscalls : undefined,
+            isExpanded: false,
+          } as PodNodeData;
+        });
       });
 
-      const podData = await Promise.all(podDataPromises);
+      const podData = await withConcurrencyLimit(podDataTasks, 10);
       setPods(podData);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Unknown error occurred');
@@ -91,6 +118,7 @@ export const usePodData = (namespace: string) => {
   return {
     pods,
     allPodsLookup,
+    services,
     loading,
     error,
     togglePodExpansion,

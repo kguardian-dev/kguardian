@@ -18,7 +18,7 @@ spec:
         app.kubernetes.io/name: {{ .Values.database.service.name }}
     spec:
       serviceAccountName: {{ default "database" .Values.database.serviceAccount.name }}
-      automountServiceAccountToken: true
+      automountServiceAccountToken: false
       securityContext:
         {{- toYaml .Values.database.podSecurityContext | nindent 8 }}
       containers:
@@ -36,8 +36,11 @@ spec:
           env:
             - name: POSTGRES_USER
               value: rust
-            - name: POSTGRES_HOST_AUTH_METHOD
-              value: trust
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: kguardian-db-credentials
+                  key: password
             - name: POSTGRES_DB
               value: kube
           livenessProbe:

@@ -2,6 +2,7 @@ import axios from "axios";
 import type { ChatRequest, ChatResponse } from "../types/index.js";
 import { LLMProvider } from "../types/index.js";
 import { BrokerClient } from "../brokerClient.js";
+import { serializeToolResult } from "./truncate.js";
 
 interface CopilotMessage {
   role: string;
@@ -24,8 +25,10 @@ export async function callCopilot(
   }
 
   const model = request.model || "gpt-4o";
-  const systemPrompt =
-    request.systemPrompt || BrokerClient.getSystemPrompt();
+  const basePrompt = BrokerClient.getSystemPrompt();
+  const systemPrompt = request.context
+    ? `${basePrompt}\n\nUser context: ${request.context}`
+    : basePrompt;
 
   // Build messages with history
   const messages: CopilotMessage[] = [
@@ -60,11 +63,17 @@ export async function callCopilot(
 
   // Multi-round tool calling loop
   for (let round = 0; round < MAX_TOOL_ROUNDS; round++) {
-    const response = await axios.post(
-      "https://api.githubcopilot.com/chat/completions",
-      { model, messages, tools, tool_choice: "auto" },
-      { headers }
-    );
+    let response;
+    try {
+      response = await axios.post(
+        "https://api.githubcopilot.com/chat/completions",
+        { model, messages, tools, tool_choice: "auto" },
+        { headers, timeout: 120000 }
+      );
+    } catch (error: any) {
+      console.error("Copilot API Error:", error.response?.data?.error?.message || error.message);
+      throw new Error(`Copilot API error: ${error.response?.data?.error?.message || error.message}`);
+    }
 
     const choice = response.data.choices[0];
     const message = choice.message;
@@ -89,25 +98,28 @@ export async function callCopilot(
     // Execute tool calls and append results
     const toolResults = await Promise.all(
       message.tool_calls.map(async (toolCall: any) => {
+        let parsedArgs: Record<string, any>;
+        try {
+          parsedArgs = JSON.parse(toolCall.function.arguments);
+        } catch {
+          return {
+            tool_call_id: toolCall.id,
+            role: "tool",
+            name: toolCall.function.name,
+            content: "Failed to parse tool arguments",
+          };
+        }
+
         const result = await brokerClient.executeTool({
           name: toolCall.function.name,
-          arguments: JSON.parse(toolCall.function.arguments),
+          arguments: parsedArgs,
         });
-
-        let content: string;
-        if (result.error) {
-          content = `Error: ${result.error}`;
-        } else if (result.data) {
-          content = typeof result.data === 'string' ? result.data : JSON.stringify(result.data);
-        } else {
-          content = 'No data returned';
-        }
 
         return {
           tool_call_id: toolCall.id,
           role: "tool",
           name: toolCall.function.name,
-          content,
+          content: serializeToolResult(result),
         };
       })
     );
@@ -119,7 +131,7 @@ export async function callCopilot(
   const finalResponse = await axios.post(
     "https://api.githubcopilot.com/chat/completions",
     { model, messages },
-    { headers }
+    { headers, timeout: 120000 }
   );
 
   return {

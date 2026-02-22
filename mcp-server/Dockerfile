@@ -20,7 +20,7 @@ COPY tools ./tools
 RUN CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo -o kguardian-mcp .
 
 # Production stage
-FROM alpine:latest
+FROM alpine:3.21
 
 WORKDIR /app
 
@@ -31,7 +31,7 @@ RUN apk --no-cache add ca-certificates
 COPY --from=builder /app/kguardian-mcp .
 
 # Set environment variables
-ENV BROKER_URL=http://broker.kguardian.svc.cluster.local:9090
+ENV BROKER_URL=http://kguardian-broker.kguardian.svc.cluster.local:9090
 ENV PORT=8081
 
 # Create non-root user

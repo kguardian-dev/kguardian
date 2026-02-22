@@ -1,6 +1,7 @@
 package tools
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -11,6 +12,9 @@ import (
 	"github.com/kguardian-dev/kguardian/mcp-server/logger"
 	"github.com/sirupsen/logrus"
 )
+
+// maxResponseBytes is the maximum size of a broker response body (10 MB).
+const maxResponseBytes = 10 * 1024 * 1024
 
 // BrokerClient handles communication with the kguardian broker
 type BrokerClient struct {
@@ -29,58 +33,63 @@ func NewBrokerClient(baseURL string) *BrokerClient {
 }
 
 // GetPodNetworkTraffic retrieves network traffic data for a pod
-func (c *BrokerClient) GetPodNetworkTraffic(namespace, podName string) (interface{}, error) {
+func (c *BrokerClient) GetPodNetworkTraffic(ctx context.Context, namespace, podName string) (interface{}, error) {
 	// Broker expects just the pod name in the URL
 	reqURL := fmt.Sprintf("%s/pod/traffic/%s", c.baseURL, url.PathEscape(podName))
-	return c.get(reqURL)
+	return c.get(ctx, reqURL)
 }
 
 // GetPodSyscalls retrieves syscall data for a pod
-func (c *BrokerClient) GetPodSyscalls(namespace, podName string) (interface{}, error) {
+func (c *BrokerClient) GetPodSyscalls(ctx context.Context, namespace, podName string) (interface{}, error) {
 	// Broker expects just the pod name in the URL
 	reqURL := fmt.Sprintf("%s/pod/syscalls/%s", c.baseURL, url.PathEscape(podName))
-	return c.get(reqURL)
+	return c.get(ctx, reqURL)
 }
 
 // GetPodByIP retrieves pod details by IP address
-func (c *BrokerClient) GetPodByIP(ip string) (interface{}, error) {
+func (c *BrokerClient) GetPodByIP(ctx context.Context, ip string) (interface{}, error) {
 	reqURL := fmt.Sprintf("%s/pod/ip/%s", c.baseURL, url.PathEscape(ip))
-	return c.get(reqURL)
+	return c.get(ctx, reqURL)
 }
 
 // GetServiceByIP retrieves service details by IP address
-func (c *BrokerClient) GetServiceByIP(ip string) (interface{}, error) {
+func (c *BrokerClient) GetServiceByIP(ctx context.Context, ip string) (interface{}, error) {
 	reqURL := fmt.Sprintf("%s/svc/ip/%s", c.baseURL, url.PathEscape(ip))
-	return c.get(reqURL)
+	return c.get(ctx, reqURL)
 }
 
 // GetAllPodTraffic retrieves all pod traffic in the cluster
-func (c *BrokerClient) GetAllPodTraffic() (interface{}, error) {
+func (c *BrokerClient) GetAllPodTraffic(ctx context.Context) (interface{}, error) {
 	reqURL := fmt.Sprintf("%s/pod/traffic", c.baseURL)
-	return c.get(reqURL)
+	return c.get(ctx, reqURL)
 }
 
 // GetAllPods retrieves all pod details in the cluster
-func (c *BrokerClient) GetAllPods() (interface{}, error) {
+func (c *BrokerClient) GetAllPods(ctx context.Context) (interface{}, error) {
 	reqURL := fmt.Sprintf("%s/pod/info", c.baseURL)
-	return c.get(reqURL)
+	return c.get(ctx, reqURL)
 }
 
 // get performs an HTTP GET request and returns the response
-func (c *BrokerClient) get(url string) (interface{}, error) {
+func (c *BrokerClient) get(ctx context.Context, reqURL string) (interface{}, error) {
 	startTime := time.Now()
 
 	logger.Log.WithFields(logrus.Fields{
-		"url":     url,
+		"url":     reqURL,
 		"timeout": c.httpClient.Timeout.String(),
 	}).Debug("Making broker request")
 
-	resp, err := c.httpClient.Get(url)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+
+	resp, err := c.httpClient.Do(req)
 	requestDuration := time.Since(startTime)
 
 	if err != nil {
 		logger.Log.WithFields(logrus.Fields{
-			"url":              url,
+			"url":              reqURL,
 			"error":            err.Error(),
 			"request_duration": requestDuration.String(),
 			"timeout":          c.httpClient.Timeout.String(),
@@ -90,15 +99,17 @@ func (c *BrokerClient) get(url string) (interface{}, error) {
 	defer resp.Body.Close()
 
 	logger.Log.WithFields(logrus.Fields{
-		"url":              url,
+		"url":              reqURL,
 		"status_code":      resp.StatusCode,
 		"request_duration": requestDuration.String(),
 	}).Debug("Received broker response")
 
+	limitedBody := io.LimitReader(resp.Body, maxResponseBytes)
+
 	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
+		body, _ := io.ReadAll(limitedBody)
 		logger.Log.WithFields(logrus.Fields{
-			"url":              url,
+			"url":              reqURL,
 			"status_code":      resp.StatusCode,
 			"response_body":    string(body),
 			"request_duration": requestDuration.String(),
@@ -108,10 +119,10 @@ func (c *BrokerClient) get(url string) (interface{}, error) {
 
 	decodeStart := time.Now()
 	var result interface{}
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+	if err := json.NewDecoder(limitedBody).Decode(&result); err != nil {
 		decodeDuration := time.Since(decodeStart)
 		logger.Log.WithFields(logrus.Fields{
-			"url":              url,
+			"url":              reqURL,
 			"error":            err.Error(),
 			"decode_duration":  decodeDuration.String(),
 			"request_duration": requestDuration.String(),
@@ -122,7 +133,7 @@ func (c *BrokerClient) get(url string) (interface{}, error) {
 	totalDuration := time.Since(startTime)
 
 	logger.Log.WithFields(logrus.Fields{
-		"url":              url,
+		"url":              reqURL,
 		"status_code":      resp.StatusCode,
 		"request_duration": requestDuration.String(),
 		"decode_duration":  decodeDuration.String(),

@@ -103,10 +103,7 @@ fn create_pod_traffic(
     );
     if w.get_row(conn)?.is_none() {
         info!("Insert pod {:?}, in pod_traffic table", w.uuid);
-        let _ = diesel::insert_into(pod_traffic)
-            .values(&*w)
-            .execute(conn)
-            .expect("Error saving data into pod_traffic");
+        diesel::insert_into(pod_traffic).values(&*w).execute(conn)?;
 
         debug!("Success: pod {:?} inserted in pod_traffic table", w.uuid);
     } else {
@@ -178,13 +175,12 @@ pub fn upsert_pod_details(
         "storing the pod details {:?} into pod_details table",
         w.pod_name,
     );
-    let _ = diesel::insert_into(pod_details)
+    diesel::insert_into(pod_details)
         .values(&*w)
         .on_conflict(pod_name)
         .do_update()
         .set(&*w)
-        .execute(conn)
-        .expect("Error saving data into pod_details");
+        .execute(conn)?;
     info!("Success: pod {:?} inserted in pod_details table", w.pod_ip);
     Ok(w.0)
 }
@@ -247,13 +243,12 @@ pub fn upsert_svc_details(
         "storing the service details {:?} into svc_details table",
         w.svc_ip,
     );
-    let _ = diesel::insert_into(svc_details)
+    diesel::insert_into(svc_details)
         .values(&*w)
         .on_conflict(svc_ip)
         .do_update()
         .set(&*w)
-        .execute(conn)
-        .expect("Error saving data into svc_details");
+        .execute(conn)?;
     info!("Success: svc {:?} inserted in svc_details table", w.svc_ip);
     Ok(w.0)
 }
@@ -300,42 +295,42 @@ pub fn create_pod_syscalls(
 ) -> Result<(), DbError> {
     use schema::pod_syscalls::dsl::*;
 
-    for pod_syscall in w.iter() {
-        debug!(
-            "Storing pod details {:?} into pod_syscalls table",
-            pod_syscall.pod_name
-        );
+    conn.transaction(|conn| {
+        for pod_syscall in w.iter() {
+            debug!(
+                "Storing pod details {:?} into pod_syscalls table",
+                pod_syscall.pod_name
+            );
 
-        let existing_row = pod_syscall.get_row(conn)?;
-        let new_syscall_number = pod_syscall.syscalls.join(",");
+            let existing_row = pod_syscall.get_row(conn)?;
+            let new_syscall_number = pod_syscall.syscalls.join(",");
 
-        if let Some(mut row) = existing_row {
-            row.syscalls = new_syscall_number;
+            if let Some(mut row) = existing_row {
+                row.syscalls = new_syscall_number;
 
-            diesel::update(pod_syscalls.filter(pod_name.eq(&row.pod_name)))
-                .set(syscalls.eq(row.syscalls.clone()))
-                .execute(conn)
-                .expect("Error updating pod_syscalls");
-        } else {
-            let new_pod_syscall = PodSyscalls {
-                syscalls: new_syscall_number,
-                pod_name: pod_syscall.pod_name.clone(),
-                pod_namespace: pod_syscall.pod_namespace.clone(),
-                arch: pod_syscall.arch.clone(),
-                time_stamp: pod_syscall.time_stamp,
-            };
+                diesel::update(pod_syscalls.filter(pod_name.eq(&row.pod_name)))
+                    .set(syscalls.eq(row.syscalls.clone()))
+                    .execute(conn)?;
+            } else {
+                let new_pod_syscall = PodSyscalls {
+                    syscalls: new_syscall_number,
+                    pod_name: pod_syscall.pod_name.clone(),
+                    pod_namespace: pod_syscall.pod_namespace.clone(),
+                    arch: pod_syscall.arch.clone(),
+                    time_stamp: pod_syscall.time_stamp,
+                };
 
-            diesel::insert_into(pod_syscalls)
-                .values(&new_pod_syscall)
-                .execute(conn)
-                .expect("Error inserting data into pod_syscalls");
+                diesel::insert_into(pod_syscalls)
+                    .values(&new_pod_syscall)
+                    .execute(conn)?;
+            }
+
+            debug!(
+                "Success: pod {:?} processed in pod_syscalls table",
+                pod_syscall.pod_name
+            );
         }
 
-        debug!(
-            "Success: pod {:?} processed in pod_syscalls table",
-            pod_syscall.pod_name
-        );
-    }
-
-    Ok(())
+        Ok(())
+    })
 }

@@ -6,19 +6,24 @@ export class BrokerClient {
   private mcpClient: Client | null = null;
   private mcpUrl: string;
   private mcpInitialized: boolean = false;
+  private initPromise: Promise<void> | null = null;
 
   constructor(brokerUrl: string, mcpUrl?: string) {
     this.mcpUrl = mcpUrl || process.env.MCP_SERVER_URL || "http://kguardian-mcp-server.kguardian.svc.cluster.local:8081";
   }
 
   /**
-   * Initialize MCP client connection
+   * Initialize MCP client connection (with mutex to prevent race conditions)
    */
-  private async initializeMCPClient(): Promise<void> {
-    if (this.mcpInitialized && this.mcpClient) {
-      return;
+  async initializeMCPClient(): Promise<void> {
+    if (this.mcpInitialized) return;
+    if (!this.initPromise) {
+      this.initPromise = this._doInit();
     }
+    return this.initPromise;
+  }
 
+  private async _doInit(): Promise<void> {
     try {
       // Create Streamable HTTP transport (MCP spec 2025-03-26)
       const transport = new StreamableHTTPClientTransport(new URL(this.mcpUrl));
@@ -27,7 +32,7 @@ export class BrokerClient {
       this.mcpClient = new Client(
         {
           name: "kguardian-llm-bridge",
-          version: "1.1.0",
+          version: "1.2.1",
         },
         {
           capabilities: {},
@@ -38,8 +43,10 @@ export class BrokerClient {
       await this.mcpClient.connect(transport);
       this.mcpInitialized = true;
 
-      console.log(`✓ Connected to MCP server at ${this.mcpUrl}`);
+      console.log(`Connected to MCP server at ${this.mcpUrl}`);
     } catch (error) {
+      // Reset the promise so future calls can retry
+      this.initPromise = null;
       console.error("Failed to initialize MCP client:", error);
       throw new Error(
         `Failed to connect to MCP server at ${this.mcpUrl}: ${error instanceof Error ? error.message : String(error)}`
@@ -53,6 +60,7 @@ export class BrokerClient {
   private resetConnection(): void {
     this.mcpClient = null;
     this.mcpInitialized = false;
+    this.initPromise = null;
     console.log("MCP client connection reset — will reconnect on next call");
   }
 
@@ -93,7 +101,7 @@ export class BrokerClient {
 
       const { name, arguments: args } = toolCall;
 
-      console.log(`Calling MCP tool: ${name} with args:`, args);
+      console.log(`Calling MCP tool: ${name}`);
 
       // Call the tool using MCP SDK
       const result = await this.mcpClient.callTool({
@@ -182,6 +190,8 @@ export class BrokerClient {
       console.error("Failed to fetch tools from MCP server, using fallback:", error);
       // Fallback to static definitions if MCP server is unavailable
       return BrokerClient.getToolDefinitions();
+    } finally {
+      await client.close();
     }
   }
 
@@ -329,6 +339,7 @@ If you don't have required information, ask ONCE, then use the tool immediately.
       await this.mcpClient.close();
       this.mcpClient = null;
       this.mcpInitialized = false;
+      this.initPromise = null;
       console.log("MCP client connection closed");
     }
   }

@@ -2,6 +2,7 @@ import axios from "axios";
 import type { ChatRequest, ChatResponse } from "../types/index.js";
 import { LLMProvider } from "../types/index.js";
 import { BrokerClient } from "../brokerClient.js";
+import { serializeToolResult } from "./truncate.js";
 
 interface OpenAIMessage {
   role: string;
@@ -32,8 +33,10 @@ export async function callOpenAI(
   }
 
   const model = request.model || "gpt-4o";
-  const systemPrompt =
-    request.systemPrompt || BrokerClient.getSystemPrompt();
+  const basePrompt = BrokerClient.getSystemPrompt();
+  const systemPrompt = request.context
+    ? `${basePrompt}\n\nUser context: ${request.context}`
+    : basePrompt;
 
   // Build messages with history
   const messages: OpenAIMessage[] = [
@@ -75,7 +78,7 @@ export async function callOpenAI(
       response = await axios.post(
         "https://api.openai.com/v1/chat/completions",
         { model, messages, tools, tool_choice: "auto" },
-        { headers }
+        { headers, timeout: 120000 }
       );
     } catch (error: any) {
       console.error("OpenAI API Error:", error.response?.data || error.message);
@@ -105,25 +108,28 @@ export async function callOpenAI(
     // Execute tool calls and append results
     const toolResults = await Promise.all(
       message.tool_calls.map(async (toolCall: any) => {
+        let parsedArgs: Record<string, any>;
+        try {
+          parsedArgs = JSON.parse(toolCall.function.arguments);
+        } catch {
+          return {
+            tool_call_id: toolCall.id,
+            role: "tool",
+            name: toolCall.function.name,
+            content: "Failed to parse tool arguments",
+          };
+        }
+
         const result = await brokerClient.executeTool({
           name: toolCall.function.name,
-          arguments: JSON.parse(toolCall.function.arguments),
+          arguments: parsedArgs,
         });
-
-        let content: string;
-        if (result.error) {
-          content = `Error: ${result.error}`;
-        } else if (result.data) {
-          content = typeof result.data === 'string' ? result.data : JSON.stringify(result.data);
-        } else {
-          content = 'No data returned';
-        }
 
         return {
           tool_call_id: toolCall.id,
           role: "tool",
           name: toolCall.function.name,
-          content,
+          content: serializeToolResult(result),
         };
       })
     );
@@ -135,7 +141,7 @@ export async function callOpenAI(
   const finalResponse = await axios.post(
     "https://api.openai.com/v1/chat/completions",
     { model, messages },
-    { headers }
+    { headers, timeout: 120000 }
   );
 
   return {

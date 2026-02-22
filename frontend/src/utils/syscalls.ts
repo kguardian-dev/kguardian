@@ -162,12 +162,10 @@ export const VALID_SYSCALLS = new Set<string>([
   'oldolduname', 'olduname', 'oldstat', 'oldlstat', 'oldfstat',
   '_sysctl', 'create_module', 'query_module', 'get_kernel_syms',
   'afs_syscall', 'nfsservctl', 'getpmsg', 'putpmsg', 'vserver',
-  'ioperm', 'iopl', 'idle', 'sysctl', 'bdflush',
+  'idle', 'sysctl', 'bdflush',
 
   // New syscalls (Linux 5.x+)
   'process_madvise', 'process_mrelease', 'mount_setattr', 'quotactl_fd',
-  'memfd_secret', 'landlock_create_ruleset', 'landlock_add_rule',
-  'landlock_restrict_self', 'futex_waitv',
 ]);
 
 /**

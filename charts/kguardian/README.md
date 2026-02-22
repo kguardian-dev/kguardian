@@ -89,7 +89,7 @@ The following table lists the configurable parameters of the kguardian chart and
 | broker.initContainer.image.repository | string | `"busybox"` | Broker init container image repository |
 | broker.initContainer.image.sha | string | `""` | Overrides the init container image tag using SHA digest |
 | broker.initContainer.image.tag | string | `"latest"` | Broker init container image tag |
-| broker.initContainer.securityContext | object | `{}` | Broker init container security context |
+| broker.initContainer.securityContext | object | `{"allowPrivilegeEscalation":false,"capabilities":{"drop":["ALL"]},"readOnlyRootFilesystem":true,"runAsNonRoot":true,"runAsUser":65534}` | Broker init container security context |
 | broker.nameOverride | string | `""` | Override the name of the broker resources |
 | broker.nodeSelector | object | `{"kubernetes.io/os":"linux"}` | Node labels for the kguardian broker pod assignment |
 | broker.podAnnotations | object | `{}` | Annotations to add to broker pods |
@@ -122,7 +122,7 @@ The following table lists the configurable parameters of the kguardian chart and
 | controller.initContainer.image.pullPolicy | string | `"Always"` | Init container image pull policy |
 | controller.initContainer.image.repository | string | `"busybox"` | Init container image repository |
 | controller.initContainer.image.tag | string | `"latest"` | Init container image tag |
-| controller.initContainer.securityContext | object | `{}` | Init container security context |
+| controller.initContainer.securityContext | object | `{"allowPrivilegeEscalation":false,"capabilities":{"drop":["ALL"]},"readOnlyRootFilesystem":true,"runAsNonRoot":true,"runAsUser":65534}` | Init container security context |
 | controller.nameOverride | string | `""` | Override the name of the controller resources |
 | controller.nodeSelector | object | `{"kubernetes.io/os":"linux"}` | Node labels for the kguardian controller pod assignment |
 | controller.podAnnotations | object | `{}` | Annotations to add to controller pods |
@@ -133,7 +133,7 @@ The following table lists the configurable parameters of the kguardian chart and
 | controller.service.port | int | `80` | Controller service port |
 | controller.service.type | string | `"ClusterIP"` | Controller service type |
 | controller.serviceAccount.annotations | object | `{}` | Annotations to add to the service account |
-| controller.serviceAccount.automountServiceAccountToken | bool | `false` | Automount API credentials for a service account |
+| controller.serviceAccount.automountServiceAccountToken | bool | `true` | Automount API credentials for a service account (controller needs K8s API access) |
 | controller.serviceAccount.create | bool | `true` | Specifies whether a service account should be created |
 | controller.serviceAccount.name | string | `""` | The name of the service account to use. If not set and create is true, a name is generated using the fullname template |
 | controller.tolerations | list | `[{"effect":"NoSchedule","key":"node-role.kubernetes.io/control-plane","operator":"Exists"}]` | Tolerations for the kguardian controller pod assignment |

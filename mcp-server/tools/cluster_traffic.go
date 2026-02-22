@@ -34,7 +34,7 @@ func (h ClusterTrafficHandler) Call(
 	logger.Log.Info("Received get_cluster_traffic request")
 
 	fetchStart := time.Now()
-	data, err := h.client.GetAllPodTraffic()
+	data, err := h.client.GetAllPodTraffic(ctx)
 	fetchDuration := time.Since(fetchStart)
 
 	if err != nil {
@@ -43,7 +43,10 @@ func (h ClusterTrafficHandler) Call(
 			"fetch_duration": fetchDuration.String(),
 			"total_duration": time.Since(startTime).String(),
 		}).Error("Error fetching cluster traffic")
-		return nil, ClusterTrafficOutput{}, fmt.Errorf("error fetching cluster traffic: %w", err)
+		return &mcp.CallToolResult{
+			Content: []mcp.Content{&mcp.TextContent{Text: fmt.Sprintf("error fetching cluster traffic: %v", err)}},
+			IsError: true,
+		}, ClusterTrafficOutput{}, nil
 	}
 
 	marshalStart := time.Now()
@@ -57,7 +60,10 @@ func (h ClusterTrafficHandler) Call(
 			"marshal_duration": marshalDuration.String(),
 			"total_duration":   time.Since(startTime).String(),
 		}).Error("Error marshaling response")
-		return nil, ClusterTrafficOutput{}, fmt.Errorf("error marshaling response: %w", err)
+		return &mcp.CallToolResult{
+			Content: []mcp.Content{&mcp.TextContent{Text: fmt.Sprintf("error marshaling response: %v", err)}},
+			IsError: true,
+		}, ClusterTrafficOutput{}, nil
 	}
 
 	totalDuration := time.Since(startTime)

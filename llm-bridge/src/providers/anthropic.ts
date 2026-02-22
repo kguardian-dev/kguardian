@@ -2,6 +2,7 @@ import axios from "axios";
 import type { ChatRequest, ChatResponse } from "../types/index.js";
 import { LLMProvider } from "../types/index.js";
 import { BrokerClient } from "../brokerClient.js";
+import { serializeToolResult } from "./truncate.js";
 
 interface AnthropicTool {
   name: string;
@@ -21,8 +22,10 @@ export async function callAnthropic(
   }
 
   const model = request.model || "claude-sonnet-4-5-20250929";
-  const systemPrompt =
-    request.systemPrompt || BrokerClient.getSystemPrompt();
+  const basePrompt = BrokerClient.getSystemPrompt();
+  const systemPrompt = request.context
+    ? `${basePrompt}\n\nUser context: ${request.context}`
+    : basePrompt;
 
   // Build tools
   const tools: AnthropicTool[] = BrokerClient.getToolDefinitions().map(
@@ -58,11 +61,17 @@ export async function callAnthropic(
 
   // Multi-round tool calling loop
   for (let round = 0; round < MAX_TOOL_ROUNDS; round++) {
-    const response = await axios.post(
-      "https://api.anthropic.com/v1/messages",
-      { model, max_tokens: 4096, system: systemPrompt, messages, tools },
-      { headers }
-    );
+    let response;
+    try {
+      response = await axios.post(
+        "https://api.anthropic.com/v1/messages",
+        { model, max_tokens: 4096, system: systemPrompt, messages, tools },
+        { headers, timeout: 120000 }
+      );
+    } catch (error: any) {
+      console.error("Anthropic API Error:", error.response?.data?.error?.message || error.message);
+      throw new Error(`Anthropic API error: ${error.response?.data?.error?.message || error.message}`);
+    }
 
     const content = response.data.content;
 
@@ -96,7 +105,7 @@ export async function callAnthropic(
         return {
           type: "tool_result",
           tool_use_id: toolUse.id,
-          content: result.error || JSON.stringify(result.data),
+          content: serializeToolResult(result),
         };
       })
     );
@@ -112,7 +121,7 @@ export async function callAnthropic(
   const finalResponse = await axios.post(
     "https://api.anthropic.com/v1/messages",
     { model, max_tokens: 4096, system: systemPrompt, messages },
-    { headers }
+    { headers, timeout: 120000 }
   );
 
   const finalContent = finalResponse.data.content.find(

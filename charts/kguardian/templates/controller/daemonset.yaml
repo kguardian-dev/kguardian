@@ -15,7 +15,7 @@ spec:
         app.kubernetes.io/name: kguardian
         {{- include "kguardian.labels" . | nindent 8 }}
     spec:
-      automountServiceAccountToken: true
+      automountServiceAccountToken: {{ .Values.controller.serviceAccount.automountServiceAccountToken }}
       hostNetwork: true
       {{- if .Values.controller.imagePullSecrets }}
       imagePullSecrets:
@@ -58,7 +58,7 @@ spec:
           volumeMounts:
           - mountPath: /sys/kernel/debug
             name: debugfs
-            readOnly: false
+            readOnly: true
           - name: bpffs
             mountPath: /sys/fs/bpf
             readOnly: true
@@ -73,10 +73,11 @@ spec:
             readOnly: true
           - mountPath: /proc
             name: hostproc
-          {{- with .Values.broker.resources }}
-            resources:
-              {{- toYaml . | nindent 12 }}
-            {{- end }}
+            readOnly: true
+          {{- with .Values.controller.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
       serviceAccountName: {{ default "controller" .Values.controller.serviceAccount.name }}
       securityContext:
         {{- toYaml .Values.controller.podSecurityContext | nindent 8 }}

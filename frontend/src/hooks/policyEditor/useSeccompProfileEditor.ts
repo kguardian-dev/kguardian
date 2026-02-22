@@ -24,6 +24,7 @@ export const useSeccompProfileEditor = ({ pod, isOpen }: UseSeccompProfileEditor
     if (isOpen && pod && currentPodId !== lastGeneratedPodId.current) {
       lastGeneratedPodId.current = currentPodId;
       const generatedProfile = generateSeccompProfile(pod);
+      // eslint-disable-next-line react-hooks/set-state-in-effect
       setSeccompProfile(generatedProfile);
     }
   }, [isOpen, pod]);

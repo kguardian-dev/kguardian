@@ -2,6 +2,7 @@ import axios from "axios";
 import type { ChatRequest, ChatResponse } from "../types/index.js";
 import { LLMProvider } from "../types/index.js";
 import { BrokerClient } from "../brokerClient.js";
+import { serializeToolResult } from "./truncate.js";
 
 const MAX_TOOL_ROUNDS = 10;
 
@@ -15,8 +16,10 @@ export async function callGemini(
   }
 
   const model = request.model || "gemini-2.0-flash-exp";
-  const systemPrompt =
-    request.systemPrompt || BrokerClient.getSystemPrompt();
+  const basePrompt = BrokerClient.getSystemPrompt();
+  const systemPrompt = request.context
+    ? `${basePrompt}\n\nUser context: ${request.context}`
+    : basePrompt;
 
   // Build function declarations
   const functionDeclarations = BrokerClient.getToolDefinitions().map(
@@ -55,15 +58,21 @@ export async function callGemini(
 
   // Multi-round tool calling loop
   for (let round = 0; round < MAX_TOOL_ROUNDS; round++) {
-    const response = await axios.post(
-      url,
-      {
-        systemInstruction: { parts: [{ text: systemPrompt }] },
-        contents,
-        tools: [{ functionDeclarations }],
-      },
-      { headers }
-    );
+    let response;
+    try {
+      response = await axios.post(
+        url,
+        {
+          systemInstruction: { parts: [{ text: systemPrompt }] },
+          contents,
+          tools: [{ functionDeclarations }],
+        },
+        { headers, timeout: 120000 }
+      );
+    } catch (error: any) {
+      console.error("Gemini API Error:", error.response?.data?.error?.message || error.message);
+      throw new Error(`Gemini API error: ${error.response?.data?.error?.message || error.message}`);
+    }
 
     const candidate = response.data.candidates[0];
     const content = candidate.content;
@@ -100,9 +109,10 @@ export async function callGemini(
         return {
           functionResponse: {
             name: part.functionCall.name,
-            response: {
-              data: result.error || result.data,
-            },
+            response: (() => {
+              const serialized = serializeToolResult(result);
+              try { return JSON.parse(serialized); } catch { return { data: serialized }; }
+            })(),
           },
         };
       })
@@ -122,7 +132,7 @@ export async function callGemini(
       systemInstruction: { parts: [{ text: systemPrompt }] },
       contents,
     },
-    { headers }
+    { headers, timeout: 120000 }
   );
 
   const finalCandidate = finalResponse.data.candidates[0];

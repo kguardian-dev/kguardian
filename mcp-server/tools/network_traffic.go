@@ -39,8 +39,16 @@ func (h NetworkTrafficHandler) Call(
 		"pod_name":  input.PodName,
 	}).Info("Received get_pod_network_traffic request")
 
+	if input.PodName == "" {
+		logger.Log.Error("pod_name is required but not provided")
+		return &mcp.CallToolResult{
+			Content: []mcp.Content{&mcp.TextContent{Text: "pod_name is required"}},
+			IsError: true,
+		}, NetworkTrafficOutput{}, nil
+	}
+
 	// Fetch data from broker
-	data, err := h.client.GetPodNetworkTraffic(input.Namespace, input.PodName)
+	data, err := h.client.GetPodNetworkTraffic(ctx, input.Namespace, input.PodName)
 	if err != nil {
 		logger.Log.WithFields(logrus.Fields{
 			"namespace":      input.Namespace,
@@ -48,14 +56,20 @@ func (h NetworkTrafficHandler) Call(
 			"error":          err.Error(),
 			"total_duration": time.Since(startTime).String(),
 		}).Error("Error fetching network traffic")
-		return nil, NetworkTrafficOutput{}, fmt.Errorf("error fetching network traffic: %w", err)
+		return &mcp.CallToolResult{
+			Content: []mcp.Content{&mcp.TextContent{Text: fmt.Sprintf("error fetching network traffic: %v", err)}},
+			IsError: true,
+		}, NetworkTrafficOutput{}, nil
 	}
 
 	// Convert to JSON string
 	jsonData, err := json.MarshalIndent(data, "", "  ")
 	if err != nil {
 		logger.Log.WithField("error", err.Error()).Error("Error marshaling response")
-		return nil, NetworkTrafficOutput{}, fmt.Errorf("error marshaling response: %w", err)
+		return &mcp.CallToolResult{
+			Content: []mcp.Content{&mcp.TextContent{Text: fmt.Sprintf("error marshaling response: %v", err)}},
+			IsError: true,
+		}, NetworkTrafficOutput{}, nil
 	}
 
 	logger.Log.WithFields(logrus.Fields{

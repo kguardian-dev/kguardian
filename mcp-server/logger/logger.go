@@ -2,11 +2,21 @@ package logger
 
 import (
 	"os"
+	"strings"
 
 	"github.com/sirupsen/logrus"
 )
 
+// Log is the global logger instance. It is initialized with a safe default
+// so that callers never encounter a nil pointer, even if Init has not been
+// called explicitly.
 var Log *logrus.Logger
+
+func init() {
+	Log = logrus.New()
+	Log.SetLevel(logrus.InfoLevel)
+	Log.SetFormatter(&logrus.TextFormatter{FullTimestamp: true})
+}
 
 // Init initializes the global logger with the specified log level
 func Init(level string) {
@@ -31,14 +41,14 @@ func Init(level string) {
 
 // parseLogLevel converts a string log level to logrus.Level
 func parseLogLevel(level string) logrus.Level {
-	switch level {
-	case "debug", "DEBUG":
+	switch strings.ToLower(level) {
+	case "debug":
 		return logrus.DebugLevel
-	case "info", "INFO":
+	case "info":
 		return logrus.InfoLevel
-	case "warn", "WARN", "warning", "WARNING":
+	case "warn", "warning":
 		return logrus.WarnLevel
-	case "error", "ERROR":
+	case "error":
 		return logrus.ErrorLevel
 	default:
 		return logrus.InfoLevel

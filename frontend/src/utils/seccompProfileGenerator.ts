@@ -1,6 +1,7 @@
 import type { PodNodeData } from '../types';
 import type { SeccompProfile, SeccompSyscall } from '../types/seccompProfile';
 import { parseSyscallString } from './syscalls';
+import { quoteYamlValue } from './networkPolicyGenerator';
 
 export function generateSeccompProfile(pod: PodNodeData): SeccompProfile {
   // Collect all unique syscalls from the pod's observed behavior
@@ -51,8 +52,8 @@ export function profileToYAML(profile: SeccompProfile, resourceName: string, nam
   yaml.push('apiVersion: security.kubernetes.io/v1alpha1');
   yaml.push('kind: SeccompProfile');
   yaml.push('metadata:');
-  yaml.push(`  name: ${resourceName}-seccomp`);
-  yaml.push(`  namespace: ${namespace}`);
+  yaml.push(`  name: ${quoteYamlValue(`${resourceName}-seccomp`)}`);
+  yaml.push(`  namespace: ${quoteYamlValue(namespace)}`);
   yaml.push('spec:');
   yaml.push(`  defaultAction: ${profile.defaultAction}`);
 

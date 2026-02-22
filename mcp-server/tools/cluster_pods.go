@@ -33,19 +33,25 @@ func (h ClusterPodsHandler) Call(
 	startTime := time.Now()
 	logger.Log.Info("Received get_cluster_pods request")
 
-	data, err := h.client.GetAllPods()
+	data, err := h.client.GetAllPods(ctx)
 	if err != nil {
 		logger.Log.WithFields(logrus.Fields{
 			"error":          err.Error(),
 			"total_duration": time.Since(startTime).String(),
 		}).Error("Error fetching cluster pods")
-		return nil, ClusterPodsOutput{}, fmt.Errorf("error fetching cluster pods: %w", err)
+		return &mcp.CallToolResult{
+			Content: []mcp.Content{&mcp.TextContent{Text: fmt.Sprintf("error fetching cluster pods: %v", err)}},
+			IsError: true,
+		}, ClusterPodsOutput{}, nil
 	}
 
 	jsonData, err := json.MarshalIndent(data, "", "  ")
 	if err != nil {
 		logger.Log.WithField("error", err.Error()).Error("Error marshaling response")
-		return nil, ClusterPodsOutput{}, fmt.Errorf("error marshaling response: %w", err)
+		return &mcp.CallToolResult{
+			Content: []mcp.Content{&mcp.TextContent{Text: fmt.Sprintf("error marshaling response: %v", err)}},
+			IsError: true,
+		}, ClusterPodsOutput{}, nil
 	}
 
 	logger.Log.WithFields(logrus.Fields{

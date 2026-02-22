@@ -40,11 +40,28 @@ export const usePolicyExport = ({
     return null;
   };
 
-  const handleCopy = () => {
+  const handleCopy = async () => {
     const content = getExportContent();
     if (!content) return;
 
-    navigator.clipboard.writeText(content);
+    try {
+      await navigator.clipboard.writeText(content);
+    } catch {
+      // Fallback: use a temporary textarea for copy
+      try {
+        const textarea = document.createElement('textarea');
+        textarea.value = content;
+        textarea.style.position = 'fixed';
+        textarea.style.opacity = '0';
+        document.body.appendChild(textarea);
+        textarea.select();
+        document.execCommand('copy');
+        document.body.removeChild(textarea);
+      } catch (fallbackErr) {
+        console.error('Failed to copy to clipboard:', fallbackErr);
+        return;
+      }
+    }
     setCopiedToClipboard(true);
     setTimeout(() => setCopiedToClipboard(false), 2000);
   };
@@ -76,7 +93,9 @@ export const usePolicyExport = ({
     const a = document.createElement('a');
     a.href = url;
     a.download = filename;
+    document.body.appendChild(a);
     a.click();
+    document.body.removeChild(a);
     URL.revokeObjectURL(url);
   };
 

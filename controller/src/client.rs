@@ -6,7 +6,11 @@ use tracing::debug;
 use lazy_static::lazy_static;
 
 lazy_static! {
-    static ref CLIENT: reqwest::Client = reqwest::Client::new();
+    static ref CLIENT: reqwest::Client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .connect_timeout(std::time::Duration::from_secs(10))
+        .build()
+        .expect("Failed to create HTTP client");
 }
 
 pub(crate) async fn api_post_call(v: Value, path: &str) -> Result<(), Error> {
