@@ -11,12 +11,14 @@ import (
 	"github.com/sirupsen/logrus"
 )
 
-// ClusterTrafficInput defines the input parameters (no params needed)
-type ClusterTrafficInput struct{}
+// ClusterTrafficInput defines the input parameters for the cluster traffic tool
+type ClusterTrafficInput struct {
+	Namespace string `json:"namespace,omitempty" jsonschema:"Optional Kubernetes namespace to filter results. If omitted, returns a summary of all namespaces."`
+}
 
 // ClusterTrafficOutput defines the output structure
 type ClusterTrafficOutput struct {
-	Data string `json:"data" jsonschema:"All pod traffic data in the cluster in JSON format"`
+	Data string `json:"data" jsonschema:"Cluster traffic summary in JSON format"`
 }
 
 // ClusterTrafficHandler handles the get_cluster_traffic tool
@@ -31,7 +33,7 @@ func (h ClusterTrafficHandler) Call(
 	input ClusterTrafficInput,
 ) (*mcp.CallToolResult, ClusterTrafficOutput, error) {
 	startTime := time.Now()
-	logger.Log.Info("Received get_cluster_traffic request")
+	logger.Log.WithField("namespace", input.Namespace).Info("Received get_cluster_traffic request")
 
 	fetchStart := time.Now()
 	data, err := h.client.GetAllPodTraffic(ctx)
@@ -49,8 +51,17 @@ func (h ClusterTrafficHandler) Call(
 		}, ClusterTrafficOutput{}, nil
 	}
 
+	// Apply namespace filter if specified
+	filtered := filterByNamespace(data, input.Namespace)
+
+	// Compact into per-pod summary
+	summary := compactTrafficSummary(filtered)
+	if input.Namespace != "" {
+		summary["filtered_namespace"] = input.Namespace
+	}
+
 	marshalStart := time.Now()
-	jsonData, err := json.MarshalIndent(data, "", "  ")
+	jsonData, err := json.Marshal(summary)
 	marshalDuration := time.Since(marshalStart)
 
 	if err != nil {
@@ -68,6 +79,7 @@ func (h ClusterTrafficHandler) Call(
 
 	totalDuration := time.Since(startTime)
 	logger.Log.WithFields(logrus.Fields{
+		"namespace":        input.Namespace,
 		"response_bytes":   len(jsonData),
 		"fetch_duration":   fetchDuration.String(),
 		"marshal_duration": marshalDuration.String(),

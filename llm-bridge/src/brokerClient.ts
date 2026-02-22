@@ -2,11 +2,17 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import type { ToolCall, ToolResult } from "./types/index.js";
 
+export interface ParsedContext {
+  namespace?: string;
+  podNames?: string[];
+}
+
 export class BrokerClient {
   private mcpClient: Client | null = null;
   private mcpUrl: string;
   private mcpInitialized: boolean = false;
   private initPromise: Promise<void> | null = null;
+  private static toolDefsCache: any[] | null = null;
 
   constructor(brokerUrl: string, mcpUrl?: string) {
     this.mcpUrl = mcpUrl || process.env.MCP_SERVER_URL || "http://kguardian-mcp-server.kguardian.svc.cluster.local:8081";
@@ -196,6 +202,19 @@ export class BrokerClient {
   }
 
   /**
+   * Get tool definitions with caching — tries MCP server first, falls back to static
+   */
+  static async getToolsCached(): Promise<any[]> {
+    if (BrokerClient.toolDefsCache) return BrokerClient.toolDefsCache;
+    try {
+      BrokerClient.toolDefsCache = await BrokerClient.getToolDefinitionsFromMCP();
+    } catch {
+      BrokerClient.toolDefsCache = BrokerClient.getToolDefinitions();
+    }
+    return BrokerClient.toolDefsCache;
+  }
+
+  /**
    * Get available tools definition for LLMs (static fallback)
    */
   static getToolDefinitions() {
@@ -203,45 +222,37 @@ export class BrokerClient {
       {
         name: "get_pod_network_traffic",
         description:
-          "Get network traffic data for a specific pod by namespace and pod name. Returns source/destination IPs, ports, protocols, traffic types (ingress/egress), and packet decisions (allowed/dropped). Essential for generating network policies and understanding pod communication patterns.",
+          "Get network traffic for a specific pod by name. Returns source/destination IPs, ports, protocols, ingress/egress types, and packet decisions. Use when the user asks about a specific pod's connections. Requires only pod_name (not namespace-scoped).",
         parameters: {
           type: "object",
           properties: {
-            namespace: {
-              type: "string",
-              description: "The Kubernetes namespace of the pod",
-            },
             pod_name: {
               type: "string",
-              description: "The name of the pod",
+              description: "The name of the pod to query traffic for",
             },
           },
-          required: ["namespace", "pod_name"],
+          required: ["pod_name"],
         },
       },
       {
         name: "get_pod_syscalls",
         description:
-          "Get system call (syscall) data for a specific pod. Returns the syscalls made by the pod with their frequencies and architecture. Critical for security analysis, generating seccomp profiles, and identifying suspicious behavior.",
+          "Get system calls made by a specific pod. Returns syscall names, frequencies, and architecture. Use when the user asks about a pod's syscalls or seccomp profile. Requires only pod_name (not namespace-scoped).",
         parameters: {
           type: "object",
           properties: {
-            namespace: {
-              type: "string",
-              description: "The Kubernetes namespace of the pod",
-            },
             pod_name: {
               type: "string",
-              description: "The name of the pod",
+              description: "The name of the pod to query syscalls for",
             },
           },
-          required: ["namespace", "pod_name"],
+          required: ["pod_name"],
         },
       },
       {
         name: "get_pod_details",
         description:
-          "Get detailed information about a pod by its IP address. Returns pod name, namespace, IP, and full Kubernetes pod object. Useful for correlating IP addresses to pod identities.",
+          "Look up a pod by its IP address. Returns pod name, namespace, IP, and full Kubernetes pod object. Requires only ip.",
         parameters: {
           type: "object",
           properties: {
@@ -256,7 +267,7 @@ export class BrokerClient {
       {
         name: "get_service_details",
         description:
-          "Get detailed information about a Kubernetes service by its cluster IP. Returns service name, namespace, IP, ports, and full service object. Essential for understanding service-to-service communication.",
+          "Look up a Kubernetes service by its cluster IP. Returns service name, namespace, IP, ports, and full service spec. Requires only ip.",
         parameters: {
           type: "object",
           properties: {
@@ -271,20 +282,30 @@ export class BrokerClient {
       {
         name: "get_cluster_traffic",
         description:
-          "Get all network traffic data across the entire cluster. Returns comprehensive traffic information for all monitored pods. Use this for cluster-wide network analysis, identifying communication patterns, and detecting anomalies. WARNING: This returns large datasets.",
+          "Get a summary of network traffic across the cluster. Returns per-pod traffic counts. Accepts optional namespace to filter. Use for overall traffic patterns.",
         parameters: {
           type: "object",
-          properties: {},
+          properties: {
+            namespace: {
+              type: "string",
+              description: "Optional namespace to filter traffic results",
+            },
+          },
           required: [],
         },
       },
       {
         name: "get_cluster_pods",
         description:
-          "Get detailed information about all pods in the cluster. Returns pod names, namespaces, IPs, and full Kubernetes objects. Useful for cluster inventory and identifying monitored workloads. WARNING: This returns large datasets.",
+          "List pods in the cluster with compact metadata. Accepts optional namespace to filter. Use when the user asks what pods are running.",
         parameters: {
           type: "object",
-          properties: {},
+          properties: {
+            namespace: {
+              type: "string",
+              description: "Optional namespace to filter pod results",
+            },
+          },
           required: [],
         },
       },
@@ -294,41 +315,69 @@ export class BrokerClient {
   /**
    * Get system prompt for kguardian AI assistant
    */
-  static getSystemPrompt(): string {
-    return `You are an AI assistant for kguardian, a Kubernetes security monitoring tool.
+  static getSystemPrompt(context?: ParsedContext): string {
+    let prompt = `You are an AI assistant for kguardian, a Kubernetes security monitoring tool.
 
 Your role is to help users understand their cluster's network traffic, security events, and system calls.
 
-IMPORTANT: You have access to 6 powerful tools that can fetch real-time data from the cluster. ALWAYS USE THESE TOOLS when users ask questions:
+IMPORTANT: You have access to 6 tools that fetch real-time data from the cluster. ALWAYS USE THESE TOOLS when users ask questions.
 
-**Pod-Specific Tools:**
-- get_pod_network_traffic: Query network connections for a pod (requires namespace and pod_name)
-- get_pod_syscalls: Get system calls made by a pod (requires namespace and pod_name)
+## Tool Selection Guide
 
-**Lookup Tools:**
-- get_pod_details: Find pod info by IP address (requires ip)
-- get_service_details: Find service info by cluster IP (requires ip)
+**Pod-Specific Tools** (require only pod_name, NOT namespace):
+- get_pod_network_traffic: Get traffic for a specific pod. Use when user asks about a pod's connections.
+- get_pod_syscalls: Get syscalls for a specific pod. Use when user asks about a pod's behavior or seccomp.
 
-**Cluster-Wide Tools:**
-- get_cluster_traffic: Get ALL network traffic in the cluster (no parameters) - use for comprehensive analysis
-- get_cluster_pods: Get ALL pod information in the cluster (no parameters) - use for inventory/discovery
+**Lookup Tools** (require only ip):
+- get_pod_details: Find pod info by IP address.
+- get_service_details: Find service info by cluster IP.
 
-When a user provides namespace and pod name (in ANY format), immediately use the appropriate tool. Do NOT ask for clarification if you have the information.
+**Cluster-Wide Tools** (accept optional namespace filter):
+- get_cluster_traffic: Get traffic summary across pods. Returns per-pod counts, not raw records.
+- get_cluster_pods: List pods with compact metadata (name, namespace, IP, node).
 
-Examples:
-- "Show syscalls for nginx-123 in default" → USE get_pod_syscalls immediately
-- "What pods are running?" → USE get_cluster_pods immediately
-- "Show all network traffic" → USE get_cluster_traffic immediately
-- "What is pod 10.1.2.3?" → USE get_pod_details with ip="10.1.2.3"
+## Constraints
+- Pod-specific tools take only pod_name — do NOT pass namespace to them.
+- Cluster tools accept an optional "namespace" parameter to scope results.`;
 
-When presenting results:
+    if (context?.namespace) {
+      prompt += `\n\n## Current Context
+The user is viewing namespace "${context.namespace}". ALWAYS pass namespace="${context.namespace}" to get_cluster_traffic and get_cluster_pods unless the user explicitly asks for all namespaces.`;
+    }
+
+    if (context?.podNames && context.podNames.length > 0) {
+      const pods = context.podNames.slice(0, 20).join(", ");
+      prompt += `\nVisible pods: ${pods}${context.podNames.length > 20 ? ` (and ${context.podNames.length - 20} more)` : ""}`;
+    }
+
+    prompt += `
+
+## Response Format
 1. Be concise and technical
 2. Format data in readable tables or lists
 3. Highlight security concerns or anomalies
 4. Suggest network policies or seccomp profiles when relevant
 5. For large datasets, summarize key findings first
 
-If you don't have required information, ask ONCE, then use the tool immediately.`;
+When a user mentions a pod name, use the appropriate tool immediately. Do NOT ask for clarification if you have the information.`;
+
+    return prompt;
+  }
+
+  /**
+   * Parse a JSON context string from the frontend into a typed object
+   */
+  static parseContext(contextStr?: string): ParsedContext | undefined {
+    if (!contextStr) return undefined;
+    try {
+      const parsed = JSON.parse(contextStr);
+      return {
+        namespace: typeof parsed.namespace === "string" ? parsed.namespace : undefined,
+        podNames: Array.isArray(parsed.podNames) ? parsed.podNames : undefined,
+      };
+    } catch {
+      return undefined;
+    }
   }
 
   /**

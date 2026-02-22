@@ -56,7 +56,7 @@ func (h PodDetailsHandler) Call(
 		}, PodDetailsOutput{}, nil
 	}
 
-	jsonData, err := json.MarshalIndent(data, "", "  ")
+	jsonData, err := json.Marshal(data)
 	if err != nil {
 		logger.Log.WithField("error", err.Error()).Error("Error marshaling response")
 		return &mcp.CallToolResult{
