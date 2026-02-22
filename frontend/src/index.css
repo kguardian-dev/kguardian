@@ -1,6 +1,8 @@
 @import "tailwindcss";
 @plugin "@tailwindcss/typography";
 
+@custom-variant dark (&:where(.dark, .dark *));
+
 /* Internal theme variables */
 :root,
 :root.dark {
@@ -17,11 +19,11 @@
 :root.light {
   --theme-bg-dark: #F3F4F6;
   --theme-bg-darker: #FFFFFF;
-  --theme-bg-card: #F9FAFB;
-  --theme-border: #E5E7EB;
+  --theme-bg-card: #FFFFFF;
+  --theme-border: #D1D5DB;
   --theme-text-primary: #111827;
-  --theme-text-secondary: #4B5563;
-  --theme-text-tertiary: #6B7280;
+  --theme-text-secondary: #374151;
+  --theme-text-tertiary: #4B5563;
 }
 
 @theme {
@@ -81,8 +83,13 @@
 
 .react-flow__controls-button {
   @apply bg-hubble-card border-hubble-border text-secondary;
+  fill: var(--theme-text-secondary);
 }
 
 .react-flow__controls-button:hover {
   @apply bg-hubble-dark;
+}
+
+.react-flow__controls-button svg {
+  fill: var(--theme-text-secondary);
 }

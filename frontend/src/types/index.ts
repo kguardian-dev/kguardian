@@ -1,9 +1,24 @@
+// Partial Kubernetes object metadata used for label extraction
+export interface KubeObjectMetadata {
+  labels?: Record<string, string>;
+  annotations?: Record<string, string>;
+  name?: string;
+  namespace?: string;
+  [key: string]: unknown;
+}
+
+// Partial Kubernetes object shape (pod spec, service spec, etc.)
+export interface KubeObject {
+  metadata?: KubeObjectMetadata;
+  [key: string]: unknown;
+}
+
 // Matches broker's PodDetail type
 export interface PodInfo {
   pod_name: string;
   pod_ip: string;
   pod_namespace: string | null;
-  pod_obj?: any;
+  pod_obj?: KubeObject;
   time_stamp: string;
   node_name: string;
   is_dead: boolean;
@@ -43,6 +58,8 @@ export interface PodNodeData {
   traffic: NetworkTraffic[];
   syscalls?: SyscallInfo[];
   isExpanded: boolean;
+  isExternal?: boolean; // True if this pod is outside the selected namespace
+  externalNamespace?: string; // The namespace this external pod belongs to
 }
 
 // Matches broker's SvcDetail type
@@ -50,5 +67,5 @@ export interface ServiceInfo {
   svc_ip: string;
   svc_name: string | null;
   svc_namespace: string | null;
-  service_spec?: any; // Full Kubernetes Service object
+  service_spec?: KubeObject; // Full Kubernetes Service object
 }

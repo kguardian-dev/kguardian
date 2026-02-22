@@ -167,6 +167,14 @@ pub fn ebpf_handle(
         // Add network events ring buffer
         ring_buffer_builder
             .add(&network_sk.maps.network_events, move |data: &[u8]| {
+                if data.len() < std::mem::size_of::<NetworkEventData>() {
+                    eprintln!(
+                        "Network event data too small: {} < {}",
+                        data.len(),
+                        std::mem::size_of::<NetworkEventData>()
+                    );
+                    return 0;
+                }
                 let network_event_data: NetworkEventData =
                     unsafe { *(data.as_ptr() as *const NetworkEventData) };
 
@@ -182,6 +190,14 @@ pub fn ebpf_handle(
         // Add syscall events ring buffer
         ring_buffer_builder
             .add(&syscall_sk.maps.syscall_events, move |data: &[u8]| {
+                if data.len() < std::mem::size_of::<SyscallEventData>() {
+                    eprintln!(
+                        "Syscall event data too small: {} < {}",
+                        data.len(),
+                        std::mem::size_of::<SyscallEventData>()
+                    );
+                    return 0;
+                }
                 let syscall_event_data: SyscallEventData =
                     unsafe { *(data.as_ptr() as *const SyscallEventData) };
                 if let Err(e) = syscall_event_sender.blocking_send(syscall_event_data) {
@@ -198,6 +214,14 @@ pub fn ebpf_handle(
             .add(
                 &netpolicy_sk.maps.policy_drop_events,
                 move |data: &[u8]| {
+                    if data.len() < std::mem::size_of::<PolicyDropEvent>() {
+                        eprintln!(
+                            "Policy drop event data too small: {} < {}",
+                            data.len(),
+                            std::mem::size_of::<PolicyDropEvent>()
+                        );
+                        return 0;
+                    }
                     let policy_drop_event: PolicyDropEvent =
                         unsafe { *(data.as_ptr() as *const PolicyDropEvent) };
                     if let Err(e) = netpolicy_drop_sender.blocking_send(policy_drop_event) {

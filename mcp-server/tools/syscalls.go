@@ -39,8 +39,16 @@ func (h SyscallsHandler) Call(
 		"pod_name":  input.PodName,
 	}).Info("Received get_pod_syscalls request")
 
+	if input.PodName == "" {
+		logger.Log.Error("pod_name is required but not provided")
+		return &mcp.CallToolResult{
+			Content: []mcp.Content{&mcp.TextContent{Text: "pod_name is required"}},
+			IsError: true,
+		}, SyscallsOutput{}, nil
+	}
+
 	// Fetch data from broker
-	data, err := h.client.GetPodSyscalls(input.Namespace, input.PodName)
+	data, err := h.client.GetPodSyscalls(ctx, input.Namespace, input.PodName)
 	if err != nil {
 		logger.Log.WithFields(logrus.Fields{
 			"namespace":      input.Namespace,
@@ -48,14 +56,20 @@ func (h SyscallsHandler) Call(
 			"error":          err.Error(),
 			"total_duration": time.Since(startTime).String(),
 		}).Error("Error fetching syscalls")
-		return nil, SyscallsOutput{}, fmt.Errorf("error fetching syscalls: %w", err)
+		return &mcp.CallToolResult{
+			Content: []mcp.Content{&mcp.TextContent{Text: fmt.Sprintf("error fetching syscalls: %v", err)}},
+			IsError: true,
+		}, SyscallsOutput{}, nil
 	}
 
 	// Convert to JSON string
 	jsonData, err := json.MarshalIndent(data, "", "  ")
 	if err != nil {
 		logger.Log.WithField("error", err.Error()).Error("Error marshaling response")
-		return nil, SyscallsOutput{}, fmt.Errorf("error marshaling response: %w", err)
+		return &mcp.CallToolResult{
+			Content: []mcp.Content{&mcp.TextContent{Text: fmt.Sprintf("error marshaling response: %v", err)}},
+			IsError: true,
+		}, SyscallsOutput{}, nil
 	}
 
 	logger.Log.WithFields(logrus.Fields{

@@ -71,16 +71,35 @@ pub async fn get_pods_by_node(
     Ok(HttpResponse::Ok().json(pods))
 }
 
-pub fn pods_by_node(
-    conn: &mut PgConnection,
-    node: &str,
-) -> Result<Vec<PodDetail>, DbError> {
+pub fn pods_by_node(conn: &mut PgConnection, node: &str) -> Result<Vec<PodDetail>, DbError> {
     use schema::pod_details::dsl::*;
     let pods = pod_details
         .filter(node_name.eq(node))
         .filter(is_dead.eq(false))
         .load::<PodDetail>(conn)?;
     Ok(pods)
+}
+
+#[get("/svc/info")]
+pub async fn get_svc_details(pool: web::Data<DbPool>) -> actix_web::Result<impl Responder> {
+    debug!("select svc details table");
+    let svc_detail = web::block(move || {
+        let mut conn = pool.get()?;
+        svc_details_all(&mut conn)
+    })
+    .await?
+    .map_err(actix_web::error::ErrorInternalServerError)?;
+
+    Ok(match svc_detail {
+        Some(s) => HttpResponse::Ok().json(s),
+        None => HttpResponse::NotFound().body("No data found"),
+    })
+}
+
+pub fn svc_details_all(conn: &mut PgConnection) -> Result<Option<Vec<SvcDetail>>, DbError> {
+    use schema::svc_details::dsl::*;
+    let svcs = svc_details.load::<SvcDetail>(conn).optional()?;
+    Ok(svcs)
 }
 
 #[get("/svc/ip/{ip}")]

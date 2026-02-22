@@ -85,6 +85,19 @@ class BrokerAPIClient {
   }
 
   /**
+   * Get all service details
+   */
+  async getAllServices(): Promise<ServiceInfo[]> {
+    try {
+      const response = await this.client.get('/svc/info');
+      return response.data || [];
+    } catch (error) {
+      console.error('Error fetching all services:', error);
+      return [];
+    }
+  }
+
+  /**
    * Get service details by IP address
    */
   async getServiceByIP(serviceIP: string): Promise<ServiceInfo | null> {

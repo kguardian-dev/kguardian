@@ -37,23 +37,32 @@ func (h PodDetailsHandler) Call(
 
 	if input.IP == "" {
 		logger.Log.Error("IP address is required but not provided")
-		return nil, PodDetailsOutput{}, fmt.Errorf("IP address is required")
+		return &mcp.CallToolResult{
+			Content: []mcp.Content{&mcp.TextContent{Text: "IP address is required"}},
+			IsError: true,
+		}, PodDetailsOutput{}, nil
 	}
 
-	data, err := h.client.GetPodByIP(input.IP)
+	data, err := h.client.GetPodByIP(ctx, input.IP)
 	if err != nil {
 		logger.Log.WithFields(logrus.Fields{
 			"ip":             input.IP,
 			"error":          err.Error(),
 			"total_duration": time.Since(startTime).String(),
 		}).Error("Error fetching pod details")
-		return nil, PodDetailsOutput{}, fmt.Errorf("error fetching pod details: %w", err)
+		return &mcp.CallToolResult{
+			Content: []mcp.Content{&mcp.TextContent{Text: fmt.Sprintf("error fetching pod details: %v", err)}},
+			IsError: true,
+		}, PodDetailsOutput{}, nil
 	}
 
 	jsonData, err := json.MarshalIndent(data, "", "  ")
 	if err != nil {
 		logger.Log.WithField("error", err.Error()).Error("Error marshaling response")
-		return nil, PodDetailsOutput{}, fmt.Errorf("error marshaling response: %w", err)
+		return &mcp.CallToolResult{
+			Content: []mcp.Content{&mcp.TextContent{Text: fmt.Sprintf("error marshaling response: %v", err)}},
+			IsError: true,
+		}, PodDetailsOutput{}, nil
 	}
 
 	logger.Log.WithFields(logrus.Fields{

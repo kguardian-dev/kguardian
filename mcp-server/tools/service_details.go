@@ -37,23 +37,32 @@ func (h ServiceDetailsHandler) Call(
 
 	if input.IP == "" {
 		logger.Log.Error("IP address is required but not provided")
-		return nil, ServiceDetailsOutput{}, fmt.Errorf("IP address is required")
+		return &mcp.CallToolResult{
+			Content: []mcp.Content{&mcp.TextContent{Text: "IP address is required"}},
+			IsError: true,
+		}, ServiceDetailsOutput{}, nil
 	}
 
-	data, err := h.client.GetServiceByIP(input.IP)
+	data, err := h.client.GetServiceByIP(ctx, input.IP)
 	if err != nil {
 		logger.Log.WithFields(logrus.Fields{
 			"ip":             input.IP,
 			"error":          err.Error(),
 			"total_duration": time.Since(startTime).String(),
 		}).Error("Error fetching service details")
-		return nil, ServiceDetailsOutput{}, fmt.Errorf("error fetching service details: %w", err)
+		return &mcp.CallToolResult{
+			Content: []mcp.Content{&mcp.TextContent{Text: fmt.Sprintf("error fetching service details: %v", err)}},
+			IsError: true,
+		}, ServiceDetailsOutput{}, nil
 	}
 
 	jsonData, err := json.MarshalIndent(data, "", "  ")
 	if err != nil {
 		logger.Log.WithField("error", err.Error()).Error("Error marshaling response")
-		return nil, ServiceDetailsOutput{}, fmt.Errorf("error marshaling response: %w", err)
+		return &mcp.CallToolResult{
+			Content: []mcp.Content{&mcp.TextContent{Text: fmt.Sprintf("error marshaling response: %v", err)}},
+			IsError: true,
+		}, ServiceDetailsOutput{}, nil
 	}
 
 	logger.Log.WithFields(logrus.Fields{

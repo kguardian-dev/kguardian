@@ -123,16 +123,22 @@ fn pod_unready(p: &Pod) -> Option<Vec<String>> {
     None
 }
 
-async fn update_pods_details(pod: &Pod, node_name: &str, client: &Client) -> Result<Option<String>, Error> {
+async fn update_pods_details(
+    pod: &Pod,
+    node_name: &str,
+    client: &Client,
+) -> Result<Option<String>, Error> {
     let pod_name = pod.name_any();
     let pod_namespace = pod.metadata.namespace.to_owned();
-    let pod_status = pod.status.as_ref().unwrap();
+    let pod_status = match pod.status.as_ref() {
+        Some(status) => status,
+        None => return Ok(None),
+    };
     let mut pod_ip_address: Option<String> = None;
-    if pod_status.pod_ip.is_some() {
-        let pod_ip = pod_status.pod_ip.as_ref().unwrap();
-
+    if let Some(pod_ip) = pod_status.pod_ip.as_ref() {
         // Extract pod identity and workload selector labels
-        let (pod_identity, workload_selector_labels) = extract_pod_identity_and_selectors(pod, client).await;
+        let (pod_identity, workload_selector_labels) =
+            extract_pod_identity_and_selectors(pod, client).await;
 
         info!(
             "Pod {}: identity={:?}, workload_selector_labels={:?}",
@@ -210,7 +216,10 @@ fn is_backed_by_daemonset(pod: &Pod) -> bool {
 /// Extracts pod identity and workload selector labels from labels or owner references
 /// Returns (identity, selector_labels)
 /// Priority: app.kubernetes.io/name > app.kubernetes.io/component > k8s-app > owner references
-async fn extract_pod_identity_and_selectors(pod: &Pod, client: &Client) -> (Option<String>, Option<BTreeMap<String, String>>) {
+async fn extract_pod_identity_and_selectors(
+    pod: &Pod,
+    client: &Client,
+) -> (Option<String>, Option<BTreeMap<String, String>>) {
     // Check labels first in priority order
     if let Some(labels) = &pod.metadata.labels {
         // 1. Check for app.kubernetes.io/name
@@ -231,7 +240,7 @@ async fn extract_pod_identity_and_selectors(pod: &Pod, client: &Client) -> (Opti
             let selectors = trace_owner_to_workload_with_selectors(pod, client).await;
             return (Some(k8s_app.clone()), selectors);
         }
-         // 4. Check for app
+        // 4. Check for app
         if let Some(k8s_app) = labels.get("app") {
             let selectors = trace_owner_to_workload_with_selectors(pod, client).await;
             return (Some(k8s_app.clone()), selectors);
@@ -244,38 +253,48 @@ async fn extract_pod_identity_and_selectors(pod: &Pod, client: &Client) -> (Opti
 }
 
 /// Traces pod's owner references to get workload selector labels only
-async fn trace_owner_to_workload_with_selectors(pod: &Pod, client: &Client) -> Option<BTreeMap<String, String>> {
+async fn trace_owner_to_workload_with_selectors(
+    pod: &Pod,
+    client: &Client,
+) -> Option<BTreeMap<String, String>> {
     let owner_references = pod.metadata.owner_references.as_ref()?;
     let namespace = pod.metadata.namespace.as_ref()?;
 
-    debug!("Tracing owner references for pod {} to get selector labels", pod.name_any());
+    debug!(
+        "Tracing owner references for pod {} to get selector labels",
+        pod.name_any()
+    );
 
     for owner in owner_references {
         debug!("Processing owner: kind={}, name={}", owner.kind, owner.name);
         match owner.kind.as_str() {
             "ReplicaSet" => {
                 // Trace ReplicaSet to Deployment and get selector
-                if let Some(selectors) = get_deployment_selector_from_replicaset(
-                    &owner.name,
-                    namespace,
-                    client
-                ).await {
+                if let Some(selectors) =
+                    get_deployment_selector_from_replicaset(&owner.name, namespace, client).await
+                {
                     return Some(selectors);
                 }
             }
             "Deployment" => {
-                if let Some(selectors) = get_deployment_selector(&owner.name, namespace, client).await {
+                if let Some(selectors) =
+                    get_deployment_selector(&owner.name, namespace, client).await
+                {
                     return Some(selectors);
                 }
             }
             "StatefulSet" => {
-                if let Some(selectors) = get_statefulset_selector(&owner.name, namespace, client).await {
+                if let Some(selectors) =
+                    get_statefulset_selector(&owner.name, namespace, client).await
+                {
                     return Some(selectors);
                 }
             }
             "DaemonSet" => {
                 debug!("Found DaemonSet owner: {}", owner.name);
-                if let Some(selectors) = get_daemonset_selector(&owner.name, namespace, client).await {
+                if let Some(selectors) =
+                    get_daemonset_selector(&owner.name, namespace, client).await
+                {
                     return Some(selectors);
                 }
             }
@@ -290,7 +309,10 @@ async fn trace_owner_to_workload_with_selectors(pod: &Pod, client: &Client) -> O
 }
 
 /// Traces pod's owner references to get both workload name and selector labels
-async fn trace_owner_to_workload_with_selectors_and_name(pod: &Pod, client: &Client) -> (Option<String>, Option<BTreeMap<String, String>>) {
+async fn trace_owner_to_workload_with_selectors_and_name(
+    pod: &Pod,
+    client: &Client,
+) -> (Option<String>, Option<BTreeMap<String, String>>) {
     let owner_references = match pod.metadata.owner_references.as_ref() {
         Some(refs) => refs,
         None => return (None, None),
@@ -304,11 +326,10 @@ async fn trace_owner_to_workload_with_selectors_and_name(pod: &Pod, client: &Cli
         match owner.kind.as_str() {
             "ReplicaSet" => {
                 // Trace ReplicaSet to Deployment
-                if let Some((name, selectors)) = get_deployment_name_and_selector_from_replicaset(
-                    &owner.name,
-                    namespace,
-                    client
-                ).await {
+                if let Some((name, selectors)) =
+                    get_deployment_name_and_selector_from_replicaset(&owner.name, namespace, client)
+                        .await
+                {
                     return (Some(name), Some(selectors));
                 }
             }
@@ -343,12 +364,17 @@ async fn get_deployment_selector(
 
     match deploy_api.get(deployment_name).await {
         Ok(deployment) => {
-            let selectors = deployment.spec
-                .and_then(|spec| spec.selector.match_labels);
+            let selectors = deployment.spec.and_then(|spec| spec.selector.match_labels);
             if selectors.is_none() {
-                debug!("Deployment {} has no match_labels in selector", deployment_name);
+                debug!(
+                    "Deployment {} has no match_labels in selector",
+                    deployment_name
+                );
             } else {
-                debug!("Deployment {} selector labels: {:?}", deployment_name, selectors);
+                debug!(
+                    "Deployment {} selector labels: {:?}",
+                    deployment_name, selectors
+                );
             }
             selectors
         }
@@ -369,12 +395,17 @@ async fn get_statefulset_selector(
 
     match sts_api.get(statefulset_name).await {
         Ok(statefulset) => {
-            let selectors = statefulset.spec
-                .and_then(|spec| spec.selector.match_labels);
+            let selectors = statefulset.spec.and_then(|spec| spec.selector.match_labels);
             if selectors.is_none() {
-                debug!("StatefulSet {} has no match_labels in selector", statefulset_name);
+                debug!(
+                    "StatefulSet {} has no match_labels in selector",
+                    statefulset_name
+                );
             } else {
-                debug!("StatefulSet {} selector labels: {:?}", statefulset_name, selectors);
+                debug!(
+                    "StatefulSet {} selector labels: {:?}",
+                    statefulset_name, selectors
+                );
             }
             selectors
         }
@@ -395,11 +426,20 @@ async fn get_daemonset_selector(
 
     match ds_api.get(daemonset_name).await {
         Ok(daemonset) => {
-            let selectors = daemonset.spec.map(|spec| spec.selector.match_labels).flatten();
+            let selectors = daemonset
+                .spec
+                .map(|spec| spec.selector.match_labels)
+                .flatten();
             if selectors.is_none() {
-                debug!("DaemonSet {} has no match_labels in selector", daemonset_name);
+                debug!(
+                    "DaemonSet {} has no match_labels in selector",
+                    daemonset_name
+                );
             } else {
-                debug!("DaemonSet {} selector labels: {:?}", daemonset_name, selectors);
+                debug!(
+                    "DaemonSet {} selector labels: {:?}",
+                    daemonset_name, selectors
+                );
             }
             selectors
         }
@@ -449,7 +489,9 @@ async fn get_deployment_name_and_selector_from_replicaset(
             if let Some(owner_references) = &replicaset.metadata.owner_references {
                 for owner in owner_references {
                     if owner.kind == "Deployment" {
-                        if let Some(selectors) = get_deployment_selector(&owner.name, namespace, client).await {
+                        if let Some(selectors) =
+                            get_deployment_selector(&owner.name, namespace, client).await
+                        {
                             return Some((owner.name.clone(), selectors));
                         }
                     }

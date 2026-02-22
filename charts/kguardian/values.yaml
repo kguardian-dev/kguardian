@@ -37,7 +37,14 @@ controller:
       # -- Init container image tag
       tag: latest
     # -- Init container security context
-    securityContext: {}
+    securityContext:
+      runAsNonRoot: true
+      runAsUser: 65534
+      readOnlyRootFilesystem: true
+      allowPrivilegeEscalation: false
+      capabilities:
+        drop:
+          - ALL
 
   # -- List of image pull secrets for private registries
   imagePullSecrets: []
@@ -53,8 +60,8 @@ controller:
     annotations: {}
     # -- The name of the service account to use. If not set and create is true, a name is generated using the fullname template
     name: ""
-    # -- Automount API credentials for a service account
-    automountServiceAccountToken: false
+    # -- Automount API credentials for a service account (controller needs K8s API access)
+    automountServiceAccountToken: true
 
   # -- Annotations to add to controller pods
   podAnnotations: {}
@@ -151,7 +158,14 @@ broker:
       # -- Overrides the init container image tag using SHA digest
       sha: ""
     # -- Broker init container security context
-    securityContext: {}
+    securityContext:
+      runAsNonRoot: true
+      runAsUser: 65534
+      readOnlyRootFilesystem: true
+      allowPrivilegeEscalation: false
+      capabilities:
+        drop:
+          - ALL
 
   container:
     # -- Broker container port

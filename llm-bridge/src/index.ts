@@ -1,5 +1,6 @@
 import express, { Request, Response } from "express";
 import cors from "cors";
+import rateLimit from "express-rate-limit";
 import dotenv from "dotenv";
 import { ZodError } from "zod";
 import { ChatRequestSchema, LLMProvider, type ErrorResponse } from "./types/index.js";
@@ -18,8 +19,8 @@ const brokerUrl =
   process.env.BROKER_URL || "http://broker.kguardian.svc.cluster.local:9090";
 
 // Middleware
-app.use(cors());
-app.use(express.json());
+app.use(cors({ origin: process.env.ALLOWED_ORIGIN || '*' }));
+app.use(express.json({ limit: '100kb' }));
 
 // Initialize broker client
 const brokerClient = new BrokerClient(brokerUrl);
@@ -39,14 +40,19 @@ app.get("/health", (req: Request, res: Response) => {
   const availableProviders = getAvailableProviders();
   res.json({
     status: "healthy",
-    brokerUrl,
-    availableProviders,
     hasProvider: availableProviders.length > 0,
   });
 });
 
+// Rate limiting for chat endpoint
+const chatLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 20,
+  message: { error: 'Too many requests' },
+});
+
 // Chat endpoint
-app.post("/api/chat", async (req: Request, res: Response<any>) => {
+app.post("/api/chat", chatLimiter, async (req: Request, res: Response<any>) => {
   try {
     // Validate request
     const chatRequest = ChatRequestSchema.parse(req.body);
@@ -106,9 +112,9 @@ app.post("/api/chat", async (req: Request, res: Response<any>) => {
     }
 
     if (error instanceof Error) {
+      console.error("Chat error details:", error.message, error.stack);
       return res.status(500).json({
-        error: error.message,
-        ...(process.env.NODE_ENV !== "production" && { details: error.stack }),
+        error: "An internal error occurred while processing the chat request",
       } as ErrorResponse);
     }
 
@@ -119,7 +125,7 @@ app.post("/api/chat", async (req: Request, res: Response<any>) => {
 });
 
 // Start server
-app.listen(port, () => {
+const server = app.listen(port, () => {
   const availableProviders = getAvailableProviders();
   console.log(`LLM Bridge listening on port ${port}`);
   console.log(`Broker URL: ${brokerUrl}`);
@@ -130,3 +136,12 @@ app.listen(port, () => {
     console.warn("Set at least one: OPENAI_API_KEY, ANTHROPIC_API_KEY, GOOGLE_API_KEY, or GITHUB_TOKEN");
   }
 });
+
+// Graceful shutdown
+const shutdown = () => {
+  brokerClient.close();
+  server.close();
+  process.exit(0);
+};
+process.on('SIGTERM', shutdown);
+process.on('SIGINT', shutdown);

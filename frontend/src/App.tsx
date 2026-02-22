@@ -28,9 +28,12 @@ function App() {
   });
   const [tableHeight, setTableHeight] = useState<number>(UI_DIMENSIONS.TABLE_DEFAULT_HEIGHT);
   const [isResizing, setIsResizing] = useState(false);
+  const [showExternalNodes, setShowExternalNodes] = useState(true);
+  const [showTraffic, setShowTraffic] = useState(true);
+  const [layoutDirection, setLayoutDirection] = useState<'LR' | 'TB'>('LR');
 
   const { namespaces } = useNamespaces();
-  const { pods, allPodsLookup, loading, error, togglePodExpansion, refreshData } = usePodData(namespace);
+  const { pods, allPodsLookup, services, loading, error, togglePodExpansion, refreshData } = usePodData(namespace);
 
   // Calculate the right padding for content when AI panel is docked (in pixels)
   const contentPaddingRightPx = aiSidePanel.isSidePanel
@@ -189,31 +192,48 @@ function App() {
                 onPodSelect={handlePodSelect}
                 selectedPodId={selectedPod?.id || null}
                 onBuildPolicy={handleBuildPolicy}
+                allPodsLookup={allPodsLookup}
+                services={services}
+                showExternalNodes={showExternalNodes}
+                onToggleExternalNodes={() => setShowExternalNodes(prev => !prev)}
+                showTraffic={showTraffic}
+                onToggleTraffic={() => setShowTraffic(prev => !prev)}
+                layoutDirection={layoutDirection}
+                onToggleLayoutDirection={() => setLayoutDirection(prev => prev === 'LR' ? 'TB' : 'LR')}
               />
             </div>
 
-            {/* Resize Handle */}
+            {/* Collapsible Bottom Panel: Resize Handle + Data Table */}
             <div
-              onMouseDown={handleMouseDown}
-              className={`h-1 border-t border-hubble-border cursor-ns-resize hover:bg-hubble-accent/50 transition-colors relative group ${
-                isResizing ? 'bg-hubble-accent' : 'bg-hubble-border'
-              }`}
-              title="Drag to resize"
+              className="overflow-hidden transition-all duration-300 ease-in-out"
+              style={{
+                height: selectedPod ? `${tableHeight + 4}px` : '0px',
+                opacity: selectedPod ? 1 : 0,
+              }}
             >
-              {/* Visual indicator */}
-              <div className="absolute inset-x-0 top-1/2 -translate-y-1/2 flex justify-center opacity-0 group-hover:opacity-100 transition-opacity">
-                <div className="flex gap-1">
-                  <div className="w-8 h-0.5 bg-hubble-accent rounded-full"></div>
+              {/* Resize Handle */}
+              <div
+                onMouseDown={handleMouseDown}
+                className={`h-1 border-t border-hubble-border cursor-ns-resize hover:bg-hubble-accent/50 transition-colors relative group ${
+                  isResizing ? 'bg-hubble-accent' : 'bg-hubble-border'
+                }`}
+                title="Drag to resize"
+              >
+                {/* Visual indicator */}
+                <div className="absolute inset-x-0 top-1/2 -translate-y-1/2 flex justify-center opacity-0 group-hover:opacity-100 transition-opacity">
+                  <div className="flex gap-1">
+                    <div className="w-8 h-0.5 bg-hubble-accent rounded-full"></div>
+                  </div>
                 </div>
               </div>
-            </div>
 
-            {/* Data Table */}
-            <div
-              className="border-t border-hubble-border bg-hubble-dark overflow-hidden"
-              style={{ height: `${tableHeight}px` }}
-            >
-              <DataTable selectedPod={selectedPod} allPodsLookup={allPodsLookup} />
+              {/* Data Table */}
+              <div
+                className="border-t border-hubble-border bg-hubble-dark overflow-hidden"
+                style={{ height: `${tableHeight}px` }}
+              >
+                <DataTable selectedPod={selectedPod} allPodsLookup={allPodsLookup} services={services} />
+              </div>
             </div>
           </>
         )}
@@ -221,7 +241,7 @@ function App() {
 
       {/* Footer */}
       <footer className="bg-hubble-dark border-t border-hubble-border px-6 py-2 text-center text-xs text-tertiary">
-        <p>Kube Guardian v0.1.0 | Namespace: {namespace} | Pods: {pods.length}</p>
+        <p>Kube Guardian v{__APP_VERSION__} | Namespace: {namespace} | Pods: {pods.length}</p>
       </footer>
 
       {/* AI Assistant Modal */}
