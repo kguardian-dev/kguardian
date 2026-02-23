@@ -5,8 +5,10 @@ import { apiClient } from '../services/api';
 interface TrafficIdentity {
   podName?: string;
   podNamespace?: string;
+  podLabels?: Record<string, string>;
   svcName?: string;
   svcNamespace?: string;
+  svcSelector?: Record<string, string>;
   isExternal: boolean;
 }
 
@@ -20,9 +22,12 @@ async function resolveTrafficIdentity(ip: string): Promise<TrafficIdentity> {
   try {
     const serviceInfo = await apiClient.getServiceByIP(ip);
     if (serviceInfo && serviceInfo.svc_name) {
+      const svcSpec = (serviceInfo.service_spec as Record<string, unknown>)?.spec as Record<string, unknown> | undefined;
+      const svcSelector = svcSpec?.selector as Record<string, string> | undefined;
       return {
         svcName: serviceInfo.svc_name,
         svcNamespace: serviceInfo.svc_namespace || undefined,
+        svcSelector: svcSelector && Object.keys(svcSelector).length > 0 ? svcSelector : undefined,
         isExternal: false,
       };
     }
@@ -34,9 +39,16 @@ async function resolveTrafficIdentity(ip: string): Promise<TrafficIdentity> {
   try {
     const podInfo = await apiClient.getPodDetailsByIP(ip);
     if (podInfo && podInfo.pod_name) {
+      let podLabels: Record<string, string> | undefined;
+      if (podInfo.workload_selector_labels && Object.keys(podInfo.workload_selector_labels).length > 0) {
+        podLabels = podInfo.workload_selector_labels;
+      } else if (podInfo.pod_obj?.metadata?.labels) {
+        podLabels = podInfo.pod_obj.metadata.labels as Record<string, string>;
+      }
       return {
         podName: podInfo.pod_name,
         podNamespace: podInfo.pod_namespace || undefined,
+        podLabels,
         isExternal: false,
       };
     }
@@ -73,6 +85,28 @@ export async function generateNetworkPolicy(pod: PodNodeData): Promise<NetworkPo
   const identityMap = new Map<string, TrafficIdentity>();
   uniqueIPArray.forEach((ip, i) => {
     identityMap.set(ip, identities[i]);
+  });
+
+  // Deduplicate: if a pod IP resolves to a pod that is selected by a service identity
+  // already present in identityMap, redirect the pod IP to use the service identity.
+  // This collapses traffic to both the service ClusterIP and its backing pod IP into one rule.
+  uniqueIPArray.forEach((ip) => {
+    const identity = identityMap.get(ip)!;
+    if (!identity.podName || !identity.podNamespace || !identity.podLabels) return;
+
+    for (const [otherIp, svcIdentity] of identityMap) {
+      if (otherIp === ip) continue;
+      if (!svcIdentity.svcName || svcIdentity.svcNamespace !== identity.podNamespace) continue;
+      if (!svcIdentity.svcSelector) continue;
+
+      const matches = Object.entries(svcIdentity.svcSelector).every(
+        ([k, v]) => identity.podLabels![k] === v
+      );
+      if (matches) {
+        identityMap.set(ip, svcIdentity);
+        break;
+      }
+    }
   });
 
   // Process traffic rules
