@@ -124,6 +124,25 @@ const NetworkGraphInner: React.FC<NetworkGraphProps> = ({
     return map;
   }, [services, pods]);
 
+  // Map backing pod IP → service ClusterIP, for cross-namespace deduplication.
+  // Shared between externalNodes (traffic merge) and initialEdges (edge resolution).
+  const podIpToSvcIp = useMemo(() => {
+    const map = new Map<string, string>();
+    services.forEach((svc) => {
+      if (!svc.svc_ip) return;
+      const svcSpec = (svc.service_spec as Record<string, unknown>)?.spec as Record<string, unknown> | undefined;
+      const selectorLabels = svcSpec?.selector as Record<string, string> | undefined;
+      if (!selectorLabels || Object.keys(selectorLabels).length === 0) return;
+      allPodsLookup.forEach((pod) => {
+        if (!pod.pod_ip || !pod.workload_selector_labels) return;
+        if (Object.entries(selectorLabels).every(([k, v]) => pod.workload_selector_labels![k] === v)) {
+          map.set(pod.pod_ip, svc.svc_ip!);
+        }
+      });
+    });
+    return map;
+  }, [services, allPodsLookup]);
+
   // Discover external endpoints from traffic data, split by direction
   // Ingress sources (-in suffix) go on the left, egress destinations (-out suffix) on the right
   const externalNodes = useMemo(() => {
@@ -166,6 +185,24 @@ const NetworkGraphInner: React.FC<NetworkGraphProps> = ({
     const svcIpLookup = new Map<string, ServiceInfo>();
     services.forEach((svc) => {
       if (svc.svc_ip) svcIpLookup.set(svc.svc_ip, svc);
+    });
+
+    // Step 2b: Merge backing pod IP entries into their service IP entry so that
+    // curl→serviceIP and curl→podIP produce a single external node (and single edge)
+    const podIpsToMerge: Array<[string, string]> = [];
+    externalIpData.forEach((_entry, ip) => {
+      const svcIp = podIpToSvcIp.get(ip);
+      if (svcIp && svcIpLookup.has(svcIp)) podIpsToMerge.push([ip, svcIp]);
+    });
+    podIpsToMerge.forEach(([podIp, svcIp]) => {
+      const entry = externalIpData.get(podIp)!;
+      if (!externalIpData.has(svcIp)) {
+        externalIpData.set(svcIp, { podInfo: null, ip: svcIp, ingressTraffic: [], egressTraffic: [] });
+      }
+      const svcEntry = externalIpData.get(svcIp)!;
+      svcEntry.ingressTraffic.push(...entry.ingressTraffic);
+      svcEntry.egressTraffic.push(...entry.egressTraffic);
+      externalIpData.delete(podIp);
     });
 
     // Step 3: Group by identity, tracking direction-specific traffic
@@ -309,7 +346,7 @@ const NetworkGraphInner: React.FC<NetworkGraphProps> = ({
     }
 
     return externalPodNodes;
-  }, [pods, showExternalNodes, showTraffic, ipToLocalPodMap, ipToAllPodsMap, svcIpToLocalPodMap, services]);
+  }, [pods, showExternalNodes, showTraffic, ipToLocalPodMap, ipToAllPodsMap, svcIpToLocalPodMap, services, podIpToSvcIp]);
 
   // Combine in-namespace and external pods for rendering
   // When traffic is enabled, hide local pods that have no traffic
@@ -387,10 +424,16 @@ const NetworkGraphInner: React.FC<NetworkGraphProps> = ({
         const trafficType = traffic.traffic_type?.toLowerCase();
         if (trafficType === 'egress') {
           sourcePod = pod;
-          // Egress: remote IP is the destination → resolve to local pod, service IP, or egress-external node
-          destPod = remoteIp
-            ? (ipToLocalPodMap.get(remoteIp) || svcIpToLocalPodMap.get(remoteIp) || egressExternalIpMap.get(remoteIp))
-            : undefined;
+          // Egress: remote IP is the destination → resolve to local pod, service IP, or egress-external node.
+          // If the remote IP is a backing pod IP for a cross-namespace service, resolve via the service ClusterIP
+          // so that curl→serviceIP and curl→podIP collapse to the same external node.
+          if (remoteIp) {
+            const canonicalIp = podIpToSvcIp.get(remoteIp) ?? remoteIp;
+            destPod = ipToLocalPodMap.get(remoteIp)
+              || svcIpToLocalPodMap.get(remoteIp)
+              || egressExternalIpMap.get(remoteIp)
+              || egressExternalIpMap.get(canonicalIp);
+          }
         } else if (trafficType === 'ingress') {
           // Ingress: remote IP is the source → resolve to local pod, service IP, or ingress-external node
           sourcePod = remoteIp
@@ -497,7 +540,7 @@ const NetworkGraphInner: React.FC<NetworkGraphProps> = ({
     });
 
     return edges;
-  }, [pods, allDisplayPods, ipToLocalPodMap, svcIpToLocalPodMap, showTraffic, wellKnownPorts]);
+  }, [pods, allDisplayPods, ipToLocalPodMap, svcIpToLocalPodMap, showTraffic, wellKnownPorts, podIpToSvcIp]);
 
   // Run ELK layout whenever nodes or edges change
   useEffect(() => {
