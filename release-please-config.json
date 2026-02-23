@@ -10,7 +10,12 @@
       "package-name": "controller",
       "changelog-path": "CHANGELOG.md",
       "extra-files": [
-        "controller/VERSION"
+        "controller/VERSION",
+        {
+          "type": "yaml",
+          "path": "charts/kguardian/values.yaml",
+          "jsonpath": "$.controller.image.tag"
+        }
       ],
       "include-component-in-tag": true
     },
@@ -20,7 +25,12 @@
       "package-name": "broker",
       "changelog-path": "CHANGELOG.md",
       "extra-files": [
-        "broker/VERSION"
+        "broker/VERSION",
+        {
+          "type": "yaml",
+          "path": "charts/kguardian/values.yaml",
+          "jsonpath": "$.broker.image.tag"
+        }
       ],
       "include-component-in-tag": true
     },
@@ -30,7 +40,12 @@
       "package-name": "frontend",
       "changelog-path": "CHANGELOG.md",
       "extra-files": [
-        "frontend/VERSION"
+        "frontend/VERSION",
+        {
+          "type": "yaml",
+          "path": "charts/kguardian/values.yaml",
+          "jsonpath": "$.frontend.image.tag"
+        }
       ],
       "include-component-in-tag": true
     },
@@ -56,6 +71,13 @@
       "release-type": "node",
       "package-name": "llm-bridge",
       "changelog-path": "CHANGELOG.md",
+      "extra-files": [
+        {
+          "type": "yaml",
+          "path": "charts/kguardian/values.yaml",
+          "jsonpath": "$.llmBridge.image.tag"
+        }
+      ],
       "include-component-in-tag": true
     },
     "mcp-server": {
@@ -64,7 +86,12 @@
       "package-name": "mcp-server",
       "changelog-path": "CHANGELOG.md",
       "extra-files": [
-        "mcp-server/VERSION"
+        "mcp-server/VERSION",
+        {
+          "type": "yaml",
+          "path": "charts/kguardian/values.yaml",
+          "jsonpath": "$.mcpServer.image.tag"
+        }
       ],
       "include-component-in-tag": true
     }
