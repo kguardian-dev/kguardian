@@ -37,7 +37,7 @@ spec:
           {{- if .Values.controller.image.sha }}
           image: "{{ .Values.controller.image.repository }}@{{ .Values.controller.image.sha }}"
           {{- else }}
-          image: "{{ .Values.controller.image.repository }}:{{ .Values.controller.image.tag }}"
+          image: "{{ .Values.controller.image.repository }}:{{ include "kguardian.imageTag" .Values.controller.image.tag }}"
           {{- end }}
           imagePullPolicy: {{ .Values.controller.image.pullPolicy }}
           securityContext:

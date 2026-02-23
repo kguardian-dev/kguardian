@@ -48,7 +48,7 @@ spec:
           {{- if .Values.broker.image.sha }}
           image: "{{ .Values.broker.image.repository }}@{{ .Values.broker.image.sha }}"
           {{- else }}
-          image: "{{ .Values.broker.image.repository }}:{{ .Values.broker.image.tag }}"
+          image: "{{ .Values.broker.image.repository }}:{{ include "kguardian.imageTag" .Values.broker.image.tag }}"
           {{- end }}
           imagePullPolicy: {{ .Values.broker.image.pullPolicy }}
           ports:

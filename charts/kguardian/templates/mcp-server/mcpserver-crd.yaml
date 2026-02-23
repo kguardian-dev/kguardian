@@ -16,7 +16,7 @@ spec:
     {{- if .Values.mcpServer.image.sha }}
     image: {{ .Values.mcpServer.image.repository }}@{{ .Values.mcpServer.image.sha }}
     {{- else }}
-    image: {{ .Values.mcpServer.image.repository }}:{{ .Values.mcpServer.image.tag }}
+    image: {{ .Values.mcpServer.image.repository }}:{{ include "kguardian.imageTag" .Values.mcpServer.image.tag }}
     {{- end }}
 
     # Port the MCP server listens on

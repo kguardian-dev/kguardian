@@ -23,9 +23,9 @@ controller:
     # -- Controller container image repository
     repository: ghcr.io/kguardian-dev/kguardian/controller
     # -- Controller image pull policy
-    pullPolicy: Always
-    # -- Controller version tag. Use component version (e.g., "v1.0.0") or "latest"
-    tag: "latest"
+    pullPolicy: IfNotPresent
+    # -- Controller version tag (auto-updated by release-please)
+    tag: "1.8.0"
     # -- Overrides the image tag using SHA digest
     sha: ""
   initContainer:
@@ -92,9 +92,10 @@ controller:
     port: 80
 
   # -- Controller pod resource requests and limits. eBPF requires more memory.
+  # CPU limits are not set by default to avoid throttling. Set them explicitly if needed.
   resources:
     limits:
-      cpu: 500m
+      # cpu: 500m
       memory: 512Mi
     requests:
       cpu: 100m
@@ -142,9 +143,9 @@ broker:
     # -- Broker container image repository
     repository: ghcr.io/kguardian-dev/kguardian/broker
     # -- Broker image pull policy
-    pullPolicy: Always
-    # -- Broker version tag. Use component version (e.g., "v1.0.0") or "latest"
-    tag: "latest"
+    pullPolicy: IfNotPresent
+    # -- Broker version tag (auto-updated by release-please)
+    tag: "1.7.0"
     # -- Overrides the image tag using SHA digest
     sha: ""
   initContainer:
@@ -221,9 +222,10 @@ broker:
     port: 9090
 
   # -- Broker pod resource requests and limits
+  # CPU limits are not set by default to avoid throttling. Set them explicitly if needed.
   resources:
     limits:
-      cpu: 500m
+      # cpu: 500m
       memory: 512Mi
     requests:
       cpu: 100m
@@ -326,9 +328,10 @@ database:
     port: 5432
 
   # -- Database pod resource requests and limits
+  # CPU limits are not set by default to avoid throttling. Set them explicitly if needed.
   resources:
     limits:
-      cpu: 500m
+      # cpu: 500m
       memory: 512Mi
     requests:
       cpu: 100m
@@ -365,9 +368,9 @@ frontend:
     # -- Frontend container image repository
     repository: ghcr.io/kguardian-dev/kguardian/frontend
     # -- Frontend image pull policy
-    pullPolicy: Always
-    # -- Frontend version tag. Use component version (e.g., "v1.0.0") or "latest"
-    tag: "latest"
+    pullPolicy: IfNotPresent
+    # -- Frontend version tag (auto-updated by release-please)
+    tag: "1.7.1"
     # -- Overrides the image tag using SHA digest
     sha: ""
 
@@ -425,9 +428,10 @@ frontend:
     port: 5173
 
   # -- Frontend pod resource requests and limits
+  # CPU limits are not set by default to avoid throttling. Set them explicitly if needed.
   resources:
     limits:
-      cpu: 200m
+      # cpu: 200m
       memory: 256Mi
     requests:
       cpu: 50m
@@ -486,9 +490,9 @@ llmBridge:
     # -- LLM Bridge container image repository
     repository: ghcr.io/kguardian-dev/kguardian/llm-bridge
     # -- LLM Bridge image pull policy
-    pullPolicy: Always
-    # -- LLM Bridge version tag. Use component version (e.g., "v1.0.0") or "latest"
-    tag: "latest"
+    pullPolicy: IfNotPresent
+    # -- LLM Bridge version tag (auto-updated by release-please)
+    tag: "1.2.2"
     # -- Overrides the image tag using SHA digest
     sha: ""
 
@@ -546,9 +550,10 @@ llmBridge:
     port: 8080
 
   # -- LLM Bridge pod resource requests and limits
+  # CPU limits are not set by default to avoid throttling. Set them explicitly if needed.
   resources:
     limits:
-      cpu: 500m
+      # cpu: 500m
       memory: 512Mi
     requests:
       cpu: 100m
@@ -632,9 +637,9 @@ mcpServer:
     # -- MCP Server container image repository
     repository: ghcr.io/kguardian-dev/kguardian/mcp-server
     # -- MCP Server image pull policy
-    pullPolicy: Always
-    # -- MCP Server version tag. Use component version (e.g., "v1.0.0") or "latest"
-    tag: "latest"
+    pullPolicy: IfNotPresent
+    # -- MCP Server version tag (auto-updated by release-please)
+    tag: "1.3.2"
     # -- Overrides the image tag using SHA digest
     sha: ""
 
@@ -692,9 +697,10 @@ mcpServer:
     port: 8081
 
   # -- MCP Server pod resource requests and limits
+  # CPU limits are not set by default to avoid throttling. Set them explicitly if needed.
   resources:
     limits:
-      cpu: 200m
+      # cpu: 200m
       memory: 256Mi
     requests:
       cpu: 50m
