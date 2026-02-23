@@ -16,9 +16,62 @@ permissions:
 jobs:
   release-please:
     runs-on: ubuntu-latest
+    outputs:
+      releases_created: ${{ steps.release-please.outputs.releases_created }}
     steps:
       - uses: googleapis/release-please-action@16a9c90856f42705d54a6fda1823352bdc62cf38 # v4.4.0
+        id: release-please
         with:
           config-file: release-please-config.json
           manifest-file: .release-please-manifest.json
           token: ${{ secrets.KGUARDIAN_PAT }}
+
+  # When a component release is created, sync its version into the chart values.yaml.
+  # release-please extra-files can't reference files outside the package directory,
+  # so this job handles the cross-package update.
+  sync-chart-versions:
+    needs: release-please
+    if: needs.release-please.outputs.releases_created == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          token: ${{ secrets.KGUARDIAN_PAT }}
+
+      - name: Install yq
+        uses: mikefarah/yq@bbdd97482f2d439126582a59689eb1c855944955 # v4.45.1
+
+      - name: Sync chart image tags from release manifest
+        env:
+          GIT_AUTHOR_NAME: github-actions[bot]
+          GIT_AUTHOR_EMAIL: 41898282+github-actions[bot]@users.noreply.github.com
+          GIT_COMMITTER_NAME: github-actions[bot]
+          GIT_COMMITTER_EMAIL: 41898282+github-actions[bot]@users.noreply.github.com
+        run: |
+          VALUES_FILE="charts/kguardian/values.yaml"
+
+          # Map release-please component names to values.yaml keys
+          declare -A COMPONENT_MAP=(
+            ["controller"]="controller"
+            ["broker"]="broker"
+            ["frontend"]="frontend"
+            ["llm-bridge"]="llmBridge"
+            ["mcp-server"]="mcpServer"
+          )
+
+          for component in "${!COMPONENT_MAP[@]}"; do
+            version=$(jq -r ".\"${component}\" // empty" .release-please-manifest.json)
+            if [ -z "$version" ]; then
+              continue
+            fi
+            values_key="${COMPONENT_MAP[$component]}"
+            yq -i ".${values_key}.image.tag = \"${version}\"" "$VALUES_FILE"
+          done
+
+          if git diff --quiet "$VALUES_FILE"; then
+            echo "Chart values.yaml is already in sync"
+          else
+            git add "$VALUES_FILE"
+            git commit -m "chore(chart): sync image tags from release manifest"
+            git push
+          fi
