@@ -64,3 +64,13 @@ Selector labels
 {{- define "kguardian.selectorLabels" -}}
 app.kubernetes.io/instance: {{ .Release.Name }}
 {{- end }}
+
+{{/*
+Resolve an image tag, prepending "v" for bare semver versions.
+release-please writes bare versions (e.g. "1.8.0"); GHCR tags use "v" prefix.
+Passes through non-semver values like "latest" or "sha-abc123" unchanged.
+Usage: include "kguardian.imageTag" .Values.<component>.image.tag
+*/}}
+{{- define "kguardian.imageTag" -}}
+{{- if regexMatch "^[0-9]+\\.[0-9]+\\.[0-9]+" . -}}v{{ . }}{{- else -}}{{ . }}{{- end -}}
+{{- end -}}
