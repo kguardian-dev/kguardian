@@ -10,10 +10,10 @@
       "package-name": "controller",
       "changelog-path": "CHANGELOG.md",
       "extra-files": [
-        "controller/VERSION",
+        "VERSION",
         {
           "type": "yaml",
-          "path": "charts/kguardian/values.yaml",
+          "path": "../charts/kguardian/values.yaml",
           "jsonpath": "$.controller.image.tag"
         }
       ],
@@ -25,10 +25,10 @@
       "package-name": "broker",
       "changelog-path": "CHANGELOG.md",
       "extra-files": [
-        "broker/VERSION",
+        "VERSION",
         {
           "type": "yaml",
-          "path": "charts/kguardian/values.yaml",
+          "path": "../charts/kguardian/values.yaml",
           "jsonpath": "$.broker.image.tag"
         }
       ],
@@ -40,10 +40,10 @@
       "package-name": "frontend",
       "changelog-path": "CHANGELOG.md",
       "extra-files": [
-        "frontend/VERSION",
+        "VERSION",
         {
           "type": "yaml",
-          "path": "charts/kguardian/values.yaml",
+          "path": "../charts/kguardian/values.yaml",
           "jsonpath": "$.frontend.image.tag"
         }
       ],
@@ -55,7 +55,7 @@
       "package-name": "advisor",
       "changelog-path": "CHANGELOG.md",
       "extra-files": [
-        "advisor/VERSION"
+        "VERSION"
       ],
       "include-component-in-tag": true
     },
@@ -74,7 +74,7 @@
       "extra-files": [
         {
           "type": "yaml",
-          "path": "charts/kguardian/values.yaml",
+          "path": "../charts/kguardian/values.yaml",
           "jsonpath": "$.llmBridge.image.tag"
         }
       ],
@@ -86,10 +86,10 @@
       "package-name": "mcp-server",
       "changelog-path": "CHANGELOG.md",
       "extra-files": [
-        "mcp-server/VERSION",
+        "VERSION",
         {
           "type": "yaml",
-          "path": "charts/kguardian/values.yaml",
+          "path": "../charts/kguardian/values.yaml",
           "jsonpath": "$.mcpServer.image.tag"
         }
       ],
