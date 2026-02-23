@@ -3,7 +3,7 @@
 version: '3'
 
 vars:
-  UI_IMAGE_NAME: ghcr.io/kguardian-dev/kguardian/guardian-ui
+  UI_IMAGE_NAME: ghcr.io/kguardian-dev/kguardian/frontend
   IMAGE_VERSION: local
 
 tasks:
@@ -11,22 +11,24 @@ tasks:
     desc: "Run all UI tasks"
     cmds:
       - task: build
+      - task: docker
 
   install:
     desc: "Install UI dependencies"
-    dir: ui
+    dir: frontend
     cmds:
       - npm install
 
   dev:
     desc: "Start UI development server"
-    dir: ui
+    dir: frontend
     cmds:
       - npm run dev
 
   build:
     desc: "Build and package the UI"
-    dir: ui
+    dir: frontend
+    deps: [install]
     cmds:
       - npm run build
 
@@ -34,12 +36,12 @@ tasks:
     desc: "Build UI Docker image and load into Kind"
     deps: [build]
     cmds:
-      - docker build -t {{.UI_IMAGE_NAME}}:{{.IMAGE_VERSION}} ui
+      - docker build -t {{.UI_IMAGE_NAME}}:{{.IMAGE_VERSION}} frontend
       - kind load docker-image {{.UI_IMAGE_NAME}}:{{.IMAGE_VERSION}}
 
   lint:
     desc: "Lint UI code"
-    dir: ui
+    dir: frontend
     cmds:
       - npm run lint
 
