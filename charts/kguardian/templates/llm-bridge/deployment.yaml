@@ -38,7 +38,7 @@ spec:
           {{- if .Values.llmBridge.image.sha }}
           image: "{{ .Values.llmBridge.image.repository }}@{{ .Values.llmBridge.image.sha }}"
           {{- else }}
-          image: "{{ .Values.llmBridge.image.repository }}:{{ .Values.llmBridge.image.tag }}"
+          image: "{{ .Values.llmBridge.image.repository }}:{{ include "kguardian.imageTag" .Values.llmBridge.image.tag }}"
           {{- end }}
           imagePullPolicy: {{ .Values.llmBridge.image.pullPolicy }}
           ports:

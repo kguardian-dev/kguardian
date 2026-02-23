@@ -37,7 +37,7 @@ spec:
           {{- if .Values.frontend.image.sha }}
           image: "{{ .Values.frontend.image.repository }}@{{ .Values.frontend.image.sha }}"
           {{- else }}
-          image: "{{ .Values.frontend.image.repository }}:{{ .Values.frontend.image.tag }}"
+          image: "{{ .Values.frontend.image.repository }}:{{ include "kguardian.imageTag" .Values.frontend.image.tag }}"
           {{- end }}
           imagePullPolicy: {{ .Values.frontend.image.pullPolicy }}
           ports:
