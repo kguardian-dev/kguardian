@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.9.0](https://github.com/kguardian-dev/kguardian/compare/chart/v1.8.3...chart/v1.9.0) (2026-02-23)
+
+
+### Features
+
+* **chart:** pin image tags to release versions, remove CPU limits ([#688](https://github.com/kguardian-dev/kguardian/issues/688)) ([7565af5](https://github.com/kguardian-dev/kguardian/commit/7565af5b3f5835fa5e6c5ab33d3defda42496117))
+
 ## [1.8.3](https://github.com/kguardian-dev/kguardian/compare/chart/v1.8.2...chart/v1.8.3) (2026-02-22)
 
 
