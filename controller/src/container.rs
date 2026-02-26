@@ -21,7 +21,9 @@ impl PodInspect {
             .and_then(|m| m.as_str().parse().ok());
 
         if let Some(container_id) = container_id {
-            match connect("/run/containerd/containerd.sock").await {
+            let sock_path = std::env::var("CONTAINERD_SOCK")
+                .unwrap_or_else(|_| "/run/containerd/containerd.sock".to_string());
+            match connect(&sock_path).await {
                 Ok(channel) => Some(
                     self.set_container_id(container_id)
                         .get_pid(channel)

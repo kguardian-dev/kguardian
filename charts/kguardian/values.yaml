@@ -128,6 +128,14 @@ controller:
   # -- Priority class to be used for the kguardian controller pods
   priorityClassName: ""
 
+  # -- Path to the containerd socket on the host node.
+  # For k3s clusters, set to: /run/k3s/containerd/containerd.sock
+  containerdSockPath: /run/containerd/containerd.sock
+
+  # -- Path to the containerd runtime bundle directory on the host node.
+  # For k3s clusters, set to: /run/k3s/containerd/io.containerd.runtime.v2.task
+  containerdBundlePath: /run/containerd/io.containerd.runtime.v2.task
+
   # -- Namespaces to be excluded from monitoring (comma-separated list)
   excludedNamespaces:
     - kguardian
