@@ -111,6 +111,8 @@ The following table lists the configurable parameters of the kguardian chart and
 | controller.autoscaling.maxReplicas | int | `100` | Maximum number of controller replicas |
 | controller.autoscaling.minReplicas | int | `1` | Minimum number of controller replicas |
 | controller.autoscaling.targetCPUUtilizationPercentage | int | `80` | Target CPU utilization percentage for autoscaling |
+| controller.containerdBundlePath | string | `"/run/containerd/io.containerd.runtime.v2.task"` | Path to the containerd runtime bundle directory on the host node. For k3s clusters, set to: /run/k3s/containerd/io.containerd.runtime.v2.task |
+| controller.containerdSockPath | string | `"/run/containerd/containerd.sock"` | Path to the containerd socket on the host node. For k3s clusters, set to: /run/k3s/containerd/containerd.sock |
 | controller.excludedNamespaces | list | `["kguardian","kube-system"]` | Namespaces to be excluded from monitoring (comma-separated list) |
 | controller.fullnameOverride | string | `""` | Override the full name of the controller resources |
 | controller.ignoreDaemonSet | bool | `true` | Ignore traffic from daemonset pods to reduce noise |
