@@ -55,6 +55,8 @@ spec:
             value: "{{ .Values.controller.excludedNamespaces | join "," }}"
           - name: IGNORE_DAEMONSET_TRAFFIC
             value: "{{ .Values.controller.ignoreDaemonSet }}"
+          - name: CONTAINERD_SOCK
+            value: "{{ .Values.controller.containerdSockPath }}"
           volumeMounts:
           - mountPath: /sys/kernel/debug
             name: debugfs
@@ -66,7 +68,7 @@ spec:
             mountPath: /run/containerd/io.containerd.runtime.v2.task
             readOnly: true
           - name: containerd-sock
-            mountPath: /run/containerd/containerd.sock
+            mountPath: {{ .Values.controller.containerdSockPath }}
             readOnly: true
           - mountPath: /sys/kernel/tracing
             name: tracefs
@@ -96,10 +98,10 @@ spec:
           type: Directory
       - name: run-containerd-bundle
         hostPath:
-          path: /run/containerd/io.containerd.runtime.v2.task
+          path: {{ .Values.controller.containerdBundlePath }}
       - name: containerd-sock
         hostPath:
-          path: /run/containerd/containerd.sock
+          path: {{ .Values.controller.containerdSockPath }}
       - hostPath:
           path: /proc
           type: Directory
