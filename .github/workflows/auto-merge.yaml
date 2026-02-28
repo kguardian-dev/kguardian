@@ -1,0 +1,34 @@
+---
+# yaml-language-server: $schema=https://json.schemastore.org/github-workflow.json
+name: Auto-merge
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, labeled, unlabeled]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  auto-merge:
+    runs-on: ubuntu-latest
+    # Run for release-please and renovate PRs, skip breaking changes
+    if: >-
+      (
+        startsWith(github.head_ref, 'release-please--') ||
+        startsWith(github.head_ref, 'renovate/')
+      ) &&
+      !contains(github.event.pull_request.title, '!') &&
+      !contains(github.event.pull_request.labels.*.name, 'breaking')
+    steps:
+      - name: Auto-approve PR
+        uses: hmarr/auto-approve-action@v4
+        with:
+          review-message: "Auto-approved: non-breaking automated PR"
+
+      - name: Enable auto-merge
+        run: gh pr merge --auto --squash "$PR_URL"
+        env:
+          PR_URL: ${{ github.event.pull_request.html_url }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
