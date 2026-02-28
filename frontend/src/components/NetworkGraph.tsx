@@ -231,40 +231,47 @@ const NetworkGraphInner: React.FC<NetworkGraphProps> = ({
           identityMap.set(key, { memberPods: [], ingressTraffic: [], egressTraffic: [] });
         }
         const group = identityMap.get(key)!;
-        // Add the service ClusterIP as a member pod (if it's a real IP)
-        if (ext.ip) {
-          group.memberPods.push({
-            pod_name: name,
-            pod_ip: ext.ip,
-            pod_namespace: ns,
-            pod_identity: name,
-            time_stamp: '',
-            node_name: '',
-            is_dead: false,
-          });
-        }
-        // Also add entries for backing pod IPs that were merged into this service IP
-        // so that edge resolution can map traffic referencing backing pod IPs to this node
         const backingIps = mergedBackingIps.get(ext.ip) || [];
-        backingIps.forEach((backingIp) => {
-          group.memberPods.push({
-            pod_name: name,
-            pod_ip: backingIp,
-            pod_namespace: ns,
-            pod_identity: name,
-            time_stamp: '',
-            node_name: '',
-            is_dead: false,
+        if (backingIps.length > 0) {
+          // Use only the real backing pod IPs so the pod count reflects actual pods.
+          // The service ClusterIP is a virtual IP and should not count as a pod.
+          // Edge resolution for "→ service ClusterIP" traffic is handled in the edge
+          // building step by indexing the canonical service IP from each backing pod IP.
+          backingIps.forEach((backingIp) => {
+            group.memberPods.push({
+              pod_name: name,
+              pod_ip: backingIp,
+              pod_namespace: ns,
+              pod_identity: name,
+              time_stamp: '',
+              node_name: '',
+              is_dead: false,
+            });
           });
-        });
+        } else {
+          // No backing pods known — use the service ClusterIP as a placeholder so the
+          // node is still displayed and edges for "→ service ClusterIP" traffic resolve.
+          if (ext.ip) {
+            group.memberPods.push({
+              pod_name: name,
+              pod_ip: ext.ip,
+              pod_namespace: ns,
+              pod_identity: name,
+              time_stamp: '',
+              node_name: '',
+              is_dead: false,
+            });
+          }
+        }
         group.ingressTraffic.push(...ext.ingressTraffic);
         group.egressTraffic.push(...ext.egressTraffic);
         return;
       }
 
-      // Cross-namespace pod with a real identity (not dead, has pod_identity)
-      if (ext.podInfo && ext.podInfo.pod_identity && !ext.podInfo.is_dead) {
-        const identity = ext.podInfo.pod_identity;
+      // Cross-namespace pod (not dead) — use pod_identity if available, fall back to pod_name
+      // for standalone pods created without a Deployment/ReplicaSet (pod_identity is null)
+      if (ext.podInfo && !ext.podInfo.is_dead) {
+        const identity = ext.podInfo.pod_identity || ext.podInfo.pod_name;
         const ns = ext.podInfo.pod_namespace || 'unknown';
         const key = `external-${ns}-${identity}`;
         if (!identityMap.has(key)) {
@@ -433,6 +440,15 @@ const NetworkGraphInner: React.FC<NetworkGraphProps> = ({
         if (p.pod_ip) {
           if (isInNode) ingressExternalIpMap.set(p.pod_ip, pod);
           if (isOutNode) egressExternalIpMap.set(p.pod_ip, pod);
+          // Also index the canonical service ClusterIP for this backing pod IP so that
+          // traffic recorded against the service IP (not the pod IP directly) still
+          // resolves to this external node — e.g. when a pod curls via the ClusterIP
+          // first and then later directly to the backing pod IP.
+          const svcIp = podIpToSvcIp.get(p.pod_ip);
+          if (svcIp) {
+            if (isInNode) ingressExternalIpMap.set(svcIp, pod);
+            if (isOutNode) egressExternalIpMap.set(svcIp, pod);
+          }
         }
       });
     });
