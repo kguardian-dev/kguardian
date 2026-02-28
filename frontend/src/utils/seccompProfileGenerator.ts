@@ -49,7 +49,7 @@ export function profileToYAML(profile: SeccompProfile, resourceName: string, nam
   const yaml: string[] = [];
 
   // Create a Kubernetes SeccompProfile CRD format
-  yaml.push('apiVersion: security.kubernetes.io/v1alpha1');
+  yaml.push('apiVersion: security-profiles-operator.x-k8s.io/v1beta1');
   yaml.push('kind: SeccompProfile');
   yaml.push('metadata:');
   yaml.push(`  name: ${quoteYamlValue(`${resourceName}-seccomp`)}`);

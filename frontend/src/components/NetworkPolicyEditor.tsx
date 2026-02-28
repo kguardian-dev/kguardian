@@ -3,11 +3,13 @@ import { Plus, Trash2, X, ChevronDown, ChevronRight, AlertCircle, RefreshCw } fr
 import type { PodNodeData } from '../types';
 import type { SeccompAction } from '../types/seccompProfile';
 import { policyToYAML } from '../utils/networkPolicyGenerator';
+import { ciliumPolicyToYAML } from '../utils/ciliumPolicyGenerator';
 import { profileToYAML } from '../utils/seccompProfileGenerator';
 import { SECCOMP_ACTIONS, ARCHITECTURES, SECCOMP_ACTION_DESCRIPTIONS } from '../types/seccompProfile';
 import { PolicyHeader } from './PolicyEditor';
 import {
   useNetworkPolicyEditor,
+  useCiliumPolicyEditor,
   useSeccompProfileEditor,
   useSyscallAutocomplete,
   usePolicyExport,
@@ -52,6 +54,41 @@ const NetworkPolicyEditor: React.FC<NetworkPolicyEditorProps> = ({ isOpen, onClo
     togglePodSelector,
   } = useNetworkPolicyEditor({ pod, isOpen: isOpen && policyType === 'network' });
 
+  // Cilium policy management
+  const {
+    ciliumPolicy,
+    setCiliumPolicy,
+    isLoading: isCiliumPolicyLoading,
+    isIngressExpanded: isCiliumIngressExpanded,
+    setIsIngressExpanded: setIsCiliumIngressExpanded,
+    isEgressExpanded: isCiliumEgressExpanded,
+    setIsEgressExpanded: setIsCiliumEgressExpanded,
+    labelInputs: ciliumLabelInputs,
+    setLabelInputs: setCiliumLabelInputs,
+    toggleDefaultDeny,
+    updateEndpointSelectorLabel,
+    removeEndpointSelectorLabel,
+    addIngressRule: addCiliumIngressRule,
+    addEgressRule: addCiliumEgressRule,
+    removeIngressRule: removeCiliumIngressRule,
+    removeEgressRule: removeCiliumEgressRule,
+    addIngressEndpoint,
+    removeIngressEndpoint,
+    addIngressCIDR,
+    removeIngressCIDR,
+    updateIngressCIDR,
+    addEgressEndpoint,
+    removeEgressEndpoint,
+    addEgressCIDR,
+    removeEgressCIDR,
+    updateEgressCIDR,
+    addLabelToEndpoint,
+    removeLabelFromEndpoint,
+    addPortToRule: addCiliumPortToRule,
+    removePortFromRule: removeCiliumPortFromRule,
+    updatePort: updateCiliumPort,
+  } = useCiliumPolicyEditor({ pod, isOpen: isOpen && policyType === 'cilium' });
+
   // Seccomp profile management
   const {
     seccompProfile,
@@ -82,6 +119,7 @@ const NetworkPolicyEditor: React.FC<NetworkPolicyEditorProps> = ({ isOpen, onClo
   const { copiedToClipboard, handleCopy, handleDownload } = usePolicyExport({
     policyType,
     policy,
+    ciliumPolicy,
     seccompProfile,
     podName: pod?.pod.pod_name || '',
     podIdentity: pod?.pod.pod_identity || undefined,
@@ -94,6 +132,8 @@ const NetworkPolicyEditor: React.FC<NetworkPolicyEditorProps> = ({ isOpen, onClo
   // Show loading state while generating policy
   const isLoading = (policyType === 'network' && isNetworkPolicyLoading) ||
                      (policyType === 'network' && !policy) ||
+                     (policyType === 'cilium' && isCiliumPolicyLoading) ||
+                     (policyType === 'cilium' && !ciliumPolicy) ||
                      (policyType === 'seccomp' && !seccompProfile);
 
   return (
@@ -132,10 +172,12 @@ const NetworkPolicyEditor: React.FC<NetworkPolicyEditorProps> = ({ isOpen, onClo
                 <div className="text-center">
                   <RefreshCw className="w-12 h-12 text-hubble-accent animate-spin mx-auto mb-4" />
                   <p className="text-lg font-semibold text-primary mb-2">
-                    Generating {policyType === 'network' ? 'Network Policy' : 'Seccomp Profile'}
+                    Generating {policyType === 'network' ? 'Network Policy' : policyType === 'cilium' ? 'Cilium Policy' : 'Seccomp Profile'}
                   </p>
                   <p className="text-sm text-tertiary">
-                    Analyzing traffic patterns and building policy rules...
+                    {policyType === 'seccomp'
+                      ? 'Analyzing syscall patterns and building profile rules...'
+                      : 'Analyzing traffic patterns and building policy rules...'}
                   </p>
                 </div>
               </div>
@@ -145,6 +187,8 @@ const NetworkPolicyEditor: React.FC<NetworkPolicyEditorProps> = ({ isOpen, onClo
                 <pre className="bg-hubble-dark text-secondary p-4 rounded-lg font-mono text-sm overflow-x-auto">
                   {policyType === 'network' && policy
                     ? policyToYAML(policy)
+                    : policyType === 'cilium' && ciliumPolicy
+                    ? ciliumPolicyToYAML(ciliumPolicy)
                     : policyType === 'seccomp' && seccompProfile
                     ? profileToYAML(seccompProfile, pod.pod.pod_identity || pod.pod.pod_name, pod.pod.pod_namespace || 'default')
                     : ''}
@@ -1129,6 +1173,624 @@ const NetworkPolicyEditor: React.FC<NetworkPolicyEditorProps> = ({ isOpen, onClo
                   )}
                 </div>
                   </>
+                ) : policyType === 'cilium' && ciliumPolicy ? (
+                  /* Cilium Policy Visual Editor */
+                  <>
+                    {/* Metadata */}
+                    <div className="bg-hubble-dark p-4 rounded-lg border border-hubble-border">
+                      <h3 className="text-sm font-semibold text-primary mb-3">Policy Metadata</h3>
+                      <div className="grid grid-cols-2 gap-4">
+                        <div>
+                          <label className="block text-xs text-tertiary mb-1">Name</label>
+                          <input
+                            type="text"
+                            value={ciliumPolicy.metadata.name}
+                            onChange={(e) =>
+                              setCiliumPolicy({
+                                ...ciliumPolicy,
+                                metadata: { ...ciliumPolicy.metadata, name: e.target.value },
+                              })
+                            }
+                            className="w-full bg-hubble-card text-primary px-3 py-2 rounded border border-hubble-border
+                                       focus:outline-none focus:ring-2 focus:ring-hubble-accent focus:border-transparent text-sm"
+                          />
+                        </div>
+                        <div>
+                          <label className="block text-xs text-tertiary mb-1">Namespace</label>
+                          <input
+                            type="text"
+                            value={ciliumPolicy.metadata.namespace}
+                            onChange={(e) =>
+                              setCiliumPolicy({
+                                ...ciliumPolicy,
+                                metadata: { ...ciliumPolicy.metadata, namespace: e.target.value },
+                              })
+                            }
+                            className="w-full bg-hubble-card text-primary px-3 py-2 rounded border border-hubble-border
+                                       focus:outline-none focus:ring-2 focus:ring-hubble-accent focus:border-transparent text-sm"
+                          />
+                        </div>
+                      </div>
+                    </div>
+
+                    {/* Endpoint Selector */}
+                    <div className="bg-hubble-dark p-4 rounded-lg border border-hubble-border">
+                      <h3 className="text-sm font-semibold text-primary mb-3">Endpoint Selector</h3>
+                      <p className="text-xs text-tertiary mb-3">Labels to select which pods this policy applies to</p>
+                      <div className="flex flex-wrap gap-1 mb-2">
+                        {Object.entries(ciliumPolicy.spec.endpointSelector.matchLabels).map(([key, value]) => (
+                          <div key={key} className="flex items-center gap-1 bg-hubble-success/20 text-hubble-success px-2 py-1 rounded text-xs">
+                            <span className="font-mono">{key}={value}</span>
+                            <button
+                              onClick={() => removeEndpointSelectorLabel(key)}
+                              className="hover:text-red-400 transition-colors"
+                            >
+                              <X className="w-3 h-3" />
+                            </button>
+                          </div>
+                        ))}
+                      </div>
+                      <div className="flex items-center gap-2">
+                        <input
+                          type="text"
+                          value={ciliumLabelInputs['endpoint-key']?.key || ''}
+                          onChange={(e) => setCiliumLabelInputs({
+                            ...ciliumLabelInputs,
+                            'endpoint-key': { ...ciliumLabelInputs['endpoint-key'], key: e.target.value }
+                          })}
+                          className="flex-1 bg-hubble-card text-secondary px-2 py-1 rounded border border-hubble-border
+                                     focus:outline-none focus:ring-1 focus:ring-hubble-accent text-xs"
+                          placeholder="app"
+                        />
+                        <span className="text-xs text-tertiary">=</span>
+                        <input
+                          type="text"
+                          value={ciliumLabelInputs['endpoint-key']?.value || ''}
+                          onChange={(e) => setCiliumLabelInputs({
+                            ...ciliumLabelInputs,
+                            'endpoint-key': { ...ciliumLabelInputs['endpoint-key'], value: e.target.value }
+                          })}
+                          onKeyDown={(e) => {
+                            if (e.key === 'Enter') {
+                              const input = ciliumLabelInputs['endpoint-key'];
+                              if (input?.key) {
+                                updateEndpointSelectorLabel(input.key, input.value || '');
+                                setCiliumLabelInputs({ ...ciliumLabelInputs, 'endpoint-key': { key: '', value: '' } });
+                              }
+                            }
+                          }}
+                          className="flex-1 bg-hubble-card text-secondary px-2 py-1 rounded border border-hubble-border
+                                     focus:outline-none focus:ring-1 focus:ring-hubble-accent text-xs"
+                          placeholder="nginx"
+                        />
+                        <button
+                          onClick={() => {
+                            const input = ciliumLabelInputs['endpoint-key'];
+                            if (input?.key) {
+                              updateEndpointSelectorLabel(input.key, input.value || '');
+                              setCiliumLabelInputs({ ...ciliumLabelInputs, 'endpoint-key': { key: '', value: '' } });
+                            }
+                          }}
+                          className="px-2 py-1 bg-hubble-success text-white rounded text-xs hover:bg-green-600 transition-colors"
+                        >
+                          <Plus className="w-3 h-3" />
+                        </button>
+                      </div>
+                    </div>
+
+                    {/* Default Deny */}
+                    <div className="bg-hubble-dark p-4 rounded-lg border border-hubble-border">
+                      <h3 className="text-sm font-semibold text-primary mb-3">Default Deny</h3>
+                      <div className="flex items-center gap-6">
+                        <label className="flex items-center gap-2 cursor-pointer">
+                          <input
+                            type="checkbox"
+                            checked={ciliumPolicy.spec.defaultDeny.ingress}
+                            onChange={() => toggleDefaultDeny('ingress')}
+                            className="rounded border-hubble-border text-hubble-accent focus:ring-hubble-accent"
+                          />
+                          <span className="text-xs text-secondary">Deny Ingress</span>
+                        </label>
+                        <label className="flex items-center gap-2 cursor-pointer">
+                          <input
+                            type="checkbox"
+                            checked={ciliumPolicy.spec.defaultDeny.egress}
+                            onChange={() => toggleDefaultDeny('egress')}
+                            className="rounded border-hubble-border text-hubble-accent focus:ring-hubble-accent"
+                          />
+                          <span className="text-xs text-secondary">Deny Egress</span>
+                        </label>
+                      </div>
+                    </div>
+
+                    {/* Cilium Ingress Rules */}
+                    <div className="bg-hubble-dark p-4 rounded-lg border border-hubble-border">
+                      <div className="flex items-center justify-between mb-3">
+                        <button
+                          onClick={() => setIsCiliumIngressExpanded(!isCiliumIngressExpanded)}
+                          className="flex items-center gap-2 text-sm font-semibold text-primary hover:text-hubble-accent transition-colors"
+                        >
+                          {isCiliumIngressExpanded ? (
+                            <ChevronDown className="w-4 h-4 text-hubble-success" />
+                          ) : (
+                            <ChevronRight className="w-4 h-4 text-hubble-success" />
+                          )}
+                          Ingress Rules
+                          {ciliumPolicy.spec.ingress && ` (${ciliumPolicy.spec.ingress.length})`}
+                        </button>
+                        {isCiliumIngressExpanded && (
+                          <button
+                            onClick={addCiliumIngressRule}
+                            className="px-3 py-1.5 text-xs bg-hubble-success text-white rounded-lg hover:bg-green-600
+                                       transition-colors flex items-center gap-1"
+                          >
+                            <Plus className="w-3 h-3" />
+                            Add Rule
+                          </button>
+                        )}
+                      </div>
+                      {isCiliumIngressExpanded && (
+                        <div className="space-y-3">
+                          {ciliumPolicy.spec.ingress && ciliumPolicy.spec.ingress.length > 0 ? (
+                            ciliumPolicy.spec.ingress.map((rule, index) => (
+                              <div key={rule.id} className="bg-hubble-card p-3 rounded-lg border border-hubble-border">
+                                <div className="flex items-center justify-between mb-2">
+                                  <span className="text-xs font-medium text-secondary">Rule {index + 1}</span>
+                                  <button
+                                    onClick={() => removeCiliumIngressRule(rule.id)}
+                                    className="p-1 text-hubble-error hover:bg-hubble-error/20 rounded transition-colors"
+                                  >
+                                    <Trash2 className="w-3 h-3" />
+                                  </button>
+                                </div>
+                                <div className="space-y-3">
+                                  {/* fromEndpoints */}
+                                  <div>
+                                    <div className="flex items-center justify-between mb-2">
+                                      <label className="text-xs font-medium text-secondary">From Endpoints</label>
+                                      <button
+                                        onClick={() => addIngressEndpoint(rule.id)}
+                                        className="text-xs text-hubble-accent hover:text-blue-400 flex items-center gap-1"
+                                      >
+                                        <Plus className="w-3 h-3" />
+                                        Add Endpoint
+                                      </button>
+                                    </div>
+                                    {rule.fromEndpoints && rule.fromEndpoints.length > 0 ? (
+                                      rule.fromEndpoints.map((ep, epIndex) => (
+                                        <div key={epIndex} className="bg-hubble-dark p-3 rounded border border-hubble-border space-y-2 mb-2">
+                                          <div className="flex items-center justify-between">
+                                            <span className="text-xs text-tertiary">matchLabels</span>
+                                            <button
+                                              onClick={() => removeIngressEndpoint(rule.id, epIndex)}
+                                              className="p-1 text-hubble-error hover:bg-hubble-error/20 rounded transition-colors"
+                                            >
+                                              <Trash2 className="w-3 h-3" />
+                                            </button>
+                                          </div>
+                                          {Object.entries(ep.matchLabels).length > 0 && (
+                                            <div className="flex flex-wrap gap-1">
+                                              {Object.entries(ep.matchLabels).map(([key, value]) => (
+                                                <div key={key} className="flex items-center gap-1 bg-hubble-success/20 text-hubble-success px-2 py-1 rounded text-xs">
+                                                  <span className="font-mono">{key}={value}</span>
+                                                  <button
+                                                    onClick={() => removeLabelFromEndpoint(rule.id, epIndex, key, 'ingress')}
+                                                    className="hover:text-red-400 transition-colors"
+                                                  >
+                                                    <X className="w-3 h-3" />
+                                                  </button>
+                                                </div>
+                                              ))}
+                                            </div>
+                                          )}
+                                          <div className="flex items-center gap-2">
+                                            <input
+                                              type="text"
+                                              value={ciliumLabelInputs[`${rule.id}-${epIndex}-ingress-ep`]?.key || ''}
+                                              onChange={(e) => setCiliumLabelInputs({
+                                                ...ciliumLabelInputs,
+                                                [`${rule.id}-${epIndex}-ingress-ep`]: {
+                                                  ...ciliumLabelInputs[`${rule.id}-${epIndex}-ingress-ep`],
+                                                  key: e.target.value
+                                                }
+                                              })}
+                                              className="flex-1 bg-hubble-card text-secondary px-2 py-1 rounded border border-hubble-border
+                                                         focus:outline-none focus:ring-1 focus:ring-hubble-accent text-xs"
+                                              placeholder="app"
+                                            />
+                                            <span className="text-xs text-tertiary">=</span>
+                                            <input
+                                              type="text"
+                                              value={ciliumLabelInputs[`${rule.id}-${epIndex}-ingress-ep`]?.value || ''}
+                                              onChange={(e) => setCiliumLabelInputs({
+                                                ...ciliumLabelInputs,
+                                                [`${rule.id}-${epIndex}-ingress-ep`]: {
+                                                  ...ciliumLabelInputs[`${rule.id}-${epIndex}-ingress-ep`],
+                                                  value: e.target.value
+                                                }
+                                              })}
+                                              onKeyDown={(e) => {
+                                                if (e.key === 'Enter') {
+                                                  const input = ciliumLabelInputs[`${rule.id}-${epIndex}-ingress-ep`];
+                                                  if (input?.key) {
+                                                    addLabelToEndpoint(rule.id, epIndex, input.key, input.value || '', 'ingress');
+                                                    setCiliumLabelInputs({
+                                                      ...ciliumLabelInputs,
+                                                      [`${rule.id}-${epIndex}-ingress-ep`]: { key: '', value: '' }
+                                                    });
+                                                  }
+                                                }
+                                              }}
+                                              className="flex-1 bg-hubble-card text-secondary px-2 py-1 rounded border border-hubble-border
+                                                         focus:outline-none focus:ring-1 focus:ring-hubble-accent text-xs"
+                                              placeholder="nginx"
+                                            />
+                                            <button
+                                              onClick={() => {
+                                                const input = ciliumLabelInputs[`${rule.id}-${epIndex}-ingress-ep`];
+                                                if (input?.key) {
+                                                  addLabelToEndpoint(rule.id, epIndex, input.key, input.value || '', 'ingress');
+                                                  setCiliumLabelInputs({
+                                                    ...ciliumLabelInputs,
+                                                    [`${rule.id}-${epIndex}-ingress-ep`]: { key: '', value: '' }
+                                                  });
+                                                }
+                                              }}
+                                              className="px-2 py-1 bg-hubble-success text-white rounded text-xs hover:bg-green-600 transition-colors"
+                                            >
+                                              <Plus className="w-3 h-3" />
+                                            </button>
+                                          </div>
+                                        </div>
+                                      ))
+                                    ) : (
+                                      <p className="text-xs text-tertiary italic">No endpoints defined</p>
+                                    )}
+                                  </div>
+
+                                  {/* fromCIDR */}
+                                  <div>
+                                    <div className="flex items-center justify-between mb-2">
+                                      <label className="text-xs font-medium text-secondary">From CIDR</label>
+                                      <button
+                                        onClick={() => addIngressCIDR(rule.id)}
+                                        className="text-xs text-hubble-accent hover:text-blue-400 flex items-center gap-1"
+                                      >
+                                        <Plus className="w-3 h-3" />
+                                        Add CIDR
+                                      </button>
+                                    </div>
+                                    {rule.fromCIDR && rule.fromCIDR.length > 0 ? (
+                                      rule.fromCIDR.map((cidr, cidrIndex) => (
+                                        <div key={cidrIndex} className="flex items-center gap-2 mb-2">
+                                          <input
+                                            type="text"
+                                            value={cidr}
+                                            onChange={(e) => updateIngressCIDR(rule.id, cidrIndex, e.target.value)}
+                                            className="flex-1 bg-hubble-dark text-secondary px-2 py-1 rounded border border-hubble-border
+                                                       focus:outline-none focus:ring-1 focus:ring-hubble-accent text-xs font-mono"
+                                            placeholder="0.0.0.0/0"
+                                          />
+                                          <button
+                                            onClick={() => removeIngressCIDR(rule.id, cidrIndex)}
+                                            className="p-1 text-hubble-error hover:bg-hubble-error/20 rounded transition-colors"
+                                          >
+                                            <Trash2 className="w-3 h-3" />
+                                          </button>
+                                        </div>
+                                      ))
+                                    ) : (
+                                      <p className="text-xs text-tertiary italic">No CIDR rules defined</p>
+                                    )}
+                                  </div>
+
+                                  {/* Ports */}
+                                  <div>
+                                    <div className="flex items-center justify-between mb-2">
+                                      <label className="text-xs font-medium text-secondary">Ports</label>
+                                      <button
+                                        onClick={() => addCiliumPortToRule(rule.id, 'ingress')}
+                                        className="text-xs text-hubble-accent hover:text-blue-400 flex items-center gap-1"
+                                      >
+                                        <Plus className="w-3 h-3" />
+                                        Add Port
+                                      </button>
+                                    </div>
+                                    <div className="space-y-2">
+                                      {rule.toPorts && rule.toPorts.length > 0 && rule.toPorts[0].ports.length > 0 ? (
+                                        rule.toPorts[0].ports.map((pp, portIndex) => (
+                                          <div key={portIndex} className="bg-hubble-dark p-2 rounded border border-hubble-border">
+                                            <div className="flex items-center gap-2">
+                                              <select
+                                                value={pp.protocol}
+                                                onChange={(e) => updateCiliumPort(rule.id, portIndex, 'protocol', e.target.value, 'ingress')}
+                                                className="bg-hubble-card text-secondary px-2 py-1 rounded border border-hubble-border
+                                                           focus:outline-none focus:ring-1 focus:ring-hubble-accent text-xs"
+                                              >
+                                                <option value="TCP">TCP</option>
+                                                <option value="UDP">UDP</option>
+                                                <option value="SCTP">SCTP</option>
+                                                <option value="ANY">ANY</option>
+                                              </select>
+                                              <span className="text-xs text-tertiary">/</span>
+                                              <input
+                                                type="text"
+                                                value={pp.port}
+                                                onChange={(e) => updateCiliumPort(rule.id, portIndex, 'port', e.target.value, 'ingress')}
+                                                className="w-20 bg-hubble-card text-secondary px-2 py-1 rounded border border-hubble-border
+                                                           focus:outline-none focus:ring-1 focus:ring-hubble-accent text-xs font-mono"
+                                                placeholder="80"
+                                              />
+                                              <button
+                                                onClick={() => removeCiliumPortFromRule(rule.id, portIndex, 'ingress')}
+                                                className="p-1 text-hubble-error hover:bg-hubble-error/20 rounded transition-colors ml-auto"
+                                              >
+                                                <Trash2 className="w-3 h-3" />
+                                              </button>
+                                            </div>
+                                          </div>
+                                        ))
+                                      ) : (
+                                        <p className="text-xs text-tertiary italic">No ports defined</p>
+                                      )}
+                                    </div>
+                                  </div>
+                                </div>
+                              </div>
+                            ))
+                          ) : (
+                            <p className="text-xs text-tertiary text-center py-4">
+                              No ingress rules defined. Click &quot;Add Rule&quot; to create one.
+                            </p>
+                          )}
+                        </div>
+                      )}
+                    </div>
+
+                    {/* Cilium Egress Rules */}
+                    <div className="bg-hubble-dark p-4 rounded-lg border border-hubble-border">
+                      <div className="flex items-center justify-between mb-3">
+                        <button
+                          onClick={() => setIsCiliumEgressExpanded(!isCiliumEgressExpanded)}
+                          className="flex items-center gap-2 text-sm font-semibold text-primary hover:text-hubble-accent transition-colors"
+                        >
+                          {isCiliumEgressExpanded ? (
+                            <ChevronDown className="w-4 h-4 text-hubble-warning" />
+                          ) : (
+                            <ChevronRight className="w-4 h-4 text-hubble-warning" />
+                          )}
+                          Egress Rules
+                          {ciliumPolicy.spec.egress && ` (${ciliumPolicy.spec.egress.length})`}
+                        </button>
+                        {isCiliumEgressExpanded && (
+                          <button
+                            onClick={addCiliumEgressRule}
+                            className="px-3 py-1.5 text-xs bg-hubble-warning text-white rounded-lg hover:bg-orange-600
+                                       transition-colors flex items-center gap-1"
+                          >
+                            <Plus className="w-3 h-3" />
+                            Add Rule
+                          </button>
+                        )}
+                      </div>
+                      {isCiliumEgressExpanded && (
+                        <div className="space-y-3">
+                          {ciliumPolicy.spec.egress && ciliumPolicy.spec.egress.length > 0 ? (
+                            ciliumPolicy.spec.egress.map((rule, index) => (
+                              <div key={rule.id} className="bg-hubble-card p-3 rounded-lg border border-hubble-border">
+                                <div className="flex items-center justify-between mb-2">
+                                  <span className="text-xs font-medium text-secondary">Rule {index + 1}</span>
+                                  <button
+                                    onClick={() => removeCiliumEgressRule(rule.id)}
+                                    className="p-1 text-hubble-error hover:bg-hubble-error/20 rounded transition-colors"
+                                  >
+                                    <Trash2 className="w-3 h-3" />
+                                  </button>
+                                </div>
+                                <div className="space-y-3">
+                                  {/* toEndpoints */}
+                                  <div>
+                                    <div className="flex items-center justify-between mb-2">
+                                      <label className="text-xs font-medium text-secondary">To Endpoints</label>
+                                      <button
+                                        onClick={() => addEgressEndpoint(rule.id)}
+                                        className="text-xs text-hubble-accent hover:text-blue-400 flex items-center gap-1"
+                                      >
+                                        <Plus className="w-3 h-3" />
+                                        Add Endpoint
+                                      </button>
+                                    </div>
+                                    {rule.toEndpoints && rule.toEndpoints.length > 0 ? (
+                                      rule.toEndpoints.map((ep, epIndex) => (
+                                        <div key={epIndex} className="bg-hubble-dark p-3 rounded border border-hubble-border space-y-2 mb-2">
+                                          <div className="flex items-center justify-between">
+                                            <span className="text-xs text-tertiary">matchLabels</span>
+                                            <button
+                                              onClick={() => removeEgressEndpoint(rule.id, epIndex)}
+                                              className="p-1 text-hubble-error hover:bg-hubble-error/20 rounded transition-colors"
+                                            >
+                                              <Trash2 className="w-3 h-3" />
+                                            </button>
+                                          </div>
+                                          {Object.entries(ep.matchLabels).length > 0 && (
+                                            <div className="flex flex-wrap gap-1">
+                                              {Object.entries(ep.matchLabels).map(([key, value]) => (
+                                                <div key={key} className="flex items-center gap-1 bg-hubble-success/20 text-hubble-success px-2 py-1 rounded text-xs">
+                                                  <span className="font-mono">{key}={value}</span>
+                                                  <button
+                                                    onClick={() => removeLabelFromEndpoint(rule.id, epIndex, key, 'egress')}
+                                                    className="hover:text-red-400 transition-colors"
+                                                  >
+                                                    <X className="w-3 h-3" />
+                                                  </button>
+                                                </div>
+                                              ))}
+                                            </div>
+                                          )}
+                                          <div className="flex items-center gap-2">
+                                            <input
+                                              type="text"
+                                              value={ciliumLabelInputs[`${rule.id}-${epIndex}-egress-ep`]?.key || ''}
+                                              onChange={(e) => setCiliumLabelInputs({
+                                                ...ciliumLabelInputs,
+                                                [`${rule.id}-${epIndex}-egress-ep`]: {
+                                                  ...ciliumLabelInputs[`${rule.id}-${epIndex}-egress-ep`],
+                                                  key: e.target.value
+                                                }
+                                              })}
+                                              className="flex-1 bg-hubble-card text-secondary px-2 py-1 rounded border border-hubble-border
+                                                         focus:outline-none focus:ring-1 focus:ring-hubble-accent text-xs"
+                                              placeholder="app"
+                                            />
+                                            <span className="text-xs text-tertiary">=</span>
+                                            <input
+                                              type="text"
+                                              value={ciliumLabelInputs[`${rule.id}-${epIndex}-egress-ep`]?.value || ''}
+                                              onChange={(e) => setCiliumLabelInputs({
+                                                ...ciliumLabelInputs,
+                                                [`${rule.id}-${epIndex}-egress-ep`]: {
+                                                  ...ciliumLabelInputs[`${rule.id}-${epIndex}-egress-ep`],
+                                                  value: e.target.value
+                                                }
+                                              })}
+                                              onKeyDown={(e) => {
+                                                if (e.key === 'Enter') {
+                                                  const input = ciliumLabelInputs[`${rule.id}-${epIndex}-egress-ep`];
+                                                  if (input?.key) {
+                                                    addLabelToEndpoint(rule.id, epIndex, input.key, input.value || '', 'egress');
+                                                    setCiliumLabelInputs({
+                                                      ...ciliumLabelInputs,
+                                                      [`${rule.id}-${epIndex}-egress-ep`]: { key: '', value: '' }
+                                                    });
+                                                  }
+                                                }
+                                              }}
+                                              className="flex-1 bg-hubble-card text-secondary px-2 py-1 rounded border border-hubble-border
+                                                         focus:outline-none focus:ring-1 focus:ring-hubble-accent text-xs"
+                                              placeholder="nginx"
+                                            />
+                                            <button
+                                              onClick={() => {
+                                                const input = ciliumLabelInputs[`${rule.id}-${epIndex}-egress-ep`];
+                                                if (input?.key) {
+                                                  addLabelToEndpoint(rule.id, epIndex, input.key, input.value || '', 'egress');
+                                                  setCiliumLabelInputs({
+                                                    ...ciliumLabelInputs,
+                                                    [`${rule.id}-${epIndex}-egress-ep`]: { key: '', value: '' }
+                                                  });
+                                                }
+                                              }}
+                                              className="px-2 py-1 bg-hubble-success text-white rounded text-xs hover:bg-green-600 transition-colors"
+                                            >
+                                              <Plus className="w-3 h-3" />
+                                            </button>
+                                          </div>
+                                        </div>
+                                      ))
+                                    ) : (
+                                      <p className="text-xs text-tertiary italic">No endpoints defined</p>
+                                    )}
+                                  </div>
+
+                                  {/* toCIDR */}
+                                  <div>
+                                    <div className="flex items-center justify-between mb-2">
+                                      <label className="text-xs font-medium text-secondary">To CIDR</label>
+                                      <button
+                                        onClick={() => addEgressCIDR(rule.id)}
+                                        className="text-xs text-hubble-accent hover:text-blue-400 flex items-center gap-1"
+                                      >
+                                        <Plus className="w-3 h-3" />
+                                        Add CIDR
+                                      </button>
+                                    </div>
+                                    {rule.toCIDR && rule.toCIDR.length > 0 ? (
+                                      rule.toCIDR.map((cidr, cidrIndex) => (
+                                        <div key={cidrIndex} className="flex items-center gap-2 mb-2">
+                                          <input
+                                            type="text"
+                                            value={cidr}
+                                            onChange={(e) => updateEgressCIDR(rule.id, cidrIndex, e.target.value)}
+                                            className="flex-1 bg-hubble-dark text-secondary px-2 py-1 rounded border border-hubble-border
+                                                       focus:outline-none focus:ring-1 focus:ring-hubble-accent text-xs font-mono"
+                                            placeholder="0.0.0.0/0"
+                                          />
+                                          <button
+                                            onClick={() => removeEgressCIDR(rule.id, cidrIndex)}
+                                            className="p-1 text-hubble-error hover:bg-hubble-error/20 rounded transition-colors"
+                                          >
+                                            <Trash2 className="w-3 h-3" />
+                                          </button>
+                                        </div>
+                                      ))
+                                    ) : (
+                                      <p className="text-xs text-tertiary italic">No CIDR rules defined</p>
+                                    )}
+                                  </div>
+
+                                  {/* Ports */}
+                                  <div>
+                                    <div className="flex items-center justify-between mb-2">
+                                      <label className="text-xs font-medium text-secondary">Ports</label>
+                                      <button
+                                        onClick={() => addCiliumPortToRule(rule.id, 'egress')}
+                                        className="text-xs text-hubble-accent hover:text-blue-400 flex items-center gap-1"
+                                      >
+                                        <Plus className="w-3 h-3" />
+                                        Add Port
+                                      </button>
+                                    </div>
+                                    <div className="space-y-2">
+                                      {rule.toPorts && rule.toPorts.length > 0 && rule.toPorts[0].ports.length > 0 ? (
+                                        rule.toPorts[0].ports.map((pp, portIndex) => (
+                                          <div key={portIndex} className="bg-hubble-dark p-2 rounded border border-hubble-border">
+                                            <div className="flex items-center gap-2">
+                                              <select
+                                                value={pp.protocol}
+                                                onChange={(e) => updateCiliumPort(rule.id, portIndex, 'protocol', e.target.value, 'egress')}
+                                                className="bg-hubble-card text-secondary px-2 py-1 rounded border border-hubble-border
+                                                           focus:outline-none focus:ring-1 focus:ring-hubble-accent text-xs"
+                                              >
+                                                <option value="TCP">TCP</option>
+                                                <option value="UDP">UDP</option>
+                                                <option value="SCTP">SCTP</option>
+                                                <option value="ANY">ANY</option>
+                                              </select>
+                                              <span className="text-xs text-tertiary">/</span>
+                                              <input
+                                                type="text"
+                                                value={pp.port}
+                                                onChange={(e) => updateCiliumPort(rule.id, portIndex, 'port', e.target.value, 'egress')}
+                                                className="w-20 bg-hubble-card text-secondary px-2 py-1 rounded border border-hubble-border
+                                                           focus:outline-none focus:ring-1 focus:ring-hubble-accent text-xs font-mono"
+                                                placeholder="80"
+                                              />
+                                              <button
+                                                onClick={() => removeCiliumPortFromRule(rule.id, portIndex, 'egress')}
+                                                className="p-1 text-hubble-error hover:bg-hubble-error/20 rounded transition-colors ml-auto"
+                                              >
+                                                <Trash2 className="w-3 h-3" />
+                                              </button>
+                                            </div>
+                                          </div>
+                                        ))
+                                      ) : (
+                                        <p className="text-xs text-tertiary italic">No ports defined</p>
+                                      )}
+                                    </div>
+                                  </div>
+                                </div>
+                              </div>
+                            ))
+                          ) : (
+                            <p className="text-xs text-tertiary text-center py-4">
+                              No egress rules defined. Click &quot;Add Rule&quot; to create one.
+                            </p>
+                          )}
+                        </div>
+                      )}
+                    </div>
+                  </>
                 ) : policyType === 'seccomp' && seccompProfile ? (
                   /* Seccomp Profile Visual Editor */
                   <>
@@ -1337,9 +1999,9 @@ const NetworkPolicyEditor: React.FC<NetworkPolicyEditorProps> = ({ isOpen, onClo
           <div className="border-t border-hubble-border px-6 py-4">
             <div className="flex items-center justify-between">
               <p className="text-xs text-tertiary">
-                {policyType === 'network'
-                  ? 'This policy was generated from observed network traffic. Review and customize before applying.'
-                  : 'This profile was generated from observed syscalls. Review and customize before applying.'}
+                {policyType === 'seccomp'
+                  ? 'This profile was generated from observed syscalls. Review and customize before applying.'
+                  : 'This policy was generated from observed network traffic. Review and customize before applying.'}
               </p>
               <div className="flex gap-2">
                 <button
@@ -1352,7 +2014,7 @@ const NetworkPolicyEditor: React.FC<NetworkPolicyEditorProps> = ({ isOpen, onClo
                   onClick={handleDownload}
                   className="px-4 py-2 text-sm bg-hubble-accent text-white rounded-lg hover:bg-blue-600 transition-colors"
                 >
-                  {policyType === 'network' ? 'Save Policy' : 'Save Profile'}
+                  {policyType === 'seccomp' ? 'Save Profile' : 'Save Policy'}
                 </button>
               </div>
             </div>

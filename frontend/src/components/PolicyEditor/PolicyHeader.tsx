@@ -1,5 +1,5 @@
 import React from 'react';
-import { X, Copy, Download, Shield, Lock } from 'lucide-react';
+import { X, Copy, Download, Shield, Lock, Network } from 'lucide-react';
 import type { PolicyType } from '../../hooks/policyEditor';
 
 interface PolicyHeaderProps {
@@ -33,13 +33,15 @@ export const PolicyHeader: React.FC<PolicyHeaderProps> = ({
         <div className="flex items-center justify-center w-10 h-10 rounded-lg bg-hubble-success/20">
           {policyType === 'network' ? (
             <Shield className="w-5 h-5 text-hubble-success" />
+          ) : policyType === 'cilium' ? (
+            <Network className="w-5 h-5 text-hubble-success" />
           ) : (
             <Lock className="w-5 h-5 text-hubble-success" />
           )}
         </div>
         <div>
           <h2 className="text-lg font-semibold text-primary">
-            {policyType === 'network' ? 'Network Policy Builder' : 'Seccomp Profile Builder'}
+            {policyType === 'network' ? 'Network Policy Builder' : policyType === 'cilium' ? 'Cilium Policy Builder' : 'Seccomp Profile Builder'}
           </h2>
           <p className="text-xs text-tertiary">
             {podName} • {podNamespace}
@@ -59,6 +61,17 @@ export const PolicyHeader: React.FC<PolicyHeaderProps> = ({
           >
             <Shield className="w-3 h-3" />
             Network Policy
+          </button>
+          <button
+            onClick={() => onPolicyTypeChange('cilium')}
+            className={`px-3 py-1.5 text-xs rounded transition-all flex items-center gap-1 ${
+              policyType === 'cilium'
+                ? 'bg-hubble-accent text-white'
+                : 'text-secondary hover:text-primary'
+            }`}
+          >
+            <Network className="w-3 h-3" />
+            Cilium Policy
           </button>
           <button
             onClick={() => onPolicyTypeChange('seccomp')}
@@ -85,7 +98,7 @@ export const PolicyHeader: React.FC<PolicyHeaderProps> = ({
         <button
           onClick={onCopy}
           className="px-3 py-1.5 text-xs text-secondary hover:text-primary hover:bg-hubble-dark rounded-lg transition-colors flex items-center gap-1"
-          title="Copy YAML"
+          title={policyType === 'seccomp' && !yamlView ? 'Copy JSON' : 'Copy YAML'}
         >
           <Copy className="w-3 h-3" />
           {copiedToClipboard ? 'Copied!' : 'Copy'}
@@ -93,7 +106,7 @@ export const PolicyHeader: React.FC<PolicyHeaderProps> = ({
         <button
           onClick={onDownload}
           className="px-3 py-1.5 text-xs text-secondary hover:text-primary hover:bg-hubble-dark rounded-lg transition-colors flex items-center gap-1"
-          title="Download YAML"
+          title={policyType === 'seccomp' && !yamlView ? 'Download JSON' : 'Download YAML'}
         >
           <Download className="w-3 h-3" />
           Download
