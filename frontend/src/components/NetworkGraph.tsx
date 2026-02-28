@@ -189,6 +189,9 @@ const NetworkGraphInner: React.FC<NetworkGraphProps> = ({
 
     // Step 2b: Merge backing pod IP entries into their service IP entry so that
     // curl→serviceIP and curl→podIP produce a single external node (and single edge)
+    // Track which backing pod IPs were merged into each service IP so we can
+    // include them in the external node's pods array for edge resolution.
+    const mergedBackingIps = new Map<string, string[]>(); // svcIp → [podIp, ...]
     const podIpsToMerge: Array<[string, string]> = [];
     externalIpData.forEach((_entry, ip) => {
       const svcIp = podIpToSvcIp.get(ip);
@@ -203,6 +206,8 @@ const NetworkGraphInner: React.FC<NetworkGraphProps> = ({
       svcEntry.ingressTraffic.push(...entry.ingressTraffic);
       svcEntry.egressTraffic.push(...entry.egressTraffic);
       externalIpData.delete(podIp);
+      if (!mergedBackingIps.has(svcIp)) mergedBackingIps.set(svcIp, []);
+      mergedBackingIps.get(svcIp)!.push(podIp);
     });
 
     // Step 3: Group by identity, tracking direction-specific traffic
@@ -226,14 +231,31 @@ const NetworkGraphInner: React.FC<NetworkGraphProps> = ({
           identityMap.set(key, { memberPods: [], ingressTraffic: [], egressTraffic: [] });
         }
         const group = identityMap.get(key)!;
-        group.memberPods.push({
-          pod_name: name,
-          pod_ip: ext.ip,
-          pod_namespace: ns,
-          pod_identity: name,
-          time_stamp: '',
-          node_name: '',
-          is_dead: false,
+        // Add the service ClusterIP as a member pod (if it's a real IP)
+        if (ext.ip) {
+          group.memberPods.push({
+            pod_name: name,
+            pod_ip: ext.ip,
+            pod_namespace: ns,
+            pod_identity: name,
+            time_stamp: '',
+            node_name: '',
+            is_dead: false,
+          });
+        }
+        // Also add entries for backing pod IPs that were merged into this service IP
+        // so that edge resolution can map traffic referencing backing pod IPs to this node
+        const backingIps = mergedBackingIps.get(ext.ip) || [];
+        backingIps.forEach((backingIp) => {
+          group.memberPods.push({
+            pod_name: name,
+            pod_ip: backingIp,
+            pod_namespace: ns,
+            pod_identity: name,
+            time_stamp: '',
+            node_name: '',
+            is_dead: false,
+          });
         });
         group.ingressTraffic.push(...ext.ingressTraffic);
         group.egressTraffic.push(...ext.egressTraffic);
@@ -435,10 +457,16 @@ const NetworkGraphInner: React.FC<NetworkGraphProps> = ({
               || egressExternalIpMap.get(canonicalIp);
           }
         } else if (trafficType === 'ingress') {
-          // Ingress: remote IP is the source → resolve to local pod, service IP, or ingress-external node
-          sourcePod = remoteIp
-            ? (ipToLocalPodMap.get(remoteIp) || svcIpToLocalPodMap.get(remoteIp) || ingressExternalIpMap.get(remoteIp))
-            : undefined;
+          // Ingress: remote IP is the source → resolve to local pod, service IP, or ingress-external node.
+          // If the remote IP is a backing pod IP, also check the canonical service ClusterIP
+          // (mirrors the egress canonicalization logic).
+          if (remoteIp) {
+            const canonicalIp = podIpToSvcIp.get(remoteIp) ?? remoteIp;
+            sourcePod = ipToLocalPodMap.get(remoteIp)
+              || svcIpToLocalPodMap.get(remoteIp)
+              || ingressExternalIpMap.get(remoteIp)
+              || ingressExternalIpMap.get(canonicalIp);
+          }
           destPod = pod;
         }
 
