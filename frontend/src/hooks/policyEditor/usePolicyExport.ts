@@ -1,14 +1,17 @@
 import { useState } from 'react';
 import type { NetworkPolicy } from '../../types/networkPolicy';
+import type { CiliumNetworkPolicy } from '../../types/ciliumPolicy';
 import type { SeccompProfile } from '../../types/seccompProfile';
 import { policyToYAML } from '../../utils/networkPolicyGenerator';
+import { ciliumPolicyToYAML } from '../../utils/ciliumPolicyGenerator';
 import { profileToYAML, profileToJSON } from '../../utils/seccompProfileGenerator';
 
-export type PolicyType = 'network' | 'seccomp';
+export type PolicyType = 'network' | 'cilium' | 'seccomp';
 
 interface UsePolicyExportProps {
   policyType: PolicyType;
   policy: NetworkPolicy | null;
+  ciliumPolicy: CiliumNetworkPolicy | null;
   seccompProfile: SeccompProfile | null;
   podName: string;
   podIdentity?: string;
@@ -19,6 +22,7 @@ interface UsePolicyExportProps {
 export const usePolicyExport = ({
   policyType,
   policy,
+  ciliumPolicy,
   seccompProfile,
   podName,
   podIdentity,
@@ -30,6 +34,8 @@ export const usePolicyExport = ({
   const getExportContent = (): string | null => {
     if (policyType === 'network' && policy) {
       return policyToYAML(policy);
+    } else if (policyType === 'cilium' && ciliumPolicy) {
+      return ciliumPolicyToYAML(ciliumPolicy);
     } else if (policyType === 'seccomp' && seccompProfile) {
       // Use pod identity for resource name, fallback to pod name
       const resourceName = podIdentity || podName;
@@ -75,6 +81,9 @@ export const usePolicyExport = ({
 
     if (policyType === 'network' && policy) {
       filename = `${policy.metadata.name}.yaml`;
+      mimeType = 'text/yaml';
+    } else if (policyType === 'cilium' && ciliumPolicy) {
+      filename = `${ciliumPolicy.metadata.name}.yaml`;
       mimeType = 'text/yaml';
     } else if (policyType === 'seccomp') {
       if (yamlView) {
