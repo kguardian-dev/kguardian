@@ -2,20 +2,17 @@
   $schema: "https://docs.renovatebot.com/renovate-schema.json",
   packageRules: [
     {
-      description: "Auto-merge GitHub Actions",
+      description: "Auto-merge GitHub Actions non-breaking updates",
       matchManagers: ["github-actions"],
+      matchUpdateTypes: ["minor", "patch", "pin", "digest"],
       automerge: true,
       automergeType: "branch",
-      matchUpdateTypes: ["minor", "patch", "digest"],
       ignoreTests: true
     },
     {
-      description: "Auto-merge Helm Release",
-      matchDatasources: ["helm", "docker"],
-      automerge: true,
-      automergeType: "pr",
-      matchUpdateTypes: ["patch"],
-      ignoreTests: true
+      description: "Never auto-merge major (breaking) updates",
+      matchUpdateTypes: ["major"],
+      automerge: false
     }
   ]
 }
