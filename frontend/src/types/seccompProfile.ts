@@ -34,7 +34,7 @@ export const SECCOMP_ACTIONS: SeccompAction[] = [
 export const SECCOMP_ACTION_DESCRIPTIONS: Record<SeccompAction, string> = {
   'SCMP_ACT_ALLOW': 'Allow the syscall to be executed',
   'SCMP_ACT_ERRNO': 'Return an error code (reject syscall)',
-  'SCMP_ACT_KILL': 'Kill only the thread',
+  'SCMP_ACT_KILL': 'Kill the thread (alias for SCMP_ACT_KILL_THREAD)',
   'SCMP_ACT_KILL_PROCESS': 'Kill the entire process',
   'SCMP_ACT_KILL_THREAD': 'Kill only the thread',
   'SCMP_ACT_LOG': 'Allow the syscall and log it to syslog or auditd',
@@ -48,6 +48,7 @@ export const ARCHITECTURES = [
   'SCMP_ARCH_X32',
   'SCMP_ARCH_ARM',
   'SCMP_ARCH_AARCH64',
+  'SCMP_ARCH_ARM64',
   'SCMP_ARCH_MIPS',
   'SCMP_ARCH_MIPS64',
   'SCMP_ARCH_MIPS64N32',
