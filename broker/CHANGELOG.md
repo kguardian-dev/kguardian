@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.7.1](https://github.com/kguardian-dev/kguardian/compare/broker/v1.7.0...broker/v1.7.1) (2026-03-01)
+
+
+### Bug Fixes
+
+* **ci:** fix release-please extra-files paths and sync VERSION files ([#692](https://github.com/kguardian-dev/kguardian/issues/692)) ([452bcad](https://github.com/kguardian-dev/kguardian/commit/452bcad0f8a13388f758569036e239bf3776036b))
+
 ## [1.7.0](https://github.com/kguardian-dev/kguardian/compare/broker/v1.6.1...broker/v1.7.0) (2026-02-22)
 
 
