@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.8.1](https://github.com/kguardian-dev/kguardian/compare/controller/v1.8.0...controller/v1.8.1) (2026-03-01)
+
+
+### Bug Fixes
+
+* **ci:** fix release-please extra-files paths and sync VERSION files ([#692](https://github.com/kguardian-dev/kguardian/issues/692)) ([452bcad](https://github.com/kguardian-dev/kguardian/commit/452bcad0f8a13388f758569036e239bf3776036b))
+* make containerd socket path configurable for k3s compatibility ([#708](https://github.com/kguardian-dev/kguardian/issues/708)) ([0017105](https://github.com/kguardian-dev/kguardian/commit/001710534c0e936f10fba8e7962137f8d481f5eb))
+
 ## [1.8.0](https://github.com/kguardian-dev/kguardian/compare/controller/v1.7.0...controller/v1.8.0) (2026-02-22)
 
 
