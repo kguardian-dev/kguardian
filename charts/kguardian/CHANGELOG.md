@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.9.1](https://github.com/kguardian-dev/kguardian/compare/chart/v1.9.0...chart/v1.9.1) (2026-03-01)
+
+
+### Bug Fixes
+
+* make containerd socket path configurable for k3s compatibility ([#708](https://github.com/kguardian-dev/kguardian/issues/708)) ([0017105](https://github.com/kguardian-dev/kguardian/commit/001710534c0e936f10fba8e7962137f8d481f5eb))
+
 ## [1.9.0](https://github.com/kguardian-dev/kguardian/compare/chart/v1.8.3...chart/v1.9.0) (2026-02-23)
 
 
