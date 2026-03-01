@@ -1,5 +1,21 @@
 # Changelog
 
+## [1.8.0](https://github.com/kguardian-dev/kguardian/compare/frontend/v1.7.1...frontend/v1.8.0) (2026-03-01)
+
+
+### Features
+
+* **frontend:** Cilium network policy UI and release-please cleanup ([#717](https://github.com/kguardian-dev/kguardian/issues/717)) ([d475812](https://github.com/kguardian-dev/kguardian/commit/d4758122761f27c4c710a6e919a5aa0a9d19c8f7))
+
+
+### Bug Fixes
+
+* **ci:** fix release-please extra-files paths and sync VERSION files ([#692](https://github.com/kguardian-dev/kguardian/issues/692)) ([452bcad](https://github.com/kguardian-dev/kguardian/commit/452bcad0f8a13388f758569036e239bf3776036b))
+* deduplicate service/pod traffic in graph and NetworkPolicy ([#687](https://github.com/kguardian-dev/kguardian/issues/687)) ([e4b8f81](https://github.com/kguardian-dev/kguardian/commit/e4b8f811f83cd3fc557061c835efc6cb2d95bb07))
+* **frontend:** deduplicate service/pod traffic in graph and NetworkPolicy generator ([e4b8f81](https://github.com/kguardian-dev/kguardian/commit/e4b8f811f83cd3fc557061c835efc6cb2d95bb07))
+* **ui:** correctly classify cross-namespace pods and deduplicate serv… ([#720](https://github.com/kguardian-dev/kguardian/issues/720)) ([966e06f](https://github.com/kguardian-dev/kguardian/commit/966e06fbb45d3653a336830ae59263297d45b886))
+* **ui:** correctly classify cross-namespace pods and deduplicate service/pod traffic in graph ([966e06f](https://github.com/kguardian-dev/kguardian/commit/966e06fbb45d3653a336830ae59263297d45b886))
+
 ## [1.7.1](https://github.com/kguardian-dev/kguardian/compare/frontend/v1.7.0...frontend/v1.7.1) (2026-02-22)
 
 
