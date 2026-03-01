@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.3.1](https://github.com/kguardian-dev/kguardian/compare/advisor/v1.3.0...advisor/v1.3.1) (2026-03-01)
+
+
+### Bug Fixes
+
+* **ci:** fix release-please extra-files paths and sync VERSION files ([#692](https://github.com/kguardian-dev/kguardian/issues/692)) ([452bcad](https://github.com/kguardian-dev/kguardian/commit/452bcad0f8a13388f758569036e239bf3776036b))
+* **deps:** update kubernetes packages to v0.35.2 ([#713](https://github.com/kguardian-dev/kguardian/issues/713)) ([3538cff](https://github.com/kguardian-dev/kguardian/commit/3538cffcb5c5f12843f6e10f368105736070228d))
+
 ## [1.3.0](https://github.com/kguardian-dev/kguardian/compare/advisor/v1.2.0...advisor/v1.3.0) (2026-02-18)
 
 
