@@ -4,10 +4,11 @@ use actix_cors::Cors;
 use actix_web::middleware::from_fn;
 use actix_web::{get, web, App, HttpResponse, HttpServer};
 use api::{
-    add_pod_details, add_pods, add_pods_batch, add_pods_syscalls, add_svc_details,
-    establish_connection, get_audit_verdicts, get_pod_by_ip, get_pod_by_name, get_pod_details,
-    get_pod_syscall_name, get_pod_traffic, get_pod_traffic_name, get_pods_by_node, get_svc_by_ip,
-    get_svc_details, mark_pod_dead, spawn_retention, AuditClient,
+    add_pod_details, add_pod_l7traffic_batch, add_pods, add_pods_batch, add_pods_syscalls,
+    add_svc_details, establish_connection, get_audit_verdicts, get_pod_by_ip, get_pod_by_name,
+    get_pod_details, get_pod_l7traffic, get_pod_l7traffic_name, get_pod_syscall_name,
+    get_pod_traffic, get_pod_traffic_name, get_pods_by_node, get_svc_by_ip, get_svc_details,
+    mark_pod_dead, spawn_retention, AuditClient,
 };
 
 use diesel::r2d2;
@@ -244,6 +245,9 @@ async fn main() -> Result<(), std::io::Error> {
             .service(get_pod_syscall_name)
             .service(get_pods_by_node)
             .service(get_audit_verdicts)
+            .service(get_pod_l7traffic)
+            .service(get_pod_l7traffic_name)
+            .service(add_pod_l7traffic_batch)
             .service(mark_pod_dead)
             .service(health_check)
             .service(metrics)

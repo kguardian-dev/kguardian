@@ -91,6 +91,22 @@ pub struct PodDetail {
 }
 
 #[derive(Debug, Default, Serialize)]
+pub struct PodHttpTraffic {
+    pub uuid: String,
+    pub pod_name: String,
+    pub pod_namespace: Option<String>,
+    pub pod_ip: String,
+    pub pod_port: Option<String>,
+    pub ip_protocol: Option<String>,
+    pub http_method: Option<String>,
+    pub http_path: Option<String>,
+    pub traffic_type: Option<String>,
+    pub traffic_in_out_ip: Option<String>,
+    pub traffic_in_out_port: Option<String>,
+    pub time_stamp: NaiveDateTime,
+}
+
+#[derive(Debug, Default, Serialize)]
 pub struct SyscallData {
     pub pod_name: String,
     pub pod_namespace: String,
