@@ -6,6 +6,7 @@ use tokio::sync::mpsc;
 use tracing::info;
 
 use kguardian::bpf::ebpf_handle;
+use kguardian::http::{handle_http_events, HttpEventData};
 use kguardian::log::init_logger;
 use kguardian::network::{handle_network_events, handle_policy_drop_events, PolicyDropEvent};
 use kguardian::service_watcher::watch_service;
@@ -71,16 +72,20 @@ async fn main() -> Result<(), Error> {
     let (network_event_sender, network_event_receiver) = mpsc::channel::<NetworkEventData>(1000);
     let (syscall_event_sender, syscall_event_receiver) = mpsc::channel::<SyscallEventData>(1000);
     let (netpolicy_drop_sender, netpolicy_drop_receiver) = mpsc::channel::<PolicyDropEvent>(1000);
+    let (http_event_sender, http_event_receiver) = mpsc::channel::<HttpEventData>(1000);
 
     let network_event_handler = handle_network_events(network_event_receiver, network_map);
     let netpolicy_drop_handler =
         handle_policy_drop_events(netpolicy_drop_receiver, Arc::clone(&container_map));
     let syscall_event_handler = handle_syscall_events(syscall_event_receiver, syscall_map);
+    let http_map = Arc::clone(&container_map);
+    let http_event_handler = handle_http_events(http_event_receiver, http_map);
 
     let ebpf_handle = ebpf_handle(
         network_event_sender,
         syscall_event_sender,
         netpolicy_drop_sender,
+        http_event_sender,
         rx,
         recv_ip,
         ignore_daemonset_traffic,
@@ -109,6 +114,7 @@ async fn main() -> Result<(), Error> {
                 network_event_handler,
                 syscall_event_handler,
                 netpolicy_drop_handler,
+                http_event_handler,
                 syscall_recorder,
                 pod_reconciler,
                 async { ebpf_handle.await? }

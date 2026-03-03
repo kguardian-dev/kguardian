@@ -66,4 +66,21 @@ diesel::table! {
     }
 }
 
-diesel::allow_tables_to_appear_in_same_query!(pod_details, pod_traffic, svc_details, pod_syscalls,);
+diesel::table! {
+    pod_http_traffic (uuid) {
+        uuid -> Varchar,
+        pod_name -> Nullable<Varchar>,
+        pod_namespace -> Nullable<Varchar>,
+        pod_ip -> Nullable<Varchar>,
+        pod_port -> Nullable<Varchar>,
+        ip_protocol -> Nullable<Varchar>,
+        http_method -> Nullable<Varchar>,
+        http_path -> Nullable<Varchar>,
+        traffic_type -> Nullable<Varchar>,
+        traffic_in_out_ip -> Nullable<Varchar>,
+        traffic_in_out_port -> Nullable<Varchar>,
+        time_stamp -> Timestamp,
+    }
+}
+
+diesel::allow_tables_to_appear_in_same_query!(pod_details, pod_traffic, svc_details, pod_syscalls, pod_http_traffic,);

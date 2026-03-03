@@ -1,4 +1,4 @@
-use crate::{schema, PodDetail, PodInputSyscalls, PodSyscalls, PodTraffic, SvcDetail};
+use crate::{schema, HttpPodTraffic, PodDetail, PodInputSyscalls, PodSyscalls, PodTraffic, SvcDetail};
 use actix_web::{post, web, Error, HttpResponse};
 use diesel::pg::PgConnection;
 use diesel::r2d2::{self, ConnectionManager};
@@ -333,4 +333,69 @@ pub fn create_pod_syscalls(
 
         Ok(())
     })
+}
+
+// ── L7 HTTP traffic ──────────────────────────────────────────────────────────
+
+#[post("/pod/l7traffic/batch")]
+pub async fn add_pod_l7traffic_batch(
+    pool: web::Data<DbPool>,
+    form: web::Json<Vec<HttpPodTraffic>>,
+) -> Result<HttpResponse, Error> {
+    let count = form.len();
+    debug!("Received batch of {} HTTP traffic events", count);
+
+    let result = web::block(move || {
+        let mut conn = pool.get()?;
+        create_http_traffic_batch(&mut conn, form)
+    })
+    .await?
+    .map_err(actix_web::error::ErrorInternalServerError)?;
+
+    info!("Successfully inserted {} HTTP traffic events", result);
+    Ok(HttpResponse::Ok().json(result))
+}
+
+fn create_http_traffic_batch(
+    conn: &mut PgConnection,
+    batch: web::Json<Vec<HttpPodTraffic>>,
+) -> Result<usize, DbError> {
+    use schema::pod_http_traffic::dsl::*;
+
+    if batch.is_empty() {
+        return Ok(0);
+    }
+
+    // Deduplicate: only insert rows not already in the table (keyed on pod_ip +
+    // traffic_type + traffic_in_out_ip + traffic_in_out_port + http_method + http_path).
+    let mut to_insert = Vec::new();
+    for event in batch.iter() {
+        let exists: bool = diesel::dsl::select(diesel::dsl::exists(
+            pod_http_traffic
+                .filter(pod_ip.eq(&event.pod_ip))
+                .filter(traffic_type.eq(&event.traffic_type))
+                .filter(traffic_in_out_ip.eq(&event.traffic_in_out_ip))
+                .filter(traffic_in_out_port.eq(&event.traffic_in_out_port))
+                .filter(http_method.eq(&event.http_method))
+                .filter(http_path.eq(&event.http_path)),
+        ))
+        .get_result(conn)?;
+
+        if !exists {
+            to_insert.push(event.clone());
+        } else {
+            debug!("Skipping duplicate HTTP event for pod: {:?}", event.pod_name);
+        }
+    }
+
+    if to_insert.is_empty() {
+        return Ok(0);
+    }
+
+    let inserted = diesel::insert_into(pod_http_traffic)
+        .values(&to_insert)
+        .execute(conn)?;
+
+    debug!("Inserted {} HTTP traffic events", inserted);
+    Ok(inserted)
 }

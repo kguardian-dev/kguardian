@@ -1,4 +1,4 @@
-use crate::{schema, PodDetail, PodSyscalls, PodTraffic, SvcDetail};
+use crate::{schema, HttpPodTraffic, PodDetail, PodSyscalls, PodTraffic, SvcDetail};
 use actix_web::{get, web, HttpResponse, Responder};
 use diesel::prelude::*;
 use diesel::r2d2::{self, ConnectionManager};
@@ -222,6 +222,62 @@ pub fn pod_traffic_by_name(
         .load::<PodTraffic>(conn)
         .optional()?;
     Ok(pod_tr)
+}
+
+// L7 HTTP TRAFFIC — ALL
+#[get("/pod/l7traffic")]
+pub async fn get_pod_l7traffic(pool: web::Data<DbPool>) -> actix_web::Result<impl Responder> {
+    debug!("select pod_http_traffic table");
+    let traffic = web::block(move || {
+        let mut conn = pool.get()?;
+        pod_l7traffic(&mut conn)
+    })
+    .await?
+    .map_err(actix_web::error::ErrorInternalServerError)?;
+
+    Ok(match traffic {
+        Some(t) => HttpResponse::Ok().json(t),
+        None => HttpResponse::NotFound().body("No data found"),
+    })
+}
+
+pub fn pod_l7traffic(conn: &mut PgConnection) -> Result<Option<Vec<HttpPodTraffic>>, DbError> {
+    use schema::pod_http_traffic::dsl::*;
+    let rows = pod_http_traffic.load::<HttpPodTraffic>(conn).optional()?;
+    Ok(rows)
+}
+
+// L7 HTTP TRAFFIC BY POD NAME
+#[get("/pod/l7traffic/{name}")]
+pub async fn get_pod_l7traffic_name(
+    pool: web::Data<DbPool>,
+    name: web::Path<String>,
+) -> actix_web::Result<impl Responder> {
+    info!("select pod_http_traffic for pod name");
+    let pod_name = name.into_inner();
+    let traffic = web::block(move || {
+        let mut conn = pool.get()?;
+        pod_l7traffic_by_name(&mut conn, &pod_name)
+    })
+    .await?
+    .map_err(actix_web::error::ErrorInternalServerError)?;
+
+    Ok(match traffic {
+        Some(t) => HttpResponse::Ok().json(t),
+        None => HttpResponse::NotFound().body("No data found"),
+    })
+}
+
+pub fn pod_l7traffic_by_name(
+    conn: &mut PgConnection,
+    name: &str,
+) -> Result<Option<Vec<HttpPodTraffic>>, DbError> {
+    use schema::pod_http_traffic::dsl::*;
+    let rows = pod_http_traffic
+        .filter(pod_name.eq(name))
+        .load::<HttpPodTraffic>(conn)
+        .optional()?;
+    Ok(rows)
 }
 
 // POD SYS CALLS BY PODNAME

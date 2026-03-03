@@ -1,3 +1,4 @@
+use crate::http::{http_probe::HttpSkelBuilder, HttpEventData};
 use crate::network::netpolicy_drop::NetpolicyDropSkelBuilder;
 use crate::network::network_probe::NetworkProbeSkelBuilder;
 use crate::network::PolicyDropEvent;
@@ -107,6 +108,7 @@ pub fn ebpf_handle(
     network_event_sender: Sender<NetworkEventData>,
     syscall_event_sender: Sender<SyscallEventData>,
     netpolicy_drop_sender: Sender<PolicyDropEvent>,
+    http_event_sender: Sender<HttpEventData>,
     mut rx: Receiver<u64>,
     mut ignore_ips: Receiver<String>,
     ignore_daemonset_traffic: bool,
@@ -161,7 +163,21 @@ pub fn ebpf_handle(
             .map_err(|e| Error::Custom(format!("Failed to attach syscall eBPF: {}", e)))?;
         info!("Syscall probe eBPF program loaded and attached");
 
-        // Build a unified ring buffer that polls all three maps efficiently
+        // Load and attach HTTP probe
+        let mut open_object = MaybeUninit::uninit();
+        let skel_builder = HttpSkelBuilder::default();
+        let http_probe_skel = skel_builder
+            .open(&mut open_object)
+            .map_err(|e| Error::Custom(format!("Failed to open HTTP probe eBPF: {}", e)))?;
+        let mut http_sk = http_probe_skel
+            .load()
+            .map_err(|e| Error::Custom(format!("Failed to load HTTP probe eBPF: {}", e)))?;
+        http_sk
+            .attach()
+            .map_err(|e| Error::Custom(format!("Failed to attach HTTP probe eBPF: {}", e)))?;
+        info!("HTTP probe eBPF program loaded and attached");
+
+        // Build a unified ring buffer that polls all four maps efficiently
         let mut ring_buffer_builder = RingBufferBuilder::new();
 
         // Add network events ring buffer
@@ -240,10 +256,32 @@ pub fn ebpf_handle(
                 ))
             })?;
 
+        // Add HTTP events ring buffer
+        ring_buffer_builder
+            .add(&http_sk.maps.http_events, move |data: &[u8]| {
+                if data.len() < std::mem::size_of::<HttpEventData>() {
+                    eprintln!(
+                        "HTTP event data too small: {} < {}",
+                        data.len(),
+                        std::mem::size_of::<HttpEventData>()
+                    );
+                    return 0;
+                }
+                let http_event_data: HttpEventData =
+                    unsafe { *(data.as_ptr() as *const HttpEventData) };
+                if let Err(e) = http_event_sender.blocking_send(http_event_data) {
+                    eprintln!("Failed to send HTTP event (receiver closed): {:?}", e);
+                }
+                0
+            })
+            .map_err(|e| {
+                Error::Custom(format!("Failed to add HTTP events ring buffer: {}", e))
+            })?;
+
         let ring_buffer = ring_buffer_builder
             .build()
             .map_err(|e| Error::Custom(format!("Failed to build ring buffer: {}", e)))?;
-        info!("Network policy drop ring buffer initialized");
+        info!("All eBPF ring buffers initialized");
 
         loop {
             // Poll all ring buffers with a single call (much more efficient!)
@@ -269,6 +307,11 @@ pub fn ebpf_handle(
                     .inode_num
                     .update(&inum.to_ne_bytes(), &1_u32.to_ne_bytes(), MapFlags::ANY)
                     .map_err(|e| eprintln!("Failed to update netpolicy inode map: {}", e));
+                let _ = http_sk
+                    .maps
+                    .inode_num
+                    .update(&inum.to_ne_bytes(), &1_u32.to_ne_bytes(), MapFlags::ANY)
+                    .map_err(|e| eprintln!("Failed to update HTTP inode map: {}", e));
             }
             if ignore_daemonset_traffic {
                 if let Ok(ip) = ignore_ips.try_recv() {
@@ -279,6 +322,11 @@ pub fn ebpf_handle(
                             .ignore_ips
                             .update(&ip_u32.to_ne_bytes(), &1_u32.to_ne_bytes(), MapFlags::ANY)
                             .map_err(|e| eprintln!("Failed to update ignore_ips map: {}", e));
+                        let _ = http_sk
+                            .maps
+                            .ignore_ips
+                            .update(&ip_u32.to_ne_bytes(), &1_u32.to_ne_bytes(), MapFlags::ANY)
+                            .map_err(|e| eprintln!("Failed to update HTTP ignore_ips map: {}", e));
                     } else {
                         eprintln!("Failed to parse IP address: {}", ip);
                     }

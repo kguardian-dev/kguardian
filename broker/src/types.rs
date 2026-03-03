@@ -1,4 +1,4 @@
-use crate::schema::{pod_details, pod_syscalls, pod_traffic, svc_details};
+use crate::schema::{pod_details, pod_http_traffic, pod_syscalls, pod_traffic, svc_details};
 use chrono::NaiveDateTime;
 use diesel::{AsChangeset, Identifiable, Insertable, Queryable, Selectable};
 use serde::{Deserialize, Serialize};
@@ -95,6 +95,35 @@ pub struct PodSyscalls {
     pub pod_namespace: String,
     pub syscalls: String,
     pub arch: String,
+    pub time_stamp: NaiveDateTime,
+}
+
+#[derive(
+    Default,
+    Debug,
+    Clone,
+    Insertable,
+    Queryable,
+    Identifiable,
+    AsChangeset,
+    Serialize,
+    Deserialize,
+    Selectable,
+)]
+#[diesel(table_name = pod_http_traffic)]
+#[diesel(primary_key(uuid))]
+pub struct HttpPodTraffic {
+    pub uuid: String,
+    pub pod_name: Option<String>,
+    pub pod_namespace: Option<String>,
+    pub pod_ip: Option<String>,
+    pub pod_port: Option<String>,
+    pub ip_protocol: Option<String>,
+    pub http_method: Option<String>,
+    pub http_path: Option<String>,
+    pub traffic_type: Option<String>,
+    pub traffic_in_out_ip: Option<String>,
+    pub traffic_in_out_port: Option<String>,
     pub time_stamp: NaiveDateTime,
 }
 
