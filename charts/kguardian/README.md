@@ -256,7 +256,7 @@ The following table lists the configurable parameters of the kguardian chart and
 | mcpServer.image.pullPolicy | string | `"IfNotPresent"` | MCP Server image pull policy |
 | mcpServer.image.repository | string | `"ghcr.io/kguardian-dev/kguardian/mcp-server"` | MCP Server container image repository |
 | mcpServer.image.sha | string | `""` | Overrides the image tag using SHA digest |
-| mcpServer.image.tag | string | `"1.3.2"` | MCP Server version tag (auto-updated by release-please) |
+| mcpServer.image.tag | string | `"1.3.3"` | MCP Server version tag (auto-updated by release-please) |
 | mcpServer.imagePullSecrets | list | `[]` | List of image pull secrets for private registries |
 | mcpServer.kmcp.authn | object | `{}` | Authentication configuration (optional) |
 | mcpServer.kmcp.authz | object | `{}` | Authorization configuration (optional) |
