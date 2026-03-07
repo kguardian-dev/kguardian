@@ -157,7 +157,7 @@ jobs:
 
       - name: Build and Push
         id: build
-        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        uses: docker/build-push-action@d08e5c354a6adb9ed34480a06d141179aa583294 # v7
         with:
           context: controller/
           platforms: linux/amd64,linux/arm64
@@ -246,7 +246,7 @@ jobs:
 
       - name: Build and Push
         id: build
-        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        uses: docker/build-push-action@d08e5c354a6adb9ed34480a06d141179aa583294 # v7
         with:
           context: broker/
           file: broker/Dockerfile
@@ -331,7 +331,7 @@ jobs:
 
       - name: Build and Push
         id: build
-        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        uses: docker/build-push-action@d08e5c354a6adb9ed34480a06d141179aa583294 # v7
         with:
           context: frontend/
           file: frontend/Dockerfile
@@ -417,7 +417,7 @@ jobs:
 
       - name: Build and Push
         id: build
-        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        uses: docker/build-push-action@d08e5c354a6adb9ed34480a06d141179aa583294 # v7
         with:
           context: llm-bridge/
           file: llm-bridge/Dockerfile
@@ -503,7 +503,7 @@ jobs:
 
       - name: Build and Push
         id: build
-        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        uses: docker/build-push-action@d08e5c354a6adb9ed34480a06d141179aa583294 # v7
         with:
           context: mcp-server/
           file: mcp-server/Dockerfile
