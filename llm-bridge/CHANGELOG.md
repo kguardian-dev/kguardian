@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.2.3](https://github.com/kguardian-dev/kguardian/compare/llm-bridge/v1.2.2...llm-bridge/v1.2.3) (2026-03-07)
+
+
+### Bug Fixes
+
+* **mcp-server,llm-bridge,frontend:** fix LLM/MCP integration data pipeline ([#684](https://github.com/kguardian-dev/kguardian/issues/684)) ([66b78c6](https://github.com/kguardian-dev/kguardian/commit/66b78c6c6f181ab3c3b99a797154bfc50b260604))
+
 ## [1.2.2](https://github.com/kguardian-dev/kguardian/compare/llm-bridge/v1.2.1...llm-bridge/v1.2.2) (2026-02-22)
 
 
