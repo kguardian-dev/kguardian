@@ -92,10 +92,8 @@ controller:
     port: 80
 
   # -- Controller pod resource requests and limits. eBPF requires more memory.
-  # CPU limits are not set by default to avoid throttling. Set them explicitly if needed.
   resources:
     limits:
-      # cpu: 500m
       memory: 512Mi
     requests:
       cpu: 100m
@@ -230,11 +228,9 @@ broker:
     port: 9090
 
   # -- Broker pod resource requests and limits
-  # CPU limits are not set by default to avoid throttling. Set them explicitly if needed.
   resources:
     limits:
-      # cpu: 500m
-      memory: 512Mi
+      memory: 1Gi
     requests:
       cpu: 100m
       memory: 256Mi
@@ -336,10 +332,8 @@ database:
     port: 5432
 
   # -- Database pod resource requests and limits
-  # CPU limits are not set by default to avoid throttling. Set them explicitly if needed.
   resources:
     limits:
-      # cpu: 500m
       memory: 512Mi
     requests:
       cpu: 100m
@@ -436,10 +430,8 @@ frontend:
     port: 5173
 
   # -- Frontend pod resource requests and limits
-  # CPU limits are not set by default to avoid throttling. Set them explicitly if needed.
   resources:
     limits:
-      # cpu: 200m
       memory: 256Mi
     requests:
       cpu: 50m
@@ -558,10 +550,8 @@ llmBridge:
     port: 8080
 
   # -- LLM Bridge pod resource requests and limits
-  # CPU limits are not set by default to avoid throttling. Set them explicitly if needed.
   resources:
     limits:
-      # cpu: 500m
       memory: 512Mi
     requests:
       cpu: 100m
@@ -634,11 +624,6 @@ mcpServer:
   # -- Enable MCP Server for external integrations
   enabled: false
 
-  # -- Use kmcp controller for MCP server management (requires kmcp controller installed)
-  # When enabled, uses MCPServer CRD instead of standard Deployment
-  # Benefits: Transport flexibility, better observability, kmcp CLI integration
-  useKmcp: false
-
   # -- Number of mcp-server replicas to deploy (ignored if useKmcp is true and autoscaling is enabled)
   replicaCount: 1
   image:
@@ -705,10 +690,8 @@ mcpServer:
     port: 8081
 
   # -- MCP Server pod resource requests and limits
-  # CPU limits are not set by default to avoid throttling. Set them explicitly if needed.
   resources:
     limits:
-      # cpu: 200m
       memory: 256Mi
     requests:
       cpu: 50m
@@ -743,44 +726,3 @@ mcpServer:
 
   # -- Priority class to be used for the kguardian mcp-server pods
   priorityClassName: ""
-
-  # kmcp-specific configuration (only used when useKmcp: true)
-  kmcp:
-    # Transport configuration
-    transport:
-      # -- Transport type: http or stdio
-      type: http
-
-      # -- HTTP path for MCP server endpoint (only used with http transport)
-      path: /
-
-    # -- Secret references for kmcp deployment
-    secretRefs: []
-    # Example:
-    # - name: kguardian-mcp-secrets
-    #   keys:
-    #     - BROKER_API_KEY
-
-    # -- Authentication configuration (optional)
-    authn: {}
-    # Example JWT authentication:
-    # authn:
-    #   jwt:
-    #     issuer: https://your-auth-provider.com
-    #     audiences:
-    #       - kguardian-mcp
-    #     jwks:
-    #       name: kguardian-jwks-secret
-    #       key: jwks.json
-
-    # -- Authorization configuration (optional)
-    authz: {}
-    # Example CEL-based authorization:
-    # authz:
-    #   server:
-    #     issuer: https://your-auth-provider.com
-    #     audience: kguardian-mcp
-    #     jwksURL: https://your-auth-provider.com/.well-known/jwks.json
-    #   rules: |
-    #     request.auth.claims.sub != "" &&
-    #     (request.tool in ["get_pod_network_traffic", "get_pod_syscalls"])
