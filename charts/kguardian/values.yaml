@@ -94,6 +94,7 @@ controller:
   # -- Controller pod resource requests and limits. eBPF requires more memory.
   resources:
     limits:
+      # cpu: 500m
       memory: 512Mi
     requests:
       cpu: 100m
@@ -230,6 +231,7 @@ broker:
   # -- Broker pod resource requests and limits
   resources:
     limits:
+      # cpu: 500m
       memory: 1Gi
     requests:
       cpu: 100m
@@ -334,6 +336,7 @@ database:
   # -- Database pod resource requests and limits
   resources:
     limits:
+      # cpu: 500m
       memory: 512Mi
     requests:
       cpu: 100m
@@ -432,6 +435,7 @@ frontend:
   # -- Frontend pod resource requests and limits
   resources:
     limits:
+      # cpu: 200m
       memory: 256Mi
     requests:
       cpu: 50m
@@ -552,6 +556,7 @@ llmBridge:
   # -- LLM Bridge pod resource requests and limits
   resources:
     limits:
+      # cpu: 500m
       memory: 512Mi
     requests:
       cpu: 100m
@@ -692,6 +697,7 @@ mcpServer:
   # -- MCP Server pod resource requests and limits
   resources:
     limits:
+      # cpu: 200m
       memory: 256Mi
     requests:
       cpu: 50m
