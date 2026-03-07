@@ -96,7 +96,7 @@ The following table lists the configurable parameters of the kguardian chart and
 | broker.podSecurityContext | object | `{"fsGroup":1000,"fsGroupChangePolicy":"OnRootMismatch","runAsGroup":1000,"runAsUser":1000,"seccompProfile":{"type":"RuntimeDefault"},"supplementalGroups":[1000]}` | Broker pod security context. Runs as non-root user 1000 |
 | broker.priorityClassName | string | `""` | Priority class to be used for the kguardian broker pods |
 | broker.replicaCount | int | `1` | Number of broker replicas to deploy |
-| broker.resources | object | `{"limits":{"memory":"512Mi"},"requests":{"cpu":"100m","memory":"256Mi"}}` | Broker pod resource requests and limits CPU limits are not set by default to avoid throttling. Set them explicitly if needed. |
+| broker.resources | object | `{"limits":{"memory":"1Gi"},"requests":{"cpu":"100m","memory":"256Mi"}}` | Broker pod resource requests and limits |
 | broker.securityContext | object | `{"allowPrivilegeEscalation":false,"capabilities":{"drop":["ALL"]},"privileged":false,"readOnlyRootFilesystem":true,"runAsNonRoot":true,"runAsUser":1000}` | Broker container security context. Hardened with read-only root filesystem |
 | broker.service.name | string | `"kguardian-broker"` | Broker service name |
 | broker.service.port | int | `9090` | Broker service port |
@@ -130,7 +130,7 @@ The following table lists the configurable parameters of the kguardian chart and
 | controller.podAnnotations | object | `{}` | Annotations to add to controller pods |
 | controller.podSecurityContext | object | `{"seccompProfile":{"type":"RuntimeDefault"}}` | Controller pod security context. Runs with seccomp RuntimeDefault profile |
 | controller.priorityClassName | string | `""` | Priority class to be used for the kguardian controller pods |
-| controller.resources | object | `{"limits":{"memory":"512Mi"},"requests":{"cpu":"100m","memory":"256Mi"}}` | Controller pod resource requests and limits. eBPF requires more memory. CPU limits are not set by default to avoid throttling. Set them explicitly if needed. |
+| controller.resources | object | `{"limits":{"memory":"512Mi"},"requests":{"cpu":"100m","memory":"256Mi"}}` | Controller pod resource requests and limits. eBPF requires more memory. |
 | controller.securityContext | object | `{"allowPrivilegeEscalation":true,"capabilities":{"add":["CAP_BPF"]},"privileged":true,"readOnlyRootFilesystem":true}` | Controller container security context. Requires privileged mode for eBPF |
 | controller.service.port | int | `80` | Controller service port |
 | controller.service.type | string | `"ClusterIP"` | Controller service type |
@@ -159,7 +159,7 @@ The following table lists the configurable parameters of the kguardian chart and
 | database.podAnnotations | object | `{}` | Annotations to add to database pods |
 | database.podSecurityContext | object | `{"fsGroup":999,"fsGroupChangePolicy":"OnRootMismatch","runAsGroup":999,"runAsUser":999,"seccompProfile":{"type":"RuntimeDefault"},"supplementalGroups":[999]}` | Database pod security context. Runs as postgres user (999) |
 | database.priorityClassName | string | `""` | Priority class to be used for the kguardian database pods |
-| database.resources | object | `{"limits":{"memory":"512Mi"},"requests":{"cpu":"100m","memory":"256Mi"}}` | Database pod resource requests and limits CPU limits are not set by default to avoid throttling. Set them explicitly if needed. |
+| database.resources | object | `{"limits":{"memory":"512Mi"},"requests":{"cpu":"100m","memory":"256Mi"}}` | Database pod resource requests and limits |
 | database.securityContext | object | `{"allowPrivilegeEscalation":false,"capabilities":{"drop":["ALL"]},"privileged":false,"readOnlyRootFilesystem":false,"runAsNonRoot":true,"runAsUser":999}` | Database container security context. Non-root with dropped capabilities |
 | database.service.name | string | `"kguardian-db"` | Database service name |
 | database.service.port | int | `5432` | Database service port |
@@ -192,7 +192,7 @@ The following table lists the configurable parameters of the kguardian chart and
 | frontend.podSecurityContext | object | `{"fsGroup":1337,"fsGroupChangePolicy":"OnRootMismatch","runAsGroup":1337,"runAsUser":1337,"seccompProfile":{"type":"RuntimeDefault"},"supplementalGroups":[1337]}` | Frontend pod security context. Runs as non-root user (1337) |
 | frontend.priorityClassName | string | `""` | Priority class to be used for the kguardian frontend pods |
 | frontend.replicaCount | int | `1` | Number of frontend replicas to deploy |
-| frontend.resources | object | `{"limits":{"memory":"256Mi"},"requests":{"cpu":"50m","memory":"128Mi"}}` | Frontend pod resource requests and limits CPU limits are not set by default to avoid throttling. Set them explicitly if needed. |
+| frontend.resources | object | `{"limits":{"memory":"256Mi"},"requests":{"cpu":"50m","memory":"128Mi"}}` | Frontend pod resource requests and limits |
 | frontend.securityContext | object | `{"allowPrivilegeEscalation":false,"capabilities":{"drop":["ALL"]},"privileged":false,"readOnlyRootFilesystem":false,"runAsNonRoot":true,"runAsUser":1337}` | Frontend container security context. Hardened with read-only root filesystem |
 | frontend.service.name | string | `"kguardian-frontend"` | Frontend service name |
 | frontend.service.port | int | `5173` | Frontend service port |
@@ -225,7 +225,7 @@ The following table lists the configurable parameters of the kguardian chart and
 | llmBridge.podSecurityContext | object | `{"fsGroup":1000,"fsGroupChangePolicy":"OnRootMismatch","runAsGroup":1000,"runAsUser":1000,"seccompProfile":{"type":"RuntimeDefault"},"supplementalGroups":[1000]}` | LLM Bridge pod security context. Runs as non-root user (node:1000) |
 | llmBridge.priorityClassName | string | `""` | Priority class to be used for the kguardian llm-bridge pods |
 | llmBridge.replicaCount | int | `2` | Number of llm-bridge replicas to deploy |
-| llmBridge.resources | object | `{"limits":{"memory":"512Mi"},"requests":{"cpu":"100m","memory":"256Mi"}}` | LLM Bridge pod resource requests and limits CPU limits are not set by default to avoid throttling. Set them explicitly if needed. |
+| llmBridge.resources | object | `{"limits":{"memory":"512Mi"},"requests":{"cpu":"100m","memory":"256Mi"}}` | LLM Bridge pod resource requests and limits |
 | llmBridge.secrets.anthropic.enabled | bool | `false` | Enable Anthropic Claude provider |
 | llmBridge.secrets.anthropic.name | string | `"kguardian-anthropic"` | Secret name for Anthropic |
 | llmBridge.secrets.copilot.enabled | bool | `false` | Enable GitHub Copilot provider |
@@ -258,18 +258,13 @@ The following table lists the configurable parameters of the kguardian chart and
 | mcpServer.image.sha | string | `""` | Overrides the image tag using SHA digest |
 | mcpServer.image.tag | string | `"1.3.2"` | MCP Server version tag (auto-updated by release-please) |
 | mcpServer.imagePullSecrets | list | `[]` | List of image pull secrets for private registries |
-| mcpServer.kmcp.authn | object | `{}` | Authentication configuration (optional) |
-| mcpServer.kmcp.authz | object | `{}` | Authorization configuration (optional) |
-| mcpServer.kmcp.secretRefs | list | `[]` | Secret references for kmcp deployment |
-| mcpServer.kmcp.transport.path | string | `"/"` | HTTP path for MCP server endpoint (only used with http transport) |
-| mcpServer.kmcp.transport.type | string | `"http"` | Transport type: http or stdio |
 | mcpServer.nameOverride | string | `""` | Override the name of the mcp-server resources |
 | mcpServer.nodeSelector | object | `{"kubernetes.io/os":"linux"}` | Node labels for the kguardian mcp-server pod assignment |
 | mcpServer.podAnnotations | object | `{}` | Annotations to add to mcp-server pods |
 | mcpServer.podSecurityContext | object | `{"fsGroup":1000,"fsGroupChangePolicy":"OnRootMismatch","runAsGroup":1000,"runAsUser":1000,"seccompProfile":{"type":"RuntimeDefault"},"supplementalGroups":[1000]}` | MCP Server pod security context. Runs as non-root user (mcp:1000) |
 | mcpServer.priorityClassName | string | `""` | Priority class to be used for the kguardian mcp-server pods |
 | mcpServer.replicaCount | int | `1` | Number of mcp-server replicas to deploy (ignored if useKmcp is true and autoscaling is enabled) |
-| mcpServer.resources | object | `{"limits":{"memory":"256Mi"},"requests":{"cpu":"50m","memory":"128Mi"}}` | MCP Server pod resource requests and limits CPU limits are not set by default to avoid throttling. Set them explicitly if needed. |
+| mcpServer.resources | object | `{"limits":{"memory":"256Mi"},"requests":{"cpu":"50m","memory":"128Mi"}}` | MCP Server pod resource requests and limits |
 | mcpServer.securityContext | object | `{"allowPrivilegeEscalation":false,"capabilities":{"drop":["ALL"]},"privileged":false,"readOnlyRootFilesystem":true,"runAsNonRoot":true,"runAsUser":1000}` | MCP Server container security context. Hardened with read-only root filesystem |
 | mcpServer.service.name | string | `"kguardian-mcp-server"` | MCP Server service name |
 | mcpServer.service.port | int | `8081` | MCP Server service port |
@@ -279,7 +274,6 @@ The following table lists the configurable parameters of the kguardian chart and
 | mcpServer.serviceAccount.create | bool | `true` | Specifies whether a service account should be created |
 | mcpServer.serviceAccount.name | string | `""` | The name of the service account to use. If not set and create is true, a name is generated using the fullname template |
 | mcpServer.tolerations | list | `[]` | Tolerations for the kguardian mcp-server pod assignment |
-| mcpServer.useKmcp | bool | `false` | Use kmcp controller for MCP server management (requires kmcp controller installed) When enabled, uses MCPServer CRD instead of standard Deployment Benefits: Transport flexibility, better observability, kmcp CLI integration |
 | namespace.annotations | object | `{}` | Annotations to add to the namespace |
 | namespace.labels | object | `{}` | Labels to add to the namespace |
 | namespace.name | string | `""` | Namespace name. If empty, uses the release namespace |
