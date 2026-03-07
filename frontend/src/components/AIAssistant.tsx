@@ -74,17 +74,14 @@ const AIAssistant: React.FC<AIAssistantProps> = ({ isOpen, onClose, onLayoutChan
         content: msg.content,
       }));
 
-      // Prepend viewing context on the first message of a conversation
-      let messageToSend = currentMessage;
-      if (messages.length === 0 && namespace) {
-        const podList = podNames && podNames.length > 0
-          ? `, with pods: ${podNames.join(', ')}`
-          : '';
-        messageToSend = `[Context: User is viewing namespace "${namespace}"${podList}]\n\n${currentMessage}`;
-      }
+      // Build structured context for every message
+      const context = JSON.stringify({
+        namespace: namespace || undefined,
+        podNames: podNames?.slice(0, 30),
+      });
 
-      // Call the real AI API with conversation history
-      const response = await sendChatMessage(messageToSend, history);
+      // Call the real AI API with conversation history and context
+      const response = await sendChatMessage(currentMessage, history, undefined, undefined, context);
 
       const assistantMessage: Message = {
         id: crypto.randomUUID(),
