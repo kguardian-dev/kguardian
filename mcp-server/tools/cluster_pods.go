@@ -11,12 +11,14 @@ import (
 	"github.com/sirupsen/logrus"
 )
 
-// ClusterPodsInput defines the input parameters (no params needed)
-type ClusterPodsInput struct{}
+// ClusterPodsInput defines the input parameters for the cluster pods tool
+type ClusterPodsInput struct {
+	Namespace string `json:"namespace,omitempty" jsonschema:"Optional Kubernetes namespace to filter results. If omitted, returns pods from all namespaces."`
+}
 
 // ClusterPodsOutput defines the output structure
 type ClusterPodsOutput struct {
-	Data string `json:"data" jsonschema:"All pod details in the cluster in JSON format"`
+	Data string `json:"data" jsonschema:"Compact pod list in JSON format"`
 }
 
 // ClusterPodsHandler handles the get_cluster_pods tool
@@ -31,7 +33,7 @@ func (h ClusterPodsHandler) Call(
 	input ClusterPodsInput,
 ) (*mcp.CallToolResult, ClusterPodsOutput, error) {
 	startTime := time.Now()
-	logger.Log.Info("Received get_cluster_pods request")
+	logger.Log.WithField("namespace", input.Namespace).Info("Received get_cluster_pods request")
 
 	data, err := h.client.GetAllPods(ctx)
 	if err != nil {
@@ -45,7 +47,13 @@ func (h ClusterPodsHandler) Call(
 		}, ClusterPodsOutput{}, nil
 	}
 
-	jsonData, err := json.MarshalIndent(data, "", "  ")
+	// Apply namespace filter if specified
+	filtered := filterByNamespace(data, input.Namespace)
+
+	// Strip heavyweight fields (pod_obj, service_spec)
+	compacted := compactPodsSummary(filtered)
+
+	jsonData, err := json.Marshal(compacted)
 	if err != nil {
 		logger.Log.WithField("error", err.Error()).Error("Error marshaling response")
 		return &mcp.CallToolResult{
@@ -55,6 +63,7 @@ func (h ClusterPodsHandler) Call(
 	}
 
 	logger.Log.WithFields(logrus.Fields{
+		"namespace":      input.Namespace,
 		"response_bytes": len(jsonData),
 		"total_duration": time.Since(startTime).String(),
 	}).Info("Successfully fetched cluster pods")

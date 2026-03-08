@@ -13,8 +13,7 @@ import (
 
 // NetworkTrafficInput defines the input parameters for the network traffic tool
 type NetworkTrafficInput struct {
-	Namespace string `json:"namespace" jsonschema:"The Kubernetes namespace of the pod"`
-	PodName   string `json:"pod_name" jsonschema:"The name of the pod"`
+	PodName string `json:"pod_name" jsonschema:"The name of the pod to query traffic for"`
 }
 
 // NetworkTrafficOutput defines the output for the network traffic tool
@@ -34,10 +33,7 @@ func (h NetworkTrafficHandler) Call(
 	input NetworkTrafficInput,
 ) (*mcp.CallToolResult, NetworkTrafficOutput, error) {
 	startTime := time.Now()
-	logger.Log.WithFields(logrus.Fields{
-		"namespace": input.Namespace,
-		"pod_name":  input.PodName,
-	}).Info("Received get_pod_network_traffic request")
+	logger.Log.WithField("pod_name", input.PodName).Info("Received get_pod_network_traffic request")
 
 	if input.PodName == "" {
 		logger.Log.Error("pod_name is required but not provided")
@@ -48,10 +44,9 @@ func (h NetworkTrafficHandler) Call(
 	}
 
 	// Fetch data from broker
-	data, err := h.client.GetPodNetworkTraffic(ctx, input.Namespace, input.PodName)
+	data, err := h.client.GetPodNetworkTraffic(ctx, input.PodName)
 	if err != nil {
 		logger.Log.WithFields(logrus.Fields{
-			"namespace":      input.Namespace,
 			"pod_name":       input.PodName,
 			"error":          err.Error(),
 			"total_duration": time.Since(startTime).String(),
@@ -63,7 +58,7 @@ func (h NetworkTrafficHandler) Call(
 	}
 
 	// Convert to JSON string
-	jsonData, err := json.MarshalIndent(data, "", "  ")
+	jsonData, err := json.Marshal(data)
 	if err != nil {
 		logger.Log.WithField("error", err.Error()).Error("Error marshaling response")
 		return &mcp.CallToolResult{
@@ -73,7 +68,6 @@ func (h NetworkTrafficHandler) Call(
 	}
 
 	logger.Log.WithFields(logrus.Fields{
-		"namespace":      input.Namespace,
 		"pod_name":       input.PodName,
 		"response_bytes": len(jsonData),
 		"total_duration": time.Since(startTime).String(),

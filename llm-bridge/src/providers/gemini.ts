@@ -16,19 +16,16 @@ export async function callGemini(
   }
 
   const model = request.model || "gemini-2.0-flash-exp";
-  const basePrompt = BrokerClient.getSystemPrompt();
-  const systemPrompt = request.context
-    ? `${basePrompt}\n\nUser context: ${request.context}`
-    : basePrompt;
+  const context = BrokerClient.parseContext(request.context);
+  const systemPrompt = BrokerClient.getSystemPrompt(context);
 
-  // Build function declarations
-  const functionDeclarations = BrokerClient.getToolDefinitions().map(
-    (tool) => ({
-      name: tool.name,
-      description: tool.description,
-      parameters: tool.parameters,
-    })
-  );
+  // Build function declarations from cached MCP definitions
+  const toolDefs = await BrokerClient.getToolsCached();
+  const functionDeclarations = toolDefs.map((tool) => ({
+    name: tool.name,
+    description: tool.description,
+    parameters: tool.parameters,
+  }));
 
   // Build contents with history
   const contents: any[] = [];

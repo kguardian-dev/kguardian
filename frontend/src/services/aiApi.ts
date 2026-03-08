@@ -34,13 +34,15 @@ export interface ChatResponse {
  * @param history Optional: Previous conversation messages for context
  * @param provider Optional: Specify which LLM provider to use (openai, anthropic, gemini, copilot)
  * @param conversationId Optional: Continue an existing conversation
+ * @param context Optional: JSON string with structured context (namespace, podNames)
  * @returns The AI's response
  */
 export async function sendChatMessage(
   message: string,
   history?: HistoryMessage[],
   provider?: LLMProvider,
-  conversationId?: string
+  conversationId?: string,
+  context?: string
 ): Promise<ChatResponse> {
   try {
     const response = await axios.post<ChatResponse>(`${LLM_BRIDGE_URL}/api/chat`, {
@@ -48,6 +50,7 @@ export async function sendChatMessage(
       history,
       provider,
       conversationId,
+      context,
     });
 
     return response.data;

@@ -25,10 +25,8 @@ export async function callCopilot(
   }
 
   const model = request.model || "gpt-4o";
-  const basePrompt = BrokerClient.getSystemPrompt();
-  const systemPrompt = request.context
-    ? `${basePrompt}\n\nUser context: ${request.context}`
-    : basePrompt;
+  const context = BrokerClient.parseContext(request.context);
+  const systemPrompt = BrokerClient.getSystemPrompt(context);
 
   // Build messages with history
   const messages: CopilotMessage[] = [
@@ -46,8 +44,9 @@ export async function callCopilot(
   // Add current user message
   messages.push({ role: "user", content: request.message });
 
-  // Build tools (OpenAI format)
-  const tools = BrokerClient.getToolDefinitions().map((tool) => ({
+  // Build tools from cached MCP definitions (OpenAI format)
+  const toolDefs = await BrokerClient.getToolsCached();
+  const tools = toolDefs.map((tool) => ({
     type: "function",
     function: {
       name: tool.name,

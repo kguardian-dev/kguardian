@@ -13,8 +13,7 @@ import (
 
 // SyscallsInput defines the input parameters for the syscalls tool
 type SyscallsInput struct {
-	Namespace string `json:"namespace" jsonschema:"The Kubernetes namespace of the pod"`
-	PodName   string `json:"pod_name" jsonschema:"The name of the pod"`
+	PodName string `json:"pod_name" jsonschema:"The name of the pod to query syscalls for"`
 }
 
 // SyscallsOutput defines the output for the syscalls tool
@@ -34,10 +33,7 @@ func (h SyscallsHandler) Call(
 	input SyscallsInput,
 ) (*mcp.CallToolResult, SyscallsOutput, error) {
 	startTime := time.Now()
-	logger.Log.WithFields(logrus.Fields{
-		"namespace": input.Namespace,
-		"pod_name":  input.PodName,
-	}).Info("Received get_pod_syscalls request")
+	logger.Log.WithField("pod_name", input.PodName).Info("Received get_pod_syscalls request")
 
 	if input.PodName == "" {
 		logger.Log.Error("pod_name is required but not provided")
@@ -48,10 +44,9 @@ func (h SyscallsHandler) Call(
 	}
 
 	// Fetch data from broker
-	data, err := h.client.GetPodSyscalls(ctx, input.Namespace, input.PodName)
+	data, err := h.client.GetPodSyscalls(ctx, input.PodName)
 	if err != nil {
 		logger.Log.WithFields(logrus.Fields{
-			"namespace":      input.Namespace,
 			"pod_name":       input.PodName,
 			"error":          err.Error(),
 			"total_duration": time.Since(startTime).String(),
@@ -63,7 +58,7 @@ func (h SyscallsHandler) Call(
 	}
 
 	// Convert to JSON string
-	jsonData, err := json.MarshalIndent(data, "", "  ")
+	jsonData, err := json.Marshal(data)
 	if err != nil {
 		logger.Log.WithField("error", err.Error()).Error("Error marshaling response")
 		return &mcp.CallToolResult{
@@ -73,7 +68,6 @@ func (h SyscallsHandler) Call(
 	}
 
 	logger.Log.WithFields(logrus.Fields{
-		"namespace":      input.Namespace,
 		"pod_name":       input.PodName,
 		"response_bytes": len(jsonData),
 		"total_duration": time.Since(startTime).String(),

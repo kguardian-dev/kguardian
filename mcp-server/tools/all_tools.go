@@ -16,27 +16,27 @@ type toolDef struct {
 var toolDefs = []toolDef{
 	{
 		Name:        "get_pod_network_traffic",
-		Description: "Get network traffic data for a specific pod by pod name. Returns source/destination IPs, ports, protocols, traffic types (ingress/egress), and packet decisions (allowed/dropped). Essential for generating network policies and understanding pod communication patterns. Note: queries are cluster-wide by pod name, not namespace-scoped.",
+		Description: "Get network traffic for a specific pod by name. Returns source/destination IPs, ports, protocols, ingress/egress types, and packet decisions. Use when the user asks about a specific pod's connections or traffic. Requires only pod_name (not namespace-scoped — the broker resolves by name cluster-wide).",
 	},
 	{
 		Name:        "get_pod_syscalls",
-		Description: "Get system call (syscall) data for a specific pod. Returns the syscalls made by the pod with their frequencies and architecture. Critical for security analysis, generating seccomp profiles, and identifying suspicious behavior. Note: queries are cluster-wide by pod name, not namespace-scoped.",
+		Description: "Get system calls made by a specific pod. Returns syscall names, frequencies, and architecture. Use when the user asks about a pod's syscalls, seccomp profile, or suspicious behavior. Requires only pod_name (not namespace-scoped).",
 	},
 	{
 		Name:        "get_pod_details",
-		Description: "Get detailed information about a pod by its IP address. Returns pod name, namespace, IP, and full Kubernetes pod object. Useful for correlating IP addresses to pod identities. Note: queries are cluster-wide by pod name, not namespace-scoped.",
+		Description: "Look up a pod by its IP address. Returns pod name, namespace, IP, and full Kubernetes pod object. Use when the user has an IP address and wants to identify which pod it belongs to. Requires only ip.",
 	},
 	{
 		Name:        "get_service_details",
-		Description: "Get detailed information about a Kubernetes service by its cluster IP. Returns service name, namespace, IP, ports, and full service object. Essential for understanding service-to-service communication. Note: queries are cluster-wide by pod name, not namespace-scoped.",
+		Description: "Look up a Kubernetes service by its cluster IP. Returns service name, namespace, IP, ports, and full service spec. Use when the user has a service IP and wants to identify the service. Requires only ip.",
 	},
 	{
 		Name:        "get_cluster_traffic",
-		Description: "Get all network traffic data across the entire cluster. Returns comprehensive traffic information for all monitored pods. Use this for cluster-wide network analysis, identifying communication patterns, and detecting anomalies. WARNING: This returns large datasets. Note: queries are cluster-wide by pod name, not namespace-scoped.",
+		Description: "Get a summary of network traffic across the cluster. Returns per-pod traffic counts (ingress/egress/peer counts), not raw records. Accepts an optional namespace parameter to filter results to a single namespace. Use when the user asks about overall traffic patterns or 'what pods are communicating'.",
 	},
 	{
 		Name:        "get_cluster_pods",
-		Description: "Get detailed information about all pods in the cluster. Returns pod names, namespaces, IPs, and full Kubernetes objects. Useful for cluster inventory and identifying monitored workloads. WARNING: This returns large datasets. Note: queries are cluster-wide by pod name, not namespace-scoped.",
+		Description: "List pods in the cluster with compact metadata (name, namespace, IP, node, status). Heavyweight fields like pod_obj are stripped. Accepts an optional namespace parameter to filter results. Use when the user asks 'what pods are running' or needs a pod inventory.",
 	},
 }
 

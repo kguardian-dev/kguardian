@@ -22,19 +22,16 @@ export async function callAnthropic(
   }
 
   const model = request.model || "claude-sonnet-4-5-20250929";
-  const basePrompt = BrokerClient.getSystemPrompt();
-  const systemPrompt = request.context
-    ? `${basePrompt}\n\nUser context: ${request.context}`
-    : basePrompt;
+  const context = BrokerClient.parseContext(request.context);
+  const systemPrompt = BrokerClient.getSystemPrompt(context);
 
-  // Build tools
-  const tools: AnthropicTool[] = BrokerClient.getToolDefinitions().map(
-    (tool) => ({
-      name: tool.name,
-      description: tool.description,
-      input_schema: tool.parameters,
-    })
-  );
+  // Build tools from cached MCP definitions
+  const toolDefs = await BrokerClient.getToolsCached();
+  const tools: AnthropicTool[] = toolDefs.map((tool) => ({
+    name: tool.name,
+    description: tool.description,
+    input_schema: tool.parameters,
+  }));
 
   // Build messages with history
   const messages: any[] = [];

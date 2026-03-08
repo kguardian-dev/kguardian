@@ -33,15 +33,13 @@ func NewBrokerClient(baseURL string) *BrokerClient {
 }
 
 // GetPodNetworkTraffic retrieves network traffic data for a pod
-func (c *BrokerClient) GetPodNetworkTraffic(ctx context.Context, namespace, podName string) (interface{}, error) {
-	// Broker expects just the pod name in the URL
+func (c *BrokerClient) GetPodNetworkTraffic(ctx context.Context, podName string) (interface{}, error) {
 	reqURL := fmt.Sprintf("%s/pod/traffic/%s", c.baseURL, url.PathEscape(podName))
 	return c.get(ctx, reqURL)
 }
 
 // GetPodSyscalls retrieves syscall data for a pod
-func (c *BrokerClient) GetPodSyscalls(ctx context.Context, namespace, podName string) (interface{}, error) {
-	// Broker expects just the pod name in the URL
+func (c *BrokerClient) GetPodSyscalls(ctx context.Context, podName string) (interface{}, error) {
 	reqURL := fmt.Sprintf("%s/pod/syscalls/%s", c.baseURL, url.PathEscape(podName))
 	return c.get(ctx, reqURL)
 }
