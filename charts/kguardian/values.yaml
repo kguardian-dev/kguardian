@@ -496,7 +496,7 @@ llmBridge:
     # -- LLM Bridge image pull policy
     pullPolicy: IfNotPresent
     # -- LLM Bridge version tag (auto-updated by release-please)
-    tag: "1.2.2"
+    tag: "1.2.3"
     # -- Overrides the image tag using SHA digest
     sha: ""
 
