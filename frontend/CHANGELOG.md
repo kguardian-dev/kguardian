@@ -1,5 +1,14 @@
 # Changelog
 
+## [1.8.1](https://github.com/kguardian-dev/kguardian/compare/frontend/v1.8.0...frontend/v1.8.1) (2026-03-07)
+
+
+### Bug Fixes
+
+* **deps:** update dependency lucide-react to ^0.576.0 ([#728](https://github.com/kguardian-dev/kguardian/issues/728)) ([7c1722e](https://github.com/kguardian-dev/kguardian/commit/7c1722e8e960da6272e514eae2829463be9772a4))
+* **deps:** update dependency lucide-react to ^0.577.0 ([#736](https://github.com/kguardian-dev/kguardian/issues/736)) ([089e140](https://github.com/kguardian-dev/kguardian/commit/089e140bed58d3c22de901bc92a8ec98e981ace5))
+* **mcp-server,llm-bridge,frontend:** fix LLM/MCP integration data pipeline ([#684](https://github.com/kguardian-dev/kguardian/issues/684)) ([66b78c6](https://github.com/kguardian-dev/kguardian/commit/66b78c6c6f181ab3c3b99a797154bfc50b260604))
+
 ## [1.8.0](https://github.com/kguardian-dev/kguardian/compare/frontend/v1.7.1...frontend/v1.8.0) (2026-03-01)
 
 
