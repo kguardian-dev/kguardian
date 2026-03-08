@@ -122,9 +122,9 @@ async fn build_http_traffic_event(
             HTTP_RECV_REQUEST => {
                 // Inbound request: remote → us
                 let remote_ip = IpAddr::V4(Ipv4Addr::from(u32::from_be(evt.daddr))).to_string();
-                let remote_port = u16::from_be(evt.dport).to_string();
                 let local_port = evt.sport.to_string(); // sport is already host-byte-order
-                ("INGRESS", local_port, remote_ip, remote_port)
+                // Zero out the ephemeral client port to avoid duplicate INGRESS rows
+                ("INGRESS", local_port, remote_ip, "0".to_string())
             }
             HTTP_SEND_REQUEST => {
                 // Outbound request: us → remote
@@ -141,9 +141,9 @@ async fn build_http_traffic_event(
             HTTP_SEND_RESPONSE => {
                 // Response sent for an inbound request
                 let remote_ip = IpAddr::V4(Ipv4Addr::from(u32::from_be(evt.daddr))).to_string();
-                let remote_port = u16::from_be(evt.dport).to_string();
                 let local_port = evt.sport.to_string();
-                ("INGRESS", local_port, remote_ip, remote_port)
+                // Zero out the ephemeral client port to avoid duplicate INGRESS rows
+                ("INGRESS", local_port, remote_ip, "0".to_string())
             }
             _ => {
                 debug!("Unknown HTTP event direction: {}", evt.direction);
@@ -158,6 +158,11 @@ async fn build_http_traffic_event(
 
     let (http_method, http_path) =
         parse_http_data(&evt.data, evt.data_len as usize, evt.direction);
+
+    // Skip response events (RECV_RESPONSE / SEND_RESPONSE) — they have no method
+    if http_method.is_none() {
+        return None;
+    }
 
     let cache_key = HttpTrafficKey {
         pod_name: pod_data.status.pod_name.clone(),

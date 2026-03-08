@@ -33,7 +33,7 @@ async fn reconcile_pods(
     reqwest_client: &ReqwestClient,
     kube_client: &Client,
 ) -> Result<(), Error> {
-    info!("reconcile_pods: Starting pod reconciliation for node: {}", node_name);
+    debug!("reconcile_pods: Starting pod reconciliation for node: {}", node_name);
 
     // Get list of pods from database for this node (only alive pods)
     let url = format!("{}/pod/list/{}", broker_url, node_name);
