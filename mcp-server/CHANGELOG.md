@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.3.4](https://github.com/kguardian-dev/kguardian/compare/mcp-server/v1.3.3...mcp-server/v1.3.4) (2026-03-08)
+
+
+### Bug Fixes
+
+* **mcp-server,llm-bridge,frontend:** fix LLM/MCP integration data pipeline ([#684](https://github.com/kguardian-dev/kguardian/issues/684)) ([66b78c6](https://github.com/kguardian-dev/kguardian/commit/66b78c6c6f181ab3c3b99a797154bfc50b260604))
+
 ## [1.3.3](https://github.com/kguardian-dev/kguardian/compare/mcp-server/v1.3.2...mcp-server/v1.3.3) (2026-03-01)
 
 
