@@ -637,7 +637,7 @@ mcpServer:
     # -- MCP Server image pull policy
     pullPolicy: IfNotPresent
     # -- MCP Server version tag (auto-updated by release-please)
-    tag: "1.3.3"
+    tag: "1.3.4"
     # -- Overrides the image tag using SHA digest
     sha: ""
 
