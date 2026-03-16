@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.3.5](https://github.com/kguardian-dev/kguardian/compare/mcp-server/v1.3.4...mcp-server/v1.3.5) (2026-03-16)
+
+
+### Bug Fixes
+
+* **deps:** update module github.com/modelcontextprotocol/go-sdk to v1.4.1 ([#766](https://github.com/kguardian-dev/kguardian/issues/766)) ([95680f1](https://github.com/kguardian-dev/kguardian/commit/95680f1808c60e644f0eebf157e5351f5b2df4a4))
+
 ## [1.3.4](https://github.com/kguardian-dev/kguardian/compare/mcp-server/v1.3.3...mcp-server/v1.3.4) (2026-03-08)
 
 
