@@ -1,9 +1,33 @@
 import axios from 'axios';
-import type { AxiosInstance } from 'axios';
+import type { AxiosInstance, AxiosError, InternalAxiosRequestConfig } from 'axios';
 import type { PodInfo, NetworkTraffic, SyscallInfo, ServiceInfo } from '../types';
+
+interface RetryConfig extends InternalAxiosRequestConfig {
+  _retryCount?: number;
+}
+
+const MAX_RETRIES = 3;
+const RETRY_BASE_DELAY_MS = 1000;
+
+function isRetryable(error: AxiosError): boolean {
+  // Retry on network errors (ECONNREFUSED, ECONNRESET, etc.)
+  if (!error.response) return true;
+  // Retry on 502, 503, 504 (broker temporarily unavailable)
+  const status = error.response.status;
+  return status === 502 || status === 503 || status === 504;
+}
+
+function retryDelay(retryCount: number): number {
+  // Exponential backoff: 1s, 2s, 4s + jitter
+  const delay = RETRY_BASE_DELAY_MS * Math.pow(2, retryCount);
+  const jitter = delay * 0.2 * Math.random();
+  return delay + jitter;
+}
 
 class BrokerAPIClient {
   private client: AxiosInstance;
+  private _connected = false;
+  private _onConnectionChange?: (connected: boolean) => void;
 
   constructor(baseURL?: string) {
     // Use provided baseURL or default to relative /api path
@@ -17,6 +41,47 @@ class BrokerAPIClient {
         'Content-Type': 'application/json',
       },
     });
+
+    // Retry interceptor for transient failures
+    this.client.interceptors.response.use(
+      (response) => {
+        this.setConnected(true);
+        return response;
+      },
+      async (error: AxiosError) => {
+        const config = error.config as RetryConfig | undefined;
+        if (!config || !isRetryable(error)) {
+          this.setConnected(false);
+          return Promise.reject(error);
+        }
+
+        const retryCount = config._retryCount ?? 0;
+        if (retryCount >= MAX_RETRIES) {
+          this.setConnected(false);
+          return Promise.reject(error);
+        }
+
+        config._retryCount = retryCount + 1;
+        const delay = retryDelay(retryCount);
+        await new Promise((resolve) => setTimeout(resolve, delay));
+        return this.client(config);
+      },
+    );
+  }
+
+  private setConnected(connected: boolean) {
+    if (this._connected !== connected) {
+      this._connected = connected;
+      this._onConnectionChange?.(connected);
+    }
+  }
+
+  get connected(): boolean {
+    return this._connected;
+  }
+
+  onConnectionChange(callback: (connected: boolean) => void) {
+    this._onConnectionChange = callback;
   }
 
   /**
