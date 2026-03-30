@@ -1,6 +1,8 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import type { PodInfo, PodNodeData, ServiceInfo } from '../types';
 import { apiClient } from '../services/api';
+
+const POLL_INTERVAL_MS = 30_000;
 
 async function withConcurrencyLimit<T>(tasks: (() => Promise<T>)[], limit: number): Promise<T[]> {
   const results: T[] = new Array(tasks.length);
@@ -24,6 +26,7 @@ export const usePodData = (namespace: string) => {
   const [services, setServices] = useState<ServiceInfo[]>([]);
   const [loading, setLoading] = useState<boolean>(true);
   const [error, setError] = useState<string | null>(null);
+  const timerRef = useRef<ReturnType<typeof setTimeout>>(undefined);
 
   const fetchPodData = useCallback(async () => {
     setLoading(true);
@@ -100,7 +103,21 @@ export const usePodData = (namespace: string) => {
   }, [namespace]);
 
   useEffect(() => {
-    fetchPodData();
+    let cancelled = false;
+
+    const poll = async () => {
+      if (cancelled) return;
+      await fetchPodData();
+      if (cancelled) return;
+      timerRef.current = setTimeout(poll, POLL_INTERVAL_MS);
+    };
+
+    poll();
+
+    return () => {
+      cancelled = true;
+      clearTimeout(timerRef.current);
+    };
   }, [fetchPodData]);
 
   const togglePodExpansion = useCallback((podId: string) => {
@@ -112,6 +129,7 @@ export const usePodData = (namespace: string) => {
   }, []);
 
   const refreshData = useCallback(() => {
+    clearTimeout(timerRef.current);
     fetchPodData();
   }, [fetchPodData]);
 
