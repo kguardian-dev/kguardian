@@ -1,6 +1,7 @@
 package k8s
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -30,7 +31,10 @@ type ProfileOptions struct {
 	Architectures []string
 }
 
-func GenerateSeccompProfile(options GenerateOptions, config *Config) {
+// GenerateSeccompProfile generates seccomp profiles for pods selected by options.
+// The context is used to detect cancellation (e.g. from a port-forwarding failure)
+// so the function exits early instead of continuing through remaining pods.
+func GenerateSeccompProfile(ctx context.Context, options GenerateOptions, config *Config) {
 
 	var Architectures = map[string][]string{
 		"x86_64": {"SCMP_ARCH_X86_64"},
@@ -53,6 +57,14 @@ func GenerateSeccompProfile(options GenerateOptions, config *Config) {
 
 	// Generate seccompprofile for each pod in pods
 	for _, pod := range pods {
+		// Honour context cancellation between pods.
+		select {
+		case <-ctx.Done():
+			log.Debug().Err(ctx.Err()).Msg("GenerateSeccompProfile: context cancelled, stopping early")
+			return
+		default:
+		}
+
 		podSysCalls, err := api.GetPodSysCall(pod.Name)
 		if err != nil {
 			log.Debug().Err(err).Msgf("Error retrieving %s pod syscall", pod.Name)

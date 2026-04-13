@@ -72,7 +72,7 @@ jobs:
 
           cd controller
 
-          cargo install cross --git https://github.com/cross-rs/cross
+          cargo install cross --git https://github.com/cross-rs/cross --tag v0.2.5
 
           cross build --target ${{ steps.args.outputs.BUILD }} --release
 

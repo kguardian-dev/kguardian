@@ -19,7 +19,7 @@ use kguardian::{
 
 #[tokio::main]
 async fn main() -> Result<(), Error> {
-    
+
     rustls::crypto::ring::default_provider()
         .install_default()
         .expect("Failed to install rustls crypto provider");
@@ -43,9 +43,14 @@ async fn main() -> Result<(), Error> {
         .parse::<bool>()
         .unwrap_or(true);
 
-    let (tx, rx) = mpsc::channel(1000); // Use tokio's mpsc channel
+    let channel_size: usize = env::var("CHANNEL_BUFFER_SIZE")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(1000);
 
-    let (sender_ip, recv_ip) = mpsc::channel(1000); // Use tokio's mpsc channel
+    let (tx, rx) = mpsc::channel(channel_size); // Use tokio's mpsc channel
+
+    let (sender_ip, recv_ip) = mpsc::channel(channel_size); // Use tokio's mpsc channel
 
     // Use DashMap for lock-free concurrent access (much faster than Mutex<BTreeMap>)
     let container_map: Arc<DashMap<u64, PodInspect>> = Arc::new(DashMap::new());
@@ -68,9 +73,9 @@ async fn main() -> Result<(), Error> {
     // Start pod reconciliation task
     let pod_reconciler = reconcile_pods_task(node_name, broker_url);
 
-    let (network_event_sender, network_event_receiver) = mpsc::channel::<NetworkEventData>(1000);
-    let (syscall_event_sender, syscall_event_receiver) = mpsc::channel::<SyscallEventData>(1000);
-    let (netpolicy_drop_sender, netpolicy_drop_receiver) = mpsc::channel::<PolicyDropEvent>(1000);
+    let (network_event_sender, network_event_receiver) = mpsc::channel::<NetworkEventData>(channel_size);
+    let (syscall_event_sender, syscall_event_receiver) = mpsc::channel::<SyscallEventData>(channel_size);
+    let (netpolicy_drop_sender, netpolicy_drop_receiver) = mpsc::channel::<PolicyDropEvent>(channel_size);
 
     let network_event_handler = handle_network_events(network_event_receiver, network_map);
     let netpolicy_drop_handler =

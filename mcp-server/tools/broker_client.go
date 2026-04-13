@@ -27,7 +27,12 @@ func NewBrokerClient(baseURL string) *BrokerClient {
 	return &BrokerClient{
 		baseURL: baseURL,
 		httpClient: &http.Client{
-			Timeout: 90 * time.Second, // Allow enough time for cluster-wide queries
+			Transport: &http.Transport{
+				MaxIdleConns:        50,
+				MaxIdleConnsPerHost: 50,
+				IdleConnTimeout:     90 * time.Second,
+			},
+			Timeout: 30 * time.Second,
 		},
 	}
 }

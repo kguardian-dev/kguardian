@@ -43,6 +43,14 @@ func (h PodDetailsHandler) Call(
 		}, PodDetailsOutput{}, nil
 	}
 
+	if err := ValidateIP(input.IP); err != nil {
+		logger.Log.WithField("ip", input.IP).Error("Invalid IP address parameter")
+		return &mcp.CallToolResult{
+			Content: []mcp.Content{&mcp.TextContent{Text: fmt.Sprintf("invalid ip: %v", err)}},
+			IsError: true,
+		}, PodDetailsOutput{}, nil
+	}
+
 	data, err := h.client.GetPodByIP(ctx, input.IP)
 	if err != nil {
 		logger.Log.WithFields(logrus.Fields{

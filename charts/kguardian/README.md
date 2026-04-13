@@ -85,12 +85,13 @@ The following table lists the configurable parameters of the kguardian chart and
 | broker.image.sha | string | `""` | Overrides the image tag using SHA digest |
 | broker.image.tag | string | `"1.7.1"` | Broker version tag (auto-updated by release-please) |
 | broker.imagePullSecrets | list | `[]` | List of image pull secrets for private registries |
-| broker.initContainer.image.pullPolicy | string | `"Always"` | Broker init container image pull policy |
+| broker.initContainer.image.pullPolicy | string | `"IfNotPresent"` | Broker init container image pull policy |
 | broker.initContainer.image.repository | string | `"busybox"` | Broker init container image repository |
 | broker.initContainer.image.sha | string | `""` | Overrides the init container image tag using SHA digest |
-| broker.initContainer.image.tag | string | `"latest"` | Broker init container image tag |
+| broker.initContainer.image.tag | string | `"1.37.0"` | Broker init container image tag |
 | broker.initContainer.securityContext | object | `{"allowPrivilegeEscalation":false,"capabilities":{"drop":["ALL"]},"readOnlyRootFilesystem":true,"runAsNonRoot":true,"runAsUser":65534}` | Broker init container security context |
 | broker.nameOverride | string | `""` | Override the name of the broker resources |
+| broker.networkPolicy | object | `{"enabled":false}` | NetworkPolicy configuration for broker (requires a CNI that supports NetworkPolicy) |
 | broker.nodeSelector | object | `{"kubernetes.io/os":"linux"}` | Node labels for the kguardian broker pod assignment |
 | broker.podAnnotations | object | `{}` | Annotations to add to broker pods |
 | broker.podSecurityContext | object | `{"fsGroup":1000,"fsGroupChangePolicy":"OnRootMismatch","runAsGroup":1000,"runAsUser":1000,"seccompProfile":{"type":"RuntimeDefault"},"supplementalGroups":[1000]}` | Broker pod security context. Runs as non-root user 1000 |
@@ -115,15 +116,16 @@ The following table lists the configurable parameters of the kguardian chart and
 | controller.containerdSockPath | string | `"/run/containerd/containerd.sock"` | Path to the containerd socket on the host node. For k3s clusters, set to: /run/k3s/containerd/containerd.sock |
 | controller.excludedNamespaces | list | `["kguardian","kube-system"]` | Namespaces to be excluded from monitoring (comma-separated list) |
 | controller.fullnameOverride | string | `""` | Override the full name of the controller resources |
+| controller.healthProbe | object | `{"enabled":true,"livenessProbe":{"httpGet":{"path":"/healthz","port":8081},"initialDelaySeconds":30,"periodSeconds":10},"port":8081,"readinessProbe":{"httpGet":{"path":"/readyz","port":8081},"initialDelaySeconds":10,"periodSeconds":5}}` | Health probe configuration for the controller |
 | controller.ignoreDaemonSet | bool | `true` | Ignore traffic from daemonset pods to reduce noise |
 | controller.image.pullPolicy | string | `"IfNotPresent"` | Controller image pull policy |
 | controller.image.repository | string | `"ghcr.io/kguardian-dev/kguardian/controller"` | Controller container image repository |
 | controller.image.sha | string | `""` | Overrides the image tag using SHA digest |
 | controller.image.tag | string | `"1.8.1"` | Controller version tag (auto-updated by release-please) |
 | controller.imagePullSecrets | list | `[]` | List of image pull secrets for private registries |
-| controller.initContainer.image.pullPolicy | string | `"Always"` | Init container image pull policy |
+| controller.initContainer.image.pullPolicy | string | `"IfNotPresent"` | Init container image pull policy |
 | controller.initContainer.image.repository | string | `"busybox"` | Init container image repository |
-| controller.initContainer.image.tag | string | `"latest"` | Init container image tag |
+| controller.initContainer.image.tag | string | `"1.37.0"` | Init container image tag |
 | controller.initContainer.securityContext | object | `{"allowPrivilegeEscalation":false,"capabilities":{"drop":["ALL"]},"readOnlyRootFilesystem":true,"runAsNonRoot":true,"runAsUser":65534}` | Init container security context |
 | controller.nameOverride | string | `""` | Override the name of the controller resources |
 | controller.nodeSelector | object | `{"kubernetes.io/os":"linux"}` | Node labels for the kguardian controller pod assignment |
@@ -145,17 +147,20 @@ The following table lists the configurable parameters of the kguardian chart and
 | database.autoscaling.minReplicas | int | `1` | Minimum number of database replicas |
 | database.autoscaling.targetCPUUtilizationPercentage | int | `80` | Target CPU utilization percentage for autoscaling |
 | database.container.port | int | `5432` | PostgreSQL container port |
+| database.existingSecret | string | `""` |  |
 | database.fullnameOverride | string | `""` | Override the full name of the database resources |
-| database.image.pullPolicy | string | `"Always"` | PostgreSQL image pull policy |
+| database.image.pullPolicy | string | `"IfNotPresent"` | PostgreSQL image pull policy |
 | database.image.repository | string | `"postgres"` | PostgreSQL container image repository |
 | database.image.sha | string | `""` | Overrides the image tag using SHA digest |
-| database.image.tag | string | `"latest"` | PostgreSQL image tag |
+| database.image.tag | string | `"17.2"` | PostgreSQL image tag |
 | database.imagePullSecrets | list | `[]` | List of image pull secrets for private registries |
 | database.name | string | `"kguardian-db"` | Database name for PostgreSQL |
 | database.nameOverride | string | `""` | Override the name of the database resources |
 | database.nodeSelector | object | `{"kubernetes.io/os":"linux"}` | Node labels for the kguardian database pod assignment |
 | database.persistence.enabled | bool | `false` | Enable persistent storage for database |
 | database.persistence.existingClaim | string | `""` | Use an existing PersistentVolumeClaim instead of creating a new one |
+| database.persistence.size | string | `"10Gi"` |  |
+| database.persistence.storageClass | string | `""` |  |
 | database.podAnnotations | object | `{}` | Annotations to add to database pods |
 | database.podSecurityContext | object | `{"fsGroup":999,"fsGroupChangePolicy":"OnRootMismatch","runAsGroup":999,"runAsUser":999,"seccompProfile":{"type":"RuntimeDefault"},"supplementalGroups":[999]}` | Database pod security context. Runs as postgres user (999) |
 | database.priorityClassName | string | `""` | Priority class to be used for the kguardian database pods |
@@ -193,7 +198,7 @@ The following table lists the configurable parameters of the kguardian chart and
 | frontend.priorityClassName | string | `""` | Priority class to be used for the kguardian frontend pods |
 | frontend.replicaCount | int | `1` | Number of frontend replicas to deploy |
 | frontend.resources | object | `{"limits":{"memory":"256Mi"},"requests":{"cpu":"50m","memory":"128Mi"}}` | Frontend pod resource requests and limits |
-| frontend.securityContext | object | `{"allowPrivilegeEscalation":false,"capabilities":{"drop":["ALL"]},"privileged":false,"readOnlyRootFilesystem":false,"runAsNonRoot":true,"runAsUser":1337}` | Frontend container security context. Hardened with read-only root filesystem |
+| frontend.securityContext | object | `{"allowPrivilegeEscalation":false,"capabilities":{"drop":["ALL"]},"privileged":false,"readOnlyRootFilesystem":true,"runAsNonRoot":true,"runAsUser":1337}` | Frontend container security context. Hardened with read-only root filesystem |
 | frontend.service.name | string | `"kguardian-frontend"` | Frontend service name |
 | frontend.service.port | int | `5173` | Frontend service port |
 | frontend.service.type | string | `"ClusterIP"` | Frontend service type |

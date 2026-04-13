@@ -1,5 +1,6 @@
 import React, { useCallback, useMemo, useEffect, useState } from 'react';
-import ReactFlow, {
+import {
+  ReactFlow,
   Controls,
   Background,
   BackgroundVariant,
@@ -9,9 +10,9 @@ import ReactFlow, {
   useReactFlow,
   ReactFlowProvider,
   Panel,
-} from 'reactflow';
-import type { Node, Edge } from 'reactflow';
-import 'reactflow/dist/style.css';
+} from '@xyflow/react';
+import type { Node, Edge } from '@xyflow/react';
+import '@xyflow/react/dist/style.css';
 import ELK from 'elkjs/lib/elk.bundled.js';
 import { Eye, EyeOff, Activity, ShieldAlert, Server } from 'lucide-react';
 import PodNode from './PodNode';
@@ -408,6 +409,9 @@ const NetworkGraphInner: React.FC<NetworkGraphProps> = ({
   // Track ELK-computed node positions
   const [elkPositions, setElkPositions] = useState<Map<string, { x: number; y: number }>>(new Map());
 
+  // Track whether ELK layout is being computed
+  const [isLayoutLoading, setIsLayoutLoading] = useState(false);
+
   // Well-known port to service name mapping
   const wellKnownPorts: Record<string, string> = useMemo(() => ({
     '53': 'DNS',
@@ -593,6 +597,8 @@ const NetworkGraphInner: React.FC<NetworkGraphProps> = ({
       return;
     }
 
+    setIsLayoutLoading(true);
+
     // Only include edges whose source and target exist in the current node set
     const nodeIds = new Set(baseNodes.map((n) => n.id));
     const validEdges = initialEdges.filter(
@@ -669,6 +675,7 @@ const NetworkGraphInner: React.FC<NetworkGraphProps> = ({
       }
 
       setElkPositions(positions);
+      setIsLayoutLoading(false);
     }).catch((err) => {
       // Fallback: simple grid layout if ELK fails
       console.error('ELK layout error, using fallback grid:', err);
@@ -683,6 +690,7 @@ const NetworkGraphInner: React.FC<NetworkGraphProps> = ({
         });
       });
       setElkPositions(positions);
+      setIsLayoutLoading(false);
     });
   }, [baseNodes, initialEdges, layoutDirection]);
 
@@ -751,7 +759,18 @@ const NetworkGraphInner: React.FC<NetworkGraphProps> = ({
   }, [pods]);
 
   return (
-    <div className="w-full h-full">
+    <div className="w-full h-full relative">
+      {isLayoutLoading && (
+        <div className="absolute inset-0 z-10 flex items-center justify-center pointer-events-none">
+          <div className="flex items-center gap-2 px-4 py-2 rounded-lg bg-hubble-card/90 border border-hubble-border backdrop-blur-sm text-xs text-secondary">
+            <span
+              className="inline-block w-3 h-3 rounded-full border-2 border-hubble-accent border-t-transparent animate-spin"
+              aria-hidden="true"
+            />
+            Computing layout...
+          </div>
+        </div>
+      )}
       <ReactFlow
         nodes={nodes}
         edges={edges}

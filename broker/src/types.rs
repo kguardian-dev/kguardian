@@ -17,6 +17,7 @@ use serde::{Deserialize, Serialize};
 )]
 #[diesel(table_name = pod_traffic)]
 #[diesel(primary_key(uuid))]
+#[serde(deny_unknown_fields)]
 pub struct PodTraffic {
     pub uuid: String,
     pub pod_name: Option<String>,
@@ -29,6 +30,22 @@ pub struct PodTraffic {
     pub traffic_in_out_port: Option<String>,
     pub decision: Option<String>,
     pub time_stamp: NaiveDateTime,
+}
+
+impl PodTraffic {
+    /// Returns an error string if the required fields (pod_name, pod_ip, traffic_type) are absent.
+    pub fn validate_required_fields(&self) -> Result<(), String> {
+        if self.pod_name.is_none() {
+            return Err("pod_name is required".to_string());
+        }
+        if self.pod_ip.is_none() {
+            return Err("pod_ip is required".to_string());
+        }
+        if self.traffic_type.is_none() {
+            return Err("traffic_type is required".to_string());
+        }
+        Ok(())
+    }
 }
 
 #[derive(

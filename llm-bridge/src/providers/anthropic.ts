@@ -7,8 +7,40 @@ import { serializeToolResult } from "./truncate.js";
 interface AnthropicTool {
   name: string;
   description: string;
-  input_schema: any;
+  input_schema: object;
 }
+
+interface AnthropicTextBlock {
+  type: "text";
+  text: string;
+}
+
+interface AnthropicToolUseBlock {
+  type: "tool_use";
+  id: string;
+  name: string;
+  input: Record<string, unknown>;
+}
+
+type AnthropicContentBlock = AnthropicTextBlock | AnthropicToolUseBlock;
+
+interface AnthropicUserMessage {
+  role: "user";
+  content: string | AnthropicToolResultBlock[];
+}
+
+interface AnthropicAssistantMessage {
+  role: "assistant";
+  content: AnthropicContentBlock[];
+}
+
+interface AnthropicToolResultBlock {
+  type: "tool_result";
+  tool_use_id: string;
+  content: string;
+}
+
+type AnthropicMessage = AnthropicUserMessage | AnthropicAssistantMessage;
 
 const MAX_TOOL_ROUNDS = 10;
 
@@ -34,14 +66,24 @@ export async function callAnthropic(
   }));
 
   // Build messages with history
-  const messages: any[] = [];
+  const messages: AnthropicMessage[] = [];
 
   // Add conversation history if provided
   if (request.history && request.history.length > 0) {
-    messages.push(...request.history.filter(msg => msg.role !== 'system').map(msg => ({
-      role: msg.role,
-      content: msg.content,
-    })));
+    for (const msg of request.history) {
+      if (msg.role === 'system') continue;
+      if (msg.role === 'assistant') {
+        messages.push({
+          role: 'assistant',
+          content: [{ type: 'text', text: msg.content }],
+        });
+      } else {
+        messages.push({
+          role: 'user',
+          content: msg.content,
+        });
+      }
+    }
   }
 
   // Add current user message
@@ -65,19 +107,24 @@ export async function callAnthropic(
         { model, max_tokens: 4096, system: systemPrompt, messages, tools },
         { headers, timeout: 120000 }
       );
-    } catch (error: any) {
-      console.error("Anthropic API Error:", error.response?.data?.error?.message || error.message);
-      throw new Error(`Anthropic API error: ${error.response?.data?.error?.message || error.message}`);
+    } catch (error: unknown) {
+      const axiosErr = error as { response?: { data?: { error?: { message?: string } } }; message?: string };
+      console.error("Anthropic API Error:", axiosErr.response?.data?.error?.message || axiosErr.message);
+      throw new Error(`Anthropic API error: ${axiosErr.response?.data?.error?.message || axiosErr.message}`);
     }
 
-    const content = response.data.content;
+    const content = response.data.content as AnthropicContentBlock[];
 
     // Check if there are tool uses
-    const toolUses = content.filter((block: any) => block.type === "tool_use");
+    const toolUses = content.filter(
+      (block): block is AnthropicToolUseBlock => block.type === "tool_use"
+    );
 
     if (toolUses.length === 0) {
       // No tool calls — return text response
-      const textContent = content.find((block: any) => block.type === "text");
+      const textContent = content.find(
+        (block): block is AnthropicTextBlock => block.type === "text"
+      );
       return {
         message: textContent?.text || "No response from Claude",
         provider: LLMProvider.ANTHROPIC,
@@ -93,14 +140,14 @@ export async function callAnthropic(
     });
 
     // Execute tool calls and build tool results
-    const toolResults = await Promise.all(
-      toolUses.map(async (toolUse: any) => {
+    const toolResults: AnthropicToolResultBlock[] = await Promise.all(
+      toolUses.map(async (toolUse: AnthropicToolUseBlock) => {
         const result = await brokerClient.executeTool({
           name: toolUse.name,
-          arguments: toolUse.input,
+          arguments: toolUse.input as Record<string, import("../types/index.js").JsonValue>,
         });
         return {
-          type: "tool_result",
+          type: "tool_result" as const,
           tool_use_id: toolUse.id,
           content: serializeToolResult(result),
         };
@@ -121,8 +168,8 @@ export async function callAnthropic(
     { headers, timeout: 120000 }
   );
 
-  const finalContent = finalResponse.data.content.find(
-    (block: any) => block.type === "text"
+  const finalContent = (finalResponse.data.content as AnthropicContentBlock[]).find(
+    (block): block is AnthropicTextBlock => block.type === "text"
   );
 
   return {

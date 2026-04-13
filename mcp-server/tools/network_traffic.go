@@ -13,7 +13,8 @@ import (
 
 // NetworkTrafficInput defines the input parameters for the network traffic tool
 type NetworkTrafficInput struct {
-	PodName string `json:"pod_name" jsonschema:"The name of the pod to query traffic for"`
+	PodName   string `json:"pod_name" jsonschema:"The name of the pod to query traffic for"`
+	Namespace string `json:"namespace,omitempty" jsonschema:"Optional Kubernetes namespace the pod belongs to"`
 }
 
 // NetworkTrafficOutput defines the output for the network traffic tool
@@ -41,6 +42,24 @@ func (h NetworkTrafficHandler) Call(
 			Content: []mcp.Content{&mcp.TextContent{Text: "pod_name is required"}},
 			IsError: true,
 		}, NetworkTrafficOutput{}, nil
+	}
+
+	if err := ValidatePodName(input.PodName); err != nil {
+		logger.Log.WithField("pod_name", input.PodName).Error("Invalid pod_name parameter")
+		return &mcp.CallToolResult{
+			Content: []mcp.Content{&mcp.TextContent{Text: fmt.Sprintf("invalid pod_name: %v", err)}},
+			IsError: true,
+		}, NetworkTrafficOutput{}, nil
+	}
+
+	if input.Namespace != "" {
+		if err := ValidateNamespace(input.Namespace); err != nil {
+			logger.Log.WithField("namespace", input.Namespace).Error("Invalid namespace parameter")
+			return &mcp.CallToolResult{
+				Content: []mcp.Content{&mcp.TextContent{Text: fmt.Sprintf("invalid namespace: %v", err)}},
+				IsError: true,
+			}, NetworkTrafficOutput{}, nil
+		}
 	}
 
 	// Fetch data from broker

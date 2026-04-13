@@ -33,6 +33,11 @@ spec:
             - containerPort: 5432
           securityContext:
             {{- toYaml .Values.database.securityContext | nindent 12 }}
+          {{- if .Values.database.existingSecret }}
+          envFrom:
+            - secretRef:
+                name: {{ .Values.database.existingSecret }}
+          {{- else }}
           env:
             - name: POSTGRES_USER
               value: rust
@@ -43,6 +48,7 @@ spec:
                   key: password
             - name: POSTGRES_DB
               value: kube
+          {{- end }}
           livenessProbe:
             exec:
               command:

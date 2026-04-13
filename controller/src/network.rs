@@ -3,8 +3,10 @@ use chrono::Utc;
 use dashmap::DashMap;
 use moka::future::Cache;
 use serde_json::json;
+use std::env;
 use std::net::{IpAddr, Ipv4Addr};
 use std::sync::Arc;
+use std::time::Duration;
 use tracing::{debug, error};
 use uuid::Uuid;
 
@@ -14,7 +16,17 @@ const KIND_INGRESS_TCP: u16 = 2;
 const KIND_EGRESS_UDP: u16 = 3;
 
 lazy_static::lazy_static! {
-    static ref TRAFFIC_CACHE: Arc<Cache<TrafficKey, ()>> = Arc::new(Cache::new(10000));
+    static ref TRAFFIC_CACHE: Arc<Cache<TrafficKey, ()>> = Arc::new(
+        Cache::builder()
+            .max_capacity(
+                env::var("TRAFFIC_CACHE_SIZE")
+                    .ok()
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(10_000),
+            )
+            .time_to_live(Duration::from_secs(300))
+            .build(),
+    );
 }
 
 pub mod network_probe {

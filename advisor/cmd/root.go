@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"time"
 
@@ -35,7 +36,7 @@ func init() {
 	kubeConfigFlags.AddFlags(rootCmd.PersistentFlags())
 
 	// Add debug flag to rootCmd so it's available for all sub-commands
-	rootCmd.PersistentFlags().BoolVar(&debug, "debug", false, "sets log level to debug")
+	rootCmd.PersistentFlags().BoolVar(&debug, "debug", false, "Enable debug-level logging (default: false)")
 
 	// Add broker override flags
 	rootCmd.PersistentFlags().StringVar(&brokerNamespace, "broker-namespace", "", "Namespace where the kguardian broker is installed (default \"kguardian\")")
@@ -59,16 +60,36 @@ func init() {
 		// Initialize Kubernetes config and logging
 		config, err := k8s.NewConfig(kubeConfigFlags)
 		if err != nil {
+			fmt.Fprintf(os.Stderr, "Failed to initialize Kubernetes client: %v\n\n", err)
+			fmt.Fprintf(os.Stderr, "Diagnosis:\n")
+			fmt.Fprintf(os.Stderr, "  Verify your kubeconfig is valid:\n")
+			fmt.Fprintf(os.Stderr, "    kubectl cluster-info\n")
+			fmt.Fprintf(os.Stderr, "  Check your current context:\n")
+			fmt.Fprintf(os.Stderr, "    kubectl config current-context\n")
+			fmt.Fprintf(os.Stderr, "  Ensure KUBECONFIG or ~/.kube/config is set correctly.\n")
 			log.Fatal().Err(err).Msg("Error initializing Kubernetes client")
 		}
 
 		kubeconfigPath := kubeConfigFlags.ToRawKubeConfigLoader().ConfigAccess().GetDefaultFilename()
 		if err != nil {
+			fmt.Fprintf(os.Stderr, "Failed to initialize Kubernetes client: %v\n\n", err)
+			fmt.Fprintf(os.Stderr, "Diagnosis:\n")
+			fmt.Fprintf(os.Stderr, "  Verify your kubeconfig is valid:\n")
+			fmt.Fprintf(os.Stderr, "    kubectl cluster-info\n")
+			fmt.Fprintf(os.Stderr, "  Check your current context:\n")
+			fmt.Fprintf(os.Stderr, "    kubectl config current-context\n")
+			fmt.Fprintf(os.Stderr, "  Ensure KUBECONFIG or ~/.kube/config is set correctly.\n")
 			log.Fatal().Err(err).Msg("Error initializing Kubernetes client")
 		}
 
 		namespace, _, err := kubeConfigFlags.ToRawKubeConfigLoader().Namespace()
 		if err != nil {
+			fmt.Fprintf(os.Stderr, "Failed to get namespace from kubeconfig: %v\n\n", err)
+			fmt.Fprintf(os.Stderr, "Diagnosis:\n")
+			fmt.Fprintf(os.Stderr, "  Check your kubeconfig context has a namespace set:\n")
+			fmt.Fprintf(os.Stderr, "    kubectl config view --minify\n")
+			fmt.Fprintf(os.Stderr, "  Or pass --namespace explicitly:\n")
+			fmt.Fprintf(os.Stderr, "    kubectl guardian gen networkpolicy --namespace <namespace> <pod-name>\n")
 			log.Fatal().Err(err).Msg("Failed to get namespace")
 		}
 

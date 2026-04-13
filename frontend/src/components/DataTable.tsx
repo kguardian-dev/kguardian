@@ -281,7 +281,7 @@ const DataTable: React.FC<DataTableProps> = ({ selectedPod, allPodsLookup, servi
   if (!selectedPod) {
     return (
       <div className="h-full flex items-center justify-center text-tertiary">
-        <p>Select a pod to view details</p>
+        <p>Click a pod in the network graph above to view its traffic and syscall details.</p>
       </div>
     );
   }
@@ -366,7 +366,7 @@ const DataTable: React.FC<DataTableProps> = ({ selectedPod, allPodsLookup, servi
         {isTrafficExpanded && hasTraffic && (
           <>
             {/* Filter Controls */}
-            <div className="mb-3 flex items-center gap-4 flex-wrap">
+            <div id="traffic-filters" className="mb-3 flex items-center gap-4 flex-wrap">
               <div className="flex items-center gap-2">
                 <Filter className="w-4 h-4 text-secondary" />
                 <span className="text-sm text-secondary">Filters:</span>
@@ -376,6 +376,7 @@ const DataTable: React.FC<DataTableProps> = ({ selectedPod, allPodsLookup, servi
               <div className="flex items-center gap-2">
                 <span className="text-xs text-tertiary">Decision:</span>
                 <select
+                  aria-label="Filter by decision"
                   value={decisionFilter}
                   onChange={(e) => {
                     setDecisionFilter(e.target.value as 'all' | 'ALLOW' | 'DROP');
@@ -393,6 +394,7 @@ const DataTable: React.FC<DataTableProps> = ({ selectedPod, allPodsLookup, servi
               <div className="flex items-center gap-2">
                 <span className="text-xs text-tertiary">Type:</span>
                 <select
+                  aria-label="Filter by traffic type"
                   value={trafficTypeFilter}
                   onChange={(e) => {
                     setTrafficTypeFilter(e.target.value as 'all' | 'ingress' | 'egress');
@@ -410,6 +412,7 @@ const DataTable: React.FC<DataTableProps> = ({ selectedPod, allPodsLookup, servi
               <div className="flex items-center gap-2">
                 <span className="text-xs text-tertiary">Protocol:</span>
                 <select
+                  aria-label="Filter by protocol"
                   value={protocolFilter}
                   onChange={(e) => {
                     setProtocolFilter(e.target.value);
@@ -429,6 +432,7 @@ const DataTable: React.FC<DataTableProps> = ({ selectedPod, allPodsLookup, servi
                 <div className="flex items-center gap-2">
                   <span className="text-xs text-tertiary">Port:</span>
                   <select
+                    aria-label="Filter by port"
                     value={portFilter}
                     onChange={(e) => {
                       setPortFilter(e.target.value);
@@ -461,17 +465,17 @@ const DataTable: React.FC<DataTableProps> = ({ selectedPod, allPodsLookup, servi
               )}
             </div>
 
-            <div className="bg-hubble-card rounded-lg border border-hubble-border overflow-hidden">
+            <div role="region" aria-label="Network traffic data" className="bg-hubble-card rounded-lg border border-hubble-border overflow-hidden">
             <div className="overflow-x-auto">
-              <table className="w-full text-sm">
+              <table className="w-full text-sm" aria-label="Pod traffic and syscall data" aria-describedby="traffic-filters">
                 <thead className="bg-hubble-dark border-b border-hubble-border">
                   <tr>
-                    <th className="px-4 py-2 text-left text-secondary font-medium">Direction</th>
-                    <th className="px-4 py-2 text-left text-secondary font-medium">Source</th>
-                    <th className="px-4 py-2 text-left text-secondary font-medium">Destination</th>
-                    <th className="px-4 py-2 text-left text-secondary font-medium">Protocol</th>
-                    <th className="px-4 py-2 text-left text-secondary font-medium">Decision</th>
-                    <th className="px-4 py-2 text-left text-secondary font-medium">Timestamp</th>
+                    <th scope="col" className="px-4 py-2 text-left text-secondary font-medium">Direction</th>
+                    <th scope="col" className="px-4 py-2 text-left text-secondary font-medium">Source</th>
+                    <th scope="col" className="px-4 py-2 text-left text-secondary font-medium">Destination</th>
+                    <th scope="col" className="px-4 py-2 text-left text-secondary font-medium">Protocol</th>
+                    <th scope="col" className="px-4 py-2 text-left text-secondary font-medium">Decision</th>
+                    <th scope="col" className="px-4 py-2 text-left text-secondary font-medium">Timestamp</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -670,14 +674,14 @@ const DataTable: React.FC<DataTableProps> = ({ selectedPod, allPodsLookup, servi
           </button>
 
           {isSyscallsExpanded && (
-            <div className="bg-hubble-card rounded-lg border border-hubble-border overflow-hidden">
+            <div role="region" aria-label="System call data" className="bg-hubble-card rounded-lg border border-hubble-border overflow-hidden">
             <div className="overflow-x-auto">
-              <table className="w-full text-sm">
+              <table className="w-full text-sm" aria-label="System call data">
                 <thead className="bg-hubble-dark border-b border-hubble-border">
                   <tr>
-                    <th className="px-4 py-2 text-left text-secondary font-medium">Architecture</th>
-                    <th className="px-4 py-2 text-left text-secondary font-medium">Syscalls</th>
-                    <th className="px-4 py-2 text-left text-secondary font-medium">Timestamp</th>
+                    <th scope="col" className="px-4 py-2 text-left text-secondary font-medium">Architecture</th>
+                    <th scope="col" className="px-4 py-2 text-left text-secondary font-medium">System Calls</th>
+                    <th scope="col" className="px-4 py-2 text-left text-secondary font-medium">Timestamp</th>
                   </tr>
                 </thead>
                 <tbody>

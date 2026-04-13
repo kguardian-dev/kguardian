@@ -6,18 +6,30 @@ metadata:
     {{- include "kguardian.labels" . | nindent 4 }}
     {{- include "kguardian.annotations" . | nindent 2 }}
 rules:
+# Core API group resources watched by the controller
 - apiGroups: [""]
-  resources: ["namespaces", "pods", "services"]
+  resources:
+    # namespaces: read to filter pods by excluded namespace list (pod_watcher.rs)
+    - namespaces
+    # pods: watched cluster-wide to track container lifecycle and inode mappings (pod_watcher.rs, pod_reconciler.rs)
+    - pods
+    # services: watched cluster-wide to correlate service IPs with network traffic (service_watcher.rs)
+    - services
   verbs:
     - get
     - watch
     - list
+# apps/v1 workload resources fetched to resolve pod owner references and extract selector labels
 - apiGroups: ["apps"]
   resources:
-  - deployments
-  - replicasets
-  - statefulsets
-  - daemonsets
+    # deployments: fetched by name to read .spec.selector.matchLabels for pod identity resolution (pod_watcher.rs)
+    - deployments
+    # replicasets: fetched by name to trace back to the parent Deployment (pod_watcher.rs)
+    - replicasets
+    # statefulsets: fetched by name to read .spec.selector.matchLabels for pod identity resolution (pod_watcher.rs)
+    - statefulsets
+    # daemonsets: fetched by name to read .spec.selector.matchLabels for pod identity resolution (pod_watcher.rs)
+    - daemonsets
   verbs:
   - get
   - list

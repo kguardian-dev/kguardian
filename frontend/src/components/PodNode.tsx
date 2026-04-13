@@ -1,5 +1,5 @@
 import React from 'react';
-import { Handle, Position } from 'reactflow';
+import { Handle, Position } from '@xyflow/react';
 import { ChevronDown, ChevronRight, Network, Server, Globe, FileCode } from 'lucide-react';
 import type { PodNodeData } from '../types';
 

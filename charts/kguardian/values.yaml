@@ -33,9 +33,9 @@ controller:
       # -- Init container image repository
       repository: busybox
       # -- Init container image pull policy
-      pullPolicy: Always
+      pullPolicy: IfNotPresent
       # -- Init container image tag
-      tag: latest
+      tag: "1.37.0"
     # -- Init container security context
     securityContext:
       runAsNonRoot: true
@@ -78,6 +78,9 @@ controller:
 
   # -- Controller container security context. Requires privileged mode for eBPF
   securityContext:
+    # Required for eBPF: loading BPF programs and accessing kernel maps
+    # requires CAP_BPF + CAP_PERFMON at minimum, or privileged mode.
+    # See: https://docs.kernel.org/bpf/bpf_design_QA.html
     privileged: true
     readOnlyRootFilesystem: true
     capabilities:
@@ -143,6 +146,23 @@ controller:
   # -- Ignore traffic from daemonset pods to reduce noise
   ignoreDaemonSet: true
 
+  # -- Health probe configuration for the controller
+  healthProbe:
+    enabled: true
+    port: 8081
+    livenessProbe:
+      httpGet:
+        path: /healthz
+        port: 8081
+      initialDelaySeconds: 30
+      periodSeconds: 10
+    readinessProbe:
+      httpGet:
+        path: /readyz
+        port: 8081
+      initialDelaySeconds: 10
+      periodSeconds: 5
+
 broker:
   # -- Number of broker replicas to deploy
   replicaCount: 1
@@ -160,9 +180,9 @@ broker:
       # -- Broker init container image repository
       repository: busybox
       # -- Broker init container image pull policy
-      pullPolicy: Always
+      pullPolicy: IfNotPresent
       # -- Broker init container image tag
-      tag: latest
+      tag: "1.37.0"
       # -- Overrides the init container image tag using SHA digest
       sha: ""
     # -- Broker init container security context
@@ -261,24 +281,35 @@ broker:
   # -- Priority class to be used for the kguardian broker pods
   priorityClassName: ""
 
+  # -- NetworkPolicy configuration for broker (requires a CNI that supports NetworkPolicy)
+  networkPolicy:
+    enabled: false  # Enable on clusters with CNI NetworkPolicy support
+
 database:
   # -- Database name for PostgreSQL
   name: kguardian-db
+  # Use an existing Kubernetes Secret for database credentials instead of generating one.
+  # The secret must contain keys: POSTGRES_USER, POSTGRES_PASSWORD, POSTGRES_DB
+  existingSecret: ""
   image:
     # -- PostgreSQL container image repository
     repository: postgres
     # -- PostgreSQL image pull policy
-    pullPolicy: Always
+    pullPolicy: IfNotPresent
     # -- PostgreSQL image tag
-    tag: "latest"
+    tag: "17.2"
     # -- Overrides the image tag using SHA digest
     sha: ""
 
   persistence:
+    # WARNING: With persistence disabled, ALL telemetry data is lost on pod restart.
+    # For production deployments, set enabled: true and configure storageClass.
     # -- Enable persistent storage for database
     enabled: false
     # -- Use an existing PersistentVolumeClaim instead of creating a new one
     existingClaim: ""
+    storageClass: ""
+    size: 10Gi
 
   container:
     # -- PostgreSQL container port
@@ -419,7 +450,7 @@ frontend:
     capabilities:
       drop:
       - ALL
-    readOnlyRootFilesystem: false
+    readOnlyRootFilesystem: true
     runAsNonRoot: true
     runAsUser: 1337
     allowPrivilegeEscalation: false
