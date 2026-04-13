@@ -70,8 +70,12 @@ spec:
           volumeMounts:
             - name: tmp
               mountPath: /tmp
+            - name: vite-temp
+              mountPath: /app/node_modules/.vite-temp
       volumes:
         - name: tmp
+          emptyDir: {}
+        - name: vite-temp
           emptyDir: {}
       {{- with .Values.frontend.nodeSelector }}
       nodeSelector:
