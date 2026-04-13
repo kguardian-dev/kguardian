@@ -1,4 +1,4 @@
-FROM rust:1.83-bookworm AS build
+FROM rust:1.86-bookworm AS build
 
 COPY Cargo.lock /app/
 
