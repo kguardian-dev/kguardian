@@ -99,8 +99,11 @@ func processIngressRules(traffic api.PodTraffic, config *Config) (*networkingv1.
 		return nil, fmt.Errorf("error determining peer for ingress traffic from %s: %w", traffic.DstIP, err)
 	}
 
-	portInt := 0
-	_, _ = fmt.Sscanf(traffic.SrcPodPort, "%d", &portInt)
+	var portInt int
+	if _, err := fmt.Sscanf(traffic.SrcPodPort, "%d", &portInt); err != nil {
+		log.Warn().Str("port", traffic.SrcPodPort).Msg("processIngressRules: failed to parse port, skipping traffic entry")
+		return nil, fmt.Errorf("processIngressRules: invalid port %q: %w", traffic.SrcPodPort, err)
+	}
 	port := intstr.FromInt(portInt)
 	protocol := traffic.Protocol
 
@@ -124,8 +127,11 @@ func processEgressRules(traffic api.PodTraffic, config *Config) (*networkingv1.N
 		return nil, fmt.Errorf("error determining peer for egress traffic to %s: %w", traffic.DstIP, err)
 	}
 
-	portInt := 0
-	_, _ = fmt.Sscanf(traffic.DstPort, "%d", &portInt)
+	var portInt int
+	if _, err := fmt.Sscanf(traffic.DstPort, "%d", &portInt); err != nil {
+		log.Warn().Str("port", traffic.DstPort).Msg("processEgressRules: failed to parse port, skipping traffic entry")
+		return nil, fmt.Errorf("processEgressRules: invalid port %q: %w", traffic.DstPort, err)
+	}
 	port := intstr.FromInt(portInt)
 	protocol := traffic.Protocol
 

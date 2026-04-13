@@ -64,7 +64,7 @@ async fn update_serviceinfo(svc: Service) -> Result<(), Error> {
 }
 
 fn svc_unready(p: &Service) -> Option<String> {
-    let status = p.status.as_ref().unwrap();
+    let status = p.status.as_ref()?;
     info!("Service Status {:?}", status);
     if let Some(conds) = &status.conditions {
         let failed = conds

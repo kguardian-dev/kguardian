@@ -4,10 +4,19 @@ import { LLMProvider } from "../types/index.js";
 import { BrokerClient } from "../brokerClient.js";
 import { serializeToolResult } from "./truncate.js";
 
+interface OpenAIToolCall {
+  id: string;
+  type: string;
+  function: {
+    name: string;
+    arguments: string;
+  };
+}
+
 interface OpenAIMessage {
   role: string;
   content: string | null;
-  tool_calls?: any[];
+  tool_calls?: OpenAIToolCall[];
   tool_call_id?: string;
   name?: string;
 }
@@ -17,7 +26,7 @@ interface OpenAITool {
   function: {
     name: string;
     description: string;
-    parameters: any;
+    parameters: object;
   };
 }
 
@@ -77,9 +86,10 @@ export async function callOpenAI(
         { model, messages, tools, tool_choice: "auto" },
         { headers, timeout: 120000 }
       );
-    } catch (error: any) {
-      console.error("OpenAI API Error:", error.response?.data || error.message);
-      throw new Error(`OpenAI API error: ${error.response?.data?.error?.message || error.message}`);
+    } catch (error: unknown) {
+      const axiosErr = error as { response?: { data?: { error?: { message?: string } } }; message?: string };
+      console.error("OpenAI API Error:", axiosErr.response?.data || axiosErr.message);
+      throw new Error(`OpenAI API error: ${axiosErr.response?.data?.error?.message || axiosErr.message}`);
     }
 
     const choice = response.data.choices[0];
@@ -104,10 +114,10 @@ export async function callOpenAI(
 
     // Execute tool calls and append results
     const toolResults = await Promise.all(
-      message.tool_calls.map(async (toolCall: any) => {
-        let parsedArgs: Record<string, any>;
+      (message.tool_calls as OpenAIToolCall[]).map(async (toolCall: OpenAIToolCall) => {
+        let parsedArgs: Record<string, unknown>;
         try {
-          parsedArgs = JSON.parse(toolCall.function.arguments);
+          parsedArgs = JSON.parse(toolCall.function.arguments) as Record<string, unknown>;
         } catch {
           return {
             tool_call_id: toolCall.id,
@@ -119,7 +129,7 @@ export async function callOpenAI(
 
         const result = await brokerClient.executeTool({
           name: toolCall.function.name,
-          arguments: parsedArgs,
+          arguments: parsedArgs as Record<string, import("../types/index.js").JsonValue>,
         });
 
         return {

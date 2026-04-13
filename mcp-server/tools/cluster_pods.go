@@ -35,6 +35,16 @@ func (h ClusterPodsHandler) Call(
 	startTime := time.Now()
 	logger.Log.WithField("namespace", input.Namespace).Info("Received get_cluster_pods request")
 
+	if input.Namespace != "" {
+		if err := ValidateNamespace(input.Namespace); err != nil {
+			logger.Log.WithField("namespace", input.Namespace).Error("Invalid namespace parameter")
+			return &mcp.CallToolResult{
+				Content: []mcp.Content{&mcp.TextContent{Text: fmt.Sprintf("invalid namespace: %v", err)}},
+				IsError: true,
+			}, ClusterPodsOutput{}, nil
+		}
+	}
+
 	data, err := h.client.GetAllPods(ctx)
 	if err != nil {
 		logger.Log.WithFields(logrus.Fields{

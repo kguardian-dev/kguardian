@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback } from 'react';
+import axios from 'axios';
 import type { PodInfo, PodNodeData, ServiceInfo } from '../types';
 import { apiClient } from '../services/api';
 
@@ -25,15 +26,15 @@ export const usePodData = (namespace: string) => {
   const [loading, setLoading] = useState<boolean>(true);
   const [error, setError] = useState<string | null>(null);
 
-  const fetchPodData = useCallback(async () => {
+  const fetchPodData = useCallback(async (signal?: AbortSignal) => {
     setLoading(true);
     setError(null);
 
     try {
       // Fetch all pods and services from broker
       const [allPods, allServices] = await Promise.all([
-        apiClient.getAllPods(),
-        apiClient.getAllServices(),
+        apiClient.getAllPods(signal),
+        apiClient.getAllServices(signal),
       ]);
 
       setServices(allServices);
@@ -67,12 +68,13 @@ export const usePodData = (namespace: string) => {
         const identity = primaryPod.pod_identity || primaryPod.pod_name;
 
         // Fetch traffic and syscalls for all pods in the group with concurrency limit
-        const trafficTasks = podsInGroup.map(pod => () => apiClient.getPodTrafficByName(pod.pod_name));
-        const syscallTasks = podsInGroup.map(pod => () => apiClient.getPodSyscalls(pod.pod_name));
+        // TODO: Replace with broker batch endpoint for better performance
+        const trafficTasks = podsInGroup.map(pod => () => apiClient.getPodTrafficByName(pod.pod_name, signal));
+        const syscallTasks = podsInGroup.map(pod => () => apiClient.getPodSyscalls(pod.pod_name, signal));
 
         return Promise.all([
-          withConcurrencyLimit(trafficTasks, 10),
-          withConcurrencyLimit(syscallTasks, 10),
+          withConcurrencyLimit(trafficTasks, 50),
+          withConcurrencyLimit(syscallTasks, 50),
         ]).then(([allTraffic, allSyscalls]) => {
           // Merge all traffic and syscalls
           const mergedTraffic = allTraffic.flat();
@@ -90,9 +92,14 @@ export const usePodData = (namespace: string) => {
         });
       });
 
-      const podData = await withConcurrencyLimit(podDataTasks, 10);
+      // TODO: Replace with broker batch endpoint for better performance
+      const podData = await withConcurrencyLimit(podDataTasks, 50);
       setPods(podData);
     } catch (err) {
+      if (axios.isCancel(err) || (err instanceof Error && err.name === 'CanceledError')) {
+        return;
+      }
+      console.error('Error fetching pod data:', err);
       setError(err instanceof Error ? err.message : 'Unknown error occurred');
     } finally {
       setLoading(false);
@@ -100,7 +107,9 @@ export const usePodData = (namespace: string) => {
   }, [namespace]);
 
   useEffect(() => {
-    fetchPodData();
+    const controller = new AbortController();
+    fetchPodData(controller.signal);
+    return () => controller.abort();
   }, [fetchPodData]);
 
   const togglePodExpansion = useCallback((podId: string) => {
@@ -120,6 +129,7 @@ export const usePodData = (namespace: string) => {
     allPodsLookup,
     services,
     loading,
+    isError: error !== null,
     error,
     togglePodExpansion,
     refreshData,

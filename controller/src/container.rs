@@ -49,7 +49,10 @@ impl PodInspect {
         let mut client = TasksClient::new(channel.clone());
 
         let req = GetRequest {
-            container_id: self.container_id.to_owned().unwrap(),
+            // container_id is always Some here: get_pid is only called after set_container_id.
+            // unwrap_or_default produces an empty string on the (impossible) None path, which
+            // the containerd gRPC call will reject gracefully via the Err arm below.
+            container_id: self.container_id.to_owned().unwrap_or_default(),
             ..Default::default()
         };
 

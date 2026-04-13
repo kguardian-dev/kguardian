@@ -111,7 +111,7 @@ jobs:
           sudo apt update -y
           sudo apt install linux-tools-common linux-tools-generic linux-tools-$(uname -r) -y
           cd controller
-          cargo install cross --git https://github.com/cross-rs/cross --force
+          cargo install cross --git https://github.com/cross-rs/cross --tag v0.2.5
           cross build --target ${{ steps.args.outputs.BUILD }} --release
 
       - uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7

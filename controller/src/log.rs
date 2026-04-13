@@ -5,7 +5,7 @@ pub fn init_logger() {
     if env::var("RUST_LOG").is_err() {
         env::set_var("RUST_LOG", "info")
     }
-    if std::env::var("RUST_LOG").unwrap().to_lowercase().eq("info") {
+    if std::env::var("RUST_LOG").unwrap_or_default().to_lowercase().eq("info") {
         std::env::set_var("RUST_LOG", "info,kube_client=off");
     } else {
         std::env::set_var(

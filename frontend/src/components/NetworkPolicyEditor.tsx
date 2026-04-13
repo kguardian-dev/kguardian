@@ -147,7 +147,7 @@ const NetworkPolicyEditor: React.FC<NetworkPolicyEditorProps> = ({ isOpen, onClo
       {/* Modal */}
       <div className="fixed inset-0 z-50 flex items-center justify-center p-4 pointer-events-none">
         <div
-          className="bg-hubble-card border border-hubble-border rounded-lg shadow-2xl w-full max-w-7xl h-[90vh] flex flex-col pointer-events-auto"
+          className="bg-hubble-card border border-hubble-border rounded-lg shadow-2xl w-full max-w-full sm:max-w-full md:max-w-4xl lg:max-w-6xl xl:max-w-7xl h-[75vh] sm:h-[80vh] md:h-[90vh] flex flex-col pointer-events-auto"
           onClick={(e) => e.stopPropagation()}
         >
           {/* Header */}
@@ -313,6 +313,13 @@ const NetworkPolicyEditor: React.FC<NetworkPolicyEditorProps> = ({ isOpen, onClo
                                           <option value="inNamespace">In Namespace (Same Namespace)</option>
                                           <option value="inCluster">In Cluster (Any Namespace)</option>
                                         </select>
+                                        <p className="text-xs text-tertiary italic mt-1">
+                                          {peer.ipBlock
+                                            ? 'Matches external IPs via CIDR blocks'
+                                            : peer.podSelector && !peer.namespaceSelector
+                                            ? 'Matches pods in the same namespace'
+                                            : 'Matches pods in any namespace'}
+                                        </p>
                                       </div>
 
                                       {/* IP Block Editor */}
@@ -766,6 +773,13 @@ const NetworkPolicyEditor: React.FC<NetworkPolicyEditorProps> = ({ isOpen, onClo
                                           <option value="inNamespace">In Namespace (Same Namespace)</option>
                                           <option value="inCluster">In Cluster (Any Namespace)</option>
                                         </select>
+                                        <p className="text-xs text-tertiary italic mt-1">
+                                          {peer.ipBlock
+                                            ? 'Matches external IPs via CIDR blocks'
+                                            : peer.podSelector && !peer.namespaceSelector
+                                            ? 'Matches pods in the same namespace'
+                                            : 'Matches pods in any namespace'}
+                                        </p>
                                       </div>
 
                                       {/* External: IP Block Editor */}

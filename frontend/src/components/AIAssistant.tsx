@@ -1,5 +1,5 @@
 import React, { useState, useRef, useEffect, useCallback } from 'react';
-import ReactMarkdown from 'react-markdown';
+import ReactMarkdown, { type Components } from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { X, Send, Sparkles, Bot, User, Minimize2, Maximize2, ChevronRight, ChevronLeft } from 'lucide-react';
 import { sendChatMessage, type HistoryMessage } from '../services/aiApi';
@@ -21,6 +21,19 @@ interface AIAssistantProps {
 }
 
 type ViewMode = 'modal' | 'side-panel';
+
+const ALLOWED_MARKDOWN_ELEMENTS: string[] = [
+  'p', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6',
+  'ul', 'ol', 'li', 'a', 'code', 'pre', 'blockquote',
+  'em', 'strong', 'table', 'thead', 'tbody', 'tr', 'th', 'td',
+  'br', 'hr', 'img', 'span', 'div', 'sup', 'sub', 'del', 'input',
+];
+
+const markdownComponents: Components = {
+  a({ node: _node, ...props }) {
+    return <a {...props} rel="noopener noreferrer" target="_blank" />;
+  },
+};
 
 const AIAssistant: React.FC<AIAssistantProps> = ({ isOpen, onClose, onLayoutChange, namespace, podNames }) => {
   const [messages, setMessages] = useState<Message[]>([]);
@@ -284,7 +297,12 @@ const AIAssistant: React.FC<AIAssistantProps> = ({ isOpen, onClose, onLayoutChan
                     >
                       {message.role === 'assistant' ? (
                         <div className="text-sm prose prose-sm dark:prose-invert max-w-none prose-p:my-1 prose-headings:my-2 prose-ul:my-1 prose-ol:my-1 prose-li:my-0.5 prose-pre:my-2 prose-table:my-2 prose-th:px-2 prose-th:py-1 prose-td:px-2 prose-td:py-1 prose-code:text-hubble-accent prose-a:text-hubble-accent">
-                          <ReactMarkdown remarkPlugins={[remarkGfm]}>{message.content}</ReactMarkdown>
+                          <ReactMarkdown
+                            remarkPlugins={[remarkGfm]}
+                            allowedElements={ALLOWED_MARKDOWN_ELEMENTS}
+                            unwrapDisallowed={true}
+                            components={markdownComponents}
+                          >{message.content}</ReactMarkdown>
                         </div>
                       ) : (
                         <p className="text-sm whitespace-pre-wrap">{message.content}</p>

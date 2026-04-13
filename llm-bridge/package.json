@@ -21,11 +21,11 @@
   "author": "kguardian-dev",
   "license": "BUSL-1.1",
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.23.0",
-    "axios": "^1.7.9",
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "axios": "^1.15.0",
     "cors": "^2.8.5",
     "dotenv": "^17.0.0",
-    "express": "^5.0.0",
+    "express": "^5.2.1",
     "express-rate-limit": "^8.2.1",
     "zod": "^4.0.0"
   },

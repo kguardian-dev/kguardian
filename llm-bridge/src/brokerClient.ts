@@ -1,6 +1,18 @@
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
-import type { ToolCall, ToolResult } from "./types/index.js";
+import type { ToolCall, ToolResult, ToolDefinition, JsonSchemaObject } from "./types/index.js";
+
+/** Shape of a tool as returned by the MCP SDK listTools() response */
+interface McpRawTool {
+  name: string;
+  description?: string;
+  inputSchema?: {
+    type?: string;
+    properties?: Record<string, { type: string; description?: string }>;
+    required?: string[];
+    [key: string]: unknown;
+  };
+}
 
 export interface ParsedContext {
   namespace?: string;
@@ -12,7 +24,7 @@ export class BrokerClient {
   private mcpUrl: string;
   private mcpInitialized: boolean = false;
   private initPromise: Promise<void> | null = null;
-  private static toolDefsCache: any[] | null = null;
+  private static toolDefsCache: ToolDefinition[] | null = null;
 
   constructor(brokerUrl: string, mcpUrl?: string) {
     this.mcpUrl = mcpUrl || process.env.MCP_SERVER_URL || "http://kguardian-mcp-server.kguardian.svc.cluster.local:8081";
@@ -157,7 +169,7 @@ export class BrokerClient {
   /**
    * Get available tools from MCP server
    */
-  async getAvailableTools(): Promise<any[]> {
+  async getAvailableTools(): Promise<McpRawTool[]> {
     try {
       await this.initializeMCPClient();
 
@@ -166,7 +178,7 @@ export class BrokerClient {
       }
 
       const response = await this.mcpClient.listTools();
-      return response.tools || [];
+      return (response.tools || []) as McpRawTool[];
     } catch (error) {
       console.error("Error fetching tools from MCP server:", error);
       return [];
@@ -177,16 +189,16 @@ export class BrokerClient {
    * Get tool definitions for LLMs
    * This fetches the actual tools from the MCP server dynamically
    */
-  static async getToolDefinitionsFromMCP(mcpUrl?: string): Promise<any[]> {
+  static async getToolDefinitionsFromMCP(mcpUrl?: string): Promise<ToolDefinition[]> {
     const client = new BrokerClient("", mcpUrl);
     try {
       const tools = await client.getAvailableTools();
 
       // Convert MCP tool format to LLM provider format
-      return tools.map((tool: any) => ({
+      return tools.map((tool: McpRawTool): ToolDefinition => ({
         name: tool.name,
         description: tool.description || "",
-        parameters: tool.inputSchema || {
+        parameters: (tool.inputSchema as JsonSchemaObject | undefined) || {
           type: "object",
           properties: {},
           required: [],
@@ -204,7 +216,7 @@ export class BrokerClient {
   /**
    * Get tool definitions with caching — tries MCP server first, falls back to static
    */
-  static async getToolsCached(): Promise<any[]> {
+  static async getToolsCached(): Promise<ToolDefinition[]> {
     if (BrokerClient.toolDefsCache) return BrokerClient.toolDefsCache;
     try {
       BrokerClient.toolDefsCache = await BrokerClient.getToolDefinitionsFromMCP();
@@ -217,7 +229,7 @@ export class BrokerClient {
   /**
    * Get available tools definition for LLMs (static fallback)
    */
-  static getToolDefinitions() {
+  static getToolDefinitions(): ToolDefinition[] {
     return [
       {
         name: "get_pod_network_traffic",

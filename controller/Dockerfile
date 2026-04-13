@@ -11,6 +11,7 @@ RUN mkdir -p linux/amd64 linux/arm64
 COPY linux/amd64/kguardian linux/amd64/
 COPY linux/arm64/kguardian linux/arm64/
 
+# Pin to a specific digest in production: debian:${DEBIAN_VERSION}-slim@sha256:<digest>
 FROM debian:${DEBIAN_VERSION}-slim
 
 ARG TARGETPLATFORM

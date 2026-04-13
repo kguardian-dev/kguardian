@@ -2,8 +2,8 @@ import express, { Request, Response } from "express";
 import cors from "cors";
 import rateLimit from "express-rate-limit";
 import dotenv from "dotenv";
-import { ZodError } from "zod";
-import { ChatRequestSchema, LLMProvider, type ErrorResponse } from "./types/index.js";
+import { ZodError, ZodIssue } from "zod";
+import { ChatRequestSchema, LLMProvider, type ChatResponse, type ErrorResponse } from "./types/index.js";
 import { BrokerClient } from "./brokerClient.js";
 import { callOpenAI } from "./providers/openai.js";
 import { callAnthropic } from "./providers/anthropic.js";
@@ -19,7 +19,12 @@ const brokerUrl =
   process.env.BROKER_URL || "http://broker.kguardian.svc.cluster.local:9090";
 
 // Middleware
-app.use(cors({ origin: process.env.ALLOWED_ORIGIN || '*' }));
+// P1-1: Default to localhost instead of wildcard to avoid open CORS
+const allowedOrigin = process.env.ALLOWED_ORIGIN;
+if (!allowedOrigin) {
+  console.warn('WARNING: ALLOWED_ORIGIN not set, defaulting to http://localhost:3000');
+}
+app.use(cors({ origin: allowedOrigin || 'http://localhost:3000' }));
 app.use(express.json({ limit: '100kb' }));
 
 // Initialize broker client
@@ -45,14 +50,17 @@ app.get("/health", (req: Request, res: Response) => {
 });
 
 // Rate limiting for chat endpoint
+const rateLimitMax = parseInt(process.env.RATE_LIMIT_MAX || '60', 10);
 const chatLimiter = rateLimit({
   windowMs: 60 * 1000,
-  max: 20,
+  max: rateLimitMax,
+  standardHeaders: true,
+  legacyHeaders: false,
   message: { error: 'Too many requests' },
 });
 
 // Chat endpoint
-app.post("/api/chat", chatLimiter, async (req: Request, res: Response<any>) => {
+app.post("/api/chat", chatLimiter, async (req: Request, res: Response<ChatResponse | ErrorResponse>) => {
   try {
     // Validate request
     const chatRequest = ChatRequestSchema.parse(req.body);
@@ -60,24 +68,25 @@ app.post("/api/chat", chatLimiter, async (req: Request, res: Response<any>) => {
     // Determine provider to use
     const availableProviders = getAvailableProviders();
 
+    // P1-2: Return generic error — do not reveal which providers are configured
     if (availableProviders.length === 0) {
       return res.status(503).json({
-        error: "No LLM provider configured",
-        details: "Please configure at least one API key: OPENAI_API_KEY, ANTHROPIC_API_KEY, GOOGLE_API_KEY, or GITHUB_TOKEN",
+        error: "No LLM provider available",
       } as ErrorResponse);
     }
 
     const provider = chatRequest.provider || availableProviders[0];
 
-    // Verify the requested provider is available
+    // P1-2: Return generic error — do not reveal which providers are available
     if (!availableProviders.includes(provider)) {
-      return res.status(400).json({
-        error: `Provider ${provider} not configured`,
-        details: `Available providers: ${availableProviders.join(", ")}`,
+      return res.status(503).json({
+        error: "No LLM provider available",
       } as ErrorResponse);
     }
 
-    console.log(`Processing chat request with provider: ${provider}`);
+    if (process.env.DEBUG) {
+      console.log(`Processing chat request with provider: ${provider}`);
+    }
 
     // Route to appropriate provider
     let response;
@@ -95,8 +104,8 @@ app.post("/api/chat", chatLimiter, async (req: Request, res: Response<any>) => {
         response = await callCopilot(chatRequest, brokerClient);
         break;
       default:
-        return res.status(400).json({
-          error: `Unknown provider: ${provider}`,
+        return res.status(503).json({
+          error: "No LLM provider available",
         } as ErrorResponse);
     }
 
@@ -107,7 +116,7 @@ app.post("/api/chat", chatLimiter, async (req: Request, res: Response<any>) => {
     if (error instanceof ZodError) {
       return res.status(400).json({
         error: "Invalid request format",
-        details: error.issues.map((e: any) => e.message).join(", "),
+        details: error.issues.map((e: ZodIssue) => e.message).join(", "),
       } as ErrorResponse);
     }
 
@@ -126,14 +135,17 @@ app.post("/api/chat", chatLimiter, async (req: Request, res: Response<any>) => {
 
 // Start server
 const server = app.listen(port, () => {
-  const availableProviders = getAvailableProviders();
   console.log(`LLM Bridge listening on port ${port}`);
   console.log(`Broker URL: ${brokerUrl}`);
-  console.log(`Available providers: ${availableProviders.join(", ") || "NONE"}`);
 
-  if (availableProviders.length === 0) {
+  // P1-2: Guard provider availability details behind DEBUG flag
+  if (process.env.DEBUG) {
+    const availableProviders = getAvailableProviders();
+    console.log(`Available providers: ${availableProviders.join(", ") || "NONE"}`);
+  }
+
+  if (getAvailableProviders().length === 0) {
     console.warn("WARNING: No LLM provider API keys configured!");
-    console.warn("Set at least one: OPENAI_API_KEY, ANTHROPIC_API_KEY, GOOGLE_API_KEY, or GITHUB_TOKEN");
   }
 });
 

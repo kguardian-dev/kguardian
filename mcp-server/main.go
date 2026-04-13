@@ -3,8 +3,10 @@ package main
 import (
 	"context"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -25,7 +27,12 @@ func main() {
 	// Get configuration from environment
 	brokerURL := os.Getenv("BROKER_URL")
 	if brokerURL == "" {
-		brokerURL = "http://kguardian-broker.kguardian.svc.cluster.local:9090"
+		logger.Log.Error("BROKER_URL environment variable is required but not set")
+		os.Exit(1)
+	}
+	if _, err := url.Parse(brokerURL); err != nil {
+		logger.Log.WithField("broker_url", brokerURL).WithError(err).Error("BROKER_URL is not a valid URL")
+		os.Exit(1)
 	}
 
 	port := os.Getenv("PORT")
@@ -38,6 +45,14 @@ func main() {
 		"broker_url": brokerURL,
 		"log_level":  logLevel,
 	}).Info("Initializing kguardian MCP server")
+
+	// shuttingDown is set to 1 when a shutdown signal is received so that the
+	// health endpoint can start returning 503 before the server drains.
+	var shuttingDown atomic.Bool
+
+	// Server lifecycle context — cancelled when shutdown begins.
+	_, serverCancel := context.WithCancel(context.Background())
+	defer serverCancel()
 
 	// Create MCP server
 	server := mcp.NewServer(
@@ -59,6 +74,13 @@ func main() {
 	// Wrap in ServeMux to add health endpoint for Kubernetes probes
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
+		if shuttingDown.Load() {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			if _, err := w.Write([]byte("shutting down")); err != nil {
+				logger.Log.Errorf("health write: %v", err)
+			}
+			return
+		}
 		w.WriteHeader(http.StatusOK)
 		if _, err := w.Write([]byte("ok")); err != nil {
 			logger.Log.Errorf("health write: %v", err)
@@ -95,11 +117,15 @@ func main() {
 
 	logger.Log.WithField("signal", sig.String()).Info("Received shutdown signal")
 
-	// Graceful shutdown
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
+	// Signal health endpoint to return 503 and cancel the server lifecycle context.
+	shuttingDown.Store(true)
+	serverCancel()
 
-	if err := httpServer.Shutdown(ctx); err != nil {
+	// Graceful shutdown with a 10-second timeout.
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer shutdownCancel()
+
+	if err := httpServer.Shutdown(shutdownCtx); err != nil {
 		logger.Log.WithField("error", err.Error()).Error("Server forced to shutdown")
 	}
 

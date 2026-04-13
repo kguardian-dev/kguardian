@@ -1,5 +1,5 @@
-use crate::{schema, PodDetail, PodInputSyscalls, PodSyscalls, PodTraffic, SvcDetail};
-use actix_web::{post, web, Error, HttpResponse};
+use crate::{schema, Error, PodDetail, PodInputSyscalls, PodSyscalls, PodTraffic, SvcDetail};
+use actix_web::{post, web, HttpResponse};
 use diesel::pg::PgConnection;
 use diesel::r2d2::{self, ConnectionManager};
 use std::clone::Clone;
@@ -8,7 +8,6 @@ use diesel::prelude::*;
 use tracing::{debug, info};
 
 type DbPool = r2d2::Pool<ConnectionManager<PgConnection>>;
-type DbError = Box<dyn std::error::Error + Send + Sync>;
 
 #[post("/pod/traffic/batch")]
 pub async fn add_pods_batch(
@@ -18,12 +17,18 @@ pub async fn add_pods_batch(
     let count = form.len();
     debug!("Received batch of {} network traffic events", count);
 
+    // Validate all entries before touching the DB
+    for (i, entry) in form.iter().enumerate() {
+        if let Err(msg) = entry.validate_required_fields() {
+            return Err(Error::UserInputError(format!("item {i}: {msg}")));
+        }
+    }
+
     let result = web::block(move || {
         let mut conn = pool.get()?;
         create_pod_traffic_batch(&mut conn, form)
     })
-    .await?
-    .map_err(actix_web::error::ErrorInternalServerError)?;
+    .await??;
 
     info!(
         "Successfully inserted batch of {} network traffic events",
@@ -35,7 +40,7 @@ pub async fn add_pods_batch(
 fn create_pod_traffic_batch(
     conn: &mut PgConnection,
     batch: web::Json<Vec<PodTraffic>>,
-) -> Result<usize, DbError> {
+) -> Result<usize, Error> {
     use schema::pod_traffic::dsl::*;
 
     if batch.is_empty() {
@@ -44,37 +49,39 @@ fn create_pod_traffic_batch(
 
     debug!("Processing batch of {} network traffic events", batch.len());
 
-    // Filter out duplicates by checking each event against existing records
-    let mut events_to_insert = Vec::new();
-    for event in batch.iter() {
-        if event.get_row(conn)?.is_none() {
-            events_to_insert.push(event.clone());
-        } else {
-            debug!(
-                "Skipping duplicate traffic event for pod: {:?}",
-                event.pod_name
-            );
+    conn.transaction(|conn| {
+        // Filter out duplicates by checking each event against existing records
+        let mut events_to_insert = Vec::new();
+        for event in batch.iter() {
+            if event.get_row(conn)?.is_none() {
+                events_to_insert.push(event.clone());
+            } else {
+                debug!(
+                    "Skipping duplicate traffic event for pod: {:?}",
+                    event.pod_name
+                );
+            }
         }
-    }
 
-    if events_to_insert.is_empty() {
-        debug!("All events in batch were duplicates, nothing to insert");
-        return Ok(0);
-    }
+        if events_to_insert.is_empty() {
+            debug!("All events in batch were duplicates, nothing to insert");
+            return Ok(0);
+        }
 
-    debug!(
-        "Inserting {} new network traffic events (filtered {} duplicates)",
-        events_to_insert.len(),
-        batch.len() - events_to_insert.len()
-    );
+        debug!(
+            "Inserting {} new network traffic events (filtered {} duplicates)",
+            events_to_insert.len(),
+            batch.len() - events_to_insert.len()
+        );
 
-    // Bulk insert only the new events
-    let inserted = diesel::insert_into(pod_traffic)
-        .values(&events_to_insert)
-        .execute(conn)?;
+        // Bulk insert only the new events
+        let inserted = diesel::insert_into(pod_traffic)
+            .values(&events_to_insert)
+            .execute(conn)?;
 
-    debug!("Successfully inserted {} network traffic events", inserted);
-    Ok(inserted)
+        debug!("Successfully inserted {} network traffic events", inserted);
+        Ok(inserted)
+    })
 }
 
 #[post("/pod/traffic")]
@@ -82,12 +89,15 @@ pub async fn add_pods(
     pool: web::Data<DbPool>,
     form: web::Json<PodTraffic>,
 ) -> Result<HttpResponse, Error> {
+    if let Err(msg) = form.validate_required_fields() {
+        return Err(Error::UserInputError(msg));
+    }
+
     let pods = web::block(move || {
         let mut conn = pool.get()?;
         create_pod_traffic(&mut conn, form)
     })
-    .await?
-    .map_err(actix_web::error::ErrorInternalServerError)?;
+    .await??;
 
     Ok(HttpResponse::Ok().json(pods))
 }
@@ -95,7 +105,7 @@ pub async fn add_pods(
 fn create_pod_traffic(
     conn: &mut PgConnection,
     w: web::Json<PodTraffic>,
-) -> Result<PodTraffic, DbError> {
+) -> Result<PodTraffic, Error> {
     use schema::pod_traffic::dsl::*;
     debug!(
         "storing the pod details {:?} into pod_traffic table",
@@ -113,7 +123,7 @@ fn create_pod_traffic(
 }
 
 impl PodTraffic {
-    pub fn get_row(&self, conn: &mut PgConnection) -> Result<Option<PodTraffic>, DbError> {
+    pub fn get_row(&self, conn: &mut PgConnection) -> Result<Option<PodTraffic>, Error> {
         use schema::pod_traffic::dsl::*;
         if self.ip_protocol.eq(&Some("UDP".to_string())) {
             let out: Option<PodTraffic> = pod_traffic
@@ -161,15 +171,14 @@ pub async fn add_pod_details(
         let mut conn = pool.get()?;
         upsert_pod_details(&mut conn, form)
     })
-    .await?
-    .map_err(actix_web::error::ErrorInternalServerError)?;
+    .await??;
     Ok(HttpResponse::Ok().json(pods))
 }
 
 pub fn upsert_pod_details(
     conn: &mut PgConnection,
     w: web::Json<PodDetail>,
-) -> Result<PodDetail, DbError> {
+) -> Result<PodDetail, Error> {
     use schema::pod_details::dsl::*;
     debug!(
         "storing the pod details {:?} into pod_details table",
@@ -201,13 +210,12 @@ pub async fn mark_pod_dead(
         let mut conn = pool.get()?;
         mark_pod_as_dead(&mut conn, &form.pod_name)
     })
-    .await?
-    .map_err(actix_web::error::ErrorInternalServerError)?;
+    .await??;
 
     Ok(HttpResponse::Ok().json(result))
 }
 
-fn mark_pod_as_dead(conn: &mut PgConnection, pod: &str) -> Result<usize, DbError> {
+fn mark_pod_as_dead(conn: &mut PgConnection, pod: &str) -> Result<usize, Error> {
     use schema::pod_details::dsl::*;
 
     let updated = diesel::update(pod_details)
@@ -229,15 +237,14 @@ pub async fn add_svc_details(
         let mut conn = pool.get()?;
         upsert_svc_details(&mut conn, form)
     })
-    .await?
-    .map_err(actix_web::error::ErrorInternalServerError)?;
+    .await??;
     Ok(HttpResponse::Ok().json(pods))
 }
 
 pub fn upsert_svc_details(
     conn: &mut PgConnection,
     w: web::Json<SvcDetail>,
-) -> Result<SvcDetail, DbError> {
+) -> Result<SvcDetail, Error> {
     use schema::svc_details::dsl::*;
     debug!(
         "storing the service details {:?} into svc_details table",
@@ -254,7 +261,7 @@ pub fn upsert_svc_details(
 }
 
 impl PodInputSyscalls {
-    pub fn get_row(&self, conn: &mut PgConnection) -> Result<Option<PodSyscalls>, DbError> {
+    pub fn get_row(&self, conn: &mut PgConnection) -> Result<Option<PodSyscalls>, Error> {
         use schema::pod_syscalls::dsl::*;
 
         debug!(
@@ -283,8 +290,7 @@ pub async fn add_pods_syscalls(
         let mut conn = pool.get()?;
         create_pod_syscalls(&mut conn, form)
     })
-    .await?
-    .map_err(actix_web::error::ErrorInternalServerError)?;
+    .await??;
 
     Ok(HttpResponse::Ok().json(pods))
 }
@@ -292,7 +298,7 @@ pub async fn add_pods_syscalls(
 pub fn create_pod_syscalls(
     conn: &mut PgConnection,
     w: web::Json<Vec<PodInputSyscalls>>,
-) -> Result<(), DbError> {
+) -> Result<(), Error> {
     use schema::pod_syscalls::dsl::*;
 
     conn.transaction(|conn| {

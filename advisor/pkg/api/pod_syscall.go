@@ -1,11 +1,13 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/rs/zerolog/log"
 )
@@ -25,8 +27,20 @@ type PodSysCallResponse struct {
 func GetPodSysCall(podName string) (PodSysCall, error) {
 	apiURL := "http://127.0.0.1:9090/pod/syscalls/" + podName
 
-	resp, err := http.Get(apiURL)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, apiURL, nil)
 	if err != nil {
+		return PodSysCall{}, fmt.Errorf("GetPodSysCall: failed to build request: %w", err)
+	}
+
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		if ctx.Err() != nil {
+			log.Error().Err(err).Msg("GetPodSysCall: request timed out")
+			return PodSysCall{}, ErrTimeout
+		}
 		log.Error().Err(err).Msg("GetPodSysCall: Error making GET request")
 		return PodSysCall{}, err
 	}
@@ -36,8 +50,12 @@ func GetPodSysCall(podName string) (PodSysCall, error) {
 		}
 	}()
 
+	if resp.StatusCode == http.StatusNotFound {
+		log.Debug().Msgf("GetPodSysCall: resource not found (404) for pod %s", podName)
+		return PodSysCall{}, ErrNotFound
+	}
 	if resp.StatusCode != http.StatusOK {
-		return PodSysCall{}, fmt.Errorf("GetPodSysCall: received non-OK HTTP status code: %v", resp.StatusCode)
+		return PodSysCall{}, classifyStatusError(resp.StatusCode)
 	}
 
 	body, err := io.ReadAll(resp.Body)

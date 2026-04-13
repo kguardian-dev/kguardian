@@ -11,8 +11,8 @@ const ThemeToggle: React.FC = () => {
       className="flex items-center gap-2 px-3 py-2 bg-hubble-card border border-hubble-border
                  rounded-lg text-secondary hover:bg-hubble-dark hover:border-hubble-accent
                  transition-all"
-      title={`Switch to ${theme === 'dark' ? 'light' : 'dark'} theme`}
-      aria-label={`Switch to ${theme === 'dark' ? 'light' : 'dark'} theme`}
+      title={`Switch to ${theme === 'dark' ? 'light' : 'dark'} mode`}
+      aria-label={`Switch to ${theme === 'dark' ? 'light' : 'dark'} mode`}
     >
       {theme === 'dark' ? (
         <>

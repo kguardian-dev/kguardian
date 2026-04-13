@@ -112,7 +112,7 @@ jobs:
           python-version: "3.12"
 
       - name: Install checkov
-        run: pip install checkov
+        run: pip install checkov==3.2.446
 
       - name: Run checkov on Helm templates
         run: |

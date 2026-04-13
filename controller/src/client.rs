@@ -1,17 +1,20 @@
 use crate::Error;
 use serde_json::Value;
 use std::env;
+use std::sync::LazyLock;
 use tracing::debug;
 
-use lazy_static::lazy_static;
-
-lazy_static! {
-    static ref CLIENT: reqwest::Client = reqwest::Client::builder()
+// reqwest::Client::builder().timeout(...).connect_timeout(...).build() can only fail
+// if the TLS backend fails to initialise. We use the default TLS backend (native-tls /
+// rustls) which is compiled-in and has no runtime prerequisites, so this cannot fail in
+// practice. The `expect` message is kept to surface the unlikely OS-level failure clearly.
+static CLIENT: LazyLock<reqwest::Client> = LazyLock::new(|| {
+    reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(30))
         .connect_timeout(std::time::Duration::from_secs(10))
         .build()
-        .expect("Failed to create HTTP client");
-}
+        .expect("Failed to create HTTP client: TLS backend initialisation failed")
+});
 
 pub(crate) async fn api_post_call(v: Value, path: &str) -> Result<(), Error> {
     let api_endpoint = env::var("API_ENDPOINT")

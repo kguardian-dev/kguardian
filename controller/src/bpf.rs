@@ -247,7 +247,7 @@ pub fn ebpf_handle(
 
         loop {
             // Poll all ring buffers with a single call (much more efficient!)
-            if let Err(e) = ring_buffer.poll(std::time::Duration::from_millis(100)) {
+            if let Err(e) = ring_buffer.poll(std::time::Duration::from_millis(20)) {
                 eprintln!("Error polling ring buffer: {}", e);
                 continue;
             }

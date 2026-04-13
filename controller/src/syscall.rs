@@ -1,11 +1,9 @@
 use chrono::Utc;
-use dashmap::DashMap;
+use dashmap::{DashMap, DashSet};
 use libseccomp::{ScmpArch, ScmpSyscall};
 use moka::future::Cache;
 use serde_json::json;
-use std::collections::HashSet;
 use std::sync::Arc;
-use tokio::sync::Mutex;
 use tracing::{debug, error};
 
 use crate::{api_post_call, Error, PodInspect, SyscallData};
@@ -17,7 +15,8 @@ pub mod sycallprobe {
     ));
 }
 
-type SyscallCache = Cache<String, Arc<Mutex<HashSet<String>>>>;
+// Each pod maps to a lock-free set of observed syscall names.
+type SyscallCache = Cache<String, Arc<DashSet<String>>>;
 
 lazy_static::lazy_static! {
     static ref SYSCALL_CACHE: SyscallCache = Cache::new(10_000);
@@ -51,24 +50,24 @@ pub async fn process_syscall_event(
 ) -> Result<(), Error> {
     let pod_name = pod_data.status.pod_name.to_string();
     let syscall_number = data.sysnbr;
-    let syscall_name = get_syscall_name(syscall_number.try_into().unwrap())
-        .unwrap_or_else(|| format!("{}", syscall_number));
+    // u32 -> i32: values above i32::MAX are not valid Linux syscall numbers;
+    // fall back to the raw number string on conversion failure.
+    let syscall_name =
+        i32::try_from(syscall_number)
+            .ok()
+            .and_then(get_syscall_name)
+            .unwrap_or_else(|| format!("{}", syscall_number));
 
     let syscalls = SYSCALL_CACHE
-        .get_with(pod_name.clone(), async {
-            Arc::new(Mutex::new(HashSet::new()))
-        })
+        .get_with(pod_name.clone(), async { Arc::new(DashSet::new()) })
         .await;
 
-    let mut syscalls_lock = syscalls.lock().await;
-
-    if syscalls_lock.contains(&syscall_name) {
+    // DashSet::insert returns false when the value was already present.
+    if !syscalls.insert(syscall_name.clone()) {
         debug!(
             "Skipping duplicate syscall: {} for pod: {}",
             syscall_name, pod_name
         );
-    } else {
-        syscalls_lock.insert(syscall_name.clone());
     }
 
     Ok(())
@@ -81,26 +80,34 @@ pub async fn send_syscall_cache_periodically() -> Result<(), Error> {
         let mut batch = Vec::new();
 
         for (pod_name, syscalls) in SYSCALL_CACHE.iter() {
-            let syscalls_lock = syscalls.lock().await;
             let last_sent = LAST_SENT_CACHE
-                .get_with(pod_name.to_string(), async {
-                    Arc::new(Mutex::new(HashSet::new()))
-                })
+                .get_with(pod_name.to_string(), async { Arc::new(DashSet::new()) })
                 .await;
-            let mut last_sent_lock = last_sent.lock().await;
 
-            if *syscalls_lock != *last_sent_lock {
-                let syscall_names: Vec<String> = syscalls_lock.iter().cloned().collect();
+            // Collect current and last-sent syscall names for comparison.
+            // DashSet iteration is unordered, so sort both for a stable diff check.
+            let mut current: Vec<String> = syscalls.iter().map(|s| s.clone()).collect();
+            current.sort_unstable();
+
+            let mut previously_sent: Vec<String> = last_sent.iter().map(|s| s.clone()).collect();
+            previously_sent.sort_unstable();
+
+            if current != previously_sent {
                 let z = json!(SyscallData {
                     pod_name: pod_name.to_string(),
                     pod_namespace: "".to_string(), // We will not store the namespace and rather read it from the pod_details table
-                    syscalls: syscall_names,
+                    syscalls: current.clone(),
                     arch: std::env::consts::ARCH.to_string(),
                     time_stamp: Utc::now().naive_utc()
                 });
                 batch.push(z);
                 debug!("Sending batch of {} syscalls to API", batch.len());
-                *last_sent_lock = syscalls_lock.clone();
+
+                // Update the last-sent snapshot: clear and repopulate.
+                last_sent.clear();
+                for name in current {
+                    last_sent.insert(name);
+                }
             }
         }
 

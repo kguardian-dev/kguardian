@@ -1,4 +1,4 @@
-FROM rust:latest  AS build
+FROM rust:1.83-bookworm AS build
 
 COPY Cargo.lock /app/
 
@@ -15,6 +15,7 @@ COPY db  /app/broker/db
 
 RUN --mount=type=cache,target=/usr/local/cargo/registry  cargo build --release
 
+# Pin to a specific digest in production: debian:bookworm-slim@sha256:<digest>
 FROM debian:bookworm-slim AS app
 
 RUN apt update && apt install libpq5 -y

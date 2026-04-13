@@ -22,92 +22,57 @@ class BrokerAPIClient {
   /**
    * Get all pod traffic
    */
-  async getAllPodTraffic(): Promise<NetworkTraffic[]> {
-    try {
-      const response = await this.client.get('/pod/traffic');
-      return response.data || [];
-    } catch (error) {
-      console.error('Error fetching all pod traffic:', error);
-      return [];
-    }
+  async getAllPodTraffic(signal?: AbortSignal): Promise<NetworkTraffic[]> {
+    const response = await this.client.get('/pod/traffic', { signal });
+    return response.data || [];
   }
 
   /**
    * Get pod traffic by pod name
    */
-  async getPodTrafficByName(podName: string): Promise<NetworkTraffic[]> {
-    try {
-      const response = await this.client.get(`/pod/traffic/${podName}`);
-      return response.data || [];
-    } catch (error) {
-      console.error('Error fetching pod traffic by name:', error);
-      return [];
-    }
+  async getPodTrafficByName(podName: string, signal?: AbortSignal): Promise<NetworkTraffic[]> {
+    const response = await this.client.get(`/pod/traffic/${podName}`, { signal });
+    return response.data || [];
   }
 
   /**
    * Get pod details by pod name
    */
-  async getPodDetailsByName(podName: string): Promise<PodInfo | null> {
-    try {
-      const response = await this.client.get(`/pod/name/${podName}`);
-      return response.data;
-    } catch (error) {
-      console.error('Error fetching pod details by name:', error);
-      return null;
-    }
+  async getPodDetailsByName(podName: string, signal?: AbortSignal): Promise<PodInfo | null> {
+    const response = await this.client.get(`/pod/name/${podName}`, { signal });
+    return response.data;
   }
 
   /**
    * Get pod details by IP address
    */
-  async getPodDetailsByIP(podIP: string): Promise<PodInfo | null> {
-    try {
-      const response = await this.client.get(`/pod/ip/${podIP}`);
-      return response.data;
-    } catch (error) {
-      console.error('Error fetching pod details by IP:', error);
-      return null;
-    }
+  async getPodDetailsByIP(podIP: string, signal?: AbortSignal): Promise<PodInfo | null> {
+    const response = await this.client.get(`/pod/ip/${podIP}`, { signal });
+    return response.data;
   }
 
   /**
    * Get syscalls for a pod by pod name
    */
-  async getPodSyscalls(podName: string): Promise<SyscallInfo[]> {
-    try {
-      const response = await this.client.get(`/pod/syscalls/${podName}`);
-      return response.data || [];
-    } catch (error) {
-      console.error('Error fetching pod syscalls:', error);
-      return [];
-    }
+  async getPodSyscalls(podName: string, signal?: AbortSignal): Promise<SyscallInfo[]> {
+    const response = await this.client.get(`/pod/syscalls/${podName}`, { signal });
+    return response.data || [];
   }
 
   /**
    * Get all service details
    */
-  async getAllServices(): Promise<ServiceInfo[]> {
-    try {
-      const response = await this.client.get('/svc/info');
-      return response.data || [];
-    } catch (error) {
-      console.error('Error fetching all services:', error);
-      return [];
-    }
+  async getAllServices(signal?: AbortSignal): Promise<ServiceInfo[]> {
+    const response = await this.client.get('/svc/info', { signal });
+    return response.data || [];
   }
 
   /**
    * Get service details by IP address
    */
-  async getServiceByIP(serviceIP: string): Promise<ServiceInfo | null> {
-    try {
-      const response = await this.client.get(`/svc/ip/${serviceIP}`);
-      return response.data;
-    } catch (error) {
-      console.error('Error fetching service by IP:', error);
-      return null;
-    }
+  async getServiceByIP(serviceIP: string, signal?: AbortSignal): Promise<ServiceInfo | null> {
+    const response = await this.client.get(`/svc/ip/${serviceIP}`, { signal });
+    return response.data;
   }
 
   /**
@@ -126,60 +91,44 @@ class BrokerAPIClient {
   /**
    * Get all pod details
    */
-  async getAllPods(): Promise<PodInfo[]> {
-    try {
-      const response = await this.client.get('/pod/info');
-      // Ensure we always return an array
-      if (Array.isArray(response.data)) {
-        return response.data;
-      }
-      console.warn('API returned non-array data for /pod/info:', response.data);
-      return [];
-    } catch (error) {
-      console.error('Error fetching all pods:', error);
-      return [];
+  async getAllPods(signal?: AbortSignal): Promise<PodInfo[]> {
+    const response = await this.client.get('/pod/info', { signal });
+    // Ensure we always return an array
+    if (Array.isArray(response.data)) {
+      return response.data;
     }
+    console.warn('API returned non-array data for /pod/info:', response.data);
+    return [];
   }
 
   /**
    * Get all unique namespaces from pods
    */
-  async getNamespaces(): Promise<string[]> {
-    try {
-      const pods = await this.getAllPods();
+  async getNamespaces(signal?: AbortSignal): Promise<string[]> {
+    const pods = await this.getAllPods(signal);
 
-      // Ensure pods is an array
-      if (!Array.isArray(pods)) {
-        console.error('getAllPods() did not return an array:', pods);
-        return ['default'];
+    const namespaces = new Set<string>();
+
+    pods.forEach(pod => {
+      if (pod.pod_namespace) {
+        namespaces.add(pod.pod_namespace);
       }
+    });
 
-      const namespaces = new Set<string>();
+    // Convert to array and sort, with "default" always first
+    const namespaceArray = Array.from(namespaces).sort();
+    const defaultIndex = namespaceArray.indexOf('default');
 
-      pods.forEach(pod => {
-        if (pod.pod_namespace) {
-          namespaces.add(pod.pod_namespace);
-        }
-      });
-
-      // Convert to array and sort, with "default" always first
-      const namespaceArray = Array.from(namespaces).sort();
-      const defaultIndex = namespaceArray.indexOf('default');
-
-      if (defaultIndex > 0) {
-        // Move "default" to the front
-        namespaceArray.splice(defaultIndex, 1);
-        namespaceArray.unshift('default');
-      } else if (defaultIndex === -1 && namespaceArray.length > 0) {
-        // If no "default" namespace exists, still sort alphabetically
-        return namespaceArray;
-      }
-
+    if (defaultIndex > 0) {
+      // Move "default" to the front
+      namespaceArray.splice(defaultIndex, 1);
+      namespaceArray.unshift('default');
+    } else if (defaultIndex === -1 && namespaceArray.length > 0) {
+      // If no "default" namespace exists, still sort alphabetically
       return namespaceArray;
-    } catch (error) {
-      console.error('Error fetching namespaces:', error);
-      return ['default'];
     }
+
+    return namespaceArray;
   }
 
   /**

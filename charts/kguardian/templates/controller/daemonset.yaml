@@ -76,6 +76,12 @@ spec:
           - mountPath: /proc
             name: hostproc
             readOnly: true
+          {{- if .Values.controller.healthProbe.enabled }}
+          livenessProbe:
+            {{- toYaml .Values.controller.healthProbe.livenessProbe | nindent 12 }}
+          readinessProbe:
+            {{- toYaml .Values.controller.healthProbe.readinessProbe | nindent 12 }}
+          {{- end }}
           {{- with .Values.controller.resources }}
           resources:
             {{- toYaml . | nindent 12 }}

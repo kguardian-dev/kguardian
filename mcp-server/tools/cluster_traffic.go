@@ -35,6 +35,16 @@ func (h ClusterTrafficHandler) Call(
 	startTime := time.Now()
 	logger.Log.WithField("namespace", input.Namespace).Info("Received get_cluster_traffic request")
 
+	if input.Namespace != "" {
+		if err := ValidateNamespace(input.Namespace); err != nil {
+			logger.Log.WithField("namespace", input.Namespace).Error("Invalid namespace parameter")
+			return &mcp.CallToolResult{
+				Content: []mcp.Content{&mcp.TextContent{Text: fmt.Sprintf("invalid namespace: %v", err)}},
+				IsError: true,
+			}, ClusterTrafficOutput{}, nil
+		}
+	}
+
 	fetchStart := time.Now()
 	data, err := h.client.GetAllPodTraffic(ctx)
 	fetchDuration := time.Since(fetchStart)

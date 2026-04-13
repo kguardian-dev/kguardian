@@ -4,6 +4,33 @@ import { LLMProvider } from "../types/index.js";
 import { BrokerClient } from "../brokerClient.js";
 import { serializeToolResult } from "./truncate.js";
 
+interface GeminiFunctionCall {
+  name: string;
+  args: Record<string, unknown>;
+}
+
+interface GeminiTextPart {
+  text: string;
+}
+
+interface GeminiFunctionCallPart {
+  functionCall: GeminiFunctionCall;
+}
+
+interface GeminiFunctionResponsePart {
+  functionResponse: {
+    name: string;
+    response: unknown;
+  };
+}
+
+type GeminiPart = GeminiTextPart | GeminiFunctionCallPart | GeminiFunctionResponsePart;
+
+interface GeminiContent {
+  role: string;
+  parts: GeminiPart[];
+}
+
 const MAX_TOOL_ROUNDS = 10;
 
 export async function callGemini(
@@ -28,7 +55,7 @@ export async function callGemini(
   }));
 
   // Build contents with history
-  const contents: any[] = [];
+  const contents: GeminiContent[] = [];
 
   // Add conversation history if provided
   if (request.history && request.history.length > 0) {
@@ -66,22 +93,25 @@ export async function callGemini(
         },
         { headers, timeout: 120000 }
       );
-    } catch (error: any) {
-      console.error("Gemini API Error:", error.response?.data?.error?.message || error.message);
-      throw new Error(`Gemini API error: ${error.response?.data?.error?.message || error.message}`);
+    } catch (error: unknown) {
+      const axiosErr = error as { response?: { data?: { error?: { message?: string } } }; message?: string };
+      console.error("Gemini API Error:", axiosErr.response?.data?.error?.message || axiosErr.message);
+      throw new Error(`Gemini API error: ${axiosErr.response?.data?.error?.message || axiosErr.message}`);
     }
 
     const candidate = response.data.candidates[0];
-    const content = candidate.content;
+    const content = candidate.content as GeminiContent;
 
     // Check for function calls
     const functionCalls = content.parts.filter(
-      (part: any) => part.functionCall
+      (part): part is GeminiFunctionCallPart => "functionCall" in part
     );
 
     if (functionCalls.length === 0) {
       // No function calls — return text response
-      const textPart = content.parts.find((part: any) => part.text);
+      const textPart = content.parts.find(
+        (part): part is GeminiTextPart => "text" in part
+      );
       return {
         message: textPart?.text || "No response from Gemini",
         provider: LLMProvider.GEMINI,
@@ -97,11 +127,11 @@ export async function callGemini(
     });
 
     // Execute function calls and build responses
-    const functionResponses = await Promise.all(
-      functionCalls.map(async (part: any) => {
+    const functionResponses: GeminiFunctionResponsePart[] = await Promise.all(
+      functionCalls.map(async (part: GeminiFunctionCallPart) => {
         const result = await brokerClient.executeTool({
           name: part.functionCall.name,
-          arguments: part.functionCall.args,
+          arguments: part.functionCall.args as Record<string, import("../types/index.js").JsonValue>,
         });
         return {
           functionResponse: {
@@ -133,8 +163,8 @@ export async function callGemini(
   );
 
   const finalCandidate = finalResponse.data.candidates[0];
-  const textPart = finalCandidate.content.parts.find(
-    (part: any) => part.text
+  const textPart = (finalCandidate.content as GeminiContent).parts.find(
+    (part): part is GeminiTextPart => "text" in part
   );
 
   return {

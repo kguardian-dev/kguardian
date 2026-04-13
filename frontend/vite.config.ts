@@ -47,7 +47,7 @@ export default defineConfig({
         manualChunks: {
           // Vendor chunks
           'react-vendor': ['react', 'react-dom'],
-          'react-flow-vendor': ['reactflow'],
+          'react-flow-vendor': ['@xyflow/react'],
         },
       },
     },

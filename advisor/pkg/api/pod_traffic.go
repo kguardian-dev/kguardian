@@ -1,15 +1,36 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"time"
 
 	log "github.com/rs/zerolog/log"
 
 	v1 "k8s.io/api/core/v1"
 )
+
+// Sentinel errors for distinct API failure modes.
+var (
+	ErrNotFound          = errors.New("resource not found")
+	ErrBrokerUnavailable = errors.New("broker unavailable")
+	ErrTimeout           = errors.New("request timeout")
+)
+
+// httpClient is a package-level shared client with connection pooling and a
+// default timeout. Individual call-sites may still wrap it with a context.
+var httpClient = &http.Client{
+	Transport: &http.Transport{
+		MaxIdleConns:        100,
+		MaxIdleConnsPerHost: 100,
+		IdleConnTimeout:     90 * time.Second,
+	},
+	Timeout: 30 * time.Second,
+}
 
 type PodTraffic struct {
 	UUID string `yaml:"uuid" json:"uuid"`
@@ -66,14 +87,35 @@ func GetSvcSpec(svcIP string) (*SvcDetail, error) {
 	return GetSvcSpecFunc(svcIP)
 }
 
+// classifyStatusError maps an HTTP status code to a sentinel error.
+func classifyStatusError(statusCode int) error {
+	if statusCode == http.StatusNotFound {
+		return ErrNotFound
+	}
+	if statusCode >= 500 {
+		return ErrBrokerUnavailable
+	}
+	return fmt.Errorf("unexpected HTTP status: %d", statusCode)
+}
+
 // Real implementations
 func getRealPodTraffic(podName string) ([]PodTraffic, error) {
-	// Specify the URL of the REST API endpoint you want to invoke.
 	apiURL := "http://127.0.0.1:9090/pod/traffic/" + podName
 
-	// Send an HTTP GET request to the API endpoint.
-	resp, err := http.Get(apiURL)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, apiURL, nil)
 	if err != nil {
+		return nil, fmt.Errorf("GetPodTraffic: failed to build request: %w", err)
+	}
+
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		if ctx.Err() != nil {
+			log.Error().Err(err).Msg("GetPodTraffic: request timed out")
+			return nil, ErrTimeout
+		}
 		log.Error().Err(err).Msg("GetPodTraffic: Error making GET request")
 		return nil, err
 	}
@@ -82,10 +124,11 @@ func getRealPodTraffic(podName string) ([]PodTraffic, error) {
 			log.Error().Err(closeErr).Msg("GetPodTraffic: Error closing response body")
 		}
 	}()
-	// Check the HTTP status code.
+
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("GetPodTraffic: received non-OK HTTP status code: %v", resp.StatusCode)
+		return nil, classifyStatusError(resp.StatusCode)
 	}
+
 	var podTraffic []PodTraffic
 
 	body, err := io.ReadAll(resp.Body)
@@ -94,13 +137,11 @@ func getRealPodTraffic(podName string) ([]PodTraffic, error) {
 		return nil, err
 	}
 
-	// Parse the JSON response and unmarshal it into the Go struct.
-	if err := json.Unmarshal([]byte(body), &podTraffic); err != nil {
+	if err := json.Unmarshal(body, &podTraffic); err != nil {
 		log.Error().Err(err).Msg("GetPodTraffic: Error unmarshal JSON")
 		return nil, err
 	}
 
-	// If no pod traffic is found, return err
 	if len(podTraffic) == 0 {
 		return nil, fmt.Errorf("GetPodTraffic: No pod traffic found in database")
 	}
@@ -110,12 +151,22 @@ func getRealPodTraffic(podName string) ([]PodTraffic, error) {
 
 // Should we just get the pod spec directly from the cluster and only use the DB for the SaaS version where it contains the pod spec? Would this help with reducing unnecessary chatter?And just let the client do it?
 func getRealPodSpec(ip string) (*PodDetail, error) {
-	// Specify the URL of the REST API endpoint you want to invoke.
 	apiURL := "http://127.0.0.1:9090/pod/ip/" + ip
 
-	// Send an HTTP GET request to the API endpoint.
-	resp, err := http.Get(apiURL)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, apiURL, nil)
 	if err != nil {
+		return nil, fmt.Errorf("getRealPodSpec: failed to build request: %w", err)
+	}
+
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		if ctx.Err() != nil {
+			log.Error().Err(err).Msg("getRealPodSpec: request timed out")
+			return nil, ErrTimeout
+		}
 		log.Error().Err(err).Msg("Error making GET request")
 		return nil, err
 	}
@@ -125,21 +176,21 @@ func getRealPodSpec(ip string) (*PodDetail, error) {
 		}
 	}()
 
-	// Check the HTTP status code.
+	if resp.StatusCode == http.StatusNotFound {
+		log.Debug().Msgf("getRealPodSpec: resource not found (404) for IP %s", ip)
+		return nil, ErrNotFound
+	}
 	if resp.StatusCode != http.StatusOK {
-		log.Debug().Msgf("received non-OK HTTP status code: %v", resp.StatusCode)
-		return nil, nil
+		return nil, classifyStatusError(resp.StatusCode)
 	}
 
 	var details *PodDetail
 
-	// Parse the JSON response and unmarshal it into the Go struct.
 	if err := json.NewDecoder(resp.Body).Decode(&details); err != nil {
 		log.Error().Err(err).Msg("Error decoding JSON")
 		return nil, err
 	}
 
-	// If no pod details are found, return err
 	if details == nil {
 		return nil, fmt.Errorf("no pod details found in database")
 	}
@@ -148,12 +199,22 @@ func getRealPodSpec(ip string) (*PodDetail, error) {
 }
 
 func getRealSvcSpec(svcIp string) (*SvcDetail, error) {
-	// Specify the URL of the RESTAPI endpoint you want to invoke.
 	apiURL := "http://127.0.0.1:9090/svc/ip/" + svcIp
 
-	// Send an HTTP GET request to the API endpoint.
-	resp, err := http.Get(apiURL)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, apiURL, nil)
 	if err != nil {
+		return nil, fmt.Errorf("getRealSvcSpec: failed to build request: %w", err)
+	}
+
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		if ctx.Err() != nil {
+			log.Error().Err(err).Msg("getRealSvcSpec: request timed out")
+			return nil, ErrTimeout
+		}
 		log.Error().Err(err).Msg("Error making GET request")
 		return nil, err
 	}
@@ -163,15 +224,16 @@ func getRealSvcSpec(svcIp string) (*SvcDetail, error) {
 		}
 	}()
 
-	// Check the HTTP status code.
+	if resp.StatusCode == http.StatusNotFound {
+		log.Debug().Msgf("getRealSvcSpec: resource not found (404) for IP %s", svcIp)
+		return nil, ErrNotFound
+	}
 	if resp.StatusCode != http.StatusOK {
-		log.Debug().Msgf("received non-OK HTTP status code: %v", resp.StatusCode)
-		return nil, nil
+		return nil, classifyStatusError(resp.StatusCode)
 	}
 
 	var details SvcDetail
 
-	// Parse the JSON response and unmarshal it into the Go struct.
 	if err := json.NewDecoder(resp.Body).Decode(&details); err != nil {
 		log.Error().Err(err).Msg("Error decoding JSON")
 		return nil, err

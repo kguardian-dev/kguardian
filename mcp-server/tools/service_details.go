@@ -43,6 +43,14 @@ func (h ServiceDetailsHandler) Call(
 		}, ServiceDetailsOutput{}, nil
 	}
 
+	if err := ValidateIP(input.IP); err != nil {
+		logger.Log.WithField("ip", input.IP).Error("Invalid IP address parameter")
+		return &mcp.CallToolResult{
+			Content: []mcp.Content{&mcp.TextContent{Text: fmt.Sprintf("invalid ip: %v", err)}},
+			IsError: true,
+		}, ServiceDetailsOutput{}, nil
+	}
+
 	data, err := h.client.GetServiceByIP(ctx, input.IP)
 	if err != nil {
 		logger.Log.WithFields(logrus.Fields{

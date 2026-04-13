@@ -1,5 +1,5 @@
 import { useState, useCallback, useEffect } from 'react';
-import { RefreshCw, Shield, Sparkles } from 'lucide-react';
+import { RefreshCw, Shield, Sparkles, AlertTriangle, ChevronDown, ChevronUp } from 'lucide-react';
 import NetworkGraph from './components/NetworkGraph';
 import NamespaceSelector from './components/NamespaceSelector';
 import DataTable from './components/DataTable';
@@ -33,6 +33,7 @@ function App() {
   const [layoutDirection, setLayoutDirection] = useState<'LR' | 'TB'>('LR');
 
   const { namespaces } = useNamespaces();
+  const [showErrorDetails, setShowErrorDetails] = useState(false);
   const { pods, allPodsLookup, services, loading, error, togglePodExpansion, refreshData } = usePodData(namespace);
 
   // Calculate the right padding for content when AI panel is docked (in pixels)
@@ -170,8 +171,37 @@ function App() {
       {/* Main Content */}
       <div className="flex-1 flex flex-col overflow-hidden">
         {error && (
-          <div className="bg-hubble-error/20 border border-hubble-error text-hubble-error px-6 py-3">
-            <p className="text-sm">Error: {error}</p>
+          <div className="border border-red-500/50 bg-red-950/30 px-6 py-4 mx-4 mt-4 rounded-lg">
+            <div className="flex items-start gap-3">
+              <AlertTriangle className="w-5 h-5 text-red-400 shrink-0 mt-0.5" />
+              <div className="flex-1 min-w-0">
+                <p className="text-sm font-medium text-red-300">
+                  Unable to connect to kguardian broker. Ensure it&apos;s running in the kguardian namespace.
+                </p>
+                {showErrorDetails && (
+                  <p className="text-xs text-red-500/70 mt-2 font-mono bg-red-950/50 rounded px-2 py-1 break-all">
+                    {error}
+                  </p>
+                )}
+              </div>
+              <div className="flex items-center gap-2 shrink-0">
+                <button
+                  onClick={() => setShowErrorDetails(prev => !prev)}
+                  className="flex items-center gap-1 text-xs text-red-400/70 hover:text-red-300 transition-colors"
+                >
+                  {showErrorDetails ? <ChevronUp className="w-3 h-3" /> : <ChevronDown className="w-3 h-3" />}
+                  {showErrorDetails ? 'Hide' : 'Show'} details
+                </button>
+                <button
+                  onClick={() => { setShowErrorDetails(false); refreshData(); }}
+                  className="flex items-center gap-1 px-3 py-1 text-xs bg-red-500/20 border border-red-500/40
+                             text-red-300 rounded hover:bg-red-500/30 hover:border-red-400 transition-all"
+                >
+                  <RefreshCw className="w-3 h-3" />
+                  Retry
+                </button>
+              </div>
+            </div>
           </div>
         )}
 

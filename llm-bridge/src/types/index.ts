@@ -41,12 +41,36 @@ export interface ErrorResponse {
 }
 
 // Broker API tool definitions
+
+/** JSON-serialisable scalar values */
+export type JsonScalar = string | number | boolean | null;
+
+/** Recursive JSON value type */
+export type JsonValue =
+  | JsonScalar
+  | JsonValue[]
+  | { [key: string]: JsonValue };
+
 export interface ToolCall {
   name: string;
-  arguments: Record<string, any>;
+  arguments: Record<string, JsonValue>;
 }
 
 export interface ToolResult {
-  data: any;
+  data: JsonValue | object;
   error?: string;
+}
+
+/** JSON Schema object describing tool parameters */
+export interface JsonSchemaObject {
+  type: "object";
+  properties: Record<string, { type: string; description?: string }>;
+  required: string[];
+}
+
+/** Tool definition used when building provider request payloads */
+export interface ToolDefinition {
+  name: string;
+  description: string;
+  parameters: JsonSchemaObject;
 }
