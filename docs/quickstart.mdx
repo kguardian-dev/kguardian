@@ -41,6 +41,7 @@ The kguardian controller runs as a DaemonSet and uses eBPF to observe your workl
     ```bash
     # Install directly from OCI registry
     helm install kguardian oci://ghcr.io/kguardian-dev/charts/kguardian \
+      --version 1.9.1 \
       --namespace kguardian \
       --create-namespace \
       --wait
@@ -55,7 +56,7 @@ The kguardian controller runs as a DaemonSet and uses eBPF to observe your workl
     ```bash
     # Install a specific version from OCI registry
     helm install kguardian oci://ghcr.io/kguardian-dev/charts/kguardian \
-      --version 1.1.1 \
+      --version 1.9.1 \
       --namespace kguardian \
       --create-namespace \
       --wait
@@ -82,6 +83,7 @@ The kguardian controller runs as a DaemonSet and uses eBPF to observe your workl
 
     # Install with custom values
     helm install kguardian oci://ghcr.io/kguardian-dev/charts/kguardian \
+      --version 1.9.1 \
       --namespace kguardian \
       --create-namespace \
       --values values.yaml \
@@ -194,16 +196,18 @@ kguardian learns from actual runtime behavior, so let your applications run norm
 
 ## Step 4: Generate Your First Network Policy
 
-Now generate a network policy based on observed traffic:
+Now generate a network policy based on observed traffic. `--dry-run=true` is the **default** — the CLI writes YAML to `--output-dir` and does **not** apply anything to the cluster:
 
 ```bash
-# Generate policy for a specific pod
+# Generate policy for a specific pod (dry-run is on by default)
 kubectl kguardian gen networkpolicy nginx -n default \
   --output-dir ./policies
 
 # View the generated policy
 cat ./policies/default-nginx-networkpolicy.yaml
 ```
+
+To apply directly during generation instead of writing files for review, pass `--dry-run=false`. See [`gen networkpolicy`](/cli/gen-networkpolicy) for the full flag reference.
 
 <CodeGroup>
 ```yaml Example Output
@@ -253,14 +257,16 @@ spec:
 
 ### Apply the Policy
 
-Review the generated policy and apply it:
+The default `--dry-run=true` only writes the YAML file. To put the policy on the cluster, either re-run the CLI with `--dry-run=false`, or `kubectl apply` the saved file:
 
 ```bash
-# Review first (always recommended)
-kubectl apply --dry-run=client -f ./policies/default-nginx-networkpolicy.yaml
+# Option A: let the CLI apply directly
+kubectl kguardian gen networkpolicy nginx -n default \
+  --output-dir ./policies --dry-run=false
 
-# Apply to cluster
-kubectl apply -f ./policies/default-nginx-networkpolicy.yaml
+# Option B: apply the saved YAML yourself
+kubectl apply --dry-run=client -f ./policies/default-nginx-networkpolicy.yaml  # validate
+kubectl apply -f ./policies/default-nginx-networkpolicy.yaml                   # apply
 
 # Verify it's created
 kubectl get networkpolicies -n default
@@ -304,33 +310,33 @@ cat ./seccomp/default-nginx-seccomp.json
 
 ### Apply the Seccomp Profile
 
-To use the profile, you need to:
+kguardian generates the profile JSON. **Distributing the profile to each node's `/var/lib/kubelet/seccomp/` directory is the user's responsibility** — kguardian does not push profiles to nodes today.
 
-1. **Copy to nodes** (for local profiles):
-   ```bash
-   kubectl cp ./seccomp/default-nginx-seccomp.json \
-     kguardian-controller-xxxxx:/var/lib/kubelet/seccomp/nginx-profile.json \
-     -n kguardian
-   ```
+Recommended distribution options:
 
-2. **Update your deployment** to reference it:
-   ```yaml
-   apiVersion: v1
-   kind: Pod
-   metadata:
-     name: nginx
-   spec:
-     securityContext:
-       seccompProfile:
-         type: Localhost
-         localhostProfile: nginx-profile.json
-     containers:
-     - name: nginx
-       image: nginx:latest
-   ```
+- **[Security Profiles Operator (SPO)](https://github.com/kubernetes-sigs/security-profiles-operator)** — Wrap the generated JSON in a `SeccompProfile` CRD; SPO's DaemonSet writes it to the kubelet seccomp directory on every node. See the SPO docs for the CRD schema and DaemonSet behavior.
+- **A custom hostPath DaemonSet** — Mount `/var/lib/kubelet/seccomp/` and copy the profile in. Suitable if you do not want a separate operator.
+- **Image-baked profiles** — Bake the profile into a config map or container image and ship it with your existing deployment pipeline.
+
+Once the profile file lives at `/var/lib/kubelet/seccomp/nginx-profile.json` on every node that may run the pod, reference it from your workload:
+
+```yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: nginx
+spec:
+  securityContext:
+    seccompProfile:
+      type: Localhost
+      localhostProfile: nginx-profile.json
+  containers:
+  - name: nginx
+    image: nginx:latest
+```
 
 <Info>
-Future versions will support automatic seccomp profile management via the Security Profiles Operator.
+Automated seccomp profile distribution from kguardian is on the roadmap. Until then, pair kguardian with SPO or a DaemonSet of your own.
 </Info>
 
 ## Next Steps
