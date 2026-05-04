@@ -169,7 +169,7 @@ jobs:
           cache-to: type=gha,mode=max
 
       - name: Update or create PR comment
-        uses: actions/github-script@v7
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9
         with:
           script: |
             const marker = '✅ Controller image built and pushed:';
@@ -258,7 +258,7 @@ jobs:
           cache-to: type=gha,mode=max
 
       - name: Update or create PR comment
-        uses: actions/github-script@v7
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9
         with:
           script: |
             const marker = '✅ Broker image built and pushed:';
@@ -343,7 +343,7 @@ jobs:
           cache-to: type=gha,mode=max
 
       - name: Update or create PR comment
-        uses: actions/github-script@v7
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9
         with:
           script: |
             const marker = '✅ Frontend image built and pushed:';
@@ -429,7 +429,7 @@ jobs:
           cache-to: type=gha,mode=max
 
       - name: Update or create PR comment
-        uses: actions/github-script@v7
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9
         with:
           script: |
             const marker = '✅ LLM Bridge image built and pushed:';
@@ -515,7 +515,7 @@ jobs:
           cache-to: type=gha,mode=max
 
       - name: Update or create PR comment
-        uses: actions/github-script@v7
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9
         with:
           script: |
             const marker = '✅ MCP Server image built and pushed:';
@@ -592,7 +592,7 @@ jobs:
           helm push "${CHART_FILE}" oci://ghcr.io/kguardian-dev/charts
 
       - name: Update or create Helm chart comment
-        uses: actions/github-script@v7
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9
         with:
           script: |
             const marker = '✅ Helm chart built and pushed for testing:';
@@ -629,7 +629,7 @@ jobs:
     if: always()
     steps:
       - name: Update or create summary comment
-        uses: actions/github-script@v7
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9
         with:
           script: |
             const marker = '## 🚀 PR Build Summary';
