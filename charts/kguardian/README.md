@@ -39,14 +39,19 @@ helm install kguardian oci://ghcr.io/kguardian-dev/charts/kguardian \
   --create-namespace
 ```
 
-**Pod Security Admission:** If your cluster enforces [Pod Security Admission](https://kubernetes.io/docs/concepts/security/pod-security-admission/), the install namespace must be labelled `privileged` before `helm install` because the controller loads eBPF programs:
+**Note:** *If you have the [Pod Securty Admission](https://kubernetes.io/docs/concepts/security/pod-security-admission/) enabled for your cluster you will need to add the following annotation to the namespace that the chart is deployed*
 
-```bash
-kubectl create namespace kguardian
-kubectl label namespace kguardian pod-security.kubernetes.io/enforce=privileged --overwrite
+Example:
+
+```yaml
+apiVersion: v1
+kind: Namespace
+metadata:
+  labels:
+    pod-security.kubernetes.io/enforce: privileged
+    pod-security.kubernetes.io/warn: privileged
+  name: kguardian
 ```
-
-See the [Quickstart prerequisites](https://docs.kguardian.dev/quickstart#prerequisites) for full context.
 
 ## Directory Structure
 
