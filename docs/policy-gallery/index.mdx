@@ -1,0 +1,54 @@
+---
+title: "Generated Policy Gallery"
+description: "Examples of NetworkPolicies, CiliumNetworkPolicies, and seccomp profiles kguardian produces against representative Kubernetes workloads"
+icon: "images"
+---
+
+<Note>
+**Example output.** Each page below shows YAML that is representative of what the kguardian controller observes and emits for a given workload. Profiles are illustrative — verify against your own runtime before applying. Verified against kguardian `X.Y.Z` controller on `[TBD reference cluster]`.
+</Note>
+
+## Why a gallery?
+
+Reading the CLI flag reference tells you what kguardian *can* do. Reading a generated policy tells you what kguardian *actually does* — what gets allowed, what gets denied, and how readable the output is.
+
+Each page in this gallery walks through one real workload pattern:
+
+- A 3-line description of the workload and what it talks to.
+- The generated `NetworkPolicy` YAML.
+- The generated `CiliumNetworkPolicy` YAML (where Cilium-specific fields add value, e.g., FQDN egress or L7 HTTP rules).
+- The generated seccomp profile JSON (or a representative excerpt with the full syscall count).
+- A short paragraph on what kguardian observed at runtime that produced each rule.
+
+## Workloads
+
+<CardGroup cols={2}>
+  <Card title="nginx" icon="server" href="/policy-gallery/nginx">
+    HTTP frontend — ingress from peer pods, DNS egress, no upstream dependencies.
+  </Card>
+  <Card title="Postgres" icon="database" href="/policy-gallery/postgres">
+    Stateful database — accepts connections from app namespace, no egress beyond DNS.
+  </Card>
+  <Card title="CoreDNS / kube-dns" icon="signs-post" href="/policy-gallery/kube-dns">
+    Cluster DNS resolver — ingress on 53/UDP+TCP, egress to upstream resolvers.
+  </Card>
+  <Card title="Prometheus" icon="chart-line" href="/policy-gallery/prometheus">
+    Scraping monitor — outbound HTTP to scrape targets, ingress from Grafana.
+  </Card>
+  <Card title="Istio sidecar (envoy)" icon="diagram-project" href="/policy-gallery/istio-sidecar">
+    Service-mesh proxy — mTLS to peers and control-plane traffic to istiod.
+  </Card>
+  <Card title="Go microservice" icon="gears" href="/policy-gallery/go-microservice">
+    Typical HTTP API — ingress on a service port, egress to DB and a few SaaS endpoints.
+  </Card>
+</CardGroup>
+
+## How to read each example
+
+The YAML on each page is what `kubectl kguardian gen networkpolicy <pod> --output-dir ./policies` writes after the controller has observed the workload for at least a few minutes. The seccomp JSON is what `kubectl kguardian gen seccomp <pod> --output-dir ./seccomp` produces.
+
+If a workload's observed behavior is empty or noisy in your cluster (no traffic captured yet, very short-lived pods, host-network pods), the generator emits a minimal policy and warns. None of the gallery examples reflect that path — see [Troubleshooting](/advanced/troubleshooting) instead.
+
+<Info>
+The seccomp excerpts in this gallery are abbreviated for readability. Production profiles routinely contain 80–200 syscall names. The full count is noted on each page.
+</Info>

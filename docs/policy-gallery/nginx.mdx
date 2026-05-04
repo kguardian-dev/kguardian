@@ -1,0 +1,134 @@
+---
+title: "nginx (HTTP frontend)"
+description: "Generated NetworkPolicy, CiliumNetworkPolicy, and seccomp profile for an nginx pod serving HTTP"
+icon: "server"
+---
+
+<Note>
+**Example output.** Verified against kguardian `X.Y.Z` controller on `[TBD reference cluster]`.
+</Note>
+
+## Workload
+
+A standard `nginx:1.27` deployment serving static HTTP on port 80. The pod is fronted by a `ClusterIP` service, scraped occasionally by curl pods in the same namespace, and resolves DNS via the cluster's CoreDNS.
+
+## Generated NetworkPolicy
+
+```yaml
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: nginx
+  namespace: default
+  labels:
+    kguardian.dev/managed-by: kguardian
+    kguardian.dev/version: v1.0.0
+spec:
+  podSelector:
+    matchLabels:
+      app: nginx
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              run: curl-pod
+          namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: default
+      ports:
+        - protocol: TCP
+          port: 80
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+```
+
+## Generated CiliumNetworkPolicy
+
+```yaml
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: nginx
+  namespace: default
+  labels:
+    kguardian.dev/managed-by: kguardian
+    kguardian.dev/version: v1.0.0
+spec:
+  endpointSelector:
+    matchLabels:
+      app: nginx
+  ingress:
+    - fromEndpoints:
+        - matchLabels:
+            run: curl-pod
+            io.kubernetes.pod.namespace: default
+      toPorts:
+        - ports:
+            - port: "80"
+              protocol: TCP
+          rules:
+            http:
+              - method: GET
+                path: "/"
+              - method: HEAD
+                path: "/"
+  egress:
+    - toEndpoints:
+        - matchLabels:
+            k8s-app: kube-dns
+            io.kubernetes.pod.namespace: kube-system
+      toPorts:
+        - ports:
+            - port: "53"
+              protocol: ANY
+          rules:
+            dns:
+              - matchPattern: "*"
+```
+
+## Generated seccomp profile (excerpt)
+
+Full profile contains **104 syscall names**. Representative excerpt:
+
+```json
+{
+  "defaultAction": "SCMP_ACT_ERRNO",
+  "architectures": ["SCMP_ARCH_X86_64"],
+  "syscalls": [
+    {
+      "names": [
+        "accept4", "bind", "close", "connect", "epoll_create1",
+        "epoll_ctl", "epoll_pwait", "fstat", "futex", "getsockname",
+        "listen", "openat", "read", "recvfrom", "sendfile",
+        "socket", "write", "writev"
+      ],
+      "action": "SCMP_ACT_ALLOW"
+    },
+    {
+      "names": [
+        "brk", "mmap", "mprotect", "munmap", "rt_sigaction",
+        "rt_sigprocmask", "set_robust_list", "set_tid_address"
+      ],
+      "action": "SCMP_ACT_ALLOW"
+    }
+  ]
+}
+```
+
+## What kguardian observed
+
+The controller saw inbound TCP connections to port 80 originating from `curl-pod` in the same namespace, outbound UDP/53 (and a small number of fallback TCP/53) to the kube-system CoreDNS pods, and the typical syscall mix for an nginx worker process: socket setup, `epoll`-based event loop, `sendfile` for static responses, and read/write on the listening sockets. No outbound traffic to upstream HTTP services was seen, so no egress allow-rules for upstream hosts were generated. The Cilium variant adds L7 HTTP method/path rules for `GET /` and `HEAD /` because those were the only request shapes captured.

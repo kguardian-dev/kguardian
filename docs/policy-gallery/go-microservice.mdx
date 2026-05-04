@@ -1,0 +1,182 @@
+---
+title: "Go microservice (typical HTTP API)"
+description: "Generated NetworkPolicy and seccomp profile for a typical Go HTTP service that talks to a database and a SaaS endpoint"
+icon: "gears"
+---
+
+<Note>
+**Example output.** Verified against kguardian `X.Y.Z` controller on `[TBD reference cluster]`.
+</Note>
+
+## Workload
+
+A `golang:1.23` HTTP API in the `app` namespace. It serves JSON on TCP/8080 to upstream callers (an internal gateway), writes to Postgres in the `data` namespace, and makes outbound HTTPS calls to a single SaaS endpoint (`api.stripe.com`) for payment processing. It also exposes Prometheus metrics on TCP/9100.
+
+## Generated NetworkPolicy
+
+```yaml
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: order-api
+  namespace: app
+  labels:
+    kguardian.dev/managed-by: kguardian
+    kguardian.dev/version: v1.0.0
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: order-api
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: edge
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: api-gateway
+      ports:
+        - protocol: TCP
+          port: 8080
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: monitoring
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: prometheus
+      ports:
+        - protocol: TCP
+          port: 9100
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: data
+          podSelector:
+            matchLabels:
+              app: postgres
+      ports:
+        - protocol: TCP
+          port: 5432
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - protocol: UDP
+          port: 53
+```
+
+The Kubernetes-native NetworkPolicy cannot express "egress to `api.stripe.com`" — you'll see traffic to external IPs in the audit log but no rule for it. The Cilium variant below adds the FQDN.
+
+## Generated CiliumNetworkPolicy
+
+```yaml
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: order-api
+  namespace: app
+  labels:
+    kguardian.dev/managed-by: kguardian
+    kguardian.dev/version: v1.0.0
+spec:
+  endpointSelector:
+    matchLabels:
+      app.kubernetes.io/name: order-api
+  ingress:
+    - fromEndpoints:
+        - matchLabels:
+            app.kubernetes.io/name: api-gateway
+            io.kubernetes.pod.namespace: edge
+      toPorts:
+        - ports:
+            - port: "8080"
+              protocol: TCP
+          rules:
+            http:
+              - method: POST
+                path: "/v1/orders"
+              - method: GET
+                path: "/v1/orders/.*"
+    - fromEndpoints:
+        - matchLabels:
+            app.kubernetes.io/name: prometheus
+            io.kubernetes.pod.namespace: monitoring
+      toPorts:
+        - ports:
+            - port: "9100"
+              protocol: TCP
+          rules:
+            http:
+              - method: GET
+                path: "/metrics"
+  egress:
+    - toEndpoints:
+        - matchLabels:
+            app: postgres
+            io.kubernetes.pod.namespace: data
+      toPorts:
+        - ports:
+            - port: "5432"
+              protocol: TCP
+    - toFQDNs:
+        - matchName: "api.stripe.com"
+      toPorts:
+        - ports:
+            - port: "443"
+              protocol: TCP
+    - toEndpoints:
+        - matchLabels:
+            k8s-app: kube-dns
+            io.kubernetes.pod.namespace: kube-system
+      toPorts:
+        - ports:
+            - port: "53"
+              protocol: UDP
+          rules:
+            dns:
+              - matchName: "api.stripe.com"
+              - matchPattern: "*.svc.cluster.local"
+```
+
+## Generated seccomp profile (excerpt)
+
+Full profile contains **97 syscall names**. Representative excerpt:
+
+```json
+{
+  "defaultAction": "SCMP_ACT_ERRNO",
+  "architectures": ["SCMP_ARCH_X86_64"],
+  "syscalls": [
+    {
+      "names": [
+        "accept4", "bind", "close", "connect", "epoll_create1",
+        "epoll_ctl", "epoll_pwait", "futex", "getrandom",
+        "getsockname", "listen", "openat", "read", "recvfrom",
+        "sendto", "setsockopt", "socket", "write"
+      ],
+      "action": "SCMP_ACT_ALLOW"
+    },
+    {
+      "names": [
+        "clone", "execve", "exit_group", "mmap", "mprotect",
+        "munmap", "rseq", "rt_sigaction", "rt_sigreturn",
+        "sched_yield", "tgkill"
+      ],
+      "action": "SCMP_ACT_ALLOW"
+    }
+  ]
+}
+```
+
+## What kguardian observed
+
+The Go runtime makes this profile easy to recognise: heavy `futex` (goroutine scheduling), `getrandom` (TLS), `rseq` and `sched_yield` (scheduler hints), and a small file-I/O footprint. Network-wise, the controller saw three distinct egress destinations — Postgres in the `data` namespace, CoreDNS for DNS, and `api.stripe.com` resolved at runtime. Because Kubernetes-native NetworkPolicy can't express egress by hostname, the K8s policy omits the Stripe rule entirely, while the Cilium variant pins it via `toFQDNs` and limits the corresponding DNS lookups to that exact name. The L7 rules on ingress (`POST /v1/orders`, `GET /v1/orders/.*`) reflect the only request shapes captured during the observation window — a workload that exposes more endpoints will get a longer list.
