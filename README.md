@@ -1,47 +1,41 @@
 # kguardian: Kubernetes Security Profile Generator
 
+- **What it does:** Generates least-privilege Kubernetes NetworkPolicies, CiliumNetworkPolicies, and seccomp profiles from observed runtime behavior.
+- **Who it's for:** Platform and security teams running Kubernetes who want policy-as-code without writing rules by hand.
+- **What it costs to run:** TBD pending benchmark — see [Performance](#performance) for the reference-workload envelope.
+
 [![Go Report Card](https://goreportcard.com/badge/github.com/kguardian-dev/kguardian)](https://goreportcard.com/report/github.com/kguardian-dev/kguardian)
 [![License](https://img.shields.io/badge/License-BSL%201.1-blue.svg)](https://mariadb.com/bsl11/)
 
-kguardian is a powerful Kubernetes security toolkit that analyzes runtime behavior using eBPF and generates tailored security resources like Network Policies and Seccomp Profiles.
+kguardian watches pod traffic and syscalls with eBPF, then writes Kubernetes NetworkPolicies, CiliumNetworkPolicies, and seccomp profiles from what it sees — no hand-authored rules.
 
-## Table of Contents
-- [kguardian: Kubernetes Security Profile Generator](#kguardian-kubernetes-security-profile-generator)
-  - [Table of Contents](#table-of-contents)
-  - [🌟 Features](#-features)
-  - [🤖 AI-Powered Security Analysis (Optional)](#-ai-powered-security-analysis-optional)
-  - [🛠️ Prerequisites](#️-prerequisites)
-  - [📦 Installation](#-installation)
-    - [Quick Install Script (Recommended)](#quick-install-script-recommended)
-    - [Krew](#krew)
-    - [Manual Download](#manual-download)
-  - [🚀 Quick Start](#-quick-start)
-  - [🔨 Usage](#-usage)
-    - [Global Flags](#global-flags)
-    - [Generate Resources (`gen`)](#generate-resources-gen)
-      - [🔒 Network Policies (`networkpolicy`, `netpol`)](#-network-policies-networkpolicy-netpol)
-      - [🛡️ Seccomp Profiles (`seccomp`, `secp`)](#️-seccomp-profiles-seccomp-secp)
-  - [🤝 Contributing](#-contributing)
-  - [📄 License](#-license)
+## Distro Compatibility
 
-## 🌟 Features
+kguardian's eBPF controller requires Linux kernel **6.2 or newer** on every node that runs the DaemonSet. Verify with `uname -r` per node before installing.
 
-*   **Network Policy Generation:** Automatically create least-privilege network policies based on observed pod communication.
-    *   Supports standard Kubernetes `NetworkPolicy` resources.
-    *   Supports `CiliumNetworkPolicy` and `CiliumClusterwideNetworkPolicy` for Cilium CNI users.
-*   **Seccomp Profile Generation:** Generate least-privilege seccomp profiles by analyzing syscalls used by containers.
-*   **Flexible Targeting:** Generate policies/profiles for single pods, all pods in a namespace, or all pods across all namespaces.
-*   **Dry-Run Mode:** Preview generated resources without applying them to the cluster.
-*   **File Output:** Save generated resources to YAML files for review or integration into GitOps workflows.
-*   **AI-Powered Analysis (Optional):** Natural language interface for cluster security analysis powered by multiple LLM providers.
-    *   Ask questions about network traffic and syscall patterns in plain English
-    *   Get AI-driven security insights and recommendations
-    *   Supports OpenAI, Anthropic Claude, Google Gemini, and GitHub Copilot
-    *   Uses Model Context Protocol (MCP) for standardized tool access
+| Distro | Default kernel | Compatible? |
+|---|---|---|
+| Ubuntu 24.04 | 6.8 | ✅ |
+| Ubuntu 22.04 | 5.15 | ❌ (need HWE 6.2+) |
+| RHEL 9 | 5.14 | ❌ |
+| Amazon Linux 2023 | 6.1 | ❌ |
+| Debian 12 | 6.1 | ❌ (need backports) |
+| Talos / Bottlerocket | usually 6.1+ | check distro version |
+
+Kernel versions reflect the GA/server defaults shipped by each distro as of May 2026. Newer kernels are typically available via opt-in channels (Ubuntu HWE, AL2023 kernel-6.12+ AMI, Debian backports, RHEL 9 kernel modules from third parties).
+
+## Features
+
+- **Network Policy Generation:** Least-privilege Kubernetes `NetworkPolicy` and Cilium `CiliumNetworkPolicy` / `CiliumClusterwideNetworkPolicy` resources from observed pod-to-pod traffic.
+- **Seccomp Profile Generation:** Per-container syscall allowlists derived from runtime traces.
+- **Targeting:** Generate per-pod, per-namespace, or cluster-wide.
+- **Dry-Run Default:** YAML is written to `--output-dir` and not applied unless you pass `--dry-run=false` (NetworkPolicies only).
+- **File Output:** YAML/JSON files for review or GitOps pipelines.
+- Optional natural-language LLM bridge for querying traffic/syscall data — see [docs/ai-assistant](docs/ai-assistant/).
 
 ## Comparison with Other Tools
 
-This table provides a high-level comparison of kguardian with other popular open-source tools in the Kubernetes security space. The landscape evolves quickly, so features may change.
+This table is a high-level comparison of kguardian with other open-source Kubernetes security tools. The landscape moves quickly; features may change.
 
 | Feature                       | kguardian                         | Inspektor Gadget                   | Security Profiles Operator (SPO) |
 | :---------------------------- | :-------------------------------- | :--------------------------------- | :------------------------------- |
@@ -50,8 +44,8 @@ This table provides a high-level comparison of kguardian with other popular open
 | **Seccomp Profile Generation**| ✅                                | 📝 (Provides syscall trace data)   | ✅ (Via Log Enricher/Recorder)   |
 | **AppArmor Profile Mgmt**     | ❌                                | ❌                                 | ✅                               |
 | **SELinux Profile Mgmt**      | ❌                                | ❌                                 | ✅                               |
-| **Data Source**               | kguardian Controller (eBPF)      | eBPF                             | Seccomp Logs / BPF Recorder    |
-| **Operational Model**         | Client CLI + Server Controller    | Client CLI + Server Gadgets      | Server Operator + CRDs         |
+| **Data Source**               | kguardian Controller (eBPF)       | eBPF                               | Seccomp Logs / BPF Recorder      |
+| **Operational Model**         | Client CLI + Server Controller    | Client CLI + Server Gadgets        | Server Operator + CRDs           |
 | **Dry Run / Preview**         | ✅ (NetPol)                       | ✅ (YAML output for advisor)       | N/A                              |
 | **Save to File**              | ✅ (NetPol, Seccomp)              | ✅ (YAML output for advisor)       | N/A (Uses CRDs)                  |
 | **Direct Apply (NetPol)**     | ✅                                | ❌                                 | N/A                              |
@@ -61,68 +55,34 @@ This table provides a high-level comparison of kguardian with other popular open
 
 **Note on Operational Models:** kguardian and Inspektor Gadget use client CLIs that interact with dedicated server-side components (Controller/Gadgets) primarily for data retrieval. SPO operates as a full Kubernetes operator managing security profiles via Custom Resource Definitions (CRDs).
 
-**Key Differentiators for kguardian:**
-*   Generates both Network Policies (K8s Native & Cilium) and Seccomp profiles from a single data source.
-*   Provides options for direct application (Network Policy) or saving to files for GitOps workflows.
-*   Optional AI assistant for natural language security analysis.
+**Where kguardian fits:**
+- One data source produces both Kubernetes-native and Cilium NetworkPolicies plus seccomp profiles.
+- Apply directly (NetworkPolicy) or save YAML for GitOps review.
+- Optional LLM bridge for natural-language queries against the observed traffic/syscall data.
 
-## 🤖 AI-Powered Security Analysis (Optional)
+## Performance
 
-kguardian includes optional AI assistant capabilities that allow you to query your cluster's security posture using natural language. This feature is completely optional and can be enabled separately from the core policy generation functionality.
+Measured on `<reference workload, e.g., 100 pods doing typical web traffic on a 3-node cluster of m6i.large nodes>`:
 
-### Features
+- Controller (eBPF DaemonSet): `<X>%` CPU, `<Y>` MiB memory per node.
+- Broker: `<X>` MiB memory; `<Y>` req/s sustained.
+- Storage growth: `<Z>` GiB / 1000 pods / day.
 
-- **Natural Language Queries**: Ask questions about your cluster in plain English
-  - "What pods have the most network connections?"
-  - "Show me syscalls for nginx pods in production namespace"
-  - "Are there any suspicious network patterns?"
+_Numbers are TODO — pending benchmark on a reference cluster._
 
-- **Multi-Provider Support**: Choose your preferred LLM provider
-  - OpenAI (GPT-4, GPT-4o)
-  - Anthropic Claude (claude-sonnet-4-5)
-  - Google Gemini (gemini-2.0-flash)
-  - GitHub Copilot (gpt-4o)
+## Prerequisites
 
-- **MCP Integration**: Uses Model Context Protocol for standardized access to cluster data
-  - 6 comprehensive tools for querying network traffic, syscalls, and pod information
-  - Can be used by external MCP clients (Claude Desktop, etc.)
+- Linux Kernel 6.2+ on every node running the controller DaemonSet
+- Kubernetes cluster v1.19+
+- `kubectl` v1.19+
+- kguardian Controller **MUST** be installed and running in the cluster to collect the necessary data
+- (For Seccomp) Linux Kernel supporting seccomp (most modern kernels)
 
-### Enabling AI Features
-
-```bash
-# Install with AI assistant enabled
-helm install kguardian oci://ghcr.io/kguardian-dev/charts/kguardian \
-  --set llmBridge.enabled=true \
-  --set mcpServer.enabled=true \
-  --set llmBridge.secrets.anthropic.enabled=true \
-  --namespace kguardian --create-namespace
-
-# Create secret with your API key
-kubectl create secret generic kguardian-anthropic \
-  --from-literal=api-key=YOUR_ANTHROPIC_API_KEY \
-  -n kguardian
-```
-
-### Documentation
-
-- [LLM Bridge Documentation](./llm-bridge/README.md) - AI assistant service architecture and configuration
-- [MCP Server Documentation](./mcp-server/README.md) - Model Context Protocol server for tool access
-
-**Note**: AI features require an API key from at least one supported LLM provider. The core kguardian functionality (policy generation via CLI) works without AI features enabled.
-
-## 🛠️ Prerequisites
-
-*   Linux Kernel 6.2+
-*   Kubernetes cluster v1.19+
-*   `kubectl` v1.19+
-*   kguardian Controller **MUST** be installed and running in the cluster to collect the necessary data.
-*   (For Seccomp) Linux Kernel supporting seccomp (most modern kernels).
-
-## 📦 Installation
+## Installation
 
 ### Install the Controller Components
 
-Before using the CLI, you need to install the kguardian controller, broker, and UI in your cluster:
+Before using the CLI, install the kguardian controller, broker, and UI in your cluster:
 
 ```bash
 # Install from OCI registry (recommended)
@@ -171,9 +131,9 @@ sudo mv kguardian /usr/local/bin/kubectl-kguardian
 kubectl kguardian --help
 ```
 
-## 🚀 Quick Start
+## Quick Start
 
-Once the kguardian controller is running and collecting data, you can generate policies.
+Once the kguardian controller is running and collecting data, you can generate policies. For curated examples of what the generator produces against representative workloads (nginx, Postgres, kube-dns, Prometheus, Istio sidecar, Go microservice), see the [Generated Policy Gallery](docs/policy-gallery/).
 
 1.  **Generate a Network Policy (Dry Run, Save to File):**
 
@@ -199,7 +159,7 @@ Once the kguardian controller is running and collecting data, you can generate p
 
 4.  **(Optional) Apply the policies:** `--dry-run=true` is the default and only writes YAML to `--output-dir`. To apply network policies, either re-run with `--dry-run=false` or run `kubectl apply -f <directory>` against the saved files. *Note: Seccomp profiles currently only support saving to files.*
 
-## 🔨 Usage
+## Usage
 
 The plugin follows the standard `kubectl` command structure:
 
@@ -211,16 +171,16 @@ kubectl kguardian [command] [subcommand] [flags]
 
 These flags are available for most commands:
 
-*   `--kubeconfig <path>`: Path to the kubeconfig file to use.
-*   `--context <name>`: The name of the kubeconfig context to use.
-*   `--namespace <name>`, `-n <name>`: The namespace scope for this CLI request.
-*   `--debug`: Enable debug logging.
+- `--kubeconfig <path>`: Path to the kubeconfig file to use.
+- `--context <name>`: The name of the kubeconfig context to use.
+- `--namespace <name>`, `-n <name>`: The namespace scope for this CLI request.
+- `--debug`: Enable debug logging.
 
 ### Generate Resources (`gen`)
 
 This is the main command group for generating security resources.
 
-#### 🔒 Network Policies (`networkpolicy`, `netpol`)
+#### Network Policies (`networkpolicy`, `netpol`)
 
 Generates Kubernetes or Cilium Network Policies based on observed traffic.
 
@@ -232,16 +192,16 @@ kubectl kguardian gen networkpolicy [pod-name] [flags]
 
 **Arguments:**
 
-*   `[pod-name]` (Optional): The name of the specific pod to generate a policy for. Required unless `-a` or `-A` is used.
+- `[pod-name]` (Optional): The name of the specific pod to generate a policy for. Required unless `-a` or `-A` is used.
 
 **Flags:**
 
-*   `-n, --namespace <string>`: Namespace scope (defaults to current context namespace if not `-A`).
-*   `-a, --all`: Generate policies for all pods in the specified/current namespace.
-*   `-A, --all-namespaces`: Generate policies for all pods in all namespaces.
-*   `-t, --type <string>`: Type of policy: `kubernetes` (default) or `cilium`.
-*   `--output-dir <string>`: Directory to save generated policies (default: `network-policies`). If empty, policies are only printed in dry-run mode.
-*   `--dry-run`: If true (default), generate policies and save/print them without applying to the cluster. Set to `false` to apply Kubernetes policies directly.
+- `-n, --namespace <string>`: Namespace scope (defaults to current context namespace if not `-A`).
+- `-a, --all`: Generate policies for all pods in the specified/current namespace.
+- `-A, --all-namespaces`: Generate policies for all pods in all namespaces.
+- `-t, --type <string>`: Type of policy: `kubernetes` (default) or `cilium`.
+- `--output-dir <string>`: Directory to save generated policies (default: `network-policies`). If empty, policies are only printed in dry-run mode.
+- `--dry-run`: If true (default), generate policies and save/print them without applying to the cluster. Set to `false` to apply Kubernetes policies directly.
 
 **Examples:**
 
@@ -259,7 +219,7 @@ kubectl kguardian gen netpol -A --dry-run=false
 kubectl kguardian gen netpol my-pod --output-dir=""
 ```
 
-#### 🛡️ Seccomp Profiles (`seccomp`, `secp`)
+#### Seccomp Profiles (`seccomp`, `secp`)
 
 Generates Seccomp profiles based on observed syscalls.
 
@@ -271,14 +231,14 @@ kubectl kguardian gen seccomp [pod-name] [flags]
 
 **Arguments:**
 
-*   `[pod-name]` (Optional): The name of the specific pod to generate a profile for. Required unless `-a` or `-A` is used.
+- `[pod-name]` (Optional): The name of the specific pod to generate a profile for. Required unless `-a` or `-A` is used.
 
 **Flags:**
 
-*   `-n, --namespace <string>`: Namespace scope (defaults to current context namespace if not `-A`).
-*   `-a, --all`: Generate profiles for all pods in the specified/current namespace.
-*   `-A, --all-namespaces`: Generate profiles for all pods in all namespaces.
-*   `--output-dir <string>`: Directory to save generated profiles (default: `seccomp-profiles`). *Required for seccomp.* `--default-action <string>`: Default action for unlisted syscalls (default: `SCMP_ACT_ERRNO`). Options: `SCMP_ACT_ERRNO`, `SCMP_ACT_LOG`, `SCMP_ACT_KILL`.
+- `-n, --namespace <string>`: Namespace scope (defaults to current context namespace if not `-A`).
+- `-a, --all`: Generate profiles for all pods in the specified/current namespace.
+- `-A, --all-namespaces`: Generate profiles for all pods in all namespaces.
+- `--output-dir <string>`: Directory to save generated profiles (default: `seccomp-profiles`). *Required for seccomp.* `--default-action <string>`: Default action for unlisted syscalls (default: `SCMP_ACT_ERRNO`). Options: `SCMP_ACT_ERRNO`, `SCMP_ACT_LOG`, `SCMP_ACT_KILL`.
 
 **Examples:**
 
@@ -293,15 +253,15 @@ kubectl kguardian gen secp --all -n staging
 kubectl kguardian gen secp -A --default-action SCMP_ACT_LOG --output-dir ./all-secp
 ```
 
-## 🤝 Contributing
+## Contributing
 
-Contributions are welcome! Please read the contributing guide (TODO: Create CONTRIBUTING.md) to get started.
+Contributions are welcome. Please read the contributing guide (TODO: Create CONTRIBUTING.md) to get started.
 
 For information on the release process and versioning strategy, see [RELEASES.md](RELEASES.md).
 
-## 📄 License
+## License
 
-This project is licensed under the Business Source License 1.1 - see the [LICENSE](LICENSE) file for details.
+This project is licensed under the Business Source License 1.1 — see the [LICENSE](LICENSE) file for details.
 
 **Summary:**
 - **Free for:** Development, testing, evaluation, and non-production/non-commercial use
