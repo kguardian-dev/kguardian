@@ -6,7 +6,9 @@ icon: "book-open"
 
 ## What is kguardian?
 
-kguardian implements **observed-based security** - it watches what your applications actually do at runtime and generates security policies that match that behavior. This is fundamentally different from traditional approaches where you manually write policies and hope they're correct.
+kguardian watches pod traffic and syscalls with eBPF, then writes Kubernetes NetworkPolicies, CiliumNetworkPolicies, and seccomp profiles from what it sees — no hand-authored rules.
+
+This is fundamentally different from traditional approaches where you write policies manually and hope they cover what your workloads actually do.
 
 ## Key Concepts
 

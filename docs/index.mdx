@@ -1,15 +1,25 @@
 ---
-title: "kguardian: Kubernetes Security Made Simple"
-description: "Automatically generate least-privilege Network Policies and Seccomp Profiles using eBPF-powered runtime behavior analysis"
+title: "kguardian"
+description: "kguardian watches pod traffic and syscalls with eBPF, then writes Kubernetes NetworkPolicies, CiliumNetworkPolicies, and seccomp profiles from what it sees — no hand-authored rules."
 ---
 
 # kguardian
 
-**Kubernetes Security Made Simple** - Automatically generate least-privilege Network Policies and Seccomp Profiles using eBPF-powered runtime behavior analysis.
+kguardian watches pod traffic and syscalls with eBPF, then writes Kubernetes NetworkPolicies, CiliumNetworkPolicies, and seccomp profiles from what it sees — no hand-authored rules.
+
+## Docs map
+
+- [**Getting Started**](/quickstart) — install, configure, run your first capture.
+- [**Generating Policies**](/guides/generating-network-policies) — NetworkPolicies and CiliumNetworkPolicies from observed traffic.
+- [**Generating Seccomp Profiles**](/concepts/seccomp-profiles) — least-privilege syscall profiles from runtime data.
+- [**Architecture**](/architecture) — Controller, Broker, storage; how data flows.
+- [**Operations**](/advanced/troubleshooting) — production deployment, retention, performance tuning.
+- [**AI Assistant**](https://github.com/kguardian-dev/kguardian/tree/main/llm-bridge) — optional LLM bridge for natural-language queries.
+- [**Reference**](/cli/overview) — CLI, [API](/api-reference/introduction), [helm values](/installation).
 
 ## What is kguardian?
 
-kguardian is a **Kubernetes security toolkit** that observes your applications at runtime using eBPF technology and automatically generates tailored security resources. Say goodbye to manual policy crafting and hello to zero-trust security that adapts to your workloads.
+A Kubernetes runtime-observability tool that turns the network and syscall behavior of your pods into the policy YAML you would otherwise have to write by hand.
 
 <CardGroup cols={2}>
   <Card
@@ -34,11 +44,11 @@ kguardian is a **Kubernetes security toolkit** that observes your applications a
     Low-overhead kernel-level visibility without code changes
   </Card>
   <Card
-    title="Real-time Visualization"
+    title="Live view (polled, ~5s)"
     icon="chart-network"
     iconType="duotone"
   >
-    Interactive UI to explore pod communication and traffic flows
+    Interactive UI that polls the Broker every few seconds to render pod-to-pod traffic
   </Card>
 </CardGroup>
 
@@ -49,12 +59,12 @@ kguardian is a **Kubernetes security toolkit** that observes your applications a
     Writing Network Policies and Seccomp profiles by hand is tedious and error-prone. kguardian observes your running applications and generates policies automatically in seconds.
   </Accordion>
 
-  <Accordion icon="lock" title="Implement Zero-Trust Security">
+  <Accordion icon="lock" title="Default-Deny by Default">
     Start with a default-deny posture and allow only the exact network paths and syscalls your applications actually use. No guesswork, no over-permissioning.
   </Accordion>
 
   <Accordion icon="eye" title="Gain Runtime Visibility">
-    See exactly how your pods communicate and what system calls they make. The built-in UI provides real-time insights into your cluster's behavior.
+    See exactly how your pods communicate and what system calls they make. The UI polls the Broker every few seconds and renders the latest observed traffic and syscall data.
   </Accordion>
 
   <Accordion icon="rocket" title="Integrate with GitOps">
@@ -172,7 +182,7 @@ kubectl apply -f ./policies/production-my-app-networkpolicy.yaml
 | **Network Policy (Cilium)**   | ✅        | ❌               | ❌                         |
 | **Seccomp Profile Generation**| ✅        | 📝               | ✅                         |
 | **AppArmor Profile Mgmt**     | 🔜        | ❌               | ✅                         |
-| **Real-time UI**              | ✅        | ❌               | ❌                         |
+| **Live view (polled, ~5s)**   | ✅        | ❌               | ❌                         |
 | **GitOps-friendly**           | ✅        | ✅               | Partial                    |
 | **eBPF-based**                | ✅        | ✅               | ✅                         |
 
@@ -200,7 +210,7 @@ kubectl apply -f ./policies/production-my-app-networkpolicy.yaml
   <Card
     title="Contributing"
     icon="code-pull-request"
-    href="/development/overview"
+    href="https://github.com/kguardian-dev/kguardian#contributing"
   >
     Learn how to contribute to kguardian
   </Card>

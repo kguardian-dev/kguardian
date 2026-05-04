@@ -9,9 +9,27 @@
 
 kguardian watches pod traffic and syscalls with eBPF, then writes Kubernetes NetworkPolicies, CiliumNetworkPolicies, and seccomp profiles from what it sees — no hand-authored rules.
 
+## What is kguardian?
+
+A Kubernetes runtime-observability tool that turns the network and syscall behavior of your pods into the policy YAML you would otherwise have to write by hand.
+
+## What does it do?
+
+The Controller (eBPF DaemonSet) captures every TCP/UDP connection and syscall on each node. The Broker stores the per-pod baseline in PostgreSQL. The `kubectl kguardian` plugin queries that baseline and synthesizes a least-privilege policy for the pod, namespace, or whole cluster you ask about.
+
+## What does it generate?
+
+For each target you select, kguardian emits:
+
+- a Kubernetes [`NetworkPolicy`](docs/policy-gallery/) YAML,
+- a Cilium [`CiliumNetworkPolicy`](docs/policy-gallery/) YAML (for Cilium CNI users),
+- a [seccomp](docs/policy-gallery/) JSON profile.
+
+Worked examples for nginx, Postgres, kube-dns, Prometheus, an Istio sidecar, and a Go microservice are in the [Generated Policy Gallery](docs/policy-gallery/).
+
 ## Distro Compatibility
 
-kguardian's eBPF controller requires Linux kernel **6.2 or newer** on every node that runs the DaemonSet. Verify with `uname -r` per node before installing.
+kguardian's eBPF Controller requires Linux kernel **6.2 or newer** on every node that runs the DaemonSet. Verify with `uname -r` per node before installing.
 
 | Distro | Default kernel | Compatible? |
 |---|---|---|
@@ -35,30 +53,7 @@ Kernel versions reflect the GA/server defaults shipped by each distro as of May 
 
 ## Comparison with Other Tools
 
-This table is a high-level comparison of kguardian with other open-source Kubernetes security tools. The landscape moves quickly; features may change.
-
-| Feature                       | kguardian                         | Inspektor Gadget                   | Security Profiles Operator (SPO) |
-| :---------------------------- | :-------------------------------- | :--------------------------------- | :------------------------------- |
-| **Network Policy (K8s)**      | ✅                                | ✅ (Network Policy Advisor)        | ❌                               |
-| **Network Policy (Cilium)**   | ✅                                | ❌                                 | ❌                               |
-| **Seccomp Profile Generation**| ✅                                | 📝 (Provides syscall trace data)   | ✅ (Via Log Enricher/Recorder)   |
-| **AppArmor Profile Mgmt**     | ❌                                | ❌                                 | ✅                               |
-| **SELinux Profile Mgmt**      | ❌                                | ❌                                 | ✅                               |
-| **Data Source**               | kguardian Controller (eBPF)       | eBPF                               | Seccomp Logs / BPF Recorder      |
-| **Operational Model**         | Client CLI + Server Controller    | Client CLI + Server Gadgets        | Server Operator + CRDs           |
-| **Dry Run / Preview**         | ✅ (NetPol)                       | ✅ (YAML output for advisor)       | N/A                              |
-| **Save to File**              | ✅ (NetPol, Seccomp)              | ✅ (YAML output for advisor)       | N/A (Uses CRDs)                  |
-| **Direct Apply (NetPol)**     | ✅                                | ❌                                 | N/A                              |
-| **Direct Apply (Seccomp)**    | ❌                                | ❌                                 | ✅                               |
-
-*Legend: ✅ = Supported, ❌ = Not Supported, 📝 = Partial/Requires Manual Steps, N/A = Not Applicable*
-
-**Note on Operational Models:** kguardian and Inspektor Gadget use client CLIs that interact with dedicated server-side components (Controller/Gadgets) primarily for data retrieval. SPO operates as a full Kubernetes operator managing security profiles via Custom Resource Definitions (CRDs).
-
-**Where kguardian fits:**
-- One data source produces both Kubernetes-native and Cilium NetworkPolicies plus seccomp profiles.
-- Apply directly (NetworkPolicy) or save YAML for GitOps review.
-- Optional LLM bridge for natural-language queries against the observed traffic/syscall data.
+How kguardian compares to Inspektor Gadget and Security Profiles Operator (NetworkPolicy support, seccomp generation, operational model, …): see the [feature comparison table](https://docs.kguardian.dev/#comparison-with-other-tools) on the docs site.
 
 ## Performance
 
@@ -72,68 +67,27 @@ _Numbers are TODO — pending benchmark on a reference cluster._
 
 ## Prerequisites
 
-- Linux Kernel 6.2+ on every node running the controller DaemonSet
+- Linux Kernel 6.2+ on every node running the Controller DaemonSet
 - Kubernetes cluster v1.19+
 - `kubectl` v1.19+
-- kguardian Controller **MUST** be installed and running in the cluster to collect the necessary data
+- The Controller **MUST** be installed and running in the cluster to collect the necessary data
 - (For Seccomp) Linux Kernel supporting seccomp (most modern kernels)
 
 ## Installation
 
-### Install the Controller Components
-
-Before using the CLI, install the kguardian controller, broker, and UI in your cluster:
+Install the Controller, Broker, and UI into your cluster, then install the `kubectl` plugin:
 
 ```bash
-# Install from OCI registry (recommended)
 helm install kguardian oci://ghcr.io/kguardian-dev/charts/kguardian \
-  --version 1.9.1 \
-  --namespace kguardian \
-  --create-namespace
-```
-
-For detailed installation options and configuration, see the [Installation Guide](https://docs.kguardian.dev/installation).
-
-### Install the CLI Plugin
-
-Choose one of the following methods:
-
-#### Quick Install Script (Recommended)
-
-This script downloads the latest release binary and attempts to install it.
-
-```bash
+  --version 1.9.1 --namespace kguardian --create-namespace
 sh -c "$(curl -fsSL https://raw.githubusercontent.com/kguardian-dev/kguardian/main/scripts/quick-install.sh)"
 ```
 
-#### Krew
-
-Use [Krew](https://krew.sigs.k8s.io/), the plugin manager for `kubectl`:
-
-```bash
-# Ensure Krew is installed: https://krew.sigs.k8s.io/docs/user-guide/setup/install/
-kubectl krew install kguardian
-```
-
-#### Manual Download
-
-Download the appropriate binary for your system from the [Releases page](https://github.com/kguardian-dev/kguardian/releases) and place it in your `PATH` named `kubectl-kguardian`.
-
-Example (Linux AMD64, replace version/binary name as needed):
-
-```bash
-# Replace with the correct release URL
-wget -O kguardian https://github.com/kguardian-dev/kguardian/releases/download/vX.Y.Z/kguardian-linux-amd64
-chmod +x kguardian
-sudo mv kguardian /usr/local/bin/kubectl-kguardian
-
-# Verify installation
-kubectl kguardian --help
-```
+Krew, manual download, custom Helm values, Kind setup, verification, upgrades, and uninstall are all covered in the [Installation Guide](https://docs.kguardian.dev/installation).
 
 ## Quick Start
 
-Once the kguardian controller is running and collecting data, you can generate policies. For curated examples of what the generator produces against representative workloads (nginx, Postgres, kube-dns, Prometheus, Istio sidecar, Go microservice), see the [Generated Policy Gallery](docs/policy-gallery/).
+Once the Controller is running and collecting data, you can generate policies. For curated examples of what the generator produces against representative workloads (nginx, Postgres, kube-dns, Prometheus, Istio sidecar, Go microservice), see the [Generated Policy Gallery](docs/policy-gallery/).
 
 1.  **Generate a Network Policy (Dry Run, Save to File):**
 
