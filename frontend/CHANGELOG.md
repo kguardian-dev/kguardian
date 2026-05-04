@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.8.2](https://github.com/kguardian-dev/kguardian/compare/frontend/v1.8.1...frontend/v1.8.2) (2026-05-04)
+
+
+### Bug Fixes
+
+* **deps:** update dependency lucide-react to v1 ([#779](https://github.com/kguardian-dev/kguardian/issues/779)) ([4b83f0f](https://github.com/kguardian-dev/kguardian/commit/4b83f0f0c93a9fa37b75ce7cb9a724bba25a50ca))
+
 ## [1.8.1](https://github.com/kguardian-dev/kguardian/compare/frontend/v1.8.0...frontend/v1.8.1) (2026-03-07)
 
 
