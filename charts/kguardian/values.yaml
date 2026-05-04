@@ -268,15 +268,15 @@ database:
     # -- PostgreSQL container image repository
     repository: postgres
     # -- PostgreSQL image pull policy
-    pullPolicy: Always
-    # -- PostgreSQL image tag
-    tag: "latest"
+    pullPolicy: IfNotPresent
+    # -- PostgreSQL image tag (pinned; bump deliberately)
+    tag: "15-alpine"
     # -- Overrides the image tag using SHA digest
     sha: ""
 
   persistence:
-    # -- Enable persistent storage for database
-    enabled: false
+    # -- Enable persistent storage for database. Defaults to true; set to false only for ephemeral testing.
+    enabled: true
     # -- Use an existing PersistentVolumeClaim instead of creating a new one
     existingClaim: ""
 

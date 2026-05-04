@@ -127,6 +127,7 @@ Before using the CLI, you need to install the kguardian controller, broker, and 
 ```bash
 # Install from OCI registry (recommended)
 helm install kguardian oci://ghcr.io/kguardian-dev/charts/kguardian \
+  --version 1.9.1 \
   --namespace kguardian \
   --create-namespace
 ```
@@ -196,7 +197,9 @@ Once the kguardian controller is running and collecting data, you can generate p
 
 3.  **Review** the generated YAML files in the specified output directories.
 
-4.  **(Optional) Apply the policies:** If satisfied after reviewing the files or the dry-run output, remove `--dry-run` (for network policies) or manually apply the saved YAML files using `kubectl apply -f <directory>`. *Note: Seccomp profiles currently only support saving to files.* ## 🔨 Usage
+4.  **(Optional) Apply the policies:** `--dry-run=true` is the default and only writes YAML to `--output-dir`. To apply network policies, either re-run with `--dry-run=false` or run `kubectl apply -f <directory>` against the saved files. *Note: Seccomp profiles currently only support saving to files.*
+
+## 🔨 Usage
 
 The plugin follows the standard `kubectl` command structure:
 
