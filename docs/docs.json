@@ -38,6 +38,18 @@
             ]
           },
           {
+            "group": "Policy Gallery",
+            "pages": [
+              "policy-gallery/index",
+              "policy-gallery/nginx",
+              "policy-gallery/postgres",
+              "policy-gallery/kube-dns",
+              "policy-gallery/prometheus",
+              "policy-gallery/istio-sidecar",
+              "policy-gallery/go-microservice"
+            ]
+          },
+          {
             "group": "CLI Reference",
             "pages": [
               "cli/overview",

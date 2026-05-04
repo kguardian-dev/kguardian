@@ -1,0 +1,157 @@
+---
+title: "Prometheus (scraping monitor)"
+description: "Generated NetworkPolicy and seccomp profile for a Prometheus pod scraping cluster targets"
+icon: "chart-line"
+---
+
+<Note>
+**Example output.** Verified against kguardian `X.Y.Z` controller on `[TBD reference cluster]`.
+</Note>
+
+## Workload
+
+A `prom/prometheus:v2.54.1` deployment in the `monitoring` namespace. It scrapes a fan-out of metrics endpoints across the cluster (kubelets, kube-state-metrics, app pods, CoreDNS), accepts UI traffic from a Grafana sidecar, and queries the Kubernetes API for service-discovery.
+
+## Generated NetworkPolicy
+
+```yaml
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: prometheus
+  namespace: monitoring
+  labels:
+    kguardian.dev/managed-by: kguardian
+    kguardian.dev/version: v1.0.0
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: prometheus
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: grafana
+      ports:
+        - protocol: TCP
+          port: 9090
+  egress:
+    - to:
+        - namespaceSelector: {}
+      ports:
+        - protocol: TCP
+          port: 8080
+        - protocol: TCP
+          port: 9100
+        - protocol: TCP
+          port: 9153
+        - protocol: TCP
+          port: 10250
+    - to:
+        - ipBlock:
+            cidr: 10.96.0.1/32
+      ports:
+        - protocol: TCP
+          port: 6443
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - protocol: UDP
+          port: 53
+```
+
+## Generated CiliumNetworkPolicy
+
+```yaml
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: prometheus
+  namespace: monitoring
+  labels:
+    kguardian.dev/managed-by: kguardian
+    kguardian.dev/version: v1.0.0
+spec:
+  endpointSelector:
+    matchLabels:
+      app.kubernetes.io/name: prometheus
+  ingress:
+    - fromEndpoints:
+        - matchLabels:
+            app.kubernetes.io/name: grafana
+      toPorts:
+        - ports:
+            - port: "9090"
+              protocol: TCP
+          rules:
+            http:
+              - method: GET
+                path: "/api/v1/query.*"
+              - method: POST
+                path: "/api/v1/query_range"
+  egress:
+    - toEndpoints:
+        - {}
+      toPorts:
+        - ports:
+            - port: "8080"
+              protocol: TCP
+            - port: "9100"
+              protocol: TCP
+            - port: "9153"
+              protocol: TCP
+            - port: "10250"
+              protocol: TCP
+          rules:
+            http:
+              - method: GET
+                path: "/metrics"
+    - toEntities:
+        - kube-apiserver
+      toPorts:
+        - ports:
+            - port: "6443"
+              protocol: TCP
+```
+
+## Generated seccomp profile (excerpt)
+
+Full profile contains **131 syscall names**. Representative excerpt:
+
+```json
+{
+  "defaultAction": "SCMP_ACT_ERRNO",
+  "architectures": ["SCMP_ARCH_X86_64"],
+  "syscalls": [
+    {
+      "names": [
+        "accept4", "bind", "close", "connect", "epoll_create1",
+        "epoll_ctl", "epoll_pwait", "fdatasync", "fsync",
+        "futex", "getrandom", "listen", "newfstatat", "openat",
+        "pread64", "pwrite64", "read", "recvfrom", "sendto",
+        "setsockopt", "socket", "write"
+      ],
+      "action": "SCMP_ACT_ALLOW"
+    },
+    {
+      "names": [
+        "clone", "execve", "exit_group", "mmap", "mprotect",
+        "munmap", "rt_sigaction", "rt_sigreturn"
+      ],
+      "action": "SCMP_ACT_ALLOW"
+    }
+  ]
+}
+```
+
+## What kguardian observed
+
+Prometheus's egress is the most interesting piece: scrape requests fanned out to every namespace on a small, well-known set of metrics ports (`8080`, `9100`, `9153`, `10250`), so kguardian emitted a single `namespaceSelector: {}` egress rule rather than per-pod selectors. The Cilium variant pins those scrapes to `GET /metrics` at L7. Ingress was a single source — Grafana — querying the Prometheus API on TCP/9090. Egress to the Kubernetes API service ClusterIP was captured for service-discovery `LIST/WATCH` calls. The syscall profile picks up `pwrite64`/`fdatasync` because Prometheus persists samples to disk via its WAL.

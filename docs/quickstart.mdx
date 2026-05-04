@@ -26,6 +26,17 @@ Before you begin, ensure you have:
     - Admin access to install the controller (DaemonSet, RBAC, etc.)
     - Permission to create resources in your target namespaces
   </Accordion>
+
+  <Accordion icon="shield-halved" title="Pod Security Admission (if enforced)">
+    The kguardian controller needs the `privileged` Pod Security Admission level because it loads eBPF programs. If your cluster enforces [Pod Security Admission](https://kubernetes.io/docs/concepts/security/pod-security-admission/), label the install namespace before running `helm install`:
+
+    ```bash
+    kubectl create namespace kguardian
+    kubectl label namespace kguardian pod-security.kubernetes.io/enforce=privileged --overwrite
+    ```
+
+    If you skip this on a PSA-enforced cluster, the controller pods will fail to admit with a `violates PodSecurity "restricted:..."` error.
+  </Accordion>
 </AccordionGroup>
 
 <Warning>
@@ -165,7 +176,7 @@ kguardian learns from actual runtime behavior, so let your applications run norm
 
 <Steps>
   <Step title="Deploy Test Workload (Optional)">
-    If you don't have existing workloads, deploy a simple app:
+    If you don't have existing workloads, deploy a small test app:
 
     ```bash
     kubectl create deployment nginx --image=nginx:latest
@@ -189,7 +200,7 @@ kguardian learns from actual runtime behavior, so let your applications run norm
     ```
 
     <Tip>
-    The longer you let workloads run, the more comprehensive your policies will be.
+    The longer you let workloads run, the more traffic and syscall variety the controller will capture, and the closer the generated policy will be to your real runtime profile.
     </Tip>
   </Step>
 </Steps>

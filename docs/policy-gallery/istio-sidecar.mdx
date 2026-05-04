@@ -1,0 +1,174 @@
+---
+title: "Istio sidecar (envoy)"
+description: "Generated NetworkPolicy and seccomp profile for an Istio sidecar (istio-proxy) injected into an application pod"
+icon: "diagram-project"
+---
+
+<Note>
+**Example output.** Verified against kguardian `X.Y.Z` controller on `[TBD reference cluster]`. Sidecar policies are sensitive to mesh configuration — automatic mTLS, ambient mode, and custom `EnvoyFilter` resources can shift the observed traffic pattern. Re-run generation after mesh upgrades.
+</Note>
+
+## Workload
+
+The `istio-proxy` container injected by Istio (mesh version 1.22.x) into an application pod in the `app` namespace. The sidecar terminates inbound mTLS on port 15006, originates mTLS to peer sidecars, exposes Envoy admin/metrics on 15090/15021/15020, and maintains an xDS gRPC stream to `istiod` in `istio-system` on port 15012.
+
+## Generated NetworkPolicy
+
+```yaml
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: app-with-istio-sidecar
+  namespace: app
+  labels:
+    kguardian.dev/managed-by: kguardian
+    kguardian.dev/version: v1.0.0
+spec:
+  podSelector:
+    matchLabels:
+      app: order-api
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              security.istio.io/tlsMode: istio
+      ports:
+        - protocol: TCP
+          port: 15006
+        - protocol: TCP
+          port: 15021
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: monitoring
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: prometheus
+      ports:
+        - protocol: TCP
+          port: 15020
+        - protocol: TCP
+          port: 15090
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: istio-system
+          podSelector:
+            matchLabels:
+              app: istiod
+      ports:
+        - protocol: TCP
+          port: 15012
+        - protocol: TCP
+          port: 15014
+    - to:
+        - podSelector:
+            matchLabels:
+              security.istio.io/tlsMode: istio
+      ports:
+        - protocol: TCP
+          port: 15006
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - protocol: UDP
+          port: 53
+```
+
+## Generated CiliumNetworkPolicy
+
+```yaml
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: app-with-istio-sidecar
+  namespace: app
+  labels:
+    kguardian.dev/managed-by: kguardian
+    kguardian.dev/version: v1.0.0
+spec:
+  endpointSelector:
+    matchLabels:
+      app: order-api
+  ingress:
+    - fromEndpoints:
+        - matchLabels:
+            security.istio.io/tlsMode: istio
+      toPorts:
+        - ports:
+            - port: "15006"
+              protocol: TCP
+            - port: "15021"
+              protocol: TCP
+    - fromEndpoints:
+        - matchLabels:
+            app.kubernetes.io/name: prometheus
+            io.kubernetes.pod.namespace: monitoring
+      toPorts:
+        - ports:
+            - port: "15020"
+              protocol: TCP
+            - port: "15090"
+              protocol: TCP
+  egress:
+    - toEndpoints:
+        - matchLabels:
+            app: istiod
+            io.kubernetes.pod.namespace: istio-system
+      toPorts:
+        - ports:
+            - port: "15012"
+              protocol: TCP
+            - port: "15014"
+              protocol: TCP
+    - toEndpoints:
+        - matchLabels:
+            security.istio.io/tlsMode: istio
+      toPorts:
+        - ports:
+            - port: "15006"
+              protocol: TCP
+```
+
+## Generated seccomp profile (excerpt)
+
+Full profile contains **148 syscall names**. Representative excerpt:
+
+```json
+{
+  "defaultAction": "SCMP_ACT_ERRNO",
+  "architectures": ["SCMP_ARCH_X86_64"],
+  "syscalls": [
+    {
+      "names": [
+        "accept4", "bind", "close", "connect", "epoll_create1",
+        "epoll_ctl", "epoll_pwait", "eventfd2", "futex",
+        "getrandom", "getsockname", "getsockopt", "listen",
+        "openat", "read", "recvfrom", "recvmsg", "sendmsg",
+        "sendto", "setsockopt", "socket", "socketpair", "write"
+      ],
+      "action": "SCMP_ACT_ALLOW"
+    },
+    {
+      "names": [
+        "clone3", "execve", "io_uring_enter", "io_uring_setup",
+        "mmap", "mprotect", "munmap", "rseq", "rt_sigaction"
+      ],
+      "action": "SCMP_ACT_ALLOW"
+    }
+  ]
+}
+```
+
+## What kguardian observed
+
+The sidecar's traffic shape is dominated by mesh control-plane and peer mTLS rather than application traffic — application-layer requests are tunneled inside the mTLS streams that kguardian sees on port 15006, so the policy keeps L4 only and labels peers by `security.istio.io/tlsMode: istio`. The xDS connection to `istiod` is long-lived and easy to capture (TCP/15012 to the `app: istiod` pod in `istio-system`). Prometheus scrapes for Envoy and pilot-agent metrics show up on 15090 and 15020. Envoy's syscall set is heavier than a typical Go binary because of `io_uring`, `socketpair`, and `eventfd2`. **Caveat:** if your mesh uses ambient mode or a non-default sidecar injector, the observed ports and labels will differ — re-generate per environment.
