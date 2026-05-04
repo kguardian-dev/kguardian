@@ -1,5 +1,17 @@
 # Changelog
 
+## [1.9.2](https://github.com/kguardian-dev/kguardian/compare/chart/v1.9.1...chart/v1.9.2) (2026-05-04)
+
+
+### Bug Fixes
+
+* **chart:** decouple MCP server from kagent/kmcp and fix broker OOM ([#749](https://github.com/kguardian-dev/kguardian/issues/749)) ([c4c226d](https://github.com/kguardian-dev/kguardian/commit/c4c226da31488d98c79ad253008b884e02f19441))
+
+
+### Documentation
+
+* tier 0 — fix credibility-killers (broken links, wrong instructions, template cruft) ([#836](https://github.com/kguardian-dev/kguardian/issues/836)) ([6b58783](https://github.com/kguardian-dev/kguardian/commit/6b58783d8aeb92713de13e28a65dec6864d33f28))
+
 ## [1.9.1](https://github.com/kguardian-dev/kguardian/compare/chart/v1.9.0...chart/v1.9.1) (2026-03-01)
 
 
