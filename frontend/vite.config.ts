@@ -43,11 +43,13 @@ export default defineConfig({
     // Optimize chunk splitting
     rollupOptions: {
       output: {
-        // Manual chunk splitting for better caching
-        manualChunks: {
-          // Vendor chunks
-          'react-vendor': ['react', 'react-dom'],
-          'react-flow-vendor': ['reactflow'],
+        manualChunks: (id) => {
+          if (id.includes('node_modules/react/') || id.includes('node_modules/react-dom/')) {
+            return 'react-vendor'
+          }
+          if (id.includes('node_modules/reactflow/') || id.includes('node_modules/@reactflow/')) {
+            return 'react-flow-vendor'
+          }
         },
       },
     },
