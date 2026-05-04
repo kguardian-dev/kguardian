@@ -146,15 +146,15 @@ The following table lists the configurable parameters of the kguardian chart and
 | database.autoscaling.targetCPUUtilizationPercentage | int | `80` | Target CPU utilization percentage for autoscaling |
 | database.container.port | int | `5432` | PostgreSQL container port |
 | database.fullnameOverride | string | `""` | Override the full name of the database resources |
-| database.image.pullPolicy | string | `"Always"` | PostgreSQL image pull policy |
+| database.image.pullPolicy | string | `"IfNotPresent"` | PostgreSQL image pull policy |
 | database.image.repository | string | `"postgres"` | PostgreSQL container image repository |
 | database.image.sha | string | `""` | Overrides the image tag using SHA digest |
-| database.image.tag | string | `"latest"` | PostgreSQL image tag |
+| database.image.tag | string | `"15-alpine"` | PostgreSQL image tag (pinned; bump deliberately) |
 | database.imagePullSecrets | list | `[]` | List of image pull secrets for private registries |
 | database.name | string | `"kguardian-db"` | Database name for PostgreSQL |
 | database.nameOverride | string | `""` | Override the name of the database resources |
 | database.nodeSelector | object | `{"kubernetes.io/os":"linux"}` | Node labels for the kguardian database pod assignment |
-| database.persistence.enabled | bool | `false` | Enable persistent storage for database |
+| database.persistence.enabled | bool | `true` | Enable persistent storage for database. Defaults to true; set to false only for ephemeral testing. |
 | database.persistence.existingClaim | string | `""` | Use an existing PersistentVolumeClaim instead of creating a new one |
 | database.podAnnotations | object | `{}` | Annotations to add to database pods |
 | database.podSecurityContext | object | `{"fsGroup":999,"fsGroupChangePolicy":"OnRootMismatch","runAsGroup":999,"runAsUser":999,"seccompProfile":{"type":"RuntimeDefault"},"supplementalGroups":[999]}` | Database pod security context. Runs as postgres user (999) |

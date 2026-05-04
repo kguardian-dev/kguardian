@@ -61,6 +61,7 @@ Before installing kguardian, verify your environment meets these requirements:
     ```bash
     # 1. Install kguardian from OCI registry
     helm install kguardian oci://ghcr.io/kguardian-dev/charts/kguardian \
+      --version 1.9.1 \
       --namespace kguardian \
       --create-namespace \
       --wait
@@ -79,7 +80,7 @@ Before installing kguardian, verify your environment meets these requirements:
 
     ```bash
     helm install kguardian oci://ghcr.io/kguardian-dev/charts/kguardian \
-      --version 1.1.1 \
+      --version 1.9.1 \
       --namespace kguardian \
       --create-namespace \
       --wait
@@ -91,37 +92,17 @@ Before installing kguardian, verify your environment meets these requirements:
 
     ```bash
     # Pull and extract the chart to view values
-    helm pull oci://ghcr.io/kguardian-dev/charts/kguardian --untar
+    helm pull oci://ghcr.io/kguardian-dev/charts/kguardian --version 1.9.1 --untar
     cat kguardian/values.yaml > my-values.yaml
 
     # Install with custom values
     helm install kguardian oci://ghcr.io/kguardian-dev/charts/kguardian \
+      --version 1.9.1 \
       --namespace kguardian \
       --create-namespace \
       --values my-values.yaml \
       --wait
     ```
-  </Tab>
-
-  <Tab title="Kubectl (Manifests)">
-    ### Install from Raw Manifests
-
-    For environments without Helm or for customization.
-
-    ```bash
-    # 1. Download manifests
-    kubectl apply -f https://raw.githubusercontent.com/kguardian-dev/kguardian/main/deploy/kubernetes/namespace.yaml
-    kubectl apply -f https://raw.githubusercontent.com/kguardian-dev/kguardian/main/deploy/kubernetes/broker.yaml
-    kubectl apply -f https://raw.githubusercontent.com/kguardian-dev/kguardian/main/deploy/kubernetes/controller.yaml
-    kubectl apply -f https://raw.githubusercontent.com/kguardian-dev/kguardian/main/deploy/kubernetes/ui.yaml
-
-    # 2. Verify installation
-    kubectl get all -n kguardian
-    ```
-
-    <Note>
-    This method requires manual configuration of environment variables and secrets. See [Custom Configurations](/advanced/custom-configurations) for details.
-    </Note>
   </Tab>
 
   <Tab title="Kind (Local Development)">
@@ -253,6 +234,7 @@ Install with custom values:
 
 ```bash
 helm install kguardian oci://ghcr.io/kguardian-dev/charts/kguardian \
+  --version 1.9.1 \
   --namespace kguardian \
   --create-namespace \
   --values values.yaml \
@@ -442,15 +424,9 @@ To upgrade kguardian to a newer version:
 # 1. Check available versions (optional)
 # You can view releases at https://github.com/kguardian-dev/kguardian/releases
 
-# 2. Upgrade to latest or specific version (preserves your values.yaml)
+# 2. Upgrade to a specific pinned version (preserves your values.yaml)
 helm upgrade kguardian oci://ghcr.io/kguardian-dev/charts/kguardian \
-  --namespace kguardian \
-  --values values.yaml \
-  --wait
-
-# Or upgrade to a specific version
-helm upgrade kguardian oci://ghcr.io/kguardian-dev/charts/kguardian \
-  --version 1.2.0 \
+  --version 1.9.1 \
   --namespace kguardian \
   --values values.yaml \
   --wait

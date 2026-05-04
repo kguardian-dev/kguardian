@@ -34,10 +34,7 @@
           {
             "group": "User Guides",
             "pages": [
-              "guides/generating-network-policies",
-              "guides/generating-seccomp-profiles",
-              "guides/using-the-ui",
-              "guides/gitops-integration"
+              "guides/generating-network-policies"
             ]
           },
           {
@@ -51,8 +48,6 @@
           {
             "group": "Advanced",
             "pages": [
-              "advanced/cilium-policies",
-              "advanced/custom-configurations",
               "advanced/troubleshooting"
             ]
           },
@@ -71,8 +66,7 @@
           {
             "group": "Broker API",
             "pages": [
-              "api-reference/introduction",
-              "api-reference/authentication"
+              "api-reference/introduction"
             ]
           },
           {
@@ -82,29 +76,6 @@
               "api-reference/endpoints/traffic",
               "api-reference/endpoints/syscalls",
               "api-reference/endpoints/services"
-            ]
-          }
-        ]
-      },
-      {
-        "tab": "Development",
-        "groups": [
-          {
-            "group": "Contributing",
-            "pages": [
-              "development/overview",
-              "development/building-from-source",
-              "development/testing",
-              "development/releases"
-            ]
-          },
-          {
-            "group": "Components",
-            "pages": [
-              "development/controller",
-              "development/broker",
-              "development/cli",
-              "development/ui"
             ]
           }
         ]
