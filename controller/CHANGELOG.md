@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.8.2](https://github.com/kguardian-dev/kguardian/compare/controller/v1.8.1...controller/v1.8.2) (2026-05-04)
+
+
+### Bug Fixes
+
+* **deps:** update rust crate containerd-client to 0.9.0 ([#809](https://github.com/kguardian-dev/kguardian/issues/809)) ([75b79e3](https://github.com/kguardian-dev/kguardian/commit/75b79e3843ef7bd73fd1dab40ec45ef28b6118b5))
+
 ## [1.8.1](https://github.com/kguardian-dev/kguardian/compare/controller/v1.8.0...controller/v1.8.1) (2026-03-01)
 
 
