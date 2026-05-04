@@ -149,7 +149,7 @@ The following table lists the configurable parameters of the kguardian chart and
 | database.image.pullPolicy | string | `"IfNotPresent"` | PostgreSQL image pull policy |
 | database.image.repository | string | `"postgres"` | PostgreSQL container image repository |
 | database.image.sha | string | `""` | Overrides the image tag using SHA digest |
-| database.image.tag | string | `"15-alpine"` | PostgreSQL image tag (pinned; bump deliberately) |
+| database.image.tag | string | `"18-alpine"` | PostgreSQL image tag (pinned; bump deliberately) |
 | database.imagePullSecrets | list | `[]` | List of image pull secrets for private registries |
 | database.name | string | `"kguardian-db"` | Database name for PostgreSQL |
 | database.nameOverride | string | `""` | Override the name of the database resources |
