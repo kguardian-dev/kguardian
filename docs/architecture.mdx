@@ -151,7 +151,7 @@ graph TB
 
     - An interactive graph of pod-to-pod communication (React Flow)
     - Tables of traffic details with filtering
-    - Real-time updates as new data arrives
+    - Live view (polled, ~5s) — the UI re-fetches from the Broker on a short interval
   </Step>
 </Steps>
 
@@ -260,7 +260,7 @@ graph TB
   <Accordion icon="table" title="Data Display">
     - Traffic table with sorting and pagination
     - Pod details panel with labels and metadata
-    - Real-time updates via polling the Broker API
+    - Live view (polled, ~5s) via the Broker API
     - Dark mode support (matches Cilium Hubble aesthetic)
   </Accordion>
 </AccordionGroup>

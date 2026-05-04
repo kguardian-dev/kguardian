@@ -45,63 +45,17 @@ Before you begin, ensure you have:
 
 ## Step 1: Install the Controller
 
-The kguardian controller runs as a DaemonSet and uses eBPF to observe your workloads.
+The Controller runs as a DaemonSet and uses eBPF to observe your workloads.
 
-<Tabs>
-  <Tab title="Helm (Recommended)">
-    ```bash
-    # Install directly from OCI registry
-    helm install kguardian oci://ghcr.io/kguardian-dev/charts/kguardian \
-      --version 1.9.1 \
-      --namespace kguardian \
-      --create-namespace \
-      --wait
-    ```
+```bash
+helm install kguardian oci://ghcr.io/kguardian-dev/charts/kguardian \
+  --version 1.9.1 \
+  --namespace kguardian \
+  --create-namespace \
+  --wait
+```
 
-    <Tip>
-    The controller will automatically start monitoring pods across your cluster (excluding kube-system and kguardian namespaces by default).
-    </Tip>
-  </Tab>
-
-  <Tab title="Specific Version">
-    ```bash
-    # Install a specific version from OCI registry
-    helm install kguardian oci://ghcr.io/kguardian-dev/charts/kguardian \
-      --version 1.9.1 \
-      --namespace kguardian \
-      --create-namespace \
-      --wait
-    ```
-  </Tab>
-
-  <Tab title="Custom Values">
-    ```bash
-    # Create a custom values file
-    cat > values.yaml <<EOF
-    controller:
-      resources:
-        limits:
-          memory: "512Mi"
-          cpu: "500m"
-      excludedNamespaces: "kube-system,kguardian,monitoring"
-
-    broker:
-      replicas: 2
-      persistence:
-        enabled: true
-        size: 10Gi
-    EOF
-
-    # Install with custom values
-    helm install kguardian oci://ghcr.io/kguardian-dev/charts/kguardian \
-      --version 1.9.1 \
-      --namespace kguardian \
-      --create-namespace \
-      --values values.yaml \
-      --wait
-    ```
-  </Tab>
-</Tabs>
+For specific versions, custom Helm values, Kind-based local development, and external PostgreSQL setups, see the [Installation Guide](/installation) — that page is the canonical install reference.
 
 ### Verify Installation
 
@@ -353,8 +307,8 @@ Automated seccomp profile distribution from kguardian is on the roadmap. Until t
 ## Next Steps
 
 <CardGroup cols={2}>
-  <Card title="Explore the UI" icon="chart-network" href="/guides/using-the-ui">
-    Visualize pod communication in real-time
+  <Card title="Architecture" icon="sitemap" href="/architecture">
+    See how the Controller, Broker, and UI fit together
   </Card>
   <Card title="Generate Cilium Policies" icon="network-wired" href="/guides/generating-network-policies">
     Create enhanced L7-aware policies
@@ -362,8 +316,8 @@ Automated seccomp profile distribution from kguardian is on the roadmap. Until t
   <Card title="Batch Generation" icon="layer-group" href="/cli/gen-networkpolicy">
     Generate policies for all pods at once
   </Card>
-  <Card title="GitOps Integration" icon="code-branch" href="/guides/gitops-integration">
-    Integrate with your CI/CD pipeline
+  <Card title="Policy Gallery" icon="images" href="/policy-gallery">
+    Worked examples for nginx, Postgres, kube-dns, Prometheus, Istio, Go
   </Card>
 </CardGroup>
 
