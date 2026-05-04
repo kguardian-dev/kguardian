@@ -270,7 +270,7 @@ database:
     # -- PostgreSQL image pull policy
     pullPolicy: IfNotPresent
     # -- PostgreSQL image tag (pinned; bump deliberately)
-    tag: "15-alpine"
+    tag: "18-alpine"
     # -- Overrides the image tag using SHA digest
     sha: ""
 
