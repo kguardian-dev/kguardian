@@ -59,9 +59,10 @@ export async function sendChatMessage(
       const errorMessage = error.response?.data?.error || error.message;
       const details = error.response?.data?.details;
       throw new Error(
-        `Failed to get AI response: ${errorMessage}${details ? ` - ${details}` : ''}`
+        `Failed to get AI response: ${errorMessage}${details ? ` - ${details}` : ''}`,
+        { cause: error }
       );
     }
-    throw new Error('An unexpected error occurred while calling the AI API');
+    throw new Error('An unexpected error occurred while calling the AI API', { cause: error });
   }
 }

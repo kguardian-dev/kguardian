@@ -79,7 +79,7 @@ export async function callOpenAI(
       );
     } catch (error: any) {
       console.error("OpenAI API Error:", error.response?.data || error.message);
-      throw new Error(`OpenAI API error: ${error.response?.data?.error?.message || error.message}`);
+      throw new Error(`OpenAI API error: ${error.response?.data?.error?.message || error.message}`, { cause: error });
     }
 
     const choice = response.data.choices[0];
