@@ -1,5 +1,5 @@
 import { useState, useCallback, useEffect } from 'react';
-import { RefreshCw, Shield, Sparkles } from 'lucide-react';
+import { RefreshCw, Shield, Sparkles, WifiOff } from 'lucide-react';
 import NetworkGraph from './components/NetworkGraph';
 import NamespaceSelector from './components/NamespaceSelector';
 import DataTable from './components/DataTable';
@@ -32,7 +32,7 @@ function App() {
   const [showTraffic, setShowTraffic] = useState(true);
   const [layoutDirection, setLayoutDirection] = useState<'LR' | 'TB'>('LR');
 
-  const { namespaces } = useNamespaces();
+  const { namespaces, connected } = useNamespaces();
   const { pods, allPodsLookup, services, loading, error, togglePodExpansion, refreshData } = usePodData(namespace);
 
   // Calculate the right padding for content when AI panel is docked (in pixels)
@@ -169,6 +169,13 @@ function App() {
 
       {/* Main Content */}
       <div className="flex-1 flex flex-col overflow-hidden">
+        {!connected && (
+          <div className="bg-amber-500/20 border border-amber-500/50 text-amber-300 px-6 py-2 flex items-center gap-2">
+            <WifiOff className="w-4 h-4 flex-shrink-0" />
+            <p className="text-sm">Broker unavailable — retrying connection&hellip;</p>
+          </div>
+        )}
+
         {error && (
           <div className="bg-hubble-error/20 border border-hubble-error text-hubble-error px-6 py-3">
             <p className="text-sm">Error: {error}</p>
