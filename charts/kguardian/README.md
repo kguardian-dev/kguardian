@@ -149,7 +149,7 @@ The following table lists the configurable parameters of the kguardian chart and
 | database.image.pullPolicy | string | `"IfNotPresent"` | PostgreSQL image pull policy |
 | database.image.repository | string | `"postgres"` | PostgreSQL container image repository |
 | database.image.sha | string | `""` | Overrides the image tag using SHA digest |
-| database.image.tag | string | `"15-alpine"` | PostgreSQL image tag (pinned; bump deliberately) |
+| database.image.tag | string | `"18-alpine"` | PostgreSQL image tag (pinned; bump deliberately). @breaking 18-alpine: PostgreSQL major-version data dirs are not forward-compatible. Existing PG15 PersistentVolumeClaims must be migrated with pg_upgrade or dropped before upgrading. See charts/kguardian/UPGRADING.md. |
 | database.imagePullSecrets | list | `[]` | List of image pull secrets for private registries |
 | database.name | string | `"kguardian-db"` | Database name for PostgreSQL |
 | database.nameOverride | string | `""` | Override the name of the database resources |
@@ -277,6 +277,11 @@ The following table lists the configurable parameters of the kguardian chart and
 | namespace.annotations | object | `{}` | Annotations to add to the namespace |
 | namespace.labels | object | `{}` | Labels to add to the namespace |
 | namespace.name | string | `""` | Namespace name. If empty, uses the release namespace |
+
+## Upgrading
+
+For breaking-change migrations between chart versions (e.g. PostgreSQL major-version
+bumps), see [UPGRADING.md](./UPGRADING.md).
 
 ## Uninstalling the Chart
 

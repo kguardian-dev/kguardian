@@ -269,8 +269,12 @@ database:
     repository: postgres
     # -- PostgreSQL image pull policy
     pullPolicy: IfNotPresent
-    # -- PostgreSQL image tag (pinned; bump deliberately)
-    tag: "15-alpine"
+    # -- PostgreSQL image tag (pinned; bump deliberately).
+    # @breaking 18-alpine: PostgreSQL major-version data dirs are not
+    # forward-compatible. Existing PG15 PersistentVolumeClaims must be
+    # migrated with pg_upgrade or dropped before upgrading. See
+    # charts/kguardian/UPGRADING.md.
+    tag: "18-alpine"
     # -- Overrides the image tag using SHA digest
     sha: ""
 

@@ -1,0 +1,32 @@
+kguardian {{ .Chart.AppVersion }} installed in namespace "{{ .Release.Namespace }}".
+
+Database: PostgreSQL {{ .Values.database.image.tag }}
+{{- if .Values.database.persistence.enabled }}
+Persistence: enabled (claim {{ .Values.database.persistence.existingClaim | default "<unset>" | quote }})
+{{- else }}
+Persistence: disabled (emptyDir; data is lost when the pod restarts)
+{{- end }}
+
+{{- if and .Values.database.persistence.enabled (hasPrefix "18" .Values.database.image.tag) }}
+
+UPGRADING FROM POSTGRESQL 15 -> 18
+==================================
+PostgreSQL major-version data directories are not forward-compatible.
+If your existing PVC was initialised by a previous chart release running
+PostgreSQL 15, the database pod will crashloop with:
+
+  "database files are incompatible with server"
+
+To resolve, choose one:
+
+  1. Run pg_upgrade against the data directory before reinstalling
+     (preserves data). Steps in: charts/kguardian/UPGRADING.md
+
+  2. Drop the existing PVC and let kguardian repopulate from cluster
+     state (acceptable when the database holds only observability data).
+
+For fresh installs this notice does not apply.
+{{- end }}
+
+To check status:
+  kubectl -n {{ .Release.Namespace }} get pods -l app.kubernetes.io/instance={{ .Release.Name }}
