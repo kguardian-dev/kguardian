@@ -155,7 +155,9 @@ The following table lists the configurable parameters of the kguardian chart and
 | database.nameOverride | string | `""` | Override the name of the database resources |
 | database.nodeSelector | object | `{"kubernetes.io/os":"linux"}` | Node labels for the kguardian database pod assignment |
 | database.persistence.enabled | bool | `true` | Enable persistent storage for database. Defaults to true; set to false only for ephemeral testing. |
-| database.persistence.existingClaim | string | `""` | Use an existing PersistentVolumeClaim instead of creating a new one |
+| database.persistence.existingClaim | string | `""` | Use an existing PersistentVolumeClaim instead of creating a new one. When unset, the chart provisions a PVC named "{{ database.name }}-data". |
+| database.persistence.size | string | `"10Gi"` | Size of the auto-provisioned PVC (only used when existingClaim is unset) |
+| database.persistence.storageClassName | string | `""` | StorageClass for the auto-provisioned PVC (only used when existingClaim is unset). Empty string uses the cluster's default StorageClass. |
 | database.podAnnotations | object | `{}` | Annotations to add to database pods |
 | database.podSecurityContext | object | `{"fsGroup":999,"fsGroupChangePolicy":"OnRootMismatch","runAsGroup":999,"runAsUser":999,"seccompProfile":{"type":"RuntimeDefault"},"supplementalGroups":[999]}` | Database pod security context. Runs as postgres user (999) |
 | database.priorityClassName | string | `""` | Priority class to be used for the kguardian database pods |
