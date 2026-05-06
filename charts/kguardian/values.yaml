@@ -262,7 +262,39 @@ broker:
   priorityClassName: ""
 
 database:
-  # -- Database name for PostgreSQL
+  # -- Deploy the bundled in-cluster PostgreSQL. Set false to use an external
+  # PostgreSQL — populate `database.external.host` and provide credentials via
+  # `database.existingSecret`.
+  enabled: true
+
+  # -- PostgreSQL role used by the broker. Must exist on external Postgres.
+  user: rust
+  # -- Database name used by the broker. Must exist on external Postgres.
+  databaseName: kube
+
+  # -- Existing Secret containing the DB password under the key configured by
+  # `database.passwordSecretKey`. When empty AND `database.enabled=true`, the
+  # chart provisions a Secret named "kguardian-db-credentials" with a random
+  # password (regenerated only on first install).
+  existingSecret: ""
+  # -- Secret data key holding the DB password.
+  passwordSecretKey: password
+
+  # External PostgreSQL connection. Used only when `database.enabled=false`.
+  external:
+    # -- Hostname or FQDN of the external PostgreSQL instance, e.g.
+    # "postgres.databases.svc.cluster.local" or "db.example.com". Required
+    # when `database.enabled=false`.
+    host: ""
+    # -- Port of the external PostgreSQL instance.
+    port: 5432
+    # -- libpq sslmode for the external connection (disable | allow | prefer
+    # | require | verify-ca | verify-full). Cloud-managed Postgres typically
+    # requires "require" or stricter.
+    sslMode: prefer
+
+  # -- Object name for the in-cluster Database deployment / PVC / SA. Only
+  # used when `database.enabled=true`.
   name: kguardian-db
   image:
     # -- PostgreSQL container image repository
