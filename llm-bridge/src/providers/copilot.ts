@@ -71,7 +71,7 @@ export async function callCopilot(
       );
     } catch (error: any) {
       console.error("Copilot API Error:", error.response?.data?.error?.message || error.message);
-      throw new Error(`Copilot API error: ${error.response?.data?.error?.message || error.message}`);
+      throw new Error(`Copilot API error: ${error.response?.data?.error?.message || error.message}`, { cause: error });
     }
 
     const choice = response.data.choices[0];

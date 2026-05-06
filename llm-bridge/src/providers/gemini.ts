@@ -68,7 +68,7 @@ export async function callGemini(
       );
     } catch (error: any) {
       console.error("Gemini API Error:", error.response?.data?.error?.message || error.message);
-      throw new Error(`Gemini API error: ${error.response?.data?.error?.message || error.message}`);
+      throw new Error(`Gemini API error: ${error.response?.data?.error?.message || error.message}`, { cause: error });
     }
 
     const candidate = response.data.candidates[0];

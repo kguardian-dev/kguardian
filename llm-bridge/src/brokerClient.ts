@@ -55,7 +55,8 @@ export class BrokerClient {
       this.initPromise = null;
       console.error("Failed to initialize MCP client:", error);
       throw new Error(
-        `Failed to connect to MCP server at ${this.mcpUrl}: ${error instanceof Error ? error.message : String(error)}`
+        `Failed to connect to MCP server at ${this.mcpUrl}: ${error instanceof Error ? error.message : String(error)}`,
+        { cause: error }
       );
     }
   }

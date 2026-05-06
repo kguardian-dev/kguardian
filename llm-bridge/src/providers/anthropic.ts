@@ -67,7 +67,7 @@ export async function callAnthropic(
       );
     } catch (error: any) {
       console.error("Anthropic API Error:", error.response?.data?.error?.message || error.message);
-      throw new Error(`Anthropic API error: ${error.response?.data?.error?.message || error.message}`);
+      throw new Error(`Anthropic API error: ${error.response?.data?.error?.message || error.message}`, { cause: error });
     }
 
     const content = response.data.content;
