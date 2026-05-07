@@ -190,6 +190,40 @@ The following table lists the configurable parameters of the kguardian chart and
 | database.serviceAccount.name | string | `""` | The name of the service account to use. If not set and create is true, a name is generated using the fullname template |
 | database.tolerations | list | `[]` | Tolerations for the kguardian database pod assignment |
 | database.user | string | `"rust"` | PostgreSQL role used by the broker. Must exist on external Postgres. |
+| evaluator | object | `{"affinity":{},"autoscaling":{"enabled":false,"maxReplicas":5,"minReplicas":1,"targetCPUUtilizationPercentage":80},"container":{"port":8082},"enabled":true,"env":[],"image":{"pullPolicy":"IfNotPresent","repository":"ghcr.io/kguardian-dev/kguardian/evaluator","sha":"","tag":"0.1.0"},"imagePullSecrets":[],"logLevel":"info","metrics":{"serviceMonitor":{"enabled":false,"interval":"30s","labels":{},"path":"/metrics","port":"http","scrapeTimeout":"10s"}},"nodeSelector":{"kubernetes.io/os":"linux"},"podAnnotations":{},"podDisruptionBudget":{"enabled":false,"maxUnavailable":"","minAvailable":1},"podSecurityContext":{"fsGroup":1000,"fsGroupChangePolicy":"OnRootMismatch","runAsGroup":1000,"runAsUser":1000,"seccompProfile":{"type":"RuntimeDefault"},"supplementalGroups":[1000]},"priorityClassName":"","replicaCount":1,"resources":{"limits":{"memory":"256Mi"},"requests":{"cpu":"50m","memory":"64Mi"}},"securityContext":{"allowPrivilegeEscalation":false,"capabilities":{"drop":["ALL"]},"privileged":false,"readOnlyRootFilesystem":true,"runAsNonRoot":true,"runAsUser":1000},"service":{"name":"kguardian-evaluator","port":8082,"type":"ClusterIP"},"serviceAccount":{"annotations":{},"automountServiceAccountToken":true,"create":true,"name":""},"startupProbe":{},"tolerations":[],"topologySpreadConstraints":[]}` | ----------------------------------------------------------------------- |
+| evaluator.affinity | object | `{}` | Affinity rules for evaluator pod assignment |
+| evaluator.autoscaling.enabled | bool | `false` | Enable horizontal pod autoscaling for evaluator |
+| evaluator.autoscaling.maxReplicas | int | `5` | Maximum number of evaluator replicas |
+| evaluator.autoscaling.minReplicas | int | `1` | Minimum number of evaluator replicas |
+| evaluator.autoscaling.targetCPUUtilizationPercentage | int | `80` | Target CPU utilization percentage for autoscaling |
+| evaluator.container.port | int | `8082` | Evaluator HTTP port |
+| evaluator.enabled | bool | `true` | Deploy the audit-mode policy evaluator (and install its CRD). When false, the evaluator workload, RBAC, Service, and PDB/ServiceMonitor are skipped. The CRD itself ships in charts/kguardian/crds/ and is always installed by Helm regardless of this toggle. |
+| evaluator.env | list | `[]` | Additional environment variables for the evaluator |
+| evaluator.image.pullPolicy | string | `"IfNotPresent"` | Evaluator image pull policy |
+| evaluator.image.repository | string | `"ghcr.io/kguardian-dev/kguardian/evaluator"` | Evaluator container image repository |
+| evaluator.image.sha | string | `""` | Overrides the image tag using SHA digest |
+| evaluator.image.tag | string | `"0.1.0"` | Evaluator version tag (auto-updated by release-please) |
+| evaluator.imagePullSecrets | list | `[]` | List of image pull secrets for private registries |
+| evaluator.logLevel | string | `"info"` | Log level for the evaluator process (panic|fatal|error|warn|info|debug|trace) |
+| evaluator.metrics.serviceMonitor.enabled | bool | `false` | Create a ServiceMonitor for prometheus-operator. The evaluator does not currently expose /metrics natively — forward-compatible toggle for when it does. |
+| evaluator.nodeSelector | object | `{"kubernetes.io/os":"linux"}` | Node labels for evaluator pod assignment |
+| evaluator.podAnnotations | object | `{}` | Annotations to add to evaluator pods |
+| evaluator.podDisruptionBudget.enabled | bool | `false` | Create a PodDisruptionBudget for the evaluator. Defaults to false; enable when running >1 replica. |
+| evaluator.podSecurityContext | object | `{"fsGroup":1000,"fsGroupChangePolicy":"OnRootMismatch","runAsGroup":1000,"runAsUser":1000,"seccompProfile":{"type":"RuntimeDefault"},"supplementalGroups":[1000]}` | Evaluator pod security context. Runs as non-root user (1000) |
+| evaluator.priorityClassName | string | `""` | Priority class to be used for the kguardian evaluator pods |
+| evaluator.replicaCount | int | `1` | Number of evaluator replicas |
+| evaluator.resources | object | `{"limits":{"memory":"256Mi"},"requests":{"cpu":"50m","memory":"64Mi"}}` | Evaluator pod resource requests and limits |
+| evaluator.securityContext | object | `{"allowPrivilegeEscalation":false,"capabilities":{"drop":["ALL"]},"privileged":false,"readOnlyRootFilesystem":true,"runAsNonRoot":true,"runAsUser":1000}` | Evaluator container security context. Hardened with read-only root filesystem |
+| evaluator.service.name | string | `"kguardian-evaluator"` | Evaluator service name |
+| evaluator.service.port | int | `8082` | Evaluator service port |
+| evaluator.service.type | string | `"ClusterIP"` | Evaluator service type |
+| evaluator.serviceAccount.annotations | object | `{}` | Annotations to add to the service account |
+| evaluator.serviceAccount.automountServiceAccountToken | bool | `true` | Automount API credentials (the evaluator must reach the API server to watch CRDs, pods, and namespaces) |
+| evaluator.serviceAccount.create | bool | `true` | Specifies whether a service account should be created |
+| evaluator.serviceAccount.name | string | `""` | The name of the service account to use |
+| evaluator.startupProbe | object | `{}` | Startup probe. Empty by default — opt in when slow startup is expected. |
+| evaluator.tolerations | list | `[]` | Tolerations for evaluator pod assignment |
+| evaluator.topologySpreadConstraints | list | `[]` | Topology spread constraints applied to evaluator pods. |
 | frontend.affinity | object | `{}` | Affinity rules for frontend pod assignment |
 | frontend.autoscaling.enabled | bool | `false` | Enable horizontal pod autoscaling for frontend |
 | frontend.autoscaling.maxReplicas | int | `100` | Maximum number of frontend replicas |

@@ -1,0 +1,44 @@
+# Example AuditNetworkPolicy.
+# kguardian's evaluator will report flows that would be denied if this
+# policy were enforced — without dropping any traffic. Promote to
+# networking.k8s.io/v1 NetworkPolicy when you're satisfied with the
+# audit results.
+apiVersion: kguardian.dev/v1alpha1
+kind: AuditNetworkPolicy
+metadata:
+  name: payments-isolation
+  namespace: prod
+spec:
+  podSelector:
+    matchLabels:
+      app: payments
+  policyTypes: [Ingress, Egress]
+  ingress:
+    # Frontend may call the payments API on TCP/8080.
+    - from:
+        - podSelector:
+            matchLabels:
+              tier: frontend
+      ports:
+        - protocol: TCP
+          port: 8080
+  egress:
+    # DNS to kube-system CoreDNS.
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - protocol: UDP
+          port: 53
+    # PostgreSQL backend.
+    - to:
+        - podSelector:
+            matchLabels:
+              app: postgres
+      ports:
+        - protocol: TCP
+          port: 5432

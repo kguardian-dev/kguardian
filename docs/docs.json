@@ -28,6 +28,7 @@
               "concepts/overview",
               "concepts/ebpf-monitoring",
               "concepts/network-policies",
+              "concepts/audit-network-policy",
               "concepts/seccomp-profiles"
             ]
           },
