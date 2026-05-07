@@ -83,7 +83,7 @@ helm install kguardian oci://ghcr.io/kguardian-dev/charts/kguardian \
 sh -c "$(curl -fsSL https://raw.githubusercontent.com/kguardian-dev/kguardian/main/scripts/quick-install.sh)"
 ```
 
-Krew, manual download, custom Helm values, Kind setup, verification, upgrades, and uninstall are all covered in the [Installation Guide](https://docs.kguardian.dev/installation).
+Manual download, custom Helm values, Kind setup, verification, upgrades, and uninstall are all covered in the [Installation Guide](https://docs.kguardian.dev/installation).
 
 ## Quick Start
 

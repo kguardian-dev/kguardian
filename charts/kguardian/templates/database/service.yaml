@@ -1,3 +1,4 @@
+{{- if .Values.database.enabled }}
 ---
 apiVersion: v1
 kind: Service
@@ -14,3 +15,4 @@ spec:
       name: http
   selector:
     app.kubernetes.io/name: {{ .Values.database.service.name }}
+{{- end }}

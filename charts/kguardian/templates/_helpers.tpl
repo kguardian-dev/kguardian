@@ -74,3 +74,51 @@ Usage: include "kguardian.imageTag" .Values.<component>.image.tag
 {{- define "kguardian.imageTag" -}}
 {{- if regexMatch "^[0-9]+\\.[0-9]+\\.[0-9]+" . -}}v{{ . }}{{- else -}}{{ . }}{{- end -}}
 {{- end -}}
+
+{{/*
+Name of the Secret holding the database password.
+Returns `database.existingSecret` if set, otherwise the chart-managed default.
+Usage: include "kguardian.dbSecretName" .
+*/}}
+{{- define "kguardian.dbSecretName" -}}
+{{- .Values.database.existingSecret | default "kguardian-db-credentials" -}}
+{{- end -}}
+
+{{/*
+Hostname for the broker's DATABASE_URL.
+- database.enabled=true  -> in-cluster service FQDN
+- database.enabled=false -> database.external.host (required)
+Usage: include "kguardian.dbHost" .
+*/}}
+{{- define "kguardian.dbHost" -}}
+{{- if .Values.database.enabled -}}
+{{- printf "%s.%s.svc.cluster.local" .Values.database.service.name (include "kguardian.namespace" . | trim) -}}
+{{- else -}}
+{{- required "database.external.host is required when database.enabled=false" .Values.database.external.host -}}
+{{- end -}}
+{{- end -}}
+
+{{/*
+Port for the broker's DATABASE_URL.
+*/}}
+{{- define "kguardian.dbPort" -}}
+{{- if .Values.database.enabled -}}
+{{- .Values.database.container.port -}}
+{{- else -}}
+{{- .Values.database.external.port -}}
+{{- end -}}
+{{- end -}}
+
+{{/*
+Full broker DATABASE_URL value, with $(DB_PASSWORD) interpolated by the
+container at runtime via secretKeyRef. sslmode is appended only for the
+external case so the in-cluster URL stays identical to prior releases.
+*/}}
+{{- define "kguardian.dbUrl" -}}
+{{- $base := printf "postgres://%s:$(DB_PASSWORD)@%s:%v/%s" .Values.database.user (include "kguardian.dbHost" .) (include "kguardian.dbPort" .) .Values.database.databaseName -}}
+{{- if and (not .Values.database.enabled) .Values.database.external.sslMode -}}
+{{- printf "%s?sslmode=%s" $base .Values.database.external.sslMode -}}
+{{- else -}}
+{{- $base -}}
+{{- end -}}
+{{- end -}}

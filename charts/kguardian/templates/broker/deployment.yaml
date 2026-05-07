@@ -38,7 +38,7 @@ spec:
           image: "{{ .Values.broker.initContainer.image.repository }}:{{ .Values.broker.initContainer.image.tag }}"
           {{- end }}
           imagePullPolicy: {{ .Values.broker.initContainer.image.pullPolicy }}
-          command: ["sh", "-c", "until nc -z {{ .Values.database.service.name }}.{{ include "kguardian.namespace" . }}.svc.cluster.local {{ .Values.database.container.port }}; do echo 'waiting for db'; sleep 2; done"]
+          command: ["sh", "-c", "until nc -z {{ include "kguardian.dbHost" . }} {{ include "kguardian.dbPort" . }}; do echo 'waiting for db'; sleep 2; done"]
           securityContext:
             {{- toYaml .Values.broker.initContainer.securityContext | nindent 12 }}
       containers:
@@ -59,10 +59,10 @@ spec:
             - name: DB_PASSWORD
               valueFrom:
                 secretKeyRef:
-                  name: kguardian-db-credentials
-                  key: password
+                  name: {{ include "kguardian.dbSecretName" . }}
+                  key: {{ .Values.database.passwordSecretKey }}
             - name: DATABASE_URL
-              value: "postgres://rust:$(DB_PASSWORD)@{{ .Values.database.service.name }}.{{ include "kguardian.namespace" . }}.svc.cluster.local:{{ .Values.database.container.port }}/kube"
+              value: {{ include "kguardian.dbUrl" . | quote }}
           livenessProbe:
             httpGet:
               path: /health

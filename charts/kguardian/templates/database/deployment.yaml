@@ -1,3 +1,4 @@
+{{- if .Values.database.enabled }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -35,22 +36,22 @@ spec:
             {{- toYaml .Values.database.securityContext | nindent 12 }}
           env:
             - name: POSTGRES_USER
-              value: rust
+              value: {{ .Values.database.user | quote }}
             - name: POSTGRES_PASSWORD
               valueFrom:
                 secretKeyRef:
-                  name: kguardian-db-credentials
-                  key: password
+                  name: {{ include "kguardian.dbSecretName" . }}
+                  key: {{ .Values.database.passwordSecretKey }}
             - name: POSTGRES_DB
-              value: kube
+              value: {{ .Values.database.databaseName | quote }}
           livenessProbe:
             exec:
               command:
                 - pg_isready
                 - -U
-                - rust
+                - {{ .Values.database.user | quote }}
                 - -d
-                - kube
+                - {{ .Values.database.databaseName | quote }}
             initialDelaySeconds: 30
             periodSeconds: 15
             timeoutSeconds: 5
@@ -60,9 +61,9 @@ spec:
               command:
                 - pg_isready
                 - -U
-                - rust
+                - {{ .Values.database.user | quote }}
                 - -d
-                - kube
+                - {{ .Values.database.databaseName | quote }}
             initialDelaySeconds: 5
             periodSeconds: 10
             timeoutSeconds: 5
@@ -98,3 +99,4 @@ spec:
       tolerations:
         {{- toYaml . | nindent 8 }}
       {{- end }}
+{{- end }}

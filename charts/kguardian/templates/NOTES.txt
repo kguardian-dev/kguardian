@@ -1,13 +1,19 @@
 kguardian {{ .Chart.AppVersion }} installed in namespace "{{ .Release.Namespace }}".
 
-Database: PostgreSQL {{ .Values.database.image.tag }}
+{{- if .Values.database.enabled }}
+Database: in-cluster PostgreSQL {{ .Values.database.image.tag }}
 {{- if .Values.database.persistence.enabled }}
-Persistence: enabled (claim {{ .Values.database.persistence.existingClaim | default "<unset>" | quote }})
+Persistence: enabled (claim {{ .Values.database.persistence.existingClaim | default (printf "%s-data (auto-provisioned)" .Values.database.name) | quote }})
 {{- else }}
 Persistence: disabled (emptyDir; data is lost when the pod restarts)
 {{- end }}
+{{- else }}
+Database: external PostgreSQL at {{ .Values.database.external.host }}:{{ .Values.database.external.port }}
+                  user="{{ .Values.database.user }}" db="{{ .Values.database.databaseName }}" sslmode="{{ .Values.database.external.sslMode }}"
+                  password from Secret "{{ include "kguardian.dbSecretName" . }}" (key="{{ .Values.database.passwordSecretKey }}")
+{{- end }}
 
-{{- if and .Values.database.persistence.enabled (hasPrefix "18" .Values.database.image.tag) }}
+{{- if and .Values.database.enabled .Values.database.persistence.enabled (hasPrefix "18" .Values.database.image.tag) }}
 
 UPGRADING FROM POSTGRESQL 15 -> 18
 ==================================

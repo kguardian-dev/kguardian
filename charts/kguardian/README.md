@@ -145,15 +145,22 @@ The following table lists the configurable parameters of the kguardian chart and
 | database.autoscaling.minReplicas | int | `1` | Minimum number of database replicas |
 | database.autoscaling.targetCPUUtilizationPercentage | int | `80` | Target CPU utilization percentage for autoscaling |
 | database.container.port | int | `5432` | PostgreSQL container port |
+| database.databaseName | string | `"kube"` | Database name used by the broker. Must exist on external Postgres. |
+| database.enabled | bool | `true` | Deploy the bundled in-cluster PostgreSQL. Set false to use an external PostgreSQL — populate `database.external.host` and provide credentials via `database.existingSecret`. |
+| database.existingSecret | string | `""` | Existing Secret containing the DB password under the key configured by `database.passwordSecretKey`. When empty AND `database.enabled=true`, the chart provisions a Secret named "kguardian-db-credentials" with a random password (regenerated only on first install). |
+| database.external.host | string | `""` | Hostname or FQDN of the external PostgreSQL instance, e.g. "postgres.databases.svc.cluster.local" or "db.example.com". Required when `database.enabled=false`. |
+| database.external.port | int | `5432` | Port of the external PostgreSQL instance. |
+| database.external.sslMode | string | `"prefer"` | libpq sslmode for the external connection (disable | allow | prefer | require | verify-ca | verify-full). Cloud-managed Postgres typically requires "require" or stricter. |
 | database.fullnameOverride | string | `""` | Override the full name of the database resources |
 | database.image.pullPolicy | string | `"IfNotPresent"` | PostgreSQL image pull policy |
 | database.image.repository | string | `"postgres"` | PostgreSQL container image repository |
 | database.image.sha | string | `""` | Overrides the image tag using SHA digest |
 | database.image.tag | string | `"18-alpine"` | PostgreSQL image tag (pinned; bump deliberately). @breaking 18-alpine: PostgreSQL major-version data dirs are not forward-compatible. Existing PG15 PersistentVolumeClaims must be migrated with pg_upgrade or dropped before upgrading. See charts/kguardian/UPGRADING.md. |
 | database.imagePullSecrets | list | `[]` | List of image pull secrets for private registries |
-| database.name | string | `"kguardian-db"` | Database name for PostgreSQL |
+| database.name | string | `"kguardian-db"` | Object name for the in-cluster Database deployment / PVC / SA. Only used when `database.enabled=true`. |
 | database.nameOverride | string | `""` | Override the name of the database resources |
 | database.nodeSelector | object | `{"kubernetes.io/os":"linux"}` | Node labels for the kguardian database pod assignment |
+| database.passwordSecretKey | string | `"password"` | Secret data key holding the DB password. |
 | database.persistence.enabled | bool | `true` | Enable persistent storage for database. Defaults to true; set to false only for ephemeral testing. |
 | database.persistence.existingClaim | string | `""` | Use an existing PersistentVolumeClaim instead of creating a new one. When unset, the chart provisions a PVC named "{{ database.name }}-data". |
 | database.persistence.size | string | `"10Gi"` | Size of the auto-provisioned PVC (only used when existingClaim is unset) |
@@ -171,6 +178,7 @@ The following table lists the configurable parameters of the kguardian chart and
 | database.serviceAccount.create | bool | `true` | Specifies whether a service account should be created |
 | database.serviceAccount.name | string | `""` | The name of the service account to use. If not set and create is true, a name is generated using the fullname template |
 | database.tolerations | list | `[]` | Tolerations for the kguardian database pod assignment |
+| database.user | string | `"rust"` | PostgreSQL role used by the broker. Must exist on external Postgres. |
 | frontend.affinity | object | `{}` | Affinity rules for frontend pod assignment |
 | frontend.autoscaling.enabled | bool | `false` | Enable horizontal pod autoscaling for frontend |
 | frontend.autoscaling.maxReplicas | int | `100` | Maximum number of frontend replicas |
