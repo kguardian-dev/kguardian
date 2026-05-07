@@ -18,14 +18,23 @@ import (
 
 	"github.com/kguardian-dev/kguardian/evaluator/pkg/matcher"
 	"github.com/kguardian-dev/kguardian/evaluator/pkg/status"
-	"github.com/kguardian-dev/kguardian/evaluator/pkg/store"
+	v1alpha1 "github.com/kguardian-dev/kguardian/evaluator/pkg/v1alpha1"
 	"github.com/sirupsen/logrus"
 )
+
+// PolicyLookup is the slice of *store.Store the server actually uses.
+// Extracted as an interface so handler logic can be tested with an
+// in-memory fake (see pkg/server/server_test.go).
+type PolicyLookup interface {
+	matcher.Lookup
+	PoliciesInNamespace(ns string) []*v1alpha1.AuditNetworkPolicy
+	ClusterPolicies() []*v1alpha1.AuditClusterNetworkPolicy
+}
 
 // Server is the HTTP entry point.
 type Server struct {
 	addr   string
-	store  *store.Store
+	store  PolicyLookup
 	agg    *status.Aggregator
 	log    *logrus.Logger
 	ready  atomic.Bool
@@ -34,7 +43,7 @@ type Server struct {
 }
 
 // New constructs a Server. Call Start to begin serving.
-func New(addr string, st *store.Store, agg *status.Aggregator, log *logrus.Logger) *Server {
+func New(addr string, st PolicyLookup, agg *status.Aggregator, log *logrus.Logger) *Server {
 	return &Server{addr: addr, store: st, agg: agg, log: log}
 }
 
