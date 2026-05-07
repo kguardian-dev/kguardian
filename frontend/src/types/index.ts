@@ -69,3 +69,21 @@ export interface ServiceInfo {
   svc_namespace: string | null;
   service_spec?: KubeObject; // Full Kubernetes Service object
 }
+
+// Matches broker's AuditVerdict type — one row per "would deny" flow
+// recorded by the kguardian-evaluator.
+export interface AuditVerdict {
+  id: number;
+  policy_uid: string;
+  policy_namespace: string; // empty string for cluster-scoped policies
+  policy_name: string;
+  direction: 'Ingress' | 'Egress' | string;
+  src_namespace: string | null;
+  src_pod: string | null;
+  dst_namespace: string | null;
+  dst_pod: string | null;
+  dst_port: number;
+  protocol: string;
+  reason: string | null;
+  observed_at: string; // ISO 8601
+}

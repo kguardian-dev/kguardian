@@ -1,6 +1,6 @@
 import axios from 'axios';
 import type { AxiosInstance } from 'axios';
-import type { PodInfo, NetworkTraffic, SyscallInfo, ServiceInfo } from '../types';
+import type { PodInfo, NetworkTraffic, SyscallInfo, ServiceInfo, AuditVerdict } from '../types';
 
 class BrokerAPIClient {
   private client: AxiosInstance;
@@ -17,6 +17,29 @@ class BrokerAPIClient {
         'Content-Type': 'application/json',
       },
     });
+  }
+
+  /**
+   * Get recent audit-mode verdicts — flows that would have been denied
+   * by an AuditNetworkPolicy / AuditClusterNetworkPolicy if enforced.
+   * Optional filters: policy name, policy namespace, row limit.
+   */
+  async getAuditVerdicts(opts: {
+    policy?: string;
+    namespace?: string;
+    limit?: number;
+  } = {}): Promise<AuditVerdict[]> {
+    try {
+      const params: Record<string, string | number> = {};
+      if (opts.policy) params.policy = opts.policy;
+      if (opts.namespace) params.namespace = opts.namespace;
+      if (opts.limit) params.limit = opts.limit;
+      const response = await this.client.get('/audit/verdicts', { params });
+      return response.data || [];
+    } catch (error) {
+      console.error('Error fetching audit verdicts:', error);
+      return [];
+    }
   }
 
   /**
