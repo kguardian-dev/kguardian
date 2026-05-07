@@ -914,10 +914,11 @@ evaluator:
   # itself ships in charts/kguardian/crds/ and is always installed by
   # Helm regardless of this toggle.
   #
-  # Defaults to false because the evaluator image build pipeline lands
-  # in a follow-up PR; flip on once `ghcr.io/kguardian-dev/kguardian/evaluator`
-  # is publishing tags.
-  enabled: false
+  # The evaluator is now published at ghcr.io/kguardian-dev/kguardian/evaluator
+  # and on by default. Set to false to skip the workload while still
+  # installing the AuditNetworkPolicy CRD (e.g. for shared-cluster setups
+  # where the evaluator runs elsewhere).
+  enabled: true
 
   # -- Number of evaluator replicas
   replicaCount: 1
