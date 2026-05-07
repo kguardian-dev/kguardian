@@ -899,11 +899,15 @@ mcpServer:
 # docs/audit-network-policy.mdx for the design.
 # -------------------------------------------------------------------------
 evaluator:
-  # -- Deploy the audit-mode policy evaluator (and install its CRD). When
-  # false, the evaluator workload, RBAC, Service, and PDB/ServiceMonitor
-  # are skipped. The CRD itself ships in charts/kguardian/crds/ and is
-  # always installed by Helm regardless of this toggle.
-  enabled: true
+  # -- Deploy the audit-mode policy evaluator. When false, the evaluator
+  # workload, RBAC, Service, and PDB/ServiceMonitor are skipped. The CRD
+  # itself ships in charts/kguardian/crds/ and is always installed by
+  # Helm regardless of this toggle.
+  #
+  # Defaults to false because the evaluator image build pipeline lands
+  # in a follow-up PR; flip on once `ghcr.io/kguardian-dev/kguardian/evaluator`
+  # is publishing tags.
+  enabled: false
 
   # -- Number of evaluator replicas
   replicaCount: 1
