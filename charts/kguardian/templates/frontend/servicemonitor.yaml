@@ -1,0 +1,26 @@
+{{- if .Values.frontend.metrics.serviceMonitor.enabled }}
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: {{ include "kguardian.name" . }}-frontend
+  {{- with .Values.frontend.metrics.serviceMonitor.namespace }}
+  namespace: {{ . | quote }}
+  {{- end }}
+  labels:
+    {{- include "kguardian.labels" . | nindent 4 }}
+    {{- with .Values.frontend.metrics.serviceMonitor.labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ .Values.frontend.service.name }}
+  namespaceSelector:
+    matchNames:
+      - {{ include "kguardian.namespace" . | trim }}
+  endpoints:
+    - port: {{ .Values.frontend.metrics.serviceMonitor.port }}
+      path: {{ .Values.frontend.metrics.serviceMonitor.path }}
+      interval: {{ .Values.frontend.metrics.serviceMonitor.interval }}
+      scrapeTimeout: {{ .Values.frontend.metrics.serviceMonitor.scrapeTimeout }}
+{{- end }}

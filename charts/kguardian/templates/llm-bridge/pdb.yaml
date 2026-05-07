@@ -1,0 +1,17 @@
+{{- if and .Values.llmBridge.enabled .Values.llmBridge.podDisruptionBudget.enabled }}
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ .Values.llmBridge.service.name }}
+  labels:
+    {{- include "kguardian.labels" . | nindent 4 }}
+spec:
+  {{- if .Values.llmBridge.podDisruptionBudget.maxUnavailable }}
+  maxUnavailable: {{ .Values.llmBridge.podDisruptionBudget.maxUnavailable }}
+  {{- else }}
+  minAvailable: {{ .Values.llmBridge.podDisruptionBudget.minAvailable | default 1 }}
+  {{- end }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ .Values.llmBridge.service.name }}
+{{- end }}

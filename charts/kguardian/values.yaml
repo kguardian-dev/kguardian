@@ -261,6 +261,53 @@ broker:
   # -- Priority class to be used for the kguardian broker pods
   priorityClassName: ""
 
+  # -- Startup probe. Empty by default — opt in when slow startup is expected
+  # (e.g. cold image pull on small nodes). Replaces the default startup probe.
+  startupProbe: {}
+  # Example:
+  # startupProbe:
+  #   httpGet: { path: /health, port: http }
+  #   failureThreshold: 30
+  #   periodSeconds: 10
+
+  # -- Topology spread constraints applied to broker pods. Useful when running
+  # multiple replicas across zones/nodes. See
+  # https://kubernetes.io/docs/concepts/scheduling-eviction/topology-spread-constraints/
+  topologySpreadConstraints: []
+  # Example:
+  # - maxSkew: 1
+  #   topologyKey: kubernetes.io/hostname
+  #   whenUnsatisfiable: ScheduleAnyway
+  #   labelSelector:
+  #     matchLabels:
+  #       app.kubernetes.io/name: kguardian-broker
+
+  podDisruptionBudget:
+    # -- Create a PodDisruptionBudget for the broker. Defaults to false; enable
+    # when running >1 replica so voluntary evictions can't take all of them out.
+    enabled: false
+    # -- Either minAvailable or maxUnavailable can be set (not both).
+    # Accepts integer or percentage string ("50%").
+    minAvailable: 1
+    maxUnavailable: ""
+
+  metrics:
+    serviceMonitor:
+      # -- Create a ServiceMonitor for prometheus-operator. The broker does
+      # not currently expose /metrics — this is a forward-compatible toggle.
+      enabled: false
+      # -- Endpoint path on the broker's HTTP service.
+      path: /metrics
+      # -- Service port name to scrape.
+      port: http
+      # -- Scrape interval.
+      interval: 30s
+      # -- Scrape timeout.
+      scrapeTimeout: 10s
+      # -- Extra labels to add to the ServiceMonitor (so prometheus-operator
+      # picks it up — usually `release: kube-prometheus-stack`).
+      labels: {}
+
 database:
   # -- Deploy the bundled in-cluster PostgreSQL. Set false to use an external
   # PostgreSQL — populate `database.external.host` and provide credentials via
@@ -505,6 +552,30 @@ frontend:
   # -- Priority class to be used for the kguardian frontend pods
   priorityClassName: ""
 
+  # -- Startup probe. Empty by default — opt in when slow startup is expected.
+  startupProbe: {}
+
+  # -- Topology spread constraints applied to frontend pods.
+  topologySpreadConstraints: []
+
+  podDisruptionBudget:
+    # -- Create a PodDisruptionBudget for the frontend. Defaults to false;
+    # enable when running >1 replica.
+    enabled: false
+    minAvailable: 1
+    maxUnavailable: ""
+
+  metrics:
+    serviceMonitor:
+      # -- Create a ServiceMonitor for prometheus-operator. The frontend
+      # does not currently expose /metrics — forward-compatible toggle.
+      enabled: false
+      path: /metrics
+      port: http
+      interval: 30s
+      scrapeTimeout: 10s
+      labels: {}
+
   ingress:
     # -- Enable ingress for frontend
     enabled: false
@@ -625,6 +696,30 @@ llmBridge:
 
   # -- Priority class to be used for the kguardian llm-bridge pods
   priorityClassName: ""
+
+  # -- Startup probe. Empty by default — opt in when slow startup is expected.
+  startupProbe: {}
+
+  # -- Topology spread constraints applied to llm-bridge pods.
+  topologySpreadConstraints: []
+
+  podDisruptionBudget:
+    # -- Create a PodDisruptionBudget for the llm-bridge. Defaults to false;
+    # enable when running >1 replica.
+    enabled: false
+    minAvailable: 1
+    maxUnavailable: ""
+
+  metrics:
+    serviceMonitor:
+      # -- Create a ServiceMonitor for prometheus-operator. llm-bridge does
+      # not currently expose /metrics — forward-compatible toggle.
+      enabled: false
+      path: /metrics
+      port: http
+      interval: 30s
+      scrapeTimeout: 10s
+      labels: {}
 
   # -- Additional environment variables for llm-bridge
   env: []
@@ -772,3 +867,28 @@ mcpServer:
 
   # -- Priority class to be used for the kguardian mcp-server pods
   priorityClassName: ""
+
+  # -- Startup probe. Empty by default — opt in when slow startup is expected.
+  startupProbe: {}
+
+  # -- Topology spread constraints applied to mcp-server pods.
+  topologySpreadConstraints: []
+
+  podDisruptionBudget:
+    # -- Create a PodDisruptionBudget for the mcp-server. Defaults to false;
+    # enable when running >1 replica.
+    enabled: false
+    minAvailable: 1
+    maxUnavailable: ""
+
+  metrics:
+    serviceMonitor:
+      # -- Create a ServiceMonitor for prometheus-operator. mcp-server has a
+      # /metrics endpoint configured via kmcp.yaml; toggle this on once the
+      # exposed port matches `service.port`.
+      enabled: false
+      path: /metrics
+      port: http
+      interval: 30s
+      scrapeTimeout: 10s
+      labels: {}

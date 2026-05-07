@@ -1,0 +1,26 @@
+{{- if .Values.broker.metrics.serviceMonitor.enabled }}
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: {{ include "kguardian.name" . }}-broker
+  {{- with .Values.broker.metrics.serviceMonitor.namespace }}
+  namespace: {{ . | quote }}
+  {{- end }}
+  labels:
+    {{- include "kguardian.labels" . | nindent 4 }}
+    {{- with .Values.broker.metrics.serviceMonitor.labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ .Values.broker.service.name }}
+  namespaceSelector:
+    matchNames:
+      - {{ include "kguardian.namespace" . | trim }}
+  endpoints:
+    - port: {{ .Values.broker.metrics.serviceMonitor.port }}
+      path: {{ .Values.broker.metrics.serviceMonitor.path }}
+      interval: {{ .Values.broker.metrics.serviceMonitor.interval }}
+      scrapeTimeout: {{ .Values.broker.metrics.serviceMonitor.scrapeTimeout }}
+{{- end }}

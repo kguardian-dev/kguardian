@@ -1,0 +1,17 @@
+{{- if .Values.broker.podDisruptionBudget.enabled }}
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "kguardian.name" . }}-broker
+  labels:
+    {{- include "kguardian.labels" . | nindent 4 }}
+spec:
+  {{- if .Values.broker.podDisruptionBudget.maxUnavailable }}
+  maxUnavailable: {{ .Values.broker.podDisruptionBudget.maxUnavailable }}
+  {{- else }}
+  minAvailable: {{ .Values.broker.podDisruptionBudget.minAvailable | default 1 }}
+  {{- end }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ .Values.broker.service.name }}
+{{- end }}

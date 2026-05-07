@@ -90,9 +90,18 @@ The following table lists the configurable parameters of the kguardian chart and
 | broker.initContainer.image.sha | string | `""` | Overrides the init container image tag using SHA digest |
 | broker.initContainer.image.tag | string | `"latest"` | Broker init container image tag |
 | broker.initContainer.securityContext | object | `{"allowPrivilegeEscalation":false,"capabilities":{"drop":["ALL"]},"readOnlyRootFilesystem":true,"runAsNonRoot":true,"runAsUser":65534}` | Broker init container security context |
+| broker.metrics.serviceMonitor.enabled | bool | `false` | Create a ServiceMonitor for prometheus-operator. The broker does not currently expose /metrics — this is a forward-compatible toggle. |
+| broker.metrics.serviceMonitor.interval | string | `"30s"` | Scrape interval. |
+| broker.metrics.serviceMonitor.labels | object | `{}` | Extra labels to add to the ServiceMonitor (so prometheus-operator picks it up — usually `release: kube-prometheus-stack`). |
+| broker.metrics.serviceMonitor.path | string | `"/metrics"` | Endpoint path on the broker's HTTP service. |
+| broker.metrics.serviceMonitor.port | string | `"http"` | Service port name to scrape. |
+| broker.metrics.serviceMonitor.scrapeTimeout | string | `"10s"` | Scrape timeout. |
 | broker.nameOverride | string | `""` | Override the name of the broker resources |
 | broker.nodeSelector | object | `{"kubernetes.io/os":"linux"}` | Node labels for the kguardian broker pod assignment |
 | broker.podAnnotations | object | `{}` | Annotations to add to broker pods |
+| broker.podDisruptionBudget.enabled | bool | `false` | Create a PodDisruptionBudget for the broker. Defaults to false; enable when running >1 replica so voluntary evictions can't take all of them out. |
+| broker.podDisruptionBudget.maxUnavailable | string | `""` |  |
+| broker.podDisruptionBudget.minAvailable | int | `1` | Either minAvailable or maxUnavailable can be set (not both). Accepts integer or percentage string ("50%"). |
 | broker.podSecurityContext | object | `{"fsGroup":1000,"fsGroupChangePolicy":"OnRootMismatch","runAsGroup":1000,"runAsUser":1000,"seccompProfile":{"type":"RuntimeDefault"},"supplementalGroups":[1000]}` | Broker pod security context. Runs as non-root user 1000 |
 | broker.priorityClassName | string | `""` | Priority class to be used for the kguardian broker pods |
 | broker.replicaCount | int | `1` | Number of broker replicas to deploy |
@@ -105,7 +114,9 @@ The following table lists the configurable parameters of the kguardian chart and
 | broker.serviceAccount.automountServiceAccountToken | bool | `false` | Automount API credentials for a service account |
 | broker.serviceAccount.create | bool | `true` | Specifies whether a service account should be created |
 | broker.serviceAccount.name | string | `""` | The name of the service account to use. If not set and create is true, a name is generated using the fullname template |
+| broker.startupProbe | object | `{}` | Startup probe. Empty by default — opt in when slow startup is expected (e.g. cold image pull on small nodes). Replaces the default startup probe. |
 | broker.tolerations | list | `[]` | Tolerations for the kguardian broker pod assignment |
+| broker.topologySpreadConstraints | list | `[]` | Topology spread constraints applied to broker pods. Useful when running multiple replicas across zones/nodes. See https://kubernetes.io/docs/concepts/scheduling-eviction/topology-spread-constraints/ |
 | controller.affinity | object | `{}` | Affinity rules for controller pod assignment |
 | controller.autoscaling.enabled | bool | `false` | Enable horizontal pod autoscaling for controller |
 | controller.autoscaling.maxReplicas | int | `100` | Maximum number of controller replicas |
@@ -196,9 +207,18 @@ The following table lists the configurable parameters of the kguardian chart and
 | frontend.ingress.enabled | bool | `false` | Enable ingress for frontend |
 | frontend.ingress.hosts | list | `[{"host":"kguardian.example.com","paths":[{"path":"/","pathType":"Prefix"}]}]` | Ingress hosts configuration |
 | frontend.ingress.tls | list | `[]` | Ingress TLS configuration |
+| frontend.metrics.serviceMonitor.enabled | bool | `false` | Create a ServiceMonitor for prometheus-operator. The frontend does not currently expose /metrics — forward-compatible toggle. |
+| frontend.metrics.serviceMonitor.interval | string | `"30s"` |  |
+| frontend.metrics.serviceMonitor.labels | object | `{}` |  |
+| frontend.metrics.serviceMonitor.path | string | `"/metrics"` |  |
+| frontend.metrics.serviceMonitor.port | string | `"http"` |  |
+| frontend.metrics.serviceMonitor.scrapeTimeout | string | `"10s"` |  |
 | frontend.nameOverride | string | `""` | Override the name of the frontend resources |
 | frontend.nodeSelector | object | `{"kubernetes.io/os":"linux"}` | Node labels for the kguardian frontend pod assignment |
 | frontend.podAnnotations | object | `{}` | Annotations to add to frontend pods |
+| frontend.podDisruptionBudget.enabled | bool | `false` | Create a PodDisruptionBudget for the frontend. Defaults to false; enable when running >1 replica. |
+| frontend.podDisruptionBudget.maxUnavailable | string | `""` |  |
+| frontend.podDisruptionBudget.minAvailable | int | `1` |  |
 | frontend.podSecurityContext | object | `{"fsGroup":1337,"fsGroupChangePolicy":"OnRootMismatch","runAsGroup":1337,"runAsUser":1337,"seccompProfile":{"type":"RuntimeDefault"},"supplementalGroups":[1337]}` | Frontend pod security context. Runs as non-root user (1337) |
 | frontend.priorityClassName | string | `""` | Priority class to be used for the kguardian frontend pods |
 | frontend.replicaCount | int | `1` | Number of frontend replicas to deploy |
@@ -211,7 +231,9 @@ The following table lists the configurable parameters of the kguardian chart and
 | frontend.serviceAccount.automountServiceAccountToken | bool | `false` | Automount API credentials for a service account |
 | frontend.serviceAccount.create | bool | `true` | Specifies whether a service account should be created |
 | frontend.serviceAccount.name | string | `""` | The name of the service account to use. If not set and create is true, a name is generated using the fullname template |
+| frontend.startupProbe | object | `{}` | Startup probe. Empty by default — opt in when slow startup is expected. |
 | frontend.tolerations | list | `[]` | Tolerations for the kguardian frontend pod assignment |
+| frontend.topologySpreadConstraints | list | `[]` | Topology spread constraints applied to frontend pods. |
 | global.annotations | object | `{}` | Annotations to apply to all resources |
 | global.labels | object | `{}` | Labels to apply to all resources |
 | global.priorityClassName | string | `""` | Priority class to be used for the kguardian pods |
@@ -229,9 +251,18 @@ The following table lists the configurable parameters of the kguardian chart and
 | llmBridge.image.sha | string | `""` | Overrides the image tag using SHA digest |
 | llmBridge.image.tag | string | `"1.2.3"` | LLM Bridge version tag (auto-updated by release-please) |
 | llmBridge.imagePullSecrets | list | `[]` | List of image pull secrets for private registries |
+| llmBridge.metrics.serviceMonitor.enabled | bool | `false` | Create a ServiceMonitor for prometheus-operator. llm-bridge does not currently expose /metrics — forward-compatible toggle. |
+| llmBridge.metrics.serviceMonitor.interval | string | `"30s"` |  |
+| llmBridge.metrics.serviceMonitor.labels | object | `{}` |  |
+| llmBridge.metrics.serviceMonitor.path | string | `"/metrics"` |  |
+| llmBridge.metrics.serviceMonitor.port | string | `"http"` |  |
+| llmBridge.metrics.serviceMonitor.scrapeTimeout | string | `"10s"` |  |
 | llmBridge.nameOverride | string | `""` | Override the name of the llm-bridge resources |
 | llmBridge.nodeSelector | object | `{"kubernetes.io/os":"linux"}` | Node labels for the kguardian llm-bridge pod assignment |
 | llmBridge.podAnnotations | object | `{}` | Annotations to add to llm-bridge pods |
+| llmBridge.podDisruptionBudget.enabled | bool | `false` | Create a PodDisruptionBudget for the llm-bridge. Defaults to false; enable when running >1 replica. |
+| llmBridge.podDisruptionBudget.maxUnavailable | string | `""` |  |
+| llmBridge.podDisruptionBudget.minAvailable | int | `1` |  |
 | llmBridge.podSecurityContext | object | `{"fsGroup":1000,"fsGroupChangePolicy":"OnRootMismatch","runAsGroup":1000,"runAsUser":1000,"seccompProfile":{"type":"RuntimeDefault"},"supplementalGroups":[1000]}` | LLM Bridge pod security context. Runs as non-root user (node:1000) |
 | llmBridge.priorityClassName | string | `""` | Priority class to be used for the kguardian llm-bridge pods |
 | llmBridge.replicaCount | int | `2` | Number of llm-bridge replicas to deploy |
@@ -253,7 +284,9 @@ The following table lists the configurable parameters of the kguardian chart and
 | llmBridge.serviceAccount.automountServiceAccountToken | bool | `false` | Automount API credentials for a service account |
 | llmBridge.serviceAccount.create | bool | `true` | Specifies whether a service account should be created |
 | llmBridge.serviceAccount.name | string | `""` | The name of the service account to use. If not set and create is true, a name is generated using the fullname template |
+| llmBridge.startupProbe | object | `{}` | Startup probe. Empty by default — opt in when slow startup is expected. |
 | llmBridge.tolerations | list | `[]` | Tolerations for the kguardian llm-bridge pod assignment |
+| llmBridge.topologySpreadConstraints | list | `[]` | Topology spread constraints applied to llm-bridge pods. |
 | mcpServer.affinity | object | `{}` | Affinity rules for mcp-server pod assignment |
 | mcpServer.autoscaling.enabled | bool | `false` | Enable horizontal pod autoscaling for mcp-server |
 | mcpServer.autoscaling.maxReplicas | int | `5` | Maximum number of mcp-server replicas |
@@ -268,9 +301,18 @@ The following table lists the configurable parameters of the kguardian chart and
 | mcpServer.image.sha | string | `""` | Overrides the image tag using SHA digest |
 | mcpServer.image.tag | string | `"1.3.4"` | MCP Server version tag (auto-updated by release-please) |
 | mcpServer.imagePullSecrets | list | `[]` | List of image pull secrets for private registries |
+| mcpServer.metrics.serviceMonitor.enabled | bool | `false` | Create a ServiceMonitor for prometheus-operator. mcp-server has a /metrics endpoint configured via kmcp.yaml; toggle this on once the exposed port matches `service.port`. |
+| mcpServer.metrics.serviceMonitor.interval | string | `"30s"` |  |
+| mcpServer.metrics.serviceMonitor.labels | object | `{}` |  |
+| mcpServer.metrics.serviceMonitor.path | string | `"/metrics"` |  |
+| mcpServer.metrics.serviceMonitor.port | string | `"http"` |  |
+| mcpServer.metrics.serviceMonitor.scrapeTimeout | string | `"10s"` |  |
 | mcpServer.nameOverride | string | `""` | Override the name of the mcp-server resources |
 | mcpServer.nodeSelector | object | `{"kubernetes.io/os":"linux"}` | Node labels for the kguardian mcp-server pod assignment |
 | mcpServer.podAnnotations | object | `{}` | Annotations to add to mcp-server pods |
+| mcpServer.podDisruptionBudget.enabled | bool | `false` | Create a PodDisruptionBudget for the mcp-server. Defaults to false; enable when running >1 replica. |
+| mcpServer.podDisruptionBudget.maxUnavailable | string | `""` |  |
+| mcpServer.podDisruptionBudget.minAvailable | int | `1` |  |
 | mcpServer.podSecurityContext | object | `{"fsGroup":1000,"fsGroupChangePolicy":"OnRootMismatch","runAsGroup":1000,"runAsUser":1000,"seccompProfile":{"type":"RuntimeDefault"},"supplementalGroups":[1000]}` | MCP Server pod security context. Runs as non-root user (mcp:1000) |
 | mcpServer.priorityClassName | string | `""` | Priority class to be used for the kguardian mcp-server pods |
 | mcpServer.replicaCount | int | `1` | Number of mcp-server replicas to deploy (ignored if useKmcp is true and autoscaling is enabled) |
@@ -283,7 +325,9 @@ The following table lists the configurable parameters of the kguardian chart and
 | mcpServer.serviceAccount.automountServiceAccountToken | bool | `false` | Automount API credentials for a service account |
 | mcpServer.serviceAccount.create | bool | `true` | Specifies whether a service account should be created |
 | mcpServer.serviceAccount.name | string | `""` | The name of the service account to use. If not set and create is true, a name is generated using the fullname template |
+| mcpServer.startupProbe | object | `{}` | Startup probe. Empty by default — opt in when slow startup is expected. |
 | mcpServer.tolerations | list | `[]` | Tolerations for the kguardian mcp-server pod assignment |
+| mcpServer.topologySpreadConstraints | list | `[]` | Topology spread constraints applied to mcp-server pods. |
 | namespace.annotations | object | `{}` | Annotations to add to the namespace |
 | namespace.labels | object | `{}` | Labels to add to the namespace |
 | namespace.name | string | `""` | Namespace name. If empty, uses the release namespace |

@@ -1,0 +1,17 @@
+{{- if and .Values.mcpServer.enabled .Values.mcpServer.podDisruptionBudget.enabled }}
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ .Values.mcpServer.service.name }}
+  labels:
+    {{- include "kguardian.labels" . | nindent 4 }}
+spec:
+  {{- if .Values.mcpServer.podDisruptionBudget.maxUnavailable }}
+  maxUnavailable: {{ .Values.mcpServer.podDisruptionBudget.maxUnavailable }}
+  {{- else }}
+  minAvailable: {{ .Values.mcpServer.podDisruptionBudget.minAvailable | default 1 }}
+  {{- end }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ .Values.mcpServer.service.name }}
+{{- end }}

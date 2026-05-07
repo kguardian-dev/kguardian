@@ -63,6 +63,10 @@ spec:
                   key: {{ .Values.database.passwordSecretKey }}
             - name: DATABASE_URL
               value: {{ include "kguardian.dbUrl" . | quote }}
+          {{- with .Values.broker.startupProbe }}
+          startupProbe:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
           livenessProbe:
             httpGet:
               path: /health
@@ -93,5 +97,9 @@ spec:
       {{- end }}
       {{- with .Values.broker.tolerations }}
       tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.broker.topologySpreadConstraints }}
+      topologySpreadConstraints:
         {{- toYaml . | nindent 8 }}
       {{- end }}

@@ -51,6 +51,10 @@ spec:
             - name: VITE_LLM_BRIDGE_URL
               value: "http://{{ .Values.llmBridge.service.name }}.{{ include "kguardian.namespace" . }}.svc.cluster.local:{{ .Values.llmBridge.service.port }}"
             {{- end }}
+          {{- with .Values.frontend.startupProbe }}
+          startupProbe:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
           livenessProbe:
             httpGet:
               path: /
@@ -77,5 +81,9 @@ spec:
       {{- end }}
       {{- with .Values.frontend.tolerations }}
       tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.frontend.topologySpreadConstraints }}
+      topologySpreadConstraints:
         {{- toYaml . | nindent 8 }}
       {{- end }}
