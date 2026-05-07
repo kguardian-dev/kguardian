@@ -1,0 +1,18 @@
+{{- if .Values.evaluator.enabled }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .Values.evaluator.service.name }}
+  labels:
+    {{- include "kguardian.labels" . | nindent 4 }}
+spec:
+  type: {{ .Values.evaluator.service.type }}
+  ports:
+    - port: {{ .Values.evaluator.service.port }}
+      targetPort: http
+      protocol: TCP
+      name: http
+  selector:
+    app.kubernetes.io/name: {{ .Values.evaluator.service.name }}
+{{- end }}

@@ -66,4 +66,22 @@ diesel::table! {
     }
 }
 
+diesel::table! {
+    audit_verdicts (id) {
+        id -> BigSerial,
+        policy_uid -> Varchar,
+        policy_namespace -> Varchar,
+        policy_name -> Varchar,
+        direction -> Varchar,
+        src_namespace -> Nullable<Varchar>,
+        src_pod -> Nullable<Varchar>,
+        dst_namespace -> Nullable<Varchar>,
+        dst_pod -> Nullable<Varchar>,
+        dst_port -> Int4,
+        protocol -> Varchar,
+        reason -> Nullable<Varchar>,
+        observed_at -> Timestamp,
+    }
+}
+
 diesel::allow_tables_to_appear_in_same_query!(pod_details, pod_traffic, svc_details, pod_syscalls,);

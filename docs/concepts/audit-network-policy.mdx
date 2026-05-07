@@ -1,0 +1,158 @@
+---
+title: "AuditNetworkPolicy"
+description: "Push policies, see what would be blocked — without blocking anything"
+---
+
+`AuditNetworkPolicy` is a kguardian CRD that lets you preview the impact of a Kubernetes NetworkPolicy *before* you enforce it. The spec is byte-identical to upstream `networking.k8s.io/v1.NetworkPolicy`. The only thing that changes is what kguardian does with it: the `kguardian-evaluator` watches observed pod traffic and reports flows that the policy *would* deny — but never drops a single packet.
+
+## Why
+
+The hardest part of shipping NetworkPolicies in production isn't writing them — it's confidence. A typo in a `podSelector` or a missing `to:` block can blackhole half a service in a heartbeat. The conventional answer is "test in staging", but staging traffic shapes never match production.
+
+`AuditNetworkPolicy` lets you apply your candidate policy to live production traffic, watch for false positives in the audit stream, then promote with a one-line `kind:` change once you're confident.
+
+## Prior art
+
+This pattern is directly modelled on Calico's [`StagedKubernetesNetworkPolicy`](https://docs.tigera.io/calico/latest/reference/resources/stagednetworkpolicy). The differences:
+
+- Calico evaluates staged policies *alongside* its own dataplane. kguardian is observability-only and runs over the live eBPF flow stream from the controller — you can use it with any CNI (Cilium, Calico, OVN, kindnet, etc.).
+- Calico's promotion path renames the resource kind. kguardian uses the same approach: copy the spec, change `kind: AuditNetworkPolicy` to `kind: NetworkPolicy`, apply with kubectl. Your CNI then enforces it.
+- Cilium has [`policyAuditMode`](https://docs.cilium.io/en/stable/security/policy-creation/) but it's a cluster-wide agent flag and disables enforcement entirely; per-policy audit was [closed `not planned`](https://github.com/cilium/cilium/issues/40621). The CRD-per-policy model that Calico (and now kguardian) use is what people actually want.
+
+## How it works
+
+```
+┌──────────────────┐  flow events    ┌──────────┐  POST /evaluate   ┌────────────┐
+│ kguardian-       │ ──────────────▶ │ broker   │ ────────────────▶ │ evaluator  │
+│ controller (eBPF)│                 │          │                   │            │
+└──────────────────┘                 └────┬─────┘                   └─────┬──────┘
+                                          │                               │ watches
+                                  audit_verdicts                          │ AuditNetworkPolicy CRDs
+                                  (Postgres)                              │ + Pods + Namespaces
+                                          │                               │
+                                          ▼                               ▼
+                                 frontend "Would-Deny"             status.evaluation
+                                 view + Prometheus              + would-deny logs / events
+```
+
+1. The controller observes every TCP/UDP connection on each node (no change from before).
+2. The broker forwards each flow to the evaluator's `/evaluate` endpoint.
+3. The evaluator looks up which `AuditNetworkPolicy` resources select either side of the flow, runs the standard NetworkPolicy semantics over the rule set, and returns a verdict per (policy, direction).
+4. `WouldDeny` verdicts are persisted in `audit_verdicts` and surface as logs, Kubernetes Events on the policy, and rolling counts in `.status.evaluation`.
+
+## Example
+
+Apply this to a namespace and watch the evaluator's logs:
+
+```yaml
+apiVersion: kguardian.dev/v1alpha1
+kind: AuditNetworkPolicy
+metadata:
+  name: payments-isolation
+  namespace: prod
+spec:
+  podSelector:
+    matchLabels:
+      app: payments
+  policyTypes: [Ingress, Egress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              tier: frontend
+      ports:
+        - protocol: TCP
+          port: 8080
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - protocol: UDP
+          port: 53
+    - to:
+        - podSelector:
+            matchLabels:
+              app: postgres
+      ports:
+        - protocol: TCP
+          port: 5432
+```
+
+`kubectl get auditnetworkpolicy payments-isolation -n prod` shows a `WOULD-DENY` column populated by the rolling-window count. `kubectl describe` shows the most frequent offenders.
+
+## Promoting to enforced
+
+When you're satisfied the would-deny set is empty (or the false positives have all been triaged), promote:
+
+```sh
+kubectl get auditnetworkpolicy payments-isolation -n prod -o yaml \
+  | sed 's|kind: AuditNetworkPolicy|kind: NetworkPolicy|' \
+  | sed 's|kguardian.dev/v1alpha1|networking.k8s.io/v1|' \
+  | kubectl apply -f -
+
+kubectl delete auditnetworkpolicy payments-isolation -n prod
+```
+
+Your CNI now enforces the policy. The evaluator stops watching it.
+
+## Cluster-scoped policies — `AuditClusterNetworkPolicy`
+
+For cross-namespace audits (e.g. "what would happen if I default-denied ingress on every workload across the cluster?") use the cluster-scoped sibling. The spec is identical to `AuditNetworkPolicy` but adds a top-level `namespaceSelector` (nil/empty matches all namespaces) and is itself cluster-scoped. Within each matching namespace the rule evaluation is identical.
+
+```yaml
+apiVersion: kguardian.dev/v1alpha1
+kind: AuditClusterNetworkPolicy
+metadata:
+  name: platform-default-deny
+spec:
+  namespaceSelector:
+    matchLabels:
+      team: platform
+  podSelector: {}
+  policyTypes: [Ingress]
+  # no ingress rules → default-deny ingress for every pod in
+  # any namespace labelled team=platform
+```
+
+Promotion works the same way but you'll typically expand a single cluster-scoped policy into N per-namespace `NetworkPolicy` resources (one per matched namespace) for actual enforcement, since upstream `NetworkPolicy` is namespaced. Calico's `GlobalNetworkPolicy` and upstream's `AdminNetworkPolicy` are the cluster-wide enforcement counterparts if your CNI supports them.
+
+## CLI helper — `kguardian audit promote`
+
+```sh
+# print the equivalent NetworkPolicy YAML
+kguardian audit promote payments-isolation -n prod
+
+# pipe straight to kubectl
+kguardian audit promote payments-isolation -n prod | kubectl apply -f -
+
+# dump every audit policy in the namespace
+kguardian audit promote --all -n prod
+
+# write one file per policy across the whole cluster
+kguardian audit promote --all --all-namespaces --output-dir ./promoted/
+```
+
+The promoted YAML strips the audit-side status and the `kubectl.kubernetes.io/last-applied-configuration` annotation (it'd be wrong for the new kind). Existing labels and other annotations are preserved.
+
+## What kguardian does *not* do
+
+- It does not enforce anything. Even with an `AuditNetworkPolicy` in place, *all traffic flows*. If you want enforcement, promote the policy as above and rely on your CNI.
+- It does not (yet) provide a frontend "Would-Deny" view — query the broker's `audit_verdicts` table directly or watch the policy's `.status.evaluation` field.
+- The promote helper handles namespaced policies; for `AuditClusterNetworkPolicy` you'll need to enumerate the matched namespaces yourself.
+
+## Limits + caveats
+
+The matcher implements podSelector + namespaceSelector + numeric port + endPort range + named-port + ipBlock (CIDR + except). Edge cases that warrant care:
+
+- **Empty `from:` / `to:`** matches *all* peers — the same trap as upstream NetworkPolicy.
+- **Empty `ingress: []` / `egress: []`** is a default-deny in the relevant direction. If a policy's `policyTypes` includes a direction with no rules, every flow in that direction is "would-deny".
+- **Unknown peer pods** (deleted between flow capture and evaluation) are not matched against any selector — this can cause an apparent under-count. The `audit_verdicts.reason` column records when this happens.
+- **Named ports** are resolved against the destination pod's `spec.containers[].ports[]` declarations. A named port matches only when both the name and the observed `containerPort` line up.
+- **`ipBlock`** matches against the peer's L3 address as observed by the eBPF controller. Flows with unknown IPs (e.g. malformed eBPF events) are non-matches, not silent allows.
+
+If you're carrying production-critical policy decisions on this, treat the verdicts as a strong signal but verify against your CNI's enforcement output once promoted.

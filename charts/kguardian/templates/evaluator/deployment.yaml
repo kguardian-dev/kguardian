@@ -1,0 +1,92 @@
+{{- if .Values.evaluator.enabled }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Values.evaluator.service.name }}
+  labels:
+    {{- include "kguardian.labels" . | nindent 4 }}
+spec:
+  {{- if not .Values.evaluator.autoscaling.enabled }}
+  replicas: {{ .Values.evaluator.replicaCount }}
+  {{- end }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ .Values.evaluator.service.name }}
+  template:
+    metadata:
+      {{- with .Values.evaluator.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      labels:
+        {{- include "kguardian.labels" . | nindent 8 }}
+        app.kubernetes.io/name: {{ .Values.evaluator.service.name }}
+    spec:
+      automountServiceAccountToken: true
+      {{- with .Values.evaluator.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      serviceAccountName: {{ default "evaluator" .Values.evaluator.serviceAccount.name }}
+      securityContext:
+        {{- toYaml .Values.evaluator.podSecurityContext | nindent 8 }}
+      containers:
+        - name: evaluator
+          securityContext:
+            {{- toYaml .Values.evaluator.securityContext | nindent 12 }}
+          {{- if .Values.evaluator.image.sha }}
+          image: "{{ .Values.evaluator.image.repository }}@{{ .Values.evaluator.image.sha }}"
+          {{- else }}
+          image: "{{ .Values.evaluator.image.repository }}:{{ include "kguardian.imageTag" .Values.evaluator.image.tag }}"
+          {{- end }}
+          imagePullPolicy: {{ .Values.evaluator.image.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.evaluator.container.port }}
+              protocol: TCP
+          env:
+            - name: LISTEN_ADDR
+              value: ":{{ .Values.evaluator.container.port }}"
+            - name: LOG_LEVEL
+              value: {{ .Values.evaluator.logLevel | quote }}
+            {{- with .Values.evaluator.env }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          {{- with .Values.evaluator.startupProbe }}
+          startupProbe:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 15
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          {{- with .Values.evaluator.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+      {{- with .Values.evaluator.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.evaluator.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.evaluator.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.evaluator.topologySpreadConstraints }}
+      topologySpreadConstraints:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}

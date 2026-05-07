@@ -1,4 +1,4 @@
-use crate::{schema, PodDetail, PodInputSyscalls, PodSyscalls, PodTraffic, SvcDetail};
+use crate::{schema, AuditClient, PodDetail, PodInputSyscalls, PodSyscalls, PodTraffic, SvcDetail};
 use actix_web::{post, web, Error, HttpResponse};
 use diesel::pg::PgConnection;
 use diesel::r2d2::{self, ConnectionManager};
@@ -13,13 +13,23 @@ type DbError = Box<dyn std::error::Error + Send + Sync>;
 #[post("/pod/traffic/batch")]
 pub async fn add_pods_batch(
     pool: web::Data<DbPool>,
+    audit: web::Data<AuditClient>,
     form: web::Json<Vec<PodTraffic>>,
 ) -> Result<HttpResponse, Error> {
     let count = form.len();
     debug!("Received batch of {} network traffic events", count);
 
+    // Snapshot the events for the audit forwarder before we move `form`
+    // into the blocking insert task. Cheap clone — PodTraffic is small.
+    let audit_events: Vec<PodTraffic> = if audit.enabled() {
+        form.iter().cloned().collect()
+    } else {
+        Vec::new()
+    };
+
+    let pool_for_insert = pool.clone();
     let result = web::block(move || {
-        let mut conn = pool.get()?;
+        let mut conn = pool_for_insert.get()?;
         create_pod_traffic_batch(&mut conn, form)
     })
     .await?
@@ -29,6 +39,20 @@ pub async fn add_pods_batch(
         "Successfully inserted batch of {} network traffic events",
         count
     );
+
+    // Fire-and-forget audit eval per event. Spawn each evaluation on
+    // its own task so a 100-event batch doesn't serialise 100 sequential
+    // 500ms HTTP round-trips on a single tokio worker.
+    if audit.enabled() {
+        for event in audit_events {
+            let audit_client = audit.get_ref().clone();
+            let pool_for_audit = pool.get_ref().clone();
+            actix_web::rt::spawn(async move {
+                audit_client.evaluate_and_persist(pool_for_audit, event).await;
+            });
+        }
+    }
+
     Ok(HttpResponse::Ok().json(result))
 }
 
@@ -80,14 +104,25 @@ fn create_pod_traffic_batch(
 #[post("/pod/traffic")]
 pub async fn add_pods(
     pool: web::Data<DbPool>,
+    audit: web::Data<AuditClient>,
     form: web::Json<PodTraffic>,
 ) -> Result<HttpResponse, Error> {
+    let audit_event: Option<PodTraffic> = if audit.enabled() { Some(form.0.clone()) } else { None };
+    let pool_for_insert = pool.clone();
     let pods = web::block(move || {
-        let mut conn = pool.get()?;
+        let mut conn = pool_for_insert.get()?;
         create_pod_traffic(&mut conn, form)
     })
     .await?
     .map_err(actix_web::error::ErrorInternalServerError)?;
+
+    if let Some(event) = audit_event {
+        let audit_client = audit.get_ref().clone();
+        let pool_for_audit = pool.get_ref().clone();
+        actix_web::rt::spawn(async move {
+            audit_client.evaluate_and_persist(pool_for_audit, event).await;
+        });
+    }
 
     Ok(HttpResponse::Ok().json(pods))
 }
