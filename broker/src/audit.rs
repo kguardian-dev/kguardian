@@ -88,6 +88,9 @@ struct AuditVerdictInsert {
     protocol: String,
     reason: Option<String>,
     observed_at: chrono::NaiveDateTime,
+    /// "Allow" or "WouldDeny". NotApplicable verdicts are dropped at
+    /// the filter site and never reach this struct.
+    verdict: String,
 }
 
 /// Long-lived client cached by the actix application state. Holds the
@@ -188,14 +191,18 @@ impl AuditClient {
             }
         };
 
-        // Persist only WouldDeny verdicts. Allow / NotApplicable are
-        // expected and high-volume; storing them all would defeat the
-        // point of an audit log.
+        // Persist Allow + WouldDeny verdicts so operators can preview
+        // both sides of policy impact (what's permitted, what would be
+        // blocked). NotApplicable is dropped — every flow checks
+        // against every cluster-scoped policy plus all namespaced ones
+        // in scope, and most produce NotApplicable; storing them all
+        // would inflate audit_verdicts by 1-2 orders of magnitude with
+        // no analytical value.
         let now = Utc::now().naive_utc();
         let to_insert: Vec<AuditVerdictInsert> = body
             .results
             .into_iter()
-            .filter(|r| r.verdict == "WouldDeny")
+            .filter(|r| r.verdict == "Allow" || r.verdict == "WouldDeny")
             .map(|r| AuditVerdictInsert {
                 policy_uid: r.policy_uid,
                 policy_namespace: r.policy_namespace,
@@ -209,6 +216,7 @@ impl AuditClient {
                 protocol: protocol.to_owned(),
                 reason: if r.reason.is_empty() { None } else { Some(r.reason) },
                 observed_at: now,
+                verdict: r.verdict,
             })
             .collect();
 

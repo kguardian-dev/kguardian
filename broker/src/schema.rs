@@ -81,6 +81,7 @@ diesel::table! {
         protocol -> Varchar,
         reason -> Nullable<Varchar>,
         observed_at -> Timestamp,
+        verdict -> Varchar,
     }
 }
 

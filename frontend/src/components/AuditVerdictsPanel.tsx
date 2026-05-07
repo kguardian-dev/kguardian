@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useState, useCallback } from 'react';
-import { X, RefreshCw, AlertTriangle, Filter } from 'lucide-react';
-import type { AuditVerdict } from '../types';
+import { X, RefreshCw, AlertTriangle, CheckCircle2, Filter } from 'lucide-react';
+import type { AuditVerdict, AuditVerdictKind } from '../types';
 import api from '../services/api';
 
 interface Props {
@@ -8,16 +8,25 @@ interface Props {
   onClose: () => void;
 }
 
+type VerdictTab = 'WouldDeny' | 'Allow' | 'All';
+
 /**
- * AuditVerdictsPanel — modal table of "would-deny" flows.
+ * AuditVerdictsPanel — modal table of evaluator verdicts.
  *
- * Each row is one observation that an `AuditNetworkPolicy` (or the
- * cluster-scoped sibling) would have blocked if it were enforced.
- * Operators use this to triage false positives before promoting an
- * audit policy to a real `networking.k8s.io/v1.NetworkPolicy`.
+ * Each row is one observation of a flow checked against an
+ * AuditNetworkPolicy or AuditClusterNetworkPolicy. Two verdicts are
+ * surfaced:
  *
- * Backend is `GET /audit/verdicts` on the broker, which reads from
- * the `audit_verdicts` table populated by the broker -> evaluator
+ *   - WouldDeny: the policy *would have blocked* this flow if enforced
+ *   - Allow:     the policy explicitly *permits* this flow
+ *
+ * Both matter when previewing impact. Allow tells you the policy is
+ * actually selecting the pods you intended (zero allows + zero denies
+ * usually means a podSelector typo). WouldDeny tells you what to
+ * triage before promoting.
+ *
+ * Backend: `GET /audit/verdicts` on the broker, reading the
+ * `audit_verdicts` table populated by the broker → evaluator
  * forwarder.
  */
 const AuditVerdictsPanel: React.FC<Props> = ({ isOpen, onClose }) => {
@@ -25,12 +34,16 @@ const AuditVerdictsPanel: React.FC<Props> = ({ isOpen, onClose }) => {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [policyFilter, setPolicyFilter] = useState('');
+  const [verdictTab, setVerdictTab] = useState<VerdictTab>('WouldDeny');
 
   const load = useCallback(async () => {
     setLoading(true);
     setError(null);
     try {
-      const rows = await api.getAuditVerdicts({ limit: 200 });
+      // Fetch both verdicts in one shot; client-side filter by tab.
+      // 400-row cap leaves headroom for the busiest pol/window combo
+      // we expect operators to triage in one sitting.
+      const rows = await api.getAuditVerdicts({ limit: 400 });
       setVerdicts(rows);
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Failed to load audit verdicts');
@@ -44,28 +57,42 @@ const AuditVerdictsPanel: React.FC<Props> = ({ isOpen, onClose }) => {
     void load();
   }, [isOpen, load]);
 
-  // Group verdicts by policy for the side filter list. We don't
-  // server-side filter by name because the broker's index is on
-  // (policy_uid, observed_at) — the API supports it, but for the UI
-  // it's snappier to filter the already-loaded set client-side.
+  // Group verdicts by policy for the side filter list. Each entry
+  // shows the (deny, allow) split so operators can see at a glance
+  // which policies are noisy on either side.
   const byPolicy = useMemo(() => {
-    const m = new Map<string, AuditVerdict[]>();
+    const m = new Map<string, { deny: number; allow: number; total: number }>();
     for (const v of verdicts) {
       const key = v.policy_namespace ? `${v.policy_namespace}/${v.policy_name}` : v.policy_name;
-      const list = m.get(key) || [];
-      list.push(v);
-      m.set(key, list);
+      const cur = m.get(key) || { deny: 0, allow: 0, total: 0 };
+      cur.total++;
+      if (v.verdict === 'WouldDeny') cur.deny++;
+      else if (v.verdict === 'Allow') cur.allow++;
+      m.set(key, cur);
     }
     return m;
   }, [verdicts]);
 
+  const counts = useMemo(() => {
+    let deny = 0;
+    let allow = 0;
+    for (const v of verdicts) {
+      if (v.verdict === 'WouldDeny') deny++;
+      else if (v.verdict === 'Allow') allow++;
+    }
+    return { deny, allow, total: verdicts.length };
+  }, [verdicts]);
+
   const visible = useMemo(() => {
-    if (!policyFilter) return verdicts;
     return verdicts.filter(v => {
-      const key = v.policy_namespace ? `${v.policy_namespace}/${v.policy_name}` : v.policy_name;
-      return key === policyFilter;
+      if (verdictTab !== 'All' && v.verdict !== verdictTab) return false;
+      if (policyFilter) {
+        const key = v.policy_namespace ? `${v.policy_namespace}/${v.policy_name}` : v.policy_name;
+        if (key !== policyFilter) return false;
+      }
+      return true;
     });
-  }, [verdicts, policyFilter]);
+  }, [verdicts, verdictTab, policyFilter]);
 
   if (!isOpen) return null;
 
@@ -87,10 +114,10 @@ const AuditVerdictsPanel: React.FC<Props> = ({ isOpen, onClose }) => {
             <AlertTriangle className="w-6 h-6 text-hubble-warning" />
             <div>
               <h2 id="audit-verdicts-title" className="text-xl font-semibold text-primary">
-                Audit Verdicts — would-deny flows
+                Audit Verdicts
               </h2>
               <p className="text-xs text-tertiary">
-                Flows your AuditNetworkPolicies would have blocked. Nothing was actually dropped.
+                Flows your AuditNetworkPolicies would block (or already permit). Nothing was actually dropped.
               </p>
             </div>
           </div>
@@ -114,6 +141,34 @@ const AuditVerdictsPanel: React.FC<Props> = ({ isOpen, onClose }) => {
           </div>
         </header>
 
+        {/* Verdict tabs */}
+        <nav className="flex border-b border-hubble-border bg-hubble-dark px-2" aria-label="Verdict filter">
+          <VerdictTabButton
+            active={verdictTab === 'WouldDeny'}
+            onClick={() => setVerdictTab('WouldDeny')}
+            icon={<AlertTriangle className="w-4 h-4" />}
+            color="text-hubble-warning"
+            label="Would-Deny"
+            count={counts.deny}
+          />
+          <VerdictTabButton
+            active={verdictTab === 'Allow'}
+            onClick={() => setVerdictTab('Allow')}
+            icon={<CheckCircle2 className="w-4 h-4" />}
+            color="text-hubble-accent"
+            label="Allow"
+            count={counts.allow}
+          />
+          <VerdictTabButton
+            active={verdictTab === 'All'}
+            onClick={() => setVerdictTab('All')}
+            icon={null}
+            color="text-secondary"
+            label="All"
+            count={counts.total}
+          />
+        </nav>
+
         {/* Body */}
         <div className="flex-1 flex overflow-hidden">
           {/* Sidebar — policies */}
@@ -132,8 +187,8 @@ const AuditVerdictsPanel: React.FC<Props> = ({ isOpen, onClose }) => {
               All ({verdicts.length})
             </button>
             {Array.from(byPolicy.entries())
-              .sort(([, a], [, b]) => b.length - a.length)
-              .map(([key, list]) => (
+              .sort(([, a], [, b]) => b.total - a.total)
+              .map(([key, c]) => (
                 <button
                   key={key}
                   onClick={() => setPolicyFilter(key)}
@@ -144,8 +199,11 @@ const AuditVerdictsPanel: React.FC<Props> = ({ isOpen, onClose }) => {
                   }`}
                   title={key}
                 >
-                  <span className="truncate block">
-                    {key} <span className="text-tertiary">({list.length})</span>
+                  <span className="truncate block">{key}</span>
+                  <span className="text-[11px] text-tertiary tabular-nums">
+                    {c.deny > 0 && <span className="text-hubble-warning">{c.deny} deny</span>}
+                    {c.deny > 0 && c.allow > 0 && <span> · </span>}
+                    {c.allow > 0 && <span className="text-hubble-accent">{c.allow} allow</span>}
                   </span>
                 </button>
               ))}
@@ -160,7 +218,7 @@ const AuditVerdictsPanel: React.FC<Props> = ({ isOpen, onClose }) => {
             )}
             {!error && !loading && visible.length === 0 && (
               <div className="m-8 text-center text-tertiary">
-                No audit verdicts in the rolling window.
+                No {verdictTab === 'All' ? '' : verdictTab.toLowerCase()} verdicts in the rolling window.
                 {policyFilter && (
                   <>
                     {' '}
@@ -179,6 +237,7 @@ const AuditVerdictsPanel: React.FC<Props> = ({ isOpen, onClose }) => {
               <table className="w-full text-sm">
                 <thead className="sticky top-0 bg-hubble-dark z-10 border-b border-hubble-border">
                   <tr className="text-left text-xs font-medium text-tertiary uppercase tracking-wide">
+                    <th className="px-4 py-2">Verdict</th>
                     <th className="px-4 py-2">When</th>
                     <th className="px-4 py-2">Policy</th>
                     <th className="px-4 py-2">Dir</th>
@@ -195,6 +254,9 @@ const AuditVerdictsPanel: React.FC<Props> = ({ isOpen, onClose }) => {
                       : v.policy_name;
                     return (
                       <tr key={v.id} className="border-b border-hubble-border/60 hover:bg-hubble-card/40">
+                        <td className="px-4 py-2">
+                          <VerdictBadge verdict={v.verdict as AuditVerdictKind} />
+                        </td>
                         <td className="px-4 py-2 text-tertiary whitespace-nowrap">
                           {formatTimestamp(v.observed_at)}
                         </td>
@@ -221,11 +283,60 @@ const AuditVerdictsPanel: React.FC<Props> = ({ isOpen, onClose }) => {
         </div>
 
         <footer className="px-6 py-2 border-t border-hubble-border text-xs text-tertiary">
-          Showing the most recent {verdicts.length} verdict{verdicts.length === 1 ? '' : 's'}.
+          Showing {visible.length} of {verdicts.length} most recent verdict{verdicts.length === 1 ? '' : 's'} ·
+          {' '}<span className="text-hubble-warning">{counts.deny} deny</span>
+          {' '}·
+          {' '}<span className="text-hubble-accent">{counts.allow} allow</span>.
           Backed by <code className="font-mono">audit_verdicts</code>; rotated by the broker's retention loop.
         </footer>
       </div>
     </div>
+  );
+};
+
+interface VerdictTabButtonProps {
+  active: boolean;
+  onClick: () => void;
+  icon: React.ReactNode;
+  color: string;
+  label: string;
+  count: number;
+}
+
+const VerdictTabButton: React.FC<VerdictTabButtonProps> = ({ active, onClick, icon, color, label, count }) => (
+  <button
+    onClick={onClick}
+    className={`flex items-center gap-2 px-4 py-2 text-sm font-medium border-b-2 transition-colors ${
+      active
+        ? 'border-hubble-accent text-primary bg-hubble-card/40'
+        : 'border-transparent text-secondary hover:text-primary'
+    }`}
+  >
+    {icon && <span className={color}>{icon}</span>}
+    {label}
+    <span className={`text-xs tabular-nums ${active ? 'text-tertiary' : 'text-tertiary'}`}>({count})</span>
+  </button>
+);
+
+const VerdictBadge: React.FC<{ verdict: AuditVerdictKind | string }> = ({ verdict }) => {
+  if (verdict === 'WouldDeny') {
+    return (
+      <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-xs bg-hubble-warning/20 text-hubble-warning">
+        <AlertTriangle className="w-3 h-3" /> Deny
+      </span>
+    );
+  }
+  if (verdict === 'Allow') {
+    return (
+      <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-xs bg-hubble-accent/20 text-hubble-accent">
+        <CheckCircle2 className="w-3 h-3" /> Allow
+      </span>
+    );
+  }
+  return (
+    <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-xs bg-hubble-card text-tertiary">
+      {verdict}
+    </span>
   );
 };
 

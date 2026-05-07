@@ -70,8 +70,11 @@ export interface ServiceInfo {
   service_spec?: KubeObject; // Full Kubernetes Service object
 }
 
-// Matches broker's AuditVerdict type — one row per "would deny" flow
-// recorded by the kguardian-evaluator.
+// Matches broker's AuditVerdict type — one row per (flow, policy,
+// direction) the evaluator decided on. The broker forwarder persists
+// `Allow` and `WouldDeny`; `NotApplicable` is dropped before insert.
+export type AuditVerdictKind = 'Allow' | 'WouldDeny';
+
 export interface AuditVerdict {
   id: number;
   policy_uid: string;
@@ -86,4 +89,5 @@ export interface AuditVerdict {
   protocol: string;
   reason: string | null;
   observed_at: string; // ISO 8601
+  verdict: AuditVerdictKind | string;
 }

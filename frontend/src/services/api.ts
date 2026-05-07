@@ -20,19 +20,23 @@ class BrokerAPIClient {
   }
 
   /**
-   * Get recent audit-mode verdicts — flows that would have been denied
-   * by an AuditNetworkPolicy / AuditClusterNetworkPolicy if enforced.
-   * Optional filters: policy name, policy namespace, row limit.
+   * Get recent audit-mode verdicts — flows the evaluator decided on
+   * for an AuditNetworkPolicy / AuditClusterNetworkPolicy. Returns
+   * both `Allow` and `WouldDeny` rows so operators can preview both
+   * sides of policy impact. Optional filters: policy, namespace,
+   * verdict, row limit.
    */
   async getAuditVerdicts(opts: {
     policy?: string;
     namespace?: string;
+    verdict?: 'Allow' | 'WouldDeny';
     limit?: number;
   } = {}): Promise<AuditVerdict[]> {
     try {
       const params: Record<string, string | number> = {};
       if (opts.policy) params.policy = opts.policy;
       if (opts.namespace) params.namespace = opts.namespace;
+      if (opts.verdict) params.verdict = opts.verdict;
       if (opts.limit) params.limit = opts.limit;
       const response = await this.client.get('/audit/verdicts', { params });
       return response.data || [];

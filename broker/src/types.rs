@@ -124,4 +124,5 @@ pub struct AuditVerdict {
     pub protocol: String,
     pub reason: Option<String>,
     pub observed_at: NaiveDateTime,
+    pub verdict: String, // "Allow" | "WouldDeny"
 }
