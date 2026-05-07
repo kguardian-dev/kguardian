@@ -256,3 +256,54 @@ pub fn pod_syscalls_by_name(
         .optional()?;
     Ok(pod_tr)
 }
+
+#[derive(serde::Deserialize)]
+pub struct AuditVerdictsQuery {
+    /// Filter to a single policy by name. Pair with `namespace` for
+    /// AuditNetworkPolicy; leave `namespace` empty for AuditClusterNetworkPolicy.
+    pub policy: Option<String>,
+    pub namespace: Option<String>,
+    /// Cap rows returned. Defaults to 100, hard cap 500.
+    pub limit: Option<i64>,
+}
+
+#[get("/audit/verdicts")]
+pub async fn get_audit_verdicts(
+    pool: web::Data<DbPool>,
+    query: web::Query<AuditVerdictsQuery>,
+) -> actix_web::Result<impl Responder> {
+    let q = query.into_inner();
+    let limit = q.limit.unwrap_or(100).clamp(1, 500);
+    let policy_name = q.policy.clone();
+    let policy_ns = q.namespace.clone();
+
+    let rows = web::block(move || {
+        let mut conn = pool.get()?;
+        audit_verdicts_query(&mut conn, policy_name, policy_ns, limit)
+    })
+    .await?
+    .map_err(actix_web::error::ErrorInternalServerError)?;
+
+    Ok(HttpResponse::Ok().json(rows))
+}
+
+pub fn audit_verdicts_query(
+    conn: &mut PgConnection,
+    by_policy: Option<String>,
+    by_namespace: Option<String>,
+    row_limit: i64,
+) -> Result<Vec<crate::AuditVerdict>, DbError> {
+    use schema::audit_verdicts::dsl::*;
+    let mut q = audit_verdicts.into_boxed();
+    if let Some(name) = by_policy {
+        q = q.filter(policy_name.eq(name));
+    }
+    if let Some(ns) = by_namespace {
+        q = q.filter(policy_namespace.eq(ns));
+    }
+    let rows = q
+        .order(observed_at.desc())
+        .limit(row_limit)
+        .load::<crate::AuditVerdict>(conn)?;
+    Ok(rows)
+}

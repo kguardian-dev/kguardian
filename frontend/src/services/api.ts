@@ -1,6 +1,6 @@
 import axios from 'axios';
 import type { AxiosInstance } from 'axios';
-import type { PodInfo, NetworkTraffic, SyscallInfo, ServiceInfo } from '../types';
+import type { PodInfo, NetworkTraffic, SyscallInfo, ServiceInfo, AuditVerdict } from '../types';
 
 class BrokerAPIClient {
   private client: AxiosInstance;
@@ -17,6 +17,33 @@ class BrokerAPIClient {
         'Content-Type': 'application/json',
       },
     });
+  }
+
+  /**
+   * Get recent audit-mode verdicts — flows the evaluator decided on
+   * for an AuditNetworkPolicy / AuditClusterNetworkPolicy. Returns
+   * both `Allow` and `WouldDeny` rows so operators can preview both
+   * sides of policy impact. Optional filters: policy, namespace,
+   * verdict, row limit.
+   */
+  async getAuditVerdicts(opts: {
+    policy?: string;
+    namespace?: string;
+    verdict?: 'Allow' | 'WouldDeny';
+    limit?: number;
+  } = {}): Promise<AuditVerdict[]> {
+    try {
+      const params: Record<string, string | number> = {};
+      if (opts.policy) params.policy = opts.policy;
+      if (opts.namespace) params.namespace = opts.namespace;
+      if (opts.verdict) params.verdict = opts.verdict;
+      if (opts.limit) params.limit = opts.limit;
+      const response = await this.client.get('/audit/verdicts', { params });
+      return response.data || [];
+    } catch (error) {
+      console.error('Error fetching audit verdicts:', error);
+      return [];
+    }
   }
 
   /**
