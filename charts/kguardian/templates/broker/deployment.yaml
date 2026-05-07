@@ -67,6 +67,14 @@ spec:
             - name: EVALUATOR_URL
               value: "http://{{ .Values.evaluator.service.name }}.{{ include "kguardian.namespace" . | trim }}.svc.cluster.local:{{ .Values.evaluator.service.port }}"
             {{- end }}
+            {{- with .Values.broker.audit.retention.days }}
+            - name: AUDIT_VERDICTS_RETENTION_DAYS
+              value: {{ . | quote }}
+            {{- end }}
+            {{- with .Values.broker.audit.retention.intervalSeconds }}
+            - name: AUDIT_VERDICTS_RETENTION_INTERVAL_SECS
+              value: {{ . | quote }}
+            {{- end }}
           {{- with .Values.broker.startupProbe }}
           startupProbe:
             {{- toYaml . | nindent 12 }}

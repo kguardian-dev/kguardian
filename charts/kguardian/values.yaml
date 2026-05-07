@@ -261,6 +261,16 @@ broker:
   # -- Priority class to be used for the kguardian broker pods
   priorityClassName: ""
 
+  audit:
+    retention:
+      # -- Retain audit_verdicts rows for this many days. Older rows are
+      # pruned by a tokio task in the broker that wakes every
+      # `intervalSeconds`. Set to 0 to disable retention entirely
+      # (table grows unbounded).
+      days: 30
+      # -- How often the cleanup pass runs, in seconds. Minimum 60.
+      intervalSeconds: 3600
+
   # -- Startup probe. Empty by default — opt in when slow startup is expected
   # (e.g. cold image pull on small nodes). Replaces the default startup probe.
   startupProbe: {}

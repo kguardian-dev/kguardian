@@ -6,7 +6,7 @@ use api::{
     add_pod_details, add_pods, add_pods_batch, add_pods_syscalls, add_svc_details,
     establish_connection, get_pod_by_ip, get_pod_by_name, get_pod_details, get_pod_syscall_name,
     get_pod_traffic, get_pod_traffic_name, get_pods_by_node, get_svc_by_ip, get_svc_details,
-    mark_pod_dead, AuditClient,
+    mark_pod_dead, spawn_retention, AuditClient,
 };
 
 use diesel::r2d2;
@@ -73,6 +73,11 @@ async fn main() -> Result<(), std::io::Error> {
     } else {
         info!("audit evaluator integration disabled (set EVALUATOR_URL to enable)");
     }
+
+    // Background pruner for audit_verdicts. Runs in-process so the
+    // broker is self-contained — no separate CronJob needed in the
+    // chart. Disable by setting AUDIT_VERDICTS_RETENTION_DAYS=0.
+    spawn_retention(pool.clone());
 
     HttpServer::new(move || {
         let cors = Cors::default()
