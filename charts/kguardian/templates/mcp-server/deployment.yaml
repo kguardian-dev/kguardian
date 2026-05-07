@@ -53,6 +53,10 @@ spec:
             {{- with .Values.mcpServer.env }}
             {{- toYaml . | nindent 12 }}
             {{- end }}
+          {{- with .Values.mcpServer.startupProbe }}
+          startupProbe:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
           livenessProbe:
             httpGet:
               path: /healthz
@@ -79,6 +83,10 @@ spec:
       {{- end }}
       {{- with .Values.mcpServer.tolerations }}
       tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.mcpServer.topologySpreadConstraints }}
+      topologySpreadConstraints:
         {{- toYaml . | nindent 8 }}
       {{- end }}
 {{- end }}

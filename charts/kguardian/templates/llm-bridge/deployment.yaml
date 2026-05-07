@@ -89,6 +89,10 @@ spec:
             {{- with .Values.llmBridge.env }}
             {{- toYaml . | nindent 12 }}
             {{- end }}
+          {{- with .Values.llmBridge.startupProbe }}
+          startupProbe:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
           livenessProbe:
             httpGet:
               path: /health
@@ -115,6 +119,10 @@ spec:
       {{- end }}
       {{- with .Values.llmBridge.tolerations }}
       tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.llmBridge.topologySpreadConstraints }}
+      topologySpreadConstraints:
         {{- toYaml . | nindent 8 }}
       {{- end }}
 {{- end }}
