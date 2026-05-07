@@ -25,16 +25,18 @@ import (
 )
 
 // Aggregator collects verdicts in memory and periodically reconciles
-// them onto AuditNetworkPolicy.status.evaluation.
+// them onto AuditNetworkPolicy.status.evaluation (and the cluster-scoped
+// equivalent).
 type Aggregator struct {
-	log    *logrus.Logger
-	dyn    dynamic.Interface
-	gvr    schema.GroupVersionResource
-	topN   int
-	period time.Duration
+	log        *logrus.Logger
+	dyn        dynamic.Interface
+	gvr        schema.GroupVersionResource // namespaced
+	clusterGVR schema.GroupVersionResource // cluster-scoped
+	topN       int
+	period     time.Duration
 
-	mu      sync.Mutex
-	counts  map[policyKey]*policyAgg
+	mu     sync.Mutex
+	counts map[policyKey]*policyAgg
 }
 
 type policyKey struct {
@@ -57,12 +59,13 @@ type policyAgg struct {
 // New returns an Aggregator wired to a dynamic client.
 func New(dyn dynamic.Interface, log *logrus.Logger) *Aggregator {
 	return &Aggregator{
-		log:    log,
-		dyn:    dyn,
-		gvr:    schema.GroupVersionResource{Group: v1alpha1.GroupName, Version: v1alpha1.Version, Resource: "auditnetworkpolicies"},
-		topN:   25,
-		period: 30 * time.Second,
-		counts: map[policyKey]*policyAgg{},
+		log:        log,
+		dyn:        dyn,
+		gvr:        schema.GroupVersionResource{Group: v1alpha1.GroupName, Version: v1alpha1.Version, Resource: "auditnetworkpolicies"},
+		clusterGVR: schema.GroupVersionResource{Group: v1alpha1.GroupName, Version: v1alpha1.Version, Resource: "auditclusternetworkpolicies"},
+		topN:       25,
+		period:     30 * time.Second,
+		counts:     map[policyKey]*policyAgg{},
 	}
 }
 
@@ -150,7 +153,9 @@ func (a *Aggregator) flush(ctx context.Context) {
 }
 
 // patchStatus writes one policy's aggregated counts back to the API
-// server using a JSON merge patch on the status subresource.
+// server using a JSON merge patch on the status subresource. The
+// namespace == "" case is treated as a cluster-scoped policy and
+// patches via the cluster GVR; otherwise the namespaced GVR is used.
 func (a *Aggregator) patchStatus(ctx context.Context, key policyKey, agg *policyAgg) error {
 	last := metav1.NewTime(agg.lastEvaluated)
 	status := v1alpha1.AuditNetworkPolicyStatus{
@@ -168,9 +173,14 @@ func (a *Aggregator) patchStatus(ctx context.Context, key policyKey, agg *policy
 		return fmt.Errorf("marshal status patch: %w", err)
 	}
 
-	_, err = a.dyn.Resource(a.gvr).
-		Namespace(key.namespace).
-		Patch(ctx, key.name, types.MergePatchType, body, metav1.PatchOptions{}, "status")
+	if key.namespace == "" {
+		_, err = a.dyn.Resource(a.clusterGVR).
+			Patch(ctx, key.name, types.MergePatchType, body, metav1.PatchOptions{}, "status")
+	} else {
+		_, err = a.dyn.Resource(a.gvr).
+			Namespace(key.namespace).
+			Patch(ctx, key.name, types.MergePatchType, body, metav1.PatchOptions{}, "status")
+	}
 	return err
 }
 

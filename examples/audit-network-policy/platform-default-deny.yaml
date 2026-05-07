@@ -1,0 +1,20 @@
+# Cluster-scoped AuditClusterNetworkPolicy.
+# Default-denies ingress for every pod in any namespace labelled
+# team=platform. The kguardian-evaluator will report flows that would
+# be denied — without dropping any traffic.
+#
+# Promotion path: enumerate the matched namespaces, for each apply an
+# equivalent networking.k8s.io/v1 NetworkPolicy (or use Calico
+# GlobalNetworkPolicy / upstream AdminNetworkPolicy if your CNI
+# supports cluster-wide enforcement).
+apiVersion: kguardian.dev/v1alpha1
+kind: AuditClusterNetworkPolicy
+metadata:
+  name: platform-default-deny-ingress
+spec:
+  namespaceSelector:
+    matchLabels:
+      team: platform
+  podSelector: {}
+  policyTypes: [Ingress]
+  # Empty ingress rules → default-deny ingress in every matched namespace.

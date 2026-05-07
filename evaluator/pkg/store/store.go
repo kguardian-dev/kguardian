@@ -33,12 +33,16 @@ type Store struct {
 	podInformer  cache.SharedIndexInformer
 	nsInformer   cache.SharedIndexInformer
 	anpInformer  cache.SharedIndexInformer
+	acnpInformer cache.SharedIndexInformer
 	stopCh       chan struct{}
 
 	policyMu sync.RWMutex
 	// policiesByNamespace caches the typed projection of the dynamic
 	// AuditNetworkPolicy informer for fast namespace-scoped lookup.
 	policiesByNamespace map[string][]*v1alpha1.AuditNetworkPolicy
+	// clusterPolicies caches typed AuditClusterNetworkPolicy items —
+	// always evaluated against every flow regardless of namespace.
+	clusterPolicies []*v1alpha1.AuditClusterNetworkPolicy
 }
 
 // AuditNetworkPolicyGVR is the GroupVersionResource the dynamic informer
@@ -47,6 +51,13 @@ var AuditNetworkPolicyGVR = schema.GroupVersionResource{
 	Group:    v1alpha1.GroupName,
 	Version:  v1alpha1.Version,
 	Resource: "auditnetworkpolicies",
+}
+
+// AuditClusterNetworkPolicyGVR — cluster-scoped sibling.
+var AuditClusterNetworkPolicyGVR = schema.GroupVersionResource{
+	Group:    v1alpha1.GroupName,
+	Version:  v1alpha1.Version,
+	Resource: "auditclusternetworkpolicies",
 }
 
 // New constructs a Store ready to start.
@@ -68,6 +79,7 @@ func New(cfg *rest.Config, log *logrus.Logger) (*Store, error) {
 		podInformer:         factory.Core().V1().Pods().Informer(),
 		nsInformer:          factory.Core().V1().Namespaces().Informer(),
 		anpInformer:         dynFactory.ForResource(AuditNetworkPolicyGVR).Informer(),
+		acnpInformer:        dynFactory.ForResource(AuditClusterNetworkPolicyGVR).Informer(),
 		stopCh:              make(chan struct{}),
 		policiesByNamespace: map[string][]*v1alpha1.AuditNetworkPolicy{},
 	}
@@ -79,6 +91,12 @@ func New(cfg *rest.Config, log *logrus.Logger) (*Store, error) {
 		UpdateFunc: func(_, obj interface{}) { s.onPolicyAddOrUpdate(obj) },
 		DeleteFunc: s.onPolicyDelete,
 	})
+	// Cluster-scoped sibling — same lifecycle, different storage.
+	_, _ = s.acnpInformer.AddEventHandler(cache.ResourceEventHandlerFuncs{
+		AddFunc:    s.onClusterPolicyAddOrUpdate,
+		UpdateFunc: func(_, obj interface{}) { s.onClusterPolicyAddOrUpdate(obj) },
+		DeleteFunc: s.onClusterPolicyDelete,
+	})
 
 	return s, nil
 }
@@ -88,15 +106,17 @@ func (s *Store) Start(ctx context.Context) error {
 	go s.podInformer.Run(s.stopCh)
 	go s.nsInformer.Run(s.stopCh)
 	go s.anpInformer.Run(s.stopCh)
+	go s.acnpInformer.Run(s.stopCh)
 
 	if !cache.WaitForCacheSync(ctx.Done(),
 		s.podInformer.HasSynced,
 		s.nsInformer.HasSynced,
 		s.anpInformer.HasSynced,
+		s.acnpInformer.HasSynced,
 	) {
 		return context.Canceled
 	}
-	s.log.Info("informer caches synced (pods, namespaces, auditnetworkpolicies)")
+	s.log.Info("informer caches synced (pods, namespaces, auditnetworkpolicies, auditclusternetworkpolicies)")
 
 	go func() {
 		<-ctx.Done()
@@ -182,6 +202,69 @@ func (s *Store) PoliciesInNamespace(ns string) []*v1alpha1.AuditNetworkPolicy {
 	out := make([]*v1alpha1.AuditNetworkPolicy, len(src))
 	copy(out, src)
 	return out
+}
+
+// ClusterPolicies returns a snapshot of every AuditClusterNetworkPolicy.
+// Safe for concurrent callers.
+func (s *Store) ClusterPolicies() []*v1alpha1.AuditClusterNetworkPolicy {
+	s.policyMu.RLock()
+	defer s.policyMu.RUnlock()
+	if len(s.clusterPolicies) == 0 {
+		return nil
+	}
+	out := make([]*v1alpha1.AuditClusterNetworkPolicy, len(s.clusterPolicies))
+	copy(out, s.clusterPolicies)
+	return out
+}
+
+func (s *Store) onClusterPolicyAddOrUpdate(obj interface{}) {
+	u, ok := obj.(*unstructured.Unstructured)
+	if !ok {
+		return
+	}
+	policy, err := unstructuredToClusterPolicy(u)
+	if err != nil {
+		s.log.WithError(err).Warn("could not convert AuditClusterNetworkPolicy from Unstructured")
+		return
+	}
+	s.policyMu.Lock()
+	defer s.policyMu.Unlock()
+	updated := s.clusterPolicies[:0:0]
+	for _, p := range s.clusterPolicies {
+		if p.Name != policy.Name {
+			updated = append(updated, p)
+		}
+	}
+	s.clusterPolicies = append(updated, policy)
+}
+
+func (s *Store) onClusterPolicyDelete(obj interface{}) {
+	u, ok := obj.(*unstructured.Unstructured)
+	if !ok {
+		return
+	}
+	name := u.GetName()
+	s.policyMu.Lock()
+	defer s.policyMu.Unlock()
+	out := s.clusterPolicies[:0]
+	for _, p := range s.clusterPolicies {
+		if p.Name != name {
+			out = append(out, p)
+		}
+	}
+	s.clusterPolicies = out
+}
+
+func unstructuredToClusterPolicy(u *unstructured.Unstructured) (*v1alpha1.AuditClusterNetworkPolicy, error) {
+	raw, err := u.MarshalJSON()
+	if err != nil {
+		return nil, err
+	}
+	out := &v1alpha1.AuditClusterNetworkPolicy{}
+	if err := json.Unmarshal(raw, out); err != nil {
+		return nil, err
+	}
+	return out, nil
 }
 
 // GetPod implements matcher.PodLookup.

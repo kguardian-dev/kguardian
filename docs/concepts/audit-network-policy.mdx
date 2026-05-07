@@ -100,18 +100,59 @@ kubectl delete auditnetworkpolicy payments-isolation -n prod
 
 Your CNI now enforces the policy. The evaluator stops watching it.
 
+## Cluster-scoped policies — `AuditClusterNetworkPolicy`
+
+For cross-namespace audits (e.g. "what would happen if I default-denied ingress on every workload across the cluster?") use the cluster-scoped sibling. The spec is identical to `AuditNetworkPolicy` but adds a top-level `namespaceSelector` (nil/empty matches all namespaces) and is itself cluster-scoped. Within each matching namespace the rule evaluation is identical.
+
+```yaml
+apiVersion: kguardian.dev/v1alpha1
+kind: AuditClusterNetworkPolicy
+metadata:
+  name: platform-default-deny
+spec:
+  namespaceSelector:
+    matchLabels:
+      team: platform
+  podSelector: {}
+  policyTypes: [Ingress]
+  # no ingress rules → default-deny ingress for every pod in
+  # any namespace labelled team=platform
+```
+
+Promotion works the same way but you'll typically expand a single cluster-scoped policy into N per-namespace `NetworkPolicy` resources (one per matched namespace) for actual enforcement, since upstream `NetworkPolicy` is namespaced. Calico's `GlobalNetworkPolicy` and upstream's `AdminNetworkPolicy` are the cluster-wide enforcement counterparts if your CNI supports them.
+
+## CLI helper — `kguardian audit promote`
+
+```sh
+# print the equivalent NetworkPolicy YAML
+kguardian audit promote payments-isolation -n prod
+
+# pipe straight to kubectl
+kguardian audit promote payments-isolation -n prod | kubectl apply -f -
+
+# dump every audit policy in the namespace
+kguardian audit promote --all -n prod
+
+# write one file per policy across the whole cluster
+kguardian audit promote --all --all-namespaces --output-dir ./promoted/
+```
+
+The promoted YAML strips the audit-side status and the `kubectl.kubernetes.io/last-applied-configuration` annotation (it'd be wrong for the new kind). Existing labels and other annotations are preserved.
+
 ## What kguardian does *not* do
 
 - It does not enforce anything. Even with an `AuditNetworkPolicy` in place, *all traffic flows*. If you want enforcement, promote the policy as above and rely on your CNI.
-- It does not currently match `ipBlock` peers (would-be-denied flows from outside-the-cluster sources are not flagged in MVP).
-- It does not currently resolve named ports (e.g. `port: http`); use numeric ports in audit policies for now. The matcher errs on "no match" rather than guessing.
+- It does not (yet) provide a frontend "Would-Deny" view — query the broker's `audit_verdicts` table directly or watch the policy's `.status.evaluation` field.
+- The promote helper handles namespaced policies; for `AuditClusterNetworkPolicy` you'll need to enumerate the matched namespaces yourself.
 
 ## Limits + caveats
 
-The matcher implements podSelector + namespaceSelector + numeric port + endPort range matching. Edge cases that warrant care:
+The matcher implements podSelector + namespaceSelector + numeric port + endPort range + named-port + ipBlock (CIDR + except). Edge cases that warrant care:
 
 - **Empty `from:` / `to:`** matches *all* peers — the same trap as upstream NetworkPolicy.
 - **Empty `ingress: []` / `egress: []`** is a default-deny in the relevant direction. If a policy's `policyTypes` includes a direction with no rules, every flow in that direction is "would-deny".
 - **Unknown peer pods** (deleted between flow capture and evaluation) are not matched against any selector — this can cause an apparent under-count. The `audit_verdicts.reason` column records when this happens.
+- **Named ports** are resolved against the destination pod's `spec.containers[].ports[]` declarations. A named port matches only when both the name and the observed `containerPort` line up.
+- **`ipBlock`** matches against the peer's L3 address as observed by the eBPF controller. Flows with unknown IPs (e.g. malformed eBPF events) are non-matches, not silent allows.
 
 If you're carrying production-critical policy decisions on this, treat the verdicts as a strong signal but verify against your CNI's enforcement output once promoted.

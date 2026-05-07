@@ -96,6 +96,43 @@ type AuditNetworkPolicyList struct {
 	Items           []AuditNetworkPolicy `json:"items"`
 }
 
+// AuditClusterNetworkPolicy is the cluster-scoped sibling of
+// AuditNetworkPolicy. The spec adds a top-level namespaceSelector that
+// scopes which namespaces the policy applies to (an empty selector
+// matches all namespaces). Within each matching namespace the rest of
+// the spec is evaluated exactly like a namespaced AuditNetworkPolicy.
+//
+// Mirrors Calico's StagedGlobalNetworkPolicy in scope (cluster-wide,
+// preview-only) and upstream's AdminNetworkPolicy in shape (namespace
+// selector + pod selector + ingress/egress).
+type AuditClusterNetworkPolicy struct {
+	metav1.TypeMeta   `json:",inline"`
+	metav1.ObjectMeta `json:"metadata,omitempty"`
+	Spec              ClusterNetworkPolicySpec `json:"spec"`
+	Status            AuditNetworkPolicyStatus `json:"status,omitempty"`
+}
+
+// ClusterNetworkPolicySpec is networkingv1.NetworkPolicySpec plus a
+// top-level namespaceSelector. Field semantics for podSelector,
+// policyTypes, ingress, egress are identical to upstream.
+type ClusterNetworkPolicySpec struct {
+	// NamespaceSelector restricts the namespaces this policy applies
+	// to. Nil or an empty selector ({}) matches all namespaces.
+	NamespaceSelector *metav1.LabelSelector `json:"namespaceSelector,omitempty"`
+	// PodSelector selects pods within the matching namespaces.
+	PodSelector  metav1.LabelSelector                    `json:"podSelector"`
+	PolicyTypes  []networkingv1.PolicyType               `json:"policyTypes,omitempty"`
+	Ingress      []networkingv1.NetworkPolicyIngressRule `json:"ingress,omitempty"`
+	Egress       []networkingv1.NetworkPolicyEgressRule  `json:"egress,omitempty"`
+}
+
+// AuditClusterNetworkPolicyList contains a list of AuditClusterNetworkPolicy.
+type AuditClusterNetworkPolicyList struct {
+	metav1.TypeMeta `json:",inline"`
+	metav1.ListMeta `json:"metadata,omitempty"`
+	Items           []AuditClusterNetworkPolicy `json:"items"`
+}
+
 // DeepCopyObject implements runtime.Object.
 func (in *AuditNetworkPolicy) DeepCopyObject() runtime.Object {
 	if in == nil {
@@ -150,6 +187,73 @@ func (in *AuditNetworkPolicyList) DeepCopyInto(out *AuditNetworkPolicyList) {
 	in.ListMeta.DeepCopyInto(&out.ListMeta)
 	if in.Items != nil {
 		out.Items = make([]AuditNetworkPolicy, len(in.Items))
+		for i := range in.Items {
+			in.Items[i].DeepCopyInto(&out.Items[i])
+		}
+	}
+}
+
+// DeepCopyObject implements runtime.Object for the cluster-scoped CRD.
+func (in *AuditClusterNetworkPolicy) DeepCopyObject() runtime.Object {
+	if in == nil {
+		return nil
+	}
+	out := new(AuditClusterNetworkPolicy)
+	in.DeepCopyInto(out)
+	return out
+}
+
+// DeepCopyInto for the cluster-scoped CRD.
+func (in *AuditClusterNetworkPolicy) DeepCopyInto(out *AuditClusterNetworkPolicy) {
+	*out = *in
+	out.TypeMeta = in.TypeMeta
+	in.ObjectMeta.DeepCopyInto(&out.ObjectMeta)
+	in.Spec.DeepCopyInto(&out.Spec)
+	in.Status.DeepCopyInto(&out.Status)
+}
+
+// DeepCopyInto for ClusterNetworkPolicySpec.
+func (in *ClusterNetworkPolicySpec) DeepCopyInto(out *ClusterNetworkPolicySpec) {
+	*out = *in
+	if in.NamespaceSelector != nil {
+		out.NamespaceSelector = in.NamespaceSelector.DeepCopy()
+	}
+	in.PodSelector.DeepCopyInto(&out.PodSelector)
+	if in.PolicyTypes != nil {
+		out.PolicyTypes = make([]networkingv1.PolicyType, len(in.PolicyTypes))
+		copy(out.PolicyTypes, in.PolicyTypes)
+	}
+	if in.Ingress != nil {
+		out.Ingress = make([]networkingv1.NetworkPolicyIngressRule, len(in.Ingress))
+		for i := range in.Ingress {
+			in.Ingress[i].DeepCopyInto(&out.Ingress[i])
+		}
+	}
+	if in.Egress != nil {
+		out.Egress = make([]networkingv1.NetworkPolicyEgressRule, len(in.Egress))
+		for i := range in.Egress {
+			in.Egress[i].DeepCopyInto(&out.Egress[i])
+		}
+	}
+}
+
+// DeepCopyObject implements runtime.Object for the cluster-scoped list.
+func (in *AuditClusterNetworkPolicyList) DeepCopyObject() runtime.Object {
+	if in == nil {
+		return nil
+	}
+	out := new(AuditClusterNetworkPolicyList)
+	in.DeepCopyInto(out)
+	return out
+}
+
+// DeepCopyInto for the cluster-scoped list.
+func (in *AuditClusterNetworkPolicyList) DeepCopyInto(out *AuditClusterNetworkPolicyList) {
+	*out = *in
+	out.TypeMeta = in.TypeMeta
+	in.ListMeta.DeepCopyInto(&out.ListMeta)
+	if in.Items != nil {
+		out.Items = make([]AuditClusterNetworkPolicy, len(in.Items))
 		for i := range in.Items {
 			in.Items[i].DeepCopyInto(&out.Items[i])
 		}

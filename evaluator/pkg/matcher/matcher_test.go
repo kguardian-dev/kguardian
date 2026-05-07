@@ -472,6 +472,74 @@ func TestMatch_NamedPortAllow(t *testing.T) {
 	}
 }
 
+func TestMatchCluster_NamespaceSelectorScopes(t *testing.T) {
+	// Cluster-scoped policy with namespaceSelector matching team=platform.
+	// Should apply to web pods in `monitoring` (team=platform) but not
+	// in `dev` (team=app).
+	lookup := newLookup()
+	lookup.addPod("monitoring", "web-1", map[string]string{"app": "web"})
+	lookup.addPod("dev", "web-1", map[string]string{"app": "web"})
+	lookup.addPod("monitoring", "client-1", map[string]string{"app": "client"})
+	lookup.addNamespace("monitoring", map[string]string{"team": "platform"})
+	lookup.addNamespace("dev", map[string]string{"team": "app"})
+
+	cp := &v1alpha1.AuditClusterNetworkPolicy{
+		ObjectMeta: metav1.ObjectMeta{Name: "platform-web-deny"},
+		Spec: v1alpha1.ClusterNetworkPolicySpec{
+			NamespaceSelector: ptrSelector(selectMatchLabels(map[string]string{"team": "platform"})),
+			PodSelector:       selectMatchLabels(map[string]string{"app": "web"}),
+			PolicyTypes:       []networkingv1.PolicyType{networkingv1.PolicyTypeIngress},
+			// no ingress rules — default-deny in the matched namespaces
+		},
+	}
+
+	// Flow into monitoring's web pod → cluster policy applies → WouldDeny
+	flow1 := Flow{
+		SrcPodNamespace: "monitoring", SrcPodName: "client-1",
+		DstPodNamespace: "monitoring", DstPodName: "web-1",
+		DstPort: 8080, Protocol: ProtocolTCP,
+	}
+	got := MatchCluster(flow1, cp, lookup)
+	if got[0].Verdict != VerdictWouldDeny {
+		t.Fatalf("expected WouldDeny in matching ns, got %#v", got)
+	}
+
+	// Flow into dev's web pod → namespace doesn't match → NotApplicable
+	flow2 := Flow{
+		DstPodNamespace: "dev", DstPodName: "web-1",
+		DstPort: 8080, Protocol: ProtocolTCP,
+	}
+	got = MatchCluster(flow2, cp, lookup)
+	if got[0].Verdict != VerdictNotApplicable {
+		t.Fatalf("expected NotApplicable in non-matching ns, got %#v", got)
+	}
+}
+
+func TestMatchCluster_NilSelectorMatchesAll(t *testing.T) {
+	// nil namespaceSelector → applies to every namespace.
+	lookup := newLookup()
+	lookup.addPod("ns-a", "web-1", map[string]string{"app": "web"})
+	lookup.addPod("ns-b", "web-1", map[string]string{"app": "web"})
+
+	cp := &v1alpha1.AuditClusterNetworkPolicy{
+		ObjectMeta: metav1.ObjectMeta{Name: "all-web-deny"},
+		Spec: v1alpha1.ClusterNetworkPolicySpec{
+			PodSelector: selectMatchLabels(map[string]string{"app": "web"}),
+		},
+	}
+
+	for _, ns := range []string{"ns-a", "ns-b"} {
+		flow := Flow{
+			DstPodNamespace: ns, DstPodName: "web-1",
+			DstPort: 8080, Protocol: ProtocolTCP,
+		}
+		got := MatchCluster(flow, cp, lookup)
+		if got[0].Verdict != VerdictWouldDeny {
+			t.Errorf("ns=%s: expected WouldDeny, got %s", ns, got[0].Verdict)
+		}
+	}
+}
+
 func TestMatch_NamedPortMismatchOnPort(t *testing.T) {
 	// Container declares "http"=8080; flow hits 9090 — should not match.
 	lookup := newLookup()

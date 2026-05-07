@@ -10,14 +10,14 @@ rules:
   - apiGroups: [""]
     resources: [pods, namespaces]
     verbs: [get, list, watch]
-  # Watch the AuditNetworkPolicy CRD via the dynamic client.
+  # Watch the AuditNetworkPolicy CRDs via the dynamic client.
   - apiGroups: [kguardian.dev]
-    resources: [auditnetworkpolicies]
+    resources: [auditnetworkpolicies, auditclusternetworkpolicies]
     verbs: [get, list, watch]
   # Allow the evaluator to write back rolling-window evaluation summary
   # via the status subresource. Spec edits are not granted.
   - apiGroups: [kguardian.dev]
-    resources: [auditnetworkpolicies/status]
+    resources: [auditnetworkpolicies/status, auditclusternetworkpolicies/status]
     verbs: [get, update, patch]
   # Emit Kubernetes Events on the AuditNetworkPolicy when a flow would
   # be denied (post-MVP — RBAC pre-granted so it's ready when the

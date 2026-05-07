@@ -11,6 +11,104 @@ import (
 	"k8s.io/apimachinery/pkg/labels"
 )
 
+// MatchCluster evaluates a Flow against a cluster-scoped
+// AuditClusterNetworkPolicy. The semantic difference vs. Match: the
+// policy can target pods in any namespace whose labels match
+// spec.namespaceSelector (nil/empty matches all). Within a matching
+// namespace the rule evaluation is identical.
+func MatchCluster(flow Flow, policy *v1alpha1.AuditClusterNetworkPolicy, lookup Lookup) []Result {
+	var results []Result
+
+	types := effectivePolicyTypesCluster(&policy.Spec)
+	for _, t := range types {
+		dir := Direction(t)
+		subject := subjectPod(flow, dir, lookup)
+		notApplicable := func() {
+			results = append(results, Result{
+				PolicyNamespace: "", // cluster-scoped: no namespace
+				PolicyName:      policy.Name,
+				Direction:       dir,
+				Verdict:         VerdictNotApplicable,
+			})
+		}
+		if subject == nil {
+			notApplicable()
+			continue
+		}
+		// Namespace gate from the cluster-scope spec.
+		if policy.Spec.NamespaceSelector != nil {
+			nsLabels := lookup.GetNamespaceLabels(subject.Namespace)
+			if nsLabels == nil || !selectorMatchesLabels(*policy.Spec.NamespaceSelector, nsLabels) {
+				notApplicable()
+				continue
+			}
+		}
+		if !selectorMatchesLabels(policy.Spec.PodSelector, subject.Labels) {
+			notApplicable()
+			continue
+		}
+
+		allowed, reason := evaluateRulesCluster(flow, policy, dir, lookup)
+		if allowed {
+			results = append(results, Result{
+				PolicyName: policy.Name,
+				Direction:  dir,
+				Verdict:    VerdictAllow,
+			})
+		} else {
+			results = append(results, Result{
+				PolicyName: policy.Name,
+				Direction:  dir,
+				Verdict:    VerdictWouldDeny,
+				Reason:     reason,
+			})
+		}
+	}
+	return results
+}
+
+func effectivePolicyTypesCluster(spec *v1alpha1.ClusterNetworkPolicySpec) []networkingv1.PolicyType {
+	if len(spec.PolicyTypes) > 0 {
+		return spec.PolicyTypes
+	}
+	types := []networkingv1.PolicyType{networkingv1.PolicyTypeIngress}
+	if len(spec.Egress) > 0 {
+		types = append(types, networkingv1.PolicyTypeEgress)
+	}
+	return types
+}
+
+// evaluateRulesCluster mirrors evaluateRules but reads from a
+// ClusterNetworkPolicySpec and threads the subject's namespace into
+// peer matching (so peers without a namespaceSelector default to the
+// subject pod's namespace, same as upstream).
+func evaluateRulesCluster(flow Flow, policy *v1alpha1.AuditClusterNetworkPolicy, dir Direction, lookup Lookup) (bool, string) {
+	dstPod := lookup.GetPod(flow.DstPodNamespace, flow.DstPodName)
+	switch dir {
+	case DirectionIngress:
+		if len(policy.Spec.Ingress) == 0 {
+			return false, "policy has no ingress rules — default-deny"
+		}
+		for _, rule := range policy.Spec.Ingress {
+			if peerListMatches(flow, dir, rule.From, lookup) && portsMatch(flow, rule.Ports, dstPod) {
+				return true, ""
+			}
+		}
+		return false, "no ingress rule matched both peer and port"
+	case DirectionEgress:
+		if len(policy.Spec.Egress) == 0 {
+			return false, "policy has no egress rules — default-deny"
+		}
+		for _, rule := range policy.Spec.Egress {
+			if peerListMatches(flow, dir, rule.To, lookup) && portsMatch(flow, rule.Ports, dstPod) {
+				return true, ""
+			}
+		}
+		return false, "no egress rule matched both peer and port"
+	}
+	return false, "unknown direction"
+}
+
 // Match evaluates a single Flow against a single AuditNetworkPolicy and
 // returns one Result per direction the policy applies in. A flow can
 // produce up to two Results when both Ingress and Egress are listed

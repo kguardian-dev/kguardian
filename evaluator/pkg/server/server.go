@@ -123,6 +123,12 @@ func (s *Server) handleEvaluate(w http.ResponseWriter, r *http.Request) {
 	for _, p := range policies {
 		results = append(results, matcher.Match(flow, p, s.store)...)
 	}
+	// Cluster-scoped policies: every flow runs against every one;
+	// MatchCluster returns NotApplicable when a policy's
+	// namespaceSelector / podSelector doesn't cover the subject pod.
+	for _, cp := range s.store.ClusterPolicies() {
+		results = append(results, matcher.MatchCluster(flow, cp, s.store)...)
+	}
 
 	for _, r := range results {
 		// Drop NotApplicable from aggregation — those are policies
