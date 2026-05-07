@@ -103,6 +103,10 @@ func (s *Server) handleEvaluate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer r.Body.Close()
+	// Cap the decoder so a chatty or buggy caller can't stream us
+	// arbitrary bytes. A Flow is well under 4KB; 64KB leaves plenty
+	// of headroom for future fields.
+	r.Body = http.MaxBytesReader(w, r.Body, 64*1024)
 
 	var flow matcher.Flow
 	if err := json.NewDecoder(r.Body).Decode(&flow); err != nil {

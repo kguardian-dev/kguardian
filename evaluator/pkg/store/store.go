@@ -152,9 +152,8 @@ func (s *Store) onPolicyAddOrUpdate(obj interface{}) {
 }
 
 func (s *Store) onPolicyDelete(obj interface{}) {
-	u, ok := obj.(*unstructured.Unstructured)
-	if !ok {
-		// Could be a tombstone — best-effort.
+	u := unwrapTombstone(obj)
+	if u == nil {
 		return
 	}
 	ns := u.GetNamespace()
@@ -178,6 +177,23 @@ func (s *Store) onPolicyDelete(obj interface{}) {
 // unstructuredToPolicy converts an Unstructured to a typed
 // AuditNetworkPolicy via JSON round-trip. Cheap relative to per-flow
 // evaluation; runs once per add/update.
+// unwrapTombstone returns the *unstructured.Unstructured payload for a
+// delete event, transparently unwrapping the cache.DeletedFinalStateUnknown
+// tombstone that client-go sends when its list-watch reconnects after a
+// disconnect. Without this, a delete that arrives via tombstone is
+// silently dropped and the policy stays in our in-memory cache forever.
+func unwrapTombstone(obj interface{}) *unstructured.Unstructured {
+	if u, ok := obj.(*unstructured.Unstructured); ok {
+		return u
+	}
+	if t, ok := obj.(cache.DeletedFinalStateUnknown); ok {
+		if u, ok := t.Obj.(*unstructured.Unstructured); ok {
+			return u
+		}
+	}
+	return nil
+}
+
 func unstructuredToPolicy(u *unstructured.Unstructured) (*v1alpha1.AuditNetworkPolicy, error) {
 	raw, err := u.MarshalJSON()
 	if err != nil {
@@ -239,8 +255,8 @@ func (s *Store) onClusterPolicyAddOrUpdate(obj interface{}) {
 }
 
 func (s *Store) onClusterPolicyDelete(obj interface{}) {
-	u, ok := obj.(*unstructured.Unstructured)
-	if !ok {
+	u := unwrapTombstone(obj)
+	if u == nil {
 		return
 	}
 	name := u.GetName()

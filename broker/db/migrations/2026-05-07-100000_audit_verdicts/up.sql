@@ -2,6 +2,11 @@
 -- One row per (flow, policy, direction) tuple where verdict = WouldDeny.
 -- Allows the broker to expose /audit/verdicts queries and serve the
 -- frontend's "Would-Deny" view without round-tripping the evaluator.
+--
+-- Retention: this table grows monotonically with would-deny traffic.
+-- A follow-up will add either pg_partman partitioning on observed_at
+-- or a scheduled DELETE WHERE observed_at < NOW() - INTERVAL '30 days'.
+-- Until then operators on busy clusters should add their own cleanup.
 CREATE TABLE audit_verdicts (
   id              BIGSERIAL PRIMARY KEY,
   policy_uid      VARCHAR     NOT NULL,

@@ -1,7 +1,6 @@
 package matcher
 
 import (
-	"fmt"
 	"net"
 
 	v1alpha1 "github.com/kguardian-dev/kguardian/evaluator/pkg/v1alpha1"
@@ -27,6 +26,7 @@ func MatchCluster(flow Flow, policy *v1alpha1.AuditClusterNetworkPolicy, lookup 
 			results = append(results, Result{
 				PolicyNamespace: "", // cluster-scoped: no namespace
 				PolicyName:      policy.Name,
+				PolicyUID:       string(policy.UID),
 				Direction:       dir,
 				Verdict:         VerdictNotApplicable,
 			})
@@ -52,12 +52,14 @@ func MatchCluster(flow Flow, policy *v1alpha1.AuditClusterNetworkPolicy, lookup 
 		if allowed {
 			results = append(results, Result{
 				PolicyName: policy.Name,
+				PolicyUID:  string(policy.UID),
 				Direction:  dir,
 				Verdict:    VerdictAllow,
 			})
 		} else {
 			results = append(results, Result{
 				PolicyName: policy.Name,
+				PolicyUID:  string(policy.UID),
 				Direction:  dir,
 				Verdict:    VerdictWouldDeny,
 				Reason:     reason,
@@ -83,14 +85,14 @@ func effectivePolicyTypesCluster(spec *v1alpha1.ClusterNetworkPolicySpec) []netw
 // peer matching (so peers without a namespaceSelector default to the
 // subject pod's namespace, same as upstream).
 func evaluateRulesCluster(flow Flow, policy *v1alpha1.AuditClusterNetworkPolicy, dir Direction, lookup Lookup) (bool, string) {
-	dstPod := lookup.GetPod(flow.DstPodNamespace, flow.DstPodName)
+	portPod := portTargetPod(flow, dir, lookup)
 	switch dir {
 	case DirectionIngress:
 		if len(policy.Spec.Ingress) == 0 {
 			return false, "policy has no ingress rules — default-deny"
 		}
 		for _, rule := range policy.Spec.Ingress {
-			if peerListMatches(flow, dir, rule.From, lookup) && portsMatch(flow, rule.Ports, dstPod) {
+			if peerListMatches(flow, dir, rule.From, lookup) && portsMatch(flow, rule.Ports, portPod) {
 				return true, ""
 			}
 		}
@@ -100,7 +102,7 @@ func evaluateRulesCluster(flow Flow, policy *v1alpha1.AuditClusterNetworkPolicy,
 			return false, "policy has no egress rules — default-deny"
 		}
 		for _, rule := range policy.Spec.Egress {
-			if peerListMatches(flow, dir, rule.To, lookup) && portsMatch(flow, rule.Ports, dstPod) {
+			if peerListMatches(flow, dir, rule.To, lookup) && portsMatch(flow, rule.Ports, portPod) {
 				return true, ""
 			}
 		}
@@ -136,6 +138,7 @@ func Match(flow Flow, policy *v1alpha1.AuditNetworkPolicy, lookup Lookup) []Resu
 			results = append(results, Result{
 				PolicyNamespace: policy.Namespace,
 				PolicyName:      policy.Name,
+				PolicyUID:       string(policy.UID),
 				Direction:       dir,
 				Verdict:         VerdictNotApplicable,
 			})
@@ -145,6 +148,7 @@ func Match(flow Flow, policy *v1alpha1.AuditNetworkPolicy, lookup Lookup) []Resu
 			results = append(results, Result{
 				PolicyNamespace: policy.Namespace,
 				PolicyName:      policy.Name,
+				PolicyUID:       string(policy.UID),
 				Direction:       dir,
 				Verdict:         VerdictNotApplicable,
 			})
@@ -154,6 +158,7 @@ func Match(flow Flow, policy *v1alpha1.AuditNetworkPolicy, lookup Lookup) []Resu
 			results = append(results, Result{
 				PolicyNamespace: policy.Namespace,
 				PolicyName:      policy.Name,
+				PolicyUID:       string(policy.UID),
 				Direction:       dir,
 				Verdict:         VerdictNotApplicable,
 			})
@@ -169,6 +174,7 @@ func Match(flow Flow, policy *v1alpha1.AuditNetworkPolicy, lookup Lookup) []Resu
 			results = append(results, Result{
 				PolicyNamespace: policy.Namespace,
 				PolicyName:      policy.Name,
+				PolicyUID:       string(policy.UID),
 				Direction:       dir,
 				Verdict:         VerdictAllow,
 			})
@@ -176,6 +182,7 @@ func Match(flow Flow, policy *v1alpha1.AuditNetworkPolicy, lookup Lookup) []Resu
 			results = append(results, Result{
 				PolicyNamespace: policy.Namespace,
 				PolicyName:      policy.Name,
+				PolicyUID:       string(policy.UID),
 				Direction:       dir,
 				Verdict:         VerdictWouldDeny,
 				Reason:          reason,
@@ -226,17 +233,20 @@ func peerPod(flow Flow, dir Direction, lookup Lookup) *corev1.Pod {
 // evaluateRules walks the relevant rule list and returns (allowed, reason).
 // Reason is only populated when allowed=false, to explain the deny.
 //
-// Named-port resolution always reads the *destination* pod's container
-// port declarations, regardless of direction.
+// Named-port resolution reads the pod whose containers expose the port:
+// for Ingress that's the *destination* pod (the one being connected to);
+// for Egress that's also the destination — i.e. the egress *peer*. The
+// upstream NetworkPolicy spec is explicit on this: NetworkPolicyPort
+// always describes the listener side of the connection.
 func evaluateRules(flow Flow, policy *v1alpha1.AuditNetworkPolicy, dir Direction, lookup Lookup) (bool, string) {
-	dstPod := lookup.GetPod(flow.DstPodNamespace, flow.DstPodName)
+	portPod := portTargetPod(flow, dir, lookup)
 	switch dir {
 	case DirectionIngress:
 		if len(policy.Spec.Ingress) == 0 {
 			return false, "policy has no ingress rules — default-deny"
 		}
 		for _, rule := range policy.Spec.Ingress {
-			if peerListMatches(flow, dir, rule.From, lookup) && portsMatch(flow, rule.Ports, dstPod) {
+			if peerListMatches(flow, dir, rule.From, lookup) && portsMatch(flow, rule.Ports, portPod) {
 				return true, ""
 			}
 		}
@@ -246,13 +256,27 @@ func evaluateRules(flow Flow, policy *v1alpha1.AuditNetworkPolicy, dir Direction
 			return false, "policy has no egress rules — default-deny"
 		}
 		for _, rule := range policy.Spec.Egress {
-			if peerListMatches(flow, dir, rule.To, lookup) && portsMatch(flow, rule.Ports, dstPod) {
+			if peerListMatches(flow, dir, rule.To, lookup) && portsMatch(flow, rule.Ports, portPod) {
 				return true, ""
 			}
 		}
 		return false, "no egress rule matched both peer and port"
 	}
 	return false, "unknown direction"
+}
+
+// portTargetPod returns the pod whose container port declarations are
+// canonical for this rule's named-port resolution.
+//
+// The upstream NetworkPolicy spec defines NetworkPolicyPort as the
+// *destination* port of the connection, regardless of whether the rule
+// is Ingress or Egress. So named-port resolution reads the destination
+// pod's containers in both directions — Ingress: the policy's subject
+// pod; Egress: the peer pod that the subject is connecting to. In both
+// cases that's `flow.Dst*`. Centralising this here documents the
+// invariant.
+func portTargetPod(flow Flow, dir Direction, lookup Lookup) *corev1.Pod {
+	return lookup.GetPod(flow.DstPodNamespace, flow.DstPodName)
 }
 
 // peerListMatches returns true if the peer side of the flow matches at
@@ -450,15 +474,3 @@ func selectorMatchesLabels(sel metav1.LabelSelector, lbls map[string]string) boo
 	return s.Matches(labels.Set(lbls))
 }
 
-// describeFlow returns a short tag for log/metric labels. Kept here so
-// callers don't have to format flows inline.
-func describeFlow(f Flow) string {
-	return fmt.Sprintf("%s/%s -> %s/%s :%d/%s",
-		f.SrcPodNamespace, f.SrcPodName,
-		f.DstPodNamespace, f.DstPodName,
-		f.DstPort, f.Protocol,
-	)
-}
-
-// silence unused warning for describeFlow during incremental builds.
-var _ = describeFlow

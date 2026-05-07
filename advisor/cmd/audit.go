@@ -8,8 +8,6 @@ import (
 
 	log "github.com/rs/zerolog/log"
 	"github.com/spf13/cobra"
-	"github.com/kguardian-dev/kguardian/advisor/pkg/k8s"
-	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -136,24 +134,32 @@ func promoteList(ctx context.Context, dyn dynamic.Interface, namespace string) e
 
 	for i := range list.Items {
 		item := &list.Items[i]
-		var out io.Writer = os.Stdout
-		if promoteOutputDir != "" {
-			path := fmt.Sprintf("%s/%s-%s.yaml", promoteOutputDir, item.GetNamespace(), item.GetName())
-			f, err := os.Create(path)
-			if err != nil {
-				return fmt.Errorf("opening %s: %w", path, err)
-			}
-			out = f
-			defer f.Close()
-			log.Info().Str("path", path).Msg("wrote promoted NetworkPolicy")
-		} else if i > 0 {
-			fmt.Fprintln(os.Stdout, "---")
-		}
-		if err := emitPromoted(item, out); err != nil {
+		if err := promoteListItem(item, i, len(list.Items)); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+// promoteListItem handles one entry of promoteList. Split out of the
+// loop so each file's defer Close() runs at the end of the iteration
+// rather than accumulating until promoteList returns (which would
+// hold N file descriptors open for an N-policy run).
+func promoteListItem(item *unstructured.Unstructured, idx, total int) error {
+	if promoteOutputDir != "" {
+		path := fmt.Sprintf("%s/%s-%s.yaml", promoteOutputDir, item.GetNamespace(), item.GetName())
+		f, err := os.Create(path)
+		if err != nil {
+			return fmt.Errorf("opening %s: %w", path, err)
+		}
+		defer f.Close()
+		log.Info().Str("path", path).Msg("wrote promoted NetworkPolicy")
+		return emitPromoted(item, f)
+	}
+	if idx > 0 {
+		fmt.Fprintln(os.Stdout, "---")
+	}
+	return emitPromoted(item, os.Stdout)
 }
 
 // emitPromoted converts an AuditNetworkPolicy into an enforced
@@ -207,7 +213,3 @@ func emitPromoted(u *unstructured.Unstructured, w io.Writer) error {
 	return nil
 }
 
-// silence unused-symbol linters for the corev1 import (kept for
-// future status-style annotations on promoted policies).
-var _ = corev1.NamespaceDefault
-var _ = k8s.ConfigKey

@@ -12,6 +12,7 @@ on:
       - 'frontend/**'
       - 'llm-bridge/**'
       - 'mcp-server/**'
+      - 'evaluator/**'
       - 'charts/**'
       - '.github/workflows/pr-build.yaml'
 

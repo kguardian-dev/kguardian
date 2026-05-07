@@ -158,7 +158,7 @@ func (a *Aggregator) flush(ctx context.Context) {
 // patches via the cluster GVR; otherwise the namespaced GVR is used.
 func (a *Aggregator) patchStatus(ctx context.Context, key policyKey, agg *policyAgg) error {
 	last := metav1.NewTime(agg.lastEvaluated)
-	status := v1alpha1.AuditNetworkPolicyStatus{
+	statusPatch := v1alpha1.AuditNetworkPolicyStatus{
 		Evaluation: v1alpha1.EvaluationStatus{
 			LastEvaluated:  &last,
 			FlowsEvaluated: agg.flowsEvaluated,
@@ -167,7 +167,7 @@ func (a *Aggregator) patchStatus(ctx context.Context, key policyKey, agg *policy
 		},
 	}
 
-	patch := map[string]any{"status": status}
+	patch := map[string]any{"status": statusPatch}
 	body, err := json.Marshal(patch)
 	if err != nil {
 		return fmt.Errorf("marshal status patch: %w", err)

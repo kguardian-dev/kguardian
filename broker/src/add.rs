@@ -40,16 +40,17 @@ pub async fn add_pods_batch(
         count
     );
 
-    // Fire-and-forget audit eval per event. The AuditClient has its
-    // own internal timeouts; we don't want to block the ingest reply.
+    // Fire-and-forget audit eval per event. Spawn each evaluation on
+    // its own task so a 100-event batch doesn't serialise 100 sequential
+    // 500ms HTTP round-trips on a single tokio worker.
     if audit.enabled() {
-        let audit_client = audit.get_ref().clone();
-        let pool_for_audit = pool.get_ref().clone();
-        actix_web::rt::spawn(async move {
-            for event in audit_events {
-                audit_client.evaluate_and_persist(pool_for_audit.clone(), event).await;
-            }
-        });
+        for event in audit_events {
+            let audit_client = audit.get_ref().clone();
+            let pool_for_audit = pool.get_ref().clone();
+            actix_web::rt::spawn(async move {
+                audit_client.evaluate_and_persist(pool_for_audit, event).await;
+            });
+        }
     }
 
     Ok(HttpResponse::Ok().json(result))

@@ -472,6 +472,58 @@ func TestMatch_NamedPortAllow(t *testing.T) {
 	}
 }
 
+func TestMatch_NamedPortEgress(t *testing.T) {
+	// Upstream invariant: NetworkPolicyPort describes the *destination*
+	// port of the connection, regardless of direction. For an egress
+	// rule from `app=web` to `app=db` on named port "postgres", the
+	// db pod (the peer / connection destination) is the one whose
+	// containers must declare the name. The web pod's container ports
+	// are irrelevant.
+	lookup := newLookup()
+	lookup.addPod("prod", "web-1", map[string]string{"app": "web"})
+	db := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: "prod", Name: "db-1",
+			Labels: map[string]string{"app": "db"},
+		},
+		Spec: corev1.PodSpec{
+			Containers: []corev1.Container{
+				{Name: "postgres", Ports: []corev1.ContainerPort{
+					{Name: "postgres", ContainerPort: 5432, Protocol: corev1.ProtocolTCP},
+				}},
+			},
+		},
+	}
+	lookup.pods["prod/db-1"] = db
+
+	tcp := corev1.ProtocolTCP
+	namedPort := intstr.FromString("postgres")
+	p := policy("prod", "web-egress-db", networkingv1.NetworkPolicySpec{
+		PodSelector: selectMatchLabels(map[string]string{"app": "web"}),
+		PolicyTypes: []networkingv1.PolicyType{networkingv1.PolicyTypeEgress},
+		Egress: []networkingv1.NetworkPolicyEgressRule{
+			{
+				To: []networkingv1.NetworkPolicyPeer{
+					{PodSelector: ptrSelector(selectMatchLabels(map[string]string{"app": "db"}))},
+				},
+				Ports: []networkingv1.NetworkPolicyPort{
+					{Protocol: &tcp, Port: &namedPort},
+				},
+			},
+		},
+	})
+
+	flow := Flow{
+		SrcPodNamespace: "prod", SrcPodName: "web-1",
+		DstPodNamespace: "prod", DstPodName: "db-1",
+		DstPort: 5432, Protocol: ProtocolTCP,
+	}
+	got := Match(flow, p, lookup)
+	if len(got) != 1 || got[0].Verdict != VerdictAllow || got[0].Direction != DirectionEgress {
+		t.Fatalf("expected Egress Allow via destination-pod named port, got %#v", got)
+	}
+}
+
 func TestMatchCluster_NamespaceSelectorScopes(t *testing.T) {
 	// Cluster-scoped policy with namespaceSelector matching team=platform.
 	// Should apply to web pods in `monitoring` (team=platform) but not

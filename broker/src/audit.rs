@@ -18,6 +18,14 @@ use tracing::{debug, warn};
 
 type DbPool = r2d2::Pool<ConnectionManager<PgConnection>>;
 
+#[derive(Debug, thiserror::Error)]
+enum AuditInsertError {
+    #[error("connection pool: {0}")]
+    Pool(#[from] diesel::r2d2::PoolError),
+    #[error("insert: {0}")]
+    Diesel(#[from] diesel::result::Error),
+}
+
 /// Wire format consumed by `POST /evaluate` — must match
 /// `evaluator/pkg/matcher.Flow` exactly.
 #[derive(Debug, Serialize)]
@@ -208,20 +216,26 @@ impl AuditClient {
             return;
         }
 
-        let result = tokio::task::spawn_blocking(move || -> Result<usize, diesel::result::Error> {
-            let mut conn = pool.get().map_err(|e| {
-                warn!(error = %e, "could not get db conn for audit verdict insert");
-                diesel::result::Error::BrokenTransactionManager
-            })?;
+        // Use a dedicated error enum so we can distinguish pool
+        // exhaustion from a real diesel error in logs without abusing
+        // `diesel::result::Error` variants for unrelated failure modes.
+        let result = tokio::task::spawn_blocking(move || -> Result<usize, AuditInsertError> {
+            let mut conn = pool.get().map_err(AuditInsertError::Pool)?;
             diesel::insert_into(schema::audit_verdicts::table)
                 .values(&to_insert)
                 .execute(&mut conn)
+                .map_err(AuditInsertError::Diesel)
         })
         .await;
 
         match result {
             Ok(Ok(n)) => debug!(rows = n, "persisted audit verdicts"),
-            Ok(Err(e)) => warn!(error = %e, "audit verdict insert failed"),
+            Ok(Err(AuditInsertError::Pool(e))) => {
+                warn!(error = %e, "could not get db conn for audit verdict insert")
+            }
+            Ok(Err(AuditInsertError::Diesel(e))) => {
+                warn!(error = %e, "audit verdict insert failed")
+            }
             Err(e) => warn!(error = %e, "audit verdict task panicked"),
         }
     }

@@ -88,8 +88,13 @@ const (
 type Result struct {
 	PolicyNamespace string    `json:"policyNamespace"`
 	PolicyName      string    `json:"policyName"`
-	Direction       Direction `json:"direction"`
-	Verdict         Verdict   `json:"verdict"`
+	// PolicyUID is the .metadata.uid of the matched
+	// AuditNetworkPolicy / AuditClusterNetworkPolicy. Stable across
+	// renames of the same generation; empty when the matcher couldn't
+	// resolve a UID (e.g. a synthetic test policy).
+	PolicyUID string    `json:"policyUID,omitempty"`
+	Direction Direction `json:"direction"`
+	Verdict   Verdict   `json:"verdict"`
 	// Reason is a human-readable explanation populated for
 	// WouldDeny verdicts.
 	Reason string `json:"reason,omitempty"`
