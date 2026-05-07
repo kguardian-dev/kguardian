@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.11.0](https://github.com/kguardian-dev/kguardian/compare/chart/v1.10.0...chart/v1.11.0) (2026-05-07)
+
+
+### Features
+
+* **chart:** enable evaluator by default ([#867](https://github.com/kguardian-dev/kguardian/issues/867)) ([3953760](https://github.com/kguardian-dev/kguardian/commit/3953760878f3139f761a7deccf617c4637e22885))
+
 ## [1.10.0](https://github.com/kguardian-dev/kguardian/compare/chart/v1.9.1...chart/v1.10.0) (2026-05-07)
 
 
