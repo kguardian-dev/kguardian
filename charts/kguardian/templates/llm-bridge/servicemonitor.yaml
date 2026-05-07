@@ -1,0 +1,26 @@
+{{- if and .Values.llmBridge.enabled .Values.llmBridge.metrics.serviceMonitor.enabled }}
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: {{ .Values.llmBridge.service.name }}
+  {{- with .Values.llmBridge.metrics.serviceMonitor.namespace }}
+  namespace: {{ . | quote }}
+  {{- end }}
+  labels:
+    {{- include "kguardian.labels" . | nindent 4 }}
+    {{- with .Values.llmBridge.metrics.serviceMonitor.labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ .Values.llmBridge.service.name }}
+  namespaceSelector:
+    matchNames:
+      - {{ include "kguardian.namespace" . | trim }}
+  endpoints:
+    - port: {{ .Values.llmBridge.metrics.serviceMonitor.port }}
+      path: {{ .Values.llmBridge.metrics.serviceMonitor.path }}
+      interval: {{ .Values.llmBridge.metrics.serviceMonitor.interval }}
+      scrapeTimeout: {{ .Values.llmBridge.metrics.serviceMonitor.scrapeTimeout }}
+{{- end }}
