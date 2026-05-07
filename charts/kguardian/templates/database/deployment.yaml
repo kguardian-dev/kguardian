@@ -72,13 +72,17 @@ spec:
             {{- toYaml . | nindent 12 }}
           {{- end }}
           volumeMounts:
-            - mountPath: /var/lib/postgres/data
+            # postgres:18+ images use major-version-specific subdirectories
+            # under /var/lib/postgresql (e.g. /var/lib/postgresql/18/docker/),
+            # so the PVC must mount the parent directory. See
+            # https://github.com/docker-library/postgres/pull/1259
+            - mountPath: /var/lib/postgresql
               name: db-data
       volumes:
         - name: db-data
           {{- if .Values.database.persistence.enabled }}
           persistentVolumeClaim:
-            claimName: {{ .Values.database.persistence.existingClaim }}
+            claimName: {{ .Values.database.persistence.existingClaim | default (printf "%s-data" .Values.database.name) }}
           {{- else }}
           emptyDir: {}
           {{- end -}}
