@@ -892,3 +892,144 @@ mcpServer:
       interval: 30s
       scrapeTimeout: 10s
       labels: {}
+
+# -------------------------------------------------------------------------
+# kguardian-evaluator: watches AuditNetworkPolicy CRDs and reports flows
+# that *would* be denied. No traffic is ever blocked. See
+# docs/audit-network-policy.mdx for the design.
+# -------------------------------------------------------------------------
+evaluator:
+  # -- Deploy the audit-mode policy evaluator. When false, the evaluator
+  # workload, RBAC, Service, and PDB/ServiceMonitor are skipped. The CRD
+  # itself ships in charts/kguardian/crds/ and is always installed by
+  # Helm regardless of this toggle.
+  #
+  # Defaults to false because the evaluator image build pipeline lands
+  # in a follow-up PR; flip on once `ghcr.io/kguardian-dev/kguardian/evaluator`
+  # is publishing tags.
+  enabled: false
+
+  # -- Number of evaluator replicas
+  replicaCount: 1
+
+  image:
+    # -- Evaluator container image repository
+    repository: ghcr.io/kguardian-dev/kguardian/evaluator
+    # -- Evaluator image pull policy
+    pullPolicy: IfNotPresent
+    # -- Evaluator version tag (auto-updated by release-please)
+    tag: "0.1.0"
+    # -- Overrides the image tag using SHA digest
+    sha: ""
+
+  # -- Log level for the evaluator process (panic|fatal|error|warn|info|debug|trace)
+  logLevel: info
+
+  # -- Additional environment variables for the evaluator
+  env: []
+
+  container:
+    # -- Evaluator HTTP port
+    port: 8082
+
+  service:
+    # -- Evaluator service name
+    name: "kguardian-evaluator"
+    # -- Evaluator service type
+    type: ClusterIP
+    # -- Evaluator service port
+    port: 8082
+
+  # -- List of image pull secrets for private registries
+  imagePullSecrets: []
+
+  serviceAccount:
+    # -- Specifies whether a service account should be created
+    create: true
+    # -- Annotations to add to the service account
+    annotations: {}
+    # -- The name of the service account to use
+    name: ""
+    # -- Automount API credentials (the evaluator must reach the API server
+    # to watch CRDs, pods, and namespaces)
+    automountServiceAccountToken: true
+
+  # -- Annotations to add to evaluator pods
+  podAnnotations: {}
+
+  # -- Evaluator pod security context. Runs as non-root user (1000)
+  podSecurityContext:
+    runAsUser: 1000
+    runAsGroup: 1000
+    fsGroup: 1000
+    fsGroupChangePolicy: OnRootMismatch
+    supplementalGroups: [1000]
+    seccompProfile:
+      type: RuntimeDefault
+
+  # -- Evaluator container security context. Hardened with read-only root filesystem
+  securityContext:
+    privileged: false
+    capabilities:
+      drop:
+      - ALL
+    readOnlyRootFilesystem: true
+    runAsNonRoot: true
+    runAsUser: 1000
+    allowPrivilegeEscalation: false
+
+  # -- Evaluator pod resource requests and limits
+  resources:
+    limits:
+      memory: 256Mi
+    requests:
+      cpu: 50m
+      memory: 64Mi
+
+  autoscaling:
+    # -- Enable horizontal pod autoscaling for evaluator
+    enabled: false
+    # -- Minimum number of evaluator replicas
+    minReplicas: 1
+    # -- Maximum number of evaluator replicas
+    maxReplicas: 5
+    # -- Target CPU utilization percentage for autoscaling
+    targetCPUUtilizationPercentage: 80
+
+  # -- Node labels for evaluator pod assignment
+  nodeSelector:
+    kubernetes.io/os: linux
+
+  # -- Tolerations for evaluator pod assignment
+  tolerations: []
+
+  # -- Affinity rules for evaluator pod assignment
+  affinity: {}
+
+  # -- Priority class to be used for the kguardian evaluator pods
+  priorityClassName: ""
+
+  # -- Startup probe. Empty by default — opt in when slow startup is expected.
+  startupProbe: {}
+
+  # -- Topology spread constraints applied to evaluator pods.
+  topologySpreadConstraints: []
+
+  podDisruptionBudget:
+    # -- Create a PodDisruptionBudget for the evaluator. Defaults to false;
+    # enable when running >1 replica.
+    enabled: false
+    minAvailable: 1
+    maxUnavailable: ""
+
+  metrics:
+    serviceMonitor:
+      # -- Create a ServiceMonitor for prometheus-operator. The evaluator
+      # does not currently expose /metrics natively — forward-compatible
+      # toggle for when it does.
+      enabled: false
+      path: /metrics
+      port: http
+      interval: 30s
+      scrapeTimeout: 10s
+      labels: {}

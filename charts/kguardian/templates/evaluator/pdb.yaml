@@ -1,0 +1,17 @@
+{{- if and .Values.evaluator.enabled .Values.evaluator.podDisruptionBudget.enabled }}
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ .Values.evaluator.service.name }}
+  labels:
+    {{- include "kguardian.labels" . | nindent 4 }}
+spec:
+  {{- if .Values.evaluator.podDisruptionBudget.maxUnavailable }}
+  maxUnavailable: {{ .Values.evaluator.podDisruptionBudget.maxUnavailable }}
+  {{- else }}
+  minAvailable: {{ .Values.evaluator.podDisruptionBudget.minAvailable | default 1 }}
+  {{- end }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ .Values.evaluator.service.name }}
+{{- end }}

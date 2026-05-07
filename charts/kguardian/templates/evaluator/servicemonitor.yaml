@@ -1,0 +1,26 @@
+{{- if and .Values.evaluator.enabled .Values.evaluator.metrics.serviceMonitor.enabled }}
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: {{ .Values.evaluator.service.name }}
+  {{- with .Values.evaluator.metrics.serviceMonitor.namespace }}
+  namespace: {{ . | quote }}
+  {{- end }}
+  labels:
+    {{- include "kguardian.labels" . | nindent 4 }}
+    {{- with .Values.evaluator.metrics.serviceMonitor.labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ .Values.evaluator.service.name }}
+  namespaceSelector:
+    matchNames:
+      - {{ include "kguardian.namespace" . | trim }}
+  endpoints:
+    - port: {{ .Values.evaluator.metrics.serviceMonitor.port }}
+      path: {{ .Values.evaluator.metrics.serviceMonitor.path }}
+      interval: {{ .Values.evaluator.metrics.serviceMonitor.interval }}
+      scrapeTimeout: {{ .Values.evaluator.metrics.serviceMonitor.scrapeTimeout }}
+{{- end }}

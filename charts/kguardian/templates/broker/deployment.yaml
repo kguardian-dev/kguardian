@@ -63,6 +63,10 @@ spec:
                   key: {{ .Values.database.passwordSecretKey }}
             - name: DATABASE_URL
               value: {{ include "kguardian.dbUrl" . | quote }}
+            {{- if .Values.evaluator.enabled }}
+            - name: EVALUATOR_URL
+              value: "http://{{ .Values.evaluator.service.name }}.{{ include "kguardian.namespace" . | trim }}.svc.cluster.local:{{ .Values.evaluator.service.port }}"
+            {{- end }}
           {{- with .Values.broker.startupProbe }}
           startupProbe:
             {{- toYaml . | nindent 12 }}

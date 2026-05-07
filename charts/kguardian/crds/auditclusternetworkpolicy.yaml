@@ -1,0 +1,113 @@
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: auditclusternetworkpolicies.kguardian.dev
+  labels:
+    app.kubernetes.io/name: kguardian
+    app.kubernetes.io/component: evaluator
+spec:
+  group: kguardian.dev
+  scope: Cluster
+  names:
+    kind: AuditClusterNetworkPolicy
+    listKind: AuditClusterNetworkPolicyList
+    plural: auditclusternetworkpolicies
+    singular: auditclusternetworkpolicy
+    shortNames:
+      - acnp
+    categories:
+      - kguardian
+      - networking
+  versions:
+    - name: v1alpha1
+      served: true
+      storage: true
+      subresources:
+        status: {}
+      additionalPrinterColumns:
+        - name: NS-Selector
+          type: string
+          jsonPath: .spec.namespaceSelector
+        - name: Pod-Selector
+          type: string
+          jsonPath: .spec.podSelector
+        - name: Would-Deny
+          type: integer
+          jsonPath: .status.evaluation.flowsWouldDeny
+        - name: Last-Evaluated
+          type: date
+          jsonPath: .status.evaluation.lastEvaluated
+        - name: Age
+          type: date
+          jsonPath: .metadata.creationTimestamp
+      schema:
+        openAPIV3Schema:
+          description: |
+            Cluster-scoped sibling of AuditNetworkPolicy. The
+            namespaceSelector restricts which namespaces the policy
+            applies to (nil or {} matches all). Within each matching
+            namespace the rest of the spec is evaluated exactly like a
+            namespaced AuditNetworkPolicy. Promote by re-applying the
+            spec under a per-namespace networking.k8s.io/v1
+            NetworkPolicy in each affected namespace.
+          type: object
+          required: [spec]
+          properties:
+            apiVersion: { type: string }
+            kind: { type: string }
+            metadata: { type: object }
+            spec:
+              type: object
+              required: [podSelector]
+              properties:
+                namespaceSelector:
+                  type: object
+                  x-kubernetes-preserve-unknown-fields: true
+                podSelector:
+                  type: object
+                  x-kubernetes-preserve-unknown-fields: true
+                policyTypes:
+                  type: array
+                  items:
+                    type: string
+                    enum: [Ingress, Egress]
+                ingress:
+                  type: array
+                  items:
+                    type: object
+                    x-kubernetes-preserve-unknown-fields: true
+                egress:
+                  type: array
+                  items:
+                    type: object
+                    x-kubernetes-preserve-unknown-fields: true
+            status:
+              type: object
+              properties:
+                observedGeneration:
+                  type: integer
+                  format: int64
+                evaluation:
+                  type: object
+                  properties:
+                    lastEvaluated:
+                      type: string
+                      format: date-time
+                    flowsEvaluated:
+                      type: integer
+                      format: int64
+                    flowsWouldDeny:
+                      type: integer
+                      format: int64
+                    topOffenders:
+                      type: array
+                      maxItems: 50
+                      items:
+                        type: object
+                        properties:
+                          srcPod: { type: string }
+                          dstPod: { type: string }
+                          dstPort: { type: integer, format: int32 }
+                          protocol: { type: string }
+                          direction: { type: string }
+                          count: { type: integer, format: int64 }

@@ -6,7 +6,7 @@ use api::{
     add_pod_details, add_pods, add_pods_batch, add_pods_syscalls, add_svc_details,
     establish_connection, get_pod_by_ip, get_pod_by_name, get_pod_details, get_pod_syscall_name,
     get_pod_traffic, get_pod_traffic_name, get_pods_by_node, get_svc_by_ip, get_svc_details,
-    mark_pod_dead,
+    mark_pod_dead, AuditClient,
 };
 
 use diesel::r2d2;
@@ -67,6 +67,13 @@ async fn main() -> Result<(), std::io::Error> {
         }
         std::thread::sleep(std::time::Duration::from_secs(2));
     }
+    let audit_client = AuditClient::from_env();
+    if audit_client.enabled() {
+        info!(url = %audit_client.base_url(), "audit evaluator integration enabled");
+    } else {
+        info!("audit evaluator integration disabled (set EVALUATOR_URL to enable)");
+    }
+
     HttpServer::new(move || {
         let cors = Cors::default()
             .allow_any_origin()
@@ -77,6 +84,7 @@ async fn main() -> Result<(), std::io::Error> {
         App::new()
             .wrap(cors)
             .app_data(web::Data::new(pool.clone()))
+            .app_data(web::Data::new(audit_client.clone()))
             .service(add_pods)
             .service(add_pods_batch)
             .service(add_pod_details)
