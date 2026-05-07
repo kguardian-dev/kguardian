@@ -1,5 +1,27 @@
 # Changelog
 
+## [1.10.0](https://github.com/kguardian-dev/kguardian/compare/chart/v1.9.1...chart/v1.10.0) (2026-05-07)
+
+
+### Features
+
+* AuditNetworkPolicy — preview NetworkPolicy impact, end-to-end ([#851](https://github.com/kguardian-dev/kguardian/issues/851)) ([05acd27](https://github.com/kguardian-dev/kguardian/commit/05acd270883a0555384d9701be47c0b5503793e0))
+* **broker:** audit_verdicts retention loop ([#858](https://github.com/kguardian-dev/kguardian/issues/858)) ([d1a309b](https://github.com/kguardian-dev/kguardian/commit/d1a309b258e2ecd6ff4741fdc133bd2b2e29203e))
+* **chart,docs:** support external Postgres + configurable DB user/db, fix doc lies ([#848](https://github.com/kguardian-dev/kguardian/issues/848)) ([14a71c9](https://github.com/kguardian-dev/kguardian/commit/14a71c94a34d5d98785216adcd26a7e6295c7f0a))
+* **chart:** startupProbe, topologySpreadConstraints, PDB, ServiceMonitor ([#849](https://github.com/kguardian-dev/kguardian/issues/849)) ([18386c0](https://github.com/kguardian-dev/kguardian/commit/18386c0ad9f31ad459ad25cc5ed85b7fc352cc4d))
+
+
+### Bug Fixes
+
+* **chart:** decouple MCP server from kagent/kmcp and fix broker OOM ([#749](https://github.com/kguardian-dev/kguardian/issues/749)) ([c4c226d](https://github.com/kguardian-dev/kguardian/commit/c4c226da31488d98c79ad253008b884e02f19441))
+* **chart:** provision DB PVC by default, fix PGDATA mount path ([#845](https://github.com/kguardian-dev/kguardian/issues/845)) ([5467573](https://github.com/kguardian-dev/kguardian/commit/54675736f7b93385c9a3c5f6c249a3cd1d016303))
+* **chart:** provision DB PVC when no existingClaim, fix PGDATA mount path ([5467573](https://github.com/kguardian-dev/kguardian/commit/54675736f7b93385c9a3c5f6c249a3cd1d016303))
+
+
+### Documentation
+
+* tier 0 — fix credibility-killers (broken links, wrong instructions, template cruft) ([#836](https://github.com/kguardian-dev/kguardian/issues/836)) ([6b58783](https://github.com/kguardian-dev/kguardian/commit/6b58783d8aeb92713de13e28a65dec6864d33f28))
+
 ## [1.9.1](https://github.com/kguardian-dev/kguardian/compare/chart/v1.9.0...chart/v1.9.1) (2026-03-01)
 
 
