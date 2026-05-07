@@ -58,6 +58,16 @@
       "changelog-path": "CHANGELOG.md",
       "include-component-in-tag": true
     },
+    "evaluator": {
+      "component": "evaluator",
+      "release-type": "go",
+      "package-name": "evaluator",
+      "changelog-path": "CHANGELOG.md",
+      "extra-files": [
+        "evaluator/VERSION"
+      ],
+      "include-component-in-tag": true
+    },
     "mcp-server": {
       "component": "mcp-server",
       "release-type": "go",

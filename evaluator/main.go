@@ -16,8 +16,10 @@ import (
 	"syscall"
 
 	"github.com/kguardian-dev/kguardian/evaluator/pkg/server"
+	"github.com/kguardian-dev/kguardian/evaluator/pkg/status"
 	"github.com/kguardian-dev/kguardian/evaluator/pkg/store"
 	"github.com/sirupsen/logrus"
+	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
 )
@@ -61,7 +63,14 @@ func run() error {
 		return fmt.Errorf("starting informers: %w", err)
 	}
 
-	srv := server.New(addr, st, log)
+	dynClient, err := dynamic.NewForConfig(cfg)
+	if err != nil {
+		return fmt.Errorf("constructing dynamic client: %w", err)
+	}
+	agg := status.New(dynClient, log)
+	go agg.Run(ctx)
+
+	srv := server.New(addr, st, agg, log)
 	srv.SetReady() // caches are synced before we get here
 	if err := srv.Start(ctx); err != nil {
 		return fmt.Errorf("server: %w", err)

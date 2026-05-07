@@ -368,3 +368,142 @@ func TestMatch_PolicyTypesInferredFromRules(t *testing.T) {
 
 // ptrSelector helps write peer specs cleanly.
 func ptrSelector(s metav1.LabelSelector) *metav1.LabelSelector { return &s }
+
+func TestMatch_IPBlockAllow(t *testing.T) {
+	lookup := newLookup()
+	lookup.addPod("prod", "web-1", map[string]string{"app": "web"})
+
+	p := policy("prod", "web-allow-vpn", networkingv1.NetworkPolicySpec{
+		PodSelector: selectMatchLabels(map[string]string{"app": "web"}),
+		Ingress: []networkingv1.NetworkPolicyIngressRule{
+			{
+				From: []networkingv1.NetworkPolicyPeer{
+					{IPBlock: &networkingv1.IPBlock{CIDR: "10.0.0.0/8"}},
+				},
+				Ports: []networkingv1.NetworkPolicyPort{tcpPort(8080)},
+			},
+		},
+	})
+
+	flow := Flow{
+		// External source: no SrcPodNamespace/Name, only SrcIP.
+		DstPodNamespace: "prod", DstPodName: "web-1",
+		SrcIP: "10.5.6.7", DstIP: "10.0.0.1",
+		DstPort: 8080, Protocol: ProtocolTCP,
+	}
+	got := Match(flow, p, lookup)
+	if got[0].Verdict != VerdictAllow {
+		t.Fatalf("expected Allow via ipBlock CIDR, got %#v", got)
+	}
+}
+
+func TestMatch_IPBlockExceptDenies(t *testing.T) {
+	lookup := newLookup()
+	lookup.addPod("prod", "web-1", map[string]string{"app": "web"})
+
+	p := policy("prod", "web-allow-vpn-not-bastion", networkingv1.NetworkPolicySpec{
+		PodSelector: selectMatchLabels(map[string]string{"app": "web"}),
+		Ingress: []networkingv1.NetworkPolicyIngressRule{
+			{
+				From: []networkingv1.NetworkPolicyPeer{
+					{IPBlock: &networkingv1.IPBlock{
+						CIDR:   "10.0.0.0/8",
+						Except: []string{"10.5.0.0/16"},
+					}},
+				},
+				Ports: []networkingv1.NetworkPolicyPort{tcpPort(8080)},
+			},
+		},
+	})
+
+	for _, tc := range []struct {
+		ip      string
+		verdict Verdict
+	}{
+		{ip: "10.5.6.7", verdict: VerdictWouldDeny},  // in except → denied
+		{ip: "10.6.6.7", verdict: VerdictAllow},      // outside except, in cidr → allowed
+		{ip: "192.168.1.1", verdict: VerdictWouldDeny}, // outside cidr → denied
+	} {
+		flow := Flow{
+			DstPodNamespace: "prod", DstPodName: "web-1",
+			SrcIP: tc.ip, DstPort: 8080, Protocol: ProtocolTCP,
+		}
+		got := Match(flow, p, lookup)
+		if got[0].Verdict != tc.verdict {
+			t.Errorf("ip=%s: expected %s, got %s", tc.ip, tc.verdict, got[0].Verdict)
+		}
+	}
+}
+
+func TestMatch_NamedPortAllow(t *testing.T) {
+	lookup := newLookup()
+	dst := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "prod", Name: "web-1", Labels: map[string]string{"app": "web"}},
+		Spec: corev1.PodSpec{
+			Containers: []corev1.Container{
+				{Name: "web", Ports: []corev1.ContainerPort{
+					{Name: "http", ContainerPort: 8080, Protocol: corev1.ProtocolTCP},
+				}},
+			},
+		},
+	}
+	lookup.pods["prod/web-1"] = dst
+	lookup.addPod("prod", "client-1", map[string]string{"app": "client"})
+
+	tcp := corev1.ProtocolTCP
+	namedPort := intstr.FromString("http")
+	p := policy("prod", "web-allow-named", networkingv1.NetworkPolicySpec{
+		PodSelector: selectMatchLabels(map[string]string{"app": "web"}),
+		Ingress: []networkingv1.NetworkPolicyIngressRule{
+			{Ports: []networkingv1.NetworkPolicyPort{
+				{Protocol: &tcp, Port: &namedPort},
+			}},
+		},
+	})
+
+	flow := Flow{
+		SrcPodNamespace: "prod", SrcPodName: "client-1",
+		DstPodNamespace: "prod", DstPodName: "web-1",
+		DstPort: 8080, Protocol: ProtocolTCP,
+	}
+	got := Match(flow, p, lookup)
+	if got[0].Verdict != VerdictAllow {
+		t.Fatalf("expected Allow via named port, got %#v", got)
+	}
+}
+
+func TestMatch_NamedPortMismatchOnPort(t *testing.T) {
+	// Container declares "http"=8080; flow hits 9090 — should not match.
+	lookup := newLookup()
+	dst := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "prod", Name: "web-1", Labels: map[string]string{"app": "web"}},
+		Spec: corev1.PodSpec{
+			Containers: []corev1.Container{
+				{Name: "web", Ports: []corev1.ContainerPort{
+					{Name: "http", ContainerPort: 8080, Protocol: corev1.ProtocolTCP},
+				}},
+			},
+		},
+	}
+	lookup.pods["prod/web-1"] = dst
+	lookup.addPod("prod", "client-1", map[string]string{"app": "client"})
+
+	tcp := corev1.ProtocolTCP
+	namedPort := intstr.FromString("http")
+	p := policy("prod", "web-allow-named", networkingv1.NetworkPolicySpec{
+		PodSelector: selectMatchLabels(map[string]string{"app": "web"}),
+		Ingress: []networkingv1.NetworkPolicyIngressRule{
+			{Ports: []networkingv1.NetworkPolicyPort{{Protocol: &tcp, Port: &namedPort}}},
+		},
+	})
+
+	flow := Flow{
+		SrcPodNamespace: "prod", SrcPodName: "client-1",
+		DstPodNamespace: "prod", DstPodName: "web-1",
+		DstPort: 9090, Protocol: ProtocolTCP,
+	}
+	got := Match(flow, p, lookup)
+	if got[0].Verdict != VerdictWouldDeny {
+		t.Fatalf("expected WouldDeny when named port resolves to a different containerPort, got %#v", got)
+	}
+}

@@ -2,6 +2,7 @@ package matcher
 
 import (
 	"fmt"
+	"net"
 
 	v1alpha1 "github.com/kguardian-dev/kguardian/evaluator/pkg/v1alpha1"
 	corev1 "k8s.io/api/core/v1"
@@ -126,14 +127,18 @@ func peerPod(flow Flow, dir Direction, lookup Lookup) *corev1.Pod {
 
 // evaluateRules walks the relevant rule list and returns (allowed, reason).
 // Reason is only populated when allowed=false, to explain the deny.
+//
+// Named-port resolution always reads the *destination* pod's container
+// port declarations, regardless of direction.
 func evaluateRules(flow Flow, policy *v1alpha1.AuditNetworkPolicy, dir Direction, lookup Lookup) (bool, string) {
+	dstPod := lookup.GetPod(flow.DstPodNamespace, flow.DstPodName)
 	switch dir {
 	case DirectionIngress:
 		if len(policy.Spec.Ingress) == 0 {
 			return false, "policy has no ingress rules — default-deny"
 		}
 		for _, rule := range policy.Spec.Ingress {
-			if peerListMatches(flow, dir, rule.From, lookup) && portsMatch(flow, rule.Ports) {
+			if peerListMatches(flow, dir, rule.From, lookup) && portsMatch(flow, rule.Ports, dstPod) {
 				return true, ""
 			}
 		}
@@ -143,7 +148,7 @@ func evaluateRules(flow Flow, policy *v1alpha1.AuditNetworkPolicy, dir Direction
 			return false, "policy has no egress rules — default-deny"
 		}
 		for _, rule := range policy.Spec.Egress {
-			if peerListMatches(flow, dir, rule.To, lookup) && portsMatch(flow, rule.Ports) {
+			if peerListMatches(flow, dir, rule.To, lookup) && portsMatch(flow, rule.Ports, dstPod) {
 				return true, ""
 			}
 		}
@@ -169,13 +174,13 @@ func peerListMatches(flow Flow, dir Direction, peers []networkingv1.NetworkPolic
 }
 
 // peerEntryMatches checks one NetworkPolicyPeer (which is one of:
-// {podSelector?, namespaceSelector?, ipBlock?}) against a peer pod.
-// MVP scope: ignores ipBlock (returns false for those entries; flagged
-// as a known limitation in the matcher's Reason output).
+// {podSelector?, namespaceSelector?, ipBlock?}) against the peer side
+// of the flow.
 func peerEntryMatches(peer *corev1.Pod, flow Flow, dir Direction, p networkingv1.NetworkPolicyPeer, lookup Lookup) bool {
+	// ipBlock is exclusive of the pod/namespace selectors per upstream
+	// schema validation — when set, evaluate it against the peer IP.
 	if p.IPBlock != nil {
-		// Pure ipBlock peer: post-MVP. Don't claim a match.
-		return false
+		return ipBlockMatches(peerIP(flow, dir), p.IPBlock)
 	}
 	if peer == nil {
 		// We need pod labels to evaluate selectors; if the peer pod
@@ -224,21 +229,22 @@ func peerEntryMatches(peer *corev1.Pod, flow Flow, dir Direction, p networkingv1
 
 // portsMatch returns true if the flow's (port, protocol) matches at
 // least one of the rule's port specs. An empty port list matches any
-// port. Numeric ports + endPort ranges are supported; named ports
-// (Port.StrVal) are MVP-stubbed as a non-match with no error.
-func portsMatch(flow Flow, ports []networkingv1.NetworkPolicyPort) bool {
+// port. Both numeric ports (with optional endPort range) and named
+// ports are supported — named ports are resolved against the
+// destination pod's container declarations.
+func portsMatch(flow Flow, ports []networkingv1.NetworkPolicyPort, dstPod *corev1.Pod) bool {
 	if len(ports) == 0 {
 		return true
 	}
 	for _, p := range ports {
-		if portEntryMatches(flow, p) {
+		if portEntryMatches(flow, p, dstPod) {
 			return true
 		}
 	}
 	return false
 }
 
-func portEntryMatches(flow Flow, p networkingv1.NetworkPolicyPort) bool {
+func portEntryMatches(flow Flow, p networkingv1.NetworkPolicyPort, dstPod *corev1.Pod) bool {
 	// Protocol defaults to TCP per upstream spec.
 	wantProto := corev1.ProtocolTCP
 	if p.Protocol != nil {
@@ -250,21 +256,87 @@ func portEntryMatches(flow Flow, p networkingv1.NetworkPolicyPort) bool {
 	if p.Port == nil {
 		return true // protocol-only match
 	}
-	// Named ports require resolving the name on the destination pod's
-	// containers. MVP does not implement this — treat as non-match.
-	if p.Port.Type != intStringTypeInt {
-		return false
+	if p.Port.Type == intStringTypeInt {
+		port := p.Port.IntVal
+		if p.EndPort != nil {
+			return flow.DstPort >= port && flow.DstPort <= *p.EndPort
+		}
+		return flow.DstPort == port
 	}
-	port := p.Port.IntVal
-	if p.EndPort != nil {
-		return flow.DstPort >= port && flow.DstPort <= *p.EndPort
-	}
-	return flow.DstPort == port
+	// Named port — resolve against the destination pod's container
+	// port declarations. The upstream semantics: a named port matches
+	// if any container on the target pod declares that name with the
+	// same protocol AND containerPort equal to the observed dst port.
+	return namedPortMatches(p.Port.StrVal, wantProto, flow.DstPort, dstPod)
 }
 
 // intStringTypeInt mirrors intstr.Int (= 0). We don't import intstr to
 // keep this file standalone-compilable in tests; the value is stable.
 const intStringTypeInt = 0
+
+// namedPortMatches returns true when `name` is declared as a container
+// port on `pod` with matching protocol and containerPort == observed.
+func namedPortMatches(name string, proto corev1.Protocol, observed int32, pod *corev1.Pod) bool {
+	if pod == nil || name == "" {
+		return false
+	}
+	for _, c := range pod.Spec.Containers {
+		for _, cp := range c.Ports {
+			if cp.Name != name {
+				continue
+			}
+			cpProto := cp.Protocol
+			if cpProto == "" {
+				cpProto = corev1.ProtocolTCP
+			}
+			if cpProto != proto {
+				continue
+			}
+			if cp.ContainerPort == observed {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// peerIP returns the L3 address of the *peer* side of the flow,
+// relative to the policy's subject. For ingress the peer is the source;
+// for egress it's the destination.
+func peerIP(flow Flow, dir Direction) string {
+	switch dir {
+	case DirectionIngress:
+		return flow.SrcIP
+	case DirectionEgress:
+		return flow.DstIP
+	}
+	return ""
+}
+
+// ipBlockMatches returns true when `ip` is contained in `block.CIDR`
+// AND not contained in any `block.Except` CIDR. Per upstream semantics,
+// `Except` entries must be subsets of `CIDR`; we don't validate that
+// here (admission does). Unknown / unparseable inputs are non-matches.
+func ipBlockMatches(ip string, block *networkingv1.IPBlock) bool {
+	if block == nil || ip == "" {
+		return false
+	}
+	addr := net.ParseIP(ip)
+	if addr == nil {
+		return false
+	}
+	_, allow, err := net.ParseCIDR(block.CIDR)
+	if err != nil || !allow.Contains(addr) {
+		return false
+	}
+	for _, exStr := range block.Except {
+		_, ex, err := net.ParseCIDR(exStr)
+		if err == nil && ex.Contains(addr) {
+			return false
+		}
+	}
+	return true
+}
 
 // selectorMatchesLabels evaluates a metav1.LabelSelector against a label
 // map using the standard apimachinery selector. An empty selector

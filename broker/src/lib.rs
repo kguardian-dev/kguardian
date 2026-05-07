@@ -1,4 +1,5 @@
 mod add;
+mod audit;
 mod error;
 mod get;
 mod telemetry;
@@ -6,6 +7,7 @@ mod types;
 pub use add::{
     add_pod_details, add_pods, add_pods_batch, add_pods_syscalls, add_svc_details, mark_pod_dead,
 };
+pub use audit::AuditClient;
 pub use error::*;
 pub use telemetry::*;
 pub use types::*;

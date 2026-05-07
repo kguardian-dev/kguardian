@@ -45,13 +45,19 @@ const (
 // matcher needs. The broker assembles these from eBPF events.
 type Flow struct {
 	// SrcPodNamespace, SrcPodName identify the originating pod (may be
-	// empty when the source is outside the cluster — those flows can
-	// only be matched against ipBlock peers, which is post-MVP).
+	// empty when the source is outside the cluster — those flows are
+	// matched against ipBlock peers using SrcIP).
 	SrcPodNamespace string `json:"srcPodNamespace,omitempty"`
 	SrcPodName      string `json:"srcPodName,omitempty"`
 	// DstPodNamespace, DstPodName identify the destination pod.
 	DstPodNamespace string `json:"dstPodNamespace,omitempty"`
 	DstPodName      string `json:"dstPodName,omitempty"`
+	// SrcIP / DstIP carry the L3 addresses observed by the eBPF
+	// controller. Used to match `ipBlock` peers (cidr + except).
+	// Empty string means "unknown" — the matcher then falls back to
+	// pod-selector evaluation only.
+	SrcIP string `json:"srcIP,omitempty"`
+	DstIP string `json:"dstIP,omitempty"`
 	// DstPort is the destination port number observed on the wire.
 	DstPort int32 `json:"dstPort"`
 	// Protocol is TCP / UDP / SCTP.

@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/kguardian-dev/kguardian/evaluator/pkg/matcher"
+	"github.com/kguardian-dev/kguardian/evaluator/pkg/status"
 	"github.com/kguardian-dev/kguardian/evaluator/pkg/store"
 	"github.com/sirupsen/logrus"
 )
@@ -25,6 +26,7 @@ import (
 type Server struct {
 	addr   string
 	store  *store.Store
+	agg    *status.Aggregator
 	log    *logrus.Logger
 	ready  atomic.Bool
 	srv    *http.Server
@@ -32,8 +34,8 @@ type Server struct {
 }
 
 // New constructs a Server. Call Start to begin serving.
-func New(addr string, st *store.Store, log *logrus.Logger) *Server {
-	return &Server{addr: addr, store: st, log: log}
+func New(addr string, st *store.Store, agg *status.Aggregator, log *logrus.Logger) *Server {
+	return &Server{addr: addr, store: st, agg: agg, log: log}
 }
 
 // SetReady marks the server ready (call after informer caches sync).
@@ -123,7 +125,23 @@ func (s *Server) handleEvaluate(w http.ResponseWriter, r *http.Request) {
 	}
 
 	for _, r := range results {
-		if r.Verdict == matcher.VerdictWouldDeny {
+		// Drop NotApplicable from aggregation — those are policies
+		// the flow doesn't even target, and inflating "flowsEvaluated"
+		// with them makes the % deny rate misleading.
+		if r.Verdict == matcher.VerdictNotApplicable {
+			continue
+		}
+		wouldDeny := r.Verdict == matcher.VerdictWouldDeny
+		if s.agg != nil {
+			s.agg.Record(
+				r.PolicyNamespace, r.PolicyName,
+				flow.SrcPodNamespace+"/"+flow.SrcPodName,
+				flow.DstPodNamespace+"/"+flow.DstPodName,
+				string(flow.Protocol), string(r.Direction),
+				flow.DstPort, wouldDeny,
+			)
+		}
+		if wouldDeny {
 			s.denied.Add(1)
 			s.log.WithFields(logrus.Fields{
 				"policy_namespace": r.PolicyNamespace,
