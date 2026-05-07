@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.8.0](https://github.com/kguardian-dev/kguardian/compare/broker/v1.7.1...broker/v1.8.0) (2026-05-07)
+
+
+### Features
+
+* AuditNetworkPolicy — preview NetworkPolicy impact, end-to-end ([#851](https://github.com/kguardian-dev/kguardian/issues/851)) ([05acd27](https://github.com/kguardian-dev/kguardian/commit/05acd270883a0555384d9701be47c0b5503793e0))
+
 ## [1.7.1](https://github.com/kguardian-dev/kguardian/compare/broker/v1.7.0...broker/v1.7.1) (2026-03-01)
 
 
