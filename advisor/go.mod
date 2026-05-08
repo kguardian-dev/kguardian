@@ -2,7 +2,7 @@ module github.com/kguardian-dev/kguardian/advisor
 
 go 1.26.0
 
-toolchain go1.26.2
+toolchain go1.26.3
 
 require (
 	github.com/cilium/cilium v1.19.3
