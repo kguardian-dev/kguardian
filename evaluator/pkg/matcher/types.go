@@ -12,10 +12,10 @@
 //   - An empty `from:` / `to:` block matches *any* peer; an empty `ports:`
 //     block matches *any* port. An empty rule list (`ingress: []`) means
 //     no flow is permitted in that direction.
-//
-// MVP scope: podSelector + namespaceSelector + numeric ports (with
-// endPort ranges). ipBlock and named-port resolution are stubbed and
-// noted as follow-ups in the matcher's Match() result.
+//   - Peers are matched by namespaceSelector + podSelector OR ipBlock
+//     (mutually exclusive per upstream schema). Ports support numeric
+//     matching with optional endPort ranges and named ports resolved
+//     against the destination pod's container declarations.
 package matcher
 
 import (
