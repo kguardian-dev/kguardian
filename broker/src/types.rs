@@ -1,4 +1,4 @@
-use crate::schema::{pod_details, pod_syscalls, pod_traffic, svc_details};
+use crate::schema::{audit_verdicts, pod_details, pod_syscalls, pod_traffic, svc_details};
 use chrono::NaiveDateTime;
 use diesel::{AsChangeset, Identifiable, Insertable, Queryable, Selectable};
 use serde::{Deserialize, Serialize};
@@ -106,4 +106,23 @@ pub struct PodInputSyscalls {
     pub syscalls: Vec<String>,
     pub arch: String,
     pub time_stamp: NaiveDateTime,
+}
+
+#[derive(Debug, Clone, Queryable, Selectable, Serialize, Deserialize)]
+#[diesel(table_name = audit_verdicts)]
+pub struct AuditVerdict {
+    pub id: i64,
+    pub policy_uid: String,
+    pub policy_namespace: String,
+    pub policy_name: String,
+    pub direction: String,
+    pub src_namespace: Option<String>,
+    pub src_pod: Option<String>,
+    pub dst_namespace: Option<String>,
+    pub dst_pod: Option<String>,
+    pub dst_port: i32,
+    pub protocol: String,
+    pub reason: Option<String>,
+    pub observed_at: NaiveDateTime,
+    pub verdict: String, // "Allow" | "WouldDeny"
 }

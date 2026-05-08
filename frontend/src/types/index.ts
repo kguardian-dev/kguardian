@@ -69,3 +69,25 @@ export interface ServiceInfo {
   svc_namespace: string | null;
   service_spec?: KubeObject; // Full Kubernetes Service object
 }
+
+// Matches broker's AuditVerdict type — one row per (flow, policy,
+// direction) the evaluator decided on. The broker forwarder persists
+// `Allow` and `WouldDeny`; `NotApplicable` is dropped before insert.
+export type AuditVerdictKind = 'Allow' | 'WouldDeny';
+
+export interface AuditVerdict {
+  id: number;
+  policy_uid: string;
+  policy_namespace: string; // empty string for cluster-scoped policies
+  policy_name: string;
+  direction: 'Ingress' | 'Egress' | string;
+  src_namespace: string | null;
+  src_pod: string | null;
+  dst_namespace: string | null;
+  dst_pod: string | null;
+  dst_port: number;
+  protocol: string;
+  reason: string | null;
+  observed_at: string; // ISO 8601
+  verdict: AuditVerdictKind | string;
+}

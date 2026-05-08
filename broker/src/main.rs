@@ -4,9 +4,9 @@ use actix_cors::Cors;
 use actix_web::{get, web, App, HttpResponse, HttpServer};
 use api::{
     add_pod_details, add_pods, add_pods_batch, add_pods_syscalls, add_svc_details,
-    establish_connection, get_pod_by_ip, get_pod_by_name, get_pod_details, get_pod_syscall_name,
-    get_pod_traffic, get_pod_traffic_name, get_pods_by_node, get_svc_by_ip, get_svc_details,
-    mark_pod_dead, spawn_retention, AuditClient,
+    establish_connection, get_audit_verdicts, get_pod_by_ip, get_pod_by_name, get_pod_details,
+    get_pod_syscall_name, get_pod_traffic, get_pod_traffic_name, get_pods_by_node, get_svc_by_ip,
+    get_svc_details, mark_pod_dead, spawn_retention, AuditClient,
 };
 
 use diesel::r2d2;
@@ -104,6 +104,7 @@ async fn main() -> Result<(), std::io::Error> {
             .service(get_pod_traffic_name)
             .service(get_pod_syscall_name)
             .service(get_pods_by_node)
+            .service(get_audit_verdicts)
             .service(mark_pod_dead)
             .service(health_check)
     })

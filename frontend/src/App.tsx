@@ -1,10 +1,11 @@
 import { useState, useCallback, useEffect } from 'react';
-import { RefreshCw, Shield, Sparkles } from 'lucide-react';
+import { AlertTriangle, RefreshCw, Shield, Sparkles } from 'lucide-react';
 import NetworkGraph from './components/NetworkGraph';
 import NamespaceSelector from './components/NamespaceSelector';
 import DataTable from './components/DataTable';
 import ThemeToggle from './components/ThemeToggle';
 import AIAssistant from './components/AIAssistant';
+import AuditVerdictsPanel from './components/AuditVerdictsPanel';
 import NetworkPolicyEditor from './components/NetworkPolicyEditor';
 import { usePodData } from './hooks/usePodData';
 import { useNamespaces } from './hooks/useNamespaces';
@@ -15,6 +16,7 @@ function App() {
   const [namespace, setNamespace] = useState('default');
   const [selectedPod, setSelectedPod] = useState<PodNodeData | null>(null);
   const [isAIAssistantOpen, setIsAIAssistantOpen] = useState(false);
+  const [isAuditPanelOpen, setIsAuditPanelOpen] = useState(false);
   const [isPolicyEditorOpen, setIsPolicyEditorOpen] = useState(false);
   const [policyEditorPod, setPolicyEditorPod] = useState<PodNodeData | null>(null);
   const [aiSidePanel, setAISidePanel] = useState<{
@@ -133,6 +135,17 @@ function App() {
           </div>
 
           <div className="flex items-center gap-4">
+            <button
+              onClick={() => setIsAuditPanelOpen(true)}
+              className="flex items-center gap-2 px-4 py-2 bg-hubble-card border border-hubble-border
+                         rounded-lg text-secondary hover:bg-hubble-dark hover:border-hubble-warning
+                         hover:text-hubble-warning transition-all"
+              title="Audit verdicts — would-deny flows"
+            >
+              <AlertTriangle className="w-4 h-4" />
+              <span className="hidden sm:inline font-medium">Audit</span>
+            </button>
+
             <button
               onClick={() => setIsAIAssistantOpen(true)}
               className="flex items-center gap-2 px-4 py-2 bg-hubble-accent/10 border border-hubble-accent/30
@@ -259,6 +272,12 @@ function App() {
         onClose={() => setIsPolicyEditorOpen(false)}
         pod={policyEditorPod}
         allPods={pods}
+      />
+
+      {/* Audit Verdicts Modal — would-deny flows from AuditNetworkPolicies */}
+      <AuditVerdictsPanel
+        isOpen={isAuditPanelOpen}
+        onClose={() => setIsAuditPanelOpen(false)}
       />
     </div>
   );
