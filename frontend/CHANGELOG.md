@@ -1,5 +1,17 @@
 # Changelog
 
+## [1.9.0](https://github.com/kguardian-dev/kguardian/compare/frontend/v1.8.1...frontend/v1.9.0) (2026-05-07)
+
+
+### Features
+
+* **frontend,broker:** audit verdicts panel — Allow + WouldDeny preview ([#859](https://github.com/kguardian-dev/kguardian/issues/859)) ([f44cc17](https://github.com/kguardian-dev/kguardian/commit/f44cc17af83a1de9ebd2160776dc5569aebb8d31))
+
+
+### Bug Fixes
+
+* **deps:** update dependency lucide-react to v1 ([#779](https://github.com/kguardian-dev/kguardian/issues/779)) ([4b83f0f](https://github.com/kguardian-dev/kguardian/commit/4b83f0f0c93a9fa37b75ce7cb9a724bba25a50ca))
+
 ## [1.8.1](https://github.com/kguardian-dev/kguardian/compare/frontend/v1.8.0...frontend/v1.8.1) (2026-03-07)
 
 
