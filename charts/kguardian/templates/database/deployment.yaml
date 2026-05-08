@@ -5,6 +5,15 @@ metadata:
   name: {{ .Values.database.name }}
 spec:
   replicas: 1
+  # Recreate (not RollingUpdate) because the database owns a singleton
+  # ReadWriteOnce PVC. A rolling update would try to schedule the new
+  # pod while the old pod still holds the volume; the new pod would
+  # block in ContainerCreating waiting for an attach that can't happen
+  # under RWO, helm --wait would time out, the upgrade would fail.
+  # Recreate kills the old pod first, frees the PVC, then starts the
+  # new one. There's a brief downtime window but no upgrade deadlock.
+  strategy:
+    type: Recreate
   selector:
     matchLabels:
       app.kubernetes.io/name: {{ .Values.database.service.name }}
