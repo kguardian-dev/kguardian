@@ -2,10 +2,6 @@
 // CRDs and evaluates observed flows (POSTed by the broker on /evaluate)
 // against them, emitting "would deny" verdicts as logs and Prometheus
 // metrics.
-//
-// MVP scope: HTTP server, in-memory CRD/pod/namespace cache, podSelector
-// + namespaceSelector + numeric port matching. Status updates back onto
-// the CRD and ipBlock / named-port matching are tracked as follow-ups.
 package main
 
 import (

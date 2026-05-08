@@ -103,6 +103,15 @@ func New(cfg *rest.Config, log *logrus.Logger) (*Store, error) {
 
 // Start launches the informers and blocks on cache sync.
 func (s *Store) Start(ctx context.Context) error {
+	// Wire stopCh to ctx before starting informers so the goroutines
+	// shut down even if WaitForCacheSync fails — otherwise a sync
+	// failure leaves four informer goroutines running until process
+	// exit.
+	go func() {
+		<-ctx.Done()
+		close(s.stopCh)
+	}()
+
 	go s.podInformer.Run(s.stopCh)
 	go s.nsInformer.Run(s.stopCh)
 	go s.anpInformer.Run(s.stopCh)
@@ -117,11 +126,6 @@ func (s *Store) Start(ctx context.Context) error {
 		return context.Canceled
 	}
 	s.log.Info("informer caches synced (pods, namespaces, auditnetworkpolicies, auditclusternetworkpolicies)")
-
-	go func() {
-		<-ctx.Done()
-		close(s.stopCh)
-	}()
 	return nil
 }
 
