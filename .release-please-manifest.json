@@ -3,7 +3,7 @@
   "broker": "1.9.0",
   "frontend": "1.9.0",
   "advisor": "1.3.1",
-  "charts/kguardian": "1.10.0",
+  "charts/kguardian": "1.11.0",
   "llm-bridge": "1.2.3",
   "mcp-server": "1.3.4",
   "evaluator": "0.2.0"
