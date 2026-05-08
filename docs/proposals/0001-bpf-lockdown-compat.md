@@ -5,189 +5,301 @@ Status: draft, looking for sign-off before implementation.
 ## Problem
 
 The controller's BPF programs fail to load on hosts running with the
-kernel `lockdown` LSM in `confidentiality` mode. Symptoms:
+kernel `lockdown` LSM in `confidentiality` mode. Symptoms from a real
+environment:
 
-- `BPF program load failed: -EINVAL` from libbpf at startup
-- Verifier log shows `program of this type cannot use helper bpf_probe_read#4`
-- Host dmesg shows the matching kernel-side reason:
-  `Lockdown: <process>: use of bpf to read kernel RAM is restricted`
-- Controller pod crashloops; no traffic gets observed on the affected node
+```
+controller libbpf: prog 'trace_udp_send': BPF program load failed: -EINVAL
+controller libbpf: prog 'trace_udp_send': -- BEGIN PROG LOAD LOG --
+...
+controller ; BPF_CORE_READ_INTO(&net_ns_inum, sk, __sk_common.skc_net.net, ns.inum);
+controller 10: (85) call bpf_probe_read#4
+controller program of this type cannot use helper bpf_probe_read#4
+controller -- END PROG LOAD LOG --
+controller libbpf: failed to load BPF skeleton 'network_probe_bpf': -EINVAL
+controller Error: Custom("Failed to load network probe eBPF: Invalid argument (os error 22)")
+```
 
-The verifier message and the dmesg notice are surfacing two separate
-gates. The verifier rejects helper #4 (`bpf_probe_read`, the legacy
-unsplit-pointer-source helper) for `fentry` programs as a helper-compat
-rule; that's the immediate failure. If we fixed that to emit the typed
-`bpf_probe_read_kernel` (#113), the kernel's `LOCKDOWN_BPF_READ_KERNEL`
-hook would block the load instead, since under confidentiality every
-`bpf_probe_read_kernel` call is denied. Both gates close.
+Host dmesg, from the same load attempt:
 
-The root cause is the same on either path: `network_probe.bpf.c` walks
-pointer chains into `struct sock` to extract the network-namespace
-inode, which it uses to filter flows by pod. Every level of the chain
-compiles to a kernel-RAM read, and the kernel won't allow that under
-confidentiality.
+```
+kern: notice: Lockdown: tokio-runtime-w: use of bpf to read kernel RAM is restricted; see man kernel_lockdown.7
+```
+
+`tokio-runtime-w` is the controller's tokio worker thread loading the
+BPF skeleton.
+
+There are two gates closing on the same call:
+
+1. The BPF verifier rejects `bpf_probe_read#4` (legacy helper) for
+   `fentry`-type programs as a helper-compat rule. This is the
+   immediate failure visible in the verifier log.
+2. If we fixed (1) by emitting the typed `bpf_probe_read_kernel#113`
+   instead, the kernel's `LOCKDOWN_BPF_READ_KERNEL` LSM hook would
+   block the load. That's the dmesg notice.
+
+Both gates fire on the same underlying issue: the BPF programs read
+kernel memory by chasing pointers through `struct sock`, and
+confidentiality mode forbids that.
+
+## Why this hits us harder than it hits Cilium
+
+Worth being explicit, because the typical operator question is "Cilium
+runs on the same node, Hubble shows all the traffic, why doesn't
+kguardian?" The answer is the program type we attach to.
+
+### What Cilium does
+
+Cilium attaches its data-plane programs as `tc` classifiers (program
+type `BPF_PROG_TYPE_SCHED_CLS`) on per-endpoint virtual interfaces, or
+as `cgroup_skb` programs (program type `BPF_PROG_TYPE_CGROUP_SKB`) on
+the pod's cgroup. Both program types receive `__sk_buff` as their
+context. The verifier knows the layout of `__sk_buff` and rewrites
+field access to safe loads at verification time.
+
+```c
+// Cilium-style: __sk_buff is the context
+SEC("classifier/from-container")
+int handle_from_container(struct __sk_buff *skb)
+{
+    __u32 src_ip = skb->saddr;     // direct access, no helper
+    __u32 dst_ip = skb->daddr;     // direct access, no helper
+    __u32 cgroup = skb->cgroup_id; // direct access, no helper
+    // ... no bpf_probe_read_kernel calls anywhere
+}
+```
+
+There's no `bpf_probe_read_kernel` in that path. The verifier's
+context-rewriting logic compiles each field access into a direct load
+from a kernel-controlled offset; lockdown's `LOCKDOWN_BPF_READ_KERNEL`
+hook is never invoked because no helper call is made.
+
+For pod identity, Cilium uses cgroup membership. `bpf_get_current_cgroup_id()`
+is a helper that returns the cgroup ID directly; it doesn't read
+arbitrary kernel memory and isn't gated by lockdown. Userspace
+maintains a cgroup-id-to-pod-id table.
+
+Cilium does have a few optional features that need kernel-RAM reads
+(some L7 visibility, certain socket-level enrichment). Those features
+are behind feature detection: Cilium probes once at startup, the kernel
+emits one lockdown notice, the agent flags those features off, the
+rest of the load proceeds. The hot path stays alive.
+
+Hubble is downstream of all this. Hubble reads flow data from Cilium's
+BPF maps via the agent's gRPC API — userspace-to-userspace, no BPF
+load involved. Hubble keeps showing flows because Cilium's data plane
+keeps producing them, even with the confidentiality-restricted optional
+features turned off.
+
+### What kguardian does today
+
+The controller attaches `fentry` programs to internal kernel functions
+(`tcp_v4_connect`, `tcp_set_state`, `udp_sendmsg`, etc.) and `kprobe`
+programs to others (`inet_csk_accept`). These program types receive raw
+kernel arguments — `struct sock *sk`, `struct msghdr *msg`. The
+verifier has no special context-rewrite for these pointers; anything
+read from them goes through `bpf_probe_read_kernel`.
+
+From `controller/src/bpf/network_probe.bpf.c`, the actual pattern:
+
+```c
+SEC("fentry/tcp_set_state")
+int BPF_PROG(trace_tcp_state_change, struct sock *sk, int state)
+{
+    if (!sk)
+        return 0;
+
+    if (state != 1)  // TCP_ESTABLISHED
+        return 0;
+
+    // This compiles to a single bpf_probe_read_kernel call covering
+    // the whole sock_common struct — addresses, ports, family, the
+    // entire embedded chunk.
+    struct sock_common skc;
+    BPF_CORE_READ_INTO(&skc, sk, __sk_common);
+
+    if (skc.skc_family != 2)
+        return 0;
+
+    // Another bpf_probe_read_kernel chain — three levels:
+    // sk -> __sk_common.skc_net.net -> ns.inum
+    __u64 inum = 0;
+    if (!get_and_validate_inum(sk, &inum))
+        return 0;
+
+    // ... rest of the function uses skc fields read above
+}
+```
+
+Every BPF program in `network_probe.bpf.c` does this. There are 9
+`BPF_CORE_READ*` calls in the source today across three programs;
+each one is a `bpf_probe_read_kernel` call at the helper level. Under
+confidentiality, every one of them gets denied.
+
+This is the load-bearing observation: fixing only the netns lookup
+doesn't help. The socket-common read fails the same way. The fix has
+to be a program-type change, not a per-read workaround.
+
+## Proposed change
+
+Migrate the network observation programs from `fentry`/`kprobe` on
+internal kernel functions to `cgroup_skb`/`cgroup_sock_addr` programs
+attached at the pod cgroup. This is the same approach Cilium uses for
+the same reason.
+
+### Sketch of the new attach
+
+```c
+// Attached at /sys/fs/cgroup (or per-pod via cgroup ID), one program
+// covers ingress and another egress.
+SEC("cgroup_skb/egress")
+int handle_egress(struct __sk_buff *skb)
+{
+    // Direct context access — no probe_read, no lockdown gate.
+    __u32 src_ip = skb->local_ip4;
+    __u32 dst_ip = skb->remote_ip4;
+    __u32 dport  = skb->remote_port;
+    __u32 sport  = skb->local_port;
+    __u32 family = skb->family;
+
+    if (family != AF_INET)
+        return 1;  // pass
+
+    // Pod identity from cgroup id — allowed helper, not a RAM read.
+    __u64 cgroup_id = bpf_get_current_cgroup_id();
+
+    // Existing should_filter_traffic / dedup logic, unchanged.
+    if (should_filter_traffic(src_ip, dst_ip))
+        return 1;
+
+    struct network_event_data *event;
+    event = bpf_ringbuf_reserve(&network_events, sizeof(*event), 0);
+    if (!event)
+        return 1;
+
+    event->cgroup_id = cgroup_id;   // <-- new field; replaces inum
+    event->saddr     = src_ip;
+    event->daddr     = dst_ip;
+    event->sport     = sport;
+    event->dport     = bpf_ntohs(dport);
+    event->kind      = 1;  // Egress
+
+    bpf_ringbuf_submit(event, 0);
+    return 1;
+}
+```
+
+Same shape on ingress. No `bpf_probe_read_kernel` in the data path.
+
+### Userspace side
+
+The current `pod_watcher.rs` already runs a Kubernetes informer for
+pod events. Two changes:
+
+1. Resolve each pod's cgroup ID from the cgroup hierarchy
+   (`/sys/fs/cgroup/kubepods/...`) at pod-create time. Already
+   approximately what the existing inum-based filter does for netns.
+2. Maintain a `cgroup_to_pod` BPF map keyed on cgroup ID, value
+   being the pod identity already used downstream. Replaces the
+   existing `inode_num` map.
+
+Flow events now carry `cgroup_id` to the broker; the broker resolves
+to pod identity by cross-referencing the userspace-maintained table
+(unchanged from how it resolves inums today; just a different key).
+
+### Trade-offs
+
+- We lose the `TCP_ESTABLISHED`-only filter that comes from attaching
+  to `tcp_set_state`. `cgroup_skb/egress` fires per packet on the
+  egress side, not per state transition. The dedup logic in
+  `is_new_connection` already handles this — it keys on the 4-tuple,
+  not on syscall context — so the rate of events going to userspace
+  stays roughly the same. Worth measuring before we ship.
+- We lose syscall-context PID. Currently the controller calls
+  `bpf_get_current_pid_tgid()` to dedup per-thread state. Cgroup-attached
+  programs run in softirq context for incoming packets, so PID is
+  meaningless there. Dedup logic moves to (cgroup_id, 4-tuple) instead
+  of (pid, 4-tuple). Same cardinality bounds.
+- The attach mechanism is different. We currently bpf-link to fentry
+  via libbpf's auto-attach; cgroup attach needs a cgroup file
+  descriptor and explicit `BPF_PROG_ATTACH` syscall. The
+  `pod_reconciler.rs` watches pod create/delete already and is the
+  natural place to do the per-pod attach.
+
+### What does not change
+
+- Ringbuffer to userspace. Same path.
+- Broker-side processing. Same fields, plus `cgroup_id` instead of
+  `inum`. Schema change is one column rename / addition; broker code
+  treats it as opaque.
+- Frontend behaviour. Doesn't touch this layer.
+- Audit-mode evaluator. Same flow shape arrives at the evaluator.
+
+### What's deliberately not in this proposal
+
+- BPF program signing. Linux 6.18 added the kernel infrastructure for
+  signed BPF programs (which would let signed programs bypass
+  lockdown's restrictions); the userspace tooling and distro signing
+  pipelines aren't deployable end-to-end yet. Worth tracking as the
+  long-term answer; not an option now.
+- Detect-and-degrade behaviour. We could try the old fentry path
+  first and fall back. There's no scenario where fentry beats
+  cgroup-attach for our use case, and dual program loads add
+  verification cost on every cluster. Just switch.
+- Lockdown=integrity support. Integrity mode doesn't block any of
+  this — `LOCKDOWN_BPF_READ_KERNEL` only fires under confidentiality
+  (per `include/linux/security.h`'s `lockdown_reason` enum, where
+  `LOCKDOWN_INTEGRITY_MAX` is the boundary marker). Mainstream
+  distro defaults stay on integrity under Secure Boot and aren't
+  affected. The break is specifically confidentiality.
 
 ## Where this matters in practice
 
 Talos with Secure Boot defaults to `lockdown=confidentiality`. This is
-opinionated harder than mainstream distros — RHEL, Ubuntu, Debian, and
-Fedora all default to `integrity` under Secure Boot, which doesn't
-block this code path (see `include/linux/security.h`'s
-`lockdown_reason` enum, where `LOCKDOWN_BPF_READ_KERNEL` sits between
-the integrity and confidentiality boundary markers).
+opinionated harder than mainstream distros. RHEL, Ubuntu, Debian, and
+Fedora all default to integrity under Secure Boot, which doesn't block
+this code path.
 
-Talos clusters frequently mix Secure Boot bare-metal nodes with VM
-nodes that boot normally. A typical split is 50–80% Secure Boot. The
-nodeSelector workaround (point the DaemonSet at the non-locked-down
-nodes only) is fine as a per-cluster opt-out but unacceptable as a
-default — it hides the controller from most of the cluster.
-
-## How other BPF agents handle this
-
-Cilium loads on confidentiality kernels. Its hot-path programs use
-`__sk_buff` direct field access, which is verifier-allowed regardless
-of lockdown mode. Optional features that need kernel-RAM reads are
-behind feature detection: Cilium probes once at startup, the kernel
-emits the lockdown notice, the agent flags the feature off, the rest
-of the load proceeds. Falco and Tetragon behave similarly. None of
-them have a single mandatory load path that requires
-`bpf_probe_read_kernel`.
-
-The pattern that makes this work is consistent: don't put kernel-RAM
-reads on a load-or-die path. Either the program type provides what
-you need via context, or userspace pre-populates a map and the BPF
-program reads that map.
-
-## Proposed change
-
-Replace the kernel-side netns inode lookup with a userspace-side
-lookup table populated by the controller's existing pod watcher.
-
-### Today
-
-```c
-// helper.h
-__u32 net_ns_inum = 0;
-BPF_CORE_READ_INTO(&net_ns_inum, sk, __sk_common.skc_net.net, ns.inum);
-
-__u64 key = (__u64)net_ns_inum;
-__u32 *user_space_inum_ptr = bpf_map_lookup_elem(&inode_num, &key);
-```
-
-Three chained dereferences from `sk` into `struct net`. Each is a
-`bpf_probe_read_kernel`. The result is matched against the
-userspace-populated `inode_num` map.
-
-### Proposed
-
-```c
-// helper.h
-__u64 pid_tgid = bpf_get_current_pid_tgid();
-__u32 pid = pid_tgid >> 32;
-
-__u32 *net_ns_inum_ptr = bpf_map_lookup_elem(&pid_to_netns, &pid);
-if (!net_ns_inum_ptr)
-    return false;
-
-__u64 key = (__u64)(*net_ns_inum_ptr);
-__u32 *user_space_inum_ptr = bpf_map_lookup_elem(&inode_num, &key);
-```
-
-`bpf_get_current_pid_tgid` is allowed under confidentiality. Map
-lookups don't read kernel RAM. The `pid_to_netns` map is owned by
-userspace.
-
-### Userspace side
-
-A new task in `pod_watcher.rs` (or a sibling module) maintains the
-`pid_to_netns` map. For each pod the controller is monitoring:
-
-1. Resolve the pod's container PIDs from the cgroup hierarchy.
-2. Read the netns inode by `stat(2)`-ing `/proc/<pid>/ns/net` (the
-   inode number is the link target's inode, not the link itself).
-3. Insert `(pid, netns_inum)` into the BPF map.
-
-Pod-create events trigger an insert; pod-delete events trigger a
-delete. Periodic full re-scan handles drift.
-
-### Trade-offs
-
-There's a window between a pod starting and userspace updating the
-map where the BPF program can't attribute flows from that pod's
-processes. Bounded; observed flows during the window are dropped at
-the netns filter (we already do this for unknown netns inums). Same
-shape as the existing startup window; widens slightly per pod
-restart. Acceptable.
-
-The userspace work is small. The controller already runs a
-Kubernetes pod informer; the netns scrape adds one syscall per
-pod per resync.
-
-## Audit of remaining kernel-RAM reads
-
-This proposal targets the netns lookup specifically. Other BPF
-programs in `controller/src/bpf/` need a sweep before the redesign
-ships. Initial grep finds:
-
-- `network_probe.bpf.c`: 9 `BPF_CORE_READ*` macro calls (the netns
-  ones plus 6 others reading TCP/UDP socket fields)
-- `netpolicy_drop.bpf.c`: probably similar; not yet inspected
-- `syscall.bpf.c`: tracepoint-based; likely uses `__sk_buff`-style
-  context access, but TBC
-
-Some of these reads access fields available via direct-context access
-on the appropriate program type and don't actually need
-`bpf_probe_read_kernel` — that's a finding for the implementation
-phase. Anything that does need a kernel-RAM read gets the same
-userspace-map treatment as the netns case, or the program migrates to
-a context-providing attach type.
-
-## What's not in scope
-
-- Full migration to cgroup-attached programs
-  (`cgroup_skb/ingress`, `cgroup_skb/egress`). That's the long-term
-  direction — same approach Cilium uses — but it's a different
-  program type with a different attach surface, and rewires the data
-  path. Worth a separate proposal once this lands.
-- Detect-and-degrade behaviour. Falling back from
-  `bpf_probe_read_kernel` to the new path at runtime adds load-path
-  branching and there's no case where the kernel read beats the map
-  lookup. Just switch.
-- BPF program signing. Linux 6.18 added the kernel infrastructure;
-  the userspace tooling and distro signing pipelines aren't
-  deployable yet. Track separately.
+A typical Talos cluster mixes Secure Boot bare-metal nodes with VM
+nodes that boot normally; a 50–80% SB split is common. NodeSelector to
+the VM-only subset works as a per-cluster opt-out but it hides the
+controller from most of the cluster, which isn't a tenable default.
 
 ## Implementation plan
 
-Roughly three landings:
+Three landings, in order:
 
-1. **Lockdown detection at startup** — controller reads
-   `/sys/kernel/security/lockdown` on init, crashloops with a clear
-   error message naming this proposal if confidentiality is active.
-   ~30 lines. Ships before any redesign so users hitting this on the
-   current code get a useful message instead of a verifier log dump.
-2. **Documentation** — `docs/installation.mdx` calls out Talos+SecureBoot
-   specifically, gives the diagnostic command
+1. **Lockdown detection at startup.** Controller reads
+   `/sys/kernel/security/lockdown` on init. If `[confidentiality]` is
+   active, log a clear error message naming this proposal and exit
+   non-zero. Beats a verifier log dump for users. ~30 lines. Ships
+   before the redesign so anyone hitting the existing breakage gets a
+   useful message and a forward pointer.
+2. **Documentation.** `docs/installation.mdx` calls out
+   Talos+SecureBoot specifically. Includes the diagnostic command
    (`talosctl read /sys/kernel/security/lockdown` /
-   `cat /sys/kernel/security/lockdown`), and points at this proposal.
-   Ships with (1).
-3. **The redesign itself** — userspace populates `pid_to_netns`,
-   BPF programs switch to map-based lookup, audit and remediate
-   any other kernel-RAM reads found in the BPF source. Validation:
-   integration test on a non-locked-down kernel to confirm no
-   regression, then a build for someone running Talos+SecureBoot to
-   smoke-test on actual confidentiality.
+   `cat /sys/kernel/security/lockdown`), the integrity-vs-confidentiality
+   distinction so RHEL/Ubuntu/Debian/Fedora users don't think they're
+   affected, and a temporary nodeSelector workaround. Ships with (1).
+3. **The redesign.** Cgroup-attached BPF programs. New attach plumbing
+   in `pod_reconciler.rs`. cgroup_id as the new pod-identity key
+   replacing the netns inum throughout the controller and broker.
+   Validation: integration test on a non-locked-down kernel to confirm
+   no regression; build for someone running Talos+SecureBoot to confirm
+   the load actually succeeds under confidentiality.
 
-(1) and (2) are session-sized. (3) is a sprint.
+(1) and (2) are session-sized. (3) is a sprint. (3) does not depend on
+(1) and (2); they ship in parallel branches.
 
 ## References
 
-- `include/linux/security.h` — `lockdown_reason` enum and
+- `include/linux/security.h` — `lockdown_reason` enum and the
   integrity/confidentiality boundary markers
-- `kernel/bpf/helpers.c` — `bpf_probe_read_kernel` checks
-  `security_locked_down(LOCKDOWN_BPF_READ_KERNEL)`
-- `kernel/trace/bpf_trace.c` — same check on the tracing path
+  (`LOCKDOWN_INTEGRITY_MAX`, `LOCKDOWN_CONFIDENTIALITY_MAX`)
+- `kernel/bpf/helpers.c` and `kernel/trace/bpf_trace.c` —
+  `bpf_probe_read_kernel` checks `security_locked_down(LOCKDOWN_BPF_READ_KERNEL)`
+- `kernel/bpf/cgroup.c` — `cgroup_skb` program-type attach surface
 - `man kernel_lockdown.7`
-- Tetragon FAQ — kernel lockdown modes
+- Cilium datapath docs — `cgroup_skb`/`tc` attach patterns
 - LWN: "Signed BPF programs" (Linux 6.18, Nov 2025) — eventual
-  upstream answer, not deployable end-to-end yet
+  upstream answer; not deployable end-to-end yet
