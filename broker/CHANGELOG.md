@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.9.0](https://github.com/kguardian-dev/kguardian/compare/broker/v1.8.0...broker/v1.9.0) (2026-05-07)
+
+
+### Features
+
+* **broker:** audit_verdicts retention loop ([#858](https://github.com/kguardian-dev/kguardian/issues/858)) ([d1a309b](https://github.com/kguardian-dev/kguardian/commit/d1a309b258e2ecd6ff4741fdc133bd2b2e29203e))
+* **frontend,broker:** audit verdicts panel — Allow + WouldDeny preview ([#859](https://github.com/kguardian-dev/kguardian/issues/859)) ([f44cc17](https://github.com/kguardian-dev/kguardian/commit/f44cc17af83a1de9ebd2160776dc5569aebb8d31))
+
 ## [1.8.0](https://github.com/kguardian-dev/kguardian/compare/broker/v1.7.1...broker/v1.8.0) (2026-05-07)
 
 
