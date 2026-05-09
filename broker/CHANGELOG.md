@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.9.1](https://github.com/kguardian-dev/kguardian/compare/broker/v1.9.0...broker/v1.9.1) (2026-05-09)
+
+
+### Bug Fixes
+
+* **broker:** /health checks schema state so kubelet self-heals on DB wipe ([#876](https://github.com/kguardian-dev/kguardian/issues/876)) ([919ae87](https://github.com/kguardian-dev/kguardian/commit/919ae8727818ff8042eb7bd46574b40bd124f65f))
+
 ## [1.9.0](https://github.com/kguardian-dev/kguardian/compare/broker/v1.8.0...broker/v1.9.0) (2026-05-07)
 
 
