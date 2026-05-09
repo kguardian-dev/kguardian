@@ -1,5 +1,43 @@
 # Upgrading the kguardian Helm chart
 
+## Before any chart upgrade: back up the database
+
+The chart's bundled PostgreSQL Deployment + ReadWriteOnce PVC pattern is
+fragile across template changes. Mount-path corrections (#845), image
+tag bumps, or strategy changes can leave the new pod attached to the
+PVC at a path PostgreSQL doesn't recognise — at which point `initdb`
+runs over an empty subtree and the broker silently sees a fresh schema.
+The data isn't recoverable after the fact.
+
+Take a logical dump before every `helm upgrade` until automated
+pre-upgrade hooks land:
+
+```sh
+kubectl -n <ns> exec deploy/kguardian-db -- \
+  pg_dumpall -U "$POSTGRES_USER" --clean --if-exists \
+  > kguardian-db-$(date +%Y%m%d-%H%M).sql
+```
+
+If an upgrade lands on an empty database, the broker's `/health`
+endpoint reports `503 Database schema not up to date` and the kubelet
+restarts the pod. Startup re-runs migrations against the new instance,
+which is enough to bring the system back online — but historical rows
+in `pod_traffic`, `pod_details`, and `audit_verdicts` are gone. The
+dump above is what lets you restore them.
+
+To restore:
+
+```sh
+kubectl -n <ns> cp kguardian-db-YYYYMMDD-HHMM.sql kguardian-db-<pod>:/tmp/restore.sql
+kubectl -n <ns> exec deploy/kguardian-db -- \
+  psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -f /tmp/restore.sql
+```
+
+The kguardian data model is observability state, not source of truth —
+losing it is recoverable (the controller repopulates pod/svc snapshots
+from live cluster state on its next sync). The dump matters most for
+`audit_verdicts`, which is a time series with no other source.
+
 ## chart 1.10.0: PostgreSQL 15 → 18
 
 The `database.image.tag` default moved from `15-alpine` to `18-alpine`.
