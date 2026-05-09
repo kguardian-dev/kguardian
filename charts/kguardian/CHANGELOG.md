@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.11.1](https://github.com/kguardian-dev/kguardian/compare/chart/v1.11.0...chart/v1.11.1) (2026-05-09)
+
+
+### Bug Fixes
+
+* **broker:** /health checks schema state so kubelet self-heals on DB wipe ([#876](https://github.com/kguardian-dev/kguardian/issues/876)) ([919ae87](https://github.com/kguardian-dev/kguardian/commit/919ae8727818ff8042eb7bd46574b40bd124f65f))
+* **chart:** use Recreate strategy on database deployment ([#870](https://github.com/kguardian-dev/kguardian/issues/870)) ([6f58dee](https://github.com/kguardian-dev/kguardian/commit/6f58dee9d36daf67dd74b24f53638069bd2939b5))
+
 ## [1.11.0](https://github.com/kguardian-dev/kguardian/compare/chart/v1.10.0...chart/v1.11.0) (2026-05-07)
 
 
