@@ -113,15 +113,36 @@ async fn main() -> Result<(), std::io::Error> {
     .await
 }
 
+// Verifying schema state on /health (rather than just connectivity) is
+// what makes the broker self-heal when the database is replaced or
+// wiped beneath us. Without this, /health passes on pool.get() while
+// every real query 500s with "relation does not exist" — silent for
+// hours. With it, the kubelet sees a failing liveness probe, restarts
+// the pod, and the startup-migration retry repopulates the schema.
 #[get("/health")]
 pub async fn health_check(
     pool: web::Data<r2d2::Pool<r2d2::ConnectionManager<diesel::PgConnection>>>,
 ) -> HttpResponse {
-    match pool.get() {
-        Ok(_) => HttpResponse::Ok()
+    let pool_inner = pool.get_ref().clone();
+    let result = tokio::task::spawn_blocking(
+        move || -> Result<bool, Box<dyn Error + Send + Sync>> {
+            let mut conn = pool_inner.get()?;
+            // Empty pending list ⇒ schema is current. Anything else
+            // means the DB is fresh or behind, e.g. because the database
+            // pod was replaced after broker startup.
+            Ok(conn.pending_migrations(MIGRATIONS)?.is_empty())
+        },
+    )
+    .await;
+
+    match result {
+        Ok(Ok(true)) => HttpResponse::Ok()
             .content_type("application/json")
             .body("Healthy!"),
-        Err(_) => HttpResponse::ServiceUnavailable()
+        Ok(Ok(false)) => HttpResponse::ServiceUnavailable()
+            .content_type("application/json")
+            .body("Database schema not up to date"),
+        Ok(Err(_)) | Err(_) => HttpResponse::ServiceUnavailable()
             .content_type("application/json")
             .body("Database unavailable"),
     }
