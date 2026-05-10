@@ -116,10 +116,16 @@ pub struct AuditClient {
 const AUDIT_INFLIGHT_PERMITS: usize = 16;
 
 impl AuditClient {
-    /// Construct from the `EVALUATOR_URL` env var. When unset, the
-    /// client is disabled and `evaluate_and_persist` is a no-op.
+    /// Construct from the `EVALUATOR_URL` env var. When unset OR
+    /// whitespace-only, the client is disabled and
+    /// `evaluate_and_persist` is a no-op. Trimming pre-check matters:
+    /// an operator setting `EVALUATOR_URL="  "` to disable would
+    /// otherwise leave `enabled=true` with a malformed URL — every
+    /// audit call would fail with a reqwest URL error, drowning the
+    /// real "audit disabled" signal in error spam.
     pub fn from_env() -> Self {
-        let base_url = std::env::var("EVALUATOR_URL").unwrap_or_default();
+        let raw = std::env::var("EVALUATOR_URL").unwrap_or_default();
+        let base_url = raw.trim().to_string();
         let enabled = !base_url.is_empty();
         let permits = std::env::var("AUDIT_INFLIGHT_PERMITS")
             .ok()
@@ -474,6 +480,58 @@ mod tests {
         match prev {
             Some(v) => std::env::set_var("AUDIT_INFLIGHT_PERMITS", v),
             None => std::env::remove_var("AUDIT_INFLIGHT_PERMITS"),
+        }
+    }
+
+    #[test]
+    fn evaluator_url_unset_disables_client() {
+        let prev = std::env::var("EVALUATOR_URL").ok();
+        std::env::remove_var("EVALUATOR_URL");
+        let c = AuditClient::from_env();
+        assert!(!c.enabled(), "no EVALUATOR_URL must yield disabled");
+        assert_eq!(c.base_url(), "");
+        if let Some(v) = prev {
+            std::env::set_var("EVALUATOR_URL", v);
+        }
+    }
+
+    #[test]
+    fn evaluator_url_whitespace_only_disables_client() {
+        // Operators sometimes set EVALUATOR_URL="  " or "\t" to
+        // toggle the audit feature off without removing the env var
+        // entirely. Pre-fix, the trim was missing from from_env, so
+        // base_url stayed " " (truthy under !is_empty), enabled=true,
+        // and every audit call hit reqwest with a malformed URL —
+        // drowning the "audit disabled" signal in URL-parse-error
+        // spam.
+        let prev = std::env::var("EVALUATOR_URL").ok();
+        for ws in ["  ", "\t", "\n", " \t\n "] {
+            std::env::set_var("EVALUATOR_URL", ws);
+            let c = AuditClient::from_env();
+            assert!(
+                !c.enabled(),
+                "whitespace-only {ws:?} must disable client",
+            );
+            assert_eq!(c.base_url(), "", "whitespace-only must trim to empty");
+        }
+        match prev {
+            Some(v) => std::env::set_var("EVALUATOR_URL", v),
+            None => std::env::remove_var("EVALUATOR_URL"),
+        }
+    }
+
+    #[test]
+    fn evaluator_url_trims_surrounding_whitespace() {
+        // A pasted URL with stray newline (very common when copying
+        // from docs) should round-trip clean.
+        let prev = std::env::var("EVALUATOR_URL").ok();
+        std::env::set_var("EVALUATOR_URL", "  http://evaluator:8080\n");
+        let c = AuditClient::from_env();
+        assert!(c.enabled());
+        assert_eq!(c.base_url(), "http://evaluator:8080");
+        match prev {
+            Some(v) => std::env::set_var("EVALUATOR_URL", v),
+            None => std::env::remove_var("EVALUATOR_URL"),
         }
     }
 
