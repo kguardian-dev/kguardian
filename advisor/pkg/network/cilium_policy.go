@@ -183,43 +183,12 @@ func (g *CiliumPolicyGenerator) processTrafficRules(podTraffic []api.PodTraffic,
 	return ingressRules, egressRules
 }
 
-// addOrUpdateRule adds a port to an existing rule for a peer or creates a new rule
+// addOrUpdateRule delegates to the shared mergeOrAppendRule helper.
+// Kept as a method for backwards compatibility with existing tests +
+// call sites; the underlying logic lives in types.go so both generators
+// stay in lockstep.
 func (g *CiliumPolicyGenerator) addOrUpdateRule(rules []NetworkPolicyRule, peer string, port intstr.IntOrString, protocolStr string) []NetworkPolicyRule {
-	protocol := protocolPtr(protocolStr)
-
-	for i := range rules {
-		if rules[i].PeerIP == peer {
-			// Found rule for the peer, check if port/protocol combo exists
-			portExists := false
-			for _, existingPort := range rules[i].Ports {
-				if existingPort.Port != nil && existingPort.Port.String() == port.String() &&
-					existingPort.Protocol != nil && *existingPort.Protocol == *protocol {
-					portExists = true
-					break
-				}
-			}
-			if !portExists {
-				// Add port to existing rule
-				rules[i].Ports = append(rules[i].Ports, networkingv1.NetworkPolicyPort{
-					Port:     &port,
-					Protocol: protocol,
-				})
-			}
-			return rules // Rule updated or port already existed
-		}
-	}
-
-	// No rule found for this peer, create a new one
-	newRule := NetworkPolicyRule{
-		PeerIP: peer,
-		Ports: []networkingv1.NetworkPolicyPort{
-			{
-				Port:     &port,
-				Protocol: protocol,
-			},
-		},
-	}
-	return append(rules, newRule)
+	return mergeOrAppendRule(rules, peer, port, protocolStr)
 }
 
 // createEndpointSelector creates a Cilium EndpointSelector from pod labels

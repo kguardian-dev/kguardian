@@ -6,6 +6,7 @@ import (
 	"github.com/kguardian-dev/kguardian/advisor/pkg/api"
 	networkingv1 "k8s.io/api/networking/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/intstr"
 )
 
 // PolicyType represents the type of network policy
@@ -22,6 +23,49 @@ const (
 type NetworkPolicyRule struct {
 	PeerIP string
 	Ports  []networkingv1.NetworkPolicyPort
+}
+
+// mergeOrAppendRule merges a (port, protocol) into an existing
+// NetworkPolicyRule for `peer` if one already exists in `rules`, or
+// appends a new rule otherwise. Identical (peer, port, protocol)
+// triples are no-ops; same peer + same port + different protocol
+// (e.g. DNS over TCP/UDP) coexist as separate port entries on the
+// same rule.
+//
+// Shared between StandardPolicyGenerator and CiliumPolicyGenerator,
+// which previously had byte-identical copies that drifted apart only
+// in a stray comment. Keeping a single implementation prevents one
+// generator developing dedup behaviour the other lacks.
+func mergeOrAppendRule(
+	rules []NetworkPolicyRule,
+	peer string,
+	port intstr.IntOrString,
+	protocolStr string,
+) []NetworkPolicyRule {
+	protocol := protocolPtr(protocolStr)
+
+	for i := range rules {
+		if rules[i].PeerIP == peer {
+			for _, existingPort := range rules[i].Ports {
+				if existingPort.Port != nil && existingPort.Port.String() == port.String() &&
+					existingPort.Protocol != nil && *existingPort.Protocol == *protocol {
+					return rules
+				}
+			}
+			rules[i].Ports = append(rules[i].Ports, networkingv1.NetworkPolicyPort{
+				Port:     &port,
+				Protocol: protocol,
+			})
+			return rules
+		}
+	}
+
+	return append(rules, NetworkPolicyRule{
+		PeerIP: peer,
+		Ports: []networkingv1.NetworkPolicyPort{
+			{Port: &port, Protocol: protocol},
+		},
+	})
 }
 
 // PolicyGenerator is the interface for network policy generators
