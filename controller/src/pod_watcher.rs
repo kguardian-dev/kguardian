@@ -505,3 +505,90 @@ async fn get_deployment_name_and_selector_from_replicaset(
 
     None
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use k8s_openapi::apimachinery::pkg::apis::meta::v1::OwnerReference;
+
+    // should_process_pod is the namespace-exclusion gate the watcher
+    // uses to ignore (for example) the kguardian and kube-system
+    // namespaces. A regression here would either miss intended
+    // exclusions (leak self-traffic into observations) or over-exclude
+    // (drop traffic operators cared about).
+
+    #[test]
+    fn should_process_pod_includes_when_no_namespace() {
+        let excluded = vec!["kguardian".into(), "kube-system".into()];
+        assert!(should_process_pod(&None, &excluded));
+    }
+
+    #[test]
+    fn should_process_pod_includes_when_excluded_list_empty() {
+        let excluded: Vec<String> = vec![];
+        assert!(should_process_pod(&Some("any".into()), &excluded));
+    }
+
+    #[test]
+    fn should_process_pod_excludes_listed_namespace() {
+        let excluded = vec!["kguardian".into(), "kube-system".into()];
+        assert!(!should_process_pod(&Some("kguardian".into()), &excluded));
+        assert!(!should_process_pod(&Some("kube-system".into()), &excluded));
+    }
+
+    #[test]
+    fn should_process_pod_includes_unlisted_namespace() {
+        let excluded = vec!["kguardian".into()];
+        assert!(should_process_pod(&Some("prod".into()), &excluded));
+        assert!(should_process_pod(&Some("default".into()), &excluded));
+    }
+
+    #[test]
+    fn should_process_pod_namespace_match_is_exact() {
+        // "kguardian-test" must NOT match "kguardian"; otherwise
+        // exclusion would over-broadly skip namespaces sharing a prefix.
+        let excluded = vec!["kguardian".into()];
+        assert!(should_process_pod(&Some("kguardian-test".into()), &excluded));
+        assert!(should_process_pod(&Some("kguardian-staging".into()), &excluded));
+    }
+
+    fn pod_with_owners(owners: Vec<OwnerReference>) -> Pod {
+        let mut pod = Pod::default();
+        pod.metadata.owner_references = if owners.is_empty() { None } else { Some(owners) };
+        pod
+    }
+
+    fn owner(kind: &str) -> OwnerReference {
+        OwnerReference {
+            kind: kind.into(),
+            api_version: "apps/v1".into(),
+            name: "x".into(),
+            uid: "u".into(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn is_backed_by_daemonset_no_owner_refs() {
+        let pod = pod_with_owners(vec![]);
+        assert!(!is_backed_by_daemonset(&pod));
+    }
+
+    #[test]
+    fn is_backed_by_daemonset_replicaset_only() {
+        let pod = pod_with_owners(vec![owner("ReplicaSet")]);
+        assert!(!is_backed_by_daemonset(&pod));
+    }
+
+    #[test]
+    fn is_backed_by_daemonset_direct() {
+        let pod = pod_with_owners(vec![owner("DaemonSet")]);
+        assert!(is_backed_by_daemonset(&pod));
+    }
+
+    #[test]
+    fn is_backed_by_daemonset_among_multiple_owners() {
+        let pod = pod_with_owners(vec![owner("ReplicaSet"), owner("DaemonSet")]);
+        assert!(is_backed_by_daemonset(&pod));
+    }
+}
