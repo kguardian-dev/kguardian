@@ -33,15 +33,15 @@ The kguardian MCP server provides 6 comprehensive tools for querying Kubernetes 
 Get network traffic data for a specific pod.
 
 **Parameters:**
-- `namespace` (string, required): Kubernetes namespace
-- `pod_name` (string, required): Pod name
+- `pod_name` (string, required): Pod name. Not namespace-scoped — the broker's pod_traffic table is keyed on pod_name alone, so pass just the name and you get every record associated with it.
 
-**Returns:** JSON with:
-- Source/destination IPs and ports
-- IP protocols (TCP, UDP, etc.)
-- Traffic types (ingress/egress)
-- Packet decisions (allowed/dropped)
-- Timestamps
+**Returns:** JSON array of records, each with:
+- pod identity columns (`pod_name`, `pod_namespace`, `pod_ip`, `pod_port`)
+- `ip_protocol` ("TCP", "UDP", or "SCTP" — UPPERCASE on the wire)
+- `traffic_type` ("INGRESS" or "EGRESS" — UPPERCASE on the wire)
+- `traffic_in_out_ip` and `traffic_in_out_port` (the peer-side address; destination for egress, source for ingress)
+- `decision` ("ALLOW" or "DROP" — UPPERCASE on the wire)
+- `time_stamp`
 
 **Use Cases:**
 - Generate Kubernetes NetworkPolicies
@@ -53,13 +53,13 @@ Get network traffic data for a specific pod.
 Get system call data for a specific pod.
 
 **Parameters:**
-- `namespace` (string, required): Kubernetes namespace
-- `pod_name` (string, required): Pod name
+- `pod_name` (string, required): Pod name. Not namespace-scoped — same rationale as `get_pod_network_traffic`.
 
 **Returns:** JSON with:
-- Syscall names and frequencies
-- CPU architecture (amd64, arm64, etc.)
-- Timestamps
+- `pod_name`, `pod_namespace`
+- `syscalls` (comma-separated string of syscall names observed)
+- `arch` (e.g. `amd64`, `arm64`)
+- `time_stamp`
 
 **Use Cases:**
 - Generate seccomp profiles
@@ -102,11 +102,16 @@ Get detailed information about a Kubernetes service by its cluster IP.
 - Analyze load balancer configurations
 
 ### `get_cluster_traffic`
-Get all network traffic data across the entire cluster.
+Get a per-pod summary of network traffic across the cluster. The response is COMPACTED (per-pod ingress/egress counts + unique-peer counts), not the raw record stream — large clusters would blow past LLM context budgets otherwise.
 
-**Parameters:** None
+**Parameters:**
+- `namespace` (string, optional): Restrict the summary to a single Kubernetes namespace. Omit to summarise across all namespaces.
 
-**Returns:** JSON array with all pod traffic data (see `get_pod_network_traffic` structure)
+**Returns:** JSON object with:
+- `total_records` (count of traffic rows the summary aggregated)
+- `pod_count` (number of distinct pod names in scope)
+- `pods` map keyed by pod name → `{ ingress_count, egress_count, unique_peer_count }`
+- `filtered_namespace` (echoed back when the namespace filter was set)
 
 **Use Cases:**
 - Cluster-wide network analysis
@@ -114,22 +119,23 @@ Get all network traffic data across the entire cluster.
 - Detect network anomalies
 - Generate comprehensive NetworkPolicy sets
 
-**WARNING:** This returns large datasets. Use with caution in large clusters.
-
 ### `get_cluster_pods`
-Get detailed information about all pods in the cluster.
+List pods in the cluster with compact metadata. Returns ALIVE pods only by default (dead historical rows from pod restarts are filtered out). Heavyweight fields (`pod_obj`, `service_spec`) are stripped to keep responses LLM-friendly.
 
-**Parameters:** None
+**Parameters:**
+- `namespace` (string, optional): Restrict the list to a single namespace. Omit to list pods across all namespaces.
 
-**Returns:** JSON array with all pod details (see `get_pod_details` structure)
+**Returns:** JSON array of compacted pod records, each with:
+- `pod_name`, `pod_namespace`, `pod_ip`
+- `node_name`, `is_dead`
+- `pod_identity` (the controller's heuristic workload-name label, e.g. `app.kubernetes.io/name`)
+- `workload_selector_labels` (the resolved selector map from the parent Deployment/StatefulSet/DaemonSet — useful for constructing NetworkPolicy selectors)
 
 **Use Cases:**
 - Cluster inventory and discovery
 - Identify monitored workloads
 - Bulk pod analysis
 - Generate reports
-
-**WARNING:** This returns large datasets. Use with caution in large clusters.
 
 ## Development
 
