@@ -82,6 +82,7 @@ The following table lists the configurable parameters of the kguardian chart and
 | broker.autoscaling.targetCPUUtilizationPercentage | int | `80` | Target CPU utilization percentage for autoscaling |
 | broker.container.port | int | `9090` | Broker container port |
 | broker.fullnameOverride | string | `""` | Override the full name of the broker resources |
+| broker.helmTest.enabled | bool | `true` | Render a `helm.sh/hook: test` Pod that probes the broker's /health endpoint after install/upgrade. /health verifies schema state (kguardian-dev/kguardian#876), so a passing test confirms the broker can reach the database AND its migrations have run. Run with `helm test <release>`. |
 | broker.image.pullPolicy | string | `"IfNotPresent"` | Broker image pull policy |
 | broker.image.repository | string | `"ghcr.io/kguardian-dev/kguardian/broker"` | Broker container image repository |
 | broker.image.sha | string | `""` | Overrides the image tag using SHA digest |
