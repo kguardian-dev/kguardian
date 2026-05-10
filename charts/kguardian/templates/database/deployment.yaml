@@ -31,6 +31,70 @@ spec:
       automountServiceAccountToken: false
       securityContext:
         {{- toYaml .Values.database.podSecurityContext | nindent 8 }}
+      {{- if and .Values.database.persistence.enabled .Values.database.persistence.safeBoot }}
+      initContainers:
+        # Cross-major datadir guard. The chart's mountPath is
+        # /var/lib/postgresql so any PG-major-specific subdirectory
+        # (15/, 16/, 17/, 18/...) lives directly under the PVC root.
+        # If the PVC has data for a DIFFERENT major than the running
+        # image and the current major's PGDATA is empty, the postgres
+        # entrypoint would happily initdb a fresh database — silently
+        # leaving operators on an empty cluster while the prior data
+        # sits unused on the volume. Refuse to boot in that case.
+        #
+        # Disable via database.persistence.safeBoot=false when
+        # intentionally rolling forward after an offline pg_upgrade.
+        - name: assert-safe-boot
+          image: "{{ .Values.database.image.repository }}:{{ .Values.database.image.tag }}"
+          imagePullPolicy: {{ .Values.database.image.pullPolicy }}
+          securityContext:
+            {{- toYaml .Values.database.securityContext | nindent 12 }}
+          command:
+            - /bin/sh
+            - -c
+            - |
+              set -eu
+              vol="/var/lib/postgresql"
+              # PG_MAJOR is set in every official postgres image; fail loudly
+              # if it isn't (image swapped to one that doesn't expose it).
+              if [ -z "${PG_MAJOR:-}" ]; then
+                echo "FATAL: PG_MAJOR not set in postgres image; cannot determine target datadir" >&2
+                exit 1
+              fi
+              current="${vol}/${PG_MAJOR}/docker"
+              if [ -f "${current}/PG_VERSION" ]; then
+                echo "datadir present at ${current} (PG_VERSION exists); ok"
+                exit 0
+              fi
+              # Current major has no datadir. Look for OTHER PG datadirs on
+              # the volume — the cross-major case the postgres entrypoint
+              # silently overwrites.
+              other=""
+              for d in "${vol}"/*/; do
+                [ -d "${d}" ] || continue
+                base="$(basename "${d}")"
+                # PG_MAJOR may match a literal subdir; skip it.
+                [ "${base}" = "${PG_MAJOR}" ] && continue
+                if [ -f "${d}/docker/PG_VERSION" ] || [ -f "${d}/data/PG_VERSION" ]; then
+                  other="${d}"
+                  break
+                fi
+              done
+              if [ -n "${other}" ]; then
+                echo "FATAL: PVC contains an existing PostgreSQL datadir at ${other} but"  >&2
+                echo "the current major (${PG_MAJOR}) has no datadir at ${current}."        >&2
+                echo "Booting now would silently initdb over an empty location and"        >&2
+                echo "leave the prior data unused. Refusing."                                >&2
+                echo                                                                          >&2
+                echo "If this is an intentional cross-major roll-forward, run pg_upgrade"   >&2
+                echo "offline OR set database.persistence.safeBoot=false to bypass."        >&2
+                exit 1
+              fi
+              echo "no prior PG datadir on ${vol}; fresh install — ok"
+          volumeMounts:
+            - mountPath: /var/lib/postgresql
+              name: db-data
+      {{- end }}
       containers:
         - name: postgresdb
           {{- if .Values.database.image.sha }}

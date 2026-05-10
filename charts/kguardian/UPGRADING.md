@@ -1,5 +1,27 @@
 # Upgrading the kguardian Helm chart
 
+## Cross-major Postgres upgrades: `database.persistence.safeBoot`
+
+The chart includes an init container (`assert-safe-boot`) that refuses
+to start the database when the PVC contains a Postgres datadir for a
+**different** major than the running image AND the current major's
+datadir is empty. Without it the postgres image would silently `initdb`
+over the empty location and leave the prior data sitting unused on the
+volume — exactly how the chart's pre-1.10.0 mount-path bug surfaced as
+"silent" data loss when the path was corrected.
+
+If you're intentionally rolling forward across a major (after running
+`pg_upgrade` offline, or otherwise migrating the data on disk yourself):
+
+```yaml
+database:
+  persistence:
+    safeBoot: false
+```
+
+Set it back to `true` once the upgrade lands so the next major catches
+the same class of footgun.
+
 ## Before any chart upgrade: back up the database
 
 The chart's bundled PostgreSQL Deployment + ReadWriteOnce PVC pattern is
