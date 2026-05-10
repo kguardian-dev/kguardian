@@ -92,8 +92,16 @@ pub async fn handle_network_events(
                     }
                 }
 
-                // Flush if batch is full
-                if batch.len() >= BATCH_SIZE {
+                // Flush when (a) batch is full OR (b) BATCH_TIMEOUT
+                // has passed since the last flush. Pre-fix, only the
+                // batch-full path was checked here — events arriving
+                // every <BATCH_TIMEOUT with sub-batch-size volume kept
+                // resetting the tokio::time::timeout window, so the
+                // Err(_) branch never fired and the batch sat
+                // unflushed indefinitely. Steady-state low-volume
+                // traffic (typical for a pod doing periodic checks)
+                // would never make it to the broker.
+                if should_flush(batch.len(), last_flush.elapsed(), BATCH_SIZE, BATCH_TIMEOUT) {
                     flush_network_batch(&mut batch).await;
                     last_flush = tokio::time::Instant::now();
                 }
@@ -107,7 +115,7 @@ pub async fn handle_network_events(
             }
             Err(_) => {
                 // Timeout reached, flush if we have any events
-                if !batch.is_empty() && last_flush.elapsed() >= BATCH_TIMEOUT {
+                if !batch.is_empty() {
                     flush_network_batch(&mut batch).await;
                     last_flush = tokio::time::Instant::now();
                 }
@@ -115,6 +123,25 @@ pub async fn handle_network_events(
         }
     }
     Ok(())
+}
+
+/// Decide whether to flush the current batch. Pure function so the
+/// rate-shaping policy can be unit-tested without async runtime
+/// scaffolding. Flush when:
+///
+/// - batch reached BATCH_SIZE, OR
+/// - BATCH_TIMEOUT has passed since the last flush AND we have at
+///   least one event to send (no point flushing an empty batch).
+pub(crate) fn should_flush(
+    batch_len: usize,
+    elapsed_since_last_flush: std::time::Duration,
+    batch_size: usize,
+    batch_timeout: std::time::Duration,
+) -> bool {
+    if batch_len == 0 {
+        return false;
+    }
+    batch_len >= batch_size || elapsed_since_last_flush >= batch_timeout
 }
 
 async fn flush_network_batch(batch: &mut Vec<PodTraffic>) {
@@ -248,8 +275,10 @@ pub async fn handle_policy_drop_events(
                     debug!("No pod found for network namespace inode: {}", event.inum);
                 }
 
-                // Flush if batch is full
-                if batch.len() >= BATCH_SIZE {
+                // Same fix as handle_network_events: also flush on
+                // BATCH_TIMEOUT elapsed in the success branch, not
+                // only in the timeout branch. See should_flush.
+                if should_flush(batch.len(), last_flush.elapsed(), BATCH_SIZE, BATCH_TIMEOUT) {
                     flush_network_batch(&mut batch).await;
                     last_flush = tokio::time::Instant::now();
                 }
@@ -264,7 +293,7 @@ pub async fn handle_policy_drop_events(
             }
             Err(_) => {
                 // Timeout reached, flush if we have any events
-                if !batch.is_empty() && last_flush.elapsed() >= BATCH_TIMEOUT {
+                if !batch.is_empty() {
                     flush_network_batch(&mut batch).await;
                     last_flush = tokio::time::Instant::now();
                 }
@@ -366,5 +395,55 @@ mod tests {
         assert_eq!(proto_to_string(132), "UNKNOWN(132)");
         assert_eq!(proto_to_string(0), "UNKNOWN(0)");
         assert_eq!(proto_to_string(255), "UNKNOWN(255)");
+    }
+
+    // should_flush is the rate-shaping policy for the network event
+    // batcher. The pre-fix bug: under steady sub-batch-rate traffic
+    // (events arriving every <BATCH_TIMEOUT), `tokio::time::timeout`
+    // resets on each recv so the timeout-branch flush never fires —
+    // and the success branch only flushed on batch-full. Steady-state
+    // light traffic was never reaching the broker. Pinning the policy
+    // here so a future refactor can't silently regress it.
+
+    use std::time::Duration;
+
+    #[test]
+    fn should_flush_empty_batch_never_flushes() {
+        // Flushing an empty batch is wasted work; the helper must
+        // gate on at least one event regardless of elapsed time.
+        assert!(!should_flush(0, Duration::from_secs(60), 100, Duration::from_secs(1)));
+    }
+
+    #[test]
+    fn should_flush_full_batch_flushes_immediately() {
+        // batch-full path — flush regardless of elapsed time.
+        assert!(should_flush(100, Duration::from_millis(0), 100, Duration::from_secs(1)));
+        assert!(should_flush(150, Duration::from_millis(0), 100, Duration::from_secs(1)));
+    }
+
+    #[test]
+    fn should_flush_under_size_under_timeout_holds() {
+        // Common case: 50 events in the batch, 500ms since last flush,
+        // limits 100 / 1s. Don't flush yet.
+        assert!(!should_flush(50, Duration::from_millis(500), 100, Duration::from_secs(1)));
+    }
+
+    #[test]
+    fn should_flush_under_size_over_timeout_flushes() {
+        // The bug case made concrete: 1 event in batch, 1.5 seconds
+        // since last flush, limits 100 / 1s. Pre-fix this was
+        // unreachable from the success branch and the timeout
+        // branch never fired due to recv resetting the window. Now
+        // it MUST flush.
+        assert!(should_flush(1, Duration::from_millis(1500), 100, Duration::from_secs(1)));
+        assert!(should_flush(50, Duration::from_secs(2), 100, Duration::from_secs(1)));
+    }
+
+    #[test]
+    fn should_flush_at_exact_timeout_boundary() {
+        // Exact-equal elapsed should flush — `>=` semantics, not `>`.
+        // Otherwise a perfectly-paced 1-event-per-second source
+        // would always be one tick behind.
+        assert!(should_flush(1, Duration::from_secs(1), 100, Duration::from_secs(1)));
     }
 }
