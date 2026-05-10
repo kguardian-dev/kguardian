@@ -59,8 +59,20 @@ impl PodInspect {
     async fn get_pid(mut self, channel: Channel) -> Self {
         let mut client = TasksClient::new(channel.clone());
 
+        // get_pid is only reached after set_container_id has populated
+        // container_id, so the prior .unwrap() was safe in practice —
+        // but a refactor that called get_pid in another path would
+        // panic the spawn_blocking thread. Fail-soft: clone the value
+        // if present, else short-circuit by leaving pid unset.
+        let container_id = match self.container_id.clone() {
+            Some(id) => id,
+            None => {
+                error!("get_pid called without a container id; pid stays unset");
+                return self;
+            }
+        };
         let req = GetRequest {
-            container_id: self.container_id.to_owned().unwrap(),
+            container_id,
             ..Default::default()
         };
 
