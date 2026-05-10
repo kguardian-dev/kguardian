@@ -3,6 +3,7 @@ package k8s
 import (
 	"encoding/json"
 	"fmt"
+	"strconv"
 
 	log "github.com/rs/zerolog/log"
 	api "github.com/kguardian-dev/kguardian/advisor/pkg/api"
@@ -99,8 +100,14 @@ func processIngressRules(traffic api.PodTraffic, config *Config) (*networkingv1.
 		return nil, fmt.Errorf("error determining peer for ingress traffic from %s: %w", traffic.DstIP, err)
 	}
 
-	portInt := 0
-	_, _ = fmt.Sscanf(traffic.SrcPodPort, "%d", &portInt)
+	// strconv.Atoi instead of fmt.Sscanf("%d") — the latter silently
+	// accepts trailing junk ("8.5" → 8, "80a" → 80) and the previous
+	// `_, _ = fmt.Sscanf(...)` discarded the error too, so an empty
+	// port string would silently become port 0 in a generated policy.
+	portInt, err := strconv.Atoi(traffic.SrcPodPort)
+	if err != nil {
+		return nil, fmt.Errorf("invalid source pod port %q: %w", traffic.SrcPodPort, err)
+	}
 	port := intstr.FromInt(portInt)
 	protocol := traffic.Protocol
 
@@ -124,8 +131,11 @@ func processEgressRules(traffic api.PodTraffic, config *Config) (*networkingv1.N
 		return nil, fmt.Errorf("error determining peer for egress traffic to %s: %w", traffic.DstIP, err)
 	}
 
-	portInt := 0
-	_, _ = fmt.Sscanf(traffic.DstPort, "%d", &portInt)
+	// See processIngressRules above for why strconv.Atoi over Sscanf.
+	portInt, err := strconv.Atoi(traffic.DstPort)
+	if err != nil {
+		return nil, fmt.Errorf("invalid destination port %q: %w", traffic.DstPort, err)
+	}
 	port := intstr.FromInt(portInt)
 	protocol := traffic.Protocol
 
