@@ -118,3 +118,98 @@ fn retention_interval() -> Duration {
         .unwrap_or(DEFAULT_INTERVAL_SECS);
     Duration::from_secs(secs.max(60))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Env-var helpers — guard the env so concurrent tests don't see
+    // each other's mutations. The std test runner runs tests in
+    // parallel by default.
+    fn with_env<F: FnOnce()>(key: &str, value: Option<&str>, f: F) {
+        let prev = std::env::var(key).ok();
+        match value {
+            Some(v) => std::env::set_var(key, v),
+            None => std::env::remove_var(key),
+        }
+        f();
+        match prev {
+            Some(v) => std::env::set_var(key, v),
+            None => std::env::remove_var(key),
+        }
+    }
+
+    #[test]
+    fn retention_days_default() {
+        with_env("AUDIT_VERDICTS_RETENTION_DAYS", None, || {
+            assert_eq!(retention_days(), DEFAULT_RETENTION_DAYS);
+        });
+    }
+
+    #[test]
+    fn retention_days_explicit() {
+        with_env("AUDIT_VERDICTS_RETENTION_DAYS", Some("7"), || {
+            assert_eq!(retention_days(), 7);
+        });
+    }
+
+    #[test]
+    fn retention_days_zero_disables() {
+        // Documented contract: 0 disables retention. spawn() checks for
+        // exactly this.
+        with_env("AUDIT_VERDICTS_RETENTION_DAYS", Some("0"), || {
+            assert_eq!(retention_days(), 0);
+        });
+    }
+
+    #[test]
+    fn retention_days_invalid_falls_back_to_default() {
+        // A typo or garbage in the env should NOT silently set retention
+        // to 0 and disable cleanup; it should fall back to the safe
+        // default.
+        with_env("AUDIT_VERDICTS_RETENTION_DAYS", Some("not-a-number"), || {
+            assert_eq!(retention_days(), DEFAULT_RETENTION_DAYS);
+        });
+    }
+
+    #[test]
+    fn retention_interval_default() {
+        with_env("AUDIT_VERDICTS_RETENTION_INTERVAL_SECS", None, || {
+            assert_eq!(retention_interval(), Duration::from_secs(DEFAULT_INTERVAL_SECS));
+        });
+    }
+
+    #[test]
+    fn retention_interval_floor_60s() {
+        // Anything below 60s is clamped — protects the DB from a
+        // typo'd `1` interval that would hammer the table.
+        with_env("AUDIT_VERDICTS_RETENTION_INTERVAL_SECS", Some("10"), || {
+            assert_eq!(retention_interval(), Duration::from_secs(60));
+        });
+    }
+
+    #[test]
+    fn retention_interval_zero_clamped_to_60s() {
+        with_env("AUDIT_VERDICTS_RETENTION_INTERVAL_SECS", Some("0"), || {
+            assert_eq!(retention_interval(), Duration::from_secs(60));
+        });
+    }
+
+    #[test]
+    fn retention_interval_explicit_above_floor() {
+        with_env("AUDIT_VERDICTS_RETENTION_INTERVAL_SECS", Some("7200"), || {
+            assert_eq!(retention_interval(), Duration::from_secs(7200));
+        });
+    }
+
+    #[test]
+    fn retention_interval_invalid_falls_back_to_default() {
+        with_env(
+            "AUDIT_VERDICTS_RETENTION_INTERVAL_SECS",
+            Some("garbage"),
+            || {
+                assert_eq!(retention_interval(), Duration::from_secs(DEFAULT_INTERVAL_SECS));
+            },
+        );
+    }
+}
