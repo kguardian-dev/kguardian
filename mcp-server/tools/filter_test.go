@@ -186,14 +186,22 @@ func TestCompactTrafficSummary_SkipsRecordsWithoutPodName(t *testing.T) {
 }
 
 func TestCompactPodsSummary_StripsHeavyweightFields(t *testing.T) {
+	// Field names match the brokers actual wire format (serde
+	// emission of the Rust PodDetail struct — snake_case). The test
+	// previously used "labels" which doesnt exist on the wire; the
+	// real field is "workload_selector_labels". A test built around
+	// a fictional field gave false confidence that pods returned
+	// from the broker carried selector labels through to the LLM —
+	// they didnt, because the keepFields list looked for "labels".
 	in := []interface{}{
 		map[string]interface{}{
-			"pod_name":      "web-1",
-			"pod_namespace": "prod",
-			"pod_ip":        "10.1.0.1",
-			"node_name":     "node-a",
-			"is_dead":       false,
-			"labels":        map[string]interface{}{"app": "web"},
+			"pod_name":                 "web-1",
+			"pod_namespace":            "prod",
+			"pod_ip":                   "10.1.0.1",
+			"node_name":                "node-a",
+			"is_dead":                  false,
+			"pod_identity":             "web",
+			"workload_selector_labels": map[string]interface{}{"app": "web"},
 			// These two should be stripped — they bloat MCP responses
 			// well past sensible LLM context budgets.
 			"pod_obj":      map[string]interface{}{"spec": "huge"},
@@ -207,7 +215,10 @@ func TestCompactPodsSummary_StripsHeavyweightFields(t *testing.T) {
 	}
 	m := gotSlice[0].(map[string]interface{})
 
-	for _, want := range []string{"pod_name", "pod_namespace", "pod_ip", "node_name", "is_dead", "labels"} {
+	for _, want := range []string{
+		"pod_name", "pod_namespace", "pod_ip", "node_name",
+		"is_dead", "pod_identity", "workload_selector_labels",
+	} {
 		if _, ok := m[want]; !ok {
 			t.Errorf("kept field missing: %s", want)
 		}
@@ -216,6 +227,33 @@ func TestCompactPodsSummary_StripsHeavyweightFields(t *testing.T) {
 		if _, ok := m[drop]; ok {
 			t.Errorf("heavyweight field leaked through: %s", drop)
 		}
+	}
+}
+
+func TestCompactPodsSummary_PreservesWorkloadSelectorLabels(t *testing.T) {
+	// Regression for the bug case. Pre-fix, the keepFields list
+	// included "labels" (no such broker field) but NOT
+	// "workload_selector_labels" (the actual wire field). Selector
+	// labels — required for the LLM to construct accurate
+	// NetworkPolicy selectors from observed traffic — were silently
+	// stripped from every cluster_pods response.
+	in := []interface{}{
+		map[string]interface{}{
+			"pod_name":                 "web-1",
+			"workload_selector_labels": map[string]interface{}{
+				"app.kubernetes.io/name": "web",
+				"tier":                   "frontend",
+			},
+		},
+	}
+	got := compactPodsSummary(in).([]interface{})
+	m := got[0].(map[string]interface{})
+	labels, ok := m["workload_selector_labels"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("workload_selector_labels stripped — LLM cant build accurate selectors from traffic")
+	}
+	if labels["app.kubernetes.io/name"] != "web" {
+		t.Errorf("label content lost: %#v", labels)
 	}
 }
 

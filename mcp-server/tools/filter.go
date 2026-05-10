@@ -101,7 +101,15 @@ func compactTrafficSummary(data interface{}) map[string]interface{} {
 }
 
 // compactPodsSummary strips heavyweight fields (pod_obj, service_spec) from
-// pod records, keeping only name, namespace, ip, node, is_dead, and labels.
+// pod records, keeping only the lightweight identity columns that the LLM
+// actually reasons about.
+//
+// Field names match the brokers wire format (serde of PodDetail emits
+// snake_case from the Rust struct fields). The previous keepFields list
+// included a non-existent "labels" key, so the broker's
+// workload_selector_labels — the single most useful field for the LLM
+// to associate a pod with its workload identity — was silently stripped
+// from every compacted response.
 func compactPodsSummary(data interface{}) interface{} {
 	items, ok := data.([]interface{})
 	if !ok {
@@ -109,12 +117,20 @@ func compactPodsSummary(data interface{}) interface{} {
 	}
 
 	keepFields := map[string]bool{
-		"pod_name":      true,
-		"pod_namespace": true,
-		"pod_ip":        true,
-		"node_name":     true,
-		"is_dead":       true,
-		"labels":        true,
+		"pod_name":                 true,
+		"pod_namespace":            true,
+		"pod_ip":                   true,
+		"node_name":                true,
+		"is_dead":                  true,
+		// pod_identity is the controllers heuristic label (e.g.
+		// app.kubernetes.io/name) — short string, cheap to keep, and
+		// usually the answer to "which workload is this".
+		"pod_identity":             true,
+		// workload_selector_labels is the resolved selector map from
+		// the parent controller (Deployment/StatefulSet/DaemonSet).
+		// Required for an LLM to construct accurate NetworkPolicy
+		// selectors from observed traffic.
+		"workload_selector_labels": true,
 	}
 
 	compacted := make([]interface{}, 0, len(items))
