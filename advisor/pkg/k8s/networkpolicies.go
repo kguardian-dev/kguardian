@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strconv"
+	"strings"
 
 	log "github.com/rs/zerolog/log"
 	api "github.com/kguardian-dev/kguardian/advisor/pkg/api"
@@ -55,8 +56,14 @@ func transformToNetworkPolicy(pod *corev1.Pod, podTraffic []api.PodTraffic, podD
 
 	for _, traffic := range podTraffic {
 		var err error
-		isIngress := traffic.TrafficType == "INGRESS"
-		isEgress := traffic.TrafficType == "EGRESS"
+		// Case-insensitive match — mirrors cilium_networkpolicies.go
+		// and the recent advisor/pkg/network/types.go fix. The broker
+		// emits UPPERCASE today but a future writer emitting mixed
+		// case should NOT silently produce zero-match policies (the
+		// exact bug class that hit the mcp-server filter).
+		direction := strings.ToUpper(traffic.TrafficType)
+		isIngress := direction == "INGRESS"
+		isEgress := direction == "EGRESS"
 
 		if isIngress {
 			rule, err := processIngressRulesFunc(traffic, config)

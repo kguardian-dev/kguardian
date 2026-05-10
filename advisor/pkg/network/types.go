@@ -2,6 +2,7 @@ package network
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/kguardian-dev/kguardian/advisor/pkg/api"
 	networkingv1 "k8s.io/api/networking/v1"
@@ -126,12 +127,18 @@ func CreateObjectMeta(name, namespace string, labels map[string]string) metav1.O
 	}
 }
 
-// IsIngressTraffic checks if traffic is ingress to the pod
+// IsIngressTraffic checks if traffic is ingress to the pod.
+// Case-insensitive on the wire field to match the sibling
+// cilium_networkpolicies.go (strings.ToUpper before compare) — guards
+// against a future writer emitting mixed-case rather than the broker's
+// canonical UPPERCASE convention. Same defensive pattern that caught
+// the recent mcp-server case-mismatch.
 func IsIngressTraffic(traffic api.PodTraffic, podDetail *api.PodDetail) bool {
-	return traffic.TrafficType == "INGRESS"
+	return strings.EqualFold(traffic.TrafficType, "INGRESS")
 }
 
-// IsEgressTraffic checks if traffic is egress from the pod
+// IsEgressTraffic checks if traffic is egress from the pod.
+// See IsIngressTraffic for the case-insensitive rationale.
 func IsEgressTraffic(traffic api.PodTraffic, podDetail *api.PodDetail) bool {
-	return traffic.TrafficType == "EGRESS"
+	return strings.EqualFold(traffic.TrafficType, "EGRESS")
 }
