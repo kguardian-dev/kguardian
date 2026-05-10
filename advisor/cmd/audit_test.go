@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"bytes"
+	"os"
 	"strings"
 	"testing"
 
@@ -273,6 +274,66 @@ func TestEmitPromoted_DeleteFlagOffByDefault(t *testing.T) {
 	}
 	if strings.Contains(buf.String(), "kubectl delete") {
 		t.Error("delete-helper must NOT appear when promoteDelete=false; output:\n" + buf.String())
+	}
+}
+
+func TestPromoteListItem_FileOutputPathNamingAndContent(t *testing.T) {
+	// File-output mode: each promoted policy lands at
+	// <outputDir>/<namespace>-<name>.yaml. The naming pattern matters
+	// because operators use it to spot which file goes where on a
+	// `kubectl apply -f <dir>` run, and a collision would silently
+	// overwrite. Pin the pattern AND that the file actually contains
+	// the promoted YAML (not e.g. an empty file from a botched defer).
+	dir := t.TempDir()
+	prev := promoteOutputDir
+	t.Cleanup(func() { promoteOutputDir = prev })
+	promoteOutputDir = dir
+
+	u := newAuditPolicy(t, "prod", "web-deny", map[string]any{
+		"podSelector": map[string]any{"matchLabels": map[string]any{"app": "web"}},
+	})
+
+	if err := promoteListItem(u, 0, 1); err != nil {
+		t.Fatalf("promoteListItem: %v", err)
+	}
+
+	wantPath := dir + "/prod-web-deny.yaml"
+	raw, err := os.ReadFile(wantPath)
+	if err != nil {
+		t.Fatalf("expected file %s; got %v", wantPath, err)
+	}
+	got := decodeYAML(t, raw)
+	if got["kind"] != "NetworkPolicy" {
+		t.Errorf("file content: want kind=NetworkPolicy, got %v", got["kind"])
+	}
+	meta := got["metadata"].(map[string]any)
+	if meta["namespace"] != "prod" || meta["name"] != "web-deny" {
+		t.Errorf("file content: want metadata={prod,web-deny}, got %v", meta)
+	}
+}
+
+func TestPromoteListItem_FailsLoudlyOnUncreatableFile(t *testing.T) {
+	// Output-dir is read-only: os.Create must surface the EPERM/EROFS
+	// from the OS rather than silently dropping the policy. Operators
+	// rely on the exit code from a `--all --output-dir=...` run; a
+	// silent skip would ship an incomplete policy bundle.
+	dir := t.TempDir()
+	if err := os.Chmod(dir, 0o500); err != nil {
+		t.Skipf("cant chmod tempdir on this fs: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(dir, 0o755) })
+
+	prev := promoteOutputDir
+	t.Cleanup(func() { promoteOutputDir = prev })
+	promoteOutputDir = dir
+
+	u := newAuditPolicy(t, "prod", "x", map[string]any{"podSelector": map[string]any{}})
+	err := promoteListItem(u, 0, 1)
+	if err == nil {
+		t.Fatal("readonly output dir should produce an error so the CLI exits non-zero")
+	}
+	if !strings.Contains(err.Error(), "opening") {
+		t.Errorf("error should name the operation that failed for debuggability; got %v", err)
 	}
 }
 
