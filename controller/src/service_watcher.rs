@@ -50,6 +50,19 @@ async fn update_serviceinfo(svc: Service) -> Result<(), Error> {
         return Ok(());
     };
 
+    // Skip services that have no usable cluster IP for the broker's
+    // IP-keyed lookup table. Two cases:
+    //   - "None"  → headless service. All headless services would
+    //               otherwise share the same svc_ip="None" row and
+    //               collide on the broker's primary key, with the
+    //               most-recent insert silently winning.
+    //   - ""      → ExternalName / unassigned. Empty PK is rejected
+    //               by Postgres on a NOT NULL column but the row
+    //               would be wasted overhead even if accepted.
+    if !is_routable_cluster_ip(svc_ip) {
+        return Ok(());
+    }
+
     let svc_details = SvcDetail {
         svc_ip: svc_ip.to_owned(),
         svc_name: svc_name.to_owned(),
@@ -61,6 +74,13 @@ async fn update_serviceinfo(svc: Service) -> Result<(), Error> {
         error!("Failed to post Service details: {}", e);
     }
     Ok(())
+}
+
+/// True when the given Service.spec.clusterIP value is a real IP that
+/// makes sense as a key in the broker's IP-keyed svc_details table.
+/// Excludes the literal "None" (headless) and empty (ExternalName).
+fn is_routable_cluster_ip(s: &str) -> bool {
+    !s.is_empty() && s != "None"
 }
 
 /// Returns Some(reason) when a Service is reporting an unready
@@ -151,5 +171,48 @@ mod tests {
         };
         let st = ServiceStatus { conditions: Some(vec![cond]), ..Default::default() };
         assert!(svc_unready(&svc(Some(st))).is_none());
+    }
+
+    // is_routable_cluster_ip pins the post-fix contract: only real
+    // IPs should drive the broker's svc_details upsert path. A
+    // regression here would either (a) re-collide every headless
+    // service on a single "None" row, or (b) bounce empty-string
+    // inserts against a NOT NULL column.
+
+    #[test]
+    fn routable_cluster_ip_accepts_real_ips() {
+        // The 10.x range is the typical cluster-IP allocation; some
+        // distros use 192.168.x; IPv6 cluster IPs look like fd00:...
+        assert!(is_routable_cluster_ip("10.96.0.1"));
+        assert!(is_routable_cluster_ip("192.168.1.100"));
+        assert!(is_routable_cluster_ip("172.20.0.10"));
+        assert!(is_routable_cluster_ip("fd00::1"));
+    }
+
+    #[test]
+    fn routable_cluster_ip_rejects_headless_sentinel() {
+        // The bug case: headless services use the literal string
+        // "None". Without this filter every headless service in the
+        // cluster would collide on svc_ip="None" in the broker.
+        assert!(!is_routable_cluster_ip("None"));
+    }
+
+    #[test]
+    fn routable_cluster_ip_rejects_empty() {
+        // ExternalName services / pre-allocation state. Empty string
+        // as a primary key is wasted overhead at best, a NOT NULL
+        // violation at worst.
+        assert!(!is_routable_cluster_ip(""));
+    }
+
+    #[test]
+    fn routable_cluster_ip_is_case_sensitive_on_none() {
+        // "none" / "NONE" are NOT the headless sentinel in the
+        // Kubernetes API — they'd be malformed values that shouldn't
+        // exist, but if they did, they'd fail real-IP parsing later
+        // anyway. Pin the literal match so a refactor doesn't relax
+        // to a case-insensitive compare that swallows other typos.
+        assert!(is_routable_cluster_ip("none"));
+        assert!(is_routable_cluster_ip("NONE"));
     }
 }
