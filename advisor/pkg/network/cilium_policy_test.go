@@ -8,6 +8,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/kguardian-dev/kguardian/advisor/pkg/api"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/util/intstr"
 )
 
 func TestCiliumPolicyGenerator_Generate_NoTraffic(t *testing.T) {
@@ -210,4 +211,69 @@ func TestCiliumPolicyGenerator_Generate_SelfTrafficFiltering(t *testing.T) {
 func TestCiliumPolicyGenerator_GetType(t *testing.T) {
 	gen := NewCiliumPolicyGenerator()
 	assert.Equal(t, CiliumPolicy, gen.GetType())
+}
+
+// addOrUpdateRule on the Cilium generator must behave the same as on
+// the Standard one — port-on-existing-peer merging, duplicate suppression,
+// (port, proto) distinctness, and per-peer separation. A regression in
+// either generator would silently bloat or under-match generated policies.
+
+func TestCiliumPolicy_AddOrUpdateRule_NewPeerCreatesRule(t *testing.T) {
+	g := &CiliumPolicyGenerator{}
+	port := intstr.FromInt(8080)
+	got := g.addOrUpdateRule(nil, "10.1.0.1", port, "TCP")
+	if len(got) != 1 || got[0].PeerIP != "10.1.0.1" {
+		t.Fatalf("want 1 rule for new peer, got %#v", got)
+	}
+	if len(got[0].Ports) != 1 {
+		t.Errorf("want 1 port on new rule, got %d", len(got[0].Ports))
+	}
+}
+
+func TestCiliumPolicy_AddOrUpdateRule_ExistingPeerAddsPort(t *testing.T) {
+	g := &CiliumPolicyGenerator{}
+	p80 := intstr.FromInt(80)
+	rules := g.addOrUpdateRule(nil, "10.1.0.1", p80, "TCP")
+	p443 := intstr.FromInt(443)
+	got := g.addOrUpdateRule(rules, "10.1.0.1", p443, "TCP")
+
+	if len(got) != 1 {
+		t.Fatalf("want merged rule, got %d entries", len(got))
+	}
+	if len(got[0].Ports) != 2 {
+		t.Errorf("want 2 ports merged, got %d", len(got[0].Ports))
+	}
+}
+
+func TestCiliumPolicy_AddOrUpdateRule_DuplicatePortIsNoOp(t *testing.T) {
+	g := &CiliumPolicyGenerator{}
+	port := intstr.FromInt(80)
+	rules := g.addOrUpdateRule(nil, "10.1.0.1", port, "TCP")
+	got := g.addOrUpdateRule(rules, "10.1.0.1", port, "TCP")
+
+	if len(got) != 1 || len(got[0].Ports) != 1 {
+		t.Errorf("dup port must be a no-op; got rules=%d ports=%d", len(got), len(got[0].Ports))
+	}
+}
+
+func TestCiliumPolicy_AddOrUpdateRule_SamePortDifferentProtocol(t *testing.T) {
+	g := &CiliumPolicyGenerator{}
+	port := intstr.FromInt(53)
+	rules := g.addOrUpdateRule(nil, "10.1.0.1", port, "TCP")
+	got := g.addOrUpdateRule(rules, "10.1.0.1", port, "UDP")
+
+	if len(got) != 1 || len(got[0].Ports) != 2 {
+		t.Errorf("DNS over TCP/UDP must coexist; got rules=%d ports=%d", len(got), len(got[0].Ports))
+	}
+}
+
+func TestCiliumPolicy_AddOrUpdateRule_MultiplePeersStaySeparate(t *testing.T) {
+	g := &CiliumPolicyGenerator{}
+	port := intstr.FromInt(80)
+	rules := g.addOrUpdateRule(nil, "10.1.0.1", port, "TCP")
+	got := g.addOrUpdateRule(rules, "10.1.0.2", port, "TCP")
+
+	if len(got) != 2 {
+		t.Errorf("two distinct peers should yield 2 rules, got %d", len(got))
+	}
 }
