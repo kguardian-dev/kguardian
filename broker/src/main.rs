@@ -14,8 +14,15 @@ use telemetry::init_logging;
 mod telemetry;
 
 use diesel_migrations::{embed_migrations, EmbeddedMigrations, MigrationHarness};
+use std::time::Instant;
 use tracing::{info, warn};
 pub const MIGRATIONS: EmbeddedMigrations = embed_migrations!("./db/migrations");
+
+/// Process-start instant used for the broker_uptime_seconds metric.
+/// Set lazily on first /metrics call rather than at static init so
+/// tests can construct the broker many times without observing a
+/// stale shared start time.
+static UPTIME_ANCHOR: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
 
 type DB = diesel::pg::Pg;
 
@@ -107,6 +114,7 @@ async fn main() -> Result<(), std::io::Error> {
             .service(get_audit_verdicts)
             .service(mark_pod_dead)
             .service(health_check)
+            .service(metrics)
     })
     .bind(("0.0.0.0", 9090))?
     .run()
@@ -145,5 +153,176 @@ pub async fn health_check(
         Ok(Err(_)) | Err(_) => HttpResponse::ServiceUnavailable()
             .content_type("application/json")
             .body("Database unavailable"),
+    }
+}
+
+/// Build the Prometheus text-format payload for the broker. Pure
+/// formatting — no I/O — so it's testable in isolation without
+/// spinning up the actix runtime.
+pub(crate) fn render_metrics_text(
+    schema_ready: u8,
+    db_reachable: u8,
+    audit_enabled: u8,
+    audit_inflight_available: usize,
+    uptime_secs: u64,
+) -> String {
+    format!(
+        concat!(
+            "# HELP broker_db_schema_ready 1 if all embedded migrations are applied, 0 otherwise (kubelet uses this via /health)\n",
+            "# TYPE broker_db_schema_ready gauge\n",
+            "broker_db_schema_ready {schema_ready}\n",
+            "# HELP broker_db_reachable 1 if a connection from the pool was acquired during the last metrics scrape\n",
+            "# TYPE broker_db_reachable gauge\n",
+            "broker_db_reachable {db_reachable}\n",
+            "# HELP broker_audit_enabled 1 if EVALUATOR_URL is configured and audit calls fire\n",
+            "# TYPE broker_audit_enabled gauge\n",
+            "broker_audit_enabled {audit_enabled}\n",
+            "# HELP broker_audit_inflight_available Number of free permits on the audit semaphore (saturation = configured cap - this)\n",
+            "# TYPE broker_audit_inflight_available gauge\n",
+            "broker_audit_inflight_available {audit_inflight_available}\n",
+            "# HELP broker_uptime_seconds Process uptime\n",
+            "# TYPE broker_uptime_seconds counter\n",
+            "broker_uptime_seconds {uptime_secs}\n",
+        ),
+        schema_ready = schema_ready,
+        db_reachable = db_reachable,
+        audit_enabled = audit_enabled,
+        audit_inflight_available = audit_inflight_available,
+        uptime_secs = uptime_secs,
+    )
+}
+
+/// Plain-text Prometheus metrics scrape endpoint. Forward-compatible
+/// with the chart's `broker.metrics.serviceMonitor.enabled` toggle
+/// — operators can now enable that without the prometheus-operator
+/// 404'ing. Surfaces three things from the broker's own state:
+///   - schema readiness (the /health check, exposed as a gauge)
+///   - DB reachability (separate from schema — DB up but migrations
+///     pending is a distinct state from DB unreachable)
+///   - audit semaphore saturation (the cap from #c05b7835 — operators
+///     need to see when it's pegged to know they should bump
+///     AUDIT_INFLIGHT_PERMITS)
+#[get("/metrics")]
+pub async fn metrics(
+    pool: web::Data<r2d2::Pool<r2d2::ConnectionManager<diesel::PgConnection>>>,
+    audit: web::Data<api::AuditClient>,
+) -> HttpResponse {
+    let pool_inner = pool.get_ref().clone();
+    let schema_state = tokio::task::spawn_blocking(
+        move || -> Result<(bool, bool), Box<dyn Error + Send + Sync>> {
+            let mut conn = pool_inner.get()?;
+            // db_reachable = pool.get() succeeded
+            // schema_ready = pending_migrations() returns Ok(empty)
+            Ok((true, conn.pending_migrations(MIGRATIONS)?.is_empty()))
+        },
+    )
+    .await;
+
+    let (db_reachable, schema_ready) = match schema_state {
+        Ok(Ok((db, schema))) => (db, schema),
+        // Pool acquire failed or pending_migrations errored — DB
+        // either unreachable or schema query broken; both surface
+        // as "not reachable" + "not ready" so a single alert
+        // (db_reachable=0) catches connectivity AND a single alert
+        // (schema_ready=0) catches schema state.
+        _ => (false, false),
+    };
+
+    let audit_inflight = audit.get_ref().available_permits();
+    let uptime_secs = UPTIME_ANCHOR
+        .get_or_init(Instant::now)
+        .elapsed()
+        .as_secs();
+
+    let body = render_metrics_text(
+        u8::from(schema_ready),
+        u8::from(db_reachable),
+        u8::from(audit.get_ref().enabled()),
+        audit_inflight,
+        uptime_secs,
+    );
+
+    HttpResponse::Ok()
+        .content_type("text/plain; version=0.0.4; charset=utf-8")
+        .body(body)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // render_metrics_text is the pure formatter behind /metrics.
+    // Lock the wire format — Prometheus is permissive about
+    // whitespace but strict about the line shape: # HELP, # TYPE,
+    // metric_name<space>value, newline. A regression in the format
+    // string would silently break operator dashboards.
+
+    #[test]
+    fn renders_all_metric_names() {
+        let body = render_metrics_text(1, 1, 1, 16, 0);
+        for name in [
+            "broker_db_schema_ready",
+            "broker_db_reachable",
+            "broker_audit_enabled",
+            "broker_audit_inflight_available",
+            "broker_uptime_seconds",
+        ] {
+            assert!(body.contains(name), "missing metric: {name}");
+        }
+    }
+
+    #[test]
+    fn each_metric_has_help_and_type() {
+        let body = render_metrics_text(1, 1, 1, 16, 0);
+        // Each metric must have a # HELP and a # TYPE line.
+        for name in [
+            "broker_db_schema_ready",
+            "broker_db_reachable",
+            "broker_audit_enabled",
+            "broker_audit_inflight_available",
+            "broker_uptime_seconds",
+        ] {
+            let help_line = format!("# HELP {name}");
+            let type_line = format!("# TYPE {name}");
+            assert!(body.contains(&help_line), "missing HELP for {name}");
+            assert!(body.contains(&type_line), "missing TYPE for {name}");
+        }
+    }
+
+    #[test]
+    fn renders_zero_state() {
+        // All-zero state: DB unreachable, audit disabled, no permits available.
+        let body = render_metrics_text(0, 0, 0, 0, 0);
+        assert!(body.contains("\nbroker_db_schema_ready 0\n"));
+        assert!(body.contains("\nbroker_db_reachable 0\n"));
+        assert!(body.contains("\nbroker_audit_enabled 0\n"));
+        assert!(body.contains("\nbroker_audit_inflight_available 0\n"));
+        assert!(body.contains("\nbroker_uptime_seconds 0\n"));
+    }
+
+    #[test]
+    fn renders_populated_state() {
+        let body = render_metrics_text(1, 1, 1, 16, 12345);
+        assert!(body.contains("\nbroker_db_schema_ready 1\n"));
+        assert!(body.contains("\nbroker_audit_inflight_available 16\n"));
+        assert!(body.contains("\nbroker_uptime_seconds 12345\n"));
+    }
+
+    #[test]
+    fn wire_shape_is_prometheus_compatible() {
+        // Each non-comment line must look like `<name> <value>\n`.
+        let body = render_metrics_text(1, 1, 0, 8, 60);
+        for line in body.lines() {
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            let parts: Vec<_> = line.split_whitespace().collect();
+            assert_eq!(parts.len(), 2, "non-comment line not `name value`: {line:?}");
+            // Value must parse as a number (gauge or counter).
+            assert!(
+                parts[1].parse::<f64>().is_ok(),
+                "value not numeric: {line:?}",
+            );
+        }
     }
 }

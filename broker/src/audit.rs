@@ -142,10 +142,10 @@ impl AuditClient {
     pub fn enabled(&self) -> bool { self.enabled }
     pub fn base_url(&self) -> &str { &self.base_url }
 
-    /// Number of permits currently available — visible to tests and
-    /// future Prometheus exposition (saturation = configured - available).
-    #[cfg(test)]
-    pub(crate) fn available_permits(&self) -> usize {
+    /// Number of permits currently available. Exposed via the broker's
+    /// /metrics endpoint as `broker_audit_inflight_available`;
+    /// saturation = configured cap minus this.
+    pub fn available_permits(&self) -> usize {
         self.in_flight.available_permits()
     }
 
