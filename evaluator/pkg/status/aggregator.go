@@ -18,6 +18,7 @@ import (
 
 	v1alpha1 "github.com/kguardian-dev/kguardian/evaluator/pkg/v1alpha1"
 	"github.com/sirupsen/logrus"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
@@ -163,6 +164,21 @@ func (a *Aggregator) flush(ctx context.Context) {
 
 	for key, agg := range snapshot {
 		if err := a.patchStatus(ctx, key, agg); err != nil {
+			if apierrors.IsNotFound(err) {
+				// The policy was deleted while we held a verdict for it.
+				// Evict the in-memory entry so (a) we don't leak memory
+				// for every deleted policy and (b) a recreate of the
+				// same name doesn't inherit a stale observedGeneration
+				// counter (the new policy starts at gen=1 but we'd be
+				// reporting whatever was last seen — confusing operators
+				// and breaking the standard k8s monotonic invariant).
+				a.mu.Lock()
+				delete(a.counts, key)
+				a.mu.Unlock()
+				a.log.WithField("policy", key.namespace+"/"+key.name).
+					Info("evicted aggregator entry: policy no longer exists")
+				continue
+			}
 			a.log.WithError(err).
 				WithField("policy", key.namespace+"/"+key.name).
 				Warn("could not patch AuditNetworkPolicy status")

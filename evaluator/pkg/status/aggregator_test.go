@@ -3,6 +3,7 @@ package status
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"testing"
 	"time"
@@ -12,8 +13,8 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
-	clienttesting "k8s.io/client-go/testing"
 	dynamicfake "k8s.io/client-go/dynamic/fake"
+	clienttesting "k8s.io/client-go/testing"
 )
 
 func TestRecord_NotApplicableNotCounted(t *testing.T) {
@@ -290,6 +291,59 @@ func TestFlush_RoutesClusterPolicyToClusterGVR(t *testing.T) {
 	}
 	if !sawClusterPatch {
 		t.Errorf("expected cluster-scoped patch on cluster-baseline-audit; actions=%v", dyn.Actions())
+	}
+}
+
+func TestFlush_EvictsEntryWhenPolicyNotFound(t *testing.T) {
+	// Pre-condition: aggregator holds a verdict for a policy that does
+	// NOT exist in the cluster (was deleted in flight). The flush() must
+	// detect the NotFound, evict the in-memory entry, and stop trying.
+	//
+	// Without this fix:
+	//   - memory grows monotonically with every deleted policy ever seen,
+	//   - if a same-name policy is recreated later, its first patch would
+	//     stamp on the OLD observedGeneration value — silently regressing
+	//     the standard "observedGeneration is monotonic" invariant.
+	dyn := fakeDynamicClient() // no policies pre-loaded → all patches will 404
+
+	a := New(dyn, quietLog())
+	a.Record("prod", "ghost-policy", "prod/x", "prod/y", "TCP", "Ingress", 80, true, 5)
+
+	// Sanity: entry is present before flush.
+	a.mu.Lock()
+	if _, ok := a.counts[policyKey{namespace: "prod", name: "ghost-policy"}]; !ok {
+		a.mu.Unlock()
+		t.Fatal("pre-flush: counts entry should exist")
+	}
+	a.mu.Unlock()
+
+	a.flush(context.Background())
+
+	// Post-condition: entry is gone.
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if _, ok := a.counts[policyKey{namespace: "prod", name: "ghost-policy"}]; ok {
+		t.Errorf("post-flush: entry should be evicted after NotFound; counts=%+v", a.counts)
+	}
+}
+
+func TestFlush_PreservesEntryOnTransientError(t *testing.T) {
+	// Counterpart to the eviction test: a non-NotFound error (e.g. a
+	// 5xx from the apiserver, a network blip) must NOT evict the entry —
+	// next reconcile will retry and the verdict count survives.
+	dyn := fakeDynamicClient()
+	dyn.PrependReactor("patch", "auditnetworkpolicies", func(action clienttesting.Action) (bool, runtime.Object, error) {
+		return true, nil, errors.New("transient apiserver hiccup")
+	})
+
+	a := New(dyn, quietLog())
+	a.Record("prod", "p1", "prod/x", "prod/y", "TCP", "Ingress", 80, true, 0)
+	a.flush(context.Background())
+
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if _, ok := a.counts[policyKey{namespace: "prod", name: "p1"}]; !ok {
+		t.Errorf("transient error should preserve entry for retry; counts=%+v", a.counts)
 	}
 }
 
