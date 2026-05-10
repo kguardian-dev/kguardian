@@ -176,6 +176,7 @@ The following table lists the configurable parameters of the kguardian chart and
 | database.passwordSecretKey | string | `"password"` | Secret data key holding the DB password. |
 | database.persistence.enabled | bool | `true` | Enable persistent storage for database. Defaults to true; set to false only for ephemeral testing. |
 | database.persistence.existingClaim | string | `""` | Use an existing PersistentVolumeClaim instead of creating a new one. When unset, the chart provisions a PVC named "{{ database.name }}-data". |
+| database.persistence.safeBoot | bool | `true` | Refuse to start the database when the PVC contains an unrelated PostgreSQL data directory (e.g. PG15 layout from before chart 1.10.0) AND the current major's directory is empty. The default postgres image would silently `initdb` over the empty location and the operator would only notice once the schema came up empty.  Set to false to bypass the check — for example, when intentionally promoting from one major to another after running `pg_upgrade` offline. See charts/kguardian/UPGRADING.md. |
 | database.persistence.size | string | `"10Gi"` | Size of the auto-provisioned PVC (only used when existingClaim is unset) |
 | database.persistence.storageClassName | string | `""` | StorageClass for the auto-provisioned PVC (only used when existingClaim is unset). Empty string uses the cluster's default StorageClass. |
 | database.podAnnotations | object | `{}` | Annotations to add to database pods |
