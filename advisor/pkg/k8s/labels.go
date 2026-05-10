@@ -4,8 +4,10 @@ import (
 	"context"
 	"fmt"
 
+	log "github.com/rs/zerolog/log"
 	api "github.com/kguardian-dev/kguardian/advisor/pkg/api"
 	v1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 )
@@ -36,6 +38,16 @@ func detectSelectorLabels(clientset kubernetes.Interface, origin interface{}) (m
 // common case, plus StatefulSet/DaemonSet/Job direct paths). Pods with
 // no owner refs return their own labels.
 //
+// Graceful degradation: if any controller in the chain has been GC'd
+// (common during deployment rollouts — old ReplicaSets are routinely
+// pruned by the deployment controller), fall back to the pod's own
+// labels. The advisor processes historical traffic data, so referenced
+// controllers may have been deleted long after the traffic was
+// observed; previously a NotFound from any Get broke the entire
+// netpol-generation batch. The pod's own labels are themselves valid
+// NetworkPolicy selectors, so the generated policy still works — it
+// just uses pod labels in place of the controller's selector labels.
+//
 // Takes kubernetes.Interface so it can be tested against fake.Clientset.
 func GetOwnerRef(clientset kubernetes.Interface, pod *v1.Pod) (map[string]string, error) {
 	ctx := context.TODO()
@@ -44,17 +56,36 @@ func GetOwnerRef(clientset kubernetes.Interface, pod *v1.Pod) (map[string]string
 	if len(pod.OwnerReferences) > 0 {
 		owner := pod.OwnerReferences[0]
 
-		// TODO: If the resource no longer exists but the database has the log/entry this will cause it to break for this netpol
-
 		// Based on the owner, get the controller object to check its labels
 		switch owner.Kind {
 		case "ReplicaSet":
 			replicaSet, err := clientset.AppsV1().ReplicaSets(pod.Namespace).Get(ctx, owner.Name, metav1.GetOptions{})
 			if err != nil {
+				if apierrors.IsNotFound(err) {
+					log.Info().Msgf("ReplicaSet %s/%s GC'd; falling back to pod labels for %s", pod.Namespace, owner.Name, pod.Name)
+					return pod.Labels, nil
+				}
 				return nil, err
+			}
+			// Bounds-check the RS's owner refs — a standalone RS (rare
+			// but legal) has no owners. Use the RS's own selector
+			// labels in that case rather than panicking on [0] indexing.
+			if len(replicaSet.OwnerReferences) == 0 {
+				if replicaSet.Spec.Selector != nil {
+					return replicaSet.Spec.Selector.MatchLabels, nil
+				}
+				return pod.Labels, nil
 			}
 			deployment, err := clientset.AppsV1().Deployments(pod.Namespace).Get(ctx, replicaSet.OwnerReferences[0].Name, metav1.GetOptions{})
 			if err != nil {
+				if apierrors.IsNotFound(err) {
+					log.Info().Msgf("Deployment %s/%s GC'd; falling back to ReplicaSet selector for %s",
+						pod.Namespace, replicaSet.OwnerReferences[0].Name, pod.Name)
+					if replicaSet.Spec.Selector != nil {
+						return replicaSet.Spec.Selector.MatchLabels, nil
+					}
+					return pod.Labels, nil
+				}
 				return nil, err
 			}
 			return deployment.Spec.Selector.MatchLabels, nil
@@ -62,6 +93,10 @@ func GetOwnerRef(clientset kubernetes.Interface, pod *v1.Pod) (map[string]string
 		case "StatefulSet":
 			statefulSet, err := clientset.AppsV1().StatefulSets(pod.Namespace).Get(ctx, owner.Name, metav1.GetOptions{})
 			if err != nil {
+				if apierrors.IsNotFound(err) {
+					log.Info().Msgf("StatefulSet %s/%s GC'd; falling back to pod labels for %s", pod.Namespace, owner.Name, pod.Name)
+					return pod.Labels, nil
+				}
 				return nil, err
 			}
 			return statefulSet.Spec.Selector.MatchLabels, nil
@@ -69,6 +104,10 @@ func GetOwnerRef(clientset kubernetes.Interface, pod *v1.Pod) (map[string]string
 		case "DaemonSet":
 			daemonSet, err := clientset.AppsV1().DaemonSets(pod.Namespace).Get(ctx, owner.Name, metav1.GetOptions{})
 			if err != nil {
+				if apierrors.IsNotFound(err) {
+					log.Info().Msgf("DaemonSet %s/%s GC'd; falling back to pod labels for %s", pod.Namespace, owner.Name, pod.Name)
+					return pod.Labels, nil
+				}
 				return nil, err
 			}
 			return daemonSet.Spec.Selector.MatchLabels, nil
@@ -76,6 +115,10 @@ func GetOwnerRef(clientset kubernetes.Interface, pod *v1.Pod) (map[string]string
 		case "Job":
 			job, err := clientset.BatchV1().Jobs(pod.Namespace).Get(ctx, owner.Name, metav1.GetOptions{})
 			if err != nil {
+				if apierrors.IsNotFound(err) {
+					log.Info().Msgf("Job %s/%s GC'd; falling back to pod labels for %s", pod.Namespace, owner.Name, pod.Name)
+					return pod.Labels, nil
+				}
 				return nil, err
 			}
 			return job.Spec.Selector.MatchLabels, nil
@@ -83,7 +126,12 @@ func GetOwnerRef(clientset kubernetes.Interface, pod *v1.Pod) (map[string]string
 		// Add more controller kinds here if needed
 
 		default:
-			return nil, fmt.Errorf("unknown or unsupported ownerReference: %s", owner.String())
+			// Unknown controller (Argo Rollout, custom CRD, etc.) —
+			// gracefully fall back to pod labels rather than failing
+			// the whole netpol-gen batch. Log so operators can see
+			// when this kicks in.
+			log.Warn().Msgf("Unsupported ownerReference kind %q for pod %s/%s; using pod labels", owner.Kind, pod.Namespace, pod.Name)
+			return pod.Labels, nil
 		}
 	}
 	return pod.Labels, nil
