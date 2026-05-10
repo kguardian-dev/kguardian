@@ -376,3 +376,85 @@ func TestDeduplicatePorts(t *testing.T) {
 		{Port: &p80, Protocol: &udp},
 	}, deduplicated)
 }
+
+// --- GetType + addOrUpdateRule coverage ---
+
+func TestStandardPolicyGenerator_GetType(t *testing.T) {
+	g := &StandardPolicyGenerator{}
+	if g.GetType() != StandardPolicy {
+		t.Errorf("StandardPolicyGenerator.GetType: want %s, got %s", StandardPolicy, g.GetType())
+	}
+}
+
+func TestStandardPolicy_AddOrUpdateRule_NewPeerCreatesRule(t *testing.T) {
+	g := &StandardPolicyGenerator{}
+	port := intstr.FromInt(8080)
+	got := g.addOrUpdateRule(nil, "10.1.0.1", port, "TCP")
+	if len(got) != 1 {
+		t.Fatalf("want 1 rule for new peer, got %d", len(got))
+	}
+	if got[0].PeerIP != "10.1.0.1" {
+		t.Errorf("PeerIP: want 10.1.0.1, got %s", got[0].PeerIP)
+	}
+	if len(got[0].Ports) != 1 {
+		t.Fatalf("want 1 port on new rule, got %d", len(got[0].Ports))
+	}
+}
+
+func TestStandardPolicy_AddOrUpdateRule_ExistingPeerAddsPort(t *testing.T) {
+	g := &StandardPolicyGenerator{}
+	p80 := intstr.FromInt(80)
+	rules := g.addOrUpdateRule(nil, "10.1.0.1", p80, "TCP")
+
+	p443 := intstr.FromInt(443)
+	got := g.addOrUpdateRule(rules, "10.1.0.1", p443, "TCP")
+
+	if len(got) != 1 {
+		t.Fatalf("expected the rule to be merged, got %d entries", len(got))
+	}
+	if len(got[0].Ports) != 2 {
+		t.Errorf("expected 2 ports on merged rule, got %d", len(got[0].Ports))
+	}
+}
+
+func TestStandardPolicy_AddOrUpdateRule_DuplicatePortIsNoOp(t *testing.T) {
+	// Same peer + port + protocol must NOT duplicate.
+	g := &StandardPolicyGenerator{}
+	port := intstr.FromInt(80)
+	rules := g.addOrUpdateRule(nil, "10.1.0.1", port, "TCP")
+	got := g.addOrUpdateRule(rules, "10.1.0.1", port, "TCP")
+
+	if len(got) != 1 {
+		t.Fatalf("want 1 rule, got %d", len(got))
+	}
+	if len(got[0].Ports) != 1 {
+		t.Errorf("duplicate port (same peer, port, proto) must not be re-added; got %d ports", len(got[0].Ports))
+	}
+}
+
+func TestStandardPolicy_AddOrUpdateRule_SamePortDifferentProtocolAdds(t *testing.T) {
+	// Port 53 over TCP vs UDP are distinct rules — DNS is a real
+	// case where this matters.
+	g := &StandardPolicyGenerator{}
+	port := intstr.FromInt(53)
+	rules := g.addOrUpdateRule(nil, "10.1.0.1", port, "TCP")
+	got := g.addOrUpdateRule(rules, "10.1.0.1", port, "UDP")
+
+	if len(got) != 1 {
+		t.Fatalf("want 1 rule (same peer), got %d", len(got))
+	}
+	if len(got[0].Ports) != 2 {
+		t.Errorf("TCP/53 and UDP/53 must coexist on the same peer rule; got %d ports", len(got[0].Ports))
+	}
+}
+
+func TestStandardPolicy_AddOrUpdateRule_MultiplePeersStaySeparate(t *testing.T) {
+	g := &StandardPolicyGenerator{}
+	port := intstr.FromInt(80)
+	rules := g.addOrUpdateRule(nil, "10.1.0.1", port, "TCP")
+	got := g.addOrUpdateRule(rules, "10.1.0.2", port, "TCP")
+
+	if len(got) != 2 {
+		t.Fatalf("two distinct peers should yield 2 rules, got %d", len(got))
+	}
+}
