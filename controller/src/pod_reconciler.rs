@@ -8,6 +8,26 @@ use tracing::{debug, error, info};
 
 const RECONCILE_INTERVAL_SECS: u64 = 60; // Reconcile every 60 seconds
 
+/// Identifier used to match a DB pod against the live cluster pod list.
+/// Namespace + name together — pod names are unique only within a
+/// namespace, so name-only comparison silently misses cross-namespace
+/// collisions (e.g. prod/web-1 vs staging/web-1).
+type PodIdent = (Option<String>, String);
+
+/// Returns the names of DB pods that no longer exist in the cluster.
+/// Pure function so the comparison logic is unit-testable without a
+/// live broker / kube client.
+fn find_dead_pods<'a>(db_pods: &'a [PodDetail], running: &HashSet<PodIdent>) -> Vec<&'a str> {
+    db_pods
+        .iter()
+        .filter(|p| {
+            let ident = (p.pod_namespace.clone(), p.pod_name.clone());
+            !running.contains(&ident)
+        })
+        .map(|p| p.pod_name.as_str())
+        .collect()
+}
+
 /// Periodically reconcile pods on this node with the database
 /// Marks pods as dead if they're no longer running on this node
 pub async fn reconcile_pods_task(
@@ -65,11 +85,19 @@ async fn reconcile_pods(
         .await
         .map_err(|e| Error::Custom(format!("Failed to list pods from Kubernetes: {}", e)))?;
 
-    // Build set of currently running pod names from Kubernetes
-    let running_pods: HashSet<String> = pod_list
+    // Build set of currently running (namespace, name) pairs from
+    // Kubernetes. The previous version keyed on name only, which
+    // silently failed when two pods on the same node shared a name
+    // across namespaces (e.g. prod/web-1 and staging/web-1).
+    let running_pods: HashSet<PodIdent> = pod_list
         .items
         .iter()
-        .filter_map(|pod| pod.metadata.name.clone())
+        .filter_map(|pod| {
+            pod.metadata
+                .name
+                .clone()
+                .map(|n| (pod.metadata.namespace.clone(), n))
+        })
         .collect();
 
     debug!(
@@ -80,23 +108,18 @@ async fn reconcile_pods(
     );
 
     // Mark pods as dead if they're in DB but not running in cluster
+    let dead = find_dead_pods(&db_pods, &running_pods);
     let mut marked_dead = 0;
-    for db_pod in db_pods {
-        if !running_pods.contains(&db_pod.pod_name) {
-            info!(
-                "Pod {} is no longer running on node {}, marking as dead",
-                db_pod.pod_name, node_name
-            );
-
-            let mark_dead_req = serde_json::json!({
-                "pod_name": db_pod.pod_name
-            });
-
-            if let Err(e) = api_post_call(mark_dead_req, "pod/mark_dead").await {
-                error!("Failed to mark pod {} as dead: {}", db_pod.pod_name, e);
-            } else {
-                marked_dead += 1;
-            }
+    for name in dead {
+        info!(
+            "Pod {} is no longer running on node {}, marking as dead",
+            name, node_name
+        );
+        let mark_dead_req = serde_json::json!({ "pod_name": name });
+        if let Err(e) = api_post_call(mark_dead_req, "pod/mark_dead").await {
+            error!("Failed to mark pod {} as dead: {}", name, e);
+        } else {
+            marked_dead += 1;
         }
     }
 
@@ -110,4 +133,113 @@ async fn reconcile_pods(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::NaiveDateTime;
+
+    fn db_pod(namespace: Option<&str>, name: &str) -> PodDetail {
+        PodDetail {
+            pod_ip: "10.0.0.1".to_string(),
+            pod_name: name.to_string(),
+            pod_namespace: namespace.map(str::to_string),
+            pod_obj: None,
+            time_stamp: NaiveDateTime::default(),
+            node_name: "node-a".to_string(),
+            is_dead: false,
+            pod_identity: None,
+            workload_selector_labels: None,
+        }
+    }
+
+    fn ident(namespace: Option<&str>, name: &str) -> PodIdent {
+        (namespace.map(str::to_string), name.to_string())
+    }
+
+    #[test]
+    fn find_dead_pods_empty_inputs() {
+        let dead = find_dead_pods(&[], &HashSet::new());
+        assert!(dead.is_empty());
+    }
+
+    #[test]
+    fn find_dead_pods_all_alive() {
+        let pods = vec![
+            db_pod(Some("prod"), "web-1"),
+            db_pod(Some("staging"), "api-2"),
+        ];
+        let mut running = HashSet::new();
+        running.insert(ident(Some("prod"), "web-1"));
+        running.insert(ident(Some("staging"), "api-2"));
+
+        let dead = find_dead_pods(&pods, &running);
+        assert!(dead.is_empty());
+    }
+
+    #[test]
+    fn find_dead_pods_marks_missing_only() {
+        let pods = vec![
+            db_pod(Some("prod"), "web-1"),
+            db_pod(Some("prod"), "web-2"),
+            db_pod(Some("prod"), "web-3"),
+        ];
+        let mut running = HashSet::new();
+        running.insert(ident(Some("prod"), "web-1"));
+        running.insert(ident(Some("prod"), "web-3"));
+
+        let dead = find_dead_pods(&pods, &running);
+        assert_eq!(dead, vec!["web-2"]);
+    }
+
+    #[test]
+    fn find_dead_pods_distinguishes_by_namespace() {
+        // The bug case: two pods with the same name in different
+        // namespaces. The cluster has prod/web-1 alive but
+        // staging/web-1 has been deleted. The DB still has the
+        // staging entry. Pre-fix the comparison was name-only — both
+        // db entries (if both existed) would see "web-1" in running
+        // and get marked alive. The reconciler's job is to mark
+        // staging/web-1 dead — that requires namespace-aware compare.
+        let pods = vec![
+            db_pod(Some("prod"), "web-1"),
+            db_pod(Some("staging"), "web-1"),
+        ];
+        let mut running = HashSet::new();
+        running.insert(ident(Some("prod"), "web-1"));
+        // staging/web-1 deliberately absent
+
+        let dead = find_dead_pods(&pods, &running);
+        assert_eq!(dead.len(), 1, "exactly one pod (staging/web-1) must be marked dead");
+        // Both share the same name, so the name alone doesn't tell
+        // us which one — but the find should produce one entry, not
+        // zero (the bug) and not two.
+        assert_eq!(dead[0], "web-1");
+    }
+
+    #[test]
+    fn find_dead_pods_handles_db_pod_with_no_namespace() {
+        // Older DB rows (pre pod_namespace migration) may have None.
+        // Match against cluster pods that also have no namespace —
+        // edge but defended against panicking.
+        let pods = vec![db_pod(None, "orphan")];
+        let mut running = HashSet::new();
+        running.insert(ident(None, "orphan"));
+
+        let dead = find_dead_pods(&pods, &running);
+        assert!(dead.is_empty(), "None-namespace pod must match against None-namespace cluster entry");
+    }
+
+    #[test]
+    fn find_dead_pods_db_namespace_mismatch_is_dead() {
+        // DB says staging/web-1 but cluster only has prod/web-1.
+        // Must mark dead — the DB row doesn't match anything live.
+        let pods = vec![db_pod(Some("staging"), "web-1")];
+        let mut running = HashSet::new();
+        running.insert(ident(Some("prod"), "web-1")); // same name, different ns
+
+        let dead = find_dead_pods(&pods, &running);
+        assert_eq!(dead, vec!["web-1"]);
+    }
 }
