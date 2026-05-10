@@ -245,6 +245,112 @@ func TestCompactTrafficSummary_SkipsRecordsWithoutPodName(t *testing.T) {
 	}
 }
 
+func TestCompactSvc_SingleMapKeepsIdentityAndLiftsSelectorPorts(t *testing.T) {
+	// Per-record contract for service compaction. The full
+	// service_spec includes Kubernetes Service.spec which itself
+	// contains selector + ports + the assorted fluff
+	// (type, sessionAffinity, loadBalancer). Strip the outer
+	// service_spec wrapper but lift selector + ports to top-level.
+	in := map[string]interface{}{
+		"svc_name":      "web",
+		"svc_namespace": "prod",
+		"svc_ip":        "10.96.0.42",
+		"time_stamp":    "2026-05-11T00:00:00Z",
+		"service_spec": map[string]interface{}{
+			// The broker stores the full Kubernetes Service obj —
+			// .spec is one nesting level inside.
+			"spec": map[string]interface{}{
+				"selector": map[string]interface{}{"app": "web", "tier": "frontend"},
+				"ports": []interface{}{
+					map[string]interface{}{"port": 80, "targetPort": 8080, "protocol": "TCP"},
+					map[string]interface{}{"port": 443, "targetPort": 8443, "protocol": "TCP"},
+				},
+				// Fluff that should NOT survive compactation:
+				"type":            "ClusterIP",
+				"sessionAffinity": "None",
+				"ipFamilies":      []interface{}{"IPv4"},
+			},
+			"status": map[string]interface{}{"loadBalancer": map[string]interface{}{}},
+		},
+	}
+	got := compactSvc(in).(map[string]interface{})
+
+	// Identity fields kept.
+	for _, want := range []string{"svc_name", "svc_namespace", "svc_ip", "time_stamp"} {
+		if _, ok := got[want]; !ok {
+			t.Errorf("identity field stripped: %s", want)
+		}
+	}
+	// service_spec dropped wholesale.
+	if _, ok := got["service_spec"]; ok {
+		t.Error("service_spec must be dropped (the rest of the Service object is fluff)")
+	}
+	// selector lifted to top-level.
+	sel, ok := got["service_selector"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("service_selector missing — LLM cant construct NetworkPolicy selectors without it: %#v", got)
+	}
+	if sel["app"] != "web" {
+		t.Errorf("selector content lost: %#v", sel)
+	}
+	// ports lifted to top-level.
+	ports, ok := got["service_ports"].([]interface{})
+	if !ok || len(ports) != 2 {
+		t.Errorf("service_ports must be lifted and preserved (2 entries); got %#v", got["service_ports"])
+	}
+}
+
+func TestCompactSvc_NoServiceSpecPassesThrough(t *testing.T) {
+	// Defensive: if the broker returns a record without service_spec
+	// (a degenerate row), the identity fields still come through and
+	// no panic occurs from missing nested access.
+	in := map[string]interface{}{
+		"svc_name":      "headless",
+		"svc_namespace": "prod",
+		"svc_ip":        "None",
+	}
+	got := compactSvc(in).(map[string]interface{})
+	if got["svc_name"] != "headless" {
+		t.Errorf("identity must survive even without service_spec: %#v", got)
+	}
+	if _, ok := got["service_selector"]; ok {
+		t.Error("service_selector must be absent when service_spec was missing")
+	}
+}
+
+func TestCompactSvc_SliceInputCompactsEach(t *testing.T) {
+	// The dispatch contract: slice in → slice out, each item
+	// compacted via compactSvcRecord. Mirrors the
+	// compactPodsSummary slice path.
+	in := []interface{}{
+		map[string]interface{}{
+			"svc_name": "a", "svc_namespace": "ns",
+			"service_spec": map[string]interface{}{
+				"spec": map[string]interface{}{"selector": map[string]interface{}{"app": "a"}},
+			},
+		},
+		map[string]interface{}{
+			"svc_name": "b", "svc_namespace": "ns",
+			"service_spec": map[string]interface{}{
+				"spec": map[string]interface{}{"selector": map[string]interface{}{"app": "b"}},
+			},
+		},
+	}
+	got := compactSvc(in).([]interface{})
+	if len(got) != 2 {
+		t.Fatalf("want 2 entries, got %d", len(got))
+	}
+	for _, item := range got {
+		m := item.(map[string]interface{})
+		if _, ok := m["service_spec"]; ok {
+			t.Errorf("service_spec must be stripped from each slice entry")
+		}
+		if _, ok := m["service_selector"]; !ok {
+			t.Errorf("service_selector must be lifted to each slice entry")
+		}
+	}
+}
+
 func TestFilterAlivePods_DropsDeadOnly(t *testing.T) {
 	// /pod/info returns every pod_details row; the LLMs list-pods
 	// tool wants only the live ones. Pin: alive rows pass through,

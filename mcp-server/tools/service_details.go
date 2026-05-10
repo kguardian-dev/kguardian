@@ -56,7 +56,15 @@ func (h ServiceDetailsHandler) Call(
 		}, ServiceDetailsOutput{}, nil
 	}
 
-	jsonData, err := json.Marshal(data)
+	// Strip the full Kubernetes Service object but keep the two
+	// nested fields the LLM actually reasons about — spec.selector
+	// (for NetworkPolicy construction) and spec.ports (for traffic
+	// matching). The rest (type / sessionAffinity / loadBalancer
+	// status / ipFamily / etc.) is rarely useful for the LLMs
+	// service-identity queries and just eats context.
+	compacted := compactSvc(data)
+
+	jsonData, err := json.Marshal(compacted)
 	if err != nil {
 		logger.Log.WithField("error", err.Error()).Error("Error marshaling response")
 		return &mcp.CallToolResult{

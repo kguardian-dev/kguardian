@@ -104,6 +104,66 @@ func compactTrafficSummary(data interface{}) map[string]interface{} {
 	}
 }
 
+// compactSvcRecord strips the heavyweight `service_spec` from a
+// SvcDetail record but lifts the two nested fields the LLM actually
+// reasons about (`selector` and `ports`) up to the top level. The
+// pre-compact response was the full Kubernetes Service object —
+// often 1-2KB per call including type/sessionAffinity/loadBalancer
+// status that's rarely useful for "what does this service do"
+// queries.
+func compactSvcRecord(m map[string]interface{}) map[string]interface{} {
+	keep := map[string]bool{
+		"svc_name":      true,
+		"svc_namespace": true,
+		"svc_ip":        true,
+		"time_stamp":    true,
+	}
+	slim := make(map[string]interface{}, len(keep)+2)
+	for k, v := range m {
+		if keep[k] {
+			slim[k] = v
+		}
+	}
+	// Lift the two genuinely useful sub-fields of service_spec.
+	if spec, ok := m["service_spec"].(map[string]interface{}); ok {
+		if inner, ok := spec["spec"].(map[string]interface{}); ok {
+			// Inside a real Kubernetes Service object the useful
+			// fields are at spec.selector / spec.ports — the
+			// broker stores the full object, so navigate one level
+			// deeper than the outer "service_spec" key.
+			if sel, ok := inner["selector"]; ok {
+				slim["service_selector"] = sel
+			}
+			if ports, ok := inner["ports"]; ok {
+				slim["service_ports"] = ports
+			}
+		}
+	}
+	return slim
+}
+
+// compactSvc dispatches on type the same way compactPodsSummary
+// does — single-map → compactSvcRecord; slice → over each; scalar
+// → passthrough.
+func compactSvc(data interface{}) interface{} {
+	if single, ok := data.(map[string]interface{}); ok {
+		return compactSvcRecord(single)
+	}
+	items, ok := data.([]interface{})
+	if !ok {
+		return data
+	}
+	out := make([]interface{}, 0, len(items))
+	for _, item := range items {
+		if m, ok := item.(map[string]interface{}); ok {
+			out = append(out, compactSvcRecord(m))
+		} else {
+			out = append(out, item)
+		}
+	}
+	return out
+}
+
 // filterAlivePods drops pod records with is_dead=true. The brokers
 // /pod/info endpoint returns every pod_details row regardless of
 // liveness — so a cluster that has churned through pod restarts
