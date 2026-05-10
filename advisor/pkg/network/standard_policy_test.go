@@ -341,6 +341,44 @@ func TestParsePort(t *testing.T) {
 	assert.Error(t, err)
 }
 
+func TestParsePort_RejectsTrailingJunkAndDecimals(t *testing.T) {
+	// The previous fmt.Sscanf("%d") implementation silently accepted
+	// these inputs and returned the leading integer, dropping the rest.
+	// That meant "8.5" → 8, "80junk" → 80, " 80" → 80, "0xff" → 0 — all
+	// silent corruption of port data scraped from observed traffic.
+	// strconv.Atoi rejects every one of these.
+	cases := []struct {
+		in   string
+		desc string
+	}{
+		{"80junk", "trailing letters"},
+		{"80a", "single trailing letter"},
+		{" 80", "leading whitespace"},
+		{"80 ", "trailing whitespace"},
+		{"80 90", "space-separated multi-int"},
+		{"8.5", "decimal — no truncation"},
+		{"0xff", "hex literal — must reject (not parse as 0)"},
+		{"08.0", "decimal with leading zeros"},
+		{"\t80", "tab whitespace"},
+	}
+	for _, c := range cases {
+		t.Run(c.desc, func(t *testing.T) {
+			_, err := parsePort(c.in)
+			assert.Error(t, err, "input %q must be rejected: %s", c.in, c.desc)
+		})
+	}
+}
+
+func TestParsePort_AcceptsLeadingZeros(t *testing.T) {
+	// "0080" is a valid integer per Atoi semantics (== 80). Atoi
+	// doesn't treat leading zeros as octal. Pin this so a future
+	// "stricter regex" refactor doesn't accidentally reject what is a
+	// reasonable wire format from older eBPF probes.
+	p, err := parsePort("0080")
+	assert.NoError(t, err)
+	assert.Equal(t, 80, p)
+}
+
 func TestProtocolPtr(t *testing.T) {
 	tcp := corev1.ProtocolTCP
 	udp := corev1.ProtocolUDP

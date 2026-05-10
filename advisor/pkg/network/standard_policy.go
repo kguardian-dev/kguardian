@@ -2,6 +2,7 @@ package network
 
 import (
 	"fmt"
+	"strconv"
 
 	log "github.com/rs/zerolog/log"
 	"github.com/kguardian-dev/kguardian/advisor/pkg/api"
@@ -327,9 +328,16 @@ func (g *StandardPolicyGenerator) createNetworkPolicyPeer(peerIP string) *networ
 // Helper functions
 
 // parsePort converts a string port to an integer.
+//
+// Uses strconv.Atoi instead of fmt.Sscanf("%d") because Sscanf silently
+// accepts trailing junk: Sscanf("80junk", "%d") returns 80 with no
+// error, Sscanf("8.5", "%d") returns 8 (truncated), Sscanf(" 80", "%d")
+// strips whitespace and returns 80. Atoi rejects all of those cleanly.
+// We can't trust the input to be well-formed — port strings come from
+// observed eBPF traffic data and persist through the broker; silently
+// truncating "8.5" to 8 in a generated NetworkPolicy is a real bug.
 func parsePort(portStr string) (int, error) {
-	var portInt int
-	_, err := fmt.Sscanf(portStr, "%d", &portInt)
+	portInt, err := strconv.Atoi(portStr)
 	if err != nil {
 		return 0, fmt.Errorf("invalid port format '%s': %w", portStr, err)
 	}
