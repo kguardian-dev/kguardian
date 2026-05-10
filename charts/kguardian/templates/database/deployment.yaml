@@ -47,8 +47,28 @@ spec:
         - name: assert-safe-boot
           image: "{{ .Values.database.image.repository }}:{{ .Values.database.image.tag }}"
           imagePullPolicy: {{ .Values.database.image.pullPolicy }}
+          # Hardened context — the init container only reads filesystem
+          # metadata (PG_VERSION existence checks); no need for the full
+          # postgres container's writable rootfs / UID 999.
           securityContext:
-            {{- toYaml .Values.database.securityContext | nindent 12 }}
+            runAsNonRoot: true
+            runAsUser: 65534
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+            seccompProfile:
+              type: RuntimeDefault
+          # Resource ceiling kept tight: this container is a sub-second
+          # filesystem inspection, then it exits.
+          resources:
+            requests:
+              cpu: 10m
+              memory: 16Mi
+            limits:
+              cpu: 100m
+              memory: 64Mi
           command:
             - /bin/sh
             - -c
