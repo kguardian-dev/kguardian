@@ -591,4 +591,85 @@ mod tests {
         let pod = pod_with_owners(vec![owner("ReplicaSet"), owner("DaemonSet")]);
         assert!(is_backed_by_daemonset(&pod));
     }
+
+    // pod_unready is mis-named: it returns Some(container_ids) when
+    // the pod IS ready and None when unready / status missing.
+    // Renaming would be churn; document and pin the contract instead.
+    use k8s_openapi::api::core::v1::{ContainerStatus, PodCondition, PodStatus};
+
+    fn pod_with_status(status: PodStatus) -> Pod {
+        let mut p = Pod::default();
+        p.status = Some(status);
+        p
+    }
+
+    #[test]
+    fn pod_unready_no_status_returns_none() {
+        assert_eq!(pod_unready(&Pod::default()), None);
+    }
+
+    #[test]
+    fn pod_unready_ready_false_returns_none() {
+        let cond = PodCondition {
+            type_: "Ready".into(),
+            status: "False".into(),
+            message: Some("crashloop".into()),
+            ..Default::default()
+        };
+        let st = PodStatus {
+            conditions: Some(vec![cond]),
+            container_statuses: Some(vec![ContainerStatus {
+                container_id: Some("docker://abc".into()),
+                ..Default::default()
+            }]),
+            ..Default::default()
+        };
+        assert_eq!(pod_unready(&pod_with_status(st)), None);
+    }
+
+    #[test]
+    fn pod_unready_ready_true_returns_container_ids() {
+        let cond = PodCondition {
+            type_: "Ready".into(),
+            status: "True".into(),
+            ..Default::default()
+        };
+        let st = PodStatus {
+            conditions: Some(vec![cond]),
+            container_statuses: Some(vec![ContainerStatus {
+                container_id: Some("containerd://hash1".into()),
+                ..Default::default()
+            }]),
+            ..Default::default()
+        };
+        assert_eq!(
+            pod_unready(&pod_with_status(st)),
+            Some(vec!["containerd://hash1".to_string()])
+        );
+    }
+
+    #[test]
+    fn pod_unready_skips_containers_without_id() {
+        // Mid-startup containers have no containerID populated yet.
+        // Those entries are silently skipped — only fully realised
+        // containers contribute IDs.
+        let st = PodStatus {
+            container_statuses: Some(vec![
+                ContainerStatus { container_id: Some("ok-1".into()), ..Default::default() },
+                ContainerStatus { container_id: None, ..Default::default() },
+                ContainerStatus { container_id: Some("ok-2".into()), ..Default::default() },
+            ]),
+            ..Default::default()
+        };
+        assert_eq!(
+            pod_unready(&pod_with_status(st)),
+            Some(vec!["ok-1".to_string(), "ok-2".to_string()])
+        );
+    }
+
+    #[test]
+    fn pod_unready_no_containers_returns_none() {
+        let st = PodStatus { container_statuses: None, ..Default::default() };
+        assert_eq!(pod_unready(&pod_with_status(st)), None);
+    }
 }
