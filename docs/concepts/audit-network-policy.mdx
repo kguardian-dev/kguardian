@@ -139,11 +139,29 @@ kguardian audit promote --all --all-namespaces --output-dir ./promoted/
 
 The promoted YAML strips the audit-side status and the `kubectl.kubernetes.io/last-applied-configuration` annotation (it'd be wrong for the new kind). Existing labels and other annotations are preserved.
 
+### Cluster-scoped — `kguardian audit promote-cluster`
+
+`AuditClusterNetworkPolicy` promotes to one `networking.k8s.io/v1.NetworkPolicy` per matching namespace (since native NetworkPolicy is namespaced; the cluster-scope `namespaceSelector` is dropped from each emitted spec).
+
+```sh
+# discover namespaces matching spec.namespaceSelector and emit one
+# NetworkPolicy per match
+kguardian audit promote-cluster platform-default-deny-ingress
+
+# explicit namespace list — skip the namespaceSelector discovery,
+# useful when promoting to a subset
+kguardian audit promote-cluster platform-default-deny-ingress \
+  --target-namespace prod --target-namespace staging
+
+# write one file per namespace
+kguardian audit promote-cluster platform-default-deny-ingress \
+  --output-dir ./promoted/
+```
+
 ## What kguardian does *not* do
 
 - It does not enforce anything. Even with an `AuditNetworkPolicy` in place, *all traffic flows*. If you want enforcement, promote the policy as above and rely on your CNI.
-- It does not (yet) provide a frontend "Would-Deny" view — query the broker's `audit_verdicts` table directly or watch the policy's `.status.evaluation` field.
-- The promote helper handles namespaced policies; for `AuditClusterNetworkPolicy` you'll need to enumerate the matched namespaces yourself.
+- It does not aggregate verdicts across multiple evaluator replicas — the evaluator's status updater is single-replica by design (a Helm guardrail blocks `replicaCount > 1`). Multi-replica HA is a future story.
 
 ## Limits + caveats
 
