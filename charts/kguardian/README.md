@@ -93,7 +93,7 @@ The following table lists the configurable parameters of the kguardian chart and
 | broker.initContainer.image.sha | string | `""` | Overrides the init container image tag using SHA digest |
 | broker.initContainer.image.tag | string | `"latest"` | Broker init container image tag |
 | broker.initContainer.securityContext | object | `{"allowPrivilegeEscalation":false,"capabilities":{"drop":["ALL"]},"readOnlyRootFilesystem":true,"runAsNonRoot":true,"runAsUser":65534}` | Broker init container security context |
-| broker.metrics.serviceMonitor.enabled | bool | `false` | Create a ServiceMonitor for prometheus-operator. The broker does not currently expose /metrics — this is a forward-compatible toggle. |
+| broker.metrics.serviceMonitor.enabled | bool | `false` | Create a ServiceMonitor for prometheus-operator. The broker exposes a Prometheus text-format /metrics endpoint with five gauges/counter:   broker_db_schema_ready, broker_db_reachable,   broker_audit_enabled, broker_audit_inflight_available,   broker_uptime_seconds Suggested alerts:   - broker_db_schema_ready == 0 for 5m   → silent failure mode   - broker_db_reachable == 0 for 1m     → DB connection issue   - broker_audit_inflight_available == 0 for 10m → bump     AUDIT_INFLIGHT_PERMITS |
 | broker.metrics.serviceMonitor.interval | string | `"30s"` | Scrape interval. |
 | broker.metrics.serviceMonitor.labels | object | `{}` | Extra labels to add to the ServiceMonitor (so prometheus-operator picks it up — usually `release: kube-prometheus-stack`). |
 | broker.metrics.serviceMonitor.path | string | `"/metrics"` | Endpoint path on the broker's HTTP service. |
