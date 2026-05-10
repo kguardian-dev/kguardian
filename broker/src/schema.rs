@@ -1,7 +1,13 @@
 // @generated automatically by Diesel CLI.
 
 diesel::table! {
-    pod_details (pod_ip) {
+    // PK is pod_name, matching the migration (`pod_name VARCHAR
+    // PRIMARY KEY`) and the PodDetail struct's
+    // `#[diesel(primary_key(pod_name))]` annotation. The previous
+    // `(pod_ip)` declaration here was inconsistent with both and
+    // would silently misbehave for any query using diesel's PK-aware
+    // helpers (.find(), Identifiable impls, joins).
+    pod_details (pod_name) {
         pod_name -> Varchar,
         pod_ip -> Varchar,
         pod_namespace -> Nullable<Varchar>,
