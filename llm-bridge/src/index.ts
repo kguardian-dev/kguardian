@@ -25,14 +25,33 @@ app.use(express.json({ limit: '100kb' }));
 // Initialize broker client
 const brokerClient = new BrokerClient(brokerUrl);
 
-// Determine available providers
-function getAvailableProviders(): LLMProvider[] {
+/**
+ * Compute available providers from a key-value env map. Pure — takes
+ * the env in as a parameter so it's unit-testable without touching
+ * process.env. The exported `availableProvidersFromEnv` form lets
+ * tests pass arbitrary maps; the internal `getAvailableProviders`
+ * binds it to the live process env.
+ *
+ * Whitespace-only values count as MISSING. The native `if (env.X)`
+ * check treated `"  "` as truthy, so an operator setting
+ * ANTHROPIC_API_KEY="  " to "disable" the provider got /health
+ * reporting it as available, requests routing to it, and then a
+ * 401 from the Anthropic API at runtime. Trimming pre-check makes
+ * the disable-by-whitespace pattern Just Work.
+ */
+export function availableProvidersFromEnv(
+  env: Record<string, string | undefined>,
+): LLMProvider[] {
   const providers: LLMProvider[] = [];
-  if (process.env.OPENAI_API_KEY) providers.push(LLMProvider.OPENAI);
-  if (process.env.ANTHROPIC_API_KEY) providers.push(LLMProvider.ANTHROPIC);
-  if (process.env.GOOGLE_API_KEY) providers.push(LLMProvider.GEMINI);
-  if (process.env.GITHUB_TOKEN) providers.push(LLMProvider.COPILOT);
+  if (env.OPENAI_API_KEY?.trim()) providers.push(LLMProvider.OPENAI);
+  if (env.ANTHROPIC_API_KEY?.trim()) providers.push(LLMProvider.ANTHROPIC);
+  if (env.GOOGLE_API_KEY?.trim()) providers.push(LLMProvider.GEMINI);
+  if (env.GITHUB_TOKEN?.trim()) providers.push(LLMProvider.COPILOT);
   return providers;
+}
+
+function getAvailableProviders(): LLMProvider[] {
+  return availableProvidersFromEnv(process.env);
 }
 
 // Health check endpoint

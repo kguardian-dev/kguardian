@@ -27,7 +27,9 @@ export async function callOpenAI(
   request: ChatRequest,
   brokerClient: BrokerClient
 ): Promise<ChatResponse> {
-  const apiKey = process.env.OPENAI_API_KEY;
+  // Trim before empty-check; whitespace-only counts as not-configured.
+  // See anthropic.ts for the disable-by-whitespace rationale.
+  const apiKey = process.env.OPENAI_API_KEY?.trim();
   if (!apiKey) {
     throw new Error("OPENAI_API_KEY not configured");
   }

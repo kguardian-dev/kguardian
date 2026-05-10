@@ -16,7 +16,12 @@ export async function callAnthropic(
   request: ChatRequest,
   brokerClient: BrokerClient
 ): Promise<ChatResponse> {
-  const apiKey = process.env.ANTHROPIC_API_KEY;
+  // Trim before the empty-check so an operator-set "  " (whitespace
+  // intended to disable the provider) doesn't slip through. Pre-fix
+  // a whitespace-only key passed `if (!apiKey)` and was sent verbatim
+  // to api.anthropic.com, producing a 401 deep in the call chain
+  // rather than a clear "not configured" message at request entry.
+  const apiKey = process.env.ANTHROPIC_API_KEY?.trim();
   if (!apiKey) {
     throw new Error("ANTHROPIC_API_KEY not configured");
   }

@@ -19,7 +19,8 @@ export async function callCopilot(
   request: ChatRequest,
   brokerClient: BrokerClient
 ): Promise<ChatResponse> {
-  const apiKey = process.env.GITHUB_TOKEN;
+  // Trim before empty-check; whitespace-only counts as not-configured.
+  const apiKey = process.env.GITHUB_TOKEN?.trim();
   if (!apiKey) {
     throw new Error("GITHUB_TOKEN not configured");
   }

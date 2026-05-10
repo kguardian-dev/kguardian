@@ -10,7 +10,8 @@ export async function callGemini(
   request: ChatRequest,
   brokerClient: BrokerClient
 ): Promise<ChatResponse> {
-  const apiKey = process.env.GOOGLE_API_KEY;
+  // Trim before empty-check; whitespace-only counts as not-configured.
+  const apiKey = process.env.GOOGLE_API_KEY?.trim();
   if (!apiKey) {
     throw new Error("GOOGLE_API_KEY not configured");
   }
