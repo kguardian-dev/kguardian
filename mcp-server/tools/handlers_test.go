@@ -166,6 +166,71 @@ func TestClusterTrafficHandler_BrokerErrorBecomesIsError(t *testing.T) {
 	}
 }
 
+// --- Single-target handlers: empty-input contract ---
+//
+// PodDetails / ServiceDetails / NetworkTraffic / Syscalls each take a
+// single required parameter (IP or PodName). They ALL must short-circuit
+// with IsError=true before making the broker call when the input is
+// empty — otherwise we'd issue a `/pod/ip/` URL with a trailing slash
+// and 404 against the broker, eating a round-trip and a noisy log line.
+
+func TestPodDetailsHandler_EmptyIPRejected(t *testing.T) {
+	// Pass a deliberately broken broker URL — the test must short-circuit
+	// before any HTTP call.
+	c := NewBrokerClient("http://broker-must-not-be-called.invalid")
+	h := PodDetailsHandler{client: c}
+	res, _, err := h.Call(context.Background(), nil, PodDetailsInput{IP: ""})
+	if err != nil {
+		t.Fatalf("handler must not return Go error: %v", err)
+	}
+	if !res.IsError {
+		t.Errorf("expected IsError=true for empty IP")
+	}
+	if !strings.Contains(textOf(t, res), "IP address is required") {
+		t.Errorf("error must explain what's missing: %s", textOf(t, res))
+	}
+}
+
+func TestPodDetailsHandler_HappyPath(t *testing.T) {
+	c, cleanup := newBrokerWithJSON(t, `{"pod_name":"web-1","pod_ip":"10.0.0.1"}`)
+	defer cleanup()
+	h := PodDetailsHandler{client: c}
+	res, _, _ := h.Call(context.Background(), nil, PodDetailsInput{IP: "10.0.0.1"})
+	if res.IsError {
+		t.Fatalf("unexpected IsError=true: %s", textOf(t, res))
+	}
+	if !strings.Contains(textOf(t, res), "web-1") {
+		t.Errorf("response missing pod_name: %s", textOf(t, res))
+	}
+}
+
+func TestServiceDetailsHandler_EmptyIPRejected(t *testing.T) {
+	c := NewBrokerClient("http://broker-must-not-be-called.invalid")
+	h := ServiceDetailsHandler{client: c}
+	res, _, _ := h.Call(context.Background(), nil, ServiceDetailsInput{IP: ""})
+	if !res.IsError {
+		t.Errorf("expected IsError=true for empty IP")
+	}
+}
+
+func TestNetworkTrafficHandler_EmptyPodNameRejected(t *testing.T) {
+	c := NewBrokerClient("http://broker-must-not-be-called.invalid")
+	h := NetworkTrafficHandler{client: c}
+	res, _, _ := h.Call(context.Background(), nil, NetworkTrafficInput{PodName: ""})
+	if !res.IsError {
+		t.Errorf("expected IsError=true for empty pod_name")
+	}
+}
+
+func TestSyscallsHandler_EmptyPodNameRejected(t *testing.T) {
+	c := NewBrokerClient("http://broker-must-not-be-called.invalid")
+	h := SyscallsHandler{client: c}
+	res, _, _ := h.Call(context.Background(), nil, SyscallsInput{PodName: ""})
+	if !res.IsError {
+		t.Errorf("expected IsError=true for empty pod_name")
+	}
+}
+
 // textOf extracts the first TextContent from a CallToolResult — the
 // shape every handler in this package returns.
 func textOf(t *testing.T, res any) string {
