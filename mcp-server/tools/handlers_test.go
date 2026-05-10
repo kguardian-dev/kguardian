@@ -213,6 +213,76 @@ func TestServiceDetailsHandler_EmptyIPRejected(t *testing.T) {
 	}
 }
 
+func TestPodDetailsHandler_StripsHeavyPodObj(t *testing.T) {
+	// End-to-end pin for iteration 76: get_pod_details must strip
+	// pod_obj (full Kubernetes Pod spec/status) from the response
+	// it returns to the LLM. Without this, every identity lookup
+	// floods LLM context with kilobytes of unused spec data.
+	c, cleanup := newBrokerWithJSON(t, `{
+		"pod_name":"web-1",
+		"pod_namespace":"prod",
+		"pod_ip":"10.0.0.1",
+		"workload_selector_labels":{"app":"web"},
+		"pod_obj":{"spec":{"containers":[{"name":"app","image":"nginx"}]},"status":{"phase":"Running"}}
+	}`)
+	defer cleanup()
+	h := PodDetailsHandler{client: c}
+	res, _, _ := h.Call(context.Background(), nil, PodDetailsInput{IP: "10.0.0.1"})
+	if res.IsError {
+		t.Fatalf("unexpected error: %s", textOf(t, res))
+	}
+	body := textOf(t, res)
+	if strings.Contains(body, "pod_obj") {
+		t.Errorf("pod_obj must be stripped from response; got: %s", body)
+	}
+	// Useful fields preserved:
+	if !strings.Contains(body, "web-1") || !strings.Contains(body, `"app":"web"`) {
+		t.Errorf("identity fields lost: %s", body)
+	}
+}
+
+func TestServiceDetailsHandler_LiftsSelectorAndPortsFromSpec(t *testing.T) {
+	// End-to-end pin for iteration 77: get_service_details must
+	// lift spec.selector → service_selector and spec.ports →
+	// service_ports, and strip the full service_spec.
+	c, cleanup := newBrokerWithJSON(t, `{
+		"svc_name":"web",
+		"svc_namespace":"prod",
+		"svc_ip":"10.96.0.42",
+		"service_spec":{
+			"spec":{
+				"selector":{"app":"web"},
+				"ports":[{"port":80,"protocol":"TCP"}],
+				"type":"ClusterIP",
+				"sessionAffinity":"None"
+			},
+			"status":{"loadBalancer":{}}
+		}
+	}`)
+	defer cleanup()
+	h := ServiceDetailsHandler{client: c}
+	res, _, _ := h.Call(context.Background(), nil, ServiceDetailsInput{IP: "10.96.0.42"})
+	if res.IsError {
+		t.Fatalf("unexpected error: %s", textOf(t, res))
+	}
+	body := textOf(t, res)
+	if strings.Contains(body, "service_spec") {
+		t.Errorf("service_spec wrapper must be stripped; got: %s", body)
+	}
+	if !strings.Contains(body, "service_selector") {
+		t.Errorf("service_selector must be lifted to top-level; got: %s", body)
+	}
+	if !strings.Contains(body, "service_ports") {
+		t.Errorf("service_ports must be lifted to top-level; got: %s", body)
+	}
+	// Fluff stripped:
+	for _, fluff := range []string{`"type"`, `"sessionAffinity"`, `"loadBalancer"`} {
+		if strings.Contains(body, fluff) {
+			t.Errorf("service-spec fluff %s leaked through; got: %s", fluff, body)
+		}
+	}
+}
+
 func TestNetworkTrafficHandler_EmptyPodNameRejected(t *testing.T) {
 	c := NewBrokerClient("http://broker-must-not-be-called.invalid")
 	h := NetworkTrafficHandler{client: c}
