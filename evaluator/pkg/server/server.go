@@ -132,7 +132,13 @@ func (s *Server) handleEvaluate(w http.ResponseWriter, r *http.Request) {
 		policies = append(policies, s.store.PoliciesInNamespace(flow.SrcPodNamespace)...)
 	}
 
-	var results []matcher.Result
+	// Initialize as a non-nil empty slice so that JSON encoding produces
+	// `"results":[]` rather than `"results":null` when no policies match
+	// the flow (no AuditNetworkPolicy in either namespace AND no
+	// AuditClusterNetworkPolicy that returns at least NotApplicable).
+	// The broker deserialises results into Vec<VerdictResult>, which
+	// rejects null but accepts an empty array.
+	results := make([]matcher.Result, 0)
 	for _, p := range policies {
 		results = append(results, matcher.Match(flow, p, s.store)...)
 	}

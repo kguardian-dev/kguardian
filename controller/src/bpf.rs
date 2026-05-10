@@ -8,9 +8,23 @@ use libbpf_rs::skel::{OpenSkel, Skel, SkelBuilder};
 use libbpf_rs::{MapCore, MapFlags, RingBufferBuilder};
 use std::mem::MaybeUninit;
 use std::net::Ipv4Addr;
+use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::sync::mpsc::{Receiver, Sender};
 use tokio::{task, task::JoinHandle};
-use tracing::info;
+use tracing::{info, warn};
+
+// Each ring-buffer callback runs on the libbpf-rs poll thread, which is
+// inside a `task::spawn_blocking` and therefore not cancelable by Tokio.
+// If the corresponding mpsc receiver is dropped (e.g. its task in
+// `try_join!` got cancelled because a sister task errored), every
+// subsequent eBPF event would log a "(receiver closed)" line, flooding
+// stderr at syscall frequency. Latch the first failure per channel,
+// log it loudly via the structured logger, then drop subsequent events
+// silently — the operator still sees the signal once and the logs stay
+// readable.
+static NETWORK_SEND_FAILED: AtomicBool = AtomicBool::new(false);
+static SYSCALL_SEND_FAILED: AtomicBool = AtomicBool::new(false);
+static POLICY_DROP_SEND_FAILED: AtomicBool = AtomicBool::new(false);
 
 /// Populate the syscall allowlist with security-relevant syscalls
 /// This dramatically reduces overhead by filtering out noisy syscalls
@@ -179,7 +193,9 @@ pub fn ebpf_handle(
                     unsafe { *(data.as_ptr() as *const NetworkEventData) };
 
                 if let Err(e) = network_event_sender.blocking_send(network_event_data) {
-                    eprintln!("Failed to send network event (receiver closed): {:?}", e);
+                    if !NETWORK_SEND_FAILED.swap(true, Ordering::Relaxed) {
+                        warn!(error = ?e, "network event channel closed; subsequent events will be dropped silently");
+                    }
                 }
                 0 // Return 0 for success
             })
@@ -201,7 +217,9 @@ pub fn ebpf_handle(
                 let syscall_event_data: SyscallEventData =
                     unsafe { *(data.as_ptr() as *const SyscallEventData) };
                 if let Err(e) = syscall_event_sender.blocking_send(syscall_event_data) {
-                    eprintln!("Failed to send syscall event (receiver closed): {:?}", e);
+                    if !SYSCALL_SEND_FAILED.swap(true, Ordering::Relaxed) {
+                        warn!(error = ?e, "syscall event channel closed; subsequent events will be dropped silently");
+                    }
                 }
                 0 // Return 0 for success
             })
@@ -225,10 +243,9 @@ pub fn ebpf_handle(
                     let policy_drop_event: PolicyDropEvent =
                         unsafe { *(data.as_ptr() as *const PolicyDropEvent) };
                     if let Err(e) = netpolicy_drop_sender.blocking_send(policy_drop_event) {
-                        eprintln!(
-                            "Failed to send network policy drop event (receiver closed): {:?}",
-                            e
-                        );
+                        if !POLICY_DROP_SEND_FAILED.swap(true, Ordering::Relaxed) {
+                            warn!(error = ?e, "network policy drop event channel closed; subsequent events will be dropped silently");
+                        }
                     }
                     0 // Return 0 for success
                 },
