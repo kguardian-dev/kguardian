@@ -45,6 +45,15 @@ var seccompCmd = &cobra.Command{
 		config.OutputDir = outputDir
 		log.Debug().Msgf("Using output directory: %s", outputDir)
 
+		// Build + validate the profile options. Pre-fix the CLI flag
+		// for --default-action was a no-op (the generator hardcoded
+		// SCMP_ACT_ERRNO); now it threads through and is rejected
+		// with a clear error if the value isn't on the whitelist.
+		profileOpts, err := k8s.NewProfileOptions(config, defaultAction)
+		if err != nil {
+			log.Fatal().Err(err).Msg("Invalid seccomp profile options")
+		}
+
 		// Get the namespace from kubeConfigFlags
 		namespace, _, err := kubeConfigFlags.ToRawKubeConfigLoader().Namespace()
 		if err != nil {
@@ -80,7 +89,7 @@ var seccompCmd = &cobra.Command{
 		log.Debug().Msg("Port forwarding set up successfully.")
 
 		// Generate seccomp profiles
-		k8s.GenerateSeccompProfile(options, config)
+		k8s.GenerateSeccompProfile(options, config, profileOpts)
 		close(stopChan)
 	},
 }

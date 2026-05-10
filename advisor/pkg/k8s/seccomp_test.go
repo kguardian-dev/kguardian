@@ -13,6 +13,47 @@ import (
 // loaded by Docker/CRI-O but produce an unusable result (most likely
 // blocking everything because no allow-list rule exists).
 
+func TestNewProfileOptions_AcceptsWhitelistedActions(t *testing.T) {
+	// All three values from the cobra help text must round-trip.
+	for _, action := range []string{"SCMP_ACT_ERRNO", "SCMP_ACT_KILL", "SCMP_ACT_LOG"} {
+		got, err := NewProfileOptions(&Config{OutputDir: "/tmp/x"}, action)
+		assert.NoError(t, err, "action=%s", action)
+		assert.Equal(t, action, got.DefaultAction, "DefaultAction must thread through")
+		assert.Equal(t, "/tmp/x", got.OutputDir, "OutputDir must thread through from Config")
+	}
+}
+
+func TestNewProfileOptions_RejectsUnknownAction(t *testing.T) {
+	// Pre-fix the --default-action flag was a no-op — now it errors
+	// loudly when the value isnt recognised. The error message must
+	// list both the offending value and the accepted whitelist so the
+	// operator doesnt have to consult docs.
+	for _, bad := range []string{"", "SCMP_ACT_ALLOW", "SCMP_ACT_KILL_PROCESS", "errno", "scmp_act_kill"} {
+		t.Run(bad, func(t *testing.T) {
+			_, err := NewProfileOptions(&Config{}, bad)
+			assert.Error(t, err)
+			if err != nil {
+				assert.Contains(t, err.Error(), bad, "error must echo the bad value")
+				assert.Contains(t, err.Error(), "SCMP_ACT_ERRNO", "error must list accepted values")
+			}
+		})
+	}
+}
+
+func TestNewProfileOptions_FallsBackToDefaultDirWhenConfigEmpty(t *testing.T) {
+	// A nil/empty Config.OutputDir means the user didn't pass
+	// --output-dir; preserve the historical default of
+	// "seccomp-profiles" so previously-written shell scripts keep
+	// working without any flag.
+	got, err := NewProfileOptions(&Config{}, "SCMP_ACT_ERRNO")
+	assert.NoError(t, err)
+	assert.Equal(t, "seccomp-profiles", got.OutputDir)
+
+	gotNil, err := NewProfileOptions(nil, "SCMP_ACT_ERRNO")
+	assert.NoError(t, err)
+	assert.Equal(t, "seccomp-profiles", gotNil.OutputDir, "nil Config must not panic + still default")
+}
+
 func TestValidateProfile_Valid(t *testing.T) {
 	p := SeccompProfile{
 		DefaultAction: "SCMP_ACT_ERRNO",

@@ -30,17 +30,55 @@ type ProfileOptions struct {
 	Architectures []string
 }
 
-func GenerateSeccompProfile(options GenerateOptions, config *Config) {
+// ValidSeccompActions is the whitelist of `defaultAction` values
+// accepted by the CLI. Matches the help text the cobra flag advertises;
+// expand cautiously — operators rely on the documented value being
+// what the generated profile actually emits.
+var ValidSeccompActions = []string{"SCMP_ACT_ERRNO", "SCMP_ACT_KILL", "SCMP_ACT_LOG"}
+
+// NewProfileOptions constructs ProfileOptions from CLI input. A
+// previous version of GenerateSeccompProfile hardcoded both OutputDir
+// and DefaultAction inside the function, silently ignoring the
+// equivalent CLI flags. This constructor is the seam that wires both
+// through and validates DefaultAction against the documented set.
+func NewProfileOptions(config *Config, defaultAction string) (ProfileOptions, error) {
+	valid := false
+	for _, v := range ValidSeccompActions {
+		if v == defaultAction {
+			valid = true
+			break
+		}
+	}
+	if !valid {
+		return ProfileOptions{}, fmt.Errorf(
+			"invalid default action %q; must be one of %v",
+			defaultAction, ValidSeccompActions,
+		)
+	}
+	outputDir := "seccomp-profiles"
+	if config != nil && config.OutputDir != "" {
+		outputDir = config.OutputDir
+	}
+	return ProfileOptions{
+		OutputDir:     outputDir,
+		DefaultAction: defaultAction,
+	}, nil
+}
+
+func GenerateSeccompProfile(options GenerateOptions, config *Config, profileOpts ProfileOptions) {
 
 	var Architectures = map[string][]string{
 		"x86_64": {"SCMP_ARCH_X86_64"},
 		"ARM64":  {"SCMP_ARCH_ARM64"},
 	}
 
-	// Default profile options
-	profileOpts := ProfileOptions{
-		OutputDir:     "seccomp-profiles",
-		DefaultAction: "SCMP_ACT_ERRNO",
+	// Defensive defaults so a caller passing the zero ProfileOptions
+	// (e.g. in a test) still produces a syntactically-valid profile.
+	if profileOpts.OutputDir == "" {
+		profileOpts.OutputDir = "seccomp-profiles"
+	}
+	if profileOpts.DefaultAction == "" {
+		profileOpts.DefaultAction = "SCMP_ACT_ERRNO"
 	}
 
 	// Fetch pods based on options
