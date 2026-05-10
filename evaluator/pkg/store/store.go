@@ -305,6 +305,19 @@ func (s *Store) GetPod(namespace, name string) *corev1.Pod {
 }
 
 // GetNamespaceLabels implements matcher.NamespaceLookup.
+//
+// Contract:
+//   - nil  → namespace UNKNOWN to the cache (informer hasn't seen it)
+//   - {}   → namespace exists but has no labels
+//   - {…}  → namespace exists with the given labels
+//
+// Distinguishing the two non-nil cases matters: the matcher reads nil
+// as "can't evaluate" (returns NotApplicable), but a namespace that
+// genuinely has no labels must still be matchable by an empty
+// namespaceSelector ({}, "match all"). A nil-vs-empty conflation here
+// silently breaks AuditClusterNetworkPolicies with `namespaceSelector: {}`
+// against any default-labelled namespace — many production namespaces
+// fall into that bucket.
 func (s *Store) GetNamespaceLabels(name string) map[string]string {
 	if name == "" {
 		return nil
@@ -316,6 +329,11 @@ func (s *Store) GetNamespaceLabels(name string) map[string]string {
 	ns, ok := obj.(*corev1.Namespace)
 	if !ok {
 		return nil
+	}
+	if ns.Labels == nil {
+		// Known but unlabelled — return an empty (not nil) map so the
+		// matcher distinguishes "exists with no labels" from "unknown".
+		return map[string]string{}
 	}
 	return ns.Labels
 }

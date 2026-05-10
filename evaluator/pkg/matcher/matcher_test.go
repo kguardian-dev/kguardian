@@ -838,6 +838,70 @@ func TestMatchCluster_NilSelectorMatchesAll(t *testing.T) {
 	}
 }
 
+func TestMatchCluster_EmptyNamespaceSelectorMatchesUnlabelledNamespace(t *testing.T) {
+	// Regression for the nil-vs-empty conflation: an
+	// AuditClusterNetworkPolicy with namespaceSelector: {} (an EXPLICIT
+	// empty selector — the "match all namespaces" idiom) must match a
+	// known-but-unlabelled namespace. The Lookup contract is:
+	//   nil → namespace UNKNOWN
+	//   {}  → namespace exists with no labels
+	// If the matcher reads {} as nil it short-circuits to NotApplicable
+	// — silently breaking every cluster policy that uses the empty
+	// selector against any default-created namespace.
+	lookup := newLookup()
+	lookup.addPod("default", "web-1", map[string]string{"app": "web"})
+	// Explicitly seed an empty (not nil) labels map for "default".
+	lookup.addNamespace("default", map[string]string{})
+
+	emptySel := metav1.LabelSelector{} // {} — match everything
+	cp := &v1alpha1.AuditClusterNetworkPolicy{
+		ObjectMeta: metav1.ObjectMeta{Name: "match-all-deny"},
+		Spec: v1alpha1.ClusterNetworkPolicySpec{
+			NamespaceSelector: &emptySel,
+			PodSelector:       selectMatchLabels(map[string]string{"app": "web"}),
+		},
+	}
+	flow := Flow{
+		DstPodNamespace: "default", DstPodName: "web-1",
+		DstPort: 8080, Protocol: ProtocolTCP,
+	}
+	got := MatchCluster(flow, cp, lookup)
+	if len(got) != 1 {
+		t.Fatalf("expected 1 result, got %#v", got)
+	}
+	if got[0].Verdict != VerdictWouldDeny {
+		t.Errorf("empty namespaceSelector + unlabelled namespace must match (WouldDeny here, no rules); got %s", got[0].Verdict)
+	}
+}
+
+func TestMatchCluster_NilNamespaceLookupIsNotApplicable(t *testing.T) {
+	// Counterpart to the empty-namespace test: when the namespace is
+	// truly unknown to the cache (Lookup returns nil), the matcher
+	// must NOT pretend it matches an empty namespaceSelector.
+	// Returning NotApplicable is the safe default — the alternative
+	// would be over-matching during informer warmup.
+	lookup := newLookup()
+	lookup.addPod("default", "web-1", map[string]string{"app": "web"})
+	// NOTE: deliberately do NOT seed "default" in namespaces.
+
+	emptySel := metav1.LabelSelector{}
+	cp := &v1alpha1.AuditClusterNetworkPolicy{
+		ObjectMeta: metav1.ObjectMeta{Name: "match-all-deny"},
+		Spec: v1alpha1.ClusterNetworkPolicySpec{
+			NamespaceSelector: &emptySel,
+			PodSelector:       selectMatchLabels(map[string]string{"app": "web"}),
+		},
+	}
+	flow := Flow{
+		DstPodNamespace: "default", DstPodName: "web-1",
+		DstPort: 8080, Protocol: ProtocolTCP,
+	}
+	got := MatchCluster(flow, cp, lookup)
+	if len(got) != 1 || got[0].Verdict != VerdictNotApplicable {
+		t.Fatalf("unknown namespace must yield NotApplicable, got %#v", got)
+	}
+}
+
 func TestMatch_NamedPortMismatchOnPort(t *testing.T) {
 	// Container declares "http"=8080; flow hits 9090 — should not match.
 	lookup := newLookup()

@@ -262,6 +262,34 @@ func TestGetNamespaceLabels_EmptyNameReturnsNil(t *testing.T) {
 	}
 }
 
+func TestGetNamespaceLabels_KnownButUnlabelled(t *testing.T) {
+	// Default-created namespaces (kubectl create namespace foo with no
+	// --labels) end up with ns.Labels == nil. The matcher uses nil to
+	// mean "namespace UNKNOWN" and would short-circuit to NotApplicable
+	// — wrong: the namespace is known, just unlabelled. An empty
+	// namespaceSelector ({}, "match all") must still see this as a
+	// match. The contract: known-but-unlabelled returns a non-nil
+	// empty map, distinguishing it from the truly-unknown nil.
+	s := newTestStoreWithInformers(t)
+	ns := &corev1.Namespace{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "default",
+			// no Labels set → field is nil
+		},
+	}
+	if err := s.nsInformer.GetStore().Add(ns); err != nil {
+		t.Fatalf("seed ns: %v", err)
+	}
+
+	got := s.GetNamespaceLabels("default")
+	if got == nil {
+		t.Fatal("known-but-unlabelled namespace must NOT return nil; nil means unknown")
+	}
+	if len(got) != 0 {
+		t.Errorf("known-but-unlabelled: want empty map, got %#v", got)
+	}
+}
+
 func TestPoliciesInNamespace_SnapshotIsolated(t *testing.T) {
 	// Caller shouldn't be able to mutate the store's internal slice.
 	s := newTestStore()
