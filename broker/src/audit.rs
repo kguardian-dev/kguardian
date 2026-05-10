@@ -248,3 +248,137 @@ impl AuditClient {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Wire-format contract tests for the broker ↔ evaluator boundary.
+    // These lock down the JSON shapes both sides must agree on.
+    // See kguardian-dev/kguardian#880 for the original divergence.
+
+    #[test]
+    fn decodes_empty_results_array() {
+        // Evaluator's `{"results":[]}` must deserialise into an empty Vec.
+        let json = r#"{"results":[]}"#;
+        let resp: EvaluateResponse = serde_json::from_str(json).expect("must decode `[]`");
+        assert!(resp.results.is_empty());
+    }
+
+    #[test]
+    fn decodes_missing_results_field() {
+        // `#[serde(default)]` on the field means a missing key defaults
+        // to an empty Vec. This guards against future evaluator versions
+        // that might omit the field entirely.
+        let json = r#"{}"#;
+        let resp: EvaluateResponse = serde_json::from_str(json).expect("must decode missing field");
+        assert!(resp.results.is_empty());
+    }
+
+    #[test]
+    fn rejects_null_results_field() {
+        // The pre-#880 bug: evaluator emitted `{"results":null}` (Go
+        // nil-slice gotcha) and the broker's Vec<VerdictResult> deser
+        // rejected it, producing the "could not decode evaluator
+        // response" warning spam. If this test ever passes, either
+        // serde changed semantics or someone added a custom deserializer
+        // that silently maps null → empty — both worth scrutinising.
+        let json = r#"{"results":null}"#;
+        let resp: Result<EvaluateResponse, _> = serde_json::from_str(json);
+        assert!(
+            resp.is_err(),
+            "null must fail to decode; got {:?}. Evaluator MUST emit [] for empty results.",
+            resp,
+        );
+    }
+
+    #[test]
+    fn decodes_populated_verdict_result() {
+        // Lock down all field renames (policyNamespace, policyName,
+        // policyUID) and the Allow/WouldDeny verdict strings.
+        let json = r#"{
+            "results": [
+                {
+                    "policyNamespace": "prod",
+                    "policyName": "web-deny",
+                    "policyUID": "uid-abc-123",
+                    "direction": "Ingress",
+                    "verdict": "WouldDeny",
+                    "reason": "policy has no ingress rules — default-deny"
+                },
+                {
+                    "policyNamespace": "",
+                    "policyName": "cluster-baseline-audit",
+                    "policyUID": "uid-cluster-1",
+                    "direction": "Ingress",
+                    "verdict": "Allow",
+                    "reason": ""
+                }
+            ]
+        }"#;
+        let resp: EvaluateResponse = serde_json::from_str(json).expect("must decode");
+        assert_eq!(resp.results.len(), 2);
+
+        assert_eq!(resp.results[0].policy_namespace, "prod");
+        assert_eq!(resp.results[0].policy_name, "web-deny");
+        assert_eq!(resp.results[0].policy_uid, "uid-abc-123");
+        assert_eq!(resp.results[0].direction, "Ingress");
+        assert_eq!(resp.results[0].verdict, "WouldDeny");
+        assert_eq!(
+            resp.results[0].reason,
+            "policy has no ingress rules — default-deny"
+        );
+
+        assert_eq!(resp.results[1].policy_namespace, "");
+        assert_eq!(resp.results[1].verdict, "Allow");
+    }
+
+    #[test]
+    fn decodes_verdict_result_with_optional_fields_omitted() {
+        // policyUID is `#[serde(default)]` (some synthetic test policies
+        // have no UID) and reason is `#[serde(default)]` (only populated
+        // for WouldDeny). Their absence must not break decoding.
+        let json = r#"{
+            "results": [
+                {
+                    "policyNamespace": "prod",
+                    "policyName": "web-allow",
+                    "direction": "Egress",
+                    "verdict": "Allow"
+                }
+            ]
+        }"#;
+        let resp: EvaluateResponse = serde_json::from_str(json).expect("must decode");
+        assert_eq!(resp.results.len(), 1);
+        assert_eq!(resp.results[0].policy_uid, "");
+        assert_eq!(resp.results[0].reason, "");
+    }
+
+    #[test]
+    fn audit_client_disabled_when_evaluator_url_unset() {
+        // Save and restore env for test isolation.
+        let prev = std::env::var("EVALUATOR_URL").ok();
+        std::env::remove_var("EVALUATOR_URL");
+        let client = AuditClient::from_env();
+        assert!(!client.enabled());
+        if let Some(v) = prev {
+            std::env::set_var("EVALUATOR_URL", v);
+        }
+    }
+
+    #[test]
+    fn audit_client_enabled_when_evaluator_url_set() {
+        let prev = std::env::var("EVALUATOR_URL").ok();
+        std::env::set_var("EVALUATOR_URL", "http://evaluator.kguardian.svc:8082");
+        let client = AuditClient::from_env();
+        assert!(client.enabled());
+        assert_eq!(
+            client.base_url(),
+            "http://evaluator.kguardian.svc:8082"
+        );
+        match prev {
+            Some(v) => std::env::set_var("EVALUATOR_URL", v),
+            None => std::env::remove_var("EVALUATOR_URL"),
+        }
+    }
+}
