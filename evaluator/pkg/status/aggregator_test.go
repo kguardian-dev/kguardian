@@ -1,9 +1,19 @@
 package status
 
 import (
+	"context"
 	"encoding/json"
+	"io"
 	"testing"
 	"time"
+
+	v1alpha1 "github.com/kguardian-dev/kguardian/evaluator/pkg/v1alpha1"
+	"github.com/sirupsen/logrus"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+	clienttesting "k8s.io/client-go/testing"
+	dynamicfake "k8s.io/client-go/dynamic/fake"
 )
 
 func TestRecord_NotApplicableNotCounted(t *testing.T) {
@@ -57,6 +67,169 @@ func TestTopOffenders_ZeroNYieldsNil(t *testing.T) {
 	if got := topOffenders(tuples, 0); got != nil {
 		t.Errorf("expected nil for n=0, got %d entries", len(got))
 	}
+}
+
+func TestNew_Defaults(t *testing.T) {
+	scheme := runtime.NewScheme()
+	dyn := dynamicfake.NewSimpleDynamicClient(scheme)
+	a := New(dyn, logrus.New())
+
+	if a.topN != 25 {
+		t.Errorf("default topN: want 25, got %d", a.topN)
+	}
+	if a.period != 30*time.Second {
+		t.Errorf("default period: want 30s, got %s", a.period)
+	}
+	if a.counts == nil {
+		t.Error("counts map must be initialised, not nil")
+	}
+	wantNs := schema.GroupVersionResource{
+		Group: v1alpha1.GroupName, Version: v1alpha1.Version, Resource: "auditnetworkpolicies",
+	}
+	if a.gvr != wantNs {
+		t.Errorf("namespaced GVR: want %v, got %v", wantNs, a.gvr)
+	}
+	wantCluster := schema.GroupVersionResource{
+		Group: v1alpha1.GroupName, Version: v1alpha1.Version, Resource: "auditclusternetworkpolicies",
+	}
+	if a.clusterGVR != wantCluster {
+		t.Errorf("cluster GVR: want %v, got %v", wantCluster, a.clusterGVR)
+	}
+}
+
+func TestSetters(t *testing.T) {
+	a := &Aggregator{counts: map[policyKey]*policyAgg{}}
+	a.SetPeriod(2 * time.Minute)
+	a.SetTopN(10)
+	if a.period != 2*time.Minute {
+		t.Errorf("SetPeriod: want 2m, got %s", a.period)
+	}
+	if a.topN != 10 {
+		t.Errorf("SetTopN: want 10, got %d", a.topN)
+	}
+}
+
+// fakeDynamicClient builds a dynamic client with the AuditNetworkPolicy
+// GVRs registered so Patch() against the status subresource works.
+func fakeDynamicClient() *dynamicfake.FakeDynamicClient {
+	scheme := runtime.NewScheme()
+	gvrToListKind := map[schema.GroupVersionResource]string{
+		{Group: v1alpha1.GroupName, Version: v1alpha1.Version, Resource: "auditnetworkpolicies"}:        "AuditNetworkPolicyList",
+		{Group: v1alpha1.GroupName, Version: v1alpha1.Version, Resource: "auditclusternetworkpolicies"}: "AuditClusterNetworkPolicyList",
+	}
+	return dynamicfake.NewSimpleDynamicClientWithCustomListKinds(scheme, gvrToListKind)
+}
+
+func TestFlush_EmptyCountsMakesNoCalls(t *testing.T) {
+	dyn := fakeDynamicClient()
+	a := New(dyn, quietLog())
+	a.flush(context.Background())
+	if got := len(dyn.Actions()); got != 0 {
+		t.Errorf("expected zero API actions for empty counts, got %d: %v", got, dyn.Actions())
+	}
+}
+
+func TestFlush_PatchesNamespacedPolicy(t *testing.T) {
+	// Pre-create the AuditNetworkPolicy so the fake client knows the
+	// object to patch (the fake returns NotFound otherwise, which the
+	// real flow would log+continue, but we want the action recorded).
+	gvr := schema.GroupVersionResource{
+		Group: v1alpha1.GroupName, Version: v1alpha1.Version, Resource: "auditnetworkpolicies",
+	}
+	policy := &unstructured.Unstructured{}
+	policy.SetGroupVersionKind(schema.GroupVersionKind{
+		Group: v1alpha1.GroupName, Version: v1alpha1.Version, Kind: "AuditNetworkPolicy",
+	})
+	policy.SetNamespace("prod")
+	policy.SetName("web-deny")
+
+	scheme := runtime.NewScheme()
+	gvrToListKind := map[schema.GroupVersionResource]string{
+		gvr: "AuditNetworkPolicyList",
+		{Group: v1alpha1.GroupName, Version: v1alpha1.Version, Resource: "auditclusternetworkpolicies"}: "AuditClusterNetworkPolicyList",
+	}
+	dyn := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(scheme, gvrToListKind, policy)
+
+	a := New(dyn, quietLog())
+	a.Record("prod", "web-deny", "prod/client-a", "prod/web-1", "TCP", "Ingress", 8080, true)
+	a.flush(context.Background())
+
+	var sawPatch *clienttesting.PatchActionImpl
+	for _, action := range dyn.Actions() {
+		if patch, ok := action.(clienttesting.PatchActionImpl); ok {
+			if patch.GetNamespace() == "prod" && patch.GetName() == "web-deny" && patch.GetSubresource() == "status" {
+				sawPatch = &patch
+				break
+			}
+		}
+	}
+	if sawPatch == nil {
+		t.Fatalf("expected a status Patch on prod/web-deny; actions=%v", dyn.Actions())
+	}
+
+	var body map[string]any
+	if err := json.Unmarshal(sawPatch.GetPatch(), &body); err != nil {
+		t.Fatalf("unmarshal patch body: %v", err)
+	}
+	st, ok := body["status"].(map[string]any)
+	if !ok {
+		t.Fatalf("patch body missing status: %s", sawPatch.GetPatch())
+	}
+	eval, ok := st["evaluation"].(map[string]any)
+	if !ok {
+		t.Fatalf("status missing evaluation: %v", st)
+	}
+	if got := eval["flowsEvaluated"]; got != float64(1) {
+		t.Errorf("flowsEvaluated: want 1, got %v", got)
+	}
+	if got := eval["flowsWouldDeny"]; got != float64(1) {
+		t.Errorf("flowsWouldDeny: want 1, got %v", got)
+	}
+}
+
+func TestFlush_RoutesClusterPolicyToClusterGVR(t *testing.T) {
+	// Cluster-scoped: namespace == "". Must hit clusterGVR path, not
+	// the namespaced GVR.
+	clusterGVR := schema.GroupVersionResource{
+		Group: v1alpha1.GroupName, Version: v1alpha1.Version, Resource: "auditclusternetworkpolicies",
+	}
+	cluster := &unstructured.Unstructured{}
+	cluster.SetGroupVersionKind(schema.GroupVersionKind{
+		Group: v1alpha1.GroupName, Version: v1alpha1.Version, Kind: "AuditClusterNetworkPolicy",
+	})
+	cluster.SetName("cluster-baseline-audit")
+
+	scheme := runtime.NewScheme()
+	gvrToListKind := map[schema.GroupVersionResource]string{
+		{Group: v1alpha1.GroupName, Version: v1alpha1.Version, Resource: "auditnetworkpolicies"}: "AuditNetworkPolicyList",
+		clusterGVR: "AuditClusterNetworkPolicyList",
+	}
+	dyn := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(scheme, gvrToListKind, cluster)
+
+	a := New(dyn, quietLog())
+	a.Record("", "cluster-baseline-audit", "/", "prod/web-1", "TCP", "Ingress", 80, true)
+	a.flush(context.Background())
+
+	var sawClusterPatch bool
+	for _, action := range dyn.Actions() {
+		if patch, ok := action.(clienttesting.PatchActionImpl); ok {
+			if patch.GetResource().Resource == "auditclusternetworkpolicies" &&
+				patch.GetNamespace() == "" &&
+				patch.GetName() == "cluster-baseline-audit" {
+				sawClusterPatch = true
+				break
+			}
+		}
+	}
+	if !sawClusterPatch {
+		t.Errorf("expected cluster-scoped patch on cluster-baseline-audit; actions=%v", dyn.Actions())
+	}
+}
+
+func quietLog() *logrus.Logger {
+	l := logrus.New()
+	l.SetOutput(io.Discard)
+	return l
 }
 
 func TestPatchStatus_BodyShape(t *testing.T) {
