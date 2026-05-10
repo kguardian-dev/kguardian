@@ -104,6 +104,36 @@ func compactTrafficSummary(data interface{}) map[string]interface{} {
 	}
 }
 
+// filterAlivePods drops pod records with is_dead=true. The brokers
+// /pod/info endpoint returns every pod_details row regardless of
+// liveness — so a cluster that has churned through pod restarts
+// over time accumulates a long tail of dead rows that the LLM has
+// to skip past. For "list pods" use cases (the LLMs only entry
+// point via cluster_pods), live-only is the sensible default.
+//
+// is_dead absent or non-bool is treated as alive (defensive: a
+// malformed row should not be silently dropped just because the
+// flag is missing).
+func filterAlivePods(data interface{}) interface{} {
+	items, ok := data.([]interface{})
+	if !ok {
+		return data
+	}
+	out := make([]interface{}, 0, len(items))
+	for _, item := range items {
+		m, ok := item.(map[string]interface{})
+		if !ok {
+			out = append(out, item)
+			continue
+		}
+		if dead, ok := m["is_dead"].(bool); ok && dead {
+			continue
+		}
+		out = append(out, item)
+	}
+	return out
+}
+
 // compactPodsSummary strips heavyweight fields (pod_obj, service_spec) from
 // pod records, keeping only the lightweight identity columns that the LLM
 // actually reasons about.

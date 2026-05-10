@@ -245,6 +245,56 @@ func TestCompactTrafficSummary_SkipsRecordsWithoutPodName(t *testing.T) {
 	}
 }
 
+func TestFilterAlivePods_DropsDeadOnly(t *testing.T) {
+	// /pod/info returns every pod_details row; the LLMs list-pods
+	// tool wants only the live ones. Pin: alive rows pass through,
+	// is_dead=true rows are dropped.
+	in := []interface{}{
+		map[string]interface{}{"pod_name": "alive-1", "is_dead": false},
+		map[string]interface{}{"pod_name": "dead-1", "is_dead": true},
+		map[string]interface{}{"pod_name": "alive-2", "is_dead": false},
+		map[string]interface{}{"pod_name": "dead-2", "is_dead": true},
+	}
+	got := filterAlivePods(in).([]interface{})
+	if len(got) != 2 {
+		t.Fatalf("want 2 alive, got %d", len(got))
+	}
+	names := map[string]bool{}
+	for _, item := range got {
+		names[item.(map[string]interface{})["pod_name"].(string)] = true
+	}
+	if !names["alive-1"] || !names["alive-2"] {
+		t.Errorf("expected alive-1 and alive-2; got %#v", names)
+	}
+	if names["dead-1"] || names["dead-2"] {
+		t.Errorf("dead pods leaked through: %#v", names)
+	}
+}
+
+func TestFilterAlivePods_MissingIsDeadTreatedAsAlive(t *testing.T) {
+	// Defensive: a malformed row missing is_dead should be kept,
+	// not silently dropped. The flag default is "alive" until
+	// proven otherwise — the mark_dead RPC explicitly sets is_dead
+	// to true, so its absence means "never been marked dead".
+	in := []interface{}{
+		map[string]interface{}{"pod_name": "no-flag"},
+		map[string]interface{}{"pod_name": "explicit-alive", "is_dead": false},
+		map[string]interface{}{"pod_name": "wrong-type", "is_dead": "false"}, // string, not bool
+	}
+	got := filterAlivePods(in).([]interface{})
+	if len(got) != 3 {
+		t.Errorf("missing or non-bool is_dead must be kept; got %d entries", len(got))
+	}
+}
+
+func TestFilterAlivePods_NonSlicePassthrough(t *testing.T) {
+	obj := map[string]interface{}{"pod_name": "x"}
+	got := filterAlivePods(obj)
+	if !reflect.DeepEqual(got, obj) {
+		t.Errorf("non-slice input must pass through unchanged")
+	}
+}
+
 func TestCompactPodsSummary_StripsHeavyweightFields(t *testing.T) {
 	// Field names match the brokers actual wire format (serde
 	// emission of the Rust PodDetail struct — snake_case). The test

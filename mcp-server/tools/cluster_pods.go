@@ -50,8 +50,16 @@ func (h ClusterPodsHandler) Call(
 	// Apply namespace filter if specified
 	filtered := filterByNamespace(data, input.Namespace)
 
+	// Drop dead pods. /pod/info returns every pod_details row
+	// regardless of liveness; the LLM's "list pods" use case wants
+	// the live ones, not a long tail of restarted-and-gone
+	// historical entries. Operators who genuinely need dead pods
+	// can ask the broker directly — the MCP tool deliberately
+	// scopes to the LLM's primary use case.
+	alive := filterAlivePods(filtered)
+
 	// Strip heavyweight fields (pod_obj, service_spec)
-	compacted := compactPodsSummary(filtered)
+	compacted := compactPodsSummary(alive)
 
 	jsonData, err := json.Marshal(compacted)
 	if err != nil {
