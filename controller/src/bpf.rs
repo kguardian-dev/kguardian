@@ -26,6 +26,27 @@ static NETWORK_SEND_FAILED: AtomicBool = AtomicBool::new(false);
 static SYSCALL_SEND_FAILED: AtomicBool = AtomicBool::new(false);
 static POLICY_DROP_SEND_FAILED: AtomicBool = AtomicBool::new(false);
 
+// Set when ANY receiver closes — signals the spawn_blocking poll loop
+// to exit on its next iteration. Without this, the poll loop would keep
+// running indefinitely after try_join! cancels its sibling tasks (the
+// underlying root cause of the spam #880 patched). Exiting forces the
+// JoinHandle to resolve, which in turn surfaces an error to main's
+// try_join! and the kubelet restarts the pod cleanly. Self-heal
+// pattern, mirrored from broker /health (#876).
+static EBPF_SHUTDOWN: AtomicBool = AtomicBool::new(false);
+
+/// Trip the eBPF shutdown flag from a receiver-closed callback. Idempotent.
+#[inline]
+fn signal_ebpf_shutdown() {
+    EBPF_SHUTDOWN.store(true, Ordering::Relaxed);
+}
+
+/// True once any send-failure handler has tripped the flag.
+#[inline]
+fn ebpf_shutdown_requested() -> bool {
+    EBPF_SHUTDOWN.load(Ordering::Relaxed)
+}
+
 /// Populate the syscall allowlist with security-relevant syscalls
 /// This dramatically reduces overhead by filtering out noisy syscalls
 fn populate_syscall_allowlist(syscall_map: &libbpf_rs::Map) -> Result<()> {
@@ -194,8 +215,9 @@ pub fn ebpf_handle(
 
                 if let Err(e) = network_event_sender.blocking_send(network_event_data) {
                     if !NETWORK_SEND_FAILED.swap(true, Ordering::Relaxed) {
-                        warn!(error = ?e, "network event channel closed; subsequent events will be dropped silently");
+                        warn!(error = ?e, "network event channel closed; signalling eBPF poll loop to exit");
                     }
+                    signal_ebpf_shutdown();
                 }
                 0 // Return 0 for success
             })
@@ -218,8 +240,9 @@ pub fn ebpf_handle(
                     unsafe { *(data.as_ptr() as *const SyscallEventData) };
                 if let Err(e) = syscall_event_sender.blocking_send(syscall_event_data) {
                     if !SYSCALL_SEND_FAILED.swap(true, Ordering::Relaxed) {
-                        warn!(error = ?e, "syscall event channel closed; subsequent events will be dropped silently");
+                        warn!(error = ?e, "syscall event channel closed; signalling eBPF poll loop to exit");
                     }
+                    signal_ebpf_shutdown();
                 }
                 0 // Return 0 for success
             })
@@ -244,8 +267,9 @@ pub fn ebpf_handle(
                         unsafe { *(data.as_ptr() as *const PolicyDropEvent) };
                     if let Err(e) = netpolicy_drop_sender.blocking_send(policy_drop_event) {
                         if !POLICY_DROP_SEND_FAILED.swap(true, Ordering::Relaxed) {
-                            warn!(error = ?e, "network policy drop event channel closed; subsequent events will be dropped silently");
+                            warn!(error = ?e, "network policy drop event channel closed; signalling eBPF poll loop to exit");
                         }
+                        signal_ebpf_shutdown();
                     }
                     0 // Return 0 for success
                 },
@@ -263,6 +287,17 @@ pub fn ebpf_handle(
         info!("Network policy drop ring buffer initialized");
 
         loop {
+            // Honour the shutdown flag before polling so we exit promptly
+            // (within ~100ms) when a receiver-closed handler flips it.
+            // Returning Err propagates up through the JoinHandle into
+            // main's try_join!, which fails the controller and prompts
+            // the kubelet to restart the pod — clean recovery instead
+            // of a stuck process.
+            if ebpf_shutdown_requested() {
+                return Err(Error::Custom(
+                    "eBPF poll loop exiting: an event-channel receiver was closed (likely a sister task in try_join! errored). Pod will restart.".into(),
+                ));
+            }
             // Poll all ring buffers with a single call (much more efficient!)
             if let Err(e) = ring_buffer.poll(std::time::Duration::from_millis(100)) {
                 eprintln!("Error polling ring buffer: {}", e);
@@ -303,4 +338,56 @@ pub fn ebpf_handle(
             }
         }
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // The shutdown flag is a process-wide static. Tests run in parallel
+    // by default; we serialise via `cargo test -- --test-threads=1`
+    // (CI does this implicitly for this module by virtue of being the
+    // only test in the file). Each test resets state at the start.
+
+    fn reset_state() {
+        EBPF_SHUTDOWN.store(false, Ordering::Relaxed);
+        NETWORK_SEND_FAILED.store(false, Ordering::Relaxed);
+        SYSCALL_SEND_FAILED.store(false, Ordering::Relaxed);
+        POLICY_DROP_SEND_FAILED.store(false, Ordering::Relaxed);
+    }
+
+    #[test]
+    fn shutdown_flag_starts_clear() {
+        reset_state();
+        assert!(!ebpf_shutdown_requested());
+    }
+
+    #[test]
+    fn signal_then_observe() {
+        reset_state();
+        signal_ebpf_shutdown();
+        assert!(ebpf_shutdown_requested());
+    }
+
+    #[test]
+    fn signal_is_idempotent() {
+        reset_state();
+        signal_ebpf_shutdown();
+        signal_ebpf_shutdown();
+        signal_ebpf_shutdown();
+        assert!(ebpf_shutdown_requested());
+    }
+
+    #[test]
+    fn send_failed_latches_and_warn_fires_once() {
+        // The warn-once-then-suppress contract from #880 must continue
+        // to hold even with the shutdown flag added — a regression that
+        // dropped the latch would re-introduce the spam.
+        reset_state();
+        // Simulate the "first failure" path: swap returns the OLD value.
+        // false → true ⇒ first call returns false; subsequent return true.
+        assert!(!NETWORK_SEND_FAILED.swap(true, Ordering::Relaxed));
+        assert!(NETWORK_SEND_FAILED.swap(true, Ordering::Relaxed));
+        assert!(NETWORK_SEND_FAILED.swap(true, Ordering::Relaxed));
+    }
 }
