@@ -95,16 +95,6 @@ type ConfigProvider interface {
 	GetOutputDir() string
 }
 
-// TrafficDirection represents the direction of traffic
-type TrafficDirection string
-
-const (
-	// IngressTraffic is incoming traffic
-	IngressTraffic TrafficDirection = "ingress"
-	// EgressTraffic is outgoing traffic
-	EgressTraffic TrafficDirection = "egress"
-)
-
 // GetPolicyName returns a name for the policy
 func GetPolicyName(podName, policyType string) string {
 	return fmt.Sprintf("%s-%s", podName, policyType)
