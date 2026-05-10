@@ -344,3 +344,27 @@ async fn build_policy_drop_event(
 
     Some(drop_event)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn proto_to_string_known_protocols() {
+        // IANA protocol numbers we surface to operators. Drift here
+        // would silently mislabel network-policy drop events.
+        assert_eq!(proto_to_string(6), "TCP");
+        assert_eq!(proto_to_string(17), "UDP");
+        assert_eq!(proto_to_string(1), "ICMP");
+        assert_eq!(proto_to_string(58), "ICMPv6");
+    }
+
+    #[test]
+    fn proto_to_string_unknown_carries_value() {
+        // Unknown protocol numbers must round-trip the value into the
+        // log string so operators can grep for `UNKNOWN(132)` etc.
+        assert_eq!(proto_to_string(132), "UNKNOWN(132)");
+        assert_eq!(proto_to_string(0), "UNKNOWN(0)");
+        assert_eq!(proto_to_string(255), "UNKNOWN(255)");
+    }
+}
