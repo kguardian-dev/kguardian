@@ -369,6 +369,105 @@ func TestMatch_PolicyTypesInferredFromRules(t *testing.T) {
 // ptrSelector helps write peer specs cleanly.
 func ptrSelector(s metav1.LabelSelector) *metav1.LabelSelector { return &s }
 
+func TestPeerIP_DirectionRouting(t *testing.T) {
+	flow := Flow{SrcIP: "10.1.2.3", DstIP: "10.4.5.6"}
+	if got := peerIP(flow, DirectionIngress); got != "10.1.2.3" {
+		t.Errorf("ingress peer is the source; want 10.1.2.3, got %q", got)
+	}
+	if got := peerIP(flow, DirectionEgress); got != "10.4.5.6" {
+		t.Errorf("egress peer is the destination; want 10.4.5.6, got %q", got)
+	}
+	// Defensive: an unrecognised Direction must not panic and must
+	// return empty (which downstream code treats as no-match).
+	if got := peerIP(flow, Direction("Sideways")); got != "" {
+		t.Errorf("unknown direction should yield empty string; got %q", got)
+	}
+}
+
+func TestIpBlockMatches_NilBlock(t *testing.T) {
+	if ipBlockMatches("10.0.0.1", nil) {
+		t.Error("nil IPBlock must never match")
+	}
+}
+
+func TestIpBlockMatches_EmptyIP(t *testing.T) {
+	// An ingress flow with no recorded source IP should not match an
+	// IP-based peer rule. The broker leaves SrcIP unset for many flow
+	// types — relying on the rule to deny is critical.
+	if ipBlockMatches("", &networkingv1.IPBlock{CIDR: "0.0.0.0/0"}) {
+		t.Error("empty IP must never match, even against 0.0.0.0/0")
+	}
+}
+
+func TestIpBlockMatches_UnparseableIP(t *testing.T) {
+	// Garbage in the IP slot must fail closed, not panic.
+	if ipBlockMatches("not-an-ip", &networkingv1.IPBlock{CIDR: "10.0.0.0/8"}) {
+		t.Error("non-IP string must fail closed")
+	}
+}
+
+func TestIpBlockMatches_UnparseableCIDR(t *testing.T) {
+	// Admission validates CIDR shape, but a corrupted policy lookup or
+	// hand-crafted test input shouldn't crash the evaluator.
+	if ipBlockMatches("10.0.0.1", &networkingv1.IPBlock{CIDR: "not-a-cidr"}) {
+		t.Error("unparseable CIDR must yield no-match")
+	}
+}
+
+func TestIpBlockMatches_OutsideCIDR(t *testing.T) {
+	if ipBlockMatches("192.168.0.1", &networkingv1.IPBlock{CIDR: "10.0.0.0/8"}) {
+		t.Error("IP outside CIDR must not match")
+	}
+}
+
+func TestIpBlockMatches_InsideCIDRNoExcept(t *testing.T) {
+	if !ipBlockMatches("10.5.6.7", &networkingv1.IPBlock{CIDR: "10.0.0.0/8"}) {
+		t.Error("IP inside CIDR with no Except must match")
+	}
+}
+
+func TestIpBlockMatches_ExceptOverridesAllow(t *testing.T) {
+	block := &networkingv1.IPBlock{
+		CIDR:   "10.0.0.0/8",
+		Except: []string{"10.5.0.0/16"},
+	}
+	if ipBlockMatches("10.5.6.7", block) {
+		t.Error("IP inside Except must not match even though inside CIDR")
+	}
+	if !ipBlockMatches("10.6.6.7", block) {
+		t.Error("IP outside Except, inside CIDR must match")
+	}
+}
+
+func TestIpBlockMatches_ExceptIgnoresInvalidEntries(t *testing.T) {
+	// One invalid Except entry shouldn't poison the entire match —
+	// remaining valid ones must still apply, and a clean valid IP in
+	// the CIDR is still considered allowed.
+	block := &networkingv1.IPBlock{
+		CIDR: "10.0.0.0/8",
+		Except: []string{
+			"garbage-cidr",      // invalid → skipped
+			"10.5.0.0/16",       // valid    → excludes
+		},
+	}
+	if ipBlockMatches("10.5.6.7", block) {
+		t.Error("valid Except entry should still take effect alongside garbage")
+	}
+	if !ipBlockMatches("10.6.6.7", block) {
+		t.Error("IP outside the valid Except remains allowed")
+	}
+}
+
+func TestIpBlockMatches_IPv6(t *testing.T) {
+	block := &networkingv1.IPBlock{CIDR: "2001:db8::/32"}
+	if !ipBlockMatches("2001:db8:1::1", block) {
+		t.Error("IPv6 inside CIDR must match")
+	}
+	if ipBlockMatches("2001:dead::1", block) {
+		t.Error("IPv6 outside CIDR must not match")
+	}
+}
+
 func TestMatch_IPBlockAllow(t *testing.T) {
 	lookup := newLookup()
 	lookup.addPod("prod", "web-1", map[string]string{"app": "web"})
