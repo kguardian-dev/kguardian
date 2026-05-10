@@ -26,11 +26,23 @@ async fn main() -> Result<(), Error> {
 
     init_logger();
 
+    // Trim whitespace from required URL/identity env vars. Common
+    // operator pastes embed a trailing newline or surrounding spaces;
+    // pre-trim defends every downstream consumer instead of forcing
+    // each (api_post_call, the reconciler, the pod_watcher, etc.) to
+    // remember the same hardening. An empty-after-trim value still
+    // counts as "not set" → clear error message.
     let node_name = env::var("CURRENT_NODE")
-        .map_err(|_| Error::Custom("CURRENT_NODE environment variable not set".to_string()))?;
+        .map(|s| s.trim().to_string())
+        .ok()
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| Error::Custom("CURRENT_NODE environment variable not set".to_string()))?;
 
     let broker_url = env::var("API_ENDPOINT")
-        .map_err(|_| Error::Custom("API_ENDPOINT environment variable not set".to_string()))?;
+        .map(|s| s.trim().to_string())
+        .ok()
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| Error::Custom("API_ENDPOINT environment variable not set".to_string()))?;
 
     let excluded_namespaces: Vec<String> = kguardian::pod_watcher::parse_excluded_namespaces(
         &env::var("EXCLUDED_NAMESPACES").unwrap_or_else(|_| "kube-system,kguardian".to_string()),
