@@ -567,6 +567,153 @@ func TestMatchCluster_NamespaceSelectorScopes(t *testing.T) {
 	}
 }
 
+func TestMatchCluster_IngressRuleAllow(t *testing.T) {
+	// Cluster policy with an ingress rule that explicitly allows from
+	// pods carrying app=client. Flow from such a client pod → Allow.
+	lookup := newLookup()
+	lookup.addPod("prod", "web-1", map[string]string{"app": "web"})
+	lookup.addPod("prod", "client-1", map[string]string{"app": "client"})
+
+	tcp := corev1.ProtocolTCP
+	port := intstr.FromInt(8080)
+	cp := &v1alpha1.AuditClusterNetworkPolicy{
+		ObjectMeta: metav1.ObjectMeta{Name: "web-allow-clients", UID: "uid-cp-allow"},
+		Spec: v1alpha1.ClusterNetworkPolicySpec{
+			PodSelector: selectMatchLabels(map[string]string{"app": "web"}),
+			PolicyTypes: []networkingv1.PolicyType{networkingv1.PolicyTypeIngress},
+			Ingress: []networkingv1.NetworkPolicyIngressRule{{
+				From: []networkingv1.NetworkPolicyPeer{{
+					PodSelector: ptrSelector(selectMatchLabels(map[string]string{"app": "client"})),
+				}},
+				Ports: []networkingv1.NetworkPolicyPort{{Protocol: &tcp, Port: &port}},
+			}},
+		},
+	}
+
+	flow := Flow{
+		SrcPodNamespace: "prod", SrcPodName: "client-1",
+		DstPodNamespace: "prod", DstPodName: "web-1",
+		DstPort: 8080, Protocol: ProtocolTCP,
+	}
+	got := MatchCluster(flow, cp, lookup)
+	if len(got) != 1 || got[0].Verdict != VerdictAllow {
+		t.Fatalf("expected Allow on ingress rule match, got %#v", got)
+	}
+	if got[0].PolicyUID != "uid-cp-allow" {
+		t.Errorf("expected policyUID propagated, got %q", got[0].PolicyUID)
+	}
+}
+
+func TestMatchCluster_IngressRuleNonMatchYieldsWouldDeny(t *testing.T) {
+	// Same shape as above but the source pod's labels don't match the
+	// rule's peer selector → no rule allows the flow → WouldDeny with a
+	// reason that points at the failed match (not "no rules").
+	lookup := newLookup()
+	lookup.addPod("prod", "web-1", map[string]string{"app": "web"})
+	lookup.addPod("prod", "stranger", map[string]string{"app": "stranger"})
+
+	tcp := corev1.ProtocolTCP
+	port := intstr.FromInt(8080)
+	cp := &v1alpha1.AuditClusterNetworkPolicy{
+		ObjectMeta: metav1.ObjectMeta{Name: "web-allow-clients-only"},
+		Spec: v1alpha1.ClusterNetworkPolicySpec{
+			PodSelector: selectMatchLabels(map[string]string{"app": "web"}),
+			PolicyTypes: []networkingv1.PolicyType{networkingv1.PolicyTypeIngress},
+			Ingress: []networkingv1.NetworkPolicyIngressRule{{
+				From: []networkingv1.NetworkPolicyPeer{{
+					PodSelector: ptrSelector(selectMatchLabels(map[string]string{"app": "client"})),
+				}},
+				Ports: []networkingv1.NetworkPolicyPort{{Protocol: &tcp, Port: &port}},
+			}},
+		},
+	}
+
+	flow := Flow{
+		SrcPodNamespace: "prod", SrcPodName: "stranger",
+		DstPodNamespace: "prod", DstPodName: "web-1",
+		DstPort: 8080, Protocol: ProtocolTCP,
+	}
+	got := MatchCluster(flow, cp, lookup)
+	if len(got) != 1 || got[0].Verdict != VerdictWouldDeny {
+		t.Fatalf("expected WouldDeny on non-matching peer, got %#v", got)
+	}
+	if got[0].Reason == "" {
+		t.Error("expected a non-empty reason for the deny")
+	}
+	if got[0].Reason == "policy has no ingress rules — default-deny" {
+		t.Errorf("expected the rule-mismatch reason, not the no-rules one: got %q", got[0].Reason)
+	}
+}
+
+func TestMatchCluster_EgressRuleAllow(t *testing.T) {
+	// Cluster-scoped egress: subject is the SOURCE pod, peer is the
+	// destination. Allow when destination labels match.
+	lookup := newLookup()
+	lookup.addPod("prod", "web-1", map[string]string{"app": "web"})
+	lookup.addPod("prod", "db-1", map[string]string{"app": "db"})
+
+	tcp := corev1.ProtocolTCP
+	port := intstr.FromInt(5432)
+	cp := &v1alpha1.AuditClusterNetworkPolicy{
+		ObjectMeta: metav1.ObjectMeta{Name: "web-egress-to-db"},
+		Spec: v1alpha1.ClusterNetworkPolicySpec{
+			PodSelector: selectMatchLabels(map[string]string{"app": "web"}),
+			PolicyTypes: []networkingv1.PolicyType{networkingv1.PolicyTypeEgress},
+			Egress: []networkingv1.NetworkPolicyEgressRule{{
+				To: []networkingv1.NetworkPolicyPeer{{
+					PodSelector: ptrSelector(selectMatchLabels(map[string]string{"app": "db"})),
+				}},
+				Ports: []networkingv1.NetworkPolicyPort{{Protocol: &tcp, Port: &port}},
+			}},
+		},
+	}
+
+	flow := Flow{
+		SrcPodNamespace: "prod", SrcPodName: "web-1",
+		DstPodNamespace: "prod", DstPodName: "db-1",
+		DstPort: 5432, Protocol: ProtocolTCP,
+	}
+	got := MatchCluster(flow, cp, lookup)
+	if len(got) != 1 {
+		t.Fatalf("expected 1 result, got %d: %#v", len(got), got)
+	}
+	if got[0].Direction != DirectionEgress {
+		t.Errorf("expected Egress direction, got %s", got[0].Direction)
+	}
+	if got[0].Verdict != VerdictAllow {
+		t.Errorf("expected Allow on egress to allowed peer, got %s reason=%q", got[0].Verdict, got[0].Reason)
+	}
+}
+
+func TestMatchCluster_EgressNoRulesDefaultDeny(t *testing.T) {
+	// Cluster policy listing Egress in policyTypes but with empty
+	// egress rules — every egress flow from the subject should be
+	// WouldDeny with the "no egress rules" reason.
+	lookup := newLookup()
+	lookup.addPod("prod", "web-1", map[string]string{"app": "web"})
+
+	cp := &v1alpha1.AuditClusterNetworkPolicy{
+		ObjectMeta: metav1.ObjectMeta{Name: "web-egress-deny-all"},
+		Spec: v1alpha1.ClusterNetworkPolicySpec{
+			PodSelector: selectMatchLabels(map[string]string{"app": "web"}),
+			PolicyTypes: []networkingv1.PolicyType{networkingv1.PolicyTypeEgress},
+		},
+	}
+
+	flow := Flow{
+		SrcPodNamespace: "prod", SrcPodName: "web-1",
+		DstPodNamespace: "prod", DstPodName: "anywhere",
+		DstPort: 80, Protocol: ProtocolTCP,
+	}
+	got := MatchCluster(flow, cp, lookup)
+	if len(got) != 1 || got[0].Verdict != VerdictWouldDeny {
+		t.Fatalf("expected WouldDeny on egress default-deny, got %#v", got)
+	}
+	if got[0].Reason != "policy has no egress rules — default-deny" {
+		t.Errorf("expected egress-default-deny reason, got %q", got[0].Reason)
+	}
+}
+
 func TestMatchCluster_NilSelectorMatchesAll(t *testing.T) {
 	// nil namespaceSelector → applies to every namespace.
 	lookup := newLookup()
