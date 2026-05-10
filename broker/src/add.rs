@@ -266,12 +266,36 @@ fn mark_pod_as_dead(conn: &mut PgConnection, pod: &str) -> Result<usize, DbError
     Ok(updated)
 }
 
+/// Defense-in-depth predicate matching the controllers
+/// is_routable_cluster_ip. Headless services use the literal string
+/// "None" for clusterIP, which is API-valid but business-invalid for
+/// the brokers svc_ip-keyed table — every headless service would
+/// collide on the same PK row. The controller already filters these
+/// out at the source; this is the brokers backstop for any other
+/// writer (a future tool, a hand-rolled curl, an out-of-band
+/// migration script) that bypasses the controller path.
+pub(crate) fn is_routable_svc_ip(s: &str) -> bool {
+    !s.is_empty() && s != "None"
+}
+
 #[post("/svc/spec")]
 pub async fn add_svc_details(
     pool: web::Data<DbPool>,
     form: web::Json<SvcDetail>,
 ) -> Result<HttpResponse, Error> {
     info!("Insert Service details table");
+    if !is_routable_svc_ip(&form.svc_ip) {
+        // Log at warn so the case is greppable in broker logs but
+        // dont 400 — keeping the response shape preserves caller
+        // idempotency. The controller filters these out at source;
+        // this branch should be unreachable in normal operation.
+        tracing::warn!(
+            svc_ip = %form.svc_ip,
+            svc_name = ?form.svc_name,
+            "skipping svc_details upsert for non-routable cluster IP (headless/ExternalName)"
+        );
+        return Ok(HttpResponse::Ok().json(form.0));
+    }
     let pods = web::block(move || {
         let mut conn = pool.get()?;
         upsert_svc_details(&mut conn, form)
@@ -380,4 +404,46 @@ pub fn create_pod_syscalls(
 
         Ok(())
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // is_routable_svc_ip mirrors the controllers
+    // is_routable_cluster_ip — defence-in-depth at the broker for any
+    // writer that bypasses the controller path. Mirroring the test
+    // shape too so a future divergence between the two predicates
+    // shows up loudly.
+
+    #[test]
+    fn routable_svc_ip_accepts_real_ips() {
+        assert!(is_routable_svc_ip("10.96.0.1"));
+        assert!(is_routable_svc_ip("192.168.1.100"));
+        assert!(is_routable_svc_ip("172.20.0.10"));
+        assert!(is_routable_svc_ip("fd00::1"));
+    }
+
+    #[test]
+    fn routable_svc_ip_rejects_headless_sentinel() {
+        // The bug case: headless services use the literal string
+        // "None" for clusterIP. Without this filter every headless
+        // service would collide on svc_ip="None" in svc_details.
+        assert!(!is_routable_svc_ip("None"));
+    }
+
+    #[test]
+    fn routable_svc_ip_rejects_empty() {
+        // ExternalName services + pre-allocation state.
+        assert!(!is_routable_svc_ip(""));
+    }
+
+    #[test]
+    fn routable_svc_ip_is_case_sensitive_on_none() {
+        // Lowercase variants are malformed input, not the headless
+        // sentinel — let them through here so subsequent validation
+        // (e.g. an inet parse on the postgres side) can flag them.
+        assert!(is_routable_svc_ip("none"));
+        assert!(is_routable_svc_ip("NONE"));
+    }
 }
