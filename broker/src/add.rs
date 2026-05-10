@@ -232,10 +232,18 @@ pub fn upsert_pod_details(
     Ok(w.0)
 }
 
-// New API: Mark pod as dead
+/// Mark-dead request body. `pod_name` is required for backward
+/// compatibility with controllers that haven't been updated yet;
+/// `pod_ip` is preferred when set because it points at the exact
+/// row (pod_details PK = pod_ip). Without pod_ip the broker falls
+/// back to `WHERE pod_name = ...` which marks EVERY historical row
+/// with that name dead — including a live restarted instance reusing
+/// the same name with a new IP.
 #[derive(serde::Deserialize)]
 pub struct MarkDeadRequest {
     pub pod_name: String,
+    #[serde(default)]
+    pub pod_ip: Option<String>,
 }
 
 #[post("/pod/mark_dead")]
@@ -244,9 +252,10 @@ pub async fn mark_pod_dead(
     form: web::Json<MarkDeadRequest>,
 ) -> Result<HttpResponse, Error> {
     debug!("Marking pod {} as dead", form.pod_name);
+    let MarkDeadRequest { pod_name, pod_ip } = form.into_inner();
     let result = web::block(move || {
         let mut conn = pool.get()?;
-        mark_pod_as_dead(&mut conn, &form.pod_name)
+        mark_pod_as_dead(&mut conn, &pod_name, pod_ip.as_deref())
     })
     .await?
     .map_err(actix_web::error::ErrorInternalServerError)?;
@@ -254,15 +263,48 @@ pub async fn mark_pod_dead(
     Ok(HttpResponse::Ok().json(result))
 }
 
-fn mark_pod_as_dead(conn: &mut PgConnection, pod: &str) -> Result<usize, DbError> {
+/// Mark the pod_details row(s) dead. Prefer the precise (pod_ip)
+/// filter; fall back to name-only for legacy callers.
+///
+/// The fallback's blast radius is the real concern: it sets is_dead
+/// on every row with the given name. For a workload that frequently
+/// restarts with the same pod-name (StatefulSets, DaemonSets) this
+/// would mark the live instance dead until the next pod_details
+/// upsert restores it — pollutes audit verdicts, traffic association,
+/// and reconciler counts during the window.
+fn mark_pod_as_dead(
+    conn: &mut PgConnection,
+    pod: &str,
+    ip: Option<&str>,
+) -> Result<usize, DbError> {
     use schema::pod_details::dsl::*;
 
-    let updated = diesel::update(pod_details)
-        .filter(pod_name.eq(pod))
-        .set(is_dead.eq(true))
-        .execute(conn)?;
+    let updated = match ip {
+        Some(precise_ip) => {
+            // Exact-row update keyed on pod_ip (the PK). The pod_name
+            // filter is included as a sanity check — if a request
+            // mismatched name+ip arrives, prefer to do nothing.
+            diesel::update(pod_details)
+                .filter(pod_name.eq(pod))
+                .filter(pod_ip.eq(precise_ip))
+                .set(is_dead.eq(true))
+                .execute(conn)?
+        }
+        None => {
+            // Legacy path. Logged at warn so operators can see when a
+            // controller hasn't been updated to send pod_ip yet.
+            tracing::warn!(
+                pod = %pod,
+                "mark_pod_dead called without pod_ip — falling back to name-only filter; this marks ALL rows with this name dead, including a possibly-live restarted instance"
+            );
+            diesel::update(pod_details)
+                .filter(pod_name.eq(pod))
+                .set(is_dead.eq(true))
+                .execute(conn)?
+        }
+    };
 
-    info!("Marked pod {} as dead", pod);
+    info!(pod = %pod, ip = ?ip, rows = updated, "Marked pod row(s) as dead");
     Ok(updated)
 }
 

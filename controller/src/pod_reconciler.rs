@@ -16,15 +16,31 @@ type PodIdent = (Option<String>, String);
 
 /// Returns the names of DB pods that no longer exist in the cluster.
 /// Pure function so the comparison logic is unit-testable without a
-/// live broker / kube client.
+/// live broker / kube client. Kept for the historical name-based
+/// tests; new code should prefer find_dead_pod_details which yields
+/// the full row (with pod_ip) for the mark-dead RPC.
 fn find_dead_pods<'a>(db_pods: &'a [PodDetail], running: &HashSet<PodIdent>) -> Vec<&'a str> {
+    find_dead_pod_details(db_pods, running)
+        .into_iter()
+        .map(|p| p.pod_name.as_str())
+        .collect()
+}
+
+/// Returns the full PodDetail rows that are dead — namespace+name no
+/// longer matches anything live in the cluster. The caller uses each
+/// entry's pod_ip to send a precise mark-dead RPC to the broker
+/// rather than the prior name-only RPC that flagged every historical
+/// row (including a live restarted instance) dead.
+fn find_dead_pod_details<'a>(
+    db_pods: &'a [PodDetail],
+    running: &HashSet<PodIdent>,
+) -> Vec<&'a PodDetail> {
     db_pods
         .iter()
         .filter(|p| {
             let ident = (p.pod_namespace.clone(), p.pod_name.clone());
             !running.contains(&ident)
         })
-        .map(|p| p.pod_name.as_str())
         .collect()
 }
 
@@ -107,17 +123,29 @@ async fn reconcile_pods(
         db_pods.len()
     );
 
-    // Mark pods as dead if they're in DB but not running in cluster
-    let dead = find_dead_pods(&db_pods, &running_pods);
+    // Mark pods as dead if they're in DB but not running in cluster.
+    // find_dead_pods returns the full PodDetail entries we need —
+    // pod_ip in particular, which lets the broker target the exact
+    // pod_details row (the PK). Without pod_ip the broker falls back
+    // to a name-only filter that marks every historical row with
+    // that name dead — including a live restarted instance with the
+    // same name and a new IP.
+    let dead = find_dead_pod_details(&db_pods, &running_pods);
     let mut marked_dead = 0;
-    for name in dead {
+    for db_pod in dead {
         info!(
-            "Pod {} is no longer running on node {}, marking as dead",
-            name, node_name
+            "Pod {}/{} (ip={}) is no longer running on node {}, marking as dead",
+            db_pod.pod_namespace.as_deref().unwrap_or("?"),
+            db_pod.pod_name,
+            db_pod.pod_ip,
+            node_name
         );
-        let mark_dead_req = serde_json::json!({ "pod_name": name });
+        let mark_dead_req = serde_json::json!({
+            "pod_name": db_pod.pod_name,
+            "pod_ip": db_pod.pod_ip,
+        });
         if let Err(e) = api_post_call(mark_dead_req, "pod/mark_dead").await {
-            error!("Failed to mark pod {} as dead: {}", name, e);
+            error!("Failed to mark pod {} as dead: {}", db_pod.pod_name, e);
         } else {
             marked_dead += 1;
         }
