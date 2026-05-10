@@ -318,6 +318,14 @@ broker:
       # picks it up — usually `release: kube-prometheus-stack`).
       labels: {}
 
+  helmTest:
+    # -- Render a `helm.sh/hook: test` Pod that probes the broker's
+    # /health endpoint after install/upgrade. /health verifies schema
+    # state (kguardian-dev/kguardian#876), so a passing test confirms
+    # the broker can reach the database AND its migrations have run.
+    # Run with `helm test <release>`.
+    enabled: true
+
 database:
   # -- Deploy the bundled in-cluster PostgreSQL. Set false to use an external
   # PostgreSQL — populate `database.external.host` and provide credentials via
