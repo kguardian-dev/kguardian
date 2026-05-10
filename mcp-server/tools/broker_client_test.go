@@ -186,6 +186,55 @@ func TestBrokerClient_BodyAtLimitDecodes(t *testing.T) {
 	}
 }
 
+func TestNewBrokerClient_TrimsTrailingSlash(t *testing.T) {
+	// BROKER_URL="http://broker:9090/" is a natural copy-paste
+	// artefact (operators copy from a browser/dashboard). Pre-fix
+	// it produced doubled-slash URLs like http://broker:9090//pod/...
+	// which most servers normalize but show up in logs and can
+	// confuse routing on prefix-matched proxies.
+	cases := []struct {
+		in   string
+		want string
+	}{
+		{"http://broker:9090", "http://broker:9090"},
+		{"http://broker:9090/", "http://broker:9090"},
+		{"http://broker:9090//", "http://broker:9090"},
+		{"http://broker:9090///", "http://broker:9090"},
+		// Path components are not stripped — operators might
+		// configure a sub-path prefix; only TRAILING slashes go.
+		{"http://broker:9090/api/v1", "http://broker:9090/api/v1"},
+		{"http://broker:9090/api/v1/", "http://broker:9090/api/v1"},
+	}
+	for _, c := range cases {
+		got := NewBrokerClient(c.in)
+		if got.baseURL != c.want {
+			t.Errorf("NewBrokerClient(%q).baseURL: want %q, got %q", c.in, c.want, got.baseURL)
+		}
+	}
+}
+
+func TestBrokerClient_TrailingSlashNoDoubleSlashInRequest(t *testing.T) {
+	// End-to-end pin: with a trailing-slash baseURL, the actual
+	// request path arriving at the server must NOT contain the
+	// double slash. This catches any future refactor that
+	// inadvertently re-adds the doubled slash via fmt.Sprintf.
+	var observedPath string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		observedPath = r.URL.Path
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`[]`))
+	}))
+	defer srv.Close()
+
+	c := NewBrokerClient(srv.URL + "/")
+	if _, err := c.GetPodNetworkTraffic(context.Background(), "x"); err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	if observedPath != "/pod/traffic/x" {
+		t.Errorf("path: want /pod/traffic/x (no double slash), got %q", observedPath)
+	}
+}
+
 func TestBrokerClient_OversizedBodyTruncated(t *testing.T) {
 	// Server returns ~12 MB of garbage JSON. The 10 MB LimitReader cap
 	// will truncate, the decoder will then hit EOF / unexpected end and

@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strings"
 	"time"
 
 	"github.com/kguardian-dev/kguardian/mcp-server/logger"
@@ -22,10 +23,15 @@ type BrokerClient struct {
 	httpClient *http.Client
 }
 
-// NewBrokerClient creates a new broker client
+// NewBrokerClient creates a new broker client.
+// Trims trailing slashes from baseURL so fmt.Sprintf("%s/pod/traffic/...",
+// baseURL, ...) doesn't produce a double-slashed URL when the operator
+// configures BROKER_URL="http://broker:9090/" (trailing slash is a
+// natural copy-paste artefact). Most servers normalize the double
+// slash but it's an avoidable source of confusion in error logs.
 func NewBrokerClient(baseURL string) *BrokerClient {
 	return &BrokerClient{
-		baseURL: baseURL,
+		baseURL: strings.TrimRight(baseURL, "/"),
 		httpClient: &http.Client{
 			Timeout: 90 * time.Second, // Allow enough time for cluster-wide queries
 		},
