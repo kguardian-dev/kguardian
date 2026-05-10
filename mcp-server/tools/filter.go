@@ -134,6 +134,28 @@ func filterAlivePods(data interface{}) interface{} {
 	return out
 }
 
+// compactPodRecord strips heavyweight fields from a single pod record.
+// Shared between the slice (compactPodsSummary) and the single-record
+// (get_pod_details) paths so both honour the same keepFields contract.
+func compactPodRecord(m map[string]interface{}) map[string]interface{} {
+	keepFields := map[string]bool{
+		"pod_name":                 true,
+		"pod_namespace":            true,
+		"pod_ip":                   true,
+		"node_name":                true,
+		"is_dead":                  true,
+		"pod_identity":             true,
+		"workload_selector_labels": true,
+	}
+	slim := make(map[string]interface{}, len(keepFields))
+	for k, v := range m {
+		if keepFields[k] {
+			slim[k] = v
+		}
+	}
+	return slim
+}
+
 // compactPodsSummary strips heavyweight fields (pod_obj, service_spec) from
 // pod records, keeping only the lightweight identity columns that the LLM
 // actually reasons about.
@@ -145,26 +167,19 @@ func filterAlivePods(data interface{}) interface{} {
 // to associate a pod with its workload identity — was silently stripped
 // from every compacted response.
 func compactPodsSummary(data interface{}) interface{} {
+	// Single-record case: the get_pod_details handler passes a
+	// map[string]interface{} (the broker's /pod/ip/{ip} response is
+	// one PodDetail object, not an array). Without this path the
+	// LLM gets the full pod_obj (kilobytes of Kubernetes Pod spec
+	// + status) every time it asks "what pod is at this IP" —
+	// floods context for an identity lookup.
+	if single, ok := data.(map[string]interface{}); ok {
+		return compactPodRecord(single)
+	}
+
 	items, ok := data.([]interface{})
 	if !ok {
 		return data
-	}
-
-	keepFields := map[string]bool{
-		"pod_name":                 true,
-		"pod_namespace":            true,
-		"pod_ip":                   true,
-		"node_name":                true,
-		"is_dead":                  true,
-		// pod_identity is the controllers heuristic label (e.g.
-		// app.kubernetes.io/name) — short string, cheap to keep, and
-		// usually the answer to "which workload is this".
-		"pod_identity":             true,
-		// workload_selector_labels is the resolved selector map from
-		// the parent controller (Deployment/StatefulSet/DaemonSet).
-		// Required for an LLM to construct accurate NetworkPolicy
-		// selectors from observed traffic.
-		"workload_selector_labels": true,
 	}
 
 	compacted := make([]interface{}, 0, len(items))
@@ -174,13 +189,7 @@ func compactPodsSummary(data interface{}) interface{} {
 			compacted = append(compacted, item)
 			continue
 		}
-		slim := make(map[string]interface{})
-		for k, v := range m {
-			if keepFields[k] {
-				slim[k] = v
-			}
-		}
-		compacted = append(compacted, slim)
+		compacted = append(compacted, compactPodRecord(m))
 	}
 	return compacted
 }

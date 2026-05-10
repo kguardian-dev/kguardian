@@ -340,6 +340,43 @@ func TestCompactPodsSummary_StripsHeavyweightFields(t *testing.T) {
 	}
 }
 
+func TestCompactPodsSummary_SingleMapInputCompactsToMap(t *testing.T) {
+	// The get_pod_details handler passes a single map (the broker's
+	// /pod/ip/{ip} returns one PodDetail, not an array). Pre-fix
+	// compactPodsSummary checked .([]interface{}) and fell through
+	// for maps — returning the heavyweight pod_obj unchanged. The
+	// LLM got kilobytes of Kubernetes Pod spec/status per identity
+	// lookup, eating context budget.
+	in := map[string]interface{}{
+		"pod_name":      "web-1",
+		"pod_namespace": "prod",
+		"pod_ip":        "10.1.0.5",
+		"node_name":     "node-a",
+		"is_dead":       false,
+		"pod_identity":  "web",
+		"workload_selector_labels": map[string]interface{}{"app": "web"},
+		// Heavyweight — must be stripped just like the slice path.
+		"pod_obj": map[string]interface{}{
+			"spec":   map[string]interface{}{"containers": "huge..."},
+			"status": map[string]interface{}{"conditions": "more huge..."},
+		},
+	}
+	got := compactPodsSummary(in)
+	gotMap, ok := got.(map[string]interface{})
+	if !ok {
+		t.Fatalf("single-map input must produce single-map output, got %T", got)
+	}
+	if _, present := gotMap["pod_obj"]; present {
+		t.Error("pod_obj must be stripped from single-record compactation")
+	}
+	if gotMap["pod_name"] != "web-1" {
+		t.Errorf("identity fields lost; got %#v", gotMap)
+	}
+	if labels, ok := gotMap["workload_selector_labels"].(map[string]interface{}); !ok || labels["app"] != "web" {
+		t.Errorf("workload_selector_labels must survive single-record compactation")
+	}
+}
+
 func TestCompactPodsSummary_PreservesWorkloadSelectorLabels(t *testing.T) {
 	// Regression for the bug case. Pre-fix, the keepFields list
 	// included "labels" (no such broker field) but NOT
@@ -367,11 +404,20 @@ func TestCompactPodsSummary_PreservesWorkloadSelectorLabels(t *testing.T) {
 	}
 }
 
-func TestCompactPodsSummary_NonSlicePassthrough(t *testing.T) {
-	obj := map[string]interface{}{"pod_name": "web-1"}
-	got := compactPodsSummary(obj)
-	if !reflect.DeepEqual(got, obj) {
-		t.Errorf("non-slice input must pass through unchanged")
+func TestCompactPodsSummary_NonSliceNonMapPassthrough(t *testing.T) {
+	// True non-collection types (strings, numbers, nil) must pass
+	// through unchanged — a map is now intentionally NOT passthrough
+	// (it goes through compactPodRecord, see _SingleMapInputCompactsToMap)
+	// so we test the truly-not-a-container case here.
+	for _, in := range []interface{}{
+		"some string",
+		42,
+		nil,
+	} {
+		got := compactPodsSummary(in)
+		if !reflect.DeepEqual(got, in) {
+			t.Errorf("non-collection input %#v must pass through unchanged; got %#v", in, got)
+		}
 	}
 }
 

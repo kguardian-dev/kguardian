@@ -56,7 +56,14 @@ func (h PodDetailsHandler) Call(
 		}, PodDetailsOutput{}, nil
 	}
 
-	jsonData, err := json.Marshal(data)
+	// Strip heavyweight fields (pod_obj). For the "what pod is at
+	// this IP" use case the LLM needs identity (name, namespace,
+	// labels, node) — not the full Kubernetes Pod spec/status. The
+	// pre-compact response was often kilobytes of YAML-style spec
+	// per call, eating LLM context for no analytical gain.
+	compacted := compactPodsSummary(data)
+
+	jsonData, err := json.Marshal(compacted)
 	if err != nil {
 		logger.Log.WithField("error", err.Error()).Error("Error marshaling response")
 		return &mcp.CallToolResult{
