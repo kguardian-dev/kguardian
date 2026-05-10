@@ -71,8 +71,12 @@ async fn reconcile_pods(
 ) -> Result<(), Error> {
     info!("reconcile_pods: Starting pod reconciliation for node: {}", node_name);
 
-    // Get list of pods from database for this node (only alive pods)
-    let url = format!("{}/pod/list/{}", broker_url, node_name);
+    // Get list of pods from database for this node (only alive pods).
+    // Trim trailing slashes from broker_url so a configured
+    // API_ENDPOINT="http://broker:9090/" doesn't produce a doubled
+    // slash in the URL — same robustness pattern applied to
+    // api_post_call's build_url helper.
+    let url = format!("{}/pod/list/{}", broker_url.trim_end_matches('/'), node_name);
     let response = reqwest_client
         .get(&url)
         .send()
