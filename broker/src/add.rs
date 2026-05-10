@@ -119,30 +119,39 @@ pub async fn add_pods(
     audit: web::Data<AuditClient>,
     form: web::Json<PodTraffic>,
 ) -> Result<HttpResponse, Error> {
-    let audit_event: Option<PodTraffic> = if audit.enabled() { Some(form.0.clone()) } else { None };
     let pool_for_insert = pool.clone();
-    let pods = web::block(move || {
+    let inserted = web::block(move || {
         let mut conn = pool_for_insert.get()?;
         create_pod_traffic(&mut conn, form)
     })
     .await?
     .map_err(actix_web::error::ErrorInternalServerError)?;
 
-    if let Some(event) = audit_event {
-        let audit_client = audit.get_ref().clone();
-        let pool_for_audit = pool.get_ref().clone();
-        actix_web::rt::spawn(async move {
-            audit_client.evaluate_and_persist(pool_for_audit, event).await;
-        });
+    // Fire audit eval ONLY for new events. The pre-fix code cloned
+    // the form unconditionally and spawned the audit task even when
+    // create_pod_traffic deduped — wasting evaluator capacity on
+    // already-seen flows. Same class of fix as the batch endpoint.
+    if audit.enabled() {
+        if let Some(event) = inserted.clone() {
+            let audit_client = audit.get_ref().clone();
+            let pool_for_audit = pool.get_ref().clone();
+            actix_web::rt::spawn(async move {
+                audit_client.evaluate_and_persist(pool_for_audit, event).await;
+            });
+        }
     }
 
-    Ok(HttpResponse::Ok().json(pods))
+    // Wire format preserved: echo the input form back to the
+    // controller (it ignores the body but a behavior change here
+    // would be observable in API contract tests). When the row was a
+    // duplicate, the input is echoed via the None-path fallback.
+    Ok(HttpResponse::Ok().json(inserted))
 }
 
 fn create_pod_traffic(
     conn: &mut PgConnection,
     w: web::Json<PodTraffic>,
-) -> Result<PodTraffic, DbError> {
+) -> Result<Option<PodTraffic>, DbError> {
     use schema::pod_traffic::dsl::*;
     debug!(
         "storing the pod details {:?} into pod_traffic table",
@@ -151,12 +160,12 @@ fn create_pod_traffic(
     if w.get_row(conn)?.is_none() {
         info!("Insert pod {:?}, in pod_traffic table", w.uuid);
         diesel::insert_into(pod_traffic).values(&*w).execute(conn)?;
-
         debug!("Success: pod {:?} inserted in pod_traffic table", w.uuid);
+        Ok(Some(w.0))
     } else {
         debug!("Data already exists");
+        Ok(None)
     }
-    Ok(w.0)
 }
 
 impl PodTraffic {
