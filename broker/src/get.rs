@@ -263,6 +263,15 @@ pub struct AuditVerdictsQuery {
     /// AuditNetworkPolicy; leave `namespace` empty for AuditClusterNetworkPolicy.
     pub policy: Option<String>,
     pub namespace: Option<String>,
+    /// Filter rows by verdict — "Allow" or "WouldDeny". The DB has the
+    /// (verdict, observed_at) composite index from the audit_verdict_column
+    /// migration, so server-side filtering is index-backed; without this
+    /// filter the frontends Would-Deny view has to pull both verdicts
+    /// then drop Allow client-side, burning the row limit.
+    pub verdict: Option<String>,
+    /// Filter rows by direction — "Ingress" or "Egress". Pairs with the
+    /// frontend tabs that split each direction.
+    pub direction: Option<String>,
     /// Cap rows returned. Defaults to 100, hard cap 500.
     pub limit: Option<i64>,
 }
@@ -272,6 +281,23 @@ pub struct AuditVerdictsQuery {
 /// without a live DB.
 pub(crate) fn clamp_audit_limit(raw: Option<i64>) -> i64 {
     raw.unwrap_or(100).clamp(1, 500)
+}
+
+/// Whitelist of valid verdict values. Anything else is rejected with
+/// 400 — silently ignoring an unknown value (the previous behavior of
+/// "no filter parameter" was no-op) would mask client bugs.
+const VALID_VERDICTS: &[&str] = &["Allow", "WouldDeny"];
+/// Whitelist of valid direction values. See VALID_VERDICTS above.
+const VALID_DIRECTIONS: &[&str] = &["Ingress", "Egress"];
+
+pub(crate) fn validate_enum_filter(field: &str, value: &str, allowed: &[&str]) -> Result<(), String> {
+    if allowed.iter().any(|a| *a == value) {
+        Ok(())
+    } else {
+        Err(format!(
+            "invalid {field}={value:?}; must be one of {allowed:?}"
+        ))
+    }
 }
 
 #[get("/audit/verdicts")]
@@ -284,9 +310,29 @@ pub async fn get_audit_verdicts(
     let policy_name = q.policy.clone();
     let policy_ns = q.namespace.clone();
 
+    if let Some(v) = q.verdict.as_deref() {
+        if let Err(msg) = validate_enum_filter("verdict", v, VALID_VERDICTS) {
+            return Ok(HttpResponse::BadRequest().body(msg));
+        }
+    }
+    if let Some(d) = q.direction.as_deref() {
+        if let Err(msg) = validate_enum_filter("direction", d, VALID_DIRECTIONS) {
+            return Ok(HttpResponse::BadRequest().body(msg));
+        }
+    }
+
+    let verdict_filter = q.verdict.clone();
+    let direction_filter = q.direction.clone();
     let rows = web::block(move || {
         let mut conn = pool.get()?;
-        audit_verdicts_query(&mut conn, policy_name, policy_ns, limit)
+        audit_verdicts_query(
+            &mut conn,
+            policy_name,
+            policy_ns,
+            verdict_filter,
+            direction_filter,
+            limit,
+        )
     })
     .await?
     .map_err(actix_web::error::ErrorInternalServerError)?;
@@ -298,6 +344,8 @@ pub fn audit_verdicts_query(
     conn: &mut PgConnection,
     by_policy: Option<String>,
     by_namespace: Option<String>,
+    by_verdict: Option<String>,
+    by_direction: Option<String>,
     row_limit: i64,
 ) -> Result<Vec<crate::AuditVerdict>, DbError> {
     use schema::audit_verdicts::dsl::*;
@@ -307,6 +355,12 @@ pub fn audit_verdicts_query(
     }
     if let Some(ns) = by_namespace {
         q = q.filter(policy_namespace.eq(ns));
+    }
+    if let Some(v) = by_verdict {
+        q = q.filter(verdict.eq(v));
+    }
+    if let Some(d) = by_direction {
+        q = q.filter(direction.eq(d));
     }
     let rows = q
         .order(observed_at.desc())
@@ -388,5 +442,79 @@ mod tests {
         // Better to return a clear 400 than to silently coerce.
         let r: Result<AuditVerdictsQuery, _> = serde_urlencoded::from_str("limit=abc");
         assert!(r.is_err(), "non-numeric limit must fail to parse");
+    }
+
+    #[test]
+    fn query_parses_verdict_and_direction() {
+        // The new filters arrive on the wire alongside policy/limit.
+        // Both populate the Option fields at the parse layer; semantic
+        // validation (allowed values) happens later in the handler.
+        let q = parse_query("verdict=WouldDeny&direction=Egress&limit=50");
+        assert_eq!(q.verdict.as_deref(), Some("WouldDeny"));
+        assert_eq!(q.direction.as_deref(), Some("Egress"));
+        assert_eq!(q.limit, Some(50));
+    }
+
+    #[test]
+    fn query_verdict_and_direction_optional() {
+        let q = parse_query("policy=p1");
+        assert!(q.verdict.is_none(), "verdict must be optional");
+        assert!(q.direction.is_none(), "direction must be optional");
+    }
+
+    #[test]
+    fn validate_enum_filter_accepts_allowed_values() {
+        // Both whitelists are tiny; pin every value to catch a typo
+        // (Allow vs allow, Ingress vs ingress) at compile-test time.
+        for v in ["Allow", "WouldDeny"] {
+            assert!(
+                validate_enum_filter("verdict", v, VALID_VERDICTS).is_ok(),
+                "verdict={v} must be accepted",
+            );
+        }
+        for d in ["Ingress", "Egress"] {
+            assert!(
+                validate_enum_filter("direction", d, VALID_DIRECTIONS).is_ok(),
+                "direction={d} must be accepted",
+            );
+        }
+    }
+
+    #[test]
+    fn validate_enum_filter_rejects_case_variants() {
+        // Verdicts are case-sensitive on the wire to match the
+        // evaluator's wire format ("WouldDeny", "Allow"). Lowercase or
+        // mixed-case must produce a 400 — silently lower-casing would
+        // mask a frontend bug and the SQL filter would still miss because
+        // the DB column stores mixed-case verbatim.
+        for bad in ["allow", "ALLOW", "wouldDeny", "wouldDENY", "would_deny"] {
+            assert!(
+                validate_enum_filter("verdict", bad, VALID_VERDICTS).is_err(),
+                "case variant {bad:?} must be rejected",
+            );
+        }
+        for bad in ["ingress", "egress", "INGRESS", "Both"] {
+            assert!(
+                validate_enum_filter("direction", bad, VALID_DIRECTIONS).is_err(),
+                "case variant {bad:?} must be rejected",
+            );
+        }
+    }
+
+    #[test]
+    fn validate_enum_filter_rejects_garbage() {
+        assert!(validate_enum_filter("verdict", "", VALID_VERDICTS).is_err());
+        assert!(validate_enum_filter("verdict", "Maybe", VALID_VERDICTS).is_err());
+        assert!(validate_enum_filter("direction", "<script>", VALID_DIRECTIONS).is_err());
+    }
+
+    #[test]
+    fn validate_enum_filter_error_includes_field_and_value() {
+        // The 400 body is what frontend devs see — make sure it names
+        // the offending field AND the bad value so the bug is debuggable
+        // without running the broker locally.
+        let err = validate_enum_filter("verdict", "Maybe", VALID_VERDICTS).unwrap_err();
+        assert!(err.contains("verdict"), "error must name field: {err}");
+        assert!(err.contains("Maybe"), "error must name value: {err}");
     }
 }
