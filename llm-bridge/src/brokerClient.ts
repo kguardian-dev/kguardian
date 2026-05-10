@@ -14,7 +14,16 @@ export class BrokerClient {
   private initPromise: Promise<void> | null = null;
   private static toolDefsCache: any[] | null = null;
 
-  constructor(brokerUrl: string, mcpUrl?: string) {
+  /**
+   * The class is named BrokerClient for historical reasons — before
+   * the MCP refactor it talked directly to the broker. Today all
+   * tool calls route through the MCP server (this.mcpUrl), and the
+   * broker is reached via the MCP server's own broker client. So
+   * only `mcpUrl` is meaningful; the previous `brokerUrl` parameter
+   * was declared but never stored — the static getToolDefinitionsFromMCP
+   * helper already acknowledged this by passing "" for it.
+   */
+  constructor(mcpUrl?: string) {
     this.mcpUrl = mcpUrl || process.env.MCP_SERVER_URL || "http://kguardian-mcp-server.kguardian.svc.cluster.local:8081";
   }
 
@@ -179,7 +188,7 @@ export class BrokerClient {
    * This fetches the actual tools from the MCP server dynamically
    */
   static async getToolDefinitionsFromMCP(mcpUrl?: string): Promise<any[]> {
-    const client = new BrokerClient("", mcpUrl);
+    const client = new BrokerClient(mcpUrl);
     try {
       const tools = await client.getAvailableTools();
 

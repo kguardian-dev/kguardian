@@ -15,15 +15,16 @@ dotenv.config();
 
 const app = express();
 const port = process.env.PORT || 8080;
-const brokerUrl =
-  process.env.BROKER_URL || "http://broker.kguardian.svc.cluster.local:9090";
 
 // Middleware
 app.use(cors({ origin: process.env.ALLOWED_ORIGIN || '*' }));
 app.use(express.json({ limit: '100kb' }));
 
-// Initialize broker client
-const brokerClient = new BrokerClient(brokerUrl);
+// Initialize broker client. Note: the class is named "BrokerClient"
+// for historical reasons; today all tool calls route through the MCP
+// server. The MCP server URL is read inside BrokerClient from
+// MCP_SERVER_URL or its hardcoded default — no constructor arg needed.
+const brokerClient = new BrokerClient();
 
 /**
  * Compute available providers from a key-value env map. Pure — takes
@@ -147,7 +148,7 @@ app.post("/api/chat", chatLimiter, async (req: Request, res: Response<any>) => {
 const server = app.listen(port, () => {
   const availableProviders = getAvailableProviders();
   console.log(`LLM Bridge listening on port ${port}`);
-  console.log(`Broker URL: ${brokerUrl}`);
+  console.log(`MCP Server URL: ${process.env.MCP_SERVER_URL || "(default)"}`);
   console.log(`Available providers: ${availableProviders.join(", ") || "NONE"}`);
 
   if (availableProviders.length === 0) {
