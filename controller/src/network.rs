@@ -144,6 +144,28 @@ pub(crate) fn should_flush(
     batch_len >= batch_size || elapsed_since_last_flush >= batch_timeout
 }
 
+/// Cap the in-memory pending batch to this many events. On a
+/// prolonged broker outage, batch.clear() would have dropped every
+/// failed flush — but the previous code (pre-iteration-68) silently
+/// swallowed 5xx as success, so the clear-on-failure was effectively
+/// a no-op. Now that errors are visible (iteration 68 promoted
+/// non-2xx to errors), holding the batch lets us retry on the next
+/// successful flush. The cap prevents unbounded memory growth if the
+/// broker stays down indefinitely.
+const MAX_PENDING_EVENTS: usize = 1000; // 10× BATCH_SIZE
+
+/// Drop oldest entries from `batch` until `batch.len() <= max`.
+/// Returns the number of entries dropped (0 if no drop needed).
+/// Pure helper so the policy is unit-testable without async runtime.
+pub(crate) fn cap_batch(batch: &mut Vec<PodTraffic>, max: usize) -> usize {
+    if batch.len() <= max {
+        return 0;
+    }
+    let drop = batch.len() - max;
+    batch.drain(..drop);
+    drop
+}
+
 async fn flush_network_batch(batch: &mut Vec<PodTraffic>) {
     if batch.is_empty() {
         return;
@@ -151,12 +173,29 @@ async fn flush_network_batch(batch: &mut Vec<PodTraffic>) {
 
     debug!("Flushing network event batch of {} events", batch.len());
 
-    // Send batch to API
-    if let Err(e) = api_post_call(json!(batch), "pod/traffic/batch").await {
-        error!("Failed to post network event batch: {}", e);
+    match api_post_call(json!(batch), "pod/traffic/batch").await {
+        Ok(()) => {
+            batch.clear();
+        }
+        Err(e) => {
+            // Hold the batch for retry on the next flush. Pre-fix this
+            // path also cleared, losing every event on a transient
+            // broker failure (the pre-iteration-68 swallow-of-5xx
+            // masked the bug). Now we retain, but cap to prevent OOM.
+            error!(
+                "Failed to post network event batch of {} events: {}; will retry next flush",
+                batch.len(),
+                e
+            );
+            let dropped = cap_batch(batch, MAX_PENDING_EVENTS);
+            if dropped > 0 {
+                error!(
+                    "Pending event queue overflow during broker outage; dropped {} oldest events (cap = {})",
+                    dropped, MAX_PENDING_EVENTS
+                );
+            }
+        }
     }
-
-    batch.clear();
 }
 
 async fn build_traffic_event(data: &NetworkEventData, pod_data: &PodInspect) -> Option<PodTraffic> {
@@ -445,5 +484,74 @@ mod tests {
         // Otherwise a perfectly-paced 1-event-per-second source
         // would always be one tick behind.
         assert!(should_flush(1, Duration::from_secs(1), 100, Duration::from_secs(1)));
+    }
+
+    // cap_batch enforces the in-memory queue limit during broker
+    // outage. The previous "clear-on-failure" lost events; now we
+    // hold for retry but must not grow unbounded.
+
+    fn make_traffic(uuid: &str) -> PodTraffic {
+        PodTraffic {
+            uuid: uuid.to_string(),
+            pod_name: None,
+            pod_namespace: None,
+            pod_ip: None,
+            pod_port: None,
+            ip_protocol: None,
+            traffic_type: None,
+            traffic_in_out_ip: None,
+            traffic_in_out_port: None,
+            decision: None,
+            time_stamp: chrono::NaiveDateTime::default(),
+        }
+    }
+
+    #[test]
+    fn cap_batch_under_max_no_drop() {
+        let mut batch = vec![make_traffic("a"), make_traffic("b")];
+        let dropped = cap_batch(&mut batch, 1000);
+        assert_eq!(dropped, 0);
+        assert_eq!(batch.len(), 2);
+    }
+
+    #[test]
+    fn cap_batch_at_exact_max_no_drop() {
+        let mut batch: Vec<_> = (0..10).map(|i| make_traffic(&i.to_string())).collect();
+        let dropped = cap_batch(&mut batch, 10);
+        assert_eq!(dropped, 0);
+        assert_eq!(batch.len(), 10);
+    }
+
+    #[test]
+    fn cap_batch_over_max_drops_oldest() {
+        // 15 events, cap 10 → drop 5 oldest. Verify the 10 newest
+        // remain. Drop-oldest preserves recent observations — what
+        // operators most likely care about during outage triage.
+        let mut batch: Vec<_> = (0..15).map(|i| make_traffic(&format!("e{}", i))).collect();
+        let dropped = cap_batch(&mut batch, 10);
+        assert_eq!(dropped, 5);
+        assert_eq!(batch.len(), 10);
+        // Oldest dropped → first surviving should be e5
+        assert_eq!(batch[0].uuid, "e5");
+        assert_eq!(batch[9].uuid, "e14");
+    }
+
+    #[test]
+    fn cap_batch_max_one_keeps_only_newest() {
+        let mut batch: Vec<_> = (0..5).map(|i| make_traffic(&format!("e{}", i))).collect();
+        let dropped = cap_batch(&mut batch, 1);
+        assert_eq!(dropped, 4);
+        assert_eq!(batch.len(), 1);
+        assert_eq!(batch[0].uuid, "e4");
+    }
+
+    #[test]
+    fn cap_batch_max_zero_drops_all() {
+        // Degenerate but defensible — caller can pass max=0 to fully
+        // drain. Shouldn't panic.
+        let mut batch = vec![make_traffic("a"), make_traffic("b")];
+        let dropped = cap_batch(&mut batch, 0);
+        assert_eq!(dropped, 2);
+        assert!(batch.is_empty());
     }
 }
