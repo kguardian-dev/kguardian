@@ -21,7 +21,7 @@ import (
 var (
 	processIngressRulesFunc  = processIngressRules
 	processEgressRulesFunc   = processEgressRules
-	detectSelectorLabelsFunc = func(clientset *kubernetes.Clientset, origin interface{}) (map[string]string, error) {
+	detectSelectorLabelsFunc = func(clientset kubernetes.Interface, origin interface{}) (map[string]string, error) {
 		return detectSelectorLabels(clientset, origin)
 	}
 	determinePeerForTrafficFunc = determinePeerForTraffic

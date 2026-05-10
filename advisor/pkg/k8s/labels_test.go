@@ -1,7 +1,6 @@
 package k8s
 
 import (
-	"context"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -118,7 +117,7 @@ func TestGetOwnerRef_ReplicaSetWalksToDeployment(t *testing.T) {
 	)
 	pod := makePod("prod", "web-1", nil, ownerRef("ReplicaSet", "web-rs"))
 
-	labels, err := getOwnerRefViaInterface(cs, pod)
+	labels, err := GetOwnerRef(cs, pod)
 	assert.NoError(t, err)
 	assert.Equal(t, map[string]string{"app": "web"}, labels)
 }
@@ -136,7 +135,7 @@ func TestGetOwnerRef_StatefulSet(t *testing.T) {
 	)
 	pod := makePod("prod", "db-0", nil, ownerRef("StatefulSet", "db"))
 
-	labels, err := getOwnerRefViaInterface(cs, pod)
+	labels, err := GetOwnerRef(cs, pod)
 	assert.NoError(t, err)
 	assert.Equal(t, map[string]string{"app": "db"}, labels)
 }
@@ -154,7 +153,7 @@ func TestGetOwnerRef_DaemonSet(t *testing.T) {
 	)
 	pod := makePod("kube-system", "node-agent-xyz", nil, ownerRef("DaemonSet", "node-agent"))
 
-	labels, err := getOwnerRefViaInterface(cs, pod)
+	labels, err := GetOwnerRef(cs, pod)
 	assert.NoError(t, err)
 	assert.Equal(t, map[string]string{"app": "node-agent"}, labels)
 }
@@ -172,7 +171,7 @@ func TestGetOwnerRef_Job(t *testing.T) {
 	)
 	pod := makePod("ci", "migrator-abc", nil, ownerRef("Job", "migrator"))
 
-	labels, err := getOwnerRefViaInterface(cs, pod)
+	labels, err := GetOwnerRef(cs, pod)
 	assert.NoError(t, err)
 	assert.Equal(t, map[string]string{"job-name": "migrator"}, labels)
 }
@@ -181,58 +180,8 @@ func TestGetOwnerRef_UnknownKindErrors(t *testing.T) {
 	cs := fakeclient.NewSimpleClientset()
 	pod := makePod("prod", "weird", nil, ownerRef("CronJob", "nightly"))
 
-	_, err := getOwnerRefViaInterface(cs, pod)
+	_, err := GetOwnerRef(cs, pod)
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "unknown or unsupported")
 }
 
-// getOwnerRefViaInterface mirrors GetOwnerRef but takes the
-// kubernetes.Interface (which fake.Clientset satisfies) instead of the
-// concrete *kubernetes.Clientset. Production code can be refactored to
-// take the interface in a follow-up; for now this lets the fake-backed
-// tests exercise the same control flow.
-func getOwnerRefViaInterface(clientset kubernetes.Interface, pod *v1.Pod) (map[string]string, error) {
-	if len(pod.OwnerReferences) == 0 {
-		return pod.Labels, nil
-	}
-	owner := pod.OwnerReferences[0]
-	ctx := context.TODO()
-	switch owner.Kind {
-	case "ReplicaSet":
-		rs, err := clientset.AppsV1().ReplicaSets(pod.Namespace).Get(ctx, owner.Name, metav1.GetOptions{})
-		if err != nil {
-			return nil, err
-		}
-		dep, err := clientset.AppsV1().Deployments(pod.Namespace).Get(ctx, rs.OwnerReferences[0].Name, metav1.GetOptions{})
-		if err != nil {
-			return nil, err
-		}
-		return dep.Spec.Selector.MatchLabels, nil
-	case "StatefulSet":
-		ss, err := clientset.AppsV1().StatefulSets(pod.Namespace).Get(ctx, owner.Name, metav1.GetOptions{})
-		if err != nil {
-			return nil, err
-		}
-		return ss.Spec.Selector.MatchLabels, nil
-	case "DaemonSet":
-		ds, err := clientset.AppsV1().DaemonSets(pod.Namespace).Get(ctx, owner.Name, metav1.GetOptions{})
-		if err != nil {
-			return nil, err
-		}
-		return ds.Spec.Selector.MatchLabels, nil
-	case "Job":
-		j, err := clientset.BatchV1().Jobs(pod.Namespace).Get(ctx, owner.Name, metav1.GetOptions{})
-		if err != nil {
-			return nil, err
-		}
-		return j.Spec.Selector.MatchLabels, nil
-	default:
-		return nil, &unknownOwnerKindError{kind: owner.Kind}
-	}
-}
-
-type unknownOwnerKindError struct{ kind string }
-
-func (e *unknownOwnerKindError) Error() string {
-	return "unknown or unsupported ownerReference kind: " + e.kind
-}

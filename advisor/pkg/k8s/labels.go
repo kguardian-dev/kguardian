@@ -11,7 +11,10 @@ import (
 )
 
 // DetectLabels detects the labels of a pod.
-func detectSelectorLabels(clientset *kubernetes.Clientset, origin interface{}) (map[string]string, error) {
+//
+// Takes the kubernetes.Interface (not the concrete *Clientset) so callers
+// can pass either the real clientset or fake.Clientset for testing.
+func detectSelectorLabels(clientset kubernetes.Interface, origin interface{}) (map[string]string, error) {
 	// Use type assertion to check the specific type
 	switch o := origin.(type) {
 	case *v1.Pod:
@@ -27,7 +30,14 @@ func detectSelectorLabels(clientset *kubernetes.Clientset, origin interface{}) (
 	}
 }
 
-func GetOwnerRef(clientset *kubernetes.Clientset, pod *v1.Pod) (map[string]string, error) {
+// GetOwnerRef resolves the workload-controller selector labels for a Pod.
+//
+// Walks the pod's first owner reference (ReplicaSet → Deployment for the
+// common case, plus StatefulSet/DaemonSet/Job direct paths). Pods with
+// no owner refs return their own labels.
+//
+// Takes kubernetes.Interface so it can be tested against fake.Clientset.
+func GetOwnerRef(clientset kubernetes.Interface, pod *v1.Pod) (map[string]string, error) {
 	ctx := context.TODO()
 
 	// Check if the Pod has an owner
