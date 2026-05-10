@@ -37,8 +37,11 @@ func newBrokerWithError(t *testing.T, status int, body string) (*BrokerClient, f
 // --- ClusterPodsHandler ---
 
 func TestClusterPodsHandler_StripsHeavyweightFields(t *testing.T) {
+	// Uses workload_selector_labels (the real broker field — see iteration
+	// 72) NOT the previously-fictional "labels" key.
 	body := `[{"pod_name":"web-1","pod_namespace":"prod","pod_ip":"10.0.0.1",
-        "node_name":"node-a","is_dead":false,"labels":{"app":"web"},
+        "node_name":"node-a","is_dead":false,
+        "workload_selector_labels":{"app":"web"},
         "pod_obj":{"spec":"huge"},"service_spec":{"a":"b"}}]`
 	c, cleanup := newBrokerWithJSON(t, body)
 	defer cleanup()
@@ -57,6 +60,36 @@ func TestClusterPodsHandler_StripsHeavyweightFields(t *testing.T) {
 	}
 	if !strings.Contains(got, "web-1") {
 		t.Errorf("response should still contain pod_name: %s", got)
+	}
+	// Iteration 72 contract: workload_selector_labels must survive
+	// compactation. Without this the LLM cant construct accurate
+	// NetworkPolicy selectors from observed traffic.
+	if !strings.Contains(got, `"workload_selector_labels"`) {
+		t.Errorf("workload_selector_labels must survive compactation: %s", got)
+	}
+}
+
+func TestClusterPodsHandler_FiltersDeadPodsByDefault(t *testing.T) {
+	// End-to-end pin for iteration 74. /pod/info returns every
+	// pod_details row including is_dead=true historical entries.
+	// The MCP tool MUST default to live-only — long-lived clusters
+	// otherwise accumulate dead history that fills the LLMs context.
+	body := `[
+		{"pod_name":"live-1","pod_namespace":"prod","pod_ip":"10.0.0.1","is_dead":false},
+		{"pod_name":"dead-1","pod_namespace":"prod","pod_ip":"10.0.0.99","is_dead":true},
+		{"pod_name":"live-2","pod_namespace":"prod","pod_ip":"10.0.0.2","is_dead":false}
+	]`
+	c, cleanup := newBrokerWithJSON(t, body)
+	defer cleanup()
+
+	h := ClusterPodsHandler{client: c}
+	res, _, _ := h.Call(context.Background(), nil, ClusterPodsInput{})
+	got := textOf(t, res)
+	if strings.Contains(got, "dead-1") {
+		t.Errorf("dead pod must NOT appear in cluster_pods response: %s", got)
+	}
+	if !strings.Contains(got, "live-1") || !strings.Contains(got, "live-2") {
+		t.Errorf("live pods must appear: %s", got)
 	}
 }
 
