@@ -94,13 +94,26 @@ struct AuditVerdictInsert {
 }
 
 /// Long-lived client cached by the actix application state. Holds the
-/// evaluator base URL and a connection-pooled reqwest client.
+/// evaluator base URL, a connection-pooled reqwest client, and a
+/// semaphore that bounds the number of concurrent in-flight audit
+/// evaluations.
 #[derive(Clone)]
 pub struct AuditClient {
     enabled: bool,
     base_url: String,
     http: reqwest::Client,
+    /// Permits the maximum number of concurrent /evaluate calls. The
+    /// add.rs path spawns one audit task per ingested flow; without a
+    /// cap, a 1000-event batch would create 1000 concurrent reqwest
+    /// futures + 1000 connection-pool waiters. Bounding here gives
+    /// upstream backpressure without changing the call sites.
+    in_flight: std::sync::Arc<tokio::sync::Semaphore>,
 }
+
+/// Maximum concurrent audit /evaluate calls. Sized roughly to twice
+/// `pool_max_idle_per_host(8)` so the connection pool stays the
+/// effective rate limit; further audit calls queue on this semaphore.
+const AUDIT_INFLIGHT_PERMITS: usize = 16;
 
 impl AuditClient {
     /// Construct from the `EVALUATOR_URL` env var. When unset, the
@@ -108,16 +121,33 @@ impl AuditClient {
     pub fn from_env() -> Self {
         let base_url = std::env::var("EVALUATOR_URL").unwrap_or_default();
         let enabled = !base_url.is_empty();
+        let permits = std::env::var("AUDIT_INFLIGHT_PERMITS")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .map(|n| n.max(1))
+            .unwrap_or(AUDIT_INFLIGHT_PERMITS);
         let http = reqwest::Client::builder()
             .timeout(Duration::from_millis(500))
             .pool_max_idle_per_host(8)
             .build()
             .unwrap_or_else(|_| reqwest::Client::new());
-        Self { enabled, base_url, http }
+        Self {
+            enabled,
+            base_url,
+            http,
+            in_flight: std::sync::Arc::new(tokio::sync::Semaphore::new(permits)),
+        }
     }
 
     pub fn enabled(&self) -> bool { self.enabled }
     pub fn base_url(&self) -> &str { &self.base_url }
+
+    /// Number of permits currently available — visible to tests and
+    /// future Prometheus exposition (saturation = configured - available).
+    #[cfg(test)]
+    pub(crate) fn available_permits(&self) -> usize {
+        self.in_flight.available_permits()
+    }
 
     /// Best-effort: build a Flow from the PodTraffic event, POST to
     /// `/evaluate`, and persist any `WouldDeny` results. Errors are
@@ -127,6 +157,20 @@ impl AuditClient {
         if !self.enabled {
             return;
         }
+        // Bound concurrent in-flight evaluations. Without this, a large
+        // ingest batch (the broker's add_pods_batch fires N tasks per
+        // event for an N-event batch) would create unbounded futures
+        // racing for the small connection pool. A failed acquire would
+        // mean the global semaphore is poisoned (extremely unlikely);
+        // treat that as 'just skip the audit step' rather than crashing
+        // the ingest path.
+        let _permit = match self.in_flight.clone().acquire_owned().await {
+            Ok(p) => p,
+            Err(e) => {
+                debug!(error = %e, "audit semaphore closed; skipping evaluation");
+                return;
+            }
+        };
         let url = format!("{}/evaluate", self.base_url.trim_end_matches('/'));
 
         // INGRESS: pod_name/pod_namespace is the destination.
@@ -379,6 +423,81 @@ mod tests {
         match prev {
             Some(v) => std::env::set_var("EVALUATOR_URL", v),
             None => std::env::remove_var("EVALUATOR_URL"),
+        }
+    }
+
+    // Concurrency-cap regression tests for the semaphore that bounds
+    // in-flight audit evaluations. Without this cap, a 1000-event
+    // batch from add_pods_batch creates 1000 concurrent reqwest
+    // futures and starves the (8-host) connection pool.
+
+    #[test]
+    fn semaphore_starts_with_default_permits_when_env_unset() {
+        let prev = std::env::var("AUDIT_INFLIGHT_PERMITS").ok();
+        std::env::remove_var("AUDIT_INFLIGHT_PERMITS");
+        let c = AuditClient::from_env();
+        assert_eq!(c.available_permits(), AUDIT_INFLIGHT_PERMITS);
+        if let Some(v) = prev {
+            std::env::set_var("AUDIT_INFLIGHT_PERMITS", v);
+        }
+    }
+
+    #[test]
+    fn semaphore_size_is_configurable() {
+        let prev = std::env::var("AUDIT_INFLIGHT_PERMITS").ok();
+        std::env::set_var("AUDIT_INFLIGHT_PERMITS", "4");
+        let c = AuditClient::from_env();
+        assert_eq!(c.available_permits(), 4);
+        match prev {
+            Some(v) => std::env::set_var("AUDIT_INFLIGHT_PERMITS", v),
+            None => std::env::remove_var("AUDIT_INFLIGHT_PERMITS"),
+        }
+    }
+
+    #[test]
+    fn semaphore_floors_invalid_values_to_default() {
+        // Operators sometimes typo `0` or non-numeric values; we don't
+        // want either to silently disable concurrency (a 0-permit
+        // semaphore would block every audit task forever).
+        let prev = std::env::var("AUDIT_INFLIGHT_PERMITS").ok();
+
+        std::env::set_var("AUDIT_INFLIGHT_PERMITS", "0");
+        let c = AuditClient::from_env();
+        // 0 floors to 1, not the full default — operators have made a
+        // deliberate (if perhaps misguided) choice.
+        assert_eq!(c.available_permits(), 1);
+
+        std::env::set_var("AUDIT_INFLIGHT_PERMITS", "not-a-number");
+        let c = AuditClient::from_env();
+        assert_eq!(c.available_permits(), AUDIT_INFLIGHT_PERMITS);
+
+        match prev {
+            Some(v) => std::env::set_var("AUDIT_INFLIGHT_PERMITS", v),
+            None => std::env::remove_var("AUDIT_INFLIGHT_PERMITS"),
+        }
+    }
+
+    #[test]
+    fn semaphore_clones_share_permits() {
+        // AuditClient is Clone; web::Data wraps it in Arc but each
+        // route handler does .get_ref().clone() to detach. The
+        // semaphore must be shared, not duplicated, otherwise each
+        // handler gets its own bucket of permits and the cap doesn't
+        // apply globally.
+        let prev = std::env::var("AUDIT_INFLIGHT_PERMITS").ok();
+        std::env::set_var("AUDIT_INFLIGHT_PERMITS", "2");
+        let a = AuditClient::from_env();
+        let b = a.clone();
+
+        let _p1 = a.in_flight.clone().try_acquire_owned().expect("a permit available");
+        let _p2 = a.in_flight.clone().try_acquire_owned().expect("second permit available");
+        // Now zero permits remain. The clone must see that.
+        assert_eq!(b.available_permits(), 0);
+        assert!(b.in_flight.clone().try_acquire_owned().is_err());
+
+        match prev {
+            Some(v) => std::env::set_var("AUDIT_INFLIGHT_PERMITS", v),
+            None => std::env::remove_var("AUDIT_INFLIGHT_PERMITS"),
         }
     }
 }
