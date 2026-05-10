@@ -288,6 +288,15 @@ fn mark_pod_as_dead(
 ) -> Result<usize, DbError> {
     use schema::pod_details::dsl::*;
 
+    // Normalise the pod_ip arg: trim whitespace, then treat empty as
+    // None. A degenerate caller (a future tool sending pod_ip="") would
+    // otherwise hit the precise-filter path with `WHERE pod_ip = ''`
+    // — silently matches no rows, returns 0, gives the caller a
+    // false success. Falling back to the legacy name-only path is
+    // less precise but visible (it logs the warn) and at least
+    // marks the matched-by-name rows dead.
+    let ip = ip.map(str::trim).filter(|s| !s.is_empty());
+
     let updated = match ip {
         Some(precise_ip) => {
             // Exact-row update keyed on pod_ip (the PK). The pod_name
