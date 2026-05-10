@@ -14,10 +14,18 @@ import { callCopilot } from "./providers/copilot.js";
 dotenv.config();
 
 const app = express();
-const port = process.env.PORT || 8080;
+// Trim env reads so a pasted "8080\n" or "  8080" doesn't propagate
+// downstream. Node's listen() is lenient about whitespace via
+// parseInt, but `cors({ origin })` compares the env value to the
+// request Origin header verbatim — a whitespace-padded env value
+// silently breaks the CORS check (no header ever matches " https://
+// example.com "). Same defensive-trim pattern from the controller /
+// evaluator / mcp-server env reads.
+const port = (process.env.PORT?.trim() || "8080");
+const allowedOrigin = process.env.ALLOWED_ORIGIN?.trim() || '*';
 
 // Middleware
-app.use(cors({ origin: process.env.ALLOWED_ORIGIN || '*' }));
+app.use(cors({ origin: allowedOrigin }));
 app.use(express.json({ limit: '100kb' }));
 
 // Initialize broker client. Note: the class is named "BrokerClient"
