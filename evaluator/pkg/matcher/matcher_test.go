@@ -902,6 +902,69 @@ func TestMatchCluster_NilNamespaceLookupIsNotApplicable(t *testing.T) {
 	}
 }
 
+func TestEffectivePolicyTypes_DedupesInput(t *testing.T) {
+	// CRD admission has list-type: set on policyTypes, but the matcher
+	// shouldn't trust input it didn't validate itself — a cluster-admin
+	// could apply a CRD without our list-type guard and let `[Ingress,
+	// Ingress]` through. Without dedup the matcher would emit duplicate
+	// Results and the status aggregator would double-count.
+	cases := []struct {
+		name string
+		in   []networkingv1.PolicyType
+		want []networkingv1.PolicyType
+	}{
+		{"empty stays empty", nil, nil},
+		{"single value untouched", []networkingv1.PolicyType{networkingv1.PolicyTypeIngress}, []networkingv1.PolicyType{networkingv1.PolicyTypeIngress}},
+		{"already-deduped passes through", []networkingv1.PolicyType{networkingv1.PolicyTypeIngress, networkingv1.PolicyTypeEgress}, []networkingv1.PolicyType{networkingv1.PolicyTypeIngress, networkingv1.PolicyTypeEgress}},
+		{"duplicate ingress collapses", []networkingv1.PolicyType{networkingv1.PolicyTypeIngress, networkingv1.PolicyTypeIngress}, []networkingv1.PolicyType{networkingv1.PolicyTypeIngress}},
+		{"duplicate egress collapses", []networkingv1.PolicyType{networkingv1.PolicyTypeEgress, networkingv1.PolicyTypeEgress}, []networkingv1.PolicyType{networkingv1.PolicyTypeEgress}},
+		{"order preserved across mixed dups", []networkingv1.PolicyType{networkingv1.PolicyTypeEgress, networkingv1.PolicyTypeIngress, networkingv1.PolicyTypeEgress}, []networkingv1.PolicyType{networkingv1.PolicyTypeEgress, networkingv1.PolicyTypeIngress}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := dedupPolicyTypes(c.in)
+			if len(got) != len(c.want) {
+				t.Fatalf("len: want %d, got %d (%v)", len(c.want), len(got), got)
+			}
+			for i := range got {
+				if got[i] != c.want[i] {
+					t.Errorf("idx %d: want %s, got %s", i, c.want[i], got[i])
+				}
+			}
+		})
+	}
+}
+
+func TestMatch_DuplicatePolicyTypesEmitOneResultPerDirection(t *testing.T) {
+	// End-to-end pin for the dedup contract: feed a policy with
+	// `policyTypes: [Ingress, Ingress]` and verify Match returns ONE
+	// result for the matched flow (not two). Double-emission would
+	// double the flowsEvaluated count in the status aggregator.
+	lookup := newLookup()
+	lookup.addPod("prod", "client-1", map[string]string{"app": "client"})
+	lookup.addPod("prod", "web-1", map[string]string{"app": "web"})
+
+	p := policy("prod", "double-ingress", networkingv1.NetworkPolicySpec{
+		PodSelector: selectMatchLabels(map[string]string{"app": "web"}),
+		PolicyTypes: []networkingv1.PolicyType{
+			networkingv1.PolicyTypeIngress,
+			networkingv1.PolicyTypeIngress, // dup
+		},
+	})
+	flow := Flow{
+		SrcPodNamespace: "prod", SrcPodName: "client-1",
+		DstPodNamespace: "prod", DstPodName: "web-1",
+		DstPort: 80, Protocol: ProtocolTCP,
+	}
+	got := Match(flow, p, lookup)
+	if len(got) != 1 {
+		t.Fatalf("expected exactly 1 Result (no double-emit on duplicate policyTypes), got %d: %#v", len(got), got)
+	}
+	if got[0].Direction != DirectionIngress {
+		t.Errorf("want Ingress, got %s", got[0].Direction)
+	}
+}
+
 func TestMatch_NamedPortMismatchOnPort(t *testing.T) {
 	// Container declares "http"=8080; flow hits 9090 — should not match.
 	lookup := newLookup()
