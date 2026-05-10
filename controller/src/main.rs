@@ -32,11 +32,9 @@ async fn main() -> Result<(), Error> {
     let broker_url = env::var("API_ENDPOINT")
         .map_err(|_| Error::Custom("API_ENDPOINT environment variable not set".to_string()))?;
 
-    let excluded_namespaces: Vec<String> = env::var("EXCLUDED_NAMESPACES")
-        .unwrap_or_else(|_| "kube-system,kguardian".to_string())
-        .split(',')
-        .map(|s| s.to_string())
-        .collect();
+    let excluded_namespaces: Vec<String> = kguardian::pod_watcher::parse_excluded_namespaces(
+        &env::var("EXCLUDED_NAMESPACES").unwrap_or_else(|_| "kube-system,kguardian".to_string()),
+    );
 
     let ignore_daemonset_traffic = env::var("IGNORE_DAEMONSET_TRAFFIC")
         .unwrap_or_else(|_| "true".to_string()) // Default to true, dont log the daemonset traffic

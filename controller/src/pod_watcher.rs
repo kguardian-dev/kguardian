@@ -95,6 +95,23 @@ fn should_process_pod(namespace: &Option<String>, excluded_namespaces: &[String]
         .map_or(false, |ns| excluded_namespaces.contains(ns))
 }
 
+/// Parse the `EXCLUDED_NAMESPACES` env var into a Vec<String>.
+///
+/// Splits on `,`, trims whitespace from each entry, drops empties.
+/// Without this, the natural human formatting `"kube-system, monitoring,
+/// ingress-nginx"` silently produced `["kube-system", " monitoring",
+/// " ingress-nginx"]` — and `should_process_pod` does an exact-match
+/// `Vec::contains`, so the spaced entries never matched any real
+/// namespace name. Operators thought they had three namespaces excluded
+/// but were processing pods from two of them.
+pub fn parse_excluded_namespaces(s: &str) -> Vec<String> {
+    s.split(',')
+        .map(|p| p.trim())
+        .filter(|p| !p.is_empty())
+        .map(|p| p.to_string())
+        .collect()
+}
+
 fn pod_unready(p: &Pod) -> Option<Vec<String>> {
     let status = p.status.as_ref()?;
     if let Some(conds) = &status.conditions {
@@ -516,6 +533,57 @@ mod tests {
     // namespaces. A regression here would either miss intended
     // exclusions (leak self-traffic into observations) or over-exclude
     // (drop traffic operators cared about).
+
+    // parse_excluded_namespaces is the EXCLUDED_NAMESPACES env-var
+    // parser. Pre-fix it was just `s.split(',').map(to_string)` —
+    // operators who wrote `"kube-system, kguardian"` (the natural
+    // human format with spaces after commas) got `[" kguardian"]`
+    // which never matched any real namespace.
+
+    #[test]
+    fn parse_excluded_namespaces_handles_no_whitespace() {
+        let got = parse_excluded_namespaces("kube-system,kguardian");
+        assert_eq!(got, vec!["kube-system", "kguardian"]);
+    }
+
+    #[test]
+    fn parse_excluded_namespaces_trims_whitespace_around_entries() {
+        // Regression: this was the bug case. "kube-system, kguardian"
+        // (with the space after the comma) silently produced
+        // [" kguardian"] which never matched any real namespace.
+        let got = parse_excluded_namespaces("kube-system, kguardian, monitoring");
+        assert_eq!(got, vec!["kube-system", "kguardian", "monitoring"]);
+    }
+
+    #[test]
+    fn parse_excluded_namespaces_filters_empty_segments() {
+        // Operators sometimes leave a trailing comma or double-comma
+        // by accident; both should produce no empty-string entries
+        // that would match the empty namespace (which itself is
+        // already filtered upstream, but defense in depth).
+        let got = parse_excluded_namespaces("kube-system,,kguardian,");
+        assert_eq!(got, vec!["kube-system", "kguardian"]);
+    }
+
+    #[test]
+    fn parse_excluded_namespaces_empty_input_yields_empty() {
+        let got = parse_excluded_namespaces("");
+        assert!(got.is_empty(), "empty input must yield no entries; got {:?}", got);
+    }
+
+    #[test]
+    fn parse_excluded_namespaces_only_whitespace_yields_empty() {
+        let got = parse_excluded_namespaces("  ,  ,   ");
+        assert!(got.is_empty(), "all-whitespace input must yield no entries; got {:?}", got);
+    }
+
+    #[test]
+    fn parse_excluded_namespaces_preserves_internal_dashes_and_dots() {
+        // Namespace names commonly contain dashes; one cluster I've
+        // seen has dotted names too. The parser only splits on commas.
+        let got = parse_excluded_namespaces("ingress-nginx, cert-manager.io , kube-public");
+        assert_eq!(got, vec!["ingress-nginx", "cert-manager.io", "kube-public"]);
+    }
 
     #[test]
     fn should_process_pod_includes_when_no_namespace() {
