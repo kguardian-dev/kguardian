@@ -1,5 +1,7 @@
 package tools
 
+import "strings"
+
 // filterByNamespace filters a slice of records by a namespace field.
 // It checks for "pod_namespace" or "svc_namespace" keys in each record.
 // Returns all data unchanged if namespace is empty or data is not a slice.
@@ -58,11 +60,18 @@ func compactTrafficSummary(data interface{}) map[string]interface{} {
 			pods[podName] = s
 		}
 
+		// The broker stores traffic_type as "INGRESS"/"EGRESS" (uppercase,
+		// emitted from controller/src/network.rs). The previous switch
+		// against lowercase silently matched nothing — both
+		// ingress_count and egress_count were always 0 in the cluster
+		// traffic summary returned to the LLM, regardless of how busy
+		// the cluster was. Case-insensitive compare so this works
+		// regardless of which writer populated the row.
 		trafficType, _ := m["traffic_type"].(string)
-		switch trafficType {
-		case "ingress":
+		switch strings.ToUpper(trafficType) {
+		case "INGRESS":
 			s.Ingress++
-		case "egress":
+		case "EGRESS":
 			s.Egress++
 		}
 

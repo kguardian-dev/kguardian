@@ -100,21 +100,26 @@ func TestCompactTrafficSummary_NonSliceYieldsZeroSummary(t *testing.T) {
 }
 
 func TestCompactTrafficSummary_AggregatesIngressEgressAndPeers(t *testing.T) {
+	// Note: traffic_type comes off the broker in UPPERCASE ("INGRESS",
+	// "EGRESS") as emitted by controller/src/network.rs. This test was
+	// previously passing lowercase, which silently matched nothing
+	// before the case-insensitive compare fix — false confidence. Use
+	// the real wire format here.
 	in := []interface{}{
 		map[string]interface{}{
-			"pod_name": "web-1", "traffic_type": "ingress",
+			"pod_name": "web-1", "traffic_type": "INGRESS",
 			"src_ip": "10.0.0.1", "dst_ip": "10.1.0.1",
 		},
 		map[string]interface{}{
-			"pod_name": "web-1", "traffic_type": "ingress",
+			"pod_name": "web-1", "traffic_type": "INGRESS",
 			"src_ip": "10.0.0.1", "dst_ip": "10.1.0.1",
 		},
 		map[string]interface{}{
-			"pod_name": "web-1", "traffic_type": "egress",
+			"pod_name": "web-1", "traffic_type": "EGRESS",
 			"src_ip": "10.1.0.1", "dst_ip": "10.0.0.5",
 		},
 		map[string]interface{}{
-			"pod_name": "db-1", "traffic_type": "ingress",
+			"pod_name": "db-1", "traffic_type": "INGRESS",
 			"src_ip": "10.1.0.1", "dst_ip": "10.2.0.1",
 		},
 	}
@@ -140,12 +145,33 @@ func TestCompactTrafficSummary_AggregatesIngressEgressAndPeers(t *testing.T) {
 	}
 }
 
+func TestCompactTrafficSummary_CaseInsensitiveTrafficType(t *testing.T) {
+	// Regression: pre-fix the switch only matched lowercase
+	// "ingress"/"egress" but the broker stores UPPERCASE. Both
+	// counters were always 0 in production. Verify the
+	// case-insensitive compare handles every realistic spelling
+	// (uppercase from the controller, mixed-case from a future
+	// hand-rolled writer).
+	cases := []string{"INGRESS", "ingress", "Ingress", "iNgReSs"}
+	for _, tt := range cases {
+		in := []interface{}{
+			map[string]interface{}{"pod_name": "x", "traffic_type": tt},
+		}
+		got := compactTrafficSummary(in)
+		pods := got["pods"].(map[string]interface{})
+		x := pods["x"].(map[string]interface{})
+		if x["ingress_count"] != 1 {
+			t.Errorf("traffic_type=%q: ingress_count must be 1, got %v", tt, x["ingress_count"])
+		}
+	}
+}
+
 func TestCompactTrafficSummary_SkipsRecordsWithoutPodName(t *testing.T) {
 	// Defensive: rows missing pod_name should be silently dropped from
 	// the per-pod aggregation rather than being keyed under "".
 	in := []interface{}{
-		map[string]interface{}{"traffic_type": "ingress"}, // no pod_name
-		map[string]interface{}{"pod_name": "web-1", "traffic_type": "ingress"},
+		map[string]interface{}{"traffic_type": "INGRESS"}, // no pod_name
+		map[string]interface{}{"pod_name": "web-1", "traffic_type": "INGRESS"},
 	}
 	got := compactTrafficSummary(in)
 	if got["pod_count"] != 1 {
