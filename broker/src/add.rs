@@ -243,11 +243,18 @@ pub fn upsert_pod_details(
 
 /// Mark-dead request body. `pod_name` is required for backward
 /// compatibility with controllers that haven't been updated yet;
-/// `pod_ip` is preferred when set because it points at the exact
-/// row (pod_details PK = pod_ip). Without pod_ip the broker falls
-/// back to `WHERE pod_name = ...` which marks EVERY historical row
-/// with that name dead — including a live restarted instance reusing
-/// the same name with a new IP.
+/// `pod_ip` is preferred when set because it acts as a sanity check
+/// against the row's current pod_ip.
+///
+/// pod_details PK is pod_name (one row per pod_name), but a pod that
+/// restarts updates the SAME row with a new pod_ip via on_conflict
+/// upsert. If the reconciler holds a stale view of the row
+/// (pod_ip=old) and posts mark_dead during the race window between
+/// restart and reconciler refresh, the precise (name, ip) filter
+/// won't match the broker's current (name, new_ip) row → no
+/// mark-dead, the live restarted pod stays alive. Without pod_ip the
+/// name-only filter would mark the live row dead, requiring an
+/// upsert from the watcher to restore is_dead=false.
 #[derive(Debug, serde::Deserialize)]
 pub struct MarkDeadRequest {
     pub pod_name: String,
@@ -275,12 +282,15 @@ pub async fn mark_pod_dead(
 /// Mark the pod_details row(s) dead. Prefer the precise (pod_ip)
 /// filter; fall back to name-only for legacy callers.
 ///
-/// The fallback's blast radius is the real concern: it sets is_dead
-/// on every row with the given name. For a workload that frequently
-/// restarts with the same pod-name (StatefulSets, DaemonSets) this
-/// would mark the live instance dead until the next pod_details
-/// upsert restores it — pollutes audit verdicts, traffic association,
-/// and reconciler counts during the window.
+/// pod_details PK is pod_name (one row per pod_name). The precise
+/// (pod_name, pod_ip) filter acts as a sanity check — if the
+/// reconciler holds a stale view, the precise filter won't match
+/// the broker's current row, leaving the (now-restarted, live)
+/// pod alone. The legacy name-only fallback unconditionally marks
+/// the (single) row dead, which is fine for actually-gone pods but
+/// briefly mis-flags a restart during the race window between the
+/// new instance's upsert and the reconciler refresh — until the
+/// next watcher upsert restores is_dead=false.
 fn mark_pod_as_dead(
     conn: &mut PgConnection,
     pod: &str,
@@ -299,9 +309,10 @@ fn mark_pod_as_dead(
 
     let updated = match ip {
         Some(precise_ip) => {
-            // Exact-row update keyed on pod_ip (the PK). The pod_name
-            // filter is included as a sanity check — if a request
-            // mismatched name+ip arrives, prefer to do nothing.
+            // Filter by (pod_name, pod_ip). pod_name is the PK so the
+            // row is unique; adding pod_ip is a sanity check that
+            // prevents marking the wrong row dead when the reconciler
+            // and broker have racing views of the pod's current IP.
             diesel::update(pod_details)
                 .filter(pod_name.eq(pod))
                 .filter(pod_ip.eq(precise_ip))
@@ -310,10 +321,14 @@ fn mark_pod_as_dead(
         }
         None => {
             // Legacy path. Logged at warn so operators can see when a
-            // controller hasn't been updated to send pod_ip yet.
+            // controller hasn't been updated to send pod_ip yet. With
+            // pod_name as PK this still updates only one row — but
+            // without the pod_ip sanity check we risk marking a
+            // racing-restart's live row dead until the next watcher
+            // upsert refreshes is_dead.
             tracing::warn!(
                 pod = %pod,
-                "mark_pod_dead called without pod_ip — falling back to name-only filter; this marks ALL rows with this name dead, including a possibly-live restarted instance"
+                "mark_pod_dead called without pod_ip — falling back to name-only filter; no IP sanity check against a racing restart"
             );
             diesel::update(pod_details)
                 .filter(pod_name.eq(pod))
