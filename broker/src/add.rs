@@ -16,19 +16,19 @@ pub async fn add_pods_batch(
     audit: web::Data<AuditClient>,
     form: web::Json<Vec<PodTraffic>>,
 ) -> Result<HttpResponse, Error> {
-    let count = form.len();
-    debug!("Received batch of {} network traffic events", count);
+    let received = form.len();
+    debug!("Received batch of {} network traffic events", received);
 
-    // Snapshot the events for the audit forwarder before we move `form`
-    // into the blocking insert task. Cheap clone — PodTraffic is small.
-    let audit_events: Vec<PodTraffic> = if audit.enabled() {
-        form.iter().cloned().collect()
-    } else {
-        Vec::new()
-    };
-
+    // Run the dedup-and-insert in the blocking pool. The returned vec
+    // is the subset of `form` that was actually new (not already in
+    // pod_traffic). Pre-fix we cloned the full batch for the audit
+    // forwarder before filtering — so a batch where 90/100 events
+    // were duplicates fired 100 evaluator round-trips for 10 actually-
+    // new flows. eBPF reports the same flow on every cycle, so most
+    // batches are >90% duplicate; the wasted audit traffic was
+    // pinning the evaluator semaphore and starving real audit work.
     let pool_for_insert = pool.clone();
-    let result = web::block(move || {
+    let inserted: Vec<PodTraffic> = web::block(move || {
         let mut conn = pool_for_insert.get()?;
         create_pod_traffic_batch(&mut conn, form)
     })
@@ -36,15 +36,16 @@ pub async fn add_pods_batch(
     .map_err(actix_web::error::ErrorInternalServerError)?;
 
     info!(
-        "Successfully inserted batch of {} network traffic events",
-        count
+        "Inserted {} new network traffic events ({} duplicates filtered)",
+        inserted.len(),
+        received - inserted.len()
     );
 
-    // Fire-and-forget audit eval per event. Spawn each evaluation on
-    // its own task so a 100-event batch doesn't serialise 100 sequential
-    // 500ms HTTP round-trips on a single tokio worker.
+    // Fire-and-forget audit eval ONLY for events that were actually new.
+    // Each evaluation runs on its own tokio task so a busy batch doesn't
+    // serialise 100 sequential 500ms HTTP round-trips on one worker.
     if audit.enabled() {
-        for event in audit_events {
+        for event in inserted.iter().cloned() {
             let audit_client = audit.get_ref().clone();
             let pool_for_audit = pool.get_ref().clone();
             actix_web::rt::spawn(async move {
@@ -53,22 +54,30 @@ pub async fn add_pods_batch(
         }
     }
 
-    Ok(HttpResponse::Ok().json(result))
+    // Wire format unchanged: respond with the count of newly-inserted
+    // rows (a usize JSON-encoded as a number). The controllers caller
+    // discards the body, so we could return more — but tightening the
+    // wire is a separate concern.
+    Ok(HttpResponse::Ok().json(inserted.len()))
 }
 
 fn create_pod_traffic_batch(
     conn: &mut PgConnection,
     batch: web::Json<Vec<PodTraffic>>,
-) -> Result<usize, DbError> {
+) -> Result<Vec<PodTraffic>, DbError> {
     use schema::pod_traffic::dsl::*;
 
     if batch.is_empty() {
-        return Ok(0);
+        return Ok(Vec::new());
     }
 
     debug!("Processing batch of {} network traffic events", batch.len());
 
-    // Filter out duplicates by checking each event against existing records
+    // Filter out duplicates by checking each event against existing records.
+    // The returned vec is what the HTTP handler uses to drive audit
+    // forwarding — only events that were genuinely new should hit the
+    // evaluator, so the dedup decision lives here as the single source
+    // of truth.
     let mut events_to_insert = Vec::new();
     for event in batch.iter() {
         if event.get_row(conn)?.is_none() {
@@ -83,7 +92,7 @@ fn create_pod_traffic_batch(
 
     if events_to_insert.is_empty() {
         debug!("All events in batch were duplicates, nothing to insert");
-        return Ok(0);
+        return Ok(events_to_insert);
     }
 
     debug!(
@@ -93,12 +102,15 @@ fn create_pod_traffic_batch(
     );
 
     // Bulk insert only the new events
-    let inserted = diesel::insert_into(pod_traffic)
+    diesel::insert_into(pod_traffic)
         .values(&events_to_insert)
         .execute(conn)?;
 
-    debug!("Successfully inserted {} network traffic events", inserted);
-    Ok(inserted)
+    debug!(
+        "Successfully inserted {} network traffic events",
+        events_to_insert.len()
+    );
+    Ok(events_to_insert)
 }
 
 #[post("/pod/traffic")]
