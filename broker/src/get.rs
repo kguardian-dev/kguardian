@@ -267,13 +267,20 @@ pub struct AuditVerdictsQuery {
     pub limit: Option<i64>,
 }
 
+/// Clamp the caller-supplied row limit into the [1, 500] window with a
+/// default of 100 when unset. Extracted so the policy can be unit-tested
+/// without a live DB.
+pub(crate) fn clamp_audit_limit(raw: Option<i64>) -> i64 {
+    raw.unwrap_or(100).clamp(1, 500)
+}
+
 #[get("/audit/verdicts")]
 pub async fn get_audit_verdicts(
     pool: web::Data<DbPool>,
     query: web::Query<AuditVerdictsQuery>,
 ) -> actix_web::Result<impl Responder> {
     let q = query.into_inner();
-    let limit = q.limit.unwrap_or(100).clamp(1, 500);
+    let limit = clamp_audit_limit(q.limit);
     let policy_name = q.policy.clone();
     let policy_ns = q.namespace.clone();
 
@@ -306,4 +313,80 @@ pub fn audit_verdicts_query(
         .limit(row_limit)
         .load::<crate::AuditVerdict>(conn)?;
     Ok(rows)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn clamp_default_when_unset() {
+        assert_eq!(clamp_audit_limit(None), 100);
+    }
+
+    #[test]
+    fn clamp_passes_through_in_range() {
+        for n in [1, 50, 100, 250, 499, 500] {
+            assert_eq!(clamp_audit_limit(Some(n)), n, "in-range {n} must be unchanged");
+        }
+    }
+
+    #[test]
+    fn clamp_caps_oversized_request() {
+        // The frontend should never request 10,000 rows — but if it did,
+        // we don't want to OOM the broker. Hard cap is 500.
+        assert_eq!(clamp_audit_limit(Some(10_000)), 500);
+        assert_eq!(clamp_audit_limit(Some(i64::MAX)), 500);
+    }
+
+    #[test]
+    fn clamp_floors_zero_and_negative() {
+        // Zero or negative would make the SQL `LIMIT 0` (no rows) or
+        // a query error; both surprising for a caller that probably
+        // forgot to set the field. Clamp to 1 row.
+        assert_eq!(clamp_audit_limit(Some(0)), 1);
+        assert_eq!(clamp_audit_limit(Some(-5)), 1);
+        assert_eq!(clamp_audit_limit(Some(i64::MIN)), 1);
+    }
+
+    // AuditVerdictsQuery deserialisation — exercised through actix's
+    // web::Query in production, but we can drive the same serde path
+    // directly via serde_urlencoded which web::Query uses internally.
+
+    fn parse_query(qs: &str) -> AuditVerdictsQuery {
+        serde_urlencoded::from_str(qs).expect("must parse")
+    }
+
+    #[test]
+    fn query_all_fields_optional() {
+        // No filters at all — all three fields are Option<_> with None.
+        let q = parse_query("");
+        assert!(q.policy.is_none());
+        assert!(q.namespace.is_none());
+        assert!(q.limit.is_none());
+    }
+
+    #[test]
+    fn query_parses_full_filter() {
+        let q = parse_query("policy=cluster-baseline-audit&namespace=&limit=42");
+        assert_eq!(q.policy.as_deref(), Some("cluster-baseline-audit"));
+        // Empty namespace is meaningful (cluster-scoped policy filter).
+        assert_eq!(q.namespace.as_deref(), Some(""));
+        assert_eq!(q.limit, Some(42));
+    }
+
+    #[test]
+    fn query_partial_filter() {
+        let q = parse_query("policy=web-deny");
+        assert_eq!(q.policy.as_deref(), Some("web-deny"));
+        assert!(q.namespace.is_none());
+        assert!(q.limit.is_none());
+    }
+
+    #[test]
+    fn query_rejects_non_numeric_limit() {
+        // Better to return a clear 400 than to silently coerce.
+        let r: Result<AuditVerdictsQuery, _> = serde_urlencoded::from_str("limit=abc");
+        assert!(r.is_err(), "non-numeric limit must fail to parse");
+    }
 }
