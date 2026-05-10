@@ -105,22 +105,27 @@ func TestCompactTrafficSummary_AggregatesIngressEgressAndPeers(t *testing.T) {
 	// previously passing lowercase, which silently matched nothing
 	// before the case-insensitive compare fix — false confidence. Use
 	// the real wire format here.
+	//
+	// Similarly: the broker emits the peer IP as `traffic_in_out_ip`,
+	// NOT `dst_ip` / `src_ip`. The previous fixture used the latter
+	// (fictional) keys, which the implementation also (incorrectly)
+	// read — masking that unique_peer_count was always 0 in production.
 	in := []interface{}{
 		map[string]interface{}{
 			"pod_name": "web-1", "traffic_type": "INGRESS",
-			"src_ip": "10.0.0.1", "dst_ip": "10.1.0.1",
+			"traffic_in_out_ip": "10.0.0.1",
 		},
 		map[string]interface{}{
 			"pod_name": "web-1", "traffic_type": "INGRESS",
-			"src_ip": "10.0.0.1", "dst_ip": "10.1.0.1",
+			"traffic_in_out_ip": "10.0.0.1",
 		},
 		map[string]interface{}{
 			"pod_name": "web-1", "traffic_type": "EGRESS",
-			"src_ip": "10.1.0.1", "dst_ip": "10.0.0.5",
+			"traffic_in_out_ip": "10.0.0.5",
 		},
 		map[string]interface{}{
 			"pod_name": "db-1", "traffic_type": "INGRESS",
-			"src_ip": "10.1.0.1", "dst_ip": "10.2.0.1",
+			"traffic_in_out_ip": "10.2.0.1",
 		},
 	}
 	got := compactTrafficSummary(in)
@@ -139,9 +144,64 @@ func TestCompactTrafficSummary_AggregatesIngressEgressAndPeers(t *testing.T) {
 	if web["egress_count"] != 1 {
 		t.Errorf("web-1 egress: want 1, got %v", web["egress_count"])
 	}
-	// 10.0.0.1, 10.1.0.1, 10.0.0.5 — three unique peers across three traffic rows.
-	if web["unique_peer_count"] != 3 {
-		t.Errorf("web-1 unique peers: want 3, got %v", web["unique_peer_count"])
+	// web-1 talked to 10.0.0.1 (twice, ingress) and 10.0.0.5 (once,
+	// egress). Two unique peers from web-1's perspective.
+	if web["unique_peer_count"] != 2 {
+		t.Errorf("web-1 unique peers: want 2, got %v", web["unique_peer_count"])
+	}
+}
+
+func TestCompactTrafficSummary_PeerIPFieldIsTrafficInOutIP(t *testing.T) {
+	// Regression for the unique_peer_count=always-0 bug. Pre-fix the
+	// code referenced m["dst_ip"] and m["src_ip"] — neither field
+	// exists in the broker's PodTraffic wire format, which emits
+	// traffic_in_out_ip as the peer side. Both nils → no peers
+	// counted → unique_peer_count=0 in every cluster_traffic
+	// response sent to the LLM, regardless of how chatty a pod was.
+	in := []interface{}{
+		map[string]interface{}{
+			"pod_name":          "web-1",
+			"traffic_type":      "EGRESS",
+			"traffic_in_out_ip": "10.42.0.5",
+		},
+		map[string]interface{}{
+			"pod_name":          "web-1",
+			"traffic_type":      "EGRESS",
+			"traffic_in_out_ip": "10.42.0.6",
+		},
+		map[string]interface{}{
+			"pod_name":          "web-1",
+			"traffic_type":      "EGRESS",
+			"traffic_in_out_ip": "10.42.0.5", // dup, must not double-count
+		},
+	}
+	got := compactTrafficSummary(in)
+	pods := got["pods"].(map[string]interface{})
+	web := pods["web-1"].(map[string]interface{})
+	if web["unique_peer_count"] != 2 {
+		t.Errorf("unique_peer_count: want 2 (10.42.0.5 and 10.42.0.6), got %v", web["unique_peer_count"])
+	}
+}
+
+func TestCompactTrafficSummary_LegacyFakeFieldsDoNotCount(t *testing.T) {
+	// Defense in depth: should a caller (or test fixture) pass the
+	// fictional dst_ip / src_ip fields, they MUST NOT contribute to
+	// the peer count. The whole point of this commits fix was to
+	// stop reading those — pin that contract.
+	in := []interface{}{
+		map[string]interface{}{
+			"pod_name":     "web-1",
+			"traffic_type": "EGRESS",
+			"dst_ip":       "192.0.2.1",
+			"src_ip":       "192.0.2.2",
+			// no traffic_in_out_ip
+		},
+	}
+	got := compactTrafficSummary(in)
+	pods := got["pods"].(map[string]interface{})
+	web := pods["web-1"].(map[string]interface{})
+	if web["unique_peer_count"] != 0 {
+		t.Errorf("fictional dst_ip / src_ip MUST NOT count toward peers; got unique_peer_count=%v", web["unique_peer_count"])
 	}
 }
 

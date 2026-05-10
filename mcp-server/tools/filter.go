@@ -75,12 +75,16 @@ func compactTrafficSummary(data interface{}) map[string]interface{} {
 			s.Egress++
 		}
 
-		// Track unique peers by destination IP
-		if dstIP, ok := m["dst_ip"].(string); ok && dstIP != "" {
-			s.Peers[dstIP] = true
-		}
-		if srcIP, ok := m["src_ip"].(string); ok && srcIP != "" {
-			s.Peers[srcIP] = true
+		// Track unique peers by the actual "other end" of the
+		// conversation. The broker's PodTraffic wire format has NO
+		// dst_ip / src_ip fields — the previous code referenced both
+		// and got nil on every record, so unique_peer_count was
+		// always 0 in the cluster_traffic summary sent to the LLM.
+		// The real field is traffic_in_out_ip (destination IP for
+		// egress, source IP for ingress — already the peer-side IP
+		// regardless of direction).
+		if peer, ok := m["traffic_in_out_ip"].(string); ok && peer != "" {
+			s.Peers[peer] = true
 		}
 	}
 
