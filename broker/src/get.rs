@@ -154,8 +154,21 @@ pub async fn get_pod_by_name<'a>(
 
 pub fn pod_name(conn: &mut PgConnection, name: &str) -> Result<Option<PodDetail>, DbError> {
     use schema::pod_details::dsl::*;
+    // pod_details PK is pod_ip — multiple historical rows can share a
+    // pod_name (StatefulSets / DaemonSets / any workload that restarts
+    // reusing the same name with a new IP). Without an explicit order,
+    // .first() returned an arbitrary row — frequently a stale dead
+    // entry from a previous incarnation, even when a live one exists.
+    //
+    // Order: live rows first (is_dead ASC = false-before-true), then
+    // most recent (time_stamp DESC). So a caller looking up a name
+    // gets the alive-and-current row whenever one exists; falls back
+    // to the most recent dead entry only when nothing is alive (which
+    // is the only reasonable signal we can give for a fully-retired
+    // pod name).
     let pod = pod_details
         .filter(pod_name.eq(name.to_string()))
+        .order((is_dead.asc(), time_stamp.desc()))
         .first::<PodDetail>(conn)
         .optional()?;
     Ok(pod)
