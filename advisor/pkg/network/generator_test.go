@@ -386,3 +386,129 @@ func TestInitOutputDirectory(t *testing.T) {
 // would primarily test the flow control and error handling by combining mocks
 // for GeneratePolicy and HandlePolicyOutput. They are omitted here for brevity
 // but should be added for full coverage.
+
+// --- GenerateAndHandlePolicy + BatchGenerateAndHandlePolicies ---
+//
+// The original test file noted these were "omitted for brevity but
+// should be added for full coverage". Add them now: regression in
+// the batch's "continue on error, return first error" semantics
+// would silently swallow the failure of the first pod and only
+// report a later one (or none).
+
+func TestGenerateAndHandlePolicy_NilOutputIsNotAnError(t *testing.T) {
+	// When GeneratePolicy returns (nil, nil) — pod had traffic but the
+	// generator decided not to emit a policy — GenerateAndHandlePolicy
+	// must log and return nil, NOT call HandlePolicyOutput which would
+	// NPE on nil.
+	prevTraffic := api.GetPodTrafficFunc
+	prevSpec := api.GetPodSpecFunc
+	defer func() {
+		api.GetPodTrafficFunc = prevTraffic
+		api.GetPodSpecFunc = prevSpec
+	}()
+
+	// Non-empty traffic so GeneratePolicy doesn't bail out early on
+	// "no traffic data".
+	api.GetPodTrafficFunc = func(name string) ([]api.PodTraffic, error) {
+		return []api.PodTraffic{{SrcPodName: name, SrcIP: "10.0.0.1", TrafficType: "INGRESS"}}, nil
+	}
+	api.GetPodSpecFunc = func(ip string) (*api.PodDetail, error) {
+		return &api.PodDetail{PodIP: ip, Name: "web-1", Namespace: "prod"}, nil
+	}
+
+	cfg := &mockConfigProvider{}
+	svc := NewPolicyService(cfg, StandardPolicy)
+	// Generator returns nil to force the nil-output branch in
+	// GenerateAndHandlePolicy.
+	svc.RegisterGenerator(&nilOutputGenerator{})
+
+	err := svc.GenerateAndHandlePolicy("web-1", StandardPolicy)
+	assert.NoError(t, err, "nil output must not error")
+}
+
+// nilOutputGenerator returns (nil, nil) so the GeneratePolicy
+// return-value gate inside GenerateAndHandlePolicy fires.
+type nilOutputGenerator struct{}
+
+func (nilOutputGenerator) Generate(podName string, podTraffic []api.PodTraffic, podDetail *api.PodDetail) (interface{}, error) {
+	return nil, nil
+}
+func (nilOutputGenerator) GetType() PolicyType { return StandardPolicy }
+
+func TestBatchGenerateAndHandlePolicies_EmptyListReturnsNil(t *testing.T) {
+	cfg := &mockConfigProvider{}
+	svc := NewPolicyService(cfg, StandardPolicy)
+	svc.RegisterGenerator(&mockPolicyGenerator{policyType: StandardPolicy})
+
+	err := svc.BatchGenerateAndHandlePolicies([]string{}, StandardPolicy)
+	assert.NoError(t, err, "empty list of pods must return nil")
+}
+
+func TestBatchGenerateAndHandlePolicies_ContinuesOnErrorAndReturnsFirst(t *testing.T) {
+	// Three pods. First fails, second succeeds, third fails differently.
+	// Contract: all three must be processed; the FIRST error returned.
+	prevTraffic := api.GetPodTrafficFunc
+	prevSpec := api.GetPodSpecFunc
+	defer func() {
+		api.GetPodTrafficFunc = prevTraffic
+		api.GetPodSpecFunc = prevSpec
+	}()
+	api.GetPodSpecFunc = func(ip string) (*api.PodDetail, error) {
+		return &api.PodDetail{PodIP: ip, Name: "pod-b", Namespace: "prod"}, nil
+	}
+
+	calls := []string{}
+	firstErr := fmt.Errorf("FIRST: deliberate failure for pod-a")
+	thirdErr := fmt.Errorf("THIRD: different failure for pod-c")
+
+	api.GetPodTrafficFunc = func(name string) ([]api.PodTraffic, error) {
+		calls = append(calls, name)
+		switch name {
+		case "pod-a":
+			return nil, firstErr
+		case "pod-b":
+			return []api.PodTraffic{{SrcPodName: "pod-b", SrcIP: "10.0.0.1", TrafficType: "INGRESS"}}, nil
+		case "pod-c":
+			return nil, thirdErr
+		}
+		return nil, nil
+	}
+
+	cfg := &mockConfigProvider{}
+	svc := NewPolicyService(cfg, StandardPolicy)
+	svc.RegisterGenerator(&mockPolicyGenerator{policyType: StandardPolicy})
+
+	err := svc.BatchGenerateAndHandlePolicies([]string{"pod-a", "pod-b", "pod-c"}, StandardPolicy)
+
+	if assert.Error(t, err) {
+		// Critical: must be the FIRST error, not the LAST. A regression
+		// that overwrites firstError with each iteration's err would
+		// slip past a non-checked test.
+		assert.Equal(t, firstErr, err, "expected first error to be returned, not later ones")
+	}
+	// All three pods processed (continue-on-error semantics).
+	assert.Equal(t, []string{"pod-a", "pod-b", "pod-c"}, calls)
+}
+
+func TestBatchGenerateAndHandlePolicies_AllSuccessReturnsNil(t *testing.T) {
+	prevTraffic := api.GetPodTrafficFunc
+	prevSpec := api.GetPodSpecFunc
+	defer func() {
+		api.GetPodTrafficFunc = prevTraffic
+		api.GetPodSpecFunc = prevSpec
+	}()
+
+	api.GetPodTrafficFunc = func(name string) ([]api.PodTraffic, error) {
+		return []api.PodTraffic{{SrcPodName: name, SrcIP: "10.0.0.1", TrafficType: "INGRESS"}}, nil
+	}
+	api.GetPodSpecFunc = func(ip string) (*api.PodDetail, error) {
+		return &api.PodDetail{PodIP: ip, Name: "from-mock", Namespace: "prod"}, nil
+	}
+
+	cfg := &mockConfigProvider{}
+	svc := NewPolicyService(cfg, StandardPolicy)
+	svc.RegisterGenerator(&mockPolicyGenerator{policyType: StandardPolicy})
+
+	err := svc.BatchGenerateAndHandlePolicies([]string{"a", "b"}, StandardPolicy)
+	assert.NoError(t, err)
+}
