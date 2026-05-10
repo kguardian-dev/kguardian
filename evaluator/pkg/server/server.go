@@ -163,7 +163,7 @@ func (s *Server) handleEvaluate(w http.ResponseWriter, r *http.Request) {
 				flow.SrcPodNamespace+"/"+flow.SrcPodName,
 				flow.DstPodNamespace+"/"+flow.DstPodName,
 				string(flow.Protocol), string(r.Direction),
-				flow.DstPort, wouldDeny,
+				flow.DstPort, wouldDeny, r.PolicyGeneration,
 			)
 		}
 		if wouldDeny {

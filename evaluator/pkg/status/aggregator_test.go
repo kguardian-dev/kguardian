@@ -22,9 +22,9 @@ func TestRecord_NotApplicableNotCounted(t *testing.T) {
 	// from an Allow doesn't increment the offender table while still
 	// bumping flowsEvaluated.
 	a := &Aggregator{counts: map[policyKey]*policyAgg{}, topN: 10}
-	a.Record("prod", "p1", "prod/a", "prod/b", "TCP", "Ingress", 80, false)
-	a.Record("prod", "p1", "prod/a", "prod/b", "TCP", "Ingress", 80, true)
-	a.Record("prod", "p1", "prod/x", "prod/y", "TCP", "Ingress", 81, true)
+	a.Record("prod", "p1", "prod/a", "prod/b", "TCP", "Ingress", 80, false, 0)
+	a.Record("prod", "p1", "prod/a", "prod/b", "TCP", "Ingress", 80, true, 0)
+	a.Record("prod", "p1", "prod/x", "prod/y", "TCP", "Ingress", 81, true, 0)
 
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -151,7 +151,7 @@ func TestFlush_PatchesNamespacedPolicy(t *testing.T) {
 	dyn := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(scheme, gvrToListKind, policy)
 
 	a := New(dyn, quietLog())
-	a.Record("prod", "web-deny", "prod/client-a", "prod/web-1", "TCP", "Ingress", 8080, true)
+	a.Record("prod", "web-deny", "prod/client-a", "prod/web-1", "TCP", "Ingress", 8080, true, 0)
 	a.flush(context.Background())
 
 	var sawPatch *clienttesting.PatchActionImpl
@@ -187,6 +187,73 @@ func TestFlush_PatchesNamespacedPolicy(t *testing.T) {
 	}
 }
 
+func TestRecord_ObservedGenerationMonotonic(t *testing.T) {
+	// observedGeneration must only ever go up — concurrent flows could
+	// arrive with different stale views of the policy spec. The status
+	// subresource appearing to regress would confuse operators.
+	a := &Aggregator{counts: map[policyKey]*policyAgg{}, topN: 10}
+	key := policyKey{namespace: "prod", name: "p1"}
+
+	a.Record("prod", "p1", "/", "/", "TCP", "Ingress", 80, true, 3)
+	if got := a.counts[key].observedGeneration; got != 3 {
+		t.Fatalf("first record: want gen=3, got %d", got)
+	}
+
+	// Older generation arrives next — must NOT overwrite the newer one.
+	a.Record("prod", "p1", "/", "/", "TCP", "Ingress", 80, true, 1)
+	if got := a.counts[key].observedGeneration; got != 3 {
+		t.Errorf("stale record: want gen=3 (no regression), got %d", got)
+	}
+
+	// Newer generation — wins.
+	a.Record("prod", "p1", "/", "/", "TCP", "Ingress", 80, true, 7)
+	if got := a.counts[key].observedGeneration; got != 7 {
+		t.Errorf("newer record: want gen=7, got %d", got)
+	}
+}
+
+func TestFlush_PatchIncludesObservedGeneration(t *testing.T) {
+	// Verify the field actually makes it onto the wire — silent drop
+	// here would defeat the whole point of plumbing the generation
+	// through the matcher.
+	gvr := schema.GroupVersionResource{
+		Group: v1alpha1.GroupName, Version: v1alpha1.Version, Resource: "auditnetworkpolicies",
+	}
+	policy := &unstructured.Unstructured{}
+	policy.SetGroupVersionKind(schema.GroupVersionKind{
+		Group: v1alpha1.GroupName, Version: v1alpha1.Version, Kind: "AuditNetworkPolicy",
+	})
+	policy.SetNamespace("prod")
+	policy.SetName("p1")
+
+	scheme := runtime.NewScheme()
+	dyn := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(scheme, map[schema.GroupVersionResource]string{
+		gvr: "AuditNetworkPolicyList",
+		{Group: v1alpha1.GroupName, Version: v1alpha1.Version, Resource: "auditclusternetworkpolicies"}: "AuditClusterNetworkPolicyList",
+	}, policy)
+
+	a := New(dyn, quietLog())
+	a.Record("prod", "p1", "/", "/", "TCP", "Ingress", 80, true, 5)
+	a.flush(context.Background())
+
+	for _, action := range dyn.Actions() {
+		patch, ok := action.(clienttesting.PatchActionImpl)
+		if !ok || patch.GetSubresource() != "status" {
+			continue
+		}
+		var body map[string]any
+		if err := json.Unmarshal(patch.GetPatch(), &body); err != nil {
+			t.Fatalf("unmarshal: %v", err)
+		}
+		st := body["status"].(map[string]any)
+		if got := st["observedGeneration"]; got != float64(5) {
+			t.Errorf("observedGeneration on patch: want 5, got %v", got)
+		}
+		return
+	}
+	t.Fatalf("expected status patch action; got actions=%v", dyn.Actions())
+}
+
 func TestFlush_RoutesClusterPolicyToClusterGVR(t *testing.T) {
 	// Cluster-scoped: namespace == "". Must hit clusterGVR path, not
 	// the namespaced GVR.
@@ -207,7 +274,7 @@ func TestFlush_RoutesClusterPolicyToClusterGVR(t *testing.T) {
 	dyn := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(scheme, gvrToListKind, cluster)
 
 	a := New(dyn, quietLog())
-	a.Record("", "cluster-baseline-audit", "/", "prod/web-1", "TCP", "Ingress", 80, true)
+	a.Record("", "cluster-baseline-audit", "/", "prod/web-1", "TCP", "Ingress", 80, true, 0)
 	a.flush(context.Background())
 
 	var sawClusterPatch bool

@@ -53,7 +53,13 @@ type policyAgg struct {
 	flowsEvaluated int64
 	flowsWouldDeny int64
 	lastEvaluated  time.Time
-	tuples         map[tupleKey]int64
+	// observedGeneration is the .metadata.generation of the policy the
+	// most recent verdict was evaluated against. Reported on the
+	// status subresource so operators can compare against the live
+	// .metadata.generation to know whether the evaluator has seen
+	// their latest spec edit (standard k8s controller convention).
+	observedGeneration int64
+	tuples             map[tupleKey]int64
 }
 
 // New returns an Aggregator wired to a dynamic client.
@@ -80,7 +86,11 @@ func (a *Aggregator) SetTopN(n int) { a.topN = n }
 // `wouldDeny` distinguishes the two paths the server takes: any
 // verdict (Allow / WouldDeny / NotApplicable) bumps `flowsEvaluated`,
 // but only WouldDeny adds to the offender table.
-func (a *Aggregator) Record(policyNamespace, policyName, srcPod, dstPod, protocol, direction string, dstPort int32, wouldDeny bool) {
+//
+// `generation` is the policy's .metadata.generation at the time of
+// evaluation. The aggregator keeps the highest value seen so the
+// status's observedGeneration monotonically tracks operator edits.
+func (a *Aggregator) Record(policyNamespace, policyName, srcPod, dstPod, protocol, direction string, dstPort int32, wouldDeny bool, generation int64) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	key := policyKey{namespace: policyNamespace, name: policyName}
@@ -91,6 +101,13 @@ func (a *Aggregator) Record(policyNamespace, policyName, srcPod, dstPod, protoco
 	}
 	agg.flowsEvaluated++
 	agg.lastEvaluated = time.Now().UTC()
+	// Monotonic: only update if we've seen a newer generation. Two
+	// flows for the same policy could arrive concurrently with
+	// different stale views; the larger wins so status doesn't
+	// appear to regress.
+	if generation > agg.observedGeneration {
+		agg.observedGeneration = generation
+	}
 	if !wouldDeny {
 		return
 	}
@@ -131,10 +148,11 @@ func (a *Aggregator) flush(ctx context.Context) {
 		// Take a shallow copy of the agg + a fresh tuples map snapshot
 		// so we can release the lock before doing API calls.
 		copyAgg := &policyAgg{
-			flowsEvaluated: v.flowsEvaluated,
-			flowsWouldDeny: v.flowsWouldDeny,
-			lastEvaluated:  v.lastEvaluated,
-			tuples:         make(map[tupleKey]int64, len(v.tuples)),
+			flowsEvaluated:     v.flowsEvaluated,
+			flowsWouldDeny:     v.flowsWouldDeny,
+			lastEvaluated:      v.lastEvaluated,
+			observedGeneration: v.observedGeneration,
+			tuples:             make(map[tupleKey]int64, len(v.tuples)),
 		}
 		for tk, n := range v.tuples {
 			copyAgg.tuples[tk] = n
@@ -159,6 +177,7 @@ func (a *Aggregator) flush(ctx context.Context) {
 func (a *Aggregator) patchStatus(ctx context.Context, key policyKey, agg *policyAgg) error {
 	last := metav1.NewTime(agg.lastEvaluated)
 	statusPatch := v1alpha1.AuditNetworkPolicyStatus{
+		ObservedGeneration: agg.observedGeneration,
 		Evaluation: v1alpha1.EvaluationStatus{
 			LastEvaluated:  &last,
 			FlowsEvaluated: agg.flowsEvaluated,

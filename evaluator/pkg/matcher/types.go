@@ -92,9 +92,15 @@ type Result struct {
 	// AuditNetworkPolicy / AuditClusterNetworkPolicy. Stable across
 	// renames of the same generation; empty when the matcher couldn't
 	// resolve a UID (e.g. a synthetic test policy).
-	PolicyUID string    `json:"policyUID,omitempty"`
-	Direction Direction `json:"direction"`
-	Verdict   Verdict   `json:"verdict"`
+	PolicyUID string `json:"policyUID,omitempty"`
+	// PolicyGeneration is the .metadata.generation of the policy at
+	// the time of evaluation. The server forwards it to the status
+	// aggregator so observedGeneration in the CRD's status subresource
+	// tracks the latest generation actually evaluated. Zero when the
+	// matcher couldn't determine it (e.g. a synthetic test policy).
+	PolicyGeneration int64     `json:"policyGeneration,omitempty"`
+	Direction        Direction `json:"direction"`
+	Verdict          Verdict   `json:"verdict"`
 	// Reason is a human-readable explanation populated for
 	// WouldDeny verdicts.
 	Reason string `json:"reason,omitempty"`
