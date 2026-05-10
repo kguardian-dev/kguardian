@@ -248,7 +248,7 @@ pub fn upsert_pod_details(
 /// back to `WHERE pod_name = ...` which marks EVERY historical row
 /// with that name dead — including a live restarted instance reusing
 /// the same name with a new IP.
-#[derive(serde::Deserialize)]
+#[derive(Debug, serde::Deserialize)]
 pub struct MarkDeadRequest {
     pub pod_name: String,
     #[serde(default)]
@@ -460,6 +460,53 @@ pub fn create_pod_syscalls(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // MarkDeadRequest deserialization is the wire-format contract
+    // between the controllers reconciler and the brokers
+    // /pod/mark_dead endpoint. Pin both shapes — pre-fix
+    // (pod_name only) and post-fix (pod_name + pod_ip) — so a future
+    // refactor that renames the field, or changes the pod_ip flag
+    // from optional to required, shows up as a test failure rather
+    // than a silent regression on a fleet of mixed-version controllers.
+
+    #[test]
+    fn mark_dead_request_legacy_shape_pod_name_only() {
+        // Pre-fix wire: controllers running an old version send only
+        // pod_name. Must still deserialise cleanly.
+        let json = r#"{"pod_name":"web-1"}"#;
+        let got: MarkDeadRequest = serde_json::from_str(json).expect("decode");
+        assert_eq!(got.pod_name, "web-1");
+        assert_eq!(got.pod_ip, None);
+    }
+
+    #[test]
+    fn mark_dead_request_new_shape_with_pod_ip() {
+        // Post-fix wire: controllers post-iteration-66 include pod_ip.
+        let json = r#"{"pod_name":"web-1","pod_ip":"10.42.3.5"}"#;
+        let got: MarkDeadRequest = serde_json::from_str(json).expect("decode");
+        assert_eq!(got.pod_name, "web-1");
+        assert_eq!(got.pod_ip.as_deref(), Some("10.42.3.5"));
+    }
+
+    #[test]
+    fn mark_dead_request_pod_ip_explicit_null_treated_as_none() {
+        // A JSON `null` for pod_ip should also produce None.
+        // serde's Option<String> with default handles both
+        // missing and explicit null this way.
+        let json = r#"{"pod_name":"web-1","pod_ip":null}"#;
+        let got: MarkDeadRequest = serde_json::from_str(json).expect("decode");
+        assert_eq!(got.pod_ip, None);
+    }
+
+    #[test]
+    fn mark_dead_request_rejects_missing_pod_name() {
+        // pod_name is REQUIRED — without it the broker has nothing
+        // to filter on at all (neither the precise path nor the
+        // legacy fallback can run). Must reject at parse time.
+        let json = r#"{"pod_ip":"10.42.3.5"}"#;
+        let got: Result<MarkDeadRequest, _> = serde_json::from_str(json);
+        assert!(got.is_err(), "missing pod_name must fail to decode, got {:?}", got);
+    }
 
     // is_routable_svc_ip mirrors the controllers
     // is_routable_cluster_ip — defence-in-depth at the broker for any
