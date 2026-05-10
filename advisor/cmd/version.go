@@ -2,6 +2,8 @@ package cmd
 
 import (
 	"fmt"
+	"io"
+	"os"
 	"runtime"
 
 	log "github.com/rs/zerolog/log"
@@ -16,6 +18,19 @@ var (
 	GitCommit = "unknown"
 )
 
+// formatClientVersion writes the client-version block to w. Extracted
+// so tests can assert the exact lines without spawning the cobra command
+// or capturing stdout. Output stays grep-able for the kguardian version
+// release-process scripts.
+func formatClientVersion(w io.Writer, version, gitCommit, buildDate, goVersion, goos, goarch string) {
+	fmt.Fprintf(w, "Client Version:\n")
+	fmt.Fprintf(w, "  Version:    %s\n", version)
+	fmt.Fprintf(w, "  Git Commit: %s\n", gitCommit)
+	fmt.Fprintf(w, "  Build Date: %s\n", buildDate)
+	fmt.Fprintf(w, "  Go Version: %s\n", goVersion)
+	fmt.Fprintf(w, "  Platform:   %s/%s\n", goos, goarch)
+}
+
 var versionCmd = &cobra.Command{
 	Use:   "version",
 	Short: "Print the client and server version information",
@@ -24,13 +39,7 @@ var versionCmd = &cobra.Command{
 		// Set up the logger first, so we get useful debug output
 		setupLogger()
 
-		// Display client version information
-		fmt.Printf("Client Version:\n")
-		fmt.Printf("  Version:    %s\n", Version)
-		fmt.Printf("  Git Commit: %s\n", GitCommit)
-		fmt.Printf("  Build Date: %s\n", BuildDate)
-		fmt.Printf("  Go Version: %s\n", runtime.Version())
-		fmt.Printf("  Platform:   %s/%s\n", runtime.GOOS, runtime.GOARCH)
+		formatClientVersion(os.Stdout, Version, GitCommit, BuildDate, runtime.Version(), runtime.GOOS, runtime.GOARCH)
 
 		// Try to get server version information
 		fmt.Printf("\nServer Version:\n")
