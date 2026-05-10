@@ -386,6 +386,15 @@ database:
     # promoting from one major to another after running `pg_upgrade`
     # offline. See charts/kguardian/UPGRADING.md.
     safeBoot: true
+    # -- Run a pg_dumpall as a Helm pre-upgrade/pre-rollback hook before
+    # each chart upgrade. The dump is printed to the Job's stdout —
+    # retrieve with `kubectl logs job/<database.name>-pre-upgrade-backup`
+    # or pipe to your existing log-aggregation backup pipeline.
+    #
+    # Best-effort: a failed backup is logged but does NOT block the
+    # upgrade. Set to false to skip entirely (e.g. for ephemeral test
+    # deployments).
+    preUpgradeBackup: true
 
   container:
     # -- PostgreSQL container port

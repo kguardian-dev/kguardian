@@ -31,8 +31,25 @@ PVC at a path PostgreSQL doesn't recognise — at which point `initdb`
 runs over an empty subtree and the broker silently sees a fresh schema.
 The data isn't recoverable after the fact.
 
-Take a logical dump before every `helm upgrade` until automated
-pre-upgrade hooks land:
+### Automatic: `database.persistence.preUpgradeBackup`
+
+The chart runs `pg_dumpall` as a Helm `pre-upgrade,pre-rollback` hook
+when `database.persistence.preUpgradeBackup` is `true` (the default).
+The dump streams to the Job's stdout — retrieve it with:
+
+```sh
+kubectl -n <ns> logs job/kguardian-db-pre-upgrade-backup > kguardian-db-$(date +%Y%m%d-%H%M).sql
+```
+
+The hook is best-effort: if the backup fails (DB unreachable,
+`pg_dumpall` errors), it logs a warning but does NOT block the
+upgrade. To skip entirely (for ephemeral test deployments) set
+`database.persistence.preUpgradeBackup: false`.
+
+### Manual fallback
+
+Take a logical dump yourself if you want to capture state at a
+specific moment that isn't tied to a chart upgrade:
 
 ```sh
 kubectl -n <ns> exec deploy/kguardian-db -- \
