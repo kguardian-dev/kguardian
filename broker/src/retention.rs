@@ -7,7 +7,8 @@
 //! This module spawns a tokio task on broker startup that wakes every
 //! `RETENTION_INTERVAL` and runs:
 //!
-//!     DELETE FROM audit_verdicts WHERE observed_at < NOW() - INTERVAL '<N> days';
+//!     DELETE FROM audit_verdicts
+//!     WHERE observed_at < timezone('UTC', NOW()) - INTERVAL '<N> days';
 //!
 //! Configuration:
 //!
@@ -73,9 +74,18 @@ async fn run_pass(pool: &DbPool, days: u32) {
         // as text — the server casts to interval. That avoids any
         // SQL-injection surface even if `days` were ever sourced from
         // user input (it isn't, but defensible).
+        // observed_at is stored as TIMESTAMP (no timezone) carrying
+        // UTC values (audit.rs sets it via Utc::now().naive_utc()).
+        // Use `timezone('UTC', NOW())` so the right-hand side is a
+        // UTC-naive timestamp regardless of the postgres session
+        // timezone. The previous `NOW() - interval` form relied on
+        // the session TZ being UTC; a misconfigured operator running
+        // postgres with a non-UTC default would compute the wrong
+        // retention window (typically off by single-digit hours on
+        // a multi-day boundary — small but real correctness drift).
         let deleted = sql_query(
             "DELETE FROM audit_verdicts \
-             WHERE observed_at < (NOW() - $1::interval)",
+             WHERE observed_at < timezone('UTC', NOW()) - $1::interval",
         )
         .bind::<diesel::sql_types::Text, _>(interval)
         .execute(&mut conn)
