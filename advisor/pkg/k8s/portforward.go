@@ -10,10 +10,31 @@ import (
 	"time"
 
 	log "github.com/rs/zerolog/log"
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/tools/portforward"
 	"k8s.io/client-go/transport/spdy"
 )
+
+// IsPodReady returns true only when the pod's status carries a
+// Ready condition with status=True. The previous implementation
+// defaulted to true and flipped false on an explicit Ready=False —
+// so a freshly-created pod whose conditions slice hadn't yet been
+// populated (no scheduler ack) was treated as ready, and the
+// port-forwarder would attempt to connect, producing a confusing
+// connection-refused error rather than a clear "wait for the pod"
+// message.
+func IsPodReady(pod *corev1.Pod) bool {
+	if pod == nil {
+		return false
+	}
+	for _, c := range pod.Status.Conditions {
+		if c.Type == corev1.PodReady {
+			return c.Status == corev1.ConditionTrue
+		}
+	}
+	return false
+}
 
 var (
 	// TODO: This namespace should be configurable if overridden
@@ -126,22 +147,15 @@ func PortForward(config *Config, brokerNamespace, brokerService string) (chan st
 		}
 		log.Debug().Msgf("Available port-forwarding pods: %s", strings.Join(podNames, ", "))
 
-		// Find a ready pod to use
+		// Find a ready pod to use — IsPodReady requires the Ready
+		// condition to be present AND True. The previous inline check
+		// treated "no Ready condition yet" as ready.
 		var readyPod metav1.ObjectMeta
 		foundReadyPod := false
 
-		for _, pod := range pods.Items {
-			// Check if pod is ready
-			podReady := true
-			for _, condition := range pod.Status.Conditions {
-				if condition.Type == "Ready" && condition.Status != "True" {
-					podReady = false
-					break
-				}
-			}
-
-			if podReady {
-				readyPod = pod.ObjectMeta
+		for i := range pods.Items {
+			if IsPodReady(&pods.Items[i]) {
+				readyPod = pods.Items[i].ObjectMeta
 				foundReadyPod = true
 				break
 			}
