@@ -549,4 +549,61 @@ mod tests {
             assert_eq!(db_migration_max_retries(), 20);
         });
     }
+
+    // listen_addr is the bind-address env reader added in iteration
+    // 130 to wire the chart's broker.container.port through to the
+    // Rust binary. Same env-trim defense + default-fallback pattern.
+
+    fn with_listen_env<F: FnOnce()>(value: Option<&str>, f: F) {
+        let prev = std::env::var("LISTEN_ADDR").ok();
+        match value {
+            Some(v) => std::env::set_var("LISTEN_ADDR", v),
+            None => std::env::remove_var("LISTEN_ADDR"),
+        }
+        f();
+        match prev {
+            Some(v) => std::env::set_var("LISTEN_ADDR", v),
+            None => std::env::remove_var("LISTEN_ADDR"),
+        }
+    }
+
+    #[test]
+    fn listen_addr_defaults_when_unset() {
+        with_listen_env(None, || {
+            assert_eq!(listen_addr(), DEFAULT_LISTEN_ADDR);
+        });
+    }
+
+    #[test]
+    fn listen_addr_honors_override() {
+        with_listen_env(Some("0.0.0.0:8080"), || {
+            assert_eq!(listen_addr(), "0.0.0.0:8080");
+        });
+    }
+
+    #[test]
+    fn listen_addr_empty_falls_back_to_default() {
+        // Operator setting LISTEN_ADDR="" (or set then unset back)
+        // shouldnt produce an empty bind string that .bind() rejects.
+        with_listen_env(Some(""), || {
+            assert_eq!(listen_addr(), DEFAULT_LISTEN_ADDR);
+        });
+    }
+
+    #[test]
+    fn listen_addr_whitespace_only_falls_back_to_default() {
+        // Same as empty — whitespace-only is operator-paste artefact,
+        // treat as "use default".
+        with_listen_env(Some("  \n"), || {
+            assert_eq!(listen_addr(), DEFAULT_LISTEN_ADDR);
+        });
+    }
+
+    #[test]
+    fn listen_addr_trims_surrounding_whitespace() {
+        // Pasted value with trailing newline round-trips clean.
+        with_listen_env(Some("  0.0.0.0:9090\n"), || {
+            assert_eq!(listen_addr(), "0.0.0.0:9090");
+        });
+    }
 }
