@@ -26,8 +26,16 @@ pub(crate) fn build_url(api_endpoint: &str, path: &str) -> String {
 }
 
 pub(crate) async fn api_post_call(v: Value, path: &str) -> Result<(), Error> {
+    // main.rs trims its API_ENDPOINT read but stores the trimmed
+    // value in a local variable that doesn't propagate here. Re-trim
+    // at this read site for consistency — operator pastes with
+    // trailing newline would otherwise create whitespace-laden URLs
+    // even though build_url handles trailing slashes.
     let api_endpoint = env::var("API_ENDPOINT")
-        .map_err(|_| Error::Custom("API_ENDPOINT environment variable not set".to_string()))?;
+        .map(|s| s.trim().to_string())
+        .ok()
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| Error::Custom("API_ENDPOINT environment variable not set".to_string()))?;
     let url = build_url(&api_endpoint, path);
 
     debug!("Posting to {}", url);

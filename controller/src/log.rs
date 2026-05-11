@@ -20,7 +20,16 @@ pub fn init_logger() {
     // panic if another thread cleared RUST_LOG between the is_err() check
     // and the unwrap() (Rust's std::env is process-global; even if the
     // race is benign here in practice, the unwrap was a code smell).
-    let current = env::var("RUST_LOG").ok();
+    //
+    // Trim before passing to rust_log_with_suppressions —
+    // its eq_ignore_ascii_case("info") comparison is strict on
+    // whitespace, so "info\n" (typical operator paste artefact)
+    // would silently take the non-info branch and apply the
+    // verbose-suppression set instead of the default.
+    let current = env::var("RUST_LOG")
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
     let next = rust_log_with_suppressions(current.as_deref());
     env::set_var("RUST_LOG", next);
 
