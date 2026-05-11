@@ -386,7 +386,18 @@ func protocolPtr(protocol string) *corev1.Protocol {
 	return &p
 }
 
-// deduplicatePorts removes duplicate ports from a slice.
+// deduplicatePorts removes duplicate ports from a slice AND returns
+// them in a deterministic order (numeric port ASC, then protocol ASC).
+//
+// The sort matters because the input order depends on whatever order
+// PodTraffic rows arrived from the broker — and the broker's
+// /pod/traffic/{name} has no ORDER BY, so two queries can return the
+// same rows in different orders. Without the sort, a single peer's
+// port list flips between e.g. [80,443] and [443,80] between
+// regenerations of the same policy, surfacing as spurious YAML
+// diff churn in operator workflows. The peer-IP sort in
+// transformToNetworkPolicy{Ingress,Egress}Rules covers the outer
+// dimension; this covers the inner.
 func deduplicatePorts(ports []networkingv1.NetworkPolicyPort) []networkingv1.NetworkPolicyPort {
 	uniquePorts := make(map[string]networkingv1.NetworkPolicyPort)
 	var result []networkingv1.NetworkPolicyPort
@@ -402,6 +413,32 @@ func deduplicatePorts(ports []networkingv1.NetworkPolicyPort) []networkingv1.Net
 			result = append(result, port)
 		}
 	}
+
+	// Stable ordering: numeric port ASC, then protocol ASC (so a
+	// peer that exposes 80/TCP, 80/UDP, 443/TCP comes out in that
+	// canonical order regardless of which traffic event arrived
+	// first). intstr.IntOrString can be String-typed for named
+	// ports — fall back to .String() compare for those.
+	sort.Slice(result, func(i, j int) bool {
+		pi, pj := result[i].Port, result[j].Port
+		// Numeric ports first, named ports after. Within each
+		// kind, ascending.
+		iNum := pi.Type == intstr.Int
+		jNum := pj.Type == intstr.Int
+		if iNum != jNum {
+			return iNum // numeric < named
+		}
+		if iNum {
+			if pi.IntVal != pj.IntVal {
+				return pi.IntVal < pj.IntVal
+			}
+		} else if pi.StrVal != pj.StrVal {
+			return pi.StrVal < pj.StrVal
+		}
+		// Same port — break by protocol string. Pointer non-nil
+		// guaranteed by the skip above.
+		return string(*result[i].Protocol) < string(*result[j].Protocol)
+	})
 
 	return result
 }

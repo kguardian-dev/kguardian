@@ -398,21 +398,84 @@ func TestDeduplicatePorts(t *testing.T) {
 	udp := corev1.ProtocolUDP
 
 	ports := []networkingv1.NetworkPolicyPort{
-		{Port: &p80, Protocol: &tcp},
 		{Port: &p443, Protocol: &tcp},
-		{Port: &p80, Protocol: &tcp}, // Duplicate
 		{Port: &p80, Protocol: &udp},
-		{Port: nil, Protocol: &tcp}, // Invalid (nil port)
-		{Port: &p80, Protocol: nil}, // Invalid (nil protocol)
+		{Port: &p80, Protocol: &tcp},
+		{Port: &p443, Protocol: &tcp}, // Duplicate of first
+		{Port: nil, Protocol: &tcp},   // Invalid (nil port)
+		{Port: &p80, Protocol: nil},   // Invalid (nil protocol)
 	}
 
 	deduplicated := deduplicatePorts(ports)
-	assert.Len(t, deduplicated, 3)
-	assert.ElementsMatch(t, []networkingv1.NetworkPolicyPort{
+	// Order assertion (not ElementsMatch) — the helper now sorts by
+	// (port ASC, protocol ASC) so two regenerations of the same input
+	// produce byte-identical YAML. ElementsMatch would silently let a
+	// future regression slip through.
+	want := []networkingv1.NetworkPolicyPort{
 		{Port: &p80, Protocol: &tcp},
+		{Port: &p80, Protocol: &udp},
+		{Port: &p443, Protocol: &tcp},
+	}
+	assert.Equal(t, want, deduplicated)
+}
+
+func TestDeduplicatePorts_DeterministicOrderAcrossRuns(t *testing.T) {
+	// Input deliberately scrambled so the dedup-by-first-seen order
+	// would visibly differ from the sorted order — pins that the
+	// sort, not the iteration order, controls the output. Run 20x to
+	// catch any residual map-iteration coupling.
+	p22 := intstr.FromInt(22)
+	p80 := intstr.FromInt(80)
+	p443 := intstr.FromInt(443)
+	p5432 := intstr.FromInt(5432)
+	tcp := corev1.ProtocolTCP
+	udp := corev1.ProtocolUDP
+
+	scrambled := []networkingv1.NetworkPolicyPort{
+		{Port: &p5432, Protocol: &tcp},
+		{Port: &p22, Protocol: &tcp},
 		{Port: &p443, Protocol: &tcp},
 		{Port: &p80, Protocol: &udp},
-	}, deduplicated)
+		{Port: &p80, Protocol: &tcp},
+	}
+	want := []networkingv1.NetworkPolicyPort{
+		{Port: &p22, Protocol: &tcp},
+		{Port: &p80, Protocol: &tcp},
+		{Port: &p80, Protocol: &udp},
+		{Port: &p443, Protocol: &tcp},
+		{Port: &p5432, Protocol: &tcp},
+	}
+	first := deduplicatePorts(scrambled)
+	assert.Equal(t, want, first)
+	for i := 0; i < 20; i++ {
+		got := deduplicatePorts(scrambled)
+		assert.Equal(t, want, got, "run %d: order must match", i)
+	}
+}
+
+func TestDeduplicatePorts_NumericBeforeNamedThenLexProtocol(t *testing.T) {
+	// Named-port support (intstr.String): named ports must sort AFTER
+	// numeric ones, with named-ports themselves in lex order. Within
+	// the same port, TCP sorts before UDP (lex on protocol string).
+	p80 := intstr.FromInt(80)
+	pHTTP := intstr.FromString("http")
+	pHTTPS := intstr.FromString("https")
+	tcp := corev1.ProtocolTCP
+	udp := corev1.ProtocolUDP
+
+	in := []networkingv1.NetworkPolicyPort{
+		{Port: &pHTTPS, Protocol: &tcp},
+		{Port: &p80, Protocol: &udp},
+		{Port: &pHTTP, Protocol: &tcp},
+		{Port: &p80, Protocol: &tcp},
+	}
+	want := []networkingv1.NetworkPolicyPort{
+		{Port: &p80, Protocol: &tcp},
+		{Port: &p80, Protocol: &udp},
+		{Port: &pHTTP, Protocol: &tcp},
+		{Port: &pHTTPS, Protocol: &tcp},
+	}
+	assert.Equal(t, want, deduplicatePorts(in))
 }
 
 // --- Determinism: peer-IP iteration order ---
