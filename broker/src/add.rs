@@ -199,7 +199,21 @@ impl PodTraffic {
             return Ok(out);
         }
 
-        debug!("pod_ip {:?}\n pod_port {:?}\n pod_trafic_type {:?}\n traffic_in_out_ip {:?}\n traffic_in_out_port {:?}\n decision {:?}\n_", &self.pod_ip, &self.pod_port,&self.traffic_type,&self.traffic_in_out_ip,&self.traffic_in_out_port,&self.decision);
+        // Single-line structured log — the previous "\n"-joined
+        // multi-line format broke log-aggregator parsing (each line
+        // looked like a separate logger emit) and the field name
+        // "pod_trafic_type" was a typo. Use tracing's structured
+        // fields so operators querying by pod_ip / decision get
+        // clean filters in their log backend.
+        debug!(
+            pod_ip = ?self.pod_ip,
+            pod_port = ?self.pod_port,
+            traffic_type = ?self.traffic_type,
+            traffic_in_out_ip = ?self.traffic_in_out_ip,
+            traffic_in_out_port = ?self.traffic_in_out_port,
+            decision = ?self.decision,
+            "checking pod_traffic for existing row",
+        );
         let row = pod_traffic
             .filter(pod_ip.eq(&self.pod_ip))
             .filter(pod_port.eq(&self.pod_port))
