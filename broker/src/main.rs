@@ -70,6 +70,7 @@ async fn main() -> Result<(), std::io::Error> {
         .and_then(|v| v.trim().parse().ok())
         .map(|n: u32| n.max(1))
         .unwrap_or(10);
+    info!(max_retries, "running embedded migrations");
     for attempt in 1..=max_retries {
         match pool.get() {
             Ok(mut conn) => match run_migrations(&mut conn) {
