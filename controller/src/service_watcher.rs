@@ -7,8 +7,7 @@ use kube::{
     Api, Client, ResourceExt,
 };
 use serde_json::json;
-use tracing::info;
-use tracing::{error, warn};
+use tracing::{debug, error, info, warn};
 
 pub async fn watch_service() -> Result<(), Error> {
     let c = Client::try_default().await?;
@@ -93,7 +92,14 @@ fn is_routable_cluster_ip(s: &str) -> bool {
 /// Service was observed mid-creation.
 fn svc_unready(p: &Service) -> Option<String> {
     let status = p.status.as_ref()?;
-    info!("Service Status {:?}", status);
+    // debug not info — this runs on every Service event including the
+    // full re-sync on controller startup. INFO floods the log with the
+    // entire ServiceStatus debug-print on every Service in the cluster,
+    // drowning real signals at the noise level operators are most
+    // likely to scan first. The actual condition message (when a
+    // Service is unready) is still surfaced via the warn! at the
+    // caller site.
+    debug!("Service Status {:?}", status);
     let conds = status.conditions.as_ref()?;
     let failed = conds
         .iter()
