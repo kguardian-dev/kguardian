@@ -213,6 +213,21 @@ pub async fn add_pod_details(
     pool: web::Data<DbPool>,
     form: web::Json<PodDetail>,
 ) -> Result<HttpResponse, Error> {
+    // Defense-in-depth: reject empty/whitespace-only pod_name before
+    // it reaches the diesel upsert. pod_name is the table PK and the
+    // CRD validator would never produce an empty value, but the
+    // broker accepts external POSTs (future tool, hand-rolled curl,
+    // misbehaving controller) and an empty PK row creates a sentinel
+    // entry that subsequent /pod/name/ lookups can surface as a
+    // fake pod. Mirrors the is_routable_svc_ip guard on /svc/spec.
+    if form.pod_name.trim().is_empty() {
+        tracing::warn!(
+            pod_ip = %form.pod_ip,
+            pod_namespace = ?form.pod_namespace,
+            "skipping pod_details upsert for empty/whitespace pod_name"
+        );
+        return Ok(HttpResponse::Ok().json(form.0));
+    }
     let pods = web::block(move || {
         let mut conn = pool.get()?;
         upsert_pod_details(&mut conn, form)
