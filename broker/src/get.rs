@@ -187,18 +187,20 @@ pub async fn get_pod_by_name<'a>(
 
 pub fn pod_name(conn: &mut PgConnection, name: &str) -> Result<Option<PodDetail>, DbError> {
     use schema::pod_details::dsl::*;
-    // pod_details PK is pod_ip — multiple historical rows can share a
-    // pod_name (StatefulSets / DaemonSets / any workload that restarts
-    // reusing the same name with a new IP). Without an explicit order,
-    // .first() returned an arbitrary row — frequently a stale dead
-    // entry from a previous incarnation, even when a live one exists.
+    // pod_details PK is pod_name (per the iteration-86 schema fix and
+    // confirmed in schema.rs), so this filter matches AT MOST one row.
+    // The upsert on /pod/spec uses on_conflict(pod_name).do_update(),
+    // so a StatefulSet pod restarting reusing the same name replaces
+    // the old row in place — the dead entry never survives alongside
+    // the new live entry.
     //
-    // Order: live rows first (is_dead ASC = false-before-true), then
-    // most recent (time_stamp DESC). So a caller looking up a name
-    // gets the alive-and-current row whenever one exists; falls back
-    // to the most recent dead entry only when nothing is alive (which
-    // is the only reasonable signal we can give for a fully-retired
-    // pod name).
+    // The (is_dead ASC, time_stamp DESC) ordering is now defense-in-
+    // depth: it's a no-op for a single-row result, but if a future
+    // schema migration ever permits multiple rows per pod_name (e.g.,
+    // a join with a workload_revisions side-table), this query would
+    // still surface the alive-and-current row first — falling back to
+    // the most-recent dead entry only when nothing is alive. Cheap
+    // insurance against a schema regression.
     let pod = pod_details
         .filter(pod_name.eq(name.to_string()))
         .order((is_dead.asc(), time_stamp.desc()))
