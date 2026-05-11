@@ -61,3 +61,15 @@ Retrieve the most recent dump with:
   kubectl -n {{ .Release.Namespace }} logs job/{{ .Values.database.name }}-pre-upgrade-backup \
     > kguardian-db-$(date +%Y%m%d-%H%M).sql
 {{- end }}
+
+{{- if .Values.evaluator.enabled }}
+
+The audit-mode evaluator is enabled. Define AuditNetworkPolicies as
+you would NetworkPolicies; kguardian will report would-deny verdicts
+on .status.evaluation and via the broker's /audit/verdicts endpoint
+without actually dropping traffic. When you're satisfied with an
+audit's results, promote it to an enforced policy:
+  kguardian audit promote <name> -n <ns> | kubectl apply -f -
+For cluster-scoped policies (AuditClusterNetworkPolicy):
+  kguardian audit promote-cluster <name> | kubectl apply -f -
+{{- end }}
