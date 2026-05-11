@@ -16,23 +16,31 @@ kguardian is continuously evolving to support more Kubernetes security resources
 
 <CardGroup cols={2}>
   <Card title="✅ Network Policies" icon="check-circle" color="#16A34A">
-    **Status:** Generally Available (v1.0.0)
+    **Status:** Generally Available
 
     - Kubernetes NetworkPolicy
     - Cilium NetworkPolicy
     - Cilium ClusterwideNetworkPolicy
   </Card>
 
+  <Card title="✅ Audit Mode Policies" icon="check-circle" color="#16A34A">
+    **Status:** Generally Available
+
+    - `AuditNetworkPolicy` + `AuditClusterNetworkPolicy` CRDs
+    - In-cluster evaluator with selectors / ports / named-port / ipBlock
+    - Frontend "Would-Deny" view + CLI `audit promote` helpers
+  </Card>
+
   <Card title="✅ Seccomp Profiles" icon="check-circle" color="#16A34A">
-    **Status:** Generally Available (v1.0.0)
+    **Status:** Generally Available
 
     - OCI seccomp JSON format
     - Architecture-aware profiles
     - Customizable default actions
   </Card>
 
-  <Card title="🚧 AppArmor Profiles" icon="hammer" color="#F59E0B">
-    **Status:** In Development (Target: v1.2.0)
+  <Card title="📋 AppArmor Profiles" icon="clipboard-list" color="#3B82F6">
+    **Status:** Planned
 
     - Generate from observed file access
     - Network capability restrictions
@@ -40,15 +48,15 @@ kguardian is continuously evolving to support more Kubernetes security resources
   </Card>
 
   <Card title="📋 SELinux Policies" icon="clipboard-list" color="#3B82F6">
-    **Status:** Planned (Target: v1.3.0)
+    **Status:** Planned
 
     - Type enforcement rules
     - File context generation
     - Process domain transitions
   </Card>
 
-  <Card title="📋 Pod Security Standards" icon="shield-check" color="#3B82F6">
-    **Status:** Planned (Target: v1.4.0)
+  <Card title="📋 Pod Security Standards" icon="clipboard-list" color="#3B82F6">
+    **Status:** Planned
 
     - Auto-generate PSS labels
     - Compliance validation
@@ -66,11 +74,12 @@ kguardian is continuously evolving to support more Kubernetes security resources
 
 ---
 
-## AppArmor Profiles (v1.2.0)
+## AppArmor Profiles
 
 <Info>
-**Target Release:** Q2 2025
-**Status:** In active development
+**Status:** Planned (no fixed release date — tracks the
+release-please cohort whenever the underlying eBPF file-access
+observer lands).
 </Info>
 
 AppArmor provides mandatory access control (MAC) for Linux applications, restricting file access, network capabilities, and more.
@@ -144,11 +153,11 @@ kubectl apply -f ./apparmor/production-nginx-apparmorprofile.yaml
 
 ---
 
-## SELinux Policies (v1.3.0)
+## SELinux Policies
 
 <Info>
-**Target Release:** Q3 2025
-**Status:** Planning phase
+**Status:** Planning phase. No fixed release date — depends on the
+AppArmor file-access observer landing first (shared infrastructure).
 </Info>
 
 SELinux provides fine-grained access control using security contexts and policies.
@@ -203,11 +212,10 @@ SELinux provides fine-grained access control using security contexts and policie
 
 ---
 
-## Pod Security Standards (v1.4.0)
+## Pod Security Standards
 
 <Info>
-**Target Release:** Q4 2025
-**Status:** Research phase
+**Status:** Research phase. No fixed release date.
 </Info>
 
 [Pod Security Standards](https://kubernetes.io/docs/concepts/security/pod-security-standards/) define three security profiles: Privileged, Baseline, and Restricted.
