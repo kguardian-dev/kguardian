@@ -36,8 +36,11 @@ func IsPodReady(pod *corev1.Pod) bool {
 	return false
 }
 
+// Defaults for the broker port-forward when the caller doesn't
+// override. The PortForward function itself takes brokerNamespace +
+// brokerService arguments and falls back to these only when both the
+// flag is empty AND the KUBE_GUARDIAN_NAMESPACE env var is unset.
 var (
-	// TODO: This namespace should be configurable if overridden
 	serviceNamespace = "kguardian"
 	serviceName      = "broker"
 	ports            = []string{"9090:9090"}
