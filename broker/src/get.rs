@@ -296,26 +296,27 @@ pub(crate) fn clamp_audit_limit(raw: Option<i64>) -> i64 {
     raw.unwrap_or(100).clamp(1, 500)
 }
 
-/// Normalise a `?policy=` filter for the `/audit/verdicts` query.
+/// Normalise an empty-string filter to `None` for /audit/verdicts.
 ///
 /// - `None` or `Some("")` → `None` (no filter applied; return everything
 ///   subject to other filters).
 /// - `Some(non-empty)` → unchanged.
 ///
-/// The empty-string normalisation matters because policy names are
-/// CRD-validated non-empty, so `WHERE policy_name = ''` matches zero
-/// rows. Without this, a caller that sends `?policy=` (a form field
-/// left empty, an MCP tool that passes through an unset parameter)
-/// would see "asked for everything, got nothing" — a confusing UX
-/// for what should be a no-op filter. The frontend already gates
-/// `if (opts.policy)`, so this is mainly a defense for direct API
-/// callers (curl, mcp-server, future SDK consumers).
+/// Applied to `?policy=`, `?verdict=`, and `?direction=`. The empty
+/// case happens when a caller submits a form with the field blank,
+/// or an MCP tool passes through an unset parameter — they want the
+/// filter to NOT be applied. Without this normaliser the broker
+/// would either filter to `WHERE policy_name = ''` (zero rows; policy
+/// names are CRD-non-empty) or reject the request with a 400 from
+/// the enum validator. The frontend already gates each filter with
+/// `if (opts.X) params.X = ...`, so this is mainly a defense for
+/// direct API callers (curl, mcp-server, future SDK consumers).
 ///
-/// Asymmetry with namespace is deliberate: `?namespace=` is a
-/// meaningful filter for cluster-scoped policies (stored with
+/// Asymmetry with `?namespace=` is deliberate: empty-namespace IS a
+/// meaningful filter (cluster-scoped policy verdicts are stored with
 /// `policy_namespace = ''`), so empty-namespace stays as an explicit
 /// filter. See the doc comment on `policy_ns` in the handler.
-pub(crate) fn normalise_policy_filter(raw: Option<String>) -> Option<String> {
+pub(crate) fn normalise_empty_to_none(raw: Option<String>) -> Option<String> {
     raw.and_then(|s| if s.is_empty() { None } else { Some(s) })
 }
 
@@ -343,7 +344,7 @@ pub async fn get_audit_verdicts(
 ) -> actix_web::Result<impl Responder> {
     let q = query.into_inner();
     let limit = clamp_audit_limit(q.limit);
-    let policy_name = normalise_policy_filter(q.policy.clone());
+    let policy_name = normalise_empty_to_none(q.policy.clone());
     // namespace is NOT normalised the same way. `namespace=` (empty)
     // IS a legitimate filter: cluster-scoped policy verdicts are
     // stored with `policy_namespace = ''` (the evaluator emits "" for
@@ -352,19 +353,25 @@ pub async fn get_audit_verdicts(
     // pinned by `query_parses_full_filter`.
     let policy_ns = q.namespace.clone();
 
-    if let Some(v) = q.verdict.as_deref() {
+    // Empty-string verdict/direction → no filter (form fields left
+    // blank). The validator then catches actual typos (Maybe / Both
+    // / lowercase variants) — a 400 for genuinely-bad input but a
+    // no-op for "filter not selected". Symmetric with policy
+    // normalisation so a caller posting an empty form doesn't get
+    // arbitrary 400 vs 200-empty depending on which fields they
+    // happen to skip.
+    let verdict_filter = normalise_empty_to_none(q.verdict.clone());
+    let direction_filter = normalise_empty_to_none(q.direction.clone());
+    if let Some(v) = verdict_filter.as_deref() {
         if let Err(msg) = validate_enum_filter("verdict", v, VALID_VERDICTS) {
             return Ok(HttpResponse::BadRequest().body(msg));
         }
     }
-    if let Some(d) = q.direction.as_deref() {
+    if let Some(d) = direction_filter.as_deref() {
         if let Err(msg) = validate_enum_filter("direction", d, VALID_DIRECTIONS) {
             return Ok(HttpResponse::BadRequest().body(msg));
         }
     }
-
-    let verdict_filter = q.verdict.clone();
-    let direction_filter = q.direction.clone();
     let rows = web::block(move || {
         let mut conn = pool.get()?;
         audit_verdicts_query(
@@ -495,37 +502,37 @@ mod tests {
     }
 
     #[test]
-    fn normalise_policy_filter_empty_string_becomes_none() {
+    fn normalise_empty_to_none_empty_string_becomes_none() {
         // `?policy=` on the wire serdes to Some("") via web::Query
         // because the parameter is present with no value. Without the
         // normaliser, the query function would apply
         // `WHERE policy_name = ''` and return zero rows — a confusing
         // "asked for everything, got nothing" UX. Policy names are
         // CRD-validated non-empty so this filter is never useful.
-        assert_eq!(normalise_policy_filter(Some(String::new())), None);
+        assert_eq!(normalise_empty_to_none(Some(String::new())), None);
     }
 
     #[test]
-    fn normalise_policy_filter_none_stays_none() {
+    fn normalise_empty_to_none_none_stays_none() {
         // No `?policy=` query string at all → Option::None passes through.
-        assert_eq!(normalise_policy_filter(None), None);
+        assert_eq!(normalise_empty_to_none(None), None);
     }
 
     #[test]
-    fn normalise_policy_filter_preserves_non_empty() {
+    fn normalise_empty_to_none_preserves_non_empty() {
         // Real policy names must pass through unchanged.
         assert_eq!(
-            normalise_policy_filter(Some("web-deny".to_string())),
+            normalise_empty_to_none(Some("web-deny".to_string())),
             Some("web-deny".to_string()),
         );
         assert_eq!(
-            normalise_policy_filter(Some("cluster-baseline-audit".to_string())),
+            normalise_empty_to_none(Some("cluster-baseline-audit".to_string())),
             Some("cluster-baseline-audit".to_string()),
         );
     }
 
     #[test]
-    fn normalise_policy_filter_preserves_whitespace_string() {
+    fn normalise_empty_to_none_preserves_whitespace_string() {
         // Whitespace-only names aren't CRD-valid either, but trimming
         // here would be too eager — if an operator types `policy= foo`
         // they probably mean " foo" literal and the server should
@@ -534,7 +541,7 @@ mod tests {
         // matching the "no value supplied" wire shape that the frontend
         // sometimes accidentally produces.
         assert_eq!(
-            normalise_policy_filter(Some(" ".to_string())),
+            normalise_empty_to_none(Some(" ".to_string())),
             Some(" ".to_string()),
         );
     }
