@@ -48,7 +48,12 @@ async fn main() -> Result<(), Error> {
         &env::var("EXCLUDED_NAMESPACES").unwrap_or_else(|_| "kube-system,kguardian".to_string()),
     );
 
+    // Trim before parse — bool::from_str is strict, so " false\n"
+    // (trailing newline from copy-paste) fails to parse and falls
+    // back to the default true. Operator wanting to DISABLE the
+    // filter gets the opposite of their intent.
     let ignore_daemonset_traffic = env::var("IGNORE_DAEMONSET_TRAFFIC")
+        .map(|s| s.trim().to_string())
         .unwrap_or_else(|_| "true".to_string()) // Default to true, dont log the daemonset traffic
         .parse::<bool>()
         .unwrap_or(true);

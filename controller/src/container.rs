@@ -32,7 +32,11 @@ impl PodInspect {
         let container_id = parse_container_id(container_id);
 
         if let Some(container_id) = container_id {
+            // Trim — a trailing newline from `CONTAINERD_SOCK="/run/...\n"`
+            // would break the unix-socket connect with a confusing
+            // "No such file or directory" error far from the env read.
             let sock_path = std::env::var("CONTAINERD_SOCK")
+                .map(|s| s.trim().to_string())
                 .unwrap_or_else(|_| "/run/containerd/containerd.sock".to_string());
             match connect(&sock_path).await {
                 Ok(channel) => Some(
