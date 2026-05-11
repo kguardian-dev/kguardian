@@ -8,7 +8,16 @@ use std::sync::Arc;
 use tracing::{debug, error};
 use uuid::Uuid;
 
-// Network event kind constants (from eBPF program)
+// Network event kind constants (from eBPF program). The eBPF probe in
+// network_probe.bpf.c emits these values; userspace must agree on the
+// numeric → (direction, protocol) mapping.
+//
+// Known gap: there is NO kind for INGRESS UDP. The eBPF probe traces
+// `udp_sendmsg` and emits kind=3, treated here as EGRESS UDP. Inbound
+// UDP (e.g. CoreDNS receiving queries, syslog, NTP) is not tracked.
+// Adding it requires a new udp_recvmsg-side tracepoint in the eBPF
+// program — out of scope for this comment, but pin the gap so a
+// future contributor doesnt assume INGRESS_UDP exists silently.
 const KIND_EGRESS_TCP: u16 = 1;
 const KIND_INGRESS_TCP: u16 = 2;
 const KIND_EGRESS_UDP: u16 = 3;
