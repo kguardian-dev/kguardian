@@ -298,6 +298,21 @@ fn mark_pod_as_dead(
 ) -> Result<usize, DbError> {
     use schema::pod_details::dsl::*;
 
+    // Symmetric defense for pod_name. A degenerate caller sending
+    // `{"pod_name": ""}` or whitespace-only would otherwise issue
+    // `WHERE pod_name = ''` and silently match zero rows — the broker
+    // logs "Marked pod row(s) as dead, rows=0" giving the caller a
+    // false-success signal that diverges from the actual update count.
+    // Bail early with a warn log so operators can spot the bad call;
+    // return Ok(0) to keep the wire-shape idempotent (controllers
+    // retry mark_dead, and a 400 would change their failure-handling
+    // behavior — pod stays alive in the DB across the retry budget).
+    let pod = pod.trim();
+    if pod.is_empty() {
+        tracing::warn!("mark_pod_dead called with empty pod_name; no-op");
+        return Ok(0);
+    }
+
     // Normalise the pod_ip arg: trim whitespace, then treat empty as
     // None. A degenerate caller (a future tool sending pod_ip="") would
     // otherwise hit the precise-filter path with `WHERE pod_ip = ''`
