@@ -8,6 +8,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/kguardian-dev/kguardian/advisor/pkg/api"
 	corev1 "k8s.io/api/core/v1"
+	networkingv1 "k8s.io/api/networking/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
 )
 
@@ -275,5 +276,78 @@ func TestCiliumPolicy_AddOrUpdateRule_MultiplePeersStaySeparate(t *testing.T) {
 
 	if len(got) != 2 {
 		t.Errorf("two distinct peers should yield 2 rules, got %d", len(got))
+	}
+}
+
+func TestConvertPortsToCiliumPortRules_DedupsDuplicates(t *testing.T) {
+	// Cilium's convertPortsToCiliumPortRules used to emit one PortRule
+	// per input entry, including duplicates. A noisy broker (same flow
+	// reported twice) would produce a YAML with two identical
+	// PortProtocol entries for the same port — bloat that Cilium would
+	// dedup itself but that pollutes the operator-reviewed YAML.
+	//
+	// Route through deduplicatePorts now means duplicate (port,
+	// protocol) pairs collapse to one PortRule.
+	g := &CiliumPolicyGenerator{}
+	p80 := intstr.FromInt(80)
+	tcp := corev1.ProtocolTCP
+
+	in := []networkingv1.NetworkPolicyPort{
+		{Port: &p80, Protocol: &tcp},
+		{Port: &p80, Protocol: &tcp}, // dup
+		{Port: &p80, Protocol: &tcp}, // dup
+	}
+	got := g.convertPortsToCiliumPortRules(in)
+	if len(got) != 1 {
+		t.Fatalf("dup ports should collapse to 1 PortRule, got %d", len(got))
+	}
+	if len(got[0].Ports) != 1 || got[0].Ports[0].Port != "80" || got[0].Ports[0].Protocol != ciliumapi.ProtoTCP {
+		t.Errorf("unexpected port: %+v", got[0].Ports)
+	}
+}
+
+func TestConvertPortsToCiliumPortRules_DeterministicOrdering(t *testing.T) {
+	// Same UX-stability class as the standard generator's
+	// TestDeduplicatePorts_DeterministicOrderAcrossRuns: scrambled
+	// input must produce sorted output, byte-identical across runs.
+	// Without the dedup-then-sort, two regenerations could emit
+	// different PortRule orderings depending on broker response order,
+	// surfacing as spurious kubectl/git diffs.
+	g := &CiliumPolicyGenerator{}
+	p22 := intstr.FromInt(22)
+	p80 := intstr.FromInt(80)
+	p443 := intstr.FromInt(443)
+	tcp := corev1.ProtocolTCP
+	udp := corev1.ProtocolUDP
+
+	scrambled := []networkingv1.NetworkPolicyPort{
+		{Port: &p443, Protocol: &tcp},
+		{Port: &p22, Protocol: &tcp},
+		{Port: &p80, Protocol: &udp},
+		{Port: &p80, Protocol: &tcp},
+	}
+	wantPorts := []string{"22", "80", "80", "443"}
+	wantProtos := []ciliumapi.L4Proto{ciliumapi.ProtoTCP, ciliumapi.ProtoTCP, ciliumapi.ProtoUDP, ciliumapi.ProtoTCP}
+	first := g.convertPortsToCiliumPortRules(scrambled)
+	if len(first) != 4 {
+		t.Fatalf("want 4 PortRules, got %d", len(first))
+	}
+	for i, w := range wantPorts {
+		if first[i].Ports[0].Port != w {
+			t.Errorf("index %d: port want %s, got %s", i, w, first[i].Ports[0].Port)
+		}
+		if first[i].Ports[0].Protocol != wantProtos[i] {
+			t.Errorf("index %d: proto want %s, got %s", i, wantProtos[i], first[i].Ports[0].Protocol)
+		}
+	}
+	// Repeat to catch any residual map-iteration coupling.
+	for run := 0; run < 20; run++ {
+		got := g.convertPortsToCiliumPortRules(scrambled)
+		for i := range got {
+			if got[i].Ports[0].Port != first[i].Ports[0].Port ||
+				got[i].Ports[0].Protocol != first[i].Ports[0].Protocol {
+				t.Errorf("run %d index %d: ordering must match", run, i)
+			}
+		}
 	}
 }

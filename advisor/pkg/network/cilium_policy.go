@@ -337,11 +337,29 @@ func (g *CiliumPolicyGenerator) resolvePeerForCilium(peerIP string) ([]ciliumapi
 	return nil, ciliumapi.CIDRSlice{cidr}
 }
 
-// convertPortsToCiliumPortRules converts standard ports to Cilium PortRules
+// convertPortsToCiliumPortRules converts standard ports to Cilium PortRules.
+//
+// Routes the input through deduplicatePorts first so:
+//   - Duplicate (port, protocol) pairs from the broker — common when
+//     /pod/traffic/{name} returns multiple events for the same flow —
+//     don't leak into the generated YAML as redundant PortRule entries.
+//   - The output ordering is deterministic (port ASC, protocol ASC, named
+//     after numeric). Without this, the Cilium YAML's ToPorts/FromPorts
+//     list reshuffles between regenerations of the same input, producing
+//     spurious kubectl/git diffs — same UX problem the standard generator
+//     hit in 87bb514e.
+//
+// `ports` from the caller is the per-peer ports slice built by
+// transformToCilium{Ingress,Egress}Rules, which had no dedup/sort —
+// previously each call wrote duplicate PortRule entries verbatim.
+// The nil-port/nil-protocol skip below is now redundant (the dedup
+// helper handles it) but kept as a defense-in-depth assertion: any
+// future refactor that bypasses dedup still won't crash on nil deref.
 func (g *CiliumPolicyGenerator) convertPortsToCiliumPortRules(ports []networkingv1.NetworkPolicyPort) ciliumapi.PortRules {
-	portRules := make(ciliumapi.PortRules, 0, len(ports))
+	deduped := deduplicatePorts(ports)
+	portRules := make(ciliumapi.PortRules, 0, len(deduped))
 
-	for _, port := range ports {
+	for _, port := range deduped {
 		if port.Port == nil || port.Protocol == nil {
 			log.Warn().Msg("Skipping port with nil port or protocol")
 			continue
