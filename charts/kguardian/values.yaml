@@ -279,6 +279,12 @@ broker:
     # load you'll see "evaluator round-trips queueing"). In-broker
     # default is 16 if unset; minimum is 1.
     inflightPermits: 16
+    # -- Per-call timeout (in milliseconds) on the broker's POST to
+    # the evaluator's /evaluate endpoint. 500ms is plenty for an
+    # in-cluster evaluator (matcher is in-memory, sub-ms) but operators
+    # running the evaluator across cells / regions / VPNs may need
+    # more. Clamped to a minimum 50ms broker-side.
+    evalTimeoutMs: 500
 
   # -- r2d2 connection-pool max_size. r2d2's own default is 10, which
   # is the bottleneck under heavy ingest: each audit evaluator

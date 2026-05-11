@@ -89,6 +89,10 @@ spec:
             - name: AUDIT_INFLIGHT_PERMITS
               value: {{ .Values.broker.audit.inflightPermits | quote }}
             {{- end }}
+            {{- if hasKey .Values.broker.audit "evalTimeoutMs" }}
+            - name: AUDIT_EVAL_TIMEOUT_MS
+              value: {{ .Values.broker.audit.evalTimeoutMs | quote }}
+            {{- end }}
             {{- if hasKey .Values.broker "dbPoolMaxSize" }}
             - name: DB_POOL_MAX_SIZE
               value: {{ .Values.broker.dbPoolMaxSize | quote }}

@@ -136,8 +136,18 @@ impl AuditClient {
             .and_then(|v| v.trim().parse::<usize>().ok())
             .map(|n| n.max(1))
             .unwrap_or(AUDIT_INFLIGHT_PERMITS);
+        // Audit eval timeout. 500ms is plenty for an in-cluster
+        // evaluator (matcher is in-memory, sub-ms) but operators
+        // running the evaluator across cells / regions / VPNs may
+        // need more. AUDIT_EVAL_TIMEOUT_MS overrides the default;
+        // clamped to a minimum 50ms to avoid pathological values.
+        let timeout_ms = std::env::var("AUDIT_EVAL_TIMEOUT_MS")
+            .ok()
+            .and_then(|v| v.trim().parse::<u64>().ok())
+            .map(|n| n.max(50))
+            .unwrap_or(500);
         let http = reqwest::Client::builder()
-            .timeout(Duration::from_millis(500))
+            .timeout(Duration::from_millis(timeout_ms))
             .pool_max_idle_per_host(8)
             .build()
             .unwrap_or_else(|_| reqwest::Client::new());
