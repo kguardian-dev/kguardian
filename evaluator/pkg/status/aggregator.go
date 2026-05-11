@@ -221,6 +221,16 @@ func (a *Aggregator) patchStatus(ctx context.Context, key policyKey, agg *policy
 
 // topOffenders sorts the tuple counters by count desc and returns the
 // top-N as OffenderSummary structs ready for status.
+//
+// Sort order is (count DESC, srcPod ASC, dstPod ASC, dstPort ASC,
+// protocol ASC, direction ASC) — count first (the actual ranking), and
+// the lexicographic tail breaks ties deterministically. Without the
+// tail, equal-count tuples land in map-iteration order, which Go
+// randomises per process. The status subresource would then "flicker"
+// between flushes whenever ties exist at the top-N boundary (which is
+// the common case — many short bursts share counts on the same minute
+// boundary), making the topOffenders list look unstable to operators
+// staring at `kubectl get auditnetworkpolicy -o yaml`.
 func topOffenders(m map[tupleKey]int64, n int) []v1alpha1.OffenderSummary {
 	if n <= 0 || len(m) == 0 {
 		return nil
@@ -233,7 +243,24 @@ func topOffenders(m map[tupleKey]int64, n int) []v1alpha1.OffenderSummary {
 	for k, c := range m {
 		all = append(all, sorted{k, c})
 	}
-	sort.Slice(all, func(i, j int) bool { return all[i].c > all[j].c })
+	sort.Slice(all, func(i, j int) bool {
+		if all[i].c != all[j].c {
+			return all[i].c > all[j].c
+		}
+		if all[i].k.srcPod != all[j].k.srcPod {
+			return all[i].k.srcPod < all[j].k.srcPod
+		}
+		if all[i].k.dstPod != all[j].k.dstPod {
+			return all[i].k.dstPod < all[j].k.dstPod
+		}
+		if all[i].k.dstPort != all[j].k.dstPort {
+			return all[i].k.dstPort < all[j].k.dstPort
+		}
+		if all[i].k.protocol != all[j].k.protocol {
+			return all[i].k.protocol < all[j].k.protocol
+		}
+		return all[i].k.direction < all[j].k.direction
+	})
 	if len(all) > n {
 		all = all[:n]
 	}

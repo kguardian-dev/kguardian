@@ -70,6 +70,83 @@ func TestTopOffenders_ZeroNYieldsNil(t *testing.T) {
 	}
 }
 
+func TestTopOffenders_TieBreakerIsDeterministic(t *testing.T) {
+	// Equal counts at the top-N boundary used to land in map-iteration
+	// order (Go randomises that per-process), so the status.evaluation.
+	// topOffenders list would flicker between flushes whenever ties
+	// existed — operators watching `kubectl get -w` would see entries
+	// re-shuffle for no apparent reason.
+	//
+	// Build a set where every tuple has the same count, run
+	// topOffenders many times, and verify the output is byte-identical
+	// each call. Tail of the sort must be (srcPod, dstPod, dstPort,
+	// protocol, direction) ascending.
+	tuples := map[tupleKey]int64{
+		{srcPod: "b", dstPod: "z", protocol: "TCP", direction: "Ingress", dstPort: 80}:  5,
+		{srcPod: "a", dstPod: "z", protocol: "TCP", direction: "Ingress", dstPort: 80}:  5,
+		{srcPod: "a", dstPod: "y", protocol: "TCP", direction: "Ingress", dstPort: 80}:  5,
+		{srcPod: "a", dstPod: "y", protocol: "TCP", direction: "Ingress", dstPort: 443}: 5,
+	}
+	first := topOffenders(tuples, 10)
+	for i := 0; i < 20; i++ {
+		got := topOffenders(tuples, 10)
+		if len(got) != len(first) {
+			t.Fatalf("run %d: length differs: want %d, got %d", i, len(first), len(got))
+		}
+		for j := range got {
+			if got[j] != first[j] {
+				t.Errorf("run %d index %d: want %+v, got %+v", i, j, first[j], got[j])
+			}
+		}
+	}
+	// Verify the actual order is the documented lex-ascending tail.
+	wantOrder := []struct{ srcPod, dstPod string; dstPort int32 }{
+		{"a", "y", 80},
+		{"a", "y", 443},
+		{"a", "z", 80},
+		{"b", "z", 80},
+	}
+	if len(first) != len(wantOrder) {
+		t.Fatalf("entry count: want %d, got %d", len(wantOrder), len(first))
+	}
+	for i, w := range wantOrder {
+		if first[i].SrcPod != w.srcPod || first[i].DstPod != w.dstPod || first[i].DstPort != w.dstPort {
+			t.Errorf("index %d: want (%s,%s,%d), got (%s,%s,%d)",
+				i, w.srcPod, w.dstPod, w.dstPort,
+				first[i].SrcPod, first[i].DstPod, first[i].DstPort)
+		}
+	}
+}
+
+func TestTopOffenders_TiesAtCapAreStable(t *testing.T) {
+	// Edge case at the cap: when more tuples tie for the boundary than
+	// fit in N, the deterministic order picks the lex-smallest entries.
+	// Without the tie-breaker the cap was non-deterministic — a tuple
+	// could appear in one flush and vanish from the next.
+	tuples := map[tupleKey]int64{
+		{srcPod: "a", protocol: "TCP", direction: "Ingress", dstPort: 80}: 5,
+		{srcPod: "b", protocol: "TCP", direction: "Ingress", dstPort: 80}: 5,
+		{srcPod: "c", protocol: "TCP", direction: "Ingress", dstPort: 80}: 5,
+		{srcPod: "d", protocol: "TCP", direction: "Ingress", dstPort: 80}: 5,
+	}
+	got := topOffenders(tuples, 2)
+	if len(got) != 2 {
+		t.Fatalf("expected 2 entries (cap), got %d", len(got))
+	}
+	if got[0].SrcPod != "a" || got[1].SrcPod != "b" {
+		t.Errorf("expected lex-smallest survivors [a, b], got [%s, %s]",
+			got[0].SrcPod, got[1].SrcPod)
+	}
+	// Twenty more runs must produce the same survivors.
+	for i := 0; i < 20; i++ {
+		again := topOffenders(tuples, 2)
+		if again[0].SrcPod != "a" || again[1].SrcPod != "b" {
+			t.Errorf("run %d: survivors differ: got [%s, %s]",
+				i, again[0].SrcPod, again[1].SrcPod)
+		}
+	}
+}
+
 func TestNew_Defaults(t *testing.T) {
 	scheme := runtime.NewScheme()
 	dyn := dynamicfake.NewSimpleDynamicClient(scheme)
