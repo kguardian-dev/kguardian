@@ -1000,3 +1000,125 @@ func TestMatch_NamedPortMismatchOnPort(t *testing.T) {
 		t.Fatalf("expected WouldDeny when named port resolves to a different containerPort, got %#v", got)
 	}
 }
+
+func TestMatch_NamedPortMismatchOnProtocol(t *testing.T) {
+	// Upstream NetworkPolicy spec: a named-port match requires BOTH
+	// the name AND the protocol to line up against the container's
+	// ports[] declaration. Container declares "dns"=53/UDP; an
+	// ingress rule asking for "dns"/TCP must not match — the rule
+	// protocol is TCP, the container's named port is UDP.
+	lookup := newLookup()
+	dst := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "prod", Name: "coredns-1", Labels: map[string]string{"app": "dns"}},
+		Spec: corev1.PodSpec{
+			Containers: []corev1.Container{
+				{Name: "coredns", Ports: []corev1.ContainerPort{
+					{Name: "dns", ContainerPort: 53, Protocol: corev1.ProtocolUDP},
+				}},
+			},
+		},
+	}
+	lookup.pods["prod/coredns-1"] = dst
+	lookup.addPod("prod", "client-1", map[string]string{"app": "client"})
+
+	tcp := corev1.ProtocolTCP
+	namedPort := intstr.FromString("dns")
+	p := policy("prod", "dns-allow-named", networkingv1.NetworkPolicySpec{
+		PodSelector: selectMatchLabels(map[string]string{"app": "dns"}),
+		Ingress: []networkingv1.NetworkPolicyIngressRule{
+			{Ports: []networkingv1.NetworkPolicyPort{{Protocol: &tcp, Port: &namedPort}}},
+		},
+	})
+
+	flow := Flow{
+		SrcPodNamespace: "prod", SrcPodName: "client-1",
+		DstPodNamespace: "prod", DstPodName: "coredns-1",
+		DstPort: 53, Protocol: ProtocolTCP,
+	}
+	got := Match(flow, p, lookup)
+	if got[0].Verdict != VerdictWouldDeny {
+		t.Fatalf("expected WouldDeny when named port resolves to a different protocol, got %#v", got)
+	}
+}
+
+func TestMatch_NamedPortNotDeclaredOnPod(t *testing.T) {
+	// Container declares only "https"; policy asks for "http". The
+	// matcher loops through every container's ports[] looking for the
+	// name; finding none, returns false. WouldDeny via the namedPort
+	// fallthrough branch.
+	lookup := newLookup()
+	dst := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "prod", Name: "web-1", Labels: map[string]string{"app": "web"}},
+		Spec: corev1.PodSpec{
+			Containers: []corev1.Container{
+				{Name: "web", Ports: []corev1.ContainerPort{
+					{Name: "https", ContainerPort: 8443, Protocol: corev1.ProtocolTCP},
+				}},
+			},
+		},
+	}
+	lookup.pods["prod/web-1"] = dst
+	lookup.addPod("prod", "client-1", map[string]string{"app": "client"})
+
+	tcp := corev1.ProtocolTCP
+	namedPort := intstr.FromString("http")
+	p := policy("prod", "web-allow-named", networkingv1.NetworkPolicySpec{
+		PodSelector: selectMatchLabels(map[string]string{"app": "web"}),
+		Ingress: []networkingv1.NetworkPolicyIngressRule{
+			{Ports: []networkingv1.NetworkPolicyPort{{Protocol: &tcp, Port: &namedPort}}},
+		},
+	})
+
+	flow := Flow{
+		SrcPodNamespace: "prod", SrcPodName: "client-1",
+		DstPodNamespace: "prod", DstPodName: "web-1",
+		DstPort: 8443, Protocol: ProtocolTCP,
+	}
+	got := Match(flow, p, lookup)
+	if got[0].Verdict != VerdictWouldDeny {
+		t.Fatalf("expected WouldDeny when policy's named port isn't declared on any container, got %#v", got)
+	}
+}
+
+func TestMatch_NamedPortContainerProtocolDefaultsTCP(t *testing.T) {
+	// k8s containerPort.protocol is an optional field — when omitted,
+	// the API server defaults it to TCP. The matcher must honor that
+	// default rather than rejecting the empty string. Without this,
+	// a container declaring just `name: http, port: 8080` (no explicit
+	// protocol) would never match a NetworkPolicy named-port rule for
+	// "http"/TCP. Pins the `cpProto == ""` → TCP branch in
+	// namedPortMatches.
+	lookup := newLookup()
+	dst := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "prod", Name: "web-1", Labels: map[string]string{"app": "web"}},
+		Spec: corev1.PodSpec{
+			Containers: []corev1.Container{
+				{Name: "web", Ports: []corev1.ContainerPort{
+					// Protocol intentionally unset — should default to TCP.
+					{Name: "http", ContainerPort: 8080},
+				}},
+			},
+		},
+	}
+	lookup.pods["prod/web-1"] = dst
+	lookup.addPod("prod", "client-1", map[string]string{"app": "client"})
+
+	tcp := corev1.ProtocolTCP
+	namedPort := intstr.FromString("http")
+	p := policy("prod", "web-allow-named", networkingv1.NetworkPolicySpec{
+		PodSelector: selectMatchLabels(map[string]string{"app": "web"}),
+		Ingress: []networkingv1.NetworkPolicyIngressRule{
+			{Ports: []networkingv1.NetworkPolicyPort{{Protocol: &tcp, Port: &namedPort}}},
+		},
+	})
+
+	flow := Flow{
+		SrcPodNamespace: "prod", SrcPodName: "client-1",
+		DstPodNamespace: "prod", DstPodName: "web-1",
+		DstPort: 8080, Protocol: ProtocolTCP,
+	}
+	got := Match(flow, p, lookup)
+	if got[0].Verdict != VerdictAllow {
+		t.Fatalf("expected Allow when containerPort.protocol is unset (defaults to TCP), got %#v", got)
+	}
+}
