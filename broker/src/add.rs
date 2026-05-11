@@ -154,7 +154,7 @@ fn create_pod_traffic(
 ) -> Result<Option<PodTraffic>, DbError> {
     use schema::pod_traffic::dsl::*;
     debug!(
-        "storing the pod details {:?} into pod_traffic table",
+        "storing pod_traffic event {:?} (uuid)",
         w.uuid
     );
     if w.get_row(conn)?.is_none() {
@@ -483,7 +483,7 @@ pub async fn add_pods_syscalls(
     pool: web::Data<DbPool>,
     form: web::Json<Vec<PodInputSyscalls>>,
 ) -> Result<HttpResponse, Error> {
-    debug!("Insert pod syscall details table");
+    debug!("processing /pod/syscalls batch");
     let pods = web::block(move || {
         let mut conn = pool.get()?;
         create_pod_syscalls(&mut conn, form)
@@ -519,7 +519,7 @@ pub fn create_pod_syscalls(
                 continue;
             }
             debug!(
-                "Storing pod details {:?} into pod_syscalls table",
+                "storing pod_syscalls entry for {:?}",
                 pod_syscall.pod_name
             );
 
