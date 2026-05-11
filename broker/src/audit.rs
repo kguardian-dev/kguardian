@@ -303,8 +303,17 @@ impl AuditClient {
         // Use a dedicated error enum so we can distinguish pool
         // exhaustion from a real diesel error in logs without abusing
         // `diesel::result::Error` variants for unrelated failure modes.
+        //
+        // Short pool-acquire timeout (1s): this audit task is holding
+        // a semaphore permit, and r2d2's 30s default would let one
+        // pool-starved insert pin a permit for 30s, cascading into
+        // audit-semaphore saturation under sustained DB pool pressure.
+        // 1s loses some inserts when the pool genuinely backs up but
+        // restores audit throughput much faster.
         let result = tokio::task::spawn_blocking(move || -> Result<usize, AuditInsertError> {
-            let mut conn = pool.get().map_err(AuditInsertError::Pool)?;
+            let mut conn = pool
+                .get_timeout(std::time::Duration::from_secs(1))
+                .map_err(AuditInsertError::Pool)?;
             diesel::insert_into(schema::audit_verdicts::table)
                 .values(&to_insert)
                 .execute(&mut conn)
