@@ -40,11 +40,21 @@ export function resolveLevel(raw: string | undefined): Level {
   return "info";
 }
 
+/**
+ * Returns true when a message at `messageLevel` should be emitted
+ * given that `activeLevel` is the configured floor. Higher-rank
+ * (more severe) message levels always pass; lower-rank levels are
+ * dropped. Exported separately from `emit` so the gating rule is
+ * unit-testable without driving the actual emit side-effect.
+ */
+export function shouldEmit(messageLevel: Level, activeLevel: Level): boolean {
+  return ORDER[messageLevel] >= ORDER[activeLevel];
+}
+
 const ACTIVE: Level = resolveLevel(process.env.LOG_LEVEL);
-const ACTIVE_RANK = ORDER[ACTIVE];
 
 function emit(level: Level, args: unknown[]): void {
-  if (ORDER[level] < ACTIVE_RANK) return;
+  if (!shouldEmit(level, ACTIVE)) return;
   // Write to stdout for trace/debug/info (matches console.log) and
   // stderr for warn/error (matches conventional logger output).
   const stream = level === "warn" || level === "error" ? console.error : console.log;
