@@ -49,7 +49,15 @@ pub async fn get_pod_details(pool: web::Data<DbPool>) -> actix_web::Result<impl 
 
 pub fn pod_details(conn: &mut PgConnection) -> Result<Option<Vec<PodDetail>>, DbError> {
     use schema::pod_details::dsl::*;
-    let pod = pod_details.load::<PodDetail>(conn).optional()?;
+    // Stable display order so the frontend's pod-info table doesn't
+    // reshuffle between reads. pod_namespace is Nullable — Postgres
+    // sorts NULLs LAST for ASC by default, which lands cluster-wide
+    // (namespaceless) entries at the bottom. pod_name is the PK so
+    // ties are impossible within a namespace.
+    let pod = pod_details
+        .order((pod_namespace.asc(), pod_name.asc()))
+        .load::<PodDetail>(conn)
+        .optional()?;
     Ok(pod)
 }
 
@@ -98,7 +106,16 @@ pub async fn get_svc_details(pool: web::Data<DbPool>) -> actix_web::Result<impl 
 
 pub fn svc_details_all(conn: &mut PgConnection) -> Result<Option<Vec<SvcDetail>>, DbError> {
     use schema::svc_details::dsl::*;
-    let svcs = svc_details.load::<SvcDetail>(conn).optional()?;
+    // Stable display order — same rationale as pod_details. svc_ip
+    // (the PK) is the final tiebreak so the order is fully
+    // deterministic even when two Services share name/namespace via
+    // an out-of-band insert (shouldn't happen in practice — k8s
+    // doesn't reuse cluster IPs — but a deterministic third sort
+    // key costs nothing and saves head-scratching if it ever does).
+    let svcs = svc_details
+        .order((svc_namespace.asc(), svc_name.asc(), svc_ip.asc()))
+        .load::<SvcDetail>(conn)
+        .optional()?;
     Ok(svcs)
 }
 
