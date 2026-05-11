@@ -27,6 +27,41 @@ pub fn establish_connection() -> ConnectionManager<PgConnection> {
 mod tests {
     use super::*;
 
+    /// Panic-safe env-isolation guard. Restores the previous value of
+    /// `key` on drop — including during a panic unwind. This is the
+    /// crucial difference from the function-based with_env helpers in
+    /// audit.rs / retention.rs / main.rs: those don't run the restore
+    /// if their closure panics, so #[should_panic] tests would leak
+    /// the test-set env var to other parallel tests.
+    ///
+    /// The previous pattern here used std::panic::catch_unwind to
+    /// catch the panic, restore env, then resume_unwind — works, but
+    /// adds boilerplate to every test body. Drop is cleaner.
+    struct EnvGuard {
+        key: String,
+        prev: Option<String>,
+    }
+
+    impl EnvGuard {
+        fn set(key: &str, value: Option<&str>) -> Self {
+            let prev = env::var(key).ok();
+            match value {
+                Some(v) => env::set_var(key, v),
+                None => env::remove_var(key),
+            }
+            Self { key: key.to_string(), prev }
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            match self.prev.take() {
+                Some(v) => env::set_var(&self.key, v),
+                None => env::remove_var(&self.key),
+            }
+        }
+    }
+
     // The startup contract is: DATABASE_URL must be set, or we panic
     // with a clear message. A regression that silently defaulted the
     // URL would let the broker boot pointing at the wrong DB.
@@ -34,24 +69,10 @@ mod tests {
     #[test]
     #[should_panic(expected = "DATABASE_URL must be set")]
     fn panics_when_database_url_unset() {
-        // Save and restore the env var to keep this test isolated from
-        // other tests that may set it.
-        let prev = env::var("DATABASE_URL").ok();
-        env::remove_var("DATABASE_URL");
-
-        // Wrap the call so the env always restores even on panic.
-        let result = std::panic::catch_unwind(|| establish_connection());
-
-        match prev {
-            Some(v) => env::set_var("DATABASE_URL", v),
-            None => env::remove_var("DATABASE_URL"),
-        }
-
-        // Re-raise the panic (or its absence) so #[should_panic] can
-        // observe it. catch_unwind returns Err on panic.
-        if let Err(panic) = result {
-            std::panic::resume_unwind(panic);
-        }
+        let _g = EnvGuard::set("DATABASE_URL", None);
+        // _g drops on the panic-unwind path, restoring env. #[should_panic]
+        // still sees the panic.
+        establish_connection();
     }
 
     #[test]
@@ -60,13 +81,8 @@ mod tests {
         // construction — that happens in r2d2 Pool::build. So a fake
         // URL is sufficient to prove the function returned without
         // panicking.
-        let prev = env::var("DATABASE_URL").ok();
-        env::set_var("DATABASE_URL", "postgres://x:y@example.invalid/db");
+        let _g = EnvGuard::set("DATABASE_URL", Some("postgres://x:y@example.invalid/db"));
         let _mgr = establish_connection();
-        match prev {
-            Some(v) => env::set_var("DATABASE_URL", v),
-            None => env::remove_var("DATABASE_URL"),
-        }
     }
 
     #[test]
@@ -77,16 +93,8 @@ mod tests {
         // It hits the empty-after-trim filter and triggers the
         // same "not set" panic — clearer signal at startup than
         // a downstream postgres parse error.
-        let prev = env::var("DATABASE_URL").ok();
-        env::set_var("DATABASE_URL", "  \n");
-        let result = std::panic::catch_unwind(|| establish_connection());
-        match prev {
-            Some(v) => env::set_var("DATABASE_URL", v),
-            None => env::remove_var("DATABASE_URL"),
-        }
-        if let Err(panic) = result {
-            std::panic::resume_unwind(panic);
-        }
+        let _g = EnvGuard::set("DATABASE_URL", Some("  \n"));
+        establish_connection();
     }
 
     #[test]
@@ -94,12 +102,7 @@ mod tests {
         // A pasted URL with trailing newline (typical) round-trips
         // clean. Construction succeeds and the connection-manager
         // gets the trimmed URL.
-        let prev = env::var("DATABASE_URL").ok();
-        env::set_var("DATABASE_URL", "  postgres://x:y@example.invalid/db\n");
+        let _g = EnvGuard::set("DATABASE_URL", Some("  postgres://x:y@example.invalid/db\n"));
         let _mgr = establish_connection();
-        match prev {
-            Some(v) => env::set_var("DATABASE_URL", v),
-            None => env::remove_var("DATABASE_URL"),
-        }
     }
 }
