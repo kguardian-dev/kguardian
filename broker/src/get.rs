@@ -375,8 +375,16 @@ pub fn audit_verdicts_query(
     if let Some(d) = by_direction {
         q = q.filter(direction.eq(d));
     }
+    // Tie-break by id DESC. Without it, multiple rows that share the
+    // same observed_at (the broker stamps with Utc::now().naive_utc()
+    // and microsecond-level ties are common when a single ingest
+    // batch produces N verdicts) come back in arbitrary order from
+    // postgres — every repeat of the same request reshuffles the
+    // top-N visible to the frontend's Would-Deny view. id is the
+    // BIGSERIAL PK (monotonic), so id DESC is a deterministic stand-
+    // in for "most recently inserted" within the same observed_at.
     let rows = q
-        .order(observed_at.desc())
+        .order((observed_at.desc(), id.desc()))
         .limit(row_limit)
         .load::<crate::AuditVerdict>(conn)?;
     Ok(rows)
