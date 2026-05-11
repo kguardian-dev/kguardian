@@ -7,7 +7,7 @@ use kube::{
     Api, Client, ResourceExt,
 };
 use serde_json::json;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, warn};
 
 pub async fn watch_service() -> Result<(), Error> {
     let c = Client::try_default().await?;
@@ -21,7 +21,16 @@ pub async fn watch_service() -> Result<(), Error> {
                 if let Some(unready_reason) = svc_unready(&p) {
                     warn!("{}", unready_reason);
                 } else {
-                    info!("SVC  {} Ready", p.name_any());
+                    // debug not info — fires for every Service watch
+                    // event including the full re-sync on startup
+                    // (one line per Service in the cluster). Same
+                    // noise class as the per-pod-event info logs
+                    // dropped in becf12c7 / da590498 / faf10771. The
+                    // controller is correctly tracking Services
+                    // either way; operators don't need the per-event
+                    // confirmation at INFO. Symmetric with the broker
+                    // side's add_svc_details info → debug in 482cae24.
+                    debug!("SVC  {} Ready", p.name_any());
 
                     let ep = update_serviceinfo(p).await;
                     // log the error and proceed
