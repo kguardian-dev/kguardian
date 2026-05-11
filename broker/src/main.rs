@@ -33,11 +33,30 @@ fn run_migrations(
     Ok(())
 }
 
+/// Default pool size — r2d2's own default is 10, which can be the
+/// bottleneck under heavy ingest: the audit forwarder alone has a
+/// 16-permit semaphore, and each in-flight evaluator round-trip needs
+/// a pool connection to persist results. 16 here roughly balances
+/// the two; operators can tune via DB_POOL_MAX_SIZE env when /metrics
+/// shows pool-acquire contention.
+const DEFAULT_DB_POOL_MAX_SIZE: u32 = 16;
+
+fn db_pool_max_size() -> u32 {
+    std::env::var("DB_POOL_MAX_SIZE")
+        .ok()
+        .and_then(|v| v.trim().parse::<u32>().ok())
+        .map(|n| n.max(1))
+        .unwrap_or(DEFAULT_DB_POOL_MAX_SIZE)
+}
+
 #[actix_web::main]
 async fn main() -> Result<(), std::io::Error> {
     init_logging();
     let manager = establish_connection();
+    let max_size = db_pool_max_size();
+    info!(max_size, "constructing DB connection pool");
     let pool = r2d2::Pool::builder()
+        .max_size(max_size)
         .build(manager)
         .expect("Failed to create pool.");
     // RUN the migration schema with retries

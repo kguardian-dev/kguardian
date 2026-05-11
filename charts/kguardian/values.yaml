@@ -280,6 +280,14 @@ broker:
     # default is 16 if unset; minimum is 1.
     inflightPermits: 16
 
+  # -- r2d2 connection-pool max_size. r2d2's own default is 10, which
+  # is the bottleneck under heavy ingest: each audit evaluator
+  # round-trip and each regular request handler needs a pool
+  # connection. 16 here matches audit.inflightPermits for parity.
+  # Tune up when broker logs show "could not get db conn for audit
+  # verdict insert" warns or when /metrics shows pool-acquire stalls.
+  dbPoolMaxSize: 16
+
   # -- Startup probe. Empty by default — opt in when slow startup is expected
   # (e.g. cold image pull on small nodes). Replaces the default startup probe.
   startupProbe: {}

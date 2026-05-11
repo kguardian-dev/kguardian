@@ -89,6 +89,10 @@ spec:
             - name: AUDIT_INFLIGHT_PERMITS
               value: {{ .Values.broker.audit.inflightPermits | quote }}
             {{- end }}
+            {{- if hasKey .Values.broker "dbPoolMaxSize" }}
+            - name: DB_POOL_MAX_SIZE
+              value: {{ .Values.broker.dbPoolMaxSize | quote }}
+            {{- end }}
           {{- with .Values.broker.startupProbe }}
           startupProbe:
             {{- toYaml . | nindent 12 }}
