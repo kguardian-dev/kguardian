@@ -24,14 +24,23 @@ type BrokerClient struct {
 }
 
 // NewBrokerClient creates a new broker client.
-// Trims trailing slashes from baseURL so fmt.Sprintf("%s/pod/traffic/...",
-// baseURL, ...) doesn't produce a double-slashed URL when the operator
-// configures BROKER_URL="http://broker:9090/" (trailing slash is a
-// natural copy-paste artefact). Most servers normalize the double
-// slash but it's an avoidable source of confusion in error logs.
+//
+// Sanitises baseURL defensively so a downstream fmt.Sprintf doesn't
+// produce a malformed URL:
+//   - Surrounding whitespace is trimmed. main.go already TrimSpace's
+//     BROKER_URL before passing it here, but a future caller (test,
+//     embedded SDK use, alternative config source) might not — and a
+//     leading-space baseURL produces requests that http.NewRequest
+//     rejects with the cryptic "net/url: invalid control character"
+//     error, far from the env-var site that introduced the space.
+//   - Trailing slashes are stripped. BROKER_URL="http://broker:9090/"
+//     is a natural copy-paste artefact (operators copy from a browser
+//     URL bar / dashboard). Most servers normalize the resulting
+//     doubled slash but it shows up in logs as http://broker:9090//pod/...
+//     and can confuse routing on prefix-matched reverse proxies.
 func NewBrokerClient(baseURL string) *BrokerClient {
 	return &BrokerClient{
-		baseURL: strings.TrimRight(baseURL, "/"),
+		baseURL: strings.TrimRight(strings.TrimSpace(baseURL), "/"),
 		httpClient: &http.Client{
 			Timeout: 90 * time.Second, // Allow enough time for cluster-wide queries
 		},

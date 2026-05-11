@@ -213,6 +213,36 @@ func TestNewBrokerClient_TrimsTrailingSlash(t *testing.T) {
 	}
 }
 
+func TestNewBrokerClient_TrimsSurroundingWhitespace(t *testing.T) {
+	// A leading or trailing space in BROKER_URL (typical Helm-values
+	// paste artefact, or a multi-line YAML literal) reaches us via
+	// envFromConfig in some deployment paths even though main.go also
+	// trims. Without the defensive trim, http.NewRequest rejects the
+	// URL with a cryptic "net/url: invalid control character" error
+	// at request time, far from the env-var site that introduced the
+	// space — and the user sees a single unhelpful error per request.
+	cases := []struct {
+		in   string
+		want string
+	}{
+		{"  http://broker:9090", "http://broker:9090"},
+		{"http://broker:9090  ", "http://broker:9090"},
+		{"\thttp://broker:9090\n", "http://broker:9090"},
+		// Combined whitespace + trailing slash — both defenses apply.
+		{"  http://broker:9090/  ", "http://broker:9090"},
+		// Whitespace-only collapses to empty (the caller should still
+		// surface "BROKER_URL not set" but a bare-empty baseURL is at
+		// least cleanly empty rather than a sneaky " ").
+		{"   ", ""},
+	}
+	for _, c := range cases {
+		got := NewBrokerClient(c.in)
+		if got.baseURL != c.want {
+			t.Errorf("NewBrokerClient(%q).baseURL: want %q, got %q", c.in, c.want, got.baseURL)
+		}
+	}
+}
+
 func TestBrokerClient_TrailingSlashNoDoubleSlashInRequest(t *testing.T) {
 	// End-to-end pin: with a trailing-slash baseURL, the actual
 	// request path arriving at the server must NOT contain the
