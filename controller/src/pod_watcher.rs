@@ -52,7 +52,15 @@ pub async fn watch_pods(
                     if let Err(e) = t.send(inum).await {
                         tracing::error!("Failed to send inode number: {:?}", e);
                     }
-                    info!("Pod {:?}, inode num {:?}", p.name(), inum);
+                    // debug not info — fires on every pod event that
+                    // passes the per-node + namespace-exclusion filter,
+                    // including the full re-sync on controller startup
+                    // AND every pod-status transition (rolling deploys
+                    // generate hundreds per minute on busy nodes). The
+                    // inode-to-pod mapping is debug-relevant only when
+                    // chasing eBPF event correlation issues; operators
+                    // under default RUST_LOG=info don't need it.
+                    debug!("Pod {:?}, inode num {:?}", p.name(), inum);
                 }
                 Ok(())
             }
