@@ -50,7 +50,8 @@ Prometheus scraping is wired up. The broker exposes:
   broker_db_schema_ready, broker_db_reachable, broker_audit_enabled,
   broker_audit_inflight_available, broker_uptime_seconds
 Suggested alerts: schema_ready=0 for 5m, db_reachable=0 for 1m,
-inflight_available=0 for 10m (bump AUDIT_INFLIGHT_PERMITS).
+inflight_available=0 for 10m — when the inflight alert fires, raise
+the cap via values.yaml: `broker.audit.inflightPermits` (default 16).
 {{- end }}
 
 {{- if and .Values.database.enabled .Values.database.persistence.enabled .Values.database.persistence.preUpgradeBackup }}
