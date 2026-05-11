@@ -26,7 +26,18 @@ pub async fn get_pod_traffic(pool: web::Data<DbPool>) -> actix_web::Result<impl 
 pub fn pod_traffic(conn: &mut PgConnection) -> Result<Option<Vec<PodTraffic>>, DbError> {
     use schema::pod_traffic::dsl::*;
 
-    let pod = pod_traffic.load::<PodTraffic>(conn).optional()?;
+    // Stable display order — most recent first with uuid (the PK) as
+    // the tiebreak. Same UX-stability class as the audit_verdicts
+    // ORDER BY (observed_at DESC, id DESC) — without this, the
+    // frontend's "all pod traffic" panel reshuffled between reads as
+    // Postgres heap state changed (any insert/delete shifts row
+    // positions). uuid DESC is deterministic for ties in time_stamp
+    // (which the broker stamps from chrono::Utc::now().naive_utc(),
+    // and microsecond-level ties are common inside a batch ingest).
+    let pod = pod_traffic
+        .order((time_stamp.desc(), uuid.desc()))
+        .load::<PodTraffic>(conn)
+        .optional()?;
 
     Ok(pod)
 }
@@ -247,8 +258,15 @@ pub fn pod_traffic_by_name(
     name: &str,
 ) -> Result<Option<Vec<PodTraffic>>, DbError> {
     use schema::pod_traffic::dsl::*;
+    // See pod_traffic() for the (time_stamp DESC, uuid DESC) rationale.
+    // This is also what the advisor's policy generator reads via
+    // /pod/traffic/{name}; the dedup-then-sort on the advisor side
+    // (deduplicatePorts) already produces deterministic YAML, but
+    // stable input here means simpler reasoning + fewer surprises if
+    // a future generator change becomes input-order sensitive.
     let pod_tr = pod_traffic
         .filter(pod_name.eq(name.to_string()))
+        .order((time_stamp.desc(), uuid.desc()))
         .load::<PodTraffic>(conn)
         .optional()?;
     Ok(pod_tr)
