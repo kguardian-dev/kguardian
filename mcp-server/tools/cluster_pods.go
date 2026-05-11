@@ -33,7 +33,7 @@ func (h ClusterPodsHandler) Call(
 	input ClusterPodsInput,
 ) (*mcp.CallToolResult, ClusterPodsOutput, error) {
 	startTime := time.Now()
-	logger.Log.WithField("namespace", input.Namespace).Info("Received get_cluster_pods request")
+	logger.Log.WithField("namespace", input.Namespace).Debug("Received get_cluster_pods request")
 
 	data, err := h.client.GetAllPods(ctx)
 	if err != nil {

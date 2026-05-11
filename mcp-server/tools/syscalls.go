@@ -33,7 +33,7 @@ func (h SyscallsHandler) Call(
 	input SyscallsInput,
 ) (*mcp.CallToolResult, SyscallsOutput, error) {
 	startTime := time.Now()
-	logger.Log.WithField("pod_name", input.PodName).Info("Received get_pod_syscalls request")
+	logger.Log.WithField("pod_name", input.PodName).Debug("Received get_pod_syscalls request")
 
 	if input.PodName == "" {
 		logger.Log.Error("pod_name is required but not provided")

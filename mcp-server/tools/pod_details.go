@@ -33,7 +33,7 @@ func (h PodDetailsHandler) Call(
 	input PodDetailsInput,
 ) (*mcp.CallToolResult, PodDetailsOutput, error) {
 	startTime := time.Now()
-	logger.Log.WithField("ip", input.IP).Info("Received get_pod_details request")
+	logger.Log.WithField("ip", input.IP).Debug("Received get_pod_details request")
 
 	if input.IP == "" {
 		logger.Log.Error("IP address is required but not provided")

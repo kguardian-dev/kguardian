@@ -33,7 +33,7 @@ func (h ClusterTrafficHandler) Call(
 	input ClusterTrafficInput,
 ) (*mcp.CallToolResult, ClusterTrafficOutput, error) {
 	startTime := time.Now()
-	logger.Log.WithField("namespace", input.Namespace).Info("Received get_cluster_traffic request")
+	logger.Log.WithField("namespace", input.Namespace).Debug("Received get_cluster_traffic request")
 
 	fetchStart := time.Now()
 	data, err := h.client.GetAllPodTraffic(ctx)

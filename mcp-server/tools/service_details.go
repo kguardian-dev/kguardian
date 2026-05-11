@@ -33,7 +33,7 @@ func (h ServiceDetailsHandler) Call(
 	input ServiceDetailsInput,
 ) (*mcp.CallToolResult, ServiceDetailsOutput, error) {
 	startTime := time.Now()
-	logger.Log.WithField("ip", input.IP).Info("Received get_service_details request")
+	logger.Log.WithField("ip", input.IP).Debug("Received get_service_details request")
 
 	if input.IP == "" {
 		logger.Log.Error("IP address is required but not provided")
