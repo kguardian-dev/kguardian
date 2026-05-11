@@ -81,11 +81,11 @@ export class BrokerClient {
       await this.mcpClient.connect(transport);
       this.mcpInitialized = true;
 
-      console.log(`Connected to MCP server at ${this.mcpUrl}`);
+      log.info(`Connected to MCP server at ${this.mcpUrl}`);
     } catch (error) {
       // Reset the promise so future calls can retry
       this.initPromise = null;
-      console.error("Failed to initialize MCP client:", error);
+      log.error("Failed to initialize MCP client:", error);
       throw new Error(
         `Failed to connect to MCP server at ${this.mcpUrl}: ${error instanceof Error ? error.message : String(error)}`,
         { cause: error }
@@ -100,7 +100,7 @@ export class BrokerClient {
     this.mcpClient = null;
     this.mcpInitialized = false;
     this.initPromise = null;
-    console.log("MCP client connection reset — will reconnect on next call");
+    log.info("MCP client connection reset — will reconnect on next call");
   }
 
   /**
@@ -176,7 +176,7 @@ export class BrokerClient {
     } catch (error) {
       // On connection errors, reset and retry once
       if (allowRetry && this.isConnectionError(error)) {
-        console.warn(
+        log.warn(
           `Connection error calling MCP tool ${toolCall.name}, resetting and retrying:`,
           error instanceof Error ? error.message : error
         );
@@ -184,7 +184,7 @@ export class BrokerClient {
         return this.executeToolInner(toolCall, false);
       }
 
-      console.error(`Error calling MCP tool ${toolCall.name}:`, error);
+      log.error(`Error calling MCP tool ${toolCall.name}:`, error);
       return {
         data: null,
         error: error instanceof Error ? error.message : String(error),
@@ -206,7 +206,7 @@ export class BrokerClient {
       const response = await this.mcpClient.listTools();
       return response.tools || [];
     } catch (error) {
-      console.error("Error fetching tools from MCP server:", error);
+      log.error("Error fetching tools from MCP server:", error);
       return [];
     }
   }
@@ -231,7 +231,7 @@ export class BrokerClient {
         },
       }));
     } catch (error) {
-      console.error("Failed to fetch tools from MCP server, using fallback:", error);
+      log.error("Failed to fetch tools from MCP server, using fallback:", error);
       // Fallback to static definitions if MCP server is unavailable
       return BrokerClient.getToolDefinitions();
     } finally {
@@ -427,7 +427,7 @@ When a user mentions a pod name, use the appropriate tool immediately. Do NOT as
       this.mcpClient = null;
       this.mcpInitialized = false;
       this.initPromise = null;
-      console.log("MCP client connection closed");
+      log.info("MCP client connection closed");
     }
   }
 }

@@ -134,7 +134,7 @@ app.post("/api/chat", chatLimiter, async (req: Request, res: Response<any>) => {
 
     res.json(response);
   } catch (error) {
-    console.error("Error processing chat request:", error);
+    log.error("Error processing chat request:", error);
 
     if (error instanceof ZodError) {
       return res.status(400).json({
@@ -144,7 +144,7 @@ app.post("/api/chat", chatLimiter, async (req: Request, res: Response<any>) => {
     }
 
     if (error instanceof Error) {
-      console.error("Chat error details:", error.message, error.stack);
+      log.error("Chat error details:", error.message, error.stack);
       return res.status(500).json({
         error: "An internal error occurred while processing the chat request",
       } as ErrorResponse);
@@ -159,13 +159,13 @@ app.post("/api/chat", chatLimiter, async (req: Request, res: Response<any>) => {
 // Start server
 const server = app.listen(port, () => {
   const availableProviders = getAvailableProviders();
-  console.log(`LLM Bridge listening on port ${port}`);
-  console.log(`MCP Server URL: ${process.env.MCP_SERVER_URL || "(default)"}`);
-  console.log(`Available providers: ${availableProviders.join(", ") || "NONE"}`);
+  log.info(`LLM Bridge listening on port ${port}`);
+  log.info(`MCP Server URL: ${process.env.MCP_SERVER_URL || "(default)"}`);
+  log.info(`Available providers: ${availableProviders.join(", ") || "NONE"}`);
 
   if (availableProviders.length === 0) {
-    console.warn("WARNING: No LLM provider API keys configured!");
-    console.warn("Set at least one: OPENAI_API_KEY, ANTHROPIC_API_KEY, GOOGLE_API_KEY, or GITHUB_TOKEN");
+    log.warn("WARNING: No LLM provider API keys configured!");
+    log.warn("Set at least one: OPENAI_API_KEY, ANTHROPIC_API_KEY, GOOGLE_API_KEY, or GITHUB_TOKEN");
   }
 });
 

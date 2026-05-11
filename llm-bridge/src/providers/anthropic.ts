@@ -2,6 +2,7 @@ import axios from "axios";
 import type { ChatRequest, ChatResponse } from "../types/index.js";
 import { LLMProvider } from "../types/index.js";
 import { BrokerClient } from "../brokerClient.js";
+import { log } from "../logger.js";
 import { serializeToolResult } from "./truncate.js";
 
 interface AnthropicTool {
@@ -71,7 +72,7 @@ export async function callAnthropic(
         { headers, timeout: 120000 }
       );
     } catch (error: any) {
-      console.error("Anthropic API Error:", error.response?.data?.error?.message || error.message);
+      log.error("Anthropic API Error:", error.response?.data?.error?.message || error.message);
       throw new Error(`Anthropic API error: ${error.response?.data?.error?.message || error.message}`, { cause: error });
     }
 

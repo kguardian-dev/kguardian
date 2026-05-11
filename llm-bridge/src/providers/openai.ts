@@ -2,6 +2,7 @@ import axios from "axios";
 import type { ChatRequest, ChatResponse } from "../types/index.js";
 import { LLMProvider } from "../types/index.js";
 import { BrokerClient } from "../brokerClient.js";
+import { log } from "../logger.js";
 import { serializeToolResult } from "./truncate.js";
 
 interface OpenAIMessage {
@@ -80,7 +81,7 @@ export async function callOpenAI(
         { headers, timeout: 120000 }
       );
     } catch (error: any) {
-      console.error("OpenAI API Error:", error.response?.data || error.message);
+      log.error("OpenAI API Error:", error.response?.data || error.message);
       throw new Error(`OpenAI API error: ${error.response?.data?.error?.message || error.message}`, { cause: error });
     }
 
