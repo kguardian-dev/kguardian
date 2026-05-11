@@ -11,6 +11,7 @@ package status
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sort"
 	"sync"
@@ -162,8 +163,40 @@ func (a *Aggregator) flush(ctx context.Context) {
 	}
 	a.mu.Unlock()
 
-	for key, agg := range snapshot {
+	// Iterate in a stable order (namespace, name) so partial-completion
+	// during shutdown is predictable and easier to reason about in logs.
+	// Without sorting, Go's randomised map iteration meant the set of
+	// policies that got patched before a cancellation arrived was
+	// arbitrary — fine for correctness (each patch is independent) but
+	// makes "where did flush get to before shutdown?" diagnostics noisy.
+	keys := make([]policyKey, 0, len(snapshot))
+	for k := range snapshot {
+		keys = append(keys, k)
+	}
+	sort.Slice(keys, func(i, j int) bool {
+		if keys[i].namespace != keys[j].namespace {
+			return keys[i].namespace < keys[j].namespace
+		}
+		return keys[i].name < keys[j].name
+	})
+
+	for _, key := range keys {
+		// Bail crisply on shutdown — without this check, a long flush
+		// (e.g., 1000 policies × 50ms apiserver latency = 50s of work)
+		// continues running every patchStatus after ctx is cancelled,
+		// and each call returns context.Canceled which the warn-log
+		// branch below treats as a real failure. Spam at exit time
+		// makes shutdown diagnostics harder.
+		if ctx.Err() != nil {
+			return
+		}
+		agg := snapshot[key]
 		if err := a.patchStatus(ctx, key, agg); err != nil {
+			// Cancellation during a single patchStatus call: treat as
+			// shutdown, not as a per-policy failure worth a warn log.
+			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+				return
+			}
 			if apierrors.IsNotFound(err) {
 				// The policy was deleted while we held a verdict for it.
 				// Evict the in-memory entry so (a) we don't leak memory

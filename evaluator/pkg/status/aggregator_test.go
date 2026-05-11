@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"testing"
 	"time"
@@ -401,6 +402,104 @@ func TestFlush_EvictsEntryWhenPolicyNotFound(t *testing.T) {
 	defer a.mu.Unlock()
 	if _, ok := a.counts[policyKey{namespace: "prod", name: "ghost-policy"}]; ok {
 		t.Errorf("post-flush: entry should be evicted after NotFound; counts=%+v", a.counts)
+	}
+}
+
+func TestFlush_BailsOnCancelledContext(t *testing.T) {
+	// Pre-cancelled ctx: flush() must return immediately without
+	// attempting any Patch calls. Without the bail, every snapshot
+	// entry's patchStatus would fire and return context.Canceled —
+	// noise at shutdown that obscures real failures in the logs.
+	dyn := fakeDynamicClient()
+	a := New(dyn, quietLog())
+	// Record many entries so a fall-through loop would be visible.
+	for i := 0; i < 10; i++ {
+		ns := "prod"
+		name := fmt.Sprintf("p-%02d", i)
+		a.Record(ns, name, "src/x", "dst/y", "TCP", "Ingress", 80, true, 1)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // already cancelled when flush runs
+	a.flush(ctx)
+
+	// No Patch action should have been issued.
+	for _, action := range dyn.Actions() {
+		if patch, ok := action.(clienttesting.PatchActionImpl); ok {
+			t.Errorf("expected no Patch calls on cancelled ctx; got %s/%s",
+				patch.GetNamespace(), patch.GetName())
+		}
+	}
+}
+
+func TestFlush_BailsOnMidIterationCancellation(t *testing.T) {
+	// More subtle: ctx is cancelled while patchStatus is running for
+	// one of the entries. The Patch reactor returns context.Canceled.
+	// flush must stop iterating instead of charging through every
+	// remaining entry and racking up identical context.Canceled errors.
+	dyn := fakeDynamicClient()
+	var patchCount int
+	dyn.PrependReactor("patch", "auditnetworkpolicies", func(action clienttesting.Action) (bool, runtime.Object, error) {
+		patchCount++
+		// First patch succeeds (so we know the loop did start), every
+		// subsequent attempt returns context.Canceled to simulate the
+		// ctx being cancelled after the first patchStatus.
+		if patchCount == 1 {
+			return true, nil, nil
+		}
+		return true, nil, context.Canceled
+	})
+
+	a := New(dyn, quietLog())
+	for i := 0; i < 10; i++ {
+		a.Record("prod", fmt.Sprintf("p-%02d", i), "src/x", "dst/y", "TCP", "Ingress", 80, true, 1)
+	}
+
+	a.flush(context.Background())
+
+	// With early-bail on context.Canceled, we expect exactly 2 patch
+	// attempts: the first succeeded, the second returned canceled and
+	// triggered the return. Without the bail we'd see all 10.
+	if patchCount != 2 {
+		t.Errorf("expected to bail after 2 patches (first ok + first canceled), got %d", patchCount)
+	}
+}
+
+func TestFlush_IteratesInStableOrder(t *testing.T) {
+	// Partial-completion ordering during shutdown should be predictable,
+	// not Go-map-iteration random. Pin the order by recording several
+	// entries, capturing the order in which Patch calls arrive, and
+	// asserting it matches (namespace, name) ascending.
+	dyn := fakeDynamicClient()
+	var observed []string
+	dyn.PrependReactor("patch", "auditnetworkpolicies", func(action clienttesting.Action) (bool, runtime.Object, error) {
+		patch := action.(clienttesting.PatchActionImpl)
+		observed = append(observed, patch.GetNamespace()+"/"+patch.GetName())
+		return true, nil, nil
+	})
+
+	a := New(dyn, quietLog())
+	// Record in deliberately-mixed insertion order to defeat any
+	// accidental insertion-order coupling. Without the sort, Go's map
+	// iteration would shuffle these per-process.
+	for _, e := range []struct{ ns, name string }{
+		{"prod", "z-policy"},
+		{"dev", "a-policy"},
+		{"prod", "a-policy"},
+		{"dev", "z-policy"},
+	} {
+		a.Record(e.ns, e.name, "src/x", "dst/y", "TCP", "Ingress", 80, true, 1)
+	}
+	a.flush(context.Background())
+
+	want := []string{"dev/a-policy", "dev/z-policy", "prod/a-policy", "prod/z-policy"}
+	if len(observed) != len(want) {
+		t.Fatalf("patch count: want %d, got %d (%v)", len(want), len(observed), observed)
+	}
+	for i, w := range want {
+		if observed[i] != w {
+			t.Errorf("index %d: want %q, got %q (full=%v)", i, w, observed[i], observed)
+		}
 	}
 }
 
