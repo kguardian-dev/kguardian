@@ -117,14 +117,20 @@ enum RetentionError {
 fn retention_days() -> u32 {
     std::env::var("AUDIT_VERDICTS_RETENTION_DAYS")
         .ok()
-        .and_then(|v| v.parse().ok())
+        // Trim before parse — consistent with the env-var
+        // whitespace-defense applied across all 5 services and the
+        // audit semaphore's AUDIT_INFLIGHT_PERMITS env. Without
+        // trim, "30\n" (the typical copy-paste artefact) falls back
+        // to the safe default — same operator-confusion class.
+        .and_then(|v| v.trim().parse().ok())
         .unwrap_or(DEFAULT_RETENTION_DAYS)
 }
 
 fn retention_interval() -> Duration {
     let secs = std::env::var("AUDIT_VERDICTS_RETENTION_INTERVAL_SECS")
         .ok()
-        .and_then(|v| v.parse().ok())
+        // Same trim defense — see retention_days.
+        .and_then(|v| v.trim().parse().ok())
         .unwrap_or(DEFAULT_INTERVAL_SECS);
     Duration::from_secs(secs.max(60))
 }
@@ -179,6 +185,23 @@ mod tests {
         // default.
         with_env("AUDIT_VERDICTS_RETENTION_DAYS", Some("not-a-number"), || {
             assert_eq!(retention_days(), DEFAULT_RETENTION_DAYS);
+        });
+    }
+
+    #[test]
+    fn retention_days_trims_whitespace() {
+        // Operator-paste with trailing newline must honor the numeric
+        // value, not fall back to the default. Same trim-defense
+        // applied to db_pool_max_size and AUDIT_INFLIGHT_PERMITS.
+        with_env("AUDIT_VERDICTS_RETENTION_DAYS", Some("  7\n"), || {
+            assert_eq!(retention_days(), 7);
+        });
+    }
+
+    #[test]
+    fn retention_interval_trims_whitespace() {
+        with_env("AUDIT_VERDICTS_RETENTION_INTERVAL_SECS", Some("  3600 "), || {
+            assert_eq!(retention_interval(), Duration::from_secs(3600));
         });
     }
 
