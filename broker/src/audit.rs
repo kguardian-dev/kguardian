@@ -239,12 +239,24 @@ impl AuditClient {
         let resp = match self.http.post(&url).json(&flow).send().await {
             Ok(r) => r,
             Err(e) => {
+                // Connection-level failures (timeout, refused, DNS):
+                // log at debug since these are commonly transient
+                // (evaluator pod restarting, brief network blip).
+                // Sustained connection failures show up as zero
+                // audit_verdicts rows AND a permit semaphore that
+                // stays near full (no in-flight calls).
                 debug!(error = %e, "evaluator unreachable; skipping audit eval");
                 return;
             }
         };
         if !resp.status().is_success() {
-            debug!(status = %resp.status(), "evaluator returned non-2xx");
+            // Non-2xx HTTP from a reachable evaluator means the
+            // evaluator IS responding but rejecting our requests
+            // (4xx = malformed request — a broker bug we want to
+            // know about; 5xx = evaluator-internal failure — also a
+            // signal the operator must surface). Promote to warn so
+            // operators see the problem without needing debug logs.
+            tracing::warn!(status = %resp.status(), url = %url, "evaluator returned non-2xx for audit eval");
             return;
         }
         let body: EvaluateResponse = match resp.json().await {
