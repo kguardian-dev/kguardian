@@ -473,6 +473,22 @@ pub fn create_pod_syscalls(
 
     conn.transaction(|conn| {
         for pod_syscall in w.iter() {
+            // Skip entries with empty/whitespace pod_name — same
+            // defense as the /pod/spec guard (commit 66090aed) and
+            // the symmetric one in mark_pod_as_dead (7eb9bf00).
+            // pod_name is the table PK; an empty value would create
+            // a sentinel row that subsequent batches' "is there
+            // already a syscall row for X?" lookups could collide
+            // with. Skip per-entry rather than failing the whole
+            // batch — controllers send these in batches and one bad
+            // entry shouldn't lose the rest.
+            if pod_syscall.pod_name.trim().is_empty() {
+                tracing::warn!(
+                    pod_namespace = %pod_syscall.pod_namespace,
+                    "skipping syscall entry with empty/whitespace pod_name"
+                );
+                continue;
+            }
             debug!(
                 "Storing pod details {:?} into pod_syscalls table",
                 pod_syscall.pod_name
