@@ -139,10 +139,19 @@ func TestClusterPodsHandler_BrokerErrorBecomesIsError(t *testing.T) {
 // --- ClusterTrafficHandler ---
 
 func TestClusterTrafficHandler_AggregatesByPod(t *testing.T) {
+	// Uses the REAL broker wire format:
+	//   traffic_type is UPPERCASE ("INGRESS"/"EGRESS") per
+	//   controller/src/network.rs
+	//   peer-side IP is traffic_in_out_ip (the prior dst_ip/src_ip
+	//   were fictional fields — see iteration 73)
+	// Pre-fix the unit tests used the fictional shape and passed
+	// against fictional behavior; this end-to-end test now exercises
+	// the real wire contract.
 	body := `[
-		{"pod_name":"web-1","pod_namespace":"prod","traffic_type":"ingress","src_ip":"10.0.0.1","dst_ip":"10.1.0.1"},
-		{"pod_name":"web-1","pod_namespace":"prod","traffic_type":"egress","src_ip":"10.1.0.1","dst_ip":"10.0.0.5"},
-		{"pod_name":"db-1","pod_namespace":"prod","traffic_type":"ingress","src_ip":"10.1.0.1","dst_ip":"10.2.0.1"}
+		{"pod_name":"web-1","pod_namespace":"prod","traffic_type":"INGRESS","traffic_in_out_ip":"10.0.0.1"},
+		{"pod_name":"web-1","pod_namespace":"prod","traffic_type":"INGRESS","traffic_in_out_ip":"10.0.0.1"},
+		{"pod_name":"web-1","pod_namespace":"prod","traffic_type":"EGRESS","traffic_in_out_ip":"10.0.0.5"},
+		{"pod_name":"db-1","pod_namespace":"prod","traffic_type":"INGRESS","traffic_in_out_ip":"10.0.0.10"}
 	]`
 	c, cleanup := newBrokerWithJSON(t, body)
 	defer cleanup()
@@ -157,11 +166,51 @@ func TestClusterTrafficHandler_AggregatesByPod(t *testing.T) {
 	if err := json.Unmarshal([]byte(textOf(t, res)), &summary); err != nil {
 		t.Fatalf("response must be JSON: %v", err)
 	}
-	if got := summary["total_records"]; got != float64(3) {
-		t.Errorf("total_records: want 3, got %v", got)
+	if got := summary["total_records"]; got != float64(4) {
+		t.Errorf("total_records: want 4, got %v", got)
 	}
 	if got := summary["pod_count"]; got != float64(2) {
 		t.Errorf("pod_count: want 2, got %v", got)
+	}
+
+	// Per-pod counts — pin both case-insensitive direction (iteration 71)
+	// AND traffic_in_out_ip peer counting (iteration 73). Pre-fix
+	// these were always 0 in production.
+	pods := summary["pods"].(map[string]any)
+	web := pods["web-1"].(map[string]any)
+	if got := web["ingress_count"]; got != float64(2) {
+		t.Errorf("web-1 ingress_count: want 2, got %v", got)
+	}
+	if got := web["egress_count"]; got != float64(1) {
+		t.Errorf("web-1 egress_count: want 1, got %v", got)
+	}
+	// 10.0.0.1 (twice, dedup) + 10.0.0.5 = 2 unique peers
+	if got := web["unique_peer_count"]; got != float64(2) {
+		t.Errorf("web-1 unique_peer_count: want 2, got %v", got)
+	}
+}
+
+func TestClusterTrafficHandler_CaseInsensitiveTrafficType(t *testing.T) {
+	// Belt-and-braces: feed mixed-case traffic_type values through
+	// the real handler and verify counts still aggregate. Catches
+	// any future regression that strict-equals traffic_type.
+	body := `[
+		{"pod_name":"a","pod_namespace":"prod","traffic_type":"INGRESS","traffic_in_out_ip":"1.1.1.1"},
+		{"pod_name":"a","pod_namespace":"prod","traffic_type":"ingress","traffic_in_out_ip":"1.1.1.2"},
+		{"pod_name":"a","pod_namespace":"prod","traffic_type":"Ingress","traffic_in_out_ip":"1.1.1.3"}
+	]`
+	c, cleanup := newBrokerWithJSON(t, body)
+	defer cleanup()
+
+	h := ClusterTrafficHandler{client: c}
+	res, _, _ := h.Call(context.Background(), nil, ClusterTrafficInput{})
+
+	var summary map[string]any
+	_ = json.Unmarshal([]byte(textOf(t, res)), &summary)
+	pods := summary["pods"].(map[string]any)
+	a := pods["a"].(map[string]any)
+	if got := a["ingress_count"]; got != float64(3) {
+		t.Errorf("ingress_count must aggregate all three spellings; want 3, got %v", got)
 	}
 }
 
