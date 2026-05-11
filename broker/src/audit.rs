@@ -129,7 +129,11 @@ impl AuditClient {
         let enabled = !base_url.is_empty();
         let permits = std::env::var("AUDIT_INFLIGHT_PERMITS")
             .ok()
-            .and_then(|v| v.parse::<usize>().ok())
+            // Trim before parsing — consistent with db_pool_max_size
+            // (iteration 102) and the env-trim defense across all 5
+            // services. Without trim, " 32\n" silently falls back to
+            // the default rather than honoring the operator's value.
+            .and_then(|v| v.trim().parse::<usize>().ok())
             .map(|n| n.max(1))
             .unwrap_or(AUDIT_INFLIGHT_PERMITS);
         let http = reqwest::Client::builder()
@@ -454,6 +458,21 @@ mod tests {
         std::env::set_var("AUDIT_INFLIGHT_PERMITS", "4");
         let c = AuditClient::from_env();
         assert_eq!(c.available_permits(), 4);
+        match prev {
+            Some(v) => std::env::set_var("AUDIT_INFLIGHT_PERMITS", v),
+            None => std::env::remove_var("AUDIT_INFLIGHT_PERMITS"),
+        }
+    }
+
+    #[test]
+    fn semaphore_trims_whitespace_around_value() {
+        // " 32\n" must honor 32, not fall back to the default. Same
+        // operator-paste defense applied to db_pool_max_size (broker
+        // iteration 102) and the env reads across all 5 services.
+        let prev = std::env::var("AUDIT_INFLIGHT_PERMITS").ok();
+        std::env::set_var("AUDIT_INFLIGHT_PERMITS", "  32\n");
+        let c = AuditClient::from_env();
+        assert_eq!(c.available_permits(), 32);
         match prev {
             Some(v) => std::env::set_var("AUDIT_INFLIGHT_PERMITS", v),
             None => std::env::remove_var("AUDIT_INFLIGHT_PERMITS"),
