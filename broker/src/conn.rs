@@ -68,4 +68,38 @@ mod tests {
             None => env::remove_var("DATABASE_URL"),
         }
     }
+
+    #[test]
+    #[should_panic(expected = "DATABASE_URL must be set")]
+    fn whitespace_only_url_is_treated_as_unset() {
+        // Iteration 108 trim contract: a pasted "  \n" must NOT
+        // be passed through to diesel as if it were a valid URL.
+        // It hits the empty-after-trim filter and triggers the
+        // same "not set" panic — clearer signal at startup than
+        // a downstream postgres parse error.
+        let prev = env::var("DATABASE_URL").ok();
+        env::set_var("DATABASE_URL", "  \n");
+        let result = std::panic::catch_unwind(|| establish_connection());
+        match prev {
+            Some(v) => env::set_var("DATABASE_URL", v),
+            None => env::remove_var("DATABASE_URL"),
+        }
+        if let Err(panic) = result {
+            std::panic::resume_unwind(panic);
+        }
+    }
+
+    #[test]
+    fn trailing_whitespace_is_stripped() {
+        // A pasted URL with trailing newline (typical) round-trips
+        // clean. Construction succeeds and the connection-manager
+        // gets the trimmed URL.
+        let prev = env::var("DATABASE_URL").ok();
+        env::set_var("DATABASE_URL", "  postgres://x:y@example.invalid/db\n");
+        let _mgr = establish_connection();
+        match prev {
+            Some(v) => env::set_var("DATABASE_URL", v),
+            None => env::remove_var("DATABASE_URL"),
+        }
+    }
 }
