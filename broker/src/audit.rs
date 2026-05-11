@@ -726,6 +726,23 @@ mod tests {
     }
 
     #[test]
+    fn build_flow_returns_none_for_empty_or_whitespace_traffic_type() {
+        // A degenerate row with traffic_type=Some("") or whitespace
+        // must also skip — the normalise (trim + uppercase) collapses
+        // both to "", which falls through the match to None. Without
+        // this contract pin, a future refactor that swaps the
+        // normaliser could silently start treating empty as INGRESS or
+        // EGRESS depending on the new logic.
+        for tt in ["", " ", "\t", "\n", "   \n  "] {
+            let traffic = sample_traffic(Some(tt));
+            assert!(
+                build_flow_for_traffic(&traffic).is_none(),
+                "traffic_type={tt:?} must produce None",
+            );
+        }
+    }
+
+    #[test]
     fn build_flow_ingress_puts_pod_as_destination() {
         let traffic = sample_traffic(Some("INGRESS"));
         let flow = build_flow_for_traffic(&traffic).expect("INGRESS must produce a Flow");
