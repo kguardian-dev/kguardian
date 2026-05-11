@@ -5,6 +5,7 @@ import dotenv from "dotenv";
 import { ZodError } from "zod";
 import { ChatRequestSchema, LLMProvider, type ErrorResponse } from "./types/index.js";
 import { BrokerClient } from "./brokerClient.js";
+import { log } from "./logger.js";
 import { callOpenAI } from "./providers/openai.js";
 import { callAnthropic } from "./providers/anthropic.js";
 import { callGemini } from "./providers/gemini.js";
@@ -105,7 +106,10 @@ app.post("/api/chat", chatLimiter, async (req: Request, res: Response<any>) => {
       } as ErrorResponse);
     }
 
-    console.log(`Processing chat request with provider: ${provider}`);
+    // Debug not info — this fires per chat request; a chat session
+    // can produce dozens. The provider routing is part of normal
+    // operation, not a per-request operator alert.
+    log.debug(`Processing chat request with provider: ${provider}`);
 
     // Route to appropriate provider
     let response;

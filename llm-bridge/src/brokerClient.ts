@@ -1,5 +1,6 @@
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
+import { log } from "./logger.js";
 import type { ToolCall, ToolResult } from "./types/index.js";
 
 export interface ParsedContext {
@@ -139,7 +140,12 @@ export class BrokerClient {
 
       const { name, arguments: args } = toolCall;
 
-      console.log(`Calling MCP tool: ${name}`);
+      // Per-tool-call entry + exit logs at debug level. A chatty LLM
+      // can call tools dozens of times per session and the exit log
+      // (with the full result body) is multi-KB per call — far too
+      // verbose for steady-state INFO. Operators wanting per-call
+      // tracing run with LOG_LEVEL=debug.
+      log.debug(`Calling MCP tool: ${name}`);
 
       // Call the tool using MCP SDK
       const result = await this.mcpClient.callTool({
@@ -147,7 +153,7 @@ export class BrokerClient {
         arguments: args || {},
       });
 
-      console.log(`MCP tool ${name} returned:`, result);
+      log.debug(`MCP tool ${name} returned:`, result);
 
       // MCP SDK returns result with content array
       if (result.content && Array.isArray(result.content)) {
