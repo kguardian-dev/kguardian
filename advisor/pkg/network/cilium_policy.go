@@ -216,8 +216,12 @@ func (g *CiliumPolicyGenerator) transformToCiliumIngressRules(rules []NetworkPol
 		peerRules[rule.PeerIP] = append(peerRules[rule.PeerIP], rule.Ports...)
 	}
 
-	// Create ingress rules
-	for peerIP, ports := range peerRules {
+	// Iterate in sorted peer-IP order — see sortedKeys in
+	// standard_policy.go for the determinism rationale. Same fix
+	// class applies to Cilium output: regenerating the same policy
+	// must produce identical YAML so kubectl diff is clean.
+	for _, peerIP := range sortedKeys(peerRules) {
+		ports := peerRules[peerIP]
 		ingressRule := g.createCiliumIngressRuleForPeer(peerIP, ports)
 		if ingressRule != nil {
 			ingressRules = append(ingressRules, *ingressRule)
@@ -237,8 +241,9 @@ func (g *CiliumPolicyGenerator) transformToCiliumEgressRules(rules []NetworkPoli
 		peerRules[rule.PeerIP] = append(peerRules[rule.PeerIP], rule.Ports...)
 	}
 
-	// Create egress rules
-	for peerIP, ports := range peerRules {
+	// Sorted iteration — see ingress sibling.
+	for _, peerIP := range sortedKeys(peerRules) {
+		ports := peerRules[peerIP]
 		egressRule := g.createCiliumEgressRuleForPeer(peerIP, ports)
 		if egressRule != nil {
 			egressRules = append(egressRules, *egressRule)

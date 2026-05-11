@@ -2,6 +2,7 @@ package network
 
 import (
 	"fmt"
+	"sort"
 	"strconv"
 
 	log "github.com/rs/zerolog/log"
@@ -214,8 +215,14 @@ func (g *StandardPolicyGenerator) transformToNetworkPolicyIngressRules(rules []N
 		peerRules[rule.PeerIP] = append(peerRules[rule.PeerIP], rule.Ports...)
 	}
 
-	// Create ingress rules
-	for peerIP, ports := range peerRules {
+	// Iterate in sorted peer-IP order so the generated YAML is
+	// deterministic across runs of identical input. Without this,
+	// `kguardian generate networkpolicy` produced different rule
+	// orderings each call (Go map iteration randomises per process),
+	// surfacing as spurious `kubectl diff` output and noise in
+	// git-tracked policy review.
+	for _, peerIP := range sortedKeys(peerRules) {
+		ports := peerRules[peerIP]
 		peerPolicy := g.createNetworkPolicyPeer(peerIP)
 		if peerPolicy == nil { // Skip if peer could not be determined (e.g., internal error)
 			continue
@@ -239,8 +246,9 @@ func (g *StandardPolicyGenerator) transformToNetworkPolicyEgressRules(rules []Ne
 		peerRules[rule.PeerIP] = append(peerRules[rule.PeerIP], rule.Ports...)
 	}
 
-	// Create egress rules
-	for peerIP, ports := range peerRules {
+	// Sorted iteration — see the ingress sibling for rationale.
+	for _, peerIP := range sortedKeys(peerRules) {
+		ports := peerRules[peerIP]
 		peerPolicy := g.createNetworkPolicyPeer(peerIP)
 		if peerPolicy == nil { // Skip if peer could not be determined
 			continue
@@ -253,6 +261,20 @@ func (g *StandardPolicyGenerator) transformToNetworkPolicyEgressRules(rules []Ne
 	}
 
 	return egressRules
+}
+
+// sortedKeys returns the keys of a string-keyed map in ascending
+// order. Used by the policy transforms to produce deterministic
+// rule ordering — Go's map iteration is randomised per process, so
+// without sorting, regenerating a policy from identical input
+// produces different YAML each run (spurious diffs).
+func sortedKeys(m map[string][]networkingv1.NetworkPolicyPort) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys
 }
 
 // createNetworkPolicyPeer determines the NetworkPolicyPeer based on the IP address.

@@ -415,6 +415,104 @@ func TestDeduplicatePorts(t *testing.T) {
 	}, deduplicated)
 }
 
+// --- Determinism: peer-IP iteration order ---
+
+func TestSortedKeys_ReturnsAscendingOrder(t *testing.T) {
+	// Pin the helper's contract: ascending lexicographic order of keys.
+	// The policy transforms depend on this for deterministic YAML output;
+	// any future refactor that swaps to a different sort tax would silently
+	// reorder generated policies across runs.
+	in := map[string][]networkingv1.NetworkPolicyPort{
+		"10.0.0.5": nil,
+		"10.0.0.1": nil,
+		"10.0.0.3": nil,
+		"10.0.0.2": nil,
+		"10.0.0.4": nil,
+	}
+	got := sortedKeys(in)
+	want := []string{"10.0.0.1", "10.0.0.2", "10.0.0.3", "10.0.0.4", "10.0.0.5"}
+	assert.Equal(t, want, got)
+
+	// Twenty more invocations must produce the same output. Without
+	// the explicit sort, Go's map iteration randomises per-process,
+	// so even N=5 keys would shuffle visibly across runs.
+	for i := 0; i < 20; i++ {
+		again := sortedKeys(in)
+		assert.Equal(t, want, again, "run %d must match", i)
+	}
+}
+
+func TestTransformToNetworkPolicyIngressRules_DeterministicPeerOrdering(t *testing.T) {
+	// Repro for the "policy YAML reshuffles between runs" bug. The
+	// transform used to range over the peerRules map directly — Go
+	// randomises per process, so two `kguardian generate
+	// networkpolicy` invocations on the same input produced different
+	// rule orderings, surfacing as spurious `kubectl diff` and noise
+	// in git-tracked policy review.
+	//
+	// Build a multi-peer rules slice using IPBlock peers (so we don't
+	// need the broker fake — IPBlock falls through createNetworkPolicyPeer
+	// with no API calls). Run the transform 20 times; the From IP
+	// sequence across the resulting IngressRule list must be identical
+	// every call.
+	p80 := intstr.FromInt(80)
+	tcp := corev1.ProtocolTCP
+	rules := []NetworkPolicyRule{
+		{PeerIP: "8.8.8.8", Ports: []networkingv1.NetworkPolicyPort{{Port: &p80, Protocol: &tcp}}},
+		{PeerIP: "1.1.1.1", Ports: []networkingv1.NetworkPolicyPort{{Port: &p80, Protocol: &tcp}}},
+		{PeerIP: "9.9.9.9", Ports: []networkingv1.NetworkPolicyPort{{Port: &p80, Protocol: &tcp}}},
+		{PeerIP: "2.2.2.2", Ports: []networkingv1.NetworkPolicyPort{{Port: &p80, Protocol: &tcp}}},
+		{PeerIP: "4.4.4.4", Ports: []networkingv1.NetworkPolicyPort{{Port: &p80, Protocol: &tcp}}},
+	}
+
+	gen := &StandardPolicyGenerator{}
+
+	first := gen.transformToNetworkPolicyIngressRules(rules)
+	assert.Len(t, first, 5)
+	want := []string{"1.1.1.1/32", "2.2.2.2/32", "4.4.4.4/32", "8.8.8.8/32", "9.9.9.9/32"}
+	for i, w := range want {
+		assert.NotNil(t, first[i].From[0].IPBlock, "rule %d: From[0].IPBlock should be set for an external IP peer", i)
+		assert.Equal(t, w, first[i].From[0].IPBlock.CIDR, "rule %d: want CIDR %s", i, w)
+	}
+
+	for run := 0; run < 20; run++ {
+		got := gen.transformToNetworkPolicyIngressRules(rules)
+		assert.Equal(t, len(first), len(got), "run %d: length differs", run)
+		for i := range got {
+			assert.Equal(t, first[i].From[0].IPBlock.CIDR, got[i].From[0].IPBlock.CIDR,
+				"run %d index %d: peer ordering must match", run, i)
+		}
+	}
+}
+
+func TestTransformToNetworkPolicyEgressRules_DeterministicPeerOrdering(t *testing.T) {
+	// Mirror of the ingress test for the egress transform. Egress
+	// rules ship in spec.egress — same git-diff / kubectl-diff impact.
+	p443 := intstr.FromInt(443)
+	tcp := corev1.ProtocolTCP
+	rules := []NetworkPolicyRule{
+		{PeerIP: "10.0.0.5", Ports: []networkingv1.NetworkPolicyPort{{Port: &p443, Protocol: &tcp}}},
+		{PeerIP: "10.0.0.1", Ports: []networkingv1.NetworkPolicyPort{{Port: &p443, Protocol: &tcp}}},
+		{PeerIP: "10.0.0.3", Ports: []networkingv1.NetworkPolicyPort{{Port: &p443, Protocol: &tcp}}},
+		{PeerIP: "10.0.0.2", Ports: []networkingv1.NetworkPolicyPort{{Port: &p443, Protocol: &tcp}}},
+	}
+	gen := &StandardPolicyGenerator{}
+	first := gen.transformToNetworkPolicyEgressRules(rules)
+	want := []string{"10.0.0.1/32", "10.0.0.2/32", "10.0.0.3/32", "10.0.0.5/32"}
+	for i, w := range want {
+		assert.NotNil(t, first[i].To[0].IPBlock, "rule %d: To[0].IPBlock should be set", i)
+		assert.Equal(t, w, first[i].To[0].IPBlock.CIDR, "rule %d: want CIDR %s", i, w)
+	}
+
+	for run := 0; run < 20; run++ {
+		got := gen.transformToNetworkPolicyEgressRules(rules)
+		for i := range got {
+			assert.Equal(t, first[i].To[0].IPBlock.CIDR, got[i].To[0].IPBlock.CIDR,
+				"run %d index %d: peer ordering must match", run, i)
+		}
+	}
+}
+
 // --- GetType + addOrUpdateRule coverage ---
 
 func TestStandardPolicyGenerator_GetType(t *testing.T) {
