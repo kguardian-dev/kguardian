@@ -56,6 +56,23 @@ fn db_pool_max_size() -> u32 {
 /// the loop's 2-second sleep = ~20s of patience.
 const DEFAULT_DB_MIGRATION_MAX_RETRIES: u32 = 10;
 
+/// Default bind address for the broker HTTP server. Operators
+/// changing the chart's broker.container.port previously needed to
+/// know to ALSO set this — now wired via LISTEN_ADDR env.
+const DEFAULT_LISTEN_ADDR: &str = "0.0.0.0:9090";
+
+/// Read LISTEN_ADDR env var with trim + empty fallback. Same env
+/// trim defense as every other env reader in the broker (a pasted
+/// "0.0.0.0:9090\n" would otherwise fail bind with a confusing
+/// parse error far from the env read site).
+fn listen_addr() -> String {
+    std::env::var("LISTEN_ADDR")
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| DEFAULT_LISTEN_ADDR.to_string())
+}
+
 /// Read DB_MIGRATION_MAX_RETRIES with trim + clamp. Extracted out
 /// of main() for the same testability reason as db_pool_max_size.
 fn db_migration_max_retries() -> u32 {
@@ -128,6 +145,8 @@ async fn main() -> Result<(), std::io::Error> {
     // chart. Disable by setting AUDIT_VERDICTS_RETENTION_DAYS=0.
     spawn_retention(pool.clone());
 
+    let listen_addr = listen_addr();
+    info!(addr = %listen_addr, "broker HTTP server starting");
     HttpServer::new(move || {
         let cors = Cors::default()
             .allow_any_origin()
@@ -158,7 +177,7 @@ async fn main() -> Result<(), std::io::Error> {
             .service(health_check)
             .service(metrics)
     })
-    .bind(("0.0.0.0", 9090))?
+    .bind(listen_addr)?
     .run()
     .await
 }

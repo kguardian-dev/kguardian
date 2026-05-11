@@ -63,6 +63,13 @@ spec:
                   key: {{ .Values.database.passwordSecretKey }}
             - name: DATABASE_URL
               value: {{ include "kguardian.dbUrl" . | quote }}
+            # Wire chart's broker.container.port through to the Rust
+            # binary so changing the chart port doesn't require also
+            # setting LISTEN_ADDR by hand. The bind address is always
+            # 0.0.0.0 — clusters that need a different bind can set
+            # LISTEN_ADDR via env override.
+            - name: LISTEN_ADDR
+              value: "0.0.0.0:{{ .Values.broker.container.port }}"
             {{- if .Values.evaluator.enabled }}
             - name: EVALUATOR_URL
               value: "http://{{ .Values.evaluator.service.name }}.{{ include "kguardian.namespace" . | trim }}.svc.cluster.local:{{ .Values.evaluator.service.port }}"
