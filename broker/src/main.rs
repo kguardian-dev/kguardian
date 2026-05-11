@@ -153,7 +153,14 @@ pub async fn health_check(
     let pool_inner = pool.get_ref().clone();
     let result = tokio::task::spawn_blocking(
         move || -> Result<bool, Box<dyn Error + Send + Sync>> {
-            let mut conn = pool_inner.get()?;
+            // Short timeout so a saturated pool doesn't block past the
+            // kubelet probe timeout (chart default 5s). Returning 503
+            // here gives the kubelet a clear "Database unavailable"
+            // signal — and the same response body operators see — vs
+            // a vague "probe timed out" log entry when pool.get()
+            // hangs for the r2d2 default 30s. Same defense applied
+            // to /metrics.
+            let mut conn = pool_inner.get_timeout(std::time::Duration::from_millis(500))?;
             // Empty pending list ⇒ schema is current. Anything else
             // means the DB is fresh or behind, e.g. because the database
             // pod was replaced after broker startup.
