@@ -115,6 +115,27 @@ pub struct AuditClient {
 /// effective rate limit; further audit calls queue on this semaphore.
 const AUDIT_INFLIGHT_PERMITS: usize = 16;
 
+/// Default audit eval timeout in milliseconds. 500ms is plenty for
+/// an in-cluster evaluator (matcher is in-memory, sub-ms); operators
+/// running the evaluator across cells / regions / VPNs may need more.
+const DEFAULT_AUDIT_EVAL_TIMEOUT_MS: u64 = 500;
+/// Minimum clamp on the audit eval timeout — avoids pathological
+/// values that would effectively disable audit forwarding (sub-50ms
+/// timeouts fail before any practical evaluator can respond).
+const MIN_AUDIT_EVAL_TIMEOUT_MS: u64 = 50;
+
+/// Read AUDIT_EVAL_TIMEOUT_MS from env with trim + clamp. Extracted
+/// out of `from_env` so the parsing contract can be unit-tested
+/// without constructing the full AuditClient (which would also need
+/// to build a reqwest::Client just to observe the timeout).
+pub(crate) fn audit_eval_timeout_ms() -> u64 {
+    std::env::var("AUDIT_EVAL_TIMEOUT_MS")
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .map(|n| n.max(MIN_AUDIT_EVAL_TIMEOUT_MS))
+        .unwrap_or(DEFAULT_AUDIT_EVAL_TIMEOUT_MS)
+}
+
 impl AuditClient {
     /// Construct from the `EVALUATOR_URL` env var. When unset OR
     /// whitespace-only, the client is disabled and
@@ -136,16 +157,7 @@ impl AuditClient {
             .and_then(|v| v.trim().parse::<usize>().ok())
             .map(|n| n.max(1))
             .unwrap_or(AUDIT_INFLIGHT_PERMITS);
-        // Audit eval timeout. 500ms is plenty for an in-cluster
-        // evaluator (matcher is in-memory, sub-ms) but operators
-        // running the evaluator across cells / regions / VPNs may
-        // need more. AUDIT_EVAL_TIMEOUT_MS overrides the default;
-        // clamped to a minimum 50ms to avoid pathological values.
-        let timeout_ms = std::env::var("AUDIT_EVAL_TIMEOUT_MS")
-            .ok()
-            .and_then(|v| v.trim().parse::<u64>().ok())
-            .map(|n| n.max(50))
-            .unwrap_or(500);
+        let timeout_ms = audit_eval_timeout_ms();
         let http = reqwest::Client::builder()
             .timeout(Duration::from_millis(timeout_ms))
             .pool_max_idle_per_host(8)
@@ -582,6 +594,69 @@ mod tests {
         match prev {
             Some(v) => std::env::set_var("EVALUATOR_URL", v),
             None => std::env::remove_var("EVALUATOR_URL"),
+        }
+    }
+
+    #[test]
+    fn audit_eval_timeout_default_when_unset() {
+        let prev = std::env::var("AUDIT_EVAL_TIMEOUT_MS").ok();
+        std::env::remove_var("AUDIT_EVAL_TIMEOUT_MS");
+        assert_eq!(audit_eval_timeout_ms(), DEFAULT_AUDIT_EVAL_TIMEOUT_MS);
+        if let Some(v) = prev {
+            std::env::set_var("AUDIT_EVAL_TIMEOUT_MS", v);
+        }
+    }
+
+    #[test]
+    fn audit_eval_timeout_explicit_value() {
+        let prev = std::env::var("AUDIT_EVAL_TIMEOUT_MS").ok();
+        std::env::set_var("AUDIT_EVAL_TIMEOUT_MS", "5000");
+        assert_eq!(audit_eval_timeout_ms(), 5000);
+        match prev {
+            Some(v) => std::env::set_var("AUDIT_EVAL_TIMEOUT_MS", v),
+            None => std::env::remove_var("AUDIT_EVAL_TIMEOUT_MS"),
+        }
+    }
+
+    #[test]
+    fn audit_eval_timeout_floors_at_minimum() {
+        // 0 or any value below MIN_AUDIT_EVAL_TIMEOUT_MS clamps up to
+        // the minimum. Avoids "effectively disabled" audit forwarder
+        // when an operator typos the value.
+        let prev = std::env::var("AUDIT_EVAL_TIMEOUT_MS").ok();
+        for too_small in ["0", "1", "10", "49"] {
+            std::env::set_var("AUDIT_EVAL_TIMEOUT_MS", too_small);
+            assert_eq!(
+                audit_eval_timeout_ms(),
+                MIN_AUDIT_EVAL_TIMEOUT_MS,
+                "value {too_small} must clamp to minimum",
+            );
+        }
+        match prev {
+            Some(v) => std::env::set_var("AUDIT_EVAL_TIMEOUT_MS", v),
+            None => std::env::remove_var("AUDIT_EVAL_TIMEOUT_MS"),
+        }
+    }
+
+    #[test]
+    fn audit_eval_timeout_trims_whitespace() {
+        let prev = std::env::var("AUDIT_EVAL_TIMEOUT_MS").ok();
+        std::env::set_var("AUDIT_EVAL_TIMEOUT_MS", "  5000\n");
+        assert_eq!(audit_eval_timeout_ms(), 5000);
+        match prev {
+            Some(v) => std::env::set_var("AUDIT_EVAL_TIMEOUT_MS", v),
+            None => std::env::remove_var("AUDIT_EVAL_TIMEOUT_MS"),
+        }
+    }
+
+    #[test]
+    fn audit_eval_timeout_garbage_falls_back_to_default() {
+        let prev = std::env::var("AUDIT_EVAL_TIMEOUT_MS").ok();
+        std::env::set_var("AUDIT_EVAL_TIMEOUT_MS", "not-a-number");
+        assert_eq!(audit_eval_timeout_ms(), DEFAULT_AUDIT_EVAL_TIMEOUT_MS);
+        match prev {
+            Some(v) => std::env::set_var("AUDIT_EVAL_TIMEOUT_MS", v),
+            None => std::env::remove_var("AUDIT_EVAL_TIMEOUT_MS"),
         }
     }
 
