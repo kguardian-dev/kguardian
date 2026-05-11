@@ -92,9 +92,14 @@ pub async fn get_pods_by_node(
 
 pub fn pods_by_node(conn: &mut PgConnection, node: &str) -> Result<Vec<PodDetail>, DbError> {
     use schema::pod_details::dsl::*;
+    // Sorted output matches /pod/info — same (namespace, name) order.
+    // The reconciler uses a HashSet lookup so this doesn't affect its
+    // logic, but ordered output makes the reconciler's own "marking
+    // X as dead" log sequence deterministic and easier to read.
     let pods = pod_details
         .filter(node_name.eq(node))
         .filter(is_dead.eq(false))
+        .order((pod_namespace.asc(), pod_name.asc()))
         .load::<PodDetail>(conn)?;
     Ok(pods)
 }
