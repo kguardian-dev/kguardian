@@ -8,7 +8,18 @@ use std::env;
 pub fn establish_connection() -> ConnectionManager<PgConnection> {
     dotenv().ok();
 
-    let database_url = env::var("DATABASE_URL").expect("DATABASE_URL must be set");
+    // Trim to defend against operator-pasted URLs with trailing
+    // newlines or surrounding whitespace — postgres would error
+    // out far later with a confusing parse failure if we passed
+    // those through. Empty-after-trim still triggers the
+    // "DATABASE_URL must be set" panic (a deliberate startup
+    // assertion — see the test pinning this contract in
+    // conn.rs's panics_when_database_url_unset test).
+    let database_url = env::var("DATABASE_URL")
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .expect("DATABASE_URL must be set");
     ConnectionManager::<PgConnection>::new(database_url)
 }
 
