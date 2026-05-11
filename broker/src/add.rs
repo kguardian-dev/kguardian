@@ -158,7 +158,12 @@ fn create_pod_traffic(
         w.uuid
     );
     if w.get_row(conn)?.is_none() {
-        info!("Insert pod {:?}, in pod_traffic table", w.uuid);
+        // debug not info — pod_traffic inserts happen at the rate of
+        // new flows in the cluster (potentially thousands per minute
+        // on a busy cluster). Reserving INFO for the rare events
+        // operators care about (startup, shutdown, config, errors)
+        // keeps the default-info log scannable.
+        debug!("Insert pod {:?}, in pod_traffic table", w.uuid);
         diesel::insert_into(pod_traffic).values(&*w).execute(conn)?;
         debug!("Success: pod {:?} inserted in pod_traffic table", w.uuid);
         Ok(Some(w.0))
@@ -252,7 +257,11 @@ pub fn upsert_pod_details(
         .do_update()
         .set(&*w)
         .execute(conn)?;
-    info!("Success: pod {:?} inserted in pod_details table", w.pod_ip);
+    // debug not info — every controller pod-watcher event upserts here
+    // (creates, updates, status transitions). On a cluster with rolling
+    // deployments this fires at high rate; same INFO-reservation
+    // discipline as create_pod_traffic above.
+    debug!("Success: pod {:?} inserted in pod_details table", w.pod_ip);
     Ok(w.0)
 }
 
@@ -388,7 +397,10 @@ pub async fn add_svc_details(
     pool: web::Data<DbPool>,
     form: web::Json<SvcDetail>,
 ) -> Result<HttpResponse, Error> {
-    info!("Insert Service details table");
+    // debug not info — fires once per Service event from the
+    // controller's watcher. Same INFO-reservation discipline as the
+    // pod_traffic / pod_details / svc_details upsert logs below.
+    debug!("Insert Service details table");
     if !is_routable_svc_ip(&form.svc_ip) {
         // Log at warn so the case is greppable in broker logs but
         // dont 400 — keeping the response shape preserves caller
@@ -425,7 +437,10 @@ pub fn upsert_svc_details(
         .do_update()
         .set(&*w)
         .execute(conn)?;
-    info!("Success: svc {:?} inserted in svc_details table", w.svc_ip);
+    // debug not info — same per-event rate concern as the pod_details
+    // upsert above. Service watch events drive this on every Service
+    // create / update / status change.
+    debug!("Success: svc {:?} inserted in svc_details table", w.svc_ip);
     Ok(w.0)
 }
 
