@@ -100,6 +100,25 @@ kubectl delete auditnetworkpolicy payments-isolation -n prod
 
 Your CNI now enforces the policy. The evaluator stops watching it.
 
+## Querying verdicts directly
+
+The frontend's Would-Deny view consumes the broker's
+[`GET /audit/verdicts`](/api-reference/endpoints/audit-verdicts)
+endpoint. The same endpoint is what to hit from your own tooling
+(scripted reports, periodic export, etc.):
+
+```bash
+# Latest 25 WouldDeny verdicts for one policy in the prod namespace
+kubectl port-forward -n kguardian svc/kguardian-broker 9090:9090
+curl 'http://localhost:9090/audit/verdicts?policy=web-deny&namespace=prod&verdict=WouldDeny&limit=25'
+```
+
+Filters are server-side and index-backed; `?namespace=` (empty
+value) is the legitimate selector for cluster-scoped policy
+verdicts. The result is ordered `(observed_at DESC, id DESC)` so
+external paginators can cursor on the BIGSERIAL `id`. See the
+endpoint reference for the full contract.
+
 ## Cluster-scoped policies — `AuditClusterNetworkPolicy`
 
 For cross-namespace audits (e.g. "what would happen if I default-denied ingress on every workload across the cluster?") use the cluster-scoped sibling. The spec is identical to `AuditNetworkPolicy` but adds a top-level `namespaceSelector` (nil/empty matches all namespaces) and is itself cluster-scoped. Within each matching namespace the rule evaluation is identical.
