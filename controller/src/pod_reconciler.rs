@@ -274,4 +274,28 @@ mod tests {
         let dead = find_dead_pods(&pods, &running);
         assert_eq!(dead, vec!["web-1"]);
     }
+
+    #[test]
+    fn find_dead_pod_details_returns_full_rows_for_caller() {
+        // The reconciler relies on the full PodDetail (not just the
+        // name) to drive the iteration-66 mark-dead RPC — it sends
+        // pod_ip alongside pod_name for race-window protection.
+        // Pin that find_dead_pod_details yields references back to
+        // the original db_pods entries (not copies, not just names).
+        let pods = vec![
+            db_pod(Some("prod"), "web-1"),  // alive
+            db_pod(Some("prod"), "web-2"),  // dead
+        ];
+        let mut running = HashSet::new();
+        running.insert(ident(Some("prod"), "web-1"));
+
+        let dead = find_dead_pod_details(&pods, &running);
+        assert_eq!(dead.len(), 1);
+        assert_eq!(dead[0].pod_name, "web-2");
+        // pod_ip must be accessible — the reconciler reads it for
+        // the precise mark-dead RPC.
+        assert_eq!(dead[0].pod_ip, "10.0.0.1");
+        // pod_namespace also accessible for the log line.
+        assert_eq!(dead[0].pod_namespace.as_deref(), Some("prod"));
+    }
 }
