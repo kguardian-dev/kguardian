@@ -215,9 +215,11 @@ func TestClusterTrafficHandler_CaseInsensitiveTrafficType(t *testing.T) {
 }
 
 func TestClusterTrafficHandler_NamespaceFilterTaggedInResponse(t *testing.T) {
+	// UPPERCASE traffic_type matches the actual broker wire format
+	// — see TestClusterTrafficHandler_AggregatesByPod for rationale.
 	body := `[
-		{"pod_name":"a","pod_namespace":"prod","traffic_type":"ingress"},
-		{"pod_name":"b","pod_namespace":"dev","traffic_type":"ingress"}
+		{"pod_name":"a","pod_namespace":"prod","traffic_type":"INGRESS"},
+		{"pod_name":"b","pod_namespace":"dev","traffic_type":"INGRESS"}
 	]`
 	c, cleanup := newBrokerWithJSON(t, body)
 	defer cleanup()
