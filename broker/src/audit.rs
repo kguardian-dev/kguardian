@@ -799,6 +799,27 @@ mod tests {
     }
 
     #[test]
+    fn build_flow_non_numeric_port_falls_back_to_zero() {
+        // Distinct from "missing port" — the port string is PRESENT
+        // but not numeric. The schema allows arbitrary Varchar so a
+        // bad writer / future tool could insert "abc" or "http" as
+        // the port. `.parse::<i32>().unwrap_or(0)` falls back to 0
+        // (which the evaluator treats as a non-matching port and
+        // surfaces as WouldDeny — preferable to panicking on bad
+        // input or sending a malformed Flow to the evaluator).
+        for bad in ["abc", "8080-rest", "8080.5", "two thousand"] {
+            let mut traffic = sample_traffic(Some("INGRESS"));
+            traffic.pod_port = Some(bad.to_string());
+            let flow = build_flow_for_traffic(&traffic)
+                .unwrap_or_else(|| panic!("non-numeric port {bad:?} should still yield a Flow"));
+            assert_eq!(
+                flow.dst_port, 0,
+                "non-numeric port {bad:?} must fall back to 0, not crash",
+            );
+        }
+    }
+
+    #[test]
     fn semaphore_clones_share_permits() {
         // AuditClient is Clone; web::Data wraps it in Arc but each
         // route handler does .get_ref().clone() to detach. The
