@@ -149,6 +149,27 @@ pub(crate) fn audit_eval_timeout_ms() -> u64 {
 /// shape mapping (which is the contract the evaluator's matcher
 /// depends on) can be pinned by unit tests without spinning up the
 /// async runtime + reqwest client.
+/// Returns true when a verdict from the evaluator should be persisted
+/// to audit_verdicts. The evaluator emits three verdict kinds:
+///   - "Allow"          — flow matched an allow rule
+///   - "WouldDeny"      — no rule matched (default-deny in audit mode)
+///   - "NotApplicable"  — policy's podSelector / namespaceSelector
+///                        didn't apply to this flow
+///
+/// NotApplicable rows would bloat audit_verdicts by 1-2 orders of
+/// magnitude (every flow checks against every cluster-scoped policy
+/// plus all namespaced policies in scope, and most produce
+/// NotApplicable) with no analytical value, so we drop them at the
+/// broker before insert.
+///
+/// Unknown verdict strings (a future evaluator version inventing a
+/// new kind, a hand-rolled test inserting malformed JSON) also drop —
+/// silent skip is preferable to either panicking on unknown shapes or
+/// persisting whatever string the evaluator sent.
+fn is_persistable_verdict(verdict: &str) -> bool {
+    verdict == "Allow" || verdict == "WouldDeny"
+}
+
 fn build_flow_for_traffic(traffic: &PodTraffic) -> Option<Flow<'_>> {
     let raw_traffic_type = traffic.traffic_type.as_deref().unwrap_or("");
     let normalised = raw_traffic_type.trim().to_ascii_uppercase();
@@ -317,7 +338,7 @@ impl AuditClient {
         let to_insert: Vec<AuditVerdictInsert> = body
             .results
             .into_iter()
-            .filter(|r| r.verdict == "Allow" || r.verdict == "WouldDeny")
+            .filter(|r| is_persistable_verdict(&r.verdict))
             .map(|r| AuditVerdictInsert {
                 policy_uid: r.policy_uid,
                 policy_namespace: r.policy_namespace,
@@ -672,6 +693,53 @@ mod tests {
             time_stamp: chrono::DateTime::from_timestamp(0, 0)
                 .expect("epoch is a valid timestamp")
                 .naive_utc(),
+        }
+    }
+
+    #[test]
+    fn is_persistable_verdict_accepts_allow_and_woulddeny() {
+        assert!(is_persistable_verdict("Allow"));
+        assert!(is_persistable_verdict("WouldDeny"));
+    }
+
+    #[test]
+    fn is_persistable_verdict_drops_not_applicable() {
+        // The largest verdict-volume bucket. The doc on the helper
+        // explains why (every flow × every cluster-scoped policy + all
+        // namespaced policies in scope) — silently dropping is the
+        // whole point of having this filter.
+        assert!(!is_persistable_verdict("NotApplicable"));
+    }
+
+    #[test]
+    fn is_persistable_verdict_drops_unknown_kinds() {
+        // Future evaluator versions inventing new verdict types
+        // (e.g. "PartialAllow", "WouldDenyIfEvaluated") must drop
+        // until the broker is updated to handle them — silent skip
+        // is preferable to persisting unknown shapes that downstream
+        // (frontend Would-Deny view, retention loop, audit_verdicts
+        // SQL filters) wouldn't know how to interpret.
+        for unknown in ["PartialAllow", "WouldDenyIfEvaluated", "Maybe", "", " "] {
+            assert!(
+                !is_persistable_verdict(unknown),
+                "unknown verdict {unknown:?} must not persist",
+            );
+        }
+    }
+
+    #[test]
+    fn is_persistable_verdict_is_case_sensitive() {
+        // The evaluator emits the canonical Title-case strings
+        // ("Allow", "WouldDeny"). Lowercase / uppercase variants
+        // are NOT accepted — silent acceptance would mask an
+        // evaluator-broker wire-format drift bug (same defensive
+        // pattern as the broker's validate_enum_filter whitelist
+        // for the /audit/verdicts query string).
+        for bad in ["allow", "ALLOW", "wouldDeny", "wouldDENY", "would_deny", "wOulddeny"] {
+            assert!(
+                !is_persistable_verdict(bad),
+                "case variant {bad:?} must not persist",
+            );
         }
     }
 
