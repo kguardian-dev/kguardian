@@ -1080,6 +1080,132 @@ func TestMatch_NamedPortNotDeclaredOnPod(t *testing.T) {
 	}
 }
 
+func TestMatch_DenyWhenPeerPodUnknown(t *testing.T) {
+	// Operational edge case: the peer pod was deleted between the
+	// eBPF flow capture and the broker → evaluator forward. The
+	// lookup returns nil for the peer namespace+name. The matcher
+	// can't evaluate selectors against absent labels, so the rule
+	// must NOT match — WouldDeny via the `peer == nil` short-circuit
+	// in peerEntryMatches.
+	//
+	// This pins the documented limitation called out in
+	// docs/concepts/audit-network-policy.mdx's "Limits + caveats":
+	// "Unknown peer pods (deleted between flow capture and
+	//  evaluation) are not matched against any selector".
+	lookup := newLookup()
+	lookup.addPod("prod", "web-1", map[string]string{"app": "web"})
+	// Deliberately do NOT add the peer pod — simulates the
+	// delete-between-capture-and-eval race.
+
+	p := policy("prod", "web-allow-frontend", networkingv1.NetworkPolicySpec{
+		PodSelector: selectMatchLabels(map[string]string{"app": "web"}),
+		PolicyTypes: []networkingv1.PolicyType{networkingv1.PolicyTypeIngress},
+		Ingress: []networkingv1.NetworkPolicyIngressRule{
+			{
+				From: []networkingv1.NetworkPolicyPeer{
+					{PodSelector: ptrSelector(selectMatchLabels(map[string]string{"tier": "frontend"}))},
+				},
+				Ports: []networkingv1.NetworkPolicyPort{tcpPort(8080)},
+			},
+		},
+	})
+
+	flow := Flow{
+		SrcPodNamespace: "prod", SrcPodName: "deleted-client",
+		DstPodNamespace: "prod", DstPodName: "web-1",
+		DstPort: 8080, Protocol: ProtocolTCP,
+	}
+	got := Match(flow, p, lookup)
+	if len(got) != 1 || got[0].Verdict != VerdictWouldDeny {
+		t.Fatalf("unknown peer pod must produce WouldDeny, got %#v", got)
+	}
+}
+
+func TestMatch_DenyOnCrossNamespacePeerWithoutNamespaceSelector(t *testing.T) {
+	// Upstream NetworkPolicy semantics: a peer entry with NO
+	// namespaceSelector restricts the peer to the policy's own
+	// namespace (= the subject's namespace for namespaced
+	// AuditNetworkPolicy). A peer pod in a DIFFERENT namespace —
+	// even if its labels match the podSelector — must not match.
+	//
+	// Real-world hit: an operator forgets the namespaceSelector and
+	// expects "any pod with this label, cluster-wide" to match. The
+	// matcher correctly enforces the upstream same-namespace
+	// constraint; this test pins that contract.
+	lookup := newLookup()
+	lookup.addPod("prod", "web-1", map[string]string{"app": "web"})
+	// Peer pod in OTHER namespace with the right labels.
+	lookup.addPod("dev", "client-1", map[string]string{"tier": "frontend"})
+
+	p := policy("prod", "web-allow-frontend", networkingv1.NetworkPolicySpec{
+		PodSelector: selectMatchLabels(map[string]string{"app": "web"}),
+		PolicyTypes: []networkingv1.PolicyType{networkingv1.PolicyTypeIngress},
+		Ingress: []networkingv1.NetworkPolicyIngressRule{
+			{
+				From: []networkingv1.NetworkPolicyPeer{
+					// No namespaceSelector — peer must share the
+					// policy's namespace (prod). The dev/client-1 peer
+					// must NOT match despite its labels.
+					{PodSelector: ptrSelector(selectMatchLabels(map[string]string{"tier": "frontend"}))},
+				},
+				Ports: []networkingv1.NetworkPolicyPort{tcpPort(8080)},
+			},
+		},
+	})
+
+	flow := Flow{
+		SrcPodNamespace: "dev", SrcPodName: "client-1",
+		DstPodNamespace: "prod", DstPodName: "web-1",
+		DstPort: 8080, Protocol: ProtocolTCP,
+	}
+	got := Match(flow, p, lookup)
+	if len(got) != 1 || got[0].Verdict != VerdictWouldDeny {
+		t.Fatalf("cross-namespace peer without namespaceSelector must produce WouldDeny, got %#v", got)
+	}
+}
+
+func TestMatch_DenyWhenPeerNamespaceUnknown(t *testing.T) {
+	// Edge case in peerEntryMatches's namespaceSelector branch: the
+	// peer's namespace is unknown to the lookup (returns nil from
+	// GetNamespaceLabels). The matcher returns false rather than
+	// applying the selector against a nil map — the iter-99
+	// distinction between "namespace known but unlabelled" (empty
+	// map) and "namespace unknown" (nil).
+	lookup := newLookup()
+	lookup.addPod("prod", "web-1", map[string]string{"app": "web"})
+	lookup.addPod("dev", "client-1", map[string]string{"tier": "frontend"})
+	// Note: don't add `dev` namespace labels to lookup → GetNamespaceLabels
+	// returns nil. peerEntryMatches treats that as "can't evaluate".
+
+	tierSelector := selectMatchLabels(map[string]string{"env": "production"})
+	p := policy("prod", "web-allow-frontend", networkingv1.NetworkPolicySpec{
+		PodSelector: selectMatchLabels(map[string]string{"app": "web"}),
+		PolicyTypes: []networkingv1.PolicyType{networkingv1.PolicyTypeIngress},
+		Ingress: []networkingv1.NetworkPolicyIngressRule{
+			{
+				From: []networkingv1.NetworkPolicyPeer{
+					// namespaceSelector set → peer namespace must
+					// match it. Without labels for the peer's ns, the
+					// matcher conservatively returns false.
+					{NamespaceSelector: &tierSelector,
+						PodSelector: ptrSelector(selectMatchLabels(map[string]string{"tier": "frontend"}))},
+				},
+				Ports: []networkingv1.NetworkPolicyPort{tcpPort(8080)},
+			},
+		},
+	})
+
+	flow := Flow{
+		SrcPodNamespace: "dev", SrcPodName: "client-1",
+		DstPodNamespace: "prod", DstPodName: "web-1",
+		DstPort: 8080, Protocol: ProtocolTCP,
+	}
+	got := Match(flow, p, lookup)
+	if len(got) != 1 || got[0].Verdict != VerdictWouldDeny {
+		t.Fatalf("unknown peer namespace must produce WouldDeny, got %#v", got)
+	}
+}
+
 func TestMatch_NamedPortContainerProtocolDefaultsTCP(t *testing.T) {
 	// k8s containerPort.protocol is an optional field — when omitted,
 	// the API server defaults it to TCP. The matcher must honor that
