@@ -69,7 +69,12 @@ async fn reconcile_pods(
     reqwest_client: &ReqwestClient,
     kube_client: &Client,
 ) -> Result<(), Error> {
-    info!("reconcile_pods: Starting pod reconciliation for node: {}", node_name);
+    // debug not info — this fires every RECONCILE_INTERVAL_SECS (60s)
+    // forever, which is 1440 daily per controller per node. The
+    // outcome of the reconcile pass is already logged conditionally
+    // below (info when pods were marked dead, debug for "no changes"),
+    // so the per-tick "starting" line is pure noise at INFO.
+    debug!("reconcile_pods: starting pod reconciliation for node: {}", node_name);
 
     // Get list of pods from database for this node (only alive pods).
     // Trim trailing slashes from broker_url so a configured
