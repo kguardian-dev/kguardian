@@ -49,6 +49,23 @@ fn db_pool_max_size() -> u32 {
         .unwrap_or(DEFAULT_DB_POOL_MAX_SIZE)
 }
 
+/// Default migration-retry budget. The charts wait-for-db init
+/// container handles "DB not started" via TCP probe, so this loop
+/// only absorbs the gap between TCP-ready and postgres-accepting-
+/// queries — typically 10-30s on slow / small nodes. 10 attempts ×
+/// the loop's 2-second sleep = ~20s of patience.
+const DEFAULT_DB_MIGRATION_MAX_RETRIES: u32 = 10;
+
+/// Read DB_MIGRATION_MAX_RETRIES with trim + clamp. Extracted out
+/// of main() for the same testability reason as db_pool_max_size.
+fn db_migration_max_retries() -> u32 {
+    std::env::var("DB_MIGRATION_MAX_RETRIES")
+        .ok()
+        .and_then(|v| v.trim().parse::<u32>().ok())
+        .map(|n| n.max(1))
+        .unwrap_or(DEFAULT_DB_MIGRATION_MAX_RETRIES)
+}
+
 #[actix_web::main]
 async fn main() -> Result<(), std::io::Error> {
     init_logging();
@@ -65,11 +82,7 @@ async fn main() -> Result<(), std::io::Error> {
     // between TCP-ready and postgres-accepting-queries — which can
     // be 10-30s on slow / small nodes during initdb. 10 attempts at
     // 2s spacing gives ~20s of patience; bump via env if needed.
-    let max_retries: u32 = std::env::var("DB_MIGRATION_MAX_RETRIES")
-        .ok()
-        .and_then(|v| v.trim().parse().ok())
-        .map(|n: u32| n.max(1))
-        .unwrap_or(10);
+    let max_retries = db_migration_max_retries();
     info!(max_retries, "running embedded migrations");
     for attempt in 1..=max_retries {
         match pool.get() {
@@ -459,6 +472,62 @@ mod tests {
         // silently fall back to the default.
         with_pool_env(Some("  32\n"), || {
             assert_eq!(db_pool_max_size(), 32);
+        });
+    }
+
+    // Mirror coverage for the iteration-127 db_migration_max_retries
+    // extraction. Same env-var-driven tunable pattern as the pool
+    // size; same defenses pinned.
+
+    fn with_retries_env<F: FnOnce()>(value: Option<&str>, f: F) {
+        let prev = std::env::var("DB_MIGRATION_MAX_RETRIES").ok();
+        match value {
+            Some(v) => std::env::set_var("DB_MIGRATION_MAX_RETRIES", v),
+            None => std::env::remove_var("DB_MIGRATION_MAX_RETRIES"),
+        }
+        f();
+        match prev {
+            Some(v) => std::env::set_var("DB_MIGRATION_MAX_RETRIES", v),
+            None => std::env::remove_var("DB_MIGRATION_MAX_RETRIES"),
+        }
+    }
+
+    #[test]
+    fn migration_retries_default_when_unset() {
+        with_retries_env(None, || {
+            assert_eq!(db_migration_max_retries(), DEFAULT_DB_MIGRATION_MAX_RETRIES);
+        });
+    }
+
+    #[test]
+    fn migration_retries_explicit_override() {
+        with_retries_env(Some("20"), || {
+            assert_eq!(db_migration_max_retries(), 20);
+        });
+    }
+
+    #[test]
+    fn migration_retries_zero_floors_to_one() {
+        // 0 retries would mean "give up immediately on first failure"
+        // — practically zero patience, useless given the loop's 2s
+        // sleep purpose. Operators sometimes typo 0 meaning "no
+        // retries needed"; clamp to 1.
+        with_retries_env(Some("0"), || {
+            assert_eq!(db_migration_max_retries(), 1);
+        });
+    }
+
+    #[test]
+    fn migration_retries_garbage_falls_back_to_default() {
+        with_retries_env(Some("not-a-number"), || {
+            assert_eq!(db_migration_max_retries(), DEFAULT_DB_MIGRATION_MAX_RETRIES);
+        });
+    }
+
+    #[test]
+    fn migration_retries_trims_whitespace() {
+        with_retries_env(Some("  20\n"), || {
+            assert_eq!(db_migration_max_retries(), 20);
         });
     }
 }
