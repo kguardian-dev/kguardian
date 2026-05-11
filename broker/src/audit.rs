@@ -377,6 +377,27 @@ impl AuditClient {
 mod tests {
     use super::*;
 
+    /// Env-isolation helper — same shape as retention.rs / main.rs.
+    /// Save the current value of `key`, set/remove it to `value`,
+    /// run `f`, then restore the previous value (or remove if unset).
+    /// The std test runner runs tests in parallel by default; consistent
+    /// save/restore lets concurrent tests mutating different env vars
+    /// co-exist. Multi-step tests can call this per step (the helper
+    /// restores between iterations, which is fine — each iteration
+    /// sets up its own state fresh).
+    fn with_env<F: FnOnce()>(key: &str, value: Option<&str>, f: F) {
+        let prev = std::env::var(key).ok();
+        match value {
+            Some(v) => std::env::set_var(key, v),
+            None => std::env::remove_var(key),
+        }
+        f();
+        match prev {
+            Some(v) => std::env::set_var(key, v),
+            None => std::env::remove_var(key),
+        }
+    }
+
     // Wire-format contract tests for the broker ↔ evaluator boundary.
     // These lock down the JSON shapes both sides must agree on.
     // See kguardian-dev/kguardian#880 for the original divergence.
@@ -480,30 +501,19 @@ mod tests {
 
     #[test]
     fn audit_client_disabled_when_evaluator_url_unset() {
-        // Save and restore env for test isolation.
-        let prev = std::env::var("EVALUATOR_URL").ok();
-        std::env::remove_var("EVALUATOR_URL");
-        let client = AuditClient::from_env();
-        assert!(!client.enabled());
-        if let Some(v) = prev {
-            std::env::set_var("EVALUATOR_URL", v);
-        }
+        with_env("EVALUATOR_URL", None, || {
+            let client = AuditClient::from_env();
+            assert!(!client.enabled());
+        });
     }
 
     #[test]
     fn audit_client_enabled_when_evaluator_url_set() {
-        let prev = std::env::var("EVALUATOR_URL").ok();
-        std::env::set_var("EVALUATOR_URL", "http://evaluator.kguardian.svc:8082");
-        let client = AuditClient::from_env();
-        assert!(client.enabled());
-        assert_eq!(
-            client.base_url(),
-            "http://evaluator.kguardian.svc:8082"
-        );
-        match prev {
-            Some(v) => std::env::set_var("EVALUATOR_URL", v),
-            None => std::env::remove_var("EVALUATOR_URL"),
-        }
+        with_env("EVALUATOR_URL", Some("http://evaluator.kguardian.svc:8082"), || {
+            let client = AuditClient::from_env();
+            assert!(client.enabled());
+            assert_eq!(client.base_url(), "http://evaluator.kguardian.svc:8082");
+        });
     }
 
     // Concurrency-cap regression tests for the semaphore that bounds
@@ -513,25 +523,18 @@ mod tests {
 
     #[test]
     fn semaphore_starts_with_default_permits_when_env_unset() {
-        let prev = std::env::var("AUDIT_INFLIGHT_PERMITS").ok();
-        std::env::remove_var("AUDIT_INFLIGHT_PERMITS");
-        let c = AuditClient::from_env();
-        assert_eq!(c.available_permits(), AUDIT_INFLIGHT_PERMITS);
-        if let Some(v) = prev {
-            std::env::set_var("AUDIT_INFLIGHT_PERMITS", v);
-        }
+        with_env("AUDIT_INFLIGHT_PERMITS", None, || {
+            let c = AuditClient::from_env();
+            assert_eq!(c.available_permits(), AUDIT_INFLIGHT_PERMITS);
+        });
     }
 
     #[test]
     fn semaphore_size_is_configurable() {
-        let prev = std::env::var("AUDIT_INFLIGHT_PERMITS").ok();
-        std::env::set_var("AUDIT_INFLIGHT_PERMITS", "4");
-        let c = AuditClient::from_env();
-        assert_eq!(c.available_permits(), 4);
-        match prev {
-            Some(v) => std::env::set_var("AUDIT_INFLIGHT_PERMITS", v),
-            None => std::env::remove_var("AUDIT_INFLIGHT_PERMITS"),
-        }
+        with_env("AUDIT_INFLIGHT_PERMITS", Some("4"), || {
+            let c = AuditClient::from_env();
+            assert_eq!(c.available_permits(), 4);
+        });
     }
 
     #[test]
@@ -539,14 +542,10 @@ mod tests {
         // " 32\n" must honor 32, not fall back to the default. Same
         // operator-paste defense applied to db_pool_max_size (broker
         // iteration 102) and the env reads across all 5 services.
-        let prev = std::env::var("AUDIT_INFLIGHT_PERMITS").ok();
-        std::env::set_var("AUDIT_INFLIGHT_PERMITS", "  32\n");
-        let c = AuditClient::from_env();
-        assert_eq!(c.available_permits(), 32);
-        match prev {
-            Some(v) => std::env::set_var("AUDIT_INFLIGHT_PERMITS", v),
-            None => std::env::remove_var("AUDIT_INFLIGHT_PERMITS"),
-        }
+        with_env("AUDIT_INFLIGHT_PERMITS", Some("  32\n"), || {
+            let c = AuditClient::from_env();
+            assert_eq!(c.available_permits(), 32);
+        });
     }
 
     #[test]
@@ -554,34 +553,29 @@ mod tests {
         // Operators sometimes typo `0` or non-numeric values; we don't
         // want either to silently disable concurrency (a 0-permit
         // semaphore would block every audit task forever).
-        let prev = std::env::var("AUDIT_INFLIGHT_PERMITS").ok();
-
-        std::env::set_var("AUDIT_INFLIGHT_PERMITS", "0");
-        let c = AuditClient::from_env();
-        // 0 floors to 1, not the full default — operators have made a
-        // deliberate (if perhaps misguided) choice.
-        assert_eq!(c.available_permits(), 1);
-
-        std::env::set_var("AUDIT_INFLIGHT_PERMITS", "not-a-number");
-        let c = AuditClient::from_env();
-        assert_eq!(c.available_permits(), AUDIT_INFLIGHT_PERMITS);
-
-        match prev {
-            Some(v) => std::env::set_var("AUDIT_INFLIGHT_PERMITS", v),
-            None => std::env::remove_var("AUDIT_INFLIGHT_PERMITS"),
-        }
+        //
+        // Two distinct values → two with_env invocations rather than
+        // one outer save/restore. Restoring between assertions is
+        // fine here: each iteration sets up its own fresh state.
+        with_env("AUDIT_INFLIGHT_PERMITS", Some("0"), || {
+            let c = AuditClient::from_env();
+            // 0 floors to 1, not the full default — operators have made
+            // a deliberate (if perhaps misguided) choice.
+            assert_eq!(c.available_permits(), 1);
+        });
+        with_env("AUDIT_INFLIGHT_PERMITS", Some("not-a-number"), || {
+            let c = AuditClient::from_env();
+            assert_eq!(c.available_permits(), AUDIT_INFLIGHT_PERMITS);
+        });
     }
 
     #[test]
     fn evaluator_url_unset_disables_client() {
-        let prev = std::env::var("EVALUATOR_URL").ok();
-        std::env::remove_var("EVALUATOR_URL");
-        let c = AuditClient::from_env();
-        assert!(!c.enabled(), "no EVALUATOR_URL must yield disabled");
-        assert_eq!(c.base_url(), "");
-        if let Some(v) = prev {
-            std::env::set_var("EVALUATOR_URL", v);
-        }
+        with_env("EVALUATOR_URL", None, || {
+            let c = AuditClient::from_env();
+            assert!(!c.enabled(), "no EVALUATOR_URL must yield disabled");
+            assert_eq!(c.base_url(), "");
+        });
     }
 
     #[test]
@@ -593,19 +587,15 @@ mod tests {
         // and every audit call hit reqwest with a malformed URL —
         // drowning the "audit disabled" signal in URL-parse-error
         // spam.
-        let prev = std::env::var("EVALUATOR_URL").ok();
         for ws in ["  ", "\t", "\n", " \t\n "] {
-            std::env::set_var("EVALUATOR_URL", ws);
-            let c = AuditClient::from_env();
-            assert!(
-                !c.enabled(),
-                "whitespace-only {ws:?} must disable client",
-            );
-            assert_eq!(c.base_url(), "", "whitespace-only must trim to empty");
-        }
-        match prev {
-            Some(v) => std::env::set_var("EVALUATOR_URL", v),
-            None => std::env::remove_var("EVALUATOR_URL"),
+            with_env("EVALUATOR_URL", Some(ws), || {
+                let c = AuditClient::from_env();
+                assert!(
+                    !c.enabled(),
+                    "whitespace-only {ws:?} must disable client",
+                );
+                assert_eq!(c.base_url(), "", "whitespace-only must trim to empty");
+            });
         }
     }
 
@@ -613,36 +603,25 @@ mod tests {
     fn evaluator_url_trims_surrounding_whitespace() {
         // A pasted URL with stray newline (very common when copying
         // from docs) should round-trip clean.
-        let prev = std::env::var("EVALUATOR_URL").ok();
-        std::env::set_var("EVALUATOR_URL", "  http://evaluator:8080\n");
-        let c = AuditClient::from_env();
-        assert!(c.enabled());
-        assert_eq!(c.base_url(), "http://evaluator:8080");
-        match prev {
-            Some(v) => std::env::set_var("EVALUATOR_URL", v),
-            None => std::env::remove_var("EVALUATOR_URL"),
-        }
+        with_env("EVALUATOR_URL", Some("  http://evaluator:8080\n"), || {
+            let c = AuditClient::from_env();
+            assert!(c.enabled());
+            assert_eq!(c.base_url(), "http://evaluator:8080");
+        });
     }
 
     #[test]
     fn audit_eval_timeout_default_when_unset() {
-        let prev = std::env::var("AUDIT_EVAL_TIMEOUT_MS").ok();
-        std::env::remove_var("AUDIT_EVAL_TIMEOUT_MS");
-        assert_eq!(audit_eval_timeout_ms(), DEFAULT_AUDIT_EVAL_TIMEOUT_MS);
-        if let Some(v) = prev {
-            std::env::set_var("AUDIT_EVAL_TIMEOUT_MS", v);
-        }
+        with_env("AUDIT_EVAL_TIMEOUT_MS", None, || {
+            assert_eq!(audit_eval_timeout_ms(), DEFAULT_AUDIT_EVAL_TIMEOUT_MS);
+        });
     }
 
     #[test]
     fn audit_eval_timeout_explicit_value() {
-        let prev = std::env::var("AUDIT_EVAL_TIMEOUT_MS").ok();
-        std::env::set_var("AUDIT_EVAL_TIMEOUT_MS", "5000");
-        assert_eq!(audit_eval_timeout_ms(), 5000);
-        match prev {
-            Some(v) => std::env::set_var("AUDIT_EVAL_TIMEOUT_MS", v),
-            None => std::env::remove_var("AUDIT_EVAL_TIMEOUT_MS"),
-        }
+        with_env("AUDIT_EVAL_TIMEOUT_MS", Some("5000"), || {
+            assert_eq!(audit_eval_timeout_ms(), 5000);
+        });
     }
 
     #[test]
@@ -650,41 +629,29 @@ mod tests {
         // 0 or any value below MIN_AUDIT_EVAL_TIMEOUT_MS clamps up to
         // the minimum. Avoids "effectively disabled" audit forwarder
         // when an operator typos the value.
-        let prev = std::env::var("AUDIT_EVAL_TIMEOUT_MS").ok();
         for too_small in ["0", "1", "10", "49"] {
-            std::env::set_var("AUDIT_EVAL_TIMEOUT_MS", too_small);
-            assert_eq!(
-                audit_eval_timeout_ms(),
-                MIN_AUDIT_EVAL_TIMEOUT_MS,
-                "value {too_small} must clamp to minimum",
-            );
-        }
-        match prev {
-            Some(v) => std::env::set_var("AUDIT_EVAL_TIMEOUT_MS", v),
-            None => std::env::remove_var("AUDIT_EVAL_TIMEOUT_MS"),
+            with_env("AUDIT_EVAL_TIMEOUT_MS", Some(too_small), || {
+                assert_eq!(
+                    audit_eval_timeout_ms(),
+                    MIN_AUDIT_EVAL_TIMEOUT_MS,
+                    "value {too_small} must clamp to minimum",
+                );
+            });
         }
     }
 
     #[test]
     fn audit_eval_timeout_trims_whitespace() {
-        let prev = std::env::var("AUDIT_EVAL_TIMEOUT_MS").ok();
-        std::env::set_var("AUDIT_EVAL_TIMEOUT_MS", "  5000\n");
-        assert_eq!(audit_eval_timeout_ms(), 5000);
-        match prev {
-            Some(v) => std::env::set_var("AUDIT_EVAL_TIMEOUT_MS", v),
-            None => std::env::remove_var("AUDIT_EVAL_TIMEOUT_MS"),
-        }
+        with_env("AUDIT_EVAL_TIMEOUT_MS", Some("  5000\n"), || {
+            assert_eq!(audit_eval_timeout_ms(), 5000);
+        });
     }
 
     #[test]
     fn audit_eval_timeout_garbage_falls_back_to_default() {
-        let prev = std::env::var("AUDIT_EVAL_TIMEOUT_MS").ok();
-        std::env::set_var("AUDIT_EVAL_TIMEOUT_MS", "not-a-number");
-        assert_eq!(audit_eval_timeout_ms(), DEFAULT_AUDIT_EVAL_TIMEOUT_MS);
-        match prev {
-            Some(v) => std::env::set_var("AUDIT_EVAL_TIMEOUT_MS", v),
-            None => std::env::remove_var("AUDIT_EVAL_TIMEOUT_MS"),
-        }
+        with_env("AUDIT_EVAL_TIMEOUT_MS", Some("not-a-number"), || {
+            assert_eq!(audit_eval_timeout_ms(), DEFAULT_AUDIT_EVAL_TIMEOUT_MS);
+        });
     }
 
     /// Build a minimal PodTraffic for the `build_flow_for_traffic` tests.
@@ -838,20 +805,15 @@ mod tests {
         // semaphore must be shared, not duplicated, otherwise each
         // handler gets its own bucket of permits and the cap doesn't
         // apply globally.
-        let prev = std::env::var("AUDIT_INFLIGHT_PERMITS").ok();
-        std::env::set_var("AUDIT_INFLIGHT_PERMITS", "2");
-        let a = AuditClient::from_env();
-        let b = a.clone();
+        with_env("AUDIT_INFLIGHT_PERMITS", Some("2"), || {
+            let a = AuditClient::from_env();
+            let b = a.clone();
 
-        let _p1 = a.in_flight.clone().try_acquire_owned().expect("a permit available");
-        let _p2 = a.in_flight.clone().try_acquire_owned().expect("second permit available");
-        // Now zero permits remain. The clone must see that.
-        assert_eq!(b.available_permits(), 0);
-        assert!(b.in_flight.clone().try_acquire_owned().is_err());
-
-        match prev {
-            Some(v) => std::env::set_var("AUDIT_INFLIGHT_PERMITS", v),
-            None => std::env::remove_var("AUDIT_INFLIGHT_PERMITS"),
-        }
+            let _p1 = a.in_flight.clone().try_acquire_owned().expect("a permit available");
+            let _p2 = a.in_flight.clone().try_acquire_owned().expect("second permit available");
+            // Now zero permits remain. The clone must see that.
+            assert_eq!(b.available_permits(), 0);
+            assert!(b.in_flight.clone().try_acquire_owned().is_err());
+        });
     }
 }
