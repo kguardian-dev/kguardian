@@ -64,11 +64,14 @@ Check that all components are running:
 ```bash
 kubectl get pods -n kguardian
 
-# Expected output:
-# NAME                              READY   STATUS    RESTARTS   AGE
-# kguardian-controller-xxxxx        1/1     Running   0          2m
-# kguardian-broker-xxxxxxxxxx-xxxxx 1/1     Running   0          2m
-# kguardian-ui-xxxxxxxxxx-xxxxx     1/1     Running   0          2m
+# Expected output (one controller pod per node; broker + db + frontend
+# as Deployments; evaluator / mcp-server / llm-bridge appear only when
+# the corresponding chart values enable them):
+# NAME                                   READY   STATUS    RESTARTS   AGE
+# kguardian-controller-xxxxx             1/1     Running   0          2m
+# kguardian-broker-xxxxxxxxxx-xxxxx      1/1     Running   0          2m
+# kguardian-db-xxxxxxxxxx-xxxxx          1/1     Running   0          2m
+# kguardian-frontend-xxxxxxxxxx-xxxxx    1/1     Running   0          2m
 ```
 
 <Check>
