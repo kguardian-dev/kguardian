@@ -435,17 +435,34 @@ mod tests {
     // exhaustion blocks ingest, hides as latency rather than failure).
     // Test isolates env state to avoid cross-test contamination.
 
-    fn with_pool_env<F: FnOnce()>(value: Option<&str>, f: F) {
-        let prev = std::env::var("DB_POOL_MAX_SIZE").ok();
+    /// Run `f` with the given env-var value temporarily set, then
+    /// restore whatever was there before. Shared by every env-driven
+    /// tunable test in this module — pool size, migration retries,
+    /// listen addr. Tests in a parallel test runner run concurrently
+    /// so this isolation matters even though each test targets a
+    /// different env var: if we leave a value set, a NEXT test (in
+    /// a different binary invocation but same /tmp env state — rare,
+    /// but possible) might be affected. The same pattern is reused
+    /// in retention.rs (with_env, scoped to retention env vars).
+    fn with_env<F: FnOnce()>(key: &str, value: Option<&str>, f: F) {
+        let prev = std::env::var(key).ok();
         match value {
-            Some(v) => std::env::set_var("DB_POOL_MAX_SIZE", v),
-            None => std::env::remove_var("DB_POOL_MAX_SIZE"),
+            Some(v) => std::env::set_var(key, v),
+            None => std::env::remove_var(key),
         }
         f();
         match prev {
-            Some(v) => std::env::set_var("DB_POOL_MAX_SIZE", v),
-            None => std::env::remove_var("DB_POOL_MAX_SIZE"),
+            Some(v) => std::env::set_var(key, v),
+            None => std::env::remove_var(key),
         }
+    }
+
+    // Thin wrappers preserve the existing call sites (each test
+    // wrote `with_pool_env(...)`, `with_retries_env(...)`,
+    // `with_listen_env(...)`) — converging them on the same shared
+    // body without churn through the test bodies.
+    fn with_pool_env<F: FnOnce()>(value: Option<&str>, f: F) {
+        with_env("DB_POOL_MAX_SIZE", value, f);
     }
 
     #[test]
@@ -499,16 +516,7 @@ mod tests {
     // size; same defenses pinned.
 
     fn with_retries_env<F: FnOnce()>(value: Option<&str>, f: F) {
-        let prev = std::env::var("DB_MIGRATION_MAX_RETRIES").ok();
-        match value {
-            Some(v) => std::env::set_var("DB_MIGRATION_MAX_RETRIES", v),
-            None => std::env::remove_var("DB_MIGRATION_MAX_RETRIES"),
-        }
-        f();
-        match prev {
-            Some(v) => std::env::set_var("DB_MIGRATION_MAX_RETRIES", v),
-            None => std::env::remove_var("DB_MIGRATION_MAX_RETRIES"),
-        }
+        with_env("DB_MIGRATION_MAX_RETRIES", value, f);
     }
 
     #[test]
@@ -555,16 +563,7 @@ mod tests {
     // Rust binary. Same env-trim defense + default-fallback pattern.
 
     fn with_listen_env<F: FnOnce()>(value: Option<&str>, f: F) {
-        let prev = std::env::var("LISTEN_ADDR").ok();
-        match value {
-            Some(v) => std::env::set_var("LISTEN_ADDR", v),
-            None => std::env::remove_var("LISTEN_ADDR"),
-        }
-        f();
-        match prev {
-            Some(v) => std::env::set_var("LISTEN_ADDR", v),
-            None => std::env::remove_var("LISTEN_ADDR"),
-        }
+        with_env("LISTEN_ADDR", value, f);
     }
 
     #[test]
