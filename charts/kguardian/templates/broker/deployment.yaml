@@ -97,6 +97,10 @@ spec:
             - name: DB_POOL_MAX_SIZE
               value: {{ .Values.broker.dbPoolMaxSize | quote }}
             {{- end }}
+            {{- if hasKey .Values.broker "dbMigrationMaxRetries" }}
+            - name: DB_MIGRATION_MAX_RETRIES
+              value: {{ .Values.broker.dbMigrationMaxRetries | quote }}
+            {{- end }}
           {{- with .Values.broker.startupProbe }}
           startupProbe:
             {{- toYaml . | nindent 12 }}
