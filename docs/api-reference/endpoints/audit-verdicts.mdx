@@ -1,0 +1,103 @@
+---
+title: "Audit Verdict Endpoints"
+description: "Query Would-Deny / Allow audit-mode policy verdicts"
+---
+
+## Overview
+
+When the audit evaluator is enabled (`evaluator.enabled: true` in
+chart values), the broker forwards every observed pod-traffic flow
+to the evaluator, persists the per-policy verdicts to the
+`audit_verdicts` table, and exposes them here. The frontend's
+"Would-Deny" view consumes this endpoint.
+
+Each verdict row captures one (flow, policy, direction) tuple. A
+single flow may produce many verdicts when several
+AuditNetworkPolicy / AuditClusterNetworkPolicy resources match the
+subject pod.
+
+## GET /audit/verdicts
+
+Returns the most-recent verdicts, ordered by
+`(observed_at DESC, id DESC)` — newest first, with the BIGSERIAL
+primary key as a tiebreak so two pages of the same query never
+reshuffle their boundary rows.
+
+### Query Parameters
+
+All filters are optional. Apply them server-side rather than
+filtering the response client-side: server-side filtering uses the
+`(policy_namespace, policy_name, observed_at DESC)` and
+`(verdict, observed_at DESC)` indexes, so narrowing by policy or
+verdict is index-backed.
+
+| Parameter   | Type    | Default | Description |
+|-------------|---------|---------|-------------|
+| `policy`    | string  | none    | Filter to a single policy by name. An empty value (`?policy=`) is treated as "no filter" (policy names are CRD-validated non-empty). |
+| `namespace` | string  | none    | Filter to verdicts in a single namespace. An **empty value** (`?namespace=`) is meaningful — it selects only cluster-scoped (AuditClusterNetworkPolicy) verdicts, which the evaluator stamps with `policy_namespace=""`. |
+| `verdict`   | enum    | none    | One of `Allow` or `WouldDeny`. Case-sensitive. Unknown values return 400. |
+| `direction` | enum    | none    | One of `Ingress` or `Egress`. Case-sensitive. Unknown values return 400. |
+| `limit`     | integer | 100     | Cap rows returned. Clamped to `[1, 500]`; values outside that range are silently clamped to the nearest bound. Non-numeric input returns 400. |
+
+### Example
+
+```bash
+# Latest 25 WouldDeny verdicts for one policy in the prod namespace
+curl 'http://localhost:9090/audit/verdicts?policy=web-deny&namespace=prod&verdict=WouldDeny&limit=25'
+
+# All verdicts from cluster-scoped policies (any verdict, any direction)
+curl 'http://localhost:9090/audit/verdicts?namespace='
+```
+
+### Response
+
+```json
+[
+  {
+    "id": 13427,
+    "policy_uid": "a8b7c6d5-e4f3-2109-8765-432109876543",
+    "policy_namespace": "prod",
+    "policy_name": "web-deny",
+    "direction": "Ingress",
+    "src_namespace": null,
+    "src_pod": null,
+    "dst_namespace": "prod",
+    "dst_pod": "web-7d9f6b8c4-x5z2w",
+    "dst_port": 8080,
+    "protocol": "TCP",
+    "reason": "policy has no ingress rules — default-deny",
+    "observed_at": "2026-05-12T10:32:14.123456",
+    "verdict": "WouldDeny"
+  }
+]
+```
+
+| Field | Notes |
+|-------|-------|
+| `id` | BIGSERIAL primary key. Stable for cursoring; combined with `observed_at` to make ordering fully deterministic. |
+| `policy_uid` | The AuditNetworkPolicy / AuditClusterNetworkPolicy `.metadata.uid` at evaluation time. Empty string when the evaluator emitted no UID (rare; only for synthetic test policies). |
+| `policy_namespace` | Empty string (`""`) for cluster-scoped policy verdicts; otherwise the namespaced policy's namespace. |
+| `direction` | `"Ingress"` or `"Egress"` — case-sensitive on the wire (matches the upstream `networking.k8s.io/v1.PolicyType` casing). |
+| `src_namespace` / `src_pod` | For `direction=Ingress`: typically `null` (the peer is an external IP). For `direction=Egress`: the subject pod's identity. |
+| `dst_namespace` / `dst_pod` | Mirror of above. |
+| `dst_port` / `protocol` | The flow's destination port + protocol (`"TCP"`/`"UDP"`/`"SCTP"`). |
+| `reason` | Free-text rationale from the matcher when `verdict=WouldDeny`; empty for `Allow`. |
+| `observed_at` | UTC timestamp the broker stamped when the verdict was inserted (microsecond precision). |
+| `verdict` | `"Allow"` (a rule matched and permitted the flow) or `"WouldDeny"` (no rule matched, or `NotApplicable` results are dropped before insert). |
+
+Returns an empty array `[]` when no rows match — never `null`. Status
+is always 200 on a successful query.
+
+## Retention
+
+The broker runs a background task that prunes `audit_verdicts` rows
+older than `AUDIT_VERDICTS_RETENTION_DAYS` (default 30) every
+`AUDIT_VERDICTS_RETENTION_INTERVAL_SECS` (default 3600). Deletion is
+batched (`AUDIT_VERDICTS_RETENTION_BATCH_SIZE`, default 5000) to bound
+the lock-hold time and WAL churn — so a one-time prune after dropping
+retention from 365 days to 7 doesn't block concurrent INSERTs.
+
+Set `AUDIT_VERDICTS_RETENTION_DAYS=0` (or
+`broker.audit.retention.days: 0` in chart values) to disable retention
+entirely. The `audit_verdicts` table will grow unbounded — only useful
+when you're exporting to long-term storage out-of-band.
