@@ -11,7 +11,7 @@ use kube::{
 use serde_json::json;
 use std::collections::BTreeMap;
 use std::sync::Arc;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, warn};
 
 use tokio::sync::mpsc;
 pub async fn watch_pods(
@@ -82,7 +82,12 @@ async fn process_pod(
         let pod_ip = update_pods_details(pod, node_name, client).await;
         if let Ok(Some(pod_ip)) = pod_ip {
             if ignore_daemonset_traffic && is_backed_by_daemonset(pod) {
-                info!("Ignoring daemonset pod: {}, {}", pod.name_any(), pod_ip);
+                // debug not info — fires per daemonset pod event,
+                // including the full re-sync (kube-proxy, calico-node,
+                // and the kguardian-controller itself on every node).
+                // Operators set IGNORE_DAEMONSET_TRAFFIC=true to NOT
+                // see this stream by default.
+                debug!("Ignoring daemonset pod: {}, {}", pod.name_any(), pod_ip);
 
                 if let Err(e) = sender_ip.send(pod_ip.clone()).await {
                     error!("Failed to send pod ip: {}", e);
@@ -190,7 +195,12 @@ async fn update_pods_details(
         let (pod_identity, workload_selector_labels) =
             extract_pod_identity_and_selectors(pod, client).await;
 
-        info!(
+        // debug not info — fires for every pod-watcher event with a
+        // pod_ip (i.e. essentially every status transition during a
+        // rollout). The identity / workload-selector inference is
+        // debug-relevant when validating what kguardian inferred from
+        // a pod's labels + owner refs, not steady-state operator info.
+        debug!(
             "Pod {}: identity={:?}, workload_selector_labels={:?}",
             pod_name, pod_identity, workload_selector_labels
         );
@@ -228,10 +238,16 @@ async fn process_container_ids(
             status: pod_info,
             ..Default::default()
         };
-        info!("pod name {}", pod.name_any());
+        // debug not info — these two log lines fire inside the
+        // per-container loop, per pod-event. Same per-event rate as
+        // the upstream pod-watcher info logs already dropped to debug.
+        // Operators see the consolidated per-pod inode line at the
+        // watch-loop level (also at debug); this inner trace is BPF
+        // debug detail.
+        debug!("pod name {}", pod.name_any());
         if let Some(pod_inspect) = pod_inspect.get_pod_inspect(con_id).await {
             if let Some(inode_num) = pod_inspect.inode_num {
-                info!(
+                debug!(
                     "inode_num of pod {} is {}",
                     pod_inspect.status.pod_name, inode_num
                 );
