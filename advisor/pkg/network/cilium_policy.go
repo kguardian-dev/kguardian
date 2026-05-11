@@ -2,6 +2,7 @@ package network
 
 import (
 	"fmt"
+	"sort"
 
 	ciliumv2 "github.com/cilium/cilium/pkg/k8s/apis/cilium.io/v2"
 	"github.com/cilium/cilium/pkg/labels"
@@ -191,16 +192,38 @@ func (g *CiliumPolicyGenerator) addOrUpdateRule(rules []NetworkPolicyRule, peer 
 	return mergeOrAppendRule(rules, peer, port, protocolStr)
 }
 
-// createEndpointSelector creates a Cilium EndpointSelector from pod labels
+// createEndpointSelector creates a Cilium EndpointSelector from pod labels.
+//
+// Iterates the input map in sorted-key order so the resulting
+// LabelArray (a slice) is byte-identical across regenerations of the
+// same policy. Without the sort, Go's randomised map iteration meant
+// the order in which labels were appended depended on map-hash state
+// — different across processes and even across edits to the labels
+// themselves. The downstream NewESFromLabels preserves slice order
+// in some of its internal representations, so emit positions in the
+// generated YAML could drift between runs, surfacing as spurious
+// kubectl/git diffs even for label sets that didn't change. Same UX-
+// stability class as the peer-IP and port-list sorts.
+//
+// The standard generator's createNetworkPolicyPeer side doesn't need
+// this fix: it constructs metav1.LabelSelector.MatchLabels (a Go map),
+// and Go's JSON encoder sorts map keys, so the output YAML is already
+// deterministic there.
 func (g *CiliumPolicyGenerator) createEndpointSelector(podLabels map[string]string) ciliumapi.EndpointSelector {
 	if len(podLabels) == 0 {
 		log.Warn().Msg("Pod has no labels, using empty EndpointSelector")
 		return ciliumapi.EndpointSelector{}
 	}
 
+	keys := make([]string, 0, len(podLabels))
+	for k := range podLabels {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+
 	labelArray := make(labels.LabelArray, 0, len(podLabels))
-	for key, value := range podLabels {
-		labelArray = append(labelArray, labels.NewLabel(key, value, labels.LabelSourceK8s))
+	for _, key := range keys {
+		labelArray = append(labelArray, labels.NewLabel(key, podLabels[key], labels.LabelSourceK8s))
 	}
 
 	return ciliumapi.NewESFromLabels(labelArray...)

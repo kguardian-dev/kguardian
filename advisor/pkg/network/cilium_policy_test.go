@@ -10,6 +10,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
+	"sigs.k8s.io/yaml"
 )
 
 func TestCiliumPolicyGenerator_Generate_NoTraffic(t *testing.T) {
@@ -276,6 +277,39 @@ func TestCiliumPolicy_AddOrUpdateRule_MultiplePeersStaySeparate(t *testing.T) {
 
 	if len(got) != 2 {
 		t.Errorf("two distinct peers should yield 2 rules, got %d", len(got))
+	}
+}
+
+func TestCreateEndpointSelector_DeterministicYAMLOutput(t *testing.T) {
+	// createEndpointSelector iterates the input labels map. Without
+	// sorting the keys, Go's randomised map iteration leaks into the
+	// resulting LabelArray's slice order, and depending on which
+	// internal Cilium field NewESFromLabels populates, the YAML could
+	// vary across regenerations. Assert byte-identical YAML across
+	// many invocations as the user-visible contract — if any future
+	// refactor breaks this, kubectl/git diffs would re-surface.
+	g := &CiliumPolicyGenerator{}
+	in := map[string]string{
+		"app":     "web",
+		"tier":    "frontend",
+		"version": "v1",
+		"env":     "prod",
+		"team":    "platform",
+	}
+
+	first, err := yaml.Marshal(g.createEndpointSelector(in))
+	if err != nil {
+		t.Fatalf("yaml.Marshal: %v", err)
+	}
+	for i := 0; i < 20; i++ {
+		got, err := yaml.Marshal(g.createEndpointSelector(in))
+		if err != nil {
+			t.Fatalf("yaml.Marshal run %d: %v", i, err)
+		}
+		if string(got) != string(first) {
+			t.Errorf("run %d: YAML differs from baseline\nfirst=\n%s\ngot=\n%s",
+				i, string(first), string(got))
+		}
 	}
 }
 
