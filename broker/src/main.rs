@@ -59,8 +59,17 @@ async fn main() -> Result<(), std::io::Error> {
         .max_size(max_size)
         .build(manager)
         .expect("Failed to create pool.");
-    // RUN the migration schema with retries
-    let max_retries = 5;
+    // RUN the migration schema with retries. The chart's wait-for-db
+    // init container handles the "DB pod not started" case via TCP
+    // probe, so this loop's real purpose is to absorb the gap
+    // between TCP-ready and postgres-accepting-queries — which can
+    // be 10-30s on slow / small nodes during initdb. 10 attempts at
+    // 2s spacing gives ~20s of patience; bump via env if needed.
+    let max_retries: u32 = std::env::var("DB_MIGRATION_MAX_RETRIES")
+        .ok()
+        .and_then(|v| v.trim().parse().ok())
+        .map(|n: u32| n.max(1))
+        .unwrap_or(10);
     for attempt in 1..=max_retries {
         match pool.get() {
             Ok(mut conn) => match run_migrations(&mut conn) {
