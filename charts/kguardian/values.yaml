@@ -325,12 +325,15 @@ broker:
       # gauges/counter:
       #   broker_db_schema_ready, broker_db_reachable,
       #   broker_audit_enabled, broker_audit_inflight_available,
+      #   broker_db_pool_idle, broker_db_pool_max,
       #   broker_uptime_seconds
       # Suggested alerts:
       #   - broker_db_schema_ready == 0 for 5m   → silent failure mode
-      #   - broker_db_reachable == 0 for 1m     → DB connection issue
+      #   - broker_db_reachable == 0 for 1m      → DB connection issue
       #   - broker_audit_inflight_available == 0 for 10m → bump
-      #     AUDIT_INFLIGHT_PERMITS
+      #     broker.audit.inflightPermits (default 16)
+      #   - broker_db_pool_idle == 0 for 10m     → bump
+      #     broker.dbPoolMaxSize (default 16)
       enabled: false
       # -- Endpoint path on the broker's HTTP service.
       path: /metrics
