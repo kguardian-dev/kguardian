@@ -74,6 +74,7 @@ The following table lists the configurable parameters of the kguardian chart and
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
 | broker.affinity | object | `{}` | Affinity rules for broker pod assignment |
+| broker.audit.evalTimeoutMs | int | `500` | Per-call timeout (in milliseconds) on the broker's POST to the evaluator's /evaluate endpoint. 500ms is plenty for an in-cluster evaluator (matcher is in-memory, sub-ms) but operators running the evaluator across cells / regions / VPNs may need more. Clamped to a minimum 50ms broker-side. |
 | broker.audit.inflightPermits | int | `16` | Maximum concurrent in-flight /evaluate calls to the audit evaluator. Bound prevents an ingest spike from creating unbounded concurrent reqwest futures + connection-pool waiters. The broker's /metrics exposes broker_audit_inflight_available so operators can spot saturation. The metrics doc suggests bumping this value when the gauge sits at 0 (under sustained load you'll see "evaluator round-trips queueing"). In-broker default is 16 if unset; minimum is 1. |
 | broker.audit.retention.days | int | `30` | Retain audit_verdicts rows for this many days. Older rows are pruned by a tokio task in the broker that wakes every `intervalSeconds`. Set to 0 to disable retention entirely (table grows unbounded). |
 | broker.audit.retention.intervalSeconds | int | `3600` | How often the cleanup pass runs, in seconds. Minimum 60. |
