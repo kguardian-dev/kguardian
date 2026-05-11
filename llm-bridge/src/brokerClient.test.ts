@@ -1,6 +1,34 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { BrokerClient } from "./brokerClient.js";
+import { BrokerClient, resolveMcpUrl } from "./brokerClient.js";
+
+const DEFAULT_URL = "http://kguardian-mcp-server.kguardian.svc.cluster.local:8081";
+
+test("resolveMcpUrl prefers explicit arg over env over default", () => {
+  assert.equal(resolveMcpUrl("http://from-arg:8081", "http://from-env:8081"), "http://from-arg:8081");
+  assert.equal(resolveMcpUrl(undefined, "http://from-env:8081"), "http://from-env:8081");
+  assert.equal(resolveMcpUrl(undefined, undefined), DEFAULT_URL);
+});
+
+test("resolveMcpUrl trims whitespace from arg and env", () => {
+  // Surrounding whitespace must not slip through. Pre-fix, a
+  // MCP_SERVER_URL=" http://x:8081 " env var (typical Helm YAML
+  // literal artefact) would store the spaced value and produce a
+  // cryptic `TypeError: Invalid URL` from `new URL(this.mcpUrl)`
+  // inside the StreamableHTTPClientTransport — far from the
+  // env-var read site.
+  assert.equal(resolveMcpUrl("  http://from-arg:8081  "), "http://from-arg:8081");
+  assert.equal(resolveMcpUrl(undefined, "\thttp://from-env:8081\n"), "http://from-env:8081");
+});
+
+test("resolveMcpUrl treats whitespace-only as empty (falls through)", () => {
+  // A whitespace-only arg/env must NOT pass the truthy check;
+  // resolution should fall through to the next candidate.
+  assert.equal(resolveMcpUrl("   ", "http://from-env:8081"), "http://from-env:8081");
+  assert.equal(resolveMcpUrl(undefined, "   "), DEFAULT_URL);
+  assert.equal(resolveMcpUrl("  ", "  "), DEFAULT_URL);
+  assert.equal(resolveMcpUrl("", ""), DEFAULT_URL);
+});
 
 // BrokerClient.parseContext is the gate that turns the LLM's free-form
 // context blob into a structured filter. A regression here either:

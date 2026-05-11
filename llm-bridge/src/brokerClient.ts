@@ -7,6 +7,28 @@ export interface ParsedContext {
   podNames?: string[];
 }
 
+/**
+ * Resolve the MCP server URL from (in priority order): an explicit
+ * constructor argument, the MCP_SERVER_URL env var, or the in-cluster
+ * default. Each candidate is trim-empty defended so a whitespace-only
+ * value (typical Helm YAML literal artefact, or a misconfigured
+ * env-from-secret with stray whitespace) doesn't pass the truthy
+ * check and surface later as a cryptic `TypeError: Invalid URL` from
+ * `new URL(...)` inside the transport — far from the env-var read
+ * site. Same defense-in-depth class as the mcp-server's
+ * NewBrokerClient TrimSpace and the broker's AuditClient::from_env
+ * trim.
+ *
+ * Exported as a pure helper so the resolution contract can be unit-
+ * tested without instantiating BrokerClient (which would also try to
+ * import MCP transports just to test a string resolution).
+ */
+export function resolveMcpUrl(arg?: string, envUrl?: string): string {
+  const argTrimmed = arg?.trim();
+  const envTrimmed = envUrl?.trim();
+  return argTrimmed || envTrimmed || "http://kguardian-mcp-server.kguardian.svc.cluster.local:8081";
+}
+
 export class BrokerClient {
   private mcpClient: Client | null = null;
   private mcpUrl: string;
@@ -24,7 +46,7 @@ export class BrokerClient {
    * helper already acknowledged this by passing "" for it.
    */
   constructor(mcpUrl?: string) {
-    this.mcpUrl = mcpUrl || process.env.MCP_SERVER_URL || "http://kguardian-mcp-server.kguardian.svc.cluster.local:8081";
+    this.mcpUrl = resolveMcpUrl(mcpUrl, process.env.MCP_SERVER_URL);
   }
 
   /**
