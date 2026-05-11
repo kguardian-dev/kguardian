@@ -112,6 +112,31 @@ pub fn parse_excluded_namespaces(s: &str) -> Vec<String> {
         .collect()
 }
 
+/// Lenient bool parser for env-var values.
+///
+/// Rust's `bool::from_str` only accepts the literal strings "true" and
+/// "false" (lowercase, exact). Operators routinely write "True",
+/// "FALSE", or copy-paste artefacts like " false\n" — all of which
+/// the strict parser rejects, silently falling back to the default.
+/// For a flag like IGNORE_DAEMONSET_TRAFFIC where the default is
+/// `true`, an operator setting `IGNORE_DAEMONSET_TRAFFIC=False`
+/// (intending to disable) gets the opposite of their intent and
+/// never gets a warning about the typo.
+///
+/// Accepts (case-insensitive, surrounding-whitespace tolerant):
+///   - true:  "true", "1", "yes", "on"
+///   - false: "false", "0", "no", "off"
+///
+/// Anything else returns `default`. Pure function, no env access —
+/// caller does the env::var lookup and passes the raw string here.
+pub fn parse_lenient_bool(s: &str, default: bool) -> bool {
+    match s.trim().to_ascii_lowercase().as_str() {
+        "true" | "1" | "yes" | "on" => true,
+        "false" | "0" | "no" | "off" => false,
+        _ => default,
+    }
+}
+
 fn pod_unready(p: &Pod) -> Option<Vec<String>> {
     let status = p.status.as_ref()?;
     if let Some(conds) = &status.conditions {
@@ -583,6 +608,47 @@ mod tests {
         // seen has dotted names too. The parser only splits on commas.
         let got = parse_excluded_namespaces("ingress-nginx, cert-manager.io , kube-public");
         assert_eq!(got, vec!["ingress-nginx", "cert-manager.io", "kube-public"]);
+    }
+
+    #[test]
+    fn parse_lenient_bool_accepts_true_variants() {
+        // bool::from_str rejects all of these; parse_lenient_bool must
+        // accept them so an operator typing "True" or "YES" doesn't
+        // silently flip their intent to the default.
+        for v in ["true", "True", "TRUE", "tRuE", "1", "yes", "YES", "on", "ON"] {
+            assert!(parse_lenient_bool(v, false), "{v:?} must parse as true");
+        }
+    }
+
+    #[test]
+    fn parse_lenient_bool_accepts_false_variants() {
+        for v in ["false", "False", "FALSE", "fAlSe", "0", "no", "NO", "off", "OFF"] {
+            assert!(!parse_lenient_bool(v, true), "{v:?} must parse as false");
+        }
+    }
+
+    #[test]
+    fn parse_lenient_bool_trims_surrounding_whitespace() {
+        // Copy-paste artefacts (trailing newline from a multi-line
+        // env value, leading space from a quoted YAML literal) must
+        // not defeat parsing. Same defense applied across other env
+        // reads in this controller.
+        assert!(parse_lenient_bool(" true\n", false));
+        assert!(parse_lenient_bool("\tFALSE  ", true) == false);
+        assert!(parse_lenient_bool("  YES  ", false));
+    }
+
+    #[test]
+    fn parse_lenient_bool_unknown_returns_default() {
+        // Typo'd or unrecognised values fall back to the caller's
+        // default. The IGNORE_DAEMONSET_TRAFFIC site uses true as the
+        // default, so an operator typo at least gets the safe-default
+        // behaviour (filter ON) rather than crashing or no-op'ing.
+        assert!(parse_lenient_bool("maybe", true));
+        assert!(!parse_lenient_bool("maybe", false));
+        assert!(parse_lenient_bool("", true));
+        assert!(!parse_lenient_bool("   ", false));
+        assert!(parse_lenient_bool("2", true));
     }
 
     #[test]
