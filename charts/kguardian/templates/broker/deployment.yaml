@@ -92,6 +92,10 @@ spec:
             - name: AUDIT_VERDICTS_RETENTION_INTERVAL_SECS
               value: {{ .Values.broker.audit.retention.intervalSeconds | quote }}
             {{- end }}
+            {{- if hasKey .Values.broker.audit.retention "batchSize" }}
+            - name: AUDIT_VERDICTS_RETENTION_BATCH_SIZE
+              value: {{ .Values.broker.audit.retention.batchSize | quote }}
+            {{- end }}
             {{- if hasKey .Values.broker.audit "inflightPermits" }}
             - name: AUDIT_INFLIGHT_PERMITS
               value: {{ .Values.broker.audit.inflightPermits | quote }}
