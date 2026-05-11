@@ -82,7 +82,9 @@ func PortForward(config *Config, brokerNamespace, brokerService string) (chan st
 		// Resolve namespace: flag > env > default
 		actualNamespace := brokerNamespace
 		if actualNamespace == "" {
-			actualNamespace = os.Getenv("KUBE_GUARDIAN_NAMESPACE")
+			// Trim — same defense as POD_NAMESPACE in config.go and the
+			// env-trim sweep across the rest of the codebase.
+			actualNamespace = strings.TrimSpace(os.Getenv("KUBE_GUARDIAN_NAMESPACE"))
 		}
 		if actualNamespace == "" {
 			actualNamespace = serviceNamespace

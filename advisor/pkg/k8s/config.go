@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	log "github.com/rs/zerolog/log"
 	corev1 "k8s.io/api/core/v1"
@@ -103,7 +104,10 @@ func GetConfig(dryRun bool) (*Config, error) {
 		log.Debug().Msg("Not running in cluster, falling back to kubeconfig file")
 
 		// Get the kubeconfig file path
-		kubeconfigPath = os.Getenv("KUBECONFIG")
+		// Trim — operator-pasted "/path/to/config\n" would error on
+		// the subsequent os.Stat with a confusing "no such file"
+		// far from the env read.
+		kubeconfigPath = strings.TrimSpace(os.Getenv("KUBECONFIG"))
 		if kubeconfigPath == "" {
 			homeDir, err := os.UserHomeDir()
 			if err != nil {
@@ -130,7 +134,10 @@ func GetConfig(dryRun bool) (*Config, error) {
 		log.Info().Msg("Running with in-cluster Kubernetes configuration")
 
 		// Still get a kubeconfigPath for potential context information
-		kubeconfigPath = os.Getenv("KUBECONFIG")
+		// Trim — operator-pasted "/path/to/config\n" would error on
+		// the subsequent os.Stat with a confusing "no such file"
+		// far from the env read.
+		kubeconfigPath = strings.TrimSpace(os.Getenv("KUBECONFIG"))
 		if kubeconfigPath == "" {
 			homeDir, err := os.UserHomeDir()
 			if err == nil {
@@ -180,14 +187,18 @@ func GetCurrentNamespace(config *Config) (string, error) {
 		return "", fmt.Errorf("nil Kubernetes configuration")
 	}
 
-	// If running in-cluster, get the namespace from the service account
-	if ns := os.Getenv("POD_NAMESPACE"); ns != "" {
+	// If running in-cluster, get the namespace from the service account.
+	// Trim — `POD_NAMESPACE="kguardian\n"` (trailing newline) would
+	// silently fail every namespace match in the cluster because the
+	// k8s API normalises namespace names to RFC-1123 lowercase
+	// without whitespace.
+	if ns := strings.TrimSpace(os.Getenv("POD_NAMESPACE")); ns != "" {
 		log.Info().Msgf("Using namespace from POD_NAMESPACE env: %s", ns)
 		return ns, nil
 	}
 
 	// Otherwise, try to get it from the kubeconfig
-	kubeconfigPath := os.Getenv("KUBECONFIG")
+	kubeconfigPath := strings.TrimSpace(os.Getenv("KUBECONFIG"))
 	if kubeconfigPath == "" {
 		homeDir, err := os.UserHomeDir()
 		if err != nil {

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/rs/zerolog"
@@ -241,9 +242,15 @@ func setupLogger() {
 	// Set up zerolog with consistent timestamp format
 	zerolog.TimeFieldFormat = time.RFC3339
 
-	// Set logging level based on verbose flag or environment variable
+	// Set logging level based on verbose flag or environment variable.
+	// Trim before compare — `DEBUG="true\n"` (operator-paste with
+	// trailing newline) would otherwise silently fall back to info
+	// because the strict-equals check fails. Same defensive trim
+	// applied everywhere else in the codebase.
 	logLevel := zerolog.InfoLevel
-	if os.Getenv("DEBUG") == "true" || os.Getenv("VERBOSE") == "true" {
+	debug := strings.TrimSpace(os.Getenv("DEBUG"))
+	verbose := strings.TrimSpace(os.Getenv("VERBOSE"))
+	if debug == "true" || verbose == "true" {
 		logLevel = zerolog.DebugLevel
 	}
 
