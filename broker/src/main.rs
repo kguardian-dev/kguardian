@@ -239,8 +239,15 @@ pub async fn metrics(
     let pool_inner = pool.get_ref().clone();
     let schema_state = tokio::task::spawn_blocking(
         move || -> Result<(bool, bool), Box<dyn Error + Send + Sync>> {
-            let mut conn = pool_inner.get()?;
-            // db_reachable = pool.get() succeeded
+            // Short timeout — /metrics is scraped frequently, must
+            // not block on pool acquisition under saturation. Falling
+            // back to db_reachable=0 (which exposes the saturation
+            // via broker_db_pool_idle elsewhere in the same payload)
+            // is the right signal: when the pool is full, the broker
+            // is effectively unhealthy for new clients, and Prometheus
+            // should see that immediately rather than waiting 30s.
+            let mut conn = pool_inner.get_timeout(std::time::Duration::from_millis(100))?;
+            // db_reachable = pool.get_timeout() succeeded
             // schema_ready = pending_migrations() returns Ok(empty)
             Ok((true, conn.pending_migrations(MIGRATIONS)?.is_empty()))
         },
