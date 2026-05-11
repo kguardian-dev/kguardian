@@ -136,6 +136,65 @@ pub(crate) fn audit_eval_timeout_ms() -> u64 {
         .unwrap_or(DEFAULT_AUDIT_EVAL_TIMEOUT_MS)
 }
 
+/// Build a `Flow` for the evaluator from a single `PodTraffic` row.
+///
+/// Returns `None` when `traffic_type` is missing or unrecognised (any
+/// value that isn't "INGRESS"/"EGRESS" after trim + uppercase). The
+/// direction is matched case-insensitively to stay aligned with the
+/// evaluator's matcher and the mcp-server's compactor, both of which
+/// normalise case; that consistency prevents a silent-skip cliff if a
+/// future producer ever writes a different case.
+///
+/// Extracted out of `evaluate_and_persist` so the direction → Flow
+/// shape mapping (which is the contract the evaluator's matcher
+/// depends on) can be pinned by unit tests without spinning up the
+/// async runtime + reqwest client.
+fn build_flow_for_traffic(traffic: &PodTraffic) -> Option<Flow<'_>> {
+    let raw_traffic_type = traffic.traffic_type.as_deref().unwrap_or("");
+    let normalised = raw_traffic_type.trim().to_ascii_uppercase();
+    // INGRESS: pod_name/pod_namespace is the destination.
+    // EGRESS: pod_name/pod_namespace is the source.
+    let (src_ns, src_name, src_ip, dst_ns, dst_name, dst_ip, dst_port_str) =
+        match normalised.as_str() {
+            "INGRESS" => (
+                None,
+                // We don't know the source pod identity from PodTraffic alone.
+                None,
+                traffic.traffic_in_out_ip.as_deref(),
+                traffic.pod_namespace.as_deref(),
+                traffic.pod_name.as_deref(),
+                traffic.pod_ip.as_deref(),
+                traffic.pod_port.as_deref().unwrap_or("0"),
+            ),
+            "EGRESS" => (
+                traffic.pod_namespace.as_deref(),
+                traffic.pod_name.as_deref(),
+                traffic.pod_ip.as_deref(),
+                None,
+                // Destination pod is identified by IP only here.
+                None,
+                traffic.traffic_in_out_ip.as_deref(),
+                traffic.traffic_in_out_port.as_deref().unwrap_or("0"),
+            ),
+            _ => return None,
+        };
+
+    let dst_port: i32 = dst_port_str.parse().unwrap_or(0);
+    let protocol = traffic.ip_protocol.as_deref().unwrap_or("TCP");
+
+    Some(Flow {
+        src_pod_namespace: src_ns,
+        src_pod_name: src_name,
+        dst_pod_namespace: dst_ns,
+        dst_pod_name: dst_name,
+        src_ip,
+        dst_ip,
+        dst_port,
+        protocol,
+        timestamp: traffic.time_stamp.and_utc().to_rfc3339(),
+    })
+}
+
 impl AuditClient {
     /// Construct from the `EVALUATOR_URL` env var. When unset OR
     /// whitespace-only, the client is disabled and
@@ -205,47 +264,15 @@ impl AuditClient {
         };
         let url = format!("{}/evaluate", self.base_url.trim_end_matches('/'));
 
-        // INGRESS: pod_name/pod_namespace is the destination.
-        // EGRESS: pod_name/pod_namespace is the source.
-        let traffic_type = traffic.traffic_type.as_deref().unwrap_or("");
-        let (src_ns, src_name, src_ip, dst_ns, dst_name, dst_ip, dst_port_str) = match traffic_type {
-            "INGRESS" => (
-                None,
-                None, // We don't know the source pod identity from PodTraffic alone.
-                traffic.traffic_in_out_ip.as_deref(),
-                traffic.pod_namespace.as_deref(),
-                traffic.pod_name.as_deref(),
-                traffic.pod_ip.as_deref(),
-                traffic.pod_port.as_deref().unwrap_or("0"),
-            ),
-            "EGRESS" => (
-                traffic.pod_namespace.as_deref(),
-                traffic.pod_name.as_deref(),
-                traffic.pod_ip.as_deref(),
-                None,
-                None, // Likewise — destination pod is identified by IP only here.
-                traffic.traffic_in_out_ip.as_deref(),
-                traffic.traffic_in_out_port.as_deref().unwrap_or("0"),
-            ),
-            _ => {
-                debug!(?traffic_type, "skipping audit eval for unknown traffic_type");
+        let flow = match build_flow_for_traffic(&traffic) {
+            Some(f) => f,
+            None => {
+                debug!(
+                    raw = traffic.traffic_type.as_deref().unwrap_or(""),
+                    "skipping audit eval for unknown traffic_type"
+                );
                 return;
             }
-        };
-
-        let dst_port: i32 = dst_port_str.parse().unwrap_or(0);
-        let protocol = traffic.ip_protocol.as_deref().unwrap_or("TCP");
-
-        let flow = Flow {
-            src_pod_namespace: src_ns,
-            src_pod_name: src_name,
-            dst_pod_namespace: dst_ns,
-            dst_pod_name: dst_name,
-            src_ip,
-            dst_ip,
-            dst_port,
-            protocol,
-            timestamp: traffic.time_stamp.and_utc().to_rfc3339(),
         };
 
         let resp = match self.http.post(&url).json(&flow).send().await {
@@ -296,12 +323,12 @@ impl AuditClient {
                 policy_namespace: r.policy_namespace,
                 policy_name: r.policy_name,
                 direction: r.direction,
-                src_namespace: src_ns.map(str::to_owned),
-                src_pod: src_name.map(str::to_owned),
-                dst_namespace: dst_ns.map(str::to_owned),
-                dst_pod: dst_name.map(str::to_owned),
-                dst_port,
-                protocol: protocol.to_owned(),
+                src_namespace: flow.src_pod_namespace.map(str::to_owned),
+                src_pod: flow.src_pod_name.map(str::to_owned),
+                dst_namespace: flow.dst_pod_namespace.map(str::to_owned),
+                dst_pod: flow.dst_pod_name.map(str::to_owned),
+                dst_port: flow.dst_port,
+                protocol: flow.protocol.to_owned(),
                 reason: if r.reason.is_empty() { None } else { Some(r.reason) },
                 observed_at: now,
                 verdict: r.verdict,
@@ -658,6 +685,133 @@ mod tests {
             Some(v) => std::env::set_var("AUDIT_EVAL_TIMEOUT_MS", v),
             None => std::env::remove_var("AUDIT_EVAL_TIMEOUT_MS"),
         }
+    }
+
+    /// Build a minimal PodTraffic for the `build_flow_for_traffic` tests.
+    /// Direction-specific fields use values that let the assertion identify
+    /// which branch (INGRESS vs EGRESS) the helper took.
+    fn sample_traffic(traffic_type: Option<&str>) -> PodTraffic {
+        PodTraffic {
+            uuid: "u".to_string(),
+            pod_name: Some("web".to_string()),
+            pod_namespace: Some("prod".to_string()),
+            pod_ip: Some("10.0.0.1".to_string()),
+            pod_port: Some("8080".to_string()),
+            ip_protocol: Some("TCP".to_string()),
+            traffic_type: traffic_type.map(str::to_string),
+            traffic_in_out_ip: Some("10.0.0.2".to_string()),
+            traffic_in_out_port: Some("443".to_string()),
+            decision: Some("ALLOW".to_string()),
+            time_stamp: chrono::DateTime::from_timestamp(0, 0)
+                .expect("epoch is a valid timestamp")
+                .naive_utc(),
+        }
+    }
+
+    #[test]
+    fn build_flow_returns_none_for_missing_traffic_type() {
+        // Defensive: `traffic_type` is Option<String> in the schema —
+        // a NULL row must not panic, must not produce a half-built Flow.
+        let traffic = sample_traffic(None);
+        assert!(build_flow_for_traffic(&traffic).is_none());
+    }
+
+    #[test]
+    fn build_flow_returns_none_for_unknown_traffic_type() {
+        // Anything that isn't ingress/egress (case-insensitive) is a
+        // skip — better to drop the audit eval than to send a malformed
+        // Flow that the evaluator might mis-classify.
+        let traffic = sample_traffic(Some("UNKNOWN"));
+        assert!(build_flow_for_traffic(&traffic).is_none());
+    }
+
+    #[test]
+    fn build_flow_ingress_puts_pod_as_destination() {
+        let traffic = sample_traffic(Some("INGRESS"));
+        let flow = build_flow_for_traffic(&traffic).expect("INGRESS must produce a Flow");
+        // INGRESS: source is the external peer (traffic_in_out_ip), the
+        // pod itself is the destination. The evaluator's matcher relies
+        // on this orientation to apply ingress rules against dst pod.
+        assert_eq!(flow.src_pod_namespace, None);
+        assert_eq!(flow.src_pod_name, None);
+        assert_eq!(flow.src_ip, Some("10.0.0.2"));
+        assert_eq!(flow.dst_pod_namespace, Some("prod"));
+        assert_eq!(flow.dst_pod_name, Some("web"));
+        assert_eq!(flow.dst_ip, Some("10.0.0.1"));
+        assert_eq!(flow.dst_port, 8080);
+        assert_eq!(flow.protocol, "TCP");
+    }
+
+    #[test]
+    fn build_flow_egress_puts_pod_as_source() {
+        let traffic = sample_traffic(Some("EGRESS"));
+        let flow = build_flow_for_traffic(&traffic).expect("EGRESS must produce a Flow");
+        assert_eq!(flow.src_pod_namespace, Some("prod"));
+        assert_eq!(flow.src_pod_name, Some("web"));
+        assert_eq!(flow.src_ip, Some("10.0.0.1"));
+        assert_eq!(flow.dst_pod_namespace, None);
+        assert_eq!(flow.dst_pod_name, None);
+        assert_eq!(flow.dst_ip, Some("10.0.0.2"));
+        assert_eq!(flow.dst_port, 443);
+        assert_eq!(flow.protocol, "TCP");
+    }
+
+    #[test]
+    fn build_flow_is_case_insensitive_for_direction() {
+        // The controller emits "INGRESS"/"EGRESS"; the evaluator's
+        // matcher and mcp-server's compactor already case-fold. Pinning
+        // the broker's audit forwarder to the same contract prevents a
+        // silent-skip cliff if a future producer ever writes mixed or
+        // lowercase. Same defense as the mcp-server filter.go iter-71
+        // bug fix.
+        for variant in ["ingress", "Ingress", "iNgReSs", "INGRESS "] {
+            let traffic = sample_traffic(Some(variant));
+            let flow = build_flow_for_traffic(&traffic)
+                .unwrap_or_else(|| panic!("variant {variant:?} must yield Flow"));
+            assert_eq!(
+                flow.dst_pod_name,
+                Some("web"),
+                "INGRESS variant {variant:?} must orient pod as dst",
+            );
+        }
+        for variant in ["egress", "Egress", "eGrEsS", " egress\n"] {
+            let traffic = sample_traffic(Some(variant));
+            let flow = build_flow_for_traffic(&traffic)
+                .unwrap_or_else(|| panic!("variant {variant:?} must yield Flow"));
+            assert_eq!(
+                flow.src_pod_name,
+                Some("web"),
+                "EGRESS variant {variant:?} must orient pod as src",
+            );
+        }
+    }
+
+    #[test]
+    fn build_flow_defaults_missing_port_to_zero() {
+        // Defensive: a NULL pod_port (INGRESS) or traffic_in_out_port
+        // (EGRESS) must not break decoding. The evaluator treats
+        // dst_port=0 as a wildcard match.
+        let mut traffic = sample_traffic(Some("INGRESS"));
+        traffic.pod_port = None;
+        let flow = build_flow_for_traffic(&traffic).expect("Flow");
+        assert_eq!(flow.dst_port, 0);
+
+        let mut traffic = sample_traffic(Some("EGRESS"));
+        traffic.traffic_in_out_port = None;
+        let flow = build_flow_for_traffic(&traffic).expect("Flow");
+        assert_eq!(flow.dst_port, 0);
+    }
+
+    #[test]
+    fn build_flow_defaults_missing_protocol_to_tcp() {
+        // The evaluator's matcher distinguishes TCP/UDP. A NULL
+        // ip_protocol in the schema must default to TCP rather than
+        // (a) being skipped (silent audit loss) or (b) being sent as
+        // empty (evaluator would error on the unknown protocol value).
+        let mut traffic = sample_traffic(Some("INGRESS"));
+        traffic.ip_protocol = None;
+        let flow = build_flow_for_traffic(&traffic).expect("Flow");
+        assert_eq!(flow.protocol, "TCP");
     }
 
     #[test]
