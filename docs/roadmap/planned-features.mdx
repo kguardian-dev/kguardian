@@ -6,9 +6,19 @@ icon: "flag-checkered"
 
 ## Release Roadmap
 
+<Note>
+The project shifted to **component-based releases** via
+[release-please](https://github.com/kguardian-dev/kguardian/blob/main/RELEASES.md)
+— each component (controller, broker, frontend, advisor, evaluator,
+mcp-server, llm-bridge, chart) versions independently as features
+land. The release-cohort sections below are kept as a feature-set
+narrative; for the current versions of each component, see
+[`.release-please-manifest.json`](https://github.com/kguardian-dev/kguardian/blob/main/.release-please-manifest.json).
+</Note>
+
 <Steps>
-  <Step title="v1.0.0 (Current) - January 2025">
-    **Status:** ✅ Released
+  <Step title="Initial release">
+    **Status:** ✅ Shipped
 
     - Kubernetes NetworkPolicy generation
     - Cilium NetworkPolicy support
@@ -19,34 +29,53 @@ icon: "flag-checkered"
     - PostgreSQL storage backend
   </Step>
 
-  <Step title="v1.1.0 - March 2025">
-    **Status:** 🚧 In Development
+  <Step title="Observability + retention pass">
+    **Status:** ✅ Shipped
 
-    **Enhancements:**
+    - Prometheus metrics export at `/metrics` (broker exposes
+      `broker_db_schema_ready`, `broker_db_reachable`,
+      `broker_audit_enabled`, `broker_audit_inflight_available`,
+      `broker_db_pool_idle`, `broker_db_pool_max`,
+      `broker_uptime_seconds`) plus chart-side ServiceMonitor wiring.
+    - `audit_verdicts` data-retention loop with batched DELETE
+      (configurable via `AUDIT_VERDICTS_RETENTION_DAYS`,
+      `AUDIT_VERDICTS_RETENTION_INTERVAL_SECS`,
+      `AUDIT_VERDICTS_RETENTION_BATCH_SIZE`).
+
+    **Still in development:**
     - Time-range filtering for policy generation
     - Policy diff/comparison tool
     - Improved UI with filtering and search
-    - Metrics export (Prometheus)
-    - Data retention policies
 
-    **New Features:**
+    **Still planned:**
     - L7 policy hints for Cilium (HTTP, gRPC)
     - Policy validation and dry-run testing
     - Multi-cluster support (federated broker)
   </Step>
 
-  <Step title="v1.2.0 - Q2 2025">
-    **Status:** 📋 Planned
+  <Step title="Audit mode + AI assistant">
+    **Status:** ✅ Shipped
 
-    **Major Feature: AppArmor Profiles**
+    - `AuditNetworkPolicy` + `AuditClusterNetworkPolicy` CRDs.
+    - Evaluator component matching observed flows against audit
+      policies (selectors + ports + named-port + ipBlock + CIDR).
+    - Broker → evaluator forwarder with a bounded
+      `AUDIT_INFLIGHT_PERMITS` semaphore.
+    - Frontend "Would-Deny" view consuming
+      [`GET /audit/verdicts`](/api-reference/endpoints/audit-verdicts).
+    - `kguardian audit promote` and `audit promote-cluster` CLI
+      helpers for promoting an audit policy to an enforced
+      `networking.k8s.io/v1.NetworkPolicy`.
+    - MCP server + LLM bridge — AI assistant tab in the UI brokers
+      cluster questions through the broker's read endpoints.
+
+    **Still planned (was tied to this cohort):**
+    - AppArmor profile generation
     - File access observation
     - Capability restrictions
     - Integration with Security Profiles Operator
     - Auto-apply via AppArmorProfile CRD
-
-    **Additional:**
     - Enhanced Cilium FQDN rules
-    - Network policy recommendations (audit mode)
     - GitOps integration examples (ArgoCD, Flux)
   </Step>
 
