@@ -270,6 +270,15 @@ broker:
       days: 30
       # -- How often the cleanup pass runs, in seconds. Minimum 60.
       intervalSeconds: 3600
+    # -- Maximum concurrent in-flight /evaluate calls to the audit
+    # evaluator. Bound prevents an ingest spike from creating
+    # unbounded concurrent reqwest futures + connection-pool waiters.
+    # The broker's /metrics exposes broker_audit_inflight_available
+    # so operators can spot saturation. The metrics doc suggests
+    # bumping this value when the gauge sits at 0 (under sustained
+    # load you'll see "evaluator round-trips queueing"). In-broker
+    # default is 16 if unset; minimum is 1.
+    inflightPermits: 16
 
   # -- Startup probe. Empty by default — opt in when slow startup is expected
   # (e.g. cold image pull on small nodes). Replaces the default startup probe.
