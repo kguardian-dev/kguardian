@@ -1,5 +1,30 @@
 # Upgrading the kguardian Helm chart
 
+## `broker.audit.retention.days: 0` now correctly disables retention
+
+Earlier chart versions used a Helm `with` block to emit
+`AUDIT_VERDICTS_RETENTION_DAYS`. Helm's `with` treats `0` as falsy and
+skipped the block — so operators who set `days: 0` (the documented
+"disable retention" value per values.yaml) did NOT propagate the env
+var to the broker, and retention kept running at the in-broker
+default of 30 days. The chart now uses an explicit `hasKey` check, so
+`0` honours the disable intent.
+
+If you'd been relying on `days: 0` as a working disable and noticed
+audit_verdicts WAS retained at 30 days, your cluster's `audit_verdicts`
+table likely has older rows than you expect. After upgrading:
+
+```sh
+# Inspect the row count + oldest entry.
+kubectl -n <ns> exec deploy/kguardian-db -- \
+  psql -U rust -c "select count(*), min(observed_at) from audit_verdicts;"
+
+# If you want to clear the historical accumulation that retention=0
+# was supposed to prevent, do it explicitly after the chart upgrade:
+kubectl -n <ns> exec deploy/kguardian-db -- \
+  psql -U rust -c "delete from audit_verdicts where observed_at < now() - interval '30 days';"
+```
+
 ## Cross-major Postgres upgrades: `database.persistence.safeBoot`
 
 The chart includes an init container (`assert-safe-boot`) that refuses
