@@ -344,4 +344,68 @@ mod tests {
             );
         }
     }
+
+    // db_pool_max_size is the env-var-driven tunable for the r2d2
+    // pool. Wrong default would silently bottleneck the broker (pool
+    // exhaustion blocks ingest, hides as latency rather than failure).
+    // Test isolates env state to avoid cross-test contamination.
+
+    fn with_pool_env<F: FnOnce()>(value: Option<&str>, f: F) {
+        let prev = std::env::var("DB_POOL_MAX_SIZE").ok();
+        match value {
+            Some(v) => std::env::set_var("DB_POOL_MAX_SIZE", v),
+            None => std::env::remove_var("DB_POOL_MAX_SIZE"),
+        }
+        f();
+        match prev {
+            Some(v) => std::env::set_var("DB_POOL_MAX_SIZE", v),
+            None => std::env::remove_var("DB_POOL_MAX_SIZE"),
+        }
+    }
+
+    #[test]
+    fn pool_size_defaults_when_unset() {
+        with_pool_env(None, || {
+            assert_eq!(db_pool_max_size(), DEFAULT_DB_POOL_MAX_SIZE);
+        });
+    }
+
+    #[test]
+    fn pool_size_explicit_override() {
+        with_pool_env(Some("32"), || {
+            assert_eq!(db_pool_max_size(), 32);
+        });
+    }
+
+    #[test]
+    fn pool_size_zero_floors_to_one() {
+        // 0 is documented-invalid (r2d2 panics on max_size=0 at
+        // build time). Operators sometimes typo 0; clamp instead
+        // of crashing the broker.
+        with_pool_env(Some("0"), || {
+            assert_eq!(db_pool_max_size(), 1);
+        });
+    }
+
+    #[test]
+    fn pool_size_garbage_falls_back_to_default() {
+        // Non-numeric values fall back to the safe default rather
+        // than crashing the broker. Operator can spot the typo via
+        // the info-level startup log (constructing DB connection
+        // pool max_size=<N>) — N=16 indicates the env didn't take.
+        with_pool_env(Some("not-a-number"), || {
+            assert_eq!(db_pool_max_size(), DEFAULT_DB_POOL_MAX_SIZE);
+        });
+    }
+
+    #[test]
+    fn pool_size_trims_whitespace() {
+        // Same operator-paste defense applied across all env reads
+        // (broker EVALUATOR_URL, controller / evaluator / mcp-server
+        // / llm-bridge env reads). A trailing newline mustn't
+        // silently fall back to the default.
+        with_pool_env(Some("  32\n"), || {
+            assert_eq!(db_pool_max_size(), 32);
+        });
+    }
 }
