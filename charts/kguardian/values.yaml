@@ -984,7 +984,7 @@ mcpServer:
 # -------------------------------------------------------------------------
 # kguardian-evaluator: watches AuditNetworkPolicy CRDs and reports flows
 # that *would* be denied. No traffic is ever blocked. See
-# docs/audit-network-policy.mdx for the design.
+# docs/concepts/audit-network-policy.mdx for the design.
 # -------------------------------------------------------------------------
 evaluator:
   # -- Deploy the audit-mode policy evaluator. When false, the evaluator
