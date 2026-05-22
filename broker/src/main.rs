@@ -193,8 +193,8 @@ pub async fn health_check(
     pool: web::Data<r2d2::Pool<r2d2::ConnectionManager<diesel::PgConnection>>>,
 ) -> HttpResponse {
     let pool_inner = pool.get_ref().clone();
-    let result = tokio::task::spawn_blocking(
-        move || -> Result<bool, Box<dyn Error + Send + Sync>> {
+    let result =
+        tokio::task::spawn_blocking(move || -> Result<bool, Box<dyn Error + Send + Sync>> {
             // Short timeout so a saturated pool doesn't block past the
             // kubelet probe timeout (chart default 5s). Returning 503
             // here gives the kubelet a clear "Database unavailable"
@@ -207,9 +207,8 @@ pub async fn health_check(
             // means the DB is fresh or behind, e.g. because the database
             // pod was replaced after broker startup.
             Ok(conn.pending_migrations(MIGRATIONS)?.is_empty())
-        },
-    )
-    .await;
+        })
+        .await;
 
     match result {
         Ok(Ok(true)) => HttpResponse::Ok()
@@ -321,10 +320,7 @@ pub async fn metrics(
     let pool_state = pool.get_ref().state();
     let db_pool_idle = pool_state.idle_connections;
     let db_pool_max = pool.get_ref().max_size();
-    let uptime_secs = UPTIME_ANCHOR
-        .get_or_init(Instant::now)
-        .elapsed()
-        .as_secs();
+    let uptime_secs = UPTIME_ANCHOR.get_or_init(Instant::now).elapsed().as_secs();
 
     let body = render_metrics_text(
         u8::from(schema_ready),
@@ -421,7 +417,11 @@ mod tests {
                 continue;
             }
             let parts: Vec<_> = line.split_whitespace().collect();
-            assert_eq!(parts.len(), 2, "non-comment line not `name value`: {line:?}");
+            assert_eq!(
+                parts.len(),
+                2,
+                "non-comment line not `name value`: {line:?}"
+            );
             // Value must parse as a number (gauge or counter).
             assert!(
                 parts[1].parse::<f64>().is_ok(),

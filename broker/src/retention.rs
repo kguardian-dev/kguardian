@@ -7,12 +7,14 @@
 //! This module spawns a tokio task on broker startup that wakes every
 //! `RETENTION_INTERVAL` and prunes expired rows in batches:
 //!
-//!     WITH expired AS (
-//!         SELECT id FROM audit_verdicts
-//!         WHERE observed_at < timezone('UTC', NOW()) - INTERVAL '<N> days'
-//!         ORDER BY id LIMIT <batch_size>
-//!     )
-//!     DELETE FROM audit_verdicts WHERE id IN (SELECT id FROM expired);
+//! ```text
+//! WITH expired AS (
+//!     SELECT id FROM audit_verdicts
+//!     WHERE observed_at < timezone('UTC', NOW()) - INTERVAL '<N> days'
+//!     ORDER BY id LIMIT <batch_size>
+//! )
+//! DELETE FROM audit_verdicts WHERE id IN (SELECT id FROM expired);
+//! ```
 //!
 //! Batching keeps each transaction's lock hold and WAL chunk bounded,
 //! so a one-time large prune (e.g. operator drops retention from 365
@@ -295,9 +297,13 @@ mod tests {
         // A typo or garbage in the env should NOT silently set retention
         // to 0 and disable cleanup; it should fall back to the safe
         // default.
-        with_env("AUDIT_VERDICTS_RETENTION_DAYS", Some("not-a-number"), || {
-            assert_eq!(retention_days(), DEFAULT_RETENTION_DAYS);
-        });
+        with_env(
+            "AUDIT_VERDICTS_RETENTION_DAYS",
+            Some("not-a-number"),
+            || {
+                assert_eq!(retention_days(), DEFAULT_RETENTION_DAYS);
+            },
+        );
     }
 
     #[test]
@@ -312,15 +318,22 @@ mod tests {
 
     #[test]
     fn retention_interval_trims_whitespace() {
-        with_env("AUDIT_VERDICTS_RETENTION_INTERVAL_SECS", Some("  3600 "), || {
-            assert_eq!(retention_interval(), Duration::from_secs(3600));
-        });
+        with_env(
+            "AUDIT_VERDICTS_RETENTION_INTERVAL_SECS",
+            Some("  3600 "),
+            || {
+                assert_eq!(retention_interval(), Duration::from_secs(3600));
+            },
+        );
     }
 
     #[test]
     fn retention_interval_default() {
         with_env("AUDIT_VERDICTS_RETENTION_INTERVAL_SECS", None, || {
-            assert_eq!(retention_interval(), Duration::from_secs(DEFAULT_INTERVAL_SECS));
+            assert_eq!(
+                retention_interval(),
+                Duration::from_secs(DEFAULT_INTERVAL_SECS)
+            );
         });
     }
 
@@ -342,9 +355,13 @@ mod tests {
 
     #[test]
     fn retention_interval_explicit_above_floor() {
-        with_env("AUDIT_VERDICTS_RETENTION_INTERVAL_SECS", Some("7200"), || {
-            assert_eq!(retention_interval(), Duration::from_secs(7200));
-        });
+        with_env(
+            "AUDIT_VERDICTS_RETENTION_INTERVAL_SECS",
+            Some("7200"),
+            || {
+                assert_eq!(retention_interval(), Duration::from_secs(7200));
+            },
+        );
     }
 
     #[test]
@@ -353,7 +370,10 @@ mod tests {
             "AUDIT_VERDICTS_RETENTION_INTERVAL_SECS",
             Some("garbage"),
             || {
-                assert_eq!(retention_interval(), Duration::from_secs(DEFAULT_INTERVAL_SECS));
+                assert_eq!(
+                    retention_interval(),
+                    Duration::from_secs(DEFAULT_INTERVAL_SECS)
+                );
             },
         );
     }
@@ -394,17 +414,25 @@ mod tests {
     fn retention_batch_size_clamps_above_max() {
         // 1M batch defeats the batching purpose — clamp to keep each
         // DELETE's lock hold bounded.
-        with_env("AUDIT_VERDICTS_RETENTION_BATCH_SIZE", Some("1000000"), || {
-            assert_eq!(retention_batch_size(), MAX_BATCH_SIZE);
-        });
+        with_env(
+            "AUDIT_VERDICTS_RETENTION_BATCH_SIZE",
+            Some("1000000"),
+            || {
+                assert_eq!(retention_batch_size(), MAX_BATCH_SIZE);
+            },
+        );
     }
 
     #[test]
     fn retention_batch_size_trims_whitespace() {
         // Same operator-paste defense as the other retention env vars.
-        with_env("AUDIT_VERDICTS_RETENTION_BATCH_SIZE", Some("  10000\n"), || {
-            assert_eq!(retention_batch_size(), 10_000);
-        });
+        with_env(
+            "AUDIT_VERDICTS_RETENTION_BATCH_SIZE",
+            Some("  10000\n"),
+            || {
+                assert_eq!(retention_batch_size(), 10_000);
+            },
+        );
     }
 
     #[test]

@@ -136,7 +136,7 @@ pub fn svc_details_all(conn: &mut PgConnection) -> Result<Option<Vec<SvcDetail>>
 }
 
 #[get("/svc/ip/{ip}")]
-pub async fn get_svc_by_ip<'a>(
+pub async fn get_svc_by_ip(
     pool: web::Data<DbPool>,
     ip: web::Path<String>,
 ) -> actix_web::Result<impl Responder> {
@@ -166,7 +166,7 @@ pub fn svc_ip(conn: &mut PgConnection, ip: &str) -> Result<Option<SvcDetail>, Db
 
 // POD BY NAME
 #[get("/pod/name/{name}")]
-pub async fn get_pod_by_name<'a>(
+pub async fn get_pod_by_name(
     pool: web::Data<DbPool>,
     name: web::Path<String>,
 ) -> actix_web::Result<impl Responder> {
@@ -211,7 +211,7 @@ pub fn pod_name(conn: &mut PgConnection, name: &str) -> Result<Option<PodDetail>
 
 // POD BY IP
 #[get("/pod/ip/{ip}")]
-pub async fn get_pod_by_ip<'a>(
+pub async fn get_pod_by_ip(
     pool: web::Data<DbPool>,
     ip: web::Path<String>,
 ) -> actix_web::Result<impl Responder> {
@@ -241,7 +241,7 @@ pub fn pod_ip(conn: &mut PgConnection, ip: &str) -> Result<Option<PodDetail>, Db
 
 // POD TRAFFIC BY PODNAME
 #[get("/pod/traffic/{name}")]
-pub async fn get_pod_traffic_name<'a>(
+pub async fn get_pod_traffic_name(
     pool: web::Data<DbPool>,
     name: web::Path<String>,
 ) -> actix_web::Result<impl Responder> {
@@ -281,7 +281,7 @@ pub fn pod_traffic_by_name(
 
 // POD SYS CALLS BY PODNAME
 #[get("/pod/syscalls/{name}")]
-pub async fn get_pod_syscall_name<'a>(
+pub async fn get_pod_syscall_name(
     pool: web::Data<DbPool>,
     name: web::Path<String>,
 ) -> actix_web::Result<impl Responder> {
@@ -369,8 +369,12 @@ const VALID_VERDICTS: &[&str] = &["Allow", "WouldDeny"];
 /// Whitelist of valid direction values. See VALID_VERDICTS above.
 const VALID_DIRECTIONS: &[&str] = &["Ingress", "Egress"];
 
-pub(crate) fn validate_enum_filter(field: &str, value: &str, allowed: &[&str]) -> Result<(), String> {
-    if allowed.iter().any(|a| *a == value) {
+pub(crate) fn validate_enum_filter(
+    field: &str,
+    value: &str,
+    allowed: &[&str],
+) -> Result<(), String> {
+    if allowed.contains(&value) {
         Ok(())
     } else {
         Err(format!(
@@ -480,7 +484,11 @@ mod tests {
     #[test]
     fn clamp_passes_through_in_range() {
         for n in [1, 50, 100, 250, 499, 500] {
-            assert_eq!(clamp_audit_limit(Some(n)), n, "in-range {n} must be unchanged");
+            assert_eq!(
+                clamp_audit_limit(Some(n)),
+                n,
+                "in-range {n} must be unchanged"
+            );
         }
     }
 

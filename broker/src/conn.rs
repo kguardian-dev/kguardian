@@ -49,7 +49,10 @@ mod tests {
                 Some(v) => env::set_var(key, v),
                 None => env::remove_var(key),
             }
-            Self { key: key.to_string(), prev }
+            Self {
+                key: key.to_string(),
+                prev,
+            }
         }
     }
 
@@ -102,7 +105,10 @@ mod tests {
         // A pasted URL with trailing newline (typical) round-trips
         // clean. Construction succeeds and the connection-manager
         // gets the trimmed URL.
-        let _g = EnvGuard::set("DATABASE_URL", Some("  postgres://x:y@example.invalid/db\n"));
+        let _g = EnvGuard::set(
+            "DATABASE_URL",
+            Some("  postgres://x:y@example.invalid/db\n"),
+        );
         let _mgr = establish_connection();
     }
 }

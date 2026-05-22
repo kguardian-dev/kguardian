@@ -49,7 +49,9 @@ pub async fn add_pods_batch(
             let audit_client = audit.get_ref().clone();
             let pool_for_audit = pool.get_ref().clone();
             actix_web::rt::spawn(async move {
-                audit_client.evaluate_and_persist(pool_for_audit, event).await;
+                audit_client
+                    .evaluate_and_persist(pool_for_audit, event)
+                    .await;
             });
         }
     }
@@ -136,7 +138,9 @@ pub async fn add_pods(
             let audit_client = audit.get_ref().clone();
             let pool_for_audit = pool.get_ref().clone();
             actix_web::rt::spawn(async move {
-                audit_client.evaluate_and_persist(pool_for_audit, event).await;
+                audit_client
+                    .evaluate_and_persist(pool_for_audit, event)
+                    .await;
             });
         }
     }
@@ -153,10 +157,7 @@ fn create_pod_traffic(
     w: web::Json<PodTraffic>,
 ) -> Result<Option<PodTraffic>, DbError> {
     use schema::pod_traffic::dsl::*;
-    debug!(
-        "storing pod_traffic event {:?} (uuid)",
-        w.uuid
-    );
+    debug!("storing pod_traffic event {:?} (uuid)", w.uuid);
     if w.get_row(conn)?.is_none() {
         // debug not info — pod_traffic inserts happen at the rate of
         // new flows in the cluster (potentially thousands per minute
@@ -484,14 +485,14 @@ pub async fn add_pods_syscalls(
     form: web::Json<Vec<PodInputSyscalls>>,
 ) -> Result<HttpResponse, Error> {
     debug!("processing /pod/syscalls batch");
-    let pods = web::block(move || {
+    web::block(move || {
         let mut conn = pool.get()?;
         create_pod_syscalls(&mut conn, form)
     })
     .await?
     .map_err(actix_web::error::ErrorInternalServerError)?;
 
-    Ok(HttpResponse::Ok().json(pods))
+    Ok(HttpResponse::Ok().json(()))
 }
 
 pub fn create_pod_syscalls(
@@ -518,10 +519,7 @@ pub fn create_pod_syscalls(
                 );
                 continue;
             }
-            debug!(
-                "storing pod_syscalls entry for {:?}",
-                pod_syscall.pod_name
-            );
+            debug!("storing pod_syscalls entry for {:?}", pod_syscall.pod_name);
 
             let existing_row = pod_syscall.get_row(conn)?;
             let new_syscall_number = pod_syscall.syscalls.join(",");
@@ -604,7 +602,11 @@ mod tests {
         // legacy fallback can run). Must reject at parse time.
         let json = r#"{"pod_ip":"10.42.3.5"}"#;
         let got: Result<MarkDeadRequest, _> = serde_json::from_str(json);
-        assert!(got.is_err(), "missing pod_name must fail to decode, got {:?}", got);
+        assert!(
+            got.is_err(),
+            "missing pod_name must fail to decode, got {:?}",
+            got
+        );
     }
 
     // is_routable_svc_ip mirrors the controllers

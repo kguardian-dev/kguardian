@@ -154,7 +154,7 @@ pub(crate) fn audit_eval_timeout_ms() -> u64 {
 ///   - "Allow"          — flow matched an allow rule
 ///   - "WouldDeny"      — no rule matched (default-deny in audit mode)
 ///   - "NotApplicable"  — policy's podSelector / namespaceSelector
-///                        didn't apply to this flow
+///     didn't apply to this flow
 ///
 /// NotApplicable rows would bloat audit_verdicts by 1-2 orders of
 /// magnitude (every flow checks against every cluster-scoped policy
@@ -251,8 +251,12 @@ impl AuditClient {
         }
     }
 
-    pub fn enabled(&self) -> bool { self.enabled }
-    pub fn base_url(&self) -> &str { &self.base_url }
+    pub fn enabled(&self) -> bool {
+        self.enabled
+    }
+    pub fn base_url(&self) -> &str {
+        &self.base_url
+    }
 
     /// Number of permits currently available. Exposed via the broker's
     /// /metrics endpoint as `broker_audit_inflight_available`;
@@ -350,7 +354,11 @@ impl AuditClient {
                 dst_pod: flow.dst_pod_name.map(str::to_owned),
                 dst_port: flow.dst_port,
                 protocol: flow.protocol.to_owned(),
-                reason: if r.reason.is_empty() { None } else { Some(r.reason) },
+                reason: if r.reason.is_empty() {
+                    None
+                } else {
+                    Some(r.reason)
+                },
                 observed_at: now,
                 verdict: r.verdict,
             })
@@ -530,11 +538,15 @@ mod tests {
 
     #[test]
     fn audit_client_enabled_when_evaluator_url_set() {
-        with_env("EVALUATOR_URL", Some("http://evaluator.kguardian.svc:8082"), || {
-            let client = AuditClient::from_env();
-            assert!(client.enabled());
-            assert_eq!(client.base_url(), "http://evaluator.kguardian.svc:8082");
-        });
+        with_env(
+            "EVALUATOR_URL",
+            Some("http://evaluator.kguardian.svc:8082"),
+            || {
+                let client = AuditClient::from_env();
+                assert!(client.enabled());
+                assert_eq!(client.base_url(), "http://evaluator.kguardian.svc:8082");
+            },
+        );
     }
 
     // Concurrency-cap regression tests for the semaphore that bounds
@@ -611,10 +623,7 @@ mod tests {
         for ws in ["  ", "\t", "\n", " \t\n "] {
             with_env("EVALUATOR_URL", Some(ws), || {
                 let c = AuditClient::from_env();
-                assert!(
-                    !c.enabled(),
-                    "whitespace-only {ws:?} must disable client",
-                );
+                assert!(!c.enabled(), "whitespace-only {ws:?} must disable client",);
                 assert_eq!(c.base_url(), "", "whitespace-only must trim to empty");
             });
         }
@@ -735,7 +744,14 @@ mod tests {
         // evaluator-broker wire-format drift bug (same defensive
         // pattern as the broker's validate_enum_filter whitelist
         // for the /audit/verdicts query string).
-        for bad in ["allow", "ALLOW", "wouldDeny", "wouldDENY", "would_deny", "wOulddeny"] {
+        for bad in [
+            "allow",
+            "ALLOW",
+            "wouldDeny",
+            "wouldDENY",
+            "would_deny",
+            "wOulddeny",
+        ] {
             assert!(
                 !is_persistable_verdict(bad),
                 "case variant {bad:?} must not persist",
@@ -898,8 +914,16 @@ mod tests {
             let a = AuditClient::from_env();
             let b = a.clone();
 
-            let _p1 = a.in_flight.clone().try_acquire_owned().expect("a permit available");
-            let _p2 = a.in_flight.clone().try_acquire_owned().expect("second permit available");
+            let _p1 = a
+                .in_flight
+                .clone()
+                .try_acquire_owned()
+                .expect("a permit available");
+            let _p2 = a
+                .in_flight
+                .clone()
+                .try_acquire_owned()
+                .expect("second permit available");
             // Now zero permits remain. The clone must see that.
             assert_eq!(b.available_permits(), 0);
             assert!(b.in_flight.clone().try_acquire_owned().is_err());
