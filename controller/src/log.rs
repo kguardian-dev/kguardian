@@ -59,10 +59,7 @@ mod tests {
 
     #[test]
     fn unset_defaults_to_info_with_kube_client_suppression() {
-        assert_eq!(
-            rust_log_with_suppressions(None),
-            "info,kube_client=off",
-        );
+        assert_eq!(rust_log_with_suppressions(None), "info,kube_client=off",);
     }
 
     #[test]

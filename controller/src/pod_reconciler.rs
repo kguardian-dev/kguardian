@@ -19,6 +19,7 @@ type PodIdent = (Option<String>, String);
 /// live broker / kube client. Kept for the historical name-based
 /// tests; new code should prefer find_dead_pod_details which yields
 /// the full row (with pod_ip) for the mark-dead RPC.
+#[cfg(test)]
 fn find_dead_pods<'a>(db_pods: &'a [PodDetail], running: &HashSet<PodIdent>) -> Vec<&'a str> {
     find_dead_pod_details(db_pods, running)
         .into_iter()
@@ -46,10 +47,7 @@ fn find_dead_pod_details<'a>(
 
 /// Periodically reconcile pods on this node with the database
 /// Marks pods as dead if they're no longer running on this node
-pub async fn reconcile_pods_task(
-    node_name: String,
-    broker_url: String,
-) -> Result<(), Error> {
+pub async fn reconcile_pods_task(node_name: String, broker_url: String) -> Result<(), Error> {
     let mut ticker = interval(Duration::from_secs(RECONCILE_INTERVAL_SECS));
     let reqwest_client = ReqwestClient::new();
     let kube_client = Client::try_default().await?;
@@ -57,7 +55,8 @@ pub async fn reconcile_pods_task(
     loop {
         ticker.tick().await;
 
-        if let Err(e) = reconcile_pods(&node_name, &broker_url, &reqwest_client, &kube_client).await {
+        if let Err(e) = reconcile_pods(&node_name, &broker_url, &reqwest_client, &kube_client).await
+        {
             error!("Pod reconciliation failed: {}", e);
         }
     }
@@ -74,14 +73,21 @@ async fn reconcile_pods(
     // outcome of the reconcile pass is already logged conditionally
     // below (info when pods were marked dead, debug for "no changes"),
     // so the per-tick "starting" line is pure noise at INFO.
-    debug!("reconcile_pods: starting pod reconciliation for node: {}", node_name);
+    debug!(
+        "reconcile_pods: starting pod reconciliation for node: {}",
+        node_name
+    );
 
     // Get list of pods from database for this node (only alive pods).
     // Trim trailing slashes from broker_url so a configured
     // API_ENDPOINT="http://broker:9090/" doesn't produce a doubled
     // slash in the URL — same robustness pattern applied to
     // api_post_call's build_url helper.
-    let url = format!("{}/pod/list/{}", broker_url.trim_end_matches('/'), node_name);
+    let url = format!(
+        "{}/pod/list/{}",
+        broker_url.trim_end_matches('/'),
+        node_name
+    );
     let response = reqwest_client
         .get(&url)
         .send()
@@ -102,8 +108,8 @@ async fn reconcile_pods(
 
     // Get list of currently running pods from Kubernetes API for this node
     let pods_api: Api<Pod> = Api::all(kube_client.clone());
-    let list_params = kube::api::ListParams::default()
-        .fields(&format!("spec.nodeName={}", node_name));
+    let list_params =
+        kube::api::ListParams::default().fields(&format!("spec.nodeName={}", node_name));
 
     let pod_list = pods_api
         .list(&list_params)
@@ -248,7 +254,11 @@ mod tests {
         // staging/web-1 deliberately absent
 
         let dead = find_dead_pods(&pods, &running);
-        assert_eq!(dead.len(), 1, "exactly one pod (staging/web-1) must be marked dead");
+        assert_eq!(
+            dead.len(),
+            1,
+            "exactly one pod (staging/web-1) must be marked dead"
+        );
         // Both share the same name, so the name alone doesn't tell
         // us which one — but the find should produce one entry, not
         // zero (the bug) and not two.
@@ -265,7 +275,10 @@ mod tests {
         running.insert(ident(None, "orphan"));
 
         let dead = find_dead_pods(&pods, &running);
-        assert!(dead.is_empty(), "None-namespace pod must match against None-namespace cluster entry");
+        assert!(
+            dead.is_empty(),
+            "None-namespace pod must match against None-namespace cluster entry"
+        );
     }
 
     #[test]
@@ -288,8 +301,8 @@ mod tests {
         // Pin that find_dead_pod_details yields references back to
         // the original db_pods entries (not copies, not just names).
         let pods = vec![
-            db_pod(Some("prod"), "web-1"),  // alive
-            db_pod(Some("prod"), "web-2"),  // dead
+            db_pod(Some("prod"), "web-1"), // alive
+            db_pod(Some("prod"), "web-2"), // dead
         ];
         let mut running = HashSet::new();
         running.insert(ident(Some("prod"), "web-1"));

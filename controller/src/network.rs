@@ -459,21 +459,41 @@ mod tests {
     fn should_flush_empty_batch_never_flushes() {
         // Flushing an empty batch is wasted work; the helper must
         // gate on at least one event regardless of elapsed time.
-        assert!(!should_flush(0, Duration::from_secs(60), 100, Duration::from_secs(1)));
+        assert!(!should_flush(
+            0,
+            Duration::from_secs(60),
+            100,
+            Duration::from_secs(1)
+        ));
     }
 
     #[test]
     fn should_flush_full_batch_flushes_immediately() {
         // batch-full path — flush regardless of elapsed time.
-        assert!(should_flush(100, Duration::from_millis(0), 100, Duration::from_secs(1)));
-        assert!(should_flush(150, Duration::from_millis(0), 100, Duration::from_secs(1)));
+        assert!(should_flush(
+            100,
+            Duration::from_millis(0),
+            100,
+            Duration::from_secs(1)
+        ));
+        assert!(should_flush(
+            150,
+            Duration::from_millis(0),
+            100,
+            Duration::from_secs(1)
+        ));
     }
 
     #[test]
     fn should_flush_under_size_under_timeout_holds() {
         // Common case: 50 events in the batch, 500ms since last flush,
         // limits 100 / 1s. Don't flush yet.
-        assert!(!should_flush(50, Duration::from_millis(500), 100, Duration::from_secs(1)));
+        assert!(!should_flush(
+            50,
+            Duration::from_millis(500),
+            100,
+            Duration::from_secs(1)
+        ));
     }
 
     #[test]
@@ -483,8 +503,18 @@ mod tests {
         // unreachable from the success branch and the timeout
         // branch never fired due to recv resetting the window. Now
         // it MUST flush.
-        assert!(should_flush(1, Duration::from_millis(1500), 100, Duration::from_secs(1)));
-        assert!(should_flush(50, Duration::from_secs(2), 100, Duration::from_secs(1)));
+        assert!(should_flush(
+            1,
+            Duration::from_millis(1500),
+            100,
+            Duration::from_secs(1)
+        ));
+        assert!(should_flush(
+            50,
+            Duration::from_secs(2),
+            100,
+            Duration::from_secs(1)
+        ));
     }
 
     #[test]
@@ -492,7 +522,12 @@ mod tests {
         // Exact-equal elapsed should flush — `>=` semantics, not `>`.
         // Otherwise a perfectly-paced 1-event-per-second source
         // would always be one tick behind.
-        assert!(should_flush(1, Duration::from_secs(1), 100, Duration::from_secs(1)));
+        assert!(should_flush(
+            1,
+            Duration::from_secs(1),
+            100,
+            Duration::from_secs(1)
+        ));
     }
 
     // cap_batch enforces the in-memory queue limit during broker

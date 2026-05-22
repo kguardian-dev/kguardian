@@ -105,7 +105,7 @@ async fn process_pod(
 fn should_process_pod(namespace: &Option<String>, excluded_namespaces: &[String]) -> bool {
     !namespace
         .as_ref()
-        .map_or(false, |ns| excluded_namespaces.contains(ns))
+        .is_some_and(|ns| excluded_namespaces.contains(ns))
 }
 
 /// Parse the `EXCLUDED_NAMESPACES` env var into a Vec<String>.
@@ -229,7 +229,7 @@ async fn update_pods_details(
 async fn process_container_ids(
     con_ids: &[String],
     pod: &Pod,
-    pod_ip: &String,
+    pod_ip: &str,
     container_map: Arc<DashMap<u64, PodInspect>>,
 ) -> Option<u64> {
     for con_id in con_ids {
@@ -492,10 +492,7 @@ async fn get_daemonset_selector(
 
     match ds_api.get(daemonset_name).await {
         Ok(daemonset) => {
-            let selectors = daemonset
-                .spec
-                .map(|spec| spec.selector.match_labels)
-                .flatten();
+            let selectors = daemonset.spec.and_then(|spec| spec.selector.match_labels);
             if selectors.is_none() {
                 debug!(
                     "DaemonSet {} has no match_labels in selector",
@@ -617,13 +614,21 @@ mod tests {
     #[test]
     fn parse_excluded_namespaces_empty_input_yields_empty() {
         let got = parse_excluded_namespaces("");
-        assert!(got.is_empty(), "empty input must yield no entries; got {:?}", got);
+        assert!(
+            got.is_empty(),
+            "empty input must yield no entries; got {:?}",
+            got
+        );
     }
 
     #[test]
     fn parse_excluded_namespaces_only_whitespace_yields_empty() {
         let got = parse_excluded_namespaces("  ,  ,   ");
-        assert!(got.is_empty(), "all-whitespace input must yield no entries; got {:?}", got);
+        assert!(
+            got.is_empty(),
+            "all-whitespace input must yield no entries; got {:?}",
+            got
+        );
     }
 
     #[test]
@@ -639,14 +644,18 @@ mod tests {
         // bool::from_str rejects all of these; parse_lenient_bool must
         // accept them so an operator typing "True" or "YES" doesn't
         // silently flip their intent to the default.
-        for v in ["true", "True", "TRUE", "tRuE", "1", "yes", "YES", "on", "ON"] {
+        for v in [
+            "true", "True", "TRUE", "tRuE", "1", "yes", "YES", "on", "ON",
+        ] {
             assert!(parse_lenient_bool(v, false), "{v:?} must parse as true");
         }
     }
 
     #[test]
     fn parse_lenient_bool_accepts_false_variants() {
-        for v in ["false", "False", "FALSE", "fAlSe", "0", "no", "NO", "off", "OFF"] {
+        for v in [
+            "false", "False", "FALSE", "fAlSe", "0", "no", "NO", "off", "OFF",
+        ] {
             assert!(!parse_lenient_bool(v, true), "{v:?} must parse as false");
         }
     }
@@ -706,13 +715,23 @@ mod tests {
         // "kguardian-test" must NOT match "kguardian"; otherwise
         // exclusion would over-broadly skip namespaces sharing a prefix.
         let excluded = vec!["kguardian".into()];
-        assert!(should_process_pod(&Some("kguardian-test".into()), &excluded));
-        assert!(should_process_pod(&Some("kguardian-staging".into()), &excluded));
+        assert!(should_process_pod(
+            &Some("kguardian-test".into()),
+            &excluded
+        ));
+        assert!(should_process_pod(
+            &Some("kguardian-staging".into()),
+            &excluded
+        ));
     }
 
     fn pod_with_owners(owners: Vec<OwnerReference>) -> Pod {
         let mut pod = Pod::default();
-        pod.metadata.owner_references = if owners.is_empty() { None } else { Some(owners) };
+        pod.metadata.owner_references = if owners.is_empty() {
+            None
+        } else {
+            Some(owners)
+        };
         pod
     }
 
@@ -813,9 +832,18 @@ mod tests {
         // containers contribute IDs.
         let st = PodStatus {
             container_statuses: Some(vec![
-                ContainerStatus { container_id: Some("ok-1".into()), ..Default::default() },
-                ContainerStatus { container_id: None, ..Default::default() },
-                ContainerStatus { container_id: Some("ok-2".into()), ..Default::default() },
+                ContainerStatus {
+                    container_id: Some("ok-1".into()),
+                    ..Default::default()
+                },
+                ContainerStatus {
+                    container_id: None,
+                    ..Default::default()
+                },
+                ContainerStatus {
+                    container_id: Some("ok-2".into()),
+                    ..Default::default()
+                },
             ]),
             ..Default::default()
         };
@@ -827,7 +855,10 @@ mod tests {
 
     #[test]
     fn pod_unready_no_containers_returns_none() {
-        let st = PodStatus { container_statuses: None, ..Default::default() };
+        let st = PodStatus {
+            container_statuses: None,
+            ..Default::default()
+        };
         assert_eq!(pod_unready(&pod_with_status(st)), None);
     }
 }

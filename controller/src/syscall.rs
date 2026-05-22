@@ -132,9 +132,7 @@ pub async fn send_syscall_cache_periodically() -> Result<(), Error> {
                     // iteration's diff catches them.
                     for (pod_name, snapshot) in pending_updates {
                         let last_sent = LAST_SENT_CACHE
-                            .get_with(pod_name, async {
-                                Arc::new(Mutex::new(HashSet::new()))
-                            })
+                            .get_with(pod_name, async { Arc::new(Mutex::new(HashSet::new())) })
                             .await;
                         *last_sent.lock().await = snapshot;
                     }
@@ -144,7 +142,8 @@ pub async fn send_syscall_cache_periodically() -> Result<(), Error> {
                     // the same diff and retry.
                     error!(
                         "Failed to post Syscall Event: {}; {} pod batches will retry next pass",
-                        e, pending_updates.len()
+                        e,
+                        pending_updates.len()
                     );
                 }
             }

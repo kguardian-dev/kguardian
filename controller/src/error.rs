@@ -87,7 +87,11 @@ mod tests {
             Error::ApiError("UPPERCASE".into()),
         ] {
             let label = e.metric_label();
-            assert_eq!(label, label.to_lowercase(), "label not all-lowercase: {label}");
+            assert_eq!(
+                label,
+                label.to_lowercase(),
+                "label not all-lowercase: {label}"
+            );
         }
     }
 }

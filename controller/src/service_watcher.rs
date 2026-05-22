@@ -145,7 +145,10 @@ mod tests {
 
     #[test]
     fn status_with_no_conditions_returns_none() {
-        let st = ServiceStatus { conditions: None, ..Default::default() };
+        let st = ServiceStatus {
+            conditions: None,
+            ..Default::default()
+        };
         assert!(svc_unready(&svc(Some(st))).is_none());
     }
 
@@ -157,7 +160,10 @@ mod tests {
             message: "service ready".into(),
             ..Default::default()
         };
-        let st = ServiceStatus { conditions: Some(vec![cond]), ..Default::default() };
+        let st = ServiceStatus {
+            conditions: Some(vec![cond]),
+            ..Default::default()
+        };
         assert!(svc_unready(&svc(Some(st))).is_none());
     }
 
@@ -169,7 +175,10 @@ mod tests {
             message: "endpoint slice missing".into(),
             ..Default::default()
         };
-        let st = ServiceStatus { conditions: Some(vec![cond]), ..Default::default() };
+        let st = ServiceStatus {
+            conditions: Some(vec![cond]),
+            ..Default::default()
+        };
         let got = svc_unready(&svc(Some(st)));
         assert!(got.is_some(), "Ready=False must produce an unready reason");
         assert!(got.unwrap().contains("endpoint slice missing"));
@@ -184,7 +193,10 @@ mod tests {
             message: "ok".into(),
             ..Default::default()
         };
-        let st = ServiceStatus { conditions: Some(vec![cond]), ..Default::default() };
+        let st = ServiceStatus {
+            conditions: Some(vec![cond]),
+            ..Default::default()
+        };
         assert!(svc_unready(&svc(Some(st))).is_none());
     }
 
