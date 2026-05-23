@@ -667,7 +667,7 @@ mod tests {
         // not defeat parsing. Same defense applied across other env
         // reads in this controller.
         assert!(parse_lenient_bool(" true\n", false));
-        assert!(parse_lenient_bool("\tFALSE  ", true) == false);
+        assert!(!parse_lenient_bool("\tFALSE  ", true));
         assert!(parse_lenient_bool("  YES  ", false));
     }
 
@@ -775,9 +775,10 @@ mod tests {
     use k8s_openapi::api::core::v1::{ContainerStatus, PodCondition, PodStatus};
 
     fn pod_with_status(status: PodStatus) -> Pod {
-        let mut p = Pod::default();
-        p.status = Some(status);
-        p
+        Pod {
+            status: Some(status),
+            ..Pod::default()
+        }
     }
 
     #[test]

@@ -130,9 +130,10 @@ mod tests {
     use k8s_openapi::apimachinery::pkg::apis::meta::v1::Condition;
 
     fn svc(status: Option<ServiceStatus>) -> Service {
-        let mut s = Service::default();
-        s.status = status;
-        s
+        Service {
+            status,
+            ..Service::default()
+        }
     }
 
     #[test]
@@ -158,7 +159,11 @@ mod tests {
             type_: "Ready".into(),
             status: "True".into(),
             message: "service ready".into(),
-            ..Default::default()
+            reason: String::new(),
+            observed_generation: None,
+            last_transition_time: k8s_openapi::apimachinery::pkg::apis::meta::v1::Time(
+                k8s_openapi::jiff::Timestamp::default(),
+            ),
         };
         let st = ServiceStatus {
             conditions: Some(vec![cond]),
@@ -173,7 +178,11 @@ mod tests {
             type_: "Ready".into(),
             status: "False".into(),
             message: "endpoint slice missing".into(),
-            ..Default::default()
+            reason: String::new(),
+            observed_generation: None,
+            last_transition_time: k8s_openapi::apimachinery::pkg::apis::meta::v1::Time(
+                k8s_openapi::jiff::Timestamp::default(),
+            ),
         };
         let st = ServiceStatus {
             conditions: Some(vec![cond]),
@@ -191,7 +200,11 @@ mod tests {
             type_: "MemoryPressure".into(),
             status: "False".into(),
             message: "ok".into(),
-            ..Default::default()
+            reason: String::new(),
+            observed_generation: None,
+            last_transition_time: k8s_openapi::apimachinery::pkg::apis::meta::v1::Time(
+                k8s_openapi::jiff::Timestamp::default(),
+            ),
         };
         let st = ServiceStatus {
             conditions: Some(vec![cond]),

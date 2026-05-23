@@ -537,9 +537,9 @@ mod tests {
     fn make_traffic(uuid: &str) -> PodTraffic {
         PodTraffic {
             uuid: uuid.to_string(),
-            pod_name: None,
+            pod_name: String::new(),
             pod_namespace: None,
-            pod_ip: None,
+            pod_ip: String::new(),
             pod_port: None,
             ip_protocol: None,
             traffic_type: None,
