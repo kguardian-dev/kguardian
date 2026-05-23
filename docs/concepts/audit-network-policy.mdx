@@ -100,6 +100,19 @@ kubectl delete auditnetworkpolicy payments-isolation -n prod
 
 Your CNI now enforces the policy. The evaluator stops watching it.
 
+## Tracking evaluator progress — `status.observedGeneration`
+
+After you edit an `AuditNetworkPolicy` (e.g. broaden a `to:` selector) the evaluator has to pick the new spec up, re-evaluate the rolling window of observed traffic, and re-publish the `WOULD-DENY` counts. The CRD exposes `.status.observedGeneration` so you know when that loop has caught up:
+
+```sh
+kubectl get auditnetworkpolicy payments-isolation -n prod \
+  -o jsonpath='{.metadata.generation} → {.status.observedGeneration}{"\n"}'
+# e.g.  4 → 4   ← evaluator is on the latest spec
+# e.g.  4 → 3   ← still working through your last edit
+```
+
+The evaluator stamps `observedGeneration` once it has finished a full reconcile of the current `.metadata.generation`. Don't trust the `WOULD-DENY` count for tuning decisions until the two numbers match.
+
 ## Querying verdicts directly
 
 The frontend's Would-Deny view consumes the broker's
@@ -191,5 +204,6 @@ The matcher implements podSelector + namespaceSelector + numeric port + endPort 
 - **Unknown peer pods** (deleted between flow capture and evaluation) are not matched against any selector — this can cause an apparent under-count. The `audit_verdicts.reason` column records when this happens.
 - **Named ports** are resolved against the destination pod's `spec.containers[].ports[]` declarations. A named port matches only when both the name and the observed `containerPort` line up.
 - **`ipBlock`** matches against the peer's L3 address as observed by the eBPF controller. Flows with unknown IPs (e.g. malformed eBPF events) are non-matches, not silent allows.
+- **Ingress UDP is systematically under-counted.** The controller's eBPF probes have no `kind` for inbound UDP, so traffic like CoreDNS receiving queries, syslog, or NTP responses arriving at a pod is not seen by the evaluator. Auditing a UDP-fronted namespace will show zero ingress flows where there may be millions. Egress UDP and all TCP directions are tracked normally.
 
 If you're carrying production-critical policy decisions on this, treat the verdicts as a strong signal but verify against your CNI's enforcement output once promoted.
