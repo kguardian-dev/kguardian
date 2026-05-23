@@ -3,18 +3,10 @@
 -- Allows the broker to expose /audit/verdicts queries and serve the
 -- frontend's "Would-Deny" view without round-tripping the evaluator.
 --
--- Retention: the broker spawns a background tokio task on startup
--- (broker/src/retention.rs) that runs
---   DELETE FROM audit_verdicts
---   WHERE observed_at < timezone('UTC', NOW()) - INTERVAL '<N> days';
--- The timezone('UTC', NOW()) form gives a UTC-naive timestamp on the
--- right-hand side so the comparison is stable regardless of the
--- postgres session timezone (observed_at is set to UTC by the broker
--- via chrono::Utc::now().naive_utc()).
--- Defaults: 30-day window, hourly cleanup pass. Tune via
--- AUDIT_VERDICTS_RETENTION_DAYS and AUDIT_VERDICTS_RETENTION_INTERVAL_SECS
--- env vars; set days=0 to disable. The idx_audit_verdicts_observed_at
--- index below supports the DELETE's range scan.
+-- Retention: this table grows monotonically with would-deny traffic.
+-- A follow-up will add either pg_partman partitioning on observed_at
+-- or a scheduled DELETE WHERE observed_at < NOW() - INTERVAL '30 days'.
+-- Until then operators on busy clusters should add their own cleanup.
 CREATE TABLE audit_verdicts (
   id              BIGSERIAL PRIMARY KEY,
   policy_uid      VARCHAR     NOT NULL,
