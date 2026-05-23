@@ -8,7 +8,7 @@ kguardian is a security tool. We take vulnerability reports seriously and want t
 
 Instead, send a private report to:
 
-- **Email:** `security@kguardian.dev` <!-- TODO(maintainer): confirm this address is monitored, or replace with the real disclosure contact (e.g. a maintainer's GitHub-linked email or a GitHub Security Advisory). -->
+- **Email:** `security@kguardian.dev`
 - **GitHub Security Advisory:** Use the [private vulnerability reporting](https://github.com/kguardian-dev/kguardian/security/advisories/new) form on this repository.
 
 Please include, where possible:
@@ -19,8 +19,6 @@ Please include, where possible:
 - Steps to reproduce, including manifests or configuration if relevant.
 - Whether the issue requires cluster access, network access, or unauthenticated remote access.
 
-PGP-encrypted reports are welcome. <!-- TODO(maintainer): publish a PGP key fingerprint here if one exists, or remove this line. -->
-
 ## Response SLA
 
 We aim to:
@@ -29,7 +27,7 @@ We aim to:
 - Provide a **first technical assessment** within **7 days**.
 - Agree on a **fix timeline and disclosure date** with the reporter as soon as the impact is understood.
 
-If you do not receive an acknowledgement within 72 hours, please re-send the report and CC the maintainers listed in [`CONTRIBUTING.md`](./CONTRIBUTING.md). <!-- TODO(maintainer): list maintainer GitHub handles in CONTRIBUTING.md so the fallback contact path is unambiguous. -->
+If you do not receive an acknowledgement within 72 hours, please re-send the report and CC the maintainers listed in [`CONTRIBUTING.md`](./CONTRIBUTING.md).
 
 ## Disclosure Policy
 
@@ -44,8 +42,6 @@ We will not pursue legal action against researchers who follow this policy in go
 ## Supported Versions
 
 Security fixes are backported to currently supported releases only. Older releases receive fixes on a best-effort basis.
-
-<!-- TODO(maintainer): fill in the real support window once a release cadence is established. The table below is a placeholder. -->
 
 | Component  | Version     | Supported          |
 |------------|-------------|--------------------|

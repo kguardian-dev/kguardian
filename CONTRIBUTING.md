@@ -118,7 +118,7 @@ kguardian uses component-based versioning automated by [release-please](https://
 
 ## Maintainers
 
-<!-- TODO(maintainer): list current maintainer GitHub handles here so contributors know who to ping for review and who the security fallback is. -->
+- [@xUnholy](https://github.com/xUnholy) — Michael Fornaro
 
 ## Licence
 
