@@ -8,14 +8,14 @@ on:
     branches:
       - main
     paths:
-      - .github/workflows/build-go.yaml
-      - 'advisor/*.go'
+      - .github/workflows/advisor-test.yaml
+      - 'advisor/**'
   pull_request:
     branches:
       - main
     paths:
-      - .github/workflows/build-go.yaml
-      - 'advisor/*.go'
+      - .github/workflows/advisor-test.yaml
+      - 'advisor/**'
 
 permissions:
   contents: read
