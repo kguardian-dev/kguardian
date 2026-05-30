@@ -105,6 +105,8 @@ The following table lists the configurable parameters of the kguardian chart and
 | broker.metrics.serviceMonitor.port | string | `"http"` | Service port name to scrape. |
 | broker.metrics.serviceMonitor.scrapeTimeout | string | `"10s"` | Scrape timeout. |
 | broker.nameOverride | string | `""` | Override the name of the broker resources |
+| broker.networkPolicy | object | `{"allowMetricsFrom":[],"enabled":true}` | Ingress NetworkPolicy for the broker. The broker HTTP API is unauthenticated, so by default ONLY the in-cluster kguardian components that legitimately call it (controller, mcp-server, frontend) may reach it; all other in-cluster traffic is denied at the network layer. Ingress-only — the broker's own egress (DB, DNS, evaluator) is never restricted. Requires a NetworkPolicy-enforcing CNI (Cilium, Calico, ...). Set enabled=false only if you gate broker access another way. |
+| broker.networkPolicy.allowMetricsFrom | list | `[]` | Extra ingress peers allowed to reach the broker HTTP port. The /metrics endpoint shares that port, so when broker.metrics.serviceMonitor.enabled is true, add your Prometheus here. Each entry is a standard NetworkPolicyPeer. |
 | broker.nodeSelector | object | `{"kubernetes.io/os":"linux"}` | Node labels for the kguardian broker pod assignment |
 | broker.podAnnotations | object | `{}` | Annotations to add to broker pods |
 | broker.podDisruptionBudget.enabled | bool | `false` | Create a PodDisruptionBudget for the broker. Defaults to false; enable when running >1 replica so voluntary evictions can't take all of them out. |
