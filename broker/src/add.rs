@@ -63,6 +63,32 @@ pub async fn add_pods_batch(
     Ok(HttpResponse::Ok().json(inserted.len()))
 }
 
+/// The content columns that identify a duplicate `PodTraffic` event —
+/// the same set `get_row` dedups on. `uuid` and `time_stamp` differ on
+/// every eBPF emit by design and are intentionally excluded so that
+/// repeated emits of the same flow collapse to one row.
+type TrafficContentKey = (
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+);
+
+fn traffic_content_key(e: &PodTraffic) -> TrafficContentKey {
+    (
+        e.pod_ip.clone(),
+        e.pod_port.clone(),
+        e.ip_protocol.clone(),
+        e.traffic_type.clone(),
+        e.traffic_in_out_ip.clone(),
+        e.traffic_in_out_port.clone(),
+        e.decision.clone(),
+    )
+}
+
 fn create_pod_traffic_batch(
     conn: &mut PgConnection,
     batch: web::Json<Vec<PodTraffic>>,
@@ -81,7 +107,23 @@ fn create_pod_traffic_batch(
     // evaluator, so the dedup decision lives here as the single source
     // of truth.
     let mut events_to_insert = Vec::new();
+    // Collapse byte-identical events within THIS batch before the
+    // per-event DB check. eBPF re-emits the same flow every cycle and a
+    // batch accumulates over BATCH_TIMEOUT, so identical events commonly
+    // arrive together. Without this, both pass get_row (neither is
+    // committed yet), double-insert into pod_traffic, AND double-fire
+    // the audit evaluator — inflating verdict/flow counts. Key on the
+    // same content columns get_row dedups on; uuid/time_stamp differ per
+    // event by design and are excluded.
+    let mut seen_in_batch = std::collections::HashSet::new();
     for event in batch.iter() {
+        if !seen_in_batch.insert(traffic_content_key(event)) {
+            debug!(
+                "Skipping in-batch duplicate traffic event for pod: {:?}",
+                event.pod_name
+            );
+            continue;
+        }
         if event.get_row(conn)?.is_none() {
             events_to_insert.push(event.clone());
         } else {
@@ -644,5 +686,53 @@ mod tests {
         // (e.g. an inet parse on the postgres side) can flag them.
         assert!(is_routable_svc_ip("none"));
         assert!(is_routable_svc_ip("NONE"));
+    }
+
+    // traffic_content_key drives the in-batch dedup in
+    // create_pod_traffic_batch. The DB path itself needs a live
+    // PostgreSQL (not available in unit tests), but the key is the part
+    // most prone to regression: include the wrong column and the dedup
+    // either over-merges distinct flows or fails to collapse repeats.
+    fn sample_traffic(uuid: &str) -> PodTraffic {
+        PodTraffic {
+            uuid: uuid.to_string(),
+            pod_name: Some("web-1".to_string()),
+            pod_namespace: Some("prod".to_string()),
+            pod_ip: Some("10.0.0.1".to_string()),
+            pod_port: Some("8080".to_string()),
+            ip_protocol: Some("TCP".to_string()),
+            traffic_type: Some("EGRESS".to_string()),
+            traffic_in_out_ip: Some("10.0.0.2".to_string()),
+            traffic_in_out_port: Some("443".to_string()),
+            decision: Some("ALLOW".to_string()),
+            time_stamp: chrono::NaiveDate::from_ymd_opt(2026, 1, 1)
+                .unwrap()
+                .and_hms_opt(0, 0, 0)
+                .unwrap(),
+        }
+    }
+
+    #[test]
+    fn content_key_ignores_uuid_and_timestamp() {
+        // eBPF re-emits the same flow every cycle with a fresh uuid and
+        // timestamp; those repeats must share a content key so the
+        // in-batch dedup collapses them to one insert + one audit eval.
+        let a = sample_traffic("uuid-a");
+        let mut b = sample_traffic("uuid-b");
+        b.time_stamp = chrono::NaiveDate::from_ymd_opt(2026, 6, 30)
+            .unwrap()
+            .and_hms_opt(12, 34, 56)
+            .unwrap();
+        assert_eq!(traffic_content_key(&a), traffic_content_key(&b));
+    }
+
+    #[test]
+    fn content_key_distinguishes_real_flow_differences() {
+        // A different peer port is a genuinely distinct flow and must
+        // NOT be collapsed — guards against an over-broad key.
+        let a = sample_traffic("x");
+        let mut b = sample_traffic("y");
+        b.traffic_in_out_port = Some("8443".to_string());
+        assert_ne!(traffic_content_key(&a), traffic_content_key(&b));
     }
 }
