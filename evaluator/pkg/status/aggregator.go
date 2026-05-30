@@ -48,7 +48,7 @@ type policyKey struct {
 
 type tupleKey struct {
 	srcPod, dstPod, protocol, direction string
-	dstPort                              int32
+	dstPort                             int32
 }
 
 type policyAgg struct {

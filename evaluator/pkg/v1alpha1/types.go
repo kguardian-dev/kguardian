@@ -120,10 +120,10 @@ type ClusterNetworkPolicySpec struct {
 	// to. Nil or an empty selector ({}) matches all namespaces.
 	NamespaceSelector *metav1.LabelSelector `json:"namespaceSelector,omitempty"`
 	// PodSelector selects pods within the matching namespaces.
-	PodSelector  metav1.LabelSelector                    `json:"podSelector"`
-	PolicyTypes  []networkingv1.PolicyType               `json:"policyTypes,omitempty"`
-	Ingress      []networkingv1.NetworkPolicyIngressRule `json:"ingress,omitempty"`
-	Egress       []networkingv1.NetworkPolicyEgressRule  `json:"egress,omitempty"`
+	PodSelector metav1.LabelSelector                    `json:"podSelector"`
+	PolicyTypes []networkingv1.PolicyType               `json:"policyTypes,omitempty"`
+	Ingress     []networkingv1.NetworkPolicyIngressRule `json:"ingress,omitempty"`
+	Egress      []networkingv1.NetworkPolicyEgressRule  `json:"egress,omitempty"`
 }
 
 // AuditClusterNetworkPolicyList contains a list of AuditClusterNetworkPolicy.

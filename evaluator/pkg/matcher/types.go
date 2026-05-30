@@ -86,8 +86,8 @@ const (
 // Result is what /evaluate returns for one (Flow, Policy, Direction)
 // triple.
 type Result struct {
-	PolicyNamespace string    `json:"policyNamespace"`
-	PolicyName      string    `json:"policyName"`
+	PolicyNamespace string `json:"policyNamespace"`
+	PolicyName      string `json:"policyName"`
 	// PolicyUID is the .metadata.uid of the matched
 	// AuditNetworkPolicy / AuditClusterNetworkPolicy. Stable across
 	// renames of the same generation; empty when the matcher couldn't

@@ -446,8 +446,8 @@ func TestIpBlockMatches_ExceptIgnoresInvalidEntries(t *testing.T) {
 	block := &networkingv1.IPBlock{
 		CIDR: "10.0.0.0/8",
 		Except: []string{
-			"garbage-cidr",      // invalid → skipped
-			"10.5.0.0/16",       // valid    → excludes
+			"garbage-cidr", // invalid → skipped
+			"10.5.0.0/16",  // valid    → excludes
 		},
 	}
 	if ipBlockMatches("10.5.6.7", block) {
@@ -519,8 +519,8 @@ func TestMatch_IPBlockExceptDenies(t *testing.T) {
 		ip      string
 		verdict Verdict
 	}{
-		{ip: "10.5.6.7", verdict: VerdictWouldDeny},  // in except → denied
-		{ip: "10.6.6.7", verdict: VerdictAllow},      // outside except, in cidr → allowed
+		{ip: "10.5.6.7", verdict: VerdictWouldDeny},    // in except → denied
+		{ip: "10.6.6.7", verdict: VerdictAllow},        // outside except, in cidr → allowed
 		{ip: "192.168.1.1", verdict: VerdictWouldDeny}, // outside cidr → denied
 	} {
 		flow := Flow{

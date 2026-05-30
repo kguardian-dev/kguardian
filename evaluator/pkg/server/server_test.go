@@ -19,10 +19,10 @@ import (
 
 // fakeLookup implements PolicyLookup with in-memory state.
 type fakeLookup struct {
-	pods         map[string]*corev1.Pod
-	nsLabels     map[string]map[string]string
-	policies     map[string][]*v1alpha1.AuditNetworkPolicy
-	clusterPols  []*v1alpha1.AuditClusterNetworkPolicy
+	pods        map[string]*corev1.Pod
+	nsLabels    map[string]map[string]string
+	policies    map[string][]*v1alpha1.AuditNetworkPolicy
+	clusterPols []*v1alpha1.AuditClusterNetworkPolicy
 }
 
 func (f *fakeLookup) GetPod(ns, name string) *corev1.Pod {

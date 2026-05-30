@@ -109,7 +109,7 @@ func (c *BrokerClient) get(ctx context.Context, reqURL string) (interface{}, err
 		}).Error("Broker request failed")
 		return nil, fmt.Errorf("failed to make request: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	logger.Log.WithFields(logrus.Fields{
 		"url":              reqURL,

@@ -91,8 +91,8 @@ func compactTrafficSummary(data interface{}) map[string]interface{} {
 	podSummaries := make(map[string]interface{}, len(pods))
 	for name, s := range pods {
 		podSummaries[name] = map[string]interface{}{
-			"ingress_count":    s.Ingress,
-			"egress_count":     s.Egress,
+			"ingress_count":     s.Ingress,
+			"egress_count":      s.Egress,
 			"unique_peer_count": len(s.Peers),
 		}
 	}

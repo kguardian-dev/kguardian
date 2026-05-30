@@ -86,11 +86,11 @@ func TestAuditNetworkPolicy_DeepCopyIndependent(t *testing.T) {
 	src.DeepCopyInto(out)
 
 	// Mutate the copy; source must not see it.
-	out.ObjectMeta.Labels["team"] = "infra"
+	out.Labels["team"] = "infra"
 	out.Spec.PodSelector.MatchLabels["app"] = "api"
 	out.Status.Evaluation.TopOffenders[0].DstPod = "tampered"
 
-	if got := src.ObjectMeta.Labels["team"]; got != "platform" {
+	if got := src.Labels["team"]; got != "platform" {
 		t.Errorf("ObjectMeta.Labels leaked through: got %q", got)
 	}
 	if got := src.Spec.PodSelector.MatchLabels["app"]; got != "web" {
@@ -101,8 +101,8 @@ func TestAuditNetworkPolicy_DeepCopyIndependent(t *testing.T) {
 	}
 
 	// Identity values still propagate.
-	if out.ObjectMeta.Generation != 7 {
-		t.Errorf("scalar field not copied: %d", out.ObjectMeta.Generation)
+	if out.Generation != 7 {
+		t.Errorf("scalar field not copied: %d", out.Generation)
 	}
 	if out.Status.ObservedGeneration != 5 {
 		t.Errorf("status.observedGeneration not copied: %d", out.Status.ObservedGeneration)
@@ -136,10 +136,10 @@ func TestAuditClusterNetworkPolicy_DeepCopyIndependent(t *testing.T) {
 func TestAuditNetworkPolicy_DeepCopyObjectImplementsRuntimeObject(t *testing.T) {
 	// runtime.Object requires DeepCopyObject() runtime.Object.
 	// Catch a regression that returns a different shape.
-	var _ runtime.Object = (&AuditNetworkPolicy{}).DeepCopyObject()
-	var _ runtime.Object = (&AuditNetworkPolicyList{}).DeepCopyObject()
-	var _ runtime.Object = (&AuditClusterNetworkPolicy{}).DeepCopyObject()
-	var _ runtime.Object = (&AuditClusterNetworkPolicyList{}).DeepCopyObject()
+	var _ runtime.Object = &AuditNetworkPolicy{}
+	var _ runtime.Object = &AuditNetworkPolicyList{}
+	var _ runtime.Object = &AuditClusterNetworkPolicy{}
+	var _ runtime.Object = &AuditClusterNetworkPolicyList{}
 }
 
 func TestAuditNetworkPolicy_DeepCopyObjectOnNil(t *testing.T) {
