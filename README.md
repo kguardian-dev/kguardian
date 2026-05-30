@@ -2,7 +2,7 @@
 
 - **What it does:** Generates least-privilege Kubernetes NetworkPolicies, CiliumNetworkPolicies, and seccomp profiles from observed runtime behavior.
 - **Who it's for:** Platform and security teams running Kubernetes who want policy-as-code without writing rules by hand.
-- **What it costs to run:** TBD pending benchmark — see [Performance](#performance) for the reference-workload envelope.
+- **What it costs to run:** lightweight control plane (~60 MiB/node for the eBPF agent; tens of MiB for the services) plus a PostgreSQL you size to your fleet — see [Performance](#performance) for measured reference figures.
 
 [![Go Report Card](https://goreportcard.com/badge/github.com/kguardian-dev/kguardian)](https://goreportcard.com/report/github.com/kguardian-dev/kguardian)
 [![License](https://img.shields.io/badge/License-BSL%201.1-blue.svg)](https://mariadb.com/bsl11/)
@@ -57,13 +57,30 @@ How kguardian compares to Inspektor Gadget and Security Profiles Operator (Netwo
 
 ## Performance
 
-Measured on `<reference workload, e.g., 100 pods doing typical web traffic on a 3-node cluster of m6i.large nodes>`:
+Reference figures from a real-world deployment: a **3-node cluster (18
+vCPU / 47 GiB RAM per node, kernel 6.18, Cilium CNI)** observing **234
+pods across 26 namespaces** of mixed traffic (web apps, databases,
+storage/Ceph, media, game servers). This is one real-world data point,
+not a synthetic sweep — treat it as an order-of-magnitude envelope, and
+expect numbers to scale with flow cardinality, not raw pod count.
 
-- Controller (eBPF DaemonSet): `<X>%` CPU, `<Y>` MiB memory per node.
-- Broker: `<X>` MiB memory; `<Y>` req/s sustained.
-- Storage growth: `<Z>` GiB / 1000 pods / day.
+- **Controller (eBPF DaemonSet):** ~60 MiB memory per node; ~0.1–0.6
+  vCPU per node, tracking the node's connection/syscall rate.
+- **Broker + evaluator (control plane):** evaluator ~26 MiB / <0.01 vCPU
+  idle; broker sized at 512 MiB request / 2 GiB limit and stays well
+  within it at this scale.
+- **PostgreSQL** is the dominant consumer (here ~0.4–2 GiB RAM, CPU
+  spiking under ingest + autovacuum) — size it generously.
+- **Baseline captured:** ~4.0 M traffic rows, ~1.37 M audit verdicts,
+  13.2 k pod records in a **1.8 GiB** database.
+- **Storage growth is dedup-bounded:** once a workload's flow set is
+  learned, new rows drop to ~0/min in steady state (identical flows are
+  collapsed), so the database grows with *new* behavior, not with time
+  or traffic volume. Configure `broker.audit.retention.days` to cap the
+  audit-verdict history.
 
-_Numbers are TODO — pending benchmark on a reference cluster._
+_A formal, reproducible benchmark on standardized instance types is still
+planned; the figures above are measured, not projected._
 
 ## Prerequisites
 
