@@ -63,6 +63,7 @@ const AuditVerdictsPanel: React.FC<Props> = ({ isOpen, onClose }) => {
 
   useEffect(() => {
     if (!isOpen) return;
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     void load();
   }, [isOpen, load]);
 

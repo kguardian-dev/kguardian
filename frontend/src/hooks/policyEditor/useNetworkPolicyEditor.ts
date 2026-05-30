@@ -24,7 +24,6 @@ export const useNetworkPolicyEditor = ({ pod, isOpen }: UseNetworkPolicyEditorPr
     // Only generate if we have a pod and haven't generated for this pod yet
     if (isOpen && pod && currentPodId !== lastGeneratedPodId.current) {
       lastGeneratedPodId.current = currentPodId;
-      // eslint-disable-next-line react-hooks/set-state-in-effect
       setIsLoading(true);
       generateNetworkPolicy(pod)
         .then((generatedPolicy) => {

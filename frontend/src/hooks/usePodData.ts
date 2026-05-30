@@ -100,6 +100,7 @@ export const usePodData = (namespace: string) => {
   }, [namespace]);
 
   useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     fetchPodData();
   }, [fetchPodData]);
 
