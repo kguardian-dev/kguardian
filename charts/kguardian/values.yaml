@@ -341,15 +341,23 @@ broker:
     maxUnavailable: ""
 
   # -- Ingress NetworkPolicy for the broker. The broker HTTP API is
-  # unauthenticated, so by default ONLY the in-cluster kguardian
-  # components that legitimately call it (controller, mcp-server,
-  # frontend) may reach it; all other in-cluster traffic is denied at
-  # the network layer. Ingress-only — the broker's own egress (DB, DNS,
-  # evaluator) is never restricted. Requires a NetworkPolicy-enforcing
-  # CNI (Cilium, Calico, ...). Set enabled=false only if you gate broker
-  # access another way.
+  # unauthenticated, so this restricts which in-cluster sources may reach
+  # it (mcp-server, frontend, the helm-test pod via podSelector; the
+  # controller via allowedNodeCIDRs). Ingress-only — the broker's own
+  # egress (DB, DNS, evaluator) is never restricted. Requires a
+  # NetworkPolicy-enforcing CNI (Cilium, Calico, ...).
+  #
+  # OPT-IN (default false) on purpose: the controller is a hostNetwork
+  # eBPF DaemonSet, so it posts to the broker from the NODE IP and a
+  # podSelector can NEVER match it. Enabling the policy without listing
+  # your node network in allowedNodeCIDRs will BLOCK the controller and
+  # stall its rollout. Enable only after setting allowedNodeCIDRs.
   networkPolicy:
-    enabled: true
+    enabled: false
+    # -- Node network CIDR(s) the controller DaemonSet runs on. Required
+    # when enabled=true, since the hostNetwork controller reaches the
+    # broker from its node IP. e.g. ["10.0.0.0/16"] or per-node /32s.
+    allowedNodeCIDRs: []
     # -- Extra ingress peers allowed to reach the broker HTTP port. The
     # /metrics endpoint shares that port, so when
     # broker.metrics.serviceMonitor.enabled is true, add your Prometheus

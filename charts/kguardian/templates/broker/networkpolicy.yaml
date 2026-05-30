@@ -45,15 +45,26 @@ spec:
               app.kubernetes.io/name: {{ .Values.frontend.service.name }}
         # the chart's own helm-test pod, which probes the broker /health
         # endpoint (templates/tests/test-connection.yaml). Without this the
-        # default-on policy would fail `helm test` and thus the release.
-        # Scoped to THIS release's Helm-managed test pod — all three labels
-        # are set by kguardian.labels — so a stray component=helm-test pod
-        # from another chart in the namespace can't ride this grant.
+        # policy would fail `helm test` and thus the release. Scoped to THIS
+        # release's Helm-managed test pod — all three labels are set by
+        # kguardian.labels — so a stray component=helm-test pod from another
+        # chart in the namespace can't ride this grant.
         - podSelector:
             matchLabels:
               app.kubernetes.io/instance: {{ .Release.Name }}
               app.kubernetes.io/managed-by: {{ .Release.Service }}
               app.kubernetes.io/component: helm-test
+        {{- range .Values.broker.networkPolicy.allowedNodeCIDRs }}
+        # The controller is a hostNetwork eBPF DaemonSet, so it posts to the
+        # broker from the NODE IP — a podSelector can never match it (CNIs
+        # see node identity, not the pod label). It must be admitted by node
+        # CIDR. This is why the policy is opt-in: these CIDRs are cluster-
+        # specific and there is no safe default that keeps the controller
+        # working. Set broker.networkPolicy.allowedNodeCIDRs to your nodes'
+        # network(s).
+        - ipBlock:
+            cidr: {{ . | quote }}
+        {{- end }}
       ports:
         - port: http
           protocol: TCP

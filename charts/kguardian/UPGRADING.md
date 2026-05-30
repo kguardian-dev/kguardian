@@ -1,37 +1,42 @@
 # Upgrading the kguardian Helm chart
 
-## Broker now ships a default-on ingress NetworkPolicy
+## Optional broker ingress NetworkPolicy (opt-in)
 
-The chart now renders an ingress `NetworkPolicy` for the broker, **enabled
-by default** (`broker.networkPolicy.enabled: true`). The broker HTTP API
-is unauthenticated, so the policy restricts who may reach it to the
-kguardian components that legitimately call it — the controller,
-mcp-server, and frontend. All other in-cluster traffic to the broker is
-denied at the network layer.
+The chart can render an ingress `NetworkPolicy` for the broker
+(`broker.networkPolicy.enabled`, **default `false`**). The broker HTTP API
+is unauthenticated, so when enabled the policy restricts which in-cluster
+sources may reach it.
 
-Action required only if:
-- **Your CNI enforces NetworkPolicy** (Cilium, Calico, ...) — otherwise
-  the object is inert and nothing changes.
-- **You scrape the broker `/metrics`** (it shares the broker HTTP port).
-  Add your Prometheus to `broker.networkPolicy.allowMetricsFrom`:
-  ```yaml
-  broker:
-    networkPolicy:
-      allowMetricsFrom:
-        - namespaceSelector:
-            matchLabels:
-              kubernetes.io/metadata.name: monitoring
-          podSelector:
-            matchLabels:
-              app.kubernetes.io/name: prometheus
-  ```
-- **You have a custom integration** that calls the broker directly — it
-  will be blocked. Add its selector to `allowMetricsFrom` (despite the
-  name, it admits any peer to the broker port) or set
-  `broker.networkPolicy.enabled: false`.
+**It is opt-in for a hard reason:** the controller is a hostNetwork eBPF
+DaemonSet, so it posts to the broker from the **node IP**, and a
+`podSelector` can never match it (NetworkPolicy-enforcing CNIs see node
+identity, not the pod label). Enabling the policy **without** listing your
+node network in `allowedNodeCIDRs` will **block the controller** and stall
+its rollout. There is no safe cluster-agnostic default, hence opt-in.
 
-Egress is intentionally left unrestricted, so the broker's own DB / DNS /
-evaluator traffic is never affected.
+To enable safely:
+```yaml
+broker:
+  networkPolicy:
+    enabled: true
+    # REQUIRED: the node network(s) the controller DaemonSet runs on.
+    allowedNodeCIDRs:
+      - "10.0.0.0/16"     # e.g. your node subnet, or per-node /32s
+    # Only if you scrape /metrics (it shares the broker HTTP port):
+    allowMetricsFrom:
+      - namespaceSelector:
+          matchLabels:
+            kubernetes.io/metadata.name: monitoring
+        podSelector:
+          matchLabels:
+            app.kubernetes.io/name: prometheus
+```
+
+When enabled, mcp-server / frontend / the helm-test pod are admitted via
+podSelector; the controller via `allowedNodeCIDRs`; everything else is
+denied. Ingress-only — the broker's own DB / DNS / evaluator egress is
+never restricted. Inert on clusters whose CNI doesn't enforce
+NetworkPolicy.
 
 ## CRD: `policyTypes` is now a constrained set
 
