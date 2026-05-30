@@ -107,8 +107,13 @@ spec:
               fi
               # --clean --if-exists makes the dump replayable. We dump
               # the whole cluster (databases + globals) so a restore
-              # can recreate users/roles too.
-              if ! pg_dumpall --clean --if-exists --no-password; then
+              # can recreate users/roles too. --no-role-passwords omits
+              # the SCRAM role-password hashes from the globals dump:
+              # this Job prints to stdout (pod logs), and leaking
+              # offline-crackable role hashes to a log sink would widen
+              # the blast radius well beyond direct DB access. A restore
+              # re-sets passwords from the chart's DB Secret anyway.
+              if ! pg_dumpall --clean --if-exists --no-password --no-role-passwords; then
                 echo "WARN: pg_dumpall failed; backup not produced" >&2
                 exit 0
               fi
