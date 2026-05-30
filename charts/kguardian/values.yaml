@@ -352,6 +352,15 @@ broker:
   # podSelector can NEVER match it. Enabling the policy without listing
   # your node network in allowedNodeCIDRs will BLOCK the controller and
   # stall its rollout. Enable only after setting allowedNodeCIDRs.
+  #
+  # CAVEAT (validated on Cilium): the allowedNodeCIDRs ipBlock needed for
+  # the hostNetwork controller is a coarse allow — on some CNIs (Cilium)
+  # it also admits OTHER in-cluster pods, so this policy is defence-in-
+  # depth, NOT airtight isolation. The pod clients (mcp-server/frontend)
+  # are precisely scoped via podSelector; the controller allowance is
+  # not. For strict broker isolation prefer a CNI-native policy (e.g. a
+  # CiliumNetworkPolicy using fromEntities: [host, remote-node]) or, the
+  # real fix, authentication on the broker API.
   networkPolicy:
     enabled: false
     # -- Node network CIDR(s) the controller DaemonSet runs on. Required

@@ -38,6 +38,15 @@ denied. Ingress-only — the broker's own DB / DNS / evaluator egress is
 never restricted. Inert on clusters whose CNI doesn't enforce
 NetworkPolicy.
 
+> **Caveat (validated live on Cilium):** the `allowedNodeCIDRs` ipBlock
+> that the hostNetwork controller requires is coarse — on Cilium it was
+> observed to also admit unrelated in-cluster pods, so treat this policy
+> as **defence-in-depth, not airtight isolation**. The pod clients are
+> precisely scoped; the controller allowance is not. For strict broker
+> isolation, use a CNI-native policy (e.g. a CiliumNetworkPolicy with
+> `fromEntities: [host, remote-node]`) or add authentication to the
+> broker API (the durable fix, tracked separately).
+
 ## CRD: `policyTypes` is now a constrained set
 
 The `AuditNetworkPolicy` and `AuditClusterNetworkPolicy` CRDs now declare
