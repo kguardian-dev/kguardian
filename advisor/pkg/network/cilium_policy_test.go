@@ -5,8 +5,8 @@ import (
 
 	ciliumv2 "github.com/cilium/cilium/pkg/k8s/apis/cilium.io/v2"
 	ciliumapi "github.com/cilium/cilium/pkg/policy/api"
-	"github.com/stretchr/testify/assert"
 	"github.com/kguardian-dev/kguardian/advisor/pkg/api"
+	"github.com/stretchr/testify/assert"
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"

@@ -7,8 +7,8 @@ import (
 	ciliumv2 "github.com/cilium/cilium/pkg/k8s/apis/cilium.io/v2"
 	"github.com/cilium/cilium/pkg/labels"
 	ciliumapi "github.com/cilium/cilium/pkg/policy/api"
-	log "github.com/rs/zerolog/log"
 	"github.com/kguardian-dev/kguardian/advisor/pkg/api"
+	log "github.com/rs/zerolog/log"
 	networkingv1 "k8s.io/api/networking/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
 )

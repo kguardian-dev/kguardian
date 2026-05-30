@@ -6,8 +6,8 @@ import (
 	"os"
 	"path/filepath"
 
-	log "github.com/rs/zerolog/log"
 	api "github.com/kguardian-dev/kguardian/advisor/pkg/api"
+	log "github.com/rs/zerolog/log"
 )
 
 // SeccompProfile represents the structure of a seccomp security profile

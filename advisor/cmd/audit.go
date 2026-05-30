@@ -152,12 +152,20 @@ func promoteListItem(item *unstructured.Unstructured, idx, total int) error {
 		if err != nil {
 			return fmt.Errorf("opening %s: %w", path, err)
 		}
-		defer f.Close()
+		if err := emitPromoted(item, f); err != nil {
+			_ = f.Close()
+			return err
+		}
+		if err := f.Close(); err != nil {
+			return fmt.Errorf("closing %s: %w", path, err)
+		}
 		log.Info().Str("path", path).Msg("wrote promoted NetworkPolicy")
-		return emitPromoted(item, f)
+		return nil
 	}
 	if idx > 0 {
-		fmt.Fprintln(os.Stdout, "---")
+		if _, err := fmt.Fprintln(os.Stdout, "---"); err != nil {
+			return err
+		}
 	}
 	return emitPromoted(item, os.Stdout)
 }
@@ -207,9 +215,10 @@ func emitPromoted(u *unstructured.Unstructured, w io.Writer) error {
 		return err
 	}
 	if promoteDelete {
-		fmt.Fprintf(w, "# After kubectl apply succeeds, retire the audit policy:\n#   kubectl delete auditnetworkpolicy %s -n %s\n",
-			u.GetName(), u.GetNamespace())
+		if _, err := fmt.Fprintf(w, "# After kubectl apply succeeds, retire the audit policy:\n#   kubectl delete auditnetworkpolicy %s -n %s\n",
+			u.GetName(), u.GetNamespace()); err != nil {
+			return err
+		}
 	}
 	return nil
 }
-

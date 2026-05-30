@@ -3,8 +3,8 @@ package network
 import (
 	"testing"
 
-	"github.com/stretchr/testify/assert"
 	"github.com/kguardian-dev/kguardian/advisor/pkg/api"
+	"github.com/stretchr/testify/assert"
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"

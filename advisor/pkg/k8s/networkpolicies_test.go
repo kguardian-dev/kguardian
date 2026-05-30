@@ -16,9 +16,9 @@ import (
 
 func TestCreateMockPod_PopulatesMeta(t *testing.T) {
 	pod := CreateMockPod("web", "prod")
-	assert.Equal(t, "web", pod.ObjectMeta.Name)
-	assert.Equal(t, "prod", pod.ObjectMeta.Namespace)
-	assert.Equal(t, "web", pod.ObjectMeta.Labels["app"])
+	assert.Equal(t, "web", pod.Name)
+	assert.Equal(t, "prod", pod.Namespace)
+	assert.Equal(t, "web", pod.Labels["app"])
 }
 
 func TestCreateMockPod_LabelMatchesName(t *testing.T) {
@@ -27,7 +27,7 @@ func TestCreateMockPod_LabelMatchesName(t *testing.T) {
 	// match nothing.
 	for _, n := range []string{"a", "web-1", "long-pod-name-with-hyphens"} {
 		pod := CreateMockPod(n, "default")
-		assert.Equal(t, n, pod.ObjectMeta.Labels["app"], "label app must equal pod name")
+		assert.Equal(t, n, pod.Labels["app"], "label app must equal pod name")
 	}
 }
 

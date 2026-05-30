@@ -17,10 +17,10 @@ import (
 func TestCreateMockCiliumNetworkPolicy_HasCorrectMeta(t *testing.T) {
 	got := createMockCiliumNetworkPolicy("web", "prod")
 
-	assert.Equal(t, "CiliumNetworkPolicy", got.TypeMeta.Kind)
-	assert.Equal(t, "cilium.io/v2", got.TypeMeta.APIVersion)
-	assert.Equal(t, "web-policy", got.ObjectMeta.Name)
-	assert.Equal(t, "prod", got.ObjectMeta.Namespace)
+	assert.Equal(t, "CiliumNetworkPolicy", got.Kind)
+	assert.Equal(t, "cilium.io/v2", got.APIVersion)
+	assert.Equal(t, "web-policy", got.Name)
+	assert.Equal(t, "prod", got.Namespace)
 }
 
 func TestCreateMockCiliumNetworkPolicy_EndpointSelectorMatchesPodName(t *testing.T) {
@@ -29,7 +29,7 @@ func TestCreateMockCiliumNetworkPolicy_EndpointSelectorMatchesPodName(t *testing
 		t.Fatal("Spec must not be nil")
 	}
 	assert.NotNil(t, got.Spec.EndpointSelector.LabelSelector)
-	assert.Equal(t, "web", got.Spec.EndpointSelector.LabelSelector.MatchLabels["app"])
+	assert.Equal(t, "web", got.Spec.EndpointSelector.MatchLabels["app"])
 }
 
 func TestCreateMockCiliumNetworkPolicy_BothDirectionsPopulated(t *testing.T) {

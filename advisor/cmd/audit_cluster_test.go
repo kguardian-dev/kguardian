@@ -203,10 +203,10 @@ func TestUnstructuredToLabelSelector_EmptyInputProducesEmptySelector(t *testing.
 	// converter must not invent matchLabels / matchExpressions out of
 	// thin air — the empty selector relies on both being nil/empty.
 	got := unstructuredToLabelSelector(map[string]any{})
-	if got.MatchLabels != nil && len(got.MatchLabels) != 0 {
+	if len(got.MatchLabels) != 0 {
 		t.Errorf("empty input must yield empty/nil MatchLabels, got %#v", got.MatchLabels)
 	}
-	if got.MatchExpressions != nil && len(got.MatchExpressions) != 0 {
+	if len(got.MatchExpressions) != 0 {
 		t.Errorf("empty input must yield empty/nil MatchExpressions, got %#v", got.MatchExpressions)
 	}
 }

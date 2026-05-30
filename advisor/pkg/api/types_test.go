@@ -89,7 +89,7 @@ func TestPodDetail_JSONShape(t *testing.T) {
 	assert.Equal(t, "10.0.0.1", got.PodIP)
 	assert.Equal(t, "web-1", got.Name)
 	assert.Equal(t, "prod", got.Namespace)
-	assert.Equal(t, "web-1", got.Pod.ObjectMeta.Name)
+	assert.Equal(t, "web-1", got.Pod.Name)
 }
 
 func TestSvcDetail_JSONShape(t *testing.T) {
@@ -108,7 +108,7 @@ func TestSvcDetail_JSONShape(t *testing.T) {
 	assert.Equal(t, "10.96.0.1", got.SvcIp)
 	assert.Equal(t, "kubernetes", got.SvcName)
 	assert.Equal(t, "default", got.SvcNamespace)
-	assert.Equal(t, "kubernetes", got.Service.ObjectMeta.Name)
+	assert.Equal(t, "kubernetes", got.Service.Name)
 }
 
 // Function-variable injection contract: GetPodTrafficFunc /

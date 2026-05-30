@@ -3,8 +3,8 @@ package k8s
 import (
 	"testing"
 
-	"github.com/stretchr/testify/assert"
 	api "github.com/kguardian-dev/kguardian/advisor/pkg/api"
+	"github.com/stretchr/testify/assert"
 	appsv1 "k8s.io/api/apps/v1"
 	batchv1 "k8s.io/api/batch/v1"
 	v1 "k8s.io/api/core/v1"
@@ -271,4 +271,3 @@ func TestGetOwnerRef_UnknownKindFallsBackToPodLabels(t *testing.T) {
 	assert.NoError(t, err)
 	assert.Equal(t, map[string]string{"app": "weird"}, got)
 }
-

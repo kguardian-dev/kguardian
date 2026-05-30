@@ -6,9 +6,9 @@ import (
 	"os"
 	"runtime"
 
+	"github.com/kguardian-dev/kguardian/advisor/pkg/k8s"
 	log "github.com/rs/zerolog/log"
 	"github.com/spf13/cobra"
-	"github.com/kguardian-dev/kguardian/advisor/pkg/k8s"
 )
 
 // Version information - these will be set during build
@@ -23,12 +23,13 @@ var (
 // or capturing stdout. Output stays grep-able for the kguardian version
 // release-process scripts.
 func formatClientVersion(w io.Writer, version, gitCommit, buildDate, goVersion, goos, goarch string) {
-	fmt.Fprintf(w, "Client Version:\n")
-	fmt.Fprintf(w, "  Version:    %s\n", version)
-	fmt.Fprintf(w, "  Git Commit: %s\n", gitCommit)
-	fmt.Fprintf(w, "  Build Date: %s\n", buildDate)
-	fmt.Fprintf(w, "  Go Version: %s\n", goVersion)
-	fmt.Fprintf(w, "  Platform:   %s/%s\n", goos, goarch)
+	_, _ = fmt.Fprintf(w, "Client Version:\n"+
+		"  Version:    %s\n"+
+		"  Git Commit: %s\n"+
+		"  Build Date: %s\n"+
+		"  Go Version: %s\n"+
+		"  Platform:   %s/%s\n",
+		version, gitCommit, buildDate, goVersion, goos, goarch)
 }
 
 var versionCmd = &cobra.Command{

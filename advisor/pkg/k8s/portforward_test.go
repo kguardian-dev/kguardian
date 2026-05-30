@@ -95,7 +95,6 @@ func TestIsPodReady_FindsReadyAmongOtherConditions(t *testing.T) {
 	assert.True(t, IsPodReady(pod))
 }
 
-
 func TestPortForward(t *testing.T) {
 	// Test basic validation failures
 	// Test nil config
@@ -107,7 +106,7 @@ func TestPortForward(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("Expected error but none received")
 	}
-	<-done // Wait for done signal
+	<-done          // Wait for done signal
 	close(stopChan) // Clean up
 
 	// Test nil clientset
@@ -123,7 +122,7 @@ func TestPortForward(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("Expected error but none received")
 	}
-	<-done // Wait for done signal
+	<-done          // Wait for done signal
 	close(stopChan) // Clean up
 
 	// Test nil REST config
@@ -139,7 +138,7 @@ func TestPortForward(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("Expected error but none received")
 	}
-	<-done // Wait for done signal
+	<-done          // Wait for done signal
 	close(stopChan) // Clean up
 }
 
