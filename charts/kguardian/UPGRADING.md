@@ -1,5 +1,25 @@
 # Upgrading the kguardian Helm chart
 
+## CRD: `policyTypes` is now a constrained set
+
+The `AuditNetworkPolicy` and `AuditClusterNetworkPolicy` CRDs now declare
+`policyTypes` as `x-kubernetes-list-type: set` with `maxItems: 2`. This
+stops accidental duplicate entries (e.g. `[Ingress, Ingress]`) at
+admission, which the evaluator would otherwise double-count.
+
+Impact: if you have an **existing** CR whose `policyTypes` already
+contains duplicates, the API server may reject *updates* to it after the
+CRD is applied (set semantics forbid duplicates). This is rare, but to be
+safe, scan and clean before upgrading:
+
+```bash
+# List any audit policies with duplicate policyTypes entries.
+kubectl get auditnetworkpolicies,auditclusternetworkpolicies -A -o json \
+  | jq -r '.items[] | select((.spec.policyTypes | length) != (.spec.policyTypes | unique | length))
+           | "\(.kind) \(.metadata.namespace)/\(.metadata.name)"'
+# Re-apply each listed policy with de-duplicated policyTypes.
+```
+
 ## `broker.audit.retention.days: 0` now correctly disables retention
 
 Earlier chart versions used a Helm `with` block to emit
