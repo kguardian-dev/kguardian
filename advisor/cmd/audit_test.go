@@ -110,7 +110,7 @@ func TestEmitPromoted_PreservesUserLabelsAndAnnotations(t *testing.T) {
 		"team":                         "platform",
 	})
 	u.SetAnnotations(map[string]string{
-		"argocd.argoproj.io/sync-wave":              "5",
+		"argocd.argoproj.io/sync-wave":                     "5",
 		"kubectl.kubernetes.io/last-applied-configuration": `{"...stale prior apply..."}`,
 	})
 	var buf bytes.Buffer

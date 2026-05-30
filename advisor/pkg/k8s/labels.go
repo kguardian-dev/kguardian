@@ -4,8 +4,8 @@ import (
 	"context"
 	"fmt"
 
-	log "github.com/rs/zerolog/log"
 	api "github.com/kguardian-dev/kguardian/advisor/pkg/api"
+	log "github.com/rs/zerolog/log"
 	v1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"

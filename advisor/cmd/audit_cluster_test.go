@@ -110,7 +110,7 @@ func TestExpandClusterPolicy_PreservesUserLabelsAndStripsKubectlAnnotation(t *te
 	cluster := newClusterPolicy(t, "x", map[string]any{"podSelector": map[string]any{}})
 	cluster.SetLabels(map[string]string{"team": "platform"})
 	cluster.SetAnnotations(map[string]string{
-		"argocd.argoproj.io/sync-wave":              "5",
+		"argocd.argoproj.io/sync-wave":                     "5",
 		"kubectl.kubernetes.io/last-applied-configuration": "stale",
 	})
 	items, err := expandClusterPolicyToNamespaced(cluster, []string{"prod"})

@@ -101,7 +101,10 @@ func TestTopOffenders_TieBreakerIsDeterministic(t *testing.T) {
 		}
 	}
 	// Verify the actual order is the documented lex-ascending tail.
-	wantOrder := []struct{ srcPod, dstPod string; dstPort int32 }{
+	wantOrder := []struct {
+		srcPod, dstPod string
+		dstPort        int32
+	}{
 		{"a", "y", 80},
 		{"a", "y", 443},
 		{"a", "z", 80},

@@ -228,7 +228,7 @@ func TestGetNamespaceLabels_FoundInIndexer(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{
 			Name: "prod",
 			Labels: map[string]string{
-				"team":                       "platform",
+				"team":                        "platform",
 				"kubernetes.io/metadata.name": "prod",
 			},
 		},

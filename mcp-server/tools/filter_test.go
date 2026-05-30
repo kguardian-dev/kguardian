@@ -454,12 +454,12 @@ func TestCompactPodsSummary_SingleMapInputCompactsToMap(t *testing.T) {
 	// LLM got kilobytes of Kubernetes Pod spec/status per identity
 	// lookup, eating context budget.
 	in := map[string]interface{}{
-		"pod_name":      "web-1",
-		"pod_namespace": "prod",
-		"pod_ip":        "10.1.0.5",
-		"node_name":     "node-a",
-		"is_dead":       false,
-		"pod_identity":  "web",
+		"pod_name":                 "web-1",
+		"pod_namespace":            "prod",
+		"pod_ip":                   "10.1.0.5",
+		"node_name":                "node-a",
+		"is_dead":                  false,
+		"pod_identity":             "web",
 		"workload_selector_labels": map[string]interface{}{"app": "web"},
 		// Heavyweight — must be stripped just like the slice path.
 		"pod_obj": map[string]interface{}{
@@ -492,7 +492,7 @@ func TestCompactPodsSummary_PreservesWorkloadSelectorLabels(t *testing.T) {
 	// stripped from every cluster_pods response.
 	in := []interface{}{
 		map[string]interface{}{
-			"pod_name":                 "web-1",
+			"pod_name": "web-1",
 			"workload_selector_labels": map[string]interface{}{
 				"app.kubernetes.io/name": "web",
 				"tier":                   "frontend",
