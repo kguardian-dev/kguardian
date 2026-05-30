@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"os"
 	"strings"
 	"time"
 
@@ -20,6 +21,7 @@ const maxResponseBytes = 10 * 1024 * 1024
 // BrokerClient handles communication with the kguardian broker
 type BrokerClient struct {
 	baseURL    string
+	authToken  string
 	httpClient *http.Client
 }
 
@@ -41,6 +43,11 @@ type BrokerClient struct {
 func NewBrokerClient(baseURL string) *BrokerClient {
 	return &BrokerClient{
 		baseURL: strings.TrimRight(strings.TrimSpace(baseURL), "/"),
+		// Optional bearer token. When the broker is deployed with
+		// BROKER_AUTH_TOKEN set, the mcp-server must present the same
+		// token or its reads are rejected (401). Empty = no-auth, the
+		// original behaviour.
+		authToken: strings.TrimSpace(os.Getenv("BROKER_AUTH_TOKEN")),
 		httpClient: &http.Client{
 			Timeout: 90 * time.Second, // Allow enough time for cluster-wide queries
 		},
@@ -95,6 +102,9 @@ func (c *BrokerClient) get(ctx context.Context, reqURL string) (interface{}, err
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+	if c.authToken != "" {
+		req.Header.Set("Authorization", "Bearer "+c.authToken)
 	}
 
 	resp, err := c.httpClient.Do(req)

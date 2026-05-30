@@ -51,6 +51,7 @@ spec:
                 fieldPath: spec.nodeName
           - name: API_ENDPOINT
             value: "http://{{ .Values.broker.service.name }}.{{ include "kguardian.namespace" . }}.svc.cluster.local:{{ .Values.broker.container.port }}"
+          {{- include "kguardian.brokerAuthEnv" . | nindent 10 }}
           - name: EXCLUDED_NAMESPACES
             value: "{{ .Values.controller.excludedNamespaces | join "," }}"
           - name: IGNORE_DAEMONSET_TRAFFIC

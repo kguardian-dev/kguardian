@@ -70,6 +70,7 @@ spec:
             # LISTEN_ADDR via env override.
             - name: LISTEN_ADDR
               value: "0.0.0.0:{{ .Values.broker.container.port }}"
+            {{- include "kguardian.brokerAuthEnv" . | nindent 12 }}
             {{- if .Values.evaluator.enabled }}
             - name: EVALUATOR_URL
               value: "http://{{ .Values.evaluator.service.name }}.{{ include "kguardian.namespace" . | trim }}.svc.cluster.local:{{ .Values.evaluator.service.port }}"

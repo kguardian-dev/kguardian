@@ -1,5 +1,32 @@
 # Upgrading the kguardian Helm chart
 
+## Optional broker API authentication (opt-in)
+
+The broker API can now require a shared **bearer token**
+(`broker.auth.enabled`, **default `false`** — no change for existing
+installs). When enabled, the controller and mcp-server must present the
+token or their requests get `401`; `/health` and `/metrics` stay open.
+This closes the unauthenticated forged-row / unauthorized-read exposure
+on the server-to-server paths — the durable complement to the
+NetworkPolicy below.
+
+To enable, create the Secret yourself (kept out of the chart so it's
+stable across upgrades) and point the chart at it:
+```bash
+kubectl -n <ns> create secret generic kguardian-broker-auth \
+  --from-literal=token="$(openssl rand -hex 32)"
+```
+```yaml
+broker:
+  auth:
+    enabled: true
+    existingSecret: kguardian-broker-auth   # required when enabled
+```
+**Known gap:** the frontend calls the broker directly from the browser
+and can't hold a static token, so auth does not cover the frontend path —
+keep the frontend on a trusted network or front the broker with an
+authenticating proxy for browser traffic. Tracked for a follow-up.
+
 ## Optional broker ingress NetworkPolicy (opt-in)
 
 The chart can render an ingress `NetworkPolicy` for the broker

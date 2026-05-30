@@ -25,6 +25,17 @@ pub(crate) fn build_url(api_endpoint: &str, path: &str) -> String {
     format!("{}/{}", endpoint, p)
 }
 
+/// Optional shared secret for the broker API. When `BROKER_AUTH_TOKEN`
+/// is set (matching the broker's own config), the controller sends it as
+/// a bearer token on every POST. Empty / whitespace-only is treated as
+/// unset.
+fn broker_auth_token() -> Option<String> {
+    env::var("BROKER_AUTH_TOKEN")
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
 pub(crate) async fn api_post_call(v: Value, path: &str) -> Result<(), Error> {
     // main.rs trims its API_ENDPOINT read but stores the trimmed
     // value in a local variable that doesn't propagate here. Re-trim
@@ -44,10 +55,21 @@ pub(crate) async fn api_post_call(v: Value, path: &str) -> Result<(), Error> {
     let json_bytes = serde_json::to_vec(&v)
         .map_err(|e| Error::Custom(format!("Failed to serialize JSON: {}", e)))?;
 
-    let res = CLIENT
+    let mut request = CLIENT
         .post(&url)
         .header("content-type", "application/json")
-        .body(json_bytes)
+        .body(json_bytes);
+
+    // Optional bearer auth: when the broker is deployed with
+    // BROKER_AUTH_TOKEN set, the controller must present the same token
+    // or its writes are rejected (401). Unset preserves the original
+    // no-auth behaviour. Read per-call to match the API_ENDPOINT pattern
+    // above; the value is stable for the process lifetime.
+    if let Some(token) = broker_auth_token() {
+        request = request.bearer_auth(token);
+    }
+
+    let res = request
         .send()
         .await
         .map_err(|e| Error::ApiError(format!("{}", e)))?;

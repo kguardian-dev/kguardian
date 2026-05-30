@@ -122,3 +122,21 @@ external case so the in-cluster URL stays identical to prior releases.
 {{- $base -}}
 {{- end -}}
 {{- end -}}
+
+{{/*
+Optional BROKER_AUTH_TOKEN env entry. Emits nothing unless
+broker.auth.enabled. The token lives in a Secret the operator provides
+(broker.auth.existingSecret) — we deliberately do not generate one in the
+template so it stays stable across upgrades. Include with the right
+nindent per consumer (broker/mcp env are indented 12, controller 10).
+Usage: {{- include "kguardian.brokerAuthEnv" . | nindent 12 }}
+*/}}
+{{- define "kguardian.brokerAuthEnv" -}}
+{{- if .Values.broker.auth.enabled -}}
+- name: BROKER_AUTH_TOKEN
+  valueFrom:
+    secretKeyRef:
+      name: {{ required "broker.auth.existingSecret is required when broker.auth.enabled=true" .Values.broker.auth.existingSecret }}
+      key: {{ .Values.broker.auth.secretKey }}
+{{- end -}}
+{{- end -}}

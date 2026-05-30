@@ -1,6 +1,7 @@
 use std::error::Error;
 
 use actix_cors::Cors;
+use actix_web::middleware::from_fn;
 use actix_web::{get, web, App, HttpResponse, HttpServer};
 use api::{
     add_pod_details, add_pods, add_pods_batch, add_pods_syscalls, add_svc_details,
@@ -11,6 +12,7 @@ use api::{
 
 use diesel::r2d2;
 use telemetry::init_logging;
+mod auth;
 mod telemetry;
 
 use diesel_migrations::{embed_migrations, EmbeddedMigrations, MigrationHarness};
@@ -134,6 +136,15 @@ async fn main() -> Result<(), std::io::Error> {
         std::thread::sleep(std::time::Duration::from_secs(2));
     }
     let audit_client = AuditClient::from_env();
+
+    // Optional bearer-token auth on the broker API. Off unless
+    // BROKER_AUTH_TOKEN is set, so existing deployments are unaffected.
+    let auth_config = auth::AuthConfig::from_env();
+    if auth_config.enabled() {
+        info!("broker API auth ENABLED — requiring bearer token (except /health, /metrics)");
+    } else {
+        info!("broker API auth disabled (set BROKER_AUTH_TOKEN to require a bearer token)");
+    }
     if audit_client.enabled() {
         info!(url = %audit_client.base_url(), "audit evaluator integration enabled");
     } else {
@@ -155,9 +166,13 @@ async fn main() -> Result<(), std::io::Error> {
             .max_age(3600);
 
         App::new()
+            // Auth is inner, CORS outer: CORS handles preflight first,
+            // then the bearer check runs on the real request.
+            .wrap(from_fn(auth::require_bearer))
             .wrap(cors)
             .app_data(web::Data::new(pool.clone()))
             .app_data(web::Data::new(audit_client.clone()))
+            .app_data(web::Data::new(auth_config.clone()))
             .service(add_pods)
             .service(add_pods_batch)
             .service(add_pod_details)
