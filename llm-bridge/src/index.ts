@@ -1,3 +1,5 @@
+import { fileURLToPath } from "node:url";
+import { resolve } from "node:path";
 import express, { Request, Response } from "express";
 import cors from "cors";
 import rateLimit from "express-rate-limit";
@@ -156,24 +158,37 @@ app.post("/api/chat", chatLimiter, async (req: Request, res: Response<any>) => {
   }
 });
 
-// Start server
-const server = app.listen(port, () => {
-  const availableProviders = getAvailableProviders();
-  log.info(`LLM Bridge listening on port ${port}`);
-  log.info(`MCP Server URL: ${process.env.MCP_SERVER_URL || "(default)"}`);
-  log.info(`Available providers: ${availableProviders.join(", ") || "NONE"}`);
+// Start server — but only when this module is the process entrypoint.
+// Unit tests import `availableProvidersFromEnv` from this file; if the
+// server (and its open socket handle) started on import, the test
+// process would never exit and `npm test` would hang. The main-module
+// guard keeps `node dist/index.js` / `tsx src/index.ts` behaviour
+// identical while making the module import-safe.
+function startServer() {
+  const server = app.listen(port, () => {
+    const availableProviders = getAvailableProviders();
+    log.info(`LLM Bridge listening on port ${port}`);
+    log.info(`MCP Server URL: ${process.env.MCP_SERVER_URL || "(default)"}`);
+    log.info(`Available providers: ${availableProviders.join(", ") || "NONE"}`);
 
-  if (availableProviders.length === 0) {
-    log.warn("WARNING: No LLM provider API keys configured!");
-    log.warn("Set at least one: OPENAI_API_KEY, ANTHROPIC_API_KEY, GOOGLE_API_KEY, or GITHUB_TOKEN");
-  }
-});
+    if (availableProviders.length === 0) {
+      log.warn("WARNING: No LLM provider API keys configured!");
+      log.warn("Set at least one: OPENAI_API_KEY, ANTHROPIC_API_KEY, GOOGLE_API_KEY, or GITHUB_TOKEN");
+    }
+  });
 
-// Graceful shutdown
-const shutdown = () => {
-  brokerClient.close();
-  server.close();
-  process.exit(0);
-};
-process.on('SIGTERM', shutdown);
-process.on('SIGINT', shutdown);
+  // Graceful shutdown
+  const shutdown = () => {
+    brokerClient.close();
+    server.close();
+    process.exit(0);
+  };
+  process.on('SIGTERM', shutdown);
+  process.on('SIGINT', shutdown);
+}
+
+const isMain = process.argv[1] !== undefined &&
+  fileURLToPath(import.meta.url) === resolve(process.argv[1]);
+if (isMain) {
+  startServer();
+}
