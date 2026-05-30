@@ -46,8 +46,13 @@ spec:
         # the chart's own helm-test pod, which probes the broker /health
         # endpoint (templates/tests/test-connection.yaml). Without this the
         # default-on policy would fail `helm test` and thus the release.
+        # Scoped to THIS release's Helm-managed test pod — all three labels
+        # are set by kguardian.labels — so a stray component=helm-test pod
+        # from another chart in the namespace can't ride this grant.
         - podSelector:
             matchLabels:
+              app.kubernetes.io/instance: {{ .Release.Name }}
+              app.kubernetes.io/managed-by: {{ .Release.Service }}
               app.kubernetes.io/component: helm-test
       ports:
         - port: http
