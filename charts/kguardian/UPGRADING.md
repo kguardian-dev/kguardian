@@ -1,5 +1,38 @@
 # Upgrading the kguardian Helm chart
 
+## Broker now ships a default-on ingress NetworkPolicy
+
+The chart now renders an ingress `NetworkPolicy` for the broker, **enabled
+by default** (`broker.networkPolicy.enabled: true`). The broker HTTP API
+is unauthenticated, so the policy restricts who may reach it to the
+kguardian components that legitimately call it — the controller,
+mcp-server, and frontend. All other in-cluster traffic to the broker is
+denied at the network layer.
+
+Action required only if:
+- **Your CNI enforces NetworkPolicy** (Cilium, Calico, ...) — otherwise
+  the object is inert and nothing changes.
+- **You scrape the broker `/metrics`** (it shares the broker HTTP port).
+  Add your Prometheus to `broker.networkPolicy.allowMetricsFrom`:
+  ```yaml
+  broker:
+    networkPolicy:
+      allowMetricsFrom:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: monitoring
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: prometheus
+  ```
+- **You have a custom integration** that calls the broker directly — it
+  will be blocked. Add its selector to `allowMetricsFrom` (despite the
+  name, it admits any peer to the broker port) or set
+  `broker.networkPolicy.enabled: false`.
+
+Egress is intentionally left unrestricted, so the broker's own DB / DNS /
+evaluator traffic is never affected.
+
 ## CRD: `policyTypes` is now a constrained set
 
 The `AuditNetworkPolicy` and `AuditClusterNetworkPolicy` CRDs now declare

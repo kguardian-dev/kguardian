@@ -340,6 +340,29 @@ broker:
     minAvailable: 1
     maxUnavailable: ""
 
+  # -- Ingress NetworkPolicy for the broker. The broker HTTP API is
+  # unauthenticated, so by default ONLY the in-cluster kguardian
+  # components that legitimately call it (controller, mcp-server,
+  # frontend) may reach it; all other in-cluster traffic is denied at
+  # the network layer. Ingress-only — the broker's own egress (DB, DNS,
+  # evaluator) is never restricted. Requires a NetworkPolicy-enforcing
+  # CNI (Cilium, Calico, ...). Set enabled=false only if you gate broker
+  # access another way.
+  networkPolicy:
+    enabled: true
+    # -- Extra ingress peers allowed to reach the broker HTTP port. The
+    # /metrics endpoint shares that port, so when
+    # broker.metrics.serviceMonitor.enabled is true, add your Prometheus
+    # here. Each entry is a standard NetworkPolicyPeer.
+    allowMetricsFrom: []
+    # Example — allow a Prometheus running in the "monitoring" namespace:
+    #   - namespaceSelector:
+    #       matchLabels:
+    #         kubernetes.io/metadata.name: monitoring
+    #     podSelector:
+    #       matchLabels:
+    #         app.kubernetes.io/name: prometheus
+
   metrics:
     serviceMonitor:
       # -- Create a ServiceMonitor for prometheus-operator. The broker
