@@ -343,11 +343,15 @@ pub fn ebpf_handle(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
 
-    // The shutdown flag is a process-wide static. Tests run in parallel
-    // by default; we serialise via `cargo test -- --test-threads=1`
-    // (CI does this implicitly for this module by virtue of being the
-    // only test in the file). Each test resets state at the start.
+    // These tests mutate process-wide AtomicBool statics, so they must
+    // not run concurrently. `cargo test` parallelises by default and CI
+    // does NOT pass --test-threads=1 for the controller, so we serialise
+    // each test body with a test-local mutex instead of relying on run
+    // order. unwrap_or_else(into_inner) keeps one failing test from
+    // poisoning the lock and cascading into the others.
+    static TEST_GUARD: Mutex<()> = Mutex::new(());
 
     fn reset_state() {
         EBPF_SHUTDOWN.store(false, Ordering::Relaxed);
@@ -358,12 +362,14 @@ mod tests {
 
     #[test]
     fn shutdown_flag_starts_clear() {
+        let _guard = TEST_GUARD.lock().unwrap_or_else(|p| p.into_inner());
         reset_state();
         assert!(!ebpf_shutdown_requested());
     }
 
     #[test]
     fn signal_then_observe() {
+        let _guard = TEST_GUARD.lock().unwrap_or_else(|p| p.into_inner());
         reset_state();
         signal_ebpf_shutdown();
         assert!(ebpf_shutdown_requested());
@@ -371,6 +377,7 @@ mod tests {
 
     #[test]
     fn signal_is_idempotent() {
+        let _guard = TEST_GUARD.lock().unwrap_or_else(|p| p.into_inner());
         reset_state();
         signal_ebpf_shutdown();
         signal_ebpf_shutdown();
@@ -383,6 +390,7 @@ mod tests {
         // The warn-once-then-suppress contract from #880 must continue
         // to hold even with the shutdown flag added — a regression that
         // dropped the latch would re-introduce the spam.
+        let _guard = TEST_GUARD.lock().unwrap_or_else(|p| p.into_inner());
         reset_state();
         // Simulate the "first failure" path: swap returns the OLD value.
         // false → true ⇒ first call returns false; subsequent return true.
