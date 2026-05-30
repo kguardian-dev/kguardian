@@ -43,6 +43,12 @@ spec:
         - podSelector:
             matchLabels:
               app.kubernetes.io/name: {{ .Values.frontend.service.name }}
+        # the chart's own helm-test pod, which probes the broker /health
+        # endpoint (templates/tests/test-connection.yaml). Without this the
+        # default-on policy would fail `helm test` and thus the release.
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/component: helm-test
       ports:
         - port: http
           protocol: TCP
