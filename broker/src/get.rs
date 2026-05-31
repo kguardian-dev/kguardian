@@ -507,6 +507,45 @@ mod tests {
     use super::*;
 
     #[test]
+    fn compact_pod_obj_drops_bulk_keeps_labels() {
+        // Guards the /pod/info weight fix: the response must drop the
+        // heavy spec/status/managedFields but keep metadata.labels (the
+        // only part the frontend reads), so /pod/info can't balloon back
+        // to multi-MB and overload the broker.
+        let mut v = serde_json::json!({
+            "metadata": {
+                "name": "web-1",
+                "namespace": "prod",
+                "labels": {"app": "web"},
+                "managedFields": [{"manager": "kubelet", "big": "x".repeat(1000)}]
+            },
+            "spec": {"containers": [{"name": "c", "image": "nginx"}]},
+            "status": {"phase": "Running", "conditions": [{"type": "Ready"}]}
+        });
+        compact_pod_obj(&mut v);
+        assert!(v.get("spec").is_none(), "spec must be dropped");
+        assert!(v.get("status").is_none(), "status must be dropped");
+        let meta = v.get("metadata").expect("metadata kept");
+        assert!(
+            meta.get("managedFields").is_none(),
+            "managedFields must be dropped"
+        );
+        assert_eq!(
+            meta.pointer("/labels/app").and_then(|x| x.as_str()),
+            Some("web"),
+            "metadata.labels must be preserved"
+        );
+        assert_eq!(meta.get("name").and_then(|x| x.as_str()), Some("web-1"));
+    }
+
+    #[test]
+    fn compact_pod_obj_tolerates_non_object() {
+        let mut v = serde_json::Value::Null;
+        compact_pod_obj(&mut v); // must not panic
+        assert!(v.is_null());
+    }
+
+    #[test]
     fn clamp_default_when_unset() {
         assert_eq!(clamp_audit_limit(None), 100);
     }

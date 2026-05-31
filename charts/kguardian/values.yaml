@@ -296,10 +296,17 @@ broker:
   # -- r2d2 connection-pool max_size. r2d2's own default is 10, which
   # is the bottleneck under heavy ingest: each audit evaluator
   # round-trip and each regular request handler needs a pool
-  # connection. 16 here matches audit.inflightPermits for parity.
+  # connection. This MUST stay comfortably above audit.inflightPermits
+  # (default 16): if the pool only equals the permit count, a burst of
+  # audit evaluations can hold every connection and starve /health +
+  # ingest inserts — /health then 503s, liveness kills the broker, and
+  # it crash-loops (clients ECONNREFUSED → retry storm). The broker
+  # enforces a floor of inflightPermits + 8 at startup (logging a warn
+  # if it has to raise this), but the chart default ships safe: 32 with
+  # the default 16 permits leaves 16 connections of headroom.
   # Tune up when broker logs show "could not get db conn for audit
   # verdict insert" warns or when /metrics shows pool-acquire stalls.
-  dbPoolMaxSize: 16
+  dbPoolMaxSize: 32
 
   # -- Number of attempts the broker makes to run embedded migrations
   # on startup, at 2s spacing. The chart's wait-for-db init container
@@ -419,7 +426,7 @@ broker:
       #   - broker_audit_inflight_available == 0 for 10m → bump
       #     broker.audit.inflightPermits (default 16)
       #   - broker_db_pool_idle == 0 for 10m     → bump
-      #     broker.dbPoolMaxSize (default 16)
+      #     broker.dbPoolMaxSize (default 32)
       enabled: false
       # -- Endpoint path on the broker's HTTP service.
       path: /metrics

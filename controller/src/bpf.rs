@@ -47,6 +47,40 @@ fn ebpf_shutdown_requested() -> bool {
     EBPF_SHUTDOWN.load(Ordering::Relaxed)
 }
 
+/// A persistently-failing poll (e.g. the eBPF map fds being torn down as a
+/// node drains) returns immediately, so the loop backs off per error and
+/// gives up after this many consecutive failures — ~5s at the 100ms
+/// backoff — exiting for a clean kubelet restart rather than hot-spinning a
+/// CPU (the "cactus" full-CPU syscall-log spam reported when a node went
+/// down).
+const MAX_CONSECUTIVE_POLL_ERRORS: u32 = 50;
+
+/// What the poll loop should do after a ring-buffer poll error, given how
+/// many have occurred back-to-back. Extracted as a pure function so the
+/// warn-once + backoff + bail thresholds are unit-testable and can't
+/// silently regress back into a hot spin.
+#[derive(Debug, PartialEq, Eq)]
+enum PollErrorAction {
+    /// First failure in a streak: warn loudly (once), then back off.
+    WarnAndBackoff,
+    /// Subsequent failure: back off silently (warn already emitted).
+    BackoffSilently,
+    /// Sustained failure: stop the loop so the pod restarts cleanly.
+    Bail,
+}
+
+/// Decide the action after the Nth consecutive poll error. `consecutive`
+/// is the running count INCLUDING the current error (i.e. first error == 1).
+fn classify_poll_error(consecutive: u32, max: u32) -> PollErrorAction {
+    if consecutive >= max {
+        PollErrorAction::Bail
+    } else if consecutive == 1 {
+        PollErrorAction::WarnAndBackoff
+    } else {
+        PollErrorAction::BackoffSilently
+    }
+}
+
 /// Populate the syscall allowlist with security-relevant syscalls
 /// This dramatically reduces overhead by filtering out noisy syscalls
 fn populate_syscall_allowlist(syscall_map: &libbpf_rs::Map) -> Result<()> {
@@ -286,12 +320,6 @@ pub fn ebpf_handle(
             .map_err(|e| Error::Custom(format!("Failed to build ring buffer: {}", e)))?;
         info!("Network policy drop ring buffer initialized");
 
-        // A persistently-failing poll (e.g. the eBPF map fds being torn
-        // down as a node drains) returns immediately, so we back off per
-        // error and give up after this many consecutive failures — ~5s at
-        // the 100ms backoff — exiting for a clean kubelet restart rather
-        // than hot-spinning a CPU.
-        const MAX_CONSECUTIVE_POLL_ERRORS: u32 = 50;
         let mut consecutive_poll_errors: u32 = 0;
 
         loop {
@@ -318,14 +346,17 @@ pub fn ebpf_handle(
             // cleanly instead of leaving a hot-spinning pod.
             if let Err(e) = ring_buffer.poll(std::time::Duration::from_millis(100)) {
                 consecutive_poll_errors += 1;
-                if consecutive_poll_errors == 1 {
-                    warn!(error = %e, "ring buffer poll failed; backing off (repeats suppressed until it recovers)");
-                }
-                if consecutive_poll_errors >= MAX_CONSECUTIVE_POLL_ERRORS {
-                    return Err(Error::Custom(format!(
-                        "ring buffer poll failed {} times consecutively (last: {}); exiting for restart",
-                        consecutive_poll_errors, e
-                    )));
+                match classify_poll_error(consecutive_poll_errors, MAX_CONSECUTIVE_POLL_ERRORS) {
+                    PollErrorAction::Bail => {
+                        return Err(Error::Custom(format!(
+                            "ring buffer poll failed {} times consecutively (last: {}); exiting for restart",
+                            consecutive_poll_errors, e
+                        )));
+                    }
+                    PollErrorAction::WarnAndBackoff => {
+                        warn!(error = %e, "ring buffer poll failed; backing off (repeats suppressed until it recovers)");
+                    }
+                    PollErrorAction::BackoffSilently => {}
                 }
                 std::thread::sleep(std::time::Duration::from_millis(100));
                 continue;
@@ -425,5 +456,46 @@ mod tests {
         assert!(!NETWORK_SEND_FAILED.swap(true, Ordering::Relaxed));
         assert!(NETWORK_SEND_FAILED.swap(true, Ordering::Relaxed));
         assert!(NETWORK_SEND_FAILED.swap(true, Ordering::Relaxed));
+    }
+
+    #[test]
+    fn poll_error_warns_once_backs_off_then_bails() {
+        // The "cactus" guard: a torn-down map fd makes poll() return an
+        // error immediately, so the loop must (1) warn exactly once on the
+        // first error, (2) back off silently while it persists, and (3)
+        // bail at the threshold so the kubelet restarts the pod instead of
+        // a CPU hot-spinning + flooding the syscall log. No statics here,
+        // so no TEST_GUARD needed — the helper is pure.
+        const MAX: u32 = 50;
+        // First error → warn (and back off).
+        assert_eq!(classify_poll_error(1, MAX), PollErrorAction::WarnAndBackoff);
+        // Mid-streak errors → silent backoff, no repeated warns.
+        assert_eq!(
+            classify_poll_error(2, MAX),
+            PollErrorAction::BackoffSilently
+        );
+        assert_eq!(
+            classify_poll_error(MAX - 1, MAX),
+            PollErrorAction::BackoffSilently
+        );
+        // At and beyond the threshold → bail for a clean restart.
+        assert_eq!(classify_poll_error(MAX, MAX), PollErrorAction::Bail);
+        assert_eq!(classify_poll_error(MAX + 1, MAX), PollErrorAction::Bail);
+    }
+
+    #[test]
+    fn poll_error_never_silently_hot_spins() {
+        // Defensive: there is no consecutive-error count below the cap that
+        // resolves to "do nothing" — every error either warns, backs off,
+        // or bails. (A regression making the bail branch unreachable would
+        // re-create the original hang.)
+        for n in 1..=MAX_CONSECUTIVE_POLL_ERRORS {
+            let action = classify_poll_error(n, MAX_CONSECUTIVE_POLL_ERRORS);
+            if n >= MAX_CONSECUTIVE_POLL_ERRORS {
+                assert_eq!(action, PollErrorAction::Bail);
+            } else {
+                assert_ne!(action, PollErrorAction::Bail);
+            }
+        }
     }
 }

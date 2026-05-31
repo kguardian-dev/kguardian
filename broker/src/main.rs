@@ -38,17 +38,73 @@ fn run_migrations(
 /// Default pool size — r2d2's own default is 10, which can be the
 /// bottleneck under heavy ingest: the audit forwarder alone has a
 /// 16-permit semaphore, and each in-flight evaluator round-trip needs
-/// a pool connection to persist results. 16 here roughly balances
-/// the two; operators can tune via DB_POOL_MAX_SIZE env when /metrics
-/// shows pool-acquire contention.
-const DEFAULT_DB_POOL_MAX_SIZE: u32 = 16;
+/// a pool connection to persist results. 32 leaves `MIN_POOL_HEADROOM_
+/// OVER_PERMITS` (16 connections) free for /health, traffic inserts and
+/// frontend reads even when every audit permit is in use — pool == permits
+/// previously let an audit burst starve /health and crash-loop the broker.
+/// `effective_pool_size` re-enforces that headroom at startup if an
+/// operator sets DB_POOL_MAX_SIZE too low. Tune up via the env when
+/// /metrics shows pool-acquire contention.
+const DEFAULT_DB_POOL_MAX_SIZE: u32 = 32;
 
+/// AUDIT_INFLIGHT_PERMITS default, mirrored from audit.rs so the pool can
+/// reserve headroom above it. Keep in sync with that module's default.
+const DEFAULT_AUDIT_INFLIGHT_PERMITS: u32 = 16;
+
+/// Connections the pool must keep available for non-audit work — health
+/// checks, traffic inserts, and the frontend's per-pod reads — on top of
+/// whatever the audit evaluator can hold. Without this, a burst of audit
+/// evaluations (each holds a pool connection while POSTing the evaluator)
+/// could consume the ENTIRE pool, starving /health -> 503 -> liveness
+/// kill -> restart loop. Observed in production when DB_POOL_MAX_SIZE
+/// equalled AUDIT_INFLIGHT_PERMITS (the old "parity" default).
+const MIN_POOL_HEADROOM_OVER_PERMITS: u32 = 8;
+
+fn audit_inflight_permits() -> u32 {
+    std::env::var("AUDIT_INFLIGHT_PERMITS")
+        .ok()
+        .and_then(|v| v.trim().parse::<u32>().ok())
+        .map(|n| n.max(1))
+        .unwrap_or(DEFAULT_AUDIT_INFLIGHT_PERMITS)
+}
+
+/// Enforce the invariant that the pool outsizes the audit permits by at
+/// least `MIN_POOL_HEADROOM_OVER_PERMITS`. Pure + testable so the guard
+/// can't silently regress.
+fn pool_size_with_headroom(configured: u32, permits: u32) -> u32 {
+    configured.max(permits.saturating_add(MIN_POOL_HEADROOM_OVER_PERMITS))
+}
+
+/// Read DB_POOL_MAX_SIZE with trim + clamp. Pure reader (no headroom
+/// applied here) so its clamping behaviour stays independently testable;
+/// the pool-vs-permits headroom invariant is enforced at the construction
+/// site via `effective_pool_size`.
 fn db_pool_max_size() -> u32 {
     std::env::var("DB_POOL_MAX_SIZE")
         .ok()
         .and_then(|v| v.trim().parse::<u32>().ok())
         .map(|n| n.max(1))
         .unwrap_or(DEFAULT_DB_POOL_MAX_SIZE)
+}
+
+/// Resolve the pool size actually handed to r2d2: the configured value
+/// raised to keep `MIN_POOL_HEADROOM_OVER_PERMITS` over the audit permit
+/// count, with a warn when the operator's value had to be raised. Keeping
+/// this here (not in main) means the warning-emitting path is exercised by
+/// the same call the pool builder uses.
+fn effective_pool_size() -> u32 {
+    let configured = db_pool_max_size();
+    let permits = audit_inflight_permits();
+    let effective = pool_size_with_headroom(configured, permits);
+    if effective != configured {
+        warn!(
+            configured,
+            audit_permits = permits,
+            effective,
+            "DB_POOL_MAX_SIZE was below AUDIT_INFLIGHT_PERMITS + headroom; raising it so audit evaluations can't starve health checks + inserts (prevents the liveness crash-loop)"
+        );
+    }
+    effective
 }
 
 /// Default migration-retry budget. The charts wait-for-db init
@@ -89,7 +145,7 @@ fn db_migration_max_retries() -> u32 {
 async fn main() -> Result<(), std::io::Error> {
     init_logging();
     let manager = establish_connection();
-    let max_size = db_pool_max_size();
+    let max_size = effective_pool_size();
     info!(max_size, "constructing DB connection pool");
     let pool = r2d2::Pool::builder()
         .max_size(max_size)
@@ -619,5 +675,22 @@ mod tests {
         with_listen_env(Some("  0.0.0.0:9090\n"), || {
             assert_eq!(listen_addr(), "0.0.0.0:9090");
         });
+    }
+
+    #[test]
+    fn pool_size_keeps_headroom_over_audit_permits() {
+        // The flapping regression guard: the pool must always exceed the
+        // audit permit count by the headroom, so audit evals can't hold
+        // every connection and starve /health.
+        let h = MIN_POOL_HEADROOM_OVER_PERMITS;
+        // Configured below permits+headroom -> raised to the floor.
+        assert_eq!(pool_size_with_headroom(16, 16), 16 + h);
+        assert_eq!(pool_size_with_headroom(1, 16), 16 + h);
+        // The old "parity" default (pool == permits) is no longer allowed.
+        assert!(pool_size_with_headroom(16, 16) > 16);
+        // Configured already roomy -> left as-is.
+        assert_eq!(pool_size_with_headroom(64, 16), 64);
+        // Larger permits still get headroom.
+        assert_eq!(pool_size_with_headroom(10, 32), 32 + h);
     }
 }

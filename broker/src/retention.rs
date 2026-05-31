@@ -70,22 +70,42 @@ const MAX_BATCH_SIZE: i64 = 100_000;
 /// hour; the next interval picks up where this one left off.
 const MAX_BATCHES_PER_PASS: u32 = 200;
 
-/// Spawn a background task that periodically prunes audit_verdicts.
-/// Returns immediately; the task lives for the broker's lifetime.
-///
-/// When `AUDIT_VERDICTS_RETENTION_DAYS=0`, retention is disabled and
-/// the task is not spawned.
-pub fn spawn(pool: DbPool) {
-    let days = retention_days();
-    if days == 0 {
-        info!("audit_verdicts retention disabled (AUDIT_VERDICTS_RETENTION_DAYS=0)");
-        return;
+/// Default window for pruning dead pods from pod_details when audit
+/// retention is disabled. pod_details bloats with pod churn regardless of
+/// audit retention (and /pod/info returns the whole table), so dead-pod
+/// pruning must NOT be coupled to AUDIT_VERDICTS_RETENTION_DAYS=0.
+const DEFAULT_DEAD_POD_RETENTION_DAYS: u32 = 7;
+
+/// Resolve the dead-pod pruning window from the audit retention setting.
+/// Pure + testable so the decoupling can't silently regress: audit_days==0
+/// (audit pruning disabled) must still yield a non-zero dead-pod window,
+/// or pod_details bloats unbounded and /pod/info slows to a crawl.
+fn dead_pod_retention_window(audit_days: u32) -> u32 {
+    if audit_days > 0 {
+        audit_days
+    } else {
+        DEFAULT_DEAD_POD_RETENTION_DAYS
     }
+}
+
+/// Spawn a background task that periodically prunes audit_verdicts and
+/// dead pods. Returns immediately; the task lives for the broker's lifetime.
+///
+/// `AUDIT_VERDICTS_RETENTION_DAYS=0` disables ONLY audit_verdicts pruning.
+/// Dead-pod pruning of pod_details always runs (with its own default
+/// window) — it must not be coupled to the audit setting.
+pub fn spawn(pool: DbPool) {
+    let audit_days = retention_days();
+    // Dead-pod pruning runs independently: use the audit window when set,
+    // otherwise a standalone default. Setting audit retention to 0 only
+    // disables audit_verdicts pruning, not pod_details cleanup.
+    let dead_pod_days = dead_pod_retention_window(audit_days);
     let interval = retention_interval();
     info!(
-        days,
+        audit_days,
+        dead_pod_days,
         interval_secs = interval.as_secs(),
-        "audit_verdicts retention loop scheduled"
+        "retention loop scheduled (audit_days=0 means audit pruning off; dead-pod pruning still runs)"
     );
 
     actix_web::rt::spawn(async move {
@@ -93,8 +113,11 @@ pub fn spawn(pool: DbPool) {
         // a cold pool the second it starts.
         tokio::time::sleep(Duration::from_secs(60)).await;
         loop {
-            run_pass(&pool, days).await;
-            run_dead_pod_pass(&pool, days).await;
+            // Audit pruning only when enabled; dead-pod pruning always.
+            if audit_days > 0 {
+                run_pass(&pool, audit_days).await;
+            }
+            run_dead_pod_pass(&pool, dead_pod_days).await;
             tokio::time::sleep(interval).await;
         }
     });
@@ -363,6 +386,21 @@ mod tests {
         with_env("AUDIT_VERDICTS_RETENTION_DAYS", Some("0"), || {
             assert_eq!(retention_days(), 0);
         });
+    }
+
+    #[test]
+    fn dead_pod_window_decoupled_from_audit_disable() {
+        // Regression guard: disabling audit retention (days==0) must NOT
+        // disable dead-pod pruning — that coupling let pod_details bloat
+        // unbounded and slowed /pod/info to a crawl. 0 -> standalone
+        // default; any positive audit window is reused as-is.
+        assert_eq!(
+            dead_pod_retention_window(0),
+            DEFAULT_DEAD_POD_RETENTION_DAYS
+        );
+        assert!(dead_pod_retention_window(0) > 0);
+        assert_eq!(dead_pod_retention_window(30), 30);
+        assert_eq!(dead_pod_retention_window(1), 1);
     }
 
     #[test]
