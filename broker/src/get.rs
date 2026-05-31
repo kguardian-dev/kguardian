@@ -53,9 +53,39 @@ pub async fn get_pod_details(pool: web::Data<DbPool>) -> actix_web::Result<impl 
     .map_err(actix_web::error::ErrorInternalServerError)?;
 
     Ok(match pod_detail {
-        Some(p) => HttpResponse::Ok().json(p),
+        Some(mut p) => {
+            // Strip the bulky parts of each stored Pod manifest before
+            // returning the whole table. /pod/info is polled by the
+            // frontend, and the full pod_obj (spec + status +
+            // metadata.managedFields) is ~12 KB/pod — at a few hundred
+            // pods that's multi-MB per poll, which spikes the broker's
+            // serialise + memory enough to blip /health and (pre-fix)
+            // death-spiral it. The frontend only reads
+            // pod_obj.metadata.labels, so keep metadata (sans
+            // managedFields) and drop the rest.
+            for pod in &mut p {
+                if let Some(obj) = pod.pod_obj.as_mut() {
+                    compact_pod_obj(obj);
+                }
+            }
+            HttpResponse::Ok().json(p)
+        }
         None => HttpResponse::NotFound().body("No data found"),
     })
+}
+
+/// Reduce a stored Pod manifest to just the metadata the frontend needs
+/// (labels live under metadata), dropping spec, status, and the verbose
+/// metadata.managedFields. Operates in place; non-object values are left
+/// untouched.
+fn compact_pod_obj(v: &mut serde_json::Value) {
+    if let Some(obj) = v.as_object_mut() {
+        obj.remove("spec");
+        obj.remove("status");
+        if let Some(meta) = obj.get_mut("metadata").and_then(|m| m.as_object_mut()) {
+            meta.remove("managedFields");
+        }
+    }
 }
 
 pub fn pod_details(conn: &mut PgConnection) -> Result<Option<Vec<PodDetail>>, DbError> {
