@@ -5,13 +5,15 @@ use futures::TryStreamExt;
 use k8s_openapi::api::apps::v1::{DaemonSet, Deployment, ReplicaSet, StatefulSet};
 use k8s_openapi::api::core::v1::Pod;
 use kube::{
+    api::ListParams,
     runtime::{reflector::Lookup, watcher, WatchStreamExt},
     Api, Client, ResourceExt,
 };
 use serde_json::json;
 use std::collections::BTreeMap;
 use std::sync::Arc;
-use tracing::{debug, error, warn};
+use std::time::Duration;
+use tracing::{debug, error, info, warn};
 
 use tokio::sync::mpsc;
 pub async fn watch_pods(
@@ -28,7 +30,28 @@ pub async fn watch_pods(
     let wc = watcher::Config::default().fields(&format!("spec.nodeName={}", node_name));
     #[cfg(debug_assertions)]
     let wc = watcher::Config::default();
-    watcher(pods, wc)
+
+    // The streaming watch gives low-latency capture as pods appear, but a
+    // `spec.nodeName` field-selector watch does NOT reliably deliver the
+    // unscheduled->scheduled transition — a pod that schedules onto this
+    // node AFTER the watch starts can be missed entirely, so it would
+    // never be captured until the controller restarts (and re-runs its
+    // initial LIST). Run a periodic re-list alongside the watch as a
+    // safety net: a field-selector LIST *is* reliable, and process_pod is
+    // idempotent, so re-walking on-node pods only ever fills gaps the
+    // watch left. See resync_pods.
+    let resync = resync_pods(
+        pods.clone(),
+        node_name.clone(),
+        tx.clone(),
+        Arc::clone(&container_map),
+        excluded_namespaces.to_vec(),
+        sender_ip.clone(),
+        ignore_daemonset_traffic,
+        c.clone(),
+    );
+
+    let watch = watcher(pods, wc)
         .applied_objects()
         .default_backoff()
         .try_for_each(|p| {
@@ -64,9 +87,66 @@ pub async fn watch_pods(
                 }
                 Ok(())
             }
-        })
-        .await?;
+        });
+
+    // Run both concurrently. If either ends (watch stream error, or the
+    // resync list fails fatally), propagate so main's try_join! exits and
+    // the kubelet restarts the controller for a clean re-sync.
+    tokio::try_join!(async move { watch.await.map_err(Error::from) }, resync)?;
     Ok(())
+}
+
+/// Periodic re-list of this node's pods, registering any the streaming
+/// watch missed. The watch is best-effort (field-selector watches drop
+/// scheduled-onto-node transitions); this LIST-based pass is the
+/// reliable backstop so new workloads are captured within one interval.
+#[allow(clippy::too_many_arguments)]
+async fn resync_pods(
+    pods: Api<Pod>,
+    node_name: String,
+    tx: mpsc::Sender<u64>,
+    container_map: Arc<DashMap<u64, PodInspect>>,
+    excluded_namespaces: Vec<String>,
+    sender_ip: mpsc::Sender<String>,
+    ignore_daemonset_traffic: bool,
+    client: Client,
+) -> Result<(), Error> {
+    const RESYNC_INTERVAL: Duration = Duration::from_secs(60);
+    let lp = ListParams::default().fields(&format!("spec.nodeName={}", node_name));
+    info!(
+        "Pod resync safety-net active: re-listing on-node pods every {}s",
+        RESYNC_INTERVAL.as_secs()
+    );
+    loop {
+        tokio::time::sleep(RESYNC_INTERVAL).await;
+        match pods.list(&lp).await {
+            Ok(list) => {
+                let mut processed = 0u32;
+                for pod in &list.items {
+                    if let Some(inum) = process_pod(
+                        pod,
+                        Arc::clone(&container_map),
+                        &excluded_namespaces,
+                        sender_ip.clone(),
+                        ignore_daemonset_traffic,
+                        &node_name,
+                        &client,
+                    )
+                    .await
+                    {
+                        if let Err(e) = tx.send(inum).await {
+                            error!("resync: failed to send inode number: {:?}", e);
+                        }
+                        processed += 1;
+                    }
+                }
+                debug!("Pod resync pass processed {} on-node pods", processed);
+            }
+            // Transient list failures (apiserver blip) are non-fatal —
+            // the next tick retries. Only the watch task failing restarts.
+            Err(e) => warn!("Pod resync list failed (will retry next tick): {}", e),
+        }
+    }
 }
 
 async fn process_pod(
