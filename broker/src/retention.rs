@@ -94,9 +94,82 @@ pub fn spawn(pool: DbPool) {
         tokio::time::sleep(Duration::from_secs(60)).await;
         loop {
             run_pass(&pool, days).await;
+            run_dead_pod_pass(&pool, days).await;
             tokio::time::sleep(interval).await;
         }
     });
+}
+
+/// One pass pruning pods that have been dead longer than the retention
+/// window. `pod_details` keeps a row per pod ever seen and dead pods are
+/// otherwise never removed, so it grows unbounded with pod churn — and
+/// `/pod/info` returns the whole table including each pod's full manifest
+/// JSON, so the bloat directly degrades both the broker (large serialise +
+/// memory spike) and the frontend. Reuses the same window, batch size and
+/// batched-DELETE discipline as the verdict prune.
+async fn run_dead_pod_pass(pool: &DbPool, days: u32) {
+    let batch_size = retention_batch_size();
+    let mut total_deleted: usize = 0;
+    for batch_idx in 0..MAX_BATCHES_PER_PASS {
+        let pool = pool.clone();
+        let result = tokio::task::spawn_blocking(move || -> Result<usize, RetentionError> {
+            run_dead_pod_batch(&pool, days, batch_size)
+        })
+        .await;
+        match result {
+            Ok(Ok(0)) => {
+                if total_deleted == 0 {
+                    debug!("pod_details retention: 0 dead pods pruned");
+                } else {
+                    info!(
+                        rows = total_deleted,
+                        batches = batch_idx,
+                        "pod_details retention pruned dead pods",
+                    );
+                }
+                return;
+            }
+            Ok(Ok(n)) => total_deleted += n,
+            Ok(Err(RetentionError::Pool(e))) => {
+                warn!(error = %e, pruned_before_failure = total_deleted, "pod_details retention: could not get db conn");
+                return;
+            }
+            Ok(Err(RetentionError::Diesel(e))) => {
+                warn!(error = %e, pruned_before_failure = total_deleted, "pod_details retention: DELETE failed");
+                return;
+            }
+            Err(e) => {
+                warn!(error = %e, pruned_before_failure = total_deleted, "pod_details retention task panicked");
+                return;
+            }
+        }
+    }
+    info!(
+        rows = total_deleted,
+        cap = MAX_BATCHES_PER_PASS,
+        "pod_details retention hit per-pass batch cap; remaining dead pods will be pruned on next interval",
+    );
+}
+
+/// Batched DELETE of dead pods older than the window. pod_details' PK is
+/// pod_name, so the CTE selects and deletes by pod_name.
+fn run_dead_pod_batch(pool: &DbPool, days: u32, batch_size: i64) -> Result<usize, RetentionError> {
+    let mut conn = pool.get().map_err(RetentionError::Pool)?;
+    let interval = format!("{} days", days);
+    let deleted = sql_query(
+        "WITH expired AS (\
+             SELECT pod_name FROM pod_details \
+             WHERE is_dead = true AND time_stamp < timezone('UTC', NOW()) - $1::interval \
+             ORDER BY pod_name \
+             LIMIT $2 \
+         ) \
+         DELETE FROM pod_details WHERE pod_name IN (SELECT pod_name FROM expired)",
+    )
+    .bind::<diesel::sql_types::Text, _>(interval)
+    .bind::<diesel::sql_types::BigInt, _>(batch_size)
+    .execute(&mut conn)
+    .map_err(RetentionError::Diesel)?;
+    Ok(deleted)
 }
 
 /// One cleanup pass — issues batched DELETEs in a loop until the
