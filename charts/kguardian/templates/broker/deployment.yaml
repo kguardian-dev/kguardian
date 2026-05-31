@@ -117,22 +117,30 @@ spec:
           startupProbe:
             {{- toYaml . | nindent 12 }}
           {{- end }}
+          # /health does a DB schema+reachability check, so it can blip
+          # 503 under heavy read load (e.g. a large /pod/info serialize).
+          # Liveness is deliberately tolerant — it should only restart the
+          # broker on SUSTAINED failure (a real DB loss, the #876 self-heal
+          # case: ~10 x 20s = 200s), never on a transient load spike, or it
+          # death-spirals (kill -> restart -> clients ECONNREFUSED -> retry
+          # storm). Readiness is more responsive so a struggling broker is
+          # pulled from the Service without being killed.
           livenessProbe:
             httpGet:
               path: /health
               port: http
-            initialDelaySeconds: 10
-            periodSeconds: 15
-            timeoutSeconds: 5
-            failureThreshold: 3
+            initialDelaySeconds: 15
+            periodSeconds: 20
+            timeoutSeconds: 10
+            failureThreshold: 10
           readinessProbe:
             httpGet:
               path: /health
               port: http
             initialDelaySeconds: 5
             periodSeconds: 10
-            timeoutSeconds: 5
-            failureThreshold: 3
+            timeoutSeconds: 10
+            failureThreshold: 6
          {{- with .Values.broker.resources }}
           resources:
             {{- toYaml . | nindent 12 }}
