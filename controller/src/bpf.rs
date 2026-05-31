@@ -286,6 +286,14 @@ pub fn ebpf_handle(
             .map_err(|e| Error::Custom(format!("Failed to build ring buffer: {}", e)))?;
         info!("Network policy drop ring buffer initialized");
 
+        // A persistently-failing poll (e.g. the eBPF map fds being torn
+        // down as a node drains) returns immediately, so we back off per
+        // error and give up after this many consecutive failures — ~5s at
+        // the 100ms backoff — exiting for a clean kubelet restart rather
+        // than hot-spinning a CPU.
+        const MAX_CONSECUTIVE_POLL_ERRORS: u32 = 50;
+        let mut consecutive_poll_errors: u32 = 0;
+
         loop {
             // Honour the shutdown flag before polling so we exit promptly
             // (within ~100ms) when a receiver-closed handler flips it.
@@ -299,10 +307,30 @@ pub fn ebpf_handle(
                 ));
             }
             // Poll all ring buffers with a single call (much more efficient!)
+            //
+            // The 100ms timeout only throttles the SUCCESS path — libbpf's
+            // poll returns *immediately* on error (e.g. epoll on a
+            // torn-down map fd while a node is draining), so an
+            // unbacked-off `continue` here pegs a CPU at 100% and floods
+            // stderr (the old eprintln also bypassed RUST_LOG, so it could
+            // not be silenced). Back off per error, warn once via tracing,
+            // and bail after sustained failure so the kubelet restarts us
+            // cleanly instead of leaving a hot-spinning pod.
             if let Err(e) = ring_buffer.poll(std::time::Duration::from_millis(100)) {
-                eprintln!("Error polling ring buffer: {}", e);
+                consecutive_poll_errors += 1;
+                if consecutive_poll_errors == 1 {
+                    warn!(error = %e, "ring buffer poll failed; backing off (repeats suppressed until it recovers)");
+                }
+                if consecutive_poll_errors >= MAX_CONSECUTIVE_POLL_ERRORS {
+                    return Err(Error::Custom(format!(
+                        "ring buffer poll failed {} times consecutively (last: {}); exiting for restart",
+                        consecutive_poll_errors, e
+                    )));
+                }
+                std::thread::sleep(std::time::Duration::from_millis(100));
                 continue;
             }
+            consecutive_poll_errors = 0;
 
             // Process any incoming messages from the pod watcher
             if let Ok(inum) = rx.try_recv() {
