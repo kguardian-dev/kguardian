@@ -1,5 +1,17 @@
 # Changelog
 
+## [1.3.0](https://github.com/kguardian-dev/kguardian/compare/llm-bridge/v1.2.3...llm-bridge/v1.3.0) (2026-06-01)
+
+
+### Features
+
+* massive-uplift production hardening release ([#888](https://github.com/kguardian-dev/kguardian/issues/888)) ([176a160](https://github.com/kguardian-dev/kguardian/commit/176a160ae4f63baf46a6b5372a2b91040c28961f))
+
+
+### Bug Fixes
+
+* **controller:** one-shot warn instead of stderr-flood on ring-buffer receiver close ([846d04d](https://github.com/kguardian-dev/kguardian/commit/846d04db1cb509659d18bba0f614d4bd9bf9e5e9))
+
 ## [1.2.3](https://github.com/kguardian-dev/kguardian/compare/llm-bridge/v1.2.2...llm-bridge/v1.2.3) (2026-03-07)
 
 
