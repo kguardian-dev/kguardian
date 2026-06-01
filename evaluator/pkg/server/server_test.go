@@ -19,10 +19,10 @@ import (
 
 // fakeLookup implements PolicyLookup with in-memory state.
 type fakeLookup struct {
-	pods         map[string]*corev1.Pod
-	nsLabels     map[string]map[string]string
-	policies     map[string][]*v1alpha1.AuditNetworkPolicy
-	clusterPols  []*v1alpha1.AuditClusterNetworkPolicy
+	pods        map[string]*corev1.Pod
+	nsLabels    map[string]map[string]string
+	policies    map[string][]*v1alpha1.AuditNetworkPolicy
+	clusterPols []*v1alpha1.AuditClusterNetworkPolicy
 }
 
 func (f *fakeLookup) GetPod(ns, name string) *corev1.Pod {
@@ -175,6 +175,54 @@ func TestHandleEvaluate_MatchesNamespacedPolicy(t *testing.T) {
 	}
 	if s.denied.Load() != 1 {
 		t.Errorf("denied counter: want 1, got %d", s.denied.Load())
+	}
+}
+
+// Regression test for kguardian-dev/kguardian#880.
+//
+// When a flow matches no policies, the response was `{"results":null}`
+// (Go's nil-slice JSON gotcha), which the broker's
+// Vec<VerdictResult> deserialiser rejects. The fix initialises results
+// as a non-nil empty slice so the wire becomes `{"results":[]}`. Guard
+// that contract here so the regression can't re-land silently.
+func TestHandleEvaluate_EmptyResultsEncodesAsJSONArray(t *testing.T) {
+	s, _ := setup(t) // empty store: no namespaced policies, no cluster policies
+
+	body, _ := json.Marshal(matcher.Flow{
+		SrcPodNamespace: "prod", SrcPodName: "client-1",
+		DstPodNamespace: "prod", DstPodName: "web-1",
+		DstPort: 8080, Protocol: matcher.ProtocolTCP,
+	})
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/evaluate", bytes.NewReader(body))
+	s.handleEvaluate(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status: want 200, got %d", rec.Code)
+	}
+
+	// Inspect the raw bytes — `null` and `[]` decode identically into
+	// Go's []T but the broker (serde Rust) treats them differently.
+	raw := rec.Body.String()
+	if strings.Contains(raw, `"results":null`) {
+		t.Fatalf("results encoded as JSON null; broker would fail to decode. body=%s", raw)
+	}
+	if !strings.Contains(raw, `"results":[]`) {
+		t.Fatalf("expected `\"results\":[]` in body, got %s", raw)
+	}
+
+	// Also assert the field is a JSON array on the wire — defensive
+	// against future field-rename or shape regressions.
+	var parsed map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(raw), &parsed); err != nil {
+		t.Fatalf("response is not valid JSON: %v", err)
+	}
+	resultsRaw, ok := parsed["results"]
+	if !ok {
+		t.Fatalf("response missing `results` field: %s", raw)
+	}
+	if string(resultsRaw) != "[]" {
+		t.Fatalf("results field: want `[]`, got %s", resultsRaw)
 	}
 }
 

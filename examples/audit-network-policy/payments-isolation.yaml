@@ -1,8 +1,12 @@
 # Example AuditNetworkPolicy.
 # kguardian's evaluator will report flows that would be denied if this
-# policy were enforced — without dropping any traffic. Promote to
-# networking.k8s.io/v1 NetworkPolicy when you're satisfied with the
-# audit results.
+# policy were enforced — without dropping any traffic. Once you've
+# reviewed the audit results (see .status.evaluation.flowsWouldDeny
+# and the broker's /audit/verdicts endpoint), promote with:
+#
+#   kguardian audit promote payments-isolation -n prod | kubectl apply -f -
+#
+# This emits the equivalent networking.k8s.io/v1.NetworkPolicy.
 apiVersion: kguardian.dev/v1alpha1
 kind: AuditNetworkPolicy
 metadata:

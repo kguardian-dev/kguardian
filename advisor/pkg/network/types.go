@@ -2,10 +2,12 @@ package network
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/kguardian-dev/kguardian/advisor/pkg/api"
 	networkingv1 "k8s.io/api/networking/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/intstr"
 )
 
 // PolicyType represents the type of network policy
@@ -22,6 +24,49 @@ const (
 type NetworkPolicyRule struct {
 	PeerIP string
 	Ports  []networkingv1.NetworkPolicyPort
+}
+
+// mergeOrAppendRule merges a (port, protocol) into an existing
+// NetworkPolicyRule for `peer` if one already exists in `rules`, or
+// appends a new rule otherwise. Identical (peer, port, protocol)
+// triples are no-ops; same peer + same port + different protocol
+// (e.g. DNS over TCP/UDP) coexist as separate port entries on the
+// same rule.
+//
+// Shared between StandardPolicyGenerator and CiliumPolicyGenerator,
+// which previously had byte-identical copies that drifted apart only
+// in a stray comment. Keeping a single implementation prevents one
+// generator developing dedup behaviour the other lacks.
+func mergeOrAppendRule(
+	rules []NetworkPolicyRule,
+	peer string,
+	port intstr.IntOrString,
+	protocolStr string,
+) []NetworkPolicyRule {
+	protocol := protocolPtr(protocolStr)
+
+	for i := range rules {
+		if rules[i].PeerIP == peer {
+			for _, existingPort := range rules[i].Ports {
+				if existingPort.Port != nil && existingPort.Port.String() == port.String() &&
+					existingPort.Protocol != nil && *existingPort.Protocol == *protocol {
+					return rules
+				}
+			}
+			rules[i].Ports = append(rules[i].Ports, networkingv1.NetworkPolicyPort{
+				Port:     &port,
+				Protocol: protocol,
+			})
+			return rules
+		}
+	}
+
+	return append(rules, NetworkPolicyRule{
+		PeerIP: peer,
+		Ports: []networkingv1.NetworkPolicyPort{
+			{Port: &port, Protocol: protocol},
+		},
+	})
 }
 
 // PolicyGenerator is the interface for network policy generators
@@ -50,16 +95,6 @@ type ConfigProvider interface {
 	// GetOutputDir returns the output directory
 	GetOutputDir() string
 }
-
-// TrafficDirection represents the direction of traffic
-type TrafficDirection string
-
-const (
-	// IngressTraffic is incoming traffic
-	IngressTraffic TrafficDirection = "ingress"
-	// EgressTraffic is outgoing traffic
-	EgressTraffic TrafficDirection = "egress"
-)
 
 // GetPolicyName returns a name for the policy
 func GetPolicyName(podName, policyType string) string {
@@ -92,12 +127,18 @@ func CreateObjectMeta(name, namespace string, labels map[string]string) metav1.O
 	}
 }
 
-// IsIngressTraffic checks if traffic is ingress to the pod
+// IsIngressTraffic checks if traffic is ingress to the pod.
+// Case-insensitive on the wire field to match the sibling
+// cilium_networkpolicies.go (strings.ToUpper before compare) — guards
+// against a future writer emitting mixed-case rather than the broker's
+// canonical UPPERCASE convention. Same defensive pattern that caught
+// the recent mcp-server case-mismatch.
 func IsIngressTraffic(traffic api.PodTraffic, podDetail *api.PodDetail) bool {
-	return traffic.TrafficType == "INGRESS"
+	return strings.EqualFold(traffic.TrafficType, "INGRESS")
 }
 
-// IsEgressTraffic checks if traffic is egress from the pod
+// IsEgressTraffic checks if traffic is egress from the pod.
+// See IsIngressTraffic for the case-insensitive rationale.
 func IsEgressTraffic(traffic api.PodTraffic, podDetail *api.PodDetail) bool {
-	return traffic.TrafficType == "EGRESS"
+	return strings.EqualFold(traffic.TrafficType, "EGRESS")
 }

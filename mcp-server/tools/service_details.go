@@ -33,7 +33,7 @@ func (h ServiceDetailsHandler) Call(
 	input ServiceDetailsInput,
 ) (*mcp.CallToolResult, ServiceDetailsOutput, error) {
 	startTime := time.Now()
-	logger.Log.WithField("ip", input.IP).Info("Received get_service_details request")
+	logger.Log.WithField("ip", input.IP).Debug("Received get_service_details request")
 
 	if input.IP == "" {
 		logger.Log.Error("IP address is required but not provided")
@@ -56,7 +56,15 @@ func (h ServiceDetailsHandler) Call(
 		}, ServiceDetailsOutput{}, nil
 	}
 
-	jsonData, err := json.Marshal(data)
+	// Strip the full Kubernetes Service object but keep the two
+	// nested fields the LLM actually reasons about — spec.selector
+	// (for NetworkPolicy construction) and spec.ports (for traffic
+	// matching). The rest (type / sessionAffinity / loadBalancer
+	// status / ipFamily / etc.) is rarely useful for the LLMs
+	// service-identity queries and just eats context.
+	compacted := compactSvc(data)
+
+	jsonData, err := json.Marshal(compacted)
 	if err != nil {
 		logger.Log.WithField("error", err.Error()).Error("Error marshaling response")
 		return &mcp.CallToolResult{

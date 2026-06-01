@@ -100,6 +100,38 @@ kubectl delete auditnetworkpolicy payments-isolation -n prod
 
 Your CNI now enforces the policy. The evaluator stops watching it.
 
+## Tracking evaluator progress — `status.observedGeneration`
+
+After you edit an `AuditNetworkPolicy` (e.g. broaden a `to:` selector) the evaluator has to pick the new spec up, re-evaluate the rolling window of observed traffic, and re-publish the `WOULD-DENY` counts. The CRD exposes `.status.observedGeneration` so you know when that loop has caught up:
+
+```sh
+kubectl get auditnetworkpolicy payments-isolation -n prod \
+  -o jsonpath='{.metadata.generation} → {.status.observedGeneration}{"\n"}'
+# e.g.  4 → 4   ← evaluator is on the latest spec
+# e.g.  4 → 3   ← still working through your last edit
+```
+
+The evaluator stamps `observedGeneration` once it has finished a full reconcile of the current `.metadata.generation`. Don't trust the `WOULD-DENY` count for tuning decisions until the two numbers match.
+
+## Querying verdicts directly
+
+The frontend's Would-Deny view consumes the broker's
+[`GET /audit/verdicts`](/api-reference/endpoints/audit-verdicts)
+endpoint. The same endpoint is what to hit from your own tooling
+(scripted reports, periodic export, etc.):
+
+```bash
+# Latest 25 WouldDeny verdicts for one policy in the prod namespace
+kubectl port-forward -n kguardian svc/kguardian-broker 9090:9090
+curl 'http://localhost:9090/audit/verdicts?policy=web-deny&namespace=prod&verdict=WouldDeny&limit=25'
+```
+
+Filters are server-side and index-backed; `?namespace=` (empty
+value) is the legitimate selector for cluster-scoped policy
+verdicts. The result is ordered `(observed_at DESC, id DESC)` so
+external paginators can cursor on the BIGSERIAL `id`. See the
+endpoint reference for the full contract.
+
 ## Cluster-scoped policies — `AuditClusterNetworkPolicy`
 
 For cross-namespace audits (e.g. "what would happen if I default-denied ingress on every workload across the cluster?") use the cluster-scoped sibling. The spec is identical to `AuditNetworkPolicy` but adds a top-level `namespaceSelector` (nil/empty matches all namespaces) and is itself cluster-scoped. Within each matching namespace the rule evaluation is identical.
@@ -139,11 +171,29 @@ kguardian audit promote --all --all-namespaces --output-dir ./promoted/
 
 The promoted YAML strips the audit-side status and the `kubectl.kubernetes.io/last-applied-configuration` annotation (it'd be wrong for the new kind). Existing labels and other annotations are preserved.
 
+### Cluster-scoped — `kguardian audit promote-cluster`
+
+`AuditClusterNetworkPolicy` promotes to one `networking.k8s.io/v1.NetworkPolicy` per matching namespace (since native NetworkPolicy is namespaced; the cluster-scope `namespaceSelector` is dropped from each emitted spec).
+
+```sh
+# discover namespaces matching spec.namespaceSelector and emit one
+# NetworkPolicy per match
+kguardian audit promote-cluster platform-default-deny-ingress
+
+# explicit namespace list — skip the namespaceSelector discovery,
+# useful when promoting to a subset
+kguardian audit promote-cluster platform-default-deny-ingress \
+  --target-namespace prod --target-namespace staging
+
+# write one file per namespace
+kguardian audit promote-cluster platform-default-deny-ingress \
+  --output-dir ./promoted/
+```
+
 ## What kguardian does *not* do
 
 - It does not enforce anything. Even with an `AuditNetworkPolicy` in place, *all traffic flows*. If you want enforcement, promote the policy as above and rely on your CNI.
-- It does not (yet) provide a frontend "Would-Deny" view — query the broker's `audit_verdicts` table directly or watch the policy's `.status.evaluation` field.
-- The promote helper handles namespaced policies; for `AuditClusterNetworkPolicy` you'll need to enumerate the matched namespaces yourself.
+- It does not aggregate verdicts across multiple evaluator replicas — the evaluator's status updater is single-replica by design (a Helm guardrail blocks `replicaCount > 1`). Multi-replica HA is a future story.
 
 ## Limits + caveats
 
@@ -154,5 +204,6 @@ The matcher implements podSelector + namespaceSelector + numeric port + endPort 
 - **Unknown peer pods** (deleted between flow capture and evaluation) are not matched against any selector — this can cause an apparent under-count. The `audit_verdicts.reason` column records when this happens.
 - **Named ports** are resolved against the destination pod's `spec.containers[].ports[]` declarations. A named port matches only when both the name and the observed `containerPort` line up.
 - **`ipBlock`** matches against the peer's L3 address as observed by the eBPF controller. Flows with unknown IPs (e.g. malformed eBPF events) are non-matches, not silent allows.
+- **Ingress UDP is systematically under-counted.** The controller's eBPF probes have no `kind` for inbound UDP, so traffic like CoreDNS receiving queries, syslog, or NTP responses arriving at a pod is not seen by the evaluator. Auditing a UDP-fronted namespace will show zero ingress flows where there may be millions. Egress UDP and all TCP directions are tracked normally.
 
 If you're carrying production-critical policy decisions on this, treat the verdicts as a strong signal but verify against your CNI's enforcement output once promoted.

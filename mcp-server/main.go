@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -15,20 +16,24 @@ import (
 )
 
 func main() {
-	// Initialize logger
-	logLevel := os.Getenv("LOG_LEVEL")
+	// Trim whitespace from every env read. Operator pastes commonly
+	// embed a trailing newline or surrounding spaces; pre-trim
+	// prevents downstream parse errors far from the env-var read
+	// site (net.Listen on a trimmed PORT, reqwest URL parse on a
+	// trimmed BROKER_URL, log-level fallback on a trimmed LOG_LEVEL).
+	// Same pattern applied to the controller and evaluator.
+	logLevel := strings.TrimSpace(os.Getenv("LOG_LEVEL"))
 	if logLevel == "" {
 		logLevel = "info"
 	}
 	logger.Init(logLevel)
 
-	// Get configuration from environment
-	brokerURL := os.Getenv("BROKER_URL")
+	brokerURL := strings.TrimSpace(os.Getenv("BROKER_URL"))
 	if brokerURL == "" {
 		brokerURL = "http://kguardian-broker.kguardian.svc.cluster.local:9090"
 	}
 
-	port := os.Getenv("PORT")
+	port := strings.TrimSpace(os.Getenv("PORT"))
 	if port == "" {
 		port = "8081"
 	}

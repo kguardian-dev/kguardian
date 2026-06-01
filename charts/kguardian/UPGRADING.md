@@ -1,5 +1,146 @@
 # Upgrading the kguardian Helm chart
 
+## Optional broker API authentication (opt-in)
+
+The broker API can now require a shared **bearer token**
+(`broker.auth.enabled`, **default `false`** — no change for existing
+installs). When enabled, the controller and mcp-server must present the
+token or their requests get `401`; `/health` and `/metrics` stay open.
+This closes the unauthenticated forged-row / unauthorized-read exposure
+on the server-to-server paths — the durable complement to the
+NetworkPolicy below.
+
+To enable, create the Secret yourself (kept out of the chart so it's
+stable across upgrades) and point the chart at it:
+```bash
+kubectl -n <ns> create secret generic kguardian-broker-auth \
+  --from-literal=token="$(openssl rand -hex 32)"
+```
+```yaml
+broker:
+  auth:
+    enabled: true
+    existingSecret: kguardian-broker-auth   # required when enabled
+```
+**Known gap:** the frontend calls the broker directly from the browser
+and can't hold a static token, so auth does not cover the frontend path —
+keep the frontend on a trusted network or front the broker with an
+authenticating proxy for browser traffic. Tracked for a follow-up.
+
+## Optional broker ingress NetworkPolicy (opt-in)
+
+The chart can render an ingress `NetworkPolicy` for the broker
+(`broker.networkPolicy.enabled`, **default `false`**). The broker HTTP API
+is unauthenticated, so when enabled the policy restricts which in-cluster
+sources may reach it.
+
+**It is opt-in for a hard reason:** the controller is a hostNetwork eBPF
+DaemonSet, so it posts to the broker from the **node IP**, and a
+`podSelector` can never match it (NetworkPolicy-enforcing CNIs see node
+identity, not the pod label). Enabling the policy **without** listing your
+node network in `allowedNodeCIDRs` will **block the controller** and stall
+its rollout. There is no safe cluster-agnostic default, hence opt-in.
+
+To enable safely:
+```yaml
+broker:
+  networkPolicy:
+    enabled: true
+    # REQUIRED: the node network(s) the controller DaemonSet runs on.
+    allowedNodeCIDRs:
+      - "10.0.0.0/16"     # e.g. your node subnet, or per-node /32s
+    # Only if you scrape /metrics (it shares the broker HTTP port):
+    allowMetricsFrom:
+      - namespaceSelector:
+          matchLabels:
+            kubernetes.io/metadata.name: monitoring
+        podSelector:
+          matchLabels:
+            app.kubernetes.io/name: prometheus
+```
+
+When enabled, mcp-server / frontend / the helm-test pod are admitted via
+podSelector; the controller via `allowedNodeCIDRs`; everything else is
+denied. Ingress-only — the broker's own DB / DNS / evaluator egress is
+never restricted. Inert on clusters whose CNI doesn't enforce
+NetworkPolicy.
+
+> **Caveat (validated live on Cilium):** the `allowedNodeCIDRs` ipBlock
+> that the hostNetwork controller requires is coarse — on Cilium it was
+> observed to also admit unrelated in-cluster pods, so treat this policy
+> as **defence-in-depth, not airtight isolation**. The pod clients are
+> precisely scoped; the controller allowance is not. For strict broker
+> isolation, use a CNI-native policy (e.g. a CiliumNetworkPolicy with
+> `fromEntities: [host, remote-node]`) or add authentication to the
+> broker API (the durable fix, tracked separately).
+
+## CRD: `policyTypes` is now a constrained set
+
+The `AuditNetworkPolicy` and `AuditClusterNetworkPolicy` CRDs now declare
+`policyTypes` as `x-kubernetes-list-type: set` with `maxItems: 2`. This
+stops accidental duplicate entries (e.g. `[Ingress, Ingress]`) at
+admission, which the evaluator would otherwise double-count.
+
+Impact: if you have an **existing** CR whose `policyTypes` already
+contains duplicates, the API server may reject *updates* to it after the
+CRD is applied (set semantics forbid duplicates). This is rare, but to be
+safe, scan and clean before upgrading:
+
+```bash
+# List any audit policies with duplicate policyTypes entries.
+kubectl get auditnetworkpolicies,auditclusternetworkpolicies -A -o json \
+  | jq -r '.items[] | select((.spec.policyTypes | length) != (.spec.policyTypes | unique | length))
+           | "\(.kind) \(.metadata.namespace)/\(.metadata.name)"'
+# Re-apply each listed policy with de-duplicated policyTypes.
+```
+
+## `broker.audit.retention.days: 0` now correctly disables retention
+
+Earlier chart versions used a Helm `with` block to emit
+`AUDIT_VERDICTS_RETENTION_DAYS`. Helm's `with` treats `0` as falsy and
+skipped the block — so operators who set `days: 0` (the documented
+"disable retention" value per values.yaml) did NOT propagate the env
+var to the broker, and retention kept running at the in-broker
+default of 30 days. The chart now uses an explicit `hasKey` check, so
+`0` honours the disable intent.
+
+If you'd been relying on `days: 0` as a working disable and noticed
+audit_verdicts WAS retained at 30 days, your cluster's `audit_verdicts`
+table likely has older rows than you expect. After upgrading:
+
+```sh
+# Inspect the row count + oldest entry.
+kubectl -n <ns> exec deploy/kguardian-db -- \
+  psql -U rust -c "select count(*), min(observed_at) from audit_verdicts;"
+
+# If you want to clear the historical accumulation that retention=0
+# was supposed to prevent, do it explicitly after the chart upgrade:
+kubectl -n <ns> exec deploy/kguardian-db -- \
+  psql -U rust -c "delete from audit_verdicts where observed_at < now() - interval '30 days';"
+```
+
+## Cross-major Postgres upgrades: `database.persistence.safeBoot`
+
+The chart includes an init container (`assert-safe-boot`) that refuses
+to start the database when the PVC contains a Postgres datadir for a
+**different** major than the running image AND the current major's
+datadir is empty. Without it the postgres image would silently `initdb`
+over the empty location and leave the prior data sitting unused on the
+volume — exactly how the chart's pre-1.10.0 mount-path bug surfaced as
+"silent" data loss when the path was corrected.
+
+If you're intentionally rolling forward across a major (after running
+`pg_upgrade` offline, or otherwise migrating the data on disk yourself):
+
+```yaml
+database:
+  persistence:
+    safeBoot: false
+```
+
+Set it back to `true` once the upgrade lands so the next major catches
+the same class of footgun.
+
 ## Before any chart upgrade: back up the database
 
 The chart's bundled PostgreSQL Deployment + ReadWriteOnce PVC pattern is
@@ -9,8 +150,25 @@ PVC at a path PostgreSQL doesn't recognise — at which point `initdb`
 runs over an empty subtree and the broker silently sees a fresh schema.
 The data isn't recoverable after the fact.
 
-Take a logical dump before every `helm upgrade` until automated
-pre-upgrade hooks land:
+### Automatic: `database.persistence.preUpgradeBackup`
+
+The chart runs `pg_dumpall` as a Helm `pre-upgrade,pre-rollback` hook
+when `database.persistence.preUpgradeBackup` is `true` (the default).
+The dump streams to the Job's stdout — retrieve it with:
+
+```sh
+kubectl -n <ns> logs job/kguardian-db-pre-upgrade-backup > kguardian-db-$(date +%Y%m%d-%H%M).sql
+```
+
+The hook is best-effort: if the backup fails (DB unreachable,
+`pg_dumpall` errors), it logs a warning but does NOT block the
+upgrade. To skip entirely (for ephemeral test deployments) set
+`database.persistence.preUpgradeBackup: false`.
+
+### Manual fallback
+
+Take a logical dump yourself if you want to capture state at a
+specific moment that isn't tied to a chart upgrade:
 
 ```sh
 kubectl -n <ns> exec deploy/kguardian-db -- \

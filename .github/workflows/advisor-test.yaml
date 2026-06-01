@@ -8,14 +8,14 @@ on:
     branches:
       - main
     paths:
-      - .github/workflows/build-go.yaml
-      - 'advisor/*.go'
+      - .github/workflows/advisor-test.yaml
+      - 'advisor/**'
   pull_request:
     branches:
       - main
     paths:
-      - .github/workflows/build-go.yaml
-      - 'advisor/*.go'
+      - .github/workflows/advisor-test.yaml
+      - 'advisor/**'
 
 permissions:
   contents: read
@@ -29,7 +29,7 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        go-version: [ '1.24.x' ]
+        go-version: [ '1.26.x' ]
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
 
@@ -51,7 +51,7 @@ jobs:
     needs: [lint]
     strategy:
       matrix:
-        go-version: [ '1.24.x' ]
+        go-version: [ '1.26.x' ]
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
 

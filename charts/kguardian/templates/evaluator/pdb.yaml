@@ -1,4 +1,18 @@
 {{- if and .Values.evaluator.enabled .Values.evaluator.podDisruptionBudget.enabled }}
+{{- /*
+  PDB-with-singleton-pod guardrail. The evaluator multi-replica
+  guard (in deployment.yaml) forces replicaCount=1 because replicas
+  race on AuditNetworkPolicy.status writes. With a single replica,
+  a PDB whose minAvailable >= 1 and no maxUnavailable blocks ALL
+  voluntary evictions — kubectl drain stalls, autoscaler can't
+  reschedule, and operators have to delete the PDB to recover.
+  Refuse to render that combination.
+*/ -}}
+{{- $pdb := .Values.evaluator.podDisruptionBudget -}}
+{{- $replicas := int .Values.evaluator.replicaCount -}}
+{{- if and (not $pdb.maxUnavailable) (le $replicas 1) }}
+{{- fail "evaluator.podDisruptionBudget.enabled with replicaCount=1 and minAvailable>=1 blocks ALL voluntary evictions (kubectl drain stalls forever). Either disable the PDB or set maxUnavailable=1." }}
+{{- end }}
 apiVersion: policy/v1
 kind: PodDisruptionBudget
 metadata:
@@ -6,10 +20,10 @@ metadata:
   labels:
     {{- include "kguardian.labels" . | nindent 4 }}
 spec:
-  {{- if .Values.evaluator.podDisruptionBudget.maxUnavailable }}
-  maxUnavailable: {{ .Values.evaluator.podDisruptionBudget.maxUnavailable }}
+  {{- if $pdb.maxUnavailable }}
+  maxUnavailable: {{ $pdb.maxUnavailable }}
   {{- else }}
-  minAvailable: {{ .Values.evaluator.podDisruptionBudget.minAvailable | default 1 }}
+  minAvailable: {{ $pdb.minAvailable | default 1 }}
   {{- end }}
   selector:
     matchLabels:

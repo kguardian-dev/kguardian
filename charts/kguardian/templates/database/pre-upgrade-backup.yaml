@@ -1,0 +1,121 @@
+{{- if and .Values.database.enabled .Values.database.persistence.enabled .Values.database.persistence.preUpgradeBackup }}
+# Pre-upgrade pg_dumpall hook.
+#
+# Runs `pg_dumpall` against the live kguardian-db service before each
+# helm upgrade and prints the dump to stdout — operators can retrieve it
+# with `kubectl logs job/<jobname>`. Best-effort: failure is non-fatal,
+# so a misconfigured backup never blocks the upgrade itself, but the
+# operator gets a loud warning.
+#
+# Why pod logs and not a separate PVC: the chart already manages a
+# single RWO PVC for the DB; adding a backup PVC complicates the values
+# surface and storage-class assumptions. Pod logs (kubectl + log
+# aggregation) are universally available. For long-term retention,
+# operators can pipe `kubectl logs` to S3-compatible storage as part of
+# their existing backup pipeline.
+#
+# Disable by setting `database.persistence.preUpgradeBackup: false`.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ .Values.database.name }}-pre-upgrade-backup
+  labels:
+    {{- include "kguardian.labels" . | nindent 4 }}
+    app.kubernetes.io/component: db-pre-upgrade-backup
+  annotations:
+    # pre-upgrade: backup before chart re-rolls anything.
+    # pre-rollback: same protection on rollback.
+    "helm.sh/hook": pre-upgrade,pre-rollback
+    # Negative weight ⇒ runs before any other resources in the same
+    # phase. We want the backup recorded before anything else moves.
+    "helm.sh/hook-weight": "-10"
+    # Delete previous job before creating; clean up on success so the
+    # cluster doesn't accumulate one Job per upgrade.
+    # On failure the Job is retained so operators can inspect logs.
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+spec:
+  ttlSecondsAfterFinished: 86400
+  backoffLimit: 0
+  template:
+    metadata:
+      labels:
+        {{- include "kguardian.labels" . | nindent 8 }}
+        app.kubernetes.io/component: db-pre-upgrade-backup
+    spec:
+      restartPolicy: Never
+      automountServiceAccountToken: false
+      containers:
+        - name: pg-dumpall
+          image: "{{ .Values.database.image.repository }}:{{ .Values.database.image.tag }}"
+          imagePullPolicy: {{ .Values.database.image.pullPolicy }}
+          # Hardened — pg_dumpall connects over TCP, never touches the
+          # local datadir, and only needs to read DB rows.
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 65534
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+            seccompProfile:
+              type: RuntimeDefault
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+          env:
+            - name: PGHOST
+              value: {{ .Values.database.service.name | quote }}
+            - name: PGPORT
+              value: "{{ .Values.database.container.port }}"
+            - name: PGUSER
+              value: {{ .Values.database.user | quote }}
+            - name: PGPASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "kguardian.dbSecretName" . }}
+                  key: {{ .Values.database.passwordSecretKey }}
+            - name: PGDATABASE
+              value: {{ .Values.database.databaseName | quote }}
+          command:
+            - /bin/sh
+            - -c
+            - |
+              set -eu
+              ts="$(date -u +%Y%m%d-%H%M%SZ)"
+              echo "=== kguardian-db pre-upgrade dump @ ${ts} ==="
+              echo "=== retrieve with: kubectl logs job/{{ .Values.database.name }}-pre-upgrade-backup ==="
+              # Try up to 3 times with a short sleep — covers the case
+              # where helm fires this hook the instant the prior pod is
+              # still finalising. 5s + 10s + 15s ≈ 30s of patience max.
+              attempt=1
+              while [ $attempt -le 3 ]; do
+                if pg_isready -h "$PGHOST" -p "$PGPORT" -U "$PGUSER" -d "$PGDATABASE" -t 5 >/dev/null 2>&1; then
+                  break
+                fi
+                sleep $((attempt * 5))
+                attempt=$((attempt + 1))
+              done
+              if ! pg_isready -h "$PGHOST" -p "$PGPORT" -U "$PGUSER" -d "$PGDATABASE" -t 5 >/dev/null 2>&1; then
+                echo "WARN: database not reachable after 3 attempts; skipping pre-upgrade backup" >&2
+                # Non-zero would block the upgrade. Best-effort.
+                exit 0
+              fi
+              # --clean --if-exists makes the dump replayable. We dump
+              # the whole cluster (databases + globals) so a restore
+              # can recreate users/roles too. --no-role-passwords omits
+              # the SCRAM role-password hashes from the globals dump:
+              # this Job prints to stdout (pod logs), and leaking
+              # offline-crackable role hashes to a log sink would widen
+              # the blast radius well beyond direct DB access. A restore
+              # re-sets passwords from the chart's DB Secret anyway.
+              if ! pg_dumpall --clean --if-exists --no-password --no-role-passwords; then
+                echo "WARN: pg_dumpall failed; backup not produced" >&2
+                exit 0
+              fi
+              echo "=== end of dump @ $(date -u +%Y%m%d-%H%M%SZ) ==="
+{{- end }}

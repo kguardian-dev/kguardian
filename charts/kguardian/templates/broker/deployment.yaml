@@ -63,38 +63,84 @@ spec:
                   key: {{ .Values.database.passwordSecretKey }}
             - name: DATABASE_URL
               value: {{ include "kguardian.dbUrl" . | quote }}
+            # Wire chart's broker.container.port through to the Rust
+            # binary so changing the chart port doesn't require also
+            # setting LISTEN_ADDR by hand. The bind address is always
+            # 0.0.0.0 — clusters that need a different bind can set
+            # LISTEN_ADDR via env override.
+            - name: LISTEN_ADDR
+              value: "0.0.0.0:{{ .Values.broker.container.port }}"
+            {{- include "kguardian.brokerAuthEnv" . | nindent 12 }}
             {{- if .Values.evaluator.enabled }}
             - name: EVALUATOR_URL
               value: "http://{{ .Values.evaluator.service.name }}.{{ include "kguardian.namespace" . | trim }}.svc.cluster.local:{{ .Values.evaluator.service.port }}"
             {{- end }}
-            {{- with .Values.broker.audit.retention.days }}
+            {{/*
+              `with` treats 0 as falsy and skips the block — so
+              setting broker.audit.retention.days: 0 (the documented
+              "disable retention" value) would silently NOT propagate
+              the env var, and the broker would fall back to its
+              30-day default. Operators expecting to disable retention
+              would keep accumulating audit_verdicts forever and not
+              notice until the table grew huge. Use an explicit
+              hasKey check instead so 0 propagates correctly.
+            */}}
+            {{- if hasKey .Values.broker.audit.retention "days" }}
             - name: AUDIT_VERDICTS_RETENTION_DAYS
-              value: {{ . | quote }}
+              value: {{ .Values.broker.audit.retention.days | quote }}
             {{- end }}
-            {{- with .Values.broker.audit.retention.intervalSeconds }}
+            {{- if hasKey .Values.broker.audit.retention "intervalSeconds" }}
             - name: AUDIT_VERDICTS_RETENTION_INTERVAL_SECS
-              value: {{ . | quote }}
+              value: {{ .Values.broker.audit.retention.intervalSeconds | quote }}
+            {{- end }}
+            {{- if hasKey .Values.broker.audit.retention "batchSize" }}
+            - name: AUDIT_VERDICTS_RETENTION_BATCH_SIZE
+              value: {{ .Values.broker.audit.retention.batchSize | quote }}
+            {{- end }}
+            {{- if hasKey .Values.broker.audit "inflightPermits" }}
+            - name: AUDIT_INFLIGHT_PERMITS
+              value: {{ .Values.broker.audit.inflightPermits | quote }}
+            {{- end }}
+            {{- if hasKey .Values.broker.audit "evalTimeoutMs" }}
+            - name: AUDIT_EVAL_TIMEOUT_MS
+              value: {{ .Values.broker.audit.evalTimeoutMs | quote }}
+            {{- end }}
+            {{- if hasKey .Values.broker "dbPoolMaxSize" }}
+            - name: DB_POOL_MAX_SIZE
+              value: {{ .Values.broker.dbPoolMaxSize | quote }}
+            {{- end }}
+            {{- if hasKey .Values.broker "dbMigrationMaxRetries" }}
+            - name: DB_MIGRATION_MAX_RETRIES
+              value: {{ .Values.broker.dbMigrationMaxRetries | quote }}
             {{- end }}
           {{- with .Values.broker.startupProbe }}
           startupProbe:
             {{- toYaml . | nindent 12 }}
           {{- end }}
+          # /health does a DB schema+reachability check, so it can blip
+          # 503 under heavy read load (e.g. a large /pod/info serialize).
+          # Liveness is deliberately tolerant — it should only restart the
+          # broker on SUSTAINED failure (a real DB loss, the #876 self-heal
+          # case: ~10 x 20s = 200s), never on a transient load spike, or it
+          # death-spirals (kill -> restart -> clients ECONNREFUSED -> retry
+          # storm). Readiness is more responsive so a struggling broker is
+          # pulled from the Service without being killed.
           livenessProbe:
             httpGet:
               path: /health
               port: http
-            initialDelaySeconds: 10
-            periodSeconds: 15
-            timeoutSeconds: 5
-            failureThreshold: 3
+            initialDelaySeconds: 15
+            periodSeconds: 20
+            timeoutSeconds: 10
+            failureThreshold: 10
           readinessProbe:
             httpGet:
               path: /health
               port: http
             initialDelaySeconds: 5
             periodSeconds: 10
-            timeoutSeconds: 5
-            failureThreshold: 3
+            timeoutSeconds: 10
+            failureThreshold: 6
          {{- with .Values.broker.resources }}
           resources:
             {{- toYaml . | nindent 12 }}

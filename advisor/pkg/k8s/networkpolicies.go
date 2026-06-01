@@ -3,9 +3,11 @@ package k8s
 import (
 	"encoding/json"
 	"fmt"
+	"strconv"
+	"strings"
 
-	log "github.com/rs/zerolog/log"
 	api "github.com/kguardian-dev/kguardian/advisor/pkg/api"
+	log "github.com/rs/zerolog/log"
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -21,7 +23,7 @@ import (
 var (
 	processIngressRulesFunc  = processIngressRules
 	processEgressRulesFunc   = processEgressRules
-	detectSelectorLabelsFunc = func(clientset *kubernetes.Clientset, origin interface{}) (map[string]string, error) {
+	detectSelectorLabelsFunc = func(clientset kubernetes.Interface, origin interface{}) (map[string]string, error) {
 		return detectSelectorLabels(clientset, origin)
 	}
 	determinePeerForTrafficFunc = determinePeerForTraffic
@@ -54,8 +56,14 @@ func transformToNetworkPolicy(pod *corev1.Pod, podTraffic []api.PodTraffic, podD
 
 	for _, traffic := range podTraffic {
 		var err error
-		isIngress := traffic.TrafficType == "INGRESS"
-		isEgress := traffic.TrafficType == "EGRESS"
+		// Case-insensitive match — mirrors cilium_networkpolicies.go
+		// and the recent advisor/pkg/network/types.go fix. The broker
+		// emits UPPERCASE today but a future writer emitting mixed
+		// case should NOT silently produce zero-match policies (the
+		// exact bug class that hit the mcp-server filter).
+		direction := strings.ToUpper(traffic.TrafficType)
+		isIngress := direction == "INGRESS"
+		isEgress := direction == "EGRESS"
 
 		if isIngress {
 			rule, err := processIngressRulesFunc(traffic, config)
@@ -99,8 +107,14 @@ func processIngressRules(traffic api.PodTraffic, config *Config) (*networkingv1.
 		return nil, fmt.Errorf("error determining peer for ingress traffic from %s: %w", traffic.DstIP, err)
 	}
 
-	portInt := 0
-	_, _ = fmt.Sscanf(traffic.SrcPodPort, "%d", &portInt)
+	// strconv.Atoi instead of fmt.Sscanf("%d") — the latter silently
+	// accepts trailing junk ("8.5" → 8, "80a" → 80) and the previous
+	// `_, _ = fmt.Sscanf(...)` discarded the error too, so an empty
+	// port string would silently become port 0 in a generated policy.
+	portInt, err := strconv.Atoi(traffic.SrcPodPort)
+	if err != nil {
+		return nil, fmt.Errorf("invalid source pod port %q: %w", traffic.SrcPodPort, err)
+	}
 	port := intstr.FromInt(portInt)
 	protocol := traffic.Protocol
 
@@ -124,8 +138,11 @@ func processEgressRules(traffic api.PodTraffic, config *Config) (*networkingv1.N
 		return nil, fmt.Errorf("error determining peer for egress traffic to %s: %w", traffic.DstIP, err)
 	}
 
-	portInt := 0
-	_, _ = fmt.Sscanf(traffic.DstPort, "%d", &portInt)
+	// See processIngressRules above for why strconv.Atoi over Sscanf.
+	portInt, err := strconv.Atoi(traffic.DstPort)
+	if err != nil {
+		return nil, fmt.Errorf("invalid destination port %q: %w", traffic.DstPort, err)
+	}
 	port := intstr.FromInt(portInt)
 	protocol := traffic.Protocol
 

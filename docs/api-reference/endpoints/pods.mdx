@@ -1,78 +1,104 @@
 ---
 title: "Pod Endpoints"
-description: "Add and retrieve pod metadata"
----
-
-## POST /pods
-
-Add or update pod metadata.
-
-### Request
-
-```json
-{
-  "pod_ip": "10.244.1.5",
-  "pod_name": "my-app-7d9f6b8c4-x5z2w",
-  "pod_namespace": "production"
-}
-```
-
-### Response
-
-```json
-{
-  "uuid": "550e8400-e29b-41d4-a716-446655440000",
-  "pod_ip": "10.244.1.5",
-  "pod_name": "my-app-7d9f6b8c4-x5z2w",
-  "pod_namespace": "production"
-}
-```
-
+description: "Submit pod metadata, mark dead, and query"
 ---
 
 ## POST /pod/spec
 
-Add full pod specification including labels and metadata.
+Insert or update pod metadata. Upserts on `pod_name` (the primary
+key) — a pod restarting reusing the same name replaces the
+previous row in place. Empty/whitespace-only `pod_name` is
+rejected at the handler (warn-log + no-op) to keep a sentinel
+empty-PK row from polluting the table.
 
 ### Request
 
 ```json
 {
-  "pod_ip": "10.244.1.5",
-  "pod_name": "my-app",
+  "pod_name": "my-app-7d9f6b8c4-x5z2w",
   "pod_namespace": "production",
-  "pod_obj": {
-    "metadata": {
-      "labels": {
-        "app": "my-app",
-        "version": "v1.0.0"
-      }
-    },
-    "spec": { /* full pod spec */ }
-  }
+  "pod_ip": "10.244.1.5",
+  "node_name": "worker-1",
+  "is_dead": false,
+  "pod_identity": "my-app",
+  "workload_selector_labels": {
+    "app.kubernetes.io/name": "my-app",
+    "app.kubernetes.io/component": "frontend"
+  },
+  "pod_obj": { "spec": { "...": "full pod spec" } },
+  "time_stamp": "2026-05-12T10:32:14.123456"
 }
 ```
 
----
+`pod_identity` and `workload_selector_labels` are populated by the
+controller's `extract_pod_identity_and_selectors` helper (priority:
+`app.kubernetes.io/name` → `app.kubernetes.io/component` → `k8s-app`
+→ owner-reference walk to Deployment/StatefulSet/DaemonSet).
 
-## GET /pod/ip/:ip
+## POST /pod/mark_dead
 
-Retrieve pod details by IP address.
+Mark a pod's row as dead without deleting it (preserves historical
+correlation against `pod_traffic` rows referencing the same IP).
 
-### Example
+The controller's `reconcile_pods_task` calls this periodically for
+pods that left the node — sending `pod_ip` alongside `pod_name`
+lets the broker apply a precise `(pod_name, pod_ip)` filter rather
+than a name-only one, avoiding the race where a same-name restart's
+live row gets marked dead.
+
+### Request
+
+```json
+{
+  "pod_name": "my-app-7d9f6b8c4-x5z2w",
+  "pod_ip": "10.244.1.5"
+}
+```
+
+`pod_ip` is optional for backwards compatibility with older
+controllers; when absent, the broker falls back to a name-only
+filter (and logs a warn for the missing precision). Empty
+`pod_name` is rejected.
+
+## GET /pod/info
+
+Return all pod metadata rows. Ordered by
+`(pod_namespace ASC, pod_name ASC)` for stable display.
+
+```bash
+curl http://localhost:9090/pod/info
+```
+
+## GET /pod/name/&#123;name&#125;
+
+Get a single pod by name. Returns the live row when one exists
+(falls back to the most-recent dead row only if no live row matches
+— defensive for a hypothetical future schema where multiple rows
+per `pod_name` are possible).
+
+```bash
+curl http://localhost:9090/pod/name/my-app-7d9f6b8c4-x5z2w
+```
+
+## GET /pod/ip/&#123;ip&#125;
+
+Get a single pod by IP. Used by the advisor when resolving a peer
+IP to a pod identity during NetworkPolicy generation.
 
 ```bash
 curl http://localhost:9090/pod/ip/10.244.1.5
 ```
 
-### Response
+A 404 with body `"No data found"` is returned when no row matches.
 
-```json
-{
-  "uuid": "550e8400-e29b-41d4-a716-446655440000",
-  "pod_ip": "10.244.1.5",
-  "pod_name": "my-app",
-  "pod_namespace": "production",
-  "pod_obj": { /* full pod spec */ }
-}
+## GET /pod/list/&#123;node&#125;
+
+Return all live pods recorded for the named node. The controller's
+reconciler calls this to compute the dead-pod diff each cycle.
+Filtered to `is_dead=false`; ordered by
+`(pod_namespace ASC, pod_name ASC)` so reconciler "marking X as
+dead" log sequences are deterministic.
+
+```bash
+curl http://localhost:9090/pod/list/worker-1
 ```

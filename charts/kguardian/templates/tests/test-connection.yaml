@@ -1,19 +1,77 @@
-{{/*
-TODO: Ignore this file for now. It's not used yet.
-
+{{- if .Values.broker.helmTest.enabled }}
+# Helm test that hits the broker's /health endpoint.
+#
+# Beyond cluster connectivity, this exercises the schema-state check
+# from kguardian-dev/kguardian#876: a broker still running with a
+# replaced/wiped DB underneath it returns 503, the test fails, and the
+# operator sees the silent-failure mode immediately rather than 14h of
+# unanswered "relation does not exist" warnings (the original incident).
+#
+# Run after `helm install`/`upgrade` with `helm test <release>`.
+# Disable with `broker.helmTest.enabled: false`.
 apiVersion: v1
 kind: Pod
 metadata:
-  name: "{{ include "kguardian.fullname" . }}-test-connection"
+  name: "{{ include "kguardian.fullname" . }}-test-broker-health"
   labels:
     {{- include "kguardian.labels" . | nindent 4 }}
+    app.kubernetes.io/component: helm-test
   annotations:
     "helm.sh/hook": test
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
 spec:
-  containers:
-    - name: wget
-      image: busybox
-      command: ['wget']
-      args: ['{{ include "kguardian.fullname" . }}:{{ .Values.service.port }}']
   restartPolicy: Never
-*/}}
+  automountServiceAccountToken: false
+  containers:
+    - name: probe
+      image: curlimages/curl:8.16.0
+      imagePullPolicy: IfNotPresent
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534
+        readOnlyRootFilesystem: true
+        allowPrivilegeEscalation: false
+        capabilities:
+          drop:
+            - ALL
+        seccompProfile:
+          type: RuntimeDefault
+      resources:
+        requests:
+          cpu: 10m
+          memory: 16Mi
+        limits:
+          cpu: 100m
+          memory: 64Mi
+      command:
+        - /bin/sh
+        - -c
+        - |
+          set -eu
+          url="http://{{ .Values.broker.service.name }}:{{ .Values.broker.service.port }}/health"
+          # Up to 5 attempts at 5s spacing — the broker takes a moment
+          # to come up after install on a cold cluster, helm test fires
+          # immediately. Total patience: ~25s.
+          attempt=1
+          while [ $attempt -le 5 ]; do
+            code=$(curl -s -o /tmp/body -w "%{http_code}" --max-time 5 "$url" || echo 000)
+            if [ "$code" = "200" ]; then
+              echo "PASS: broker /health is 200"
+              cat /tmp/body
+              exit 0
+            fi
+            echo "attempt $attempt: HTTP $code (will retry)"
+            attempt=$((attempt + 1))
+            sleep 5
+          done
+          echo "FAIL: broker /health did not return 200 after 5 attempts" >&2
+          echo "last body:" >&2
+          cat /tmp/body >&2 || true
+          exit 1
+      volumeMounts:
+        - name: tmp
+          mountPath: /tmp
+  volumes:
+    - name: tmp
+      emptyDir: {}
+{{- end }}

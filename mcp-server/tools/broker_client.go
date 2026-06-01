@@ -7,6 +7,8 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"os"
+	"strings"
 	"time"
 
 	"github.com/kguardian-dev/kguardian/mcp-server/logger"
@@ -19,13 +21,33 @@ const maxResponseBytes = 10 * 1024 * 1024
 // BrokerClient handles communication with the kguardian broker
 type BrokerClient struct {
 	baseURL    string
+	authToken  string
 	httpClient *http.Client
 }
 
-// NewBrokerClient creates a new broker client
+// NewBrokerClient creates a new broker client.
+//
+// Sanitises baseURL defensively so a downstream fmt.Sprintf doesn't
+// produce a malformed URL:
+//   - Surrounding whitespace is trimmed. main.go already TrimSpace's
+//     BROKER_URL before passing it here, but a future caller (test,
+//     embedded SDK use, alternative config source) might not — and a
+//     leading-space baseURL produces requests that http.NewRequest
+//     rejects with the cryptic "net/url: invalid control character"
+//     error, far from the env-var site that introduced the space.
+//   - Trailing slashes are stripped. BROKER_URL="http://broker:9090/"
+//     is a natural copy-paste artefact (operators copy from a browser
+//     URL bar / dashboard). Most servers normalize the resulting
+//     doubled slash but it shows up in logs as http://broker:9090//pod/...
+//     and can confuse routing on prefix-matched reverse proxies.
 func NewBrokerClient(baseURL string) *BrokerClient {
 	return &BrokerClient{
-		baseURL: baseURL,
+		baseURL: strings.TrimRight(strings.TrimSpace(baseURL), "/"),
+		// Optional bearer token. When the broker is deployed with
+		// BROKER_AUTH_TOKEN set, the mcp-server must present the same
+		// token or its reads are rejected (401). Empty = no-auth, the
+		// original behaviour.
+		authToken: strings.TrimSpace(os.Getenv("BROKER_AUTH_TOKEN")),
 		httpClient: &http.Client{
 			Timeout: 90 * time.Second, // Allow enough time for cluster-wide queries
 		},
@@ -81,6 +103,9 @@ func (c *BrokerClient) get(ctx context.Context, reqURL string) (interface{}, err
 	if err != nil {
 		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
+	if c.authToken != "" {
+		req.Header.Set("Authorization", "Bearer "+c.authToken)
+	}
 
 	resp, err := c.httpClient.Do(req)
 	requestDuration := time.Since(startTime)
@@ -94,7 +119,7 @@ func (c *BrokerClient) get(ctx context.Context, reqURL string) (interface{}, err
 		}).Error("Broker request failed")
 		return nil, fmt.Errorf("failed to make request: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	logger.Log.WithFields(logrus.Fields{
 		"url":              reqURL,

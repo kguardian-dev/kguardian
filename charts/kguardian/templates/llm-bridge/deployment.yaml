@@ -48,8 +48,12 @@ spec:
           env:
             - name: PORT
               value: "{{ .Values.llmBridge.container.port }}"
-            - name: BROKER_URL
-              value: "http://{{ .Values.broker.service.name }}.{{ include "kguardian.namespace" . }}.svc.cluster.local:{{ .Values.broker.container.port }}"
+            # llm-bridge no longer talks to the broker directly — all
+            # tool calls route through the MCP server, which in turn
+            # talks to the broker. BROKER_URL was previously set here
+            # but never read by the llm-bridge process; removed to
+            # avoid the false impression that overriding it changes
+            # behavior. (The mcp-server has its own BROKER_URL.)
             - name: MCP_SERVER_URL
               value: "http://{{ .Values.mcpServer.service.name }}.{{ include "kguardian.namespace" . }}.svc.cluster.local:{{ .Values.mcpServer.service.port }}"
             - name: NODE_ENV

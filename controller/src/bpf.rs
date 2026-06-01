@@ -26,6 +26,61 @@ static NETWORK_SEND_FAILED: AtomicBool = AtomicBool::new(false);
 static SYSCALL_SEND_FAILED: AtomicBool = AtomicBool::new(false);
 static POLICY_DROP_SEND_FAILED: AtomicBool = AtomicBool::new(false);
 
+// Set when ANY receiver closes — signals the spawn_blocking poll loop
+// to exit on its next iteration. Without this, the poll loop would keep
+// running indefinitely after try_join! cancels its sibling tasks (the
+// underlying root cause of the spam #880 patched). Exiting forces the
+// JoinHandle to resolve, which in turn surfaces an error to main's
+// try_join! and the kubelet restarts the pod cleanly. Self-heal
+// pattern, mirrored from broker /health (#876).
+static EBPF_SHUTDOWN: AtomicBool = AtomicBool::new(false);
+
+/// Trip the eBPF shutdown flag from a receiver-closed callback. Idempotent.
+#[inline]
+fn signal_ebpf_shutdown() {
+    EBPF_SHUTDOWN.store(true, Ordering::Relaxed);
+}
+
+/// True once any send-failure handler has tripped the flag.
+#[inline]
+fn ebpf_shutdown_requested() -> bool {
+    EBPF_SHUTDOWN.load(Ordering::Relaxed)
+}
+
+/// A persistently-failing poll (e.g. the eBPF map fds being torn down as a
+/// node drains) returns immediately, so the loop backs off per error and
+/// gives up after this many consecutive failures — ~5s at the 100ms
+/// backoff — exiting for a clean kubelet restart rather than hot-spinning a
+/// CPU (the "cactus" full-CPU syscall-log spam reported when a node went
+/// down).
+const MAX_CONSECUTIVE_POLL_ERRORS: u32 = 50;
+
+/// What the poll loop should do after a ring-buffer poll error, given how
+/// many have occurred back-to-back. Extracted as a pure function so the
+/// warn-once + backoff + bail thresholds are unit-testable and can't
+/// silently regress back into a hot spin.
+#[derive(Debug, PartialEq, Eq)]
+enum PollErrorAction {
+    /// First failure in a streak: warn loudly (once), then back off.
+    WarnAndBackoff,
+    /// Subsequent failure: back off silently (warn already emitted).
+    BackoffSilently,
+    /// Sustained failure: stop the loop so the pod restarts cleanly.
+    Bail,
+}
+
+/// Decide the action after the Nth consecutive poll error. `consecutive`
+/// is the running count INCLUDING the current error (i.e. first error == 1).
+fn classify_poll_error(consecutive: u32, max: u32) -> PollErrorAction {
+    if consecutive >= max {
+        PollErrorAction::Bail
+    } else if consecutive == 1 {
+        PollErrorAction::WarnAndBackoff
+    } else {
+        PollErrorAction::BackoffSilently
+    }
+}
+
 /// Populate the syscall allowlist with security-relevant syscalls
 /// This dramatically reduces overhead by filtering out noisy syscalls
 fn populate_syscall_allowlist(syscall_map: &libbpf_rs::Map) -> Result<()> {
@@ -194,8 +249,9 @@ pub fn ebpf_handle(
 
                 if let Err(e) = network_event_sender.blocking_send(network_event_data) {
                     if !NETWORK_SEND_FAILED.swap(true, Ordering::Relaxed) {
-                        warn!(error = ?e, "network event channel closed; subsequent events will be dropped silently");
+                        warn!(error = ?e, "network event channel closed; signalling eBPF poll loop to exit");
                     }
+                    signal_ebpf_shutdown();
                 }
                 0 // Return 0 for success
             })
@@ -218,8 +274,9 @@ pub fn ebpf_handle(
                     unsafe { *(data.as_ptr() as *const SyscallEventData) };
                 if let Err(e) = syscall_event_sender.blocking_send(syscall_event_data) {
                     if !SYSCALL_SEND_FAILED.swap(true, Ordering::Relaxed) {
-                        warn!(error = ?e, "syscall event channel closed; subsequent events will be dropped silently");
+                        warn!(error = ?e, "syscall event channel closed; signalling eBPF poll loop to exit");
                     }
+                    signal_ebpf_shutdown();
                 }
                 0 // Return 0 for success
             })
@@ -244,8 +301,9 @@ pub fn ebpf_handle(
                         unsafe { *(data.as_ptr() as *const PolicyDropEvent) };
                     if let Err(e) = netpolicy_drop_sender.blocking_send(policy_drop_event) {
                         if !POLICY_DROP_SEND_FAILED.swap(true, Ordering::Relaxed) {
-                            warn!(error = ?e, "network policy drop event channel closed; subsequent events will be dropped silently");
+                            warn!(error = ?e, "network policy drop event channel closed; signalling eBPF poll loop to exit");
                         }
+                        signal_ebpf_shutdown();
                     }
                     0 // Return 0 for success
                 },
@@ -262,12 +320,48 @@ pub fn ebpf_handle(
             .map_err(|e| Error::Custom(format!("Failed to build ring buffer: {}", e)))?;
         info!("Network policy drop ring buffer initialized");
 
+        let mut consecutive_poll_errors: u32 = 0;
+
         loop {
+            // Honour the shutdown flag before polling so we exit promptly
+            // (within ~100ms) when a receiver-closed handler flips it.
+            // Returning Err propagates up through the JoinHandle into
+            // main's try_join!, which fails the controller and prompts
+            // the kubelet to restart the pod — clean recovery instead
+            // of a stuck process.
+            if ebpf_shutdown_requested() {
+                return Err(Error::Custom(
+                    "eBPF poll loop exiting: an event-channel receiver was closed (likely a sister task in try_join! errored). Pod will restart.".into(),
+                ));
+            }
             // Poll all ring buffers with a single call (much more efficient!)
+            //
+            // The 100ms timeout only throttles the SUCCESS path — libbpf's
+            // poll returns *immediately* on error (e.g. epoll on a
+            // torn-down map fd while a node is draining), so an
+            // unbacked-off `continue` here pegs a CPU at 100% and floods
+            // stderr (the old eprintln also bypassed RUST_LOG, so it could
+            // not be silenced). Back off per error, warn once via tracing,
+            // and bail after sustained failure so the kubelet restarts us
+            // cleanly instead of leaving a hot-spinning pod.
             if let Err(e) = ring_buffer.poll(std::time::Duration::from_millis(100)) {
-                eprintln!("Error polling ring buffer: {}", e);
+                consecutive_poll_errors += 1;
+                match classify_poll_error(consecutive_poll_errors, MAX_CONSECUTIVE_POLL_ERRORS) {
+                    PollErrorAction::Bail => {
+                        return Err(Error::Custom(format!(
+                            "ring buffer poll failed {} times consecutively (last: {}); exiting for restart",
+                            consecutive_poll_errors, e
+                        )));
+                    }
+                    PollErrorAction::WarnAndBackoff => {
+                        warn!(error = %e, "ring buffer poll failed; backing off (repeats suppressed until it recovers)");
+                    }
+                    PollErrorAction::BackoffSilently => {}
+                }
+                std::thread::sleep(std::time::Duration::from_millis(100));
                 continue;
             }
+            consecutive_poll_errors = 0;
 
             // Process any incoming messages from the pod watcher
             if let Ok(inum) = rx.try_recv() {
@@ -303,4 +397,105 @@ pub fn ebpf_handle(
             }
         }
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Mutex;
+
+    // These tests mutate process-wide AtomicBool statics, so they must
+    // not run concurrently. `cargo test` parallelises by default and CI
+    // does NOT pass --test-threads=1 for the controller, so we serialise
+    // each test body with a test-local mutex instead of relying on run
+    // order. unwrap_or_else(into_inner) keeps one failing test from
+    // poisoning the lock and cascading into the others.
+    static TEST_GUARD: Mutex<()> = Mutex::new(());
+
+    fn reset_state() {
+        EBPF_SHUTDOWN.store(false, Ordering::Relaxed);
+        NETWORK_SEND_FAILED.store(false, Ordering::Relaxed);
+        SYSCALL_SEND_FAILED.store(false, Ordering::Relaxed);
+        POLICY_DROP_SEND_FAILED.store(false, Ordering::Relaxed);
+    }
+
+    #[test]
+    fn shutdown_flag_starts_clear() {
+        let _guard = TEST_GUARD.lock().unwrap_or_else(|p| p.into_inner());
+        reset_state();
+        assert!(!ebpf_shutdown_requested());
+    }
+
+    #[test]
+    fn signal_then_observe() {
+        let _guard = TEST_GUARD.lock().unwrap_or_else(|p| p.into_inner());
+        reset_state();
+        signal_ebpf_shutdown();
+        assert!(ebpf_shutdown_requested());
+    }
+
+    #[test]
+    fn signal_is_idempotent() {
+        let _guard = TEST_GUARD.lock().unwrap_or_else(|p| p.into_inner());
+        reset_state();
+        signal_ebpf_shutdown();
+        signal_ebpf_shutdown();
+        signal_ebpf_shutdown();
+        assert!(ebpf_shutdown_requested());
+    }
+
+    #[test]
+    fn send_failed_latches_and_warn_fires_once() {
+        // The warn-once-then-suppress contract from #880 must continue
+        // to hold even with the shutdown flag added — a regression that
+        // dropped the latch would re-introduce the spam.
+        let _guard = TEST_GUARD.lock().unwrap_or_else(|p| p.into_inner());
+        reset_state();
+        // Simulate the "first failure" path: swap returns the OLD value.
+        // false → true ⇒ first call returns false; subsequent return true.
+        assert!(!NETWORK_SEND_FAILED.swap(true, Ordering::Relaxed));
+        assert!(NETWORK_SEND_FAILED.swap(true, Ordering::Relaxed));
+        assert!(NETWORK_SEND_FAILED.swap(true, Ordering::Relaxed));
+    }
+
+    #[test]
+    fn poll_error_warns_once_backs_off_then_bails() {
+        // The "cactus" guard: a torn-down map fd makes poll() return an
+        // error immediately, so the loop must (1) warn exactly once on the
+        // first error, (2) back off silently while it persists, and (3)
+        // bail at the threshold so the kubelet restarts the pod instead of
+        // a CPU hot-spinning + flooding the syscall log. No statics here,
+        // so no TEST_GUARD needed — the helper is pure.
+        const MAX: u32 = 50;
+        // First error → warn (and back off).
+        assert_eq!(classify_poll_error(1, MAX), PollErrorAction::WarnAndBackoff);
+        // Mid-streak errors → silent backoff, no repeated warns.
+        assert_eq!(
+            classify_poll_error(2, MAX),
+            PollErrorAction::BackoffSilently
+        );
+        assert_eq!(
+            classify_poll_error(MAX - 1, MAX),
+            PollErrorAction::BackoffSilently
+        );
+        // At and beyond the threshold → bail for a clean restart.
+        assert_eq!(classify_poll_error(MAX, MAX), PollErrorAction::Bail);
+        assert_eq!(classify_poll_error(MAX + 1, MAX), PollErrorAction::Bail);
+    }
+
+    #[test]
+    fn poll_error_never_silently_hot_spins() {
+        // Defensive: there is no consecutive-error count below the cap that
+        // resolves to "do nothing" — every error either warns, backs off,
+        // or bails. (A regression making the bail branch unreachable would
+        // re-create the original hang.)
+        for n in 1..=MAX_CONSECUTIVE_POLL_ERRORS {
+            let action = classify_poll_error(n, MAX_CONSECUTIVE_POLL_ERRORS);
+            if n >= MAX_CONSECUTIVE_POLL_ERRORS {
+                assert_eq!(action, PollErrorAction::Bail);
+            } else {
+                assert_ne!(action, PollErrorAction::Bail);
+            }
+        }
+    }
 }

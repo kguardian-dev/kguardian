@@ -66,6 +66,11 @@ spec:
                   x-kubernetes-preserve-unknown-fields: true
                 policyTypes:
                   type: array
+                  # Only two valid values exist; constraining the array
+                  # at admission stops accidental duplicates from being
+                  # accepted (and double-counted by the evaluator).
+                  maxItems: 2
+                  x-kubernetes-list-type: set
                   items:
                     type: string
                     enum: [Ingress, Egress]

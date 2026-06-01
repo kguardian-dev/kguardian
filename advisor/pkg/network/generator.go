@@ -3,9 +3,9 @@ package network
 import (
 	"fmt"
 
-	log "github.com/rs/zerolog/log"
 	api "github.com/kguardian-dev/kguardian/advisor/pkg/api"
 	"github.com/kguardian-dev/kguardian/advisor/pkg/common"
+	log "github.com/rs/zerolog/log"
 	"sigs.k8s.io/yaml"
 )
 

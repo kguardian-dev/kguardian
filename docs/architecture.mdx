@@ -276,14 +276,21 @@ kguardian-controller-yyyyy (node-2)
 kguardian-controller-zzzzz (node-3)
 
 # Deployment: Broker with replicas
-kguardian-broker-aaaaaa
-kguardian-broker-bbbbbb
+kguardian-broker-aaaaaa-zzzz1
+kguardian-broker-aaaaaa-zzzz2
 
-# StatefulSet: PostgreSQL
-kguardian-postgresql-0
+# Deployment: PostgreSQL (kguardian-db.<ns>.svc.cluster.local:5432)
+kguardian-db-bbbbbb-yyyyy
 
-# Deployment: UI
-kguardian-ui-cccccc
+# Deployment: Web frontend
+kguardian-frontend-cccccc-xxxxx
+
+# Deployment: Evaluator (when audit mode is enabled)
+kguardian-evaluator-dddddd-wwwww
+
+# Deployment: MCP server + LLM bridge (when AI assistant is enabled)
+kguardian-mcp-server-eeeeee-vvvvv
+kguardian-llm-bridge-ffffff-uuuuu
 ```
 
 ### High Availability

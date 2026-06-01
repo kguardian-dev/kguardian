@@ -2,12 +2,13 @@ package network
 
 import (
 	"fmt"
+	"sort"
 
 	ciliumv2 "github.com/cilium/cilium/pkg/k8s/apis/cilium.io/v2"
 	"github.com/cilium/cilium/pkg/labels"
 	ciliumapi "github.com/cilium/cilium/pkg/policy/api"
-	log "github.com/rs/zerolog/log"
 	"github.com/kguardian-dev/kguardian/advisor/pkg/api"
+	log "github.com/rs/zerolog/log"
 	networkingv1 "k8s.io/api/networking/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
 )
@@ -183,55 +184,46 @@ func (g *CiliumPolicyGenerator) processTrafficRules(podTraffic []api.PodTraffic,
 	return ingressRules, egressRules
 }
 
-// addOrUpdateRule adds a port to an existing rule for a peer or creates a new rule
+// addOrUpdateRule delegates to the shared mergeOrAppendRule helper.
+// Kept as a method for backwards compatibility with existing tests +
+// call sites; the underlying logic lives in types.go so both generators
+// stay in lockstep.
 func (g *CiliumPolicyGenerator) addOrUpdateRule(rules []NetworkPolicyRule, peer string, port intstr.IntOrString, protocolStr string) []NetworkPolicyRule {
-	protocol := protocolPtr(protocolStr)
-
-	for i := range rules {
-		if rules[i].PeerIP == peer {
-			// Found rule for the peer, check if port/protocol combo exists
-			portExists := false
-			for _, existingPort := range rules[i].Ports {
-				if existingPort.Port != nil && existingPort.Port.String() == port.String() &&
-					existingPort.Protocol != nil && *existingPort.Protocol == *protocol {
-					portExists = true
-					break
-				}
-			}
-			if !portExists {
-				// Add port to existing rule
-				rules[i].Ports = append(rules[i].Ports, networkingv1.NetworkPolicyPort{
-					Port:     &port,
-					Protocol: protocol,
-				})
-			}
-			return rules // Rule updated or port already existed
-		}
-	}
-
-	// No rule found for this peer, create a new one
-	newRule := NetworkPolicyRule{
-		PeerIP: peer,
-		Ports: []networkingv1.NetworkPolicyPort{
-			{
-				Port:     &port,
-				Protocol: protocol,
-			},
-		},
-	}
-	return append(rules, newRule)
+	return mergeOrAppendRule(rules, peer, port, protocolStr)
 }
 
-// createEndpointSelector creates a Cilium EndpointSelector from pod labels
+// createEndpointSelector creates a Cilium EndpointSelector from pod labels.
+//
+// Iterates the input map in sorted-key order so the resulting
+// LabelArray (a slice) is byte-identical across regenerations of the
+// same policy. Without the sort, Go's randomised map iteration meant
+// the order in which labels were appended depended on map-hash state
+// — different across processes and even across edits to the labels
+// themselves. The downstream NewESFromLabels preserves slice order
+// in some of its internal representations, so emit positions in the
+// generated YAML could drift between runs, surfacing as spurious
+// kubectl/git diffs even for label sets that didn't change. Same UX-
+// stability class as the peer-IP and port-list sorts.
+//
+// The standard generator's createNetworkPolicyPeer side doesn't need
+// this fix: it constructs metav1.LabelSelector.MatchLabels (a Go map),
+// and Go's JSON encoder sorts map keys, so the output YAML is already
+// deterministic there.
 func (g *CiliumPolicyGenerator) createEndpointSelector(podLabels map[string]string) ciliumapi.EndpointSelector {
 	if len(podLabels) == 0 {
 		log.Warn().Msg("Pod has no labels, using empty EndpointSelector")
 		return ciliumapi.EndpointSelector{}
 	}
 
+	keys := make([]string, 0, len(podLabels))
+	for k := range podLabels {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+
 	labelArray := make(labels.LabelArray, 0, len(podLabels))
-	for key, value := range podLabels {
-		labelArray = append(labelArray, labels.NewLabel(key, value, labels.LabelSourceK8s))
+	for _, key := range keys {
+		labelArray = append(labelArray, labels.NewLabel(key, podLabels[key], labels.LabelSourceK8s))
 	}
 
 	return ciliumapi.NewESFromLabels(labelArray...)
@@ -247,8 +239,12 @@ func (g *CiliumPolicyGenerator) transformToCiliumIngressRules(rules []NetworkPol
 		peerRules[rule.PeerIP] = append(peerRules[rule.PeerIP], rule.Ports...)
 	}
 
-	// Create ingress rules
-	for peerIP, ports := range peerRules {
+	// Iterate in sorted peer-IP order — see sortedKeys in
+	// standard_policy.go for the determinism rationale. Same fix
+	// class applies to Cilium output: regenerating the same policy
+	// must produce identical YAML so kubectl diff is clean.
+	for _, peerIP := range sortedKeys(peerRules) {
+		ports := peerRules[peerIP]
 		ingressRule := g.createCiliumIngressRuleForPeer(peerIP, ports)
 		if ingressRule != nil {
 			ingressRules = append(ingressRules, *ingressRule)
@@ -268,8 +264,9 @@ func (g *CiliumPolicyGenerator) transformToCiliumEgressRules(rules []NetworkPoli
 		peerRules[rule.PeerIP] = append(peerRules[rule.PeerIP], rule.Ports...)
 	}
 
-	// Create egress rules
-	for peerIP, ports := range peerRules {
+	// Sorted iteration — see ingress sibling.
+	for _, peerIP := range sortedKeys(peerRules) {
+		ports := peerRules[peerIP]
 		egressRule := g.createCiliumEgressRuleForPeer(peerIP, ports)
 		if egressRule != nil {
 			egressRules = append(egressRules, *egressRule)
@@ -363,11 +360,29 @@ func (g *CiliumPolicyGenerator) resolvePeerForCilium(peerIP string) ([]ciliumapi
 	return nil, ciliumapi.CIDRSlice{cidr}
 }
 
-// convertPortsToCiliumPortRules converts standard ports to Cilium PortRules
+// convertPortsToCiliumPortRules converts standard ports to Cilium PortRules.
+//
+// Routes the input through deduplicatePorts first so:
+//   - Duplicate (port, protocol) pairs from the broker — common when
+//     /pod/traffic/{name} returns multiple events for the same flow —
+//     don't leak into the generated YAML as redundant PortRule entries.
+//   - The output ordering is deterministic (port ASC, protocol ASC, named
+//     after numeric). Without this, the Cilium YAML's ToPorts/FromPorts
+//     list reshuffles between regenerations of the same input, producing
+//     spurious kubectl/git diffs — same UX problem the standard generator
+//     hit in 87bb514e.
+//
+// `ports` from the caller is the per-peer ports slice built by
+// transformToCilium{Ingress,Egress}Rules, which had no dedup/sort —
+// previously each call wrote duplicate PortRule entries verbatim.
+// The nil-port/nil-protocol skip below is now redundant (the dedup
+// helper handles it) but kept as a defense-in-depth assertion: any
+// future refactor that bypasses dedup still won't crash on nil deref.
 func (g *CiliumPolicyGenerator) convertPortsToCiliumPortRules(ports []networkingv1.NetworkPolicyPort) ciliumapi.PortRules {
-	portRules := make(ciliumapi.PortRules, 0, len(ports))
+	deduped := deduplicatePorts(ports)
+	portRules := make(ciliumapi.PortRules, 0, len(deduped))
 
-	for _, port := range ports {
+	for _, port := range deduped {
 		if port.Port == nil || port.Protocol == nil {
 			log.Warn().Msg("Skipping port with nil port or protocol")
 			continue

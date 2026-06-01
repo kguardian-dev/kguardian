@@ -9,6 +9,7 @@ interface Props {
 }
 
 type VerdictTab = 'WouldDeny' | 'Allow' | 'All';
+type DirectionFilter = 'All' | 'Ingress' | 'Egress';
 
 /**
  * AuditVerdictsPanel — modal table of evaluator verdicts.
@@ -35,6 +36,11 @@ const AuditVerdictsPanel: React.FC<Props> = ({ isOpen, onClose }) => {
   const [error, setError] = useState<string | null>(null);
   const [policyFilter, setPolicyFilter] = useState('');
   const [verdictTab, setVerdictTab] = useState<VerdictTab>('WouldDeny');
+  // Direction is filtered server-side: the broker's /audit/verdicts
+  // endpoint accepts a `direction` query param backed by
+  // idx_audit_verdicts_verdict_time, so narrowing here avoids burning
+  // the 400-row cap on rows we'd discard client-side.
+  const [directionFilter, setDirectionFilter] = useState<DirectionFilter>('All');
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -43,17 +49,21 @@ const AuditVerdictsPanel: React.FC<Props> = ({ isOpen, onClose }) => {
       // Fetch both verdicts in one shot; client-side filter by tab.
       // 400-row cap leaves headroom for the busiest pol/window combo
       // we expect operators to triage in one sitting.
-      const rows = await api.getAuditVerdicts({ limit: 400 });
+      const rows = await api.getAuditVerdicts({
+        limit: 400,
+        ...(directionFilter !== 'All' ? { direction: directionFilter } : {}),
+      });
       setVerdicts(rows);
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Failed to load audit verdicts');
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [directionFilter]);
 
   useEffect(() => {
     if (!isOpen) return;
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     void load();
   }, [isOpen, load]);
 
@@ -141,32 +151,56 @@ const AuditVerdictsPanel: React.FC<Props> = ({ isOpen, onClose }) => {
           </div>
         </header>
 
-        {/* Verdict tabs */}
-        <nav className="flex border-b border-hubble-border bg-hubble-dark px-2" aria-label="Verdict filter">
-          <VerdictTabButton
-            active={verdictTab === 'WouldDeny'}
-            onClick={() => setVerdictTab('WouldDeny')}
-            icon={<AlertTriangle className="w-4 h-4" />}
-            color="text-hubble-warning"
-            label="Would-Deny"
-            count={counts.deny}
-          />
-          <VerdictTabButton
-            active={verdictTab === 'Allow'}
-            onClick={() => setVerdictTab('Allow')}
-            icon={<CheckCircle2 className="w-4 h-4" />}
-            color="text-hubble-accent"
-            label="Allow"
-            count={counts.allow}
-          />
-          <VerdictTabButton
-            active={verdictTab === 'All'}
-            onClick={() => setVerdictTab('All')}
-            icon={null}
-            color="text-secondary"
-            label="All"
-            count={counts.total}
-          />
+        {/* Verdict tabs + Direction filter */}
+        <nav
+          className="flex items-center justify-between border-b border-hubble-border bg-hubble-dark px-2"
+          aria-label="Verdict filter"
+        >
+          <div className="flex">
+            <VerdictTabButton
+              active={verdictTab === 'WouldDeny'}
+              onClick={() => setVerdictTab('WouldDeny')}
+              icon={<AlertTriangle className="w-4 h-4" />}
+              color="text-hubble-warning"
+              label="Would-Deny"
+              count={counts.deny}
+            />
+            <VerdictTabButton
+              active={verdictTab === 'Allow'}
+              onClick={() => setVerdictTab('Allow')}
+              icon={<CheckCircle2 className="w-4 h-4" />}
+              color="text-hubble-accent"
+              label="Allow"
+              count={counts.allow}
+            />
+            <VerdictTabButton
+              active={verdictTab === 'All'}
+              onClick={() => setVerdictTab('All')}
+              icon={null}
+              color="text-secondary"
+              label="All"
+              count={counts.total}
+            />
+          </div>
+          <div
+            className="flex items-center gap-2 pr-1"
+            role="group"
+            aria-label="Direction filter"
+          >
+            <span className="text-[11px] font-medium uppercase tracking-wide text-tertiary">
+              Direction
+            </span>
+            <div className="flex overflow-hidden rounded border border-hubble-border">
+              {(['All', 'Ingress', 'Egress'] as const).map(d => (
+                <DirectionButton
+                  key={d}
+                  active={directionFilter === d}
+                  onClick={() => setDirectionFilter(d)}
+                  label={d}
+                />
+              ))}
+            </div>
+          </div>
         </nav>
 
         {/* Body */}
@@ -315,6 +349,26 @@ const VerdictTabButton: React.FC<VerdictTabButtonProps> = ({ active, onClick, ic
     {icon && <span className={color}>{icon}</span>}
     {label}
     <span className={`text-xs tabular-nums ${active ? 'text-tertiary' : 'text-tertiary'}`}>({count})</span>
+  </button>
+);
+
+interface DirectionButtonProps {
+  active: boolean;
+  onClick: () => void;
+  label: string;
+}
+
+const DirectionButton: React.FC<DirectionButtonProps> = ({ active, onClick, label }) => (
+  <button
+    onClick={onClick}
+    aria-pressed={active}
+    className={`px-2.5 py-1 text-xs font-medium transition-colors border-r border-hubble-border last:border-r-0 ${
+      active
+        ? 'bg-hubble-accent/20 text-hubble-accent'
+        : 'text-secondary hover:bg-hubble-card hover:text-primary'
+    }`}
+  >
+    {label}
   </button>
 );
 

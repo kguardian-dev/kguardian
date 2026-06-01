@@ -2,6 +2,7 @@ import axios from "axios";
 import type { ChatRequest, ChatResponse } from "../types/index.js";
 import { LLMProvider } from "../types/index.js";
 import { BrokerClient } from "../brokerClient.js";
+import { log } from "../logger.js";
 import { serializeToolResult } from "./truncate.js";
 
 interface AnthropicTool {
@@ -16,7 +17,12 @@ export async function callAnthropic(
   request: ChatRequest,
   brokerClient: BrokerClient
 ): Promise<ChatResponse> {
-  const apiKey = process.env.ANTHROPIC_API_KEY;
+  // Trim before the empty-check so an operator-set "  " (whitespace
+  // intended to disable the provider) doesn't slip through. Pre-fix
+  // a whitespace-only key passed `if (!apiKey)` and was sent verbatim
+  // to api.anthropic.com, producing a 401 deep in the call chain
+  // rather than a clear "not configured" message at request entry.
+  const apiKey = process.env.ANTHROPIC_API_KEY?.trim();
   if (!apiKey) {
     throw new Error("ANTHROPIC_API_KEY not configured");
   }
@@ -66,7 +72,7 @@ export async function callAnthropic(
         { headers, timeout: 120000 }
       );
     } catch (error: any) {
-      console.error("Anthropic API Error:", error.response?.data?.error?.message || error.message);
+      log.error("Anthropic API Error:", error.response?.data?.error?.message || error.message);
       throw new Error(`Anthropic API error: ${error.response?.data?.error?.message || error.message}`, { cause: error });
     }
 

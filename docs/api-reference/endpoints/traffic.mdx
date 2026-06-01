@@ -1,16 +1,72 @@
 ---
 title: "Traffic Endpoints"
-description: "Query network traffic data"
+description: "Add observed pod-traffic events and query them"
 ---
 
-## GET /pod/traffic/:pod_ip
+## POST /pod/traffic
 
-Get all observed traffic for a pod by IP address.
+Insert a single observed traffic event. The kguardian controller
+calls this directly when a network event arrives from one of the
+eBPF ring buffers; external integrations rarely need it (prefer
+`POST /pod/traffic/batch` below for bulk).
+
+Duplicate events (same `pod_ip`, `pod_port`, `traffic_type`,
+`traffic_in_out_ip`, `traffic_in_out_port`, `ip_protocol`,
+`decision`) are deduped server-side and reported back as the
+inserted-or-Null result. The audit forwarder (when
+`evaluator.enabled: true`) is fired only for events that were
+genuinely new.
+
+### Request
+
+```json
+{
+  "uuid": "550e8400-e29b-41d4-a716-446655440000",
+  "pod_name": "my-app-7d9f6b8c4-x5z2w",
+  "pod_namespace": "production",
+  "pod_ip": "10.244.1.5",
+  "pod_port": "8080",
+  "ip_protocol": "TCP",
+  "traffic_type": "INGRESS",
+  "traffic_in_out_ip": "10.244.2.10",
+  "traffic_in_out_port": "52341",
+  "decision": "ALLOW",
+  "time_stamp": "2026-05-12T10:32:14.123456"
+}
+```
+
+`traffic_type` is `"INGRESS"` (matches the upstream NetworkPolicy
+casing) or `"EGRESS"`; `decision` is `"ALLOW"` (eBPF observed an
+allow) or `"DROP"` (NetworkPolicy dropped the flow before it
+reached the destination, observed via the netpolicy-drop probe).
+
+## POST /pod/traffic/batch
+
+Bulk variant taking a JSON array of the same shape. The controller
+batches up to 100 events at a time (or one second elapsed since
+last flush, whichever first); call sites talking to a remote
+broker should use this path to amortise the round-trip.
+
+Response is an integer count of the rows actually inserted after
+dedup.
+
+## GET /pod/traffic
+
+Get every observed traffic row. Returns rows ordered
+`(time_stamp DESC, uuid DESC)` — newest first, with the UUID
+primary key as a tiebreak for microsecond-collision rows from a
+single batch ingest.
+
+<Warning>
+Currently unbounded — no LIMIT, no pagination. On a busy cluster
+with months of retained traffic this can be tens of MB to GB of
+JSON. Prefer the per-pod variant for any interactive use.
+</Warning>
 
 ### Example
 
 ```bash
-curl http://localhost:9090/pod/traffic/10.244.1.5
+curl http://localhost:9090/pod/traffic
 ```
 
 ### Response
@@ -18,38 +74,32 @@ curl http://localhost:9090/pod/traffic/10.244.1.5
 ```json
 [
   {
-    "uuid": "123e4567-e89b-12d3-a456-426614174000",
-    "pod_name": "my-app",
-    "pod_ip": "10.244.1.5",
-    "pod_namespace": "production",
-    "pod_port": "8080",
-    "traffic_type": "INGRESS",
-    "traffic_in_out_ip": "10.244.2.10",
-    "traffic_in_out_port": "52341",
-    "ip_protocol": "TCP"
-  },
-  {
     "uuid": "234e5678-e89b-12d3-a456-426614174001",
     "pod_name": "my-app",
-    "pod_ip": "10.244.1.5",
     "pod_namespace": "production",
+    "pod_ip": "10.244.1.5",
     "pod_port": "35821",
+    "ip_protocol": "TCP",
     "traffic_type": "EGRESS",
     "traffic_in_out_ip": "10.244.3.15",
     "traffic_in_out_port": "5432",
-    "ip_protocol": "TCP"
+    "decision": "ALLOW",
+    "time_stamp": "2026-05-12T10:32:14.123456"
   }
 ]
 ```
 
----
+## GET /pod/traffic/&#123;name&#125;
 
-## GET /pod/traffic/name/:namespace/:pod_name
-
-Get traffic by pod name and namespace.
-
-### Example
+Get traffic for a single pod by name. The actix route captures
+`name` directly — no separate namespace path segment — so:
 
 ```bash
-curl http://localhost:9090/pod/traffic/name/production/my-app
+curl http://localhost:9090/pod/traffic/my-app-7d9f6b8c4-x5z2w
 ```
+
+Same row shape as `GET /pod/traffic` above; same ordering.
+
+A name that doesn't match any rows returns 404 with body
+`"No data found"`. The frontend's per-pod traffic view handles
+this transparently by falling back to an empty list.

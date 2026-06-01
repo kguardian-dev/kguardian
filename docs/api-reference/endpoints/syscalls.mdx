@@ -1,55 +1,61 @@
 ---
 title: "Syscall Endpoints"
-description: "Retrieve syscall observations"
+description: "Submit and retrieve syscall observations"
 ---
 
-## POST /pods/syscalls
+## POST /pod/syscalls
 
-Add syscall observation data.
+Submit a batch of syscall observations. The kguardian controller
+calls this every 10 seconds with the cache diff (only syscalls
+not yet sent for the pod). External integrations rarely need it.
+
+Body is a JSON array — the broker iterates each entry inside a
+single transaction, upserting per pod_name (the primary key on
+`pod_syscalls`). Entries with empty or whitespace-only `pod_name`
+are skipped with a warn log rather than failing the batch.
 
 ### Request
 
 ```json
-{
-  "pod_name": "my-app",
-  "pod_namespace": "production",
-  "syscalls": ["read", "write", "open", "close", "socket"],
-  "arch": "x86_64"
-}
+[
+  {
+    "pod_name": "my-app-7d9f6b8c4-x5z2w",
+    "pod_namespace": "production",
+    "syscalls": ["read", "write", "open", "close", "socket"],
+    "arch": "x86_64",
+    "time_stamp": "2026-05-12T10:32:14.123456"
+  }
+]
 ```
 
----
+## GET /pod/syscalls/&#123;name&#125;
 
-## GET /pod/syscalls/name/:namespace/:pod_name
-
-Get observed syscalls for a pod.
+Get observed syscalls for a single pod. The actix route captures
+`name` directly — no separate namespace path segment.
 
 ### Example
 
 ```bash
-curl http://localhost:9090/pod/syscalls/name/production/my-app
+curl http://localhost:9090/pod/syscalls/my-app-7d9f6b8c4-x5z2w
 ```
 
 ### Response
 
 ```json
-{
-  "pod_name": "my-app",
-  "pod_namespace": "production",
-  "syscalls": [
-    "accept",
-    "bind",
-    "brk",
-    "close",
-    "connect",
-    "listen",
-    "mmap",
-    "munmap",
-    "open",
-    "read",
-    "socket",
-    "write"
-  ],
-  "arch": "x86_64"
-}
+[
+  {
+    "pod_name": "my-app-7d9f6b8c4-x5z2w",
+    "pod_namespace": "production",
+    "syscalls": "accept,bind,brk,close,connect,listen,mmap,munmap,open,read,socket,write",
+    "arch": "x86_64",
+    "time_stamp": "2026-05-12T10:32:14.123456"
+  }
+]
 ```
+
+Syscalls on the wire are a comma-joined string (compact storage in
+a single VARCHAR column). The kguardian advisor's seccomp generator
+splits on `,` when reading this endpoint.
+
+A name that doesn't match any rows returns 404 with body
+`"No data found"`.

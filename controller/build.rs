@@ -3,7 +3,6 @@ use std::ffi::OsStr;
 use std::path::PathBuf;
 
 use libbpf_cargo::SkeletonBuilder;
-use vmlinux;
 
 const SYSCALL_SRC: &str = "src/bpf/syscall.bpf.c";
 const TCP_PROBE_SRC: &str = "src/bpf/network_probe.bpf.c";

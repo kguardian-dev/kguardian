@@ -1,0 +1,82 @@
+{{- if .Values.broker.networkPolicy.enabled }}
+---
+# Ingress NetworkPolicy for the broker.
+#
+# The broker HTTP API is unauthenticated (it relies on being an
+# in-cluster-only service), so we restrict who may reach it to the
+# kguardian components that legitimately call it. Without this, any pod
+# that can route to the broker Service could read collected
+# pod/traffic/syscall telemetry or inject forged rows that poison the
+# audit verdicts.
+#
+# Ingress-only by design: egress (PostgreSQL, DNS, the evaluator
+# round-trip) is intentionally left unrestricted so this policy can never
+# break the broker's own outbound traffic. Requires a NetworkPolicy-
+# enforcing CNI (Cilium, Calico, ...). Selectors match pods in the
+# broker's own namespace, where all kguardian components are deployed.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ .Values.broker.service.name }}
+  namespace: {{ include "kguardian.namespace" . }}
+  labels:
+    {{- include "kguardian.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: {{ .Values.broker.service.name }}
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        # controller DaemonSet — writes pod traffic / syscalls / specs.
+        # Its pod label is the literal "kguardian" (not a *.service.name),
+        # so it is hard-coded here on purpose.
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: kguardian
+        # mcp-server — reads telemetry to answer MCP tool queries.
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: {{ .Values.mcpServer.service.name }}
+        # frontend — reads telemetry directly for the dashboard.
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: {{ .Values.frontend.service.name }}
+        # the chart's own helm-test pod, which probes the broker /health
+        # endpoint (templates/tests/test-connection.yaml). Without this the
+        # policy would fail `helm test` and thus the release. Scoped to THIS
+        # release's Helm-managed test pod — all three labels are set by
+        # kguardian.labels — so a stray component=helm-test pod from another
+        # chart in the namespace can't ride this grant.
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/instance: {{ .Release.Name }}
+              app.kubernetes.io/managed-by: {{ .Release.Service }}
+              app.kubernetes.io/component: helm-test
+        {{- range .Values.broker.networkPolicy.allowedNodeCIDRs }}
+        # The controller is a hostNetwork eBPF DaemonSet, so it posts to the
+        # broker from the NODE IP — a podSelector can never match it (CNIs
+        # see node identity, not the pod label). It must be admitted by node
+        # CIDR. This is why the policy is opt-in: these CIDRs are cluster-
+        # specific and there is no safe default that keeps the controller
+        # working. Set broker.networkPolicy.allowedNodeCIDRs to your nodes'
+        # network(s).
+        - ipBlock:
+            cidr: {{ . | quote }}
+        {{- end }}
+      ports:
+        - port: http
+          protocol: TCP
+    {{- with .Values.broker.networkPolicy.allowMetricsFrom }}
+    # Optional extra scrapers (e.g. Prometheus) for /metrics, which is
+    # served on the same broker HTTP port. Populate
+    # broker.networkPolicy.allowMetricsFrom when
+    # broker.metrics.serviceMonitor.enabled is true.
+    - from:
+        {{- toYaml . | nindent 8 }}
+      ports:
+        - port: http
+          protocol: TCP
+    {{- end }}
+{{- end }}

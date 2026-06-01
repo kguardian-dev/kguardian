@@ -51,7 +51,14 @@ pub async fn process_syscall_event(
 ) -> Result<(), Error> {
     let pod_name = pod_data.status.pod_name.to_string();
     let syscall_number = data.sysnbr;
-    let syscall_name = get_syscall_name(syscall_number.try_into().unwrap())
+    // u32 → i32 truncation. Real syscall numbers fit in 16 bits (the
+    // highest defined Linux syscall is well under 1000). The previous
+    // .try_into().unwrap() would panic if a hostile or buggy kernel
+    // ever emitted u32::MAX; fall back to the numeric form via
+    // get_syscall_name's None branch instead.
+    let syscall_name = i32::try_from(syscall_number)
+        .ok()
+        .and_then(get_syscall_name)
         .unwrap_or_else(|| format!("{}", syscall_number));
 
     let syscalls = SYSCALL_CACHE
@@ -79,6 +86,15 @@ pub async fn send_syscall_cache_periodically() -> Result<(), Error> {
     let interval_duration = std::time::Duration::from_secs(10);
     for _ in 0.. {
         let mut batch = Vec::new();
+        // Track which (pod, snapshot) pairs to mark as last_sent
+        // AFTER the POST succeeds. The pre-fix code eagerly updated
+        // last_sent inside the loop, before the POST — so a
+        // transient broker failure permanently dropped the batch:
+        // next iteration the diff `syscalls_lock != last_sent_lock`
+        // was false (we'd just made them equal), no retry, broker
+        // never got those syscalls. Stable-state pods (no new
+        // syscalls between iterations) lost data.
+        let mut pending_updates: Vec<(String, HashSet<String>)> = Vec::new();
 
         for (pod_name, syscalls) in SYSCALL_CACHE.iter() {
             let syscalls_lock = syscalls.lock().await;
@@ -87,10 +103,11 @@ pub async fn send_syscall_cache_periodically() -> Result<(), Error> {
                     Arc::new(Mutex::new(HashSet::new()))
                 })
                 .await;
-            let mut last_sent_lock = last_sent.lock().await;
+            let last_sent_lock = last_sent.lock().await;
 
             if *syscalls_lock != *last_sent_lock {
-                let syscall_names: Vec<String> = syscalls_lock.iter().cloned().collect();
+                let snapshot = syscalls_lock.clone();
+                let syscall_names: Vec<String> = snapshot.iter().cloned().collect();
                 let z = json!(SyscallData {
                     pod_name: pod_name.to_string(),
                     pod_namespace: "".to_string(), // We will not store the namespace and rather read it from the pod_details table
@@ -99,14 +116,36 @@ pub async fn send_syscall_cache_periodically() -> Result<(), Error> {
                     time_stamp: Utc::now().naive_utc()
                 });
                 batch.push(z);
-                debug!("Sending batch of {} syscalls to API", batch.len());
-                *last_sent_lock = syscalls_lock.clone();
+                pending_updates.push((pod_name.to_string(), snapshot));
             }
         }
 
         if !batch.is_empty() {
-            if let Err(e) = api_post_call(json!(batch), "pod/syscalls").await {
-                error!("Failed to post Syscall Event: {}", e);
+            debug!("Sending batch of {} syscalls to API", batch.len());
+            match api_post_call(json!(batch), "pod/syscalls").await {
+                Ok(()) => {
+                    // POST succeeded — persist the snapshots as
+                    // last_sent so we don't re-send them next pass.
+                    // No race: this loop is the only writer of
+                    // LAST_SENT_CACHE entries. If new syscalls
+                    // arrived between POST and update, the next
+                    // iteration's diff catches them.
+                    for (pod_name, snapshot) in pending_updates {
+                        let last_sent = LAST_SENT_CACHE
+                            .get_with(pod_name, async { Arc::new(Mutex::new(HashSet::new())) })
+                            .await;
+                        *last_sent.lock().await = snapshot;
+                    }
+                }
+                Err(e) => {
+                    // Don't touch last_sent. Next iteration will see
+                    // the same diff and retry.
+                    error!(
+                        "Failed to post Syscall Event: {}; {} pod batches will retry next pass",
+                        e,
+                        pending_updates.len()
+                    );
+                }
             }
         }
         tokio::time::sleep(interval_duration).await;

@@ -68,6 +68,8 @@ spec:
                   x-kubernetes-preserve-unknown-fields: true
                 policyTypes:
                   type: array
+                  maxItems: 2
+                  x-kubernetes-list-type: set
                   items:
                     type: string
                     enum: [Ingress, Egress]

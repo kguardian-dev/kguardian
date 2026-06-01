@@ -23,8 +23,13 @@ kubectl port-forward -n kguardian svc/kguardian-broker 9090:9090
 ## Authentication
 
 <Warning>
-The current version (v1.0.0) has **no authentication**. The API should only be accessible within the cluster network. For production deployments, consider using NetworkPolicies, service mesh, or an API gateway with authentication.
+The broker currently has **no authentication**. The API should only be accessible within the cluster network. For production deployments, consider using NetworkPolicies, service mesh, or an API gateway with authentication.
 </Warning>
+
+For the broker's current released version, see
+[`broker/VERSION`](https://github.com/kguardian-dev/kguardian/blob/main/broker/VERSION)
+— component versions evolve independently per the
+[release strategy](https://github.com/kguardian-dev/kguardian/blob/main/RELEASES.md).
 
 ## API Endpoints
 
@@ -41,6 +46,9 @@ The current version (v1.0.0) has **no authentication**. The API should only be a
   <Card title="Services" icon="cloud" href="/api-reference/endpoints/services">
     Service IP to metadata mapping
   </Card>
+  <Card title="Audit Verdicts" icon="shield-check" href="/api-reference/endpoints/audit-verdicts">
+    Query Would-Deny / Allow verdicts from the audit evaluator
+  </Card>
 </CardGroup>
 
 ## Response Format
@@ -56,12 +64,28 @@ All responses are JSON with standard HTTP status codes:
 
 ### Pagination
 
-Currently not supported. All matching records are returned.
+Most endpoints return all matching rows without paging — fine for
+small / medium clusters but unbounded on busy ones. `/audit/verdicts`
+is the exception: it supports a `limit` query parameter (default 100,
+max 500) and orders by `(observed_at DESC, id DESC)` for stable
+cursor-style traversal. The `/pod/info`, `/svc/info`, `/pod/traffic`
+and `/pod/traffic/{name}` endpoints have stable ordering too — see
+each page for the sort key — but no LIMIT yet.
 
 ### Filtering
 
-Some endpoints support filtering by namespace, pod name, or time range (coming soon).
+`/audit/verdicts` supports server-side filtering by policy,
+namespace, verdict, and direction (index-backed; see the endpoint
+page for the full contract).
+
+The pod-name- and IP-scoped GETs already filter at the URL: prefer
+`GET /pod/traffic/{name}` over `GET /pod/traffic` + client-side
+filter on any non-trivial cluster.
 
 ### Rate Limiting
 
-No rate limiting is currently enforced.
+No rate limiting is currently enforced at the broker. The audit
+forwarder bounds concurrent in-flight `/evaluate` calls via the
+`AUDIT_INFLIGHT_PERMITS` semaphore (default 16) and exposes the
+gauge as `broker_audit_inflight_available` on `/metrics` so
+operators can spot saturation.

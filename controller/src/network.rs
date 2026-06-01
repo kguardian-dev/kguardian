@@ -8,7 +8,16 @@ use std::sync::Arc;
 use tracing::{debug, error};
 use uuid::Uuid;
 
-// Network event kind constants (from eBPF program)
+// Network event kind constants (from eBPF program). The eBPF probe in
+// network_probe.bpf.c emits these values; userspace must agree on the
+// numeric → (direction, protocol) mapping.
+//
+// Known gap: there is NO kind for INGRESS UDP. The eBPF probe traces
+// `udp_sendmsg` and emits kind=3, treated here as EGRESS UDP. Inbound
+// UDP (e.g. CoreDNS receiving queries, syslog, NTP) is not tracked.
+// Adding it requires a new udp_recvmsg-side tracepoint in the eBPF
+// program — out of scope for this comment, but pin the gap so a
+// future contributor doesnt assume INGRESS_UDP exists silently.
 const KIND_EGRESS_TCP: u16 = 1;
 const KIND_INGRESS_TCP: u16 = 2;
 const KIND_EGRESS_UDP: u16 = 3;
@@ -92,8 +101,16 @@ pub async fn handle_network_events(
                     }
                 }
 
-                // Flush if batch is full
-                if batch.len() >= BATCH_SIZE {
+                // Flush when (a) batch is full OR (b) BATCH_TIMEOUT
+                // has passed since the last flush. Pre-fix, only the
+                // batch-full path was checked here — events arriving
+                // every <BATCH_TIMEOUT with sub-batch-size volume kept
+                // resetting the tokio::time::timeout window, so the
+                // Err(_) branch never fired and the batch sat
+                // unflushed indefinitely. Steady-state low-volume
+                // traffic (typical for a pod doing periodic checks)
+                // would never make it to the broker.
+                if should_flush(batch.len(), last_flush.elapsed(), BATCH_SIZE, BATCH_TIMEOUT) {
                     flush_network_batch(&mut batch).await;
                     last_flush = tokio::time::Instant::now();
                 }
@@ -107,7 +124,7 @@ pub async fn handle_network_events(
             }
             Err(_) => {
                 // Timeout reached, flush if we have any events
-                if !batch.is_empty() && last_flush.elapsed() >= BATCH_TIMEOUT {
+                if !batch.is_empty() {
                     flush_network_batch(&mut batch).await;
                     last_flush = tokio::time::Instant::now();
                 }
@@ -117,6 +134,47 @@ pub async fn handle_network_events(
     Ok(())
 }
 
+/// Decide whether to flush the current batch. Pure function so the
+/// rate-shaping policy can be unit-tested without async runtime
+/// scaffolding. Flush when:
+///
+/// - batch reached BATCH_SIZE, OR
+/// - BATCH_TIMEOUT has passed since the last flush AND we have at
+///   least one event to send (no point flushing an empty batch).
+pub(crate) fn should_flush(
+    batch_len: usize,
+    elapsed_since_last_flush: std::time::Duration,
+    batch_size: usize,
+    batch_timeout: std::time::Duration,
+) -> bool {
+    if batch_len == 0 {
+        return false;
+    }
+    batch_len >= batch_size || elapsed_since_last_flush >= batch_timeout
+}
+
+/// Cap the in-memory pending batch to this many events. On a
+/// prolonged broker outage, batch.clear() would have dropped every
+/// failed flush — but the previous code (pre-iteration-68) silently
+/// swallowed 5xx as success, so the clear-on-failure was effectively
+/// a no-op. Now that errors are visible (iteration 68 promoted
+/// non-2xx to errors), holding the batch lets us retry on the next
+/// successful flush. The cap prevents unbounded memory growth if the
+/// broker stays down indefinitely.
+const MAX_PENDING_EVENTS: usize = 1000; // 10× BATCH_SIZE
+
+/// Drop oldest entries from `batch` until `batch.len() <= max`.
+/// Returns the number of entries dropped (0 if no drop needed).
+/// Pure helper so the policy is unit-testable without async runtime.
+pub(crate) fn cap_batch(batch: &mut Vec<PodTraffic>, max: usize) -> usize {
+    if batch.len() <= max {
+        return 0;
+    }
+    let drop = batch.len() - max;
+    batch.drain(..drop);
+    drop
+}
+
 async fn flush_network_batch(batch: &mut Vec<PodTraffic>) {
     if batch.is_empty() {
         return;
@@ -124,12 +182,29 @@ async fn flush_network_batch(batch: &mut Vec<PodTraffic>) {
 
     debug!("Flushing network event batch of {} events", batch.len());
 
-    // Send batch to API
-    if let Err(e) = api_post_call(json!(batch), "pod/traffic/batch").await {
-        error!("Failed to post network event batch: {}", e);
+    match api_post_call(json!(batch), "pod/traffic/batch").await {
+        Ok(()) => {
+            batch.clear();
+        }
+        Err(e) => {
+            // Hold the batch for retry on the next flush. Pre-fix this
+            // path also cleared, losing every event on a transient
+            // broker failure (the pre-iteration-68 swallow-of-5xx
+            // masked the bug). Now we retain, but cap to prevent OOM.
+            error!(
+                "Failed to post network event batch of {} events: {}; will retry next flush",
+                batch.len(),
+                e
+            );
+            let dropped = cap_batch(batch, MAX_PENDING_EVENTS);
+            if dropped > 0 {
+                error!(
+                    "Pending event queue overflow during broker outage; dropped {} oldest events (cap = {})",
+                    dropped, MAX_PENDING_EVENTS
+                );
+            }
+        }
     }
-
-    batch.clear();
 }
 
 async fn build_traffic_event(data: &NetworkEventData, pod_data: &PodInspect) -> Option<PodTraffic> {
@@ -248,8 +323,10 @@ pub async fn handle_policy_drop_events(
                     debug!("No pod found for network namespace inode: {}", event.inum);
                 }
 
-                // Flush if batch is full
-                if batch.len() >= BATCH_SIZE {
+                // Same fix as handle_network_events: also flush on
+                // BATCH_TIMEOUT elapsed in the success branch, not
+                // only in the timeout branch. See should_flush.
+                if should_flush(batch.len(), last_flush.elapsed(), BATCH_SIZE, BATCH_TIMEOUT) {
                     flush_network_batch(&mut batch).await;
                     last_flush = tokio::time::Instant::now();
                 }
@@ -264,7 +341,7 @@ pub async fn handle_policy_drop_events(
             }
             Err(_) => {
                 // Timeout reached, flush if we have any events
-                if !batch.is_empty() && last_flush.elapsed() >= BATCH_TIMEOUT {
+                if !batch.is_empty() {
                     flush_network_batch(&mut batch).await;
                     last_flush = tokio::time::Instant::now();
                 }
@@ -343,4 +420,182 @@ async fn build_policy_drop_event(
     TRAFFIC_CACHE.insert(cache_key, ()).await;
 
     Some(drop_event)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn proto_to_string_known_protocols() {
+        // IANA protocol numbers we surface to operators. Drift here
+        // would silently mislabel network-policy drop events.
+        assert_eq!(proto_to_string(6), "TCP");
+        assert_eq!(proto_to_string(17), "UDP");
+        assert_eq!(proto_to_string(1), "ICMP");
+        assert_eq!(proto_to_string(58), "ICMPv6");
+    }
+
+    #[test]
+    fn proto_to_string_unknown_carries_value() {
+        // Unknown protocol numbers must round-trip the value into the
+        // log string so operators can grep for `UNKNOWN(132)` etc.
+        assert_eq!(proto_to_string(132), "UNKNOWN(132)");
+        assert_eq!(proto_to_string(0), "UNKNOWN(0)");
+        assert_eq!(proto_to_string(255), "UNKNOWN(255)");
+    }
+
+    // should_flush is the rate-shaping policy for the network event
+    // batcher. The pre-fix bug: under steady sub-batch-rate traffic
+    // (events arriving every <BATCH_TIMEOUT), `tokio::time::timeout`
+    // resets on each recv so the timeout-branch flush never fires —
+    // and the success branch only flushed on batch-full. Steady-state
+    // light traffic was never reaching the broker. Pinning the policy
+    // here so a future refactor can't silently regress it.
+
+    use std::time::Duration;
+
+    #[test]
+    fn should_flush_empty_batch_never_flushes() {
+        // Flushing an empty batch is wasted work; the helper must
+        // gate on at least one event regardless of elapsed time.
+        assert!(!should_flush(
+            0,
+            Duration::from_secs(60),
+            100,
+            Duration::from_secs(1)
+        ));
+    }
+
+    #[test]
+    fn should_flush_full_batch_flushes_immediately() {
+        // batch-full path — flush regardless of elapsed time.
+        assert!(should_flush(
+            100,
+            Duration::from_millis(0),
+            100,
+            Duration::from_secs(1)
+        ));
+        assert!(should_flush(
+            150,
+            Duration::from_millis(0),
+            100,
+            Duration::from_secs(1)
+        ));
+    }
+
+    #[test]
+    fn should_flush_under_size_under_timeout_holds() {
+        // Common case: 50 events in the batch, 500ms since last flush,
+        // limits 100 / 1s. Don't flush yet.
+        assert!(!should_flush(
+            50,
+            Duration::from_millis(500),
+            100,
+            Duration::from_secs(1)
+        ));
+    }
+
+    #[test]
+    fn should_flush_under_size_over_timeout_flushes() {
+        // The bug case made concrete: 1 event in batch, 1.5 seconds
+        // since last flush, limits 100 / 1s. Pre-fix this was
+        // unreachable from the success branch and the timeout
+        // branch never fired due to recv resetting the window. Now
+        // it MUST flush.
+        assert!(should_flush(
+            1,
+            Duration::from_millis(1500),
+            100,
+            Duration::from_secs(1)
+        ));
+        assert!(should_flush(
+            50,
+            Duration::from_secs(2),
+            100,
+            Duration::from_secs(1)
+        ));
+    }
+
+    #[test]
+    fn should_flush_at_exact_timeout_boundary() {
+        // Exact-equal elapsed should flush — `>=` semantics, not `>`.
+        // Otherwise a perfectly-paced 1-event-per-second source
+        // would always be one tick behind.
+        assert!(should_flush(
+            1,
+            Duration::from_secs(1),
+            100,
+            Duration::from_secs(1)
+        ));
+    }
+
+    // cap_batch enforces the in-memory queue limit during broker
+    // outage. The previous "clear-on-failure" lost events; now we
+    // hold for retry but must not grow unbounded.
+
+    fn make_traffic(uuid: &str) -> PodTraffic {
+        PodTraffic {
+            uuid: uuid.to_string(),
+            pod_name: String::new(),
+            pod_namespace: None,
+            pod_ip: String::new(),
+            pod_port: None,
+            ip_protocol: None,
+            traffic_type: None,
+            traffic_in_out_ip: None,
+            traffic_in_out_port: None,
+            decision: None,
+            time_stamp: chrono::NaiveDateTime::default(),
+        }
+    }
+
+    #[test]
+    fn cap_batch_under_max_no_drop() {
+        let mut batch = vec![make_traffic("a"), make_traffic("b")];
+        let dropped = cap_batch(&mut batch, 1000);
+        assert_eq!(dropped, 0);
+        assert_eq!(batch.len(), 2);
+    }
+
+    #[test]
+    fn cap_batch_at_exact_max_no_drop() {
+        let mut batch: Vec<_> = (0..10).map(|i| make_traffic(&i.to_string())).collect();
+        let dropped = cap_batch(&mut batch, 10);
+        assert_eq!(dropped, 0);
+        assert_eq!(batch.len(), 10);
+    }
+
+    #[test]
+    fn cap_batch_over_max_drops_oldest() {
+        // 15 events, cap 10 → drop 5 oldest. Verify the 10 newest
+        // remain. Drop-oldest preserves recent observations — what
+        // operators most likely care about during outage triage.
+        let mut batch: Vec<_> = (0..15).map(|i| make_traffic(&format!("e{}", i))).collect();
+        let dropped = cap_batch(&mut batch, 10);
+        assert_eq!(dropped, 5);
+        assert_eq!(batch.len(), 10);
+        // Oldest dropped → first surviving should be e5
+        assert_eq!(batch[0].uuid, "e5");
+        assert_eq!(batch[9].uuid, "e14");
+    }
+
+    #[test]
+    fn cap_batch_max_one_keeps_only_newest() {
+        let mut batch: Vec<_> = (0..5).map(|i| make_traffic(&format!("e{}", i))).collect();
+        let dropped = cap_batch(&mut batch, 1);
+        assert_eq!(dropped, 4);
+        assert_eq!(batch.len(), 1);
+        assert_eq!(batch[0].uuid, "e4");
+    }
+
+    #[test]
+    fn cap_batch_max_zero_drops_all() {
+        // Degenerate but defensible — caller can pass max=0 to fully
+        // drain. Shouldn't panic.
+        let mut batch = vec![make_traffic("a"), make_traffic("b")];
+        let dropped = cap_batch(&mut batch, 0);
+        assert_eq!(dropped, 2);
+        assert!(batch.is_empty());
+    }
 }

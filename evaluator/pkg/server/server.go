@@ -1,8 +1,8 @@
 // Package server exposes the evaluator's HTTP surface:
 //
-//   GET  /healthz     liveness probe
-//   GET  /readyz      readiness probe (informer caches synced)
-//   POST /evaluate    body: matcher.Flow JSON; returns []matcher.Result
+//	GET  /healthz     liveness probe
+//	GET  /readyz      readiness probe (informer caches synced)
+//	POST /evaluate    body: matcher.Flow JSON; returns []matcher.Result
 //
 // The server is intentionally thin — informer caches and policy lookup
 // live on the Store; the server just brokers HTTP <-> matcher.
@@ -111,7 +111,7 @@ func (s *Server) handleEvaluate(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	defer r.Body.Close()
+	defer func() { _ = r.Body.Close() }()
 	// Cap the decoder so a chatty or buggy caller can't stream us
 	// arbitrary bytes. A Flow is well under 4KB; 64KB leaves plenty
 	// of headroom for future fields.
@@ -163,7 +163,7 @@ func (s *Server) handleEvaluate(w http.ResponseWriter, r *http.Request) {
 				flow.SrcPodNamespace+"/"+flow.SrcPodName,
 				flow.DstPodNamespace+"/"+flow.DstPodName,
 				string(flow.Protocol), string(r.Direction),
-				flow.DstPort, wouldDeny,
+				flow.DstPort, wouldDeny, r.PolicyGeneration,
 			)
 		}
 		if wouldDeny {

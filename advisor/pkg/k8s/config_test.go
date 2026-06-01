@@ -165,7 +165,7 @@ func TestGetConfig(t *testing.T) {
 	nonInteractiveDeferredLoadingClientConfigFunc = func(
 		loadingRules *clientcmd.ClientConfigLoadingRules,
 		overrides *clientcmd.ConfigOverrides) clientcmd.ClientConfig {
-			return &testClientConfig{namespace: "test-namespace"}
+		return &testClientConfig{namespace: "test-namespace"}
 	}
 
 	// Test with KUBECONFIG env var
@@ -230,7 +230,7 @@ func TestGetCurrentNamespace(t *testing.T) {
 	nonInteractiveDeferredLoadingClientConfigFunc = func(
 		loadingRules *clientcmd.ClientConfigLoadingRules,
 		overrides *clientcmd.ConfigOverrides) clientcmd.ClientConfig {
-			return &testClientConfig{namespace: "default"}
+		return &testClientConfig{namespace: "default"}
 	}
 
 	// Test the GetCurrentNamespace function

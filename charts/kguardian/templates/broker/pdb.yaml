@@ -1,4 +1,19 @@
 {{- if .Values.broker.podDisruptionBudget.enabled }}
+{{- /*
+  PDB-with-singleton-pod guardrail. Mirrors the evaluator PDB check
+  (b964c58d). With replicaCount=1 (the chart default) and the PDB's
+  default minAvailable: 1, no maxUnavailable, the PDB blocks ALL
+  voluntary evictions — kubectl drain stalls, autoscaler can't
+  reschedule, and operators have to delete the PDB to recover.
+  Refuse to render that combination unless either:
+    - replicaCount > 1 (the documented "use case" for the PDB), or
+    - operator opts into the safer maxUnavailable=1 policy.
+*/ -}}
+{{- $pdb := .Values.broker.podDisruptionBudget -}}
+{{- $replicas := int .Values.broker.replicaCount -}}
+{{- if and (not $pdb.maxUnavailable) (le $replicas 1) }}
+{{- fail "broker.podDisruptionBudget.enabled with replicaCount=1 and minAvailable>=1 blocks ALL voluntary evictions (kubectl drain stalls forever). Either bump broker.replicaCount > 1, set podDisruptionBudget.maxUnavailable=1, or disable the PDB." }}
+{{- end }}
 apiVersion: policy/v1
 kind: PodDisruptionBudget
 metadata:
@@ -6,10 +21,10 @@ metadata:
   labels:
     {{- include "kguardian.labels" . | nindent 4 }}
 spec:
-  {{- if .Values.broker.podDisruptionBudget.maxUnavailable }}
-  maxUnavailable: {{ .Values.broker.podDisruptionBudget.maxUnavailable }}
+  {{- if $pdb.maxUnavailable }}
+  maxUnavailable: {{ $pdb.maxUnavailable }}
   {{- else }}
-  minAvailable: {{ .Values.broker.podDisruptionBudget.minAvailable | default 1 }}
+  minAvailable: {{ $pdb.minAvailable | default 1 }}
   {{- end }}
   selector:
     matchLabels:
