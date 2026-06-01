@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.9.0](https://github.com/kguardian-dev/kguardian/compare/controller/v1.8.2...controller/v1.9.0) (2026-06-01)
+
+
+### Features
+
+* massive-uplift production hardening release ([#888](https://github.com/kguardian-dev/kguardian/issues/888)) ([176a160](https://github.com/kguardian-dev/kguardian/commit/176a160ae4f63baf46a6b5372a2b91040c28961f))
+
 ## [1.8.2](https://github.com/kguardian-dev/kguardian/compare/controller/v1.8.1...controller/v1.8.2) (2026-05-09)
 
 
