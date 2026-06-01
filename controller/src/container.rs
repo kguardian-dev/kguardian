@@ -12,16 +12,31 @@ use tracing::*;
 
 static REGEX_CONTAINERD: &str = "containerd://(?P<container_id>[0-9a-zA-Z]*)";
 
+/// Parse a Kubernetes pod-status containerID URL.
+///
+/// Expects `containerd://<id>` — only the containerd runtime is
+/// supported today. Returns the bare container ID, or None when the
+/// input doesn't match (cri-o:// or docker:// prefixes, malformed
+/// strings, etc.). A non-match is non-fatal at the call site — pods
+/// using other runtimes are simply skipped.
+pub(crate) fn parse_container_id(s: &str) -> Option<String> {
+    let re = Regex::new(REGEX_CONTAINERD).ok()?;
+    re.captures(s)
+        .and_then(|c| c.name("container_id"))
+        .map(|m| m.as_str().to_string())
+        .filter(|s| !s.is_empty())
+}
+
 impl PodInspect {
     pub async fn get_pod_inspect(self, container_id: &str) -> Option<PodInspect> {
-        let re = Regex::new(REGEX_CONTAINERD).ok()?;
-        let container_id: Option<String> = re
-            .captures(container_id)
-            .and_then(|c| c.name("container_id"))
-            .and_then(|m| m.as_str().parse().ok());
+        let container_id = parse_container_id(container_id);
 
         if let Some(container_id) = container_id {
+            // Trim — a trailing newline from `CONTAINERD_SOCK="/run/...\n"`
+            // would break the unix-socket connect with a confusing
+            // "No such file or directory" error far from the env read.
             let sock_path = std::env::var("CONTAINERD_SOCK")
+                .map(|s| s.trim().to_string())
                 .unwrap_or_else(|_| "/run/containerd/containerd.sock".to_string());
             match connect(&sock_path).await {
                 Ok(channel) => Some(
@@ -48,8 +63,20 @@ impl PodInspect {
     async fn get_pid(mut self, channel: Channel) -> Self {
         let mut client = TasksClient::new(channel.clone());
 
+        // get_pid is only reached after set_container_id has populated
+        // container_id, so the prior .unwrap() was safe in practice —
+        // but a refactor that called get_pid in another path would
+        // panic the spawn_blocking thread. Fail-soft: clone the value
+        // if present, else short-circuit by leaving pid unset.
+        let container_id = match self.container_id.clone() {
+            Some(id) => id,
+            None => {
+                error!("get_pid called without a container id; pid stays unset");
+                return self;
+            }
+        };
         let req = GetRequest {
-            container_id: self.container_id.to_owned().unwrap(),
+            container_id,
             ..Default::default()
         };
 
@@ -81,5 +108,72 @@ impl PodInspect {
             }
         }
         self
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // parse_container_id is the gate that decides which pods we can
+    // observe. A regression here either drops valid pods (we lose
+    // visibility) or accepts garbage (we make containerd RPCs with
+    // bad IDs, log noise).
+
+    #[test]
+    fn parse_extracts_id_from_containerd_url() {
+        // 64-char hex is the canonical containerd ID shape.
+        let id = "a".repeat(64);
+        let url = format!("containerd://{id}");
+        assert_eq!(parse_container_id(&url).as_deref(), Some(id.as_str()));
+    }
+
+    #[test]
+    fn parse_accepts_alphanumeric_id() {
+        // Mixed alphanumeric (rare but legal under the regex character class).
+        assert_eq!(
+            parse_container_id("containerd://Abc123Xyz").as_deref(),
+            Some("Abc123Xyz"),
+        );
+    }
+
+    #[test]
+    fn parse_rejects_empty_id_after_prefix() {
+        // `containerd://` with nothing after means no container ID — must
+        // not produce Some("") which would be sent to the containerd
+        // socket and 404 noisily.
+        assert_eq!(parse_container_id("containerd://"), None);
+    }
+
+    #[test]
+    fn parse_rejects_other_runtimes() {
+        // Pods on cri-o, docker (legacy), or any other runtime should
+        // be skipped, not misparsed.
+        assert_eq!(parse_container_id("cri-o://abc123"), None);
+        assert_eq!(parse_container_id("docker://abc123"), None);
+        assert_eq!(parse_container_id("rkt://abc123"), None);
+    }
+
+    #[test]
+    fn parse_rejects_garbage() {
+        assert_eq!(parse_container_id(""), None);
+        assert_eq!(parse_container_id("just some text"), None);
+        assert_eq!(parse_container_id("https://example.com"), None);
+    }
+
+    #[test]
+    fn parse_stops_at_non_alphanumeric() {
+        // The regex character class is [0-9a-zA-Z]*, so the first
+        // non-alphanumeric char terminates the capture. A path like
+        // `containerd://abc/def` yields just `abc` — that's fine,
+        // but pin the contract.
+        assert_eq!(
+            parse_container_id("containerd://abc/def").as_deref(),
+            Some("abc"),
+        );
+        assert_eq!(
+            parse_container_id("containerd://abc-def").as_deref(),
+            Some("abc"),
+        );
     }
 }

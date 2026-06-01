@@ -589,6 +589,7 @@ const NetworkGraphInner: React.FC<NetworkGraphProps> = ({
   // Run ELK layout whenever nodes or edges change
   useEffect(() => {
     if (baseNodes.length === 0) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect
       setElkPositions(new Map());
       return;
     }

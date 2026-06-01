@@ -169,3 +169,72 @@ func TestHandleOutputDir(t *testing.T) {
 
 // Note: PrintDryRunMessage only logs, testing it requires capturing log output,
 // which is more involved and might be added later if needed.
+
+// --- RealFileIO + SetFileIO smoke tests ---
+//
+// RealFileIO is a thin wrapper that delegates to the os package.
+// It's only meaningful when the wider code uses defaultFileIO; pin
+// the contract so a regression that swaps to a misbehaving default
+// (e.g. one that returns nil errors silently) is caught.
+
+func TestRealFileIO_MkdirAllAndStat(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "a", "b", "c")
+
+	io := RealFileIO{}
+	if err := io.MkdirAll(target, 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+
+	info, err := io.Stat(target)
+	if err != nil {
+		t.Fatalf("Stat: %v", err)
+	}
+	if !info.IsDir() {
+		t.Errorf("expected target to be a directory")
+	}
+}
+
+func TestRealFileIO_WriteFile(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "out.txt")
+
+	io := RealFileIO{}
+	if err := io.WriteFile(target, []byte("hello"), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	got, err := os.ReadFile(target)
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+	if string(got) != "hello" {
+		t.Errorf("contents: want %q, got %q", "hello", string(got))
+	}
+}
+
+func TestRealFileIO_StatMissingFile(t *testing.T) {
+	io := RealFileIO{}
+	_, err := io.Stat(filepath.Join(t.TempDir(), "does-not-exist"))
+	if !os.IsNotExist(err) {
+		t.Errorf("expected IsNotExist, got %v", err)
+	}
+}
+
+func TestSetFileIO_RestoresAfterTest(t *testing.T) {
+	// SetFileIO mutates package-level state; this test ensures that
+	// even though tests in this file replace defaultFileIO via mock,
+	// restoring the real one works as documented.
+	prev := defaultFileIO
+	defer SetFileIO(prev)
+
+	mock := &mockFileIO{files: map[string][]byte{}}
+	SetFileIO(mock)
+	if defaultFileIO != mock {
+		t.Errorf("SetFileIO didn't replace defaultFileIO")
+	}
+	SetFileIO(prev)
+	if defaultFileIO != prev {
+		t.Errorf("SetFileIO didn't restore previous IO")
+	}
+}

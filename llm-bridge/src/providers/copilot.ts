@@ -2,6 +2,7 @@ import axios from "axios";
 import type { ChatRequest, ChatResponse } from "../types/index.js";
 import { LLMProvider } from "../types/index.js";
 import { BrokerClient } from "../brokerClient.js";
+import { log } from "../logger.js";
 import { serializeToolResult } from "./truncate.js";
 
 interface CopilotMessage {
@@ -19,7 +20,8 @@ export async function callCopilot(
   request: ChatRequest,
   brokerClient: BrokerClient
 ): Promise<ChatResponse> {
-  const apiKey = process.env.GITHUB_TOKEN;
+  // Trim before empty-check; whitespace-only counts as not-configured.
+  const apiKey = process.env.GITHUB_TOKEN?.trim();
   if (!apiKey) {
     throw new Error("GITHUB_TOKEN not configured");
   }
@@ -70,7 +72,7 @@ export async function callCopilot(
         { headers, timeout: 120000 }
       );
     } catch (error: any) {
-      console.error("Copilot API Error:", error.response?.data?.error?.message || error.message);
+      log.error("Copilot API Error:", error.response?.data?.error?.message || error.message);
       throw new Error(`Copilot API error: ${error.response?.data?.error?.message || error.message}`, { cause: error });
     }
 

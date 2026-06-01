@@ -29,3 +29,5 @@ tilt-settings.yaml
 .tilt/
 tilt_modules/
 localbin/
+
+.claude/

@@ -48,6 +48,7 @@ spec:
           env:
             - name: BROKER_URL
               value: "http://{{ .Values.broker.service.name }}.{{ include "kguardian.namespace" . }}.svc.cluster.local:{{ .Values.broker.container.port }}"
+            {{- include "kguardian.brokerAuthEnv" . | nindent 12 }}
             - name: PORT
               value: "{{ .Values.mcpServer.container.port }}"
             {{- with .Values.mcpServer.env }}

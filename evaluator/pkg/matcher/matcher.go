@@ -24,11 +24,12 @@ func MatchCluster(flow Flow, policy *v1alpha1.AuditClusterNetworkPolicy, lookup 
 		subject := subjectPod(flow, dir, lookup)
 		notApplicable := func() {
 			results = append(results, Result{
-				PolicyNamespace: "", // cluster-scoped: no namespace
-				PolicyName:      policy.Name,
-				PolicyUID:       string(policy.UID),
-				Direction:       dir,
-				Verdict:         VerdictNotApplicable,
+				PolicyNamespace:  "", // cluster-scoped: no namespace
+				PolicyName:       policy.Name,
+				PolicyUID:        string(policy.UID),
+				PolicyGeneration: policy.Generation,
+				Direction:        dir,
+				Verdict:          VerdictNotApplicable,
 			})
 		}
 		if subject == nil {
@@ -51,18 +52,20 @@ func MatchCluster(flow Flow, policy *v1alpha1.AuditClusterNetworkPolicy, lookup 
 		allowed, reason := evaluateRulesCluster(flow, policy, dir, lookup)
 		if allowed {
 			results = append(results, Result{
-				PolicyName: policy.Name,
-				PolicyUID:  string(policy.UID),
-				Direction:  dir,
-				Verdict:    VerdictAllow,
+				PolicyName:       policy.Name,
+				PolicyUID:        string(policy.UID),
+				PolicyGeneration: policy.Generation,
+				Direction:        dir,
+				Verdict:          VerdictAllow,
 			})
 		} else {
 			results = append(results, Result{
-				PolicyName: policy.Name,
-				PolicyUID:  string(policy.UID),
-				Direction:  dir,
-				Verdict:    VerdictWouldDeny,
-				Reason:     reason,
+				PolicyName:       policy.Name,
+				PolicyUID:        string(policy.UID),
+				PolicyGeneration: policy.Generation,
+				Direction:        dir,
+				Verdict:          VerdictWouldDeny,
+				Reason:           reason,
 			})
 		}
 	}
@@ -71,7 +74,7 @@ func MatchCluster(flow Flow, policy *v1alpha1.AuditClusterNetworkPolicy, lookup 
 
 func effectivePolicyTypesCluster(spec *v1alpha1.ClusterNetworkPolicySpec) []networkingv1.PolicyType {
 	if len(spec.PolicyTypes) > 0 {
-		return spec.PolicyTypes
+		return dedupPolicyTypes(spec.PolicyTypes)
 	}
 	types := []networkingv1.PolicyType{networkingv1.PolicyTypeIngress}
 	if len(spec.Egress) > 0 {
@@ -136,31 +139,34 @@ func Match(flow Flow, policy *v1alpha1.AuditNetworkPolicy, lookup Lookup) []Resu
 		subject := subjectPod(flow, dir, lookup)
 		if subject == nil {
 			results = append(results, Result{
-				PolicyNamespace: policy.Namespace,
-				PolicyName:      policy.Name,
-				PolicyUID:       string(policy.UID),
-				Direction:       dir,
-				Verdict:         VerdictNotApplicable,
+				PolicyNamespace:  policy.Namespace,
+				PolicyName:       policy.Name,
+				PolicyUID:        string(policy.UID),
+				PolicyGeneration: policy.Generation,
+				Direction:        dir,
+				Verdict:          VerdictNotApplicable,
 			})
 			continue
 		}
 		if subject.Namespace != policy.Namespace {
 			results = append(results, Result{
-				PolicyNamespace: policy.Namespace,
-				PolicyName:      policy.Name,
-				PolicyUID:       string(policy.UID),
-				Direction:       dir,
-				Verdict:         VerdictNotApplicable,
+				PolicyNamespace:  policy.Namespace,
+				PolicyName:       policy.Name,
+				PolicyUID:        string(policy.UID),
+				PolicyGeneration: policy.Generation,
+				Direction:        dir,
+				Verdict:          VerdictNotApplicable,
 			})
 			continue
 		}
 		if !selectorMatchesLabels(policy.Spec.PodSelector, subject.Labels) {
 			results = append(results, Result{
-				PolicyNamespace: policy.Namespace,
-				PolicyName:      policy.Name,
-				PolicyUID:       string(policy.UID),
-				Direction:       dir,
-				Verdict:         VerdictNotApplicable,
+				PolicyNamespace:  policy.Namespace,
+				PolicyName:       policy.Name,
+				PolicyUID:        string(policy.UID),
+				PolicyGeneration: policy.Generation,
+				Direction:        dir,
+				Verdict:          VerdictNotApplicable,
 			})
 			continue
 		}
@@ -172,20 +178,22 @@ func Match(flow Flow, policy *v1alpha1.AuditNetworkPolicy, lookup Lookup) []Resu
 		allowed, reason := evaluateRules(flow, policy, dir, lookup)
 		if allowed {
 			results = append(results, Result{
-				PolicyNamespace: policy.Namespace,
-				PolicyName:      policy.Name,
-				PolicyUID:       string(policy.UID),
-				Direction:       dir,
-				Verdict:         VerdictAllow,
+				PolicyNamespace:  policy.Namespace,
+				PolicyName:       policy.Name,
+				PolicyUID:        string(policy.UID),
+				PolicyGeneration: policy.Generation,
+				Direction:        dir,
+				Verdict:          VerdictAllow,
 			})
 		} else {
 			results = append(results, Result{
-				PolicyNamespace: policy.Namespace,
-				PolicyName:      policy.Name,
-				PolicyUID:       string(policy.UID),
-				Direction:       dir,
-				Verdict:         VerdictWouldDeny,
-				Reason:          reason,
+				PolicyNamespace:  policy.Namespace,
+				PolicyName:       policy.Name,
+				PolicyUID:        string(policy.UID),
+				PolicyGeneration: policy.Generation,
+				Direction:        dir,
+				Verdict:          VerdictWouldDeny,
+				Reason:           reason,
 			})
 		}
 	}
@@ -196,16 +204,47 @@ func Match(flow Flow, policy *v1alpha1.AuditNetworkPolicy, lookup Lookup) []Resu
 // effectivePolicyTypes returns the directions a policy applies in.
 // Mirrors the inference rules from the upstream NetworkPolicy spec:
 // if policyTypes is omitted, Ingress is implied; Egress is implied only
-// when at least one egress rule is present.
+// when at least one egress rule is present. Duplicates in the input
+// (e.g. a malformed `policyTypes: [Ingress, Ingress]` that slipped past
+// admission) are removed — without dedup we would emit duplicate
+// Results and the status aggregator would double-count flowsEvaluated.
 func effectivePolicyTypes(spec *networkingv1.NetworkPolicySpec) []networkingv1.PolicyType {
 	if len(spec.PolicyTypes) > 0 {
-		return spec.PolicyTypes
+		return dedupPolicyTypes(spec.PolicyTypes)
 	}
 	types := []networkingv1.PolicyType{networkingv1.PolicyTypeIngress}
 	if len(spec.Egress) > 0 {
 		types = append(types, networkingv1.PolicyTypeEgress)
 	}
 	return types
+}
+
+// dedupPolicyTypes preserves first-seen order. There are only two valid
+// values (Ingress, Egress) so we use a tiny fixed-size check rather
+// than a map; allocates one small slice and is allocation-free for the
+// common case (input already deduped).
+func dedupPolicyTypes(in []networkingv1.PolicyType) []networkingv1.PolicyType {
+	if len(in) <= 1 {
+		return in
+	}
+	var sawIngress, sawEgress bool
+	out := in[:0:0] // empty slice, fresh backing array
+	for _, t := range in {
+		switch t {
+		case networkingv1.PolicyTypeIngress:
+			if sawIngress {
+				continue
+			}
+			sawIngress = true
+		case networkingv1.PolicyTypeEgress:
+			if sawEgress {
+				continue
+			}
+			sawEgress = true
+		}
+		out = append(out, t)
+	}
+	return out
 }
 
 // subjectPod returns the pod the policy targets for the given direction.
@@ -473,4 +512,3 @@ func selectorMatchesLabels(sel metav1.LabelSelector, lbls map[string]string) boo
 	}
 	return s.Matches(labels.Set(lbls))
 }
-

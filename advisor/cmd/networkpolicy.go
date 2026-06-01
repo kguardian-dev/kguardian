@@ -4,13 +4,14 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"strings"
 	"time"
 
+	"github.com/kguardian-dev/kguardian/advisor/pkg/k8s"
+	"github.com/kguardian-dev/kguardian/advisor/pkg/network"
 	"github.com/rs/zerolog"
 	log "github.com/rs/zerolog/log"
 	"github.com/spf13/cobra"
-	"github.com/kguardian-dev/kguardian/advisor/pkg/k8s"
-	"github.com/kguardian-dev/kguardian/advisor/pkg/network"
 	corev1 "k8s.io/api/core/v1"
 )
 
@@ -102,12 +103,17 @@ var networkPolicyCmd = &cobra.Command{
 		// Set dry run mode in config
 		config.DryRun = dryRun
 
-		// Create policy service with appropriate configuration
-		var policyServiceType network.PolicyType
-		if policyType == "cilium" {
-			policyServiceType = network.CiliumPolicy
-		} else {
-			policyServiceType = network.StandardPolicy
+		// Create policy service with appropriate configuration.
+		// Validate strictly — silently coercing an unknown value to
+		// StandardPolicy meant `--type=k8s` (typo for `kubernetes`) or
+		// `--type=cillium` (typo for `cilium`) produced standard
+		// policies with no error, even though the user clearly meant
+		// something specific.
+		policyServiceType, err := parsePolicyType(policyType)
+		if err != nil {
+			log.Error().Err(err).Msg("Invalid --type flag")
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			os.Exit(1)
 		}
 
 		// Create the policy service
@@ -155,6 +161,21 @@ var networkPolicyCmd = &cobra.Command{
 			}
 		}
 	},
+}
+
+// parsePolicyType maps the --type flag value to network.PolicyType.
+// Whitelist is "kubernetes" / "k8s" → StandardPolicy and "cilium" →
+// CiliumPolicy. Any other value is rejected with a clear error
+// listing the accepted values.
+func parsePolicyType(in string) (network.PolicyType, error) {
+	switch in {
+	case "kubernetes", "k8s":
+		return network.StandardPolicy, nil
+	case "cilium":
+		return network.CiliumPolicy, nil
+	default:
+		return "", fmt.Errorf("unknown policy type %q; must be one of: kubernetes, cilium", in)
+	}
 }
 
 // processPods processes a list of pods and generates policies for them
@@ -209,9 +230,10 @@ func init() {
 	networkPolicyCmd.Flags().BoolVar(&dryRun, "dry-run", true, "Only generate policies and save to files without applying them to the cluster")
 	networkPolicyCmd.Flags().StringVar(&outputDir, "output-dir", "network-policies", "Directory to store generated network policies")
 
-	// Add completion for the policy type flag
+	// Add completion for the policy type flag — must stay in lockstep
+	// with parsePolicyType's accepted values.
 	_ = networkPolicyCmd.RegisterFlagCompletionFunc("type", func(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
-		return []string{"kubernetes", "cilium"}, cobra.ShellCompDirectiveNoFileComp
+		return []string{"kubernetes", "k8s", "cilium"}, cobra.ShellCompDirectiveNoFileComp
 	})
 }
 
@@ -220,9 +242,15 @@ func setupLogger() {
 	// Set up zerolog with consistent timestamp format
 	zerolog.TimeFieldFormat = time.RFC3339
 
-	// Set logging level based on verbose flag or environment variable
+	// Set logging level based on verbose flag or environment variable.
+	// Trim before compare — `DEBUG="true\n"` (operator-paste with
+	// trailing newline) would otherwise silently fall back to info
+	// because the strict-equals check fails. Same defensive trim
+	// applied everywhere else in the codebase.
 	logLevel := zerolog.InfoLevel
-	if os.Getenv("DEBUG") == "true" || os.Getenv("VERBOSE") == "true" {
+	debug := strings.TrimSpace(os.Getenv("DEBUG"))
+	verbose := strings.TrimSpace(os.Getenv("VERBOSE"))
+	if debug == "true" || verbose == "true" {
 		logLevel = zerolog.DebugLevel
 	}
 

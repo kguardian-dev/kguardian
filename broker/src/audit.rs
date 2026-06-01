@@ -94,48 +94,93 @@ struct AuditVerdictInsert {
 }
 
 /// Long-lived client cached by the actix application state. Holds the
-/// evaluator base URL and a connection-pooled reqwest client.
+/// evaluator base URL, a connection-pooled reqwest client, and a
+/// semaphore that bounds the number of concurrent in-flight audit
+/// evaluations.
 #[derive(Clone)]
 pub struct AuditClient {
     enabled: bool,
     base_url: String,
     http: reqwest::Client,
+    /// Permits the maximum number of concurrent /evaluate calls. The
+    /// add.rs path spawns one audit task per ingested flow; without a
+    /// cap, a 1000-event batch would create 1000 concurrent reqwest
+    /// futures + 1000 connection-pool waiters. Bounding here gives
+    /// upstream backpressure without changing the call sites.
+    in_flight: std::sync::Arc<tokio::sync::Semaphore>,
 }
 
-impl AuditClient {
-    /// Construct from the `EVALUATOR_URL` env var. When unset, the
-    /// client is disabled and `evaluate_and_persist` is a no-op.
-    pub fn from_env() -> Self {
-        let base_url = std::env::var("EVALUATOR_URL").unwrap_or_default();
-        let enabled = !base_url.is_empty();
-        let http = reqwest::Client::builder()
-            .timeout(Duration::from_millis(500))
-            .pool_max_idle_per_host(8)
-            .build()
-            .unwrap_or_else(|_| reqwest::Client::new());
-        Self { enabled, base_url, http }
-    }
+/// Maximum concurrent audit /evaluate calls. Sized roughly to twice
+/// `pool_max_idle_per_host(8)` so the connection pool stays the
+/// effective rate limit; further audit calls queue on this semaphore.
+const AUDIT_INFLIGHT_PERMITS: usize = 16;
 
-    pub fn enabled(&self) -> bool { self.enabled }
-    pub fn base_url(&self) -> &str { &self.base_url }
+/// Default audit eval timeout in milliseconds. 500ms is plenty for
+/// an in-cluster evaluator (matcher is in-memory, sub-ms); operators
+/// running the evaluator across cells / regions / VPNs may need more.
+const DEFAULT_AUDIT_EVAL_TIMEOUT_MS: u64 = 500;
+/// Minimum clamp on the audit eval timeout — avoids pathological
+/// values that would effectively disable audit forwarding (sub-50ms
+/// timeouts fail before any practical evaluator can respond).
+const MIN_AUDIT_EVAL_TIMEOUT_MS: u64 = 50;
 
-    /// Best-effort: build a Flow from the PodTraffic event, POST to
-    /// `/evaluate`, and persist any `WouldDeny` results. Errors are
-    /// logged but never propagated — the broker's ingest path must not
-    /// stall on evaluator hiccups.
-    pub async fn evaluate_and_persist(&self, pool: DbPool, traffic: PodTraffic) {
-        if !self.enabled {
-            return;
-        }
-        let url = format!("{}/evaluate", self.base_url.trim_end_matches('/'));
+/// Read AUDIT_EVAL_TIMEOUT_MS from env with trim + clamp. Extracted
+/// out of `from_env` so the parsing contract can be unit-tested
+/// without constructing the full AuditClient (which would also need
+/// to build a reqwest::Client just to observe the timeout).
+pub(crate) fn audit_eval_timeout_ms() -> u64 {
+    std::env::var("AUDIT_EVAL_TIMEOUT_MS")
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .map(|n| n.max(MIN_AUDIT_EVAL_TIMEOUT_MS))
+        .unwrap_or(DEFAULT_AUDIT_EVAL_TIMEOUT_MS)
+}
 
-        // INGRESS: pod_name/pod_namespace is the destination.
-        // EGRESS: pod_name/pod_namespace is the source.
-        let traffic_type = traffic.traffic_type.as_deref().unwrap_or("");
-        let (src_ns, src_name, src_ip, dst_ns, dst_name, dst_ip, dst_port_str) = match traffic_type {
+/// Build a `Flow` for the evaluator from a single `PodTraffic` row.
+///
+/// Returns `None` when `traffic_type` is missing or unrecognised (any
+/// value that isn't "INGRESS"/"EGRESS" after trim + uppercase). The
+/// direction is matched case-insensitively to stay aligned with the
+/// evaluator's matcher and the mcp-server's compactor, both of which
+/// normalise case; that consistency prevents a silent-skip cliff if a
+/// future producer ever writes a different case.
+///
+/// Extracted out of `evaluate_and_persist` so the direction → Flow
+/// shape mapping (which is the contract the evaluator's matcher
+/// depends on) can be pinned by unit tests without spinning up the
+/// async runtime + reqwest client.
+/// Returns true when a verdict from the evaluator should be persisted
+/// to audit_verdicts. The evaluator emits three verdict kinds:
+///   - "Allow"          — flow matched an allow rule
+///   - "WouldDeny"      — no rule matched (default-deny in audit mode)
+///   - "NotApplicable"  — policy's podSelector / namespaceSelector
+///     didn't apply to this flow
+///
+/// NotApplicable rows would bloat audit_verdicts by 1-2 orders of
+/// magnitude (every flow checks against every cluster-scoped policy
+/// plus all namespaced policies in scope, and most produce
+/// NotApplicable) with no analytical value, so we drop them at the
+/// broker before insert.
+///
+/// Unknown verdict strings (a future evaluator version inventing a
+/// new kind, a hand-rolled test inserting malformed JSON) also drop —
+/// silent skip is preferable to either panicking on unknown shapes or
+/// persisting whatever string the evaluator sent.
+fn is_persistable_verdict(verdict: &str) -> bool {
+    verdict == "Allow" || verdict == "WouldDeny"
+}
+
+fn build_flow_for_traffic(traffic: &PodTraffic) -> Option<Flow<'_>> {
+    let raw_traffic_type = traffic.traffic_type.as_deref().unwrap_or("");
+    let normalised = raw_traffic_type.trim().to_ascii_uppercase();
+    // INGRESS: pod_name/pod_namespace is the destination.
+    // EGRESS: pod_name/pod_namespace is the source.
+    let (src_ns, src_name, src_ip, dst_ns, dst_name, dst_ip, dst_port_str) =
+        match normalised.as_str() {
             "INGRESS" => (
                 None,
-                None, // We don't know the source pod identity from PodTraffic alone.
+                // We don't know the source pod identity from PodTraffic alone.
+                None,
                 traffic.traffic_in_out_ip.as_deref(),
                 traffic.pod_namespace.as_deref(),
                 traffic.pod_name.as_deref(),
@@ -147,40 +192,135 @@ impl AuditClient {
                 traffic.pod_name.as_deref(),
                 traffic.pod_ip.as_deref(),
                 None,
-                None, // Likewise — destination pod is identified by IP only here.
+                // Destination pod is identified by IP only here.
+                None,
                 traffic.traffic_in_out_ip.as_deref(),
                 traffic.traffic_in_out_port.as_deref().unwrap_or("0"),
             ),
-            _ => {
-                debug!(?traffic_type, "skipping audit eval for unknown traffic_type");
+            _ => return None,
+        };
+
+    let dst_port: i32 = dst_port_str.parse().unwrap_or(0);
+    let protocol = traffic.ip_protocol.as_deref().unwrap_or("TCP");
+
+    Some(Flow {
+        src_pod_namespace: src_ns,
+        src_pod_name: src_name,
+        dst_pod_namespace: dst_ns,
+        dst_pod_name: dst_name,
+        src_ip,
+        dst_ip,
+        dst_port,
+        protocol,
+        timestamp: traffic.time_stamp.and_utc().to_rfc3339(),
+    })
+}
+
+impl AuditClient {
+    /// Construct from the `EVALUATOR_URL` env var. When unset OR
+    /// whitespace-only, the client is disabled and
+    /// `evaluate_and_persist` is a no-op. Trimming pre-check matters:
+    /// an operator setting `EVALUATOR_URL="  "` to disable would
+    /// otherwise leave `enabled=true` with a malformed URL — every
+    /// audit call would fail with a reqwest URL error, drowning the
+    /// real "audit disabled" signal in error spam.
+    pub fn from_env() -> Self {
+        let raw = std::env::var("EVALUATOR_URL").unwrap_or_default();
+        let base_url = raw.trim().to_string();
+        let enabled = !base_url.is_empty();
+        let permits = std::env::var("AUDIT_INFLIGHT_PERMITS")
+            .ok()
+            // Trim before parsing — consistent with db_pool_max_size
+            // (iteration 102) and the env-trim defense across all 5
+            // services. Without trim, " 32\n" silently falls back to
+            // the default rather than honoring the operator's value.
+            .and_then(|v| v.trim().parse::<usize>().ok())
+            .map(|n| n.max(1))
+            .unwrap_or(AUDIT_INFLIGHT_PERMITS);
+        let timeout_ms = audit_eval_timeout_ms();
+        let http = reqwest::Client::builder()
+            .timeout(Duration::from_millis(timeout_ms))
+            .pool_max_idle_per_host(8)
+            .build()
+            .unwrap_or_else(|_| reqwest::Client::new());
+        Self {
+            enabled,
+            base_url,
+            http,
+            in_flight: std::sync::Arc::new(tokio::sync::Semaphore::new(permits)),
+        }
+    }
+
+    pub fn enabled(&self) -> bool {
+        self.enabled
+    }
+    pub fn base_url(&self) -> &str {
+        &self.base_url
+    }
+
+    /// Number of permits currently available. Exposed via the broker's
+    /// /metrics endpoint as `broker_audit_inflight_available`;
+    /// saturation = configured cap minus this.
+    pub fn available_permits(&self) -> usize {
+        self.in_flight.available_permits()
+    }
+
+    /// Best-effort: build a Flow from the PodTraffic event, POST to
+    /// `/evaluate`, and persist any `WouldDeny` results. Errors are
+    /// logged but never propagated — the broker's ingest path must not
+    /// stall on evaluator hiccups.
+    pub async fn evaluate_and_persist(&self, pool: DbPool, traffic: PodTraffic) {
+        if !self.enabled {
+            return;
+        }
+        // Bound concurrent in-flight evaluations. Without this, a large
+        // ingest batch (the broker's add_pods_batch fires N tasks per
+        // event for an N-event batch) would create unbounded futures
+        // racing for the small connection pool. A failed acquire would
+        // mean the global semaphore is poisoned (extremely unlikely);
+        // treat that as 'just skip the audit step' rather than crashing
+        // the ingest path.
+        let _permit = match self.in_flight.clone().acquire_owned().await {
+            Ok(p) => p,
+            Err(e) => {
+                debug!(error = %e, "audit semaphore closed; skipping evaluation");
                 return;
             }
         };
+        let url = format!("{}/evaluate", self.base_url.trim_end_matches('/'));
 
-        let dst_port: i32 = dst_port_str.parse().unwrap_or(0);
-        let protocol = traffic.ip_protocol.as_deref().unwrap_or("TCP");
-
-        let flow = Flow {
-            src_pod_namespace: src_ns,
-            src_pod_name: src_name,
-            dst_pod_namespace: dst_ns,
-            dst_pod_name: dst_name,
-            src_ip,
-            dst_ip,
-            dst_port,
-            protocol,
-            timestamp: traffic.time_stamp.and_utc().to_rfc3339(),
+        let flow = match build_flow_for_traffic(&traffic) {
+            Some(f) => f,
+            None => {
+                debug!(
+                    raw = traffic.traffic_type.as_deref().unwrap_or(""),
+                    "skipping audit eval for unknown traffic_type"
+                );
+                return;
+            }
         };
 
         let resp = match self.http.post(&url).json(&flow).send().await {
             Ok(r) => r,
             Err(e) => {
+                // Connection-level failures (timeout, refused, DNS):
+                // log at debug since these are commonly transient
+                // (evaluator pod restarting, brief network blip).
+                // Sustained connection failures show up as zero
+                // audit_verdicts rows AND a permit semaphore that
+                // stays near full (no in-flight calls).
                 debug!(error = %e, "evaluator unreachable; skipping audit eval");
                 return;
             }
         };
         if !resp.status().is_success() {
-            debug!(status = %resp.status(), "evaluator returned non-2xx");
+            // Non-2xx HTTP from a reachable evaluator means the
+            // evaluator IS responding but rejecting our requests
+            // (4xx = malformed request — a broker bug we want to
+            // know about; 5xx = evaluator-internal failure — also a
+            // signal the operator must surface). Promote to warn so
+            // operators see the problem without needing debug logs.
+            tracing::warn!(status = %resp.status(), url = %url, "evaluator returned non-2xx for audit eval");
             return;
         }
         let body: EvaluateResponse = match resp.json().await {
@@ -202,19 +342,23 @@ impl AuditClient {
         let to_insert: Vec<AuditVerdictInsert> = body
             .results
             .into_iter()
-            .filter(|r| r.verdict == "Allow" || r.verdict == "WouldDeny")
+            .filter(|r| is_persistable_verdict(&r.verdict))
             .map(|r| AuditVerdictInsert {
                 policy_uid: r.policy_uid,
                 policy_namespace: r.policy_namespace,
                 policy_name: r.policy_name,
                 direction: r.direction,
-                src_namespace: src_ns.map(str::to_owned),
-                src_pod: src_name.map(str::to_owned),
-                dst_namespace: dst_ns.map(str::to_owned),
-                dst_pod: dst_name.map(str::to_owned),
-                dst_port,
-                protocol: protocol.to_owned(),
-                reason: if r.reason.is_empty() { None } else { Some(r.reason) },
+                src_namespace: flow.src_pod_namespace.map(str::to_owned),
+                src_pod: flow.src_pod_name.map(str::to_owned),
+                dst_namespace: flow.dst_pod_namespace.map(str::to_owned),
+                dst_pod: flow.dst_pod_name.map(str::to_owned),
+                dst_port: flow.dst_port,
+                protocol: flow.protocol.to_owned(),
+                reason: if r.reason.is_empty() {
+                    None
+                } else {
+                    Some(r.reason)
+                },
                 observed_at: now,
                 verdict: r.verdict,
             })
@@ -227,8 +371,17 @@ impl AuditClient {
         // Use a dedicated error enum so we can distinguish pool
         // exhaustion from a real diesel error in logs without abusing
         // `diesel::result::Error` variants for unrelated failure modes.
+        //
+        // Short pool-acquire timeout (1s): this audit task is holding
+        // a semaphore permit, and r2d2's 30s default would let one
+        // pool-starved insert pin a permit for 30s, cascading into
+        // audit-semaphore saturation under sustained DB pool pressure.
+        // 1s loses some inserts when the pool genuinely backs up but
+        // restores audit throughput much faster.
         let result = tokio::task::spawn_blocking(move || -> Result<usize, AuditInsertError> {
-            let mut conn = pool.get().map_err(AuditInsertError::Pool)?;
+            let mut conn = pool
+                .get_timeout(std::time::Duration::from_secs(1))
+                .map_err(AuditInsertError::Pool)?;
             diesel::insert_into(schema::audit_verdicts::table)
                 .values(&to_insert)
                 .execute(&mut conn)
@@ -246,5 +399,534 @@ impl AuditClient {
             }
             Err(e) => warn!(error = %e, "audit verdict task panicked"),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Env-isolation helper — same shape as retention.rs / main.rs.
+    /// Save the current value of `key`, set/remove it to `value`,
+    /// run `f`, then restore the previous value (or remove if unset).
+    /// The std test runner runs tests in parallel by default; consistent
+    /// save/restore lets concurrent tests mutating different env vars
+    /// co-exist. Multi-step tests can call this per step (the helper
+    /// restores between iterations, which is fine — each iteration
+    /// sets up its own state fresh).
+    fn with_env<F: FnOnce()>(key: &str, value: Option<&str>, f: F) {
+        let prev = std::env::var(key).ok();
+        match value {
+            Some(v) => std::env::set_var(key, v),
+            None => std::env::remove_var(key),
+        }
+        f();
+        match prev {
+            Some(v) => std::env::set_var(key, v),
+            None => std::env::remove_var(key),
+        }
+    }
+
+    // Wire-format contract tests for the broker ↔ evaluator boundary.
+    // These lock down the JSON shapes both sides must agree on.
+    // See kguardian-dev/kguardian#880 for the original divergence.
+
+    #[test]
+    fn decodes_empty_results_array() {
+        // Evaluator's `{"results":[]}` must deserialise into an empty Vec.
+        let json = r#"{"results":[]}"#;
+        let resp: EvaluateResponse = serde_json::from_str(json).expect("must decode `[]`");
+        assert!(resp.results.is_empty());
+    }
+
+    #[test]
+    fn decodes_missing_results_field() {
+        // `#[serde(default)]` on the field means a missing key defaults
+        // to an empty Vec. This guards against future evaluator versions
+        // that might omit the field entirely.
+        let json = r#"{}"#;
+        let resp: EvaluateResponse = serde_json::from_str(json).expect("must decode missing field");
+        assert!(resp.results.is_empty());
+    }
+
+    #[test]
+    fn rejects_null_results_field() {
+        // The pre-#880 bug: evaluator emitted `{"results":null}` (Go
+        // nil-slice gotcha) and the broker's Vec<VerdictResult> deser
+        // rejected it, producing the "could not decode evaluator
+        // response" warning spam. If this test ever passes, either
+        // serde changed semantics or someone added a custom deserializer
+        // that silently maps null → empty — both worth scrutinising.
+        let json = r#"{"results":null}"#;
+        let resp: Result<EvaluateResponse, _> = serde_json::from_str(json);
+        assert!(
+            resp.is_err(),
+            "null must fail to decode; got {:?}. Evaluator MUST emit [] for empty results.",
+            resp,
+        );
+    }
+
+    #[test]
+    fn decodes_populated_verdict_result() {
+        // Lock down all field renames (policyNamespace, policyName,
+        // policyUID) and the Allow/WouldDeny verdict strings.
+        let json = r#"{
+            "results": [
+                {
+                    "policyNamespace": "prod",
+                    "policyName": "web-deny",
+                    "policyUID": "uid-abc-123",
+                    "direction": "Ingress",
+                    "verdict": "WouldDeny",
+                    "reason": "policy has no ingress rules — default-deny"
+                },
+                {
+                    "policyNamespace": "",
+                    "policyName": "cluster-baseline-audit",
+                    "policyUID": "uid-cluster-1",
+                    "direction": "Ingress",
+                    "verdict": "Allow",
+                    "reason": ""
+                }
+            ]
+        }"#;
+        let resp: EvaluateResponse = serde_json::from_str(json).expect("must decode");
+        assert_eq!(resp.results.len(), 2);
+
+        assert_eq!(resp.results[0].policy_namespace, "prod");
+        assert_eq!(resp.results[0].policy_name, "web-deny");
+        assert_eq!(resp.results[0].policy_uid, "uid-abc-123");
+        assert_eq!(resp.results[0].direction, "Ingress");
+        assert_eq!(resp.results[0].verdict, "WouldDeny");
+        assert_eq!(
+            resp.results[0].reason,
+            "policy has no ingress rules — default-deny"
+        );
+
+        assert_eq!(resp.results[1].policy_namespace, "");
+        assert_eq!(resp.results[1].verdict, "Allow");
+    }
+
+    #[test]
+    fn decodes_verdict_result_with_optional_fields_omitted() {
+        // policyUID is `#[serde(default)]` (some synthetic test policies
+        // have no UID) and reason is `#[serde(default)]` (only populated
+        // for WouldDeny). Their absence must not break decoding.
+        let json = r#"{
+            "results": [
+                {
+                    "policyNamespace": "prod",
+                    "policyName": "web-allow",
+                    "direction": "Egress",
+                    "verdict": "Allow"
+                }
+            ]
+        }"#;
+        let resp: EvaluateResponse = serde_json::from_str(json).expect("must decode");
+        assert_eq!(resp.results.len(), 1);
+        assert_eq!(resp.results[0].policy_uid, "");
+        assert_eq!(resp.results[0].reason, "");
+    }
+
+    #[test]
+    fn audit_client_disabled_when_evaluator_url_unset() {
+        with_env("EVALUATOR_URL", None, || {
+            let client = AuditClient::from_env();
+            assert!(!client.enabled());
+        });
+    }
+
+    #[test]
+    fn audit_client_enabled_when_evaluator_url_set() {
+        with_env(
+            "EVALUATOR_URL",
+            Some("http://evaluator.kguardian.svc:8082"),
+            || {
+                let client = AuditClient::from_env();
+                assert!(client.enabled());
+                assert_eq!(client.base_url(), "http://evaluator.kguardian.svc:8082");
+            },
+        );
+    }
+
+    // Concurrency-cap regression tests for the semaphore that bounds
+    // in-flight audit evaluations. Without this cap, a 1000-event
+    // batch from add_pods_batch creates 1000 concurrent reqwest
+    // futures and starves the (8-host) connection pool.
+
+    #[test]
+    fn semaphore_starts_with_default_permits_when_env_unset() {
+        with_env("AUDIT_INFLIGHT_PERMITS", None, || {
+            let c = AuditClient::from_env();
+            assert_eq!(c.available_permits(), AUDIT_INFLIGHT_PERMITS);
+        });
+    }
+
+    #[test]
+    fn semaphore_size_is_configurable() {
+        with_env("AUDIT_INFLIGHT_PERMITS", Some("4"), || {
+            let c = AuditClient::from_env();
+            assert_eq!(c.available_permits(), 4);
+        });
+    }
+
+    #[test]
+    fn semaphore_trims_whitespace_around_value() {
+        // " 32\n" must honor 32, not fall back to the default. Same
+        // operator-paste defense applied to db_pool_max_size (broker
+        // iteration 102) and the env reads across all 5 services.
+        with_env("AUDIT_INFLIGHT_PERMITS", Some("  32\n"), || {
+            let c = AuditClient::from_env();
+            assert_eq!(c.available_permits(), 32);
+        });
+    }
+
+    #[test]
+    fn semaphore_floors_invalid_values_to_default() {
+        // Operators sometimes typo `0` or non-numeric values; we don't
+        // want either to silently disable concurrency (a 0-permit
+        // semaphore would block every audit task forever).
+        //
+        // Two distinct values → two with_env invocations rather than
+        // one outer save/restore. Restoring between assertions is
+        // fine here: each iteration sets up its own fresh state.
+        with_env("AUDIT_INFLIGHT_PERMITS", Some("0"), || {
+            let c = AuditClient::from_env();
+            // 0 floors to 1, not the full default — operators have made
+            // a deliberate (if perhaps misguided) choice.
+            assert_eq!(c.available_permits(), 1);
+        });
+        with_env("AUDIT_INFLIGHT_PERMITS", Some("not-a-number"), || {
+            let c = AuditClient::from_env();
+            assert_eq!(c.available_permits(), AUDIT_INFLIGHT_PERMITS);
+        });
+    }
+
+    #[test]
+    fn evaluator_url_unset_disables_client() {
+        with_env("EVALUATOR_URL", None, || {
+            let c = AuditClient::from_env();
+            assert!(!c.enabled(), "no EVALUATOR_URL must yield disabled");
+            assert_eq!(c.base_url(), "");
+        });
+    }
+
+    #[test]
+    fn evaluator_url_whitespace_only_disables_client() {
+        // Operators sometimes set EVALUATOR_URL="  " or "\t" to
+        // toggle the audit feature off without removing the env var
+        // entirely. Pre-fix, the trim was missing from from_env, so
+        // base_url stayed " " (truthy under !is_empty), enabled=true,
+        // and every audit call hit reqwest with a malformed URL —
+        // drowning the "audit disabled" signal in URL-parse-error
+        // spam.
+        for ws in ["  ", "\t", "\n", " \t\n "] {
+            with_env("EVALUATOR_URL", Some(ws), || {
+                let c = AuditClient::from_env();
+                assert!(!c.enabled(), "whitespace-only {ws:?} must disable client",);
+                assert_eq!(c.base_url(), "", "whitespace-only must trim to empty");
+            });
+        }
+    }
+
+    #[test]
+    fn evaluator_url_trims_surrounding_whitespace() {
+        // A pasted URL with stray newline (very common when copying
+        // from docs) should round-trip clean.
+        with_env("EVALUATOR_URL", Some("  http://evaluator:8080\n"), || {
+            let c = AuditClient::from_env();
+            assert!(c.enabled());
+            assert_eq!(c.base_url(), "http://evaluator:8080");
+        });
+    }
+
+    #[test]
+    fn audit_eval_timeout_default_when_unset() {
+        with_env("AUDIT_EVAL_TIMEOUT_MS", None, || {
+            assert_eq!(audit_eval_timeout_ms(), DEFAULT_AUDIT_EVAL_TIMEOUT_MS);
+        });
+    }
+
+    #[test]
+    fn audit_eval_timeout_explicit_value() {
+        with_env("AUDIT_EVAL_TIMEOUT_MS", Some("5000"), || {
+            assert_eq!(audit_eval_timeout_ms(), 5000);
+        });
+    }
+
+    #[test]
+    fn audit_eval_timeout_floors_at_minimum() {
+        // 0 or any value below MIN_AUDIT_EVAL_TIMEOUT_MS clamps up to
+        // the minimum. Avoids "effectively disabled" audit forwarder
+        // when an operator typos the value.
+        for too_small in ["0", "1", "10", "49"] {
+            with_env("AUDIT_EVAL_TIMEOUT_MS", Some(too_small), || {
+                assert_eq!(
+                    audit_eval_timeout_ms(),
+                    MIN_AUDIT_EVAL_TIMEOUT_MS,
+                    "value {too_small} must clamp to minimum",
+                );
+            });
+        }
+    }
+
+    #[test]
+    fn audit_eval_timeout_trims_whitespace() {
+        with_env("AUDIT_EVAL_TIMEOUT_MS", Some("  5000\n"), || {
+            assert_eq!(audit_eval_timeout_ms(), 5000);
+        });
+    }
+
+    #[test]
+    fn audit_eval_timeout_garbage_falls_back_to_default() {
+        with_env("AUDIT_EVAL_TIMEOUT_MS", Some("not-a-number"), || {
+            assert_eq!(audit_eval_timeout_ms(), DEFAULT_AUDIT_EVAL_TIMEOUT_MS);
+        });
+    }
+
+    /// Build a minimal PodTraffic for the `build_flow_for_traffic` tests.
+    /// Direction-specific fields use values that let the assertion identify
+    /// which branch (INGRESS vs EGRESS) the helper took.
+    fn sample_traffic(traffic_type: Option<&str>) -> PodTraffic {
+        PodTraffic {
+            uuid: "u".to_string(),
+            pod_name: Some("web".to_string()),
+            pod_namespace: Some("prod".to_string()),
+            pod_ip: Some("10.0.0.1".to_string()),
+            pod_port: Some("8080".to_string()),
+            ip_protocol: Some("TCP".to_string()),
+            traffic_type: traffic_type.map(str::to_string),
+            traffic_in_out_ip: Some("10.0.0.2".to_string()),
+            traffic_in_out_port: Some("443".to_string()),
+            decision: Some("ALLOW".to_string()),
+            time_stamp: chrono::DateTime::from_timestamp(0, 0)
+                .expect("epoch is a valid timestamp")
+                .naive_utc(),
+        }
+    }
+
+    #[test]
+    fn is_persistable_verdict_accepts_allow_and_woulddeny() {
+        assert!(is_persistable_verdict("Allow"));
+        assert!(is_persistable_verdict("WouldDeny"));
+    }
+
+    #[test]
+    fn is_persistable_verdict_drops_not_applicable() {
+        // The largest verdict-volume bucket. The doc on the helper
+        // explains why (every flow × every cluster-scoped policy + all
+        // namespaced policies in scope) — silently dropping is the
+        // whole point of having this filter.
+        assert!(!is_persistable_verdict("NotApplicable"));
+    }
+
+    #[test]
+    fn is_persistable_verdict_drops_unknown_kinds() {
+        // Future evaluator versions inventing new verdict types
+        // (e.g. "PartialAllow", "WouldDenyIfEvaluated") must drop
+        // until the broker is updated to handle them — silent skip
+        // is preferable to persisting unknown shapes that downstream
+        // (frontend Would-Deny view, retention loop, audit_verdicts
+        // SQL filters) wouldn't know how to interpret.
+        for unknown in ["PartialAllow", "WouldDenyIfEvaluated", "Maybe", "", " "] {
+            assert!(
+                !is_persistable_verdict(unknown),
+                "unknown verdict {unknown:?} must not persist",
+            );
+        }
+    }
+
+    #[test]
+    fn is_persistable_verdict_is_case_sensitive() {
+        // The evaluator emits the canonical Title-case strings
+        // ("Allow", "WouldDeny"). Lowercase / uppercase variants
+        // are NOT accepted — silent acceptance would mask an
+        // evaluator-broker wire-format drift bug (same defensive
+        // pattern as the broker's validate_enum_filter whitelist
+        // for the /audit/verdicts query string).
+        for bad in [
+            "allow",
+            "ALLOW",
+            "wouldDeny",
+            "wouldDENY",
+            "would_deny",
+            "wOulddeny",
+        ] {
+            assert!(
+                !is_persistable_verdict(bad),
+                "case variant {bad:?} must not persist",
+            );
+        }
+    }
+
+    #[test]
+    fn build_flow_returns_none_for_missing_traffic_type() {
+        // Defensive: `traffic_type` is Option<String> in the schema —
+        // a NULL row must not panic, must not produce a half-built Flow.
+        let traffic = sample_traffic(None);
+        assert!(build_flow_for_traffic(&traffic).is_none());
+    }
+
+    #[test]
+    fn build_flow_returns_none_for_unknown_traffic_type() {
+        // Anything that isn't ingress/egress (case-insensitive) is a
+        // skip — better to drop the audit eval than to send a malformed
+        // Flow that the evaluator might mis-classify.
+        let traffic = sample_traffic(Some("UNKNOWN"));
+        assert!(build_flow_for_traffic(&traffic).is_none());
+    }
+
+    #[test]
+    fn build_flow_returns_none_for_empty_or_whitespace_traffic_type() {
+        // A degenerate row with traffic_type=Some("") or whitespace
+        // must also skip — the normalise (trim + uppercase) collapses
+        // both to "", which falls through the match to None. Without
+        // this contract pin, a future refactor that swaps the
+        // normaliser could silently start treating empty as INGRESS or
+        // EGRESS depending on the new logic.
+        for tt in ["", " ", "\t", "\n", "   \n  "] {
+            let traffic = sample_traffic(Some(tt));
+            assert!(
+                build_flow_for_traffic(&traffic).is_none(),
+                "traffic_type={tt:?} must produce None",
+            );
+        }
+    }
+
+    #[test]
+    fn build_flow_ingress_puts_pod_as_destination() {
+        let traffic = sample_traffic(Some("INGRESS"));
+        let flow = build_flow_for_traffic(&traffic).expect("INGRESS must produce a Flow");
+        // INGRESS: source is the external peer (traffic_in_out_ip), the
+        // pod itself is the destination. The evaluator's matcher relies
+        // on this orientation to apply ingress rules against dst pod.
+        assert_eq!(flow.src_pod_namespace, None);
+        assert_eq!(flow.src_pod_name, None);
+        assert_eq!(flow.src_ip, Some("10.0.0.2"));
+        assert_eq!(flow.dst_pod_namespace, Some("prod"));
+        assert_eq!(flow.dst_pod_name, Some("web"));
+        assert_eq!(flow.dst_ip, Some("10.0.0.1"));
+        assert_eq!(flow.dst_port, 8080);
+        assert_eq!(flow.protocol, "TCP");
+    }
+
+    #[test]
+    fn build_flow_egress_puts_pod_as_source() {
+        let traffic = sample_traffic(Some("EGRESS"));
+        let flow = build_flow_for_traffic(&traffic).expect("EGRESS must produce a Flow");
+        assert_eq!(flow.src_pod_namespace, Some("prod"));
+        assert_eq!(flow.src_pod_name, Some("web"));
+        assert_eq!(flow.src_ip, Some("10.0.0.1"));
+        assert_eq!(flow.dst_pod_namespace, None);
+        assert_eq!(flow.dst_pod_name, None);
+        assert_eq!(flow.dst_ip, Some("10.0.0.2"));
+        assert_eq!(flow.dst_port, 443);
+        assert_eq!(flow.protocol, "TCP");
+    }
+
+    #[test]
+    fn build_flow_is_case_insensitive_for_direction() {
+        // The controller emits "INGRESS"/"EGRESS"; the evaluator's
+        // matcher and mcp-server's compactor already case-fold. Pinning
+        // the broker's audit forwarder to the same contract prevents a
+        // silent-skip cliff if a future producer ever writes mixed or
+        // lowercase. Same defense as the mcp-server filter.go iter-71
+        // bug fix.
+        for variant in ["ingress", "Ingress", "iNgReSs", "INGRESS "] {
+            let traffic = sample_traffic(Some(variant));
+            let flow = build_flow_for_traffic(&traffic)
+                .unwrap_or_else(|| panic!("variant {variant:?} must yield Flow"));
+            assert_eq!(
+                flow.dst_pod_name,
+                Some("web"),
+                "INGRESS variant {variant:?} must orient pod as dst",
+            );
+        }
+        for variant in ["egress", "Egress", "eGrEsS", " egress\n"] {
+            let traffic = sample_traffic(Some(variant));
+            let flow = build_flow_for_traffic(&traffic)
+                .unwrap_or_else(|| panic!("variant {variant:?} must yield Flow"));
+            assert_eq!(
+                flow.src_pod_name,
+                Some("web"),
+                "EGRESS variant {variant:?} must orient pod as src",
+            );
+        }
+    }
+
+    #[test]
+    fn build_flow_defaults_missing_port_to_zero() {
+        // Defensive: a NULL pod_port (INGRESS) or traffic_in_out_port
+        // (EGRESS) must not break decoding. The evaluator treats
+        // dst_port=0 as a wildcard match.
+        let mut traffic = sample_traffic(Some("INGRESS"));
+        traffic.pod_port = None;
+        let flow = build_flow_for_traffic(&traffic).expect("Flow");
+        assert_eq!(flow.dst_port, 0);
+
+        let mut traffic = sample_traffic(Some("EGRESS"));
+        traffic.traffic_in_out_port = None;
+        let flow = build_flow_for_traffic(&traffic).expect("Flow");
+        assert_eq!(flow.dst_port, 0);
+    }
+
+    #[test]
+    fn build_flow_defaults_missing_protocol_to_tcp() {
+        // The evaluator's matcher distinguishes TCP/UDP. A NULL
+        // ip_protocol in the schema must default to TCP rather than
+        // (a) being skipped (silent audit loss) or (b) being sent as
+        // empty (evaluator would error on the unknown protocol value).
+        let mut traffic = sample_traffic(Some("INGRESS"));
+        traffic.ip_protocol = None;
+        let flow = build_flow_for_traffic(&traffic).expect("Flow");
+        assert_eq!(flow.protocol, "TCP");
+    }
+
+    #[test]
+    fn build_flow_non_numeric_port_falls_back_to_zero() {
+        // Distinct from "missing port" — the port string is PRESENT
+        // but not numeric. The schema allows arbitrary Varchar so a
+        // bad writer / future tool could insert "abc" or "http" as
+        // the port. `.parse::<i32>().unwrap_or(0)` falls back to 0
+        // (which the evaluator treats as a non-matching port and
+        // surfaces as WouldDeny — preferable to panicking on bad
+        // input or sending a malformed Flow to the evaluator).
+        for bad in ["abc", "8080-rest", "8080.5", "two thousand"] {
+            let mut traffic = sample_traffic(Some("INGRESS"));
+            traffic.pod_port = Some(bad.to_string());
+            let flow = build_flow_for_traffic(&traffic)
+                .unwrap_or_else(|| panic!("non-numeric port {bad:?} should still yield a Flow"));
+            assert_eq!(
+                flow.dst_port, 0,
+                "non-numeric port {bad:?} must fall back to 0, not crash",
+            );
+        }
+    }
+
+    #[test]
+    fn semaphore_clones_share_permits() {
+        // AuditClient is Clone; web::Data wraps it in Arc but each
+        // route handler does .get_ref().clone() to detach. The
+        // semaphore must be shared, not duplicated, otherwise each
+        // handler gets its own bucket of permits and the cap doesn't
+        // apply globally.
+        with_env("AUDIT_INFLIGHT_PERMITS", Some("2"), || {
+            let a = AuditClient::from_env();
+            let b = a.clone();
+
+            let _p1 = a
+                .in_flight
+                .clone()
+                .try_acquire_owned()
+                .expect("a permit available");
+            let _p2 = a
+                .in_flight
+                .clone()
+                .try_acquire_owned()
+                .expect("second permit available");
+            // Now zero permits remain. The clone must see that.
+            assert_eq!(b.available_permits(), 0);
+            assert!(b.in_flight.clone().try_acquire_owned().is_err());
+        });
     }
 }

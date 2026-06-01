@@ -369,6 +369,105 @@ func TestMatch_PolicyTypesInferredFromRules(t *testing.T) {
 // ptrSelector helps write peer specs cleanly.
 func ptrSelector(s metav1.LabelSelector) *metav1.LabelSelector { return &s }
 
+func TestPeerIP_DirectionRouting(t *testing.T) {
+	flow := Flow{SrcIP: "10.1.2.3", DstIP: "10.4.5.6"}
+	if got := peerIP(flow, DirectionIngress); got != "10.1.2.3" {
+		t.Errorf("ingress peer is the source; want 10.1.2.3, got %q", got)
+	}
+	if got := peerIP(flow, DirectionEgress); got != "10.4.5.6" {
+		t.Errorf("egress peer is the destination; want 10.4.5.6, got %q", got)
+	}
+	// Defensive: an unrecognised Direction must not panic and must
+	// return empty (which downstream code treats as no-match).
+	if got := peerIP(flow, Direction("Sideways")); got != "" {
+		t.Errorf("unknown direction should yield empty string; got %q", got)
+	}
+}
+
+func TestIpBlockMatches_NilBlock(t *testing.T) {
+	if ipBlockMatches("10.0.0.1", nil) {
+		t.Error("nil IPBlock must never match")
+	}
+}
+
+func TestIpBlockMatches_EmptyIP(t *testing.T) {
+	// An ingress flow with no recorded source IP should not match an
+	// IP-based peer rule. The broker leaves SrcIP unset for many flow
+	// types — relying on the rule to deny is critical.
+	if ipBlockMatches("", &networkingv1.IPBlock{CIDR: "0.0.0.0/0"}) {
+		t.Error("empty IP must never match, even against 0.0.0.0/0")
+	}
+}
+
+func TestIpBlockMatches_UnparseableIP(t *testing.T) {
+	// Garbage in the IP slot must fail closed, not panic.
+	if ipBlockMatches("not-an-ip", &networkingv1.IPBlock{CIDR: "10.0.0.0/8"}) {
+		t.Error("non-IP string must fail closed")
+	}
+}
+
+func TestIpBlockMatches_UnparseableCIDR(t *testing.T) {
+	// Admission validates CIDR shape, but a corrupted policy lookup or
+	// hand-crafted test input shouldn't crash the evaluator.
+	if ipBlockMatches("10.0.0.1", &networkingv1.IPBlock{CIDR: "not-a-cidr"}) {
+		t.Error("unparseable CIDR must yield no-match")
+	}
+}
+
+func TestIpBlockMatches_OutsideCIDR(t *testing.T) {
+	if ipBlockMatches("192.168.0.1", &networkingv1.IPBlock{CIDR: "10.0.0.0/8"}) {
+		t.Error("IP outside CIDR must not match")
+	}
+}
+
+func TestIpBlockMatches_InsideCIDRNoExcept(t *testing.T) {
+	if !ipBlockMatches("10.5.6.7", &networkingv1.IPBlock{CIDR: "10.0.0.0/8"}) {
+		t.Error("IP inside CIDR with no Except must match")
+	}
+}
+
+func TestIpBlockMatches_ExceptOverridesAllow(t *testing.T) {
+	block := &networkingv1.IPBlock{
+		CIDR:   "10.0.0.0/8",
+		Except: []string{"10.5.0.0/16"},
+	}
+	if ipBlockMatches("10.5.6.7", block) {
+		t.Error("IP inside Except must not match even though inside CIDR")
+	}
+	if !ipBlockMatches("10.6.6.7", block) {
+		t.Error("IP outside Except, inside CIDR must match")
+	}
+}
+
+func TestIpBlockMatches_ExceptIgnoresInvalidEntries(t *testing.T) {
+	// One invalid Except entry shouldn't poison the entire match —
+	// remaining valid ones must still apply, and a clean valid IP in
+	// the CIDR is still considered allowed.
+	block := &networkingv1.IPBlock{
+		CIDR: "10.0.0.0/8",
+		Except: []string{
+			"garbage-cidr", // invalid → skipped
+			"10.5.0.0/16",  // valid    → excludes
+		},
+	}
+	if ipBlockMatches("10.5.6.7", block) {
+		t.Error("valid Except entry should still take effect alongside garbage")
+	}
+	if !ipBlockMatches("10.6.6.7", block) {
+		t.Error("IP outside the valid Except remains allowed")
+	}
+}
+
+func TestIpBlockMatches_IPv6(t *testing.T) {
+	block := &networkingv1.IPBlock{CIDR: "2001:db8::/32"}
+	if !ipBlockMatches("2001:db8:1::1", block) {
+		t.Error("IPv6 inside CIDR must match")
+	}
+	if ipBlockMatches("2001:dead::1", block) {
+		t.Error("IPv6 outside CIDR must not match")
+	}
+}
+
 func TestMatch_IPBlockAllow(t *testing.T) {
 	lookup := newLookup()
 	lookup.addPod("prod", "web-1", map[string]string{"app": "web"})
@@ -420,8 +519,8 @@ func TestMatch_IPBlockExceptDenies(t *testing.T) {
 		ip      string
 		verdict Verdict
 	}{
-		{ip: "10.5.6.7", verdict: VerdictWouldDeny},  // in except → denied
-		{ip: "10.6.6.7", verdict: VerdictAllow},      // outside except, in cidr → allowed
+		{ip: "10.5.6.7", verdict: VerdictWouldDeny},    // in except → denied
+		{ip: "10.6.6.7", verdict: VerdictAllow},        // outside except, in cidr → allowed
 		{ip: "192.168.1.1", verdict: VerdictWouldDeny}, // outside cidr → denied
 	} {
 		flow := Flow{
@@ -567,6 +666,153 @@ func TestMatchCluster_NamespaceSelectorScopes(t *testing.T) {
 	}
 }
 
+func TestMatchCluster_IngressRuleAllow(t *testing.T) {
+	// Cluster policy with an ingress rule that explicitly allows from
+	// pods carrying app=client. Flow from such a client pod → Allow.
+	lookup := newLookup()
+	lookup.addPod("prod", "web-1", map[string]string{"app": "web"})
+	lookup.addPod("prod", "client-1", map[string]string{"app": "client"})
+
+	tcp := corev1.ProtocolTCP
+	port := intstr.FromInt(8080)
+	cp := &v1alpha1.AuditClusterNetworkPolicy{
+		ObjectMeta: metav1.ObjectMeta{Name: "web-allow-clients", UID: "uid-cp-allow"},
+		Spec: v1alpha1.ClusterNetworkPolicySpec{
+			PodSelector: selectMatchLabels(map[string]string{"app": "web"}),
+			PolicyTypes: []networkingv1.PolicyType{networkingv1.PolicyTypeIngress},
+			Ingress: []networkingv1.NetworkPolicyIngressRule{{
+				From: []networkingv1.NetworkPolicyPeer{{
+					PodSelector: ptrSelector(selectMatchLabels(map[string]string{"app": "client"})),
+				}},
+				Ports: []networkingv1.NetworkPolicyPort{{Protocol: &tcp, Port: &port}},
+			}},
+		},
+	}
+
+	flow := Flow{
+		SrcPodNamespace: "prod", SrcPodName: "client-1",
+		DstPodNamespace: "prod", DstPodName: "web-1",
+		DstPort: 8080, Protocol: ProtocolTCP,
+	}
+	got := MatchCluster(flow, cp, lookup)
+	if len(got) != 1 || got[0].Verdict != VerdictAllow {
+		t.Fatalf("expected Allow on ingress rule match, got %#v", got)
+	}
+	if got[0].PolicyUID != "uid-cp-allow" {
+		t.Errorf("expected policyUID propagated, got %q", got[0].PolicyUID)
+	}
+}
+
+func TestMatchCluster_IngressRuleNonMatchYieldsWouldDeny(t *testing.T) {
+	// Same shape as above but the source pod's labels don't match the
+	// rule's peer selector → no rule allows the flow → WouldDeny with a
+	// reason that points at the failed match (not "no rules").
+	lookup := newLookup()
+	lookup.addPod("prod", "web-1", map[string]string{"app": "web"})
+	lookup.addPod("prod", "stranger", map[string]string{"app": "stranger"})
+
+	tcp := corev1.ProtocolTCP
+	port := intstr.FromInt(8080)
+	cp := &v1alpha1.AuditClusterNetworkPolicy{
+		ObjectMeta: metav1.ObjectMeta{Name: "web-allow-clients-only"},
+		Spec: v1alpha1.ClusterNetworkPolicySpec{
+			PodSelector: selectMatchLabels(map[string]string{"app": "web"}),
+			PolicyTypes: []networkingv1.PolicyType{networkingv1.PolicyTypeIngress},
+			Ingress: []networkingv1.NetworkPolicyIngressRule{{
+				From: []networkingv1.NetworkPolicyPeer{{
+					PodSelector: ptrSelector(selectMatchLabels(map[string]string{"app": "client"})),
+				}},
+				Ports: []networkingv1.NetworkPolicyPort{{Protocol: &tcp, Port: &port}},
+			}},
+		},
+	}
+
+	flow := Flow{
+		SrcPodNamespace: "prod", SrcPodName: "stranger",
+		DstPodNamespace: "prod", DstPodName: "web-1",
+		DstPort: 8080, Protocol: ProtocolTCP,
+	}
+	got := MatchCluster(flow, cp, lookup)
+	if len(got) != 1 || got[0].Verdict != VerdictWouldDeny {
+		t.Fatalf("expected WouldDeny on non-matching peer, got %#v", got)
+	}
+	if got[0].Reason == "" {
+		t.Error("expected a non-empty reason for the deny")
+	}
+	if got[0].Reason == "policy has no ingress rules — default-deny" {
+		t.Errorf("expected the rule-mismatch reason, not the no-rules one: got %q", got[0].Reason)
+	}
+}
+
+func TestMatchCluster_EgressRuleAllow(t *testing.T) {
+	// Cluster-scoped egress: subject is the SOURCE pod, peer is the
+	// destination. Allow when destination labels match.
+	lookup := newLookup()
+	lookup.addPod("prod", "web-1", map[string]string{"app": "web"})
+	lookup.addPod("prod", "db-1", map[string]string{"app": "db"})
+
+	tcp := corev1.ProtocolTCP
+	port := intstr.FromInt(5432)
+	cp := &v1alpha1.AuditClusterNetworkPolicy{
+		ObjectMeta: metav1.ObjectMeta{Name: "web-egress-to-db"},
+		Spec: v1alpha1.ClusterNetworkPolicySpec{
+			PodSelector: selectMatchLabels(map[string]string{"app": "web"}),
+			PolicyTypes: []networkingv1.PolicyType{networkingv1.PolicyTypeEgress},
+			Egress: []networkingv1.NetworkPolicyEgressRule{{
+				To: []networkingv1.NetworkPolicyPeer{{
+					PodSelector: ptrSelector(selectMatchLabels(map[string]string{"app": "db"})),
+				}},
+				Ports: []networkingv1.NetworkPolicyPort{{Protocol: &tcp, Port: &port}},
+			}},
+		},
+	}
+
+	flow := Flow{
+		SrcPodNamespace: "prod", SrcPodName: "web-1",
+		DstPodNamespace: "prod", DstPodName: "db-1",
+		DstPort: 5432, Protocol: ProtocolTCP,
+	}
+	got := MatchCluster(flow, cp, lookup)
+	if len(got) != 1 {
+		t.Fatalf("expected 1 result, got %d: %#v", len(got), got)
+	}
+	if got[0].Direction != DirectionEgress {
+		t.Errorf("expected Egress direction, got %s", got[0].Direction)
+	}
+	if got[0].Verdict != VerdictAllow {
+		t.Errorf("expected Allow on egress to allowed peer, got %s reason=%q", got[0].Verdict, got[0].Reason)
+	}
+}
+
+func TestMatchCluster_EgressNoRulesDefaultDeny(t *testing.T) {
+	// Cluster policy listing Egress in policyTypes but with empty
+	// egress rules — every egress flow from the subject should be
+	// WouldDeny with the "no egress rules" reason.
+	lookup := newLookup()
+	lookup.addPod("prod", "web-1", map[string]string{"app": "web"})
+
+	cp := &v1alpha1.AuditClusterNetworkPolicy{
+		ObjectMeta: metav1.ObjectMeta{Name: "web-egress-deny-all"},
+		Spec: v1alpha1.ClusterNetworkPolicySpec{
+			PodSelector: selectMatchLabels(map[string]string{"app": "web"}),
+			PolicyTypes: []networkingv1.PolicyType{networkingv1.PolicyTypeEgress},
+		},
+	}
+
+	flow := Flow{
+		SrcPodNamespace: "prod", SrcPodName: "web-1",
+		DstPodNamespace: "prod", DstPodName: "anywhere",
+		DstPort: 80, Protocol: ProtocolTCP,
+	}
+	got := MatchCluster(flow, cp, lookup)
+	if len(got) != 1 || got[0].Verdict != VerdictWouldDeny {
+		t.Fatalf("expected WouldDeny on egress default-deny, got %#v", got)
+	}
+	if got[0].Reason != "policy has no egress rules — default-deny" {
+		t.Errorf("expected egress-default-deny reason, got %q", got[0].Reason)
+	}
+}
+
 func TestMatchCluster_NilSelectorMatchesAll(t *testing.T) {
 	// nil namespaceSelector → applies to every namespace.
 	lookup := newLookup()
@@ -589,6 +835,133 @@ func TestMatchCluster_NilSelectorMatchesAll(t *testing.T) {
 		if got[0].Verdict != VerdictWouldDeny {
 			t.Errorf("ns=%s: expected WouldDeny, got %s", ns, got[0].Verdict)
 		}
+	}
+}
+
+func TestMatchCluster_EmptyNamespaceSelectorMatchesUnlabelledNamespace(t *testing.T) {
+	// Regression for the nil-vs-empty conflation: an
+	// AuditClusterNetworkPolicy with namespaceSelector: {} (an EXPLICIT
+	// empty selector — the "match all namespaces" idiom) must match a
+	// known-but-unlabelled namespace. The Lookup contract is:
+	//   nil → namespace UNKNOWN
+	//   {}  → namespace exists with no labels
+	// If the matcher reads {} as nil it short-circuits to NotApplicable
+	// — silently breaking every cluster policy that uses the empty
+	// selector against any default-created namespace.
+	lookup := newLookup()
+	lookup.addPod("default", "web-1", map[string]string{"app": "web"})
+	// Explicitly seed an empty (not nil) labels map for "default".
+	lookup.addNamespace("default", map[string]string{})
+
+	emptySel := metav1.LabelSelector{} // {} — match everything
+	cp := &v1alpha1.AuditClusterNetworkPolicy{
+		ObjectMeta: metav1.ObjectMeta{Name: "match-all-deny"},
+		Spec: v1alpha1.ClusterNetworkPolicySpec{
+			NamespaceSelector: &emptySel,
+			PodSelector:       selectMatchLabels(map[string]string{"app": "web"}),
+		},
+	}
+	flow := Flow{
+		DstPodNamespace: "default", DstPodName: "web-1",
+		DstPort: 8080, Protocol: ProtocolTCP,
+	}
+	got := MatchCluster(flow, cp, lookup)
+	if len(got) != 1 {
+		t.Fatalf("expected 1 result, got %#v", got)
+	}
+	if got[0].Verdict != VerdictWouldDeny {
+		t.Errorf("empty namespaceSelector + unlabelled namespace must match (WouldDeny here, no rules); got %s", got[0].Verdict)
+	}
+}
+
+func TestMatchCluster_NilNamespaceLookupIsNotApplicable(t *testing.T) {
+	// Counterpart to the empty-namespace test: when the namespace is
+	// truly unknown to the cache (Lookup returns nil), the matcher
+	// must NOT pretend it matches an empty namespaceSelector.
+	// Returning NotApplicable is the safe default — the alternative
+	// would be over-matching during informer warmup.
+	lookup := newLookup()
+	lookup.addPod("default", "web-1", map[string]string{"app": "web"})
+	// NOTE: deliberately do NOT seed "default" in namespaces.
+
+	emptySel := metav1.LabelSelector{}
+	cp := &v1alpha1.AuditClusterNetworkPolicy{
+		ObjectMeta: metav1.ObjectMeta{Name: "match-all-deny"},
+		Spec: v1alpha1.ClusterNetworkPolicySpec{
+			NamespaceSelector: &emptySel,
+			PodSelector:       selectMatchLabels(map[string]string{"app": "web"}),
+		},
+	}
+	flow := Flow{
+		DstPodNamespace: "default", DstPodName: "web-1",
+		DstPort: 8080, Protocol: ProtocolTCP,
+	}
+	got := MatchCluster(flow, cp, lookup)
+	if len(got) != 1 || got[0].Verdict != VerdictNotApplicable {
+		t.Fatalf("unknown namespace must yield NotApplicable, got %#v", got)
+	}
+}
+
+func TestEffectivePolicyTypes_DedupesInput(t *testing.T) {
+	// CRD admission has list-type: set on policyTypes, but the matcher
+	// shouldn't trust input it didn't validate itself — a cluster-admin
+	// could apply a CRD without our list-type guard and let `[Ingress,
+	// Ingress]` through. Without dedup the matcher would emit duplicate
+	// Results and the status aggregator would double-count.
+	cases := []struct {
+		name string
+		in   []networkingv1.PolicyType
+		want []networkingv1.PolicyType
+	}{
+		{"empty stays empty", nil, nil},
+		{"single value untouched", []networkingv1.PolicyType{networkingv1.PolicyTypeIngress}, []networkingv1.PolicyType{networkingv1.PolicyTypeIngress}},
+		{"already-deduped passes through", []networkingv1.PolicyType{networkingv1.PolicyTypeIngress, networkingv1.PolicyTypeEgress}, []networkingv1.PolicyType{networkingv1.PolicyTypeIngress, networkingv1.PolicyTypeEgress}},
+		{"duplicate ingress collapses", []networkingv1.PolicyType{networkingv1.PolicyTypeIngress, networkingv1.PolicyTypeIngress}, []networkingv1.PolicyType{networkingv1.PolicyTypeIngress}},
+		{"duplicate egress collapses", []networkingv1.PolicyType{networkingv1.PolicyTypeEgress, networkingv1.PolicyTypeEgress}, []networkingv1.PolicyType{networkingv1.PolicyTypeEgress}},
+		{"order preserved across mixed dups", []networkingv1.PolicyType{networkingv1.PolicyTypeEgress, networkingv1.PolicyTypeIngress, networkingv1.PolicyTypeEgress}, []networkingv1.PolicyType{networkingv1.PolicyTypeEgress, networkingv1.PolicyTypeIngress}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := dedupPolicyTypes(c.in)
+			if len(got) != len(c.want) {
+				t.Fatalf("len: want %d, got %d (%v)", len(c.want), len(got), got)
+			}
+			for i := range got {
+				if got[i] != c.want[i] {
+					t.Errorf("idx %d: want %s, got %s", i, c.want[i], got[i])
+				}
+			}
+		})
+	}
+}
+
+func TestMatch_DuplicatePolicyTypesEmitOneResultPerDirection(t *testing.T) {
+	// End-to-end pin for the dedup contract: feed a policy with
+	// `policyTypes: [Ingress, Ingress]` and verify Match returns ONE
+	// result for the matched flow (not two). Double-emission would
+	// double the flowsEvaluated count in the status aggregator.
+	lookup := newLookup()
+	lookup.addPod("prod", "client-1", map[string]string{"app": "client"})
+	lookup.addPod("prod", "web-1", map[string]string{"app": "web"})
+
+	p := policy("prod", "double-ingress", networkingv1.NetworkPolicySpec{
+		PodSelector: selectMatchLabels(map[string]string{"app": "web"}),
+		PolicyTypes: []networkingv1.PolicyType{
+			networkingv1.PolicyTypeIngress,
+			networkingv1.PolicyTypeIngress, // dup
+		},
+	})
+	flow := Flow{
+		SrcPodNamespace: "prod", SrcPodName: "client-1",
+		DstPodNamespace: "prod", DstPodName: "web-1",
+		DstPort: 80, Protocol: ProtocolTCP,
+	}
+	got := Match(flow, p, lookup)
+	if len(got) != 1 {
+		t.Fatalf("expected exactly 1 Result (no double-emit on duplicate policyTypes), got %d: %#v", len(got), got)
+	}
+	if got[0].Direction != DirectionIngress {
+		t.Errorf("want Ingress, got %s", got[0].Direction)
 	}
 }
 
@@ -625,5 +998,253 @@ func TestMatch_NamedPortMismatchOnPort(t *testing.T) {
 	got := Match(flow, p, lookup)
 	if got[0].Verdict != VerdictWouldDeny {
 		t.Fatalf("expected WouldDeny when named port resolves to a different containerPort, got %#v", got)
+	}
+}
+
+func TestMatch_NamedPortMismatchOnProtocol(t *testing.T) {
+	// Upstream NetworkPolicy spec: a named-port match requires BOTH
+	// the name AND the protocol to line up against the container's
+	// ports[] declaration. Container declares "dns"=53/UDP; an
+	// ingress rule asking for "dns"/TCP must not match — the rule
+	// protocol is TCP, the container's named port is UDP.
+	lookup := newLookup()
+	dst := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "prod", Name: "coredns-1", Labels: map[string]string{"app": "dns"}},
+		Spec: corev1.PodSpec{
+			Containers: []corev1.Container{
+				{Name: "coredns", Ports: []corev1.ContainerPort{
+					{Name: "dns", ContainerPort: 53, Protocol: corev1.ProtocolUDP},
+				}},
+			},
+		},
+	}
+	lookup.pods["prod/coredns-1"] = dst
+	lookup.addPod("prod", "client-1", map[string]string{"app": "client"})
+
+	tcp := corev1.ProtocolTCP
+	namedPort := intstr.FromString("dns")
+	p := policy("prod", "dns-allow-named", networkingv1.NetworkPolicySpec{
+		PodSelector: selectMatchLabels(map[string]string{"app": "dns"}),
+		Ingress: []networkingv1.NetworkPolicyIngressRule{
+			{Ports: []networkingv1.NetworkPolicyPort{{Protocol: &tcp, Port: &namedPort}}},
+		},
+	})
+
+	flow := Flow{
+		SrcPodNamespace: "prod", SrcPodName: "client-1",
+		DstPodNamespace: "prod", DstPodName: "coredns-1",
+		DstPort: 53, Protocol: ProtocolTCP,
+	}
+	got := Match(flow, p, lookup)
+	if got[0].Verdict != VerdictWouldDeny {
+		t.Fatalf("expected WouldDeny when named port resolves to a different protocol, got %#v", got)
+	}
+}
+
+func TestMatch_NamedPortNotDeclaredOnPod(t *testing.T) {
+	// Container declares only "https"; policy asks for "http". The
+	// matcher loops through every container's ports[] looking for the
+	// name; finding none, returns false. WouldDeny via the namedPort
+	// fallthrough branch.
+	lookup := newLookup()
+	dst := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "prod", Name: "web-1", Labels: map[string]string{"app": "web"}},
+		Spec: corev1.PodSpec{
+			Containers: []corev1.Container{
+				{Name: "web", Ports: []corev1.ContainerPort{
+					{Name: "https", ContainerPort: 8443, Protocol: corev1.ProtocolTCP},
+				}},
+			},
+		},
+	}
+	lookup.pods["prod/web-1"] = dst
+	lookup.addPod("prod", "client-1", map[string]string{"app": "client"})
+
+	tcp := corev1.ProtocolTCP
+	namedPort := intstr.FromString("http")
+	p := policy("prod", "web-allow-named", networkingv1.NetworkPolicySpec{
+		PodSelector: selectMatchLabels(map[string]string{"app": "web"}),
+		Ingress: []networkingv1.NetworkPolicyIngressRule{
+			{Ports: []networkingv1.NetworkPolicyPort{{Protocol: &tcp, Port: &namedPort}}},
+		},
+	})
+
+	flow := Flow{
+		SrcPodNamespace: "prod", SrcPodName: "client-1",
+		DstPodNamespace: "prod", DstPodName: "web-1",
+		DstPort: 8443, Protocol: ProtocolTCP,
+	}
+	got := Match(flow, p, lookup)
+	if got[0].Verdict != VerdictWouldDeny {
+		t.Fatalf("expected WouldDeny when policy's named port isn't declared on any container, got %#v", got)
+	}
+}
+
+func TestMatch_DenyWhenPeerPodUnknown(t *testing.T) {
+	// Operational edge case: the peer pod was deleted between the
+	// eBPF flow capture and the broker → evaluator forward. The
+	// lookup returns nil for the peer namespace+name. The matcher
+	// can't evaluate selectors against absent labels, so the rule
+	// must NOT match — WouldDeny via the `peer == nil` short-circuit
+	// in peerEntryMatches.
+	//
+	// This pins the documented limitation called out in
+	// docs/concepts/audit-network-policy.mdx's "Limits + caveats":
+	// "Unknown peer pods (deleted between flow capture and
+	//  evaluation) are not matched against any selector".
+	lookup := newLookup()
+	lookup.addPod("prod", "web-1", map[string]string{"app": "web"})
+	// Deliberately do NOT add the peer pod — simulates the
+	// delete-between-capture-and-eval race.
+
+	p := policy("prod", "web-allow-frontend", networkingv1.NetworkPolicySpec{
+		PodSelector: selectMatchLabels(map[string]string{"app": "web"}),
+		PolicyTypes: []networkingv1.PolicyType{networkingv1.PolicyTypeIngress},
+		Ingress: []networkingv1.NetworkPolicyIngressRule{
+			{
+				From: []networkingv1.NetworkPolicyPeer{
+					{PodSelector: ptrSelector(selectMatchLabels(map[string]string{"tier": "frontend"}))},
+				},
+				Ports: []networkingv1.NetworkPolicyPort{tcpPort(8080)},
+			},
+		},
+	})
+
+	flow := Flow{
+		SrcPodNamespace: "prod", SrcPodName: "deleted-client",
+		DstPodNamespace: "prod", DstPodName: "web-1",
+		DstPort: 8080, Protocol: ProtocolTCP,
+	}
+	got := Match(flow, p, lookup)
+	if len(got) != 1 || got[0].Verdict != VerdictWouldDeny {
+		t.Fatalf("unknown peer pod must produce WouldDeny, got %#v", got)
+	}
+}
+
+func TestMatch_DenyOnCrossNamespacePeerWithoutNamespaceSelector(t *testing.T) {
+	// Upstream NetworkPolicy semantics: a peer entry with NO
+	// namespaceSelector restricts the peer to the policy's own
+	// namespace (= the subject's namespace for namespaced
+	// AuditNetworkPolicy). A peer pod in a DIFFERENT namespace —
+	// even if its labels match the podSelector — must not match.
+	//
+	// Real-world hit: an operator forgets the namespaceSelector and
+	// expects "any pod with this label, cluster-wide" to match. The
+	// matcher correctly enforces the upstream same-namespace
+	// constraint; this test pins that contract.
+	lookup := newLookup()
+	lookup.addPod("prod", "web-1", map[string]string{"app": "web"})
+	// Peer pod in OTHER namespace with the right labels.
+	lookup.addPod("dev", "client-1", map[string]string{"tier": "frontend"})
+
+	p := policy("prod", "web-allow-frontend", networkingv1.NetworkPolicySpec{
+		PodSelector: selectMatchLabels(map[string]string{"app": "web"}),
+		PolicyTypes: []networkingv1.PolicyType{networkingv1.PolicyTypeIngress},
+		Ingress: []networkingv1.NetworkPolicyIngressRule{
+			{
+				From: []networkingv1.NetworkPolicyPeer{
+					// No namespaceSelector — peer must share the
+					// policy's namespace (prod). The dev/client-1 peer
+					// must NOT match despite its labels.
+					{PodSelector: ptrSelector(selectMatchLabels(map[string]string{"tier": "frontend"}))},
+				},
+				Ports: []networkingv1.NetworkPolicyPort{tcpPort(8080)},
+			},
+		},
+	})
+
+	flow := Flow{
+		SrcPodNamespace: "dev", SrcPodName: "client-1",
+		DstPodNamespace: "prod", DstPodName: "web-1",
+		DstPort: 8080, Protocol: ProtocolTCP,
+	}
+	got := Match(flow, p, lookup)
+	if len(got) != 1 || got[0].Verdict != VerdictWouldDeny {
+		t.Fatalf("cross-namespace peer without namespaceSelector must produce WouldDeny, got %#v", got)
+	}
+}
+
+func TestMatch_DenyWhenPeerNamespaceUnknown(t *testing.T) {
+	// Edge case in peerEntryMatches's namespaceSelector branch: the
+	// peer's namespace is unknown to the lookup (returns nil from
+	// GetNamespaceLabels). The matcher returns false rather than
+	// applying the selector against a nil map — the iter-99
+	// distinction between "namespace known but unlabelled" (empty
+	// map) and "namespace unknown" (nil).
+	lookup := newLookup()
+	lookup.addPod("prod", "web-1", map[string]string{"app": "web"})
+	lookup.addPod("dev", "client-1", map[string]string{"tier": "frontend"})
+	// Note: don't add `dev` namespace labels to lookup → GetNamespaceLabels
+	// returns nil. peerEntryMatches treats that as "can't evaluate".
+
+	tierSelector := selectMatchLabels(map[string]string{"env": "production"})
+	p := policy("prod", "web-allow-frontend", networkingv1.NetworkPolicySpec{
+		PodSelector: selectMatchLabels(map[string]string{"app": "web"}),
+		PolicyTypes: []networkingv1.PolicyType{networkingv1.PolicyTypeIngress},
+		Ingress: []networkingv1.NetworkPolicyIngressRule{
+			{
+				From: []networkingv1.NetworkPolicyPeer{
+					// namespaceSelector set → peer namespace must
+					// match it. Without labels for the peer's ns, the
+					// matcher conservatively returns false.
+					{NamespaceSelector: &tierSelector,
+						PodSelector: ptrSelector(selectMatchLabels(map[string]string{"tier": "frontend"}))},
+				},
+				Ports: []networkingv1.NetworkPolicyPort{tcpPort(8080)},
+			},
+		},
+	})
+
+	flow := Flow{
+		SrcPodNamespace: "dev", SrcPodName: "client-1",
+		DstPodNamespace: "prod", DstPodName: "web-1",
+		DstPort: 8080, Protocol: ProtocolTCP,
+	}
+	got := Match(flow, p, lookup)
+	if len(got) != 1 || got[0].Verdict != VerdictWouldDeny {
+		t.Fatalf("unknown peer namespace must produce WouldDeny, got %#v", got)
+	}
+}
+
+func TestMatch_NamedPortContainerProtocolDefaultsTCP(t *testing.T) {
+	// k8s containerPort.protocol is an optional field — when omitted,
+	// the API server defaults it to TCP. The matcher must honor that
+	// default rather than rejecting the empty string. Without this,
+	// a container declaring just `name: http, port: 8080` (no explicit
+	// protocol) would never match a NetworkPolicy named-port rule for
+	// "http"/TCP. Pins the `cpProto == ""` → TCP branch in
+	// namedPortMatches.
+	lookup := newLookup()
+	dst := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "prod", Name: "web-1", Labels: map[string]string{"app": "web"}},
+		Spec: corev1.PodSpec{
+			Containers: []corev1.Container{
+				{Name: "web", Ports: []corev1.ContainerPort{
+					// Protocol intentionally unset — should default to TCP.
+					{Name: "http", ContainerPort: 8080},
+				}},
+			},
+		},
+	}
+	lookup.pods["prod/web-1"] = dst
+	lookup.addPod("prod", "client-1", map[string]string{"app": "client"})
+
+	tcp := corev1.ProtocolTCP
+	namedPort := intstr.FromString("http")
+	p := policy("prod", "web-allow-named", networkingv1.NetworkPolicySpec{
+		PodSelector: selectMatchLabels(map[string]string{"app": "web"}),
+		Ingress: []networkingv1.NetworkPolicyIngressRule{
+			{Ports: []networkingv1.NetworkPolicyPort{{Protocol: &tcp, Port: &namedPort}}},
+		},
+	})
+
+	flow := Flow{
+		SrcPodNamespace: "prod", SrcPodName: "client-1",
+		DstPodNamespace: "prod", DstPodName: "web-1",
+		DstPort: 8080, Protocol: ProtocolTCP,
+	}
+	got := Match(flow, p, lookup)
+	if got[0].Verdict != VerdictAllow {
+		t.Fatalf("expected Allow when containerPort.protocol is unset (defaults to TCP), got %#v", got)
 	}
 }

@@ -1,11 +1,19 @@
 ---
 title: "Service Endpoints"
-description: "Service IP to metadata mapping"
+description: "Submit service metadata and look up by IP"
 ---
 
 ## POST /svc/spec
 
-Add or update service metadata.
+Insert or update service metadata. Upserts on `svc_ip` (the
+primary key) — k8s never reuses cluster IPs so collisions are an
+out-of-band event.
+
+The handler rejects non-routable IPs (`is_routable_svc_ip` guard:
+empty string for ExternalName services, the literal `"None"` for
+headless Services) with a warn log and a no-op response — the
+controller already filters these at source, so this branch is
+defense-in-depth for non-controller writers.
 
 ### Request
 
@@ -14,30 +22,34 @@ Add or update service metadata.
   "svc_ip": "10.96.0.100",
   "svc_name": "my-service",
   "svc_namespace": "production",
-  "service_spec": {
-    "metadata": { /* service metadata */ },
-    "spec": {
-      "selector": {
-        "app": "my-app"
-      },
-      "ports": [
-        {
-          "port": 80,
-          "targetPort": 8080
-        }
-      ]
-    }
-  }
+  "service_spec": { "spec": { "selector": { "app": "my-app" } } },
+  "time_stamp": "2026-05-12T10:32:14.123456"
 }
 ```
 
----
+`service_spec` is an opaque JSON blob storing the full Service
+object — selector + ports are the parts the advisor's
+NetworkPolicy generator and the mcp-server's compactor actually
+read. The chart's broker stores the full spec so future tooling
+can query other fields without a controller round-trip.
 
-## GET /svc/ip/:ip
+## GET /svc/info
 
-Retrieve service details by cluster IP.
+Return all service metadata rows. Ordered by
+`(svc_namespace ASC, svc_name ASC, svc_ip ASC)` for stable
+display. Used by the frontend's service-list view and the
+mcp-server's `cluster_pods` aggregator.
 
-### Example
+```bash
+curl http://localhost:9090/svc/info
+```
+
+## GET /svc/ip/&#123;ip&#125;
+
+Get a single service by cluster IP. Used by the advisor when
+resolving a peer IP to a Service selector during NetworkPolicy
+generation — the advisor falls back to per-pod lookup if no
+Service matches.
 
 ```bash
 curl http://localhost:9090/svc/ip/10.96.0.100
@@ -50,12 +62,11 @@ curl http://localhost:9090/svc/ip/10.96.0.100
   "svc_ip": "10.96.0.100",
   "svc_name": "my-service",
   "svc_namespace": "production",
-  "service_spec": {
-    "spec": {
-      "selector": {
-        "app": "my-app"
-      }
-    }
-  }
+  "service_spec": { "spec": { "selector": { "app": "my-app" } } },
+  "time_stamp": "2026-05-12T10:32:14.123456"
 }
 ```
+
+A 404 with body `"No data found"` is returned when no row matches
+(the advisor handles this by falling through to its pod-lookup
+path).

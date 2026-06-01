@@ -1,3 +1,5 @@
+import { fileURLToPath } from "node:url";
+import { resolve } from "node:path";
 import express, { Request, Response } from "express";
 import cors from "cors";
 import rateLimit from "express-rate-limit";
@@ -5,6 +7,7 @@ import dotenv from "dotenv";
 import { ZodError } from "zod";
 import { ChatRequestSchema, LLMProvider, type ErrorResponse } from "./types/index.js";
 import { BrokerClient } from "./brokerClient.js";
+import { log } from "./logger.js";
 import { callOpenAI } from "./providers/openai.js";
 import { callAnthropic } from "./providers/anthropic.js";
 import { callGemini } from "./providers/gemini.js";
@@ -14,25 +17,53 @@ import { callCopilot } from "./providers/copilot.js";
 dotenv.config();
 
 const app = express();
-const port = process.env.PORT || 8080;
-const brokerUrl =
-  process.env.BROKER_URL || "http://broker.kguardian.svc.cluster.local:9090";
+// Trim env reads so a pasted "8080\n" or "  8080" doesn't propagate
+// downstream. Node's listen() is lenient about whitespace via
+// parseInt, but `cors({ origin })` compares the env value to the
+// request Origin header verbatim — a whitespace-padded env value
+// silently breaks the CORS check (no header ever matches " https://
+// example.com "). Same defensive-trim pattern from the controller /
+// evaluator / mcp-server env reads.
+const port = (process.env.PORT?.trim() || "8080");
+const allowedOrigin = process.env.ALLOWED_ORIGIN?.trim() || '*';
 
 // Middleware
-app.use(cors({ origin: process.env.ALLOWED_ORIGIN || '*' }));
+app.use(cors({ origin: allowedOrigin }));
 app.use(express.json({ limit: '100kb' }));
 
-// Initialize broker client
-const brokerClient = new BrokerClient(brokerUrl);
+// Initialize broker client. Note: the class is named "BrokerClient"
+// for historical reasons; today all tool calls route through the MCP
+// server. The MCP server URL is read inside BrokerClient from
+// MCP_SERVER_URL or its hardcoded default — no constructor arg needed.
+const brokerClient = new BrokerClient();
 
-// Determine available providers
-function getAvailableProviders(): LLMProvider[] {
+/**
+ * Compute available providers from a key-value env map. Pure — takes
+ * the env in as a parameter so it's unit-testable without touching
+ * process.env. The exported `availableProvidersFromEnv` form lets
+ * tests pass arbitrary maps; the internal `getAvailableProviders`
+ * binds it to the live process env.
+ *
+ * Whitespace-only values count as MISSING. The native `if (env.X)`
+ * check treated `"  "` as truthy, so an operator setting
+ * ANTHROPIC_API_KEY="  " to "disable" the provider got /health
+ * reporting it as available, requests routing to it, and then a
+ * 401 from the Anthropic API at runtime. Trimming pre-check makes
+ * the disable-by-whitespace pattern Just Work.
+ */
+export function availableProvidersFromEnv(
+  env: Record<string, string | undefined>,
+): LLMProvider[] {
   const providers: LLMProvider[] = [];
-  if (process.env.OPENAI_API_KEY) providers.push(LLMProvider.OPENAI);
-  if (process.env.ANTHROPIC_API_KEY) providers.push(LLMProvider.ANTHROPIC);
-  if (process.env.GOOGLE_API_KEY) providers.push(LLMProvider.GEMINI);
-  if (process.env.GITHUB_TOKEN) providers.push(LLMProvider.COPILOT);
+  if (env.OPENAI_API_KEY?.trim()) providers.push(LLMProvider.OPENAI);
+  if (env.ANTHROPIC_API_KEY?.trim()) providers.push(LLMProvider.ANTHROPIC);
+  if (env.GOOGLE_API_KEY?.trim()) providers.push(LLMProvider.GEMINI);
+  if (env.GITHUB_TOKEN?.trim()) providers.push(LLMProvider.COPILOT);
   return providers;
+}
+
+function getAvailableProviders(): LLMProvider[] {
+  return availableProvidersFromEnv(process.env);
 }
 
 // Health check endpoint
@@ -77,7 +108,10 @@ app.post("/api/chat", chatLimiter, async (req: Request, res: Response<any>) => {
       } as ErrorResponse);
     }
 
-    console.log(`Processing chat request with provider: ${provider}`);
+    // Debug not info — this fires per chat request; a chat session
+    // can produce dozens. The provider routing is part of normal
+    // operation, not a per-request operator alert.
+    log.debug(`Processing chat request with provider: ${provider}`);
 
     // Route to appropriate provider
     let response;
@@ -102,7 +136,7 @@ app.post("/api/chat", chatLimiter, async (req: Request, res: Response<any>) => {
 
     res.json(response);
   } catch (error) {
-    console.error("Error processing chat request:", error);
+    log.error("Error processing chat request:", error);
 
     if (error instanceof ZodError) {
       return res.status(400).json({
@@ -112,7 +146,7 @@ app.post("/api/chat", chatLimiter, async (req: Request, res: Response<any>) => {
     }
 
     if (error instanceof Error) {
-      console.error("Chat error details:", error.message, error.stack);
+      log.error("Chat error details:", error.message, error.stack);
       return res.status(500).json({
         error: "An internal error occurred while processing the chat request",
       } as ErrorResponse);
@@ -124,24 +158,37 @@ app.post("/api/chat", chatLimiter, async (req: Request, res: Response<any>) => {
   }
 });
 
-// Start server
-const server = app.listen(port, () => {
-  const availableProviders = getAvailableProviders();
-  console.log(`LLM Bridge listening on port ${port}`);
-  console.log(`Broker URL: ${brokerUrl}`);
-  console.log(`Available providers: ${availableProviders.join(", ") || "NONE"}`);
+// Start server — but only when this module is the process entrypoint.
+// Unit tests import `availableProvidersFromEnv` from this file; if the
+// server (and its open socket handle) started on import, the test
+// process would never exit and `npm test` would hang. The main-module
+// guard keeps `node dist/index.js` / `tsx src/index.ts` behaviour
+// identical while making the module import-safe.
+function startServer() {
+  const server = app.listen(port, () => {
+    const availableProviders = getAvailableProviders();
+    log.info(`LLM Bridge listening on port ${port}`);
+    log.info(`MCP Server URL: ${process.env.MCP_SERVER_URL || "(default)"}`);
+    log.info(`Available providers: ${availableProviders.join(", ") || "NONE"}`);
 
-  if (availableProviders.length === 0) {
-    console.warn("WARNING: No LLM provider API keys configured!");
-    console.warn("Set at least one: OPENAI_API_KEY, ANTHROPIC_API_KEY, GOOGLE_API_KEY, or GITHUB_TOKEN");
-  }
-});
+    if (availableProviders.length === 0) {
+      log.warn("WARNING: No LLM provider API keys configured!");
+      log.warn("Set at least one: OPENAI_API_KEY, ANTHROPIC_API_KEY, GOOGLE_API_KEY, or GITHUB_TOKEN");
+    }
+  });
 
-// Graceful shutdown
-const shutdown = () => {
-  brokerClient.close();
-  server.close();
-  process.exit(0);
-};
-process.on('SIGTERM', shutdown);
-process.on('SIGINT', shutdown);
+  // Graceful shutdown
+  const shutdown = () => {
+    brokerClient.close();
+    server.close();
+    process.exit(0);
+  };
+  process.on('SIGTERM', shutdown);
+  process.on('SIGINT', shutdown);
+}
+
+const isMain = process.argv[1] !== undefined &&
+  fileURLToPath(import.meta.url) === resolve(process.argv[1]);
+if (isMain) {
+  startServer();
+}

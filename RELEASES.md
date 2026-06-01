@@ -15,13 +15,20 @@ kguardian uses **component-based versioning** where each component can be releas
 
 ## Components
 
-The project consists of five independently versioned components:
+The project consists of eight independently versioned components:
 
 1. **Controller** - eBPF-based monitoring DaemonSet (Rust)
 2. **Broker** - API server for telemetry storage (Rust)
-3. **UI** - Web interface for visualization (React/TypeScript)
+3. **Frontend** - Web interface for visualization (React/TypeScript)
 4. **Advisor** - kubectl plugin for policy generation (Go)
-5. **Chart** - Helm chart for Kubernetes deployment
+5. **Evaluator** - Audit-mode NetworkPolicy evaluator (Go)
+6. **MCP Server** - Model Context Protocol server bridging LLMs to broker data (Go)
+7. **LLM Bridge** - HTTP shim wiring web UI requests to LLM providers via the MCP Server (TypeScript)
+8. **Chart** - Helm chart for Kubernetes deployment
+
+The component list and release-type wiring authoritative source is
+`release-please-config.json` at the repository root — keep that file
+and this list in sync when adding a new component.
 
 ## Version Tracking
 
@@ -31,8 +38,12 @@ Each component maintains its version in two places:
 2. **Package manifest** - Component-specific file:
    - Controller: `controller/Cargo.toml`
    - Broker: `broker/Cargo.toml`
-   - UI: `ui/package.json`
+   - Frontend: `frontend/package.json`
    - Advisor: Set via ldflags during build
+   - Evaluator: `evaluator/go.mod` (Go module version not bumped; version
+     is sourced from the VERSION file at build time)
+   - MCP Server: `mcp-server/go.mod` (same as Evaluator)
+   - LLM Bridge: `llm-bridge/package.json`
    - Chart: `charts/kguardian/Chart.yaml`
 
 ## Git Tagging Strategy
@@ -45,8 +56,12 @@ Each component uses a **prefixed tag** format: `<component>/v<semver>`
 
 - `controller/v1.0.0` - Controller releases
 - `broker/v1.2.3` - Broker releases
-- `ui/v2.0.0` - UI releases
+- `frontend/v2.0.0` - Frontend releases (release-please component name; the
+  user-facing product is the "Web UI")
 - `advisor/v1.1.0` - Advisor releases
+- `evaluator/v1.0.0` - Evaluator releases
+- `mcp-server/v1.0.0` - MCP Server releases
+- `llm-bridge/v1.0.0` - LLM Bridge releases
 - `chart/v1.0.0` - Helm chart releases
 
 When you merge a Release PR created by release-please, these tags are automatically created and pushed.
@@ -64,7 +79,7 @@ Use [Conventional Commits](https://www.conventionalcommits.org/) format for all 
 ```bash
 # Feature commits (minor version bump)
 git commit -m "feat(controller): add support for custom namespace labels"
-git commit -m "feat(ui): add real-time syscall heatmap visualization"
+git commit -m "feat(frontend): add real-time syscall heatmap visualization"
 
 # Bug fix commits (patch version bump)
 git commit -m "fix(broker): resolve connection pool exhaustion under load"
@@ -79,7 +94,7 @@ BREAKING CHANGE: The /pods endpoint now returns an array instead of an object"
 
 # Other commit types
 git commit -m "docs(readme): update installation instructions"
-git commit -m "refactor(ui): extract custom hooks for policy editing"
+git commit -m "refactor(frontend): extract custom hooks for policy editing"
 git commit -m "perf(controller): optimize eBPF map lookups"
 git commit -m "chore(deps): update dependencies"
 ```
@@ -127,7 +142,10 @@ Once the Release PR is merged, release-please automatically:
 4. Publishes artifacts:
    - **Controller**: Docker image to `ghcr.io/kguardian-dev/kguardian/guardian-controller:vX.Y.Z`
    - **Broker**: Docker image to `ghcr.io/kguardian-dev/kguardian/guardian-broker:vX.Y.Z`
-   - **UI**: Docker image to `ghcr.io/kguardian-dev/kguardian/guardian-ui:vX.Y.Z`
+   - **Frontend**: Docker image to `ghcr.io/kguardian-dev/kguardian/frontend:vX.Y.Z`
+   - **Evaluator**: Docker image to `ghcr.io/kguardian-dev/kguardian/evaluator:vX.Y.Z`
+   - **MCP Server**: Docker image to `ghcr.io/kguardian-dev/kguardian/mcp-server:vX.Y.Z`
+   - **LLM Bridge**: Docker image to `ghcr.io/kguardian-dev/kguardian/llm-bridge:vX.Y.Z`
    - **Advisor**: SLSA3-attested binaries to GitHub Releases (linux/darwin, amd64/arm64)
    - **Chart**: Helm package to `oci://ghcr.io/kguardian-dev/charts/kguardian:X.Y.Z`
 5. Tags Docker images with `latest`
@@ -140,13 +158,13 @@ Release-please automatically handles multi-component releases. When you make cha
 ```bash
 git commit -m "feat(controller): add IPv6 support"
 git commit -m "feat(broker): add IPv6 fields to API"
-git commit -m "feat(ui): display IPv6 addresses"
+git commit -m "feat(frontend): display IPv6 addresses"
 git push origin main
 
 # Release-please creates ONE PR that releases all three:
 # - controller: 1.0.0 → 1.1.0
 # - broker: 1.0.0 → 1.1.0
-# - ui: 1.0.0 → 1.1.0
+# - frontend: 1.0.0 → 1.1.0
 ```
 
 When merged, all three components are released simultaneously with their respective tags.
@@ -168,9 +186,9 @@ controller:
 broker:
   image:
     tag: "v1.3.1"  # Pin to specific broker version
-ui:
+frontend:
   image:
-    tag: "v2.0.0"  # Pin to specific UI version
+    tag: "v2.0.0"  # Pin to specific frontend version
 ```
 
 ### Manual Override (Emergency Use Only)
@@ -259,11 +277,16 @@ All components follow [Semantic Versioning 2.0.0](https://semver.org/):
   {
     "controller": "1.0.0",
     "broker": "1.0.0",
-    "ui": "1.0.0",
+    "frontend": "1.0.0",
     "advisor": "1.0.0",
+    "evaluator": "1.0.0",
+    "mcp-server": "1.0.0",
+    "llm-bridge": "1.0.0",
     "charts/kguardian": "1.0.0"
   }
   ```
+  (Versions shown here are illustrative; the real file holds whatever
+  versions release-please has bumped each component to most recently.)
 
 - **`release-please-config.json`** - Configures release-please behavior per component
   - Specifies release types (rust, node, go, helm)
@@ -282,7 +305,10 @@ All components follow [Semantic Versioning 2.0.0](https://semver.org/):
 Each component maintains its own CHANGELOG.md:
 - `controller/CHANGELOG.md`
 - `broker/CHANGELOG.md`
-- `ui/CHANGELOG.md`
+- `frontend/CHANGELOG.md`
+- `evaluator/CHANGELOG.md`
+- `mcp-server/CHANGELOG.md`
+- `llm-bridge/CHANGELOG.md`
 - `advisor/CHANGELOG.md`
 - `charts/kguardian/CHANGELOG.md`
 
@@ -301,26 +327,36 @@ These are automatically updated by release-please based on conventional commits.
 
 - `.github/workflows/controller-release.yaml` - Triggered by `controller/v*` tags or workflow_dispatch
 - `.github/workflows/broker-release.yaml` - Triggered by `broker/v*` tags or workflow_dispatch
-- `.github/workflows/ui-release.yaml` - Triggered by `ui/v*` tags or workflow_dispatch
+- `.github/workflows/frontend-release.yaml` - Triggered by `frontend/v*` tags or workflow_dispatch
 - `.github/workflows/advisor-release.yml` - Triggered by `advisor/v*` tags or workflow_dispatch
+- `.github/workflows/evaluator-release.yaml` - Triggered by `evaluator/v*` tags or workflow_dispatch
+- `.github/workflows/mcp-server-release.yaml` - Triggered by `mcp-server/v*` tags or workflow_dispatch
+- `.github/workflows/llm-bridge-release.yaml` - Triggered by `llm-bridge/v*` tags or workflow_dispatch
 - `.github/workflows/charts-release.yaml` - Triggered by `chart/v*` tags or chart file changes
 
 ## Querying Versions
 
 ### Current Installed Versions
 
+The chart sets `app.kubernetes.io/name` on each workload's pod template
+(values: `kguardian` for the controller daemonset, `kguardian-broker`,
+`kguardian-frontend`, `kguardian-evaluator`, etc). Examples:
+
 ```bash
 # Controller version (from pod)
-kubectl get pods -n kguardian -l app.kubernetes.io/component=controller -o jsonpath='{.items[0].spec.containers[0].image}'
+kubectl get pods -n kguardian -l app.kubernetes.io/name=kguardian -o jsonpath='{.items[0].spec.containers[0].image}'
 
 # Broker version (from pod)
-kubectl get pods -n kguardian -l app.kubernetes.io/component=broker -o jsonpath='{.items[0].spec.containers[0].image}'
+kubectl get pods -n kguardian -l app.kubernetes.io/name=kguardian-broker -o jsonpath='{.items[0].spec.containers[0].image}'
 
-# UI version (from pod)
-kubectl get pods -n kguardian -l app.kubernetes.io/component=ui -o jsonpath='{.items[0].spec.containers[0].image}'
+# Frontend version (from pod)
+kubectl get pods -n kguardian -l app.kubernetes.io/name=kguardian-frontend -o jsonpath='{.items[0].spec.containers[0].image}'
+
+# Evaluator version (from pod)
+kubectl get pods -n kguardian -l app.kubernetes.io/name=kguardian-evaluator -o jsonpath='{.items[0].spec.containers[0].image}'
 
 # Advisor version (from binary)
-kubectl xentra version
+kubectl kguardian version
 
 # Chart version (from Helm)
 helm list -n kguardian
@@ -332,7 +368,7 @@ helm list -n kguardian
 # Docker images
 docker pull ghcr.io/kguardian-dev/kguardian/guardian-controller
 docker pull ghcr.io/kguardian-dev/kguardian/guardian-broker
-docker pull ghcr.io/kguardian-dev/kguardian/guardian-ui
+docker pull ghcr.io/kguardian-dev/kguardian/frontend
 
 # Helm chart versions
 helm search repo kguardian --versions
@@ -444,13 +480,13 @@ git push origin main
 ### Example 2: Feature Release (Minor) - Automated with Release-Please
 
 ```bash
-# Add a new feature to the UI
-cd ui
+# Add a new feature to the Web UI
+cd frontend
 # Implement the feature...
 
 # Commit using conventional commits (feat = minor bump)
 git add .
-git commit -m "feat(ui): add real-time syscall heatmap visualization
+git commit -m "feat(frontend): add real-time syscall heatmap visualization
 
 Adds an interactive heatmap showing syscall frequency across pods.
 Users can filter by time range and syscall type."
@@ -458,10 +494,10 @@ Users can filter by time range and syscall type."
 git push origin main
 
 # Release-please will:
-# 1. Detect the feat(ui) commit
-# 2. Create/update a Release PR bumping ui from 1.0.0 -> 1.1.0
+# 1. Detect the feat(frontend) commit
+# 2. Create/update a Release PR bumping frontend from 1.0.0 -> 1.1.0
 # 3. Generate CHANGELOG entry under "Features" section
-# 4. When merged, creates ui/v1.1.0 release and builds the image
+# 4. When merged, creates frontend/v1.1.0 release and builds the image
 ```
 
 ### Example 3: Breaking Change (Major) - Automated with Release-Please
@@ -493,7 +529,7 @@ git push origin main
 # Make changes across multiple components
 git commit -m "feat(controller): add IPv6 support for network monitoring"
 git commit -m "feat(broker): add IPv6 address fields to database schema"
-git commit -m "feat(ui): display IPv6 addresses in network graph"
+git commit -m "feat(frontend): display IPv6 addresses in network graph"
 git commit -m "docs(readme): update IPv6 feature documentation"
 
 git push origin main
@@ -502,9 +538,9 @@ git push origin main
 # 1. Create a single Release PR with updates for all 3 components:
 #    - controller: 1.0.0 -> 1.1.0
 #    - broker: 1.0.0 -> 1.1.0
-#    - ui: 1.0.0 -> 1.1.0
+#    - frontend: 1.0.0 -> 1.1.0
 # 2. Each component gets its own CHANGELOG update
-# 3. When merged, creates 3 releases: controller/v1.1.0, broker/v1.1.0, ui/v1.1.0
+# 3. When merged, creates 3 releases: controller/v1.1.0, broker/v1.1.0, frontend/v1.1.0
 # 4. Triggers all 3 build workflows
 ```
 

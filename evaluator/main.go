@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 
 	"github.com/kguardian-dev/kguardian/evaluator/pkg/server"
@@ -29,15 +30,25 @@ func main() {
 
 func run() error {
 	log := logrus.New()
-	if lvl := os.Getenv("LOG_LEVEL"); lvl != "" {
+	// Trim before ParseLevel; an operator-pasted "info\n" (trailing
+	// newline) or "  info" (leading space) would otherwise silently
+	// fail-and-fallback to the default level, no signal in logs that
+	// LOG_LEVEL was misconfigured. Same defensive-trim pattern
+	// applied to the controllers env reads.
+	if lvl := strings.TrimSpace(os.Getenv("LOG_LEVEL")); lvl != "" {
 		parsed, err := logrus.ParseLevel(lvl)
 		if err == nil {
 			log.SetLevel(parsed)
+		} else {
+			log.Warnf("LOG_LEVEL=%q is not a valid logrus level; using default", lvl)
 		}
 	}
 	log.SetFormatter(&logrus.JSONFormatter{})
 
-	addr := os.Getenv("LISTEN_ADDR")
+	// Same trim defence for LISTEN_ADDR. An untrimmed ":8082 "
+	// (trailing space) crashes net.Listen with a parse error far
+	// from the env-var read site.
+	addr := strings.TrimSpace(os.Getenv("LISTEN_ADDR"))
 	if addr == "" {
 		addr = ":8082"
 	}

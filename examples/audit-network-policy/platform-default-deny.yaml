@@ -3,10 +3,14 @@
 # team=platform. The kguardian-evaluator will report flows that would
 # be denied — without dropping any traffic.
 #
-# Promotion path: enumerate the matched namespaces, for each apply an
-# equivalent networking.k8s.io/v1 NetworkPolicy (or use Calico
-# GlobalNetworkPolicy / upstream AdminNetworkPolicy if your CNI
-# supports cluster-wide enforcement).
+# Promotion path:
+#   kguardian audit promote-cluster platform-default-deny-ingress \
+#     | kubectl apply -f -
+#
+# This emits one networking.k8s.io/v1.NetworkPolicy per namespace
+# matched by spec.namespaceSelector. (If your CNI supports cluster-wide
+# enforcement — Calico GlobalNetworkPolicy, upstream AdminNetworkPolicy
+# — you can instead translate the spec to those by hand.)
 apiVersion: kguardian.dev/v1alpha1
 kind: AuditClusterNetworkPolicy
 metadata:

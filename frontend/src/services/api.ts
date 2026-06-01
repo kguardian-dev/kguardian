@@ -24,12 +24,18 @@ class BrokerAPIClient {
    * for an AuditNetworkPolicy / AuditClusterNetworkPolicy. Returns
    * both `Allow` and `WouldDeny` rows so operators can preview both
    * sides of policy impact. Optional filters: policy, namespace,
-   * verdict, row limit.
+   * verdict, direction, row limit.
+   *
+   * The verdict and direction filters are server-side and index-backed
+   * (idx_audit_verdicts_verdict_time). Prefer them over client-side
+   * filtering when narrowing, especially with large policies, to avoid
+   * burning the row limit on rows you'll discard.
    */
   async getAuditVerdicts(opts: {
     policy?: string;
     namespace?: string;
     verdict?: 'Allow' | 'WouldDeny';
+    direction?: 'Ingress' | 'Egress';
     limit?: number;
   } = {}): Promise<AuditVerdict[]> {
     try {
@@ -37,6 +43,7 @@ class BrokerAPIClient {
       if (opts.policy) params.policy = opts.policy;
       if (opts.namespace) params.namespace = opts.namespace;
       if (opts.verdict) params.verdict = opts.verdict;
+      if (opts.direction) params.direction = opts.direction;
       if (opts.limit) params.limit = opts.limit;
       const response = await this.client.get('/audit/verdicts', { params });
       return response.data || [];

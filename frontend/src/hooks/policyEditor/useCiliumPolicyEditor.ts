@@ -29,7 +29,6 @@ export const useCiliumPolicyEditor = ({ pod, isOpen }: UseCiliumPolicyEditorProp
 
     if (isOpen && pod && currentPodId !== lastGeneratedPodId.current) {
       lastGeneratedPodId.current = currentPodId;
-      // eslint-disable-next-line react-hooks/set-state-in-effect
       setIsLoading(true);
       generateCiliumNetworkPolicy(pod)
         .then((generatedPolicy) => {

@@ -1,7 +1,13 @@
 // @generated automatically by Diesel CLI.
 
 diesel::table! {
-    pod_details (pod_ip) {
+    // PK is pod_name, matching the migration (`pod_name VARCHAR
+    // PRIMARY KEY`) and the PodDetail struct's
+    // `#[diesel(primary_key(pod_name))]` annotation. The previous
+    // `(pod_ip)` declaration here was inconsistent with both and
+    // would silently misbehave for any query using diesel's PK-aware
+    // helpers (.find(), Identifiable impls, joins).
+    pod_details (pod_name) {
         pod_name -> Varchar,
         pod_ip -> Varchar,
         pod_namespace -> Nullable<Varchar>,
@@ -26,22 +32,6 @@ diesel::table! {
         traffic_in_out_ip -> Nullable<Varchar>,
         traffic_in_out_port -> Nullable<Varchar>,
         decision -> Nullable<Varchar>,
-        time_stamp -> Timestamp,
-    }
-}
-
-diesel::table! {
-    pod_packet_drop (uuid) {
-        uuid -> Varchar,
-        pod_name -> Nullable<Varchar>,
-        pod_namespace -> Nullable<Varchar>,
-        pod_ip -> Nullable<Varchar>,
-        pod_port -> Nullable<Varchar>,
-        ip_protocol -> Nullable<Varchar>,
-        traffic_type -> Nullable<Varchar>,
-        traffic_in_out_ip -> Nullable<Varchar>,
-        traffic_in_out_port -> Nullable<Varchar>,
-        drop_reason -> Nullable<Varchar>,
         time_stamp -> Timestamp,
     }
 }
@@ -85,4 +75,10 @@ diesel::table! {
     }
 }
 
-diesel::allow_tables_to_appear_in_same_query!(pod_details, pod_traffic, svc_details, pod_syscalls,);
+diesel::allow_tables_to_appear_in_same_query!(
+    pod_details,
+    pod_traffic,
+    svc_details,
+    pod_syscalls,
+    audit_verdicts,
+);

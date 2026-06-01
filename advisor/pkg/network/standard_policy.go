@@ -2,9 +2,11 @@ package network
 
 import (
 	"fmt"
+	"sort"
+	"strconv"
 
-	log "github.com/rs/zerolog/log"
 	"github.com/kguardian-dev/kguardian/advisor/pkg/api"
+	log "github.com/rs/zerolog/log"
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -195,43 +197,12 @@ func (g *StandardPolicyGenerator) processTrafficRules(podTraffic []api.PodTraffi
 	return ingressRules, egressRules
 }
 
-// addOrUpdateRule adds a port to an existing rule for a peer or creates a new rule.
+// addOrUpdateRule delegates to the shared mergeOrAppendRule helper.
+// Kept as a method for backwards compatibility with existing tests +
+// call sites; the underlying logic lives in types.go so both generators
+// stay in lockstep.
 func (g *StandardPolicyGenerator) addOrUpdateRule(rules []NetworkPolicyRule, peer string, port intstr.IntOrString, protocolStr string) []NetworkPolicyRule {
-	protocol := protocolPtr(protocolStr) // Get protocol pointer once
-
-	for i := range rules {
-		if rules[i].PeerIP == peer {
-			// Found rule for the peer, check if port/protocol combo exists
-			portExists := false
-			for _, existingPort := range rules[i].Ports {
-				if existingPort.Port != nil && existingPort.Port.String() == port.String() &&
-					existingPort.Protocol != nil && *existingPort.Protocol == *protocol {
-					portExists = true
-					break
-				}
-			}
-			if !portExists {
-				// Add port to existing rule
-				rules[i].Ports = append(rules[i].Ports, networkingv1.NetworkPolicyPort{
-					Port:     &port,
-					Protocol: protocol,
-				})
-			}
-			return rules // Rule updated or port already existed
-		}
-	}
-
-	// No rule found for this peer, create a new one
-	newRule := NetworkPolicyRule{
-		PeerIP: peer,
-		Ports: []networkingv1.NetworkPolicyPort{
-			{
-				Port:     &port,
-				Protocol: protocol,
-			},
-		},
-	}
-	return append(rules, newRule)
+	return mergeOrAppendRule(rules, peer, port, protocolStr)
 }
 
 // transformToNetworkPolicyIngressRules converts our internal rules to K8s NetworkPolicyIngressRule
@@ -244,8 +215,14 @@ func (g *StandardPolicyGenerator) transformToNetworkPolicyIngressRules(rules []N
 		peerRules[rule.PeerIP] = append(peerRules[rule.PeerIP], rule.Ports...)
 	}
 
-	// Create ingress rules
-	for peerIP, ports := range peerRules {
+	// Iterate in sorted peer-IP order so the generated YAML is
+	// deterministic across runs of identical input. Without this,
+	// `kguardian generate networkpolicy` produced different rule
+	// orderings each call (Go map iteration randomises per process),
+	// surfacing as spurious `kubectl diff` output and noise in
+	// git-tracked policy review.
+	for _, peerIP := range sortedKeys(peerRules) {
+		ports := peerRules[peerIP]
 		peerPolicy := g.createNetworkPolicyPeer(peerIP)
 		if peerPolicy == nil { // Skip if peer could not be determined (e.g., internal error)
 			continue
@@ -269,8 +246,9 @@ func (g *StandardPolicyGenerator) transformToNetworkPolicyEgressRules(rules []Ne
 		peerRules[rule.PeerIP] = append(peerRules[rule.PeerIP], rule.Ports...)
 	}
 
-	// Create egress rules
-	for peerIP, ports := range peerRules {
+	// Sorted iteration — see the ingress sibling for rationale.
+	for _, peerIP := range sortedKeys(peerRules) {
+		ports := peerRules[peerIP]
 		peerPolicy := g.createNetworkPolicyPeer(peerIP)
 		if peerPolicy == nil { // Skip if peer could not be determined
 			continue
@@ -283,6 +261,20 @@ func (g *StandardPolicyGenerator) transformToNetworkPolicyEgressRules(rules []Ne
 	}
 
 	return egressRules
+}
+
+// sortedKeys returns the keys of a string-keyed map in ascending
+// order. Used by the policy transforms to produce deterministic
+// rule ordering — Go's map iteration is randomised per process, so
+// without sorting, regenerating a policy from identical input
+// produces different YAML each run (spurious diffs).
+func sortedKeys(m map[string][]networkingv1.NetworkPolicyPort) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys
 }
 
 // createNetworkPolicyPeer determines the NetworkPolicyPeer based on the IP address.
@@ -358,9 +350,16 @@ func (g *StandardPolicyGenerator) createNetworkPolicyPeer(peerIP string) *networ
 // Helper functions
 
 // parsePort converts a string port to an integer.
+//
+// Uses strconv.Atoi instead of fmt.Sscanf("%d") because Sscanf silently
+// accepts trailing junk: Sscanf("80junk", "%d") returns 80 with no
+// error, Sscanf("8.5", "%d") returns 8 (truncated), Sscanf(" 80", "%d")
+// strips whitespace and returns 80. Atoi rejects all of those cleanly.
+// We can't trust the input to be well-formed — port strings come from
+// observed eBPF traffic data and persist through the broker; silently
+// truncating "8.5" to 8 in a generated NetworkPolicy is a real bug.
 func parsePort(portStr string) (int, error) {
-	var portInt int
-	_, err := fmt.Sscanf(portStr, "%d", &portInt)
+	portInt, err := strconv.Atoi(portStr)
 	if err != nil {
 		return 0, fmt.Errorf("invalid port format '%s': %w", portStr, err)
 	}
@@ -387,7 +386,18 @@ func protocolPtr(protocol string) *corev1.Protocol {
 	return &p
 }
 
-// deduplicatePorts removes duplicate ports from a slice.
+// deduplicatePorts removes duplicate ports from a slice AND returns
+// them in a deterministic order (numeric port ASC, then protocol ASC).
+//
+// The sort matters because the input order depends on whatever order
+// PodTraffic rows arrived from the broker — and the broker's
+// /pod/traffic/{name} has no ORDER BY, so two queries can return the
+// same rows in different orders. Without the sort, a single peer's
+// port list flips between e.g. [80,443] and [443,80] between
+// regenerations of the same policy, surfacing as spurious YAML
+// diff churn in operator workflows. The peer-IP sort in
+// transformToNetworkPolicy{Ingress,Egress}Rules covers the outer
+// dimension; this covers the inner.
 func deduplicatePorts(ports []networkingv1.NetworkPolicyPort) []networkingv1.NetworkPolicyPort {
 	uniquePorts := make(map[string]networkingv1.NetworkPolicyPort)
 	var result []networkingv1.NetworkPolicyPort
@@ -403,6 +413,32 @@ func deduplicatePorts(ports []networkingv1.NetworkPolicyPort) []networkingv1.Net
 			result = append(result, port)
 		}
 	}
+
+	// Stable ordering: numeric port ASC, then protocol ASC (so a
+	// peer that exposes 80/TCP, 80/UDP, 443/TCP comes out in that
+	// canonical order regardless of which traffic event arrived
+	// first). intstr.IntOrString can be String-typed for named
+	// ports — fall back to .String() compare for those.
+	sort.Slice(result, func(i, j int) bool {
+		pi, pj := result[i].Port, result[j].Port
+		// Numeric ports first, named ports after. Within each
+		// kind, ascending.
+		iNum := pi.Type == intstr.Int
+		jNum := pj.Type == intstr.Int
+		if iNum != jNum {
+			return iNum // numeric < named
+		}
+		if iNum {
+			if pi.IntVal != pj.IntVal {
+				return pi.IntVal < pj.IntVal
+			}
+		} else if pi.StrVal != pj.StrVal {
+			return pi.StrVal < pj.StrVal
+		}
+		// Same port — break by protocol string. Pointer non-nil
+		// guaranteed by the skip above.
+		return string(*result[i].Protocol) < string(*result[j].Protocol)
+	})
 
 	return result
 }

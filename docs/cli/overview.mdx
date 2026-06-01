@@ -32,6 +32,12 @@ Available for all commands:
   <Card title="gen seccomp" icon="shield-check" href="/cli/gen-seccomp">
     Generate Seccomp profiles from syscall usage
   </Card>
+  <Card title="audit promote" icon="arrow-up-right-from-square" href="/concepts/audit-network-policy#cli-helper--kguardian-audit-promote">
+    Convert an AuditNetworkPolicy into an enforced networking.k8s.io/v1 NetworkPolicy ready for kubectl apply.
+  </Card>
+  <Card title="audit promote-cluster" icon="globe" href="/concepts/audit-network-policy#cluster-scoped--kguardian-audit-promote-cluster">
+    Convert an AuditClusterNetworkPolicy into one NetworkPolicy per matched namespace (discovery from `namespaceSelector`).
+  </Card>
 </CardGroup>
 
 ## Examples

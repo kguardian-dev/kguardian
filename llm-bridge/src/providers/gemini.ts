@@ -2,6 +2,7 @@ import axios from "axios";
 import type { ChatRequest, ChatResponse } from "../types/index.js";
 import { LLMProvider } from "../types/index.js";
 import { BrokerClient } from "../brokerClient.js";
+import { log } from "../logger.js";
 import { serializeToolResult } from "./truncate.js";
 
 const MAX_TOOL_ROUNDS = 10;
@@ -10,7 +11,8 @@ export async function callGemini(
   request: ChatRequest,
   brokerClient: BrokerClient
 ): Promise<ChatResponse> {
-  const apiKey = process.env.GOOGLE_API_KEY;
+  // Trim before empty-check; whitespace-only counts as not-configured.
+  const apiKey = process.env.GOOGLE_API_KEY?.trim();
   if (!apiKey) {
     throw new Error("GOOGLE_API_KEY not configured");
   }
@@ -67,7 +69,7 @@ export async function callGemini(
         { headers, timeout: 120000 }
       );
     } catch (error: any) {
-      console.error("Gemini API Error:", error.response?.data?.error?.message || error.message);
+      log.error("Gemini API Error:", error.response?.data?.error?.message || error.message);
       throw new Error(`Gemini API error: ${error.response?.data?.error?.message || error.message}`, { cause: error });
     }
 

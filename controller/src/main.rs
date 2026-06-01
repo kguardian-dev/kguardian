@@ -19,29 +19,45 @@ use kguardian::{
 
 #[tokio::main]
 async fn main() -> Result<(), Error> {
-    
     rustls::crypto::ring::default_provider()
         .install_default()
         .expect("Failed to install rustls crypto provider");
 
     init_logger();
 
+    // Trim whitespace from required URL/identity env vars. Common
+    // operator pastes embed a trailing newline or surrounding spaces;
+    // pre-trim defends every downstream consumer instead of forcing
+    // each (api_post_call, the reconciler, the pod_watcher, etc.) to
+    // remember the same hardening. An empty-after-trim value still
+    // counts as "not set" → clear error message.
     let node_name = env::var("CURRENT_NODE")
-        .map_err(|_| Error::Custom("CURRENT_NODE environment variable not set".to_string()))?;
+        .map(|s| s.trim().to_string())
+        .ok()
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| Error::Custom("CURRENT_NODE environment variable not set".to_string()))?;
 
     let broker_url = env::var("API_ENDPOINT")
-        .map_err(|_| Error::Custom("API_ENDPOINT environment variable not set".to_string()))?;
+        .map(|s| s.trim().to_string())
+        .ok()
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| Error::Custom("API_ENDPOINT environment variable not set".to_string()))?;
 
-    let excluded_namespaces: Vec<String> = env::var("EXCLUDED_NAMESPACES")
-        .unwrap_or_else(|_| "kube-system,kguardian".to_string())
-        .split(',')
-        .map(|s| s.to_string())
-        .collect();
+    let excluded_namespaces: Vec<String> = kguardian::pod_watcher::parse_excluded_namespaces(
+        &env::var("EXCLUDED_NAMESPACES").unwrap_or_else(|_| "kube-system,kguardian".to_string()),
+    );
 
-    let ignore_daemonset_traffic = env::var("IGNORE_DAEMONSET_TRAFFIC")
-        .unwrap_or_else(|_| "true".to_string()) // Default to true, dont log the daemonset traffic
-        .parse::<bool>()
-        .unwrap_or(true);
+    // bool::from_str is strict — only lowercase "true"/"false".
+    // parse_lenient_bool accepts case-insensitive variants and
+    // tolerates surrounding whitespace, so "False"/"FALSE"/" true\n"
+    // all do the right thing instead of silently falling back to
+    // the default. Operator setting IGNORE_DAEMONSET_TRAFFIC=False
+    // (intending to disable) used to flip back to the default true
+    // — the opposite of their intent.
+    let ignore_daemonset_traffic = kguardian::pod_watcher::parse_lenient_bool(
+        &env::var("IGNORE_DAEMONSET_TRAFFIC").unwrap_or_default(),
+        true,
+    );
 
     let (tx, rx) = mpsc::channel(1000); // Use tokio's mpsc channel
 

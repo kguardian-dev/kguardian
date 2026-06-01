@@ -1,4 +1,23 @@
 {{- if .Values.evaluator.enabled }}
+{{- /*
+  Multi-replica guardrail. The evaluator's status aggregator keeps
+  per-policy counters in process memory and writes back to the CRD's
+  status subresource on its own schedule. With multiple replicas:
+    - the broker round-robins /evaluate calls so each replica sees
+      a partial view of flows; flowsEvaluated/flowsWouldDeny are
+      reported per-replica with last-writer-wins on the patch;
+    - status updates race; topOffenders flips between disjoint sets
+      every reconcile.
+  Until proper leader election lands, refuse to render >1 replica.
+  Operators that genuinely need HA can run a second kguardian
+  instance with its own broker/db pair.
+*/ -}}
+{{- if and (not .Values.evaluator.autoscaling.enabled) (gt (int .Values.evaluator.replicaCount) 1) }}
+{{- fail "evaluator.replicaCount > 1 is not supported: replicas race on AuditNetworkPolicy.status writes and produce contradictory counters. Set evaluator.replicaCount=1." }}
+{{- end }}
+{{- if .Values.evaluator.autoscaling.enabled }}
+{{- fail "evaluator.autoscaling.enabled=true is not supported: replicas race on AuditNetworkPolicy.status writes. Disable autoscaling for the evaluator." }}
+{{- end }}
 ---
 apiVersion: apps/v1
 kind: Deployment

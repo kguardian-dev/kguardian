@@ -33,7 +33,7 @@ func (h NetworkTrafficHandler) Call(
 	input NetworkTrafficInput,
 ) (*mcp.CallToolResult, NetworkTrafficOutput, error) {
 	startTime := time.Now()
-	logger.Log.WithField("pod_name", input.PodName).Info("Received get_pod_network_traffic request")
+	logger.Log.WithField("pod_name", input.PodName).Debug("Received get_pod_network_traffic request")
 
 	if input.PodName == "" {
 		logger.Log.Error("pod_name is required but not provided")
