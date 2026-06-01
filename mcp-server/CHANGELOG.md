@@ -1,5 +1,19 @@
 # Changelog
 
+## [1.4.0](https://github.com/kguardian-dev/kguardian/compare/mcp-server/v1.3.4...mcp-server/v1.4.0) (2026-06-01)
+
+
+### Features
+
+* massive-uplift production hardening release ([#888](https://github.com/kguardian-dev/kguardian/issues/888)) ([176a160](https://github.com/kguardian-dev/kguardian/commit/176a160ae4f63baf46a6b5372a2b91040c28961f))
+
+
+### Bug Fixes
+
+* **controller:** one-shot warn instead of stderr-flood on ring-buffer receiver close ([846d04d](https://github.com/kguardian-dev/kguardian/commit/846d04db1cb509659d18bba0f614d4bd9bf9e5e9))
+* **deps:** update module github.com/modelcontextprotocol/go-sdk to v1.4.1 ([#766](https://github.com/kguardian-dev/kguardian/issues/766)) ([95680f1](https://github.com/kguardian-dev/kguardian/commit/95680f1808c60e644f0eebf157e5351f5b2df4a4))
+* **deps:** update module github.com/modelcontextprotocol/go-sdk to v1.6.0 ([#794](https://github.com/kguardian-dev/kguardian/issues/794)) ([30994bf](https://github.com/kguardian-dev/kguardian/commit/30994bf4b01054381713b90d9e03daae4ab97d68))
+
 ## [1.3.4](https://github.com/kguardian-dev/kguardian/compare/mcp-server/v1.3.3...mcp-server/v1.3.4) (2026-03-08)
 
 
