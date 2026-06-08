@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.4.1](https://github.com/kguardian-dev/kguardian/compare/advisor/v1.4.0...advisor/v1.4.1) (2026-06-08)
+
+
+### Bug Fixes
+
+* **deps:** update kubernetes monorepo to v0.36.1 ([#893](https://github.com/kguardian-dev/kguardian/issues/893)) ([9f837c1](https://github.com/kguardian-dev/kguardian/commit/9f837c10c4464a903e75483dbc78490202cd69c5))
+* **deps:** update module github.com/cilium/cilium to v1.19.4 ([#895](https://github.com/kguardian-dev/kguardian/issues/895)) ([c106d76](https://github.com/kguardian-dev/kguardian/commit/c106d76dd49983db3e0da349470c7084d9bcaa97))
+
 ## [1.4.0](https://github.com/kguardian-dev/kguardian/compare/advisor/v1.3.1...advisor/v1.4.0) (2026-06-01)
 
 
