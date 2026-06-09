@@ -1,6 +1,6 @@
 {
   "controller": "1.9.0",
-  "broker": "1.10.0",
+  "broker": "1.10.1",
   "frontend": "1.10.0",
   "advisor": "1.4.1",
   "charts/kguardian": "1.12.0",
