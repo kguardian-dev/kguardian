@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.10.1](https://github.com/kguardian-dev/kguardian/compare/broker/v1.10.0...broker/v1.10.1) (2026-06-09)
+
+
+### Bug Fixes
+
+* **deps:** update rust crate reqwest to 0.13 ([#855](https://github.com/kguardian-dev/kguardian/issues/855)) ([c47bec2](https://github.com/kguardian-dev/kguardian/commit/c47bec2760b81defd9062520b5ee23b56e0e52fe))
+
 ## [1.10.0](https://github.com/kguardian-dev/kguardian/compare/broker/v1.9.1...broker/v1.10.0) (2026-06-01)
 
 
