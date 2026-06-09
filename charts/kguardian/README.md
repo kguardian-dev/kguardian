@@ -2,7 +2,7 @@
 
 This chart bootstraps the [kguardian]() controlplane onto a [Kubernetes](http://kubernetes.io) cluster using the [Helm](https://helm.sh) package manager.
 
-![Version: 1.11.1](https://img.shields.io/badge/Version-1.11.1-informational?style=flat-square)
+![Version: 1.12.0](https://img.shields.io/badge/Version-1.12.0-informational?style=flat-square)
 
 ## Overview
 
@@ -94,7 +94,7 @@ The following table lists the configurable parameters of the kguardian chart and
 | broker.image.pullPolicy | string | `"IfNotPresent"` | Broker image pull policy |
 | broker.image.repository | string | `"ghcr.io/kguardian-dev/kguardian/broker"` | Broker container image repository |
 | broker.image.sha | string | `""` | Overrides the image tag using SHA digest |
-| broker.image.tag | string | `"1.9.0"` | Broker version tag (auto-updated by release-please) |
+| broker.image.tag | string | `"1.10.0"` | Broker version tag (auto-updated by release-please) |
 | broker.imagePullSecrets | list | `[]` | List of image pull secrets for private registries |
 | broker.initContainer.image.pullPolicy | string | `"Always"` | Broker init container image pull policy |
 | broker.initContainer.image.repository | string | `"busybox"` | Broker init container image repository |
@@ -144,7 +144,7 @@ The following table lists the configurable parameters of the kguardian chart and
 | controller.image.pullPolicy | string | `"IfNotPresent"` | Controller image pull policy |
 | controller.image.repository | string | `"ghcr.io/kguardian-dev/kguardian/controller"` | Controller container image repository |
 | controller.image.sha | string | `""` | Overrides the image tag using SHA digest |
-| controller.image.tag | string | `"1.8.1"` | Controller version tag (auto-updated by release-please) |
+| controller.image.tag | string | `"1.9.0"` | Controller version tag (auto-updated by release-please) |
 | controller.imagePullSecrets | list | `[]` | List of image pull secrets for private registries |
 | controller.initContainer.image.pullPolicy | string | `"Always"` | Init container image pull policy |
 | controller.initContainer.image.repository | string | `"busybox"` | Init container image repository |
@@ -206,7 +206,7 @@ The following table lists the configurable parameters of the kguardian chart and
 | database.serviceAccount.name | string | `""` | The name of the service account to use. If not set and create is true, a name is generated using the fullname template |
 | database.tolerations | list | `[]` | Tolerations for the kguardian database pod assignment |
 | database.user | string | `"rust"` | PostgreSQL role used by the broker. Must exist on external Postgres. |
-| evaluator | object | `{"affinity":{},"autoscaling":{"enabled":false,"maxReplicas":5,"minReplicas":1,"targetCPUUtilizationPercentage":80},"container":{"port":8082},"enabled":true,"env":[],"image":{"pullPolicy":"IfNotPresent","repository":"ghcr.io/kguardian-dev/kguardian/evaluator","sha":"","tag":"v0.2.0"},"imagePullSecrets":[],"logLevel":"info","metrics":{"serviceMonitor":{"enabled":false,"interval":"30s","labels":{},"path":"/metrics","port":"http","scrapeTimeout":"10s"}},"nodeSelector":{"kubernetes.io/os":"linux"},"podAnnotations":{},"podDisruptionBudget":{"enabled":false,"maxUnavailable":"","minAvailable":1},"podSecurityContext":{"fsGroup":1000,"fsGroupChangePolicy":"OnRootMismatch","runAsGroup":1000,"runAsUser":1000,"seccompProfile":{"type":"RuntimeDefault"},"supplementalGroups":[1000]},"priorityClassName":"","replicaCount":1,"resources":{"limits":{"memory":"256Mi"},"requests":{"cpu":"50m","memory":"64Mi"}},"securityContext":{"allowPrivilegeEscalation":false,"capabilities":{"drop":["ALL"]},"privileged":false,"readOnlyRootFilesystem":true,"runAsNonRoot":true,"runAsUser":1000},"service":{"name":"kguardian-evaluator","port":8082,"type":"ClusterIP"},"serviceAccount":{"annotations":{},"automountServiceAccountToken":true,"create":true,"name":""},"startupProbe":{},"tolerations":[],"topologySpreadConstraints":[]}` | ----------------------------------------------------------------------- |
+| evaluator | object | `{"affinity":{},"autoscaling":{"enabled":false,"maxReplicas":5,"minReplicas":1,"targetCPUUtilizationPercentage":80},"container":{"port":8082},"enabled":true,"env":[],"image":{"pullPolicy":"IfNotPresent","repository":"ghcr.io/kguardian-dev/kguardian/evaluator","sha":"","tag":"v0.3.0"},"imagePullSecrets":[],"logLevel":"info","metrics":{"serviceMonitor":{"enabled":false,"interval":"30s","labels":{},"path":"/metrics","port":"http","scrapeTimeout":"10s"}},"nodeSelector":{"kubernetes.io/os":"linux"},"podAnnotations":{},"podDisruptionBudget":{"enabled":false,"maxUnavailable":"","minAvailable":1},"podSecurityContext":{"fsGroup":1000,"fsGroupChangePolicy":"OnRootMismatch","runAsGroup":1000,"runAsUser":1000,"seccompProfile":{"type":"RuntimeDefault"},"supplementalGroups":[1000]},"priorityClassName":"","replicaCount":1,"resources":{"limits":{"memory":"256Mi"},"requests":{"cpu":"50m","memory":"64Mi"}},"securityContext":{"allowPrivilegeEscalation":false,"capabilities":{"drop":["ALL"]},"privileged":false,"readOnlyRootFilesystem":true,"runAsNonRoot":true,"runAsUser":1000},"service":{"name":"kguardian-evaluator","port":8082,"type":"ClusterIP"},"serviceAccount":{"annotations":{},"automountServiceAccountToken":true,"create":true,"name":""},"startupProbe":{},"tolerations":[],"topologySpreadConstraints":[]}` | ----------------------------------------------------------------------- |
 | evaluator.affinity | object | `{}` | Affinity rules for evaluator pod assignment |
 | evaluator.autoscaling.enabled | bool | `false` | Enable horizontal pod autoscaling for evaluator |
 | evaluator.autoscaling.maxReplicas | int | `5` | Maximum number of evaluator replicas |
@@ -218,7 +218,7 @@ The following table lists the configurable parameters of the kguardian chart and
 | evaluator.image.pullPolicy | string | `"IfNotPresent"` | Evaluator image pull policy |
 | evaluator.image.repository | string | `"ghcr.io/kguardian-dev/kguardian/evaluator"` | Evaluator container image repository |
 | evaluator.image.sha | string | `""` | Overrides the image tag using SHA digest |
-| evaluator.image.tag | string | `"v0.2.0"` | Evaluator version tag (auto-updated by release-please) |
+| evaluator.image.tag | string | `"v0.3.0"` | Evaluator version tag (auto-updated by release-please) |
 | evaluator.imagePullSecrets | list | `[]` | List of image pull secrets for private registries |
 | evaluator.logLevel | string | `"info"` | Log level for the evaluator process (panic|fatal|error|warn|info|debug|trace) |
 | evaluator.metrics.serviceMonitor.enabled | bool | `false` | Create a ServiceMonitor for prometheus-operator. The evaluator does not currently expose /metrics natively — forward-compatible toggle for when it does. |
@@ -250,7 +250,7 @@ The following table lists the configurable parameters of the kguardian chart and
 | frontend.image.pullPolicy | string | `"IfNotPresent"` | Frontend image pull policy |
 | frontend.image.repository | string | `"ghcr.io/kguardian-dev/kguardian/frontend"` | Frontend container image repository |
 | frontend.image.sha | string | `""` | Overrides the image tag using SHA digest |
-| frontend.image.tag | string | `"1.9.0"` | Frontend version tag (auto-updated by release-please) |
+| frontend.image.tag | string | `"1.10.0"` | Frontend version tag (auto-updated by release-please) |
 | frontend.imagePullSecrets | list | `[]` | List of image pull secrets for private registries |
 | frontend.ingress.annotations | object | `{}` | Ingress annotations |
 | frontend.ingress.className | string | `""` | Ingress class name |
@@ -299,7 +299,7 @@ The following table lists the configurable parameters of the kguardian chart and
 | llmBridge.image.pullPolicy | string | `"IfNotPresent"` | LLM Bridge image pull policy |
 | llmBridge.image.repository | string | `"ghcr.io/kguardian-dev/kguardian/llm-bridge"` | LLM Bridge container image repository |
 | llmBridge.image.sha | string | `""` | Overrides the image tag using SHA digest |
-| llmBridge.image.tag | string | `"1.2.3"` | LLM Bridge version tag (auto-updated by release-please) |
+| llmBridge.image.tag | string | `"1.3.0"` | LLM Bridge version tag (auto-updated by release-please) |
 | llmBridge.imagePullSecrets | list | `[]` | List of image pull secrets for private registries |
 | llmBridge.metrics.serviceMonitor.enabled | bool | `false` | Create a ServiceMonitor for prometheus-operator. llm-bridge does not currently expose /metrics — forward-compatible toggle. |
 | llmBridge.metrics.serviceMonitor.interval | string | `"30s"` |  |
@@ -349,7 +349,7 @@ The following table lists the configurable parameters of the kguardian chart and
 | mcpServer.image.pullPolicy | string | `"IfNotPresent"` | MCP Server image pull policy |
 | mcpServer.image.repository | string | `"ghcr.io/kguardian-dev/kguardian/mcp-server"` | MCP Server container image repository |
 | mcpServer.image.sha | string | `""` | Overrides the image tag using SHA digest |
-| mcpServer.image.tag | string | `"1.3.4"` | MCP Server version tag (auto-updated by release-please) |
+| mcpServer.image.tag | string | `"1.4.0"` | MCP Server version tag (auto-updated by release-please) |
 | mcpServer.imagePullSecrets | list | `[]` | List of image pull secrets for private registries |
 | mcpServer.metrics.serviceMonitor.enabled | bool | `false` | Create a ServiceMonitor for prometheus-operator. mcp-server has a /metrics endpoint configured via kmcp.yaml; toggle this on once the exposed port matches `service.port`. |
 | mcpServer.metrics.serviceMonitor.interval | string | `"30s"` |  |
