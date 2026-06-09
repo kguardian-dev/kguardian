@@ -35,7 +35,7 @@ tracing = {version = "0.1.44", features = ['log']}
 chrono = { version = "0.4.43", features = ["serde"] }
 diesel_migrations = "2.1.0"
 tracing-subscriber = { version = "0.3.22", features = ["json", "env-filter"] }
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+reqwest = { version = "0.13", default-features = false, features = ["json"] }
 tokio = { version = "1", features = ["rt", "macros"] }
 
 [dev-dependencies]
