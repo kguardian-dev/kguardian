@@ -18,6 +18,21 @@
   "configWarningReuseIssue": true,
   "suppressNotifications": ["prEditedNotification", "prIgnoreNotification"],
   "platformAutomerge": true,
+  "packageRules": [
+    {
+      // The SLSA generator's reusable workflows MUST be referenced by a version
+      // tag (refs/tags/vX.Y.Z). The builder resolves its own ref to derive the
+      // release version for provenance, so a commit SHA makes it fail with
+      // "Invalid ref ... Expected ref of the form refs/tags/vX.Y.Z".
+      // Exempt it from helpers:pinGitHubActionDigests so it is never digest-pinned,
+      // while still allowing Renovate to upgrade the version tag (vX.Y.Z -> newer).
+      // Context: regression from #295, reverted in #938.
+      "description": "Do not digest-pin the SLSA reusable workflow (breaks the generator); keep tag upgrades",
+      "matchManagers": ["github-actions"],
+      "matchDepNames": ["slsa-framework/slsa-github-generator"],
+      "pinDigests": false,
+    },
+  ],
   "pre-commit": {
     "enabled": true
   },
