@@ -12,7 +12,7 @@ COPY pkg ./pkg
 
 RUN CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo -o kguardian-evaluator .
 
-FROM alpine:3.23
+FROM alpine:3.24
 
 WORKDIR /app
 
