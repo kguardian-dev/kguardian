@@ -6,9 +6,9 @@ toolchain go1.26.4
 
 require (
 	github.com/sirupsen/logrus v1.9.4
-	k8s.io/api v0.36.1
-	k8s.io/apimachinery v0.36.1
-	k8s.io/client-go v0.36.1
+	k8s.io/api v0.36.2
+	k8s.io/apimachinery v0.36.2
+	k8s.io/client-go v0.36.2
 )
 
 require (
