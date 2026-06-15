@@ -16,7 +16,7 @@ plain = "0.2"
 time = { version = "0.3.47", features = ["formatting", "local-offset", "macros"]}
 tokio = { version = "1.49.0", features = ["macros", "rt-multi-thread", "fs", "time"] }
 kube = { version = "3.0.1", features = ["runtime", "derive"] }
-k8s-openapi = { version = "0.27.0", features = ["latest"] }
+k8s-openapi = { version = "0.28.0", features = ["latest"] }
 futures = "0.3.32"
 thiserror = "2.0.18"
 tracing = "0.1.44"
