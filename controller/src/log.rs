@@ -33,7 +33,7 @@ pub fn init_logger() {
     let next = rust_log_with_suppressions(current.as_deref());
     env::set_var("RUST_LOG", next);
 
-    let timer = time::format_description::parse(
+    let timer = time::format_description::parse_borrowed::<2>(
         "[year]-[month padding:zero]-[day padding:zero] [hour]:[minute]:[second]",
     )
     .expect("Time Error");
