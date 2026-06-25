@@ -771,36 +771,19 @@ fn create_http_traffic_batch(
         return Ok(0);
     }
 
-    // Deduplicate: only insert rows not already in the table (keyed on pod_ip +
-    // traffic_type + traffic_in_out_ip + traffic_in_out_port + http_method + http_path).
-    let mut to_insert = Vec::new();
-    for event in batch.iter() {
-        let exists: bool = diesel::dsl::select(diesel::dsl::exists(
-            pod_http_traffic
-                .filter(pod_ip.eq(&event.pod_ip))
-                .filter(traffic_type.eq(&event.traffic_type))
-                .filter(traffic_in_out_ip.eq(&event.traffic_in_out_ip))
-                .filter(traffic_in_out_port.eq(&event.traffic_in_out_port))
-                .filter(http_method.eq(&event.http_method))
-                .filter(http_path.eq(&event.http_path)),
-        ))
-        .get_result(conn)?;
-
-        if !exists {
-            to_insert.push(event.clone());
-        } else {
-            debug!("Skipping duplicate HTTP event for pod: {:?}", event.pod_name);
-        }
-    }
-
-    if to_insert.is_empty() {
-        return Ok(0);
-    }
-
+    // Dedup is enforced by the pod_http_traffic_content_uidx unique index on the
+    // content columns. ON CONFLICT DO NOTHING collapses duplicates atomically —
+    // within this batch and across concurrent batches / controller restarts —
+    // so we no longer need the racy check-then-insert (SELECT exists then
+    // INSERT) that let two concurrent batches both insert the same flow.
     let inserted = diesel::insert_into(pod_http_traffic)
-        .values(&to_insert)
+        .values(batch.as_slice())
+        .on_conflict_do_nothing()
         .execute(conn)?;
 
-    debug!("Inserted {} HTTP traffic events", inserted);
+    debug!("Inserted {} HTTP traffic events (skipped {} duplicates)",
+        inserted,
+        batch.len() - inserted,
+    );
     Ok(inserted)
 }
