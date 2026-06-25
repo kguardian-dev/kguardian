@@ -50,10 +50,10 @@ export async function callAnthropic(
     })));
   }
 
-  // Add current user message
+  // Add current user message wrapped in delimiters to prevent prompt injection
   messages.push({
     role: "user",
-    content: request.message,
+    content: `<user_input>\n${request.message}\n</user_input>`,
   });
 
   const headers = {
