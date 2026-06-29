@@ -32,11 +32,35 @@ var toolDefs = []toolDef{
 	},
 	{
 		Name:        "get_cluster_traffic",
-		Description: "Get a summary of network traffic across the cluster. Returns per-pod traffic counts (ingress/egress/peer counts), not raw records. Accepts an optional namespace parameter to filter results to a single namespace. Use when the user asks about overall traffic patterns or 'what pods are communicating'.",
+		Description: "Get a summary of network traffic across the cluster. Returns per-pod counts (ingress/egress, allow/drop, unique peers) plus a cluster-wide total_drop_count — not raw records. Dropped flows (decision=DROP) come from the eBPF network-policy-drop probe, so this also answers 'what traffic is being blocked/dropped'. Accepts an optional namespace filter. Use for overall traffic patterns, 'what pods are communicating', or 'where is traffic being dropped'.",
 	},
 	{
 		Name:        "get_cluster_pods",
 		Description: "List pods in the cluster with compact metadata (name, namespace, IP, node, status). Heavyweight fields like pod_obj are stripped. Accepts an optional namespace parameter to filter results. Use when the user asks 'what pods are running' or needs a pod inventory.",
+	},
+	{
+		Name:        "get_pod_details_by_name",
+		Description: "Look up a pod by its name. Returns identity (name, namespace, IP, node, workload selector labels) with the heavyweight pod_obj stripped. Use when the user names a pod (e.g. from a traffic record) and wants its details — prefer this over get_pod_details, which requires an IP.",
+	},
+	{
+		Name:        "list_services",
+		Description: "List Kubernetes services in the cluster with compact metadata (name, namespace, cluster IP, selector, ports). Accepts an optional namespace parameter to filter results. Use when the user asks 'what services exist' or needs a service inventory — get_service_details only resolves a single known IP.",
+	},
+	{
+		Name:        "get_pods_on_node",
+		Description: "List the pods recorded on a specific Kubernetes node (compact metadata: name, namespace, IP, node, workload labels; live pods only). Use for blast-radius / 'what runs on node X' / 'which workloads share a node' questions. Requires node.",
+	},
+	{
+		Name:        "get_audit_verdicts",
+		Description: "Get network-policy evaluation verdicts — flows the AuditNetworkPolicy/AuditClusterNetworkPolicy engine evaluated as Allow or WouldDeny. Returns source/destination pod+namespace, port, protocol, direction, the human-readable reason, and observed_at, newest first. All filters optional: policy, namespace, verdict ('Allow'|'WouldDeny'), direction ('Ingress'|'Egress'), limit (default 100, max 500). Use for security questions like 'what traffic would be denied', 'why is this flow blocked', or 'show recent policy violations'.",
+	},
+	{
+		Name:        "generate_network_policy",
+		Description: "Generate a least-privilege Kubernetes NetworkPolicy (or CiliumNetworkPolicy) for a pod from its observed traffic. Returns ready-to-apply YAML. Parameters: pod_name (required); policy_type ('kubernetes' for a standard NetworkPolicy — the default — or 'cilium'). Use when the user asks to 'generate/create a network policy', 'lock down this pod', or 'restrict traffic for X'. The policy is deterministically synthesised by the advisor from captured flows, not guessed.",
+	},
+	{
+		Name:        "generate_seccomp_profile",
+		Description: "Generate a least-privilege seccomp profile for a pod from its observed syscalls. Returns ready-to-use seccomp JSON (allow-lists the observed syscalls, denies the rest). Parameter: pod_name (required). Use when the user asks to 'generate/create a seccomp profile' or 'restrict syscalls for X'.",
 	},
 }
 
@@ -88,4 +112,37 @@ func RegisterAllTools(server *mcp.Server, brokerURL string) {
 		Name:        "get_cluster_pods",
 		Description: defs["get_cluster_pods"],
 	}, ClusterPodsHandler{client: client}.Call)
+
+	mcp.AddTool(server, &mcp.Tool{
+		Name:        "get_pod_details_by_name",
+		Description: defs["get_pod_details_by_name"],
+	}, PodByNameHandler{client: client}.Call)
+
+	mcp.AddTool(server, &mcp.Tool{
+		Name:        "list_services",
+		Description: defs["list_services"],
+	}, ClusterServicesHandler{client: client}.Call)
+
+	mcp.AddTool(server, &mcp.Tool{
+		Name:        "get_pods_on_node",
+		Description: defs["get_pods_on_node"],
+	}, PodsOnNodeHandler{client: client}.Call)
+
+	mcp.AddTool(server, &mcp.Tool{
+		Name:        "get_audit_verdicts",
+		Description: defs["get_audit_verdicts"],
+	}, AuditVerdictsHandler{client: client}.Call)
+
+	// Policy/seccomp generation proxies to the advisor service.
+	advisor := NewAdvisorClient("")
+
+	mcp.AddTool(server, &mcp.Tool{
+		Name:        "generate_network_policy",
+		Description: defs["generate_network_policy"],
+	}, GenerateNetworkPolicyHandler{advisor: advisor}.Call)
+
+	mcp.AddTool(server, &mcp.Tool{
+		Name:        "generate_seccomp_profile",
+		Description: defs["generate_seccomp_profile"],
+	}, GenerateSeccompProfileHandler{advisor: advisor}.Call)
 }

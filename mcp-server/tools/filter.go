@@ -41,9 +41,12 @@ func compactTrafficSummary(data interface{}) map[string]interface{} {
 	type podStats struct {
 		Ingress int
 		Egress  int
+		Allow   int
+		Drop    int
 		Peers   map[string]bool
 	}
 	pods := make(map[string]*podStats)
+	totalDrop := 0
 
 	for _, item := range items {
 		m, ok := item.(map[string]interface{})
@@ -86,6 +89,20 @@ func compactTrafficSummary(data interface{}) map[string]interface{} {
 		if peer, ok := m["traffic_in_out_ip"].(string); ok && peer != "" {
 			s.Peers[peer] = true
 		}
+
+		// Surface the policy decision so "what traffic is being dropped /
+		// blocked cluster-wide" is answerable from the summary. The broker
+		// stores decision as "ALLOW"/"DROP" (uppercase, from
+		// controller/src/network.rs); the eBPF netpolicy-drop probe lands
+		// here as decision="DROP" rows. Without this the LLM would have to
+		// pull raw per-pod traffic to find drops.
+		switch strings.ToUpper(asString(m["decision"])) {
+		case "DROP":
+			s.Drop++
+			totalDrop++
+		case "ALLOW":
+			s.Allow++
+		}
 	}
 
 	podSummaries := make(map[string]interface{}, len(pods))
@@ -93,15 +110,24 @@ func compactTrafficSummary(data interface{}) map[string]interface{} {
 		podSummaries[name] = map[string]interface{}{
 			"ingress_count":     s.Ingress,
 			"egress_count":      s.Egress,
+			"allow_count":       s.Allow,
+			"drop_count":        s.Drop,
 			"unique_peer_count": len(s.Peers),
 		}
 	}
 
 	return map[string]interface{}{
-		"total_records": len(items),
-		"pod_count":     len(pods),
-		"pods":          podSummaries,
+		"total_records":    len(items),
+		"pod_count":        len(pods),
+		"total_drop_count": totalDrop,
+		"pods":             podSummaries,
 	}
+}
+
+// asString returns the string value of v, or "" if v is not a string.
+func asString(v interface{}) string {
+	s, _ := v.(string)
+	return s
 }
 
 // compactSvcRecord strips the heavyweight `service_spec` from a
