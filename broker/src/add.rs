@@ -1,4 +1,7 @@
-use crate::{schema, AuditClient, PodDetail, PodInputSyscalls, PodSyscalls, PodTraffic, SvcDetail};
+use crate::{
+    schema, AuditClient, HttpPodTraffic, PodDetail, PodInputSyscalls, PodSyscalls, PodTraffic,
+    SvcDetail,
+};
 use actix_web::{post, web, Error, HttpResponse};
 use diesel::pg::PgConnection;
 use diesel::r2d2::{self, ConnectionManager};
@@ -736,4 +739,52 @@ mod tests {
         b.traffic_in_out_port = Some("8443".to_string());
         assert_ne!(traffic_content_key(&a), traffic_content_key(&b));
     }
+}
+
+// ── L7 HTTP traffic ──────────────────────────────────────────────────────────
+
+#[post("/pod/l7traffic/batch")]
+pub async fn add_pod_l7traffic_batch(
+    pool: web::Data<DbPool>,
+    form: web::Json<Vec<HttpPodTraffic>>,
+) -> Result<HttpResponse, Error> {
+    let count = form.len();
+    debug!("Received batch of {} HTTP traffic events", count);
+
+    let result = web::block(move || {
+        let mut conn = pool.get()?;
+        create_http_traffic_batch(&mut conn, form)
+    })
+    .await?
+    .map_err(actix_web::error::ErrorInternalServerError)?;
+
+    info!("Successfully inserted {} HTTP traffic events", result);
+    Ok(HttpResponse::Ok().json(result))
+}
+
+fn create_http_traffic_batch(
+    conn: &mut PgConnection,
+    batch: web::Json<Vec<HttpPodTraffic>>,
+) -> Result<usize, DbError> {
+    use schema::pod_http_traffic::dsl::*;
+
+    if batch.is_empty() {
+        return Ok(0);
+    }
+
+    // Dedup is enforced by the pod_http_traffic_content_uidx unique index on the
+    // content columns. ON CONFLICT DO NOTHING collapses duplicates atomically —
+    // within this batch and across concurrent batches / controller restarts —
+    // so we no longer need the racy check-then-insert (SELECT exists then
+    // INSERT) that let two concurrent batches both insert the same flow.
+    let inserted = diesel::insert_into(pod_http_traffic)
+        .values(batch.as_slice())
+        .on_conflict_do_nothing()
+        .execute(conn)?;
+
+    debug!("Inserted {} HTTP traffic events (skipped {} duplicates)",
+        inserted,
+        batch.len() - inserted,
+    );
+    Ok(inserted)
 }
