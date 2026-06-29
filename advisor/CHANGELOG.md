@@ -1,5 +1,18 @@
 # Changelog
 
+## [1.5.0](https://github.com/kguardian-dev/kguardian/compare/advisor/v1.4.1...advisor/v1.5.0) (2026-06-29)
+
+
+### Features
+
+* MCP/LLM integration uplift + data-path hardening ([572b31f](https://github.com/kguardian-dev/kguardian/commit/572b31fdcb470af9f6c844186fb9b8fa8cc8b83f))
+
+
+### Bug Fixes
+
+* **deps:** update kubernetes monorepo to v0.36.2 ([#956](https://github.com/kguardian-dev/kguardian/issues/956)) ([0ee2bf2](https://github.com/kguardian-dev/kguardian/commit/0ee2bf22fa1049bfd5de48be509ae3d9a7a76eeb))
+* **deps:** update module github.com/cilium/cilium to v1.19.5 ([#964](https://github.com/kguardian-dev/kguardian/issues/964)) ([78bf4ac](https://github.com/kguardian-dev/kguardian/commit/78bf4ac9fd8c42f7a977a2d41f5bcf22c05aa9cc))
+
 ## [1.4.1](https://github.com/kguardian-dev/kguardian/compare/advisor/v1.4.0...advisor/v1.4.1) (2026-06-08)
 
 
