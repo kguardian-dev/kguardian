@@ -1,0 +1,74 @@
+---
+# yaml-language-server: $schema=https://json.schemastore.org/github-workflow.json
+name: Build and Push Advisor Docker Images
+
+# The advisor ships two artifacts on an advisor/v* tag:
+#   - advisor-release.yml      -> the SLSA-provenanced CLI binary (kubectl plugin)
+#   - this workflow            -> the container image for `advisor serve`
+# The container image is what the Helm chart deploys (advisor.enabled=true).
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "advisor/v*"
+
+jobs:
+  build_and_push:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+
+      - name: Cache Go modules
+        uses: actions/cache@2c8a9bd7457de244a408f35966fab2fb45fda9c8 # v6
+        with:
+          path: |
+            ~/.cache/go-build
+            ~/go/pkg/mod
+          key: ${{ runner.os }}-go-advisor-${{ hashFiles('advisor/go.sum') }}
+          restore-keys: |
+            ${{ runner.os }}-go-advisor-
+            ${{ runner.os }}-go-
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@06116385d9baf250c9f4dcb4858b16962ea869c3 # v4
+        with:
+          platforms: all
+
+      - name: Set up Docker Buildx
+        id: buildx
+        uses: docker/setup-buildx-action@d7f5e7f509e45cec5c76c4d5afdd7de93d0b3df5 # v4
+        with:
+          install: true
+          version: latest
+
+      - name: Login to GHCR
+        uses: docker/login-action@650006c6eb7dba73a995cc03b0b2d7f5ca915bee # v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract tag name
+        id: extract_tag
+        run: |
+          TAG="${GITHUB_REF#refs/tags/}"
+          VERSION="${TAG#advisor/}"
+          echo "TAG_NAME=${VERSION}" >> $GITHUB_OUTPUT
+
+      - name: Build and Push
+        uses: docker/build-push-action@f9f3042f7e2789586610d6e8b85c8f03e5195baf # v7
+        with:
+          context: advisor/
+          file: advisor/Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          build-args: |
+            VERSION=${{ steps.extract_tag.outputs.TAG_NAME }}
+            SHA=${{ github.sha }}
+          tags: |
+            ghcr.io/kguardian-dev/kguardian/advisor:${{ steps.extract_tag.outputs.TAG_NAME }}
+            ghcr.io/kguardian-dev/kguardian/advisor:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
