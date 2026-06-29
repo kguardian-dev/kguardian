@@ -293,9 +293,10 @@ pub fn upsert_pod_details(
     mut w: web::Json<PodDetail>,
 ) -> Result<PodDetail, DbError> {
     use schema::pod_details::dsl::*;
-    // Slim the Pod manifest before it ever hits storage: consumers only read
-    // metadata.labels, so dropping spec/status/managedFields here (rather than
-    // recompacting on every read) shrinks the row and the serialise cost.
+    // Slim the Pod manifest before it ever hits storage: consumers read only
+    // metadata.labels and spec.hostNetwork, so dropping the rest of
+    // spec/status/managedFields here (rather than recompacting on every read)
+    // shrinks the row and the serialise cost.
     if let Some(obj) = w.pod_obj.as_mut() {
         crate::get::compact_pod_obj(obj);
     }

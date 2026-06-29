@@ -165,7 +165,9 @@ const AIAssistant: React.FC<AIAssistantProps> = ({ isOpen, onClose, onLayoutChan
     // Build structured context for every message
     const context = JSON.stringify({
       namespace: namespace || undefined,
-      podNames: podNames?.slice(0, 30),
+      // Cap at 20 to match the bridge's getSystemPrompt truncation — sending
+      // more just gets dropped server-side.
+      podNames: podNames?.slice(0, 20),
     });
 
     // Cancel any prior in-flight stream, then start a fresh abortable one.

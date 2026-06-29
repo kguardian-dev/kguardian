@@ -24,11 +24,6 @@ func NewCiliumPolicyGenerator() *CiliumPolicyGenerator {
 	return &CiliumPolicyGenerator{data: DefaultBrokerData()}
 }
 
-// NewCiliumPolicyGeneratorWithData injects a BrokerData for peer resolution.
-func NewCiliumPolicyGeneratorWithData(d BrokerData) *CiliumPolicyGenerator {
-	return &CiliumPolicyGenerator{data: d}
-}
-
 func (g *CiliumPolicyGenerator) setBrokerData(d BrokerData) {
 	if d != nil {
 		g.data = d

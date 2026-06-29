@@ -24,11 +24,6 @@ func NewStandardPolicyGenerator() *StandardPolicyGenerator {
 	return &StandardPolicyGenerator{data: DefaultBrokerData()}
 }
 
-// NewStandardPolicyGeneratorWithData injects a BrokerData for peer resolution.
-func NewStandardPolicyGeneratorWithData(d BrokerData) *StandardPolicyGenerator {
-	return &StandardPolicyGenerator{data: d}
-}
-
 func (g *StandardPolicyGenerator) setBrokerData(d BrokerData) {
 	if d != nil {
 		g.data = d

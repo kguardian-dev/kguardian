@@ -1,5 +1,3 @@
-import axios from 'axios';
-
 // LLM Bridge URL - use relative path for proxy in production, or direct URL in development
 // In production (Vite preview), this proxies through /llm-api to the llm-bridge service
 // In development, this can connect directly to localhost:8080 or use the dev proxy
@@ -12,31 +10,6 @@ export interface HistoryMessage {
   content: string;
 }
 
-export interface ChatMessage {
-  message: string;
-  conversation_id?: string;
-  provider?: LLMProvider;
-  model?: string;
-  context?: string;
-  history?: HistoryMessage[];
-}
-
-export interface ChatResponse {
-  message: string;
-  provider: LLMProvider;
-  model: string;
-  conversation_id?: string;
-}
-
-/**
- * Send a chat message to the AI assistant
- * @param message The user's message
- * @param history Optional: Previous conversation messages for context
- * @param provider Optional: Specify which LLM provider to use (openai, anthropic, gemini, copilot)
- * @param conversationId Optional: Continue an existing conversation
- * @param context Optional: JSON string with structured context (namespace, podNames)
- * @returns The AI's response
- */
 /**
  * Callbacks invoked as a streamed chat response arrives. Every field is
  * optional so callers subscribe only to the events they render.
@@ -167,35 +140,5 @@ export async function streamChatMessage(
     // Always release the reader lock / signal the body to stop, so an aborted
     // or errored stream doesn't leak the reader and underlying connection.
     reader.cancel().catch(() => {});
-  }
-}
-
-export async function sendChatMessage(
-  message: string,
-  history?: HistoryMessage[],
-  provider?: LLMProvider,
-  conversationId?: string,
-  context?: string
-): Promise<ChatResponse> {
-  try {
-    const response = await axios.post<ChatResponse>(`${LLM_BRIDGE_URL}/api/chat`, {
-      message,
-      history,
-      provider,
-      conversationId,
-      context,
-    });
-
-    return response.data;
-  } catch (error) {
-    if (axios.isAxiosError(error)) {
-      const errorMessage = error.response?.data?.error || error.message;
-      const details = error.response?.data?.details;
-      throw new Error(
-        `Failed to get AI response: ${errorMessage}${details ? ` - ${details}` : ''}`,
-        { cause: error }
-      );
-    }
-    throw new Error('An unexpected error occurred while calling the AI API', { cause: error });
   }
 }

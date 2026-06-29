@@ -120,8 +120,8 @@ func (c *BrokerClient) GetPodsOnNode(ctx context.Context, node string) (interfac
 // from the broker's /audit/verdicts endpoint. Filters are optional. The
 // namespace dimension has three distinct modes that mirror the broker:
 //   - clusterScoped=true  -> sends "namespace=" (empty value PRESENT), which
-//     the broker reads as "cluster-scoped policy verdicts only"
-//     (policy_namespace = ''). This takes precedence over namespace.
+//     the broker reads as "cluster-scoped policy verdicts only" (those rows
+//     are stored with an empty policy_namespace). Takes precedence over namespace.
 //   - namespace != ""     -> sends "namespace=<ns>" (that namespace only).
 //   - neither             -> omits the param entirely, spanning all
 //     namespaces including cluster-scoped.

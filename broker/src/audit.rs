@@ -350,15 +350,13 @@ impl AuditClient {
         self.in_flight.available_permits()
     }
 
-    /// Best-effort: build a Flow from the PodTraffic event, POST to
-    /// `/evaluate`, and persist any `WouldDeny` results. Errors are
-    /// logged but never propagated — the broker's ingest path must not
-    /// stall on evaluator hiccups.
     /// Evaluate one flow against the evaluator and persist any verdicts.
-    /// Concurrency is bounded by the caller: the audit dispatcher holds an
-    /// `in_flight` permit for the duration of this call, so a large ingest
-    /// burst can't create unbounded concurrent /evaluate round-trips.
-    pub async fn evaluate_and_persist(&self, pool: DbPool, traffic: PodTraffic) {
+    /// Best-effort: errors are logged but never propagated — the ingest path
+    /// must not stall on evaluator hiccups. Concurrency is bounded by the
+    /// caller: the audit dispatcher holds an `in_flight` permit for the duration
+    /// of this call, so a large ingest burst can't create unbounded concurrent
+    /// /evaluate round-trips. Called only by the in-crate dispatcher.
+    pub(crate) async fn evaluate_and_persist(&self, pool: DbPool, traffic: PodTraffic) {
         if !self.enabled {
             return;
         }
