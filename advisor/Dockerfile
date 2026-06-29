@@ -26,7 +26,7 @@ COPY . .
 
 RUN go build -a -installsuffix cgo \
   -ldflags="-w -extldflags '-static' \
-  -X 'main.ApplicationName=${APPLICATION_NAME}}' \
+  -X 'main.ApplicationName=${APPLICATION_NAME}' \
   -X 'main.Version=${VERSION}' -X 'main.SHA=${SHA}' \
   -X 'github.com/kguardian-dev/kguardian/advisor/pkg/k8s.Version=${VERSION}'" \
   -o advisor .

@@ -74,15 +74,33 @@ pub async fn get_pod_details(pool: web::Data<DbPool>) -> actix_web::Result<impl 
     })
 }
 
-/// Reduce a stored Pod manifest to just the metadata consumers need (labels
-/// live under metadata — advisor uses them for the policy podSelector, the
-/// frontend for the same), dropping spec, status, and the verbose
-/// metadata.managedFields. Operates in place; non-object values are left
-/// untouched. Applied at write time (add.rs) so the bulk never reaches storage,
-/// and kept here as a defensive read-time pass for rows written before that.
+/// Reduce a stored Pod manifest to just the fields consumers need: labels
+/// (under metadata — advisor uses them for the policy podSelector, the frontend
+/// for the same) and `spec.hostNetwork` (the advisor's Cilium generator reads it
+/// to skip host-networked / node-IP pods). Everything else in spec, all of
+/// status, and the verbose metadata.managedFields are dropped. Operates in
+/// place; non-object values are left untouched. Applied at write time (add.rs)
+/// so the bulk never reaches storage, and kept here as a defensive read-time
+/// pass for rows written before that.
 pub(crate) fn compact_pod_obj(v: &mut serde_json::Value) {
     if let Some(obj) = v.as_object_mut() {
-        obj.remove("spec");
+        // Preserve only spec.hostNetwork, dropping the rest of spec. When the
+        // manifest has no spec.hostNetwork (the common, non-host-networked
+        // case — the field is omitempty), drop spec entirely; the advisor then
+        // deserializes HostNetwork=false, which is correct.
+        let host_network = obj
+            .get("spec")
+            .and_then(|s| s.get("hostNetwork"))
+            .filter(|hn| !hn.is_null())
+            .cloned();
+        match host_network {
+            Some(hn) => {
+                obj.insert("spec".to_string(), serde_json::json!({ "hostNetwork": hn }));
+            }
+            None => {
+                obj.remove("spec");
+            }
+        }
         obj.remove("status");
         if let Some(meta) = obj.get_mut("metadata").and_then(|m| m.as_object_mut()) {
             meta.remove("managedFields");
@@ -535,11 +553,10 @@ mod tests {
                 "labels": {"app": "web"},
                 "managedFields": [{"manager": "kubelet", "big": "x".repeat(1000)}]
             },
-            "spec": {"containers": [{"name": "c", "image": "nginx"}]},
+            "spec": {"hostNetwork": true, "containers": [{"name": "c", "image": "nginx"}]},
             "status": {"phase": "Running", "conditions": [{"type": "Ready"}]}
         });
         compact_pod_obj(&mut v);
-        assert!(v.get("spec").is_none(), "spec must be dropped");
         assert!(v.get("status").is_none(), "status must be dropped");
         let meta = v.get("metadata").expect("metadata kept");
         assert!(
@@ -552,6 +569,35 @@ mod tests {
             "metadata.labels must be preserved"
         );
         assert_eq!(meta.get("name").and_then(|x| x.as_str()), Some("web-1"));
+        // spec.hostNetwork must survive (the Cilium generator reads it) but the
+        // rest of spec (containers, etc.) must be dropped.
+        assert_eq!(
+            v.pointer("/spec/hostNetwork").and_then(|x| x.as_bool()),
+            Some(true),
+            "spec.hostNetwork must be preserved"
+        );
+        assert!(
+            v.pointer("/spec/containers").is_none(),
+            "the rest of spec must be dropped"
+        );
+    }
+
+    #[test]
+    fn compact_pod_obj_drops_spec_when_no_host_network() {
+        // Non-host-networked pods omit spec.hostNetwork; spec is dropped wholesale.
+        let mut v = serde_json::json!({
+            "metadata": {"labels": {"app": "db"}},
+            "spec": {"containers": [{"name": "c"}]}
+        });
+        compact_pod_obj(&mut v);
+        assert!(
+            v.get("spec").is_none(),
+            "spec must be dropped when no hostNetwork"
+        );
+        assert_eq!(
+            v.pointer("/metadata/labels/app").and_then(|x| x.as_str()),
+            Some("db")
+        );
     }
 
     #[test]

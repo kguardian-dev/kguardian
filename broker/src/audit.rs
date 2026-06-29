@@ -780,6 +780,51 @@ mod tests {
         }
     }
 
+    // Build a queue-wired AuditClient with a given channel capacity, without
+    // spawning the dispatcher — so the receiver is never drained and the queue
+    // fills deterministically. The caller must keep the receiver alive (else
+    // try_send sees Closed, not Full).
+    fn client_with_queue(capacity: usize) -> (AuditClient, mpsc::Receiver<PodTraffic>) {
+        let (tx, rx) = mpsc::channel::<PodTraffic>(capacity);
+        let client = AuditClient {
+            enabled: true,
+            base_url: "http://evaluator".to_string(),
+            http: reqwest::Client::new(),
+            in_flight: std::sync::Arc::new(tokio::sync::Semaphore::new(1)),
+            tx: Some(tx),
+            dropped: Arc::new(AtomicU64::new(0)),
+        };
+        (client, rx)
+    }
+
+    #[test]
+    fn try_enqueue_sheds_and_counts_when_queue_full() {
+        // capacity 1, receiver never polled: first enqueue buffers, the rest
+        // are shed and counted via broker_audit_dropped_total.
+        let (client, _rx) = client_with_queue(1);
+        client.try_enqueue(sample_traffic(Some("INGRESS")));
+        assert_eq!(client.dropped_count(), 0, "first enqueue fits");
+        client.try_enqueue(sample_traffic(Some("INGRESS")));
+        client.try_enqueue(sample_traffic(Some("INGRESS")));
+        assert_eq!(client.dropped_count(), 2, "two shed once the queue is full");
+    }
+
+    #[test]
+    fn try_enqueue_is_noop_without_a_queue() {
+        // No dispatcher wired (start() not called): drop silently, never panic,
+        // never count.
+        let client = AuditClient {
+            enabled: true,
+            base_url: "http://evaluator".to_string(),
+            http: reqwest::Client::new(),
+            in_flight: std::sync::Arc::new(tokio::sync::Semaphore::new(1)),
+            tx: None,
+            dropped: Arc::new(AtomicU64::new(0)),
+        };
+        client.try_enqueue(sample_traffic(Some("INGRESS")));
+        assert_eq!(client.dropped_count(), 0);
+    }
+
     #[test]
     fn is_persistable_verdict_accepts_allow_and_woulddeny() {
         assert!(is_persistable_verdict("Allow"));

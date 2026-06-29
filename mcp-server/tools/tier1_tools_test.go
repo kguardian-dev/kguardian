@@ -22,7 +22,7 @@ func TestBrokerClient_GetAuditVerdicts_BuildsQueryString(t *testing.T) {
 	defer srv.Close()
 
 	c := NewBrokerClient(srv.URL)
-	_, err := c.GetAuditVerdicts(context.Background(), "web-deny", "prod", "WouldDeny", "Egress", 50)
+	_, err := c.GetAuditVerdicts(context.Background(), "web-deny", "prod", "WouldDeny", "Egress", 50, false)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -56,11 +56,39 @@ func TestBrokerClient_GetAuditVerdicts_OmitsEmptyAndZero(t *testing.T) {
 	defer srv.Close()
 
 	c := NewBrokerClient(srv.URL)
-	if _, err := c.GetAuditVerdicts(context.Background(), "", "", "", "", 0); err != nil {
+	if _, err := c.GetAuditVerdicts(context.Background(), "", "", "", "", 0, false); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if rawQuery != "" {
 		t.Errorf("expected no query string, got %q", rawQuery)
+	}
+}
+
+// TestBrokerClient_GetAuditVerdicts_ClusterScoped pins that clusterScoped=true
+// sends namespace= (empty value PRESENT, not absent), which the broker reads as
+// "cluster-scoped policy verdicts only". A bare empty namespace string can't
+// express this — it would be omitted — so the dedicated flag is the only way to
+// reach the broker's cluster-scoped filter.
+func TestBrokerClient_GetAuditVerdicts_ClusterScoped(t *testing.T) {
+	var rawQuery string
+	var gotQuery url.Values
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		rawQuery = r.URL.RawQuery
+		gotQuery = r.URL.Query()
+		_, _ = w.Write([]byte("[]"))
+	}))
+	defer srv.Close()
+
+	c := NewBrokerClient(srv.URL)
+	// namespace="prod" is provided but clusterScoped=true must take precedence.
+	if _, err := c.GetAuditVerdicts(context.Background(), "", "prod", "", "", 0, true); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !strings.Contains(rawQuery, "namespace=") {
+		t.Errorf("expected namespace= (empty value present) in query, got %q", rawQuery)
+	}
+	if ns, ok := gotQuery["namespace"]; !ok || len(ns) != 1 || ns[0] != "" {
+		t.Errorf("expected namespace present with empty value, got %v", gotQuery["namespace"])
 	}
 }
 

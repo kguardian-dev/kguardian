@@ -117,17 +117,26 @@ func (c *BrokerClient) GetPodsOnNode(ctx context.Context, node string) (interfac
 }
 
 // GetAuditVerdicts retrieves policy-evaluation verdicts (Allow / WouldDeny)
-// from the broker's /audit/verdicts endpoint. Every filter is optional and
-// only forwarded when non-empty so the broker applies its documented
-// defaults (empty-string filters are normalised to "no filter" server-side,
-// except namespace="" which legitimately selects cluster-scoped policies —
-// so namespace is only sent when the caller explicitly set it).
-func (c *BrokerClient) GetAuditVerdicts(ctx context.Context, policy, namespace, verdict, direction string, limit int) (interface{}, error) {
+// from the broker's /audit/verdicts endpoint. Filters are optional. The
+// namespace dimension has three distinct modes that mirror the broker:
+//   - clusterScoped=true  -> sends "namespace=" (empty value PRESENT), which
+//     the broker reads as "cluster-scoped policy verdicts only"
+//     (policy_namespace = ”). This takes precedence over namespace.
+//   - namespace != ""     -> sends "namespace=<ns>" (that namespace only).
+//   - neither             -> omits the param entirely, spanning all
+//     namespaces including cluster-scoped.
+//
+// The empty-vs-absent distinction is the whole reason clusterScoped is a
+// separate flag: a bare empty string can't tell "all namespaces" apart from
+// "cluster-scoped only", so the caller signals the latter explicitly.
+func (c *BrokerClient) GetAuditVerdicts(ctx context.Context, policy, namespace, verdict, direction string, limit int, clusterScoped bool) (interface{}, error) {
 	q := url.Values{}
 	if policy != "" {
 		q.Set("policy", policy)
 	}
-	if namespace != "" {
+	if clusterScoped {
+		q.Set("namespace", "") // empty value present -> cluster-scoped only
+	} else if namespace != "" {
 		q.Set("namespace", namespace)
 	}
 	if verdict != "" {
