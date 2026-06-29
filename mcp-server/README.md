@@ -27,7 +27,7 @@ This MCP server exposes kguardian's broker API as MCP tools, allowing LLMs to qu
 
 ## Available Tools
 
-The kguardian MCP server provides 6 comprehensive tools for querying Kubernetes security and network telemetry:
+The kguardian MCP server provides tools for querying Kubernetes security and network telemetry:
 
 ### `get_pod_network_traffic`
 Get network traffic data for a specific pod.
@@ -136,6 +136,68 @@ List pods in the cluster with compact metadata. Returns ALIVE pods only by defau
 - Identify monitored workloads
 - Bulk pod analysis
 - Generate reports
+
+### `get_pod_details_by_name`
+Look up a single pod by its name (the broker resolves the name cluster-wide). Returns the same compacted identity shape as `get_pod_details`, with `pod_obj` stripped. Prefer this over `get_pod_details` when you have a pod name rather than an IP.
+
+**Parameters:**
+- `pod_name` (string, required): The name of the pod to look up.
+
+**Returns:** A compacted pod record (`pod_name`, `pod_namespace`, `pod_ip`, `node_name`, `is_dead`, `pod_identity`, `workload_selector_labels`).
+
+**Use Cases:**
+- Resolve a pod name seen in a traffic record to its namespace/IP/node
+- Find the workload selector labels for NetworkPolicy construction
+
+### `list_services`
+List Kubernetes services across the cluster with compact metadata. Returns the same shape as `get_service_details` (full `service_spec` stripped; `selector` and `ports` lifted), for every service rather than a single known IP.
+
+**Parameters:**
+- `namespace` (string, optional): Restrict the list to a single namespace. Omit to list services across all namespaces.
+
+**Returns:** JSON array of compacted service records, each with `svc_name`, `svc_namespace`, `svc_ip`, `service_selector`, `service_ports`.
+
+**Use Cases:**
+- Service inventory and discovery
+- Map cluster IPs to services when interpreting egress traffic
+
+### `get_audit_verdicts`
+Get network-policy evaluation verdicts produced by the audit pipeline — observed flows scored as `Allow` or `WouldDeny` against `AuditNetworkPolicy` / `AuditClusterNetworkPolicy` resources. Rows are returned newest-first. This is the primary tool for security questions about what traffic a policy would block.
+
+**Parameters (all optional):**
+- `policy` (string): Filter to a single policy by name. Pair with `namespace` for an `AuditNetworkPolicy`; leave `namespace` empty for an `AuditClusterNetworkPolicy`.
+- `namespace` (string): Filter by policy namespace.
+- `verdict` (string): `Allow` or `WouldDeny`. Use `WouldDeny` to surface flows that would be blocked if the policy were enforced.
+- `direction` (string): `Ingress` or `Egress`.
+- `limit` (number): Cap rows returned. Defaults to 100, hard cap 500.
+
+**Returns:** JSON array of verdict records, each with `policy_name`, `policy_namespace`, `direction`, `src_namespace`/`src_pod`, `dst_namespace`/`dst_pod`, `dst_port`, `protocol`, `reason`, `verdict`, and `observed_at`.
+
+**Use Cases:**
+- "What traffic would be denied by policy X?"
+- "Why is this flow blocked?" / "Show recent policy violations"
+- Validate an audit-mode policy before promoting it to enforcement
+
+> **Note:** Requires the broker's audit pipeline to be enabled (`EVALUATOR_URL` set on the broker). With audit disabled, no verdicts are recorded and this tool returns an empty list.
+
+### `generate_network_policy`
+Generate a least-privilege Kubernetes NetworkPolicy (or CiliumNetworkPolicy) for a pod from its observed traffic. The synthesis is performed by the **advisor service** (`advisor serve`); this tool proxies to it and returns the YAML verbatim.
+
+**Parameters:**
+- `pod_name` (string, required): The pod to generate a policy for.
+- `policy_type` (string, optional): `kubernetes` (standard NetworkPolicy, default) or `cilium`.
+
+**Returns:** Ready-to-apply policy YAML.
+
+### `generate_seccomp_profile`
+Generate a least-privilege seccomp profile (JSON) for a pod from its observed syscalls. Proxies to the advisor service.
+
+**Parameters:**
+- `pod_name` (string, required): The pod to generate a profile for.
+
+**Returns:** Seccomp profile JSON (allow-lists observed syscalls, denies the rest).
+
+> **Note:** The two `generate_*` tools require the **advisor service** to be reachable. Set `ADVISOR_URL` on the MCP server (default `http://kguardian-advisor.kguardian.svc.cluster.local:8083`). The advisor service must be deployed (`advisor serve`, with `BROKER_URL` pointing at the broker).
 
 ## Development
 

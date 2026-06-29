@@ -59,7 +59,7 @@ A dedicated microservice that bridges the kguardian frontend with multiple LLM p
 
 ### Anthropic Claude
 - **Env Var**: `ANTHROPIC_API_KEY`
-- **Default Model**: `claude-sonnet-4-5-20250929`
+- **Default Model**: `claude-opus-4-8`
 - **Best For**: Complex security analysis, best reasoning
 
 ### Google Gemini
@@ -158,7 +158,7 @@ Send a chat message to the AI assistant.
 {
   "message": "What pods have the most network traffic?",
   "provider": "anthropic",  // optional: openai, anthropic, gemini, copilot
-  "model": "claude-sonnet-4-5-20250929",  // optional: override default
+  "model": "claude-opus-4-8",  // optional: override default
   "conversationId": "abc123",  // optional: for conversation context
   "systemPrompt": "Custom system prompt"  // optional
 }
@@ -169,7 +169,7 @@ Send a chat message to the AI assistant.
 {
   "message": "Based on the network traffic data...",
   "provider": "anthropic",
-  "model": "claude-sonnet-4-5-20250929",
+  "model": "claude-opus-4-8",
   "conversationId": "abc123"
 }
 ```

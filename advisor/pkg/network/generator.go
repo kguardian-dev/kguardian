@@ -3,7 +3,6 @@ package network
 import (
 	"fmt"
 
-	api "github.com/kguardian-dev/kguardian/advisor/pkg/api"
 	"github.com/kguardian-dev/kguardian/advisor/pkg/common"
 	log "github.com/rs/zerolog/log"
 	"sigs.k8s.io/yaml"
@@ -14,26 +13,48 @@ type PolicyService struct {
 	config      ConfigProvider
 	generators  map[PolicyType]PolicyGenerator
 	defaultType PolicyType
+	data        BrokerData
 }
 
-// NewPolicyService creates a new PolicyService
+// NewPolicyService creates a new PolicyService backed by the default
+// (api-backed) broker data source. Inject a different source with UseBrokerData.
 func NewPolicyService(config ConfigProvider, defaultType PolicyType) *PolicyService {
 	return &PolicyService{
 		config:      config,
 		generators:  make(map[PolicyType]PolicyGenerator),
 		defaultType: defaultType,
+		data:        DefaultBrokerData(),
 	}
 }
 
-// RegisterGenerator registers a policy generator for a specific policy type
+// UseBrokerData swaps the broker data source and propagates it to every
+// already-registered generator, so the whole synthesis path reads from one
+// injected source. Call it before or after RegisterGenerator.
+func (s *PolicyService) UseBrokerData(data BrokerData) {
+	if data == nil {
+		return
+	}
+	s.data = data
+	for _, g := range s.generators {
+		if aware, ok := g.(brokerDataAware); ok {
+			aware.setBrokerData(data)
+		}
+	}
+}
+
+// RegisterGenerator registers a policy generator for a specific policy type,
+// injecting the service's broker data source so peer resolution uses it.
 func (s *PolicyService) RegisterGenerator(generator PolicyGenerator) {
+	if aware, ok := generator.(brokerDataAware); ok {
+		aware.setBrokerData(s.data)
+	}
 	s.generators[generator.GetType()] = generator
 }
 
 // GeneratePolicy generates a network policy for a pod
 func (s *PolicyService) GeneratePolicy(podName string, policyType PolicyType) (*PolicyOutput, error) {
 	// Get the pod traffic data
-	podTraffic, err := api.GetPodTraffic(podName)
+	podTraffic, err := s.data.PodTrafficByName(podName)
 	if err != nil {
 		log.Debug().Err(err).Msgf("Error retrieving %s pod traffic", podName)
 		return nil, err
@@ -58,7 +79,7 @@ func (s *PolicyService) GeneratePolicy(podName string, policyType PolicyType) (*
 	}
 
 	// Get the pod details
-	podDetail, err := api.GetPodSpec(lookupIP)
+	podDetail, err := s.data.PodByIP(lookupIP)
 	if err != nil {
 		log.Error().Err(err).Msgf("Error retrieving pod spec using IP %s for pod %s", lookupIP, podName)
 		return nil, err
