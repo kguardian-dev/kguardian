@@ -74,13 +74,29 @@ pub async fn get_pod_details(pool: web::Data<DbPool>) -> actix_web::Result<impl 
     })
 }
 
-/// Reduce a stored Pod manifest to just the metadata the frontend needs
-/// (labels live under metadata), dropping spec, status, and the verbose
+/// Reduce a stored Pod manifest to just the metadata consumers need (labels
+/// live under metadata — advisor uses them for the policy podSelector, the
+/// frontend for the same), dropping spec, status, and the verbose
 /// metadata.managedFields. Operates in place; non-object values are left
-/// untouched.
-fn compact_pod_obj(v: &mut serde_json::Value) {
+/// untouched. Applied at write time (add.rs) so the bulk never reaches storage,
+/// and kept here as a defensive read-time pass for rows written before that.
+pub(crate) fn compact_pod_obj(v: &mut serde_json::Value) {
     if let Some(obj) = v.as_object_mut() {
         obj.remove("spec");
+        obj.remove("status");
+        if let Some(meta) = obj.get_mut("metadata").and_then(|m| m.as_object_mut()) {
+            meta.remove("managedFields");
+        }
+    }
+}
+
+/// Reduce a stored Service manifest to the fields consumers read — `spec`
+/// carries the selector (advisor/frontend) and ports (mcp-server/frontend) —
+/// dropping status (loadBalancer, etc.) and metadata.managedFields. Operates in
+/// place; non-object values are left untouched. Applied at write time so the
+/// bulk never reaches storage.
+pub(crate) fn compact_svc_spec(v: &mut serde_json::Value) {
+    if let Some(obj) = v.as_object_mut() {
         obj.remove("status");
         if let Some(meta) = obj.get_mut("metadata").and_then(|m| m.as_object_mut()) {
             meta.remove("managedFields");
@@ -536,6 +552,50 @@ mod tests {
             "metadata.labels must be preserved"
         );
         assert_eq!(meta.get("name").and_then(|x| x.as_str()), Some("web-1"));
+    }
+
+    #[test]
+    fn compact_svc_spec_keeps_spec_drops_status() {
+        // The Service slim must keep spec (selector + ports — read by advisor,
+        // mcp-server, and the frontend) while dropping status and managedFields.
+        let mut v = serde_json::json!({
+            "metadata": {
+                "name": "web",
+                "namespace": "prod",
+                "managedFields": [{"manager": "kube-controller", "big": "y".repeat(1000)}]
+            },
+            "spec": {
+                "selector": {"app": "web"},
+                "ports": [{"port": 80, "protocol": "TCP"}],
+                "type": "ClusterIP"
+            },
+            "status": {"loadBalancer": {"ingress": [{"ip": "1.2.3.4"}]}}
+        });
+        compact_svc_spec(&mut v);
+        assert!(v.get("status").is_none(), "status must be dropped");
+        let meta = v.get("metadata").expect("metadata kept");
+        assert!(
+            meta.get("managedFields").is_none(),
+            "managedFields must be dropped"
+        );
+        // spec.selector and spec.ports must survive for policy generation.
+        assert_eq!(
+            v.pointer("/spec/selector/app").and_then(|x| x.as_str()),
+            Some("web"),
+            "spec.selector must be preserved"
+        );
+        assert_eq!(
+            v.pointer("/spec/ports/0/port").and_then(|x| x.as_u64()),
+            Some(80),
+            "spec.ports must be preserved"
+        );
+    }
+
+    #[test]
+    fn compact_svc_spec_tolerates_non_object() {
+        let mut v = serde_json::Value::Null;
+        compact_svc_spec(&mut v); // must not panic
+        assert!(v.is_null());
     }
 
     #[test]
