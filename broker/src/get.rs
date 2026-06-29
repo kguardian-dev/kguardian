@@ -378,8 +378,10 @@ pub fn pod_syscalls_by_name(
 
 #[derive(serde::Deserialize)]
 pub struct AuditVerdictsQuery {
-    /// Filter to a single policy by name. Pair with `namespace` for
-    /// AuditNetworkPolicy; leave `namespace` empty for AuditClusterNetworkPolicy.
+    /// Filter to a single policy by name. Combine with a concrete `namespace`
+    /// for an AuditNetworkPolicy; for cluster-scoped verdicts send `namespace=`
+    /// (empty value present), which matches `policy_namespace = ''`. An absent
+    /// `namespace` param spans all namespaces (cluster-scoped included).
     pub policy: Option<String>,
     pub namespace: Option<String>,
     /// Filter rows by verdict — "Allow" or "WouldDeny". The DB has the
