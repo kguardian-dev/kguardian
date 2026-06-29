@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.11.0](https://github.com/kguardian-dev/kguardian/compare/frontend/v1.10.0...frontend/v1.11.0) (2026-06-29)
+
+
+### Features
+
+* MCP/LLM integration uplift + data-path hardening ([572b31f](https://github.com/kguardian-dev/kguardian/commit/572b31fdcb470af9f6c844186fb9b8fa8cc8b83f))
+
 ## [1.10.0](https://github.com/kguardian-dev/kguardian/compare/frontend/v1.9.0...frontend/v1.10.0) (2026-06-01)
 
 
