@@ -1,5 +1,17 @@
 # Changelog
 
+## [1.4.0](https://github.com/kguardian-dev/kguardian/compare/llm-bridge/v1.3.0...llm-bridge/v1.4.0) (2026-06-29)
+
+
+### Features
+
+* MCP/LLM integration uplift + data-path hardening ([572b31f](https://github.com/kguardian-dev/kguardian/commit/572b31fdcb470af9f6c844186fb9b8fa8cc8b83f))
+
+
+### Bug Fixes
+
+* **deps:** update dependency @anthropic-ai/sdk to ^0.107.0 ([#1005](https://github.com/kguardian-dev/kguardian/issues/1005)) ([ef2a5f7](https://github.com/kguardian-dev/kguardian/commit/ef2a5f773dd3e8a18e9ed858d87af8ca1562621d))
+
 ## [1.3.0](https://github.com/kguardian-dev/kguardian/compare/llm-bridge/v1.2.3...llm-bridge/v1.3.0) (2026-06-01)
 
 
