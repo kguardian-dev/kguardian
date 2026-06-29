@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
+	"time"
 
 	log "github.com/rs/zerolog/log"
 
@@ -44,6 +46,45 @@ type SvcDetail struct {
 	Service      v1.Service `yaml:"service_spec" json:"service_spec"`
 }
 
+// BrokerBaseURL is the base URL of the kguardian broker. It defaults to the
+// port-forward target the kubectl-plugin CLI sets up (a forward to
+// localhost:9090). The `serve` command overrides it (from BROKER_URL) so the
+// in-cluster service reaches the broker directly without a port-forward.
+//
+// BrokerBaseURL and BrokerAuthToken are configure-once values: set them before
+// serving traffic (the CLI sets up the port-forward first; `serve` sets them
+// from the environment before ListenAndServe). They are only read afterwards,
+// so concurrent broker calls need no synchronisation.
+var BrokerBaseURL = "http://127.0.0.1:9090"
+
+// BrokerAuthToken, when non-empty, is sent as a Bearer token on every broker
+// request. The broker requires it on all data endpoints when deployed with
+// BROKER_AUTH_TOKEN set; the `serve` command wires it from the environment so
+// the in-cluster service authenticates the same way the mcp-server does.
+var BrokerAuthToken = ""
+
+// maxBrokerResponseBytes caps the broker response body read (10 MB) so a
+// long-lived `serve` process can't be OOM'd by an oversized/hostile response.
+const maxBrokerResponseBytes = 10 * 1024 * 1024
+
+// brokerHTTPClient bounds every broker call with a timeout so a hung broker
+// can't pin a goroutine until the serve WriteTimeout fires.
+var brokerHTTPClient = &http.Client{Timeout: 30 * time.Second}
+
+// brokerGet performs an authenticated, timeout-bounded GET against the broker.
+// path is the URL path (already escaped by the caller) appended to
+// BrokerBaseURL. Callers are responsible for closing the returned body.
+func brokerGet(path string) (*http.Response, error) {
+	req, err := http.NewRequest(http.MethodGet, BrokerBaseURL+path, nil)
+	if err != nil {
+		return nil, err
+	}
+	if BrokerAuthToken != "" {
+		req.Header.Set("Authorization", "Bearer "+BrokerAuthToken)
+	}
+	return brokerHTTPClient.Do(req)
+}
+
 // Function variables for easier mocking in tests
 var (
 	GetPodTrafficFunc = getRealPodTraffic
@@ -68,11 +109,9 @@ func GetSvcSpec(svcIP string) (*SvcDetail, error) {
 
 // Real implementations
 func getRealPodTraffic(podName string) ([]PodTraffic, error) {
-	// Specify the URL of the REST API endpoint you want to invoke.
-	apiURL := "http://127.0.0.1:9090/pod/traffic/" + podName
-
-	// Send an HTTP GET request to the API endpoint.
-	resp, err := http.Get(apiURL)
+	// PathEscape the caller-supplied name so a value containing '/', '?', '#'
+	// or control chars can't manipulate the broker request path/query.
+	resp, err := brokerGet("/pod/traffic/" + url.PathEscape(podName))
 	if err != nil {
 		log.Error().Err(err).Msg("GetPodTraffic: Error making GET request")
 		return nil, err
@@ -88,7 +127,7 @@ func getRealPodTraffic(podName string) ([]PodTraffic, error) {
 	}
 	var podTraffic []PodTraffic
 
-	body, err := io.ReadAll(resp.Body)
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxBrokerResponseBytes))
 	if err != nil {
 		log.Error().Err(err).Msg("GetPodTraffic: Error reading response body")
 		return nil, err
@@ -110,11 +149,7 @@ func getRealPodTraffic(podName string) ([]PodTraffic, error) {
 
 // Should we just get the pod spec directly from the cluster and only use the DB for the SaaS version where it contains the pod spec? Would this help with reducing unnecessary chatter?And just let the client do it?
 func getRealPodSpec(ip string) (*PodDetail, error) {
-	// Specify the URL of the REST API endpoint you want to invoke.
-	apiURL := "http://127.0.0.1:9090/pod/ip/" + ip
-
-	// Send an HTTP GET request to the API endpoint.
-	resp, err := http.Get(apiURL)
+	resp, err := brokerGet("/pod/ip/" + url.PathEscape(ip))
 	if err != nil {
 		log.Error().Err(err).Msg("Error making GET request")
 		return nil, err
@@ -134,7 +169,7 @@ func getRealPodSpec(ip string) (*PodDetail, error) {
 	var details *PodDetail
 
 	// Parse the JSON response and unmarshal it into the Go struct.
-	if err := json.NewDecoder(resp.Body).Decode(&details); err != nil {
+	if err := json.NewDecoder(io.LimitReader(resp.Body, maxBrokerResponseBytes)).Decode(&details); err != nil {
 		log.Error().Err(err).Msg("Error decoding JSON")
 		return nil, err
 	}
@@ -148,11 +183,7 @@ func getRealPodSpec(ip string) (*PodDetail, error) {
 }
 
 func getRealSvcSpec(svcIp string) (*SvcDetail, error) {
-	// Specify the URL of the RESTAPI endpoint you want to invoke.
-	apiURL := "http://127.0.0.1:9090/svc/ip/" + svcIp
-
-	// Send an HTTP GET request to the API endpoint.
-	resp, err := http.Get(apiURL)
+	resp, err := brokerGet("/svc/ip/" + url.PathEscape(svcIp))
 	if err != nil {
 		log.Error().Err(err).Msg("Error making GET request")
 		return nil, err
@@ -172,7 +203,7 @@ func getRealSvcSpec(svcIp string) (*SvcDetail, error) {
 	var details SvcDetail
 
 	// Parse the JSON response and unmarshal it into the Go struct.
-	if err := json.NewDecoder(resp.Body).Decode(&details); err != nil {
+	if err := json.NewDecoder(io.LimitReader(resp.Body, maxBrokerResponseBytes)).Decode(&details); err != nil {
 		log.Error().Err(err).Msg("Error decoding JSON")
 		return nil, err
 	}

@@ -14,11 +14,34 @@ import (
 )
 
 // StandardPolicyGenerator generates standard Kubernetes NetworkPolicy resources
-type StandardPolicyGenerator struct{}
+type StandardPolicyGenerator struct {
+	data BrokerData
+}
 
-// NewStandardPolicyGenerator creates a new generator for standard NetworkPolicy resources
+// NewStandardPolicyGenerator creates a new generator for standard NetworkPolicy
+// resources, resolving peers via the default (api-backed) broker data source.
 func NewStandardPolicyGenerator() *StandardPolicyGenerator {
-	return &StandardPolicyGenerator{}
+	return &StandardPolicyGenerator{data: DefaultBrokerData()}
+}
+
+// NewStandardPolicyGeneratorWithData injects a BrokerData for peer resolution.
+func NewStandardPolicyGeneratorWithData(d BrokerData) *StandardPolicyGenerator {
+	return &StandardPolicyGenerator{data: d}
+}
+
+func (g *StandardPolicyGenerator) setBrokerData(d BrokerData) {
+	if d != nil {
+		g.data = d
+	}
+}
+
+// broker returns the injected BrokerData, falling back to the default so a
+// zero-value generator never nil-panics.
+func (g *StandardPolicyGenerator) broker() BrokerData {
+	if g.data == nil {
+		return DefaultBrokerData()
+	}
+	return g.data
 }
 
 // GetType returns the policy type
@@ -283,7 +306,7 @@ func (g *StandardPolicyGenerator) createNetworkPolicyPeer(peerIP string) *networ
 	log.Debug().Msgf("Creating network policy peer for IP: %s", peerIP)
 
 	// Try to get Service info first
-	svcSpec, err := api.GetSvcSpec(peerIP)
+	svcSpec, err := g.broker().ServiceByIP(peerIP)
 	if err == nil && svcSpec != nil {
 		// Validate service has selectors before using it
 		if len(svcSpec.Service.Spec.Selector) > 0 {
@@ -311,7 +334,7 @@ func (g *StandardPolicyGenerator) createNetworkPolicyPeer(peerIP string) *networ
 	}
 
 	// Try to get Pod info
-	podSpec, err := api.GetPodSpec(peerIP)
+	podSpec, err := g.broker().PodByIP(peerIP)
 	if err == nil && podSpec != nil {
 		// Validate pod has labels before using it
 		if len(podSpec.Pod.Labels) > 0 {

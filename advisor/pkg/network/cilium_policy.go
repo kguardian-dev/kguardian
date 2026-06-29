@@ -14,11 +14,34 @@ import (
 )
 
 // CiliumPolicyGenerator generates Cilium NetworkPolicy resources
-type CiliumPolicyGenerator struct{}
+type CiliumPolicyGenerator struct {
+	data BrokerData
+}
 
-// NewCiliumPolicyGenerator creates a new generator for Cilium NetworkPolicy resources
+// NewCiliumPolicyGenerator creates a new generator for Cilium NetworkPolicy
+// resources, resolving peers via the default (api-backed) broker data source.
 func NewCiliumPolicyGenerator() *CiliumPolicyGenerator {
-	return &CiliumPolicyGenerator{}
+	return &CiliumPolicyGenerator{data: DefaultBrokerData()}
+}
+
+// NewCiliumPolicyGeneratorWithData injects a BrokerData for peer resolution.
+func NewCiliumPolicyGeneratorWithData(d BrokerData) *CiliumPolicyGenerator {
+	return &CiliumPolicyGenerator{data: d}
+}
+
+func (g *CiliumPolicyGenerator) setBrokerData(d BrokerData) {
+	if d != nil {
+		g.data = d
+	}
+}
+
+// broker returns the injected BrokerData, falling back to the default so a
+// zero-value generator never nil-panics.
+func (g *CiliumPolicyGenerator) broker() BrokerData {
+	if g.data == nil {
+		return DefaultBrokerData()
+	}
+	return g.data
 }
 
 // GetType returns the policy type
@@ -333,7 +356,7 @@ func (g *CiliumPolicyGenerator) createCiliumEgressRuleForPeer(peerIP string, por
 // resolvePeerForCilium resolves peer IP to either EndpointSelector or CIDR
 func (g *CiliumPolicyGenerator) resolvePeerForCilium(peerIP string) ([]ciliumapi.EndpointSelector, ciliumapi.CIDRSlice) {
 	// Try to get Service info first
-	svcSpec, err := api.GetSvcSpec(peerIP)
+	svcSpec, err := g.broker().ServiceByIP(peerIP)
 	if err == nil && svcSpec != nil && len(svcSpec.Service.Spec.Selector) > 0 {
 		log.Debug().Msgf("Found service %s/%s with selector %v for IP %s",
 			svcSpec.SvcNamespace, svcSpec.SvcName, svcSpec.Service.Spec.Selector, peerIP)
@@ -344,7 +367,7 @@ func (g *CiliumPolicyGenerator) resolvePeerForCilium(peerIP string) ([]ciliumapi
 	}
 
 	// Try to get Pod info
-	podSpec, err := api.GetPodSpec(peerIP)
+	podSpec, err := g.broker().PodByIP(peerIP)
 	if err == nil && podSpec != nil && len(podSpec.Pod.Labels) > 0 {
 		log.Debug().Msgf("Found pod %s/%s with labels %v for IP %s",
 			podSpec.Namespace, podSpec.Name, podSpec.Pod.Labels, peerIP)
