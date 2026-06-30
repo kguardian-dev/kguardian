@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.5.1](https://github.com/kguardian-dev/kguardian/compare/advisor/v1.5.0...advisor/v1.5.1) (2026-06-30)
+
+
+### Bug Fixes
+
+* **advisor:** embed version info via correct ldflag targets ([#1011](https://github.com/kguardian-dev/kguardian/issues/1011)) ([ef3923e](https://github.com/kguardian-dev/kguardian/commit/ef3923e89c593bdc8c1af8aef70e80fd1bb4dd50))
+
 ## [1.5.0](https://github.com/kguardian-dev/kguardian/compare/advisor/v1.4.1...advisor/v1.5.0) (2026-06-29)
 
 
