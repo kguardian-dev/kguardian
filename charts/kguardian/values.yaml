@@ -917,6 +917,102 @@ llmBridge:
       # -- Secret name for GitHub Copilot
       name: "kguardian-copilot"
 
+# Advisor Service Configuration
+# Runs `advisor serve` as an in-cluster HTTP service exposing NetworkPolicy /
+# CiliumNetworkPolicy and seccomp generation (the same synthesis as the CLI).
+# The MCP server's generate_network_policy / generate_seccomp_profile tools
+# proxy to it; enable it alongside mcpServer to offer policy generation in chat.
+advisor:
+  # -- Deploy the advisor HTTP service. When false, the workload, Service,
+  # ServiceAccount, and NetworkPolicy are skipped (the CLI/kubectl-plugin is
+  # unaffected — it does not use this service).
+  enabled: false
+
+  # -- Number of advisor replicas. The service is stateless (it reads the
+  # broker and synthesises a policy per request), so it scales freely.
+  replicaCount: 1
+
+  image:
+    # -- Advisor container image repository
+    repository: ghcr.io/kguardian-dev/kguardian/advisor
+    # -- Advisor image pull policy
+    pullPolicy: IfNotPresent
+    # -- Advisor version tag (auto-updated by Renovate, like the other images)
+    tag: "1.4.1"
+    # -- Overrides the image tag using SHA digest
+    sha: ""
+
+  # -- Additional environment variables for the advisor process
+  env: []
+
+  container:
+    # -- Advisor HTTP port (distinct from the evaluator's 8082)
+    port: 8083
+
+  service:
+    # -- Advisor service name
+    name: "kguardian-advisor"
+    # -- Advisor service type
+    type: ClusterIP
+    # -- Advisor service port
+    port: 8083
+
+  # -- List of image pull secrets for private registries
+  imagePullSecrets: []
+
+  serviceAccount:
+    # -- Specifies whether a service account should be created
+    create: true
+    # -- Annotations to add to the service account
+    annotations: {}
+    # -- The name of the service account to use
+    name: ""
+    # -- The advisor service only talks to the broker over HTTP; it does not
+    # call the Kubernetes API, so no token is mounted.
+    automountServiceAccountToken: false
+
+  # -- Restrict who may reach the unauthenticated advisor HTTP API. When
+  # enabled, only the mcp-server pod may connect. Requires a NetworkPolicy-
+  # enforcing CNI (Cilium, Calico, ...).
+  networkPolicy:
+    enabled: false
+
+  # -- Annotations to add to advisor pods
+  podAnnotations: {}
+
+  # -- Advisor pod security context. Runs as non-root user (nonroot:65532).
+  podSecurityContext:
+    runAsNonRoot: true
+    seccompProfile:
+      type: RuntimeDefault
+
+  # -- Advisor container security context. Distroless nonroot + read-only root.
+  securityContext:
+    privileged: false
+    capabilities:
+      drop:
+      - ALL
+    readOnlyRootFilesystem: true
+    runAsNonRoot: true
+    allowPrivilegeEscalation: false
+
+  # -- Advisor pod resource requests and limits
+  resources:
+    requests:
+      cpu: 10m
+      memory: 32Mi
+    limits:
+      memory: 128Mi
+
+  # -- Node selector for advisor pods
+  nodeSelector: {}
+  # -- Affinity rules for advisor pods
+  affinity: {}
+  # -- Tolerations for advisor pods
+  tolerations: []
+  # -- Topology spread constraints for advisor pods
+  topologySpreadConstraints: []
+
 # MCP Server Configuration (Model Context Protocol)
 # The MCP server provides external tools (like Claude Desktop) access to cluster data
 mcpServer:

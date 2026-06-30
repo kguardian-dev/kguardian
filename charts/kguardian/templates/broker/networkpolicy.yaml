@@ -39,6 +39,12 @@ spec:
         - podSelector:
             matchLabels:
               app.kubernetes.io/name: {{ .Values.mcpServer.service.name }}
+        {{- if .Values.advisor.enabled }}
+        # advisor service — reads traffic/syscalls to synthesise policies.
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: {{ .Values.advisor.service.name }}
+        {{- end }}
         # frontend — reads telemetry directly for the dashboard.
         - podSelector:
             matchLabels:

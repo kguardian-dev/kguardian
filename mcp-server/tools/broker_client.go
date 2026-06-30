@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -87,6 +88,70 @@ func (c *BrokerClient) GetAllPodTraffic(ctx context.Context) (interface{}, error
 // GetAllPods retrieves all pod details in the cluster
 func (c *BrokerClient) GetAllPods(ctx context.Context) (interface{}, error) {
 	reqURL := fmt.Sprintf("%s/pod/info", c.baseURL)
+	return c.get(ctx, reqURL)
+}
+
+// GetPodByName retrieves pod details by pod name. The broker resolves
+// the name cluster-wide, so the LLM can look a pod up directly from a
+// name it already has (e.g. from a traffic record) instead of having
+// to round-trip through an IP via GetPodByIP.
+func (c *BrokerClient) GetPodByName(ctx context.Context, name string) (interface{}, error) {
+	reqURL := fmt.Sprintf("%s/pod/name/%s", c.baseURL, url.PathEscape(name))
+	return c.get(ctx, reqURL)
+}
+
+// GetAllServices retrieves all service details in the cluster. Mirrors
+// GetAllPods for the service inventory the LLM otherwise had no way to
+// enumerate (GetServiceByIP only resolves a single known cluster IP).
+func (c *BrokerClient) GetAllServices(ctx context.Context) (interface{}, error) {
+	reqURL := fmt.Sprintf("%s/svc/info", c.baseURL)
+	return c.get(ctx, reqURL)
+}
+
+// GetPodsOnNode retrieves the pods the broker has recorded on a given node.
+// Backs blast-radius / "what runs on node X" questions, which neither the
+// namespace-scoped cluster pod list nor any per-pod lookup could answer.
+func (c *BrokerClient) GetPodsOnNode(ctx context.Context, node string) (interface{}, error) {
+	reqURL := fmt.Sprintf("%s/pod/list/%s", c.baseURL, url.PathEscape(node))
+	return c.get(ctx, reqURL)
+}
+
+// GetAuditVerdicts retrieves policy-evaluation verdicts (Allow / WouldDeny)
+// from the broker's /audit/verdicts endpoint. Filters are optional. The
+// namespace dimension has three distinct modes that mirror the broker:
+//   - clusterScoped=true  -> sends "namespace=" (empty value PRESENT), which
+//     the broker reads as "cluster-scoped policy verdicts only" (those rows
+//     are stored with an empty policy_namespace). Takes precedence over namespace.
+//   - namespace != ""     -> sends "namespace=<ns>" (that namespace only).
+//   - neither             -> omits the param entirely, spanning all
+//     namespaces including cluster-scoped.
+//
+// The empty-vs-absent distinction is the whole reason clusterScoped is a
+// separate flag: a bare empty string can't tell "all namespaces" apart from
+// "cluster-scoped only", so the caller signals the latter explicitly.
+func (c *BrokerClient) GetAuditVerdicts(ctx context.Context, policy, namespace, verdict, direction string, limit int, clusterScoped bool) (interface{}, error) {
+	q := url.Values{}
+	if policy != "" {
+		q.Set("policy", policy)
+	}
+	if clusterScoped {
+		q.Set("namespace", "") // empty value present -> cluster-scoped only
+	} else if namespace != "" {
+		q.Set("namespace", namespace)
+	}
+	if verdict != "" {
+		q.Set("verdict", verdict)
+	}
+	if direction != "" {
+		q.Set("direction", direction)
+	}
+	if limit > 0 {
+		q.Set("limit", strconv.Itoa(limit))
+	}
+	reqURL := fmt.Sprintf("%s/audit/verdicts", c.baseURL)
+	if encoded := q.Encode(); encoded != "" {
+		reqURL += "?" + encoded
+	}
 	return c.get(ctx, reqURL)
 }
 

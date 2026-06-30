@@ -41,18 +41,14 @@ pub async fn add_pods_batch(
         received - inserted.len()
     );
 
-    // Fire-and-forget audit eval ONLY for events that were actually new.
-    // Each evaluation runs on its own tokio task so a busy batch doesn't
-    // serialise 100 sequential 500ms HTTP round-trips on one worker.
+    // Enqueue new flows for best-effort audit eval. try_enqueue never blocks
+    // the ingest hot path and never back-pressures capture: a backed-up
+    // evaluator sheds load (the bounded queue drops the overflow and counts it)
+    // instead of accumulating unbounded waiting tasks. The dispatcher drains the
+    // queue under a concurrency cap.
     if audit.enabled() {
         for event in inserted.iter().cloned() {
-            let audit_client = audit.get_ref().clone();
-            let pool_for_audit = pool.get_ref().clone();
-            actix_web::rt::spawn(async move {
-                audit_client
-                    .evaluate_and_persist(pool_for_audit, event)
-                    .await;
-            });
+            audit.try_enqueue(event);
         }
     }
 
@@ -171,19 +167,12 @@ pub async fn add_pods(
     .await?
     .map_err(actix_web::error::ErrorInternalServerError)?;
 
-    // Fire audit eval ONLY for new events. The pre-fix code cloned
-    // the form unconditionally and spawned the audit task even when
-    // create_pod_traffic deduped — wasting evaluator capacity on
-    // already-seen flows. Same class of fix as the batch endpoint.
+    // Enqueue ONLY new events for best-effort audit eval (deduped flows are
+    // skipped). try_enqueue is non-blocking and sheds load when the evaluator
+    // is backed up — same bounded-queue path as the batch endpoint.
     if audit.enabled() {
         if let Some(event) = inserted.clone() {
-            let audit_client = audit.get_ref().clone();
-            let pool_for_audit = pool.get_ref().clone();
-            actix_web::rt::spawn(async move {
-                audit_client
-                    .evaluate_and_persist(pool_for_audit, event)
-                    .await;
-            });
+            audit.try_enqueue(event);
         }
     }
 
@@ -301,9 +290,16 @@ pub async fn add_pod_details(
 
 pub fn upsert_pod_details(
     conn: &mut PgConnection,
-    w: web::Json<PodDetail>,
+    mut w: web::Json<PodDetail>,
 ) -> Result<PodDetail, DbError> {
     use schema::pod_details::dsl::*;
+    // Slim the Pod manifest before it ever hits storage: consumers read only
+    // metadata.labels and spec.hostNetwork, so dropping the rest of
+    // spec/status/managedFields here (rather than recompacting on every read)
+    // shrinks the row and the serialise cost.
+    if let Some(obj) = w.pod_obj.as_mut() {
+        crate::get::compact_pod_obj(obj);
+    }
     debug!(
         "storing the pod details {:?} into pod_details table",
         w.pod_name,
@@ -481,9 +477,14 @@ pub async fn add_svc_details(
 
 pub fn upsert_svc_details(
     conn: &mut PgConnection,
-    w: web::Json<SvcDetail>,
+    mut w: web::Json<SvcDetail>,
 ) -> Result<SvcDetail, DbError> {
     use schema::svc_details::dsl::*;
+    // Slim the Service manifest before storage: consumers read spec.selector
+    // and spec.ports, so keep spec and drop status/managedFields here.
+    if let Some(obj) = w.service_spec.as_mut() {
+        crate::get::compact_svc_spec(obj);
+    }
     debug!(
         "storing the service details {:?} into svc_details table",
         w.svc_ip,

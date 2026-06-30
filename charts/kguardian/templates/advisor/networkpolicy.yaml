@@ -1,0 +1,35 @@
+{{- if and .Values.advisor.enabled .Values.advisor.networkPolicy.enabled }}
+---
+# Ingress NetworkPolicy for the advisor service.
+#
+# The advisor HTTP API is unauthenticated and can synthesise a policy/seccomp
+# profile for any pod by name (disclosing that pod's observed peers and
+# syscalls). It relies on being an in-cluster-only service, so we restrict
+# ingress to the one component that legitimately calls it: the mcp-server
+# (whose generate_* tools proxy here). Requires a NetworkPolicy-enforcing CNI.
+#
+# Egress (the broker round-trip, DNS) is intentionally left unrestricted so
+# this policy can't break the advisor's own outbound calls.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ .Values.advisor.service.name }}
+  namespace: {{ include "kguardian.namespace" . }}
+  labels:
+    {{- include "kguardian.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: {{ .Values.advisor.service.name }}
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        # mcp-server — proxies generate_network_policy / generate_seccomp_profile.
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: {{ .Values.mcpServer.service.name }}
+      ports:
+        - port: http
+          protocol: TCP
+{{- end }}

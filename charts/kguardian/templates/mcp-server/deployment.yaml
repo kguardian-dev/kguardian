@@ -51,6 +51,11 @@ spec:
             {{- include "kguardian.brokerAuthEnv" . | nindent 12 }}
             - name: PORT
               value: "{{ .Values.mcpServer.container.port }}"
+            {{- if .Values.advisor.enabled }}
+            # Policy/seccomp generation tools proxy to the advisor service.
+            - name: ADVISOR_URL
+              value: "http://{{ .Values.advisor.service.name }}.{{ include "kguardian.namespace" . }}.svc.cluster.local:{{ .Values.advisor.service.port }}"
+            {{- end }}
             {{- with .Values.mcpServer.env }}
             {{- toYaml . | nindent 12 }}
             {{- end }}

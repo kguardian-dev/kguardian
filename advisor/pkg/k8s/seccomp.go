@@ -36,6 +36,36 @@ type ProfileOptions struct {
 // what the generated profile actually emits.
 var ValidSeccompActions = []string{"SCMP_ACT_ERRNO", "SCMP_ACT_KILL", "SCMP_ACT_LOG"}
 
+// SeccompArchitectures maps a captured CPU architecture (as recorded by the
+// controller) to the seccomp arch tokens. Exported so callers that build a
+// profile outside the file-writing GenerateSeccompProfile path (e.g. the
+// `serve` HTTP API) reuse the same mapping rather than duplicating it.
+var SeccompArchitectures = map[string][]string{
+	"x86_64": {"SCMP_ARCH_X86_64"},
+	"ARM64":  {"SCMP_ARCH_ARM64"},
+}
+
+// BuildSeccompProfile constructs a SeccompProfile that allow-lists exactly the
+// observed syscalls and denies everything else via defaultAction. It is the
+// single source of truth for profile shape, shared between the CLI's
+// file-writing path and the serve API. An empty defaultAction falls back to
+// SCMP_ACT_ERRNO so callers always get a syntactically valid profile.
+func BuildSeccompProfile(syscalls []string, arch, defaultAction string) SeccompProfile {
+	if defaultAction == "" {
+		defaultAction = "SCMP_ACT_ERRNO"
+	}
+	return SeccompProfile{
+		DefaultAction: defaultAction,
+		Architectures: SeccompArchitectures[arch],
+		Syscalls: []Rule{
+			{
+				Names:  syscalls,
+				Action: "SCMP_ACT_ALLOW",
+			},
+		},
+	}
+}
+
 // NewProfileOptions constructs ProfileOptions from CLI input. A
 // previous version of GenerateSeccompProfile hardcoded both OutputDir
 // and DefaultAction inside the function, silently ignoring the
@@ -67,11 +97,6 @@ func NewProfileOptions(config *Config, defaultAction string) (ProfileOptions, er
 
 func GenerateSeccompProfile(options GenerateOptions, config *Config, profileOpts ProfileOptions) {
 
-	var Architectures = map[string][]string{
-		"x86_64": {"SCMP_ARCH_X86_64"},
-		"ARM64":  {"SCMP_ARCH_ARM64"},
-	}
-
 	// Defensive defaults so a caller passing the zero ProfileOptions
 	// (e.g. in a test) still produces a syntactically-valid profile.
 	if profileOpts.OutputDir == "" {
@@ -97,16 +122,7 @@ func GenerateSeccompProfile(options GenerateOptions, config *Config, profileOpts
 			continue
 		}
 
-		profile := SeccompProfile{
-			DefaultAction: profileOpts.DefaultAction,
-			Architectures: Architectures[podSysCalls.Arch],
-			Syscalls: []Rule{
-				{
-					Names:  podSysCalls.Syscalls,
-					Action: "SCMP_ACT_ALLOW",
-				},
-			},
-		}
+		profile := BuildSeccompProfile(podSysCalls.Syscalls, podSysCalls.Arch, profileOpts.DefaultAction)
 
 		// Generate profile JSON
 		profileJSON, err := json.MarshalIndent(profile, "", "    ")

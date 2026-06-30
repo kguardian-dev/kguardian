@@ -85,3 +85,41 @@ test("parseContext handles pre-empty arrays", () => {
   const got = BrokerClient.parseContext('{"podNames":[]}');
   assert.deepEqual(got, { namespace: undefined, podNames: [] });
 });
+
+// The MCP server is the single source of truth for the tool surface — there is
+// no static fallback. Tool discovery failing (or returning nothing) must make
+// the request fail clearly, never silently answer the user with zero tools.
+
+test("getToolsCached throws on an empty tool set (no static fallback)", async () => {
+  const C = BrokerClient as unknown as {
+    getToolDefinitionsFromMCP: () => Promise<unknown[]>;
+    toolDefsCache: unknown;
+  };
+  const orig = C.getToolDefinitionsFromMCP;
+  C.toolDefsCache = null;
+  C.getToolDefinitionsFromMCP = async () => [];
+  try {
+    await assert.rejects(() => BrokerClient.getToolsCached(), /no tools/);
+  } finally {
+    C.getToolDefinitionsFromMCP = orig;
+    C.toolDefsCache = null;
+  }
+});
+
+test("getToolsCached propagates a discovery failure (no static fallback)", async () => {
+  const C = BrokerClient as unknown as {
+    getToolDefinitionsFromMCP: () => Promise<unknown[]>;
+    toolDefsCache: unknown;
+  };
+  const orig = C.getToolDefinitionsFromMCP;
+  C.toolDefsCache = null;
+  C.getToolDefinitionsFromMCP = async () => {
+    throw new Error("MCP server unreachable");
+  };
+  try {
+    await assert.rejects(() => BrokerClient.getToolsCached(), /MCP server unreachable/);
+  } finally {
+    C.getToolDefinitionsFromMCP = orig;
+    C.toolDefsCache = null;
+  }
+});

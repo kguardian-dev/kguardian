@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 
 	"github.com/rs/zerolog/log"
@@ -23,9 +24,7 @@ type PodSysCallResponse struct {
 }
 
 func GetPodSysCall(podName string) (PodSysCall, error) {
-	apiURL := "http://127.0.0.1:9090/pod/syscalls/" + podName
-
-	resp, err := http.Get(apiURL)
+	resp, err := brokerGet("/pod/syscalls/" + url.PathEscape(podName))
 	if err != nil {
 		log.Error().Err(err).Msg("GetPodSysCall: Error making GET request")
 		return PodSysCall{}, err
@@ -40,7 +39,7 @@ func GetPodSysCall(podName string) (PodSysCall, error) {
 		return PodSysCall{}, fmt.Errorf("GetPodSysCall: received non-OK HTTP status code: %v", resp.StatusCode)
 	}
 
-	body, err := io.ReadAll(resp.Body)
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxBrokerResponseBytes))
 	if err != nil {
 		log.Error().Err(err).Msg("GetPodSysCall: Error reading response body")
 		return PodSysCall{}, err

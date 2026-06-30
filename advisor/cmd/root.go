@@ -81,6 +81,7 @@ func init() {
 	}
 
 	rootCmd.AddCommand(genCmd)
+	rootCmd.AddCommand(serveCmd)
 
 	// Set up colored output with consistent RFC3339 timestamp format
 	consoleWriter := zerolog.ConsoleWriter{

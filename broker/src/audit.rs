@@ -13,7 +13,10 @@ use diesel::pg::PgConnection;
 use diesel::prelude::*;
 use diesel::r2d2::{self, ConnectionManager};
 use serde::{Deserialize, Serialize};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
+use tokio::sync::mpsc;
 use tracing::{debug, warn};
 
 type DbPool = r2d2::Pool<ConnectionManager<PgConnection>>;
@@ -108,12 +111,25 @@ pub struct AuditClient {
     /// futures + 1000 connection-pool waiters. Bounding here gives
     /// upstream backpressure without changing the call sites.
     in_flight: std::sync::Arc<tokio::sync::Semaphore>,
+    /// Bounded ingest→audit queue. Ingest `try_send`s onto it (never blocks);
+    /// a dispatcher task drains it under `in_flight`. `None` until `start()`
+    /// wires the dispatcher (and on disabled clients / unit tests).
+    tx: Option<mpsc::Sender<PodTraffic>>,
+    /// Count of flows shed because the queue was full (evaluator backed up).
+    /// Exposed as `broker_audit_dropped_total`.
+    dropped: Arc<AtomicU64>,
 }
 
 /// Maximum concurrent audit /evaluate calls. Sized roughly to twice
 /// `pool_max_idle_per_host(8)` so the connection pool stays the
 /// effective rate limit; further audit calls queue on this semaphore.
 const AUDIT_INFLIGHT_PERMITS: usize = 16;
+
+/// Capacity of the bounded ingest→audit queue. This caps the memory the
+/// audit path can hold under evaluator slowness: ingest sheds (drops +
+/// counts) once the queue is full rather than spawning unbounded waiting
+/// tasks. Audit is best-effort, so shedding is the correct overload response.
+const AUDIT_QUEUE_CAPACITY: usize = 2048;
 
 /// Default audit eval timeout in milliseconds. 500ms is plenty for
 /// an in-cluster evaluator (matcher is in-memory, sub-ms); operators
@@ -216,6 +232,30 @@ fn build_flow_for_traffic(traffic: &PodTraffic) -> Option<Flow<'_>> {
     })
 }
 
+/// Drain the bounded audit queue, bounding concurrency by the `in_flight`
+/// semaphore. Acquiring a permit *before* receiving keeps the channel (not an
+/// unbounded pile of spawned tasks) as the buffer: at most `permits` evals run
+/// at once, at most `capacity` flows wait, and ingest sheds beyond that.
+fn spawn_audit_dispatcher(client: AuditClient, pool: DbPool, mut rx: mpsc::Receiver<PodTraffic>) {
+    actix_web::rt::spawn(async move {
+        loop {
+            let permit = match client.in_flight.clone().acquire_owned().await {
+                Ok(p) => p,
+                Err(_) => break, // semaphore closed → shutting down
+            };
+            let Some(traffic) = rx.recv().await else {
+                break; // all senders dropped → shutting down
+            };
+            let worker = client.clone();
+            let pool = pool.clone();
+            actix_web::rt::spawn(async move {
+                worker.evaluate_and_persist(pool, traffic).await;
+                drop(permit);
+            });
+        }
+    });
+}
+
 impl AuditClient {
     /// Construct from the `EVALUATOR_URL` env var. When unset OR
     /// whitespace-only, the client is disabled and
@@ -248,7 +288,52 @@ impl AuditClient {
             base_url,
             http,
             in_flight: std::sync::Arc::new(tokio::sync::Semaphore::new(permits)),
+            tx: None,
+            dropped: Arc::new(AtomicU64::new(0)),
         }
+    }
+
+    /// Wire up the bounded ingest→audit queue and spawn the dispatcher that
+    /// drains it. Call once at startup, after the DB pool exists. No-op (and no
+    /// queue) when audit is disabled, so `try_enqueue` silently drops. Returns
+    /// self so it composes: `AuditClient::from_env().start(pool)`.
+    pub fn start(mut self, pool: DbPool) -> Self {
+        if !self.enabled {
+            return self;
+        }
+        let capacity = std::env::var("AUDIT_QUEUE_CAPACITY")
+            .ok()
+            .and_then(|v| v.trim().parse::<usize>().ok())
+            .map(|n| n.max(1))
+            .unwrap_or(AUDIT_QUEUE_CAPACITY);
+        let (tx, rx) = mpsc::channel::<PodTraffic>(capacity);
+        self.tx = Some(tx);
+        spawn_audit_dispatcher(self.clone(), pool, rx);
+        self
+    }
+
+    /// Best-effort, non-blocking enqueue of a flow for audit evaluation. Ingest
+    /// calls this on the hot path: it never blocks and never back-pressures
+    /// capture. If the queue is full (evaluator backed up) the flow is dropped
+    /// and counted; if the dispatcher is gone the flow is silently ignored.
+    pub fn try_enqueue(&self, traffic: PodTraffic) {
+        let Some(tx) = self.tx.as_ref() else {
+            return;
+        };
+        match tx.try_send(traffic) {
+            Ok(()) => {}
+            Err(mpsc::error::TrySendError::Full(_)) => {
+                self.dropped.fetch_add(1, Ordering::Relaxed);
+                debug!("audit queue full; shedding flow (evaluator backed up)");
+            }
+            Err(mpsc::error::TrySendError::Closed(_)) => {}
+        }
+    }
+
+    /// Total flows shed because the audit queue was full. Exposed via
+    /// `/metrics` as `broker_audit_dropped_total`.
+    pub fn dropped_count(&self) -> u64 {
+        self.dropped.load(Ordering::Relaxed)
     }
 
     pub fn enabled(&self) -> bool {
@@ -265,28 +350,16 @@ impl AuditClient {
         self.in_flight.available_permits()
     }
 
-    /// Best-effort: build a Flow from the PodTraffic event, POST to
-    /// `/evaluate`, and persist any `WouldDeny` results. Errors are
-    /// logged but never propagated — the broker's ingest path must not
-    /// stall on evaluator hiccups.
-    pub async fn evaluate_and_persist(&self, pool: DbPool, traffic: PodTraffic) {
+    /// Evaluate one flow against the evaluator and persist any verdicts.
+    /// Best-effort: errors are logged but never propagated — the ingest path
+    /// must not stall on evaluator hiccups. Concurrency is bounded by the
+    /// caller: the audit dispatcher holds an `in_flight` permit for the duration
+    /// of this call, so a large ingest burst can't create unbounded concurrent
+    /// /evaluate round-trips. Called only by the in-crate dispatcher.
+    pub(crate) async fn evaluate_and_persist(&self, pool: DbPool, traffic: PodTraffic) {
         if !self.enabled {
             return;
         }
-        // Bound concurrent in-flight evaluations. Without this, a large
-        // ingest batch (the broker's add_pods_batch fires N tasks per
-        // event for an N-event batch) would create unbounded futures
-        // racing for the small connection pool. A failed acquire would
-        // mean the global semaphore is poisoned (extremely unlikely);
-        // treat that as 'just skip the audit step' rather than crashing
-        // the ingest path.
-        let _permit = match self.in_flight.clone().acquire_owned().await {
-            Ok(p) => p,
-            Err(e) => {
-                debug!(error = %e, "audit semaphore closed; skipping evaluation");
-                return;
-            }
-        };
         let url = format!("{}/evaluate", self.base_url.trim_end_matches('/'));
 
         let flow = match build_flow_for_traffic(&traffic) {
@@ -703,6 +776,51 @@ mod tests {
                 .expect("epoch is a valid timestamp")
                 .naive_utc(),
         }
+    }
+
+    // Build a queue-wired AuditClient with a given channel capacity, without
+    // spawning the dispatcher — so the receiver is never drained and the queue
+    // fills deterministically. The caller must keep the receiver alive (else
+    // try_send sees Closed, not Full).
+    fn client_with_queue(capacity: usize) -> (AuditClient, mpsc::Receiver<PodTraffic>) {
+        let (tx, rx) = mpsc::channel::<PodTraffic>(capacity);
+        let client = AuditClient {
+            enabled: true,
+            base_url: "http://evaluator".to_string(),
+            http: reqwest::Client::new(),
+            in_flight: std::sync::Arc::new(tokio::sync::Semaphore::new(1)),
+            tx: Some(tx),
+            dropped: Arc::new(AtomicU64::new(0)),
+        };
+        (client, rx)
+    }
+
+    #[test]
+    fn try_enqueue_sheds_and_counts_when_queue_full() {
+        // capacity 1, receiver never polled: first enqueue buffers, the rest
+        // are shed and counted via broker_audit_dropped_total.
+        let (client, _rx) = client_with_queue(1);
+        client.try_enqueue(sample_traffic(Some("INGRESS")));
+        assert_eq!(client.dropped_count(), 0, "first enqueue fits");
+        client.try_enqueue(sample_traffic(Some("INGRESS")));
+        client.try_enqueue(sample_traffic(Some("INGRESS")));
+        assert_eq!(client.dropped_count(), 2, "two shed once the queue is full");
+    }
+
+    #[test]
+    fn try_enqueue_is_noop_without_a_queue() {
+        // No dispatcher wired (start() not called): drop silently, never panic,
+        // never count.
+        let client = AuditClient {
+            enabled: true,
+            base_url: "http://evaluator".to_string(),
+            http: reqwest::Client::new(),
+            in_flight: std::sync::Arc::new(tokio::sync::Semaphore::new(1)),
+            tx: None,
+            dropped: Arc::new(AtomicU64::new(0)),
+        };
+        client.try_enqueue(sample_traffic(Some("INGRESS")));
+        assert_eq!(client.dropped_count(), 0);
     }
 
     #[test]

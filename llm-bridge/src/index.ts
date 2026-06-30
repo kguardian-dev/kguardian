@@ -9,14 +9,17 @@ import { ChatRequestSchema, LLMProvider, type ErrorResponse } from "./types/inde
 import { BrokerClient } from "./brokerClient.js";
 import { log } from "./logger.js";
 import { callOpenAI } from "./providers/openai.js";
-import { callAnthropic } from "./providers/anthropic.js";
+import { callAnthropic, streamAnthropic, type StreamEvent } from "./providers/anthropic.js";
 import { callGemini } from "./providers/gemini.js";
 import { callCopilot } from "./providers/copilot.js";
+import type { ChatRequest, ChatResponse } from "./types/index.js";
 
 // Load environment variables
 dotenv.config();
 
-const app = express();
+// Exported for integration tests (the main-module guard prevents the server
+// from auto-starting on import).
+export const app = express();
 // Trim env reads so a pasted "8080\n" or "  8080" doesn't propagate
 // downstream. Node's listen() is lenient about whitespace via
 // parseInt, but `cors({ origin })` compares the env value to the
@@ -66,6 +69,57 @@ function getAvailableProviders(): LLMProvider[] {
   return availableProvidersFromEnv(process.env);
 }
 
+// Provider resolution shared by the JSON and SSE chat routes. Returns either
+// the resolved provider or a ready-to-send error (status + body) so both
+// routes apply identical "no provider" / "provider not configured" handling.
+type ProviderResolution =
+  | { ok: true; provider: LLMProvider }
+  | { ok: false; status: number; body: ErrorResponse };
+
+function resolveProvider(chatRequest: ChatRequest): ProviderResolution {
+  const availableProviders = getAvailableProviders();
+  if (availableProviders.length === 0) {
+    return {
+      ok: false,
+      status: 503,
+      body: {
+        error: "No LLM provider configured",
+        details:
+          "Please configure at least one API key: OPENAI_API_KEY, ANTHROPIC_API_KEY, GOOGLE_API_KEY, or GITHUB_TOKEN",
+      },
+    };
+  }
+  const provider = chatRequest.provider || availableProviders[0];
+  if (!availableProviders.includes(provider)) {
+    return {
+      ok: false,
+      status: 400,
+      body: {
+        error: `Provider ${provider} not configured`,
+        details: `Available providers: ${availableProviders.join(", ")}`,
+      },
+    };
+  }
+  return { ok: true, provider };
+}
+
+// Non-streaming dispatch to a provider. Used by the JSON route directly and by
+// the SSE route for providers that don't have a native streaming path yet.
+function callProvider(provider: LLMProvider, chatRequest: ChatRequest): Promise<ChatResponse> {
+  switch (provider) {
+    case LLMProvider.OPENAI:
+      return callOpenAI(chatRequest, brokerClient);
+    case LLMProvider.ANTHROPIC:
+      return callAnthropic(chatRequest, brokerClient);
+    case LLMProvider.GEMINI:
+      return callGemini(chatRequest, brokerClient);
+    case LLMProvider.COPILOT:
+      return callCopilot(chatRequest, brokerClient);
+    default:
+      return Promise.reject(new Error(`Unknown provider: ${provider}`));
+  }
+}
+
 // Health check endpoint
 app.get("/health", (req: Request, res: Response) => {
   const availableProviders = getAvailableProviders();
@@ -89,51 +143,18 @@ app.post("/api/chat", chatLimiter, async (req: Request, res: Response<any>) => {
     const chatRequest = ChatRequestSchema.parse(req.body);
 
     // Determine provider to use
-    const availableProviders = getAvailableProviders();
-
-    if (availableProviders.length === 0) {
-      return res.status(503).json({
-        error: "No LLM provider configured",
-        details: "Please configure at least one API key: OPENAI_API_KEY, ANTHROPIC_API_KEY, GOOGLE_API_KEY, or GITHUB_TOKEN",
-      } as ErrorResponse);
+    const resolution = resolveProvider(chatRequest);
+    if (!resolution.ok) {
+      return res.status(resolution.status).json(resolution.body);
     }
-
-    const provider = chatRequest.provider || availableProviders[0];
-
-    // Verify the requested provider is available
-    if (!availableProviders.includes(provider)) {
-      return res.status(400).json({
-        error: `Provider ${provider} not configured`,
-        details: `Available providers: ${availableProviders.join(", ")}`,
-      } as ErrorResponse);
-    }
+    const provider = resolution.provider;
 
     // Debug not info — this fires per chat request; a chat session
     // can produce dozens. The provider routing is part of normal
     // operation, not a per-request operator alert.
     log.debug(`Processing chat request with provider: ${provider}`);
 
-    // Route to appropriate provider
-    let response;
-    switch (provider) {
-      case LLMProvider.OPENAI:
-        response = await callOpenAI(chatRequest, brokerClient);
-        break;
-      case LLMProvider.ANTHROPIC:
-        response = await callAnthropic(chatRequest, brokerClient);
-        break;
-      case LLMProvider.GEMINI:
-        response = await callGemini(chatRequest, brokerClient);
-        break;
-      case LLMProvider.COPILOT:
-        response = await callCopilot(chatRequest, brokerClient);
-        break;
-      default:
-        return res.status(400).json({
-          error: `Unknown provider: ${provider}`,
-        } as ErrorResponse);
-    }
-
+    const response = await callProvider(provider, chatRequest);
     res.json(response);
   } catch (error) {
     log.error("Error processing chat request:", error);
@@ -155,6 +176,77 @@ app.post("/api/chat", chatLimiter, async (req: Request, res: Response<any>) => {
     res.status(500).json({
       error: "An unexpected error occurred",
     } as ErrorResponse);
+  }
+});
+
+// Streaming chat endpoint (Server-Sent Events). Emits incremental `text`,
+// summarized `thinking`, and `tool_use`/`tool_result` activity events, then a
+// terminal `done` (or `error`). Anthropic streams natively; other providers
+// run non-streaming and arrive as a single `text` chunk, so the frontend can
+// use one consistent stream transport for every provider.
+app.post("/api/chat/stream", chatLimiter, async (req: Request, res: Response) => {
+  let chatRequest: ChatRequest;
+  let provider: LLMProvider;
+
+  // Pre-stream validation + provider resolution still use JSON errors, since
+  // the SSE headers have not been written yet.
+  try {
+    chatRequest = ChatRequestSchema.parse(req.body);
+    const resolution = resolveProvider(chatRequest);
+    if (!resolution.ok) {
+      return res.status(resolution.status).json(resolution.body);
+    }
+    provider = resolution.provider;
+  } catch (error) {
+    if (error instanceof ZodError) {
+      return res.status(400).json({
+        error: "Invalid request format",
+        details: error.issues.map((e: any) => e.message).join(", "),
+      } as ErrorResponse);
+    }
+    log.error("Error validating stream request:", error);
+    return res.status(500).json({ error: "An unexpected error occurred" } as ErrorResponse);
+  }
+
+  // Open the SSE stream.
+  res.writeHead(200, {
+    "Content-Type": "text/event-stream",
+    "Cache-Control": "no-cache, no-transform",
+    Connection: "keep-alive",
+    // Disable proxy buffering (nginx) so events flush to the client live.
+    "X-Accel-Buffering": "no",
+  });
+
+  const emit = (event: StreamEvent): void => {
+    res.write(`event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`);
+  };
+
+  // Abort the in-flight model stream if the client disconnects.
+  const abort = new AbortController();
+  res.on("close", () => abort.abort());
+
+  log.debug(`Processing streaming chat request with provider: ${provider}`);
+
+  try {
+    if (provider === LLMProvider.ANTHROPIC) {
+      await streamAnthropic(chatRequest, brokerClient, emit, abort.signal);
+    } else {
+      // Providers without a native streaming path: run to completion and emit
+      // the answer as a single text chunk plus the terminal done event.
+      const response = await callProvider(provider, chatRequest);
+      emit({ type: "text", delta: response.message });
+      emit({ type: "done", model: response.model, conversationId: response.conversationId });
+    }
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : "An internal error occurred";
+    log.error("Streaming chat error:", detail);
+    // Headers are already sent, so surface the failure over SSE rather than
+    // as an HTTP status. Guard the write in case the client already closed.
+    if (!res.writableEnded) {
+      emit({ type: "error", error: detail });
+    }
+  } finally {
+    res.end();
   }
 });
 

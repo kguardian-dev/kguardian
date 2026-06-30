@@ -73,6 +73,31 @@ The following table lists the configurable parameters of the kguardian chart and
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
+| advisor.affinity | object | `{}` | Affinity rules for advisor pods |
+| advisor.container.port | int | `8083` | Advisor HTTP port (distinct from the evaluator's 8082) |
+| advisor.enabled | bool | `false` | Deploy the advisor HTTP service. When false, the workload, Service, ServiceAccount, and NetworkPolicy are skipped (the CLI/kubectl-plugin is unaffected — it does not use this service). |
+| advisor.env | list | `[]` | Additional environment variables for the advisor process |
+| advisor.image.pullPolicy | string | `"IfNotPresent"` | Advisor image pull policy |
+| advisor.image.repository | string | `"ghcr.io/kguardian-dev/kguardian/advisor"` | Advisor container image repository |
+| advisor.image.sha | string | `""` | Overrides the image tag using SHA digest |
+| advisor.image.tag | string | `"1.4.1"` | Advisor version tag (auto-updated by Renovate, like the other images) |
+| advisor.imagePullSecrets | list | `[]` | List of image pull secrets for private registries |
+| advisor.networkPolicy | object | `{"enabled":false}` | Restrict who may reach the unauthenticated advisor HTTP API. When enabled, only the mcp-server pod may connect. Requires a NetworkPolicy- enforcing CNI (Cilium, Calico, ...). |
+| advisor.nodeSelector | object | `{}` | Node selector for advisor pods |
+| advisor.podAnnotations | object | `{}` | Annotations to add to advisor pods |
+| advisor.podSecurityContext | object | `{"runAsNonRoot":true,"seccompProfile":{"type":"RuntimeDefault"}}` | Advisor pod security context. Runs as non-root user (nonroot:65532). |
+| advisor.replicaCount | int | `1` | Number of advisor replicas. The service is stateless (it reads the broker and synthesises a policy per request), so it scales freely. |
+| advisor.resources | object | `{"limits":{"memory":"128Mi"},"requests":{"cpu":"10m","memory":"32Mi"}}` | Advisor pod resource requests and limits |
+| advisor.securityContext | object | `{"allowPrivilegeEscalation":false,"capabilities":{"drop":["ALL"]},"privileged":false,"readOnlyRootFilesystem":true,"runAsNonRoot":true}` | Advisor container security context. Distroless nonroot + read-only root. |
+| advisor.service.name | string | `"kguardian-advisor"` | Advisor service name |
+| advisor.service.port | int | `8083` | Advisor service port |
+| advisor.service.type | string | `"ClusterIP"` | Advisor service type |
+| advisor.serviceAccount.annotations | object | `{}` | Annotations to add to the service account |
+| advisor.serviceAccount.automountServiceAccountToken | bool | `false` | The advisor service only talks to the broker over HTTP; it does not call the Kubernetes API, so no token is mounted. |
+| advisor.serviceAccount.create | bool | `true` | Specifies whether a service account should be created |
+| advisor.serviceAccount.name | string | `""` | The name of the service account to use |
+| advisor.tolerations | list | `[]` | Tolerations for advisor pods |
+| advisor.topologySpreadConstraints | list | `[]` | Topology spread constraints for advisor pods |
 | broker.affinity | object | `{}` | Affinity rules for broker pod assignment |
 | broker.audit.evalTimeoutMs | int | `500` | Per-call timeout (in milliseconds) on the broker's POST to the evaluator's /evaluate endpoint. 500ms is plenty for an in-cluster evaluator (matcher is in-memory, sub-ms) but operators running the evaluator across cells / regions / VPNs may need more. Clamped to a minimum 50ms broker-side. |
 | broker.audit.inflightPermits | int | `16` | Maximum concurrent in-flight /evaluate calls to the audit evaluator. Bound prevents an ingest spike from creating unbounded concurrent reqwest futures + connection-pool waiters. The broker's /metrics exposes broker_audit_inflight_available so operators can spot saturation. The metrics doc suggests bumping this value when the gauge sits at 0 (under sustained load you'll see "evaluator round-trips queueing"). In-broker default is 16 if unset; minimum is 1. |

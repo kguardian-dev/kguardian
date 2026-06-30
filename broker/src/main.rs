@@ -191,7 +191,11 @@ async fn main() -> Result<(), std::io::Error> {
         }
         std::thread::sleep(std::time::Duration::from_secs(2));
     }
-    let audit_client = AuditClient::from_env();
+    // start() wires the bounded ingest→audit queue + dispatcher (no-op when
+    // audit is disabled). Ingest enqueues onto it instead of spawning a task
+    // per flow, so a slow evaluator sheds load rather than back-pressuring
+    // capture or growing memory unbounded.
+    let audit_client = AuditClient::from_env().start(pool.clone());
 
     // Optional bearer-token auth on the broker API. Off unless
     // BROKER_AUTH_TOKEN is set, so existing deployments are unaffected.
@@ -297,11 +301,13 @@ pub async fn health_check(
 /// Build the Prometheus text-format payload for the broker. Pure
 /// formatting — no I/O — so it's testable in isolation without
 /// spinning up the actix runtime.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn render_metrics_text(
     schema_ready: u8,
     db_reachable: u8,
     audit_enabled: u8,
     audit_inflight_available: usize,
+    audit_dropped_total: u64,
     db_pool_idle: u32,
     db_pool_max: u32,
     uptime_secs: u64,
@@ -320,6 +326,9 @@ pub(crate) fn render_metrics_text(
             "# HELP broker_audit_inflight_available Number of free permits on the audit semaphore (saturation = configured cap - this)\n",
             "# TYPE broker_audit_inflight_available gauge\n",
             "broker_audit_inflight_available {audit_inflight_available}\n",
+            "# HELP broker_audit_dropped_total Flows shed because the bounded audit queue was full (evaluator backed up)\n",
+            "# TYPE broker_audit_dropped_total counter\n",
+            "broker_audit_dropped_total {audit_dropped_total}\n",
             "# HELP broker_db_pool_idle Idle connections in the r2d2 pool (saturation = broker_db_pool_max - this)\n",
             "# TYPE broker_db_pool_idle gauge\n",
             "broker_db_pool_idle {db_pool_idle}\n",
@@ -334,6 +343,7 @@ pub(crate) fn render_metrics_text(
         db_reachable = db_reachable,
         audit_enabled = audit_enabled,
         audit_inflight_available = audit_inflight_available,
+        audit_dropped_total = audit_dropped_total,
         db_pool_idle = db_pool_idle,
         db_pool_max = db_pool_max,
         uptime_secs = uptime_secs,
@@ -384,6 +394,7 @@ pub async fn metrics(
     };
 
     let audit_inflight = audit.get_ref().available_permits();
+    let audit_dropped = audit.get_ref().dropped_count();
     // r2d2 pool state — paired metrics let operators compute
     // saturation = max - idle. broker_db_pool_idle pegged at 0 for
     // sustained time means the pool is fully utilised; bump
@@ -398,6 +409,7 @@ pub async fn metrics(
         u8::from(db_reachable),
         u8::from(audit.get_ref().enabled()),
         audit_inflight,
+        audit_dropped,
         db_pool_idle,
         db_pool_max,
         uptime_secs,
@@ -420,12 +432,13 @@ mod tests {
 
     #[test]
     fn renders_all_metric_names() {
-        let body = render_metrics_text(1, 1, 1, 16, 16, 16, 0);
+        let body = render_metrics_text(1, 1, 1, 16, 0, 16, 16, 0);
         for name in [
             "broker_db_schema_ready",
             "broker_db_reachable",
             "broker_audit_enabled",
             "broker_audit_inflight_available",
+            "broker_audit_dropped_total",
             "broker_db_pool_idle",
             "broker_db_pool_max",
             "broker_uptime_seconds",
@@ -436,13 +449,14 @@ mod tests {
 
     #[test]
     fn each_metric_has_help_and_type() {
-        let body = render_metrics_text(1, 1, 1, 16, 16, 16, 0);
+        let body = render_metrics_text(1, 1, 1, 16, 0, 16, 16, 0);
         // Each metric must have a # HELP and a # TYPE line.
         for name in [
             "broker_db_schema_ready",
             "broker_db_reachable",
             "broker_audit_enabled",
             "broker_audit_inflight_available",
+            "broker_audit_dropped_total",
             "broker_db_pool_idle",
             "broker_db_pool_max",
             "broker_uptime_seconds",
@@ -458,11 +472,12 @@ mod tests {
     fn renders_zero_state() {
         // All-zero state: DB unreachable, audit disabled, no permits available,
         // pool saturated (0 idle).
-        let body = render_metrics_text(0, 0, 0, 0, 0, 0, 0);
+        let body = render_metrics_text(0, 0, 0, 0, 0, 0, 0, 0);
         assert!(body.contains("\nbroker_db_schema_ready 0\n"));
         assert!(body.contains("\nbroker_db_reachable 0\n"));
         assert!(body.contains("\nbroker_audit_enabled 0\n"));
         assert!(body.contains("\nbroker_audit_inflight_available 0\n"));
+        assert!(body.contains("\nbroker_audit_dropped_total 0\n"));
         assert!(body.contains("\nbroker_db_pool_idle 0\n"));
         assert!(body.contains("\nbroker_db_pool_max 0\n"));
         assert!(body.contains("\nbroker_uptime_seconds 0\n"));
@@ -470,9 +485,10 @@ mod tests {
 
     #[test]
     fn renders_populated_state() {
-        let body = render_metrics_text(1, 1, 1, 16, 12, 16, 12345);
+        let body = render_metrics_text(1, 1, 1, 16, 7, 12, 16, 12345);
         assert!(body.contains("\nbroker_db_schema_ready 1\n"));
         assert!(body.contains("\nbroker_audit_inflight_available 16\n"));
+        assert!(body.contains("\nbroker_audit_dropped_total 7\n"));
         // 12 idle out of 16 max = 4 in use; pin both so saturation is computable
         assert!(body.contains("\nbroker_db_pool_idle 12\n"));
         assert!(body.contains("\nbroker_db_pool_max 16\n"));
@@ -482,7 +498,7 @@ mod tests {
     #[test]
     fn wire_shape_is_prometheus_compatible() {
         // Each non-comment line must look like `<name> <value>\n`.
-        let body = render_metrics_text(1, 1, 0, 8, 4, 16, 60);
+        let body = render_metrics_text(1, 1, 0, 8, 0, 4, 16, 60);
         for line in body.lines() {
             if line.is_empty() || line.starts_with('#') {
                 continue;

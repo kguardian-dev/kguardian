@@ -1,8 +1,8 @@
 import React, { useState, useRef, useEffect, useCallback } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
-import { X, Send, Sparkles, Bot, User, Minimize2, Maximize2, ChevronRight, ChevronLeft } from 'lucide-react';
-import { sendChatMessage, type HistoryMessage } from '../services/aiApi';
+import { X, Send, Sparkles, Bot, User, Minimize2, Maximize2, ChevronRight, ChevronLeft, Copy, Check } from 'lucide-react';
+import { streamChatMessage, type HistoryMessage } from '../services/aiApi';
 import { UI_DIMENSIONS } from '../constants/ui';
 
 interface Message {
@@ -10,7 +10,69 @@ interface Message {
   role: 'user' | 'assistant';
   content: string;
   timestamp: Date;
+  // Transient UI state while a streamed assistant reply is in flight.
+  activity?: string;   // e.g. "Looking up policy verdicts…" or "Thinking…"
+  streaming?: boolean; // true until the terminal done/error event
 }
+
+// Map an MCP tool name to a short human phrase for the activity indicator.
+function describeTool(name: string): string {
+  const map: Record<string, string> = {
+    get_pod_network_traffic: 'pod network traffic',
+    get_pod_syscalls: 'pod syscalls',
+    get_pod_details: 'pod details',
+    get_pod_details_by_name: 'pod details',
+    get_service_details: 'service details',
+    list_services: 'service inventory',
+    get_cluster_traffic: 'cluster traffic',
+    get_cluster_pods: 'cluster pods',
+    get_audit_verdicts: 'policy verdicts',
+    generate_network_policy: 'network policy',
+    generate_seccomp_profile: 'seccomp profile',
+  };
+  return map[name] || name.replace(/^(get|list|generate)_/, '').replace(/_/g, ' ');
+}
+
+// Activity line for a tool call — generation tools read better as "Generating…".
+function toolActivity(name: string): string {
+  const what = describeTool(name);
+  return name.startsWith('generate_') ? `Generating ${what}…` : `Looking up ${what}…`;
+}
+
+// Renders a fenced markdown code block with a Copy button. Used as the custom
+// `pre` renderer for assistant markdown so generated NetworkPolicy/seccomp
+// (and any other code) can be copied to the clipboard in one click.
+const CodeBlock: React.FC<{ children?: React.ReactNode }> = ({ children }) => {
+  const preRef = useRef<HTMLPreElement>(null);
+  const [copied, setCopied] = useState(false);
+
+  const handleCopy = async () => {
+    const text = preRef.current?.innerText ?? '';
+    if (!text) return;
+    try {
+      await navigator.clipboard.writeText(text);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    } catch {
+      // Clipboard API unavailable (e.g. non-secure context) — silently ignore.
+    }
+  };
+
+  return (
+    <div className="relative group">
+      <button
+        type="button"
+        onClick={handleCopy}
+        className="absolute right-2 top-2 flex items-center gap-1 rounded bg-hubble-dark/80 px-2 py-1 text-xs text-tertiary opacity-0 transition-opacity group-hover:opacity-100 hover:text-primary"
+        aria-label="Copy code"
+      >
+        {copied ? <Check className="w-3 h-3" /> : <Copy className="w-3 h-3" />}
+        {copied ? 'Copied' : 'Copy'}
+      </button>
+      <pre ref={preRef}>{children}</pre>
+    </div>
+  );
+};
 
 interface AIAssistantProps {
   isOpen: boolean;
@@ -32,6 +94,18 @@ const AIAssistant: React.FC<AIAssistantProps> = ({ isOpen, onClose, onLayoutChan
   const [isResizing, setIsResizing] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
+  // Aborts the in-flight streaming request so the model stream (and its
+  // server-side tool calls / token spend) is cancelled when the user closes,
+  // clears, navigates away, or sends a new message mid-stream.
+  const abortRef = useRef<AbortController | null>(null);
+
+  // Abort any in-flight stream on unmount.
+  useEffect(() => () => abortRef.current?.abort(), []);
+
+  // Abort the in-flight stream when the panel is closed.
+  useEffect(() => {
+    if (!isOpen) abortRef.current?.abort();
+  }, [isOpen]);
 
   // Notify parent of layout changes
   useEffect(() => {
@@ -62,43 +136,80 @@ const AIAssistant: React.FC<AIAssistantProps> = ({ isOpen, onClose, onLayoutChan
       timestamp: new Date(),
     };
 
-    setMessages(prev => [...prev, userMessage]);
+    // Conversation history (exclude the in-flight turn) before we mutate state.
+    const history: HistoryMessage[] = messages.map(msg => ({
+      role: msg.role,
+      content: msg.content,
+    }));
+
+    // Streaming placeholder the deltas accumulate into.
+    const assistantId = crypto.randomUUID();
+    const assistantPlaceholder: Message = {
+      id: assistantId,
+      role: 'assistant',
+      content: '',
+      timestamp: new Date(),
+      activity: 'Thinking…',
+      streaming: true,
+    };
+
+    setMessages(prev => [...prev, userMessage, assistantPlaceholder]);
     const currentMessage = inputValue;
     setInputValue('');
     setIsTyping(true);
 
+    // Immutably patch the in-flight assistant message by id.
+    const patchAssistant = (patch: (m: Message) => Message) =>
+      setMessages(prev => prev.map(m => (m.id === assistantId ? patch(m) : m)));
+
+    // Build structured context for every message
+    const context = JSON.stringify({
+      namespace: namespace || undefined,
+      // Cap at 20 to match the bridge's getSystemPrompt truncation — sending
+      // more just gets dropped server-side.
+      podNames: podNames?.slice(0, 20),
+    });
+
+    // Cancel any prior in-flight stream, then start a fresh abortable one.
+    abortRef.current?.abort();
+    const controller = new AbortController();
+    abortRef.current = controller;
+
     try {
-      // Build conversation history (exclude system messages)
-      const history: HistoryMessage[] = messages.map(msg => ({
-        role: msg.role,
-        content: msg.content,
-      }));
-
-      // Build structured context for every message
-      const context = JSON.stringify({
-        namespace: namespace || undefined,
-        podNames: podNames?.slice(0, 30),
-      });
-
-      // Call the real AI API with conversation history and context
-      const response = await sendChatMessage(currentMessage, history, undefined, undefined, context);
-
-      const assistantMessage: Message = {
-        id: crypto.randomUUID(),
-        role: 'assistant',
-        content: response.message,
-        timestamp: new Date(),
-      };
-      setMessages(prev => [...prev, assistantMessage]);
+      await streamChatMessage(currentMessage, history, context, {
+        onText: (delta) =>
+          patchAssistant(m => ({ ...m, content: m.content + delta, activity: undefined })),
+        onToolUse: (name) =>
+          patchAssistant(m => ({ ...m, activity: toolActivity(name) })),
+        onToolResult: () =>
+          patchAssistant(m => ({ ...m, activity: 'Analyzing…' })),
+        onThinking: () =>
+          // Only surface a "thinking" hint while no answer text has arrived yet.
+          patchAssistant(m => (m.content ? m : { ...m, activity: 'Thinking…' })),
+        onDone: () =>
+          patchAssistant(m => ({ ...m, streaming: false, activity: undefined })),
+        onError: (error) =>
+          patchAssistant(m => ({
+            ...m,
+            streaming: false,
+            activity: undefined,
+            content: m.content
+              ? `${m.content}\n\n_Error: ${error}_`
+              : `Error: ${error}`,
+          })),
+      }, { signal: controller.signal });
     } catch (error) {
-      const errorMessage: Message = {
-        id: crypto.randomUUID(),
-        role: 'assistant',
+      patchAssistant(m => ({
+        ...m,
+        streaming: false,
+        activity: undefined,
         content: `Error: ${error instanceof Error ? error.message : 'Failed to get AI response. Please check that your API keys are configured.'}`,
-        timestamp: new Date(),
-      };
-      setMessages(prev => [...prev, errorMessage]);
+      }));
     } finally {
+      // Finalize the placeholder in every termination case — including an
+      // aborted stream, where neither onDone nor onError fires — so no bubble
+      // is left stuck in the streaming state with a spinning activity line.
+      patchAssistant(m => (m.streaming ? { ...m, streaming: false, activity: undefined } : m));
       setIsTyping(false);
     }
   };
@@ -106,11 +217,18 @@ const AIAssistant: React.FC<AIAssistantProps> = ({ isOpen, onClose, onLayoutChan
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
+      // Ignore Enter while a response is streaming — the Send button is already
+      // disabled on isTyping; this guards the keyboard path too, so a second
+      // turn can't start mid-stream (which would feed a partial answer back as
+      // history and run two concurrent streams).
+      if (isTyping) return;
       handleSendMessage();
     }
   };
 
   const handleClearChat = () => {
+    // Abort any in-flight stream so it doesn't keep patching a cleared message.
+    abortRef.current?.abort();
     setMessages([]);
   };
 
@@ -284,10 +402,20 @@ const AIAssistant: React.FC<AIAssistantProps> = ({ isOpen, onClose, onLayoutChan
                     >
                       {message.role === 'assistant' ? (
                         <div className="text-sm prose prose-sm dark:prose-invert max-w-none prose-p:my-1 prose-headings:my-2 prose-ul:my-1 prose-ol:my-1 prose-li:my-0.5 prose-pre:my-2 prose-table:my-2 prose-th:px-2 prose-th:py-1 prose-td:px-2 prose-td:py-1 prose-code:text-hubble-accent prose-a:text-hubble-accent">
-                          <ReactMarkdown remarkPlugins={[remarkGfm]}>{message.content}</ReactMarkdown>
+                          <ReactMarkdown remarkPlugins={[remarkGfm]} components={{ pre: CodeBlock }}>{message.content}</ReactMarkdown>
                         </div>
                       ) : (
                         <p className="text-sm whitespace-pre-wrap">{message.content}</p>
+                      )}
+                      {message.role === 'assistant' && message.activity && (
+                        <div className="flex items-center gap-2 mt-1 text-xs text-tertiary italic">
+                          <span className="flex gap-1">
+                            <span className="w-1.5 h-1.5 bg-hubble-accent rounded-full animate-bounce" style={{ animationDelay: '0ms' }} />
+                            <span className="w-1.5 h-1.5 bg-hubble-accent rounded-full animate-bounce" style={{ animationDelay: '150ms' }} />
+                            <span className="w-1.5 h-1.5 bg-hubble-accent rounded-full animate-bounce" style={{ animationDelay: '300ms' }} />
+                          </span>
+                          <span>{message.activity}</span>
+                        </div>
                       )}
                       <p
                         className={`text-xs mt-1 ${
@@ -304,7 +432,7 @@ const AIAssistant: React.FC<AIAssistantProps> = ({ isOpen, onClose, onLayoutChan
                     )}
                   </div>
                 ))}
-                {isTyping && (
+                {isTyping && !messages.some(m => m.streaming) && (
                   <div className="flex gap-3 justify-start">
                     <div className="flex-shrink-0 w-8 h-8 rounded-lg bg-hubble-accent/20 flex items-center justify-center">
                       <Bot className="w-5 h-5 text-hubble-accent" />
@@ -509,10 +637,20 @@ const AIAssistant: React.FC<AIAssistantProps> = ({ isOpen, onClose, onLayoutChan
                 >
                   {message.role === 'assistant' ? (
                     <div className="text-sm prose prose-sm dark:prose-invert max-w-none prose-p:my-1 prose-headings:my-2 prose-ul:my-1 prose-ol:my-1 prose-li:my-0.5 prose-pre:my-2 prose-table:my-2 prose-th:px-2 prose-th:py-1 prose-td:px-2 prose-td:py-1 prose-code:text-hubble-accent prose-a:text-hubble-accent">
-                      <ReactMarkdown remarkPlugins={[remarkGfm]}>{message.content}</ReactMarkdown>
+                      <ReactMarkdown remarkPlugins={[remarkGfm]} components={{ pre: CodeBlock }}>{message.content}</ReactMarkdown>
                     </div>
                   ) : (
                     <p className="text-sm whitespace-pre-wrap">{message.content}</p>
+                  )}
+                  {message.role === 'assistant' && message.activity && (
+                    <div className="flex items-center gap-2 mt-1 text-xs text-tertiary italic">
+                      <span className="flex gap-1">
+                        <span className="w-1.5 h-1.5 bg-hubble-accent rounded-full animate-bounce" style={{ animationDelay: '0ms' }} />
+                        <span className="w-1.5 h-1.5 bg-hubble-accent rounded-full animate-bounce" style={{ animationDelay: '150ms' }} />
+                        <span className="w-1.5 h-1.5 bg-hubble-accent rounded-full animate-bounce" style={{ animationDelay: '300ms' }} />
+                      </span>
+                      <span>{message.activity}</span>
+                    </div>
                   )}
                   <p
                     className={`text-xs mt-1 ${
@@ -529,7 +667,7 @@ const AIAssistant: React.FC<AIAssistantProps> = ({ isOpen, onClose, onLayoutChan
                 )}
               </div>
             ))}
-            {isTyping && (
+            {isTyping && !messages.some(m => m.streaming) && (
               <div className="flex gap-3 justify-start">
                 <div className="flex-shrink-0 w-8 h-8 rounded-lg bg-hubble-accent/20 flex items-center justify-center">
                   <Bot className="w-5 h-5 text-hubble-accent" />

@@ -206,8 +206,12 @@ export class BrokerClient {
       const response = await this.mcpClient.listTools();
       return response.tools || [];
     } catch (error) {
+      // Propagate rather than swallow. The MCP server is the single source of
+      // truth for the tool surface; if discovery fails the assistant has no
+      // grounded tools, and answering ungrounded is worse than failing. The
+      // caller surfaces a clear "tool server unreachable" error to the user.
       log.error("Error fetching tools from MCP server:", error);
-      return [];
+      throw error instanceof Error ? error : new Error(String(error));
     }
   }
 
@@ -220,7 +224,7 @@ export class BrokerClient {
     try {
       const tools = await client.getAvailableTools();
 
-      // Convert MCP tool format to LLM provider format
+      // Convert MCP tool format to LLM provider format.
       return tools.map((tool: any) => ({
         name: tool.name,
         description: tool.description || "",
@@ -230,124 +234,30 @@ export class BrokerClient {
           required: [],
         },
       }));
-    } catch (error) {
-      log.error("Failed to fetch tools from MCP server, using fallback:", error);
-      // Fallback to static definitions if MCP server is unavailable
-      return BrokerClient.getToolDefinitions();
     } finally {
+      // Errors propagate (no static fallback) — the MCP server is the single
+      // source of truth for the tool surface.
       await client.close();
     }
   }
 
   /**
-   * Get tool definitions with caching — tries MCP server first, falls back to static
+   * Get tool definitions with caching. The MCP server is the single source of
+   * truth — there is no static fallback. If discovery fails or returns nothing,
+   * this throws so the request fails clearly rather than the model answering
+   * without its data tools. Only a successful, non-empty result is cached, so a
+   * transient MCP blip is retried on the next request.
    */
   static async getToolsCached(): Promise<any[]> {
     if (BrokerClient.toolDefsCache) return BrokerClient.toolDefsCache;
-    try {
-      BrokerClient.toolDefsCache = await BrokerClient.getToolDefinitionsFromMCP();
-    } catch {
-      BrokerClient.toolDefsCache = BrokerClient.getToolDefinitions();
+    const tools = await BrokerClient.getToolDefinitionsFromMCP();
+    if (!tools.length) {
+      throw new Error(
+        "MCP server returned no tools — the assistant cannot answer without its data tools. Check that the MCP server is reachable (MCP_SERVER_URL).",
+      );
     }
-    return BrokerClient.toolDefsCache;
-  }
-
-  /**
-   * Get available tools definition for LLMs (static fallback)
-   */
-  static getToolDefinitions() {
-    return [
-      {
-        name: "get_pod_network_traffic",
-        description:
-          "Get network traffic for a specific pod by name. Returns source/destination IPs, ports, protocols, ingress/egress types, and packet decisions. Use when the user asks about a specific pod's connections. Requires only pod_name (not namespace-scoped).",
-        parameters: {
-          type: "object",
-          properties: {
-            pod_name: {
-              type: "string",
-              description: "The name of the pod to query traffic for",
-            },
-          },
-          required: ["pod_name"],
-        },
-      },
-      {
-        name: "get_pod_syscalls",
-        description:
-          "Get system calls made by a specific pod. Returns syscall names, frequencies, and architecture. Use when the user asks about a pod's syscalls or seccomp profile. Requires only pod_name (not namespace-scoped).",
-        parameters: {
-          type: "object",
-          properties: {
-            pod_name: {
-              type: "string",
-              description: "The name of the pod to query syscalls for",
-            },
-          },
-          required: ["pod_name"],
-        },
-      },
-      {
-        name: "get_pod_details",
-        description:
-          "Look up a pod by its IP address. Returns pod name, namespace, IP, and full Kubernetes pod object. Requires only ip.",
-        parameters: {
-          type: "object",
-          properties: {
-            ip: {
-              type: "string",
-              description: "The IP address of the pod to query",
-            },
-          },
-          required: ["ip"],
-        },
-      },
-      {
-        name: "get_service_details",
-        description:
-          "Look up a Kubernetes service by its cluster IP. Returns service name, namespace, IP, ports, and full service spec. Requires only ip.",
-        parameters: {
-          type: "object",
-          properties: {
-            ip: {
-              type: "string",
-              description: "The IP address of the service to query",
-            },
-          },
-          required: ["ip"],
-        },
-      },
-      {
-        name: "get_cluster_traffic",
-        description:
-          "Get a summary of network traffic across the cluster. Returns per-pod traffic counts. Accepts optional namespace to filter. Use for overall traffic patterns.",
-        parameters: {
-          type: "object",
-          properties: {
-            namespace: {
-              type: "string",
-              description: "Optional namespace to filter traffic results",
-            },
-          },
-          required: [],
-        },
-      },
-      {
-        name: "get_cluster_pods",
-        description:
-          "List pods in the cluster with compact metadata. Accepts optional namespace to filter. Use when the user asks what pods are running.",
-        parameters: {
-          type: "object",
-          properties: {
-            namespace: {
-              type: "string",
-              description: "Optional namespace to filter pod results",
-            },
-          },
-          required: [],
-        },
-      },
-    ];
+    BrokerClient.toolDefsCache = tools;
+    return tools;
   }
 
   /**
@@ -358,13 +268,14 @@ export class BrokerClient {
 
 Your role is to help users understand their cluster's network traffic, security events, and system calls.
 
-IMPORTANT: You have access to 6 tools that fetch real-time data from the cluster. ALWAYS USE THESE TOOLS when users ask questions.
+IMPORTANT: You have access to tools that fetch real-time data from the cluster. ALWAYS USE THESE TOOLS when users ask questions.
 
 ## Tool Selection Guide
 
 **Pod-Specific Tools** (require only pod_name, NOT namespace):
 - get_pod_network_traffic: Get traffic for a specific pod. Use when user asks about a pod's connections.
 - get_pod_syscalls: Get syscalls for a specific pod. Use when user asks about a pod's behavior or seccomp.
+- get_pod_details_by_name: Identify a pod from its name (namespace, IP, node, workload labels). Prefer this when the user names a pod.
 
 **Lookup Tools** (require only ip):
 - get_pod_details: Find pod info by IP address.
@@ -373,14 +284,23 @@ IMPORTANT: You have access to 6 tools that fetch real-time data from the cluster
 **Cluster-Wide Tools** (accept optional namespace filter):
 - get_cluster_traffic: Get traffic summary across pods. Returns per-pod counts, not raw records.
 - get_cluster_pods: List pods with compact metadata (name, namespace, IP, node).
+- list_services: List services with name, namespace, cluster IP, selector, and ports.
+- get_pods_on_node: List pods on a specific node (blast-radius / "what runs on node X"). Requires node.
+
+**Security / Policy Tools:**
+- get_audit_verdicts: Get network-policy evaluation verdicts (Allow / WouldDeny) for observed flows, newest first. THE tool for "what would be denied", "why is this flow blocked", "show recent policy violations", or "summarize security events". Filter by policy, namespace, verdict ('WouldDeny' for violations), direction, and limit.
+
+**Generation Tools** (synthesize ready-to-apply resources from observed runtime data):
+- generate_network_policy: Generate a least-privilege NetworkPolicy or CiliumNetworkPolicy (YAML) for a pod. Use when the user asks to generate/create a network policy or lock down a pod. Pass policy_type 'cilium' only if the user asks for Cilium. Present the YAML in a fenced \`\`\`yaml code block so the user can copy or apply it.
+- generate_seccomp_profile: Generate a least-privilege seccomp profile (JSON) for a pod. Use when the user asks to generate/create a seccomp profile. Present the JSON in a fenced \`\`\`json code block.
 
 ## Constraints
 - Pod-specific tools take only pod_name — do NOT pass namespace to them.
-- Cluster tools accept an optional "namespace" parameter to scope results.`;
+- Cluster, service, and audit tools accept an optional "namespace" parameter to scope results.`;
 
     if (context?.namespace) {
       prompt += `\n\n## Current Context
-The user is viewing namespace "${context.namespace}". ALWAYS pass namespace="${context.namespace}" to get_cluster_traffic and get_cluster_pods unless the user explicitly asks for all namespaces.`;
+The user is viewing namespace "${context.namespace}". ALWAYS pass namespace="${context.namespace}" to get_cluster_traffic, get_cluster_pods, list_services, and get_audit_verdicts unless the user explicitly asks for all namespaces.`;
     }
 
     if (context?.podNames && context.podNames.length > 0) {
@@ -396,6 +316,7 @@ The user is viewing namespace "${context.namespace}". ALWAYS pass namespace="${c
 3. Highlight security concerns or anomalies
 4. Suggest network policies or seccomp profiles when relevant
 5. For large datasets, summarize key findings first
+6. Respond with your final answer only — do not narrate your reasoning or tool-selection process
 
 When a user mentions a pod name, use the appropriate tool immediately. Do NOT ask for clarification if you have the information.`;
 
