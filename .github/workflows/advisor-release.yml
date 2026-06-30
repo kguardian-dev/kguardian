@@ -1,78 +1,122 @@
 ---
 # yaml-language-server: $schema=https://json.schemastore.org/github-workflow.json
+name: Build and Release Advisor Binary
 
-# This workflow uses actions that are not certified by GitHub.
-# They are provided by a third-party and are governed by
-# separate terms of service, privacy policy, and support
-# documentation.
+# Builds the advisor CLI (kubectl plugin) binaries and attaches them — with
+# build provenance — to the advisor GitHub release, in a way that is COMPATIBLE
+# WITH GITHUB IMMUTABLE RELEASES.
+#
+# Background: immutable releases reject asset uploads to an already-published
+# release. release-please used to publish the advisor release immediately, so
+# the previous SLSA reusable workflow (which uploads assets post-publish) failed
+# with "Cannot upload assets to an immutable release".
+#
+# How this avoids it:
+#   1. release-please creates the advisor release as a DRAFT
+#      (`"draft": true` for the advisor package in release-please-config.json).
+#      Drafts are mutable and not yet immutable, and no git tag is created yet.
+#   2. The draft-create fires a `release: created` event (release-please
+#      authenticates with a PAT, so the event triggers this workflow). The build
+#      job compiles each binary, generates provenance via
+#      actions/attest-build-provenance (stored in GitHub's attestation API,
+#      independent of the release — immutability does not affect it), and
+#      uploads the binaries to the DRAFT.
+#   3. The publish job flips the draft to published. GitHub then creates the git
+#      tag and makes the release immutable WITH the binaries already attached,
+#      then kicks the container-image build (which keys off the tag, now created
+#      by a token that would not otherwise re-trigger it).
+#
+# Verify a downloaded binary with:
+#   gh attestation verify advisor-<os>-<arch> --repo kguardian-dev/kguardian
 
-# This workflow lets you compile your Go project using a SLSA3 compliant builder.
-# This workflow will generate a so-called "provenance" file describing the steps
-# that were performed to generate the final binary.
-# The project is an initiative of the OpenSSF (openssf.org) and is developed at
-# https://github.com/slsa-framework/slsa-github-generator.
-# The provenance file can be verified using https://github.com/slsa-framework/slsa-verifier.
-# For more information about SLSA and how it improves the supply-chain, visit slsa.dev.
-
-name: Build and Push Advisor Binary
 on:
   workflow_dispatch:
-  push:
-    tags:
-      - "advisor/v*"
+    inputs:
+      tag:
+        description: "Release tag to (re)build, e.g. advisor/v1.5.1"
+        required: true
+        type: string
+  release:
+    types: [created]
 
-permissions: read-all
+permissions: {}
 
 jobs:
-  # Generate ldflags dynamically.
-  # Optional: only needed for ldflags.
-  args:
-    runs-on: ubuntu-latest
-    outputs:
-      commit-date: ${{ steps.ldflags.outputs.commit-date }}
-      commit: ${{ steps.ldflags.outputs.commit }}
-      version: ${{ steps.ldflags.outputs.version }}
-      tree-state: ${{ steps.ldflags.outputs.tree-state }}
-    steps:
-      - id: checkout
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-        with:
-          fetch-depth: 0
-      - id: ldflags
-        run: |
-          echo "commit-date=$(git log --date=iso8601-strict -1 --pretty=%ct)" >> "$GITHUB_OUTPUT"
-          echo "commit=$GITHUB_SHA" >> "$GITHUB_OUTPUT"
-          TAG=$(git describe --tags --always --dirty)
-          VERSION="${TAG#advisor/v}"
-          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
-          echo "tree-state=$(if git diff --quiet; then echo "clean"; else echo "dirty"; fi)" >> "$GITHUB_OUTPUT"
-
-  # ========================================================================================================================================
-  #     Prerequesite: Create a .slsa-goreleaser.yml in the root directory of your project.
-  #       See format in https://github.com/slsa-framework/slsa-github-generator/blob/main/internal/builders/go/README.md#configuration-file
-  #=========================================================================================================================================
   build:
+    # Only the advisor's draft release. Other components publish directly and
+    # have no binary assets, so they are filtered out here.
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (startsWith(github.event.release.tag_name, 'advisor/') && github.event.release.draft)
+    runs-on: ubuntu-latest
     permissions:
-      id-token: write # To sign the provenance.
-      contents: write # To upload assets to release.
-      actions: read # To read the workflow path.
-    needs: [args]
+      contents: write # upload binaries to the (draft) release
+      id-token: write # provenance signing
+      attestations: write # actions/attest-build-provenance
     strategy:
       matrix:
-        os:
-          - linux
-          - darwin
-        arch:
-          - amd64
-          - arm64
-    # NOTE: Do NOT pin this reusable workflow to a SHA — the SLSA generator
-    # rejects non-tag refs ("Expected ref of the form refs/tags/vX.Y.Z").
-    uses: slsa-framework/slsa-github-generator/.github/workflows/builder_go_slsa3.yml@v2.1.0
-    with:
-      go-version: "1.24"
-      config-file: .slsa-goreleaser/advisor/${{matrix.os}}-${{matrix.arch}}.yml
-      evaluated-envs: "COMMIT_DATE:${{needs.args.outputs.commit-date}}, COMMIT:${{needs.args.outputs.commit}}, VERSION:${{needs.args.outputs.version}}, TREE_STATE:${{needs.args.outputs.tree-state}}"
-      upload-assets: true
-      # =============================================================================================================
-      #     Optional: For more options, see https://github.com/slsa-framework/slsa-github-generator#golang-projects
-      # =============================================================================================================
+        os: [linux, darwin]
+        arch: [amd64, arm64]
+    env:
+      TAG: ${{ github.event.release.tag_name || inputs.tag }}
+    steps:
+      - id: meta
+        run: |
+          echo "version=${TAG#advisor/v}" >> "$GITHUB_OUTPUT"
+          echo "ref=${{ github.event.release.target_commitish || inputs.tag }}" >> "$GITHUB_OUTPUT"
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ steps.meta.outputs.ref }}
+          fetch-depth: 0
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version-file: advisor/go.mod
+      - id: build
+        working-directory: advisor
+        env:
+          GOOS: ${{ matrix.os }}
+          GOARCH: ${{ matrix.arch }}
+          CGO_ENABLED: "0"
+          GO111MODULE: "on"
+          VERSION: ${{ steps.meta.outputs.version }}
+        run: |
+          BIN="advisor-${GOOS}-${GOARCH}"
+          COMMIT="$(git rev-parse HEAD)"
+          COMMIT_DATE="$(git log --date=iso8601-strict -1 --pretty=%ct)"
+          if git diff --quiet; then TREE_STATE=clean; else TREE_STATE=dirty; fi
+          go build -trimpath -tags=netgo \
+            -ldflags "-s -w \
+              -X main.Version=${VERSION} \
+              -X main.Commit=${COMMIT} \
+              -X main.CommitDate=${COMMIT_DATE} \
+              -X main.TreeState=${TREE_STATE} \
+              -X github.com/kguardian-dev/kguardian/advisor/pkg/k8s.Version=${VERSION}" \
+            -o "../${BIN}" .
+          echo "binary=${BIN}" >> "$GITHUB_OUTPUT"
+      - uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a # v3
+        with:
+          subject-path: ${{ steps.build.outputs.binary }}
+      - name: Upload binary to the draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "${TAG}" "${{ steps.build.outputs.binary }}" --clobber --repo "${{ github.repository }}"
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # publish the release (creates the tag)
+      actions: write # dispatch the container-image workflow
+    env:
+      TAG: ${{ github.event.release.tag_name || inputs.tag }}
+    steps:
+      - name: Publish the release (draft -> published; immutable WITH assets)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release edit "${TAG}" --draft=false --latest --repo "${{ github.repository }}"
+      - name: Trigger the container-image build for the now-published tag
+        # Publishing via GITHUB_TOKEN creates the tag but does not re-trigger the
+        # tag-keyed image workflow, so dispatch it explicitly on the tag ref.
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run advisor-image-release.yaml --ref "${TAG}" --repo "${{ github.repository }}"
