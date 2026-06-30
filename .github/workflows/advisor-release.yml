@@ -36,6 +36,13 @@ on:
         description: "Release tag to (re)build, e.g. advisor/v1.5.1"
         required: true
         type: string
+      sha:
+        description: "Commit SHA to build (the draft release's target — a draft has no git tag yet)"
+        required: true
+        type: string
+  # Secondary path. Primary trigger is a dispatch from release-please.yaml: a
+  # draft pushes no git tag, and release-please's PAT-created release does not
+  # reliably fire `release` to workflows.
   release:
     types: [created]
 
@@ -61,7 +68,7 @@ jobs:
       # Sourced as env (not interpolated into run: scripts) to avoid workflow
       # injection — these come from the release payload.
       TAG: ${{ github.event.release.tag_name || inputs.tag }}
-      TARGET_REF: ${{ github.event.release.target_commitish || inputs.tag }}
+      TARGET_REF: ${{ github.event.release.target_commitish || inputs.sha }}
     steps:
       - id: meta
         run: |
