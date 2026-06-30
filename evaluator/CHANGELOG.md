@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.2](https://github.com/kguardian-dev/kguardian/compare/evaluator/v0.3.1...evaluator/v0.3.2) (2026-06-29)
+
+
+### Bug Fixes
+
+* **deps:** update kubernetes monorepo to v0.36.2 ([#956](https://github.com/kguardian-dev/kguardian/issues/956)) ([0ee2bf2](https://github.com/kguardian-dev/kguardian/commit/0ee2bf22fa1049bfd5de48be509ae3d9a7a76eeb))
+
 ## [0.3.1](https://github.com/kguardian-dev/kguardian/compare/evaluator/v0.3.0...evaluator/v0.3.1) (2026-06-08)
 
 
