@@ -58,12 +58,15 @@ jobs:
         os: [linux, darwin]
         arch: [amd64, arm64]
     env:
+      # Sourced as env (not interpolated into run: scripts) to avoid workflow
+      # injection — these come from the release payload.
       TAG: ${{ github.event.release.tag_name || inputs.tag }}
+      TARGET_REF: ${{ github.event.release.target_commitish || inputs.tag }}
     steps:
       - id: meta
         run: |
           echo "version=${TAG#advisor/v}" >> "$GITHUB_OUTPUT"
-          echo "ref=${{ github.event.release.target_commitish || inputs.tag }}" >> "$GITHUB_OUTPUT"
+          echo "ref=${TARGET_REF}" >> "$GITHUB_OUTPUT"
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           ref: ${{ steps.meta.outputs.ref }}
@@ -82,14 +85,12 @@ jobs:
         run: |
           BIN="advisor-${GOOS}-${GOARCH}"
           COMMIT="$(git rev-parse HEAD)"
-          COMMIT_DATE="$(git log --date=iso8601-strict -1 --pretty=%ct)"
-          if git diff --quiet; then TREE_STATE=clean; else TREE_STATE=dirty; fi
+          COMMIT_DATE="$(git log -1 --pretty=%cI)"
           go build -trimpath -tags=netgo \
             -ldflags "-s -w \
-              -X main.Version=${VERSION} \
-              -X main.Commit=${COMMIT} \
-              -X main.CommitDate=${COMMIT_DATE} \
-              -X main.TreeState=${TREE_STATE} \
+              -X github.com/kguardian-dev/kguardian/advisor/cmd.Version=${VERSION} \
+              -X github.com/kguardian-dev/kguardian/advisor/cmd.GitCommit=${COMMIT} \
+              -X github.com/kguardian-dev/kguardian/advisor/cmd.BuildDate=${COMMIT_DATE} \
               -X github.com/kguardian-dev/kguardian/advisor/pkg/k8s.Version=${VERSION}" \
             -o "../${BIN}" .
           echo "binary=${BIN}" >> "$GITHUB_OUTPUT"
