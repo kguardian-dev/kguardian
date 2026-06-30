@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.9.1](https://github.com/kguardian-dev/kguardian/compare/controller/v1.9.0...controller/v1.9.1) (2026-06-29)
+
+
+### Bug Fixes
+
+* **deps:** update rust crate kube to v4 and k8s-openapi to 0.28 ([#981](https://github.com/kguardian-dev/kguardian/issues/981)) ([134586b](https://github.com/kguardian-dev/kguardian/commit/134586b5988d6d1a3f11c36bd944b921f489bd47))
+
 ## [1.9.0](https://github.com/kguardian-dev/kguardian/compare/controller/v1.8.2...controller/v1.9.0) (2026-06-01)
 
 
