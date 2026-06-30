@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.5.0](https://github.com/kguardian-dev/kguardian/compare/mcp-server/v1.4.1...mcp-server/v1.5.0) (2026-06-29)
+
+
+### Features
+
+* MCP/LLM integration uplift + data-path hardening ([572b31f](https://github.com/kguardian-dev/kguardian/commit/572b31fdcb470af9f6c844186fb9b8fa8cc8b83f))
+
 ## [1.4.1](https://github.com/kguardian-dev/kguardian/compare/mcp-server/v1.4.0...mcp-server/v1.4.1) (2026-06-08)
 
 
