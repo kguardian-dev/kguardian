@@ -36,6 +36,7 @@
     },
     "advisor": {
       "component": "advisor",
+      "draft": true,
       "release-type": "go",
       "package-name": "advisor",
       "changelog-path": "CHANGELOG.md",
