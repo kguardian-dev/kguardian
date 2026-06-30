@@ -22,3 +22,31 @@ jobs:
           config-file: release-please-config.json
           manifest-file: .release-please-manifest.json
           token: ${{ secrets.KGUARDIAN_PAT }}
+
+  # The advisor release is created as a DRAFT (release-please-config draft:true)
+  # so its binaries + provenance can be attached before it becomes immutable. A
+  # draft pushes no git tag and release-please's PAT-created release does not
+  # reliably fire a `release` event to workflows, so this job is the reliable
+  # trigger: it finds a pending advisor draft (no assets yet) and dispatches the
+  # binary build for its target commit. Idempotent — no-op once assets exist.
+  advisor-binary:
+    needs: release-please
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # view draft releases (drafts need push-level visibility)
+      actions: write # dispatch advisor-release.yml
+    steps:
+      - name: Dispatch advisor binary build for a pending draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          tag=$(gh release list --repo "$REPO" --json tagName,isDraft \
+            -q 'map(select(.isDraft and (.tagName|startswith("advisor/"))))|.[0].tagName // ""')
+          if [ -z "$tag" ]; then echo "no pending advisor draft release"; exit 0; fi
+          assets=$(gh release view "$tag" --repo "$REPO" --json assets -q '[.assets[]]|length')
+          if [ "$assets" -gt 0 ]; then echo "$tag already has assets; nothing to do"; exit 0; fi
+          sha=$(gh release view "$tag" --repo "$REPO" --json targetCommitish -q '.targetCommitish')
+          echo "dispatching advisor binary build for $tag @ $sha"
+          gh workflow run advisor-release.yml -f tag="$tag" -f sha="$sha" --repo "$REPO"
