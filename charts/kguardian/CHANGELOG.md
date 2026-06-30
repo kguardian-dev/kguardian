@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.13.0](https://github.com/kguardian-dev/kguardian/compare/chart/v1.12.0...chart/v1.13.0) (2026-06-29)
+
+
+### Features
+
+* MCP/LLM integration uplift + data-path hardening ([572b31f](https://github.com/kguardian-dev/kguardian/commit/572b31fdcb470af9f6c844186fb9b8fa8cc8b83f))
+
 ## [1.12.0](https://github.com/kguardian-dev/kguardian/compare/chart/v1.11.1...chart/v1.12.0) (2026-06-01)
 
 
