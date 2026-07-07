@@ -8,11 +8,15 @@ type DbPool = r2d2::Pool<ConnectionManager<PgConnection>>;
 type DbError = Box<dyn std::error::Error + Send + Sync>;
 
 #[get("/pod/traffic")]
-pub async fn get_pod_traffic(pool: web::Data<DbPool>) -> actix_web::Result<impl Responder> {
+pub async fn get_pod_traffic(
+    pool: web::Data<DbPool>,
+    query: web::Query<PodTrafficQuery>,
+) -> actix_web::Result<impl Responder> {
     debug!("select pod traffic table");
+    let row_limit = clamp_pod_traffic_limit(query.limit);
     let pod_traffic = web::block(move || {
         let mut conn = pool.get()?;
-        pod_traffic(&mut conn)
+        pod_traffic(&mut conn, row_limit)
     })
     .await?
     .map_err(actix_web::error::ErrorInternalServerError)?;
@@ -23,7 +27,38 @@ pub async fn get_pod_traffic(pool: web::Data<DbPool>) -> actix_web::Result<impl 
     })
 }
 
-pub fn pod_traffic(conn: &mut PgConnection) -> Result<Option<Vec<PodTraffic>>, DbError> {
+/// Query params for the cluster-wide `GET /pod/traffic` endpoint.
+#[derive(serde::Deserialize)]
+pub struct PodTrafficQuery {
+    /// Cap rows returned (most-recent-first). Defaults to 5000, hard cap 20000.
+    pub limit: Option<i64>,
+}
+
+/// Clamp the caller-supplied row limit into [1, 20000] with a default of
+/// 5000 when unset. Extracted so the policy can be unit-tested without a
+/// live DB, mirroring `clamp_audit_limit`.
+///
+/// The bound is not cosmetic: `pod_traffic` is a high-insert, never-pruned
+/// table that grows into the millions of rows (observed at 6.7M rows / 2 GB
+/// in production). The pre-bound query was an unbounded
+/// `SELECT * ... ORDER BY time_stamp DESC` — a parallel seq-scan + sort of
+/// the whole table that took tens of seconds and serialised a multi-hundred-MB
+/// body. That stalled the broker, spiked its memory, and overran the
+/// mcp-server's 10 MB response cap, so the client failed to decode the
+/// truncated body with "unexpected EOF" (i.e. cluster-traffic was broken).
+/// At ~350 B/row of JSON, the 20000-row cap is ~7 MB — safely under that cap —
+/// and the default 5000 is ~1.7 MB. The sole cluster-wide consumer
+/// (mcp-server's get_cluster_traffic) only aggregates the rows into per-pod
+/// counts, so a most-recent-first window is the right shape; its counts now
+/// describe the recent window rather than all history.
+pub(crate) fn clamp_pod_traffic_limit(raw: Option<i64>) -> i64 {
+    raw.unwrap_or(5_000).clamp(1, 20_000)
+}
+
+pub fn pod_traffic(
+    conn: &mut PgConnection,
+    row_limit: i64,
+) -> Result<Option<Vec<PodTraffic>>, DbError> {
     use schema::pod_traffic::dsl::*;
 
     // Stable display order — most recent first with uuid (the PK) as
@@ -34,8 +69,14 @@ pub fn pod_traffic(conn: &mut PgConnection) -> Result<Option<Vec<PodTraffic>>, D
     // positions). uuid DESC is deterministic for ties in time_stamp
     // (which the broker stamps from chrono::Utc::now().naive_utc(),
     // and microsecond-level ties are common inside a batch ingest).
+    //
+    // The .limit() bounds the whole-table read (see clamp_pod_traffic_limit);
+    // the idx_pod_traffic_time_stamp index (time_stamp DESC, uuid DESC) lets
+    // this ORDER BY ... LIMIT run as an index scan of `row_limit` rows instead
+    // of a full seq-scan + sort of the millions-of-rows table.
     let pod = pod_traffic
         .order((time_stamp.desc(), uuid.desc()))
+        .limit(row_limit)
         .load::<PodTraffic>(conn)
         .optional()?;
 
@@ -725,6 +766,62 @@ mod tests {
     fn query_rejects_non_numeric_limit() {
         // Better to return a clear 400 than to silently coerce.
         let r: Result<AuditVerdictsQuery, _> = serde_urlencoded::from_str("limit=abc");
+        assert!(r.is_err(), "non-numeric limit must fail to parse");
+    }
+
+    // ---- /pod/traffic limit clamping + query parsing ----
+
+    #[test]
+    fn pod_traffic_clamp_default_when_unset() {
+        // The mcp-server's get_cluster_traffic sends no limit, so the
+        // default governs the whole cluster-traffic path.
+        assert_eq!(clamp_pod_traffic_limit(None), 5_000);
+    }
+
+    #[test]
+    fn pod_traffic_clamp_passes_through_in_range() {
+        for n in [1, 100, 5_000, 10_000, 19_999, 20_000] {
+            assert_eq!(
+                clamp_pod_traffic_limit(Some(n)),
+                n,
+                "in-range {n} must be unchanged"
+            );
+        }
+    }
+
+    #[test]
+    fn pod_traffic_clamp_caps_oversized_request() {
+        // Above the cap the unbounded whole-table serialise returns to
+        // overrunning the mcp-server's 10 MB body cap; hard cap is 20000
+        // (~7 MB at ~350 B/row).
+        assert_eq!(clamp_pod_traffic_limit(Some(1_000_000)), 20_000);
+        assert_eq!(clamp_pod_traffic_limit(Some(i64::MAX)), 20_000);
+    }
+
+    #[test]
+    fn pod_traffic_clamp_floors_zero_and_negative() {
+        // LIMIT 0 returns no rows; negative errors in SQL. Both are almost
+        // certainly a caller mistake — clamp to 1 row.
+        assert_eq!(clamp_pod_traffic_limit(Some(0)), 1);
+        assert_eq!(clamp_pod_traffic_limit(Some(-5)), 1);
+        assert_eq!(clamp_pod_traffic_limit(Some(i64::MIN)), 1);
+    }
+
+    #[test]
+    fn pod_traffic_query_limit_optional() {
+        let q: PodTrafficQuery = serde_urlencoded::from_str("").expect("must parse");
+        assert!(q.limit.is_none());
+    }
+
+    #[test]
+    fn pod_traffic_query_parses_limit() {
+        let q: PodTrafficQuery = serde_urlencoded::from_str("limit=1234").expect("must parse");
+        assert_eq!(q.limit, Some(1234));
+    }
+
+    #[test]
+    fn pod_traffic_query_rejects_non_numeric_limit() {
+        let r: Result<PodTrafficQuery, _> = serde_urlencoded::from_str("limit=abc");
         assert!(r.is_err(), "non-numeric limit must fail to parse");
     }
 
