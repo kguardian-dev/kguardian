@@ -2,7 +2,7 @@ module github.com/kguardian-dev/kguardian/evaluator
 
 go 1.26.0
 
-toolchain go1.26.4
+toolchain go1.26.5
 
 require (
 	github.com/sirupsen/logrus v1.9.4
