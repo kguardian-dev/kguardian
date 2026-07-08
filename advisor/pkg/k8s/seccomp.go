@@ -40,9 +40,14 @@ var ValidSeccompActions = []string{"SCMP_ACT_ERRNO", "SCMP_ACT_KILL", "SCMP_ACT_
 // controller) to the seccomp arch tokens. Exported so callers that build a
 // profile outside the file-writing GenerateSeccompProfile path (e.g. the
 // `serve` HTTP API) reuse the same mapping rather than duplicating it.
+// Keys MUST match the arch string the controller records, which is Rust's
+// std::env::consts::ARCH (controller/src/syscall.rs) — i.e. "x86_64" or
+// "aarch64". The previous "ARM64" key never matched anything the controller
+// writes, so on ARM/aarch64 nodes the lookup missed and the generated profile
+// had "architectures": null — a structurally invalid, unusable seccomp profile.
 var SeccompArchitectures = map[string][]string{
-	"x86_64": {"SCMP_ARCH_X86_64"},
-	"ARM64":  {"SCMP_ARCH_ARM64"},
+	"x86_64":  {"SCMP_ARCH_X86_64"},
+	"aarch64": {"SCMP_ARCH_ARM64"},
 }
 
 // BuildSeccompProfile constructs a SeccompProfile that allow-lists exactly the
