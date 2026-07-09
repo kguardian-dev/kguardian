@@ -2,17 +2,27 @@
   $schema: "https://docs.renovatebot.com/renovate-schema.json",
   packageRules: [
     {
-      description: "Auto-merge GitHub Actions non-breaking updates",
-      matchManagers: ["github-actions"],
+      // Auto-merge ALL non-major updates (any manager, including GitHub
+      // Actions) once CI is green. `automerge: true` + `platformAutomerge`
+      // enables GitHub native auto-merge; the `automerge` label lets the
+      // renovate-automerge workflow complete the merge, which is required
+      // because main's branch protection mandates a code-owner review the bot
+      // cannot provide (so native auto-merge alone never completes). Majors are
+      // excluded below and always go through manual review.
+      description: "Auto-merge non-major (minor/patch/pin/digest) updates that pass CI",
       matchUpdateTypes: ["minor", "patch", "pin", "digest"],
       automerge: true,
-      automergeType: "branch",
-      ignoreTests: true
+      automergeType: "pr",
+      platformAutomerge: true,
+      addLabels: ["automerge"],
     },
     {
-      description: "Never auto-merge major (breaking) updates",
+      // Major bumps can carry breaking changes — always a manual PR + review,
+      // regardless of manager (GitHub Actions included).
+      description: "Never auto-merge major (breaking) updates — require manual review",
       matchUpdateTypes: ["major"],
-      automerge: false
-    }
-  ]
+      automerge: false,
+      addLabels: ["needs-manual-review"],
+    },
+  ],
 }
