@@ -1,0 +1,64 @@
+---
+# yaml-language-server: $schema=https://json.schemastore.org/github-workflow.json
+name: Renovate Auto-merge
+
+# Completes the merge of non-major Renovate PRs. main's branch protection
+# requires a code-owner review the Renovate bot cannot provide, so Renovate's
+# own platformAutomerge never completes on its own. This sweep admin-merges the
+# PRs Renovate has marked `automerge` (minor / patch / pin / digest — see
+# .github/renovate/autoMerge.json5) once every check is green. Major bumps are
+# labeled `needs-manual-review` and are never touched here.
+
+on:
+  schedule:
+    - cron: "*/30 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pull-requests: read
+
+concurrency:
+  group: renovate-automerge
+  cancel-in-progress: false
+
+jobs:
+  automerge:
+    name: Merge green non-major Renovate PRs
+    runs-on: ubuntu-latest
+    steps:
+      - name: Admin-merge eligible PRs
+        env:
+          # Admin PAT: main's branch protection (code-owner review +
+          # last-push-approval) can only be bypassed by an admin merge, which
+          # the bot's own token cannot perform. Same secret release-please uses
+          # to admin-merge its own PRs.
+          GH_TOKEN: ${{ secrets.KGUARDIAN_PAT }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          # Eligible: open, branch renovate/*, labeled `automerge`, NOT
+          # `needs-manual-review`, and GitHub reports it mergeable.
+          mapfile -t prs < <(gh pr list --repo "$REPO" --state open --limit 100 \
+            --json number,headRefName,labels,mergeable \
+            --jq '.[]
+              | select(.headRefName | startswith("renovate/"))
+              | select([.labels[].name] | index("automerge"))
+              | select([.labels[].name] | index("needs-manual-review") | not)
+              | select(.mergeable == "MERGEABLE")
+              | .number')
+          if [ "${#prs[@]}" -eq 0 ]; then
+            echo "No eligible Renovate PRs."
+            exit 0
+          fi
+          for pr in "${prs[@]}"; do
+            # Every check must be passing (gh pr checks exits 0). Pending (8) or
+            # failing (1) -> skip; the next scheduled run retries once CI settles.
+            if gh pr checks "$pr" --repo "$REPO" >/dev/null 2>&1; then
+              echo "Admin-merging Renovate PR #$pr"
+              gh pr merge "$pr" --repo "$REPO" --squash --admin --delete-branch \
+                || echo "::warning::merge failed for #$pr (conflict or race); will retry next run"
+            else
+              echo "PR #$pr checks not all green yet; skipping"
+            fi
+          done
