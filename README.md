@@ -20,7 +20,6 @@ _Least-privilege Kubernetes security policies, generated from what your pods act
 <div align="center">
 
 [![Chart](https://img.shields.io/github/v/release/kguardian-dev/kguardian?filter=chart%2F*&style=flat-square&label=chart&logo=helm&logoColor=white)](https://github.com/kguardian-dev/kguardian/releases)&nbsp;&nbsp;
-[![Go Report Card](https://goreportcard.com/badge/github.com/kguardian-dev/kguardian?style=flat-square)](https://goreportcard.com/report/github.com/kguardian-dev/kguardian)&nbsp;&nbsp;
 [![Security Scan](https://img.shields.io/github/actions/workflow/status/kguardian-dev/kguardian/security-scan.yaml?branch=main&style=flat-square&label=security%20scan)](https://github.com/kguardian-dev/kguardian/actions/workflows/security-scan.yaml)&nbsp;&nbsp;
 [![Stars](https://img.shields.io/github/stars/kguardian-dev/kguardian?style=flat-square&logo=github)](https://github.com/kguardian-dev/kguardian/stargazers)&nbsp;&nbsp;
 [![Last Commit](https://img.shields.io/github/last-commit/kguardian-dev/kguardian?style=flat-square)](https://github.com/kguardian-dev/kguardian/commits/main)&nbsp;&nbsp;
