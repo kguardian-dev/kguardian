@@ -1,4 +1,5 @@
-ARG DEBIAN_VERSION="12.9"
+# renovate: datasource=docker depName=debian
+ARG DEBIAN_VERSION="12.15"
 
 FROM --platform=$BUILDPLATFORM ubuntu:26.04 AS builder
 
