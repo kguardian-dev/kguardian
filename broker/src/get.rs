@@ -425,7 +425,7 @@ pub(crate) fn clamp_audit_limit(raw: Option<i64>) -> i64 {
 /// `policy_namespace = ''`), so empty-namespace stays as an explicit
 /// filter. See the doc comment on `policy_ns` in the handler.
 pub(crate) fn normalise_empty_to_none(raw: Option<String>) -> Option<String> {
-    raw.and_then(|s| if s.is_empty() { None } else { Some(s) })
+    raw.filter(|s| !s.is_empty())
 }
 
 /// Whitelist of valid verdict values. Anything else is rejected with
