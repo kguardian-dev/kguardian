@@ -15,7 +15,7 @@ COPY db  /app/broker/db
 
 RUN --mount=type=cache,target=/usr/local/cargo/registry  cargo build --release
 
-FROM debian:bookworm-slim AS app
+FROM debian:12.15-slim AS app
 
 RUN apt update && apt install libpq5 -y
 

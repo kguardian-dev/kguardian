@@ -33,6 +33,19 @@
       "pinDigests": false,
     },
   ],
+  "customManagers": [
+    {
+      // Tracks Dockerfile ARGs annotated with "# renovate: datasource=... depName=..."
+      // (e.g. DEBIAN_VERSION in controller/Dockerfile, which the native docker
+      // manager cannot update through the ARG indirection).
+      "customType": "regex",
+      "managerFilePatterns": ["/(^|/)Dockerfile$/"],
+      "matchStrings": [
+        "# renovate: datasource=(?<datasource>[a-z-]+) depName=(?<depName>\\S+)( versioning=(?<versioning>\\S+))?\\s*\\nARG \\S+=\"(?<currentValue>[^\"]+)\"",
+      ],
+      "versioningTemplate": "{{#if versioning}}{{{versioning}}}{{else}}docker{{/if}}",
+    },
+  ],
   "pre-commit": {
     "enabled": true
   },
