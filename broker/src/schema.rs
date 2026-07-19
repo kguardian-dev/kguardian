@@ -75,6 +75,15 @@ diesel::table! {
     }
 }
 
+diesel::table! {
+    // Single row: this installation's anonymous id for the version
+    // check-in (version_check.rs). Random UUID, no cluster/user data.
+    install_info (install_id) {
+        install_id -> Varchar,
+        created_at -> Timestamp,
+    }
+}
+
 diesel::allow_tables_to_appear_in_same_query!(
     pod_details,
     pod_traffic,

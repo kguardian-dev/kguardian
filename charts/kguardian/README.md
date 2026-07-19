@@ -407,6 +407,8 @@ The following table lists the configurable parameters of the kguardian chart and
 | namespace.annotations | object | `{}` | Annotations to add to the namespace |
 | namespace.labels | object | `{}` | Labels to add to the namespace |
 | namespace.name | string | `""` | Namespace name. If empty, uses the release namespace |
+| telemetry.enabled | bool | `true` | Enable the daily anonymous version check-in. The broker asks the kguardian version service for the latest released versions (surfacing an update notice in the UI and at GET /version); the request doubles as the project's only usage signal. Exactly six fields are sent — a random install UUID, broker version, chart version, Kubernetes version, live node count, and CPU architecture. No cluster names, no IPs stored, no user data. Documented verbatim at https://docs.kguardian.dev/telemetry. Set to false to disable entirely: no task is spawned and no request is ever made. Air-gapped/egress-restricted clusters can also just leave it on — failures are silent and harmless. |
+| telemetry.endpoint | string | `"https://version.kguardian.dev/v1/check"` | Version service the broker calls once a day. Override to self-host or point at a mock; unreachable endpoints are ignored silently. |
 
 ## Upgrading
 

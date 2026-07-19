@@ -7,8 +7,8 @@ use api::{
     add_pod_details, add_pods, add_pods_batch, add_pods_syscalls, add_svc_details,
     establish_connection, get_audit_verdicts, get_pod_by_ip, get_pod_by_name, get_pod_details,
     get_pod_syscall_name, get_pod_traffic, get_pod_traffic_name, get_pods_by_node, get_svc_by_ip,
-    get_svc_details, mark_pod_dead, set_statement_timeout, spawn_retention, AuditClient,
-    StatementTimeoutCustomizer,
+    get_svc_details, get_version, mark_pod_dead, set_statement_timeout, spawn_retention,
+    spawn_version_check, AuditClient, StatementTimeoutCustomizer, VersionCheckState,
 };
 
 use diesel::r2d2;
@@ -259,6 +259,11 @@ async fn main() -> Result<(), std::io::Error> {
     // chart. Disable by setting AUDIT_VERDICTS_RETENTION_DAYS=0.
     spawn_retention(pool.clone());
 
+    // Daily anonymous version check-in + shared state for GET /version.
+    // Disabled entirely (no task, no requests) with TELEMETRY_ENABLED=false.
+    let version_state = web::Data::new(VersionCheckState::default());
+    spawn_version_check(pool.clone(), version_state.clone());
+
     let listen_addr = listen_addr();
     info!(addr = %listen_addr, "broker HTTP server starting");
     HttpServer::new(move || {
@@ -276,6 +281,7 @@ async fn main() -> Result<(), std::io::Error> {
             .app_data(web::Data::new(pool.clone()))
             .app_data(web::Data::new(audit_client.clone()))
             .app_data(web::Data::new(auth_config.clone()))
+            .app_data(version_state.clone())
             .service(add_pods)
             .service(add_pods_batch)
             .service(add_pod_details)
@@ -292,6 +298,7 @@ async fn main() -> Result<(), std::io::Error> {
             .service(get_pods_by_node)
             .service(get_audit_verdicts)
             .service(mark_pod_dead)
+            .service(get_version)
             .service(health_check)
             .service(metrics)
     })

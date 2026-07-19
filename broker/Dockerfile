@@ -17,7 +17,8 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry  cargo build --release
 
 FROM debian:12.15-slim AS app
 
-RUN apt update && apt install libpq5 -y
+# ca-certificates: root store for the outbound HTTPS version check-in.
+RUN apt update && apt install -y libpq5 ca-certificates && rm -rf /var/lib/apt/lists/*
 
 COPY --from=build /app/broker/target/release/broker /broker
 

@@ -5,6 +5,7 @@ mod get;
 mod retention;
 mod telemetry;
 mod types;
+mod version_check;
 pub use add::{
     add_pod_details, add_pods, add_pods_batch, add_pods_syscalls, add_svc_details, mark_pod_dead,
 };
@@ -13,6 +14,7 @@ pub use error::*;
 pub use retention::spawn as spawn_retention;
 pub use telemetry::*;
 pub use types::*;
+pub use version_check::{get_version, spawn as spawn_version_check, VersionCheckState};
 mod conn;
 pub use conn::*;
 mod schema;

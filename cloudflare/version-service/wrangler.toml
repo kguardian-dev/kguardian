@@ -1,0 +1,27 @@
+name = "kguardian-version-service"
+main = "src/index.js"
+compatibility_date = "2026-07-01"
+
+# Custom domain: version.kguardian.dev (zone kguardian.dev must be on this
+# Cloudflare account; the route is claimed automatically on deploy).
+routes = [
+  { pattern = "version.kguardian.dev", custom_domain = true }
+]
+
+# Cache of the GitHub Releases lookup (5 min TTL) — create with:
+#   wrangler kv namespace create VERSIONS
+# then paste the returned id below.
+[[kv_namespaces]]
+binding = "VERSIONS"
+id = "REPLACE_WITH_KV_NAMESPACE_ID"
+
+# Usage telemetry sink. Free tier; query with the Analytics Engine SQL API:
+#   SELECT COUNT(DISTINCT index1) AS installs FROM kguardian_telemetry
+#   WHERE timestamp > NOW() - INTERVAL '30' DAY
+[[analytics_engine_datasets]]
+binding = "TELEMETRY"
+dataset = "kguardian_telemetry"
+
+# Optional secret to raise the GitHub API rate limit (not required — the
+# KV cache keeps traffic minimal):
+#   wrangler secret put GITHUB_TOKEN
