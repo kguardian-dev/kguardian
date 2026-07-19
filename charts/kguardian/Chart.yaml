@@ -8,10 +8,9 @@ home: https://github.com/kguardian-dev/kguardian
 # Versions are expected to follow Semantic Versioning (https://semver.org/)
 version: 1.13.1
 
-# kguardian is multi-component (each image pins its own tag in values.yaml),
-# so appVersion tracks the chart release itself. Kept in sync by release-please
-# via the x-release-please-version annotation — do not edit by hand.
-appVersion: "1.13.1"  # x-release-please-version
+# appVersion is intentionally omitted: kguardian is multi-component and each
+# service pins its own image tag in values.yaml, so no single application
+# version exists. The chart `version` above is the only release identifier.
 kubeVersion: ">= 1.18.0-0"
 
 keywords:

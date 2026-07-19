@@ -50,10 +50,7 @@
       "release-type": "helm",
       "package-name": "kguardian",
       "changelog-path": "CHANGELOG.md",
-      "include-component-in-tag": true,
-      "extra-files": [
-        "Chart.yaml"
-      ]
+      "include-component-in-tag": true
     },
     "llm-bridge": {
       "component": "llm-bridge",
