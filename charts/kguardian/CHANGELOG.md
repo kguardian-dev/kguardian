@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.13.2](https://github.com/kguardian-dev/kguardian/compare/chart/v1.13.1...chart/v1.13.2) (2026-07-19)
+
+
+### Bug Fixes
+
+* **charts:** track chart release in appVersion and release on image bumps ([#1096](https://github.com/kguardian-dev/kguardian/issues/1096)) ([7924050](https://github.com/kguardian-dev/kguardian/commit/792405030c2f40961b9efea2d3ff90ee2f77dd65))
+
 ## [1.13.1](https://github.com/kguardian-dev/kguardian/compare/chart/v1.13.0...chart/v1.13.1) (2026-07-19)
 
 
