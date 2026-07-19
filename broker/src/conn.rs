@@ -1,9 +1,45 @@
 extern crate dotenv;
 
 use diesel::pg::PgConnection;
-use diesel::r2d2::ConnectionManager;
+use diesel::r2d2::{ConnectionManager, CustomizeConnection};
+use diesel::{sql_query, QueryResult, RunQueryDsl};
 use dotenv::dotenv;
 use std::env;
+
+/// Apply Postgres `statement_timeout` to a single connection's session.
+/// `ms = 0` disables it (Postgres treats 0 as "no limit"). The value is
+/// our own integer, never user input, so the inline format is injection-safe.
+pub fn set_statement_timeout(conn: &mut PgConnection, ms: u64) -> QueryResult<()> {
+    sql_query(format!("SET statement_timeout = {ms}")).execute(conn)?;
+    Ok(())
+}
+
+/// r2d2 customizer that caps every pooled connection's per-statement runtime.
+/// The broker runs as a single replica, so one slow or accidentally-unbounded
+/// query would otherwise tie up a worker/connection indefinitely and can
+/// cascade into liveness-probe failures. This is the universal backstop under
+/// the whole "no unbounded read" effort: even a future unbounded query is
+/// killed by Postgres at the deadline instead of wedging the broker.
+///
+/// NOT applied to the startup migration connection — long `CREATE INDEX`
+/// builds on multi-million-row tables must not be killed (main.rs disables the
+/// timeout around `run_migrations` and restores it after).
+#[derive(Debug, Clone, Copy)]
+pub struct StatementTimeoutCustomizer {
+    timeout_ms: u64,
+}
+
+impl StatementTimeoutCustomizer {
+    pub fn new(timeout_ms: u64) -> Self {
+        Self { timeout_ms }
+    }
+}
+
+impl CustomizeConnection<PgConnection, diesel::r2d2::Error> for StatementTimeoutCustomizer {
+    fn on_acquire(&self, conn: &mut PgConnection) -> Result<(), diesel::r2d2::Error> {
+        set_statement_timeout(conn, self.timeout_ms).map_err(diesel::r2d2::Error::QueryError)
+    }
+}
 
 pub fn establish_connection() -> ConnectionManager<PgConnection> {
     dotenv().ok();

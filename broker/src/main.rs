@@ -7,7 +7,8 @@ use api::{
     add_pod_details, add_pods, add_pods_batch, add_pods_syscalls, add_svc_details,
     establish_connection, get_audit_verdicts, get_pod_by_ip, get_pod_by_name, get_pod_details,
     get_pod_syscall_name, get_pod_traffic, get_pod_traffic_name, get_pods_by_node, get_svc_by_ip,
-    get_svc_details, mark_pod_dead, spawn_retention, AuditClient,
+    get_svc_details, mark_pod_dead, set_statement_timeout, spawn_retention, AuditClient,
+    StatementTimeoutCustomizer,
 };
 
 use diesel::r2d2;
@@ -46,6 +47,8 @@ fn run_migrations(
 /// operator sets DB_POOL_MAX_SIZE too low. Tune up via the env when
 /// /metrics shows pool-acquire contention.
 const DEFAULT_DB_POOL_MAX_SIZE: u32 = 32;
+/// Default per-statement timeout (30s). See db_statement_timeout_ms.
+const DEFAULT_DB_STATEMENT_TIMEOUT_MS: u64 = 30_000;
 
 /// AUDIT_INFLIGHT_PERMITS default, mirrored from audit.rs so the pool can
 /// reserve headroom above it. Keep in sync with that module's default.
@@ -85,6 +88,19 @@ fn db_pool_max_size() -> u32 {
         .and_then(|v| v.trim().parse::<u32>().ok())
         .map(|n| n.max(1))
         .unwrap_or(DEFAULT_DB_POOL_MAX_SIZE)
+}
+
+/// Per-statement timeout (ms) applied to every pooled connection as a backstop
+/// against a slow/unbounded query wedging the single-replica broker. `0`
+/// disables it. Default 30s: comfortably above any healthy request query
+/// (bounded reads are sub-second) yet a hard ceiling on pathological ones.
+/// Unlike the pool size this is NOT floored to 1 — `0` is the meaningful
+/// "disabled" value (Postgres reads `statement_timeout = 0` as "no limit").
+fn db_statement_timeout_ms() -> u64 {
+    std::env::var("DB_STATEMENT_TIMEOUT_MS")
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .unwrap_or(DEFAULT_DB_STATEMENT_TIMEOUT_MS)
 }
 
 /// Resolve the pool size actually handed to r2d2: the configured value
@@ -146,11 +162,20 @@ async fn main() -> Result<(), std::io::Error> {
     init_logging();
     let manager = establish_connection();
     let max_size = effective_pool_size();
+    let stmt_timeout_ms = db_statement_timeout_ms();
     info!(max_size, "constructing DB connection pool");
-    let pool = r2d2::Pool::builder()
-        .max_size(max_size)
-        .build(manager)
-        .expect("Failed to create pool.");
+    let mut builder = r2d2::Pool::builder().max_size(max_size);
+    if stmt_timeout_ms > 0 {
+        info!(
+            stmt_timeout_ms,
+            "applying per-connection statement_timeout backstop"
+        );
+        builder = builder
+            .connection_customizer(Box::new(StatementTimeoutCustomizer::new(stmt_timeout_ms)));
+    } else {
+        info!("statement_timeout backstop disabled (DB_STATEMENT_TIMEOUT_MS=0)");
+    }
+    let pool = builder.build(manager).expect("Failed to create pool.");
     // RUN the migration schema with retries. The chart's wait-for-db
     // init container handles the "DB pod not started" case via TCP
     // probe, so this loop's real purpose is to absorb the gap
@@ -161,21 +186,39 @@ async fn main() -> Result<(), std::io::Error> {
     info!(max_retries, "running embedded migrations");
     for attempt in 1..=max_retries {
         match pool.get() {
-            Ok(mut conn) => match run_migrations(&mut conn) {
-                Ok(()) => {
-                    info!("DB setup success");
-                    break;
-                }
-                Err(e) => {
-                    if attempt == max_retries {
-                        panic!("DB migration failed after {} attempts: {}", max_retries, e);
+            Ok(mut conn) => {
+                // The statement_timeout backstop (applied by the pool customizer
+                // on acquire) would kill a long CREATE INDEX on a multi-million-row
+                // table mid-build. Disable it for the migration session, then
+                // restore it before this connection returns to the pool so it
+                // still carries the backstop when later serving requests.
+                if stmt_timeout_ms > 0 {
+                    if let Err(e) = set_statement_timeout(&mut conn, 0) {
+                        warn!("could not disable statement_timeout for migrations: {e}");
                     }
-                    warn!(
-                        "DB migration attempt {}/{} failed: {}. Retrying in 2s...",
-                        attempt, max_retries, e
-                    );
                 }
-            },
+                let migration_result = run_migrations(&mut conn);
+                if stmt_timeout_ms > 0 {
+                    if let Err(e) = set_statement_timeout(&mut conn, stmt_timeout_ms) {
+                        warn!("could not restore statement_timeout after migrations: {e}");
+                    }
+                }
+                match migration_result {
+                    Ok(()) => {
+                        info!("DB setup success");
+                        break;
+                    }
+                    Err(e) => {
+                        if attempt == max_retries {
+                            panic!("DB migration failed after {} attempts: {}", max_retries, e);
+                        }
+                        warn!(
+                            "DB migration attempt {}/{} failed: {}. Retrying in 2s...",
+                            attempt, max_retries, e
+                        );
+                    }
+                }
+            }
             Err(e) => {
                 if attempt == max_retries {
                     panic!(
@@ -595,6 +638,53 @@ mod tests {
         // silently fall back to the default.
         with_pool_env(Some("  32\n"), || {
             assert_eq!(db_pool_max_size(), 32);
+        });
+    }
+
+    // db_statement_timeout_ms is the backstop that keeps one slow/unbounded
+    // query from wedging the single-replica broker. Unlike the pool size, 0 is
+    // a MEANINGFUL value (disabled) and must NOT be floored to 1.
+
+    fn with_stmt_timeout_env<F: FnOnce()>(value: Option<&str>, f: F) {
+        with_env("DB_STATEMENT_TIMEOUT_MS", value, f);
+    }
+
+    #[test]
+    fn stmt_timeout_defaults_when_unset() {
+        with_stmt_timeout_env(None, || {
+            assert_eq!(db_statement_timeout_ms(), DEFAULT_DB_STATEMENT_TIMEOUT_MS);
+        });
+    }
+
+    #[test]
+    fn stmt_timeout_explicit_override() {
+        with_stmt_timeout_env(Some("15000"), || {
+            assert_eq!(db_statement_timeout_ms(), 15_000);
+        });
+    }
+
+    #[test]
+    fn stmt_timeout_zero_disables_not_floored() {
+        // 0 means "no timeout" (Postgres semantics); the pool builder skips the
+        // customizer entirely. It must survive as 0, unlike the pool size which
+        // floors to 1 — flooring here would silently impose a 1ms timeout and
+        // kill every query.
+        with_stmt_timeout_env(Some("0"), || {
+            assert_eq!(db_statement_timeout_ms(), 0);
+        });
+    }
+
+    #[test]
+    fn stmt_timeout_garbage_falls_back_to_default() {
+        with_stmt_timeout_env(Some("not-a-number"), || {
+            assert_eq!(db_statement_timeout_ms(), DEFAULT_DB_STATEMENT_TIMEOUT_MS);
+        });
+    }
+
+    #[test]
+    fn stmt_timeout_trims_whitespace() {
+        with_stmt_timeout_env(Some("  20000\n"), || {
+            assert_eq!(db_statement_timeout_ms(), 20_000);
         });
     }
 
