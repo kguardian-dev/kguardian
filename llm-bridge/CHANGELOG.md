@@ -1,5 +1,15 @@
 # Changelog
 
+## [1.4.1](https://github.com/kguardian-dev/kguardian/compare/llm-bridge/v1.4.0...llm-bridge/v1.4.1) (2026-07-19)
+
+
+### Bug Fixes
+
+* **deps:** update dependency @anthropic-ai/sdk to ^0.110.0 ([#1022](https://github.com/kguardian-dev/kguardian/issues/1022)) ([a23a684](https://github.com/kguardian-dev/kguardian/commit/a23a68457f8b3dcf48a577b1014da8019b248a83))
+* **deps:** update dependency @anthropic-ai/sdk to ^0.111.0 ([#1050](https://github.com/kguardian-dev/kguardian/issues/1050)) ([e847663](https://github.com/kguardian-dev/kguardian/commit/e847663fee2b77786b8612a96222a20b4161229d))
+* **deps:** update dependency @anthropic-ai/sdk to ^0.112.0 ([#1072](https://github.com/kguardian-dev/kguardian/issues/1072)) ([8a1a112](https://github.com/kguardian-dev/kguardian/commit/8a1a112f474f89869c4d85f5fdc062e3e170e426))
+* **llm-bridge:** harden AI streaming — resilience + error correctness ([#1039](https://github.com/kguardian-dev/kguardian/issues/1039)) ([81fd7b0](https://github.com/kguardian-dev/kguardian/commit/81fd7b015cc3740302ae4d4212b01ce56ba6cc73))
+
 ## [1.4.0](https://github.com/kguardian-dev/kguardian/compare/llm-bridge/v1.3.0...llm-bridge/v1.4.0) (2026-06-29)
 
 
