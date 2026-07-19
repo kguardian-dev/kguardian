@@ -20,6 +20,17 @@
   "platformAutomerge": true,
   "packageRules": [
     {
+      // Chart image-tag bumps must cut a chart release: release-please hides
+      // chore(deps) commits, so a chart published right before Renovate rolls
+      // the tags (e.g. chart 1.13.1 pinning broker 1.11.0 hours after 1.11.1
+      // shipped) stays stale until an unrelated fix lands. Typing these as
+      // fix(deps) makes every component-image bump produce a chart patch
+      // release automatically.
+      "description": "Chart image tag bumps are user-facing — release the chart",
+      "matchFileNames": ["charts/**"],
+      "semanticCommitType": "fix",
+    },
+    {
       // The SLSA generator's reusable workflows MUST be referenced by a version
       // tag (refs/tags/vX.Y.Z). The builder resolves its own ref to derive the
       // release version for provenance, so a commit SHA makes it fail with

@@ -1,4 +1,4 @@
-kguardian {{ .Chart.AppVersion }} installed in namespace "{{ .Release.Namespace }}".
+kguardian chart {{ .Chart.Version }} installed in namespace "{{ .Release.Namespace }}".
 
 {{- if .Values.database.enabled }}
 Database: in-cluster PostgreSQL {{ .Values.database.image.tag }}
