@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.13.1](https://github.com/kguardian-dev/kguardian/compare/chart/v1.13.0...chart/v1.13.1) (2026-07-19)
+
+
+### Bug Fixes
+
+* **broker:** add statement_timeout backstop on DB connections ([#1036](https://github.com/kguardian-dev/kguardian/issues/1036)) ([4d139c2](https://github.com/kguardian-dev/kguardian/commit/4d139c25512bee3f4b0e543fde0993cd1e29f2e6))
+
 ## [1.13.0](https://github.com/kguardian-dev/kguardian/compare/chart/v1.12.0...chart/v1.13.0) (2026-06-29)
 
 
