@@ -3,6 +3,7 @@ package cmd
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"os"
 	"os/signal"
@@ -162,6 +163,15 @@ func handleSeccompGenerate(w http.ResponseWriter, r *http.Request) {
 	}
 
 	profile := k8s.BuildSeccompProfile(syscalls.Syscalls, syscalls.Arch, "SCMP_ACT_ERRNO")
+	// Never hand back a structurally-invalid profile. An unrecognised arch
+	// yields empty Architectures ("architectures": null), which is unusable —
+	// the CLI's file-writing path validates, so the serve path must too, or the
+	// MCP generate_seccomp_profile tool silently returns a broken profile.
+	if err := k8s.ValidateProfile(profile); err != nil {
+		log.Warn().Err(err).Str("arch", syscalls.Arch).Msgf("serve: invalid seccomp profile for pod %s", pod)
+		writeJSONError(w, http.StatusUnprocessableEntity, fmt.Sprintf("generated seccomp profile is invalid: %v", err))
+		return
+	}
 	body, err := json.MarshalIndent(profile, "", "    ")
 	if err != nil {
 		writeJSONError(w, http.StatusInternalServerError, "failed to marshal seccomp profile")
