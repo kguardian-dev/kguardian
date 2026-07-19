@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.6.1](https://github.com/kguardian-dev/kguardian/compare/advisor/v1.6.0...advisor/v1.6.1) (2026-07-19)
+
+
+### Bug Fixes
+
+* **advisor:** seccomp generation on ARM nodes (architectures was null) ([#1042](https://github.com/kguardian-dev/kguardian/issues/1042)) ([ad68795](https://github.com/kguardian-dev/kguardian/commit/ad68795012da27bb581568c18174fcd5d80b0dc8))
+* **deps:** update module github.com/cilium/cilium to v1.19.6 ([#1070](https://github.com/kguardian-dev/kguardian/issues/1070)) ([a69745c](https://github.com/kguardian-dev/kguardian/commit/a69745cd314dacc930ce4e789a1c9e1f52b65a68))
+
 ## [1.6.0](https://github.com/kguardian-dev/kguardian/compare/advisor/v1.5.1...advisor/v1.6.0) (2026-06-30)
 
 
