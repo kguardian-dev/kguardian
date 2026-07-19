@@ -42,6 +42,7 @@ It's built for platform and security teams who want policy-as-code without writi
 - [🤖 AI Assistant](#-ai-assistant)
 - [🧩 Compatibility](#-compatibility)
 - [📊 Performance](#-performance)
+- [📡 Telemetry](#-telemetry)
 - [🤝 Contributing](#-contributing)
 - [📄 License](#-license)
 
@@ -169,6 +170,10 @@ Reference figures from a real-world deployment — a 3-node cluster (18 vCPU / 4
 - **Storage growth is dedup-bounded:** once a workload's flow set is learned, new rows drop to ~0/min in steady state. The database grows with *new* behavior, not with time or traffic volume; `broker.audit.retention.days` caps the audit-verdict history.
 
 This is one measured data point, not a synthetic sweep — treat it as an order-of-magnitude envelope. Expect numbers to scale with flow cardinality, not raw pod count.
+
+## 📡 Telemetry
+
+The broker performs a daily anonymous version check-in that powers the UI's update notice and is the project's only usage signal. Exactly six fields are sent — a random install UUID, broker/chart/Kubernetes versions, node count, and CPU architecture; no cluster names, IPs, or workload data, ever. It's on by default, announced at install time, documented field-by-field in the [telemetry docs](https://docs.kguardian.dev/telemetry), and disabled with `--set telemetry.enabled=false`.
 
 ## 🤝 Contributing
 

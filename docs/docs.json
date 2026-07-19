@@ -61,7 +61,8 @@
           {
             "group": "Advanced",
             "pages": [
-              "advanced/troubleshooting"
+              "advanced/troubleshooting",
+              "telemetry"
             ]
           },
           {
@@ -132,7 +133,7 @@
     ],
     "primary": {
       "type": "button",
-      "label": "Star on GitHub ⭐",
+      "label": "Star on GitHub \u2b50",
       "href": "https://github.com/kguardian-dev/kguardian"
     }
   },
