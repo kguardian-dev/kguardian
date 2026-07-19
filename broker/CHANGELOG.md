@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.11.1](https://github.com/kguardian-dev/kguardian/compare/broker/v1.11.0...broker/v1.11.1) (2026-07-19)
+
+
+### Bug Fixes
+
+* **broker:** add statement_timeout backstop on DB connections ([#1036](https://github.com/kguardian-dev/kguardian/issues/1036)) ([4d139c2](https://github.com/kguardian-dev/kguardian/commit/4d139c25512bee3f4b0e543fde0993cd1e29f2e6))
+* **broker:** bound /pod/traffic to stop oversized-response failures ([#1034](https://github.com/kguardian-dev/kguardian/issues/1034)) ([bf10c4a](https://github.com/kguardian-dev/kguardian/commit/bf10c4a626da9d6351ce504efbe41f8d79a85c9c))
+
 ## [1.11.0](https://github.com/kguardian-dev/kguardian/compare/broker/v1.10.1...broker/v1.11.0) (2026-06-29)
 
 
