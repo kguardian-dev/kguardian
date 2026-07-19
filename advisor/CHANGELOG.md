@@ -1,5 +1,39 @@
 # Changelog
 
+## [1.7.0](https://github.com/kguardian-dev/kguardian/compare/advisor/v1.6.1...advisor/v1.7.0) (2026-07-19)
+
+
+### Features
+
+* **advisor:** add --broker-namespace and --broker-service CLI flags ([8c5f945](https://github.com/kguardian-dev/kguardian/commit/8c5f945cc9461a0c1eb63b2f59b0ce4c86b62e3d))
+* AuditNetworkPolicy — preview NetworkPolicy impact, end-to-end ([#851](https://github.com/kguardian-dev/kguardian/issues/851)) ([05acd27](https://github.com/kguardian-dev/kguardian/commit/05acd270883a0555384d9701be47c0b5503793e0))
+* massive-uplift production hardening release ([#888](https://github.com/kguardian-dev/kguardian/issues/888)) ([176a160](https://github.com/kguardian-dev/kguardian/commit/176a160ae4f63baf46a6b5372a2b91040c28961f))
+* MCP/LLM integration uplift + data-path hardening ([572b31f](https://github.com/kguardian-dev/kguardian/commit/572b31fdcb470af9f6c844186fb9b8fa8cc8b83f))
+* overall improvements and uplift ([2f6aa21](https://github.com/kguardian-dev/kguardian/commit/2f6aa216a217412bba14126365a96c4db0e7df62))
+* overall improvements and uplift ([e7c223c](https://github.com/kguardian-dev/kguardian/commit/e7c223cd00147071eefb3285b110c75585a05a3c))
+
+
+### Bug Fixes
+
+* **advisor:** embed version info via correct ldflag targets ([#1011](https://github.com/kguardian-dev/kguardian/issues/1011)) ([ef3923e](https://github.com/kguardian-dev/kguardian/commit/ef3923e89c593bdc8c1af8aef70e80fd1bb4dd50))
+* **advisor:** seccomp generation on ARM nodes (architectures was null) ([#1042](https://github.com/kguardian-dev/kguardian/issues/1042)) ([ad68795](https://github.com/kguardian-dev/kguardian/commit/ad68795012da27bb581568c18174fcd5d80b0dc8))
+* **ci:** fix release-please extra-files paths and sync VERSION files ([#692](https://github.com/kguardian-dev/kguardian/issues/692)) ([452bcad](https://github.com/kguardian-dev/kguardian/commit/452bcad0f8a13388f758569036e239bf3776036b))
+* **controller:** one-shot warn instead of stderr-flood on ring-buffer receiver close ([846d04d](https://github.com/kguardian-dev/kguardian/commit/846d04db1cb509659d18bba0f614d4bd9bf9e5e9))
+* **deps:** update kubernetes monorepo to v0.36.0 ([#776](https://github.com/kguardian-dev/kguardian/issues/776)) ([fa1d82d](https://github.com/kguardian-dev/kguardian/commit/fa1d82db75d790d076a88c01b5850b77effd7903))
+* **deps:** update kubernetes monorepo to v0.36.1 ([#893](https://github.com/kguardian-dev/kguardian/issues/893)) ([9f837c1](https://github.com/kguardian-dev/kguardian/commit/9f837c10c4464a903e75483dbc78490202cd69c5))
+* **deps:** update kubernetes monorepo to v0.36.2 ([#956](https://github.com/kguardian-dev/kguardian/issues/956)) ([0ee2bf2](https://github.com/kguardian-dev/kguardian/commit/0ee2bf22fa1049bfd5de48be509ae3d9a7a76eeb))
+* **deps:** update kubernetes packages to v0.35.0 ([13cff80](https://github.com/kguardian-dev/kguardian/commit/13cff800cffb1f4e5e66875da17b2086bc2ab8cf))
+* **deps:** update kubernetes packages to v0.35.0 ([e759cef](https://github.com/kguardian-dev/kguardian/commit/e759cef12d7253bb863ef96a34fd4eed667ad84a))
+* **deps:** update kubernetes packages to v0.35.1 ([#644](https://github.com/kguardian-dev/kguardian/issues/644)) ([034e600](https://github.com/kguardian-dev/kguardian/commit/034e60095784240eb5879dbeef4146a2bc6e1733))
+* **deps:** update kubernetes packages to v0.35.2 ([#713](https://github.com/kguardian-dev/kguardian/issues/713)) ([3538cff](https://github.com/kguardian-dev/kguardian/commit/3538cffcb5c5f12843f6e10f368105736070228d))
+* **deps:** update module github.com/cilium/cilium to v1.18.5 ([9038c8d](https://github.com/kguardian-dev/kguardian/commit/9038c8dd7374f7b7d44af930b7f790f0eaef45a0))
+* **deps:** update module github.com/cilium/cilium to v1.19.1 ([#608](https://github.com/kguardian-dev/kguardian/issues/608)) ([53794fe](https://github.com/kguardian-dev/kguardian/commit/53794fe72359c2619ce782b6c1d0491acce85f9b))
+* **deps:** update module github.com/cilium/cilium to v1.19.3 [security] ([#783](https://github.com/kguardian-dev/kguardian/issues/783)) ([ea505c0](https://github.com/kguardian-dev/kguardian/commit/ea505c0b79be491b71711aed1e3356ae8985a8b1))
+* **deps:** update module github.com/cilium/cilium to v1.19.4 ([#895](https://github.com/kguardian-dev/kguardian/issues/895)) ([c106d76](https://github.com/kguardian-dev/kguardian/commit/c106d76dd49983db3e0da349470c7084d9bcaa97))
+* **deps:** update module github.com/cilium/cilium to v1.19.5 ([#964](https://github.com/kguardian-dev/kguardian/issues/964)) ([78bf4ac](https://github.com/kguardian-dev/kguardian/commit/78bf4ac9fd8c42f7a977a2d41f5bcf22c05aa9cc))
+* **deps:** update module github.com/cilium/cilium to v1.19.6 ([#1070](https://github.com/kguardian-dev/kguardian/issues/1070)) ([a69745c](https://github.com/kguardian-dev/kguardian/commit/a69745cd314dacc930ce4e789a1c9e1f52b65a68))
+* **deps:** update module github.com/rs/zerolog to v1.35.1 ([#786](https://github.com/kguardian-dev/kguardian/issues/786)) ([bce376a](https://github.com/kguardian-dev/kguardian/commit/bce376a79179f84f079719815f34847e0211b2b2))
+
 ## [1.6.1](https://github.com/kguardian-dev/kguardian/compare/advisor/v1.6.0...advisor/v1.6.1) (2026-07-19)
 
 
