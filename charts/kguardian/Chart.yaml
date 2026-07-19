@@ -8,11 +8,10 @@ home: https://github.com/kguardian-dev/kguardian
 # Versions are expected to follow Semantic Versioning (https://semver.org/)
 version: 1.13.1
 
-# This is the version number of the application being deployed. This version number should be
-# incremented each time you make changes to the application. Versions are not expected to
-# follow Semantic Versioning. They should reflect the version the application is using.
-# It is recommended to use it with quotes.
-appVersion: "1.0.0"
+# kguardian is multi-component (each image pins its own tag in values.yaml),
+# so appVersion tracks the chart release itself. Kept in sync by release-please
+# via the x-release-please-version annotation — do not edit by hand.
+appVersion: "1.13.1" # x-release-please-version
 kubeVersion: ">= 1.18.0-0"
 
 keywords:
