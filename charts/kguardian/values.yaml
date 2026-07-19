@@ -308,6 +308,15 @@ broker:
   # verdict insert" warns or when /metrics shows pool-acquire stalls.
   dbPoolMaxSize: 32
 
+  # -- Per-statement timeout (ms) applied to every broker DB connection as a
+  # backstop: the broker runs as a single replica, so one slow or accidentally
+  # unbounded query would otherwise tie up a connection/worker indefinitely and
+  # can cascade into liveness-probe failures. Postgres kills any statement that
+  # exceeds this. 0 disables it. Startup migrations (long CREATE INDEX builds)
+  # are exempt. Healthy request queries are sub-second, so 30s is a safe ceiling
+  # that only ever fires on pathological queries. Tune down for tighter SLOs.
+  statementTimeoutMs: 30000
+
   # -- Number of attempts the broker makes to run embedded migrations
   # on startup, at 2s spacing. The chart's wait-for-db init container
   # handles "DB not started" via TCP probe — this loop absorbs the

@@ -154,6 +154,7 @@ The following table lists the configurable parameters of the kguardian chart and
 | broker.serviceAccount.create | bool | `true` | Specifies whether a service account should be created |
 | broker.serviceAccount.name | string | `""` | The name of the service account to use. If not set and create is true, a name is generated using the fullname template |
 | broker.startupProbe | object | `{}` | Startup probe. Empty by default — opt in when slow startup is expected (e.g. cold image pull on small nodes). Replaces the default startup probe. |
+| broker.statementTimeoutMs | int | `30000` | Per-statement timeout (ms) applied to every broker DB connection as a backstop: the broker runs as a single replica, so one slow or accidentally unbounded query would otherwise tie up a connection/worker indefinitely and can cascade into liveness-probe failures. Postgres kills any statement that exceeds this. 0 disables it. Startup migrations (long CREATE INDEX builds) are exempt. Healthy request queries are sub-second, so 30s is a safe ceiling that only ever fires on pathological queries. Tune down for tighter SLOs. |
 | broker.tolerations | list | `[]` | Tolerations for the kguardian broker pod assignment |
 | broker.topologySpreadConstraints | list | `[]` | Topology spread constraints applied to broker pods. Useful when running multiple replicas across zones/nodes. See https://kubernetes.io/docs/concepts/scheduling-eviction/topology-spread-constraints/ |
 | controller.affinity | object | `{}` | Affinity rules for controller pod assignment |
