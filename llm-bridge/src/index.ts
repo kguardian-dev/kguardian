@@ -168,6 +168,19 @@ app.post("/api/chat", chatLimiter, async (req: Request, res: Response<any>) => {
 
     if (error instanceof Error) {
       log.error("Chat error details:", error.message, error.stack);
+      // Surface upstream rate-limit / overload as matching statuses so the
+      // client can back off, instead of an opaque 500 it can't act on.
+      const status = (error as { status?: number }).status;
+      if (status === 429) {
+        return res.status(429).json({
+          error: "The AI provider is rate-limiting requests right now. Please retry in a few seconds.",
+        } as ErrorResponse);
+      }
+      if (status === 529 || status === 503) {
+        return res.status(503).json({
+          error: "The AI provider is temporarily overloaded. Please retry in a few seconds.",
+        } as ErrorResponse);
+      }
       return res.status(500).json({
         error: "An internal error occurred while processing the chat request",
       } as ErrorResponse);
@@ -225,6 +238,15 @@ app.post("/api/chat/stream", chatLimiter, async (req: Request, res: Response) =>
   const abort = new AbortController();
   res.on("close", () => abort.abort());
 
+  // SSE keepalive. During a tool round no events flow for the whole MCP
+  // round-trip; an idle intermediary (nginx ingress default proxy-read-timeout
+  // is 60s) would close the connection and break the stream. A periodic comment
+  // ping keeps it alive — comments (lines starting ":") are ignored by the
+  // EventSource client and don't affect the event data.
+  const heartbeat = setInterval(() => {
+    if (!res.writableEnded) res.write(": ping\n\n");
+  }, 15000);
+
   log.debug(`Processing streaming chat request with provider: ${provider}`);
 
   try {
@@ -238,7 +260,18 @@ app.post("/api/chat/stream", chatLimiter, async (req: Request, res: Response) =>
       emit({ type: "done", model: response.model, conversationId: response.conversationId });
     }
   } catch (error) {
-    const detail = error instanceof Error ? error.message : "An internal error occurred";
+    // Map upstream rate-limit / overload to a clear, actionable message rather
+    // than leaking a raw SDK string. A client disconnect does NOT reach here —
+    // streamAnthropic returns cleanly on abort.
+    const status = (error as { status?: number })?.status;
+    const detail =
+      status === 429
+        ? "The AI provider is rate-limiting requests right now. Please retry in a few seconds."
+        : status === 529 || status === 503
+          ? "The AI provider is temporarily overloaded. Please retry in a few seconds."
+          : error instanceof Error
+            ? error.message
+            : "An internal error occurred";
     log.error("Streaming chat error:", detail);
     // Headers are already sent, so surface the failure over SSE rather than
     // as an HTTP status. Guard the write in case the client already closed.
@@ -246,6 +279,7 @@ app.post("/api/chat/stream", chatLimiter, async (req: Request, res: Response) =>
       emit({ type: "error", error: detail });
     }
   } finally {
+    clearInterval(heartbeat);
     res.end();
   }
 });

@@ -93,6 +93,33 @@ function toolUsesOf(message: Anthropic.Message): Anthropic.ToolUseBlock[] {
   );
 }
 
+/** Join the text blocks of a completed message into the answer string. */
+function textOf(message: Anthropic.Message): string {
+  return message.content
+    .filter((block): block is Anthropic.TextBlock => block.type === "text")
+    .map((block) => block.text)
+    .join("\n")
+    .trim();
+}
+
+/**
+ * Human-readable stand-in when a completed message carries no usable text.
+ * A `refusal` stop_reason streams empty content (no text_delta), so without
+ * this the user would get a blank answer; `max_tokens` means the answer was
+ * cut off mid-generation. Shared by the streaming and non-streaming paths so
+ * both explain the outcome instead of returning nothing.
+ */
+function fallbackFor(message: Anthropic.Message): string {
+  switch (message.stop_reason) {
+    case "refusal":
+      return "I can't help with that request.";
+    case "max_tokens":
+      return "The response was cut off because it hit the length limit. Please narrow the question or ask for a shorter answer.";
+    default:
+      return "No response from Claude";
+  }
+}
+
 /**
  * Execute the model's tool calls via the broker/MCP client and build the
  * tool_result blocks to feed back. Pushes the assistant turn (verbatim, so
@@ -127,6 +154,11 @@ async function runToolRound(
         type: "tool_result" as const,
         tool_use_id: toolUse.id,
         content: serializeToolResult(result),
+        // Flag failures so the model treats them as errors rather than data.
+        // serializeToolResult renders a failure as plain "Error: ..." text,
+        // which the model can otherwise mistake for a legitimate result and
+        // answer from — set is_error so it knows the call failed.
+        ...(result.error ? { is_error: true } : {}),
       };
     }),
   );
@@ -233,15 +265,30 @@ export async function streamAnthropic(
   };
 
   for (let round = 0; round < MAX_TOOL_ROUNDS; round++) {
+    // Client disconnected between rounds — stop before doing (or paying for)
+    // more model/tool work. Returning cleanly (not throwing) keeps a normal
+    // disconnect out of the transport's error path.
+    if (signal?.aborted) return;
+
     let message: Anthropic.Message;
     try {
       message = await runStream(true);
     } catch (error) {
+      // An abort mid-stream throws from the SDK; that's a normal disconnect,
+      // not a failure to surface to the user.
+      if (signal?.aborted) return;
       throw toCleanError(error);
     }
 
     const toolUses = toolUsesOf(message);
     if (toolUses.length === 0) {
+      // If the model produced no text (a `refusal` streams empty content, so
+      // no text_delta fired), the client would get `done` with a blank answer.
+      // Emit the explanatory fallback so the user always sees something. Text
+      // that WAS produced already streamed incrementally above.
+      if (!textOf(message)) {
+        emit({ type: "text", delta: fallbackFor(message) });
+      }
       emit({ type: "done", model: message.model, conversationId: request.conversationId });
       return;
     }
@@ -249,11 +296,16 @@ export async function streamAnthropic(
   }
 
   // Max rounds reached — final pass without tools.
+  if (signal?.aborted) return;
   let finalMessage: Anthropic.Message;
   try {
     finalMessage = await runStream(false);
   } catch (error) {
+    if (signal?.aborted) return;
     throw toCleanError(error);
+  }
+  if (!textOf(finalMessage)) {
+    emit({ type: "text", delta: fallbackFor(finalMessage) });
   }
   emit({ type: "done", model: finalMessage.model, conversationId: request.conversationId });
 }
@@ -264,31 +316,33 @@ export async function streamAnthropic(
 
 /** Extract the text answer from a completed message into the wire contract. */
 function finalize(message: Anthropic.Message, request: ChatRequest): ChatResponse {
-  const text = message.content
-    .filter((block): block is Anthropic.TextBlock => block.type === "text")
-    .map((block) => block.text)
-    .join("\n")
-    .trim();
-
-  const fallback =
-    message.stop_reason === "refusal"
-      ? "I can't help with that request."
-      : "No response from Claude";
-
   return {
-    message: text || fallback,
+    message: textOf(message) || fallbackFor(message),
     provider: LLMProvider.ANTHROPIC,
     model: message.model,
     conversationId: request.conversationId,
   };
 }
 
+/**
+ * An Error that carries the upstream provider HTTP status so the transport can
+ * map it (429 rate-limit / 529 overload) instead of collapsing everything to a
+ * generic 500. `status` is undefined for non-API (network/other) errors.
+ */
+export interface ProviderError extends Error {
+  status?: number;
+}
+
 /** Normalise SDK/transport errors into a single Error with a clean message. */
-function toCleanError(error: unknown): Error {
+function toCleanError(error: unknown): ProviderError {
   if (error instanceof Anthropic.APIError) {
     const detail = error.message || `status ${error.status}`;
     log.error("Anthropic API Error:", detail);
-    return new Error(`Anthropic API error: ${detail}`, { cause: error });
+    const clean: ProviderError = new Error(`Anthropic API error: ${detail}`, { cause: error });
+    // Preserve the upstream status (429/529/5xx) so the HTTP layer can return a
+    // matching status + retry hint rather than an opaque 500.
+    clean.status = error.status;
+    return clean;
   }
   const detail = error instanceof Error ? error.message : String(error);
   log.error("Anthropic request failed:", detail);
