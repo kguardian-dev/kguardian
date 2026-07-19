@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.11.1](https://github.com/kguardian-dev/kguardian/compare/frontend/v1.11.0...frontend/v1.11.1) (2026-07-19)
+
+
+### Bug Fixes
+
+* **deps:** update dependency elkjs to ^0.12.0 ([#1075](https://github.com/kguardian-dev/kguardian/issues/1075)) ([be9027a](https://github.com/kguardian-dev/kguardian/commit/be9027ae31a5a5ffa553c1589db3febdeff76faf))
+
 ## [1.11.0](https://github.com/kguardian-dev/kguardian/compare/frontend/v1.10.0...frontend/v1.11.0) (2026-06-29)
 
 
