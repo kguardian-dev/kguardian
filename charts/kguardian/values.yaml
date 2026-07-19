@@ -152,7 +152,7 @@ broker:
     # -- Broker image pull policy
     pullPolicy: IfNotPresent
     # -- Broker version tag (auto-updated by release-please)
-    tag: "1.11.0"
+    tag: "1.11.1"
     # -- Overrides the image tag using SHA digest
     sha: ""
   initContainer:
