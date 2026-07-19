@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.12.0](https://github.com/kguardian-dev/kguardian/compare/broker/v1.11.1...broker/v1.12.0) (2026-07-19)
+
+
+### Features
+
+* **broker:** anonymous daily version check-in and /version endpoint ([#1098](https://github.com/kguardian-dev/kguardian/issues/1098)) ([bc6accf](https://github.com/kguardian-dev/kguardian/commit/bc6accf90bbf95aece872195d6939eb3642a2b03))
+
 ## [1.11.1](https://github.com/kguardian-dev/kguardian/compare/broker/v1.11.0...broker/v1.11.1) (2026-07-19)
 
 
