@@ -1,5 +1,17 @@
 # Changelog
 
+## [1.14.0](https://github.com/kguardian-dev/kguardian/compare/chart/v1.13.2...chart/v1.14.0) (2026-07-20)
+
+
+### Features
+
+* **broker:** anonymous daily version check-in and /version endpoint ([#1098](https://github.com/kguardian-dev/kguardian/issues/1098)) ([bc6accf](https://github.com/kguardian-dev/kguardian/commit/bc6accf90bbf95aece872195d6939eb3642a2b03))
+
+
+### Bug Fixes
+
+* **deps:** update ghcr.io/kguardian-dev/kguardian/broker docker tag to v1.12.0 ([#1101](https://github.com/kguardian-dev/kguardian/issues/1101)) ([7720b7d](https://github.com/kguardian-dev/kguardian/commit/7720b7de8455d56761b741fdc110cb47a50fce04))
+
 ## [1.13.2](https://github.com/kguardian-dev/kguardian/compare/chart/v1.13.1...chart/v1.13.2) (2026-07-19)
 
 
