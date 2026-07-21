@@ -353,6 +353,8 @@ mod tests {
     // each other's mutations. The std test runner runs tests in
     // parallel by default.
     fn with_env<F: FnOnce()>(key: &str, value: Option<&str>, f: F) {
+        // Crate-wide env lock — std::env is process-global (see test_support).
+        let _guard = crate::test_support::env_lock();
         let prev = std::env::var(key).ok();
         match value {
             Some(v) => std::env::set_var(key, v),
