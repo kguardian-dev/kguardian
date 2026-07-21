@@ -1,5 +1,14 @@
 # Changelog
 
+## [1.14.2](https://github.com/kguardian-dev/kguardian/compare/chart/v1.14.1...chart/v1.14.2) (2026-07-21)
+
+
+### Bug Fixes
+
+* **deps:** update ghcr.io/kguardian-dev/kguardian/broker docker tag to v1.12.2 ([#1128](https://github.com/kguardian-dev/kguardian/issues/1128)) ([93a5a75](https://github.com/kguardian-dev/kguardian/commit/93a5a751e92b347f6bf85942c189c085abe50982))
+* **deps:** update ghcr.io/kguardian-dev/kguardian/llm-bridge docker tag to v1.4.2 ([#1132](https://github.com/kguardian-dev/kguardian/issues/1132)) ([caec610](https://github.com/kguardian-dev/kguardian/commit/caec6104b0bf678eec768c6bcd5776bb1ee0b697))
+* **deps:** update ghcr.io/kguardian-dev/kguardian/mcp-server docker tag to v1.5.1 ([#1133](https://github.com/kguardian-dev/kguardian/issues/1133)) ([32a66e1](https://github.com/kguardian-dev/kguardian/commit/32a66e156a2521d7a26d93de775d57d2acd4953d))
+
 ## [1.14.1](https://github.com/kguardian-dev/kguardian/compare/chart/v1.14.0...chart/v1.14.1) (2026-07-21)
 
 
