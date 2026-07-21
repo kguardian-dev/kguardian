@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.14.1](https://github.com/kguardian-dev/kguardian/compare/chart/v1.14.0...chart/v1.14.1) (2026-07-21)
+
+
+### Bug Fixes
+
+* **deps:** update ghcr.io/kguardian-dev/kguardian/broker docker tag to v1.12.1 ([#1121](https://github.com/kguardian-dev/kguardian/issues/1121)) ([88773cb](https://github.com/kguardian-dev/kguardian/commit/88773cb00fcf9383723a79680067a22368e0d898))
+
 ## [1.14.0](https://github.com/kguardian-dev/kguardian/compare/chart/v1.13.2...chart/v1.14.0) (2026-07-20)
 
 
