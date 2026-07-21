@@ -23,6 +23,11 @@ const REPO = "kguardian-dev/kguardian";
 // zone we control works; this path is never actually routable.
 const CACHE_KEY = "https://version.kguardian.dev/__cache/latest-versions";
 const CACHE_TTL_SECS = 300;
+// Long-TTL stale copy served when GitHub errors on a cold fresh-cache miss
+// (shared egress IPs can hit GitHub's unauthenticated rate limit). A day-old
+// version map beats an empty one; clients only check daily anyway.
+const STALE_KEY = "https://version.kguardian.dev/__cache/latest-versions-stale";
+const STALE_TTL_SECS = 24 * 60 * 60;
 
 /** Tag prefixes → response keys. Matches release-please's component tags. */
 const COMPONENTS = [
@@ -77,11 +82,29 @@ async function latestVersions(env) {
   const cache = caches.default;
   const hit = await cache.match(CACHE_KEY);
   if (hit) return hit.json();
-  const fresh = await fetchLatestFromGitHub(env);
+  let fresh;
+  try {
+    fresh = await fetchLatestFromGitHub(env);
+  } catch (e) {
+    // GitHub unreachable/rate-limited on a cold fresh-cache miss: serve the
+    // long-TTL stale copy rather than an empty map.
+    const stale = await cache.match(STALE_KEY);
+    if (stale) {
+      console.warn("serving stale latest-versions:", e.message);
+      return stale.json();
+    }
+    throw e;
+  }
   await cache.put(
     CACHE_KEY,
     Response.json(fresh, {
       headers: { "Cache-Control": `public, max-age=${CACHE_TTL_SECS}` },
+    }),
+  );
+  await cache.put(
+    STALE_KEY,
+    Response.json(fresh, {
+      headers: { "Cache-Control": `public, max-age=${STALE_TTL_SECS}` },
     }),
   );
   return fresh;
