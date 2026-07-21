@@ -115,6 +115,12 @@ export default {
       return Response.json({ ok: true });
     }
 
+    // Humans curious what this endpoint is land on the page that documents
+    // exactly what it collects.
+    if (url.pathname === "/") {
+      return Response.redirect("https://docs.kguardian.dev/telemetry", 302);
+    }
+
     if (url.pathname !== "/v1/check" || request.method !== "GET") {
       return Response.json({ error: "not found" }, { status: 404 });
     }
