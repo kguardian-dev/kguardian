@@ -31,3 +31,10 @@ tilt_modules/
 localbin/
 
 .claude/
+
+# wrangler files
+.wrangler
+.dev.vars*
+!.dev.vars.example
+.env*
+!.env.example
