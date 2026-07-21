@@ -4,7 +4,7 @@
   "frontend": "1.11.1",
   "advisor": "1.6.1",
   "charts/kguardian": "1.14.0",
-  "llm-bridge": "1.4.1",
+  "llm-bridge": "1.4.2",
   "mcp-server": "1.5.0",
   "evaluator": "0.3.2"
 }
