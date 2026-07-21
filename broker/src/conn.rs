@@ -79,6 +79,9 @@ mod tests {
     }
 
     impl EnvGuard {
+        /// NOTE: callers must hold `crate::test_support::env_lock()` for
+        /// the guard's lifetime — EnvGuard restores values but does not
+        /// provide cross-test exclusion.
         fn set(key: &str, value: Option<&str>) -> Self {
             let prev = env::var(key).ok();
             match value {
@@ -108,6 +111,7 @@ mod tests {
     #[test]
     #[should_panic(expected = "DATABASE_URL must be set")]
     fn panics_when_database_url_unset() {
+        let _lock = crate::test_support::env_lock();
         let _g = EnvGuard::set("DATABASE_URL", None);
         // _g drops on the panic-unwind path, restoring env. #[should_panic]
         // still sees the panic.
@@ -120,6 +124,7 @@ mod tests {
         // construction — that happens in r2d2 Pool::build. So a fake
         // URL is sufficient to prove the function returned without
         // panicking.
+        let _lock = crate::test_support::env_lock();
         let _g = EnvGuard::set("DATABASE_URL", Some("postgres://x:y@example.invalid/db"));
         let _mgr = establish_connection();
     }
@@ -132,6 +137,7 @@ mod tests {
         // It hits the empty-after-trim filter and triggers the
         // same "not set" panic — clearer signal at startup than
         // a downstream postgres parse error.
+        let _lock = crate::test_support::env_lock();
         let _g = EnvGuard::set("DATABASE_URL", Some("  \n"));
         establish_connection();
     }
@@ -141,6 +147,7 @@ mod tests {
         // A pasted URL with trailing newline (typical) round-trips
         // clean. Construction succeeds and the connection-manager
         // gets the trimmed URL.
+        let _lock = crate::test_support::env_lock();
         let _g = EnvGuard::set(
             "DATABASE_URL",
             Some("  postgres://x:y@example.invalid/db\n"),
