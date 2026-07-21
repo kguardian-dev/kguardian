@@ -1,5 +1,17 @@
 # Changelog
 
+## [1.12.1](https://github.com/kguardian-dev/kguardian/compare/broker/v1.12.0...broker/v1.12.1) (2026-07-21)
+
+
+### Bug Fixes
+
+* **broker:** pin builder to rust:1-bookworm to match runtime glibc ([#1120](https://github.com/kguardian-dev/kguardian/issues/1120)) ([32c41c7](https://github.com/kguardian-dev/kguardian/commit/32c41c7e5f6ea6b2fcb0ab99e6832cfe08c61080))
+
+
+### Documentation
+
+* repo-wide accuracy pass — remove obsolete, untrue, and misleading content ([#1115](https://github.com/kguardian-dev/kguardian/issues/1115)) ([72e672d](https://github.com/kguardian-dev/kguardian/commit/72e672d26d62b7c416b5fb4b526b8a7e18c7ab81))
+
 ## [1.12.0](https://github.com/kguardian-dev/kguardian/compare/broker/v1.11.1...broker/v1.12.0) (2026-07-19)
 
 
