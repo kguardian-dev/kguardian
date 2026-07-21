@@ -140,13 +140,13 @@ Once the Release PR is merged, release-please automatically:
 2. Creates GitHub Releases with changelog content
 3. Triggers component-specific build workflows via workflow_dispatch
 4. Publishes artifacts:
-   - **Controller**: Docker image to `ghcr.io/kguardian-dev/kguardian/guardian-controller:vX.Y.Z`
-   - **Broker**: Docker image to `ghcr.io/kguardian-dev/kguardian/guardian-broker:vX.Y.Z`
+   - **Controller**: Docker image to `ghcr.io/kguardian-dev/kguardian/controller:vX.Y.Z`
+   - **Broker**: Docker image to `ghcr.io/kguardian-dev/kguardian/broker:vX.Y.Z`
    - **Frontend**: Docker image to `ghcr.io/kguardian-dev/kguardian/frontend:vX.Y.Z`
    - **Evaluator**: Docker image to `ghcr.io/kguardian-dev/kguardian/evaluator:vX.Y.Z`
    - **MCP Server**: Docker image to `ghcr.io/kguardian-dev/kguardian/mcp-server:vX.Y.Z`
    - **LLM Bridge**: Docker image to `ghcr.io/kguardian-dev/kguardian/llm-bridge:vX.Y.Z`
-   - **Advisor**: SLSA3-attested binaries to GitHub Releases (linux/darwin, amd64/arm64)
+   - **Advisor**: Binaries to GitHub Releases (linux/darwin, amd64/arm64) with GitHub build-provenance attestations — verify with `gh attestation verify advisor-<os>-<arch> --repo kguardian-dev/kguardian` — plus a Docker image to `ghcr.io/kguardian-dev/kguardian/advisor` via `advisor-image-release.yaml`
    - **Chart**: Helm package to `oci://ghcr.io/kguardian-dev/charts/kguardian:X.Y.Z`
 5. Tags Docker images with `latest`
 
@@ -178,17 +178,20 @@ git commit -m "feat(chart): add support for custom annotations"
 # → Creates PR: chart 1.0.0 → 1.1.0
 ```
 
-The chart can reference specific component versions via `values.yaml`:
+The chart can reference specific component versions via `values.yaml`. Image tags are bare semver — no `v` prefix (only advisor binary releases use `v`-prefixed versions, e.g. `v1.6.1`):
 ```yaml
 controller:
   image:
-    tag: "v1.2.0"  # Pin to specific controller version
+    tag: "1.9.1"  # Pin to specific controller version
 broker:
   image:
-    tag: "v1.3.1"  # Pin to specific broker version
+    tag: "1.12.0"  # Pin to specific broker version
 frontend:
   image:
-    tag: "v2.0.0"  # Pin to specific frontend version
+    tag: "1.9.1"  # Pin to specific frontend version
+llmBridge:
+  image:
+    tag: "1.4.1"  # Pin to specific LLM Bridge version
 ```
 
 ### Manual Override (Emergency Use Only)
@@ -328,18 +331,18 @@ These are automatically updated by release-please based on conventional commits.
 - `.github/workflows/controller-release.yaml` - Triggered by `controller/v*` tags or workflow_dispatch
 - `.github/workflows/broker-release.yaml` - Triggered by `broker/v*` tags or workflow_dispatch
 - `.github/workflows/frontend-release.yaml` - Triggered by `frontend/v*` tags or workflow_dispatch
-- `.github/workflows/advisor-release.yml` - Triggered by `advisor/v*` tags or workflow_dispatch
+- `.github/workflows/advisor-release.yml` - Triggered by workflow_dispatch only (release-please dispatches it with tag + sha inputs); uses a draft-release flow — the draft GitHub release is published once the binaries are attached
 - `.github/workflows/evaluator-release.yaml` - Triggered by `evaluator/v*` tags or workflow_dispatch
 - `.github/workflows/mcp-server-release.yaml` - Triggered by `mcp-server/v*` tags or workflow_dispatch
 - `.github/workflows/llm-bridge-release.yaml` - Triggered by `llm-bridge/v*` tags or workflow_dispatch
-- `.github/workflows/charts-release.yaml` - Triggered by `chart/v*` tags or chart file changes
+- `.github/workflows/charts-release.yaml` - Triggered by `chart/v*` tags or workflow_dispatch
 
 ## Querying Versions
 
 ### Current Installed Versions
 
 The chart sets `app.kubernetes.io/name` on each workload's pod template
-(values: `kguardian` for the controller daemonset, `kguardian-broker`,
+(values: `kguardian` for the controller daemonset, `kbroker`,
 `kguardian-frontend`, `kguardian-evaluator`, etc). Examples:
 
 ```bash
@@ -347,7 +350,7 @@ The chart sets `app.kubernetes.io/name` on each workload's pod template
 kubectl get pods -n kguardian -l app.kubernetes.io/name=kguardian -o jsonpath='{.items[0].spec.containers[0].image}'
 
 # Broker version (from pod)
-kubectl get pods -n kguardian -l app.kubernetes.io/name=kguardian-broker -o jsonpath='{.items[0].spec.containers[0].image}'
+kubectl get pods -n kguardian -l app.kubernetes.io/name=kbroker -o jsonpath='{.items[0].spec.containers[0].image}'
 
 # Frontend version (from pod)
 kubectl get pods -n kguardian -l app.kubernetes.io/name=kguardian-frontend -o jsonpath='{.items[0].spec.containers[0].image}'
@@ -366,12 +369,13 @@ helm list -n kguardian
 
 ```bash
 # Docker images
-docker pull ghcr.io/kguardian-dev/kguardian/guardian-controller
-docker pull ghcr.io/kguardian-dev/kguardian/guardian-broker
+docker pull ghcr.io/kguardian-dev/kguardian/controller
+docker pull ghcr.io/kguardian-dev/kguardian/broker
 docker pull ghcr.io/kguardian-dev/kguardian/frontend
 
-# Helm chart versions
-helm search repo kguardian --versions
+# Helm chart versions (OCI registry — no classic repo index)
+helm show chart oci://ghcr.io/kguardian-dev/charts/kguardian
+# or browse the GitHub releases page (chart/v* releases)
 
 # Advisor releases
 gh release list --repo kguardian-dev/kguardian
@@ -408,7 +412,7 @@ gh release list --repo kguardian-dev/kguardian
 
 6. **Pin component versions** in Helm values for production
    - Don't use `latest` in production
-   - Use specific version tags: `v1.2.3`
+   - Use specific version tags: `1.2.3`
 
 7. **Coordinate breaking changes**
    - Document breaking changes clearly in commit body
@@ -422,35 +426,7 @@ gh release list --repo kguardian-dev/kguardian
 
 ## Migration from Previous Versioning
 
-Previously, the project used a single `v*` tag for all components. With release-please:
-
-1. ✅ All workflows updated to use component-specific tags (component/v*)
-2. ✅ VERSION files created for each component at v1.0.0
-3. ✅ Helm chart updated to support component-specific versions
-4. ✅ Release-please configured for automated releases
-5. ✅ CHANGELOG.md files created for each component
-6. 🔄 Next step: Push to main and let release-please create the first Release PR
-7. 📋 Legacy `v*` tags remain for backward compatibility but are deprecated
-
-**Important:** With release-please, you no longer manually create tags. The automation handles all versioning, tagging, and changelog generation.
-
-## Validation and Testing
-
-Before using release-please in production, validate your configuration:
-
-```bash
-# Run the validation script
-./.github/scripts/validate-release-config.sh
-```
-
-This validates:
-- JSON syntax and structure
-- Component consistency
-- Version file existence and consistency
-- Workflow configuration
-- Conventional commit parsing
-
-For comprehensive testing including dry-runs, mock commits, and using the release-please CLI, see [.github/TESTING_RELEASES.md](.github/TESTING_RELEASES.md).
+The project migrated from a single `v*` tag to component-based versioning in 2025; legacy `v*` tags remain for backward compatibility but are deprecated.
 
 ## Examples
 
@@ -561,7 +537,7 @@ git push origin main
 
 # Release-please will:
 # 1. Create Release PR bumping chart from 1.0.0 -> 1.1.0
-# 2. Update charts/kguardian/Chart.yaml version and appVersion
+# 2. Update charts/kguardian/Chart.yaml version
 # 3. When merged, creates chart/v1.1.0 and publishes to OCI registry
 ```
 

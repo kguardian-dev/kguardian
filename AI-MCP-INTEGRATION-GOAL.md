@@ -43,7 +43,7 @@ frontend/AIAssistant.tsx
 llm-bridge (TS/Express, @anthropic-ai/sdk, claude-opus-4-8, prompt caching)
    │  MCP tool calls
    ▼
-mcp-server (Go, 11 tools) ──HTTP──► broker (Rust/actix, Postgres)   [pod/traffic, pod/info, audit/verdicts, …]
+mcp-server (Go, 12 tools) ──HTTP──► broker (Rust/actix, Postgres)   [pod/traffic, pod/info, audit/verdicts, …]
                           └─HTTP──► advisor (Go, serve mode)        [generate networkpolicy / seccomp]
 ```
 
@@ -70,7 +70,7 @@ drift-guard between mcp-server tool set and llm-bridge; golden-answer tests for 
 responses are size-capped end to end.
 **Acceptance:** a CI guard fails the build if a broker read lacks a bound; DB size stays flat
 under steady state; p95/p99 latency targets met under a load test.
-- **[P0] `/pod/traffic` unbounded** — FIXED, PR #1034 (bound + `idx_pod_traffic_time_stamp`). Deploy + verify.
+- **[P0] `/pod/traffic` unbounded** — FIXED, PR #1034 (bound + `idx_pod_traffic_time_stamp`).
 - **[P0] `/pod/traffic/{name}` (`get.rs:368`) unbounded** — hit by the frontend per-pod on every
   view load AND by the advisor. Fix via **dedup (DISTINCT ON the flow tuple)** so the advisor keeps
   complete flows, not a blind LIMIT. Correct tuple = `(pod_ip, pod_port, ip_protocol, traffic_type,
@@ -97,7 +97,7 @@ no single query or pod restart is fatal.
 degrading cleanly; broker survives a burst of concurrent heavy calls.
 - Broker is a **single replica** = SPOF for the entire data path. Decide HA (replicas + readiness)
   or at minimum isolate heavy queries (statement_timeout, separate pool) so one can't wedge the pod.
-- Enforce `statement_timeout` on all broker queries as a backstop.
+- Enforce `statement_timeout` on all broker queries as a backstop — SHIPPED (#1036, 2026-07-19).
 - mcp-server↔broker: confirm sane client timeouts (90s today) + retries; llm-bridge tool-call timeouts.
 
 ### WS4 — Observability
@@ -115,7 +115,7 @@ telemetry alone; alerts fire on error-rate/latency/DB-size breaches.
 every PR; an "unbounded-query" lint/guard; a load-smoke job; zero known-flaky tests.
 - Fix flaky `TestBrokerClient_OversizedBodyTruncated` (deadlocks under parallel load).
 - Add the WS1 contract tests and the WS2 bound-guard.
-- Ensure Rust tests actually gate PRs (historically they didn't).
+- Ensure Rust tests actually gate PRs — DONE (`pr-build.yaml` runs fmt/clippy/test for broker + controller).
 
 ### WS6 — Security & trust
 **Bar:** Broker API authenticated; secrets handled well; the LLM path is hardened against prompt
@@ -156,7 +156,7 @@ is exposed. No component silently depends on a service that isn't deployed.
 ## 4. Sequencing
 
 - **P0 — Stop the bleeding (WS2 + the live deploy):** land #1034; dedup-bound the two sibling
-  endpoints; `pod_traffic` retention; `audit_verdicts` bloat. Add `statement_timeout` backstop (WS3).
+  endpoints; `pod_traffic` retention; `audit_verdicts` bloat. `statement_timeout` backstop (WS3) — SHIPPED (#1036, 2026-07-19).
 - **P1 — Make it stay fixed:** CI bound-guard + contract tests + flaky fix (WS5); observability for
   the golden signals + table-size alerts (WS4); broker SPOF decision (WS3).
 - **P2 — Trust & polish:** UX failure-state mapping (WS7); broker auth + dep alert burndown (WS6);
@@ -191,3 +191,9 @@ wait until §1 targets hold.
   - Task #2 re-scoped by code review: the `ip_protocol` "index bug" is actually a `get_row` (6-col DB
     dedup) vs `traffic_content_key` (7-col in-batch) INGEST inconsistency — separate, riskier, deferred.
     Per-pod growth is churn-driven (new IP per restart), which retention (Task #3) attacks at the root.
+- 2026-07-19 — **llm-bridge streaming hardening shipped (#1039, v1.4.1):** SSE keepalive, abort-aware
+  tool rounds, `is_error` tool results, refusal/max_tokens fallbacks, 429/529 mapping.
+- 2026-07-19 — **advisor ARM seccomp fix shipped (#1042, v1.6.1):** aarch64 arch map + serve-path
+  validation.
+- 2026-07-19/20 — **Anonymous version check-in + `GET /version` shipped (#1098):** broker v1.12.0,
+  chart v1.14.0; version.kguardian.dev live.

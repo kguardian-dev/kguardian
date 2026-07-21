@@ -41,10 +41,10 @@ Example generated profile:
 - `SCMP_ACT_ALLOW`: Allow the syscall
 - `SCMP_ACT_ERRNO`: Block with error (default for unlisted)
 - `SCMP_ACT_LOG`: Log the syscall but allow it
-- `SCMP_ACT_KILL`: Kill the process (most restrictive)
+- `SCMP_ACT_KILL`: Kill the calling thread
+- `SCMP_ACT_KILL_PROCESS`: Kill the whole process (most restrictive)
 
 ---
 
 **Next steps:**
-- [Generate Seccomp Profiles](/guides/generating-seccomp-profiles)
 - [CLI Reference](/cli/gen-seccomp)

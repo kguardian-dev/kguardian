@@ -4,8 +4,12 @@ description: "Generated NetworkPolicy and seccomp profile for an Istio sidecar (
 icon: "diagram-project"
 ---
 
+<Warning>
+**Hand-authored illustration.** The YAML on this page illustrates the shape of the policies kguardian generates for this workload — it is not captured generator output. Exact metadata, rule grouping, and selectors produced by `kubectl kguardian gen` will differ. Regeneration of this gallery from a live cluster is planned.
+</Warning>
+
 <Note>
-**Example output.** Verified against kguardian `X.Y.Z` controller on `[TBD reference cluster]`. Sidecar policies are sensitive to mesh configuration — automatic mTLS, ambient mode, and custom `EnvoyFilter` resources can shift the observed traffic pattern. Re-run generation after mesh upgrades.
+Sidecar policies are sensitive to mesh configuration — automatic mTLS, ambient mode, and custom `EnvoyFilter` resources can shift the observed traffic pattern. Re-run generation after mesh upgrades.
 </Note>
 
 ## Workload
@@ -171,4 +175,4 @@ Full profile contains **148 syscall names**. Representative excerpt:
 
 ## What kguardian observed
 
-The sidecar's traffic shape is dominated by mesh control-plane and peer mTLS rather than application traffic — application-layer requests are tunneled inside the mTLS streams that kguardian sees on port 15006, so the policy keeps L4 only and labels peers by `security.istio.io/tlsMode: istio`. The xDS connection to `istiod` is long-lived and easy to capture (TCP/15012 to the `app: istiod` pod in `istio-system`). Prometheus scrapes for Envoy and pilot-agent metrics show up on 15090 and 15020. Envoy's syscall set is heavier than a typical Go binary because of `io_uring`, `socketpair`, and `eventfd2`. **Caveat:** if your mesh uses ambient mode or a non-default sidecar injector, the observed ports and labels will differ — re-generate per environment.
+The sidecar's traffic shape is dominated by mesh control-plane and peer mTLS rather than application traffic — application-layer requests are tunneled inside the mTLS streams that kguardian sees on port 15006, so the policy stays at L4. Selecting mesh peers by the single `security.istio.io/tlsMode: istio` label, as shown above, is a hand-idealization — real generator output emits one rule per observed peer, selecting that peer's full label set together with a namespace selector. The xDS connection to `istiod` is long-lived and easy to capture (TCP/15012 to the `app: istiod` pod in `istio-system`). Prometheus scrapes for Envoy and pilot-agent metrics show up on 15090 and 15020. Envoy's syscall set is heavier than a typical Go binary because of `io_uring`, `socketpair`, and `eventfd2`. **Caveat:** if your mesh uses ambient mode or a non-default sidecar injector, the observed ports and labels will differ — re-generate per environment.

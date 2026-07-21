@@ -6,8 +6,9 @@
  * GET /v1/check?install=&broker=&chart=&k8s=&nodes=&arch=
  *   → { "latest": { "chart": "1.13.2", "broker": "1.11.1", ... } }
  *
- * Latest versions come from the GitHub Releases API, cached in KV for
- * CACHE_TTL_SECS so the worker never rate-limits against GitHub and
+ * Latest versions come from the GitHub Releases API, cached via the
+ * Workers Cache API for CACHE_TTL_SECS so the worker never rate-limits
+ * against GitHub and
  * check-ins stay fast. Each request's metadata is written to Workers
  * Analytics Engine (dataset: TELEMETRY) — that dataset is the project's
  * usage telemetry. IP addresses are not persisted; country comes from
@@ -46,7 +47,7 @@ async function fetchLatestFromGitHub(env) {
       headers: {
         "User-Agent": "kguardian-version-service",
         Accept: "application/vnd.github+json",
-        // Optional: raises the rate limit from 60/h to 5000/h. The KV
+        // Optional: raises the rate limit from 60/h to 5000/h. The
         // cache keeps us far below either, so absence is fine.
         ...(env.GITHUB_TOKEN
           ? { Authorization: `Bearer ${env.GITHUB_TOKEN}` }

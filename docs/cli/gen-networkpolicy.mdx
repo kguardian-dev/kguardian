@@ -20,7 +20,7 @@ kubectl kguardian gen netpol [POD_NAME] [flags]  # Alias
 | `-n, --namespace` | string | Namespace of the pod | Current namespace |
 | `-a, --all` | bool | Generate for all pods in namespace | `false` |
 | `-A, --all-namespaces` | bool | Generate for all pods cluster-wide | `false` |
-| `-t, --type` | string | Policy type: `kubernetes` or `cilium` | `kubernetes` |
+| `-t, --type` | string | Policy type: `kubernetes` (alias `k8s`) or `cilium` | `kubernetes` |
 | `--output-dir` | string | Directory to save policies | `network-policies` |
 | `--dry-run` | bool | Generate without applying | `true` |
 

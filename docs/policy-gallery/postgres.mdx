@@ -4,9 +4,9 @@ description: "Generated NetworkPolicy and seccomp profile for a Postgres pod acc
 icon: "database"
 ---
 
-<Note>
-**Example output.** Verified against kguardian `X.Y.Z` controller on `[TBD reference cluster]`.
-</Note>
+<Warning>
+**Hand-authored illustration.** The YAML on this page illustrates the shape of the policies kguardian generates for this workload — it is not captured generator output. Exact metadata, rule grouping, and selectors produced by `kubectl kguardian gen` will differ. Regeneration of this gallery from a live cluster is planned.
+</Warning>
 
 ## Workload
 
@@ -96,10 +96,6 @@ spec:
         - ports:
             - port: "53"
               protocol: UDP
-          rules:
-            dns:
-              - matchPattern: "*.svc.cluster.local"
-              - matchPattern: "*.cluster.local"
 ```
 
 ## Generated seccomp profile (excerpt)
@@ -135,4 +131,4 @@ Full profile contains **162 syscall names**. Representative excerpt:
 
 ## What kguardian observed
 
-Two distinct ingress sources connected to TCP/5432: `order-api` and `billing-worker`, both in the `app` namespace. Egress was limited to UDP/53 lookups during connection establishment (Postgres resolves `pg_hba`-related hostnames at startup). The syscall set is heavier than nginx because Postgres performs heavy I/O: file extension/truncation (`ftruncate`, `pwrite64`, `fdatasync`), directory enumeration (`getdents64`), and process management (`clone`, `wait4`) for its background worker model. The Cilium policy adds an FQDN matchPattern for `*.svc.cluster.local` because that's the only DNS query shape observed.
+Two distinct ingress sources connected to TCP/5432: `order-api` and `billing-worker`, both in the `app` namespace. Egress was limited to UDP/53 lookups during connection establishment (Postgres resolves `pg_hba`-related hostnames at startup). The syscall set is heavier than nginx because Postgres performs heavy I/O: file extension/truncation (`ftruncate`, `pwrite64`, `fdatasync`), directory enumeration (`getdents64`), and process management (`clone`, `wait4`) for its background worker model.
