@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.12.2](https://github.com/kguardian-dev/kguardian/compare/broker/v1.12.1...broker/v1.12.2) (2026-07-21)
+
+
+### Bug Fixes
+
+* **broker:** ignore semver build metadata in version check comparisons ([#1126](https://github.com/kguardian-dev/kguardian/issues/1126)) ([5cde86a](https://github.com/kguardian-dev/kguardian/commit/5cde86aaba64a73742ae372a22f26f7c4aeb2a2f))
+
 ## [1.12.1](https://github.com/kguardian-dev/kguardian/compare/broker/v1.12.0...broker/v1.12.1) (2026-07-21)
 
 
