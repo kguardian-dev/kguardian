@@ -40,7 +40,7 @@ kubectl kguardian gen networkpolicy my-app -n production \
   </Step>
 
   <Step title="Generates YAML">
-    Creates `production-my-app-networkpolicy.yaml` in the `./policies` directory
+    Creates `production-my-app-standard-networkpolicy.yaml` in the `./policies` directory
   </Step>
 </Steps>
 
@@ -50,11 +50,12 @@ kubectl kguardian gen networkpolicy my-app -n production \
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
-  name: my-app
+  name: my-app-standard-policy
   namespace: production
   labels:
-    kguardian.dev/managed-by: kguardian
-    kguardian.dev/version: v1.0.0
+    app.kubernetes.io/name: my-app
+    app.kubernetes.io/component: standard-policy
+    app.kubernetes.io/part-of: kguardian
 spec:
   podSelector:
     matchLabels:
@@ -144,21 +145,20 @@ kubectl kguardian gen networkpolicy my-app -n production \
 apiVersion: cilium.io/v2
 kind: CiliumNetworkPolicy
 metadata:
-  name: my-app
+  name: my-app-cilium-policy
   namespace: production
   labels:
-    kguardian.dev/managed-by: kguardian
-    kguardian.dev/version: v1.0.0
+    app.kubernetes.io/name: my-app
+    app.kubernetes.io/component: cilium-policy
+    app.kubernetes.io/part-of: kguardian
 spec:
   endpointSelector:
     matchLabels:
-      app: my-app
+      k8s:app: my-app
   ingress:
     - fromEndpoints:
         - matchLabels:
-            app: api-gateway
-        - matchLabels:
-            io.kubernetes.pod.namespace: production
+            k8s:app: api-gateway
       toPorts:
         - ports:
             - port: "8080"
@@ -166,20 +166,21 @@ spec:
   egress:
     - toEndpoints:
         - matchLabels:
-            app: postgres
-        - matchLabels:
-            io.kubernetes.pod.namespace: production
+            k8s:app: postgres
       toPorts:
         - ports:
             - port: "5432"
               protocol: TCP
-    - toCIDR:
-        - "10.96.0.10/32"  # kube-dns
+    - toEndpoints:
+        - matchLabels:
+            k8s:k8s-app: kube-dns
       toPorts:
         - ports:
             - port: "53"
               protocol: UDP
 ```
+
+Each peer gets a single endpoint selector built from that peer's labels: the Service's selector when the IP resolves to a Service (as with kube-dns above), the pod's labels otherwise. `toCIDR`/`fromCIDR` entries appear only for IPs that can't be resolved to a pod or Service. Label keys in the generated YAML carry Cilium's `k8s:` source prefix.
 
 ### Cilium vs Kubernetes Policies
 
@@ -200,7 +201,7 @@ If you're running Cilium CNI, use `--type cilium` for better security and featur
 
 ---
 
-## Dry Run vs Apply
+## Dry Run and Applying
 
 ### Dry Run (Default)
 
@@ -211,33 +212,27 @@ kubectl kguardian gen netpol my-app -n prod --output-dir ./policies
 
 # Policies are saved but NOT applied
 # Review them first:
-cat ./policies/prod-my-app-networkpolicy.yaml
+cat ./policies/prod-my-app-standard-networkpolicy.yaml
 ```
 
-### Direct Apply
-
-To generate **and immediately apply** policies:
-
-```bash
-kubectl kguardian gen netpol my-app -n prod \
-  --dry-run=false \
-  --output-dir ./policies
-```
-
-<Warning>
-**Use with caution!** Applying network policies can break communication if the observed traffic was incomplete. Always test in non-production first.
-</Warning>
+<Note>
+Applying directly from the CLI is not implemented. Passing `--dry-run=false` currently behaves the same as dry-run — policies are only saved to files — and the CLI logs a warning to that effect. Apply the generated files with `kubectl apply -f`.
+</Note>
 
 ### Recommended Workflow
 
 1. **Generate** policies in dry-run mode
 2. **Review** the generated YAML files
 3. **Test** in a staging environment
-4. **Apply** manually after validation:
+4. **Apply** with kubectl after validation:
 
 ```bash
 kubectl apply -f ./policies/
 ```
+
+<Warning>
+**Use with caution!** Applying network policies can break communication if the observed traffic was incomplete. Always test in non-production first.
+</Warning>
 
 ---
 
@@ -430,7 +425,7 @@ Now your namespace runs default-deny — only explicitly observed communication 
 3. Check broker has data:
    ```bash
    kubectl port-forward -n kguardian svc/kguardian-broker 9090:9090 &
-   curl http://localhost:9090/pod/traffic/name/myns/mypod
+   curl http://localhost:9090/pod/traffic/mypod
    ```
 
 ### Generated Policy Too Permissive
@@ -458,16 +453,13 @@ Now your namespace runs default-deny — only explicitly observed communication 
 ---
 
 <CardGroup cols={2}>
-  <Card title="Generate Seccomp Profiles" icon="shield-check" href="/guides/generating-seccomp-profiles">
+  <Card title="Generate Seccomp Profiles" icon="shield-check" href="/cli/gen-seccomp">
     Restrict syscalls based on observed behavior
-  </Card>
-  <Card title="Cilium Policies Deep Dive" icon="circle-nodes" href="/advanced/cilium-policies">
-    Advanced Cilium NetworkPolicy features
   </Card>
   <Card title="CLI Reference" icon="terminal" href="/cli/gen-networkpolicy">
     Complete flag documentation
   </Card>
-  <Card title="Policy Gallery" icon="images" href="/policy-gallery">
+  <Card title="Policy Gallery" icon="images" href="/policy-gallery/index">
     Worked examples for nginx, Postgres, Prometheus, Istio, and more
   </Card>
 </CardGroup>

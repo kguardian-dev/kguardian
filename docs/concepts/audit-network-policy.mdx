@@ -31,14 +31,14 @@ This pattern is directly modelled on Calico's [`StagedKubernetesNetworkPolicy`](
                                   (Postgres)                              │ + Pods + Namespaces
                                           │                               │
                                           ▼                               ▼
-                                 frontend "Would-Deny"             status.evaluation
-                                 view + Prometheus              + would-deny logs / events
+                                 frontend "Would-Deny" view        status.evaluation
+                                                                  + would-deny logs
 ```
 
 1. The controller observes every TCP/UDP connection on each node (no change from before).
 2. The broker forwards each flow to the evaluator's `/evaluate` endpoint.
 3. The evaluator looks up which `AuditNetworkPolicy` resources select either side of the flow, runs the standard NetworkPolicy semantics over the rule set, and returns a verdict per (policy, direction).
-4. `WouldDeny` verdicts are persisted in `audit_verdicts` and surface as logs, Kubernetes Events on the policy, and rolling counts in `.status.evaluation`.
+4. `WouldDeny` verdicts are persisted in `audit_verdicts` and surface as logs and cumulative counts in `.status.evaluation` — counts accumulate from evaluator start and reset when the evaluator restarts. (Kubernetes Events on the policy are planned.) The broker's `/metrics` endpoint exposes audit pipeline health (`broker_audit_dropped_total`, `broker_audit_inflight_available`), not would-deny counts.
 
 ## Example
 
@@ -83,7 +83,7 @@ spec:
           port: 5432
 ```
 
-`kubectl get auditnetworkpolicy payments-isolation -n prod` shows a `WOULD-DENY` column populated by the rolling-window count. `kubectl describe` shows the most frequent offenders.
+`kubectl get auditnetworkpolicy payments-isolation -n prod` shows a `WOULD-DENY` column populated by the cumulative count (since evaluator start; resets on restart). `kubectl describe` shows the most frequent offenders.
 
 ## Promoting to enforced
 
@@ -102,7 +102,7 @@ Your CNI now enforces the policy. The evaluator stops watching it.
 
 ## Tracking evaluator progress — `status.observedGeneration`
 
-After you edit an `AuditNetworkPolicy` (e.g. broaden a `to:` selector) the evaluator has to pick the new spec up, re-evaluate the rolling window of observed traffic, and re-publish the `WOULD-DENY` counts. The CRD exposes `.status.observedGeneration` so you know when that loop has caught up:
+After you edit an `AuditNetworkPolicy` (e.g. broaden a `to:` selector) the evaluator picks the new spec up and starts evaluating *new* flows against it. The CRD exposes `.status.observedGeneration` so you know when that has happened:
 
 ```sh
 kubectl get auditnetworkpolicy payments-isolation -n prod \
@@ -111,7 +111,7 @@ kubectl get auditnetworkpolicy payments-isolation -n prod \
 # e.g.  4 → 3   ← still working through your last edit
 ```
 
-The evaluator stamps `observedGeneration` once it has finished a full reconcile of the current `.metadata.generation`. Don't trust the `WOULD-DENY` count for tuning decisions until the two numbers match.
+The evaluator advances `observedGeneration` once a new flow has been evaluated against the new spec (status is flushed roughly every 30 seconds). It does not re-evaluate historical traffic — with no new traffic, `observedGeneration` never advances. Verdicts recorded before your edit stay in the cumulative totals, so don't trust the `WOULD-DENY` count for tuning decisions until the two numbers match and fresh traffic has flowed under the new spec.
 
 ## Querying verdicts directly
 

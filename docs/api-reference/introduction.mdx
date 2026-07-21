@@ -22,8 +22,17 @@ kubectl port-forward -n kguardian svc/kguardian-broker 9090:9090
 
 ## Authentication
 
+Authentication is **opt-in** bearer-token auth, off by default. Set the
+`BROKER_AUTH_TOKEN` environment variable on the broker and every
+endpoint except `/health` and `/metrics` requires an
+`Authorization: Bearer <token>` header; a missing or invalid token
+returns `401`.
+
 <Warning>
-The broker currently has **no authentication**. The API should only be accessible within the cluster network. For production deployments, consider using NetworkPolicies, service mesh, or an API gateway with authentication.
+Without `BROKER_AUTH_TOKEN` set, the API is unauthenticated and should
+only be reachable within the cluster network. For production
+deployments, enable token auth and/or restrict access with
+NetworkPolicies, a service mesh, or an API gateway.
 </Warning>
 
 For the broker's current released version, see
@@ -49,6 +58,9 @@ For the broker's current released version, see
   <Card title="Audit Verdicts" icon="shield-check" href="/api-reference/endpoints/audit-verdicts">
     Query Would-Deny / Allow verdicts from the audit evaluator
   </Card>
+  <Card title="Version" icon="tag" href="/api-reference/endpoints/version">
+    Running broker + chart versions, latest known releases, and update availability
+  </Card>
 </CardGroup>
 
 ## Response Format
@@ -57,6 +69,7 @@ All responses are JSON with standard HTTP status codes:
 
 - `200 OK` - Success
 - `400 Bad Request` - Invalid parameters
+- `401 Unauthorized` - Missing or invalid bearer token (only when `BROKER_AUTH_TOKEN` is set)
 - `404 Not Found` - Resource not found
 - `500 Internal Server Error` - Server error
 
@@ -64,13 +77,14 @@ All responses are JSON with standard HTTP status codes:
 
 ### Pagination
 
-Most endpoints return all matching rows without paging — fine for
-small / medium clusters but unbounded on busy ones. `/audit/verdicts`
-is the exception: it supports a `limit` query parameter (default 100,
-max 500) and orders by `(observed_at DESC, id DESC)` for stable
-cursor-style traversal. The `/pod/info`, `/svc/info`, `/pod/traffic`
-and `/pod/traffic/{name}` endpoints have stable ordering too — see
-each page for the sort key — but no LIMIT yet.
+The high-volume endpoints support a `limit` query parameter:
+`/pod/traffic` defaults to 5000 rows (clamped to `[1, 20000]`,
+most-recent-first) and `/audit/verdicts` defaults to 100 (clamped to
+`[1, 500]`), both ordered newest-first with the primary key as a
+tiebreak for stable cursor-style traversal. Only
+`/pod/traffic/{name}` remains unbounded. The `/pod/info` and
+`/svc/info` endpoints return all rows but have stable ordering — see
+each page for the sort key.
 
 ### Filtering
 

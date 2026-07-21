@@ -1,96 +1,51 @@
 # kguardian LLM Bridge
 
-A dedicated microservice that bridges the kguardian frontend with multiple LLM providers (OpenAI, Anthropic, Gemini, GitHub Copilot).
+A microservice that connects the kguardian frontend to LLM providers (OpenAI, Anthropic, Gemini, GitHub Copilot) and gives the model access to cluster data through the MCP server.
 
 ## Architecture
 
 ```
 ┌─────────────┐      ┌─────────────┐      ┌──────────────────┐
 │   Frontend  │─────▶│ LLM Bridge  │─────▶│  LLM Provider    │
-│   (React)   │      │(TypeScript) │      │  (OpenAI/Claude/ │
+│   (React)   │ SSE  │(TypeScript) │      │  (OpenAI/Claude/ │
 │             │      │             │      │  Gemini/Copilot) │
 └─────────────┘      └─────────────┘      └──────────────────┘
-                            │                      │
-                            │                      │
-                            ▼                      ▼
-                     ┌─────────────┐      ┌──────────────┐
-                     │ MCP Server  │      │  Tool Calls  │
-                     │    (Go)     │      │ (6 MCP Tools)│
-                     │             │      │              │
-                     └─────────────┘      └──────────────┘
-                            │                      │
-                            ▼                      │
-                     ┌─────────────┐               │
-                     │   Broker    │◀──────────────┘
-                     │   (Rust)    │
-                     └─────────────┘
                             │
                             ▼
-                     ┌─────────────┐
-                     │ PostgreSQL  │
-                     │   (Data)    │
-                     └─────────────┘
+                     ┌─────────────┐      ┌─────────────┐      ┌─────────────┐
+                     │ MCP Server  │─────▶│   Broker    │─────▶│ PostgreSQL  │
+                     │    (Go)     │      │   (Rust)    │      │             │
+                     └─────────────┘      └─────────────┘      └─────────────┘
 ```
 
-## Why a Separate Service?
+The bridge exists so LLM API keys stay isolated from the Broker, the AI workload can scale independently, and the Broker stays focused on telemetry. It selects the first provider with a configured API key, exposes streaming chat over SSE, and lets the model call the MCP server's 12 tools for live (polled) cluster data. See [mcp-server/README.md](../mcp-server/README.md#available-tools) for the full tool list.
 
-**Security**: API keys isolated from main broker
-**Separation of Concerns**: Broker stays focused on telemetry data
-**Scalability**: Scale AI workload independently
-**Flexibility**: Easy to swap/update LLM logic
-**Frontend Direct Connection**: Simpler architecture
-
-## Features
-
-- ✅ **Multi-Provider Support**: OpenAI, Anthropic, Gemini, GitHub Copilot
-- ✅ **MCP Integration**: Uses Model Context Protocol (MCP) to access cluster data via MCP server
-- ✅ **Function Calling**: LLMs can call 6 MCP tools for real-time cluster data
-- ✅ **Automatic Provider Selection**: Uses first available API key
-- ✅ **Health Checks**: Monitor service and provider availability
-- ✅ **Error Handling**: Comprehensive error messages with graceful fallbacks
-- ✅ **TypeScript**: Full type safety with MCP SDK integration
+Its only upstream is the MCP server (`MCP_SERVER_URL`) — the bridge never talks to the Broker directly.
 
 ## Supported LLM Providers
 
 ### OpenAI (GPT-4, GPT-4o)
 - **Env Var**: `OPENAI_API_KEY`
 - **Default Model**: `gpt-4o`
-- **Best For**: Fast, general-purpose queries
 
 ### Anthropic Claude
 - **Env Var**: `ANTHROPIC_API_KEY`
 - **Default Model**: `claude-opus-4-8`
-- **Best For**: Complex security analysis, best reasoning
 
 ### Google Gemini
 - **Env Var**: `GOOGLE_API_KEY`
 - **Default Model**: `gemini-2.0-flash-exp`
-- **Best For**: Cost-effective, free tier available
 
 ### GitHub Copilot
 - **Env Var**: `GITHUB_TOKEN`
 - **Default Model**: `gpt-4o`
-- **Best For**: If you already have Copilot subscription
-
-## Available Tools
-
-The bridge connects to the MCP server which provides 6 comprehensive tools that LLMs can call:
-
-1. **get_pod_network_traffic** - Query network connections for a specific pod
-2. **get_pod_syscalls** - Get system calls made by a specific pod
-3. **get_pod_details** - Get detailed pod information by IP address
-4. **get_service_details** - Get Kubernetes service information by cluster IP
-5. **get_cluster_traffic** - Get all network traffic across the entire cluster
-6. **get_cluster_pods** - Get detailed information about all pods in the cluster
-
-For detailed tool specifications, parameters, and use cases, see the [MCP Server documentation](../mcp-server/README.md#available-tools).
 
 ## Development
 
 ### Prerequisites
 - Node.js 20+
 - npm
-- Access to kguardian broker
+- A reachable MCP server
 
 ### Install Dependencies
 ```bash
@@ -122,18 +77,20 @@ npm start
 
 ### Build Image
 ```bash
-docker build -t kguardian-llm-bridge .
+docker build -t ghcr.io/kguardian-dev/kguardian/llm-bridge .
 ```
 
 ### Run Container
 ```bash
 docker run -p 8080:8080 \
-  -e BROKER_URL=http://broker:9090 \
-  -e OPENAI_API_KEY=sk-... \
-  kguardian-llm-bridge
+  -e MCP_SERVER_URL=http://kguardian-mcp-server:8081 \
+  -e ANTHROPIC_API_KEY=sk-ant-... \
+  ghcr.io/kguardian-dev/kguardian/llm-bridge
 ```
 
 ## API Endpoints
+
+Both chat endpoints are rate-limited to **20 requests per minute** per client.
 
 ### GET /health
 
@@ -143,15 +100,17 @@ Health check endpoint.
 ```json
 {
   "status": "healthy",
-  "brokerUrl": "http://broker:9090",
-  "availableProviders": ["openai", "anthropic"],
   "hasProvider": true
 }
 ```
 
+### POST /api/chat/stream
+
+Streaming chat over Server-Sent Events — this is what the frontend uses. Same request body as `/api/chat`; the response is an SSE stream of incremental message events, including tool-call rounds, with keepalives while the model works.
+
 ### POST /api/chat
 
-Send a chat message to the AI assistant.
+Non-streaming chat; returns the full response as one JSON object.
 
 **Request:**
 ```json
@@ -182,13 +141,16 @@ Send a chat message to the AI assistant.
 }
 ```
 
+Upstream provider rate limits and overloads are surfaced as `429`/`503` so clients can back off.
+
 ## Environment Variables
 
 | Variable | Required | Description |
 |----------|----------|-------------|
 | `PORT` | No | Server port (default: 8080) |
-| `BROKER_URL` | Yes | kguardian broker URL |
-| `MCP_SERVER_URL` | No | MCP server URL (default: http://kguardian-mcp-server.kguardian.svc.cluster.local:8081) |
+| `MCP_SERVER_URL` | No | MCP server URL (default: `http://kguardian-mcp-server.kguardian.svc.cluster.local:8081`) |
+| `ALLOWED_ORIGIN` | No | CORS allowed origin (default: `*`) |
+| `LOG_LEVEL` | No | Log level (default: `info`) |
 | `OPENAI_API_KEY` | No* | OpenAI API key |
 | `ANTHROPIC_API_KEY` | No* | Anthropic API key |
 | `GOOGLE_API_KEY` | No* | Google Gemini API key |
@@ -204,16 +166,14 @@ The service is deployed as part of the kguardian Helm chart:
 llmBridge:
   enabled: true
   image:
-    repository: ghcr.io/kguardian-dev/llm-bridge
-    tag: latest
+    repository: ghcr.io/kguardian-dev/kguardian/llm-bridge
+    tag: "1.4.1"
   env:
-    - name: BROKER_URL
-      value: "http://broker.kguardian.svc.cluster.local:9090"
-    - name: OPENAI_API_KEY
+    - name: ANTHROPIC_API_KEY
       valueFrom:
         secretKeyRef:
           name: kguardian-secrets
-          key: openai-api-key
+          key: anthropic-api-key
           optional: true
 ```
 
@@ -241,12 +201,7 @@ curl http://localhost:8080/health
 
 ### No providers available
 - Ensure at least one API key environment variable is set
-- Check the `/health` endpoint to see which providers are configured
-
-### Connection to broker fails
-- Verify `BROKER_URL` is correct
-- Ensure broker service is running
-- Check network policies allow egress from llm-bridge to broker
+- Check the `/health` endpoint (`hasProvider` should be `true`)
 
 ### Connection to MCP server fails
 - Verify `MCP_SERVER_URL` is correct
@@ -256,10 +211,9 @@ curl http://localhost:8080/health
 - Look for MCP connection messages in llm-bridge startup logs
 
 ### Tools not working / LLM can't access data
-- Check that MCP server successfully connected (look for "✓ Connected to MCP server" in logs)
-- Verify MCP server can reach broker
-- Test tool calls manually using the MCP Inspector (if using kmcp)
-- Check that all 6 tools are registered: Review MCP server logs for tool registration messages
+- Check that MCP server successfully connected (look for "Connected to MCP server" in logs)
+- Verify MCP server can reach the Broker
+- Check that all 12 tools are registered: review MCP server logs for tool registration messages
 
 ### LLM API errors
 - Verify API keys are valid and have credits
@@ -268,18 +222,9 @@ curl http://localhost:8080/health
 
 ## Security
 
-- API keys are stored as Kubernetes Secrets
+- API keys are stored as Kubernetes Secrets and never exposed to the frontend
 - Service runs as non-root user
-- CORS enabled for frontend access
-- All communication over HTTPS in production
-- API keys never exposed to frontend
-
-## Performance
-
-- Typical response time: 2-5 seconds
-- Function calling adds ~1-2 seconds per tool call
-- Concurrent request handling with Express
-- Health checks every 30 seconds
+- CORS restricted via `ALLOWED_ORIGIN`
 
 ## License
 

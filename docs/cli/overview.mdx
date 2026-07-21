@@ -21,7 +21,13 @@ Available for all commands:
 | `--kubeconfig` | Path to kubeconfig file | `$KUBECONFIG` or `~/.kube/config` |
 | `--context` | Kubernetes context to use | Current context |
 | `-n, --namespace` | Namespace scope | Current namespace |
+| `--broker-namespace` | Namespace where the kguardian broker is installed | `kguardian` |
+| `--broker-service` | Name of the kguardian broker service | `broker` |
 | `--debug` | Enable debug logging | `false` |
+
+`--broker-namespace` and `--broker-service` matter when kguardian is
+installed outside the default `kguardian` namespace — the CLI
+port-forwards to the broker and needs to find it.
 
 ## Commands
 
@@ -37,6 +43,12 @@ Available for all commands:
   </Card>
   <Card title="audit promote-cluster" icon="globe" href="/concepts/audit-network-policy#cluster-scoped--kguardian-audit-promote-cluster">
     Convert an AuditClusterNetworkPolicy into one NetworkPolicy per matched namespace (discovery from `namespaceSelector`).
+  </Card>
+  <Card title="serve" icon="server">
+    Run the advisor as an in-cluster HTTP service exposing `/generate/networkpolicy`, `/generate/seccomp`, and `/healthz` — used by the MCP server's chat tools.
+  </Card>
+  <Card title="version" icon="tag">
+    Print client version information. Also available as `-v` / `--version` on the root command.
   </Card>
 </CardGroup>
 

@@ -18,7 +18,7 @@ kubectl kguardian gen secp [POD_NAME] [flags]  # Alias
 | Flag | Type | Description | Default |
 |------|------|-------------|---------|
 | `-n, --namespace` | string | Namespace of the pod | Current namespace |
-| `-a, --all` | bool | Generate for all pods in namespace | `false` |
+| `--all` | bool | Generate for all pods in namespace (no `-a` shorthand) | `false` |
 | `-A, --all-namespaces` | bool | Generate for all pods cluster-wide | `false` |
 | `--output-dir` | string | Directory to save profiles | `seccomp-profiles` |
 | `--default-action` | string | Action for unlisted syscalls | `SCMP_ACT_ERRNO` |

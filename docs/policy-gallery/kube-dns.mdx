@@ -4,8 +4,12 @@ description: "Generated NetworkPolicy and seccomp profile for the kube-system Co
 icon: "signs-post"
 ---
 
+<Warning>
+**Hand-authored illustration.** The YAML on this page illustrates the shape of the policies kguardian generates for this workload — it is not captured generator output. Exact metadata, rule grouping, and selectors produced by `kubectl kguardian gen` will differ. Regeneration of this gallery from a live cluster is planned.
+</Warning>
+
 <Note>
-**Example output.** Verified against kguardian `X.Y.Z` controller on `[TBD reference cluster]`. CoreDNS lives in `kube-system`, which is excluded from monitoring by default — to capture this profile you must remove `kube-system` from `controller.excludedNamespaces` in the Helm values, or scope generation manually.
+CoreDNS lives in `kube-system`, which is excluded from monitoring by default — to capture this profile you must remove `kube-system` from `controller.excludedNamespaces` in the Helm values, or scope generation manually.
 </Note>
 
 ## Workload
@@ -136,4 +140,4 @@ Full profile contains **78 syscall names**. Representative excerpt:
 
 ## What kguardian observed
 
-CoreDNS receives requests from every namespace in the cluster, so kguardian collapses ingress sources into a single `namespaceSelector: {}` rule rather than enumerating thousands of pods. Egress splits into two distinct destinations: node-local resolver IP for upstream lookups, and the Kubernetes API service ClusterIP (`10.96.0.1`) for the in-cluster zone plugin. The syscall set is small because CoreDNS is a single-purpose Go binary — heavy `recvmsg`/`sendmsg` for UDP, `epoll` for TCP, and minimal file I/O. Prometheus scrape ingress on TCP/9153 was captured separately because it originated from a single, identifiable pod.
+CoreDNS receives requests from every namespace in the cluster. The single `namespaceSelector: {}` ingress rule shown above is a hand-idealization — the generator emits one rule per observed peer, with pod and namespace selectors for in-cluster sources. Egress splits into two distinct destinations: node-local resolver IP for upstream lookups, and the Kubernetes API service ClusterIP (`10.96.0.1`) for the in-cluster zone plugin. The syscall set is small because CoreDNS is a single-purpose Go binary — heavy `recvmsg`/`sendmsg` for UDP, `epoll` for TCP, and minimal file I/O. Prometheus scrape ingress on TCP/9153 was captured separately because it originated from a single, identifiable pod.

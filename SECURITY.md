@@ -43,22 +43,13 @@ We will not pursue legal action against researchers who follow this policy in go
 
 Security fixes are backported to currently supported releases only. Older releases receive fixes on a best-effort basis.
 
-| Component  | Version     | Supported          |
-|------------|-------------|--------------------|
-| Controller | latest minor | ✅ security fixes  |
-| Controller | older        | ❌ best-effort     |
-| Broker     | latest minor | ✅ security fixes  |
-| Broker     | older        | ❌ best-effort     |
-| Advisor    | latest minor | ✅ security fixes  |
-| Advisor    | older        | ❌ best-effort     |
-| UI         | latest minor | ✅ security fixes  |
-| Helm chart | latest minor | ✅ security fixes  |
+This applies uniformly to every independently versioned component — Controller, Broker, UI, Advisor CLI, Evaluator, MCP Server, LLM Bridge, and the Helm chart: the latest minor release of each receives security fixes; older releases get fixes on a best-effort basis only.
 
 "latest minor" means the most recent `MAJOR.MINOR.x` release line for each component. See [`RELEASES.md`](./RELEASES.md) for the per-component versioning model.
 
 ## Threat Model and Architecture Notes
 
-For security-relevant architecture details (Controller capabilities, Broker auth posture, data sensitivity, trust boundaries) see [`docs/security-model.mdx`](./docs/security-model.mdx). That page is the canonical source for "what does kguardian assume about its environment?" — please read it before reporting issues that depend on those assumptions.
+For security-relevant architecture details (Controller capabilities, Broker auth posture, data sensitivity, trust boundaries) see the docs site at [docs.kguardian.dev](https://docs.kguardian.dev) — please review the architecture and security material there before reporting issues that depend on those assumptions.
 
 ## Style
 

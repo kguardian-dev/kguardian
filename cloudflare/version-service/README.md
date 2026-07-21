@@ -5,7 +5,7 @@ the broker's daily anonymous check-in ([docs/telemetry](../../docs/telemetry.mdx
 client: [`broker/src/version_check.rs`](../../broker/src/version_check.rs)).
 
 `GET /v1/check` returns the latest released component versions (GitHub
-Releases, cached 5 min in KV) and records the check-in's metadata in Workers
+Releases, cached 5 min via the Workers Cache API) and records the check-in's metadata in Workers
 Analytics Engine. IPs are not persisted; geo is Cloudflare's country code.
 
 ## Deploy

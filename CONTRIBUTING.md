@@ -4,7 +4,7 @@ Thanks for your interest in contributing. This guide explains how to file issues
 
 ## Code of Conduct
 
-This project adopts the [Contributor Covenant 2.1](./CODE_OF_CONDUCT.md). By participating you agree to abide by it. Report unacceptable behaviour to the maintainers as described in that document.
+Be respectful and constructive — critique code and ideas, not people, and keep discussions focused on making the project better. Report unacceptable behaviour privately to the maintainers listed below.
 
 ## Where to file what
 
@@ -62,28 +62,23 @@ All commits must be signed off:
 git commit -s -m "fix(broker): close DB pool on shutdown"
 ```
 
-The `-s` flag adds a `Signed-off-by:` trailer that certifies you have the right to submit the work under the project licence (see the [Developer Certificate of Origin](https://developercertificate.org/)). PRs without sign-off will be rejected by CI.
+The `-s` flag adds a `Signed-off-by:` trailer that certifies you have the right to submit the work under the project licence (see the [Developer Certificate of Origin](https://developercertificate.org/)). Sign-off is expected on all commits; maintainers may ask you to add it during review.
 
 ### PR checklist
 
 Before requesting review:
 
-1. The change is covered by tests (unit, integration, or both — see [`docs/development/testing`](./docs/development/testing.mdx)).
+1. The change is covered by tests (unit, integration, or both).
 2. `task preflight` and the relevant component build (`task <component>:build`) pass locally.
-3. Docs are updated if behaviour, flags, or API contracts changed. See [`docs/contributing.mdx`](./docs/contributing.mdx) for the docs workflow.
+3. Docs are updated if behaviour, flags, or API contracts changed.
 4. Style rules from [`STYLE.md`](./STYLE.md) are honoured (lowercase product name, no banned marketing words, no emoji in headings, no unqualified "real-time").
 5. Commit messages follow Conventional Commits and are signed off.
 
 ## Local development setup
 
-Pointers, not duplicates — the docs site has the canonical guides:
+The monorepo builds via [`Taskfile.yaml`](./Taskfile.yaml) (run `task --list` for all targets) and each component lives in its own source directory: `controller/`, `broker/`, `frontend/`, `advisor/`, `evaluator/`, `mcp-server/`, `llm-bridge/`, `charts/`.
 
-- [Development overview](./docs/development/overview.mdx) — repo layout, monorepo components, dev loop.
-- [Building from source](./docs/development/building-from-source.mdx) — Rust + Go + frontend build via `Taskfile.yaml` and `Tiltfile`.
-- [Testing](./docs/development/testing.mdx) — how to run unit and integration tests per component.
-- Component internals: [Controller](./docs/development/controller.mdx), [Broker](./docs/development/broker.mdx), [CLI](./docs/development/cli.mdx), [UI](./docs/development/ui.mdx).
-
-Quick start for the impatient:
+Quick start:
 
 ```bash
 # clone + enter
@@ -114,7 +109,7 @@ If you are touching docs, read `STYLE.md` end-to-end before writing — it is sh
 
 ## Releases
 
-kguardian uses component-based versioning automated by [release-please](https://github.com/googleapis/release-please). See [`RELEASES.md`](./RELEASES.md) and [`docs/development/releases.mdx`](./docs/development/releases.mdx) for the full release flow. As a contributor, the only thing you usually need to do is write a Conventional Commit message — release-please does the rest.
+kguardian uses component-based versioning automated by [release-please](https://github.com/googleapis/release-please). See [`RELEASES.md`](./RELEASES.md) for the full release flow. As a contributor, the only thing you usually need to do is write a Conventional Commit message — release-please does the rest.
 
 ## Maintainers
 
