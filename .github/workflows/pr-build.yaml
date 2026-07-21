@@ -322,6 +322,25 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
+      # Execute the built image, not just build it. Catches runtime-only
+      # failures like builder/runtime glibc mismatch (broker v1.12.0 shipped
+      # unable to exec: "GLIBC_2.38 not found" — built on a drifted
+      # rust:latest, run on debian 12). Without a DATABASE_URL the binary
+      # must reach its own startup assertion; a loader error means the
+      # image cannot run anywhere.
+      - name: Smoke test image (binary must exec)
+        env:
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          out=$(docker run --rm "ghcr.io/kguardian-dev/kguardian/broker:pr-${PR_NUMBER}" /broker 2>&1 || true)
+          echo "$out"
+          if echo "$out" | grep -q "DATABASE_URL must be set"; then
+            echo "OK: binary executed to the expected startup assertion"
+          else
+            echo "FAIL: binary did not reach startup (loader/link error above?)"
+            exit 1
+          fi
+
       - name: Update or create PR comment
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9
         with:
