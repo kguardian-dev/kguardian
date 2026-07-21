@@ -14,19 +14,13 @@ routes = [
 # The 5-minute GitHub Releases cache uses the Workers Cache API
 # (caches.default) — per-colo, zero pre-created resources. No KV needed.
 
-# Usage telemetry sink — TEMPORARILY DISABLED (chicken-and-egg on fresh
-# accounts): deploying with this binding fails with error 10089 until
-# Analytics Engine is enabled in the dashboard, but the dashboard's enable
-# CTA (Workers & Pages → Overview → side panel → "Analytics Engine (beta)")
-# only appears once a worker is deployed. So: deploy without the binding
-# first (version checks work; recordCheckin no-ops on the absent binding),
-# enable AE in the dashboard, then uncomment this block. Query with the
-# Analytics Engine SQL API:
+# Usage telemetry sink (Analytics Engine enabled on the account 2026-07-21).
+# Every check-in writes one data point; query with the AE SQL API:
 #   SELECT COUNT(DISTINCT index1) AS installs FROM kguardian_telemetry
 #   WHERE timestamp > NOW() - INTERVAL '30' DAY
-# [[analytics_engine_datasets]]
-# binding = "TELEMETRY"
-# dataset = "kguardian_telemetry"
+[[analytics_engine_datasets]]
+binding = "TELEMETRY"
+dataset = "kguardian_telemetry"
 
 # Optional secret to raise the GitHub API rate limit (not required — the
 # cache keeps traffic minimal):
