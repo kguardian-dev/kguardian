@@ -21,8 +21,8 @@ these six query parameters — nothing else, ever:
 | Field | Example | What it is |
 | --- | --- | --- |
 | `install` | `4f7c…-…` | Random UUID generated once at first startup. Contains no cluster or user information — it only lets repeated check-ins from the same install be counted once. |
-| `broker` | `1.11.1` | Broker version. |
-| `chart` | `1.13.2` | Helm chart version (`unknown` outside the chart). |
+| `broker` | `1.12.0` | Broker version. |
+| `chart` | `1.14.0` | Helm chart version (`unknown` outside the chart). |
 | `k8s` | `v1.33.1` | Kubernetes version, captured by the chart at install/upgrade time. |
 | `nodes` | `3` | Count of distinct live nodes the controller has observed — a coarse size signal, not an inventory. |
 | `arch` | `x86_64` | Broker CPU architecture. |
@@ -44,10 +44,10 @@ surfaces it at `GET /version`:
 
 ```json
 {
-  "broker": "1.11.1",
-  "chart": "1.13.2",
+  "broker": "1.12.0",
+  "chart": "1.14.0",
   "telemetry_enabled": true,
-  "latest": { "chart": "1.13.2", "broker": "1.11.1" },
+  "latest": { "chart": "1.14.0", "broker": "1.12.0" },
   "checked_at": "2026-07-19T12:00:00",
   "update_available": false
 }

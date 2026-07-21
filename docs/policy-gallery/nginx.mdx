@@ -4,9 +4,9 @@ description: "Generated NetworkPolicy, CiliumNetworkPolicy, and seccomp profile 
 icon: "server"
 ---
 
-<Note>
-**Example output.** Verified against kguardian `X.Y.Z` controller on `[TBD reference cluster]`.
-</Note>
+<Warning>
+**Hand-authored illustration.** The YAML on this page illustrates the shape of the policies kguardian generates for this workload — it is not captured generator output. Exact metadata, rule grouping, and selectors produced by `kubectl kguardian gen` will differ. Regeneration of this gallery from a live cluster is planned.
+</Warning>
 
 ## Workload
 
@@ -80,12 +80,6 @@ spec:
         - ports:
             - port: "80"
               protocol: TCP
-          rules:
-            http:
-              - method: GET
-                path: "/"
-              - method: HEAD
-                path: "/"
   egress:
     - toEndpoints:
         - matchLabels:
@@ -95,9 +89,6 @@ spec:
         - ports:
             - port: "53"
               protocol: ANY
-          rules:
-            dns:
-              - matchPattern: "*"
 ```
 
 ## Generated seccomp profile (excerpt)
@@ -131,4 +122,4 @@ Full profile contains **104 syscall names**. Representative excerpt:
 
 ## What kguardian observed
 
-The controller saw inbound TCP connections to port 80 originating from `curl-pod` in the same namespace, outbound UDP/53 (and a small number of fallback TCP/53) to the kube-system CoreDNS pods, and the typical syscall mix for an nginx worker process: socket setup, `epoll`-based event loop, `sendfile` for static responses, and read/write on the listening sockets. No outbound traffic to upstream HTTP services was seen, so no egress allow-rules for upstream hosts were generated. The Cilium variant adds L7 HTTP method/path rules for `GET /` and `HEAD /` because those were the only request shapes captured.
+The controller saw inbound TCP connections to port 80 originating from `curl-pod` in the same namespace, outbound UDP/53 (and a small number of fallback TCP/53) to the kube-system CoreDNS pods, and the typical syscall mix for an nginx worker process: socket setup, `epoll`-based event loop, `sendfile` for static responses, and read/write on the listening sockets. No outbound traffic to upstream HTTP services was seen, so no egress allow-rules for upstream hosts were generated. The generator emits one rule per observed peer — pod plus namespace selectors for in-cluster peers — so each source appears as its own rule.

@@ -42,7 +42,7 @@ spec:
 
 ## How kguardian Generates Policies
 
-1. **Observes traffic** via eBPF for 5+ minutes
+1. **Observes traffic** continuously via eBPF (let several minutes of representative traffic accumulate before generating)
 2. **Identifies peers** by resolving IPs to pods/services
 3. **Groups rules** by protocol and port
 4. **Deduplicates** to create minimal policies
@@ -71,4 +71,4 @@ spec:
 
 **Next steps:**
 - [Generate Network Policies](/guides/generating-network-policies)
-- [Cilium Policies](/advanced/cilium-policies)
+- [Policy Gallery](/policy-gallery/index)

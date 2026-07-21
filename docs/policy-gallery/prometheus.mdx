@@ -4,9 +4,9 @@ description: "Generated NetworkPolicy and seccomp profile for a Prometheus pod s
 icon: "chart-line"
 ---
 
-<Note>
-**Example output.** Verified against kguardian `X.Y.Z` controller on `[TBD reference cluster]`.
-</Note>
+<Warning>
+**Hand-authored illustration.** The YAML on this page illustrates the shape of the policies kguardian generates for this workload — it is not captured generator output. Exact metadata, rule grouping, and selectors produced by `kubectl kguardian gen` will differ. Regeneration of this gallery from a live cluster is planned.
+</Warning>
 
 ## Workload
 
@@ -91,12 +91,6 @@ spec:
         - ports:
             - port: "9090"
               protocol: TCP
-          rules:
-            http:
-              - method: GET
-                path: "/api/v1/query.*"
-              - method: POST
-                path: "/api/v1/query_range"
   egress:
     - toEndpoints:
         - {}
@@ -110,10 +104,6 @@ spec:
               protocol: TCP
             - port: "10250"
               protocol: TCP
-          rules:
-            http:
-              - method: GET
-                path: "/metrics"
     - toEntities:
         - kube-apiserver
       toPorts:
@@ -154,4 +144,4 @@ Full profile contains **131 syscall names**. Representative excerpt:
 
 ## What kguardian observed
 
-Prometheus's egress is the most interesting piece: scrape requests fanned out to every namespace on a small, well-known set of metrics ports (`8080`, `9100`, `9153`, `10250`), so kguardian emitted a single `namespaceSelector: {}` egress rule rather than per-pod selectors. The Cilium variant pins those scrapes to `GET /metrics` at L7. Ingress was a single source — Grafana — querying the Prometheus API on TCP/9090. Egress to the Kubernetes API service ClusterIP was captured for service-discovery `LIST/WATCH` calls. The syscall profile picks up `pwrite64`/`fdatasync` because Prometheus persists samples to disk via its WAL.
+Prometheus's egress is the most interesting piece: scrape requests fan out to every namespace on a small, well-known set of metrics ports (`8080`, `9100`, `9153`, `10250`). The single `namespaceSelector: {}` egress rule shown above is a hand-idealization — the generator emits one rule per observed peer, with pod and namespace selectors for in-cluster targets. Ingress was a single source — Grafana — querying the Prometheus API on TCP/9090. Egress to the Kubernetes API service ClusterIP was captured for service-discovery `LIST/WATCH` calls. The syscall profile picks up `pwrite64`/`fdatasync` because Prometheus persists samples to disk via its WAL.

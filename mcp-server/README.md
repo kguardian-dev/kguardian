@@ -161,6 +161,18 @@ List Kubernetes services across the cluster with compact metadata. Returns the s
 - Service inventory and discovery
 - Map cluster IPs to services when interpreting egress traffic
 
+### `get_pods_on_node`
+List the pods recorded on a specific Kubernetes node (compact metadata: name, namespace, IP, node, workload labels; live pods only).
+
+**Parameters:**
+- `node` (string, required): The node name to list pods for.
+
+**Returns:** JSON array of compacted pod records, same shape as `get_cluster_pods`.
+
+**Use Cases:**
+- Blast-radius analysis ("what runs on node X?")
+- Identify workloads sharing a node
+
 ### `get_audit_verdicts`
 Get network-policy evaluation verdicts produced by the audit pipeline — observed flows scored as `Allow` or `WouldDeny` against `AuditNetworkPolicy` / `AuditClusterNetworkPolicy` resources. Rows are returned newest-first. This is the primary tool for security questions about what traffic a policy would block.
 
@@ -202,7 +214,7 @@ Generate a least-privilege seccomp profile (JSON) for a pod from its observed sy
 ## Development
 
 ### Prerequisites
-- Go 1.23+
+- Go 1.25+
 - kmcp CLI (recommended) - Install from https://kagent.dev/docs/kmcp
 - Docker (for building images)
 - Kubernetes cluster (for deployment)
@@ -236,7 +248,7 @@ go build -o bin/kguardian-mcp .
 
 Set the broker URL and port via environment variables:
 ```bash
-export BROKER_URL=http://broker.kguardian.svc.cluster.local:9090
+export BROKER_URL=http://kguardian-broker.kguardian.svc.cluster.local:9090
 export PORT=8081
 export LOG_LEVEL=debug  # Optional: debug, info, warn, error
 ```
@@ -272,43 +284,13 @@ docker run -e BROKER_URL=http://broker:9090 kguardian-mcp-server
 
 ## Deployment
 
-The MCP server supports multiple deployment methods. See [DEPLOYMENT.md](./DEPLOYMENT.md) for comprehensive deployment guides.
-
-### Quick Deploy with kmcp
+The MCP server is deployed via the kguardian Helm chart. See [DEPLOYMENT.md](./DEPLOYMENT.md) for details.
 
 ```bash
-# Install kmcp controller
-kmcp install
-
-# Deploy MCP server
-kubectl apply -f deploy/mcpserver.yaml
-
-# Verify
-kubectl get mcpserver -n kguardian
-```
-
-### Deploy with Helm
-
-```bash
-# Standard deployment
 helm install kguardian oci://ghcr.io/kguardian-dev/charts/kguardian \
   --set mcpServer.enabled=true \
   --namespace kguardian --create-namespace
-
-# With kmcp controller (recommended)
-helm install kguardian oci://ghcr.io/kguardian-dev/charts/kguardian \
-  --set mcpServer.enabled=true \
-  --set mcpServer.useKmcp=true \
-  --namespace kguardian --create-namespace
 ```
-
-### Benefits of kmcp Deployment
-
-- ✅ **Transport Flexibility**: Switch between HTTP, SSE, stdio, WebSocket without code changes
-- ✅ **Better DX**: Built-in testing with MCP Inspector
-- ✅ **Kubernetes-Native**: MCPServer CRD managed by controller
-- ✅ **Easy Scaling**: Autoscaling and multi-tenant support
-- ✅ **Observability**: Built-in metrics and tracing integration
 
 ## Integration with LLM Bridge
 
@@ -362,7 +344,7 @@ With the LLM bridge, you can ask natural language questions like:
 
 The LLM bridge automatically discovers and uses all MCP tools. No additional configuration needed beyond:
 
-1. Deploy MCP server with kmcp or Helm
+1. Deploy the MCP server via the Helm chart (`mcpServer.enabled=true`)
 2. Configure LLM bridge with MCP server URL
 3. Start asking questions!
 

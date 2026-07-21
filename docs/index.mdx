@@ -74,7 +74,7 @@ A Kubernetes runtime-observability tool that turns the network and syscall behav
 
 ## How it Works
 
-kguardian consists of four components working together:
+kguardian is built around four core components, plus an audit-mode evaluator (deployed by default) and an optional AI assistant (llm-bridge + mcp-server):
 
 <Steps>
   <Step title="Controller Monitors">
@@ -91,6 +91,14 @@ kguardian consists of four components working together:
 
   <Step title="UI Visualizes">
     The **UI** (React + TypeScript) provides an interactive graph showing pod communication, making it easy to understand complex network topologies.
+  </Step>
+
+  <Step title="Evaluator Audits">
+    The **Evaluator** (deployed by default) replays observed flows against generated policies and reports would-deny verdicts, so you can validate a policy before enforcing it.
+  </Step>
+
+  <Step title="AI Assistant (Optional)">
+    The optional **AI assistant** (llm-bridge + mcp-server) answers natural-language questions about cluster traffic and generates policies conversationally.
   </Step>
 </Steps>
 
@@ -111,7 +119,7 @@ kubectl kguardian gen networkpolicy my-app -n production \
   --output-dir ./policies
 
 # Review and apply
-kubectl apply -f ./policies/production-my-app-networkpolicy.yaml
+kubectl apply -f ./policies/production-my-app-standard-networkpolicy.yaml
 ```
 
 <Check>

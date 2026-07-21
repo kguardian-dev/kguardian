@@ -65,6 +65,10 @@ filter (and logs a warn for the missing precision). Empty
 Return all pod metadata rows. Ordered by
 `(pod_namespace ASC, pod_name ASC)` for stable display.
 
+The stored/returned `pod_obj` is compacted, not the full manifest:
+only `metadata` (minus `managedFields`) and `spec.hostNetwork` are
+kept — containers, volumes, and status are dropped.
+
 ```bash
 curl http://localhost:9090/pod/info
 ```

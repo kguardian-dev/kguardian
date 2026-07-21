@@ -15,9 +15,9 @@ kguardian attaches eBPF programs to kernel hooks to observe pod behavior:
 ### Network Traffic Monitoring
 
 **Hook points:**
-- `tcp_connect` - Outbound TCP connections
-- `tcp_sendmsg` / `tcp_recvmsg` - Data transmission
-- `udp_sendmsg` / `udp_recvmsg` - UDP traffic
+- `fentry/tcp_set_state` - TCP connection lifecycle (both inbound and outbound)
+- `kprobe`/`kretprobe` on `inet_csk_accept` - Inbound TCP connections
+- `fentry/udp_sendmsg` - Outbound UDP traffic
 
 **Captured data:**
 - Source and destination IP addresses
@@ -25,22 +25,25 @@ kguardian attaches eBPF programs to kernel hooks to observe pod behavior:
 - Protocol (TCP/UDP)
 - Network namespace (to map to containers)
 
+<Warning>
+Inbound UDP is not captured — there is no probe for UDP receive. Traffic arriving at a pod over UDP (e.g. DNS queries reaching CoreDNS) will not appear in the flow stream. Egress UDP and all TCP directions are tracked normally.
+</Warning>
+
 ### Syscall Monitoring
 
 **Hook points:**
-- `sys_enter_*` - Entry to any syscall
-- `sys_exit_*` - Exit from syscall
+- `tracepoint/raw_syscalls/sys_enter` - Entry to any syscall
 
 **Captured data:**
-- Syscall name (e.g., `open`, `read`, `socket`)
+- Syscall number, resolved to a name (e.g., `open`, `read`, `socket`) in userspace
 - Process ID and container namespace
-- Architecture (x86_64, arm64, etc.)
+- Node architecture (`x86_64` or `aarch64`)
 
 ## Why eBPF?
 
 <CardGroup cols={2}>
   <Card title="Performance" icon="gauge-high">
-    ~1-2% CPU overhead vs 10-20% for proxy-based solutions
+    In-kernel tracing avoids the per-request cost of proxy-based solutions
   </Card>
   <Card title="Safety" icon="shield-check">
     Verifier ensures programs can't crash the kernel
@@ -49,7 +52,7 @@ kguardian attaches eBPF programs to kernel hooks to observe pod behavior:
     No code changes, sidecars, or pod restarts needed
   </Card>
   <Card title="Kernel-Level Visibility" icon="eye">
-    See everything, including encrypted connections
+    Connection metadata (endpoints, ports, protocol) is visible even for encrypted traffic — payloads are never captured
   </Card>
 </CardGroup>
 
@@ -57,4 +60,3 @@ kguardian attaches eBPF programs to kernel hooks to observe pod behavior:
 
 **Learn more:**
 - [Architecture Overview](/architecture)
-- [Controller Implementation](/development/controller)

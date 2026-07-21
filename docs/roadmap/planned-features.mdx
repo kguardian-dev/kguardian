@@ -49,7 +49,7 @@ narrative; for the current versions of each component, see
 
     **Still planned:**
     - L7 policy hints for Cilium (HTTP, gRPC)
-    - Policy validation and dry-run testing
+    - CiliumClusterwideNetworkPolicy generation
     - Multi-cluster support (federated broker)
   </Step>
 
@@ -114,35 +114,7 @@ narrative; for the current versions of each component, see
 
 ## Feature Requests
 
-### Top Community Requests
-
-Vote on features you want most by starring issues on GitHub:
-
-<CardGroup cols={2}>
-  <Card title="Istio/Service Mesh Policies" icon="diagram-project">
-    **Votes:** 🔥🔥🔥
-
-    Generate AuthorizationPolicies for Istio and Linkerd based on observed L7 traffic.
-  </Card>
-
-  <Card title="Falco Rules Generation" icon="bell">
-    **Votes:** 🔥🔥
-
-    Create runtime threat detection rules from normal behavior baselines.
-  </Card>
-
-  <Card title="OPA/Gatekeeper Policies" icon="gavel">
-    **Votes:** 🔥🔥
-
-    Generate admission control policies to enforce observed patterns.
-  </Card>
-
-  <Card title="RBAC Analyzer" icon="users-gear">
-    **Votes:** 🔥
-
-    Suggest least-privilege RBAC roles based on actual API usage.
-  </Card>
-</CardGroup>
+Ideas under discussion include service-mesh AuthorizationPolicies (Istio/Linkerd), Falco rule generation, OPA/Gatekeeper admission policies, and an RBAC least-privilege analyzer. Want one of these — or something else? Open or upvote an issue on [GitHub](https://github.com/kguardian-dev/kguardian/issues).
 
 ---
 
@@ -225,19 +197,6 @@ For commercial licensees:
     Enterprise customers get priority feature requests. Contact us for licensing options.
   </Step>
 </Steps>
-
----
-
-## Release Schedule
-
-- **Major releases** (x.0.0): Quarterly
-- **Minor releases** (x.x.0): Monthly (features)
-- **Patch releases** (x.x.x): As needed (bug fixes)
-
-All releases follow [Semantic Versioning](https://semver.org/) and include:
-- Detailed changelog
-- Migration guide (if breaking changes)
-- Upgrade instructions
 
 ---
 

@@ -43,13 +43,12 @@ Before you begin, ensure you have:
 **Kernel Version Check:** kguardian requires Linux kernel 6.2+ for eBPF functionality. Run `uname -r` on your nodes to verify.
 </Warning>
 
-## Step 1: Install the Controller
+## Step 1: Install kguardian
 
-The Controller runs as a DaemonSet and uses eBPF to observe your workloads.
+A single Helm install deploys the full stack: the Controller DaemonSet (eBPF observation), Broker, database, frontend, and evaluator.
 
 ```bash
 helm install kguardian oci://ghcr.io/kguardian-dev/charts/kguardian \
-  --version 1.9.1 \
   --namespace kguardian \
   --create-namespace \
   --wait
@@ -64,13 +63,15 @@ Check that all components are running:
 ```bash
 kubectl get pods -n kguardian
 
-# Expected output (one controller pod per node; broker + db + frontend
-# as Deployments; evaluator / mcp-server / llm-bridge appear only when
-# the corresponding chart values enable them):
+# Expected output (one controller pod per node; broker + db + frontend +
+# evaluator as Deployments; the evaluator is on by default and can be
+# disabled with evaluator.enabled=false; mcp-server / llm-bridge appear
+# only when the corresponding chart values enable them):
 # NAME                                   READY   STATUS    RESTARTS   AGE
 # kguardian-controller-xxxxx             1/1     Running   0          2m
 # kguardian-broker-xxxxxxxxxx-xxxxx      1/1     Running   0          2m
 # kguardian-db-xxxxxxxxxx-xxxxx          1/1     Running   0          2m
+# kguardian-evaluator-xxxxxxxxxx-xxxxx   1/1     Running   0          2m
 # kguardian-frontend-xxxxxxxxxx-xxxxx    1/1     Running   0          2m
 ```
 
@@ -96,16 +97,16 @@ The kguardian CLI is a kubectl plugin for generating policies.
   <Tab title="Manual Download">
     ```bash
     # Download the binary for your platform
-    # Replace {VERSION}, {OS}, and {ARCH} with appropriate values
-    VERSION="v1.0.0"
+    # CLI releases are tagged advisor/vX.Y.Z; assets are named advisor-<os>-<arch>
+    VERSION="advisor/v1.6.1"
     OS="linux"  # or darwin, windows
     ARCH="amd64"  # or arm64
 
-    curl -LO "https://github.com/kguardian-dev/kguardian/releases/download/${VERSION}/kguardian-${OS}-${ARCH}"
+    curl -LO "https://github.com/kguardian-dev/kguardian/releases/download/${VERSION}/advisor-${OS}-${ARCH}"
 
     # Make it executable and move to PATH
-    chmod +x kguardian-${OS}-${ARCH}
-    sudo mv kguardian-${OS}-${ARCH} /usr/local/bin/kubectl-kguardian
+    chmod +x advisor-${OS}-${ARCH}
+    sudo mv advisor-${OS}-${ARCH} /usr/local/bin/kubectl-kguardian
 
     # Verify installation
     kubectl kguardian --version
@@ -139,7 +140,7 @@ kguardian learns from actual runtime behavior, so let your applications run norm
     kubectl port-forward -n kguardian svc/kguardian-broker 9090:9090 &
 
     # Check for traffic data (replace 'nginx' with your pod name)
-    curl http://localhost:9090/pod/traffic/name/default/nginx
+    curl http://localhost:9090/pod/traffic/nginx
     ```
 
     <Tip>
@@ -158,7 +159,7 @@ kubectl kguardian gen networkpolicy nginx -n default \
   --output-dir ./policies
 
 # View the generated policy
-cat ./policies/default-nginx-networkpolicy.yaml
+cat ./policies/default-nginx-standard-networkpolicy.yaml
 ```
 
 To apply directly during generation instead of writing files for review, pass `--dry-run=false`. See [`gen networkpolicy`](/cli/gen-networkpolicy) for the full flag reference.
@@ -219,8 +220,8 @@ kubectl kguardian gen networkpolicy nginx -n default \
   --output-dir ./policies --dry-run=false
 
 # Option B: apply the saved YAML yourself
-kubectl apply --dry-run=client -f ./policies/default-nginx-networkpolicy.yaml  # validate
-kubectl apply -f ./policies/default-nginx-networkpolicy.yaml                   # apply
+kubectl apply --dry-run=client -f ./policies/default-nginx-standard-networkpolicy.yaml  # validate
+kubectl apply -f ./policies/default-nginx-standard-networkpolicy.yaml                   # apply
 
 # Verify it's created
 kubectl get networkpolicies -n default
@@ -236,7 +237,7 @@ kubectl kguardian gen seccomp nginx -n default \
   --output-dir ./seccomp
 
 # View the generated profile
-cat ./seccomp/default-nginx-seccomp.json
+cat ./seccomp/nginx-seccomp.json
 ```
 
 <CodeGroup>
