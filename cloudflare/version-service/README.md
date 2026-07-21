@@ -10,15 +10,19 @@ Analytics Engine. IPs are not persisted; geo is Cloudflare's country code.
 
 ## Deploy
 
-```bash
-cd cloudflare/version-service
-wrangler kv namespace create VERSIONS   # paste the id into wrangler.toml
-wrangler deploy
-wrangler secret put GITHUB_TOKEN        # optional: higher GitHub rate limit
-```
+Deployed via Cloudflare's Git-connected Workers Builds: the dashboard
+project **kguardian** points at this repo with root directory
+`cloudflare/version-service`, and every push to `main` touching this
+directory deploys automatically. No pre-created resources are needed —
+the GitHub-releases cache uses the Workers Cache API and the Analytics
+Engine dataset is provisioned on first deploy.
 
 The `version.kguardian.dev` custom domain is claimed on deploy (the
 `kguardian.dev` zone must be on the deploying account).
+
+Manual deploy (fallback): `npx wrangler deploy` from this directory.
+Optional: `wrangler secret put GITHUB_TOKEN` raises the GitHub API rate
+limit; the cache keeps traffic minimal without it.
 
 ## Query the telemetry
 

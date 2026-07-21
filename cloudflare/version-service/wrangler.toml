@@ -1,4 +1,7 @@
-name = "kguardian-version-service"
+# Name matches the Git-connected Worker created in the Cloudflare dashboard
+# (Workers Builds project "kguardian") — the two must agree or builds warn
+# and auto-PR a rename.
+name = "kguardian"
 main = "src/index.js"
 compatibility_date = "2026-07-01"
 
@@ -8,14 +11,11 @@ routes = [
   { pattern = "version.kguardian.dev", custom_domain = true }
 ]
 
-# Cache of the GitHub Releases lookup (5 min TTL) — create with:
-#   wrangler kv namespace create VERSIONS
-# then paste the returned id below.
-[[kv_namespaces]]
-binding = "VERSIONS"
-id = "REPLACE_WITH_KV_NAMESPACE_ID"
+# The 5-minute GitHub Releases cache uses the Workers Cache API
+# (caches.default) — per-colo, zero pre-created resources. No KV needed.
 
-# Usage telemetry sink. Free tier; query with the Analytics Engine SQL API:
+# Usage telemetry sink. Auto-provisioned on deploy; query with the
+# Analytics Engine SQL API:
 #   SELECT COUNT(DISTINCT index1) AS installs FROM kguardian_telemetry
 #   WHERE timestamp > NOW() - INTERVAL '30' DAY
 [[analytics_engine_datasets]]
@@ -23,5 +23,5 @@ binding = "TELEMETRY"
 dataset = "kguardian_telemetry"
 
 # Optional secret to raise the GitHub API rate limit (not required — the
-# KV cache keeps traffic minimal):
+# cache keeps traffic minimal):
 #   wrangler secret put GITHUB_TOKEN

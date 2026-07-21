@@ -19,7 +19,9 @@
  */
 
 const REPO = "kguardian-dev/kguardian";
-const CACHE_KEY = "latest-versions";
+// Synthetic cache key for the Workers Cache API (per-colo). Any URL on a
+// zone we control works; this path is never actually routable.
+const CACHE_KEY = "https://version.kguardian.dev/__cache/latest-versions";
 const CACHE_TTL_SECS = 300;
 
 /** Tag prefixes → response keys. Matches release-please's component tags. */
@@ -68,12 +70,20 @@ async function fetchLatestFromGitHub(env) {
 }
 
 async function latestVersions(env) {
-  const cached = await env.VERSIONS.get(CACHE_KEY, { type: "json" });
-  if (cached) return cached;
+  // Workers Cache API instead of KV: per-colo rather than global, which is
+  // fine here — worst case each colo refreshes from GitHub once per TTL,
+  // still far under any rate limit — and it needs no pre-created namespace,
+  // so the Git-connected build deploys with zero manual resources.
+  const cache = caches.default;
+  const hit = await cache.match(CACHE_KEY);
+  if (hit) return hit.json();
   const fresh = await fetchLatestFromGitHub(env);
-  await env.VERSIONS.put(CACHE_KEY, JSON.stringify(fresh), {
-    expirationTtl: CACHE_TTL_SECS,
-  });
+  await cache.put(
+    CACHE_KEY,
+    Response.json(fresh, {
+      headers: { "Cache-Control": `public, max-age=${CACHE_TTL_SECS}` },
+    }),
+  );
   return fresh;
 }
 
