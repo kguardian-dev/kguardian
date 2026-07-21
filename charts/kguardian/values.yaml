@@ -1052,7 +1052,7 @@ mcpServer:
     # -- MCP Server image pull policy
     pullPolicy: IfNotPresent
     # -- MCP Server version tag (auto-updated by release-please)
-    tag: "1.5.0"
+    tag: "1.5.1"
     # -- Overrides the image tag using SHA digest
     sha: ""
 
