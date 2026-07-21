@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.4.2](https://github.com/kguardian-dev/kguardian/compare/llm-bridge/v1.4.1...llm-bridge/v1.4.2) (2026-07-21)
+
+
+### Documentation
+
+* repo-wide accuracy pass — remove obsolete, untrue, and misleading content ([#1115](https://github.com/kguardian-dev/kguardian/issues/1115)) ([72e672d](https://github.com/kguardian-dev/kguardian/commit/72e672d26d62b7c416b5fb4b526b8a7e18c7ab81))
+
 ## [1.4.1](https://github.com/kguardian-dev/kguardian/compare/llm-bridge/v1.4.0...llm-bridge/v1.4.1) (2026-07-19)
 
 
