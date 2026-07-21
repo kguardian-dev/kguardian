@@ -89,15 +89,26 @@ pub(crate) fn telemetry_interval() -> Duration {
     Duration::from_secs(secs)
 }
 
-/// Chart version as injected by the Helm chart. Absent when the broker
-/// runs outside the chart (dev, docker-compose) — sent as "unknown"
-/// rather than omitted so the service can count non-chart installs.
+/// Chart version as injected by the Helm chart, normalized to the base
+/// semver. Flux-installed charts report `.Chart.Version` with build
+/// metadata appended (e.g. "1.14.1+a1f714b25358"); semver defines the
+/// `+meta` suffix as ignorable for comparison, and keeping it would both
+/// fragment the telemetry's version-spread grouping and false-positive
+/// `update_available` against the service's bare "1.14.1". Absent when
+/// the broker runs outside the chart (dev, docker-compose) — sent as
+/// "unknown" rather than omitted so the service can count non-chart
+/// installs.
 fn chart_version() -> String {
     std::env::var("CHART_VERSION")
         .ok()
-        .map(|v| v.trim().to_string())
+        .map(|v| strip_build_metadata(v.trim()).to_string())
         .filter(|v| !v.is_empty())
         .unwrap_or_else(|| "unknown".to_string())
+}
+
+/// Drop a semver build-metadata suffix ("1.14.1+a1f714b" → "1.14.1").
+fn strip_build_metadata(version: &str) -> &str {
+    version.split('+').next().unwrap_or(version)
 }
 
 fn kube_version() -> String {
@@ -160,9 +171,14 @@ pub(crate) fn update_available(
     if current_chart == "unknown" {
         return false;
     }
+    // Compare base versions: build metadata is defined by semver as
+    // ignorable, and callers may pass a raw Flux-style "1.14.1+<sha>"
+    // (chart_version() already normalizes, but stay safe on both sides).
     latest
         .and_then(|l| l.get("chart"))
-        .map(|latest_chart| latest_chart != current_chart)
+        .map(|latest_chart| {
+            strip_build_metadata(latest_chart) != strip_build_metadata(current_chart)
+        })
         .unwrap_or(false)
 }
 
@@ -327,13 +343,11 @@ pub fn spawn(pool: DbPool, state: web::Data<VersionCheckState>) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
-
-    // Env-mutating tests share this lock (std::env is process-global).
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     fn with_env<F: FnOnce()>(key: &str, value: Option<&str>, f: F) {
-        let _guard = ENV_LOCK.lock().unwrap();
+        // Crate-wide lock: std::env is process-global, so exclusion must
+        // span every test module, not just this one.
+        let _guard = crate::test_support::env_lock();
         let saved = std::env::var(key).ok();
         match value {
             Some(v) => std::env::set_var(key, v),
@@ -452,6 +466,37 @@ mod tests {
                 .status()
         });
         assert!(status.is_success(), "unexpected status {status}");
+    }
+
+    #[test]
+    fn chart_version_strips_build_metadata() {
+        // Flux reports .Chart.Version with build metadata; the base
+        // version must be what we send and compare (the raw form caused
+        // a permanent update_available=true false positive in 1.12.1).
+        with_env("CHART_VERSION", Some("1.14.1+a1f714b25358"), || {
+            assert_eq!(chart_version(), "1.14.1");
+        });
+        with_env("CHART_VERSION", Some("1.14.1"), || {
+            assert_eq!(chart_version(), "1.14.1");
+        });
+        // A degenerate "+meta"-only value strips to empty → unknown.
+        with_env("CHART_VERSION", Some("+abc"), || {
+            assert_eq!(chart_version(), "unknown");
+        });
+    }
+
+    #[test]
+    fn update_available_ignores_build_metadata() {
+        let latest = |v: &str| {
+            let mut m = HashMap::new();
+            m.insert("chart".to_string(), v.to_string());
+            m
+        };
+        // Same base version with metadata on either side → no update.
+        assert!(!update_available("1.14.1+a1f714b", Some(&latest("1.14.1"))));
+        assert!(!update_available("1.14.1", Some(&latest("1.14.1+meta"))));
+        // Genuinely behind, metadata present → still flags.
+        assert!(update_available("1.14.0+a1f714b", Some(&latest("1.14.1"))));
     }
 
     #[test]

@@ -23,3 +23,24 @@ pub use get::{
     get_pod_traffic, get_pod_traffic_name, get_pods_by_node, get_svc_by_ip, get_svc_details,
 };
 pub use schema::{pod_details, pod_traffic};
+
+#[cfg(test)]
+pub(crate) mod test_support {
+    use std::sync::{Mutex, MutexGuard};
+
+    /// Process-wide lock for tests that mutate environment variables.
+    /// `std::env` is process-global: parallel tests mutating even
+    /// *different* keys race on libc's `environ` (and one module's
+    /// remove_var can crash another's concurrent var()). Every
+    /// env-mutating test helper in this crate must hold this lock —
+    /// per-module locks give no cross-module exclusion (the flaky
+    /// conn::returns_connection_manager_when_url_set failure).
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    /// Acquire the env lock, tolerating poison: #[should_panic] tests
+    /// legitimately panic while holding it, and the next test must not
+    /// fail on the poisoned mutex.
+    pub fn env_lock() -> MutexGuard<'static, ()> {
+        ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner())
+    }
+}
