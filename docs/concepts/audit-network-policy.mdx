@@ -1,6 +1,7 @@
 ---
 title: "AuditNetworkPolicy"
 description: "Push policies, see what would be blocked — without blocking anything"
+icon: "clipboard-check"
 ---
 
 `AuditNetworkPolicy` is a kguardian CRD that lets you preview the impact of a Kubernetes NetworkPolicy *before* you enforce it. The spec is byte-identical to upstream `networking.k8s.io/v1.NetworkPolicy`. The only thing that changes is what kguardian does with it: the `kguardian-evaluator` watches observed pod traffic and reports flows that the policy *would* deny — but never drops a single packet.
