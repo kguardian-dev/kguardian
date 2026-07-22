@@ -11,9 +11,9 @@ _Least-privilege Kubernetes security policies, generated from what your pods act
 
 <div align="center">
 
-[![Docs](https://img.shields.io/badge/docs-docs.kguardian.dev-16A34A?style=for-the-badge&logo=gitbook&logoColor=white)](https://docs.kguardian.dev)&nbsp;&nbsp;
-[![Kubernetes](https://img.shields.io/badge/kubernetes-v1.19%2B-16A34A?style=for-the-badge&logo=kubernetes&logoColor=white)](https://kubernetes.io/)&nbsp;&nbsp;
-[![License](https://img.shields.io/badge/license-BSL%201.1-15803D?style=for-the-badge)](LICENSE)&nbsp;&nbsp;
+[![Docs](https://img.shields.io/badge/docs-docs.kguardian.dev-4E3AD9?style=for-the-badge&logo=gitbook&logoColor=white)](https://docs.kguardian.dev)&nbsp;&nbsp;
+[![Kubernetes](https://img.shields.io/badge/kubernetes-v1.19%2B-4E3AD9?style=for-the-badge&logo=kubernetes&logoColor=white)](https://kubernetes.io/)&nbsp;&nbsp;
+[![License](https://img.shields.io/badge/license-BSL%201.1-3B2BA8?style=for-the-badge)](LICENSE)&nbsp;&nbsp;
 
 </div>
 
@@ -78,11 +78,11 @@ graph LR
     UI --> B
     CLI -->|generate policies| B
 
-    style C fill:#16A34A,color:#fff
-    style B fill:#22C55E,color:#fff
-    style E fill:#22C55E,color:#fff
-    style UI fill:#22C55E,color:#fff
-    style CLI fill:#15803D,color:#fff
+    style C fill:#4E3AD9,color:#fff
+    style B fill:#6D5CE6,color:#fff
+    style E fill:#6D5CE6,color:#fff
+    style UI fill:#6D5CE6,color:#fff
+    style CLI fill:#3B2BA8,color:#fff
 ```
 
 | Component | Language | Runs as | Purpose |
