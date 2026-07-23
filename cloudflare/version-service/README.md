@@ -37,6 +37,14 @@ WHERE timestamp > NOW() - INTERVAL '30' DAY
 Version spread: `blob2` is the chart version; `blob3` the k8s version;
 `blob5` the country; `double1` the node count.
 
+A check-in is recorded only when every field validates against the
+broker's wire contract (UUID install, semver versions, kubelet-style
+k8s version, sane arch/node bounds), so the dataset holds real broker
+check-ins only. Rows written before 2026-07-24 predate that guard —
+filter the launch-day test noise with
+`AND index1 NOT IN ('unknown', 'health-probe', 'ae-live-check')` until
+it ages out of AE's 3-month retention (~2026-10-21).
+
 ## Local test
 
 ```bash
