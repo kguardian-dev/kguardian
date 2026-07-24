@@ -109,10 +109,25 @@ spec:
             - name: DB_POOL_MAX_SIZE
               value: {{ .Values.broker.dbPoolMaxSize | quote }}
             {{- end }}
+            {{- if hasKey .Values.broker "statementTimeoutMs" }}
+            - name: DB_STATEMENT_TIMEOUT_MS
+              value: {{ .Values.broker.statementTimeoutMs | quote }}
+            {{- end }}
             {{- if hasKey .Values.broker "dbMigrationMaxRetries" }}
             - name: DB_MIGRATION_MAX_RETRIES
               value: {{ .Values.broker.dbMigrationMaxRetries | quote }}
             {{- end }}
+            # Anonymous version check-in (see docs/telemetry). CHART_VERSION
+            # and KUBE_VERSION are captured at install/upgrade time and ride
+            # the daily check-in; disable with telemetry.enabled=false.
+            - name: TELEMETRY_ENABLED
+              value: {{ .Values.telemetry.enabled | quote }}
+            - name: TELEMETRY_ENDPOINT
+              value: {{ .Values.telemetry.endpoint | quote }}
+            - name: CHART_VERSION
+              value: {{ .Chart.Version | quote }}
+            - name: KUBE_VERSION
+              value: {{ .Capabilities.KubeVersion.Version | quote }}
           {{- with .Values.broker.startupProbe }}
           startupProbe:
             {{- toYaml . | nindent 12 }}

@@ -10,6 +10,22 @@ global:
   # -- Priority class to be used for the kguardian pods
   priorityClassName: ""
 
+telemetry:
+  # -- Enable the daily anonymous version check-in. The broker asks the
+  # kguardian version service for the latest released versions (surfacing an
+  # update notice in the UI and at GET /version); the request doubles as the
+  # project's only usage signal. Exactly six fields are sent — a random
+  # install UUID, broker version, chart version, Kubernetes version, live
+  # node count, and CPU architecture. No cluster names, no IPs stored, no
+  # user data. Documented verbatim at https://docs.kguardian.dev/telemetry.
+  # Set to false to disable entirely: no task is spawned and no request is
+  # ever made. Air-gapped/egress-restricted clusters can also just leave it
+  # on — failures are silent and harmless.
+  enabled: true
+  # -- Version service the broker calls once a day. Override to self-host
+  # or point at a mock; unreachable endpoints are ignored silently.
+  endpoint: https://version.kguardian.dev/v1/check
+
 namespace:
   # -- Namespace name. If empty, uses the release namespace
   name: ""
@@ -152,7 +168,7 @@ broker:
     # -- Broker image pull policy
     pullPolicy: IfNotPresent
     # -- Broker version tag (auto-updated by release-please)
-    tag: "1.11.0"
+    tag: "1.12.2"
     # -- Overrides the image tag using SHA digest
     sha: ""
   initContainer:
@@ -307,6 +323,15 @@ broker:
   # Tune up when broker logs show "could not get db conn for audit
   # verdict insert" warns or when /metrics shows pool-acquire stalls.
   dbPoolMaxSize: 32
+
+  # -- Per-statement timeout (ms) applied to every broker DB connection as a
+  # backstop: the broker runs as a single replica, so one slow or accidentally
+  # unbounded query would otherwise tie up a connection/worker indefinitely and
+  # can cascade into liveness-probe failures. Postgres kills any statement that
+  # exceeds this. 0 disables it. Startup migrations (long CREATE INDEX builds)
+  # are exempt. Healthy request queries are sub-second, so 30s is a safe ceiling
+  # that only ever fires on pathological queries. Tune down for tighter SLOs.
+  statementTimeoutMs: 30000
 
   # -- Number of attempts the broker makes to run embedded migrations
   # on startup, at 2s spacing. The chart's wait-for-db init container
@@ -621,7 +646,7 @@ frontend:
     # -- Frontend image pull policy
     pullPolicy: IfNotPresent
     # -- Frontend version tag (auto-updated by release-please)
-    tag: "1.11.0"
+    tag: "1.11.1"
     # -- Overrides the image tag using SHA digest
     sha: ""
 
@@ -766,7 +791,7 @@ llmBridge:
     # -- LLM Bridge image pull policy
     pullPolicy: IfNotPresent
     # -- LLM Bridge version tag (auto-updated by release-please)
-    tag: "1.4.0"
+    tag: "1.4.3"
     # -- Overrides the image tag using SHA digest
     sha: ""
 
@@ -938,7 +963,7 @@ advisor:
     # -- Advisor image pull policy
     pullPolicy: IfNotPresent
     # -- Advisor version tag (auto-updated by Renovate, like the other images)
-    tag: "v1.6.0"
+    tag: "v1.6.2"
     # -- Overrides the image tag using SHA digest
     sha: ""
 
@@ -1027,7 +1052,7 @@ mcpServer:
     # -- MCP Server image pull policy
     pullPolicy: IfNotPresent
     # -- MCP Server version tag (auto-updated by release-please)
-    tag: "1.5.0"
+    tag: "1.5.1"
     # -- Overrides the image tag using SHA digest
     sha: ""
 
@@ -1174,7 +1199,7 @@ evaluator:
     # -- Evaluator image pull policy
     pullPolicy: IfNotPresent
     # -- Evaluator version tag (auto-updated by release-please)
-    tag: "v0.3.2"
+    tag: "v0.3.3"
     # -- Overrides the image tag using SHA digest
     sha: ""
 

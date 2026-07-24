@@ -1,6 +1,6 @@
 [package]
 name = "broker"
-version = "1.11.0"  #:version
+version = "1.12.2"  #:version
 authors = ["Mahesh Rayas"]
 description = """
 API server for kguardian - stores telemetry data from eBPF controller
@@ -35,7 +35,10 @@ tracing = {version = "0.1.44", features = ['log']}
 chrono = { version = "0.4.43", features = ["serde"] }
 diesel_migrations = "2.1.0"
 tracing-subscriber = { version = "0.3.22", features = ["json", "env-filter"] }
-reqwest = { version = "0.13", default-features = false, features = ["json"] }
+# "rustls" (renamed from 0.12's "rustls-tls") adds the TLS backend for the
+# outbound HTTPS version check-in (version_check.rs); in-cluster calls
+# (evaluator) remain plain http.
+reqwest = { version = "0.13", default-features = false, features = ["json", "query", "rustls"] }
 tokio = { version = "1", features = ["rt", "macros"] }
 
 [dev-dependencies]

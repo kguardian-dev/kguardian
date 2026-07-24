@@ -1,4 +1,4 @@
-kguardian {{ .Chart.AppVersion }} installed in namespace "{{ .Release.Namespace }}".
+kguardian chart {{ .Chart.Version }} installed in namespace "{{ .Release.Namespace }}".
 
 {{- if .Values.database.enabled }}
 Database: in-cluster PostgreSQL {{ .Values.database.image.tag }}
@@ -75,4 +75,18 @@ audit's results, promote it to an enforced policy:
   kguardian audit promote <name> -n <ns> | kubectl apply -f -
 For cluster-scoped policies (AuditClusterNetworkPolicy):
   kguardian audit promote-cluster <name> | kubectl apply -f -
+{{- end }}
+{{- if .Values.telemetry.enabled }}
+
+Telemetry: the broker performs a daily anonymous version check-in
+(random install UUID, component/chart/Kubernetes versions, node count,
+CPU arch — nothing else). It powers the update notice in the UI and is
+the project's only usage signal. Full field list and privacy details:
+  https://docs.kguardian.dev/telemetry
+Disable it at any time with:
+  --set telemetry.enabled=false
+{{- else }}
+
+Telemetry: DISABLED (telemetry.enabled=false) — no version check-in
+requests will be made. Update notices in the UI are unavailable.
 {{- end }}

@@ -1,6 +1,7 @@
 ---
 title: "Audit Verdict Endpoints"
 description: "Query Would-Deny / Allow audit-mode policy verdicts"
+icon: "gavel"
 ---
 
 ## Overview
@@ -81,7 +82,7 @@ curl 'http://localhost:9090/audit/verdicts?namespace='
 | `src_namespace` / `src_pod` | For `direction=Ingress`: typically `null` (the peer is an external IP). For `direction=Egress`: the subject pod's identity. |
 | `dst_namespace` / `dst_pod` | Mirror of above. |
 | `dst_port` / `protocol` | The flow's destination port + protocol (`"TCP"`/`"UDP"`/`"SCTP"`). |
-| `reason` | Free-text rationale from the matcher when `verdict=WouldDeny`; empty for `Allow`. |
+| `reason` | Free-text rationale from the matcher when `verdict=WouldDeny`; JSON `null` (not an empty string) for `Allow`. |
 | `observed_at` | UTC timestamp the broker stamped when the verdict was inserted (microsecond precision). |
 | `verdict` | `"Allow"` (a rule matched and permitted the flow) or `"WouldDeny"` (no rule matched, or `NotApplicable` results are dropped before insert). |
 

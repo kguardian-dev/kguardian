@@ -1,9 +1,45 @@
 extern crate dotenv;
 
 use diesel::pg::PgConnection;
-use diesel::r2d2::ConnectionManager;
+use diesel::r2d2::{ConnectionManager, CustomizeConnection};
+use diesel::{sql_query, QueryResult, RunQueryDsl};
 use dotenv::dotenv;
 use std::env;
+
+/// Apply Postgres `statement_timeout` to a single connection's session.
+/// `ms = 0` disables it (Postgres treats 0 as "no limit"). The value is
+/// our own integer, never user input, so the inline format is injection-safe.
+pub fn set_statement_timeout(conn: &mut PgConnection, ms: u64) -> QueryResult<()> {
+    sql_query(format!("SET statement_timeout = {ms}")).execute(conn)?;
+    Ok(())
+}
+
+/// r2d2 customizer that caps every pooled connection's per-statement runtime.
+/// The broker runs as a single replica, so one slow or accidentally-unbounded
+/// query would otherwise tie up a worker/connection indefinitely and can
+/// cascade into liveness-probe failures. This is the universal backstop under
+/// the whole "no unbounded read" effort: even a future unbounded query is
+/// killed by Postgres at the deadline instead of wedging the broker.
+///
+/// NOT applied to the startup migration connection — long `CREATE INDEX`
+/// builds on multi-million-row tables must not be killed (main.rs disables the
+/// timeout around `run_migrations` and restores it after).
+#[derive(Debug, Clone, Copy)]
+pub struct StatementTimeoutCustomizer {
+    timeout_ms: u64,
+}
+
+impl StatementTimeoutCustomizer {
+    pub fn new(timeout_ms: u64) -> Self {
+        Self { timeout_ms }
+    }
+}
+
+impl CustomizeConnection<PgConnection, diesel::r2d2::Error> for StatementTimeoutCustomizer {
+    fn on_acquire(&self, conn: &mut PgConnection) -> Result<(), diesel::r2d2::Error> {
+        set_statement_timeout(conn, self.timeout_ms).map_err(diesel::r2d2::Error::QueryError)
+    }
+}
 
 pub fn establish_connection() -> ConnectionManager<PgConnection> {
     dotenv().ok();
@@ -43,6 +79,9 @@ mod tests {
     }
 
     impl EnvGuard {
+        /// NOTE: callers must hold `crate::test_support::env_lock()` for
+        /// the guard's lifetime — EnvGuard restores values but does not
+        /// provide cross-test exclusion.
         fn set(key: &str, value: Option<&str>) -> Self {
             let prev = env::var(key).ok();
             match value {
@@ -72,6 +111,7 @@ mod tests {
     #[test]
     #[should_panic(expected = "DATABASE_URL must be set")]
     fn panics_when_database_url_unset() {
+        let _lock = crate::test_support::env_lock();
         let _g = EnvGuard::set("DATABASE_URL", None);
         // _g drops on the panic-unwind path, restoring env. #[should_panic]
         // still sees the panic.
@@ -84,6 +124,7 @@ mod tests {
         // construction — that happens in r2d2 Pool::build. So a fake
         // URL is sufficient to prove the function returned without
         // panicking.
+        let _lock = crate::test_support::env_lock();
         let _g = EnvGuard::set("DATABASE_URL", Some("postgres://x:y@example.invalid/db"));
         let _mgr = establish_connection();
     }
@@ -96,6 +137,7 @@ mod tests {
         // It hits the empty-after-trim filter and triggers the
         // same "not set" panic — clearer signal at startup than
         // a downstream postgres parse error.
+        let _lock = crate::test_support::env_lock();
         let _g = EnvGuard::set("DATABASE_URL", Some("  \n"));
         establish_connection();
     }
@@ -105,6 +147,7 @@ mod tests {
         // A pasted URL with trailing newline (typical) round-trips
         // clean. Construction succeeds and the connection-manager
         // gets the trimmed URL.
+        let _lock = crate::test_support::env_lock();
         let _g = EnvGuard::set(
             "DATABASE_URL",
             Some("  postgres://x:y@example.invalid/db\n"),

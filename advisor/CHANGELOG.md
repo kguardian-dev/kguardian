@@ -1,5 +1,20 @@
 # Changelog
 
+## [1.6.2](https://github.com/kguardian-dev/kguardian/compare/advisor/v1.6.1...advisor/v1.6.2) (2026-07-23)
+
+
+### Bug Fixes
+
+* **deps:** update kubernetes monorepo to v0.36.3 ([#1145](https://github.com/kguardian-dev/kguardian/issues/1145)) ([0d8b8cc](https://github.com/kguardian-dev/kguardian/commit/0d8b8cc06326656a11edeb7f5bfdaa67d84d09f5))
+
+## [1.6.1](https://github.com/kguardian-dev/kguardian/compare/advisor/v1.6.0...advisor/v1.6.1) (2026-07-19)
+
+
+### Bug Fixes
+
+* **advisor:** seccomp generation on ARM nodes (architectures was null) ([#1042](https://github.com/kguardian-dev/kguardian/issues/1042)) ([ad68795](https://github.com/kguardian-dev/kguardian/commit/ad68795012da27bb581568c18174fcd5d80b0dc8))
+* **deps:** update module github.com/cilium/cilium to v1.19.6 ([#1070](https://github.com/kguardian-dev/kguardian/issues/1070)) ([a69745c](https://github.com/kguardian-dev/kguardian/commit/a69745cd314dacc930ce4e789a1c9e1f52b65a68))
+
 ## [1.6.0](https://github.com/kguardian-dev/kguardian/compare/advisor/v1.5.1...advisor/v1.6.0) (2026-06-30)
 
 

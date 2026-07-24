@@ -1,0 +1,53 @@
+---
+title: "Version Endpoint"
+description: "Running broker + chart versions and update availability"
+icon: "tag"
+---
+
+## Overview
+
+The broker checks in with the kguardian version service once a day
+(see [telemetry](/telemetry)) to learn the latest released component
+versions. `GET /version` surfaces the useful half of that exchange:
+the versions currently running plus the latest known ones, so the
+frontend can show an update notice and the MCP layer can answer
+"am I up to date?".
+
+When telemetry is disabled the endpoint still works — it reports the
+current versions with `latest` and `checked_at` as `null`.
+
+## GET /version
+
+Requires bearer auth when `BROKER_AUTH_TOKEN` is set — unlike
+`/health` and `/metrics`, it is not on the exempt list.
+
+### Example
+
+```bash
+curl http://localhost:9090/version
+```
+
+### Response
+
+```json
+{
+  "broker": "1.7.0",
+  "chart": "1.13.1",
+  "telemetry_enabled": true,
+  "latest": {
+    "chart": "1.13.2",
+    "broker": "1.7.1"
+  },
+  "checked_at": "2026-07-18T04:12:09.123456",
+  "update_available": true
+}
+```
+
+| Field | Notes |
+|-------|-------|
+| `broker` | Version of the running broker (crate version). |
+| `chart` | Helm chart version, injected by the chart at install time. `"unknown"` when the broker runs outside the chart (dev, docker-compose). |
+| `telemetry_enabled` | Whether the daily check-in loop is active. |
+| `latest` | Component name → latest released version, as reported by the version service. `null` until the first successful check-in — or forever, when telemetry is disabled. |
+| `checked_at` | UTC timestamp of the last successful check-in; `null` when `latest` is `null`. |
+| `update_available` | `true` when the latest chart version differs from the running one. `false` when the chart version is `"unknown"` or no check-in data exists — the broker never nags when it can't compare. |

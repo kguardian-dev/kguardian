@@ -11,9 +11,9 @@ _Least-privilege Kubernetes security policies, generated from what your pods act
 
 <div align="center">
 
-[![Docs](https://img.shields.io/badge/docs-docs.kguardian.dev-16A34A?style=for-the-badge&logo=gitbook&logoColor=white)](https://docs.kguardian.dev)&nbsp;&nbsp;
-[![Kubernetes](https://img.shields.io/badge/kubernetes-v1.19%2B-16A34A?style=for-the-badge&logo=kubernetes&logoColor=white)](https://kubernetes.io/)&nbsp;&nbsp;
-[![License](https://img.shields.io/badge/license-BSL%201.1-15803D?style=for-the-badge)](LICENSE)&nbsp;&nbsp;
+[![Docs](https://img.shields.io/badge/docs-docs.kguardian.dev-4E3AD9?style=for-the-badge&logo=gitbook&logoColor=white)](https://docs.kguardian.dev)&nbsp;&nbsp;
+[![Kubernetes](https://img.shields.io/badge/kubernetes-v1.19%2B-4E3AD9?style=for-the-badge&logo=kubernetes&logoColor=white)](https://kubernetes.io/)&nbsp;&nbsp;
+[![License](https://img.shields.io/badge/license-BSL%201.1-3B2BA8?style=for-the-badge)](LICENSE)&nbsp;&nbsp;
 
 </div>
 
@@ -42,20 +42,21 @@ It's built for platform and security teams who want policy-as-code without writi
 - [🤖 AI Assistant](#-ai-assistant)
 - [🧩 Compatibility](#-compatibility)
 - [📊 Performance](#-performance)
+- [📡 Telemetry](#-telemetry)
 - [🤝 Contributing](#-contributing)
 - [📄 License](#-license)
 
 ## ✨ Features
 
-- **Network Policy generation** — least-privilege Kubernetes `NetworkPolicy` and Cilium `CiliumNetworkPolicy` / `CiliumClusterwideNetworkPolicy` resources from observed pod-to-pod traffic.
+- **Network Policy generation** — least-privilege Kubernetes `NetworkPolicy` and Cilium `CiliumNetworkPolicy` resources from observed pod-to-pod traffic.
 - **Seccomp profile generation** — per-container syscall allowlists derived from runtime traces.
 - **Policy auditing before enforcement** — the `AuditNetworkPolicy` CRD is byte-identical to an upstream `NetworkPolicy`, but instead of dropping packets the evaluator reports every flow the policy *would* deny. Ship policies with confidence instead of blackholing production.
 - **Flexible targeting** — generate per-pod, per-namespace, or cluster-wide.
-- **Dry-run by default** — YAML is written to `--output-dir` and never applied unless you pass `--dry-run=false`.
+- **Review-first by design** — the CLI writes YAML to `--output-dir` and never applies anything to the cluster; you review and `kubectl apply` the files yourself.
 - **GitOps-friendly output** — plain YAML/JSON files ready for review or a GitOps pipeline.
 - **Optional AI assistant** — query traffic and syscall data in natural language via the LLM bridge and MCP server.
 
-Worked examples of everything the generator produces (nginx, Postgres, kube-dns, Prometheus, Istio sidecar, a Go microservice) live in the [Generated Policy Gallery](docs/policy-gallery/). For a comparison with Inspektor Gadget and Security Profiles Operator, see the [docs site](https://docs.kguardian.dev/#comparison-with-other-tools).
+Example policies for common workloads (nginx, Postgres, kube-dns, Prometheus, Istio sidecar, a Go microservice) live in the [Policy Gallery](docs/policy-gallery/). For a comparison with Inspektor Gadget and Security Profiles Operator, see the [docs site](https://docs.kguardian.dev/#comparison-with-other-tools).
 
 ## 🏗️ Architecture
 
@@ -77,11 +78,11 @@ graph LR
     UI --> B
     CLI -->|generate policies| B
 
-    style C fill:#16A34A,color:#fff
-    style B fill:#22C55E,color:#fff
-    style E fill:#22C55E,color:#fff
-    style UI fill:#22C55E,color:#fff
-    style CLI fill:#15803D,color:#fff
+    style C fill:#4E3AD9,color:#fff
+    style B fill:#6D5CE6,color:#fff
+    style E fill:#6D5CE6,color:#fff
+    style UI fill:#6D5CE6,color:#fff
+    style CLI fill:#3B2BA8,color:#fff
 ```
 
 | Component | Language | Runs as | Purpose |
@@ -91,7 +92,7 @@ graph LR
 | **Evaluator** | Go | Deployment | Evaluates live flows against `AuditNetworkPolicy` CRDs and reports would-deny verdicts — without dropping a packet |
 | **CLI** (`kubectl kguardian`) | Go | kubectl plugin | Generates NetworkPolicies and seccomp profiles from the observed baseline |
 | **Web UI** | React + TypeScript | Deployment | Visualizes traffic, policies, and pod behavior |
-| **LLM Bridge / MCP Server** | TypeScript / Go | Optional Deployments | Natural-language assistant over cluster traffic ([docs/ai-assistant](docs/ai-assistant/)) |
+| **LLM Bridge / MCP Server** | TypeScript / Go | Optional Deployments | Natural-language assistant over cluster traffic ([llm-bridge/README.md](llm-bridge/README.md), [mcp-server/README.md](mcp-server/README.md)) |
 
 ## 🚀 Quick Start
 
@@ -118,7 +119,7 @@ kubectl kguardian gen netpol --all -n staging --type cilium --output-dir ./polic
 kubectl kguardian gen seccomp -A --output-dir ./seccomp
 ```
 
-Review the generated YAML, then apply it yourself (`kubectl apply -f ./policies`) or re-run with `--dry-run=false`. Manual download, custom Helm values, Kind setup, verification, upgrades, and uninstall are covered in the [Installation Guide](https://docs.kguardian.dev/installation).
+Review the generated YAML, then apply it yourself (`kubectl apply -f ./policies`). Manual download, custom Helm values, Kind setup, verification, upgrades, and uninstall are covered in the [Installation Guide](https://docs.kguardian.dev/installation).
 
 ## 🛠️ Usage
 
@@ -131,18 +132,18 @@ kubectl kguardian gen <networkpolicy|seccomp> [pod-name] [flags]
 | Flag | Applies to | Description |
 | --- | --- | --- |
 | `-n, --namespace` | both | Namespace scope (defaults to current context namespace) |
-| `-a, --all` | both | All pods in the selected namespace |
+| `--all` | both | All pods in the selected namespace (`-a` shorthand: networkpolicy only) |
 | `-A, --all-namespaces` | both | All pods in all namespaces |
 | `--output-dir` | both | Directory for generated files (`network-policies` / `seccomp-profiles`) |
 | `-t, --type` | networkpolicy | `kubernetes` (default) or `cilium` |
-| `--dry-run` | networkpolicy | `true` (default) writes files only; `false` applies to the cluster |
+| `--dry-run` | networkpolicy | `true` (default). Applying directly is not implemented yet — the CLI always writes files only |
 | `--default-action` | seccomp | Action for unlisted syscalls: `SCMP_ACT_ERRNO` (default), `SCMP_ACT_LOG`, `SCMP_ACT_KILL` |
 
 Full command reference, including audit workflows and advanced flags, is in the [CLI docs](https://docs.kguardian.dev/cli).
 
 ## 🤖 AI Assistant
 
-kguardian ships an optional natural-language assistant: ask questions like *"what has this pod talked to in the last hour?"* or *"generate a seccomp profile for the payments namespace"* from the Web UI. It's powered by an LLM bridge (SSE streaming) and an MCP server exposing the broker's data as tools — bring your own Anthropic API key. Setup and configuration live in [docs/ai-assistant](docs/ai-assistant/).
+kguardian ships an optional natural-language assistant: ask questions like *"what has this pod talked to in the last hour?"* or *"generate a seccomp profile for the payments namespace"* from the Web UI. It's powered by an LLM bridge (SSE streaming) and an MCP server exposing the broker's data as tools — bring your own Anthropic API key. Setup and configuration live in [llm-bridge/README.md](llm-bridge/README.md) and [mcp-server/README.md](mcp-server/README.md).
 
 ## 🧩 Compatibility
 
@@ -169,6 +170,10 @@ Reference figures from a real-world deployment — a 3-node cluster (18 vCPU / 4
 - **Storage growth is dedup-bounded:** once a workload's flow set is learned, new rows drop to ~0/min in steady state. The database grows with *new* behavior, not with time or traffic volume; `broker.audit.retention.days` caps the audit-verdict history.
 
 This is one measured data point, not a synthetic sweep — treat it as an order-of-magnitude envelope. Expect numbers to scale with flow cardinality, not raw pod count.
+
+## 📡 Telemetry
+
+The broker performs a daily anonymous version check-in that powers the UI's update notice and is the project's only usage signal. Exactly six fields are sent — a random install UUID, broker/chart/Kubernetes versions, node count, and CPU architecture; no cluster names, IPs, or workload data, ever. It's on by default, announced at install time, documented field-by-field in the [telemetry docs](https://docs.kguardian.dev/telemetry), and disabled with `--set telemetry.enabled=false`.
 
 ## 🤝 Contributing
 

@@ -3,9 +3,9 @@
   "theme": "mint",
   "name": "kguardian",
   "colors": {
-    "primary": "#16A34A",
-    "light": "#22C55E",
-    "dark": "#15803D"
+    "primary": "#4E3AD9",
+    "light": "#7C6FF0",
+    "dark": "#3B2BA8"
   },
   "favicon": "/favicon.svg",
   "navigation": {
@@ -61,7 +61,8 @@
           {
             "group": "Advanced",
             "pages": [
-              "advanced/troubleshooting"
+              "advanced/troubleshooting",
+              "telemetry"
             ]
           },
           {
@@ -89,7 +90,8 @@
               "api-reference/endpoints/traffic",
               "api-reference/endpoints/syscalls",
               "api-reference/endpoints/services",
-              "api-reference/endpoints/audit-verdicts"
+              "api-reference/endpoints/audit-verdicts",
+              "api-reference/endpoints/version"
             ]
           }
         ]
@@ -132,7 +134,7 @@
     ],
     "primary": {
       "type": "button",
-      "label": "Star on GitHub ⭐",
+      "label": "Star on GitHub \u2b50",
       "href": "https://github.com/kguardian-dev/kguardian"
     }
   },

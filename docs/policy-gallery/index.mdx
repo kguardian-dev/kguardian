@@ -4,9 +4,9 @@ description: "Examples of NetworkPolicies, CiliumNetworkPolicies, and seccomp pr
 icon: "images"
 ---
 
-<Note>
-**Example output.** Each page below shows YAML that is representative of what the kguardian controller observes and emits for a given workload. Profiles are illustrative — verify against your own runtime before applying. Verified against kguardian `X.Y.Z` controller on `[TBD reference cluster]`.
-</Note>
+<Warning>
+**Hand-authored illustrations.** The YAML in this gallery illustrates the shape of the policies kguardian generates for each workload — it is not captured generator output. Exact metadata, rule grouping, and selectors produced by `kubectl kguardian gen` will differ, and regeneration from a live cluster is planned. Always verify against your own runtime before applying.
+</Warning>
 
 ## Why a gallery?
 
@@ -16,7 +16,7 @@ Each page in this gallery walks through one real workload pattern:
 
 - A 3-line description of the workload and what it talks to.
 - The generated `NetworkPolicy` YAML.
-- The generated `CiliumNetworkPolicy` YAML (where Cilium-specific fields add value, e.g., FQDN egress or L7 HTTP rules).
+- The generated `CiliumNetworkPolicy` YAML (where Cilium-specific fields add value — CIDR-based L4 egress, endpoint selectors, and default-deny semantics).
 - The generated seccomp profile JSON (or a representative excerpt with the full syscall count).
 - A short paragraph on what kguardian observed at runtime that produced each rule.
 
@@ -45,10 +45,10 @@ Each page in this gallery walks through one real workload pattern:
 
 ## How to read each example
 
-The YAML on each page is what `kubectl kguardian gen networkpolicy <pod> --output-dir ./policies` writes after the controller has observed the workload for at least a few minutes. The seccomp JSON is what `kubectl kguardian gen seccomp <pod> --output-dir ./seccomp` produces.
+The YAML on each page follows what `kubectl kguardian gen networkpolicy <pod> --output-dir ./policies` writes after the controller has observed the workload for at least a few minutes (add `--type cilium` for the CiliumNetworkPolicy variant — the default output type is `kubernetes`). The seccomp JSON is what `kubectl kguardian gen seccomp <pod> --output-dir ./seccomp` produces.
 
 If a workload's observed behavior is empty or noisy in your cluster (no traffic captured yet, very short-lived pods, host-network pods), the generator emits a minimal policy and warns. None of the gallery examples reflect that path — see [Troubleshooting](/advanced/troubleshooting) instead.
 
 <Info>
-The seccomp excerpts in this gallery are abbreviated for readability. Production profiles routinely contain 80–200 syscall names. The full count is noted on each page.
+The seccomp excerpts in this gallery are abbreviated for readability — real profiles contain far more syscall names than shown here.
 </Info>

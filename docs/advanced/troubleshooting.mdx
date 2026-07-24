@@ -36,7 +36,7 @@ kubectl get pods -n kguardian
     kubectl logs -n kguardian daemonset/kguardian-controller
     ```
 
-    Look for errors like: "failed to load BPF programs"
+    Look for errors like: "Failed to load network probe eBPF"
 
     **Solution:** Enable eBPF in cloud provider settings or use privileged security context.
   </Accordion>
@@ -73,22 +73,29 @@ kubectl get pods -n kguardian
     ```
   </Step>
 
-  <Step title="Check controller is sending data">
-    ```bash
-    kubectl logs -n kguardian daemonset/kguardian-controller | grep "Sending traffic"
-    ```
-  </Step>
-
   <Step title="Check broker is receiving data">
     ```bash
     kubectl logs -n kguardian deployment/kguardian-broker | grep POST
     ```
+
+    The controller logs its batch flushes ("Flushing network event
+    batch of N events") only at DEBUG, and the chart pins
+    `RUST_LOG=INFO` — so verify ingest at the broker side, or raise
+    the controller log level (see [Debug Mode](#debug-mode)).
   </Step>
 
-  <Step title="Query database directly">
+  <Step title="Query the broker directly">
     ```bash
     kubectl port-forward -n kguardian svc/kguardian-broker 9090:9090
-    curl http://localhost:9090/pod/traffic/10.244.1.5  # Use actual pod IP
+    curl 'http://localhost:9090/pod/traffic?limit=10'          # Recent rows, any pod
+    curl http://localhost:9090/pod/traffic/my-app-7d9f6b8c4-x5z2w  # Per-pod, by POD NAME
+    ```
+
+    The per-pod path takes a pod **name**, not an IP. If you only
+    have an IP, resolve it first with `GET /pod/ip/{ip}`:
+
+    ```bash
+    curl http://localhost:9090/pod/ip/10.244.1.5
     ```
   </Step>
 </Steps>
@@ -101,18 +108,28 @@ kubectl get pods -n kguardian
 
 **Symptoms:**
 ```
-Error: failed to connect to broker: connection refused
+Port forwarding failed
+Failed to setup port forwarding: ...
 ```
 
 **Solution:**
 
-The CLI auto-discovers the broker via port-forwarding. Ensure you have permissions:
+The CLI creates its own port-forward to the broker service — no
+manual port-forward is needed. Ensure you have permissions:
 
 ```bash
 kubectl auth can-i create pods/portforward -n kguardian
 ```
 
-If not, ask your cluster admin for permissions or manually port-forward:
+If kguardian is installed in a non-default namespace or with a
+renamed broker service, point the CLI at it:
+
+```bash
+kubectl kguardian gen netpol my-app --broker-namespace my-ns --broker-service my-broker
+```
+
+A manual port-forward is only needed when curling the broker API
+directly:
 
 ```bash
 kubectl port-forward -n kguardian svc/kguardian-broker 9090:9090 &
@@ -149,15 +166,16 @@ kubectl port-forward -n kguardian svc/kguardian-broker 9090:9090 &
 Enable debug logging for more details:
 
 ```bash
-# For controller
-helm upgrade kguardian kguardian/kguardian \
-  --namespace kguardian \
-  --set controller.debug=true \
-  --reuse-values
+# For controller — verbosity is the RUST_LOG env var, which the
+# chart's DaemonSet template fixes to INFO. Override it directly:
+kubectl set env daemonset/kguardian-controller RUST_LOG=debug -n kguardian
 
 # For CLI
 kubectl kguardian gen netpol my-app --debug
 ```
+
+The `kubectl set env` override reverts on the next `helm upgrade`,
+which re-renders the DaemonSet with the chart's pinned value.
 
 ---
 

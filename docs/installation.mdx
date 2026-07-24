@@ -16,7 +16,7 @@ Before installing kguardian, verify your environment meets these requirements:
     - Kubernetes version: **1.19+**
     - Node OS: **Linux**
     - Kernel version: **6.2+** (for eBPF support)
-    - Container runtime: **containerd** (Docker/CRI-O supported with limitations)
+    - Container runtime: **containerd** (required — Docker and CRI-O are not supported)
 
     **Verify kernel version:**
     ```bash
@@ -59,9 +59,8 @@ Before installing kguardian, verify your environment meets these requirements:
     The simplest and recommended method for production deployments.
 
     ```bash
-    # 1. Install kguardian from OCI registry
+    # 1. Install kguardian from OCI registry (latest chart version)
     helm install kguardian oci://ghcr.io/kguardian-dev/charts/kguardian \
-      --version 1.9.1 \
       --namespace kguardian \
       --create-namespace \
       --wait
@@ -71,16 +70,16 @@ Before installing kguardian, verify your environment meets these requirements:
     ```
 
     <Check>
-    All three pods (controller, broker, UI) should be in `Running` state within 2-3 minutes.
+    All pods — controller (one per node), broker, db, frontend, and evaluator — should be in `Running` state within 2-3 minutes.
     </Check>
 
     ### Install Specific Version
 
-    You can specify a particular version:
+    You can pin a particular chart version:
 
     ```bash
     helm install kguardian oci://ghcr.io/kguardian-dev/charts/kguardian \
-      --version 1.9.1 \
+      --version 1.14.0 \
       --namespace kguardian \
       --create-namespace \
       --wait
@@ -92,12 +91,11 @@ Before installing kguardian, verify your environment meets these requirements:
 
     ```bash
     # Pull and extract the chart to view values
-    helm pull oci://ghcr.io/kguardian-dev/charts/kguardian --version 1.9.1 --untar
+    helm pull oci://ghcr.io/kguardian-dev/charts/kguardian --untar
     cat kguardian/values.yaml > my-values.yaml
 
     # Install with custom values
     helm install kguardian oci://ghcr.io/kguardian-dev/charts/kguardian \
-      --version 1.9.1 \
       --namespace kguardian \
       --create-namespace \
       --values my-values.yaml \
@@ -118,18 +116,15 @@ Before installing kguardian, verify your environment meets these requirements:
     git clone https://github.com/kguardian-dev/kguardian.git
     cd kguardian
 
-    # 3. Create Kind cluster and install everything
-    task install
+    # 3. Create a fresh Kind cluster
+    task kind
 
-    # This will:
-    # - Create a Kind cluster with appropriate settings
-    # - Build controller and broker images
-    # - Load images into Kind
-    # - Install via Helm with local tags
+    # 4. Build images, load them into Kind, and install via Helm
+    task install:oci
     ```
 
     <Tip>
-    The `task install` command is perfect for development. It rebuilds images and reloads them automatically.
+    `task install:oci` rebuilds the controller and broker images, loads them into Kind, and runs a production-style Helm install with the local image tags.
     </Tip>
   </Tab>
 </Tabs>
@@ -155,15 +150,15 @@ controller:
       memory: "512Mi"
 
   # Exclude namespaces from monitoring
-  excludedNamespaces: "kube-system,kguardian,monitoring,istio-system"
-
-  # Enable debug logging
-  debug: true
+  excludedNamespaces:
+    - kube-system
+    - kguardian
+    - monitoring
+    - istio-system
 
   # Image configuration
   image:
-    repository: ghcr.io/kguardian-dev/controller
-    tag: "1.0.0"
+    repository: ghcr.io/kguardian-dev/kguardian/controller
     pullPolicy: IfNotPresent
 
 # Broker configuration
@@ -176,9 +171,8 @@ broker:
     limits:
       memory: "1Gi"
 
-# Frontend (UI) — gated by `frontend.enabled`
+# Frontend (UI)
 frontend:
-  enabled: true
   replicaCount: 1
 
 # Bundled PostgreSQL — see "Use External PostgreSQL" below to disable.
@@ -281,19 +275,19 @@ After deploying the controller, install the CLI to generate policies.
   <Tab title="Manual Download">
     ```bash
     # 1. Download binary from GitHub Releases
-    VERSION="v1.0.0"
+    # CLI releases are tagged advisor/vX.Y.Z; assets are named advisor-<os>-<arch>
+    VERSION="advisor/v1.6.1"
     OS="linux"  # or darwin, windows
     ARCH="amd64"  # or arm64
 
-    curl -LO "https://github.com/kguardian-dev/kguardian/releases/download/${VERSION}/kguardian-${OS}-${ARCH}"
+    curl -LO "https://github.com/kguardian-dev/kguardian/releases/download/${VERSION}/advisor-${OS}-${ARCH}"
 
-    # 2. Verify checksum (optional but recommended)
-    curl -LO "https://github.com/kguardian-dev/kguardian/releases/download/${VERSION}/checksums.txt"
-    sha256sum --check --ignore-missing checksums.txt
+    # 2. Verify build provenance (optional but recommended, requires the gh CLI)
+    gh attestation verify advisor-${OS}-${ARCH} --repo kguardian-dev/kguardian
 
     # 3. Install
-    chmod +x kguardian-${OS}-${ARCH}
-    sudo mv kguardian-${OS}-${ARCH} /usr/local/bin/kubectl-kguardian
+    chmod +x advisor-${OS}-${ARCH}
+    sudo mv advisor-${OS}-${ARCH} /usr/local/bin/kubectl-kguardian
 
     # 4. Verify
     kubectl kguardian --version
@@ -330,11 +324,12 @@ After installation, verify all components are working:
 kubectl get pods -n kguardian
 
 # Expected output:
-# NAME                                  READY   STATUS    RESTARTS   AGE
-# kguardian-controller-xxxxx            1/1     Running   0          5m
-# kguardian-broker-xxxxxxxxxx-xxxxx     1/1     Running   0          5m
-# kguardian-db-xxxxxxxxxx-xxxxx         1/1     Running   0          5m
-# kguardian-frontend-xxxxxxxxxx-xxxxx   1/1     Running   0          5m
+# NAME                                   READY   STATUS    RESTARTS   AGE
+# kguardian-controller-xxxxx             1/1     Running   0          5m
+# kguardian-broker-xxxxxxxxxx-xxxxx      1/1     Running   0          5m
+# kguardian-db-xxxxxxxxxx-xxxxx          1/1     Running   0          5m
+# kguardian-evaluator-xxxxxxxxxx-xxxxx   1/1     Running   0          5m
+# kguardian-frontend-xxxxxxxxxx-xxxxx    1/1     Running   0          5m
 ```
 
 ### 2. Check Controller Logs
@@ -343,8 +338,9 @@ kubectl get pods -n kguardian
 kubectl logs -n kguardian daemonset/kguardian-controller --tail=50
 
 # Look for:
-# - "eBPF programs loaded successfully"
-# - "Watching pods on node: <node-name>"
+# - "Network probe eBPF program loaded and attached"
+# - "Syscall probe eBPF program loaded and attached"
+# - "Ignoring namespaces: [...]"
 # - No error messages
 ```
 
@@ -357,13 +353,15 @@ kubectl port-forward -n kguardian svc/kguardian-broker 9090:9090 &
 # Test health endpoint
 curl http://localhost:9090/health
 
-# Expected: {"status":"ok"}
+# Expected: Healthy!
+# A 503 with body "Database unavailable" or "Database schema not up to date"
+# means the broker is up but cannot serve requests yet.
 ```
 
 ### 4. Test CLI Connection
 
 ```bash
-# List some pods (controller auto-forwards to broker)
+# Print the command help (the CLI port-forwards to the broker automatically)
 kubectl kguardian gen networkpolicy --help
 
 # Try generating a policy for a test pod
@@ -388,7 +386,7 @@ To upgrade kguardian to a newer version:
 
 # 2. Upgrade to a specific pinned version (preserves your values.yaml)
 helm upgrade kguardian oci://ghcr.io/kguardian-dev/charts/kguardian \
-  --version 1.9.1 \
+  --version 1.14.0 \
   --namespace kguardian \
   --values values.yaml \
   --wait

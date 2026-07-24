@@ -12,11 +12,16 @@ Use `kguardian` (the package/system) when speaking about the project as a whole.
 
 ### Component nouns
 
-The system has three named components. When referring to the specific kguardian component, capitalize as proper nouns:
+The system has eight named components. When referring to the specific kguardian component, capitalize as proper nouns:
 
 - **Controller** — the eBPF DaemonSet that captures pod traffic and syscalls.
 - **Broker** — the Rust + Actix-web service that stores observed behavior in PostgreSQL and serves it back over an HTTP API.
 - **UI** — the React + TypeScript frontend that visualises pod-to-pod traffic.
+- **CLI** — the `kubectl kguardian` plugin (the `advisor` source directory) that generates policies from the observed baseline.
+- **Evaluator** — the Go service that checks live flows against `AuditNetworkPolicy` CRDs and reports would-deny verdicts.
+- **MCP Server** — the Go service exposing the Broker's data as MCP tools.
+- **LLM Bridge** — the TypeScript service that streams assistant responses to the UI via the MCP Server.
+- **database** — the PostgreSQL instance behind the Broker (lowercase; it is off-the-shelf, not a kguardian binary).
 
 When the same words appear generically (a controller in another tool, the broker pattern, a ui), keep them lowercase.
 
@@ -36,7 +41,7 @@ Avoid the awkward "kguardian Controller" form — within kguardian's own README 
 ## Tone
 
 - **Specific over fluff.** Prefer concrete numbers, kernel versions, and command examples. A docs sentence with a kernel version, a Helm version, and a kubectl flag in it is almost always stronger than one without.
-- **No emoji in headings.** Emoji is fine in feature-comparison tables, badges, and inline status markers (`✅`, `❌`, `🔜`). Headings stay text-only.
+- **Emoji in headings: root README only.** The root `README.md` uses emoji+badge headings — a deliberate choice from the 2026-07 redesign. Docs-site pages (`docs/*.mdx`) and component READMEs stay emoji-free in headings. Emoji is fine everywhere in feature-comparison tables, badges, and inline status markers (`✅`, `❌`, `🔜`).
 - **Banned marketing words.** The following do not appear in user-facing copy:
   - "made simple"
   - "tailored"
@@ -49,7 +54,7 @@ Avoid the awkward "kguardian Controller" form — within kguardian's own README 
 
 ## Versioning and links
 
-- Pin Helm chart versions in copy-paste install snippets so they do not drift behind newer releases. The Tier-1 baseline is `1.9.1`; bump in lockstep with chart releases.
+- Pin nothing in copy-paste install snippets — install unpinned so snippets never drift behind newer releases. Only show a pinned version when the snippet is specifically demonstrating version pinning.
 - Internal docs links are repo-relative (`/installation`, `/quickstart`, `/architecture`). External links use full URLs.
 - Cross-link rather than duplicate. If the same install snippet, comparison table, or "what is kguardian?" pitch already lives somewhere canonical, link to it instead of copy-pasting.
 
@@ -59,7 +64,7 @@ When the same content would otherwise appear in multiple places, this is the can
 
 | Topic | Canonical source |
 |---|---|
-| "What is kguardian?" pitch | `README.md` lede (line 10) — used verbatim in `docs/index.mdx` and `docs/concepts/overview.mdx` |
+| "What is kguardian?" pitch | `README.md` lede — used verbatim in `docs/index.mdx` and `docs/concepts/overview.mdx` |
 | Feature comparison table | `docs/index.mdx` `## Comparison with Other Tools` |
 | Install snippets (Helm, Krew, manual, Kind, custom values) | `docs/installation.mdx` |
 | Quickstart-flow install (one Helm command + link) | `docs/quickstart.mdx` Step 1 |

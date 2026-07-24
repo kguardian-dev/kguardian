@@ -1,0 +1,27 @@
+# Name matches the Git-connected Worker created in the Cloudflare dashboard
+# (Workers Builds project "kguardian") — the two must agree or builds warn
+# and auto-PR a rename.
+name = "kguardian"
+main = "src/index.js"
+compatibility_date = "2026-07-01"
+
+# Custom domain: version.kguardian.dev (zone kguardian.dev must be on this
+# Cloudflare account; the route is claimed automatically on deploy).
+routes = [
+  { pattern = "version.kguardian.dev", custom_domain = true }
+]
+
+# The 5-minute GitHub Releases cache uses the Workers Cache API
+# (caches.default) — per-colo, zero pre-created resources. No KV needed.
+
+# Usage telemetry sink (Analytics Engine enabled on the account 2026-07-21).
+# Every check-in writes one data point; query with the AE SQL API:
+#   SELECT COUNT(DISTINCT index1) AS installs FROM kguardian_telemetry
+#   WHERE timestamp > NOW() - INTERVAL '30' DAY
+[[analytics_engine_datasets]]
+binding = "TELEMETRY"
+dataset = "kguardian_telemetry"
+
+# Optional secret to raise the GitHub API rate limit (not required — the
+# cache keeps traffic minimal):
+#   wrangler secret put GITHUB_TOKEN

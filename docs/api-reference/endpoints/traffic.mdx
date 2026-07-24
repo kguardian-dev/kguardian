@@ -1,6 +1,7 @@
 ---
 title: "Traffic Endpoints"
 description: "Add observed pod-traffic events and query them"
+icon: "right-left"
 ---
 
 ## POST /pod/traffic
@@ -11,10 +12,11 @@ eBPF ring buffers; external integrations rarely need it (prefer
 `POST /pod/traffic/batch` below for bulk).
 
 Duplicate events (same `pod_ip`, `pod_port`, `traffic_type`,
-`traffic_in_out_ip`, `traffic_in_out_port`, `ip_protocol`,
-`decision`) are deduped server-side and reported back as the
-inserted-or-Null result. The audit forwarder (when
-`evaluator.enabled: true`) is fired only for events that were
+`traffic_in_out_ip`, `traffic_in_out_port`, `decision`) are deduped
+server-side; the check is protocol-aware, branching on the event's
+protocol rather than treating `ip_protocol` as a plain key column.
+The result reported back is inserted-or-Null. The audit forwarder
+(when `evaluator.enabled: true`) is fired only for events that were
 genuinely new.
 
 ### Request
@@ -52,21 +54,22 @@ dedup.
 
 ## GET /pod/traffic
 
-Get every observed traffic row. Returns rows ordered
+Get a most-recent-first window of observed traffic rows, ordered
 `(time_stamp DESC, uuid DESC)` — newest first, with the UUID
 primary key as a tiebreak for microsecond-collision rows from a
-single batch ingest.
+single batch ingest. The query is backed by the
+`idx_pod_traffic_time_stamp` index.
 
-<Warning>
-Currently unbounded — no LIMIT, no pagination. On a busy cluster
-with months of retained traffic this can be tens of MB to GB of
-JSON. Prefer the per-pod variant for any interactive use.
-</Warning>
+### Query Parameters
+
+| Parameter | Type    | Default | Description |
+|-----------|---------|---------|-------------|
+| `limit`   | integer | 5000    | Cap rows returned. Clamped to `[1, 20000]`; values outside that range are silently clamped to the nearest bound. Non-numeric input returns 400. |
 
 ### Example
 
 ```bash
-curl http://localhost:9090/pod/traffic
+curl 'http://localhost:9090/pod/traffic?limit=100'
 ```
 
 ### Response

@@ -1,5 +1,39 @@
 # Changelog
 
+## [1.12.2](https://github.com/kguardian-dev/kguardian/compare/broker/v1.12.1...broker/v1.12.2) (2026-07-21)
+
+
+### Bug Fixes
+
+* **broker:** ignore semver build metadata in version check comparisons ([#1126](https://github.com/kguardian-dev/kguardian/issues/1126)) ([5cde86a](https://github.com/kguardian-dev/kguardian/commit/5cde86aaba64a73742ae372a22f26f7c4aeb2a2f))
+
+## [1.12.1](https://github.com/kguardian-dev/kguardian/compare/broker/v1.12.0...broker/v1.12.1) (2026-07-21)
+
+
+### Bug Fixes
+
+* **broker:** pin builder to rust:1-bookworm to match runtime glibc ([#1120](https://github.com/kguardian-dev/kguardian/issues/1120)) ([32c41c7](https://github.com/kguardian-dev/kguardian/commit/32c41c7e5f6ea6b2fcb0ab99e6832cfe08c61080))
+
+
+### Documentation
+
+* repo-wide accuracy pass — remove obsolete, untrue, and misleading content ([#1115](https://github.com/kguardian-dev/kguardian/issues/1115)) ([72e672d](https://github.com/kguardian-dev/kguardian/commit/72e672d26d62b7c416b5fb4b526b8a7e18c7ab81))
+
+## [1.12.0](https://github.com/kguardian-dev/kguardian/compare/broker/v1.11.1...broker/v1.12.0) (2026-07-19)
+
+
+### Features
+
+* **broker:** anonymous daily version check-in and /version endpoint ([#1098](https://github.com/kguardian-dev/kguardian/issues/1098)) ([bc6accf](https://github.com/kguardian-dev/kguardian/commit/bc6accf90bbf95aece872195d6939eb3642a2b03))
+
+## [1.11.1](https://github.com/kguardian-dev/kguardian/compare/broker/v1.11.0...broker/v1.11.1) (2026-07-19)
+
+
+### Bug Fixes
+
+* **broker:** add statement_timeout backstop on DB connections ([#1036](https://github.com/kguardian-dev/kguardian/issues/1036)) ([4d139c2](https://github.com/kguardian-dev/kguardian/commit/4d139c25512bee3f4b0e543fde0993cd1e29f2e6))
+* **broker:** bound /pod/traffic to stop oversized-response failures ([#1034](https://github.com/kguardian-dev/kguardian/issues/1034)) ([bf10c4a](https://github.com/kguardian-dev/kguardian/commit/bf10c4a626da9d6351ce504efbe41f8d79a85c9c))
+
 ## [1.11.0](https://github.com/kguardian-dev/kguardian/compare/broker/v1.10.1...broker/v1.11.0) (2026-06-29)
 
 

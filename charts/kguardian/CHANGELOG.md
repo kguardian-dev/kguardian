@@ -1,5 +1,56 @@
 # Changelog
 
+## [1.14.3](https://github.com/kguardian-dev/kguardian/compare/chart/v1.14.2...chart/v1.14.3) (2026-07-24)
+
+
+### Bug Fixes
+
+* **deps:** update ghcr.io/kguardian-dev/kguardian/advisor docker tag to v1.6.2 ([#1154](https://github.com/kguardian-dev/kguardian/issues/1154)) ([c58e00a](https://github.com/kguardian-dev/kguardian/commit/c58e00a6ad6524b24199a055756124ef4be3d665))
+* **deps:** update ghcr.io/kguardian-dev/kguardian/evaluator docker tag to v0.3.3 ([#1155](https://github.com/kguardian-dev/kguardian/issues/1155)) ([e07132f](https://github.com/kguardian-dev/kguardian/commit/e07132f1dd9dba0bd9d4f51b51f1ecabb7436a7c))
+* **deps:** update ghcr.io/kguardian-dev/kguardian/llm-bridge docker tag to v1.4.3 ([#1153](https://github.com/kguardian-dev/kguardian/issues/1153)) ([345f127](https://github.com/kguardian-dev/kguardian/commit/345f12716a45120be26e0a2eac47c06034bc93d2))
+
+## [1.14.2](https://github.com/kguardian-dev/kguardian/compare/chart/v1.14.1...chart/v1.14.2) (2026-07-21)
+
+
+### Bug Fixes
+
+* **deps:** update ghcr.io/kguardian-dev/kguardian/broker docker tag to v1.12.2 ([#1128](https://github.com/kguardian-dev/kguardian/issues/1128)) ([93a5a75](https://github.com/kguardian-dev/kguardian/commit/93a5a751e92b347f6bf85942c189c085abe50982))
+* **deps:** update ghcr.io/kguardian-dev/kguardian/llm-bridge docker tag to v1.4.2 ([#1132](https://github.com/kguardian-dev/kguardian/issues/1132)) ([caec610](https://github.com/kguardian-dev/kguardian/commit/caec6104b0bf678eec768c6bcd5776bb1ee0b697))
+* **deps:** update ghcr.io/kguardian-dev/kguardian/mcp-server docker tag to v1.5.1 ([#1133](https://github.com/kguardian-dev/kguardian/issues/1133)) ([32a66e1](https://github.com/kguardian-dev/kguardian/commit/32a66e156a2521d7a26d93de775d57d2acd4953d))
+
+## [1.14.1](https://github.com/kguardian-dev/kguardian/compare/chart/v1.14.0...chart/v1.14.1) (2026-07-21)
+
+
+### Bug Fixes
+
+* **deps:** update ghcr.io/kguardian-dev/kguardian/broker docker tag to v1.12.1 ([#1121](https://github.com/kguardian-dev/kguardian/issues/1121)) ([88773cb](https://github.com/kguardian-dev/kguardian/commit/88773cb00fcf9383723a79680067a22368e0d898))
+
+## [1.14.0](https://github.com/kguardian-dev/kguardian/compare/chart/v1.13.2...chart/v1.14.0) (2026-07-20)
+
+
+### Features
+
+* **broker:** anonymous daily version check-in and /version endpoint ([#1098](https://github.com/kguardian-dev/kguardian/issues/1098)) ([bc6accf](https://github.com/kguardian-dev/kguardian/commit/bc6accf90bbf95aece872195d6939eb3642a2b03))
+
+
+### Bug Fixes
+
+* **deps:** update ghcr.io/kguardian-dev/kguardian/broker docker tag to v1.12.0 ([#1101](https://github.com/kguardian-dev/kguardian/issues/1101)) ([7720b7d](https://github.com/kguardian-dev/kguardian/commit/7720b7de8455d56761b741fdc110cb47a50fce04))
+
+## [1.13.2](https://github.com/kguardian-dev/kguardian/compare/chart/v1.13.1...chart/v1.13.2) (2026-07-19)
+
+
+### Bug Fixes
+
+* **charts:** track chart release in appVersion and release on image bumps ([#1096](https://github.com/kguardian-dev/kguardian/issues/1096)) ([7924050](https://github.com/kguardian-dev/kguardian/commit/792405030c2f40961b9efea2d3ff90ee2f77dd65))
+
+## [1.13.1](https://github.com/kguardian-dev/kguardian/compare/chart/v1.13.0...chart/v1.13.1) (2026-07-19)
+
+
+### Bug Fixes
+
+* **broker:** add statement_timeout backstop on DB connections ([#1036](https://github.com/kguardian-dev/kguardian/issues/1036)) ([4d139c2](https://github.com/kguardian-dev/kguardian/commit/4d139c25512bee3f4b0e543fde0993cd1e29f2e6))
+
 ## [1.13.0](https://github.com/kguardian-dev/kguardian/compare/chart/v1.12.0...chart/v1.13.0) (2026-06-29)
 
 

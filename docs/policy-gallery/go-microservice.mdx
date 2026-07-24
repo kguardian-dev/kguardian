@@ -4,9 +4,9 @@ description: "Generated NetworkPolicy and seccomp profile for a typical Go HTTP 
 icon: "gears"
 ---
 
-<Note>
-**Example output.** Verified against kguardian `X.Y.Z` controller on `[TBD reference cluster]`.
-</Note>
+<Warning>
+**Hand-authored illustration.** The YAML on this page illustrates the shape of the policies kguardian generates for this workload — it is not captured generator output. Exact metadata, rule grouping, and selectors produced by `kubectl kguardian gen` will differ. Regeneration of this gallery from a live cluster is planned.
+</Warning>
 
 ## Workload
 
@@ -74,7 +74,7 @@ spec:
           port: 53
 ```
 
-The Kubernetes-native NetworkPolicy cannot express "egress to `api.stripe.com`" — you'll see traffic to external IPs in the audit log but no rule for it. The Cilium variant below adds the FQDN.
+Kubernetes-native NetworkPolicy cannot express "egress to `api.stripe.com`" by hostname. In real generator output, that traffic appears as a `/32` `ipBlock` egress rule for the observed IP (not shown above) — functional, but brittle for CDN-backed endpoints whose addresses rotate.
 
 ## Generated CiliumNetworkPolicy
 
@@ -100,12 +100,6 @@ spec:
         - ports:
             - port: "8080"
               protocol: TCP
-          rules:
-            http:
-              - method: POST
-                path: "/v1/orders"
-              - method: GET
-                path: "/v1/orders/.*"
     - fromEndpoints:
         - matchLabels:
             app.kubernetes.io/name: prometheus
@@ -114,10 +108,6 @@ spec:
         - ports:
             - port: "9100"
               protocol: TCP
-          rules:
-            http:
-              - method: GET
-                path: "/metrics"
   egress:
     - toEndpoints:
         - matchLabels:
@@ -127,12 +117,6 @@ spec:
         - ports:
             - port: "5432"
               protocol: TCP
-    - toFQDNs:
-        - matchName: "api.stripe.com"
-      toPorts:
-        - ports:
-            - port: "443"
-              protocol: TCP
     - toEndpoints:
         - matchLabels:
             k8s-app: kube-dns
@@ -141,10 +125,6 @@ spec:
         - ports:
             - port: "53"
               protocol: UDP
-          rules:
-            dns:
-              - matchName: "api.stripe.com"
-              - matchPattern: "*.svc.cluster.local"
 ```
 
 ## Generated seccomp profile (excerpt)
@@ -179,4 +159,4 @@ Full profile contains **97 syscall names**. Representative excerpt:
 
 ## What kguardian observed
 
-The Go runtime makes this profile easy to recognise: heavy `futex` (goroutine scheduling), `getrandom` (TLS), `rseq` and `sched_yield` (scheduler hints), and a small file-I/O footprint. Network-wise, the controller saw three distinct egress destinations — Postgres in the `data` namespace, CoreDNS for DNS, and `api.stripe.com` resolved at runtime. Because Kubernetes-native NetworkPolicy can't express egress by hostname, the K8s policy omits the Stripe rule entirely, while the Cilium variant pins it via `toFQDNs` and limits the corresponding DNS lookups to that exact name. The L7 rules on ingress (`POST /v1/orders`, `GET /v1/orders/.*`) reflect the only request shapes captured during the observation window — a workload that exposes more endpoints will get a longer list.
+The Go runtime makes this profile easy to recognise: heavy `futex` (goroutine scheduling), `getrandom` (TLS), `rseq` and `sched_yield` (scheduler hints), and a small file-I/O footprint. Network-wise, the controller saw three distinct egress destinations — Postgres in the `data` namespace, CoreDNS for DNS, and `api.stripe.com` resolved at runtime. The generator does not emit hostname-based rules, so the Stripe traffic is covered by a `/32` `ipBlock` egress rule for the resolved IP. That works, but is brittle for CDN-backed endpoints like Stripe whose addresses rotate — expect to re-generate or hand-maintain that rule.
