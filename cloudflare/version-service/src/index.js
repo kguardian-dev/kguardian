@@ -111,23 +111,55 @@ async function latestVersions(env) {
   return fresh;
 }
 
+// Field shapes a genuine broker check-in can produce (wire contract:
+// docs/telemetry.mdx, client: broker/src/version_check.rs). The endpoint
+// is public, so anything can hit it — param-less curl pokes, bots,
+// fuzzers. Those still get a version response, but a check-in is only
+// recorded when every field validates: AE is append-only with a 3-month
+// retention, so a junk row can't be deleted once written.
+const INSTALL_UUID =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+// Semver with optional -prerelease/+build (dev charts: "1.14.1+a1f714b…").
+const SEMVER = /^\d+\.\d+\.\d+(?:[+-][0-9A-Za-z.-]{1,48})?$/;
+// kubelet/apiserver format, incl. distro suffixes ("v1.28.3+k3s1",
+// "v1.28.9-eks-036c24b").
+const K8S_VERSION = /^v\d+\.\d+\.\d+(?:[+-][0-9A-Za-z.-]{1,48})?$/;
+// Rust std::env::consts::ARCH values (x86_64, aarch64, …).
+const ARCH = /^[A-Za-z0-9_]{1,16}$/;
+const MAX_NODES = 10_000;
+
+function parseCheckin(q) {
+  const install = q.get("install") ?? "";
+  const broker = q.get("broker") ?? "";
+  const chart = q.get("chart") ?? "";
+  const k8s = q.get("k8s") ?? "";
+  const arch = q.get("arch") ?? "";
+  const nodes = Number(q.get("nodes"));
+  if (!INSTALL_UUID.test(install)) return null;
+  if (!SEMVER.test(broker)) return null;
+  // chart/k8s come from env vars the chart injects; a broker running
+  // outside the chart sends the literal "unknown" on purpose so
+  // non-chart installs are still countable (version_check.rs). The
+  // compile-time fields (broker, arch) never legitimately do.
+  if (chart !== "unknown" && !SEMVER.test(chart)) return null;
+  if (k8s !== "unknown" && !K8S_VERSION.test(k8s)) return null;
+  if (!ARCH.test(arch)) return null;
+  if (!Number.isInteger(nodes) || nodes < 0 || nodes > MAX_NODES) return null;
+  return { install, broker, chart, k8s, arch, nodes };
+}
+
 function recordCheckin(env, request, url) {
   // Analytics Engine is fire-and-forget and additive-only; a schema of
   // blobs (strings) + doubles (numbers) + an index. The install UUID is
   // the index so per-install queries (active installs, version spread)
   // are cheap.
   if (!env.TELEMETRY) return; // dataset unbound in local dev
-  const q = url.searchParams;
+  const c = parseCheckin(url.searchParams);
+  if (!c) return;
   env.TELEMETRY.writeDataPoint({
-    indexes: [q.get("install") ?? "unknown"],
-    blobs: [
-      q.get("broker") ?? "unknown",
-      q.get("chart") ?? "unknown",
-      q.get("k8s") ?? "unknown",
-      q.get("arch") ?? "unknown",
-      request.cf?.country ?? "unknown",
-    ],
-    doubles: [Number(q.get("nodes")) || 0],
+    indexes: [c.install],
+    blobs: [c.broker, c.chart, c.k8s, c.arch, request.cf?.country ?? "unknown"],
+    doubles: [c.nodes],
   });
 }
 
