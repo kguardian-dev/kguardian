@@ -80,7 +80,7 @@ The following table lists the configurable parameters of the kguardian chart and
 | advisor.image.pullPolicy | string | `"IfNotPresent"` | Advisor image pull policy |
 | advisor.image.repository | string | `"ghcr.io/kguardian-dev/kguardian/advisor"` | Advisor container image repository |
 | advisor.image.sha | string | `""` | Overrides the image tag using SHA digest |
-| advisor.image.tag | string | `"v1.6.1"` | Advisor version tag (auto-updated by Renovate, like the other images) |
+| advisor.image.tag | string | `"v1.6.2"` | Advisor version tag (auto-updated by Renovate, like the other images) |
 | advisor.imagePullSecrets | list | `[]` | List of image pull secrets for private registries |
 | advisor.networkPolicy | object | `{"enabled":false}` | Restrict who may reach the unauthenticated advisor HTTP API. When enabled, only the mcp-server pod may connect. Requires a NetworkPolicy- enforcing CNI (Cilium, Calico, ...). |
 | advisor.nodeSelector | object | `{}` | Node selector for advisor pods |
