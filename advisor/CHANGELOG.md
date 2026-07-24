@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.6.2](https://github.com/kguardian-dev/kguardian/compare/advisor/v1.6.1...advisor/v1.6.2) (2026-07-23)
+
+
+### Bug Fixes
+
+* **deps:** update kubernetes monorepo to v0.36.3 ([#1145](https://github.com/kguardian-dev/kguardian/issues/1145)) ([0d8b8cc](https://github.com/kguardian-dev/kguardian/commit/0d8b8cc06326656a11edeb7f5bfdaa67d84d09f5))
+
 ## [1.6.1](https://github.com/kguardian-dev/kguardian/compare/advisor/v1.6.0...advisor/v1.6.1) (2026-07-19)
 
 
