@@ -22,7 +22,7 @@ COPY db  /app/broker/db
 
 RUN --mount=type=cache,target=/usr/local/cargo/registry  cargo build --release
 
-FROM debian:12.15-slim AS app
+FROM debian:13.6-slim AS app
 
 # ca-certificates: root store for the outbound HTTPS version check-in.
 RUN apt update && apt install -y libpq5 ca-certificates && rm -rf /var/lib/apt/lists/*
