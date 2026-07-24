@@ -51,3 +51,5 @@ it ages out of AE's 3-month retention (~2026-10-21).
 wrangler dev
 curl "http://localhost:8787/v1/check?install=test&broker=1.11.1&chart=1.13.2&k8s=v1.33.0&nodes=3&arch=x86_64"
 ```
+
+<!-- build: retrigger 2026-07-24 (production build af6db712 skipped as duplicate of PR preview; this commit forces a real build) -->
