@@ -67,8 +67,9 @@ jobs:
     strategy:
       matrix:
         arch:
+          # PR builds are amd64-only (SIMPLIFICATION-GOAL.md WS-E); the release
+          # workflow still builds and publishes both architectures.
           - linux/amd64
-          - linux/arm64
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -131,11 +132,6 @@ jobs:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@96fe6ef7f33517b61c61be40b68a1882f3264fb8 # v4
-        with:
-          platforms: all
-
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4
         with:
@@ -154,17 +150,15 @@ jobs:
           name: x86_64-unknown-linux-gnu-binary
           path: controller/linux/amd64
 
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
-        with:
-          name: aarch64-unknown-linux-gnu-binary
-          path: controller/linux/arm64
-
       - name: Build and Push
         id: build
         uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7
         with:
           context: controller/
-          platforms: linux/amd64,linux/arm64
+          # PR images are amd64-only (SIMPLIFICATION-GOAL.md WS-E) — multi-arch
+          # builds run under QEMU at ~45 min/component and belong to release
+          # workflows only. Release pipelines are unchanged.
+          platforms: linux/amd64
           file: controller/Dockerfile
           push: true
           tags: |
@@ -291,11 +285,6 @@ jobs:
             ${{ runner.os }}-cargo-broker-
             ${{ runner.os }}-cargo-
 
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@96fe6ef7f33517b61c61be40b68a1882f3264fb8 # v4
-        with:
-          platforms: all
-
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4
         with:
@@ -315,7 +304,10 @@ jobs:
         with:
           context: broker/
           file: broker/Dockerfile
-          platforms: linux/amd64,linux/arm64
+          # PR images are amd64-only (SIMPLIFICATION-GOAL.md WS-E) — multi-arch
+          # builds run under QEMU at ~45 min/component and belong to release
+          # workflows only. Release pipelines are unchanged.
+          platforms: linux/amd64
           push: true
           tags: |
             ghcr.io/kguardian-dev/kguardian/broker:pr-${{ github.event.pull_request.number }}
@@ -457,11 +449,6 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-node-
 
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@96fe6ef7f33517b61c61be40b68a1882f3264fb8 # v4
-        with:
-          platforms: all
-
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4
         with:
@@ -481,7 +468,10 @@ jobs:
         with:
           context: frontend/
           file: frontend/Dockerfile
-          platforms: linux/amd64,linux/arm64
+          # PR images are amd64-only (SIMPLIFICATION-GOAL.md WS-E) — multi-arch
+          # builds run under QEMU at ~45 min/component and belong to release
+          # workflows only. Release pipelines are unchanged.
+          platforms: linux/amd64
           push: true
           tags: |
             ghcr.io/kguardian-dev/kguardian/frontend:pr-${{ github.event.pull_request.number }}
@@ -543,11 +533,6 @@ jobs:
             ${{ runner.os }}-node-llm-bridge-
             ${{ runner.os }}-node-
 
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@96fe6ef7f33517b61c61be40b68a1882f3264fb8 # v4
-        with:
-          platforms: all
-
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4
         with:
@@ -567,7 +552,10 @@ jobs:
         with:
           context: llm-bridge/
           file: llm-bridge/Dockerfile
-          platforms: linux/amd64,linux/arm64
+          # PR images are amd64-only (SIMPLIFICATION-GOAL.md WS-E) — multi-arch
+          # builds run under QEMU at ~45 min/component and belong to release
+          # workflows only. Release pipelines are unchanged.
+          platforms: linux/amd64
           push: true
           tags: |
             ghcr.io/kguardian-dev/kguardian/llm-bridge:pr-${{ github.event.pull_request.number }}
@@ -629,11 +617,6 @@ jobs:
             ${{ runner.os }}-go-mcp-server-
             ${{ runner.os }}-go-
 
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@96fe6ef7f33517b61c61be40b68a1882f3264fb8 # v4
-        with:
-          platforms: all
-
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4
         with:
@@ -653,7 +636,10 @@ jobs:
         with:
           context: mcp-server/
           file: mcp-server/Dockerfile
-          platforms: linux/amd64,linux/arm64
+          # PR images are amd64-only (SIMPLIFICATION-GOAL.md WS-E) — multi-arch
+          # builds run under QEMU at ~45 min/component and belong to release
+          # workflows only. Release pipelines are unchanged.
+          platforms: linux/amd64
           push: true
           tags: |
             ghcr.io/kguardian-dev/kguardian/mcp-server:pr-${{ github.event.pull_request.number }}
@@ -715,11 +701,6 @@ jobs:
             ${{ runner.os }}-go-evaluator-
             ${{ runner.os }}-go-
 
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@96fe6ef7f33517b61c61be40b68a1882f3264fb8 # v4
-        with:
-          platforms: all
-
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4
         with:
@@ -739,7 +720,10 @@ jobs:
         with:
           context: evaluator/
           file: evaluator/Dockerfile
-          platforms: linux/amd64,linux/arm64
+          # PR images are amd64-only (SIMPLIFICATION-GOAL.md WS-E) — multi-arch
+          # builds run under QEMU at ~45 min/component and belong to release
+          # workflows only. Release pipelines are unchanged.
+          platforms: linux/amd64
           push: true
           tags: |
             ghcr.io/kguardian-dev/kguardian/evaluator:pr-${{ github.event.pull_request.number }}
