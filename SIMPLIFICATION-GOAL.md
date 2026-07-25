@@ -30,6 +30,7 @@ today still exists and behaves identically — proven by tests, not by hope.
 | Policy/seccomp generators | 3 implementations → **1 shared package** (+ CLI in provable parity) |
 | Feature parity | **100%** — every tool, endpoint, generator output, and CLI behavior preserved; proven by the parity gates in §3 |
 | Regressions | **Zero** — no user-visible behavior change ships without a test that would have caught its absence |
+| CPU architectures | **linux/amd64 + linux/arm64, always** — every image and binary, at every pipeline stage including PR validation. Simplification means fewer components, never fewer supported platforms |
 | Install/maintain UX | Quickstart unchanged (one `helm install`); values.yaml shrinks; no new mandatory inputs; deprecated keys warn, never break |
 
 **Non-goals (explicitly deferred):** new features, new tools, new providers; merging the evaluator
@@ -114,17 +115,21 @@ exactly what's running and what was skipped; docs quickstart unchanged; an UPGRA
 phase, written before the phase merges.
 
 ### WS-E — CI & release weight
-**Bar:** CI cost proportional to what changed; releases stay fully automated end to end.
-**Acceptance:** PR image builds are amd64-only (multi-arch on release tags only — a PR broker build
-measured 45 min under QEMU); release units drop to 6 with renovate + release-please automation
+**Bar:** CI cost proportional to what changed; releases stay fully automated end to end; **both
+architectures (linux/amd64 + linux/arm64) are built and validated at every stage — PR and release.**
+Dropping an architecture is never an acceptable cost reduction: an arm64-only build break must
+surface on the PR, not at release time.
+**Acceptance:** PR image builds keep full amd64+arm64 coverage but move the arm64 legs from QEMU
+emulation (a PR broker build measured 45 min) to native `ubuntu-24.04-arm` runners with a manifest
+merge, targeting minutes not hours; release units drop to 6 with renovate + release-please automation
 verified end to end on the first post-merge bump; advisor's draft-release flow shrinks to the binary
-matrix only.
+matrix only (all four OS/arch binary targets retained).
 
 ---
 
 ## 5. Sequencing
 
-- **P0 — WS-A + WS-E's PR-build trim + `ai.enabled` umbrella (maps to existing toggles).** Ships value
+- **P0 — WS-A + WS-E's native-arm-runner migration + `ai.enabled` umbrella (maps to existing toggles).** Ships value
   immediately, touches no contracts, builds the G1/G2 snapshots while the old system is still the
   reference implementation.
 - **P1 — WS-B behind G1/G3/G5.** The biggest failure-surface reduction; directly serves the sibling
@@ -145,3 +150,6 @@ judgment call.
 - 2026-07-26 — Charter created from the full architecture review (four-quadrant exploration: AI chain,
   data plane, advisor, deployment/CI). Baseline: 7 runtime components, 8 release units, 4 toolchains,
   1,316-line values.yaml, tool definitions ×3, generators ×3.
+- 2026-07-26 — **Architecture-support invariant added** (owner decision): amd64 + arm64 are guaranteed
+  at every pipeline stage including PR validation. An initial amd64-only PR-build trim was closed
+  unmerged; WS-E re-aimed at native arm64 runners instead of coverage reduction.
