@@ -1,7 +1,7 @@
 import axios from "axios";
 import type { ChatRequest, ChatResponse } from "../types/index.js";
 import { LLMProvider } from "../types/index.js";
-import { BrokerClient } from "../brokerClient.js";
+import { McpClient } from "../mcpClient.js";
 import { log } from "../logger.js";
 import { serializeToolResult } from "./truncate.js";
 
@@ -18,7 +18,7 @@ const MAX_TOOL_ROUNDS = 10;
 // GitHub Copilot uses OpenAI-compatible API
 export async function callCopilot(
   request: ChatRequest,
-  brokerClient: BrokerClient
+  mcpClient: McpClient
 ): Promise<ChatResponse> {
   // Trim before empty-check; whitespace-only counts as not-configured.
   const apiKey = process.env.GITHUB_TOKEN?.trim();
@@ -27,8 +27,8 @@ export async function callCopilot(
   }
 
   const model = request.model || "gpt-4o";
-  const context = BrokerClient.parseContext(request.context);
-  const systemPrompt = BrokerClient.getSystemPrompt(context);
+  const context = McpClient.parseContext(request.context);
+  const systemPrompt = McpClient.getSystemPrompt(context);
 
   // Build messages with history
   const messages: CopilotMessage[] = [
@@ -47,7 +47,7 @@ export async function callCopilot(
   messages.push({ role: "user", content: request.message });
 
   // Build tools from cached MCP definitions (OpenAI format)
-  const toolDefs = await BrokerClient.getToolsCached();
+  const toolDefs = await McpClient.getToolsCached();
   const tools = toolDefs.map((tool) => ({
     type: "function",
     function: {
@@ -85,7 +85,6 @@ export async function callCopilot(
         message: message.content,
         provider: LLMProvider.COPILOT,
         model: response.data.model,
-        conversationId: request.conversationId,
       };
     }
 
@@ -111,7 +110,7 @@ export async function callCopilot(
           };
         }
 
-        const result = await brokerClient.executeTool({
+        const result = await mcpClient.executeTool({
           name: toolCall.function.name,
           arguments: parsedArgs,
         });
@@ -139,6 +138,5 @@ export async function callCopilot(
     message: finalResponse.data.choices[0].message.content,
     provider: LLMProvider.COPILOT,
     model: finalResponse.data.model,
-    conversationId: request.conversationId,
   };
 }

@@ -1,7 +1,7 @@
 import axios from "axios";
 import type { ChatRequest, ChatResponse } from "../types/index.js";
 import { LLMProvider } from "../types/index.js";
-import { BrokerClient } from "../brokerClient.js";
+import { McpClient } from "../mcpClient.js";
 import { log } from "../logger.js";
 import { serializeToolResult } from "./truncate.js";
 
@@ -9,7 +9,7 @@ const MAX_TOOL_ROUNDS = 10;
 
 export async function callGemini(
   request: ChatRequest,
-  brokerClient: BrokerClient
+  mcpClient: McpClient
 ): Promise<ChatResponse> {
   // Trim before empty-check; whitespace-only counts as not-configured.
   const apiKey = process.env.GOOGLE_API_KEY?.trim();
@@ -18,11 +18,11 @@ export async function callGemini(
   }
 
   const model = request.model || "gemini-2.0-flash-exp";
-  const context = BrokerClient.parseContext(request.context);
-  const systemPrompt = BrokerClient.getSystemPrompt(context);
+  const context = McpClient.parseContext(request.context);
+  const systemPrompt = McpClient.getSystemPrompt(context);
 
   // Build function declarations from cached MCP definitions
-  const toolDefs = await BrokerClient.getToolsCached();
+  const toolDefs = await McpClient.getToolsCached();
   const functionDeclarations = toolDefs.map((tool) => ({
     name: tool.name,
     description: tool.description,
@@ -88,7 +88,6 @@ export async function callGemini(
         message: textPart?.text || "No response from Gemini",
         provider: LLMProvider.GEMINI,
         model,
-        conversationId: request.conversationId,
       };
     }
 
@@ -101,7 +100,7 @@ export async function callGemini(
     // Execute function calls and build responses
     const functionResponses = await Promise.all(
       functionCalls.map(async (part: any) => {
-        const result = await brokerClient.executeTool({
+        const result = await mcpClient.executeTool({
           name: part.functionCall.name,
           arguments: part.functionCall.args,
         });
@@ -143,6 +142,5 @@ export async function callGemini(
     message: textPart?.text || "No response from Gemini",
     provider: LLMProvider.GEMINI,
     model,
-    conversationId: request.conversationId,
   };
 }

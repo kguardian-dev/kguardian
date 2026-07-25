@@ -4,7 +4,7 @@ import http from "node:http";
 import type { AddressInfo } from "node:net";
 
 import { app } from "./index.js";
-import { BrokerClient } from "./brokerClient.js";
+import { McpClient } from "./mcpClient.js";
 
 // Integration test for the SSE /api/chat/stream route: boots the real Express
 // app, points the Anthropic SDK at a mock streaming server, and asserts the
@@ -56,7 +56,7 @@ before(async () => {
   delete process.env.GOOGLE_API_KEY;
   delete process.env.GITHUB_TOKEN;
 
-  (BrokerClient as unknown as { getToolsCached: () => Promise<unknown[]> }).getToolsCached =
+  (McpClient as unknown as { getToolsCached: () => Promise<unknown[]> }).getToolsCached =
     async () => [
       { name: "get_cluster_pods", description: "List pods.", parameters: { type: "object", properties: {}, required: [] } },
     ];
