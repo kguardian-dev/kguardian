@@ -76,6 +76,18 @@ audit's results, promote it to an enforced policy:
 For cluster-scoped policies (AuditClusterNetworkPolicy):
   kguardian audit promote-cluster <name> | kubectl apply -f -
 {{- end }}
+{{- if include "kguardian.llmBridgeEnabled" . }}
+
+AI assistant: ENABLED (llm-bridge{{ if include "kguardian.mcpServerEnabled" . }} + mcp-server{{ end }}{{ if include "kguardian.advisorEnabled" . }} + advisor{{ end }}).
+Provide an LLM provider API key as a Secret (see llmBridge.secrets in
+values) or the assistant will start without a provider. Enabling
+everything at once next time: --set ai.enabled=true
+{{- else }}
+
+AI assistant: disabled. Enable the whole path (llm-bridge, mcp-server,
+advisor) with one value plus a provider secret:
+  --set ai.enabled=true
+{{- end }}
 {{- if .Values.telemetry.enabled }}
 
 Telemetry: the broker performs a daily anonymous version check-in

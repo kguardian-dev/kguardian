@@ -39,7 +39,7 @@ spec:
         - podSelector:
             matchLabels:
               app.kubernetes.io/name: {{ .Values.mcpServer.service.name }}
-        {{- if .Values.advisor.enabled }}
+        {{- if include "kguardian.advisorEnabled" . }}
         # advisor service — reads traffic/syscalls to synthesise policies.
         - podSelector:
             matchLabels:

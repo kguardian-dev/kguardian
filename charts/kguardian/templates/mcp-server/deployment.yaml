@@ -1,4 +1,4 @@
-{{- if .Values.mcpServer.enabled }}
+{{- if include "kguardian.mcpServerEnabled" . }}
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -51,7 +51,7 @@ spec:
             {{- include "kguardian.brokerAuthEnv" . | nindent 12 }}
             - name: PORT
               value: "{{ .Values.mcpServer.container.port }}"
-            {{- if .Values.advisor.enabled }}
+            {{- if include "kguardian.advisorEnabled" . }}
             # Policy/seccomp generation tools proxy to the advisor service.
             - name: ADVISOR_URL
               value: "http://{{ .Values.advisor.service.name }}.{{ include "kguardian.namespace" . }}.svc.cluster.local:{{ .Values.advisor.service.port }}"

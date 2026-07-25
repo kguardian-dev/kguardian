@@ -1,4 +1,4 @@
-{{- if and .Values.advisor.enabled .Values.advisor.networkPolicy.enabled }}
+{{- if and (include "kguardian.advisorEnabled" .) .Values.advisor.networkPolicy.enabled }}
 ---
 # Ingress NetworkPolicy for the advisor service.
 #

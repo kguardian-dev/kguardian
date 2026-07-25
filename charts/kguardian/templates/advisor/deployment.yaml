@@ -1,4 +1,4 @@
-{{- if .Values.advisor.enabled }}
+{{- if include "kguardian.advisorEnabled" . }}
 ---
 apiVersion: apps/v1
 kind: Deployment

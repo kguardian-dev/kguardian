@@ -780,8 +780,17 @@ frontend:
     #  - secretName: kguardian-tls
     #    hosts:
     #      - kguardian.example.com
+# AI assistant umbrella switch. The assistant needs three components working
+# together (llm-bridge, mcp-server, advisor); this turns them all on with one
+# value so the path can never be half-deployed. Per-component `enabled` flags
+# below still work for enabling components individually. You must also create
+# an LLM provider secret — see llmBridge.secrets.
+ai:
+  # -- Enable the full AI assistant path (llm-bridge + mcp-server + advisor) with one toggle
+  enabled: false
+
 llmBridge:
-  # -- Enable LLM Bridge service for AI assistant
+  # -- Enable LLM Bridge service for AI assistant (or use ai.enabled to turn on the whole path)
   enabled: false
   # -- Number of llm-bridge replicas to deploy
   replicaCount: 2
