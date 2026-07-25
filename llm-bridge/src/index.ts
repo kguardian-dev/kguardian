@@ -6,7 +6,7 @@ import rateLimit from "express-rate-limit";
 import dotenv from "dotenv";
 import { ZodError } from "zod";
 import { ChatRequestSchema, LLMProvider, type ErrorResponse } from "./types/index.js";
-import { BrokerClient } from "./brokerClient.js";
+import { McpClient } from "./mcpClient.js";
 import { log } from "./logger.js";
 import { callOpenAI } from "./providers/openai.js";
 import { callAnthropic, streamAnthropic, type StreamEvent } from "./providers/anthropic.js";
@@ -34,11 +34,11 @@ const allowedOrigin = process.env.ALLOWED_ORIGIN?.trim() || '*';
 app.use(cors({ origin: allowedOrigin }));
 app.use(express.json({ limit: '100kb' }));
 
-// Initialize broker client. Note: the class is named "BrokerClient"
+// Initialize broker client. Note: the class is named "McpClient"
 // for historical reasons; today all tool calls route through the MCP
-// server. The MCP server URL is read inside BrokerClient from
+// server. The MCP server URL is read inside McpClient from
 // MCP_SERVER_URL or its hardcoded default — no constructor arg needed.
-const brokerClient = new BrokerClient();
+const mcpClient = new McpClient();
 
 /**
  * Compute available providers from a key-value env map. Pure — takes
@@ -108,13 +108,13 @@ function resolveProvider(chatRequest: ChatRequest): ProviderResolution {
 function callProvider(provider: LLMProvider, chatRequest: ChatRequest): Promise<ChatResponse> {
   switch (provider) {
     case LLMProvider.OPENAI:
-      return callOpenAI(chatRequest, brokerClient);
+      return callOpenAI(chatRequest, mcpClient);
     case LLMProvider.ANTHROPIC:
-      return callAnthropic(chatRequest, brokerClient);
+      return callAnthropic(chatRequest, mcpClient);
     case LLMProvider.GEMINI:
-      return callGemini(chatRequest, brokerClient);
+      return callGemini(chatRequest, mcpClient);
     case LLMProvider.COPILOT:
-      return callCopilot(chatRequest, brokerClient);
+      return callCopilot(chatRequest, mcpClient);
     default:
       return Promise.reject(new Error(`Unknown provider: ${provider}`));
   }
@@ -251,13 +251,13 @@ app.post("/api/chat/stream", chatLimiter, async (req: Request, res: Response) =>
 
   try {
     if (provider === LLMProvider.ANTHROPIC) {
-      await streamAnthropic(chatRequest, brokerClient, emit, abort.signal);
+      await streamAnthropic(chatRequest, mcpClient, emit, abort.signal);
     } else {
       // Providers without a native streaming path: run to completion and emit
       // the answer as a single text chunk plus the terminal done event.
       const response = await callProvider(provider, chatRequest);
       emit({ type: "text", delta: response.message });
-      emit({ type: "done", model: response.model, conversationId: response.conversationId });
+      emit({ type: "done", model: response.model });
     }
   } catch (error) {
     // Map upstream rate-limit / overload to a clear, actionable message rather
@@ -305,7 +305,7 @@ function startServer() {
 
   // Graceful shutdown
   const shutdown = () => {
-    brokerClient.close();
+    mcpClient.close();
     server.close();
     process.exit(0);
   };
