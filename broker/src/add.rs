@@ -153,58 +153,6 @@ fn create_pod_traffic_batch(
     Ok(events_to_insert)
 }
 
-#[post("/pod/traffic")]
-pub async fn add_pods(
-    pool: web::Data<DbPool>,
-    audit: web::Data<AuditClient>,
-    form: web::Json<PodTraffic>,
-) -> Result<HttpResponse, Error> {
-    let pool_for_insert = pool.clone();
-    let inserted = web::block(move || {
-        let mut conn = pool_for_insert.get()?;
-        create_pod_traffic(&mut conn, form)
-    })
-    .await?
-    .map_err(actix_web::error::ErrorInternalServerError)?;
-
-    // Enqueue ONLY new events for best-effort audit eval (deduped flows are
-    // skipped). try_enqueue is non-blocking and sheds load when the evaluator
-    // is backed up — same bounded-queue path as the batch endpoint.
-    if audit.enabled() {
-        if let Some(event) = inserted.clone() {
-            audit.try_enqueue(event);
-        }
-    }
-
-    // Wire format preserved: echo the input form back to the
-    // controller (it ignores the body but a behavior change here
-    // would be observable in API contract tests). When the row was a
-    // duplicate, the input is echoed via the None-path fallback.
-    Ok(HttpResponse::Ok().json(inserted))
-}
-
-fn create_pod_traffic(
-    conn: &mut PgConnection,
-    w: web::Json<PodTraffic>,
-) -> Result<Option<PodTraffic>, DbError> {
-    use schema::pod_traffic::dsl::*;
-    debug!("storing pod_traffic event {:?} (uuid)", w.uuid);
-    if w.get_row(conn)?.is_none() {
-        // debug not info — pod_traffic inserts happen at the rate of
-        // new flows in the cluster (potentially thousands per minute
-        // on a busy cluster). Reserving INFO for the rare events
-        // operators care about (startup, shutdown, config, errors)
-        // keeps the default-info log scannable.
-        debug!("Insert pod {:?}, in pod_traffic table", w.uuid);
-        diesel::insert_into(pod_traffic).values(&*w).execute(conn)?;
-        debug!("Success: pod {:?} inserted in pod_traffic table", w.uuid);
-        Ok(Some(w.0))
-    } else {
-        debug!("Data already exists");
-        Ok(None)
-    }
-}
-
 impl PodTraffic {
     pub fn get_row(&self, conn: &mut PgConnection) -> Result<Option<PodTraffic>, DbError> {
         use schema::pod_traffic::dsl::*;
@@ -313,7 +261,7 @@ pub fn upsert_pod_details(
     // debug not info — every controller pod-watcher event upserts here
     // (creates, updates, status transitions). On a cluster with rolling
     // deployments this fires at high rate; same INFO-reservation
-    // discipline as create_pod_traffic above.
+    // discipline as create_pod_traffic_batch.
     debug!("Success: pod {:?} inserted in pod_details table", w.pod_ip);
     Ok(w.0)
 }
