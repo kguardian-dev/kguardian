@@ -200,7 +200,7 @@ export async function callAnthropic(
 
     const toolUses = toolUsesOf(message);
     if (toolUses.length === 0) {
-      return finalize(message, request);
+      return finalize(message);
     }
     await runToolRound(message, toolUses, mcpClient, messages);
   }
@@ -213,7 +213,7 @@ export async function callAnthropic(
   } catch (error) {
     throw toCleanError(error);
   }
-  return finalize(finalMessage, request);
+  return finalize(finalMessage);
 }
 
 // ---------------------------------------------------------------------------
@@ -315,7 +315,7 @@ export async function streamAnthropic(
 // ---------------------------------------------------------------------------
 
 /** Extract the text answer from a completed message into the wire contract. */
-function finalize(message: Anthropic.Message, request: ChatRequest): ChatResponse {
+function finalize(message: Anthropic.Message): ChatResponse {
   return {
     message: textOf(message) || fallbackFor(message),
     provider: LLMProvider.ANTHROPIC,
