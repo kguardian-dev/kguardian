@@ -1,4 +1,4 @@
-{{- if and .Values.llmBridge.enabled .Values.llmBridge.podDisruptionBudget.enabled }}
+{{- if and (include "kguardian.llmBridgeEnabled" .) .Values.llmBridge.podDisruptionBudget.enabled }}
 {{- /* PDB-singleton guardrail. See evaluator/pdb.yaml (b964c58d). */ -}}
 {{- $pdb := .Values.llmBridge.podDisruptionBudget -}}
 {{- $replicas := int .Values.llmBridge.replicaCount -}}

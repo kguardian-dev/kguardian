@@ -1,4 +1,4 @@
-{{- if and .Values.llmBridge.enabled .Values.llmBridge.metrics.serviceMonitor.enabled }}
+{{- if and (include "kguardian.llmBridgeEnabled" .) .Values.llmBridge.metrics.serviceMonitor.enabled }}
 apiVersion: monitoring.coreos.com/v1
 kind: ServiceMonitor
 metadata:
