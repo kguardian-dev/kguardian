@@ -1,268 +1,65 @@
-import { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { log } from "./logger.js";
 import type { ToolCall, ToolResult } from "./types/index.js";
+import { TOOL_DEFS } from "./tools/registry.js";
+import { executeInProcessTool } from "./tools/execute.js";
+
+// WS-B: the assistant's 12 tools run IN-PROCESS here — this class no longer
+// talks to a separate mcp-server over MCP transport; it reaches the broker and
+// advisor directly (src/tools/*). The public surface (executeTool,
+// getToolsCached, getSystemPrompt, parseContext) is unchanged so the provider
+// loops are untouched, and the src/tools parity test proves every tool
+// reproduces the mcp-server's outputs against the shared G1 fixtures.
+//
+// NOTE: the class keeps the name McpClient for a focused, reviewable diff; a
+// rename to `Assistant` is a trivial follow-up. The tool set is still exposed
+// as MCP tools to the model — only the transport (a network hop to a Go
+// service) is gone.
 
 export interface ParsedContext {
   namespace?: string;
   podNames?: string[];
 }
 
-/**
- * Resolve the MCP server URL from (in priority order): an explicit
- * constructor argument, the MCP_SERVER_URL env var, or the in-cluster
- * default. Each candidate is trim-empty defended so a whitespace-only
- * value (typical Helm YAML literal artefact, or a misconfigured
- * env-from-secret with stray whitespace) doesn't pass the truthy
- * check and surface later as a cryptic `TypeError: Invalid URL` from
- * `new URL(...)` inside the transport — far from the env-var read
- * site. Same defense-in-depth class as the mcp-server's
- * NewMcpClient TrimSpace and the broker's AuditClient::from_env
- * trim.
- *
- * Exported as a pure helper so the resolution contract can be unit-
- * tested without instantiating McpClient (which would also try to
- * import MCP transports just to test a string resolution).
- */
-export function resolveMcpUrl(arg?: string, envUrl?: string): string {
-  const argTrimmed = arg?.trim();
-  const envTrimmed = envUrl?.trim();
-  return argTrimmed || envTrimmed || "http://kguardian-mcp-server.kguardian.svc.cluster.local:8081";
-}
-
 export class McpClient {
-  private mcpClient: Client | null = null;
-  private mcpUrl: string;
-  private mcpInitialized: boolean = false;
-  private initPromise: Promise<void> | null = null;
-  private static toolDefsCache: any[] | null = null;
+  private static toolDefsCache: { name: string; description: string; parameters: unknown }[] | null = null;
 
   /**
-   * The class is named McpClient for historical reasons — before
-   * the MCP refactor it talked directly to the broker. Today all
-   * tool calls route through the MCP server (this.mcpUrl), and the
-   * broker is reached via the MCP server's own broker client. So
-   * only `mcpUrl` is meaningful; the previous `brokerUrl` parameter
-   * was declared but never stored — the static getToolDefinitionsFromMCP
-   * helper already acknowledged this by passing "" for it.
-   */
-  constructor(mcpUrl?: string) {
-    this.mcpUrl = resolveMcpUrl(mcpUrl, process.env.MCP_SERVER_URL);
-  }
-
-  /**
-   * Initialize MCP client connection (with mutex to prevent race conditions)
-   */
-  async initializeMCPClient(): Promise<void> {
-    if (this.mcpInitialized) return;
-    if (!this.initPromise) {
-      this.initPromise = this._doInit();
-    }
-    return this.initPromise;
-  }
-
-  private async _doInit(): Promise<void> {
-    try {
-      // Create Streamable HTTP transport (MCP spec 2025-03-26)
-      const transport = new StreamableHTTPClientTransport(new URL(this.mcpUrl));
-
-      // Create MCP client
-      this.mcpClient = new Client(
-        {
-          name: "kguardian-llm-bridge",
-          version: "1.2.1",
-        },
-        {
-          capabilities: {},
-        }
-      );
-
-      // Connect to MCP server
-      await this.mcpClient.connect(transport);
-      this.mcpInitialized = true;
-
-      log.info(`Connected to MCP server at ${this.mcpUrl}`);
-    } catch (error) {
-      // Reset the promise so future calls can retry
-      this.initPromise = null;
-      log.error("Failed to initialize MCP client:", error);
-      throw new Error(
-        `Failed to connect to MCP server at ${this.mcpUrl}: ${error instanceof Error ? error.message : String(error)}`,
-        { cause: error }
-      );
-    }
-  }
-
-  /**
-   * Reset MCP client connection state so the next call will reconnect
-   */
-  private resetConnection(): void {
-    this.mcpClient = null;
-    this.mcpInitialized = false;
-    this.initPromise = null;
-    log.info("MCP client connection reset — will reconnect on next call");
-  }
-
-  /**
-   * Check if an error is a connection-level failure worth retrying
-   */
-  private isConnectionError(error: unknown): boolean {
-    if (!(error instanceof Error)) return false;
-    const msg = error.message.toLowerCase();
-    return (
-      msg.includes("econnrefused") ||
-      msg.includes("econnreset") ||
-      msg.includes("socket hang up") ||
-      msg.includes("fetch failed") ||
-      msg.includes("network error")
-    );
-  }
-
-  /**
-   * Execute a tool call by routing to the MCP server.
-   * On connection errors, resets state and retries once.
+   * Execute a tool call in-process. Returns the same ToolResult shape the
+   * providers already consume: { data } on success (parsed JSON when the tool
+   * returned JSON, otherwise the raw string), or { data: null, error } on
+   * failure — a failing tool never throws, so one bad call can't abort the
+   * model's tool round.
    */
   async executeTool(toolCall: ToolCall): Promise<ToolResult> {
-    return this.executeToolInner(toolCall, true);
-  }
-
-  private async executeToolInner(
-    toolCall: ToolCall,
-    allowRetry: boolean
-  ): Promise<ToolResult> {
+    const { name, arguments: args } = toolCall;
+    log.debug(`Executing tool in-process: ${name}`);
+    const result = await executeInProcessTool(name, args || {});
+    if (result.isError) {
+      return { data: null, error: result.text };
+    }
     try {
-      // Ensure MCP client is initialized
-      await this.initializeMCPClient();
-
-      if (!this.mcpClient) {
-        throw new Error("MCP client not initialized");
-      }
-
-      const { name, arguments: args } = toolCall;
-
-      // Per-tool-call entry + exit logs at debug level. A chatty LLM
-      // can call tools dozens of times per session and the exit log
-      // (with the full result body) is multi-KB per call — far too
-      // verbose for steady-state INFO. Operators wanting per-call
-      // tracing run with LOG_LEVEL=debug.
-      log.debug(`Calling MCP tool: ${name}`);
-
-      // Call the tool using MCP SDK
-      const result = await this.mcpClient.callTool({
-        name,
-        arguments: args || {},
-      });
-
-      log.debug(`MCP tool ${name} returned:`, result);
-
-      // MCP SDK returns result with content array
-      if (result.content && Array.isArray(result.content)) {
-        // Extract text content from the response
-        const textContent = result.content.find((item) => item.type === "text");
-        if (textContent && "text" in textContent) {
-          try {
-            // Try to parse as JSON
-            const parsedData = JSON.parse(textContent.text);
-            return { data: parsedData };
-          } catch {
-            // If not JSON, return as-is
-            return { data: textContent.text };
-          }
-        }
-      }
-
-      // If we get here, return the raw result
-      return { data: result };
-    } catch (error) {
-      // On connection errors, reset and retry once
-      if (allowRetry && this.isConnectionError(error)) {
-        log.warn(
-          `Connection error calling MCP tool ${toolCall.name}, resetting and retrying:`,
-          error instanceof Error ? error.message : error
-        );
-        this.resetConnection();
-        return this.executeToolInner(toolCall, false);
-      }
-
-      log.error(`Error calling MCP tool ${toolCall.name}:`, error);
-      return {
-        data: null,
-        error: error instanceof Error ? error.message : String(error),
-      };
+      return { data: JSON.parse(result.text) };
+    } catch {
+      // Advisor tools return YAML/JSON text that is not necessarily a JSON
+      // object — forward it as-is.
+      return { data: result.text };
     }
   }
 
   /**
-   * Get available tools from MCP server
+   * Tool definitions for the LLM providers, sourced from the single in-repo
+   * registry. Kept async + cached to preserve the previous call signature.
    */
-  async getAvailableTools(): Promise<any[]> {
-    try {
-      await this.initializeMCPClient();
-
-      if (!this.mcpClient) {
-        throw new Error("MCP client not initialized");
-      }
-
-      const response = await this.mcpClient.listTools();
-      return response.tools || [];
-    } catch (error) {
-      // Propagate rather than swallow. The MCP server is the single source of
-      // truth for the tool surface; if discovery fails the assistant has no
-      // grounded tools, and answering ungrounded is worse than failing. The
-      // caller surfaces a clear "tool server unreachable" error to the user.
-      log.error("Error fetching tools from MCP server:", error);
-      throw error instanceof Error ? error : new Error(String(error));
-    }
-  }
-
-  /**
-   * Get tool definitions for LLMs
-   * This fetches the actual tools from the MCP server dynamically
-   */
-  static async getToolDefinitionsFromMCP(mcpUrl?: string): Promise<any[]> {
-    const client = new McpClient(mcpUrl);
-    try {
-      const tools = await client.getAvailableTools();
-
-      // Convert MCP tool format to LLM provider format.
-      return tools.map((tool: any) => ({
-        name: tool.name,
-        description: tool.description || "",
-        parameters: tool.inputSchema || {
-          type: "object",
-          properties: {},
-          required: [],
-        },
-      }));
-    } finally {
-      // Errors propagate (no static fallback) — the MCP server is the single
-      // source of truth for the tool surface.
-      await client.close();
-    }
-  }
-
-  /**
-   * Get tool definitions with caching. The MCP server is the single source of
-   * truth — there is no static fallback. If discovery fails or returns nothing,
-   * this throws so the request fails clearly rather than the model answering
-   * without its data tools. Only a successful, non-empty result is cached, so a
-   * transient MCP blip is retried on the next request.
-   */
-  static async getToolsCached(): Promise<any[]> {
+  static async getToolsCached(): Promise<{ name: string; description: string; parameters: unknown }[]> {
     if (McpClient.toolDefsCache) return McpClient.toolDefsCache;
-    const tools = await McpClient.getToolDefinitionsFromMCP();
-    if (!tools.length) {
-      throw new Error(
-        "MCP server returned no tools — the assistant cannot answer without its data tools. Check that the MCP server is reachable (MCP_SERVER_URL).",
-      );
-    }
-    McpClient.toolDefsCache = tools;
-    return tools;
+    McpClient.toolDefsCache = TOOL_DEFS.map((t) => ({
+      name: t.name,
+      description: t.description,
+      parameters: t.parameters,
+    }));
+    return McpClient.toolDefsCache;
   }
 
-  /**
-   * Get system prompt for kguardian AI assistant
-   */
   static getSystemPrompt(context?: ParsedContext): string {
     let prompt = `You are an AI assistant for kguardian, a Kubernetes security monitoring tool.
 
@@ -324,7 +121,7 @@ When a user mentions a pod name, use the appropriate tool immediately. Do NOT as
   }
 
   /**
-   * Parse a JSON context string from the frontend into a typed object
+   * Parse a JSON context string from the frontend into a typed object.
    */
   static parseContext(contextStr?: string): ParsedContext | undefined {
     if (!contextStr) return undefined;
@@ -336,19 +133,6 @@ When a user mentions a pod name, use the appropriate tool immediately. Do NOT as
       };
     } catch {
       return undefined;
-    }
-  }
-
-  /**
-   * Close the MCP client connection
-   */
-  async close(): Promise<void> {
-    if (this.mcpClient) {
-      await this.mcpClient.close();
-      this.mcpClient = null;
-      this.mcpInitialized = false;
-      this.initPromise = null;
-      log.info("MCP client connection closed");
     }
   }
 }
