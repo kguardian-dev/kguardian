@@ -158,6 +158,18 @@ shipped — but the freeze stops the untidiness from here on.
 
 ## 7. Progress log
 
+- 2026-07-26 — **WS-C progress + G4 gate.** G4 values-compatibility gate (#1187):
+  fast render check proving legacy per-component AI flags and the ai.enabled
+  umbrella render the identical stack (guards upgrade safety). In-process
+  SECCOMP generation (#1188): the assistant builds seccomp profiles itself from
+  /pod/syscalls, G2-locked to the frontend + advisor-CLI generators — first tool
+  decoupled from the advisor service. Design note: no npm-workspace (per-package
+  Docker contexts make it deploy-risky); one-behavior enforced via G2 fixtures.
+  Freeze holding (0 release PRs cut); canary healthy through day 1. Next: the
+  in-process NETWORK POLICY port (must reproduce the advisor's exact YAML for G1
+  + CLI parity — the riskiest remaining change), then advisor serve/Deployment/
+  image removal after the 7-day canary.
+
 - 2026-07-26 — **Release freeze adopted** (owner decision, see §6) + **WS-C cilium
   removal.** Owner flagged that mid-restructure public releases risk shipping a
   half-migrated state; froze new public releases until the restructure completes
