@@ -48,15 +48,11 @@ spec:
           env:
             - name: PORT
               value: "{{ .Values.llmBridge.container.port }}"
-            # WS-B: the assistant runs the 12 tools in-process and reaches the
-            # data plane directly — no mcp-server hop. It calls the broker for
-            # the 10 data tools and the advisor for the 2 generate tools.
+            # WS-B/WS-C: the assistant runs all 12 tools in-process and reaches
+            # the data plane directly — no mcp-server hop, and policy/seccomp
+            # generation is in-process too, so it only needs the broker.
             - name: BROKER_URL
               value: "http://{{ .Values.broker.service.name }}.{{ include "kguardian.namespace" . }}.svc.cluster.local:{{ .Values.broker.service.port }}"
-            {{- if include "kguardian.advisorEnabled" . }}
-            - name: ADVISOR_URL
-              value: "http://{{ .Values.advisor.service.name }}.{{ include "kguardian.namespace" . }}.svc.cluster.local:{{ .Values.advisor.service.port }}"
-            {{- end }}
             {{- include "kguardian.brokerAuthEnv" . | nindent 12 }}
             - name: NODE_ENV
               value: "production"

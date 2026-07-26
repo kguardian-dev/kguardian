@@ -93,7 +93,7 @@ export const TOOL_DEFS: ToolDef[] = [
   {
     name: "generate_network_policy",
     description:
-      "Generate a least-privilege Kubernetes NetworkPolicy (or CiliumNetworkPolicy) for a pod from its observed traffic. Returns ready-to-apply YAML. Parameters: pod_name (required); policy_type ('kubernetes' for a standard NetworkPolicy — the default — or 'cilium'). Use when the user asks to 'generate/create a network policy', 'lock down this pod', or 'restrict traffic for X'. The policy is deterministically synthesised by the advisor from captured flows, not guessed.",
+      "Generate a least-privilege Kubernetes NetworkPolicy (or CiliumNetworkPolicy) for a pod from its observed traffic. Returns ready-to-apply YAML. Parameters: pod_name (required); policy_type ('kubernetes' for a standard NetworkPolicy — the default — or 'cilium'). Use when the user asks to 'generate/create a network policy', 'lock down this pod', or 'restrict traffic for X'. The policy is deterministically synthesised from captured flows, not guessed.",
     parameters: { type: "object", properties: { pod_name: str("The name of the pod to generate a least-privilege network policy for"), policy_type: str("Policy flavour: 'kubernetes' (standard NetworkPolicy, default) or 'cilium' (CiliumNetworkPolicy)") }, required: ["pod_name"] },
   },
   {

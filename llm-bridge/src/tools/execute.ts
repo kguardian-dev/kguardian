@@ -1,19 +1,47 @@
 import { log } from "../logger.js";
 import { TOOL_DEFS } from "./registry.js";
-import { brokerGetJSON, advisorGetText, auditVerdictsQuery } from "./backendClient.js";
+import { brokerGetJSON, auditVerdictsQuery } from "./backendClient.js";
 import {
   filterByNamespace, compactTrafficSummary, compactPodsSummary, filterAlivePods, compactSvc,
 } from "./compaction.js";
 import { seccompFromBrokerSyscalls } from "./generators/seccomp.js";
+import {
+  generateNetworkPolicy, generateCiliumPolicy, policyToYAML,
+  type PeerResolver, type PeerIdentity, type PodInfo, type TrafficRow,
+} from "./generators/networkpolicy.js";
 
-// In-process tool execution (WS-B). Each of the 12 tools is a fetch from the
-// broker or advisor followed by the exact compaction the mcp-server applied
-// (tools/*.go handlers). The G1 parity test replays the shared backend
-// fixtures through executeInProcessTool and asserts the results match the Go
-// server's recorded outputs.
+// In-process tool execution. Each of the 12 tools is a broker fetch + the exact
+// compaction the mcp-server applied, or in-process policy/seccomp generation.
+// The G1 parity test replays the shared backend fixtures through
+// executeInProcessTool and asserts broker tools match the Go server outputs.
 
 const s = (v: unknown): string => (typeof v === "string" ? v : "");
 const enc = encodeURIComponent;
+
+// Resolve a peer IP to a policy identity the way the advisor does: service
+// selector first (priority 1), then pod labels (priority 2), else null →
+// external CIDR. Broker lookups that 404/error resolve to null (external).
+const brokerPeerResolver: PeerResolver = async (ip): Promise<PeerIdentity | null> => {
+  try {
+    const svc = (await brokerGetJSON(`/svc/ip/${enc(ip)}`)) as {
+      svc_namespace?: string; service_spec?: { spec?: { selector?: Record<string, string> } };
+    };
+    const selector = svc?.service_spec?.spec?.selector;
+    if (selector && Object.keys(selector).length > 0) {
+      return { selector, namespace: svc.svc_namespace };
+    }
+  } catch { /* not a service — fall through to pod lookup */ }
+  try {
+    const pod = (await brokerGetJSON(`/pod/ip/${enc(ip)}`)) as {
+      pod_namespace?: string; pod_obj?: { metadata?: { labels?: Record<string, string> } };
+    };
+    const labels = pod?.pod_obj?.metadata?.labels;
+    if (labels && Object.keys(labels).length > 0) {
+      return { selector: labels, namespace: pod.pod_namespace };
+    }
+  } catch { /* not a pod — external */ }
+  return null;
+};
 
 export interface InProcessResult {
   text: string;
@@ -45,9 +73,31 @@ const handlers: Record<string, Handler> = {
       policy: s(a.policy), namespace: s(a.namespace), verdict: s(a.verdict), direction: s(a.direction),
       limit: typeof a.limit === "number" ? a.limit : undefined, cluster_scoped: a.cluster_scoped === true,
     })}`),
+  // Network policy is generated in-process from the pod's observed traffic and
+  // broker-resolved peer identities — no advisor hop (WS-C). Byte-semantically
+  // identical to the advisor (G2 netpol fixtures lock all paths).
   generate_network_policy: async (a) => {
+    const podName = s(a.pod_name);
+    const traffic = (await brokerGetJSON(`/pod/traffic/${enc(podName)}`)) as TrafficRow[] & { pod_ip?: string }[];
+    if (!Array.isArray(traffic) || traffic.length === 0) {
+      throw new Error(`no traffic data found for pod ${podName}`);
+    }
+    const podIP = (traffic[0] as { pod_ip?: string }).pod_ip ?? "";
+    const detail = (await brokerGetJSON(`/pod/ip/${enc(podIP)}`)) as {
+      pod_name?: string; pod_namespace?: string; pod_ip?: string;
+      pod_obj?: { metadata?: { labels?: Record<string, string> } };
+    };
+    const pod: PodInfo = {
+      name: detail.pod_name ?? podName,
+      namespace: detail.pod_namespace ?? "",
+      ip: detail.pod_ip ?? podIP,
+      labels: detail.pod_obj?.metadata?.labels ?? {},
+    };
     const type = s(a.policy_type) || "kubernetes";
-    return advisorGetText(`/generate/networkpolicy?pod=${enc(s(a.pod_name))}&type=${enc(type)}`);
+    const policy = type === "cilium"
+      ? await generateCiliumPolicy(pod, traffic, brokerPeerResolver)
+      : await generateNetworkPolicy(pod, traffic, brokerPeerResolver);
+    return policyToYAML(policy);
   },
   // Seccomp is generated in-process from the pod's observed syscalls — no
   // advisor hop (WS-C). Returned as pretty JSON; the profile is G2-locked to
@@ -60,7 +110,7 @@ const handlers: Record<string, Handler> = {
 
 const KNOWN = new Set(TOOL_DEFS.map((t) => t.name));
 
-/** Execute a tool in-process. Advisor tools return their raw text body; broker
+/** Execute a tool in-process. Generation tools return YAML/JSON text; broker
  *  tools return compacted JSON serialized to a string — matching what the LLM
  *  received from the mcp-server. Errors become an is-error result, not a throw,
  *  so one failing tool never aborts the model's tool round. */
