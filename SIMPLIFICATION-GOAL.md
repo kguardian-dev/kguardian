@@ -158,6 +158,18 @@ shipped — but the freeze stops the untidiness from here on.
 
 ## 7. Progress log
 
+- 2026-07-26 — **Assistant fully advisor-independent.** In-process NETWORK
+  POLICY + Cilium generation (#1190): faithful TS port of the advisor Go
+  generators (standard/cilium/types), all 5 paths (CIDR, service/pod
+  endpoint-resolved, default-deny) proven byte-semantically identical to the
+  advisor via the G2 netpol goldens; peer resolution mirrors the advisor's
+  BrokerData seam via broker /svc/ip + /pod/ip. With in-process seccomp
+  (#1188), the assistant makes NO advisor calls — ADVISOR_URL removed from the
+  llm-bridge deployment. Canary re-pinned to pr-1190 (the complete advisor-free
+  assistant) so one 7-day window gates removing BOTH mcp-server AND the advisor
+  Deployment. Frontend keeps its own G2-locked generators for the ai.enabled
+  =false case (no-workspace design). Freeze holding.
+
 - 2026-07-26 — **WS-C progress + G4 gate.** G4 values-compatibility gate (#1187):
   fast render check proving legacy per-component AI flags and the ai.enabled
   umbrella render the identical stack (guards upgrade safety). In-process
