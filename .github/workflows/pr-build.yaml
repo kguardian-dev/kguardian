@@ -50,6 +50,7 @@ jobs:
               - 'broker/**'
             frontend:
               - 'frontend/**'
+              - 'test/fixtures/generators/**'
             llm-bridge:
               - 'llm-bridge/**'
             mcp-server:

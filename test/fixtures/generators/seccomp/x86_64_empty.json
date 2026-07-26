@@ -1,0 +1,17 @@
+{
+  "name": "x86_64 pod with no observed syscalls — the allow rule is still emitted",
+  "input": {
+    "syscalls": [],
+    "arch": "x86_64"
+  },
+  "expected": {
+    "defaultAction": "SCMP_ACT_ERRNO",
+    "architectures": ["SCMP_ARCH_X86_64"],
+    "syscalls": [
+      {
+        "names": [],
+        "action": "SCMP_ACT_ALLOW"
+      }
+    ]
+  }
+}
