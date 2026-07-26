@@ -61,6 +61,12 @@ render "ai-umbrella" --set ai.enabled=true && {
   assert_has     "ai-umbrella" "kguardian-advisor"
 }
 
+# 3b. One-line provider path (ai.provider + ai.secret) wires the right env var.
+render "ai-provider" --set ai.enabled=true --set ai.provider=anthropic --set ai.secret=my-llm-key && {
+  assert_has "ai-provider" "ANTHROPIC_API_KEY"
+  assert_has "ai-provider" "name: my-llm-key"
+}
+
 # 4. External database (database.enabled=false) must render with no bundled DB.
 render "external-db" \
   --set database.enabled=false --set database.external.host=pg.example.com && {
