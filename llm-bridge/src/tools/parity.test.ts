@@ -39,7 +39,11 @@ const CALLS: Record<string, Record<string, unknown>> = {
   generate_seccomp_profile: { pod_name: "web-1" },
 };
 
-const ADVISOR_TOOLS = new Set(["generate_network_policy", "generate_seccomp_profile"]);
+// generate_network_policy is still an advisor text passthrough (compared
+// exactly). generate_seccomp_profile now generates in-process (WS-C), so its
+// output is canonical JS-formatted JSON rather than the advisor's text — the
+// PROFILE is identical, so it is compared semantically like the broker tools.
+const ADVISOR_TEXT_TOOLS = new Set(["generate_network_policy"]);
 
 let server: http.Server;
 
@@ -71,7 +75,7 @@ for (const [tool, args] of Object.entries(CALLS)) {
     assert.equal(got.isError, false, `${tool} errored: ${got.text}`);
 
     const goldenText = golden[tool].content[0].text;
-    if (ADVISOR_TOOLS.has(tool)) {
+    if (ADVISOR_TEXT_TOOLS.has(tool)) {
       assert.equal(got.text, goldenText, `${tool} advisor text drift`);
     } else {
       assert.deepEqual(JSON.parse(got.text), JSON.parse(goldenText), `${tool} broker data drift`);
