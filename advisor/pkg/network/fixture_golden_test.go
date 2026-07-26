@@ -99,3 +99,54 @@ func TestFixtureGolden_CiliumWithTraffic(t *testing.T) {
 	}
 	checkPolicyGolden(t, "cilium_with_traffic.golden.yaml", out)
 }
+
+// Additional cilium fixtures covering the paths the CIDR-only golden misses —
+// default-deny (no traffic) and endpoint-resolved peers (a peer IP that
+// resolves to a service selector becomes a from/toEndpoints selector, not a
+// CIDR). These capture the current cilium-library output so the dependency can
+// later be replaced by hand-rolled types with a golden guarding every path.
+
+func TestFixtureGolden_CiliumDefaultDeny(t *testing.T) {
+	detail := fixturePodDetail("idle", "prod", "10.0.0.2", map[string]string{"app": "idle"})
+	policy, err := NewCiliumPolicyGenerator().Generate("idle", []api.PodTraffic{}, detail)
+	if err != nil {
+		t.Fatalf("generate: %v", err)
+	}
+	out, err := yaml.Marshal(policy)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	checkPolicyGolden(t, "cilium_default_deny.golden.yaml", out)
+}
+
+func TestFixtureGolden_CiliumEndpointResolved(t *testing.T) {
+	detail := fixturePodDetail("web", "prod", "10.0.0.1", map[string]string{"app": "web"})
+	traffic := []api.PodTraffic{
+		// Egress peer 10.96.0.10 resolves to the db service selector -> ToEndpoints.
+		{TrafficType: "EGRESS", SrcIP: "10.0.0.1", DstIP: "10.96.0.10", DstPort: "5432", Protocol: "TCP"},
+		// Ingress peer 10.0.0.7 resolves to a pod (app=frontend) -> FromEndpoints.
+		{TrafficType: "INGRESS", SrcIP: "10.0.0.1", SrcPodPort: "8080", DstIP: "10.0.0.7", Protocol: "TCP"},
+	}
+	stub := stubBrokerData{
+		svcs: map[string]*api.SvcDetail{
+			"10.96.0.10": {
+				SvcName: "db", SvcNamespace: "prod", SvcIp: "10.96.0.10",
+				Service: corev1.Service{Spec: corev1.ServiceSpec{Selector: map[string]string{"app": "db"}}},
+			},
+		},
+		pods: map[string]*api.PodDetail{
+			"10.0.0.7": podDetail("frontend-1", "10.0.0.7", map[string]string{"app": "frontend"}),
+		},
+	}
+	gen := NewCiliumPolicyGenerator()
+	gen.setBrokerData(stub)
+	policy, err := gen.Generate("web", traffic, detail)
+	if err != nil {
+		t.Fatalf("generate: %v", err)
+	}
+	out, err := yaml.Marshal(policy)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	checkPolicyGolden(t, "cilium_endpoint_resolved.golden.yaml", out)
+}
