@@ -1,5 +1,18 @@
 # Changelog
 
+## [1.5.0](https://github.com/kguardian-dev/kguardian/compare/llm-bridge/v1.4.4...llm-bridge/v1.5.0) (2026-07-26)
+
+
+### Features
+
+* **llm-bridge:** run MCP tools in-process, drop the mcp-server hop (WS-B) ([#1180](https://github.com/kguardian-dev/kguardian/issues/1180)) ([8126fd4](https://github.com/kguardian-dev/kguardian/commit/8126fd49b59f9924713b77617f22af5401e6757f))
+
+
+### Code Refactoring
+
+* **llm-bridge:** consolidate OpenAI-compatible providers, drop dead route ([#1179](https://github.com/kguardian-dev/kguardian/issues/1179)) ([32b56fd](https://github.com/kguardian-dev/kguardian/commit/32b56fdf6a5b2f8e00120a8b13acc689844409e9))
+* **llm-bridge:** retire stale broker naming and dead conversationId ([#1167](https://github.com/kguardian-dev/kguardian/issues/1167)) ([cacedc4](https://github.com/kguardian-dev/kguardian/commit/cacedc4bd4e8bef3913214cab08298874c7a0a3f))
+
 ## [1.4.4](https://github.com/kguardian-dev/kguardian/compare/llm-bridge/v1.4.3...llm-bridge/v1.4.4) (2026-07-25)
 
 
