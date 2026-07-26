@@ -270,31 +270,26 @@ jobs:
 
   # Build Broker
   build-broker:
-    runs-on: ubuntu-latest
     needs: detect-changes
     if: needs.detect-changes.outputs.broker == 'true'
+    # Both architectures always build on PRs (SIMPLIFICATION-GOAL.md WS-E:
+    # amd64 + arm64 are a product guarantee at every pipeline stage). Each
+    # arch builds natively - arm64 on GitHub's free arm64 runners - instead
+    # of under QEMU emulation, which cost up to 45 minutes per component.
+    # push-broker merges the two per-arch tags into the pr-N manifest.
+    strategy:
+      matrix:
+        include:
+          - platform: linux/amd64
+            arch: amd64
+            runner: ubuntu-latest
+          - platform: linux/arm64
+            arch: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-
-      - name: Cache Rust dependencies
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
-        with:
-          path: |
-            ~/.cargo/bin/
-            ~/.cargo/registry/index/
-            ~/.cargo/registry/cache/
-            ~/.cargo/git/db/
-            broker/target/
-          key: ${{ runner.os }}-cargo-broker-${{ hashFiles('broker/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-broker-
-            ${{ runner.os }}-cargo-
-
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@96fe6ef7f33517b61c61be40b68a1882f3264fb8 # v4
-        with:
-          platforms: all
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4
@@ -309,30 +304,28 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Build and Push
-        id: build
+      - name: Build and Push (per-arch)
         uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7
         with:
           context: broker/
           file: broker/Dockerfile
-          platforms: linux/amd64,linux/arm64
+          platforms: ${{ matrix.platform }}
           push: true
           tags: |
-            ghcr.io/kguardian-dev/kguardian/broker:pr-${{ github.event.pull_request.number }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+            ghcr.io/kguardian-dev/kguardian/broker:pr-${{ github.event.pull_request.number }}-${{ matrix.arch }}
+          cache-from: type=gha,scope=broker-${{ matrix.arch }}
+          cache-to: type=gha,mode=max,scope=broker-${{ matrix.arch }}
 
       # Execute the built image, not just build it. Catches runtime-only
       # failures like builder/runtime glibc mismatch (broker v1.12.0 shipped
-      # unable to exec: "GLIBC_2.38 not found" — built on a drifted
-      # rust:latest, run on debian 12). Without a DATABASE_URL the binary
-      # must reach its own startup assertion; a loader error means the
-      # image cannot run anywhere.
+      # unable to exec: "GLIBC_2.38 not found"). Runs natively on BOTH
+      # architectures now - under the old QEMU flow the arm64 image was
+      # never executed in CI at all.
       - name: Smoke test image (binary must exec)
         env:
           PR_NUMBER: ${{ github.event.pull_request.number }}
         run: |
-          out=$(docker run --rm "ghcr.io/kguardian-dev/kguardian/broker:pr-${PR_NUMBER}" /broker 2>&1 || true)
+          out=$(docker run --rm "ghcr.io/kguardian-dev/kguardian/broker:pr-${PR_NUMBER}-${{ matrix.arch }}" /broker 2>&1 || true)
           echo "$out"
           if echo "$out" | grep -q "DATABASE_URL must be set"; then
             echo "OK: binary executed to the expected startup assertion"
@@ -340,6 +333,28 @@ jobs:
             echo "FAIL: binary did not reach startup (loader/link error above?)"
             exit 1
           fi
+
+  push-broker:
+    runs-on: ubuntu-latest
+    needs: build-broker
+    steps:
+      - name: Login to GHCR
+        uses: docker/login-action@abd2ef45e78c5afb21d64d4ca52ee8550d9572c7 # v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Merge per-arch tags into the pr-N manifest
+        id: build
+        env:
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          img="ghcr.io/kguardian-dev/kguardian/broker"
+          docker buildx imagetools create -t "$img:pr-${PR_NUMBER}" \
+            "$img:pr-${PR_NUMBER}-amd64" "$img:pr-${PR_NUMBER}-arm64"
+          digest=$(docker buildx imagetools inspect "$img:pr-${PR_NUMBER}" --format '{{.Manifest.Digest}}')
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
 
       - name: Update or create PR comment
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9
@@ -440,27 +455,26 @@ jobs:
 
   # Build Frontend
   build-frontend:
-    runs-on: ubuntu-latest
     needs: detect-changes
     if: needs.detect-changes.outputs.frontend == 'true'
+    # Both architectures always build on PRs (SIMPLIFICATION-GOAL.md WS-E:
+    # amd64 + arm64 are a product guarantee at every pipeline stage). Each
+    # arch builds natively - arm64 on GitHub's free arm64 runners - instead
+    # of under QEMU emulation, which cost up to 45 minutes per component.
+    # push-frontend merges the two per-arch tags into the pr-N manifest.
+    strategy:
+      matrix:
+        include:
+          - platform: linux/amd64
+            arch: amd64
+            runner: ubuntu-latest
+          - platform: linux/arm64
+            arch: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-
-      - name: Cache Node modules
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
-        with:
-          path: |
-            ~/.npm
-            frontend/node_modules
-          key: ${{ runner.os }}-node-${{ hashFiles('frontend/package-lock.json') }}
-          restore-keys: |
-            ${{ runner.os }}-node-
-
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@96fe6ef7f33517b61c61be40b68a1882f3264fb8 # v4
-        with:
-          platforms: all
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4
@@ -475,18 +489,39 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Build and Push
-        id: build
+      - name: Build and Push (per-arch)
         uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7
         with:
           context: frontend/
           file: frontend/Dockerfile
-          platforms: linux/amd64,linux/arm64
+          platforms: ${{ matrix.platform }}
           push: true
           tags: |
-            ghcr.io/kguardian-dev/kguardian/frontend:pr-${{ github.event.pull_request.number }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+            ghcr.io/kguardian-dev/kguardian/frontend:pr-${{ github.event.pull_request.number }}-${{ matrix.arch }}
+          cache-from: type=gha,scope=frontend-${{ matrix.arch }}
+          cache-to: type=gha,mode=max,scope=frontend-${{ matrix.arch }}
+
+  push-frontend:
+    runs-on: ubuntu-latest
+    needs: build-frontend
+    steps:
+      - name: Login to GHCR
+        uses: docker/login-action@abd2ef45e78c5afb21d64d4ca52ee8550d9572c7 # v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Merge per-arch tags into the pr-N manifest
+        id: build
+        env:
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          img="ghcr.io/kguardian-dev/kguardian/frontend"
+          docker buildx imagetools create -t "$img:pr-${PR_NUMBER}" \
+            "$img:pr-${PR_NUMBER}-amd64" "$img:pr-${PR_NUMBER}-arm64"
+          digest=$(docker buildx imagetools inspect "$img:pr-${PR_NUMBER}" --format '{{.Manifest.Digest}}')
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
 
       - name: Update or create PR comment
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9
@@ -525,28 +560,26 @@ jobs:
 
   # Build LLM Bridge
   build-llm-bridge:
-    runs-on: ubuntu-latest
     needs: detect-changes
     if: needs.detect-changes.outputs.llm-bridge == 'true'
+    # Both architectures always build on PRs (SIMPLIFICATION-GOAL.md WS-E:
+    # amd64 + arm64 are a product guarantee at every pipeline stage). Each
+    # arch builds natively - arm64 on GitHub's free arm64 runners - instead
+    # of under QEMU emulation, which cost up to 45 minutes per component.
+    # push-llm-bridge merges the two per-arch tags into the pr-N manifest.
+    strategy:
+      matrix:
+        include:
+          - platform: linux/amd64
+            arch: amd64
+            runner: ubuntu-latest
+          - platform: linux/arm64
+            arch: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-
-      - name: Cache Node modules
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
-        with:
-          path: |
-            ~/.npm
-            llm-bridge/node_modules
-          key: ${{ runner.os }}-node-llm-bridge-${{ hashFiles('llm-bridge/package-lock.json') }}
-          restore-keys: |
-            ${{ runner.os }}-node-llm-bridge-
-            ${{ runner.os }}-node-
-
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@96fe6ef7f33517b61c61be40b68a1882f3264fb8 # v4
-        with:
-          platforms: all
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4
@@ -561,18 +594,39 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Build and Push
-        id: build
+      - name: Build and Push (per-arch)
         uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7
         with:
           context: llm-bridge/
           file: llm-bridge/Dockerfile
-          platforms: linux/amd64,linux/arm64
+          platforms: ${{ matrix.platform }}
           push: true
           tags: |
-            ghcr.io/kguardian-dev/kguardian/llm-bridge:pr-${{ github.event.pull_request.number }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+            ghcr.io/kguardian-dev/kguardian/llm-bridge:pr-${{ github.event.pull_request.number }}-${{ matrix.arch }}
+          cache-from: type=gha,scope=llm-bridge-${{ matrix.arch }}
+          cache-to: type=gha,mode=max,scope=llm-bridge-${{ matrix.arch }}
+
+  push-llm-bridge:
+    runs-on: ubuntu-latest
+    needs: build-llm-bridge
+    steps:
+      - name: Login to GHCR
+        uses: docker/login-action@abd2ef45e78c5afb21d64d4ca52ee8550d9572c7 # v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Merge per-arch tags into the pr-N manifest
+        id: build
+        env:
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          img="ghcr.io/kguardian-dev/kguardian/llm-bridge"
+          docker buildx imagetools create -t "$img:pr-${PR_NUMBER}" \
+            "$img:pr-${PR_NUMBER}-amd64" "$img:pr-${PR_NUMBER}-arm64"
+          digest=$(docker buildx imagetools inspect "$img:pr-${PR_NUMBER}" --format '{{.Manifest.Digest}}')
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
 
       - name: Update or create PR comment
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9
@@ -611,28 +665,26 @@ jobs:
 
   # Build MCP Server
   build-mcp-server:
-    runs-on: ubuntu-latest
     needs: detect-changes
     if: needs.detect-changes.outputs.mcp-server == 'true'
+    # Both architectures always build on PRs (SIMPLIFICATION-GOAL.md WS-E:
+    # amd64 + arm64 are a product guarantee at every pipeline stage). Each
+    # arch builds natively - arm64 on GitHub's free arm64 runners - instead
+    # of under QEMU emulation, which cost up to 45 minutes per component.
+    # push-mcp-server merges the two per-arch tags into the pr-N manifest.
+    strategy:
+      matrix:
+        include:
+          - platform: linux/amd64
+            arch: amd64
+            runner: ubuntu-latest
+          - platform: linux/arm64
+            arch: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-
-      - name: Cache Go modules
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
-        with:
-          path: |
-            ~/.cache/go-build
-            ~/go/pkg/mod
-          key: ${{ runner.os }}-go-mcp-server-${{ hashFiles('mcp-server/go.sum') }}
-          restore-keys: |
-            ${{ runner.os }}-go-mcp-server-
-            ${{ runner.os }}-go-
-
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@96fe6ef7f33517b61c61be40b68a1882f3264fb8 # v4
-        with:
-          platforms: all
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4
@@ -647,18 +699,39 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Build and Push
-        id: build
+      - name: Build and Push (per-arch)
         uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7
         with:
           context: mcp-server/
           file: mcp-server/Dockerfile
-          platforms: linux/amd64,linux/arm64
+          platforms: ${{ matrix.platform }}
           push: true
           tags: |
-            ghcr.io/kguardian-dev/kguardian/mcp-server:pr-${{ github.event.pull_request.number }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+            ghcr.io/kguardian-dev/kguardian/mcp-server:pr-${{ github.event.pull_request.number }}-${{ matrix.arch }}
+          cache-from: type=gha,scope=mcp-server-${{ matrix.arch }}
+          cache-to: type=gha,mode=max,scope=mcp-server-${{ matrix.arch }}
+
+  push-mcp-server:
+    runs-on: ubuntu-latest
+    needs: build-mcp-server
+    steps:
+      - name: Login to GHCR
+        uses: docker/login-action@abd2ef45e78c5afb21d64d4ca52ee8550d9572c7 # v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Merge per-arch tags into the pr-N manifest
+        id: build
+        env:
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          img="ghcr.io/kguardian-dev/kguardian/mcp-server"
+          docker buildx imagetools create -t "$img:pr-${PR_NUMBER}" \
+            "$img:pr-${PR_NUMBER}-amd64" "$img:pr-${PR_NUMBER}-arm64"
+          digest=$(docker buildx imagetools inspect "$img:pr-${PR_NUMBER}" --format '{{.Manifest.Digest}}')
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
 
       - name: Update or create PR comment
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9
@@ -697,28 +770,26 @@ jobs:
 
   # Build Evaluator
   build-evaluator:
-    runs-on: ubuntu-latest
     needs: detect-changes
     if: needs.detect-changes.outputs.evaluator == 'true'
+    # Both architectures always build on PRs (SIMPLIFICATION-GOAL.md WS-E:
+    # amd64 + arm64 are a product guarantee at every pipeline stage). Each
+    # arch builds natively - arm64 on GitHub's free arm64 runners - instead
+    # of under QEMU emulation, which cost up to 45 minutes per component.
+    # push-evaluator merges the two per-arch tags into the pr-N manifest.
+    strategy:
+      matrix:
+        include:
+          - platform: linux/amd64
+            arch: amd64
+            runner: ubuntu-latest
+          - platform: linux/arm64
+            arch: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-
-      - name: Cache Go modules
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
-        with:
-          path: |
-            ~/.cache/go-build
-            ~/go/pkg/mod
-          key: ${{ runner.os }}-go-evaluator-${{ hashFiles('evaluator/go.sum') }}
-          restore-keys: |
-            ${{ runner.os }}-go-evaluator-
-            ${{ runner.os }}-go-
-
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@96fe6ef7f33517b61c61be40b68a1882f3264fb8 # v4
-        with:
-          platforms: all
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4
@@ -733,18 +804,39 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Build and Push
-        id: build
+      - name: Build and Push (per-arch)
         uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7
         with:
           context: evaluator/
           file: evaluator/Dockerfile
-          platforms: linux/amd64,linux/arm64
+          platforms: ${{ matrix.platform }}
           push: true
           tags: |
-            ghcr.io/kguardian-dev/kguardian/evaluator:pr-${{ github.event.pull_request.number }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+            ghcr.io/kguardian-dev/kguardian/evaluator:pr-${{ github.event.pull_request.number }}-${{ matrix.arch }}
+          cache-from: type=gha,scope=evaluator-${{ matrix.arch }}
+          cache-to: type=gha,mode=max,scope=evaluator-${{ matrix.arch }}
+
+  push-evaluator:
+    runs-on: ubuntu-latest
+    needs: build-evaluator
+    steps:
+      - name: Login to GHCR
+        uses: docker/login-action@abd2ef45e78c5afb21d64d4ca52ee8550d9572c7 # v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Merge per-arch tags into the pr-N manifest
+        id: build
+        env:
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          img="ghcr.io/kguardian-dev/kguardian/evaluator"
+          docker buildx imagetools create -t "$img:pr-${PR_NUMBER}" \
+            "$img:pr-${PR_NUMBER}-amd64" "$img:pr-${PR_NUMBER}-arm64"
+          digest=$(docker buildx imagetools inspect "$img:pr-${PR_NUMBER}" --format '{{.Manifest.Digest}}')
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
 
       - name: Update or create PR comment
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9
@@ -857,7 +949,7 @@ jobs:
   # Summary comment with testing instructions
   pr-summary:
     runs-on: ubuntu-latest
-    needs: [detect-changes, push-controller, build-broker, build-frontend, build-llm-bridge, build-mcp-server, build-evaluator, build-helm-chart]
+    needs: [detect-changes, push-controller, build-broker, push-broker, build-frontend, push-frontend, build-llm-bridge, push-llm-bridge, build-mcp-server, push-mcp-server, build-evaluator, push-evaluator, build-helm-chart]
     if: always()
     steps:
       - name: Update or create summary comment
