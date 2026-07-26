@@ -145,7 +145,28 @@ least as much as it adds (or justify why not), keep the quickstart true, and shi
 change in the same PR. Anything that changes user-visible behavior is a bug in this charter, not a
 judgment call.
 
+**Release freeze (owner decision 2026-07-26):** no NEW public releases (chart or component) are cut
+mid-restructure. Restructure PRs merge to `main` with non-release commit types (`refactor`/`chore`/
+`test`) so release-please does not auto-cut; any release PR it does open is HELD unmerged. Canaries
+deploy to cluster-00 from pre-release `pr-<N>` artifacts, never from a freshly cut public release.
+When the whole restructure has landed and the G5 canary has held, cut ONE coherent release
+representing the finished 6-workload architecture, with a single summary changelog. Rationale: an
+intermediate public release can strand a half-migrated state (e.g. an enabled-but-unused mcp-server
+pod, or a removed advisor before in-process generation ships) on a customer's cluster. Everything
+released so far (through chart 1.16.0 / llm-bridge 1.5.0) is a working superset — nothing broken
+shipped — but the freeze stops the untidiness from here on.
+
 ## 7. Progress log
+
+- 2026-07-26 — **Release freeze adopted** (owner decision, see §6) + **WS-C cilium
+  removal.** Owner flagged that mid-restructure public releases risk shipping a
+  half-migrated state; froze new public releases until the restructure completes
+  (restructure PRs land as refactor/chore/test; canary from pre-release
+  artifacts; one coherent release at the end). Verified nothing broken shipped —
+  everything through chart 1.16.0 is a working superset. WS-C: dropped
+  github.com/cilium/cilium from the advisor (hand-rolled CNP types, every path
+  golden-guarded); go.sum 1622->185 lines (-89% transitive surface); dead
+  pkg/k8s cilium path deleted. dependabot alerts 71->35 as dep surface shrank.
 
 - 2026-07-26 — **G5 canary OPEN on cluster-00.** Chart 1.16.0 + llm-bridge
   v1.5.0 (in-process tools) deployed and validated: both pods healthy,
