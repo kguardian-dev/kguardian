@@ -1,0 +1,18 @@
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  labels:
+    app.kubernetes.io/component: cilium-policy-deny-all
+    app.kubernetes.io/name: idle
+    app.kubernetes.io/part-of: kguardian
+  name: idle-cilium-policy-deny-all
+  namespace: prod
+spec:
+  description: Default-deny Cilium network policy for pod idle
+  enableDefaultDeny:
+    egress: true
+    ingress: true
+  endpointSelector:
+    matchLabels:
+      k8s:app: idle
+status: {}
