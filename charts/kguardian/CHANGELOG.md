@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.15.0](https://github.com/kguardian-dev/kguardian/compare/chart/v1.14.3...chart/v1.15.0) (2026-07-25)
+
+
+### Features
+
+* **chart:** ai.enabled umbrella toggle for the assistant path ([#1165](https://github.com/kguardian-dev/kguardian/issues/1165)) ([3fe4948](https://github.com/kguardian-dev/kguardian/commit/3fe49480d469b1f6062e97832931617714431a03))
+
 ## [1.14.3](https://github.com/kguardian-dev/kguardian/compare/chart/v1.14.2...chart/v1.14.3) (2026-07-24)
 
 
