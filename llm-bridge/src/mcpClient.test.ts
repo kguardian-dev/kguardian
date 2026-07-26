@@ -1,34 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { McpClient, resolveMcpUrl } from "./mcpClient.js";
-
-const DEFAULT_URL = "http://kguardian-mcp-server.kguardian.svc.cluster.local:8081";
-
-test("resolveMcpUrl prefers explicit arg over env over default", () => {
-  assert.equal(resolveMcpUrl("http://from-arg:8081", "http://from-env:8081"), "http://from-arg:8081");
-  assert.equal(resolveMcpUrl(undefined, "http://from-env:8081"), "http://from-env:8081");
-  assert.equal(resolveMcpUrl(undefined, undefined), DEFAULT_URL);
-});
-
-test("resolveMcpUrl trims whitespace from arg and env", () => {
-  // Surrounding whitespace must not slip through. Pre-fix, a
-  // MCP_SERVER_URL=" http://x:8081 " env var (typical Helm YAML
-  // literal artefact) would store the spaced value and produce a
-  // cryptic `TypeError: Invalid URL` from `new URL(this.mcpUrl)`
-  // inside the StreamableHTTPClientTransport — far from the
-  // env-var read site.
-  assert.equal(resolveMcpUrl("  http://from-arg:8081  "), "http://from-arg:8081");
-  assert.equal(resolveMcpUrl(undefined, "\thttp://from-env:8081\n"), "http://from-env:8081");
-});
-
-test("resolveMcpUrl treats whitespace-only as empty (falls through)", () => {
-  // A whitespace-only arg/env must NOT pass the truthy check;
-  // resolution should fall through to the next candidate.
-  assert.equal(resolveMcpUrl("   ", "http://from-env:8081"), "http://from-env:8081");
-  assert.equal(resolveMcpUrl(undefined, "   "), DEFAULT_URL);
-  assert.equal(resolveMcpUrl("  ", "  "), DEFAULT_URL);
-  assert.equal(resolveMcpUrl("", ""), DEFAULT_URL);
-});
+import { McpClient } from "./mcpClient.js";
+import { TOOL_DEFS } from "./tools/registry.js";
 
 // McpClient.parseContext is the gate that turns the LLM's free-form
 // context blob into a structured filter. A regression here either:
@@ -86,40 +59,16 @@ test("parseContext handles pre-empty arrays", () => {
   assert.deepEqual(got, { namespace: undefined, podNames: [] });
 });
 
-// The MCP server is the single source of truth for the tool surface — there is
-// no static fallback. Tool discovery failing (or returning nothing) must make
-// the request fail clearly, never silently answer the user with zero tools.
+// WS-B: tools are sourced from the in-repo registry (no MCP discovery hop).
+// getToolsCached must surface every registered tool in provider format.
 
-test("getToolsCached throws on an empty tool set (no static fallback)", async () => {
-  const C = McpClient as unknown as {
-    getToolDefinitionsFromMCP: () => Promise<unknown[]>;
-    toolDefsCache: unknown;
-  };
-  const orig = C.getToolDefinitionsFromMCP;
-  C.toolDefsCache = null;
-  C.getToolDefinitionsFromMCP = async () => [];
-  try {
-    await assert.rejects(() => McpClient.getToolsCached(), /no tools/);
-  } finally {
-    C.getToolDefinitionsFromMCP = orig;
-    C.toolDefsCache = null;
-  }
-});
-
-test("getToolsCached propagates a discovery failure (no static fallback)", async () => {
-  const C = McpClient as unknown as {
-    getToolDefinitionsFromMCP: () => Promise<unknown[]>;
-    toolDefsCache: unknown;
-  };
-  const orig = C.getToolDefinitionsFromMCP;
-  C.toolDefsCache = null;
-  C.getToolDefinitionsFromMCP = async () => {
-    throw new Error("MCP server unreachable");
-  };
-  try {
-    await assert.rejects(() => McpClient.getToolsCached(), /MCP server unreachable/);
-  } finally {
-    C.getToolDefinitionsFromMCP = orig;
-    C.toolDefsCache = null;
+test("getToolsCached returns every registered tool in provider format", async () => {
+  const tools = await McpClient.getToolsCached();
+  assert.equal(tools.length, TOOL_DEFS.length);
+  assert.equal(tools.length, 12);
+  for (const t of tools) {
+    assert.equal(typeof t.name, "string");
+    assert.equal(typeof t.description, "string");
+    assert.ok(t.parameters, `tool ${t.name} must carry a parameter schema`);
   }
 });

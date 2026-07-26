@@ -48,14 +48,16 @@ spec:
           env:
             - name: PORT
               value: "{{ .Values.llmBridge.container.port }}"
-            # llm-bridge no longer talks to the broker directly — all
-            # tool calls route through the MCP server, which in turn
-            # talks to the broker. BROKER_URL was previously set here
-            # but never read by the llm-bridge process; removed to
-            # avoid the false impression that overriding it changes
-            # behavior. (The mcp-server has its own BROKER_URL.)
-            - name: MCP_SERVER_URL
-              value: "http://{{ .Values.mcpServer.service.name }}.{{ include "kguardian.namespace" . }}.svc.cluster.local:{{ .Values.mcpServer.service.port }}"
+            # WS-B: the assistant runs the 12 tools in-process and reaches the
+            # data plane directly — no mcp-server hop. It calls the broker for
+            # the 10 data tools and the advisor for the 2 generate tools.
+            - name: BROKER_URL
+              value: "http://{{ .Values.broker.service.name }}.{{ include "kguardian.namespace" . }}.svc.cluster.local:{{ .Values.broker.service.port }}"
+            {{- if include "kguardian.advisorEnabled" . }}
+            - name: ADVISOR_URL
+              value: "http://{{ .Values.advisor.service.name }}.{{ include "kguardian.namespace" . }}.svc.cluster.local:{{ .Values.advisor.service.port }}"
+            {{- end }}
+            {{- include "kguardian.brokerAuthEnv" . | nindent 12 }}
             - name: NODE_ENV
               value: "production"
             {{- if .Values.llmBridge.secrets.openai.enabled }}
