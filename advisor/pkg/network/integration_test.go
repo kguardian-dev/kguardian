@@ -3,7 +3,6 @@ package network
 import (
 	"testing"
 
-	ciliumv2 "github.com/cilium/cilium/pkg/k8s/apis/cilium.io/v2"
 	"github.com/kguardian-dev/kguardian/advisor/pkg/api"
 	"github.com/stretchr/testify/assert"
 	corev1 "k8s.io/api/core/v1"
@@ -119,7 +118,7 @@ func TestIntegration_StandardAndCiliumPolicyGenerators(t *testing.T) {
 		result, err := gen.Generate("api-server", podTraffic, podDetail)
 		assert.NoError(t, err)
 
-		policy, ok := result.(*ciliumv2.CiliumNetworkPolicy)
+		policy, ok := result.(*CiliumNetworkPolicy)
 		assert.True(t, ok)
 		assert.Equal(t, "api-server-cilium-policy", policy.Name)
 		assert.Equal(t, "production", policy.Namespace)
@@ -131,7 +130,7 @@ func TestIntegration_StandardAndCiliumPolicyGenerators(t *testing.T) {
 		// Check ingress rule (from frontend-pod)
 		ingressRule := policy.Spec.Ingress[0]
 		assert.Len(t, ingressRule.FromEndpoints, 1)
-		assert.NotEmpty(t, ingressRule.FromEndpoints[0].LabelSelector)
+		assert.NotEmpty(t, ingressRule.FromEndpoints[0].MatchLabels)
 		assert.Len(t, ingressRule.ToPorts, 1)
 		assert.Equal(t, "8080", ingressRule.ToPorts[0].Ports[0].Port)
 
@@ -141,7 +140,7 @@ func TestIntegration_StandardAndCiliumPolicyGenerators(t *testing.T) {
 		for _, egressRule := range policy.Spec.Egress {
 			if len(egressRule.ToEndpoints) > 0 {
 				// Database service rule (using EndpointSelector)
-				assert.NotEmpty(t, egressRule.ToEndpoints[0].LabelSelector)
+				assert.NotEmpty(t, egressRule.ToEndpoints[0].MatchLabels)
 				hasDBRule = true
 			} else if len(egressRule.ToCIDR) > 0 {
 				// External rule (using CIDR)
@@ -166,7 +165,7 @@ func TestIntegration_StandardAndCiliumPolicyGenerators(t *testing.T) {
 
 		// Both should generate policies with the same structure
 		stdPolicy := stdResult.(*networkingv1.NetworkPolicy)
-		ciliumPolicy := ciliumResult.(*ciliumv2.CiliumNetworkPolicy)
+		ciliumPolicy := ciliumResult.(*CiliumNetworkPolicy)
 
 		// Same number of rules
 		assert.Equal(t, len(stdPolicy.Spec.Ingress), len(ciliumPolicy.Spec.Ingress))
@@ -174,6 +173,6 @@ func TestIntegration_StandardAndCiliumPolicyGenerators(t *testing.T) {
 
 		// Both target the same pod
 		assert.Equal(t, stdPolicy.Spec.PodSelector.MatchLabels["app"], "api-server")
-		assert.NotEmpty(t, ciliumPolicy.Spec.EndpointSelector.LabelSelector)
+		assert.NotEmpty(t, ciliumPolicy.Spec.EndpointSelector.MatchLabels)
 	})
 }
