@@ -25,7 +25,7 @@ today still exists and behaves identically — proven by tests, not by hope.
 |---|---|
 | Workloads with AI enabled | 8 → **6** (core 5 unchanged; assistant replaces llm-bridge + mcp-server; advisor Deployment retired) |
 | Values to enable the AI path | 3 coordinated toggles + per-provider secrets → **`ai.enabled=true` + 1 secret** |
-| Release units | 8 → **6**; a component bump reaches the chart default in one automated pass |
+| Release units | 8 → **7** (corrected 2026-07-27): mcp-server retired entirely; the advisor stays a release unit for its kubectl-plugin CLI binary (the "6" target predated the advisor-CLI-only decision — dropping the advisor release unit would delete the kubectl plugin, a feature-parity regression this charter forbids). The advisor's *serve* image pipeline is still retired. A component bump reaches the chart default in one automated pass. |
 | Tool definitions | 3 places / 2 languages → **1 registry** |
 | Policy/seccomp generators | 3 implementations → **1 shared package** (+ CLI in provable parity) |
 | Feature parity | **100%** — every tool, endpoint, generator output, and CLI behavior preserved; proven by the parity gates in §3 |
@@ -157,6 +157,15 @@ released so far (through chart 1.16.0 / llm-bridge 1.5.0) is a working superset 
 shipped — but the freeze stops the untidiness from here on.
 
 ## 7. Progress log
+
+- 2026-07-27 — **Release-unit target corrected 8→7 (from 6)** during canary-wait
+  verification: keeping the advisor kubectl-plugin CLI means the advisor stays a
+  release-please component; only mcp-server is fully retired. Forcing "6" would
+  require deleting the advisor CLI — a feature-parity regression the charter
+  forbids. Workloads target 8→6 is unaffected (advisor CLI is a client-side
+  binary, not a cluster workload; only the advisor *Deployment*/serve image is
+  removed). DoD now: 6/8 rows met; the remaining two (workloads 8→6, release
+  units 8→7) are delivered by the single canary-gated removal (~2026-08-02).
 
 - 2026-07-26 — **WS-D done; entering canary-wait.** ai.provider/ai.secret
   one-line enablement (#1192) + UPGRADING note (#1193): assistant enabled with
