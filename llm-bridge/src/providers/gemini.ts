@@ -17,7 +17,9 @@ export async function callGemini(
     throw new Error("GOOGLE_API_KEY not configured");
   }
 
-  const model = request.model || "gemini-2.0-flash-exp";
+  // Stable GA model. Was "gemini-2.0-flash-exp" — an experimental preview id
+  // that can be withdrawn without notice; pin the GA alias instead.
+  const model = request.model || "gemini-2.0-flash";
   const context = McpClient.parseContext(request.context);
   const systemPrompt = McpClient.getSystemPrompt(context);
 

@@ -8,10 +8,9 @@ import { ZodError } from "zod";
 import { ChatRequestSchema, LLMProvider, type ErrorResponse } from "./types/index.js";
 import { McpClient } from "./mcpClient.js";
 import { log } from "./logger.js";
-import { callOpenAI } from "./providers/openai.js";
+import { callOpenAI, callCopilot } from "./providers/openai.js";
 import { callAnthropic, streamAnthropic, type StreamEvent } from "./providers/anthropic.js";
 import { callGemini } from "./providers/gemini.js";
-import { callCopilot } from "./providers/copilot.js";
 import type { ChatRequest, ChatResponse } from "./types/index.js";
 
 // Load environment variables
@@ -134,62 +133,6 @@ const chatLimiter = rateLimit({
   windowMs: 60 * 1000,
   max: 20,
   message: { error: 'Too many requests' },
-});
-
-// Chat endpoint
-app.post("/api/chat", chatLimiter, async (req: Request, res: Response<any>) => {
-  try {
-    // Validate request
-    const chatRequest = ChatRequestSchema.parse(req.body);
-
-    // Determine provider to use
-    const resolution = resolveProvider(chatRequest);
-    if (!resolution.ok) {
-      return res.status(resolution.status).json(resolution.body);
-    }
-    const provider = resolution.provider;
-
-    // Debug not info — this fires per chat request; a chat session
-    // can produce dozens. The provider routing is part of normal
-    // operation, not a per-request operator alert.
-    log.debug(`Processing chat request with provider: ${provider}`);
-
-    const response = await callProvider(provider, chatRequest);
-    res.json(response);
-  } catch (error) {
-    log.error("Error processing chat request:", error);
-
-    if (error instanceof ZodError) {
-      return res.status(400).json({
-        error: "Invalid request format",
-        details: error.issues.map((e: any) => e.message).join(", "),
-      } as ErrorResponse);
-    }
-
-    if (error instanceof Error) {
-      log.error("Chat error details:", error.message, error.stack);
-      // Surface upstream rate-limit / overload as matching statuses so the
-      // client can back off, instead of an opaque 500 it can't act on.
-      const status = (error as { status?: number }).status;
-      if (status === 429) {
-        return res.status(429).json({
-          error: "The AI provider is rate-limiting requests right now. Please retry in a few seconds.",
-        } as ErrorResponse);
-      }
-      if (status === 529 || status === 503) {
-        return res.status(503).json({
-          error: "The AI provider is temporarily overloaded. Please retry in a few seconds.",
-        } as ErrorResponse);
-      }
-      return res.status(500).json({
-        error: "An internal error occurred while processing the chat request",
-      } as ErrorResponse);
-    }
-
-    res.status(500).json({
-      error: "An unexpected error occurred",
-    } as ErrorResponse);
-  }
 });
 
 // Streaming chat endpoint (Server-Sent Events). Emits incremental `text`,
