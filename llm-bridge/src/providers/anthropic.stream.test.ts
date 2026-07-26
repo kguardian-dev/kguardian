@@ -4,7 +4,7 @@ import http from "node:http";
 import type { AddressInfo } from "node:net";
 
 import { streamAnthropic, type StreamEvent } from "./anthropic.js";
-import { BrokerClient } from "../brokerClient.js";
+import { McpClient } from "../mcpClient.js";
 import type { ChatRequest } from "../types/index.js";
 
 // Mock of the Anthropic Messages API streaming endpoint. Each request is
@@ -75,7 +75,7 @@ before(async () => {
 
   process.env.ANTHROPIC_API_KEY = "test-key";
   process.env.ANTHROPIC_BASE_URL = `http://127.0.0.1:${port}`;
-  (BrokerClient as unknown as { getToolsCached: () => Promise<unknown[]> }).getToolsCached =
+  (McpClient as unknown as { getToolsCached: () => Promise<unknown[]> }).getToolsCached =
     async () => [
       { name: "get_cluster_pods", description: "List pods.", parameters: { type: "object", properties: {}, required: [] } },
     ];
@@ -89,18 +89,18 @@ beforeEach(() => {
   responseQueue = [];
 });
 
-function stubBroker(calls: string[]): BrokerClient {
+function stubBroker(calls: string[]): McpClient {
   return {
     executeTool: async (toolCall: { name: string }) => {
       calls.push(toolCall.name);
       return { data: { ok: true } };
     },
-  } as unknown as BrokerClient;
+  } as unknown as McpClient;
 }
 
 const baseRequest: ChatRequest = { message: "hello" } as ChatRequest;
 
-async function collect(req: ChatRequest, broker: BrokerClient): Promise<StreamEvent[]> {
+async function collect(req: ChatRequest, broker: McpClient): Promise<StreamEvent[]> {
   const events: StreamEvent[] = [];
   await streamAnthropic(req, broker, (e) => events.push(e));
   return events;

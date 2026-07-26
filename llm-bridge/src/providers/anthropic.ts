@@ -1,7 +1,7 @@
 import Anthropic from "@anthropic-ai/sdk";
 import type { ChatRequest, ChatResponse } from "../types/index.js";
 import { LLMProvider } from "../types/index.js";
-import { BrokerClient } from "../brokerClient.js";
+import { McpClient } from "../mcpClient.js";
 import { log } from "../logger.js";
 import { serializeToolResult } from "./truncate.js";
 
@@ -29,7 +29,7 @@ export type StreamEvent =
   | { type: "thinking"; delta: string }
   | { type: "tool_use"; name: string; id: string }
   | { type: "tool_result"; name: string; ok: boolean }
-  | { type: "done"; model: string; conversationId?: string }
+  | { type: "done"; model: string }
   | { type: "error"; error: string };
 
 export type Emit = (event: StreamEvent) => void;
@@ -59,13 +59,13 @@ function requireApiKey(): string {
  * cache instead of reprocessing it.
  */
 function buildSystem(request: ChatRequest): Anthropic.TextBlockParam[] {
-  const context = BrokerClient.parseContext(request.context);
-  const systemPrompt = BrokerClient.getSystemPrompt(context);
+  const context = McpClient.parseContext(request.context);
+  const systemPrompt = McpClient.getSystemPrompt(context);
   return [{ type: "text", text: systemPrompt, cache_control: { type: "ephemeral" } }];
 }
 
 async function buildTools(): Promise<Anthropic.Tool[]> {
-  const toolDefs = await BrokerClient.getToolsCached();
+  const toolDefs = await McpClient.getToolsCached();
   return toolDefs.map((tool) => ({
     name: tool.name,
     description: tool.description,
@@ -129,7 +129,7 @@ function fallbackFor(message: Anthropic.Message): string {
 async function runToolRound(
   message: Anthropic.Message,
   toolUses: Anthropic.ToolUseBlock[],
-  brokerClient: BrokerClient,
+  mcpClient: McpClient,
   messages: Anthropic.MessageParam[],
   emit?: Emit,
 ): Promise<void> {
@@ -143,7 +143,7 @@ async function runToolRound(
 
   const toolResults: Anthropic.ToolResultBlockParam[] = await Promise.all(
     toolUses.map(async (toolUse) => {
-      const result = await brokerClient.executeTool({
+      const result = await mcpClient.executeTool({
         name: toolUse.name,
         arguments: toolUse.input as Record<string, unknown>,
       });
@@ -178,7 +178,7 @@ async function runToolRound(
  */
 export async function callAnthropic(
   request: ChatRequest,
-  brokerClient: BrokerClient,
+  mcpClient: McpClient,
 ): Promise<ChatResponse> {
   const apiKey = requireApiKey();
   // The SDK reads ANTHROPIC_BASE_URL from the environment when baseURL is not
@@ -200,9 +200,9 @@ export async function callAnthropic(
 
     const toolUses = toolUsesOf(message);
     if (toolUses.length === 0) {
-      return finalize(message, request);
+      return finalize(message);
     }
-    await runToolRound(message, toolUses, brokerClient, messages);
+    await runToolRound(message, toolUses, mcpClient, messages);
   }
 
   // Max rounds reached — one final call without tools to force a textual
@@ -213,7 +213,7 @@ export async function callAnthropic(
   } catch (error) {
     throw toCleanError(error);
   }
-  return finalize(finalMessage, request);
+  return finalize(finalMessage);
 }
 
 // ---------------------------------------------------------------------------
@@ -228,7 +228,7 @@ export async function callAnthropic(
  */
 export async function streamAnthropic(
   request: ChatRequest,
-  brokerClient: BrokerClient,
+  mcpClient: McpClient,
   emit: Emit,
   signal?: AbortSignal,
 ): Promise<void> {
@@ -289,10 +289,10 @@ export async function streamAnthropic(
       if (!textOf(message)) {
         emit({ type: "text", delta: fallbackFor(message) });
       }
-      emit({ type: "done", model: message.model, conversationId: request.conversationId });
+      emit({ type: "done", model: message.model });
       return;
     }
-    await runToolRound(message, toolUses, brokerClient, messages, emit);
+    await runToolRound(message, toolUses, mcpClient, messages, emit);
   }
 
   // Max rounds reached — final pass without tools.
@@ -307,7 +307,7 @@ export async function streamAnthropic(
   if (!textOf(finalMessage)) {
     emit({ type: "text", delta: fallbackFor(finalMessage) });
   }
-  emit({ type: "done", model: finalMessage.model, conversationId: request.conversationId });
+  emit({ type: "done", model: finalMessage.model });
 }
 
 // ---------------------------------------------------------------------------
@@ -315,12 +315,11 @@ export async function streamAnthropic(
 // ---------------------------------------------------------------------------
 
 /** Extract the text answer from a completed message into the wire contract. */
-function finalize(message: Anthropic.Message, request: ChatRequest): ChatResponse {
+function finalize(message: Anthropic.Message): ChatResponse {
   return {
     message: textOf(message) || fallbackFor(message),
     provider: LLMProvider.ANTHROPIC,
     model: message.model,
-    conversationId: request.conversationId,
   };
 }
 

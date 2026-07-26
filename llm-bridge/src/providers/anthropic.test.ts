@@ -4,7 +4,7 @@ import http from "node:http";
 import type { AddressInfo } from "node:net";
 
 import { callAnthropic } from "./anthropic.js";
-import { BrokerClient } from "../brokerClient.js";
+import { McpClient } from "../mcpClient.js";
 import type { ChatRequest } from "../types/index.js";
 
 // A scripted mock of the Anthropic Messages API. Each request pops the next
@@ -58,7 +58,7 @@ before(async () => {
   process.env.ANTHROPIC_BASE_URL = baseURL;
   // Stub the MCP-backed tool discovery so the loop has a deterministic,
   // network-free tool set.
-  (BrokerClient as unknown as { getToolsCached: () => Promise<unknown[]> }).getToolsCached =
+  (McpClient as unknown as { getToolsCached: () => Promise<unknown[]> }).getToolsCached =
     async () => [
       {
         name: "get_cluster_pods",
@@ -77,13 +77,13 @@ beforeEach(() => {
   capturedRequests = [];
 });
 
-function stubBroker(calls: string[]): BrokerClient {
+function stubBroker(calls: string[]): McpClient {
   return {
     executeTool: async (toolCall: { name: string }) => {
       calls.push(toolCall.name);
       return { data: { ok: true, tool: toolCall.name } };
     },
-  } as unknown as BrokerClient;
+  } as unknown as McpClient;
 }
 
 const baseRequest: ChatRequest = { message: "hello", provider: undefined } as ChatRequest;

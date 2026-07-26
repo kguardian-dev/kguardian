@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { BrokerClient, resolveMcpUrl } from "./brokerClient.js";
+import { McpClient, resolveMcpUrl } from "./mcpClient.js";
 
 const DEFAULT_URL = "http://kguardian-mcp-server.kguardian.svc.cluster.local:8081";
 
@@ -30,7 +30,7 @@ test("resolveMcpUrl treats whitespace-only as empty (falls through)", () => {
   assert.equal(resolveMcpUrl("", ""), DEFAULT_URL);
 });
 
-// BrokerClient.parseContext is the gate that turns the LLM's free-form
+// McpClient.parseContext is the gate that turns the LLM's free-form
 // context blob into a structured filter. A regression here either:
 //   - drops a valid namespace filter (LLM gets cluster-wide data when
 //     the user asked for a single ns), or
@@ -39,27 +39,27 @@ test("resolveMcpUrl treats whitespace-only as empty (falls through)", () => {
 // Use Node 22's built-in test runner (no vitest dep).
 
 test("parseContext returns undefined for empty/missing input", () => {
-  assert.equal(BrokerClient.parseContext(undefined), undefined);
-  assert.equal(BrokerClient.parseContext(""), undefined);
+  assert.equal(McpClient.parseContext(undefined), undefined);
+  assert.equal(McpClient.parseContext(""), undefined);
 });
 
 test("parseContext returns undefined for invalid JSON (no throw)", () => {
-  assert.equal(BrokerClient.parseContext("not-json"), undefined);
-  assert.equal(BrokerClient.parseContext("{open"), undefined);
+  assert.equal(McpClient.parseContext("not-json"), undefined);
+  assert.equal(McpClient.parseContext("{open"), undefined);
 });
 
 test("parseContext extracts namespace string", () => {
-  const got = BrokerClient.parseContext('{"namespace":"prod"}');
+  const got = McpClient.parseContext('{"namespace":"prod"}');
   assert.deepEqual(got, { namespace: "prod", podNames: undefined });
 });
 
 test("parseContext extracts podNames array", () => {
-  const got = BrokerClient.parseContext('{"podNames":["a","b"]}');
+  const got = McpClient.parseContext('{"podNames":["a","b"]}');
   assert.deepEqual(got, { namespace: undefined, podNames: ["a", "b"] });
 });
 
 test("parseContext extracts both fields when present", () => {
-  const got = BrokerClient.parseContext('{"namespace":"prod","podNames":["web-1"]}');
+  const got = McpClient.parseContext('{"namespace":"prod","podNames":["web-1"]}');
   assert.deepEqual(got, { namespace: "prod", podNames: ["web-1"] });
 });
 
@@ -67,22 +67,22 @@ test("parseContext rejects non-string namespace", () => {
   // If the LLM hallucinates {"namespace": 42} we must reject the
   // numeric — passing it downstream would either crash a string
   // comparison or be coerced into a misleading match.
-  const got = BrokerClient.parseContext('{"namespace":42}');
+  const got = McpClient.parseContext('{"namespace":42}');
   assert.equal(got?.namespace, undefined);
 });
 
 test("parseContext rejects non-array podNames", () => {
-  const got = BrokerClient.parseContext('{"podNames":"web-1"}');
+  const got = McpClient.parseContext('{"podNames":"web-1"}');
   assert.equal(got?.podNames, undefined);
 });
 
 test("parseContext ignores unrelated extra fields", () => {
-  const got = BrokerClient.parseContext('{"namespace":"prod","unknown":"value"}');
+  const got = McpClient.parseContext('{"namespace":"prod","unknown":"value"}');
   assert.deepEqual(got, { namespace: "prod", podNames: undefined });
 });
 
 test("parseContext handles pre-empty arrays", () => {
-  const got = BrokerClient.parseContext('{"podNames":[]}');
+  const got = McpClient.parseContext('{"podNames":[]}');
   assert.deepEqual(got, { namespace: undefined, podNames: [] });
 });
 
@@ -91,7 +91,7 @@ test("parseContext handles pre-empty arrays", () => {
 // the request fail clearly, never silently answer the user with zero tools.
 
 test("getToolsCached throws on an empty tool set (no static fallback)", async () => {
-  const C = BrokerClient as unknown as {
+  const C = McpClient as unknown as {
     getToolDefinitionsFromMCP: () => Promise<unknown[]>;
     toolDefsCache: unknown;
   };
@@ -99,7 +99,7 @@ test("getToolsCached throws on an empty tool set (no static fallback)", async ()
   C.toolDefsCache = null;
   C.getToolDefinitionsFromMCP = async () => [];
   try {
-    await assert.rejects(() => BrokerClient.getToolsCached(), /no tools/);
+    await assert.rejects(() => McpClient.getToolsCached(), /no tools/);
   } finally {
     C.getToolDefinitionsFromMCP = orig;
     C.toolDefsCache = null;
@@ -107,7 +107,7 @@ test("getToolsCached throws on an empty tool set (no static fallback)", async ()
 });
 
 test("getToolsCached propagates a discovery failure (no static fallback)", async () => {
-  const C = BrokerClient as unknown as {
+  const C = McpClient as unknown as {
     getToolDefinitionsFromMCP: () => Promise<unknown[]>;
     toolDefsCache: unknown;
   };
@@ -117,7 +117,7 @@ test("getToolsCached propagates a discovery failure (no static fallback)", async
     throw new Error("MCP server unreachable");
   };
   try {
-    await assert.rejects(() => BrokerClient.getToolsCached(), /MCP server unreachable/);
+    await assert.rejects(() => McpClient.getToolsCached(), /MCP server unreachable/);
   } finally {
     C.getToolDefinitionsFromMCP = orig;
     C.toolDefsCache = null;

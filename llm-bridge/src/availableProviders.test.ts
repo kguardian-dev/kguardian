@@ -89,7 +89,7 @@ test("availableProvidersFromEnv: ignores unrelated env vars", () => {
   const got = availableProvidersFromEnv({
     PATH: "/usr/bin",
     HOME: "/home/foo",
-    BROKER_URL: "http://x:9090",
+    MCP_SERVER_URL: "http://x:8081",
   });
   assert.deepEqual(got, []);
 });

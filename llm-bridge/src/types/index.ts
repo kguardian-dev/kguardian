@@ -21,7 +21,6 @@ export const ChatRequestSchema = z.object({
   message: z.string().min(1).max(50000),
   provider: z.nativeEnum(LLMProvider).optional(),
   model: z.string().optional(),
-  conversationId: z.string().optional(),
   context: z.string().max(2000).optional(),
   history: z.array(MessageSchema).max(100).optional(),
 });
@@ -32,7 +31,6 @@ export interface ChatResponse {
   message: string;
   provider: LLMProvider;
   model: string;
-  conversationId?: string;
 }
 
 export interface ErrorResponse {

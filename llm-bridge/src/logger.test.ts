@@ -68,7 +68,7 @@ test("shouldEmit at error suppresses everything below", () => {
 
 test("shouldEmit at debug keeps info+ but drops trace", () => {
   // LOG_LEVEL=debug is the typical "I'm debugging" setting —
-  // unlocks the per-tool-call hot-path traces from brokerClient.ts
+  // unlocks the per-tool-call hot-path traces from mcpClient.ts
   // (commit 3528d437) but still drops the trace level (currently
   // unused but reserved for future ultra-verbose hooks).
   assert.ok(!shouldEmit("trace", "debug"));
