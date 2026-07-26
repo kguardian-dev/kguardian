@@ -160,3 +160,28 @@ Usage: {{- if include "kguardian.llmBridgeEnabled" . }}
 {{- define "kguardian.advisorEnabled" -}}
 {{- if or .Values.ai.enabled .Values.advisor.enabled }}true{{- end -}}
 {{- end -}}
+
+{{/*
+AI provider env (SIMPLIFICATION-GOAL.md WS-D). The one-line provider path:
+ai.provider + ai.secret inject the correct env var for the chosen LLM provider
+from a single operator-supplied Secret. Emits nothing unless ai.provider is set.
+The per-provider llmBridge.secrets.* blocks remain and are additive, so an
+existing values file keeps working unchanged.
+Usage: {{- include "kguardian.aiProviderEnv" . | nindent 12 }}
+*/}}
+{{- define "kguardian.aiProviderEnv" -}}
+{{- $provider := .Values.ai.provider | default "" -}}
+{{- if $provider -}}
+{{- $envByProvider := dict "openai" "OPENAI_API_KEY" "anthropic" "ANTHROPIC_API_KEY" "gemini" "GOOGLE_API_KEY" "copilot" "GITHUB_TOKEN" -}}
+{{- $envName := index $envByProvider $provider -}}
+{{- if not $envName -}}
+{{- fail (printf "ai.provider must be one of openai|anthropic|gemini|copilot, got %q" $provider) -}}
+{{- end -}}
+- name: {{ $envName }}
+  valueFrom:
+    secretKeyRef:
+      name: {{ required "ai.secret is required when ai.provider is set" .Values.ai.secret }}
+      key: {{ .Values.llmBridge.secrets.keyName }}
+      optional: true
+{{- end -}}
+{{- end -}}

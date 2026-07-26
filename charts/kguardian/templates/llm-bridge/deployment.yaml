@@ -56,6 +56,9 @@ spec:
             {{- include "kguardian.brokerAuthEnv" . | nindent 12 }}
             - name: NODE_ENV
               value: "production"
+            # One-line provider path (ai.provider + ai.secret). Additive — the
+            # per-provider blocks below still work for multi-provider setups.
+            {{- include "kguardian.aiProviderEnv" . | nindent 12 }}
             {{- if .Values.llmBridge.secrets.openai.enabled }}
             - name: OPENAI_API_KEY
               valueFrom:

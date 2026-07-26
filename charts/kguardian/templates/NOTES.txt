@@ -79,14 +79,19 @@ For cluster-scoped policies (AuditClusterNetworkPolicy):
 {{- if include "kguardian.llmBridgeEnabled" . }}
 
 AI assistant: ENABLED (llm-bridge{{ if include "kguardian.mcpServerEnabled" . }} + mcp-server{{ end }}{{ if include "kguardian.advisorEnabled" . }} + advisor{{ end }}).
-Provide an LLM provider API key as a Secret (see llmBridge.secrets in
-values) or the assistant will start without a provider. Enabling
-everything at once next time: --set ai.enabled=true
+{{- if .Values.ai.provider }}
+Provider: {{ .Values.ai.provider }}, key from Secret "{{ .Values.ai.secret }}".
+{{- else }}
+Provide an LLM provider key. The one-line way is a single Secret:
+  kubectl create secret generic my-llm-key --from-literal=api-key=sk-...
+  helm upgrade ... --set ai.provider=anthropic --set ai.secret=my-llm-key
+(or configure providers individually via llmBridge.secrets.*).
+{{- end }}
 {{- else }}
 
-AI assistant: disabled. Enable the whole path (llm-bridge, mcp-server,
-advisor) with one value plus a provider secret:
-  --set ai.enabled=true
+AI assistant: disabled. Enable it with one value, one provider, one secret:
+  kubectl create secret generic my-llm-key --from-literal=api-key=sk-...
+  --set ai.enabled=true --set ai.provider=anthropic --set ai.secret=my-llm-key
 {{- end }}
 {{- if .Values.telemetry.enabled }}
 
