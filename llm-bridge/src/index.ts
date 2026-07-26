@@ -237,7 +237,7 @@ function startServer() {
   const server = app.listen(port, () => {
     const availableProviders = getAvailableProviders();
     log.info(`LLM Bridge listening on port ${port}`);
-    log.info(`MCP Server URL: ${process.env.MCP_SERVER_URL || "(default)"}`);
+    log.info(`Broker URL: ${process.env.BROKER_URL || "(default)"} · Advisor URL: ${process.env.ADVISOR_URL || "(default)"}`);
     log.info(`Available providers: ${availableProviders.join(", ") || "NONE"}`);
 
     if (availableProviders.length === 0) {
@@ -248,7 +248,6 @@ function startServer() {
 
   // Graceful shutdown
   const shutdown = () => {
-    mcpClient.close();
     server.close();
     process.exit(0);
   };
