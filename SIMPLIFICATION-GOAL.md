@@ -147,6 +147,15 @@ judgment call.
 
 ## 7. Progress log
 
+- 2026-07-26 — **G5 canary OPEN on cluster-00.** Chart 1.16.0 + llm-bridge
+  v1.5.0 (in-process tools) deployed and validated: both pods healthy,
+  hasProvider:true, BROKER_URL resolves to kguardian-broker.kguardian.svc and
+  the broker answers Healthy! from inside the pod. The assistant reaches the
+  data plane with no mcp-server hop. mcp-server left deployed for rollback
+  (revert the llm-bridge image pin). 7-day window to hold the sibling charter's
+  tool-call success / latency targets before mcp-server retirement (task #12);
+  checked daily. WS-C (shared generator, advisor CLI-only) proceeds in parallel.
+
 - 2026-07-26 — **P1 core done: provider consolidation + WS-B assistant merge.**
   Provider consolidation (#1179): OpenAI+Copilot collapsed to one
   OpenAI-compatible client, dead /api/chat route removed, Gemini pinned off its
