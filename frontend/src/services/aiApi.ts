@@ -19,13 +19,12 @@ export interface StreamHandlers {
   onThinking?: (delta: string) => void;
   onToolUse?: (name: string) => void;
   onToolResult?: (name: string, ok: boolean) => void;
-  onDone?: (info: { model: string; conversationId?: string }) => void;
+  onDone?: (info: { model: string }) => void;
   onError?: (error: string) => void;
 }
 
 export interface StreamOptions {
   provider?: LLMProvider;
-  conversationId?: string;
   signal?: AbortSignal;
 }
 
@@ -52,7 +51,6 @@ export async function streamChatMessage(
         history,
         context,
         provider: options.provider,
-        conversationId: options.conversationId,
       }),
       signal: options.signal,
     });
@@ -113,7 +111,7 @@ export async function streamChatMessage(
         handlers.onToolResult?.(event.name as string, event.ok as boolean);
         break;
       case 'done':
-        handlers.onDone?.({ model: event.model as string, conversationId: event.conversationId as string | undefined });
+        handlers.onDone?.({ model: event.model as string });
         break;
       case 'error':
         handlers.onError?.(event.error as string);

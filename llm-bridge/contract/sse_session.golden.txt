@@ -1,0 +1,18 @@
+event: thinking
+data: {"type":"thinking","delta":"Checking the cluster inventory."}
+
+event: tool_use
+data: {"type":"tool_use","name":"get_cluster_pods","id":"toolu_contract_1"}
+
+event: tool_result
+data: {"type":"tool_result","name":"get_cluster_pods","ok":true}
+
+event: text
+data: {"type":"text","delta":"Your cluster runs "}
+
+event: text
+data: {"type":"text","delta":"2 pods."}
+
+event: done
+data: {"type":"done","model":"claude-opus-4-8"}
+

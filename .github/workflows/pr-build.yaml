@@ -663,6 +663,54 @@ jobs:
               });
             }
 
+  # Test llm-bridge (tsc build via pretest deps + node:test suite), including
+  # the G3 SSE contract recordings under llm-bridge/contract/ - the emitter
+  # side of the stream contract. SIMPLIFICATION-GOAL.md section 3.
+  test-llm-bridge:
+    runs-on: ubuntu-latest
+    needs: detect-changes
+    if: needs.detect-changes.outputs.llm-bridge == 'true' || needs.detect-changes.outputs.frontend == 'true'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Set up Node
+        uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: llm-bridge/package-lock.json
+
+      - name: Test
+        working-directory: llm-bridge
+        run: |
+          npm ci
+          npm test
+
+  # Test frontend (vitest), including the G3 SSE contract consumer side -
+  # replays llm-bridge/contract recordings through the real SSE parser, so it
+  # runs when EITHER component changes.
+  test-frontend:
+    runs-on: ubuntu-latest
+    needs: detect-changes
+    if: needs.detect-changes.outputs.frontend == 'true' || needs.detect-changes.outputs.llm-bridge == 'true'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Set up Node
+        uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Test
+        working-directory: frontend
+        run: |
+          npm ci
+          npm test
+
   # Build MCP Server
   build-mcp-server:
     needs: detect-changes
