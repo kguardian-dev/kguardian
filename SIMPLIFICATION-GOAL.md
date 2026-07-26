@@ -153,3 +153,9 @@ judgment call.
 - 2026-07-26 — **Architecture-support invariant added** (owner decision): amd64 + arm64 are guaranteed
   at every pipeline stage including PR validation. An initial amd64-only PR-build trim was closed
   unmerged; WS-E re-aimed at native arm64 runners instead of coverage reduction.
+- 2026-07-26 — **P0 complete.** WS-A: dead broker route (#1166), llm-bridge stale naming + dead
+  conversationId (#1167), AIAssistant chrome single-sourced 722→615 (#1169) — all merged. WS-D:
+  ai.enabled umbrella shipped in chart 1.15.0, deployed + verified on cluster-00. WS-E: PR builds
+  now native per-arch (#1174) — broker arm64 leg 45 min (QEMU) → 3m25s (native), smoke test now
+  executes BOTH arches, pr-N manifests verified multi-arch. Deferred from WS-A into the provider
+  consolidation: /api/chat route removal, provider-loop collapse.
