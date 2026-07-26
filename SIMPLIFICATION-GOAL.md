@@ -147,6 +147,18 @@ judgment call.
 
 ## 7. Progress log
 
+- 2026-07-26 — **P1 core done: provider consolidation + WS-B assistant merge.**
+  Provider consolidation (#1179): OpenAI+Copilot collapsed to one
+  OpenAI-compatible client, dead /api/chat route removed, Gemini pinned off its
+  -exp preview model. **WS-B (#1180, releasing as llm-bridge 1.5.0):** the
+  assistant now runs all 12 tools IN-PROCESS (src/tools: registry + filter.go
+  port + direct broker/advisor HTTP) instead of proxying through the Go
+  mcp-server — one fewer deployment, one fewer hop, and the WS0 deployed-but-off
+  failure class gone. Parity proven: src/tools/parity.test.ts replays the shared
+  G1 fixtures and reproduces every mcp-server output. @modelcontextprotocol/sdk
+  removed; McpClient public API unchanged so provider loops + G3 untouched.
+  mcp-server stays deployed for canary rollback (retired after G5 holds).
+
 - 2026-07-26 — **P1 gates built.** G1 tool-contract snapshot (#1176): 12-tool
   MCP wire contract pinned as goldens via an in-memory client session; also
   root-caused and fixed the long-standing OversizedBody suite deadlock and
