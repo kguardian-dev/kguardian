@@ -1,5 +1,29 @@
 # Upgrading the kguardian Helm chart
 
+## AI assistant: one-line enablement (`ai.*`)
+
+The AI assistant is now enabled with a single value and a single secret.
+No existing values need to change — the previous per-component flags
+(`llmBridge.enabled`, `mcpServer.enabled`, `advisor.enabled`) and
+per-provider secret blocks (`llmBridge.secrets.*`) all still work exactly
+as before, so upgrades are a no-op unless you opt into the new keys.
+
+The one-line path:
+```bash
+kubectl -n <ns> create secret generic my-llm-key \
+  --from-literal=api-key="sk-..."
+```
+```yaml
+ai:
+  enabled: true          # renders llm-bridge + mcp-server + advisor
+  provider: anthropic    # openai | anthropic | gemini | copilot
+  secret: my-llm-key     # holds the key under `api-key`
+```
+`ai.enabled=true` is the umbrella for the whole assistant path;
+`ai.provider` + `ai.secret` wire the chosen provider's API key. To run
+several providers at once, keep using the per-provider
+`llmBridge.secrets.*` blocks (they are additive to `ai.provider`).
+
 ## Optional broker API authentication (opt-in)
 
 The broker API can now require a shared **bearer token**

@@ -158,6 +158,20 @@ shipped — but the freeze stops the untidiness from here on.
 
 ## 7. Progress log
 
+- 2026-07-26 — **WS-D done; entering canary-wait.** ai.provider/ai.secret
+  one-line enablement (#1192) + UPGRADING note (#1193): assistant enabled with
+  one toggle + one provider + one secret, every legacy key still works (G4
+  covers both). All buildable, non-canary-gated restructure work is now landed
+  on main (no public release cut). What REMAINS is gated on the 7-day G5 canary
+  (day 1 of 7, holds ~2026-08-02): (1) remove mcp-server + advisor Deployment/
+  serve/chart-templates/advisor-image-release.yaml → the 8→6 workload DoD;
+  (2) WS-E release-units 8→6 in release-please-config; (3) merge the HELD chart
+  release PR as the ONE coherent release; (4) close-out (task #16). The values.yaml
+  boilerplate-shrink is deliberately DEFERRED (low value, high churn-risk against
+  a live chart during the freeze). Note: this loop is session-scoped; a 7-day
+  canary exceeds a session, so the removals+release will land in a later /loop
+  run — the task graph + this charter persist the state.
+
 - 2026-07-26 — **Assistant fully advisor-independent.** In-process NETWORK
   POLICY + Cilium generation (#1190): faithful TS port of the advisor Go
   generators (standard/cilium/types), all 5 paths (CIDR, service/pod
