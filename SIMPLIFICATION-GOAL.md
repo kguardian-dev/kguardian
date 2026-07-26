@@ -147,6 +147,17 @@ judgment call.
 
 ## 7. Progress log
 
+- 2026-07-26 — **P1 gates built.** G1 tool-contract snapshot (#1176): 12-tool
+  MCP wire contract pinned as goldens via an in-memory client session; also
+  root-caused and fixed the long-standing OversizedBody suite deadlock and
+  added the first CI test gate for mcp-server. G3 SSE stream contract (#1177):
+  full session (thinking/tool/text/done) + error recording pinned on both the
+  llm-bridge emitter and the frontend parser; first CI test gates for both.
+  G2 generator parity (#1178): shared fixtures both advisor Go and frontend TS
+  assert; surfaced and fixed two real frontend seccomp bugs (hardcoded x86 arch
+  on aarch64 pods; missing allow rule) — advisor is the reference. Network-policy
+  reference goldens pinned; frontend netpol wiring folds into WS-C.
+
 - 2026-07-26 — Charter created from the full architecture review (four-quadrant exploration: AI chain,
   data plane, advisor, deployment/CI). Baseline: 7 runtime components, 8 release units, 4 toolchains,
   1,316-line values.yaml, tool definitions ×3, generators ×3.
