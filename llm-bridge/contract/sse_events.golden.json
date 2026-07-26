@@ -1,0 +1,28 @@
+[
+  {
+    "type": "thinking",
+    "delta": "Checking the cluster inventory."
+  },
+  {
+    "type": "tool_use",
+    "name": "get_cluster_pods",
+    "id": "toolu_contract_1"
+  },
+  {
+    "type": "tool_result",
+    "name": "get_cluster_pods",
+    "ok": true
+  },
+  {
+    "type": "text",
+    "delta": "Your cluster runs "
+  },
+  {
+    "type": "text",
+    "delta": "2 pods."
+  },
+  {
+    "type": "done",
+    "model": "claude-opus-4-8"
+  }
+]

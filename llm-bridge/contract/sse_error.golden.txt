@@ -1,0 +1,3 @@
+event: error
+data: {"type":"error","error":"The AI provider is temporarily overloaded. Please retry in a few seconds."}
+
