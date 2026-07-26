@@ -1,0 +1,17 @@
+{
+  "name": "x86_64 web pod with a typical syscall set",
+  "input": {
+    "syscalls": ["accept4", "bind", "clone", "close", "epoll_wait", "openat", "read", "recvfrom", "sendto", "socket", "write"],
+    "arch": "x86_64"
+  },
+  "expected": {
+    "defaultAction": "SCMP_ACT_ERRNO",
+    "architectures": ["SCMP_ARCH_X86_64"],
+    "syscalls": [
+      {
+        "names": ["accept4", "bind", "clone", "close", "epoll_wait", "openat", "read", "recvfrom", "sendto", "socket", "write"],
+        "action": "SCMP_ACT_ALLOW"
+      }
+    ]
+  }
+}

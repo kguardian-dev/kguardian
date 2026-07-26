@@ -1,0 +1,17 @@
+{
+  "name": "aarch64 pod — arch must map to ARM64, not x86 (regression guard)",
+  "input": {
+    "syscalls": ["clone", "execve", "futex", "mmap", "openat", "read", "write"],
+    "arch": "aarch64"
+  },
+  "expected": {
+    "defaultAction": "SCMP_ACT_ERRNO",
+    "architectures": ["SCMP_ARCH_ARM64"],
+    "syscalls": [
+      {
+        "names": ["clone", "execve", "futex", "mmap", "openat", "read", "write"],
+        "action": "SCMP_ACT_ALLOW"
+      }
+    ]
+  }
+}
