@@ -1,5 +1,17 @@
 # Changelog
 
+## [1.16.0](https://github.com/kguardian-dev/kguardian/compare/chart/v1.15.0...chart/v1.16.0) (2026-07-26)
+
+
+### Features
+
+* **llm-bridge:** run MCP tools in-process, drop the mcp-server hop (WS-B) ([#1180](https://github.com/kguardian-dev/kguardian/issues/1180)) ([8126fd4](https://github.com/kguardian-dev/kguardian/commit/8126fd49b59f9924713b77617f22af5401e6757f))
+
+
+### Bug Fixes
+
+* **deps:** update ghcr.io/kguardian-dev/kguardian/llm-bridge docker tag to v1.4.4 ([#1170](https://github.com/kguardian-dev/kguardian/issues/1170)) ([4306131](https://github.com/kguardian-dev/kguardian/commit/4306131dea30920d3a776d19d26588f348524f5f))
+
 ## [1.15.0](https://github.com/kguardian-dev/kguardian/compare/chart/v1.14.3...chart/v1.15.0) (2026-07-25)
 
 
