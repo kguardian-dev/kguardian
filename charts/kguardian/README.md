@@ -98,6 +98,7 @@ The following table lists the configurable parameters of the kguardian chart and
 | advisor.serviceAccount.name | string | `""` | The name of the service account to use |
 | advisor.tolerations | list | `[]` | Tolerations for advisor pods |
 | advisor.topologySpreadConstraints | list | `[]` | Topology spread constraints for advisor pods |
+| ai.enabled | bool | `false` | Enable the full AI assistant path (llm-bridge + mcp-server + advisor) with one toggle |
 | broker.affinity | object | `{}` | Affinity rules for broker pod assignment |
 | broker.audit.evalTimeoutMs | int | `500` | Per-call timeout (in milliseconds) on the broker's POST to the evaluator's /evaluate endpoint. 500ms is plenty for an in-cluster evaluator (matcher is in-memory, sub-ms) but operators running the evaluator across cells / regions / VPNs may need more. Clamped to a minimum 50ms broker-side. |
 | broker.audit.inflightPermits | int | `16` | Maximum concurrent in-flight /evaluate calls to the audit evaluator. Bound prevents an ingest spike from creating unbounded concurrent reqwest futures + connection-pool waiters. The broker's /metrics exposes broker_audit_inflight_available so operators can spot saturation. The metrics doc suggests bumping this value when the gauge sits at 0 (under sustained load you'll see "evaluator round-trips queueing"). In-broker default is 16 if unset; minimum is 1. |
@@ -319,7 +320,7 @@ The following table lists the configurable parameters of the kguardian chart and
 | llmBridge.autoscaling.minReplicas | int | `2` | Minimum number of llm-bridge replicas |
 | llmBridge.autoscaling.targetCPUUtilizationPercentage | int | `80` | Target CPU utilization percentage for autoscaling |
 | llmBridge.container.port | int | `8080` | LLM Bridge container port |
-| llmBridge.enabled | bool | `false` | Enable LLM Bridge service for AI assistant |
+| llmBridge.enabled | bool | `false` | Enable LLM Bridge service for AI assistant (or use ai.enabled to turn on the whole path) |
 | llmBridge.env | list | `[]` | Additional environment variables for llm-bridge |
 | llmBridge.fullnameOverride | string | `""` | Override the full name of the llm-bridge resources |
 | llmBridge.image.pullPolicy | string | `"IfNotPresent"` | LLM Bridge image pull policy |

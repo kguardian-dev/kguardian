@@ -140,3 +140,23 @@ Usage: {{- include "kguardian.brokerAuthEnv" . | nindent 12 }}
       key: {{ .Values.broker.auth.secretKey }}
 {{- end -}}
 {{- end -}}
+
+{{/*
+AI-path component gates (SIMPLIFICATION-GOAL.md WS-D). ai.enabled=true turns
+on the whole assistant chain — llm-bridge, mcp-server, and the advisor
+service — with one value. The per-component `enabled` flags still work and
+remain the way to switch a single component on; these helpers OR the two so
+existing values files render identically. Truthy = non-empty string.
+Usage: {{- if include "kguardian.llmBridgeEnabled" . }}
+*/}}
+{{- define "kguardian.llmBridgeEnabled" -}}
+{{- if or .Values.ai.enabled .Values.llmBridge.enabled }}true{{- end -}}
+{{- end -}}
+
+{{- define "kguardian.mcpServerEnabled" -}}
+{{- if or .Values.ai.enabled .Values.mcpServer.enabled }}true{{- end -}}
+{{- end -}}
+
+{{- define "kguardian.advisorEnabled" -}}
+{{- if or .Values.ai.enabled .Values.advisor.enabled }}true{{- end -}}
+{{- end -}}

@@ -1,4 +1,4 @@
-{{- if and .Values.mcpServer.enabled .Values.mcpServer.podDisruptionBudget.enabled }}
+{{- if and (include "kguardian.mcpServerEnabled" .) .Values.mcpServer.podDisruptionBudget.enabled }}
 {{- /* PDB-singleton guardrail. See evaluator/pdb.yaml (b964c58d). */ -}}
 {{- $pdb := .Values.mcpServer.podDisruptionBudget -}}
 {{- $replicas := int .Values.mcpServer.replicaCount -}}

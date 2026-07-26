@@ -1,4 +1,4 @@
-{{- if .Values.llmBridge.enabled }}
+{{- if include "kguardian.llmBridgeEnabled" . }}
 ---
 apiVersion: v1
 kind: Service
