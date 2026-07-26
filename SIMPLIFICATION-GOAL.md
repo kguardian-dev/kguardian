@@ -169,6 +169,10 @@ shipped — but the freeze stops the untidiness from here on.
   assistant) so one 7-day window gates removing BOTH mcp-server AND the advisor
   Deployment. Frontend keeps its own G2-locked generators for the ai.enabled
   =false case (no-workspace design). Freeze holding.
+  - **Validated in-cluster (cluster-00):** pr-1190 rolled out healthy; generating
+    a real NetworkPolicy for a live pod resolved a peer to a podSelector (real
+    labels from the broker /pod/ip) — the broker-backed resolver works against
+    the real broker, the one path the flat test fixture could not exercise.
 
 - 2026-07-26 — **WS-C progress + G4 gate.** G4 values-compatibility gate (#1187):
   fast render check proving legacy per-component AI flags and the ai.enabled
