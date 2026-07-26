@@ -1,0 +1,16 @@
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  labels:
+    app.kubernetes.io/component: standard-policy-deny-all
+    app.kubernetes.io/name: idle
+    app.kubernetes.io/part-of: kguardian
+  name: idle-standard-policy-deny-all
+  namespace: prod
+spec:
+  podSelector:
+    matchLabels:
+      app: idle
+  policyTypes:
+  - Ingress
+  - Egress
