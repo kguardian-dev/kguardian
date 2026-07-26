@@ -6,7 +6,6 @@ import { log } from "../logger.js";
 // bearer token as the mcp-server used.
 
 const BROKER_TIMEOUT_MS = 90_000; // cluster-wide queries can be large
-const ADVISOR_TIMEOUT_MS = 60_000;
 
 function trimSlash(u: string): string {
   return u.trim().replace(/\/+$/, "");
@@ -16,9 +15,6 @@ export function brokerURL(): string {
   return trimSlash(process.env.BROKER_URL?.trim() || "http://kguardian-broker.kguardian.svc.cluster.local:9090");
 }
 
-export function advisorURL(): string {
-  return trimSlash(process.env.ADVISOR_URL?.trim() || "http://kguardian-advisor.kguardian.svc.cluster.local:8083");
-}
 
 function brokerAuthHeaders(): Record<string, string> {
   const token = process.env.BROKER_AUTH_TOKEN?.trim();
@@ -46,16 +42,6 @@ export async function brokerGetJSON(path: string): Promise<unknown> {
   return resp.json();
 }
 
-/** GET an advisor generate endpoint and return the raw text body (YAML/JSON). */
-export async function advisorGetText(path: string): Promise<string> {
-  const url = `${advisorURL()}${path}`;
-  const resp = await getWithTimeout(url, ADVISOR_TIMEOUT_MS, {}, "text/plain, application/json, application/yaml");
-  if (!resp.ok) {
-    log.error(`advisor GET ${path} -> ${resp.status}`);
-    throw new Error(`advisor returned ${resp.status} for ${path}`);
-  }
-  return resp.text();
-}
 
 /** Build the /audit/verdicts query string, mirroring the mcp-server's three
  *  namespace modes (cluster-scoped = empty value present; single ns; or absent). */
