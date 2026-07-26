@@ -3,8 +3,6 @@ package network
 import (
 	"testing"
 
-	ciliumv2 "github.com/cilium/cilium/pkg/k8s/apis/cilium.io/v2"
-	ciliumapi "github.com/cilium/cilium/pkg/policy/api"
 	"github.com/kguardian-dev/kguardian/advisor/pkg/api"
 	"github.com/stretchr/testify/assert"
 	corev1 "k8s.io/api/core/v1"
@@ -22,7 +20,7 @@ func TestCiliumPolicyGenerator_Generate_NoTraffic(t *testing.T) {
 	assert.NoError(t, err)
 	assert.NotNil(t, policyInterface)
 
-	policy, ok := policyInterface.(*ciliumv2.CiliumNetworkPolicy)
+	policy, ok := policyInterface.(*CiliumNetworkPolicy)
 	assert.True(t, ok)
 	assert.Equal(t, GetPolicyName("test-pod", "cilium-policy-deny-all"), policy.Name)
 	assert.Equal(t, podDetail.Namespace, policy.Namespace)
@@ -84,34 +82,34 @@ func TestCiliumPolicyGenerator_Generate_BasicIngressEgress(t *testing.T) {
 	assert.NoError(t, err)
 	assert.NotNil(t, policyInterface)
 
-	policy, ok := policyInterface.(*ciliumv2.CiliumNetworkPolicy)
+	policy, ok := policyInterface.(*CiliumNetworkPolicy)
 	assert.True(t, ok)
 	assert.Equal(t, GetPolicyName("test-pod", "cilium-policy"), policy.Name)
 	assert.Equal(t, podDetail.Namespace, policy.Namespace)
 	assert.Contains(t, policy.Spec.Description, "Cilium network policy for pod test-pod")
 
 	// Verify EndpointSelector has pod labels
-	assert.NotEmpty(t, policy.Spec.EndpointSelector.LabelSelector)
+	assert.NotEmpty(t, policy.Spec.EndpointSelector.MatchLabels)
 
 	// Verify Ingress Rule
 	assert.Len(t, policy.Spec.Ingress, 1)
 	ingressRule := policy.Spec.Ingress[0]
 	// Should use EndpointSelector for pod peer
 	assert.Len(t, ingressRule.FromEndpoints, 1)
-	assert.NotEmpty(t, ingressRule.FromEndpoints[0].LabelSelector)
+	assert.NotEmpty(t, ingressRule.FromEndpoints[0].MatchLabels)
 	assert.Len(t, ingressRule.ToPorts, 1)
 	assert.Equal(t, "80", ingressRule.ToPorts[0].Ports[0].Port)
-	assert.Equal(t, ciliumapi.L4Proto("TCP"), ingressRule.ToPorts[0].Ports[0].Protocol)
+	assert.Equal(t, "TCP", ingressRule.ToPorts[0].Ports[0].Protocol)
 
 	// Verify Egress Rule
 	assert.Len(t, policy.Spec.Egress, 1)
 	egressRule := policy.Spec.Egress[0]
 	// Should use EndpointSelector for service peer
 	assert.Len(t, egressRule.ToEndpoints, 1)
-	assert.NotEmpty(t, egressRule.ToEndpoints[0].LabelSelector)
+	assert.NotEmpty(t, egressRule.ToEndpoints[0].MatchLabels)
 	assert.Len(t, egressRule.ToPorts, 1)
 	assert.Equal(t, "443", egressRule.ToPorts[0].Ports[0].Port)
-	assert.Equal(t, ciliumapi.L4Proto("TCP"), egressRule.ToPorts[0].Ports[0].Protocol)
+	assert.Equal(t, "TCP", egressRule.ToPorts[0].Ports[0].Protocol)
 }
 
 func TestCiliumPolicyGenerator_Generate_CIDRFallback(t *testing.T) {
@@ -159,7 +157,7 @@ func TestCiliumPolicyGenerator_Generate_CIDRFallback(t *testing.T) {
 
 	policyInterface, err := gen.Generate("test-pod", podTraffic, podDetail)
 	assert.NoError(t, err)
-	policy, ok := policyInterface.(*ciliumv2.CiliumNetworkPolicy)
+	policy, ok := policyInterface.(*CiliumNetworkPolicy)
 	assert.True(t, ok)
 
 	// Verify Ingress Rule (should use CIDR)
@@ -167,20 +165,20 @@ func TestCiliumPolicyGenerator_Generate_CIDRFallback(t *testing.T) {
 	ingressRule := policy.Spec.Ingress[0]
 	assert.Empty(t, ingressRule.FromEndpoints) // No endpoint selectors
 	assert.Len(t, ingressRule.FromCIDR, 1)
-	assert.Equal(t, ciliumapi.CIDR("10.0.0.5/32"), ingressRule.FromCIDR[0])
+	assert.Equal(t, "10.0.0.5/32", ingressRule.FromCIDR[0])
 	assert.Len(t, ingressRule.ToPorts, 1)
 	assert.Equal(t, "8080", ingressRule.ToPorts[0].Ports[0].Port)
-	assert.Equal(t, ciliumapi.L4Proto("TCP"), ingressRule.ToPorts[0].Ports[0].Protocol)
+	assert.Equal(t, "TCP", ingressRule.ToPorts[0].Ports[0].Protocol)
 
 	// Verify Egress Rule (should use CIDR)
 	assert.Len(t, policy.Spec.Egress, 1)
 	egressRule := policy.Spec.Egress[0]
 	assert.Empty(t, egressRule.ToEndpoints) // No endpoint selectors
 	assert.Len(t, egressRule.ToCIDR, 1)
-	assert.Equal(t, ciliumapi.CIDR("8.8.8.8/32"), egressRule.ToCIDR[0])
+	assert.Equal(t, "8.8.8.8/32", egressRule.ToCIDR[0])
 	assert.Len(t, egressRule.ToPorts, 1)
 	assert.Equal(t, "53", egressRule.ToPorts[0].Ports[0].Port)
-	assert.Equal(t, ciliumapi.L4Proto("UDP"), egressRule.ToPorts[0].Ports[0].Protocol)
+	assert.Equal(t, "UDP", egressRule.ToPorts[0].Ports[0].Protocol)
 }
 
 func TestCiliumPolicyGenerator_Generate_SelfTrafficFiltering(t *testing.T) {
@@ -203,7 +201,7 @@ func TestCiliumPolicyGenerator_Generate_SelfTrafficFiltering(t *testing.T) {
 	assert.NoError(t, err)
 
 	// Should generate default-deny policy since self-traffic was filtered out
-	policy, ok := policyInterface.(*ciliumv2.CiliumNetworkPolicy)
+	policy, ok := policyInterface.(*CiliumNetworkPolicy)
 	assert.True(t, ok)
 	assert.Contains(t, policy.Name, "deny-all")
 	assert.NotNil(t, policy.Spec.EnableDefaultDeny.Ingress)
@@ -335,7 +333,7 @@ func TestConvertPortsToCiliumPortRules_DedupsDuplicates(t *testing.T) {
 	if len(got) != 1 {
 		t.Fatalf("dup ports should collapse to 1 PortRule, got %d", len(got))
 	}
-	if len(got[0].Ports) != 1 || got[0].Ports[0].Port != "80" || got[0].Ports[0].Protocol != ciliumapi.ProtoTCP {
+	if len(got[0].Ports) != 1 || got[0].Ports[0].Port != "80" || got[0].Ports[0].Protocol != "TCP" {
 		t.Errorf("unexpected port: %+v", got[0].Ports)
 	}
 }
@@ -361,7 +359,7 @@ func TestConvertPortsToCiliumPortRules_DeterministicOrdering(t *testing.T) {
 		{Port: &p80, Protocol: &tcp},
 	}
 	wantPorts := []string{"22", "80", "80", "443"}
-	wantProtos := []ciliumapi.L4Proto{ciliumapi.ProtoTCP, ciliumapi.ProtoTCP, ciliumapi.ProtoUDP, ciliumapi.ProtoTCP}
+	wantProtos := []string{"TCP", "TCP", "UDP", "TCP"}
 	first := g.convertPortsToCiliumPortRules(scrambled)
 	if len(first) != 4 {
 		t.Fatalf("want 4 PortRules, got %d", len(first))
