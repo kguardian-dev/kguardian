@@ -768,6 +768,31 @@ jobs:
               });
             }
 
+  # Test MCP server (go vet / go test), including the G1 tool-contract
+  # snapshot: testdata/contract goldens pin the wire-visible MCP contract
+  # (tools/list + per-tool call results) that any reimplementation of the
+  # tool set must reproduce byte-for-byte. SIMPLIFICATION-GOAL.md section 3.
+  # GOTOOLCHAIN=local + matrix >= go.mod per advisor-ci-gotchas.
+  test-mcp-server:
+    runs-on: ubuntu-latest
+    needs: detect-changes
+    if: needs.detect-changes.outputs.mcp-server == 'true'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+        with:
+          go-version: '1.26.x'
+          cache-dependency-path: mcp-server/go.sum
+
+      - name: Vet and test (includes G1 contract snapshot)
+        working-directory: mcp-server
+        run: |
+          go vet ./...
+          go test ./... -timeout 300s
+
   # Build Evaluator
   build-evaluator:
     needs: detect-changes

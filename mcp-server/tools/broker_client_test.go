@@ -278,8 +278,17 @@ func TestBrokerClient_OversizedBodyTruncated(t *testing.T) {
 		chunk := strings.Repeat(`{"k":"v"},`, 1024)
 		written := 1
 		for written < oversized {
-			n, _ := w.Write([]byte(chunk))
+			n, err := w.Write([]byte(chunk))
 			written += n
+			if err != nil {
+				// The client stops reading at its 10 MB cap and drops the
+				// connection; from then on Write returns (0, err) forever.
+				// The old code discarded err, so written stopped advancing
+				// and this loop spun until the 600s package timeout while
+				// srv.Close() waited on the handler — the intermittent
+				// full-suite deadlock. Bail on first write error.
+				return
+			}
 		}
 	}))
 	defer srv.Close()
