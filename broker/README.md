@@ -49,3 +49,7 @@ When `BROKER_AUTH_TOKEN` is set, all endpoints except `/health` and `/metrics` r
 | `TELEMETRY_INTERVAL_SECS` | `86400` | Check-in cadence (min 3600) |
 | `CHART_VERSION` / `KUBE_VERSION` | unset | Reported in the version check-in |
 | `RUST_LOG` | `info` | Log level |
+
+PR images (`pr-<N>` tags on GHCR) are multi-arch: each architecture builds
+natively in CI and the broker image is smoke-executed on both amd64 and arm64
+before the manifest is assembled.
