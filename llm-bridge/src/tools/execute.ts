@@ -4,6 +4,7 @@ import { brokerGetJSON, advisorGetText, auditVerdictsQuery } from "./backendClie
 import {
   filterByNamespace, compactTrafficSummary, compactPodsSummary, filterAlivePods, compactSvc,
 } from "./compaction.js";
+import { seccompFromBrokerSyscalls } from "./generators/seccomp.js";
 
 // In-process tool execution (WS-B). Each of the 12 tools is a fetch from the
 // broker or advisor followed by the exact compaction the mcp-server applied
@@ -48,7 +49,13 @@ const handlers: Record<string, Handler> = {
     const type = s(a.policy_type) || "kubernetes";
     return advisorGetText(`/generate/networkpolicy?pod=${enc(s(a.pod_name))}&type=${enc(type)}`);
   },
-  generate_seccomp_profile: (a) => advisorGetText(`/generate/seccomp?pod=${enc(s(a.pod_name))}`),
+  // Seccomp is generated in-process from the pod's observed syscalls — no
+  // advisor hop (WS-C). Returned as pretty JSON; the profile is G2-locked to
+  // the frontend and advisor-CLI generators.
+  generate_seccomp_profile: async (a) => {
+    const syscalls = await brokerGetJSON(`/pod/syscalls/${enc(s(a.pod_name))}`);
+    return JSON.stringify(seccompFromBrokerSyscalls(syscalls), null, 2);
+  },
 };
 
 const KNOWN = new Set(TOOL_DEFS.map((t) => t.name));
