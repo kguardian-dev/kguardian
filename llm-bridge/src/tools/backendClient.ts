@@ -1,8 +1,8 @@
 import { log } from "../logger.js";
 
-// Direct HTTP clients to the broker and advisor. WS-B: the assistant reaches
-// the data plane in-process instead of proxying through the mcp-server, so
-// these replace the MCP transport hop. Same endpoints, same optional broker
+// Direct HTTP client to the broker. WS-B: the assistant reaches the data
+// plane in-process instead of proxying through the mcp-server, so this
+// replaces the MCP transport hop. Same endpoints, same optional broker
 // bearer token as the mcp-server used.
 
 const BROKER_TIMEOUT_MS = 90_000; // cluster-wide queries can be large
