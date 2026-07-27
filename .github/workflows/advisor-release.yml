@@ -114,7 +114,6 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write # publish the release (creates the tag)
-      actions: write # dispatch the container-image workflow
     env:
       TAG: ${{ github.event.release.tag_name || inputs.tag }}
     steps:
@@ -122,9 +121,3 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: gh release edit "${TAG}" --draft=false --latest --repo "${{ github.repository }}"
-      - name: Trigger the container-image build for the now-published tag
-        # Publishing via GITHUB_TOKEN creates the tag but does not re-trigger the
-        # tag-keyed image workflow, so dispatch it explicitly on the tag ref.
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: gh workflow run advisor-image-release.yaml --ref "${TAG}" --repo "${{ github.repository }}"
