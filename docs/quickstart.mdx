@@ -65,8 +65,8 @@ kubectl get pods -n kguardian
 
 # Expected output (one controller pod per node; broker + db + frontend +
 # evaluator as Deployments; the evaluator is on by default and can be
-# disabled with evaluator.enabled=false; mcp-server / llm-bridge appear
-# only when the corresponding chart values enable them):
+# disabled with evaluator.enabled=false; llm-bridge appears
+# only when the corresponding chart values enable it):
 # NAME                                   READY   STATUS    RESTARTS   AGE
 # kguardian-controller-xxxxx             1/1     Running   0          2m
 # kguardian-broker-xxxxxxxxxx-xxxxx      1/1     Running   0          2m

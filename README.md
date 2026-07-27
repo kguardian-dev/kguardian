@@ -54,7 +54,7 @@ It's built for platform and security teams who want policy-as-code without writi
 - **Flexible targeting** — generate per-pod, per-namespace, or cluster-wide.
 - **Review-first by design** — the CLI writes YAML to `--output-dir` and never applies anything to the cluster; you review and `kubectl apply` the files yourself.
 - **GitOps-friendly output** — plain YAML/JSON files ready for review or a GitOps pipeline.
-- **Optional AI assistant** — query traffic and syscall data in natural language via the LLM bridge and MCP server.
+- **Optional AI assistant** — query traffic and syscall data in natural language via the LLM bridge.
 
 Example policies for common workloads (nginx, Postgres, kube-dns, Prometheus, Istio sidecar, a Go microservice) live in the [Policy Gallery](docs/policy-gallery/). For a comparison with Inspektor Gadget and Security Profiles Operator, see the [docs site](https://docs.kguardian.dev/#comparison-with-other-tools).
 
@@ -92,7 +92,7 @@ graph LR
 | **Evaluator** | Go | Deployment | Evaluates live flows against `AuditNetworkPolicy` CRDs and reports would-deny verdicts — without dropping a packet |
 | **CLI** (`kubectl kguardian`) | Go | kubectl plugin | Generates NetworkPolicies and seccomp profiles from the observed baseline |
 | **Web UI** | React + TypeScript | Deployment | Visualizes traffic, policies, and pod behavior |
-| **LLM Bridge / MCP Server** | TypeScript / Go | Optional Deployments | Natural-language assistant over cluster traffic ([llm-bridge/README.md](llm-bridge/README.md), [mcp-server/README.md](mcp-server/README.md)) |
+| **LLM Bridge** | TypeScript | Optional Deployment | Natural-language assistant over cluster traffic — runs all tools and policy/seccomp generation in-process ([llm-bridge/README.md](llm-bridge/README.md)) |
 
 ## 🚀 Quick Start
 
@@ -143,7 +143,7 @@ Full command reference, including audit workflows and advanced flags, is in the 
 
 ## 🤖 AI Assistant
 
-kguardian ships an optional natural-language assistant: ask questions like *"what has this pod talked to in the last hour?"* or *"generate a seccomp profile for the payments namespace"* from the Web UI. It's powered by an LLM bridge (SSE streaming) and an MCP server exposing the broker's data as tools — bring your own Anthropic API key. Setup and configuration live in [llm-bridge/README.md](llm-bridge/README.md) and [mcp-server/README.md](mcp-server/README.md).
+kguardian ships an optional natural-language assistant: ask questions like *"what has this pod talked to in the last hour?"* or *"generate a seccomp profile for the payments namespace"* from the Web UI. It's a single service, the LLM bridge (SSE streaming), that calls the broker's data directly and generates policies/seccomp profiles in-process — bring your own Anthropic API key. Setup and configuration live in [llm-bridge/README.md](llm-bridge/README.md).
 
 ## 🧩 Compatibility
 

@@ -29,17 +29,17 @@ defense-in-depth for non-controller writers.
 ```
 
 `service_spec` is an opaque JSON blob storing the full Service
-object — selector + ports are the parts the advisor's
-NetworkPolicy generator and the mcp-server's compactor actually
-read. The chart's broker stores the full spec so future tooling
-can query other fields without a controller round-trip.
+object — selector + ports are the parts the advisor's and the
+llm-bridge's NetworkPolicy generators actually read. The chart's
+broker stores the full spec so future tooling can query other
+fields without a controller round-trip.
 
 ## GET /svc/info
 
 Return all service metadata rows. Ordered by
 `(svc_namespace ASC, svc_name ASC, svc_ip ASC)` for stable
 display. Used by the frontend's service-list view and the
-mcp-server's `cluster_pods` aggregator.
+llm-bridge's `list_services` tool.
 
 ```bash
 curl http://localhost:9090/svc/info

@@ -142,23 +142,17 @@ Usage: {{- include "kguardian.brokerAuthEnv" . | nindent 12 }}
 {{- end -}}
 
 {{/*
-AI-path component gates (SIMPLIFICATION-GOAL.md WS-D). ai.enabled=true turns
-on the whole assistant chain — llm-bridge, mcp-server, and the advisor
-service — with one value. The per-component `enabled` flags still work and
-remain the way to switch a single component on; these helpers OR the two so
-existing values files render identically. Truthy = non-empty string.
+AI-path component gate (SIMPLIFICATION-GOAL.md WS-D). ai.enabled=true turns
+on the assistant with one value. Since WS-B/WS-C the assistant is a single
+workload — llm-bridge runs the tools and policy/seccomp generation in-process,
+so the retired mcp-server and advisor-serve components no longer render. The
+per-component `llmBridge.enabled` flag still works and remains the way to
+switch the component on; this helper ORs the two so existing values files
+render identically. Truthy = non-empty string.
 Usage: {{- if include "kguardian.llmBridgeEnabled" . }}
 */}}
 {{- define "kguardian.llmBridgeEnabled" -}}
 {{- if or .Values.ai.enabled .Values.llmBridge.enabled }}true{{- end -}}
-{{- end -}}
-
-{{- define "kguardian.mcpServerEnabled" -}}
-{{- if or .Values.ai.enabled .Values.mcpServer.enabled }}true{{- end -}}
-{{- end -}}
-
-{{- define "kguardian.advisorEnabled" -}}
-{{- if or .Values.ai.enabled .Values.advisor.enabled }}true{{- end -}}
 {{- end -}}
 
 {{/*
