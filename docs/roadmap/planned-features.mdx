@@ -10,7 +10,7 @@ icon: "flag-checkered"
 The project shifted to **component-based releases** via
 [release-please](https://github.com/kguardian-dev/kguardian/blob/main/RELEASES.md)
 — each component (controller, broker, frontend, advisor, evaluator,
-mcp-server, llm-bridge, chart) versions independently as features
+llm-bridge, chart) versions independently as features
 land. The release-cohort sections below are kept as a feature-set
 narrative; for the current versions of each component, see
 [`.release-please-manifest.json`](https://github.com/kguardian-dev/kguardian/blob/main/.release-please-manifest.json).
@@ -66,8 +66,10 @@ narrative; for the current versions of each component, see
     - `kguardian audit promote` and `audit promote-cluster` CLI
       helpers for promoting an audit policy to an enforced
       `networking.k8s.io/v1.NetworkPolicy`.
-    - MCP server + LLM bridge — AI assistant tab in the UI brokers
-      cluster questions through the broker's read endpoints.
+    - LLM bridge — AI assistant tab in the UI brokers cluster
+      questions through the broker's read endpoints (in-process
+      tool calls; originally paired with a separate MCP server,
+      since retired and folded into the bridge).
 
     **Still planned (was tied to this cohort):**
     - AppArmor profile generation

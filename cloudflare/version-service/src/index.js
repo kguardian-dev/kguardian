@@ -38,7 +38,6 @@ const COMPONENTS = [
   "frontend",
   "advisor",
   "llm-bridge",
-  "mcp-server",
   "evaluator",
 ];
 

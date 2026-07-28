@@ -33,10 +33,10 @@ const allowedOrigin = process.env.ALLOWED_ORIGIN?.trim() || '*';
 app.use(cors({ origin: allowedOrigin }));
 app.use(express.json({ limit: '100kb' }));
 
-// Initialize broker client. Note: the class is named "McpClient"
-// for historical reasons; today all tool calls route through the MCP
-// server. The MCP server URL is read inside McpClient from
-// MCP_SERVER_URL or its hardcoded default — no constructor arg needed.
+// Initialize the in-process assistant. Note: the class is named "McpClient"
+// for historical reasons; it no longer talks to a separate MCP server —
+// all 12 tools execute in-process (src/tools/*), reaching the broker
+// directly. No constructor arg needed.
 const mcpClient = new McpClient();
 
 /**

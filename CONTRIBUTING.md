@@ -76,7 +76,7 @@ Before requesting review:
 
 ## Local development setup
 
-The monorepo builds via [`Taskfile.yaml`](./Taskfile.yaml) (run `task --list` for all targets) and each component lives in its own source directory: `controller/`, `broker/`, `frontend/`, `advisor/`, `evaluator/`, `mcp-server/`, `llm-bridge/`, `charts/`.
+The monorepo builds via [`Taskfile.yaml`](./Taskfile.yaml) (run `task --list` for all targets) and each component lives in its own source directory: `controller/`, `broker/`, `frontend/`, `advisor/`, `evaluator/`, `llm-bridge/`, `charts/`.
 
 Quick start:
 

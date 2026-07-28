@@ -15,16 +15,15 @@ kguardian uses **component-based versioning** where each component can be releas
 
 ## Components
 
-The project consists of eight independently versioned components:
+The project consists of seven independently versioned components:
 
 1. **Controller** - eBPF-based monitoring DaemonSet (Rust)
 2. **Broker** - API server for telemetry storage (Rust)
 3. **Frontend** - Web interface for visualization (React/TypeScript)
 4. **Advisor** - kubectl plugin for policy generation (Go)
 5. **Evaluator** - Audit-mode NetworkPolicy evaluator (Go)
-6. **MCP Server** - Model Context Protocol server bridging LLMs to broker data (Go)
-7. **LLM Bridge** - HTTP shim wiring web UI requests to LLM providers via the MCP Server (TypeScript)
-8. **Chart** - Helm chart for Kubernetes deployment
+6. **LLM Bridge** - HTTP shim wiring web UI requests to LLM providers, running the AI assistant's tools and policy/seccomp generation in-process (TypeScript)
+7. **Chart** - Helm chart for Kubernetes deployment
 
 The component list and release-type wiring authoritative source is
 `release-please-config.json` at the repository root — keep that file
@@ -42,7 +41,6 @@ Each component maintains its version in two places:
    - Advisor: Set via ldflags during build
    - Evaluator: `evaluator/go.mod` (Go module version not bumped; version
      is sourced from the VERSION file at build time)
-   - MCP Server: `mcp-server/go.mod` (same as Evaluator)
    - LLM Bridge: `llm-bridge/package.json`
    - Chart: `charts/kguardian/Chart.yaml`
 
@@ -60,7 +58,6 @@ Each component uses a **prefixed tag** format: `<component>/v<semver>`
   user-facing product is the "Web UI")
 - `advisor/v1.1.0` - Advisor releases
 - `evaluator/v1.0.0` - Evaluator releases
-- `mcp-server/v1.0.0` - MCP Server releases
 - `llm-bridge/v1.0.0` - LLM Bridge releases
 - `chart/v1.0.0` - Helm chart releases
 
@@ -144,7 +141,6 @@ Once the Release PR is merged, release-please automatically:
    - **Broker**: Docker image to `ghcr.io/kguardian-dev/kguardian/broker:vX.Y.Z`
    - **Frontend**: Docker image to `ghcr.io/kguardian-dev/kguardian/frontend:vX.Y.Z`
    - **Evaluator**: Docker image to `ghcr.io/kguardian-dev/kguardian/evaluator:vX.Y.Z`
-   - **MCP Server**: Docker image to `ghcr.io/kguardian-dev/kguardian/mcp-server:vX.Y.Z`
    - **LLM Bridge**: Docker image to `ghcr.io/kguardian-dev/kguardian/llm-bridge:vX.Y.Z`
    - **Advisor**: Binaries to GitHub Releases (linux/darwin, amd64/arm64) with GitHub build-provenance attestations — verify with `gh attestation verify advisor-<os>-<arch> --repo kguardian-dev/kguardian` — plus a Docker image to `ghcr.io/kguardian-dev/kguardian/advisor` via `advisor-image-release.yaml`
    - **Chart**: Helm package to `oci://ghcr.io/kguardian-dev/charts/kguardian:X.Y.Z`
@@ -283,7 +279,6 @@ All components follow [Semantic Versioning 2.0.0](https://semver.org/):
     "frontend": "1.0.0",
     "advisor": "1.0.0",
     "evaluator": "1.0.0",
-    "mcp-server": "1.0.0",
     "llm-bridge": "1.0.0",
     "charts/kguardian": "1.0.0"
   }
@@ -310,7 +305,6 @@ Each component maintains its own CHANGELOG.md:
 - `broker/CHANGELOG.md`
 - `frontend/CHANGELOG.md`
 - `evaluator/CHANGELOG.md`
-- `mcp-server/CHANGELOG.md`
 - `llm-bridge/CHANGELOG.md`
 - `advisor/CHANGELOG.md`
 - `charts/kguardian/CHANGELOG.md`
@@ -333,7 +327,6 @@ These are automatically updated by release-please based on conventional commits.
 - `.github/workflows/frontend-release.yaml` - Triggered by `frontend/v*` tags or workflow_dispatch
 - `.github/workflows/advisor-release.yml` - Triggered by workflow_dispatch only (release-please dispatches it with tag + sha inputs); uses a draft-release flow — the draft GitHub release is published once the binaries are attached
 - `.github/workflows/evaluator-release.yaml` - Triggered by `evaluator/v*` tags or workflow_dispatch
-- `.github/workflows/mcp-server-release.yaml` - Triggered by `mcp-server/v*` tags or workflow_dispatch
 - `.github/workflows/llm-bridge-release.yaml` - Triggered by `llm-bridge/v*` tags or workflow_dispatch
 - `.github/workflows/charts-release.yaml` - Triggered by `chart/v*` tags or workflow_dispatch
 

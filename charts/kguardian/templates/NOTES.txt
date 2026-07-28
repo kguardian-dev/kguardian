@@ -78,7 +78,7 @@ For cluster-scoped policies (AuditClusterNetworkPolicy):
 {{- end }}
 {{- if include "kguardian.llmBridgeEnabled" . }}
 
-AI assistant: ENABLED (llm-bridge{{ if include "kguardian.mcpServerEnabled" . }} + mcp-server{{ end }}{{ if include "kguardian.advisorEnabled" . }} + advisor{{ end }}).
+AI assistant: ENABLED (llm-bridge — tools and policy/seccomp generation run in-process).
 {{- if .Values.ai.provider }}
 Provider: {{ .Values.ai.provider }}, key from Secret "{{ .Values.ai.secret }}".
 {{- else }}

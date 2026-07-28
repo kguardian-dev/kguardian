@@ -5,6 +5,5 @@
   "advisor": "1.6.2",
   "charts/kguardian": "1.16.0",
   "llm-bridge": "1.5.0",
-  "mcp-server": "1.5.1",
   "evaluator": "0.3.3"
 }

@@ -4,13 +4,11 @@
 # Toggle individual components on/off
 enable_controller: true
 enable_llm_bridge: true
-enable_mcp_server: true
 
 # Local builds — set to true to build from source with live-reload.
 # When false (default), the component uses the latest published image from GHCR.
 build_broker: true
 build_llm_bridge: false
-build_mcp_server: false
 build_controller: false
 
 # LLM provider API keys — only enabled providers will have secrets created.

@@ -73,32 +73,7 @@ The following table lists the configurable parameters of the kguardian chart and
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
-| advisor.affinity | object | `{}` | Affinity rules for advisor pods |
-| advisor.container.port | int | `8083` | Advisor HTTP port (distinct from the evaluator's 8082) |
-| advisor.enabled | bool | `false` | Deploy the advisor HTTP service. When false, the workload, Service, ServiceAccount, and NetworkPolicy are skipped (the CLI/kubectl-plugin is unaffected — it does not use this service). |
-| advisor.env | list | `[]` | Additional environment variables for the advisor process |
-| advisor.image.pullPolicy | string | `"IfNotPresent"` | Advisor image pull policy |
-| advisor.image.repository | string | `"ghcr.io/kguardian-dev/kguardian/advisor"` | Advisor container image repository |
-| advisor.image.sha | string | `""` | Overrides the image tag using SHA digest |
-| advisor.image.tag | string | `"v1.6.2"` | Advisor version tag (auto-updated by Renovate, like the other images) |
-| advisor.imagePullSecrets | list | `[]` | List of image pull secrets for private registries |
-| advisor.networkPolicy | object | `{"enabled":false}` | Restrict who may reach the unauthenticated advisor HTTP API. When enabled, only the mcp-server pod may connect. Requires a NetworkPolicy- enforcing CNI (Cilium, Calico, ...). |
-| advisor.nodeSelector | object | `{}` | Node selector for advisor pods |
-| advisor.podAnnotations | object | `{}` | Annotations to add to advisor pods |
-| advisor.podSecurityContext | object | `{"runAsNonRoot":true,"seccompProfile":{"type":"RuntimeDefault"}}` | Advisor pod security context. Runs as non-root user (nonroot:65532). |
-| advisor.replicaCount | int | `1` | Number of advisor replicas. The service is stateless (it reads the broker and synthesises a policy per request), so it scales freely. |
-| advisor.resources | object | `{"limits":{"memory":"128Mi"},"requests":{"cpu":"10m","memory":"32Mi"}}` | Advisor pod resource requests and limits |
-| advisor.securityContext | object | `{"allowPrivilegeEscalation":false,"capabilities":{"drop":["ALL"]},"privileged":false,"readOnlyRootFilesystem":true,"runAsNonRoot":true}` | Advisor container security context. Distroless nonroot + read-only root. |
-| advisor.service.name | string | `"kguardian-advisor"` | Advisor service name |
-| advisor.service.port | int | `8083` | Advisor service port |
-| advisor.service.type | string | `"ClusterIP"` | Advisor service type |
-| advisor.serviceAccount.annotations | object | `{}` | Annotations to add to the service account |
-| advisor.serviceAccount.automountServiceAccountToken | bool | `false` | The advisor service only talks to the broker over HTTP; it does not call the Kubernetes API, so no token is mounted. |
-| advisor.serviceAccount.create | bool | `true` | Specifies whether a service account should be created |
-| advisor.serviceAccount.name | string | `""` | The name of the service account to use |
-| advisor.tolerations | list | `[]` | Tolerations for advisor pods |
-| advisor.topologySpreadConstraints | list | `[]` | Topology spread constraints for advisor pods |
-| ai.enabled | bool | `false` | Enable the full AI assistant path (llm-bridge + mcp-server + advisor) with one toggle |
+| ai.enabled | bool | `false` | Enable the AI assistant with one toggle. The assistant is a single workload (llm-bridge) that runs the tools and policy/seccomp generation in-process — no separate mcp-server or advisor-serve components. |
 | ai.provider | string | `""` | LLM provider for the assistant: one of "openai", "anthropic", "gemini", "copilot". With `ai.secret` this is the one-line way to wire a provider — the chart injects the right env var (OPENAI_API_KEY / ANTHROPIC_API_KEY / GOOGLE_API_KEY / GITHUB_TOKEN) from your secret. Leave empty to configure providers individually via llmBridge.secrets.* instead. |
 | ai.secret | string | `""` | Name of an existing Secret holding the provider API key under the key `api-key` (override with llmBridge.secrets.keyName). Required when `ai.provider` is set. Create it once:   kubectl create secret generic my-llm-key --from-literal=api-key=sk-... |
 | broker.affinity | object | `{}` | Affinity rules for broker pod assignment |
@@ -107,7 +82,7 @@ The following table lists the configurable parameters of the kguardian chart and
 | broker.audit.retention.batchSize | int | `5000` | Rows deleted per batched DELETE. The retention loop issues one DELETE per batch — bounded lock hold and bounded WAL chunk — and loops until the window is empty or a per-pass cap is hit. Clamped in the broker to [100, 100000]; values outside that range either round-trip the DB for trivial work (too small) or behave like an unbatched DELETE (too large). |
 | broker.audit.retention.days | int | `30` | Retain audit_verdicts rows for this many days. Older rows are pruned by a tokio task in the broker that wakes every `intervalSeconds`. Set to 0 to disable retention entirely (table grows unbounded). |
 | broker.audit.retention.intervalSeconds | int | `3600` | How often the cleanup pass runs, in seconds. Minimum 60. |
-| broker.auth | object | `{"enabled":false,"existingSecret":"","secretKey":"token"}` | Optional bearer-token auth on the broker HTTP API. The broker API is otherwise unauthenticated; enabling this requires every controller / mcp-server request to carry a shared secret, closing the forged-row / unauthorized-read exposure for those server-to-server paths. Opt-in (default false) for backward compatibility.  NOTE: the frontend talks to the broker directly from the browser and cannot safely hold a static token, so enabling auth does not cover the frontend path — keep the frontend on a trusted network or front the broker with an authenticating proxy for browser traffic.  /health and /metrics stay open (kubelet probes + Prometheus can't send the token). Provide the token yourself in a Secret (not generated by the chart, so it's stable across upgrades):   kubectl -n <ns> create secret generic kguardian-broker-auth \     --from-literal=token="$(openssl rand -hex 32)" |
+| broker.auth | object | `{"enabled":false,"existingSecret":"","secretKey":"token"}` | Optional bearer-token auth on the broker HTTP API. The broker API is otherwise unauthenticated; enabling this requires every controller / llm-bridge request to carry a shared secret, closing the forged-row / unauthorized-read exposure for those server-to-server paths. Opt-in (default false) for backward compatibility.  NOTE: the frontend talks to the broker directly from the browser and cannot safely hold a static token, so enabling auth does not cover the frontend path — keep the frontend on a trusted network or front the broker with an authenticating proxy for browser traffic.  /health and /metrics stay open (kubelet probes + Prometheus can't send the token). Provide the token yourself in a Secret (not generated by the chart, so it's stable across upgrades):   kubectl -n <ns> create secret generic kguardian-broker-auth \     --from-literal=token="$(openssl rand -hex 32)" |
 | broker.auth.existingSecret | string | `""` | Name of an existing Secret holding the shared token. REQUIRED when enabled=true. |
 | broker.auth.secretKey | string | `"token"` | Key within that Secret. |
 | broker.autoscaling.enabled | bool | `false` | Enable horizontal pod autoscaling for broker |
@@ -136,7 +111,7 @@ The following table lists the configurable parameters of the kguardian chart and
 | broker.metrics.serviceMonitor.port | string | `"http"` | Service port name to scrape. |
 | broker.metrics.serviceMonitor.scrapeTimeout | string | `"10s"` | Scrape timeout. |
 | broker.nameOverride | string | `""` | Override the name of the broker resources |
-| broker.networkPolicy | object | `{"allowMetricsFrom":[],"allowedNodeCIDRs":[],"enabled":false}` | Ingress NetworkPolicy for the broker. The broker HTTP API is unauthenticated, so this restricts which in-cluster sources may reach it (mcp-server, frontend, the helm-test pod via podSelector; the controller via allowedNodeCIDRs). Ingress-only — the broker's own egress (DB, DNS, evaluator) is never restricted. Requires a NetworkPolicy-enforcing CNI (Cilium, Calico, ...).  OPT-IN (default false) on purpose: the controller is a hostNetwork eBPF DaemonSet, so it posts to the broker from the NODE IP and a podSelector can NEVER match it. Enabling the policy without listing your node network in allowedNodeCIDRs will BLOCK the controller and stall its rollout. Enable only after setting allowedNodeCIDRs.  CAVEAT (validated on Cilium): the allowedNodeCIDRs ipBlock needed for the hostNetwork controller is a coarse allow — on some CNIs (Cilium) it also admits OTHER in-cluster pods, so this policy is defence-in- depth, NOT airtight isolation. The pod clients (mcp-server/frontend) are precisely scoped via podSelector; the controller allowance is not. For strict broker isolation prefer a CNI-native policy (e.g. a CiliumNetworkPolicy using fromEntities: [host, remote-node]) or, the real fix, authentication on the broker API. |
+| broker.networkPolicy | object | `{"allowMetricsFrom":[],"allowedNodeCIDRs":[],"enabled":false}` | Ingress NetworkPolicy for the broker. The broker HTTP API is unauthenticated, so this restricts which in-cluster sources may reach it (llm-bridge, frontend, the helm-test pod via podSelector; the controller via allowedNodeCIDRs). Ingress-only — the broker's own egress (DB, DNS, evaluator) is never restricted. Requires a NetworkPolicy-enforcing CNI (Cilium, Calico, ...).  OPT-IN (default false) on purpose: the controller is a hostNetwork eBPF DaemonSet, so it posts to the broker from the NODE IP and a podSelector can NEVER match it. Enabling the policy without listing your node network in allowedNodeCIDRs will BLOCK the controller and stall its rollout. Enable only after setting allowedNodeCIDRs.  CAVEAT (validated on Cilium): the allowedNodeCIDRs ipBlock needed for the hostNetwork controller is a coarse allow — on some CNIs (Cilium) it also admits OTHER in-cluster pods, so this policy is defence-in- depth, NOT airtight isolation. The pod clients (llm-bridge/frontend) are precisely scoped via podSelector; the controller allowance is not. For strict broker isolation prefer a CNI-native policy (e.g. a CiliumNetworkPolicy using fromEntities: [host, remote-node]) or, the real fix, authentication on the broker API. |
 | broker.networkPolicy.allowMetricsFrom | list | `[]` | Extra ingress peers allowed to reach the broker HTTP port. The /metrics endpoint shares that port, so when broker.metrics.serviceMonitor.enabled is true, add your Prometheus here. Each entry is a standard NetworkPolicyPeer. |
 | broker.networkPolicy.allowedNodeCIDRs | list | `[]` | Node network CIDR(s) the controller DaemonSet runs on. Required when enabled=true, since the hostNetwork controller reaches the broker from its node IP. e.g. ["10.0.0.0/16"] or per-node /32s. |
 | broker.nodeSelector | object | `{"kubernetes.io/os":"linux"}` | Node labels for the kguardian broker pod assignment |
@@ -366,47 +341,6 @@ The following table lists the configurable parameters of the kguardian chart and
 | llmBridge.startupProbe | object | `{}` | Startup probe. Empty by default — opt in when slow startup is expected. |
 | llmBridge.tolerations | list | `[]` | Tolerations for the kguardian llm-bridge pod assignment |
 | llmBridge.topologySpreadConstraints | list | `[]` | Topology spread constraints applied to llm-bridge pods. |
-| mcpServer.affinity | object | `{}` | Affinity rules for mcp-server pod assignment |
-| mcpServer.autoscaling.enabled | bool | `false` | Enable horizontal pod autoscaling for mcp-server |
-| mcpServer.autoscaling.maxReplicas | int | `5` | Maximum number of mcp-server replicas |
-| mcpServer.autoscaling.minReplicas | int | `1` | Minimum number of mcp-server replicas |
-| mcpServer.autoscaling.targetCPUUtilizationPercentage | int | `80` | Target CPU utilization percentage for autoscaling |
-| mcpServer.container.port | int | `8081` | MCP Server container HTTP port for StreamableHTTP transport |
-| mcpServer.enabled | bool | `false` | Enable MCP Server for external integrations |
-| mcpServer.env | list | `[]` | Additional environment variables for mcp-server |
-| mcpServer.fullnameOverride | string | `""` | Override the full name of the mcp-server resources |
-| mcpServer.image.pullPolicy | string | `"IfNotPresent"` | MCP Server image pull policy |
-| mcpServer.image.repository | string | `"ghcr.io/kguardian-dev/kguardian/mcp-server"` | MCP Server container image repository |
-| mcpServer.image.sha | string | `""` | Overrides the image tag using SHA digest |
-| mcpServer.image.tag | string | `"1.5.1"` | MCP Server version tag (auto-updated by release-please) |
-| mcpServer.imagePullSecrets | list | `[]` | List of image pull secrets for private registries |
-| mcpServer.metrics.serviceMonitor.enabled | bool | `false` | Create a ServiceMonitor for prometheus-operator. mcp-server has a /metrics endpoint configured via kmcp.yaml; toggle this on once the exposed port matches `service.port`. |
-| mcpServer.metrics.serviceMonitor.interval | string | `"30s"` |  |
-| mcpServer.metrics.serviceMonitor.labels | object | `{}` |  |
-| mcpServer.metrics.serviceMonitor.path | string | `"/metrics"` |  |
-| mcpServer.metrics.serviceMonitor.port | string | `"http"` |  |
-| mcpServer.metrics.serviceMonitor.scrapeTimeout | string | `"10s"` |  |
-| mcpServer.nameOverride | string | `""` | Override the name of the mcp-server resources |
-| mcpServer.nodeSelector | object | `{"kubernetes.io/os":"linux"}` | Node labels for the kguardian mcp-server pod assignment |
-| mcpServer.podAnnotations | object | `{}` | Annotations to add to mcp-server pods |
-| mcpServer.podDisruptionBudget.enabled | bool | `false` | Create a PodDisruptionBudget for the mcp-server. Defaults to false; enable when running >1 replica. |
-| mcpServer.podDisruptionBudget.maxUnavailable | string | `""` |  |
-| mcpServer.podDisruptionBudget.minAvailable | int | `1` |  |
-| mcpServer.podSecurityContext | object | `{"fsGroup":1000,"fsGroupChangePolicy":"OnRootMismatch","runAsGroup":1000,"runAsUser":1000,"seccompProfile":{"type":"RuntimeDefault"},"supplementalGroups":[1000]}` | MCP Server pod security context. Runs as non-root user (mcp:1000) |
-| mcpServer.priorityClassName | string | `""` | Priority class to be used for the kguardian mcp-server pods |
-| mcpServer.replicaCount | int | `1` | Number of mcp-server replicas to deploy (ignored if useKmcp is true and autoscaling is enabled) |
-| mcpServer.resources | object | `{"limits":{"memory":"256Mi"},"requests":{"cpu":"50m","memory":"128Mi"}}` | MCP Server pod resource requests and limits |
-| mcpServer.securityContext | object | `{"allowPrivilegeEscalation":false,"capabilities":{"drop":["ALL"]},"privileged":false,"readOnlyRootFilesystem":true,"runAsNonRoot":true,"runAsUser":1000}` | MCP Server container security context. Hardened with read-only root filesystem |
-| mcpServer.service.name | string | `"kguardian-mcp-server"` | MCP Server service name |
-| mcpServer.service.port | int | `8081` | MCP Server service port |
-| mcpServer.service.type | string | `"ClusterIP"` | MCP Server service type |
-| mcpServer.serviceAccount.annotations | object | `{}` | Annotations to add to the service account |
-| mcpServer.serviceAccount.automountServiceAccountToken | bool | `false` | Automount API credentials for a service account |
-| mcpServer.serviceAccount.create | bool | `true` | Specifies whether a service account should be created |
-| mcpServer.serviceAccount.name | string | `""` | The name of the service account to use. If not set and create is true, a name is generated using the fullname template |
-| mcpServer.startupProbe | object | `{}` | Startup probe. Empty by default — opt in when slow startup is expected. |
-| mcpServer.tolerations | list | `[]` | Tolerations for the kguardian mcp-server pod assignment |
-| mcpServer.topologySpreadConstraints | list | `[]` | Topology spread constraints applied to mcp-server pods. |
 | namespace.annotations | object | `{}` | Annotations to add to the namespace |
 | namespace.labels | object | `{}` | Labels to add to the namespace |
 | namespace.name | string | `""` | Namespace name. If empty, uses the release namespace |

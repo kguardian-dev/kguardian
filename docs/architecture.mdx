@@ -6,7 +6,7 @@ icon: "sitemap"
 
 ## System Architecture
 
-kguardian is designed as a distributed system: four core components (Controller, Broker, CLI, UI) plus an audit-mode evaluator (deployed by default) and an optional AI assistant (llm-bridge + mcp-server) work together to observe, analyze, and secure your Kubernetes workloads.
+kguardian is designed as a distributed system: four core components (Controller, Broker, CLI, UI) plus an audit-mode evaluator (deployed by default) and an optional AI assistant (llm-bridge, running tools and policy/seccomp generation in-process) work together to observe, analyze, and secure your Kubernetes workloads.
 
 ```mermaid
 graph TB
@@ -95,7 +95,7 @@ graph TB
   </Card>
 
   <Card title="AI Assistant (Optional)" icon="robot" iconType="duotone">
-    **Deployment:** llm-bridge + mcp-server (opt-in via chart values)
+    **Deployment:** llm-bridge (opt-in via chart values)
 
     **Purpose:** Natural-language queries and conversational policy generation
   </Card>
@@ -306,8 +306,7 @@ kguardian-frontend-cccccc-xxxxx
 # Deployment: Evaluator (on by default; disable with evaluator.enabled=false)
 kguardian-evaluator-dddddd-wwwww
 
-# Deployment: MCP server + LLM bridge (when AI assistant is enabled)
-kguardian-mcp-server-eeeeee-vvvvv
+# Deployment: LLM bridge (when AI assistant is enabled)
 kguardian-llm-bridge-ffffff-uuuuu
 ```
 

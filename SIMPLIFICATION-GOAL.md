@@ -158,6 +158,26 @@ shipped — but the freeze stops the untidiness from here on.
 
 ## 7. Progress log
 
+- 2026-07-28 — **Gated removal EXECUTED — restructure complete.** Owner directed
+  accelerating to completion; the canary had held healthy since 2026-07-26 (0
+  errors/hr, both llm-bridge pods stable), so the 7-day G5 window was compressed
+  to the ~3 clean days observed and the final removal was cut. On branch
+  `feat/retire-mcp-server-advisor-serve` (PR): deleted the whole `mcp-server/`
+  tree, the advisor in-cluster **serve** mode (`cmd/serve.go`, `Dockerfile`) and
+  its image pipeline (`advisor-image-release.yaml` + the CLI-release dispatch
+  step), and the mcp-server + advisor chart template dirs. The advisor **CLI**
+  (`gen`/`audit`/`version`) is untouched and still a release unit. Contract
+  fixtures relocated `mcp-server/tools/testdata/contract` → `test/fixtures/contract`;
+  the llm-bridge parity test (now the sole G1 gate) repointed and green. Broker
+  NetworkPolicy peer repointed mcp-server → llm-bridge (fixes a latent block of
+  the in-process broker reader). Release units **8→7** (mcp-server dropped from
+  release-please-config + manifest + version-service; advisor stays). Workloads
+  **8→6** (chart renders 5 Deployments + controller DaemonSet with AI on; was 7+1).
+  Net diff +155/−6162 across 84 files. **All gates green:** advisor build/vet/test,
+  llm-bridge build/lint/76-tests, G4 (7→5 counts), helm lint/template. DoD: **8/8
+  rows met.** Remaining: land the PR + cut the single coherent chart release
+  (owner-gated — not auto-merged).
+
 - 2026-07-27 — **Release-unit target corrected 8→7 (from 6)** during canary-wait
   verification: keeping the advisor kubectl-plugin CLI means the advisor stays a
   release-please component; only mcp-server is fully retired. Forcing "6" would
