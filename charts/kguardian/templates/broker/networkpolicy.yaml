@@ -35,15 +35,14 @@ spec:
         - podSelector:
             matchLabels:
               app.kubernetes.io/name: kguardian
-        # mcp-server — reads telemetry to answer MCP tool queries.
+        # llm-bridge — the AI assistant reads telemetry and synthesises
+        # policies/seccomp profiles in-process (WS-B/WS-C), so it is now the
+        # sole assistant-side caller of the broker (the retired mcp-server and
+        # advisor-serve peers used to sit here).
+        {{- if include "kguardian.llmBridgeEnabled" . }}
         - podSelector:
             matchLabels:
-              app.kubernetes.io/name: {{ .Values.mcpServer.service.name }}
-        {{- if include "kguardian.advisorEnabled" . }}
-        # advisor service — reads traffic/syscalls to synthesise policies.
-        - podSelector:
-            matchLabels:
-              app.kubernetes.io/name: {{ .Values.advisor.service.name }}
+              app.kubernetes.io/name: {{ .Values.llmBridge.service.name }}
         {{- end }}
         # frontend — reads telemetry directly for the dashboard.
         - podSelector:

@@ -70,15 +70,3 @@ llmBridge:
     requests:
       cpu: 50m
       memory: 128Mi
-
-mcpServer:
-  enabled: true
-  replicaCount: 1
-  image: {}
-  resources:
-    limits:
-      cpu: 100m
-      memory: 128Mi
-    requests:
-      cpu: 25m
-      memory: 64Mi

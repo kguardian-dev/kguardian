@@ -11,9 +11,9 @@ on:
       - 'broker/**'
       - 'frontend/**'
       - 'llm-bridge/**'
-      - 'mcp-server/**'
       - 'evaluator/**'
       - 'charts/**'
+      - 'test/fixtures/**'
       - '.github/workflows/pr-build.yaml'
 
 permissions:
@@ -30,7 +30,6 @@ jobs:
       broker: ${{ steps.changes.outputs.broker }}
       frontend: ${{ steps.changes.outputs.frontend }}
       llm-bridge: ${{ steps.changes.outputs.llm-bridge }}
-      mcp-server: ${{ steps.changes.outputs.mcp-server }}
       evaluator: ${{ steps.changes.outputs.evaluator }}
       charts: ${{ steps.changes.outputs.charts }}
     steps:
@@ -53,8 +52,7 @@ jobs:
               - 'test/fixtures/generators/**'
             llm-bridge:
               - 'llm-bridge/**'
-            mcp-server:
-              - 'mcp-server/**'
+              - 'test/fixtures/**'
             evaluator:
               - 'evaluator/**'
             charts:
@@ -712,136 +710,6 @@ jobs:
           npm ci
           npm test
 
-  # Build MCP Server
-  build-mcp-server:
-    needs: detect-changes
-    if: needs.detect-changes.outputs.mcp-server == 'true'
-    # Both architectures always build on PRs (SIMPLIFICATION-GOAL.md WS-E:
-    # amd64 + arm64 are a product guarantee at every pipeline stage). Each
-    # arch builds natively - arm64 on GitHub's free arm64 runners - instead
-    # of under QEMU emulation, which cost up to 45 minutes per component.
-    # push-mcp-server merges the two per-arch tags into the pr-N manifest.
-    strategy:
-      matrix:
-        include:
-          - platform: linux/amd64
-            arch: amd64
-            runner: ubuntu-latest
-          - platform: linux/arm64
-            arch: arm64
-            runner: ubuntu-24.04-arm
-    runs-on: ${{ matrix.runner }}
-    steps:
-      - name: Checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4
-        with:
-          install: true
-          version: latest
-
-      - name: Login to GHCR
-        uses: docker/login-action@abd2ef45e78c5afb21d64d4ca52ee8550d9572c7 # v4
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Build and Push (per-arch)
-        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7
-        with:
-          context: mcp-server/
-          file: mcp-server/Dockerfile
-          platforms: ${{ matrix.platform }}
-          push: true
-          tags: |
-            ghcr.io/kguardian-dev/kguardian/mcp-server:pr-${{ github.event.pull_request.number }}-${{ matrix.arch }}
-          cache-from: type=gha,scope=mcp-server-${{ matrix.arch }}
-          cache-to: type=gha,mode=max,scope=mcp-server-${{ matrix.arch }}
-
-  push-mcp-server:
-    runs-on: ubuntu-latest
-    needs: build-mcp-server
-    steps:
-      - name: Login to GHCR
-        uses: docker/login-action@abd2ef45e78c5afb21d64d4ca52ee8550d9572c7 # v4
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Merge per-arch tags into the pr-N manifest
-        id: build
-        env:
-          PR_NUMBER: ${{ github.event.pull_request.number }}
-        run: |
-          img="ghcr.io/kguardian-dev/kguardian/mcp-server"
-          docker buildx imagetools create -t "$img:pr-${PR_NUMBER}" \
-            "$img:pr-${PR_NUMBER}-amd64" "$img:pr-${PR_NUMBER}-arm64"
-          digest=$(docker buildx imagetools inspect "$img:pr-${PR_NUMBER}" --format '{{.Manifest.Digest}}')
-          echo "digest=$digest" >> "$GITHUB_OUTPUT"
-
-      - name: Update or create PR comment
-        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9
-        with:
-          script: |
-            const marker = '✅ MCP Server image built and pushed:';
-            const digest = '${{ steps.build.outputs.digest }}';
-            const body = `${marker}
-            \`\`\`
-            ghcr.io/kguardian-dev/kguardian/mcp-server:pr-${{ github.event.pull_request.number }}
-            \`\`\`
-            **Digest:** \`${digest}\``;
-
-            const comments = await github.rest.issues.listComments({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              issue_number: context.issue.number,
-            });
-            const existing = comments.data.find(c => c.body.includes(marker));
-
-            if (existing) {
-              await github.rest.issues.updateComment({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                comment_id: existing.id,
-                body: body,
-              });
-            } else {
-              await github.rest.issues.createComment({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                issue_number: context.issue.number,
-                body: body,
-              });
-            }
-
-  # Test MCP server (go vet / go test), including the G1 tool-contract
-  # snapshot: testdata/contract goldens pin the wire-visible MCP contract
-  # (tools/list + per-tool call results) that any reimplementation of the
-  # tool set must reproduce byte-for-byte. SIMPLIFICATION-GOAL.md section 3.
-  # GOTOOLCHAIN=local + matrix >= go.mod per advisor-ci-gotchas.
-  test-mcp-server:
-    runs-on: ubuntu-latest
-    needs: detect-changes
-    if: needs.detect-changes.outputs.mcp-server == 'true'
-    steps:
-      - name: Checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-
-      - name: Set up Go
-        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
-        with:
-          go-version: '1.26.x'
-          cache-dependency-path: mcp-server/go.sum
-
-      - name: Vet and test (includes G1 contract snapshot)
-        working-directory: mcp-server
-        run: |
-          go vet ./...
-          go test ./... -timeout 300s
-
   # Build Evaluator
   build-evaluator:
     needs: detect-changes
@@ -951,7 +819,7 @@ jobs:
   build-helm-chart:
     runs-on: ubuntu-latest
     needs: detect-changes
-    if: needs.detect-changes.outputs.charts == 'true' || needs.detect-changes.outputs.controller == 'true' || needs.detect-changes.outputs.broker == 'true' || needs.detect-changes.outputs.frontend == 'true' || needs.detect-changes.outputs.llm-bridge == 'true' || needs.detect-changes.outputs.mcp-server == 'true' || needs.detect-changes.outputs.evaluator == 'true'
+    if: needs.detect-changes.outputs.charts == 'true' || needs.detect-changes.outputs.controller == 'true' || needs.detect-changes.outputs.broker == 'true' || needs.detect-changes.outputs.frontend == 'true' || needs.detect-changes.outputs.llm-bridge == 'true' || needs.detect-changes.outputs.evaluator == 'true'
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -1023,7 +891,7 @@ jobs:
   # Summary comment with testing instructions
   pr-summary:
     runs-on: ubuntu-latest
-    needs: [detect-changes, push-controller, build-broker, push-broker, build-frontend, push-frontend, build-llm-bridge, push-llm-bridge, build-mcp-server, push-mcp-server, build-evaluator, push-evaluator, build-helm-chart]
+    needs: [detect-changes, push-controller, build-broker, push-broker, build-frontend, push-frontend, build-llm-bridge, push-llm-bridge, build-evaluator, push-evaluator, build-helm-chart]
     if: always()
     steps:
       - name: Update or create summary comment
@@ -1035,14 +903,13 @@ jobs:
             const broker = '${{ needs.detect-changes.outputs.broker }}' === 'true';
             const frontend = '${{ needs.detect-changes.outputs.frontend }}' === 'true';
             const llmBridge = '${{ needs.detect-changes.outputs.llm-bridge }}' === 'true';
-            const mcpServer = '${{ needs.detect-changes.outputs.mcp-server }}' === 'true';
             const evaluator = '${{ needs.detect-changes.outputs.evaluator }}' === 'true';
             const charts = '${{ needs.detect-changes.outputs.charts }}' === 'true';
             const helmBuilt = '${{ needs.build-helm-chart.result }}' === 'success';
 
             let body = marker + '\n\n';
 
-            if (!controller && !broker && !frontend && !llmBridge && !mcpServer && !evaluator && !charts) {
+            if (!controller && !broker && !frontend && !llmBridge && !evaluator && !charts) {
               body += '⏭️ No component changes detected. Skipping builds.\n';
             } else {
               body += '### Built Images\n\n';
@@ -1058,9 +925,6 @@ jobs:
               }
               if (llmBridge) {
                 body += '✅ **LLM Bridge**: `ghcr.io/kguardian-dev/kguardian/llm-bridge:pr-${{ github.event.pull_request.number }}`\n';
-              }
-              if (mcpServer) {
-                body += '✅ **MCP Server**: `ghcr.io/kguardian-dev/kguardian/mcp-server:pr-${{ github.event.pull_request.number }}`\n';
               }
               if (evaluator) {
                 body += '✅ **Evaluator**: `ghcr.io/kguardian-dev/kguardian/evaluator:pr-${{ github.event.pull_request.number }}`\n';
@@ -1100,10 +964,6 @@ jobs:
               if (llmBridge) {
                 body += '  --set llmBridge.enabled=true \\\n';
                 body += '  --set llmBridge.image.tag=pr-${{ github.event.pull_request.number }} \\\n';
-              }
-              if (mcpServer) {
-                body += '  --set mcpServer.enabled=true \\\n';
-                body += '  --set mcpServer.image.tag=pr-${{ github.event.pull_request.number }} \\\n';
               }
 
               body += '  --wait\n';
