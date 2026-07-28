@@ -1,5 +1,31 @@
 # Changelog
 
+## [1.17.0](https://github.com/kguardian-dev/kguardian/compare/chart/v1.16.0...chart/v1.17.0) (2026-07-28)
+
+
+### Features
+
+* **chart:** one-line ai.provider + ai.secret for the assistant ([#1192](https://github.com/kguardian-dev/kguardian/issues/1192)) ([1e7c505](https://github.com/kguardian-dev/kguardian/commit/1e7c505963a720828c1b63a46c57b25c7ed901ff))
+* **chart:** single-workload AI assistant — retire mcp-server + advisor-serve ([e03d7bb](https://github.com/kguardian-dev/kguardian/commit/e03d7bb6d7ea25b09c626c7ea8e3376ffc239f05))
+* **chart:** single-workload AI assistant — retire mcp-server + advisor-serve ([5c7e4f1](https://github.com/kguardian-dev/kguardian/commit/5c7e4f187f2d712168058a17d196d5bc0e33a221))
+
+
+### Bug Fixes
+
+* **chart:** default llm-bridge image to 1.6.0 for the advisor-free assistant ([7ea8184](https://github.com/kguardian-dev/kguardian/commit/7ea8184a7c51aec9f1ae5559ebe193e19b58eb62))
+* **chart:** default llm-bridge image to 1.6.0 for the advisor-free assistant ([fc15494](https://github.com/kguardian-dev/kguardian/commit/fc154946a481ab65efae013d7760987df08869cc))
+* **deps:** update ghcr.io/kguardian-dev/kguardian/llm-bridge docker tag to v1.5.0 ([#1182](https://github.com/kguardian-dev/kguardian/issues/1182)) ([d7909a5](https://github.com/kguardian-dev/kguardian/commit/d7909a5a5e9cd531044d999378384b13a1d185ae))
+
+
+### Documentation
+
+* **chart:** UPGRADING note for the ai.* one-line keys ([#1193](https://github.com/kguardian-dev/kguardian/issues/1193)) ([17ad965](https://github.com/kguardian-dev/kguardian/commit/17ad965d419f793ae69c6404d9245e5a88e03683))
+
+
+### Code Refactoring
+
+* **llm-bridge:** generate network policies in-process, drop advisor dep ([#1190](https://github.com/kguardian-dev/kguardian/issues/1190)) ([a0851cc](https://github.com/kguardian-dev/kguardian/commit/a0851cc05cdf070ec18067dbe7d6bdfe5ba6a686))
+
 ## [1.16.0](https://github.com/kguardian-dev/kguardian/compare/chart/v1.15.0...chart/v1.16.0) (2026-07-26)
 
 
