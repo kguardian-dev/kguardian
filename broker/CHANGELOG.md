@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.12.3](https://github.com/kguardian-dev/kguardian/compare/broker/v1.12.2...broker/v1.12.3) (2026-07-28)
+
+
+### Code Refactoring
+
+* **broker:** remove dead single-row POST /pod/traffic endpoint ([#1166](https://github.com/kguardian-dev/kguardian/issues/1166)) ([6cc8b57](https://github.com/kguardian-dev/kguardian/commit/6cc8b57ccd02010b651ed578f8c9b46defb8073e))
+
 ## [1.12.2](https://github.com/kguardian-dev/kguardian/compare/broker/v1.12.1...broker/v1.12.2) (2026-07-21)
 
 
