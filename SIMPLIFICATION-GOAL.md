@@ -158,6 +158,21 @@ shipped — but the freeze stops the untidiness from here on.
 
 ## 7. Progress log
 
+- 2026-07-28 — **RELEASED + DEPLOYED to production — GOAL COMPLETE.** PR #1197
+  merged to main; the freeze was lifted and the whole held batch released:
+  **chart 1.17.0, llm-bridge 1.6.0, advisor 1.7.0, broker 1.12.3, frontend
+  1.11.2**. Caught a release landmine first: chart 1.17.0 removes advisor-serve,
+  so it must default to llm-bridge 1.6.0 (in-process generation) — 1.5.0 still
+  proxies to the deleted advisor; fixed via #1203 bumping the chart's default
+  llm-bridge tag (the `kguardian.imageTag` helper prepends `v`, so "1.6.0"
+  renders the real `v1.6.0` image). Deployed to cluster-00 via k8s-gitops (chart
+  1.16.0→1.17.0; llm-bridge canary pr-1190 → released v1.6.0@sha256:abf332e0;
+  dropped the dead mcpServer values block). **Verified live:** Flux reconciled,
+  HelmRelease 1.17.0 healthy + helm test passed, the kguardian-mcp-server
+  Deployment was pruned, llm-bridge is 2/2 on v1.6.0 with 0 errors, and
+  llm-bridge→broker /health returns 200 — the assistant runs advisor-free in
+  production. DoD 8/8 met and confirmed on the real cluster.
+
 - 2026-07-28 — **Gated removal EXECUTED — restructure complete.** Owner directed
   accelerating to completion; the canary had held healthy since 2026-07-26 (0
   errors/hr, both llm-bridge pods stable), so the 7-day G5 window was compressed
