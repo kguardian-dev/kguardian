@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.11.2](https://github.com/kguardian-dev/kguardian/compare/frontend/v1.11.1...frontend/v1.11.2) (2026-07-28)
+
+
+### Code Refactoring
+
+* **frontend:** single-source the AIAssistant chrome ([#1169](https://github.com/kguardian-dev/kguardian/issues/1169)) ([4be4d92](https://github.com/kguardian-dev/kguardian/commit/4be4d92797e29f322c8c807688df7c9933727413))
+
 ## [1.11.1](https://github.com/kguardian-dev/kguardian/compare/frontend/v1.11.0...frontend/v1.11.1) (2026-07-19)
 
 
