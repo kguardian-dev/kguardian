@@ -3,12 +3,14 @@ import type { ToolCall, ToolResult } from "./types/index.js";
 import { TOOL_DEFS } from "./tools/registry.js";
 import { executeInProcessTool } from "./tools/execute.js";
 
-// WS-B: the assistant's 12 tools run IN-PROCESS here — this class no longer
-// talks to a separate mcp-server over MCP transport; it reaches the broker and
-// advisor directly (src/tools/*). The public surface (executeTool,
-// getToolsCached, getSystemPrompt, parseContext) is unchanged so the provider
-// loops are untouched, and the src/tools parity test proves every tool
-// reproduces the mcp-server's outputs against the shared G1 fixtures.
+// WS-B/WS-C: the assistant's 12 tools run IN-PROCESS here — this class no
+// longer talks to a separate mcp-server over MCP transport. It reaches the
+// broker directly and generates network policies / seccomp profiles itself
+// (src/tools/*), so neither the mcp-server nor the advisor-serve service is
+// in the path. The public surface (executeTool, getToolsCached,
+// getSystemPrompt, parseContext) is unchanged so the provider loops are
+// untouched, and the src/tools parity test proves every tool reproduces the
+// former mcp-server's outputs against the shared contract fixtures.
 //
 // NOTE: the class keeps the name McpClient for a focused, reviewable diff; a
 // rename to `Assistant` is a trivial follow-up. The tool set is still exposed

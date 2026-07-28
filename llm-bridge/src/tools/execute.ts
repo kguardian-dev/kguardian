@@ -10,10 +10,11 @@ import {
   type PeerResolver, type PeerIdentity, type PodInfo, type TrafficRow,
 } from "./generators/networkpolicy.js";
 
-// In-process tool execution. Each of the 12 tools is a broker fetch + the exact
-// compaction the mcp-server applied, or in-process policy/seccomp generation.
-// The G1 parity test replays the shared backend fixtures through
-// executeInProcessTool and asserts broker tools match the Go server outputs.
+// In-process tool execution — this IS the assistant now (WS-B). Each of the 12
+// tools is a broker fetch + the exact compaction the former mcp-server applied,
+// or in-process policy/seccomp generation. The G1 parity test replays the
+// shared backend fixtures through executeInProcessTool and asserts broker
+// tools match the former Go server's outputs.
 
 const s = (v: unknown): string => (typeof v === "string" ? v : "");
 const enc = encodeURIComponent;
@@ -112,8 +113,9 @@ const KNOWN = new Set(TOOL_DEFS.map((t) => t.name));
 
 /** Execute a tool in-process. Generation tools return YAML/JSON text; broker
  *  tools return compacted JSON serialized to a string — matching what the LLM
- *  received from the mcp-server. Errors become an is-error result, not a throw,
- *  so one failing tool never aborts the model's tool round. */
+ *  received when tools ran via the former mcp-server. Errors become an
+ *  is-error result, not a throw, so one failing tool never aborts the
+ *  model's tool round. */
 export async function executeInProcessTool(name: string, args: Record<string, unknown>): Promise<InProcessResult> {
   if (!KNOWN.has(name)) {
     return { text: `unknown tool: ${name}`, isError: true };

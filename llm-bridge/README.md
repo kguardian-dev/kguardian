@@ -1,6 +1,6 @@
 # kguardian LLM Bridge
 
-A microservice that connects the kguardian frontend to LLM providers (OpenAI, Anthropic, Gemini, GitHub Copilot) and gives the model access to cluster data through the MCP server.
+A microservice that connects the kguardian frontend to LLM providers (OpenAI, Anthropic, Gemini, GitHub Copilot) and gives the model access to cluster data. All 12 assistant tools, plus NetworkPolicy and seccomp profile generation, run in-process — there's no separate backend service for the model to call.
 
 ## Architecture
 
@@ -9,18 +9,18 @@ A microservice that connects the kguardian frontend to LLM providers (OpenAI, An
 │   Frontend  │─────▶│ LLM Bridge  │─────▶│  LLM Provider    │
 │   (React)   │ SSE  │(TypeScript) │      │  (OpenAI/Claude/ │
 │             │      │             │      │  Gemini/Copilot) │
-└─────────────┘      └─────────────┘      └──────────────────┘
-                            │
-                            ▼
-                     ┌─────────────┐      ┌─────────────┐      ┌─────────────┐
-                     │ MCP Server  │─────▶│   Broker    │─────▶│ PostgreSQL  │
-                     │    (Go)     │      │   (Rust)    │      │             │
-                     └─────────────┘      └─────────────┘      └─────────────┘
+└─────────────┘      └──────┬──────┘      └──────────────────┘
+                             │ tool calls, in-process
+                             ▼
+                      ┌─────────────┐      ┌─────────────┐
+                      │   Broker    │─────▶│ PostgreSQL  │
+                      │   (Rust)    │      │             │
+                      └─────────────┘      └─────────────┘
 ```
 
-The bridge exists so LLM API keys stay isolated from the Broker, the AI workload can scale independently, and the Broker stays focused on telemetry. It selects the first provider with a configured API key, exposes streaming chat over SSE, and lets the model call the MCP server's 12 tools for live (polled) cluster data. See [mcp-server/README.md](../mcp-server/README.md#available-tools) for the full tool list.
+The bridge exists so LLM API keys stay isolated from the Broker, the AI workload can scale independently, and the Broker stays focused on telemetry. It selects the first provider with a configured API key and exposes streaming chat over SSE. When the model calls a tool, the bridge executes it in-process (`src/tools/execute.ts`): the 10 read tools fetch and compact data straight from the Broker (`src/tools/backendClient.ts`, `src/tools/compaction.ts`), and the 2 generation tools (`generate_network_policy`, `generate_seccomp_profile`) build the policy/profile locally from the same observed-traffic and observed-syscall data, using the same algorithms as the advisor CLI (`src/tools/generators/`). See `src/tools/registry.ts` for the full tool list and descriptions.
 
-Its only upstream is the MCP server (`MCP_SERVER_URL`) — the bridge never talks to the Broker directly.
+Its only upstream is the Broker (`BROKER_URL`) — there's no MCP transport hop and no advisor service call; tool execution and policy/seccomp generation both happen inside this process.
 
 ## Supported LLM Providers
 
@@ -45,7 +45,7 @@ Its only upstream is the MCP server (`MCP_SERVER_URL`) — the bridge never talk
 ### Prerequisites
 - Node.js 20+
 - npm
-- A reachable MCP server
+- A reachable Broker
 
 ### Install Dependencies
 ```bash
@@ -83,7 +83,7 @@ docker build -t ghcr.io/kguardian-dev/kguardian/llm-bridge .
 ### Run Container
 ```bash
 docker run -p 8080:8080 \
-  -e MCP_SERVER_URL=http://kguardian-mcp-server:8081 \
+  -e BROKER_URL=http://kguardian-broker:9090 \
   -e ANTHROPIC_API_KEY=sk-ant-... \
   ghcr.io/kguardian-dev/kguardian/llm-bridge
 ```
@@ -148,7 +148,8 @@ Upstream provider rate limits and overloads are surfaced as `429`/`503` so clien
 | Variable | Required | Description |
 |----------|----------|-------------|
 | `PORT` | No | Server port (default: 8080) |
-| `MCP_SERVER_URL` | No | MCP server URL (default: `http://kguardian-mcp-server.kguardian.svc.cluster.local:8081`) |
+| `BROKER_URL` | No | Broker URL (default: `http://kguardian-broker.kguardian.svc.cluster.local:9090`) |
+| `BROKER_AUTH_TOKEN` | No | Bearer token sent to the Broker, if the Broker requires auth |
 | `ALLOWED_ORIGIN` | No | CORS allowed origin (default: `*`) |
 | `LOG_LEVEL` | No | Log level (default: `info`) |
 | `OPENAI_API_KEY` | No* | OpenAI API key |
@@ -203,17 +204,12 @@ curl http://localhost:8080/health
 - Ensure at least one API key environment variable is set
 - Check the `/health` endpoint (`hasProvider` should be `true`)
 
-### Connection to MCP server fails
-- Verify `MCP_SERVER_URL` is correct
-- Ensure MCP server is running: `kubectl get pods -n kguardian | grep mcp-server`
-- Check MCP server logs: `kubectl logs -n kguardian deployment/kguardian-mcp-server`
-- Verify network policies allow llm-bridge → mcp-server communication
-- Look for MCP connection messages in llm-bridge startup logs
-
 ### Tools not working / LLM can't access data
-- Check that MCP server successfully connected (look for "Connected to MCP server" in logs)
-- Verify MCP server can reach the Broker
-- Check that all 12 tools are registered: review MCP server logs for tool registration messages
+- Verify `BROKER_URL` is correct and reachable from the llm-bridge pod
+- Ensure the Broker is running: `kubectl get pods -n kguardian | grep broker`
+- Check the Broker logs: `kubectl logs -n kguardian deployment/kguardian-broker`
+- Verify network policies allow llm-bridge → broker communication
+- Check the llm-bridge logs for `tool <name> failed` entries — each failing tool call is logged with the underlying error
 
 ### LLM API errors
 - Verify API keys are valid and have credits
