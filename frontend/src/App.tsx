@@ -1,5 +1,5 @@
 import { useState, useCallback, useEffect } from 'react';
-import { AlertTriangle, RefreshCw, Shield, Sparkles } from 'lucide-react';
+import { Bot, RefreshCw, Share2, ShieldAlert } from 'lucide-react';
 import NetworkGraph from './components/NetworkGraph';
 import NamespaceSelector from './components/NamespaceSelector';
 import DataTable from './components/DataTable';
@@ -7,6 +7,8 @@ import ThemeToggle from './components/ThemeToggle';
 import AIAssistant from './components/AIAssistant';
 import AuditVerdictsPanel from './components/AuditVerdictsPanel';
 import NetworkPolicyEditor from './components/NetworkPolicyEditor';
+import { Sidebar, type NavItem } from './components/Sidebar';
+import { Button } from './components/ui/Button';
 import { usePodData } from './hooks/usePodData';
 import { useNamespaces } from './hooks/useNamespaces';
 import type { PodNodeData } from './types';
@@ -114,73 +116,60 @@ function App() {
     };
   }, [isResizing, handleMouseMove, handleMouseUp]);
 
+  const navItems: NavItem[] = [
+    {
+      id: 'map', label: 'Network Map', icon: Share2, hint: 'Live pod traffic graph',
+      active: !isAuditPanelOpen && !isAIAssistantOpen,
+      onClick: () => { setIsAuditPanelOpen(false); handleAIClose(); },
+    },
+    {
+      id: 'audit', label: 'Audit Verdicts', icon: ShieldAlert, hint: 'Flows an AuditNetworkPolicy would deny',
+      active: isAuditPanelOpen, onClick: () => setIsAuditPanelOpen(true),
+    },
+    {
+      id: 'assistant', label: 'AI Assistant', icon: Bot, hint: 'Ask about cluster traffic & policies',
+      active: isAIAssistantOpen, onClick: () => setIsAIAssistantOpen(true),
+    },
+  ];
+
+  const sectionTitle = isAIAssistantOpen ? 'AI Assistant' : isAuditPanelOpen ? 'Audit Verdicts' : 'Network Map';
+
   return (
-    <div
-      className="flex flex-col h-screen bg-hubble-darker transition-all duration-300"
-      style={{ paddingRight: `${contentPaddingRightPx}px` }}
-    >
-      {/* Header */}
-      <header className="bg-hubble-dark border-b border-hubble-border px-6 py-4">
-        <div className="flex items-center justify-between">
-          <div className="flex items-center gap-3">
-            <Shield className="w-8 h-8 text-hubble-accent" />
-            <div>
-              <h1 className="text-2xl font-bold text-primary">
-                kguardian
-              </h1>
-              <p className="text-sm text-tertiary">
-                Network Traffic & Security Monitoring
-              </p>
-            </div>
+    <div className="flex h-screen bg-hubble-darker">
+      <Sidebar items={navItems} version={__APP_VERSION__} footer={<ThemeToggle />} />
+
+      <div
+        className="flex-1 flex flex-col min-w-0 transition-all duration-300"
+        style={{ paddingRight: `${contentPaddingRightPx}px` }}
+      >
+        {/* Top bar */}
+        <header className="h-14 shrink-0 flex items-center justify-between gap-4 px-5 border-b border-hubble-border bg-hubble-dark">
+          <div className="min-w-0">
+            <h1 className="text-sm font-semibold text-primary truncate">{sectionTitle}</h1>
+            <p className="text-xs text-tertiary truncate">
+              Namespace <span className="text-secondary">{namespace}</span> · {pods.length} pods
+            </p>
           </div>
 
-          <div className="flex items-center gap-4">
-            <button
-              onClick={() => setIsAuditPanelOpen(true)}
-              className="flex items-center gap-2 px-4 py-2 bg-hubble-card border border-hubble-border
-                         rounded-lg text-secondary hover:bg-hubble-dark hover:border-hubble-warning
-                         hover:text-hubble-warning transition-all"
-              title="Audit verdicts — would-deny flows"
-            >
-              <AlertTriangle className="w-4 h-4" />
-              <span className="hidden sm:inline font-medium">Audit</span>
-            </button>
-
-            <button
-              onClick={() => setIsAIAssistantOpen(true)}
-              className="flex items-center gap-2 px-4 py-2 bg-hubble-accent/10 border border-hubble-accent/30
-                         rounded-lg text-hubble-accent hover:bg-hubble-accent/20 hover:border-hubble-accent
-                         transition-all"
-              title="Open AI Assistant"
-            >
-              <Sparkles className="w-4 h-4" />
-              <span className="hidden sm:inline font-medium">AI</span>
-            </button>
-
+          <div className="flex items-center gap-2">
             <NamespaceSelector
               selectedNamespace={namespace}
               onNamespaceChange={setNamespace}
               namespaces={namespaces}
             />
-
-            <ThemeToggle />
-
-            <button
+            <Button
+              variant="secondary"
+              leftIcon={RefreshCw}
               onClick={refreshData}
               disabled={loading}
-              className="flex items-center gap-2 px-4 py-2 bg-hubble-card border border-hubble-border
-                         rounded-lg text-secondary hover:bg-hubble-dark hover:border-hubble-accent
-                         transition-all disabled:opacity-50 disabled:cursor-not-allowed"
-              title="Refresh data"
+              className={loading ? '[&_svg]:animate-spin' : ''}
             >
-              <RefreshCw className={`w-4 h-4 ${loading ? 'animate-spin' : ''}`} />
               Refresh
-            </button>
+            </Button>
           </div>
-        </div>
-      </header>
+        </header>
 
-      {/* Main Content */}
+        {/* Main Content */}
       <div className="flex-1 flex flex-col overflow-hidden">
         {error && (
           <div className="bg-hubble-error/20 border border-hubble-error text-hubble-error px-6 py-3">
@@ -252,10 +241,7 @@ function App() {
         )}
       </div>
 
-      {/* Footer */}
-      <footer className="bg-hubble-dark border-t border-hubble-border px-6 py-2 text-center text-xs text-tertiary">
-        <p>Kube Guardian v{__APP_VERSION__} | Namespace: {namespace} | Pods: {pods.length}</p>
-      </footer>
+      </div>
 
       {/* AI Assistant Modal */}
       <AIAssistant
