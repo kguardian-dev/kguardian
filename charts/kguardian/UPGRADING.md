@@ -1,12 +1,30 @@
 # Upgrading the kguardian Helm chart
 
+## AI assistant is now a single workload (mcp-server / advisor-serve retired)
+
+The assistant used to be three in-cluster workloads — `llm-bridge`, a
+separate `mcp-server`, and an `advisor` HTTP service. As of this release the
+`llm-bridge` runs all of the assistant tools **and** the NetworkPolicy /
+seccomp generation **in-process**, so the `mcp-server` and advisor-serve
+Deployments no longer exist.
+
+**What happens on `helm upgrade`:** if you had the assistant enabled, Helm
+removes the `kguardian-mcp-server` and `kguardian-advisor` Deployments (plus
+their Services / ServiceAccounts). This is expected and safe — the assistant
+loses no capability; the work simply moved into `llm-bridge`. No data is
+touched. The advisor **CLI / kubectl-plugin** is unaffected: it ships as its
+own released binary and never ran in the cluster.
+
+The retired `mcpServer.*` and `advisor.*` values keys are now inert. They are
+still accepted so an old values file keeps rendering, but they no longer
+create anything — remove them from your values at your convenience.
+
 ## AI assistant: one-line enablement (`ai.*`)
 
-The AI assistant is now enabled with a single value and a single secret.
-No existing values need to change — the previous per-component flags
-(`llmBridge.enabled`, `mcpServer.enabled`, `advisor.enabled`) and
-per-provider secret blocks (`llmBridge.secrets.*`) all still work exactly
-as before, so upgrades are a no-op unless you opt into the new keys.
+The AI assistant is enabled with a single value and a single secret. No
+existing values need to change — the `llmBridge.enabled` flag and the
+per-provider secret blocks (`llmBridge.secrets.*`) still work exactly as
+before, so upgrades are a no-op unless you opt into the new keys.
 
 The one-line path:
 ```bash
@@ -15,11 +33,11 @@ kubectl -n <ns> create secret generic my-llm-key \
 ```
 ```yaml
 ai:
-  enabled: true          # renders llm-bridge + mcp-server + advisor
+  enabled: true          # renders the llm-bridge assistant (tools + generation in-process)
   provider: anthropic    # openai | anthropic | gemini | copilot
   secret: my-llm-key     # holds the key under `api-key`
 ```
-`ai.enabled=true` is the umbrella for the whole assistant path;
+`ai.enabled=true` is the umbrella for the assistant;
 `ai.provider` + `ai.secret` wire the chosen provider's API key. To run
 several providers at once, keep using the per-provider
 `llmBridge.secrets.*` blocks (they are additive to `ai.provider`).
@@ -28,7 +46,7 @@ several providers at once, keep using the per-provider
 
 The broker API can now require a shared **bearer token**
 (`broker.auth.enabled`, **default `false`** — no change for existing
-installs). When enabled, the controller and mcp-server must present the
+installs). When enabled, the controller and llm-bridge must present the
 token or their requests get `401`; `/health` and `/metrics` stay open.
 This closes the unauthenticated forged-row / unauthorized-read exposure
 on the server-to-server paths — the durable complement to the
@@ -83,7 +101,7 @@ broker:
             app.kubernetes.io/name: prometheus
 ```
 
-When enabled, mcp-server / frontend / the helm-test pod are admitted via
+When enabled, llm-bridge / frontend / the helm-test pod are admitted via
 podSelector; the controller via `allowedNodeCIDRs`; everything else is
 denied. Ingress-only — the broker's own DB / DNS / evaluator egress is
 never restricted. Inert on clusters whose CNI doesn't enforce

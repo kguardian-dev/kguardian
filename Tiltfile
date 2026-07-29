@@ -10,13 +10,11 @@ settings = read_yaml("tilt-settings.yaml", default={})
 
 enable_controller = settings.get("enable_controller", True)
 enable_llm_bridge = settings.get("enable_llm_bridge", True)
-enable_mcp_server = settings.get("enable_mcp_server", True)
 llm_providers = settings.get("llm_providers", {})
 
 # Local build toggles — when False, use latest published GHCR image instead.
 build_broker = settings.get("build_broker", True)
 build_llm_bridge = settings.get("build_llm_bridge", False)
-build_mcp_server = settings.get("build_mcp_server", False)
 build_controller = settings.get("build_controller", False)
 
 # Suppress warnings for GHCR images we're not building locally
@@ -25,8 +23,6 @@ if not build_broker:
     skip_images.append("ghcr.io/kguardian-dev/kguardian/broker")
 if not build_llm_bridge:
     skip_images.append("ghcr.io/kguardian-dev/kguardian/llm-bridge")
-if not build_mcp_server:
-    skip_images.append("ghcr.io/kguardian-dev/kguardian/mcp-server")
 if not build_controller:
     skip_images.append("ghcr.io/kguardian-dev/kguardian/controller")
 update_settings(suppress_unused_image_warnings=skip_images)
@@ -38,13 +34,11 @@ namespace_create(NAMESPACE)
 # ─── Helm values overrides ──────────────────────────────────────────
 helm_set = [
     "llmBridge.enabled=%s" % ("true" if enable_llm_bridge else "false"),
-    "mcpServer.enabled=%s" % ("true" if enable_mcp_server else "false"),
     # Pull policy: IfNotPresent when building locally (Tilt loads the image),
     # Always when using pre-built GHCR images so the cluster fetches latest.
     "broker.image.pullPolicy=%s" % ("IfNotPresent" if build_broker else "Always"),
     "controller.image.pullPolicy=%s" % ("IfNotPresent" if build_controller else "Always"),
     "llmBridge.image.pullPolicy=%s" % ("IfNotPresent" if build_llm_bridge else "Always"),
-    "mcpServer.image.pullPolicy=%s" % ("IfNotPresent" if build_mcp_server else "Always"),
 ]
 
 # Wire up LLM provider secret toggles so Helm renders the env var refs
@@ -113,18 +107,6 @@ if enable_llm_bridge and build_llm_bridge:
         ],
     )
 
-if enable_mcp_server and build_mcp_server:
-    docker_build(
-        "ghcr.io/kguardian-dev/kguardian/mcp-server",
-        context="mcp-server",
-        dockerfile="mcp-server/Dockerfile",
-        live_update=[
-            sync("mcp-server/main.go", "/app/main.go"),
-            sync("mcp-server/tools", "/app/tools"),
-            sync("mcp-server/logger", "/app/logger"),
-        ],
-    )
-
 if enable_controller and build_controller:
     arch = str(local("uname -m", quiet=True)).strip()
     if arch == "arm64" or arch == "aarch64":
@@ -164,7 +146,6 @@ k8s_resource(
         "database:serviceaccount",
         "frontend:serviceaccount",
         "llm-bridge:serviceaccount",
-        "mcp-server:serviceaccount",
         "kguardian-viewer:clusterrole",
         "kguardian:clusterrolebinding",
     ],
@@ -202,15 +183,6 @@ if enable_llm_bridge:
     k8s_resource(
         "kguardian-llm-bridge",
         port_forwards=["8080:8080"],
-        resource_deps=["kguardian-broker"],
-        labels=["backend"],
-    )
-
-# MCP Server
-if enable_mcp_server:
-    k8s_resource(
-        "kguardian-mcp-server",
-        port_forwards=["8081:8081"],
         resource_deps=["kguardian-broker"],
         labels=["backend"],
     )

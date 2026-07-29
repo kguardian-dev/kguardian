@@ -45,20 +45,24 @@ render "defaults" && {
 }
 
 # 2. LEGACY per-component AI flags (pre-ai.enabled operators) must still work.
+# The retired mcpServer.enabled / advisor.enabled keys are still passed here on
+# purpose: an operator upgrading with an OLD values file that sets them must
+# render without error (Helm ignores unknown values) and must NOT resurrect the
+# retired workloads. The assistant is now a single workload (llm-bridge).
 render "legacy-ai-flags" \
   --set llmBridge.enabled=true --set mcpServer.enabled=true --set advisor.enabled=true && {
-  assert_deploys "legacy-ai-flags" 7
+  assert_deploys "legacy-ai-flags" 5
   assert_has     "legacy-ai-flags" "kguardian-llm-bridge"
-  assert_has     "legacy-ai-flags" "kguardian-mcp-server"
-  assert_has     "legacy-ai-flags" "kguardian-advisor"
+  assert_absent  "legacy-ai-flags" "kguardian-mcp-server"
+  assert_absent  "legacy-ai-flags" "kguardian-advisor"
 }
 
-# 3. New ai.enabled umbrella must render the SAME AI stack as the legacy flags.
+# 3. New ai.enabled umbrella renders the single-workload assistant.
 render "ai-umbrella" --set ai.enabled=true && {
-  assert_deploys "ai-umbrella" 7
+  assert_deploys "ai-umbrella" 5
   assert_has     "ai-umbrella" "kguardian-llm-bridge"
-  assert_has     "ai-umbrella" "kguardian-mcp-server"
-  assert_has     "ai-umbrella" "kguardian-advisor"
+  assert_absent  "ai-umbrella" "kguardian-mcp-server"
+  assert_absent  "ai-umbrella" "kguardian-advisor"
 }
 
 # 3b. One-line provider path (ai.provider + ai.secret) wires the right env var.

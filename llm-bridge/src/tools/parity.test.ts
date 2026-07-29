@@ -9,15 +9,16 @@ import type { AddressInfo } from "node:net";
 import { executeInProcessTool } from "./execute.js";
 import { TOOL_DEFS } from "./registry.js";
 
-// WS-B parity: the in-process tool layer must reproduce the mcp-server's
-// tool-call outputs. Replays the SAME shared fixtures the Go G1 test uses
-// (mcp-server/tools/testdata/contract): broker tools must reproduce the Go
-// server output exactly (parsed JSON, key-order immaterial); the in-process
-// generate_* tools are wiring-checked here and correctness-locked by the G2
-// generator fixtures.
+// WS-B parity: the in-process tool layer must reproduce the retired
+// mcp-server's tool-call outputs. Replays the shared contract fixtures
+// (test/fixtures/contract) that were the mcp-server's Go G1 goldens: broker
+// tools must reproduce that output exactly (parsed JSON, key-order
+// immaterial); the in-process generate_* tools are wiring-checked here and
+// correctness-locked by the G2 generator fixtures. These fixtures are now the
+// sole surviving copy of the tool-call contract — this test is its gate.
 
 const here = path.dirname(fileURLToPath(import.meta.url));
-const contractDir = path.resolve(here, "../../../mcp-server/tools/testdata/contract");
+const contractDir = path.resolve(here, "../../../test/fixtures/contract");
 
 const fixtures = JSON.parse(fs.readFileSync(path.join(contractDir, "backend_fixtures.json"), "utf8")) as Record<string, unknown>;
 const golden = JSON.parse(fs.readFileSync(path.join(contractDir, "tool_calls.golden.json"), "utf8")) as Record<string, { content: { text: string }[] }>;

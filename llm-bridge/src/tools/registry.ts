@@ -1,9 +1,9 @@
 // Single source of truth for the assistant's tool set (WS-B). Ported from the
-// mcp-server's tools/all_tools.go toolDefs — names and descriptions must stay
-// identical (the G1 contract pins them on the Go side during the canary). The
-// provider loops build their provider-specific tool schema from `parameters`;
-// the system-prompt tool guide is generated from this list, so there is now
-// exactly one place a tool is described.
+// former mcp-server's tools/all_tools.go toolDefs — names and descriptions must
+// stay identical (the G1 parity test pins them against the former Go server's
+// goldens). The provider loops build their provider-specific tool schema from
+// `parameters`; the system-prompt tool guide is generated from this list, so
+// there is now exactly one place a tool is described.
 
 export interface ToolDef {
   name: string;

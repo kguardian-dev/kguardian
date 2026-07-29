@@ -75,7 +75,7 @@ A Kubernetes runtime-observability tool that turns the network and syscall behav
 
 ## How it Works
 
-kguardian is built around four core components, plus an audit-mode evaluator (deployed by default) and an optional AI assistant (llm-bridge + mcp-server):
+kguardian is built around four core components, plus an audit-mode evaluator (deployed by default) and an optional AI assistant (llm-bridge):
 
 <Steps>
   <Step title="Controller Monitors">
@@ -99,7 +99,7 @@ kguardian is built around four core components, plus an audit-mode evaluator (de
   </Step>
 
   <Step title="AI Assistant (Optional)">
-    The optional **AI assistant** (llm-bridge + mcp-server) answers natural-language questions about cluster traffic and generates policies conversationally.
+    The optional **AI assistant** (llm-bridge) answers natural-language questions about cluster traffic and generates policies conversationally.
   </Step>
 </Steps>
 
