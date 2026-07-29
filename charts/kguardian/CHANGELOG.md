@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.17.1](https://github.com/kguardian-dev/kguardian/compare/chart/v1.17.0...chart/v1.17.1) (2026-07-29)
+
+
+### Bug Fixes
+
+* **deps:** update ghcr.io/kguardian-dev/kguardian/frontend docker tag to v1.11.2 ([#1207](https://github.com/kguardian-dev/kguardian/issues/1207)) ([ebf37c3](https://github.com/kguardian-dev/kguardian/commit/ebf37c3c66e24cdc68fd0e5c9dda435725af8638))
+
 ## [1.17.0](https://github.com/kguardian-dev/kguardian/compare/chart/v1.16.0...chart/v1.17.0) (2026-07-28)
 
 
