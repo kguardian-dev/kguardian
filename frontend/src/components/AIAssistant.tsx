@@ -26,6 +26,7 @@ function describeTool(name: string): string {
     list_services: 'service inventory',
     get_cluster_traffic: 'cluster traffic',
     get_cluster_pods: 'cluster pods',
+    get_pods_on_node: 'pods on node',
     get_audit_verdicts: 'policy verdicts',
     generate_network_policy: 'network policy',
     generate_seccomp_profile: 'seccomp profile',
