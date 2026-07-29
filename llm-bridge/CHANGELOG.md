@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.6.1](https://github.com/kguardian-dev/kguardian/compare/llm-bridge/v1.6.0...llm-bridge/v1.6.1) (2026-07-28)
+
+
+### Bug Fixes
+
+* **llm-bridge:** validate seccomp arch — no silent broken profile on unknown arch ([76f08ca](https://github.com/kguardian-dev/kguardian/commit/76f08cafdca2447d8fca25212ac0fb2ea20fc846))
+* **llm-bridge:** validate seccomp arch — no silent broken profile on unknown arch ([ed56c27](https://github.com/kguardian-dev/kguardian/commit/ed56c27f81d4dd804eeec85b806dff4b07c51807))
+
 ## [1.6.0](https://github.com/kguardian-dev/kguardian/compare/llm-bridge/v1.5.0...llm-bridge/v1.6.0) (2026-07-28)
 
 
