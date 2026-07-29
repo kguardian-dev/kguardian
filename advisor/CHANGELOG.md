@@ -1,5 +1,18 @@
 # Changelog
 
+## [1.7.0](https://github.com/kguardian-dev/kguardian/compare/advisor/v1.6.2...advisor/v1.7.0) (2026-07-28)
+
+
+### Features
+
+* **chart:** single-workload AI assistant — retire mcp-server + advisor-serve ([e03d7bb](https://github.com/kguardian-dev/kguardian/commit/e03d7bb6d7ea25b09c626c7ea8e3376ffc239f05))
+
+
+### Code Refactoring
+
+* **advisor:** drop github.com/cilium/cilium, hand-roll the CNP types ([#1185](https://github.com/kguardian-dev/kguardian/issues/1185)) ([6b1cac0](https://github.com/kguardian-dev/kguardian/commit/6b1cac0fd83eaad06949c62436c2d0c616a39860))
+* **advisor:** retire in-cluster serve mode; keep the CLI ([0136c87](https://github.com/kguardian-dev/kguardian/commit/0136c872208f93c9652bbd3e351bf1025f6661ee))
+
 ## [1.6.2](https://github.com/kguardian-dev/kguardian/compare/advisor/v1.6.1...advisor/v1.6.2) (2026-07-23)
 
 
