@@ -1,5 +1,19 @@
 # Changelog
 
+## [1.6.0](https://github.com/kguardian-dev/kguardian/compare/llm-bridge/v1.5.0...llm-bridge/v1.6.0) (2026-07-28)
+
+
+### Features
+
+* **chart:** single-workload AI assistant — retire mcp-server + advisor-serve ([e03d7bb](https://github.com/kguardian-dev/kguardian/commit/e03d7bb6d7ea25b09c626c7ea8e3376ffc239f05))
+
+
+### Code Refactoring
+
+* **llm-bridge:** generate network policies in-process, drop advisor dep ([#1190](https://github.com/kguardian-dev/kguardian/issues/1190)) ([a0851cc](https://github.com/kguardian-dev/kguardian/commit/a0851cc05cdf070ec18067dbe7d6bdfe5ba6a686))
+* **llm-bridge:** generate seccomp profiles in-process ([#1188](https://github.com/kguardian-dev/kguardian/issues/1188)) ([3b8bef4](https://github.com/kguardian-dev/kguardian/commit/3b8bef4fc3815e7c6fd929a5a7e374b768f99755))
+* **llm-bridge:** read contract fixtures from test/fixtures; fix stale docs ([84d3a58](https://github.com/kguardian-dev/kguardian/commit/84d3a587e2bcfee6c2d6d31c63d5552f8e3b8233))
+
 ## [1.5.0](https://github.com/kguardian-dev/kguardian/compare/llm-bridge/v1.4.4...llm-bridge/v1.5.0) (2026-07-26)
 
 
