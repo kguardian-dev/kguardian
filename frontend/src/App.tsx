@@ -1,13 +1,16 @@
-import { useState, useCallback, useEffect } from 'react';
+import { useState, useCallback, useEffect, lazy, Suspense } from 'react';
 import { Bot, RefreshCw, Share2, ShieldAlert } from 'lucide-react';
 import NetworkGraph from './components/NetworkGraph';
 import NamespaceSelector from './components/NamespaceSelector';
 import DataTable from './components/DataTable';
 import ThemeToggle from './components/ThemeToggle';
-import AIAssistant from './components/AIAssistant';
-import AuditVerdictsPanel from './components/AuditVerdictsPanel';
-import NetworkPolicyEditor from './components/NetworkPolicyEditor';
 import { Sidebar, type NavItem } from './components/Sidebar';
+
+// Heavy surfaces — lazy so they stay out of the initial bundle and only load
+// when first opened (the NetworkPolicyEditor alone is ~2k lines).
+const AIAssistant = lazy(() => import('./components/AIAssistant'));
+const AuditVerdictsPanel = lazy(() => import('./components/AuditVerdictsPanel'));
+const NetworkPolicyEditor = lazy(() => import('./components/NetworkPolicyEditor'));
 import { Button } from './components/ui/Button';
 import { usePodData } from './hooks/usePodData';
 import { useNamespaces } from './hooks/useNamespaces';
@@ -35,9 +38,23 @@ function App() {
   const [showExternalNodes, setShowExternalNodes] = useState(true);
   const [showTraffic, setShowTraffic] = useState(true);
   const [layoutDirection, setLayoutDirection] = useState<'LR' | 'TB'>('LR');
+  const [railCollapsed, setRailCollapsed] = useState<boolean>(() => localStorage.getItem('kg-rail-collapsed') === '1');
 
   const { namespaces } = useNamespaces();
-  const { pods, allPodsLookup, services, loading, error, togglePodExpansion, refreshData } = usePodData(namespace);
+  // If the current selection isn't a namespace that actually has monitored pods
+  // (the hardcoded 'default' usually isn't), resolve to the first real one so
+  // the graph isn't empty on first paint. Derived rather than synced via an
+  // effect — no extra render, and it can't loop.
+  const effectiveNamespace =
+    namespaces.length > 0 && !namespaces.includes(namespace) ? namespaces[0] : namespace;
+  const { pods, allPodsLookup, services, loading, error, togglePodExpansion, refreshData } = usePodData(effectiveNamespace);
+
+  const toggleRail = useCallback(() => {
+    setRailCollapsed((c) => {
+      localStorage.setItem('kg-rail-collapsed', c ? '0' : '1');
+      return !c;
+    });
+  }, []);
 
   // Calculate the right padding for content when AI panel is docked (in pixels)
   const contentPaddingRightPx = aiSidePanel.isSidePanel
@@ -136,7 +153,13 @@ function App() {
 
   return (
     <div className="flex h-screen bg-hubble-darker">
-      <Sidebar items={navItems} version={__APP_VERSION__} footer={<ThemeToggle />} />
+      <Sidebar
+        items={navItems}
+        version={__APP_VERSION__}
+        footer={<ThemeToggle />}
+        collapsed={railCollapsed}
+        onToggleCollapse={toggleRail}
+      />
 
       <div
         className="flex-1 flex flex-col min-w-0 transition-all duration-300"
@@ -147,13 +170,13 @@ function App() {
           <div className="min-w-0">
             <h1 className="text-sm font-semibold text-primary truncate">{sectionTitle}</h1>
             <p className="text-xs text-tertiary truncate">
-              Namespace <span className="text-secondary">{namespace}</span> · {pods.length} pods
+              Namespace <span className="text-secondary">{effectiveNamespace}</span> · {pods.length} pods
             </p>
           </div>
 
           <div className="flex items-center gap-2">
             <NamespaceSelector
-              selectedNamespace={namespace}
+              selectedNamespace={effectiveNamespace}
               onNamespaceChange={setNamespace}
               namespaces={namespaces}
             />
@@ -243,28 +266,35 @@ function App() {
 
       </div>
 
-      {/* AI Assistant Modal */}
-      <AIAssistant
-        isOpen={isAIAssistantOpen}
-        onClose={handleAIClose}
-        onLayoutChange={handleAILayoutChange}
-        namespace={namespace}
-        podNames={pods.map(p => p.label)}
-      />
+      {/* Heavy surfaces: mounted (and their chunk fetched) only while open. */}
+      {isAIAssistantOpen && (
+        <Suspense fallback={null}>
+          <AIAssistant
+            isOpen
+            onClose={handleAIClose}
+            onLayoutChange={handleAILayoutChange}
+            namespace={effectiveNamespace}
+            podNames={pods.map(p => p.label)}
+          />
+        </Suspense>
+      )}
 
-      {/* Network Policy Editor Modal */}
-      <NetworkPolicyEditor
-        isOpen={isPolicyEditorOpen}
-        onClose={() => setIsPolicyEditorOpen(false)}
-        pod={policyEditorPod}
-        allPods={pods}
-      />
+      {isPolicyEditorOpen && (
+        <Suspense fallback={null}>
+          <NetworkPolicyEditor
+            isOpen
+            onClose={() => setIsPolicyEditorOpen(false)}
+            pod={policyEditorPod}
+            allPods={pods}
+          />
+        </Suspense>
+      )}
 
-      {/* Audit Verdicts Modal — would-deny flows from AuditNetworkPolicies */}
-      <AuditVerdictsPanel
-        isOpen={isAuditPanelOpen}
-        onClose={() => setIsAuditPanelOpen(false)}
-      />
+      {isAuditPanelOpen && (
+        <Suspense fallback={null}>
+          <AuditVerdictsPanel isOpen onClose={() => setIsAuditPanelOpen(false)} />
+        </Suspense>
+      )}
     </div>
   );
 }
