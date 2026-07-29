@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef } from 'react';
 import type { PodNodeData } from '../../types';
 import type { SeccompProfile, SeccompSyscall, SeccompAction } from '../../types/seccompProfile';
-import { generateSeccompProfile } from '../../utils/seccompProfileGenerator';
+import { generateSeccompProfile, validateSeccompProfile } from '../../utils/seccompProfileGenerator';
 import { isValidSyscall } from '../../utils/syscalls';
 
 interface UseSeccompProfileEditorProps {
@@ -27,6 +27,19 @@ export const useSeccompProfileEditor = ({ pod, isOpen }: UseSeccompProfileEditor
       setSeccompProfile(generatedProfile);
     }
   }, [isOpen, pod]);
+
+  // Derived, non-fatal warning when the current profile isn't directly usable
+  // (e.g. an unrecognized CPU arch → no architectures selected). Derived from
+  // the profile rather than stored, so it live-updates as the user edits and
+  // clears itself once they pick an architecture / add a syscall rule.
+  let generationWarning: string | null = null;
+  if (seccompProfile) {
+    try {
+      validateSeccompProfile(seccompProfile);
+    } catch (e) {
+      generationWarning = e instanceof Error ? e.message : String(e);
+    }
+  }
 
   const addSyscallRule = () => {
     if (!seccompProfile) return;
@@ -143,6 +156,7 @@ export const useSeccompProfileEditor = ({ pod, isOpen }: UseSeccompProfileEditor
   return {
     seccompProfile,
     setSeccompProfile,
+    generationWarning,
     isSyscallsExpanded,
     setIsSyscallsExpanded,
     syscallErrors,

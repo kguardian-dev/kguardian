@@ -92,6 +92,7 @@ const NetworkPolicyEditor: React.FC<NetworkPolicyEditorProps> = ({ isOpen, onClo
   // Seccomp profile management
   const {
     seccompProfile,
+    generationWarning,
     isSyscallsExpanded,
     setIsSyscallsExpanded,
     syscallErrors,
@@ -1820,6 +1821,15 @@ const NetworkPolicyEditor: React.FC<NetworkPolicyEditorProps> = ({ isOpen, onClo
                         </div>
                       </div>
                     </div>
+
+                    {/* Non-fatal generation warning (e.g. unrecognized arch → no
+                        architectures selected). The profile still renders so the
+                        user can fix it below. */}
+                    {generationWarning && (
+                      <div className="bg-amber-500/10 border border-amber-500/40 text-amber-300 text-xs rounded-lg p-3">
+                        ⚠️ {generationWarning}
+                      </div>
+                    )}
 
                     {/* Architectures */}
                     <div className="bg-hubble-dark p-4 rounded-lg border border-hubble-border">
