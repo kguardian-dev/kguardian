@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.11.3](https://github.com/kguardian-dev/kguardian/compare/frontend/v1.11.2...frontend/v1.11.3) (2026-07-29)
+
+
+### Bug Fixes
+
+* **frontend:** seccomp arch guard parity + missing tool label ([cbff5ac](https://github.com/kguardian-dev/kguardian/commit/cbff5ac354141929ef8df234ebfb7ed5a224cac2))
+* **frontend:** seccomp arch guard parity + missing tool label ([c889edf](https://github.com/kguardian-dev/kguardian/commit/c889edf57624e03bdfd1650dda8608384a527718))
+
 ## [1.11.2](https://github.com/kguardian-dev/kguardian/compare/frontend/v1.11.1...frontend/v1.11.2) (2026-07-28)
 
 
