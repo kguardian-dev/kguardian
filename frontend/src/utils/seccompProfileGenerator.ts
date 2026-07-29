@@ -35,6 +35,28 @@ export function buildSeccompProfile(syscalls: string[], arch: string): SeccompPr
   };
 }
 
+/**
+ * Reject a profile that would be unusable if applied — parity port of the
+ * advisor's k8s.ValidateProfile and the llm-bridge assistant's
+ * validateSeccompProfile. An unrecognized `arch` yields `architectures: []`;
+ * without this the editor would present a silently-broken profile. Throws a
+ * clear message the caller can surface (the editor catches it and warns rather
+ * than crashing, since the user can pick an architecture manually).
+ */
+export function validateSeccompProfile(profile: SeccompProfile): void {
+  if (!profile.defaultAction) {
+    throw new Error('seccomp profile is invalid: default action is required');
+  }
+  if (!profile.architectures || profile.architectures.length === 0) {
+    throw new Error(
+      `seccomp profile is invalid: unrecognized architecture — no seccomp arch mapping (supported: ${Object.keys(SECCOMP_ARCHITECTURES).join(', ')}). Select an architecture below.`,
+    );
+  }
+  if (!profile.syscalls || profile.syscalls.length === 0) {
+    throw new Error('seccomp profile is invalid: at least one syscall rule is required');
+  }
+}
+
 export function generateSeccompProfile(pod: PodNodeData): SeccompProfile {
   // Collect all unique valid syscalls from the pod's observed behavior.
   const uniqueSyscalls = new Set<string>();
