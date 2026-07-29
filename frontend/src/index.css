@@ -8,41 +8,65 @@
 :root.dark {
   --theme-bg-dark: #0E1726;
   --theme-bg-darker: #0A0F1C;
-  --theme-bg-card: #1A2332;
-  --theme-border: #2A3647;
+  --theme-bg-card: #161E2E;
+  --theme-bg-hover: #1E2739;
+  --theme-border: #263141;
+  --theme-border-strong: #33415A;
   --theme-text-primary: #F3F4F6;
-  --theme-text-secondary: #9CA3AF;
-  --theme-text-tertiary: #6B7280;
+  --theme-text-secondary: #9AA5B8;
+  --theme-text-tertiary: #64708A;
 }
 
 /* Light theme override */
 :root.light {
-  --theme-bg-dark: #F3F4F6;
+  --theme-bg-dark: #F5F6F8;
   --theme-bg-darker: #FFFFFF;
   --theme-bg-card: #FFFFFF;
-  --theme-border: #D1D5DB;
-  --theme-text-primary: #111827;
-  --theme-text-secondary: #374151;
-  --theme-text-tertiary: #4B5563;
+  --theme-bg-hover: #F0F1F4;
+  --theme-border: #E2E5EA;
+  --theme-border-strong: #CBD1DA;
+  --theme-text-primary: #0F1626;
+  --theme-text-secondary: #4A5468;
+  --theme-text-tertiary: #6B7488;
 }
 
 @theme {
-  /* Hubble colors using theme-aware CSS variables */
+  /* Surfaces (theme-aware) */
   --color-hubble-dark: var(--theme-bg-dark);
   --color-hubble-darker: var(--theme-bg-darker);
   --color-hubble-card: var(--theme-bg-card);
+  --color-hubble-hover: var(--theme-bg-hover);
   --color-hubble-border: var(--theme-border);
+  --color-hubble-border-strong: var(--theme-border-strong);
 
   /* Theme-aware text colors (generates text-primary, text-secondary, text-tertiary) */
   --color-primary: var(--theme-text-primary);
   --color-secondary: var(--theme-text-secondary);
   --color-tertiary: var(--theme-text-tertiary);
 
-  /* Accent colors (same for both themes) */
-  --color-hubble-accent: #3B82F6;
+  /* Brand indigo accent (padlock #4e3ad9) + interaction ramp. One accent,
+     one hover — replaces the ad-hoc blue-600/green-600 hovers across the app. */
+  --color-hubble-accent: #4E3AD9;
+  --color-hubble-accent-hover: #5B48E6;
   --color-hubble-success: #10B981;
+  --color-hubble-success-hover: #0E9E70;
   --color-hubble-warning: #F59E0B;
+  --color-hubble-warning-hover: #D98908;
   --color-hubble-error: #EF4444;
+  --color-hubble-error-hover: #DC2626;
+
+  /* One radius step for interactive controls (buttons, inputs, tabs) so the
+     app stops mixing rounded / rounded-lg / rounded-full at random. */
+  --radius-control: 0.5rem;
+}
+
+@layer base {
+  /* Consistent focus ring in the brand accent for keyboard users. */
+  *:focus-visible {
+    outline: 2px solid var(--color-hubble-accent);
+    outline-offset: 1px;
+    border-radius: 2px;
+  }
 }
 
 @layer base {
