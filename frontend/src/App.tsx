@@ -3,8 +3,11 @@ import { Bot, RefreshCw, Share2, ShieldAlert } from 'lucide-react';
 import NetworkGraph from './components/NetworkGraph';
 import NamespaceSelector from './components/NamespaceSelector';
 import DataTable from './components/DataTable';
-import ThemeToggle from './components/ThemeToggle';
 import { Sidebar, type NavItem } from './components/Sidebar';
+import { ClusterSwitcher } from './components/ClusterSwitcher';
+import { AccountMenu } from './components/AccountMenu';
+import { SettingsPanel } from './components/SettingsPanel';
+import { useSettings } from './contexts/SettingsContext';
 
 // Heavy surfaces — lazy so they stay out of the initial bundle and only load
 // when first opened (the NetworkPolicyEditor alone is ~2k lines).
@@ -18,8 +21,10 @@ import type { PodNodeData } from './types';
 import { UI_DIMENSIONS } from './constants/ui';
 
 function App() {
-  const [namespace, setNamespace] = useState('default');
+  const { settings, updateSettings } = useSettings();
+  const [namespace, setNamespace] = useState<string>(() => settings.defaultNamespace ?? 'default');
   const [selectedPod, setSelectedPod] = useState<PodNodeData | null>(null);
+  const [settingsOpen, setSettingsOpen] = useState(false);
   const [isAIAssistantOpen, setIsAIAssistantOpen] = useState(false);
   const [isAuditPanelOpen, setIsAuditPanelOpen] = useState(false);
   const [isPolicyEditorOpen, setIsPolicyEditorOpen] = useState(false);
@@ -35,9 +40,6 @@ function App() {
   });
   const [tableHeight, setTableHeight] = useState<number>(UI_DIMENSIONS.TABLE_DEFAULT_HEIGHT);
   const [isResizing, setIsResizing] = useState(false);
-  const [showExternalNodes, setShowExternalNodes] = useState(true);
-  const [showTraffic, setShowTraffic] = useState(true);
-  const [layoutDirection, setLayoutDirection] = useState<'LR' | 'TB'>('LR');
   const [railCollapsed, setRailCollapsed] = useState<boolean>(() => localStorage.getItem('kg-rail-collapsed') === '1');
 
   const { namespaces } = useNamespaces();
@@ -156,7 +158,8 @@ function App() {
       <Sidebar
         items={navItems}
         version={__APP_VERSION__}
-        footer={<ThemeToggle />}
+        topSlot={<ClusterSwitcher collapsed={railCollapsed} />}
+        footer={<AccountMenu collapsed={railCollapsed} onOpenSettings={() => setSettingsOpen(true)} />}
         collapsed={railCollapsed}
         onToggleCollapse={toggleRail}
       />
@@ -219,12 +222,12 @@ function App() {
                 onBuildPolicy={handleBuildPolicy}
                 allPodsLookup={allPodsLookup}
                 services={services}
-                showExternalNodes={showExternalNodes}
-                onToggleExternalNodes={() => setShowExternalNodes(prev => !prev)}
-                showTraffic={showTraffic}
-                onToggleTraffic={() => setShowTraffic(prev => !prev)}
-                layoutDirection={layoutDirection}
-                onToggleLayoutDirection={() => setLayoutDirection(prev => prev === 'LR' ? 'TB' : 'LR')}
+                showExternalNodes={settings.showExternalNodes}
+                onToggleExternalNodes={() => updateSettings({ showExternalNodes: !settings.showExternalNodes })}
+                showTraffic={settings.showTraffic}
+                onToggleTraffic={() => updateSettings({ showTraffic: !settings.showTraffic })}
+                layoutDirection={settings.layoutDirection}
+                onToggleLayoutDirection={() => updateSettings({ layoutDirection: settings.layoutDirection === 'LR' ? 'TB' : 'LR' })}
               />
             </div>
 
@@ -295,6 +298,8 @@ function App() {
           <AuditVerdictsPanel isOpen onClose={() => setIsAuditPanelOpen(false)} />
         </Suspense>
       )}
+
+      <SettingsPanel isOpen={settingsOpen} onClose={() => setSettingsOpen(false)} namespaces={namespaces} />
     </div>
   );
 }
