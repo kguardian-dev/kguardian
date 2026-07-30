@@ -5,7 +5,7 @@ license = "BUSL-1.1"
 edition = "2021"
 
 [build-dependencies]
-libbpf-cargo = "0.26.0"
+libbpf-cargo = "0.27.0"
 vmlinux = { version = "0.0", git = "https://github.com/libbpf/vmlinux.h.git", rev = "db131a55c624fbe1da97de90ac08e9cec9e8ed49" }
 
 [dependencies]

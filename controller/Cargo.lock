@@ -1451,7 +1451,7 @@ dependencies = [
  "kube",
  "lazy_static",
  "libbpf-cargo",
- "libbpf-rs 0.27.0",
+ "libbpf-rs",
  "libbpf-sys",
  "libseccomp",
  "moka",
@@ -1596,32 +1596,20 @@ checksum = "09edd9e8b54e49e587e4f6295a7d29c3ea94d469cb40ab8ca70b288248a81db2"
 
 [[package]]
 name = "libbpf-cargo"
-version = "0.26.2"
+version = "0.27.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "67e63283df9689af55b85f91e99dc8b213ae89fc3e1d9bb29ab7f75eb8a8a783"
+checksum = "b60690d8d106293050fe02e0f6d090556b3ca2a2ec9c73271eb47efd69376b12"
 dependencies = [
  "anyhow",
  "cargo_metadata",
  "clap",
- "libbpf-rs 0.26.2",
+ "libbpf-rs",
  "memmap2",
  "serde",
  "serde_json",
  "tempfile",
  "tracing",
  "tracing-subscriber",
-]
-
-[[package]]
-name = "libbpf-rs"
-version = "0.26.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fd8e8db46a2d5967b5b3dba7aba32a875dc38f222395040607045635ec1f9b63"
-dependencies = [
- "bitflags",
- "libbpf-sys",
- "libc",
- "vsprintf",
 ]
 
 [[package]]
