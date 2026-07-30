@@ -333,7 +333,7 @@ const DataTable: React.FC<DataTableProps> = ({ selectedPod, allPodsLookup, servi
                   {entry.count} connection{entry.count !== 1 ? 's' : ''}
                 </div>
                 {entry.drops > 0 && (
-                  <div className="text-red-400 text-xs">
+                  <div className="text-hubble-error text-xs">
                     {entry.drops} drop{entry.drops !== 1 ? 's' : ''}
                   </div>
                 )}
