@@ -1,6 +1,8 @@
 import { StrictMode, Component } from 'react'
 import type { ReactNode, ErrorInfo } from 'react'
 import { createRoot } from 'react-dom/client'
+import '@fontsource-variable/hanken-grotesk/wght.css'
+import '@fontsource-variable/jetbrains-mono/wght.css'
 import './index.css'
 import App from './App.tsx'
 import { ThemeProvider } from './contexts/ThemeContext.tsx'
