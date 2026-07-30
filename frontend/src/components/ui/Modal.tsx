@@ -25,6 +25,8 @@ interface ModalProps {
   contentClassName?: string;
   /** Disable close-on-backdrop-click (e.g. destructive-in-progress). */
   disableBackdropClose?: boolean;
+  /** Vertical placement. 'top' anchors near the top (command-palette style). */
+  align?: 'center' | 'top';
 }
 
 const SIZE_CLASS: Record<ModalSize, string> = {
@@ -58,6 +60,7 @@ export function Modal({
   hideHeader = false,
   contentClassName = 'flex-1 min-h-0 overflow-y-auto',
   disableBackdropClose = false,
+  align = 'center',
 }: ModalProps) {
   const panelRef = useRef<HTMLDivElement>(null);
   const lastFocused = useRef<HTMLElement | null>(null);
@@ -156,7 +159,11 @@ export function Modal({
         }`}
         onClick={disableBackdropClose ? undefined : onClose}
       />
-      <div className="absolute inset-0 flex items-center justify-center p-4 pointer-events-none">
+      <div
+        className={`absolute inset-0 flex justify-center p-4 pointer-events-none ${
+          align === 'top' ? 'items-start pt-[12vh]' : 'items-center'
+        }`}
+      >
         <div
           ref={panelRef}
           role="dialog"
