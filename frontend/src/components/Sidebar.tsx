@@ -1,6 +1,7 @@
 import type { ReactNode } from 'react';
 import type { LucideIcon } from 'lucide-react';
-import { Shield, PanelLeftClose, PanelLeftOpen } from 'lucide-react';
+import { PanelLeftClose, PanelLeftOpen } from 'lucide-react';
+import { BrandMark } from './BrandMark';
 
 export interface NavItem {
   id: string;
@@ -34,9 +35,7 @@ export function Sidebar({ items, footer, topSlot, version, collapsed = false, on
     >
       {/* Brand + collapse toggle */}
       <div className={`h-14 flex items-center border-b border-hubble-border ${collapsed ? 'justify-center px-0' : 'gap-2.5 px-4'}`}>
-        <div className="grid place-items-center w-8 h-8 rounded-control bg-hubble-accent/15 text-hubble-accent shrink-0">
-          <Shield size={18} />
-        </div>
+        <BrandMark size={28} className="shrink-0" />
         {!collapsed && (
           <div className="leading-none min-w-0 flex-1">
             <div className="text-sm font-semibold text-primary tracking-tight truncate">kguardian</div>
