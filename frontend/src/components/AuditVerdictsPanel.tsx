@@ -97,14 +97,23 @@ const AuditVerdictsPanel: React.FC<Props> = ({ isOpen, onClose }) => {
   }, [verdicts]);
 
   const visible = useMemo(() => {
-    return verdicts.filter(v => {
-      if (verdictTab !== 'All' && v.verdict !== verdictTab) return false;
-      if (policyFilter) {
-        const key = v.policy_namespace ? `${v.policy_namespace}/${v.policy_name}` : v.policy_name;
-        if (key !== policyFilter) return false;
-      }
-      return true;
-    });
+    return verdicts
+      .filter(v => {
+        if (verdictTab !== 'All' && v.verdict !== verdictTab) return false;
+        if (policyFilter) {
+          const key = v.policy_namespace ? `${v.policy_namespace}/${v.policy_name}` : v.policy_name;
+          if (key !== policyFilter) return false;
+        }
+        return true;
+      })
+      // Hoist would-deny verdicts: they are the actionable rows (a flow your
+      // policy would block), so they lead; newest first within each group.
+      .sort((a, b) => {
+        const aDeny = a.verdict === 'WouldDeny' ? 0 : 1;
+        const bDeny = b.verdict === 'WouldDeny' ? 0 : 1;
+        if (aDeny !== bDeny) return aDeny - bDeny;
+        return new Date(b.observed_at).getTime() - new Date(a.observed_at).getTime();
+      });
   }, [verdicts, verdictTab, policyFilter]);
 
   return (
@@ -286,11 +295,16 @@ const AuditVerdictsPanel: React.FC<Props> = ({ isOpen, onClose }) => {
                       ? `${v.policy_namespace}/${v.policy_name}`
                       : v.policy_name;
                     return (
-                      <tr key={v.id} className="border-b border-hubble-border/60 hover:bg-hubble-card/40">
+                      <tr
+                        key={v.id}
+                        className={`border-b border-hubble-border/60 hover:bg-hubble-card/40 ${
+                          v.verdict === 'WouldDeny' ? 'bg-hubble-warning/[0.06]' : ''
+                        }`}
+                      >
                         <td className="px-4 py-2">
                           <VerdictBadge verdict={v.verdict as AuditVerdictKind} />
                         </td>
-                        <td className="px-4 py-2 text-tertiary whitespace-nowrap">
+                        <td className="px-4 py-2 text-tertiary whitespace-nowrap font-mono tabular-nums">
                           {formatTimestamp(v.observed_at)}
                         </td>
                         <td className="px-4 py-2 font-mono text-xs">
