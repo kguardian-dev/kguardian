@@ -1,8 +1,8 @@
-import { useState, useCallback, useEffect, lazy, Suspense } from 'react';
+import { useState, useCallback, useEffect, useMemo, useRef, lazy, Suspense } from 'react';
 import { Bot, RefreshCw, Share2, ShieldAlert, LayoutDashboard, FileCode } from 'lucide-react';
 import NetworkGraph from './components/NetworkGraph';
 import { FindingsView } from './components/FindingsView';
-import { useHashRoute } from './hooks/useHashRoute';
+import { useHashLocation } from './hooks/useHashLocation';
 import NamespaceSelector from './components/NamespaceSelector';
 import DataTable from './components/DataTable';
 import { Sidebar, type NavItem } from './components/Sidebar';
@@ -33,16 +33,33 @@ const ROUTES = ['map', 'findings'] as const;
 function App() {
   const { settings, updateSettings } = useSettings();
   const { activeCluster } = useCluster();
-  // Namespace selection is remembered per cluster, so switching clusters
-  // restores that cluster's own namespace rather than carrying one across.
-  const [nsByCluster, setNsByCluster] = useState<Record<string, string>>({});
-  const namespace = nsByCluster[activeCluster.id] ?? settings.defaultNamespace ?? 'default';
-  const setNamespace = useCallback(
-    (ns: string) => setNsByCluster((prev) => ({ ...prev, [activeCluster.id]: ns })),
-    [activeCluster.id],
+
+  // The whole location — view, namespace, selected workload — lives in the URL
+  // hash so it's shareable and refreshable. Namespace is also remembered per
+  // cluster (below) as the fallback when the URL carries none.
+  const { loc, navigate } = useHashLocation();
+  const view: (typeof ROUTES)[number] = (ROUTES as readonly string[]).includes(loc.view)
+    ? (loc.view as (typeof ROUTES)[number])
+    : 'map';
+
+  // Namespace remembered per cluster — seeded from a deep-linked ns on first load.
+  const [nsByCluster, setNsByCluster] = useState<Record<string, string>>(() => {
+    const ns = new URLSearchParams(window.location.hash.split('?')[1] ?? '').get('ns');
+    return ns ? { [activeCluster.id]: ns } : {};
+  });
+  const namespace = loc.params.ns ?? nsByCluster[activeCluster.id] ?? settings.defaultNamespace ?? 'default';
+
+  const setView = useCallback(
+    (v: (typeof ROUTES)[number]) => navigate(v, { ns: loc.params.ns, pod: v === 'map' ? loc.params.pod : undefined }),
+    [navigate, loc.params.ns, loc.params.pod],
   );
-  const [selectedPod, setSelectedPod] = useState<PodNodeData | null>(null);
-  const [view, setView] = useHashRoute<(typeof ROUTES)[number]>('map', ROUTES);
+  const setNamespace = useCallback(
+    (ns: string) => {
+      setNsByCluster((prev) => ({ ...prev, [activeCluster.id]: ns }));
+      navigate(view, { ns, pod: undefined }); // namespace change clears the workload
+    },
+    [navigate, view, activeCluster.id],
+  );
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [isAIAssistantOpen, setIsAIAssistantOpen] = useState(false);
   const [isAuditPanelOpen, setIsAuditPanelOpen] = useState(false);
@@ -70,6 +87,36 @@ function App() {
     namespaces.length > 0 && !namespaces.includes(namespace) ? namespaces[0] : namespace;
   const { pods, allPodsLookup, services, loading, error, togglePodExpansion, refreshData } = usePodData(effectiveNamespace);
 
+  // Selected workload is derived from the URL (`?pod=<id>`) and resolved against
+  // the loaded pods — so a deep link opens straight to that workload once data
+  // arrives, and back/forward restores it.
+  const selectedPodId = loc.params.pod ?? null;
+  const selectedPod = useMemo(
+    () => (selectedPodId ? pods.find((p) => p.id === selectedPodId) ?? null : null),
+    [pods, selectedPodId],
+  );
+  const selectPod = useCallback(
+    (pod: PodNodeData | null) => navigate('map', { ns: loc.params.ns, pod: pod?.id }, { replace: true }),
+    [navigate, loc.params.ns],
+  );
+
+  // On cluster switch, point the URL at the new cluster's remembered namespace
+  // (and clear the workload) so the per-cluster memory wins over a stale URL ns.
+  const prevCluster = useRef(activeCluster.id);
+  useEffect(() => {
+    if (prevCluster.current === activeCluster.id) return;
+    prevCluster.current = activeCluster.id;
+    navigate(view, { ns: nsByCluster[activeCluster.id], pod: undefined }, { replace: true });
+  }, [activeCluster.id, nsByCluster, view, navigate]);
+
+  // Keep the resolved namespace in the URL so the link is always shareable,
+  // even before the user has explicitly picked one.
+  useEffect(() => {
+    if (!loc.params.ns && namespaces.length > 0) {
+      navigate(view, { ns: effectiveNamespace, pod: loc.params.pod }, { replace: true });
+    }
+  }, [loc.params.ns, loc.params.pod, namespaces.length, effectiveNamespace, view, navigate]);
+
   const toggleRail = useCallback(() => {
     setRailCollapsed((c) => {
       localStorage.setItem('kg-rail-collapsed', c ? '0' : '1');
@@ -83,7 +130,7 @@ function App() {
     : 0;
 
   const handlePodSelect = (pod: PodNodeData | null) => {
-    setSelectedPod(pod);
+    selectPod(pod);
   };
 
   const handleBuildPolicy = (pod: PodNodeData) => {
@@ -161,11 +208,10 @@ function App() {
     };
   }, [isResizing, handleMouseMove, handleMouseUp]);
 
-  // Jump from a finding straight to that workload on the map.
+  // Jump from a finding straight to that workload on the map (one history entry).
   const handleFindingSelect = useCallback((pod: PodNodeData) => {
-    setSelectedPod(pod);
-    setView('map');
-  }, [setView]);
+    navigate('map', { ns: loc.params.ns, pod: pod.id });
+  }, [navigate, loc.params.ns]);
 
   const navItems: NavItem[] = [
     {
