@@ -1,7 +1,8 @@
 import { useState, useCallback, useEffect, useMemo, useRef, lazy, Suspense } from 'react';
-import { Bot, RefreshCw, Share2, ShieldAlert, LayoutDashboard, FileCode } from 'lucide-react';
+import { Bot, RefreshCw, Share2, ShieldAlert, LayoutDashboard, FileCode, Boxes, Search } from 'lucide-react';
 import NetworkGraph from './components/NetworkGraph';
 import { FindingsView } from './components/FindingsView';
+import { CommandPalette, type Command } from './components/CommandPalette';
 import { useHashLocation } from './hooks/useHashLocation';
 import NamespaceSelector from './components/NamespaceSelector';
 import DataTable from './components/DataTable';
@@ -61,6 +62,7 @@ function App() {
     [navigate, view, activeCluster.id],
   );
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [paletteOpen, setPaletteOpen] = useState(false);
   const [isAIAssistantOpen, setIsAIAssistantOpen] = useState(false);
   const [isAuditPanelOpen, setIsAuditPanelOpen] = useState(false);
   const [isPolicyBuilderOpen, setIsPolicyBuilderOpen] = useState(false);
@@ -213,6 +215,45 @@ function App() {
     navigate('map', { ns: loc.params.ns, pod: pod.id });
   }, [navigate, loc.params.ns]);
 
+  // ⌘K / Ctrl-K opens the command palette from anywhere.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') {
+        e.preventDefault();
+        setPaletteOpen((o) => !o);
+      }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, []);
+
+  // Everything the command palette can jump to.
+  const commands: Command[] = useMemo(() => {
+    const list: Command[] = [
+      { id: 'view-map', group: 'Views', label: 'Network Map', icon: Share2, keywords: 'graph traffic', run: () => setView('map') },
+      { id: 'view-findings', group: 'Views', label: 'Findings', icon: LayoutDashboard, keywords: 'risk signals triage', run: () => setView('findings') },
+      { id: 'tool-policy', group: 'Tools', label: 'Policy Builder', icon: FileCode, keywords: 'networkpolicy seccomp cilium generate', run: openPolicyBuilder },
+      { id: 'tool-audit', group: 'Tools', label: 'Audit Verdicts', icon: ShieldAlert, keywords: 'would deny', run: () => setIsAuditPanelOpen(true) },
+      { id: 'tool-ai', group: 'Tools', label: 'AI Assistant', icon: Bot, keywords: 'chat ask', run: () => setIsAIAssistantOpen(true) },
+    ];
+    namespaces.forEach((ns) =>
+      list.push({ id: `ns-${ns}`, group: 'Namespaces', label: ns, icon: Boxes, keywords: 'namespace switch', run: () => setNamespace(ns) }),
+    );
+    pods
+      .filter((p) => !p.isExternal)
+      .forEach((p) =>
+        list.push({
+          id: `pod-${p.id}`,
+          group: 'Workloads',
+          label: p.label || p.pod.pod_identity || p.pod.pod_name,
+          hint: p.pod.pod_namespace ?? undefined,
+          icon: Server,
+          run: () => handleFindingSelect(p),
+        }),
+      );
+    return list;
+  }, [namespaces, pods, setView, openPolicyBuilder, setNamespace, handleFindingSelect]);
+
   const navItems: NavItem[] = [
     {
       id: 'findings', label: 'Findings', icon: LayoutDashboard, group: 'Views',
@@ -240,6 +281,11 @@ function App() {
       active: isAIAssistantOpen, onClick: () => setIsAIAssistantOpen(true),
     },
   ];
+
+  const cmdKey = useMemo(
+    () => (typeof navigator !== 'undefined' && /Mac|iPhone|iPad/.test(navigator.platform) ? '⌘K' : 'Ctrl K'),
+    [],
+  );
 
   const sectionTitle = view === 'findings' ? 'Findings' : 'Network Map';
   const sectionSubtitle =
@@ -270,6 +316,15 @@ function App() {
           </div>
 
           <div className="flex items-center gap-2">
+            <button
+              onClick={() => setPaletteOpen(true)}
+              title="Search & commands"
+              className="hidden md:flex items-center gap-2 h-8 pl-2.5 pr-1.5 rounded-control border border-hubble-border bg-hubble-card text-tertiary hover:text-secondary hover:border-hubble-border-strong transition-colors"
+            >
+              <Search className="w-3.5 h-3.5" />
+              <span className="text-xs">Search</span>
+              <kbd className="text-[10px] font-mono border border-hubble-border rounded px-1 py-0.5 leading-none">{cmdKey}</kbd>
+            </button>
             <NamespaceSelector
               selectedNamespace={effectiveNamespace}
               onNamespaceChange={setNamespace}
@@ -413,6 +468,8 @@ function App() {
       )}
 
       <SettingsPanel isOpen={settingsOpen} onClose={() => setSettingsOpen(false)} namespaces={namespaces} />
+
+      {paletteOpen && <CommandPalette onClose={() => setPaletteOpen(false)} commands={commands} />}
     </div>
   );
 }
