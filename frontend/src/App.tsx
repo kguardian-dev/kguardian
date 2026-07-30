@@ -1,5 +1,5 @@
 import { useState, useCallback, useEffect, lazy, Suspense } from 'react';
-import { Bot, RefreshCw, Share2, ShieldAlert, LayoutDashboard } from 'lucide-react';
+import { Bot, RefreshCw, Share2, ShieldAlert, LayoutDashboard, FileCode } from 'lucide-react';
 import NetworkGraph from './components/NetworkGraph';
 import { FindingsView } from './components/FindingsView';
 import { useHashRoute } from './hooks/useHashRoute';
@@ -16,7 +16,9 @@ import { useCluster } from './contexts/ClusterContext';
 // when first opened (the NetworkPolicyEditor alone is ~2k lines).
 const AIAssistant = lazy(() => import('./components/AIAssistant'));
 const AuditVerdictsPanel = lazy(() => import('./components/AuditVerdictsPanel'));
-const NetworkPolicyEditor = lazy(() => import('./components/NetworkPolicyEditor'));
+const PolicyBuilderModal = lazy(() =>
+  import('./components/PolicyBuilderModal').then((m) => ({ default: m.PolicyBuilderModal })),
+);
 import { Button } from './components/ui/Button';
 import { EmptyState } from './components/ui/EmptyState';
 import { GraphSkeleton } from './components/ui/Skeleton';
@@ -44,8 +46,8 @@ function App() {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [isAIAssistantOpen, setIsAIAssistantOpen] = useState(false);
   const [isAuditPanelOpen, setIsAuditPanelOpen] = useState(false);
-  const [isPolicyEditorOpen, setIsPolicyEditorOpen] = useState(false);
-  const [policyEditorPod, setPolicyEditorPod] = useState<PodNodeData | null>(null);
+  const [isPolicyBuilderOpen, setIsPolicyBuilderOpen] = useState(false);
+  const [policyBuilderInitialPod, setPolicyBuilderInitialPod] = useState<PodNodeData | null>(null);
   const [aiSidePanel, setAISidePanel] = useState<{
     isSidePanel: boolean;
     isCollapsed: boolean;
@@ -85,9 +87,16 @@ function App() {
   };
 
   const handleBuildPolicy = (pod: PodNodeData) => {
-    setPolicyEditorPod(pod);
-    setIsPolicyEditorOpen(true);
+    setPolicyBuilderInitialPod(pod);
+    setIsPolicyBuilderOpen(true);
   };
+
+  // Rail entry: open the builder with the current workload if one is selected,
+  // otherwise with no pod so it shows the workload picker.
+  const openPolicyBuilder = useCallback(() => {
+    setPolicyBuilderInitialPod(selectedPod && !selectedPod.isExternal ? selectedPod : null);
+    setIsPolicyBuilderOpen(true);
+  }, [selectedPod]);
 
   const handleAILayoutChange = useCallback((isSidePanel: boolean, isCollapsed: boolean, width?: number) => {
     setAISidePanel({ isSidePanel, isCollapsed, width: width ?? UI_DIMENSIONS.AI_PANEL_DEFAULT_WIDTH });
@@ -168,6 +177,11 @@ function App() {
       id: 'map', label: 'Network Map', icon: Share2, group: 'Views', hint: 'Live pod traffic graph',
       active: view === 'map',
       onClick: () => setView('map'),
+    },
+    {
+      id: 'policy', label: 'Policy Builder', icon: FileCode, group: 'Tools',
+      hint: 'Generate a NetworkPolicy or Seccomp profile for a workload',
+      active: isPolicyBuilderOpen, onClick: openPolicyBuilder,
     },
     {
       id: 'audit', label: 'Audit Verdicts', icon: ShieldAlert, group: 'Tools',
@@ -336,13 +350,12 @@ function App() {
         </Suspense>
       )}
 
-      {isPolicyEditorOpen && (
+      {isPolicyBuilderOpen && (
         <Suspense fallback={null}>
-          <NetworkPolicyEditor
-            isOpen
-            onClose={() => setIsPolicyEditorOpen(false)}
-            pod={policyEditorPod}
-            allPods={pods}
+          <PolicyBuilderModal
+            onClose={() => setIsPolicyBuilderOpen(false)}
+            workloads={pods.filter((p) => !p.isExternal)}
+            initialPod={policyBuilderInitialPod}
           />
         </Suspense>
       )}
