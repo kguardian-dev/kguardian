@@ -1,6 +1,6 @@
 import React from 'react';
 import { Handle, Position } from 'reactflow';
-import { ChevronDown, ChevronRight, Network, Server, Globe, FileCode } from 'lucide-react';
+import { ChevronDown, ChevronRight, Network, Server, Globe, FileCode, Crosshair } from 'lucide-react';
 import type { PodNodeData } from '../types';
 
 interface PodNodeProps {
@@ -8,6 +8,8 @@ interface PodNodeProps {
     layoutDirection?: 'LR' | 'TB';
     onToggle: (id: string) => void;
     onBuildPolicy?: (pod: PodNodeData) => void;
+    onFocus?: (id: string) => void;
+    isFocused?: boolean;
   };
   selected?: boolean;
 }
@@ -83,6 +85,21 @@ const PodNode: React.FC<PodNodeProps> = React.memo(({ data, selected }) => {
             )}
           </div>
         </div>
+
+        {data.onFocus && (
+          <button
+            onClick={(e) => { e.stopPropagation(); data.onFocus?.(data.id); }}
+            className={`shrink-0 p-1 rounded transition-colors ${
+              data.isFocused
+                ? 'text-hubble-accent bg-hubble-accent/15'
+                : 'text-tertiary hover:text-primary hover:bg-hubble-hover'
+            }`}
+            title={data.isFocused ? 'Exit focus' : 'Focus on this node’s connections'}
+            aria-label={data.isFocused ? 'Exit focus' : 'Focus on connections'}
+          >
+            <Crosshair className="w-3.5 h-3.5" />
+          </button>
+        )}
       </div>
 
       {data.isExpanded && (
@@ -137,6 +154,7 @@ const PodNode: React.FC<PodNodeProps> = React.memo(({ data, selected }) => {
   return (
     prevProps.data.id === nextProps.data.id &&
     prevProps.data.isExpanded === nextProps.data.isExpanded &&
+    prevProps.data.isFocused === nextProps.data.isFocused &&
     prevProps.selected === nextProps.selected &&
     prevProps.data.traffic?.length === nextProps.data.traffic?.length &&
     prevProps.data.syscalls?.length === nextProps.data.syscalls?.length &&

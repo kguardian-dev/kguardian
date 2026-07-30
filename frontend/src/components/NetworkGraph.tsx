@@ -13,7 +13,7 @@ import ReactFlow, {
 import type { Node, Edge } from 'reactflow';
 import 'reactflow/dist/style.css';
 import ELK from 'elkjs/lib/elk.bundled.js';
-import { Eye, EyeOff, Activity, ShieldAlert, Server } from 'lucide-react';
+import { Eye, EyeOff, Activity, ShieldAlert, Server, Crosshair, X } from 'lucide-react';
 import PodNode from './PodNode';
 import type { PodNodeData, PodInfo, ServiceInfo, NetworkTraffic } from '../types';
 import { UI_TIMING } from '../constants/ui';
@@ -64,6 +64,13 @@ const NetworkGraphInner: React.FC<NetworkGraphProps> = ({
   onBuildPolicy,
 }) => {
   const { fitView } = useReactFlow();
+
+  // Focus mode: isolate a node + its direct upstream/downstream, hide the rest,
+  // and re-lay-out the subset. Toggling the same node (or Esc / the pill) exits.
+  const [focusedNodeId, setFocusedNodeId] = useState<string | null>(null);
+  const onFocus = useCallback((id: string) => {
+    setFocusedNodeId((prev) => (prev === id ? null : id));
+  }, []);
 
   // Build IP-to-PodInfo lookup from allPodsLookup for cross-namespace resolution
   const ipToAllPodsMap = useMemo(() => {
@@ -399,11 +406,13 @@ const NetworkGraphInner: React.FC<NetworkGraphProps> = ({
           layoutDirection,
           onToggle: isExternal ? noopToggle : onPodToggle,
           onBuildPolicy: isExternal ? undefined : onBuildPolicy,
+          onFocus,
+          isFocused: pod.id === focusedNodeId,
         },
         selected: pod.id === selectedPodId,
       };
     });
-  }, [allDisplayPods, onPodToggle, selectedPodId, onBuildPolicy, layoutDirection]);
+  }, [allDisplayPods, onPodToggle, selectedPodId, onBuildPolicy, layoutDirection, onFocus, focusedNodeId]);
 
   // Track ELK-computed node positions
   const [elkPositions, setElkPositions] = useState<Map<string, { x: number; y: number }>>(new Map());
@@ -586,17 +595,45 @@ const NetworkGraphInner: React.FC<NetworkGraphProps> = ({
     return edges;
   }, [pods, allDisplayPods, ipToLocalPodMap, svcIpToLocalPodMap, showTraffic, wellKnownPorts, podIpToSvcIp]);
 
+  // Focus filter: the focused node + everything one hop up/downstream. Applied
+  // before ELK so the isolated subset gets its own clean layout.
+  const focusNeighborhood = useMemo(() => {
+    if (!focusedNodeId) return null;
+    const ids = new Set<string>([focusedNodeId]);
+    for (const e of initialEdges) {
+      if (e.source === focusedNodeId) ids.add(e.target);
+      if (e.target === focusedNodeId) ids.add(e.source);
+    }
+    return ids;
+  }, [focusedNodeId, initialEdges]);
+
+  const displayNodes: Node[] = useMemo(
+    () => (focusNeighborhood ? baseNodes.filter((n) => focusNeighborhood.has(n.id)) : baseNodes),
+    [baseNodes, focusNeighborhood],
+  );
+  const displayEdges: Edge[] = useMemo(
+    () => (focusNeighborhood
+      ? initialEdges.filter((e) => focusNeighborhood.has(e.source) && focusNeighborhood.has(e.target))
+      : initialEdges),
+    [initialEdges, focusNeighborhood],
+  );
+
+  const focusedLabel = useMemo(
+    () => (focusedNodeId ? allDisplayPods.find((p) => p.id === focusedNodeId)?.label ?? 'node' : null),
+    [focusedNodeId, allDisplayPods],
+  );
+
   // Run ELK layout whenever nodes or edges change
   useEffect(() => {
-    if (baseNodes.length === 0) {
+    if (displayNodes.length === 0) {
       // eslint-disable-next-line react-hooks/set-state-in-effect
       setElkPositions(new Map());
       return;
     }
 
     // Only include edges whose source and target exist in the current node set
-    const nodeIds = new Set(baseNodes.map((n) => n.id));
-    const validEdges = initialEdges.filter(
+    const nodeIds = new Set(displayNodes.map((n) => n.id));
+    const validEdges = displayEdges.filter(
       (e) => nodeIds.has(e.source) && nodeIds.has(e.target)
     );
 
@@ -612,7 +649,7 @@ const NetworkGraphInner: React.FC<NetworkGraphProps> = ({
         'elk.separateConnectedComponents': 'true',
         'elk.spacing.componentComponent': '100',
       },
-      children: baseNodes.map((node) => {
+      children: displayNodes.map((node) => {
         const isIn = node.id.endsWith('-in');
         const isOut = node.id.endsWith('-out');
         const isInternet = node.id.startsWith('external-internet-');
@@ -674,8 +711,8 @@ const NetworkGraphInner: React.FC<NetworkGraphProps> = ({
       // Fallback: simple grid layout if ELK fails
       console.error('ELK layout error, using fallback grid:', err);
       const positions = new Map<string, { x: number; y: number }>();
-      const cols = Math.ceil(Math.sqrt(baseNodes.length));
-      baseNodes.forEach((node, i) => {
+      const cols = Math.ceil(Math.sqrt(displayNodes.length));
+      displayNodes.forEach((node, i) => {
         const col = i % cols;
         const row = Math.floor(i / cols);
         positions.set(node.id, {
@@ -685,18 +722,18 @@ const NetworkGraphInner: React.FC<NetworkGraphProps> = ({
       });
       setElkPositions(positions);
     });
-  }, [baseNodes, initialEdges, layoutDirection]);
+  }, [displayNodes, displayEdges, layoutDirection]);
 
   // Merge ELK positions into nodes — hide nodes until ELK has run for the current set
   const positionedNodes: Node[] = useMemo(() => {
     // Check if ELK has computed positions for these specific nodes
-    const hasPositions = baseNodes.length > 0 && baseNodes.some((n) => elkPositions.has(n.id));
+    const hasPositions = displayNodes.length > 0 && displayNodes.some((n) => elkPositions.has(n.id));
     if (!hasPositions) return [];
-    return baseNodes.map((node) => ({
+    return displayNodes.map((node) => ({
       ...node,
       position: elkPositions.get(node.id) ?? { x: -9999, y: -9999 },
     }));
-  }, [baseNodes, elkPositions]);
+  }, [displayNodes, elkPositions]);
 
   const [nodes, setNodes, onNodesChange] = useNodesState(positionedNodes);
   const [edges, setEdges, onEdgesChange] = useEdgesState(initialEdges);
@@ -710,8 +747,18 @@ const NetworkGraphInner: React.FC<NetworkGraphProps> = ({
 
   // Update edges when traffic changes
   useEffect(() => {
-    setEdges(initialEdges);
-  }, [initialEdges, setEdges]);
+    setEdges(displayEdges);
+  }, [displayEdges, setEdges]);
+
+  // Esc exits focus mode.
+  useEffect(() => {
+    if (!focusedNodeId) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setFocusedNodeId(null);
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [focusedNodeId]);
 
   // Auto-fit view after ELK layout completes
   useEffect(() => {
@@ -772,6 +819,26 @@ const NetworkGraphInner: React.FC<NetworkGraphProps> = ({
           size={1}
           color="var(--theme-border)"
         />
+
+        {/* Focus pill — shown while a node's neighborhood is isolated */}
+        {focusedNodeId && (
+          <Panel position="top-center">
+            <div className="flex items-center gap-2 pl-3 pr-1.5 py-1.5 rounded-full bg-hubble-accent/15 border border-hubble-accent/40 backdrop-blur-sm text-xs">
+              <Crosshair className="w-3.5 h-3.5 text-hubble-accent shrink-0" />
+              <span className="text-primary">
+                Focused on <span className="font-semibold">{focusedLabel}</span>
+              </span>
+              <button
+                onClick={() => setFocusedNodeId(null)}
+                className="flex items-center gap-1 pl-2 pr-2 py-0.5 rounded-full text-secondary hover:text-primary hover:bg-hubble-hover transition-colors"
+                title="Show all nodes (Esc)"
+              >
+                <X className="w-3 h-3" />
+                Show all
+              </button>
+            </div>
+          </Panel>
+        )}
 
         {/* Security Summary Panel */}
         <Panel position="top-left">
