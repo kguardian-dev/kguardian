@@ -16,6 +16,9 @@ const AIAssistant = lazy(() => import('./components/AIAssistant'));
 const AuditVerdictsPanel = lazy(() => import('./components/AuditVerdictsPanel'));
 const NetworkPolicyEditor = lazy(() => import('./components/NetworkPolicyEditor'));
 import { Button } from './components/ui/Button';
+import { EmptyState } from './components/ui/EmptyState';
+import { GraphSkeleton } from './components/ui/Skeleton';
+import { Server } from 'lucide-react';
 import { usePodData } from './hooks/usePodData';
 import { useNamespaces } from './hooks/useNamespaces';
 import type { PodNodeData } from './types';
@@ -213,11 +216,21 @@ function App() {
         )}
 
         {loading && pods.length === 0 ? (
+          <div className="flex-1 min-h-0">
+            <GraphSkeleton />
+          </div>
+        ) : !error && pods.length === 0 ? (
           <div className="flex-1 flex items-center justify-center">
-            <div className="text-center">
-              <RefreshCw className="w-8 h-8 text-hubble-accent animate-spin mx-auto mb-4" />
-              <p className="text-secondary">Loading pod data...</p>
-            </div>
+            <EmptyState
+              icon={Server}
+              title={`No workloads in ${effectiveNamespace}`}
+              description="This namespace has no observed pods yet. Switch namespaces from the header, or wait for the controller to report traffic from workloads here."
+              action={
+                <Button variant="secondary" size="sm" leftIcon={RefreshCw} onClick={refreshData}>
+                  Refresh
+                </Button>
+              }
+            />
           </div>
         ) : (
           <>
