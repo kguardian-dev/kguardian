@@ -2,6 +2,7 @@ import React from 'react';
 import { Handle, Position } from 'reactflow';
 import { ChevronDown, ChevronRight, Network, Server, Globe, FileCode, Crosshair } from 'lucide-react';
 import type { PodNodeData } from '../types';
+import { Button } from './ui/Button';
 
 interface PodNodeProps {
   data: PodNodeData & {
@@ -30,20 +31,21 @@ const PodNode: React.FC<PodNodeProps> = React.memo(({ data, selected }) => {
   }, 0) || 0;
 
   const IconComponent = isExternal ? Globe : Server;
-  const accentColor = isExternal ? 'text-amber-500' : 'text-hubble-accent';
+  // Trust state → accent: external endpoints = warning amber, in-cluster
+  // workloads = brand indigo. Encoded as a left spine rather than a full tinted
+  // border (elevation + a spine reads authored; a rounded tint box reads generic).
+  const accentColor = isExternal ? 'text-hubble-warning' : 'text-hubble-accent';
+  const spineColor = isExternal ? 'border-l-hubble-warning' : 'border-l-hubble-accent';
 
-  const borderClasses = isExternal
-    ? selected
-      ? 'border-amber-500 bg-hubble-card shadow-lg shadow-amber-500/20'
-      : 'border-amber-500/40 bg-hubble-card hover:border-amber-500/60'
-    : selected
-      ? 'border-hubble-accent bg-hubble-card shadow-lg shadow-hubble-accent/20'
-      : 'border-hubble-border bg-hubble-card hover:border-hubble-accent/50';
+  const borderClasses = selected
+    ? `border-hubble-border-strong ring-1 ring-hubble-accent/60 shadow-lg`
+    : `border-hubble-border hover:border-hubble-border-strong`;
 
   return (
     <div
       className={`
-        px-4 py-3 rounded-lg border-2 transition-all min-w-[200px]
+        relative px-4 py-3 rounded-surface bg-hubble-card border border-l-[3px] ${spineColor}
+        transition-colors min-w-[200px] max-w-[264px]
         ${borderClasses}
       `}
     >
@@ -69,8 +71,8 @@ const PodNode: React.FC<PodNodeProps> = React.memo(({ data, selected }) => {
 
           <IconComponent className={`w-5 h-5 ${accentColor}`} />
 
-          <div className="flex-1">
-            <div className="font-semibold text-sm text-primary">
+          <div className="flex-1 min-w-0">
+            <div className="font-semibold text-sm text-primary truncate" title={identityName}>
               {identityName}
             </div>
             {data.externalNamespace && data.externalNamespace !== 'internet' && data.externalNamespace !== 'cluster' && (
@@ -128,19 +130,19 @@ const PodNode: React.FC<PodNodeProps> = React.memo(({ data, selected }) => {
           )}
 
           {!isExternal && (
-            <button
+            <Button
+              variant="success"
+              size="sm"
+              leftIcon={FileCode}
+              className="w-full mt-2"
               onClick={(e) => {
                 e.stopPropagation();
                 data.onBuildPolicy?.(data);
               }}
-              className="w-full mt-2 px-3 py-1.5 bg-hubble-success/10 border border-hubble-success/30
-                         rounded text-hubble-success hover:bg-hubble-success/20 hover:border-hubble-success
-                         transition-all flex items-center justify-center gap-2 text-xs font-medium"
               title="Build Network Policy"
             >
-              <FileCode className="w-3 h-3" />
               Build Policy
-            </button>
+            </Button>
           )}
         </div>
       )}
