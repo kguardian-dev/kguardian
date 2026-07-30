@@ -3,6 +3,8 @@ import { X, RefreshCw, AlertTriangle, CheckCircle2, Filter } from 'lucide-react'
 import type { AuditVerdict, AuditVerdictKind } from '../types';
 import api from '../services/api';
 import { Modal } from './ui/Modal';
+import { EmptyState } from './ui/EmptyState';
+import { Button } from './ui/Button';
 
 interface Props {
   isOpen: boolean;
@@ -247,21 +249,22 @@ const AuditVerdictsPanel: React.FC<Props> = ({ isOpen, onClose }) => {
               </div>
             )}
             {!error && !loading && visible.length === 0 && (
-              <div className="m-8 text-center text-tertiary">
-                No {verdictTab === 'All' ? '' : verdictTab.toLowerCase()} verdicts in the rolling window.
-                {policyFilter && (
-                  <>
-                    {' '}
-                    <button
-                      onClick={() => setPolicyFilter('')}
-                      className="text-hubble-accent underline"
-                    >
+              <EmptyState
+                icon={CheckCircle2}
+                title={`No ${verdictTab === 'All' ? '' : verdictTab.toLowerCase() + ' '}verdicts in the rolling window`}
+                description={
+                  policyFilter
+                    ? 'Nothing matched the current policy filter.'
+                    : 'The evaluator has not recorded any audited flows for this window yet.'
+                }
+                action={
+                  policyFilter ? (
+                    <Button variant="secondary" size="sm" onClick={() => setPolicyFilter('')}>
                       Clear filter
-                    </button>
-                    .
-                  </>
-                )}
-              </div>
+                    </Button>
+                  ) : undefined
+                }
+              />
             )}
             {visible.length > 0 && (
               <table className="w-full text-sm">
