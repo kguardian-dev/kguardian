@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useState, useCallback } from 'react';
 import { X, RefreshCw, AlertTriangle, CheckCircle2, Filter } from 'lucide-react';
 import type { AuditVerdict, AuditVerdictKind } from '../types';
 import api from '../services/api';
+import { Modal } from './ui/Modal';
 
 interface Props {
   isOpen: boolean;
@@ -104,20 +105,15 @@ const AuditVerdictsPanel: React.FC<Props> = ({ isOpen, onClose }) => {
     });
   }, [verdicts, verdictTab, policyFilter]);
 
-  if (!isOpen) return null;
-
   return (
-    <div
-      className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4"
-      role="dialog"
-      aria-modal="true"
-      aria-labelledby="audit-verdicts-title"
-      onClick={onClose}
+    <Modal
+      isOpen={isOpen}
+      onClose={onClose}
+      hideHeader
+      size="full"
+      contentClassName="flex-1 min-h-0 flex flex-col"
     >
-      <div
-        className="bg-hubble-darker border border-hubble-border rounded-lg w-full max-w-6xl max-h-[90vh] flex flex-col"
-        onClick={e => e.stopPropagation()}
-      >
+      <>
         {/* Header */}
         <header className="flex items-center justify-between px-6 py-4 border-b border-hubble-border">
           <div className="flex items-center gap-3">
@@ -323,8 +319,8 @@ const AuditVerdictsPanel: React.FC<Props> = ({ isOpen, onClose }) => {
           {' '}<span className="text-hubble-accent">{counts.allow} allow</span>.
           Backed by <code className="font-mono">audit_verdicts</code>; rotated by the broker's retention loop.
         </footer>
-      </div>
-    </div>
+      </>
+    </Modal>
   );
 };
 
