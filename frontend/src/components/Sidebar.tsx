@@ -14,6 +14,8 @@ export interface NavItem {
 interface SidebarProps {
   items: NavItem[];
   footer?: ReactNode;
+  /** Rendered between the brand and the section nav (e.g. cluster switcher). */
+  topSlot?: ReactNode;
   version: string;
   collapsed?: boolean;
   onToggleCollapse?: () => void;
@@ -25,7 +27,7 @@ interface SidebarProps {
  * a stable section rail (the Datadog/Grafana/Linear convention). Collapses to a
  * 56px icon rail; labels fall back to native tooltips via `title`.
  */
-export function Sidebar({ items, footer, version, collapsed = false, onToggleCollapse }: SidebarProps) {
+export function Sidebar({ items, footer, topSlot, version, collapsed = false, onToggleCollapse }: SidebarProps) {
   return (
     <aside
       className={`${collapsed ? 'w-14' : 'w-56'} shrink-0 flex flex-col bg-hubble-dark border-r border-hubble-border transition-[width] duration-200 ease-out`}
@@ -52,6 +54,9 @@ export function Sidebar({ items, footer, version, collapsed = false, onToggleCol
           </button>
         )}
       </div>
+
+      {/* Top slot (cluster switcher) */}
+      {topSlot}
 
       {/* Section nav */}
       <nav className="flex-1 p-2 space-y-0.5 overflow-y-auto">
@@ -83,20 +88,28 @@ export function Sidebar({ items, footer, version, collapsed = false, onToggleCol
         })}
       </nav>
 
-      {/* Footer: utilities + version (+ expand control when collapsed) */}
-      <div className={`p-2 border-t border-hubble-border flex items-center gap-1.5 ${collapsed ? 'flex-col' : 'justify-between'}`}>
-        {collapsed && onToggleCollapse && (
-          <button
-            onClick={onToggleCollapse}
-            title="Expand sidebar"
-            aria-label="Expand sidebar"
-            className="grid place-items-center w-9 h-9 rounded-control text-tertiary hover:text-primary hover:bg-hubble-hover transition-colors"
-          >
-            <PanelLeftOpen size={16} />
-          </button>
+      {/* Footer: account + version (+ expand control when collapsed) */}
+      <div className="p-2 border-t border-hubble-border">
+        {collapsed ? (
+          <div className="flex flex-col items-center gap-1.5">
+            {onToggleCollapse && (
+              <button
+                onClick={onToggleCollapse}
+                title="Expand sidebar"
+                aria-label="Expand sidebar"
+                className="grid place-items-center w-9 h-9 rounded-control text-tertiary hover:text-primary hover:bg-hubble-hover transition-colors"
+              >
+                <PanelLeftOpen size={16} />
+              </button>
+            )}
+            {footer}
+          </div>
+        ) : (
+          <div className="space-y-1">
+            {footer}
+            <div className="px-1.5 text-[10px] font-medium text-tertiary tabular-nums">v{version}</div>
+          </div>
         )}
-        <div className="flex items-center gap-1">{footer}</div>
-        {!collapsed && <span className="px-1.5 text-[10px] font-medium text-tertiary tabular-nums">v{version}</span>}
       </div>
     </aside>
   );
