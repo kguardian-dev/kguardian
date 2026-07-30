@@ -49,16 +49,21 @@ const PodNode: React.FC<PodNodeProps> = React.memo(({ data, selected }) => {
 
       <div className="flex items-start justify-between gap-2">
         <div className="flex items-center gap-2 flex-1">
-          <button
-            onClick={() => data.onToggle(data.id)}
-            className={`${accentColor} hover:opacity-75 transition-colors`}
-          >
-            {data.isExpanded ? (
-              <ChevronDown className="w-4 h-4" />
-            ) : (
-              <ChevronRight className="w-4 h-4" />
-            )}
-          </button>
+          {/* External endpoints aggregate traffic only — they have no syscalls
+              or policy to reveal (their toggle is a no-op), so no expander. */}
+          {!isExternal && (
+            <button
+              onClick={() => data.onToggle(data.id)}
+              className={`${accentColor} hover:opacity-75 transition-colors`}
+              aria-label={data.isExpanded ? 'Collapse' : 'Expand'}
+            >
+              {data.isExpanded ? (
+                <ChevronDown className="w-4 h-4" />
+              ) : (
+                <ChevronRight className="w-4 h-4" />
+              )}
+            </button>
+          )}
 
           <IconComponent className={`w-5 h-5 ${accentColor}`} />
 
