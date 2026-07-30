@@ -1,6 +1,7 @@
-import { useState, useRef, useEffect } from 'react';
+import { useState, useRef } from 'react';
 import { Boxes, Check, ChevronsUpDown, Plus } from 'lucide-react';
 import { useCluster } from '../contexts/ClusterContext';
+import { useDismissable } from '../hooks/useDismissable';
 
 /**
  * Active-cluster selector in the rail. With one cluster it reads as the current
@@ -12,15 +13,7 @@ export function ClusterSwitcher({ collapsed = false }: { collapsed?: boolean }) 
   const { clusters, activeCluster, setActiveClusterId } = useCluster();
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
-
-  useEffect(() => {
-    if (!open) return;
-    const onDown = (e: MouseEvent) => {
-      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
-    };
-    document.addEventListener('mousedown', onDown);
-    return () => document.removeEventListener('mousedown', onDown);
-  }, [open]);
+  useDismissable(open, () => setOpen(false), ref);
 
   return (
     <div ref={ref} className="relative px-2 pt-2">
