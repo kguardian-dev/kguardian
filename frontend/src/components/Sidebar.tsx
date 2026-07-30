@@ -10,6 +10,9 @@ export interface NavItem {
   onClick: () => void;
   active?: boolean;
   hint?: string;
+  /** Rail section this item belongs to (e.g. "Views", "Tools"). Items with the
+   *  same group render under one header, in first-seen order. */
+  group?: string;
 }
 
 interface SidebarProps {
@@ -28,6 +31,22 @@ interface SidebarProps {
  * a stable section rail (the Datadog/Grafana/Linear convention). Collapses to a
  * 56px icon rail; labels fall back to native tooltips via `title`.
  */
+/** Bucket nav items by their `group` (default "Workspace"), preserving the
+ *  order each group's first item appears in. */
+function groupItems(items: NavItem[]): Array<[string, NavItem[]]> {
+  const order: string[] = [];
+  const map = new Map<string, NavItem[]>();
+  for (const item of items) {
+    const group = item.group ?? 'Workspace';
+    if (!map.has(group)) {
+      map.set(group, []);
+      order.push(group);
+    }
+    map.get(group)!.push(item);
+  }
+  return order.map((group) => [group, map.get(group)!]);
+}
+
 export function Sidebar({ items, footer, topSlot, version, collapsed = false, onToggleCollapse }: SidebarProps) {
   return (
     <aside
@@ -57,34 +76,38 @@ export function Sidebar({ items, footer, topSlot, version, collapsed = false, on
       {/* Top slot (cluster switcher) */}
       {topSlot}
 
-      {/* Section nav */}
+      {/* Section nav — grouped by NavItem.group, in first-seen order. */}
       <nav className="flex-1 p-2 space-y-0.5 overflow-y-auto">
-        {!collapsed && (
-          <div className="px-2 pt-1.5 pb-1 text-[10px] font-semibold uppercase tracking-[0.12em] text-tertiary">
-            Workspace
+        {groupItems(items).map(([group, groupItemList], gi) => (
+          <div key={group} className={gi > 0 ? 'pt-2' : undefined}>
+            {!collapsed && (
+              <div className="px-2 pt-1.5 pb-1 text-[10px] font-semibold uppercase tracking-[0.12em] text-tertiary">
+                {group}
+              </div>
+            )}
+            {groupItemList.map((item) => {
+              const Icon = item.icon;
+              return (
+                <button
+                  key={item.id}
+                  onClick={item.onClick}
+                  title={item.hint ?? item.label}
+                  aria-current={item.active ? 'page' : undefined}
+                  className={`w-full flex items-center h-9 rounded-control text-sm transition-colors ${
+                    collapsed ? 'justify-center px-0' : 'gap-2.5 px-3'
+                  } ${
+                    item.active
+                      ? 'bg-hubble-accent/15 text-hubble-accent font-medium'
+                      : 'text-secondary hover:bg-hubble-hover hover:text-primary'
+                  }`}
+                >
+                  <Icon size={16} className="shrink-0" />
+                  {!collapsed && <span className="truncate">{item.label}</span>}
+                </button>
+              );
+            })}
           </div>
-        )}
-        {items.map((item) => {
-          const Icon = item.icon;
-          return (
-            <button
-              key={item.id}
-              onClick={item.onClick}
-              title={item.hint ?? item.label}
-              aria-current={item.active ? 'page' : undefined}
-              className={`w-full flex items-center h-9 rounded-control text-sm transition-colors ${
-                collapsed ? 'justify-center px-0' : 'gap-2.5 px-3'
-              } ${
-                item.active
-                  ? 'bg-hubble-accent/15 text-hubble-accent font-medium'
-                  : 'text-secondary hover:bg-hubble-hover hover:text-primary'
-              }`}
-            >
-              <Icon size={16} className="shrink-0" />
-              {!collapsed && <span className="truncate">{item.label}</span>}
-            </button>
-          );
-        })}
+        ))}
       </nav>
 
       {/* Footer: account + version (+ expand control when collapsed) */}
