@@ -11,7 +11,7 @@ import ReactFlow, {
 import type { Node, Edge } from 'reactflow';
 import 'reactflow/dist/style.css';
 import ELK from 'elkjs/lib/elk.bundled.js';
-import { Eye, EyeOff, Activity, ShieldAlert, Server, Crosshair, X } from 'lucide-react';
+import { Eye, EyeOff, Activity, ShieldAlert, Server, Crosshair, X, ArrowRight, ArrowDown } from 'lucide-react';
 import PodNode from './PodNode';
 import type { PodNodeData, PodInfo, ServiceInfo, NetworkTraffic } from '../types';
 import { UI_TIMING } from '../constants/ui';
@@ -907,7 +907,8 @@ const NetworkGraphInner: React.FC<NetworkGraphProps> = ({
                            bg-hubble-card border-hubble-border text-secondary hover:border-hubble-border-strong hover:text-primary"
                 title={`Switch to ${layoutDirection === 'LR' ? 'vertical' : 'horizontal'} layout`}
               >
-                Layout: {layoutDirection === 'LR' ? '\u2192' : '\u2193'}
+                {layoutDirection === 'LR' ? <ArrowRight className="w-3.5 h-3.5" /> : <ArrowDown className="w-3.5 h-3.5" />}
+                Layout
               </button>
             )}
           </div>
