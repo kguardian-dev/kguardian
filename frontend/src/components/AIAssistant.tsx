@@ -5,6 +5,7 @@ import { X, Send, ArrowRight, Minimize2, Maximize2, ChevronRight, ChevronLeft, C
 import { streamChatMessage, type HistoryMessage } from '../services/aiApi';
 import { UI_DIMENSIONS } from '../constants/ui';
 import { Button } from './ui/Button';
+import { Modal } from './ui/Modal';
 
 interface Message {
   id: string;
@@ -454,27 +455,19 @@ const AIAssistant: React.FC<AIAssistantProps> = ({ isOpen, onClose, onLayoutChan
   // Modal view (centered, with backdrop)
   if (viewMode === 'modal') {
     return (
-      <>
-        {/* Backdrop */}
-        <div
-          className="fixed inset-0 bg-black/50 backdrop-blur-sm z-40 transition-opacity"
-          onClick={onClose}
-        />
-
-        {/* Modal */}
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 pointer-events-none">
-          <div
-            className="bg-hubble-card border border-hubble-border rounded-lg shadow-2xl w-full max-w-3xl h-[600px] flex flex-col pointer-events-auto"
-            onClick={(e) => e.stopPropagation()}
-          >
-            <ChatHeader showClear={messages.length > 0} onClear={handleClearChat} onClose={onClose}>
-              <Button variant="ghost" size="sm" iconOnly leftIcon={Minimize2} onClick={toggleViewMode} aria-label="Dock to side" title="Dock to side" />
-            </ChatHeader>
-            {chatMessages('max-w-md mx-auto w-full')}
-            {chatInput}
-          </div>
-        </div>
-      </>
+      <Modal
+        isOpen
+        onClose={onClose}
+        hideHeader
+        className="w-full max-w-3xl h-[600px]"
+        contentClassName="flex-1 min-h-0 flex flex-col"
+      >
+        <ChatHeader showClear={messages.length > 0} onClear={handleClearChat} onClose={onClose}>
+          <Button variant="ghost" size="sm" iconOnly leftIcon={Minimize2} onClick={toggleViewMode} aria-label="Dock to side" title="Dock to side" />
+        </ChatHeader>
+        {chatMessages('max-w-md mx-auto w-full')}
+        {chatInput}
+      </Modal>
     );
   }
 

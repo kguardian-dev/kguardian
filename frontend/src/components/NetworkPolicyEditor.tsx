@@ -7,6 +7,7 @@ import { ciliumPolicyToYAML } from '../utils/ciliumPolicyGenerator';
 import { profileToYAML } from '../utils/seccompProfileGenerator';
 import { SECCOMP_ACTIONS, ARCHITECTURES, SECCOMP_ACTION_DESCRIPTIONS } from '../types/seccompProfile';
 import { PolicyHeader } from './PolicyEditor';
+import { Modal } from './ui/Modal';
 import {
   useNetworkPolicyEditor,
   useCiliumPolicyEditor,
@@ -138,21 +139,15 @@ const NetworkPolicyEditor: React.FC<NetworkPolicyEditorProps> = ({ isOpen, onClo
                      (policyType === 'seccomp' && !seccompProfile);
 
   return (
-    <>
-      {/* Backdrop */}
-      <div
-        className="fixed inset-0 bg-black/50 backdrop-blur-sm z-40 transition-opacity"
-        onClick={onClose}
-      />
-
-      {/* Modal */}
-      <div className="fixed inset-0 z-50 flex items-center justify-center p-4 pointer-events-none">
-        <div
-          className="bg-hubble-card border border-hubble-border rounded-lg shadow-2xl w-full max-w-7xl h-[90vh] flex flex-col pointer-events-auto"
-          onClick={(e) => e.stopPropagation()}
-        >
-          {/* Header */}
-          <PolicyHeader
+    <Modal
+      isOpen
+      onClose={onClose}
+      hideHeader
+      className="w-full max-w-7xl h-[90vh]"
+      contentClassName="flex-1 min-h-0 flex flex-col"
+    >
+      {/* Header */}
+      <PolicyHeader
             policyType={policyType}
             onPolicyTypeChange={setPolicyType}
             yamlView={yamlView}
@@ -2029,9 +2024,7 @@ const NetworkPolicyEditor: React.FC<NetworkPolicyEditorProps> = ({ isOpen, onClo
               </div>
             </div>
           </div>
-        </div>
-      </div>
-    </>
+    </Modal>
   );
 };
 
