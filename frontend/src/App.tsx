@@ -1,6 +1,8 @@
 import { useState, useCallback, useEffect, lazy, Suspense } from 'react';
-import { Bot, RefreshCw, Share2, ShieldAlert } from 'lucide-react';
+import { Bot, RefreshCw, Share2, ShieldAlert, LayoutDashboard } from 'lucide-react';
 import NetworkGraph from './components/NetworkGraph';
+import { FindingsView } from './components/FindingsView';
+import { useHashRoute } from './hooks/useHashRoute';
 import NamespaceSelector from './components/NamespaceSelector';
 import DataTable from './components/DataTable';
 import { Sidebar, type NavItem } from './components/Sidebar';
@@ -24,6 +26,8 @@ import { useNamespaces } from './hooks/useNamespaces';
 import type { PodNodeData } from './types';
 import { UI_DIMENSIONS } from './constants/ui';
 
+const ROUTES = ['map', 'findings'] as const;
+
 function App() {
   const { settings, updateSettings } = useSettings();
   const { activeCluster } = useCluster();
@@ -36,6 +40,7 @@ function App() {
     [activeCluster.id],
   );
   const [selectedPod, setSelectedPod] = useState<PodNodeData | null>(null);
+  const [view, setView] = useHashRoute<(typeof ROUTES)[number]>('map', ROUTES);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [isAIAssistantOpen, setIsAIAssistantOpen] = useState(false);
   const [isAuditPanelOpen, setIsAuditPanelOpen] = useState(false);
@@ -147,23 +152,40 @@ function App() {
     };
   }, [isResizing, handleMouseMove, handleMouseUp]);
 
+  // Jump from a finding straight to that workload on the map.
+  const handleFindingSelect = useCallback((pod: PodNodeData) => {
+    setSelectedPod(pod);
+    setView('map');
+  }, [setView]);
+
   const navItems: NavItem[] = [
     {
-      id: 'map', label: 'Network Map', icon: Share2, hint: 'Live pod traffic graph',
-      active: !isAuditPanelOpen && !isAIAssistantOpen,
-      onClick: () => { setIsAuditPanelOpen(false); handleAIClose(); },
+      id: 'findings', label: 'Findings', icon: LayoutDashboard, group: 'Views',
+      hint: 'Prioritized runtime-security signals',
+      active: view === 'findings', onClick: () => setView('findings'),
     },
     {
-      id: 'audit', label: 'Audit Verdicts', icon: ShieldAlert, hint: 'Flows an AuditNetworkPolicy would deny',
+      id: 'map', label: 'Network Map', icon: Share2, group: 'Views', hint: 'Live pod traffic graph',
+      active: view === 'map',
+      onClick: () => setView('map'),
+    },
+    {
+      id: 'audit', label: 'Audit Verdicts', icon: ShieldAlert, group: 'Tools',
+      hint: 'Flows an AuditNetworkPolicy would deny',
       active: isAuditPanelOpen, onClick: () => setIsAuditPanelOpen(true),
     },
     {
-      id: 'assistant', label: 'AI Assistant', icon: Bot, hint: 'Ask about cluster traffic & policies',
+      id: 'assistant', label: 'AI Assistant', icon: Bot, group: 'Tools',
+      hint: 'Ask about cluster traffic & policies',
       active: isAIAssistantOpen, onClick: () => setIsAIAssistantOpen(true),
     },
   ];
 
-  const sectionTitle = isAIAssistantOpen ? 'AI Assistant' : isAuditPanelOpen ? 'Audit Verdicts' : 'Network Map';
+  const sectionTitle = view === 'findings' ? 'Findings' : 'Network Map';
+  const sectionSubtitle =
+    view === 'findings'
+      ? `Namespace ${effectiveNamespace}`
+      : `Namespace ${effectiveNamespace} · ${pods.length} pods`;
 
   return (
     <div className="flex h-screen bg-hubble-darker">
@@ -184,9 +206,7 @@ function App() {
         <header className="h-14 shrink-0 flex items-center justify-between gap-4 px-5 border-b border-hubble-border bg-hubble-dark">
           <div className="min-w-0">
             <h1 className="text-sm font-semibold text-primary truncate">{sectionTitle}</h1>
-            <p className="text-xs text-tertiary truncate">
-              Namespace <span className="text-secondary">{effectiveNamespace}</span> · {pods.length} pods
-            </p>
+            <p className="text-xs text-tertiary truncate">{sectionSubtitle}</p>
           </div>
 
           <div className="flex items-center gap-2">
@@ -209,6 +229,16 @@ function App() {
 
         {/* Main Content */}
       <div className="flex-1 flex flex-col overflow-hidden">
+        {view === 'findings' ? (
+          <FindingsView
+            pods={pods}
+            namespace={effectiveNamespace}
+            onSelectPod={handleFindingSelect}
+            onBuildPolicy={handleBuildPolicy}
+            onOpenAudit={() => setIsAuditPanelOpen(true)}
+          />
+        ) : (
+        <>
         {error && (
           <div className="bg-hubble-error/20 border border-hubble-error text-hubble-error px-6 py-3">
             <p className="text-sm">Error: {error}</p>
@@ -286,6 +316,8 @@ function App() {
               </div>
             </div>
           </>
+        )}
+        </>
         )}
       </div>
 
