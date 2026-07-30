@@ -1,7 +1,8 @@
-import { useState, useRef, useEffect } from 'react';
+import { useState, useRef } from 'react';
 import { User, Settings as SettingsIcon, Sun, Moon, LogOut, ShieldCheck, ChevronsUpDown } from 'lucide-react';
 import { useAuth } from '../contexts/AuthContext';
 import { useTheme } from '../contexts/ThemeContext';
+import { useDismissable } from '../hooks/useDismissable';
 
 interface AccountMenuProps {
   collapsed?: boolean;
@@ -18,15 +19,7 @@ export function AccountMenu({ collapsed = false, onOpenSettings }: AccountMenuPr
   const { theme, toggleTheme } = useTheme();
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
-
-  useEffect(() => {
-    if (!open) return;
-    const onDown = (e: MouseEvent) => {
-      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
-    };
-    document.addEventListener('mousedown', onDown);
-    return () => document.removeEventListener('mousedown', onDown);
-  }, [open]);
+  useDismissable(open, () => setOpen(false), ref);
 
   const primaryLabel = user?.name ?? 'Local access';
   const secondaryLabel = user?.email ?? (mode === 'oidc' ? 'Signed in' : 'SSO not configured');
