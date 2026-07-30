@@ -14,7 +14,11 @@ export interface Cluster {
 // route the data layer (services/api.ts) per selected cluster — no UI rewrite,
 // just swap this provider's source and thread `activeCluster` into the client.
 const LOCAL_CLUSTERS: Cluster[] = [
-  { id: 'primary', name: 'Primary Cluster' },
+  { id: 'cluster-00', name: 'cluster-00' },
+  // DEMO: a second entry with no distinct apiBase, so it mirrors cluster-00's
+  // data. Purely to visualize the multi-cluster switcher until real per-cluster
+  // ingestion lands (then each entry gets its own source/apiBase).
+  { id: 'cluster-01', name: 'cluster-01' },
 ];
 
 const ACTIVE_KEY = 'kg-active-cluster';
