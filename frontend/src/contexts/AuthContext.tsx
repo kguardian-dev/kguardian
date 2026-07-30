@@ -19,36 +19,43 @@ interface AuthContextValue {
 
 const AuthContext = createContext<AuthContextValue | undefined>(undefined);
 
-// Auth is OFF by default — the app runs in local/no-auth mode and shows that
-// honestly (no fake login screen). To enable SSO, front the frontend + broker
-// with an identity-aware proxy (e.g. oauth2-proxy) and build with
-// VITE_AUTH_MODE=oidc; this provider then reads the signed-in identity from the
-// proxy's /oauth2/userinfo and the account menu reflects the real user. The rest
-// of the app consumes `useAuth()` and needs no change when SSO is turned on.
-const MODE: AuthMode = (import.meta.env.VITE_AUTH_MODE as AuthMode) || 'none';
-
+// Auth auto-detects at runtime — no build-time flag, so the same image works
+// with or without SSO. On load it asks the identity-aware proxy (oauth2-proxy)
+// who the user is via `/oauth2/userinfo` (same-origin; the SSO cookie is sent):
+//   - 200 with an identity  -> SSO is active, show the real user (mode 'oidc')
+//   - 401 / 404 / error      -> no proxy in front, run in local/no-auth mode
+//     (shown honestly in the account menu — no fake login).
+// To turn SSO on, front the route with oauth2-proxy + a `/oauth2/*` route (the
+// chart's frontend.sso.* templates, or the cluster's Envoy SecurityPolicy). The
+// rest of the app consumes `useAuth()` and needs no change.
 export function AuthProvider({ children }: { children: ReactNode }) {
+  const [mode, setMode] = useState<AuthMode>('none');
   const [user, setUser] = useState<AuthUser | null>(null);
-  const [loading, setLoading] = useState<boolean>(MODE === 'oidc');
+  const [loading, setLoading] = useState<boolean>(true);
 
   useEffect(() => {
-    if (MODE !== 'oidc') return;
     let cancelled = false;
     (async () => {
       try {
-        const res = await fetch('/oauth2/userinfo', { credentials: 'include' });
+        const res = await fetch('/oauth2/userinfo', {
+          credentials: 'include',
+          headers: { Accept: 'application/json' },
+        });
         if (!res.ok) throw new Error(String(res.status));
         const info = await res.json();
+        const id = info.user ?? info.email;
+        if (!id) throw new Error('no identity');
         if (!cancelled) {
           setUser({
-            id: info.user ?? info.email ?? 'unknown',
+            id,
             name: info.preferredUsername ?? info.name ?? info.user ?? info.email ?? 'User',
             email: info.email,
             groups: info.groups,
           });
+          setMode('oidc');
         }
       } catch {
-        // No session / proxy not present — treated as signed out.
+        // No session / proxy not present — local/no-auth mode.
       } finally {
         if (!cancelled) setLoading(false);
       }
@@ -57,12 +64,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const signOut = () => {
-    // oauth2-proxy sign-out; a no-op in local mode.
-    if (MODE === 'oidc') window.location.href = '/oauth2/sign_out';
+    if (mode === 'oidc') window.location.href = '/oauth2/sign_out';
   };
 
   return (
-    <AuthContext.Provider value={{ mode: MODE, user, loading, signOut }}>
+    <AuthContext.Provider value={{ mode, user, loading, signOut }}>
       {children}
     </AuthContext.Provider>
   );
