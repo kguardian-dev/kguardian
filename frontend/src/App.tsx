@@ -8,6 +8,7 @@ import { ClusterSwitcher } from './components/ClusterSwitcher';
 import { AccountMenu } from './components/AccountMenu';
 import { SettingsPanel } from './components/SettingsPanel';
 import { useSettings } from './contexts/SettingsContext';
+import { useCluster } from './contexts/ClusterContext';
 
 // Heavy surfaces — lazy so they stay out of the initial bundle and only load
 // when first opened (the NetworkPolicyEditor alone is ~2k lines).
@@ -22,7 +23,15 @@ import { UI_DIMENSIONS } from './constants/ui';
 
 function App() {
   const { settings, updateSettings } = useSettings();
-  const [namespace, setNamespace] = useState<string>(() => settings.defaultNamespace ?? 'default');
+  const { activeCluster } = useCluster();
+  // Namespace selection is remembered per cluster, so switching clusters
+  // restores that cluster's own namespace rather than carrying one across.
+  const [nsByCluster, setNsByCluster] = useState<Record<string, string>>({});
+  const namespace = nsByCluster[activeCluster.id] ?? settings.defaultNamespace ?? 'default';
+  const setNamespace = useCallback(
+    (ns: string) => setNsByCluster((prev) => ({ ...prev, [activeCluster.id]: ns })),
+    [activeCluster.id],
+  );
   const [selectedPod, setSelectedPod] = useState<PodNodeData | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [isAIAssistantOpen, setIsAIAssistantOpen] = useState(false);
