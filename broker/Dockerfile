@@ -3,9 +3,9 @@
 # than the runtime's makes the container fail at exec ("GLIBC_X.YY not
 # found"). rust:latest drifted to a newer Debian base and broke broker
 # v1.12.0 exactly this way (built needing glibc 2.38, ran on bookworm's
-# 2.36). If the runtime moves to debian:13-slim, move this to rust:1-trixie
-# in the same commit.
-FROM rust:1-bookworm AS build
+# 2.36). Paired with the debian:13-slim (trixie) runtime below — keep both
+# on the same release when either moves.
+FROM rust:1-trixie AS build
 
 COPY Cargo.lock /app/
 
