@@ -26,25 +26,17 @@ _Least-privilege Kubernetes security policies, generated from what your pods act
 
 </div>
 
+<div align="center">
+
+[Overview](#-overview) · [Features](#-features) · [Architecture](#️-architecture) · [Quick Start](#-quick-start) · [Usage](#️-usage) · [AI Assistant](#-ai-assistant) · [Compatibility](#-compatibility) · [Performance](#-performance) · [Telemetry](#-telemetry) · [Contributing](#-contributing) · [License](#-license)
+
+</div>
+
 # 🔭 Overview
 
 kguardian watches pod traffic and syscalls with eBPF, then writes Kubernetes `NetworkPolicy`, `CiliumNetworkPolicy`, and seccomp profiles from what it sees — no hand-authored rules.
 
 It's built for platform and security teams who want policy-as-code without writing rules by hand: the Controller (an eBPF DaemonSet) captures every TCP/UDP connection and syscall on each node, the Broker stores the per-pod baseline in PostgreSQL, and the `kubectl kguardian` plugin turns that baseline into least-privilege policy YAML for any pod, namespace, or the whole cluster.
-
-## 📖 Table of contents
-
-- [🔭 Overview](#-overview)
-- [✨ Features](#-features)
-- [🏗️ Architecture](#️-architecture)
-- [🚀 Quick Start](#-quick-start)
-- [🛠️ Usage](#️-usage)
-- [🤖 AI Assistant](#-ai-assistant)
-- [🧩 Compatibility](#-compatibility)
-- [📊 Performance](#-performance)
-- [📡 Telemetry](#-telemetry)
-- [🤝 Contributing](#-contributing)
-- [📄 License](#-license)
 
 ## ✨ Features
 
