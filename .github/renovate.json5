@@ -43,6 +43,17 @@
       "matchDepNames": ["slsa-framework/slsa-github-generator"],
       "pinDigests": false,
     },
+    {
+      // TypeScript 7 (the Go-native compiler) is GA on npm's `latest`, but
+      // typescript-eslint refuses to run against it — it throws
+      // "typescript-eslint does not support TS 7.0" at load, breaking
+      // `npm run lint` across frontend + llm-bridge. No typescript-eslint
+      // release supports TS7 yet; tracking: typescript-eslint/typescript-eslint#10940.
+      // Hold at 6.x until that lands, then lift this cap and take the major.
+      "description": "Hold typescript at 6.x until typescript-eslint supports TS7 (typescript-eslint#10940)",
+      "matchDepNames": ["typescript"],
+      "allowedVersions": "<7",
+    },
   ],
   "customManagers": [
     {
