@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.9.2](https://github.com/kguardian-dev/kguardian/compare/controller/v1.9.1...controller/v1.9.2) (2026-08-06)
+
+
+### Bug Fixes
+
+* **deps:** update rust crate libbpf-rs to 0.27.0 ([#1227](https://github.com/kguardian-dev/kguardian/issues/1227)) ([099b0ff](https://github.com/kguardian-dev/kguardian/commit/099b0ffcbd44ce5ad4cd85c10eaf63be60f8dc3b))
+
 ## [1.9.1](https://github.com/kguardian-dev/kguardian/compare/controller/v1.9.0...controller/v1.9.1) (2026-06-29)
 
 
