@@ -1,9 +1,14 @@
 import { StrictMode, Component } from 'react'
 import type { ReactNode, ErrorInfo } from 'react'
 import { createRoot } from 'react-dom/client'
+import '@fontsource-variable/hanken-grotesk/wght.css'
+import '@fontsource-variable/jetbrains-mono/wght.css'
 import './index.css'
 import App from './App.tsx'
 import { ThemeProvider } from './contexts/ThemeContext.tsx'
+import { SettingsProvider } from './contexts/SettingsContext.tsx'
+import { ClusterProvider } from './contexts/ClusterContext.tsx'
+import { AuthProvider } from './contexts/AuthContext.tsx'
 
 interface ErrorBoundaryState {
   hasError: boolean;
@@ -33,7 +38,7 @@ class ErrorBoundary extends Component<{ children: ReactNode }, ErrorBoundaryStat
             onClick={() => window.location.reload()}
             style={{
               padding: '0.5rem 1rem',
-              background: '#3B82F6',
+              background: '#4E3AD9',
               color: '#fff',
               border: 'none',
               borderRadius: '0.375rem',
@@ -53,7 +58,13 @@ createRoot(document.getElementById('root')!).render(
   <StrictMode>
     <ErrorBoundary>
       <ThemeProvider>
-        <App />
+        <AuthProvider>
+          <ClusterProvider>
+            <SettingsProvider>
+              <App />
+            </SettingsProvider>
+          </ClusterProvider>
+        </AuthProvider>
       </ThemeProvider>
     </ErrorBoundary>
   </StrictMode>,

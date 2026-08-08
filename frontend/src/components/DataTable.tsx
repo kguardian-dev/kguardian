@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useMemo, useCallback } from 'react';
 import type { PodInfo, PodNodeData, ServiceInfo } from '../types';
-import { ArrowRight, Activity, ChevronDown, ChevronRight, Filter } from 'lucide-react';
+import { ArrowRight, Activity, ChevronDown, ChevronRight, Filter, MousePointerClick, Inbox } from 'lucide-react';
+import { EmptyState } from './ui/EmptyState';
 
 interface DataTableProps {
   selectedPod: PodNodeData | null;
@@ -230,21 +231,30 @@ const DataTable: React.FC<DataTableProps> = ({ selectedPod, allPodsLookup, servi
   const filteredTraffic = useMemo(() => {
     if (!selectedPod?.traffic) return [];
 
-    return selectedPod.traffic.filter(traffic => {
-      if (decisionFilter !== 'all' && traffic.decision !== decisionFilter) {
-        return false;
-      }
-      if (trafficTypeFilter !== 'all' && traffic.traffic_type?.toLowerCase() !== trafficTypeFilter) {
-        return false;
-      }
-      if (protocolFilter !== 'all' && traffic.ip_protocol?.toUpperCase() !== protocolFilter) {
-        return false;
-      }
-      if (portFilter !== 'all' && traffic.traffic_in_out_port !== portFilter) {
-        return false;
-      }
-      return true;
-    });
+    return selectedPod.traffic
+      .filter(traffic => {
+        if (decisionFilter !== 'all' && traffic.decision !== decisionFilter) {
+          return false;
+        }
+        if (trafficTypeFilter !== 'all' && traffic.traffic_type?.toLowerCase() !== trafficTypeFilter) {
+          return false;
+        }
+        if (protocolFilter !== 'all' && traffic.ip_protocol?.toUpperCase() !== protocolFilter) {
+          return false;
+        }
+        if (portFilter !== 'all' && traffic.traffic_in_out_port !== portFilter) {
+          return false;
+        }
+        return true;
+      })
+      // Hoist denied flows: a DROP is the security-relevant row, so it leads;
+      // within each decision group, newest first.
+      .sort((a, b) => {
+        const aDrop = a.decision === 'DROP' ? 0 : 1;
+        const bDrop = b.decision === 'DROP' ? 0 : 1;
+        if (aDrop !== bDrop) return aDrop - bDrop;
+        return new Date(b.time_stamp).getTime() - new Date(a.time_stamp).getTime();
+      });
   }, [selectedPod, decisionFilter, trafficTypeFilter, protocolFilter, portFilter]);
 
   // Aggregate traffic by port/protocol for external node summary
@@ -280,8 +290,13 @@ const DataTable: React.FC<DataTableProps> = ({ selectedPod, allPodsLookup, servi
 
   if (!selectedPod) {
     return (
-      <div className="h-full flex items-center justify-center text-tertiary">
-        <p>Select a pod to view details</p>
+      <div className="h-full flex items-center justify-center">
+        <EmptyState
+          icon={MousePointerClick}
+          title="No workload selected"
+          description="Select a node in the map to inspect its traffic, decisions, and observed syscalls."
+          compact
+        />
       </div>
     );
   }
@@ -289,7 +304,7 @@ const DataTable: React.FC<DataTableProps> = ({ selectedPod, allPodsLookup, servi
   return (
     <div className="h-full overflow-auto p-4 space-y-4">
       {/* Identity Information Header */}
-      <div className="bg-hubble-card p-4 rounded-lg border border-hubble-border">
+      <div className="bg-hubble-card p-4 rounded-surface border border-hubble-border">
         <h3 className="text-lg font-semibold text-primary mb-2">
           {identityName}
         </h3>
@@ -324,7 +339,7 @@ const DataTable: React.FC<DataTableProps> = ({ selectedPod, allPodsLookup, servi
             {trafficAggregation.slice(0, TRAFFIC_PROFILE_MAX).map((entry) => (
               <div
                 key={`${entry.port}/${entry.protocol}`}
-                className="bg-hubble-dark rounded-lg border border-hubble-border p-3"
+                className="bg-hubble-dark rounded-surface border border-hubble-border p-3"
               >
                 <div className="text-primary font-bold text-sm">
                   {getPortLabel(entry.port, entry.protocol)}
@@ -333,7 +348,7 @@ const DataTable: React.FC<DataTableProps> = ({ selectedPod, allPodsLookup, servi
                   {entry.count} connection{entry.count !== 1 ? 's' : ''}
                 </div>
                 {entry.drops > 0 && (
-                  <div className="text-red-400 text-xs">
+                  <div className="text-hubble-error text-xs">
                     {entry.drops} drop{entry.drops !== 1 ? 's' : ''}
                   </div>
                 )}
@@ -461,17 +476,17 @@ const DataTable: React.FC<DataTableProps> = ({ selectedPod, allPodsLookup, servi
               )}
             </div>
 
-            <div className="bg-hubble-card rounded-lg border border-hubble-border overflow-hidden">
+            <div className="bg-hubble-card rounded-surface border border-hubble-border overflow-hidden">
             <div className="overflow-x-auto">
               <table className="w-full text-sm">
-                <thead className="bg-hubble-dark border-b border-hubble-border">
-                  <tr>
-                    <th className="px-4 py-2 text-left text-secondary font-medium">Direction</th>
-                    <th className="px-4 py-2 text-left text-secondary font-medium">Source</th>
-                    <th className="px-4 py-2 text-left text-secondary font-medium">Destination</th>
-                    <th className="px-4 py-2 text-left text-secondary font-medium">Protocol</th>
-                    <th className="px-4 py-2 text-left text-secondary font-medium">Decision</th>
-                    <th className="px-4 py-2 text-left text-secondary font-medium">Timestamp</th>
+                <thead className="sticky top-0 z-10 bg-hubble-dark border-b border-hubble-border">
+                  <tr className="text-left text-xs font-medium text-tertiary uppercase tracking-wide">
+                    <th className="px-4 py-2">Direction</th>
+                    <th className="px-4 py-2">Source</th>
+                    <th className="px-4 py-2">Destination</th>
+                    <th className="px-4 py-2">Protocol</th>
+                    <th className="px-4 py-2">Decision</th>
+                    <th className="px-4 py-2">Timestamp</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -550,7 +565,9 @@ const DataTable: React.FC<DataTableProps> = ({ selectedPod, allPodsLookup, servi
                     return (
                       <tr
                         key={traffic.uuid || index}
-                        className="border-b border-hubble-border hover:bg-hubble-dark/50 transition-colors"
+                        className={`border-b border-hubble-border hover:bg-hubble-dark/50 transition-colors ${
+                          traffic.decision === 'DROP' ? 'bg-hubble-error/[0.06]' : ''
+                        }`}
                       >
                         {/* Direction */}
                         <td className="px-4 py-2">
@@ -599,7 +616,7 @@ const DataTable: React.FC<DataTableProps> = ({ selectedPod, allPodsLookup, servi
                         </td>
 
                         {/* Timestamp */}
-                        <td className="px-4 py-2 text-tertiary text-xs">
+                        <td className="px-4 py-2 text-tertiary text-xs font-mono tabular-nums whitespace-nowrap">
                           {new Date(traffic.time_stamp).toLocaleString()}
                         </td>
                       </tr>
@@ -641,14 +658,24 @@ const DataTable: React.FC<DataTableProps> = ({ selectedPod, allPodsLookup, servi
         )}
 
         {isTrafficExpanded && hasTraffic && filteredTraffic.length === 0 && (
-          <div className="bg-hubble-card p-4 rounded-lg border border-hubble-border text-tertiary text-sm">
-            No traffic matches the selected filters. Try adjusting or clearing the filters.
+          <div className="bg-hubble-card rounded-surface border border-hubble-border">
+            <EmptyState
+              icon={Filter}
+              title="No traffic matches these filters"
+              description="Adjust or clear the filters above to see recorded flows."
+              compact
+            />
           </div>
         )}
 
         {isTrafficExpanded && !hasTraffic && (
-          <div className="bg-hubble-card p-4 rounded-lg border border-hubble-border text-tertiary text-sm">
-            No network traffic recorded
+          <div className="bg-hubble-card rounded-surface border border-hubble-border">
+            <EmptyState
+              icon={Inbox}
+              title="No network traffic recorded"
+              description="The controller has not observed any flows for this workload yet."
+              compact
+            />
           </div>
         )}
       </div>
@@ -670,14 +697,14 @@ const DataTable: React.FC<DataTableProps> = ({ selectedPod, allPodsLookup, servi
           </button>
 
           {isSyscallsExpanded && (
-            <div className="bg-hubble-card rounded-lg border border-hubble-border overflow-hidden">
+            <div className="bg-hubble-card rounded-surface border border-hubble-border overflow-hidden">
             <div className="overflow-x-auto">
               <table className="w-full text-sm">
-                <thead className="bg-hubble-dark border-b border-hubble-border">
-                  <tr>
-                    <th className="px-4 py-2 text-left text-secondary font-medium">Architecture</th>
-                    <th className="px-4 py-2 text-left text-secondary font-medium">Syscalls</th>
-                    <th className="px-4 py-2 text-left text-secondary font-medium">Timestamp</th>
+                <thead className="sticky top-0 z-10 bg-hubble-dark border-b border-hubble-border">
+                  <tr className="text-left text-xs font-medium text-tertiary uppercase tracking-wide">
+                    <th className="px-4 py-2">Architecture</th>
+                    <th className="px-4 py-2">Syscalls</th>
+                    <th className="px-4 py-2">Timestamp</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -729,7 +756,7 @@ const DataTable: React.FC<DataTableProps> = ({ selectedPod, allPodsLookup, servi
                             )}
                           </div>
                         </td>
-                        <td className="px-4 py-2 text-tertiary text-xs">
+                        <td className="px-4 py-2 text-tertiary text-xs font-mono tabular-nums whitespace-nowrap">
                           {new Date(syscall.time_stamp).toLocaleString()}
                         </td>
                       </tr>

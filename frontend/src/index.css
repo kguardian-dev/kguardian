@@ -8,41 +8,75 @@
 :root.dark {
   --theme-bg-dark: #0E1726;
   --theme-bg-darker: #0A0F1C;
-  --theme-bg-card: #1A2332;
-  --theme-border: #2A3647;
+  --theme-bg-card: #161E2E;
+  --theme-bg-hover: #1E2739;
+  --theme-border: #263141;
+  --theme-border-strong: #33415A;
   --theme-text-primary: #F3F4F6;
-  --theme-text-secondary: #9CA3AF;
-  --theme-text-tertiary: #6B7280;
+  --theme-text-secondary: #9AA5B8;
+  --theme-text-tertiary: #7E8BA3;
 }
 
 /* Light theme override */
 :root.light {
-  --theme-bg-dark: #F3F4F6;
+  --theme-bg-dark: #F5F6F8;
   --theme-bg-darker: #FFFFFF;
   --theme-bg-card: #FFFFFF;
-  --theme-border: #D1D5DB;
-  --theme-text-primary: #111827;
-  --theme-text-secondary: #374151;
-  --theme-text-tertiary: #4B5563;
+  --theme-bg-hover: #F0F1F4;
+  --theme-border: #E2E5EA;
+  --theme-border-strong: #CBD1DA;
+  --theme-text-primary: #0F1626;
+  --theme-text-secondary: #4A5468;
+  --theme-text-tertiary: #5B6478;
 }
 
 @theme {
-  /* Hubble colors using theme-aware CSS variables */
+  /* Surfaces (theme-aware) */
   --color-hubble-dark: var(--theme-bg-dark);
   --color-hubble-darker: var(--theme-bg-darker);
   --color-hubble-card: var(--theme-bg-card);
+  --color-hubble-hover: var(--theme-bg-hover);
   --color-hubble-border: var(--theme-border);
+  --color-hubble-border-strong: var(--theme-border-strong);
 
   /* Theme-aware text colors (generates text-primary, text-secondary, text-tertiary) */
   --color-primary: var(--theme-text-primary);
   --color-secondary: var(--theme-text-secondary);
   --color-tertiary: var(--theme-text-tertiary);
 
-  /* Accent colors (same for both themes) */
-  --color-hubble-accent: #3B82F6;
+  /* Brand indigo accent (padlock #4e3ad9) + interaction ramp. One accent,
+     one hover — replaces the ad-hoc blue-600/green-600 hovers across the app. */
+  --color-hubble-accent: #4E3AD9;
+  --color-hubble-accent-hover: #5B48E6;
   --color-hubble-success: #10B981;
+  --color-hubble-success-hover: #0E9E70;
   --color-hubble-warning: #F59E0B;
+  --color-hubble-warning-hover: #D98908;
   --color-hubble-error: #EF4444;
+  --color-hubble-error-hover: #DC2626;
+
+  /* One radius step for interactive controls (buttons, inputs, tabs) so the
+     app stops mixing rounded / rounded-lg / rounded-full at random. */
+  --radius-control: 0.5rem;
+  /* A distinct, larger step for surfaces (cards, panels, modals) so controls
+     and containers read as deliberately different, not all "rounded-lg". */
+  --radius-surface: 0.75rem;
+
+  /* Type system — self-hosted variable fonts (imported in main.tsx). Hanken
+     Grotesk gives a humanist-grotesk UI voice instead of the default
+     Inter/system-ui tell; JetBrains Mono owns every identifier, IP, port,
+     syscall, and metric — the actual content of a security tool. */
+  --font-sans: 'Hanken Grotesk Variable', system-ui, -apple-system, sans-serif;
+  --font-mono: 'JetBrains Mono Variable', ui-monospace, 'SF Mono', Menlo, monospace;
+}
+
+@layer base {
+  /* Consistent focus ring in the brand accent for keyboard users. */
+  *:focus-visible {
+    outline: 2px solid var(--color-hubble-accent);
+    outline-offset: 1px;
+    border-radius: 2px;
+  }
 }
 
 @layer base {
@@ -50,23 +84,52 @@
     background-color: var(--theme-bg-darker);
     color: var(--theme-text-primary);
     margin: 0;
-    font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+    font-family: var(--font-sans);
+    font-feature-settings: 'cv11', 'ss01';
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
     transition: background-color 0.3s ease, color 0.3s ease;
+  }
+
+  /* Headings get tighter tracking — the authored-type discipline the review
+     called out (system-ui at one size had no hierarchy). */
+  h1, h2, h3 {
+    letter-spacing: -0.02em;
+  }
+
+  /* Monospace carries the product's data (identifiers, IPs, metrics); lock its
+     numerals to tabular so counts don't jitter as they update. */
+  code, pre, kbd, samp, .font-mono {
+    font-variant-numeric: tabular-nums;
   }
 
   #root {
     width: 100%;
     height: 100vh;
   }
+
+  /* Respect reduced-motion: neutralize animations/transitions app-wide. */
+  @media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after {
+      animation-duration: 0.01ms !important;
+      animation-iteration-count: 1 !important;
+      transition-duration: 0.01ms !important;
+      scroll-behavior: auto !important;
+    }
+  }
 }
 
 /* React Flow custom styles */
 .react-flow {
   @apply bg-hubble-dark;
+  /* Faint brand-indigo honeycomb instead of the React Flow default dot grid —
+     the hexagon of the kguardian mark, carried into the canvas so the map is
+     unmistakably ours. Very low opacity so it never competes with the graph. */
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='28' height='49' viewBox='0 0 28 49'%3E%3Cg fill='none' fill-rule='evenodd'%3E%3Cg fill='%234E3AD9' fill-opacity='0.05'%3E%3Cpath d='M13.99 9.25l13 7.5v15l-13 7.5L1 31.75v-15l12.99-7.5zM3 17.9v12.7l10.99 6.34 11-6.35V17.9l-11-6.34L3 17.9zM0 15l12.98-7.5V0h-2v6.35L0 12.69v2.3zm0 18.5L12.98 41v8h-2v-6.85L0 35.81v-2.3zM15 0v7.5L27.99 15H28v-2.31h-.01L17 6.35V0h-2zm0 49v-8l12.99-7.5H28v2.31h-.01L17 42.15V49h-2z'/%3E%3C/g%3E%3C/g%3E%3C/svg%3E");
 }
 
 .react-flow__node {
-  @apply rounded-lg shadow-lg;
+  @apply rounded-surface;
 }
 
 .react-flow__edge-path {
