@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.4](https://github.com/kguardian-dev/kguardian/compare/evaluator/v0.3.3...evaluator/v0.3.4) (2026-08-12)
+
+
+### Bug Fixes
+
+* **deps:** bump golang.org/x/net to v0.55.0 (security) ([#1263](https://github.com/kguardian-dev/kguardian/issues/1263)) ([027717c](https://github.com/kguardian-dev/kguardian/commit/027717c08afc7d18a8fc16c4033bec5d81513546))
+
 ## [0.3.3](https://github.com/kguardian-dev/kguardian/compare/evaluator/v0.3.2...evaluator/v0.3.3) (2026-07-23)
 
 
