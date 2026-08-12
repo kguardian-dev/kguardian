@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.12.4](https://github.com/kguardian-dev/kguardian/compare/broker/v1.12.3...broker/v1.12.4) (2026-08-12)
+
+
+### Bug Fixes
+
+* **deps:** patch vulnerable Rust transitives in broker + controller (security) ([#1264](https://github.com/kguardian-dev/kguardian/issues/1264)) ([b5f3117](https://github.com/kguardian-dev/kguardian/commit/b5f3117a717ee46dfff18d291a3352b9bb8b8e98))
+
 ## [1.12.3](https://github.com/kguardian-dev/kguardian/compare/broker/v1.12.2...broker/v1.12.3) (2026-07-28)
 
 
