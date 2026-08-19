@@ -2,7 +2,7 @@ module github.com/kguardian-dev/kguardian/advisor
 
 go 1.26.0
 
-toolchain go1.26.6
+toolchain go1.26.7
 
 require (
 	github.com/rs/zerolog v1.35.1
