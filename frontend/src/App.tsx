@@ -1,24 +1,72 @@
-import { useState, useCallback, useEffect } from 'react';
-import { AlertTriangle, RefreshCw, Shield, Sparkles } from 'lucide-react';
+import { useState, useCallback, useEffect, useMemo, useRef, lazy, Suspense } from 'react';
+import { Bot, RefreshCw, Share2, ShieldAlert, LayoutDashboard, FileCode, Boxes, Search } from 'lucide-react';
 import NetworkGraph from './components/NetworkGraph';
+import { FindingsView } from './components/FindingsView';
+import { CommandPalette, type Command } from './components/CommandPalette';
+import { useHashLocation } from './hooks/useHashLocation';
 import NamespaceSelector from './components/NamespaceSelector';
 import DataTable from './components/DataTable';
-import ThemeToggle from './components/ThemeToggle';
-import AIAssistant from './components/AIAssistant';
-import AuditVerdictsPanel from './components/AuditVerdictsPanel';
-import NetworkPolicyEditor from './components/NetworkPolicyEditor';
+import { Sidebar, type NavItem } from './components/Sidebar';
+import { ClusterSwitcher } from './components/ClusterSwitcher';
+import { AccountMenu } from './components/AccountMenu';
+import { SettingsPanel } from './components/SettingsPanel';
+import { useSettings } from './contexts/SettingsContext';
+import { useCluster } from './contexts/ClusterContext';
+
+// Heavy surfaces — lazy so they stay out of the initial bundle and only load
+// when first opened (the NetworkPolicyEditor alone is ~2k lines).
+const AIAssistant = lazy(() => import('./components/AIAssistant'));
+const AuditVerdictsPanel = lazy(() => import('./components/AuditVerdictsPanel'));
+const PolicyBuilderModal = lazy(() =>
+  import('./components/PolicyBuilderModal').then((m) => ({ default: m.PolicyBuilderModal })),
+);
+import { Button } from './components/ui/Button';
+import { EmptyState } from './components/ui/EmptyState';
+import { GraphSkeleton } from './components/ui/Skeleton';
+import { Server } from 'lucide-react';
 import { usePodData } from './hooks/usePodData';
 import { useNamespaces } from './hooks/useNamespaces';
 import type { PodNodeData } from './types';
 import { UI_DIMENSIONS } from './constants/ui';
 
+const ROUTES = ['map', 'findings'] as const;
+
 function App() {
-  const [namespace, setNamespace] = useState('default');
-  const [selectedPod, setSelectedPod] = useState<PodNodeData | null>(null);
+  const { settings, updateSettings } = useSettings();
+  const { activeCluster } = useCluster();
+
+  // The whole location — view, namespace, selected workload — lives in the URL
+  // hash so it's shareable and refreshable. Namespace is also remembered per
+  // cluster (below) as the fallback when the URL carries none.
+  const { loc, navigate } = useHashLocation();
+  const view: (typeof ROUTES)[number] = (ROUTES as readonly string[]).includes(loc.view)
+    ? (loc.view as (typeof ROUTES)[number])
+    : 'map';
+
+  // Namespace remembered per cluster — seeded from a deep-linked ns on first load.
+  const [nsByCluster, setNsByCluster] = useState<Record<string, string>>(() => {
+    const ns = new URLSearchParams(window.location.hash.split('?')[1] ?? '').get('ns');
+    return ns ? { [activeCluster.id]: ns } : {};
+  });
+  const namespace = loc.params.ns ?? nsByCluster[activeCluster.id] ?? settings.defaultNamespace ?? 'default';
+
+  const setView = useCallback(
+    (v: (typeof ROUTES)[number]) => navigate(v, { ns: loc.params.ns, pod: v === 'map' ? loc.params.pod : undefined }),
+    [navigate, loc.params.ns, loc.params.pod],
+  );
+  const setNamespace = useCallback(
+    (ns: string) => {
+      setNsByCluster((prev) => ({ ...prev, [activeCluster.id]: ns }));
+      navigate(view, { ns, pod: undefined }); // namespace change clears the workload
+    },
+    [navigate, view, activeCluster.id],
+  );
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [paletteOpen, setPaletteOpen] = useState(false);
   const [isAIAssistantOpen, setIsAIAssistantOpen] = useState(false);
   const [isAuditPanelOpen, setIsAuditPanelOpen] = useState(false);
-  const [isPolicyEditorOpen, setIsPolicyEditorOpen] = useState(false);
-  const [policyEditorPod, setPolicyEditorPod] = useState<PodNodeData | null>(null);
+  const [isPolicyBuilderOpen, setIsPolicyBuilderOpen] = useState(false);
+  const [policyBuilderInitialPod, setPolicyBuilderInitialPod] = useState<PodNodeData | null>(null);
   const [aiSidePanel, setAISidePanel] = useState<{
     isSidePanel: boolean;
     isCollapsed: boolean;
@@ -30,12 +78,53 @@ function App() {
   });
   const [tableHeight, setTableHeight] = useState<number>(UI_DIMENSIONS.TABLE_DEFAULT_HEIGHT);
   const [isResizing, setIsResizing] = useState(false);
-  const [showExternalNodes, setShowExternalNodes] = useState(true);
-  const [showTraffic, setShowTraffic] = useState(true);
-  const [layoutDirection, setLayoutDirection] = useState<'LR' | 'TB'>('LR');
+  const [railCollapsed, setRailCollapsed] = useState<boolean>(() => localStorage.getItem('kg-rail-collapsed') === '1');
 
   const { namespaces } = useNamespaces();
-  const { pods, allPodsLookup, services, loading, error, togglePodExpansion, refreshData } = usePodData(namespace);
+  // If the current selection isn't a namespace that actually has monitored pods
+  // (the hardcoded 'default' usually isn't), resolve to the first real one so
+  // the graph isn't empty on first paint. Derived rather than synced via an
+  // effect — no extra render, and it can't loop.
+  const effectiveNamespace =
+    namespaces.length > 0 && !namespaces.includes(namespace) ? namespaces[0] : namespace;
+  const { pods, allPodsLookup, services, loading, error, togglePodExpansion, refreshData } = usePodData(effectiveNamespace);
+
+  // Selected workload is derived from the URL (`?pod=<id>`) and resolved against
+  // the loaded pods — so a deep link opens straight to that workload once data
+  // arrives, and back/forward restores it.
+  const selectedPodId = loc.params.pod ?? null;
+  const selectedPod = useMemo(
+    () => (selectedPodId ? pods.find((p) => p.id === selectedPodId) ?? null : null),
+    [pods, selectedPodId],
+  );
+  const selectPod = useCallback(
+    (pod: PodNodeData | null) => navigate('map', { ns: loc.params.ns, pod: pod?.id }, { replace: true }),
+    [navigate, loc.params.ns],
+  );
+
+  // On cluster switch, point the URL at the new cluster's remembered namespace
+  // (and clear the workload) so the per-cluster memory wins over a stale URL ns.
+  const prevCluster = useRef(activeCluster.id);
+  useEffect(() => {
+    if (prevCluster.current === activeCluster.id) return;
+    prevCluster.current = activeCluster.id;
+    navigate(view, { ns: nsByCluster[activeCluster.id], pod: undefined }, { replace: true });
+  }, [activeCluster.id, nsByCluster, view, navigate]);
+
+  // Keep the resolved namespace in the URL so the link is always shareable,
+  // even before the user has explicitly picked one.
+  useEffect(() => {
+    if (!loc.params.ns && namespaces.length > 0) {
+      navigate(view, { ns: effectiveNamespace, pod: loc.params.pod }, { replace: true });
+    }
+  }, [loc.params.ns, loc.params.pod, namespaces.length, effectiveNamespace, view, navigate]);
+
+  const toggleRail = useCallback(() => {
+    setRailCollapsed((c) => {
+      localStorage.setItem('kg-rail-collapsed', c ? '0' : '1');
+      return !c;
+    });
+  }, []);
 
   // Calculate the right padding for content when AI panel is docked (in pixels)
   const contentPaddingRightPx = aiSidePanel.isSidePanel
@@ -43,13 +132,20 @@ function App() {
     : 0;
 
   const handlePodSelect = (pod: PodNodeData | null) => {
-    setSelectedPod(pod);
+    selectPod(pod);
   };
 
   const handleBuildPolicy = (pod: PodNodeData) => {
-    setPolicyEditorPod(pod);
-    setIsPolicyEditorOpen(true);
+    setPolicyBuilderInitialPod(pod);
+    setIsPolicyBuilderOpen(true);
   };
+
+  // Rail entry: open the builder with the current workload if one is selected,
+  // otherwise with no pod so it shows the workload picker.
+  const openPolicyBuilder = useCallback(() => {
+    setPolicyBuilderInitialPod(selectedPod && !selectedPod.isExternal ? selectedPod : null);
+    setIsPolicyBuilderOpen(true);
+  }, [selectedPod]);
 
   const handleAILayoutChange = useCallback((isSidePanel: boolean, isCollapsed: boolean, width?: number) => {
     setAISidePanel({ isSidePanel, isCollapsed, width: width ?? UI_DIMENSIONS.AI_PANEL_DEFAULT_WIDTH });
@@ -114,74 +210,150 @@ function App() {
     };
   }, [isResizing, handleMouseMove, handleMouseUp]);
 
+  // Jump from a finding straight to that workload on the map (one history entry).
+  const handleFindingSelect = useCallback((pod: PodNodeData) => {
+    navigate('map', { ns: loc.params.ns, pod: pod.id });
+  }, [navigate, loc.params.ns]);
+
+  // ⌘K / Ctrl-K opens the command palette from anywhere.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') {
+        e.preventDefault();
+        setPaletteOpen((o) => !o);
+      }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, []);
+
+  // Everything the command palette can jump to.
+  const commands: Command[] = useMemo(() => {
+    const list: Command[] = [
+      { id: 'view-map', group: 'Views', label: 'Network Map', icon: Share2, keywords: 'graph traffic', run: () => setView('map') },
+      { id: 'view-findings', group: 'Views', label: 'Findings', icon: LayoutDashboard, keywords: 'risk signals triage', run: () => setView('findings') },
+      { id: 'tool-policy', group: 'Tools', label: 'Policy Builder', icon: FileCode, keywords: 'networkpolicy seccomp cilium generate', run: openPolicyBuilder },
+      { id: 'tool-audit', group: 'Tools', label: 'Audit Verdicts', icon: ShieldAlert, keywords: 'would deny', run: () => setIsAuditPanelOpen(true) },
+      { id: 'tool-ai', group: 'Tools', label: 'AI Assistant', icon: Bot, keywords: 'chat ask', run: () => setIsAIAssistantOpen(true) },
+    ];
+    namespaces.forEach((ns) =>
+      list.push({ id: `ns-${ns}`, group: 'Namespaces', label: ns, icon: Boxes, keywords: 'namespace switch', run: () => setNamespace(ns) }),
+    );
+    pods
+      .filter((p) => !p.isExternal)
+      .forEach((p) =>
+        list.push({
+          id: `pod-${p.id}`,
+          group: 'Workloads',
+          label: p.label || p.pod.pod_identity || p.pod.pod_name,
+          hint: p.pod.pod_namespace ?? undefined,
+          icon: Server,
+          run: () => handleFindingSelect(p),
+        }),
+      );
+    return list;
+  }, [namespaces, pods, setView, openPolicyBuilder, setNamespace, handleFindingSelect]);
+
+  const navItems: NavItem[] = [
+    {
+      id: 'findings', label: 'Findings', icon: LayoutDashboard, group: 'Views',
+      hint: 'Prioritized runtime-security signals',
+      active: view === 'findings', onClick: () => setView('findings'),
+    },
+    {
+      id: 'map', label: 'Network Map', icon: Share2, group: 'Views', hint: 'Live pod traffic graph',
+      active: view === 'map',
+      onClick: () => setView('map'),
+    },
+    {
+      id: 'policy', label: 'Policy Builder', icon: FileCode, group: 'Tools',
+      hint: 'Generate a NetworkPolicy or Seccomp profile for a workload',
+      active: isPolicyBuilderOpen, onClick: openPolicyBuilder,
+    },
+    {
+      id: 'audit', label: 'Audit Verdicts', icon: ShieldAlert, group: 'Tools',
+      hint: 'Flows an AuditNetworkPolicy would deny',
+      active: isAuditPanelOpen, onClick: () => setIsAuditPanelOpen(true),
+    },
+    {
+      id: 'assistant', label: 'AI Assistant', icon: Bot, group: 'Tools',
+      hint: 'Ask about cluster traffic & policies',
+      active: isAIAssistantOpen, onClick: () => setIsAIAssistantOpen(true),
+    },
+  ];
+
+  const cmdKey = useMemo(
+    () => (typeof navigator !== 'undefined' && /Mac|iPhone|iPad/.test(navigator.platform) ? '⌘K' : 'Ctrl K'),
+    [],
+  );
+
+  const sectionTitle = view === 'findings' ? 'Findings' : 'Network Map';
+  const sectionSubtitle =
+    view === 'findings'
+      ? `Namespace ${effectiveNamespace}`
+      : `Namespace ${effectiveNamespace} · ${pods.length} pods`;
+
   return (
-    <div
-      className="flex flex-col h-screen bg-hubble-darker transition-all duration-300"
-      style={{ paddingRight: `${contentPaddingRightPx}px` }}
-    >
-      {/* Header */}
-      <header className="bg-hubble-dark border-b border-hubble-border px-6 py-4">
-        <div className="flex items-center justify-between">
-          <div className="flex items-center gap-3">
-            <Shield className="w-8 h-8 text-hubble-accent" />
-            <div>
-              <h1 className="text-2xl font-bold text-primary">
-                kguardian
-              </h1>
-              <p className="text-sm text-tertiary">
-                Network Traffic & Security Monitoring
-              </p>
-            </div>
+    <div className="flex h-screen bg-hubble-darker">
+      <Sidebar
+        items={navItems}
+        version={__APP_VERSION__}
+        topSlot={<ClusterSwitcher collapsed={railCollapsed} />}
+        footer={<AccountMenu collapsed={railCollapsed} onOpenSettings={() => setSettingsOpen(true)} />}
+        collapsed={railCollapsed}
+        onToggleCollapse={toggleRail}
+      />
+
+      <div
+        className="flex-1 flex flex-col min-w-0 transition-all duration-300"
+        style={{ paddingRight: `${contentPaddingRightPx}px` }}
+      >
+        {/* Top bar */}
+        <header className="h-14 shrink-0 flex items-center justify-between gap-4 px-5 border-b border-hubble-border bg-hubble-dark">
+          <div className="min-w-0">
+            <h1 className="text-sm font-semibold text-primary truncate">{sectionTitle}</h1>
+            <p className="text-xs text-tertiary truncate">{sectionSubtitle}</p>
           </div>
 
-          <div className="flex items-center gap-4">
+          <div className="flex items-center gap-2">
             <button
-              onClick={() => setIsAuditPanelOpen(true)}
-              className="flex items-center gap-2 px-4 py-2 bg-hubble-card border border-hubble-border
-                         rounded-lg text-secondary hover:bg-hubble-dark hover:border-hubble-warning
-                         hover:text-hubble-warning transition-all"
-              title="Audit verdicts — would-deny flows"
+              onClick={() => setPaletteOpen(true)}
+              title="Search & commands"
+              className="hidden md:flex items-center gap-2 h-8 pl-2.5 pr-1.5 rounded-control border border-hubble-border bg-hubble-card text-tertiary hover:text-secondary hover:border-hubble-border-strong transition-colors"
             >
-              <AlertTriangle className="w-4 h-4" />
-              <span className="hidden sm:inline font-medium">Audit</span>
+              <Search className="w-3.5 h-3.5" />
+              <span className="text-xs">Search</span>
+              <kbd className="text-[10px] font-mono border border-hubble-border rounded px-1 py-0.5 leading-none">{cmdKey}</kbd>
             </button>
-
-            <button
-              onClick={() => setIsAIAssistantOpen(true)}
-              className="flex items-center gap-2 px-4 py-2 bg-hubble-accent/10 border border-hubble-accent/30
-                         rounded-lg text-hubble-accent hover:bg-hubble-accent/20 hover:border-hubble-accent
-                         transition-all"
-              title="Open AI Assistant"
-            >
-              <Sparkles className="w-4 h-4" />
-              <span className="hidden sm:inline font-medium">AI</span>
-            </button>
-
             <NamespaceSelector
-              selectedNamespace={namespace}
+              selectedNamespace={effectiveNamespace}
               onNamespaceChange={setNamespace}
               namespaces={namespaces}
             />
-
-            <ThemeToggle />
-
-            <button
+            <Button
+              variant="secondary"
+              leftIcon={RefreshCw}
               onClick={refreshData}
               disabled={loading}
-              className="flex items-center gap-2 px-4 py-2 bg-hubble-card border border-hubble-border
-                         rounded-lg text-secondary hover:bg-hubble-dark hover:border-hubble-accent
-                         transition-all disabled:opacity-50 disabled:cursor-not-allowed"
-              title="Refresh data"
+              className={loading ? '[&_svg]:animate-spin' : ''}
             >
-              <RefreshCw className={`w-4 h-4 ${loading ? 'animate-spin' : ''}`} />
               Refresh
-            </button>
+            </Button>
           </div>
-        </div>
-      </header>
+        </header>
 
-      {/* Main Content */}
+        {/* Main Content */}
       <div className="flex-1 flex flex-col overflow-hidden">
+        {view === 'findings' ? (
+          <FindingsView
+            pods={pods}
+            namespace={effectiveNamespace}
+            onSelectPod={handleFindingSelect}
+            onBuildPolicy={handleBuildPolicy}
+            onOpenAudit={() => setIsAuditPanelOpen(true)}
+          />
+        ) : (
+        <>
         {error && (
           <div className="bg-hubble-error/20 border border-hubble-error text-hubble-error px-6 py-3">
             <p className="text-sm">Error: {error}</p>
@@ -189,11 +361,21 @@ function App() {
         )}
 
         {loading && pods.length === 0 ? (
+          <div className="flex-1 min-h-0">
+            <GraphSkeleton />
+          </div>
+        ) : !error && pods.length === 0 ? (
           <div className="flex-1 flex items-center justify-center">
-            <div className="text-center">
-              <RefreshCw className="w-8 h-8 text-hubble-accent animate-spin mx-auto mb-4" />
-              <p className="text-secondary">Loading pod data...</p>
-            </div>
+            <EmptyState
+              icon={Server}
+              title={`No workloads in ${effectiveNamespace}`}
+              description="This namespace has no observed pods yet. Switch namespaces from the header, or wait for the controller to report traffic from workloads here."
+              action={
+                <Button variant="secondary" size="sm" leftIcon={RefreshCw} onClick={refreshData}>
+                  Refresh
+                </Button>
+              }
+            />
           </div>
         ) : (
           <>
@@ -207,12 +389,12 @@ function App() {
                 onBuildPolicy={handleBuildPolicy}
                 allPodsLookup={allPodsLookup}
                 services={services}
-                showExternalNodes={showExternalNodes}
-                onToggleExternalNodes={() => setShowExternalNodes(prev => !prev)}
-                showTraffic={showTraffic}
-                onToggleTraffic={() => setShowTraffic(prev => !prev)}
-                layoutDirection={layoutDirection}
-                onToggleLayoutDirection={() => setLayoutDirection(prev => prev === 'LR' ? 'TB' : 'LR')}
+                showExternalNodes={settings.showExternalNodes}
+                onToggleExternalNodes={() => updateSettings({ showExternalNodes: !settings.showExternalNodes })}
+                showTraffic={settings.showTraffic}
+                onToggleTraffic={() => updateSettings({ showTraffic: !settings.showTraffic })}
+                layoutDirection={settings.layoutDirection}
+                onToggleLayoutDirection={() => updateSettings({ layoutDirection: settings.layoutDirection === 'LR' ? 'TB' : 'LR' })}
               />
             </div>
 
@@ -250,35 +432,44 @@ function App() {
             </div>
           </>
         )}
+        </>
+        )}
       </div>
 
-      {/* Footer */}
-      <footer className="bg-hubble-dark border-t border-hubble-border px-6 py-2 text-center text-xs text-tertiary">
-        <p>Kube Guardian v{__APP_VERSION__} | Namespace: {namespace} | Pods: {pods.length}</p>
-      </footer>
+      </div>
 
-      {/* AI Assistant Modal */}
-      <AIAssistant
-        isOpen={isAIAssistantOpen}
-        onClose={handleAIClose}
-        onLayoutChange={handleAILayoutChange}
-        namespace={namespace}
-        podNames={pods.map(p => p.label)}
-      />
+      {/* Heavy surfaces: mounted (and their chunk fetched) only while open. */}
+      {isAIAssistantOpen && (
+        <Suspense fallback={null}>
+          <AIAssistant
+            isOpen
+            onClose={handleAIClose}
+            onLayoutChange={handleAILayoutChange}
+            namespace={effectiveNamespace}
+            podNames={pods.map(p => p.label)}
+          />
+        </Suspense>
+      )}
 
-      {/* Network Policy Editor Modal */}
-      <NetworkPolicyEditor
-        isOpen={isPolicyEditorOpen}
-        onClose={() => setIsPolicyEditorOpen(false)}
-        pod={policyEditorPod}
-        allPods={pods}
-      />
+      {isPolicyBuilderOpen && (
+        <Suspense fallback={null}>
+          <PolicyBuilderModal
+            onClose={() => setIsPolicyBuilderOpen(false)}
+            workloads={pods.filter((p) => !p.isExternal)}
+            initialPod={policyBuilderInitialPod}
+          />
+        </Suspense>
+      )}
 
-      {/* Audit Verdicts Modal — would-deny flows from AuditNetworkPolicies */}
-      <AuditVerdictsPanel
-        isOpen={isAuditPanelOpen}
-        onClose={() => setIsAuditPanelOpen(false)}
-      />
+      {isAuditPanelOpen && (
+        <Suspense fallback={null}>
+          <AuditVerdictsPanel isOpen onClose={() => setIsAuditPanelOpen(false)} />
+        </Suspense>
+      )}
+
+      <SettingsPanel isOpen={settingsOpen} onClose={() => setSettingsOpen(false)} namespaces={namespaces} />
+
+      {paletteOpen && <CommandPalette onClose={() => setPaletteOpen(false)} commands={commands} />}
     </div>
   );
 }
