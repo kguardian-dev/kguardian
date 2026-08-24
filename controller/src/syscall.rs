@@ -84,7 +84,7 @@ pub async fn process_syscall_event(
 pub async fn send_syscall_cache_periodically() -> Result<(), Error> {
     // Reduced from 60s to 10s for faster visibility of syscall data
     let interval_duration = std::time::Duration::from_secs(10);
-    for _ in 0.. {
+    loop {
         let mut batch = Vec::new();
         // Track which (pod, snapshot) pairs to mark as last_sent
         // AFTER the POST succeeds. The pre-fix code eagerly updated
@@ -150,8 +150,6 @@ pub async fn send_syscall_cache_periodically() -> Result<(), Error> {
         }
         tokio::time::sleep(interval_duration).await;
     }
-
-    Ok(())
 }
 
 fn get_syscall_name(syscall_number: i32) -> Option<String> {
