@@ -1,5 +1,115 @@
 # Upgrading the kguardian Helm chart
 
+## External MCP endpoint (opt-in, default off)
+
+**Existing installs are unaffected.** `ai.mcp.enabled` defaults to `false`,
+and while it is false the `/mcp` route is not registered at all — the path
+404s exactly as it did before this release. No new Deployment, Service, port,
+or probe is added in either state, and no existing values key changes meaning.
+If you do nothing, nothing changes.
+
+When enabled, the llm-bridge serves kguardian's 12 tools over Model Context
+Protocol (StreamableHTTP) at `/mcp` on its **existing** port 8080, so an
+external MCP client can query cluster telemetry and generate policies.
+
+```bash
+kubectl -n <ns> create secret generic kguardian-mcp-token \
+  --from-literal=token="$(openssl rand -hex 32)"
+```
+```yaml
+ai:
+  enabled: true
+  mcp:
+    enabled: true
+    auth:
+      existingSecret: kguardian-mcp-token
+```
+Then reach it over a port-forward:
+```bash
+kubectl -n <ns> port-forward svc/kguardian-llm-bridge 8080:8080
+```
+and point your MCP client at `http://localhost:8080/mcp`, sending
+`Authorization: Bearer <token>`.
+
+### The chart refuses to serve this endpoint open by accident
+
+Setting `ai.mcp.enabled: true` **without** `ai.mcp.auth.existingSecret` makes
+the chart fail to render, naming both remedies. This is deliberate. The
+endpoint returns pod traffic, syscalls, and audit verdicts with no LLM in the
+path and no per-tool authorization, and it is fronted by a ClusterIP Service —
+which is not a security boundary. Every pod in the cluster can route to it
+unless a NetworkPolicy says otherwise, and this chart ships no llm-bridge
+NetworkPolicy. A forgotten token would hand your telemetry to any compromised
+workload in the cluster.
+
+If llm-bridge is already fronted by a default-deny NetworkPolicy or a mesh
+with mTLS, the token is genuinely redundant. Say so explicitly:
+
+```yaml
+ai:
+  mcp:
+    auth:
+      allowUnauthenticated: true
+```
+That opt-out exists so the decision lands in your values file and your code
+review, which a silently-missing token never would.
+
+Note that `MCP_AUTH_TOKEN` is injected **without** `optional: true`, unlike
+the provider API keys. If the named Secret is missing the pod fails to start
+rather than coming up unauthenticated — a typo in the Secret name must not
+quietly open the endpoint.
+
+## OpenAI-compatible gateways: `ai.baseUrl` and `ai.model` (opt-in, default off)
+
+**Existing installs are unaffected.** Both keys default to `""`, and while
+they are empty the chart emits no new environment variables at all — the
+rendered llm-bridge is byte-identical to the previous release. Vendor
+endpoints and default models are unchanged. If you do nothing, nothing
+changes.
+
+They let you point the provider named by `ai.provider` at an
+OpenAI-compatible gateway (LiteLLM, vLLM, an enterprise proxy) instead of the
+vendor's API:
+
+```yaml
+ai:
+  enabled: true
+  provider: openai
+  secret: litellm-key                                   # still required — see below
+  baseUrl: http://litellm.litellm.svc.cluster.local:4000/v1
+  model: my-team/llama-3.3-70b
+```
+
+**You must still set `ai.secret`.** Provider availability is gated on the API
+key alone, so a gateway configured without one leaves the assistant reporting
+"no provider configured" no matter how correct the base URL is. Set it to your
+gateway's virtual key, or to any non-empty dummy value if the gateway is
+unauthenticated. This is the most common first-run mistake.
+
+**The `/v1` segment is yours to get right.** kguardian appends the provider's
+request path to your base URL verbatim and never inserts, removes, or rewrites
+a `/v1`. LiteLLM answers on both `/chat/completions` and
+`/v1/chat/completions`, so both forms appear to work there; vLLM and most
+other gateways serve only the `/v1` form. A wrong base surfaces as a 404 or
+405 whose error message names the offending environment variable — it never
+silently falls back to the vendor API.
+
+The keys map per provider, and the Gemini row is asymmetric on purpose — the
+key is named for the vendor, the endpoint and model for the provider
+`ai.provider` selects:
+
+| `ai.provider` | API key env | `ai.baseUrl` env | `ai.model` env |
+|---|---|---|---|
+| `openai` | `OPENAI_API_KEY` | `OPENAI_BASE_URL` | `OPENAI_MODEL` |
+| `anthropic` | `ANTHROPIC_API_KEY` | `ANTHROPIC_BASE_URL` | `ANTHROPIC_MODEL` |
+| `gemini` | `GOOGLE_API_KEY` | `GEMINI_BASE_URL` | `GEMINI_MODEL` |
+| `copilot` | `GITHUB_TOKEN` | `COPILOT_BASE_URL` | `COPILOT_MODEL` |
+
+Both keys sit on the one-liner `ai.*` path only. Running two gateways at once
+is still served by `llmBridge.env`, which is emitted last and therefore also
+works as a per-value override.
+
+
 ## AI assistant is now a single workload (mcp-server / advisor-serve retired)
 
 The assistant used to be three in-cluster workloads — `llm-bridge`, a

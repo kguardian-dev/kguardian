@@ -59,6 +59,15 @@ spec:
             # One-line provider path (ai.provider + ai.secret). Additive — the
             # per-provider blocks below still work for multi-provider setups.
             {{- include "kguardian.aiProviderEnv" . | nindent 12 }}
+            # Gateway support (ai.baseUrl + ai.model): point the provider named
+            # by ai.provider at an OpenAI-compatible gateway instead of the
+            # vendor API. Emits nothing when both are empty. Note the key is
+            # still required — provider availability is gated on the API key
+            # alone, so a gateway without ai.secret leaves the assistant dark.
+            {{- include "kguardian.aiEndpointEnv" . | nindent 12 }}
+            # External MCP endpoint (ai.mcp.*) at /mcp on this same port.
+            # Emits nothing unless enabled, so the path 404s by default.
+            {{- include "kguardian.mcpEnv" . | nindent 12 }}
             {{- if .Values.llmBridge.secrets.openai.enabled }}
             - name: OPENAI_API_KEY
               valueFrom:
