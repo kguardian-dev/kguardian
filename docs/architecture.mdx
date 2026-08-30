@@ -6,7 +6,7 @@ icon: "sitemap"
 
 ## System Architecture
 
-kguardian is designed as a distributed system: four core components (Controller, Broker, CLI, UI) plus an audit-mode evaluator (deployed by default) and an optional AI assistant (llm-bridge, running tools and policy/seccomp generation in-process) work together to observe, analyze, and secure your Kubernetes workloads.
+kguardian is designed as a distributed system: four core components (Controller, Broker, CLI, UI) plus an audit-mode evaluator (deployed by default) and an optional AI assistant (the LLM Bridge, running tools and policy/seccomp generation in-process) work together to observe, analyze, and secure your Kubernetes workloads.
 
 ```mermaid
 graph TB
@@ -95,9 +95,11 @@ graph TB
   </Card>
 
   <Card title="AI Assistant (Optional)" icon="robot" iconType="duotone">
-    **Deployment:** llm-bridge (opt-in via chart values)
+    **Language:** TypeScript
 
-    **Purpose:** Natural-language queries and conversational policy generation
+    **Deployment:** LLM Bridge (opt-in via `ai.enabled`)
+
+    **Purpose:** Natural-language queries and conversational policy generation; optionally serves the same tools to external MCP clients at `/mcp`
   </Card>
 </CardGroup>
 
@@ -306,9 +308,11 @@ kguardian-frontend-cccccc-xxxxx
 # Deployment: Evaluator (on by default; disable with evaluator.enabled=false)
 kguardian-evaluator-dddddd-wwwww
 
-# Deployment: LLM bridge (when AI assistant is enabled)
+# Deployment: LLM Bridge (when ai.enabled is set)
 kguardian-llm-bridge-ffffff-uuuuu
 ```
+
+The LLM Bridge is the only optional workload, and it adds no listener of its own beyond its Service port: the assistant's SSE chat route and the optional MCP endpoint (`/mcp`, see [Connect an MCP Client](/guides/mcp-endpoint)) are both routes on port 8080.
 
 ### High Availability
 
@@ -387,7 +391,7 @@ For larger clusters, consider:
   <Card title="Deep Dive: eBPF Monitoring" icon="microscope" href="/concepts/ebpf-monitoring">
     Learn how eBPF programs capture kernel events
   </Card>
-  <Card title="Controller Implementation" icon="code" href="/development/controller">
+  <Card title="Controller Implementation" icon="code" href="https://github.com/kguardian-dev/kguardian/tree/main/controller">
     Explore the Controller source code
   </Card>
   <Card title="Broker API Reference" icon="book" href="/api-reference/introduction">
