@@ -837,14 +837,23 @@ ai:
     # all and 404s, so a disabled endpoint is indistinguishable from a build
     # that never had one.
     #
-    # OFF by default because this hands cluster telemetry — pod traffic,
-    # syscalls, audit verdicts — to anything that can reach the Service, with
-    # no LLM in the path and no per-tool authorization. The Service is
-    # ClusterIP, which is NOT a boundary: every pod in the cluster can route
-    # to it unless a NetworkPolicy says otherwise, and this chart ships no
-    # llm-bridge NetworkPolicy. Treat enabling it as widening the blast
-    # radius of any compromised workload in the cluster, not just as opening
-    # a port for yourself.
+    # OFF by default. Enabled, it serves cluster telemetry — pod traffic,
+    # syscalls, audit verdicts — with no LLM in the path and no per-tool
+    # authorization.
+    #
+    # To be accurate about what this does and does not change: a workload
+    # already inside the cluster can read that same data from the Broker
+    # today, since `broker.auth.enabled` is false by default and the Broker's
+    # API is a ClusterIP Service too. Turning /mcp on does not newly expose
+    # anything to a compromised pod. What it adds is a path for that data to
+    # leave the cluster — /mcp exists to be consumed from a workstation over
+    # `kubectl port-forward`, by a client whose config may be shared or
+    # committed. That is the exposure the token is for.
+    #
+    # It is off by default, and authenticated by default, because this is a
+    # new endpoint with no existing users: the strict default costs nobody a
+    # migration today and could not be introduced later without breaking
+    # people.
     enabled: false
     auth:
       # -- Name of an existing Secret holding the shared bearer token.
@@ -862,14 +871,16 @@ ai:
       #
       # This exists as an explicit, reviewable opt-out rather than the chart
       # silently allowing it, and rather than the chart forbidding it
-      # outright: if you enforce a default-deny NetworkPolicy or a mesh with
-      # mTLS in front of llm-bridge, the bearer token is genuinely redundant
-      # and refusing to render would be the chart overruling you about your
-      # own cluster. Setting it to true makes that judgement visible in your
+      # outright: if you front llm-bridge with a default-deny NetworkPolicy
+      # or a mesh with mTLS, the bearer token is genuinely redundant and
+      # refusing to render would be the chart overruling you about your own
+      # cluster. Setting it to true makes that judgement visible in your
       # values file and in code review, which a missing token never is.
-      # If you are reaching /mcp over `kubectl port-forward` and nothing else
-      # in the cluster is hostile, this is defensible — but a token costs one
-      # `openssl rand` and removes the question.
+      #
+      # Note the failure is loud: `helm template` errors, so with a GitOps
+      # controller the whole release stops reconciling, not just llm-bridge.
+      # That is deliberate for a config you have just written, but it is why
+      # the error names both remedies.
       allowUnauthenticated: false
     # -- Per-IP request ceiling for /mcp, in requests per minute. Empty = the
     # bridge's default of 300. Sized far above the chat route's 20/min

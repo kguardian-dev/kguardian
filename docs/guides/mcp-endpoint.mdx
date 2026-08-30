@@ -62,7 +62,9 @@ helm upgrade kguardian oci://ghcr.io/kguardian-dev/charts/kguardian \
 ```
 
 <Warning>
-Enabling `/mcp` hands cluster telemetry — pod traffic, syscalls, audit verdicts — to anything that can reach the Service, with no model in the path and no per-tool authorization. A ClusterIP Service is not a boundary: every pod in the cluster can route to it unless a NetworkPolicy says otherwise, and the chart ships no LLM Bridge NetworkPolicy.
+Enabling `/mcp` serves cluster telemetry — pod traffic, syscalls, audit verdicts — to anything that can reach it, with no model in the path and no per-tool authorization.
+
+Worth being precise about what that changes. A workload already running in your cluster can read the same data from the Broker today, because `broker.auth.enabled` is `false` by default. Turning `/mcp` on does not newly expose it in-cluster. What `/mcp` adds is a route out: it exists to be used from your workstation over `kubectl port-forward`, by a client whose configuration may be shared with your team or committed to a repository. That is what the token protects.
 
 The chart refuses to render an unauthenticated endpoint by accident: `ai.mcp.enabled=true` with no `auth.existingSecret` fails the install unless you also set `ai.mcp.auth.allowUnauthenticated=true`. Use that opt-out only when a default-deny NetworkPolicy or a mesh with mTLS already fronts the workload — it exists so the decision shows up in a values diff, not as a shortcut.
 </Warning>

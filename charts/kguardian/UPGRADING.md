@@ -36,11 +36,16 @@ and point your MCP client at `http://localhost:8080/mcp`, sending
 Setting `ai.mcp.enabled: true` **without** `ai.mcp.auth.existingSecret` makes
 the chart fail to render, naming both remedies. This is deliberate. The
 endpoint returns pod traffic, syscalls, and audit verdicts with no LLM in the
-path and no per-tool authorization, and it is fronted by a ClusterIP Service —
-which is not a security boundary. Every pod in the cluster can route to it
-unless a NetworkPolicy says otherwise, and this chart ships no llm-bridge
-NetworkPolicy. A forgotten token would hand your telemetry to any compromised
-workload in the cluster.
+path and no per-tool authorization.
+
+Be precise about what enabling it changes. A workload already inside the
+cluster can read that same data from the Broker today, since
+`broker.auth.enabled` defaults to `false`, so `/mcp` does not newly expose it
+in-cluster. What `/mcp` adds is a path for that data to leave: it is built to
+be consumed from a workstation over `kubectl port-forward`, by a client whose
+config may be shared or committed. The token guards that path, and the strict
+default is free to adopt now only because this endpoint is new and has no
+existing users.
 
 If llm-bridge is already fronted by a default-deny NetworkPolicy or a mesh
 with mTLS, the token is genuinely redundant. Say so explicitly:
