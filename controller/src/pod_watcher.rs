@@ -1,6 +1,6 @@
+use crate::models::ContainerMap;
 use crate::{api_post_call, Error, PodDetail, PodInfo, PodInspect};
 use chrono::Utc;
-use dashmap::DashMap;
 use futures::TryStreamExt;
 use k8s_openapi::api::apps::v1::{DaemonSet, Deployment, ReplicaSet, StatefulSet};
 use k8s_openapi::api::core::v1::Pod;
@@ -19,7 +19,7 @@ use tokio::sync::mpsc;
 pub async fn watch_pods(
     node_name: String,
     tx: mpsc::Sender<u64>,
-    container_map: Arc<DashMap<u64, PodInspect>>,
+    container_map: ContainerMap,
     excluded_namespaces: &[String],
     sender_ip: mpsc::Sender<String>,
     ignore_daemonset_traffic: bool,
@@ -105,7 +105,7 @@ async fn resync_pods(
     pods: Api<Pod>,
     node_name: String,
     tx: mpsc::Sender<u64>,
-    container_map: Arc<DashMap<u64, PodInspect>>,
+    container_map: ContainerMap,
     excluded_namespaces: Vec<String>,
     sender_ip: mpsc::Sender<String>,
     ignore_daemonset_traffic: bool,
@@ -151,7 +151,7 @@ async fn resync_pods(
 
 async fn process_pod(
     pod: &Pod,
-    container_map: Arc<DashMap<u64, PodInspect>>,
+    container_map: ContainerMap,
     excluded_namespaces: &[String],
     sender_ip: mpsc::Sender<String>,
     ignore_daemonset_traffic: bool,
@@ -310,7 +310,7 @@ async fn process_container_ids(
     con_ids: &[String],
     pod: &Pod,
     pod_ip: &str,
-    container_map: Arc<DashMap<u64, PodInspect>>,
+    container_map: ContainerMap,
 ) -> Option<u64> {
     for con_id in con_ids {
         let pod_info = create_pod_info(pod, pod_ip);
@@ -331,8 +331,10 @@ async fn process_container_ids(
                     "inode_num of pod {} is {}",
                     pod_inspect.status.pod_name, inode_num
                 );
-                // DashMap provides lock-free inserts!
-                container_map.insert(inode_num, pod_inspect.clone());
+                // Takes a write lock on this key's shard. It is only safe to
+                // block here because no reader holds a guard across an await
+                // any more — see ContainerMap and lookup_pod in models.rs.
+                container_map.insert(inode_num, Arc::new(pod_inspect));
                 return Some(inode_num);
             }
         }

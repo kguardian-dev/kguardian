@@ -1,0 +1,21 @@
+# Make "read the container map only through models::lookup_pod" a compiler-
+# enforced rule rather than a comment.
+#
+# DashMap::get returns a Ref that holds the shard's read lock until dropped.
+# Held across an .await it deadlocks the whole controller, because every
+# subsystem is composed into one task by try_join! in main.rs and the pod
+# watcher's insert() then blocks the thread on that shard. That outage shipped
+# once already: a stalled controller, Running with zero restarts and silent
+# logs, and it took a production report to find.
+#
+# clippy::await_holding_lock does NOT catch it — dashmap wraps the parking_lot
+# guard in its own Ref type, which the lint cannot see through. Neither do the
+# unit tests, which can only exercise lookup_pod itself, not the call sites
+# where the mistake actually gets made. This is the only mechanism that fails
+# the build on a one-line reintroduction at a call site.
+#
+# models::lookup_pod carries the single audited #[allow] for this lint.
+disallowed-methods = [
+  { path = "dashmap::DashMap::get", reason = "returns a Ref holding the shard read lock; read the map via models::lookup_pod, which drops the guard before returning" },
+  { path = "dashmap::DashMap::get_mut", reason = "returns a RefMut holding the shard write lock; the container map is insert-only by design" },
+]
