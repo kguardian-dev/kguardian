@@ -1,5 +1,18 @@
 # Changelog
 
+## [1.9.5](https://github.com/kguardian-dev/kguardian/compare/controller/v1.9.4...controller/v1.9.5) (2026-08-31)
+
+
+### Bug Fixes
+
+* **controller:** drain the pod-watcher queues instead of taking one per poll ([f16a9c5](https://github.com/kguardian-dev/kguardian/commit/f16a9c5ea0325fa3d3101bb928f377dd00fca636))
+* **controller:** stop a DashMap guard being held across await ([3600597](https://github.com/kguardian-dev/kguardian/commit/3600597a6f6e5fc5a5ac317c193d2cb90d553d69))
+* **deps:** patch vulnerable Rust transitives in broker + controller (security) ([#1264](https://github.com/kguardian-dev/kguardian/issues/1264)) ([663fa38](https://github.com/kguardian-dev/kguardian/commit/663fa386849ffca7bc7f1e2ab3f82cacda20adf4))
+* **deps:** update rust crate kube to v4 and k8s-openapi to 0.28 ([#981](https://github.com/kguardian-dev/kguardian/issues/981)) ([cbc75cb](https://github.com/kguardian-dev/kguardian/commit/cbc75cb4556dbc0ac3cef90504e14ba4c3ee6d05))
+* **deps:** update rust crate libbpf-rs to 0.27.0 ([#1227](https://github.com/kguardian-dev/kguardian/issues/1227)) ([72a5bba](https://github.com/kguardian-dev/kguardian/commit/72a5bbaceecb88e995e9f3d62945549119ccd3f8))
+* **KICK-0000:** drain the pod-watcher queues instead of taking one per poll ([8e253af](https://github.com/kguardian-dev/kguardian/commit/8e253af03f7117d2fa1875477a6836b613f72393))
+* **KICK-0000:** stop a DashMap guard being held across await in the controller ([2e6763d](https://github.com/kguardian-dev/kguardian/commit/2e6763da0c753f0ef0fc81a61643937e280f1b4e))
+
 ## [1.9.4](https://github.com/kguardian-dev/kguardian/compare/controller/v1.9.3...controller/v1.9.4) (2026-08-31)
 
 
