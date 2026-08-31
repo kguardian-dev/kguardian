@@ -317,7 +317,7 @@ curl http://localhost:8080/health
 - API keys are stored as Kubernetes Secrets and never exposed to the frontend
 - Service runs as non-root user
 - CORS restricted via `ALLOWED_ORIGIN`
-- The MCP endpoint is off by default. Enabled, it serves cluster telemetry — pod traffic, syscalls, audit verdicts — to any caller that can reach the Service, with no LLM in the path and no per-tool authorization. A ClusterIP Service is not a boundary: every pod in the cluster can route to it unless a NetworkPolicy says otherwise. Set `MCP_AUTH_TOKEN`, or front the Service with a default-deny NetworkPolicy or a mesh with mTLS
+- The MCP endpoint is off by default. Enabled, it serves cluster telemetry — pod traffic, syscalls, audit verdicts — to any caller that reaches it, with no LLM in the path and no per-tool authorization. A workload inside the cluster can already read that data from the Broker, whose auth is off by default, so `/mcp` does not newly expose it in-cluster. What it adds is a path out of the cluster, since it is built to be consumed from a workstation over `kubectl port-forward`. Set `MCP_AUTH_TOKEN`, or front the Service with a default-deny NetworkPolicy or a mesh with mTLS
 
 ## License
 

@@ -222,15 +222,25 @@ Usage: {{- include "kguardian.aiEndpointEnv" . | nindent 12 }}
 MCP endpoint env. Emits nothing unless ai.mcp.enabled, so /mcp is not routed
 at all on a default install and the path 404s.
 
-SECURITY: the endpoint hands cluster telemetry to any caller that can reach
-the Service, with no LLM in the path. ClusterIP is not a boundary — every pod
-in the cluster can route to it unless a NetworkPolicy says otherwise, and this
-chart ships no llm-bridge NetworkPolicy. So the chart FAILS TO RENDER when the
-endpoint is enabled with neither a token nor an explicit opt-out, rather than
-quietly serving it open. The opt-out exists because a default-deny
-NetworkPolicy or a mesh with mTLS makes the token genuinely redundant, and
-refusing outright would be the chart overruling the operator about their own
-cluster — but it has to be *stated*, so it shows up in a values diff.
+SECURITY: the endpoint serves cluster telemetry with no LLM in the path. Be
+precise about what that changes. A workload already in the cluster can read
+the same data straight from the Broker today (broker.auth.enabled is false by
+default), so /mcp does not newly expose it in-cluster. What /mcp adds is a
+route OUT: it is built to be consumed from a workstation over port-forward, by
+a client whose config may be shared or committed.
+
+So the chart FAILS TO RENDER when the endpoint is enabled with neither a token
+nor an explicit opt-out, rather than quietly serving it open. This is a new
+endpoint with no existing users, which makes the strict default free now and
+impossible to add later without breaking people. The opt-out exists because a
+default-deny NetworkPolicy or a mesh with mTLS makes the token genuinely
+redundant, and refusing outright would be the chart overruling the operator
+about their own cluster — but it has to be *stated*, so it shows up in a
+values diff.
+
+The Broker's open-by-default API is the wider gap, and it is deliberately not
+addressed here: changing that default is a breaking change and needs its own
+upgrade note rather than riding along with an opt-in feature.
 
 MCP_AUTH_TOKEN is deliberately NOT `optional: true`, unlike the provider API
 keys above. An optional secretKeyRef whose Secret is missing leaves the env
@@ -252,7 +262,7 @@ Usage: {{- include "kguardian.mcpEnv" . | nindent 12 }}
       name: {{ $secret }}
       key: {{ .Values.ai.mcp.auth.secretKey }}
 {{- else if not .Values.ai.mcp.auth.allowUnauthenticated -}}
-{{- fail "ai.mcp.enabled=true requires ai.mcp.auth.existingSecret — the MCP endpoint exposes cluster telemetry (pod traffic, syscalls, audit verdicts) to anything that can reach the ClusterIP Service, which is every pod in the cluster unless a NetworkPolicy says otherwise. Create a token Secret:\n  kubectl create secret generic kguardian-mcp-token --from-literal=token=\"$(openssl rand -hex 32)\"\nand set ai.mcp.auth.existingSecret=kguardian-mcp-token.\nIf llm-bridge is already fronted by a default-deny NetworkPolicy or a mesh with mTLS, set ai.mcp.auth.allowUnauthenticated=true to serve it without a token deliberately." -}}
+{{- fail "ai.mcp.enabled=true requires ai.mcp.auth.existingSecret — /mcp serves cluster telemetry (pod traffic, syscalls, audit verdicts) to any caller that reaches it, and it exists to be consumed from OUTSIDE the cluster over kubectl port-forward, by a client whose config may be shared or committed. Create a token Secret:\n  kubectl create secret generic kguardian-mcp-token --from-literal=token=\"$(openssl rand -hex 32)\"\nand set ai.mcp.auth.existingSecret=kguardian-mcp-token.\nIf llm-bridge is already fronted by a default-deny NetworkPolicy or a mesh with mTLS, set ai.mcp.auth.allowUnauthenticated=true to serve it without a token deliberately." -}}
 {{- end }}
 {{- if $limit }}
 - name: MCP_RATE_LIMIT_PER_MIN
