@@ -24,6 +24,19 @@ const traffic: TrafficRow[] = [
   { traffic_type: "INGRESS", pod_port: "8080", traffic_in_out_ip: "10.0.0.7", ip_protocol: "TCP" },
   { traffic_type: "EGRESS", traffic_in_out_ip: "10.96.0.10", traffic_in_out_port: "5432", ip_protocol: "TCP" },
 ];
+
+// Dual-stack scenario: an IPv6 pod whose observed peers are two IPv6 addresses
+// and — deliberately mixed-family — one IPv4 address. It pins the host mask to
+// the address family of each PEER rather than of the pod: /128 for fd00::7 and
+// fd00:96::a, /32 for 10.96.0.10. A single /32 applied across the board would
+// widen each v6 peer rule to 2^96 addresses.
+const web6: PodInfo = { name: "web6", namespace: "prod", ip: "fd00::1", labels: { app: "web" } };
+const dualStackTraffic: TrafficRow[] = [
+  { traffic_type: "INGRESS", pod_port: "8080", traffic_in_out_ip: "fd00::7", ip_protocol: "TCP" },
+  { traffic_type: "EGRESS", traffic_in_out_ip: "fd00:96::a", traffic_in_out_port: "5432", ip_protocol: "TCP" },
+  { traffic_type: "EGRESS", traffic_in_out_ip: "10.96.0.10", traffic_in_out_port: "5432", ip_protocol: "TCP" },
+];
+
 const noResolve: PeerResolver = async () => null;
 const resolveEndpoints: PeerResolver = async (ip) =>
   ip === "10.96.0.10" ? { selector: { app: "db" }, namespace: "prod" }
@@ -57,4 +70,14 @@ test("cilium policy — endpoint-resolved peers matches advisor golden", async (
 test("cilium policy — default-deny matches advisor golden", async () => {
   const got = await roundtrip(await generateCiliumPolicy(idle, [], noResolve));
   assert.deepEqual(got, golden("cilium_default_deny.golden.yaml"));
+});
+
+test("standard policy — dual-stack CIDR peers matches advisor golden", async () => {
+  const got = await roundtrip(await generateNetworkPolicy(web6, dualStackTraffic, noResolve));
+  assert.deepEqual(got, golden("standard_dualstack.golden.yaml"));
+});
+
+test("cilium policy — dual-stack CIDR peers matches advisor golden", async () => {
+  const got = await roundtrip(await generateCiliumPolicy(web6, dualStackTraffic, noResolve));
+  assert.deepEqual(got, golden("cilium_dualstack.golden.yaml"));
 });
