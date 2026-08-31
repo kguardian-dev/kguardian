@@ -10,8 +10,7 @@ The broker checks in with the kguardian version service once a day
 (see [telemetry](/telemetry)) to learn the latest released component
 versions. `GET /version` surfaces the useful half of that exchange:
 the versions currently running plus the latest known ones, so the
-frontend can show an update notice and the MCP layer can answer
-"am I up to date?".
+frontend can show an update notice.
 
 When telemetry is disabled the endpoint still works — it reports the
 current versions with `latest` and `checked_at` as `null`.
