@@ -7,8 +7,6 @@
 
 * **controller:** drain the pod-watcher queues instead of taking one per poll ([8395122](https://github.com/kguardian-dev/kguardian/commit/8395122b6c7541a5b130c4ac1b3a794e9c7fa9ff))
 * **controller:** stop a DashMap guard being held across await ([ca61273](https://github.com/kguardian-dev/kguardian/commit/ca612734ce9aaa3b09cab81eba8b4d248af16ccb))
-* **KICK-0000:** drain the pod-watcher queues instead of taking one per poll ([9ce31fd](https://github.com/kguardian-dev/kguardian/commit/9ce31fdf8029995d066a02955c7cba1be86c5690))
-* **KICK-0000:** stop a DashMap guard being held across await in the controller ([742445f](https://github.com/kguardian-dev/kguardian/commit/742445fd9702655e52fe37963083e057acf590a1))
 
 ## [1.9.3](https://github.com/kguardian-dev/kguardian/compare/controller/v1.9.2...controller/v1.9.3) (2026-08-12)
 
