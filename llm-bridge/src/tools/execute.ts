@@ -10,7 +10,7 @@ import {
   type PeerResolver, type PeerIdentity, type PodInfo, type TrafficRow,
 } from "./generators/networkpolicy.js";
 
-// In-process tool execution — this IS the assistant now (WS-B). Each of the 12
+// In-process tool execution — this IS the assistant now. Each of the 12
 // tools is a broker fetch + the exact compaction the former mcp-server applied,
 // or in-process policy/seccomp generation. The G1 parity test replays the
 // shared backend fixtures through executeInProcessTool and asserts broker
@@ -75,7 +75,7 @@ const handlers: Record<string, Handler> = {
       limit: typeof a.limit === "number" ? a.limit : undefined, cluster_scoped: a.cluster_scoped === true,
     })}`),
   // Network policy is generated in-process from the pod's observed traffic and
-  // broker-resolved peer identities — no advisor hop (WS-C). Byte-semantically
+  // broker-resolved peer identities — no advisor hop. Byte-semantically
   // identical to the advisor (G2 netpol fixtures lock all paths).
   generate_network_policy: async (a) => {
     const podName = s(a.pod_name);
@@ -101,7 +101,7 @@ const handlers: Record<string, Handler> = {
     return policyToYAML(policy);
   },
   // Seccomp is generated in-process from the pod's observed syscalls — no
-  // advisor hop (WS-C). Returned as pretty JSON; the profile is G2-locked to
+  // advisor hop. Returned as pretty JSON; the profile is G2-locked to
   // the frontend and advisor-CLI generators.
   generate_seccomp_profile: async (a) => {
     const syscalls = await brokerGetJSON(`/pod/syscalls/${enc(s(a.pod_name))}`);

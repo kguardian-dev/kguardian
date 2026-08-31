@@ -36,7 +36,7 @@ spec:
             matchLabels:
               app.kubernetes.io/name: kguardian
         # llm-bridge — the AI assistant reads telemetry and synthesises
-        # policies/seccomp profiles in-process (WS-B/WS-C), so it is now the
+        # policies/seccomp profiles in-process, so it is now the
         # sole assistant-side caller of the broker (the retired mcp-server and
         # advisor-serve peers used to sit here).
         {{- if include "kguardian.llmBridgeEnabled" . }}

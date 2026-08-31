@@ -142,8 +142,8 @@ Usage: {{- include "kguardian.brokerAuthEnv" . | nindent 12 }}
 {{- end -}}
 
 {{/*
-AI-path component gate (SIMPLIFICATION-GOAL.md WS-D). ai.enabled=true turns
-on the assistant with one value. Since WS-B/WS-C the assistant is a single
+AI-path component gate. ai.enabled=true turns
+on the assistant with one value. The assistant is a single
 workload — llm-bridge runs the tools and policy/seccomp generation in-process,
 so the retired mcp-server and advisor-serve components no longer render. The
 per-component `llmBridge.enabled` flag still works and remains the way to
@@ -156,7 +156,7 @@ Usage: {{- if include "kguardian.llmBridgeEnabled" . }}
 {{- end -}}
 
 {{/*
-AI provider env (SIMPLIFICATION-GOAL.md WS-D). The one-line provider path:
+AI provider env. The one-line provider path:
 ai.provider + ai.secret inject the correct env var for the chosen LLM provider
 from a single operator-supplied Secret. Emits nothing unless ai.provider is set.
 The per-provider llmBridge.secrets.* blocks remain and are additive, so an

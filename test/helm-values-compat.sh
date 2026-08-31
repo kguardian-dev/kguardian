@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# G4 chart values-compatibility gate (SIMPLIFICATION-GOAL.md §3).
+# G4 chart values-compatibility gate.
 #
 # Renders the CURRENT chart with the value sets real operators are running —
 # especially the legacy per-component AI flags that predate the ai.enabled

@@ -6,7 +6,7 @@ import { fileURLToPath } from "node:url";
 import { parse } from "yaml";
 import { generateNetworkPolicy, generateCiliumPolicy, policyToYAML, type PeerResolver, type PodInfo, type TrafficRow } from "./networkpolicy.js";
 
-// G2 generator parity — network policy, assistant side (SIMPLIFICATION-GOAL.md §3).
+// G2 generator parity — network policy, assistant side.
 // Runs the assistant's in-process generators against the same scenarios the
 // advisor Go golden tests use and asserts the produced policy — parsed from
 // YAML — deep-equals the advisor golden (parsed). YAML serialization differs
