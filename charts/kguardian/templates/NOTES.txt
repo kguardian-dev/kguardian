@@ -87,11 +87,35 @@ Provide an LLM provider key. The one-line way is a single Secret:
   helm upgrade ... --set ai.provider=anthropic --set ai.secret=my-llm-key
 (or configure providers individually via llmBridge.secrets.*).
 {{- end }}
+{{- if .Values.ai.baseUrl }}
+Gateway: {{ .Values.ai.baseUrl }}{{ if .Values.ai.model }} (model {{ .Values.ai.model }}){{ end }}
+kguardian appends the provider's request path to that base verbatim — if the
+gateway serves it under /v1, that /v1 must be in ai.baseUrl.
+{{- end }}
+{{- if .Values.ai.mcp.enabled }}
+
+MCP endpoint: ENABLED at /mcp on port {{ .Values.llmBridge.container.port }} ({{ if .Values.ai.mcp.auth.existingSecret }}bearer token from Secret "{{ .Values.ai.mcp.auth.existingSecret }}"{{ else }}NO AUTH — ai.mcp.auth.allowUnauthenticated=true{{ end }}).
+Reach it from your workstation:
+  kubectl -n {{ .Release.Namespace }} port-forward svc/{{ .Values.llmBridge.service.name }} {{ .Values.llmBridge.service.port }}:{{ .Values.llmBridge.service.port }}
+Then point an MCP client at http://localhost:{{ .Values.llmBridge.service.port }}/mcp
+{{- if not .Values.ai.mcp.auth.existingSecret }}
+Anything that can reach this Service can read your cluster telemetry. Put a
+NetworkPolicy in front of llm-bridge, or set ai.mcp.auth.existingSecret.
+{{- end }}
+{{- else }}
+
+MCP endpoint: disabled. Serve kguardian's tools to external MCP clients with:
+  --set ai.mcp.enabled=true --set ai.mcp.auth.existingSecret=<token-secret>
+{{- end }}
 {{- else }}
 
 AI assistant: disabled. Enable it with one value, one provider, one secret:
   kubectl create secret generic my-llm-key --from-literal=api-key=sk-...
   --set ai.enabled=true --set ai.provider=anthropic --set ai.secret=my-llm-key
+{{- if .Values.ai.mcp.enabled }}
+NOTE: ai.mcp.enabled=true has no effect while the assistant is off — the
+llm-bridge that would serve /mcp is not deployed. Set ai.enabled=true too.
+{{- end }}
 {{- end }}
 {{- if .Values.telemetry.enabled }}
 
