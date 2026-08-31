@@ -152,6 +152,17 @@ The eBPF Controller requires Linux kernel **6.2 or newer** on every node in the 
 
 Kernel versions reflect the GA/server defaults shipped by each distro as of May 2026; newer kernels are typically available via each distro's opt-in channels.
 
+### IP families
+
+IPv4, IPv6, and dual-stack clusters are all supported. The Controller reads both `AF_INET` and `AF_INET6` sockets, and policy generation emits `/32` or `/128` ipBlocks per peer — a dual-stack pod gets both families in one policy.
+
+Two things to know:
+
+- **Dual-stack pods and Services are tracked on every address**, not just the primary one in `.status.podIP` / `.spec.clusterIP`. A peer is therefore resolved to a `podSelector` regardless of which family the traffic used.
+- **Nodes built with `CONFIG_IPV6=n`** are handled: the IPv6 socket fields are read behind a CO-RE existence guard, so the Controller loads and runs normally on such kernels — it simply never sees v6 flows there.
+
+A generated policy is only as complete as what was observed. If a workload speaks both families but was only exercised over one during the observation window, the policy will reflect that — review before enforcing, as always.
+
 ## 📊 Performance
 
 Reference figures from a real-world deployment — a 3-node cluster (18 vCPU / 47 GiB RAM per node, Cilium CNI) observing 234 pods across 26 namespaces of mixed traffic:
