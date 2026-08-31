@@ -422,6 +422,10 @@ broker:
     # -- Node network CIDR(s) the controller DaemonSet runs on. Required
     # when enabled=true, since the hostNetwork controller reaches the
     # broker from its node IP. e.g. ["10.0.0.0/16"] or per-node /32s.
+    # On a dual-stack cluster list BOTH families — the controller reaches
+    # the broker over whichever the node resolves first, so a v4-only
+    # list silently blocks it on a v6-primary node. e.g.
+    # ["10.0.0.0/16", "fd00::/64"].
     allowedNodeCIDRs: []
     # -- Extra ingress peers allowed to reach the broker HTTP port. The
     # /metrics endpoint shares that port, so when
