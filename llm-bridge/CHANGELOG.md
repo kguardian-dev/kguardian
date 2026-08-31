@@ -1,5 +1,30 @@
 # Changelog
 
+## [1.7.0](https://github.com/kguardian-dev/kguardian/compare/llm-bridge/v1.6.2...llm-bridge/v1.7.0) (2026-08-31)
+
+
+### Features
+
+* **llm-bridge:** point any provider at an OpenAI-compatible gateway ([2a407e2](https://github.com/kguardian-dev/kguardian/commit/2a407e20da66b632afc4158c64e462525ba080c3))
+* **llm-bridge:** serve the assistant's tools over MCP at /mcp ([d3678c4](https://github.com/kguardian-dev/kguardian/commit/d3678c4130c011927078f27c354f4800fac9a627))
+
+
+### Bug Fixes
+
+* **deps:** update dependency @anthropic-ai/sdk to ^0.117.0 ([#1292](https://github.com/kguardian-dev/kguardian/issues/1292)) ([855de19](https://github.com/kguardian-dev/kguardian/commit/855de1972f2ef3bc84cdf3a7640ced7afea14379))
+* **deps:** update dependency @anthropic-ai/sdk to ^0.118.0 ([#1304](https://github.com/kguardian-dev/kguardian/issues/1304)) ([9cef1cb](https://github.com/kguardian-dev/kguardian/commit/9cef1cbb2a7b27733d53b37a318e1369d2139186))
+* **deps:** update dependency @anthropic-ai/sdk to ^0.119.0 ([#1307](https://github.com/kguardian-dev/kguardian/issues/1307)) ([9e26b43](https://github.com/kguardian-dev/kguardian/commit/9e26b4367f3213ad519cd564308a6e77d6e93de6))
+* **deps:** update dependency @anthropic-ai/sdk to ^0.120.0 ([#1309](https://github.com/kguardian-dev/kguardian/issues/1309)) ([d7e8c4d](https://github.com/kguardian-dev/kguardian/commit/d7e8c4d21224889457e047674f5fad13865855c2))
+* **deps:** update dependency @anthropic-ai/sdk to ^0.121.0 ([#1329](https://github.com/kguardian-dev/kguardian/issues/1329)) ([b8c7e6f](https://github.com/kguardian-dev/kguardian/commit/b8c7e6fb432c08dcdba19ae07542760a3263566c))
+* **deps:** update dependency @anthropic-ai/sdk to ^0.122.0 ([#1332](https://github.com/kguardian-dev/kguardian/issues/1332)) ([36964a3](https://github.com/kguardian-dev/kguardian/commit/36964a3ebaa5130ff1ff2e8d736394c535330486))
+* **llm-bridge:** remove pre-auth ReDoS in the MCP bearer parser ([9819dbc](https://github.com/kguardian-dev/kguardian/commit/9819dbc0cedf0c398973d33a833ba27070df88af))
+
+
+### Documentation
+
+* **chart:** state the MCP auth rationale accurately ([c9c0c20](https://github.com/kguardian-dev/kguardian/commit/c9c0c200d097f07e4626ff2928c78984a2d726cb))
+* MCP endpoint and gateway configuration, plus accuracy fixes ([cd3aee4](https://github.com/kguardian-dev/kguardian/commit/cd3aee4f6f6669781887e4420864ce54b2d227d8))
+
 ## [1.6.2](https://github.com/kguardian-dev/kguardian/compare/llm-bridge/v1.6.1...llm-bridge/v1.6.2) (2026-08-12)
 
 
