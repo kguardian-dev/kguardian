@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.9.4](https://github.com/kguardian-dev/kguardian/compare/controller/v1.9.3...controller/v1.9.4) (2026-08-31)
+
+
+### Bug Fixes
+
+* **controller:** drain the pod-watcher queues instead of taking one per poll ([8395122](https://github.com/kguardian-dev/kguardian/commit/8395122b6c7541a5b130c4ac1b3a794e9c7fa9ff))
+* **controller:** stop a DashMap guard being held across await ([ca61273](https://github.com/kguardian-dev/kguardian/commit/ca612734ce9aaa3b09cab81eba8b4d248af16ccb))
+
 ## [1.9.3](https://github.com/kguardian-dev/kguardian/compare/controller/v1.9.2...controller/v1.9.3) (2026-08-12)
 
 
