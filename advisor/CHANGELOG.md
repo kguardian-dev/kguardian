@@ -1,5 +1,33 @@
 # Changelog
 
+## [1.8.0](https://github.com/kguardian-dev/kguardian/compare/advisor/v1.7.1...advisor/v1.8.0) (2026-08-31)
+
+
+### Features
+
+* **chart:** single-workload AI assistant — retire mcp-server + advisor-serve ([4105199](https://github.com/kguardian-dev/kguardian/commit/4105199f18bff1651a62cbae291b5d677bb87be8))
+* MCP/LLM integration uplift + data-path hardening ([855da76](https://github.com/kguardian-dev/kguardian/commit/855da76fb03dece78862efe5468bc5ab7c524ad3))
+
+
+### Bug Fixes
+
+* **advisor:** embed version info via correct ldflag targets ([#1011](https://github.com/kguardian-dev/kguardian/issues/1011)) ([66703ee](https://github.com/kguardian-dev/kguardian/commit/66703eeeda89839696b37e09c822461b02aafe18))
+* **advisor:** seccomp generation on ARM nodes (architectures was null) ([#1042](https://github.com/kguardian-dev/kguardian/issues/1042)) ([642c3bb](https://github.com/kguardian-dev/kguardian/commit/642c3bb72b197367e1b4d23d277d52e74820aff3))
+* **deps:** update kubernetes monorepo to v0.36.2 ([#956](https://github.com/kguardian-dev/kguardian/issues/956)) ([f0f0114](https://github.com/kguardian-dev/kguardian/commit/f0f01149398e6860291b45e4f5948a23c50d7b0e))
+* **deps:** update kubernetes monorepo to v0.36.3 ([#1145](https://github.com/kguardian-dev/kguardian/issues/1145)) ([1ff8c64](https://github.com/kguardian-dev/kguardian/commit/1ff8c64b593993131f5c0ffb6d3e9bdad0218d65))
+* **deps:** update kubernetes monorepo to v0.36.4 ([#1312](https://github.com/kguardian-dev/kguardian/issues/1312)) ([84e19c2](https://github.com/kguardian-dev/kguardian/commit/84e19c2371ac536dd1ba67163e065fcd0954cb3e))
+* **deps:** update kubernetes monorepo to v0.37.0 ([#1330](https://github.com/kguardian-dev/kguardian/issues/1330)) ([9b9d50d](https://github.com/kguardian-dev/kguardian/commit/9b9d50dd85c3a49755bfa4f38dd80a2b58e4113d))
+* **deps:** update module github.com/cilium/cilium to v1.19.5 ([#964](https://github.com/kguardian-dev/kguardian/issues/964)) ([a84685a](https://github.com/kguardian-dev/kguardian/commit/a84685a9a462cc5fc8760148ea65c0ae6ca85b30))
+* **deps:** update module github.com/cilium/cilium to v1.19.6 ([#1070](https://github.com/kguardian-dev/kguardian/issues/1070)) ([caf0b16](https://github.com/kguardian-dev/kguardian/commit/caf0b160959ff77da564b5bb83ff6528c6f4c195))
+* **deps:** update module github.com/stretchr/testify to v1.12.0 ([#1296](https://github.com/kguardian-dev/kguardian/issues/1296)) ([5e9499a](https://github.com/kguardian-dev/kguardian/commit/5e9499a6fcb58903ee3fee0edf4746b992438ffe))
+* **deps:** update module github.com/stretchr/testify to v1.12.1 ([#1303](https://github.com/kguardian-dev/kguardian/issues/1303)) ([15e5dca](https://github.com/kguardian-dev/kguardian/commit/15e5dca94665dd492c0e09e8e1e3f4d32d4ff262))
+
+
+### Code Refactoring
+
+* **advisor:** drop github.com/cilium/cilium, hand-roll the CNP types ([#1185](https://github.com/kguardian-dev/kguardian/issues/1185)) ([7574d4f](https://github.com/kguardian-dev/kguardian/commit/7574d4f5386fe2d87262c7cbb3f7ce133713d74b))
+* **advisor:** retire in-cluster serve mode; keep the CLI ([91e5258](https://github.com/kguardian-dev/kguardian/commit/91e52589a40aa78bac455719fec73e7a762a50f4))
+
 ## [1.7.1](https://github.com/kguardian-dev/kguardian/compare/advisor/v1.7.0...advisor/v1.7.1) (2026-08-31)
 
 
