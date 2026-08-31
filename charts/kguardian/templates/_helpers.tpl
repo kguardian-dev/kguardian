@@ -179,3 +179,94 @@ Usage: {{- include "kguardian.aiProviderEnv" . | nindent 12 }}
       optional: true
 {{- end -}}
 {{- end -}}
+
+{{/*
+AI endpoint env: base URL and default model for the provider named by
+ai.provider. Keyed identically to `kguardian.aiProviderEnv` above so one
+`ai.provider` value drives the key, the endpoint, and the model together.
+
+These are plain values, not secrets — which is why they live on ai.* and NOT
+under llmBridge.secrets.*. Each is emitted only when non-empty (whitespace
+counts as empty), so a default install renders exactly the env block it
+rendered before these keys existed.
+
+The bridge appends its request path to the base URL verbatim and never
+adjusts a /v1 segment; see llm-bridge/src/providers/baseUrl.ts for why.
+Usage: {{- include "kguardian.aiEndpointEnv" . | nindent 12 }}
+*/}}
+{{- define "kguardian.aiEndpointEnv" -}}
+{{- $provider := .Values.ai.provider | default "" -}}
+{{- $baseUrl := .Values.ai.baseUrl | default "" | toString | trim -}}
+{{- $model := .Values.ai.model | default "" | toString | trim -}}
+{{- if and (not $provider) (or $baseUrl $model) -}}
+{{- fail "ai.baseUrl and ai.model require ai.provider to be set — without it the chart cannot know which provider's env var to write, and the value would be silently ignored. Set ai.provider (openai|anthropic|gemini|copilot), or use llmBridge.env to set the provider env var directly." -}}
+{{- end -}}
+{{- if $provider -}}
+{{- /* Note the deliberate asymmetry for gemini: the API key env var is
+       GOOGLE_API_KEY (see aiProviderEnv) while the base and model are
+       GEMINI_*. The bridge reads exactly these names — do not "fix" it. */ -}}
+{{- $baseUrlByProvider := dict "openai" "OPENAI_BASE_URL" "anthropic" "ANTHROPIC_BASE_URL" "gemini" "GEMINI_BASE_URL" "copilot" "COPILOT_BASE_URL" -}}
+{{- $modelByProvider := dict "openai" "OPENAI_MODEL" "anthropic" "ANTHROPIC_MODEL" "gemini" "GEMINI_MODEL" "copilot" "COPILOT_MODEL" -}}
+{{- if $baseUrl }}
+- name: {{ index $baseUrlByProvider $provider }}
+  value: {{ $baseUrl | quote }}
+{{- end }}
+{{- if $model }}
+- name: {{ index $modelByProvider $provider }}
+  value: {{ $model | quote }}
+{{- end }}
+{{- end -}}
+{{- end -}}
+
+{{/*
+MCP endpoint env. Emits nothing unless ai.mcp.enabled, so /mcp is not routed
+at all on a default install and the path 404s.
+
+SECURITY: the endpoint serves cluster telemetry with no LLM in the path. Be
+precise about what that changes. A workload already in the cluster can read
+the same data straight from the Broker today (broker.auth.enabled is false by
+default), so /mcp does not newly expose it in-cluster. What /mcp adds is a
+route OUT: it is built to be consumed from a workstation over port-forward, by
+a client whose config may be shared or committed.
+
+So the chart FAILS TO RENDER when the endpoint is enabled with neither a token
+nor an explicit opt-out, rather than quietly serving it open. This is a new
+endpoint with no existing users, which makes the strict default free now and
+impossible to add later without breaking people. The opt-out exists because a
+default-deny NetworkPolicy or a mesh with mTLS makes the token genuinely
+redundant, and refusing outright would be the chart overruling the operator
+about their own cluster — but it has to be *stated*, so it shows up in a
+values diff.
+
+The Broker's open-by-default API is the wider gap, and it is deliberately not
+addressed here: changing that default is a breaking change and needs its own
+upgrade note rather than riding along with an opt-in feature.
+
+MCP_AUTH_TOKEN is deliberately NOT `optional: true`, unlike the provider API
+keys above. An optional secretKeyRef whose Secret is missing leaves the env
+var unset, and the bridge reads unset as "no auth" — a typo in the Secret name
+would silently serve the endpoint wide open. Without `optional` the pod fails
+to start instead, which is the correct direction to fail.
+Usage: {{- include "kguardian.mcpEnv" . | nindent 12 }}
+*/}}
+{{- define "kguardian.mcpEnv" -}}
+{{- if .Values.ai.mcp.enabled -}}
+{{- $secret := .Values.ai.mcp.auth.existingSecret | default "" | toString | trim -}}
+{{- $limit := .Values.ai.mcp.rateLimitPerMin | default "" | toString | trim -}}
+- name: MCP_ENABLED
+  value: "true"
+{{- if $secret }}
+- name: MCP_AUTH_TOKEN
+  valueFrom:
+    secretKeyRef:
+      name: {{ $secret }}
+      key: {{ .Values.ai.mcp.auth.secretKey }}
+{{- else if not .Values.ai.mcp.auth.allowUnauthenticated -}}
+{{- fail "ai.mcp.enabled=true requires ai.mcp.auth.existingSecret — /mcp serves cluster telemetry (pod traffic, syscalls, audit verdicts) to any caller that reaches it, and it exists to be consumed from OUTSIDE the cluster over kubectl port-forward, by a client whose config may be shared or committed. Create a token Secret:\n  kubectl create secret generic kguardian-mcp-token --from-literal=token=\"$(openssl rand -hex 32)\"\nand set ai.mcp.auth.existingSecret=kguardian-mcp-token.\nIf llm-bridge is already fronted by a default-deny NetworkPolicy or a mesh with mTLS, set ai.mcp.auth.allowUnauthenticated=true to serve it without a token deliberately." -}}
+{{- end }}
+{{- if $limit }}
+- name: MCP_RATE_LIMIT_PER_MIN
+  value: {{ $limit | quote }}
+{{- end }}
+{{- end -}}
+{{- end -}}

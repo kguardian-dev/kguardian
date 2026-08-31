@@ -156,3 +156,47 @@ test("missing API key fails fast with a clear message", async () => {
     process.env.ANTHROPIC_API_KEY = saved;
   }
 });
+
+test("ANTHROPIC_MODEL replaces the default, and request.model still wins", async () => {
+  // Operators pointing ANTHROPIC_BASE_URL at a gateway need a default model id
+  // the gateway recognises; "claude-opus-4-8" may mean nothing to it.
+  responseQueue.push(message([{ type: "text", text: "a" }], "end_turn"));
+  responseQueue.push(message([{ type: "text", text: "b" }], "end_turn"));
+  process.env.ANTHROPIC_MODEL = "claude-via-gateway";
+  try {
+    await callAnthropic({ ...baseRequest }, stubBroker([]));
+    assert.equal(capturedRequests[0].model, "claude-via-gateway");
+
+    await callAnthropic({ ...baseRequest, model: "claude-sonnet-4-5" }, stubBroker([]));
+    assert.equal(capturedRequests[1].model, "claude-sonnet-4-5");
+  } finally {
+    delete process.env.ANTHROPIC_MODEL;
+  }
+});
+
+test("whitespace-only ANTHROPIC_MODEL counts as unset", async () => {
+  responseQueue.push(message([{ type: "text", text: "a" }], "end_turn"));
+  process.env.ANTHROPIC_MODEL = "   ";
+  try {
+    await callAnthropic({ ...baseRequest }, stubBroker([]));
+    assert.equal(capturedRequests[0].model, "claude-opus-4-8");
+  } finally {
+    delete process.env.ANTHROPIC_MODEL;
+  }
+});
+
+test("malformed ANTHROPIC_BASE_URL rejects with a message naming the env var", async () => {
+  // Every other test in this file relies on ANTHROPIC_BASE_URL pointing at the
+  // mock server, which is itself the proof that the override is honoured; this
+  // covers the typo path.
+  process.env.ANTHROPIC_BASE_URL = "api.anthropic.com";
+  try {
+    await assert.rejects(
+      () => callAnthropic({ ...baseRequest }, stubBroker([])),
+      /ANTHROPIC_BASE_URL is not a valid URL/,
+    );
+    assert.equal(capturedRequests.length, 0, "fails before any request is sent");
+  } finally {
+    process.env.ANTHROPIC_BASE_URL = baseURL;
+  }
+});

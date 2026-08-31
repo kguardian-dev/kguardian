@@ -2,7 +2,7 @@
 
 This chart bootstraps the [kguardian]() controlplane onto a [Kubernetes](http://kubernetes.io) cluster using the [Helm](https://helm.sh) package manager.
 
-![Version: 1.17.1](https://img.shields.io/badge/Version-1.17.1-informational?style=flat-square)
+![Version: 1.17.3](https://img.shields.io/badge/Version-1.17.3-informational?style=flat-square)
 
 ## Overview
 
@@ -73,7 +73,14 @@ The following table lists the configurable parameters of the kguardian chart and
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
+| ai.baseUrl | string | `""` | Base URL of an OpenAI-compatible gateway (LiteLLM, vLLM, an enterprise proxy) to call instead of the vendor's own API. Applies to whichever provider `ai.provider` names. Empty = the vendor default.  kguardian appends the provider's request path to this value VERBATIM and never inserts, removes, or rewrites a `/v1` segment. That matters because LiteLLM answers on both `/chat/completions` and `/v1/chat/completions` while vLLM serves only the `/v1` form — so include `/v1` if your gateway needs it. A wrong base fails as a 404/405 whose error names this value, not as a silent fallback to the vendor API.   baseUrl: http://litellm.litellm.svc.cluster.local:4000/v1  YOU STILL NEED `ai.secret`. Provider availability is gated on the API key alone, so setting `baseUrl` without `ai.secret` still reports "no provider configured" and the assistant stays dark, however correct the URL is. Set `ai.secret` to your gateway's virtual key, or to any non-empty dummy value if the gateway is unauthenticated. This is the most common first-run mistake. |
 | ai.enabled | bool | `false` | Enable the AI assistant with one toggle. The assistant is a single workload (llm-bridge) that runs the tools and policy/seccomp generation in-process — no separate mcp-server or advisor-serve components. |
+| ai.mcp.auth.allowUnauthenticated | bool | `false` | Serve /mcp with NO authentication. Every caller that can reach the Service gets unrestricted read access to your cluster's telemetry.  This exists as an explicit, reviewable opt-out rather than the chart silently allowing it, and rather than the chart forbidding it outright: if you front llm-bridge with a default-deny NetworkPolicy or a mesh with mTLS, the bearer token is genuinely redundant and refusing to render would be the chart overruling you about your own cluster. Setting it to true makes that judgement visible in your values file and in code review, which a missing token never is.  Note the failure is loud: `helm template` errors, so with a GitOps controller the whole release stops reconciling, not just llm-bridge. That is deliberate for a config you have just written, but it is why the error names both remedies. |
+| ai.mcp.auth.existingSecret | string | `""` | Name of an existing Secret holding the shared bearer token. REQUIRED when `ai.mcp.enabled=true` unless you explicitly set `allowUnauthenticated` below — the chart refuses to render an unauthenticated MCP endpoint by accident. Create it once:   kubectl create secret generic kguardian-mcp-token \     --from-literal=token="$(openssl rand -hex 32)" Clients then send `Authorization: Bearer <token>`. |
+| ai.mcp.auth.secretKey | string | `"token"` | Key within that Secret. |
+| ai.mcp.enabled | bool | `false` | Serve the MCP endpoint at /mcp. When false the path is not routed at all and 404s, so a disabled endpoint is indistinguishable from a build that never had one.  OFF by default. Enabled, it serves cluster telemetry — pod traffic, syscalls, audit verdicts — with no LLM in the path and no per-tool authorization.  To be accurate about what this does and does not change: a workload already inside the cluster can read that same data from the Broker today, since `broker.auth.enabled` is false by default and the Broker's API is a ClusterIP Service too. Turning /mcp on does not newly expose anything to a compromised pod. What it adds is a path for that data to leave the cluster — /mcp exists to be consumed from a workstation over `kubectl port-forward`, by a client whose config may be shared or committed. That is the exposure the token is for.  It is off by default, and authenticated by default, because this is a new endpoint with no existing users: the strict default costs nobody a migration today and could not be introduced later without breaking people. |
+| ai.mcp.rateLimitPerMin | string | `""` | Per-IP request ceiling for /mcp, in requests per minute. Empty = the bridge's default of 300. Sized far above the chat route's 20/min because one MCP client session is many round-trips — an agent walking pods -> traffic -> verdicts -> policy burns 30-60 calls in seconds. The counter is per-replica (in-memory store), so with the default replicaCount of 2 the cluster-wide ceiling is roughly double this. It is a runaway-client guard, not a quota. A non-numeric or non-positive value is ignored by the bridge in favour of the default. |
+| ai.model | string | `""` | Default model id the assistant asks the provider for. Empty = the built-in default for `ai.provider` (gpt-4o / claude-opus-4-8 / gemini-2.0-flash). Set this when pointing `ai.baseUrl` at a gateway whose model ids are its own — "gpt-4o" means nothing to a gateway routing to a local Llama, and the request fails model-not-found.   model: my-team/llama-3.3-70b |
 | ai.provider | string | `""` | LLM provider for the assistant: one of "openai", "anthropic", "gemini", "copilot". With `ai.secret` this is the one-line way to wire a provider — the chart injects the right env var (OPENAI_API_KEY / ANTHROPIC_API_KEY / GOOGLE_API_KEY / GITHUB_TOKEN) from your secret. Leave empty to configure providers individually via llmBridge.secrets.* instead. |
 | ai.secret | string | `""` | Name of an existing Secret holding the provider API key under the key `api-key` (override with llmBridge.secrets.keyName). Required when `ai.provider` is set. Create it once:   kubectl create secret generic my-llm-key --from-literal=api-key=sk-... |
 | broker.affinity | object | `{}` | Affinity rules for broker pod assignment |
@@ -97,7 +104,7 @@ The following table lists the configurable parameters of the kguardian chart and
 | broker.image.pullPolicy | string | `"IfNotPresent"` | Broker image pull policy |
 | broker.image.repository | string | `"ghcr.io/kguardian-dev/kguardian/broker"` | Broker container image repository |
 | broker.image.sha | string | `""` | Overrides the image tag using SHA digest |
-| broker.image.tag | string | `"1.12.3"` | Broker version tag (auto-updated by release-please) |
+| broker.image.tag | string | `"1.12.4"` | Broker version tag (auto-updated by release-please) |
 | broker.imagePullSecrets | list | `[]` | List of image pull secrets for private registries |
 | broker.initContainer.image.pullPolicy | string | `"Always"` | Broker init container image pull policy |
 | broker.initContainer.image.repository | string | `"busybox"` | Broker init container image repository |
@@ -148,7 +155,7 @@ The following table lists the configurable parameters of the kguardian chart and
 | controller.image.pullPolicy | string | `"IfNotPresent"` | Controller image pull policy |
 | controller.image.repository | string | `"ghcr.io/kguardian-dev/kguardian/controller"` | Controller container image repository |
 | controller.image.sha | string | `""` | Overrides the image tag using SHA digest |
-| controller.image.tag | string | `"1.9.1"` | Controller version tag (auto-updated by release-please) |
+| controller.image.tag | string | `"1.9.3"` | Controller version tag (auto-updated by release-please) |
 | controller.imagePullSecrets | list | `[]` | List of image pull secrets for private registries |
 | controller.initContainer.image.pullPolicy | string | `"Always"` | Init container image pull policy |
 | controller.initContainer.image.repository | string | `"busybox"` | Init container image repository |
@@ -210,7 +217,7 @@ The following table lists the configurable parameters of the kguardian chart and
 | database.serviceAccount.name | string | `""` | The name of the service account to use. If not set and create is true, a name is generated using the fullname template |
 | database.tolerations | list | `[]` | Tolerations for the kguardian database pod assignment |
 | database.user | string | `"rust"` | PostgreSQL role used by the broker. Must exist on external Postgres. |
-| evaluator | object | `{"affinity":{},"autoscaling":{"enabled":false,"maxReplicas":5,"minReplicas":1,"targetCPUUtilizationPercentage":80},"container":{"port":8082},"enabled":true,"env":[],"image":{"pullPolicy":"IfNotPresent","repository":"ghcr.io/kguardian-dev/kguardian/evaluator","sha":"","tag":"v0.3.3"},"imagePullSecrets":[],"logLevel":"info","metrics":{"serviceMonitor":{"enabled":false,"interval":"30s","labels":{},"path":"/metrics","port":"http","scrapeTimeout":"10s"}},"nodeSelector":{"kubernetes.io/os":"linux"},"podAnnotations":{},"podDisruptionBudget":{"enabled":false,"maxUnavailable":"","minAvailable":1},"podSecurityContext":{"fsGroup":1000,"fsGroupChangePolicy":"OnRootMismatch","runAsGroup":1000,"runAsUser":1000,"seccompProfile":{"type":"RuntimeDefault"},"supplementalGroups":[1000]},"priorityClassName":"","replicaCount":1,"resources":{"limits":{"memory":"256Mi"},"requests":{"cpu":"50m","memory":"64Mi"}},"securityContext":{"allowPrivilegeEscalation":false,"capabilities":{"drop":["ALL"]},"privileged":false,"readOnlyRootFilesystem":true,"runAsNonRoot":true,"runAsUser":1000},"service":{"name":"kguardian-evaluator","port":8082,"type":"ClusterIP"},"serviceAccount":{"annotations":{},"automountServiceAccountToken":true,"create":true,"name":""},"startupProbe":{},"tolerations":[],"topologySpreadConstraints":[]}` | ----------------------------------------------------------------------- |
+| evaluator | object | `{"affinity":{},"autoscaling":{"enabled":false,"maxReplicas":5,"minReplicas":1,"targetCPUUtilizationPercentage":80},"container":{"port":8082},"enabled":true,"env":[],"image":{"pullPolicy":"IfNotPresent","repository":"ghcr.io/kguardian-dev/kguardian/evaluator","sha":"","tag":"v0.3.4"},"imagePullSecrets":[],"logLevel":"info","metrics":{"serviceMonitor":{"enabled":false,"interval":"30s","labels":{},"path":"/metrics","port":"http","scrapeTimeout":"10s"}},"nodeSelector":{"kubernetes.io/os":"linux"},"podAnnotations":{},"podDisruptionBudget":{"enabled":false,"maxUnavailable":"","minAvailable":1},"podSecurityContext":{"fsGroup":1000,"fsGroupChangePolicy":"OnRootMismatch","runAsGroup":1000,"runAsUser":1000,"seccompProfile":{"type":"RuntimeDefault"},"supplementalGroups":[1000]},"priorityClassName":"","replicaCount":1,"resources":{"limits":{"memory":"256Mi"},"requests":{"cpu":"50m","memory":"64Mi"}},"securityContext":{"allowPrivilegeEscalation":false,"capabilities":{"drop":["ALL"]},"privileged":false,"readOnlyRootFilesystem":true,"runAsNonRoot":true,"runAsUser":1000},"service":{"name":"kguardian-evaluator","port":8082,"type":"ClusterIP"},"serviceAccount":{"annotations":{},"automountServiceAccountToken":true,"create":true,"name":""},"startupProbe":{},"tolerations":[],"topologySpreadConstraints":[]}` | ----------------------------------------------------------------------- |
 | evaluator.affinity | object | `{}` | Affinity rules for evaluator pod assignment |
 | evaluator.autoscaling.enabled | bool | `false` | Enable horizontal pod autoscaling for evaluator |
 | evaluator.autoscaling.maxReplicas | int | `5` | Maximum number of evaluator replicas |
@@ -222,7 +229,7 @@ The following table lists the configurable parameters of the kguardian chart and
 | evaluator.image.pullPolicy | string | `"IfNotPresent"` | Evaluator image pull policy |
 | evaluator.image.repository | string | `"ghcr.io/kguardian-dev/kguardian/evaluator"` | Evaluator container image repository |
 | evaluator.image.sha | string | `""` | Overrides the image tag using SHA digest |
-| evaluator.image.tag | string | `"v0.3.3"` | Evaluator version tag (auto-updated by release-please) |
+| evaluator.image.tag | string | `"v0.3.4"` | Evaluator version tag (auto-updated by release-please) |
 | evaluator.imagePullSecrets | list | `[]` | List of image pull secrets for private registries |
 | evaluator.logLevel | string | `"info"` | Log level for the evaluator process (panic|fatal|error|warn|info|debug|trace) |
 | evaluator.metrics.serviceMonitor.enabled | bool | `false` | Create a ServiceMonitor for prometheus-operator. The evaluator does not currently expose /metrics natively — forward-compatible toggle for when it does. |
@@ -254,7 +261,7 @@ The following table lists the configurable parameters of the kguardian chart and
 | frontend.image.pullPolicy | string | `"IfNotPresent"` | Frontend image pull policy |
 | frontend.image.repository | string | `"ghcr.io/kguardian-dev/kguardian/frontend"` | Frontend container image repository |
 | frontend.image.sha | string | `""` | Overrides the image tag using SHA digest |
-| frontend.image.tag | string | `"1.11.3"` | Frontend version tag (auto-updated by release-please) |
+| frontend.image.tag | string | `"1.11.4"` | Frontend version tag (auto-updated by release-please) |
 | frontend.imagePullSecrets | list | `[]` | List of image pull secrets for private registries |
 | frontend.ingress.annotations | object | `{}` | Ingress annotations |
 | frontend.ingress.className | string | `""` | Ingress class name |
@@ -311,7 +318,7 @@ The following table lists the configurable parameters of the kguardian chart and
 | llmBridge.image.pullPolicy | string | `"IfNotPresent"` | LLM Bridge image pull policy |
 | llmBridge.image.repository | string | `"ghcr.io/kguardian-dev/kguardian/llm-bridge"` | LLM Bridge container image repository |
 | llmBridge.image.sha | string | `""` | Overrides the image tag using SHA digest |
-| llmBridge.image.tag | string | `"1.6.1"` | LLM Bridge version tag (auto-updated by release-please) |
+| llmBridge.image.tag | string | `"1.6.2"` | LLM Bridge version tag (auto-updated by release-please) |
 | llmBridge.imagePullSecrets | list | `[]` | List of image pull secrets for private registries |
 | llmBridge.metrics.serviceMonitor.enabled | bool | `false` | Create a ServiceMonitor for prometheus-operator. llm-bridge does not currently expose /metrics — forward-compatible toggle. |
 | llmBridge.metrics.serviceMonitor.interval | string | `"30s"` |  |

@@ -12,16 +12,17 @@ Use `kguardian` (the package/system) when speaking about the project as a whole.
 
 ### Component nouns
 
-The system has eight named components. When referring to the specific kguardian component, capitalize as proper nouns:
+The system has seven named components. When referring to the specific kguardian component, capitalize as proper nouns:
 
 - **Controller** — the eBPF DaemonSet that captures pod traffic and syscalls.
 - **Broker** — the Rust + Actix-web service that stores observed behavior in PostgreSQL and serves it back over an HTTP API.
 - **UI** — the React + TypeScript frontend that visualises pod-to-pod traffic.
 - **CLI** — the `kubectl kguardian` plugin (the `advisor` source directory) that generates policies from the observed baseline.
 - **Evaluator** — the Go service that checks live flows against `AuditNetworkPolicy` CRDs and reports would-deny verdicts.
-- **MCP Server** — the Go service exposing the Broker's data as MCP tools.
-- **LLM Bridge** — the TypeScript service that streams assistant responses to the UI via the MCP Server.
+- **LLM Bridge** — the TypeScript service that runs the assistant's 12 tools in-process against the Broker, streams responses to the UI over SSE, and serves the optional MCP endpoint at `/mcp` for external MCP clients.
 - **database** — the PostgreSQL instance behind the Broker (lowercase; it is off-the-shelf, not a kguardian binary).
+
+There is no longer a separate MCP Server component. A standalone Go `mcp-server` existed until PR #1197 (2026-07-28) and was retired when its tool registry moved in-process into the LLM Bridge; that same registry is what the LLM Bridge now re-serves over HTTP. Write "the MCP endpoint" (a route on the LLM Bridge), never "the MCP Server". The same applies to `advisor serve` — the advisor's in-cluster HTTP mode was retired in that PR and the `advisor` directory now builds only the CLI.
 
 When the same words appear generically (a controller in another tool, the broker pattern, a ui), keep them lowercase.
 
@@ -69,5 +70,8 @@ When the same content would otherwise appear in multiple places, this is the can
 | Install snippets (Helm, Krew, manual, Kind, custom values) | `docs/installation.mdx` |
 | Quickstart-flow install (one Helm command + link) | `docs/quickstart.mdx` Step 1 |
 | Generated policy examples | `docs/policy-gallery/` |
+| Enabling the AI assistant + provider/gateway values | `docs/installation.mdx` `### AI Assistant` |
+| Connecting an external MCP client to the endpoint | `docs/guides/mcp-endpoint.mdx` |
+| LLM Bridge env vars, routes, and local development | `llm-bridge/README.md` |
 
 If a future change makes one of those locations no longer canonical, update this table in the same PR.
