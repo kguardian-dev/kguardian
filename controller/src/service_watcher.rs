@@ -1,3 +1,4 @@
+use crate::network::canonicalize_ip;
 use crate::{api_post_call, Error, SvcDetail};
 use chrono::Utc;
 use futures::TryStreamExt;
@@ -53,35 +54,74 @@ async fn update_serviceinfo(svc: Service) -> Result<(), Error> {
     let svc_name = svc.name_any();
     let svc_namespace = svc.metadata.namespace.to_owned();
 
-    let Some(svc_ip) = svc.spec.as_ref().and_then(|spec| spec.cluster_ip.as_ref()) else {
-        warn!("Service {} has no cluster IP", svc_name);
-        return Ok(());
-    };
+    let spec = svc.spec.as_ref();
+    let svc_ips = routable_cluster_ips(
+        spec.and_then(|s| s.cluster_ip.as_deref()),
+        spec.and_then(|s| s.cluster_ips.as_deref()),
+    );
 
-    // Skip services that have no usable cluster IP for the broker's
-    // IP-keyed lookup table. Two cases:
-    //   - "None"  → headless service. All headless services would
-    //               otherwise share the same svc_ip="None" row and
-    //               collide on the broker's primary key, with the
-    //               most-recent insert silently winning.
-    //   - ""      → ExternalName / unassigned. Empty PK is rejected
-    //               by Postgres on a NOT NULL column but the row
-    //               would be wasted overhead even if accepted.
-    if !is_routable_cluster_ip(svc_ip) {
+    if svc_ips.is_empty() {
+        warn!("Service {} has no usable cluster IP", svc_name);
         return Ok(());
     }
 
-    let svc_details = SvcDetail {
-        svc_ip: svc_ip.to_owned(),
-        svc_name: svc_name.to_owned(),
-        svc_namespace: svc_namespace.to_owned(),
-        service_spec: Some(json!(svc)),
-        time_stamp: Utc::now().naive_utc(),
-    };
-    if let Err(e) = api_post_call(json!(svc_details), "svc/spec").await {
-        error!("Failed to post Service details: {}", e);
+    // svc_details is keyed on svc_ip, so a dual-stack Service simply
+    // gets one row per address — no schema change needed, and either
+    // address resolves back to the same Service name/namespace.
+    let service_spec = json!(svc);
+    for svc_ip in svc_ips {
+        let svc_details = SvcDetail {
+            svc_ip,
+            svc_name: svc_name.to_owned(),
+            svc_namespace: svc_namespace.to_owned(),
+            service_spec: Some(service_spec.clone()),
+            time_stamp: Utc::now().naive_utc(),
+        };
+        if let Err(e) = api_post_call(json!(svc_details), "svc/spec").await {
+            error!("Failed to post Service details: {}", e);
+        }
     }
     Ok(())
+}
+
+/// Every cluster IP worth storing for a Service, canonicalised and
+/// de-duplicated, primary (`spec.clusterIP`) first.
+///
+/// `spec.clusterIPs` holds both addresses of a dual-stack Service;
+/// reading only `spec.clusterIP` meant the secondary-family address was
+/// never registered, so eBPF flows to it correlated to no Service.
+/// `clusterIPs` is absent on single-stack/older clusters, hence the
+/// `clusterIP` seed.
+///
+/// Filtering is applied per address — same two cases as before:
+///
+/// - `"None"` → headless service. All headless services would otherwise
+///   share the same `svc_ip="None"` row and collide on the broker's
+///   primary key, with the most-recent insert silently winning.
+/// - `""` → ExternalName / unassigned. An empty PK is rejected by
+///   Postgres on a NOT NULL column, and the row would be wasted
+///   overhead even if accepted.
+fn routable_cluster_ips(cluster_ip: Option<&str>, cluster_ips: Option<&[String]>) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let mut push = |raw: &str| {
+        if !is_routable_cluster_ip(raw) {
+            return;
+        }
+        // Canonical spelling so the broker's IP-keyed lookups match
+        // what the eBPF path reports. See network::canonicalize_ip.
+        let ip = canonicalize_ip(raw);
+        if !out.contains(&ip) {
+            out.push(ip);
+        }
+    };
+
+    if let Some(primary) = cluster_ip {
+        push(primary);
+    }
+    for ip in cluster_ips.unwrap_or_default() {
+        push(ip);
+    }
+    out
 }
 
 /// True when the given Service.spec.clusterIP value is a real IP that
@@ -128,6 +168,65 @@ mod tests {
     use super::*;
     use k8s_openapi::api::core::v1::ServiceStatus;
     use k8s_openapi::apimachinery::pkg::apis::meta::v1::Condition;
+
+    fn ips(v: &[&str]) -> Vec<String> {
+        v.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn cluster_ips_single_stack_yields_one_row() {
+        assert_eq!(
+            routable_cluster_ips(Some("10.96.0.1"), Some(&ips(&["10.96.0.1"]))),
+            vec!["10.96.0.1".to_string()]
+        );
+    }
+
+    #[test]
+    fn cluster_ips_dual_stack_yields_a_row_per_family() {
+        // The regression this guards: reading only spec.clusterIP
+        // dropped the IPv6 address, so IPv6 flows to this Service
+        // correlated to nothing.
+        assert_eq!(
+            routable_cluster_ips(
+                Some("10.96.0.1"),
+                Some(&ips(&["10.96.0.1", "fd00:10:96::1"]))
+            ),
+            vec!["10.96.0.1".to_string(), "fd00:10:96::1".to_string()]
+        );
+    }
+
+    #[test]
+    fn cluster_ips_falls_back_to_singular_when_list_absent() {
+        assert_eq!(
+            routable_cluster_ips(Some("10.96.0.1"), None),
+            vec!["10.96.0.1".to_string()]
+        );
+    }
+
+    #[test]
+    fn cluster_ips_filters_headless_and_empty_per_entry() {
+        assert!(routable_cluster_ips(Some("None"), Some(&ips(&["None"]))).is_empty());
+        assert!(routable_cluster_ips(Some(""), None).is_empty());
+        assert!(routable_cluster_ips(None, None).is_empty());
+        // A junk entry alongside a real one must not take the real one down.
+        assert_eq!(
+            routable_cluster_ips(Some("10.96.0.1"), Some(&ips(&["None", "fd00::1"]))),
+            vec!["10.96.0.1".to_string(), "fd00::1".to_string()]
+        );
+    }
+
+    #[test]
+    fn cluster_ips_canonicalises_and_dedupes() {
+        // Same address spelled two ways must produce ONE row, or the
+        // broker ends up with duplicate keys for one Service.
+        assert_eq!(
+            routable_cluster_ips(
+                Some("FD00:0:0:0:0:0:0:1"),
+                Some(&ips(&["fd00::1", "fd00:0::0:1"]))
+            ),
+            vec!["fd00::1".to_string()]
+        );
+    }
 
     fn svc(status: Option<ServiceStatus>) -> Service {
         Service {

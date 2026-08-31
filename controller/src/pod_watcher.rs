@@ -1,9 +1,10 @@
+use crate::network::canonicalize_ip;
 use crate::{api_post_call, Error, PodDetail, PodInfo, PodInspect};
 use chrono::Utc;
 use dashmap::DashMap;
 use futures::TryStreamExt;
 use k8s_openapi::api::apps::v1::{DaemonSet, Deployment, ReplicaSet, StatefulSet};
-use k8s_openapi::api::core::v1::Pod;
+use k8s_openapi::api::core::v1::{Pod, PodIP};
 use kube::{
     api::ListParams,
     runtime::{reflector::Lookup, watcher, WatchStreamExt},
@@ -258,6 +259,25 @@ fn pod_unready(p: &Pod) -> Option<Vec<String>> {
     None
 }
 
+/// Build the full set of addresses for a pod, canonicalised and
+/// de-duplicated, with `primary` (from `status.podIP`) guaranteed first.
+///
+/// `status.podIPs` is authoritative for dual-stack and, per the API
+/// contract, its first entry equals `status.podIP` — but that is only a
+/// contract, and the list is absent entirely on older/simpler clusters.
+/// Seeding from `primary` means a missing or reordered `podIPs` can
+/// never lose the address the rest of the controller keys on.
+fn collect_pod_ips(pod_ips: Option<&[PodIP]>, primary: &str) -> Vec<String> {
+    let mut out = vec![primary.to_string()];
+    for entry in pod_ips.unwrap_or_default() {
+        let ip = canonicalize_ip(&entry.ip);
+        if !ip.is_empty() && !out.contains(&ip) {
+            out.push(ip);
+        }
+    }
+    out
+}
+
 async fn update_pods_details(
     pod: &Pod,
     node_name: &str,
@@ -271,6 +291,21 @@ async fn update_pods_details(
     };
     let mut pod_ip_address: Option<String> = None;
     if let Some(pod_ip) = pod_status.pod_ip.as_ref() {
+        // Canonicalise: everything downstream (the broker's IP-keyed
+        // lookups, the TrafficKey cache, the eBPF address comparison in
+        // network.rs) matches these as strings, so the controller must
+        // emit exactly one spelling per address. See
+        // network::canonicalize_ip.
+        let pod_ip = canonicalize_ip(pod_ip);
+
+        // A dual-stack pod has both an IPv4 and an IPv6 address, but
+        // `status.podIP` reports only the first (the cluster's primary
+        // family). Reading it alone meant the secondary-family address
+        // was never registered, so eBPF flows to or from it correlated
+        // to no pod at all. `status.podIPs` carries the full set; post
+        // all of them and keep podIP as the primary for compatibility.
+        let pod_ips = collect_pod_ips(pod_status.pod_ips.as_deref(), &pod_ip);
+
         // Extract pod identity and workload selector labels
         let (pod_identity, workload_selector_labels) =
             extract_pod_identity_and_selectors(pod, client).await;
@@ -287,6 +322,7 @@ async fn update_pods_details(
 
         let z = PodDetail {
             pod_ip: pod_ip.to_string(),
+            pod_ips,
             pod_name: pod_name.clone(),
             pod_namespace,
             pod_obj: Some(json!(pod)),
@@ -653,6 +689,62 @@ async fn get_deployment_name_and_selector_from_replicaset(
 mod tests {
     use super::*;
     use k8s_openapi::apimachinery::pkg::apis::meta::v1::OwnerReference;
+
+    fn pod_ip(ip: &str) -> PodIP {
+        PodIP { ip: ip.to_string() }
+    }
+
+    #[test]
+    fn collect_pod_ips_single_stack() {
+        assert_eq!(
+            collect_pod_ips(Some(&[pod_ip("10.244.1.5")]), "10.244.1.5"),
+            vec!["10.244.1.5".to_string()]
+        );
+    }
+
+    #[test]
+    fn collect_pod_ips_dual_stack_keeps_both_primary_first() {
+        // The regression this guards: reading only status.podIP dropped
+        // the IPv6 address, so eBPF flows on it matched no pod and their
+        // generated rules degraded to ipBlocks.
+        assert_eq!(
+            collect_pod_ips(
+                Some(&[pod_ip("10.244.1.5"), pod_ip("fd00:10:244::5")]),
+                "10.244.1.5"
+            ),
+            vec!["10.244.1.5".to_string(), "fd00:10:244::5".to_string()]
+        );
+    }
+
+    #[test]
+    fn collect_pod_ips_falls_back_when_pod_ips_absent() {
+        assert_eq!(
+            collect_pod_ips(None, "10.244.1.5"),
+            vec!["10.244.1.5".to_string()]
+        );
+    }
+
+    #[test]
+    fn collect_pod_ips_never_loses_the_primary() {
+        // podIPs[0] is contractually podIP, but the contract is not the
+        // implementation. Even a list that omits or reorders it must
+        // leave the address the rest of the controller keys on first.
+        assert_eq!(
+            collect_pod_ips(Some(&[pod_ip("fd00::5")]), "10.244.1.5"),
+            vec!["10.244.1.5".to_string(), "fd00::5".to_string()]
+        );
+    }
+
+    #[test]
+    fn collect_pod_ips_canonicalises_and_dedupes() {
+        assert_eq!(
+            collect_pod_ips(
+                Some(&[pod_ip("FD00:0:0:0:0:0:0:5"), pod_ip("fd00::5")]),
+                "fd00::5"
+            ),
+            vec!["fd00::5".to_string()]
+        );
+    }
 
     // should_process_pod is the namespace-exclusion gate the watcher
     // uses to ignore (for example) the kguardian and kube-system

@@ -1,13 +1,13 @@
 use crate::network::netpolicy_drop::NetpolicyDropSkelBuilder;
 use crate::network::network_probe::NetworkProbeSkelBuilder;
-use crate::network::PolicyDropEvent;
+use crate::network::{ip_to_wire_addr, PolicyDropEvent};
 use crate::syscall::{sycallprobe::SyscallSkelBuilder, SyscallEventData};
 use crate::{error::Error, network::NetworkEventData};
 use anyhow::Result;
 use libbpf_rs::skel::{OpenSkel, Skel, SkelBuilder};
 use libbpf_rs::{MapCore, MapFlags, RingBufferBuilder};
 use std::mem::MaybeUninit;
-use std::net::Ipv4Addr;
+use std::net::IpAddr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::sync::mpsc::{Receiver, Sender};
 use tokio::{task, task::JoinHandle};
@@ -383,15 +383,25 @@ pub fn ebpf_handle(
             }
             if ignore_daemonset_traffic {
                 if let Ok(ip) = ignore_ips.try_recv() {
-                    if let Ok(parsed_ip) = ip.parse::<Ipv4Addr>() {
-                        let ip_u32 = u32::from(parsed_ip).to_be(); // Ensure the IP is in network byte order
-                        let _ = network_sk
-                            .maps
-                            .ignore_ips
-                            .update(&ip_u32.to_ne_bytes(), &1_u32.to_ne_bytes(), MapFlags::ANY)
-                            .map_err(|e| eprintln!("Failed to update ignore_ips map: {}", e));
-                    } else {
-                        eprintln!("Failed to parse IP address: {}", ip);
+                    // Parsed as IpAddr, not Ipv4Addr: a dual-stack
+                    // daemonset pod reports IPv6 addresses too, and the
+                    // v4-only parse silently dropped them — the ignore
+                    // list then only half-worked on such nodes.
+                    //
+                    // The key is the same 16-byte v4-mapped form the
+                    // eBPF probes compare against (see read_sock_addrs
+                    // in src/bpf/helper.h); ip_to_wire_addr is the one
+                    // place that spelling is produced.
+                    match ip.parse::<IpAddr>() {
+                        Ok(parsed_ip) => {
+                            let key = ip_to_wire_addr(parsed_ip);
+                            let _ = network_sk
+                                .maps
+                                .ignore_ips
+                                .update(&key, &1_u32.to_ne_bytes(), MapFlags::ANY)
+                                .map_err(|e| eprintln!("Failed to update ignore_ips map: {}", e));
+                        }
+                        Err(_) => eprintln!("Failed to parse IP address: {}", ip),
                     }
                 }
             }
