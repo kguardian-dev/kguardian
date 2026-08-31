@@ -1,6 +1,6 @@
+use crate::models::{lookup_pod, ContainerMap};
 use crate::{api_post_call, Error, PodInspect, PodTraffic};
 use chrono::Utc;
-use dashmap::DashMap;
 use moka::future::Cache;
 use serde_json::json;
 use std::net::{IpAddr, Ipv4Addr};
@@ -79,7 +79,7 @@ pub struct PolicyDropEvent {
 
 pub async fn handle_network_events(
     mut event_receiver: tokio::sync::mpsc::Receiver<NetworkEventData>,
-    container_map: Arc<DashMap<u64, PodInspect>>,
+    container_map: ContainerMap,
 ) -> Result<(), Error> {
     // Batching configuration
     const BATCH_SIZE: usize = 100;
@@ -94,8 +94,12 @@ pub async fn handle_network_events(
 
         match event {
             Ok(Some(event)) => {
-                // DashMap provides lock-free reads - no need for explicit locking!
-                if let Some(pod_inspect) = container_map.get(&event.inum) {
+                // Resolve the pod BEFORE awaiting. Written inline as
+                // `if let Some(p) = container_map.get(..) { ...await }` this
+                // held the shard's read guard across build_traffic_event's
+                // await, which deadlocked the whole controller against the
+                // pod watcher's insert. See ContainerMap in models.rs.
+                if let Some(pod_inspect) = lookup_pod(&container_map, event.inum) {
                     if let Some(traffic) = build_traffic_event(&event, &pod_inspect).await {
                         batch.push(traffic);
                     }
@@ -298,7 +302,7 @@ fn proto_to_string(proto: u8) -> String {
 
 pub async fn handle_policy_drop_events(
     mut event_receiver: tokio::sync::mpsc::Receiver<PolicyDropEvent>,
-    container_map: Arc<DashMap<u64, PodInspect>>,
+    container_map: ContainerMap,
 ) -> Result<(), Error> {
     // Batching configuration
     const BATCH_SIZE: usize = 100;
@@ -315,7 +319,8 @@ pub async fn handle_policy_drop_events(
 
         match event {
             Ok(Some(event)) => {
-                if let Some(pod_inspect) = container_map.get(&event.inum) {
+                // Same guard-across-await hazard as handle_network_events.
+                if let Some(pod_inspect) = lookup_pod(&container_map, event.inum) {
                     if let Some(drop_event) = build_policy_drop_event(&event, &pod_inspect).await {
                         batch.push(drop_event);
                     }
