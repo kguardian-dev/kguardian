@@ -1,9 +1,11 @@
 import React, { useState, useRef, useEffect, useCallback } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
-import { X, Send, Sparkles, Bot, User, Minimize2, Maximize2, ChevronRight, ChevronLeft, Copy, Check } from 'lucide-react';
+import { X, Send, ArrowRight, Minimize2, Maximize2, ChevronRight, ChevronLeft, Copy, Check } from 'lucide-react';
 import { streamChatMessage, type HistoryMessage } from '../services/aiApi';
 import { UI_DIMENSIONS } from '../constants/ui';
+import { Button } from './ui/Button';
+import { Modal } from './ui/Modal';
 
 interface Message {
   id: string;
@@ -94,33 +96,17 @@ const ChatHeader: React.FC<{
   /** Layout-toggle buttons rendered between Clear and Close. */
   children: React.ReactNode;
 }> = ({ showClear, onClear, onClose, children }) => (
-  <div className="flex items-center justify-between px-6 py-4 border-b border-hubble-border">
-    <div className="flex items-center gap-3">
-      <div className="flex items-center justify-center w-10 h-10 rounded-lg bg-hubble-accent/20">
-        <Sparkles className="w-5 h-5 text-hubble-accent" />
-      </div>
-      <div>
-        <h2 className="text-lg font-semibold text-primary">AI Assistant</h2>
-        <p className="text-xs text-tertiary">Ask questions about your cluster</p>
-      </div>
+  <div className="flex items-center justify-between h-14 px-5 border-b border-hubble-border shrink-0">
+    <div className="min-w-0">
+      <h2 className="text-sm font-semibold text-primary">AI Assistant</h2>
+      <p className="text-xs text-tertiary truncate">Grounded in live cluster telemetry</p>
     </div>
-    <div className="flex items-center gap-2">
+    <div className="flex items-center gap-1">
       {showClear && (
-        <button
-          onClick={onClear}
-          className="px-3 py-1.5 text-xs text-tertiary hover:text-secondary transition-colors"
-        >
-          Clear
-        </button>
+        <Button variant="ghost" size="sm" onClick={onClear}>Clear</Button>
       )}
       {children}
-      <button
-        onClick={onClose}
-        className="p-2 text-tertiary hover:text-primary hover:bg-hubble-dark rounded-lg transition-colors"
-        aria-label="Close AI Assistant"
-      >
-        <X className="w-5 h-5" />
-      </button>
+      <Button variant="ghost" size="sm" iconOnly leftIcon={X} onClick={onClose} aria-label="Close AI Assistant" />
     </div>
   </div>
 );
@@ -133,27 +119,24 @@ const ChatMessages: React.FC<{
   /** The side panel constrains the example-prompt list; the modal doesn't. */
   examplesClassName: string;
 }> = ({ messages, isTyping, onPromptClick, messagesEndRef, examplesClassName }) => (
-  <div className="flex-1 overflow-y-auto p-6 space-y-4">
+  <div className="flex-1 overflow-y-auto px-5 py-5 space-y-6">
     {messages.length === 0 ? (
-      <div className="flex flex-col items-center justify-center h-full text-center">
-        <div className="flex items-center justify-center w-16 h-16 rounded-full bg-hubble-accent/10 mb-4">
-          <Sparkles className="w-8 h-8 text-hubble-accent" />
-        </div>
-        <h3 className="text-lg font-semibold text-primary mb-2">
-          Welcome to AI Assistant
-        </h3>
-        <p className="text-sm text-tertiary max-w-md">
-          Ask me anything about your Kubernetes cluster, network traffic, security events, or system calls.
+      <div className={`h-full flex flex-col justify-center ${examplesClassName}`}>
+        <h3 className="text-sm font-semibold text-primary">Ask about your cluster</h3>
+        <p className="mt-1.5 text-sm text-secondary leading-relaxed">
+          Query live traffic, syscalls, and audit verdicts, or generate a NetworkPolicy or seccomp
+          profile — every answer is grounded in what kguardian actually observed.
         </p>
-        <div className={examplesClassName}>
-          <p className="text-xs text-tertiary font-medium">Example prompts:</p>
+        <div className="mt-5">
+          <p className="mb-1 px-1 text-[10px] font-semibold uppercase tracking-[0.12em] text-tertiary">Try asking</p>
           {EXAMPLE_PROMPTS.map((prompt) => (
             <button
               key={prompt}
               onClick={() => onPromptClick(prompt)}
-              className="block w-full text-left px-4 py-2 text-sm text-secondary bg-hubble-dark hover:bg-hubble-darker rounded-lg transition-colors"
+              className="group w-full flex items-center gap-2.5 text-left px-3 h-9 rounded-control text-sm text-secondary hover:bg-hubble-hover hover:text-primary transition-colors"
             >
-              "{prompt}"
+              <ArrowRight size={14} className="shrink-0 text-tertiary group-hover:text-hubble-accent transition-colors" />
+              <span className="truncate">{prompt}</span>
             </button>
           ))}
         </div>
@@ -161,65 +144,36 @@ const ChatMessages: React.FC<{
     ) : (
       <>
         {messages.map((message) => (
-          <div
-            key={message.id}
-            className={`flex gap-3 ${message.role === 'user' ? 'justify-end' : 'justify-start'}`}
-          >
-            {message.role === 'assistant' && (
-              <div className="flex-shrink-0 w-8 h-8 rounded-lg bg-hubble-accent/20 flex items-center justify-center">
-                <Bot className="w-5 h-5 text-hubble-accent" />
-              </div>
-            )}
-            <div
-              className={`max-w-[70%] rounded-lg px-4 py-3 ${
-                message.role === 'user'
-                  ? 'bg-hubble-accent text-white'
-                  : 'bg-hubble-dark text-primary'
-              }`}
-            >
-              {message.role === 'assistant' ? (
-                <div className="text-sm prose prose-sm dark:prose-invert max-w-none prose-p:my-1 prose-headings:my-2 prose-ul:my-1 prose-ol:my-1 prose-li:my-0.5 prose-pre:my-2 prose-table:my-2 prose-th:px-2 prose-th:py-1 prose-td:px-2 prose-td:py-1 prose-code:text-hubble-accent prose-a:text-hubble-accent">
-                  <ReactMarkdown remarkPlugins={[remarkGfm]} components={{ pre: CodeBlock }}>{message.content}</ReactMarkdown>
-                </div>
-              ) : (
-                <p className="text-sm whitespace-pre-wrap">{message.content}</p>
-              )}
-              {message.role === 'assistant' && message.activity && (
-                <div className="flex items-center gap-2 mt-1 text-xs text-tertiary italic">
-                  <span className="flex gap-1">
-                    <span className="w-1.5 h-1.5 bg-hubble-accent rounded-full animate-bounce" style={{ animationDelay: '0ms' }} />
-                    <span className="w-1.5 h-1.5 bg-hubble-accent rounded-full animate-bounce" style={{ animationDelay: '150ms' }} />
-                    <span className="w-1.5 h-1.5 bg-hubble-accent rounded-full animate-bounce" style={{ animationDelay: '300ms' }} />
-                  </span>
-                  <span>{message.activity}</span>
-                </div>
-              )}
-              <p
-                className={`text-xs mt-1 ${
-                  message.role === 'user' ? 'text-blue-100' : 'text-tertiary'
-                }`}
-              >
-                {message.timestamp.toLocaleTimeString()}
-              </p>
+          <div key={message.id} className="space-y-1.5">
+            <div className="text-[10px] font-semibold uppercase tracking-[0.12em] text-tertiary">
+              {message.role === 'user' ? 'You' : 'Assistant'}
             </div>
-            {message.role === 'user' && (
-              <div className="flex-shrink-0 w-8 h-8 rounded-lg bg-hubble-success/20 flex items-center justify-center">
-                <User className="w-5 h-5 text-hubble-success" />
+            {message.role === 'assistant' ? (
+              <div className="text-sm text-primary prose prose-sm dark:prose-invert max-w-none prose-p:my-1.5 prose-headings:mt-3 prose-headings:mb-1.5 prose-ul:my-1.5 prose-ol:my-1.5 prose-li:my-0.5 prose-pre:my-2 prose-pre:bg-hubble-darker prose-pre:border prose-pre:border-hubble-border prose-table:my-2 prose-th:px-2 prose-th:py-1 prose-td:px-2 prose-td:py-1 prose-code:text-hubble-accent prose-a:text-hubble-accent">
+                <ReactMarkdown remarkPlugins={[remarkGfm]} components={{ pre: CodeBlock }}>{message.content}</ReactMarkdown>
+              </div>
+            ) : (
+              <p className="text-sm text-primary whitespace-pre-wrap">{message.content}</p>
+            )}
+            {message.role === 'assistant' && message.activity && (
+              <div className="flex items-center gap-2 pt-0.5 text-xs text-tertiary">
+                <span className="flex gap-1">
+                  <span className="w-1.5 h-1.5 bg-hubble-accent rounded-full animate-bounce" style={{ animationDelay: '0ms' }} />
+                  <span className="w-1.5 h-1.5 bg-hubble-accent rounded-full animate-bounce" style={{ animationDelay: '150ms' }} />
+                  <span className="w-1.5 h-1.5 bg-hubble-accent rounded-full animate-bounce" style={{ animationDelay: '300ms' }} />
+                </span>
+                <span>{message.activity}</span>
               </div>
             )}
           </div>
         ))}
         {isTyping && !messages.some(m => m.streaming) && (
-          <div className="flex gap-3 justify-start">
-            <div className="flex-shrink-0 w-8 h-8 rounded-lg bg-hubble-accent/20 flex items-center justify-center">
-              <Bot className="w-5 h-5 text-hubble-accent" />
-            </div>
-            <div className="bg-hubble-dark rounded-lg px-4 py-3">
-              <div className="flex gap-1">
-                <div className="w-2 h-2 bg-tertiary rounded-full animate-bounce" style={{ animationDelay: '0ms' }} />
-                <div className="w-2 h-2 bg-tertiary rounded-full animate-bounce" style={{ animationDelay: '150ms' }} />
-                <div className="w-2 h-2 bg-tertiary rounded-full animate-bounce" style={{ animationDelay: '300ms' }} />
-              </div>
+          <div className="space-y-1.5">
+            <div className="text-[10px] font-semibold uppercase tracking-[0.12em] text-tertiary">Assistant</div>
+            <div className="flex gap-1 py-1">
+              <span className="w-1.5 h-1.5 bg-tertiary rounded-full animate-bounce" style={{ animationDelay: '0ms' }} />
+              <span className="w-1.5 h-1.5 bg-tertiary rounded-full animate-bounce" style={{ animationDelay: '150ms' }} />
+              <span className="w-1.5 h-1.5 bg-tertiary rounded-full animate-bounce" style={{ animationDelay: '300ms' }} />
             </div>
           </div>
         )}
@@ -237,32 +191,24 @@ const ChatInput: React.FC<{
   onSend: () => void;
   isTyping: boolean;
 }> = ({ inputRef, inputValue, onInputChange, onKeyDown, onSend, isTyping }) => (
-  <div className="border-t border-hubble-border p-4">
-    <div className="flex gap-3">
+  <div className="border-t border-hubble-border p-3 shrink-0">
+    <div className="flex items-end gap-2">
       <textarea
         ref={inputRef}
         value={inputValue}
         onChange={(e) => onInputChange(e.target.value)}
         onKeyDown={onKeyDown}
-        placeholder="Ask a question... (Shift+Enter for new line)"
-        className="flex-1 bg-hubble-dark text-primary placeholder-tertiary px-4 py-3 rounded-lg border border-hubble-border
-                   focus:outline-none focus:ring-2 focus:ring-hubble-accent focus:border-transparent
-                   resize-none min-h-[60px] max-h-[120px]"
+        placeholder="Ask about traffic, syscalls, or policies…"
+        className="flex-1 bg-hubble-darker text-primary placeholder-tertiary text-sm px-3 py-2.5 rounded-control border border-hubble-border
+                   focus:outline-none focus:border-hubble-accent resize-none min-h-[60px] max-h-[140px]"
         rows={2}
       />
-      <button
-        onClick={onSend}
-        disabled={!inputValue.trim() || isTyping}
-        className="px-6 py-3 bg-hubble-accent text-white rounded-lg hover:bg-blue-600
-                   transition-colors disabled:opacity-50 disabled:cursor-not-allowed
-                   flex items-center gap-2"
-      >
-        <Send className="w-4 h-4" />
+      <Button variant="primary" leftIcon={Send} onClick={onSend} disabled={!inputValue.trim() || isTyping} aria-label="Send message">
         <span className="hidden sm:inline">Send</span>
-      </button>
+      </Button>
     </div>
-    <p className="text-xs text-tertiary mt-2">
-      AI Assistant uses your configured LLM provider (OpenAI, Anthropic, Gemini, or GitHub Copilot). Configure API keys in Helm values.
+    <p className="mt-2 text-[11px] text-tertiary">
+      Enter to send · Shift+Enter for a new line
     </p>
   </div>
 );
@@ -509,34 +455,19 @@ const AIAssistant: React.FC<AIAssistantProps> = ({ isOpen, onClose, onLayoutChan
   // Modal view (centered, with backdrop)
   if (viewMode === 'modal') {
     return (
-      <>
-        {/* Backdrop */}
-        <div
-          className="fixed inset-0 bg-black/50 backdrop-blur-sm z-40 transition-opacity"
-          onClick={onClose}
-        />
-
-        {/* Modal */}
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 pointer-events-none">
-          <div
-            className="bg-hubble-card border border-hubble-border rounded-lg shadow-2xl w-full max-w-3xl h-[600px] flex flex-col pointer-events-auto"
-            onClick={(e) => e.stopPropagation()}
-          >
-            <ChatHeader showClear={messages.length > 0} onClear={handleClearChat} onClose={onClose}>
-              <button
-                onClick={toggleViewMode}
-                className="p-2 text-tertiary hover:text-primary hover:bg-hubble-dark rounded-lg transition-colors"
-                aria-label="Dock to side"
-                title="Dock to side"
-              >
-                <Minimize2 className="w-5 h-5" />
-              </button>
-            </ChatHeader>
-            {chatMessages('mt-6 space-y-2 text-left')}
-            {chatInput}
-          </div>
-        </div>
-      </>
+      <Modal
+        isOpen
+        onClose={onClose}
+        hideHeader
+        className="w-full max-w-3xl h-[600px]"
+        contentClassName="flex-1 min-h-0 flex flex-col"
+      >
+        <ChatHeader showClear={messages.length > 0} onClear={handleClearChat} onClose={onClose}>
+          <Button variant="ghost" size="sm" iconOnly leftIcon={Minimize2} onClick={toggleViewMode} aria-label="Dock to side" title="Dock to side" />
+        </ChatHeader>
+        {chatMessages('max-w-md mx-auto w-full')}
+        {chatInput}
+      </Modal>
     );
   }
 
@@ -545,14 +476,7 @@ const AIAssistant: React.FC<AIAssistantProps> = ({ isOpen, onClose, onLayoutChan
   if (isCollapsed) {
     return (
       <div className="fixed top-0 right-0 bottom-0 z-50 w-12 flex flex-col bg-hubble-card border-l border-hubble-border shadow-2xl items-center justify-center">
-        <button
-          onClick={toggleCollapse}
-          className="p-3 text-tertiary hover:text-primary hover:bg-hubble-dark rounded-lg transition-colors"
-          aria-label="Expand AI Assistant"
-          title="Expand AI Assistant"
-        >
-          <ChevronLeft className="w-5 h-5" />
-        </button>
+        <Button variant="ghost" iconOnly leftIcon={ChevronLeft} onClick={toggleCollapse} aria-label="Expand AI Assistant" title="Expand AI Assistant" />
         <div className="flex-1 flex items-center justify-center">
           <div className="transform -rotate-90 whitespace-nowrap text-sm text-tertiary font-medium">
             AI Assistant
@@ -590,24 +514,10 @@ const AIAssistant: React.FC<AIAssistantProps> = ({ isOpen, onClose, onLayoutChan
       </div>
 
       <ChatHeader showClear={messages.length > 0} onClear={handleClearChat} onClose={onClose}>
-        <button
-          onClick={toggleCollapse}
-          className="p-2 text-tertiary hover:text-primary hover:bg-hubble-dark rounded-lg transition-colors"
-          aria-label="Collapse panel"
-          title="Collapse panel"
-        >
-          <ChevronRight className="w-5 h-5" />
-        </button>
-        <button
-          onClick={toggleViewMode}
-          className="p-2 text-tertiary hover:text-primary hover:bg-hubble-dark rounded-lg transition-colors"
-          aria-label="Expand to center"
-          title="Expand to center"
-        >
-          <Maximize2 className="w-5 h-5" />
-        </button>
+        <Button variant="ghost" size="sm" iconOnly leftIcon={ChevronRight} onClick={toggleCollapse} aria-label="Collapse panel" title="Collapse panel" />
+        <Button variant="ghost" size="sm" iconOnly leftIcon={Maximize2} onClick={toggleViewMode} aria-label="Expand to center" title="Expand to center" />
       </ChatHeader>
-      {chatMessages('mt-6 space-y-2 text-left w-full max-w-sm')}
+      {chatMessages('max-w-sm w-full')}
       {chatInput}
     </div>
   );

@@ -2,6 +2,9 @@ import React, { useEffect, useMemo, useState, useCallback } from 'react';
 import { X, RefreshCw, AlertTriangle, CheckCircle2, Filter } from 'lucide-react';
 import type { AuditVerdict, AuditVerdictKind } from '../types';
 import api from '../services/api';
+import { Modal } from './ui/Modal';
+import { EmptyState } from './ui/EmptyState';
+import { Button } from './ui/Button';
 
 interface Props {
   isOpen: boolean;
@@ -94,30 +97,34 @@ const AuditVerdictsPanel: React.FC<Props> = ({ isOpen, onClose }) => {
   }, [verdicts]);
 
   const visible = useMemo(() => {
-    return verdicts.filter(v => {
-      if (verdictTab !== 'All' && v.verdict !== verdictTab) return false;
-      if (policyFilter) {
-        const key = v.policy_namespace ? `${v.policy_namespace}/${v.policy_name}` : v.policy_name;
-        if (key !== policyFilter) return false;
-      }
-      return true;
-    });
+    return verdicts
+      .filter(v => {
+        if (verdictTab !== 'All' && v.verdict !== verdictTab) return false;
+        if (policyFilter) {
+          const key = v.policy_namespace ? `${v.policy_namespace}/${v.policy_name}` : v.policy_name;
+          if (key !== policyFilter) return false;
+        }
+        return true;
+      })
+      // Hoist would-deny verdicts: they are the actionable rows (a flow your
+      // policy would block), so they lead; newest first within each group.
+      .sort((a, b) => {
+        const aDeny = a.verdict === 'WouldDeny' ? 0 : 1;
+        const bDeny = b.verdict === 'WouldDeny' ? 0 : 1;
+        if (aDeny !== bDeny) return aDeny - bDeny;
+        return new Date(b.observed_at).getTime() - new Date(a.observed_at).getTime();
+      });
   }, [verdicts, verdictTab, policyFilter]);
 
-  if (!isOpen) return null;
-
   return (
-    <div
-      className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4"
-      role="dialog"
-      aria-modal="true"
-      aria-labelledby="audit-verdicts-title"
-      onClick={onClose}
+    <Modal
+      isOpen={isOpen}
+      onClose={onClose}
+      hideHeader
+      size="full"
+      contentClassName="flex-1 min-h-0 flex flex-col"
     >
-      <div
-        className="bg-hubble-darker border border-hubble-border rounded-lg w-full max-w-6xl max-h-[90vh] flex flex-col"
-        onClick={e => e.stopPropagation()}
-      >
+      <>
         {/* Header */}
         <header className="flex items-center justify-between px-6 py-4 border-b border-hubble-border">
           <div className="flex items-center gap-3">
@@ -251,21 +258,22 @@ const AuditVerdictsPanel: React.FC<Props> = ({ isOpen, onClose }) => {
               </div>
             )}
             {!error && !loading && visible.length === 0 && (
-              <div className="m-8 text-center text-tertiary">
-                No {verdictTab === 'All' ? '' : verdictTab.toLowerCase()} verdicts in the rolling window.
-                {policyFilter && (
-                  <>
-                    {' '}
-                    <button
-                      onClick={() => setPolicyFilter('')}
-                      className="text-hubble-accent underline"
-                    >
+              <EmptyState
+                icon={CheckCircle2}
+                title={`No ${verdictTab === 'All' ? '' : verdictTab.toLowerCase() + ' '}verdicts in the rolling window`}
+                description={
+                  policyFilter
+                    ? 'Nothing matched the current policy filter.'
+                    : 'The evaluator has not recorded any audited flows for this window yet.'
+                }
+                action={
+                  policyFilter ? (
+                    <Button variant="secondary" size="sm" onClick={() => setPolicyFilter('')}>
                       Clear filter
-                    </button>
-                    .
-                  </>
-                )}
-              </div>
+                    </Button>
+                  ) : undefined
+                }
+              />
             )}
             {visible.length > 0 && (
               <table className="w-full text-sm">
@@ -287,11 +295,16 @@ const AuditVerdictsPanel: React.FC<Props> = ({ isOpen, onClose }) => {
                       ? `${v.policy_namespace}/${v.policy_name}`
                       : v.policy_name;
                     return (
-                      <tr key={v.id} className="border-b border-hubble-border/60 hover:bg-hubble-card/40">
+                      <tr
+                        key={v.id}
+                        className={`border-b border-hubble-border/60 hover:bg-hubble-card/40 ${
+                          v.verdict === 'WouldDeny' ? 'bg-hubble-warning/[0.06]' : ''
+                        }`}
+                      >
                         <td className="px-4 py-2">
                           <VerdictBadge verdict={v.verdict as AuditVerdictKind} />
                         </td>
-                        <td className="px-4 py-2 text-tertiary whitespace-nowrap">
+                        <td className="px-4 py-2 text-tertiary whitespace-nowrap font-mono tabular-nums">
                           {formatTimestamp(v.observed_at)}
                         </td>
                         <td className="px-4 py-2 font-mono text-xs">
@@ -323,8 +336,8 @@ const AuditVerdictsPanel: React.FC<Props> = ({ isOpen, onClose }) => {
           {' '}<span className="text-hubble-accent">{counts.allow} allow</span>.
           Backed by <code className="font-mono">audit_verdicts</code>; rotated by the broker's retention loop.
         </footer>
-      </div>
-    </div>
+      </>
+    </Modal>
   );
 };
 

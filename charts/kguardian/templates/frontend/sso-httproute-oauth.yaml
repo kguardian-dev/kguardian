@@ -1,0 +1,28 @@
+{{- if .Values.frontend.sso.enabled -}}
+# Sends /oauth2/* on the app host to oauth2-proxy so the OIDC callback, sign-in,
+# and /oauth2/userinfo are served same-origin. Longest-path-prefix precedence
+# keeps /oauth2/* here; everything else falls through to the protected route.
+# This route is intentionally NOT covered by the SecurityPolicy — it is the auth
+# flow itself.
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: {{ include "kguardian.name" . }}-frontend-oauth
+  labels:
+    {{- include "kguardian.labels" . | nindent 4 }}
+spec:
+  parentRefs:
+    {{- required "frontend.sso.parentRefs is required when frontend.sso.enabled=true" .Values.frontend.sso.parentRefs | toYaml | nindent 4 }}
+  hostnames:
+    {{- required "frontend.sso.hostnames is required when frontend.sso.enabled=true" .Values.frontend.sso.hostnames | toYaml | nindent 4 }}
+  rules:
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /oauth2/
+      backendRefs:
+        - name: {{ .Values.frontend.sso.oauth2Proxy.name }}
+          namespace: {{ .Values.frontend.sso.oauth2Proxy.namespace }}
+          port: {{ .Values.frontend.sso.oauth2Proxy.port }}
+          weight: 100
+{{- end }}

@@ -1,8 +1,6 @@
 import React, { useCallback, useMemo, useEffect, useState } from 'react';
 import ReactFlow, {
   Controls,
-  Background,
-  BackgroundVariant,
   useNodesState,
   useEdgesState,
   MarkerType,
@@ -13,7 +11,7 @@ import ReactFlow, {
 import type { Node, Edge } from 'reactflow';
 import 'reactflow/dist/style.css';
 import ELK from 'elkjs/lib/elk.bundled.js';
-import { Eye, EyeOff, Activity, ShieldAlert, Server } from 'lucide-react';
+import { Eye, EyeOff, Activity, ShieldAlert, Server, Crosshair, X, ArrowRight, ArrowDown } from 'lucide-react';
 import PodNode from './PodNode';
 import type { PodNodeData, PodInfo, ServiceInfo, NetworkTraffic } from '../types';
 import { UI_TIMING } from '../constants/ui';
@@ -64,6 +62,13 @@ const NetworkGraphInner: React.FC<NetworkGraphProps> = ({
   onBuildPolicy,
 }) => {
   const { fitView } = useReactFlow();
+
+  // Focus mode: isolate a node + its direct upstream/downstream, hide the rest,
+  // and re-lay-out the subset. Toggling the same node (or Esc / the pill) exits.
+  const [focusedNodeId, setFocusedNodeId] = useState<string | null>(null);
+  const onFocus = useCallback((id: string) => {
+    setFocusedNodeId((prev) => (prev === id ? null : id));
+  }, []);
 
   // Build IP-to-PodInfo lookup from allPodsLookup for cross-namespace resolution
   const ipToAllPodsMap = useMemo(() => {
@@ -399,11 +404,13 @@ const NetworkGraphInner: React.FC<NetworkGraphProps> = ({
           layoutDirection,
           onToggle: isExternal ? noopToggle : onPodToggle,
           onBuildPolicy: isExternal ? undefined : onBuildPolicy,
+          onFocus,
+          isFocused: pod.id === focusedNodeId,
         },
         selected: pod.id === selectedPodId,
       };
     });
-  }, [allDisplayPods, onPodToggle, selectedPodId, onBuildPolicy, layoutDirection]);
+  }, [allDisplayPods, onPodToggle, selectedPodId, onBuildPolicy, layoutDirection, onFocus, focusedNodeId]);
 
   // Track ELK-computed node positions
   const [elkPositions, setElkPositions] = useState<Map<string, { x: number; y: number }>>(new Map());
@@ -521,8 +528,12 @@ const NetworkGraphInner: React.FC<NetworkGraphProps> = ({
       const [source, target] = key.split('::');
       const { count, isExternal, ports, protocols, dropCount } = edgeData;
 
-      // Determine stroke color: red for drops, amber for external, blue for internal
-      const strokeColor = dropCount > 0 ? '#EF4444' : isExternal ? '#F59E0B' : '#3B82F6';
+      // Trust-state edge coloring (kguardian brand): denied flows are the single
+      // most important signal for a runtime-security operator, so they get the
+      // error red + a bolder stroke; egress-to-external is warm amber (dashed);
+      // trusted in-cluster traffic is the brand indigo (was an off-brand #3B82F6).
+      const isDrop = dropCount > 0;
+      const strokeColor = isDrop ? '#EF4444' : isExternal ? '#F59E0B' : '#4E3AD9';
 
       // Build semantic label from port/protocol data
       let label: string;
@@ -564,14 +575,15 @@ const NetworkGraphInner: React.FC<NetworkGraphProps> = ({
         animated: true,
         style: {
           stroke: strokeColor,
-          strokeWidth: Math.min(count / 2 + 1, 4),
-          strokeDasharray: isExternal ? '5 5' : undefined,
+          strokeWidth: isDrop ? Math.min(count / 2 + 2.5, 5) : Math.min(count / 2 + 1, 4),
+          strokeDasharray: isExternal && !isDrop ? '5 5' : undefined,
         },
         label,
         labelStyle: {
-          fill: 'var(--theme-text-secondary)',
+          fill: isDrop ? '#EF4444' : 'var(--theme-text-secondary)',
           fontSize: 11,
-          fontFamily: 'monospace',
+          fontFamily: 'var(--font-mono)',
+          fontWeight: isDrop ? 600 : 400,
         },
         labelBgStyle: {
           fill: 'var(--theme-bg-card)',
@@ -586,17 +598,45 @@ const NetworkGraphInner: React.FC<NetworkGraphProps> = ({
     return edges;
   }, [pods, allDisplayPods, ipToLocalPodMap, svcIpToLocalPodMap, showTraffic, wellKnownPorts, podIpToSvcIp]);
 
+  // Focus filter: the focused node + everything one hop up/downstream. Applied
+  // before ELK so the isolated subset gets its own clean layout.
+  const focusNeighborhood = useMemo(() => {
+    if (!focusedNodeId) return null;
+    const ids = new Set<string>([focusedNodeId]);
+    for (const e of initialEdges) {
+      if (e.source === focusedNodeId) ids.add(e.target);
+      if (e.target === focusedNodeId) ids.add(e.source);
+    }
+    return ids;
+  }, [focusedNodeId, initialEdges]);
+
+  const displayNodes: Node[] = useMemo(
+    () => (focusNeighborhood ? baseNodes.filter((n) => focusNeighborhood.has(n.id)) : baseNodes),
+    [baseNodes, focusNeighborhood],
+  );
+  const displayEdges: Edge[] = useMemo(
+    () => (focusNeighborhood
+      ? initialEdges.filter((e) => focusNeighborhood.has(e.source) && focusNeighborhood.has(e.target))
+      : initialEdges),
+    [initialEdges, focusNeighborhood],
+  );
+
+  const focusedLabel = useMemo(
+    () => (focusedNodeId ? allDisplayPods.find((p) => p.id === focusedNodeId)?.label ?? 'node' : null),
+    [focusedNodeId, allDisplayPods],
+  );
+
   // Run ELK layout whenever nodes or edges change
   useEffect(() => {
-    if (baseNodes.length === 0) {
+    if (displayNodes.length === 0) {
       // eslint-disable-next-line react-hooks/set-state-in-effect
       setElkPositions(new Map());
       return;
     }
 
     // Only include edges whose source and target exist in the current node set
-    const nodeIds = new Set(baseNodes.map((n) => n.id));
-    const validEdges = initialEdges.filter(
+    const nodeIds = new Set(displayNodes.map((n) => n.id));
+    const validEdges = displayEdges.filter(
       (e) => nodeIds.has(e.source) && nodeIds.has(e.target)
     );
 
@@ -612,7 +652,7 @@ const NetworkGraphInner: React.FC<NetworkGraphProps> = ({
         'elk.separateConnectedComponents': 'true',
         'elk.spacing.componentComponent': '100',
       },
-      children: baseNodes.map((node) => {
+      children: displayNodes.map((node) => {
         const isIn = node.id.endsWith('-in');
         const isOut = node.id.endsWith('-out');
         const isInternet = node.id.startsWith('external-internet-');
@@ -674,8 +714,8 @@ const NetworkGraphInner: React.FC<NetworkGraphProps> = ({
       // Fallback: simple grid layout if ELK fails
       console.error('ELK layout error, using fallback grid:', err);
       const positions = new Map<string, { x: number; y: number }>();
-      const cols = Math.ceil(Math.sqrt(baseNodes.length));
-      baseNodes.forEach((node, i) => {
+      const cols = Math.ceil(Math.sqrt(displayNodes.length));
+      displayNodes.forEach((node, i) => {
         const col = i % cols;
         const row = Math.floor(i / cols);
         positions.set(node.id, {
@@ -685,18 +725,18 @@ const NetworkGraphInner: React.FC<NetworkGraphProps> = ({
       });
       setElkPositions(positions);
     });
-  }, [baseNodes, initialEdges, layoutDirection]);
+  }, [displayNodes, displayEdges, layoutDirection]);
 
   // Merge ELK positions into nodes — hide nodes until ELK has run for the current set
   const positionedNodes: Node[] = useMemo(() => {
     // Check if ELK has computed positions for these specific nodes
-    const hasPositions = baseNodes.length > 0 && baseNodes.some((n) => elkPositions.has(n.id));
+    const hasPositions = displayNodes.length > 0 && displayNodes.some((n) => elkPositions.has(n.id));
     if (!hasPositions) return [];
-    return baseNodes.map((node) => ({
+    return displayNodes.map((node) => ({
       ...node,
       position: elkPositions.get(node.id) ?? { x: -9999, y: -9999 },
     }));
-  }, [baseNodes, elkPositions]);
+  }, [displayNodes, elkPositions]);
 
   const [nodes, setNodes, onNodesChange] = useNodesState(positionedNodes);
   const [edges, setEdges, onEdgesChange] = useEdgesState(initialEdges);
@@ -710,8 +750,18 @@ const NetworkGraphInner: React.FC<NetworkGraphProps> = ({
 
   // Update edges when traffic changes
   useEffect(() => {
-    setEdges(initialEdges);
-  }, [initialEdges, setEdges]);
+    setEdges(displayEdges);
+  }, [displayEdges, setEdges]);
+
+  // Esc exits focus mode.
+  useEffect(() => {
+    if (!focusedNodeId) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setFocusedNodeId(null);
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [focusedNodeId]);
 
   // Auto-fit view after ELK layout completes
   useEffect(() => {
@@ -766,81 +816,99 @@ const NetworkGraphInner: React.FC<NetworkGraphProps> = ({
         attributionPosition="bottom-right"
       >
         <Controls className="bg-hubble-card border-hubble-border" />
-        <Background
-          variant={BackgroundVariant.Dots}
-          gap={16}
-          size={1}
-          color="var(--theme-border)"
-        />
+
+        {/* Focus pill — shown while a node's neighborhood is isolated */}
+        {focusedNodeId && (
+          <Panel position="top-center">
+            <div className="flex items-center gap-2 pl-3 pr-1.5 py-1.5 rounded-full bg-hubble-accent/15 border border-hubble-accent/40 backdrop-blur-sm text-xs">
+              <Crosshair className="w-3.5 h-3.5 text-hubble-accent shrink-0" />
+              <span className="text-primary">
+                Focused on <span className="font-semibold">{focusedLabel}</span>
+              </span>
+              <button
+                onClick={() => setFocusedNodeId(null)}
+                className="flex items-center gap-1 pl-2 pr-2 py-0.5 rounded-full text-secondary hover:text-primary hover:bg-hubble-hover transition-colors"
+                title="Show all nodes (Esc)"
+              >
+                <X className="w-3 h-3" />
+                Show all
+              </button>
+            </div>
+          </Panel>
+        )}
 
         {/* Security Summary Panel */}
         <Panel position="top-left">
-          <div className="flex items-center gap-3 px-3 py-2 rounded-lg bg-hubble-card/90 border border-hubble-border backdrop-blur-sm text-xs">
+          <div className="flex items-center gap-3 px-3 py-2 rounded-surface bg-hubble-card/90 border border-hubble-border backdrop-blur-sm text-xs">
             <div className="flex items-center gap-1.5 text-secondary" title="Total workload identities in the current namespace">
               <Server className="w-3.5 h-3.5 text-hubble-accent" />
-              <span className="font-medium">{summaryStats.podCount}</span>
+              <span className="font-medium font-mono tabular-nums">{summaryStats.podCount}</span>
             </div>
             <div className="w-px h-4 bg-hubble-border" />
             <div className="flex items-center gap-1.5 text-secondary" title="Total observed network flows (ingress + egress) across all pods">
-              <Activity className="w-3.5 h-3.5 text-blue-400" />
-              <span className="font-medium">{summaryStats.totalFlows.toLocaleString()}</span>
+              <Activity className="w-3.5 h-3.5 text-hubble-accent" />
+              <span className="font-medium font-mono tabular-nums">{summaryStats.totalFlows.toLocaleString()}</span>
             </div>
             <div className="w-px h-4 bg-hubble-border" />
             <div
-              className={`flex items-center gap-1.5 ${summaryStats.totalDrops > 0 ? 'text-red-400' : 'text-secondary'}`}
+              className={`flex items-center gap-1.5 ${summaryStats.totalDrops > 0 ? 'text-hubble-error' : 'text-secondary'}`}
               title={`Packets denied by network policy${summaryStats.totalDrops > 0 ? ' — review your policies for misconfigurations' : ''}`}
             >
-              <ShieldAlert className={`w-3.5 h-3.5 ${summaryStats.totalDrops > 0 ? 'text-red-400' : 'text-secondary'}`} />
-              <span className="font-medium">{summaryStats.totalDrops}</span>
+              <ShieldAlert className={`w-3.5 h-3.5 ${summaryStats.totalDrops > 0 ? 'text-hubble-error' : 'text-secondary'}`} />
+              <span className="font-medium font-mono tabular-nums">{summaryStats.totalDrops}</span>
             </div>
           </div>
         </Panel>
+
+        {/* Edge legend — decode the trust-state colors */}
+        {showTraffic && (
+          <Panel position="bottom-left">
+            <div className="flex items-center gap-3 px-3 py-1.5 rounded-surface bg-hubble-card/90 border border-hubble-border backdrop-blur-sm text-[11px] text-secondary">
+              <span className="flex items-center gap-1.5"><span className="w-3.5 h-0.5 rounded-full" style={{ background: '#4E3AD9' }} />Trusted</span>
+              <span className="flex items-center gap-1.5"><span className="w-3.5 h-0 border-t-2 border-dashed" style={{ borderColor: '#F59E0B' }} />Egress</span>
+              <span className="flex items-center gap-1.5"><span className="w-3.5 h-[3px] rounded-full" style={{ background: '#EF4444' }} />Denied</span>
+            </div>
+          </Panel>
+        )}
 
         {/* Graph controls */}
         <Panel position="top-right">
           <div className="flex gap-2">
             <button
               onClick={onToggleTraffic}
-              className={`flex items-center gap-2 px-3 py-2 rounded-lg border text-xs font-medium transition-all ${
+              className={`flex items-center gap-2 h-8 px-3 rounded-control border text-xs font-medium transition-colors ${
                 showTraffic
-                  ? 'bg-blue-500/20 border-blue-500/50 text-blue-400 hover:bg-blue-500/30'
-                  : 'bg-hubble-card border-hubble-border text-tertiary hover:border-hubble-accent'
+                  ? 'bg-hubble-accent/15 border-hubble-accent/50 text-hubble-accent hover:bg-hubble-accent/25'
+                  : 'bg-hubble-card border-hubble-border text-tertiary hover:border-hubble-border-strong hover:text-secondary'
               }`}
               title={showTraffic ? 'Hide traffic edges' : 'Show traffic edges'}
             >
-              {showTraffic ? (
-                <Eye className="w-3.5 h-3.5" />
-              ) : (
-                <EyeOff className="w-3.5 h-3.5" />
-              )}
+              {showTraffic ? <Eye className="w-3.5 h-3.5" /> : <EyeOff className="w-3.5 h-3.5" />}
               Traffic
             </button>
             {showTraffic && (
               <button
                 onClick={onToggleExternalNodes}
-                className={`flex items-center gap-2 px-3 py-2 rounded-lg border text-xs font-medium transition-all ${
+                className={`flex items-center gap-2 h-8 px-3 rounded-control border text-xs font-medium transition-colors ${
                   showExternalNodes
-                    ? 'bg-amber-500/20 border-amber-500/50 text-amber-400 hover:bg-amber-500/30'
-                    : 'bg-hubble-card border-hubble-border text-tertiary hover:border-hubble-accent'
+                    ? 'bg-hubble-warning/15 border-hubble-warning/50 text-hubble-warning hover:bg-hubble-warning/25'
+                    : 'bg-hubble-card border-hubble-border text-tertiary hover:border-hubble-border-strong hover:text-secondary'
                 }`}
                 title={showExternalNodes ? 'Hide external namespace nodes' : 'Show external namespace nodes'}
               >
-                {showExternalNodes ? (
-                  <Eye className="w-3.5 h-3.5" />
-                ) : (
-                  <EyeOff className="w-3.5 h-3.5" />
-                )}
+                {showExternalNodes ? <Eye className="w-3.5 h-3.5" /> : <EyeOff className="w-3.5 h-3.5" />}
                 External{externalCount > 0 ? ` (${externalCount})` : ''}
               </button>
             )}
             {showTraffic && (
               <button
                 onClick={onToggleLayoutDirection}
-                className="flex items-center gap-2 px-3 py-2 rounded-lg border text-xs font-medium transition-all
-                           bg-hubble-card border-hubble-border text-secondary hover:border-hubble-accent"
+                className="flex items-center gap-2 h-8 px-3 rounded-control border text-xs font-medium transition-colors
+                           bg-hubble-card border-hubble-border text-secondary hover:border-hubble-border-strong hover:text-primary"
                 title={`Switch to ${layoutDirection === 'LR' ? 'vertical' : 'horizontal'} layout`}
               >
-                Layout: {layoutDirection === 'LR' ? '\u2192' : '\u2193'}
+                {layoutDirection === 'LR' ? <ArrowRight className="w-3.5 h-3.5" /> : <ArrowDown className="w-3.5 h-3.5" />}
+                Layout
               </button>
             )}
           </div>

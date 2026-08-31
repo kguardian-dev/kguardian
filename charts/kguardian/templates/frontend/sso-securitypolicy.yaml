@@ -1,0 +1,30 @@
+{{- if .Values.frontend.sso.enabled -}}
+# Gates the frontend HTTPRoute behind SSO via Envoy Gateway ext-auth ->
+# oauth2-proxy. Anonymous requests get 401 and are sent to sign in; the proxy
+# forwards the authenticated identity to the app as the headersToBackend below.
+# NOTE: the oauth2-proxy Service lives in another namespace, so a ReferenceGrant
+# in that namespace must allow SecurityPolicy + HTTPRoute from this release's
+# namespace (see UPGRADING.md).
+apiVersion: gateway.envoyproxy.io/v1alpha1
+kind: SecurityPolicy
+metadata:
+  name: {{ include "kguardian.name" . }}-frontend-sso
+  labels:
+    {{- include "kguardian.labels" . | nindent 4 }}
+spec:
+  targetRefs:
+    - group: gateway.networking.k8s.io
+      kind: HTTPRoute
+      name: {{ required "frontend.sso.httpRouteName is required when frontend.sso.enabled=true" .Values.frontend.sso.httpRouteName }}
+  extAuth:
+    headersToExtAuth:
+      {{- toYaml .Values.frontend.sso.headersToExtAuth | nindent 6 }}
+    http:
+      backendRefs:
+        - name: {{ .Values.frontend.sso.oauth2Proxy.name }}
+          namespace: {{ .Values.frontend.sso.oauth2Proxy.namespace }}
+          port: {{ .Values.frontend.sso.oauth2Proxy.port }}
+      path: {{ .Values.frontend.sso.oauth2Proxy.authPath }}
+      headersToBackend:
+        {{- toYaml .Values.frontend.sso.headersToBackend | nindent 8 }}
+{{- end }}

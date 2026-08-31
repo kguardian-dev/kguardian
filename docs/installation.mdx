@@ -337,6 +337,34 @@ The chart refuses to render an unauthenticated endpoint unless you set `ai.mcp.a
 
 The full client-side walkthrough — port-forward, `claude mcp add`, `.mcp.json`, and what the tools answer — is in [Connect an MCP Client](/guides/mcp-endpoint).
 
+### Gate the UI Behind SSO
+
+The UI and the Broker API are unauthenticated by default. In a Gateway API environment running an identity-aware proxy (oauth2-proxy in front of an OIDC provider such as Dex, Keycloak or Authentik), the chart can put the frontend route behind SSO:
+
+```yaml
+frontend:
+  sso:
+    enabled: true
+    httpRouteName: kguardian          # the HTTPRoute you expose the UI on
+    hostnames: ["kguardian.example.com"]
+    parentRefs:
+      - name: envoy-external
+        namespace: network-system
+        sectionName: https
+    oauth2Proxy:
+      name: oauth2-proxy
+      namespace: network-system
+      port: 80
+```
+
+This renders two Envoy Gateway objects, and nothing at all while `enabled` is `false`: a `SecurityPolicy` that ext-auths the frontend route against oauth2-proxy, and an `/oauth2/*` HTTPRoute so the OIDC callback and `/oauth2/userinfo` are served same-origin. The UI detects the session from `/oauth2/userinfo` at runtime, so there is no rebuild and no build flag; without the proxy it stays in local mode.
+
+<Warning>
+  The oauth2-proxy Service usually lives in another namespace, so a `ReferenceGrant` **in that namespace** must allow `SecurityPolicy` and `HTTPRoute` from the release namespace to reference it. The chart cannot render this for you. Without it the policy attaches but the route cannot reach the proxy.
+</Warning>
+
+This gates the **UI route only**. It does not authenticate the Broker API, which the browser calls directly — see `broker.auth.enabled` for that, and note the frontend cannot hold a static token. It also does not cover the MCP endpoint above, which carries its own bearer token.
+
 ---
 
 ## Install the CLI Plugin
