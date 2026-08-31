@@ -1,5 +1,48 @@
 # Changelog
 
+## [1.13.0](https://github.com/kguardian-dev/kguardian/compare/frontend/v1.12.0...frontend/v1.13.0) (2026-08-31)
+
+
+### Features
+
+* **frontend:** ⌘K command palette ([30d0292](https://github.com/kguardian-dev/kguardian/commit/30d02929039de3364ff2920eabc695dd20f7883e))
+* **frontend:** add a demo second cluster to visualize multi-cluster ([6a5efb5](https://github.com/kguardian-dev/kguardian/commit/6a5efb519d7bbb8c3d74a9514336aea19e2d5ad0))
+* **frontend:** authored type system + brand mark + a11y (UX Tier 1a) ([f390fdb](https://github.com/kguardian-dev/kguardian/commit/f390fdb08ee1688fa7eee0cf141c1bb7a2d38096))
+* **frontend:** auto-detect SSO session via /oauth2/userinfo (no build flag) ([ff5fd62](https://github.com/kguardian-dev/kguardian/commit/ff5fd626a488d58a0848c4063b244c9bc9b82293))
+* **frontend:** de-slop the AI assistant panel ([73fc70f](https://github.com/kguardian-dev/kguardian/commit/73fc70ffdae09a332963a3ef2cd291fb039a01eb))
+* **frontend:** deep-linkable selection — view + namespace + workload in URL hash ([7826a05](https://github.com/kguardian-dev/kguardian/commit/7826a05aa93ea6f6d001375c43872ce057d467d2))
+* **frontend:** EmptyState + Skeleton primitives — graph skeleton loader, empty-namespace state, tokenized Audit empty state ([e825c8d](https://github.com/kguardian-dev/kguardian/commit/e825c8dbab1970972b12e9215589abf87ae02a0a))
+* **frontend:** enterprise shell — brand-indigo tokens, Button primitive, left rail ([82ef380](https://github.com/kguardian-dev/kguardian/commit/82ef3805248fc8f17adf93a32f9507be4fe79df1))
+* **frontend:** enterprise UI shell, design tokens, and shared primitives ([31d2426](https://github.com/kguardian-dev/kguardian/commit/31d24262f70872a64d274f935087b14126f332cf))
+* **frontend:** extensibility seams — multi-cluster, SSO, per-user settings ([8a50670](https://github.com/kguardian-dev/kguardian/commit/8a50670b32a7b0081732161df53b512a186e754c))
+* **frontend:** Findings triage home + hash routing + Views/Tools rail ([709d809](https://github.com/kguardian-dev/kguardian/commit/709d809d774534003cbcc04959350c88fbd6fb00))
+* **frontend:** node focus mode — isolate a node's up/downstream connections ([3ac4337](https://github.com/kguardian-dev/kguardian/commit/3ac433749d52eb4db35f1efd4b40e4cfc7b30c04))
+* **frontend:** Policy Builder in rail + workload picker ([154cde0](https://github.com/kguardian-dev/kguardian/commit/154cde02936f906e438e6437aa136c6b3ce0f75c))
+* **frontend:** pro data tables — hoist denied rows + tint, sticky headers, tabular-nums timestamps, EmptyState empties (DataTable + Audit) ([5f9954f](https://github.com/kguardian-dev/kguardian/commit/5f9954fca87d202e4eb07484d4f926244b24bdf4))
+* **frontend:** shared Modal primitive (enter/exit anim, Esc, focus-trap, scroll-lock, aria) — retrofit Settings/Audit/AIAssistant/NetworkPolicyEditor ([1330492](https://github.com/kguardian-dev/kguardian/commit/13304924726c5b6bb16b92f15e5dfc5076a60f85))
+* **frontend:** trust-map graph redesign — trust-state edge colors, brand honeycomb, node accent-spines, edge legend ([e5dadc1](https://github.com/kguardian-dev/kguardian/commit/e5dadc1ff9ae8a871fdea968726dfefed62a4a4b))
+* **frontend:** useDismissable hook — Esc + outside-click for rail dropdowns ([e5082fc](https://github.com/kguardian-dev/kguardian/commit/e5082fcc330c253eec411a93ea64d0ce97582fe0))
+* MCP/LLM integration uplift + data-path hardening ([855da76](https://github.com/kguardian-dev/kguardian/commit/855da76fb03dece78862efe5468bc5ab7c524ad3))
+
+
+### Bug Fixes
+
+* **deps:** patch vulnerable npm transitives in frontend + llm-bridge (security) ([#1265](https://github.com/kguardian-dev/kguardian/issues/1265)) ([89bab3e](https://github.com/kguardian-dev/kguardian/commit/89bab3e627a8d6bd8aec0e62deb9133e83472b1c))
+* **deps:** update dependency elkjs to ^0.12.0 ([#1075](https://github.com/kguardian-dev/kguardian/issues/1075)) ([a49c46c](https://github.com/kguardian-dev/kguardian/commit/a49c46c4d609f9686c78ba0226dd1b53c2dc0de4))
+* **frontend:** drop the demo cluster; document SSO alongside the other chart options ([76ed7b6](https://github.com/kguardian-dev/kguardian/commit/76ed7b696200166fe6d4e8698c29e0446871325c))
+* **frontend:** give graph Layout toggle a leading icon so it matches Traffic/External button size ([ad40ef2](https://github.com/kguardian-dev/kguardian/commit/ad40ef2241364df304efeae88ffcdc1ec4ee5006))
+* **frontend:** hide the dead expand arrow on external traffic nodes ([fa50a15](https://github.com/kguardian-dev/kguardian/commit/fa50a15c84ba85cf249a3e48c915a7ab5e9fcf0e))
+* **frontend:** namespace default, collapsible rail, load performance ([9e48985](https://github.com/kguardian-dev/kguardian/commit/9e48985069514e69b674d6e4642a9d9b860a0d24))
+* **frontend:** remember namespace per cluster ([6dae1b7](https://github.com/kguardian-dev/kguardian/commit/6dae1b74067e8eb1ced865657ff8fbb1627f13da))
+* **frontend:** seccomp arch guard parity + missing tool label ([c446eae](https://github.com/kguardian-dev/kguardian/commit/c446eaea7686bd45b84769422ca9f47e3f931cf8))
+* **frontend:** seccomp arch guard parity + missing tool label ([d702e1a](https://github.com/kguardian-dev/kguardian/commit/d702e1ac58be829b5fa9774511cdce8bb1a9a117))
+
+
+### Code Refactoring
+
+* **frontend:** single-source the AIAssistant chrome ([#1169](https://github.com/kguardian-dev/kguardian/issues/1169)) ([441a9ac](https://github.com/kguardian-dev/kguardian/commit/441a9ac4fc89cc6b883bf115c4c9246f4e7194d6))
+* **frontend:** tokenize remaining raw colors (green/blue/red/amber → hubble tokens), drop dead ThemeToggle ([9662903](https://github.com/kguardian-dev/kguardian/commit/9662903f31432a993788a14e186a0be99c82e7b6))
+
 ## [1.12.0](https://github.com/kguardian-dev/kguardian/compare/frontend/v1.11.4...frontend/v1.12.0) (2026-08-31)
 
 
