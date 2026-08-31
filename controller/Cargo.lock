@@ -1464,7 +1464,7 @@ dependencies = [
 
 [[package]]
 name = "kguardian"
-version = "1.9.3"
+version = "1.9.4"
 dependencies = [
  "anyhow",
  "chrono",
