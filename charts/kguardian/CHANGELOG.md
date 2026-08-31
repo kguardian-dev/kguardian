@@ -1,5 +1,24 @@
 # Changelog
 
+## [1.18.0](https://github.com/kguardian-dev/kguardian/compare/chart/v1.17.3...chart/v1.18.0) (2026-08-31)
+
+
+### Features
+
+* **chart:** opt-in SSO support (frontend.sso.*) for Gateway API + oauth2-proxy ([f6e2e78](https://github.com/kguardian-dev/kguardian/commit/f6e2e780348d329dc48f803b6fbcbcb4bdb88aa1))
+* **chart:** ai.baseUrl, ai.model, and the ai.mcp.* endpoint toggle ([0dd63bd](https://github.com/kguardian-dev/kguardian/commit/0dd63bd8513ff5fe28643c4f4a4866a2320a8ff5))
+* **frontend:** enterprise UI shell, design tokens, and shared primitives ([e0c88fb](https://github.com/kguardian-dev/kguardian/commit/e0c88fb195b778679e5f3068c4755d0eba710736))
+
+
+### Bug Fixes
+
+* **deps:** bump chart component images to the versions just released ([ba4089c](https://github.com/kguardian-dev/kguardian/commit/ba4089c9c969515ce7dda3c088813133bfab7569))
+
+
+### Documentation
+
+* **chart:** state the MCP auth rationale accurately ([c9c0c20](https://github.com/kguardian-dev/kguardian/commit/c9c0c200d097f07e4626ff2928c78984a2d726cb))
+
 ## [1.17.3](https://github.com/kguardian-dev/kguardian/compare/chart/v1.17.2...chart/v1.17.3) (2026-08-13)
 
 
