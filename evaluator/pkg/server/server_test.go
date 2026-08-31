@@ -15,6 +15,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/intstr"
 )
 
 // fakeLookup implements PolicyLookup with in-memory state.
@@ -265,4 +266,96 @@ func TestHandleEvaluate_ClusterPolicyNamespaceGate(t *testing.T) {
 	if !sawClusterDeny {
 		t.Errorf("expected cluster-scoped WouldDeny verdict in results: %#v", resp.Results)
 	}
+}
+
+// End of the line for a v6 flow: the /evaluate handler itself. The
+// matcher tests cover the decision logic; this covers the two things only
+// the handler can break — JSON decoding an IPv6 address into Flow.SrcIP /
+// Flow.DstIP (a v6 literal is just a string with colons in it, but a
+// future change to the wire format or a "parse the IP here" step would
+// land right here), and the namespace routing that picks which policies a
+// v6 flow is even evaluated against.
+func TestHandleEvaluate_IPv6FlowEndToEnd(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		srcIP  string
+		port   int32
+		want   matcher.Verdict
+		denied int64
+	}{
+		{name: "peer inside cidr is allowed", srcIP: "fd00::7", port: 8080, want: matcher.VerdictAllow},
+		{name: "peer inside except subnet would deny", srcIP: "fd00::bad:1", port: 8080, want: matcher.VerdictWouldDeny, denied: 1},
+		{name: "peer outside cidr would deny", srcIP: "fd01::7", port: 8080, want: matcher.VerdictWouldDeny, denied: 1},
+		// A dual-stack pod also receives IPv4 traffic; a v6-only rule
+		// must not be read as covering it.
+		{name: "ipv4 peer against v6 block would deny", srcIP: "10.0.0.7", port: 8080, want: matcher.VerdictWouldDeny, denied: 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s, f := setup(t)
+			f.pods["prod/web6-1"] = &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{
+					Namespace: "prod", Name: "web6-1",
+					Labels: map[string]string{"app": "web"},
+				},
+			}
+			f.policies["prod"] = []*v1alpha1.AuditNetworkPolicy{{
+				ObjectMeta: metav1.ObjectMeta{
+					Namespace: "prod", Name: "web6-allow-ula", UID: "uid-v6",
+				},
+				Spec: networkingv1.NetworkPolicySpec{
+					PodSelector: metav1.LabelSelector{MatchLabels: map[string]string{"app": "web"}},
+					PolicyTypes: []networkingv1.PolicyType{networkingv1.PolicyTypeIngress},
+					Ingress: []networkingv1.NetworkPolicyIngressRule{{
+						From: []networkingv1.NetworkPolicyPeer{
+							{IPBlock: &networkingv1.IPBlock{
+								CIDR:   "fd00::/64",
+								Except: []string{"fd00::bad:0/112"},
+							}},
+						},
+						Ports: []networkingv1.NetworkPolicyPort{tcpPort(tc.port)},
+					}},
+				},
+			}}
+
+			// Marshal/unmarshal is the point: the v6 literals have to
+			// survive the wire, not just the matcher.
+			body, err := json.Marshal(matcher.Flow{
+				DstPodNamespace: "prod", DstPodName: "web6-1",
+				SrcIP: tc.srcIP, DstIP: "fd00::1",
+				DstPort: tc.port, Protocol: matcher.ProtocolTCP,
+			})
+			if err != nil {
+				t.Fatalf("marshal flow: %v", err)
+			}
+			rec := httptest.NewRecorder()
+			s.handleEvaluate(rec, httptest.NewRequest(http.MethodPost, "/evaluate", bytes.NewReader(body)))
+
+			if rec.Code != http.StatusOK {
+				t.Fatalf("status: want 200, got %d body=%s", rec.Code, rec.Body.String())
+			}
+			resp := decode(t, rec.Body)
+			if len(resp.Results) != 1 {
+				t.Fatalf("expected 1 result, got %d: %#v", len(resp.Results), resp.Results)
+			}
+			got := resp.Results[0]
+			if got.Verdict != tc.want {
+				t.Errorf("verdict: want %s, got %s (reason %q)", tc.want, got.Verdict, got.Reason)
+			}
+			if got.Direction != matcher.DirectionIngress {
+				t.Errorf("direction: want Ingress, got %s", got.Direction)
+			}
+			if got.PolicyUID != "uid-v6" {
+				t.Errorf("policyUID: want uid-v6, got %q", got.PolicyUID)
+			}
+			if s.denied.Load() != tc.denied {
+				t.Errorf("denied counter: want %d, got %d", tc.denied, s.denied.Load())
+			}
+		})
+	}
+}
+
+func tcpPort(p int32) networkingv1.NetworkPolicyPort {
+	tcp := corev1.ProtocolTCP
+	port := intstr.FromInt32(p)
+	return networkingv1.NetworkPolicyPort{Protocol: &tcp, Port: &port}
 }
