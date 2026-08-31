@@ -4,13 +4,19 @@ import { LLMProvider } from "../types/index.js";
 import { McpClient } from "../mcpClient.js";
 import { log } from "../logger.js";
 import { serializeToolResult } from "./truncate.js";
+import { resolveBaseUrl } from "./baseUrl.js";
 
 // Upper bound on tool-calling round-trips before we force a final answer.
 const MAX_TOOL_ROUNDS = 10;
 
 // Default model. Bare alias (no date suffix) so it always resolves to the
-// current Opus 4.8 snapshot. Callers may override via request.model.
+// current Opus 4.8 snapshot. Callers may override via request.model, and
+// operators may move the default via ANTHROPIC_MODEL (see resolveModel).
 const DEFAULT_MODEL = "claude-opus-4-8";
+
+// The SDK's own default base, restated here so the explicit value we pass
+// matches what the SDK would have used on its own.
+const ANTHROPIC_DEFAULT_BASE = "https://api.anthropic.com";
 
 // Output cap for the non-streaming path. 8K leaves room for tables and policy
 // snippets without risking the SDK's non-streaming timeout guard.
@@ -48,6 +54,32 @@ function requireApiKey(): string {
     throw new Error("ANTHROPIC_API_KEY not configured");
   }
   return apiKey;
+}
+
+/**
+ * Build the SDK client with the base URL resolved the same way the other
+ * providers resolve theirs.
+ *
+ * The SDK already picks ANTHROPIC_BASE_URL up implicitly when `baseURL` is
+ * omitted, so this changes no behaviour for anyone already relying on it —
+ * the same env var, with the same effect. Passing it explicitly means all
+ * four providers read their base from one greppable place, a typo is reported
+ * against the env var name instead of arriving as an SDK connection error,
+ * and a whitespace-only value now counts as unset (the SDK would have handed
+ * "  " to its URL parser) exactly as it does for the API keys.
+ */
+function buildClient(apiKey: string): Anthropic {
+  // The SDK handles retries (429/5xx/network) and timeout scaling.
+  return new Anthropic({ apiKey, baseURL: resolveBaseUrl("ANTHROPIC_BASE_URL", ANTHROPIC_DEFAULT_BASE) });
+}
+
+/**
+ * Model for this turn: an explicit per-request model wins, then the operator's
+ * ANTHROPIC_MODEL default (useful when the base URL points at a gateway whose
+ * model ids are not Anthropic's), then the built-in default.
+ */
+function resolveModel(request: ChatRequest): string {
+  return request.model || process.env.ANTHROPIC_MODEL?.trim() || DEFAULT_MODEL;
 }
 
 /**
@@ -181,11 +213,9 @@ export async function callAnthropic(
   mcpClient: McpClient,
 ): Promise<ChatResponse> {
   const apiKey = requireApiKey();
-  // The SDK reads ANTHROPIC_BASE_URL from the environment when baseURL is not
-  // passed, and handles retries (429/5xx/network) and timeout scaling.
-  const client = new Anthropic({ apiKey });
+  const client = buildClient(apiKey);
 
-  const model = request.model || DEFAULT_MODEL;
+  const model = resolveModel(request);
   const system = buildSystem(request);
   const tools = await buildTools();
   const messages = buildMessages(request);
@@ -233,9 +263,9 @@ export async function streamAnthropic(
   signal?: AbortSignal,
 ): Promise<void> {
   const apiKey = requireApiKey();
-  const client = new Anthropic({ apiKey });
+  const client = buildClient(apiKey);
 
-  const model = request.model || DEFAULT_MODEL;
+  const model = resolveModel(request);
   const system = buildSystem(request);
   const tools = await buildTools();
   const messages = buildMessages(request);

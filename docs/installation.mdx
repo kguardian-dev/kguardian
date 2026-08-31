@@ -249,6 +249,94 @@ helm install kguardian oci://ghcr.io/kguardian-dev/charts/kguardian \
   --values values.yaml --wait
 ```
 
+### AI Assistant
+
+The assistant is optional and off by default. It is one workload — the LLM Bridge — that runs the 12 tools and the policy/seccomp generation in-process against the Broker.
+
+Create a Secret holding your provider API key under the key `api-key`, then turn the assistant on with the provider name and the Secret:
+
+```bash
+kubectl create secret generic kguardian-anthropic \
+  --namespace kguardian \
+  --from-literal=api-key='sk-ant-...'
+```
+
+```yaml
+ai:
+  enabled: true
+  # openai | anthropic | gemini | copilot
+  provider: anthropic
+  secret: kguardian-anthropic
+```
+
+The chart writes the right environment variable for the provider you name — `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GOOGLE_API_KEY`, or `GITHUB_TOKEN`. For a multi-provider setup, configure each one under `llmBridge.secrets.*` instead and leave `ai.provider` empty.
+
+Check it came up with the LLM Bridge health endpoint — `hasProvider` must be `true`:
+
+```bash
+kubectl -n kguardian port-forward svc/kguardian-llm-bridge 8080:8080
+curl -s http://localhost:8080/health
+# {"status":"healthy","hasProvider":true,"mcp":false}
+```
+
+### Use an OpenAI-Compatible Gateway
+
+To route the assistant through LiteLLM, vLLM, or an enterprise proxy instead of the vendor API, set `ai.baseUrl` — and, because a gateway's model ids are its own, usually `ai.model` too:
+
+```yaml
+ai:
+  enabled: true
+  provider: openai
+  secret: kguardian-litellm
+  baseUrl: http://litellm.litellm.svc.cluster.local:4000/v1
+  model: my-team/llama-3.3-70b
+```
+
+Both apply to whichever provider `ai.provider` names. Setting them without `ai.provider` fails the install rather than being silently ignored.
+
+<Warning>
+**You still need an API key.** Provider availability is decided by the API key alone, never by the base URL. Point `ai.baseUrl` at a gateway without setting `ai.secret` and `/health` reports `hasProvider: false`, chat requests fail with `503 No LLM provider configured`, and nothing in the error mentions the gateway you configured.
+
+Set `ai.secret` to a Secret holding your gateway's virtual key — or any non-empty dummy value if the gateway is unauthenticated. This is the most common first-run mistake.
+</Warning>
+
+<Warning>
+**The request path is appended to your base URL verbatim.** kguardian never inserts, removes, or rewrites a `/v1` segment; only a trailing slash is normalised.
+
+If your gateway serves `/v1/chat/completions`, include `/v1` in `ai.baseUrl`. If it serves `/chat/completions`, do not. LiteLLM answers on both, which is why a value that works against LiteLLM can return `404` from vLLM or a proxy that exposes only the `/v1` form.
+</Warning>
+
+The variable each value maps to depends on the provider:
+
+| `ai.provider` | API key variable | `ai.baseUrl` | `ai.model` |
+|---|---|---|---|
+| `openai` | `OPENAI_API_KEY` | `OPENAI_BASE_URL` | `OPENAI_MODEL` |
+| `anthropic` | `ANTHROPIC_API_KEY` | `ANTHROPIC_BASE_URL` | `ANTHROPIC_MODEL` |
+| `gemini` | `GOOGLE_API_KEY` | `GEMINI_BASE_URL` | `GEMINI_MODEL` |
+| `copilot` | `GITHUB_TOKEN` | `COPILOT_BASE_URL` | `COPILOT_MODEL` |
+
+Gemini's asymmetry is deliberate — the key is `GOOGLE_API_KEY` while the base URL and model are `GEMINI_*`, matching each vendor's own convention. `ANTHROPIC_BASE_URL` is not new: the Anthropic SDK already honoured it, and the chart now sets it explicitly so a typo is reported against the value rather than surfacing as a connection error.
+
+Errors are diagnostic rather than silent. A malformed or scheme-less base URL fails before any request is sent, naming the variable. A `404` or `405` from an OpenAI-compatible, Copilot, or Gemini gateway names the exact URL that was called and the variable to fix. A whitespace-only value counts as unset, consistently with the API keys.
+
+### Serve the MCP Endpoint
+
+The LLM Bridge can serve its 12 tools to external MCP clients at `POST /mcp` on its existing port, so Claude Code or another MCP client can query your cluster's observed telemetry and generate policies from it. It is off by default:
+
+```yaml
+ai:
+  enabled: true
+  mcp:
+    enabled: true
+    auth:
+      existingSecret: kguardian-mcp-token
+      secretKey: token
+```
+
+The chart refuses to render an unauthenticated endpoint unless you set `ai.mcp.auth.allowUnauthenticated=true` deliberately, because the endpoint serves cluster telemetry to anything that can reach the ClusterIP Service. `ai.mcp.rateLimitPerMin` moves the per-replica ceiling from its default of 300.
+
+The full client-side walkthrough — port-forward, `claude mcp add`, `.mcp.json`, and what the tools answer — is in [Connect an MCP Client](/guides/mcp-endpoint).
+
 ---
 
 ## Install the CLI Plugin
@@ -426,8 +514,8 @@ This will **not** remove generated policies that were already applied to your na
   <Card title="Quick Start" icon="rocket" href="/quickstart">
     Jump right into generating policies
   </Card>
-  <Card title="Configuration Guide" icon="sliders" href="/advanced/custom-configurations">
-    Deep dive into configuration options
+  <Card title="Connect an MCP Client" icon="plug" href="/guides/mcp-endpoint">
+    Point Claude Code or another MCP client at your cluster
   </Card>
   <Card title="Troubleshooting" icon="wrench" href="/advanced/troubleshooting">
     Fix common installation issues
