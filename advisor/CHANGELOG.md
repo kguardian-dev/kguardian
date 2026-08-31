@@ -1,5 +1,15 @@
 # Changelog
 
+## [1.7.1](https://github.com/kguardian-dev/kguardian/compare/advisor/v1.7.0...advisor/v1.7.1) (2026-08-31)
+
+
+### Bug Fixes
+
+* **deps:** update kubernetes monorepo to v0.36.4 ([#1312](https://github.com/kguardian-dev/kguardian/issues/1312)) ([090b547](https://github.com/kguardian-dev/kguardian/commit/090b5473212e7f112ce7f3129335b25455f7e2e9))
+* **deps:** update kubernetes monorepo to v0.37.0 ([#1330](https://github.com/kguardian-dev/kguardian/issues/1330)) ([a369619](https://github.com/kguardian-dev/kguardian/commit/a36961950bfe19bf883ce4892d9fc857d68c72fc))
+* **deps:** update module github.com/stretchr/testify to v1.12.0 ([#1296](https://github.com/kguardian-dev/kguardian/issues/1296)) ([2a72c73](https://github.com/kguardian-dev/kguardian/commit/2a72c73ae222bdb38bbed789a0f58c619c141b2b))
+* **deps:** update module github.com/stretchr/testify to v1.12.1 ([#1303](https://github.com/kguardian-dev/kguardian/issues/1303)) ([e4ee3ec](https://github.com/kguardian-dev/kguardian/commit/e4ee3ec3b6ecd4161981c9c29333cdf631f7fcda))
+
 ## [1.7.0](https://github.com/kguardian-dev/kguardian/compare/advisor/v1.6.2...advisor/v1.7.0) (2026-07-28)
 
 
