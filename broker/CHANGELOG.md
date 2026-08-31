@@ -1,5 +1,33 @@
 # Changelog
 
+## [1.13.0](https://github.com/kguardian-dev/kguardian/compare/broker/v1.12.4...broker/v1.13.0) (2026-08-31)
+
+
+### Features
+
+* **broker:** anonymous daily version check-in and /version endpoint ([#1098](https://github.com/kguardian-dev/kguardian/issues/1098)) ([6f8d60c](https://github.com/kguardian-dev/kguardian/commit/6f8d60cb9af3d3043a9b82c6134d478cb346dfb2))
+* MCP/LLM integration uplift + data-path hardening ([855da76](https://github.com/kguardian-dev/kguardian/commit/855da76fb03dece78862efe5468bc5ab7c524ad3))
+
+
+### Bug Fixes
+
+* **broker:** add statement_timeout backstop on DB connections ([#1036](https://github.com/kguardian-dev/kguardian/issues/1036)) ([8a16bfa](https://github.com/kguardian-dev/kguardian/commit/8a16bfa9b4f3a3ecc63b1f948a2457f41cfdcf35))
+* **broker:** bound /pod/traffic to stop oversized-response failures ([#1034](https://github.com/kguardian-dev/kguardian/issues/1034)) ([72868f0](https://github.com/kguardian-dev/kguardian/commit/72868f0350705d5c475929bee5d40f9d1590bea6))
+* **broker:** ignore semver build metadata in version check comparisons ([#1126](https://github.com/kguardian-dev/kguardian/issues/1126)) ([0038990](https://github.com/kguardian-dev/kguardian/commit/0038990cd3414823e8f719b174313f0b846a03f9))
+* **broker:** pin builder to rust:1-bookworm to match runtime glibc ([#1120](https://github.com/kguardian-dev/kguardian/issues/1120)) ([fcb8d13](https://github.com/kguardian-dev/kguardian/commit/fcb8d13959a93ba40c11f204696be9be4476031c))
+* **deps:** patch vulnerable Rust transitives in broker + controller (security) ([#1264](https://github.com/kguardian-dev/kguardian/issues/1264)) ([663fa38](https://github.com/kguardian-dev/kguardian/commit/663fa386849ffca7bc7f1e2ab3f82cacda20adf4))
+* **deps:** update rust crate reqwest to 0.13 ([#855](https://github.com/kguardian-dev/kguardian/issues/855)) ([6d3ba66](https://github.com/kguardian-dev/kguardian/commit/6d3ba66cdd8dac91f2efbcf79cedfc8a6efb0f3d))
+
+
+### Documentation
+
+* repo-wide accuracy pass — remove obsolete, untrue, and misleading content ([#1115](https://github.com/kguardian-dev/kguardian/issues/1115)) ([5b527a4](https://github.com/kguardian-dev/kguardian/commit/5b527a42526919eb61d5d4edc5e85554a845c2be))
+
+
+### Code Refactoring
+
+* **broker:** remove dead single-row POST /pod/traffic endpoint ([#1166](https://github.com/kguardian-dev/kguardian/issues/1166)) ([d21bb6d](https://github.com/kguardian-dev/kguardian/commit/d21bb6da0f218d9cf3f8d302dbe45a1ad1769122))
+
 ## [1.12.4](https://github.com/kguardian-dev/kguardian/compare/broker/v1.12.3...broker/v1.12.4) (2026-08-12)
 
 
