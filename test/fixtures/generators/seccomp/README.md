@@ -1,7 +1,7 @@
 # G2 generator golden fixtures — seccomp
 
 Language-neutral fixtures for the seccomp profile generator
-(SIMPLIFICATION-GOAL.md §3, gate G2). Each `*.json` is:
+(gate G2). Each `*.json` is:
 
 ```
 { "name": "...", "input": { "syscalls": [...sorted...], "arch": "x86_64|aarch64" },
@@ -30,4 +30,4 @@ generators (advisor preserves input order; the frontend sorts).
 
 Network-policy fixtures live under `../networkpolicy/` with advisor Go
 reference goldens; frontend consumption of those lands with the shared
-generator package (WS-C), where the two input shapes converge.
+generator package, where the two input shapes converge.

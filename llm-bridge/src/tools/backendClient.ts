@@ -1,6 +1,6 @@
 import { log } from "../logger.js";
 
-// Direct HTTP client to the broker. WS-B: the assistant reaches the data
+// Direct HTTP client to the broker. the assistant reaches the data
 // plane in-process instead of proxying through the mcp-server, so this
 // replaces the MCP transport hop. Same endpoints, same optional broker
 // bearer token as the mcp-server used.

@@ -1,4 +1,4 @@
-// In-process seccomp profile generator (WS-C). The assistant generates seccomp
+// In-process seccomp profile generator. The assistant generates seccomp
 // profiles itself instead of proxying to the advisor service, so the advisor
 // Deployment can be retired. This is the same pure function as the frontend's
 // buildSeccompProfile (frontend/src/utils/seccompProfileGenerator.ts) and the

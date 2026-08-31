@@ -1,5 +1,5 @@
 // Response compaction — a faithful TypeScript port of the former mcp-server's
-// tools/filter.go. The assistant executes the 12 tools in-process (WS-B); these
+// tools/filter.go. The assistant executes the 12 tools in-process; these
 // transforms must produce data structurally identical to what filter.go
 // produced, which the G1 parity test enforces by replaying the shared
 // backend fixtures. Keep this in lockstep with filter.go.

@@ -9,7 +9,7 @@ import type { AddressInfo } from "node:net";
 import { app } from "./index.js";
 import { McpClient } from "./mcpClient.js";
 
-// G3 SSE stream contract (SIMPLIFICATION-GOAL.md §3).
+// G3 SSE stream contract.
 //
 // Records a full assistant session — thinking, a tool round (tool_use +
 // tool_result), streamed text, and the terminal done frame — as raw SSE bytes

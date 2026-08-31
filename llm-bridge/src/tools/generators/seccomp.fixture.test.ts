@@ -5,7 +5,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { buildSeccompProfile } from "./seccomp.js";
 
-// G2 generator parity — seccomp, assistant side (SIMPLIFICATION-GOAL.md §3).
+// G2 generator parity — seccomp, assistant side.
 // The assistant's in-process seccomp generator asserts the SAME shared
 // fixtures the frontend TS and advisor Go generators do, so the three cannot
 // diverge. Compared as parsed objects.

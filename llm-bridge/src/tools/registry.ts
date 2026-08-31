@@ -1,4 +1,4 @@
-// Single source of truth for the assistant's tool set (WS-B). Ported from the
+// Single source of truth for the assistant's tool set. Ported from the
 // former mcp-server's tools/all_tools.go toolDefs — names and descriptions must
 // stay identical (the G1 parity test pins them against the former Go server's
 // goldens). The provider loops build their provider-specific tool schema from

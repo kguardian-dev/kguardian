@@ -3,7 +3,7 @@ import type { ToolCall, ToolResult } from "./types/index.js";
 import { TOOL_DEFS } from "./tools/registry.js";
 import { executeInProcessTool } from "./tools/execute.js";
 
-// WS-B/WS-C: the assistant's 12 tools run IN-PROCESS here — this class no
+// the assistant's 12 tools run IN-PROCESS here — this class no
 // longer talks to a separate mcp-server over MCP transport. It reaches the
 // broker directly and generates network policies / seccomp profiles itself
 // (src/tools/*), so neither the mcp-server nor the advisor-serve service is

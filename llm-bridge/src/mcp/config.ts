@@ -1,11 +1,12 @@
 /**
  * Configuration for the MCP endpoint served from this process.
  *
- * SIMPLIFICATION-GOAL.md §"MCP server" anticipated this: the 12 tools that
- * used to live in the standalone Go mcp-server now run in-process
- * (src/tools/*), and the same registry is re-exposed over StreamableHTTP
- * from the same Express app for external MCP clients. There is no second
- * deployment and no second listener — just another route on port 8080.
+ * The 12 tools that used to live in a standalone Go mcp-server now run
+ * in-process (src/tools/*), and the same registry is re-exposed over
+ * StreamableHTTP from this Express app for external MCP clients. That service
+ * was retired precisely because it was a second deployment and a second
+ * network hop that could be silently off, so this deliberately reuses the
+ * existing listener: no new deployment, no new port, just another route.
  *
  * The endpoint is OFF by default. It surfaces cluster telemetry (pod
  * traffic, syscalls, audit verdicts) to whatever can reach the Service, so
