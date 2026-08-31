@@ -59,7 +59,7 @@ test("parseContext handles pre-empty arrays", () => {
   assert.deepEqual(got, { namespace: undefined, podNames: [] });
 });
 
-// WS-B: tools are sourced from the in-repo registry (no MCP discovery hop).
+// tools are sourced from the in-repo registry (no MCP discovery hop).
 // getToolsCached must surface every registered tool in provider format.
 
 test("getToolsCached returns every registered tool in provider format", async () => {

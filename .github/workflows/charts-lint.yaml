@@ -44,7 +44,7 @@ jobs:
         if: steps.list-changed.outputs.changed == 'true'
         run: ct lint --config .github/ct.yaml --target-branch ${{ github.event.repository.default_branch }}
 
-      # G4 gate (SIMPLIFICATION-GOAL.md §3): render the chart with the value
+      # G4 gate: render the chart with the value
       # sets real operators run — legacy per-component AI flags, the ai.enabled
       # umbrella, external DB, broker auth — and assert each still produces the
       # expected workloads. Guards upgrade-compatibility; fast, no cluster.

@@ -4,7 +4,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { streamChatMessage } from './aiApi';
 
-// G3 SSE stream contract — consumer side (SIMPLIFICATION-GOAL.md §3).
+// G3 SSE stream contract — consumer side.
 //
 // Replays the exact recording the llm-bridge emitter test produced
 // (llm-bridge/contract/sse_session.golden.txt) through the real parser and

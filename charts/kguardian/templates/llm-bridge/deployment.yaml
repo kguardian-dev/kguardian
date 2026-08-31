@@ -48,7 +48,7 @@ spec:
           env:
             - name: PORT
               value: "{{ .Values.llmBridge.container.port }}"
-            # WS-B/WS-C: the assistant runs all 12 tools in-process and reaches
+            # the assistant runs all 12 tools in-process and reaches
             # the data plane directly — no mcp-server hop, and policy/seccomp
             # generation is in-process too, so it only needs the broker.
             - name: BROKER_URL

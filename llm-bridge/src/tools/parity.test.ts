@@ -9,7 +9,7 @@ import type { AddressInfo } from "node:net";
 import { executeInProcessTool } from "./execute.js";
 import { TOOL_DEFS } from "./registry.js";
 
-// WS-B parity: the in-process tool layer must reproduce the retired
+// Parity: the in-process tool layer must reproduce the retired
 // mcp-server's tool-call outputs. Replays the shared contract fixtures
 // (test/fixtures/contract) that were the mcp-server's Go G1 goldens: broker
 // tools must reproduce that output exactly (parsed JSON, key-order
@@ -39,7 +39,7 @@ const CALLS: Record<string, Record<string, unknown>> = {
   generate_seccomp_profile: { pod_name: "web-1" },
 };
 
-// Both generate_* tools now run IN-PROCESS (WS-C) rather than proxying to the
+// Both generate_* tools now run IN-PROCESS rather than proxying to the
 // advisor. Their output correctness is proven exhaustively by the G2 generator
 // fixture tests (seccomp.fixture.test.ts, networkpolicy.fixture.test.ts) which
 // lock every path to the advisor goldens. Here we only assert the tool wiring

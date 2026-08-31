@@ -4,7 +4,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { buildSeccompProfile } from './seccompProfileGenerator';
 
-// G2 generator parity — seccomp, consumer side (SIMPLIFICATION-GOAL.md §3).
+// G2 generator parity — seccomp, consumer side.
 // Runs every shared fixture through the frontend generator and asserts it
 // produces the advisor-reference profile. The advisor Go suite
 // (advisor/pkg/k8s/seccomp_fixture_test.go) asserts the same fixtures from the
