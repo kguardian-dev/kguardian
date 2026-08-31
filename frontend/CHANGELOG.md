@@ -1,5 +1,17 @@
 # Changelog
 
+## [1.12.0](https://github.com/kguardian-dev/kguardian/compare/frontend/v1.11.4...frontend/v1.12.0) (2026-08-31)
+
+
+### Features
+
+* **frontend:** enterprise UI shell, design tokens, and shared primitives ([e0c88fb](https://github.com/kguardian-dev/kguardian/commit/e0c88fb195b778679e5f3068c4755d0eba710736))
+
+
+### Bug Fixes
+
+* **frontend:** drop the demo cluster; document SSO alongside the other chart options ([4d7136b](https://github.com/kguardian-dev/kguardian/commit/4d7136b636983dcf02e01d69753694425fb42e5a))
+
 ## [1.11.4](https://github.com/kguardian-dev/kguardian/compare/frontend/v1.11.3...frontend/v1.11.4) (2026-08-12)
 
 
