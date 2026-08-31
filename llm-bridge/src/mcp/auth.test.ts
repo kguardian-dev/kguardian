@@ -33,6 +33,25 @@ test("bearerTokenFrom parses the header the way clients actually send it", () =>
   assert.equal(bearerTokenFrom(`Basic ${TOKEN}`), null);
 });
 
+test("bearerTokenFrom stays linear on an adversarial header", () => {
+  // Regression gate for the polynomial ReDoS that CodeQL flagged in the
+  // original /^Bearer\s+(.*)$/i (js/polynomial-redos). `\s+` and `.` both
+  // match a space, so a long run of spaces followed by a newline the `.`
+  // cannot cross made the engine backtrack over every split of that run:
+  // quadratic, on a header an UNAUTHENTICATED caller controls.
+  //
+  // The old pattern took ~1.5s at 64k spaces and grows fourfold each time the
+  // input doubles, so it needs well over a minute here. The ceiling is set
+  // far above the linear implementation's sub-millisecond real cost purely so
+  // this cannot flake on a loaded CI runner — anything still quadratic misses
+  // it by orders of magnitude, which is the only distinction that matters.
+  const adversarial = "bearer" + " ".repeat(250_000) + "a\nb";
+  const started = process.hrtime.bigint();
+  bearerTokenFrom(adversarial);
+  const elapsedMs = Number(process.hrtime.bigint() - started) / 1e6;
+  assert.ok(elapsedMs < 1000, `parsing took ${elapsedMs.toFixed(1)}ms — the parser is backtracking again`);
+});
+
 test("requireBearer(null) is a pass-through", () => {
   let called = false;
   requireBearer(null)({ header: () => undefined } as never, {} as never, () => { called = true; });

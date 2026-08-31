@@ -36,11 +36,36 @@ export function tokensMatch(presented: string, expected: string): boolean {
  * case-insensitively because RFC 7235 defines it that way and clients do vary
  * ("bearer" is legal); the token itself is trimmed so a trailing space in a
  * hand-written config doesn't produce a confusing 401.
+ *
+ * Parsed with string operations rather than the obvious `/^Bearer\s+(.*)$/i`.
+ * That pattern is a polynomial ReDoS (CodeQL js/polynomial-redos): `\s+` and
+ * `.` both match a space, so the two are ambiguous, and on input shaped like
+ * "bearer" + many spaces + a newline — which `.` cannot cross — the engine
+ * backtracks over every way of splitting the run before it can fail. This
+ * function runs on an attacker-supplied header BEFORE authentication, so it
+ * has to be linear no matter what it is handed.
+ *
+ * One deliberate difference from that regex: it rejected a token containing a
+ * newline (because `.` cannot match one) and this does not. That rejection was
+ * an accident of the pattern rather than a rule, an HTTP header cannot carry a
+ * bare newline anyway, and the token is still compared in full by
+ * `tokensMatch` — so a more permissive parse cannot authenticate anyone who
+ * does not already know the secret. Tightening it instead would break an
+ * operator whose token happens to contain whitespace.
  */
+const BEARER_SCHEME = "bearer";
+
 export function bearerTokenFrom(header: string | undefined): string | null {
   if (!header) return null;
-  const match = /^Bearer\s+(.*)$/i.exec(header.trim());
-  return match ? match[1].trim() : null;
+  const trimmed = header.trim();
+  if (trimmed.length <= BEARER_SCHEME.length) return null;
+  if (trimmed.slice(0, BEARER_SCHEME.length).toLowerCase() !== BEARER_SCHEME) return null;
+  const rest = trimmed.slice(BEARER_SCHEME.length);
+  // RFC 7235 requires at least one space between the scheme and the token;
+  // without this check "Bearerv4lu3" would authenticate as "v4lu3". Testing
+  // the single leading character cannot backtrack.
+  if (!/^\s/.test(rest)) return null;
+  return rest.trim();
 }
 
 /**
