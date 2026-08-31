@@ -15,7 +15,7 @@ kguardian watches pod traffic and syscalls with eBPF, then writes Kubernetes Net
 - [**Generating Seccomp Profiles**](/concepts/seccomp-profiles) — least-privilege syscall profiles from runtime data.
 - [**Architecture**](/architecture) — Controller, Broker, storage; how data flows.
 - [**Operations**](/advanced/troubleshooting) — production deployment, retention, performance tuning.
-- [**AI Assistant**](https://github.com/kguardian-dev/kguardian/tree/main/llm-bridge) — optional LLM bridge for natural-language queries.
+- [**AI Assistant**](/installation#ai-assistant) — optional LLM Bridge for natural-language queries, and an [MCP endpoint](/guides/mcp-endpoint) for your own client.
 - [**Reference**](/cli/overview) — CLI, [API](/api-reference/introduction), [helm values](/installation).
 
 ## What is kguardian?
@@ -75,7 +75,7 @@ A Kubernetes runtime-observability tool that turns the network and syscall behav
 
 ## How it Works
 
-kguardian is built around four core components, plus an audit-mode evaluator (deployed by default) and an optional AI assistant (llm-bridge):
+kguardian is built around four core components, plus an audit-mode evaluator (deployed by default) and an optional AI assistant (the LLM Bridge):
 
 <Steps>
   <Step title="Controller Monitors">
@@ -99,7 +99,7 @@ kguardian is built around four core components, plus an audit-mode evaluator (de
   </Step>
 
   <Step title="AI Assistant (Optional)">
-    The optional **AI assistant** (llm-bridge) answers natural-language questions about cluster traffic and generates policies conversationally.
+    The optional **AI assistant** (the LLM Bridge) answers natural-language questions about cluster traffic and generates policies conversationally. The same tools can be served to an external MCP client — see [Connect an MCP Client](/guides/mcp-endpoint).
   </Step>
 </Steps>
 

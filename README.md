@@ -26,25 +26,17 @@ _Least-privilege Kubernetes security policies, generated from what your pods act
 
 </div>
 
+<div align="center">
+
+[Overview](#-overview) · [Features](#-features) · [Architecture](#️-architecture) · [Quick Start](#-quick-start) · [Usage](#️-usage) · [AI Assistant](#-ai-assistant) · [Compatibility](#-compatibility) · [Performance](#-performance) · [Telemetry](#-telemetry) · [Contributing](#-contributing) · [License](#-license)
+
+</div>
+
 # 🔭 Overview
 
 kguardian watches pod traffic and syscalls with eBPF, then writes Kubernetes `NetworkPolicy`, `CiliumNetworkPolicy`, and seccomp profiles from what it sees — no hand-authored rules.
 
 It's built for platform and security teams who want policy-as-code without writing rules by hand: the Controller (an eBPF DaemonSet) captures every TCP/UDP connection and syscall on each node, the Broker stores the per-pod baseline in PostgreSQL, and the `kubectl kguardian` plugin turns that baseline into least-privilege policy YAML for any pod, namespace, or the whole cluster.
-
-## 📖 Table of contents
-
-- [🔭 Overview](#-overview)
-- [✨ Features](#-features)
-- [🏗️ Architecture](#️-architecture)
-- [🚀 Quick Start](#-quick-start)
-- [🛠️ Usage](#️-usage)
-- [🤖 AI Assistant](#-ai-assistant)
-- [🧩 Compatibility](#-compatibility)
-- [📊 Performance](#-performance)
-- [📡 Telemetry](#-telemetry)
-- [🤝 Contributing](#-contributing)
-- [📄 License](#-license)
 
 ## ✨ Features
 
@@ -54,7 +46,7 @@ It's built for platform and security teams who want policy-as-code without writi
 - **Flexible targeting** — generate per-pod, per-namespace, or cluster-wide.
 - **Review-first by design** — the CLI writes YAML to `--output-dir` and never applies anything to the cluster; you review and `kubectl apply` the files yourself.
 - **GitOps-friendly output** — plain YAML/JSON files ready for review or a GitOps pipeline.
-- **Optional AI assistant** — query traffic and syscall data in natural language via the LLM bridge.
+- **Optional AI assistant** — query traffic and syscall data in natural language via the LLM Bridge, in the web UI or from your own MCP client.
 
 Example policies for common workloads (nginx, Postgres, kube-dns, Prometheus, Istio sidecar, a Go microservice) live in the [Policy Gallery](docs/policy-gallery/). For a comparison with Inspektor Gadget and Security Profiles Operator, see the [docs site](https://docs.kguardian.dev/#comparison-with-other-tools).
 
@@ -92,7 +84,7 @@ graph LR
 | **Evaluator** | Go | Deployment | Evaluates live flows against `AuditNetworkPolicy` CRDs and reports would-deny verdicts — without dropping a packet |
 | **CLI** (`kubectl kguardian`) | Go | kubectl plugin | Generates NetworkPolicies and seccomp profiles from the observed baseline |
 | **Web UI** | React + TypeScript | Deployment | Visualizes traffic, policies, and pod behavior |
-| **LLM Bridge** | TypeScript | Optional Deployment | Natural-language assistant over cluster traffic — runs all tools and policy/seccomp generation in-process ([llm-bridge/README.md](llm-bridge/README.md)) |
+| **LLM Bridge** | TypeScript | Optional Deployment | Natural-language assistant over cluster traffic — runs all tools and policy/seccomp generation in-process, and optionally serves them to external MCP clients ([llm-bridge/README.md](llm-bridge/README.md)) |
 
 ## 🚀 Quick Start
 
@@ -143,7 +135,28 @@ Full command reference, including audit workflows and advanced flags, is in the 
 
 ## 🤖 AI Assistant
 
-kguardian ships an optional natural-language assistant: ask questions like *"what has this pod talked to in the last hour?"* or *"generate a seccomp profile for the payments namespace"* from the Web UI. It's a single service, the LLM bridge (SSE streaming), that calls the broker's data directly and generates policies/seccomp profiles in-process — bring your own Anthropic API key. Setup and configuration live in [llm-bridge/README.md](llm-bridge/README.md).
+kguardian ships an optional natural-language assistant: ask questions like *"what has this pod talked to in the last hour?"* or *"generate a seccomp profile for the payments namespace"* from the Web UI. It's a single service, the LLM Bridge (SSE streaming), that reads the broker's data directly and generates policies and seccomp profiles in-process — bring your own API key for OpenAI, Anthropic, Gemini, or GitHub Copilot.
+
+```yaml
+ai:
+  enabled: true
+  provider: anthropic          # openai | anthropic | gemini | copilot
+  secret: kguardian-anthropic  # Secret holding the key under `api-key`
+```
+
+Running an OpenAI-compatible gateway (LiteLLM, vLLM, a proxy)? Add `ai.baseUrl` and `ai.model`. Two things to know: the API key is still required — provider availability is gated on the key alone, so point `ai.secret` at your gateway's virtual key (or a dummy value if it's unauthenticated) — and kguardian appends the request path to your base URL **verbatim**, never adding or stripping `/v1`. See the [AI assistant setup](https://docs.kguardian.dev/installation#ai-assistant).
+
+### 🔌 Connect your own MCP client
+
+The same 12 tools can be served over MCP at `POST /mcp` on the LLM Bridge, so Claude Code — or any MCP client — can read your cluster's observed telemetry and write policies from it. Off by default; enable with `ai.mcp.*`, port-forward, and add one server entry:
+
+```bash
+kubectl -n kguardian port-forward svc/kguardian-llm-bridge 8080:8080
+claude mcp add --transport http kguardian http://localhost:8080/mcp \
+  --header "Authorization: Bearer $KGUARDIAN_MCP_TOKEN"
+```
+
+Full walkthrough: [Connect an MCP Client](https://docs.kguardian.dev/guides/mcp-endpoint). Env vars, routes, and local development: [llm-bridge/README.md](llm-bridge/README.md).
 
 ## 🧩 Compatibility
 

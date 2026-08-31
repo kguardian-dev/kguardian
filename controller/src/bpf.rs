@@ -363,8 +363,38 @@ pub fn ebpf_handle(
             }
             consecutive_poll_errors = 0;
 
-            // Process any incoming messages from the pod watcher
-            if let Ok(inum) = rx.try_recv() {
+            // Drain the pod watcher's queues, don't sip from them.
+            //
+            // These were `if let`, taking ONE item per loop iteration. The
+            // iteration rate is tied to ring_buffer.poll() returning, and poll
+            // only returns once its callbacks have pushed every pending record
+            // through blocking_send into bounded(1000) channels. Under event
+            // load the poll thread spends most of its time parked in those
+            // sends, so iterations become rare and the intake rate collapses
+            // toward zero.
+            //
+            // Meanwhile resync_pods re-sends an inode for EVERY on-node pod
+            // every 60s unconditionally, so a 234-pod node offers ~234/min
+            // forever. Once intake falls below that, the bounded(1000) channel
+            // fills and the pod watcher parks on `send().await`. Nothing then
+            // registers a new pod again, and because the eBPF programs gate on
+            // the inode_num map (syscall.bpf.c: unknown netns returns early),
+            // unregistered pods emit nothing at all. On a node dominated by
+            // short-lived Jobs the registered set is soon entirely dead pods
+            // and telemetry decays to zero. The process stays healthy-looking
+            // throughout: Running, no restarts, flat memory.
+            //
+            // Bounded rather than a bare `while let` on purpose: an unbounded
+            // drain against a producer that can outrun us would keep us out of
+            // poll() and starve the ring buffers instead, trading one
+            // starvation for its mirror image. The cap is far above the real
+            // arrival rate (~234/min) yet still returns us to poll() promptly.
+            const MAX_DRAIN_PER_ITERATION: usize = 128;
+
+            let mut drained = 0;
+            while drained < MAX_DRAIN_PER_ITERATION {
+                let Ok(inum) = rx.try_recv() else { break };
+                drained += 1;
                 let _ = network_sk
                     .maps
                     .inode_num
@@ -382,7 +412,13 @@ pub fn ebpf_handle(
                     .map_err(|e| eprintln!("Failed to update netpolicy inode map: {}", e));
             }
             if ignore_daemonset_traffic {
-                if let Ok(ip) = ignore_ips.try_recv() {
+                // Same starvation, same bound: one IP per iteration meant the
+                // daemonset ignore-list lagged behind the pods it describes,
+                // so their traffic was recorded until the backlog caught up.
+                let mut ips_drained = 0;
+                while ips_drained < MAX_DRAIN_PER_ITERATION {
+                    let Ok(ip) = ignore_ips.try_recv() else { break };
+                    ips_drained += 1;
                     if let Ok(parsed_ip) = ip.parse::<Ipv4Addr>() {
                         let ip_u32 = u32::from(parsed_ip).to_be(); // Ensure the IP is in network byte order
                         let _ = network_sk

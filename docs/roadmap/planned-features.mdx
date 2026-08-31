@@ -66,10 +66,13 @@ narrative; for the current versions of each component, see
     - `kguardian audit promote` and `audit promote-cluster` CLI
       helpers for promoting an audit policy to an enforced
       `networking.k8s.io/v1.NetworkPolicy`.
-    - LLM bridge — AI assistant tab in the UI brokers cluster
+    - LLM Bridge — AI assistant tab in the UI brokers cluster
       questions through the broker's read endpoints (in-process
       tool calls; originally paired with a separate MCP server,
       since retired and folded into the bridge).
+    - [MCP endpoint](/guides/mcp-endpoint) — the same in-process
+      tools served to external MCP clients over HTTP from the
+      bridge, off by default.
 
     **Still planned (was tied to this cohort):**
     - AppArmor profile generation
@@ -162,7 +165,7 @@ For commercial licensees:
 ### Performance
 
 - **Scalability:** Support for 10,000+ pods
-- **Efficiency:** Reduce controller CPU overhead to <0.5%
+- **Efficiency:** Reduce controller CPU overhead to `<0.5%`
 - **Storage:** TimescaleDB for time-series optimization
 
 ### Developer Experience

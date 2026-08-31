@@ -1,0 +1,279 @@
+---
+title: "Connect an MCP Client"
+description: "Point Claude Code or any MCP client at your cluster's observed telemetry and have it write policies"
+icon: "plug"
+---
+
+kguardian's assistant runs 12 tools against the Broker: pod traffic, syscalls, pod and service inventory, network-policy audit verdicts, and generation of least-privilege `NetworkPolicy` and seccomp profiles from that observed baseline. The web UI is one way to reach them.
+
+The other is to point your own MCP client at the cluster. Enable the endpoint, port-forward, add one server entry, and the agent you already work in can ask about real observed behaviour and turn it into policy YAML — without an API key of kguardian's own, and without leaving your terminal.
+
+<Info>
+This is the same in-process tool registry the assistant uses, re-served over HTTP by the LLM Bridge at `POST /mcp`. It is not a separate deployment: no extra Service, port, or workload. A standalone MCP server component existed until it was retired in mid-2026; its tools moved into the LLM Bridge, and this endpoint re-exposes them.
+</Info>
+
+---
+
+## Before you start
+
+<Steps>
+  <Step title="kguardian is installed and has observed traffic">
+    Follow the [Quickstart](/quickstart) if you have not. Let workloads run for 5-15 minutes so there is a baseline to ask about.
+  </Step>
+
+  <Step title="The AI assistant is enabled">
+    The MCP endpoint is served by the LLM Bridge, so `ai.enabled` must be on. See [AI Assistant](/installation#ai-assistant) in the installation guide.
+
+    The endpoint itself needs no LLM provider key — the tools read the Broker directly, and your MCP client brings its own model. A provider key is only needed for the assistant tab in the UI.
+  </Step>
+
+  <Step title="The MCP endpoint is enabled">
+    Off by default. Turn it on with `ai.mcp.enabled`, below.
+  </Step>
+</Steps>
+
+---
+
+## Step 1: Enable the endpoint
+
+Generate a bearer token and store it as a Secret, then enable the endpoint against it:
+
+```bash
+kubectl create secret generic kguardian-mcp-token \
+  --namespace kguardian \
+  --from-literal=token="$(openssl rand -hex 32)"
+```
+
+```yaml values.yaml
+ai:
+  enabled: true
+  mcp:
+    enabled: true
+    auth:
+      existingSecret: kguardian-mcp-token
+      secretKey: token
+```
+
+```bash
+helm upgrade kguardian oci://ghcr.io/kguardian-dev/charts/kguardian \
+  --namespace kguardian \
+  --values values.yaml \
+  --wait
+```
+
+<Warning>
+Enabling `/mcp` serves cluster telemetry — pod traffic, syscalls, audit verdicts — to anything that can reach it, with no model in the path and no per-tool authorization.
+
+Worth being precise about what that changes. A workload already running in your cluster can read the same data from the Broker today, because `broker.auth.enabled` is `false` by default. Turning `/mcp` on does not newly expose it in-cluster. What `/mcp` adds is a route out: it exists to be used from your workstation over `kubectl port-forward`, by a client whose configuration may be shared with your team or committed to a repository. That is what the token protects.
+
+The chart refuses to render an unauthenticated endpoint by accident: `ai.mcp.enabled=true` with no `auth.existingSecret` fails the install unless you also set `ai.mcp.auth.allowUnauthenticated=true`. Use that opt-out only when a default-deny NetworkPolicy or a mesh with mTLS already fronts the workload — it exists so the decision shows up in a values diff, not as a shortcut.
+</Warning>
+
+Confirm it came up:
+
+```bash
+kubectl -n kguardian port-forward svc/kguardian-llm-bridge 8080:8080
+
+curl -s http://localhost:8080/health
+# {"status":"healthy","hasProvider":true,"mcp":true}
+```
+
+`"mcp": true` means the route is served. If it is `false`, the value did not reach the pod — check `kubectl -n kguardian logs deployment/kguardian-llm-bridge | grep MCP`, which states the posture outright at startup.
+
+---
+
+## Step 2: Reach the endpoint
+
+The Service is ClusterIP, so a port-forward is the normal way in. Leave this running:
+
+```bash
+kubectl -n kguardian port-forward svc/kguardian-llm-bridge 8080:8080
+```
+
+The endpoint is then at `http://localhost:8080/mcp`.
+
+<Tip>
+For a longer-lived setup, expose the LLM Bridge through your ingress and use the public URL instead. Keep the bearer token — outside a port-forward it is the only thing standing between the internet and your cluster's telemetry.
+</Tip>
+
+---
+
+## Step 3: Add the server to your client
+
+<CodeGroup>
+```bash Claude Code (with token)
+claude mcp add --transport http kguardian http://localhost:8080/mcp \
+  --header "Authorization: Bearer $KGUARDIAN_MCP_TOKEN"
+```
+
+```bash Claude Code (no token)
+claude mcp add --transport http kguardian http://localhost:8080/mcp
+```
+</CodeGroup>
+
+Read the token out of the cluster if you do not have it to hand:
+
+```bash
+export KGUARDIAN_MCP_TOKEN=$(kubectl -n kguardian get secret kguardian-mcp-token \
+  -o jsonpath='{.data.token}' | base64 -d)
+```
+
+`claude mcp add` defaults to local scope. Add `--scope project` to write the entry into a `.mcp.json` your team shares, or write the file yourself:
+
+<CodeGroup>
+```json .mcp.json (with token)
+{
+  "mcpServers": {
+    "kguardian": {
+      "type": "http",
+      "url": "http://localhost:8080/mcp",
+      "headers": {
+        "Authorization": "Bearer <token>"
+      }
+    }
+  }
+}
+```
+
+```json .mcp.json (no token)
+{
+  "mcpServers": {
+    "kguardian": {
+      "type": "http",
+      "url": "http://localhost:8080/mcp"
+    }
+  }
+}
+```
+</CodeGroup>
+
+<Warning>
+A committed `.mcp.json` with a literal token puts that token in your git history. For a shared file, prefer `claude mcp add` at local scope, or keep the project entry unauthenticated and rely on the port-forward.
+</Warning>
+
+Any MCP client that speaks StreamableHTTP works — the shape above is Claude Code's; other clients take the same URL and `Authorization` header in whatever config they use.
+
+Verify the client sees the tools:
+
+```bash
+claude mcp list
+```
+
+---
+
+## What you can ask for
+
+The 12 tools cover four areas. The value is not any single call — it is that an agent can chain them: find the pod, read its real traffic, check what a policy would have denied, then write the policy.
+
+<AccordionGroup>
+  <Accordion icon="chart-network" title="Observed network traffic">
+    `get_pod_network_traffic` returns a pod's source/destination IPs, ports, protocols, direction, and per-flow allow/drop decisions. `get_cluster_traffic` summarises the whole cluster — per-pod ingress/egress, allow/drop counts, unique peers, and a cluster-wide drop total — with an optional namespace filter.
+
+    *"Which pods in `payments` are seeing dropped egress, and what were they trying to reach?"*
+  </Accordion>
+
+  <Accordion icon="microchip" title="Syscall activity">
+    `get_pod_syscalls` returns the syscall names, frequencies, and architecture observed for a pod.
+
+    *"Has the `worker` pod called anything unusual since yesterday's deploy?"*
+  </Accordion>
+
+  <Accordion icon="magnifying-glass" title="Cluster inventory">
+    `get_cluster_pods`, `get_pod_details_by_name`, `get_pods_on_node`, `list_services`, and the IP-based lookups `get_pod_details` and `get_service_details` resolve names, IPs, nodes, and selectors.
+
+    *"An audit verdict names `10.0.4.19` — what is it, and what else runs on its node?"*
+  </Accordion>
+
+  <Accordion icon="scale-balanced" title="Audit verdicts">
+    `get_audit_verdicts` returns flows the evaluator judged `Allow` or `WouldDeny` against your `AuditNetworkPolicy` and `AuditClusterNetworkPolicy` resources, with the human-readable reason, newest first. Filter by policy, namespace, cluster-scoped, verdict, direction, and limit.
+
+    *"Show me every WouldDeny on the `api-baseline` policy and explain what would break."*
+  </Accordion>
+
+  <Accordion icon="file-shield" title="Policy and profile generation">
+    `generate_network_policy` returns ready-to-apply YAML — a standard `NetworkPolicy` by default, or a `CiliumNetworkPolicy` — synthesised deterministically from a pod's captured flows, not guessed. `generate_seccomp_profile` returns seccomp JSON allow-listing the syscalls that pod actually made.
+
+    *"Generate a Cilium policy for `checkout`, then tell me which existing verdicts it would newly deny."*
+  </Accordion>
+</AccordionGroup>
+
+Pod-specific tools take only `pod_name` — the Broker resolves it cluster-wide, so there is no namespace argument. Cluster-wide tools take an optional `namespace` filter.
+
+<Note>
+Every tool is a read against the Broker, plus two that compute policy locally. Nothing here writes to your cluster: an agent can hand you a `NetworkPolicy`, but applying it is still `kubectl apply` and your review.
+</Note>
+
+---
+
+## How the endpoint behaves
+
+Worth knowing before you file a bug:
+
+| Behaviour | Why |
+|---|---|
+| `POST /mcp` only | The endpoint is stateless — each request is self-contained, so it load-balances across replicas with no session to lose |
+| `GET` and `DELETE` return `405` | By design, with `Allow: POST`. A `GET` would open a server-notification stream this server never writes to and pin the socket open. The MCP spec permits `405` here, and clients treat it as "not offered" and carry on |
+| Requests need `Content-Type: application/json` **and** `Accept: application/json, text/event-stream` | Both, or you get a `406`. Responses come back as Server-Sent Events |
+| Wrong or missing token returns `401` | With a `WWW-Authenticate: Bearer` header. The body never says whether a token was absent, malformed, or merely wrong |
+| Disabled means `404`, not `403` | The route is never mounted, so a default install is indistinguishable from a build that never had the endpoint |
+| 300 requests/minute, per replica | `ai.mcp.rateLimitPerMin`. Sized for agent traffic: one session is many round-trips, and an investigation walking pods to traffic to verdicts to policy burns 30-60 calls in seconds. It is a runaway-client guard, not a quota |
+
+The server identifies itself as `kguardian` at the LLM Bridge version and advertises the `tools` capability only — it serves no MCP resources or prompts.
+
+To check the wire directly, without a client:
+
+```bash
+curl -sN -X POST http://localhost:8080/mcp \
+  -H "Content-Type: application/json" \
+  -H "Accept: application/json, text/event-stream" \
+  -H "Authorization: Bearer $KGUARDIAN_MCP_TOKEN" \
+  -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'
+```
+
+---
+
+## Troubleshooting
+
+<AccordionGroup>
+  <Accordion icon="triangle-exclamation" title="404 on /mcp">
+    The endpoint is not enabled. `curl -s localhost:8080/health` reports `"mcp": false`. Check that `ai.mcp.enabled=true` reached the pod:
+
+    ```bash
+    kubectl -n kguardian get deploy kguardian-llm-bridge \
+      -o jsonpath='{.spec.template.spec.containers[0].env}' | tr ',' '\n' | grep -i mcp
+    ```
+  </Accordion>
+
+  <Accordion icon="triangle-exclamation" title="401 Unauthorized">
+    `MCP_AUTH_TOKEN` is set in the pod and your client is not sending a matching `Authorization: Bearer <token>`. Re-read the token from the Secret and confirm the header reached the request — a stale value in a client config is the usual cause.
+  </Accordion>
+
+  <Accordion icon="triangle-exclamation" title="406 Not Acceptable">
+    The request is missing one of the two required headers. A compliant MCP client sends both automatically; this normally only appears in a hand-rolled `curl`.
+  </Accordion>
+
+  <Accordion icon="triangle-exclamation" title="405 on GET">
+    Expected, not a fault. See the table above.
+  </Accordion>
+
+  <Accordion icon="triangle-exclamation" title="Tools connect but return no data">
+    The endpoint is healthy and the Broker has nothing to report. Confirm the Controller is observing — `kubectl logs -n kguardian daemonset/kguardian-controller` — and that workloads have been running long enough. See [Troubleshooting](/advanced/troubleshooting).
+  </Accordion>
+</AccordionGroup>
+
+---
+
+<CardGroup cols={2}>
+  <Card title="Enable the AI assistant" icon="robot" href="/installation#ai-assistant">
+    Chart values, provider keys, and OpenAI-compatible gateways
+  </Card>
+  <Card title="Architecture" icon="sitemap" href="/architecture">
+    Where the LLM Bridge sits and what it talks to
+  </Card>
+  <Card title="Audit policies" icon="scale-balanced" href="/concepts/audit-network-policy">
+    What the verdict tools are reading
+  </Card>
+  <Card title="Generating policies" icon="network-wired" href="/guides/generating-network-policies">
+    The same generation, from the CLI
+  </Card>
+</CardGroup>

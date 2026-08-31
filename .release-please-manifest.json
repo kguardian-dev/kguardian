@@ -1,9 +1,9 @@
 {
-  "controller": "1.9.1",
-  "broker": "1.12.3",
-  "frontend": "1.11.3",
+  "controller": "1.9.3",
+  "broker": "1.12.4",
+  "frontend": "1.11.4",
   "advisor": "1.7.0",
-  "charts/kguardian": "1.17.1",
-  "llm-bridge": "1.6.1",
-  "evaluator": "0.3.3"
+  "charts/kguardian": "1.17.3",
+  "llm-bridge": "1.6.2",
+  "evaluator": "0.3.4"
 }

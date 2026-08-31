@@ -11,6 +11,8 @@ import { log } from "./logger.js";
 import { callOpenAI, callCopilot } from "./providers/openai.js";
 import { callAnthropic, streamAnthropic, type StreamEvent } from "./providers/anthropic.js";
 import { callGemini } from "./providers/gemini.js";
+import { MCP_PATH, mcpConfigFromEnv } from "./mcp/config.js";
+import { createMcpRouter } from "./mcp/router.js";
 import type { ChatRequest, ChatResponse } from "./types/index.js";
 
 // Load environment variables
@@ -28,8 +30,16 @@ export const app = express();
 // evaluator / mcp-server env reads.
 const port = (process.env.PORT?.trim() || "8080");
 const allowedOrigin = process.env.ALLOWED_ORIGIN?.trim() || '*';
+const mcpConfig = mcpConfigFromEnv(process.env);
 
-// Middleware
+// Middleware. `cors()` is deliberately first: with the default
+// `allowedHeaders` unset it reflects the browser's
+// Access-Control-Request-Headers back, which is what lets a browser-based
+// MCP client send `mcp-protocol-version` (and `authorization`) without the
+// preflight being rejected. Setting ALLOWED_ORIGIN to the UI's origin locks
+// that down and would block MCP clients from any other origin — the endpoint
+// is intended for non-browser clients reached over port-forward, so that is
+// the right default, but it is a real constraint to document.
 app.use(cors({ origin: allowedOrigin }));
 app.use(express.json({ limit: '100kb' }));
 
@@ -119,14 +129,27 @@ function callProvider(provider: LLMProvider, chatRequest: ChatRequest): Promise<
   }
 }
 
-// Health check endpoint
+// Health check endpoint. `status` and `hasProvider` are load-bearing — the
+// chart's liveness/readiness probes and the frontend's provider gate read
+// them — so `mcp` is added alongside rather than reshaping the body.
 app.get("/health", (req: Request, res: Response) => {
   const availableProviders = getAvailableProviders();
   res.json({
     status: "healthy",
     hasProvider: availableProviders.length > 0,
+    mcp: mcpConfig.enabled,
   });
 });
+
+// External MCP endpoint. Mounted only when enabled, so /mcp 404s on a default
+// install exactly as if the route did not exist — no "deployed but off"
+// endpoint answering with a 403 and inviting probing. Placed after the JSON
+// body parser (the transport is handed the already-parsed body) and before
+// the chat routes, though it carries its own rate limiter and auth so the
+// ordering is not load-bearing.
+if (mcpConfig.enabled) {
+  app.use(MCP_PATH, createMcpRouter(mcpConfig));
+}
 
 // Rate limiting for chat endpoint
 const chatLimiter = rateLimit({
@@ -239,6 +262,20 @@ function startServer() {
     log.info(`LLM Bridge listening on port ${port}`);
     log.info(`Broker URL: ${process.env.BROKER_URL || "(default)"}`);
     log.info(`Available providers: ${availableProviders.join(", ") || "NONE"}`);
+    // State the MCP posture explicitly at startup. "Is it on, and does it
+    // want a token?" is the first thing an operator debugging a client
+    // connection needs, and inferring it from the absence of a log line is
+    // exactly the "silently deployed-but-off" failure this project has been
+    // burned by before.
+    if (mcpConfig.enabled) {
+      log.info(
+        `MCP endpoint: enabled at ${MCP_PATH} ` +
+        `(auth: ${mcpConfig.authToken ? "bearer token required" : "none"}, ` +
+        `rate limit: ${mcpConfig.rateLimitPerMin}/min)`,
+      );
+    } else {
+      log.info("MCP endpoint: disabled (set MCP_ENABLED=true to serve tools at /mcp)");
+    }
 
     if (availableProviders.length === 0) {
       log.warn("WARNING: No LLM provider API keys configured!");

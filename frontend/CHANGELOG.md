@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.11.4](https://github.com/kguardian-dev/kguardian/compare/frontend/v1.11.3...frontend/v1.11.4) (2026-08-12)
+
+
+### Bug Fixes
+
+* **deps:** patch vulnerable npm transitives in frontend + llm-bridge (security) ([#1265](https://github.com/kguardian-dev/kguardian/issues/1265)) ([f3a86e3](https://github.com/kguardian-dev/kguardian/commit/f3a86e3a8b910425712dfcf887de1118fec9216f))
+
 ## [1.11.3](https://github.com/kguardian-dev/kguardian/compare/frontend/v1.11.2...frontend/v1.11.3) (2026-07-29)
 
 

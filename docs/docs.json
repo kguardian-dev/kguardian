@@ -35,7 +35,8 @@
           {
             "group": "User Guides",
             "pages": [
-              "guides/generating-network-policies"
+              "guides/generating-network-policies",
+              "guides/mcp-endpoint"
             ]
           },
           {
