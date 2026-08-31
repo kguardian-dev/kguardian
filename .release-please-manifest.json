@@ -5,5 +5,5 @@
   "advisor": "1.7.1",
   "charts/kguardian": "1.18.0",
   "llm-bridge": "1.7.0",
-  "evaluator": "0.3.5"
+  "evaluator": "0.3.6"
 }

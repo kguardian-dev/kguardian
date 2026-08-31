@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.3.6](https://github.com/kguardian-dev/kguardian/compare/evaluator/v0.3.5...evaluator/v0.3.6) (2026-08-31)
+
+
+### Bug Fixes
+
+* **deps:** bump golang.org/x/net to v0.55.0 (security) ([#1263](https://github.com/kguardian-dev/kguardian/issues/1263)) ([3e559c0](https://github.com/kguardian-dev/kguardian/commit/3e559c0b82bdde3e7c3caffa9bde38e8e875f295))
+* **deps:** update kubernetes monorepo to v0.36.2 ([#956](https://github.com/kguardian-dev/kguardian/issues/956)) ([f0f0114](https://github.com/kguardian-dev/kguardian/commit/f0f01149398e6860291b45e4f5948a23c50d7b0e))
+* **deps:** update kubernetes monorepo to v0.36.3 ([#1145](https://github.com/kguardian-dev/kguardian/issues/1145)) ([1ff8c64](https://github.com/kguardian-dev/kguardian/commit/1ff8c64b593993131f5c0ffb6d3e9bdad0218d65))
+* **deps:** update kubernetes monorepo to v0.36.4 ([#1312](https://github.com/kguardian-dev/kguardian/issues/1312)) ([84e19c2](https://github.com/kguardian-dev/kguardian/commit/84e19c2371ac536dd1ba67163e065fcd0954cb3e))
+* **deps:** update kubernetes monorepo to v0.37.0 ([#1330](https://github.com/kguardian-dev/kguardian/issues/1330)) ([9b9d50d](https://github.com/kguardian-dev/kguardian/commit/9b9d50dd85c3a49755bfa4f38dd80a2b58e4113d))
+* **deps:** update module github.com/sirupsen/logrus to v1.10.0 ([#1289](https://github.com/kguardian-dev/kguardian/issues/1289)) ([a1fb76e](https://github.com/kguardian-dev/kguardian/commit/a1fb76e1b5085716730641afe3fecf718b072fe8))
+* **deps:** update module github.com/sirupsen/logrus to v1.10.1 ([#1300](https://github.com/kguardian-dev/kguardian/issues/1300)) ([e9a323a](https://github.com/kguardian-dev/kguardian/commit/e9a323a0f8c55951310ed06ef818493c22bffd0c))
+* **deps:** update module github.com/sirupsen/logrus to v1.10.2 ([#1325](https://github.com/kguardian-dev/kguardian/issues/1325)) ([2c48771](https://github.com/kguardian-dev/kguardian/commit/2c48771c2889fbcf7bdf8bd5dd94753315005bf8))
+
 ## [0.3.5](https://github.com/kguardian-dev/kguardian/compare/evaluator/v0.3.4...evaluator/v0.3.5) (2026-08-31)
 
 
