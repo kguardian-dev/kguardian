@@ -2,6 +2,7 @@ import type { PodNodeData } from '../types';
 import type { NetworkPolicy, NetworkPolicyRule, NetworkPolicyPeer } from '../types/networkPolicy';
 import { apiClient } from '../services/api';
 import { resolveTrafficIdentity, type TrafficIdentity } from './trafficIdentity';
+import { peerCIDR } from './ipCidr';
 
 export async function generateNetworkPolicy(pod: PodNodeData): Promise<NetworkPolicy> {
   const ingressRules: NetworkPolicyRule[] = [];
@@ -125,7 +126,9 @@ export async function generateNetworkPolicy(pod: PodNodeData): Promise<NetworkPo
   };
 
   // Helper function to create peer based on identity type
-  const createPeer = async (peerInfo: PeerInfo): Promise<NetworkPolicyPeer> => {
+  // Returns null when the peer is an external IP that does not parse as an
+  // address literal - see peerCIDR; the caller drops the rule in that case.
+  const createPeer = async (peerInfo: PeerInfo): Promise<NetworkPolicyPeer | null> => {
     const { identity } = peerInfo;
 
     if (identity.svcName) {
@@ -170,10 +173,14 @@ export async function generateNetworkPolicy(pod: PodNodeData): Promise<NetworkPo
 
       return peer;
     } else {
-      // External IP - use IP block
+      // External IP - use IP block. The host mask follows the address family:
+      // /32 for IPv4, /128 for IPv6 (a /32 on a v6 address would cover 2^96
+      // hosts rather than the single peer we observed).
+      const cidr = peerCIDR(peerInfo.ip);
+      if (cidr === null) return null;
       return {
         ipBlock: {
-          cidr: `${peerInfo.ip}/32`,
+          cidr,
         },
       };
     }
@@ -181,9 +188,13 @@ export async function generateNetworkPolicy(pod: PodNodeData): Promise<NetworkPo
 
   // Build ingress rules - one rule per peer with all its ports
   for (const { peer, ports } of ingressMap.values()) {
+    const resolvedPeer = await createPeer(peer);
+    // An unparseable peer IP drops the whole rule rather than emitting a
+    // malformed CIDR, which would make the API server reject the entire policy.
+    if (resolvedPeer === null) continue;
     const rule: NetworkPolicyRule = {
       id: `ingress-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
-      peers: [await createPeer(peer)],
+      peers: [resolvedPeer],
       ports: Array.from(ports).map((portStr) => {
         const [protocol, port] = portStr.split(':');
         return {
@@ -197,9 +208,13 @@ export async function generateNetworkPolicy(pod: PodNodeData): Promise<NetworkPo
 
   // Build egress rules - one rule per peer with all its ports
   for (const { peer, ports } of egressMap.values()) {
+    const resolvedPeer = await createPeer(peer);
+    // An unparseable peer IP drops the whole rule rather than emitting a
+    // malformed CIDR, which would make the API server reject the entire policy.
+    if (resolvedPeer === null) continue;
     const rule: NetworkPolicyRule = {
       id: `egress-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
-      peers: [await createPeer(peer)],
+      peers: [resolvedPeer],
       ports: Array.from(ports).map((portStr) => {
         const [protocol, port] = portStr.split(':');
         return {
@@ -241,11 +256,18 @@ export async function generateNetworkPolicy(pod: PodNodeData): Promise<NetworkPo
     },
   };
 
-  // Add policy types
-  if (ingressRules.length > 0) {
+  // The policyType is driven by the direction being OBSERVED, not by the rule
+  // list surviving. Those were the same thing until unparseable peers began
+  // being dropped above: if every peer in a direction fails to resolve, the
+  // rule list is empty, and gating the policyType on it would omit the
+  // direction entirely — which does not mean "deny", it means the policy stops
+  // restricting that direction at all. Keeping the type with an empty rule list
+  // is the default-deny form, and matches the advisor (standard_policy.go) and
+  // llm-bridge, both of which key off the observed direction for this reason.
+  if (ingressMap.size > 0) {
     policy.spec.policyTypes.push('Ingress');
   }
-  if (egressRules.length > 0) {
+  if (egressMap.size > 0) {
     policy.spec.policyTypes.push('Egress');
   }
 
