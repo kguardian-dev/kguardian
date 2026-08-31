@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.3.5](https://github.com/kguardian-dev/kguardian/compare/evaluator/v0.3.4...evaluator/v0.3.5) (2026-08-31)
+
+
+### Bug Fixes
+
+* **deps:** update kubernetes monorepo to v0.36.4 ([#1312](https://github.com/kguardian-dev/kguardian/issues/1312)) ([090b547](https://github.com/kguardian-dev/kguardian/commit/090b5473212e7f112ce7f3129335b25455f7e2e9))
+* **deps:** update kubernetes monorepo to v0.37.0 ([#1330](https://github.com/kguardian-dev/kguardian/issues/1330)) ([a369619](https://github.com/kguardian-dev/kguardian/commit/a36961950bfe19bf883ce4892d9fc857d68c72fc))
+* **deps:** update module github.com/sirupsen/logrus to v1.10.0 ([#1289](https://github.com/kguardian-dev/kguardian/issues/1289)) ([940b755](https://github.com/kguardian-dev/kguardian/commit/940b75501e90a1b7ba22f67a4f67998d920a4faf))
+* **deps:** update module github.com/sirupsen/logrus to v1.10.1 ([#1300](https://github.com/kguardian-dev/kguardian/issues/1300)) ([edd550a](https://github.com/kguardian-dev/kguardian/commit/edd550aba54d73d94f5fab7fe38cdb6a1c412750))
+* **deps:** update module github.com/sirupsen/logrus to v1.10.2 ([#1325](https://github.com/kguardian-dev/kguardian/issues/1325)) ([b9b5d12](https://github.com/kguardian-dev/kguardian/commit/b9b5d124c7c9cabe6bb5872663ba97f0e0f369ec))
+
 ## [0.3.4](https://github.com/kguardian-dev/kguardian/compare/evaluator/v0.3.3...evaluator/v0.3.4) (2026-08-12)
 
 
