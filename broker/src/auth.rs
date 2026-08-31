@@ -112,6 +112,13 @@ mod tests {
 
     #[test]
     fn from_env_treats_blank_as_disabled() {
+        // Crate-wide env lock — std::env is process-global, so this
+        // must not run concurrently with main.rs's `with_env` even
+        // though the two touch different keys (see test_support).
+        // Without it this test's set_var/remove_var interleaved with
+        // main.rs's save/restore window and flaked
+        // `listen_addr_honors_override`.
+        let _guard = crate::test_support::env_lock();
         // Saved/restored around the test to avoid cross-test bleed; the
         // broker reads this once at startup in production.
         let prev = std::env::var("BROKER_AUTH_TOKEN").ok();

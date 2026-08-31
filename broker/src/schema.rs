@@ -17,6 +17,13 @@ diesel::table! {
         is_dead -> Bool,
         pod_identity -> Nullable<Varchar>,
         workload_selector_labels -> Nullable<Json>,
+        // Jsonb (not Json like the two columns above): the pod-by-IP
+        // lookup matches with the `@>` containment operator, which
+        // only exists for jsonb, and the GIN index added alongside
+        // the column is a jsonb_path_ops index. Declared last to match
+        // the physical column order ALTER TABLE ADD COLUMN produces —
+        // PodDetail derives Queryable, which is positional.
+        pod_ips -> Nullable<Jsonb>,
     }
 }
 
