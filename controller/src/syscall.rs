@@ -1,5 +1,5 @@
+use crate::models::{lookup_pod, ContainerMap};
 use chrono::Utc;
-use dashmap::DashMap;
 use libseccomp::{ScmpArch, ScmpSyscall};
 use moka::future::Cache;
 use serde_json::json;
@@ -33,11 +33,15 @@ pub struct SyscallEventData {
 
 pub async fn handle_syscall_events(
     mut event_receiver: tokio::sync::mpsc::Receiver<SyscallEventData>,
-    container_map: Arc<DashMap<u64, PodInspect>>,
+    container_map: ContainerMap,
 ) -> Result<(), Error> {
     while let Some(event) = event_receiver.recv().await {
-        // DashMap provides lock-free reads - no need for explicit locking!
-        if let Some(pod_inspect) = container_map.get(&event.inum) {
+        // Resolve before awaiting. This was the worst of the three sites: the
+        // inline `get()` held the shard's read guard across
+        // process_syscall_event, which itself awaits a tokio Mutex shared
+        // with the periodic sender — so the guard could be held for as long
+        // as that lock was contended. See ContainerMap in models.rs.
+        if let Some(pod_inspect) = lookup_pod(&container_map, event.inum) {
             process_syscall_event(&event, &pod_inspect).await?
         }
     }

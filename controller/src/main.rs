@@ -13,7 +13,7 @@ use kguardian::syscall::{
     handle_syscall_events, send_syscall_cache_periodically, SyscallEventData,
 };
 use kguardian::{
-    error::Error, models::PodInspect, network::NetworkEventData,
+    error::Error, models::ContainerMap, network::NetworkEventData,
     pod_reconciler::reconcile_pods_task, pod_watcher::watch_pods,
 };
 
@@ -63,8 +63,11 @@ async fn main() -> Result<(), Error> {
 
     let (sender_ip, recv_ip) = mpsc::channel(1000); // Use tokio's mpsc channel
 
-    // Use DashMap for lock-free concurrent access (much faster than Mutex<BTreeMap>)
-    let container_map: Arc<DashMap<u64, PodInspect>> = Arc::new(DashMap::new());
+    // Shared inode -> pod map. NOTE: DashMap is sharded RwLocks, not lock-free.
+    // Every subsystem below is joined into ONE task by try_join!, so a shard
+    // guard held across an .await blocks the whole controller permanently.
+    // Read it only via models::lookup_pod. See ContainerMap for the detail.
+    let container_map: ContainerMap = Arc::new(DashMap::new());
     let pod_c = Arc::clone(&container_map);
     let network_map = Arc::clone(&container_map);
     let syscall_map = Arc::clone(&container_map);
