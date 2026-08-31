@@ -13,13 +13,18 @@ export interface Cluster {
 // ingestion), this list will come from an API and `activeCluster.apiBase` will
 // route the data layer (services/api.ts) per selected cluster — no UI rewrite,
 // just swap this provider's source and thread `activeCluster` into the client.
-const LOCAL_CLUSTERS: Cluster[] = [
-  { id: 'cluster-00', name: 'cluster-00' },
-  // DEMO: a second entry with no distinct apiBase, so it mirrors cluster-00's
-  // data. Purely to visualize the multi-cluster switcher until real per-cluster
-  // ingestion lands (then each entry gets its own source/apiBase).
-  { id: 'cluster-01', name: 'cluster-01' },
-];
+// Exactly one entry, deliberately. A second entry was used during design
+// preview to exercise the switcher, but it carried no distinct apiBase, so
+// selecting it showed the primary cluster's data under another cluster's name.
+// In a tool people use to decide what traffic is legitimate, telemetry
+// mislabelled with the wrong cluster is worse than no multi-cluster support at
+// all, so nothing goes in this list that is not a real, separately-sourced
+// cluster.
+//
+// The name is generic for the same reason: the UI has no way to learn the
+// cluster's real identity (no API exposes it), so anything specific here would
+// be wrong for every operator but the one it was written for.
+const LOCAL_CLUSTERS: Cluster[] = [{ id: 'primary', name: 'Primary' }];
 
 const ACTIVE_KEY = 'kg-active-cluster';
 
