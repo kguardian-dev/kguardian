@@ -6,6 +6,7 @@ import (
 	"strconv"
 
 	"github.com/kguardian-dev/kguardian/advisor/pkg/api"
+	"github.com/kguardian-dev/kguardian/advisor/pkg/common"
 	log "github.com/rs/zerolog/log"
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
@@ -356,11 +357,25 @@ func (g *StandardPolicyGenerator) createNetworkPolicyPeer(peerIP string) *networ
 		log.Debug().Msgf("No pod found for IP %s, falling back to IPBlock", peerIP)
 	}
 
-	// Fall back to IPBlock for external IPs or unresolvable cluster IPs
-	log.Debug().Msgf("Using IPBlock for peer %s", peerIP)
+	// Fall back to IPBlock for external IPs or unresolvable cluster IPs.
+	//
+	// common.HostCIDR picks the prefix length from the address family
+	// (/32 for IPv4, /128 for IPv6) — this used to be a hardcoded "/32",
+	// which on a dual-stack cluster turned a single peer into the whole
+	// fd00::/32 block. It rejects anything it cannot parse; returning nil
+	// here is the established "peer could not be determined" signal that
+	// both transform loops already skip on, so an unusable address costs
+	// us that one rule instead of poisoning the entire policy with a
+	// malformed ipBlock.
+	cidr, err := common.HostCIDR(peerIP)
+	if err != nil {
+		log.Warn().Err(err).Msgf("Skipping peer %s: cannot express it as a host CIDR", peerIP)
+		return nil
+	}
+	log.Debug().Msgf("Using IPBlock %s for peer %s", cidr, peerIP)
 	return &networkingv1.NetworkPolicyPeer{
 		IPBlock: &networkingv1.IPBlock{
-			CIDR: fmt.Sprintf("%s/32", peerIP),
+			CIDR: cidr,
 		},
 	}
 }

@@ -383,3 +383,56 @@ func TestConvertPortsToCiliumPortRules_DeterministicOrdering(t *testing.T) {
 		}
 	}
 }
+
+func TestResolvePeerForCilium_HostCIDRPerAddressFamily(t *testing.T) {
+	// Mirror of the standard generator's fallback test. toCIDR entries
+	// used to be built with a hardcoded "/32", so an IPv6 peer became
+	// fd00::1/32 — ~2^96 addresses granted in place of one host.
+	gen := NewCiliumPolicyGenerator()
+	gen.setBrokerData(stubBrokerData{})
+
+	for _, tc := range []struct {
+		name string
+		ip   string
+		want []string
+	}{
+		{name: "ipv4 peer keeps /32", ip: "10.96.0.10", want: []string{"10.96.0.10/32"}},
+		{name: "ipv6 peer gets /128", ip: "fd00:96::a", want: []string{"fd00:96::a/128"}},
+		{name: "ipv6 loopback gets /128", ip: "::1", want: []string{"::1/128"}},
+		// No CIDR and no endpoint selector is the existing "could not
+		// resolve peer" signal the rule builders already drop on.
+		{name: "unparseable peer yields no selector", ip: "not-an-ip", want: nil},
+		{name: "empty peer yields no selector", ip: "", want: nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			endpoints, cidrs := gen.resolvePeerForCilium(tc.ip)
+			assert.Nil(t, endpoints, "unresolvable peers must not produce an endpoint selector")
+			assert.Equal(t, tc.want, cidrs)
+		})
+	}
+}
+
+func TestCiliumGenerate_DualStackAndUnparseablePeer(t *testing.T) {
+	// A dual-stack pod's policy must carry /128 and /32 entries together,
+	// and an unparseable peer must cost only its own rule.
+	gen := NewCiliumPolicyGenerator()
+	gen.setBrokerData(stubBrokerData{})
+	detail := mockPodDetail("web6", "prod", "fd00::1", map[string]string{"app": "web"})
+	traffic := []api.PodTraffic{
+		{TrafficType: "EGRESS", SrcIP: "fd00::1", DstIP: "fd00:96::a", DstPort: "5432", Protocol: "TCP"},
+		{TrafficType: "EGRESS", SrcIP: "fd00::1", DstIP: "10.96.0.10", DstPort: "5432", Protocol: "TCP"},
+		{TrafficType: "EGRESS", SrcIP: "fd00::1", DstIP: "junk", DstPort: "5432", Protocol: "TCP"},
+	}
+
+	policyInterface, err := gen.Generate("web6", traffic, detail)
+	assert.NoError(t, err)
+	policy, ok := policyInterface.(*CiliumNetworkPolicy)
+	assert.True(t, ok, "expected a *CiliumNetworkPolicy")
+
+	var got []string
+	for _, rule := range policy.Spec.Egress {
+		got = append(got, rule.ToCIDR...)
+	}
+	assert.ElementsMatch(t, []string{"10.96.0.10/32", "fd00:96::a/128"}, got,
+		"both families must appear side by side and the unparseable peer must be dropped")
+}
