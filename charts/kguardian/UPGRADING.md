@@ -1,5 +1,43 @@
 # Upgrading the kguardian Helm chart
 
+## SSO (opt-in): gate the UI behind OIDC via oauth2-proxy (`frontend.sso.*`)
+
+The kguardian UI and broker API are unauthenticated by default. In a **Gateway
+API** environment with an identity-aware proxy (**oauth2-proxy** in front of an
+OIDC provider such as Dex/Keycloak/Authentik), the chart can gate the frontend
+route behind SSO. It renders two Envoy Gateway objects (nothing when
+`frontend.sso.enabled=false`, the default):
+
+1. a **`SecurityPolicy`** that ext-auths the frontend HTTPRoute against
+   oauth2-proxy — anonymous requests get `401` and are sent to sign in; and
+2. an **`/oauth2/*` HTTPRoute** to oauth2-proxy so the OIDC callback and
+   `/oauth2/userinfo` are served **same-origin**. The frontend auto-detects the
+   session from `/oauth2/userinfo` at runtime (no rebuild, no env flag) and the
+   account menu shows the signed-in user; without the proxy it stays in local
+   mode.
+
+```yaml
+frontend:
+  sso:
+    enabled: true
+    httpRouteName: kguardian          # the HTTPRoute you expose the UI on
+    hostnames: ["kguardian.example.com"]
+    parentRefs:
+      - name: envoy-external
+        namespace: network-system
+        sectionName: https
+    oauth2Proxy:
+      name: oauth2-proxy
+      namespace: network-system
+      port: 80
+```
+
+**Required companion (not chart-rendered):** the oauth2-proxy `Service` is in
+another namespace, so a **`ReferenceGrant`** in *that* namespace must allow
+`SecurityPolicy` and `HTTPRoute` from the release namespace to reference it.
+Add the release namespace to the proxy's existing grant. If the proxy uses a
+domain-wide cookie (`cookie_domains=.example.com`), an existing SSO session on
+any sibling app admits users here with no new OIDC client.
 ## External MCP endpoint (opt-in, default off)
 
 **Existing installs are unaffected.** `ai.mcp.enabled` defaults to `false`,

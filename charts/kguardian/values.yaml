@@ -780,6 +780,41 @@ frontend:
     #  - secretName: kguardian-tls
     #    hosts:
     #      - kguardian.example.com
+
+  # SSO (opt-in). For Gateway API environments with an identity-aware proxy
+  # (oauth2-proxy -> OIDC, e.g. Dex/Keycloak/Authentik). When enabled the chart
+  # renders an Envoy Gateway SecurityPolicy that gates your frontend HTTPRoute
+  # via ext-auth, plus an /oauth2/* HTTPRoute to the proxy so the OIDC callback
+  # and /oauth2/userinfo are same-origin (the frontend reads the signed-in user
+  # from userinfo automatically — no rebuild). See charts/kguardian/UPGRADING.md.
+  sso:
+    # -- Gate the frontend behind SSO (renders a SecurityPolicy + /oauth2 route)
+    enabled: false
+    # -- Name of the HTTPRoute to protect (you or your gitops render the route)
+    httpRouteName: ""
+    # -- Hostnames for the /oauth2 auth-flow route — must match the app host
+    hostnames: []
+    #  - kguardian.example.com
+    # -- Gateway parentRefs the /oauth2 route attaches to
+    parentRefs: []
+    #  - name: envoy-external
+    #    namespace: network-system
+    #    sectionName: https
+    # -- The identity-aware proxy providing ext-auth + the /oauth2 endpoints
+    oauth2Proxy:
+      name: oauth2-proxy
+      namespace: network-system
+      port: 80
+      # -- ext-auth check path on the proxy
+      authPath: /oauth2/auth
+    # -- Request headers the gateway forwards to the proxy for the auth check
+    headersToExtAuth:
+      - cookie
+      - authorization
+    # -- Identity headers the proxy injects back into the app after auth
+    headersToBackend:
+      - x-auth-request-user
+      - x-auth-request-email
 # AI assistant switch. The assistant is a single workload (llm-bridge) that
 # runs the tools and the NetworkPolicy / seccomp generation in-process — the
 # former mcp-server and advisor-serve components are retired. `ai.enabled`

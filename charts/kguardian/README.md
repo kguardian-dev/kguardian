@@ -292,6 +292,14 @@ The following table lists the configurable parameters of the kguardian chart and
 | frontend.serviceAccount.automountServiceAccountToken | bool | `false` | Automount API credentials for a service account |
 | frontend.serviceAccount.create | bool | `true` | Specifies whether a service account should be created |
 | frontend.serviceAccount.name | string | `""` | The name of the service account to use. If not set and create is true, a name is generated using the fullname template |
+| frontend.sso.enabled | bool | `false` | Gate the frontend behind SSO (renders a SecurityPolicy + /oauth2 route) |
+| frontend.sso.headersToBackend | list | `["x-auth-request-user","x-auth-request-email"]` | Identity headers the proxy injects back into the app after auth |
+| frontend.sso.headersToExtAuth | list | `["cookie","authorization"]` | Request headers the gateway forwards to the proxy for the auth check |
+| frontend.sso.hostnames | list | `[]` | Hostnames for the /oauth2 auth-flow route — must match the app host |
+| frontend.sso.httpRouteName | string | `""` | Name of the HTTPRoute to protect (you or your gitops render the route) |
+| frontend.sso.oauth2Proxy | object | `{"authPath":"/oauth2/auth","name":"oauth2-proxy","namespace":"network-system","port":80}` | The identity-aware proxy providing ext-auth + the /oauth2 endpoints |
+| frontend.sso.oauth2Proxy.authPath | string | `"/oauth2/auth"` | ext-auth check path on the proxy |
+| frontend.sso.parentRefs | list | `[]` | Gateway parentRefs the /oauth2 route attaches to |
 | frontend.startupProbe | object | `{}` | Startup probe. Empty by default — opt in when slow startup is expected. |
 | frontend.tolerations | list | `[]` | Tolerations for the kguardian frontend pod assignment |
 | frontend.topologySpreadConstraints | list | `[]` | Topology spread constraints applied to frontend pods. |

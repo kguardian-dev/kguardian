@@ -7,6 +7,7 @@ import { ciliumPolicyToYAML } from '../utils/ciliumPolicyGenerator';
 import { profileToYAML } from '../utils/seccompProfileGenerator';
 import { SECCOMP_ACTIONS, ARCHITECTURES, SECCOMP_ACTION_DESCRIPTIONS } from '../types/seccompProfile';
 import { PolicyHeader } from './PolicyEditor';
+import { Modal } from './ui/Modal';
 import {
   useNetworkPolicyEditor,
   useCiliumPolicyEditor,
@@ -138,21 +139,15 @@ const NetworkPolicyEditor: React.FC<NetworkPolicyEditorProps> = ({ isOpen, onClo
                      (policyType === 'seccomp' && !seccompProfile);
 
   return (
-    <>
-      {/* Backdrop */}
-      <div
-        className="fixed inset-0 bg-black/50 backdrop-blur-sm z-40 transition-opacity"
-        onClick={onClose}
-      />
-
-      {/* Modal */}
-      <div className="fixed inset-0 z-50 flex items-center justify-center p-4 pointer-events-none">
-        <div
-          className="bg-hubble-card border border-hubble-border rounded-lg shadow-2xl w-full max-w-7xl h-[90vh] flex flex-col pointer-events-auto"
-          onClick={(e) => e.stopPropagation()}
-        >
-          {/* Header */}
-          <PolicyHeader
+    <Modal
+      isOpen
+      onClose={onClose}
+      hideHeader
+      className="w-full max-w-7xl h-[90vh]"
+      contentClassName="flex-1 min-h-0 flex flex-col"
+    >
+      {/* Header */}
+      <PolicyHeader
             policyType={policyType}
             onPolicyTypeChange={setPolicyType}
             yamlView={yamlView}
@@ -256,7 +251,7 @@ const NetworkPolicyEditor: React.FC<NetworkPolicyEditorProps> = ({ isOpen, onClo
                     {isIngressExpanded && (
                       <button
                         onClick={addIngressRule}
-                        className="px-3 py-1.5 text-xs bg-hubble-success text-white rounded-lg hover:bg-green-600
+                        className="px-3 py-1.5 text-xs bg-hubble-success text-white rounded-lg hover:bg-hubble-success-hover
                                    transition-colors flex items-center gap-1"
                       >
                         <Plus className="w-3 h-3" />
@@ -285,7 +280,7 @@ const NetworkPolicyEditor: React.FC<NetworkPolicyEditorProps> = ({ isOpen, onClo
                                 <label className="text-xs font-medium text-secondary">From (Sources)</label>
                                 <button
                                   onClick={() => addPeerToRule(rule.id, 'ingress')}
-                                  className="text-xs text-hubble-accent hover:text-blue-400 flex items-center gap-1"
+                                  className="text-xs text-hubble-accent hover:text-hubble-accent-hover flex items-center gap-1"
                                 >
                                   <Plus className="w-3 h-3" />
                                   Add Source
@@ -346,7 +341,7 @@ const NetworkPolicyEditor: React.FC<NetworkPolicyEditorProps> = ({ isOpen, onClo
                                                     <span className="font-mono">{key}={value}</span>
                                                     <button
                                                       onClick={() => removeLabelFromPeer(rule.id, peerIndex, 'podSelector', key, 'ingress')}
-                                                      className="hover:text-red-400 transition-colors"
+                                                      className="hover:text-hubble-error-hover transition-colors"
                                                       title="Remove label"
                                                     >
                                                       <X className="w-3 h-3" />
@@ -409,7 +404,7 @@ const NetworkPolicyEditor: React.FC<NetworkPolicyEditorProps> = ({ isOpen, onClo
                                                     });
                                                   }
                                                 }}
-                                                className="px-2 py-1 bg-hubble-success text-white rounded text-xs hover:bg-green-600 transition-colors"
+                                                className="px-2 py-1 bg-hubble-success text-white rounded text-xs hover:bg-hubble-success-hover transition-colors"
                                               >
                                                 <Plus className="w-3 h-3" />
                                               </button>
@@ -435,7 +430,7 @@ const NetworkPolicyEditor: React.FC<NetworkPolicyEditorProps> = ({ isOpen, onClo
                                                     <span className="font-mono">{key}={value}</span>
                                                     <button
                                                       onClick={() => removeLabelFromPeer(rule.id, peerIndex, 'namespaceSelector', key, 'ingress')}
-                                                      className="hover:text-red-400 transition-colors"
+                                                      className="hover:text-hubble-error-hover transition-colors"
                                                       title="Remove label"
                                                     >
                                                       <X className="w-3 h-3" />
@@ -498,7 +493,7 @@ const NetworkPolicyEditor: React.FC<NetworkPolicyEditorProps> = ({ isOpen, onClo
                                                     });
                                                   }
                                                 }}
-                                                className="px-2 py-1 bg-hubble-success text-white rounded text-xs hover:bg-green-600 transition-colors"
+                                                className="px-2 py-1 bg-hubble-success text-white rounded text-xs hover:bg-hubble-success-hover transition-colors"
                                               >
                                                 <Plus className="w-3 h-3" />
                                               </button>
@@ -512,7 +507,7 @@ const NetworkPolicyEditor: React.FC<NetworkPolicyEditorProps> = ({ isOpen, onClo
                                                 <span className="text-xs font-medium text-secondary">Pod Labels (Optional)</span>
                                                 <button
                                                   onClick={() => togglePodSelector(rule.id, peerIndex, 'ingress')}
-                                                  className="text-xs text-hubble-error hover:text-red-400"
+                                                  className="text-xs text-hubble-error hover:text-hubble-error-hover"
                                                 >
                                                   Remove
                                                 </button>
@@ -526,7 +521,7 @@ const NetworkPolicyEditor: React.FC<NetworkPolicyEditorProps> = ({ isOpen, onClo
                                                       <span className="font-mono">{key}={value}</span>
                                                       <button
                                                         onClick={() => removeLabelFromPeer(rule.id, peerIndex, 'podSelector', key, 'ingress')}
-                                                        className="hover:text-red-400 transition-colors"
+                                                        className="hover:text-hubble-error-hover transition-colors"
                                                         title="Remove label"
                                                       >
                                                         <X className="w-3 h-3" />
@@ -589,7 +584,7 @@ const NetworkPolicyEditor: React.FC<NetworkPolicyEditorProps> = ({ isOpen, onClo
                                                       });
                                                     }
                                                   }}
-                                                  className="px-2 py-1 bg-hubble-success text-white rounded text-xs hover:bg-green-600 transition-colors"
+                                                  className="px-2 py-1 bg-hubble-success text-white rounded text-xs hover:bg-hubble-success-hover transition-colors"
                                                 >
                                                   <Plus className="w-3 h-3" />
                                                 </button>
@@ -601,7 +596,7 @@ const NetworkPolicyEditor: React.FC<NetworkPolicyEditorProps> = ({ isOpen, onClo
                                           {!peer.podSelector && (
                                             <button
                                               onClick={() => togglePodSelector(rule.id, peerIndex, 'ingress')}
-                                              className="text-xs text-hubble-accent hover:text-blue-400"
+                                              className="text-xs text-hubble-accent hover:text-hubble-accent-hover"
                                             >
                                               + Add Pod Selector (Optional)
                                             </button>
@@ -632,7 +627,7 @@ const NetworkPolicyEditor: React.FC<NetworkPolicyEditorProps> = ({ isOpen, onClo
                                 <label className="text-xs font-medium text-secondary">Ports</label>
                                 <button
                                   onClick={() => addPortToRule(rule.id, 'ingress')}
-                                  className="text-xs text-hubble-accent hover:text-blue-400 flex items-center gap-1"
+                                  className="text-xs text-hubble-accent hover:text-hubble-accent-hover flex items-center gap-1"
                                 >
                                   <Plus className="w-3 h-3" />
                                   Add Port
@@ -738,7 +733,7 @@ const NetworkPolicyEditor: React.FC<NetworkPolicyEditorProps> = ({ isOpen, onClo
                                 <label className="text-xs font-medium text-secondary">To (Destinations)</label>
                                 <button
                                   onClick={() => addPeerToRule(rule.id, 'egress')}
-                                  className="text-xs text-hubble-accent hover:text-blue-400 flex items-center gap-1"
+                                  className="text-xs text-hubble-accent hover:text-hubble-accent-hover flex items-center gap-1"
                                 >
                                   <Plus className="w-3 h-3" />
                                   Add Destination
@@ -804,7 +799,7 @@ const NetworkPolicyEditor: React.FC<NetworkPolicyEditorProps> = ({ isOpen, onClo
                                                     <span className="font-mono">{key}={value}</span>
                                                     <button
                                                       onClick={() => removeLabelFromPeer(rule.id, peerIndex, 'podSelector', key, 'egress')}
-                                                      className="hover:text-red-400 transition-colors"
+                                                      className="hover:text-hubble-error-hover transition-colors"
                                                       title="Remove label"
                                                     >
                                                       <X className="w-3 h-3" />
@@ -876,7 +871,7 @@ const NetworkPolicyEditor: React.FC<NetworkPolicyEditorProps> = ({ isOpen, onClo
                                                     });
                                                   }
                                                 }}
-                                                className="px-2 py-1 bg-hubble-success text-white rounded text-xs hover:bg-green-600 transition-colors"
+                                                className="px-2 py-1 bg-hubble-success text-white rounded text-xs hover:bg-hubble-success-hover transition-colors"
                                                 title="Add label"
                                               >
                                                 <Plus className="w-3 h-3" />
@@ -903,7 +898,7 @@ const NetworkPolicyEditor: React.FC<NetworkPolicyEditorProps> = ({ isOpen, onClo
                                                     <span className="font-mono">{key}={value}</span>
                                                     <button
                                                       onClick={() => removeLabelFromPeer(rule.id, peerIndex, 'namespaceSelector', key, 'egress')}
-                                                      className="hover:text-red-400 transition-colors"
+                                                      className="hover:text-hubble-error-hover transition-colors"
                                                       title="Remove label"
                                                     >
                                                       <X className="w-3 h-3" />
@@ -972,7 +967,7 @@ const NetworkPolicyEditor: React.FC<NetworkPolicyEditorProps> = ({ isOpen, onClo
                                                     });
                                                   }
                                                 }}
-                                                className="px-2 py-1 bg-hubble-accent text-white rounded text-xs hover:bg-blue-600 transition-colors"
+                                                className="px-2 py-1 bg-hubble-accent text-white rounded text-xs hover:bg-hubble-accent-hover transition-colors"
                                                 title="Add namespace label"
                                               >
                                                 <Plus className="w-3 h-3" />
@@ -987,7 +982,7 @@ const NetworkPolicyEditor: React.FC<NetworkPolicyEditorProps> = ({ isOpen, onClo
                                                 <span className="text-xs font-medium text-secondary">Pod Labels (Optional)</span>
                                                 <button
                                                   onClick={() => togglePodSelector(rule.id, peerIndex, 'egress')}
-                                                  className="text-xs text-hubble-error hover:text-red-400"
+                                                  className="text-xs text-hubble-error hover:text-hubble-error-hover"
                                                 >
                                                   Remove
                                                 </button>
@@ -1003,7 +998,7 @@ const NetworkPolicyEditor: React.FC<NetworkPolicyEditorProps> = ({ isOpen, onClo
                                                       <span className="font-mono">{key}={value}</span>
                                                       <button
                                                         onClick={() => removeLabelFromPeer(rule.id, peerIndex, 'podSelector', key, 'egress')}
-                                                        className="hover:text-red-400 transition-colors"
+                                                        className="hover:text-hubble-error-hover transition-colors"
                                                         title="Remove label"
                                                       >
                                                         <X className="w-3 h-3" />
@@ -1072,7 +1067,7 @@ const NetworkPolicyEditor: React.FC<NetworkPolicyEditorProps> = ({ isOpen, onClo
                                                       });
                                                     }
                                                   }}
-                                                  className="px-2 py-1 bg-hubble-success text-white rounded text-xs hover:bg-green-600 transition-colors"
+                                                  className="px-2 py-1 bg-hubble-success text-white rounded text-xs hover:bg-hubble-success-hover transition-colors"
                                                   title="Add pod label"
                                                 >
                                                   <Plus className="w-3 h-3" />
@@ -1085,7 +1080,7 @@ const NetworkPolicyEditor: React.FC<NetworkPolicyEditorProps> = ({ isOpen, onClo
                                           {!peer.podSelector && (
                                             <button
                                               onClick={() => togglePodSelector(rule.id, peerIndex, 'egress')}
-                                              className="text-xs text-hubble-accent hover:text-blue-400"
+                                              className="text-xs text-hubble-accent hover:text-hubble-accent-hover"
                                             >
                                               + Add Pod Selector (Optional)
                                             </button>
@@ -1115,7 +1110,7 @@ const NetworkPolicyEditor: React.FC<NetworkPolicyEditorProps> = ({ isOpen, onClo
                                 <label className="text-xs font-medium text-secondary">Ports</label>
                                 <button
                                   onClick={() => addPortToRule(rule.id, 'egress')}
-                                  className="text-xs text-hubble-accent hover:text-blue-400 flex items-center gap-1"
+                                  className="text-xs text-hubble-accent hover:text-hubble-accent-hover flex items-center gap-1"
                                 >
                                   <Plus className="w-3 h-3" />
                                   Add Port
@@ -1224,7 +1219,7 @@ const NetworkPolicyEditor: React.FC<NetworkPolicyEditorProps> = ({ isOpen, onClo
                             <span className="font-mono">{key}={value}</span>
                             <button
                               onClick={() => removeEndpointSelectorLabel(key)}
-                              className="hover:text-red-400 transition-colors"
+                              className="hover:text-hubble-error-hover transition-colors"
                             >
                               <X className="w-3 h-3" />
                             </button>
@@ -1272,7 +1267,7 @@ const NetworkPolicyEditor: React.FC<NetworkPolicyEditorProps> = ({ isOpen, onClo
                               setCiliumLabelInputs({ ...ciliumLabelInputs, 'endpoint-key': { key: '', value: '' } });
                             }
                           }}
-                          className="px-2 py-1 bg-hubble-success text-white rounded text-xs hover:bg-green-600 transition-colors"
+                          className="px-2 py-1 bg-hubble-success text-white rounded text-xs hover:bg-hubble-success-hover transition-colors"
                         >
                           <Plus className="w-3 h-3" />
                         </button>
@@ -1322,7 +1317,7 @@ const NetworkPolicyEditor: React.FC<NetworkPolicyEditorProps> = ({ isOpen, onClo
                         {isCiliumIngressExpanded && (
                           <button
                             onClick={addCiliumIngressRule}
-                            className="px-3 py-1.5 text-xs bg-hubble-success text-white rounded-lg hover:bg-green-600
+                            className="px-3 py-1.5 text-xs bg-hubble-success text-white rounded-lg hover:bg-hubble-success-hover
                                        transition-colors flex items-center gap-1"
                           >
                             <Plus className="w-3 h-3" />
@@ -1351,7 +1346,7 @@ const NetworkPolicyEditor: React.FC<NetworkPolicyEditorProps> = ({ isOpen, onClo
                                       <label className="text-xs font-medium text-secondary">From Endpoints</label>
                                       <button
                                         onClick={() => addIngressEndpoint(rule.id)}
-                                        className="text-xs text-hubble-accent hover:text-blue-400 flex items-center gap-1"
+                                        className="text-xs text-hubble-accent hover:text-hubble-accent-hover flex items-center gap-1"
                                       >
                                         <Plus className="w-3 h-3" />
                                         Add Endpoint
@@ -1376,7 +1371,7 @@ const NetworkPolicyEditor: React.FC<NetworkPolicyEditorProps> = ({ isOpen, onClo
                                                   <span className="font-mono">{key}={value}</span>
                                                   <button
                                                     onClick={() => removeLabelFromEndpoint(rule.id, epIndex, key, 'ingress')}
-                                                    className="hover:text-red-400 transition-colors"
+                                                    className="hover:text-hubble-error-hover transition-colors"
                                                   >
                                                     <X className="w-3 h-3" />
                                                   </button>
@@ -1437,7 +1432,7 @@ const NetworkPolicyEditor: React.FC<NetworkPolicyEditorProps> = ({ isOpen, onClo
                                                   });
                                                 }
                                               }}
-                                              className="px-2 py-1 bg-hubble-success text-white rounded text-xs hover:bg-green-600 transition-colors"
+                                              className="px-2 py-1 bg-hubble-success text-white rounded text-xs hover:bg-hubble-success-hover transition-colors"
                                             >
                                               <Plus className="w-3 h-3" />
                                             </button>
@@ -1455,7 +1450,7 @@ const NetworkPolicyEditor: React.FC<NetworkPolicyEditorProps> = ({ isOpen, onClo
                                       <label className="text-xs font-medium text-secondary">From CIDR</label>
                                       <button
                                         onClick={() => addIngressCIDR(rule.id)}
-                                        className="text-xs text-hubble-accent hover:text-blue-400 flex items-center gap-1"
+                                        className="text-xs text-hubble-accent hover:text-hubble-accent-hover flex items-center gap-1"
                                       >
                                         <Plus className="w-3 h-3" />
                                         Add CIDR
@@ -1491,7 +1486,7 @@ const NetworkPolicyEditor: React.FC<NetworkPolicyEditorProps> = ({ isOpen, onClo
                                       <label className="text-xs font-medium text-secondary">Ports</label>
                                       <button
                                         onClick={() => addCiliumPortToRule(rule.id, 'ingress')}
-                                        className="text-xs text-hubble-accent hover:text-blue-400 flex items-center gap-1"
+                                        className="text-xs text-hubble-accent hover:text-hubble-accent-hover flex items-center gap-1"
                                       >
                                         <Plus className="w-3 h-3" />
                                         Add Port
@@ -1595,7 +1590,7 @@ const NetworkPolicyEditor: React.FC<NetworkPolicyEditorProps> = ({ isOpen, onClo
                                       <label className="text-xs font-medium text-secondary">To Endpoints</label>
                                       <button
                                         onClick={() => addEgressEndpoint(rule.id)}
-                                        className="text-xs text-hubble-accent hover:text-blue-400 flex items-center gap-1"
+                                        className="text-xs text-hubble-accent hover:text-hubble-accent-hover flex items-center gap-1"
                                       >
                                         <Plus className="w-3 h-3" />
                                         Add Endpoint
@@ -1620,7 +1615,7 @@ const NetworkPolicyEditor: React.FC<NetworkPolicyEditorProps> = ({ isOpen, onClo
                                                   <span className="font-mono">{key}={value}</span>
                                                   <button
                                                     onClick={() => removeLabelFromEndpoint(rule.id, epIndex, key, 'egress')}
-                                                    className="hover:text-red-400 transition-colors"
+                                                    className="hover:text-hubble-error-hover transition-colors"
                                                   >
                                                     <X className="w-3 h-3" />
                                                   </button>
@@ -1681,7 +1676,7 @@ const NetworkPolicyEditor: React.FC<NetworkPolicyEditorProps> = ({ isOpen, onClo
                                                   });
                                                 }
                                               }}
-                                              className="px-2 py-1 bg-hubble-success text-white rounded text-xs hover:bg-green-600 transition-colors"
+                                              className="px-2 py-1 bg-hubble-success text-white rounded text-xs hover:bg-hubble-success-hover transition-colors"
                                             >
                                               <Plus className="w-3 h-3" />
                                             </button>
@@ -1699,7 +1694,7 @@ const NetworkPolicyEditor: React.FC<NetworkPolicyEditorProps> = ({ isOpen, onClo
                                       <label className="text-xs font-medium text-secondary">To CIDR</label>
                                       <button
                                         onClick={() => addEgressCIDR(rule.id)}
-                                        className="text-xs text-hubble-accent hover:text-blue-400 flex items-center gap-1"
+                                        className="text-xs text-hubble-accent hover:text-hubble-accent-hover flex items-center gap-1"
                                       >
                                         <Plus className="w-3 h-3" />
                                         Add CIDR
@@ -1735,7 +1730,7 @@ const NetworkPolicyEditor: React.FC<NetworkPolicyEditorProps> = ({ isOpen, onClo
                                       <label className="text-xs font-medium text-secondary">Ports</label>
                                       <button
                                         onClick={() => addCiliumPortToRule(rule.id, 'egress')}
-                                        className="text-xs text-hubble-accent hover:text-blue-400 flex items-center gap-1"
+                                        className="text-xs text-hubble-accent hover:text-hubble-accent-hover flex items-center gap-1"
                                       >
                                         <Plus className="w-3 h-3" />
                                         Add Port
@@ -1826,7 +1821,7 @@ const NetworkPolicyEditor: React.FC<NetworkPolicyEditorProps> = ({ isOpen, onClo
                         architectures selected). The profile still renders so the
                         user can fix it below. */}
                     {generationWarning && (
-                      <div className="bg-amber-500/10 border border-amber-500/40 text-amber-300 text-xs rounded-lg p-3">
+                      <div className="bg-hubble-warning/10 border border-hubble-warning/40 text-hubble-warning text-xs rounded-lg p-3">
                         ⚠️ {generationWarning}
                       </div>
                     )}
@@ -1869,7 +1864,7 @@ const NetworkPolicyEditor: React.FC<NetworkPolicyEditorProps> = ({ isOpen, onClo
                         {isSyscallsExpanded && (
                           <button
                             onClick={addSyscallRule}
-                            className="px-3 py-1.5 text-xs bg-hubble-success text-white rounded-lg hover:bg-green-600
+                            className="px-3 py-1.5 text-xs bg-hubble-success text-white rounded-lg hover:bg-hubble-success-hover
                                        transition-colors flex items-center gap-1"
                           >
                             <Plus className="w-3 h-3" />
@@ -1921,7 +1916,7 @@ const NetworkPolicyEditor: React.FC<NetworkPolicyEditorProps> = ({ isOpen, onClo
                                         <span className="text-xs text-secondary font-mono">{syscall}</span>
                                         <button
                                           onClick={() => removeSyscallFromRule(index, syscallIndex)}
-                                          className="text-hubble-error hover:text-red-400 transition-colors"
+                                          className="text-hubble-error hover:text-hubble-error-hover transition-colors"
                                           title="Remove syscall"
                                         >
                                           <X className="w-3 h-3" />
@@ -2022,16 +2017,14 @@ const NetworkPolicyEditor: React.FC<NetworkPolicyEditorProps> = ({ isOpen, onClo
                 </button>
                 <button
                   onClick={handleDownload}
-                  className="px-4 py-2 text-sm bg-hubble-accent text-white rounded-lg hover:bg-blue-600 transition-colors"
+                  className="px-4 py-2 text-sm bg-hubble-accent text-white rounded-lg hover:bg-hubble-accent-hover transition-colors"
                 >
                   {policyType === 'seccomp' ? 'Save Profile' : 'Save Policy'}
                 </button>
               </div>
             </div>
           </div>
-        </div>
-      </div>
-    </>
+    </Modal>
   );
 };
 
