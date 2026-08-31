@@ -4,7 +4,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
-// Hand-rolled CiliumNetworkPolicy types (WS-C). These replace the heavy
+// Hand-rolled CiliumNetworkPolicy types. These replace the heavy
 // github.com/cilium/cilium dependency — pulled in transitively hive, statedb,
 // gopacket, otel, azure-sdk, etc. — which the advisor imported solely to build
 // and marshal a CiliumNetworkPolicy YAML. The structs below reproduce exactly

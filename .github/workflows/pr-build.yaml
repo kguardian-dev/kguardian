@@ -271,7 +271,7 @@ jobs:
   build-broker:
     needs: detect-changes
     if: needs.detect-changes.outputs.broker == 'true'
-    # Both architectures always build on PRs (SIMPLIFICATION-GOAL.md WS-E:
+    # Both architectures always build on PRs (
     # amd64 + arm64 are a product guarantee at every pipeline stage). Each
     # arch builds natively - arm64 on GitHub's free arm64 runners - instead
     # of under QEMU emulation, which cost up to 45 minutes per component.
@@ -456,7 +456,7 @@ jobs:
   build-frontend:
     needs: detect-changes
     if: needs.detect-changes.outputs.frontend == 'true'
-    # Both architectures always build on PRs (SIMPLIFICATION-GOAL.md WS-E:
+    # Both architectures always build on PRs (
     # amd64 + arm64 are a product guarantee at every pipeline stage). Each
     # arch builds natively - arm64 on GitHub's free arm64 runners - instead
     # of under QEMU emulation, which cost up to 45 minutes per component.
@@ -561,7 +561,7 @@ jobs:
   build-llm-bridge:
     needs: detect-changes
     if: needs.detect-changes.outputs.llm-bridge == 'true'
-    # Both architectures always build on PRs (SIMPLIFICATION-GOAL.md WS-E:
+    # Both architectures always build on PRs (
     # amd64 + arm64 are a product guarantee at every pipeline stage). Each
     # arch builds natively - arm64 on GitHub's free arm64 runners - instead
     # of under QEMU emulation, which cost up to 45 minutes per component.
@@ -664,7 +664,7 @@ jobs:
 
   # Test llm-bridge (tsc build via pretest deps + node:test suite), including
   # the G3 SSE contract recordings under llm-bridge/contract/ - the emitter
-  # side of the stream contract. SIMPLIFICATION-GOAL.md section 3.
+  # side of the stream contract.
   test-llm-bridge:
     runs-on: ubuntu-latest
     needs: detect-changes
@@ -714,7 +714,7 @@ jobs:
   build-evaluator:
     needs: detect-changes
     if: needs.detect-changes.outputs.evaluator == 'true'
-    # Both architectures always build on PRs (SIMPLIFICATION-GOAL.md WS-E:
+    # Both architectures always build on PRs (
     # amd64 + arm64 are a product guarantee at every pipeline stage). Each
     # arch builds natively - arm64 on GitHub's free arm64 runners - instead
     # of under QEMU emulation, which cost up to 45 minutes per component.

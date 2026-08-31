@@ -8,7 +8,7 @@ import (
 	"testing"
 )
 
-// G2 generator parity — seccomp, reference side (SIMPLIFICATION-GOAL.md §3).
+// G2 generator parity — seccomp, reference side.
 // advisor is the reference implementation: these shared fixtures under
 // test/fixtures/generators/seccomp encode its output, and the frontend TS
 // suite asserts the same fixtures from the other language so the two

@@ -12,14 +12,14 @@ import (
 )
 
 // G2 generator golden fixtures — network policy, reference side
-// (SIMPLIFICATION-GOAL.md §3). advisor is the reference: these committed
+//. advisor is the reference: these committed
 // YAML goldens pin its deterministic output for representative scenarios and
-// are the target the shared generator package (WS-C, incl. the frontend
+// are the target the shared generator package (incl. the frontend
 // consumer) must reproduce. Regenerate deliberately:
 //   UPDATE_GOLDEN=1 go test ./pkg/network -run FixtureGolden
 //
 // Frontend consumption of these fixtures lands with the shared package
-// extraction in WS-C, where the frontend's async-identity input shape and the
+// extraction into the shared package, where the frontend's async-identity input shape and the
 // advisor's resolved-input shape converge on one seam.
 
 func fixturePodDetail(name, ns, ip string, labels map[string]string) *api.PodDetail {

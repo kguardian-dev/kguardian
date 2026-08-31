@@ -1,6 +1,6 @@
 import { stringify } from "yaml";
 
-// In-process NetworkPolicy / CiliumNetworkPolicy generation (WS-C). A faithful
+// In-process NetworkPolicy / CiliumNetworkPolicy generation. A faithful
 // TypeScript port of the advisor's Go generators (pkg/network standard_policy.go,
 // cilium_policy.go, types.go) so the assistant produces the same policy the
 // advisor did — letting the advisor Deployment be retired. Parity is proven
