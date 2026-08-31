@@ -4,8 +4,29 @@ import { LLMProvider } from "../types/index.js";
 import { McpClient } from "../mcpClient.js";
 import { log } from "../logger.js";
 import { serializeToolResult } from "./truncate.js";
+import { resolveBaseUrl, endpointHint } from "./baseUrl.js";
 
 const MAX_TOOL_ROUNDS = 10;
+
+// Base URL of the Gemini API, overridable via GEMINI_BASE_URL for gateways
+// that expose Gemini's native protocol (LiteLLM's passthrough lives at
+// http://litellm:4000/gemini, so that whole prefix is the base). The version
+// segment stays in the appended path here, matching Google's own base-URL
+// convention — see baseUrl.ts for the append-verbatim rule.
+const GEMINI_DEFAULT_BASE = "https://generativelanguage.googleapis.com";
+
+/**
+ * Normalise a request failure into the Gemini-labelled error, appending the
+ * base-URL hint when the status says the path itself was wrong. Shared by the
+ * tool loop and the final summary request so a misconfigured gateway is
+ * reported the same way wherever the failure lands.
+ */
+function toGeminiError(url: string, error: any): Error {
+  const detail = error.response?.data?.error?.message || error.message;
+  const hint = endpointHint("GEMINI_BASE_URL", url, error.response?.status);
+  log.error("Gemini API Error:", `${detail}${hint}`);
+  return new Error(`Gemini API error: ${detail}${hint}`, { cause: error });
+}
 
 export async function callGemini(
   request: ChatRequest,
@@ -18,8 +39,10 @@ export async function callGemini(
   }
 
   // Stable GA model. Was "gemini-2.0-flash-exp" — an experimental preview id
-  // that can be withdrawn without notice; pin the GA alias instead.
-  const model = request.model || "gemini-2.0-flash";
+  // that can be withdrawn without notice; pin the GA alias instead. GEMINI_MODEL
+  // moves that default for operators whose gateway serves a different model id;
+  // request.model still wins over both.
+  const model = request.model || process.env.GEMINI_MODEL?.trim() || "gemini-2.0-flash";
   const context = McpClient.parseContext(request.context);
   const systemPrompt = McpClient.getSystemPrompt(context);
 
@@ -51,7 +74,8 @@ export async function callGemini(
     parts: [{ text: request.message }],
   });
 
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`;
+  const baseUrl = resolveBaseUrl("GEMINI_BASE_URL", GEMINI_DEFAULT_BASE);
+  const url = `${baseUrl}/v1beta/models/${model}:generateContent`;
   const headers = {
     "Content-Type": "application/json",
     "x-goog-api-key": apiKey,
@@ -71,8 +95,7 @@ export async function callGemini(
         { headers, timeout: 120000 }
       );
     } catch (error: any) {
-      log.error("Gemini API Error:", error.response?.data?.error?.message || error.message);
-      throw new Error(`Gemini API error: ${error.response?.data?.error?.message || error.message}`, { cause: error });
+      throw toGeminiError(url, error);
     }
 
     const candidate = response.data.candidates[0];
@@ -126,14 +149,19 @@ export async function callGemini(
   }
 
   // Max rounds reached — request final response without tools
-  const finalResponse = await axios.post(
-    url,
-    {
-      systemInstruction: { parts: [{ text: systemPrompt }] },
-      contents,
-    },
-    { headers, timeout: 120000 }
-  );
+  let finalResponse;
+  try {
+    finalResponse = await axios.post(
+      url,
+      {
+        systemInstruction: { parts: [{ text: systemPrompt }] },
+        contents,
+      },
+      { headers, timeout: 120000 }
+    );
+  } catch (error: any) {
+    throw toGeminiError(url, error);
+  }
 
   const finalCandidate = finalResponse.data.candidates[0];
   const textPart = finalCandidate.content.parts.find(

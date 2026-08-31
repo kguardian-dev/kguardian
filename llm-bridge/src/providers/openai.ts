@@ -4,6 +4,7 @@ import { LLMProvider } from "../types/index.js";
 import { McpClient } from "../mcpClient.js";
 import { log } from "../logger.js";
 import { serializeToolResult } from "./truncate.js";
+import { resolveBaseUrl, endpointHint } from "./baseUrl.js";
 
 interface OpenAIMessage {
   role: string;
@@ -24,45 +25,81 @@ interface OpenAITool {
 
 const MAX_TOOL_ROUNDS = 10;
 
+// The request path both providers speak. Appended to the configured base URL
+// verbatim — see baseUrl.ts for why kguardian never adjusts the /v1 segment.
+const CHAT_COMPLETIONS_PATH = "/chat/completions";
+
 // OpenAI and GitHub Copilot speak the identical /chat/completions wire
 // protocol — same request body, tool-call shape, and response envelope. They
 // differ only in endpoint, credential, and default model, so one
 // implementation serves both; a per-provider config is the only variance.
+// That variance is now operator-supplied as well: pointing OPENAI_BASE_URL at
+// a self-hosted gateway makes a third "provider" out of the same code.
 interface OpenAICompatConfig {
   provider: LLMProvider;
   label: string;
   endpoint: string;
+  baseUrlName: string;
   apiKey: string | undefined;
   keyName: string;
   defaultModel: string;
 }
 
+// Note the asymmetry in the two default bases: OpenAI's version segment lives
+// in the base (`/v1`) because that is the base OpenAI itself documents and
+// what every OpenAI-compatible gateway expects operators to copy, whereas
+// Copilot serves /chat/completions straight off the host. Both are just "the
+// part before the request path", so the same append rule covers them.
 const PROVIDERS: Record<"openai" | "copilot", () => OpenAICompatConfig> = {
   openai: () => ({
     provider: LLMProvider.OPENAI,
     label: "OpenAI",
-    endpoint: "https://api.openai.com/v1/chat/completions",
+    endpoint: resolveBaseUrl("OPENAI_BASE_URL", "https://api.openai.com/v1") + CHAT_COMPLETIONS_PATH,
+    baseUrlName: "OPENAI_BASE_URL",
     // Trim before empty-check; whitespace-only counts as not-configured.
     // See anthropic.ts for the disable-by-whitespace rationale.
     apiKey: process.env.OPENAI_API_KEY?.trim(),
     keyName: "OPENAI_API_KEY",
-    defaultModel: "gpt-4o",
+    // "gpt-4o" is meaningless to a gateway routing to a local model, so the
+    // default is overridable too. request.model still wins over both.
+    defaultModel: process.env.OPENAI_MODEL?.trim() || "gpt-4o",
   }),
   copilot: () => ({
     provider: LLMProvider.COPILOT,
     label: "Copilot",
-    endpoint: "https://api.githubcopilot.com/chat/completions",
+    endpoint:
+      resolveBaseUrl("COPILOT_BASE_URL", "https://api.githubcopilot.com") + CHAT_COMPLETIONS_PATH,
+    baseUrlName: "COPILOT_BASE_URL",
     apiKey: process.env.GITHUB_TOKEN?.trim(),
     keyName: "GITHUB_TOKEN",
-    defaultModel: "gpt-4o",
+    defaultModel: process.env.COPILOT_MODEL?.trim() || "gpt-4o",
   }),
 };
+
+/**
+ * Normalise a request failure into the provider-labelled error, appending the
+ * base-URL hint when the status says the path itself was wrong. Shared by the
+ * tool loop and the final summary request so a misconfigured gateway is
+ * reported the same way wherever the failure lands.
+ */
+function toProviderError(cfg: OpenAICompatConfig, error: any): Error {
+  const detail = error.response?.data?.error?.message || error.message;
+  const hint = endpointHint(cfg.baseUrlName, cfg.endpoint, error.response?.status);
+  log.error(`${cfg.label} API Error:`, `${detail}${hint}`);
+  return new Error(`${cfg.label} API error: ${detail}${hint}`, { cause: error });
+}
 
 async function callOpenAICompatible(
   request: ChatRequest,
   mcpClient: McpClient,
-  cfg: OpenAICompatConfig,
+  makeConfig: () => OpenAICompatConfig,
 ): Promise<ChatResponse> {
+  // Built inside the async body on purpose: resolving the base URL can throw
+  // on a malformed value, and the callers below are plain (non-async)
+  // functions, so building the config in them would throw synchronously past
+  // the promise the callers of `callOpenAI` are awaiting.
+  const cfg = makeConfig();
+
   if (!cfg.apiKey) {
     throw new Error(`${cfg.keyName} not configured`);
   }
@@ -97,8 +134,7 @@ async function callOpenAICompatible(
         { headers, timeout: 120000 },
       );
     } catch (error: any) {
-      log.error(`${cfg.label} API Error:`, error.response?.data?.error?.message || error.message);
-      throw new Error(`${cfg.label} API error: ${error.response?.data?.error?.message || error.message}`, { cause: error });
+      throw toProviderError(cfg, error);
     }
 
     const message = response.data.choices[0].message;
@@ -126,15 +162,20 @@ async function callOpenAICompatible(
   }
 
   // Max rounds reached — one final tool-less request for a summary.
-  const finalResponse = await axios.post(cfg.endpoint, { model, messages }, { headers, timeout: 120000 });
+  let finalResponse;
+  try {
+    finalResponse = await axios.post(cfg.endpoint, { model, messages }, { headers, timeout: 120000 });
+  } catch (error: any) {
+    throw toProviderError(cfg, error);
+  }
   return { message: finalResponse.data.choices[0].message.content, provider: cfg.provider, model: finalResponse.data.model };
 }
 
 export function callOpenAI(request: ChatRequest, mcpClient: McpClient): Promise<ChatResponse> {
-  return callOpenAICompatible(request, mcpClient, PROVIDERS.openai());
+  return callOpenAICompatible(request, mcpClient, PROVIDERS.openai);
 }
 
 // GitHub Copilot uses the OpenAI-compatible chat/completions API.
 export function callCopilot(request: ChatRequest, mcpClient: McpClient): Promise<ChatResponse> {
-  return callOpenAICompatible(request, mcpClient, PROVIDERS.copilot());
+  return callOpenAICompatible(request, mcpClient, PROVIDERS.copilot);
 }
