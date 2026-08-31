@@ -1,5 +1,63 @@
 # Changelog
 
+## [1.19.0](https://github.com/kguardian-dev/kguardian/compare/chart/v1.18.0...chart/v1.19.0) (2026-08-31)
+
+
+### Features
+
+* **broker:** anonymous daily version check-in and /version endpoint ([#1098](https://github.com/kguardian-dev/kguardian/issues/1098)) ([6f8d60c](https://github.com/kguardian-dev/kguardian/commit/6f8d60cb9af3d3043a9b82c6134d478cb346dfb2))
+* **chart:** ai.baseUrl, ai.model, and the ai.mcp.* endpoint toggle ([e11207e](https://github.com/kguardian-dev/kguardian/commit/e11207e8fdd6551a7e7d6663d69047bbf00f7c47))
+* **chart:** ai.enabled umbrella toggle for the assistant path ([#1165](https://github.com/kguardian-dev/kguardian/issues/1165)) ([c1737a3](https://github.com/kguardian-dev/kguardian/commit/c1737a36b364f949826d8be0d1f48710c55b4096))
+* **chart:** one-line ai.provider + ai.secret for the assistant ([#1192](https://github.com/kguardian-dev/kguardian/issues/1192)) ([cda0624](https://github.com/kguardian-dev/kguardian/commit/cda0624b10b64d76957186e2f9ac44d5128500d8))
+* **chart:** opt-in SSO support (frontend.sso.*) for Gateway API + oauth2-proxy ([29c5a63](https://github.com/kguardian-dev/kguardian/commit/29c5a63ccbdca5fa70b2cd85dbe8507b013b1de1))
+* **chart:** single-workload AI assistant — retire mcp-server + advisor-serve ([4105199](https://github.com/kguardian-dev/kguardian/commit/4105199f18bff1651a62cbae291b5d677bb87be8))
+* **chart:** single-workload AI assistant — retire mcp-server + advisor-serve ([47ad5ec](https://github.com/kguardian-dev/kguardian/commit/47ad5ec7c6e3a4fa30b88458eb70368c10ad7822))
+* **frontend:** enterprise UI shell, design tokens, and shared primitives ([31d2426](https://github.com/kguardian-dev/kguardian/commit/31d24262f70872a64d274f935087b14126f332cf))
+* **llm-bridge:** run MCP tools in-process, drop the mcp-server hop (WS-B) ([#1180](https://github.com/kguardian-dev/kguardian/issues/1180)) ([b22488f](https://github.com/kguardian-dev/kguardian/commit/b22488f2735b36f6dcd5810201d5ec24a6544bc5))
+* MCP/LLM integration uplift + data-path hardening ([855da76](https://github.com/kguardian-dev/kguardian/commit/855da76fb03dece78862efe5468bc5ab7c524ad3))
+
+
+### Bug Fixes
+
+* **broker:** add statement_timeout backstop on DB connections ([#1036](https://github.com/kguardian-dev/kguardian/issues/1036)) ([8a16bfa](https://github.com/kguardian-dev/kguardian/commit/8a16bfa9b4f3a3ecc63b1f948a2457f41cfdcf35))
+* **chart:** default llm-bridge image to 1.6.0 for the advisor-free assistant ([0e7654c](https://github.com/kguardian-dev/kguardian/commit/0e7654c26393c09cb07f5e5fbbab5a31f939cb7c))
+* **chart:** default llm-bridge image to 1.6.0 for the advisor-free assistant ([f1e93be](https://github.com/kguardian-dev/kguardian/commit/f1e93be137946f758e021624f240c2645f06b8ee))
+* **charts:** track chart release in appVersion and release on image bumps ([#1096](https://github.com/kguardian-dev/kguardian/issues/1096)) ([4182684](https://github.com/kguardian-dev/kguardian/commit/4182684cae4b76c7d5731c061c90c87f98a166ce))
+* **deps:** bump chart component images to security-patched versions ([#1285](https://github.com/kguardian-dev/kguardian/issues/1285)) ([597c7b9](https://github.com/kguardian-dev/kguardian/commit/597c7b984f4d88b1b0e0a3290f416cdc48a4c888))
+* **deps:** bump chart component images to the versions just released ([49747f1](https://github.com/kguardian-dev/kguardian/commit/49747f156c0c0f6c9e25e3b4ee945f45fa51dc11))
+* **deps:** bump chart component images to the versions just released ([4c99db5](https://github.com/kguardian-dev/kguardian/commit/4c99db5cd9c61cdd27c98a25e48b5c9636ad3abd))
+* **deps:** update controller image tag to 1.9.2 ([#1252](https://github.com/kguardian-dev/kguardian/issues/1252)) ([d9d58de](https://github.com/kguardian-dev/kguardian/commit/d9d58de48b994458db6ac933f50299fb485840c9))
+* **deps:** update ghcr.io/kguardian-dev/kguardian/advisor docker tag to v1.6.2 ([#1154](https://github.com/kguardian-dev/kguardian/issues/1154)) ([d7c0c1b](https://github.com/kguardian-dev/kguardian/commit/d7c0c1b5c319e0bacb7a12adff9213f2bec3925f))
+* **deps:** update ghcr.io/kguardian-dev/kguardian/broker docker tag to v1.12.0 ([#1101](https://github.com/kguardian-dev/kguardian/issues/1101)) ([d06f8ce](https://github.com/kguardian-dev/kguardian/commit/d06f8ceaea4787d1570b1ae0eeb49ae324f1a9cc))
+* **deps:** update ghcr.io/kguardian-dev/kguardian/broker docker tag to v1.12.1 ([#1121](https://github.com/kguardian-dev/kguardian/issues/1121)) ([03fb1c0](https://github.com/kguardian-dev/kguardian/commit/03fb1c0bf0cc77d6c9b509b2ff34def969498807))
+* **deps:** update ghcr.io/kguardian-dev/kguardian/broker docker tag to v1.12.2 ([#1128](https://github.com/kguardian-dev/kguardian/issues/1128)) ([0abb5da](https://github.com/kguardian-dev/kguardian/commit/0abb5da74efc21caee8e693eb163dd4131102f73))
+* **deps:** update ghcr.io/kguardian-dev/kguardian/broker docker tag to v1.12.3 ([4f83e24](https://github.com/kguardian-dev/kguardian/commit/4f83e24f1a8fd74405840ac6fcbb0ce01819a308))
+* **deps:** update ghcr.io/kguardian-dev/kguardian/broker docker tag to v1.12.3 ([ebc17a3](https://github.com/kguardian-dev/kguardian/commit/ebc17a3390301f2cc1566b086f5a161c578794eb))
+* **deps:** update ghcr.io/kguardian-dev/kguardian/controller docker tag to v1.9.3 ([#1281](https://github.com/kguardian-dev/kguardian/issues/1281)) ([baf707f](https://github.com/kguardian-dev/kguardian/commit/baf707fc738edfb87ae2e3f7cf14c54854576b68))
+* **deps:** update ghcr.io/kguardian-dev/kguardian/evaluator docker tag to v0.3.3 ([#1155](https://github.com/kguardian-dev/kguardian/issues/1155)) ([3d591e4](https://github.com/kguardian-dev/kguardian/commit/3d591e4aff0645627d37438a446b3e827545bb9c))
+* **deps:** update ghcr.io/kguardian-dev/kguardian/evaluator docker tag to v0.3.4 ([#1282](https://github.com/kguardian-dev/kguardian/issues/1282)) ([3fd4b62](https://github.com/kguardian-dev/kguardian/commit/3fd4b62e1a80fa7fde91c55e825fdc170a74b64e))
+* **deps:** update ghcr.io/kguardian-dev/kguardian/frontend docker tag to v1.11.2 ([#1207](https://github.com/kguardian-dev/kguardian/issues/1207)) ([848ad0b](https://github.com/kguardian-dev/kguardian/commit/848ad0b75393172954a18c21bd7f4f110734e306))
+* **deps:** update ghcr.io/kguardian-dev/kguardian/frontend docker tag to v1.11.3 ([#1213](https://github.com/kguardian-dev/kguardian/issues/1213)) ([430663b](https://github.com/kguardian-dev/kguardian/commit/430663bea9ba7276fcf738d0b848ce27efe87759))
+* **deps:** update ghcr.io/kguardian-dev/kguardian/frontend docker tag to v1.11.4 ([#1283](https://github.com/kguardian-dev/kguardian/issues/1283)) ([2deb3b7](https://github.com/kguardian-dev/kguardian/commit/2deb3b73255609ef144157e79ed5647e0d5b58c6))
+* **deps:** update ghcr.io/kguardian-dev/kguardian/llm-bridge docker tag to v1.4.2 ([#1132](https://github.com/kguardian-dev/kguardian/issues/1132)) ([a8a908e](https://github.com/kguardian-dev/kguardian/commit/a8a908e16104bafff0b91ae0d61e4376fd4f36ff))
+* **deps:** update ghcr.io/kguardian-dev/kguardian/llm-bridge docker tag to v1.4.3 ([#1153](https://github.com/kguardian-dev/kguardian/issues/1153)) ([6040338](https://github.com/kguardian-dev/kguardian/commit/60403380e8b43df2b066ebfd45772969b76e8156))
+* **deps:** update ghcr.io/kguardian-dev/kguardian/llm-bridge docker tag to v1.4.4 ([#1170](https://github.com/kguardian-dev/kguardian/issues/1170)) ([efe84ce](https://github.com/kguardian-dev/kguardian/commit/efe84cedc3de4e30772692cd5a4c8d505033ba00))
+* **deps:** update ghcr.io/kguardian-dev/kguardian/llm-bridge docker tag to v1.5.0 ([#1182](https://github.com/kguardian-dev/kguardian/issues/1182)) ([e353be3](https://github.com/kguardian-dev/kguardian/commit/e353be35445e3cae0f8b00a144ca4dc8cc13d785))
+* **deps:** update ghcr.io/kguardian-dev/kguardian/llm-bridge docker tag to v1.6.1 ([#1214](https://github.com/kguardian-dev/kguardian/issues/1214)) ([a08e1b6](https://github.com/kguardian-dev/kguardian/commit/a08e1b6c74ab7d62407362386e04fab96420d476))
+* **deps:** update ghcr.io/kguardian-dev/kguardian/llm-bridge docker tag to v1.6.2 ([#1284](https://github.com/kguardian-dev/kguardian/issues/1284)) ([621539d](https://github.com/kguardian-dev/kguardian/commit/621539d04ce7c9fd9cd55612277ae9e092d72cc4))
+* **deps:** update ghcr.io/kguardian-dev/kguardian/mcp-server docker tag to v1.5.1 ([#1133](https://github.com/kguardian-dev/kguardian/issues/1133)) ([6fb99eb](https://github.com/kguardian-dev/kguardian/commit/6fb99eba6161ad48506989954d09350c445b6603))
+
+
+### Documentation
+
+* **chart:** state the MCP auth rationale accurately ([837de97](https://github.com/kguardian-dev/kguardian/commit/837de9700740d8ebb4d350fd3b88ef0a18fcb564))
+* **chart:** UPGRADING note for the ai.* one-line keys ([#1193](https://github.com/kguardian-dev/kguardian/issues/1193)) ([6cdd81f](https://github.com/kguardian-dev/kguardian/commit/6cdd81f773062d2086d22b1848e9bce78b46574f))
+
+
+### Code Refactoring
+
+* **llm-bridge:** generate network policies in-process, drop advisor dep ([#1190](https://github.com/kguardian-dev/kguardian/issues/1190)) ([81b2e82](https://github.com/kguardian-dev/kguardian/commit/81b2e82c03085c326733861dc86771a9f5747b09))
+
 ## [1.18.0](https://github.com/kguardian-dev/kguardian/compare/chart/v1.17.3...chart/v1.18.0) (2026-08-31)
 
 
