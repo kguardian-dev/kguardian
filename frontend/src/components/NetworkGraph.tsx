@@ -391,6 +391,17 @@ const NetworkGraphInner: React.FC<NetworkGraphProps> = ({
     return [...visiblePods, ...externalNodes];
   }, [pods, externalNodes, showTraffic]);
 
+  // Focus is only meaningful while the focused node exists in the current
+  // node set. Switching namespace (or the pod being deleted) used to leave
+  // the stale focus filtering EVERYTHING out — an empty graph with the
+  // focus pill still up. Self-heal instead of threading the namespace down:
+  // any change that removes the focused node exits focus mode.
+  useEffect(() => {
+    if (focusedNodeId && !allDisplayPods.some((p) => p.id === focusedNodeId)) {
+      setFocusedNodeId(null);
+    }
+  }, [focusedNodeId, allDisplayPods]);
+
   // Build React Flow nodes with placeholder positions (ELK will reposition)
   const baseNodes: Node[] = useMemo(() => {
     return allDisplayPods.map((pod) => {
