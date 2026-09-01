@@ -5,6 +5,13 @@
 #include <bpf/bpf_tracing.h>
 #include "helper.h"
 
+// TCP states (include/net/tcp_states.h). Frozen values: tcp_set_state
+// carries BUILD_BUG_ONs pinning each TCP_* to the BPF_TCP_* UAPI enum
+// precisely so BPF programs can depend on them.
+#define TCP_ESTABLISHED 1
+#define TCP_SYN_SENT    2
+#define TCP_SYN_RECV    3
+
 // Wire struct shared with userspace (controller/src/network.rs,
 // NetworkEventData). The ring-buffer callback in controller/src/bpf.rs
 // reinterprets the raw bytes with a pointer cast, so ANY change to
@@ -220,8 +227,8 @@ int BPF_PROG(trace_tcp_state_change, struct sock *sk, int state)
     if (!sk)
         return 0;
 
-    // TCP_ESTABLISHED = 1 - only record when connection succeeds
-    if (state != 1)
+    // Only record when a connection completes.
+    if (state != TCP_ESTABLISHED)
         return 0;
 
     // Read socket common structure once (batch read) for the ports
@@ -245,20 +252,43 @@ int BPF_PROG(trace_tcp_state_change, struct sock *sk, int state)
     if (should_filter_traffic(saddr, daddr))
         return 0;
 
-    // Determine direction: if the source address is our pod IP, it's egress
-    // For established connections from tcp_set_state, we need to determine direction
-    // We'll consider it egress if skc_num (local port) is ephemeral (>1024)
     __u16 sport = skc.skc_num;
     __u16 dport = bpf_ntohs(skc.skc_dport);
 
-    // Assume egress if local port > 1024 (ephemeral), otherwise ingress
-    // This is a heuristic - most client connections use ephemeral ports
-    __u8 direction = (sport > 1024) ? 1 : 2; // 1=Egress, 2=Ingress
+    // Direction comes from the socket's PRE-transition state, not a
+    // port heuristic. At fentry, tcp_set_state's body has not run yet,
+    // so skc_state (already in the batch-read copy above — it lives in
+    // the config-independent first 24 bytes of sock_common) still
+    // holds the OLD state. The kernel reaches ESTABLISHED from exactly
+    // two states: SYN_SENT for an actively-opened socket (this pod is
+    // the client — egress) and SYN_RECV for a passively-accepted one
+    // (this pod is the server — ingress). Both values are pinned to
+    // the BPF_TCP_* UAPI enum by BUILD_BUG_ONs inside tcp_set_state
+    // itself, so a BPF program may rely on them.
+    //
+    // The heuristic this replaces — "local port > 1024 means egress" —
+    // flipped every ACCEPTED connection on a high-port listener into
+    // an egress flow toward the client's EPHEMERAL source port, one
+    // recorded flow per client port: a kubelet-probed workload
+    // accumulated 1,798 distinct "egress ports" (a 3,649-line
+    // generated policy), and 96.6% of a production pod_traffic table
+    // was this artifact.
+    __u8 direction;
+    if (skc.skc_state == TCP_SYN_SENT)
+        direction = 1; // Egress: active open completing
+    else if (skc.skc_state == TCP_SYN_RECV)
+        direction = 2; // Ingress: passive open completing
+    else
+        return 0; // No other state legitimately becomes ESTABLISHED
 
-    // Check if this is a new connection (reduces duplicate events)
+    // Check if this is a new connection (reduces duplicate events).
+    // Dedup on the STABLE port for the direction: the local listen
+    // port for ingress, the remote service port for egress. Keying
+    // ingress on the client's ephemeral port made every accepted
+    // connection look new, defeating kernel-side dedup entirely.
     struct conn_key conn = {
         .inum = inum,
-        .dport = dport,
+        .dport = (direction == 2) ? sport : dport,
         .protocol = 1, // TCP
         .direction = direction,
     };
@@ -342,13 +372,16 @@ int BPF_KRETPROBE(tcp_accept_exit, struct sock *new_sk)
     if (should_filter_traffic(saddr, daddr))
         return 0;
 
-    // Check if this is a new connection (reduces duplicate events by 80-90%)
-    // Uses 4-tuple to handle ephemeral source port rotation
+    // Check if this is a new connection (reduces duplicate events).
+    // Dedup on the LOCAL listen port — the stable side for ingress —
+    // matching the key trace_tcp_state_change builds for the same
+    // accepted socket, so the two ingress emitters collapse into one
+    // event instead of each reporting per client ephemeral port.
     __u16 dport = __bpf_ntohs(skc.skc_dport);
 
     struct conn_key conn = {
         .inum = inum,
-        .dport = dport,
+        .dport = skc.skc_num,
         .protocol = 1, // TCP
         .direction = 2, // Ingress
     };
