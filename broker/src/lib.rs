@@ -7,7 +7,10 @@ mod retention;
 mod telemetry;
 mod types;
 mod version_check;
-pub use add::{add_pod_details, add_pods_batch, add_pods_syscalls, add_svc_details, mark_pod_dead};
+pub use add::{
+    add_node_facts, add_pod_details, add_pods_batch, add_pods_syscalls, add_svc_details,
+    mark_pod_dead,
+};
 pub use audit::AuditClient;
 pub use error::*;
 pub use retention::spawn as spawn_retention;

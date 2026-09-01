@@ -240,10 +240,158 @@ fn live_node_count(pool: &DbPool) -> Result<i64, DbError> {
     Ok(row.n)
 }
 
+/// Contract-v2 environment signals: coarse enums aggregated from the
+/// per-node facts the controller reports, plus a pods bucket and the
+/// chart's feature-flag list. Every value is a fixed enum/bucket string
+/// — the version service re-whitelists them all (docs/telemetry.mdx).
+pub(crate) struct EnvSignals {
+    provider: String,
+    distro: String,
+    cni: String,
+    ip_family: String,
+    node_os: String,
+    pods_bucket: String,
+    features: String,
+}
+
+impl Default for EnvSignals {
+    fn default() -> Self {
+        Self {
+            provider: "unknown".into(),
+            distro: "unknown".into(),
+            cni: "unknown".into(),
+            ip_family: "unknown".into(),
+            node_os: "unknown".into(),
+            pods_bucket: "unknown".into(),
+            features: "none".into(),
+        }
+    }
+}
+
+/// Most frequent value in a column, ties broken alphabetically for
+/// determinism; "unknown" when the table is empty.
+fn mode(values: &[String]) -> String {
+    use std::collections::BTreeMap;
+    let mut counts: BTreeMap<&str, usize> = BTreeMap::new();
+    for v in values {
+        *counts.entry(v.as_str()).or_default() += 1;
+    }
+    counts
+        .into_iter()
+        .max_by_key(|(_, n)| *n)
+        .map(|(v, _)| v.to_string())
+        .unwrap_or_else(|| "unknown".to_string())
+}
+
+/// Cluster IP family from per-node families: any node dual — or a mix
+/// of v4-only and v6-only nodes — means the cluster speaks both.
+fn aggregate_ip_family(values: &[String]) -> String {
+    let dual = values.iter().any(|v| v == "dual");
+    let v4 = values.iter().any(|v| v == "ipv4");
+    let v6 = values.iter().any(|v| v == "ipv6");
+    if dual || (v4 && v6) {
+        "dual".to_string()
+    } else {
+        mode(values)
+    }
+}
+
+/// Order-of-magnitude bucket for the pods count. Must stay within the
+/// version service's BUCKET pattern.
+pub(crate) fn bucketize(n: i64) -> String {
+    match n {
+        i64::MIN..=0 => "0".to_string(),
+        1..=9 => "1-9".to_string(),
+        10..=99 => "10-99".to_string(),
+        100..=999 => "100-999".to_string(),
+        1000..=9999 => "1000-9999".to_string(),
+        _ => "10000+".to_string(),
+    }
+}
+
+/// FEATURES env: comma-separated flag slugs the chart injects
+/// ("ai,audit"). Anything outside [a-z0-9_,] disables the field to
+/// "none" rather than shipping junk upstream.
+fn features() -> String {
+    features_from(std::env::var("FEATURES").ok().as_deref())
+}
+
+fn features_from(raw: Option<&str>) -> String {
+    let Some(v) = raw.map(str::trim).filter(|v| !v.is_empty()) else {
+        return "none".to_string();
+    };
+    if v.len() <= 400
+        && v.bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_' || b == b',')
+    {
+        v.to_string()
+    } else {
+        "none".to_string()
+    }
+}
+
+/// Aggregate the node_facts table (plus pod count + FEATURES env) into
+/// the check-in's environment signals. Any DB error degrades to
+/// defaults — telemetry must never fail the check-in.
+fn env_signals(pool: &DbPool) -> EnvSignals {
+    use crate::schema::node_facts::dsl as nf;
+    use crate::schema::pod_details::dsl as pd;
+    use diesel::prelude::*;
+
+    let mut out = EnvSignals {
+        features: features(),
+        ..EnvSignals::default()
+    };
+    let Ok(mut conn) = pool.get() else {
+        return out;
+    };
+    if let Ok(rows) = nf::node_facts
+        .select((
+            nf::provider,
+            nf::distro,
+            nf::cni,
+            nf::ip_family,
+            nf::node_os,
+        ))
+        .load::<(String, String, String, String, String)>(&mut conn)
+    {
+        if !rows.is_empty() {
+            let col = |i: usize| -> Vec<String> {
+                rows.iter()
+                    .map(|r| match i {
+                        0 => r.0.clone(),
+                        1 => r.1.clone(),
+                        2 => r.2.clone(),
+                        3 => r.3.clone(),
+                        _ => r.4.clone(),
+                    })
+                    .collect()
+            };
+            out.provider = mode(&col(0));
+            out.distro = mode(&col(1));
+            out.cni = mode(&col(2));
+            out.ip_family = aggregate_ip_family(&col(3));
+            out.node_os = mode(&col(4));
+        }
+    }
+    if let Ok(n) = pd::pod_details
+        .filter(pd::is_dead.eq(false))
+        .count()
+        .get_result::<i64>(&mut conn)
+    {
+        out.pods_bucket = bucketize(n);
+    }
+    out
+}
+
 /// The full query-parameter set for a check-in. Pure so the tests can
 /// pin exactly what leaves the process — this list and docs/telemetry
 /// must stay in lockstep.
-pub(crate) fn check_params(install: &str, nodes: i64) -> Vec<(&'static str, String)> {
+pub(crate) fn check_params(
+    install: &str,
+    nodes: i64,
+    env: &EnvSignals,
+) -> Vec<(&'static str, String)> {
     vec![
         ("install", install.to_string()),
         ("broker", env!("CARGO_PKG_VERSION").to_string()),
@@ -251,6 +399,13 @@ pub(crate) fn check_params(install: &str, nodes: i64) -> Vec<(&'static str, Stri
         ("k8s", kube_version()),
         ("nodes", nodes.to_string()),
         ("arch", std::env::consts::ARCH.to_string()),
+        ("provider", env.provider.clone()),
+        ("distro", env.distro.clone()),
+        ("cni", env.cni.clone()),
+        ("ip_family", env.ip_family.clone()),
+        ("node_os", env.node_os.clone()),
+        ("pods_bucket", env.pods_bucket.clone()),
+        ("features", env.features.clone()),
     ]
 }
 
@@ -265,10 +420,12 @@ async fn run_check(
     let nodes = tokio::task::spawn_blocking(move || live_node_count(&p))
         .await?
         .unwrap_or(0);
+    let p = pool.clone();
+    let env = tokio::task::spawn_blocking(move || env_signals(&p)).await?;
 
     let response = client
         .get(endpoint)
-        .query(&check_params(&install, nodes))
+        .query(&check_params(&install, nodes, &env))
         .send()
         .await?
         .error_for_status()?
@@ -434,16 +591,79 @@ mod tests {
         // added or removed here, the docs page MUST change in the same
         // commit — this test is the tripwire.
         with_env("CHART_VERSION", Some("9.9.9"), || {
-            let params = check_params("abc-123", 4);
+            let params = check_params("abc-123", 4, &EnvSignals::default());
             let keys: Vec<&str> = params.iter().map(|(k, _)| *k).collect();
-            assert_eq!(keys, ["install", "broker", "chart", "k8s", "nodes", "arch"]);
+            assert_eq!(
+                keys,
+                [
+                    "install",
+                    "broker",
+                    "chart",
+                    "k8s",
+                    "nodes",
+                    "arch",
+                    "provider",
+                    "distro",
+                    "cni",
+                    "ip_family",
+                    "node_os",
+                    "pods_bucket",
+                    "features",
+                ]
+            );
             let map: HashMap<_, _> = params.into_iter().collect();
             assert_eq!(map["install"], "abc-123");
             assert_eq!(map["broker"], env!("CARGO_PKG_VERSION"));
             assert_eq!(map["chart"], "9.9.9");
             assert_eq!(map["nodes"], "4");
             assert_eq!(map["arch"], std::env::consts::ARCH);
+            // v2 defaults: coarse "unknown"/"none" — never absent, so
+            // the wire shape is identical whether or not the controller
+            // ever reported node facts.
+            assert_eq!(map["provider"], "unknown");
+            assert_eq!(map["features"], "none");
+            assert_eq!(map["pods_bucket"], "unknown");
         });
+    }
+
+    #[test]
+    fn bucketize_matches_the_worker_pattern() {
+        assert_eq!(bucketize(0), "0");
+        assert_eq!(bucketize(-3), "0");
+        assert_eq!(bucketize(1), "1-9");
+        assert_eq!(bucketize(99), "10-99");
+        assert_eq!(bucketize(100), "100-999");
+        assert_eq!(bucketize(9999), "1000-9999");
+        assert_eq!(bucketize(50_000), "10000+");
+    }
+
+    #[test]
+    fn ip_family_aggregation_detects_dual_from_mixed_nodes() {
+        let v = |xs: &[&str]| xs.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert_eq!(aggregate_ip_family(&v(&["ipv4", "ipv4"])), "ipv4");
+        assert_eq!(aggregate_ip_family(&v(&["ipv4", "dual"])), "dual");
+        assert_eq!(aggregate_ip_family(&v(&["ipv4", "ipv6"])), "dual");
+        assert_eq!(aggregate_ip_family(&v(&["ipv6"])), "ipv6");
+        assert_eq!(aggregate_ip_family(&[]), "unknown");
+    }
+
+    #[test]
+    fn features_env_is_whitelisted_or_none() {
+        assert_eq!(features_from(None), "none");
+        assert_eq!(features_from(Some("  ")), "none");
+        assert_eq!(features_from(Some("ai,audit")), "ai,audit");
+        assert_eq!(features_from(Some("AI;DROP TABLE")), "none");
+    }
+
+    #[test]
+    fn mode_breaks_ties_deterministically() {
+        let v = |xs: &[&str]| xs.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert_eq!(mode(&v(&["aws", "gcp", "aws"])), "aws");
+        // Equal counts: the max_by_key over a BTreeMap keeps the LAST
+        // maximal entry in key order — pinned so status output can't
+        // flap between runs.
+        assert_eq!(mode(&v(&["aws", "gcp"])), "gcp");
+        assert_eq!(mode(&[]), "unknown");
     }
 
     /// Real-network proof that the reqwest `rustls` feature gives a
