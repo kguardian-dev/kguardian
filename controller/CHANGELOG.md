@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.10.1](https://github.com/kguardian-dev/kguardian/compare/controller/v1.10.0...controller/v1.10.1) (2026-09-01)
+
+
+### Bug Fixes
+
+* classify TCP direction from socket state, not a port heuristic ([593e925](https://github.com/kguardian-dev/kguardian/commit/593e9253655fa8f6ebf848018dbd3e6e57fc84b8))
+* **controller:** classify TCP direction from socket state, not a port heuristic ([cd489ad](https://github.com/kguardian-dev/kguardian/commit/cd489ad55be5da6d6b0adfdbbd54b346d55b8700))
+
 ## [1.10.0](https://github.com/kguardian-dev/kguardian/compare/controller/v1.9.4...controller/v1.10.0) (2026-09-01)
 
 
