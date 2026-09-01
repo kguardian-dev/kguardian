@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.19.1](https://github.com/kguardian-dev/kguardian/compare/chart/v1.19.0...chart/v1.19.1) (2026-09-01)
+
+
+### Bug Fixes
+
+* **deps:** bump chart to controller 1.10.1 and broker 1.13.1 ([#1390](https://github.com/kguardian-dev/kguardian/issues/1390)) ([d9bbc8f](https://github.com/kguardian-dev/kguardian/commit/d9bbc8f0f0fc135e40b2bd7a4c9c2d647c046f29))
+
 ## [1.19.0](https://github.com/kguardian-dev/kguardian/compare/chart/v1.18.0...chart/v1.19.0) (2026-09-01)
 
 
