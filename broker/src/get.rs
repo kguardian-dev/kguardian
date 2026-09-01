@@ -443,9 +443,15 @@ pub fn pod_traffic_by_name(
     // (deduplicatePorts) already produces deterministic YAML, but
     // stable input here means simpler reasoning + fewer surprises if
     // a future generator change becomes input-order sensitive.
+    // Bounded like the cluster-wide endpoint (clamp_pod_traffic_limit's
+    // ceiling): a pathological pod — the direction-heuristic artifact
+    // accumulated tens of thousands of one-port rows per peer — must
+    // not turn this into an unbounded whole-partition read. Newest
+    // rows win via the DESC order above.
     let pod_tr = pod_traffic
         .filter(pod_name.eq(name.to_string()))
         .order((time_stamp.desc(), uuid.desc()))
+        .limit(clamp_pod_traffic_limit(Some(20_000)))
         .load::<PodTraffic>(conn)
         .optional()?;
     Ok(pod_tr)
