@@ -10,6 +10,7 @@ import type {
 import { apiClient } from '../services/api';
 import { resolveTrafficIdentity, type TrafficIdentity } from './trafficIdentity';
 import { quoteYamlValue } from './networkPolicyGenerator';
+import { peerCIDR } from './ipCidr';
 
 interface PeerInfo {
   ip: string;
@@ -120,7 +121,12 @@ export async function generateCiliumNetworkPolicy(pod: PodNodeData): Promise<Cil
       const labels = await getLabelsForPod(identity.podName);
       return { selector: { matchLabels: labels || { app: identity.podName } } };
     } else {
-      return { cidr: `${peerInfo.ip}/32` };
+      // External IP - the host mask follows the address family: /32 for IPv4,
+      // /128 for IPv6 (a /32 on a v6 address would cover 2^96 hosts rather than
+      // the single peer we observed). An unparseable IP resolves to neither a
+      // selector nor a CIDR, and the caller drops the rule.
+      const cidr = peerCIDR(peerInfo.ip);
+      return cidr === null ? {} : { cidr };
     }
   };
 
@@ -136,6 +142,9 @@ export async function generateCiliumNetworkPolicy(pod: PodNodeData): Promise<Cil
   const ingressRules: CiliumIngressRule[] = [];
   for (const { peer, ports } of ingressMap.values()) {
     const resolved = await resolvePeerLabels(peer);
+    // A Cilium rule with neither fromEndpoints nor fromCIDR selects ALL peers, so an
+    // unparseable IP must drop the rule rather than silently widen it.
+    if (!resolved.selector && !resolved.cidr) continue;
     const rule: CiliumIngressRule = {
       id: `ingress-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
       toPorts: parsePorts(ports),
@@ -152,6 +161,9 @@ export async function generateCiliumNetworkPolicy(pod: PodNodeData): Promise<Cil
   const egressRules: CiliumEgressRule[] = [];
   for (const { peer, ports } of egressMap.values()) {
     const resolved = await resolvePeerLabels(peer);
+    // A Cilium rule with neither toEndpoints nor toCIDR selects ALL peers, so an
+    // unparseable IP must drop the rule rather than silently widen it.
+    if (!resolved.selector && !resolved.cidr) continue;
     const rule: CiliumEgressRule = {
       id: `egress-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
       toPorts: parsePorts(ports),
@@ -183,9 +195,14 @@ export async function generateCiliumNetworkPolicy(pod: PodNodeData): Promise<Cil
     },
     spec: {
       endpointSelector: { matchLabels: targetPodLabels },
+      // Keyed off the direction being OBSERVED, not off the rule list
+      // surviving — see the sibling comment in networkPolicyGenerator. Since
+      // unparseable peers are now dropped, a direction can observe traffic and
+      // still end with no rules, and flipping defaultDeny to false there would
+      // turn "deny everything not listed" into "restrict nothing".
       defaultDeny: {
-        ingress: ingressRules.length > 0,
-        egress: egressRules.length > 0,
+        ingress: ingressMap.size > 0,
+        egress: egressMap.size > 0,
       },
       ...(ingressRules.length > 0 && { ingress: ingressRules }),
       ...(egressRules.length > 0 && { egress: egressRules }),
