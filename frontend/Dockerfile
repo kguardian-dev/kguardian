@@ -40,5 +40,9 @@ HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
 # Switch to non-root user
 USER 1337
 
-# Use vite preview for production
-CMD ["npx", "vite", "preview", "--host", "0.0.0.0", "--port", "5173"]
+# Use vite preview for production. Bare --host (no address) listens on
+# all addresses of both IP families: Node binds the IPv6 unspecified
+# address (accepting IPv4 as v4-mapped) and falls back to IPv4-only on
+# kernels without IPv6. An explicit 0.0.0.0 is IPv4-only and leaves the
+# pod unreachable on IPv6-only clusters.
+CMD ["npx", "vite", "preview", "--host", "--port", "5173"]

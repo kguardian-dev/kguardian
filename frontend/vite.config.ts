@@ -67,7 +67,12 @@ export default defineConfig({
   // Preview server configuration (for production)
   preview: {
     port: 5173,
-    host: '0.0.0.0',
+    // true, not '0.0.0.0': listen on all addresses of BOTH families.
+    // Node then binds the IPv6 unspecified address (accepting IPv4 as
+    // v4-mapped) and falls back to IPv4-only on kernels without IPv6 —
+    // a literal '0.0.0.0' never accepts connections on the pod's IPv6
+    // address, so probes and Service traffic fail on IPv6-only clusters.
+    host: true,
     strictPort: true,
     allowedHosts: true,
     proxy: {
