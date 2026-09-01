@@ -52,7 +52,12 @@ const PodNode: React.FC<PodNodeProps> = React.memo(({ data, selected }) => {
       <Handle type="target" position={targetPosition} />
 
       <div className="flex items-start justify-between gap-2">
-        <div className="flex items-center gap-2 flex-1">
+        {/* min-w-0 is load-bearing: without it this flex level's automatic
+            minimum is the full nowrap width of a long pod/service name, the
+            row overflows the card, and the focus button renders out on the
+            graph canvas. Truncation only works when every nested flex level
+            may shrink. */}
+        <div className="flex items-center gap-2 flex-1 min-w-0">
           {/* External endpoints aggregate traffic only — they have no syscalls
               or policy to reveal (their toggle is a no-op), so no expander. */}
           {!isExternal && (
@@ -76,7 +81,7 @@ const PodNode: React.FC<PodNodeProps> = React.memo(({ data, selected }) => {
               {identityName}
             </div>
             {data.externalNamespace && data.externalNamespace !== 'internet' && data.externalNamespace !== 'cluster' && (
-              <div className="text-xs text-tertiary">
+              <div className="text-xs text-tertiary truncate" title={data.externalNamespace}>
                 ns: {data.externalNamespace}
               </div>
             )}
