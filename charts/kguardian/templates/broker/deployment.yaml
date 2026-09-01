@@ -176,3 +176,6 @@ spec:
       topologySpreadConstraints:
         {{- toYaml . | nindent 8 }}
       {{- end }}
+      {{- with include "kguardian.priorityClassName" (dict "component" .Values.broker "global" .Values.global) }}
+      priorityClassName: {{ . | quote }}
+      {{- end }}

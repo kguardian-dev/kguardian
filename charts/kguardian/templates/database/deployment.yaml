@@ -192,4 +192,7 @@ spec:
       tolerations:
         {{- toYaml . | nindent 8 }}
       {{- end }}
+      {{- with include "kguardian.priorityClassName" (dict "component" .Values.database "global" .Values.global) }}
+      priorityClassName: {{ . | quote }}
+      {{- end }}
 {{- end }}

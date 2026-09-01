@@ -76,6 +76,16 @@ Usage: include "kguardian.imageTag" .Values.<component>.image.tag
 {{- end -}}
 
 {{/*
+Resolve a pod's priorityClassName: the component's own value first, falling
+back to global.priorityClassName. Both default to "" so nothing renders
+unless an operator asks for one.
+Usage: {{- with include "kguardian.priorityClassName" (dict "component" .Values.broker "global" .Values.global) }}
+*/}}
+{{- define "kguardian.priorityClassName" -}}
+{{- .component.priorityClassName | default .global.priorityClassName -}}
+{{- end -}}
+
+{{/*
 Name of the Secret holding the database password.
 Returns `database.existingSecret` if set, otherwise the chart-managed default.
 Usage: include "kguardian.dbSecretName" .
