@@ -166,21 +166,48 @@ fn effective_pool_size() -> u32 {
 /// the loop's 2-second sleep = ~20s of patience.
 const DEFAULT_DB_MIGRATION_MAX_RETRIES: u32 = 10;
 
-/// Default bind address for the broker HTTP server. Operators
+/// IPv4 fallback bind address for the broker HTTP server. Operators
 /// changing the chart's broker.container.port previously needed to
 /// know to ALSO set this — now wired via LISTEN_ADDR env.
 const DEFAULT_LISTEN_ADDR: &str = "0.0.0.0:9090";
 
+/// Dual-stack default: the IPv6 unspecified address, which on Linux
+/// (bindv6only=0, the default everywhere Kubernetes runs) also accepts
+/// IPv4 connections as v4-mapped. A literal 0.0.0.0 bind never accepts
+/// connections on the pod's IPv6 address, leaving the broker
+/// unreachable on IPv6-only clusters.
+const DEFAULT_LISTEN_ADDR_DUAL: &str = "[::]:9090";
+
 /// Read LISTEN_ADDR env var with trim + empty fallback. Same env
 /// trim defense as every other env reader in the broker (a pasted
 /// "0.0.0.0:9090\n" would otherwise fail bind with a confusing
-/// parse error far from the env read site).
-fn listen_addr() -> String {
+/// parse error far from the env read site). `None` means "no operator
+/// override" — the caller picks the dual-stack default.
+fn explicit_listen_addr() -> Option<String> {
     std::env::var("LISTEN_ADDR")
         .ok()
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| DEFAULT_LISTEN_ADDR.to_string())
+}
+
+/// Bind `addr` preferring dual-stack, falling back to `v4` on kernels
+/// without IPv6 — the same fallback Node and Go perform for an
+/// unspecified host, so all four kguardian services now behave alike.
+fn bind_dual_stack(dual: &str, v4: &str) -> std::io::Result<std::net::TcpListener> {
+    std::net::TcpListener::bind(dual).or_else(|_| std::net::TcpListener::bind(v4))
+}
+
+/// The broker's TCP listener. An explicit LISTEN_ADDR is bound
+/// verbatim — operator intent wins, including a deliberately
+/// single-family bind. Without one, prefer dual-stack.
+fn broker_listener() -> std::io::Result<std::net::TcpListener> {
+    let listener = match explicit_listen_addr() {
+        Some(addr) => std::net::TcpListener::bind(&*addr)?,
+        None => bind_dual_stack(DEFAULT_LISTEN_ADDR_DUAL, DEFAULT_LISTEN_ADDR)?,
+    };
+    // actix takes over polling; the std listener must not block accept.
+    listener.set_nonblocking(true)?;
+    Ok(listener)
 }
 
 /// Read DB_MIGRATION_MAX_RETRIES with trim + clamp. Extracted out
@@ -300,8 +327,8 @@ async fn main() -> Result<(), std::io::Error> {
     let version_state = web::Data::new(VersionCheckState::default());
     spawn_version_check(pool.clone(), version_state.clone());
 
-    let listen_addr = listen_addr();
-    info!(addr = %listen_addr, "broker HTTP server starting");
+    let listener = broker_listener()?;
+    info!(addr = %listener.local_addr()?, "broker HTTP server starting");
     HttpServer::new(move || {
         let cors = Cors::default()
             .allow_any_origin()
@@ -337,7 +364,7 @@ async fn main() -> Result<(), std::io::Error> {
             .service(health_check)
             .service(metrics)
     })
-    .bind(listen_addr)?
+    .listen(listener)?
     .run()
     .await
 }
@@ -784,43 +811,45 @@ mod tests {
         });
     }
 
-    // listen_addr is the bind-address env reader added in iteration
-    // 130 to wire the chart's broker.container.port through to the
-    // Rust binary. Same env-trim defense + default-fallback pattern.
+    // explicit_listen_addr is the bind-address env reader added in
+    // iteration 130 (as listen_addr) to wire the chart's
+    // broker.container.port through to the Rust binary; None now means
+    // "no override" and the caller binds the dual-stack default. Same
+    // env-trim defense pattern as every other env reader here.
 
     fn with_listen_env<F: FnOnce()>(value: Option<&str>, f: F) {
         with_env("LISTEN_ADDR", value, f);
     }
 
     #[test]
-    fn listen_addr_defaults_when_unset() {
+    fn listen_addr_unset_means_no_override() {
         with_listen_env(None, || {
-            assert_eq!(listen_addr(), DEFAULT_LISTEN_ADDR);
+            assert_eq!(explicit_listen_addr(), None);
         });
     }
 
     #[test]
     fn listen_addr_honors_override() {
         with_listen_env(Some("0.0.0.0:8080"), || {
-            assert_eq!(listen_addr(), "0.0.0.0:8080");
+            assert_eq!(explicit_listen_addr().as_deref(), Some("0.0.0.0:8080"));
         });
     }
 
     #[test]
-    fn listen_addr_empty_falls_back_to_default() {
+    fn listen_addr_empty_means_no_override() {
         // Operator setting LISTEN_ADDR="" (or set then unset back)
-        // shouldnt produce an empty bind string that .bind() rejects.
+        // shouldnt produce an empty bind string that bind() rejects.
         with_listen_env(Some(""), || {
-            assert_eq!(listen_addr(), DEFAULT_LISTEN_ADDR);
+            assert_eq!(explicit_listen_addr(), None);
         });
     }
 
     #[test]
-    fn listen_addr_whitespace_only_falls_back_to_default() {
+    fn listen_addr_whitespace_only_means_no_override() {
         // Same as empty — whitespace-only is operator-paste artefact,
         // treat as "use default".
         with_listen_env(Some("  \n"), || {
-            assert_eq!(listen_addr(), DEFAULT_LISTEN_ADDR);
+            assert_eq!(explicit_listen_addr(), None);
         });
     }
 
@@ -828,8 +857,29 @@ mod tests {
     fn listen_addr_trims_surrounding_whitespace() {
         // Pasted value with trailing newline round-trips clean.
         with_listen_env(Some("  0.0.0.0:9090\n"), || {
-            assert_eq!(listen_addr(), "0.0.0.0:9090");
+            assert_eq!(explicit_listen_addr().as_deref(), Some("0.0.0.0:9090"));
         });
+    }
+
+    #[test]
+    fn dual_stack_bind_prefers_ipv6_and_accepts_v4_fallback() {
+        // Port 0 keeps the test free of fixed-port flakiness. On a host
+        // with IPv6 the preferred bind must be the v6 unspecified
+        // address (which accepts IPv4 as v4-mapped); on a v6-less
+        // kernel the fallback path must still yield a listener.
+        let host_has_v6 = std::net::TcpListener::bind("[::]:0").is_ok();
+        let l = bind_dual_stack("[::]:0", "0.0.0.0:0").expect("must bind on any kernel");
+        assert_eq!(l.local_addr().unwrap().is_ipv6(), host_has_v6);
+    }
+
+    #[test]
+    fn dual_stack_bind_falls_back_when_preferred_is_unbindable() {
+        // An unbindable preferred address (port already taken on
+        // loopback) must fall through to the v4 address, not error.
+        let occupied = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let taken = format!("127.0.0.1:{}", occupied.local_addr().unwrap().port());
+        let l = bind_dual_stack(&taken, "0.0.0.0:0").expect("fallback must bind");
+        assert!(l.local_addr().unwrap().ip().is_unspecified());
     }
 
     #[test]

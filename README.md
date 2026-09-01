@@ -181,6 +181,7 @@ Things to know:
 
 - **Dual-stack pods and Services are tracked on every address**, not just the primary one in `.status.podIP` / `.spec.clusterIP`. A peer is therefore resolved to a `podSelector` regardless of which family the traffic used.
 - **Nodes built with `CONFIG_IPV6=n`** are handled: the IPv6 socket fields are read behind a CO-RE existence guard, so the Controller loads and runs normally on such kernels — it simply never sees v6 flows there.
+- **Every service listener is dual-stack.** The broker, frontend, llm-bridge and evaluator bind the IPv6 unspecified address (accepting IPv4 as v4-mapped) and fall back to IPv4-only on kernels without IPv6 — so the stack serves IPv4-only, dual-stack, and IPv6-only clusters alike. The broker's `LISTEN_ADDR` env still binds verbatim when set.
 - **Kernels with IPv6 as a module but no module BTF** (kernels older than 5.11, or built with `CONFIG_DEBUG_INFO_BTF_MODULES=n` — Debian 11's 5.10 is the common case) can't attach the IPv6 UDP probes. The Controller detects this at startup, logs a warning, and runs with those probes disabled rather than failing; IPv6 TCP capture is unaffected.
 - **UDP flows are captured from connected sockets** (glibc's DNS resolver connects, so pod DNS is covered on both families). Unconnected `sendto()` datagrams carry no destination on the socket at the probe point and are not captured — the same behaviour IPv4 has always had, notable mainly for musl-based (Alpine) resolvers.
 
