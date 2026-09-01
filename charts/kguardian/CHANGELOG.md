@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.19.2](https://github.com/kguardian-dev/kguardian/compare/chart/v1.19.1...chart/v1.19.2) (2026-09-01)
+
+
+### Bug Fixes
+
+* **deps:** bump chart to frontend 1.13.1 ([#1397](https://github.com/kguardian-dev/kguardian/issues/1397)) ([f0ecc8d](https://github.com/kguardian-dev/kguardian/commit/f0ecc8d68c0aeeaf0b3f9f73883abd070ba78b8c))
+
 ## [1.19.1](https://github.com/kguardian-dev/kguardian/compare/chart/v1.19.0...chart/v1.19.1) (2026-09-01)
 
 
