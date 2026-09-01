@@ -6,6 +6,10 @@ metadata:
   labels:
     {{- include "kguardian.labels" . | nindent 4 }}
 spec:
+  {{- with .Values.controller.updateStrategy }}
+  updateStrategy:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
   selector:
     matchLabels:
       app.kubernetes.io/name: kguardian
@@ -89,8 +93,8 @@ spec:
       tolerations:
         {{- toYaml . | nindent 8 }}
       {{- end }}
-      {{- if .Values.controller.priorityClassName }}
-      priorityClassName: {{ .Values.controller.priorityClassName | quote }}
+      {{- with include "kguardian.priorityClassName" (dict "component" .Values.controller "global" .Values.global) }}
+      priorityClassName: {{ . | quote }}
       {{- end }}
       volumes:
       - name: bpffs

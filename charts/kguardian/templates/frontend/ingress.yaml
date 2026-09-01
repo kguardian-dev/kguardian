@@ -36,6 +36,7 @@ spec:
                 name: {{ $.Values.frontend.service.name }}
                 port:
                   number: {{ $.Values.frontend.service.port }}
+          {{- if $.Values.frontend.ingress.apiPath }}
           # Proxy /api requests to broker
           - path: /api
             pathType: Prefix
@@ -44,5 +45,6 @@ spec:
                 name: {{ $.Values.broker.service.name }}
                 port:
                   number: {{ $.Values.broker.service.port }}
+          {{- end }}
     {{- end }}
 {{- end }}

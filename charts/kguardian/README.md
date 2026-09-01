@@ -175,6 +175,7 @@ The following table lists the configurable parameters of the kguardian chart and
 | controller.serviceAccount.create | bool | `true` | Specifies whether a service account should be created |
 | controller.serviceAccount.name | string | `""` | The name of the service account to use. If not set and create is true, a name is generated using the fullname template |
 | controller.tolerations | list | `[{"effect":"NoSchedule","key":"node-role.kubernetes.io/control-plane","operator":"Exists"}]` | Tolerations for the kguardian controller pod assignment |
+| controller.updateStrategy | object | `{}` | Rolling update strategy for the Controller DaemonSet. Kubernetes defaults to maxUnavailable 1 with maxSurge 0, which updates one node at a time. A node the kubelet refuses the pod on (DiskPressure, for example) never becomes Ready, so it holds that single slot indefinitely and no further node is updated. On a large cluster one unhealthy node can stall the rollout completely. A percentage lets the rest proceed:   updateStrategy:     rollingUpdate:       maxUnavailable: 20% |
 | database.affinity | object | `{}` | Affinity rules for database pod assignment |
 | database.autoscaling.enabled | bool | `false` | Enable horizontal pod autoscaling for database |
 | database.autoscaling.maxReplicas | int | `100` | Maximum number of database replicas |
@@ -264,6 +265,7 @@ The following table lists the configurable parameters of the kguardian chart and
 | frontend.image.tag | string | `"1.13.1"` | Frontend version tag (auto-updated by release-please) |
 | frontend.imagePullSecrets | list | `[]` | List of image pull secrets for private registries |
 | frontend.ingress.annotations | object | `{}` | Ingress annotations |
+| frontend.ingress.apiPath | bool | `true` | Also route /api on the same host to the Broker. The Broker serves bare paths (/pod/info, /pod/traffic), so this only works behind an ingress controller that strips the prefix, such as nginx with rewrite-target. Controllers that pass the path through unchanged (AWS ALB, for example) make every /api request a 404. The UI image proxies /api to the Broker itself, so setting this to false serves the whole application from the UI Service and works on any controller. |
 | frontend.ingress.className | string | `""` | Ingress class name |
 | frontend.ingress.enabled | bool | `false` | Enable ingress for frontend |
 | frontend.ingress.hosts | list | `[{"host":"kguardian.example.com","paths":[{"path":"/","pathType":"Prefix"}]}]` | Ingress hosts configuration |

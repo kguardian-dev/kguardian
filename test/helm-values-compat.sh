@@ -216,6 +216,47 @@ render "mcp-without-assistant" --set ai.mcp.enabled=true && {
   assert_absent  "mcp-without-assistant" "MCP_ENABLED"
 }
 
+# 9. GitOps inputs: values a kustomize/Argo CD consumer would otherwise have to
+# patch into the rendered output. Each defaults to today's behaviour, so an
+# existing values file keeps rendering identically.
+
+# 9a. Defaults render no priorityClassName anywhere and keep the /api ingress
+# path, so nothing changes for operators who never set these.
+render "gitops-defaults" --set frontend.ingress.enabled=true && {
+  assert_absent "gitops-defaults" "priorityClassName"
+  assert_absent "gitops-defaults" "updateStrategy"
+  assert_has    "gitops-defaults" "path: /api"
+}
+
+# 9b. global.priorityClassName reaches every workload, including the in-cluster
+# database and the assistant, and a per-component value wins over it.
+render "gitops-priorityclass" \
+  --set global.priorityClassName=medium-priority \
+  --set broker.priorityClassName=high-priority \
+  --set ai.enabled=true --set ai.provider=openai --set ai.secret=k && {
+  assert_has "gitops-priorityclass" "high-priority"
+  # 5 of the 6 workloads take the global; the Broker takes its override.
+  got="$(grep -c 'priorityClassName: "medium-priority"' <<<"$OUT" || true)"
+  [ "$got" = "5" ] || { echo "FAIL [gitops-priorityclass]: expected 5 global, got $got"; fail=1; }
+}
+
+# 9c. The Controller DaemonSet accepts an updateStrategy. Without one, Kubernetes
+# updates a single node at a time and a node that refuses the pod holds that slot
+# indefinitely, stalling the rollout for every remaining node.
+render "gitops-updatestrategy" \
+  --set controller.updateStrategy.rollingUpdate.maxUnavailable=20% && {
+  assert_has "gitops-updatestrategy" "maxUnavailable: 20%"
+}
+
+# 9d. apiPath=false drops the /api rule for ingress controllers that do not
+# rewrite the prefix. The UI image proxies /api to the Broker itself, so the
+# application still works end to end from the UI Service alone.
+render "gitops-no-apipath" \
+  --set frontend.ingress.enabled=true --set frontend.ingress.apiPath=false && {
+  assert_absent "gitops-no-apipath" "path: /api"
+  assert_has    "gitops-no-apipath" "path: /"
+}
+
 if [ "$fail" -ne 0 ]; then
   echo "G4 values-compatibility check FAILED"
   exit 1

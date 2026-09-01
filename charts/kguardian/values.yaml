@@ -151,6 +151,17 @@ controller:
   # For k3s clusters, set to: /run/k3s/containerd/io.containerd.runtime.v2.task
   containerdBundlePath: /run/containerd/io.containerd.runtime.v2.task
 
+  # -- Rolling update strategy for the Controller DaemonSet. Kubernetes
+  # defaults to maxUnavailable 1 with maxSurge 0, which updates one node at a
+  # time. A node the kubelet refuses the pod on (DiskPressure, for example)
+  # never becomes Ready, so it holds that single slot indefinitely and no
+  # further node is updated. On a large cluster one unhealthy node can stall
+  # the rollout completely. A percentage lets the rest proceed:
+  #   updateStrategy:
+  #     rollingUpdate:
+  #       maxUnavailable: 20%
+  updateStrategy: {}
+
   # -- Namespaces to be excluded from monitoring (comma-separated list)
   excludedNamespaces:
     - kguardian
@@ -769,6 +780,14 @@ frontend:
     enabled: false
     # -- Ingress class name
     className: ""
+    # -- Also route /api on the same host to the Broker. The Broker serves
+    # bare paths (/pod/info, /pod/traffic), so this only works behind an
+    # ingress controller that strips the prefix, such as nginx with
+    # rewrite-target. Controllers that pass the path through unchanged (AWS
+    # ALB, for example) make every /api request a 404. The UI image proxies
+    # /api to the Broker itself, so setting this to false serves the whole
+    # application from the UI Service and works on any controller.
+    apiPath: true
     # -- Ingress annotations
     annotations: {}
       # kubernetes.io/ingress.class: nginx
