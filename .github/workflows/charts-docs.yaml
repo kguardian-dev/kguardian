@@ -17,6 +17,12 @@ jobs:
   chart-readme:
     name: Update README
     runs-on: ubuntu-latest
+    # Same-repo PRs only: this job checks out the head branch by name
+    # from THIS repo and commits the regenerated README back to it —
+    # a fork's branch is unreachable that way and unwritable with the
+    # read-only fork-PR token. Maintainers regenerate the README when
+    # the change lands.
+    if: github.event.pull_request.head.repo.full_name == github.repository
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
