@@ -186,6 +186,7 @@ mod tests {
     fn db_pod(namespace: Option<&str>, name: &str) -> PodDetail {
         PodDetail {
             pod_ip: "10.0.0.1".to_string(),
+            pod_ips: vec!["10.0.0.1".to_string()],
             pod_name: name.to_string(),
             pod_namespace: namespace.map(str::to_string),
             pod_obj: None,
