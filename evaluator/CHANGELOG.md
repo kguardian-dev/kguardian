@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.4.0](https://github.com/kguardian-dev/kguardian/compare/evaluator/v0.3.5...evaluator/v0.4.0) (2026-09-01)
+
+
+### Features
+
+* capture IPv6 traffic and emit /128 peer rules ([#1370](https://github.com/kguardian-dev/kguardian/issues/1370)) ([c1bbf51](https://github.com/kguardian-dev/kguardian/commit/c1bbf51c0d9d8d2f8216081fbb7d6aa113541a5f))
+
 ## [0.3.5](https://github.com/kguardian-dev/kguardian/compare/evaluator/v0.3.4...evaluator/v0.3.5) (2026-08-31)
 
 
