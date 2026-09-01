@@ -1,13 +1,13 @@
 use crate::network::netpolicy_drop::NetpolicyDropSkelBuilder;
 use crate::network::network_probe::NetworkProbeSkelBuilder;
-use crate::network::PolicyDropEvent;
+use crate::network::{ip_to_wire_addr, PolicyDropEvent};
 use crate::syscall::{sycallprobe::SyscallSkelBuilder, SyscallEventData};
 use crate::{error::Error, network::NetworkEventData};
 use anyhow::Result;
 use libbpf_rs::skel::{OpenSkel, Skel, SkelBuilder};
 use libbpf_rs::{MapCore, MapFlags, RingBufferBuilder};
 use std::mem::MaybeUninit;
-use std::net::Ipv4Addr;
+use std::net::IpAddr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::sync::mpsc::{Receiver, Sender};
 use tokio::{task, task::JoinHandle};
@@ -172,6 +172,71 @@ fn populate_syscall_allowlist(syscall_map: &libbpf_rs::Map) -> Result<()> {
     Ok(())
 }
 
+/// Where `sym` lives according to a `/proc/kallsyms` dump: `None` if
+/// absent, `Some(None)` if built in, `Some(Some(module))` if exported
+/// by a module (kallsyms appends the module as a bracketed 4th field).
+/// `/proc/kallsyms` lists symbol names even when addresses are hidden,
+/// so reading it needs no capability beyond what the controller
+/// already runs with.
+fn symbol_location(kallsyms: &str, sym: &str) -> Option<Option<String>> {
+    kallsyms.lines().find_map(|line| {
+        let mut fields = line.split_whitespace();
+        let name = fields.nth(2)?;
+        if name != sym {
+            return None;
+        }
+        Some(
+            fields
+                .next()
+                .map(|module| module.trim_matches(['[', ']']).to_string()),
+        )
+    })
+}
+
+/// True when an fentry program targeting `sym` can actually LOAD.
+///
+/// Used to decide whether the `fentry/udpv6_sendmsg` twins stay
+/// autoloaded: an fentry program whose target cannot be resolved fails
+/// the whole skeleton load, which would kill the controller on exactly
+/// the nodes read_sock_addrs works to keep it alive on.
+///
+/// Presence in kallsyms is necessary but NOT sufficient. fentry
+/// resolves its target through BTF; a built-in symbol is covered by
+/// vmlinux BTF (whose absence would already fail every other fentry
+/// program here), but a MODULE symbol needs that module's split BTF,
+/// which kernels older than 5.11 or built with
+/// CONFIG_DEBUG_INFO_BTF_MODULES=n do not ship — Debian 11's 5.10 with
+/// its CONFIG_IPV6=m is the canonical case. There the symbol IS in
+/// kallsyms, the load still fails, and trusting kallsyms alone would
+/// crash-loop the controller. So a module symbol is only trusted when
+/// /sys/kernel/btf/<module> exists.
+fn kernel_can_fentry(sym: &str) -> bool {
+    let kallsyms = match std::fs::read_to_string("/proc/kallsyms") {
+        Ok(contents) => contents,
+        Err(e) => {
+            // Failing open would abort the load on kernels without the
+            // symbol; failing closed only costs IPv6 UDP visibility.
+            warn!("could not read /proc/kallsyms ({e}); assuming {sym} is absent");
+            return false;
+        }
+    };
+    match symbol_location(&kallsyms, sym) {
+        None => false,
+        Some(None) => true,
+        Some(Some(module)) => {
+            let btf = format!("/sys/kernel/btf/{module}");
+            let present = std::path::Path::new(&btf).exists();
+            if !present {
+                warn!(
+                    "{sym} lives in module {module} but {btf} is missing \
+                     (kernel without module BTF); skipping its probes"
+                );
+            }
+            present
+        }
+    }
+}
+
 pub fn ebpf_handle(
     network_event_sender: Sender<NetworkEventData>,
     syscall_event_sender: Sender<SyscallEventData>,
@@ -181,12 +246,30 @@ pub fn ebpf_handle(
     ignore_daemonset_traffic: bool,
 ) -> JoinHandle<Result<(), Error>> {
     task::spawn_blocking(move || {
+        // The IPv6 UDP twins target udpv6_sendmsg; on a kernel where
+        // that target cannot be fentry-attached they must be dropped
+        // BEFORE load or the skeleton load fails and the controller
+        // dies. See kernel_can_fentry.
+        let kernel_has_udpv6 = kernel_can_fentry("udpv6_sendmsg");
+        if !kernel_has_udpv6 {
+            warn!(
+                "no loadable udpv6_sendmsg (IPv6 disabled, module not loaded, or \
+                 module BTF missing); native IPv6 UDP traffic will not be captured"
+            );
+        }
+
         // Load and attach network probe
         let mut open_object = MaybeUninit::uninit();
         let skel_builder = NetworkProbeSkelBuilder::default();
-        let network_probe_skel = skel_builder
+        let mut network_probe_skel = skel_builder
             .open(&mut open_object)
             .map_err(|e| Error::Custom(format!("Failed to open network probe eBPF: {}", e)))?;
+        if !kernel_has_udpv6 {
+            network_probe_skel
+                .progs
+                .trace_udpv6_send
+                .set_autoload(false);
+        }
         let mut network_sk = network_probe_skel
             .load()
             .map_err(|e| Error::Custom(format!("Failed to load network probe eBPF: {}", e)))?;
@@ -198,9 +281,15 @@ pub fn ebpf_handle(
         // Load and attach netpolicy drop probe
         let mut open_object = MaybeUninit::uninit();
         let skel_builder = NetpolicyDropSkelBuilder::default();
-        let netpolicy_drop_skel = skel_builder
+        let mut netpolicy_drop_skel = skel_builder
             .open(&mut open_object)
             .map_err(|e| Error::Custom(format!("Failed to open netpolicy drop eBPF: {}", e)))?;
+        if !kernel_has_udpv6 {
+            netpolicy_drop_skel
+                .progs
+                .trace_udpv6_send
+                .set_autoload(false);
+        }
         let mut netpolicy_sk = netpolicy_drop_skel
             .load()
             .map_err(|e| Error::Custom(format!("Failed to load netpolicy drop eBPF: {}", e)))?;
@@ -419,15 +508,25 @@ pub fn ebpf_handle(
                 while ips_drained < MAX_DRAIN_PER_ITERATION {
                     let Ok(ip) = ignore_ips.try_recv() else { break };
                     ips_drained += 1;
-                    if let Ok(parsed_ip) = ip.parse::<Ipv4Addr>() {
-                        let ip_u32 = u32::from(parsed_ip).to_be(); // Ensure the IP is in network byte order
-                        let _ = network_sk
-                            .maps
-                            .ignore_ips
-                            .update(&ip_u32.to_ne_bytes(), &1_u32.to_ne_bytes(), MapFlags::ANY)
-                            .map_err(|e| eprintln!("Failed to update ignore_ips map: {}", e));
-                    } else {
-                        eprintln!("Failed to parse IP address: {}", ip);
+                    // Parsed as IpAddr, not Ipv4Addr: a dual-stack
+                    // daemonset pod reports IPv6 addresses too, and the
+                    // v4-only parse silently dropped them — the ignore
+                    // list then only half-worked on such nodes.
+                    //
+                    // The key is the same 16-byte v4-mapped form the
+                    // eBPF probes compare against (see read_sock_addrs
+                    // in src/bpf/helper.h); ip_to_wire_addr is the one
+                    // place that spelling is produced.
+                    match ip.parse::<IpAddr>() {
+                        Ok(parsed_ip) => {
+                            let key = ip_to_wire_addr(parsed_ip);
+                            let _ = network_sk
+                                .maps
+                                .ignore_ips
+                                .update(&key, &1_u32.to_ne_bytes(), MapFlags::ANY)
+                                .map_err(|e| eprintln!("Failed to update ignore_ips map: {}", e));
+                        }
+                        Err(_) => eprintln!("Failed to parse IP address: {}", ip),
                     }
                 }
             }
@@ -447,6 +546,39 @@ mod tests {
     // order. unwrap_or_else(into_inner) keeps one failing test from
     // poisoning the lock and cascading into the others.
     static TEST_GUARD: Mutex<()> = Mutex::new(());
+
+    // ---- symbol_location: the kallsyms parse behind the udpv6 gate ----
+    //
+    // The distinction between "built in" and "in a module" is
+    // load-bearing: a module symbol without its module BTF fails the
+    // fentry load even though kallsyms lists it (Debian 11's 5.10 with
+    // CONFIG_IPV6=m), so misparsing the module tag either crash-loops
+    // the controller or silently disables IPv6 UDP capture.
+
+    #[test]
+    fn symbol_location_builtin() {
+        let dump = "ffffffff81000000 T udp_sendmsg\n\
+                    0000000000000000 T udpv6_sendmsg\n";
+        assert_eq!(symbol_location(dump, "udpv6_sendmsg"), Some(None));
+    }
+
+    #[test]
+    fn symbol_location_module_tag_is_extracted() {
+        let dump = "ffffffff81000000 T udp_sendmsg\n\
+                    ffffffffc0aa0000 t udpv6_sendmsg\t[ipv6]\n";
+        assert_eq!(
+            symbol_location(dump, "udpv6_sendmsg"),
+            Some(Some("ipv6".to_string()))
+        );
+    }
+
+    #[test]
+    fn symbol_location_absent_and_no_prefix_confusion() {
+        // __pfx_/prefixed neighbours must not satisfy an exact lookup.
+        let dump = "ffffffff81000000 T __pfx_udpv6_sendmsg\n\
+                    ffffffff81000010 T udpv6_sendmsg_prelude\n";
+        assert_eq!(symbol_location(dump, "udpv6_sendmsg"), None);
+    }
 
     fn reset_state() {
         EBPF_SHUTDOWN.store(false, Ordering::Relaxed);

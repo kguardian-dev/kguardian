@@ -1,3 +1,4 @@
+use crate::ip::{canonical_ip, canonicalise_opt};
 use crate::{schema, AuditClient, PodDetail, PodInputSyscalls, PodSyscalls, PodTraffic, SvcDetail};
 use actix_web::{post, web, Error, HttpResponse};
 use diesel::pg::PgConnection;
@@ -85,9 +86,31 @@ fn traffic_content_key(e: &PodTraffic) -> TrafficContentKey {
     )
 }
 
+/// Canonicalise the two IP columns of every event in an ingest batch,
+/// in place.
+///
+/// This has to run ahead of the dedup, not just ahead of the insert.
+/// `traffic_content_key` and `PodTraffic::get_row` both compare these
+/// strings, so the same IPv6 flow rendered "FD00::1" on one eBPF emit
+/// and "fd00::1" on the next looks like two distinct flows — duplicate
+/// rows in pod_traffic AND a duplicate evaluator round-trip for each.
+///
+/// It also has to happen on the way IN rather than at read time:
+/// `traffic_in_out_ip` is the value the advisor feeds back to
+/// /pod/ip/<ip> and /svc/ip/<ip> to resolve a peer, so the stored form
+/// and the looked-up form have to agree. IPv4 is unaffected —
+/// canonicalisation is a no-op for it — so rows written before this
+/// existed still match.
+fn canonicalise_traffic_ips(batch: &mut [PodTraffic]) {
+    for event in batch.iter_mut() {
+        canonicalise_opt(&mut event.pod_ip);
+        canonicalise_opt(&mut event.traffic_in_out_ip);
+    }
+}
+
 fn create_pod_traffic_batch(
     conn: &mut PgConnection,
-    batch: web::Json<Vec<PodTraffic>>,
+    mut batch: web::Json<Vec<PodTraffic>>,
 ) -> Result<Vec<PodTraffic>, DbError> {
     use schema::pod_traffic::dsl::*;
 
@@ -96,6 +119,8 @@ fn create_pod_traffic_batch(
     }
 
     debug!("Processing batch of {} network traffic events", batch.len());
+
+    canonicalise_traffic_ips(&mut batch);
 
     // Filter out duplicates by checking each event against existing records.
     // The returned vec is what the HTTP handler uses to drive audit
@@ -236,6 +261,70 @@ pub async fn add_pod_details(
     Ok(HttpResponse::Ok().json(pods))
 }
 
+/// Build the `pod_ips` array stored alongside the scalar `pod_ip`.
+///
+/// `posted` is the optional array the controller sent; `primary` is
+/// the already-canonicalised `pod_ip` for the same row. Every entry is
+/// canonicalised, duplicates are collapsed, and `primary` is forced to
+/// the front so the scalar column and the array can never disagree
+/// about which address is the pod's primary. Non-string and blank
+/// entries are dropped rather than stored — they could only ever match
+/// nothing, and keeping them out means the GIN index holds addresses
+/// only.
+///
+/// A `None` (or non-array) `posted` is the backward-compatibility
+/// case, not an error: a controller predating dual-stack support posts
+/// `pod_ip` alone, and the broker ships independently of it
+/// (RELEASES.md). Such a pod gets `[pod_ip]`, which is exactly what
+/// the migration backfilled for rows written before this column
+/// existed, so the row is never left in a shape the lookup cannot
+/// find.
+///
+/// Be clear about the cost, because this is NOT a no-op on the update
+/// path. `upsert_pod_details` recomputes this column unconditionally
+/// and feeds it to `on_conflict(pod_name).do_update()`, so an old
+/// controller posting without the field does not merely decline to add
+/// addresses — it REPLACES an existing `["10.0.0.5","fd00::5"]` with
+/// `["10.0.0.5"]`, destroying a second-family address a newer
+/// controller already wrote. `/pod/ip/fd00::5` then 404s and that peer
+/// degrades back to an ipBlock: precisely the regression this column
+/// exists to prevent.
+///
+/// Accepted rather than fixed, because the blast radius is bounded.
+/// `update_pods_details` is driven by each node's own pod watcher, so
+/// a given pod's row is only ever written by the controller on its
+/// node, and the full list is restored on that controller's next watch
+/// event. The window is therefore "pods on not-yet-upgraded nodes are
+/// single-stack in the DB during a DaemonSet rollout", and it
+/// self-heals as the rollout completes.
+///
+/// The alternative — treat `None` as "leave the column alone" — trades
+/// away the invariant that `pod_ip` is always present in `pod_ips`,
+/// which every lookup relies on. That is a design change, not an
+/// obvious win, so it is deliberately not made here.
+fn canonical_pod_ips(posted: Option<&serde_json::Value>, primary: &str) -> serde_json::Value {
+    let mut out: Vec<String> = Vec::new();
+    let mut push = |ip: &str| {
+        let ip = ip.trim();
+        if ip.is_empty() {
+            return;
+        }
+        let canonical = canonical_ip(ip);
+        if !out.contains(&canonical) {
+            out.push(canonical);
+        }
+    };
+    push(primary);
+    if let Some(serde_json::Value::Array(items)) = posted {
+        for item in items {
+            if let Some(ip) = item.as_str() {
+                push(ip);
+            }
+        }
+    }
+    serde_json::Value::Array(out.into_iter().map(serde_json::Value::String).collect())
+}
+
 pub fn upsert_pod_details(
     conn: &mut PgConnection,
     mut w: web::Json<PodDetail>,
@@ -248,6 +337,13 @@ pub fn upsert_pod_details(
     if let Some(obj) = w.pod_obj.as_mut() {
         crate::get::compact_pod_obj(obj);
     }
+    // Canonicalise before storage so the stored spelling is the one
+    // pod_ip()/svc_ip() will look up. Order matters: pod_ip has to be
+    // canonical before canonical_pod_ips folds it into the array, or
+    // the scalar and the array would carry different spellings of the
+    // same address and the OR in the lookup would only half-work.
+    w.pod_ip = canonical_ip(&w.pod_ip);
+    w.pod_ips = Some(canonical_pod_ips(w.pod_ips.as_ref(), &w.pod_ip));
     debug!(
         "storing the pod details {:?} into pod_details table",
         w.pod_name,
@@ -345,9 +441,19 @@ fn mark_pod_as_dead(
     // false success. Falling back to the legacy name-only path is
     // less precise but visible (it logs the warn) and at least
     // marks the matched-by-name rows dead.
-    let ip = ip.map(str::trim).filter(|s| !s.is_empty());
+    //
+    // Canonicalise once empty is ruled out: the sanity check below is a
+    // string comparison against the stored pod_ip, which the upsert
+    // path writes in canonical form. An IPv6 pod whose mark_dead call
+    // spelled the address differently would fail that comparison,
+    // match zero rows, and leave a terminated pod marked alive —
+    // resurfacing later as a phantom peer in generated policy.
+    let ip = ip
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(canonical_ip);
 
-    let updated = match ip {
+    let updated = match ip.as_deref() {
         Some(precise_ip) => {
             // Filter by (pod_name, pod_ip). pod_name is the PK so the
             // row is unique; adding pod_ip is a sanity check that
@@ -433,6 +539,12 @@ pub fn upsert_svc_details(
     if let Some(obj) = w.service_spec.as_mut() {
         crate::get::compact_svc_spec(obj);
     }
+    // svc_ip is the table PK and svc_ip() matches it as a string, so an
+    // IPv6 ClusterIP must be stored in the same canonical form the
+    // lookup normalises to. The non-routable guard in the handler above
+    // has already rejected the "None" sentinel by this point; anything
+    // else that fails to parse is stored verbatim, as before.
+    w.svc_ip = canonical_ip(&w.svc_ip);
     debug!(
         "storing the service details {:?} into svc_details table",
         w.svc_ip,
@@ -548,6 +660,223 @@ pub fn create_pod_syscalls(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ---- pod_ips (dual-stack) -------------------------------------
+    //
+    // canonical_pod_ips is the write half of the dual-stack fix; the
+    // read half is get::pod_by_ip_query. The invariant tying them
+    // together is that pod_ip is always present in pod_ips and both
+    // are canonical, so the OR in the lookup can never match one and
+    // miss the other.
+
+    fn ips(v: &serde_json::Value) -> Vec<String> {
+        v.as_array()
+            .expect("pod_ips must be a JSON array")
+            .iter()
+            .map(|x| x.as_str().expect("entries must be strings").to_string())
+            .collect()
+    }
+
+    #[test]
+    fn pod_ips_absent_falls_back_to_pod_ip() {
+        // The backward-compatibility case: a controller predating
+        // dual-stack support posts pod_ip alone. It must keep working
+        // against this broker, and the row it writes must be
+        // indistinguishable from what the migration backfilled.
+        let got = canonical_pod_ips(None, "10.42.3.5");
+        assert_eq!(ips(&got), vec!["10.42.3.5"]);
+    }
+
+    #[test]
+    fn pod_ips_non_array_falls_back_to_pod_ip() {
+        // A malformed payload should degrade to the single-stack
+        // behaviour rather than store something the lookup can't match.
+        for junk in [
+            serde_json::Value::Null,
+            serde_json::json!("10.42.3.5"),
+            serde_json::json!({"v4": "10.42.3.5"}),
+        ] {
+            let got = canonical_pod_ips(Some(&junk), "10.42.3.5");
+            assert_eq!(ips(&got), vec!["10.42.3.5"], "junk payload {junk:?}");
+        }
+    }
+
+    #[test]
+    fn pod_ips_empty_array_falls_back_to_pod_ip() {
+        let got = canonical_pod_ips(Some(&serde_json::json!([])), "10.42.3.5");
+        assert_eq!(ips(&got), vec!["10.42.3.5"]);
+    }
+
+    #[test]
+    fn pod_ips_keeps_both_families_for_a_dual_stack_pod() {
+        // The case the whole change exists for.
+        let posted = serde_json::json!(["10.42.3.5", "fd00::5"]);
+        let got = canonical_pod_ips(Some(&posted), "10.42.3.5");
+        assert_eq!(ips(&got), vec!["10.42.3.5", "fd00::5"]);
+    }
+
+    #[test]
+    fn pod_ips_canonicalises_every_entry() {
+        // Entries arrive as whatever the source rendered. They are
+        // matched by JSONB containment against a canonicalised probe,
+        // so a non-canonical entry in the array is an entry that can
+        // never be found.
+        let posted = serde_json::json!(["10.42.3.5", "FD00:0:0:0:0:0:0:5", "2001:0DB8::0:1"]);
+        let got = canonical_pod_ips(Some(&posted), "10.42.3.5");
+        assert_eq!(ips(&got), vec!["10.42.3.5", "fd00::5", "2001:db8::1"]);
+    }
+
+    #[test]
+    fn pod_ips_always_leads_with_the_primary_address() {
+        // pod_ip and pod_ips[0] must agree on the primary, so the two
+        // halves of the lookup's OR can't disagree about which pod an
+        // address belongs to. Even if the controller orders podIPs
+        // differently, or omits the primary entirely.
+        let posted = serde_json::json!(["fd00::5", "10.42.3.5"]);
+        let got = canonical_pod_ips(Some(&posted), "10.42.3.5");
+        assert_eq!(ips(&got), vec!["10.42.3.5", "fd00::5"]);
+
+        let posted = serde_json::json!(["fd00::5"]);
+        let got = canonical_pod_ips(Some(&posted), "10.42.3.5");
+        assert_eq!(ips(&got), vec!["10.42.3.5", "fd00::5"]);
+    }
+
+    #[test]
+    fn pod_ips_collapses_duplicates_including_spelling_variants() {
+        // Two spellings of one address are one address; storing both
+        // would bloat the GIN index with entries that can never match
+        // independently.
+        let posted = serde_json::json!(["10.42.3.5", "FD00::5", "fd00:0:0:0:0:0:0:5", "fd00::5"]);
+        let got = canonical_pod_ips(Some(&posted), "10.42.3.5");
+        assert_eq!(ips(&got), vec!["10.42.3.5", "fd00::5"]);
+    }
+
+    #[test]
+    fn pod_ips_drops_blank_and_non_string_entries() {
+        // Keep the index holding addresses only — these could match
+        // nothing anyway.
+        let posted = serde_json::json!(["", "   ", 42, null, {"ip": "x"}, "fd00::5"]);
+        let got = canonical_pod_ips(Some(&posted), "10.42.3.5");
+        assert_eq!(ips(&got), vec!["10.42.3.5", "fd00::5"]);
+    }
+
+    #[test]
+    fn pod_ips_keeps_unparseable_entries_verbatim() {
+        // Same passthrough rule as everywhere else: don't error, don't
+        // rewrite. An entry that isn't an address just never matches.
+        let posted = serde_json::json!(["10.42.3.5", "fe80::1%eth0"]);
+        let got = canonical_pod_ips(Some(&posted), "10.42.3.5");
+        assert_eq!(ips(&got), vec!["10.42.3.5", "fe80::1%eth0"]);
+    }
+
+    #[test]
+    fn pod_ips_tolerates_a_blank_primary() {
+        // PodDetail::default() and degenerate callers produce an empty
+        // pod_ip; it must not become an empty-string array entry.
+        let posted = serde_json::json!(["fd00::5"]);
+        let got = canonical_pod_ips(Some(&posted), "");
+        assert_eq!(ips(&got), vec!["fd00::5"]);
+        assert_eq!(ips(&canonical_pod_ips(None, "")), Vec::<String>::new());
+    }
+
+    // ---- pod_traffic ingest canonicalisation ----------------------
+
+    fn traffic(pod_ip: &str, peer_ip: &str) -> PodTraffic {
+        PodTraffic {
+            uuid: "u".to_string(),
+            pod_ip: Some(pod_ip.to_string()),
+            traffic_in_out_ip: Some(peer_ip.to_string()),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn traffic_ingest_canonicalises_both_ip_columns() {
+        let mut batch = vec![traffic("FD00::1", "FD00:0:0:0:0:0:0:2")];
+        canonicalise_traffic_ips(&mut batch);
+        assert_eq!(batch[0].pod_ip.as_deref(), Some("fd00::1"));
+        assert_eq!(batch[0].traffic_in_out_ip.as_deref(), Some("fd00::2"));
+    }
+
+    #[test]
+    fn traffic_ingest_leaves_ipv4_and_nulls_alone() {
+        let mut batch = vec![
+            traffic("10.0.0.1", "10.0.0.2"),
+            PodTraffic {
+                uuid: "u2".to_string(),
+                ..Default::default()
+            },
+        ];
+        canonicalise_traffic_ips(&mut batch);
+        assert_eq!(batch[0].pod_ip.as_deref(), Some("10.0.0.1"));
+        assert_eq!(batch[0].traffic_in_out_ip.as_deref(), Some("10.0.0.2"));
+        assert_eq!(batch[1].pod_ip, None);
+        assert_eq!(batch[1].traffic_in_out_ip, None);
+    }
+
+    #[test]
+    fn traffic_ingest_makes_ipv6_spelling_variants_dedup_together() {
+        // The point of canonicalising BEFORE the dedup: two emits of
+        // one flow, spelled differently, must collapse to a single
+        // content key — otherwise they double-insert and double-fire
+        // the audit evaluator.
+        let mut batch = vec![
+            traffic("FD00::1", "fd00:0:0:0:0:0:0:2"),
+            traffic("fd00:0000:0000:0000:0000:0000:0000:0001", "FD00::2"),
+        ];
+        assert_ne!(
+            traffic_content_key(&batch[0]),
+            traffic_content_key(&batch[1]),
+            "precondition: raw spellings look like different flows"
+        );
+        canonicalise_traffic_ips(&mut batch);
+        assert_eq!(
+            traffic_content_key(&batch[0]),
+            traffic_content_key(&batch[1]),
+            "after canonicalisation the two emits must be one flow"
+        );
+    }
+
+    // PodDetail wire compatibility. Broker and controller are released
+    // independently (RELEASES.md), so the /pod/spec payload must
+    // deserialise with and without the new field.
+
+    #[test]
+    fn pod_detail_accepts_payload_without_pod_ips() {
+        // Pre-dual-stack controller. Must not 400.
+        let json = r#"{"pod_name":"web-1","pod_ip":"10.42.3.5","pod_namespace":"prod",
+            "pod_obj":null,"time_stamp":"2026-08-31T00:00:00","node_name":"node-a",
+            "is_dead":false,"pod_identity":null,"workload_selector_labels":null}"#;
+        let got: PodDetail = serde_json::from_str(json).expect("must parse without pod_ips");
+        assert_eq!(got.pod_ip, "10.42.3.5");
+        assert!(
+            got.pod_ips.is_none(),
+            "missing field must deserialise to None"
+        );
+    }
+
+    #[test]
+    fn pod_detail_accepts_payload_with_pod_ips() {
+        let json = r#"{"pod_name":"web-1","pod_ip":"10.42.3.5","pod_namespace":"prod",
+            "pod_obj":null,"time_stamp":"2026-08-31T00:00:00","node_name":"node-a",
+            "is_dead":false,"pod_identity":null,"workload_selector_labels":null,
+            "pod_ips":["10.42.3.5","fd00::5"]}"#;
+        let got: PodDetail = serde_json::from_str(json).expect("must parse with pod_ips");
+        assert_eq!(
+            ips(&got.pod_ips.expect("pod_ips present")),
+            vec!["10.42.3.5", "fd00::5"]
+        );
+    }
+
+    #[test]
+    fn pod_detail_accepts_explicit_null_pod_ips() {
+        let json = r#"{"pod_name":"web-1","pod_ip":"10.42.3.5","pod_namespace":null,
+            "pod_obj":null,"time_stamp":"2026-08-31T00:00:00","node_name":"node-a",
+            "is_dead":false,"pod_identity":null,"workload_selector_labels":null,
+            "pod_ips":null}"#;
+        let got: PodDetail = serde_json::from_str(json).expect("must parse with null pod_ips");
+        assert!(got.pod_ips.is_none());
+    }
 
     // MarkDeadRequest deserialization is the wire-format contract
     // between the controllers reconciler and the brokers

@@ -54,6 +54,19 @@ pub struct PodDetail {
     pub is_dead: bool,
     pub pod_identity: Option<String>,
     pub workload_selector_labels: Option<serde_json::Value>,
+    /// Every address the pod holds, as a JSON array of canonicalised
+    /// strings — the dual-stack counterpart to the scalar `pod_ip`
+    /// above, which can only ever carry one family.
+    ///
+    /// Optional on the wire, and `#[serde(default)]` makes a missing
+    /// field deserialise to `None` rather than a 400. The broker and
+    /// the controller ship independently (RELEASES.md), so a
+    /// controller predating dual-stack support posts `pod_ip` alone
+    /// and must keep working; `upsert_pod_details` fills the gap with
+    /// `[pod_ip]`. Field order matters — `Queryable` is positional, so
+    /// this must stay last to match `schema::pod_details`.
+    #[serde(default)]
+    pub pod_ips: Option<serde_json::Value>,
 }
 
 #[derive(

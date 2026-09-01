@@ -1,0 +1,36 @@
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  labels:
+    app.kubernetes.io/component: standard-policy
+    app.kubernetes.io/name: web6
+    app.kubernetes.io/part-of: kguardian
+  name: web6-standard-policy
+  namespace: prod
+spec:
+  egress:
+  - ports:
+    - port: 5432
+      protocol: TCP
+    to:
+    - ipBlock:
+        cidr: 10.96.0.10/32
+  - ports:
+    - port: 5432
+      protocol: TCP
+    to:
+    - ipBlock:
+        cidr: fd00:96::a/128
+  ingress:
+  - from:
+    - ipBlock:
+        cidr: fd00::7/128
+    ports:
+    - port: 8080
+      protocol: TCP
+  podSelector:
+    matchLabels:
+      app: web
+  policyTypes:
+  - Ingress
+  - Egress

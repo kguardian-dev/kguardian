@@ -1,7 +1,10 @@
+use crate::ip::canonical_ip;
 use crate::{schema, PodDetail, PodSyscalls, PodTraffic, SvcDetail};
 use actix_web::{get, web, HttpResponse, Responder};
+use diesel::dsl::sql;
 use diesel::prelude::*;
 use diesel::r2d2::{self, ConnectionManager};
+use diesel::sql_types::{Bool, Jsonb};
 use tracing::{debug, info};
 
 type DbPool = r2d2::Pool<ConnectionManager<PgConnection>>;
@@ -260,12 +263,28 @@ pub async fn get_svc_by_ip(
     })
 }
 
-pub fn svc_ip(conn: &mut PgConnection, ip: &str) -> Result<Option<SvcDetail>, DbError> {
+/// The service-by-IP query for a raw inbound `ip`, canonicalisation
+/// included.
+///
+/// Split out from [`svc_ip`] so the whole behaviour — the normalisation
+/// and the resulting SQL — can be asserted in a unit test. Every test
+/// in this crate runs without a database, so the generated SQL is the
+/// only thing there is to pin.
+///
+/// svc_ip is the table PK, a VARCHAR, so this is a string match: an
+/// IPv6 ClusterIP written "FD00::1" by the caller does not match the
+/// "fd00::1" the write path stored, and the Service silently resolves
+/// to nothing. See [`crate::ip`] for the canonical form itself (it is
+/// a cross-component contract, not a local choice) and for why non-IP
+/// input — notably the headless "None" sentinel — passes through
+/// rather than erroring.
+fn svc_by_ip_query(ip: &str) -> schema::svc_details::BoxedQuery<'static, diesel::pg::Pg> {
     use schema::svc_details::dsl::*;
-    let svc = svc_details
-        .filter(svc_ip.eq(ip.to_string()))
-        .first::<SvcDetail>(conn)
-        .optional()?;
+    svc_details.filter(svc_ip.eq(canonical_ip(ip))).into_boxed()
+}
+
+pub fn svc_ip(conn: &mut PgConnection, ip: &str) -> Result<Option<SvcDetail>, DbError> {
+    let svc = svc_by_ip_query(ip).first::<SvcDetail>(conn).optional()?;
     Ok(svc)
 }
 
@@ -335,12 +354,60 @@ pub async fn get_pod_by_ip(
     })
 }
 
-pub fn pod_ip(conn: &mut PgConnection, ip: &str) -> Result<Option<PodDetail>, DbError> {
+/// The pod-by-IP query for a raw inbound `ip`, canonicalisation
+/// included.
+///
+/// Split out from [`pod_ip`] for the same reason as
+/// [`svc_by_ip_query`]: the crate has no database-backed tests, so the
+/// generated SQL is what the unit tests assert against.
+///
+/// The inbound address is canonicalised first. These are VARCHAR
+/// columns matched as strings, and one IPv6 address has many spellings
+/// ("FD00::1", "fd00:0:0:0:0:0:0:1", "fd00::1"); whichever form the
+/// caller happens to hold has to be reduced to the same form the write
+/// path stored. See [`crate::ip`].
+///
+/// The predicate matches EITHER the legacy scalar `pod_ip` column or
+/// membership in the `pod_ips` array. `pod_details.pod_ip` holds a
+/// single address — for a dual-stack pod, whichever family kubelet
+/// reports as primary — so a peer observed on the other family never
+/// resolved to a pod at all. That failure is invisible rather than
+/// loud: a `None` here is also how the advisor learns a peer is
+/// genuinely external, so instead of erroring, policy generation
+/// quietly degrades the flow from a podSelector to a raw ipBlock.
+///
+/// Matching the scalar as well as the array (rather than reading
+/// `pod_ips` alone) is what keeps an older controller working — one
+/// that posts only `pod_ip`, against rows this broker has not
+/// re-upserted since the migration backfilled them. Broker and
+/// controller ship independently (RELEASES.md).
+///
+/// The containment probe is a raw fragment because diesel has no typed
+/// operator for jsonb `@>`; it is parameterised, not interpolated, and
+/// idx_pod_details_pod_ips (GIN jsonb_path_ops) serves it. The column
+/// is qualified because `pod_ips` is also in scope as a diesel dsl
+/// item.
+fn pod_by_ip_query(ip: &str) -> schema::pod_details::BoxedQuery<'static, diesel::pg::Pg> {
     use schema::pod_details::dsl::*;
-    let pod = pod_details
-        .filter(pod_ip.eq(ip.to_string()))
-        .first::<PodDetail>(conn)
-        .optional()?;
+    let wanted = canonical_ip(ip);
+    let contains_wanted =
+        sql::<Bool>("pod_details.pod_ips @> ").bind::<Jsonb, _>(serde_json::json!([wanted]));
+    // Deterministic pick when more than one row matches. pod_details is
+    // keyed by pod_name, so a pod that died holding an address and a
+    // live pod that later reused it are two rows — and widening the
+    // predicate makes an overlap likelier than it was with a single
+    // exact column. Same (is_dead ASC, time_stamp DESC) rule as
+    // pod_name(): prefer the live pod, fall back to the most recently
+    // seen dead one, never let the planner decide.
+    pod_details
+        .filter(pod_ip.eq(wanted).or(contains_wanted))
+        .order((is_dead.asc(), time_stamp.desc()))
+        .into_boxed()
+}
+
+/// Resolve a pod by any of its addresses.
+pub fn pod_ip(conn: &mut PgConnection, ip: &str) -> Result<Option<PodDetail>, DbError> {
+    let pod = pod_by_ip_query(ip).first::<PodDetail>(conn).optional()?;
     Ok(pod)
 }
 
@@ -582,6 +649,153 @@ pub fn audit_verdicts_query(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ---- pod/svc by-IP lookup -------------------------------------
+    //
+    // There is no database in this test suite (nothing in the crate
+    // takes a live PgConnection), so these assert on the SQL diesel
+    // generates and the values it binds. That is enough to pin the two
+    // things that actually broke for dual-stack pods: which columns the
+    // predicate consults, and what form the address is in by the time
+    // it reaches a bind.
+
+    fn pod_sql(ip: &str) -> String {
+        diesel::debug_query::<diesel::pg::Pg, _>(&pod_by_ip_query(ip)).to_string()
+    }
+
+    fn svc_sql(ip: &str) -> String {
+        diesel::debug_query::<diesel::pg::Pg, _>(&svc_by_ip_query(ip)).to_string()
+    }
+
+    #[test]
+    fn pod_by_ip_matches_either_column() {
+        // The regression this whole change exists for: a dual-stack pod
+        // stores only its primary address in pod_details.pod_ip, so the
+        // lookup has to also consult pod_ips. Both halves must be
+        // present, OR'd — checking only pod_ips would break older
+        // controllers, checking only pod_ip is the original bug.
+        let sql = pod_sql("fd00::1");
+        assert!(
+            sql.contains(r#""pod_details"."pod_ip" = $1"#),
+            "legacy scalar column must still be matched: {sql}"
+        );
+        assert!(
+            sql.contains("pod_details.pod_ips @> $2"),
+            "pod_ips membership must be matched: {sql}"
+        );
+        assert!(
+            sql.contains(r#"(("pod_details"."pod_ip" = $1) OR pod_details.pod_ips @> $2)"#),
+            "the two must be OR'd, not AND'd: {sql}"
+        );
+    }
+
+    #[test]
+    fn pod_by_ip_binds_the_same_canonical_address_to_both_halves() {
+        // A mismatch between the two binds would make the OR match on
+        // one family's spelling and miss on the other's — the exact
+        // failure mode, just moved one layer down.
+        let sql = pod_sql("FD00:0:0:0:0:0:0:1");
+        assert!(
+            sql.contains(r#"binds: ["fd00::1", Array [String("fd00::1")]]"#),
+            "both halves must bind the same canonical form: {sql}"
+        );
+    }
+
+    #[test]
+    fn pod_by_ip_canonicalises_every_ipv6_spelling_to_one_query() {
+        // Four ways of writing one address must produce byte-identical
+        // SQL *and* binds, or the lookup depends on how the caller
+        // happened to format the peer it observed.
+        let expected = pod_sql("fd00::1");
+        for spelling in [
+            "FD00::1",
+            "fd00:0:0:0:0:0:0:1",
+            "fd00:0000:0000:0000:0000:0000:0000:0001",
+            "FD00:0000:0000:0000:0000:0000:0000:0001",
+        ] {
+            assert_eq!(
+                pod_sql(spelling),
+                expected,
+                "{spelling} must produce the same query as fd00::1"
+            );
+        }
+    }
+
+    #[test]
+    fn pod_by_ip_leaves_ipv4_alone() {
+        // Canonicalisation must not disturb the IPv4 path: every row
+        // written before this change holds a plain dotted quad.
+        let sql = pod_sql("10.42.3.5");
+        assert!(
+            sql.contains(r#"binds: ["10.42.3.5", Array [String("10.42.3.5")]]"#),
+            "IPv4 must bind unchanged: {sql}"
+        );
+    }
+
+    #[test]
+    fn pod_by_ip_passes_non_ip_input_through_unchanged() {
+        // A lookup for something that isn't an address should behave as
+        // it did before canonicalisation existed — bind the string,
+        // match nothing, return None. Not an error.
+        let sql = pod_sql("not-an-ip");
+        assert!(
+            sql.contains(r#"binds: ["not-an-ip", Array [String("not-an-ip")]]"#),
+            "unparseable input must reach the bind untouched: {sql}"
+        );
+    }
+
+    #[test]
+    fn pod_by_ip_prefers_the_live_pod() {
+        // Widening the predicate makes multi-row matches likelier (a
+        // dead pod's row keeps its address; a later pod can reuse it),
+        // so the row we return must not be the planner's choice.
+        let sql = pod_sql("fd00::1");
+        assert!(
+            sql.contains(
+                r#"ORDER BY "pod_details"."is_dead" ASC, "pod_details"."time_stamp" DESC"#
+            ),
+            "alive-first, newest-first ordering must be explicit: {sql}"
+        );
+    }
+
+    #[test]
+    fn pod_by_ip_selects_pod_ips_last() {
+        // PodDetail derives Queryable, which is positional: if the
+        // struct field order and schema.rs column order ever drift, the
+        // load silently deserialises the wrong column into the wrong
+        // field. Pin the tail of the select list.
+        let sql = pod_sql("10.0.0.1");
+        assert!(
+            sql.contains(
+                r#""pod_details"."workload_selector_labels", "pod_details"."pod_ips" FROM"#
+            ),
+            "pod_ips must be the last selected column: {sql}"
+        );
+    }
+
+    #[test]
+    fn svc_by_ip_canonicalises_ipv6_variants() {
+        let expected = svc_sql("fd00::1");
+        for spelling in ["FD00::1", "fd00:0:0:0:0:0:0:1"] {
+            assert_eq!(
+                svc_sql(spelling),
+                expected,
+                "{spelling} must produce the same query as fd00::1"
+            );
+        }
+        assert!(
+            expected.contains(r#"binds: ["fd00::1"]"#),
+            "svc lookup must bind the canonical form: {expected}"
+        );
+    }
+
+    #[test]
+    fn svc_by_ip_leaves_headless_sentinel_and_ipv4_alone() {
+        // "None" is the headless-Service sentinel the routability guard
+        // rejects on the write path; it must not be mangled here either.
+        assert!(svc_sql("None").contains(r#"binds: ["None"]"#));
+        assert!(svc_sql("10.96.0.1").contains(r#"binds: ["10.96.0.1"]"#));
+    }
 
     #[test]
     fn compact_pod_obj_drops_bulk_keeps_labels() {

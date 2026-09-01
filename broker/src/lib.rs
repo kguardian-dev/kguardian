@@ -2,6 +2,7 @@ mod add;
 mod audit;
 mod error;
 mod get;
+mod ip;
 mod retention;
 mod telemetry;
 mod types;

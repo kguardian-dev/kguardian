@@ -4,6 +4,7 @@ import (
 	"fmt"
 
 	"github.com/kguardian-dev/kguardian/advisor/pkg/api"
+	"github.com/kguardian-dev/kguardian/advisor/pkg/common"
 	log "github.com/rs/zerolog/log"
 	networkingv1 "k8s.io/api/networking/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
@@ -359,9 +360,22 @@ func (g *CiliumPolicyGenerator) resolvePeerForCilium(peerIP string) ([]CiliumEnd
 		return []CiliumEndpointSelector{selector}, nil
 	}
 
-	// Fall back to CIDR for external IPs or unresolvable cluster IPs
-	log.Debug().Msgf("Using CIDR for peer %s", peerIP)
-	cidr := fmt.Sprintf("%s/32", peerIP)
+	// Fall back to CIDR for external IPs or unresolvable cluster IPs.
+	//
+	// common.HostCIDR picks the prefix length from the address family
+	// (/32 for IPv4, /128 for IPv6) — this used to be a hardcoded "/32",
+	// which on a dual-stack cluster widened a single peer into the whole
+	// fd00::/32 block. Returning both selectors empty is the existing
+	// "could not resolve peer" signal: transformToCilium{Ingress,Egress}Rules
+	// already logs and drops the rule rather than emitting one with no
+	// peer, so an unparseable address costs that single rule instead of
+	// putting a malformed toCIDR entry into the policy.
+	cidr, err := common.HostCIDR(peerIP)
+	if err != nil {
+		log.Warn().Err(err).Msgf("Skipping peer %s: cannot express it as a host CIDR", peerIP)
+		return nil, nil
+	}
+	log.Debug().Msgf("Using CIDR %s for peer %s", cidr, peerIP)
 	return nil, []string{cidr}
 }
 

@@ -16,6 +16,42 @@ use telemetry::init_logging;
 mod auth;
 mod telemetry;
 
+/// Test-only helpers shared across this binary's modules.
+///
+/// This deliberately duplicates `api::test_support` rather than
+/// reusing it: that module is `#[cfg(test)]`, and a lib's cfg(test)
+/// items are not compiled when the lib is built as a dependency of
+/// this binary, so it is invisible here no matter how it is scoped.
+/// The two locks guard two separate test processes (`--lib` and
+/// `--bin broker` link and run independently), so having one each is
+/// correct, not a gap.
+#[cfg(test)]
+pub(crate) mod test_support {
+    use std::sync::{Mutex, MutexGuard};
+
+    /// Process-wide lock for tests that mutate environment variables.
+    /// `std::env` is process-global: parallel tests mutating even
+    /// *different* keys race on libc's `environ`. The lib crate
+    /// learned this the hard way (see the note in lib.rs citing the
+    /// flaky conn::returns_connection_manager_when_url_set failure);
+    /// this binary had the same latent race between `tests::with_env`
+    /// (LISTEN_ADDR, DB_POOL_MAX_SIZE, DB_MIGRATION_MAX_RETRIES,
+    /// DB_STATEMENT_TIMEOUT_MS) and
+    /// `auth::tests::from_env_treats_blank_as_disabled`
+    /// (BROKER_AUTH_TOKEN), which surfaced as
+    /// `listen_addr_honors_override` intermittently reading a value
+    /// another test had just restored. Every env-mutating test helper
+    /// in this binary must hold this lock.
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    /// Acquire the env lock, tolerating poison: a test that panics
+    /// while holding it must not cascade into a failure for the next
+    /// one that takes it.
+    pub fn env_lock() -> MutexGuard<'static, ()> {
+        ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner())
+    }
+}
+
 use diesel_migrations::{embed_migrations, EmbeddedMigrations, MigrationHarness};
 use std::time::Instant;
 use tracing::{info, warn};
@@ -581,6 +617,13 @@ mod tests {
     /// but possible) might be affected. The same pattern is reused
     /// in retention.rs (with_env, scoped to retention env vars).
     fn with_env<F: FnOnce()>(key: &str, value: Option<&str>, f: F) {
+        // Crate-wide env lock — std::env is process-global (see
+        // test_support). Held for the whole save/mutate/run/restore
+        // window so a concurrent test can never observe this test's
+        // value, nor have its own restore interleave with ours. Safe to
+        // take here rather than in each test because no `with_*_env`
+        // helper nests inside another; std's Mutex is not reentrant.
+        let _guard = crate::test_support::env_lock();
         let prev = std::env::var(key).ok();
         match value {
             Some(v) => std::env::set_var(key, v),

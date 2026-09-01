@@ -1248,3 +1248,197 @@ func TestMatch_NamedPortContainerProtocolDefaultsTCP(t *testing.T) {
 		t.Fatalf("expected Allow when containerPort.protocol is unset (defaults to TCP), got %#v", got)
 	}
 }
+
+// ipBlockMatches is IPv6-correct on its own (see TestIpBlockMatches_IPv6),
+// but that only proves the innermost comparison. These tests drive a
+// dual-stack flow — v6 on both SrcIP and DstIP — through Match, the
+// package's entry point, so the whole chain is exercised: policyTypes
+// resolution, subject-pod selection per direction, podSelector matching,
+// rule iteration, peer routing via peerIP(), the ipBlock CIDR/except
+// comparison, and port matching. A regression anywhere along that path
+// (for example a future "normalise the IP" step that assumes dotted-quad)
+// shows up here rather than silently degrading v6 clusters to
+// allow-nothing.
+
+// resultFor returns the Result for one direction. A two-directional
+// policy emits one Result per direction; the direction not under test is
+// NotApplicable because only one side of the flow is a known pod.
+func resultFor(t *testing.T, results []Result, dir Direction) Result {
+	t.Helper()
+	for _, r := range results {
+		if r.Direction == dir {
+			return r
+		}
+	}
+	t.Fatalf("no %s result in %#v", dir, results)
+	return Result{}
+}
+
+// dualStackV6Policy allows a /64 of ULA space inbound on 8080 and a /32 of
+// ULA service space outbound on 5432, each with an except subnet carved
+// out. Both directions live in one policy so a single flow can be checked
+// against both.
+func dualStackV6Policy() *v1alpha1.AuditNetworkPolicy {
+	return policy("prod", "web6-dualstack", networkingv1.NetworkPolicySpec{
+		PodSelector: selectMatchLabels(map[string]string{"app": "web"}),
+		PolicyTypes: []networkingv1.PolicyType{
+			networkingv1.PolicyTypeIngress,
+			networkingv1.PolicyTypeEgress,
+		},
+		Ingress: []networkingv1.NetworkPolicyIngressRule{{
+			From: []networkingv1.NetworkPolicyPeer{
+				{IPBlock: &networkingv1.IPBlock{
+					CIDR:   "fd00::/64",
+					Except: []string{"fd00::bad:0/112"},
+				}},
+			},
+			Ports: []networkingv1.NetworkPolicyPort{tcpPort(8080)},
+		}},
+		Egress: []networkingv1.NetworkPolicyEgressRule{{
+			To: []networkingv1.NetworkPolicyPeer{
+				{IPBlock: &networkingv1.IPBlock{
+					CIDR:   "fd00:96::/32",
+					Except: []string{"fd00:96:dead::/48"},
+				}},
+			},
+			Ports: []networkingv1.NetworkPolicyPort{tcpPort(5432)},
+		}},
+	})
+}
+
+func TestMatch_IPv6IPBlockIngress(t *testing.T) {
+	lookup := newLookup()
+	lookup.addPod("prod", "web6-1", map[string]string{"app": "web"})
+	p := dualStackV6Policy()
+
+	for _, tc := range []struct {
+		name  string
+		srcIP string
+		port  int32
+		want  Verdict
+	}{
+		{name: "peer inside cidr", srcIP: "fd00::7", port: 8080, want: VerdictAllow},
+		{name: "peer at cidr lower bound", srcIP: "fd00::", port: 8080, want: VerdictAllow},
+		{name: "peer at cidr upper bound", srcIP: "fd00::ffff:ffff:ffff:ffff", port: 8080, want: VerdictAllow},
+		{name: "peer inside except subnet", srcIP: "fd00::bad:1", port: 8080, want: VerdictWouldDeny},
+		{name: "peer just outside except subnet", srcIP: "fd00::bac:1", port: 8080, want: VerdictAllow},
+		{name: "peer outside cidr", srcIP: "fd01::7", port: 8080, want: VerdictWouldDeny},
+		// A /64 of IPv6 must not be reachable by an IPv4 peer just
+		// because both sit in the same rule list.
+		{name: "ipv4 peer against v6 block", srcIP: "10.0.0.7", port: 8080, want: VerdictWouldDeny},
+		{name: "right peer wrong port", srcIP: "fd00::7", port: 9090, want: VerdictWouldDeny},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			// Dual-stack flow: the subject pod's own address is v6 too.
+			// Src is external (no pod identity), so the Egress direction
+			// of this policy comes back NotApplicable.
+			flow := Flow{
+				DstPodNamespace: "prod", DstPodName: "web6-1",
+				SrcIP: tc.srcIP, DstIP: "fd00::1",
+				DstPort: tc.port, Protocol: ProtocolTCP,
+			}
+			results := Match(flow, p, lookup)
+			got := resultFor(t, results, DirectionIngress)
+			if got.Verdict != tc.want {
+				t.Errorf("src=%s port=%d: verdict = %s, want %s (reason: %q)",
+					tc.srcIP, tc.port, got.Verdict, tc.want, got.Reason)
+			}
+			if got.Verdict == VerdictWouldDeny && got.Reason == "" {
+				t.Error("WouldDeny must carry a reason for the audit trail")
+			}
+		})
+	}
+}
+
+func TestMatch_IPv6IPBlockEgress(t *testing.T) {
+	lookup := newLookup()
+	lookup.addPod("prod", "web6-1", map[string]string{"app": "web"})
+	p := dualStackV6Policy()
+
+	for _, tc := range []struct {
+		name  string
+		dstIP string
+		port  int32
+		want  Verdict
+	}{
+		{name: "peer inside cidr", dstIP: "fd00:96::a", port: 5432, want: VerdictAllow},
+		{name: "peer inside except subnet", dstIP: "fd00:96:dead::1", port: 5432, want: VerdictWouldDeny},
+		{name: "peer just outside except subnet", dstIP: "fd00:96:deae::1", port: 5432, want: VerdictAllow},
+		{name: "peer outside cidr", dstIP: "fd00:97::a", port: 5432, want: VerdictWouldDeny},
+		// The mixed-family case a real dual-stack pod hits: it also
+		// talks to IPv4-only Services, and those flows are not covered
+		// by a v6-only egress rule.
+		{name: "ipv4 peer against v6 block", dstIP: "10.96.0.10", port: 5432, want: VerdictWouldDeny},
+		{name: "right peer wrong port", dstIP: "fd00:96::a", port: 5433, want: VerdictWouldDeny},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			// Dst is external (no pod identity), so the Ingress
+			// direction of this policy comes back NotApplicable.
+			flow := Flow{
+				SrcPodNamespace: "prod", SrcPodName: "web6-1",
+				SrcIP: "fd00::1", DstIP: tc.dstIP,
+				DstPort: tc.port, Protocol: ProtocolTCP,
+			}
+			results := Match(flow, p, lookup)
+			got := resultFor(t, results, DirectionEgress)
+			if got.Verdict != tc.want {
+				t.Errorf("dst=%s port=%d: verdict = %s, want %s (reason: %q)",
+					tc.dstIP, tc.port, got.Verdict, tc.want, got.Reason)
+			}
+			if got.Verdict == VerdictWouldDeny && got.Reason == "" {
+				t.Error("WouldDeny must carry a reason for the audit trail")
+			}
+		})
+	}
+}
+
+// A pod-to-pod flow where both ends are v6 pods in the cluster: this
+// drives both directions of the same policy off one Match call, so the
+// per-direction subject selection is exercised with v6 addresses present
+// on both sides rather than one side being external.
+func TestMatch_IPv6FlowEvaluatesBothDirectionsInOneCall(t *testing.T) {
+	lookup := newLookup()
+	lookup.addPod("prod", "web6-1", map[string]string{"app": "web"})
+	lookup.addPod("prod", "web6-2", map[string]string{"app": "web"})
+
+	// Ingress allows the peer; egress does not list the peer's address,
+	// so the same flow is allowed inbound and would-denied outbound.
+	p := policy("prod", "web6-asymmetric", networkingv1.NetworkPolicySpec{
+		PodSelector: selectMatchLabels(map[string]string{"app": "web"}),
+		PolicyTypes: []networkingv1.PolicyType{
+			networkingv1.PolicyTypeIngress,
+			networkingv1.PolicyTypeEgress,
+		},
+		Ingress: []networkingv1.NetworkPolicyIngressRule{{
+			From: []networkingv1.NetworkPolicyPeer{
+				{IPBlock: &networkingv1.IPBlock{CIDR: "fd00::/64"}},
+			},
+			Ports: []networkingv1.NetworkPolicyPort{tcpPort(8080)},
+		}},
+		Egress: []networkingv1.NetworkPolicyEgressRule{{
+			To: []networkingv1.NetworkPolicyPeer{
+				{IPBlock: &networkingv1.IPBlock{CIDR: "fd00:96::/32"}},
+			},
+			Ports: []networkingv1.NetworkPolicyPort{tcpPort(5432)},
+		}},
+	})
+
+	flow := Flow{
+		SrcPodNamespace: "prod", SrcPodName: "web6-2",
+		DstPodNamespace: "prod", DstPodName: "web6-1",
+		SrcIP: "fd00::2", DstIP: "fd00::1",
+		DstPort: 8080, Protocol: ProtocolTCP,
+	}
+	results := Match(flow, p, lookup)
+	if len(results) != 2 {
+		t.Fatalf("expected one result per direction, got %d: %#v", len(results), results)
+	}
+	if got := resultFor(t, results, DirectionIngress).Verdict; got != VerdictAllow {
+		t.Errorf("ingress: verdict = %s, want %s", got, VerdictAllow)
+	}
+	// Egress peer is fd00::1, which is outside the fd00:96::/32 egress
+	// block — and the port doesn't match either.
+	if got := resultFor(t, results, DirectionEgress).Verdict; got != VerdictWouldDeny {
+		t.Errorf("egress: verdict = %s, want %s", got, VerdictWouldDeny)
+	}
+}
