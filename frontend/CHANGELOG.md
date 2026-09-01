@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.13.1](https://github.com/kguardian-dev/kguardian/compare/frontend/v1.13.0...frontend/v1.13.1) (2026-09-01)
+
+
+### Bug Fixes
+
+* **frontend:** exit focus mode when the focused node disappears; keep the focus button on the card ([#1393](https://github.com/kguardian-dev/kguardian/issues/1393)) ([50ae021](https://github.com/kguardian-dev/kguardian/commit/50ae02196cba74c1d5db33b77fcb8ee58df0075c))
+
 ## [1.13.0](https://github.com/kguardian-dev/kguardian/compare/frontend/v1.12.0...frontend/v1.13.0) (2026-09-01)
 
 
