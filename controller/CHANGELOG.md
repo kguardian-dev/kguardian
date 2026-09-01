@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.10.0](https://github.com/kguardian-dev/kguardian/compare/controller/v1.9.4...controller/v1.10.0) (2026-09-01)
+
+
+### Features
+
+* capture IPv6 traffic and emit /128 peer rules ([#1370](https://github.com/kguardian-dev/kguardian/issues/1370)) ([c1bbf51](https://github.com/kguardian-dev/kguardian/commit/c1bbf51c0d9d8d2f8216081fbb7d6aa113541a5f))
+
 ## [1.9.4](https://github.com/kguardian-dev/kguardian/compare/controller/v1.9.3...controller/v1.9.4) (2026-08-31)
 
 
