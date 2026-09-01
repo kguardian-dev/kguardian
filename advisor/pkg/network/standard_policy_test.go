@@ -657,3 +657,65 @@ func TestStandardPolicy_AddOrUpdateRule_MultiplePeersStaySeparate(t *testing.T) 
 		t.Fatalf("two distinct peers should yield 2 rules, got %d", len(got))
 	}
 }
+
+func TestCreateNetworkPolicyPeer_HostCIDRPerAddressFamily(t *testing.T) {
+	// The IPBlock fallback used to hardcode "/32", so an IPv6 peer came
+	// out as fd00::1/32 — a well-formed CIDR covering ~2^96 addresses
+	// instead of the single host we observed. Peers here resolve to
+	// neither a service nor a pod, so every case lands on that fallback.
+	gen := NewStandardPolicyGenerator()
+	gen.setBrokerData(stubBrokerData{})
+
+	for _, tc := range []struct {
+		name  string
+		ip    string
+		want  string
+		isNil bool
+	}{
+		{name: "ipv4 peer keeps /32", ip: "10.96.0.10", want: "10.96.0.10/32"},
+		{name: "ipv6 peer gets /128", ip: "fd00:96::a", want: "fd00:96::a/128"},
+		{name: "ipv6 loopback gets /128", ip: "::1", want: "::1/128"},
+		// A malformed address must drop the peer rather than emit a
+		// malformed ipBlock; both transform loops already skip on nil.
+		{name: "unparseable peer is skipped", ip: "not-an-ip", isNil: true},
+		{name: "empty peer is skipped", ip: "", isNil: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			peer := gen.createNetworkPolicyPeer(tc.ip)
+			if tc.isNil {
+				assert.Nil(t, peer, "peer %q must be skipped, not emitted", tc.ip)
+				return
+			}
+			if assert.NotNil(t, peer) && assert.NotNil(t, peer.IPBlock) {
+				assert.Equal(t, tc.want, peer.IPBlock.CIDR)
+			}
+		})
+	}
+}
+
+func TestTransformToNetworkPolicyRules_SkipsUnparseablePeer(t *testing.T) {
+	// End-to-end proof of the skip decision: an unusable peer costs its
+	// own rule and nothing else. The surrounding IPv4 and IPv6 peers must
+	// still be emitted, so an operator gets a reviewable policy instead
+	// of one poisoned by a malformed ipBlock.
+	p443 := intstr.FromInt(443)
+	tcp := corev1.ProtocolTCP
+	rules := []NetworkPolicyRule{
+		{PeerIP: "10.0.0.5", Ports: []networkingv1.NetworkPolicyPort{{Port: &p443, Protocol: &tcp}}},
+		{PeerIP: "junk", Ports: []networkingv1.NetworkPolicyPort{{Port: &p443, Protocol: &tcp}}},
+		{PeerIP: "fd00::5", Ports: []networkingv1.NetworkPolicyPort{{Port: &p443, Protocol: &tcp}}},
+	}
+
+	gen := NewStandardPolicyGenerator()
+	gen.setBrokerData(stubBrokerData{})
+
+	ingress := gen.transformToNetworkPolicyIngressRules(rules)
+	assert.Len(t, ingress, 2, "the unparseable peer must be dropped, the other two kept")
+	assert.Equal(t, "10.0.0.5/32", ingress[0].From[0].IPBlock.CIDR)
+	assert.Equal(t, "fd00::5/128", ingress[1].From[0].IPBlock.CIDR)
+
+	egress := gen.transformToNetworkPolicyEgressRules(rules)
+	assert.Len(t, egress, 2, "the unparseable peer must be dropped, the other two kept")
+	assert.Equal(t, "10.0.0.5/32", egress[0].To[0].IPBlock.CIDR)
+	assert.Equal(t, "fd00::5/128", egress[1].To[0].IPBlock.CIDR)
+}

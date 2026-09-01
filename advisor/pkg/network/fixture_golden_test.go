@@ -1,8 +1,10 @@
 package network
 
 import (
+	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/kguardian-dev/kguardian/advisor/pkg/api"
@@ -149,4 +151,134 @@ func TestFixtureGolden_CiliumEndpointResolved(t *testing.T) {
 		t.Fatalf("marshal: %v", err)
 	}
 	checkPolicyGolden(t, "cilium_endpoint_resolved.golden.yaml", out)
+}
+
+// Dual-stack fixtures. A real dual-stack pod does not talk exclusively to
+// one address family: it reaches IPv6 peers over its ULA range and still
+// reaches IPv4-only Services (kube-dns, anything behind a single-stack
+// ClusterIP) over 10.x. The mixed-family egress row below is therefore
+// deliberate, and the goldens must show a /128 ipBlock and a /32 ipBlock
+// living side by side in the same policy.
+//
+// Both APIs allow that. Upstream NetworkPolicy validates each
+// ipBlock.cidr independently — the family is not pinned per policy, per
+// rule, or per peer list (this is exactly how the API supports dual-stack
+// clusters), and a rule may carry several peers of different families.
+// CiliumNetworkPolicy is the same: toCIDR/fromCIDR are plain lists of CIDR
+// strings validated one by one, and Cilium's dual-stack support relies on
+// mixing them.
+//
+// The hardcoded "/32" these fixtures replaced would have emitted
+// fd00::7/32 here — a valid CIDR covering roughly 2^96 addresses instead
+// of the one peer that was actually observed.
+
+func dualStackFixtureTraffic() []api.PodTraffic {
+	return []api.PodTraffic{
+		// Ingress: an IPv6 peer reaches our pod on 8080/TCP.
+		{TrafficType: "INGRESS", SrcIP: "fd00::1", SrcPodPort: "8080", DstIP: "fd00::7", Protocol: "TCP"},
+		// Egress: our pod reaches an IPv6 peer on 5432/TCP.
+		{TrafficType: "EGRESS", SrcIP: "fd00::1", DstIP: "fd00:96::a", DstPort: "5432", Protocol: "TCP"},
+		// Egress: the same pod also reaches an IPv4-only peer on 5432/TCP.
+		{TrafficType: "EGRESS", SrcIP: "fd00::1", DstIP: "10.96.0.10", DstPort: "5432", Protocol: "TCP"},
+	}
+}
+
+func TestFixtureGolden_StandardDualStack(t *testing.T) {
+	detail := fixturePodDetail("web6", "prod", "fd00::1", map[string]string{"app": "web"})
+	policy, err := NewStandardPolicyGenerator().Generate("web6", dualStackFixtureTraffic(), detail)
+	if err != nil {
+		t.Fatalf("generate: %v", err)
+	}
+	out, err := yaml.Marshal(policy)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	checkPolicyGolden(t, "standard_dualstack.golden.yaml", out)
+}
+
+func TestFixtureGolden_CiliumDualStack(t *testing.T) {
+	detail := fixturePodDetail("web6", "prod", "fd00::1", map[string]string{"app": "web"})
+	policy, err := NewCiliumPolicyGenerator().Generate("web6", dualStackFixtureTraffic(), detail)
+	if err != nil {
+		t.Fatalf("generate: %v", err)
+	}
+	out, err := yaml.Marshal(policy)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	checkPolicyGolden(t, "cilium_dualstack.golden.yaml", out)
+}
+
+// Guards the mixed-family claim the dual-stack goldens rest on, so it is
+// checked rather than asserted in a comment: every CIDR the generators
+// emit must parse, must be a single-host prefix, and the two families
+// must genuinely coexist in one policy.
+//
+// The one family rule that does exist upstream is *within* a single
+// ipBlock — every `except` entry has to sit inside `cidr`, so an ipBlock
+// cannot mix families internally. Neither generator emits `except`, and
+// nothing constrains sibling peers or sibling rules to share a family;
+// that is precisely what makes a dual-stack policy expressible.
+func TestFixtureGolden_DualStackGoldensAreValidMixedFamily(t *testing.T) {
+	for _, name := range []string{"standard_dualstack.golden.yaml", "cilium_dualstack.golden.yaml"} {
+		t.Run(name, func(t *testing.T) {
+			path := filepath.Join("..", "..", "..", "test", "fixtures", "generators", "networkpolicy", name)
+			raw, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatalf("read golden %s: %v", name, err)
+			}
+
+			cidrs := extractCIDRs(string(raw))
+			if len(cidrs) == 0 {
+				t.Fatalf("%s: expected CIDR peers in a dual-stack golden, found none", name)
+			}
+
+			var sawV4, sawV6 bool
+			for _, c := range cidrs {
+				addr, network, err := net.ParseCIDR(c)
+				if err != nil {
+					t.Errorf("%s: %q is not a valid CIDR: %v", name, c, err)
+					continue
+				}
+				ones, bits := network.Mask.Size()
+				if ones != bits {
+					t.Errorf("%s: %q is a /%d of %d bits; a peer observed as one address must stay one host",
+						name, c, ones, bits)
+				}
+				if addr.To4() != nil {
+					sawV4 = true
+				} else {
+					sawV6 = true
+				}
+			}
+			if !sawV4 || !sawV6 {
+				t.Errorf("%s: want both families in one policy, got v4=%v v6=%v (cidrs %v)",
+					name, sawV4, sawV6, cidrs)
+			}
+		})
+	}
+}
+
+// extractCIDRs pulls every CIDR-looking scalar out of a marshalled
+// policy. Deliberately format-agnostic (it reads both the standard
+// generator's `cidr:` fields and Cilium's to/fromCIDR list items) so this
+// check keeps working if either schema is restructured.
+func extractCIDRs(yamlDoc string) []string {
+	var out []string
+	for _, line := range strings.Split(yamlDoc, "\n") {
+		field := strings.TrimSpace(line)
+		field = strings.TrimPrefix(field, "- ")
+		if i := strings.LastIndex(field, ": "); i >= 0 {
+			field = field[i+2:]
+		}
+		field = strings.Trim(field, `"`)
+		if !strings.Contains(field, "/") {
+			continue
+		}
+		if _, _, err := net.ParseCIDR(field); err != nil {
+			continue
+		}
+		out = append(out, field)
+	}
+	return out
 }

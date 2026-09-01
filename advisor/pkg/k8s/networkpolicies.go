@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	api "github.com/kguardian-dev/kguardian/advisor/pkg/api"
+	"github.com/kguardian-dev/kguardian/advisor/pkg/common"
 	log "github.com/rs/zerolog/log"
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
@@ -168,9 +169,20 @@ func determinePeerForTraffic(ip string, config *Config) (networkingv1.NetworkPol
 		podOrigin, podErr := api.GetPodSpec(ip)
 		if podErr != nil || podOrigin == nil {
 			log.Debug().Msgf("No pod found for IP %s, assuming external IP.", ip)
-			// Assume external IP if no service or pod found
+			// Assume external IP if no service or pod found.
+			//
+			// common.HostCIDR derives the prefix length from the address
+			// family (/32 for IPv4, /128 for IPv6). The previous hardcoded
+			// "/32" turned an IPv6 peer into the surrounding fd00::/32
+			// block. Unlike the generator call sites, this function can
+			// report the failure to its caller, so an unparseable address
+			// surfaces as an error rather than a silently malformed peer.
+			cidr, cidrErr := common.HostCIDR(ip)
+			if cidrErr != nil {
+				return networkingv1.NetworkPolicyPeer{}, fmt.Errorf("peer %s: %w", ip, cidrErr)
+			}
 			ipBlock := &networkingv1.IPBlock{
-				CIDR: fmt.Sprintf("%s/32", ip),
+				CIDR: cidr,
 			}
 			return networkingv1.NetworkPolicyPeer{IPBlock: ipBlock}, nil
 		}
