@@ -128,6 +128,16 @@ spec:
               value: {{ .Chart.Version | quote }}
             - name: KUBE_VERSION
               value: {{ .Capabilities.KubeVersion.Version | quote }}
+            # Which optional features are on, as fixed slugs — part of
+            # the telemetry check-in (contract v2, docs/telemetry.mdx).
+            # Flag names only, never configuration values.
+            - name: FEATURES
+              {{- $features := list }}
+              {{- if or .Values.ai.enabled .Values.llmBridge.enabled }}{{- $features = append $features "ai" }}{{- end }}
+              {{- if .Values.evaluator.enabled }}{{- $features = append $features "audit" }}{{- end }}
+              {{- if .Values.broker.networkPolicy.enabled }}{{- $features = append $features "netpol" }}{{- end }}
+              {{- if .Values.frontend.sso.enabled }}{{- $features = append $features "sso" }}{{- end }}
+              value: {{ join "," $features | quote }}
           {{- with .Values.broker.startupProbe }}
           startupProbe:
             {{- toYaml . | nindent 12 }}

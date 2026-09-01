@@ -12,6 +12,14 @@ rules:
     - get
     - watch
     - list
+# The controller reads its OWN Node object once at startup to derive
+# coarse environment facts (provider/distro/CNI/IP family/OS) for the
+# anonymous telemetry check-in (docs/telemetry.mdx). get only — no
+# list/watch over nodes.
+- apiGroups: [""]
+  resources: ["nodes"]
+  verbs:
+    - get
 - apiGroups: ["apps"]
   resources:
   - deployments
