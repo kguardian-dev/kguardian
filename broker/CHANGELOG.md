@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.13.1](https://github.com/kguardian-dev/kguardian/compare/broker/v1.13.0...broker/v1.13.1) (2026-09-01)
+
+
+### Bug Fixes
+
+* **broker:** bound /pod/traffic/{name} like the cluster-wide endpoint ([10b34f7](https://github.com/kguardian-dev/kguardian/commit/10b34f7cdf5af36198125b22cafa9480b66d6a82))
+* classify TCP direction from socket state, not a port heuristic ([593e925](https://github.com/kguardian-dev/kguardian/commit/593e9253655fa8f6ebf848018dbd3e6e57fc84b8))
+
 ## [1.13.0](https://github.com/kguardian-dev/kguardian/compare/broker/v1.12.4...broker/v1.13.0) (2026-09-01)
 
 
