@@ -232,3 +232,18 @@ export function parseSyscallString(syscallStr: string): {
 
   return { valid, invalid };
 }
+
+/**
+ * Split a comma-separated syscall record into a display-ready list:
+ * trimmed, empties dropped, de-duplicated, and sorted alphabetically.
+ *
+ * The capture layer emits syscalls in observation order, which differs
+ * between pods and across refreshes — every view that LISTS syscalls
+ * goes through this so the same workload always reads the same way.
+ * (Counts intentionally do not: they keep raw record semantics.)
+ */
+export function displaySyscallList(syscallStr: string): string[] {
+  return [...new Set(
+    syscallStr.split(',').map((s) => s.trim()).filter((s) => s.length > 0),
+  )].sort((a, b) => a.localeCompare(b));
+}

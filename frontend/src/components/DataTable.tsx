@@ -2,6 +2,7 @@ import React, { useState, useEffect, useMemo, useCallback } from 'react';
 import type { PodInfo, PodNodeData, ServiceInfo } from '../types';
 import { ArrowRight, Activity, ChevronDown, ChevronRight, Filter, MousePointerClick, Inbox } from 'lucide-react';
 import { EmptyState } from './ui/EmptyState';
+import { displaySyscallList } from '../utils/syscalls';
 
 interface DataTableProps {
   selectedPod: PodNodeData | null;
@@ -709,7 +710,10 @@ const DataTable: React.FC<DataTableProps> = ({ selectedPod, allPodsLookup, servi
                 </thead>
                 <tbody>
                   {selectedPod.syscalls?.map((syscall, index) => {
-                    const syscallList = syscall.syscalls.split(',').filter(s => s.trim());
+                    // Sorted + de-duplicated: capture emits in observation
+                    // order, which varies between pods and refreshes; the
+                    // collapsed 10-chip preview must show a stable prefix.
+                    const syscallList = displaySyscallList(syscall.syscalls);
                     const isExpanded = expandedSyscalls.has(index);
                     const displayedSyscalls = isExpanded ? syscallList : syscallList.slice(0, 10);
 
