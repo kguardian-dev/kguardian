@@ -56,6 +56,34 @@ jobs:
         if: steps.list-changed.outputs.changed == 'true'
         uses: helm/kind-action@ef37e7f390d99f746eb8b610417061a60e82a6cc # v1.14.0
 
+      # A chart bump PR typically references images whose release builds
+      # are still running — release-please cuts the tag minutes before
+      # the bump PR opens, and the Rust builds take ~30 minutes. Without
+      # this, ct install fails on ErrImagePull through no fault of the
+      # chart and every bump PR is born red (it has happened on three
+      # consecutive bumps). Wait — bounded — for each kguardian image
+      # the chart actually renders before installing.
+      - name: Wait for referenced images
+        if: steps.list-changed.outputs.changed == 'true'
+        run: |
+          images=$(helm template charts/kguardian \
+            | grep -oE 'image: *"?[^"]+"?' \
+            | sed -E 's/image: *"?([^"]+)"?/\1/' \
+            | grep '^ghcr.io/kguardian-dev/' | sort -u)
+          echo "chart references:"; echo "$images"
+          deadline=$(( $(date +%s) + 1500 ))
+          for img in $images; do
+            until docker manifest inspect "$img" >/dev/null 2>&1; do
+              if [ "$(date +%s)" -gt "$deadline" ]; then
+                echo "::error::$img still absent after 25 minutes — release build failed or tag never cut"
+                exit 1
+              fi
+              echo "waiting for $img ..."
+              sleep 30
+            done
+            echo "present: $img"
+          done
+
       - name: Run chart-testing (install)
         if: steps.list-changed.outputs.changed == 'true'
         run: ct install --config .github/ct.yaml --target-branch ${{ github.event.repository.default_branch }}
