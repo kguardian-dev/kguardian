@@ -122,7 +122,9 @@ export function FindingsView({ pods, namespace, onSelectPod, onBuildPolicy, onOp
         });
         const calls = [...seen.entries()]
           .map(([name, severity]) => ({ name, severity }))
-          .sort((a, b) => SEVERITY_RANK[b.severity] - SEVERITY_RANK[a.severity]);
+          // Name tiebreak: equal severities otherwise keep Map insertion
+          // order, which is capture order — inconsistent across refreshes.
+          .sort((a, b) => SEVERITY_RANK[b.severity] - SEVERITY_RANK[a.severity] || a.name.localeCompare(b.name));
         const worst = calls.reduce<Severity | null>(
           (acc, c) => (acc === null || SEVERITY_RANK[c.severity] > SEVERITY_RANK[acc] ? c.severity : acc),
           null,
@@ -130,7 +132,11 @@ export function FindingsView({ pods, namespace, onSelectPod, onBuildPolicy, onOp
         return calls.length > 0 && worst ? { pod, worst, calls } : null;
       })
       .filter((f): f is SyscallFinding => f !== null)
-      .sort((a, b) => SEVERITY_RANK[b.worst] - SEVERITY_RANK[a.worst] || b.calls.length - a.calls.length);
+      // Pod-label tiebreak for the same reason as the per-call sort above.
+      .sort((a, b) =>
+        SEVERITY_RANK[b.worst] - SEVERITY_RANK[a.worst]
+        || b.calls.length - a.calls.length
+        || podLabel(a.pod).localeCompare(podLabel(b.pod)));
   }, [workloads]);
 
   const fanoutFindings = useMemo<FanoutFinding[]>(() => {
