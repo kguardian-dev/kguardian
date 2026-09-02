@@ -16,7 +16,9 @@ you know exactly what it does and choose, than never notice it.
 ## Exactly what is sent
 
 One HTTPS `GET` per day to `https://version.kguardian.dev/v1/check` with
-these six query parameters — nothing else, ever:
+the query parameters below — nothing else, ever. The first six are the
+original contract; the rest were added in contract v2 and are optional
+(a broker that predates them is still accepted):
 
 | Field | Example | What it is |
 | --- | --- | --- |
@@ -26,6 +28,15 @@ these six query parameters — nothing else, ever:
 | `k8s` | `v1.33.1` | Kubernetes version, captured by the chart at install/upgrade time. |
 | `nodes` | `3` | Count of distinct live nodes the controller has observed — a coarse size signal, not an inventory. |
 | `arch` | `x86_64` | Broker CPU architecture. |
+| `provider` | `aws` | Cloud platform, derived from the node's `providerID` scheme. One of a fixed list (`aws`, `gcp`, `azure`, `digitalocean`, `hetzner`, `openstack`, `vsphere`, `oracle`, `ibm`, `baremetal`, `kind`) or `unknown`. Never an account, project, or region. |
+| `distro` | `k3s` | Kubernetes distribution flavor (`eks`, `gke`, `aks`, `k3s`, `rke2`, `talos`, `openshift`, `kind`, `vanilla`), derived from well-known node labels and version suffixes. |
+| `cni` | `cilium` | CNI plugin, derived from node annotations (`cilium`, `calico`, `flannel`, `weave`, `antrea`, `kindnet`). |
+| `ip_family` | `dual` | Cluster IP family (`ipv4`, `ipv6`, `dual`), derived from node pod CIDRs. |
+| `node_os` | `talos` | Node operating-system family from `nodeInfo.osImage`, coarsened to a fixed list. |
+| `pods_bucket` | `10-99` | Order-of-magnitude bucket of pods observed — never an exact inventory. |
+| `features` | `ai,audit` | Which optional kguardian features are enabled, as fixed slugs — no configuration values. |
+
+The v2 fields (everything below `arch`) are optional: older brokers that do not send them are still accepted, and every value is validated against a fixed whitelist server-side. All of them are coarse enums or buckets by design — the check-in never carries names, addresses, regions, instance types, or configuration contents.
 
 The exact field list is pinned by a unit test in the broker
 (`check_params_send_exactly_the_documented_fields`) — a change to the wire
