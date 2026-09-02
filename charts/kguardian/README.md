@@ -2,7 +2,7 @@
 
 This chart bootstraps the [kguardian]() controlplane onto a [Kubernetes](http://kubernetes.io) cluster using the [Helm](https://helm.sh) package manager.
 
-![Version: 1.19.2](https://img.shields.io/badge/Version-1.19.2-informational?style=flat-square)
+![Version: 1.20.0](https://img.shields.io/badge/Version-1.20.0-informational?style=flat-square)
 
 ## Overview
 
@@ -104,7 +104,7 @@ The following table lists the configurable parameters of the kguardian chart and
 | broker.image.pullPolicy | string | `"IfNotPresent"` | Broker image pull policy |
 | broker.image.repository | string | `"ghcr.io/kguardian-dev/kguardian/broker"` | Broker container image repository |
 | broker.image.sha | string | `""` | Overrides the image tag using SHA digest |
-| broker.image.tag | string | `"1.13.1"` | Broker version tag (auto-updated by release-please) |
+| broker.image.tag | string | `"1.14.0"` | Broker version tag (auto-updated by release-please) |
 | broker.imagePullSecrets | list | `[]` | List of image pull secrets for private registries |
 | broker.initContainer.image.pullPolicy | string | `"Always"` | Broker init container image pull policy |
 | broker.initContainer.image.repository | string | `"busybox"` | Broker init container image repository |
@@ -155,7 +155,7 @@ The following table lists the configurable parameters of the kguardian chart and
 | controller.image.pullPolicy | string | `"IfNotPresent"` | Controller image pull policy |
 | controller.image.repository | string | `"ghcr.io/kguardian-dev/kguardian/controller"` | Controller container image repository |
 | controller.image.sha | string | `""` | Overrides the image tag using SHA digest |
-| controller.image.tag | string | `"1.10.1"` | Controller version tag (auto-updated by release-please) |
+| controller.image.tag | string | `"1.11.0"` | Controller version tag (auto-updated by release-please) |
 | controller.imagePullSecrets | list | `[]` | List of image pull secrets for private registries |
 | controller.initContainer.image.pullPolicy | string | `"Always"` | Init container image pull policy |
 | controller.initContainer.image.repository | string | `"busybox"` | Init container image repository |
@@ -262,7 +262,7 @@ The following table lists the configurable parameters of the kguardian chart and
 | frontend.image.pullPolicy | string | `"IfNotPresent"` | Frontend image pull policy |
 | frontend.image.repository | string | `"ghcr.io/kguardian-dev/kguardian/frontend"` | Frontend container image repository |
 | frontend.image.sha | string | `""` | Overrides the image tag using SHA digest |
-| frontend.image.tag | string | `"1.13.1"` | Frontend version tag (auto-updated by release-please) |
+| frontend.image.tag | string | `"1.13.2"` | Frontend version tag (auto-updated by release-please) |
 | frontend.imagePullSecrets | list | `[]` | List of image pull secrets for private registries |
 | frontend.ingress.annotations | object | `{}` | Ingress annotations |
 | frontend.ingress.apiPath | bool | `true` | Also route /api on the same host to the Broker. The Broker serves bare paths (/pod/info, /pod/traffic), so this only works behind an ingress controller that strips the prefix, such as nginx with rewrite-target. Controllers that pass the path through unchanged (AWS ALB, for example) make every /api request a 404. The UI image proxies /api to the Broker itself, so setting this to false serves the whole application from the UI Service and works on any controller. |
@@ -320,7 +320,7 @@ The following table lists the configurable parameters of the kguardian chart and
 | llmBridge.image.pullPolicy | string | `"IfNotPresent"` | LLM Bridge image pull policy |
 | llmBridge.image.repository | string | `"ghcr.io/kguardian-dev/kguardian/llm-bridge"` | LLM Bridge container image repository |
 | llmBridge.image.sha | string | `""` | Overrides the image tag using SHA digest |
-| llmBridge.image.tag | string | `"1.8.0"` | LLM Bridge version tag (auto-updated by release-please) |
+| llmBridge.image.tag | string | `"1.8.1"` | LLM Bridge version tag (auto-updated by release-please) |
 | llmBridge.imagePullSecrets | list | `[]` | List of image pull secrets for private registries |
 | llmBridge.metrics.serviceMonitor.enabled | bool | `false` | Create a ServiceMonitor for prometheus-operator. llm-bridge does not currently expose /metrics — forward-compatible toggle. |
 | llmBridge.metrics.serviceMonitor.interval | string | `"30s"` |  |

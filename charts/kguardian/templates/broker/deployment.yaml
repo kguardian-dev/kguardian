@@ -63,13 +63,17 @@ spec:
                   key: {{ .Values.database.passwordSecretKey }}
             - name: DATABASE_URL
               value: {{ include "kguardian.dbUrl" . | quote }}
-            # Wire chart's broker.container.port through to the Rust
-            # binary so changing the chart port doesn't require also
-            # setting LISTEN_ADDR by hand. The bind address is always
-            # 0.0.0.0 — clusters that need a different bind can set
-            # LISTEN_ADDR via env override.
+            {{- if ne (int .Values.broker.container.port) 9090 }}
+            # Non-default port: wire it through via LISTEN_ADDR. An
+            # explicit LISTEN_ADDR binds verbatim, so this pins an
+            # IPv4-only socket — on an IPv6-only cluster with a custom
+            # port, override to "[::]:<port>" instead. With the default
+            # port this env is intentionally OMITTED so the broker's
+            # dual-stack default bind ([::] with an IPv4 fallback)
+            # stays in effect.
             - name: LISTEN_ADDR
               value: "0.0.0.0:{{ .Values.broker.container.port }}"
+            {{- end }}
             {{- include "kguardian.brokerAuthEnv" . | nindent 12 }}
             {{- if .Values.evaluator.enabled }}
             - name: EVALUATOR_URL
