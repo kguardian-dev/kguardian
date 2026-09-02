@@ -196,6 +196,53 @@ pub async fn get_version(state: web::Data<VersionCheckState>) -> impl Responder 
     })
 }
 
+/// Cluster-environment wire shape for GET /cluster/environment: the
+/// same coarse per-column aggregates the telemetry check-in sends
+/// (env_signals), exposed so the UI and assistant can align policy
+/// generation with the cluster CNI (issue #1413). `nodes` counts
+/// node_facts rows — 0 means no controller has reported yet, and every
+/// enum degrades to "unknown"; consumers MUST treat unknown as
+/// "behave exactly as before".
+#[derive(Serialize)]
+pub struct ClusterEnvironment {
+    pub cni: String,
+    pub ip_family: String,
+    pub provider: String,
+    pub distro: String,
+    pub node_os: String,
+    pub nodes: i64,
+}
+
+/// Always 200: DB trouble degrades to all-unknown/0 like env_signals —
+/// an environment hint must never break a page load.
+#[get("/cluster/environment")]
+pub async fn get_cluster_environment(pool: web::Data<DbPool>) -> impl Responder {
+    let p = pool.get_ref().clone();
+    let (signals, nodes) = tokio::task::spawn_blocking(move || {
+        let signals = env_signals(&p);
+        let nodes = node_fact_count(&p).unwrap_or(0);
+        (signals, nodes)
+    })
+    .await
+    .unwrap_or_else(|_| (EnvSignals::default(), 0));
+    HttpResponse::Ok().json(ClusterEnvironment {
+        cni: signals.cni,
+        ip_family: signals.ip_family,
+        provider: signals.provider,
+        distro: signals.distro,
+        node_os: signals.node_os,
+        nodes,
+    })
+}
+
+/// Rows in node_facts — how many controllers have reported facts.
+fn node_fact_count(pool: &DbPool) -> Result<i64, DbError> {
+    use crate::schema::node_facts::dsl as nf;
+    use diesel::prelude::*;
+    let mut conn = pool.get()?;
+    Ok(nf::node_facts.count().get_result::<i64>(&mut conn)?)
+}
+
 /// Read the install id, creating it on first run. Runs on the blocking
 /// pool (diesel is sync).
 fn get_or_create_install_id(pool: &DbPool) -> Result<String, DbError> {
@@ -624,6 +671,48 @@ mod tests {
             assert_eq!(map["features"], "none");
             assert_eq!(map["pods_bucket"], "unknown");
         });
+    }
+
+    #[test]
+    fn cluster_environment_serializes_the_documented_shape() {
+        // Wire contract for GET /cluster/environment — the UI and
+        // assistant key on exactly these fields (docs/api-reference).
+        let env = ClusterEnvironment {
+            cni: "cilium".into(),
+            ip_family: "dual".into(),
+            provider: "baremetal".into(),
+            distro: "talos".into(),
+            node_os: "talos".into(),
+            nodes: 3,
+        };
+        let v: serde_json::Value = serde_json::to_value(&env).unwrap();
+        // serde_json::Value maps iterate in key order — compare as a
+        // sorted set; field presence is the contract, not order.
+        let keys: Vec<&str> = v.as_object().unwrap().keys().map(|k| k.as_str()).collect();
+        assert_eq!(
+            keys,
+            ["cni", "distro", "ip_family", "node_os", "nodes", "provider"]
+        );
+        assert_eq!(v["cni"], "cilium");
+        assert_eq!(v["nodes"], 3);
+    }
+
+    #[test]
+    fn env_signals_default_degrades_to_all_unknown() {
+        // The unknown-degradation pin: consumers treat "unknown" as
+        // "behave exactly as before", so the no-facts default must be
+        // unknown everywhere (features excepted — it is env-sourced).
+        let d = EnvSignals::default();
+        assert_eq!(
+            (
+                d.cni.as_str(),
+                d.ip_family.as_str(),
+                d.provider.as_str(),
+                d.distro.as_str(),
+                d.node_os.as_str()
+            ),
+            ("unknown", "unknown", "unknown", "unknown", "unknown")
+        );
     }
 
     #[test]

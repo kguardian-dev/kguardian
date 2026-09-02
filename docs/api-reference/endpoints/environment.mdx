@@ -1,0 +1,47 @@
+---
+title: "Cluster Environment Endpoint"
+description: "Coarse cluster-environment aggregates: CNI, IP family, platform"
+icon: "globe"
+---
+
+## Overview
+
+`GET /cluster/environment` exposes the same coarse environment
+aggregates the [telemetry check-in](/telemetry) reports — CNI, IP
+family, provider, distribution, and node OS — derived from per-node
+facts each controller reports at startup. The UI and the AI assistant
+use it to align policy generation with the cluster: a
+`CiliumNetworkPolicy` is only applicable where Cilium runs, so the
+Policy Builder badges the Cilium option and the assistant annotates
+its output when the detected CNI is something else.
+
+Every value is a fixed enum. `"unknown"` means "no signal" — the CNI
+does not annotate nodes (kindnet), no controller has reported yet, or
+the controller predates fact reporting — and consumers treat it as
+"behave exactly as before". Mixed-CNI clusters resolve to the most
+common per-node value.
+
+## GET /cluster/environment
+
+Requires bearer auth when `BROKER_AUTH_TOKEN` is set. Always returns
+`200` — database trouble degrades to all-`unknown`, never an error.
+
+```json
+{
+  "cni": "cilium",
+  "ip_family": "dual",
+  "provider": "baremetal",
+  "distro": "talos",
+  "node_os": "talos",
+  "nodes": 3
+}
+```
+
+| Field | Values |
+| --- | --- |
+| `cni` | `cilium`, `calico`, `flannel`, `weave`, `antrea`, `unknown` |
+| `ip_family` | `ipv4`, `ipv6`, `dual`, `unknown` |
+| `provider` | `aws`, `gcp`, `azure`, `digitalocean`, `hetzner`, `openstack`, `vsphere`, `oracle`, `ibm`, `baremetal`, `kind`, `unknown` |
+| `distro` | `eks`, `gke`, `aks`, `k3s`, `rke2`, `talos`, `openshift`, `kind`, `vanilla`, `unknown` |
+| `node_os` | `talos`, `bottlerocket`, `flatcar`, `cos`, `ubuntu`, `debian`, `rhel`, `amazonlinux`, `alpine`, `other`, `unknown` |
+| `nodes` | Count of nodes that have reported facts; `0` = none yet |
