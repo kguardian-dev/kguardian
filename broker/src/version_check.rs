@@ -213,6 +213,21 @@ pub struct ClusterEnvironment {
     pub nodes: i64,
 }
 
+/// Clamp a stored fact to a fixed whitelist before it leaves the API.
+/// node_facts rows come from the in-cluster (and by default
+/// unauthenticated) POST /node/facts, so a poisoned row must not flow
+/// verbatim to consumers — the assistant interpolates `cni` into a
+/// YAML comment, where an unexpected value (a newline, say) could
+/// inject lines. Anything off-list degrades to "unknown", the value
+/// every consumer already treats as "no signal".
+fn clamp_enum(value: String, allowed: &[&str]) -> String {
+    if allowed.contains(&value.as_str()) {
+        value
+    } else {
+        "unknown".to_string()
+    }
+}
+
 /// Always 200: DB trouble degrades to all-unknown/0 like env_signals —
 /// an environment hint must never break a page load.
 #[get("/cluster/environment")]
@@ -225,12 +240,64 @@ pub async fn get_cluster_environment(pool: web::Data<DbPool>) -> impl Responder 
     })
     .await
     .unwrap_or_else(|_| (EnvSignals::default(), 0));
+    // Whitelists mirror controller/src/node_facts.rs and the version
+    // service (docs/telemetry.mdx) — keep the three in lockstep.
     HttpResponse::Ok().json(ClusterEnvironment {
-        cni: signals.cni,
-        ip_family: signals.ip_family,
-        provider: signals.provider,
-        distro: signals.distro,
-        node_os: signals.node_os,
+        cni: clamp_enum(
+            signals.cni,
+            &[
+                "cilium", "calico", "flannel", "weave", "antrea", "kindnet", "unknown",
+            ],
+        ),
+        ip_family: clamp_enum(signals.ip_family, &["ipv4", "ipv6", "dual", "unknown"]),
+        provider: clamp_enum(
+            signals.provider,
+            &[
+                "aws",
+                "gcp",
+                "azure",
+                "digitalocean",
+                "hetzner",
+                "openstack",
+                "vsphere",
+                "oracle",
+                "ibm",
+                "baremetal",
+                "kind",
+                "unknown",
+            ],
+        ),
+        distro: clamp_enum(
+            signals.distro,
+            &[
+                "eks",
+                "gke",
+                "aks",
+                "k3s",
+                "rke2",
+                "talos",
+                "openshift",
+                "kind",
+                "vanilla",
+                "unknown",
+            ],
+        ),
+        node_os: clamp_enum(
+            signals.node_os,
+            &[
+                "talos",
+                "bottlerocket",
+                "flatcar",
+                "cos",
+                "ubuntu",
+                "debian",
+                "rhel",
+                "amazonlinux",
+                "alpine",
+                "other",
+                "unknown",
+            ],
+        ),
         nodes,
     })
 }
@@ -695,6 +762,25 @@ mod tests {
         );
         assert_eq!(v["cni"], "cilium");
         assert_eq!(v["nodes"], 3);
+    }
+
+    #[test]
+    fn clamp_enum_rejects_off_list_values() {
+        // The injection guard: a poisoned node_facts row (the POST is
+        // in-cluster-unauthenticated by default) must never flow
+        // verbatim to consumers that interpolate these values.
+        assert_eq!(
+            clamp_enum("cilium".into(), &["cilium", "unknown"]),
+            "cilium"
+        );
+        assert_eq!(
+            clamp_enum("evil\n# injected".into(), &["cilium", "unknown"]),
+            "unknown"
+        );
+        assert_eq!(
+            clamp_enum("CILIUM".into(), &["cilium", "unknown"]),
+            "unknown"
+        );
     }
 
     #[test]
