@@ -132,6 +132,12 @@ spec:
               value: {{ .Chart.Version | quote }}
             - name: KUBE_VERSION
               value: {{ .Capabilities.KubeVersion.Version | quote }}
+            {{- if .Values.seccomp.overrides.enabled }}
+            # Enables PUT/DELETE /seccomp/profiles/.../override. Editing a
+            # generated profile can take a workload down, so it is opt-in.
+            - name: SECCOMP_OVERRIDES_ENABLED
+              value: "true"
+            {{- end }}
             # Which optional features are on, as fixed slugs — part of
             # the telemetry check-in (contract v2, docs/telemetry.mdx).
             # Flag names only, never configuration values.

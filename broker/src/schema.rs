@@ -20,10 +20,16 @@ diesel::table! {
         // Jsonb (not Json like the two columns above): the pod-by-IP
         // lookup matches with the `@>` containment operator, which
         // only exists for jsonb, and the GIN index added alongside
-        // the column is a jsonb_path_ops index. Declared last to match
-        // the physical column order ALTER TABLE ADD COLUMN produces —
-        // PodDetail derives Queryable, which is positional.
+        // the column is a jsonb_path_ops index.
         pod_ips -> Nullable<Jsonb>,
+        // Top-level owning controller, resolved by the controller from
+        // ownerReferences (ReplicaSet→Deployment, Job→CronJob). The
+        // key a per-workload seccomp profile is grouped on. Declared
+        // last to match the physical column order ALTER TABLE ADD
+        // COLUMN produces — PodDetail derives Queryable, which is
+        // positional, so any new column goes here.
+        workload_kind -> Nullable<Varchar>,
+        workload_name -> Nullable<Varchar>,
     }
 }
 
@@ -103,6 +109,67 @@ diesel::table! {
         ip_family -> Varchar,
         node_os -> Varchar,
         time_stamp -> Timestamp,
+    }
+}
+
+diesel::table! {
+    // Per-workload monotonic union of observed syscalls, keyed on the
+    // stable (namespace, kind, name) identity. `syscalls` / `arches`
+    // are comma-joined sorted sets; `hash` is a content fingerprint
+    // that names the generated seccomp profile. See the migration and
+    // src/seccomp.rs.
+    workload_syscalls (pod_namespace, workload_kind, workload_name) {
+        pod_namespace -> Varchar,
+        workload_kind -> Varchar,
+        workload_name -> Varchar,
+        syscalls -> Text,
+        arches -> Text,
+        hash -> Varchar,
+        updated_at -> Timestamp,
+    }
+}
+
+diesel::table! {
+    // What seccomp profile files each node's distributor currently has
+    // on disk (localhostProfile paths). Replaced wholesale on every
+    // distributor pass. Drives per-profile readiness. See src/seccomp.rs.
+    seccomp_node_status (node_name) {
+        node_name -> Varchar,
+        paths -> Jsonb,
+        updated_at -> Timestamp,
+    }
+}
+
+diesel::table! {
+    // Operator adjustments to a generated seccomp profile, kept separate
+    // from the observed union so the ingest recompute can't clobber them.
+    // Effective set = (observed ∪ add_syscalls) \ remove_syscalls.
+    // `revision` is optimistic concurrency. See src/seccomp.rs (Phase 6).
+    workload_seccomp_overrides (pod_namespace, workload_kind, workload_name) {
+        pod_namespace -> Varchar,
+        workload_kind -> Varchar,
+        workload_name -> Varchar,
+        add_syscalls -> Text,
+        remove_syscalls -> Text,
+        default_action -> Nullable<Varchar>,
+        note -> Nullable<Text>,
+        updated_by -> Varchar,
+        updated_at -> Timestamp,
+        revision -> Int4,
+    }
+}
+
+diesel::table! {
+    // Append-only audit trail of override writes.
+    seccomp_override_audit (id) {
+        id -> Int8,
+        pod_namespace -> Varchar,
+        workload_kind -> Varchar,
+        workload_name -> Varchar,
+        op -> Varchar,
+        diff -> Jsonb,
+        updated_by -> Varchar,
+        at -> Timestamp,
     }
 }
 

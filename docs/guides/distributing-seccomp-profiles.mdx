@@ -1,0 +1,220 @@
+---
+title: "Distributing Seccomp Profiles"
+description: "Generate per-workload seccomp profiles from observed syscalls and roll them out to nodes"
+icon: "shield-halved"
+---
+
+kguardian can turn the syscalls it observes into a named, versioned seccomp
+profile per workload, write those profiles onto every node, and tell you when a
+profile is safe to reference. Your application team owns the one-line
+`securityContext` change — kguardian never edits workloads.
+
+<Info>
+**Ownership split.** kguardian guarantees a named profile exists at a known path
+on every node and reports when that is true. Whether to enforce it — and owning
+the blast radius if it is too tight — stays with the team that runs the workload.
+</Info>
+
+---
+
+## How it fits together
+
+<Steps>
+  <Step title="Observe">
+    The controller's eBPF probe records syscalls per pod. By default it only
+    traces a security-relevant subset; opt a workload in to **full** capture
+    (see below) before generating an enforceable profile.
+  </Step>
+  <Step title="Attribute">
+    Each pod is resolved to its top-level controller — a ReplicaSet to its
+    Deployment, a Job to its CronJob — so the profile is keyed on a stable
+    `(namespace, kind, name)` identity, not a pod name that churns every rollout.
+  </Step>
+  <Step title="Aggregate">
+    The broker keeps a **monotonic union** of every syscall seen from any pod of
+    the workload. The set only grows: scaling a replica away never narrows the
+    profile.
+  </Step>
+  <Step title="Distribute">
+    With `seccomp.distribute=true`, the controller writes each profile onto its
+    node under the kubelet seccomp root, atomically, and never deletes.
+  </Step>
+  <Step title="Reference">
+    Once the profile reports `Ready`, add the `Localhost` reference to your pod
+    template.
+  </Step>
+</Steps>
+
+---
+
+## Enable full syscall capture
+
+The default capture is filtered to security-relevant syscalls — good for
+monitoring, but a deny-by-default profile built from a partial set will start
+erroring legitimate calls. Annotate the workload's **pod template** to capture
+the complete set:
+
+```yaml
+spec:
+  template:
+    metadata:
+      annotations:
+        kguardian.dev/seccomp-record: "true"
+```
+
+Let it run under representative load for a while. For a CronJob, let several
+scheduled runs complete — a single run rarely exercises every code path.
+
+---
+
+## Enable distribution
+
+```yaml
+# values.yaml
+seccomp:
+  distribute: true
+  # Only if the kubelet root is not /var/lib/kubelet:
+  #   k3s: /var/lib/rancher/k3s/agent/kubelet
+  kubeletRoot: /var/lib/kubelet
+```
+
+This adds a hostPath mount of `<kubeletRoot>/seccomp` to the controller
+DaemonSet and starts a distribution pass every 30 seconds. Distribution is
+best-effort: a failed pass or a wrong `kubeletRoot` is logged and retried, and
+never restarts the controller.
+
+---
+
+## Reference a profile
+
+List what is available and its readiness:
+
+```bash
+kubectl exec deploy/kguardian-broker -n kguardian -- \
+  wget -qO- localhost:9090/seccomp/profiles | jq
+```
+
+```json
+[
+  {
+    "namespace": "prod",
+    "kind": "Deployment",
+    "name": "web",
+    "hash": "a1b2c3d4e5f60718",
+    "localhostProfile": "kguardian/prod/deployment-web-a1b2c3d4e5f60718.json",
+    "distribution": { "ready": 12, "total": 12, "state": "Ready" },
+    "recommendedSnippet": {
+      "seccompProfile": {
+        "type": "Localhost",
+        "localhostProfile": "kguardian/prod/deployment-web-a1b2c3d4e5f60718.json"
+      }
+    }
+  }
+]
+```
+
+<Warning>
+Wait for `"state": "Ready"`. If you reference a profile before every node has
+the file, a pod that schedules onto a node still missing it fails to start with
+`CreateContainerError` until the next distribution pass catches up.
+</Warning>
+
+Drop the snippet into the pod template — at pod level, or on a single container:
+
+```yaml
+spec:
+  template:
+    spec:
+      securityContext:
+        seccompProfile:
+          type: Localhost
+          localhostProfile: kguardian/prod/deployment-web-a1b2c3d4e5f60718.json
+```
+
+The filename carries the content hash. When the observed syscall set grows, a
+**new** file appears alongside the old one and `/seccomp/profiles` reports the
+new hash — bump the reference on your own schedule. The old file is never
+removed, so rolling back is just pointing at the previous hash.
+
+---
+
+## Adjust a profile
+
+Sometimes the observed set isn't quite right — a syscall from a weekly cron the
+scanner never caught, or one you want gone. Set an **override**: it's stored
+separately from the observed union (which keeps accruing underneath) and folded
+back in on every recompute, so the next syscall batch can't revert it.
+
+Enable it once, cluster-wide:
+
+```yaml
+# values.yaml
+seccomp:
+  overrides:
+    enabled: true
+```
+
+Then edit a workload's profile — `revision` from the current
+`GET /seccomp/profiles` (`override.revision`, or omit to create):
+
+```bash
+curl -X PUT localhost:9090/seccomp/profiles/prod/Deployment/web/override \
+  -H 'X-Kguardian-Actor: alice' \
+  -d '{
+        "add": ["clock_settime", "clock_adjtime"],
+        "note": "cert rotation cron, weekly",
+        "revision": null
+      }'
+```
+
+The response carries the new `hash` and any `warnings`. Within one distributor
+poll a new hash-named file is on every node; bump your pod template to it.
+`DELETE` the override to revert — the pre-override file was never deleted, so
+that's instant.
+
+## Promote from audit to enforcement
+
+The generated profile uses `defaultAction: SCMP_ACT_LOG` — disallowed syscalls
+are logged to the kernel audit log but nothing is blocked. Run in this mode
+first and confirm the audit log shows nothing your workload actually needs being
+denied. Then flip the action **via an override**:
+
+```bash
+curl -X PUT localhost:9090/seccomp/profiles/prod/Deployment/web/override \
+  -H 'X-Kguardian-Actor: alice' \
+  -d '{ "defaultAction": "SCMP_ACT_ERRNO", "revision": 1 }'
+```
+
+`defaultAction` is part of the hash, so this produces a new, distributable
+enforcing file — not just a different API render.
+
+<Warning>
+A too-tight profile breaks the workload on its **next restart**, not
+immediately — so promote deliberately, and watch the audit log for a full usage
+cycle first (for a CronJob, several runs).
+</Warning>
+
+---
+
+## Things to know
+
+- **One file per workload.** Every observed syscall goes into that one profile's
+  `names` array — 100 syscalls is one ~2&nbsp;KB file, not 100 files. Extra files
+  on a node come only from the set *growing over time*: each first-sighting of a
+  new syscall writes a new hash-named file next to the old one. This settles
+  within minutes.
+- **The set only grows.** kguardian keeps a monotonic union — if a workload
+  stops making a syscall, it stays in the profile. A profile that narrowed
+  because a replica scaled away would start denying calls the app still makes.
+  Shrinking a profile is a manual reset today.
+- **Per-pod, not per-container.** Attribution is by network namespace, which all
+  containers in a pod share. An injected sidecar (a service-mesh proxy) adds its
+  syscalls to the workload's profile. The profile is a safe superset; per-container
+  profiles are not supported.
+- **New nodes.** A node that joins the cluster gets profiles on the next
+  distribution pass. There is a brief window where a pod scheduled onto it could
+  hit `CreateContainerError`.
+- **Mixed architectures.** A workload running on both `amd64` and `arm64` nodes
+  gets one profile with both architectures listed.
+- **Disk.** Old profile files accumulate (there is no automatic cleanup). Each is
+  ~2&nbsp;KB; prune `<kubeletRoot>/seccomp/kguardian/` manually if needed.

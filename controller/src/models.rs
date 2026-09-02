@@ -3,6 +3,33 @@ use serde::{Deserialize as _, Deserializer, Serialize};
 use serde_derive::Deserialize;
 use std::collections::BTreeMap;
 
+/// Bit flags packed into the eBPF `inode_num` map value. The network and
+/// netpolicy probes only test the key for presence, but the syscall probe
+/// reads `RECORD_ALL_SYSCALLS` to decide whether to bypass its allowlist.
+/// Keep the bit positions in sync with the `KG_FLAG_*` defines in
+/// `controller/src/bpf/helper.h`.
+pub mod pod_flags {
+    /// The netns belongs to a pod kube-guardian tracks. Always set on a
+    /// registration; a bare "present" marker for the network probes.
+    pub const POD_TRACKED: u32 = 1 << 0;
+    /// Capture every syscall for this netns, ignoring `allowed_syscalls` —
+    /// set when the pod's workload opted in via the seccomp-record
+    /// annotation. See `docs/design/per-workload-seccomp-distribution.md`.
+    pub const RECORD_ALL_SYSCALLS: u32 = 1 << 1;
+}
+
+/// One pod's netns registration, passed from the pod watcher to the eBPF
+/// map-update loop in `bpf.rs`. This was a bare `u64` inode until
+/// per-workload seccomp recording needed a second bit of state travelling
+/// the same channel.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PodRegistration {
+    /// Network-namespace inode — the `inode_num` map key.
+    pub netns_inode: u64,
+    /// `pod_flags` bitfield stored as the map value.
+    pub flags: u32,
+}
+
 /// Shared map from network-namespace inode to the pod occupying it.
 ///
 /// The value is an `Arc` on purpose. `DashMap` is NOT lock-free despite what
@@ -167,6 +194,20 @@ pub struct PodDetail {
     pub is_dead: bool,
     pub pod_identity: Option<String>,
     pub workload_selector_labels: Option<BTreeMap<String, String>>,
+    /// Kind and name of the top-level controller that owns this pod,
+    /// resolved from ownerReferences: a ReplicaSet is collapsed to its
+    /// Deployment and a Job to its CronJob, so the value is stable
+    /// across rollouts. `None` for a bare pod. Unlike `pod_identity`
+    /// (a best-effort label), this is the unambiguous key the broker
+    /// groups syscalls on for per-workload seccomp profiles.
+    ///
+    /// `#[serde(default)]`: a broker old enough to lack these columns
+    /// simply ignores the extra fields, and this struct still
+    /// round-trips a `/pod/list` response from such a broker.
+    #[serde(default)]
+    pub workload_kind: Option<String>,
+    #[serde(default)]
+    pub workload_name: Option<String>,
 }
 
 #[derive(Debug, Default, Serialize)]

@@ -195,6 +195,8 @@ mod tests {
             is_dead: false,
             pod_identity: None,
             workload_selector_labels: None,
+            workload_kind: None,
+            workload_name: None,
         }
     }
 

@@ -8,6 +8,7 @@ use tracing::info;
 use kguardian::bpf::ebpf_handle;
 use kguardian::log::init_logger;
 use kguardian::network::{handle_network_events, handle_policy_drop_events, PolicyDropEvent};
+use kguardian::seccomp_distributor::run as run_seccomp_distributor;
 use kguardian::service_watcher::watch_service;
 use kguardian::syscall::{
     handle_syscall_events, send_syscall_cache_periodically, SyscallEventData,
@@ -116,6 +117,11 @@ async fn main() -> Result<(), Error> {
 
     let syscall_recorder = send_syscall_cache_periodically();
 
+    // Writes broker-generated per-workload seccomp profiles onto this
+    // node. No-ops unless SECCOMP_DISTRIBUTE=true; best-effort, so a
+    // failure here never restarts the controller.
+    let seccomp_distributor = run_seccomp_distributor();
+
     // Graceful shutdown on SIGTERM/SIGINT
     let shutdown = async {
         let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
@@ -138,6 +144,7 @@ async fn main() -> Result<(), Error> {
                 syscall_event_handler,
                 netpolicy_drop_handler,
                 syscall_recorder,
+                seccomp_distributor,
                 pod_reconciler,
                 async { ebpf_handle.await? }
             )

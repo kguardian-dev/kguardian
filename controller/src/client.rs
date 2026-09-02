@@ -95,6 +95,48 @@ pub(crate) async fn api_post_call(v: Value, path: &str) -> Result<(), Error> {
     Ok(())
 }
 
+/// Authenticated, timeout-bounded GET against the broker, returning the
+/// raw response body. Mirrors `api_post_call`'s endpoint / auth / status
+/// handling. Used by the seccomp distributor, which needs the profile
+/// JSON verbatim to write to disk.
+pub(crate) async fn api_get_bytes(path: &str) -> Result<Vec<u8>, Error> {
+    let api_endpoint = env::var("API_ENDPOINT")
+        .map(|s| s.trim().to_string())
+        .ok()
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| Error::Custom("API_ENDPOINT environment variable not set".to_string()))?;
+    let url = build_url(&api_endpoint, path);
+    debug!("Getting {}", url);
+
+    let mut request = CLIENT.get(&url);
+    if let Some(token) = broker_auth_token() {
+        request = request.bearer_auth(token);
+    }
+
+    let res = request
+        .send()
+        .await
+        .map_err(|e| Error::ApiError(format!("{}", e)))?;
+
+    let status = res.status();
+    if !status.is_success() {
+        let body = res
+            .text()
+            .await
+            .unwrap_or_else(|e| format!("<could not read body: {}>", e));
+        return Err(Error::ApiError(format!(
+            "broker returned {} for GET {}: {}",
+            status, url, body
+        )));
+    }
+
+    let bytes = res
+        .bytes()
+        .await
+        .map_err(|e| Error::ApiError(format!("reading GET {} body: {}", url, e)))?;
+    Ok(bytes.to_vec())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

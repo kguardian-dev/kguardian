@@ -62,7 +62,21 @@ spec:
             value: "{{ .Values.controller.ignoreDaemonSet }}"
           - name: CONTAINERD_SOCK
             value: "{{ .Values.controller.containerdSockPath }}"
+          {{- if .Values.seccomp.distribute }}
+          - name: SECCOMP_DISTRIBUTE
+            value: "true"
+          - name: SECCOMP_ROOT
+            value: "{{ .Values.seccomp.kubeletRoot }}/seccomp"
+          {{- with .Values.seccomp.distributeIntervalSeconds }}
+          - name: SECCOMP_DISTRIBUTE_INTERVAL_SECS
+            value: "{{ . }}"
+          {{- end }}
+          {{- end }}
           volumeMounts:
+          {{- if .Values.seccomp.distribute }}
+          - name: seccomp-profiles
+            mountPath: {{ .Values.seccomp.kubeletRoot }}/seccomp
+          {{- end }}
           - mountPath: /sys/kernel/debug
             name: debugfs
             readOnly: true
@@ -118,6 +132,15 @@ spec:
           path: /sys/kernel/tracing
           type: Directory
         name: tracefs
+      {{- if .Values.seccomp.distribute }}
+      # Kubelet seccomp root. DirectoryOrCreate so the first node to
+      # need it provisions the tree; the distributor only ever adds
+      # files under kguardian/.
+      - name: seccomp-profiles
+        hostPath:
+          path: {{ .Values.seccomp.kubeletRoot }}/seccomp
+          type: DirectoryOrCreate
+      {{- end }}
       nodeSelector:
         {{- if .Values.controller.nodeSelector }}
           {{- toYaml .Values.controller.nodeSelector | nindent 8 }}

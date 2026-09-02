@@ -21,6 +21,19 @@
 // ipBlock rule.
 #define IPV6_ADDR_LEN 16
 
+// The value stored in inode_num is a bitfield, not a bare "present"
+// marker. Userspace (controller/src/bpf.rs) writes it from the
+// PodRegistration flags the pod watcher computes; the network and
+// netpolicy probes only test the key for presence, but the syscall
+// probe reads KG_FLAG_RECORD_ALL_SYSCALLS to decide whether to bypass
+// the allowed_syscalls filter for that netns. Keep these bit positions
+// in sync with `mod pod_flags` in controller/src/models.rs.
+//
+//   bit 0  netns belongs to a pod kube-guardian tracks (always set)
+//   bit 1  capture every syscall for this netns, ignoring the allowlist
+#define KG_FLAG_POD_TRACKED          (1u << 0)
+#define KG_FLAG_RECORD_ALL_SYSCALLS  (1u << 1)
+
 // Use LRU_HASH for automatic eviction of stale entries
 struct
 {

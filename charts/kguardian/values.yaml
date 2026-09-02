@@ -170,6 +170,34 @@ controller:
   # -- Ignore traffic from daemonset pods to reduce noise
   ignoreDaemonSet: true
 
+# -- Per-workload seccomp profile distribution. When enabled, the controller
+# DaemonSet also writes broker-generated seccomp profiles onto each node under
+# the kubelet seccomp root, so a workload can reference one with
+# `securityContext.seccompProfile.type: Localhost` +
+# `localhostProfile: kguardian/<namespace>/<kind>-<name>-<hash>.json`.
+# kube-guardian never edits workloads and never deletes profile files.
+# See docs/design/per-workload-seccomp-distribution.md.
+seccomp:
+  # -- Write seccomp profiles onto nodes. Adds a hostPath mount of the kubelet
+  # seccomp directory to the controller pod. Off by default — referencing a
+  # profile is a workload-availability decision for the app team.
+  distribute: false
+  # -- Kubelet root directory on the host. Profiles are written under
+  # `<kubeletRoot>/seccomp/kguardian/`. Not `/var/lib/kubelet` everywhere:
+  # k3s uses `/var/lib/rancher/k3s/agent/kubelet`, some kubeadm installs and
+  # OpenShift differ.
+  kubeletRoot: /var/lib/kubelet
+  # -- Seconds between distribution passes. Empty uses the controller default (30).
+  distributeIntervalSeconds: ""
+  overrides:
+    # -- Allow operators to edit a generated profile (add/remove syscalls, set
+    # defaultAction) via `PUT /seccomp/profiles/<ns>/<kind>/<name>/override`.
+    # Off by default — a bad edit denies a syscall the app makes and breaks it
+    # on the next restart. The edit is a separate layer; the observed union
+    # underneath keeps accruing. Every write is recorded with the actor from
+    # the `X-Kguardian-Actor` header.
+    enabled: false
+
 broker:
   # -- Number of broker replicas to deploy
   replicaCount: 1
