@@ -1,6 +1,6 @@
 import { log } from "../logger.js";
 import { TOOL_DEFS } from "./registry.js";
-import { brokerGetJSON, auditVerdictsQuery } from "./backendClient.js";
+import { brokerGetJSON, auditVerdictsQuery, clusterCni } from "./backendClient.js";
 import {
   filterByNamespace, compactTrafficSummary, compactPodsSummary, filterAlivePods, compactSvc,
 } from "./compaction.js";
@@ -98,7 +98,21 @@ const handlers: Record<string, Handler> = {
     const policy = type === "cilium"
       ? await generateCiliumPolicy(pod, traffic, brokerPeerResolver)
       : await generateNetworkPolicy(pod, traffic, brokerPeerResolver);
-    return policyToYAML(policy);
+    const yaml = policyToYAML(policy);
+    // Align with the cluster CNI (issue #1413): never refuse and never
+    // silently switch kinds — annotate, so the model (or a scripted
+    // caller) sees the mismatch in the result and can self-correct.
+    // clusterCni() degrades to "unknown" on any failure, which leaves
+    // the output byte-identical to pre-detection behavior (the parity
+    // and G2 fixtures pin exactly that).
+    if (type === "cilium") {
+      const cni = await clusterCni();
+      if (cni !== "unknown" && cni !== "cilium") {
+        return `# WARNING: cluster CNI detected as '${cni}' — the CiliumNetworkPolicy CRD is likely unavailable here, and only Cilium enforces it. Use policy_type 'kubernetes' for a policy any CNI enforces.
+${yaml}`;
+      }
+    }
+    return yaml;
   },
   // Seccomp is generated in-process from the pod's observed syscalls — no
   // advisor hop. Returned as pretty JSON; the profile is G2-locked to

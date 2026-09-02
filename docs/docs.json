@@ -94,7 +94,8 @@
               "api-reference/endpoints/seccomp",
               "api-reference/endpoints/services",
               "api-reference/endpoints/audit-verdicts",
-              "api-reference/endpoints/version"
+              "api-reference/endpoints/version",
+              "api-reference/endpoints/environment"
             ]
           }
         ]

@@ -1,5 +1,5 @@
 import React from 'react';
-import { X, Copy, Download, Shield, Lock, Network } from 'lucide-react';
+import { X, Copy, Download, Shield, Lock, Network, AlertTriangle } from 'lucide-react';
 import type { PolicyType } from '../../hooks/policyEditor';
 
 interface PolicyHeaderProps {
@@ -13,6 +13,9 @@ interface PolicyHeaderProps {
   onClose: () => void;
   podName: string;
   podNamespace: string | null;
+  /** Non-null when the cluster CNI makes CiliumNetworkPolicy unlikely
+   *  to be applicable; shown as a badge on the Cilium tab. */
+  ciliumWarning?: string | null;
 }
 
 export const PolicyHeader: React.FC<PolicyHeaderProps> = ({
@@ -26,6 +29,7 @@ export const PolicyHeader: React.FC<PolicyHeaderProps> = ({
   onClose,
   podName,
   podNamespace,
+  ciliumWarning,
 }) => {
   return (
     <div className="flex items-center justify-between px-6 py-4 border-b border-hubble-border">
@@ -72,6 +76,11 @@ export const PolicyHeader: React.FC<PolicyHeaderProps> = ({
           >
             <Network className="w-3 h-3" />
             Cilium Policy
+            {ciliumWarning && (
+              <span title={ciliumWarning} aria-label={ciliumWarning}>
+                <AlertTriangle className="w-3 h-3 text-hubble-warning" />
+              </span>
+            )}
           </button>
           <button
             onClick={() => onPolicyTypeChange('seccomp')}

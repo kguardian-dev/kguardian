@@ -1,6 +1,7 @@
 import axios from 'axios';
 import type { AxiosInstance } from 'axios';
-import type { PodInfo, NetworkTraffic, SyscallInfo, ServiceInfo, AuditVerdict } from '../types';
+import type { PodInfo, NetworkTraffic, SyscallInfo, ServiceInfo, AuditVerdict, ClusterEnvironment } from '../types';
+import { UNKNOWN_CLUSTER_ENVIRONMENT } from '../types';
 
 class BrokerAPIClient {
   private client: AxiosInstance;
@@ -142,6 +143,30 @@ class BrokerAPIClient {
       console.error('Error fetching service by IP:', error);
       return null;
     }
+  }
+
+  /**
+   * Cluster environment (coarse CNI/IP-family/platform aggregates from
+   * the broker's node_facts). Memoized for the page lifetime — the CNI
+   * cannot change mid-session — and every failure path degrades to
+   * all-'unknown', which consumers MUST treat as "behave exactly as
+   * before" (older brokers 404 this endpoint).
+   */
+  private clusterEnvPromise: Promise<ClusterEnvironment> | null = null;
+
+  async getClusterEnvironment(): Promise<ClusterEnvironment> {
+    if (!this.clusterEnvPromise) {
+      this.clusterEnvPromise = this.client
+        .get<ClusterEnvironment>('/cluster/environment')
+        .then((r) => r.data)
+        .catch(() => UNKNOWN_CLUSTER_ENVIRONMENT);
+    }
+    return this.clusterEnvPromise;
+  }
+
+  /** Test hook: clear the memoized environment. */
+  resetClusterEnvironmentCache(): void {
+    this.clusterEnvPromise = null;
   }
 
   /**
