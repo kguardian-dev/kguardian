@@ -19,7 +19,8 @@ blast radius if a profile is too tight. kube-guardian never mutates a workload.
 - Syscall attribution & aggregation per **workload**, not per pod
   (Deployment / StatefulSet / DaemonSet / CronJob).
 - Deterministic, content-hashed profile names.
-- A distributor DaemonSet that writes profiles under the kubelet seccomp root.
+- On-node distribution that writes profiles under the kubelet seccomp root
+  (a task in the controller DaemonSet — see D5 — not a new component).
 - A readiness API + UI so teams know a profile is safe to reference.
 
 ## Out of scope
@@ -47,7 +48,7 @@ full capture and must land first.
 | 1 · Observe | controller (eBPF) | `syscall.bpf.c` traces `raw_syscalls:sys_enter` for tracked netns. Phase 0 lets opted-in workloads bypass the allowlist. |
 | 2 · Attribute | controller | `pod_watcher.rs` already walks owner refs for NetworkPolicy. Extend it to emit a `(kind, name)` workload tuple: ReplicaSet→Deployment, Job→CronJob, StatefulSet/DaemonSet direct. |
 | 3 · Aggregate | broker | Join per-pod syscall rows to `pod_details`, **union** across replicas and over time into a `workload_syscalls` table, recompute a content hash, render the profile JSON. |
-| 4 · Distribute | new DaemonSet | `profile-distributor` polls the broker and writes `kguardian/<ns>/<kind>-<name>-<hash>.json` under the kubelet seccomp root, atomically, never deleting. Reports per-node status back. |
+| 4 · Distribute | controller (see D5) | The `seccomp_distributor` task polls the broker and writes `kguardian/<ns>/<kind>-<name>-<hash>.json` under the kubelet seccomp root, atomically, never deleting. Reports per-node status back. Off unless `seccomp.distribute=true`. |
 | 5 · Reference | application team | Team reads the ready profile path from the API or UI and adds a `type: Localhost` reference to their pod template on their own schedule. |
 
 ---
