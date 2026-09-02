@@ -13,11 +13,11 @@
 //! (bare pod, or attribution not resolved) contributes to nothing.
 
 use crate::schema;
-use actix_web::{get, web, HttpResponse, Responder};
+use actix_web::{get, post, web, HttpResponse, Responder};
 use diesel::prelude::*;
 use diesel::r2d2::{self, ConnectionManager};
-use serde::Serialize;
-use std::collections::BTreeSet;
+use serde::{Deserialize, Serialize};
+use std::collections::{BTreeSet, HashMap};
 use tracing::{debug, info};
 
 type DbPool = r2d2::Pool<ConnectionManager<PgConnection>>;
@@ -274,6 +274,35 @@ fn localhost_profile_path(row: &WorkloadSyscallsRow) -> String {
     )
 }
 
+/// Distribution readiness for one profile: how many live nodes have its
+/// current file, out of how many. Referencing a profile before it is
+/// `Ready` risks a pod scheduling onto a node that lacks the file
+/// (`CreateContainerError`).
+#[derive(Serialize)]
+struct Distribution {
+    ready: i64,
+    total: i64,
+    /// `Ready` | `Partial` | `Pending`.
+    state: &'static str,
+}
+
+impl Distribution {
+    fn compute(ready: i64, total: i64) -> Self {
+        let state = if total == 0 || ready == 0 {
+            "Pending"
+        } else if ready >= total {
+            "Ready"
+        } else {
+            "Partial"
+        };
+        Distribution {
+            ready,
+            total,
+            state,
+        }
+    }
+}
+
 #[derive(Serialize)]
 struct ProfileSummary {
     namespace: String,
@@ -285,27 +314,81 @@ struct ProfileSummary {
     #[serde(rename = "syscallCount")]
     syscall_count: usize,
     architectures: Vec<String>,
+    distribution: Distribution,
+    /// Drop-in for a pod template's `securityContext`.
+    #[serde(rename = "recommendedSnippet")]
+    recommended_snippet: serde_json::Value,
     #[serde(rename = "updatedAt")]
     updated_at: chrono::NaiveDateTime,
 }
 
-impl From<&WorkloadSyscallsRow> for ProfileSummary {
-    fn from(r: &WorkloadSyscallsRow) -> Self {
+impl ProfileSummary {
+    fn build(r: &WorkloadSyscallsRow, index: &DistributionIndex) -> Self {
+        let path = localhost_profile_path(r);
+        let ready = index.path_counts.get(&path).copied().unwrap_or(0);
         ProfileSummary {
             namespace: r.pod_namespace.clone(),
             kind: r.workload_kind.clone(),
             name: r.workload_name.clone(),
             hash: r.hash.clone(),
-            localhost_profile: localhost_profile_path(r),
             syscall_count: split_set(&r.syscalls).len(),
             architectures: split_set(&r.arches)
                 .iter()
                 .filter_map(|a| arch_token(a))
                 .map(String::from)
                 .collect(),
+            distribution: Distribution::compute(ready, index.total_nodes),
+            recommended_snippet: serde_json::json!({
+                "seccompProfile": { "type": "Localhost", "localhostProfile": path }
+            }),
+            localhost_profile: path,
             updated_at: r.updated_at,
         }
     }
+}
+
+/// Per-path node counts plus the live-node denominator, loaded once per
+/// request so building N summaries is O(nodes + profiles), not a query
+/// per profile.
+struct DistributionIndex {
+    path_counts: HashMap<String, i64>,
+    total_nodes: i64,
+}
+
+fn distribution_index(conn: &mut PgConnection) -> Result<DistributionIndex, DbError> {
+    use diesel::sql_query;
+    use diesel::sql_types::BigInt;
+    use schema::seccomp_node_status::dsl as sns;
+
+    #[derive(diesel::QueryableByName)]
+    struct CountRow {
+        #[diesel(sql_type = BigInt)]
+        n: i64,
+    }
+    // Same denominator the version check-in uses for install size.
+    let total_nodes: i64 =
+        sql_query("SELECT COUNT(DISTINCT node_name) AS n FROM pod_details WHERE is_dead = false")
+            .get_result::<CountRow>(conn)?
+            .n;
+
+    let rows: Vec<serde_json::Value> = sns::seccomp_node_status.select(sns::paths).load(conn)?;
+    let mut path_counts: HashMap<String, i64> = HashMap::new();
+    for paths in rows {
+        if let Some(arr) = paths.as_array() {
+            // A node reporting the same path twice still counts once.
+            for p in arr
+                .iter()
+                .filter_map(|v| v.as_str())
+                .collect::<BTreeSet<_>>()
+            {
+                *path_counts.entry(p.to_string()).or_insert(0) += 1;
+            }
+        }
+    }
+    Ok(DistributionIndex {
+        path_counts,
+        total_nodes,
+    })
 }
 
 fn all_rows(conn: &mut PgConnection) -> Result<Vec<WorkloadSyscallsRow>, DbError> {
@@ -349,19 +432,24 @@ pub struct ProfileQuery {
     action: Option<String>,
 }
 
-/// `GET /seccomp/profiles` — every workload that has an aggregate,
-/// with its current hash and profile path. The list a distributor polls.
+/// `GET /seccomp/profiles` — every workload that has an aggregate, with
+/// its current hash, profile path, and distribution readiness. The list
+/// a distributor polls and the UI shows.
 #[get("/seccomp/profiles")]
 pub async fn list_seccomp_profiles(pool: web::Data<DbPool>) -> actix_web::Result<impl Responder> {
     info!("list seccomp profiles");
-    let rows = web::block(move || {
+    let out: Vec<ProfileSummary> = web::block(move || -> Result<_, DbError> {
         let mut conn = pool.get()?;
-        all_rows(&mut conn)
+        let rows = all_rows(&mut conn)?;
+        let index = distribution_index(&mut conn)?;
+        Ok(rows
+            .iter()
+            .map(|r| ProfileSummary::build(r, &index))
+            .collect())
     })
     .await?
     .map_err(actix_web::error::ErrorInternalServerError)?;
 
-    let out: Vec<ProfileSummary> = rows.iter().map(ProfileSummary::from).collect();
     Ok(HttpResponse::Ok().json(out))
 }
 
@@ -385,21 +473,28 @@ pub async fn get_seccomp_profile(
     let action = validated_action(query.action.as_deref())?.to_string();
     info!(%namespace, %kind, %name, "get seccomp profile");
 
-    let row = web::block(move || {
+    let result = web::block(move || -> Result<_, DbError> {
         let mut conn = pool.get()?;
-        one_row(&mut conn, &namespace, &kind, &name)
+        match one_row(&mut conn, &namespace, &kind, &name)? {
+            Some(r) => {
+                let index = distribution_index(&mut conn)?;
+                Ok(Some((
+                    ProfileSummary::build(&r, &index),
+                    r.syscalls,
+                    r.arches,
+                )))
+            }
+            None => Ok(None),
+        }
     })
     .await?
     .map_err(actix_web::error::ErrorInternalServerError)?;
 
-    Ok(match row {
-        Some(r) => {
-            let profile = build_profile(&r.syscalls, &r.arches, &action);
-            HttpResponse::Ok().json(ProfileDetail {
-                summary: ProfileSummary::from(&r),
-                profile,
-            })
-        }
+    Ok(match result {
+        Some((summary, syscalls, arches)) => HttpResponse::Ok().json(ProfileDetail {
+            profile: build_profile(&syscalls, &arches, &action),
+            summary,
+        }),
         None => HttpResponse::NotFound().body("no seccomp profile for that workload"),
     })
 }
@@ -431,6 +526,58 @@ pub async fn get_seccomp_profile_file(
         Some(_) => HttpResponse::NotFound().body("stale hash; re-read /seccomp/profiles"),
         None => HttpResponse::NotFound().body("no seccomp profile for that workload"),
     })
+}
+
+/// Body of `POST /seccomp/node-status`.
+#[derive(Deserialize)]
+pub struct NodeStatusInput {
+    node_name: String,
+    /// Every `localhostProfile` path the node currently has on disk.
+    #[serde(default)]
+    paths: Vec<String>,
+}
+
+/// `POST /seccomp/node-status` — the distributor reports, after each
+/// pass, the full set of profile files present on its node. Replaces the
+/// node's row wholesale.
+#[post("/seccomp/node-status")]
+pub async fn post_seccomp_node_status(
+    pool: web::Data<DbPool>,
+    body: web::Json<NodeStatusInput>,
+) -> actix_web::Result<impl Responder> {
+    let NodeStatusInput { node_name, paths } = body.into_inner();
+    if node_name.trim().is_empty() {
+        return Err(actix_web::error::ErrorBadRequest("node_name is required"));
+    }
+    // De-duplicate defensively; the readiness count treats a node once.
+    let paths: Vec<String> = paths
+        .into_iter()
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    debug!(node = %node_name, profiles = paths.len(), "seccomp node status");
+
+    web::block(move || -> Result<(), DbError> {
+        use schema::seccomp_node_status::dsl as sns;
+        let mut conn = pool.get()?;
+        let now = chrono::Utc::now().naive_utc();
+        let json = serde_json::Value::from(paths);
+        diesel::insert_into(sns::seccomp_node_status)
+            .values((
+                sns::node_name.eq(&node_name),
+                sns::paths.eq(&json),
+                sns::updated_at.eq(now),
+            ))
+            .on_conflict(sns::node_name)
+            .do_update()
+            .set((sns::paths.eq(&json), sns::updated_at.eq(now)))
+            .execute(&mut conn)?;
+        Ok(())
+    })
+    .await?
+    .map_err(actix_web::error::ErrorInternalServerError)?;
+
+    Ok(HttpResponse::Ok().json(()))
 }
 
 #[cfg(test)]
@@ -545,5 +692,54 @@ mod tests {
         assert_eq!(v["architectures"][0], "SCMP_ARCH_X86_64");
         assert_eq!(v["syscalls"][0]["names"][0], "read");
         assert_eq!(v["syscalls"][0]["action"], "SCMP_ACT_ALLOW");
+    }
+
+    #[test]
+    fn distribution_state_transitions() {
+        assert_eq!(Distribution::compute(0, 0).state, "Pending");
+        assert_eq!(Distribution::compute(0, 5).state, "Pending");
+        assert_eq!(Distribution::compute(2, 5).state, "Partial");
+        assert_eq!(Distribution::compute(5, 5).state, "Ready");
+        // Defensive: more reporters than the live-node count (a node
+        // draining, say) still reads as Ready, never a >100% Partial.
+        assert_eq!(Distribution::compute(6, 5).state, "Ready");
+    }
+
+    #[test]
+    fn profile_summary_carries_snippet_and_readiness() {
+        let row = WorkloadSyscallsRow {
+            pod_namespace: "prod".into(),
+            workload_kind: "Deployment".into(),
+            workload_name: "web".into(),
+            syscalls: "read,write".into(),
+            arches: "x86_64".into(),
+            hash: "abc123".into(),
+            updated_at: chrono::NaiveDateTime::default(),
+        };
+        let index = DistributionIndex {
+            path_counts: HashMap::from([(
+                "kguardian/prod/deployment-web-abc123.json".to_string(),
+                3,
+            )]),
+            total_nodes: 3,
+        };
+        let s = ProfileSummary::build(&row, &index);
+        let v = serde_json::to_value(&s).unwrap();
+        assert_eq!(v["distribution"]["state"], "Ready");
+        assert_eq!(v["distribution"]["ready"], 3);
+        assert_eq!(
+            v["recommendedSnippet"]["seccompProfile"]["localhostProfile"],
+            "kguardian/prod/deployment-web-abc123.json"
+        );
+        assert_eq!(
+            v["recommendedSnippet"]["seccompProfile"]["type"],
+            "Localhost"
+        );
+    }
+
+    #[test]
+    fn node_status_input_defaults_paths_to_empty() {
+        let got: NodeStatusInput = serde_json::from_str(r#"{"node_name":"node-a"}"#).unwrap();
+        assert!(got.paths.is_empty());
     }
 }

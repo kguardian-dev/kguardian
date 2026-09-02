@@ -23,7 +23,9 @@ pub use get::{
     get_pod_traffic, get_pod_traffic_name, get_pods_by_node, get_svc_by_ip, get_svc_details,
 };
 pub use schema::{pod_details, pod_traffic};
-pub use seccomp::{get_seccomp_profile, get_seccomp_profile_file, list_seccomp_profiles};
+pub use seccomp::{
+    get_seccomp_profile, get_seccomp_profile_file, list_seccomp_profiles, post_seccomp_node_status,
+};
 
 #[cfg(test)]
 pub(crate) mod test_support {

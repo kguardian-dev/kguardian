@@ -1,0 +1,111 @@
+---
+title: "Seccomp Endpoints"
+description: "Per-workload seccomp profiles, distribution readiness, and node status"
+icon: "shield-halved"
+---
+
+These endpoints expose the per-workload seccomp profiles the broker builds from
+observed syscalls. See the
+[Distributing Seccomp Profiles](/guides/distributing-seccomp-profiles) guide for
+the workflow.
+
+---
+
+## GET /seccomp/profiles
+
+Every workload that has an aggregated syscall set, with its current hash,
+profile path, and distribution readiness. This is the list the controller's
+distributor polls and the UI renders.
+
+### Response
+
+```json
+[
+  {
+    "namespace": "prod",
+    "kind": "Deployment",
+    "name": "web",
+    "hash": "a1b2c3d4e5f60718",
+    "localhostProfile": "kguardian/prod/deployment-web-a1b2c3d4e5f60718.json",
+    "syscallCount": 73,
+    "architectures": ["SCMP_ARCH_X86_64"],
+    "distribution": { "ready": 12, "total": 12, "state": "Ready" },
+    "recommendedSnippet": {
+      "seccompProfile": {
+        "type": "Localhost",
+        "localhostProfile": "kguardian/prod/deployment-web-a1b2c3d4e5f60718.json"
+      }
+    },
+    "updatedAt": "2026-09-02T10:15:00"
+  }
+]
+```
+
+`distribution.state` is `Ready` when every live node (`total`) reports the
+current file, `Partial` when some do, and `Pending` when none do or no node has
+reported yet.
+
+---
+
+## GET /seccomp/profiles/{namespace}/{kind}/{name}
+
+One workload's summary (as above) plus the rendered profile document.
+
+| Query param | Default | Values |
+|-------------|---------|--------|
+| `action` | `SCMP_ACT_LOG` | `SCMP_ACT_LOG`, `SCMP_ACT_ERRNO`, `SCMP_ACT_KILL` |
+
+### Response
+
+```json
+{
+  "namespace": "prod",
+  "kind": "Deployment",
+  "name": "web",
+  "hash": "a1b2c3d4e5f60718",
+  "localhostProfile": "kguardian/prod/deployment-web-a1b2c3d4e5f60718.json",
+  "distribution": { "ready": 12, "total": 12, "state": "Ready" },
+  "profile": {
+    "defaultAction": "SCMP_ACT_LOG",
+    "architectures": ["SCMP_ARCH_X86_64"],
+    "syscalls": [
+      { "names": ["accept4", "read", "write", "..."], "action": "SCMP_ACT_ALLOW" }
+    ]
+  }
+}
+```
+
+`404` if the workload has no aggregate yet.
+
+---
+
+## GET /seccomp/profile-file/{namespace}/{kind}/{name}/{hash}
+
+The bare `SeccompProfile` document, for a distributor to write to a node
+verbatim. Accepts the same `action` query param.
+
+Serves only the **current** hash — a stale hash returns `404` with
+`stale hash; re-read /seccomp/profiles`, which is the caller's signal to
+re-read the list.
+
+---
+
+## POST /seccomp/node-status
+
+The distributor reports, after every pass, the full set of profile files present
+on its node. Replaces the node's row wholesale — it is a snapshot, not a delta.
+
+### Request
+
+```json
+{
+  "node_name": "ip-10-0-1-42.ec2.internal",
+  "paths": [
+    "kguardian/prod/deployment-web-a1b2c3d4e5f60718.json",
+    "kguardian/prod/cronjob-report-9f8e7d6c5b4a3021.json"
+  ]
+}
+```
+
+`node_name` is required; an empty `paths` is valid (the node has no profiles
+yet). Returns `200` with an empty body.

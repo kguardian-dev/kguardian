@@ -14,10 +14,11 @@
 //! correct and stale hashes simply accumulate (see
 //! docs/design/per-workload-seccomp-distribution.md).
 
-use crate::client::api_get_bytes;
+use crate::client::{api_get_bytes, api_post_call};
 use crate::pod_watcher::parse_lenient_bool;
 use crate::Error;
 use serde::Deserialize;
+use serde_json::json;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 use tracing::{debug, error, info, warn};
@@ -43,6 +44,9 @@ struct ProfileSummary {
 struct Config {
     root: PathBuf,
     interval: Duration,
+    /// This node's name, for the `/seccomp/node-status` report. Empty
+    /// disables the report (the files still get written).
+    node_name: String,
 }
 
 fn enabled_config() -> Option<Config> {
@@ -64,9 +68,14 @@ fn enabled_config() -> Option<Config> {
         .filter(|&s| s > 0)
         .map(Duration::from_secs)
         .unwrap_or(DEFAULT_INTERVAL);
+    let node_name = std::env::var("CURRENT_NODE")
+        .unwrap_or_default()
+        .trim()
+        .to_string();
     Some(Config {
         root: PathBuf::from(root),
         interval,
+        node_name,
     })
 }
 
@@ -99,20 +108,21 @@ pub async fn run() -> Result<(), Error> {
     loop {
         ticker.tick().await;
         match reconcile_once(&cfg).await {
-            Ok(stats) => {
-                if stats.written > 0 || stats.failed > 0 {
+            Ok(pass) => {
+                if pass.stats.written > 0 || pass.stats.failed > 0 {
                     info!(
-                        written = stats.written,
-                        present = stats.present,
-                        failed = stats.failed,
+                        written = pass.stats.written,
+                        present = pass.stats.present,
+                        failed = pass.stats.failed,
                         "seccomp profile distribution pass"
                     );
                 } else {
                     debug!(
-                        present = stats.present,
+                        present = pass.stats.present,
                         "seccomp profile distribution pass (no change)"
                     );
                 }
+                report_node_status(&cfg, &pass.present_paths).await;
             }
             Err(e) => warn!("seccomp profile distribution pass failed (will retry): {e}"),
         }
@@ -126,12 +136,20 @@ struct Stats {
     failed: usize,
 }
 
-async fn reconcile_once(cfg: &Config) -> Result<Stats, Error> {
+struct Pass {
+    stats: Stats,
+    /// `localhostProfile` paths confirmed on disk after this pass —
+    /// what `/seccomp/node-status` reports for readiness.
+    present_paths: Vec<String>,
+}
+
+async fn reconcile_once(cfg: &Config) -> Result<Pass, Error> {
     let body = api_get_bytes("seccomp/profiles").await?;
     let profiles: Vec<ProfileSummary> = serde_json::from_slice(&body)
         .map_err(|e| Error::Custom(format!("parsing /seccomp/profiles: {e}")))?;
 
     let mut stats = Stats::default();
+    let mut present_paths = Vec::new();
     for p in &profiles {
         let rel = match safe_relative_path(&p.localhost_profile) {
             Some(r) => r,
@@ -146,6 +164,7 @@ async fn reconcile_once(cfg: &Config) -> Result<Stats, Error> {
             // The hash is in the filename, so the bytes on disk are
             // already the right ones.
             stats.present += 1;
+            present_paths.push(p.localhost_profile.clone());
             continue;
         }
 
@@ -158,6 +177,7 @@ async fn reconcile_once(cfg: &Config) -> Result<Stats, Error> {
                 Ok(()) => {
                     debug!(dest = %dest.display(), "wrote seccomp profile");
                     stats.written += 1;
+                    present_paths.push(p.localhost_profile.clone());
                 }
                 Err(e) => {
                     warn!(dest = %dest.display(), "failed to write seccomp profile: {e}");
@@ -170,7 +190,23 @@ async fn reconcile_once(cfg: &Config) -> Result<Stats, Error> {
             }
         }
     }
-    Ok(stats)
+    Ok(Pass {
+        stats,
+        present_paths,
+    })
+}
+
+/// Best-effort report of which profile files this node now has, so the
+/// broker can compute per-profile readiness. A failure here is logged
+/// and forgotten — the next pass re-reports.
+async fn report_node_status(cfg: &Config, present_paths: &[String]) {
+    if cfg.node_name.is_empty() {
+        return;
+    }
+    let body = json!({ "node_name": cfg.node_name, "paths": present_paths });
+    if let Err(e) = api_post_call(body, "seccomp/node-status").await {
+        debug!("seccomp node-status report failed (will retry next pass): {e}");
+    }
 }
 
 /// Reduce a broker-supplied `localhostProfile` to a relative path that is

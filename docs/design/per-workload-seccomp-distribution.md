@@ -291,19 +291,26 @@ kube-guardian internals.
 
 **Changes**
 
-- *broker* — fold node-status rows into `distribution: { ready, total, state }`
-  on the profile response; add the `recommendedSnippet`.
-- *frontend* — show profile name, readiness pill, and a copy button in the
-  policy editor.
-- *advisor* — optional: publish a per-namespace ConfigMap
-  `kguardian-seccomp-<kind>-<name>` for GitOps discovery.
-- *docs* — guide: how to reference, the `LOG → ERRNO` promotion workflow, the
-  node scale-up race caveat, sidecar behaviour.
+- *broker* — `seccomp_node_status` table + `POST /seccomp/node-status`; fold it
+  into `distribution: { ready, total, state }` on both profile responses; add
+  `recommendedSnippet` (a drop-in `securityContext` fragment). `total` is the
+  live-node count (`COUNT(DISTINCT node_name) … WHERE NOT is_dead`), the same
+  denominator the version check-in uses.
+- *controller* — the distributor POSTs its present-file list after each pass
+  (best-effort; a failure just re-reports next pass).
+- *docs* — `guides/distributing-seccomp-profiles.mdx` (reference syntax, the
+  `LOG → ERRNO` promotion workflow, the scale-up race, sidecar behaviour) and
+  `api-reference/endpoints/seccomp.mdx`; both wired into `docs.json`.
 
 **Done when**
 
-- From the UI or a single `kubectl get`, a team obtains a ready path + a valid
-  `securityContext` snippet.
+- From a single `GET /seccomp/profiles` a team obtains a ready path + a valid
+  `securityContext` snippet. ✅
+
+**Still open:** the frontend policy editor still needs the readiness pill +
+copy button (`useSeccompProfileEditor.ts`) — the API contract it consumes is
+done. A per-namespace discovery ConfigMap was dropped for v1 (the API + guide
+cover self-service).
 
 ### Phase 5 — SPO interop (optional)
 

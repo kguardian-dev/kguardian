@@ -114,6 +114,17 @@ diesel::table! {
     }
 }
 
+diesel::table! {
+    // What seccomp profile files each node's distributor currently has
+    // on disk (localhostProfile paths). Replaced wholesale on every
+    // distributor pass. Drives per-profile readiness. See src/seccomp.rs.
+    seccomp_node_status (node_name) {
+        node_name -> Varchar,
+        paths -> Jsonb,
+        updated_at -> Timestamp,
+    }
+}
+
 diesel::allow_tables_to_appear_in_same_query!(
     pod_details,
     pod_traffic,

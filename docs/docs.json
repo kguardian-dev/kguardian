@@ -36,7 +36,8 @@
             "group": "User Guides",
             "pages": [
               "guides/generating-network-policies",
-              "guides/mcp-endpoint"
+              "guides/mcp-endpoint",
+              "guides/distributing-seccomp-profiles"
             ]
           },
           {
@@ -90,6 +91,7 @@
               "api-reference/endpoints/pods",
               "api-reference/endpoints/traffic",
               "api-reference/endpoints/syscalls",
+              "api-reference/endpoints/seccomp",
               "api-reference/endpoints/services",
               "api-reference/endpoints/audit-verdicts",
               "api-reference/endpoints/version"
