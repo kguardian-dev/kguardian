@@ -3,6 +3,33 @@ use serde::{Deserialize as _, Deserializer, Serialize};
 use serde_derive::Deserialize;
 use std::collections::BTreeMap;
 
+/// Bit flags packed into the eBPF `inode_num` map value. The network and
+/// netpolicy probes only test the key for presence, but the syscall probe
+/// reads `RECORD_ALL_SYSCALLS` to decide whether to bypass its allowlist.
+/// Keep the bit positions in sync with the `KG_FLAG_*` defines in
+/// `controller/src/bpf/helper.h`.
+pub mod pod_flags {
+    /// The netns belongs to a pod kube-guardian tracks. Always set on a
+    /// registration; a bare "present" marker for the network probes.
+    pub const POD_TRACKED: u32 = 1 << 0;
+    /// Capture every syscall for this netns, ignoring `allowed_syscalls` —
+    /// set when the pod's workload opted in via the seccomp-record
+    /// annotation. See `docs/design/per-workload-seccomp-distribution.md`.
+    pub const RECORD_ALL_SYSCALLS: u32 = 1 << 1;
+}
+
+/// One pod's netns registration, passed from the pod watcher to the eBPF
+/// map-update loop in `bpf.rs`. This was a bare `u64` inode until
+/// per-workload seccomp recording needed a second bit of state travelling
+/// the same channel.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PodRegistration {
+    /// Network-namespace inode — the `inode_num` map key.
+    pub netns_inode: u64,
+    /// `pod_flags` bitfield stored as the map value.
+    pub flags: u32,
+}
+
 /// Shared map from network-namespace inode to the pod occupying it.
 ///
 /// The value is an `Arc` on purpose. `DashMap` is NOT lock-free despite what

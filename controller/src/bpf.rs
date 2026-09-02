@@ -1,3 +1,4 @@
+use crate::models::PodRegistration;
 use crate::network::netpolicy_drop::NetpolicyDropSkelBuilder;
 use crate::network::network_probe::NetworkProbeSkelBuilder;
 use crate::network::{ip_to_wire_addr, PolicyDropEvent};
@@ -241,7 +242,7 @@ pub fn ebpf_handle(
     network_event_sender: Sender<NetworkEventData>,
     syscall_event_sender: Sender<SyscallEventData>,
     netpolicy_drop_sender: Sender<PolicyDropEvent>,
-    mut rx: Receiver<u64>,
+    mut rx: Receiver<PodRegistration>,
     mut ignore_ips: Receiver<String>,
     ignore_daemonset_traffic: bool,
 ) -> JoinHandle<Result<(), Error>> {
@@ -482,22 +483,29 @@ pub fn ebpf_handle(
 
             let mut drained = 0;
             while drained < MAX_DRAIN_PER_ITERATION {
-                let Ok(inum) = rx.try_recv() else { break };
+                let Ok(reg) = rx.try_recv() else { break };
                 drained += 1;
+                // The same flags value goes into all three maps. The
+                // network and netpolicy probes only test the key for
+                // presence and POD_TRACKED is always set, so the extra
+                // bits are inert for them; the syscall probe reads
+                // RECORD_ALL_SYSCALLS out of its instance.
+                let key = reg.netns_inode.to_ne_bytes();
+                let val = reg.flags.to_ne_bytes();
                 let _ = network_sk
                     .maps
                     .inode_num
-                    .update(&inum.to_ne_bytes(), &1_u32.to_ne_bytes(), MapFlags::ANY)
+                    .update(&key, &val, MapFlags::ANY)
                     .map_err(|e| eprintln!("Failed to update network inode map: {}", e));
                 let _ = syscall_sk
                     .maps
                     .inode_num
-                    .update(&inum.to_ne_bytes(), &1_u32.to_ne_bytes(), MapFlags::ANY)
+                    .update(&key, &val, MapFlags::ANY)
                     .map_err(|e| eprintln!("Failed to update syscall inode map: {}", e));
                 let _ = netpolicy_sk
                     .maps
                     .inode_num
-                    .update(&inum.to_ne_bytes(), &1_u32.to_ne_bytes(), MapFlags::ANY)
+                    .update(&key, &val, MapFlags::ANY)
                     .map_err(|e| eprintln!("Failed to update netpolicy inode map: {}", e));
             }
             if ignore_daemonset_traffic {

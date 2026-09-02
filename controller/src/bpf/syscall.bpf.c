@@ -31,19 +31,26 @@ int trace_execve(struct trace_event_raw_sys_enter *ctx)
     if (!inum)
         return 0;
 
-    // Filter syscalls using allowlist if populated
-    // If allowlist is empty (no entries), trace all syscalls (backward compatible)
-    u32 syscall_id = (__u32)ctx->id;
-    u32 *allowed = bpf_map_lookup_elem(&allowed_syscalls, &syscall_id);
+    // A netns whose registration carries KG_FLAG_RECORD_ALL_SYSCALLS
+    // (its workload opted in via the seccomp-record annotation) skips
+    // the allowlist entirely — the seccomp profile generator needs the
+    // complete syscall set, not just the security-relevant subset.
+    if (!(*inum & KG_FLAG_RECORD_ALL_SYSCALLS))
+    {
+        // Filter syscalls using allowlist if populated
+        // If allowlist is empty (no entries), trace all syscalls (backward compatible)
+        u32 syscall_id = (__u32)ctx->id;
+        u32 *allowed = bpf_map_lookup_elem(&allowed_syscalls, &syscall_id);
 
-    // If allowlist has entries, only trace allowed syscalls
-    // Check if map is populated by testing a known syscall (0)
-    u32 zero = 0;
-    u32 *test = bpf_map_lookup_elem(&allowed_syscalls, &zero);
+        // If allowlist has entries, only trace allowed syscalls
+        // Check if map is populated by testing a known syscall (0)
+        u32 zero = 0;
+        u32 *test = bpf_map_lookup_elem(&allowed_syscalls, &zero);
 
-    // If allowlist is populated (test returns non-NULL) but current syscall not found, skip
-    if (test && !allowed)
-        return 0;
+        // If allowlist is populated (test returns non-NULL) but current syscall not found, skip
+        if (test && !allowed)
+            return 0;
+    }
 
     // Reserve space in ring buffer
     struct data_t *data;

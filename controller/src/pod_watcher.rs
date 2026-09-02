@@ -1,4 +1,4 @@
-use crate::models::ContainerMap;
+use crate::models::{pod_flags, ContainerMap, PodRegistration};
 use crate::network::canonicalize_ip;
 use crate::{api_post_call, Error, PodDetail, PodInfo, PodInspect};
 use chrono::Utc;
@@ -19,7 +19,7 @@ use tracing::{debug, error, info, warn};
 use tokio::sync::mpsc;
 pub async fn watch_pods(
     node_name: String,
-    tx: mpsc::Sender<u64>,
+    tx: mpsc::Sender<PodRegistration>,
     container_map: ContainerMap,
     excluded_namespaces: &[String],
     sender_ip: mpsc::Sender<String>,
@@ -62,7 +62,7 @@ pub async fn watch_pods(
             let node_name = node_name.clone();
             let c = c.clone();
             async move {
-                if let Some(inum) = process_pod(
+                if let Some(reg) = process_pod(
                     &p,
                     container_map,
                     excluded_namespaces,
@@ -73,8 +73,8 @@ pub async fn watch_pods(
                 )
                 .await
                 {
-                    if let Err(e) = t.send(inum).await {
-                        tracing::error!("Failed to send inode number: {:?}", e);
+                    if let Err(e) = t.send(reg).await {
+                        tracing::error!("Failed to send pod registration: {:?}", e);
                     }
                     // debug not info — fires on every pod event that
                     // passes the per-node + namespace-exclusion filter,
@@ -84,7 +84,12 @@ pub async fn watch_pods(
                     // inode-to-pod mapping is debug-relevant only when
                     // chasing eBPF event correlation issues; operators
                     // under default RUST_LOG=info don't need it.
-                    debug!("Pod {:?}, inode num {:?}", p.name(), inum);
+                    debug!(
+                        "Pod {:?}, inode num {:?}, flags {:#x}",
+                        p.name(),
+                        reg.netns_inode,
+                        reg.flags
+                    );
                 }
                 Ok(())
             }
@@ -105,7 +110,7 @@ pub async fn watch_pods(
 async fn resync_pods(
     pods: Api<Pod>,
     node_name: String,
-    tx: mpsc::Sender<u64>,
+    tx: mpsc::Sender<PodRegistration>,
     container_map: ContainerMap,
     excluded_namespaces: Vec<String>,
     sender_ip: mpsc::Sender<String>,
@@ -124,7 +129,7 @@ async fn resync_pods(
             Ok(list) => {
                 let mut processed = 0u32;
                 for pod in &list.items {
-                    if let Some(inum) = process_pod(
+                    if let Some(reg) = process_pod(
                         pod,
                         Arc::clone(&container_map),
                         &excluded_namespaces,
@@ -135,8 +140,8 @@ async fn resync_pods(
                     )
                     .await
                     {
-                        if let Err(e) = tx.send(inum).await {
-                            error!("resync: failed to send inode number: {:?}", e);
+                        if let Err(e) = tx.send(reg).await {
+                            error!("resync: failed to send pod registration: {:?}", e);
                         }
                         processed += 1;
                     }
@@ -158,7 +163,7 @@ async fn process_pod(
     ignore_daemonset_traffic: bool,
     node_name: &str,
     client: &Client,
-) -> Option<u64> {
+) -> Option<PodRegistration> {
     if let Some(con_ids) = pod_unready(pod) {
         let pod_ip = update_pods_details(pod, node_name, client).await;
         if let Ok(Some(pod_ip)) = pod_ip {
@@ -353,12 +358,38 @@ async fn update_pods_details(
     Ok(pod_ip_address)
 }
 
+/// Annotation a workload sets on its pod template to opt into complete,
+/// unfiltered syscall capture for seccomp profile generation. Absent, or
+/// any value the lenient bool parser does not read as true, leaves the
+/// pod on the default allowlist-filtered capture. Kubernetes propagates
+/// `spec.template.metadata.annotations` onto the pods, so this needs no
+/// extra owner lookup. See docs/design/per-workload-seccomp-distribution.md.
+pub const SECCOMP_RECORD_ANNOTATION: &str = "kguardian.dev/seccomp-record";
+
+/// Registration flags for a pod. `POD_TRACKED` is always set;
+/// `RECORD_ALL_SYSCALLS` is added when the opt-in annotation is present
+/// and truthy.
+fn pod_registration_flags(pod: &Pod) -> u32 {
+    let mut flags = pod_flags::POD_TRACKED;
+    let opted_in = pod
+        .metadata
+        .annotations
+        .as_ref()
+        .and_then(|a| a.get(SECCOMP_RECORD_ANNOTATION))
+        .is_some_and(|v| parse_lenient_bool(v, false));
+    if opted_in {
+        flags |= pod_flags::RECORD_ALL_SYSCALLS;
+    }
+    flags
+}
+
 async fn process_container_ids(
     con_ids: &[String],
     pod: &Pod,
     pod_ip: &str,
     container_map: ContainerMap,
-) -> Option<u64> {
+) -> Option<PodRegistration> {
+    let flags = pod_registration_flags(pod);
     for con_id in con_ids {
         let pod_info = create_pod_info(pod, pod_ip);
         let pod_inspect = PodInspect {
@@ -375,14 +406,17 @@ async fn process_container_ids(
         if let Some(pod_inspect) = pod_inspect.get_pod_inspect(con_id).await {
             if let Some(inode_num) = pod_inspect.inode_num {
                 debug!(
-                    "inode_num of pod {} is {}",
-                    pod_inspect.status.pod_name, inode_num
+                    "inode_num of pod {} is {} (flags {:#x})",
+                    pod_inspect.status.pod_name, inode_num, flags
                 );
                 // Takes a write lock on this key's shard. It is only safe to
                 // block here because no reader holds a guard across an await
                 // any more — see ContainerMap and lookup_pod in models.rs.
                 container_map.insert(inode_num, Arc::new(pod_inspect));
-                return Some(inode_num);
+                return Some(PodRegistration {
+                    netns_inode: inode_num,
+                    flags,
+                });
             }
         }
     }
@@ -908,6 +942,53 @@ mod tests {
             &Some("kguardian-staging".into()),
             &excluded
         ));
+    }
+
+    fn pod_with_annotation(key: &str, value: &str) -> Pod {
+        let mut pod = Pod::default();
+        pod.metadata
+            .annotations
+            .get_or_insert_with(Default::default)
+            .insert(key.to_string(), value.to_string());
+        pod
+    }
+
+    #[test]
+    fn pod_registration_flags_default_is_tracked_only() {
+        let flags = pod_registration_flags(&Pod::default());
+        assert_eq!(flags, pod_flags::POD_TRACKED);
+        assert_eq!(flags & pod_flags::RECORD_ALL_SYSCALLS, 0);
+    }
+
+    #[test]
+    fn pod_registration_flags_opts_in_on_truthy_annotation() {
+        for v in ["true", "1", "yes", "on", "True"] {
+            let pod = pod_with_annotation(SECCOMP_RECORD_ANNOTATION, v);
+            let flags = pod_registration_flags(&pod);
+            assert_eq!(
+                flags,
+                pod_flags::POD_TRACKED | pod_flags::RECORD_ALL_SYSCALLS,
+                "value {v:?} should opt in"
+            );
+        }
+    }
+
+    #[test]
+    fn pod_registration_flags_stays_default_on_falsey_or_garbage_annotation() {
+        for v in ["false", "0", "no", "off", "", "maybe"] {
+            let pod = pod_with_annotation(SECCOMP_RECORD_ANNOTATION, v);
+            assert_eq!(
+                pod_registration_flags(&pod),
+                pod_flags::POD_TRACKED,
+                "value {v:?} should not opt in"
+            );
+        }
+    }
+
+    #[test]
+    fn pod_registration_flags_ignores_unrelated_annotations() {
+        let pod = pod_with_annotation("example.com/other", "true");
+        assert_eq!(pod_registration_flags(&pod), pod_flags::POD_TRACKED);
     }
 
     fn pod_with_owners(owners: Vec<OwnerReference>) -> Pod {
