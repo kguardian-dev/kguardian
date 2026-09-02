@@ -127,6 +127,40 @@ const K8S_VERSION = /^v\d+\.\d+\.\d+(?:[+-][0-9A-Za-z.-]{1,48})?$/;
 const ARCH = /^[A-Za-z0-9_]{1,16}$/;
 const MAX_NODES = 10_000;
 
+// Contract v2 (all optional — a v1 broker that sends none of these is
+// still accepted, and every value is whitelisted so the dataset stays
+// clean). Values are COARSE by design: enums and buckets, never names,
+// addresses, regions, or instance types. docs/telemetry.mdx lists every
+// field and is the consent surface — keep it in lockstep.
+const PROVIDERS = new Set([
+  "aws", "gcp", "azure", "digitalocean", "hetzner", "openstack",
+  "vsphere", "oracle", "ibm", "baremetal", "kind", "unknown",
+]);
+const DISTROS = new Set([
+  "eks", "gke", "aks", "k3s", "rke2", "talos", "openshift", "kind",
+  "vanilla", "unknown",
+]);
+const CNIS = new Set([
+  "cilium", "calico", "flannel", "weave", "antrea", "kindnet",
+  "unknown",
+]);
+const IP_FAMILIES = new Set(["ipv4", "ipv6", "dual", "unknown"]);
+const NODE_OS = new Set([
+  "talos", "bottlerocket", "flatcar", "cos", "ubuntu", "debian",
+  "rhel", "amazonlinux", "alpine", "other", "unknown",
+]);
+// Order-of-magnitude bucket for observed pods ("0", "1-9", "10-99", …).
+const BUCKET = /^(0|[1-9][0-9]*-[1-9][0-9]*|[1-9][0-9]*\+)$/;
+// Comma-separated feature-flag slugs the chart reports ("ai,audit").
+const FEATURES = /^[a-z0-9_]{1,24}(,[a-z0-9_]{1,24}){0,15}$/;
+
+/** Read an optional enum param: absent → "unknown", invalid → null (reject). */
+function optEnum(q, key, allowed) {
+  const v = q.get(key);
+  if (v === null || v === "") return "unknown";
+  return allowed.has(v) ? v : null;
+}
+
 function parseCheckin(q) {
   const install = q.get("install") ?? "";
   const broker = q.get("broker") ?? "";
@@ -144,7 +178,31 @@ function parseCheckin(q) {
   if (k8s !== "unknown" && !K8S_VERSION.test(k8s)) return null;
   if (!ARCH.test(arch)) return null;
   if (!Number.isInteger(nodes) || nodes < 0 || nodes > MAX_NODES) return null;
-  return { install, broker, chart, k8s, arch, nodes };
+
+  // v2 optional fields.
+  const provider = optEnum(q, "provider", PROVIDERS);
+  const distro = optEnum(q, "distro", DISTROS);
+  const cni = optEnum(q, "cni", CNIS);
+  const ipFamily = optEnum(q, "ip_family", IP_FAMILIES);
+  const nodeOs = optEnum(q, "node_os", NODE_OS);
+  if (provider === null || distro === null || cni === null || ipFamily === null || nodeOs === null) {
+    return null;
+  }
+  const podsBucketRaw = q.get("pods_bucket");
+  const podsBucket = podsBucketRaw === null || podsBucketRaw === ""
+    ? "unknown"
+    : (BUCKET.test(podsBucketRaw) ? podsBucketRaw : null);
+  if (podsBucket === null) return null;
+  const featuresRaw = q.get("features");
+  const features = featuresRaw === null || featuresRaw === ""
+    ? "none"
+    : (FEATURES.test(featuresRaw) ? featuresRaw : null);
+  if (features === null) return null;
+
+  return {
+    install, broker, chart, k8s, arch, nodes,
+    provider, distro, cni, ipFamily, nodeOs, podsBucket, features,
+  };
 }
 
 function recordCheckin(env, request, url) {
@@ -155,9 +213,15 @@ function recordCheckin(env, request, url) {
   if (!env.TELEMETRY) return; // dataset unbound in local dev
   const c = parseCheckin(url.searchParams);
   if (!c) return;
+  // Blob order is the Analytics Engine schema: APPEND-ONLY. blob1-5 are
+  // contract v1 and every existing query indexes them by position.
   env.TELEMETRY.writeDataPoint({
     indexes: [c.install],
-    blobs: [c.broker, c.chart, c.k8s, c.arch, request.cf?.country ?? "unknown"],
+    blobs: [
+      c.broker, c.chart, c.k8s, c.arch, request.cf?.country ?? "unknown",
+      c.provider, c.distro, c.cni, c.ipFamily, c.nodeOs, c.podsBucket,
+      c.features,
+    ],
     doubles: [c.nodes],
   });
 }

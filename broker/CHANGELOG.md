@@ -1,5 +1,18 @@
 # Changelog
 
+## [1.14.0](https://github.com/kguardian-dev/kguardian/compare/broker/v1.13.1...broker/v1.14.0) (2026-09-02)
+
+
+### Features
+
+* **broker:** aggregate environment signals into the check-in ([f0bb077](https://github.com/kguardian-dev/kguardian/commit/f0bb0777a15fe9b5db45e3809ef330b149ac1671))
+* **telemetry:** report environment signals in the check-in ([fcab3f4](https://github.com/kguardian-dev/kguardian/commit/fcab3f4bcd415e0485a2c982f2ac11e91e5e0aab))
+
+
+### Bug Fixes
+
+* serve the frontend and broker on both IP families ([#1406](https://github.com/kguardian-dev/kguardian/issues/1406)) ([da56804](https://github.com/kguardian-dev/kguardian/commit/da568046cbd90e3f2f0ed37abb1495ce9d677e1a))
+
 ## [1.13.1](https://github.com/kguardian-dev/kguardian/compare/broker/v1.13.0...broker/v1.13.1) (2026-09-01)
 
 

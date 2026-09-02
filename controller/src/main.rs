@@ -44,6 +44,15 @@ async fn main() -> Result<(), Error> {
         .filter(|s| !s.is_empty())
         .ok_or_else(|| Error::Custom("API_ENDPOINT environment variable not set".to_string()))?;
 
+    // One-shot, fire-and-forget: derive this node's environment facts
+    // (provider/distro/CNI/IP family/OS) and report them to the broker
+    // for the anonymous telemetry check-in. Deliberately NOT part of
+    // the try_join! fabric — telemetry must never take capture down.
+    tokio::spawn(kguardian::node_facts::report_node_facts(
+        node_name.clone(),
+        broker_url.clone(),
+    ));
+
     let excluded_namespaces: Vec<String> = kguardian::pod_watcher::parse_excluded_namespaces(
         &env::var("EXCLUDED_NAMESPACES").unwrap_or_else(|_| "kube-system,kguardian".to_string()),
     );

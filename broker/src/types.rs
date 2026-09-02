@@ -150,3 +150,29 @@ pub struct AuditVerdict {
     pub observed_at: NaiveDateTime,
     pub verdict: String, // "Allow" | "WouldDeny"
 }
+
+/// One node's coarse environment facts, POSTed by the controller at
+/// startup (controller/src/node_facts.rs) and aggregated into the
+/// anonymous telemetry check-in (version_check.rs). Fixed enum strings
+/// only — the wire values are re-whitelisted by the version service.
+#[derive(
+    Debug, Clone, Serialize, Deserialize, Queryable, Insertable, AsChangeset, Identifiable,
+)]
+#[diesel(table_name = crate::schema::node_facts)]
+#[diesel(primary_key(node_name))]
+pub struct NodeFact {
+    pub node_name: String,
+    pub provider: String,
+    pub distro: String,
+    pub cni: String,
+    pub ip_family: String,
+    pub node_os: String,
+    #[serde(default = "chrono_now")]
+    pub time_stamp: NaiveDateTime,
+}
+
+/// Serde default for rows arriving without a timestamp (the controller
+/// doesn't send one; the broker stamps arrival time).
+fn chrono_now() -> NaiveDateTime {
+    chrono::Utc::now().naive_utc()
+}

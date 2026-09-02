@@ -16,3 +16,4 @@ use client::*;
 
 pub mod bpf;
 pub mod log;
+pub mod node_facts;

@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.11.0](https://github.com/kguardian-dev/kguardian/compare/controller/v1.10.1...controller/v1.11.0) (2026-09-02)
+
+
+### Features
+
+* **controller:** derive and report node environment facts ([3355990](https://github.com/kguardian-dev/kguardian/commit/3355990958d62e917cd2d18a4a8c934295aaca4e))
+* **telemetry:** report environment signals in the check-in ([fcab3f4](https://github.com/kguardian-dev/kguardian/commit/fcab3f4bcd415e0485a2c982f2ac11e91e5e0aab))
+
 ## [1.10.1](https://github.com/kguardian-dev/kguardian/compare/controller/v1.10.0...controller/v1.10.1) (2026-09-01)
 
 

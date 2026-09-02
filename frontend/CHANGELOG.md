@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.13.2](https://github.com/kguardian-dev/kguardian/compare/frontend/v1.13.1...frontend/v1.13.2) (2026-09-02)
+
+
+### Bug Fixes
+
+* **frontend:** list syscalls in a consistent order everywhere ([#1407](https://github.com/kguardian-dev/kguardian/issues/1407)) ([25a3fdd](https://github.com/kguardian-dev/kguardian/commit/25a3fdd75879aa890f7f41297cbeafa52f6a0157))
+* serve the frontend and broker on both IP families ([#1406](https://github.com/kguardian-dev/kguardian/issues/1406)) ([da56804](https://github.com/kguardian-dev/kguardian/commit/da568046cbd90e3f2f0ed37abb1495ce9d677e1a))
+
 ## [1.13.1](https://github.com/kguardian-dev/kguardian/compare/frontend/v1.13.0...frontend/v1.13.1) (2026-09-01)
 
 
