@@ -1,7 +1,7 @@
 {
   "controller": "1.11.0",
   "broker": "1.13.1",
-  "frontend": "1.13.1",
+  "frontend": "1.13.2",
   "advisor": "1.8.0",
   "charts/kguardian": "1.19.2",
   "llm-bridge": "1.8.0",
