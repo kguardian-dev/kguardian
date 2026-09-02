@@ -91,10 +91,26 @@ diesel::table! {
     }
 }
 
+diesel::table! {
+    // One row per node: coarse environment facts the controller derives
+    // from its own Node object, aggregated into the telemetry check-in
+    // (contract v2). Values are fixed enum strings, never identifiers.
+    node_facts (node_name) {
+        node_name -> Varchar,
+        provider -> Varchar,
+        distro -> Varchar,
+        cni -> Varchar,
+        ip_family -> Varchar,
+        node_os -> Varchar,
+        time_stamp -> Timestamp,
+    }
+}
+
 diesel::allow_tables_to_appear_in_same_query!(
     pod_details,
     pod_traffic,
     svc_details,
     pod_syscalls,
     audit_verdicts,
+    node_facts,
 );

@@ -1014,3 +1014,46 @@ mod tests {
         assert_ne!(traffic_content_key(&a), traffic_content_key(&b));
     }
 }
+
+/// Upsert one node's coarse environment facts (see NodeFact). Called by
+/// the controller once per start; the telemetry check-in aggregates the
+/// table. Light validation only — the version service re-whitelists
+/// every value before anything is recorded upstream.
+#[post("/node/facts")]
+pub async fn add_node_facts(
+    pool: web::Data<DbPool>,
+    form: web::Json<crate::NodeFact>,
+) -> Result<HttpResponse, Error> {
+    let fact = form.into_inner();
+    if fact.node_name.trim().is_empty() {
+        return Ok(HttpResponse::BadRequest().body("node_name must not be empty"));
+    }
+    // Enum fields are short fixed strings; anything oversized is junk
+    // (the broker API is in-cluster but unauthenticated by default).
+    let fields = [
+        &fact.node_name,
+        &fact.provider,
+        &fact.distro,
+        &fact.cni,
+        &fact.ip_family,
+        &fact.node_os,
+    ];
+    if fields.iter().any(|f| f.len() > 253) {
+        return Ok(HttpResponse::BadRequest().body("field too long"));
+    }
+    web::block(move || -> Result<(), DbError> {
+        use schema::node_facts::dsl::*;
+        let mut conn = pool.get()?;
+        diesel::insert_into(node_facts)
+            .values(&fact)
+            .on_conflict(node_name)
+            .do_update()
+            .set(&fact)
+            .execute(&mut conn)?;
+        Ok(())
+    })
+    .await?
+    .map_err(actix_web::error::ErrorInternalServerError)?;
+    debug!("node facts upserted");
+    Ok(HttpResponse::Ok().json(()))
+}
