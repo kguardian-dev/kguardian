@@ -159,10 +159,11 @@ rather than the sha256 originally sketched — the input is broker-generated and
 never adversarial, and a crypto-hash crate would be a new dependency chain in
 the broker for no security benefit. It must stay stable across broker builds
 (it names a file app teams pin), which rules out `std::hash::DefaultHasher`.
-The hash covers the syscall set only, **not** `defaultAction` — the distributed
-file is always the `SCMP_ACT_LOG` variant; `?action=` on the API renders an
-enforcing copy for inspection but nothing yet places that on a node (follow-up:
-a `seccomp.distributeAction` value).
+As shipped (Phases 0–4) the hash covers the syscall set only, **not**
+`defaultAction` — the distributed file is always the `SCMP_ACT_LOG` variant, and
+`?action=` on the API only re-renders a copy for inspection. Phase 6 folds
+`default_action` into the hash and drops `?action=` on `profile-file`, so the
+enforcing variant is a real, distributable version rather than a manual step.
 
 ### D5 — Distribution runs inside the controller DaemonSet, gated off by default
 
@@ -211,6 +212,27 @@ default.
 
 **Decision:** ship native; document SPO mode as a supported alternative in
 Phase 5.
+
+### D8 — Operator edits are an override layer, never a mutation of observed data
+
+Operators will need to adjust a generated profile — the scanner missed a syscall
+a weekly cron makes, or a profile is one syscall short of a code path that only
+runs on failure. The naive approach — let them edit `workload_syscalls.syscalls`
+— does not work: `recompute_workload` runs on every syscall batch (~10 s/pod)
+and overwrites that column with the observed union.
+
+So an edit is stored **separately** from observations and re-applied on top of
+every recompute. `workload_syscalls.syscalls` stays the pure observed union,
+untouched by any human. A `workload_seccomp_overrides` row carries the operator's
+intent, and the *effective* set the profile is rendered from is
+`(observed ∪ add) \ remove`. The hash — and therefore the filename and what the
+distributor ships — is computed over the effective set, so an edit produces a
+new file within one distributor poll and the previous file stays for rollback,
+exactly like an observed change.
+
+**Decision:** override table, not a column edit. Provenance stays legible
+(`63 observed, +2 / −1 by alice`), observations keep accruing underneath, and a
+bad edit is reverted by deleting one row.
 
 ---
 
@@ -351,6 +373,128 @@ Operator.
 - A generated CR reconciles to a node path SPO manages, and a pod can reference
   it.
 
+### Phase 6 — Profile overrides
+
+**Goal:** an operator can add or remove syscalls from a generated profile, and
+set its `defaultAction`, without losing the observed baseline and without the
+next syscall batch reverting the change.
+
+#### Data model
+
+`workload_syscalls` is unchanged — `syscalls` / `arches` remain the pure
+observed union, and `hash` now names the **effective** set (see below).
+
+New table `workload_seccomp_overrides`, keyed the same
+`(pod_namespace, workload_kind, workload_name)`:
+
+| column | type | meaning |
+|--------|------|---------|
+| `add_syscalls` | `TEXT` | comma-joined, sorted; unioned onto the observed set |
+| `remove_syscalls` | `TEXT` | comma-joined, sorted; subtracted after the add |
+| `default_action` | `VARCHAR NULL` | overrides the served `defaultAction`; `NULL` = the request default (`SCMP_ACT_LOG`) |
+| `note` | `TEXT NULL` | free-text reason, surfaced in the UI and API |
+| `updated_by` | `VARCHAR` | subject from the auth token (or `"unknown"` when auth is off) |
+| `updated_at` | `TIMESTAMP` | for optimistic concurrency + audit |
+| `revision` | `INT` | bumped every write; the client sends the revision it edited, a mismatch is `409` |
+
+Effective set, computed wherever a profile is rendered or hashed:
+
+```
+effective_syscalls = (observed ∪ add_syscalls) \ remove_syscalls
+```
+
+A `remove` that also appears in `add` is a config error → `400`. A `remove` of a
+syscall that is not (yet) observed is allowed and kept — it stays effective if
+that syscall is observed later.
+
+#### Hashing
+
+`fingerprint()` moves from hashing the observed set to hashing the **effective**
+set plus the effective `default_action`. Consequences, all intended:
+
+- adding the first override to an existing workload changes its hash once — a
+  one-time re-distribution, same as any observed growth.
+- `default_action` now participates in the hash, which closes the current gap
+  where the same filename could serve `LOG` or `ERRNO` depending on `?action=`.
+  Phase 6 drops the `?action=` query param on `profile-file` entirely; the file a
+  node gets is the one the hash names.
+
+#### Broker changes
+
+- migration: `workload_seccomp_overrides` + a `revision` bump trigger or
+  in-code increment.
+- `recompute_workload` unchanged for the observed union; a new
+  `effective_profile(ns, kind, name)` helper joins observed + override and is
+  the single source of truth for `build_profile` and `fingerprint`. Called from
+  the ingest recompute *and* on any override write, so both paths converge.
+- `PUT /seccomp/profiles/{ns}/{kind}/{name}/override` — body
+  `{ add: [...], remove: [...], defaultAction?, note?, revision }`. Validates
+  (see below), writes the row, recomputes the effective hash, returns the new
+  summary.
+- `DELETE /seccomp/profiles/{ns}/{kind}/{name}/override` — drops the row;
+  effective set falls back to observed; hash reverts (so the pre-override file,
+  still on every node, is valid again).
+- `GET /seccomp/profiles[/…]` gains an `override` block:
+  `{ add, remove, defaultAction, note, updatedBy, updatedAt, revision }` or
+  `null`, and `syscallCount` / `architectures` reflect the effective set.
+
+#### Validation
+
+Rejected with `400` and a specific message:
+
+- a syscall name `libseccomp` (already a controller dep; broker gains
+  `libseccomp` or a static name table) does not recognise for any supported
+  arch.
+- `add ∩ remove` non-empty.
+- `default_action` not in `{SCMP_ACT_LOG, SCMP_ACT_ERRNO, SCMP_ACT_KILL}`.
+- an `add`/`remove` list longer than a sane cap (say 512).
+
+Warned (`200` with a `warnings` array), because they are legal but load-bearing:
+
+- `default_action` set to `SCMP_ACT_ERRNO` or `SCMP_ACT_KILL` — "this profile
+  now blocks; a missing syscall breaks the workload on its next restart".
+- `remove` of a syscall in the observed set — "the workload was seen to make
+  this".
+
+#### Authorization & audit
+
+- Editing a profile can take a workload down, so the write endpoints require the
+  broker's bearer token even when `broker.auth` is otherwise permissive, and the
+  chart grows `seccomp.overrides.enabled` (default `false`) — the endpoints
+  `404` unless it is on.
+- `updated_by` is recorded from the token subject. Every write also appends to an
+  `audit_verdicts`-style `seccomp_override_audit` table (`ns, kind, name, diff,
+  updated_by, at`) so an override implicated in an incident has a trail. Not
+  reusing `audit_verdicts` — different shape, different retention.
+- Per-namespace RBAC (a reviewer in `team-a` can only edit `team-a/*`) is **out
+  of scope for Phase 6** — noted as the next step once the broker has any notion
+  of identity beyond "holds the shared token".
+
+#### Controller / distributor
+
+Essentially unchanged — it already redistributes on any hash change. One fix:
+remove the always-`LOG` behaviour in `reconcile_once` (it fetched
+`profile-file/…/{hash}` with no action); with `default_action` in the hash, the
+file the broker serves for a hash is already the right one.
+
+#### Frontend
+
+The existing `useSeccompProfileEditor.ts` becomes a real editor: show observed
+vs effective, let a reviewer stage `add`/`remove` and pick `defaultAction`, show
+the validation warnings inline, and `PUT` on save with the `revision` it loaded.
+A `409` prompts a reload-and-reapply.
+
+**Done when**
+
+- An operator adds a syscall via the API or UI; within one distributor poll a
+  new hash-named file is on every node and `/seccomp/profiles` shows the
+  override block. The next syscall batch does **not** revert it.
+- Deleting the override restores the previous hash; the pre-override file
+  (never deleted) is referenced again with no redistribution.
+- A syscall typo, an `add`/`remove` overlap, and an unknown `defaultAction` are
+  each rejected with a message that says what to fix.
+- Every override write is in `seccomp_override_audit` with the token subject.
+
 ---
 
 ## Risks & mitigations
@@ -364,6 +508,7 @@ Operator.
 | **Profile too tight under ERRNO** | App breaks on next restart, not immediately — easy to miss. | `defaultAction` stays `SCMP_ACT_LOG` until the team opts up; promotion workflow in docs. |
 | **Unbounded disk from no GC** | Old hash files accumulate on every node. | Profiles are ~2 KB each; ship a manual prune recipe; revisit automatic GC after v1. |
 | **Multi-arch workload** | One profile must cover x86_64 and aarch64 nodes. | Architectures unioned into a single profile; per-arch file split kept as a future option. |
+| **Bad operator override** (Phase 6) | A removed or mistyped syscall makes the effective profile deny a real call — breaks the workload on next restart. | Name validation + warnings on `remove`-of-observed and on enforcing actions; delete-the-row revert; audit trail; write endpoints gated + token-authed. |
 
 ---
 

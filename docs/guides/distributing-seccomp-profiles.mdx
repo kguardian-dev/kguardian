@@ -155,11 +155,10 @@ wget -qO- 'localhost:9090/seccomp/profiles/prod/Deployment/web?action=SCMP_ACT_E
 
 <Warning>
 `?action=` only changes what the **API renders** — the file the distributor
-writes to nodes is always `SCMP_ACT_LOG`. Actually enforcing on a node currently
-means placing the `SCMP_ACT_ERRNO` document there yourself (or via your own
-pipeline). A `seccomp.distributeAction` value to switch this cluster-wide is a
-planned follow-up. A too-tight profile breaks the workload on its **next
-restart**, not immediately — so promote deliberately.
+writes to nodes is always `SCMP_ACT_LOG`. Enforcing on a node currently means
+placing the `SCMP_ACT_ERRNO` document there yourself (or via your own pipeline);
+a distributable enforcing variant is planned. A too-tight profile breaks the
+workload on its **next restart**, not immediately — so promote deliberately.
 </Warning>
 
 ---
