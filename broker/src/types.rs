@@ -64,9 +64,20 @@ pub struct PodDetail {
     /// controller predating dual-stack support posts `pod_ip` alone
     /// and must keep working; `upsert_pod_details` fills the gap with
     /// `[pod_ip]`. Field order matters — `Queryable` is positional, so
-    /// this must stay last to match `schema::pod_details`.
+    /// new fields append after this to match `schema::pod_details`.
     #[serde(default)]
     pub pod_ips: Option<serde_json::Value>,
+    /// Kind and name of the top-level controller that owns this pod
+    /// (`Deployment`, `StatefulSet`, `DaemonSet`, `CronJob`, ...), as
+    /// resolved by the controller from ownerReferences. `None` for a
+    /// bare pod, and `None` from a controller old enough not to send
+    /// these — `AsChangeset` skips `None`, so the upsert never nulls a
+    /// previously-populated column. Keyed on by the per-workload
+    /// seccomp profile aggregation.
+    #[serde(default)]
+    pub workload_kind: Option<String>,
+    #[serde(default)]
+    pub workload_name: Option<String>,
 }
 
 #[derive(

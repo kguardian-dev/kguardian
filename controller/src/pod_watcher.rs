@@ -4,7 +4,9 @@ use crate::{api_post_call, Error, PodDetail, PodInfo, PodInspect};
 use chrono::Utc;
 use futures::TryStreamExt;
 use k8s_openapi::api::apps::v1::{DaemonSet, Deployment, ReplicaSet, StatefulSet};
+use k8s_openapi::api::batch::v1::Job;
 use k8s_openapi::api::core::v1::{Pod, PodIP};
+use k8s_openapi::apimachinery::pkg::apis::meta::v1::OwnerReference;
 use kube::{
     api::ListParams,
     runtime::{reflector::Lookup, watcher, WatchStreamExt},
@@ -326,14 +328,21 @@ async fn update_pods_details(
         let (pod_identity, workload_selector_labels) =
             extract_pod_identity_and_selectors(pod, client).await;
 
+        // Top-level owning controller as (kind, name) — the key the
+        // broker groups syscalls on for per-workload seccomp profiles.
+        let (workload_kind, workload_name) = match resolve_workload(pod, client).await {
+            Some((k, n)) => (Some(k), Some(n)),
+            None => (None, None),
+        };
+
         // debug not info — fires for every pod-watcher event with a
         // pod_ip (i.e. essentially every status transition during a
         // rollout). The identity / workload-selector inference is
         // debug-relevant when validating what kguardian inferred from
         // a pod's labels + owner refs, not steady-state operator info.
         debug!(
-            "Pod {}: identity={:?}, workload_selector_labels={:?}",
-            pod_name, pod_identity, workload_selector_labels
+            "Pod {}: identity={:?}, workload={:?}/{:?}, workload_selector_labels={:?}",
+            pod_name, pod_identity, workload_kind, workload_name, workload_selector_labels
         );
 
         let z = PodDetail {
@@ -347,6 +356,8 @@ async fn update_pods_details(
             is_dead: false,
             pod_identity,
             workload_selector_labels,
+            workload_kind,
+            workload_name,
         };
 
         if let Err(e) = api_post_call(json!(z), "pod/spec").await {
@@ -583,6 +594,126 @@ async fn trace_owner_to_workload_with_selectors_and_name(
     (None, None)
 }
 
+/// Kinds taken as a workload identity directly from a pod's owner
+/// reference — no further tracing needed. `ReplicaSet` and `Job` are
+/// deliberately absent: they are collapsed to their parent by
+/// `resolve_workload`.
+const DIRECT_WORKLOAD_KINDS: [&str; 4] = [
+    "Deployment",
+    "StatefulSet",
+    "DaemonSet",
+    "ReplicationController",
+];
+
+/// What a pod's owner references say about its workload, before any
+/// apiserver round-trip. Split out from `resolve_workload` so the
+/// owner-walking logic is unit-testable without a `Client`.
+#[derive(Debug, PartialEq, Eq)]
+enum OwnerClass {
+    /// Owner is itself the top-level workload.
+    Direct(String, String),
+    /// Owner is a ReplicaSet — trace it to its Deployment.
+    ViaReplicaSet(String),
+    /// Owner is a Job — trace it to its CronJob.
+    ViaJob(String),
+    /// No controller owner reference — a bare or static pod.
+    None,
+}
+
+/// Classify a pod's owner references. Only the reference with
+/// `controller: true` identifies the workload.
+fn classify_owner(owners: Option<&[OwnerReference]>) -> OwnerClass {
+    let Some(owners) = owners else {
+        return OwnerClass::None;
+    };
+    for owner in owners {
+        if owner.controller != Some(true) {
+            continue;
+        }
+        return match owner.kind.as_str() {
+            "ReplicaSet" => OwnerClass::ViaReplicaSet(owner.name.clone()),
+            "Job" => OwnerClass::ViaJob(owner.name.clone()),
+            kind if DIRECT_WORKLOAD_KINDS.contains(&kind) => {
+                OwnerClass::Direct(kind.to_string(), owner.name.clone())
+            }
+            other => {
+                debug!("classify_owner: unhandled controller kind {other}");
+                OwnerClass::None
+            }
+        };
+    }
+    OwnerClass::None
+}
+
+/// Resolve a pod to the top-level controller that owns it, as a
+/// `(kind, name)` pair — the stable key a per-workload seccomp profile
+/// is grouped on.
+///
+/// Transient layers are collapsed: a `ReplicaSet` resolves to its
+/// `Deployment` (each rollout creates a fresh ReplicaSet, so keying on
+/// it would fragment the profile), and a `Job` to its `CronJob` (Jobs
+/// created by a CronJob carry a generated name per scheduled run). A
+/// ReplicaSet or Job that has no controller of its own is kept as-is.
+/// A pod with no controller owner reference — a bare or static pod —
+/// returns `None`.
+async fn resolve_workload(pod: &Pod, client: &Client) -> Option<(String, String)> {
+    let namespace = pod.metadata.namespace.as_deref()?;
+    match classify_owner(pod.metadata.owner_references.as_deref()) {
+        OwnerClass::Direct(kind, name) => Some((kind, name)),
+        OwnerClass::ViaReplicaSet(rs) => Some(
+            replicaset_deployment(&rs, namespace, client)
+                .await
+                .unwrap_or(("ReplicaSet".to_string(), rs)),
+        ),
+        OwnerClass::ViaJob(job) => Some(
+            job_cronjob(&job, namespace, client)
+                .await
+                .unwrap_or(("Job".to_string(), job)),
+        ),
+        OwnerClass::None => None,
+    }
+}
+
+/// `("Deployment", name)` when the ReplicaSet is owned by one, else `None`
+/// (a directly-created ReplicaSet).
+async fn replicaset_deployment(
+    name: &str,
+    namespace: &str,
+    client: &Client,
+) -> Option<(String, String)> {
+    let api: Api<ReplicaSet> = Api::namespaced(client.clone(), namespace);
+    match api.get(name).await {
+        Ok(rs) => rs
+            .metadata
+            .owner_references?
+            .into_iter()
+            .find(|o| o.kind == "Deployment" && o.controller == Some(true))
+            .map(|o| ("Deployment".to_string(), o.name)),
+        Err(e) => {
+            warn!("resolve_workload: failed to get ReplicaSet {name}: {e}");
+            None
+        }
+    }
+}
+
+/// `("CronJob", name)` when the Job is owned by one, else `None` (a
+/// standalone Job).
+async fn job_cronjob(name: &str, namespace: &str, client: &Client) -> Option<(String, String)> {
+    let api: Api<Job> = Api::namespaced(client.clone(), namespace);
+    match api.get(name).await {
+        Ok(job) => job
+            .metadata
+            .owner_references?
+            .into_iter()
+            .find(|o| o.kind == "CronJob" && o.controller == Some(true))
+            .map(|o| ("CronJob".to_string(), o.name)),
+        Err(e) => {
+            warn!("resolve_workload: failed to get Job {name}: {e}");
+            None
+        }
+    }
+}
+
 /// Gets selector labels from a Deployment
 async fn get_deployment_selector(
     deployment_name: &str,
@@ -735,7 +866,6 @@ async fn get_deployment_name_and_selector_from_replicaset(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use k8s_openapi::apimachinery::pkg::apis::meta::v1::OwnerReference;
 
     fn pod_ip(ip: &str) -> PodIP {
         PodIP { ip: ip.to_string() }
@@ -1033,6 +1163,71 @@ mod tests {
     fn is_backed_by_daemonset_among_multiple_owners() {
         let pod = pod_with_owners(vec![owner("ReplicaSet"), owner("DaemonSet")]);
         assert!(is_backed_by_daemonset(&pod));
+    }
+
+    fn controller_owner(kind: &str, name: &str) -> OwnerReference {
+        OwnerReference {
+            kind: kind.into(),
+            api_version: "apps/v1".into(),
+            name: name.into(),
+            uid: "u".into(),
+            controller: Some(true),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn classify_owner_none_without_refs() {
+        assert_eq!(classify_owner(None), OwnerClass::None);
+        assert_eq!(classify_owner(Some(&[])), OwnerClass::None);
+    }
+
+    #[test]
+    fn classify_owner_direct_kinds() {
+        for kind in [
+            "Deployment",
+            "StatefulSet",
+            "DaemonSet",
+            "ReplicationController",
+        ] {
+            assert_eq!(
+                classify_owner(Some(&[controller_owner(kind, "app")])),
+                OwnerClass::Direct(kind.to_string(), "app".to_string())
+            );
+        }
+    }
+
+    #[test]
+    fn classify_owner_replicaset_and_job_need_tracing() {
+        assert_eq!(
+            classify_owner(Some(&[controller_owner("ReplicaSet", "app-7d9f")])),
+            OwnerClass::ViaReplicaSet("app-7d9f".to_string())
+        );
+        assert_eq!(
+            classify_owner(Some(&[controller_owner("Job", "nightly-28919")])),
+            OwnerClass::ViaJob("nightly-28919".to_string())
+        );
+    }
+
+    #[test]
+    fn classify_owner_ignores_non_controller_refs() {
+        // A plain (non-controller) ownerReference does not identify the
+        // workload — e.g. a pod that a custom operator merely labels as
+        // owned. Only `controller: true` counts.
+        let mut plain = controller_owner("Deployment", "app");
+        plain.controller = None;
+        assert_eq!(classify_owner(Some(&[plain])), OwnerClass::None);
+    }
+
+    #[test]
+    fn classify_owner_unknown_controller_kind_is_none() {
+        // A CRD-based controller we don't model (e.g. Rollout, CloneSet):
+        // better to leave the workload unattributed than to key a
+        // profile on something we can't reason about.
+        assert_eq!(
+            classify_owner(Some(&[controller_owner("Rollout", "app")])),
+            OwnerClass::None
+        );
     }
 
     // pod_unready is mis-named: it returns Some(container_ids) when

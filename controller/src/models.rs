@@ -194,6 +194,20 @@ pub struct PodDetail {
     pub is_dead: bool,
     pub pod_identity: Option<String>,
     pub workload_selector_labels: Option<BTreeMap<String, String>>,
+    /// Kind and name of the top-level controller that owns this pod,
+    /// resolved from ownerReferences: a ReplicaSet is collapsed to its
+    /// Deployment and a Job to its CronJob, so the value is stable
+    /// across rollouts. `None` for a bare pod. Unlike `pod_identity`
+    /// (a best-effort label), this is the unambiguous key the broker
+    /// groups syscalls on for per-workload seccomp profiles.
+    ///
+    /// `#[serde(default)]`: a broker old enough to lack these columns
+    /// simply ignores the extra fields, and this struct still
+    /// round-trips a `/pod/list` response from such a broker.
+    #[serde(default)]
+    pub workload_kind: Option<String>,
+    #[serde(default)]
+    pub workload_name: Option<String>,
 }
 
 #[derive(Debug, Default, Serialize)]

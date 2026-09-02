@@ -20,10 +20,16 @@ diesel::table! {
         // Jsonb (not Json like the two columns above): the pod-by-IP
         // lookup matches with the `@>` containment operator, which
         // only exists for jsonb, and the GIN index added alongside
-        // the column is a jsonb_path_ops index. Declared last to match
-        // the physical column order ALTER TABLE ADD COLUMN produces —
-        // PodDetail derives Queryable, which is positional.
+        // the column is a jsonb_path_ops index.
         pod_ips -> Nullable<Jsonb>,
+        // Top-level owning controller, resolved by the controller from
+        // ownerReferences (ReplicaSet→Deployment, Job→CronJob). The
+        // key a per-workload seccomp profile is grouped on. Declared
+        // last to match the physical column order ALTER TABLE ADD
+        // COLUMN produces — PodDetail derives Queryable, which is
+        // positional, so any new column goes here.
+        workload_kind -> Nullable<Varchar>,
+        workload_name -> Nullable<Varchar>,
     }
 }
 

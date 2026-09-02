@@ -856,6 +856,29 @@ mod tests {
     }
 
     #[test]
+    fn pod_detail_accepts_payload_with_workload() {
+        // Controller new enough to resolve the owning workload.
+        let json = r#"{"pod_name":"web-1","pod_ip":"10.42.3.5","pod_namespace":"prod",
+            "pod_obj":null,"time_stamp":"2026-08-31T00:00:00","node_name":"node-a",
+            "is_dead":false,"pod_identity":null,"workload_selector_labels":null,
+            "workload_kind":"Deployment","workload_name":"web"}"#;
+        let got: PodDetail = serde_json::from_str(json).expect("must parse with workload fields");
+        assert_eq!(got.workload_kind.as_deref(), Some("Deployment"));
+        assert_eq!(got.workload_name.as_deref(), Some("web"));
+    }
+
+    #[test]
+    fn pod_detail_accepts_payload_without_workload() {
+        // Controller predating workload attribution, or a bare pod.
+        let json = r#"{"pod_name":"web-1","pod_ip":"10.42.3.5","pod_namespace":"prod",
+            "pod_obj":null,"time_stamp":"2026-08-31T00:00:00","node_name":"node-a",
+            "is_dead":false,"pod_identity":null,"workload_selector_labels":null}"#;
+        let got: PodDetail =
+            serde_json::from_str(json).expect("must parse without workload fields");
+        assert!(got.workload_kind.is_none() && got.workload_name.is_none());
+    }
+
+    #[test]
     fn pod_detail_accepts_payload_with_pod_ips() {
         let json = r#"{"pod_name":"web-1","pod_ip":"10.42.3.5","pod_namespace":"prod",
             "pod_obj":null,"time_stamp":"2026-08-31T00:00:00","node_name":"node-a",
