@@ -1,5 +1,14 @@
 # Changelog
 
+## [1.20.0](https://github.com/kguardian-dev/kguardian/compare/chart/v1.19.2...chart/v1.20.0) (2026-09-02)
+
+
+### Features
+
+* **chart:** add the GitOps inputs consumers were patching by hand ([#1405](https://github.com/kguardian-dev/kguardian/issues/1405)) ([e545109](https://github.com/kguardian-dev/kguardian/commit/e5451097357265aa391f20ac959767827118b6c4))
+* **chart:** wire telemetry v2 - nodes get RBAC + FEATURES env ([07836ec](https://github.com/kguardian-dev/kguardian/commit/07836ecc1d3fbf4aa19005c7516c4710a00ea6f8))
+* **telemetry:** report environment signals in the check-in ([fcab3f4](https://github.com/kguardian-dev/kguardian/commit/fcab3f4bcd415e0485a2c982f2ac11e91e5e0aab))
+
 ## [1.19.2](https://github.com/kguardian-dev/kguardian/compare/chart/v1.19.1...chart/v1.19.2) (2026-09-01)
 
 
