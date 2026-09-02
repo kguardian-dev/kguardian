@@ -138,27 +138,60 @@ removed, so rolling back is just pointing at the previous hash.
 
 ---
 
-## Promote from audit to enforcement
+## Adjust a profile
 
-The distributed profile files use `defaultAction: SCMP_ACT_LOG` — disallowed
-syscalls are logged to the kernel audit log but nothing is blocked. Run in this
-mode first and confirm the audit log shows nothing your workload actually needs
-being denied.
+Sometimes the observed set isn't quite right — a syscall from a weekly cron the
+scanner never caught, or one you want gone. Set an **override**: it's stored
+separately from the observed union (which keeps accruing underneath) and folded
+back in on every recompute, so the next syscall batch can't revert it.
 
-```bash
-# inspect what the enforcing profile would contain
-wget -qO- 'localhost:9090/seccomp/profiles/prod/Deployment/web?action=SCMP_ACT_ERRNO' \
-  | jq .profile
+Enable it once, cluster-wide:
+
+```yaml
+# values.yaml
+seccomp:
+  overrides:
+    enabled: true
 ```
 
-`?action=` accepts `SCMP_ACT_LOG` (default), `SCMP_ACT_ERRNO`, or `SCMP_ACT_KILL`.
+Then edit a workload's profile — `revision` from the current
+`GET /seccomp/profiles` (`override.revision`, or omit to create):
+
+```bash
+curl -X PUT localhost:9090/seccomp/profiles/prod/Deployment/web/override \
+  -H 'X-Kguardian-Actor: alice' \
+  -d '{
+        "add": ["clock_settime", "clock_adjtime"],
+        "note": "cert rotation cron, weekly",
+        "revision": null
+      }'
+```
+
+The response carries the new `hash` and any `warnings`. Within one distributor
+poll a new hash-named file is on every node; bump your pod template to it.
+`DELETE` the override to revert — the pre-override file was never deleted, so
+that's instant.
+
+## Promote from audit to enforcement
+
+The generated profile uses `defaultAction: SCMP_ACT_LOG` — disallowed syscalls
+are logged to the kernel audit log but nothing is blocked. Run in this mode
+first and confirm the audit log shows nothing your workload actually needs being
+denied. Then flip the action **via an override**:
+
+```bash
+curl -X PUT localhost:9090/seccomp/profiles/prod/Deployment/web/override \
+  -H 'X-Kguardian-Actor: alice' \
+  -d '{ "defaultAction": "SCMP_ACT_ERRNO", "revision": 1 }'
+```
+
+`defaultAction` is part of the hash, so this produces a new, distributable
+enforcing file — not just a different API render.
 
 <Warning>
-`?action=` only changes what the **API renders** — the file the distributor
-writes to nodes is always `SCMP_ACT_LOG`. Enforcing on a node currently means
-placing the `SCMP_ACT_ERRNO` document there yourself (or via your own pipeline);
-a distributable enforcing variant is planned. A too-tight profile breaks the
-workload on its **next restart**, not immediately — so promote deliberately.
+A too-tight profile breaks the workload on its **next restart**, not
+immediately — so promote deliberately, and watch the audit log for a full usage
+cycle first (for a CronJob, several runs).
 </Warning>
 
 ---

@@ -42,14 +42,23 @@ fn arch_token(arch: &str) -> Option<&'static str> {
 pub const DEFAULT_SECCOMP_ACTION: &str = "SCMP_ACT_LOG";
 const VALID_SECCOMP_ACTIONS: [&str; 3] = ["SCMP_ACT_LOG", "SCMP_ACT_ERRNO", "SCMP_ACT_KILL"];
 
-/// FNV-1a (64-bit) over the canonical `syscalls\x1earches` string. A
-/// content fingerprint, not a security primitive: the input is
+/// FNV-1a (64-bit) over the canonical `syscalls\x1earches\x1edefault_action`
+/// string. A content fingerprint, not a security primitive: the input is
 /// broker-generated and never adversarial, and pulling a crypto hash
 /// crate into the broker would buy nothing here. Stable across builds
 /// by construction, which a crypto hash gives too but `DefaultHasher`
 /// (SipHash, unspecified) would not — and the value names a file an app
-/// team pins, so it must never move unless the set moves.
-fn fingerprint(syscalls: &BTreeSet<String>, arches: &BTreeSet<String>) -> String {
+/// team pins, so it must never move unless the *effective* profile does.
+///
+/// `default_action` is part of the fingerprint (since Phase 6): a
+/// `LOG` profile and the `ERRNO` profile for the same syscall set are
+/// genuinely different files, and hashing the action is what lets a
+/// distributor tell them apart.
+fn fingerprint(
+    syscalls: &BTreeSet<String>,
+    arches: &BTreeSet<String>,
+    default_action: &str,
+) -> String {
     const OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
     const PRIME: u64 = 0x0000_0100_0000_01b3;
     let mut h = OFFSET;
@@ -73,6 +82,8 @@ fn fingerprint(syscalls: &BTreeSet<String>, arches: &BTreeSet<String>) -> String
         }
         feed(a.as_bytes());
     }
+    feed(b"\x1e");
+    feed(default_action.as_bytes());
     format!("{h:016x}")
 }
 
@@ -132,7 +143,9 @@ fn join_set(set: &BTreeSet<String>) -> String {
     set.iter().cloned().collect::<Vec<_>>().join(",")
 }
 
-/// One row of `workload_syscalls`, as stored.
+/// One row of `workload_syscalls`, as stored. `syscalls` / `arches` are
+/// the pure observed union; `hash` names the *effective* profile
+/// (observed folded with any override — see `effective_sets`).
 #[derive(Debug, Queryable, Selectable)]
 #[diesel(table_name = schema::workload_syscalls)]
 struct WorkloadSyscallsRow {
@@ -143,6 +156,62 @@ struct WorkloadSyscallsRow {
     arches: String,
     hash: String,
     updated_at: chrono::NaiveDateTime,
+}
+
+/// One row of `workload_seccomp_overrides` (Phase 6).
+#[derive(Debug, Clone, Queryable, Selectable)]
+#[diesel(table_name = schema::workload_seccomp_overrides)]
+struct OverrideRow {
+    #[allow(dead_code)]
+    pod_namespace: String,
+    #[allow(dead_code)]
+    workload_kind: String,
+    #[allow(dead_code)]
+    workload_name: String,
+    add_syscalls: String,
+    remove_syscalls: String,
+    default_action: Option<String>,
+    note: Option<String>,
+    updated_by: String,
+    updated_at: chrono::NaiveDateTime,
+    revision: i32,
+}
+
+fn load_override(
+    conn: &mut PgConnection,
+    ns: &str,
+    kind: &str,
+    name: &str,
+) -> Result<Option<OverrideRow>, DbError> {
+    use schema::workload_seccomp_overrides::dsl::*;
+    Ok(workload_seccomp_overrides
+        .find((ns, kind, name))
+        .select(OverrideRow::as_select())
+        .first(conn)
+        .optional()?)
+}
+
+/// Fold an observed syscall/arch set with an optional override into the
+/// effective `(syscalls, arches, default_action)` the profile renders
+/// from. `arches` are not overridable. The single place this fold
+/// happens, shared by the ingest recompute and every render path.
+fn effective_sets(
+    observed_syscalls: &BTreeSet<String>,
+    observed_arches: &BTreeSet<String>,
+    ovr: Option<&OverrideRow>,
+) -> (BTreeSet<String>, BTreeSet<String>, String) {
+    let mut syscalls = observed_syscalls.clone();
+    let mut action = DEFAULT_SECCOMP_ACTION.to_string();
+    if let Some(o) = ovr {
+        syscalls.extend(split_set(&o.add_syscalls));
+        for r in split_set(&o.remove_syscalls) {
+            syscalls.remove(&r);
+        }
+        if let Some(a) = o.default_action.as_deref().filter(|a| !a.is_empty()) {
+            action = a.to_string();
+        }
+    }
+    (syscalls, observed_arches.clone(), action)
 }
 
 /// The `(namespace, kind, name)` workloads that own any of `pod_names`.
@@ -197,15 +266,15 @@ pub fn recompute_workload(
 
     // Seed from the existing aggregate so the union is monotonic across
     // time even as individual pods come and go.
-    let existing: Option<(String, String)> = ws::workload_syscalls
+    let existing: Option<(String, String, String)> = ws::workload_syscalls
         .find((namespace, kind, name))
-        .select((ws::syscalls, ws::arches))
+        .select((ws::syscalls, ws::arches, ws::hash))
         .first(conn)
         .optional()?;
 
     let mut syscall_set = BTreeSet::new();
     let mut arch_set = BTreeSet::new();
-    if let Some((s, a)) = &existing {
+    if let Some((s, a, _)) = &existing {
         syscall_set.extend(split_set(s));
         arch_set.extend(split_set(a));
     }
@@ -224,11 +293,17 @@ pub fn recompute_workload(
 
     let syscalls_joined = join_set(&syscall_set);
     let arches_joined = join_set(&arch_set);
-    let new_hash = fingerprint(&syscall_set, &arch_set);
+
+    // The hash names the EFFECTIVE profile, so an override changes the
+    // filename even when the observed union has not moved.
+    let ovr = load_override(conn, namespace, kind, name)?;
+    let (eff_syscalls, eff_arches, eff_action) =
+        effective_sets(&syscall_set, &arch_set, ovr.as_ref());
+    let new_hash = fingerprint(&eff_syscalls, &eff_arches, &eff_action);
 
     if existing
         .as_ref()
-        .is_some_and(|(s, a)| s == &syscalls_joined && a == &arches_joined)
+        .is_some_and(|(s, a, h)| s == &syscalls_joined && a == &arches_joined && h == &new_hash)
     {
         return Ok(()); // unchanged — leave updated_at alone
     }
@@ -263,7 +338,8 @@ pub fn recompute_workload(
 
 /// `kguardian/<ns>/<kind-lowercased>-<name>-<hash>.json` — the path an
 /// app team puts in `securityContext.seccompProfile.localhostProfile`,
-/// resolved by the kubelet under its seccomp root.
+/// resolved by the kubelet under its seccomp root. `hash` is the
+/// effective-profile hash stored on the row.
 fn localhost_profile_path(row: &WorkloadSyscallsRow) -> String {
     format!(
         "kguardian/{}/{}-{}-{}.json",
@@ -272,6 +348,69 @@ fn localhost_profile_path(row: &WorkloadSyscallsRow) -> String {
         row.workload_name,
         row.hash
     )
+}
+
+/// Observed row + the effective set it renders to after any override.
+struct Effective {
+    row: WorkloadSyscallsRow,
+    syscalls: BTreeSet<String>,
+    arches: BTreeSet<String>,
+    default_action: String,
+    ovr: Option<OverrideRow>,
+}
+
+/// Load a workload's observed row and fold in its override. `None` when
+/// the workload has no observed aggregate yet — an override alone never
+/// produces a profile (there would be no architectures).
+fn effective_profile(
+    conn: &mut PgConnection,
+    ns: &str,
+    kind: &str,
+    name: &str,
+) -> Result<Option<Effective>, DbError> {
+    let Some(row) = one_row(conn, ns, kind, name)? else {
+        return Ok(None);
+    };
+    let ovr = load_override(conn, ns, kind, name)?;
+    let observed_syscalls = split_set(&row.syscalls);
+    let observed_arches = split_set(&row.arches);
+    let (syscalls, arches, default_action) =
+        effective_sets(&observed_syscalls, &observed_arches, ovr.as_ref());
+    Ok(Some(Effective {
+        row,
+        syscalls,
+        arches,
+        default_action,
+        ovr,
+    }))
+}
+
+#[derive(Serialize)]
+struct OverrideBlock {
+    add: Vec<String>,
+    remove: Vec<String>,
+    #[serde(rename = "defaultAction")]
+    default_action: Option<String>,
+    note: Option<String>,
+    #[serde(rename = "updatedBy")]
+    updated_by: String,
+    #[serde(rename = "updatedAt")]
+    updated_at: chrono::NaiveDateTime,
+    revision: i32,
+}
+
+impl From<&OverrideRow> for OverrideBlock {
+    fn from(o: &OverrideRow) -> Self {
+        OverrideBlock {
+            add: split_set(&o.add_syscalls).into_iter().collect(),
+            remove: split_set(&o.remove_syscalls).into_iter().collect(),
+            default_action: o.default_action.clone().filter(|a| !a.is_empty()),
+            note: o.note.clone(),
+            updated_by: o.updated_by.clone(),
+            updated_at: o.updated_at,
+            revision: o.revision,
+        }
+    }
 }
 
 /// Distribution readiness for one profile: how many live nodes have its
@@ -311,6 +450,8 @@ struct ProfileSummary {
     hash: String,
     #[serde(rename = "localhostProfile")]
     localhost_profile: String,
+    #[serde(rename = "defaultAction")]
+    default_action: String,
     #[serde(rename = "syscallCount")]
     syscall_count: usize,
     architectures: Vec<String>,
@@ -318,12 +459,18 @@ struct ProfileSummary {
     /// Drop-in for a pod template's `securityContext`.
     #[serde(rename = "recommendedSnippet")]
     recommended_snippet: serde_json::Value,
+    /// Operator override in effect, or `null`.
+    #[serde(rename = "override")]
+    override_block: Option<OverrideBlock>,
     #[serde(rename = "updatedAt")]
     updated_at: chrono::NaiveDateTime,
 }
 
 impl ProfileSummary {
-    fn build(r: &WorkloadSyscallsRow, index: &DistributionIndex) -> Self {
+    /// `syscall_count` / `architectures` / `default_action` reflect the
+    /// **effective** profile, not the raw observed row.
+    fn build(eff: &Effective, index: &DistributionIndex) -> Self {
+        let r = &eff.row;
         let path = localhost_profile_path(r);
         let ready = index.path_counts.get(&path).copied().unwrap_or(0);
         ProfileSummary {
@@ -331,8 +478,10 @@ impl ProfileSummary {
             kind: r.workload_kind.clone(),
             name: r.workload_name.clone(),
             hash: r.hash.clone(),
-            syscall_count: split_set(&r.syscalls).len(),
-            architectures: split_set(&r.arches)
+            default_action: eff.default_action.clone(),
+            syscall_count: eff.syscalls.len(),
+            architectures: eff
+                .arches
                 .iter()
                 .filter_map(|a| arch_token(a))
                 .map(String::from)
@@ -341,6 +490,7 @@ impl ProfileSummary {
             recommended_snippet: serde_json::json!({
                 "seccompProfile": { "type": "Localhost", "localhostProfile": path }
             }),
+            override_block: eff.ovr.as_ref().map(OverrideBlock::from),
             localhost_profile: path,
             updated_at: r.updated_at,
         }
@@ -391,16 +541,61 @@ fn distribution_index(conn: &mut PgConnection) -> Result<DistributionIndex, DbEr
     })
 }
 
-fn all_rows(conn: &mut PgConnection) -> Result<Vec<WorkloadSyscallsRow>, DbError> {
-    use schema::workload_syscalls::dsl::*;
-    Ok(workload_syscalls
+/// Every workload's observed row folded with its override, ordered.
+/// Batch-loads overrides so the list endpoint stays O(rows), not a
+/// query per row.
+fn all_effective(conn: &mut PgConnection) -> Result<Vec<Effective>, DbError> {
+    use schema::workload_seccomp_overrides::dsl as o;
+    use schema::workload_syscalls::dsl as ws;
+
+    let rows: Vec<WorkloadSyscallsRow> = ws::workload_syscalls
         .select(WorkloadSyscallsRow::as_select())
         .order((
-            pod_namespace.asc(),
-            workload_kind.asc(),
-            workload_name.asc(),
+            ws::pod_namespace.asc(),
+            ws::workload_kind.asc(),
+            ws::workload_name.asc(),
         ))
-        .load(conn)?)
+        .load(conn)?;
+
+    let mut overrides: HashMap<(String, String, String), OverrideRow> =
+        o::workload_seccomp_overrides
+            .select(OverrideRow::as_select())
+            .load(conn)?
+            .into_iter()
+            .map(|r| {
+                (
+                    (
+                        r.pod_namespace.clone(),
+                        r.workload_kind.clone(),
+                        r.workload_name.clone(),
+                    ),
+                    r,
+                )
+            })
+            .collect();
+
+    Ok(rows
+        .into_iter()
+        .map(|row| {
+            let key = (
+                row.pod_namespace.clone(),
+                row.workload_kind.clone(),
+                row.workload_name.clone(),
+            );
+            let ovr = overrides.remove(&key);
+            let observed_syscalls = split_set(&row.syscalls);
+            let observed_arches = split_set(&row.arches);
+            let (syscalls, arches, default_action) =
+                effective_sets(&observed_syscalls, &observed_arches, ovr.as_ref());
+            Effective {
+                row,
+                syscalls,
+                arches,
+                default_action,
+                ovr,
+            }
+        })
+        .collect())
 }
 
 fn one_row(
@@ -417,34 +612,38 @@ fn one_row(
         .optional()?)
 }
 
-fn validated_action(raw: Option<&str>) -> Result<&str, actix_web::Error> {
-    match raw {
-        None => Ok(DEFAULT_SECCOMP_ACTION),
-        Some(a) if VALID_SECCOMP_ACTIONS.contains(&a) => Ok(a),
-        Some(a) => Err(actix_web::error::ErrorBadRequest(format!(
-            "invalid action {a:?}; expected one of {VALID_SECCOMP_ACTIONS:?}"
-        ))),
+fn validated_action(a: &str) -> Result<(), actix_web::Error> {
+    if VALID_SECCOMP_ACTIONS.contains(&a) {
+        Ok(())
+    } else {
+        Err(actix_web::error::ErrorBadRequest(format!(
+            "invalid defaultAction {a:?}; expected one of {VALID_SECCOMP_ACTIONS:?}"
+        )))
     }
 }
 
-#[derive(serde::Deserialize)]
-pub struct ProfileQuery {
-    action: Option<String>,
+/// Render the profile document for an `Effective`.
+fn render(eff: &Effective) -> SeccompProfile {
+    build_profile(
+        &join_set(&eff.syscalls),
+        &join_set(&eff.arches),
+        &eff.default_action,
+    )
 }
 
 /// `GET /seccomp/profiles` — every workload that has an aggregate, with
-/// its current hash, profile path, and distribution readiness. The list
-/// a distributor polls and the UI shows.
+/// its effective hash, profile path, distribution readiness, and any
+/// override. The list a distributor polls and the UI shows.
 #[get("/seccomp/profiles")]
 pub async fn list_seccomp_profiles(pool: web::Data<DbPool>) -> actix_web::Result<impl Responder> {
     info!("list seccomp profiles");
     let out: Vec<ProfileSummary> = web::block(move || -> Result<_, DbError> {
         let mut conn = pool.get()?;
-        let rows = all_rows(&mut conn)?;
+        let effs = all_effective(&mut conn)?;
         let index = distribution_index(&mut conn)?;
-        Ok(rows
+        Ok(effs
             .iter()
-            .map(|r| ProfileSummary::build(r, &index))
+            .map(|e| ProfileSummary::build(e, &index))
             .collect())
     })
     .await?
@@ -461,28 +660,22 @@ struct ProfileDetail {
 }
 
 /// `GET /seccomp/profiles/{namespace}/{kind}/{name}` — one workload's
-/// summary plus the rendered profile. `?action=` overrides the
-/// `defaultAction` (default `SCMP_ACT_LOG`).
+/// summary plus the rendered effective profile.
 #[get("/seccomp/profiles/{namespace}/{kind}/{name}")]
 pub async fn get_seccomp_profile(
     pool: web::Data<DbPool>,
     path: web::Path<(String, String, String)>,
-    query: web::Query<ProfileQuery>,
 ) -> actix_web::Result<impl Responder> {
     let (namespace, kind, name) = path.into_inner();
-    let action = validated_action(query.action.as_deref())?.to_string();
     info!(%namespace, %kind, %name, "get seccomp profile");
 
     let result = web::block(move || -> Result<_, DbError> {
         let mut conn = pool.get()?;
-        match one_row(&mut conn, &namespace, &kind, &name)? {
-            Some(r) => {
+        match effective_profile(&mut conn, &namespace, &kind, &name)? {
+            Some(eff) => {
                 let index = distribution_index(&mut conn)?;
-                Ok(Some((
-                    ProfileSummary::build(&r, &index),
-                    r.syscalls,
-                    r.arches,
-                )))
+                let profile = render(&eff);
+                Ok(Some((ProfileSummary::build(&eff, &index), profile)))
             }
             None => Ok(None),
         }
@@ -491,38 +684,31 @@ pub async fn get_seccomp_profile(
     .map_err(actix_web::error::ErrorInternalServerError)?;
 
     Ok(match result {
-        Some((summary, syscalls, arches)) => HttpResponse::Ok().json(ProfileDetail {
-            profile: build_profile(&syscalls, &arches, &action),
-            summary,
-        }),
+        Some((summary, profile)) => HttpResponse::Ok().json(ProfileDetail { summary, profile }),
         None => HttpResponse::NotFound().body("no seccomp profile for that workload"),
     })
 }
 
 /// `GET /seccomp/profile-file/{namespace}/{kind}/{name}/{hash}` — the
-/// bare `SeccompProfile` JSON, for a distributor to write to a node.
-/// Serves only the CURRENT hash; a stale hash is a 404 (the caller
+/// bare effective `SeccompProfile` JSON, for a distributor to write to a
+/// node. Serves only the CURRENT hash; a stale hash is a 404 (the caller
 /// should re-read the list).
 #[get("/seccomp/profile-file/{namespace}/{kind}/{name}/{hash}")]
 pub async fn get_seccomp_profile_file(
     pool: web::Data<DbPool>,
     path: web::Path<(String, String, String, String)>,
-    query: web::Query<ProfileQuery>,
 ) -> actix_web::Result<impl Responder> {
     let (namespace, kind, name, hash) = path.into_inner();
-    let action = validated_action(query.action.as_deref())?.to_string();
 
-    let row = web::block(move || {
+    let eff = web::block(move || {
         let mut conn = pool.get()?;
-        one_row(&mut conn, &namespace, &kind, &name)
+        effective_profile(&mut conn, &namespace, &kind, &name)
     })
     .await?
     .map_err(actix_web::error::ErrorInternalServerError)?;
 
-    Ok(match row {
-        Some(r) if r.hash == hash => {
-            HttpResponse::Ok().json(build_profile(&r.syscalls, &r.arches, &action))
-        }
+    Ok(match eff {
+        Some(e) if e.row.hash == hash => HttpResponse::Ok().json(render(&e)),
         Some(_) => HttpResponse::NotFound().body("stale hash; re-read /seccomp/profiles"),
         None => HttpResponse::NotFound().body("no seccomp profile for that workload"),
     })
@@ -580,6 +766,413 @@ pub async fn post_seccomp_node_status(
     Ok(HttpResponse::Ok().json(()))
 }
 
+// ---------------------------------------------------------------------------
+// Phase 6 — operator overrides
+// ---------------------------------------------------------------------------
+
+/// The override write endpoints are gated: they 404 unless
+/// `SECCOMP_OVERRIDES_ENABLED` is truthy. Editing a profile can take a
+/// workload down, so it is an explicit opt-in, not on-by-default.
+fn overrides_enabled() -> bool {
+    matches!(
+        std::env::var("SECCOMP_OVERRIDES_ENABLED")
+            .as_deref()
+            .map(str::trim),
+        Ok("true") | Ok("1") | Ok("yes") | Ok("on")
+    )
+}
+
+/// A syntactically plausible syscall name: `^[a-z][a-z0-9_]{0,63}$`.
+/// This rejects typos like `"OpenAt"`, `"openat "`, `"openat;"` and any
+/// injection attempt. It does NOT confirm the name is a real syscall —
+/// an unknown-but-well-formed name is a warning (a static name table is
+/// a future hardening).
+fn valid_syscall_name(s: &str) -> bool {
+    let b = s.as_bytes();
+    !b.is_empty()
+        && b.len() <= 64
+        && b[0].is_ascii_lowercase()
+        && b.iter()
+            .all(|&c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == b'_')
+}
+
+/// Actor recorded on an override write. The broker token is a shared
+/// secret with no subject, so callers pass `X-Kguardian-Actor`; absent
+/// or blank ⇒ `"unknown"`.
+fn actor_from(req: &actix_web::HttpRequest) -> String {
+    req.headers()
+        .get("X-Kguardian-Actor")
+        .and_then(|h| h.to_str().ok())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or("unknown")
+        .chars()
+        .take(128)
+        .collect()
+}
+
+/// Body of `PUT /seccomp/profiles/{ns}/{kind}/{name}/override`.
+#[derive(Deserialize)]
+pub struct OverrideInput {
+    #[serde(default)]
+    add: Vec<String>,
+    #[serde(default)]
+    remove: Vec<String>,
+    #[serde(default, rename = "defaultAction")]
+    default_action: Option<String>,
+    #[serde(default)]
+    note: Option<String>,
+    /// The `revision` the client last read. Omit (or `null`) to create.
+    /// A mismatch with the stored revision is a `409`.
+    #[serde(default)]
+    revision: Option<i32>,
+    /// Validate + render without persisting.
+    #[serde(default, rename = "dryRun")]
+    dry_run: bool,
+}
+
+const MAX_OVERRIDE_LIST: usize = 512;
+
+enum OverrideWrite {
+    Ok {
+        revision: i32,
+        hash: String,
+        warnings: Vec<String>,
+        profile: SeccompProfile,
+    },
+    NoObservedProfile,
+    RevisionConflict {
+        current: Option<i32>,
+    },
+}
+
+#[allow(clippy::too_many_arguments)]
+fn apply_override(
+    conn: &mut PgConnection,
+    ns: &str,
+    kind: &str,
+    name: &str,
+    add: BTreeSet<String>,
+    remove: BTreeSet<String>,
+    default_action: Option<String>,
+    note: Option<String>,
+    client_revision: Option<i32>,
+    actor: &str,
+    dry_run: bool,
+) -> Result<OverrideWrite, DbError> {
+    use schema::workload_seccomp_overrides::dsl as o;
+
+    let Some(observed) = one_row(conn, ns, kind, name)? else {
+        return Ok(OverrideWrite::NoObservedProfile);
+    };
+    let existing = load_override(conn, ns, kind, name)?;
+    let current_rev = existing.as_ref().map(|e| e.revision);
+    if client_revision != current_rev {
+        return Ok(OverrideWrite::RevisionConflict {
+            current: current_rev,
+        });
+    }
+
+    let observed_syscalls = split_set(&observed.syscalls);
+    let mut warnings = Vec::new();
+    if let Some(a) = default_action.as_deref() {
+        if a == "SCMP_ACT_ERRNO" || a == "SCMP_ACT_KILL" {
+            warnings.push(format!(
+                "defaultAction {a} blocks — a syscall the workload makes but kube-guardian \
+                 has not yet observed will fail on the pod's next restart"
+            ));
+        }
+    }
+    for r in &remove {
+        if observed_syscalls.contains(r) {
+            warnings.push(format!(
+                "removing {r:?}, which the workload was observed to make"
+            ));
+        }
+    }
+
+    let add_joined = join_set(&add);
+    let remove_joined = join_set(&remove);
+    let synthetic = OverrideRow {
+        pod_namespace: ns.to_string(),
+        workload_kind: kind.to_string(),
+        workload_name: name.to_string(),
+        add_syscalls: add_joined.clone(),
+        remove_syscalls: remove_joined.clone(),
+        default_action: default_action.clone(),
+        note: note.clone(),
+        updated_by: actor.to_string(),
+        updated_at: chrono::Utc::now().naive_utc(),
+        revision: current_rev.unwrap_or(0) + 1,
+    };
+    let (eff_s, eff_a, eff_act) = effective_sets(
+        &observed_syscalls,
+        &split_set(&observed.arches),
+        Some(&synthetic),
+    );
+    let hash = fingerprint(&eff_s, &eff_a, &eff_act);
+    let profile = build_profile(&join_set(&eff_s), &join_set(&eff_a), &eff_act);
+
+    if dry_run {
+        return Ok(OverrideWrite::Ok {
+            revision: synthetic.revision,
+            hash,
+            warnings,
+            profile,
+        });
+    }
+
+    let now = synthetic.updated_at;
+    diesel::insert_into(o::workload_seccomp_overrides)
+        .values((
+            o::pod_namespace.eq(ns),
+            o::workload_kind.eq(kind),
+            o::workload_name.eq(name),
+            o::add_syscalls.eq(&add_joined),
+            o::remove_syscalls.eq(&remove_joined),
+            o::default_action.eq(&default_action),
+            o::note.eq(&note),
+            o::updated_by.eq(actor),
+            o::updated_at.eq(now),
+            o::revision.eq(synthetic.revision),
+        ))
+        .on_conflict((o::pod_namespace, o::workload_kind, o::workload_name))
+        .do_update()
+        .set((
+            o::add_syscalls.eq(&add_joined),
+            o::remove_syscalls.eq(&remove_joined),
+            o::default_action.eq(&default_action),
+            o::note.eq(&note),
+            o::updated_by.eq(actor),
+            o::updated_at.eq(now),
+            o::revision.eq(synthetic.revision),
+        ))
+        .execute(conn)?;
+
+    audit_override(
+        conn,
+        ns,
+        kind,
+        name,
+        "put",
+        serde_json::json!({
+            "add": add, "remove": remove, "defaultAction": default_action, "note": note
+        }),
+        actor,
+    )?;
+    rehash_workload(conn, ns, kind, name)?;
+
+    Ok(OverrideWrite::Ok {
+        revision: synthetic.revision,
+        hash,
+        warnings,
+        profile,
+    })
+}
+
+fn audit_override(
+    conn: &mut PgConnection,
+    ns: &str,
+    kind: &str,
+    name: &str,
+    op: &str,
+    diff: serde_json::Value,
+    actor: &str,
+) -> Result<(), DbError> {
+    use schema::seccomp_override_audit::dsl as a;
+    diesel::insert_into(a::seccomp_override_audit)
+        .values((
+            a::pod_namespace.eq(ns),
+            a::workload_kind.eq(kind),
+            a::workload_name.eq(name),
+            a::op.eq(op),
+            a::diff.eq(diff),
+            a::updated_by.eq(actor),
+            a::at.eq(chrono::Utc::now().naive_utc()),
+        ))
+        .execute(conn)?;
+    Ok(())
+}
+
+/// Recompute just the effective hash on `workload_syscalls` (cheaper
+/// than `recompute_workload`, which also re-does the pod union query).
+/// Called after an override write.
+fn rehash_workload(
+    conn: &mut PgConnection,
+    ns: &str,
+    kind: &str,
+    name: &str,
+) -> Result<(), DbError> {
+    use schema::workload_syscalls::dsl as ws;
+    let Some(row) = one_row(conn, ns, kind, name)? else {
+        return Ok(());
+    };
+    let ovr = load_override(conn, ns, kind, name)?;
+    let (s, a, act) = effective_sets(
+        &split_set(&row.syscalls),
+        &split_set(&row.arches),
+        ovr.as_ref(),
+    );
+    let h = fingerprint(&s, &a, &act);
+    if h != row.hash {
+        diesel::update(ws::workload_syscalls.find((ns, kind, name)))
+            .set((
+                ws::hash.eq(&h),
+                ws::updated_at.eq(chrono::Utc::now().naive_utc()),
+            ))
+            .execute(conn)?;
+    }
+    Ok(())
+}
+
+/// `PUT /seccomp/profiles/{namespace}/{kind}/{name}/override` — set (or
+/// replace) the operator override for a workload. Gated behind
+/// `SECCOMP_OVERRIDES_ENABLED`.
+#[actix_web::put("/seccomp/profiles/{namespace}/{kind}/{name}/override")]
+pub async fn put_seccomp_override(
+    req: actix_web::HttpRequest,
+    pool: web::Data<DbPool>,
+    path: web::Path<(String, String, String)>,
+    body: web::Json<OverrideInput>,
+) -> actix_web::Result<impl Responder> {
+    if !overrides_enabled() {
+        return Ok(HttpResponse::NotFound().body("seccomp overrides are not enabled"));
+    }
+    let (namespace, kind, name) = path.into_inner();
+    let OverrideInput {
+        add,
+        remove,
+        default_action,
+        note,
+        revision,
+        dry_run,
+    } = body.into_inner();
+    let actor = actor_from(&req);
+
+    // Pure validation, before touching the DB.
+    if add.len() > MAX_OVERRIDE_LIST || remove.len() > MAX_OVERRIDE_LIST {
+        return Err(actix_web::error::ErrorBadRequest(format!(
+            "add/remove lists are capped at {MAX_OVERRIDE_LIST} entries"
+        )));
+    }
+    for s in add.iter().chain(remove.iter()) {
+        if !valid_syscall_name(s) {
+            return Err(actix_web::error::ErrorBadRequest(format!(
+                "{s:?} is not a valid syscall name (expected ^[a-z][a-z0-9_]{{0,63}}$)"
+            )));
+        }
+    }
+    let add: BTreeSet<String> = add.into_iter().collect();
+    let remove: BTreeSet<String> = remove.into_iter().collect();
+    let overlap: Vec<&String> = add.intersection(&remove).collect();
+    if !overlap.is_empty() {
+        return Err(actix_web::error::ErrorBadRequest(format!(
+            "these syscalls are in both add and remove: {overlap:?}"
+        )));
+    }
+    if let Some(a) = default_action.as_deref().filter(|a| !a.is_empty()) {
+        validated_action(a)?;
+    }
+    let default_action = default_action.filter(|a| !a.is_empty());
+    if let Some(n) = &note {
+        if n.len() > 2000 {
+            return Err(actix_web::error::ErrorBadRequest(
+                "note is capped at 2000 chars",
+            ));
+        }
+    }
+
+    info!(%namespace, %kind, %name, %actor, dry_run, "put seccomp override");
+
+    let outcome = web::block(move || {
+        let mut conn = pool.get()?;
+        conn.transaction(|conn| {
+            apply_override(
+                conn,
+                &namespace,
+                &kind,
+                &name,
+                add,
+                remove,
+                default_action,
+                note,
+                revision,
+                &actor,
+                dry_run,
+            )
+        })
+    })
+    .await?
+    .map_err(actix_web::error::ErrorInternalServerError)?;
+
+    Ok(match outcome {
+        OverrideWrite::Ok {
+            revision,
+            hash,
+            warnings,
+            profile,
+        } => HttpResponse::Ok().json(serde_json::json!({
+            "dryRun": dry_run,
+            "revision": revision,
+            "hash": hash,
+            "warnings": warnings,
+            "profile": profile,
+        })),
+        OverrideWrite::NoObservedProfile => HttpResponse::NotFound()
+            .body("no observed profile for that workload yet — record syscalls first"),
+        OverrideWrite::RevisionConflict { current } => HttpResponse::Conflict()
+            .json(serde_json::json!({ "error": "revision conflict", "currentRevision": current })),
+    })
+}
+
+/// `DELETE /seccomp/profiles/{namespace}/{kind}/{name}/override` — drop
+/// the override; the effective profile falls back to the observed set
+/// and the hash reverts (the pre-override file, never deleted, is valid
+/// again).
+#[actix_web::delete("/seccomp/profiles/{namespace}/{kind}/{name}/override")]
+pub async fn delete_seccomp_override(
+    req: actix_web::HttpRequest,
+    pool: web::Data<DbPool>,
+    path: web::Path<(String, String, String)>,
+) -> actix_web::Result<impl Responder> {
+    if !overrides_enabled() {
+        return Ok(HttpResponse::NotFound().body("seccomp overrides are not enabled"));
+    }
+    let (namespace, kind, name) = path.into_inner();
+    let actor = actor_from(&req);
+    info!(%namespace, %kind, %name, %actor, "delete seccomp override");
+
+    let deleted = web::block(move || {
+        use schema::workload_seccomp_overrides::dsl as o;
+        let mut conn = pool.get()?;
+        conn.transaction(|conn| -> Result<bool, DbError> {
+            let n = diesel::delete(o::workload_seccomp_overrides.find((&namespace, &kind, &name)))
+                .execute(conn)?;
+            if n > 0 {
+                audit_override(
+                    conn,
+                    &namespace,
+                    &kind,
+                    &name,
+                    "delete",
+                    serde_json::json!({}),
+                    &actor,
+                )?;
+                rehash_workload(conn, &namespace, &kind, &name)?;
+            }
+            Ok(n > 0)
+        })
+    })
+    .await?
+    .map_err(actix_web::error::ErrorInternalServerError)?;
+
+    Ok(if deleted {
+        HttpResponse::Ok().json(serde_json::json!({ "deleted": true }))
+    } else {
+        HttpResponse::NotFound().body("no override for that workload")
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -588,44 +1181,43 @@ mod tests {
         items.iter().map(|s| s.to_string()).collect()
     }
 
+    /// fingerprint with a fixed action, for the set/arch-focused tests.
+    fn fp(syscalls: &[&str], arches: &[&str]) -> String {
+        fingerprint(&set(syscalls), &set(arches), "SCMP_ACT_LOG")
+    }
+
     #[test]
     fn fingerprint_is_order_independent_and_stable() {
-        let a = fingerprint(
-            &set(&["read", "write", "openat"]),
-            &set(&["SCMP_ARCH_X86_64"]),
-        );
-        let b = fingerprint(
-            &set(&["openat", "read", "write"]),
-            &set(&["SCMP_ARCH_X86_64"]),
-        );
-        assert_eq!(a, b);
-        // Pinned: this value must not move across builds, or every
-        // distributed profile filename changes and app-team references break.
-        assert_eq!(
-            a,
-            fingerprint(
-                &set(&["write", "openat", "read"]),
-                &set(&["SCMP_ARCH_X86_64"])
-            )
-        );
+        let a = fp(&["read", "write", "openat"], &["SCMP_ARCH_X86_64"]);
+        assert_eq!(a, fp(&["openat", "read", "write"], &["SCMP_ARCH_X86_64"]));
+        assert_eq!(a, fp(&["write", "openat", "read"], &["SCMP_ARCH_X86_64"]));
         assert_eq!(a.len(), 16);
     }
 
     #[test]
     fn fingerprint_changes_when_the_set_grows() {
-        let before = fingerprint(&set(&["read", "write"]), &set(&["SCMP_ARCH_X86_64"]));
-        let after = fingerprint(
-            &set(&["read", "write", "mmap"]),
-            &set(&["SCMP_ARCH_X86_64"]),
+        assert_ne!(
+            fp(&["read", "write"], &["SCMP_ARCH_X86_64"]),
+            fp(&["read", "write", "mmap"], &["SCMP_ARCH_X86_64"])
         );
-        assert_ne!(before, after);
     }
 
     #[test]
     fn fingerprint_distinguishes_arch() {
-        let x = fingerprint(&set(&["read"]), &set(&["SCMP_ARCH_X86_64"]));
-        let arm = fingerprint(&set(&["read"]), &set(&["SCMP_ARCH_ARM64"]));
-        assert_ne!(x, arm);
+        assert_ne!(
+            fp(&["read"], &["SCMP_ARCH_X86_64"]),
+            fp(&["read"], &["SCMP_ARCH_ARM64"])
+        );
+    }
+
+    #[test]
+    fn fingerprint_distinguishes_default_action() {
+        let base = set(&["read", "write"]);
+        let arch = set(&["SCMP_ARCH_X86_64"]);
+        assert_ne!(
+            fingerprint(&base, &arch, "SCMP_ACT_LOG"),
+            fingerprint(&base, &arch, "SCMP_ACT_ERRNO")
+        );
     }
 
     #[test]
@@ -676,12 +1268,90 @@ mod tests {
 
     #[test]
     fn validated_action_rejects_garbage() {
-        assert_eq!(validated_action(None).unwrap(), "SCMP_ACT_LOG");
+        assert!(validated_action("SCMP_ACT_ERRNO").is_ok());
+        assert!(validated_action("SCMP_ACT_LOG").is_ok());
+        assert!(validated_action("rm -rf").is_err());
+    }
+
+    #[test]
+    fn valid_syscall_name_rules() {
+        for ok in ["read", "openat2", "clock_gettime", "io_uring_enter"] {
+            assert!(valid_syscall_name(ok), "{ok} should be valid");
+        }
+        for bad in [
+            "",
+            "OpenAt",
+            "openat ",
+            "openat;",
+            "2read",
+            "-x",
+            "a".repeat(65).as_str(),
+        ] {
+            assert!(!valid_syscall_name(bad), "{bad:?} should be rejected");
+        }
+    }
+
+    #[test]
+    fn effective_sets_applies_add_remove_and_action() {
+        let observed = set(&["read", "write", "openat"]);
+        let arches = set(&["x86_64"]);
+        let ovr = OverrideRow {
+            pod_namespace: "p".into(),
+            workload_kind: "Deployment".into(),
+            workload_name: "w".into(),
+            add_syscalls: "mmap,munmap".into(),
+            remove_syscalls: "openat".into(),
+            default_action: Some("SCMP_ACT_ERRNO".into()),
+            note: None,
+            updated_by: "alice".into(),
+            updated_at: chrono::NaiveDateTime::default(),
+            revision: 1,
+        };
+        let (s, a, act) = effective_sets(&observed, &arches, Some(&ovr));
         assert_eq!(
-            validated_action(Some("SCMP_ACT_ERRNO")).unwrap(),
-            "SCMP_ACT_ERRNO"
+            s,
+            set(&["read", "write", "mmap", "munmap"]),
+            "openat removed, mmap/munmap added"
         );
-        assert!(validated_action(Some("rm -rf")).is_err());
+        assert_eq!(a, arches);
+        assert_eq!(act, "SCMP_ACT_ERRNO");
+    }
+
+    #[test]
+    fn effective_sets_no_override_is_observed_plus_log() {
+        let observed = set(&["read"]);
+        let (s, _, act) = effective_sets(&observed, &set(&["x86_64"]), None);
+        assert_eq!(s, observed);
+        assert_eq!(act, "SCMP_ACT_LOG");
+    }
+
+    #[test]
+    fn override_block_serialises_with_camelcase() {
+        let o = OverrideRow {
+            pod_namespace: "p".into(),
+            workload_kind: "Deployment".into(),
+            workload_name: "w".into(),
+            add_syscalls: "mmap".into(),
+            remove_syscalls: "".into(),
+            default_action: Some("SCMP_ACT_ERRNO".into()),
+            note: Some("weekly cron".into()),
+            updated_by: "alice".into(),
+            updated_at: chrono::NaiveDateTime::default(),
+            revision: 3,
+        };
+        let v = serde_json::to_value(OverrideBlock::from(&o)).unwrap();
+        assert_eq!(v["add"], serde_json::json!(["mmap"]));
+        assert_eq!(v["remove"], serde_json::json!([]));
+        assert_eq!(v["defaultAction"], "SCMP_ACT_ERRNO");
+        assert_eq!(v["updatedBy"], "alice");
+        assert_eq!(v["revision"], 3);
+    }
+
+    #[test]
+    fn override_input_defaults() {
+        let got: OverrideInput = serde_json::from_str("{}").unwrap();
+        assert!(got.add.is_empty() && got.remove.is_empty());
+        assert!(got.revision.is_none() && !got.dry_run);
     }
 
     #[test]
@@ -705,17 +1375,34 @@ mod tests {
         assert_eq!(Distribution::compute(6, 5).state, "Ready");
     }
 
-    #[test]
-    fn profile_summary_carries_snippet_and_readiness() {
+    fn effective_fixture(
+        syscalls: &str,
+        arches: &str,
+        hash: &str,
+        ovr: Option<OverrideRow>,
+    ) -> Effective {
         let row = WorkloadSyscallsRow {
             pod_namespace: "prod".into(),
             workload_kind: "Deployment".into(),
             workload_name: "web".into(),
-            syscalls: "read,write".into(),
-            arches: "x86_64".into(),
-            hash: "abc123".into(),
+            syscalls: syscalls.into(),
+            arches: arches.into(),
+            hash: hash.into(),
             updated_at: chrono::NaiveDateTime::default(),
         };
+        let (s, a, act) = effective_sets(&split_set(syscalls), &split_set(arches), ovr.as_ref());
+        Effective {
+            row,
+            syscalls: s,
+            arches: a,
+            default_action: act,
+            ovr,
+        }
+    }
+
+    #[test]
+    fn profile_summary_carries_snippet_and_readiness() {
+        let eff = effective_fixture("read,write", "x86_64", "abc123", None);
         let index = DistributionIndex {
             path_counts: HashMap::from([(
                 "kguardian/prod/deployment-web-abc123.json".to_string(),
@@ -723,10 +1410,11 @@ mod tests {
             )]),
             total_nodes: 3,
         };
-        let s = ProfileSummary::build(&row, &index);
-        let v = serde_json::to_value(&s).unwrap();
+        let v = serde_json::to_value(ProfileSummary::build(&eff, &index)).unwrap();
         assert_eq!(v["distribution"]["state"], "Ready");
         assert_eq!(v["distribution"]["ready"], 3);
+        assert_eq!(v["defaultAction"], "SCMP_ACT_LOG");
+        assert_eq!(v["override"], serde_json::Value::Null);
         assert_eq!(
             v["recommendedSnippet"]["seccompProfile"]["localhostProfile"],
             "kguardian/prod/deployment-web-abc123.json"
@@ -735,6 +1423,34 @@ mod tests {
             v["recommendedSnippet"]["seccompProfile"]["type"],
             "Localhost"
         );
+    }
+
+    #[test]
+    fn profile_summary_reflects_the_effective_set_and_override() {
+        let ovr = OverrideRow {
+            pod_namespace: "prod".into(),
+            workload_kind: "Deployment".into(),
+            workload_name: "web".into(),
+            add_syscalls: "mmap".into(),
+            remove_syscalls: "write".into(),
+            default_action: Some("SCMP_ACT_ERRNO".into()),
+            note: Some("scanner missed mmap".into()),
+            updated_by: "alice".into(),
+            updated_at: chrono::NaiveDateTime::default(),
+            revision: 2,
+        };
+        let eff = effective_fixture("read,write", "x86_64", "deadbeef", Some(ovr));
+        let index = DistributionIndex {
+            path_counts: HashMap::new(),
+            total_nodes: 4,
+        };
+        let v = serde_json::to_value(ProfileSummary::build(&eff, &index)).unwrap();
+        assert_eq!(v["syscallCount"], 2); // read + mmap (write removed)
+        assert_eq!(v["defaultAction"], "SCMP_ACT_ERRNO");
+        assert_eq!(v["distribution"]["state"], "Pending");
+        assert_eq!(v["override"]["add"], serde_json::json!(["mmap"]));
+        assert_eq!(v["override"]["remove"], serde_json::json!(["write"]));
+        assert_eq!(v["override"]["revision"], 2);
     }
 
     #[test]

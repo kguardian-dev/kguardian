@@ -140,6 +140,39 @@ diesel::table! {
     }
 }
 
+diesel::table! {
+    // Operator adjustments to a generated seccomp profile, kept separate
+    // from the observed union so the ingest recompute can't clobber them.
+    // Effective set = (observed ∪ add_syscalls) \ remove_syscalls.
+    // `revision` is optimistic concurrency. See src/seccomp.rs (Phase 6).
+    workload_seccomp_overrides (pod_namespace, workload_kind, workload_name) {
+        pod_namespace -> Varchar,
+        workload_kind -> Varchar,
+        workload_name -> Varchar,
+        add_syscalls -> Text,
+        remove_syscalls -> Text,
+        default_action -> Nullable<Varchar>,
+        note -> Nullable<Text>,
+        updated_by -> Varchar,
+        updated_at -> Timestamp,
+        revision -> Int4,
+    }
+}
+
+diesel::table! {
+    // Append-only audit trail of override writes.
+    seccomp_override_audit (id) {
+        id -> Int8,
+        pod_namespace -> Varchar,
+        workload_kind -> Varchar,
+        workload_name -> Varchar,
+        op -> Varchar,
+        diff -> Jsonb,
+        updated_by -> Varchar,
+        at -> Timestamp,
+    }
+}
+
 diesel::allow_tables_to_appear_in_same_query!(
     pod_details,
     pod_traffic,

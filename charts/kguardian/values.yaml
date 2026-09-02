@@ -189,6 +189,14 @@ seccomp:
   kubeletRoot: /var/lib/kubelet
   # -- Seconds between distribution passes. Empty uses the controller default (30).
   distributeIntervalSeconds: ""
+  overrides:
+    # -- Allow operators to edit a generated profile (add/remove syscalls, set
+    # defaultAction) via `PUT /seccomp/profiles/<ns>/<kind>/<name>/override`.
+    # Off by default — a bad edit denies a syscall the app makes and breaks it
+    # on the next restart. The edit is a separate layer; the observed union
+    # underneath keeps accruing. Every write is recorded with the actor from
+    # the `X-Kguardian-Actor` header.
+    enabled: false
 
 broker:
   # -- Number of broker replicas to deploy

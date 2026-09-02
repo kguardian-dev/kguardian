@@ -495,6 +495,24 @@ A `409` prompts a reload-and-reapply.
   each rejected with a message that says what to fix.
 - Every override write is in `seccomp_override_audit` with the token subject.
 
+#### As built
+
+Shipped as specced, with these deviations:
+
+- **Syscall-name validation is format-only** (`^[a-z][a-z0-9_]{0,63}$`), not a
+  real syscall table — the broker gains no `libseccomp` C dependency. An
+  unknown-but-well-formed name is accepted silently; a static name table stays a
+  follow-up.
+- **`updated_by` comes from an `X-Kguardian-Actor` header**, not a token
+  subject — the broker token is a shared secret with no identity. Absent ⇒
+  `"unknown"`.
+- After an override write the broker calls a lighter **`rehash_workload`** (just
+  recomputes the effective hash on `workload_syscalls`) rather than the full
+  `recompute_workload` pod-union query.
+- **Frontend not done** — the `PUT`/`DELETE` API, gating, validation, warnings
+  and audit are complete; the editor UI is the remaining piece, consistent with
+  the Phase 4 frontend deferral.
+
 ---
 
 ## Risks & mitigations

@@ -27,7 +27,8 @@ pub use get::{
 };
 pub use schema::{pod_details, pod_traffic};
 pub use seccomp::{
-    get_seccomp_profile, get_seccomp_profile_file, list_seccomp_profiles, post_seccomp_node_status,
+    delete_seccomp_override, get_seccomp_profile, get_seccomp_profile_file, list_seccomp_profiles,
+    post_seccomp_node_status, put_seccomp_override,
 };
 
 #[cfg(test)]
