@@ -5,10 +5,11 @@ use actix_web::middleware::from_fn;
 use actix_web::{get, web, App, HttpResponse, HttpServer};
 use api::{
     add_node_facts, add_pod_details, add_pods_batch, add_pods_syscalls, add_svc_details,
-    establish_connection, get_audit_verdicts, get_pod_by_ip, get_pod_by_name, get_pod_details,
-    get_pod_syscall_name, get_pod_traffic, get_pod_traffic_name, get_pods_by_node, get_svc_by_ip,
-    get_svc_details, get_version, mark_pod_dead, set_statement_timeout, spawn_retention,
-    spawn_version_check, AuditClient, StatementTimeoutCustomizer, VersionCheckState,
+    establish_connection, get_audit_verdicts, get_cluster_environment, get_pod_by_ip,
+    get_pod_by_name, get_pod_details, get_pod_syscall_name, get_pod_traffic, get_pod_traffic_name,
+    get_pods_by_node, get_svc_by_ip, get_svc_details, get_version, mark_pod_dead,
+    set_statement_timeout, spawn_retention, spawn_version_check, AuditClient,
+    StatementTimeoutCustomizer, VersionCheckState,
 };
 
 use diesel::r2d2;
@@ -362,6 +363,7 @@ async fn main() -> Result<(), std::io::Error> {
             .service(mark_pod_dead)
             .service(add_node_facts)
             .service(get_version)
+            .service(get_cluster_environment)
             .service(health_check)
             .service(metrics)
     })

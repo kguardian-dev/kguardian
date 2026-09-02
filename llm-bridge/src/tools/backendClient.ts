@@ -58,3 +58,33 @@ export function auditVerdictsQuery(args: {
   const s = q.toString();
   return s ? `?${s}` : "";
 }
+
+// --- cluster environment -------------------------------------------
+
+/**
+ * The cluster's detected CNI from GET /cluster/environment, cached
+ * (success ~5min, failure ~60s). Every failure — older broker 404,
+ * timeout, junk — resolves to "unknown", which callers MUST treat as
+ * "no signal, behave as before". Never throws.
+ */
+const CNI_TTL_OK_MS = 5 * 60_000;
+const CNI_TTL_ERR_MS = 60_000;
+let cniCache: { value: string; expires: number } | null = null;
+
+export async function clusterCni(): Promise<string> {
+  const now = Date.now();
+  if (cniCache && now < cniCache.expires) return cniCache.value;
+  try {
+    const env = (await brokerGetJSON("/cluster/environment")) as { cni?: unknown };
+    const cni = typeof env.cni === "string" && env.cni.length > 0 ? env.cni : "unknown";
+    cniCache = { value: cni, expires: now + CNI_TTL_OK_MS };
+  } catch {
+    cniCache = { value: "unknown", expires: now + CNI_TTL_ERR_MS };
+  }
+  return cniCache.value;
+}
+
+/** Test hook: clear the CNI cache. */
+export function resetClusterCniCache(): void {
+  cniCache = null;
+}

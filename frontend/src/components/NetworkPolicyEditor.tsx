@@ -5,6 +5,8 @@ import type { SeccompAction } from '../types/seccompProfile';
 import { policyToYAML } from '../utils/networkPolicyGenerator';
 import { ciliumPolicyToYAML } from '../utils/ciliumPolicyGenerator';
 import { profileToYAML } from '../utils/seccompProfileGenerator';
+import { useClusterEnvironment } from '../hooks/useClusterEnvironment';
+import { CniMismatchNotice } from './PolicyEditor/CniMismatchNotice';
 import { SECCOMP_ACTIONS, ARCHITECTURES, SECCOMP_ACTION_DESCRIPTIONS } from '../types/seccompProfile';
 import { PolicyHeader } from './PolicyEditor';
 import { Modal } from './ui/Modal';
@@ -27,6 +29,17 @@ interface NetworkPolicyEditorProps {
 const NetworkPolicyEditor: React.FC<NetworkPolicyEditorProps> = ({ isOpen, onClose, pod }) => {
   const [policyType, setPolicyType] = useState<PolicyType>('network');
   const [yamlView, setYamlView] = useState(true); // Default to YAML view
+
+  // Align with the cluster CNI (issue #1413): when the detected CNI is
+  // real and not cilium, badge the Cilium tab and show a notice on it.
+  // 'unknown' (no facts yet, older broker, non-annotating CNI) keeps
+  // the editor pixel-identical to its pre-detection behavior, and the
+  // async fetch never gates rendering.
+  const { cni } = useClusterEnvironment();
+  const cniMismatch = cni !== 'unknown' && cni !== 'cilium' ? cni : null;
+  const ciliumWarning = cniMismatch
+    ? `Cluster CNI detected as ${cniMismatch} — CiliumNetworkPolicy is likely not applicable here`
+    : null;
 
   // Network policy management
   const {
@@ -158,7 +171,10 @@ const NetworkPolicyEditor: React.FC<NetworkPolicyEditorProps> = ({ isOpen, onClo
             onClose={onClose}
             podName={pod.pod.pod_name}
             podNamespace={pod.pod.pod_namespace}
+            ciliumWarning={ciliumWarning}
           />
+
+          {policyType === 'cilium' && cniMismatch && <CniMismatchNotice cni={cniMismatch} />}
 
           {/* Content */}
           <div className="flex-1 overflow-hidden flex">

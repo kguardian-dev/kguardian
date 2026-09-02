@@ -91,3 +91,26 @@ export interface AuditVerdict {
   observed_at: string; // ISO 8601
   verdict: AuditVerdictKind | string;
 }
+
+/**
+ * Coarse cluster-environment aggregates from the broker (GET
+ * /cluster/environment, backed by controller-reported node facts).
+ * 'unknown' anywhere means "no signal — behave exactly as before".
+ */
+export interface ClusterEnvironment {
+  cni: string;
+  ip_family: string;
+  provider: string;
+  distro: string;
+  node_os: string;
+  nodes: number;
+}
+
+export const UNKNOWN_CLUSTER_ENVIRONMENT: ClusterEnvironment = {
+  cni: 'unknown',
+  ip_family: 'unknown',
+  provider: 'unknown',
+  distro: 'unknown',
+  node_os: 'unknown',
+  nodes: 0,
+};
