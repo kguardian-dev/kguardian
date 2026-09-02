@@ -135,12 +135,34 @@ is relative under `<kubelet-root>/seccomp/`; segments are DNS-1123-safe, no
 `..`. A changed set ⇒ a new file beside the old one; old files are never
 touched, so rollback is just pointing back at the previous hash.
 
+**One file per workload, not per syscall.** Every observed syscall for a
+workload goes into the single `syscalls[0].names` array of that one JSON. The
+hash is over the whole set. Multiple files on a node accumulate only as the
+*set grows over time* — each first-sighting of a new syscall changes the hash
+and writes a new file, and old files are never deleted:
+
+| moment | observed set | files on the node for this workload |
+|--------|--------------|-------------------------------------|
+| pod starts, 60 syscalls seen | 60 | `…-<hashA>.json` |
+| +5 min, 3 new syscalls | 63 | `…-<hashA>.json`, `…-<hashB>.json` |
+| +1 h, 1 rare-path syscall | 64 | `…-<hashA>`, `…-<hashB>`, `…-<hashC>` |
+| steady state | 64 | no new files |
+
+So the file count is bounded by "number of times the set grew" — a handful in
+practice, since the set converges within minutes — not by syscall count, and
+never by replica count (all replicas fold into one aggregate). Each file is
+~2 KB. GC of superseded files is a deliberate non-goal for v1 (documented).
+
 **Decision:** content hash in the filename; the app team pins a specific hash.
 Implemented as a 16-hex FNV-1a-64 digest (`broker/src/seccomp.rs::fingerprint`)
 rather than the sha256 originally sketched — the input is broker-generated and
 never adversarial, and a crypto-hash crate would be a new dependency chain in
 the broker for no security benefit. It must stay stable across broker builds
 (it names a file app teams pin), which rules out `std::hash::DefaultHasher`.
+The hash covers the syscall set only, **not** `defaultAction` — the distributed
+file is always the `SCMP_ACT_LOG` variant; `?action=` on the API renders an
+enforcing copy for inspection but nothing yet places that on a node (follow-up:
+a `seccomp.distributeAction` value).
 
 ### D5 — Distribution runs inside the controller DaemonSet, gated off by default
 

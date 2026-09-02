@@ -140,25 +140,41 @@ removed, so rolling back is just pointing at the previous hash.
 
 ## Promote from audit to enforcement
 
-The generated profile is served with `defaultAction: SCMP_ACT_LOG` — it logs
-disallowed syscalls to the kernel audit log but blocks nothing. Run in this mode
-first, confirm nothing your workload needs is being logged as denied, then fetch
-the enforcing version:
+The distributed profile files use `defaultAction: SCMP_ACT_LOG` — disallowed
+syscalls are logged to the kernel audit log but nothing is blocked. Run in this
+mode first and confirm the audit log shows nothing your workload actually needs
+being denied.
 
 ```bash
-# one workload, enforcing
+# inspect what the enforcing profile would contain
 wget -qO- 'localhost:9090/seccomp/profiles/prod/Deployment/web?action=SCMP_ACT_ERRNO' \
   | jq .profile
 ```
 
 `?action=` accepts `SCMP_ACT_LOG` (default), `SCMP_ACT_ERRNO`, or `SCMP_ACT_KILL`.
-A too-tight profile breaks the workload on its **next restart**, not immediately —
-so promote deliberately.
+
+<Warning>
+`?action=` only changes what the **API renders** — the file the distributor
+writes to nodes is always `SCMP_ACT_LOG`. Actually enforcing on a node currently
+means placing the `SCMP_ACT_ERRNO` document there yourself (or via your own
+pipeline). A `seccomp.distributeAction` value to switch this cluster-wide is a
+planned follow-up. A too-tight profile breaks the workload on its **next
+restart**, not immediately — so promote deliberately.
+</Warning>
 
 ---
 
 ## Things to know
 
+- **One file per workload.** Every observed syscall goes into that one profile's
+  `names` array — 100 syscalls is one ~2&nbsp;KB file, not 100 files. Extra files
+  on a node come only from the set *growing over time*: each first-sighting of a
+  new syscall writes a new hash-named file next to the old one. This settles
+  within minutes.
+- **The set only grows.** kguardian keeps a monotonic union — if a workload
+  stops making a syscall, it stays in the profile. A profile that narrowed
+  because a replica scaled away would start denying calls the app still makes.
+  Shrinking a profile is a manual reset today.
 - **Per-pod, not per-container.** Attribution is by network namespace, which all
   containers in a pod share. An injected sidecar (a service-mesh proxy) adds its
   syscalls to the workload's profile. The profile is a safe superset; per-container
