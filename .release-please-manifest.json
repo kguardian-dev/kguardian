@@ -4,6 +4,6 @@
   "frontend": "1.13.2",
   "advisor": "1.8.0",
   "charts/kguardian": "1.19.2",
-  "llm-bridge": "1.8.0",
+  "llm-bridge": "1.8.1",
   "evaluator": "0.4.0"
 }
