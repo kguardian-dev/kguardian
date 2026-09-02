@@ -141,17 +141,32 @@ never adversarial, and a crypto-hash crate would be a new dependency chain in
 the broker for no security benefit. It must stay stable across broker builds
 (it names a file app teams pin), which rules out `std::hash::DefaultHasher`.
 
-### D5 — Distribution is a separate, minimal DaemonSet
+### D5 — Distribution runs inside the controller DaemonSet, gated off by default
 
-A new `profile-distributor` DaemonSet with a hostPath mount of
-`{{ .Values.seccomp.kubeletRoot }}/seccomp` (default `/var/lib/kubelet/seccomp`,
-configurable exactly like `containerdSockPath` already is). It polls the broker,
-writes files atomically (temp + rename), never deletes, and POSTs per-node
-status. It carries no BPF, no host PID, no privileged flag — so a distribution
-bug cannot take down tracing.
+**Originally** planned as a separate `profile-distributor` DaemonSet, for blast
+radius. **Revised during implementation:** a standalone component means a new
+Go module, Dockerfile, two-arch image builds, release-please wiring and chart
+plumbing — a large cost for a v1 feature that ships disabled. The controller is
+already a DaemonSet on every node, already has the configurable-host-path
+pattern (`containerdSockPath`), and already runs a periodic broker-polling task
+(`send_syscall_cache_periodically`).
 
-**Decision:** its own DaemonSet, not folded into the controller. Blast radius
-over convenience.
+So the distributor is a `seccomp_distributor` tokio task in the controller
+(`controller/src/seccomp_distributor.rs`), joined alongside the eBPF tasks but
+**never propagating an error** — a failed pass logs and retries, a missing
+seccomp root or broker outage leaves it inactive, and neither restarts the
+controller. It is inert unless `SECCOMP_DISTRIBUTE=true` (Helm:
+`seccomp.distribute=true`), which also adds the hostPath mount of
+`{{ .Values.seccomp.kubeletRoot }}/seccomp` (default `/var/lib/kubelet`). Files
+are written atomically (temp + `rename`), never deleted; a broker-supplied path
+is validated (`safe_relative_path`) before being joined onto the host root.
+
+**Decision:** in the controller, behind a default-off flag. The reconcile logic
+is self-contained and lifts out to a standalone component later if the blast-radius
+concern outweighs the scaffolding cost.
+
+Not yet done: per-node status reporting (moved to Phase 4, which adds the
+readiness surface and the broker endpoint it would POST to).
 
 ### D6 — Readiness is a first-class signal
 
@@ -243,29 +258,31 @@ workload.
 - A Deployment's profile equals the union of its pods' syscalls.
 - Hash is stable while the set is stable and changes only when it grows.
 
-### Phase 3 — Distributor DaemonSet
+### Phase 3 — On-node distribution
 
 **Goal:** every profile the broker knows about exists as a file on every node,
 idempotently.
 
-**Changes**
+**Changes** (see D5 for why this landed in the controller, not a new component)
 
-- *advisor* — new Go binary `profile-distributor` in the advisor module (reuses
-  its k8s + broker client code).
-- *chart* — `templates/distributor/daemonset.yaml` + RBAC; values
-  `seccomp.enabled`, `seccomp.kubeletRoot`; high `priorityClassName`.
-- *advisor* — loop: list profiles → for each missing local `hash`, fetch JSON,
-  write under `kguardian/<ns>/` via temp + `rename(2)` → POST
-  `/seccomp/node-status`.
-- *advisor* — preflight: assert the seccomp dir exists and sits on a mount; log
-  loudly if the kubelet root looks wrong.
+- *controller* — `seccomp_distributor` task: poll `GET /seccomp/profiles`, and
+  for each entry whose `<root>/<localhostProfile>` is absent, fetch
+  `GET /seccomp/profile-file/...` and write it atomically (temp + `rename`).
+  Never deletes. `safe_relative_path` rejects `..` / absolute paths from the
+  broker response before joining onto the host root. Best-effort: errors log
+  and retry, misconfiguration leaves it inactive, nothing restarts the pod.
+- *controller* — `api_get_bytes` broker GET helper (mirrors `api_post_call`).
+- *chart* — `seccomp.distribute` / `seccomp.kubeletRoot` /
+  `seccomp.distributeIntervalSeconds` values; when `distribute` is true the
+  controller DaemonSet gains the `SECCOMP_*` env and a `DirectoryOrCreate`
+  hostPath mount of `<kubeletRoot>/seccomp`.
 
 **Done when**
 
 - A throwaway pod referencing a distributed profile starts cleanly on every
-  node.
+  node. *(manual — needs a cluster)*
 - Distributor restart re-writes nothing; broker outage retries without data
-  loss.
+  loss. *(unit-covered: `write_atomic`, `safe_relative_path`, disabled path)*
 
 ### Phase 4 — Readiness surface & docs
 
