@@ -129,12 +129,17 @@ periodic reconcile.
 kguardian/<namespace>/<kind>-<name>-<hash>.json
 ```
 
-`hash` is the first 8 hex of `sha256(sorted(syscalls) + "\n" + sorted(arches))`.
-The path is relative under `<kubelet-root>/seccomp/`; segments are DNS-1123-safe,
-no `..`. A changed set ⇒ a new file beside the old one; old files are never
+`hash` is a content fingerprint of `(sorted syscalls, sorted arches)`. The path
+is relative under `<kubelet-root>/seccomp/`; segments are DNS-1123-safe, no
+`..`. A changed set ⇒ a new file beside the old one; old files are never
 touched, so rollback is just pointing back at the previous hash.
 
 **Decision:** content hash in the filename; the app team pins a specific hash.
+Implemented as a 16-hex FNV-1a-64 digest (`broker/src/seccomp.rs::fingerprint`)
+rather than the sha256 originally sketched — the input is broker-generated and
+never adversarial, and a crypto-hash crate would be a new dependency chain in
+the broker for no security benefit. It must stay stable across broker builds
+(it names a file app teams pin), which rules out `std::hash::DefaultHasher`.
 
 ### D5 — Distribution is a separate, minimal DaemonSet
 

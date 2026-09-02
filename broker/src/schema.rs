@@ -97,6 +97,23 @@ diesel::table! {
     }
 }
 
+diesel::table! {
+    // Per-workload monotonic union of observed syscalls, keyed on the
+    // stable (namespace, kind, name) identity. `syscalls` / `arches`
+    // are comma-joined sorted sets; `hash` is a content fingerprint
+    // that names the generated seccomp profile. See the migration and
+    // src/seccomp.rs.
+    workload_syscalls (pod_namespace, workload_kind, workload_name) {
+        pod_namespace -> Varchar,
+        workload_kind -> Varchar,
+        workload_name -> Varchar,
+        syscalls -> Text,
+        arches -> Text,
+        hash -> Varchar,
+        updated_at -> Timestamp,
+    }
+}
+
 diesel::allow_tables_to_appear_in_same_query!(
     pod_details,
     pod_traffic,

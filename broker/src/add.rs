@@ -605,6 +605,9 @@ pub fn create_pod_syscalls(
     use schema::pod_syscalls::dsl::*;
 
     conn.transaction(|conn| {
+        // pod_names touched by this batch — used after the loop to
+        // recompute the affected workloads' seccomp aggregates.
+        let mut touched: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
         for pod_syscall in w.iter() {
             // Skip entries with empty/whitespace pod_name — same
             // defense as the /pod/spec guard (commit 66090aed) and
@@ -622,6 +625,7 @@ pub fn create_pod_syscalls(
                 );
                 continue;
             }
+            touched.insert(pod_syscall.pod_name.clone());
             debug!("storing pod_syscalls entry for {:?}", pod_syscall.pod_name);
 
             let existing_row = pod_syscall.get_row(conn)?;
@@ -651,6 +655,17 @@ pub fn create_pod_syscalls(
                 "Success: pod {:?} processed in pod_syscalls table",
                 pod_syscall.pod_name
             );
+        }
+
+        // Roll the new syscalls up into the per-workload aggregates that
+        // seccomp profiles are generated from. Same transaction as the
+        // ingest so a reader never sees pod_syscalls updated without the
+        // matching workload_syscalls. A pod whose pod_details row has no
+        // resolved workload yet contributes to nothing here; its next
+        // batch (every ~10s from the controller) will pick it up once
+        // attribution lands.
+        for (ns, kind, name) in crate::seccomp::affected_workloads(conn, &touched)? {
+            crate::seccomp::recompute_workload(conn, &ns, &kind, &name)?;
         }
 
         Ok(())
