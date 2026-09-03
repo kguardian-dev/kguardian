@@ -15,6 +15,7 @@ export default {
         'hubble-success': '#10B981',
         'hubble-warning': '#F59E0B',
         'hubble-error': '#EF4444',
+        'hubble-info': '#0D9488',
       },
     },
   },

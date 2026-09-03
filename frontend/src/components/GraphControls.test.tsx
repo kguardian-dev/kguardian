@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { afterEach, expect, test, vi } from 'vitest';
 import { cleanup, fireEvent, render, screen } from '@testing-library/react';
-import { DAEMONSET_TOGGLE_TOOLTIP, GraphControls } from './GraphControls';
+import { DAEMONSET_ACTIVE, DAEMONSET_TOGGLE_TOOLTIP, EXTERNAL_ACTIVE, GraphControls, TRAFFIC_ACTIVE } from './GraphControls';
 
 afterEach(cleanup);
 
@@ -32,6 +32,28 @@ test('when on, the count is shown without the hidden hint', () => {
   const btn = screen.getByTitle(DAEMONSET_TOGGLE_TOOLTIP);
   expect(btn.textContent).toBe('DaemonSets (5)');
   expect(btn.getAttribute('aria-pressed')).toBe('true');
+});
+
+test('each toggle has its own hue: Traffic indigo, External amber, DaemonSets teal', () => {
+  render(<GraphControls {...props({ showDaemonSetNodes: true })} />);
+  const [traffic, external, daemonSets] = screen.getAllByRole('button');
+  expect(traffic.className).toContain(TRAFFIC_ACTIVE);
+  expect(external.className).toContain(EXTERNAL_ACTIVE);
+  expect(daemonSets.className).toContain(DAEMONSET_ACTIVE);
+  // Three distinct tokens — none shares another's colour.
+  expect(DAEMONSET_ACTIVE).toContain('hubble-info');
+  expect(DAEMONSET_ACTIVE).not.toContain('hubble-warning');
+  expect(DAEMONSET_ACTIVE).not.toContain('hubble-accent');
+  expect(EXTERNAL_ACTIVE).not.toContain('hubble-info');
+  expect(TRAFFIC_ACTIVE).not.toContain('hubble-info');
+  expect(daemonSets.className).not.toContain('hubble-warning');
+});
+
+test('while off, the hidden-count hint still carries the DaemonSets hue', () => {
+  render(<GraphControls {...props()} />);
+  const btn = screen.getByTitle(DAEMONSET_TOGGLE_TOOLTIP);
+  expect(btn.className).not.toContain('hubble-info');
+  expect(btn.querySelector('span.text-hubble-info')?.textContent).toBe('(5 hidden)');
 });
 
 test('no count suffix when there is nothing to hide', () => {

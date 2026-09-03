@@ -1,6 +1,7 @@
 import React from 'react';
 import { Handle, Position } from 'reactflow';
 import { ChevronDown, ChevronRight, Network, Server, Globe, FileCode, Crosshair } from 'lucide-react';
+import { isDaemonSetOrHostNetworkPod } from '../utils/daemonSetPeers';
 import type { PodNodeData } from '../types';
 import { Button } from './ui/Button';
 
@@ -34,11 +35,19 @@ const PodNode: React.FC<PodNodeProps> = React.memo(({ data, selected }) => {
   }, 0) || 0;
 
   const IconComponent = isExternal ? Globe : Server;
+  // DaemonSet / host-network peers (see utils/daemonSetPeers) get the same
+  // teal as their toolbar toggle so the badge, the spine and the toggle that
+  // hides them all read as one thing.
+  const daemonSetPeer = isExternal && (data.pods && data.pods.length > 0 ? data.pods : [data.pod]).some(isDaemonSetOrHostNetworkPod);
+  const daemonSetBadge = daemonSetPeer
+    ? ((data.pods ?? []).some((p) => p.workload_kind === 'DaemonSet') ? 'DaemonSet' : 'host-network')
+    : null;
   // Trust state → accent: external endpoints = warning amber, in-cluster
-  // workloads = brand indigo. Encoded as a left spine rather than a full tinted
-  // border (elevation + a spine reads authored; a rounded tint box reads generic).
-  const accentColor = isExternal ? 'text-hubble-warning' : 'text-hubble-accent';
-  const spineColor = isExternal ? 'border-l-hubble-warning' : 'border-l-hubble-accent';
+  // workloads = brand indigo, DaemonSet/host-network peers = teal. Encoded as
+  // a left spine rather than a full tinted border (elevation + a spine reads
+  // authored; a rounded tint box reads generic).
+  const accentColor = daemonSetPeer ? 'text-hubble-info' : isExternal ? 'text-hubble-warning' : 'text-hubble-accent';
+  const spineColor = daemonSetPeer ? 'border-l-hubble-info' : isExternal ? 'border-l-hubble-warning' : 'border-l-hubble-accent';
 
   const borderClasses = selected
     ? `border-hubble-border-strong ring-1 ring-hubble-accent/60 shadow-lg`
@@ -87,6 +96,14 @@ const PodNode: React.FC<PodNodeProps> = React.memo(({ data, selected }) => {
               <div className="text-xs text-tertiary truncate" title={data.externalNamespace}>
                 ns: {data.externalNamespace}
               </div>
+            )}
+            {daemonSetBadge && (
+              <span
+                className="inline-block mt-0.5 px-1.5 py-px rounded-control border border-hubble-info/40 bg-hubble-info/10 text-[10px] font-medium text-hubble-info"
+                title="Hidden by the DaemonSets toggle when it is off"
+              >
+                {daemonSetBadge}
+              </span>
             )}
             {podCount > 1 && (
               <div className="text-xs text-tertiary">
