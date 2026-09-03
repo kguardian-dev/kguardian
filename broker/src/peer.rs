@@ -26,9 +26,16 @@
 //!    race where the flow arrives before the peer pod's `/pod/spec`.
 //!    Rows that age out unresolved stay NULL forever.
 //! 3. **Start-time guard.** [`choose_pod`] never picks a pod whose
-//!    `started_at` is later than the flow's `time_stamp`. The same
-//!    function backs `GET /pod/ip/{ip}?at=`, so the by-IP fallback for
-//!    rows with no stored peer applies the identical rule.
+//!    `started_at` is later than the flow's `time_stamp`, nor one whose
+//!    start is unknown (NULL = never re-posted since the upgrade, i.e.
+//!    a ghost, or Pending). The same function backs
+//!    `GET /pod/ip/{ip}?at=`, so the by-IP fallback for rows with no
+//!    stored peer applies the identical rule.
+//! 4. **Stale-alive sweep.** The controller re-posts every live pod on
+//!    each 60 s resync; a row still `is_dead=false` but untouched for
+//!    `PEER_STALE_ALIVE_SECS` (default 900) is a ghost from a controller
+//!    restart and gets marked dead, so it stops being a "live" by-IP
+//!    candidate for a recycled address.
 //!
 //! Precedence, given the guard: a live pod holding the IP > the dead
 //! pod with the newest start ≤ the flow time > a Service ClusterIP >
@@ -171,11 +178,20 @@ pub fn load_candidates(conn: &mut PgConnection, ip: &str) -> Result<Candidates, 
 }
 
 /// The start-time guard: `pod` may be the peer of a flow observed at
-/// `at` only if it had started by then. An unknown start (`None`) is
-/// not excluded — there is nothing to compare — it merely ranks last in
-/// [`choose_pod`].
+/// `at` only if it is KNOWN to have started by then.
+///
+/// An unknown start (`None`) is excluded, not merely ranked last. The
+/// broker derives `started_at` from the `status.startTime` the
+/// controller posts, and the controller re-posts every live pod within
+/// 60 s of a resync, so after the upgrade every genuinely live pod has
+/// one. A row still NULL is therefore a ghost — a pod that no longer
+/// exists but was never marked dead (seen live on cluster-00: 33
+/// `is_dead=false` rows from a July controller restart, one of which
+/// kept absorbing old flows under the earlier "rank last" rule) — or a
+/// Pending pod that has no address to be a peer with yet. Neither may
+/// attribute a flow.
 pub fn passes_guard(pod: &PodDetail, at: NaiveDateTime) -> bool {
-    pod.started_at.is_none_or(|s| s <= at)
+    pod.started_at.is_some_and(|s| s <= at)
 }
 
 /// Pick the pod that held the address at `at`, from all rows that hold
@@ -185,20 +201,16 @@ pub fn passes_guard(pod: &PodDetail, at: NaiveDateTime) -> bool {
 /// since it started, so if it started before `at` it was the holder at
 /// `at`), then dead pods by newest `started_at` — IP owners are
 /// sequential in time, so the pod that started most recently before
-/// the flow is the most likely holder — then unknown starts, newest
-/// `time_stamp` first. Anything that fails the guard is skipped
-/// outright; `None` when nothing survives it.
+/// the flow is the most likely holder — then newest `time_stamp`, then
+/// name for determinism. Anything that fails the guard (started after
+/// `at`, or start unknown) is skipped outright; `None` when nothing
+/// survives it.
 pub fn choose_pod(pods: &[PodDetail], at: NaiveDateTime) -> Option<&PodDetail> {
     let mut eligible: Vec<&PodDetail> = pods.iter().filter(|p| passes_guard(p, at)).collect();
     eligible.sort_by(|a, b| {
         a.is_dead
             .cmp(&b.is_dead)
-            .then_with(|| match (a.started_at, b.started_at) {
-                (Some(x), Some(y)) => y.cmp(&x),
-                (Some(_), None) => std::cmp::Ordering::Less,
-                (None, Some(_)) => std::cmp::Ordering::Greater,
-                (None, None) => std::cmp::Ordering::Equal,
-            })
+            .then_with(|| b.started_at.cmp(&a.started_at))
             .then_with(|| b.time_stamp.cmp(&a.time_stamp))
             .then_with(|| a.pod_name.cmp(&b.pod_name))
     });
@@ -264,37 +276,106 @@ pub fn window_cutoff(now: NaiveDateTime, window: Duration) -> NaiveDateTime {
     now - chrono::Duration::from_std(window).unwrap_or(chrono::Duration::zero())
 }
 
-/// Spawn the late-resolve task. Returns immediately; the task lives for
-/// the broker's lifetime. `PEER_LATE_RESOLVE_WINDOW_SECS=0` disables it
-/// (ingest-time resolution still runs).
+/// Stale-alive threshold (seconds): an `is_dead=false` pod_details row
+/// whose `time_stamp` is older than this is marked dead. `0` disables
+/// the sweep. Default 15 min = fifteen missed 60 s controller resyncs.
+const DEFAULT_STALE_ALIVE_SECS: u64 = 900;
+
+fn stale_alive_secs() -> u64 {
+    std::env::var("PEER_STALE_ALIVE_SECS")
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .unwrap_or(DEFAULT_STALE_ALIVE_SECS)
+}
+
+/// The stale-alive sweep as a statement: every row still flagged alive
+/// that the controller has not re-posted since `cutoff` is marked dead.
+/// The controller re-posts every live pod on each 60 s resync (updating
+/// `time_stamp`), so a row untouched for the threshold cannot be live —
+/// it is a ghost left behind by a controller restart, and a ghost
+/// holding a recycled address would otherwise be a live-pod candidate
+/// for every flow to that address (`choose_pod` prefers live pods).
+/// If the controller itself is down long enough to trip this, its next
+/// resync re-posts `is_dead=false` and the rows come straight back.
+/// A constant (and pinned by a unit test) rather than a diesel DSL
+/// expression only because naming the DSL's return type is unwieldy;
+/// `$1` is the cutoff, bound as a parameter.
+const STALE_ALIVE_SQL: &str = "UPDATE pod_details SET is_dead = true \
+     WHERE is_dead = false AND time_stamp < $1";
+
+/// One stale-alive sweep: rows marked dead.
+pub fn run_stale_alive_sweep(
+    conn: &mut PgConnection,
+    threshold: Duration,
+) -> Result<usize, DbError> {
+    let cutoff = window_cutoff(chrono::Utc::now().naive_utc(), threshold);
+    Ok(diesel::sql_query(STALE_ALIVE_SQL)
+        .bind::<diesel::sql_types::Timestamp, _>(cutoff)
+        .execute(conn)?)
+}
+
+/// Spawn the peer maintenance loop: the late-resolve pass
+/// (`PEER_LATE_RESOLVE_WINDOW_SECS`, `0` disables) and the stale-alive
+/// sweep (`PEER_STALE_ALIVE_SECS`, `0` disables), both on the
+/// `PEER_LATE_RESOLVE_INTERVAL_SECS` cadence. Returns immediately; the
+/// task lives for the broker's lifetime. Ingest-time resolution runs
+/// regardless.
 pub fn spawn(pool: DbPool) {
     let window = window_secs();
+    let stale = stale_alive_secs();
     if window == 0 {
         info!("peer late-resolve disabled (PEER_LATE_RESOLVE_WINDOW_SECS=0)");
+    }
+    if stale == 0 {
+        info!("peer stale-alive sweep disabled (PEER_STALE_ALIVE_SECS=0)");
+    }
+    if window == 0 && stale == 0 {
         return;
     }
     let every = interval();
     info!(
         window_secs = window,
+        stale_alive_secs = stale,
         interval_secs = every.as_secs(),
-        "peer late-resolve loop scheduled"
+        "peer late-resolve / stale-alive loop scheduled"
     );
     actix_web::rt::spawn(async move {
         loop {
             tokio::time::sleep(every).await;
-            let pool = pool.clone();
-            let result = tokio::task::spawn_blocking(move || -> Result<(usize, usize), DbError> {
-                let mut conn = pool.get()?;
-                run_pass(&mut conn, Duration::from_secs(window))
-            })
-            .await;
-            match result {
-                Ok(Ok((0, 0))) => debug!("peer late-resolve: nothing pending"),
-                Ok(Ok((scanned, resolved))) => {
-                    info!(scanned, resolved, "peer late-resolve pass")
+            if window > 0 {
+                let pool = pool.clone();
+                let result =
+                    tokio::task::spawn_blocking(move || -> Result<(usize, usize), DbError> {
+                        let mut conn = pool.get()?;
+                        run_pass(&mut conn, Duration::from_secs(window))
+                    })
+                    .await;
+                match result {
+                    Ok(Ok((0, 0))) => debug!("peer late-resolve: nothing pending"),
+                    Ok(Ok((scanned, resolved))) => {
+                        info!(scanned, resolved, "peer late-resolve pass")
+                    }
+                    Ok(Err(e)) => warn!(error = %e, "peer late-resolve pass failed"),
+                    Err(e) => warn!(error = %e, "peer late-resolve task panicked"),
                 }
-                Ok(Err(e)) => warn!(error = %e, "peer late-resolve pass failed"),
-                Err(e) => warn!(error = %e, "peer late-resolve task panicked"),
+            }
+            if stale > 0 {
+                let pool = pool.clone();
+                let result = tokio::task::spawn_blocking(move || -> Result<usize, DbError> {
+                    let mut conn = pool.get()?;
+                    run_stale_alive_sweep(&mut conn, Duration::from_secs(stale))
+                })
+                .await;
+                match result {
+                    Ok(Ok(0)) => debug!("peer stale-alive sweep: nothing stale"),
+                    Ok(Ok(marked_dead)) => info!(
+                        marked_dead,
+                        stale_alive_secs = stale,
+                        "peer stale-alive sweep marked ghost pods dead"
+                    ),
+                    Ok(Err(e)) => warn!(error = %e, "peer stale-alive sweep failed"),
+                    Err(e) => warn!(error = %e, "peer stale-alive sweep panicked"),
+                }
             }
         }
     });
@@ -425,9 +506,33 @@ mod tests {
     }
 
     #[test]
-    fn guard_does_not_exclude_an_unknown_start() {
-        let legacy = pod("legacy-1", true, None, "2026-05-01T00:00:00");
-        assert!(passes_guard(&legacy, ts("2020-01-01T00:00:00")));
+    fn guard_excludes_an_unknown_start_even_when_alive() {
+        // The cluster-00 ghost: is_dead=false, never re-posted since the
+        // upgrade (started_at NULL), IP since recycled. It must not be a
+        // candidate for any flow, at any time — dead or "alive".
+        let ghost = pod(
+            "autobrr-6b6cb9f9dd-vc9rf",
+            false,
+            None,
+            "2026-07-23T19:31:00",
+        );
+        assert!(!passes_guard(&ghost, ts("2026-09-03T00:00:00")));
+        assert!(!passes_guard(&ghost, ts("2020-01-01T00:00:00")));
+        let legacy_dead = pod("legacy-1", true, None, "2026-05-01T00:00:00");
+        assert!(!passes_guard(&legacy_dead, ts("2026-09-03T00:00:00")));
+        // choose_pod inherits it: a ghost alone resolves to nothing, and
+        // a ghost never outranks a dead pod with a known start.
+        assert!(choose_pod(std::slice::from_ref(&ghost), ts("2026-09-03T00:00:00")).is_none());
+        let real = pod(
+            "job-b",
+            true,
+            Some("2026-07-23T09:00:00"),
+            "2026-07-23T09:30:00",
+        );
+        assert_eq!(
+            choose_pod(&[ghost, real], ts("2026-09-03T00:00:00")).map(|p| p.pod_name.as_str()),
+            Some("job-b")
+        );
     }
 
     #[test]
@@ -508,7 +613,7 @@ mod tests {
     }
 
     #[test]
-    fn dead_pods_with_known_start_rank_before_unknown_start() {
+    fn unknown_start_is_never_a_candidate_regardless_of_recency() {
         let pods = vec![
             pod("legacy", true, None, "2026-08-30T00:00:00"),
             pod(
@@ -522,15 +627,12 @@ mod tests {
             choose_pod(&pods, ts("2026-08-31T00:00:00")).map(|p| p.pod_name.as_str()),
             Some("job-b")
         );
-        // Only unknown starts left: newest seen wins.
+        // Only unknown starts left: nothing, not "the newest seen".
         let pods = vec![
             pod("old", true, None, "2026-05-01T00:00:00"),
-            pod("newer", true, None, "2026-08-30T00:00:00"),
+            pod("newer", false, None, "2026-08-30T00:00:00"),
         ];
-        assert_eq!(
-            choose_pod(&pods, ts("2026-08-31T00:00:00")).map(|p| p.pod_name.as_str()),
-            Some("newer")
-        );
+        assert!(choose_pod(&pods, ts("2026-08-31T00:00:00")).is_none());
     }
 
     #[test]
@@ -768,6 +870,53 @@ mod tests {
             Some(v) => std::env::set_var(key, v),
             None => std::env::remove_var(key),
         }
+    }
+
+    #[test]
+    fn stale_alive_sweep_marks_only_untouched_alive_rows_dead() {
+        // Pin the statement: UPDATE pod_details SET is_dead = true only
+        // where is_dead = false AND time_stamp < cutoff. Dead rows and
+        // recently re-posted live rows are untouched, and nothing is
+        // deleted (retention prunes dead rows on its own schedule).
+        let cutoff = ts("2026-09-03T00:00:00");
+        let sql = STALE_ALIVE_SQL;
+        assert!(
+            sql.starts_with("UPDATE pod_details SET is_dead = true"),
+            "{sql}"
+        );
+        assert!(
+            sql.ends_with("WHERE is_dead = false AND time_stamp < $1"),
+            "{sql}"
+        );
+        assert!(!sql.contains("DELETE"), "{sql}");
+        // The cutoff is bound as a parameter, never interpolated.
+        let bound = diesel::debug_query::<diesel::pg::Pg, _>(
+            &diesel::sql_query(STALE_ALIVE_SQL).bind::<diesel::sql_types::Timestamp, _>(cutoff),
+        )
+        .to_string();
+        assert!(bound.contains("binds: [2026-09-03T00:00:00]"), "{bound}");
+        // The cutoff is the same arithmetic as the late-resolve window:
+        // a 15-min threshold at 00:15 marks rows last written before 00:00.
+        assert_eq!(
+            window_cutoff(ts("2026-09-03T00:15:00"), Duration::from_secs(900)),
+            cutoff
+        );
+    }
+
+    #[test]
+    fn stale_alive_env_default_override_zero_and_garbage() {
+        with_env("PEER_STALE_ALIVE_SECS", None, || {
+            assert_eq!(stale_alive_secs(), DEFAULT_STALE_ALIVE_SECS);
+        });
+        with_env("PEER_STALE_ALIVE_SECS", Some(" 1800\n"), || {
+            assert_eq!(stale_alive_secs(), 1800);
+        });
+        with_env("PEER_STALE_ALIVE_SECS", Some("0"), || {
+            assert_eq!(stale_alive_secs(), 0);
+        });
+        with_env("PEER_STALE_ALIVE_SECS", Some("never"), || {
+            assert_eq!(stale_alive_secs(), DEFAULT_STALE_ALIVE_SECS);
+        });
     }
 
     #[test]
