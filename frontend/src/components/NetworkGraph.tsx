@@ -11,9 +11,11 @@ import ReactFlow, {
 import type { Node, Edge } from 'reactflow';
 import 'reactflow/dist/style.css';
 import ELK from 'elkjs/lib/elk.bundled.js';
-import { Eye, EyeOff, Activity, ShieldAlert, Server, Crosshair, X, ArrowRight, ArrowDown } from 'lucide-react';
+import { Activity, ShieldAlert, Server, Crosshair, X } from 'lucide-react';
 import PodNode from './PodNode';
 import { shouldExitFocus } from '../utils/graphFocus';
+import { partitionDaemonSetPeers, shouldAutoShowDaemonSets } from '../utils/daemonSetPeers';
+import { GraphControls } from './GraphControls';
 import { buildPeerIndex, resolvePeer, type PeerResolution } from '../utils/peerResolution';
 import { buildExternalNodes, remoteNodeForRow } from '../utils/externalPeers';
 import type { PodNodeData, PodInfo, ServiceInfo, NetworkTraffic } from '../types';
@@ -31,6 +33,9 @@ interface NetworkGraphProps {
   services: ServiceInfo[];
   showExternalNodes: boolean;
   onToggleExternalNodes: () => void;
+  /** Show DaemonSet / host-network peers (utils/daemonSetPeers). Off by default. */
+  showDaemonSetNodes: boolean;
+  onToggleDaemonSetNodes: () => void;
   showTraffic: boolean;
   onToggleTraffic: () => void;
   layoutDirection: 'LR' | 'TB';
@@ -59,6 +64,8 @@ const NetworkGraphInner: React.FC<NetworkGraphProps> = ({
   services,
   showExternalNodes,
   onToggleExternalNodes,
+  showDaemonSetNodes,
+  onToggleDaemonSetNodes,
   showTraffic,
   onToggleTraffic,
   layoutDirection,
@@ -188,12 +195,41 @@ const NetworkGraphInner: React.FC<NetworkGraphProps> = ({
 
   // Combine in-namespace and external pods for rendering
   // When traffic is enabled, hide local pods that have no traffic
+  // DaemonSet / host-network peers are computed like any other external node
+  // (so counts and policy inputs see them) but rendered only when the toggle
+  // is on. The focused or selected node is never hidden; the Unattributed and
+  // Internet aggregates never qualify (see isDaemonSetPeer).
+  const daemonSetPartition = useMemo(
+    () => partitionDaemonSetPeers(externalNodes, { show: showDaemonSetNodes, focusedId: focusedNodeId, selectedId: selectedPodId }),
+    [externalNodes, showDaemonSetNodes, focusedNodeId, selectedPodId],
+  );
+  const daemonSetCount = useMemo(
+    () => partitionDaemonSetPeers(externalNodes, { show: false, focusedId: null, selectedId: null }).hidden.length,
+    [externalNodes],
+  );
+
+  // A `?focus=` link to a DaemonSet peer reveals the whole class, not just
+  // the pinned node — flip the toggle on (it persists like the other toggles).
+  // Once per focused id: the user may still turn the toggle off afterwards
+  // (the focused node itself stays pinned), and StrictMode's double effect
+  // run must not flip it twice.
+  const autoShownFocusRef = React.useRef<string | null>(null);
+  useEffect(() => {
+    if (autoShownFocusRef.current === focusedNodeId) return;
+    if (shouldAutoShowDaemonSets(focusedNodeId, externalNodes, showDaemonSetNodes)) {
+      autoShownFocusRef.current = focusedNodeId;
+      onToggleDaemonSetNodes();
+    } else if (!focusedNodeId) {
+      autoShownFocusRef.current = null;
+    }
+  }, [focusedNodeId, externalNodes, showDaemonSetNodes, onToggleDaemonSetNodes]);
+
   const allDisplayPods = useMemo(() => {
     const visiblePods = showTraffic
       ? pods.filter((pod) => pod.traffic && pod.traffic.length > 0)
       : pods;
-    return [...visiblePods, ...externalNodes];
-  }, [pods, externalNodes, showTraffic]);
+    return [...visiblePods, ...daemonSetPartition.visible];
+  }, [pods, daemonSetPartition, showTraffic]);
 
   // Focus is only meaningful while the focused node exists in the current
   // node set. Switching namespace (or the pod being deleted) used to leave
@@ -575,7 +611,7 @@ const NetworkGraphInner: React.FC<NetworkGraphProps> = ({
     onPodSelect(null);
   }, [onPodSelect]);
 
-  const externalCount = externalNodes.length;
+  const externalCount = daemonSetPartition.visible.length;
 
   // Compute namespace-level summary stats for the Security Summary Panel
   const summaryStats = useMemo(() => {
@@ -664,45 +700,18 @@ const NetworkGraphInner: React.FC<NetworkGraphProps> = ({
 
         {/* Graph controls */}
         <Panel position="top-right">
-          <div className="flex gap-2">
-            <button
-              onClick={onToggleTraffic}
-              className={`flex items-center gap-2 h-8 px-3 rounded-control border text-xs font-medium transition-colors ${
-                showTraffic
-                  ? 'bg-hubble-accent/15 border-hubble-accent/50 text-hubble-accent hover:bg-hubble-accent/25'
-                  : 'bg-hubble-card border-hubble-border text-tertiary hover:border-hubble-border-strong hover:text-secondary'
-              }`}
-              title={showTraffic ? 'Hide traffic edges' : 'Show traffic edges'}
-            >
-              {showTraffic ? <Eye className="w-3.5 h-3.5" /> : <EyeOff className="w-3.5 h-3.5" />}
-              Traffic
-            </button>
-            {showTraffic && (
-              <button
-                onClick={onToggleExternalNodes}
-                className={`flex items-center gap-2 h-8 px-3 rounded-control border text-xs font-medium transition-colors ${
-                  showExternalNodes
-                    ? 'bg-hubble-warning/15 border-hubble-warning/50 text-hubble-warning hover:bg-hubble-warning/25'
-                    : 'bg-hubble-card border-hubble-border text-tertiary hover:border-hubble-border-strong hover:text-secondary'
-                }`}
-                title={showExternalNodes ? 'Hide external namespace nodes' : 'Show external namespace nodes'}
-              >
-                {showExternalNodes ? <Eye className="w-3.5 h-3.5" /> : <EyeOff className="w-3.5 h-3.5" />}
-                External{externalCount > 0 ? ` (${externalCount})` : ''}
-              </button>
-            )}
-            {showTraffic && (
-              <button
-                onClick={onToggleLayoutDirection}
-                className="flex items-center gap-2 h-8 px-3 rounded-control border text-xs font-medium transition-colors
-                           bg-hubble-card border-hubble-border text-secondary hover:border-hubble-border-strong hover:text-primary"
-                title={`Switch to ${layoutDirection === 'LR' ? 'vertical' : 'horizontal'} layout`}
-              >
-                {layoutDirection === 'LR' ? <ArrowRight className="w-3.5 h-3.5" /> : <ArrowDown className="w-3.5 h-3.5" />}
-                Layout
-              </button>
-            )}
-          </div>
+          <GraphControls
+            showTraffic={showTraffic}
+            onToggleTraffic={onToggleTraffic}
+            showExternalNodes={showExternalNodes}
+            onToggleExternalNodes={onToggleExternalNodes}
+            externalCount={externalCount}
+            showDaemonSetNodes={showDaemonSetNodes}
+            onToggleDaemonSetNodes={onToggleDaemonSetNodes}
+            daemonSetCount={daemonSetCount}
+            layoutDirection={layoutDirection}
+            onToggleLayoutDirection={onToggleLayoutDirection}
+          />
         </Panel>
       </ReactFlow>
     </div>

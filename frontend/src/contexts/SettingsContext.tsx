@@ -9,6 +9,11 @@ export interface AppSettings {
   defaultNamespace: string | null;
   /** Graph defaults — persisted so the view survives reloads. */
   showExternalNodes: boolean;
+  /** Show DaemonSet / host-network peers (node-exporter, CNI, CSI agents) on
+   *  the map. Off by default: since node-IP traffic is recorded they appear
+   *  as peers of nearly every pod and drown the workload picture. Policy
+   *  generation ignores this — those peers stay in the generated rules. */
+  showDaemonSetNodes: boolean;
   showTraffic: boolean;
   layoutDirection: 'LR' | 'TB';
 }
@@ -16,6 +21,7 @@ export interface AppSettings {
 const DEFAULT_SETTINGS: AppSettings = {
   defaultNamespace: null,
   showExternalNodes: true,
+  showDaemonSetNodes: false,
   showTraffic: true,
   layoutDirection: 'LR',
 };
@@ -33,9 +39,14 @@ function loadSettings(): AppSettings {
   }
 }
 
+type BooleanSettingKey = { [K in keyof AppSettings]: AppSettings[K] extends boolean ? K : never }[keyof AppSettings];
+
 interface SettingsContextValue {
   settings: AppSettings;
   updateSettings: (patch: Partial<AppSettings>) => void;
+  /** Flip a boolean setting from its CURRENT value (functional update), so a
+   *  toggle fired from an effect or a stale closure cannot double-flip. */
+  toggleSetting: (key: BooleanSettingKey) => void;
   resetSettings: () => void;
 }
 
@@ -62,10 +73,19 @@ export function SettingsProvider({ children }: { children: ReactNode }) {
     [],
   );
 
+  const toggleSetting = useCallback(
+    (key: BooleanSettingKey) => setSettings((prev) => {
+      const next = { ...prev, [key]: !prev[key] };
+      try { localStorage.setItem(STORAGE_KEY, JSON.stringify(next)); } catch { /* ignore */ }
+      return next;
+    }),
+    [],
+  );
+
   const resetSettings = useCallback(() => persist(DEFAULT_SETTINGS), [persist]);
 
   return (
-    <SettingsContext.Provider value={{ settings, updateSettings, resetSettings }}>
+    <SettingsContext.Provider value={{ settings, updateSettings, toggleSetting, resetSettings }}>
       {children}
     </SettingsContext.Provider>
   );
