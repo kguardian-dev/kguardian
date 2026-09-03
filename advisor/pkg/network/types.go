@@ -20,10 +20,64 @@ const (
 	CiliumPolicy PolicyType = "cilium"
 )
 
-// NetworkPolicyRule represents a network policy rule
+// NetworkPolicyRule represents a network policy rule: the ports one peer was
+// observed on. Peer is the peer's attributed identity (see peer.go); a nil
+// Peer means "resolve PeerIP with no row context" — the pre-v4 behaviour,
+// kept for callers that build rules from bare IPs. Stamps are the
+// time_stamps of the rows folded into the rule (the newest is quoted in the
+// unattributed-peer comment).
 type NetworkPolicyRule struct {
 	PeerIP string
+	Peer   *resolvedPeer
 	Ports  []networkingv1.NetworkPolicyPort
+	Stamps []string
+}
+
+// identityKey is the rule's grouping key beside PeerIP ("" for a rule with
+// no resolved peer, which groups by IP alone like before).
+func (r NetworkPolicyRule) identityKey() string {
+	if r.Peer == nil {
+		return ""
+	}
+	return r.Peer.identityKey()
+}
+
+// mergeOrAppendResolvedRule is mergeOrAppendRule keyed on (peer IP, resolved
+// identity) rather than the IP alone, so flows from two different peers that
+// held the same IP at different times never merge into one rule — the
+// stored/guarded identity would otherwise be lost at exactly the point it
+// matters. It also records the row's time_stamp.
+func mergeOrAppendResolvedRule(
+	rules []NetworkPolicyRule,
+	peer resolvedPeer,
+	port intstr.IntOrString,
+	protocolStr string,
+	timeStamp string,
+) []NetworkPolicyRule {
+	key := peer.identityKey()
+	for i := range rules {
+		if rules[i].PeerIP != peer.IP || rules[i].identityKey() != key {
+			continue
+		}
+		rules[i].Stamps = appendStamp(rules[i].Stamps, timeStamp)
+		merged := mergeOrAppendRule([]NetworkPolicyRule{rules[i]}, peer.IP, port, protocolStr)
+		rules[i].Ports = merged[0].Ports
+		return rules
+	}
+	p := peer
+	return append(rules, NetworkPolicyRule{
+		PeerIP: peer.IP,
+		Peer:   &p,
+		Ports:  []networkingv1.NetworkPolicyPort{{Port: &port, Protocol: protocolPtr(protocolStr)}},
+		Stamps: appendStamp(nil, timeStamp),
+	})
+}
+
+func appendStamp(stamps []string, s string) []string {
+	if s == "" {
+		return stamps
+	}
+	return append(stamps, s)
 }
 
 // mergeOrAppendRule merges a (port, protocol) into an existing

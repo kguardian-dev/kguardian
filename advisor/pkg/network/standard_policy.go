@@ -162,6 +162,10 @@ func (g *StandardPolicyGenerator) generateDefaultDenyPolicy(podDetail *api.PodDe
 // - Example: Allow our pod to reach database-svc (DstIP) on port 5432 (DstPort)
 func (g *StandardPolicyGenerator) processTrafficRules(podTraffic []api.PodTraffic, podDetail *api.PodDetail) ([]NetworkPolicyRule, []NetworkPolicyRule) {
 	var ingressRules, egressRules []NetworkPolicyRule
+	// One resolver per generation: peers are attributed per ROW (stored
+	// identity, else by IP under the start-time guard) and rules keyed by
+	// (IP, identity) — see peer.go.
+	resolver := newPeerResolver(g.broker())
 
 	for _, traffic := range podTraffic {
 		var portInt int
@@ -195,7 +199,7 @@ func (g *StandardPolicyGenerator) processTrafficRules(podTraffic []api.PodTraffi
 			protocolStr = string(traffic.Protocol)
 
 			log.Debug().Msgf("Processing INGRESS: allowing peer %s to reach our pod port %d (%s)", peer, portInt, protocolStr)
-			ingressRules = g.addOrUpdateRule(ingressRules, peer, port, protocolStr)
+			ingressRules = mergeOrAppendResolvedRule(ingressRules, resolver.resolveRow(peer, traffic), port, protocolStr, traffic.TimeStamp)
 
 		} else if IsEgressTraffic(traffic, podDetail) {
 			// For EGRESS traffic: Our Pod -> External destination
@@ -222,7 +226,7 @@ func (g *StandardPolicyGenerator) processTrafficRules(podTraffic []api.PodTraffi
 			protocolStr = string(traffic.Protocol)
 
 			log.Debug().Msgf("Processing EGRESS: allowing our pod to reach peer %s on port %d (%s)", peer, portInt, protocolStr)
-			egressRules = g.addOrUpdateRule(egressRules, peer, port, protocolStr)
+			egressRules = mergeOrAppendResolvedRule(egressRules, resolver.resolveRow(peer, traffic), port, protocolStr, traffic.TimeStamp)
 		} else {
 			log.Debug().Msgf("Skipping traffic record with unknown type: %s", traffic.TrafficType)
 		}
@@ -248,28 +252,21 @@ func (g *StandardPolicyGenerator) addOrUpdateRule(rules []NetworkPolicyRule, pee
 func (g *StandardPolicyGenerator) transformToNetworkPolicyIngressRules(rules []NetworkPolicyRule, comments *PolicyComments) []networkingv1.NetworkPolicyIngressRule {
 	var ingressRules []networkingv1.NetworkPolicyIngressRule
 
-	// Group rules by peer IP
-	peerRules := make(map[string][]networkingv1.NetworkPolicyPort)
-	for _, rule := range rules {
-		peerRules[rule.PeerIP] = append(peerRules[rule.PeerIP], rule.Ports...)
-	}
-
-	// Iterate in sorted peer-IP order so the generated YAML is
-	// deterministic across runs of identical input. Without this,
-	// `kguardian generate networkpolicy` produced different rule
-	// orderings each call (Go map iteration randomises per process),
-	// surfacing as spurious `kubectl diff` output and noise in
-	// git-tracked policy review.
-	for _, peerIP := range sortedKeys(peerRules) {
-		ports := peerRules[peerIP]
-		peers, comment := g.createNetworkPolicyPeers(peerIP)
+	// Group by (peer IP, identity) and iterate in sorted order so the
+	// generated YAML is deterministic across runs of identical input.
+	// Without this, `kguardian generate networkpolicy` produced different
+	// rule orderings each call (Go map iteration randomises per process),
+	// surfacing as spurious `kubectl diff` output and noise in git-tracked
+	// policy review.
+	for _, group := range groupPeerRules(rules, newPeerResolver(g.broker())) {
+		peers, comment := g.peersForResolved(group.peer, newestTimeStamp(group.stamps))
 		if len(peers) == 0 { // Skip if peer could not be determined (e.g., internal error)
 			continue
 		}
 		comments.addIngress(len(ingressRules), comment)
 		ingressRules = append(ingressRules, networkingv1.NetworkPolicyIngressRule{
 			From:  peers,
-			Ports: deduplicatePorts(ports),
+			Ports: deduplicatePorts(group.ports),
 		})
 	}
 
@@ -281,16 +278,9 @@ func (g *StandardPolicyGenerator) transformToNetworkPolicyIngressRules(rules []N
 func (g *StandardPolicyGenerator) transformToNetworkPolicyEgressRules(rules []NetworkPolicyRule, comments *PolicyComments) []networkingv1.NetworkPolicyEgressRule {
 	var egressRules []networkingv1.NetworkPolicyEgressRule
 
-	// Group rules by peer IP
-	peerRules := make(map[string][]networkingv1.NetworkPolicyPort)
-	for _, rule := range rules {
-		peerRules[rule.PeerIP] = append(peerRules[rule.PeerIP], rule.Ports...)
-	}
-
 	// Sorted iteration — see the ingress sibling for rationale.
-	for _, peerIP := range sortedKeys(peerRules) {
-		ports := peerRules[peerIP]
-		peers, comment := g.createNetworkPolicyPeers(peerIP)
+	for _, group := range groupPeerRules(rules, newPeerResolver(g.broker())) {
+		peers, comment := g.peersForResolved(group.peer, newestTimeStamp(group.stamps))
 		if len(peers) == 0 { // Skip if peer could not be determined
 			continue
 		}
@@ -298,37 +288,33 @@ func (g *StandardPolicyGenerator) transformToNetworkPolicyEgressRules(rules []Ne
 
 		egressRules = append(egressRules, networkingv1.NetworkPolicyEgressRule{
 			To:    peers,
-			Ports: deduplicatePorts(ports),
+			Ports: deduplicatePorts(group.ports),
 		})
 	}
 
 	return egressRules
 }
 
-// sortedKeys returns the keys of a string-keyed map in ascending
-// order. Used by the policy transforms to produce deterministic
-// rule ordering — Go's map iteration is randomised per process, so
-// without sorting, regenerating a policy from identical input
-// produces different YAML each run (spurious diffs).
-func sortedKeys(m map[string][]networkingv1.NetworkPolicyPort) []string {
-	keys := make([]string, 0, len(m))
-	for k := range m {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
-	return keys
+// createNetworkPolicyPeers determines the NetworkPolicyPeer set for one observed
+// peer IP with no row context — no stored identity and no time_stamp, so the
+// start-time guard cannot exclude anything. It prioritizes Service selectors,
+// then Pod selectors, then falls back to IPBlock. See peersForResolved.
+func (g *StandardPolicyGenerator) createNetworkPolicyPeers(peerIP string) ([]networkingv1.NetworkPolicyPeer, string) {
+	return g.peersForResolved(newPeerResolver(g.broker()).resolveIP(peerIP), "")
 }
 
-// createNetworkPolicyPeers determines the NetworkPolicyPeer set for one observed
-// peer IP. It prioritizes Service selectors, then Pod selectors, then falls
-// back to IPBlock. Every path yields exactly one peer except a Service backed
-// by host-network pods, which yields one ipBlock per backend node IP (the
-// post-DNAT destinations). An empty result means the rule must be dropped.
+// peersForResolved renders one attributed peer as its NetworkPolicyPeer set.
+// Every path yields exactly one peer except a Service backed by host-network
+// pods, which yields one ipBlock per backend node IP (the post-DNAT
+// destinations). An empty result means the rule must be dropped.
 //
 // The second return value is a YAML comment to render above the rule, or ""
-// — it is set only for host-network peers, which are rendered as ipBlocks of
-// node IPs because no podSelector can match them.
-func (g *StandardPolicyGenerator) createNetworkPolicyPeers(peerIP string) ([]networkingv1.NetworkPolicyPeer, string) {
+// — it is set for host-network peers, which are rendered as ipBlocks of node
+// IPs because no podSelector can match them, and for unattributed peers
+// (pinned by IP because no pod can be proven to have held it at flow time;
+// `at` is the newest row time_stamp, quoted verbatim).
+func (g *StandardPolicyGenerator) peersForResolved(peer resolvedPeer, at string) ([]networkingv1.NetworkPolicyPeer, string) {
+	peerIP := peer.IP
 	log.Debug().Msgf("Creating network policy peer for IP: %s", peerIP)
 	one := func(p *networkingv1.NetworkPolicyPeer, comment string) ([]networkingv1.NetworkPolicyPeer, string) {
 		if p == nil {
@@ -336,67 +322,68 @@ func (g *StandardPolicyGenerator) createNetworkPolicyPeers(peerIP string) ([]net
 		}
 		return []networkingv1.NetworkPolicyPeer{*p}, comment
 	}
-
-	// Try to get Service info first
-	svcSpec, err := g.broker().ServiceByIP(peerIP)
-	if err == nil && svcSpec != nil {
-		// Validate service has selectors before using it
-		if len(svcSpec.Service.Spec.Selector) > 0 {
-			log.Debug().Msgf("Found service %s/%s with selector %v for IP %s",
-				svcSpec.SvcNamespace, svcSpec.SvcName, svcSpec.Service.Spec.Selector, peerIP)
-
-			// A Service fronting host-network pods fronts node IPs: its
-			// selector would match nothing the CNI sees, and NetworkPolicy is
-			// evaluated post-DNAT, so pin the backend node IPs — one ipBlock
-			// each — not the ClusterIP.
-			if backends := hostNetworkServiceBackends(g.broker(), svcSpec); len(backends) > 0 {
-				cidrs := hostNetworkServiceCIDRs(backends)
-				if len(cidrs) == 0 {
-					log.Warn().Msgf("Skipping host-network service peer %s/%s: no backend IP could be expressed as a host CIDR", svcSpec.SvcNamespace, svcSpec.SvcName)
-					return nil, ""
-				}
-				log.Debug().Msgf("Service %s/%s is backed by host-network pods; using IPBlocks %v", svcSpec.SvcNamespace, svcSpec.SvcName, cidrs)
-				peers := make([]networkingv1.NetworkPolicyPeer, 0, len(cidrs))
-				for _, cidr := range cidrs {
-					peers = append(peers, networkingv1.NetworkPolicyPeer{IPBlock: &networkingv1.IPBlock{CIDR: cidr}})
-				}
-				return peers, hostNetworkServiceComment(svcSpec, backends, peerIP, "podSelector")
-			}
-
-			return one(&networkingv1.NetworkPolicyPeer{
-				PodSelector: &metav1.LabelSelector{
-					MatchLabels: svcSpec.Service.Spec.Selector,
-				},
-				NamespaceSelector: &metav1.LabelSelector{
-					MatchLabels: map[string]string{
-						"kubernetes.io/metadata.name": svcSpec.SvcNamespace,
-					},
-				},
-			}, "")
-		} else {
-			log.Debug().Msgf("Service %s/%s found for IP %s but has no selector, trying pod lookup",
-				svcSpec.SvcNamespace, svcSpec.SvcName, peerIP)
+	ipBlock := func(comment string) ([]networkingv1.NetworkPolicyPeer, string) {
+		// common.HostCIDR picks the prefix length from the address family
+		// (/32 for IPv4, /128 for IPv6) — this used to be a hardcoded "/32",
+		// which on a dual-stack cluster turned a single peer into the whole
+		// fd00::/32 block. It rejects anything it cannot parse; returning nil
+		// here is the established "peer could not be determined" signal that
+		// both transform loops already skip on, so an unusable address costs
+		// us that one rule instead of poisoning the entire policy with a
+		// malformed ipBlock.
+		cidr, err := common.HostCIDR(peerIP)
+		if err != nil {
+			log.Warn().Err(err).Msgf("Skipping peer %s: cannot express it as a host CIDR", peerIP)
+			return nil, ""
 		}
-	} else if err != nil {
-		log.Debug().Err(err).Msgf("Error fetching service spec for IP %s, trying pod spec", peerIP)
-	} else {
-		log.Debug().Msgf("No service found for IP %s, trying pod spec", peerIP)
+		log.Debug().Msgf("Using IPBlock %s for peer %s", cidr, peerIP)
+		return one(&networkingv1.NetworkPolicyPeer{IPBlock: &networkingv1.IPBlock{CIDR: cidr}}, comment)
 	}
 
-	// Try to get Pod info
-	podSpec, err := g.broker().PodByIP(peerIP)
-	if err == nil && podSpec != nil {
+	if peer.Unattributed {
+		return ipBlock(unattributedPeerComment(peerIP, at))
+	}
+
+	if svcSpec := peer.Svc; svcSpec != nil {
+		log.Debug().Msgf("Found service %s/%s with selector %v for IP %s",
+			svcSpec.SvcNamespace, svcSpec.SvcName, svcSpec.Service.Spec.Selector, peerIP)
+
+		// A Service fronting host-network pods fronts node IPs: its
+		// selector would match nothing the CNI sees, and NetworkPolicy is
+		// evaluated post-DNAT, so pin the backend node IPs — one ipBlock
+		// each — not the ClusterIP.
+		if backends := peer.Backends; len(backends) > 0 {
+			cidrs := hostNetworkServiceCIDRs(backends)
+			if len(cidrs) == 0 {
+				log.Warn().Msgf("Skipping host-network service peer %s/%s: no backend IP could be expressed as a host CIDR", svcSpec.SvcNamespace, svcSpec.SvcName)
+				return nil, ""
+			}
+			log.Debug().Msgf("Service %s/%s is backed by host-network pods; using IPBlocks %v", svcSpec.SvcNamespace, svcSpec.SvcName, cidrs)
+			peers := make([]networkingv1.NetworkPolicyPeer, 0, len(cidrs))
+			for _, cidr := range cidrs {
+				peers = append(peers, networkingv1.NetworkPolicyPeer{IPBlock: &networkingv1.IPBlock{CIDR: cidr}})
+			}
+			return peers, hostNetworkServiceComment(svcSpec, backends, peerIP, "podSelector")
+		}
+
+		return one(&networkingv1.NetworkPolicyPeer{
+			PodSelector: &metav1.LabelSelector{
+				MatchLabels: svcSpec.Service.Spec.Selector,
+			},
+			NamespaceSelector: &metav1.LabelSelector{
+				MatchLabels: map[string]string{
+					"kubernetes.io/metadata.name": svcSpec.SvcNamespace,
+				},
+			},
+		}, "")
+	}
+
+	if podSpec := peer.Pod; podSpec != nil {
 		// A host-network pod shares the node IP; its labels select nothing
 		// the CNI can see. Pin the observed node address instead and say so.
 		if isHostNetwork(podSpec) {
-			cidr, err := common.HostCIDR(peerIP)
-			if err != nil {
-				log.Warn().Err(err).Msgf("Skipping host-network peer %s: cannot express it as a host CIDR", peerIP)
-				return nil, ""
-			}
-			log.Debug().Msgf("Peer %s is host-network pod %s/%s; using IPBlock %s", peerIP, podSpec.Namespace, podSpec.Name, cidr)
-			return one(&networkingv1.NetworkPolicyPeer{IPBlock: &networkingv1.IPBlock{CIDR: cidr}},
-				hostNetworkPeerComment(podSpec, peerIP, "podSelector"))
+			log.Debug().Msgf("Peer %s is host-network pod %s/%s; using IPBlock", peerIP, podSpec.Namespace, podSpec.Name)
+			return ipBlock(hostNetworkPeerComment(podSpec, peerIP, "podSelector"))
 		}
 		// Validate pod has labels before using it
 		if len(podSpec.Pod.Labels) > 0 {
@@ -413,37 +400,13 @@ func (g *StandardPolicyGenerator) createNetworkPolicyPeers(peerIP string) ([]net
 					},
 				},
 			}, "")
-		} else {
-			log.Debug().Msgf("Pod %s/%s found for IP %s but has no labels, falling back to IPBlock",
-				podSpec.Namespace, podSpec.Name, peerIP)
 		}
-	} else if err != nil {
-		log.Debug().Err(err).Msgf("Error fetching pod spec for IP %s, falling back to IPBlock", peerIP)
-	} else {
-		log.Debug().Msgf("No pod found for IP %s, falling back to IPBlock", peerIP)
+		log.Debug().Msgf("Pod %s/%s found for IP %s but has no labels, falling back to IPBlock",
+			podSpec.Namespace, podSpec.Name, peerIP)
 	}
 
 	// Fall back to IPBlock for external IPs or unresolvable cluster IPs.
-	//
-	// common.HostCIDR picks the prefix length from the address family
-	// (/32 for IPv4, /128 for IPv6) — this used to be a hardcoded "/32",
-	// which on a dual-stack cluster turned a single peer into the whole
-	// fd00::/32 block. It rejects anything it cannot parse; returning nil
-	// here is the established "peer could not be determined" signal that
-	// both transform loops already skip on, so an unusable address costs
-	// us that one rule instead of poisoning the entire policy with a
-	// malformed ipBlock.
-	cidr, err := common.HostCIDR(peerIP)
-	if err != nil {
-		log.Warn().Err(err).Msgf("Skipping peer %s: cannot express it as a host CIDR", peerIP)
-		return nil, ""
-	}
-	log.Debug().Msgf("Using IPBlock %s for peer %s", cidr, peerIP)
-	return one(&networkingv1.NetworkPolicyPeer{
-		IPBlock: &networkingv1.IPBlock{
-			CIDR: cidr,
-		},
-	}, "")
+	return ipBlock("")
 }
 
 // Helper functions
