@@ -386,6 +386,14 @@ broker:
     # rows then keep whatever resolved at ingest. Rendered as
     # PEER_LATE_RESOLVE_WINDOW_SECS.
     lateResolveWindowSeconds: 600
+    # -- Stale-alive sweep, in seconds. The controller re-posts every
+    # live pod every 60 s, so a pod_details row still marked alive
+    # that has not been re-posted for this long is a ghost (its node's
+    # controller lost it, or the row predates the upgrade). The broker
+    # marks such rows dead so they cannot win the alive-first ordering
+    # for an IP they no longer hold. 0 disables the sweep. Rendered as
+    # PEER_STALE_ALIVE_SECS.
+    staleAliveSeconds: 900
 
   audit:
     retention:

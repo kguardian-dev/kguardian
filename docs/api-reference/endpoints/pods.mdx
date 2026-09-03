@@ -54,7 +54,10 @@ or `null` when unknown — a manifest with no `status.startTime`, or a row
 last written by a broker predating the column (it fills in on the pod's
 next watch upsert; every live pod is re-posted when the controller
 restarts). It is the input to the start-time guard: a flow is never
-attributed to a pod that started after the flow's `time_stamp`. See
+attributed to a pod that started after the flow's `time_stamp`, nor to
+one with no `started_at`. A row still marked alive that has not been
+re-posted for `PEER_STALE_ALIVE_SECS` (default 900) is marked dead by
+the broker's stale-alive sweep. See
 [How peers are attributed](/concepts/peer-attribution#the-start-time-guard).
 
 The full record as returned by every `GET` below:
@@ -157,10 +160,11 @@ wrong question for a flow observed weeks ago — pod IPs are recycled
 constantly and `pod_details` keeps no ownership history.
 
 With `at`, candidates are filtered by the start-time guard
-`started_at IS NULL OR started_at <= at`, then ordered
-`is_dead ASC, started_at DESC NULLS LAST, time_stamp DESC`; the first
-wins. A pod with an unknown `started_at` is not excluded (there is
-nothing to compare) but ranks after any candidate with a known start.
+`started_at <= at`, then ordered `is_dead ASC, started_at DESC,
+time_stamp DESC`; the first wins. A pod with a `null` `started_at` is
+excluded: the controller re-posts every live pod every 60 s, so within
+a minute of the broker upgrade every live pod has one, and `null`
+means a ghost row or a Pending pod.
 So for the recycled-IP case in
 [How peers are attributed](/concepts/peer-attribution#why-by-ip-lookups-at-read-time-were-wrong),
 `?at=2026-07-23T…` never returns `autobrr` (started 2026-08-04); it
