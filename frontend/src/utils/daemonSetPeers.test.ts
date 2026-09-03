@@ -48,6 +48,14 @@ describe('isDaemonSetPeer', () => {
   test('Internet / Service placeholder members (no workload facts) are never hidden', () => {
     expect(isDaemonSetPeer(node('external-internet-in', [pod('1.2.3.4', { pod_namespace: 'internet' })]))).toBe(false);
   });
+  test('the Unattributed aggregate is never hidden, even if a member carries DaemonSet facts', () => {
+    const unattributed = {
+      ...node('external-unattributed-in', [pod('192.168.50.101', { pod_namespace: 'unattributed', workload_kind: 'DaemonSet', host_network: true })]),
+      externalNamespace: 'unattributed',
+    } as PodNodeData;
+    expect(isDaemonSetPeer(unattributed)).toBe(false);
+    expect(partitionDaemonSetPeers([unattributed], { show: false, focusedId: null, selectedId: null }).hidden).toEqual([]);
+  });
 });
 
 describe('partitionDaemonSetPeers', () => {

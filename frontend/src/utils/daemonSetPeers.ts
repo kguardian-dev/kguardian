@@ -1,4 +1,5 @@
 import type { PodInfo, PodNodeData } from '../types';
+import { UNATTRIBUTED_NAMESPACE } from './peerResolution';
 
 // "DaemonSets" map toggle.
 //
@@ -23,6 +24,9 @@ export function isDaemonSetOrHostNetworkPod(p: PodInfo | undefined | null): bool
  */
 export function isDaemonSetPeer(node: PodNodeData): boolean {
   if (!node.isExternal) return false;
+  // The Unattributed / Internet aggregates stand for bare IPs, not pods; a
+  // guarded-out former IP holder must stay visible whatever it once was.
+  if (node.externalNamespace === UNATTRIBUTED_NAMESPACE || node.externalNamespace === 'internet') return false;
   const members = node.pods && node.pods.length > 0 ? node.pods : [node.pod];
   return members.some(isDaemonSetOrHostNetworkPod);
 }
