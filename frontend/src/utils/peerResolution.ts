@@ -16,8 +16,11 @@
 //     stamped at capture time and never recomputed from the IP.
 //  2. By-IP fallback is guarded by the flow time. For a row with no stored
 //     peer (legacy rows; the broker could not resolve it), a pod may only be
-//     chosen if it did NOT start after the flow — a pod that did not exist
-//     yet cannot have been the peer. When the guard excludes every candidate
+//     chosen if its start is KNOWN and not after the flow — a pod that did
+//     not exist yet cannot have been the peer, and a record with no
+//     `started_at` is a ghost or a Pending pod (every live pod gets its
+//     start within a minute of the broker upgrade), which on cluster-00
+//     absorbed months of old flows. When the guard excludes every candidate
 //     the peer is "unattributed": a former holder of the IP the cluster no
 //     longer knows. It renders as an IP node / ipBlock and never as a pod
 //     selector.
@@ -28,10 +31,10 @@
 //
 // Precedence among surviving candidates mirrors the broker's resolver
 // (scratchpad/broker-api-v4.md): alive before dead, then newest
-// `started_at` (unknown start ranks last), then newest record, then
-// `<ns>/<name>`. The same algorithm runs in llm-bridge (`resolvePeerRow`)
-// and the advisor (`pkg/network/peer.go`); the goldens in
-// test/fixtures/generators/networkpolicy pin all three.
+// `started_at`, then newest record, then `<ns>/<name>`. The same algorithm
+// runs in llm-bridge (`resolvePeerRow`) and the advisor
+// (`pkg/network/peer.go`); the goldens in test/fixtures/generators/
+// networkpolicy pin all three.
 
 import type { NetworkTraffic, PodInfo, ServiceInfo } from '../types';
 
@@ -65,14 +68,15 @@ export function hasStoredPeer(row: Pick<NetworkTraffic, 'peer_kind'>): boolean {
 }
 
 /**
- * The start-time guard. True when the pod is KNOWN to have started after the
- * flow — both times must be known; an unknown `started_at` never excludes
- * (it only ranks last, see `rankPods`).
+ * The start-time guard. A pod may be the peer of a flow only when its
+ * `started_at` is KNOWN and not later than the flow time. An unknown start
+ * (NULL/absent) or an unparseable flow time disqualifies: there is nothing
+ * to prove the pod existed when the flow happened.
  */
-export function podStartedAfter(pod: Pick<PodInfo, 'started_at'>, flowTime: number | null): boolean {
+export function podEligibleAt(pod: Pick<PodInfo, 'started_at'>, flowTime: number | null): boolean {
   if (flowTime === null) return false;
   const started = parseBrokerTime(pod.started_at);
-  return started !== null && started > flowTime;
+  return started !== null && started <= flowTime;
 }
 
 /** Every IP a pod record holds: `pod_ip` plus the dual-stack `pod_ips`. */
@@ -85,7 +89,7 @@ export function podAddresses(pod: PodInfo): string[] {
 
 /** Lookup tables built once per pod/service listing. */
 export interface PeerIndex {
-  /** Every record (alive and dead) that holds the IP. */
+  /** Every record (alive and dead) that holds the IP, before the guard. */
   podsByIp: Map<string, PodInfo[]>;
   /** By pod name — the broker keys `pod_details` on the name alone. */
   podsByName: Map<string, PodInfo>;
@@ -123,8 +127,9 @@ export function buildPeerIndex(pods: readonly PodInfo[] | null | undefined, serv
 
 /**
  * Order candidates the way the broker does: alive first; then newest
- * `started_at` with unknown starts last; then newest record `time_stamp`;
- * then name, so the order is total and stable.
+ * `started_at` (unknown last — such records never pass the guard, this only
+ * keeps the order total); then newest record `time_stamp`; then
+ * `<ns>/<name>`.
  */
 export function rankPods(pods: readonly PodInfo[]): PodInfo[] {
   return [...pods].sort((a, b) => {
@@ -158,12 +163,12 @@ export interface ByIpSelection {
 
 /**
  * Pick the pod that held an IP at `flowTime` from the records that hold it
- * now or held it once. `flowTime` null (unparseable row time) disables the
- * guard — there is nothing to compare — and falls back to plain precedence.
+ * now or held it once: only candidates with a known start not after the
+ * flow qualify (`podEligibleAt`); none ⇒ guarded out.
  */
 export function selectPodByIp(candidates: readonly PodInfo[] | undefined, flowTime: number | null): ByIpSelection {
   if (!candidates || candidates.length === 0) return { pod: null, guardedOut: false };
-  const eligible = candidates.filter((p) => !podStartedAfter(p, flowTime));
+  const eligible = candidates.filter((p) => podEligibleAt(p, flowTime));
   if (eligible.length === 0) return { pod: null, guardedOut: true };
   return { pod: rankPods(eligible)[0], guardedOut: false };
 }

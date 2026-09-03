@@ -53,7 +53,9 @@ export function newerRow(a: string, b: string): boolean {
  * Redirect every pod identity that a Service identity in the same set
  * selects (same namespace, selector ⊆ labels) to that Service identity, so
  * traffic to a ClusterIP and to its backing pod IP collapse into one rule.
- * Mutates `rowIdentity` in place.
+ * Mutates `rowIdentity` in place. An unattributed row has no pod identity
+ * and is never redirected — a guarded-out pod must not come back through
+ * the Service that fronts it.
  */
 export function collapseToServiceIdentity(rowIdentity: Map<NetworkTraffic, TrafficIdentity>): void {
   const svcIdentities = Array.from(new Set(

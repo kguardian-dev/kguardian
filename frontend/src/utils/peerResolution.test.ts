@@ -7,7 +7,7 @@ import {
   peerGroupIdentity,
   peerKey,
   peerSelectorLabels,
-  podStartedAfter,
+  podEligibleAt,
   rankPods,
   resolvePeer,
   selectPodByIp,
@@ -58,18 +58,19 @@ describe('parseBrokerTime', () => {
 
 describe('start-time guard', () => {
   test('a pod started after the flow is excluded', () => {
-    expect(podStartedAfter(autobrr, parseBrokerTime('2026-05-21T10:00:00'))).toBe(true);
-    expect(podStartedAfter(autobrr, parseBrokerTime('2026-07-23T10:00:00'))).toBe(true);
+    expect(podEligibleAt(autobrr, parseBrokerTime('2026-05-21T10:00:00'))).toBe(false);
+    expect(podEligibleAt(autobrr, parseBrokerTime('2026-07-23T10:00:00'))).toBe(false);
   });
-  test('a pod started before the flow is a candidate', () => {
-    expect(podStartedAfter(autobrr, parseBrokerTime('2026-08-05T10:00:00'))).toBe(false);
+  test('a pod started before (or exactly at) the flow is a candidate', () => {
+    expect(podEligibleAt(autobrr, parseBrokerTime('2026-08-05T10:00:00'))).toBe(true);
+    expect(podEligibleAt(autobrr, parseBrokerTime('2026-08-04T09:12:41'))).toBe(true);
   });
-  test('unknown started_at never excludes (legacy pod record)', () => {
-    expect(podStartedAfter({ started_at: null }, parseBrokerTime('2026-05-21T10:00:00'))).toBe(false);
-    expect(podStartedAfter({}, parseBrokerTime('2026-05-21T10:00:00'))).toBe(false);
+  test('unknown started_at is EXCLUDED (ghost / Pending record)', () => {
+    expect(podEligibleAt({ started_at: null }, parseBrokerTime('2026-05-21T10:00:00'))).toBe(false);
+    expect(podEligibleAt({}, parseBrokerTime('2026-05-21T10:00:00'))).toBe(false);
   });
-  test('unparseable flow time disables the guard', () => {
-    expect(podStartedAfter(autobrr, null)).toBe(false);
+  test('unparseable flow time excludes every candidate', () => {
+    expect(podEligibleAt(autobrr, null)).toBe(false);
   });
 });
 
@@ -80,12 +81,14 @@ describe('selectPodByIp — broker precedence', () => {
     const alive = pod({ pod_name: 'new', pod_ip: '10.0.0.1', started_at: '2026-08-01T00:00:00' });
     expect(selectPodByIp([dead, alive], flow).pod).toBe(alive);
   });
-  test('among dead: newest started_at, NULL start ranks last', () => {
+  test('among dead: newest started_at; a NULL start is not a candidate at all', () => {
     const a = pod({ pod_name: 'a', pod_ip: '10.0.0.1', is_dead: true, started_at: '2026-08-01T00:00:00' });
     const b = pod({ pod_name: 'b', pod_ip: '10.0.0.1', is_dead: true, started_at: '2026-08-02T00:00:00' });
-    const legacy = pod({ pod_name: 'legacy', pod_ip: '10.0.0.1', is_dead: true, started_at: null, time_stamp: '2026-09-02T00:00:00' });
-    expect(rankPods([legacy, a, b]).map((p) => p.pod_name)).toEqual(['b', 'a', 'legacy']);
-    expect(selectPodByIp([legacy, a, b], flow).pod).toBe(b);
+    const ghost = pod({ pod_name: 'ghost', pod_ip: '10.0.0.1', is_dead: false, started_at: null, time_stamp: '2026-09-02T00:00:00' });
+    expect(rankPods([ghost, a, b]).map((p) => p.pod_name)).toEqual(['ghost', 'b', 'a']);
+    // The alive ghost would win on precedence; the guard removes it first.
+    expect(selectPodByIp([ghost, a, b], flow).pod).toBe(b);
+    expect(selectPodByIp([ghost], flow)).toEqual({ pod: null, guardedOut: true });
   });
   test('no candidates → nothing, not guarded out', () => {
     expect(selectPodByIp(undefined, flow)).toEqual({ pod: null, guardedOut: false });
@@ -160,7 +163,7 @@ describe('resolvePeer — autobrr / cmangos-database', () => {
   test('stored node peer = host-network pod', () => {
     const nodeExporter = pod({
       pod_name: 'node-exporter-abc12', pod_ip: '192.168.50.101', pod_namespace: 'monitoring',
-      workload_kind: 'DaemonSet', workload_name: 'node-exporter', host_network: true,
+      workload_kind: 'DaemonSet', workload_name: 'node-exporter', host_network: true, started_at: '2026-01-01T00:00:00',
     });
     const idx = buildPeerIndex([nodeExporter]);
     const peer = resolvePeer(row({
