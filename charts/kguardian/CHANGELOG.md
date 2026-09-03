@@ -1,5 +1,22 @@
 # Changelog
 
+## [1.21.1](https://github.com/kguardian-dev/kguardian/compare/chart/v1.21.0...chart/v1.21.1) (2026-09-03)
+
+
+### Bug Fixes
+
+* **deps:** update ghcr.io/kguardian-dev/kguardian/broker docker tag to v1.15.0 ([#1443](https://github.com/kguardian-dev/kguardian/issues/1443)) ([f606f91](https://github.com/kguardian-dev/kguardian/commit/f606f91f753e23fb1db656927a9fe1bab3bbadd8))
+* **deps:** update ghcr.io/kguardian-dev/kguardian/controller docker tag to v1.12.0 ([#1444](https://github.com/kguardian-dev/kguardian/issues/1444)) ([d9fb63e](https://github.com/kguardian-dev/kguardian/commit/d9fb63e5646a6192a63a627bdab91fb6bf0aaeee))
+* **deps:** update ghcr.io/kguardian-dev/kguardian/frontend docker tag to v1.14.0 ([#1445](https://github.com/kguardian-dev/kguardian/issues/1445)) ([75ae00b](https://github.com/kguardian-dev/kguardian/commit/75ae00b12ae3ca133feb0549e3f44da262fb391f))
+* **deps:** update ghcr.io/kguardian-dev/kguardian/llm-bridge docker tag to v1.9.0 ([#1446](https://github.com/kguardian-dev/kguardian/issues/1446)) ([252f7dd](https://github.com/kguardian-dev/kguardian/commit/252f7ddd046fab85d3edb1b37e1b22805b0a63d6))
+* resolve peer identity at ingest and guard by-IP attribution on pod start time ([#1447](https://github.com/kguardian-dev/kguardian/issues/1447)) ([fb6dfed](https://github.com/kguardian-dev/kguardian/commit/fb6dfed55a4be4990ba3f5358764ad3e50a0687b))
+* resolve peer identity at ingest and guard by-IP attribution on pod start time ([#1447](https://github.com/kguardian-dev/kguardian/issues/1447)) ([fb6dfed](https://github.com/kguardian-dev/kguardian/commit/fb6dfed55a4be4990ba3f5358764ad3e50a0687b))
+
+
+### Documentation
+
+* peer-attribution concepts page, API reference, UPGRADING. ([fb6dfed](https://github.com/kguardian-dev/kguardian/commit/fb6dfed55a4be4990ba3f5358764ad3e50a0687b))
+
 ## [1.21.0](https://github.com/kguardian-dev/kguardian/compare/chart/v1.20.0...chart/v1.21.0) (2026-09-03)
 
 

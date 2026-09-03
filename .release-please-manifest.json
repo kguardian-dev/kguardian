@@ -3,7 +3,7 @@
   "broker": "1.15.0",
   "frontend": "1.14.0",
   "advisor": "1.8.1",
-  "charts/kguardian": "1.21.0",
+  "charts/kguardian": "1.21.1",
   "llm-bridge": "1.9.0",
   "evaluator": "0.4.0"
 }
