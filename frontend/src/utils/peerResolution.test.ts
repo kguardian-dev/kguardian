@@ -113,7 +113,7 @@ describe('resolvePeer — autobrr / cmangos-database', () => {
     expect(peerKey(peer)).toBe('pod:home-system/autobrr-7d9c4b8f6-q2x9k');
   });
 
-  test('stored peer wins over the current IP holder, even when its record is gone', () => {
+  test('stored peer wins over the current IP holder; a gone record is a placeholder keyed as unattributed', () => {
     const peer = resolvePeer(row({
       time_stamp: '2026-07-23T10:00:00',
       peer_kind: 'pod', peer_namespace: 'game-servers', peer_name: 'cmangos-backup-29271840-x7k2p',
@@ -127,11 +127,12 @@ describe('resolvePeer — autobrr / cmangos-database', () => {
     expect(peer.pod.pod_namespace).toBe('game-servers');
     expect(peer.pod.workload_kind).toBe('CronJob');
     expect(peer.pod.is_dead).toBe(true);
-    // Placeholder: no labels → no selector may be built from it.
+    // Placeholder: no labels → no selector may be built from it, and it
+    // renders as the Unattributed node (never autobrr, never a named node).
+    expect(isPlaceholderPod(peer.pod)).toBe(true);
     expect(peerSelectorLabels(peer.pod)).toBeNull();
-    // Grouped under the CronJob, not the per-run pod name.
     expect(peerGroupIdentity(peer.pod)).toBe('cmangos-backup');
-    expect(peerKey(peer)).toBe('pod:game-servers/cmangos-backup-29271840-x7k2p');
+    expect(peerKey(peer)).toBe('unattributed:10.244.12.199');
   });
 
   test('stored peer whose record is present resolves to that record', () => {

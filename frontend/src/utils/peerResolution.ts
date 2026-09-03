@@ -173,11 +173,10 @@ export type PlaceholderPod = PodInfo & { placeholder: true };
 
 /**
  * Stand-in record for a stored peer whose `pod_details` row is gone
- * (retention pruned it) or whose uid no longer matches. The identity is
- * still trustworthy — it was resolved when the flow was captured — so the
- * map can group it under its workload; it has no labels and is flagged so
- * the generators treat it as unattributed (they never build a selector for
- * it — see trafficIdentity).
+ * (retention pruned it) or whose uid no longer matches. It keeps the stored
+ * identity for inspection but is flagged so every consumer — map, DataTable
+ * and both generators — renders it as UNATTRIBUTED (no labels, no node of
+ * its own, never a selector).
  */
 export function placeholderPod(row: NetworkTraffic): PlaceholderPod {
   return {
@@ -284,6 +283,9 @@ export function peerKey(peer: PeerResolution): string | null {
   switch (peer.kind) {
     case 'pod':
     case 'node':
+      // A stored peer whose record is gone is rendered unattributed
+      // everywhere (map and generators agree), so it keys like one.
+      if (isPlaceholderPod(peer.pod)) return `unattributed:${peer.pod.pod_ip}`;
       return `pod:${peer.pod.pod_namespace ?? ''}/${peer.pod.pod_name}`;
     case 'unattributed':
       return `unattributed:${peer.ip}`;
