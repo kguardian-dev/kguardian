@@ -1,5 +1,19 @@
 # Changelog
 
+## [1.9.0](https://github.com/kguardian-dev/kguardian/compare/llm-bridge/v1.8.1...llm-bridge/v1.9.0) (2026-09-03)
+
+
+### Features
+
+* align policy generation with the cluster CNI ([#1421](https://github.com/kguardian-dev/kguardian/issues/1421)) ([c0d9aa6](https://github.com/kguardian-dev/kguardian/commit/c0d9aa67a33c079387ae930d78a88fb130c64339))
+
+
+### Bug Fixes
+
+* Cilium policies carry the namespace label for cross-namespace peers ([515de3d](https://github.com/kguardian-dev/kguardian/commit/515de3db9c9607ea2381fad0ab394cb732b169b0))
+* record traffic to node IPs and render host-network peers correctly ([515de3d](https://github.com/kguardian-dev/kguardian/commit/515de3db9c9607ea2381fad0ab394cb732b169b0))
+* record traffic to node IPs and render host-network peers correctly ([#1431](https://github.com/kguardian-dev/kguardian/issues/1431)) ([515de3d](https://github.com/kguardian-dev/kguardian/commit/515de3db9c9607ea2381fad0ab394cb732b169b0))
+
 ## [1.8.1](https://github.com/kguardian-dev/kguardian/compare/llm-bridge/v1.8.0...llm-bridge/v1.8.1) (2026-09-02)
 
 
