@@ -32,6 +32,23 @@ fn find_dead_pods<'a>(db_pods: &'a [PodDetail], running: &HashSet<PodIdent>) -> 
 /// entry's pod_ip to send a precise mark-dead RPC to the broker
 /// rather than the prior name-only RPC that flagged every historical
 /// row (including a live restarted instance) dead.
+/// A pod counts as running for reconciliation only while it can still own
+/// its IP. Terminal pods (`Succeeded` / `Failed`) and pods with a deletion
+/// timestamp linger in the API server — a node drain on 2026-07-23 left 33
+/// Succeeded pods on one node for six weeks — but their IPs are released and
+/// recycled, and the watcher never re-posts them. Counting them as running
+/// kept their broker rows alive with no `started_at`, so old flows on their
+/// former IPs were attributed to them forever.
+fn pod_holds_an_ip(pod: &Pod) -> bool {
+    if pod.metadata.deletion_timestamp.is_some() {
+        return false;
+    }
+    !matches!(
+        pod.status.as_ref().and_then(|s| s.phase.as_deref()),
+        Some("Succeeded") | Some("Failed")
+    )
+}
+
 fn find_dead_pod_details<'a>(
     db_pods: &'a [PodDetail],
     running: &HashSet<PodIdent>,
@@ -123,6 +140,7 @@ async fn reconcile_pods(
     let running_pods: HashSet<PodIdent> = pod_list
         .items
         .iter()
+        .filter(|pod| pod_holds_an_ip(pod))
         .filter_map(|pod| {
             pod.metadata
                 .name
@@ -320,5 +338,35 @@ mod tests {
         assert_eq!(dead[0].pod_ip, "10.0.0.1");
         // pod_namespace also accessible for the log line.
         assert_eq!(dead[0].pod_namespace.as_deref(), Some("prod"));
+    }
+
+    #[test]
+    fn terminal_or_deleting_pods_do_not_count_as_running() {
+        use k8s_openapi::api::core::v1::PodStatus;
+        use k8s_openapi::apimachinery::pkg::apis::meta::v1::Time;
+        let with_phase = |phase: &str| Pod {
+            status: Some(PodStatus {
+                phase: Some(phase.into()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        assert!(pod_holds_an_ip(&with_phase("Running")));
+        assert!(pod_holds_an_ip(&with_phase("Pending")));
+        for phase in ["Succeeded", "Failed"] {
+            assert!(
+                !pod_holds_an_ip(&with_phase(phase)),
+                "{phase} must not count as running"
+            );
+        }
+
+        let mut deleting = with_phase("Running");
+        deleting.metadata.deletion_timestamp = Some(Time(k8s_openapi::jiff::Timestamp::now()));
+        assert!(!pod_holds_an_ip(&deleting));
+
+        assert!(
+            pod_holds_an_ip(&Pod::default()),
+            "unknown phase is treated as running (conservative)"
+        );
     }
 }
