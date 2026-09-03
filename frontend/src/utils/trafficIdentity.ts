@@ -5,7 +5,7 @@ import {
   buildPeerIndex,
   isPlaceholderPod,
   peerSelectorLabels,
-  podStartedAfter,
+  podEligibleAt,
   parseBrokerTime,
   resolvePeer,
   serviceSelector,
@@ -66,9 +66,9 @@ function serviceIdentity(serviceInfo: ServiceInfo): TrafficIdentity {
  *
  * `at` (a row's `time_stamp`) is passed to the broker as `?at=` so a broker
  * that supports it excludes pods started after the flow — and the same guard
- * is applied here on the returned record, because a broker predating `?at=`
- * ignores the parameter and returns the current holder. A guarded-out
- * result is `{ isExternal: true, unattributed }`.
+ * is applied here on the returned record (known start, not after the flow),
+ * because a broker predating `?at=` ignores the parameter and returns the
+ * current holder. A guarded-out result is `{ isExternal: true, unattributed }`.
  */
 export async function resolveTrafficIdentity(ip: string, at?: string): Promise<TrafficIdentity> {
   if (!ip) {
@@ -89,7 +89,7 @@ export async function resolveTrafficIdentity(ip: string, at?: string): Promise<T
   try {
     const podInfo = await apiClient.getPodDetailsByIP(ip, at);
     if (podInfo && podInfo.pod_name) {
-      if (at !== undefined && podStartedAfter(podInfo, parseBrokerTime(at))) {
+      if (at !== undefined && !podEligibleAt(podInfo, parseBrokerTime(at))) {
         return { isExternal: true, unattributed: { ip, at } };
       }
       return podIdentityFromRecord(podInfo);

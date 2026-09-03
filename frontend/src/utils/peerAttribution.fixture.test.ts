@@ -306,6 +306,49 @@ describe('generateNetworkPolicy — peer attribution', () => {
     ]);
   });
 
+  test('by-IP: an alive holder with NULL started_at (ghost / Pending) is not a candidate ⇒ unattributed', async () => {
+    listing = [cmangosDatabase, autobrrNoStart];
+    const yaml = policyToYAML(await generateNetworkPolicy(target(cmangosDatabase, [
+      ingressRow('10.244.12.199', '3306', '51234', '2026-09-01T10:00:00'),
+    ])));
+    expect(spec(parse(yaml)).ingress).toEqual([
+      { from: [{ ipBlock: { cidr: '10.244.12.199/32' } }], ports: [{ protocol: 'TCP', port: 3306 }] },
+    ]);
+    expect(yaml).not.toContain('autobrr');
+    expect(commentLines(yaml)).toEqual(['# unattributed peer 10.244.12.199 at 2026-09-01T10:00:00']);
+  });
+
+  test('a guarded-out pod backed by a Service is NOT redirected to the Service identity', async () => {
+    // autobrr's Service is also a peer; the May row from autobrr's IP must stay unattributed.
+    const autobrrSvc: ServiceInfo = { svc_ip: '10.96.0.20', svc_name: 'autobrr', svc_namespace: 'home-system',
+      service_spec: { spec: { selector: { app: 'autobrr' } } } };
+    services = { '10.96.0.20': autobrrSvc };
+    const yaml = policyToYAML(await generateNetworkPolicy(target(cmangosDatabase, [
+      ingressRow('10.244.12.199', '3306', '51234', '2026-05-21T08:30:00'),
+      egressRow('10.96.0.20', '7474', '2026-09-01T10:00:00'),
+    ])));
+    const doc = parse(yaml);
+    expect(spec(doc).ingress).toEqual([
+      { from: [{ ipBlock: { cidr: '10.244.12.199/32' } }], ports: [{ protocol: 'TCP', port: 3306 }] },
+    ]);
+    expect((spec(doc).egress as Rule[])[0].to).toEqual([
+      { namespaceSelector: { matchLabels: { 'kubernetes.io/metadata.name': 'home-system' } }, podSelector: { matchLabels: { app: 'autobrr' } } },
+    ]);
+    expect(commentLines(yaml)).toEqual(['# unattributed peer 10.244.12.199 at 2026-05-21T08:30:00']);
+  });
+
+  test('listing unavailable: a by-IP answer with NULL started_at is unattributed too', async () => {
+    listing = () => { throw new Error('broker down'); };
+    vi.mocked(apiClient.getPodDetailsByIP).mockResolvedValueOnce(autobrrNoStart);
+    const yaml = policyToYAML(await generateNetworkPolicy(target(cmangosDatabase, [
+      ingressRow('10.244.12.199', '3306', '51234', '2026-09-01T10:00:00'),
+    ])));
+    expect(spec(parse(yaml)).ingress).toEqual([
+      { from: [{ ipBlock: { cidr: '10.244.12.199/32' } }], ports: [{ protocol: 'TCP', port: 3306 }] },
+    ]);
+    expect(commentLines(yaml)).toEqual(['# unattributed peer 10.244.12.199 at 2026-09-01T10:00:00']);
+  });
+
   test('listing unavailable: by-IP fallback passes ?at= and still guards the (pre-?at=) broker answer', async () => {
     listing = () => { throw new Error('broker down'); };
     const yaml = policyToYAML(await generateNetworkPolicy(staleIpPeer));
