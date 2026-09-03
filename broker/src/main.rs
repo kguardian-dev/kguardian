@@ -5,12 +5,13 @@ use actix_web::middleware::from_fn;
 use actix_web::{get, web, App, HttpResponse, HttpServer};
 use api::{
     add_node_facts, add_pod_details, add_pods_batch, add_pods_syscalls, add_svc_details,
-    delete_seccomp_override, establish_connection, get_audit_verdicts, get_cluster_environment,
-    get_pod_by_ip, get_pod_by_name, get_pod_details, get_pod_syscall_name, get_pod_traffic,
-    get_pod_traffic_name, get_pods_by_node, get_seccomp_profile, get_seccomp_profile_file,
-    get_svc_by_ip, get_svc_details, get_version, list_seccomp_profiles, mark_pod_dead,
-    post_seccomp_node_status, put_seccomp_override, set_statement_timeout, spawn_retention,
-    spawn_version_check, AuditClient, StatementTimeoutCustomizer, VersionCheckState,
+    delete_seccomp_cr, establish_connection, export_seccomp_profile, export_seccomp_profile_post,
+    get_audit_verdicts, get_cluster_environment, get_pod_by_ip, get_pod_by_name, get_pod_details,
+    get_pod_syscall_name, get_pod_traffic, get_pod_traffic_name, get_pods_by_node,
+    get_seccomp_profile, get_seccomp_profile_file, get_svc_by_ip, get_svc_details, get_version,
+    list_seccomp_profiles, mark_pod_dead, post_seccomp_node_status, put_seccomp_cr,
+    set_statement_timeout, spawn_retention, spawn_version_check, AuditClient,
+    StatementTimeoutCustomizer, VersionCheckState,
 };
 
 use diesel::r2d2;
@@ -362,9 +363,11 @@ async fn main() -> Result<(), std::io::Error> {
             .service(list_seccomp_profiles)
             .service(get_seccomp_profile)
             .service(get_seccomp_profile_file)
+            .service(export_seccomp_profile)
+            .service(export_seccomp_profile_post)
             .service(post_seccomp_node_status)
-            .service(put_seccomp_override)
-            .service(delete_seccomp_override)
+            .service(put_seccomp_cr)
+            .service(delete_seccomp_cr)
             .service(get_pods_by_node)
             .service(get_audit_verdicts)
             .service(mark_pod_dead)

@@ -4,9 +4,10 @@ import type { PodNodeData } from '../types';
 import type { SeccompAction } from '../types/seccompProfile';
 import { policyToYAML } from '../utils/networkPolicyGenerator';
 import { ciliumPolicyToYAML } from '../utils/ciliumPolicyGenerator';
-import { profileToYAML } from '../utils/seccompProfileGenerator';
 import { useClusterEnvironment } from '../hooks/useClusterEnvironment';
 import { CniMismatchNotice } from './PolicyEditor/CniMismatchNotice';
+import { PartialCaptureWarning } from './Seccomp/PartialCaptureWarning';
+import { useWorkloadCapture } from '../hooks/useWorkloadCapture';
 import { SECCOMP_ACTIONS, ARCHITECTURES, SECCOMP_ACTION_DESCRIPTIONS } from '../types/seccompProfile';
 import { PolicyHeader } from './PolicyEditor';
 import { Modal } from './ui/Modal';
@@ -16,7 +17,9 @@ import {
   useSeccompProfileEditor,
   useSyscallAutocomplete,
   usePolicyExport,
+  SECCOMP_EXPORT_FORMATS,
   type PolicyType,
+  type SeccompExportFormat,
 } from '../hooks/policyEditor';
 
 interface NetworkPolicyEditorProps {
@@ -120,6 +123,12 @@ const NetworkPolicyEditor: React.FC<NetworkPolicyEditorProps> = ({ isOpen, onClo
     clearSyscallError,
   } = useSeccompProfileEditor({ pod, isOpen: isOpen && policyType === 'seccomp' });
 
+  // Which capture tier produced the syscalls this profile is built from. The
+  // same partial-capture warning as the workload seccomp view — a profile
+  // generated from a filtered tier is incomplete and will block the app.
+  const seccompCapture = useWorkloadCapture(pod, isOpen && policyType === 'seccomp');
+  const [seccompFormat, setSeccompFormat] = useState<SeccompExportFormat>('kguardian');
+
   // Syscall autocomplete
   const {
     syscallInputValues,
@@ -131,7 +140,7 @@ const NetworkPolicyEditor: React.FC<NetworkPolicyEditorProps> = ({ isOpen, onClo
   } = useSyscallAutocomplete();
 
   // Export functionality
-  const { copiedToClipboard, handleCopy, handleDownload } = usePolicyExport({
+  const { copiedToClipboard, handleCopy, handleDownload, getExportContent } = usePolicyExport({
     policyType,
     policy,
     ciliumPolicy,
@@ -140,6 +149,9 @@ const NetworkPolicyEditor: React.FC<NetworkPolicyEditorProps> = ({ isOpen, onClo
     podIdentity: pod?.pod.pod_identity || undefined,
     podNamespace: pod?.pod.pod_namespace || 'default',
     yamlView,
+    seccompFormat,
+    pod,
+    capture: seccompCapture,
   });
 
   if (!isOpen || !pod) return null;
@@ -172,9 +184,14 @@ const NetworkPolicyEditor: React.FC<NetworkPolicyEditorProps> = ({ isOpen, onClo
             podName={pod.pod.pod_name}
             podNamespace={pod.pod.pod_namespace}
             ciliumWarning={ciliumWarning}
+            seccompFormat={seccompFormat}
+            onSeccompFormatChange={setSeccompFormat}
           />
 
           {policyType === 'cilium' && cniMismatch && <CniMismatchNotice cni={cniMismatch} />}
+          {policyType === 'seccomp' && !isLoading && (
+            <PartialCaptureWarning capture={seccompCapture} compact className="mx-6 mt-4 rounded-surface" />
+          )}
 
           {/* Content */}
           <div className="flex-1 overflow-hidden flex">
@@ -195,14 +212,33 @@ const NetworkPolicyEditor: React.FC<NetworkPolicyEditorProps> = ({ isOpen, onClo
               </div>
             ) : yamlView ? (
               /* YAML View */
-              <div className="flex-1 p-6 overflow-auto">
+              <div className="flex-1 p-6 overflow-auto space-y-3">
+                {policyType === 'seccomp' && (
+                  <div className="flex flex-wrap items-center gap-1.5" role="radiogroup" aria-label="Seccomp export format">
+                    {SECCOMP_EXPORT_FORMATS.map((f) => (
+                      <button
+                        key={f.id}
+                        role="radio"
+                        aria-checked={seccompFormat === f.id}
+                        title={f.hint}
+                        onClick={() => setSeccompFormat(f.id)}
+                        className={`px-3 py-1.5 text-xs rounded-control border transition-colors ${
+                          seccompFormat === f.id ? 'bg-hubble-accent/20 border-hubble-accent text-hubble-accent' : 'border-hubble-border text-secondary hover:border-hubble-accent/50'
+                        }`}
+                      >
+                        {f.label}
+                      </button>
+                    ))}
+                    <span className="text-[11px] text-tertiary ml-1">{SECCOMP_EXPORT_FORMATS.find((f) => f.id === seccompFormat)?.hint}</span>
+                  </div>
+                )}
                 <pre className="bg-hubble-dark text-secondary p-4 rounded-lg font-mono text-sm overflow-x-auto">
                   {policyType === 'network' && policy
                     ? policyToYAML(policy)
                     : policyType === 'cilium' && ciliumPolicy
                     ? ciliumPolicyToYAML(ciliumPolicy)
                     : policyType === 'seccomp' && seccompProfile
-                    ? profileToYAML(seccompProfile, pod.pod.pod_identity || pod.pod.pod_name, pod.pod.pod_namespace || 'default')
+                    ? getExportContent() ?? ''
                     : ''}
                 </pre>
               </div>
@@ -2021,7 +2057,11 @@ const NetworkPolicyEditor: React.FC<NetworkPolicyEditorProps> = ({ isOpen, onClo
             <div className="flex items-center justify-between">
               <p className="text-xs text-tertiary">
                 {policyType === 'seccomp'
-                  ? 'This profile was generated from observed syscalls. Review and customize before applying.'
+                  ? seccompFormat === 'spo'
+                    ? 'Generated from observed syscalls, exported as a Security Profiles Operator SeccompProfile CR (requires SPO).'
+                    : seccompFormat === 'json'
+                      ? 'Generated from observed syscalls, exported as a raw seccomp JSON document.'
+                      : 'Generated from observed syscalls, exported as a kguardian.dev SeccompProfile CR. Commit it, apply it, and reference the node path in your pod template — kguardian never applies it for you.'
                   : 'This policy was generated from observed network traffic. Review and customize before applying.'}
               </p>
               <div className="flex gap-2">
@@ -2035,7 +2075,7 @@ const NetworkPolicyEditor: React.FC<NetworkPolicyEditorProps> = ({ isOpen, onClo
                   onClick={handleDownload}
                   className="px-4 py-2 text-sm bg-hubble-accent text-white rounded-lg hover:bg-hubble-accent-hover transition-colors"
                 >
-                  {policyType === 'seccomp' ? 'Save Profile' : 'Save Policy'}
+                  {policyType === 'seccomp' ? (seccompFormat === 'spo' ? 'Save SPO CR' : seccompFormat === 'json' ? 'Save JSON' : 'Save CR') : 'Save Policy'}
                 </button>
               </div>
             </div>

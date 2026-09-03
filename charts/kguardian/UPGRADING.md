@@ -1,5 +1,109 @@
 # Upgrading the kguardian Helm chart
 
+## Seccomp: capture tiers, and distribution is now driven by a `SeccompProfile` CRD
+
+This release changes what the controller traces by default and how a seccomp
+profile reaches a node. The previous chart's profile pipeline (broker-side
+publish state, override endpoints, hash-named files) was never exposed in the
+UI and is gone; read points 3–5 if you had `seccomp.distribute: true`.
+
+### 1. Default capture is now `full`
+
+The controller used to trace a fixed set of 56 security-relevant syscalls.
+It now traces **every** syscall by default (`syscalls.captureLevel: full`).
+The probe de-duplicates per pod network namespace inside BPF — each syscall
+crosses into userspace once per pod — so the CPU cost is close to what it
+was. Expect the broker's `pod_syscalls` table to grow (roughly 100–200 rows
+per pod instead of a few dozen).
+
+`full` is the only tier that yields a complete, enforceable profile. If you
+never intend to ship profiles and want the old footprint back:
+
+```yaml
+syscalls:
+  captureLevel: low      # exactly the previous 56 syscalls, by name
+```
+
+The other tiers are `high` (everything except hot-path noise), `medium`
+(`low` plus network / file-permission / process-lifecycle families) and
+`custom` (`syscalls.customList`, comma-joined into `SYSCALL_CUSTOM_LIST`).
+The value is case-insensitive; an invalid level fails `helm template`. A
+workload can raise its own tier above the cluster default with the
+pod-template annotation `kguardian.dev/syscall-capture: <level>`; it can
+never lower it. `kguardian.dev/seccomp-record: "true"` still works as an
+alias for `full`.
+
+### 2. arm64 nodes now trace the right syscalls
+
+Syscall numbers were hard-coded for x86_64, so the filtered set selected
+the **wrong** syscalls on arm64 nodes. Names are now resolved per
+architecture at controller startup via libseccomp. No action needed — but
+profiles generated from arm64 observations before this release should be
+treated as suspect and regenerated.
+
+### 3. Profiles reach nodes only through a `SeccompProfile` CR (behaviour change)
+
+Previously, with `seccomp.distribute: true`, every workload with an observed
+syscall set was written to every node automatically as
+`kguardian/<ns>/<kind>-<name>-<hash>.json`. The controller no longer polls the
+broker for profiles at all. It watches `SeccompProfile` objects
+(`kguardian.dev/v1alpha1`, namespaced) and writes one file per CR:
+`kguardian/<namespace>/<cr-name>.json`. Deleting the CR deletes the file.
+
+**After upgrading, nothing new is written until you apply a CR.** Files the
+old distributor wrote are left in place (the new controller never touches
+paths it does not own), so a workload referencing an old hash-named file
+keeps starting — but that file will never be updated again. To move over:
+
+1. Export the CR for the workload (UI → Export, or
+   `GET /seccomp/profiles/<ns>/<kind>/<name>/export`), review, commit, apply.
+2. Wait for `kubectl -n <ns> get seccompprofile <name>` to show `READY n/n`.
+3. Point the workload at `kguardian/<ns>/<cr-name>.json` and roll it.
+4. Prune the old `kguardian/<ns>/*-<hash>.json` files by hand if you like;
+   nothing depends on them any more.
+
+The exported CR defaults to `defaultAction: SCMP_ACT_LOG`. Enforcing is a
+one-line edit to the CR in git, not an API call.
+
+Upgrade the broker and controller images together. An older controller
+(chart ≤ 1.20) polling the new broker sees a summary without
+`localhostProfile` and with `hash` now meaning the observed set, so it
+distributes nothing and logs a parse warning every poll interval until it is
+upgraded; a new controller against an old broker gets `404` on
+`PUT /seccomp/crs` and has its `files` list ignored by node-status, so CR
+status stays `Pending`. Both are harmless and clear once the images match.
+
+### 4. The CRD is installed as a template: `seccomp.installCRDs` (default `true`)
+
+Helm applies `crds/` on first install and never upgrades them. The
+`SeccompProfile` CRD is instead rendered as a release resource (annotated
+`helm.sh/resource-policy: keep`), so schema changes ship with `helm upgrade`.
+Consequences:
+
+- `helm uninstall` leaves the CRD — and every `SeccompProfile` — in place.
+  Delete it by hand once no workload references a profile.
+- If you manage CRDs separately, set `seccomp.installCRDs: false` and apply
+  `charts/kguardian/files/kguardian.dev_seccompprofiles.yaml` yourself
+  before enabling `distribute`.
+- The two `AuditNetworkPolicy` CRDs still ship in `crds/` and install the old
+  way: they predate this pattern and their schema has not needed an upgrade;
+  `SeccompProfile` uses the template path because its schema is expected to
+  evolve and Helm cannot upgrade anything under `crds/`.
+
+With `seccomp.distribute: true` the controller ClusterRole gains
+`get/list/watch` on `seccompprofiles`, `patch` on `seccompprofiles/status`,
+and `list` on `nodes`. Nothing is added when distribution is off.
+
+### 5. Removed: `seccomp.overrides.*` and the broker lifecycle endpoints
+
+`seccomp.overrides.enabled` and `SECCOMP_OVERRIDES_ENABLED` are gone, along
+with `PUT/DELETE /seccomp/profiles/.../override` and the short-lived
+`publish` / `unpublish` / `enforce` / `audit` routes. Editing a profile is now
+editing the CR. The broker migration drops the `workload_seccomp_overrides`,
+`seccomp_override_audit` and `workload_seccomp_state` tables; none of them
+had a UI, so there is nothing to migrate. A stale `seccomp.overrides` key in
+your values file is ignored.
+
 ## SSO (opt-in): gate the UI behind OIDC via oauth2-proxy (`frontend.sso.*`)
 
 The kguardian UI and broker API are unauthenticated by default. In a **Gateway

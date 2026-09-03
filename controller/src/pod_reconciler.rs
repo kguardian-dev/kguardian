@@ -197,6 +197,7 @@ mod tests {
             workload_selector_labels: None,
             workload_kind: None,
             workload_name: None,
+            capture_level: None,
         }
     }
 

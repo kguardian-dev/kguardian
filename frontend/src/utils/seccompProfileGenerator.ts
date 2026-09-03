@@ -77,10 +77,17 @@ export function profileToJSON(profile: SeccompProfile): string {
   return JSON.stringify(profile, null, 2);
 }
 
+/**
+ * Render the profile as a Security Profiles Operator `SeccompProfile` CR
+ * (security-profiles-operator.x-k8s.io/v1beta1). This is NOT the raw seccomp
+ * JSON the kubelet loads from disk (see profileToJSON) — it needs the SPO
+ * installed to reconcile into a node file. kguardian's own distribution path
+ * (publish from the Seccomp Profiles view) needs no operator.
+ */
 export function profileToYAML(profile: SeccompProfile, resourceName: string, namespace: string): string {
   const yaml: string[] = [];
 
-  // Create a Kubernetes SeccompProfile CRD format
+  // Security Profiles Operator SeccompProfile CR
   yaml.push('apiVersion: security-profiles-operator.x-k8s.io/v1beta1');
   yaml.push('kind: SeccompProfile');
   yaml.push('metadata:');

@@ -1,5 +1,5 @@
 import { useState, useCallback, useEffect, useMemo, useRef, lazy, Suspense } from 'react';
-import { Bot, RefreshCw, Share2, ShieldAlert, LayoutDashboard, FileCode, Boxes, Search } from 'lucide-react';
+import { Bot, RefreshCw, Share2, ShieldAlert, LayoutDashboard, FileCode, Boxes, Search, Lock } from 'lucide-react';
 import NetworkGraph from './components/NetworkGraph';
 import { FindingsView } from './components/FindingsView';
 import { CommandPalette, type Command } from './components/CommandPalette';
@@ -20,6 +20,7 @@ const AuditVerdictsPanel = lazy(() => import('./components/AuditVerdictsPanel'))
 const PolicyBuilderModal = lazy(() =>
   import('./components/PolicyBuilderModal').then((m) => ({ default: m.PolicyBuilderModal })),
 );
+const SeccompProfilesView = lazy(() => import('./components/SeccompProfilesView'));
 import { Button } from './components/ui/Button';
 import { EmptyState } from './components/ui/EmptyState';
 import { GraphSkeleton } from './components/ui/Skeleton';
@@ -29,7 +30,7 @@ import { useNamespaces } from './hooks/useNamespaces';
 import type { PodNodeData } from './types';
 import { UI_DIMENSIONS } from './constants/ui';
 
-const ROUTES = ['map', 'findings'] as const;
+const ROUTES = ['map', 'findings', 'seccomp'] as const;
 
 function App() {
   const { settings, updateSettings } = useSettings();
@@ -232,6 +233,7 @@ function App() {
     const list: Command[] = [
       { id: 'view-map', group: 'Views', label: 'Network Map', icon: Share2, keywords: 'graph traffic', run: () => setView('map') },
       { id: 'view-findings', group: 'Views', label: 'Findings', icon: LayoutDashboard, keywords: 'risk signals triage', run: () => setView('findings') },
+      { id: 'view-seccomp', group: 'Views', label: 'Seccomp Profiles', icon: Lock, keywords: 'syscall publish enforce capture', run: () => setView('seccomp') },
       { id: 'tool-policy', group: 'Tools', label: 'Policy Builder', icon: FileCode, keywords: 'networkpolicy seccomp cilium generate', run: openPolicyBuilder },
       { id: 'tool-audit', group: 'Tools', label: 'Audit Verdicts', icon: ShieldAlert, keywords: 'would deny', run: () => setIsAuditPanelOpen(true) },
       { id: 'tool-ai', group: 'Tools', label: 'AI Assistant', icon: Bot, keywords: 'chat ask', run: () => setIsAIAssistantOpen(true) },
@@ -266,6 +268,11 @@ function App() {
       onClick: () => setView('map'),
     },
     {
+      id: 'seccomp', label: 'Seccomp Profiles', icon: Lock, group: 'Views',
+      hint: 'Publish, enforce, and edit per-workload seccomp profiles',
+      active: view === 'seccomp', onClick: () => setView('seccomp'),
+    },
+    {
       id: 'policy', label: 'Policy Builder', icon: FileCode, group: 'Tools',
       hint: 'Generate a NetworkPolicy or Seccomp profile for a workload',
       active: isPolicyBuilderOpen, onClick: openPolicyBuilder,
@@ -287,11 +294,11 @@ function App() {
     [],
   );
 
-  const sectionTitle = view === 'findings' ? 'Findings' : 'Network Map';
+  const sectionTitle = view === 'findings' ? 'Findings' : view === 'seccomp' ? 'Seccomp Profiles' : 'Network Map';
   const sectionSubtitle =
-    view === 'findings'
-      ? `Namespace ${effectiveNamespace}`
-      : `Namespace ${effectiveNamespace} · ${pods.length} pods`;
+    view === 'map'
+      ? `Namespace ${effectiveNamespace} · ${pods.length} pods`
+      : `Namespace ${effectiveNamespace}`;
 
   return (
     <div className="flex h-screen bg-hubble-darker">
@@ -344,7 +351,11 @@ function App() {
 
         {/* Main Content */}
       <div className="flex-1 flex flex-col overflow-hidden">
-        {view === 'findings' ? (
+        {view === 'seccomp' ? (
+          <Suspense fallback={null}>
+            <SeccompProfilesView namespace={effectiveNamespace} />
+          </Suspense>
+        ) : view === 'findings' ? (
           <FindingsView
             pods={pods}
             namespace={effectiveNamespace}

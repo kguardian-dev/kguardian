@@ -78,7 +78,22 @@ pub struct PodDetail {
     pub workload_kind: Option<String>,
     #[serde(default)]
     pub workload_name: Option<String>,
+    /// Syscall capture tier the controller ran for this pod when it
+    /// last upserted the row: `full` | `high` | `medium` | `low` |
+    /// `custom`. `None` from a controller predating tiers (the JSON key
+    /// is simply absent) or when the posted value is not one of the
+    /// five (normalised away in `upsert_pod_details`). Capture
+    /// completeness (every contributing pod `full`) feeds the CR's
+    /// `CaptureComplete` condition, the export warning and drift
+    /// reporting; `None` counts as `low` there — a profile is never
+    /// assumed complete. Positional, so it stays last.
+    #[serde(default)]
+    pub capture_level: Option<String>,
 }
+
+/// The syscall capture tiers, exactly as the controller and chart spell
+/// them. Anything else on the wire is stored as NULL (unknown).
+pub const CAPTURE_LEVELS: [&str; 5] = ["full", "high", "medium", "low", "custom"];
 
 #[derive(
     Default,

@@ -1,0 +1,31 @@
+---
+title: "Policy as Code"
+description: "kguardian generates and audits; you commit and apply; nothing is enforced on your behalf"
+icon: "code-branch"
+---
+
+Every security artefact kguardian produces follows the same rule: **kguardian
+observes and recommends; you own the resource; kguardian never mutates cluster
+or node state on its own.**
+
+| | kguardian generates | you commit and apply | kguardian audits |
+|---|---|---|---|
+| Network policy | `NetworkPolicy` / `CiliumNetworkPolicy` from observed flows | the policy, or first an [`AuditNetworkPolicy`](/concepts/audit-network-policy) | would-deny verdicts on live traffic |
+| Seccomp | a [`SeccompProfile`](/reference/crds/seccompprofile) CR from observed syscalls | the CR; the controller places the file it describes | capture completeness and drift in the CR's status |
+
+Concretely:
+
+- **The generated manifest is the deliverable.** The CLI writes YAML to a
+  directory; the UI and API export it. Neither applies anything.
+- **The resource you apply is the source of truth.** For network policies that
+  is the policy object your CNI enforces. For seccomp it is the `SeccompProfile`
+  CR — the file on each node is a pure rendering of its `spec`, with nothing
+  observed mixed in. Version it, review it, roll it back, all in git.
+- **kguardian acts only on what you applied.** The evaluator reports what an
+  `AuditNetworkPolicy` *would* deny. The controller writes a seccomp file only
+  because a CR exists, and removes it only because you deleted the CR.
+- **Drift is a signal, not an action.** When observed behaviour diverges from
+  the committed resource — a flow a policy would deny, a syscall a profile
+  does not allow — kguardian tells you. Re-export, diff, decide.
+
+Future resource types follow the same shape.

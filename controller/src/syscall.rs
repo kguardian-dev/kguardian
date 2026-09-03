@@ -1,6 +1,7 @@
+use crate::capture_tiers::native_scmp_arch;
 use crate::models::{lookup_pod, ContainerMap};
 use chrono::Utc;
-use libseccomp::{ScmpArch, ScmpSyscall};
+use libseccomp::ScmpSyscall;
 use moka::future::Cache;
 use serde_json::json;
 use std::collections::HashSet;
@@ -157,11 +158,10 @@ pub async fn send_syscall_cache_periodically() -> Result<(), Error> {
 }
 
 fn get_syscall_name(syscall_number: i32) -> Option<String> {
-    let arch = if cfg!(target_arch = "x86_64") {
-        ScmpArch::X8664
-    } else if cfg!(target_arch = "aarch64") {
-        ScmpArch::Aarch64
-    } else {
+    // Same arch selection the tier allowlists use at startup
+    // (capture_tiers::native_scmp_arch), so a number the probe filtered
+    // by name resolves back to that same name here.
+    let Some(arch) = native_scmp_arch() else {
         eprintln!("Unsupported architecture");
         return None;
     };

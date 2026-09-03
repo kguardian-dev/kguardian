@@ -1,3 +1,4 @@
+use crate::capture_tiers::{CaptureLevel, ResolvedTiers};
 use crate::models::PodRegistration;
 use crate::network::netpolicy_drop::NetpolicyDropSkelBuilder;
 use crate::network::network_probe::NetworkProbeSkelBuilder;
@@ -82,95 +83,51 @@ fn classify_poll_error(consecutive: u32, max: u32) -> PollErrorAction {
     }
 }
 
-/// Populate the syscall allowlist with security-relevant syscalls
-/// This dramatically reduces overhead by filtering out noisy syscalls
-fn populate_syscall_allowlist(syscall_map: &libbpf_rs::Map) -> Result<()> {
-    // Security-relevant syscalls to monitor
-    let security_syscalls: Vec<u32> = vec![
-        // Process execution
-        59,  // execve
-        322, // execveat
-        57,  // fork
-        58,  // vfork
-        56,  // clone
-        231, // exit_group
-        // Network operations
-        41,  // socket
-        42,  // connect
-        43,  // accept
-        288, // accept4
-        49,  // bind
-        50,  // listen
-        46,  // sendmsg
-        47,  // recvmsg
-        44,  // sendto
-        45,  // recvfrom
-        // File operations
-        2,   // open
-        257, // openat
-        318, // openat2
-        85,  // creat
-        87,  // unlink
-        263, // unlinkat
-        82,  // rename
-        264, // renameat
-        316, // renameat2
-        83,  // mkdir
-        84,  // rmdir
-        88,  // symlink
-        266, // symlinkat
-        // Privilege operations
-        105, // setuid
-        106, // setgid
-        117, // setresuid
-        119, // setresgid
-        114, // setregid
-        113, // setreuid
-        157, // prctl
-        101, // ptrace
-        155, // pivot_root
-        165, // mount
-        166, // umount2
-        167, // swapon
-        168, // swapoff
-        // Module loading
-        175, // init_module
-        313, // finit_module
-        176, // delete_module
-        // Capabilities
-        126, // capset
-        // BPF operations (for security monitoring)
-        321, // bpf
-        // Namespace operations
-        308, // setns
-        272, // unshare
-        // Time manipulation
-        227, // clock_settime
-        228, // clock_adjtime
-        // Keyring operations
-        248, // keyctl
-        // Security-sensitive I/O
-        78,  // getdents
-        217, // getdents64
-        0,   // read (for /proc, /sys reads)
-        1,   // write (for sensitive writes)
-    ];
-
-    info!(
-        "Populating syscall allowlist with {} security-relevant syscalls",
-        security_syscalls.len()
-    );
-
-    for &syscall_nr in &security_syscalls {
-        syscall_map.update(
-            &syscall_nr.to_ne_bytes(),
-            &1u32.to_ne_bytes(),
-            MapFlags::ANY,
-        )?;
+/// Fill one tier's allowlist map with already-resolved syscall numbers.
+/// Value type is `u8` to match `KG_ALLOWLIST` in syscall.bpf.c.
+fn populate_allowlist(map: &libbpf_rs::Map, level: CaptureLevel, nrs: &[u32]) -> Result<()> {
+    for nr in nrs {
+        map.update(&nr.to_ne_bytes(), &1u8.to_ne_bytes(), MapFlags::ANY)?;
     }
-
-    info!("Syscall allowlist populated successfully");
+    info!(
+        tier = %level,
+        entries = nrs.len(),
+        "syscall allowlist map populated"
+    );
     Ok(())
+}
+
+/// Populate every non-full tier map from the names resolved at startup
+/// (see `capture_tiers`). Numbers were resolved for THIS architecture by
+/// libseccomp — the previous hard-coded list was x86_64-only and selected
+/// unrelated syscalls on arm64.
+///
+/// Failure is per map and non-fatal: the other tiers still load, and the
+/// `full` tier needs no map at all. A tier whose map failed to populate
+/// captures nothing, so it is logged at error rather than silently
+/// falling back to unfiltered capture (which would undo the operator's
+/// choice of tier).
+fn populate_tier_maps(maps: &crate::syscall::sycallprobe::SyscallMaps<'_>, tiers: &ResolvedTiers) {
+    let plan: [(
+        &libbpf_rs::Map,
+        CaptureLevel,
+        &std::collections::BTreeSet<u32>,
+    ); 4] = [
+        (&*maps.allowlist_high, CaptureLevel::High, &tiers.high),
+        (&*maps.allowlist_medium, CaptureLevel::Medium, &tiers.medium),
+        (&*maps.allowlist_low, CaptureLevel::Low, &tiers.low),
+        (&*maps.allowlist_custom, CaptureLevel::Custom, &tiers.custom),
+    ];
+    for (map, level, nrs) in plan {
+        let nrs: Vec<u32> = nrs.iter().copied().collect();
+        if let Err(e) = populate_allowlist(map, level, &nrs) {
+            tracing::error!(
+                tier = %level,
+                "failed to populate syscall allowlist map: {e}; workloads at this tier will \
+                 capture NO syscalls until the controller restarts"
+            );
+        }
+    }
 }
 
 /// Where `sym` lives according to a `/proc/kallsyms` dump: `None` if
@@ -245,6 +202,7 @@ pub fn ebpf_handle(
     mut rx: Receiver<PodRegistration>,
     mut ignore_ips: Receiver<String>,
     ignore_daemonset_traffic: bool,
+    tiers: ResolvedTiers,
 ) -> JoinHandle<Result<(), Error>> {
     task::spawn_blocking(move || {
         // The IPv6 UDP twins target udpv6_sendmsg; on a kernel where
@@ -309,11 +267,9 @@ pub fn ebpf_handle(
             .load()
             .map_err(|e| Error::Custom(format!("Failed to load syscall eBPF: {}", e)))?;
 
-        // Populate syscall allowlist BEFORE attaching to reduce overhead immediately
-        if let Err(e) = populate_syscall_allowlist(&syscall_sk.maps.allowed_syscalls) {
-            eprintln!("Warning: Failed to populate syscall allowlist: {}", e);
-            eprintln!("Continuing without allowlist (will trace all syscalls)");
-        }
+        // Populate the tier allowlists BEFORE attaching so the very first
+        // events are already filtered by tier.
+        populate_tier_maps(&syscall_sk.maps, &tiers);
 
         syscall_sk
             .attach()
@@ -487,9 +443,9 @@ pub fn ebpf_handle(
                 drained += 1;
                 // The same flags value goes into all three maps. The
                 // network and netpolicy probes only test the key for
-                // presence and POD_TRACKED is always set, so the extra
-                // bits are inert for them; the syscall probe reads
-                // RECORD_ALL_SYSCALLS out of its instance.
+                // presence and POD_TRACKED is always set, so the tier
+                // and generation bits are inert for them; the syscall
+                // probe reads both out of its instance.
                 let key = reg.netns_inode.to_ne_bytes();
                 let val = reg.flags.to_ne_bytes();
                 let _ = network_sk

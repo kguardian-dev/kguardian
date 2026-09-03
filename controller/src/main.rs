@@ -69,6 +69,21 @@ async fn main() -> Result<(), Error> {
         true,
     );
 
+    // Syscall capture tier (SYSCALL_CAPTURE_LEVEL, default full) and the
+    // names behind `custom` (SYSCALL_CUSTOM_LIST). Resolved to numbers
+    // for THIS architecture here, once, and logged, so an operator can
+    // see what each tier means on the node. Every tier is resolved
+    // regardless of the cluster default because a pod annotation can
+    // raise any workload to any tier.
+    let capture_config = kguardian::capture_tiers::CaptureConfig::from_env();
+    info!(
+        level = %capture_config.level,
+        custom_names = capture_config.custom_names.len(),
+        "syscall capture level"
+    );
+    let cluster_capture_level = capture_config.level;
+    let resolved_tiers = capture_config.resolve();
+
     let (tx, rx) = mpsc::channel(1000); // Use tokio's mpsc channel
 
     let (sender_ip, recv_ip) = mpsc::channel(1000); // Use tokio's mpsc channel
@@ -89,6 +104,7 @@ async fn main() -> Result<(), Error> {
         &excluded_namespaces,
         sender_ip,
         ignore_daemonset_traffic,
+        cluster_capture_level,
     );
     info!("Ignoring namespaces: {:?}", excluded_namespaces);
 
@@ -113,6 +129,7 @@ async fn main() -> Result<(), Error> {
         rx,
         recv_ip,
         ignore_daemonset_traffic,
+        resolved_tiers,
     );
 
     let syscall_recorder = send_syscall_cache_periodically();

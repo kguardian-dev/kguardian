@@ -36,3 +36,5 @@ libseccomp = "0.4"
 moka = { version = "0.12.13", features = ["future"]}
 dashmap = "6.1"
 rustls = { version = "0.23", features = ["ring"] } 
+serde_norway = "0.9"
+schemars = "1"

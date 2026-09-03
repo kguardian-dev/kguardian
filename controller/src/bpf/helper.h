@@ -25,14 +25,32 @@
 // marker. Userspace (controller/src/bpf.rs) writes it from the
 // PodRegistration flags the pod watcher computes; the network and
 // netpolicy probes only test the key for presence, but the syscall
-// probe reads KG_FLAG_RECORD_ALL_SYSCALLS to decide whether to bypass
-// the allowed_syscalls filter for that netns. Keep these bit positions
-// in sync with `mod pod_flags` in controller/src/models.rs.
+// probe reads the capture tier out of it to pick an allowlist map (or
+// none). Keep these bit positions in sync with `mod pod_flags` in
+// controller/src/models.rs and `CaptureLevel::tier_index` in
+// controller/src/capture_tiers.rs.
 //
-//   bit 0  netns belongs to a pod kube-guardian tracks (always set)
-//   bit 1  capture every syscall for this netns, ignoring the allowlist
-#define KG_FLAG_POD_TRACKED          (1u << 0)
-#define KG_FLAG_RECORD_ALL_SYSCALLS  (1u << 1)
+//   bit 0      netns belongs to a pod kube-guardian tracks (always set)
+//   bits 1-3   capture tier: 0=full 1=high 2=medium 3=low 4=custom
+//   bits 4-31  registration generation (see KG_GEN_SHIFT)
+#define KG_FLAG_POD_TRACKED  (1u << 0)
+#define KG_TIER_SHIFT        1
+#define KG_TIER_MASK         0x7u
+#define KG_TIER_FULL         0
+#define KG_TIER_HIGH         1
+#define KG_TIER_MEDIUM       2
+#define KG_TIER_LOW          3
+#define KG_TIER_CUSTOM       4
+// Generation: a per-registration value derived from the pod UID. The
+// kernel hands out netns inode numbers from an IDA, so a pod that dies
+// frees its number for the next pod on the node to reuse. The syscall
+// probe's per-netns dedup would then suppress, for the NEW pod, every
+// syscall the OLD pod had already reported — silently punching holes
+// in a seccomp profile. Folding the generation into the dedup key
+// makes a reused inode start from a clean slate.
+#define KG_GEN_SHIFT         4
+#define KG_TIER_OF(flags)    (((flags) >> KG_TIER_SHIFT) & KG_TIER_MASK)
+#define KG_GEN_OF(flags)     ((flags) >> KG_GEN_SHIFT)
 
 // Use LRU_HASH for automatic eviction of stale entries
 struct
@@ -71,14 +89,6 @@ struct
     __type(key, struct ignore_ip_key);
     __type(value, u32);
 } ignore_ips SEC(".maps");
-
-struct
-{
-    __uint(type, BPF_MAP_TYPE_HASH);
-    __uint(max_entries, 512);
-    __type(key, u32);
-    __type(value, u32);
-} allowed_syscalls SEC(".maps");
 
 // Compare two 16-byte addresses.
 //

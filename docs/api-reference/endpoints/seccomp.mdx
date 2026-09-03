@@ -1,26 +1,26 @@
 ---
 title: "Seccomp Endpoints"
-description: "Per-workload seccomp profiles, distribution readiness, overrides, and node status"
+description: "Observed syscall sets per workload, capture completeness, SeccompProfile export, CR mirror, and node status"
 icon: "shield-halved"
 ---
 
-These endpoints expose the per-workload seccomp profiles the broker builds from
-observed syscalls. See the
-[Distributing Seccomp Profiles](/guides/distributing-seccomp-profiles) guide for
-the workflow.
-
-Every rendered profile is the **effective** profile:
-`(observed ∪ override.add) \ override.remove`, with `defaultAction` from the
-override or `SCMP_ACT_LOG`. The `hash` names that effective set — it changes when
-the observed union grows *or* when an override changes.
+These endpoints expose the per-workload syscall sets the broker aggregates
+from the controller's observations, and turn them into `SeccompProfile`
+manifests. The broker holds **no** profile lifecycle state: whether a profile
+is deployed, in audit or enforcing is decided entirely by the `SeccompProfile`
+CR you apply (see the [CRD reference](/reference/crds/seccompprofile) and the
+[distribution guide](/guides/distributing-seccomp-profiles)). The read
+endpoints are open; the write endpoints (`PUT`/`DELETE /seccomp/crs/…`,
+`POST /seccomp/node-status`) are for the controller and require the broker
+bearer token when `broker.auth.enabled` is set.
 
 ---
 
 ## GET /seccomp/profiles
 
-Every workload that has an aggregated syscall set, with its effective hash,
-profile path, distribution readiness, and any override. This is the list the
-controller's distributor polls and the UI renders.
+Every workload with an observed syscall set: the set, its capture
+completeness, and — if a `SeccompProfile` CR references the workload — that
+CR's deployment state and drift against the observed set.
 
 ### Response
 
@@ -31,59 +31,88 @@ controller's distributor polls and the UI renders.
     "kind": "Deployment",
     "name": "web",
     "hash": "a1b2c3d4e5f60718",
-    "localhostProfile": "kguardian/prod/deployment-web-a1b2c3d4e5f60718.json",
-    "defaultAction": "SCMP_ACT_LOG",
     "syscallCount": 73,
     "architectures": ["SCMP_ARCH_X86_64"],
-    "distribution": { "ready": 12, "total": 12, "state": "Ready" },
+    "updatedAt": "2026-09-02T10:15:00.400499",
+    "capture": {
+      "level": "full",
+      "complete": true,
+      "pods": [
+        { "name": "web-7d9c8b6f4-abc12", "level": "full" },
+        { "name": "web-7d9c8b6f4-def34", "level": "full" }
+      ],
+      "more": 0,
+      "incomplete": 0
+    },
+    "captureComplete": true,
+    "suggestedName": "deployment-web",
+    "crCount": 1,
+    "cr": {
+      "name": "deployment-web",
+      "defaultAction": "SCMP_ACT_LOG",
+      "hash": "a1b2c3d4e5f60718",
+      "syscallCount": 71,
+      "architectures": ["SCMP_ARCH_X86_64"],
+      "localhostProfile": "kguardian/prod/deployment-web.json",
+      "distribution": { "ready": 12, "total": 12, "state": "Ready", "present": 12 },
+      "statusDistribution": { "ready": 12, "total": 12, "state": "Ready" },
+      "drift": { "missing": ["clock_adjtime", "clock_settime"], "extra": [], "inSync": false },
+      "updatedAt": "2026-09-03T01:00:00"
+    },
     "recommendedSnippet": {
       "seccompProfile": {
         "type": "Localhost",
-        "localhostProfile": "kguardian/prod/deployment-web-a1b2c3d4e5f60718.json"
+        "localhostProfile": "kguardian/prod/deployment-web.json"
       }
-    },
-    "override": null,
-    "updatedAt": "2026-09-02T10:15:00"
+    }
   }
 ]
 ```
 
-`distribution.state` is `Ready` when every live node (`total`) reports the
-current file, `Partial` when some do, and `Pending` when none do or no node has
-reported yet.
-
-When an override is set, `override` is:
-
-```json
-{
-  "add": ["clock_settime"],
-  "remove": [],
-  "defaultAction": "SCMP_ACT_ERRNO",
-  "note": "weekly cron rotates the cert",
-  "updatedBy": "alice",
-  "updatedAt": "2026-09-03T09:00:00",
-  "revision": 2
-}
-```
+- `hash` — fingerprint of the observed set rendered with `SCMP_ACT_LOG`;
+  changes when the union grows.
+- `capture.level` — the **lowest** capture tier across every pod that
+  contributed syscalls to the union, dead pods included: `full`, `high`,
+  `medium`, `low`, `custom`, or `unknown` (a contributor from a controller that
+  predates tiers, or no contributors). `capture.complete` (mirrored as
+  `captureComplete`) is `true` only when there is at least one contributor and
+  every one is `full`; `custom` is never complete. `capture.pods` lists
+  contributors worst-first, capped at 20, with `more` for the remainder and
+  `incomplete` the number of contributors below `full`.
+- `suggestedName` — `<kind lowercased>-<name>`, the `metadata.name` the export
+  uses unless overridden.
+- `crCount` — CRs whose `workloadRef` matches this workload; `0` ⇒ `cr` is
+  `null`. When several match, `cr` is the most recently updated one.
+- `cr` — the mirrored `SeccompProfile`: `defaultAction` (`SCMP_ACT_LOG` ⇒
+  audit, anything else ⇒ enforcing), `hash` of the file it renders to (the
+  CR's `status.hash`), the count of syscalls its `SCMP_ACT_ALLOW` rules name,
+  `architectures`, and the `localhostProfile` path. `distribution` is
+  **broker-computed** from node-status reports: `ready` = nodes reporting the
+  path with a hash equal to `cr.hash`, `present` = nodes reporting the path at
+  all, `total` = live nodes. `statusDistribution` is the CR's own
+  `status.distribution` as the controllers last mirrored it (`null` if not yet
+  written). `drift.missing` = observed but not allowed by the CR,
+  `drift.extra` = allowed by the CR but never observed, `inSync` = `missing`
+  is empty.
+- `recommendedSnippet` — `kguardian/<namespace>/<cr.name>.json` when a CR
+  exists, else `<suggestedName>`.
 
 ---
 
 ## GET /seccomp/profiles/{namespace}/{kind}/{name}
 
-One workload's summary (as above) plus the rendered effective profile document.
-
-### Response
+One workload's summary (all fields above) plus the observed set rendered as a
+seccomp document with `SCMP_ACT_LOG` — a preview, not what is on any node.
 
 ```json
 {
-  "namespace": "prod",
-  "kind": "Deployment",
-  "name": "web",
+  "namespace": "prod", "kind": "Deployment", "name": "web",
   "hash": "a1b2c3d4e5f60718",
-  "localhostProfile": "kguardian/prod/deployment-web-a1b2c3d4e5f60718.json",
-  "defaultAction": "SCMP_ACT_LOG",
-  "distribution": { "ready": 12, "total": 12, "state": "Ready" },
-  "override": null,
+  "capture": { "level": "full", "complete": true, "pods": [ ... ], "more": 0 },
+  "captureComplete": true,
+  "suggestedName": "deployment-web",
+  "crCount": 0,
+  "cr": null,
   "profile": {
     "defaultAction": "SCMP_ACT_LOG",
     "architectures": ["SCMP_ARCH_X86_64"],
@@ -94,105 +123,154 @@ One workload's summary (as above) plus the rendered effective profile document.
 }
 ```
 
-`404` if the workload has no aggregate yet.
+`404` if the workload has no observed set yet.
+
+---
+
+## GET /seccomp/profiles/{namespace}/{kind}/{name}/export
+
+The `SeccompProfile` manifest for the observed set, ready to commit.
+`Content-Type: application/yaml`.
+
+### Query
+
+| Param | Default | Effect |
+|-------|---------|--------|
+| `name` | `suggestedName` | `metadata.name` of the CR (DNS-1123, ≤ 253) |
+| `defaultAction` | `SCMP_ACT_LOG` | one of `SCMP_ACT_LOG`, `SCMP_ACT_ERRNO`, `SCMP_ACT_KILL`, `SCMP_ACT_KILL_PROCESS` |
+| `format` | `yaml` | `json` returns the same object (no comments) as `application/json` |
+
+Bad values are a `400`; `404` if the workload has no observed set.
+
+### Response — `200`
+
+```yaml
+# kguardian SeccompProfile export
+# workload: prod Deployment/web
+# observed syscalls: 73 (x86_64)
+# capture: full — complete (2 contributing pod(s))
+apiVersion: kguardian.dev/v1alpha1
+kind: SeccompProfile
+metadata:
+  name: deployment-web
+  namespace: prod
+spec:
+  defaultAction: SCMP_ACT_LOG
+  architectures:
+    - SCMP_ARCH_X86_64
+  syscalls:
+    - names:
+        - accept4
+        - bind
+        - clone3
+      action: SCMP_ACT_ALLOW
+  workloadRef:
+    kind: Deployment
+    name: web
+```
+
+Names are sorted; `architectures` is omitted when the observed set has none.
+When `capture.complete` is `false` the header also carries:
+
+```yaml
+# WARNING: partial capture (low on 2 pod(s): web-2 (low), web-4 (unknown)) — this profile will block
+# WARNING: syscalls the workload makes. Raise the tier to "full" (kguardian.dev/syscall-capture
+# WARNING: annotation or SYSCALL_CAPTURE_LEVEL) and re-export before enforcing.
+```
+
+Export is never refused for an incomplete capture; the warning travels with
+the manifest so it survives into code review.
+
+## POST /seccomp/profiles/{namespace}/{kind}/{name}/export
+
+The same document, with staged edits applied server-side — what the UI's
+pre-export editor uses.
+
+```json
+{
+  "name": "deployment-web",
+  "defaultAction": "SCMP_ACT_LOG",
+  "format": "yaml",
+  "add": ["clock_settime", "clock_adjtime"],
+  "remove": ["ptrace"]
+}
+```
+
+Every field is optional. The exported set is `(observed ∪ add) \ remove`.
+Names must match `^[a-z][a-z0-9_]{0,63}$`, ≤ 512 per list, and may not
+appear in both lists (`400`). The observed union in the broker is never
+modified by this call.
+
+---
+
+## PUT /seccomp/crs/{namespace}/{name}
+
+Controller-only. Mirrors a `SeccompProfile` CR into the broker so the UI can
+show CR state and drift without talking to the API server. Every controller
+sends the same payload on every watch event and resync; the write is
+idempotent.
+
+```json
+{
+  "spec": { "defaultAction": "SCMP_ACT_LOG", "architectures": ["SCMP_ARCH_X86_64"],
+            "syscalls": [ { "names": ["accept4", "..."], "action": "SCMP_ACT_ALLOW" } ],
+            "workloadRef": { "kind": "Deployment", "name": "web" } },
+  "hash": "a1b2c3d4e5f60718",
+  "status": { "distribution": { "ready": 12, "total": 12, "state": "Ready" } }
+}
+```
+
+`spec` is the CR spec verbatim; `hash` is the CR's `status.hash` (may be `""`
+before the first render — then no node can be ready for it); `status` is
+optional and mirrored as `cr.statusDistribution`. Only rules with
+`action: SCMP_ACT_ALLOW` count towards the CR's syscall set for drift.
+Returns `200` `{ "namespace", "name", "hash", "syscallCount" }`.
+
+`DELETE /seccomp/crs/{namespace}/{name}` removes the mirror row when the CR
+is deleted: `200` `{ "deleted": true }`, or `404` if unknown (every node
+sends it; the controller treats `404` as success).
 
 ---
 
 ## GET /seccomp/profile-file/{namespace}/{kind}/{name}/{hash}
 
-The bare effective `SeccompProfile` document, for a distributor to write to a
-node verbatim.
-
-Serves only the **current** hash — a stale hash returns `404` with
-`stale hash; re-read /seccomp/profiles`, which is the caller's signal to
-re-read the list.
-
----
-
-## PUT /seccomp/profiles/{namespace}/{kind}/{name}/override
-
-Set or replace the operator override for a workload. **Gated** — returns `404`
-unless the broker is started with `SECCOMP_OVERRIDES_ENABLED=true` (Helm:
-`seccomp.overrides.enabled`).
-
-The override is stored separately from the observed union, which keeps accruing
-underneath. The effective hash is recomputed on the write, so a new
-hash-named file lands on every node within one distributor poll; the previous
-file is never deleted, so a `DELETE` (below) reverts cleanly.
-
-### Request
-
-```json
-{
-  "add": ["clock_settime", "clock_adjtime"],
-  "remove": [],
-  "defaultAction": "SCMP_ACT_ERRNO",
-  "note": "cert rotation cron, runs weekly",
-  "revision": 1,
-  "dryRun": false
-}
-```
-
-- `add` / `remove` — syscall names, `^[a-z][a-z0-9_]{0,63}$`, ≤ 512 each. A name
-  in both is a `400`. Names are **not** checked against a real syscall table yet
-  (a typo that passes the format check produces a warning-free but useless
-  profile).
-- `defaultAction` — one of `SCMP_ACT_LOG`, `SCMP_ACT_ERRNO`, `SCMP_ACT_KILL`;
-  omit to keep `SCMP_ACT_LOG`.
-- `revision` — the revision the client last read. Omit (or `null`) to **create**;
-  a mismatch with the stored revision is a `409`.
-- `dryRun` — validate and render without persisting.
-- `X-Kguardian-Actor` header — recorded as `updatedBy`; defaults to `unknown`.
-
-### Response — `200`
-
-```json
-{
-  "dryRun": false,
-  "revision": 2,
-  "hash": "7f3c1a0b9d2e4658",
-  "warnings": [
-    "defaultAction SCMP_ACT_ERRNO blocks — a syscall the workload makes but kube-guardian has not yet observed will fail on the pod's next restart"
-  ],
-  "profile": { "defaultAction": "SCMP_ACT_ERRNO", "architectures": ["..."], "syscalls": [ ... ] }
-}
-```
-
-### Errors
-
-| Code | When |
-|------|------|
-| `404` | overrides not enabled, or no observed profile for the workload yet |
-| `400` | bad syscall name, `add`/`remove` overlap, invalid `defaultAction`, list over cap |
-| `409` | `revision` does not match the stored one — body carries `currentRevision` |
-
----
-
-## DELETE /seccomp/profiles/{namespace}/{kind}/{name}/override
-
-Drop the override. The effective profile falls back to the pure observed set and
-the hash reverts to the pre-override value — and since that file was never
-deleted from any node, no redistribution is needed. Also gated behind
-`SECCOMP_OVERRIDES_ENABLED`. `404` if there was no override.
+Debug render of the observed set as a bare seccomp document, addressed by the
+summary's `hash`. A stale hash returns `404`. Nothing reads this on the
+distribution path any more — nodes render from the CR.
 
 ---
 
 ## POST /seccomp/node-status
 
-The distributor reports, after every pass, the full set of profile files present
-on its node. Replaces the node's row wholesale — it is a snapshot, not a delta.
-
-### Request
+The controller reports, after every reconcile pass, the profile files present
+on its node with their hashes. Replaces the node's row wholesale — it is a
+snapshot, not a delta.
 
 ```json
 {
   "node_name": "ip-10-0-1-42.ec2.internal",
-  "paths": [
-    "kguardian/prod/deployment-web-a1b2c3d4e5f60718.json",
-    "kguardian/prod/cronjob-report-9f8e7d6c5b4a3021.json"
+  "files": [
+    { "path": "kguardian/prod/deployment-web.json", "hash": "a1b2c3d4e5f60718" },
+    { "path": "kguardian/prod/cronjob-report.json", "hash": "9f8e7d6c5b4a3021" }
   ]
 }
 ```
 
-`node_name` is required; an empty `paths` is valid (the node has no profiles
-yet). Returns `200` with an empty body.
+`node_name` is required; an empty `files` is valid. `hash` is the FNV-1a-64
+of the bytes on disk after the pass. Returns `200` with an empty body. A node
+counts towards `cr.distribution.ready` when it reports the CR's path with a
+hash equal to the mirrored `cr.hash`, and towards `present` when it reports
+the path at all. The pre-CRD body shape — `"paths": ["…json"]`, no hashes —
+is still accepted and counts as present-but-unverified.
+
+---
+
+## Removed in this release
+
+`POST …/publish`, `…/unpublish`, `…/enforce`, `…/audit`,
+`PUT`/`DELETE …/override`, the `?state=` filter, the hash-less
+`profile-file` route, the `SECCOMP_OVERRIDES_ENABLED` flag, and the `state` /
+`stableProfile` / `localhostProfile` / `defaultAction` / `distribution` /
+`publishedAt` / `publishedBy` / `publishForced` / `override` summary fields. Deployment and enforcement
+decisions live in the `SeccompProfile` CR; there is no broker-side write path
+for them.

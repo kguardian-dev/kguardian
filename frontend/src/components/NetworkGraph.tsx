@@ -398,6 +398,7 @@ const NetworkGraphInner: React.FC<NetworkGraphProps> = ({
   // any change that removes the focused node exits focus mode.
   useEffect(() => {
     if (focusedNodeId && !allDisplayPods.some((p) => p.id === focusedNodeId)) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect -- intentional self-heal, see above
       setFocusedNodeId(null);
     }
   }, [focusedNodeId, allDisplayPods]);

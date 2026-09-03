@@ -41,7 +41,7 @@ It's built for platform and security teams who want policy-as-code without writi
 ## ✨ Features
 
 - **Network Policy generation** — least-privilege Kubernetes `NetworkPolicy` and Cilium `CiliumNetworkPolicy` resources from observed pod-to-pod traffic.
-- **Seccomp profile generation** — per-container syscall allowlists derived from runtime traces.
+- **Seccomp profile generation** — per-workload syscall allowlists derived from runtime traces, exported as a `SeccompProfile` CR you commit; the controller places the file on every node only once you apply it. Capture is tiered (`full` by default, cheap thanks to in-BPF dedup; `high`/`medium`/`low`/`custom` for monitoring-only clusters), and only a `full` capture yields a profile safe to enforce.
 - **Policy auditing before enforcement** — the `AuditNetworkPolicy` CRD is byte-identical to an upstream `NetworkPolicy`, but instead of dropping packets the evaluator reports every flow the policy *would* deny. Ship policies with confidence instead of blackholing production.
 - **Flexible targeting** — generate per-pod, per-namespace, or cluster-wide.
 - **Review-first by design** — the CLI writes YAML to `--output-dir` and never applies anything to the cluster; you review and `kubectl apply` the files yourself.
