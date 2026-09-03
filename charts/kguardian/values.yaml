@@ -170,33 +170,79 @@ controller:
   # -- Ignore traffic from daemonset pods to reduce noise
   ignoreDaemonSet: true
 
-# -- Per-workload seccomp profile distribution. When enabled, the controller
-# DaemonSet also writes broker-generated seccomp profiles onto each node under
-# the kubelet seccomp root, so a workload can reference one with
-# `securityContext.seccompProfile.type: Localhost` +
-# `localhostProfile: kguardian/<namespace>/<kind>-<name>-<hash>.json`.
-# kube-guardian never edits workloads and never deletes profile files.
-# See docs/design/per-workload-seccomp-distribution.md.
+# -- Syscall capture tier for the controller's eBPF probe. Sets
+# `SYSCALL_CAPTURE_LEVEL` / `SYSCALL_CUSTOM_LIST` on the controller DaemonSet.
+syscalls:
+  # Tiers, most to least complete:
+  #   full    — every syscall. The only tier that can publish a seccomp
+  #             profile; anything less is a partial set and a deny-by-default
+  #             profile built from it will break the workload.
+  #   high    — everything except hot-path noise (read/write/futex/epoll/
+  #             mmap/clock_gettime and similar).
+  #   medium  — `low` plus the network, file-permission/link and process-
+  #             lifecycle families.
+  #   low     — the 56 security-relevant syscalls kguardian traced before
+  #             this setting existed (exec, socket, mount, ptrace, bpf, ...).
+  #   custom  — exactly the names in `syscalls.customList`.
+  #
+  # `full` is the default because the probe de-duplicates per pod network
+  # namespace inside BPF: each syscall crosses into userspace once per pod,
+  # so the CPU cost of full capture is close to that of `low`. Lower tiers
+  # only reduce what reaches userspace on that first sighting. Names are
+  # resolved per architecture at controller startup, so a tier selects the
+  # same syscalls on amd64 and arm64. A workload can raise (never lower) its
+  # own tier with the pod-template annotation
+  # `kguardian.dev/syscall-capture: full`.
+  #
+  # -- Cluster-wide capture level: `full` (default, every syscall — the only
+  # tier that can publish a seccomp profile), `high`, `medium`, `low` or
+  # `custom`. Full capture is de-duplicated in BPF so it costs about the same
+  # CPU as `low`; pick a lower tier only if you never intend to publish
+  # seccomp profiles and want a smaller syscall table in the broker. The
+  # block above lists what each tier traces.
+  captureLevel: full
+  # -- Syscall names for `captureLevel: custom` (ignored on any other level),
+  # rendered comma-joined into `SYSCALL_CUSTOM_LIST`, e.g.
+  # `[execve, openat, connect]`. A name unknown on the node's architecture is
+  # logged and skipped, never fatal.
+  customList: []
+
+# -- Seccomp profile distribution, driven by the user-owned `SeccompProfile`
+# CRD (`kguardian.dev/v1alpha1`). kguardian observes syscalls and renders a
+# CR manifest you can commit; nothing reaches a node until you apply that CR.
+# When `distribute` is on, the controller on every node watches
+# `SeccompProfile` objects cluster-wide and writes each one to
+# `<kubeletRoot>/seccomp/kguardian/<namespace>/<name>.json`, so a workload
+# references it with `securityContext.seccompProfile.type: Localhost` +
+# `localhostProfile: kguardian/<namespace>/<name>.json`. Deleting the CR
+# deletes the file. kguardian never edits workloads and never writes a
+# profile that is not backed by a CR. See docs/guides/distributing-seccomp-profiles.
 seccomp:
-  # -- Write seccomp profiles onto nodes. Adds a hostPath mount of the kubelet
-  # seccomp directory to the controller pod. Off by default — referencing a
-  # profile is a workload-availability decision for the app team.
+  # -- Reconcile `SeccompProfile` CRs onto nodes. Adds a hostPath mount of the
+  # kubelet seccomp directory to the controller pod and grants the controller
+  # get/list/watch on `seccompprofiles`, patch on `seccompprofiles/status`, and
+  # list on `nodes`. Off by default — referencing a profile is a
+  # workload-availability decision for the app team. Without it the CRD still
+  # installs and the UI still exports manifests; they just never land on a node.
   distribute: false
+  # -- Install the `SeccompProfile` CRD as a chart template (with
+  # `helm.sh/resource-policy: keep`) rather than from `crds/`. Helm applies
+  # `crds/` on install only and never upgrades them; a templated CRD is
+  # upgraded with the release, so schema changes ship with the chart. The
+  # trade-off: the CRD is part of the release, so a `helm uninstall` leaves it
+  # behind on purpose (the `keep` policy) — delete it by hand if you also want
+  # every `SeccompProfile` object gone. Set to `false` if you manage CRDs
+  # separately; then apply `charts/kguardian/files/kguardian.dev_seccompprofiles.yaml`
+  # yourself before enabling `distribute`.
+  installCRDs: true
   # -- Kubelet root directory on the host. Profiles are written under
   # `<kubeletRoot>/seccomp/kguardian/`. Not `/var/lib/kubelet` everywhere:
   # k3s uses `/var/lib/rancher/k3s/agent/kubelet`, some kubeadm installs and
   # OpenShift differ.
   kubeletRoot: /var/lib/kubelet
-  # -- Seconds between distribution passes. Empty uses the controller default (30).
+  # -- Seconds between full resyncs of the `SeccompProfile` watch (the watch
+  # itself reacts to changes immediately). Empty uses the controller default (30).
   distributeIntervalSeconds: ""
-  overrides:
-    # -- Allow operators to edit a generated profile (add/remove syscalls, set
-    # defaultAction) via `PUT /seccomp/profiles/<ns>/<kind>/<name>/override`.
-    # Off by default — a bad edit denies a syscall the app makes and breaks it
-    # on the next restart. The edit is a separate layer; the observed union
-    # underneath keeps accruing. Every write is recorded with the actor from
-    # the `X-Kguardian-Actor` header.
-    enabled: false
 
 broker:
   # -- Number of broker replicas to deploy

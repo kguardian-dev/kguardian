@@ -1,0 +1,158 @@
+---
+title: "SeccompProfile"
+description: "The kguardian.dev/v1alpha1 SeccompProfile CRD: spec, status, printer columns, and what happens on delete"
+icon: "file-shield"
+---
+
+`SeccompProfile` is a namespaced kguardian CRD that describes one seccomp
+profile file. You own the object; the kguardian controller on every node
+renders `spec` to standard seccomp JSON at
+`<kubeletRoot>/seccomp/kguardian/<namespace>/<name>.json` and reports per-node
+state in `status`. See the
+[distribution guide](/guides/distributing-seccomp-profiles) for the workflow
+and [policy as code](/concepts/policy-as-code) for why it is shaped this way.
+
+| | |
+|---|---|
+| Group / version | `kguardian.dev/v1alpha1` |
+| Kind / plural / short | `SeccompProfile` / `seccompprofiles` / `scmp` |
+| Scope | Namespaced |
+| Status subresource | yes |
+| Installed by | the Helm chart when `seccomp.installCRDs=true` (default), or `kubectl apply -f charts/kguardian/files/kguardian.dev_seccompprofiles.yaml` |
+| Reconciled when | `seccomp.distribute=true` |
+
+---
+
+## Spec
+
+```yaml
+apiVersion: kguardian.dev/v1alpha1
+kind: SeccompProfile
+metadata:
+  name: deployment-web          # becomes the file name: kguardian/<namespace>/<name>.json
+  namespace: prod
+spec:
+  defaultAction: SCMP_ACT_LOG
+  architectures: [SCMP_ARCH_X86_64, SCMP_ARCH_ARM64]
+  syscalls:
+    - names: [accept4, read, write]
+      action: SCMP_ACT_ALLOW
+  workloadRef:
+    kind: Deployment
+    name: web
+```
+
+| Field | Type | Required | Notes |
+|-------|------|----------|-------|
+| `defaultAction` | enum | yes | `SCMP_ACT_LOG`, `SCMP_ACT_ERRNO`, `SCMP_ACT_KILL`, `SCMP_ACT_KILL_PROCESS`. Applied to any syscall not matched below. Exports use `SCMP_ACT_LOG`. |
+| `architectures` | list of enum | no | `SCMP_ARCH_X86_64`, `SCMP_ARCH_ARM64`, `SCMP_ARCH_AARCH64`, `SCMP_ARCH_X86`, `SCMP_ARCH_X32`. Omitted ⇒ the rendered file has no `architectures` field and the runtime uses the native one. |
+| `syscalls` | list, min 1 | yes | Each entry is `{ names, action, errnoRet? }`. |
+| `syscalls[].names` | list of string | yes | `^[a-z][a-z0-9_]{0,63}$` each. |
+| `syscalls[].action` | enum | yes | `SCMP_ACT_ALLOW` plus the four `defaultAction` values. kguardian only generates `SCMP_ACT_ALLOW`; the rest are for hand edits. |
+| `syscalls[].errnoRet` | integer | no | errno returned for `SCMP_ACT_ERRNO` entries. |
+| `workloadRef` | object | no | `{ kind, name }` in the CR's namespace. `kind` is one of `Deployment`, `StatefulSet`, `DaemonSet`, `CronJob`, `Job`, `ReplicaSet`, `ReplicationController`. Enables the `CaptureComplete` and `Drift` conditions and the UI's drift view. Distribution works without it. |
+
+The rendered node file is exactly `{ defaultAction, architectures?, syscalls[] }`
+from `spec`, serialised deterministically. Nothing observed by kguardian is
+mixed in — what is on disk is what is in git.
+
+---
+
+## Status
+
+Written by the controllers only; you never set it.
+
+```yaml
+status:
+  observedGeneration: 3
+  hash: "a1b2c3d4e5f60718"
+  localhostProfile: kguardian/prod/deployment-web.json
+  distribution: { ready: 12, total: 12, state: Ready, summary: "12/12" }
+  drift: "False"
+  nodes:
+    - name: node-a
+      hash: "a1b2c3d4e5f60718"
+      lastWritten: "2026-09-03T01:00:00Z"
+  conditions:
+    - type: Ready
+      status: "True"
+      reason: AllNodes
+      message: "12/12 nodes"
+    - type: CaptureComplete
+      status: "True"
+      reason: Full
+      message: "full on 2 pod(s)"
+    - type: Drift
+      status: "False"
+      reason: InSync
+      message: "spec matches the observed set"
+```
+
+| Field | Meaning |
+|-------|---------|
+| `observedGeneration` | The `metadata.generation` the summary was computed for. |
+| `hash` | FNV-1a-64 of the rendered file bytes — what a node should have on disk. |
+| `localhostProfile` | The value to put in `securityContext.seccompProfile.localhostProfile`. |
+| `distribution` | `ready` nodes whose entry in `nodes` carries the current `hash`, out of `total` live nodes; `state` is `Ready` (`ready == total > 0`), `Partial`, or `Pending` (`ready == 0`). `summary` is the `ready/total` string the printer column shows. |
+| `drift` | Mirror of the `Drift` condition's status (`True`/`False`/`Unknown`) for the printer column — printer columns take simple JSON paths, not condition filters. |
+| `nodes[]` | One entry per node, keyed by `name` (`x-kubernetes-list-type: map`). Each controller server-side-applies only its own entry, with field manager `kguardian-controller/<node>`. |
+| `conditions[]` | Standard `metav1.Condition` list, below. |
+
+### Conditions
+
+| Type | Status | Reason | When |
+|------|--------|--------|------|
+| `Ready` | `True` | `AllNodes` | every live node has the current hash |
+| | `False` | `SomeNodes` / `NoNodes` | message carries `ready/total` |
+| `CaptureComplete` | `True` | `Full` | every pod that contributed syscalls for `workloadRef` was captured at the `full` tier |
+| | `False` | `PartialCapture` | message names the lowest tier and the pods |
+| | `Unknown` | `NoWorkloadRef` / `NoObservations` | no `workloadRef`, or nothing observed yet |
+| `Drift` | `True` | `ObservedNotInSpec` | the workload made syscalls not allowed by `spec`; message lists them |
+| | `False` | `InSync` | |
+| | `Unknown` | `NoWorkloadRef` | |
+
+The summary (`distribution`, `Ready`) is computed by every controller from the
+CR's own `nodes` list plus a live node count and applied with field manager
+`kguardian-summary`; every node computes the same value, so last-writer-wins
+converges. `CaptureComplete` and `Drift` come from the broker's observed set
+and are applied the same way. Controllers only patch when a value changes.
+
+### Printer columns
+
+```
+$ kubectl -n prod get seccompprofiles
+NAME             ACTION           READY   DRIFT   AGE
+deployment-web   SCMP_ACT_ERRNO   12/12   False   3d
+```
+
+`ACTION` is `spec.defaultAction`, `READY` is `status.distribution.summary`,
+`DRIFT` is `status.drift`.
+
+---
+
+## Delete semantics
+
+Deleting a `SeccompProfile` **deletes the file** from every node on the next
+watch event. This is the only time kguardian removes anything from a node, and
+it follows your explicit deletion. A pod that still references the path fails
+its next start with `CreateContainerError` — remove the `seccompProfile`
+reference from the workload first, roll it, then delete the CR.
+
+Uninstalling the chart does **not** delete the CRD when `seccomp.installCRDs`
+is on: it is annotated `helm.sh/resource-policy: keep`, because dropping a CRD
+deletes every object of that kind with it. This CRD is rendered as a chart
+template rather than shipped in `crds/` (as the older `AuditNetworkPolicy`
+CRDs are) so that `helm upgrade` can apply schema changes — Helm never
+upgrades anything under `crds/`. Delete it by hand
+(`kubectl delete crd seccompprofiles.kguardian.dev`) once you have removed
+every profile reference.
+
+---
+
+## RBAC
+
+With `seccomp.distribute=true` the chart grants the controller ServiceAccount
+`get`/`list`/`watch` on `seccompprofiles`, `patch` on `seccompprofiles/status`,
+and `list` on `nodes`. Nothing is granted when distribution is off. Users need
+ordinary namespaced RBAC on `seccompprofiles.kguardian.dev` to create and edit
+profiles.

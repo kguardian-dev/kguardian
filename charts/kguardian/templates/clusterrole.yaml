@@ -30,3 +30,24 @@ rules:
   - get
   - list
   - watch
+{{- if .Values.seccomp.distribute }}
+# Seccomp distribution: the controller watches SeccompProfile CRs
+# cluster-wide, writes each to its node, and reports per-node state via
+# server-side apply on the status subresource. `nodes` list is needed to
+# compute ready/total for the summary condition. None of this is granted
+# when seccomp.distribute is off.
+- apiGroups: ["kguardian.dev"]
+  resources: ["seccompprofiles"]
+  verbs:
+    - get
+    - list
+    - watch
+- apiGroups: ["kguardian.dev"]
+  resources: ["seccompprofiles/status"]
+  verbs:
+    - patch
+- apiGroups: [""]
+  resources: ["nodes"]
+  verbs:
+    - list
+{{- end }}

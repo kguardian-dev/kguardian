@@ -30,6 +30,11 @@ diesel::table! {
         // positional, so any new column goes here.
         workload_kind -> Nullable<Varchar>,
         workload_name -> Nullable<Varchar>,
+        // Capture tier (full|high|medium|low|custom) the controller ran
+        // for this pod; NULL = unknown / older controller. Feeds
+        // capture completeness (CaptureComplete condition, export
+        // warning, drift). Positional — stays last.
+        capture_level -> Nullable<Varchar>,
     }
 }
 
@@ -131,8 +136,9 @@ diesel::table! {
 
 diesel::table! {
     // What seccomp profile files each node's distributor currently has
-    // on disk (localhostProfile paths). Replaced wholesale on every
-    // distributor pass. Drives per-profile readiness. See src/seccomp.rs.
+    // on disk: a JSON array of `{path, hash}` objects (legacy rows may
+    // hold bare path strings). Replaced wholesale on every distributor
+    // pass. Drives per-CR readiness. See src/seccomp.rs.
     seccomp_node_status (node_name) {
         node_name -> Varchar,
         paths -> Jsonb,
@@ -141,35 +147,23 @@ diesel::table! {
 }
 
 diesel::table! {
-    // Operator adjustments to a generated seccomp profile, kept separate
-    // from the observed union so the ingest recompute can't clobber them.
-    // Effective set = (observed ∪ add_syscalls) \ remove_syscalls.
-    // `revision` is optimistic concurrency. See src/seccomp.rs (Phase 6).
-    workload_seccomp_overrides (pod_namespace, workload_kind, workload_name) {
-        pod_namespace -> Varchar,
-        workload_kind -> Varchar,
-        workload_name -> Varchar,
-        add_syscalls -> Text,
-        remove_syscalls -> Text,
-        default_action -> Nullable<Varchar>,
-        note -> Nullable<Text>,
-        updated_by -> Varchar,
+    // Mirror of every SeccompProfile CR (kguardian.dev/v1alpha1) the
+    // controller sees. `syscalls` = sorted csv of the CR's ALLOW names
+    // (drift is computed against it); `hash` = the CR's status.hash
+    // (rendered file bytes). See src/seccomp.rs and the migration.
+    seccomp_crs (namespace, name) {
+        namespace -> Varchar,
+        name -> Varchar,
+        workload_kind -> Nullable<Varchar>,
+        workload_name -> Nullable<Varchar>,
+        default_action -> Varchar,
+        syscalls -> Text,
+        architectures -> Text,
+        hash -> Varchar,
+        ready -> Int4,
+        total -> Int4,
+        dist_state -> Varchar,
         updated_at -> Timestamp,
-        revision -> Int4,
-    }
-}
-
-diesel::table! {
-    // Append-only audit trail of override writes.
-    seccomp_override_audit (id) {
-        id -> Int8,
-        pod_namespace -> Varchar,
-        workload_kind -> Varchar,
-        workload_name -> Varchar,
-        op -> Varchar,
-        diff -> Jsonb,
-        updated_by -> Varchar,
-        at -> Timestamp,
     }
 }
 

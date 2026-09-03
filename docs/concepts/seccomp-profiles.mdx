@@ -17,9 +17,41 @@ Most applications use only 50-100 of Linux's 300+ syscalls. Blocking unused sysc
 
 ## How kguardian Generates Profiles
 
-1. **Observes** all syscalls made by the container via eBPF
-2. **Aggregates** unique syscall names over observation period
-3. **Generates** JSON profile with allowlist
+1. **Captures** syscalls per pod via eBPF, at the cluster's capture tier
+2. **Aggregates** unique syscall names per workload over the observation period
+3. **Generates** a JSON profile with the allowlist
+
+### Capture tiers
+
+The controller does not necessarily see every syscall — it traces at one of
+five tiers, set cluster-wide with `syscalls.captureLevel` in Helm and
+raisable per workload with the `kguardian.dev/syscall-capture` pod
+annotation:
+
+| Tier | Traces |
+|------|--------|
+| `full` (default) | every syscall |
+| `high` | everything except hot-path noise (`read`, `write`, `futex`, `epoll_*`, `mmap`, `clock_gettime`, …) |
+| `medium` | `low` plus the network, file-permission/link and process-lifecycle families |
+| `low` | 56 security-relevant syscalls (`execve`, `socket`, `mount`, `ptrace`, `bpf`, …) |
+| `custom` | an operator-supplied list |
+
+**Only a `full` capture yields a profile that is safe to enforce.** A profile
+is an allowlist: anything not in it is denied, so a profile built from a
+partial tier denies the syscalls the tier never traced. kguardian marks such
+profiles as partial capture in the UI, in the exported manifest, and in the
+`SeccompProfile` CR's `CaptureComplete` condition. The lower tiers exist for
+monitoring clusters that never intend to enforce; `full` is the default
+because syscalls are de-duplicated per pod inside BPF, so its cost is close to
+`low`.
+
+### From observation to a node
+
+kguardian never applies a profile itself. It exports a `SeccompProfile`
+manifest you commit and apply; the controller on every node then writes the
+file that CR describes and reports readiness and drift in its status. See
+[policy as code](/concepts/policy-as-code) and the
+[distribution guide](/guides/distributing-seccomp-profiles).
 
 Example generated profile:
 
@@ -47,4 +79,6 @@ Example generated profile:
 ---
 
 **Next steps:**
+- [Distributing Seccomp Profiles](/guides/distributing-seccomp-profiles)
+- [SeccompProfile CRD](/reference/crds/seccompprofile)
 - [CLI Reference](/cli/gen-seccomp)

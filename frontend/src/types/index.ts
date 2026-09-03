@@ -24,6 +24,15 @@ export interface PodInfo {
   is_dead: boolean;
   pod_identity?: string | null;
   workload_selector_labels?: Record<string, string> | null;
+  /** Top-level owning controller (Deployment, StatefulSet, ...) — the key the
+   *  broker groups syscalls on for per-workload seccomp profiles. Absent for a
+   *  bare pod or from an older controller. */
+  workload_kind?: string | null;
+  workload_name?: string | null;
+  /** Syscall capture tier the controller ran for this pod: one of
+   *  `full | high | medium | low | custom`. Absent/null from a controller
+   *  predating tiers — never assume that means complete. */
+  capture_level?: string | null;
 }
 
 // Matches broker's PodTraffic type

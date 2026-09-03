@@ -3,6 +3,29 @@
 > **Status:** Draft · **Date:** 2026-09-02 · **Components:** controller, broker, advisor, chart
 > Engineering design proposal. Not part of the published (Mintlify) docs site.
 
+## Revision 2026-09-03 — CR-driven distribution
+
+The operator redirected the design after Phase 6 landed: **kguardian never
+mutates cluster or node state on its own.** It observes, recommends, and
+audits; the user commits and applies a `SeccompProfile` CR
+(`kguardian.dev/v1alpha1`, namespaced), and only that CR causes a file to be
+written to a node. The same principle applies to network policies — the
+generated `NetworkPolicy` / `CiliumNetworkPolicy` is the user-owned resource
+and audit verdicts are the drift signal — and to every future resource type.
+The broker holds no publish state and the UI is export-only. Current docs:
+`docs/guides/distributing-seccomp-profiles.mdx`,
+`docs/reference/crds/seccompprofile.mdx`, `docs/concepts/policy-as-code.mdx`.
+
+| Decision / phase below | Replaced by |
+|---|---|
+| D4 — content-hashed names, `<kind>-<name>-<hash>.json` | One file per CR: `kguardian/<namespace>/<cr-name>.json`, rewritten in place when the rendered `spec` changes. No hash-named files, no accumulation, no stable-path alias; version history lives in git with the CR. |
+| D5 — distributor polls the broker | A CR watcher/reconciler in the controller (`seccomp_distributor.rs`): renders `spec` deterministically, byte-compares, writes atomically, and **deletes the file when the CR is deleted**. Per-node state via server-side apply on `status.nodes[name=<node>]`; the summary is SSA'd under a shared manager. Still gated on `seccomp.distribute`. |
+| D6 — readiness from broker node-status rows | CR `status.distribution` + `Ready` / `CaptureComplete` / `Drift` conditions, plus a broker mirror (`PUT /seccomp/crs`) so the UI shows CR state and drift without the API server. Node-status now reports `{path, hash}`. |
+| D8 / Phase 6 — override layer in the broker | Edits are edits to the CR in git. `workload_seccomp_overrides`, `seccomp_override_audit`, `PUT/DELETE …/override` and `SECCOMP_OVERRIDES_ENABLED` are removed; the observed union is never edited. |
+| Phase 4 — publish / lifecycle surface (`publish`, `unpublish`, `enforce`, `audit`, `?state=`) | Removed. `GET …/export` renders the CR manifest (`defaultAction: SCMP_ACT_LOG`, `workloadRef` filled, partial-capture warning in the header); promotion to enforcing is a one-line CR edit. |
+| Phase 0 — full capture via annotation | Five tiers `full > high > medium > low`, `custom`, cluster default `full` (`syscalls.captureLevel`), raise-only per-workload annotation `kguardian.dev/syscall-capture` (`seccomp-record: "true"` = alias for `full`), per-netns dedup in BPF, names resolved per architecture. Completeness is computed over every contributing pod and gates the export warning and the CR's `CaptureComplete` condition — it never blocks. |
+| Chart | `SeccompProfile` CRD rendered as a template from `charts/kguardian/files/` with `helm.sh/resource-policy: keep` (`seccomp.installCRDs`), so upgrades carry schema changes; RBAC on `seccompprofiles` only when `distribute` is on. |
+
 Turn the syscalls kube-guardian already observes into named, versioned seccomp
 profiles that land on every node — so an application team can reference one by
 path and nothing else has to change.
@@ -215,6 +238,8 @@ Phase 5.
 
 ### D8 — Operator edits are an override layer, never a mutation of observed data
 
+> **Superseded, see Revision 2026-09-03.** Overrides now live in the user's `SeccompProfile` CR; the broker-side override layer described here was removed.
+
 Operators will need to adjust a generated profile — the scanner missed a syscall
 a weekly cron makes, or a profile is one syscall short of a code path that only
 runs on failure. The naive approach — let them edit `workload_syscalls.syscalls`
@@ -374,6 +399,8 @@ Operator.
   it.
 
 ### Phase 6 — Profile overrides
+
+> **Superseded, see Revision 2026-09-03.** Shipped in #1418 and then removed in favour of CR edits; kept here as history.
 
 **Goal:** an operator can add or remove syscalls from a generated profile, and
 set its `defaultAction`, without losing the observed baseline and without the

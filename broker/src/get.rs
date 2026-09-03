@@ -765,7 +765,7 @@ mod tests {
     }
 
     #[test]
-    fn pod_by_ip_selects_workload_columns_last() {
+    fn pod_by_ip_selects_capture_level_last() {
         // PodDetail derives Queryable, which is positional: if the
         // struct field order and schema.rs column order ever drift, the
         // load silently deserialises the wrong column into the wrong
@@ -774,9 +774,9 @@ mod tests {
         let sql = pod_sql("10.0.0.1");
         assert!(
             sql.contains(
-                r#""pod_details"."pod_ips", "pod_details"."workload_kind", "pod_details"."workload_name" FROM"#
+                r#""pod_details"."pod_ips", "pod_details"."workload_kind", "pod_details"."workload_name", "pod_details"."capture_level" FROM"#
             ),
-            "workload_kind/workload_name must be the last selected columns: {sql}"
+            "workload_kind/workload_name/capture_level must be the last selected columns: {sql}"
         );
     }
 

@@ -4,29 +4,62 @@ import type { SeccompProfile, SeccompSyscall, SeccompAction } from '../../types/
 import { generateSeccompProfile, validateSeccompProfile } from '../../utils/seccompProfileGenerator';
 import { isValidSyscall } from '../../utils/syscalls';
 
+/**
+ * A profile to edit that did NOT come from a pod's observed syscalls — e.g.
+ * the broker's effective per-workload profile in the override editor. `key`
+ * identifies the loaded revision (workload + revision + hash); when it changes
+ * the editor re-seeds, which is how a reload after a 409 lands.
+ */
+export interface SeccompEditorSeed {
+  key: string;
+  profile: SeccompProfile;
+}
+
 interface UseSeccompProfileEditorProps {
   pod: PodNodeData | null;
   isOpen: boolean;
+  /** Takes precedence over `pod` when set. */
+  seed?: SeccompEditorSeed | null;
 }
 
-export const useSeccompProfileEditor = ({ pod, isOpen }: UseSeccompProfileEditorProps) => {
+export const useSeccompProfileEditor = ({ pod, isOpen, seed = null }: UseSeccompProfileEditorProps) => {
   const [seccompProfile, setSeccompProfile] = useState<SeccompProfile | null>(null);
   const [isSyscallsExpanded, setIsSyscallsExpanded] = useState(true);
   const [syscallErrors, setSyscallErrors] = useState<{ [key: number]: string }>({});
 
-  // Track which pod we've generated profile for to avoid regeneration
+  // Track which source (pod id or seed key) the current profile came from so
+  // the user's edits survive re-renders and only a genuinely new source resets.
   const lastGeneratedPodId = useRef<string | null>(null);
 
   useEffect(() => {
+    if (!isOpen) return;
+    if (seed) {
+      const seedId = `seed:${seed.key}`;
+      if (seedId !== lastGeneratedPodId.current) {
+        lastGeneratedPodId.current = seedId;
+        setSeccompProfile(structuredClone(seed.profile));
+      }
+      return;
+    }
     const currentPodId = pod?.id || null;
 
     // Only generate if we have a pod and haven't generated for this pod yet
-    if (isOpen && pod && currentPodId !== lastGeneratedPodId.current) {
+    if (pod && currentPodId !== lastGeneratedPodId.current) {
       lastGeneratedPodId.current = currentPodId;
       const generatedProfile = generateSeccompProfile(pod);
       setSeccompProfile(generatedProfile);
     }
-  }, [isOpen, pod]);
+  }, [isOpen, pod, seed]);
+
+  /** Discard edits and return to the seed / regenerate from the pod. */
+  const resetProfile = () => {
+    if (seed) {
+      setSeccompProfile(structuredClone(seed.profile));
+    } else if (pod) {
+      setSeccompProfile(generateSeccompProfile(pod));
+    }
+    setSyscallErrors({});
+  };
 
   // Derived, non-fatal warning when the current profile isn't directly usable
   // (e.g. an unrecognized CPU arch → no architectures selected). Derived from
@@ -156,6 +189,7 @@ export const useSeccompProfileEditor = ({ pod, isOpen }: UseSeccompProfileEditor
   return {
     seccompProfile,
     setSeccompProfile,
+    resetProfile,
     generationWarning,
     isSyscallsExpanded,
     setIsSyscallsExpanded,

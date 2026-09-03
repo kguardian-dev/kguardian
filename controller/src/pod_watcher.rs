@@ -1,3 +1,4 @@
+use crate::capture_tiers::CaptureLevel;
 use crate::models::{pod_flags, ContainerMap, PodRegistration};
 use crate::network::canonicalize_ip;
 use crate::{api_post_call, Error, PodDetail, PodInfo, PodInspect};
@@ -26,6 +27,7 @@ pub async fn watch_pods(
     excluded_namespaces: &[String],
     sender_ip: mpsc::Sender<String>,
     ignore_daemonset_traffic: bool,
+    cluster_capture_level: CaptureLevel,
 ) -> Result<(), Error> {
     let c = Client::try_default().await?;
     let pods: Api<Pod> = Api::all(c.clone());
@@ -52,6 +54,7 @@ pub async fn watch_pods(
         sender_ip.clone(),
         ignore_daemonset_traffic,
         c.clone(),
+        cluster_capture_level,
     );
 
     let watch = watcher(pods, wc)
@@ -72,6 +75,7 @@ pub async fn watch_pods(
                     ignore_daemonset_traffic,
                     &node_name,
                     &c,
+                    cluster_capture_level,
                 )
                 .await
                 {
@@ -118,6 +122,7 @@ async fn resync_pods(
     sender_ip: mpsc::Sender<String>,
     ignore_daemonset_traffic: bool,
     client: Client,
+    cluster_capture_level: CaptureLevel,
 ) -> Result<(), Error> {
     const RESYNC_INTERVAL: Duration = Duration::from_secs(60);
     let lp = ListParams::default().fields(&format!("spec.nodeName={}", node_name));
@@ -139,6 +144,7 @@ async fn resync_pods(
                         ignore_daemonset_traffic,
                         &node_name,
                         &client,
+                        cluster_capture_level,
                     )
                     .await
                     {
@@ -157,6 +163,7 @@ async fn resync_pods(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn process_pod(
     pod: &Pod,
     container_map: ContainerMap,
@@ -165,9 +172,13 @@ async fn process_pod(
     ignore_daemonset_traffic: bool,
     node_name: &str,
     client: &Client,
+    cluster_capture_level: CaptureLevel,
 ) -> Option<PodRegistration> {
     if let Some(con_ids) = pod_unready(pod) {
-        let pod_ip = update_pods_details(pod, node_name, client).await;
+        // Computed once here so the broker payload and the eBPF
+        // registration can never disagree about a pod's tier.
+        let capture_level = effective_capture_level(pod, cluster_capture_level);
+        let pod_ip = update_pods_details(pod, node_name, client, capture_level).await;
         if let Ok(Some(pod_ip)) = pod_ip {
             if ignore_daemonset_traffic && is_backed_by_daemonset(pod) {
                 // debug not info — fires per daemonset pod event,
@@ -193,7 +204,8 @@ async fn process_pod(
                 }
             }
             if should_process_pod(&pod.metadata.namespace, excluded_namespaces) {
-                return process_container_ids(&con_ids, pod, &pod_ip, container_map).await;
+                return process_container_ids(&con_ids, pod, &pod_ip, container_map, capture_level)
+                    .await;
             }
         }
     }
@@ -300,6 +312,7 @@ async fn update_pods_details(
     pod: &Pod,
     node_name: &str,
     client: &Client,
+    capture_level: CaptureLevel,
 ) -> Result<Option<String>, Error> {
     let pod_name = pod.name_any();
     let pod_namespace = pod.metadata.namespace.to_owned();
@@ -358,6 +371,7 @@ async fn update_pods_details(
             workload_selector_labels,
             workload_kind,
             workload_name,
+            capture_level: Some(capture_level.as_str().to_string()),
         };
 
         if let Err(e) = api_post_call(json!(z), "pod/spec").await {
@@ -369,29 +383,79 @@ async fn update_pods_details(
     Ok(pod_ip_address)
 }
 
-/// Annotation a workload sets on its pod template to opt into complete,
-/// unfiltered syscall capture for seccomp profile generation. Absent, or
-/// any value the lenient bool parser does not read as true, leaves the
-/// pod on the default allowlist-filtered capture. Kubernetes propagates
-/// `spec.template.metadata.annotations` onto the pods, so this needs no
-/// extra owner lookup. See docs/design/per-workload-seccomp-distribution.md.
+/// Annotation a workload sets on its pod template to raise its syscall
+/// capture tier above the cluster default: one of `full|high|medium|low`.
+/// It can only RAISE capture (the cluster default is a floor); `custom`
+/// is cluster-only and an unknown value warns and is ignored. Kubernetes
+/// propagates `spec.template.metadata.annotations` onto the pods, so this
+/// needs no extra owner lookup.
+pub const SYSCALL_CAPTURE_ANNOTATION: &str = "kguardian.dev/syscall-capture";
+
+/// Legacy opt-in for complete, unfiltered capture — kept as an alias for
+/// `kguardian.dev/syscall-capture: full`. Any value the lenient bool
+/// parser reads as true counts. See
+/// docs/design/per-workload-seccomp-distribution.md.
 pub const SECCOMP_RECORD_ANNOTATION: &str = "kguardian.dev/seccomp-record";
 
-/// Registration flags for a pod. `POD_TRACKED` is always set;
-/// `RECORD_ALL_SYSCALLS` is added when the opt-in annotation is present
-/// and truthy.
-fn pod_registration_flags(pod: &Pod) -> u32 {
-    let mut flags = pod_flags::POD_TRACKED;
-    let opted_in = pod
-        .metadata
-        .annotations
-        .as_ref()
+/// The tier a pod is captured at: the cluster default, raised by the
+/// pod's annotations if they ask for more.
+///
+/// Precedence: `seccomp-record: "true"` ⇒ `full`, unconditionally.
+/// Otherwise `syscall-capture` is parsed and applied through
+/// `CaptureLevel::raise` (never lowers). Invalid values and `custom`
+/// warn and leave the cluster default in place.
+pub fn effective_capture_level(pod: &Pod, cluster: CaptureLevel) -> CaptureLevel {
+    let annotations = pod.metadata.annotations.as_ref();
+
+    let legacy_full = annotations
         .and_then(|a| a.get(SECCOMP_RECORD_ANNOTATION))
         .is_some_and(|v| parse_lenient_bool(v, false));
-    if opted_in {
-        flags |= pod_flags::RECORD_ALL_SYSCALLS;
+    if legacy_full {
+        return CaptureLevel::Full;
     }
-    flags
+
+    let Some(raw) = annotations.and_then(|a| a.get(SYSCALL_CAPTURE_ANNOTATION)) else {
+        return cluster;
+    };
+    match CaptureLevel::parse(raw) {
+        Some(CaptureLevel::Custom) => {
+            warn!(
+                pod = %pod.name_any(),
+                "{SYSCALL_CAPTURE_ANNOTATION}=custom is cluster-only (SYSCALL_CUSTOM_LIST); \
+                 using cluster default {cluster}"
+            );
+            cluster
+        }
+        Some(requested) => {
+            let effective = CaptureLevel::raise(cluster, requested);
+            if effective != requested {
+                debug!(
+                    pod = %pod.name_any(),
+                    "{SYSCALL_CAPTURE_ANNOTATION}={requested} does not raise the cluster \
+                     default {cluster}; keeping {effective}"
+                );
+            }
+            effective
+        }
+        None => {
+            warn!(
+                pod = %pod.name_any(),
+                value = raw.as_str(),
+                "{SYSCALL_CAPTURE_ANNOTATION} is not one of full|high|medium|low; \
+                 using cluster default {cluster}"
+            );
+            cluster
+        }
+    }
+}
+
+/// The `inode_num` map value for a pod: tracked, at `level`, with a
+/// generation derived from the pod UID (see `pod_flags::GEN_SHIFT`).
+fn pod_registration_flags(pod: &Pod, level: CaptureLevel) -> u32 {
+    pod_flags::pack(
+        level,
+        pod_flags::generation_for_uid(pod.metadata.uid.as_deref()),
+    )
 }
 
 async fn process_container_ids(
@@ -399,8 +463,9 @@ async fn process_container_ids(
     pod: &Pod,
     pod_ip: &str,
     container_map: ContainerMap,
+    capture_level: CaptureLevel,
 ) -> Option<PodRegistration> {
-    let flags = pod_registration_flags(pod);
+    let flags = pod_registration_flags(pod, capture_level);
     for con_id in con_ids {
         let pod_info = create_pod_info(pod, pod_ip);
         let pod_inspect = PodInspect {
@@ -1083,42 +1148,94 @@ mod tests {
         pod
     }
 
+    use CaptureLevel::*;
+
     #[test]
-    fn pod_registration_flags_default_is_tracked_only() {
-        let flags = pod_registration_flags(&Pod::default());
-        assert_eq!(flags, pod_flags::POD_TRACKED);
-        assert_eq!(flags & pod_flags::RECORD_ALL_SYSCALLS, 0);
+    fn effective_level_without_annotations_is_the_cluster_default() {
+        for cluster in CaptureLevel::ALL {
+            assert_eq!(effective_capture_level(&Pod::default(), cluster), cluster);
+        }
     }
 
     #[test]
-    fn pod_registration_flags_opts_in_on_truthy_annotation() {
+    fn effective_level_annotation_raises_above_cluster_default() {
+        // cluster low + annotation high ⇒ high
+        let pod = pod_with_annotation(SYSCALL_CAPTURE_ANNOTATION, "high");
+        assert_eq!(effective_capture_level(&pod, Low), High);
+        // and the string form is case/whitespace tolerant
+        let pod = pod_with_annotation(SYSCALL_CAPTURE_ANNOTATION, " Full ");
+        assert_eq!(effective_capture_level(&pod, Medium), Full);
+    }
+
+    #[test]
+    fn effective_level_annotation_never_lowers() {
+        // cluster full + annotation low ⇒ full
+        let pod = pod_with_annotation(SYSCALL_CAPTURE_ANNOTATION, "low");
+        assert_eq!(effective_capture_level(&pod, Full), Full);
+        let pod = pod_with_annotation(SYSCALL_CAPTURE_ANNOTATION, "medium");
+        assert_eq!(effective_capture_level(&pod, High), High);
+        assert_eq!(effective_capture_level(&pod, Medium), Medium);
+    }
+
+    #[test]
+    fn effective_level_invalid_annotation_uses_cluster_default() {
+        for v in ["", "maximum", "true", "FULL!", "custom"] {
+            let pod = pod_with_annotation(SYSCALL_CAPTURE_ANNOTATION, v);
+            assert_eq!(effective_capture_level(&pod, Low), Low, "value {v:?}");
+            assert_eq!(effective_capture_level(&pod, Full), Full, "value {v:?}");
+        }
+    }
+
+    #[test]
+    fn effective_level_legacy_seccomp_record_means_full() {
         for v in ["true", "1", "yes", "on", "True"] {
             let pod = pod_with_annotation(SECCOMP_RECORD_ANNOTATION, v);
-            let flags = pod_registration_flags(&pod);
-            assert_eq!(
-                flags,
-                pod_flags::POD_TRACKED | pod_flags::RECORD_ALL_SYSCALLS,
-                "value {v:?} should opt in"
-            );
+            assert_eq!(effective_capture_level(&pod, Low), Full, "value {v:?}");
+            assert_eq!(effective_capture_level(&pod, Custom), Full, "value {v:?}");
         }
-    }
-
-    #[test]
-    fn pod_registration_flags_stays_default_on_falsey_or_garbage_annotation() {
         for v in ["false", "0", "no", "off", "", "maybe"] {
             let pod = pod_with_annotation(SECCOMP_RECORD_ANNOTATION, v);
-            assert_eq!(
-                pod_registration_flags(&pod),
-                pod_flags::POD_TRACKED,
-                "value {v:?} should not opt in"
-            );
+            assert_eq!(effective_capture_level(&pod, Low), Low, "value {v:?}");
         }
+        // The legacy alias wins over a lower syscall-capture value.
+        let mut pod = pod_with_annotation(SECCOMP_RECORD_ANNOTATION, "true");
+        pod.metadata
+            .annotations
+            .as_mut()
+            .unwrap()
+            .insert(SYSCALL_CAPTURE_ANNOTATION.into(), "low".into());
+        assert_eq!(effective_capture_level(&pod, Low), Full);
     }
 
     #[test]
-    fn pod_registration_flags_ignores_unrelated_annotations() {
-        let pod = pod_with_annotation("example.com/other", "true");
-        assert_eq!(pod_registration_flags(&pod), pod_flags::POD_TRACKED);
+    fn effective_level_ignores_unrelated_annotations() {
+        let pod = pod_with_annotation("example.com/other", "full");
+        assert_eq!(effective_capture_level(&pod, Low), Low);
+    }
+
+    #[test]
+    fn registration_flags_carry_tier_and_uid_generation() {
+        let mut pod = Pod::default();
+        pod.metadata.uid = Some("11111111-2222-3333-4444-555555555555".into());
+        let f = pod_registration_flags(&pod, Medium);
+        assert_eq!(f & pod_flags::POD_TRACKED, pod_flags::POD_TRACKED);
+        assert_eq!(pod_flags::level(f), Some(Medium));
+        assert_eq!(
+            pod_flags::generation(f),
+            pod_flags::generation_for_uid(pod.metadata.uid.as_deref())
+        );
+        // Same pod, resync ⇒ identical value (no spurious dedup reset);
+        // a different pod on a reused inode ⇒ different generation.
+        assert_eq!(f, pod_registration_flags(&pod, Medium));
+        let mut other = Pod::default();
+        other.metadata.uid = Some("11111111-2222-3333-4444-555555555556".into());
+        assert_ne!(
+            pod_flags::generation(f),
+            pod_flags::generation(pod_registration_flags(&other, Medium))
+        );
+        // No UID (a hand-built test pod) still yields a tracked, tiered value.
+        let f = pod_registration_flags(&Pod::default(), Full);
+        assert_eq!(f, pod_flags::POD_TRACKED);
     }
 
     fn pod_with_owners(owners: Vec<OwnerReference>) -> Pod {

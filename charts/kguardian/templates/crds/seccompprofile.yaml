@@ -1,0 +1,20 @@
+{{- /*
+SeccompProfile CRD, rendered as a release resource so `helm upgrade` picks up
+schema changes (Helm applies `crds/` on install only). The source file is
+generated from the controller's Rust type and committed at
+files/kguardian.dev_seccompprofiles.yaml — edit the Rust type, not the YAML.
+`helm.sh/resource-policy: keep` stops `helm uninstall` from deleting the CRD
+and, with it, every SeccompProfile object in the cluster.
+*/ -}}
+{{- if .Values.seccomp.installCRDs }}
+{{- $raw := .Files.Get "files/kguardian.dev_seccompprofiles.yaml" }}
+{{- if not $raw }}
+{{- fail "seccomp.installCRDs is true but files/kguardian.dev_seccompprofiles.yaml is missing from the chart" }}
+{{- end }}
+{{- $crd := $raw | fromYaml }}
+{{- $meta := $crd.metadata }}
+{{- $_ := set $meta "annotations" (merge (dict "helm.sh/resource-policy" "keep") (default (dict) $meta.annotations)) }}
+{{- $_ := set $meta "labels" (merge (default (dict) $meta.labels) (include "kguardian.labels" . | fromYaml)) }}
+---
+{{ toYaml $crd }}
+{{- end }}

@@ -325,6 +325,33 @@ fn canonical_pod_ips(posted: Option<&serde_json::Value>, primary: &str) -> serde
     serde_json::Value::Array(out.into_iter().map(serde_json::Value::String).collect())
 }
 
+/// Reduce a posted `capture_level` to one of the five tier names, or
+/// `None`. Trimmed and lower-cased so a chart typo in case does not
+/// register as "unknown"; anything else is logged and dropped. `None`
+/// is the honest answer for an unrecognised value — capture
+/// completeness (which feeds the CR's `CaptureComplete` condition, the
+/// export warning and drift) treats it as `low`, never as complete,
+/// which is the safe direction. Because `AsChangeset` skips `None`, a
+/// dropped value leaves
+/// whatever the column already held rather than overwriting it.
+fn normalise_capture_level(posted: Option<String>, pod: &str) -> Option<String> {
+    let raw = posted?;
+    let level = raw.trim().to_ascii_lowercase();
+    if level.is_empty() {
+        return None;
+    }
+    if crate::CAPTURE_LEVELS.contains(&level.as_str()) {
+        Some(level)
+    } else {
+        tracing::warn!(
+            pod,
+            value = %raw,
+            "unrecognised capture_level on /pod/spec; storing NULL (treated as low)"
+        );
+        None
+    }
+}
+
 pub fn upsert_pod_details(
     conn: &mut PgConnection,
     mut w: web::Json<PodDetail>,
@@ -344,6 +371,7 @@ pub fn upsert_pod_details(
     // same address and the OR in the lookup would only half-work.
     w.pod_ip = canonical_ip(&w.pod_ip);
     w.pod_ips = Some(canonical_pod_ips(w.pod_ips.as_ref(), &w.pod_ip));
+    w.capture_level = normalise_capture_level(w.capture_level.take(), &w.pod_name);
     debug!(
         "storing the pod details {:?} into pod_details table",
         w.pod_name,
@@ -891,6 +919,51 @@ mod tests {
         let got: PodDetail =
             serde_json::from_str(json).expect("must parse without workload fields");
         assert!(got.workload_kind.is_none() && got.workload_name.is_none());
+    }
+
+    #[test]
+    fn pod_detail_accepts_payload_with_capture_level() {
+        let json = r#"{"pod_name":"web-1","pod_ip":"10.42.3.5","pod_namespace":"prod",
+            "pod_obj":null,"time_stamp":"2026-08-31T00:00:00","node_name":"node-a",
+            "is_dead":false,"pod_identity":null,"workload_selector_labels":null,
+            "workload_kind":"Deployment","workload_name":"web","capture_level":"high"}"#;
+        let got: PodDetail = serde_json::from_str(json).expect("must parse with capture_level");
+        assert_eq!(got.capture_level.as_deref(), Some("high"));
+    }
+
+    #[test]
+    fn pod_detail_capture_level_defaults_to_none_for_older_controllers() {
+        let json = r#"{"pod_name":"web-1","pod_ip":"10.42.3.5","pod_namespace":"prod",
+            "pod_obj":null,"time_stamp":"2026-08-31T00:00:00","node_name":"node-a",
+            "is_dead":false,"pod_identity":null,"workload_selector_labels":null}"#;
+        let got: PodDetail = serde_json::from_str(json).unwrap();
+        assert!(got.capture_level.is_none());
+    }
+
+    #[test]
+    fn normalise_capture_level_accepts_the_five_tiers_case_insensitively() {
+        for (input, want) in [
+            ("full", "full"),
+            ("High", "high"),
+            (" medium ", "medium"),
+            ("LOW", "low"),
+            ("custom", "custom"),
+        ] {
+            assert_eq!(
+                normalise_capture_level(Some(input.to_string()), "p").as_deref(),
+                Some(want),
+                "{input:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn normalise_capture_level_drops_unknown_and_blank() {
+        assert!(normalise_capture_level(None, "p").is_none());
+        assert!(normalise_capture_level(Some("".into()), "p").is_none());
+        assert!(normalise_capture_level(Some("   ".into()), "p").is_none());
+        assert!(normalise_capture_level(Some("ultra".into()), "p").is_none());
+        assert!(normalise_capture_level(Some("full;drop".into()), "p").is_none());
     }
 
     #[test]

@@ -62,6 +62,21 @@ spec:
             value: "{{ .Values.controller.ignoreDaemonSet }}"
           - name: CONTAINERD_SOCK
             value: "{{ .Values.controller.containerdSockPath }}"
+          {{- $level := .Values.syscalls.captureLevel | default "full" | toString | lower }}
+          {{- if not (has $level (list "full" "high" "medium" "low" "custom")) }}
+          {{- fail (printf "syscalls.captureLevel must be one of full, high, medium, low, custom (got %q)" $level) }}
+          {{- end }}
+          {{- if and (eq $level "custom") (not .Values.syscalls.customList) }}
+          {{- fail "syscalls.captureLevel is custom but syscalls.customList is empty" }}
+          {{- end }}
+          # Syscall capture tier. Only `full` yields a complete seccomp
+          # profile; see values.yaml `syscalls`.
+          - name: SYSCALL_CAPTURE_LEVEL
+            value: {{ $level | quote }}
+          {{- if eq $level "custom" }}
+          - name: SYSCALL_CUSTOM_LIST
+            value: {{ .Values.syscalls.customList | join "," | quote }}
+          {{- end }}
           {{- if .Values.seccomp.distribute }}
           - name: SECCOMP_DISTRIBUTE
             value: "true"

@@ -1,69 +1,115 @@
 ---
 title: "Distributing Seccomp Profiles"
-description: "Generate per-workload seccomp profiles from observed syscalls and roll them out to nodes"
+description: "Capture a workload's syscalls, export a SeccompProfile CR, commit it, and let kguardian place the file on every node"
 icon: "shield-halved"
 ---
 
-kguardian can turn the syscalls it observes into a named, versioned seccomp
-profile per workload, write those profiles onto every node, and tell you when a
-profile is safe to reference. Your application team owns the one-line
-`securityContext` change — kguardian never edits workloads.
+kguardian turns the syscalls it observes into a `SeccompProfile` manifest you
+commit to git. Once you apply that CR, the controller on every node writes the
+profile file it describes and reports back in the CR's status. kguardian never
+applies a profile on its own, never edits workloads, and never writes a file
+that is not backed by a CR you own — see
+[policy as code](/concepts/policy-as-code).
 
 <Info>
-**Ownership split.** kguardian guarantees a named profile exists at a known path
-on every node and reports when that is true. Whether to enforce it — and owning
-the blast radius if it is too tight — stays with the team that runs the workload.
+**Ownership split.** You own the `SeccompProfile` object: its contents, its
+version history, and the decision to enforce. kguardian guarantees that the
+file it describes exists at a known path on every node, tells you when that is
+true, and tells you when what it observes has drifted from what you committed.
 </Info>
 
 ---
 
-## How it fits together
+## The lifecycle
 
 <Steps>
-  <Step title="Observe">
-    The controller's eBPF probe records syscalls per pod. By default it only
-    traces a security-relevant subset; opt a workload in to **full** capture
-    (see below) before generating an enforceable profile.
+  <Step title="Capture">
+    The controller's eBPF probe records syscalls per pod at the cluster's
+    capture tier (`syscalls.captureLevel`, default `full`). Only `full` is
+    complete enough for a profile — see [capture tiers](#capture-tiers).
   </Step>
-  <Step title="Attribute">
-    Each pod is resolved to its top-level controller — a ReplicaSet to its
-    Deployment, a Job to its CronJob — so the profile is keyed on a stable
-    `(namespace, kind, name)` identity, not a pod name that churns every rollout.
+  <Step title="Review">
+    Each pod is attributed to its top-level controller (ReplicaSet →
+    Deployment, Job → CronJob) and the broker keeps a monotonic union of every
+    syscall seen for that workload. Inspect it in the UI or via
+    `GET /seccomp/profiles`. A profile built from a partial tier is flagged.
   </Step>
-  <Step title="Aggregate">
-    The broker keeps a **monotonic union** of every syscall seen from any pod of
-    the workload. The set only grows: scaling a replica away never narrows the
-    profile.
+  <Step title="Export">
+    Export the `SeccompProfile` manifest (UI, or
+    `GET /seccomp/profiles/{ns}/{kind}/{name}/export`). It arrives with
+    `defaultAction: SCMP_ACT_LOG` and a `workloadRef` so kguardian can keep
+    reporting on it.
   </Step>
-  <Step title="Distribute">
-    With `seccomp.distribute=true`, the controller writes each profile onto its
-    node under the kubelet seccomp root, atomically, and never deletes.
+  <Step title="Commit and apply">
+    Review the YAML like any other manifest, commit it, apply it — by hand or
+    through your GitOps pipeline. This is the only step that changes cluster
+    state, and it is yours.
   </Step>
   <Step title="Reference">
-    Once the profile reports `Ready`, add the `Localhost` reference to your pod
-    template.
+    With `seccomp.distribute=true`, every controller writes
+    `kguardian/<namespace>/<name>.json` to its node and the CR's status turns
+    `Ready`. Add the `Localhost` reference to the pod template once.
+  </Step>
+  <Step title="Promote">
+    After a full usage cycle under audit with a clean kernel log, change
+    `defaultAction` to `SCMP_ACT_ERRNO` in git and apply. The file is rewritten
+    on every node; it applies to each pod on its next restart.
+  </Step>
+  <Step title="Watch for drift">
+    When the workload starts making a syscall your CR does not allow, the CR's
+    `Drift` condition and the UI say so. Re-export, diff, commit.
   </Step>
 </Steps>
 
 ---
 
-## Enable full syscall capture
+## Capture tiers
 
-The default capture is filtered to security-relevant syscalls — good for
-monitoring, but a deny-by-default profile built from a partial set will start
-erroring legitimate calls. Annotate the workload's **pod template** to capture
-the complete set:
+The controller traces syscalls at one of five tiers, set cluster-wide in Helm:
+
+| Tier | Traces | Complete profile? |
+|------|--------|-------------------|
+| `full` (default) | every syscall | yes |
+| `high` | everything except hot-path noise (`read`, `write`, `futex`, `epoll_*`, `mmap`, `clock_gettime`, …) | no |
+| `medium` | `low` plus the network, file-permission/link and process-lifecycle families | no |
+| `low` | the 56 security-relevant syscalls (`execve`, `socket`, `mount`, `ptrace`, `bpf`, …) | no |
+| `custom` | exactly `syscalls.customList` | no |
+
+`full` costs about the same CPU as `low`: the probe de-duplicates per pod
+network namespace inside BPF, so each syscall crosses into userspace once per
+pod. Choose a lower tier only if you never intend to ship profiles.
+
+```yaml
+# values.yaml
+syscalls:
+  captureLevel: full
+```
+
+A workload can **raise** its own tier above the cluster default (never lower
+it) with a pod-template annotation. `kguardian.dev/seccomp-record: "true"` is
+an alias for `full`:
 
 ```yaml
 spec:
   template:
     metadata:
       annotations:
-        kguardian.dev/seccomp-record: "true"
+        kguardian.dev/syscall-capture: full
 ```
 
-Let it run under representative load for a while. For a CronJob, let several
-scheduled runs complete — a single run rarely exercises every code path.
+Let the workload run under representative load. For a CronJob, let several
+scheduled runs complete — one run rarely exercises every code path.
+
+<Warning>
+A profile built from a partial tier is an incomplete allowlist: it **will**
+deny syscalls the application makes. The completeness check covers every pod
+that ever contributed syscalls to the union — one historical `low` run keeps
+the workload incomplete. The UI and API mark such profiles
+(`capture.complete: false`) and name the tier and pods responsible; the
+exported YAML carries a `# WARNING: partial capture` header and the CR's
+`CaptureComplete` condition stays `False`. Export is never blocked — the
+decision is yours — but raise the tier and let the union refill first.
+</Warning>
 
 ---
 
@@ -73,21 +119,36 @@ scheduled runs complete — a single run rarely exercises every code path.
 # values.yaml
 seccomp:
   distribute: true
+  installCRDs: true          # default; see below
   # Only if the kubelet root is not /var/lib/kubelet:
   #   k3s: /var/lib/rancher/k3s/agent/kubelet
   kubeletRoot: /var/lib/kubelet
 ```
 
-This adds a hostPath mount of `<kubeletRoot>/seccomp` to the controller
-DaemonSet and starts a distribution pass every 30 seconds. Distribution is
-best-effort: a failed pass or a wrong `kubeletRoot` is logged and retried, and
-never restarts the controller.
+`distribute` adds a hostPath mount of `<kubeletRoot>/seccomp` to the controller
+DaemonSet, grants it read/watch on `seccompprofiles` plus patch on their
+status, and starts a cluster-wide watch on `SeccompProfile` objects. For each
+CR the controller renders the standard seccomp JSON from `spec`, compares it
+byte-for-byte with `<kubeletRoot>/seccomp/kguardian/<namespace>/<name>.json`,
+and writes atomically when they differ. **Deleting the CR deletes the file**
+— that is the one case where kguardian removes something from a node, and it
+only ever follows an explicit deletion of yours.
+
+`installCRDs` renders the CRD as part of the release (with
+`helm.sh/resource-policy: keep`) so `helm upgrade` picks up schema changes,
+which Helm's `crds/` mechanism never does. The trade-off is that
+`helm uninstall` leaves the CRD — and every `SeccompProfile` — in place; delete
+it by hand if that is what you want. Set it to `false` if you manage CRDs
+separately and apply `charts/kguardian/files/kguardian.dev_seccompprofiles.yaml`
+yourself. (The older `AuditNetworkPolicy` CRDs still ship in `crds/`; they
+predate this pattern and have not needed a schema upgrade.)
 
 ---
 
-## Reference a profile
+## Review and export
 
-List what is available and its readiness:
+List workloads with an observed syscall set, their capture completeness, and
+whether a CR already covers them:
 
 ```bash
 kubectl exec deploy/kguardian-broker -n kguardian -- \
@@ -100,26 +161,86 @@ kubectl exec deploy/kguardian-broker -n kguardian -- \
     "namespace": "prod",
     "kind": "Deployment",
     "name": "web",
-    "hash": "a1b2c3d4e5f60718",
-    "localhostProfile": "kguardian/prod/deployment-web-a1b2c3d4e5f60718.json",
-    "distribution": { "ready": 12, "total": 12, "state": "Ready" },
+    "syscallCount": 73,
+    "capture": { "level": "full", "complete": true,
+                 "pods": [{ "name": "web-7d9c8-abc12", "level": "full" }],
+                 "more": 0, "incomplete": 0 },
+    "captureComplete": true,
+    "suggestedName": "deployment-web",
+    "crCount": 0,
+    "cr": null,
     "recommendedSnippet": {
-      "seccompProfile": {
-        "type": "Localhost",
-        "localhostProfile": "kguardian/prod/deployment-web-a1b2c3d4e5f60718.json"
-      }
+      "seccompProfile": { "type": "Localhost",
+                          "localhostProfile": "kguardian/prod/deployment-web.json" }
     }
   }
 ]
 ```
 
+`cr: null` means no `SeccompProfile` references this workload yet. Export one:
+
+```bash
+kubectl exec deploy/kguardian-broker -n kguardian -- \
+  wget -qO- localhost:9090/seccomp/profiles/prod/Deployment/web/export \
+  > seccomp/prod/deployment-web.yaml
+```
+
+```yaml
+# kguardian SeccompProfile export
+# workload: prod Deployment/web
+# observed syscalls: 73 (x86_64)
+# capture: full — complete (2 contributing pod(s))
+apiVersion: kguardian.dev/v1alpha1
+kind: SeccompProfile
+metadata:
+  name: deployment-web
+  namespace: prod
+spec:
+  defaultAction: SCMP_ACT_LOG
+  architectures:
+    - SCMP_ARCH_X86_64
+  syscalls:
+    - names:
+        - accept4
+        - bind
+        - clone3
+        # ...
+      action: SCMP_ACT_ALLOW
+  workloadRef:
+    kind: Deployment
+    name: web
+```
+
+`?name=` renames the CR and `?defaultAction=` changes the action; the UI's
+editor stages syscall additions and removals before export. Review it, commit
+it, apply it:
+
+```bash
+kubectl apply -f seccomp/prod/deployment-web.yaml
+kubectl -n prod get seccompprofile deployment-web
+```
+
+```
+NAME             ACTION         READY   DRIFT   AGE
+deployment-web   SCMP_ACT_LOG   12/12   False   40s
+```
+
+The full status — per-node hashes, `Ready` / `CaptureComplete` / `Drift`
+conditions — is in the [CRD reference](/reference/crds/seccompprofile).
+
+---
+
+## Reference the profile
+
 <Warning>
-Wait for `"state": "Ready"`. If you reference a profile before every node has
-the file, a pod that schedules onto a node still missing it fails to start with
-`CreateContainerError` until the next distribution pass catches up.
+Wait for `READY` to show every node. A pod that schedules onto a node still
+missing the file fails to start with `CreateContainerError` until the
+controller there catches up (immediately on the watch event, or on the next
+resync).
 </Warning>
 
-Drop the snippet into the pod template — at pod level, or on a single container:
+Reference the path — at pod level, or on a single container. The name is the
+CR's name, so it never changes when the contents do:
 
 ```yaml
 spec:
@@ -128,93 +249,81 @@ spec:
       securityContext:
         seccompProfile:
           type: Localhost
-          localhostProfile: kguardian/prod/deployment-web-a1b2c3d4e5f60718.json
+          localhostProfile: kguardian/prod/deployment-web.json
 ```
 
-The filename carries the content hash. When the observed syscall set grows, a
-**new** file appears alongside the old one and `/seccomp/profiles` reports the
-new hash — bump the reference on your own schedule. The old file is never
-removed, so rolling back is just pointing at the previous hash.
+<Note>
+The kubelet reads the profile at **container start**. A changed file does
+nothing to running pods; it applies on the next restart. That is what makes
+rewriting in place safe — and what makes an over-tight enforcing profile
+surface later than you might expect.
+</Note>
 
 ---
 
-## Adjust a profile
+## Edit a profile
 
-Sometimes the observed set isn't quite right — a syscall from a weekly cron the
-scanner never caught, or one you want gone. Set an **override**: it's stored
-separately from the observed union (which keeps accruing underneath) and folded
-back in on every recompute, so the next syscall batch can't revert it.
-
-Enable it once, cluster-wide:
+The CR is yours. Add a syscall the scanner never caught, remove one you want
+gone, change the action — in git, then apply. Every controller rewrites the
+file on the watch event; the app team changes nothing.
 
 ```yaml
-# values.yaml
-seccomp:
-  overrides:
-    enabled: true
+spec:
+  syscalls:
+    - names: [accept4, ..., clock_settime, clock_adjtime]   # cert rotation cron, weekly
+      action: SCMP_ACT_ALLOW
 ```
 
-Then edit a workload's profile — `revision` from the current
-`GET /seccomp/profiles` (`override.revision`, or omit to create):
+kguardian keeps observing underneath. If you removed a syscall the workload
+still makes, or it starts making a new one, the `Drift` condition flips to
+`True` with the names, and `GET /seccomp/profiles` shows them under
+`cr.drift.missing`. Re-export and diff to fold them in — the UI shows the
+add/remove lines against your current CR before the YAML.
 
-```bash
-curl -X PUT localhost:9090/seccomp/profiles/prod/Deployment/web/override \
-  -H 'X-Kguardian-Actor: alice' \
-  -d '{
-        "add": ["clock_settime", "clock_adjtime"],
-        "note": "cert rotation cron, weekly",
-        "revision": null
-      }'
+---
+
+## Promote to enforcing
+
+`SCMP_ACT_LOG` logs disallowed syscalls to the kernel audit log
+(`type=SECCOMP` in `dmesg` / auditd) and blocks nothing. Run a full usage
+cycle in this mode — for a CronJob, several runs — and confirm the log shows
+nothing the workload needs. Then change one line and apply:
+
+```yaml
+spec:
+  defaultAction: SCMP_ACT_ERRNO
 ```
-
-The response carries the new `hash` and any `warnings`. Within one distributor
-poll a new hash-named file is on every node; bump your pod template to it.
-`DELETE` the override to revert — the pre-override file was never deleted, so
-that's instant.
-
-## Promote from audit to enforcement
-
-The generated profile uses `defaultAction: SCMP_ACT_LOG` — disallowed syscalls
-are logged to the kernel audit log but nothing is blocked. Run in this mode
-first and confirm the audit log shows nothing your workload actually needs being
-denied. Then flip the action **via an override**:
-
-```bash
-curl -X PUT localhost:9090/seccomp/profiles/prod/Deployment/web/override \
-  -H 'X-Kguardian-Actor: alice' \
-  -d '{ "defaultAction": "SCMP_ACT_ERRNO", "revision": 1 }'
-```
-
-`defaultAction` is part of the hash, so this produces a new, distributable
-enforcing file — not just a different API render.
 
 <Warning>
 A too-tight profile breaks the workload on its **next restart**, not
-immediately — so promote deliberately, and watch the audit log for a full usage
-cycle first (for a CronJob, several runs).
+immediately. Promote deliberately, keep the audit log open, and know that
+reverting is a one-line change in git.
 </Warning>
 
 ---
 
 ## Things to know
 
-- **One file per workload.** Every observed syscall goes into that one profile's
-  `names` array — 100 syscalls is one ~2&nbsp;KB file, not 100 files. Extra files
-  on a node come only from the set *growing over time*: each first-sighting of a
-  new syscall writes a new hash-named file next to the old one. This settles
-  within minutes.
-- **The set only grows.** kguardian keeps a monotonic union — if a workload
-  stops making a syscall, it stays in the profile. A profile that narrowed
-  because a replica scaled away would start denying calls the app still makes.
-  Shrinking a profile is a manual reset today.
-- **Per-pod, not per-container.** Attribution is by network namespace, which all
-  containers in a pod share. An injected sidecar (a service-mesh proxy) adds its
-  syscalls to the workload's profile. The profile is a safe superset; per-container
+- **One file per CR.** `kguardian/<namespace>/<name>.json`, rewritten in place.
+  No hash-named copies accumulate; version history lives in git, where the
+  CR does.
+- **The observed set only grows.** kguardian keeps a monotonic union — a
+  syscall the workload stops making stays observed. Your CR is the place to
+  narrow; `cr.drift.extra` lists what your CR allows that was never observed.
+- **Per-pod, not per-container.** Attribution is by network namespace, which
+  all containers in a pod share. An injected sidecar adds its syscalls to the
+  workload's observed set. The profile is a safe superset; per-container
   profiles are not supported.
-- **New nodes.** A node that joins the cluster gets profiles on the next
-  distribution pass. There is a brief window where a pod scheduled onto it could
-  hit `CreateContainerError`.
-- **Mixed architectures.** A workload running on both `amd64` and `arm64` nodes
-  gets one profile with both architectures listed.
-- **Disk.** Old profile files accumulate (there is no automatic cleanup). Each is
-  ~2&nbsp;KB; prune `<kubeletRoot>/seccomp/kguardian/` manually if needed.
+- **`workloadRef` is optional.** Without it the CR is still distributed, but
+  `CaptureComplete` and `Drift` are `Unknown` — kguardian has nothing to
+  compare against. Several CRs may reference one workload; the summary shows
+  the newest and a `crCount`.
+- **Pods from an older controller** have no recorded capture level, report as
+  `unknown`, and count as incomplete. A CronJob between runs or a workload
+  scaled to zero is complete if every contributing pod was `full`.
+- **New nodes** get every CR's file as soon as the controller there starts.
+- **Mixed architectures.** A workload on both `amd64` and `arm64` nodes gets
+  both in `spec.architectures`. Syscall names are resolved per architecture
+  at controller startup.
+- **The CLI still works.** `kubectl kguardian gen seccomp` writes the same
+  profile as plain seccomp JSON for use outside the CR flow.

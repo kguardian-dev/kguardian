@@ -247,6 +247,13 @@ class BrokerAPIClient {
   setBaseURL(baseURL: string) {
     this.client.defaults.baseURL = baseURL;
   }
+
+  /** The broker base path every other broker module must build on (the
+   *  `/api` proxy in dev/preview). Exposed so fetch-based modules that need
+   *  structured error bodies (see services/seccompApi.ts) share one origin. */
+  get baseURL(): string {
+    return this.client.defaults.baseURL ?? '/api';
+  }
 }
 
 // Export a singleton instance

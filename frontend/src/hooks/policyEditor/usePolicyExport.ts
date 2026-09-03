@@ -5,8 +5,25 @@ import type { SeccompProfile } from '../../types/seccompProfile';
 import { policyToYAML } from '../../utils/networkPolicyGenerator';
 import { ciliumPolicyToYAML } from '../../utils/ciliumPolicyGenerator';
 import { profileToYAML, profileToJSON } from '../../utils/seccompProfileGenerator';
+import { podProfileToKguardianCR, suggestedCrName } from '../../utils/seccompCr';
+import type { PodNodeData } from '../../types';
+import type { CaptureInfo } from '../../types/seccompWorkload';
 
 export type PolicyType = 'network' | 'cilium' | 'seccomp';
+
+/**
+ * Seccomp export formats. `kguardian` (default) is the kguardian.dev/v1alpha1
+ * SeccompProfile CR the docs describe and the controller reconciles; `spo` is
+ * the Security Profiles Operator CR for shops running SPO; `json` is the raw
+ * seccomp document.
+ */
+export type SeccompExportFormat = 'kguardian' | 'spo' | 'json';
+
+export const SECCOMP_EXPORT_FORMATS: { id: SeccompExportFormat; label: string; hint: string }[] = [
+  { id: 'kguardian', label: 'kguardian CR', hint: 'kguardian.dev/v1alpha1 SeccompProfile — commit and apply; the controller writes the node file' },
+  { id: 'spo', label: 'Security Profiles Operator CR', hint: 'security-profiles-operator.x-k8s.io/v1beta1 SeccompProfile — requires SPO' },
+  { id: 'json', label: 'Raw JSON', hint: 'Plain seccomp document (what the kubelet loads from disk)' },
+];
 
 interface UsePolicyExportProps {
   policyType: PolicyType;
@@ -16,7 +33,13 @@ interface UsePolicyExportProps {
   podName: string;
   podIdentity?: string;
   podNamespace: string;
-  yamlView: boolean;
+  /** Network/Cilium always export YAML; seccomp is driven by `seccompFormat`. Kept for callers. */
+  yamlView?: boolean;
+  /** Seccomp only; defaults to the kguardian CR. */
+  seccompFormat?: SeccompExportFormat;
+  /** Seccomp only; needed for the kguardian CR (workloadRef + capture header). */
+  pod?: PodNodeData | null;
+  capture?: CaptureInfo;
 }
 
 export const usePolicyExport = ({
@@ -27,7 +50,9 @@ export const usePolicyExport = ({
   podName,
   podIdentity,
   podNamespace,
-  yamlView,
+  seccompFormat = 'kguardian',
+  pod = null,
+  capture = { level: 'unknown', complete: false, pods: [] },
 }: UsePolicyExportProps) => {
   const [copiedToClipboard, setCopiedToClipboard] = useState(false);
 
@@ -37,11 +62,13 @@ export const usePolicyExport = ({
     } else if (policyType === 'cilium' && ciliumPolicy) {
       return ciliumPolicyToYAML(ciliumPolicy);
     } else if (policyType === 'seccomp' && seccompProfile) {
-      // Use pod identity for resource name, fallback to pod name
-      const resourceName = podIdentity || podName;
-      return yamlView
-        ? profileToYAML(seccompProfile, resourceName, podNamespace)
-        : profileToJSON(seccompProfile);
+      if (seccompFormat === 'json') return profileToJSON(seccompProfile);
+      if (seccompFormat === 'spo') {
+        // Use pod identity for resource name, fallback to pod name
+        return profileToYAML(seccompProfile, podIdentity || podName, podNamespace);
+      }
+      if (!pod) return null;
+      return podProfileToKguardianCR(pod, seccompProfile, capture);
     }
     return null;
   };
@@ -86,12 +113,17 @@ export const usePolicyExport = ({
       filename = `${ciliumPolicy.metadata.name}.yaml`;
       mimeType = 'text/yaml';
     } else if (policyType === 'seccomp') {
-      if (yamlView) {
-        filename = `${podName}-seccomp.yaml`;
-        mimeType = 'text/yaml';
-      } else {
+      if (seccompFormat === 'json') {
         filename = `${podName}-seccomp.json`;
         mimeType = 'application/json';
+      } else if (seccompFormat === 'spo') {
+        // A Security Profiles Operator SeccompProfile CR, not a raw seccomp
+        // document — name it so.
+        filename = `${podName}-seccompprofile-spo.yaml`;
+        mimeType = 'text/yaml';
+      } else {
+        filename = `${pod ? suggestedCrName(pod) : podName}.yaml`;
+        mimeType = 'text/yaml';
       }
     } else {
       return;
@@ -112,5 +144,6 @@ export const usePolicyExport = ({
     copiedToClipboard,
     handleCopy,
     handleDownload,
+    getExportContent,
   };
 };

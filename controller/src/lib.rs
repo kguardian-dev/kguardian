@@ -1,4 +1,5 @@
 pub mod network;
+pub mod seccomp_crd;
 pub mod seccomp_distributor;
 pub mod syscall;
 
@@ -15,5 +16,6 @@ pub mod container;
 use client::*;
 
 pub mod bpf;
+pub mod capture_tiers;
 pub mod log;
 pub mod node_facts;

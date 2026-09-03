@@ -1,0 +1,233 @@
+# Generated from controller/src/seccomp_crd.rs — do not edit.
+# Refresh with: cd controller && KGUARDIAN_WRITE_CRD=1 cargo test crd_yaml_committed
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: seccompprofiles.kguardian.dev
+spec:
+  group: kguardian.dev
+  names:
+    kind: SeccompProfile
+    plural: seccompprofiles
+    shortNames:
+    - scmp
+    singular: seccompprofile
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .spec.defaultAction
+      name: Action
+      type: string
+    - jsonPath: .status.distribution.summary
+      name: Ready
+      type: string
+    - jsonPath: .status.drift
+      name: Drift
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: 'A seccomp profile that kguardian distributes to every node as kguardian/<namespace>/<name>.json under the kubelet seccomp root. Reference it from a pod with securityContext.seccompProfile {type: Localhost, localhostProfile: kguardian/<namespace>/<name>.json}.'
+        properties:
+          spec:
+            description: |-
+              Spec of a `SeccompProfile`: a seccomp profile in its native shape,
+              plus an optional pointer at the workload it is for.
+            properties:
+              architectures:
+                description: |-
+                  Architectures the profile applies to (seccomp `architectures`).
+                  Omitted ⇒ the rendered file carries no `architectures` field.
+                items:
+                  enum:
+                  - SCMP_ARCH_X86_64
+                  - SCMP_ARCH_ARM64
+                  - SCMP_ARCH_X86
+                  - SCMP_ARCH_X32
+                  - SCMP_ARCH_AARCH64
+                  type: string
+                nullable: true
+                type: array
+              defaultAction:
+                description: Action for any syscall not matched by a rule.
+                enum:
+                - SCMP_ACT_LOG
+                - SCMP_ACT_ERRNO
+                - SCMP_ACT_KILL
+                - SCMP_ACT_KILL_PROCESS
+                type: string
+              syscalls:
+                description: |-
+                  Syscall rules. kguardian generates `SCMP_ACT_ALLOW` rules only;
+                  the other actions are accepted for hand edits.
+                items:
+                  description: 'One seccomp rule: a set of syscall names sharing an action.'
+                  properties:
+                    action:
+                      enum:
+                      - SCMP_ACT_ALLOW
+                      - SCMP_ACT_LOG
+                      - SCMP_ACT_ERRNO
+                      - SCMP_ACT_KILL
+                      - SCMP_ACT_KILL_PROCESS
+                      type: string
+                    errnoRet:
+                      description: errno to return for `SCMP_ACT_ERRNO` rules.
+                      format: uint32
+                      minimum: 0.0
+                      nullable: true
+                      type: integer
+                    names:
+                      description: Syscall names (`^[a-z][a-z0-9_]{0,63}$`).
+                      items:
+                        description: A syscall name. Validated by the CRD schema pattern.
+                        pattern: ^[a-z][a-z0-9_]{0,63}$
+                        type: string
+                      minItems: 1
+                      type: array
+                  required:
+                  - action
+                  - names
+                  type: object
+                minItems: 1
+                type: array
+              workloadRef:
+                description: |-
+                  The workload this profile is for. Enables the `CaptureComplete`
+                  and `Drift` conditions; optional.
+                nullable: true
+                properties:
+                  kind:
+                    enum:
+                    - Deployment
+                    - StatefulSet
+                    - DaemonSet
+                    - CronJob
+                    - Job
+                    - ReplicaSet
+                    - ReplicationController
+                    type: string
+                  name:
+                    type: string
+                required:
+                - kind
+                - name
+                type: object
+            required:
+            - defaultAction
+            - syscalls
+            type: object
+          status:
+            description: |-
+              `status` of a `SeccompProfile`. Two writers: each controller
+              server-side-applies its own `nodes[name=<node>]` entry (field manager
+              `kguardian-controller/<node>`), and every controller applies the same
+              computed summary (everything else) under the shared manager
+              `kguardian-summary`, so the summary converges to the last writer.
+            nullable: true
+            properties:
+              conditions:
+                items:
+                  description: |-
+                    A `metav1.Condition`-shaped condition (`type`, `status`, `reason`,
+                    `message`, `lastTransitionTime`).
+                  properties:
+                    lastTransitionTime:
+                      nullable: true
+                      type: string
+                    message:
+                      default: ''
+                      type: string
+                    reason:
+                      type: string
+                    status:
+                      description: '`"True"`, `"False"` or `"Unknown"`.'
+                      type: string
+                    type:
+                      type: string
+                  required:
+                  - reason
+                  - status
+                  - type
+                  type: object
+                type: array
+                x-kubernetes-list-map-keys:
+                - type
+                x-kubernetes-list-type: map
+              distribution:
+                nullable: true
+                properties:
+                  ready:
+                    format: uint32
+                    minimum: 0.0
+                    type: integer
+                  state:
+                    enum:
+                    - Ready
+                    - Partial
+                    - Pending
+                    type: string
+                  summary:
+                    description: '`ready/total`, for the `Ready` printer column.'
+                    nullable: true
+                    type: string
+                  total:
+                    format: uint32
+                    minimum: 0.0
+                    type: integer
+                required:
+                - ready
+                - state
+                - total
+                type: object
+              drift:
+                description: |-
+                  Mirror of the `Drift` condition's status (`True`/`False`/`Unknown`)
+                  for the printer column — CRD printer columns take simple JSON
+                  paths only, no `[?(@.type=="Drift")]` filters.
+                nullable: true
+                type: string
+              hash:
+                description: FNV-1a-64 (hex) of the rendered file — what is on a ready node.
+                nullable: true
+                type: string
+              localhostProfile:
+                description: The `localhostProfile` value pods reference.
+                nullable: true
+                type: string
+              nodes:
+                description: Per-node state; each entry is owned by that node's controller.
+                items:
+                  properties:
+                    hash:
+                      type: string
+                    lastWritten:
+                      description: RFC 3339; when this node last wrote the file.
+                      nullable: true
+                      type: string
+                    name:
+                      type: string
+                  required:
+                  - hash
+                  - name
+                  type: object
+                type: array
+                x-kubernetes-list-map-keys:
+                - name
+                x-kubernetes-list-type: map
+              observedGeneration:
+                format: int64
+                nullable: true
+                type: integer
+            type: object
+        required:
+        - spec
+        title: SeccompProfile
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}

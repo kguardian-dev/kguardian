@@ -1,6 +1,6 @@
 import React from 'react';
 import { X, Copy, Download, Shield, Lock, Network, AlertTriangle } from 'lucide-react';
-import type { PolicyType } from '../../hooks/policyEditor';
+import type { PolicyType, SeccompExportFormat } from '../../hooks/policyEditor';
 
 interface PolicyHeaderProps {
   policyType: PolicyType;
@@ -16,7 +16,16 @@ interface PolicyHeaderProps {
   /** Non-null when the cluster CNI makes CiliumNetworkPolicy unlikely
    *  to be applicable; shown as a badge on the Cilium tab. */
   ciliumWarning?: string | null;
+  /** Seccomp export format (kguardian CR by default). */
+  seccompFormat?: SeccompExportFormat;
+  onSeccompFormatChange?: (format: SeccompExportFormat) => void;
 }
+
+const SECCOMP_FORMAT_LABEL: Record<SeccompExportFormat, string> = {
+  kguardian: 'kguardian CR',
+  spo: 'Security Profiles Operator CR',
+  json: 'raw seccomp JSON',
+};
 
 export const PolicyHeader: React.FC<PolicyHeaderProps> = ({
   policyType,
@@ -30,7 +39,9 @@ export const PolicyHeader: React.FC<PolicyHeaderProps> = ({
   podName,
   podNamespace,
   ciliumWarning,
+  seccompFormat = 'kguardian',
 }) => {
+  const seccompLabel = SECCOMP_FORMAT_LABEL[seccompFormat];
   return (
     <div className="flex items-center justify-between px-6 py-4 border-b border-hubble-border">
       <div className="flex items-center gap-3">
@@ -102,12 +113,12 @@ export const PolicyHeader: React.FC<PolicyHeaderProps> = ({
               : 'text-secondary hover:text-primary hover:bg-hubble-dark'
           }`}
         >
-          {yamlView ? 'Visual Editor' : (policyType === 'seccomp' ? 'YAML/JSON View' : 'YAML View')}
+          {yamlView ? 'Visual Editor' : (policyType === 'seccomp' ? 'Export View' : 'YAML View')}
         </button>
         <button
           onClick={onCopy}
           className="px-3 py-1.5 text-xs text-secondary hover:text-primary hover:bg-hubble-dark rounded-lg transition-colors flex items-center gap-1"
-          title={policyType === 'seccomp' && !yamlView ? 'Copy JSON' : 'Copy YAML'}
+          title={policyType === 'seccomp' ? `Copy ${seccompLabel}` : 'Copy YAML'}
         >
           <Copy className="w-3 h-3" />
           {copiedToClipboard ? 'Copied!' : 'Copy'}
@@ -115,7 +126,7 @@ export const PolicyHeader: React.FC<PolicyHeaderProps> = ({
         <button
           onClick={onDownload}
           className="px-3 py-1.5 text-xs text-secondary hover:text-primary hover:bg-hubble-dark rounded-lg transition-colors flex items-center gap-1"
-          title={policyType === 'seccomp' && !yamlView ? 'Download JSON' : 'Download YAML'}
+          title={policyType === 'seccomp' ? `Download ${seccompLabel}` : 'Download YAML'}
         >
           <Download className="w-3 h-3" />
           Download

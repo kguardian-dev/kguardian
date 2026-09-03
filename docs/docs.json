@@ -29,7 +29,8 @@
               "concepts/ebpf-monitoring",
               "concepts/network-policies",
               "concepts/audit-network-policy",
-              "concepts/seccomp-profiles"
+              "concepts/seccomp-profiles",
+              "concepts/policy-as-code"
             ]
           },
           {
@@ -58,6 +59,12 @@
               "cli/overview",
               "cli/gen-networkpolicy",
               "cli/gen-seccomp"
+            ]
+          },
+          {
+            "group": "CRD Reference",
+            "pages": [
+              "reference/crds/seccompprofile"
             ]
           },
           {

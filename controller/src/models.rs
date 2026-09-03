@@ -3,19 +3,65 @@ use serde::{Deserialize as _, Deserializer, Serialize};
 use serde_derive::Deserialize;
 use std::collections::BTreeMap;
 
-/// Bit flags packed into the eBPF `inode_num` map value. The network and
+/// Bit layout of the eBPF `inode_num` map value. The network and
 /// netpolicy probes only test the key for presence, but the syscall probe
-/// reads `RECORD_ALL_SYSCALLS` to decide whether to bypass its allowlist.
-/// Keep the bit positions in sync with the `KG_FLAG_*` defines in
-/// `controller/src/bpf/helper.h`.
+/// reads the capture tier out of it to pick an allowlist map, and the
+/// generation to key its per-netns dedup. Keep the positions in sync with
+/// the `KG_*` defines in `controller/src/bpf/helper.h`.
+///
+/// ```text
+///   bit 0      POD_TRACKED (always set)
+///   bits 1-3   capture tier index (CaptureLevel::tier_index)
+///   bits 4-31  registration generation
+/// ```
 pub mod pod_flags {
+    use crate::capture_tiers::CaptureLevel;
+
     /// The netns belongs to a pod kube-guardian tracks. Always set on a
     /// registration; a bare "present" marker for the network probes.
     pub const POD_TRACKED: u32 = 1 << 0;
-    /// Capture every syscall for this netns, ignoring `allowed_syscalls` —
-    /// set when the pod's workload opted in via the seccomp-record
-    /// annotation. See `docs/design/per-workload-seccomp-distribution.md`.
-    pub const RECORD_ALL_SYSCALLS: u32 = 1 << 1;
+    pub const TIER_SHIFT: u32 = 1;
+    pub const TIER_MASK: u32 = 0x7;
+    /// Generation: derived from the pod UID so a reused netns inode
+    /// number (the kernel recycles them) does not inherit the previous
+    /// pod's dedup state in the syscall probe. See `KG_GEN_SHIFT`.
+    pub const GEN_SHIFT: u32 = 4;
+    pub const GEN_MASK: u32 = u32::MAX >> GEN_SHIFT;
+
+    /// Build the map value for a tracked pod at `level`.
+    pub fn pack(level: CaptureLevel, generation: u32) -> u32 {
+        POD_TRACKED
+            | ((level.tier_index() & TIER_MASK) << TIER_SHIFT)
+            | ((generation & GEN_MASK) << GEN_SHIFT)
+    }
+
+    /// The tier index packed into `flags`.
+    pub fn tier_index(flags: u32) -> u32 {
+        (flags >> TIER_SHIFT) & TIER_MASK
+    }
+
+    /// The tier packed into `flags`, if it is one userspace emits.
+    pub fn level(flags: u32) -> Option<CaptureLevel> {
+        CaptureLevel::from_tier_index(tier_index(flags))
+    }
+
+    /// The generation packed into `flags`.
+    pub fn generation(flags: u32) -> u32 {
+        flags >> GEN_SHIFT
+    }
+
+    /// 28-bit FNV-1a of the pod UID (or 0 for a pod without one). Only
+    /// needs to differ between two pods that end up on the same netns
+    /// inode back-to-back, so collisions are harmless in practice.
+    pub fn generation_for_uid(uid: Option<&str>) -> u32 {
+        let Some(uid) = uid else { return 0 };
+        let mut h: u32 = 0x811c_9dc5;
+        for b in uid.bytes() {
+            h ^= u32::from(b);
+            h = h.wrapping_mul(0x0100_0193);
+        }
+        h & GEN_MASK
+    }
 }
 
 /// One pod's netns registration, passed from the pod watcher to the eBPF
@@ -208,6 +254,14 @@ pub struct PodDetail {
     pub workload_kind: Option<String>,
     #[serde(default)]
     pub workload_name: Option<String>,
+    /// The effective syscall capture tier for this pod — one of
+    /// `full|high|medium|low|custom` (`CaptureLevel::as_str`). The
+    /// broker reads the lowest level across a workload's pods to decide
+    /// whether its seccomp profile is complete enough to publish; a
+    /// missing value (older controller) is treated as `low` there,
+    /// never as complete. Always `Some` when this controller posts.
+    #[serde(default)]
+    pub capture_level: Option<String>,
 }
 
 #[derive(Debug, Default, Serialize)]
@@ -307,6 +361,55 @@ mod tests {
         let d: PodDetail = serde_json::from_str(&pod_detail_json(r#","pod_ips":null"#))
             .expect("explicit null must parse");
         assert!(d.pod_ips.is_empty());
+    }
+
+    #[test]
+    fn capture_level_absent_deserialises_to_none_and_round_trips_when_set() {
+        // /pod/list from an older broker has no capture_level column.
+        let d: PodDetail = serde_json::from_str(&pod_detail_json("")).unwrap();
+        assert_eq!(d.capture_level, None);
+        let d: PodDetail =
+            serde_json::from_str(&pod_detail_json(r#","capture_level":"high""#)).unwrap();
+        assert_eq!(d.capture_level.as_deref(), Some("high"));
+        let d: PodDetail =
+            serde_json::from_str(&pod_detail_json(r#","capture_level":null"#)).unwrap();
+        assert_eq!(d.capture_level, None);
+    }
+
+    #[test]
+    fn pod_flags_pack_and_unpack_match_helper_h_layout() {
+        use crate::capture_tiers::CaptureLevel;
+        for l in CaptureLevel::ALL {
+            let f = pod_flags::pack(l, 0xABC_DEF1);
+            assert_eq!(f & pod_flags::POD_TRACKED, pod_flags::POD_TRACKED);
+            assert_eq!(pod_flags::level(f), Some(l));
+            assert_eq!(pod_flags::tier_index(f), l.tier_index());
+            // 0xABC_DEF1 is 28 bits, so it survives intact.
+            assert_eq!(pod_flags::generation(f), 0xABC_DEF1);
+        }
+        // Bit positions are a wire contract with helper.h.
+        assert_eq!(pod_flags::pack(CaptureLevel::Full, 0), 0b0001);
+        assert_eq!(pod_flags::pack(CaptureLevel::High, 0), 0b0011);
+        assert_eq!(pod_flags::pack(CaptureLevel::Low, 0), 0b0111);
+        assert_eq!(pod_flags::pack(CaptureLevel::Custom, 0), 0b1001);
+        assert_eq!(pod_flags::pack(CaptureLevel::Full, 1), 0b1_0001);
+        // A generation wider than 28 bits is truncated, never spills
+        // into the tier bits.
+        let f = pod_flags::pack(CaptureLevel::Full, u32::MAX);
+        assert_eq!(pod_flags::level(f), Some(CaptureLevel::Full));
+    }
+
+    #[test]
+    fn generation_differs_between_uids_and_is_stable() {
+        let a = pod_flags::generation_for_uid(Some("0d1e2f3a-1111-4222-8333-444455556666"));
+        let b = pod_flags::generation_for_uid(Some("0d1e2f3a-1111-4222-8333-444455556667"));
+        assert_ne!(a, b);
+        assert_eq!(
+            a,
+            pod_flags::generation_for_uid(Some("0d1e2f3a-1111-4222-8333-444455556666"))
+        );
+        assert_eq!(pod_flags::generation_for_uid(None), 0);
+        assert!(a <= pod_flags::GEN_MASK && b <= pod_flags::GEN_MASK);
     }
 
     #[test]

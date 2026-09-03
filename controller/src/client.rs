@@ -95,6 +95,68 @@ pub(crate) async fn api_post_call(v: Value, path: &str) -> Result<(), Error> {
     Ok(())
 }
 
+fn api_endpoint() -> Result<String, Error> {
+    env::var("API_ENDPOINT")
+        .map(|s| s.trim().to_string())
+        .ok()
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| Error::Custom("API_ENDPOINT environment variable not set".to_string()))
+}
+
+/// Send a bodiless-or-JSON request and promote a non-2xx status to an
+/// error, the way `api_post_call` does. `tolerate_404` turns a 404 into
+/// success for idempotent deletes.
+async fn send_checked(
+    request: reqwest::RequestBuilder,
+    method: &str,
+    url: &str,
+    tolerate_404: bool,
+) -> Result<(), Error> {
+    let mut request = request;
+    if let Some(token) = broker_auth_token() {
+        request = request.bearer_auth(token);
+    }
+    let res = request
+        .send()
+        .await
+        .map_err(|e| Error::ApiError(format!("{}", e)))?;
+    let status = res.status();
+    if status.is_success() || (tolerate_404 && status == reqwest::StatusCode::NOT_FOUND) {
+        debug!("{} url {} : {}", method, url, status);
+        return Ok(());
+    }
+    let body = res
+        .text()
+        .await
+        .unwrap_or_else(|e| format!("<could not read body: {}>", e));
+    Err(Error::ApiError(format!(
+        "broker returned {} for {} {}: {}",
+        status, method, url, body
+    )))
+}
+
+/// Authenticated JSON PUT (idempotent upsert). Used by the seccomp CR
+/// mirror; same endpoint / auth / status handling as `api_post_call`.
+pub(crate) async fn api_put_call(v: Value, path: &str) -> Result<(), Error> {
+    let url = build_url(&api_endpoint()?, path);
+    debug!("Putting to {}", url);
+    let json_bytes = serde_json::to_vec(&v)
+        .map_err(|e| Error::Custom(format!("Failed to serialize JSON: {}", e)))?;
+    let request = CLIENT
+        .put(&url)
+        .header("content-type", "application/json")
+        .body(json_bytes);
+    send_checked(request, "PUT", &url, false).await
+}
+
+/// Authenticated DELETE. A 404 counts as success: the row is gone either
+/// way, and N nodes race to delete the same mirror row.
+pub(crate) async fn api_delete_call(path: &str) -> Result<(), Error> {
+    let url = build_url(&api_endpoint()?, path);
+    debug!("Deleting {}", url);
+    send_checked(CLIENT.delete(&url), "DELETE", &url, true).await
+}
+
 /// Authenticated, timeout-bounded GET against the broker, returning the
 /// raw response body. Mirrors `api_post_call`'s endpoint / auth / status
 /// handling. Used by the seccomp distributor, which needs the profile
