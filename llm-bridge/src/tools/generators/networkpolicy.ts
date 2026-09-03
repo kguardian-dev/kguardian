@@ -735,11 +735,22 @@ export function parseBrokerTime(s: string | null | undefined): number | null {
 // has one within a minute of the broker upgrade, so NULL means a ghost row
 // or a Pending pod, and on cluster-00 such rows absorbed old flows. With no
 // row time_stamp there is nothing to compare and the candidate stays.
-function excludedByGuard(startedAt: string | null | undefined, timeStamp: string): boolean {
+//
+// A DEAD candidate must additionally have been alive at flow time: its
+// record time_stamp (last written — when it was seen alive or marked dead)
+// must be at or after the row time_stamp. A completed Job pod with an old
+// start would otherwise absorb every later flow on its recycled IP. A dead
+// row with an unknown time_stamp is excluded.
+function excludedByGuard(c: BrokerPodListEntry, timeStamp: string): boolean {
   const flow = parseBrokerTime(timeStamp);
   if (flow === null) return false;
-  const start = parseBrokerTime(startedAt);
-  return start === null || start > flow;
+  const start = parseBrokerTime(c.started_at);
+  if (start === null || start > flow) return true;
+  if (c.is_dead === true) {
+    const seen = parseBrokerTime(c.time_stamp);
+    return seen === null || seen < flow;
+  }
+  return false;
 }
 
 // newestTimeStamp — the newest of the given broker timestamps, returned
@@ -795,7 +806,7 @@ export function podIdentity(pod: BrokerPodListEntry): PeerIdentity | null {
  * every candidate.
  */
 export function choosePeerCandidate(candidates: BrokerPodListEntry[], timeStamp: string): BrokerPodListEntry | null {
-  const kept = candidates.filter((c) => !excludedByGuard(c.started_at, timeStamp));
+  const kept = candidates.filter((c) => !excludedByGuard(c, timeStamp));
   if (kept.length === 0) return null;
   kept.sort((a, b) =>
     Number(a.is_dead === true) - Number(b.is_dead === true)
