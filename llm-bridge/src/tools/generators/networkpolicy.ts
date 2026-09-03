@@ -33,14 +33,21 @@ export interface PeerIdentity {
   // NetworkPolicy is evaluated post-DNAT, so these — never the ClusterIP —
   // are the ipBlock peers. Cilium ignores them (entities cover every node).
   backendIPs?: string[];
+  // Unattributed: pods held this IP but none can be proven to have been the
+  // peer at flow time (all started later), or the row's stored identity no
+  // longer exists. Rendered as an ipBlock / CIDR with a comment — never a
+  // selector for whoever holds the IP today.
+  unattributed?: boolean;
 }
 
-// The broker /pod/info record fields consulted when deciding whether a
-// Service fronts host-network pods.
+// The broker pod record (/pod/info listing, /pod/ip) fields the generators
+// read. started_at / pod_ips / time_stamp / metadata.uid are broker-api-v4;
+// an older broker simply omits them.
 export interface BrokerPodListEntry {
   pod_name?: string; pod_namespace?: string; pod_ip?: string; host_network?: boolean | null;
-  node_name?: string; is_dead?: boolean;
-  pod_obj?: { metadata?: { labels?: Record<string, string> }; spec?: { nodeName?: string } };
+  node_name?: string; workload_name?: string; is_dead?: boolean;
+  pod_ips?: string[] | null; time_stamp?: string | null; started_at?: string | null;
+  pod_obj?: { metadata?: { uid?: string; labels?: Record<string, string> }; spec?: { nodeName?: string } };
 }
 
 function labelsContain(labels: Record<string, string> | undefined, selector: Record<string, string>): boolean {
@@ -69,8 +76,28 @@ export function hostNetworkServiceIdentity(
   return { hostNetwork: true, namespace: svc.svc_namespace, service: svc.svc_name, selector: svc.selector, node: nodes.join(","), backendIPs };
 }
 
-// resolvePeer(ip) → identity, or null for an unresolvable/external IP.
-export type PeerResolver = (ip: string) => Promise<PeerIdentity | null>;
+// The identity the broker stamped on a traffic row at ingest (broker-api-v4).
+export interface StoredPeer {
+  kind: string; // pod | node | service
+  namespace: string;
+  name: string;
+  uid: string;
+  workloadKind: string;
+  workloadName: string;
+}
+
+// Row context handed to the resolver beside the IP: the stored identity (null
+// when the broker left the row unresolved) and the row's time_stamp for the
+// start-time guard.
+export interface PeerRowContext {
+  peer: StoredPeer | null;
+  timeStamp: string;
+}
+
+// resolvePeer(ip, row) → identity, or null for an unresolvable/external IP.
+// Resolvers that ignore `row` behave exactly as before v4 (no stored identity,
+// no guard).
+export type PeerResolver = (ip: string, row: PeerRowContext) => Promise<PeerIdentity | null>;
 
 export interface TrafficRow {
   traffic_type?: string;   // INGRESS | EGRESS
@@ -78,6 +105,26 @@ export interface TrafficRow {
   traffic_in_out_ip?: string;   // peer IP
   traffic_in_out_port?: string; // peer port (egress)
   ip_protocol?: string;    // TCP | UDP
+  // First-observed time, broker naive UTC ("2026-07-23T10:00:00[.ffffff]").
+  time_stamp?: string | null;
+  // Peer identity resolved by the broker at ingest (broker-api-v4). null /
+  // absent on legacy rows and on flows whose peer never resolved.
+  peer_kind?: string | null;
+  peer_namespace?: string | null;
+  peer_name?: string | null;
+  peer_uid?: string | null;
+  peer_workload_kind?: string | null;
+  peer_workload_name?: string | null;
+  peer_resolved_at?: string | null;
+}
+
+/** The ingest-time identity of a row, or null when the broker left it unresolved. */
+export function storedPeerOf(row: TrafficRow): StoredPeer | null {
+  if (!row.peer_kind) return null;
+  return {
+    kind: row.peer_kind, namespace: row.peer_namespace ?? "", name: row.peer_name ?? "", uid: row.peer_uid ?? "",
+    workloadKind: row.peer_workload_kind ?? "", workloadName: row.peer_workload_name ?? "",
+  };
 }
 
 export interface PodInfo {
@@ -143,7 +190,10 @@ function hostTargetWarning(pod: PodInfo, kind: string, selector: string): string
 const HOST_ENTITIES = ["host", "remote-node"];
 
 interface Port { port: number; protocol: string }
-interface Rule { peerIP: string; ports: Port[] }
+// One rule per (peer IP, attributed identity): the ports that peer was
+// observed on, the identity it resolved to, and the time_stamps of the rows
+// folded in (the newest is quoted in the unattributed-peer comment).
+interface Rule { peerIP: string; key: string; identity: PeerIdentity | null; ports: Port[]; stamps: string[] }
 
 function parsePort(p: string): number | null {
   const n = Number(p);
@@ -151,16 +201,43 @@ function parsePort(p: string): number | null {
   return n;
 }
 
-// mergeOrAppendRule — group by peer IP, dedup (port,protocol). Mirrors types.go.
-function mergeOrAppend(rules: Rule[], peer: string, port: number, protocol: string): void {
+// identityKey groups rows for the same IP that resolved to the same rendering
+// and orders sibling groups. Derived from what is RENDERED, so the advisor,
+// this port and the frontend compute the same key from the same broker data:
+//   "cidr"                          unresolved / external
+//   "unattributed"                  guarded out
+//   "host:<ns>/<workload-or-pod>"   host-network pod
+//   "host:<ns>/svc/<name>"          Service backed by host-network pods
+//   "sel:<ns>:k1=v1,k2=v2"          selector peer (labels sorted bytewise)
+export function identityKey(id: PeerIdentity | null): string {
+  if (!id) return "cidr";
+  if (id.unattributed) return "unattributed";
+  if (id.hostNetwork === true) {
+    return `host:${id.namespace ?? ""}/${id.service ? `svc/${id.service}` : hostWorkloadName(id.workload, id.podName)}`;
+  }
+  if (id.selector && Object.keys(id.selector).length > 0) {
+    const labels = Object.entries(id.selector).map(([k, v]) => `${k}=${v}`).sort(bytewise).join(",");
+    return `sel:${id.namespace ?? ""}:${labels}`;
+  }
+  return "cidr";
+}
+
+const bytewise = (a: string, b: string): number => (a < b ? -1 : a > b ? 1 : 0);
+
+// mergeOrAppendRule — group by (peer IP, identity), dedup (port,protocol).
+// Mirrors mergeOrAppendResolvedRule in types.go: flows from two different
+// peers that held the same IP at different times never merge into one rule.
+function mergeOrAppend(rules: Rule[], peer: string, identity: PeerIdentity | null, port: number, protocol: string, timeStamp: string): void {
+  const key = identityKey(identity);
   for (const r of rules) {
-    if (r.peerIP === peer) {
+    if (r.peerIP === peer && r.key === key) {
+      if (timeStamp) r.stamps.push(timeStamp);
       if (r.ports.some((p) => p.port === port && p.protocol === protocol)) return;
       r.ports.push({ port, protocol });
       return;
     }
   }
-  rules.push({ peerIP: peer, ports: [{ port, protocol }] });
+  rules.push({ peerIP: peer, key, identity, ports: [{ port, protocol }], stamps: timeStamp ? [timeStamp] : [] });
 }
 
 // deduplicatePorts — sort by port asc then protocol asc, drop dups. Mirrors the
@@ -187,7 +264,12 @@ const standardLabels = (pod: string, resourceType: string) => ({
 // Ingress peer = traffic_in_out_ip, port = our pod_port. Egress peer =
 // traffic_in_out_ip, port = traffic_in_out_port. Self-traffic + empty peers
 // dropped. Mirrors the Go generators (shared by standard + cilium).
-function processTrafficRules(traffic: TrafficRow[], pod: PodInfo): { ingress: Rule[]; egress: Rule[] } {
+//
+// Every row is attributed on its own (stored identity, else by IP under the
+// start-time guard — see resolvePeerRow) so an IP that was held by two peers
+// over the retention window yields two rules, never one merged under
+// whichever pod holds the IP today.
+async function processTrafficRules(traffic: TrafficRow[], pod: PodInfo, resolve: PeerResolver): Promise<{ ingress: Rule[]; egress: Rule[] }> {
   const ingress: Rule[] = [];
   const egress: Rule[] = [];
   for (const t of traffic) {
@@ -195,14 +277,17 @@ function processTrafficRules(traffic: TrafficRow[], pod: PodInfo): { ingress: Ru
     if (!peer || peer === pod.ip) continue;
     const protocol = (t.ip_protocol ?? "TCP").toUpperCase();
     const type = (t.traffic_type ?? "").toUpperCase();
+    const timeStamp = t.time_stamp ?? "";
     if (type === "INGRESS") {
       const port = parsePort(t.pod_port ?? "");
       if (port === null) continue;
-      mergeOrAppend(ingress, peer, port, protocol);
+      const id = await resolve(peer, { peer: storedPeerOf(t), timeStamp });
+      mergeOrAppend(ingress, peer, id, port, protocol, timeStamp);
     } else if (type === "EGRESS") {
       const port = parsePort(t.traffic_in_out_port ?? "");
       if (port === null) continue;
-      mergeOrAppend(egress, peer, port, protocol);
+      const id = await resolve(peer, { peer: storedPeerOf(t), timeStamp });
+      mergeOrAppend(egress, peer, id, port, protocol, timeStamp);
     }
   }
   return { ingress, egress };
@@ -213,7 +298,8 @@ function processTrafficRules(traffic: TrafficRow[], pod: PodInfo): { ingress: Ru
 // deliberately not canonicalized first. Canonicalization happens later, in
 // peerCIDR at emit time; normalizing before the sort would reorder any peer
 // whose observed text differs from its canonical form and silently desync the
-// rule order from the goldens.
+// rule order from the goldens. Sibling rules for one IP (two identities) are
+// then ordered by identity key, again bytewise.
 //
 // The comparison must be bytewise. localeCompare (used here previously) is
 // collation-aware: it treats ":" as ignorable punctuation and orders case
@@ -222,7 +308,7 @@ function processTrafficRules(traffic: TrafficRow[], pod: PodInfo): { ingress: Ru
 // Go yields the reverse. For ASCII, comparing UTF-16 code units as below is
 // identical to Go comparing UTF-8 bytes.
 function sortedPeers(rules: Rule[]): Rule[] {
-  return [...rules].sort((a, b) => (a.peerIP < b.peerIP ? -1 : a.peerIP > b.peerIP ? 1 : 0));
+  return [...rules].sort((a, b) => bytewise(a.peerIP, b.peerIP) || bytewise(a.key, b.key));
 }
 
 // ---- Peer CIDR ---------------------------------------------------------------
@@ -359,14 +445,19 @@ function peerCIDR(ip: string): string | null {
 
 // ---- Standard NetworkPolicy --------------------------------------------------
 
-// standardPeer resolves one observed peer IP to its NetworkPolicy peer set.
+// standardPeer renders one attributed peer as its NetworkPolicy peer set.
 // Every path yields exactly one peer except a Service backed by host-network
 // pods, which yields one ipBlock per backend node IP (the post-DNAT
 // destinations — never the ClusterIP). null ⇒ drop the rule. `comment` is
-// non-empty only for host-network peers, which are pinned by node IP (no
-// namespaceSelector) because no podSelector can match them.
-async function standardPeer(ip: string, resolve: PeerResolver): Promise<{ peers: Record<string, unknown>[]; comment: string } | null> {
-  const id = await resolve(ip);
+// non-empty for host-network peers, which are pinned by node IP (no
+// namespaceSelector) because no podSelector can match them, and for
+// unattributed peers (pinned by IP because no pod can be proven to have held
+// it at flow time; `at` is the newest row time_stamp, quoted verbatim).
+function standardPeer(ip: string, id: PeerIdentity | null, at: string): { peers: Record<string, unknown>[]; comment: string } | null {
+  if (id?.unattributed) {
+    const cidr = peerCIDR(ip);
+    return cidr === null ? null : { peers: [{ ipBlock: { cidr } }], comment: unattributedPeerComment(ip, at) };
+  }
   if (id?.hostNetwork === true) {
     const comment = hostPeerComment(id, ip, "podSelector");
     if (id.service) {
@@ -389,12 +480,10 @@ async function standardPeer(ip: string, resolve: PeerResolver): Promise<{ peers:
   return cidr === null ? null : { peers: [{ ipBlock: { cidr } }], comment: "" };
 }
 
-async function standardRules(
-  rules: Rule[], resolve: PeerResolver, key: "from" | "to", comments: Record<number, string[]>,
-): Promise<unknown[]> {
+function standardRules(rules: Rule[], key: "from" | "to", comments: Record<number, string[]>): unknown[] {
   const out: unknown[] = [];
   for (const r of sortedPeers(rules)) {
-    const resolved = await standardPeer(r.peerIP, resolve);
+    const resolved = standardPeer(r.peerIP, r.identity, newestTimeStamp(r.stamps));
     if (resolved === null) continue; // unparseable peer IP - see peerCIDR
     addRuleComment(comments, out.length, resolved.comment);
     out.push({
@@ -415,7 +504,7 @@ export async function generateNetworkPolicy(
 export async function generateNetworkPolicyWithComments(
   pod: PodInfo, traffic: TrafficRow[], resolve: PeerResolver,
 ): Promise<GeneratedPolicy> {
-  const { ingress, egress } = processTrafficRules(traffic, pod);
+  const { ingress, egress } = await processTrafficRules(traffic, pod, resolve);
   const comments = newComments();
   if (pod.hostNetwork === true) comments.header.push(...hostTargetWarning(pod, "NetworkPolicy", "podSelector"));
 
@@ -440,12 +529,12 @@ export async function generateNetworkPolicyWithComments(
   // the advisor's omitempty serialization.
   if (ingress.length > 0) {
     types.push("Ingress");
-    const rules = await standardRules(ingress, resolve, "from", comments.ingress);
+    const rules = standardRules(ingress, "from", comments.ingress);
     if (rules.length > 0) spec.ingress = rules;
   }
   if (egress.length > 0) {
     types.push("Egress");
-    const rules = await standardRules(egress, resolve, "to", comments.egress);
+    const rules = standardRules(egress, "to", comments.egress);
     if (rules.length > 0) spec.egress = rules;
   }
   spec.policyTypes = types;
@@ -490,8 +579,14 @@ function peerEndpointSelector(labels: Record<string, string>, peerNamespace: str
   return matchLabels;
 }
 
-async function ciliumPeer(ip: string, resolve: PeerResolver, policyNamespace: string): Promise<CiliumPeer> {
-  const id = await resolve(ip);
+// ciliumPeer renders one attributed peer as its Cilium peer field. An
+// unattributed peer is a CIDR with a comment — never a selector for the pod
+// that holds the IP today.
+function ciliumPeer(ip: string, id: PeerIdentity | null, at: string, policyNamespace: string): CiliumPeer {
+  if (id?.unattributed) {
+    const cidr = peerCIDR(ip);
+    return cidr === null ? { comment: "" } : { cidr: [cidr], comment: unattributedPeerComment(ip, at) };
+  }
   if (id?.hostNetwork === true) {
     // A host-network pod is not a Cilium endpoint; it carries the node's
     // identity. Select that identity rather than labels nothing will match.
@@ -510,13 +605,13 @@ const portsKey = (ports: Port[]): string => ports.map((p) => `${p.port}/${p.prot
 // (the entities already cover every node): the rule sits where the first such
 // peer fell in sorted-IP order, and later same-port peers only add their
 // comment line to it. Mirrors transformToCilium{Ingress,Egress}Rules in Go.
-async function ciliumRules(
-  rules: Rule[], resolve: PeerResolver, dir: "ingress" | "egress", comments: Record<number, string[]>, policyNamespace: string,
-): Promise<unknown[]> {
+function ciliumRules(
+  rules: Rule[], dir: "ingress" | "egress", comments: Record<number, string[]>, policyNamespace: string,
+): unknown[] {
   const out: unknown[] = [];
   const entityRuleByPorts = new Map<string, number>();
   for (const r of sortedPeers(rules)) {
-    const peer = await ciliumPeer(r.peerIP, resolve, policyNamespace);
+    const peer = ciliumPeer(r.peerIP, r.identity, newestTimeStamp(r.stamps), policyNamespace);
     const rule: Record<string, unknown> = {};
     const epKey = dir === "ingress" ? "fromEndpoints" : "toEndpoints";
     const entKey = dir === "ingress" ? "fromEntities" : "toEntities";
@@ -549,7 +644,7 @@ export async function generateCiliumPolicy(
 export async function generateCiliumPolicyWithComments(
   pod: PodInfo, traffic: TrafficRow[], resolve: PeerResolver,
 ): Promise<GeneratedPolicy> {
-  const { ingress, egress } = processTrafficRules(traffic, pod);
+  const { ingress, egress } = await processTrafficRules(traffic, pod, resolve);
   const endpointSelector = { matchLabels: k8sPrefixed(pod.labels) };
   const comments = newComments();
   if (pod.hostNetwork === true) comments.header.push(...hostTargetWarning(pod, "CiliumNetworkPolicy", "endpointSelector"));
@@ -573,17 +668,232 @@ export async function generateCiliumPolicyWithComments(
   // As above, an empty list is omitted rather than emitted - only reachable
   // when every peer in the direction had an unparseable IP.
   if (ingress.length > 0) {
-    const rules = await ciliumRules(ingress, resolve, "ingress", comments.ingress, pod.namespace);
+    const rules = ciliumRules(ingress, "ingress", comments.ingress, pod.namespace);
     if (rules.length > 0) spec.ingress = rules;
   }
   if (egress.length > 0) {
-    const rules = await ciliumRules(egress, resolve, "egress", comments.egress, pod.namespace);
+    const rules = ciliumRules(egress, "egress", comments.egress, pod.namespace);
     if (rules.length > 0) spec.egress = rules;
   }
 
   return {
     policy: { apiVersion: "cilium.io/v2", kind: "CiliumNetworkPolicy", metadata: { name: `${pod.name}-cilium-policy`, namespace: pod.namespace, labels: standardLabels(pod.name, "cilium-policy") }, spec, status: {} },
     comments,
+  };
+}
+
+// ---- Peer attribution (CONTRACT v4) -------------------------------------------
+//
+// pod_traffic rows store the peer IP, and pod IPs are recycled constantly.
+// Resolving the IP against today's pod table names whoever holds the IP NOW,
+// not whoever held it when the flow happened — autobrr was drawn talking to
+// cmangos-database because it inherited a CronJob pod's IP months later.
+// Mirrors advisor pkg/network/peer.go exactly (the goldens pin both):
+//
+//  1. A row the broker resolved at ingest (peer_kind set) is used verbatim;
+//     the IP is never looked up again.
+//  2. Otherwise the peer is resolved by IP under the START-TIME GUARD: a pod
+//     whose started_at is later than the row's time_stamp cannot have been
+//     the peer. Candidates are every known pod record holding the IP; alive
+//     ones are preferred, then the newest start. If pods held the IP but none
+//     survives the guard the peer is UNATTRIBUTED.
+
+/** The broker /svc/ip record fields the resolver reads. */
+export interface BrokerServiceRecord {
+  svc_name?: string; svc_namespace?: string;
+  service_spec?: { spec?: { selector?: Record<string, string> } };
+}
+
+/**
+ * The broker reads peer resolution needs. serviceByIP / podByIP resolve to
+ * null for a 404 or any error; pods() is fetched once per resolver.
+ */
+export interface PeerLookup {
+  serviceByIP(ip: string): Promise<BrokerServiceRecord | null>;
+  podByIP(ip: string): Promise<BrokerPodListEntry | null>;
+  pods(): Promise<BrokerPodListEntry[]>;
+}
+
+// Broker timestamps are naive UTC ("2026-07-23T10:00:00.123456", no zone).
+// Date.parse treats a zone-less date-time as LOCAL time, so a "Z" is appended
+// when no designator is present. RFC 3339 with a zone is accepted as is.
+const ZONE_RE = /(?:[zZ]|[+-]\d{2}:?\d{2})$/;
+
+/** Parse a broker timestamp to epoch ms, or null when empty/unparseable. */
+export function parseBrokerTime(s: string | null | undefined): number | null {
+  const text = (s ?? "").trim();
+  if (!text) return null;
+  // Guard against date-only or free-text values Date.parse would still accept.
+  if (!/^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}/.test(text)) return null;
+  const ms = Date.parse(ZONE_RE.test(text) ? text : `${text}Z`);
+  return Number.isNaN(ms) ? null : ms;
+}
+
+// laterThan — the start-time guard: is `startedAt` strictly later than the
+// flow's `timeStamp`? Either side unknown ⇒ false (nothing to compare, the
+// candidate stays).
+function laterThan(startedAt: string | null | undefined, timeStamp: string): boolean {
+  const a = parseBrokerTime(startedAt);
+  const b = parseBrokerTime(timeStamp);
+  return a !== null && b !== null && a > b;
+}
+
+// newestTimeStamp — the newest of the given broker timestamps, returned
+// VERBATIM (no reformatting, so every implementation prints the same text).
+// Unparseable values are ignored; ties keep the first seen.
+export function newestTimeStamp(stamps: string[]): string {
+  let best = "";
+  let bestMs: number | null = null;
+  for (const s of stamps) {
+    const ms = parseBrokerTime(s);
+    if (ms === null) continue;
+    if (bestMs === null || ms > bestMs) { best = s; bestMs = ms; }
+  }
+  return best;
+}
+
+export function unattributedPeerComment(ip: string, at: string): string {
+  return at ? `unattributed peer ${ip} at ${at}` : `unattributed peer ${ip}`;
+}
+
+// Newest-first over known timestamps, unknown last; 0 when equal/both unknown.
+function compareTimesDesc(a: string | null | undefined, b: string | null | undefined): number {
+  const ta = parseBrokerTime(a);
+  const tb = parseBrokerTime(b);
+  if (ta !== null && tb !== null) return tb - ta;
+  if (ta !== null) return -1;
+  if (tb !== null) return 1;
+  return 0;
+}
+
+function podHoldsIP(p: BrokerPodListEntry, ip: string): boolean {
+  return p.pod_ip === ip || (p.pod_ips ?? []).includes(ip);
+}
+
+/** The policy identity of a pod record: host-network, labels, or null (CIDR). */
+export function podIdentity(pod: BrokerPodListEntry): PeerIdentity | null {
+  if (pod.host_network === true) {
+    return {
+      hostNetwork: true, namespace: pod.pod_namespace, podName: pod.pod_name,
+      workload: pod.workload_name, node: pod.node_name || pod.pod_obj?.spec?.nodeName,
+    };
+  }
+  const labels = pod.pod_obj?.metadata?.labels;
+  if (labels && Object.keys(labels).length > 0) return { selector: labels, namespace: pod.pod_namespace };
+  return null;
+}
+
+/**
+ * choosePeerCandidate applies the start-time guard and the broker's
+ * precedence (its `/pod/ip/{ip}?at=` ordering): drop candidates started
+ * after the flow; prefer alive; then the newest started_at (unknown last);
+ * then the newest record; then ns/name for stability. null when the guard
+ * removed every candidate.
+ */
+export function choosePeerCandidate(candidates: BrokerPodListEntry[], timeStamp: string): BrokerPodListEntry | null {
+  const kept = candidates.filter((c) => !laterThan(c.started_at, timeStamp));
+  if (kept.length === 0) return null;
+  kept.sort((a, b) =>
+    Number(a.is_dead === true) - Number(b.is_dead === true)
+    || compareTimesDesc(a.started_at, b.started_at)
+    || compareTimesDesc(a.time_stamp, b.time_stamp)
+    || bytewise(`${a.pod_namespace}/${a.pod_name}`, `${b.pod_namespace}/${b.pod_name}`));
+  return kept[0];
+}
+
+const UNATTRIBUTED: PeerIdentity = { unattributed: true };
+
+/**
+ * makePeerResolver builds the PeerResolver the generators consume from the
+ * broker reads. Results are memoised per (ip, stored identity, time_stamp) so
+ * a pod with thousands of flows to one peer costs one resolution.
+ */
+export function makePeerResolver(lookup: PeerLookup): PeerResolver {
+  const cache = new Map<string, Promise<PeerIdentity | null>>();
+  let listing: Promise<BrokerPodListEntry[]> | null = null;
+  const pods = (): Promise<BrokerPodListEntry[]> => {
+    listing ??= lookup.pods().then((v) => (Array.isArray(v) ? v : [])).catch((err: unknown) => {
+      log.warn(`cannot list pods; peer attribution falls back to the by-IP record only: ${err instanceof Error ? err.message : String(err)}`);
+      return [] as BrokerPodListEntry[];
+    });
+    return listing;
+  };
+  // The broker reads depend on the IP alone; only the candidate choice is
+  // time-dependent. Memoised per IP so N rows to one peer cost one fetch each.
+  const memo = <T,>(fn: (ip: string) => Promise<T>): ((ip: string) => Promise<T>) => {
+    const m = new Map<string, Promise<T>>();
+    return (ip) => {
+      let p = m.get(ip);
+      if (!p) { p = fn(ip); m.set(ip, p); }
+      return p;
+    };
+  };
+  const serviceByIP = memo((ip) => lookup.serviceByIP(ip));
+  const podByIP = memo((ip) => lookup.podByIP(ip));
+
+  const serviceIdentity = async (svc: BrokerServiceRecord): Promise<PeerIdentity> => {
+    const selector = svc.service_spec?.spec?.selector ?? {};
+    const host = hostNetworkServiceIdentity({ svc_name: svc.svc_name, svc_namespace: svc.svc_namespace, selector }, await pods());
+    return host ?? { selector, namespace: svc.svc_namespace };
+  };
+
+  // A stored identity is materialised, never re-resolved: an identity that no
+  // longer exists is unattributed — re-resolving the IP would recreate the
+  // bug the stored identity exists to prevent.
+  const resolveStored = async (ip: string, s: StoredPeer): Promise<PeerIdentity | null> => {
+    if (s.kind === "pod" || s.kind === "node") {
+      if (!s.name) return null; // a bare node IP with no host-network pod: nothing to select
+      const pod = (await pods()).find((p) => p.pod_name === s.name && p.pod_namespace === s.namespace
+        && !(p.pod_obj?.metadata?.uid && s.uid && p.pod_obj.metadata.uid !== s.uid));
+      if (!pod) {
+        log.warn(`stored peer ${s.namespace}/${s.name} (${s.kind}) for IP ${ip} is no longer known; pinning the IP`);
+        return UNATTRIBUTED;
+      }
+      return podIdentity(pod);
+    }
+    if (s.kind === "service") {
+      const svc = await serviceByIP(ip);
+      const selector = svc?.service_spec?.spec?.selector;
+      if (svc && svc.svc_name === s.name && svc.svc_namespace === s.namespace && selector && Object.keys(selector).length > 0) {
+        return serviceIdentity(svc);
+      }
+      log.warn(`stored peer service ${s.namespace}/${s.name} for IP ${ip} no longer matches; pinning the IP`);
+      return UNATTRIBUTED;
+    }
+    log.warn(`unknown stored peer kind ${JSON.stringify(s.kind)} for IP ${ip}; resolving by IP`);
+    return resolveByIP(ip, "");
+  };
+
+  // Service by ClusterIP first (not recycled the way pod IPs are), then the
+  // pod candidates holding the IP — the listing plus the by-IP record (the
+  // same table; a stub or older broker may serve only one) — under the guard.
+  const resolveByIP = async (ip: string, timeStamp: string): Promise<PeerIdentity | null> => {
+    const svc = await serviceByIP(ip);
+    const selector = svc?.service_spec?.spec?.selector;
+    if (svc && selector && Object.keys(selector).length > 0) return serviceIdentity(svc);
+
+    const candidates = (await pods()).filter((p) => podHoldsIP(p, ip));
+    const byIP = await podByIP(ip);
+    if (byIP && !candidates.some((c) => c.pod_namespace === byIP.pod_namespace && c.pod_name === byIP.pod_name)) candidates.push(byIP);
+    if (candidates.length === 0) return null; // external: plain CIDR, as before
+    const chosen = choosePeerCandidate(candidates, timeStamp);
+    if (!chosen) {
+      log.warn(`every pod that held IP ${ip} started after the flow at ${timeStamp}; leaving the peer unattributed`);
+      return UNATTRIBUTED;
+    }
+    return podIdentity(chosen);
+  };
+
+  return (ip, row) => {
+    const ctx: PeerRowContext = row ?? { peer: null, timeStamp: "" };
+    const stored = ctx.peer;
+    const key = `${ip}\0${stored ? `${stored.kind}:${stored.namespace}/${stored.name}/${stored.uid}` : ""}\0${ctx.timeStamp}`;
+    let pending = cache.get(key);
+    if (!pending) {
+      pending = stored ? resolveStored(ip, stored) : resolveByIP(ip, ctx.timeStamp);
+      cache.set(key, pending);
+    }
+    return pending;
   };
 }
 

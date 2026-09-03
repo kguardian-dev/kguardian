@@ -29,6 +29,25 @@ type PodTraffic struct {
 	DstPort string `yaml:"traffic_in_out_port" json:"traffic_in_out_port"` // Port on the peer (used for EGRESS rules)
 
 	Protocol v1.Protocol `yaml:"ip_protocol" json:"ip_protocol"` // Network protocol (TCP, UDP, etc.)
+
+	// TimeStamp is when the flow was first observed, in the broker's naive
+	// UTC form ("2026-07-23T10:00:00[.ffffff]"). It is the instant the
+	// start-time guard compares a peer pod's StartedAt against.
+	TimeStamp string `yaml:"time_stamp,omitempty" json:"time_stamp,omitempty"`
+
+	// Peer identity resolved by the broker AT INGEST (broker-api-v4). When
+	// PeerKind is non-empty the generators use it verbatim and never look the
+	// IP up again — pod IPs are recycled, so a by-IP lookup at generation time
+	// can name a pod that did not exist when the flow happened. Empty on rows
+	// written before the upgrade, on external peers, and on flows whose peer
+	// spec never arrived: those fall back to the guarded by-IP resolution.
+	PeerKind         string `yaml:"peer_kind,omitempty" json:"peer_kind,omitempty"` // pod | node | service | ""
+	PeerNamespace    string `yaml:"peer_namespace,omitempty" json:"peer_namespace,omitempty"`
+	PeerName         string `yaml:"peer_name,omitempty" json:"peer_name,omitempty"`
+	PeerUID          string `yaml:"peer_uid,omitempty" json:"peer_uid,omitempty"`
+	PeerWorkloadKind string `yaml:"peer_workload_kind,omitempty" json:"peer_workload_kind,omitempty"`
+	PeerWorkloadName string `yaml:"peer_workload_name,omitempty" json:"peer_workload_name,omitempty"`
+	PeerResolvedAt   string `yaml:"peer_resolved_at,omitempty" json:"peer_resolved_at,omitempty"`
 }
 
 type PodDetail struct {
@@ -49,6 +68,16 @@ type PodDetail struct {
 	// pod-network pod, nil when the broker does not know (row written by an
 	// old controller). nil MUST leave generator behaviour unchanged.
 	HostNetwork *bool `yaml:"host_network,omitempty" json:"host_network,omitempty"`
+	// PodIPs lists every address the pod holds (dual-stack); PodIP is the
+	// first. A peer lookup matches either.
+	PodIPs []string `yaml:"pod_ips,omitempty" json:"pod_ips,omitempty"`
+	// TimeStamp is when the broker last wrote this record (naive UTC).
+	TimeStamp string `yaml:"time_stamp,omitempty" json:"time_stamp,omitempty"`
+	// StartedAt is pod_details.started_at — status.startTime captured when
+	// the spec was posted, naive UTC. Empty = unknown (row written by an
+	// older broker or a manifest without status.startTime); an unknown start
+	// is never excluded by the start-time guard.
+	StartedAt string `yaml:"started_at,omitempty" json:"started_at,omitempty"`
 }
 
 type SvcDetail struct {

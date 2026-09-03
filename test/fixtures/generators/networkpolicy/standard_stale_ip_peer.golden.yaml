@@ -1,0 +1,35 @@
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  labels:
+    app.kubernetes.io/component: standard-policy
+    app.kubernetes.io/name: cmangos-database
+    app.kubernetes.io/part-of: kguardian
+  name: cmangos-database-standard-policy
+  namespace: game-servers
+spec:
+  egress:
+  - ports:
+    - port: 8080
+      protocol: TCP
+    to:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: game-servers
+      podSelector:
+        matchLabels:
+          app: cmangos-web
+  ingress:
+  # unattributed peer 10.244.12.199 at 2026-07-23T10:00:00
+  - from:
+    - ipBlock:
+        cidr: 10.244.12.199/32
+    ports:
+    - port: 3306
+      protocol: TCP
+  podSelector:
+    matchLabels:
+      app: cmangos-database
+  policyTypes:
+  - Ingress
+  - Egress

@@ -6,8 +6,8 @@ import {
 } from "./compaction.js";
 import { seccompFromBrokerSyscalls } from "./generators/seccomp.js";
 import {
-  generateNetworkPolicyWithComments, generateCiliumPolicyWithComments, policyToYAML, hostNetworkServiceIdentity,
-  type PeerResolver, type PeerIdentity, type PodInfo, type TrafficRow, type BrokerPodListEntry,
+  generateNetworkPolicyWithComments, generateCiliumPolicyWithComments, policyToYAML, makePeerResolver,
+  type PeerResolver, type PodInfo, type TrafficRow, type BrokerPodListEntry, type BrokerServiceRecord,
 } from "./generators/networkpolicy.js";
 
 // In-process tool execution — this IS the assistant now. Each of the 12
@@ -19,56 +19,29 @@ import {
 const s = (v: unknown): string => (typeof v === "string" ? v : "");
 const enc = encodeURIComponent;
 
-// Broker /pod/ip record — the fields the generators read. host_network,
-// node_name and workload_name are the flat columns broker-api-v3 added;
-// an older broker simply omits them (⇒ pre-existing behaviour).
-interface BrokerPodRecord {
-  pod_name?: string; pod_namespace?: string; pod_ip?: string;
-  host_network?: boolean | null; node_name?: string; workload_name?: string;
-  pod_obj?: { metadata?: { labels?: Record<string, string> }; spec?: { nodeName?: string } };
-}
-
-// Resolve a peer IP to a policy identity the way the advisor does: service
-// selector first (priority 1), then pod labels (priority 2), else null →
-// external CIDR. Broker lookups that 404/error resolve to null (external).
-// A pod with host_network === true is returned as a host-network identity
-// regardless of its labels — the generators render it as the node IP. A
-// Service whose alive backing pods (from /pod/info, fetched once per
-// generation) are host-network is returned the same way, named by Service.
+// Resolve a traffic row's peer to a policy identity the way the advisor
+// does (networkpolicy.ts makePeerResolver, CONTRACT v4): the identity the
+// broker stored on the row at ingest when present; otherwise service
+// selector first, then the pod candidates holding the IP under the
+// start-time guard (started_at later than the row ⇒ not the peer), else
+// null → external CIDR. Broker lookups that 404/error resolve to null. The
+// /pod/info listing is fetched once per generation.
 function makeBrokerPeerResolver(): PeerResolver {
-  let podList: Promise<BrokerPodListEntry[]> | null = null;
-  const listPods = (): Promise<BrokerPodListEntry[]> => {
-    podList ??= brokerGetJSON("/pod/info")
-      .then((v) => (Array.isArray(v) ? (v as BrokerPodListEntry[]) : []))
-      .catch(() => [] as BrokerPodListEntry[]); // unknown ⇒ pre-existing rendering
-    return podList;
-  };
-  return async (ip): Promise<PeerIdentity | null> => {
+  const getOrNull = async <T,>(path: string): Promise<T | null> => {
     try {
-      const svc = (await brokerGetJSON(`/svc/ip/${enc(ip)}`)) as {
-        svc_name?: string; svc_namespace?: string; service_spec?: { spec?: { selector?: Record<string, string> } };
-      };
-      const selector = svc?.service_spec?.spec?.selector;
-      if (selector && Object.keys(selector).length > 0) {
-        const host = hostNetworkServiceIdentity({ svc_name: svc.svc_name, svc_namespace: svc.svc_namespace, selector }, await listPods());
-        return host ?? { selector, namespace: svc.svc_namespace };
-      }
-    } catch { /* not a service — fall through to pod lookup */ }
-    try {
-      const pod = (await brokerGetJSON(`/pod/ip/${enc(ip)}`)) as BrokerPodRecord;
-      if (pod?.host_network === true) {
-        return {
-          hostNetwork: true, namespace: pod.pod_namespace, podName: pod.pod_name,
-          workload: pod.workload_name, node: pod.node_name || pod.pod_obj?.spec?.nodeName,
-        };
-      }
-      const labels = pod?.pod_obj?.metadata?.labels;
-      if (labels && Object.keys(labels).length > 0) {
-        return { selector: labels, namespace: pod.pod_namespace };
-      }
-    } catch { /* not a pod — external */ }
-    return null;
+      return (await brokerGetJSON(path)) as T;
+    } catch {
+      return null; // 404 / error ⇒ not known
+    }
   };
+  return makePeerResolver({
+    serviceByIP: (ip) => getOrNull<BrokerServiceRecord>(`/svc/ip/${enc(ip)}`),
+    podByIP: (ip) => getOrNull<BrokerPodListEntry>(`/pod/ip/${enc(ip)}`),
+    pods: async () => {
+      const v = await brokerGetJSON("/pod/info");
+      return Array.isArray(v) ? (v as BrokerPodListEntry[]) : [];
+    },
+  });
 }
 
 export interface InProcessResult {
@@ -111,7 +84,7 @@ const handlers: Record<string, Handler> = {
       throw new Error(`no traffic data found for pod ${podName}`);
     }
     const podIP = (traffic[0] as { pod_ip?: string }).pod_ip ?? "";
-    const detail = (await brokerGetJSON(`/pod/ip/${enc(podIP)}`)) as BrokerPodRecord;
+    const detail = (await brokerGetJSON(`/pod/ip/${enc(podIP)}`)) as BrokerPodListEntry;
     const pod: PodInfo = {
       name: detail.pod_name ?? podName,
       namespace: detail.pod_namespace ?? "",

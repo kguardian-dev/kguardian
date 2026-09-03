@@ -491,6 +491,114 @@ func crossNamespaceFixture() (stubBrokerData, *api.PodDetail, []api.PodTraffic) 
 	return stub, detail, traffic
 }
 
+// ---- Peer attribution: stale IPs and stored identity (CONTRACT v4) ---------
+//
+// Pod IPs are recycled. Resolving a flow's peer IP against today's pod table
+// names whoever holds the IP NOW — on cluster-00 that drew autobrr
+// (home-system, started 2026-08-04) as the peer of cmangos-database INGRESS
+// rows from May and July, because it inherited a CronJob pod's IP. Two
+// fixtures pin the fix; see peer.go and test/fixtures/generators/networkpolicy/README.md.
+
+func v4FixturePod(name, ns, ip string, labels map[string]string, node, workload, startedAt string, dead bool) api.PodDetail {
+	d := fixturePodDetail(name, ns, ip, labels)
+	d.NodeName = node
+	d.WorkloadName = workload
+	d.StartedAt = startedAt
+	d.IsDead = dead
+	return *d
+}
+
+// (a) stale_ip_peer: legacy rows (no stored peer) from 10.244.12.199, dated
+// 2026-05-21 and 2026-07-23; the only pod known to hold that IP is autobrr,
+// started 2026-08-04 — later than both flows, so the start-time guard leaves
+// the peer UNATTRIBUTED: an ipBlock with a comment quoting the newest row
+// time_stamp, never autobrr's selector. The egress peer cmangos-web-0 started
+// before its flow and resolves normally, proving the guard is per candidate.
+func staleIPPeerFixture() (stubBrokerData, *api.PodDetail, []api.PodTraffic) {
+	stub := stubBrokerData{
+		pods: map[string]*api.PodDetail{},
+		svcs: map[string]*api.SvcDetail{},
+		allPods: []api.PodDetail{
+			v4FixturePod("autobrr-7d9c4b8f6-q2x9k", "home-system", "10.244.12.199",
+				map[string]string{"app": "autobrr"}, "worker-2", "autobrr", "2026-08-04T09:12:41", false),
+			v4FixturePod("cmangos-web-0", "game-servers", "10.244.5.8",
+				map[string]string{"app": "cmangos-web"}, "worker-1", "cmangos-web", "2026-07-01T00:00:00", false),
+		},
+	}
+	detail := fixturePodDetail("cmangos-database", "game-servers", "10.244.3.17", map[string]string{"app": "cmangos-database"})
+	traffic := []api.PodTraffic{
+		{TrafficType: "INGRESS", SrcIP: "10.244.3.17", SrcPodPort: "3306", DstIP: "10.244.12.199", DstPort: "51234", Protocol: "TCP", TimeStamp: "2026-05-21T08:30:00"},
+		{TrafficType: "INGRESS", SrcIP: "10.244.3.17", SrcPodPort: "3306", DstIP: "10.244.12.199", DstPort: "51235", Protocol: "TCP", TimeStamp: "2026-07-23T10:00:00"},
+		{TrafficType: "EGRESS", SrcIP: "10.244.3.17", DstIP: "10.244.5.8", DstPort: "8080", Protocol: "TCP", TimeStamp: "2026-07-23T10:00:05"},
+	}
+	return stub, detail, traffic
+}
+
+// (b) stored_peer_identity: rows the broker resolved at ingest. The INGRESS
+// row names the CronJob pod that held 10.244.12.199 at flow time; the IP is
+// NOW held by autobrr (alive, start unknown — a by-IP lookup would pick it).
+// The stored identity wins. The egress rows carry a stored Service and a
+// stored host-network ("node") peer, so all three peer_kind values are pinned.
+func storedPeerIdentityFixture() (stubBrokerData, *api.PodDetail, []api.PodTraffic) {
+	backup := v4FixturePod("cmangos-backup-29271840-x7k2p", "game-servers", "10.244.12.199",
+		map[string]string{"app": "cmangos-backup"}, "worker-1", "cmangos-backup", "2026-09-03T04:59:30", true)
+	backup.Pod.UID = "0d1e2f3a-4b5c-6d7e-8f90-a1b2c3d4e5f6"
+	nodeExporter := v4FixturePod("node-exporter-abc12", "monitoring", "192.168.50.101",
+		map[string]string{"app": "node-exporter"}, "worker-1", "node-exporter", "2026-08-01T00:00:00", false)
+	hostNetwork := true
+	nodeExporter.HostNetwork = &hostNetwork
+	nodeExporter.Pod.UID = "9c8b7a6f-5e4d-3c2b-1a09-f8e7d6c5b4a3"
+	stub := stubBrokerData{
+		pods: map[string]*api.PodDetail{},
+		svcs: map[string]*api.SvcDetail{
+			"10.96.0.10": {SvcName: "db", SvcNamespace: "game-servers", SvcIp: "10.96.0.10",
+				Service: corev1.Service{Spec: corev1.ServiceSpec{Selector: map[string]string{"app": "db"}}}},
+		},
+		allPods: []api.PodDetail{
+			v4FixturePod("autobrr-7d9c4b8f6-q2x9k", "home-system", "10.244.12.199",
+				map[string]string{"app": "autobrr"}, "worker-2", "autobrr", "", false),
+			backup,
+			nodeExporter,
+		},
+	}
+	detail := fixturePodDetail("cmangos-database", "game-servers", "10.244.3.17", map[string]string{"app": "cmangos-database"})
+	traffic := []api.PodTraffic{
+		{TrafficType: "INGRESS", SrcIP: "10.244.3.17", SrcPodPort: "3306", DstIP: "10.244.12.199", DstPort: "51234", Protocol: "TCP",
+			TimeStamp: "2026-09-03T05:00:00", PeerKind: "pod", PeerNamespace: "game-servers", PeerName: "cmangos-backup-29271840-x7k2p",
+			PeerUID: "0d1e2f3a-4b5c-6d7e-8f90-a1b2c3d4e5f6", PeerWorkloadKind: "CronJob", PeerWorkloadName: "cmangos-backup", PeerResolvedAt: "2026-09-03T05:00:00.201118"},
+		{TrafficType: "EGRESS", SrcIP: "10.244.3.17", DstIP: "10.96.0.10", DstPort: "5432", Protocol: "TCP",
+			TimeStamp: "2026-09-03T05:00:01", PeerKind: "service", PeerNamespace: "game-servers", PeerName: "db", PeerResolvedAt: "2026-09-03T05:00:01.100000"},
+		{TrafficType: "EGRESS", SrcIP: "10.244.3.17", DstIP: "192.168.50.101", DstPort: "9100", Protocol: "TCP",
+			TimeStamp: "2026-09-03T05:00:02", PeerKind: "node", PeerNamespace: "monitoring", PeerName: "node-exporter-abc12",
+			PeerUID: "9c8b7a6f-5e4d-3c2b-1a09-f8e7d6c5b4a3", PeerWorkloadKind: "DaemonSet", PeerWorkloadName: "node-exporter", PeerResolvedAt: "2026-09-03T05:00:02.100000"},
+	}
+	return stub, detail, traffic
+}
+
+func TestFixtureGolden_PeerAttribution(t *testing.T) {
+	cases := []struct {
+		name    string
+		fixture func() (stubBrokerData, *api.PodDetail, []api.PodTraffic)
+	}{
+		{"stale_ip_peer", staleIPPeerFixture},
+		{"stored_peer_identity", storedPeerIdentityFixture},
+	}
+	for _, tc := range cases {
+		t.Run("standard_"+tc.name, func(t *testing.T) {
+			stub, detail, traffic := tc.fixture()
+			gen := NewStandardPolicyGenerator()
+			gen.setBrokerData(stub)
+			checkCommentedPolicyGolden(t, "standard_"+tc.name+".golden.yaml", gen, detail.Name, traffic, detail)
+		})
+		t.Run("cilium_"+tc.name, func(t *testing.T) {
+			stub, detail, traffic := tc.fixture()
+			gen := NewCiliumPolicyGenerator()
+			gen.setBrokerData(stub)
+			checkCommentedPolicyGolden(t, "cilium_"+tc.name+".golden.yaml", gen, detail.Name, traffic, detail)
+		})
+	}
+}
+
 func TestFixtureGolden_CrossNamespacePeer(t *testing.T) {
 	t.Run("standard", func(t *testing.T) {
 		stub, detail, traffic := crossNamespaceFixture()
