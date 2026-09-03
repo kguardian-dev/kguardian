@@ -39,7 +39,7 @@ fn find_dead_pods<'a>(db_pods: &'a [PodDetail], running: &HashSet<PodIdent>) -> 
 /// recycled, and the watcher never re-posts them. Counting them as running
 /// kept their broker rows alive with no `started_at`, so old flows on their
 /// former IPs were attributed to them forever.
-fn pod_holds_an_ip(pod: &Pod) -> bool {
+pub(crate) fn pod_holds_an_ip(pod: &Pod) -> bool {
     if pod.metadata.deletion_timestamp.is_some() {
         return false;
     }
