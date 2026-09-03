@@ -31,9 +31,15 @@ started after the flow. See
    `pod_details.started_at` is likewise `NULL` on pre-upgrade pod rows
    until the controller re-posts the pod — every live pod is re-posted
    when the controller restarts, so the DaemonSet rollout fills it in;
-   a pod that is never re-posted keeps `NULL` and is excluded from by-IP
-   attribution — within 60 s of the upgrade every live pod has a start
-   time, so `NULL` means a ghost row or a Pending pod. The broker also
+   pods that were already dead at upgrade time never receive one (the
+   controller only re-posts live pods, and stored manifests carry no
+   `status`) and are excluded from by-IP attribution, so a historical
+   row whose peer was such a pod renders as unattributed rather than
+   being guessed from the IP's current holder. Live pods gain a start
+   time within 60 s and every flow recorded after the upgrade carries
+   its peer identity, so the gap is confined to pre-upgrade history and
+   closes with retention. Among live pods, `NULL` means a ghost row or a
+   Pending pod. The broker also
    marks alive rows dead when they have not been re-posted for
    `broker.peerResolution.staleAliveSeconds` (default 900, env
    `PEER_STALE_ALIVE_SECS`, `0` disables), since the controller re-posts
