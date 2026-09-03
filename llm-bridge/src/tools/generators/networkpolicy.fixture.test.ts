@@ -366,14 +366,22 @@ test("choosePeerCandidate — start-time guard and broker precedence", () => {
   const deadNew = v4Pod("job-new", "ns", "10.0.0.9", {}, "", "", "2026-07-20T00:00:00", true);
   const deadUnknown = v4Pod("job-unknown", "ns", "10.0.0.9", {}, "", "", null, true);
   const alive = v4Pod("deploy", "ns", "10.0.0.9", {}, "", "", "2026-07-10T00:00:00", false);
-  const all = [deadOld, deadNew, deadUnknown, alive];
-  assert.equal(choosePeerCandidate(all, "2026-07-23T10:00:00")?.pod_name, "deploy", "alive wins");
+  const aliveUnknown = v4Pod("ghost", "ns", "10.0.0.9", {}, "", "", null, false);
+  const all = [deadOld, deadNew, deadUnknown, aliveUnknown, alive];
+  assert.equal(choosePeerCandidate(all, "2026-07-23T10:00:00")?.pod_name, "deploy", "alive with a known start wins");
   assert.equal(choosePeerCandidate([deadOld, deadUnknown, deadNew], "2026-07-23T10:00:00")?.pod_name, "job-new", "newest known start among the dead");
-  assert.equal(choosePeerCandidate(all, "2026-07-05T00:00:00")?.pod_name, "job-old", "guard drops later starts; unknown start ranks last");
-  assert.equal(choosePeerCandidate([deadUnknown], "2026-07-05T00:00:00")?.pod_name, "job-unknown", "unknown start is allowed");
+  assert.equal(choosePeerCandidate(all, "2026-07-05T00:00:00")?.pod_name, "job-old", "guard drops later starts and every unknown start");
+  assert.equal(choosePeerCandidate([deadUnknown, aliveUnknown], "2026-07-05T00:00:00"), null, "unknown start is never a candidate (ghost/Pending row), alive or not");
   assert.equal(choosePeerCandidate([deadNew, alive], "2026-06-01T00:00:00"), null, "every candidate started later ⇒ unattributed");
   assert.equal(choosePeerCandidate(all, "")?.pod_name, "deploy", "no flow time ⇒ no guard");
+  assert.equal(choosePeerCandidate([deadOld, aliveUnknown], "")?.pod_name, "ghost", "no flow time ⇒ alive still preferred");
   assert.equal(choosePeerCandidate([alive], "2026-07-10T00:00:00")?.pod_name, "deploy", "equal is not later");
+});
+
+test("makePeerResolver — a ghost row with unknown started_at is unattributed, not the peer", async () => {
+  const ghost = v4Pod("ghost", "ns", "10.0.0.9", { app: "ghost" }, "", "", null, false);
+  const resolve = makePeerResolver(memoryLookup([ghost]));
+  assert.deepEqual(await resolve("10.0.0.9", { peer: null, timeStamp: "2026-07-23T10:00:00" }), { unattributed: true });
 });
 
 test("makePeerResolver — guarded-out is unattributed, external is a plain CIDR, stored wins", async () => {

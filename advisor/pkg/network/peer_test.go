@@ -41,27 +41,40 @@ func TestParseBrokerTime(t *testing.T) {
 	}
 }
 
-func TestStartTimeGuard_LaterThan(t *testing.T) {
-	assert.True(t, laterThan("2026-08-04T09:12:41", "2026-07-23T10:00:00"), "started after the flow ⇒ excluded")
-	assert.False(t, laterThan("2026-07-23T10:00:00", "2026-07-23T10:00:00"), "equal is not later")
-	assert.False(t, laterThan("2026-07-01T00:00:00", "2026-07-23T10:00:00"))
-	assert.False(t, laterThan("", "2026-07-23T10:00:00"), "unknown start is never excluded")
-	assert.False(t, laterThan("2026-08-04T09:12:41", ""), "unknown flow time cannot exclude")
+func TestStartTimeGuard_ExcludedByGuard(t *testing.T) {
+	assert.True(t, excludedByGuard("2026-08-04T09:12:41", "2026-07-23T10:00:00"), "started after the flow ⇒ excluded")
+	assert.False(t, excludedByGuard("2026-07-23T10:00:00", "2026-07-23T10:00:00"), "equal is not after")
+	assert.False(t, excludedByGuard("2026-07-01T00:00:00", "2026-07-23T10:00:00"))
+	assert.True(t, excludedByGuard("", "2026-07-23T10:00:00"), "unknown start is a ghost/Pending row ⇒ excluded")
+	assert.False(t, excludedByGuard("2026-08-04T09:12:41", ""), "no flow time ⇒ nothing to compare")
+	assert.False(t, excludedByGuard("", ""), "no flow time ⇒ nothing to compare")
 }
 
 func TestChoosePeerCandidate_Precedence(t *testing.T) {
 	deadOld := v4Pod("job-old", "ns", "10.0.0.9", "2026-07-01T00:00:00", true, nil)
 	deadNew := v4Pod("job-new", "ns", "10.0.0.9", "2026-07-20T00:00:00", true, nil)
 	deadUnknown := v4Pod("job-unknown", "ns", "10.0.0.9", "", true, nil)
+	aliveUnknown := v4Pod("ghost", "ns", "10.0.0.9", "", false, nil)
 	alive := v4Pod("deploy", "ns", "10.0.0.9", "2026-07-10T00:00:00", false, nil)
-	all := []*api.PodDetail{&deadOld, &deadNew, &deadUnknown, &alive}
+	all := []*api.PodDetail{&deadOld, &deadNew, &deadUnknown, &aliveUnknown, &alive}
 
-	assert.Equal(t, "deploy", choosePeerCandidate(all, "2026-07-23T10:00:00").Name, "alive wins")
+	assert.Equal(t, "deploy", choosePeerCandidate(all, "2026-07-23T10:00:00").Name, "alive with a known start wins")
 	assert.Equal(t, "job-new", choosePeerCandidate([]*api.PodDetail{&deadOld, &deadUnknown, &deadNew}, "2026-07-23T10:00:00").Name, "newest known start among the dead")
-	assert.Equal(t, "job-old", choosePeerCandidate(all, "2026-07-05T00:00:00").Name, "guard drops everything started after the flow; unknown start ranks last")
-	assert.Equal(t, "job-unknown", choosePeerCandidate([]*api.PodDetail{&deadUnknown}, "2026-07-05T00:00:00").Name, "unknown start is allowed")
+	assert.Equal(t, "job-old", choosePeerCandidate(all, "2026-07-05T00:00:00").Name, "guard drops everything started after the flow and every unknown start")
+	assert.Nil(t, choosePeerCandidate([]*api.PodDetail{&deadUnknown, &aliveUnknown}, "2026-07-05T00:00:00"), "unknown start is never a candidate, alive or not")
 	assert.Nil(t, choosePeerCandidate([]*api.PodDetail{&deadNew, &alive}, "2026-06-01T00:00:00"), "every candidate started later ⇒ unattributed")
-	assert.Equal(t, "deploy", choosePeerCandidate(all, "").Name, "no flow time ⇒ no guard, pre-v4 precedence")
+	assert.Equal(t, "deploy", choosePeerCandidate(all, "").Name, "no flow time ⇒ no guard, pre-v4 precedence (unknown start ranks last)")
+	assert.Equal(t, "ghost", choosePeerCandidate([]*api.PodDetail{&deadOld, &aliveUnknown}, "").Name, "no flow time ⇒ alive still preferred")
+}
+
+func TestResolveByIP_GhostRowWithUnknownStartIsUnattributed(t *testing.T) {
+	// Live finding: ghost pod_details rows (NULL started_at) absorbed old
+	// flows. With a row time_stamp, such a row is not a candidate.
+	ghost := v4Pod("ghost", "ns", "10.0.0.9", "", false, map[string]string{"app": "ghost"})
+	r := newPeerResolver(stubBrokerData{allPods: []api.PodDetail{ghost}})
+	got := r.resolveRow("10.0.0.9", rowAt("10.0.0.9", "2026-07-23T10:00:00"))
+	assert.True(t, got.Unattributed)
+	assert.Nil(t, got.Pod)
 }
 
 func TestResolveByIP_GuardedOutIsUnattributed_ExternalIsNot(t *testing.T) {

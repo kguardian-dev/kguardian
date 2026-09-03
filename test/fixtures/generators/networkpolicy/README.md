@@ -51,10 +51,13 @@ grouped by `(peer IP, identity)`:
   one); `service` must still be the Service `/svc/ip` returns. An identity that
   no longer exists is **unattributed** — the IP is never re-resolved.
 - `peer_kind` null: `/svc/ip` first; else every pod record holding the IP is a
-  candidate, minus those whose `started_at` is later than the row `time_stamp`
-  (unknown on either side ⇒ kept). Alive first, then newest `started_at`, then
-  newest record. Candidates existed but none survived ⇒ **unattributed**; none at
-  all ⇒ plain CIDR as before.
+  candidate, but only one with a KNOWN `started_at` that is not after the row
+  `time_stamp` qualifies — a NULL `started_at` is a ghost or Pending row and is
+  never chosen (every live pod has a start within a minute of the broker
+  upgrade). Alive first, then newest `started_at`, then newest record.
+  Candidates existed but none qualified ⇒ **unattributed**; none at all ⇒ plain
+  CIDR as before. A row with no `time_stamp` (bare-IP callers) has nothing to
+  compare and keeps the pre-v4 by-IP behaviour.
 - **Unattributed** renders as `ipBlock` / `fromCIDR`/`toCIDR` of the observed IP
   with the comment `# unattributed peer <ip> at <time>` (`<time>` = the newest row
   `time_stamp` in the group, verbatim; omitted with " at" when none parses).

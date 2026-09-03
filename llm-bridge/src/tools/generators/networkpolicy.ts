@@ -729,13 +729,17 @@ export function parseBrokerTime(s: string | null | undefined): number | null {
   return Number.isNaN(ms) ? null : ms;
 }
 
-// laterThan — the start-time guard: is `startedAt` strictly later than the
-// flow's `timeStamp`? Either side unknown ⇒ false (nothing to compare, the
-// candidate stays).
-function laterThan(startedAt: string | null | undefined, timeStamp: string): boolean {
-  const a = parseBrokerTime(startedAt);
-  const b = parseBrokerTime(timeStamp);
-  return a !== null && b !== null && a > b;
+// excludedByGuard — the start-time guard for a by-IP candidate: given a row
+// time_stamp, only a pod with a KNOWN start that is not after the flow can
+// have been the peer. An unknown started_at is excluded too — every live pod
+// has one within a minute of the broker upgrade, so NULL means a ghost row
+// or a Pending pod, and on cluster-00 such rows absorbed old flows. With no
+// row time_stamp there is nothing to compare and the candidate stays.
+function excludedByGuard(startedAt: string | null | undefined, timeStamp: string): boolean {
+  const flow = parseBrokerTime(timeStamp);
+  if (flow === null) return false;
+  const start = parseBrokerTime(startedAt);
+  return start === null || start > flow;
 }
 
 // newestTimeStamp — the newest of the given broker timestamps, returned
@@ -785,13 +789,13 @@ export function podIdentity(pod: BrokerPodListEntry): PeerIdentity | null {
 
 /**
  * choosePeerCandidate applies the start-time guard and the broker's
- * precedence (its `/pod/ip/{ip}?at=` ordering): drop candidates started
- * after the flow; prefer alive; then the newest started_at (unknown last);
- * then the newest record; then ns/name for stability. null when the guard
- * removed every candidate.
+ * precedence: drop candidates with an unknown start or one after the flow
+ * (see excludedByGuard); prefer alive; then the newest started_at; then the
+ * newest record; then ns/name for stability. null when the guard removed
+ * every candidate.
  */
 export function choosePeerCandidate(candidates: BrokerPodListEntry[], timeStamp: string): BrokerPodListEntry | null {
-  const kept = candidates.filter((c) => !laterThan(c.started_at, timeStamp));
+  const kept = candidates.filter((c) => !excludedByGuard(c.started_at, timeStamp));
   if (kept.length === 0) return null;
   kept.sort((a, b) =>
     Number(a.is_dead === true) - Number(b.is_dead === true)
