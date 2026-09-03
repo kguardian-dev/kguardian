@@ -180,28 +180,22 @@ async fn process_pod(
         let capture_level = effective_capture_level(pod, cluster_capture_level);
         let pod_ip = update_pods_details(pod, node_name, client, capture_level).await;
         if let Ok(Some(pod_ip)) = pod_ip {
-            if ignore_daemonset_traffic && is_backed_by_daemonset(pod) {
-                // debug not info — fires per daemonset pod event,
-                // including the full re-sync (kube-proxy, calico-node,
-                // and the kguardian-controller itself on every node).
-                // Operators set IGNORE_DAEMONSET_TRAFFIC=true to NOT
-                // see this stream by default.
-                debug!("Ignoring daemonset pod: {}, {}", pod.name_any(), pod_ip);
-
-                // EVERY address the pod holds, not just the primary: on
-                // a dual-stack node the eBPF ignore map otherwise never
-                // learns the secondary-family address, and the
-                // daemonset's traffic over that family is still
-                // recorded — the exact half-working state the IpAddr
-                // parse in bpf.rs exists to prevent.
-                for ip in collect_pod_ips(
-                    pod.status.as_ref().and_then(|s| s.pod_ips.as_deref()),
-                    &pod_ip,
-                ) {
-                    if let Err(e) = sender_ip.send(ip).await {
-                        error!("Failed to send pod ip: {}", e);
+            match ignore_map_action(pod, &pod_ip, ignore_daemonset_traffic, excluded_namespaces) {
+                IgnoreMapAction::Ignore(ips) => {
+                    // debug not info — fires per daemonset pod event,
+                    // including the full re-sync (kube-proxy, calico-node,
+                    // and the kguardian-controller itself on every node).
+                    // Operators set IGNORE_DAEMONSET_TRAFFIC=true to NOT
+                    // see this stream by default.
+                    debug!("Ignoring daemonset pod: {}, {}", pod.name_any(), pod_ip);
+                    for ip in ips {
+                        if let Err(e) = sender_ip.send(ip).await {
+                            error!("Failed to send pod ip: {}", e);
+                        }
                     }
                 }
+                IgnoreMapAction::HostNetwork => log_host_network_skip_once(pod, &pod_ip),
+                IgnoreMapAction::None => {}
             }
             if should_process_pod(&pod.metadata.namespace, excluded_namespaces) {
                 return process_container_ids(&con_ids, pod, &pod_ip, container_map, capture_level)
@@ -211,6 +205,99 @@ async fn process_pod(
     }
 
     None
+}
+
+/// What `process_pod` does to the eBPF `ignore_ips` map for a pod.
+#[derive(Debug, PartialEq, Eq)]
+enum IgnoreMapAction {
+    /// Not a DaemonSet pod, ignoring is off, or the namespace is
+    /// excluded: leave the map alone.
+    None,
+    /// A DaemonSet pod whose address is the node's: leave the map alone
+    /// (see `ignore_map_action`) — the caller logs, once.
+    HostNetwork,
+    /// Push these addresses into the map.
+    Ignore(Vec<String>),
+}
+
+/// Decide whether a pod's addresses go into the eBPF ignore map.
+///
+/// `IGNORE_DAEMONSET_TRAFFIC` means "don't capture DaemonSet pods". For
+/// a pod-network DaemonSet that is two things: don't register its
+/// netns (handled by never reaching `process_container_ids`) AND drop
+/// flows to/from its IPs in BPF, so its peers' recordings aren't
+/// flooded with kube-proxy / CNI chatter.
+///
+/// A host-network DaemonSet pod (node-exporter, Cilium, this controller)
+/// has `podIP == node IP`. Putting that in the map ignored every flow to
+/// or from the NODE — Prometheus → node-exporter:9100, anything →
+/// kubelet:10250, etcd:2381, the apiserver on a control-plane node —
+/// for every pod on the cluster, and `helper.h` drops on src OR dst.
+/// That traffic was simply never recorded, so generated policies
+/// omitted it. Such a pod is still not registered (unchanged); only the
+/// map insertion is withheld.
+///
+/// The excluded-namespace gate applies here too: it used to run only
+/// AFTER the insertion, so excluding `kguardian` did not stop the
+/// controller's own DaemonSet from ignoring its node IP.
+///
+/// `Ignore` carries EVERY address the pod holds, not just the primary:
+/// on a dual-stack node the map otherwise never learns the
+/// secondary-family address, and the daemonset's traffic over that
+/// family is still recorded — the exact half-working state the IpAddr
+/// parse in bpf.rs exists to prevent.
+fn ignore_map_action(
+    pod: &Pod,
+    pod_ip: &str,
+    ignore_daemonset_traffic: bool,
+    excluded_namespaces: &[String],
+) -> IgnoreMapAction {
+    if !ignore_daemonset_traffic
+        || !is_backed_by_daemonset(pod)
+        || !should_process_pod(&pod.metadata.namespace, excluded_namespaces)
+    {
+        return IgnoreMapAction::None;
+    }
+    if is_host_network(pod) {
+        return IgnoreMapAction::HostNetwork;
+    }
+    IgnoreMapAction::Ignore(collect_pod_ips(
+        pod.status.as_ref().and_then(|s| s.pod_ips.as_deref()),
+        pod_ip,
+    ))
+}
+
+/// `spec.hostNetwork`, absent ⇒ false.
+fn is_host_network(pod: &Pod) -> bool {
+    pod.spec
+        .as_ref()
+        .and_then(|s| s.host_network)
+        .unwrap_or(false)
+}
+
+/// Info once per pod, not per event: `process_pod` re-runs for every
+/// watch event and on the 60s resync, and there are several
+/// host-network DaemonSet pods on every node.
+fn log_host_network_skip_once(pod: &Pod, pod_ip: &str) {
+    static LOGGED: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<String>>> =
+        std::sync::OnceLock::new();
+    let key = format!(
+        "{}/{}",
+        pod.metadata.namespace.as_deref().unwrap_or_default(),
+        pod.name_any()
+    );
+    let mut logged = LOGGED
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    if logged.insert(key) {
+        info!(
+            pod = %pod.name_any(),
+            namespace = pod.metadata.namespace.as_deref().unwrap_or_default(),
+            ip = pod_ip,
+            "host-network daemonset pod shares the node IP; not ignoring node traffic"
+        );
+    }
 }
 
 fn should_process_pod(namespace: &Option<String>, excluded_namespaces: &[String]) -> bool {
@@ -372,6 +459,7 @@ async fn update_pods_details(
             workload_kind,
             workload_name,
             capture_level: Some(capture_level.as_str().to_string()),
+            host_network: is_host_network(pod),
         };
 
         if let Err(e) = api_post_call(json!(z), "pod/spec").await {
@@ -1256,6 +1344,100 @@ mod tests {
             uid: "u".into(),
             ..Default::default()
         }
+    }
+
+    /// A ready DaemonSet pod in `ns` with `hostNetwork` set as given and
+    /// (dual-stack) `status.podIPs`.
+    fn daemonset_pod(ns: &str, host_network: bool) -> Pod {
+        use k8s_openapi::api::core::v1::{PodSpec, PodStatus};
+        let mut pod = pod_with_owners(vec![owner("DaemonSet")]);
+        pod.metadata.name = Some("ds-x".into());
+        pod.metadata.namespace = Some(ns.into());
+        pod.spec = Some(PodSpec {
+            host_network: Some(host_network),
+            ..Default::default()
+        });
+        pod.status = Some(PodStatus {
+            pod_ip: Some("10.0.0.5".into()),
+            pod_ips: Some(vec![
+                PodIP {
+                    ip: "10.0.0.5".into(),
+                },
+                PodIP {
+                    ip: "fd00::5".into(),
+                },
+            ]),
+            ..Default::default()
+        });
+        pod
+    }
+
+    fn excluded() -> Vec<String> {
+        vec!["kguardian".to_string()]
+    }
+
+    #[test]
+    fn ignore_map_host_network_daemonset_pod_is_never_ignored() {
+        // The blind spot: a host-network DS pod's IP is the node IP, so
+        // ignoring it ignored every pod's flows to any node address
+        // (node-exporter, kubelet, etcd, apiserver).
+        let pod = daemonset_pod("monitoring", true);
+        assert_eq!(
+            ignore_map_action(&pod, "10.0.0.5", true, &excluded()),
+            IgnoreMapAction::HostNetwork
+        );
+    }
+
+    #[test]
+    fn ignore_map_pod_network_daemonset_pod_is_ignored_with_every_address() {
+        let pod = daemonset_pod("kube-system", false);
+        assert_eq!(
+            ignore_map_action(&pod, "10.0.0.5", true, &excluded()),
+            IgnoreMapAction::Ignore(vec!["10.0.0.5".into(), "fd00::5".into()])
+        );
+        // hostNetwork absent from the spec is the same as false.
+        let mut pod = daemonset_pod("kube-system", false);
+        pod.spec = None;
+        assert!(matches!(
+            ignore_map_action(&pod, "10.0.0.5", true, &excluded()),
+            IgnoreMapAction::Ignore(_)
+        ));
+    }
+
+    #[test]
+    fn ignore_map_excluded_namespace_daemonset_pod_is_not_ignored() {
+        // The gate used to run only AFTER the insertion, so excluding
+        // kguardian did not keep the controller's own node IP out.
+        for hn in [true, false] {
+            let pod = daemonset_pod("kguardian", hn);
+            assert_eq!(
+                ignore_map_action(&pod, "10.0.0.5", true, &excluded()),
+                IgnoreMapAction::None,
+                "hostNetwork={hn}"
+            );
+        }
+    }
+
+    #[test]
+    fn ignore_map_is_untouched_when_disabled_or_not_a_daemonset() {
+        let pod = daemonset_pod("kube-system", false);
+        assert_eq!(
+            ignore_map_action(&pod, "10.0.0.5", false, &excluded()),
+            IgnoreMapAction::None
+        );
+        let mut pod = daemonset_pod("kube-system", true);
+        pod.metadata.owner_references = Some(vec![owner("ReplicaSet")]);
+        assert_eq!(
+            ignore_map_action(&pod, "10.0.0.5", true, &excluded()),
+            IgnoreMapAction::None
+        );
+    }
+
+    #[test]
+    fn is_host_network_reads_spec_and_defaults_false() {
+        assert!(!is_host_network(&Pod::default()));
+        assert!(!is_host_network(&daemonset_pod("a", false)));
+        assert!(is_host_network(&daemonset_pod("a", true)));
     }
 
     #[test]

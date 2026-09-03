@@ -167,7 +167,15 @@ controller:
     - kguardian
     - kube-system
 
-  # -- Ignore traffic from daemonset pods to reduce noise
+  # -- Skip DaemonSet pods: their network namespaces are not registered with
+  # the eBPF probe, so their own flows are never recorded (log shippers,
+  # CNI agents, node-exporter are noise for policy generation). Host-network
+  # DaemonSet pods share the node's IP; those pods are still skipped, but
+  # their IP is never added to the probe's ignore list, so traffic from any
+  # pod TO a node IP (kubelet :10250, node-exporter :9100, etcd :2381,
+  # apiserver :6443) is recorded and shows up in generated policies.
+  # Controllers up to 1.11.0 ignored the node IP as well, which silently
+  # dropped every pod-to-node flow.
   ignoreDaemonSet: true
 
 # -- Syscall capture tier for the controller's eBPF probe. Sets

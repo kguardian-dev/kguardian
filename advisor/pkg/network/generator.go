@@ -5,7 +5,6 @@ import (
 
 	"github.com/kguardian-dev/kguardian/advisor/pkg/common"
 	log "github.com/rs/zerolog/log"
-	"sigs.k8s.io/yaml"
 )
 
 // PolicyService handles network policy generation and management
@@ -100,15 +99,25 @@ func (s *PolicyService) GeneratePolicy(podName string, policyType PolicyType) (*
 		log.Warn().Msgf("No generator found for policy type %s, using default type %s", policyType, s.defaultType)
 	}
 
-	// Generate the policy
-	policy, err := generator.Generate(podName, podTraffic, podDetail)
+	// Generate the policy — with its explanatory comments when the
+	// generator can provide them (host-network peers / target).
+	var (
+		policy   interface{}
+		comments *PolicyComments
+	)
+	if cg, ok := generator.(CommentedPolicyGenerator); ok {
+		policy, comments, err = cg.GenerateWithComments(podName, podTraffic, podDetail)
+	} else {
+		policy, err = generator.Generate(podName, podTraffic, podDetail)
+	}
 	if err != nil {
 		log.Error().Err(err).Msgf("Error generating %s policy for pod %s", policyType, podName)
 		return nil, err
 	}
 
-	// Convert to YAML
-	policyYAML, err := yaml.Marshal(policy)
+	// Convert to YAML (comments spliced in; byte-identical to yaml.Marshal
+	// when there are none).
+	policyYAML, err := MarshalPolicyYAML(policy, comments)
 	if err != nil {
 		log.Error().Err(err).Msgf("Error converting %s policy to YAML", policyType)
 		return nil, err
@@ -116,6 +125,7 @@ func (s *PolicyService) GeneratePolicy(podName string, policyType PolicyType) (*
 
 	return &PolicyOutput{
 		Policy:    policy,
+		Comments:  comments,
 		YAML:      policyYAML,
 		PodName:   podDetail.Name,
 		Namespace: podDetail.Namespace,

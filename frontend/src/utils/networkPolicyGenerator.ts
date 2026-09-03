@@ -1,8 +1,18 @@
-import type { PodNodeData } from '../types';
-import type { NetworkPolicy, NetworkPolicyRule, NetworkPolicyPeer } from '../types/networkPolicy';
+import type { PodInfo, PodNodeData } from '../types';
+import type { NetworkPolicy, NetworkPolicyRule, NetworkPolicyPeer, NetworkPolicyPort } from '../types/networkPolicy';
 import { apiClient } from '../services/api';
 import { resolveTrafficIdentity, type TrafficIdentity } from './trafficIdentity';
 import { peerCIDR } from './ipCidr';
+import {
+  hostNetworkPeerComment,
+  hostNetworkServiceBackends,
+  hostNetworkServiceComment,
+  hostNetworkTargetName,
+  hostNetworkTargetWarning,
+  isHostNetworkTarget,
+  specNodeName,
+  yamlComments,
+} from './hostNetwork';
 
 export async function generateNetworkPolicy(pod: PodNodeData): Promise<NetworkPolicy> {
   const ingressRules: NetworkPolicyRule[] = [];
@@ -102,43 +112,118 @@ export async function generateNetworkPolicy(pod: PodNodeData): Promise<NetworkPo
     }
   });
 
-  // Helper function to get labels for a pod (workload labels or pod labels)
-  const getLabelsForPod = async (podName: string): Promise<Record<string, string> | null> => {
+  // What the by-name pod lookup tells us about a peer: its selector labels
+  // (workload labels preferred over pod labels) plus the host-network facts
+  // needed to decide whether a podSelector can match it at all.
+  interface PeerPodFacts {
+    labels: Record<string, string> | null;
+    hostNetwork: boolean | undefined;
+    nodeName?: string;
+    workloadName?: string;
+    namespace?: string;
+  }
+
+  // One pod listing per generation, fetched lazily and only when a Service
+  // peer needs its backends inspected. null = listing failed (unknown).
+  let allPods: Promise<PodInfo[] | null> | undefined;
+  const listPods = (): Promise<PodInfo[] | null> => {
+    if (!allPods) {
+      allPods = (async () => {
+        try {
+          const pods = await apiClient.getAllPods();
+          return Array.isArray(pods) ? pods : null;
+        } catch {
+          return null;
+        }
+      })();
+    }
+    return allPods;
+  };
+
+  const getPeerPodFacts = async (podName: string): Promise<PeerPodFacts> => {
+    const facts: PeerPodFacts = { labels: null, hostNetwork: undefined };
     try {
       const podInfo = await apiClient.getPodDetailsByName(podName);
+      if (!podInfo) return facts;
 
       // First try workload selector labels
-      if (podInfo?.workload_selector_labels && Object.keys(podInfo.workload_selector_labels).length > 0) {
-        return podInfo.workload_selector_labels;
+      if (podInfo.workload_selector_labels && Object.keys(podInfo.workload_selector_labels).length > 0) {
+        facts.labels = podInfo.workload_selector_labels;
+      } else if (podInfo.pod_obj?.metadata?.labels && Object.keys(podInfo.pod_obj.metadata.labels).length > 0) {
+        // Fall back to pod labels from pod spec
+        facts.labels = podInfo.pod_obj.metadata.labels;
       }
-
-      // Fall back to pod labels from pod spec
-      if (podInfo?.pod_obj?.metadata?.labels) {
-        const labels = podInfo.pod_obj.metadata.labels;
-        if (Object.keys(labels).length > 0) {
-          return labels;
-        }
-      }
+      // null/absent host_network (old broker) stays undefined ⇒ legacy rendering.
+      if (typeof podInfo.host_network === 'boolean') facts.hostNetwork = podInfo.host_network;
+      facts.nodeName = podInfo.node_name || specNodeName(podInfo) || undefined;
+      facts.workloadName = podInfo.workload_name || undefined;
+      facts.namespace = podInfo.pod_namespace || undefined;
     } catch {
-      // If we can't fetch labels, return null
+      // If we can't fetch the pod, fall back to name-derived labels
     }
-    return null;
+    return facts;
+  };
+
+  interface ResolvedPeer {
+    // Usually one peer; a Service backed by host-network pods yields one
+    // ipBlock per backend node IP in a single rule.
+    peers: NetworkPolicyPeer[];
+    // Set only for a host-network peer: the explanatory comment line.
+    hostNetworkComment?: string;
+  }
+
+  // A host-network pod shares the node's IP and network identity, so a
+  // podSelector on its labels never matches its traffic. Pin the observed
+  // node IP instead (no namespaceSelector — an ipBlock may not be combined
+  // with selectors in one peer) and say why in a comment above the rule.
+  const hostNetworkPeer = (
+    peerInfo: PeerInfo,
+    namespace: string,
+    name: string,
+    node: string,
+  ): ResolvedPeer | null => {
+    const cidr = peerCIDR(peerInfo.ip);
+    if (cidr === null) return null;
+    return {
+      peers: [{ ipBlock: { cidr } }],
+      hostNetworkComment: hostNetworkPeerComment('standard', namespace, name, node),
+    };
   };
 
   // Helper function to create peer based on identity type
   // Returns null when the peer is an external IP that does not parse as an
   // address literal - see peerCIDR; the caller drops the rule in that case.
-  const createPeer = async (peerInfo: PeerInfo): Promise<NetworkPolicyPeer | null> => {
+  const createPeer = async (peerInfo: PeerInfo): Promise<ResolvedPeer | null> => {
     const { identity } = peerInfo;
 
     if (identity.svcName) {
       // Service - use podSelector with service label
       // Try to get labels (workload or pod labels) for pods behind this service
-      const labels = await getLabelsForPod(identity.svcName);
+      // A Service fronting host-network pods fronts node IPs: its selector
+      // matches labels no policy can see. NetworkPolicy is evaluated after
+      // the Service DNAT, so the ClusterIP never appears on the wire either —
+      // pin the backends' node IPs, one ipBlock each, in a single rule.
+      const backends = hostNetworkServiceBackends(await listPods(), identity.svcNamespace, identity.svcSelector);
+      if (backends.length > 0) {
+        const cidrs = Array.from(new Set(backends.map((b) => b.pod_ip)))
+          .sort()
+          .map((ip) => peerCIDR(ip))
+          .filter((c): c is string => c !== null);
+        // Never fall back to the ClusterIP: a rule for it would be inert.
+        if (cidrs.length === 0) return null;
+        return {
+          peers: cidrs.map((cidr) => ({ ipBlock: { cidr } })),
+          hostNetworkComment: hostNetworkServiceComment(
+            'standard', identity.svcNamespace || 'default', identity.svcName, backends, peerInfo.ip,
+          ),
+        };
+      }
+
+      const facts = await getPeerPodFacts(identity.svcName);
 
       const peer: NetworkPolicyPeer = {
         podSelector: {
-          matchLabels: labels || { app: identity.svcName },
+          matchLabels: facts.labels || { app: identity.svcName },
         },
       };
 
@@ -151,14 +236,27 @@ export async function generateNetworkPolicy(pod: PodNodeData): Promise<NetworkPo
         };
       }
 
-      return peer;
+      return { peers: [peer] };
     } else if (identity.podName) {
       // Pod - use labels (workload selector labels or pod labels)
-      const labels = await getLabelsForPod(identity.podName);
+      const facts = await getPeerPodFacts(identity.podName);
+
+      // The by-IP lookup (resolveTrafficIdentity) already carries
+      // host_network; the by-name lookup is the fallback for a broker that
+      // reported it on one route but not the other.
+      const hostNetwork = identity.hostNetwork ?? facts.hostNetwork;
+      if (hostNetwork === true) {
+        return hostNetworkPeer(
+          peerInfo,
+          identity.podNamespace || facts.namespace || 'default',
+          identity.workloadName || facts.workloadName || identity.podName,
+          identity.nodeName || facts.nodeName || peerInfo.ip,
+        );
+      }
 
       const peer: NetworkPolicyPeer = {
         podSelector: {
-          matchLabels: labels || { app: identity.podName },
+          matchLabels: facts.labels || { app: identity.podName },
         },
       };
 
@@ -171,60 +269,79 @@ export async function generateNetworkPolicy(pod: PodNodeData): Promise<NetworkPo
         };
       }
 
-      return peer;
+      return { peers: [peer] };
     } else {
       // External IP - use IP block. The host mask follows the address family:
       // /32 for IPv4, /128 for IPv6 (a /32 on a v6 address would cover 2^96
       // hosts rather than the single peer we observed).
       const cidr = peerCIDR(peerInfo.ip);
       if (cidr === null) return null;
-      return {
-        ipBlock: {
-          cidr,
-        },
-      };
+      return { peers: [{ ipBlock: { cidr } }] };
     }
   };
 
-  // Build ingress rules - one rule per peer with all its ports
-  for (const { peer, ports } of ingressMap.values()) {
-    const resolvedPeer = await createPeer(peer);
-    // An unparseable peer IP drops the whole rule rather than emitting a
-    // malformed CIDR, which would make the API server reject the entire policy.
-    if (resolvedPeer === null) continue;
-    const rule: NetworkPolicyRule = {
-      id: `ingress-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
-      peers: [resolvedPeer],
-      ports: Array.from(ports).map((portStr) => {
-        const [protocol, port] = portStr.split(':');
-        return {
-          protocol: protocol.toUpperCase(),
-          port: parseInt(port) || port,
-        };
-      }),
-    };
-    ingressRules.push(rule);
-  }
+  // Rules are emitted in bytewise peer-IP order, the same order the advisor
+  // and llm-bridge use, so the three generators agree on rule position.
+  const sortedByPeerIP = <T extends { peer: PeerInfo }>(map: Map<string, T>): T[] =>
+    Array.from(map.values()).sort((a, b) => (a.peer.ip < b.peer.ip ? -1 : a.peer.ip > b.peer.ip ? 1 : 0));
 
-  // Build egress rules - one rule per peer with all its ports
-  for (const { peer, ports } of egressMap.values()) {
-    const resolvedPeer = await createPeer(peer);
-    // An unparseable peer IP drops the whole rule rather than emitting a
-    // malformed CIDR, which would make the API server reject the entire policy.
-    if (resolvedPeer === null) continue;
-    const rule: NetworkPolicyRule = {
-      id: `egress-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
-      peers: [resolvedPeer],
-      ports: Array.from(ports).map((portStr) => {
-        const [protocol, port] = portStr.split(':');
-        return {
-          protocol: protocol.toUpperCase(),
-          port: parseInt(port) || port,
-        };
-      }),
-    };
-    egressRules.push(rule);
-  }
+  const parsePorts = (ports: Set<string>): NetworkPolicyPort[] =>
+    Array.from(ports).map((portStr) => {
+      const [protocol, port] = portStr.split(':');
+      return {
+        protocol: protocol.toUpperCase(),
+        port: parseInt(port) || port,
+      };
+    });
+
+  // Build rules - one rule per peer with all its ports. Host-network peers
+  // are the exception: several of them can share one node IP (every
+  // host-network pod on a node does), and they collapse into a single ipBlock
+  // rule carrying the union of their ports and one comment line per peer.
+  const buildRules = async (
+    map: Map<string, { peer: PeerInfo; ports: Set<string> }>,
+    direction: 'ingress' | 'egress',
+  ): Promise<NetworkPolicyRule[]> => {
+    const rules: NetworkPolicyRule[] = [];
+    const hostRuleByCidr = new Map<string, NetworkPolicyRule>();
+    for (const { peer, ports } of sortedByPeerIP(map)) {
+      const resolved = await createPeer(peer);
+      // An unparseable peer IP drops the whole rule rather than emitting a
+      // malformed CIDR, which would make the API server reject the entire policy.
+      if (resolved === null) continue;
+      const rulePorts = parsePorts(ports);
+
+      // Host-network rules collapse on their ipBlock set (one node IP for a
+      // pod peer, the backends' node IPs for a Service peer).
+      const cidr = resolved.hostNetworkComment
+        ? resolved.peers.map((p) => p.ipBlock?.cidr).filter(Boolean).join(',') || undefined
+        : undefined;
+      const existing = cidr ? hostRuleByCidr.get(cidr) : undefined;
+      if (existing && resolved.hostNetworkComment) {
+        const seen = new Set(existing.ports.map((p) => `${p.protocol}:${p.port}`));
+        for (const p of rulePorts) {
+          if (!seen.has(`${p.protocol}:${p.port}`)) existing.ports.push(p);
+        }
+        if (!existing.comments!.includes(resolved.hostNetworkComment)) {
+          existing.comments!.push(resolved.hostNetworkComment);
+        }
+        continue;
+      }
+
+      const rule: NetworkPolicyRule = {
+        id: `${direction}-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
+        peers: resolved.peers,
+        ports: rulePorts,
+        ...(resolved.hostNetworkComment && { comments: [resolved.hostNetworkComment] }),
+      };
+      if (cidr) hostRuleByCidr.set(cidr, rule);
+      rules.push(rule);
+    }
+    return rules;
+  };
+
+  ingressRules.push(...(await buildRules(ingressMap, 'ingress')));
+  egressRules.push(...(await buildRules(egressMap, 'egress')));
 
   // Create policy
   // Use pod identity for resource name, fallback to pod name if not available
@@ -240,6 +357,11 @@ export async function generateNetworkPolicy(pod: PodNodeData): Promise<NetworkPo
   }
 
   const policy: NetworkPolicy = {
+    // A host-network target cannot be selected by any namespaced
+    // NetworkPolicy. Emit the policy anyway — the rules are still the right
+    // shape for a host-firewall rewrite — but lead with a warning so nobody
+    // applies it expecting enforcement.
+    ...(isHostNetworkTarget(pod) && { warnings: hostNetworkTargetWarning('standard', pod.pod.pod_namespace || 'default', hostNetworkTargetName(pod)) }),
     apiVersion: 'networking.k8s.io/v1',
     kind: 'NetworkPolicy',
     metadata: {
@@ -288,6 +410,7 @@ export function quoteYamlValue(value: string): string {
 export function policyToYAML(policy: NetworkPolicy): string {
   const yaml: string[] = [];
 
+  yaml.push(...yamlComments(policy.warnings));
   yaml.push(`apiVersion: ${quoteYamlValue(policy.apiVersion)}`);
   yaml.push(`kind: ${quoteYamlValue(policy.kind)}`);
   yaml.push('metadata:');
@@ -310,6 +433,7 @@ export function policyToYAML(policy: NetworkPolicy): string {
   if (policy.spec.ingress && policy.spec.ingress.length > 0) {
     yaml.push('  ingress:');
     policy.spec.ingress.forEach((rule) => {
+      yaml.push(...yamlComments(rule.comments, '  '));
       yaml.push('  - from:');
       rule.peers.forEach((peer) => {
         yaml.push('    -');
@@ -349,6 +473,7 @@ export function policyToYAML(policy: NetworkPolicy): string {
   if (policy.spec.egress && policy.spec.egress.length > 0) {
     yaml.push('  egress:');
     policy.spec.egress.forEach((rule) => {
+      yaml.push(...yamlComments(rule.comments, '  '));
       yaml.push('  - to:');
       rule.peers.forEach((peer) => {
         yaml.push('    -');

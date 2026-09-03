@@ -33,6 +33,11 @@ export interface PodInfo {
    *  `full | high | medium | low | custom`. Absent/null from a controller
    *  predating tiers — never assume that means complete. */
   capture_level?: string | null;
+  /** `pod.spec.hostNetwork`. A host-network pod shares the node's IP, so a
+   *  podSelector can never match its traffic — the generators render such a
+   *  peer as an ipBlock / Cilium entities instead. Absent/null from a broker or
+   *  controller predating the column ⇒ treated as unknown (legacy rendering). */
+  host_network?: boolean | null;
 }
 
 // Matches broker's PodTraffic type

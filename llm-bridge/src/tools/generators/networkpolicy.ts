@@ -1,4 +1,4 @@
-import { stringify } from "yaml";
+import { Document, stringify, isNode } from "yaml";
 
 // In-process NetworkPolicy / CiliumNetworkPolicy generation. A faithful
 // TypeScript port of the advisor's Go generators (pkg/network standard_policy.go,
@@ -15,6 +15,57 @@ export interface PeerIdentity {
   // Service selector (priority 1) or pod labels (priority 2); null → external CIDR.
   selector?: Record<string, string>;
   namespace?: string;
+  // Host-network pod (broker host_network === true). Takes precedence over
+  // selector: its labels select nothing the CNI can see, so the peer is
+  // rendered as the observed node IP (NetworkPolicy ipBlock) or the host
+  // entities (Cilium) with an explanatory comment. false/undefined ⇒ normal.
+  hostNetwork?: boolean;
+  // Identity for the comment: workload_name (falls back to podName) and
+  // node_name (falls back to the observed IP). For a Service whose backing
+  // pods are host-network, `service` is the Service name (rendered as
+  // "<ns>/svc/<name>") and `node` the sorted, deduped node list of those pods.
+  podName?: string;
+  workload?: string;
+  node?: string;
+  service?: string;
+  // Service case only: distinct backend pod IPs (= node IPs), sorted bytewise.
+  // NetworkPolicy is evaluated post-DNAT, so these — never the ClusterIP —
+  // are the ipBlock peers. Cilium ignores them (entities cover every node).
+  backendIPs?: string[];
+}
+
+// The broker /pod/info record fields consulted when deciding whether a
+// Service fronts host-network pods.
+export interface BrokerPodListEntry {
+  pod_name?: string; pod_namespace?: string; pod_ip?: string; host_network?: boolean | null;
+  node_name?: string; is_dead?: boolean;
+  pod_obj?: { metadata?: { labels?: Record<string, string> }; spec?: { nodeName?: string } };
+}
+
+function labelsContain(labels: Record<string, string> | undefined, selector: Record<string, string>): boolean {
+  return Object.entries(selector).every(([k, v]) => labels?.[k] === v);
+}
+
+/**
+ * Host-network identity for a Service, or null when none of its alive,
+ * selector-matching backing pods (same namespace) is host_network === true.
+ * Mirrors advisor hostNetworkServiceBackends/hostNetworkServiceComment: the
+ * node is the sorted, deduplicated node list (node_name, then
+ * pod_obj.spec.nodeName) of the host-network backends; empty ⇒ the generator
+ * falls back to the observed IP.
+ */
+export function hostNetworkServiceIdentity(
+  svc: { svc_name?: string; svc_namespace?: string; selector: Record<string, string> },
+  pods: BrokerPodListEntry[],
+): PeerIdentity | null {
+  if (!svc.svc_name || Object.keys(svc.selector).length === 0) return null;
+  const backends = pods.filter((p) =>
+    p && !p.is_dead && p.pod_namespace === svc.svc_namespace && p.host_network === true
+    && labelsContain(p.pod_obj?.metadata?.labels, svc.selector));
+  if (backends.length === 0) return null;
+  const nodes = [...new Set(backends.map((p) => p.node_name || p.pod_obj?.spec?.nodeName || "").filter(Boolean))].sort();
+  const backendIPs = [...new Set(backends.map((p) => p.pod_ip || "").filter(Boolean))].sort();
+  return { hostNetwork: true, namespace: svc.svc_namespace, service: svc.svc_name, selector: svc.selector, node: nodes.join(","), backendIPs };
 }
 
 // resolvePeer(ip) → identity, or null for an unresolvable/external IP.
@@ -33,7 +84,62 @@ export interface PodInfo {
   namespace: string;
   ip: string;
   labels: Record<string, string>;
+  // broker host_network for the TARGET pod: true ⇒ the policy is headed by a
+  // WARNING (no selector can select a host-network pod). null/undefined/false
+  // ⇒ unchanged output.
+  hostNetwork?: boolean | null;
+  workload?: string;
 }
+
+// YAML comments emitted beside a policy. The policy object cannot carry them,
+// so generators return them separately and policyToYAML splices them in.
+// Lines are stored without the leading "# ". Rule comments are keyed by the
+// index of the emitted rule in spec.ingress / spec.egress.
+export interface PolicyComments {
+  header: string[];
+  ingress: Record<number, string[]>;
+  egress: Record<number, string[]>;
+}
+
+export interface GeneratedPolicy {
+  policy: Record<string, unknown>;
+  comments: PolicyComments;
+}
+
+const newComments = (): PolicyComments => ({ header: [], ingress: {}, egress: {} });
+
+function addRuleComment(bucket: Record<number, string[]>, idx: number, line: string): void {
+  if (!line) return;
+  (bucket[idx] ??= []).push(line);
+}
+
+export function hasComments(c: PolicyComments | undefined): boolean {
+  return !!c && (c.header.length > 0 || Object.keys(c.ingress).length > 0 || Object.keys(c.egress).length > 0);
+}
+
+// ---- Host-network peers and targets ------------------------------------------
+//
+// Mirrors advisor pkg/network/hostnetwork.go: identical wording, identical
+// fallbacks, because the goldens pin the comment lines too.
+
+const hostWorkloadName = (workload: string | undefined, name: string | undefined): string => workload || name || "";
+
+function hostPeerComment(id: PeerIdentity, peerIP: string, selector: string): string {
+  const who = `${id.namespace ?? ""}/${id.service ? `svc/${id.service}` : hostWorkloadName(id.workload, id.podName)}`;
+  return `host-network peer ${who} on node ${id.node || peerIP} — ${selector} cannot match host traffic`;
+}
+
+function hostTargetWarning(pod: PodInfo, kind: string, selector: string): string[] {
+  return [
+    `WARNING: ${pod.namespace}/${hostWorkloadName(pod.workload, pod.name)} runs with hostNetwork: true. A ${kind} ${selector} cannot select`,
+    "host-network pods; this policy will have no effect. Use a CiliumClusterwideNetworkPolicy",
+    "with a nodeSelector (host firewall) instead.",
+  ];
+}
+
+// Both entities: `host` is the local node, `remote-node` every other node,
+// and the peer may sit on either.
+const HOST_ENTITIES = ["host", "remote-node"];
 
 interface Port { port: number; protocol: string }
 interface Rule { peerIP: string; ports: Port[] }
@@ -252,43 +358,76 @@ function peerCIDR(ip: string): string | null {
 
 // ---- Standard NetworkPolicy --------------------------------------------------
 
-async function standardPeer(ip: string, resolve: PeerResolver): Promise<Record<string, unknown> | null> {
+// standardPeer resolves one observed peer IP to its NetworkPolicy peer set.
+// Every path yields exactly one peer except a Service backed by host-network
+// pods, which yields one ipBlock per backend node IP (the post-DNAT
+// destinations — never the ClusterIP). null ⇒ drop the rule. `comment` is
+// non-empty only for host-network peers, which are pinned by node IP (no
+// namespaceSelector) because no podSelector can match them.
+async function standardPeer(ip: string, resolve: PeerResolver): Promise<{ peers: Record<string, unknown>[]; comment: string } | null> {
   const id = await resolve(ip);
+  if (id?.hostNetwork === true) {
+    const comment = hostPeerComment(id, ip, "podSelector");
+    if (id.service) {
+      const cidrs = (id.backendIPs ?? []).map(peerCIDR).filter((c): c is string => c !== null);
+      return cidrs.length === 0 ? null : { peers: cidrs.map((cidr) => ({ ipBlock: { cidr } })), comment };
+    }
+    const cidr = peerCIDR(ip);
+    return cidr === null ? null : { peers: [{ ipBlock: { cidr } }], comment };
+  }
   if (id && id.selector && Object.keys(id.selector).length > 0) {
     return {
-      podSelector: { matchLabels: id.selector },
-      namespaceSelector: { matchLabels: { "kubernetes.io/metadata.name": id.namespace ?? "" } },
+      peers: [{
+        podSelector: { matchLabels: id.selector },
+        namespaceSelector: { matchLabels: { "kubernetes.io/metadata.name": id.namespace ?? "" } },
+      }],
+      comment: "",
     };
   }
   const cidr = peerCIDR(ip);
-  return cidr === null ? null : { ipBlock: { cidr } };
+  return cidr === null ? null : { peers: [{ ipBlock: { cidr } }], comment: "" };
 }
 
-async function standardRules(rules: Rule[], resolve: PeerResolver, key: "from" | "to"): Promise<unknown[]> {
+async function standardRules(
+  rules: Rule[], resolve: PeerResolver, key: "from" | "to", comments: Record<number, string[]>,
+): Promise<unknown[]> {
   const out: unknown[] = [];
   for (const r of sortedPeers(rules)) {
-    const peer = await standardPeer(r.peerIP, resolve);
-    if (peer === null) continue; // unparseable peer IP - see peerCIDR
+    const resolved = await standardPeer(r.peerIP, resolve);
+    if (resolved === null) continue; // unparseable peer IP - see peerCIDR
+    addRuleComment(comments, out.length, resolved.comment);
     out.push({
-      [key]: [peer],
+      [key]: resolved.peers,
       ports: dedupePorts(r.ports).map((p) => ({ protocol: p.protocol, port: p.port })),
     });
   }
   return out;
 }
 
+/** generateNetworkPolicy without the comments — kept for existing callers. */
 export async function generateNetworkPolicy(
   pod: PodInfo, traffic: TrafficRow[], resolve: PeerResolver,
 ): Promise<Record<string, unknown>> {
+  return (await generateNetworkPolicyWithComments(pod, traffic, resolve)).policy;
+}
+
+export async function generateNetworkPolicyWithComments(
+  pod: PodInfo, traffic: TrafficRow[], resolve: PeerResolver,
+): Promise<GeneratedPolicy> {
   const { ingress, egress } = processTrafficRules(traffic, pod);
+  const comments = newComments();
+  if (pod.hostNetwork === true) comments.header.push(...hostTargetWarning(pod, "NetworkPolicy", "podSelector"));
 
   if (ingress.length === 0 && egress.length === 0) {
     return {
-      apiVersion: "networking.k8s.io/v1", kind: "NetworkPolicy",
-      metadata: { name: `${pod.name}-standard-policy-deny-all`, namespace: pod.namespace, labels: standardLabels(pod.name, "standard-policy-deny-all") },
-      // No empty ingress/egress arrays: the advisor's Go type omitempties them,
-      // so the emitted YAML carries only policyTypes for a default-deny.
-      spec: { podSelector: { matchLabels: pod.labels }, policyTypes: ["Ingress", "Egress"] },
+      policy: {
+        apiVersion: "networking.k8s.io/v1", kind: "NetworkPolicy",
+        metadata: { name: `${pod.name}-standard-policy-deny-all`, namespace: pod.namespace, labels: standardLabels(pod.name, "standard-policy-deny-all") },
+        // No empty ingress/egress arrays: the advisor's Go type omitempties them,
+        // so the emitted YAML carries only policyTypes for a default-deny.
+        spec: { podSelector: { matchLabels: pod.labels }, policyTypes: ["Ingress", "Egress"] },
+      },
+      comments,
     };
   }
 
@@ -300,20 +439,23 @@ export async function generateNetworkPolicy(
   // the advisor's omitempty serialization.
   if (ingress.length > 0) {
     types.push("Ingress");
-    const rules = await standardRules(ingress, resolve, "from");
+    const rules = await standardRules(ingress, resolve, "from", comments.ingress);
     if (rules.length > 0) spec.ingress = rules;
   }
   if (egress.length > 0) {
     types.push("Egress");
-    const rules = await standardRules(egress, resolve, "to");
+    const rules = await standardRules(egress, resolve, "to", comments.egress);
     if (rules.length > 0) spec.egress = rules;
   }
   spec.policyTypes = types;
 
   return {
-    apiVersion: "networking.k8s.io/v1", kind: "NetworkPolicy",
-    metadata: { name: `${pod.name}-standard-policy`, namespace: pod.namespace, labels: standardLabels(pod.name, "standard-policy") },
-    spec,
+    policy: {
+      apiVersion: "networking.k8s.io/v1", kind: "NetworkPolicy",
+      metadata: { name: `${pod.name}-standard-policy`, namespace: pod.namespace, labels: standardLabels(pod.name, "standard-policy") },
+      spec,
+    },
+    comments,
   };
 }
 
@@ -322,45 +464,84 @@ export async function generateNetworkPolicy(
 const k8sPrefixed = (labels: Record<string, string>): Record<string, string> =>
   Object.fromEntries(Object.entries(labels).map(([k, v]) => [`k8s:${k}`, v]));
 
-async function ciliumPeer(ip: string, resolve: PeerResolver): Promise<{ endpoints?: unknown[]; cidr?: string[] }> {
+// Exactly one of endpoints / entities / cidr is set; none when the IP is
+// unparseable (ciliumRules drops the rule, since a Cilium rule with no peer
+// field selects ALL peers). `comment` is set only for host-network peers.
+interface CiliumPeer { endpoints?: unknown[]; entities?: string[]; cidr?: string[]; comment: string }
+
+async function ciliumPeer(ip: string, resolve: PeerResolver): Promise<CiliumPeer> {
   const id = await resolve(ip);
-  if (id && id.selector && Object.keys(id.selector).length > 0) {
-    return { endpoints: [{ matchLabels: k8sPrefixed(id.selector) }] };
+  if (id?.hostNetwork === true) {
+    // A host-network pod is not a Cilium endpoint; it carries the node's
+    // identity. Select that identity rather than labels nothing will match.
+    return { entities: [...HOST_ENTITIES], comment: hostPeerComment(id, ip, "endpointSelector") };
   }
-  // Neither key set when the IP is unparseable; ciliumRules drops the rule,
-  // since a Cilium rule with no peer field selects ALL peers.
+  if (id && id.selector && Object.keys(id.selector).length > 0) {
+    return { endpoints: [{ matchLabels: k8sPrefixed(id.selector) }], comment: "" };
+  }
   const cidr = peerCIDR(ip);
-  return cidr === null ? {} : { cidr: [cidr] };
+  return cidr === null ? { comment: "" } : { cidr: [cidr], comment: "" };
 }
 
-async function ciliumRules(rules: Rule[], resolve: PeerResolver, dir: "ingress" | "egress"): Promise<unknown[]> {
+const portsKey = (ports: Port[]): string => ports.map((p) => `${p.port}/${p.protocol}`).join(",");
+
+// Host-network peers collapse into ONE entities rule per distinct port list
+// (the entities already cover every node): the rule sits where the first such
+// peer fell in sorted-IP order, and later same-port peers only add their
+// comment line to it. Mirrors transformToCilium{Ingress,Egress}Rules in Go.
+async function ciliumRules(
+  rules: Rule[], resolve: PeerResolver, dir: "ingress" | "egress", comments: Record<number, string[]>,
+): Promise<unknown[]> {
   const out: unknown[] = [];
+  const entityRuleByPorts = new Map<string, number>();
   for (const r of sortedPeers(rules)) {
     const peer = await ciliumPeer(r.peerIP, resolve);
     const rule: Record<string, unknown> = {};
     const epKey = dir === "ingress" ? "fromEndpoints" : "toEndpoints";
+    const entKey = dir === "ingress" ? "fromEntities" : "toEntities";
     const cidrKey = dir === "ingress" ? "fromCIDR" : "toCIDR";
+    const ports = dedupePorts(r.ports);
     if (peer.endpoints) rule[epKey] = peer.endpoints;
+    else if (peer.entities) {
+      const key = portsKey(ports);
+      const existing = entityRuleByPorts.get(key);
+      if (existing !== undefined) { addRuleComment(comments, existing, peer.comment); continue; }
+      entityRuleByPorts.set(key, out.length);
+      rule[entKey] = peer.entities;
+    }
     else if (peer.cidr) rule[cidrKey] = peer.cidr;
     else continue;
-    rule.toPorts = [{ ports: dedupePorts(r.ports).map((p) => ({ port: String(p.port), protocol: p.protocol })) }];
+    rule.toPorts = [{ ports: ports.map((p) => ({ port: String(p.port), protocol: p.protocol })) }];
+    addRuleComment(comments, out.length, peer.comment);
     out.push(rule);
   }
   return out;
 }
 
+/** generateCiliumPolicy without the comments — kept for existing callers. */
 export async function generateCiliumPolicy(
   pod: PodInfo, traffic: TrafficRow[], resolve: PeerResolver,
 ): Promise<Record<string, unknown>> {
+  return (await generateCiliumPolicyWithComments(pod, traffic, resolve)).policy;
+}
+
+export async function generateCiliumPolicyWithComments(
+  pod: PodInfo, traffic: TrafficRow[], resolve: PeerResolver,
+): Promise<GeneratedPolicy> {
   const { ingress, egress } = processTrafficRules(traffic, pod);
   const endpointSelector = { matchLabels: k8sPrefixed(pod.labels) };
+  const comments = newComments();
+  if (pod.hostNetwork === true) comments.header.push(...hostTargetWarning(pod, "CiliumNetworkPolicy", "endpointSelector"));
 
   if (ingress.length === 0 && egress.length === 0) {
     return {
-      apiVersion: "cilium.io/v2", kind: "CiliumNetworkPolicy",
-      metadata: { name: `${pod.name}-cilium-policy-deny-all`, namespace: pod.namespace, labels: standardLabels(pod.name, "cilium-policy-deny-all") },
-      spec: { endpointSelector, description: `Default-deny Cilium network policy for pod ${pod.name}`, enableDefaultDeny: { ingress: true, egress: true } },
-      status: {},
+      policy: {
+        apiVersion: "cilium.io/v2", kind: "CiliumNetworkPolicy",
+        metadata: { name: `${pod.name}-cilium-policy-deny-all`, namespace: pod.namespace, labels: standardLabels(pod.name, "cilium-policy-deny-all") },
+        spec: { endpointSelector, description: `Default-deny Cilium network policy for pod ${pod.name}`, enableDefaultDeny: { ingress: true, egress: true } },
+        status: {},
+      },
+      comments,
     };
   }
 
@@ -371,18 +552,37 @@ export async function generateCiliumPolicy(
   // As above, an empty list is omitted rather than emitted - only reachable
   // when every peer in the direction had an unparseable IP.
   if (ingress.length > 0) {
-    const rules = await ciliumRules(ingress, resolve, "ingress");
+    const rules = await ciliumRules(ingress, resolve, "ingress", comments.ingress);
     if (rules.length > 0) spec.ingress = rules;
   }
   if (egress.length > 0) {
-    const rules = await ciliumRules(egress, resolve, "egress");
+    const rules = await ciliumRules(egress, resolve, "egress", comments.egress);
     if (rules.length > 0) spec.egress = rules;
   }
 
-  return { apiVersion: "cilium.io/v2", kind: "CiliumNetworkPolicy", metadata: { name: `${pod.name}-cilium-policy`, namespace: pod.namespace, labels: standardLabels(pod.name, "cilium-policy") }, spec, status: {} };
+  return {
+    policy: { apiVersion: "cilium.io/v2", kind: "CiliumNetworkPolicy", metadata: { name: `${pod.name}-cilium-policy`, namespace: pod.namespace, labels: standardLabels(pod.name, "cilium-policy") }, spec, status: {} },
+    comments,
+  };
 }
 
-/** Serialize a generated policy object to YAML for the tool response. */
-export function policyToYAML(policy: Record<string, unknown>): string {
-  return stringify(policy);
+/**
+ * Serialize a generated policy object to YAML for the tool response. With no
+ * comments this is exactly `stringify(policy)` (the pre-existing output);
+ * otherwise the comments are attached to the document / rule nodes so the
+ * emitter renders them as `# ...` lines above the header / rule.
+ */
+export function policyToYAML(policy: Record<string, unknown>, comments?: PolicyComments): string {
+  if (!hasComments(comments)) return stringify(policy);
+  const c = comments as PolicyComments;
+  const doc = new Document(policy);
+  const asComment = (lines: string[]) => lines.map((l) => ` ${l}`).join("\n");
+  if (c.header.length > 0) doc.commentBefore = asComment(c.header);
+  for (const dir of ["ingress", "egress"] as const) {
+    for (const [idx, lines] of Object.entries(c[dir])) {
+      const node = doc.getIn(["spec", dir, Number(idx)], true);
+      if (isNode(node)) node.commentBefore = asComment(lines);
+    }
+  }
+  return doc.toString();
 }

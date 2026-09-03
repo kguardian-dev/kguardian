@@ -27,7 +27,8 @@ empty-PK row from polluting the table.
     "app.kubernetes.io/component": "frontend"
   },
   "pod_obj": { "spec": { "...": "full pod spec" } },
-  "time_stamp": "2026-05-12T10:32:14.123456"
+  "time_stamp": "2026-05-12T10:32:14.123456",
+  "host_network": false
 }
 ```
 
@@ -35,6 +36,14 @@ empty-PK row from polluting the table.
 controller's `extract_pod_identity_and_selectors` helper (priority:
 `app.kubernetes.io/name` → `app.kubernetes.io/component` → `k8s-app`
 → owner-reference walk to Deployment/StatefulSet/DaemonSet).
+
+`host_network` mirrors `spec.hostNetwork` and is the last field of the
+record. It is optional on ingest (older controllers omit it; the broker
+then derives it from `pod_obj.spec.hostNetwork`) and always present on
+read as `true`, `false`, or `null` when unknown. Generators use it to
+render host-network peers as `ipBlock` / Cilium entities instead of a
+`podSelector` — see
+[Host-network peers and targets](/guides/generating-network-policies#host-network-peers-and-targets).
 
 ## POST /pod/mark_dead
 

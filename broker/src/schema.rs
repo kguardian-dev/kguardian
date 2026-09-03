@@ -35,6 +35,12 @@ diesel::table! {
         // capture completeness (CaptureComplete condition, export
         // warning, drift). Positional — stays last.
         capture_level -> Nullable<Varchar>,
+        // spec.hostNetwork of the pod; NULL = unknown / older
+        // controller with no manifest to derive it from. A host-network
+        // pod's IP is the node IP, so generators render node-IP peers
+        // as ipBlock / host entities instead of a podSelector.
+        // Positional — stays last.
+        host_network -> Nullable<Bool>,
     }
 }
 

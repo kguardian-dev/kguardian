@@ -1,5 +1,46 @@
 # Upgrading the kguardian Helm chart
 
+## Node-IP traffic is now recorded; host-network peers render as `ipBlock` / entities
+
+Controllers up to 1.11.0 with `controller.ignoreDaemonSet: true` (the default)
+put every DaemonSet pod IP into the eBPF ignore list. Host-network
+DaemonSets (node-exporter, the kguardian controller itself, most CNIs) have
+the node's IP as their pod IP, so every node IP was ignored and **no**
+pod-to-node flow was ever recorded: kubelet `:10250`, node-exporter
+`:9100`, etcd `:2381`, the API server on `:6443` on control-plane nodes.
+Policies generated for anything that scrapes or probes nodes were missing
+those rules and broke on apply.
+
+The controller now skips host-network DaemonSet pods (they are still not
+registered with the probe) without ignoring their IP, and excluded
+namespaces are checked before the ignore list is touched. `ignoreDaemonSet`
+keeps its default and its meaning: DaemonSet pods' own traffic is not
+recorded.
+
+**After upgrading the controller:**
+
+1. Node-IP flows start appearing in the broker and the UI. Expect the
+   `pod_traffic` table to grow for monitoring, logging and service-mesh
+   workloads.
+2. Regenerate policies for any workload that talks to nodes (Prometheus,
+   metrics agents, anything hitting kubelet or the API server via a node
+   IP) after a fresh observation window. The new rules render as
+   `ipBlock: {cidr: <node IP>/32}` on Kubernetes NetworkPolicies and
+   `toEntities: [host, remote-node]` on CiliumNetworkPolicies, because a
+   `podSelector` cannot match host-network traffic. Scope differs: the
+   `ipBlock` names one node IP (the pod's own node is always allowed by the
+   NetworkPolicy spec; enforcement for remote node IPs is CNI-specific),
+   while the Cilium entities rule admits the port on every node, since
+   Cilium does not apply CIDR rules to node IPs. See
+   [Host-network peers and targets](https://kguardian.dev/guides/generating-network-policies#host-network-peers-and-targets).
+3. Upgrade the broker alongside the controller. The controller reports
+   `host_network` in the pod payload; an old broker has no column for it,
+   so every generator falls back to the previous (ineffective)
+   `podSelector` rendering for host-network peers. A new broker with an old
+   controller derives the value from the stored pod manifest, so rendering
+   is correct, but the node-IP flows themselves are still not captured
+   until the controller is upgraded.
+
 ## Seccomp: capture tiers, and distribution is now driven by a `SeccompProfile` CRD
 
 This release changes what the controller traces by default and how a seccomp

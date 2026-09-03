@@ -405,9 +405,10 @@ func TestResolvePeerForCilium_HostCIDRPerAddressFamily(t *testing.T) {
 		{name: "empty peer yields no selector", ip: "", want: nil},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			endpoints, cidrs := gen.resolvePeerForCilium(tc.ip)
-			assert.Nil(t, endpoints, "unresolvable peers must not produce an endpoint selector")
-			assert.Equal(t, tc.want, cidrs)
+			peer := gen.resolvePeerForCilium(tc.ip)
+			assert.Nil(t, peer.endpoints, "unresolvable peers must not produce an endpoint selector")
+			assert.Nil(t, peer.entities, "unresolvable peers must not produce entities")
+			assert.Equal(t, tc.want, peer.cidr)
 		})
 	}
 }

@@ -1,0 +1,35 @@
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  labels:
+    app.kubernetes.io/component: standard-policy
+    app.kubernetes.io/name: prometheus
+    app.kubernetes.io/part-of: kguardian
+  name: prometheus-standard-policy
+  namespace: monitoring
+spec:
+  egress:
+  - ports:
+    - port: 5432
+      protocol: TCP
+    to:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: prod
+      podSelector:
+        matchLabels:
+          app: db
+  # host-network peer monitoring/svc/node-exporter on node worker-1,worker-2 — podSelector cannot match host traffic
+  - ports:
+    - port: 9100
+      protocol: TCP
+    to:
+    - ipBlock:
+        cidr: 192.168.50.101/32
+    - ipBlock:
+        cidr: 192.168.50.102/32
+  podSelector:
+    matchLabels:
+      app: prometheus
+  policyTypes:
+  - Egress

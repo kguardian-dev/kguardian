@@ -198,6 +198,7 @@ mod tests {
             workload_kind: None,
             workload_name: None,
             capture_level: None,
+            host_network: false,
         }
     }
 

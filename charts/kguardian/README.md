@@ -151,7 +151,7 @@ The following table lists the configurable parameters of the kguardian chart and
 | controller.containerdSockPath | string | `"/run/containerd/containerd.sock"` | Path to the containerd socket on the host node. For k3s clusters, set to: /run/k3s/containerd/containerd.sock |
 | controller.excludedNamespaces | list | `["kguardian","kube-system"]` | Namespaces to be excluded from monitoring (comma-separated list) |
 | controller.fullnameOverride | string | `""` | Override the full name of the controller resources |
-| controller.ignoreDaemonSet | bool | `true` | Ignore traffic from daemonset pods to reduce noise |
+| controller.ignoreDaemonSet | bool | `true` | Skip DaemonSet pods: their network namespaces are not registered with the eBPF probe, so their own flows are never recorded (log shippers, CNI agents, node-exporter are noise for policy generation). Host-network DaemonSet pods share the node's IP; those pods are still skipped, but their IP is never added to the probe's ignore list, so traffic from any pod TO a node IP (kubelet :10250, node-exporter :9100, etcd :2381, apiserver :6443) is recorded and shows up in generated policies. Controllers up to 1.11.0 ignored the node IP as well, which silently dropped every pod-to-node flow. |
 | controller.image.pullPolicy | string | `"IfNotPresent"` | Controller image pull policy |
 | controller.image.repository | string | `"ghcr.io/kguardian-dev/kguardian/controller"` | Controller container image repository |
 | controller.image.sha | string | `""` | Overrides the image tag using SHA digest |

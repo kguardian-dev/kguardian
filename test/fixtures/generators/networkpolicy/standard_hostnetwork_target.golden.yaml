@@ -1,0 +1,29 @@
+# WARNING: monitoring/node-exporter runs with hostNetwork: true. A NetworkPolicy podSelector cannot select
+# host-network pods; this policy will have no effect. Use a CiliumClusterwideNetworkPolicy
+# with a nodeSelector (host firewall) instead.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  labels:
+    app.kubernetes.io/component: standard-policy
+    app.kubernetes.io/name: node-exporter-abc12
+    app.kubernetes.io/part-of: kguardian
+  name: node-exporter-abc12-standard-policy
+  namespace: monitoring
+spec:
+  ingress:
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: monitoring
+      podSelector:
+        matchLabels:
+          app: prometheus
+    ports:
+    - port: 9100
+      protocol: TCP
+  podSelector:
+    matchLabels:
+      app: node-exporter
+  policyTypes:
+  - Ingress

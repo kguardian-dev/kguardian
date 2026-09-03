@@ -79,7 +79,11 @@ type PolicyGenerator interface {
 
 // PolicyOutput represents the output of policy generation
 type PolicyOutput struct {
-	Policy    interface{}
+	Policy interface{}
+	// Comments are the YAML comments already spliced into YAML (nil when
+	// the generator had nothing to explain). Kept for callers that render
+	// the policy themselves.
+	Comments  *PolicyComments
 	YAML      []byte
 	PodName   string
 	Namespace string

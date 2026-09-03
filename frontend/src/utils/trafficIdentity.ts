@@ -1,4 +1,5 @@
 import { apiClient } from '../services/api';
+import { specNodeName } from './hostNetwork';
 
 export interface TrafficIdentity {
   podName?: string;
@@ -7,6 +8,14 @@ export interface TrafficIdentity {
   svcName?: string;
   svcNamespace?: string;
   svcSelector?: Record<string, string>;
+  /** `pod.spec.hostNetwork` of the resolved pod. `true` means the peer IP is a
+   *  NODE IP and no podSelector can match it; undefined when the broker did
+   *  not report it (legacy) or the peer is a Service / external. */
+  hostNetwork?: boolean;
+  /** Node the resolved pod runs on — used only to annotate host-network peers. */
+  nodeName?: string;
+  /** Owning workload name (Deployment/DaemonSet/...) when the broker knows it. */
+  workloadName?: string;
   isExternal: boolean;
 }
 
@@ -47,6 +56,9 @@ export async function resolveTrafficIdentity(ip: string): Promise<TrafficIdentit
         podName: podInfo.pod_name,
         podNamespace: podInfo.pod_namespace || undefined,
         podLabels,
+        hostNetwork: typeof podInfo.host_network === 'boolean' ? podInfo.host_network : undefined,
+        nodeName: podInfo.node_name || specNodeName(podInfo) || undefined,
+        workloadName: podInfo.workload_name || undefined,
         isExternal: false,
       };
     }

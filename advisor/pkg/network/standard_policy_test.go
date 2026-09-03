@@ -5,6 +5,7 @@ import (
 
 	"github.com/kguardian-dev/kguardian/advisor/pkg/api"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -530,7 +531,7 @@ func TestTransformToNetworkPolicyIngressRules_DeterministicPeerOrdering(t *testi
 
 	gen := &StandardPolicyGenerator{}
 
-	first := gen.transformToNetworkPolicyIngressRules(rules)
+	first := gen.transformToNetworkPolicyIngressRules(rules, nil)
 	assert.Len(t, first, 5)
 	want := []string{"1.1.1.1/32", "2.2.2.2/32", "4.4.4.4/32", "8.8.8.8/32", "9.9.9.9/32"}
 	for i, w := range want {
@@ -539,7 +540,7 @@ func TestTransformToNetworkPolicyIngressRules_DeterministicPeerOrdering(t *testi
 	}
 
 	for run := 0; run < 20; run++ {
-		got := gen.transformToNetworkPolicyIngressRules(rules)
+		got := gen.transformToNetworkPolicyIngressRules(rules, nil)
 		assert.Equal(t, len(first), len(got), "run %d: length differs", run)
 		for i := range got {
 			assert.Equal(t, first[i].From[0].IPBlock.CIDR, got[i].From[0].IPBlock.CIDR,
@@ -560,7 +561,7 @@ func TestTransformToNetworkPolicyEgressRules_DeterministicPeerOrdering(t *testin
 		{PeerIP: "10.0.0.2", Ports: []networkingv1.NetworkPolicyPort{{Port: &p443, Protocol: &tcp}}},
 	}
 	gen := &StandardPolicyGenerator{}
-	first := gen.transformToNetworkPolicyEgressRules(rules)
+	first := gen.transformToNetworkPolicyEgressRules(rules, nil)
 	want := []string{"10.0.0.1/32", "10.0.0.2/32", "10.0.0.3/32", "10.0.0.5/32"}
 	for i, w := range want {
 		assert.NotNil(t, first[i].To[0].IPBlock, "rule %d: To[0].IPBlock should be set", i)
@@ -568,7 +569,7 @@ func TestTransformToNetworkPolicyEgressRules_DeterministicPeerOrdering(t *testin
 	}
 
 	for run := 0; run < 20; run++ {
-		got := gen.transformToNetworkPolicyEgressRules(rules)
+		got := gen.transformToNetworkPolicyEgressRules(rules, nil)
 		for i := range got {
 			assert.Equal(t, first[i].To[0].IPBlock.CIDR, got[i].To[0].IPBlock.CIDR,
 				"run %d index %d: peer ordering must match", run, i)
@@ -681,11 +682,13 @@ func TestCreateNetworkPolicyPeer_HostCIDRPerAddressFamily(t *testing.T) {
 		{name: "empty peer is skipped", ip: "", isNil: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			peer := gen.createNetworkPolicyPeer(tc.ip)
+			peers, _ := gen.createNetworkPolicyPeers(tc.ip)
 			if tc.isNil {
-				assert.Nil(t, peer, "peer %q must be skipped, not emitted", tc.ip)
+				assert.Empty(t, peers, "peer %q must be skipped, not emitted", tc.ip)
 				return
 			}
+			require.Len(t, peers, 1)
+			peer := &peers[0]
 			if assert.NotNil(t, peer) && assert.NotNil(t, peer.IPBlock) {
 				assert.Equal(t, tc.want, peer.IPBlock.CIDR)
 			}
@@ -709,12 +712,12 @@ func TestTransformToNetworkPolicyRules_SkipsUnparseablePeer(t *testing.T) {
 	gen := NewStandardPolicyGenerator()
 	gen.setBrokerData(stubBrokerData{})
 
-	ingress := gen.transformToNetworkPolicyIngressRules(rules)
+	ingress := gen.transformToNetworkPolicyIngressRules(rules, nil)
 	assert.Len(t, ingress, 2, "the unparseable peer must be dropped, the other two kept")
 	assert.Equal(t, "10.0.0.5/32", ingress[0].From[0].IPBlock.CIDR)
 	assert.Equal(t, "fd00::5/128", ingress[1].From[0].IPBlock.CIDR)
 
-	egress := gen.transformToNetworkPolicyEgressRules(rules)
+	egress := gen.transformToNetworkPolicyEgressRules(rules, nil)
 	assert.Len(t, egress, 2, "the unparseable peer must be dropped, the other two kept")
 	assert.Equal(t, "10.0.0.5/32", egress[0].To[0].IPBlock.CIDR)
 	assert.Equal(t, "fd00::5/128", egress[1].To[0].IPBlock.CIDR)

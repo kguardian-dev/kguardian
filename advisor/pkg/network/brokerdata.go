@@ -14,6 +14,10 @@ type BrokerData interface {
 	PodByIP(ip string) (*api.PodDetail, error)
 	// ServiceByIP resolves a peer IP to a service (nil, nil if not a known svc).
 	ServiceByIP(ip string) (*api.SvcDetail, error)
+	// Pods lists every known pod (nil, nil when none). Used to find the pods
+	// backing a Service so a Service fronting host-network pods is rendered
+	// as a host-network peer.
+	Pods() ([]api.PodDetail, error)
 }
 
 // apiBrokerData is the default BrokerData, backed by the api package's
@@ -27,6 +31,7 @@ func (apiBrokerData) PodTrafficByName(name string) ([]api.PodTraffic, error) {
 }
 func (apiBrokerData) PodByIP(ip string) (*api.PodDetail, error)     { return api.GetPodSpec(ip) }
 func (apiBrokerData) ServiceByIP(ip string) (*api.SvcDetail, error) { return api.GetSvcSpec(ip) }
+func (apiBrokerData) Pods() ([]api.PodDetail, error)                { return api.GetPods() }
 
 // DefaultBrokerData returns the api-backed BrokerData used when none is injected.
 func DefaultBrokerData() BrokerData { return apiBrokerData{} }

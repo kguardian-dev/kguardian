@@ -262,6 +262,19 @@ pub struct PodDetail {
     /// never as complete. Always `Some` when this controller posts.
     #[serde(default)]
     pub capture_level: Option<String>,
+    /// `spec.hostNetwork`. A host-network pod's address IS the node
+    /// address, so a peer that resolves to one cannot be expressed as
+    /// a `podSelector` (the CNI sees node identity, not pod identity);
+    /// policy generators render such peers as an `ipBlock` / Cilium
+    /// `host`/`remote-node` entities instead. Always set when this
+    /// controller posts. Last field by the positional-order convention.
+    ///
+    /// `null_tolerant`: the broker column is nullable (rows from an
+    /// older controller) and its `Option<bool>` comes back over the
+    /// wire as an explicit `null`, which a bare `#[serde(default)]`
+    /// rejects — the same whole-list failure `pod_ips` guards against.
+    #[serde(default, deserialize_with = "null_tolerant")]
+    pub host_network: bool,
 }
 
 #[derive(Debug, Default, Serialize)]
@@ -374,6 +387,56 @@ mod tests {
         let d: PodDetail =
             serde_json::from_str(&pod_detail_json(r#","capture_level":null"#)).unwrap();
         assert_eq!(d.capture_level, None);
+    }
+
+    #[test]
+    fn host_network_absent_or_null_deserialises_to_false() {
+        // /pod/list from an older broker has no host_network column;
+        // a newer broker with a NULL row (older controller) sends null.
+        let d: PodDetail = serde_json::from_str(&pod_detail_json("")).unwrap();
+        assert!(!d.host_network);
+        let d: PodDetail =
+            serde_json::from_str(&pod_detail_json(r#","host_network":null"#)).unwrap();
+        assert!(!d.host_network);
+        let d: PodDetail =
+            serde_json::from_str(&pod_detail_json(r#","host_network":true"#)).unwrap();
+        assert!(d.host_network);
+    }
+
+    fn pod_detail(host_network: bool) -> PodDetail {
+        PodDetail {
+            pod_ip: "10.0.0.1".into(),
+            pod_ips: vec!["10.0.0.1".into()],
+            pod_name: "web".into(),
+            pod_namespace: Some("prod".into()),
+            pod_obj: None,
+            time_stamp: NaiveDateTime::default(),
+            node_name: "node-a".into(),
+            is_dead: false,
+            pod_identity: None,
+            workload_selector_labels: None,
+            workload_kind: None,
+            workload_name: None,
+            capture_level: Some("full".into()),
+            host_network,
+        }
+    }
+
+    #[test]
+    fn host_network_is_serialised_as_a_boolean_and_is_the_last_key() {
+        // Wire contract with the broker: key name, plain boolean (never
+        // null from this side), and LAST in positional order — the
+        // broker's diesel Insertable is positional, so a field added
+        // anywhere else silently shifts every later column.
+        for hn in [true, false] {
+            let v = serde_json::to_value(pod_detail(hn)).unwrap();
+            assert_eq!(v["host_network"], serde_json::Value::Bool(hn));
+            let s = serde_json::to_string(&pod_detail(hn)).unwrap();
+            assert!(
+                s.ends_with(&format!(r#""host_network":{hn}}}"#)),
+                "host_network must be the last key: {s}"
+            );
+        }
     }
 
     #[test]

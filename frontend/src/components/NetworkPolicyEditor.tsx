@@ -4,6 +4,7 @@ import type { PodNodeData } from '../types';
 import type { SeccompAction } from '../types/seccompProfile';
 import { policyToYAML } from '../utils/networkPolicyGenerator';
 import { ciliumPolicyToYAML } from '../utils/ciliumPolicyGenerator';
+import { EntitiesPeer, HostNetworkWarningBanner, RuleComments } from './HostNetworkNotes';
 import { useClusterEnvironment } from '../hooks/useClusterEnvironment';
 import { CniMismatchNotice } from './PolicyEditor/CniMismatchNotice';
 import { PartialCaptureWarning } from './Seccomp/PartialCaptureWarning';
@@ -189,6 +190,11 @@ const NetworkPolicyEditor: React.FC<NetworkPolicyEditorProps> = ({ isOpen, onClo
           />
 
           {policyType === 'cilium' && cniMismatch && <CniMismatchNotice cni={cniMismatch} />}
+          {!isLoading && (
+            <HostNetworkWarningBanner
+              warnings={policyType === 'network' ? policy?.warnings : policyType === 'cilium' ? ciliumPolicy?.warnings : undefined}
+            />
+          )}
           {policyType === 'seccomp' && !isLoading && (
             <PartialCaptureWarning capture={seccompCapture} compact className="mx-6 mt-4 rounded-surface" />
           )}
@@ -327,6 +333,7 @@ const NetworkPolicyEditor: React.FC<NetworkPolicyEditorProps> = ({ isOpen, onClo
                             </button>
                           </div>
                           <div className="space-y-3">
+                            <RuleComments comments={rule.comments} />
                             <div>
                               <div className="flex items-center justify-between mb-2">
                                 <label className="text-xs font-medium text-secondary">From (Sources)</label>
@@ -780,6 +787,7 @@ const NetworkPolicyEditor: React.FC<NetworkPolicyEditorProps> = ({ isOpen, onClo
                             </button>
                           </div>
                           <div className="space-y-3">
+                            <RuleComments comments={rule.comments} />
                             <div>
                               <div className="flex items-center justify-between mb-2">
                                 <label className="text-xs font-medium text-secondary">To (Destinations)</label>
@@ -1392,6 +1400,8 @@ const NetworkPolicyEditor: React.FC<NetworkPolicyEditorProps> = ({ isOpen, onClo
                                   </button>
                                 </div>
                                 <div className="space-y-3">
+                                  <RuleComments comments={rule.comments} />
+                                  <EntitiesPeer label="From Entities" entities={rule.fromEntities} />
                                   {/* fromEndpoints */}
                                   <div>
                                     <div className="flex items-center justify-between mb-2">
@@ -1636,6 +1646,8 @@ const NetworkPolicyEditor: React.FC<NetworkPolicyEditorProps> = ({ isOpen, onClo
                                   </button>
                                 </div>
                                 <div className="space-y-3">
+                                  <RuleComments comments={rule.comments} />
+                                  <EntitiesPeer label="To Entities" entities={rule.toEntities} />
                                   {/* toEndpoints */}
                                   <div>
                                     <div className="flex items-center justify-between mb-2">

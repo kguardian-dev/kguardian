@@ -45,17 +45,35 @@ func (g *StandardPolicyGenerator) GetType() PolicyType {
 	return StandardPolicy
 }
 
-// Generate creates a NetworkPolicy for the specified pod
+// Generate creates a NetworkPolicy for the specified pod. It is
+// GenerateWithComments minus the comments — kept for the PolicyGenerator
+// interface and existing callers.
 func (g *StandardPolicyGenerator) Generate(podName string, podTraffic []api.PodTraffic, podDetail *api.PodDetail) (interface{}, error) {
+	policy, _, err := g.GenerateWithComments(podName, podTraffic, podDetail)
+	return policy, err
+}
+
+// GenerateWithComments creates a NetworkPolicy for the specified pod together
+// with the YAML comments that explain host-network peers and targets (see
+// hostnetwork.go). The returned comments are empty for a policy with no
+// host-network involvement, so MarshalPolicyYAML emits exactly yaml.Marshal.
+func (g *StandardPolicyGenerator) GenerateWithComments(podName string, podTraffic []api.PodTraffic, podDetail *api.PodDetail) (interface{}, *PolicyComments, error) {
 	log.Info().Msgf("Generating standard network policy for pod %s", podName)
 
 	if podDetail == nil {
-		return nil, fmt.Errorf("pod detail is nil for pod %s", podName)
+		return nil, nil, fmt.Errorf("pod detail is nil for pod %s", podName)
 	}
+
+	comments := &PolicyComments{}
+	if isHostNetwork(podDetail) {
+		log.Warn().Msgf("Pod %s/%s runs with hostNetwork: true; a NetworkPolicy podSelector cannot select it", podDetail.Namespace, podDetail.Name)
+		comments.addHeader(hostNetworkTargetWarning(podDetail, "NetworkPolicy", "podSelector")...)
+	}
+
 	if len(podTraffic) == 0 {
 		// If there's no traffic, generate a default-deny policy
 		log.Warn().Msgf("No traffic data available for pod %s. Generating a default-deny policy.", podName)
-		return g.generateDefaultDenyPolicy(podDetail), nil
+		return g.generateDefaultDenyPolicy(podDetail), comments, nil
 	}
 
 	// Group traffic by ingress/egress
@@ -80,22 +98,22 @@ func (g *StandardPolicyGenerator) Generate(podName string, podTraffic []api.PodT
 	// Add ingress rules if any
 	if len(ingressRules) > 0 {
 		policy.Spec.PolicyTypes = append(policy.Spec.PolicyTypes, networkingv1.PolicyTypeIngress)
-		policy.Spec.Ingress = g.transformToNetworkPolicyIngressRules(ingressRules)
+		policy.Spec.Ingress = g.transformToNetworkPolicyIngressRules(ingressRules, comments)
 	}
 
 	// Add egress rules if any
 	if len(egressRules) > 0 {
 		policy.Spec.PolicyTypes = append(policy.Spec.PolicyTypes, networkingv1.PolicyTypeEgress)
-		policy.Spec.Egress = g.transformToNetworkPolicyEgressRules(egressRules)
+		policy.Spec.Egress = g.transformToNetworkPolicyEgressRules(egressRules, comments)
 	}
 
 	// If no rules were added (e.g., only traffic to self or unidentifiable IPs), make it default deny
 	if len(policy.Spec.PolicyTypes) == 0 {
 		log.Warn().Msgf("No valid ingress or egress rules generated for pod %s. Applying default-deny.", podName)
-		return g.generateDefaultDenyPolicy(podDetail), nil
+		return g.generateDefaultDenyPolicy(podDetail), comments, nil
 	}
 
-	return policy, nil
+	return policy, comments, nil
 }
 
 // generateDefaultDenyPolicy creates a policy that denies all ingress and egress traffic
@@ -224,8 +242,10 @@ func (g *StandardPolicyGenerator) addOrUpdateRule(rules []NetworkPolicyRule, pee
 	return mergeOrAppendRule(rules, peer, port, protocolStr)
 }
 
-// transformToNetworkPolicyIngressRules converts our internal rules to K8s NetworkPolicyIngressRule
-func (g *StandardPolicyGenerator) transformToNetworkPolicyIngressRules(rules []NetworkPolicyRule) []networkingv1.NetworkPolicyIngressRule {
+// transformToNetworkPolicyIngressRules converts our internal rules to K8s
+// NetworkPolicyIngressRule. comments (nil-safe) receives one line per
+// host-network peer, keyed by the emitted rule's index.
+func (g *StandardPolicyGenerator) transformToNetworkPolicyIngressRules(rules []NetworkPolicyRule, comments *PolicyComments) []networkingv1.NetworkPolicyIngressRule {
 	var ingressRules []networkingv1.NetworkPolicyIngressRule
 
 	// Group rules by peer IP
@@ -242,12 +262,13 @@ func (g *StandardPolicyGenerator) transformToNetworkPolicyIngressRules(rules []N
 	// git-tracked policy review.
 	for _, peerIP := range sortedKeys(peerRules) {
 		ports := peerRules[peerIP]
-		peerPolicy := g.createNetworkPolicyPeer(peerIP)
-		if peerPolicy == nil { // Skip if peer could not be determined (e.g., internal error)
+		peers, comment := g.createNetworkPolicyPeers(peerIP)
+		if len(peers) == 0 { // Skip if peer could not be determined (e.g., internal error)
 			continue
 		}
+		comments.addIngress(len(ingressRules), comment)
 		ingressRules = append(ingressRules, networkingv1.NetworkPolicyIngressRule{
-			From:  []networkingv1.NetworkPolicyPeer{*peerPolicy},
+			From:  peers,
 			Ports: deduplicatePorts(ports),
 		})
 	}
@@ -255,8 +276,9 @@ func (g *StandardPolicyGenerator) transformToNetworkPolicyIngressRules(rules []N
 	return ingressRules
 }
 
-// transformToNetworkPolicyEgressRules converts our internal rules to K8s NetworkPolicyEgressRule
-func (g *StandardPolicyGenerator) transformToNetworkPolicyEgressRules(rules []NetworkPolicyRule) []networkingv1.NetworkPolicyEgressRule {
+// transformToNetworkPolicyEgressRules converts our internal rules to K8s
+// NetworkPolicyEgressRule. See the ingress sibling for comments.
+func (g *StandardPolicyGenerator) transformToNetworkPolicyEgressRules(rules []NetworkPolicyRule, comments *PolicyComments) []networkingv1.NetworkPolicyEgressRule {
 	var egressRules []networkingv1.NetworkPolicyEgressRule
 
 	// Group rules by peer IP
@@ -268,13 +290,14 @@ func (g *StandardPolicyGenerator) transformToNetworkPolicyEgressRules(rules []Ne
 	// Sorted iteration — see the ingress sibling for rationale.
 	for _, peerIP := range sortedKeys(peerRules) {
 		ports := peerRules[peerIP]
-		peerPolicy := g.createNetworkPolicyPeer(peerIP)
-		if peerPolicy == nil { // Skip if peer could not be determined
+		peers, comment := g.createNetworkPolicyPeers(peerIP)
+		if len(peers) == 0 { // Skip if peer could not be determined
 			continue
 		}
+		comments.addEgress(len(egressRules), comment)
 
 		egressRules = append(egressRules, networkingv1.NetworkPolicyEgressRule{
-			To:    []networkingv1.NetworkPolicyPeer{*peerPolicy},
+			To:    peers,
 			Ports: deduplicatePorts(ports),
 		})
 	}
@@ -296,10 +319,23 @@ func sortedKeys(m map[string][]networkingv1.NetworkPolicyPort) []string {
 	return keys
 }
 
-// createNetworkPolicyPeer determines the NetworkPolicyPeer based on the IP address.
-// It prioritizes Service selectors, then Pod selectors, then falls back to IPBlock.
-func (g *StandardPolicyGenerator) createNetworkPolicyPeer(peerIP string) *networkingv1.NetworkPolicyPeer {
+// createNetworkPolicyPeers determines the NetworkPolicyPeer set for one observed
+// peer IP. It prioritizes Service selectors, then Pod selectors, then falls
+// back to IPBlock. Every path yields exactly one peer except a Service backed
+// by host-network pods, which yields one ipBlock per backend node IP (the
+// post-DNAT destinations). An empty result means the rule must be dropped.
+//
+// The second return value is a YAML comment to render above the rule, or ""
+// — it is set only for host-network peers, which are rendered as ipBlocks of
+// node IPs because no podSelector can match them.
+func (g *StandardPolicyGenerator) createNetworkPolicyPeers(peerIP string) ([]networkingv1.NetworkPolicyPeer, string) {
 	log.Debug().Msgf("Creating network policy peer for IP: %s", peerIP)
+	one := func(p *networkingv1.NetworkPolicyPeer, comment string) ([]networkingv1.NetworkPolicyPeer, string) {
+		if p == nil {
+			return nil, ""
+		}
+		return []networkingv1.NetworkPolicyPeer{*p}, comment
+	}
 
 	// Try to get Service info first
 	svcSpec, err := g.broker().ServiceByIP(peerIP)
@@ -309,7 +345,25 @@ func (g *StandardPolicyGenerator) createNetworkPolicyPeer(peerIP string) *networ
 			log.Debug().Msgf("Found service %s/%s with selector %v for IP %s",
 				svcSpec.SvcNamespace, svcSpec.SvcName, svcSpec.Service.Spec.Selector, peerIP)
 
-			return &networkingv1.NetworkPolicyPeer{
+			// A Service fronting host-network pods fronts node IPs: its
+			// selector would match nothing the CNI sees, and NetworkPolicy is
+			// evaluated post-DNAT, so pin the backend node IPs — one ipBlock
+			// each — not the ClusterIP.
+			if backends := hostNetworkServiceBackends(g.broker(), svcSpec); len(backends) > 0 {
+				cidrs := hostNetworkServiceCIDRs(backends)
+				if len(cidrs) == 0 {
+					log.Warn().Msgf("Skipping host-network service peer %s/%s: no backend IP could be expressed as a host CIDR", svcSpec.SvcNamespace, svcSpec.SvcName)
+					return nil, ""
+				}
+				log.Debug().Msgf("Service %s/%s is backed by host-network pods; using IPBlocks %v", svcSpec.SvcNamespace, svcSpec.SvcName, cidrs)
+				peers := make([]networkingv1.NetworkPolicyPeer, 0, len(cidrs))
+				for _, cidr := range cidrs {
+					peers = append(peers, networkingv1.NetworkPolicyPeer{IPBlock: &networkingv1.IPBlock{CIDR: cidr}})
+				}
+				return peers, hostNetworkServiceComment(svcSpec, backends, peerIP, "podSelector")
+			}
+
+			return one(&networkingv1.NetworkPolicyPeer{
 				PodSelector: &metav1.LabelSelector{
 					MatchLabels: svcSpec.Service.Spec.Selector,
 				},
@@ -318,7 +372,7 @@ func (g *StandardPolicyGenerator) createNetworkPolicyPeer(peerIP string) *networ
 						"kubernetes.io/metadata.name": svcSpec.SvcNamespace,
 					},
 				},
-			}
+			}, "")
 		} else {
 			log.Debug().Msgf("Service %s/%s found for IP %s but has no selector, trying pod lookup",
 				svcSpec.SvcNamespace, svcSpec.SvcName, peerIP)
@@ -332,12 +386,24 @@ func (g *StandardPolicyGenerator) createNetworkPolicyPeer(peerIP string) *networ
 	// Try to get Pod info
 	podSpec, err := g.broker().PodByIP(peerIP)
 	if err == nil && podSpec != nil {
+		// A host-network pod shares the node IP; its labels select nothing
+		// the CNI can see. Pin the observed node address instead and say so.
+		if isHostNetwork(podSpec) {
+			cidr, err := common.HostCIDR(peerIP)
+			if err != nil {
+				log.Warn().Err(err).Msgf("Skipping host-network peer %s: cannot express it as a host CIDR", peerIP)
+				return nil, ""
+			}
+			log.Debug().Msgf("Peer %s is host-network pod %s/%s; using IPBlock %s", peerIP, podSpec.Namespace, podSpec.Name, cidr)
+			return one(&networkingv1.NetworkPolicyPeer{IPBlock: &networkingv1.IPBlock{CIDR: cidr}},
+				hostNetworkPeerComment(podSpec, peerIP, "podSelector"))
+		}
 		// Validate pod has labels before using it
 		if len(podSpec.Pod.Labels) > 0 {
 			log.Debug().Msgf("Found pod %s/%s with labels %v for IP %s",
 				podSpec.Namespace, podSpec.Name, podSpec.Pod.Labels, peerIP)
 
-			return &networkingv1.NetworkPolicyPeer{
+			return one(&networkingv1.NetworkPolicyPeer{
 				PodSelector: &metav1.LabelSelector{
 					MatchLabels: podSpec.Pod.Labels,
 				},
@@ -346,7 +412,7 @@ func (g *StandardPolicyGenerator) createNetworkPolicyPeer(peerIP string) *networ
 						"kubernetes.io/metadata.name": podSpec.Namespace,
 					},
 				},
-			}
+			}, "")
 		} else {
 			log.Debug().Msgf("Pod %s/%s found for IP %s but has no labels, falling back to IPBlock",
 				podSpec.Namespace, podSpec.Name, peerIP)
@@ -370,14 +436,14 @@ func (g *StandardPolicyGenerator) createNetworkPolicyPeer(peerIP string) *networ
 	cidr, err := common.HostCIDR(peerIP)
 	if err != nil {
 		log.Warn().Err(err).Msgf("Skipping peer %s: cannot express it as a host CIDR", peerIP)
-		return nil
+		return nil, ""
 	}
 	log.Debug().Msgf("Using IPBlock %s for peer %s", cidr, peerIP)
-	return &networkingv1.NetworkPolicyPeer{
+	return one(&networkingv1.NetworkPolicyPeer{
 		IPBlock: &networkingv1.IPBlock{
 			CIDR: cidr,
 		},
-	}
+	}, "")
 }
 
 // Helper functions
