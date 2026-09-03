@@ -9,6 +9,7 @@ import {
   ChevronRight,
 } from 'lucide-react';
 import type { PodNodeData, AuditVerdict } from '../types';
+import type { FindingKind } from '../utils/findingPolicyType';
 import api from '../services/api';
 import { Button } from './ui/Button';
 import { EmptyState } from './ui/EmptyState';
@@ -18,7 +19,8 @@ interface FindingsViewProps {
   pods: PodNodeData[];
   namespace: string;
   onSelectPod: (pod: PodNodeData) => void;
-  onBuildPolicy: (pod: PodNodeData) => void;
+  /** Opens the Policy Builder on the tab relevant to the finding kind. */
+  onBuildPolicy: (pod: PodNodeData, kind: FindingKind) => void;
   onOpenAudit: () => void;
 }
 
@@ -274,7 +276,7 @@ export function FindingsView({ pods, namespace, onSelectPod, onBuildPolicy, onOp
                       title={podLabel(pod)}
                       badge={<Badge className="bg-hubble-error/15 text-hubble-error border-hubble-error/30">{drops} dropped</Badge>}
                       onView={() => onSelectPod(pod)}
-                      onBuildPolicy={() => onBuildPolicy(pod)}
+                      onBuildPolicy={() => onBuildPolicy(pod, 'denied-traffic')}
                     />
                   ))}
                 </ul>
@@ -301,7 +303,7 @@ export function FindingsView({ pods, namespace, onSelectPod, onBuildPolicy, onOp
                         </div>
                       }
                       onView={() => onSelectPod(pod)}
-                      onBuildPolicy={() => onBuildPolicy(pod)}
+                      onBuildPolicy={() => onBuildPolicy(pod, 'sensitive-syscalls')}
                     />
                   ))}
                 </ul>
@@ -318,7 +320,7 @@ export function FindingsView({ pods, namespace, onSelectPod, onBuildPolicy, onOp
                       title={podLabel(pod)}
                       badge={<Badge className="bg-hubble-warning/15 text-hubble-warning border-hubble-warning/30">{peers} peers</Badge>}
                       onView={() => onSelectPod(pod)}
-                      onBuildPolicy={() => onBuildPolicy(pod)}
+                      onBuildPolicy={() => onBuildPolicy(pod, 'egress-fanout')}
                     />
                   ))}
                 </ul>

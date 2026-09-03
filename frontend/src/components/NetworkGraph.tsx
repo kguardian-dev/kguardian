@@ -13,6 +13,7 @@ import 'reactflow/dist/style.css';
 import ELK from 'elkjs/lib/elk.bundled.js';
 import { Eye, EyeOff, Activity, ShieldAlert, Server, Crosshair, X, ArrowRight, ArrowDown } from 'lucide-react';
 import PodNode from './PodNode';
+import { shouldExitFocus } from '../utils/graphFocus';
 import type { PodNodeData, PodInfo, ServiceInfo, NetworkTraffic } from '../types';
 import { UI_TIMING } from '../constants/ui';
 
@@ -36,6 +37,10 @@ interface NetworkGraphProps {
   onPodSelect: (pod: PodNodeData | null) => void;
   selectedPodId: string | null;
   onBuildPolicy?: (pod: PodNodeData) => void;
+  /** Focused node (URL `?focus=`), or null. Controlled by the caller so a
+   *  focused view is shareable; the graph reports every change back. */
+  focusedNodeId: string | null;
+  onFocusChange: (id: string | null) => void;
 }
 
 // Define nodeTypes outside component to prevent recreation
@@ -60,15 +65,19 @@ const NetworkGraphInner: React.FC<NetworkGraphProps> = ({
   onPodSelect,
   selectedPodId,
   onBuildPolicy,
+  focusedNodeId,
+  onFocusChange,
 }) => {
   const { fitView } = useReactFlow();
 
   // Focus mode: isolate a node + its direct upstream/downstream, hide the rest,
   // and re-lay-out the subset. Toggling the same node (or Esc / the pill) exits.
-  const [focusedNodeId, setFocusedNodeId] = useState<string | null>(null);
-  const onFocus = useCallback((id: string) => {
-    setFocusedNodeId((prev) => (prev === id ? null : id));
-  }, []);
+  // The focused id lives in the URL hash (see App) so the view is shareable.
+  const setFocusedNodeId = onFocusChange;
+  const onFocus = useCallback(
+    (id: string) => onFocusChange(focusedNodeId === id ? null : id),
+    [onFocusChange, focusedNodeId],
+  );
 
   // Build IP-to-PodInfo lookup from allPodsLookup for cross-namespace resolution
   const ipToAllPodsMap = useMemo(() => {
@@ -395,13 +404,14 @@ const NetworkGraphInner: React.FC<NetworkGraphProps> = ({
   // node set. Switching namespace (or the pod being deleted) used to leave
   // the stale focus filtering EVERYTHING out — an empty graph with the
   // focus pill still up. Self-heal instead of threading the namespace down:
-  // any change that removes the focused node exits focus mode.
+  // any change that removes the focused node exits focus mode (and drops the
+  // URL param) — but only once nodes have loaded, so a shared `?focus=` link
+  // survives the initial fetch (utils/graphFocus).
   useEffect(() => {
-    if (focusedNodeId && !allDisplayPods.some((p) => p.id === focusedNodeId)) {
-      // eslint-disable-next-line react-hooks/set-state-in-effect -- intentional self-heal, see above
-      setFocusedNodeId(null);
+    if (shouldExitFocus(focusedNodeId, allDisplayPods.map((p) => p.id), pods.length > 0)) {
+      onFocusChange(null);
     }
-  }, [focusedNodeId, allDisplayPods]);
+  }, [focusedNodeId, allDisplayPods, pods.length, onFocusChange]);
 
   // Build React Flow nodes with placeholder positions (ELK will reposition)
   const baseNodes: Node[] = useMemo(() => {

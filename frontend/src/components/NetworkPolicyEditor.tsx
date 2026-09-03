@@ -27,10 +27,12 @@ interface NetworkPolicyEditorProps {
   onClose: () => void;
   pod: PodNodeData | null;
   allPods?: PodNodeData[];
+  /** Tab to open on. Defaults to the network policy. */
+  initialPolicyType?: PolicyType;
 }
 
-const NetworkPolicyEditor: React.FC<NetworkPolicyEditorProps> = ({ isOpen, onClose, pod }) => {
-  const [policyType, setPolicyType] = useState<PolicyType>('network');
+const NetworkPolicyEditor: React.FC<NetworkPolicyEditorProps> = ({ isOpen, onClose, pod, initialPolicyType = 'network' }) => {
+  const [policyType, setPolicyType] = useState<PolicyType>(initialPolicyType);
   const [yamlView, setYamlView] = useState(true); // Default to YAML view
 
   // Align with the cluster CNI (issue #1413): when the detected CNI is

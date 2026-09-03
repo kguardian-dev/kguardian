@@ -4,6 +4,7 @@ import type { PodNodeData } from '../types';
 import { Modal } from './ui/Modal';
 import { EmptyState } from './ui/EmptyState';
 import NetworkPolicyEditor from './NetworkPolicyEditor';
+import type { PolicyType } from '../hooks/policyEditor';
 
 interface PolicyBuilderModalProps {
   onClose: () => void;
@@ -11,6 +12,8 @@ interface PolicyBuilderModalProps {
   workloads: PodNodeData[];
   /** Pre-selected workload (contextual "Build Policy") — skips the picker. */
   initialPod: PodNodeData | null;
+  /** Tab to open on (a finding's "Policy" action picks the relevant one). */
+  initialPolicyType?: PolicyType;
 }
 
 function label(pod: PodNodeData): string {
@@ -28,11 +31,11 @@ function syscallCount(pod: PodNodeData): number {
  * picker — a workload-first path to the same editor, rather than requiring you
  * to find the node on the map. The heavy editor stays behind this lazy chunk.
  */
-export function PolicyBuilderModal({ onClose, workloads, initialPod }: PolicyBuilderModalProps) {
+export function PolicyBuilderModal({ onClose, workloads, initialPod, initialPolicyType }: PolicyBuilderModalProps) {
   const [chosen, setChosen] = useState<PodNodeData | null>(initialPod);
 
   if (chosen) {
-    return <NetworkPolicyEditor isOpen onClose={onClose} pod={chosen} allPods={workloads} />;
+    return <NetworkPolicyEditor isOpen onClose={onClose} pod={chosen} allPods={workloads} initialPolicyType={initialPolicyType} />;
   }
   return <WorkloadPicker workloads={workloads} onPick={setChosen} onClose={onClose} />;
 }
