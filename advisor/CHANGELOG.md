@@ -1,5 +1,14 @@
 # Changelog
 
+## [1.8.1](https://github.com/kguardian-dev/kguardian/compare/advisor/v1.8.0...advisor/v1.8.1) (2026-09-03)
+
+
+### Bug Fixes
+
+* Cilium policies carry the namespace label for cross-namespace peers ([515de3d](https://github.com/kguardian-dev/kguardian/commit/515de3db9c9607ea2381fad0ab394cb732b169b0))
+* record traffic to node IPs and render host-network peers correctly ([515de3d](https://github.com/kguardian-dev/kguardian/commit/515de3db9c9607ea2381fad0ab394cb732b169b0))
+* record traffic to node IPs and render host-network peers correctly ([#1431](https://github.com/kguardian-dev/kguardian/issues/1431)) ([515de3d](https://github.com/kguardian-dev/kguardian/commit/515de3db9c9607ea2381fad0ab394cb732b169b0))
+
 ## [1.8.0](https://github.com/kguardian-dev/kguardian/compare/advisor/v1.7.1...advisor/v1.8.0) (2026-09-01)
 
 
