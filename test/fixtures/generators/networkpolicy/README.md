@@ -54,7 +54,11 @@ grouped by `(peer IP, identity)`:
   candidate, but only one with a KNOWN `started_at` that is not after the row
   `time_stamp` qualifies — a NULL `started_at` is a ghost or Pending row and is
   never chosen (every live pod has a start within a minute of the broker
-  upgrade). Alive first, then newest `started_at`, then newest record.
+  upgrade). A dead candidate must also have been alive at flow time: its record
+  `time_stamp` (last seen alive / marked dead) must be at or after the row
+  `time_stamp`, else a completed Job pod would absorb every later flow on its
+  recycled IP; a dead row with no `time_stamp` is excluded. Alive first, then
+  newest `started_at`, then newest record.
   Candidates existed but none qualified ⇒ **unattributed**; none at all ⇒ plain
   CIDR as before. A row with no `time_stamp` (bare-IP callers) has nothing to
   compare and keeps the pre-v4 by-IP behaviour.

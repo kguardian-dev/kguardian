@@ -163,13 +163,26 @@ func parseBrokerTime(s string) (t time.Time, ok bool) {
 // a Pending pod, and on cluster-00 such rows absorbed old flows. With no row
 // time_stamp (bare-IP callers) there is nothing to compare and the candidate
 // stays.
-func excludedByGuard(startedAt, at string) bool {
+//
+// A DEAD candidate must additionally have been alive at flow time: its record
+// time_stamp (last written — the moment it was seen alive or marked dead)
+// must be at or after the row time_stamp. A completed Job pod with an old
+// start would otherwise absorb every later flow on its recycled IP. A dead
+// row with an unknown time_stamp is excluded.
+func excludedByGuard(c *api.PodDetail, at string) bool {
 	flow, ok := parseBrokerTime(at)
 	if !ok {
 		return false
 	}
-	start, ok := parseBrokerTime(startedAt)
-	return !ok || start.After(flow)
+	start, ok := parseBrokerTime(c.StartedAt)
+	if !ok || start.After(flow) {
+		return true
+	}
+	if c.IsDead {
+		seen, ok := parseBrokerTime(c.TimeStamp)
+		return !ok || seen.Before(flow)
+	}
+	return false
 }
 
 // newestTimeStamp picks the newest of the given broker timestamps and
@@ -407,7 +420,7 @@ func (r *peerResolver) candidatesByIP(peerIP string) []*api.PodDetail {
 func choosePeerCandidate(candidates []*api.PodDetail, at string) *api.PodDetail {
 	var kept []*api.PodDetail
 	for _, c := range candidates {
-		if excludedByGuard(c.StartedAt, at) {
+		if excludedByGuard(c, at) {
 			continue
 		}
 		kept = append(kept, c)

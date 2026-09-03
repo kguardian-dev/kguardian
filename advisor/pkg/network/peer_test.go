@@ -42,29 +42,63 @@ func TestParseBrokerTime(t *testing.T) {
 }
 
 func TestStartTimeGuard_ExcludedByGuard(t *testing.T) {
-	assert.True(t, excludedByGuard("2026-08-04T09:12:41", "2026-07-23T10:00:00"), "started after the flow ⇒ excluded")
-	assert.False(t, excludedByGuard("2026-07-23T10:00:00", "2026-07-23T10:00:00"), "equal is not after")
-	assert.False(t, excludedByGuard("2026-07-01T00:00:00", "2026-07-23T10:00:00"))
-	assert.True(t, excludedByGuard("", "2026-07-23T10:00:00"), "unknown start is a ghost/Pending row ⇒ excluded")
-	assert.False(t, excludedByGuard("2026-08-04T09:12:41", ""), "no flow time ⇒ nothing to compare")
-	assert.False(t, excludedByGuard("", ""), "no flow time ⇒ nothing to compare")
+	alive := func(start string) *api.PodDetail { return &api.PodDetail{StartedAt: start} }
+	dead := func(start, seen string) *api.PodDetail {
+		return &api.PodDetail{StartedAt: start, IsDead: true, TimeStamp: seen}
+	}
+	at := "2026-07-23T10:00:00"
+	assert.True(t, excludedByGuard(alive("2026-08-04T09:12:41"), at), "started after the flow ⇒ excluded")
+	assert.False(t, excludedByGuard(alive("2026-07-23T10:00:00"), at), "equal is not after")
+	assert.False(t, excludedByGuard(alive("2026-07-01T00:00:00"), at))
+	assert.True(t, excludedByGuard(alive(""), at), "unknown start is a ghost/Pending row ⇒ excluded")
+	assert.False(t, excludedByGuard(alive("2026-08-04T09:12:41"), ""), "no flow time ⇒ nothing to compare")
+	assert.False(t, excludedByGuard(alive(""), ""), "no flow time ⇒ nothing to compare")
+	// Dead candidates must also have been alive at flow time.
+	assert.False(t, excludedByGuard(dead("2026-07-01T00:00:00", "2026-07-23T10:00:00"), at), "dead, last seen at the flow ⇒ eligible")
+	assert.False(t, excludedByGuard(dead("2026-07-01T00:00:00", "2026-07-30T00:00:00"), at), "dead, seen after the flow ⇒ eligible")
+	assert.True(t, excludedByGuard(dead("2026-07-01T00:00:00", "2026-07-02T00:00:00"), at), "completed Job gone before the flow ⇒ excluded")
+	assert.True(t, excludedByGuard(dead("2026-07-01T00:00:00", ""), at), "dead with unknown time_stamp ⇒ excluded")
+	assert.False(t, excludedByGuard(dead("2026-07-01T00:00:00", ""), ""), "no flow time ⇒ nothing to compare")
+}
+
+func v4DeadPod(name, ns, ip, startedAt, seenAt string, labels map[string]string) api.PodDetail {
+	p := v4Pod(name, ns, ip, startedAt, true, labels)
+	p.TimeStamp = seenAt
+	return p
 }
 
 func TestChoosePeerCandidate_Precedence(t *testing.T) {
-	deadOld := v4Pod("job-old", "ns", "10.0.0.9", "2026-07-01T00:00:00", true, nil)
-	deadNew := v4Pod("job-new", "ns", "10.0.0.9", "2026-07-20T00:00:00", true, nil)
-	deadUnknown := v4Pod("job-unknown", "ns", "10.0.0.9", "", true, nil)
+	deadOld := v4DeadPod("job-old", "ns", "10.0.0.9", "2026-07-01T00:00:00", "2026-08-01T00:00:00", nil)
+	deadNew := v4DeadPod("job-new", "ns", "10.0.0.9", "2026-07-20T00:00:00", "2026-08-01T00:00:00", nil)
+	deadUnknown := v4DeadPod("job-unknown", "ns", "10.0.0.9", "", "2026-08-01T00:00:00", nil)
+	deadGoneEarly := v4DeadPod("job-gone", "ns", "10.0.0.9", "2026-07-21T00:00:00", "2026-07-22T00:00:00", nil)
 	aliveUnknown := v4Pod("ghost", "ns", "10.0.0.9", "", false, nil)
 	alive := v4Pod("deploy", "ns", "10.0.0.9", "2026-07-10T00:00:00", false, nil)
-	all := []*api.PodDetail{&deadOld, &deadNew, &deadUnknown, &aliveUnknown, &alive}
+	all := []*api.PodDetail{&deadOld, &deadNew, &deadUnknown, &deadGoneEarly, &aliveUnknown, &alive}
 
 	assert.Equal(t, "deploy", choosePeerCandidate(all, "2026-07-23T10:00:00").Name, "alive with a known start wins")
-	assert.Equal(t, "job-new", choosePeerCandidate([]*api.PodDetail{&deadOld, &deadUnknown, &deadNew}, "2026-07-23T10:00:00").Name, "newest known start among the dead")
+	assert.Equal(t, "job-new", choosePeerCandidate([]*api.PodDetail{&deadOld, &deadUnknown, &deadNew, &deadGoneEarly}, "2026-07-23T10:00:00").Name, "newest known start among the dead still alive at flow time")
 	assert.Equal(t, "job-old", choosePeerCandidate(all, "2026-07-05T00:00:00").Name, "guard drops everything started after the flow and every unknown start")
 	assert.Nil(t, choosePeerCandidate([]*api.PodDetail{&deadUnknown, &aliveUnknown}, "2026-07-05T00:00:00"), "unknown start is never a candidate, alive or not")
+	assert.Nil(t, choosePeerCandidate([]*api.PodDetail{&deadGoneEarly}, "2026-07-23T10:00:00"), "a dead pod gone before the flow is not a candidate")
+	assert.Equal(t, "job-gone", choosePeerCandidate([]*api.PodDetail{&deadGoneEarly}, "2026-07-21T12:00:00").Name, "…but it is for a flow while it lived")
 	assert.Nil(t, choosePeerCandidate([]*api.PodDetail{&deadNew, &alive}, "2026-06-01T00:00:00"), "every candidate started later ⇒ unattributed")
 	assert.Equal(t, "deploy", choosePeerCandidate(all, "").Name, "no flow time ⇒ no guard, pre-v4 precedence (unknown start ranks last)")
 	assert.Equal(t, "ghost", choosePeerCandidate([]*api.PodDetail{&deadOld, &aliveUnknown}, "").Name, "no flow time ⇒ alive still preferred")
+}
+
+func TestResolveByIP_CompletedJobDoesNotAbsorbLaterFlows(t *testing.T) {
+	// Live finding: a completed Job pod (old start, marked dead long ago)
+	// absorbed every later flow on its recycled IP. Its record time_stamp is
+	// when it was last seen / marked dead; a flow after that cannot be it.
+	job := v4DeadPod("backup-1", "batch", "10.0.0.9", "2026-07-01T00:00:00", "2026-07-01T00:05:00", map[string]string{"app": "backup"})
+	r := newPeerResolver(stubBrokerData{allPods: []api.PodDetail{job}})
+	later := r.resolveRow("10.0.0.9", rowAt("10.0.0.9", "2026-07-23T10:00:00"))
+	assert.True(t, later.Unattributed)
+	assert.Nil(t, later.Pod)
+	during := r.resolveRow("10.0.0.9", rowAt("10.0.0.9", "2026-07-01T00:02:00"))
+	require.NotNil(t, during.Pod)
+	assert.Equal(t, "backup-1", during.Pod.Name)
 }
 
 func TestResolveByIP_GhostRowWithUnknownStartIsUnattributed(t *testing.T) {
@@ -101,7 +135,7 @@ func TestResolveByIP_UnionsListingAndByIPRecord(t *testing.T) {
 	// serve either. Both feed the candidate set, deduplicated by ns/name.
 	viaIP := podDetail("frontend-1", "10.0.0.7", map[string]string{"app": "frontend"})
 	viaIP.StartedAt = "2026-08-04T00:00:00"
-	older := v4Pod("job-1", "prod", "10.0.0.7", "2026-07-01T00:00:00", true, map[string]string{"app": "job"})
+	older := v4DeadPod("job-1", "prod", "10.0.0.7", "2026-07-01T00:00:00", "2026-08-01T00:00:00", map[string]string{"app": "job"})
 	r := newPeerResolver(stubBrokerData{
 		pods:    map[string]*api.PodDetail{"10.0.0.7": viaIP},
 		allPods: []api.PodDetail{older, *viaIP},
