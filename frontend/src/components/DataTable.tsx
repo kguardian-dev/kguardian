@@ -209,11 +209,13 @@ const DataTable: React.FC<DataTableProps> = ({ selectedPod, allPodsLookup, servi
           identities.set(t, { isExternal: true, unattributed: true });
           break;
         default:
-          identities.set(t, resolveTrafficIdentity(t.traffic_in_out_ip));
+          // No pod ever held the IP and it is no ClusterIP. Never derived
+          // from a pod or Service that holds the IP today.
+          identities.set(t, { isExternal: true });
       }
     });
     return identities;
-  }, [selectedPod, peerIndex, resolveTrafficIdentity]);
+  }, [selectedPod, peerIndex]);
 
   // Compute available protocols and ports for filter dropdowns
   const availableProtocols = useMemo(() => {
