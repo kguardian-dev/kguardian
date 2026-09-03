@@ -113,16 +113,24 @@ export function suggestedCrName(pod: PodNodeData): string {
 /**
  * The Policy Builder's per-pod export as a kguardian.dev SeccompProfile CR —
  * the same renderer the workload view uses, so both paths produce the
- * manifest the docs describe.
+ * manifest the docs describe. Profiles always start in audit mode:
+ * `spec.defaultAction` is SCMP_ACT_LOG unless the caller passes an action the
+ * operator explicitly chose. (The per-pod generator's own default is
+ * SCMP_ACT_ERRNO, which the SPO CR and raw JSON exports keep.)
  */
-export function podProfileToKguardianCR(pod: PodNodeData, profile: SeccompProfile, capture: CaptureInfo): string {
+export function podProfileToKguardianCR(
+  pod: PodNodeData,
+  profile: SeccompProfile,
+  capture: CaptureInfo,
+  opts: { defaultAction?: SeccompProfile['defaultAction'] } = {},
+): string {
   const namespace = pod.pod.pod_namespace || 'default';
   const workloadRef = podWorkloadRef(pod);
   const name = suggestedCrName(pod);
   return renderSeccompProfileCR({
     name,
     namespace,
-    profile,
+    profile: { ...profile, defaultAction: opts.defaultAction ?? 'SCMP_ACT_LOG' },
     workloadRef,
     header: captureHeaderLines({ namespace, kind: workloadRef?.kind, name: workloadRef?.name ?? pod.pod.pod_name, syscallCount: allowedSyscalls(profile).size, capture }),
   });

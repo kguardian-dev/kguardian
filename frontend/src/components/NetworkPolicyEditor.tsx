@@ -130,6 +130,14 @@ const NetworkPolicyEditor: React.FC<NetworkPolicyEditorProps> = ({ isOpen, onClo
   // generated from a filtered tier is incomplete and will block the app.
   const seccompCapture = useWorkloadCapture(pod, isOpen && policyType === 'seccomp');
   const [seccompFormat, setSeccompFormat] = useState<SeccompExportFormat>('kguardian');
+  // The kguardian CR exports audit-first (SCMP_ACT_LOG) regardless of the
+  // generator's ERRNO default; only an action the operator explicitly picks in
+  // the visual editor overrides that.
+  const [seccompActionTouched, setSeccompActionTouched] = useState(false);
+  const updateSeccompDefaultAction = (action: SeccompAction) => {
+    setSeccompActionTouched(true);
+    updateDefaultAction(action);
+  };
 
   // Syscall autocomplete
   const {
@@ -154,6 +162,7 @@ const NetworkPolicyEditor: React.FC<NetworkPolicyEditorProps> = ({ isOpen, onClo
     seccompFormat,
     pod,
     capture: seccompCapture,
+    crDefaultAction: seccompActionTouched && seccompProfile ? seccompProfile.defaultAction : undefined,
   });
 
   if (!isOpen || !pod) return null;
@@ -231,7 +240,10 @@ const NetworkPolicyEditor: React.FC<NetworkPolicyEditorProps> = ({ isOpen, onClo
                         {f.label}
                       </button>
                     ))}
-                    <span className="text-[11px] text-tertiary ml-1">{SECCOMP_EXPORT_FORMATS.find((f) => f.id === seccompFormat)?.hint}</span>
+                    <span className="text-[11px] text-tertiary ml-1">
+                      {SECCOMP_EXPORT_FORMATS.find((f) => f.id === seccompFormat)?.hint}
+                      {seccompFormat === 'kguardian' && !seccompActionTouched && ' · exports audit-first (SCMP_ACT_LOG); pick a Default Action in the visual editor to enforce'}
+                    </span>
                   </div>
                 )}
                 <pre className="bg-hubble-dark text-secondary p-4 rounded-lg font-mono text-sm overflow-x-auto">
@@ -1852,7 +1864,7 @@ const NetworkPolicyEditor: React.FC<NetworkPolicyEditorProps> = ({ isOpen, onClo
                           <label className="text-xs text-tertiary">Action for syscalls not explicitly allowed:</label>
                           <select
                             value={seccompProfile.defaultAction}
-                            onChange={(e) => updateDefaultAction(e.target.value as SeccompAction)}
+                            onChange={(e) => updateSeccompDefaultAction(e.target.value as SeccompAction)}
                             className="bg-hubble-card text-primary px-3 py-2 rounded border border-hubble-border
                                        focus:outline-none focus:ring-2 focus:ring-hubble-accent focus:border-transparent text-sm"
                           >

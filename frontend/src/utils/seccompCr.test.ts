@@ -183,8 +183,12 @@ describe('seccompCr', () => {
       isExpanded: false,
     };
     expect(suggestedCrName(pod)).toBe('deployment-web');
-    const y = podProfileToKguardianCR(pod, observed, { level: 'low', complete: false, pods: [{ name: 'web-1', level: 'low' }] });
+    const y = podProfileToKguardianCR(pod, { ...observed, defaultAction: 'SCMP_ACT_ERRNO' }, { level: 'low', complete: false, pods: [{ name: 'web-1', level: 'low' }] });
     expect(y).toContain('apiVersion: kguardian.dev/v1alpha1');
+    // Audit-first: the generator's ERRNO default never leaks into the CR…
+    expect(y).toContain('  defaultAction: SCMP_ACT_LOG');
+    // …unless the operator explicitly chose an action.
+    expect(podProfileToKguardianCR(pod, observed, { level: 'full', complete: true, pods: [] }, { defaultAction: 'SCMP_ACT_ERRNO' })).toContain('  defaultAction: SCMP_ACT_ERRNO');
     expect(y).not.toContain('security-profiles-operator');
     expect(y).toContain('# WARNING: partial capture');
     expect(y).toContain('  name: "deployment-web"');
