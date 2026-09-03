@@ -142,6 +142,10 @@ func (g *CiliumPolicyGenerator) generateDefaultDenyPolicy(podDetail *api.PodDeta
 // processTrafficRules groups traffic rules by direction using the corrected logic
 func (g *CiliumPolicyGenerator) processTrafficRules(podTraffic []api.PodTraffic, podDetail *api.PodDetail) ([]NetworkPolicyRule, []NetworkPolicyRule) {
 	var ingressRules, egressRules []NetworkPolicyRule
+	// One resolver per generation: peers are attributed per ROW (stored
+	// identity, else by IP under the start-time guard) and rules keyed by
+	// (IP, identity) — see peer.go.
+	resolver := newPeerResolver(g.broker())
 
 	for _, traffic := range podTraffic {
 		var portInt int
@@ -175,7 +179,7 @@ func (g *CiliumPolicyGenerator) processTrafficRules(podTraffic []api.PodTraffic,
 			protocolStr = string(traffic.Protocol)
 
 			log.Debug().Msgf("Processing CILIUM INGRESS: allowing peer %s to reach our pod port %d (%s)", peer, portInt, protocolStr)
-			ingressRules = g.addOrUpdateRule(ingressRules, peer, port, protocolStr)
+			ingressRules = mergeOrAppendResolvedRule(ingressRules, resolver.resolveRow(peer, traffic), port, protocolStr, traffic.TimeStamp)
 
 		} else if IsEgressTraffic(traffic, podDetail) {
 			// For EGRESS traffic: Our Pod -> External destination
@@ -202,7 +206,7 @@ func (g *CiliumPolicyGenerator) processTrafficRules(podTraffic []api.PodTraffic,
 			protocolStr = string(traffic.Protocol)
 
 			log.Debug().Msgf("Processing CILIUM EGRESS: allowing our pod to reach peer %s on port %d (%s)", peer, portInt, protocolStr)
-			egressRules = g.addOrUpdateRule(egressRules, peer, port, protocolStr)
+			egressRules = mergeOrAppendResolvedRule(egressRules, resolver.resolveRow(peer, traffic), port, protocolStr, traffic.TimeStamp)
 		} else {
 			log.Debug().Msgf("Skipping traffic record with unknown type: %s", traffic.TrafficType)
 		}
@@ -289,20 +293,13 @@ func (g *CiliumPolicyGenerator) createPeerEndpointSelector(labels map[string]str
 func (g *CiliumPolicyGenerator) transformToCiliumIngressRules(rules []NetworkPolicyRule, comments *PolicyComments, policyNamespace string) []CiliumIngressRule {
 	var ingressRules []CiliumIngressRule
 
-	// Group rules by peer IP
-	peerRules := make(map[string][]networkingv1.NetworkPolicyPort)
-	for _, rule := range rules {
-		peerRules[rule.PeerIP] = append(peerRules[rule.PeerIP], rule.Ports...)
-	}
-
-	// Iterate in sorted peer-IP order — see sortedKeys in
-	// standard_policy.go for the determinism rationale. Same fix
-	// class applies to Cilium output: regenerating the same policy
-	// must produce identical YAML so kubectl diff is clean.
+	// Group by (peer IP, identity) and iterate in sorted order — see
+	// groupPeerRules for the determinism rationale. Same fix class applies
+	// to Cilium output: regenerating the same policy must produce identical
+	// YAML so kubectl diff is clean.
 	entityRuleByPorts := map[string]int{}
-	for _, peerIP := range sortedKeys(peerRules) {
-		ports := peerRules[peerIP]
-		ingressRule, comment := g.createCiliumIngressRuleForPeer(peerIP, ports, policyNamespace)
+	for _, group := range groupPeerRules(rules, newPeerResolver(g.broker())) {
+		ingressRule, comment := g.ciliumIngressRuleForResolved(group.peer, newestTimeStamp(group.stamps), group.ports, policyNamespace)
 		if ingressRule == nil {
 			continue
 		}
@@ -326,17 +323,10 @@ func (g *CiliumPolicyGenerator) transformToCiliumIngressRules(rules []NetworkPol
 func (g *CiliumPolicyGenerator) transformToCiliumEgressRules(rules []NetworkPolicyRule, comments *PolicyComments, policyNamespace string) []CiliumEgressRule {
 	var egressRules []CiliumEgressRule
 
-	// Group rules by peer IP
-	peerRules := make(map[string][]networkingv1.NetworkPolicyPort)
-	for _, rule := range rules {
-		peerRules[rule.PeerIP] = append(peerRules[rule.PeerIP], rule.Ports...)
-	}
-
 	// Sorted iteration — see ingress sibling.
 	entityRuleByPorts := map[string]int{}
-	for _, peerIP := range sortedKeys(peerRules) {
-		ports := peerRules[peerIP]
-		egressRule, comment := g.createCiliumEgressRuleForPeer(peerIP, ports, policyNamespace)
+	for _, group := range groupPeerRules(rules, newPeerResolver(g.broker())) {
+		egressRule, comment := g.ciliumEgressRuleForResolved(group.peer, newestTimeStamp(group.stamps), group.ports, policyNamespace)
 		if egressRule == nil {
 			continue
 		}
@@ -380,11 +370,11 @@ type ciliumPeer struct {
 
 // createCiliumIngressRuleForPeer creates a Cilium ingress rule for a specific
 // peer, plus the comment to render above it ("" for ordinary peers).
-func (g *CiliumPolicyGenerator) createCiliumIngressRuleForPeer(peerIP string, ports []networkingv1.NetworkPolicyPort, policyNamespace string) (*CiliumIngressRule, string) {
+func (g *CiliumPolicyGenerator) ciliumIngressRuleForResolved(resolved resolvedPeer, at string, ports []networkingv1.NetworkPolicyPort, policyNamespace string) (*CiliumIngressRule, string) {
+	peerIP := resolved.IP
 	log.Debug().Msgf("Creating Cilium ingress rule for peer IP: %s", peerIP)
 
-	// Try to resolve peer information
-	peer := g.resolvePeerForCilium(peerIP, policyNamespace)
+	peer := g.ciliumPeerFor(resolved, at, policyNamespace)
 
 	var ingressRule CiliumIngressRule
 
@@ -412,11 +402,11 @@ func (g *CiliumPolicyGenerator) createCiliumIngressRuleForPeer(peerIP string, po
 
 // createCiliumEgressRuleForPeer creates a Cilium egress rule for a specific
 // peer, plus the comment to render above it ("" for ordinary peers).
-func (g *CiliumPolicyGenerator) createCiliumEgressRuleForPeer(peerIP string, ports []networkingv1.NetworkPolicyPort, policyNamespace string) (*CiliumEgressRule, string) {
+func (g *CiliumPolicyGenerator) ciliumEgressRuleForResolved(resolved resolvedPeer, at string, ports []networkingv1.NetworkPolicyPort, policyNamespace string) (*CiliumEgressRule, string) {
+	peerIP := resolved.IP
 	log.Debug().Msgf("Creating Cilium egress rule for peer IP: %s", peerIP)
 
-	// Try to resolve peer information
-	peer := g.resolvePeerForCilium(peerIP, policyNamespace)
+	peer := g.ciliumPeerFor(resolved, at, policyNamespace)
 
 	var egressRule CiliumEgressRule
 
@@ -448,15 +438,48 @@ func (g *CiliumPolicyGenerator) createCiliumEgressRuleForPeer(peerIP string, por
 // selector is scoped to it, so a peer in another namespace needs the
 // namespace label as well (see createPeerEndpointSelector).
 func (g *CiliumPolicyGenerator) resolvePeerForCilium(peerIP, policyNamespace string) ciliumPeer {
-	// Try to get Service info first
-	svcSpec, err := g.broker().ServiceByIP(peerIP)
-	if err == nil && svcSpec != nil && len(svcSpec.Service.Spec.Selector) > 0 {
+	// No row context: no stored identity and no time_stamp, so the
+	// start-time guard cannot exclude anything (pre-v4 behaviour).
+	return g.ciliumPeerFor(newPeerResolver(g.broker()).resolveIP(peerIP), "", policyNamespace)
+}
+
+// ciliumPeerFor renders one attributed peer (see peer.go) as its Cilium peer
+// field: an EndpointSelector, the host entities (host-network pod or Service
+// backed by them) or a CIDR. An unattributed peer — no pod can be proven to
+// have held the IP at flow time — is a CIDR with a comment naming the newest
+// row time_stamp (`at`, quoted verbatim); never a selector for the pod that
+// holds the IP today.
+func (g *CiliumPolicyGenerator) ciliumPeerFor(resolved resolvedPeer, at, policyNamespace string) ciliumPeer {
+	peerIP := resolved.IP
+	toCIDR := func(comment string) ciliumPeer {
+		// common.HostCIDR picks the prefix length from the address family
+		// (/32 for IPv4, /128 for IPv6) — this used to be a hardcoded "/32",
+		// which on a dual-stack cluster widened a single peer into the whole
+		// fd00::/32 block. Returning both selectors empty is the existing
+		// "could not resolve peer" signal: transformToCilium{Ingress,Egress}Rules
+		// already logs and drops the rule rather than emitting one with no
+		// peer, so an unparseable address costs that single rule instead of
+		// putting a malformed toCIDR entry into the policy.
+		cidr, err := common.HostCIDR(peerIP)
+		if err != nil {
+			log.Warn().Err(err).Msgf("Skipping peer %s: cannot express it as a host CIDR", peerIP)
+			return ciliumPeer{}
+		}
+		log.Debug().Msgf("Using CIDR %s for peer %s", cidr, peerIP)
+		return ciliumPeer{cidr: []string{cidr}, comment: comment}
+	}
+
+	if resolved.Unattributed {
+		return toCIDR(unattributedPeerComment(peerIP, at))
+	}
+
+	if svcSpec := resolved.Svc; svcSpec != nil {
 		log.Debug().Msgf("Found service %s/%s with selector %v for IP %s",
 			svcSpec.SvcNamespace, svcSpec.SvcName, svcSpec.Service.Spec.Selector, peerIP)
 
 		// A Service fronting host-network pods fronts node identities — see
 		// the standard generator. Select the host entities instead.
-		if backends := hostNetworkServiceBackends(g.broker(), svcSpec); len(backends) > 0 {
+		if backends := resolved.Backends; len(backends) > 0 {
 			log.Debug().Msgf("Service %s/%s is backed by host-network pods; using entities %v", svcSpec.SvcNamespace, svcSpec.SvcName, hostEntities)
 			return ciliumPeer{
 				entities: append([]string(nil), hostEntities...),
@@ -469,44 +492,29 @@ func (g *CiliumPolicyGenerator) resolvePeerForCilium(peerIP, policyNamespace str
 		return ciliumPeer{endpoints: []CiliumEndpointSelector{selector}}
 	}
 
-	// Try to get Pod info
-	podSpec, err := g.broker().PodByIP(peerIP)
-	if err == nil && podSpec != nil && isHostNetwork(podSpec) {
-		// A host-network pod is not a Cilium endpoint; it carries the node's
-		// identity. Select that identity — local node or any remote node —
-		// rather than labels nothing will match.
-		log.Debug().Msgf("Peer %s is host-network pod %s/%s; using entities %v", peerIP, podSpec.Namespace, podSpec.Name, hostEntities)
-		return ciliumPeer{
-			entities: append([]string(nil), hostEntities...),
-			comment:  hostNetworkPeerComment(podSpec, peerIP, "endpointSelector"),
+	if podSpec := resolved.Pod; podSpec != nil {
+		if isHostNetwork(podSpec) {
+			// A host-network pod is not a Cilium endpoint; it carries the node's
+			// identity. Select that identity — local node or any remote node —
+			// rather than labels nothing will match.
+			log.Debug().Msgf("Peer %s is host-network pod %s/%s; using entities %v", peerIP, podSpec.Namespace, podSpec.Name, hostEntities)
+			return ciliumPeer{
+				entities: append([]string(nil), hostEntities...),
+				comment:  hostNetworkPeerComment(podSpec, peerIP, "endpointSelector"),
+			}
 		}
-	}
-	if err == nil && podSpec != nil && len(podSpec.Pod.Labels) > 0 {
-		log.Debug().Msgf("Found pod %s/%s with labels %v for IP %s",
-			podSpec.Namespace, podSpec.Name, podSpec.Pod.Labels, peerIP)
+		if len(podSpec.Pod.Labels) > 0 {
+			log.Debug().Msgf("Found pod %s/%s with labels %v for IP %s",
+				podSpec.Namespace, podSpec.Name, podSpec.Pod.Labels, peerIP)
 
-		// Create EndpointSelector from pod labels
-		selector := g.createPeerEndpointSelector(podSpec.Pod.Labels, podSpec.Namespace, policyNamespace)
-		return ciliumPeer{endpoints: []CiliumEndpointSelector{selector}}
+			// Create EndpointSelector from pod labels
+			selector := g.createPeerEndpointSelector(podSpec.Pod.Labels, podSpec.Namespace, policyNamespace)
+			return ciliumPeer{endpoints: []CiliumEndpointSelector{selector}}
+		}
 	}
 
 	// Fall back to CIDR for external IPs or unresolvable cluster IPs.
-	//
-	// common.HostCIDR picks the prefix length from the address family
-	// (/32 for IPv4, /128 for IPv6) — this used to be a hardcoded "/32",
-	// which on a dual-stack cluster widened a single peer into the whole
-	// fd00::/32 block. Returning both selectors empty is the existing
-	// "could not resolve peer" signal: transformToCilium{Ingress,Egress}Rules
-	// already logs and drops the rule rather than emitting one with no
-	// peer, so an unparseable address costs that single rule instead of
-	// putting a malformed toCIDR entry into the policy.
-	cidr, err := common.HostCIDR(peerIP)
-	if err != nil {
-		log.Warn().Err(err).Msgf("Skipping peer %s: cannot express it as a host CIDR", peerIP)
-		return ciliumPeer{}
-	}
-	log.Debug().Msgf("Using CIDR %s for peer %s", cidr, peerIP)
-	return ciliumPeer{cidr: []string{cidr}}
+	return toCIDR("")
 }
 
 // convertPortsToCiliumPortRules converts standard ports to Cilium PortRules.

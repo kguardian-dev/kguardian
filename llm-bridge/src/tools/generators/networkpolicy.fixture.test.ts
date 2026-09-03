@@ -7,7 +7,8 @@ import { parse } from "yaml";
 import {
   generateNetworkPolicy, generateCiliumPolicy, policyToYAML,
   generateNetworkPolicyWithComments, generateCiliumPolicyWithComments, hostNetworkServiceIdentity,
-  type PeerResolver, type PeerIdentity, type PodInfo, type TrafficRow, type BrokerPodListEntry,
+  makePeerResolver, choosePeerCandidate, parseBrokerTime, newestTimeStamp, identityKey, storedPeerOf,
+  type PeerResolver, type PeerIdentity, type PodInfo, type TrafficRow, type BrokerPodListEntry, type BrokerServiceRecord, type PeerLookup,
 } from "./networkpolicy.js";
 
 // G2 generator parity — network policy, assistant side.
@@ -269,4 +270,188 @@ test("cilium policy — unknown peer namespace leaves the selector as before", a
   const policy = await generateCiliumPolicy(web, [crossNsTraffic[0]], noNs);
   const egress = (policy.spec as { egress: { toEndpoints: { matchLabels: Record<string, string> }[] }[] }).egress;
   assert.deepEqual(egress[0].toEndpoints[0].matchLabels, { "k8s:app": "sonarr" });
+});
+
+// ---- Peer attribution: stale IPs and stored identity (CONTRACT v4) ----------
+// Pod IPs are recycled; resolving a row's peer IP against today's pod table
+// names whoever holds the IP NOW. The resolver is built from in-memory broker
+// reads through makePeerResolver — the same code execute.ts wires to the
+// broker — so the guard, the precedence and the stored-identity lookup are
+// under golden test, not a hand-written identity. Mirrors advisor
+// fixture_golden_test.go (TestFixtureGolden_PeerAttribution); inputs in the
+// v4 generators handoff.
+
+const cmangos: PodInfo = { name: "cmangos-database", namespace: "game-servers", ip: "10.244.3.17", labels: { app: "cmangos-database" } };
+
+const v4Pod = (pod_name: string, pod_namespace: string, pod_ip: string, labels: Record<string, string>, node_name: string, workload_name: string, started_at: string | null, is_dead: boolean, extra: Partial<BrokerPodListEntry> = {}): BrokerPodListEntry =>
+  ({ ...extra, pod_name, pod_namespace, pod_ip, node_name, workload_name, started_at, is_dead, pod_obj: { metadata: { labels, ...(extra.pod_obj?.metadata ?? {}) } } });
+
+function memoryLookup(pods: BrokerPodListEntry[], svcs: Record<string, BrokerServiceRecord> = {}, byIP: Record<string, BrokerPodListEntry> = {}): PeerLookup {
+  return {
+    serviceByIP: async (ip) => svcs[ip] ?? null,
+    podByIP: async (ip) => byIP[ip] ?? null,
+    pods: async () => pods,
+  };
+}
+
+// (a) legacy rows (no peer_*) from 10.244.12.199 dated May and July; the only
+// pod known to hold that IP is autobrr, started in August ⇒ unattributed.
+const staleIPTraffic: TrafficRow[] = [
+  { traffic_type: "INGRESS", pod_port: "3306", traffic_in_out_ip: "10.244.12.199", traffic_in_out_port: "51234", ip_protocol: "TCP", time_stamp: "2026-05-21T08:30:00" },
+  { traffic_type: "INGRESS", pod_port: "3306", traffic_in_out_ip: "10.244.12.199", traffic_in_out_port: "51235", ip_protocol: "TCP", time_stamp: "2026-07-23T10:00:00" },
+  { traffic_type: "EGRESS", traffic_in_out_ip: "10.244.5.8", traffic_in_out_port: "8080", ip_protocol: "TCP", time_stamp: "2026-07-23T10:00:05" },
+];
+const staleIPPods: BrokerPodListEntry[] = [
+  v4Pod("autobrr-7d9c4b8f6-q2x9k", "home-system", "10.244.12.199", { app: "autobrr" }, "worker-2", "autobrr", "2026-08-04T09:12:41", false),
+  v4Pod("cmangos-web-0", "game-servers", "10.244.5.8", { app: "cmangos-web" }, "worker-1", "cmangos-web", "2026-07-01T00:00:00", false),
+];
+
+// (b) rows the broker resolved at ingest: pod (the CronJob pod that held the
+// IP; autobrr holds it NOW with an unknown start, so by-IP would pick it),
+// service, and node (host-network pod).
+const storedTraffic: TrafficRow[] = [
+  { traffic_type: "INGRESS", pod_port: "3306", traffic_in_out_ip: "10.244.12.199", traffic_in_out_port: "51234", ip_protocol: "TCP", time_stamp: "2026-09-03T05:00:00",
+    peer_kind: "pod", peer_namespace: "game-servers", peer_name: "cmangos-backup-29271840-x7k2p", peer_uid: "0d1e2f3a-4b5c-6d7e-8f90-a1b2c3d4e5f6",
+    peer_workload_kind: "CronJob", peer_workload_name: "cmangos-backup", peer_resolved_at: "2026-09-03T05:00:00.201118" },
+  { traffic_type: "EGRESS", traffic_in_out_ip: "10.96.0.10", traffic_in_out_port: "5432", ip_protocol: "TCP", time_stamp: "2026-09-03T05:00:01",
+    peer_kind: "service", peer_namespace: "game-servers", peer_name: "db", peer_uid: null, peer_workload_kind: null, peer_workload_name: null, peer_resolved_at: "2026-09-03T05:00:01.100000" },
+  { traffic_type: "EGRESS", traffic_in_out_ip: "192.168.50.101", traffic_in_out_port: "9100", ip_protocol: "TCP", time_stamp: "2026-09-03T05:00:02",
+    peer_kind: "node", peer_namespace: "monitoring", peer_name: "node-exporter-abc12", peer_uid: "9c8b7a6f-5e4d-3c2b-1a09-f8e7d6c5b4a3",
+    peer_workload_kind: "DaemonSet", peer_workload_name: "node-exporter", peer_resolved_at: "2026-09-03T05:00:02.100000" },
+];
+const storedPods: BrokerPodListEntry[] = [
+  v4Pod("autobrr-7d9c4b8f6-q2x9k", "home-system", "10.244.12.199", { app: "autobrr" }, "worker-2", "autobrr", null, false),
+  v4Pod("cmangos-backup-29271840-x7k2p", "game-servers", "10.244.12.199", { app: "cmangos-backup" }, "worker-1", "cmangos-backup", "2026-09-03T04:59:30", true,
+    { pod_obj: { metadata: { uid: "0d1e2f3a-4b5c-6d7e-8f90-a1b2c3d4e5f6" } } }),
+  v4Pod("node-exporter-abc12", "monitoring", "192.168.50.101", { app: "node-exporter" }, "worker-1", "node-exporter", "2026-08-01T00:00:00", false,
+    { host_network: true, pod_obj: { metadata: { uid: "9c8b7a6f-5e4d-3c2b-1a09-f8e7d6c5b4a3" } } }),
+];
+const storedSvcs: Record<string, BrokerServiceRecord> = {
+  "10.96.0.10": { svc_name: "db", svc_namespace: "game-servers", service_spec: { spec: { selector: { app: "db" } } } },
+};
+
+const attributionCases: { name: string; traffic: TrafficRow[]; lookup: () => PeerLookup }[] = [
+  { name: "stale_ip_peer", traffic: staleIPTraffic, lookup: () => memoryLookup(staleIPPods) },
+  { name: "stored_peer_identity", traffic: storedTraffic, lookup: () => memoryLookup(storedPods, storedSvcs) },
+];
+
+for (const tc of attributionCases) {
+  test(`standard policy — ${tc.name} matches advisor golden (policy + comments)`, async () => {
+    const { policy, comments } = await generateNetworkPolicyWithComments(cmangos, tc.traffic, makePeerResolver(tc.lookup()));
+    const text = policyToYAML(policy, comments);
+    const file = `standard_${tc.name}.golden.yaml`;
+    assert.deepEqual(parse(text), golden(file));
+    assert.deepEqual(commentLines(text), commentLines(goldenText(file)));
+  });
+
+  test(`cilium policy — ${tc.name} matches advisor golden (policy + comments)`, async () => {
+    const { policy, comments } = await generateCiliumPolicyWithComments(cmangos, tc.traffic, makePeerResolver(tc.lookup()));
+    const text = policyToYAML(policy, comments);
+    const file = `cilium_${tc.name}.golden.yaml`;
+    assert.deepEqual(parse(text), golden(file));
+    assert.deepEqual(commentLines(text), commentLines(goldenText(file)));
+  });
+}
+
+test("parseBrokerTime — naive broker timestamps are UTC, not local", () => {
+  assert.equal(parseBrokerTime("2026-07-23T10:00:00"), Date.UTC(2026, 6, 23, 10, 0, 0));
+  assert.equal(parseBrokerTime("2026-07-23T10:00:00.123456"), Date.UTC(2026, 6, 23, 10, 0, 0, 123));
+  assert.equal(parseBrokerTime("2026-07-23T12:00:00+02:00"), Date.UTC(2026, 6, 23, 10, 0, 0));
+  assert.equal(parseBrokerTime("2026-07-23T10:00:00Z"), Date.UTC(2026, 6, 23, 10, 0, 0));
+  for (const bad of ["", "  ", "yesterday", "2026-07-23", null, undefined]) assert.equal(parseBrokerTime(bad), null);
+});
+
+// A dead record's time_stamp is when it was last seen alive / marked dead.
+const v4DeadPod = (pod_name: string, pod_ip: string, started_at: string | null, time_stamp: string | null, labels: Record<string, string> = {}): BrokerPodListEntry =>
+  v4Pod(pod_name, "ns", pod_ip, labels, "", "", started_at, true, { time_stamp });
+
+test("choosePeerCandidate — start-time guard and broker precedence", () => {
+  const deadOld = v4DeadPod("job-old", "10.0.0.9", "2026-07-01T00:00:00", "2026-08-01T00:00:00");
+  const deadNew = v4DeadPod("job-new", "10.0.0.9", "2026-07-20T00:00:00", "2026-08-01T00:00:00");
+  const deadUnknown = v4DeadPod("job-unknown", "10.0.0.9", null, "2026-08-01T00:00:00");
+  const deadGoneEarly = v4DeadPod("job-gone", "10.0.0.9", "2026-07-21T00:00:00", "2026-07-22T00:00:00");
+  const deadNoStamp = v4DeadPod("job-nostamp", "10.0.0.9", "2026-07-01T00:00:00", null);
+  const alive = v4Pod("deploy", "ns", "10.0.0.9", {}, "", "", "2026-07-10T00:00:00", false);
+  const aliveUnknown = v4Pod("ghost", "ns", "10.0.0.9", {}, "", "", null, false);
+  const all = [deadOld, deadNew, deadUnknown, deadGoneEarly, deadNoStamp, aliveUnknown, alive];
+  assert.equal(choosePeerCandidate(all, "2026-07-23T10:00:00")?.pod_name, "deploy", "alive with a known start wins");
+  assert.equal(choosePeerCandidate([deadOld, deadUnknown, deadNew, deadGoneEarly, deadNoStamp], "2026-07-23T10:00:00")?.pod_name, "job-new", "newest known start among the dead still alive at flow time");
+  assert.equal(choosePeerCandidate(all, "2026-07-05T00:00:00")?.pod_name, "job-old", "guard drops later starts and every unknown start");
+  assert.equal(choosePeerCandidate([deadUnknown, aliveUnknown], "2026-07-05T00:00:00"), null, "unknown start is never a candidate (ghost/Pending row), alive or not");
+  assert.equal(choosePeerCandidate([deadGoneEarly, deadNoStamp], "2026-07-23T10:00:00"), null, "a dead pod gone before the flow, or with no time_stamp, is not a candidate");
+  assert.equal(choosePeerCandidate([deadGoneEarly], "2026-07-21T12:00:00")?.pod_name, "job-gone", "…but it is for a flow while it lived");
+  assert.equal(choosePeerCandidate([deadGoneEarly], "2026-07-22T00:00:00")?.pod_name, "job-gone", "last seen exactly at the flow ⇒ eligible");
+  assert.equal(choosePeerCandidate([deadNew, alive], "2026-06-01T00:00:00"), null, "every candidate started later ⇒ unattributed");
+  assert.equal(choosePeerCandidate(all, "")?.pod_name, "deploy", "no flow time ⇒ no guard");
+  assert.equal(choosePeerCandidate([deadOld, aliveUnknown], "")?.pod_name, "ghost", "no flow time ⇒ alive still preferred");
+  assert.equal(choosePeerCandidate([alive], "2026-07-10T00:00:00")?.pod_name, "deploy", "equal is not later");
+});
+
+test("makePeerResolver — a completed Job pod does not absorb later flows on its recycled IP", async () => {
+  const job = v4DeadPod("backup-1", "10.0.0.9", "2026-07-01T00:00:00", "2026-07-01T00:05:00", { app: "backup" });
+  const resolve = makePeerResolver(memoryLookup([job]));
+  assert.deepEqual(await resolve("10.0.0.9", { peer: null, timeStamp: "2026-07-23T10:00:00" }), { unattributed: true });
+  assert.deepEqual(await resolve("10.0.0.9", { peer: null, timeStamp: "2026-07-01T00:02:00" }), { selector: { app: "backup" }, namespace: "ns" });
+});
+
+test("makePeerResolver — a ghost row with unknown started_at is unattributed, not the peer", async () => {
+  const ghost = v4Pod("ghost", "ns", "10.0.0.9", { app: "ghost" }, "", "", null, false);
+  const resolve = makePeerResolver(memoryLookup([ghost]));
+  assert.deepEqual(await resolve("10.0.0.9", { peer: null, timeStamp: "2026-07-23T10:00:00" }), { unattributed: true });
+});
+
+test("makePeerResolver — guarded-out is unattributed, external is a plain CIDR, stored wins", async () => {
+  const autobrr = v4Pod("autobrr", "home-system", "10.244.12.199", { app: "autobrr" }, "w", "autobrr", "2026-08-04T09:12:41", false);
+  const resolve = makePeerResolver(memoryLookup([autobrr]));
+  const stale = await resolve("10.244.12.199", { peer: null, timeStamp: "2026-07-23T10:00:00" });
+  assert.deepEqual(stale, { unattributed: true });
+  assert.equal(identityKey(stale), "unattributed");
+  const fresh = await resolve("10.244.12.199", { peer: null, timeStamp: "2026-08-05T00:00:00" });
+  assert.deepEqual(fresh, { selector: { app: "autobrr" }, namespace: "home-system" });
+  assert.equal(identityKey(fresh), "sel:home-system:app=autobrr");
+  assert.equal(await resolve("8.8.8.8", { peer: null, timeStamp: "2026-07-23T10:00:00" }), null);
+  assert.equal(identityKey(null), "cidr");
+
+  // A stored identity is materialised from the listing, never re-resolved by IP.
+  const stored = storedPeerOf({ peer_kind: "pod", peer_namespace: "game-servers", peer_name: "gone", peer_uid: "" });
+  assert.deepEqual(await resolve("10.244.12.199", { peer: stored, timeStamp: "2026-09-03T05:00:00" }), { unattributed: true });
+  assert.equal(storedPeerOf({ peer_kind: null }), null);
+});
+
+test("makePeerResolver — candidates union the listing and the by-IP record", async () => {
+  const older = v4Pod("job-1", "prod", "10.0.0.7", { app: "job" }, "", "", "2026-07-01T00:00:00", true, { time_stamp: "2026-08-01T00:00:00" });
+  const viaIP = v4Pod("frontend-1", "prod", "10.0.0.7", { app: "frontend" }, "", "", "2026-08-04T00:00:00", false);
+  const resolve = makePeerResolver(memoryLookup([older], {}, { "10.0.0.7": viaIP }));
+  assert.deepEqual(await resolve("10.0.0.7", { peer: null, timeStamp: "2026-07-15T00:00:00" }), { selector: { app: "job" }, namespace: "prod" });
+  assert.deepEqual(await resolve("10.0.0.7", { peer: null, timeStamp: "" }), { selector: { app: "frontend" }, namespace: "prod" });
+});
+
+test("same IP, two stored identities ⇒ two rules ordered by identity key", async () => {
+  const jobA = v4Pod("job-a", "batch", "10.0.0.5", { app: "a" }, "", "", "2026-07-01T00:00:00", true);
+  const jobB = v4Pod("job-b", "batch", "10.0.0.5", { app: "b" }, "", "", "2026-07-02T00:00:00", true);
+  const stored = (time_stamp: string, peer_name: string, traffic_in_out_port: string): TrafficRow =>
+    ({ traffic_type: "INGRESS", pod_port: "80", traffic_in_out_ip: "10.0.0.5", traffic_in_out_port, ip_protocol: "TCP", time_stamp, peer_kind: "pod", peer_namespace: "batch", peer_name });
+  const traffic: TrafficRow[] = [
+    stored("2026-07-02T01:00:00", "job-b", "1"),
+    stored("2026-07-01T01:00:00", "job-a", "2"),
+    { traffic_type: "INGRESS", pod_port: "80", traffic_in_out_ip: "10.0.0.10", traffic_in_out_port: "3", ip_protocol: "TCP", time_stamp: "2026-07-01T01:00:00" },
+    stored("2026-07-02T02:00:00", "job-b", "4"),
+  ];
+  const { policy } = await generateNetworkPolicyWithComments(web, traffic, makePeerResolver(memoryLookup([jobA, jobB])));
+  const ingress = (policy.spec as { ingress: { from: { ipBlock?: { cidr: string }; podSelector?: { matchLabels: Record<string, string> } }[] }[] }).ingress;
+  assert.deepEqual(ingress.map((r) => r.from[0].ipBlock?.cidr ?? r.from[0].podSelector?.matchLabels), [
+    "10.0.0.10/32", { app: "a" }, { app: "b" },
+  ]);
+});
+
+test("unattributed comment quotes the newest row time_stamp verbatim, or none", async () => {
+  assert.equal(newestTimeStamp(["2026-05-21T08:30:00", "2026-07-23T10:00:00", "junk"]), "2026-07-23T10:00:00");
+  assert.equal(newestTimeStamp(["junk", ""]), "");
+  const unattributed: PeerResolver = async () => ({ unattributed: true });
+  const rows: TrafficRow[] = [{ traffic_type: "INGRESS", pod_port: "3306", traffic_in_out_ip: "10.244.12.199", ip_protocol: "TCP" }];
+  const { policy, comments } = await generateCiliumPolicyWithComments(cmangos, rows, unattributed);
+  assert.deepEqual(comments.ingress, { 0: ["unattributed peer 10.244.12.199"] });
+  const ingress = (policy.spec as { ingress: { fromCIDR?: string[]; fromEndpoints?: unknown }[] }).ingress;
+  assert.deepEqual(ingress[0].fromCIDR, ["10.244.12.199/32"]);
+  assert.equal(ingress[0].fromEndpoints, undefined);
 });

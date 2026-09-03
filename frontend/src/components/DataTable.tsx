@@ -1,8 +1,9 @@
 import React, { useState, useEffect, useMemo, useCallback } from 'react';
-import type { PodInfo, PodNodeData, ServiceInfo } from '../types';
+import type { NetworkTraffic, PodInfo, PodNodeData, ServiceInfo } from '../types';
 import { ArrowRight, Activity, ChevronDown, ChevronRight, Filter, MousePointerClick, Inbox } from 'lucide-react';
 import { EmptyState } from './ui/EmptyState';
 import { displaySyscallList } from '../utils/syscalls';
+import { UNATTRIBUTED_PEER_TOOLTIP, buildPeerIndex, isPlaceholderPod, resolvePeer } from '../utils/peerResolution';
 
 interface DataTableProps {
   selectedPod: PodNodeData | null;
@@ -16,6 +17,8 @@ interface TrafficIdentity {
   podNamespace?: string;
   svcName?: string;
   svcNamespace?: string;
+  /** The start-time guard excluded every pod that ever held the IP. */
+  unattributed?: boolean;
   isExternal: boolean;
 }
 
@@ -80,11 +83,14 @@ const DataTable: React.FC<DataTableProps> = ({ selectedPod, allPodsLookup, servi
         </div>
       );
     } else {
-      // External
+      // External, or a former IP holder no live pod matched at flow time
       return (
         <div className="flex flex-col gap-0.5">
-          <span className="px-1.5 py-0.5 bg-hubble-border/30 text-secondary rounded text-xs font-medium w-fit">
-            External
+          <span
+            className="px-1.5 py-0.5 bg-hubble-border/30 text-secondary rounded text-xs font-medium w-fit"
+            title={identity.unattributed ? UNATTRIBUTED_PEER_TOOLTIP : undefined}
+          >
+            {identity.unattributed ? 'Unattributed' : 'External'}
           </span>
           <span className="font-mono text-xs text-secondary pl-1">
             {ip}{port ? `:${port}` : ''}
@@ -158,15 +164,13 @@ const DataTable: React.FC<DataTableProps> = ({ selectedPod, allPodsLookup, servi
     return { isExternal: true };
   }, [podLookupMaps, svcLookupByIp]);
 
-  // Memoize resolved identities map - recalculate only when traffic or pods change
-  // Resolves both remote IPs (traffic_in_out_ip) and local pod IPs (pod_ip)
+  // Memoize resolved identities for the local side (pod_ip) — by IP
   const resolvedIdentities = useMemo(() => {
     if (!selectedPod?.traffic) return new Map<string, TrafficIdentity>();
 
     const identities = new Map<string, TrafficIdentity>();
     const uniqueIPs = new Set<string>();
     selectedPod.traffic.forEach(t => {
-      if (t.traffic_in_out_ip) uniqueIPs.add(t.traffic_in_out_ip);
       if (t.pod_ip) uniqueIPs.add(t.pod_ip);
     });
 
@@ -176,6 +180,42 @@ const DataTable: React.FC<DataTableProps> = ({ selectedPod, allPodsLookup, servi
 
     return identities;
   }, [selectedPod, resolveTrafficIdentity]);
+
+  // The remote side is attributed per ROW (utils/peerResolution): the row's
+  // stored peer_* first, else by IP guarded by the flow time — one IP can be
+  // different peers at different times.
+  const peerIndex = useMemo(() => buildPeerIndex(allPodsLookup, services), [allPodsLookup, services]);
+  const remoteIdentities = useMemo(() => {
+    const identities = new Map<NetworkTraffic, TrafficIdentity>();
+    selectedPod?.traffic?.forEach((t) => {
+      const peer = resolvePeer(t, peerIndex);
+      switch (peer.kind) {
+        case 'pod':
+        case 'node':
+          if (isPlaceholderPod(peer.pod)) { identities.set(t, { isExternal: true, unattributed: true }); break; }
+          identities.set(t, {
+            podName: peer.pod.pod_name,
+            podIdentity: peer.pod.pod_identity || peer.pod.workload_name || undefined,
+            podNamespace: peer.pod.pod_namespace || undefined,
+            isExternal: false,
+          });
+          break;
+        case 'service':
+          identities.set(t, peer.svc
+            ? { svcName: peer.name || undefined, svcNamespace: peer.namespace || undefined, isExternal: false }
+            : { isExternal: true, unattributed: true });
+          break;
+        case 'unattributed':
+          identities.set(t, { isExternal: true, unattributed: true });
+          break;
+        default:
+          // No pod ever held the IP and it is no ClusterIP. Never derived
+          // from a pod or Service that holds the IP today.
+          identities.set(t, { isExternal: true });
+      }
+    });
+    return identities;
+  }, [selectedPod, peerIndex]);
 
   // Compute available protocols and ports for filter dropdowns
   const availableProtocols = useMemo(() => {
@@ -492,7 +532,7 @@ const DataTable: React.FC<DataTableProps> = ({ selectedPod, allPodsLookup, servi
                 </thead>
                 <tbody>
                   {paginatedTraffic.map((traffic, index) => {
-                    const remoteIdentity = resolvedIdentities.get(traffic.traffic_in_out_ip || '') || { isExternal: true };
+                    const remoteIdentity = remoteIdentities.get(traffic) || { isExternal: true };
                     const isIngress = traffic.traffic_type?.toLowerCase() === 'ingress';
 
                     // For external nodes, traffic records come from local pods.

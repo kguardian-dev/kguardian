@@ -15,6 +15,9 @@ interface PodNodeProps {
   selected?: boolean;
 }
 
+// Pseudo-namespaces of the nodes that aggregate bare IPs rather than pods.
+const AGGREGATE_NAMESPACES = new Set(['internet', 'cluster', 'unattributed']);
+
 const PodNode: React.FC<PodNodeProps> = React.memo(({ data, selected }) => {
   const trafficCount = data.traffic?.length || 0;
   const identityName = data.label || data.pod.pod_identity || data.pod.pod_name;
@@ -77,17 +80,17 @@ const PodNode: React.FC<PodNodeProps> = React.memo(({ data, selected }) => {
           <IconComponent className={`w-5 h-5 ${accentColor}`} />
 
           <div className="flex-1 min-w-0">
-            <div className="font-semibold text-sm text-primary truncate" title={identityName}>
+            <div className="font-semibold text-sm text-primary truncate" title={data.tooltip ?? identityName}>
               {identityName}
             </div>
-            {data.externalNamespace && data.externalNamespace !== 'internet' && data.externalNamespace !== 'cluster' && (
+            {data.externalNamespace && !AGGREGATE_NAMESPACES.has(data.externalNamespace) && (
               <div className="text-xs text-tertiary truncate" title={data.externalNamespace}>
                 ns: {data.externalNamespace}
               </div>
             )}
             {podCount > 1 && (
               <div className="text-xs text-tertiary">
-                {podCount} {isExternal ? ((data.externalNamespace === 'internet' || data.externalNamespace === 'cluster') ? 'IPs' : 'pods') : 'replicas'}
+                {podCount} {isExternal ? (AGGREGATE_NAMESPACES.has(data.externalNamespace ?? '') ? 'IPs' : 'pods') : 'replicas'}
               </div>
             )}
           </div>

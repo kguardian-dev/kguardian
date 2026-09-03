@@ -41,6 +41,12 @@ diesel::table! {
         // as ipBlock / host entities instead of a podSelector.
         // Positional — stays last.
         host_network -> Nullable<Bool>,
+        // pod_obj.status.startTime as naive UTC, captured on /pod/spec
+        // before compact_pod_obj strips `status`. Drives the start-time
+        // guard: a flow never resolves to a pod that started after it.
+        // NULL = unknown (older broker wrote the row, or no startTime).
+        // Positional — stays last.
+        started_at -> Nullable<Timestamp>,
     }
 }
 
@@ -57,6 +63,18 @@ diesel::table! {
         traffic_in_out_port -> Nullable<Varchar>,
         decision -> Nullable<Varchar>,
         time_stamp -> Timestamp,
+        // Peer identity stamped at ingest (src/peer.rs). All nullable;
+        // NULL peer_kind = unresolved (external / legacy / spec never
+        // arrived). Declared after time_stamp to match the physical
+        // column order — PodTraffic derives Queryable, which is
+        // positional, so any new column goes here.
+        peer_kind -> Nullable<Varchar>,
+        peer_namespace -> Nullable<Varchar>,
+        peer_name -> Nullable<Varchar>,
+        peer_uid -> Nullable<Varchar>,
+        peer_workload_kind -> Nullable<Varchar>,
+        peer_workload_name -> Nullable<Varchar>,
+        peer_resolved_at -> Nullable<Timestamp>,
     }
 }
 

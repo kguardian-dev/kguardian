@@ -1,0 +1,45 @@
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  labels:
+    app.kubernetes.io/component: standard-policy
+    app.kubernetes.io/name: cmangos-database
+    app.kubernetes.io/part-of: kguardian
+  name: cmangos-database-standard-policy
+  namespace: game-servers
+spec:
+  egress:
+  - ports:
+    - port: 5432
+      protocol: TCP
+    to:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: game-servers
+      podSelector:
+        matchLabels:
+          app: db
+  # host-network peer monitoring/node-exporter on node worker-1 — podSelector cannot match host traffic
+  - ports:
+    - port: 9100
+      protocol: TCP
+    to:
+    - ipBlock:
+        cidr: 192.168.50.101/32
+  ingress:
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: game-servers
+      podSelector:
+        matchLabels:
+          app: cmangos-backup
+    ports:
+    - port: 3306
+      protocol: TCP
+  podSelector:
+    matchLabels:
+      app: cmangos-database
+  policyTypes:
+  - Ingress
+  - Egress

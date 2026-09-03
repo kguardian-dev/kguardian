@@ -43,7 +43,7 @@ spec:
 ## How kguardian Generates Policies
 
 1. **Observes traffic** continuously via eBPF (let several minutes of representative traffic accumulate before generating)
-2. **Identifies peers** by resolving IPs to pods/services
+2. **Identifies peers** — each peer IP is resolved to a pod, Service or node when the flow is ingested and stored on the row, so a recycled IP never points at its later owner ([how peers are attributed](/concepts/peer-attribution))
 3. **Groups rules** by protocol and port
 4. **Deduplicates** to create minimal policies
 5. **Generates YAML** ready to apply

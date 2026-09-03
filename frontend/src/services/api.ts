@@ -94,11 +94,16 @@ class BrokerAPIClient {
   }
 
   /**
-   * Get pod details by IP address
+   * Get pod details by IP address. `at` (a traffic row's `time_stamp`) asks
+   * the broker for the pod that held the IP AT that time — it excludes pods
+   * started later and prefers one alive then (`GET /pod/ip/{ip}?at=`). A
+   * broker predating the parameter ignores it and returns the current
+   * holder, so callers apply the same start-time guard themselves
+   * (utils/peerResolution). 404 (no holder at that time) resolves to null.
    */
-  async getPodDetailsByIP(podIP: string): Promise<PodInfo | null> {
+  async getPodDetailsByIP(podIP: string, at?: string): Promise<PodInfo | null> {
     try {
-      const response = await this.client.get(`/pod/ip/${podIP}`);
+      const response = await this.client.get(`/pod/ip/${podIP}`, at !== undefined ? { params: { at } } : undefined);
       return response.data;
     } catch (error) {
       console.error('Error fetching pod details by IP:', error);

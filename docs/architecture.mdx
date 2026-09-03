@@ -157,7 +157,7 @@ graph TB
 
     1. Fetches all traffic for a specific pod
     2. Identifies unique source/destination IPs
-    3. Resolves IPs to pods/services via the Broker
+    3. Reads the peer identity the Broker stamped on each row at ingest; falls back to `/pod/ip/{ip}?at=` for unresolved rows ([how peers are attributed](/concepts/peer-attribution))
     4. Groups traffic by protocol and port
     5. Deduplicates rules
     6. Generates K8s/Cilium NetworkPolicy YAML
@@ -215,7 +215,7 @@ graph TB
     Tables:
     - `pod_details`: Pod metadata (name, namespace, IP, labels, spec)
     - `svc_details`: Service metadata (name, namespace, cluster IP, selectors)
-    - `pod_traffic`: Network connections (src/dst IP, port, protocol, type)
+    - `pod_traffic`: Network connections (src/dst IP, port, protocol, type) plus the peer identity resolved at ingest (`peer_kind`, `peer_namespace`, `peer_name`, `peer_uid`, `peer_workload_kind`, `peer_workload_name`, `peer_resolved_at`)
     - `pod_syscalls`: Syscall observations (pod, syscall names, count, architecture)
     - `audit_verdicts`: Evaluator would-deny verdicts for observed flows
     - `install_info`: Installation metadata
@@ -243,7 +243,7 @@ graph TB
   <Accordion icon="network-wired" title="Policy Generation Logic">
     Network policies:
     1. Query `/pod/traffic/{pod}` from Broker
-    2. For each unique peer IP, query `/pod/ip/{ip}` or `/svc/ip/{ip}`
+    2. Use the row's stored `peer_*` identity; for rows without one, query `/pod/ip/{ip}?at=<time_stamp>` or `/svc/ip/{ip}`
     3. Build `NetworkPolicyPeer` with `podSelector` + `namespaceSelector`
     4. Group by direction (ingress/egress) and port/protocol
     5. Deduplicate rules via JSON marshaling comparison

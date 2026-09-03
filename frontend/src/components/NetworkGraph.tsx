@@ -14,6 +14,8 @@ import ELK from 'elkjs/lib/elk.bundled.js';
 import { Eye, EyeOff, Activity, ShieldAlert, Server, Crosshair, X, ArrowRight, ArrowDown } from 'lucide-react';
 import PodNode from './PodNode';
 import { shouldExitFocus } from '../utils/graphFocus';
+import { buildPeerIndex, resolvePeer, type PeerResolution } from '../utils/peerResolution';
+import { buildExternalNodes, remoteNodeForRow } from '../utils/externalPeers';
 import type { PodNodeData, PodInfo, ServiceInfo, NetworkTraffic } from '../types';
 import { UI_TIMING } from '../constants/ui';
 
@@ -90,18 +92,28 @@ const NetworkGraphInner: React.FC<NetworkGraphProps> = ({
     return map;
   }, [allPodsLookup]);
 
-  // Build IP-to-PodNodeData lookup for in-namespace pods
-  const ipToLocalPodMap = useMemo(() => {
+  // Peer attribution per traffic ROW (utils/peerResolution): the row's
+  // stored peer_* identity first, else a by-IP lookup guarded by the flow
+  // time. Pod IPs are recycled, so this — not an IP → pod map — decides
+  // which node a flow connects to. Shared by externalNodes and initialEdges.
+  const peerIndex = useMemo(() => buildPeerIndex(allPodsLookup, services), [allPodsLookup, services]);
+  const rowPeers = useMemo(() => {
+    const map = new Map<NetworkTraffic, PeerResolution>();
+    pods.forEach((pod) => {
+      pod.traffic?.forEach((traffic) => {
+        if (traffic.traffic_in_out_ip) map.set(traffic, resolvePeer(traffic, peerIndex));
+      });
+    });
+    return map;
+  }, [pods, peerIndex]);
+
+  // Build name-to-PodNodeData lookup for in-namespace pods (a resolved peer
+  // is matched to its node by NAME, never by IP)
+  const localPodByName = useMemo(() => {
     const map = new Map<string, PodNodeData>();
     pods.forEach((pod) => {
-      if (pod.pod.pod_ip) {
-        map.set(pod.pod.pod_ip, pod);
-      }
-      pod.pods?.forEach((p) => {
-        if (p.pod_ip) {
-          map.set(p.pod_ip, pod);
-        }
-      });
+      map.set(pod.pod.pod_name, pod);
+      pod.pods?.forEach((p) => map.set(p.pod_name, pod));
     });
     return map;
   }, [pods]);
@@ -138,9 +150,9 @@ const NetworkGraphInner: React.FC<NetworkGraphProps> = ({
     return map;
   }, [services, pods]);
 
-  // Map backing pod IP → service ClusterIP, for cross-namespace deduplication.
-  // Shared between externalNodes (traffic merge) and initialEdges (edge resolution).
-  const podIpToSvcIp = useMemo(() => {
+  // Map backing pod NAME → service ClusterIP, for peers resolved to a pod
+  // record (the by-IP map above is ambiguous once an IP has changed hands).
+  const podNameToSvcIp = useMemo(() => {
     const map = new Map<string, string>();
     services.forEach((svc) => {
       if (!svc.svc_ip) return;
@@ -148,9 +160,9 @@ const NetworkGraphInner: React.FC<NetworkGraphProps> = ({
       const selectorLabels = svcSpec?.selector as Record<string, string> | undefined;
       if (!selectorLabels || Object.keys(selectorLabels).length === 0) return;
       allPodsLookup.forEach((pod) => {
-        if (!pod.pod_ip || !pod.workload_selector_labels) return;
+        if (!pod.workload_selector_labels || pod.pod_namespace !== svc.svc_namespace) return;
         if (Object.entries(selectorLabels).every(([k, v]) => pod.workload_selector_labels![k] === v)) {
-          map.set(pod.pod_ip, svc.svc_ip!);
+          map.set(pod.pod_name, svc.svc_ip!);
         }
       });
     });
@@ -158,238 +170,21 @@ const NetworkGraphInner: React.FC<NetworkGraphProps> = ({
   }, [services, allPodsLookup]);
 
   // Discover external endpoints from traffic data, split by direction
-  // Ingress sources (-in suffix) go on the left, egress destinations (-out suffix) on the right
+  // (utils/externalPeers): ingress sources (-in) on the left, egress
+  // destinations (-out) on the right. Every row joins the node of the peer
+  // resolvePeer attributed to it; a Service is never derived from a raw IP.
   const externalNodes = useMemo(() => {
     if (!showExternalNodes || !showTraffic) return [];
-
-    // Step 1: Classify each external IP's traffic by direction
-    const externalIpData = new Map<string, {
-      podInfo: PodInfo | null;
-      ip: string;
-      ingressTraffic: NetworkTraffic[];
-      egressTraffic: NetworkTraffic[];
-    }>();
-
-    pods.forEach((pod) => {
-      pod.traffic?.forEach((traffic) => {
-        const remoteIp = traffic.traffic_in_out_ip;
-        if (!remoteIp) return;
-        if (ipToLocalPodMap.has(remoteIp)) return;
-        if (svcIpToLocalPodMap.has(remoteIp)) return;
-
-        if (!externalIpData.has(remoteIp)) {
-          externalIpData.set(remoteIp, {
-            podInfo: ipToAllPodsMap.get(remoteIp) || null,
-            ip: remoteIp,
-            ingressTraffic: [],
-            egressTraffic: [],
-          });
-        }
-        const entry = externalIpData.get(remoteIp)!;
-        const trafficType = traffic.traffic_type?.toLowerCase();
-        if (trafficType === 'ingress') {
-          entry.ingressTraffic.push(traffic);
-        } else if (trafficType === 'egress') {
-          entry.egressTraffic.push(traffic);
-        }
-      });
+    return buildExternalNodes({
+      pods,
+      services,
+      rowPeers,
+      localPodByName,
+      svcIpToLocalPod: svcIpToLocalPodMap,
+      podNameToSvcIp,
+      ipToAllPods: ipToAllPodsMap,
     });
-
-    // Step 2: Build service IP lookup
-    const svcIpLookup = new Map<string, ServiceInfo>();
-    services.forEach((svc) => {
-      if (svc.svc_ip) svcIpLookup.set(svc.svc_ip, svc);
-    });
-
-    // Step 2b: Merge backing pod IP entries into their service IP entry so that
-    // curl→serviceIP and curl→podIP produce a single external node (and single edge)
-    // Track which backing pod IPs were merged into each service IP so we can
-    // include them in the external node's pods array for edge resolution.
-    const mergedBackingIps = new Map<string, string[]>(); // svcIp → [podIp, ...]
-    const podIpsToMerge: Array<[string, string]> = [];
-    externalIpData.forEach((_entry, ip) => {
-      const svcIp = podIpToSvcIp.get(ip);
-      if (svcIp && svcIpLookup.has(svcIp)) podIpsToMerge.push([ip, svcIp]);
-    });
-    podIpsToMerge.forEach(([podIp, svcIp]) => {
-      const entry = externalIpData.get(podIp)!;
-      if (!externalIpData.has(svcIp)) {
-        externalIpData.set(svcIp, { podInfo: null, ip: svcIp, ingressTraffic: [], egressTraffic: [] });
-      }
-      const svcEntry = externalIpData.get(svcIp)!;
-      svcEntry.ingressTraffic.push(...entry.ingressTraffic);
-      svcEntry.egressTraffic.push(...entry.egressTraffic);
-      externalIpData.delete(podIp);
-      if (!mergedBackingIps.has(svcIp)) mergedBackingIps.set(svcIp, []);
-      mergedBackingIps.get(svcIp)!.push(podIp);
-    });
-
-    // Step 3: Group by identity, tracking direction-specific traffic
-    interface IdentityGroup {
-      memberPods: PodInfo[];
-      ingressTraffic: NetworkTraffic[];
-      egressTraffic: NetworkTraffic[];
-    }
-
-    const identityMap = new Map<string, IdentityGroup>();
-    const internetEntries: { pod: PodInfo; ingressTraffic: NetworkTraffic[]; egressTraffic: NetworkTraffic[] }[] = [];
-
-    externalIpData.forEach((ext) => {
-      // First check service IPs (takes priority regardless of podInfo)
-      const svc = svcIpLookup.get(ext.ip);
-      if (svc) {
-        const ns = svc.svc_namespace || 'unknown';
-        const name = svc.svc_name || ext.ip;
-        const key = `external-svc-${ns}-${name}`;
-        if (!identityMap.has(key)) {
-          identityMap.set(key, { memberPods: [], ingressTraffic: [], egressTraffic: [] });
-        }
-        const group = identityMap.get(key)!;
-        const backingIps = mergedBackingIps.get(ext.ip) || [];
-        if (backingIps.length > 0) {
-          // Use only the real backing pod IPs so the pod count reflects actual pods.
-          // The service ClusterIP is a virtual IP and should not count as a pod.
-          // Edge resolution for "→ service ClusterIP" traffic is handled in the edge
-          // building step by indexing the canonical service IP from each backing pod IP.
-          backingIps.forEach((backingIp) => {
-            group.memberPods.push({
-              pod_name: name,
-              pod_ip: backingIp,
-              pod_namespace: ns,
-              pod_identity: name,
-              time_stamp: '',
-              node_name: '',
-              is_dead: false,
-            });
-          });
-        } else {
-          // No backing pods known — use the service ClusterIP as a placeholder so the
-          // node is still displayed and edges for "→ service ClusterIP" traffic resolve.
-          if (ext.ip) {
-            group.memberPods.push({
-              pod_name: name,
-              pod_ip: ext.ip,
-              pod_namespace: ns,
-              pod_identity: name,
-              time_stamp: '',
-              node_name: '',
-              is_dead: false,
-            });
-          }
-        }
-        group.ingressTraffic.push(...ext.ingressTraffic);
-        group.egressTraffic.push(...ext.egressTraffic);
-        return;
-      }
-
-      // Cross-namespace pod (not dead) — use pod_identity if available, fall back to pod_name
-      // for standalone pods created without a Deployment/ReplicaSet (pod_identity is null)
-      if (ext.podInfo && !ext.podInfo.is_dead) {
-        const identity = ext.podInfo.pod_identity || ext.podInfo.pod_name;
-        const ns = ext.podInfo.pod_namespace || 'unknown';
-        const key = `external-${ns}-${identity}`;
-        if (!identityMap.has(key)) {
-          identityMap.set(key, { memberPods: [], ingressTraffic: [], egressTraffic: [] });
-        }
-        const group = identityMap.get(key)!;
-        group.memberPods.push(ext.podInfo);
-        group.ingressTraffic.push(...ext.ingressTraffic);
-        group.egressTraffic.push(...ext.egressTraffic);
-        return;
-      }
-
-      // Dead pod — IP belonged to a pod that no longer exists; skip entirely
-      if (ext.podInfo && ext.podInfo.is_dead) {
-        return;
-      }
-
-      // Truly external IP (not matching any cluster pod or service) — aggregate into "Internet" node
-      internetEntries.push({
-        pod: {
-          pod_name: ext.ip,
-          pod_ip: ext.ip,
-          pod_namespace: 'internet',
-          time_stamp: '',
-          node_name: '',
-          is_dead: false,
-        },
-        ingressTraffic: ext.ingressTraffic,
-        egressTraffic: ext.egressTraffic,
-      });
-    });
-
-    // Step 4: Create directional nodes — separate ingress (-in) and egress (-out) nodes
-    const externalPodNodes: PodNodeData[] = [];
-
-    const addDirectionalNodes = (
-      key: string,
-      label: string,
-      memberPods: PodInfo[],
-      ingressTraffic: NetworkTraffic[],
-      egressTraffic: NetworkTraffic[],
-      externalNamespace: string,
-    ) => {
-      const primary = memberPods[0];
-      if (ingressTraffic.length > 0) {
-        externalPodNodes.push({
-          id: `${key}-in`,
-          label,
-          pod: primary,
-          pods: memberPods,
-          traffic: ingressTraffic,
-          isExpanded: false,
-          isExternal: true,
-          externalNamespace,
-        });
-      }
-      if (egressTraffic.length > 0) {
-        externalPodNodes.push({
-          id: `${key}-out`,
-          label,
-          pod: primary,
-          pods: memberPods,
-          traffic: egressTraffic,
-          isExpanded: false,
-          isExternal: true,
-          externalNamespace,
-        });
-      }
-    };
-
-    identityMap.forEach((group, key) => {
-      const primary = group.memberPods[0];
-      addDirectionalNodes(
-        key,
-        primary.pod_identity || primary.pod_name,
-        group.memberPods,
-        group.ingressTraffic,
-        group.egressTraffic,
-        primary.pod_namespace || 'unknown',
-      );
-    });
-
-    // Aggregate all unknown IPs into a single "Internet" node
-    if (internetEntries.length > 0) {
-      const internetPods: PodInfo[] = [];
-      const internetIngress: NetworkTraffic[] = [];
-      const internetEgress: NetworkTraffic[] = [];
-      internetEntries.forEach((entry) => {
-        internetPods.push(entry.pod);
-        internetIngress.push(...entry.ingressTraffic);
-        internetEgress.push(...entry.egressTraffic);
-      });
-      addDirectionalNodes(
-        'external-internet',
-        'Internet',
-        internetPods,
-        internetIngress,
-        internetEgress,
-        'internet',
-      );
-    }
-
-    return externalPodNodes;
-  }, [pods, showExternalNodes, showTraffic, ipToLocalPodMap, ipToAllPodsMap, svcIpToLocalPodMap, services, podIpToSvcIp]);
+  }, [pods, showExternalNodes, showTraffic, ipToAllPodsMap, svcIpToLocalPodMap, services, podNameToSvcIp, rowPeers, localPodByName]);
 
   // Combine in-namespace and external pods for rendering
   // When traffic is enabled, hide local pods that have no traffic
@@ -458,27 +253,17 @@ const NetworkGraphInner: React.FC<NetworkGraphProps> = ({
       dropCount: number;
     }>();
 
-    // Build direction-specific IP lookups for external nodes
-    const ingressExternalIpMap = new Map<string, PodNodeData>();
-    const egressExternalIpMap = new Map<string, PodNodeData>();
+    // Build direction-specific lookups for external nodes by the peer keys
+    // they answer for (utils/externalPeers). Nothing is indexed by IP.
+    const ingressExternalByKey = new Map<string, PodNodeData>();
+    const egressExternalByKey = new Map<string, PodNodeData>();
     allDisplayPods.forEach((pod) => {
       if (!pod.isExternal) return;
       const isInNode = pod.id.endsWith('-in');
       const isOutNode = pod.id.endsWith('-out');
-      pod.pods?.forEach((p) => {
-        if (p.pod_ip) {
-          if (isInNode) ingressExternalIpMap.set(p.pod_ip, pod);
-          if (isOutNode) egressExternalIpMap.set(p.pod_ip, pod);
-          // Also index the canonical service ClusterIP for this backing pod IP so that
-          // traffic recorded against the service IP (not the pod IP directly) still
-          // resolves to this external node — e.g. when a pod curls via the ClusterIP
-          // first and then later directly to the backing pod IP.
-          const svcIp = podIpToSvcIp.get(p.pod_ip);
-          if (svcIp) {
-            if (isInNode) ingressExternalIpMap.set(svcIp, pod);
-            if (isOutNode) egressExternalIpMap.set(svcIp, pod);
-          }
-        }
+      pod.peerKeys?.forEach((k) => {
+        if (isInNode) ingressExternalByKey.set(k, pod);
+        if (isOutNode) egressExternalByKey.set(k, pod);
       });
     });
 
@@ -486,32 +271,16 @@ const NetworkGraphInner: React.FC<NetworkGraphProps> = ({
       pod.traffic?.forEach((traffic) => {
         let sourcePod: PodNodeData | undefined;
         let destPod: PodNodeData | undefined;
-        const remoteIp = traffic.traffic_in_out_ip;
 
+        // The row's attributed peer (utils/peerResolution) is matched to its
+        // node by NAME (local) or peer key (external) — never by IP, which
+        // may have changed hands since the flow (utils/externalPeers).
         const trafficType = traffic.traffic_type?.toLowerCase();
         if (trafficType === 'egress') {
           sourcePod = pod;
-          // Egress: remote IP is the destination → resolve to local pod, service IP, or egress-external node.
-          // If the remote IP is a backing pod IP for a cross-namespace service, resolve via the service ClusterIP
-          // so that curl→serviceIP and curl→podIP collapse to the same external node.
-          if (remoteIp) {
-            const canonicalIp = podIpToSvcIp.get(remoteIp) ?? remoteIp;
-            destPod = ipToLocalPodMap.get(remoteIp)
-              || svcIpToLocalPodMap.get(remoteIp)
-              || egressExternalIpMap.get(remoteIp)
-              || egressExternalIpMap.get(canonicalIp);
-          }
+          destPod = remoteNodeForRow(traffic, rowPeers, localPodByName, svcIpToLocalPodMap, egressExternalByKey);
         } else if (trafficType === 'ingress') {
-          // Ingress: remote IP is the source → resolve to local pod, service IP, or ingress-external node.
-          // If the remote IP is a backing pod IP, also check the canonical service ClusterIP
-          // (mirrors the egress canonicalization logic).
-          if (remoteIp) {
-            const canonicalIp = podIpToSvcIp.get(remoteIp) ?? remoteIp;
-            sourcePod = ipToLocalPodMap.get(remoteIp)
-              || svcIpToLocalPodMap.get(remoteIp)
-              || ingressExternalIpMap.get(remoteIp)
-              || ingressExternalIpMap.get(canonicalIp);
-          }
+          sourcePod = remoteNodeForRow(traffic, rowPeers, localPodByName, svcIpToLocalPodMap, ingressExternalByKey);
           destPod = pod;
         }
 
@@ -618,7 +387,7 @@ const NetworkGraphInner: React.FC<NetworkGraphProps> = ({
     });
 
     return edges;
-  }, [pods, allDisplayPods, ipToLocalPodMap, svcIpToLocalPodMap, showTraffic, wellKnownPorts, podIpToSvcIp]);
+  }, [pods, allDisplayPods, svcIpToLocalPodMap, showTraffic, wellKnownPorts, rowPeers, localPodByName]);
 
   // Focus filter: the focused node + everything one hop up/downstream. Applied
   // before ELK so the isolated subset gets its own clean layout.

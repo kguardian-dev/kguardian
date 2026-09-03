@@ -28,6 +28,7 @@
               "concepts/overview",
               "concepts/ebpf-monitoring",
               "concepts/network-policies",
+              "concepts/peer-attribution",
               "concepts/audit-network-policy",
               "concepts/seccomp-profiles",
               "concepts/policy-as-code"

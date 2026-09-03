@@ -174,6 +174,20 @@ async fn process_pod(
     client: &Client,
     cluster_capture_level: CaptureLevel,
 ) -> Option<PodRegistration> {
+    // A Succeeded/Failed or deleting pod no longer owns its IP, but its
+    // object lingers in the API server and shows up in every resync.
+    // Re-posting it kept its broker row alive (and flapping against the
+    // reconciler, which marks it dead), so flows on its recycled IP were
+    // attributed to a Job that finished weeks earlier. Skip it entirely;
+    // the reconciler marks the row dead.
+    if !crate::pod_reconciler::pod_holds_an_ip(pod) {
+        debug!(
+            "skipping terminal/deleting pod {}/{}",
+            pod.metadata.namespace.as_deref().unwrap_or(""),
+            pod.name_any()
+        );
+        return None;
+    }
     if let Some(con_ids) = pod_unready(pod) {
         // Computed once here so the broker payload and the eBPF
         // registration can never disagree about a pod's tier.

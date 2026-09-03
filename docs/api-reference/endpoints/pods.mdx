@@ -37,13 +37,50 @@ controller's `extract_pod_identity_and_selectors` helper (priority:
 `app.kubernetes.io/name` → `app.kubernetes.io/component` → `k8s-app`
 → owner-reference walk to Deployment/StatefulSet/DaemonSet).
 
-`host_network` mirrors `spec.hostNetwork` and is the last field of the
-record. It is optional on ingest (older controllers omit it; the broker
+`host_network` mirrors `spec.hostNetwork`. It is optional on ingest (older controllers omit it; the broker
 then derives it from `pod_obj.spec.hostNetwork`) and always present on
 read as `true`, `false`, or `null` when unknown. Generators use it to
 render host-network peers as `ipBlock` / Cilium entities instead of a
 `podSelector` — see
 [Host-network peers and targets](/guides/generating-network-policies#host-network-peers-and-targets).
+
+`started_at` is the last field of the record and is optional on
+ingest. The broker captures it from `pod_obj.status.startTime` (the
+API server's RFC 3339 value, converted to naive UTC) before
+`compact_pod_obj` strips `status`, and stores it in its own column
+`pod_details.started_at`; a posted top-level `started_at` wins over the
+derivation. On read it is always present, as `"2026-08-04T09:12:41"`
+or `null` when unknown — a manifest with no `status.startTime`, or a row
+last written by a broker predating the column (it fills in on the pod's
+next watch upsert; every live pod is re-posted when the controller
+restarts). It is the input to the start-time guard: a flow is never
+attributed to a pod that started after the flow's `time_stamp`, nor to
+one with no `started_at`. A row still marked alive that has not been
+re-posted for `PEER_STALE_ALIVE_SECS` (default 900) is marked dead by
+the broker's stale-alive sweep. See
+[How peers are attributed](/concepts/peer-attribution#the-start-time-guard).
+
+The full record as returned by every `GET` below:
+
+```json
+{
+  "pod_name": "autobrr-7d9c4b8f6-q2x9k",
+  "pod_ip": "10.244.12.199",
+  "pod_namespace": "home-system",
+  "pod_obj": { "metadata": { "uid": "…", "labels": { "app": "autobrr" } } },
+  "time_stamp": "2026-09-03T05:00:00",
+  "node_name": "node-a",
+  "is_dead": false,
+  "pod_identity": null,
+  "workload_selector_labels": { "app": "autobrr" },
+  "pod_ips": ["10.244.12.199"],
+  "workload_kind": "Deployment",
+  "workload_name": "autobrr",
+  "capture_level": "full",
+  "host_network": false,
+  "started_at": "2026-08-04T09:12:41"
+}
+```
 
 ## POST /pod/mark_dead
 
@@ -96,14 +133,49 @@ curl http://localhost:9090/pod/name/my-app-7d9f6b8c4-x5z2w
 
 ## GET /pod/ip/&#123;ip&#125;
 
-Get a single pod by IP. Used by the advisor when resolving a peer
-IP to a pod identity during NetworkPolicy generation.
+Get a single pod by IP. Matches either the primary `pod_ip` or any
+address in `pod_ips`, so a dual-stack pod resolves on both families;
+IPv6 input is canonicalised before matching.
+
+Since peer identity is stamped on traffic rows at ingest, consumers
+only need this lookup for rows whose `peer_*` fields are `null`
+(pre-upgrade history, or a peer the broker never learned about). For
+those, pass the row's `time_stamp` as `at`.
 
 ```bash
 curl http://localhost:9090/pod/ip/10.244.1.5
+curl 'http://localhost:9090/pod/ip/10.244.1.5?at=2026-07-23T09:14:02Z'
 ```
 
-A 404 with body `"No data found"` is returned when no row matches.
+### Query Parameters
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `at` | timestamp | none | The instant the flow was observed. RFC 3339 (`2026-07-23T10:00:00Z`; an offset is converted to UTC) or the broker's naive form (`2026-07-23T10:00:00[.ffffff]`). Malformed input returns 400 with a message. |
+
+Without `at`, the pick among several rows holding the IP is
+`is_dead ASC, time_stamp DESC`: the live pod, else the most recently
+seen dead one. That answers "who holds this IP now", which is the
+wrong question for a flow observed weeks ago — pod IPs are recycled
+constantly and `pod_details` keeps no ownership history.
+
+With `at`, candidates are filtered by the start-time guard
+`started_at <= at` (and, for a dead candidate, record `time_stamp >= at`
+— it must not have been dead already at `at`), then ordered
+`is_dead ASC, started_at DESC, time_stamp DESC`; the first wins. A pod with a `null` `started_at` is
+excluded: the controller re-posts every live pod every 60 s, so within
+a minute of the broker upgrade every live pod has one, and `null`
+means a ghost row or a Pending pod.
+So for the recycled-IP case in
+[How peers are attributed](/concepts/peer-attribution#why-by-ip-lookups-at-read-time-were-wrong),
+`?at=2026-07-23T…` never returns `autobrr` (started 2026-08-04); it
+returns the CronJob pod that held the IP then if its row survived, and
+404 otherwise. The ingest resolver and the late-resolve task apply the
+same guard and ordering with `at = row.time_stamp`.
+
+A 404 with body `"No data found"` is returned when no row matches —
+including when every candidate is excluded by `at`. Treat that as an
+unattributed peer, not an error.
 
 ## GET /pod/list/&#123;node&#125;
 

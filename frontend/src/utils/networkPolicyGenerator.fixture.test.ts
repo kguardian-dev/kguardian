@@ -47,6 +47,8 @@ const golden = (f: string) => parse(goldenText(f)) as Record<string, unknown>;
 const podRecord = (p: Partial<PodInfo> & { pod_name: string; pod_ip: string }): PodInfo => ({
   pod_namespace: 'default',
   time_stamp: '2026-09-03T00:00:00',
+  // v4: a pod with no known start is never a by-IP candidate.
+  started_at: '2026-01-01T00:00:00',
   node_name: 'worker-0',
   is_dead: false,
   pod_obj: { metadata: { labels: p.workload_selector_labels ?? {} } },
@@ -137,8 +139,8 @@ const target = (pod: Partial<PodInfo> & { pod_name: string; pod_ip: string }, tr
   const p = podRecord(pod);
   return { id: p.pod_name, label: p.pod_name, pod: p, pods: [p], traffic, isExpanded: false } as PodNodeData;
 };
-const ingressRow = (ip: string, port: string) => ({ traffic_type: 'INGRESS', pod_port: port, traffic_in_out_ip: ip, ip_protocol: 'TCP' });
-const egressRow = (ip: string, port: string) => ({ traffic_type: 'EGRESS', traffic_in_out_ip: ip, traffic_in_out_port: port, ip_protocol: 'TCP' });
+const ingressRow = (ip: string, port: string) => ({ traffic_type: 'INGRESS', pod_port: port, traffic_in_out_ip: ip, ip_protocol: 'TCP', time_stamp: '2026-09-03T00:00:00' });
+const egressRow = (ip: string, port: string) => ({ traffic_type: 'EGRESS', traffic_in_out_ip: ip, traffic_in_out_port: port, ip_protocol: 'TCP', time_stamp: '2026-09-03T00:00:00' });
 
 const prometheus = { pod_name: 'prometheus', pod_ip: '10.0.0.5', pod_namespace: 'monitoring', node_name: 'worker-3',
   workload_name: 'prometheus', workload_selector_labels: { app: 'prometheus' }, host_network: false };

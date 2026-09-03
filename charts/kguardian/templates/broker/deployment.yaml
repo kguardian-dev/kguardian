@@ -105,6 +105,14 @@ spec:
             - name: AUDIT_INFLIGHT_PERMITS
               value: {{ .Values.broker.audit.inflightPermits | quote }}
             {{- end }}
+            {{- if hasKey (.Values.broker.peerResolution | default dict) "lateResolveWindowSeconds" }}
+            - name: PEER_LATE_RESOLVE_WINDOW_SECS
+              value: {{ .Values.broker.peerResolution.lateResolveWindowSeconds | quote }}
+            {{- end }}
+            {{- if hasKey (.Values.broker.peerResolution | default dict) "staleAliveSeconds" }}
+            - name: PEER_STALE_ALIVE_SECS
+              value: {{ .Values.broker.peerResolution.staleAliveSeconds | quote }}
+            {{- end }}
             {{- if hasKey .Values.broker.audit "evalTimeoutMs" }}
             - name: AUDIT_EVAL_TIMEOUT_MS
               value: {{ .Values.broker.audit.evalTimeoutMs | quote }}

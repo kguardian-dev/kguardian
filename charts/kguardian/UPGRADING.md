@@ -1,5 +1,77 @@
 # Upgrading the kguardian Helm chart
 
+## Peer identity is now fixed when a flow is ingested
+
+`pod_traffic` rows used to store only the peer's IP. The Network Map, the
+Policy Builder, the CLI and the assistant all turned that IP into a pod at
+read time, against `pod_details` as it stood at that moment. Pod IPs are
+recycled constantly (a single address on one cluster had 50+ dead former
+owners from hourly Jobs), and `pod_details` keeps no ownership history, so
+weeks-old flows were drawn and allow-listed against whichever pod holds
+the IP **today**. The same defect leaked Job-only labels (`job-name`,
+`controller-uid`) into generated policies.
+
+The broker now resolves the peer when the row is ingested and stores it on
+the row (`peer_kind`, `peer_namespace`, `peer_name`, `peer_uid`,
+`peer_workload_kind`, `peer_workload_name`, `peer_resolved_at`). Every
+consumer reads those fields first. Where a by-IP lookup still runs, it
+obeys a start-time guard: a flow is never attributed to a pod that
+started after the flow. See
+[How peers are attributed](https://kguardian.dev/concepts/peer-attribution).
+
+**After upgrading the broker:**
+
+1. **Existing rows are not backfilled.** The migration adds the columns
+   and leaves them `NULL` on every pre-upgrade row — a backfill against
+   today's tables would reproduce the bug permanently. Legacy rows are
+   resolved by IP with the start-time guard (`GET /pod/ip/{ip}?at=`).
+   The guard removes the impossible answers; it cannot recover history
+   that was never recorded, so an old row can still render as an
+   unattributed IP where a pod was previously (wrongly) shown.
+   `pod_details.started_at` is likewise `NULL` on pre-upgrade pod rows
+   until the controller re-posts the pod — every live pod is re-posted
+   when the controller restarts, so the DaemonSet rollout fills it in;
+   pods that were already dead at upgrade time never receive one (the
+   controller only re-posts live pods, and stored manifests carry no
+   `status`) and are excluded from by-IP attribution, so a historical
+   row whose peer was such a pod renders as unattributed rather than
+   being guessed from the IP's current holder. Live pods gain a start
+   time within 60 s and every flow recorded after the upgrade carries
+   its peer identity, so the gap is confined to pre-upgrade history and
+   closes with retention. Among live pods, `NULL` means a ghost row or a
+   Pending pod. A dead candidate is also rejected when it was already
+   dead at flow time (its record `time_stamp` — last seen alive or marked
+   dead — is before the flow); a pod marked dead late is over-permissive
+   only for the bounded interval in between. The controller no longer
+   posts Succeeded/Failed/deleting pods as alive and its reconciler marks
+   them dead, so a completed Job cannot be attributed later flows on its
+   recycled IP. The broker also
+   marks alive rows dead when they have not been re-posted for
+   `broker.peerResolution.staleAliveSeconds` (default 900, env
+   `PEER_STALE_ALIVE_SECS`, `0` disables), since the controller re-posts
+   live pods every 60 s; a ghost row can no longer claim an IP.
+2. **Regenerate policies after a fresh observation window.** Rows written
+   from now on carry a definite peer. Let a representative window of
+   traffic accumulate (hours for most workloads; a full cycle for
+   anything driven by CronJobs), then regenerate rather than reusing
+   policies built from the pre-upgrade backlog. Expect some peers that
+   used to render as a `podSelector` to become an `ipBlock` with a
+   `# unattributed peer <ip> at <time>` comment — that is a stale
+   identity being refused, not a regression.
+3. **Late-resolve window.** A flow that arrives before its peer pod's
+   spec is stored with a `NULL` peer and re-resolved by a broker task
+   within `broker.peerResolution.lateResolveWindowSeconds` (default 600,
+   env `PEER_LATE_RESOLVE_WINDOW_SECS`; `0` disables the task). Raise it
+   only if the controller lags pod creation by more than ten minutes on
+   your cluster. An IP that matches nothing — external traffic included —
+   stays `NULL` rather than being stamped `external`, so the guarded
+   fallback still applies to it later.
+4. **Upgrade the broker first, then the frontend, CLI and llm-bridge.**
+   An old consumer ignores the new fields and keeps resolving by IP
+   without the guard. A new consumer against an old broker sees neither
+   `peer_*` nor `started_at` on any record, so it cannot apply the guard
+   either; the misattribution persists until the broker is upgraded.
+
 ## Node-IP traffic is now recorded; host-network peers render as `ipBlock` / entities
 
 Controllers up to 1.11.0 with `controller.ignoreDaemonSet: true` (the default)

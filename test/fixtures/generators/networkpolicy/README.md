@@ -37,6 +37,38 @@ handoff so the TS ports can be written from it.
 | `standard_hostnetwork_target`, `cilium_hostnetwork_target` | the target pod itself is `host_network: true` |
 | `standard_cross_namespace_peer`, `cilium_cross_namespace_peer` | peers (a pod, a Service, ingress + egress) in namespaces other than the target's |
 | `standard_hostnetwork_service_peer`, `cilium_hostnetwork_service_peer` | Prometheus → node-exporter ClusterIP whose backing pods are `host_network: true`, plus a normally-backed db ClusterIP |
+| `standard_stale_ip_peer`, `cilium_stale_ip_peer` | legacy rows (no `peer_*`) from an IP whose only known holder started AFTER the flows ⇒ unattributed ipBlock/CIDR + comment, never that pod's selector |
+| `standard_stored_peer_identity`, `cilium_stored_peer_identity` | rows carry `peer_kind` pod / service / node; the pod IP is NOW held by another pod ⇒ the stored identity wins |
+
+## Peer attribution (stored identity + start-time guard)
+
+Pod IPs are recycled, so resolving a row's peer IP against today's pod table
+names whoever holds the IP now. Every row is attributed on its own and rules are
+grouped by `(peer IP, identity)`:
+
+- `peer_kind` set (broker resolved the peer at ingest): used verbatim. `pod`/`node`
+  are looked up in `/pod/info` by namespace + name (+ uid when both sides have
+  one); `service` must still be the Service `/svc/ip` returns. An identity that
+  no longer exists is **unattributed** — the IP is never re-resolved.
+- `peer_kind` null: `/svc/ip` first; else every pod record holding the IP is a
+  candidate, but only one with a KNOWN `started_at` that is not after the row
+  `time_stamp` qualifies — a NULL `started_at` is a ghost or Pending row and is
+  never chosen (every live pod has a start within a minute of the broker
+  upgrade). A dead candidate must also have been alive at flow time: its record
+  `time_stamp` (last seen alive / marked dead) must be at or after the row
+  `time_stamp`, else a completed Job pod would absorb every later flow on its
+  recycled IP; a dead row with no `time_stamp` is excluded. Alive first, then
+  newest `started_at`, then newest record.
+  Candidates existed but none qualified ⇒ **unattributed**; none at all ⇒ plain
+  CIDR as before. A row with no `time_stamp` (bare-IP callers) has nothing to
+  compare and keeps the pre-v4 by-IP behaviour.
+- **Unattributed** renders as `ipBlock` / `fromCIDR`/`toCIDR` of the observed IP
+  with the comment `# unattributed peer <ip> at <time>` (`<time>` = the newest row
+  `time_stamp` in the group, verbatim; omitted with " at" when none parses).
+
+Sibling rules for one IP are ordered by identity key (`cidr`, `unattributed`,
+`host:<ns>/<who>`, `sel:<ns>:k=v,...`); with one identity per IP the order is
+the pre-existing IP order. Full algorithm and inputs: the v4 generators handoff.
 
 ## Cross-namespace peers
 

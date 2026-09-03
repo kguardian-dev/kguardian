@@ -1,4 +1,4 @@
-import type { PodInfo, PodNodeData } from '../types';
+import type { NetworkTraffic, PodInfo, PodNodeData } from '../types';
 import {
   CILIUM_NAMESPACE_LABEL,
   type CiliumNetworkPolicy,
@@ -9,9 +9,10 @@ import {
   type CiliumPortRule,
 } from '../types/ciliumPolicy';
 import { apiClient } from '../services/api';
-import { resolveTrafficIdentity, type TrafficIdentity } from './trafficIdentity';
+import { createRowIdentityResolver, type TrafficIdentity } from './trafficIdentity';
 import { quoteYamlValue } from './networkPolicyGenerator';
 import { peerCIDR } from './ipCidr';
+import { collapseToServiceIdentity, identityKey, newerRow, unattributedPeerComment } from './peerComments';
 import { specNodeName } from './hostNetwork';
 import {
   HOST_NETWORK_ENTITIES,
@@ -33,50 +34,26 @@ export async function generateCiliumNetworkPolicy(pod: PodNodeData): Promise<Cil
   const ingressMap = new Map<string, { peer: PeerInfo; ports: Set<string> }>();
   const egressMap = new Map<string, { peer: PeerInfo; ports: Set<string> }>();
 
-  // Resolve all unique IPs to identities
-  const uniqueIPs = new Set<string>();
-  pod.traffic?.forEach((traffic) => {
-    if (traffic.traffic_in_out_ip) {
-      uniqueIPs.add(traffic.traffic_in_out_ip);
-    }
-  });
+  // Per-ROW identities — see the sibling comment in networkPolicyGenerator:
+  // stored `peer_*` first, then the guarded by-IP fallback.
+  const resolver = await createRowIdentityResolver();
+  const rows: NetworkTraffic[] = pod.traffic ?? [];
+  const identities = await Promise.all(rows.map((t) => resolver.resolve(t)));
+  const rowIdentity = new Map<NetworkTraffic, TrafficIdentity>();
+  rows.forEach((t, i) => rowIdentity.set(t, identities[i]));
 
-  const uniqueIPArray = Array.from(uniqueIPs);
-  const identities = await Promise.all(uniqueIPArray.map(ip => resolveTrafficIdentity(ip)));
-  const identityMap = new Map<string, TrafficIdentity>();
-  uniqueIPArray.forEach((ip, i) => {
-    identityMap.set(ip, identities[i]);
-  });
-
-  // Deduplicate: if a pod IP resolves to a pod that is selected by a service identity
-  // already present in identityMap, redirect the pod IP to use the service identity.
-  uniqueIPArray.forEach((ip) => {
-    const identity = identityMap.get(ip)!;
-    if (!identity.podName || !identity.podNamespace || !identity.podLabels) return;
-
-    for (const [otherIp, svcIdentity] of identityMap) {
-      if (otherIp === ip) continue;
-      if (!svcIdentity.svcName || svcIdentity.svcNamespace !== identity.podNamespace) continue;
-      if (!svcIdentity.svcSelector) continue;
-
-      const matches = Object.entries(svcIdentity.svcSelector).every(
-        ([k, v]) => identity.podLabels![k] === v
-      );
-      if (matches) {
-        identityMap.set(ip, svcIdentity);
-        break;
-      }
-    }
-  });
+  // Deduplicate: a pod peer selected by a Service peer also present is
+  // redirected to the Service identity.
+  collapseToServiceIdentity(rowIdentity);
 
   // Process traffic rules
-  pod.traffic?.forEach((traffic) => {
+  rows.forEach((traffic) => {
     const protocol = traffic.ip_protocol || 'TCP';
     const remoteIP = traffic.traffic_in_out_ip;
 
     if (!remoteIP) return;
 
-    const identity = identityMap.get(remoteIP) || { isExternal: true };
+    const identity = rowIdentity.get(traffic) || { isExternal: true };
     const trafficType = traffic.traffic_type?.toLowerCase();
 
     let key: string;
@@ -84,22 +61,25 @@ export async function generateCiliumNetworkPolicy(pod: PodNodeData): Promise<Cil
       key = `svc-${identity.svcNamespace || 'default'}-${identity.svcName}`;
     } else if (identity.podName) {
       key = `pod-${identity.podNamespace || 'default'}-${identity.podName}`;
+    } else if (identity.unattributed) {
+      key = `unattributed-${remoteIP}`;
     } else {
       key = `ip-${remoteIP}`;
     }
 
-    if (trafficType === 'ingress') {
-      const port = traffic.pod_port || '80';
-      if (!ingressMap.has(key)) {
-        ingressMap.set(key, { peer: { ip: remoteIP, identity }, ports: new Set() });
-      }
-      ingressMap.get(key)?.ports.add(`${protocol}:${port}`);
-    } else if (trafficType === 'egress') {
-      const port = traffic.traffic_in_out_port || '80';
-      if (!egressMap.has(key)) {
-        egressMap.set(key, { peer: { ip: remoteIP, identity }, ports: new Set() });
-      }
-      egressMap.get(key)?.ports.add(`${protocol}:${port}`);
+    const map = trafficType === 'ingress' ? ingressMap : trafficType === 'egress' ? egressMap : null;
+    if (!map) return;
+    const port = (trafficType === 'ingress' ? traffic.pod_port : traffic.traffic_in_out_port) || '80';
+
+    const entry = map.get(key);
+    if (!entry) {
+      map.set(key, { peer: { ip: remoteIP, identity }, ports: new Set([`${protocol}:${port}`]) });
+      return;
+    }
+    entry.ports.add(`${protocol}:${port}`);
+    // The group's comment quotes the NEWEST unattributed flow.
+    if (identity.unattributed && entry.peer.identity.unattributed && newerRow(identity.unattributed.at, entry.peer.identity.unattributed.at)) {
+      entry.peer = { ip: remoteIP, identity };
     }
   });
 
@@ -117,6 +97,7 @@ export async function generateCiliumNetworkPolicy(pod: PodNodeData): Promise<Cil
   // peer needs its backends inspected. null = listing failed (unknown).
   let allPods: Promise<PodInfo[] | null> | undefined;
   const listPods = (): Promise<PodInfo[] | null> => {
+    if (resolver.pods) return Promise.resolve(resolver.pods);
     if (!allPods) {
       allPods = (async () => {
         try {
@@ -161,6 +142,8 @@ export async function generateCiliumNetworkPolicy(pod: PodNodeData): Promise<Cil
     cidr?: string;
     entities?: string[];
     hostNetworkComment?: string;
+    // Any other explanatory comment (unattributed peer, gone stored peer).
+    comment?: string;
   }
 
   // Cilium scopes an endpoint selector to the POLICY's namespace unless the
@@ -212,9 +195,15 @@ export async function generateCiliumNetworkPolicy(pod: PodNodeData): Promise<Cil
           identity.nodeName || facts.nodeName || peerInfo.ip,
         );
       }
+      // A stored peer whose record carries no labels: pin the IP, no selector.
+      const labels = facts.labels || identity.podLabels || null;
+      if (!labels && identity.stored) {
+        const cidr = peerCIDR(peerInfo.ip);
+        return cidr === null ? {} : { cidr };
+      }
       return {
         selector: {
-          matchLabels: withPeerNamespace(facts.labels || { app: identity.podName }, identity.podNamespace || facts.namespace),
+          matchLabels: withPeerNamespace(labels || { app: identity.podName }, identity.podNamespace || facts.namespace),
         },
       };
     } else {
@@ -223,13 +212,23 @@ export async function generateCiliumNetworkPolicy(pod: PodNodeData): Promise<Cil
       // the single peer we observed). An unparseable IP resolves to neither a
       // selector nor a CIDR, and the caller drops the rule.
       const cidr = peerCIDR(peerInfo.ip);
-      return cidr === null ? {} : { cidr };
+      if (cidr === null) return {};
+      if (identity.unattributed) {
+        return { cidr, comment: unattributedPeerComment(identity.unattributed.ip, identity.unattributed.at) };
+      }
+      return { cidr };
     }
   };
 
   // Rules are emitted in bytewise peer-IP order, matching advisor/llm-bridge.
+  // Two rules for one IP (it changed hands between flows) order by identity key.
   const sortedByPeerIP = <T extends { peer: PeerInfo }>(map: Map<string, T>): T[] =>
-    Array.from(map.values()).sort((a, b) => (a.peer.ip < b.peer.ip ? -1 : a.peer.ip > b.peer.ip ? 1 : 0));
+    Array.from(map.values()).sort((a, b) => {
+      if (a.peer.ip !== b.peer.ip) return a.peer.ip < b.peer.ip ? -1 : 1;
+      const ka = identityKey(a.peer.identity);
+      const kb = identityKey(b.peer.identity);
+      return ka < kb ? -1 : ka > kb ? 1 : 0;
+    });
 
   const parsePorts = (ports: Set<string>): CiliumPortRule[] => {
     const portProtocols: PortProtocol[] = Array.from(ports).map((portStr) => {
@@ -280,6 +279,7 @@ export async function generateCiliumNetworkPolicy(pod: PodNodeData): Promise<Cil
     const rule: CiliumIngressRule = {
       id: `ingress-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
       toPorts: parsePorts(ports),
+      ...(resolved.comment && { comments: [resolved.comment] }),
     };
     if (resolved.selector) {
       rule.fromEndpoints = [resolved.selector];
@@ -315,6 +315,7 @@ export async function generateCiliumNetworkPolicy(pod: PodNodeData): Promise<Cil
     const rule: CiliumEgressRule = {
       id: `egress-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
       toPorts: parsePorts(ports),
+      ...(resolved.comment && { comments: [resolved.comment] }),
     };
     if (resolved.selector) {
       rule.toEndpoints = [resolved.selector];

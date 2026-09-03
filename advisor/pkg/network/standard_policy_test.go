@@ -480,31 +480,8 @@ func TestDeduplicatePorts_NumericBeforeNamedThenLexProtocol(t *testing.T) {
 }
 
 // --- Determinism: peer-IP iteration order ---
-
-func TestSortedKeys_ReturnsAscendingOrder(t *testing.T) {
-	// Pin the helper's contract: ascending lexicographic order of keys.
-	// The policy transforms depend on this for deterministic YAML output;
-	// any future refactor that swaps to a different sort tax would silently
-	// reorder generated policies across runs.
-	in := map[string][]networkingv1.NetworkPolicyPort{
-		"10.0.0.5": nil,
-		"10.0.0.1": nil,
-		"10.0.0.3": nil,
-		"10.0.0.2": nil,
-		"10.0.0.4": nil,
-	}
-	got := sortedKeys(in)
-	want := []string{"10.0.0.1", "10.0.0.2", "10.0.0.3", "10.0.0.4", "10.0.0.5"}
-	assert.Equal(t, want, got)
-
-	// Twenty more invocations must produce the same output. Without
-	// the explicit sort, Go's map iteration randomises per-process,
-	// so even N=5 keys would shuffle visibly across runs.
-	for i := 0; i < 20; i++ {
-		again := sortedKeys(in)
-		assert.Equal(t, want, again, "run %d must match", i)
-	}
-}
+// (The ascending (peer IP, identity) order itself is pinned by
+// TestGroupPeerRules_OrdersByIPThenIdentity in peer_test.go.)
 
 func TestTransformToNetworkPolicyIngressRules_DeterministicPeerOrdering(t *testing.T) {
 	// Repro for the "policy YAML reshuffles between runs" bug. The
