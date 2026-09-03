@@ -1,5 +1,21 @@
 # Changelog
 
+## [1.21.0](https://github.com/kguardian-dev/kguardian/compare/chart/v1.20.0...chart/v1.21.0) (2026-09-03)
+
+
+### Features
+
+* per-workload seccomp profile distribution ([#1418](https://github.com/kguardian-dev/kguardian/issues/1418)) ([c93c9b4](https://github.com/kguardian-dev/kguardian/commit/c93c9b44cf54a3bffefd6a378ffc1b1c12afaf9a))
+* tiered syscall capture and CR-driven seccomp profile distribution ([2f0b513](https://github.com/kguardian-dev/kguardian/commit/2f0b5133e2921d36c182863dbdae2d7e1ef0c5d7))
+* tiered syscall capture and CR-driven seccomp profile distribution ([#1427](https://github.com/kguardian-dev/kguardian/issues/1427)) ([2f0b513](https://github.com/kguardian-dev/kguardian/commit/2f0b5133e2921d36c182863dbdae2d7e1ef0c5d7))
+
+
+### Bug Fixes
+
+* Cilium policies carry the namespace label for cross-namespace peers ([515de3d](https://github.com/kguardian-dev/kguardian/commit/515de3db9c9607ea2381fad0ab394cb732b169b0))
+* record traffic to node IPs and render host-network peers correctly ([515de3d](https://github.com/kguardian-dev/kguardian/commit/515de3db9c9607ea2381fad0ab394cb732b169b0))
+* record traffic to node IPs and render host-network peers correctly ([#1431](https://github.com/kguardian-dev/kguardian/issues/1431)) ([515de3d](https://github.com/kguardian-dev/kguardian/commit/515de3db9c9607ea2381fad0ab394cb732b169b0))
+
 ## [1.20.0](https://github.com/kguardian-dev/kguardian/compare/chart/v1.19.2...chart/v1.20.0) (2026-09-02)
 
 
