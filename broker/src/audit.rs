@@ -777,6 +777,7 @@ mod tests {
             time_stamp: chrono::DateTime::from_timestamp(0, 0)
                 .expect("epoch is a valid timestamp")
                 .naive_utc(),
+            ..Default::default()
         }
     }
 

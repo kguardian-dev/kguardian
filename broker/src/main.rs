@@ -10,8 +10,8 @@ use api::{
     get_pod_syscall_name, get_pod_traffic, get_pod_traffic_name, get_pods_by_node,
     get_seccomp_profile, get_seccomp_profile_file, get_svc_by_ip, get_svc_details, get_version,
     list_seccomp_profiles, mark_pod_dead, post_seccomp_node_status, put_seccomp_cr,
-    set_statement_timeout, spawn_retention, spawn_version_check, AuditClient,
-    StatementTimeoutCustomizer, VersionCheckState,
+    set_statement_timeout, spawn_peer_late_resolve, spawn_retention, spawn_version_check,
+    AuditClient, StatementTimeoutCustomizer, VersionCheckState,
 };
 
 use diesel::r2d2;
@@ -324,6 +324,11 @@ async fn main() -> Result<(), std::io::Error> {
     // broker is self-contained — no separate CronJob needed in the
     // chart. Disable by setting AUDIT_VERDICTS_RETENTION_DAYS=0.
     spawn_retention(pool.clone());
+
+    // Re-resolves the peer identity of recently ingested traffic rows
+    // whose peer pod's spec had not arrived yet (peer.rs). Disable with
+    // PEER_LATE_RESOLVE_WINDOW_SECS=0.
+    spawn_peer_late_resolve(pool.clone());
 
     // Daily anonymous version check-in + shared state for GET /version.
     // Disabled entirely (no task, no requests) with TELEMETRY_ENABLED=false.

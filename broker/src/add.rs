@@ -166,6 +166,14 @@ fn create_pod_traffic_batch(
         batch.len() - events_to_insert.len()
     );
 
+    // Stamp the peer's identity NOW, while pod_details still knows who
+    // holds each address: the IP will be recycled, the row's identity
+    // must not be. One candidate lookup per distinct peer IP; whatever
+    // the client put in the peer_* fields is overwritten. Runs after the
+    // dedup on purpose — the content key never includes peer_* — and
+    // only for the rows that will actually be written.
+    crate::peer::resolve_batch(conn, &mut events_to_insert)?;
+
     // Bulk insert only the new events
     diesel::insert_into(pod_traffic)
         .values(&events_to_insert)
@@ -375,11 +383,36 @@ fn resolve_host_network(posted: Option<bool>, pod_obj: Option<&serde_json::Value
     )
 }
 
+/// Resolve the pod's start time: the posted value when the controller
+/// sent one, else `status.startTime` from the manifest in `pod_obj`
+/// (RFC3339 from the API server, stored as naive UTC like every other
+/// timestamp here). MUST run before `compact_pod_obj`, which strips
+/// `status`. `None` when neither is available — `AsChangeset` skips it,
+/// so a re-post without a startTime never nulls a stored value.
+fn resolve_started_at(
+    posted: Option<chrono::NaiveDateTime>,
+    pod_obj: Option<&serde_json::Value>,
+) -> Option<chrono::NaiveDateTime> {
+    if posted.is_some() {
+        return posted;
+    }
+    let raw = pod_obj?.pointer("/status/startTime")?.as_str()?;
+    match chrono::DateTime::parse_from_rfc3339(raw) {
+        Ok(dt) => Some(dt.naive_utc()),
+        Err(e) => {
+            tracing::warn!(value = raw, error = %e, "unparseable status.startTime on /pod/spec; started_at left unset");
+            None
+        }
+    }
+}
+
 pub fn upsert_pod_details(
     conn: &mut PgConnection,
     mut w: web::Json<PodDetail>,
 ) -> Result<PodDetail, DbError> {
     use schema::pod_details::dsl::*;
+    // Capture the start time BEFORE the compaction below drops `status`.
+    w.started_at = resolve_started_at(w.started_at, w.pod_obj.as_ref());
     // Slim the Pod manifest before it ever hits storage: consumers read only
     // metadata.labels and spec.hostNetwork, so dropping the rest of
     // spec/status/managedFields here (rather than recompacting on every read)
@@ -1215,6 +1248,7 @@ mod tests {
                 .unwrap()
                 .and_hms_opt(0, 0, 0)
                 .unwrap(),
+            ..Default::default()
         }
     }
 
@@ -1240,6 +1274,143 @@ mod tests {
         let mut b = sample_traffic("y");
         b.traffic_in_out_port = Some("8443".to_string());
         assert_ne!(traffic_content_key(&a), traffic_content_key(&b));
+    }
+
+    // ---- peer identity (v4) ---------------------------------------
+
+    #[test]
+    fn content_key_ignores_peer_identity_columns() {
+        // The dedup must not see the stamped identity: the same flow
+        // re-emitted after its peer pod was replaced (new name, new
+        // uid, same IP) is still the same flow, and a legacy NULL-peer
+        // row must still dedup against a newly resolved emit.
+        let a = sample_traffic("x");
+        let mut b = sample_traffic("y");
+        b.peer_kind = Some("pod".to_string());
+        b.peer_namespace = Some("prod".to_string());
+        b.peer_name = Some("api-2".to_string());
+        b.peer_uid = Some("uid-2".to_string());
+        b.peer_workload_kind = Some("Deployment".to_string());
+        b.peer_workload_name = Some("api".to_string());
+        b.peer_resolved_at = Some(a.time_stamp);
+        assert_eq!(traffic_content_key(&a), traffic_content_key(&b));
+    }
+
+    #[test]
+    fn pod_traffic_accepts_controller_payload_without_peer_fields() {
+        // The controller never sends peer_*; the batch must deserialise
+        // and every peer field must be None before resolution.
+        let json = r#"[{"uuid":"u1","pod_name":"web-1","pod_namespace":"prod",
+            "pod_ip":"10.0.0.1","pod_port":"8080","ip_protocol":"TCP",
+            "traffic_type":"INGRESS","traffic_in_out_ip":"10.0.0.2",
+            "traffic_in_out_port":"51234","decision":"ALLOW",
+            "time_stamp":"2026-09-03T05:00:00.123456"}]"#;
+        let got: Vec<PodTraffic> = serde_json::from_str(json).expect("must parse");
+        assert_eq!(got.len(), 1);
+        assert!(got[0].peer_kind.is_none());
+        assert!(got[0].peer_resolved_at.is_none());
+    }
+
+    #[test]
+    fn pod_traffic_serialises_peer_fields_as_null_or_values() {
+        // This IS the wire shape GET /pod/traffic/{name} returns: every
+        // peer key present, null when unresolved, values when stamped.
+        let row = sample_traffic("u");
+        let v = serde_json::to_value(&row).unwrap();
+        for k in [
+            "peer_kind",
+            "peer_namespace",
+            "peer_name",
+            "peer_uid",
+            "peer_workload_kind",
+            "peer_workload_name",
+            "peer_resolved_at",
+        ] {
+            assert!(v.get(k).is_some(), "{k} must be present");
+            assert!(v[k].is_null(), "{k} must be null when unresolved");
+        }
+        let mut row = sample_traffic("u");
+        row.peer_kind = Some("pod".to_string());
+        row.peer_namespace = Some("game-servers".to_string());
+        row.peer_name = Some("cmangos-backup-29271840-x7k2p".to_string());
+        row.peer_uid = Some("0d1e2f3a".to_string());
+        row.peer_workload_kind = Some("CronJob".to_string());
+        row.peer_workload_name = Some("cmangos-backup".to_string());
+        row.peer_resolved_at = Some(
+            "2026-09-03T05:00:00.201118"
+                .parse::<chrono::NaiveDateTime>()
+                .unwrap(),
+        );
+        let v = serde_json::to_value(&row).unwrap();
+        assert_eq!(v["peer_kind"], "pod");
+        assert_eq!(v["peer_workload_kind"], "CronJob");
+        assert_eq!(v["peer_resolved_at"], "2026-09-03T05:00:00.201118");
+        // Round-trips through the same struct (consumers may echo rows).
+        let back: PodTraffic = serde_json::from_value(v).unwrap();
+        assert_eq!(
+            back.peer_name.as_deref(),
+            Some("cmangos-backup-29271840-x7k2p")
+        );
+    }
+
+    // ---- started_at (v4) ------------------------------------------
+
+    fn ts(s: &str) -> chrono::NaiveDateTime {
+        s.parse().unwrap()
+    }
+
+    #[test]
+    fn started_at_is_derived_from_status_start_time() {
+        let manifest = serde_json::json!({
+            "metadata": {"uid": "abc"},
+            "status": {"startTime": "2026-08-04T09:12:41Z", "phase": "Running"}
+        });
+        assert_eq!(
+            resolve_started_at(None, Some(&manifest)),
+            Some(ts("2026-08-04T09:12:41"))
+        );
+        // Offsets are normalised to UTC like every stored timestamp.
+        let manifest = serde_json::json!({"status": {"startTime": "2026-08-04T11:12:41+02:00"}});
+        assert_eq!(
+            resolve_started_at(None, Some(&manifest)),
+            Some(ts("2026-08-04T09:12:41"))
+        );
+    }
+
+    #[test]
+    fn started_at_prefers_a_posted_value_and_tolerates_absence() {
+        let manifest = serde_json::json!({"status": {"startTime": "2026-08-04T09:12:41Z"}});
+        assert_eq!(
+            resolve_started_at(Some(ts("2026-01-01T00:00:00")), Some(&manifest)),
+            Some(ts("2026-01-01T00:00:00"))
+        );
+        assert_eq!(resolve_started_at(None, None), None);
+        // Pending pod: status without startTime yet.
+        let pending = serde_json::json!({"status": {"phase": "Pending"}});
+        assert_eq!(resolve_started_at(None, Some(&pending)), None);
+        // Already-compacted manifest (no status at all).
+        let compacted = serde_json::json!({"metadata": {"labels": {}}});
+        assert_eq!(resolve_started_at(None, Some(&compacted)), None);
+        // Garbage is dropped, never a 500.
+        let bad = serde_json::json!({"status": {"startTime": "last tuesday"}});
+        assert_eq!(resolve_started_at(None, Some(&bad)), None);
+    }
+
+    #[test]
+    fn pod_detail_accepts_payload_without_started_at_and_serialises_it() {
+        // Old controller: key absent ⇒ None, no 400.
+        let json = r#"{"pod_name":"web-1","pod_ip":"10.42.3.5","pod_namespace":"prod",
+            "pod_obj":null,"time_stamp":"2026-08-31T00:00:00","node_name":"node-a",
+            "is_dead":false,"pod_identity":null,"workload_selector_labels":null}"#;
+        let got: PodDetail = serde_json::from_str(json).unwrap();
+        assert!(got.started_at.is_none());
+        // On the wire it is always present: null or naive UTC.
+        let v = serde_json::to_value(&got).unwrap();
+        assert!(v["started_at"].is_null());
+        let mut pod = got;
+        pod.started_at = Some(ts("2026-08-04T09:12:41"));
+        let v = serde_json::to_value(&pod).unwrap();
+        assert_eq!(v["started_at"], "2026-08-04T09:12:41");
     }
 }
 

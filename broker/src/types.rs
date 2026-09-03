@@ -29,11 +29,47 @@ pub struct PodTraffic {
     pub traffic_in_out_port: Option<String>,
     pub decision: Option<String>,
     pub time_stamp: NaiveDateTime,
+    /// Identity of the peer behind `traffic_in_out_ip`, resolved by the
+    /// broker when the row is ingested (or by the late-resolve pass
+    /// shortly after) and never recomputed from the IP again — the IP
+    /// is recycled, the identity is not. See [`crate::peer`].
+    ///
+    /// `peer_kind` is `"pod"`, `"node"` (a host-network pod, i.e. the
+    /// IP is a node IP) or `"service"`; `None` means unresolved
+    /// (external, a row from before this existed, or the peer's spec
+    /// never arrived in the window), and consumers then fall back to
+    /// `GET /pod/ip/{ip}?at=<time_stamp>`.
+    ///
+    /// All `#[serde(default)]`: the controller does not send them, and
+    /// whatever a client does send is overwritten by the broker's own
+    /// resolution on ingest. Positional (Queryable) — these stay last,
+    /// in schema order.
+    #[serde(default)]
+    pub peer_kind: Option<String>,
+    #[serde(default)]
+    pub peer_namespace: Option<String>,
+    #[serde(default)]
+    pub peer_name: Option<String>,
+    /// `pod_obj.metadata.uid` for a pod/node peer, the Service UID for
+    /// a service peer; `None` when the stored manifest carries none.
+    #[serde(default)]
+    pub peer_uid: Option<String>,
+    /// The peer pod's owning controller, so Job pods can be grouped
+    /// under their CronJob rather than by pod name. `None` for a
+    /// Service peer or a bare pod.
+    #[serde(default)]
+    pub peer_workload_kind: Option<String>,
+    #[serde(default)]
+    pub peer_workload_name: Option<String>,
+    /// When the identity was stamped; `None` whenever `peer_kind` is.
+    #[serde(default)]
+    pub peer_resolved_at: Option<NaiveDateTime>,
 }
 
 #[derive(
     Default,
     Debug,
+    Clone,
     Insertable,
     Queryable,
     Identifiable,
@@ -100,6 +136,19 @@ pub struct PodDetail {
     /// pre-existing behaviour. Positional, so it stays last.
     #[serde(default)]
     pub host_network: Option<bool>,
+    /// `pod_obj.status.startTime` as naive UTC, captured on `/pod/spec`
+    /// before `compact_pod_obj` strips `status` from the manifest. The
+    /// start-time guard ([`crate::peer`]) refuses to attribute a flow
+    /// to a pod that started after the flow was observed — the by-IP
+    /// fallback for rows with no stored peer, the ingest resolver and
+    /// `GET /pod/ip/{ip}?at=` all apply it. `None` = unknown (row last
+    /// written by an older broker, or a manifest without a startTime);
+    /// an unknown start is not excluded by the guard, it just ranks
+    /// after every candidate whose start is known. A posted value wins
+    /// over the derivation; `AsChangeset` skips `None`. Positional, so
+    /// it stays last.
+    #[serde(default)]
+    pub started_at: Option<NaiveDateTime>,
 }
 
 /// The syscall capture tiers, exactly as the controller and chart spell
