@@ -19,6 +19,7 @@ import {
   UNATTRIBUTED_NAMESPACE,
   UNATTRIBUTED_PEER_TOOLTIP,
   buildPeerIndex,
+  isPlaceholderPod,
   peerGroupIdentity,
   peerKey,
   resolvePeer,
@@ -243,14 +244,19 @@ const NetworkGraphInner: React.FC<NetworkGraphProps> = ({
         let podInfo: PodInfo | null = null;
         let stored = false;
         let unattributed = false;
-        if (peer.kind === 'pod' || peer.kind === 'node') {
+        if ((peer.kind === 'pod' || peer.kind === 'node') && !isPlaceholderPod(peer.pod)) {
           // In-namespace peer: an edge, not an external node.
           if (localPodByName.has(peer.pod.pod_name)) return;
           podInfo = peer.pod;
           stored = peer.stored;
           entryKey = peerKey(peer)!;
-        } else if (peer.kind === 'unattributed' || (peer.kind === 'service' && !peer.svc)) {
-          // Guarded out, or a stored Service that no longer fronts this IP.
+        } else if (peer.kind !== 'unknown' && peer.kind !== 'service') {
+          // Guarded out, or a stored pod whose record is gone: the same
+          // Unattributed node the generators' ipBlock corresponds to.
+          unattributed = true;
+          entryKey = `unattributed:${remoteIp}`;
+        } else if (peer.kind === 'service' && !peer.svc) {
+          // A stored Service that no longer fronts this IP.
           unattributed = true;
           entryKey = `unattributed:${remoteIp}`;
         } else {
