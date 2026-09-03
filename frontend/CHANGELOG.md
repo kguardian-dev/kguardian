@@ -1,5 +1,23 @@
 # Changelog
 
+## [1.15.0](https://github.com/kguardian-dev/kguardian/compare/frontend/v1.14.0...frontend/v1.15.0) (2026-09-03)
+
+
+### Features
+
+* **frontend:** map toggle to hide DaemonSet and host-network peers by default ([#1439](https://github.com/kguardian-dev/kguardian/issues/1439)) ([774e665](https://github.com/kguardian-dev/kguardian/commit/774e665236201843e0548640ec9aa5d5727aa4dc))
+
+
+### Bug Fixes
+
+* resolve peer identity at ingest and guard by-IP attribution on pod start time ([#1447](https://github.com/kguardian-dev/kguardian/issues/1447)) ([fb6dfed](https://github.com/kguardian-dev/kguardian/commit/fb6dfed55a4be4990ba3f5358764ad3e50a0687b))
+* resolve peer identity at ingest and guard by-IP attribution on pod start time ([#1447](https://github.com/kguardian-dev/kguardian/issues/1447)) ([fb6dfed](https://github.com/kguardian-dev/kguardian/commit/fb6dfed55a4be4990ba3f5358764ad3e50a0687b))
+
+
+### Documentation
+
+* peer-attribution concepts page, API reference, UPGRADING. ([fb6dfed](https://github.com/kguardian-dev/kguardian/commit/fb6dfed55a4be4990ba3f5358764ad3e50a0687b))
+
 ## [1.14.0](https://github.com/kguardian-dev/kguardian/compare/frontend/v1.13.2...frontend/v1.14.0) (2026-09-03)
 
 
