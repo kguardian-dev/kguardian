@@ -338,7 +338,7 @@ Every generated policy includes:
 
 ### How Peers are Identified
 
-kguardian resolves IPs to Kubernetes resources:
+kguardian resolves IPs to Kubernetes resources. The resolution happens when the Broker ingests the flow and is stored on the traffic row; the generators read that stored identity and only fall back to a by-IP lookup (guarded by the peer pod's start time) for rows written before it existed. A peer that nothing matches under the guard is emitted as an `ipBlock` / CIDR with a `# unattributed peer <ip> at <time>` comment, never as a selector. Details: [How peers are attributed](/concepts/peer-attribution).
 
 <AccordionGroup>
   <Accordion title="Pod-to-Pod Traffic" icon="cubes">

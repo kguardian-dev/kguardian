@@ -65,7 +65,7 @@ It's built for platform and security teams who want policy-as-code without writi
 
 ## ✨ Features
 
-- **Network Policy generation** — least-privilege Kubernetes `NetworkPolicy` and Cilium `CiliumNetworkPolicy` resources from observed pod-to-pod traffic.
+- **Network Policy generation** — least-privilege Kubernetes `NetworkPolicy` and Cilium `CiliumNetworkPolicy` resources from observed pod-to-pod traffic. Each flow's peer is identified when it is captured, not when a policy is generated, so a recycled pod IP never allow-lists the wrong workload ([how peers are attributed](https://docs.kguardian.dev/concepts/peer-attribution)).
 - **Seccomp profile generation** — per-workload syscall allowlists derived from runtime traces, exported as a `SeccompProfile` CR you commit; the controller places the file on every node only once you apply it. Capture is tiered (`full` by default, cheap thanks to in-BPF dedup; `high`/`medium`/`low`/`custom` for monitoring-only clusters), and only a `full` capture yields a profile safe to enforce.
 - **Policy auditing before enforcement** — the `AuditNetworkPolicy` CRD is byte-identical to an upstream `NetworkPolicy`, but instead of dropping packets the evaluator reports every flow the policy *would* deny. Ship policies with confidence instead of blackholing production.
 - **Flexible targeting** — generate per-pod, per-namespace, or cluster-wide.

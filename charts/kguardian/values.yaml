@@ -370,6 +370,23 @@ broker:
   # -- Priority class to be used for the kguardian broker pods
   priorityClassName: ""
 
+  peerResolution:
+    # -- Late-resolve window, in seconds. The broker stamps each
+    # traffic row's peer identity (pod / host-network pod / Service)
+    # when the row is ingested. A flow can arrive before the peer
+    # pod's spec does, in which case the row is stored with a NULL
+    # peer; a broker task wakes every 60 s (PEER_LATE_RESOLVE_INTERVAL_SECS,
+    # not exposed here) and re-resolves NULL rows whose time_stamp is
+    # younger than this window, at most 5000 per pass. Rows older
+    # than the window stay NULL for good (pre-upgrade history, an
+    # external IP, or a peer the cluster never learned about) and
+    # consumers fall back to a start-time-guarded by-IP lookup for
+    # them. Raise it on clusters where the controller lags pod
+    # creation by more than ten minutes. 0 disables the task; new
+    # rows then keep whatever resolved at ingest. Rendered as
+    # PEER_LATE_RESOLVE_WINDOW_SECS.
+    lateResolveWindowSeconds: 600
+
   audit:
     retention:
       # -- Retain audit_verdicts rows for this many days. Older rows are

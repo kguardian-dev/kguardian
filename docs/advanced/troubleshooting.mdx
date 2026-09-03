@@ -97,6 +97,13 @@ kubectl get pods -n kguardian
     ```bash
     curl http://localhost:9090/pod/ip/10.244.1.5
     ```
+
+    Pod IPs are recycled, so an IP taken from an old traffic row may
+    now belong to a different pod. Pass the row's `time_stamp` as
+    `?at=` to exclude pods that started after the flow, or read the
+    row's `peer_name` directly — rows carry their resolved peer since
+    the ingest-time attribution change
+    ([how peers are attributed](/concepts/peer-attribution)).
   </Step>
 </Steps>
 

@@ -1,0 +1,221 @@
+---
+title: "How Peers Are Attributed"
+description: "Why a flow's peer identity is fixed at ingest, how the start-time guard works, and what pre-upgrade rows look like"
+icon: "fingerprint"
+---
+
+Every `pod_traffic` row names one pod (the one the Controller was watching)
+and one peer. The pod side is known at capture time. The peer side arrives
+as nothing but an IP address, and turning that IP into a pod, a
+host-network pod or a Service is what the Network Map, the Policy Builder
+and both CLI generators depend on. This page explains where that
+resolution happens, why it moved, and how to read rows written before it
+moved.
+
+## Peer identity is stamped at ingest
+
+When the Broker receives a traffic batch it resolves each row's peer IP
+against its **current** `pod_details` and `svc_details` tables and stores
+the answer on the row itself. Once stamped, the resolution never runs
+again for that row; whatever the cluster looked like at the moment the
+flow was ingested is what the row says forever. Anything a client sends
+in the `peer_*` keys is overwritten by the Broker's own resolution.
+
+The precedence is fixed:
+
+| Order | Match | `peer_kind` |
+|-------|-------|-------------|
+| 1 | A pod-network pod holding the IP at the flow's `time_stamp`. An alive pod wins; otherwise the dead pod with the newest `started_at` not later than `time_stamp`. | `pod` |
+| 2 | A host-network pod holding the IP (`host_network: true`, so the IP is a node IP) | `node` |
+| 3 | No pod held the IP and it is a Service ClusterIP | `service` |
+| 4 | Nothing matched | `null` |
+
+Each row carries `peer_kind`, `peer_namespace`, `peer_name`, `peer_uid`,
+`peer_workload_kind`, `peer_workload_name` and `peer_resolved_at`. The
+UID is the Kubernetes `metadata.uid` of the pod (or of the Service where
+its stored spec carries one), so two pods that reuse the same name — a
+StatefulSet replica restarting, a CronJob firing hourly — are still told
+apart. `peer_workload_kind`/`peer_workload_name` name the owning
+Deployment, StatefulSet, DaemonSet, Job or CronJob so the map can group
+short-lived Job pods under their controller instead of drawing one node
+per pod name. For a `node` peer, `peer_name` is the host-network pod
+(typically a DaemonSet member), not the node.
+
+There is deliberately no `external` value. An IP that matched nothing is
+left `null`, because stamping "external" permanently would throw away the
+guarded by-IP fallback for a row whose peer spec simply arrived late — a
+Controller restart on that node can delay it past the late-resolve
+window. Consumers therefore have exactly two cases: `peer_kind` set,
+use it verbatim; `peer_kind` null, resolve by IP with the guard below and
+render an `ipBlock` if that finds nothing.
+
+This is the same model Cilium Hubble uses. A Hubble flow does not carry
+"source IP, look it up later"; it carries a fully resolved `Endpoint`
+for each side, captured when the flow was observed. From
+[`api/v1/flow/flow.proto`](https://raw.githubusercontent.com/cilium/cilium/main/api/v1/flow/flow.proto)
+on `main`, fetched 2026-09-03:
+
+```proto
+message Endpoint {
+    uint32 ID = 1;
+    uint32 identity = 2;
+    string cluster_name = 7;
+    string namespace = 3;
+    // labels in `foo=bar` format.
+    repeated string labels = 4;
+    string pod_name = 5;
+    repeated Workload workloads = 6;
+    // pod_uid is the Kubernetes UID of the Pod represented by this endpoint.
+    string pod_uid = 8;
+}
+```
+
+`Workload` is `{name, kind}`. kguardian's `peer_*` columns map onto
+`namespace`, `pod_name`, `workloads` and `pod_uid`; the identity that
+Cilium computes from labels corresponds to the `pod_identity` and
+selector labels kguardian already keeps on `pod_details`.
+
+### The late-resolve pass
+
+A flow can reach the Broker before the peer pod's spec does — the
+Controller on one node sees the SYN while the Controller on another node
+is still posting the new pod. Such a row is stored with a `null` peer.
+A background task in the Broker wakes every `PEER_LATE_RESOLVE_INTERVAL_SECS`
+(default 60, floor 5) and re-resolves rows with `peer_kind IS NULL` whose
+`time_stamp` is younger than `PEER_LATE_RESOLVE_WINDOW_SECS` (default 600;
+`broker.peerResolution.lateResolveWindowSeconds` in the chart; `0`
+disables the task), newest first, at most 5000 rows per pass, with one
+lookup per distinct peer IP. A row that matches is stamped with
+`peer_resolved_at` set to that moment; a row that does not is retried on
+the next pass until it ages out of the window, after which it stays
+`null` for good.
+
+## Why by-IP lookups at read time were wrong
+
+Before this change `pod_traffic` stored only the peer IP. The map, the
+Broker's `GET /pod/ip/{ip}`, the Policy Builder and both generators
+resolved IP to pod when the data was **read**, against `pod_details` as it
+stood at that moment. `pod_details` is keyed by pod name and upserted in
+place, so it holds who owns an IP *now* — it has no record of who owned it
+last month.
+
+Pod IPs are recycled constantly. On a cluster running hourly volsync
+backups and a handful of migration Jobs, a single address had more than
+50 dead former owners. A concrete case, diagnosed live on 2026-09-03:
+
+- `cmangos-database` (namespace `game-servers`) had INGRESS rows on
+  `:3306` from `10.244.12.199`, time-stamped 2026-05-21 and 2026-07-23.
+- `autobrr` (namespace `home-system`) started on 2026-08-04 and was
+  handed `10.244.12.199`.
+- The map resolved the old rows against today's table and drew
+  **autobrr → cmangos-database**, a connection that never happened.
+  A policy generated for the database would have allow-listed
+  `autobrr`'s labels.
+
+The same mechanism leaked Job-only labels (`job-name`,
+`controller-uid`) into generated policies: a long-gone Job's IP had been
+reused by whatever pod happened to be resolved, and the selector was
+built from the wrong pod's labels.
+
+Ingest-time resolution fixes this for every row written after the
+upgrade. The row records `autobrr` only if `autobrr` held the IP when the
+flow was seen.
+
+## The start-time guard
+
+A by-IP lookup still exists — it is what the ingest resolver and the
+late-resolve pass run, and what consumers fall back to for rows with a
+`null` peer. Everywhere it runs, it obeys one rule:
+
+> A flow is never attributed to a pod whose start time is later than the
+> flow's `time_stamp`.
+
+The Broker stores `started_at` on every pod record (`status.startTime`,
+captured from the manifest on `POST /pod/spec`; `null` when unknown) and
+applies the guard inside its own resolvers with `at = row.time_stamp`.
+The HTTP lookup takes the same instant as a query parameter:
+
+```bash
+curl 'http://localhost:9090/pod/ip/10.244.12.199?at=2026-07-23T09:14:02Z'
+```
+
+With `at`, the candidates holding the IP are filtered by
+`started_at IS NULL OR started_at <= at` and ordered
+`is_dead ASC, started_at DESC NULLS LAST, time_stamp DESC`; the first
+wins. Applied to the example above, the 2026-07-23 row cannot resolve to
+`autobrr` (started 2026-08-04); it resolves to the CronJob pod that held
+the IP then if its row still exists, and to nothing otherwise. A pod
+with an unknown start is not excluded — there is nothing to compare —
+but ranks after every candidate whose start is known.
+
+If no candidate survives the guard the peer is *unattributed*: the map
+renders it as an external IP node with a tooltip explaining that no live
+pod matched at flow time, and every generator emits an `ipBlock`
+(Kubernetes) or `toCIDR`/`fromCIDR` (Cilium) with a comment
+`# unattributed peer <ip> at <time>` — never a `podSelector`. An
+allow-list built from a stale identity is worse than one that names the
+address.
+
+The guard narrows the by-IP fallback; it does not make it exact. If two
+former holders of an IP both started before the flow, history alone cannot
+say which one it was, and the ordering above picks the newer start. Only
+rows resolved at ingest carry a definite answer.
+
+## Pre-upgrade rows
+
+The migration adds the `peer_*` columns and leaves them `null` on every
+existing row. There is deliberately no backfill: resolving old rows
+against today's `pod_details` would reproduce the exact bug this change
+removes, only permanently.
+
+A legacy row therefore looks like this on `GET /pod/traffic/{name}`:
+
+```json
+{
+  "uuid": "6f1d5a2e-...",
+  "pod_name": "cmangos-database-0",
+  "pod_namespace": "game-servers",
+  "pod_ip": "10.244.3.17",
+  "pod_port": "3306",
+  "ip_protocol": "TCP",
+  "traffic_type": "INGRESS",
+  "traffic_in_out_ip": "10.244.12.199",
+  "traffic_in_out_port": "51234",
+  "decision": "ALLOW",
+  "time_stamp": "2026-07-23T09:14:02.118377",
+
+  "peer_kind": null,
+  "peer_namespace": null,
+  "peer_name": null,
+  "peer_uid": null,
+  "peer_workload_kind": null,
+  "peer_workload_name": null,
+  "peer_resolved_at": null
+}
+```
+
+It is indistinguishable from a post-upgrade row whose peer never
+matched, and consumers treat both the same way: `GET /pod/ip/{ip}?at=<row
+time_stamp>`, then an unattributed peer when that returns 404. Rows
+younger than the late-resolve window are filled in by the Broker within
+a minute or so; older ones stay this way until retention (or you)
+removes them.
+
+Pre-upgrade `pod_details` rows have `started_at: null` too, until the
+Controller re-posts the pod (every live pod is re-posted when the
+Controller restarts, so a rolling upgrade of the DaemonSet fills them
+in). A dead pod that was never re-posted stays unguarded and is ranked
+last among candidates.
+
+Because legacy history is only as good as the guard, **regenerate
+policies after a fresh observation window** rather than from the
+pre-upgrade backlog. A few hours of post-upgrade traffic gives every row
+a stored identity; the chart's
+[UPGRADING notes](https://github.com/kguardian-dev/kguardian/blob/main/charts/kguardian/UPGRADING.md)
+list the steps.
+
+## Reference
+
+- Row fields and `peer_kind` values: [Traffic Endpoints](/api-reference/endpoints/traffic)
+- `started_at` and `GET /pod/ip/{ip}?at=`: [Pod Endpoints](/api-reference/endpoints/pods)
+- Chart value: `broker.peerResolution.lateResolveWindowSeconds`

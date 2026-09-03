@@ -42,6 +42,12 @@ casing) or `"EGRESS"`; `decision` is `"ALLOW"` (eBPF observed an
 allow) or `"DROP"` (NetworkPolicy dropped the flow before it
 reached the destination, observed via the netpolicy-drop probe).
 
+The request carries only the peer's IP (`traffic_in_out_ip`). The
+broker resolves it to a peer identity as part of the insert and
+stores the result on the row — see [Peer attribution](#peer-attribution)
+below. Clients need not send the `peer_*` fields; any values they do
+send are overwritten.
+
 ## POST /pod/traffic/batch
 
 Bulk variant taking a JSON array of the same shape. The controller
@@ -51,6 +57,11 @@ broker should use this path to amortise the round-trip.
 
 Response is an integer count of the rows actually inserted after
 dedup.
+
+Peer resolution runs once per distinct `traffic_in_out_ip` in the
+batch, not once per row, so a 100-row batch from a pod talking to
+three peers costs three lookups. The dedup key is unchanged: the
+`peer_*` columns are never part of it.
 
 ## GET /pod/traffic
 
@@ -87,10 +98,65 @@ curl 'http://localhost:9090/pod/traffic?limit=100'
     "traffic_in_out_ip": "10.244.3.15",
     "traffic_in_out_port": "5432",
     "decision": "ALLOW",
-    "time_stamp": "2026-05-12T10:32:14.123456"
+    "time_stamp": "2026-05-12T10:32:14.123456",
+
+    "peer_kind": "pod",
+    "peer_namespace": "production",
+    "peer_name": "postgres-0",
+    "peer_uid": "0d1e2f3a-4b5c-6d7e-8f90-a1b2c3d4e5f6",
+    "peer_workload_kind": "StatefulSet",
+    "peer_workload_name": "postgres",
+    "peer_resolved_at": "2026-05-12T10:32:14.201118"
   }
 ]
 ```
+
+### Peer attribution
+
+The seven `peer_*` fields are the peer identity the broker resolved
+**when the row was ingested** (or shortly after, by the late-resolve
+pass). They are the fields every consumer should read first; the
+peer IP is a fallback, not the source of truth. Why:
+[How peers are attributed](/concepts/peer-attribution).
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `peer_kind` | string or null | `"pod"`, `"node"` or `"service"`; `null` when unresolved (see below). |
+| `peer_namespace` | string or null | Namespace of the pod, host-network pod or Service. |
+| `peer_name` | string or null | Pod name, host-network pod name (for `node`), or Service name. |
+| `peer_uid` | string or null | `pod_obj.metadata.uid` for `pod`/`node`; `service_spec.metadata.uid` for `service`. `null` when the stored manifest lacks it. |
+| `peer_workload_kind` | string or null | Kind of the owning controller (`Deployment`, `StatefulSet`, `DaemonSet`, `Job`, `CronJob`, …). `null` for a bare pod, a pod posted by an old controller, or a `service`. |
+| `peer_workload_name` | string or null | Name of that controller; same nullability. |
+| `peer_resolved_at` | timestamp or null | When the identity was stamped. Same format as `time_stamp`; `null` whenever `peer_kind` is `null`. |
+
+`peer_kind` values the broker writes:
+
+| `peer_kind` | Meaning |
+|-------------|---------|
+| `"pod"` | `traffic_in_out_ip` was held by a pod-network pod at `time_stamp` — an alive pod is preferred; else the dead pod with the newest `started_at` not later than `time_stamp`. |
+| `"node"` | The IP was held by a **host-network** pod (`host_network: true`), so it is a node IP. `peer_*` describe that pod (typically a `DaemonSet` member). |
+| `"service"` | No pod held the IP; it is a Service ClusterIP. `peer_workload_*` are `null`. |
+| `null` | **Unresolved**: nothing matched at ingest and nothing matched during the late-resolve window — an external IP, a pre-upgrade row, or a peer whose spec never arrived. All seven fields are `null` together. |
+
+There is no `"external"` value. Stamping it permanently would remove
+the guarded by-IP fallback for a row whose peer spec merely arrived
+late, so an unmatched peer stays `null`. Consumers have exactly two
+cases: `peer_kind` set → use the stored identity verbatim;
+`peer_kind` null → resolve with
+[`GET /pod/ip/{ip}?at=<row time_stamp>`](/api-reference/endpoints/pods#get-podipip)
+and, on a 404, render an unattributed peer (an `ipBlock`, never a
+selector).
+
+A `null` row younger than `PEER_LATE_RESOLVE_WINDOW_SECS` (default 600,
+chart value `broker.peerResolution.lateResolveWindowSeconds`) is
+retried by a broker task every `PEER_LATE_RESOLVE_INTERVAL_SECS`
+(default 60) until it resolves or ages out. Rows written before the
+columns existed are not backfilled.
+
+The seven fields follow `time_stamp` and are always present on read.
+On `POST` they are `#[serde(default)]`: an old controller that omits
+them is accepted, and anything a client sends in them is overwritten by
+the broker's own resolution.
 
 ## GET /pod/traffic/&#123;name&#125;
 
@@ -101,7 +167,8 @@ Get traffic for a single pod by name. The actix route captures
 curl http://localhost:9090/pod/traffic/my-app-7d9f6b8c4-x5z2w
 ```
 
-Same row shape as `GET /pod/traffic` above; same ordering.
+Same row shape as `GET /pod/traffic` above, `peer_*` fields
+included; same ordering.
 
 A name that doesn't match any rows returns 404 with body
 `"No data found"`. The frontend's per-pod traffic view handles
