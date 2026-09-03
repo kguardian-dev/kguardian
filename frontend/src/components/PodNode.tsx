@@ -35,13 +35,10 @@ const PodNode: React.FC<PodNodeProps> = React.memo(({ data, selected }) => {
   }, 0) || 0;
 
   const IconComponent = isExternal ? Globe : Server;
-  // DaemonSet / host-network peers (see utils/daemonSetPeers) get the same
-  // teal as their toolbar toggle so the badge, the spine and the toggle that
-  // hides them all read as one thing.
+  // DaemonSet / host-network peers (see utils/daemonSetPeers) take the same
+  // teal as their toolbar toggle and their edges — colour alone carries the
+  // association, no tag text on the card.
   const daemonSetPeer = isExternal && (data.pods && data.pods.length > 0 ? data.pods : [data.pod]).some(isDaemonSetOrHostNetworkPod);
-  const daemonSetBadge = daemonSetPeer
-    ? ((data.pods ?? []).some((p) => p.workload_kind === 'DaemonSet') ? 'DaemonSet' : 'host-network')
-    : null;
   // Trust state → accent: external endpoints = warning amber, in-cluster
   // workloads = brand indigo, DaemonSet/host-network peers = teal. Encoded as
   // a left spine rather than a full tinted border (elevation + a spine reads
@@ -97,14 +94,7 @@ const PodNode: React.FC<PodNodeProps> = React.memo(({ data, selected }) => {
                 ns: {data.externalNamespace}
               </div>
             )}
-            {daemonSetBadge && (
-              <span
-                className="inline-block mt-0.5 px-1.5 py-px rounded-control border border-hubble-info/40 bg-hubble-info/10 text-[10px] font-medium text-hubble-info"
-                title="Hidden by the DaemonSets toggle when it is off"
-              >
-                {daemonSetBadge}
-              </span>
-            )}
+
             {podCount > 1 && (
               <div className="text-xs text-tertiary">
                 {podCount} {isExternal ? (AGGREGATE_NAMESPACES.has(data.externalNamespace ?? '') ? 'IPs' : 'pods') : 'replicas'}

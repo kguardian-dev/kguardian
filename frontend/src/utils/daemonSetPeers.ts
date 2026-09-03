@@ -27,6 +27,21 @@ export function isDaemonSetPeer(node: PodNodeData): boolean {
   return members.some(isDaemonSetOrHostNetworkPod);
 }
 
+// Map colours for the association: the toggle, the peer node's spine and
+// every edge to/from such a peer share the DaemonSets hue (hubble-info) the
+// way External shares amber with its nodes and edges. Denied stays red.
+export const EDGE_COLOR_DENIED = '#EF4444';
+export const EDGE_COLOR_EXTERNAL = '#F59E0B';
+export const EDGE_COLOR_TRUSTED = '#4E3AD9';
+export const EDGE_COLOR_DAEMONSET = '#0D9488'; // --color-hubble-info
+
+export function edgeStrokeColor(edge: { isDrop: boolean; isDaemonSet: boolean; isExternal: boolean }): string {
+  if (edge.isDrop) return EDGE_COLOR_DENIED;
+  if (edge.isDaemonSet) return EDGE_COLOR_DAEMONSET;
+  if (edge.isExternal) return EDGE_COLOR_EXTERNAL;
+  return EDGE_COLOR_TRUSTED;
+}
+
 export interface DaemonSetPartition {
   visible: PodNodeData[];
   hidden: PodNodeData[];

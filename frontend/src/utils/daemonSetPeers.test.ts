@@ -1,6 +1,11 @@
 import { describe, expect, test } from 'vitest';
 import type { PodInfo, PodNodeData } from '../types';
 import {
+  EDGE_COLOR_DAEMONSET,
+  EDGE_COLOR_DENIED,
+  EDGE_COLOR_EXTERNAL,
+  EDGE_COLOR_TRUSTED,
+  edgeStrokeColor,
   isDaemonSetOrHostNetworkPod,
   isDaemonSetPeer,
   partitionDaemonSetPeers,
@@ -67,6 +72,19 @@ describe('partitionDaemonSetPeers', () => {
   test('selected peer is never hidden', () => {
     const { visible } = partitionDaemonSetPeers(all, { show: false, focusedId: null, selectedId: cni.id });
     expect(visible).toEqual([cni, app]);
+  });
+});
+
+describe('edgeStrokeColor', () => {
+  test('edges to/from a DaemonSet peer take the DaemonSets hue, distinct from External', () => {
+    expect(edgeStrokeColor({ isDrop: false, isDaemonSet: true, isExternal: true })).toBe(EDGE_COLOR_DAEMONSET);
+    expect(EDGE_COLOR_DAEMONSET).not.toBe(EDGE_COLOR_EXTERNAL);
+    expect(EDGE_COLOR_DAEMONSET).not.toBe(EDGE_COLOR_TRUSTED);
+  });
+  test('denied always wins; otherwise external amber, in-cluster indigo', () => {
+    expect(edgeStrokeColor({ isDrop: true, isDaemonSet: true, isExternal: true })).toBe(EDGE_COLOR_DENIED);
+    expect(edgeStrokeColor({ isDrop: false, isDaemonSet: false, isExternal: true })).toBe(EDGE_COLOR_EXTERNAL);
+    expect(edgeStrokeColor({ isDrop: false, isDaemonSet: false, isExternal: false })).toBe(EDGE_COLOR_TRUSTED);
   });
 });
 

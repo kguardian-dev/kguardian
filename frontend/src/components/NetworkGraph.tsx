@@ -14,7 +14,7 @@ import ELK from 'elkjs/lib/elk.bundled.js';
 import { Activity, ShieldAlert, Server, Crosshair, X } from 'lucide-react';
 import PodNode from './PodNode';
 import { shouldExitFocus } from '../utils/graphFocus';
-import { partitionDaemonSetPeers, shouldAutoShowDaemonSets } from '../utils/daemonSetPeers';
+import { EDGE_COLOR_DAEMONSET, edgeStrokeColor, isDaemonSetPeer, partitionDaemonSetPeers, shouldAutoShowDaemonSets } from '../utils/daemonSetPeers';
 import { GraphControls } from './GraphControls';
 import { buildPeerIndex, resolvePeer, type PeerResolution } from '../utils/peerResolution';
 import { buildExternalNodes, remoteNodeForRow } from '../utils/externalPeers';
@@ -284,6 +284,8 @@ const NetworkGraphInner: React.FC<NetworkGraphProps> = ({
     const edgeMap = new Map<string, {
       count: number;
       isExternal: boolean;
+      /** Either end is a DaemonSet / host-network peer — drawn in the DaemonSets hue. */
+      isDaemonSet: boolean;
       ports: Map<string, number>;
       protocols: Set<string>;
       dropCount: number;
@@ -323,10 +325,12 @@ const NetworkGraphInner: React.FC<NetworkGraphProps> = ({
         if (sourcePod && destPod && sourcePod.id !== destPod.id) {
           const edgeKey = `${sourcePod.id}::${destPod.id}`;
           const isExternalEdge = !!(sourcePod.isExternal || destPod.isExternal);
+          const isDaemonSetEdge = isDaemonSetPeer(sourcePod) || isDaemonSetPeer(destPod);
           if (!edgeMap.has(edgeKey)) {
             edgeMap.set(edgeKey, {
               count: 0,
               isExternal: isExternalEdge,
+              isDaemonSet: isDaemonSetEdge,
               ports: new Map(),
               protocols: new Set(),
               dropCount: 0,
@@ -353,14 +357,16 @@ const NetworkGraphInner: React.FC<NetworkGraphProps> = ({
 
     edgeMap.forEach((edgeData, key) => {
       const [source, target] = key.split('::');
-      const { count, isExternal, ports, protocols, dropCount } = edgeData;
+      const { count, isExternal, isDaemonSet, ports, protocols, dropCount } = edgeData;
 
       // Trust-state edge coloring (kguardian brand): denied flows are the single
       // most important signal for a runtime-security operator, so they get the
       // error red + a bolder stroke; egress-to-external is warm amber (dashed);
       // trusted in-cluster traffic is the brand indigo (was an off-brand #3B82F6).
+      // DaemonSet / host-network peers take the DaemonSets toggle's teal so the
+      // toggle, the node and its traffic read as one association.
       const isDrop = dropCount > 0;
-      const strokeColor = isDrop ? '#EF4444' : isExternal ? '#F59E0B' : '#4E3AD9';
+      const strokeColor = edgeStrokeColor({ isDrop, isDaemonSet, isExternal });
 
       // Build semantic label from port/protocol data
       let label: string;
@@ -693,6 +699,9 @@ const NetworkGraphInner: React.FC<NetworkGraphProps> = ({
             <div className="flex items-center gap-3 px-3 py-1.5 rounded-surface bg-hubble-card/90 border border-hubble-border backdrop-blur-sm text-[11px] text-secondary">
               <span className="flex items-center gap-1.5"><span className="w-3.5 h-0.5 rounded-full" style={{ background: '#4E3AD9' }} />Trusted</span>
               <span className="flex items-center gap-1.5"><span className="w-3.5 h-0 border-t-2 border-dashed" style={{ borderColor: '#F59E0B' }} />Egress</span>
+              {showDaemonSetNodes && daemonSetCount > 0 && (
+                <span className="flex items-center gap-1.5"><span className="w-3.5 h-0 border-t-2 border-dashed" style={{ borderColor: EDGE_COLOR_DAEMONSET }} />DaemonSet</span>
+              )}
               <span className="flex items-center gap-1.5"><span className="w-3.5 h-[3px] rounded-full" style={{ background: '#EF4444' }} />Denied</span>
             </div>
           </Panel>
