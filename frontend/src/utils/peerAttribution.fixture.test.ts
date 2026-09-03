@@ -306,6 +306,23 @@ describe('generateNetworkPolicy — peer attribution', () => {
     ]);
   });
 
+  test('by-IP: a dead Job pod last seen before the flow is not a candidate ⇒ unattributed', async () => {
+    const job = podRecord({
+      pod_name: 'volsync-src-abc', pod_ip: '10.244.12.199', pod_namespace: 'home-system', is_dead: true,
+      workload_kind: 'Job', workload_name: 'volsync-src', workload_selector_labels: { app: 'volsync' },
+      started_at: '2026-08-01T00:00:00', time_stamp: '2026-08-01T00:10:00',
+    });
+    listing = [cmangosDatabase, job];
+    const yaml = policyToYAML(await generateNetworkPolicy(target(cmangosDatabase, [
+      ingressRow('10.244.12.199', '3306', '51234', '2026-08-10T00:00:00'),
+    ])));
+    expect(spec(parse(yaml)).ingress).toEqual([
+      { from: [{ ipBlock: { cidr: '10.244.12.199/32' } }], ports: [{ protocol: 'TCP', port: 3306 }] },
+    ]);
+    expect(yaml).not.toContain('volsync');
+    expect(commentLines(yaml)).toEqual(['# unattributed peer 10.244.12.199 at 2026-08-10T00:00:00']);
+  });
+
   test('by-IP: an alive holder with NULL started_at (ghost / Pending) is not a candidate ⇒ unattributed', async () => {
     listing = [cmangosDatabase, autobrrNoStart];
     const yaml = policyToYAML(await generateNetworkPolicy(target(cmangosDatabase, [

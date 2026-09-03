@@ -29,6 +29,10 @@
 // applies it (`GET /pod/ip/{ip}?at=`): a broker predating `?at=` returns
 // the current holder for any `at`, and the frontend must still not draw it.
 //
+// A dead record is additionally bounded by its `time_stamp` (last seen /
+// marked dead): a finished Job with an old start must not absorb flows on
+// its recycled IP that happened after it ended.
+//
 // Precedence among surviving candidates mirrors the broker's resolver
 // (scratchpad/broker-api-v4.md): alive before dead, then newest
 // `started_at`, then newest record, then `<ns>/<name>`. The same algorithm
@@ -68,15 +72,24 @@ export function hasStoredPeer(row: Pick<NetworkTraffic, 'peer_kind'>): boolean {
 }
 
 /**
- * The start-time guard. A pod may be the peer of a flow only when its
- * `started_at` is KNOWN and not later than the flow time. An unknown start
- * (NULL/absent) or an unparseable flow time disqualifies: there is nothing
- * to prove the pod existed when the flow happened.
+ * The lifetime guard. A pod may be the peer of a flow only when it existed
+ * at the flow time:
+ *  - its `started_at` is KNOWN and not later than the flow (an unknown
+ *    start or an unparseable flow time disqualifies — nothing proves the
+ *    pod existed then);
+ *  - and, for a DEAD record, its `time_stamp` (last seen alive / marked
+ *    dead) is KNOWN and not earlier than the flow — a completed Job whose
+ *    IP was recycled must not absorb flows that happened after it ended.
  */
-export function podEligibleAt(pod: Pick<PodInfo, 'started_at'>, flowTime: number | null): boolean {
+export function podEligibleAt(pod: Pick<PodInfo, 'started_at' | 'is_dead' | 'time_stamp'>, flowTime: number | null): boolean {
   if (flowTime === null) return false;
   const started = parseBrokerTime(pod.started_at);
-  return started !== null && started <= flowTime;
+  if (started === null || started > flowTime) return false;
+  if (pod.is_dead) {
+    const lastSeen = parseBrokerTime(pod.time_stamp);
+    if (lastSeen === null || lastSeen < flowTime) return false;
+  }
+  return true;
 }
 
 /** Every IP a pod record holds: `pod_ip` plus the dual-stack `pod_ips`. */
