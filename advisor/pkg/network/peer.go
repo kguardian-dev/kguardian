@@ -156,13 +156,20 @@ func parseBrokerTime(s string) (t time.Time, ok bool) {
 	return time.Time{}, false
 }
 
-// laterThan reports whether a (a pod's started_at) is strictly later than b
-// (a row's time_stamp) — the start-time guard. Either side unknown ⇒ false:
-// nothing to compare, so the candidate stays.
-func laterThan(a, b string) bool {
-	ta, okA := parseBrokerTime(a)
-	tb, okB := parseBrokerTime(b)
-	return okA && okB && ta.After(tb)
+// excludedByGuard is the start-time guard for a by-IP candidate: given a row
+// time_stamp, only a pod with a KNOWN start that is not after the flow can
+// have been the peer. An unknown started_at is excluded too — every live pod
+// has one within a minute of the broker upgrade, so NULL means a ghost row or
+// a Pending pod, and on cluster-00 such rows absorbed old flows. With no row
+// time_stamp (bare-IP callers) there is nothing to compare and the candidate
+// stays.
+func excludedByGuard(startedAt, at string) bool {
+	flow, ok := parseBrokerTime(at)
+	if !ok {
+		return false
+	}
+	start, ok := parseBrokerTime(startedAt)
+	return !ok || start.After(flow)
 }
 
 // newestTimeStamp picks the newest of the given broker timestamps and
@@ -393,13 +400,14 @@ func (r *peerResolver) candidatesByIP(peerIP string) []*api.PodDetail {
 }
 
 // choosePeerCandidate applies the start-time guard and the broker's
-// precedence: drop candidates started after the flow; prefer alive; then the
-// newest started_at (unknown last); then the newest record; then name, so
-// the choice is stable. nil when the guard removed every candidate.
+// precedence: drop candidates with an unknown start or one after the flow
+// (see excludedByGuard); prefer alive; then the newest started_at; then the
+// newest record; then name, so the choice is stable. nil when the guard
+// removed every candidate.
 func choosePeerCandidate(candidates []*api.PodDetail, at string) *api.PodDetail {
 	var kept []*api.PodDetail
 	for _, c := range candidates {
-		if laterThan(c.StartedAt, at) {
+		if excludedByGuard(c.StartedAt, at) {
 			continue
 		}
 		kept = append(kept, c)
