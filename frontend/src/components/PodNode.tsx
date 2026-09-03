@@ -1,6 +1,7 @@
 import React from 'react';
 import { Handle, Position } from 'reactflow';
 import { ChevronDown, ChevronRight, Network, Server, Globe, FileCode, Crosshair } from 'lucide-react';
+import { isDaemonSetOrHostNetworkPod } from '../utils/daemonSetPeers';
 import type { PodNodeData } from '../types';
 import { Button } from './ui/Button';
 
@@ -34,11 +35,16 @@ const PodNode: React.FC<PodNodeProps> = React.memo(({ data, selected }) => {
   }, 0) || 0;
 
   const IconComponent = isExternal ? Globe : Server;
+  // DaemonSet / host-network peers (see utils/daemonSetPeers) take the same
+  // teal as their toolbar toggle and their edges — colour alone carries the
+  // association, no tag text on the card.
+  const daemonSetPeer = isExternal && (data.pods && data.pods.length > 0 ? data.pods : [data.pod]).some(isDaemonSetOrHostNetworkPod);
   // Trust state → accent: external endpoints = warning amber, in-cluster
-  // workloads = brand indigo. Encoded as a left spine rather than a full tinted
-  // border (elevation + a spine reads authored; a rounded tint box reads generic).
-  const accentColor = isExternal ? 'text-hubble-warning' : 'text-hubble-accent';
-  const spineColor = isExternal ? 'border-l-hubble-warning' : 'border-l-hubble-accent';
+  // workloads = brand indigo, DaemonSet/host-network peers = teal. Encoded as
+  // a left spine rather than a full tinted border (elevation + a spine reads
+  // authored; a rounded tint box reads generic).
+  const accentColor = daemonSetPeer ? 'text-hubble-info' : isExternal ? 'text-hubble-warning' : 'text-hubble-accent';
+  const spineColor = daemonSetPeer ? 'border-l-hubble-info' : isExternal ? 'border-l-hubble-warning' : 'border-l-hubble-accent';
 
   const borderClasses = selected
     ? `border-hubble-border-strong ring-1 ring-hubble-accent/60 shadow-lg`
@@ -88,6 +94,7 @@ const PodNode: React.FC<PodNodeProps> = React.memo(({ data, selected }) => {
                 ns: {data.externalNamespace}
               </div>
             )}
+
             {podCount > 1 && (
               <div className="text-xs text-tertiary">
                 {podCount} {isExternal ? (AGGREGATE_NAMESPACES.has(data.externalNamespace ?? '') ? 'IPs' : 'pods') : 'replicas'}

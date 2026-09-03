@@ -36,7 +36,8 @@ import { UI_DIMENSIONS } from './constants/ui';
 const ROUTES = ['map', 'findings', 'seccomp'] as const;
 
 function App() {
-  const { settings, updateSettings } = useSettings();
+  const { settings, updateSettings, toggleSetting } = useSettings();
+  const toggleDaemonSetNodes = useCallback(() => toggleSetting('showDaemonSetNodes'), [toggleSetting]);
   const { activeCluster } = useCluster();
 
   // The whole location — view, namespace, selected workload — lives in the URL
@@ -432,6 +433,8 @@ function App() {
                 services={services}
                 showExternalNodes={settings.showExternalNodes}
                 onToggleExternalNodes={() => updateSettings({ showExternalNodes: !settings.showExternalNodes })}
+                showDaemonSetNodes={settings.showDaemonSetNodes}
+                onToggleDaemonSetNodes={toggleDaemonSetNodes}
                 showTraffic={settings.showTraffic}
                 onToggleTraffic={() => updateSettings({ showTraffic: !settings.showTraffic })}
                 layoutDirection={settings.layoutDirection}

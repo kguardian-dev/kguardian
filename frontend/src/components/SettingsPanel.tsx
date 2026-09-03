@@ -80,6 +80,9 @@ export function SettingsPanel({ isOpen, onClose, namespaces }: SettingsPanelProp
           <Row label="Show external endpoints" hint="Internet / cross-cluster traffic nodes">
             <Toggle checked={settings.showExternalNodes} onChange={(v) => updateSettings({ showExternalNodes: v })} />
           </Row>
+          <Row label="Show DaemonSet peers" hint="node-exporter, CNI and CSI agents — hidden by default to declutter the map">
+            <Toggle checked={settings.showDaemonSetNodes} onChange={(v) => updateSettings({ showDaemonSetNodes: v })} />
+          </Row>
           <Row label="Show traffic edges">
             <Toggle checked={settings.showTraffic} onChange={(v) => updateSettings({ showTraffic: v })} />
           </Row>

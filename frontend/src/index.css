@@ -54,6 +54,12 @@
   --color-hubble-warning-hover: #D98908;
   --color-hubble-error: #EF4444;
   --color-hubble-error-hover: #DC2626;
+  /* Third categorical hue (teal) for things that are neither the brand
+     accent nor a trust state: the map's DaemonSet / host-network peers,
+     whose toggle must read differently from Traffic (indigo) and External
+     (amber) at a glance. teal-600 keeps ≥4.5:1 on the dark ground. */
+  --color-hubble-info: #0D9488;
+  --color-hubble-info-hover: #0F766E;
 
   /* One radius step for interactive controls (buttons, inputs, tabs) so the
      app stops mixing rounded / rounded-lg / rounded-full at random. */
