@@ -184,7 +184,16 @@ describe('resolvePeer — autobrr / cmangos-database', () => {
     expect(recycled).toEqual({ kind: 'service', namespace: 'prod', name: 'old-db', svc: null, stored: true });
     const noSelector = resolvePeer(row({ traffic_in_out_ip: '10.96.0.11', peer_kind: 'service', peer_namespace: 'prod', peer_name: 'ext' }), idx);
     expect(noSelector).toEqual({ kind: 'service', namespace: 'prod', name: 'ext', svc: null, stored: true });
-    expect(peerKey(stored)).toBeNull();
+    expect(peerKey(stored)).toBe('svc:prod/db');
+    expect(peerKey(recycled)).toBeNull();
+  });
+
+  test('by IP: the row IP IS a ClusterIP ⇒ service (never inferred from a backend pod holding an IP)', () => {
+    const svc: ServiceInfo = { svc_ip: '10.96.0.10', svc_name: 'db', svc_namespace: 'prod', service_spec: { spec: { selector: { app: 'db' } } } };
+    const idx = buildPeerIndex([autobrr], [svc]);
+    expect(resolvePeer(row({ traffic_in_out_ip: '10.96.0.10' }), idx)).toEqual({ kind: 'service', namespace: 'prod', name: 'db', svc, stored: false });
+    // autobrr's IP with a flow older than autobrr: guarded out, not a Service.
+    expect(resolvePeer(row({ traffic_in_out_ip: '10.244.12.199', time_stamp: '2026-07-23T10:00:00' }), idx).kind).toBe('unattributed');
   });
 
   test('null peer, IP nobody ever held → unknown (caller falls back to Service-by-IP / external)', () => {

@@ -211,11 +211,13 @@ export type PeerResolution =
   /** A host-network pod: the IP is a node IP (`peer_kind` node, or a by-IP
    *  choice whose record says host_network). */
   | { kind: 'node'; pod: PodInfo; stored: boolean }
-  /** A Service ClusterIP the broker stamped. `svc` is the current Service
-   *  of that namespace/name when the listing has it WITH a selector; null
-   *  means the Service is gone or a recycled ClusterIP now names another
-   *  Service — consumers render that as unattributed. */
-  | { kind: 'service'; namespace: string | null; name: string | null; svc: ServiceInfo | null; stored: true }
+  /** A Service ClusterIP: stamped by the broker (`stored`), or the row's IP
+   *  IS a ClusterIP in the listing (by-IP; only when no pod ever held the
+   *  IP). For a stored one `svc` is the current Service of that
+   *  namespace/name when the listing has it WITH a selector; null means the
+   *  Service is gone or a recycled ClusterIP now names another Service —
+   *  consumers render that as unattributed. */
+  | { kind: 'service'; namespace: string | null; name: string | null; svc: ServiceInfo | null; stored: boolean }
   /** No stored peer and the guard excluded every pod that ever held the IP. */
   | { kind: 'unattributed'; ip: string; at: string }
   /** No stored peer, no pod ever held the IP: the caller's pre-v4 path
@@ -275,6 +277,11 @@ export function resolvePeer(row: NetworkTraffic, index: PeerIndex): PeerResoluti
   const { pod, guardedOut } = selectPodByIp(index.podsByIp.get(ip), parseBrokerTime(row.time_stamp));
   if (pod) return { kind: pod.host_network === true ? 'node' : 'pod', pod, stored: false };
   if (guardedOut) return { kind: 'unattributed', ip, at: row.time_stamp };
+  // No pod ever held the IP: it may be a ClusterIP itself. (A Service is
+  // never inferred from a pod that holds the IP — only from the IP being
+  // the ClusterIP.)
+  const svc = index.servicesByIp.get(ip);
+  if (svc) return { kind: 'service', namespace: svc.svc_namespace ?? null, name: svc.svc_name ?? null, svc, stored: false };
   return { kind: 'unknown' };
 }
 
@@ -294,6 +301,8 @@ export function peerKey(peer: PeerResolution): string | null {
       return `pod:${peer.pod.pod_namespace ?? ''}/${peer.pod.pod_name}`;
     case 'unattributed':
       return `unattributed:${peer.ip}`;
+    case 'service':
+      return peer.svc ? `svc:${peer.svc.svc_namespace ?? ''}/${peer.svc.svc_name ?? peer.svc.svc_ip}` : null;
     default:
       return null;
   }

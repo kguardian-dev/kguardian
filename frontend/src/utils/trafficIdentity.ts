@@ -172,6 +172,7 @@ export async function createRowIdentityResolver(): Promise<RowIdentityResolver> 
         return identity;
       }
       case 'service': {
+        if (!peer.stored && peer.svc) return serviceIdentity(peer.svc);
         // The Service of that namespace/name must still front this
         // ClusterIP with a selector (`/svc/ip`; the listing has no
         // Services). A different name on the IP means the ClusterIP was
