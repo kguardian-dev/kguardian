@@ -44,7 +44,7 @@ It's built for platform and security teams who want policy-as-code without writi
   <tr>
     <td width="50%" align="center">
       <a href="docs/images/readme/network-map.png"><img src="docs/images/readme/network-map.png" alt="Network Map: every observed flow in a namespace, with trusted, egress, and denied edges" /></a>
-      <br /><sub><b>Network Map</b> — every flow eBPF saw, in one graph: trusted, egress, and would-deny edges across a live namespace.</sub>
+      <br /><sub><b>Network Map</b> — every flow eBPF saw, in one graph: trusted, egress, and would-deny edges for a live namespace (here, Flux).</sub>
     </td>
     <td width="50%" align="center">
       <a href="docs/images/readme/policy-builder.png"><img src="docs/images/readme/policy-builder.png" alt="Policy Builder: a least-privilege NetworkPolicy generated from observed traffic" /></a>
@@ -54,11 +54,11 @@ It's built for platform and security teams who want policy-as-code without writi
   <tr>
     <td width="50%" align="center">
       <a href="docs/images/readme/seccomp-profiles.png"><img src="docs/images/readme/seccomp-profiles.png" alt="Seccomp Profiles: an enforcing SeccompProfile CR with node readiness and drift" /></a>
-      <br /><sub><b>Seccomp Profiles</b> — per-workload syscall allow-lists, exported as a CR you commit; readiness on every node and drift against the deployed profile.</sub>
+      <br /><sub><b>Seccomp Profiles</b> — per-workload syscall allow-lists with node readiness and drift against the deployed <code>SeccompProfile</code>, audit mode by default.</sub>
     </td>
     <td width="50%" align="center">
-      <a href="docs/images/readme/audit-verdicts.png"><img src="docs/images/readme/audit-verdicts.png" alt="Audit Verdicts: flows an AuditNetworkPolicy would deny, nothing dropped" /></a>
-      <br /><sub><b>Audit Verdicts</b> — see exactly which flows a policy <i>would</i> block before you enforce it. Nothing is dropped.</sub>
+      <a href="docs/images/readme/seccomp-export.png"><img src="docs/images/readme/seccomp-export.png" alt="Export a SeccompProfile CR: diff against the deployed CR and the manifest to commit" /></a>
+      <br /><sub><b>Policy as code</b> — export the <code>SeccompProfile</code> CR, see the diff against what is deployed, commit it. kguardian never applies anything itself.</sub>
     </td>
   </tr>
 </table>
