@@ -333,17 +333,39 @@ pub fn pod_name(conn: &mut PgConnection, name: &str) -> Result<Option<PodDetail>
     Ok(pod)
 }
 
+/// Query params for `GET /pod/ip/{ip}`.
+#[derive(serde::Deserialize)]
+pub struct PodByIpQuery {
+    /// When the flow being attributed was observed. With it, the lookup
+    /// applies the start-time guard (a pod started after `at` is never
+    /// returned) and prefers the pod that held the address AT that
+    /// time; without it, behaviour is unchanged (live first, then the
+    /// most recently seen). RFC3339 or the broker's naive-UTC form.
+    pub at: Option<String>,
+}
+
 // POD BY IP
 #[get("/pod/ip/{ip}")]
 pub async fn get_pod_by_ip(
     pool: web::Data<DbPool>,
     ip: web::Path<String>,
+    query: web::Query<PodByIpQuery>,
 ) -> actix_web::Result<impl Responder> {
     info!("select pod details by ip");
     let ip = ip.into_inner();
+    let at = match query.into_inner().at.filter(|s| !s.trim().is_empty()) {
+        None => None,
+        Some(raw) => match crate::peer::parse_at(&raw) {
+            Ok(t) => Some(t),
+            Err(msg) => return Ok(HttpResponse::BadRequest().body(msg)),
+        },
+    };
     let pod_detail = web::block(move || {
         let mut conn = pool.get()?;
-        pod_ip(&mut conn, &ip)
+        match at {
+            Some(at) => pod_ip_at(&mut conn, &ip, at),
+            None => pod_ip(&mut conn, &ip),
+        }
     })
     .await?
     .map_err(actix_web::error::ErrorInternalServerError)?;
@@ -352,6 +374,29 @@ pub async fn get_pod_by_ip(
         Some(p) => HttpResponse::Ok().json(p),
         None => HttpResponse::NotFound().body("No data found"),
     })
+}
+
+/// Every pod_details row that holds (or held) `ip`, in the same
+/// alive-first / newest-first order as [`pod_by_ip_query`]. The peer
+/// resolver and the `?at=` lookup rank these in Rust under the
+/// start-time guard (`crate::peer::choose_pod`); the list is small — a
+/// handful of former holders, 50-odd for the busiest recycled address.
+pub(crate) fn pod_candidates_by_ip(
+    conn: &mut PgConnection,
+    ip: &str,
+) -> Result<Vec<PodDetail>, DbError> {
+    Ok(pod_by_ip_query(ip).load::<PodDetail>(conn)?)
+}
+
+/// Resolve a pod by any of its addresses AS OF `at`: excludes pods that
+/// started after `at`, prefers the one that held the address then.
+pub fn pod_ip_at(
+    conn: &mut PgConnection,
+    ip: &str,
+    at: chrono::NaiveDateTime,
+) -> Result<Option<PodDetail>, DbError> {
+    let candidates = pod_candidates_by_ip(conn, ip)?;
+    Ok(crate::peer::choose_pod(&candidates, at).cloned())
 }
 
 /// The pod-by-IP query for a raw inbound `ip`, canonicalisation
@@ -774,10 +819,25 @@ mod tests {
         let sql = pod_sql("10.0.0.1");
         assert!(
             sql.contains(
-                r#""pod_details"."pod_ips", "pod_details"."workload_kind", "pod_details"."workload_name", "pod_details"."capture_level", "pod_details"."host_network" FROM"#
+                r#""pod_details"."pod_ips", "pod_details"."workload_kind", "pod_details"."workload_name", "pod_details"."capture_level", "pod_details"."host_network", "pod_details"."started_at" FROM"#
             ),
-            "workload_kind/workload_name/capture_level/host_network must be the last selected columns: {sql}"
+            "workload_kind/workload_name/capture_level/host_network/started_at must be the last selected columns: {sql}"
         );
+    }
+
+    #[test]
+    fn pod_by_ip_query_parses_at_and_treats_blank_as_absent() {
+        // web::Query goes through serde_urlencoded; `?at=` present-but-
+        // empty is how a caller forwards an unset variable, and the
+        // handler treats it as "no guard" rather than a 400.
+        let q: PodByIpQuery = serde_urlencoded::from_str("").expect("must parse");
+        assert!(q.at.is_none());
+        let q: PodByIpQuery =
+            serde_urlencoded::from_str("at=2026-07-23T10%3A00%3A00Z").expect("must parse");
+        assert_eq!(q.at.as_deref(), Some("2026-07-23T10:00:00Z"));
+        let q: PodByIpQuery = serde_urlencoded::from_str("at=").expect("must parse");
+        assert_eq!(q.at.as_deref(), Some(""));
+        assert!(q.at.filter(|s| !s.trim().is_empty()).is_none());
     }
 
     #[test]

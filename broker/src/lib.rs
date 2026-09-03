@@ -3,6 +3,7 @@ mod audit;
 mod error;
 mod get;
 mod ip;
+mod peer;
 mod retention;
 mod seccomp;
 mod telemetry;
@@ -14,6 +15,7 @@ pub use add::{
 };
 pub use audit::AuditClient;
 pub use error::*;
+pub use peer::spawn as spawn_peer_late_resolve;
 pub use retention::spawn as spawn_retention;
 pub use telemetry::*;
 pub use types::*;
