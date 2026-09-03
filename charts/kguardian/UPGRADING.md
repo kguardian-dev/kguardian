@@ -31,7 +31,13 @@ started after the flow. See
    `pod_details.started_at` is likewise `NULL` on pre-upgrade pod rows
    until the controller re-posts the pod — every live pod is re-posted
    when the controller restarts, so the DaemonSet rollout fills it in;
-   a dead pod that is never re-posted stays unguarded and ranks last.
+   a pod that is never re-posted keeps `NULL` and is excluded from by-IP
+   attribution — within 60 s of the upgrade every live pod has a start
+   time, so `NULL` means a ghost row or a Pending pod. The broker also
+   marks alive rows dead when they have not been re-posted for
+   `broker.peerResolution.staleAliveSeconds` (default 900, env
+   `PEER_STALE_ALIVE_SECS`, `0` disables), since the controller re-posts
+   live pods every 60 s; a ghost row can no longer claim an IP.
 2. **Regenerate policies after a fresh observation window.** Rows written
    from now on carry a definite peer. Let a representative window of
    traffic accumulate (hours for most workloads; a full cycle for

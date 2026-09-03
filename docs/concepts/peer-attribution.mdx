@@ -140,13 +140,22 @@ curl 'http://localhost:9090/pod/ip/10.244.12.199?at=2026-07-23T09:14:02Z'
 ```
 
 With `at`, the candidates holding the IP are filtered by
-`started_at IS NULL OR started_at <= at` and ordered
-`is_dead ASC, started_at DESC NULLS LAST, time_stamp DESC`; the first
-wins. Applied to the example above, the 2026-07-23 row cannot resolve to
-`autobrr` (started 2026-08-04); it resolves to the CronJob pod that held
-the IP then if its row still exists, and to nothing otherwise. A pod
-with an unknown start is not excluded — there is nothing to compare —
-but ranks after every candidate whose start is known.
+`started_at <= at` and ordered `is_dead ASC, started_at DESC,
+time_stamp DESC`; the first wins. Applied to the example above, the
+2026-07-23 row cannot resolve to `autobrr` (started 2026-08-04); it
+resolves to the CronJob pod that held the IP then if its row still
+exists, and to nothing otherwise. A pod with a `null` `started_at` is
+excluded outright. The Controller re-posts every live pod every 60 s,
+so within a minute of the broker upgrade every live pod has a start
+time; a `null` therefore means a ghost row or a pod still Pending,
+neither of which can have originated a flow.
+
+The Broker also keeps `pod_details` honest with a stale-alive sweep:
+a row still marked alive that has not been re-posted for
+`PEER_STALE_ALIVE_SECS` (default 900; `0` disables;
+`broker.peerResolution.staleAliveSeconds` in the chart) is marked dead,
+so a pod the Controller lost track of cannot keep winning the
+alive-first ordering for an IP it no longer holds.
 
 If no candidate survives the guard the peer is *unattributed*: the map
 renders it as an external IP node with a tooltip explaining that no live
@@ -204,8 +213,8 @@ removes them.
 Pre-upgrade `pod_details` rows have `started_at: null` too, until the
 Controller re-posts the pod (every live pod is re-posted when the
 Controller restarts, so a rolling upgrade of the DaemonSet fills them
-in). A dead pod that was never re-posted stays unguarded and is ranked
-last among candidates.
+in). A dead pod that was never re-posted keeps `started_at: null` and
+is never chosen by the guard.
 
 Because legacy history is only as good as the guard, **regenerate
 policies after a fresh observation window** rather than from the
