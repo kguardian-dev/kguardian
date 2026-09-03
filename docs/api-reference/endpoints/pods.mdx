@@ -160,8 +160,9 @@ wrong question for a flow observed weeks ago — pod IPs are recycled
 constantly and `pod_details` keeps no ownership history.
 
 With `at`, candidates are filtered by the start-time guard
-`started_at <= at`, then ordered `is_dead ASC, started_at DESC,
-time_stamp DESC`; the first wins. A pod with a `null` `started_at` is
+`started_at <= at` (and, for a dead candidate, record `time_stamp >= at`
+— it must not have been dead already at `at`), then ordered
+`is_dead ASC, started_at DESC, time_stamp DESC`; the first wins. A pod with a `null` `started_at` is
 excluded: the controller re-posts every live pod every 60 s, so within
 a minute of the broker upgrade every live pod has one, and `null`
 means a ghost row or a Pending pod.

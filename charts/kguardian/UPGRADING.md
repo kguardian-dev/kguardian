@@ -39,7 +39,13 @@ started after the flow. See
    time within 60 s and every flow recorded after the upgrade carries
    its peer identity, so the gap is confined to pre-upgrade history and
    closes with retention. Among live pods, `NULL` means a ghost row or a
-   Pending pod. The broker also
+   Pending pod. A dead candidate is also rejected when it was already
+   dead at flow time (its record `time_stamp` — last seen alive or marked
+   dead — is before the flow); a pod marked dead late is over-permissive
+   only for the bounded interval in between. The controller no longer
+   posts Succeeded/Failed/deleting pods as alive and its reconciler marks
+   them dead, so a completed Job cannot be attributed later flows on its
+   recycled IP. The broker also
    marks alive rows dead when they have not been re-posted for
    `broker.peerResolution.staleAliveSeconds` (default 900, env
    `PEER_STALE_ALIVE_SECS`, `0` disables), since the controller re-posts
