@@ -1,4 +1,5 @@
 import { Document, stringify, isNode } from "yaml";
+import { log } from "../../logger.js";
 
 // In-process NetworkPolicy / CiliumNetworkPolicy generation. A faithful
 // TypeScript port of the advisor's Go generators (pkg/network standard_policy.go,
@@ -469,7 +470,27 @@ const k8sPrefixed = (labels: Record<string, string>): Record<string, string> =>
 // field selects ALL peers). `comment` is set only for host-network peers.
 interface CiliumPeer { endpoints?: unknown[]; entities?: string[]; cidr?: string[]; comment: string }
 
-async function ciliumPeer(ip: string, resolve: PeerResolver): Promise<CiliumPeer> {
+// Cilium attaches every pod endpoint's namespace as this (source-prefixed)
+// label. An endpoint selector WITHOUT it is scoped to the policy's own
+// namespace, so a cross-namespace peer rendered from its labels alone matches
+// nothing and the flow is denied (media/maintainerr → downloads/sonarr).
+const CILIUM_NAMESPACE_LABEL = "k8s:io.kubernetes.pod.namespace";
+
+// peerEndpointSelector — the from/toEndpoints selector for a peer with the
+// given labels living in peerNamespace, relative to the policy's namespace.
+// Same-namespace peers are unchanged; an unknown peer namespace cannot be
+// fixed here and is logged. Mirrors advisor createPeerEndpointSelector.
+function peerEndpointSelector(labels: Record<string, string>, peerNamespace: string | undefined, policyNamespace: string): Record<string, string> {
+  const matchLabels = k8sPrefixed(labels);
+  if (!peerNamespace) {
+    log.warn(`peer namespace unknown for labels ${JSON.stringify(labels)}; Cilium endpoint selector is scoped to namespace ${policyNamespace} and will not match a cross-namespace peer`);
+    return matchLabels;
+  }
+  if (peerNamespace !== policyNamespace) matchLabels[CILIUM_NAMESPACE_LABEL] = peerNamespace;
+  return matchLabels;
+}
+
+async function ciliumPeer(ip: string, resolve: PeerResolver, policyNamespace: string): Promise<CiliumPeer> {
   const id = await resolve(ip);
   if (id?.hostNetwork === true) {
     // A host-network pod is not a Cilium endpoint; it carries the node's
@@ -477,7 +498,7 @@ async function ciliumPeer(ip: string, resolve: PeerResolver): Promise<CiliumPeer
     return { entities: [...HOST_ENTITIES], comment: hostPeerComment(id, ip, "endpointSelector") };
   }
   if (id && id.selector && Object.keys(id.selector).length > 0) {
-    return { endpoints: [{ matchLabels: k8sPrefixed(id.selector) }], comment: "" };
+    return { endpoints: [{ matchLabels: peerEndpointSelector(id.selector, id.namespace, policyNamespace) }], comment: "" };
   }
   const cidr = peerCIDR(ip);
   return cidr === null ? { comment: "" } : { cidr: [cidr], comment: "" };
@@ -490,12 +511,12 @@ const portsKey = (ports: Port[]): string => ports.map((p) => `${p.port}/${p.prot
 // peer fell in sorted-IP order, and later same-port peers only add their
 // comment line to it. Mirrors transformToCilium{Ingress,Egress}Rules in Go.
 async function ciliumRules(
-  rules: Rule[], resolve: PeerResolver, dir: "ingress" | "egress", comments: Record<number, string[]>,
+  rules: Rule[], resolve: PeerResolver, dir: "ingress" | "egress", comments: Record<number, string[]>, policyNamespace: string,
 ): Promise<unknown[]> {
   const out: unknown[] = [];
   const entityRuleByPorts = new Map<string, number>();
   for (const r of sortedPeers(rules)) {
-    const peer = await ciliumPeer(r.peerIP, resolve);
+    const peer = await ciliumPeer(r.peerIP, resolve, policyNamespace);
     const rule: Record<string, unknown> = {};
     const epKey = dir === "ingress" ? "fromEndpoints" : "toEndpoints";
     const entKey = dir === "ingress" ? "fromEntities" : "toEntities";
@@ -552,11 +573,11 @@ export async function generateCiliumPolicyWithComments(
   // As above, an empty list is omitted rather than emitted - only reachable
   // when every peer in the direction had an unparseable IP.
   if (ingress.length > 0) {
-    const rules = await ciliumRules(ingress, resolve, "ingress", comments.ingress);
+    const rules = await ciliumRules(ingress, resolve, "ingress", comments.ingress, pod.namespace);
     if (rules.length > 0) spec.ingress = rules;
   }
   if (egress.length > 0) {
-    const rules = await ciliumRules(egress, resolve, "egress", comments.egress);
+    const rules = await ciliumRules(egress, resolve, "egress", comments.egress, pod.namespace);
     if (rules.length > 0) spec.egress = rules;
   }
 

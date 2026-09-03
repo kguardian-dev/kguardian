@@ -237,3 +237,36 @@ test("standard — host-network Service peers are the backend node IPs, never th
   const dropped = await generateNetworkPolicyWithComments(prometheus, serviceTraffic, noIPs);
   assert.equal((dropped.policy.spec as { egress?: unknown[] }).egress, undefined);
 });
+
+// ---- Cross-namespace peers ----------------------------------------------------
+// A CiliumNetworkPolicy endpoint selector without a namespace label is scoped
+// to the policy's namespace; cross-namespace peers need
+// k8s:io.kubernetes.pod.namespace beside their labels. Mirrors advisor
+// crossNamespaceFixture; cilium_endpoint_resolved (same-namespace) is unchanged.
+const crossNsTraffic: TrafficRow[] = [
+  { traffic_type: "EGRESS", traffic_in_out_ip: "10.0.0.30", traffic_in_out_port: "8989", ip_protocol: "TCP" },
+  { traffic_type: "EGRESS", traffic_in_out_ip: "10.96.0.50", traffic_in_out_port: "9090", ip_protocol: "TCP" },
+  { traffic_type: "INGRESS", pod_port: "8080", traffic_in_out_ip: "10.0.0.40", ip_protocol: "TCP" },
+];
+const resolveCrossNs: PeerResolver = async (ip) =>
+  ip === "10.0.0.30" ? { selector: { app: "sonarr" }, namespace: "downloads" }
+  : ip === "10.0.0.40" ? { selector: { app: "maintainerr" }, namespace: "media" }
+  : ip === "10.96.0.50" ? { selector: { app: "prometheus" }, namespace: "monitoring" }
+  : null;
+
+test("standard policy — cross-namespace peers match advisor golden", async () => {
+  const got = await roundtrip(await generateNetworkPolicy(web, crossNsTraffic, resolveCrossNs));
+  assert.deepEqual(got, golden("standard_cross_namespace_peer.golden.yaml"));
+});
+
+test("cilium policy — cross-namespace peers carry the namespace label (advisor golden)", async () => {
+  const got = await roundtrip(await generateCiliumPolicy(web, crossNsTraffic, resolveCrossNs));
+  assert.deepEqual(got, golden("cilium_cross_namespace_peer.golden.yaml"));
+});
+
+test("cilium policy — unknown peer namespace leaves the selector as before", async () => {
+  const noNs: PeerResolver = async () => ({ selector: { app: "sonarr" } });
+  const policy = await generateCiliumPolicy(web, [crossNsTraffic[0]], noNs);
+  const egress = (policy.spec as { egress: { toEndpoints: { matchLabels: Record<string, string> }[] }[] }).egress;
+  assert.deepEqual(egress[0].toEndpoints[0].matchLabels, { "k8s:app": "sonarr" });
+});

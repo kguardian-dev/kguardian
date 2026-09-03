@@ -21,8 +21,12 @@ const prometheus = podRecord({
   pod_name: 'prometheus-0', pod_ip: '10.0.0.9', pod_namespace: 'monitoring',
   workload_selector_labels: { app: 'prometheus' }, host_network: false,
 });
-const byIp: Record<string, PodInfo> = { '10.0.0.20': nodeExporter, '10.0.0.9': prometheus };
-const byName: Record<string, PodInfo> = { [nodeExporter.pod_name]: nodeExporter, [prometheus.pod_name]: prometheus };
+const sonarr = podRecord({
+  pod_name: 'sonarr-0', pod_ip: '10.0.0.30', pod_namespace: 'downloads',
+  workload_selector_labels: { app: 'sonarr' }, host_network: false,
+});
+const byIp: Record<string, PodInfo> = { '10.0.0.20': nodeExporter, '10.0.0.9': prometheus, '10.0.0.30': sonarr };
+const byName: Record<string, PodInfo> = { [nodeExporter.pod_name]: nodeExporter, [prometheus.pod_name]: prometheus, [sonarr.pod_name]: sonarr };
 
 vi.mock('../services/api', () => {
   const apiClient = {
@@ -45,6 +49,9 @@ const target = (pod: PodInfo, traffic: unknown[]): PodNodeData =>
 const web = podRecord({ pod_name: 'web', pod_ip: '10.0.0.1', pod_namespace: 'prod', workload_selector_labels: { app: 'web' } });
 const hostnetEgress = target(web, [
   { traffic_type: 'EGRESS', traffic_in_out_ip: '10.0.0.20', traffic_in_out_port: '9100', ip_protocol: 'TCP' },
+]);
+const crossNamespace = target(web, [
+  { traffic_type: 'EGRESS', traffic_in_out_ip: '10.0.0.30', traffic_in_out_port: '8989', ip_protocol: 'TCP' },
 ]);
 const hostnetTarget = target(
   podRecord({ pod_name: 'node-exporter-abc12', pod_ip: '10.0.0.20', pod_namespace: 'monitoring', node_name: 'worker-1',
@@ -84,6 +91,17 @@ test('cilium visual editor: host-network peer renders read-only entities chips',
   expect(screen.getByText('host')).toBeTruthy();
   expect(screen.getByText('remote-node')).toBeTruthy();
   expect(screen.getByText(CILIUM_NOTE)).toBeTruthy();
+});
+
+test('cilium visual editor: cross-namespace peer shows a namespace chip beside its labels', async () => {
+  render(<NetworkPolicyEditor isOpen onClose={() => {}} pod={crossNamespace} />);
+  fireEvent.click(screen.getByText('Cilium Policy'));
+  const pre = await screen.findByText((_, el) => el?.tagName === 'PRE' && !!el.textContent?.includes('toEndpoints:'));
+  // The writer quotes the key (it contains ':' and '.'); still the exact Cilium label.
+  expect(pre.textContent).toContain('"k8s:io.kubernetes.pod.namespace": downloads');
+  fireEvent.click(screen.getByText('Visual Editor'));
+  expect(await screen.findByText('namespace: downloads')).toBeTruthy();
+  expect(screen.getByText('app=sonarr')).toBeTruthy();
 });
 
 test('host-network target: WARNING banner shown in both YAML and visual views', async () => {

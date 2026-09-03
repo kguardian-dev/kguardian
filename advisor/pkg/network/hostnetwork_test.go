@@ -192,7 +192,7 @@ func TestCiliumHostNetwork_DedupIsPerPortList(t *testing.T) {
 		{PeerIP: "192.168.50.103", Ports: mustPorts(10250)},
 	}
 	comments := &PolicyComments{}
-	egress := gen.transformToCiliumEgressRules(rules, comments)
+	egress := gen.transformToCiliumEgressRules(rules, comments, "monitoring")
 	require.Len(t, egress, 2)
 	assert.Equal(t, []string{"host", "remote-node"}, egress[0].ToEntities)
 	assert.Equal(t, "9100", egress[0].ToPorts[0].Ports[0].Port)

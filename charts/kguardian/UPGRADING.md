@@ -145,6 +145,17 @@ editing the CR. The broker migration drops the `workload_seccomp_overrides`,
 had a UI, so there is nothing to migrate. A stale `seccomp.overrides` key in
 your values file is ignored.
 
+## Cilium policies: cross-namespace peers now carry the namespace label
+
+Earlier generators emitted a peer in another namespace as bare
+`k8s:<label>` entries in `fromEndpoints`/`toEndpoints`. Cilium scopes
+those to the policy's own namespace, so the rule matched nothing and the
+traffic was silently denied. Generated selectors for cross-namespace peers
+now include `k8s:io.kubernetes.pod.namespace: <peer namespace>`.
+Regenerate any CiliumNetworkPolicy that has cross-namespace peers (the
+kube-dns egress rule is the usual one); Kubernetes NetworkPolicy output is
+unaffected.
+
 ## SSO (opt-in): gate the UI behind OIDC via oauth2-proxy (`frontend.sso.*`)
 
 The kguardian UI and broker API are unauthenticated by default. In a **Gateway

@@ -35,7 +35,20 @@ handoff so the TS ports can be written from it.
 | `standard_hostnetwork_egress_peer`, `cilium_hostnetwork_egress_peer` | Prometheus → node-exporter on two nodes (peers are `host_network: true`) + one CIDR peer |
 | `standard_hostnetwork_ingress_peer`, `cilium_hostnetwork_ingress_peer` | hostNetwork ingress-nginx and a normal pod both reach web:8080 |
 | `standard_hostnetwork_target`, `cilium_hostnetwork_target` | the target pod itself is `host_network: true` |
+| `standard_cross_namespace_peer`, `cilium_cross_namespace_peer` | peers (a pod, a Service, ingress + egress) in namespaces other than the target's |
 | `standard_hostnetwork_service_peer`, `cilium_hostnetwork_service_peer` | Prometheus → node-exporter ClusterIP whose backing pods are `host_network: true`, plus a normally-backed db ClusterIP |
+
+## Cross-namespace peers
+
+A CiliumNetworkPolicy endpoint selector with no namespace label is scoped to
+the policy's own namespace, so a peer in another namespace rendered from its
+labels alone matches nothing (the flow is denied). Whenever the resolved peer's
+namespace (pod, Service, or backing pod) differs from the target's, the Cilium
+`from/toEndpoints` selector carries `k8s:io.kubernetes.pod.namespace: <peer ns>`
+beside the `k8s:`-prefixed labels. Same-namespace peers are unchanged
+(`cilium_endpoint_resolved` is same-namespace and untouched); an unknown peer
+namespace is left as before and logged. The NetworkPolicy generator already
+emitted the `namespaceSelector` for every resolved peer.
 
 ## Host-network rendering
 

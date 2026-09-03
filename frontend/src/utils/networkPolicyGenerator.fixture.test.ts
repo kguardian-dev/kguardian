@@ -25,6 +25,9 @@ import type { PodInfo, PodNodeData } from '../types';
 //       host-network ingress-nginx controller → ipBlock / fromEntities
 //   (c) target: node-exporter itself is host-network → normal body + WARNING
 //   (d) host_network null (old broker) → legacy podSelector, no comments
+//   (f) cross_namespace_peer: peers in other namespaces → standard adds a
+//       namespaceSelector (unchanged); Cilium adds
+//       k8s:io.kubernetes.pod.namespace to the endpoint selector (the bug fix)
 //   (e) service_peer: a ClusterIP whose backing pods are host-network →
 //       one ipBlock per backend node IP (NP) / toEntities, comment names <ns>/svc/<name>
 //       and lists the backends' nodes
@@ -69,6 +72,15 @@ const podsByIp: Record<string, PodInfo> = {
     pod_name: 'prometheus', pod_ip: '10.0.0.5', pod_namespace: 'monitoring', node_name: 'worker-3',
     workload_name: 'prometheus', workload_selector_labels: { app: 'prometheus' }, host_network: false,
   }),
+  // (f) cross-namespace pod peers of prod/web
+  '10.0.0.30': podRecord({
+    pod_name: 'sonarr-0', pod_ip: '10.0.0.30', pod_namespace: 'downloads', node_name: 'worker-2',
+    workload_name: 'sonarr', workload_selector_labels: { app: 'sonarr' }, host_network: false,
+  }),
+  '10.0.0.41': podRecord({
+    pod_name: 'maintainerr-0', pod_ip: '10.0.0.41', pod_namespace: 'media', node_name: 'worker-2',
+    workload_name: 'maintainerr', workload_selector_labels: { app: 'maintainerr' }, host_network: false,
+  }),
   // (d) legacy row: host_network unknown
   '10.0.0.40': podRecord({
     pod_name: 'legacy-abc', pod_ip: '10.0.0.40', pod_namespace: 'prod',
@@ -100,6 +112,9 @@ const services: Record<string, unknown> = {
     service_spec: { spec: { selector: { app: 'node-exporter' } } } },
   '10.96.0.10': { svc_name: 'db', svc_namespace: 'prod', svc_ip: '10.96.0.10',
     service_spec: { spec: { selector: { app: 'db' } } } },
+  // (f) cross-namespace Service peer of prod/web
+  '10.96.0.50': { svc_name: 'prometheus', svc_namespace: 'monitoring', svc_ip: '10.96.0.50',
+    service_spec: { spec: { selector: { app: 'prometheus' } } } },
 };
 let serviceLookup: Record<string, unknown> = {};
 const useServices = () => { serviceLookup = services; };
@@ -145,6 +160,12 @@ const hostnetTarget = target(
 const legacyPeer = target(web, [egressRow('10.0.0.40', '5432')]);
 // (e) prometheus scrapes node-exporter via its ClusterIP and talks to db via its ClusterIP.
 const servicePeer = target(prometheus, [egressRow('10.96.0.20', '9100'), egressRow('10.96.0.10', '5432')]);
+// (f) prod/web talks to pods and a Service in OTHER namespaces, and is called from one.
+const crossNamespace = target(web, [
+  egressRow('10.0.0.30', '8989'),
+  egressRow('10.96.0.50', '9090'),
+  ingressRow('10.0.0.41', '8080'),
+]);
 
 const commentLines = (yaml: string) => yaml.split('\n').filter((l) => l.trimStart().startsWith('#'));
 
@@ -262,6 +283,17 @@ describe('generateNetworkPolicy — host-network peers', () => {
     expect(yaml).not.toContain('10.96.0.20');
   });
 
+  test('(f) cross-namespace peers: namespaceSelector on each, matches golden', async () => {
+    useDefaults();
+    useServices();
+    const doc = parse(policyToYAML(await generateNetworkPolicy(crossNamespace)));
+    const want = golden('standard_cross_namespace_peer.golden.yaml');
+    // Every peer is cross-namespace here, so no namespaceSelector is dropped by the normaliser.
+    expect(normaliseStandardRules(spec(doc).egress, 'prod')).toEqual(normaliseStandardRules(spec(want).egress, 'prod'));
+    expect(normaliseStandardRules(spec(doc).ingress, 'prod')).toEqual(normaliseStandardRules(spec(want).ingress, 'prod'));
+    expect(spec(doc).policyTypes).toEqual(spec(want).policyTypes);
+  });
+
   test('(d) host_network null (old broker): legacy podSelector rendering, no comments', async () => {
     useDefaults();
     const policy = await generateNetworkPolicy(legacyPeer);
@@ -338,6 +370,29 @@ describe('generateCiliumNetworkPolicy — host-network peers', () => {
       normaliseCiliumRules(spec(golden('cilium_hostnetwork_service_peer.golden.yaml')).egress),
     );
     expect(commentLines(yaml)).toEqual(commentLines(goldenText('cilium_hostnetwork_service_peer.golden.yaml')));
+  });
+
+  test('(f) cross-namespace peers: k8s:io.kubernetes.pod.namespace on every endpoint selector, byte-exact key', async () => {
+    useDefaults();
+    useServices();
+    const doc = parse(ciliumPolicyToYAML(await generateCiliumNetworkPolicy(crossNamespace)));
+    const want = golden('cilium_cross_namespace_peer.golden.yaml');
+    expect(normaliseCiliumRules(spec(doc).egress)).toEqual(normaliseCiliumRules(spec(want).egress));
+    expect(normaliseCiliumRules(spec(doc).ingress)).toEqual(normaliseCiliumRules(spec(want).ingress));
+    // The namespace label itself must be the exact Cilium key — not stripped
+    // by the k8s: normalisation above.
+    const namespaces = (dir: unknown, key: string) =>
+      ((dir as Rule[]).flatMap((r) => (r[key] as { matchLabels: Record<string, string> }[]) ?? []))
+        .map((ep) => ep.matchLabels['k8s:io.kubernetes.pod.namespace']);
+    expect(namespaces(spec(doc).egress, 'toEndpoints')).toEqual(['downloads', 'monitoring']);
+    expect(namespaces(spec(doc).ingress, 'fromEndpoints')).toEqual(['media']);
+    expect(namespaces(spec(want).egress, 'toEndpoints')).toEqual(['downloads', 'monitoring']);
+  });
+
+  test('(f2) same-namespace peer stays a bare selector (no namespace label)', async () => {
+    useDefaults();
+    const doc = parse(ciliumPolicyToYAML(await generateCiliumNetworkPolicy(hostnetTarget)));
+    expect((spec(doc).ingress as Rule[])[0].fromEndpoints).toEqual([{ matchLabels: { app: 'prometheus' } }]);
   });
 
   test('(d) host_network null: legacy toEndpoints, no comments', async () => {

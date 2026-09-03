@@ -1,11 +1,12 @@
 import type { PodInfo, PodNodeData } from '../types';
-import type {
-  CiliumNetworkPolicy,
-  CiliumIngressRule,
-  CiliumEgressRule,
-  EndpointSelector,
-  PortProtocol,
-  CiliumPortRule,
+import {
+  CILIUM_NAMESPACE_LABEL,
+  type CiliumNetworkPolicy,
+  type CiliumIngressRule,
+  type CiliumEgressRule,
+  type EndpointSelector,
+  type PortProtocol,
+  type CiliumPortRule,
 } from '../types/ciliumPolicy';
 import { apiClient } from '../services/api';
 import { resolveTrafficIdentity, type TrafficIdentity } from './trafficIdentity';
@@ -162,6 +163,22 @@ export async function generateCiliumNetworkPolicy(pod: PodNodeData): Promise<Cil
     hostNetworkComment?: string;
   }
 
+  // Cilium scopes an endpoint selector to the POLICY's namespace unless the
+  // selector names one, so a cross-namespace peer must carry the namespace
+  // label or it matches nothing (the standard generator's namespaceSelector
+  // equivalent). Same-namespace and unknown-namespace peers are unchanged.
+  const withPeerNamespace = (labels: Record<string, string>, peerNamespace: string | undefined): Record<string, string> => {
+    if (!peerNamespace) {
+      // Unknown namespace: emit the bare selector (scoped to the policy's own
+      // namespace) rather than guess, but say so — a cross-namespace peer
+      // rendered this way matches nothing.
+      console.warn(`Cilium peer ${JSON.stringify(labels)} has no namespace; selector is scoped to ${pod.pod.pod_namespace || 'default'}`);
+      return labels;
+    }
+    if (peerNamespace === (pod.pod.pod_namespace || 'default')) return labels;
+    return { ...labels, [CILIUM_NAMESPACE_LABEL]: peerNamespace };
+  };
+
   const hostNetworkPeer = (namespace: string, name: string, node: string): ResolvedPeer => ({
     entities: [...HOST_NETWORK_ENTITIES],
     hostNetworkComment: hostNetworkPeerComment('cilium', namespace, name, node),
@@ -184,7 +201,7 @@ export async function generateCiliumNetworkPolicy(pod: PodNodeData): Promise<Cil
         };
       }
       const facts = await getPeerPodFacts(identity.svcName);
-      return { selector: { matchLabels: facts.labels || { app: identity.svcName } } };
+      return { selector: { matchLabels: withPeerNamespace(facts.labels || { app: identity.svcName }, identity.svcNamespace) } };
     } else if (identity.podName) {
       const facts = await getPeerPodFacts(identity.podName);
       const hostNetwork = identity.hostNetwork ?? facts.hostNetwork;
@@ -195,7 +212,11 @@ export async function generateCiliumNetworkPolicy(pod: PodNodeData): Promise<Cil
           identity.nodeName || facts.nodeName || peerInfo.ip,
         );
       }
-      return { selector: { matchLabels: facts.labels || { app: identity.podName } } };
+      return {
+        selector: {
+          matchLabels: withPeerNamespace(facts.labels || { app: identity.podName }, identity.podNamespace || facts.namespace),
+        },
+      };
     } else {
       // External IP - the host mask follows the address family: /32 for IPv4,
       // /128 for IPv6 (a /32 on a v6 address would cover 2^96 hosts rather than

@@ -96,13 +96,13 @@ func (g *CiliumPolicyGenerator) GenerateWithComments(podName string, podTraffic 
 
 	// Add ingress rules if any
 	if len(ingressRules) > 0 {
-		policy.Spec.Ingress = g.transformToCiliumIngressRules(ingressRules, comments)
+		policy.Spec.Ingress = g.transformToCiliumIngressRules(ingressRules, comments, podDetail.Namespace)
 		log.Debug().Msgf("Added %d ingress rules to Cilium policy", len(policy.Spec.Ingress))
 	}
 
 	// Add egress rules if any
 	if len(egressRules) > 0 {
-		policy.Spec.Egress = g.transformToCiliumEgressRules(egressRules, comments)
+		policy.Spec.Egress = g.transformToCiliumEgressRules(egressRules, comments, podDetail.Namespace)
 		log.Debug().Msgf("Added %d egress rules to Cilium policy", len(policy.Spec.Egress))
 	}
 
@@ -250,6 +250,33 @@ func (g *CiliumPolicyGenerator) createEndpointSelector(podLabels map[string]stri
 	return newCiliumEndpointSelector(podLabels)
 }
 
+// ciliumNamespaceLabel is the label Cilium attaches to every pod endpoint
+// with its namespace (source-prefixed like every other k8s label).
+const ciliumNamespaceLabel = "k8s:io.kubernetes.pod.namespace"
+
+// createPeerEndpointSelector builds the from/toEndpoints selector for a peer
+// in peerNamespace. A CiliumNetworkPolicy endpoint selector with no namespace
+// label is scoped to the policy's own namespace, so a cross-namespace peer
+// rendered from its labels alone matches nothing and the flow is denied.
+// When the peer lives in another namespace the namespace label is added;
+// same-namespace peers are unchanged. An unknown peer namespace cannot be
+// fixed here — it is left as before and logged.
+func (g *CiliumPolicyGenerator) createPeerEndpointSelector(labels map[string]string, peerNamespace, policyNamespace string) CiliumEndpointSelector {
+	selector := g.createEndpointSelector(labels)
+	if peerNamespace == "" {
+		log.Warn().Msgf("Peer namespace unknown for labels %v; endpoint selector is scoped to namespace %q and will not match a cross-namespace peer", labels, policyNamespace)
+		return selector
+	}
+	if peerNamespace == policyNamespace {
+		return selector
+	}
+	if selector.MatchLabels == nil {
+		selector.MatchLabels = map[string]string{}
+	}
+	selector.MatchLabels[ciliumNamespaceLabel] = peerNamespace
+	return selector
+}
+
 // transformToCiliumIngressRules converts our internal rules to Cilium
 // IngressRule. comments (nil-safe) receives one line per host-network peer,
 // keyed by the emitted rule's index.
@@ -259,7 +286,7 @@ func (g *CiliumPolicyGenerator) createEndpointSelector(podLabels map[string]stri
 // yield ONE entities rule (the entities already cover every node), with a
 // comment line for each peer folded into it. The rule sits where the first
 // such peer fell in sorted-IP order.
-func (g *CiliumPolicyGenerator) transformToCiliumIngressRules(rules []NetworkPolicyRule, comments *PolicyComments) []CiliumIngressRule {
+func (g *CiliumPolicyGenerator) transformToCiliumIngressRules(rules []NetworkPolicyRule, comments *PolicyComments, policyNamespace string) []CiliumIngressRule {
 	var ingressRules []CiliumIngressRule
 
 	// Group rules by peer IP
@@ -275,7 +302,7 @@ func (g *CiliumPolicyGenerator) transformToCiliumIngressRules(rules []NetworkPol
 	entityRuleByPorts := map[string]int{}
 	for _, peerIP := range sortedKeys(peerRules) {
 		ports := peerRules[peerIP]
-		ingressRule, comment := g.createCiliumIngressRuleForPeer(peerIP, ports)
+		ingressRule, comment := g.createCiliumIngressRuleForPeer(peerIP, ports, policyNamespace)
 		if ingressRule == nil {
 			continue
 		}
@@ -296,7 +323,7 @@ func (g *CiliumPolicyGenerator) transformToCiliumIngressRules(rules []NetworkPol
 
 // transformToCiliumEgressRules converts our internal rules to Cilium
 // EgressRule. See the ingress sibling for the entities dedup.
-func (g *CiliumPolicyGenerator) transformToCiliumEgressRules(rules []NetworkPolicyRule, comments *PolicyComments) []CiliumEgressRule {
+func (g *CiliumPolicyGenerator) transformToCiliumEgressRules(rules []NetworkPolicyRule, comments *PolicyComments, policyNamespace string) []CiliumEgressRule {
 	var egressRules []CiliumEgressRule
 
 	// Group rules by peer IP
@@ -309,7 +336,7 @@ func (g *CiliumPolicyGenerator) transformToCiliumEgressRules(rules []NetworkPoli
 	entityRuleByPorts := map[string]int{}
 	for _, peerIP := range sortedKeys(peerRules) {
 		ports := peerRules[peerIP]
-		egressRule, comment := g.createCiliumEgressRuleForPeer(peerIP, ports)
+		egressRule, comment := g.createCiliumEgressRuleForPeer(peerIP, ports, policyNamespace)
 		if egressRule == nil {
 			continue
 		}
@@ -353,11 +380,11 @@ type ciliumPeer struct {
 
 // createCiliumIngressRuleForPeer creates a Cilium ingress rule for a specific
 // peer, plus the comment to render above it ("" for ordinary peers).
-func (g *CiliumPolicyGenerator) createCiliumIngressRuleForPeer(peerIP string, ports []networkingv1.NetworkPolicyPort) (*CiliumIngressRule, string) {
+func (g *CiliumPolicyGenerator) createCiliumIngressRuleForPeer(peerIP string, ports []networkingv1.NetworkPolicyPort, policyNamespace string) (*CiliumIngressRule, string) {
 	log.Debug().Msgf("Creating Cilium ingress rule for peer IP: %s", peerIP)
 
 	// Try to resolve peer information
-	peer := g.resolvePeerForCilium(peerIP)
+	peer := g.resolvePeerForCilium(peerIP, policyNamespace)
 
 	var ingressRule CiliumIngressRule
 
@@ -385,11 +412,11 @@ func (g *CiliumPolicyGenerator) createCiliumIngressRuleForPeer(peerIP string, po
 
 // createCiliumEgressRuleForPeer creates a Cilium egress rule for a specific
 // peer, plus the comment to render above it ("" for ordinary peers).
-func (g *CiliumPolicyGenerator) createCiliumEgressRuleForPeer(peerIP string, ports []networkingv1.NetworkPolicyPort) (*CiliumEgressRule, string) {
+func (g *CiliumPolicyGenerator) createCiliumEgressRuleForPeer(peerIP string, ports []networkingv1.NetworkPolicyPort, policyNamespace string) (*CiliumEgressRule, string) {
 	log.Debug().Msgf("Creating Cilium egress rule for peer IP: %s", peerIP)
 
 	// Try to resolve peer information
-	peer := g.resolvePeerForCilium(peerIP)
+	peer := g.resolvePeerForCilium(peerIP, policyNamespace)
 
 	var egressRule CiliumEgressRule
 
@@ -417,7 +444,10 @@ func (g *CiliumPolicyGenerator) createCiliumEgressRuleForPeer(peerIP string, por
 
 // resolvePeerForCilium resolves a peer IP to an EndpointSelector, the host
 // entities (host-network pod) or a CIDR, in that priority order.
-func (g *CiliumPolicyGenerator) resolvePeerForCilium(peerIP string) ciliumPeer {
+// policyNamespace is the namespace of the pod the policy is FOR: an endpoint
+// selector is scoped to it, so a peer in another namespace needs the
+// namespace label as well (see createPeerEndpointSelector).
+func (g *CiliumPolicyGenerator) resolvePeerForCilium(peerIP, policyNamespace string) ciliumPeer {
 	// Try to get Service info first
 	svcSpec, err := g.broker().ServiceByIP(peerIP)
 	if err == nil && svcSpec != nil && len(svcSpec.Service.Spec.Selector) > 0 {
@@ -435,7 +465,7 @@ func (g *CiliumPolicyGenerator) resolvePeerForCilium(peerIP string) ciliumPeer {
 		}
 
 		// Create EndpointSelector from service labels
-		selector := g.createEndpointSelector(svcSpec.Service.Spec.Selector)
+		selector := g.createPeerEndpointSelector(svcSpec.Service.Spec.Selector, svcSpec.SvcNamespace, policyNamespace)
 		return ciliumPeer{endpoints: []CiliumEndpointSelector{selector}}
 	}
 
@@ -456,7 +486,7 @@ func (g *CiliumPolicyGenerator) resolvePeerForCilium(peerIP string) ciliumPeer {
 			podSpec.Namespace, podSpec.Name, podSpec.Pod.Labels, peerIP)
 
 		// Create EndpointSelector from pod labels
-		selector := g.createEndpointSelector(podSpec.Pod.Labels)
+		selector := g.createPeerEndpointSelector(podSpec.Pod.Labels, podSpec.Namespace, policyNamespace)
 		return ciliumPeer{endpoints: []CiliumEndpointSelector{selector}}
 	}
 

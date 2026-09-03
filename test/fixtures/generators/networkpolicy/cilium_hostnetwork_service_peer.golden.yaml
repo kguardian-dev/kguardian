@@ -13,6 +13,7 @@ spec:
   - toEndpoints:
     - matchLabels:
         k8s:app: db
+        k8s:io.kubernetes.pod.namespace: prod
     toPorts:
     - ports:
       - port: "5432"

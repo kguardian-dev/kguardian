@@ -1,3 +1,7 @@
+/** The label Cilium derives from a pod's namespace; naming it in an endpoint
+ *  selector is how a CiliumNetworkPolicy selects peers in ANOTHER namespace. */
+export const CILIUM_NAMESPACE_LABEL = 'k8s:io.kubernetes.pod.namespace';
+
 export interface EndpointSelector {
   matchLabels: Record<string, string>;
 }

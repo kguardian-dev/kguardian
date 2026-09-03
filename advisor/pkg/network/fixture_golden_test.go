@@ -458,3 +458,50 @@ func TestFixtureGolden_NoHostNetworkIsByteIdentical(t *testing.T) {
 		}
 	}
 }
+
+// ---- Cross-namespace peers ----------------------------------------------------
+//
+// A CiliumNetworkPolicy endpoint selector without a namespace label is scoped
+// to the policy's own namespace, so a peer in another namespace rendered from
+// its labels alone matched nothing (media/maintainerr → downloads/sonarr was
+// denied). The Cilium golden pins `k8s:io.kubernetes.pod.namespace` beside the
+// labels for every cross-namespace peer (pod or Service); the standard golden
+// pins the namespaceSelector the NetworkPolicy generator already emitted. The
+// pre-existing cilium_endpoint_resolved golden is same-namespace (prod →
+// prod) and stays unchanged.
+func crossNamespaceFixture() (stubBrokerData, *api.PodDetail, []api.PodTraffic) {
+	stub := stubBrokerData{
+		pods: map[string]*api.PodDetail{
+			"10.0.0.30": fixturePodDetail("sonarr-0", "downloads", "10.0.0.30", map[string]string{"app": "sonarr"}),
+			"10.0.0.40": fixturePodDetail("maintainerr-0", "media", "10.0.0.40", map[string]string{"app": "maintainerr"}),
+		},
+		svcs: map[string]*api.SvcDetail{
+			"10.96.0.50": {SvcName: "prometheus", SvcNamespace: "monitoring", SvcIp: "10.96.0.50",
+				Service: corev1.Service{Spec: corev1.ServiceSpec{Selector: map[string]string{"app": "prometheus"}}}},
+		},
+	}
+	detail := fixturePodDetail("web", "prod", "10.0.0.1", map[string]string{"app": "web"})
+	traffic := []api.PodTraffic{
+		// Egress to a pod in another namespace and to a Service in a third.
+		{TrafficType: "EGRESS", SrcIP: "10.0.0.1", DstIP: "10.0.0.30", DstPort: "8989", Protocol: "TCP"},
+		{TrafficType: "EGRESS", SrcIP: "10.0.0.1", DstIP: "10.96.0.50", DstPort: "9090", Protocol: "TCP"},
+		// Ingress from a pod in another namespace.
+		{TrafficType: "INGRESS", SrcIP: "10.0.0.1", SrcPodPort: "8080", DstIP: "10.0.0.40", Protocol: "TCP"},
+	}
+	return stub, detail, traffic
+}
+
+func TestFixtureGolden_CrossNamespacePeer(t *testing.T) {
+	t.Run("standard", func(t *testing.T) {
+		stub, detail, traffic := crossNamespaceFixture()
+		gen := NewStandardPolicyGenerator()
+		gen.setBrokerData(stub)
+		checkCommentedPolicyGolden(t, "standard_cross_namespace_peer.golden.yaml", gen, detail.Name, traffic, detail)
+	})
+	t.Run("cilium", func(t *testing.T) {
+		stub, detail, traffic := crossNamespaceFixture()
+		gen := NewCiliumPolicyGenerator()
+		gen.setBrokerData(stub)
+		checkCommentedPolicyGolden(t, "cilium_cross_namespace_peer.golden.yaml", gen, detail.Name, traffic, detail)
+	})
+}
