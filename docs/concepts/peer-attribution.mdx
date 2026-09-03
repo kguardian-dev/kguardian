@@ -140,8 +140,13 @@ curl 'http://localhost:9090/pod/ip/10.244.12.199?at=2026-07-23T09:14:02Z'
 ```
 
 With `at`, the candidates holding the IP are filtered by
-`started_at <= at` and ordered `is_dead ASC, started_at DESC,
-time_stamp DESC`; the first wins. Applied to the example above, the
+`started_at <= at`; a dead candidate must additionally not have been
+dead already at `at` — its record `time_stamp` (last seen alive, or
+when it was marked dead) must be at or after the flow. Survivors are
+ordered `is_dead ASC, started_at DESC, time_stamp DESC`; the first
+wins. A pod marked dead late can still be over-permissive for the flows
+in between, but the window is bounded by the reconciler interval and
+the stale-alive sweep, not open-ended. Applied to the example above, the
 2026-07-23 row cannot resolve to `autobrr` (started 2026-08-04); it
 resolves to the CronJob pod that held the IP then if its row still
 exists, and to nothing otherwise. A pod with a `null` `started_at` is
@@ -150,7 +155,10 @@ so within a minute of the broker upgrade every live pod has a start
 time; a `null` therefore means a ghost row or a pod still Pending,
 neither of which can have originated a flow.
 
-The Broker also keeps `pod_details` honest with a stale-alive sweep:
+The Controller no longer posts Succeeded, Failed or deleting pods as
+alive, and its reconciler marks them dead, so a completed Job cannot be
+attributed later flows on its recycled IP. The Broker also keeps
+`pod_details` honest with a stale-alive sweep:
 a row still marked alive that has not been re-posted for
 `PEER_STALE_ALIVE_SECS` (default 900; `0` disables;
 `broker.peerResolution.staleAliveSeconds` in the chart) is marked dead,
