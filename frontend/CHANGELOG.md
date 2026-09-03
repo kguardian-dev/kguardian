@@ -1,5 +1,22 @@
 # Changelog
 
+## [1.14.0](https://github.com/kguardian-dev/kguardian/compare/frontend/v1.13.2...frontend/v1.14.0) (2026-09-03)
+
+
+### Features
+
+* align policy generation with the cluster CNI ([#1421](https://github.com/kguardian-dev/kguardian/issues/1421)) ([c0d9aa6](https://github.com/kguardian-dev/kguardian/commit/c0d9aa67a33c079387ae930d78a88fb130c64339))
+* tiered syscall capture and CR-driven seccomp profile distribution ([2f0b513](https://github.com/kguardian-dev/kguardian/commit/2f0b5133e2921d36c182863dbdae2d7e1ef0c5d7))
+* tiered syscall capture and CR-driven seccomp profile distribution ([#1427](https://github.com/kguardian-dev/kguardian/issues/1427)) ([2f0b513](https://github.com/kguardian-dev/kguardian/commit/2f0b5133e2921d36c182863dbdae2d7e1ef0c5d7))
+
+
+### Bug Fixes
+
+* Cilium policies carry the namespace label for cross-namespace peers ([515de3d](https://github.com/kguardian-dev/kguardian/commit/515de3db9c9607ea2381fad0ab394cb732b169b0))
+* **frontend:** open the relevant policy tab from findings; make graph focus shareable via URL ([#1429](https://github.com/kguardian-dev/kguardian/issues/1429)) ([e35f1b1](https://github.com/kguardian-dev/kguardian/commit/e35f1b180f543840b3f39d7ed2d5c9d1bbd20bb6))
+* record traffic to node IPs and render host-network peers correctly ([515de3d](https://github.com/kguardian-dev/kguardian/commit/515de3db9c9607ea2381fad0ab394cb732b169b0))
+* record traffic to node IPs and render host-network peers correctly ([#1431](https://github.com/kguardian-dev/kguardian/issues/1431)) ([515de3d](https://github.com/kguardian-dev/kguardian/commit/515de3db9c9607ea2381fad0ab394cb732b169b0))
+
 ## [1.13.2](https://github.com/kguardian-dev/kguardian/compare/frontend/v1.13.1...frontend/v1.13.2) (2026-09-02)
 
 
