@@ -1,5 +1,41 @@
 # Changelog
 
+## [1.9.0](https://github.com/kguardian-dev/kguardian/compare/advisor/v1.8.2...advisor/v1.9.0) (2026-09-03)
+
+
+### Features
+
+* capture IPv6 traffic and emit /128 peer rules ([#1370](https://github.com/kguardian-dev/kguardian/issues/1370)) ([c1bbf51](https://github.com/kguardian-dev/kguardian/commit/c1bbf51c0d9d8d2f8216081fbb7d6aa113541a5f))
+* **chart:** single-workload AI assistant — retire mcp-server + advisor-serve ([e03d7bb](https://github.com/kguardian-dev/kguardian/commit/e03d7bb6d7ea25b09c626c7ea8e3376ffc239f05))
+
+
+### Bug Fixes
+
+* **advisor:** embed version info via correct ldflag targets ([#1011](https://github.com/kguardian-dev/kguardian/issues/1011)) ([ef3923e](https://github.com/kguardian-dev/kguardian/commit/ef3923e89c593bdc8c1af8aef70e80fd1bb4dd50))
+* **advisor:** seccomp generation on ARM nodes (architectures was null) ([#1042](https://github.com/kguardian-dev/kguardian/issues/1042)) ([ad68795](https://github.com/kguardian-dev/kguardian/commit/ad68795012da27bb581568c18174fcd5d80b0dc8))
+* Cilium policies carry the namespace label for cross-namespace peers ([515de3d](https://github.com/kguardian-dev/kguardian/commit/515de3db9c9607ea2381fad0ab394cb732b169b0))
+* **deps:** update kubernetes monorepo to v0.36.3 ([#1145](https://github.com/kguardian-dev/kguardian/issues/1145)) ([0d8b8cc](https://github.com/kguardian-dev/kguardian/commit/0d8b8cc06326656a11edeb7f5bfdaa67d84d09f5))
+* **deps:** update kubernetes monorepo to v0.36.4 ([#1312](https://github.com/kguardian-dev/kguardian/issues/1312)) ([090b547](https://github.com/kguardian-dev/kguardian/commit/090b5473212e7f112ce7f3129335b25455f7e2e9))
+* **deps:** update kubernetes monorepo to v0.37.0 ([#1330](https://github.com/kguardian-dev/kguardian/issues/1330)) ([a369619](https://github.com/kguardian-dev/kguardian/commit/a36961950bfe19bf883ce4892d9fc857d68c72fc))
+* **deps:** update module github.com/cilium/cilium to v1.19.6 ([#1070](https://github.com/kguardian-dev/kguardian/issues/1070)) ([a69745c](https://github.com/kguardian-dev/kguardian/commit/a69745cd314dacc930ce4e789a1c9e1f52b65a68))
+* **deps:** update module github.com/stretchr/testify to v1.12.0 ([#1296](https://github.com/kguardian-dev/kguardian/issues/1296)) ([2a72c73](https://github.com/kguardian-dev/kguardian/commit/2a72c73ae222bdb38bbed789a0f58c619c141b2b))
+* **deps:** update module github.com/stretchr/testify to v1.12.1 ([#1303](https://github.com/kguardian-dev/kguardian/issues/1303)) ([e4ee3ec](https://github.com/kguardian-dev/kguardian/commit/e4ee3ec3b6ecd4161981c9c29333cdf631f7fcda))
+* record traffic to node IPs and render host-network peers correctly ([515de3d](https://github.com/kguardian-dev/kguardian/commit/515de3db9c9607ea2381fad0ab394cb732b169b0))
+* record traffic to node IPs and render host-network peers correctly ([#1431](https://github.com/kguardian-dev/kguardian/issues/1431)) ([515de3d](https://github.com/kguardian-dev/kguardian/commit/515de3db9c9607ea2381fad0ab394cb732b169b0))
+* resolve peer identity at ingest and guard by-IP attribution on pod start time ([#1447](https://github.com/kguardian-dev/kguardian/issues/1447)) ([fb6dfed](https://github.com/kguardian-dev/kguardian/commit/fb6dfed55a4be4990ba3f5358764ad3e50a0687b))
+* resolve peer identity at ingest and guard by-IP attribution on pod start time ([#1447](https://github.com/kguardian-dev/kguardian/issues/1447)) ([fb6dfed](https://github.com/kguardian-dev/kguardian/commit/fb6dfed55a4be4990ba3f5358764ad3e50a0687b))
+
+
+### Documentation
+
+* peer-attribution concepts page, API reference, UPGRADING. ([fb6dfed](https://github.com/kguardian-dev/kguardian/commit/fb6dfed55a4be4990ba3f5358764ad3e50a0687b))
+
+
+### Code Refactoring
+
+* **advisor:** drop github.com/cilium/cilium, hand-roll the CNP types ([#1185](https://github.com/kguardian-dev/kguardian/issues/1185)) ([6b1cac0](https://github.com/kguardian-dev/kguardian/commit/6b1cac0fd83eaad06949c62436c2d0c616a39860))
+* **advisor:** retire in-cluster serve mode; keep the CLI ([0136c87](https://github.com/kguardian-dev/kguardian/commit/0136c872208f93c9652bbd3e351bf1025f6661ee))
+
 ## [1.8.2](https://github.com/kguardian-dev/kguardian/compare/advisor/v1.8.1...advisor/v1.8.2) (2026-09-03)
 
 
