@@ -66,8 +66,18 @@ describe('start-time guard', () => {
     expect(podEligibleAt(autobrr, parseBrokerTime('2026-08-04T09:12:41'))).toBe(true);
   });
   test('unknown started_at is EXCLUDED (ghost / Pending record)', () => {
-    expect(podEligibleAt({ started_at: null }, parseBrokerTime('2026-05-21T10:00:00'))).toBe(false);
-    expect(podEligibleAt({}, parseBrokerTime('2026-05-21T10:00:00'))).toBe(false);
+    expect(podEligibleAt({ started_at: null, is_dead: false, time_stamp: '2026-09-01T00:00:00' }, parseBrokerTime('2026-05-21T10:00:00'))).toBe(false);
+    expect(podEligibleAt({ is_dead: false, time_stamp: '2026-09-01T00:00:00' }, parseBrokerTime('2026-05-21T10:00:00'))).toBe(false);
+  });
+  test('a dead record is bounded by its time_stamp (last seen / marked dead)', () => {
+    const flow = parseBrokerTime('2026-08-10T00:00:00');
+    const finishedJob = { started_at: '2026-08-01T00:00:00', is_dead: true, time_stamp: '2026-08-01T00:10:00' };
+    expect(podEligibleAt(finishedJob, flow)).toBe(false);
+    expect(podEligibleAt({ ...finishedJob, time_stamp: '2026-08-10T00:00:00' }, flow)).toBe(true);
+    expect(podEligibleAt({ ...finishedJob, time_stamp: '2026-08-11T00:00:00' }, flow)).toBe(true);
+    expect(podEligibleAt({ ...finishedJob, time_stamp: null as unknown as string }, flow)).toBe(false);
+    // Alive: the time_stamp bound does not apply.
+    expect(podEligibleAt({ ...finishedJob, is_dead: false }, flow)).toBe(true);
   });
   test('unparseable flow time excludes every candidate', () => {
     expect(podEligibleAt(autobrr, null)).toBe(false);
@@ -96,6 +106,13 @@ describe('selectPodByIp — broker precedence', () => {
   });
   test('every candidate started after the flow → guarded out', () => {
     expect(selectPodByIp([autobrr], parseBrokerTime('2026-05-21T10:00:00'))).toEqual({ pod: null, guardedOut: true });
+  });
+  test('a dead Job pod whose time_stamp is before the flow → guarded out (recycled IP, later flow)', () => {
+    const job = pod({ pod_name: 'volsync-src-abc', pod_ip: '10.0.0.1', is_dead: true, started_at: '2026-08-01T00:00:00', time_stamp: '2026-08-01T00:10:00' });
+    expect(selectPodByIp([job], parseBrokerTime('2026-08-10T00:00:00'))).toEqual({ pod: null, guardedOut: true });
+    expect(selectPodByIp([job], parseBrokerTime('2026-08-01T00:05:00')).pod).toBe(job);
+    const dying = { ...job, time_stamp: null as unknown as string };
+    expect(selectPodByIp([dying], parseBrokerTime('2026-08-01T00:05:00'))).toEqual({ pod: null, guardedOut: true });
   });
 });
 
