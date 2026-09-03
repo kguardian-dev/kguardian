@@ -28,7 +28,7 @@ _Least-privilege Kubernetes security policies, generated from what your pods act
 
 <div align="center">
 
-[Overview](#-overview) · [Features](#-features) · [Architecture](#️-architecture) · [Quick Start](#-quick-start) · [Usage](#️-usage) · [AI Assistant](#-ai-assistant) · [Compatibility](#-compatibility) · [Performance](#-performance) · [Telemetry](#-telemetry) · [Contributing](#-contributing) · [License](#-license)
+[Overview](#-overview) · [In action](#-in-action) · [Features](#-features) · [Architecture](#️-architecture) · [Quick Start](#-quick-start) · [Usage](#️-usage) · [AI Assistant](#-ai-assistant) · [Compatibility](#-compatibility) · [Performance](#-performance) · [Telemetry](#-telemetry) · [Contributing](#-contributing) · [License](#-license)
 
 </div>
 
@@ -37,6 +37,31 @@ _Least-privilege Kubernetes security policies, generated from what your pods act
 kguardian watches pod traffic and syscalls with eBPF, then writes Kubernetes `NetworkPolicy`, `CiliumNetworkPolicy`, and seccomp profiles from what it sees — no hand-authored rules.
 
 It's built for platform and security teams who want policy-as-code without writing rules by hand: the Controller (an eBPF DaemonSet) captures every TCP/UDP connection and syscall on each node, the Broker stores the per-pod baseline in PostgreSQL, and the `kubectl kguardian` plugin turns that baseline into least-privilege policy YAML for any pod, namespace, or the whole cluster.
+
+## 📸 In action
+
+<table>
+  <tr>
+    <td width="50%" align="center">
+      <a href="docs/images/readme/network-map.png"><img src="docs/images/readme/network-map.png" alt="Network Map: every observed flow in a namespace, with trusted, egress, and denied edges" /></a>
+      <br /><sub><b>Network Map</b> — every flow eBPF saw, in one graph: trusted, egress, and would-deny edges across a live namespace.</sub>
+    </td>
+    <td width="50%" align="center">
+      <a href="docs/images/readme/policy-builder.png"><img src="docs/images/readme/policy-builder.png" alt="Policy Builder: a least-privilege NetworkPolicy generated from observed traffic" /></a>
+      <br /><sub><b>Policy Builder</b> — a least-privilege <code>NetworkPolicy</code> or <code>CiliumNetworkPolicy</code> written from what the workload actually did.</sub>
+    </td>
+  </tr>
+  <tr>
+    <td width="50%" align="center">
+      <a href="docs/images/readme/seccomp-profiles.png"><img src="docs/images/readme/seccomp-profiles.png" alt="Seccomp Profiles: an enforcing SeccompProfile CR with node readiness and drift" /></a>
+      <br /><sub><b>Seccomp Profiles</b> — per-workload syscall allow-lists, exported as a CR you commit; readiness on every node and drift against the deployed profile.</sub>
+    </td>
+    <td width="50%" align="center">
+      <a href="docs/images/readme/audit-verdicts.png"><img src="docs/images/readme/audit-verdicts.png" alt="Audit Verdicts: flows an AuditNetworkPolicy would deny, nothing dropped" /></a>
+      <br /><sub><b>Audit Verdicts</b> — see exactly which flows a policy <i>would</i> block before you enforce it. Nothing is dropped.</sub>
+    </td>
+  </tr>
+</table>
 
 ## ✨ Features
 
