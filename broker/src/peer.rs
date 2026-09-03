@@ -71,8 +71,11 @@ const DEFAULT_INTERVAL_SECS: u64 = 60;
 const MIN_INTERVAL_SECS: u64 = 5;
 /// Rows re-resolved per pass. Unresolved rows in the window are mostly
 /// genuinely external peers (DNS, internet) that never resolve; the cap
-/// bounds one pass regardless of how many there are.
-const MAX_ROWS_PER_PASS: i64 = 5_000;
+/// bounds one pass regardless of how many there are. Generous, and
+/// paired with OLDEST-first ordering so the pass drains FIFO: a
+/// resolvable row can only be deferred, never starved out of the
+/// window by newer noise (see `pending_rows_query`).
+const MAX_ROWS_PER_PASS: i64 = 20_000;
 
 /// The identity stamped on a `pod_traffic` row.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -298,18 +301,33 @@ pub fn spawn(pool: DbPool) {
 }
 
 /// One late-resolve pass: (rows scanned, rows resolved).
-pub fn run_pass(conn: &mut PgConnection, window: Duration) -> Result<(usize, usize), DbError> {
+/// The rows one late-resolve pass considers: unresolved, inside the
+/// window, OLDEST first. Oldest-first matters: a row nearest the cutoff
+/// is the one about to age out, so under sustained unresolvable noise
+/// (external IPs re-emitted every cycle) it must be tried before the
+/// newer rows, or a resolvable older row could be pushed past the LIMIT
+/// on every pass and leave the window NULL. With ASC + LIMIT the pass
+/// drains FIFO; the cutoff bounds the set, the LIMIT bounds one pass.
+/// Split out so the SQL can be pinned without a database.
+fn pending_rows_query(
+    cutoff: NaiveDateTime,
+) -> schema::pod_traffic::BoxedQuery<'static, diesel::pg::Pg> {
     use schema::pod_traffic::dsl::*;
-    let cutoff = window_cutoff(chrono::Utc::now().naive_utc(), window);
-    // Bounded range scan on idx_pod_traffic_time_stamp; newest first so
-    // the rows most likely to have just gained a peer spec go first.
-    let mut pending: Vec<PodTraffic> = pod_traffic
+    pod_traffic
         .filter(peer_kind.is_null())
         .filter(traffic_in_out_ip.is_not_null())
         .filter(time_stamp.ge(cutoff))
-        .order((time_stamp.desc(), uuid.desc()))
+        .order((time_stamp.asc(), uuid.asc()))
         .limit(MAX_ROWS_PER_PASS)
-        .load::<PodTraffic>(conn)?;
+        .into_boxed()
+}
+
+pub fn run_pass(conn: &mut PgConnection, window: Duration) -> Result<(usize, usize), DbError> {
+    use schema::pod_traffic::dsl::*;
+    let cutoff = window_cutoff(chrono::Utc::now().naive_utc(), window);
+    // Bounded range scan on idx_pod_traffic_time_stamp (walked backwards
+    // for ASC), oldest first — see pending_rows_query.
+    let mut pending: Vec<PodTraffic> = pending_rows_query(cutoff).load::<PodTraffic>(conn)?;
     if pending.is_empty() {
         return Ok((0, 0));
     }
@@ -649,6 +667,55 @@ mod tests {
         assert!(ts("2026-09-03T00:00:00") >= cutoff);
         assert!(ts("2026-09-03T00:09:59") >= cutoff);
         assert!(ts("2026-09-02T23:59:59") < cutoff);
+    }
+
+    #[test]
+    fn late_resolve_pass_takes_the_oldest_unresolved_row_first() {
+        // Starvation guard: a resolvable row near the cutoff must be
+        // picked before newer unresolvable noise, so it is never pushed
+        // past the LIMIT on every pass until it ages out. Pin the SQL:
+        // ascending on time_stamp (FIFO within the window), bounded by
+        // the cutoff and a generous LIMIT.
+        let cutoff = ts("2026-09-03T00:00:00");
+        let sql = diesel::debug_query::<diesel::pg::Pg, _>(&pending_rows_query(cutoff)).to_string();
+        assert!(
+            sql.contains(r#"ORDER BY "pod_traffic"."time_stamp" ASC, "pod_traffic"."uuid" ASC"#),
+            "must be oldest-first: {sql}"
+        );
+        assert!(
+            !sql.contains("DESC"),
+            "no newest-first ordering anywhere: {sql}"
+        );
+        assert!(
+            sql.contains(r#""pod_traffic"."peer_kind" IS NULL"#)
+                && sql.contains(r#""pod_traffic"."traffic_in_out_ip" IS NOT NULL"#)
+                && sql.contains(r#""pod_traffic"."time_stamp" >= $1"#),
+            "window + unresolved predicates: {sql}"
+        );
+        assert!(
+            sql.contains("LIMIT $2") && sql.contains(&format!("{MAX_ROWS_PER_PASS}")),
+            "generous LIMIT bound: {sql}"
+        );
+        // Simulate a window holding one old resolvable row plus more
+        // noise than one pass admits: under the pinned ASC order the old
+        // row is the FIRST row of the pass, not one pushed past the LIMIT.
+        let old = ts("2026-09-03T00:00:01");
+        let mut times: Vec<NaiveDateTime> = (2..(MAX_ROWS_PER_PASS + 10))
+            .map(|i| ts("2026-09-03T00:00:00") + chrono::Duration::seconds(i))
+            .collect();
+        times.push(old);
+        times.sort(); // what ORDER BY time_stamp ASC yields
+        let first_pass: Vec<_> = times.iter().take(MAX_ROWS_PER_PASS as usize).collect();
+        assert_eq!(first_pass[0], &old, "oldest row leads the pass");
+        let newest_first: Vec<_> = times
+            .iter()
+            .rev()
+            .take(MAX_ROWS_PER_PASS as usize)
+            .collect();
+        assert!(
+            !newest_first.contains(&&old),
+            "the old DESC order would have starved it"
+        );
     }
 
     // ---- ?at= parsing ----------------------------------------------
