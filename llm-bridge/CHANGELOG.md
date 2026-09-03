@@ -1,5 +1,18 @@
 # Changelog
 
+## [1.9.1](https://github.com/kguardian-dev/kguardian/compare/llm-bridge/v1.9.0...llm-bridge/v1.9.1) (2026-09-03)
+
+
+### Bug Fixes
+
+* resolve peer identity at ingest and guard by-IP attribution on pod start time ([#1447](https://github.com/kguardian-dev/kguardian/issues/1447)) ([fb6dfed](https://github.com/kguardian-dev/kguardian/commit/fb6dfed55a4be4990ba3f5358764ad3e50a0687b))
+* resolve peer identity at ingest and guard by-IP attribution on pod start time ([#1447](https://github.com/kguardian-dev/kguardian/issues/1447)) ([fb6dfed](https://github.com/kguardian-dev/kguardian/commit/fb6dfed55a4be4990ba3f5358764ad3e50a0687b))
+
+
+### Documentation
+
+* peer-attribution concepts page, API reference, UPGRADING. ([fb6dfed](https://github.com/kguardian-dev/kguardian/commit/fb6dfed55a4be4990ba3f5358764ad3e50a0687b))
+
 ## [1.9.0](https://github.com/kguardian-dev/kguardian/compare/llm-bridge/v1.8.1...llm-bridge/v1.9.0) (2026-09-03)
 
 
