@@ -2,7 +2,7 @@
 
 This chart bootstraps the [kguardian]() controlplane onto a [Kubernetes](http://kubernetes.io) cluster using the [Helm](https://helm.sh) package manager.
 
-![Version: 1.21.0](https://img.shields.io/badge/Version-1.21.0-informational?style=flat-square)
+![Version: 1.21.1](https://img.shields.io/badge/Version-1.21.1-informational?style=flat-square)
 
 ## Overview
 
@@ -104,7 +104,7 @@ The following table lists the configurable parameters of the kguardian chart and
 | broker.image.pullPolicy | string | `"IfNotPresent"` | Broker image pull policy |
 | broker.image.repository | string | `"ghcr.io/kguardian-dev/kguardian/broker"` | Broker container image repository |
 | broker.image.sha | string | `""` | Overrides the image tag using SHA digest |
-| broker.image.tag | string | `"1.15.0"` | Broker version tag (auto-updated by release-please) |
+| broker.image.tag | string | `"1.15.1"` | Broker version tag (auto-updated by release-please) |
 | broker.imagePullSecrets | list | `[]` | List of image pull secrets for private registries |
 | broker.initContainer.image.pullPolicy | string | `"Always"` | Broker init container image pull policy |
 | broker.initContainer.image.repository | string | `"busybox"` | Broker init container image repository |
