@@ -115,3 +115,20 @@ test('reacts to external hash changes such as browser back', () => {
 
   expect(result.current.loc).toEqual({ view: 'map', params: { ns: 'kube-system' } });
 });
+
+test('carries a focus param alongside ns/pod and restores it from a shared URL', async () => {
+  // Restore-on-load: a pasted link with focus= parses to the focused node.
+  setHash('#/map?ns=prod&pod=web&focus=web');
+  const { result } = renderHook(() => useHashLocation());
+  expect(result.current.loc).toEqual({ view: 'map', params: { ns: 'prod', pod: 'web', focus: 'web' } });
+
+  // Entering focus mode writes it into the hash without touching ns/pod.
+  act(() => result.current.navigate('map', { ns: 'prod', pod: 'web', focus: 'api' }, { replace: true }));
+  await waitFor(() => expect(result.current.loc.params.focus).toBe('api'));
+  expect(window.location.hash).toBe('#/map?ns=prod&pod=web&focus=api');
+
+  // Exiting focus (self-heal or "Show all") drops the param and keeps the rest.
+  act(() => result.current.navigate('map', { ns: 'prod', pod: 'web', focus: undefined }, { replace: true }));
+  await waitFor(() => expect(result.current.loc.params.focus).toBeUndefined());
+  expect(window.location.hash).toBe('#/map?ns=prod&pod=web');
+});

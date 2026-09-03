@@ -11,6 +11,9 @@ import { ClusterSwitcher } from './components/ClusterSwitcher';
 import { AccountMenu } from './components/AccountMenu';
 import { SettingsPanel } from './components/SettingsPanel';
 import { useSettings } from './contexts/SettingsContext';
+import { useClusterEnvironment } from './hooks/useClusterEnvironment';
+import { policyTypeForFinding, type FindingKind } from './utils/findingPolicyType';
+import type { PolicyType } from './hooks/policyEditor';
 import { useCluster } from './contexts/ClusterContext';
 
 // Heavy surfaces — lazy so they stay out of the initial bundle and only load
@@ -51,14 +54,17 @@ function App() {
   });
   const namespace = loc.params.ns ?? nsByCluster[activeCluster.id] ?? settings.defaultNamespace ?? 'default';
 
+  // Map-only params (selected workload, focused node) travel with the map view
+  // and are dropped when leaving it.
   const setView = useCallback(
-    (v: (typeof ROUTES)[number]) => navigate(v, { ns: loc.params.ns, pod: v === 'map' ? loc.params.pod : undefined }),
-    [navigate, loc.params.ns, loc.params.pod],
+    (v: (typeof ROUTES)[number]) =>
+      navigate(v, { ns: loc.params.ns, pod: v === 'map' ? loc.params.pod : undefined, focus: v === 'map' ? loc.params.focus : undefined }),
+    [navigate, loc.params.ns, loc.params.pod, loc.params.focus],
   );
   const setNamespace = useCallback(
     (ns: string) => {
       setNsByCluster((prev) => ({ ...prev, [activeCluster.id]: ns }));
-      navigate(view, { ns, pod: undefined }); // namespace change clears the workload
+      navigate(view, { ns, pod: undefined, focus: undefined }); // namespace change clears the workload + focus
     },
     [navigate, view, activeCluster.id],
   );
@@ -68,6 +74,8 @@ function App() {
   const [isAuditPanelOpen, setIsAuditPanelOpen] = useState(false);
   const [isPolicyBuilderOpen, setIsPolicyBuilderOpen] = useState(false);
   const [policyBuilderInitialPod, setPolicyBuilderInitialPod] = useState<PodNodeData | null>(null);
+  const [policyBuilderInitialType, setPolicyBuilderInitialType] = useState<PolicyType>('network');
+  const { cni } = useClusterEnvironment();
   const [aiSidePanel, setAISidePanel] = useState<{
     isSidePanel: boolean;
     isCollapsed: boolean;
@@ -99,8 +107,17 @@ function App() {
     [pods, selectedPodId],
   );
   const selectPod = useCallback(
-    (pod: PodNodeData | null) => navigate('map', { ns: loc.params.ns, pod: pod?.id }, { replace: true }),
-    [navigate, loc.params.ns],
+    (pod: PodNodeData | null) => navigate('map', { ns: loc.params.ns, pod: pod?.id, focus: loc.params.focus }, { replace: true }),
+    [navigate, loc.params.ns, loc.params.focus],
+  );
+
+  // Graph focus mode is URL state (`?focus=<node id>`) so a focused view can
+  // be copied and shared; the graph restores it once data arrives and clears
+  // it if the node disappears.
+  const focusedNodeId = loc.params.focus ?? null;
+  const setFocusedNodeId = useCallback(
+    (id: string | null) => navigate('map', { ns: loc.params.ns, pod: loc.params.pod, focus: id ?? undefined }, { replace: true }),
+    [navigate, loc.params.ns, loc.params.pod],
   );
 
   // On cluster switch, point the URL at the new cluster's remembered namespace
@@ -109,16 +126,16 @@ function App() {
   useEffect(() => {
     if (prevCluster.current === activeCluster.id) return;
     prevCluster.current = activeCluster.id;
-    navigate(view, { ns: nsByCluster[activeCluster.id], pod: undefined }, { replace: true });
+    navigate(view, { ns: nsByCluster[activeCluster.id], pod: undefined, focus: undefined }, { replace: true });
   }, [activeCluster.id, nsByCluster, view, navigate]);
 
   // Keep the resolved namespace in the URL so the link is always shareable,
   // even before the user has explicitly picked one.
   useEffect(() => {
     if (!loc.params.ns && namespaces.length > 0) {
-      navigate(view, { ns: effectiveNamespace, pod: loc.params.pod }, { replace: true });
+      navigate(view, { ns: effectiveNamespace, pod: loc.params.pod, focus: loc.params.focus }, { replace: true });
     }
-  }, [loc.params.ns, loc.params.pod, namespaces.length, effectiveNamespace, view, navigate]);
+  }, [loc.params.ns, loc.params.pod, loc.params.focus, namespaces.length, effectiveNamespace, view, navigate]);
 
   const toggleRail = useCallback(() => {
     setRailCollapsed((c) => {
@@ -138,13 +155,24 @@ function App() {
 
   const handleBuildPolicy = (pod: PodNodeData) => {
     setPolicyBuilderInitialPod(pod);
+    setPolicyBuilderInitialType('network');
     setIsPolicyBuilderOpen(true);
   };
+
+  // A finding's "Policy" action opens the tab relevant to that finding —
+  // seccomp for sensitive syscalls, network (Cilium on a Cilium cluster) for
+  // the traffic findings — not the default tab.
+  const handleBuildPolicyForFinding = useCallback((pod: PodNodeData, kind: FindingKind) => {
+    setPolicyBuilderInitialPod(pod);
+    setPolicyBuilderInitialType(policyTypeForFinding(kind, cni));
+    setIsPolicyBuilderOpen(true);
+  }, [cni]);
 
   // Rail entry: open the builder with the current workload if one is selected,
   // otherwise with no pod so it shows the workload picker.
   const openPolicyBuilder = useCallback(() => {
     setPolicyBuilderInitialPod(selectedPod && !selectedPod.isExternal ? selectedPod : null);
+    setPolicyBuilderInitialType('network');
     setIsPolicyBuilderOpen(true);
   }, [selectedPod]);
 
@@ -360,7 +388,7 @@ function App() {
             pods={pods}
             namespace={effectiveNamespace}
             onSelectPod={handleFindingSelect}
-            onBuildPolicy={handleBuildPolicy}
+            onBuildPolicy={handleBuildPolicyForFinding}
             onOpenAudit={() => setIsAuditPanelOpen(true)}
           />
         ) : (
@@ -398,6 +426,8 @@ function App() {
                 onPodSelect={handlePodSelect}
                 selectedPodId={selectedPod?.id || null}
                 onBuildPolicy={handleBuildPolicy}
+                focusedNodeId={focusedNodeId}
+                onFocusChange={setFocusedNodeId}
                 allPodsLookup={allPodsLookup}
                 services={services}
                 showExternalNodes={settings.showExternalNodes}
@@ -468,6 +498,7 @@ function App() {
             onClose={() => setIsPolicyBuilderOpen(false)}
             workloads={pods.filter((p) => !p.isExternal)}
             initialPod={policyBuilderInitialPod}
+            initialPolicyType={policyBuilderInitialType}
           />
         </Suspense>
       )}

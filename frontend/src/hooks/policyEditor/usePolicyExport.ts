@@ -40,6 +40,9 @@ interface UsePolicyExportProps {
   /** Seccomp only; needed for the kguardian CR (workloadRef + capture header). */
   pod?: PodNodeData | null;
   capture?: CaptureInfo;
+  /** kguardian CR only: an action the operator explicitly picked in the
+   *  editor. Omitted ⇒ the CR exports audit-first (SCMP_ACT_LOG). */
+  crDefaultAction?: SeccompProfile['defaultAction'];
 }
 
 export const usePolicyExport = ({
@@ -53,6 +56,7 @@ export const usePolicyExport = ({
   seccompFormat = 'kguardian',
   pod = null,
   capture = { level: 'unknown', complete: false, pods: [] },
+  crDefaultAction,
 }: UsePolicyExportProps) => {
   const [copiedToClipboard, setCopiedToClipboard] = useState(false);
 
@@ -68,7 +72,7 @@ export const usePolicyExport = ({
         return profileToYAML(seccompProfile, podIdentity || podName, podNamespace);
       }
       if (!pod) return null;
-      return podProfileToKguardianCR(pod, seccompProfile, capture);
+      return podProfileToKguardianCR(pod, seccompProfile, capture, { defaultAction: crDefaultAction });
     }
     return null;
   };
