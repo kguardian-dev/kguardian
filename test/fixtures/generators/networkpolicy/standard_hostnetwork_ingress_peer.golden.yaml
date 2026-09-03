@@ -1,0 +1,33 @@
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  labels:
+    app.kubernetes.io/component: standard-policy
+    app.kubernetes.io/name: web
+    app.kubernetes.io/part-of: kguardian
+  name: web-standard-policy
+  namespace: prod
+spec:
+  ingress:
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: prod
+      podSelector:
+        matchLabels:
+          app: frontend
+    ports:
+    - port: 8080
+      protocol: TCP
+  # host-network peer ingress-nginx/ingress-nginx-controller on node worker-1 — podSelector cannot match host traffic
+  - from:
+    - ipBlock:
+        cidr: 192.168.50.101/32
+    ports:
+    - port: 8080
+      protocol: TCP
+  podSelector:
+    matchLabels:
+      app: web
+  policyTypes:
+  - Ingress

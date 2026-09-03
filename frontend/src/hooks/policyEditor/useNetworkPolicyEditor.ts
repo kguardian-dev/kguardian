@@ -336,6 +336,9 @@ export const useNetworkPolicyEditor = ({ pod, isOpen }: UseNetworkPolicyEditorPr
             rule.id === ruleId
               ? {
                   ...rule,
+                  // A host-network note explains an ipBlock the generator chose;
+                  // once the user re-types the peer it no longer applies.
+                  comments: undefined,
                   peers: rule.peers.map((peer, i) => (i === peerIndex ? newPeer : peer)),
                 }
               : rule
@@ -351,6 +354,9 @@ export const useNetworkPolicyEditor = ({ pod, isOpen }: UseNetworkPolicyEditorPr
             rule.id === ruleId
               ? {
                   ...rule,
+                  // A host-network note explains an ipBlock the generator chose;
+                  // once the user re-types the peer it no longer applies.
+                  comments: undefined,
                   peers: rule.peers.map((peer, i) => (i === peerIndex ? newPeer : peer)),
                 }
               : rule

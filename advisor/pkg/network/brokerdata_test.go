@@ -16,11 +16,13 @@ type stubBrokerData struct {
 	traffic []api.PodTraffic
 	pods    map[string]*api.PodDetail // keyed by IP
 	svcs    map[string]*api.SvcDetail // keyed by IP
+	allPods []api.PodDetail           // /pod/info listing (service backends)
 }
 
 func (s stubBrokerData) PodTrafficByName(string) ([]api.PodTraffic, error) { return s.traffic, nil }
 func (s stubBrokerData) PodByIP(ip string) (*api.PodDetail, error)         { return s.pods[ip], nil }
 func (s stubBrokerData) ServiceByIP(ip string) (*api.SvcDetail, error)     { return s.svcs[ip], nil }
+func (s stubBrokerData) Pods() ([]api.PodDetail, error)                    { return s.allPods, nil }
 
 func podDetail(name, ip string, labels map[string]string) *api.PodDetail {
 	return &api.PodDetail{

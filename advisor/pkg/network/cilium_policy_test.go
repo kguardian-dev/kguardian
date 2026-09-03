@@ -405,9 +405,10 @@ func TestResolvePeerForCilium_HostCIDRPerAddressFamily(t *testing.T) {
 		{name: "empty peer yields no selector", ip: "", want: nil},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			endpoints, cidrs := gen.resolvePeerForCilium(tc.ip)
-			assert.Nil(t, endpoints, "unresolvable peers must not produce an endpoint selector")
-			assert.Equal(t, tc.want, cidrs)
+			peer := gen.resolvePeerForCilium(tc.ip, "prod")
+			assert.Nil(t, peer.endpoints, "unresolvable peers must not produce an endpoint selector")
+			assert.Nil(t, peer.entities, "unresolvable peers must not produce entities")
+			assert.Equal(t, tc.want, peer.cidr)
 		})
 	}
 }
@@ -435,4 +436,21 @@ func TestCiliumGenerate_DualStackAndUnparseablePeer(t *testing.T) {
 	}
 	assert.ElementsMatch(t, []string{"10.96.0.10/32", "fd00:96::a/128"}, got,
 		"both families must appear side by side and the unparseable peer must be dropped")
+}
+
+func TestCreatePeerEndpointSelector_CrossNamespace(t *testing.T) {
+	g := &CiliumPolicyGenerator{}
+	labels := map[string]string{"app": "sonarr"}
+
+	same := g.createPeerEndpointSelector(labels, "prod", "prod")
+	assert.Equal(t, map[string]string{"k8s:app": "sonarr"}, same.MatchLabels, "same namespace: unchanged")
+
+	cross := g.createPeerEndpointSelector(labels, "downloads", "media")
+	assert.Equal(t, map[string]string{"k8s:app": "sonarr", "k8s:io.kubernetes.pod.namespace": "downloads"}, cross.MatchLabels)
+
+	unknown := g.createPeerEndpointSelector(labels, "", "media")
+	assert.Equal(t, map[string]string{"k8s:app": "sonarr"}, unknown.MatchLabels, "unknown peer namespace: left as before")
+
+	// The input map must not be mutated (it is the broker's label map).
+	assert.Equal(t, map[string]string{"app": "sonarr"}, labels)
 }

@@ -45,17 +45,23 @@ type CiliumEndpointSelector struct {
 	MatchLabels map[string]string `json:"matchLabels,omitempty"`
 }
 
-// CiliumIngressRule allows traffic from endpoints or CIDRs on given ports.
+// CiliumIngressRule allows traffic from endpoints, CIDRs or entities on given
+// ports. Exactly one of the peer fields is set per rule. FromEntities is used
+// for host-network peers ([host, remote-node]); it is a top-level rule field,
+// not nested under a selector.
 type CiliumIngressRule struct {
 	FromEndpoints []CiliumEndpointSelector `json:"fromEndpoints,omitempty"`
 	FromCIDR      []string                 `json:"fromCIDR,omitempty"`
+	FromEntities  []string                 `json:"fromEntities,omitempty"`
 	ToPorts       []CiliumPortRule         `json:"toPorts,omitempty"`
 }
 
-// CiliumEgressRule allows traffic to endpoints or CIDRs on given ports.
+// CiliumEgressRule allows traffic to endpoints, CIDRs or entities on given
+// ports. See CiliumIngressRule for the entities note.
 type CiliumEgressRule struct {
 	ToEndpoints []CiliumEndpointSelector `json:"toEndpoints,omitempty"`
 	ToCIDR      []string                 `json:"toCIDR,omitempty"`
+	ToEntities  []string                 `json:"toEntities,omitempty"`
 	ToPorts     []CiliumPortRule         `json:"toPorts,omitempty"`
 }
 

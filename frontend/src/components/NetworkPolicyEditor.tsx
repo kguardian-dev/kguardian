@@ -4,6 +4,8 @@ import type { PodNodeData } from '../types';
 import type { SeccompAction } from '../types/seccompProfile';
 import { policyToYAML } from '../utils/networkPolicyGenerator';
 import { ciliumPolicyToYAML } from '../utils/ciliumPolicyGenerator';
+import { EntitiesPeer, HostNetworkWarningBanner, RuleComments } from './HostNetworkNotes';
+import { CILIUM_NAMESPACE_LABEL } from '../types/ciliumPolicy';
 import { useClusterEnvironment } from '../hooks/useClusterEnvironment';
 import { CniMismatchNotice } from './PolicyEditor/CniMismatchNotice';
 import { PartialCaptureWarning } from './Seccomp/PartialCaptureWarning';
@@ -189,6 +191,11 @@ const NetworkPolicyEditor: React.FC<NetworkPolicyEditorProps> = ({ isOpen, onClo
           />
 
           {policyType === 'cilium' && cniMismatch && <CniMismatchNotice cni={cniMismatch} />}
+          {!isLoading && (
+            <HostNetworkWarningBanner
+              warnings={policyType === 'network' ? policy?.warnings : policyType === 'cilium' ? ciliumPolicy?.warnings : undefined}
+            />
+          )}
           {policyType === 'seccomp' && !isLoading && (
             <PartialCaptureWarning capture={seccompCapture} compact className="mx-6 mt-4 rounded-surface" />
           )}
@@ -327,6 +334,7 @@ const NetworkPolicyEditor: React.FC<NetworkPolicyEditorProps> = ({ isOpen, onClo
                             </button>
                           </div>
                           <div className="space-y-3">
+                            <RuleComments comments={rule.comments} />
                             <div>
                               <div className="flex items-center justify-between mb-2">
                                 <label className="text-xs font-medium text-secondary">From (Sources)</label>
@@ -780,6 +788,7 @@ const NetworkPolicyEditor: React.FC<NetworkPolicyEditorProps> = ({ isOpen, onClo
                             </button>
                           </div>
                           <div className="space-y-3">
+                            <RuleComments comments={rule.comments} />
                             <div>
                               <div className="flex items-center justify-between mb-2">
                                 <label className="text-xs font-medium text-secondary">To (Destinations)</label>
@@ -1392,6 +1401,8 @@ const NetworkPolicyEditor: React.FC<NetworkPolicyEditorProps> = ({ isOpen, onClo
                                   </button>
                                 </div>
                                 <div className="space-y-3">
+                                  <RuleComments comments={rule.comments} />
+                                  <EntitiesPeer label="From Entities" entities={rule.fromEntities} />
                                   {/* fromEndpoints */}
                                   <div>
                                     <div className="flex items-center justify-between mb-2">
@@ -1419,8 +1430,14 @@ const NetworkPolicyEditor: React.FC<NetworkPolicyEditorProps> = ({ isOpen, onClo
                                           {Object.entries(ep.matchLabels).length > 0 && (
                                             <div className="flex flex-wrap gap-1">
                                               {Object.entries(ep.matchLabels).map(([key, value]) => (
-                                                <div key={key} className="flex items-center gap-1 bg-hubble-success/20 text-hubble-success px-2 py-1 rounded text-xs">
-                                                  <span className="font-mono">{key}={value}</span>
+                                                <div
+                                                  key={key}
+                                                  title={key === CILIUM_NAMESPACE_LABEL ? 'Peer namespace — without it Cilium scopes the selector to this policy\'s namespace' : undefined}
+                                                  className={`flex items-center gap-1 px-2 py-1 rounded text-xs ${
+                                                    key === CILIUM_NAMESPACE_LABEL ? 'bg-hubble-accent/20 text-hubble-accent' : 'bg-hubble-success/20 text-hubble-success'
+                                                  }`}
+                                                >
+                                                  <span className="font-mono">{key === CILIUM_NAMESPACE_LABEL ? `namespace: ${value}` : `${key}=${value}`}</span>
                                                   <button
                                                     onClick={() => removeLabelFromEndpoint(rule.id, epIndex, key, 'ingress')}
                                                     className="hover:text-hubble-error-hover transition-colors"
@@ -1636,6 +1653,8 @@ const NetworkPolicyEditor: React.FC<NetworkPolicyEditorProps> = ({ isOpen, onClo
                                   </button>
                                 </div>
                                 <div className="space-y-3">
+                                  <RuleComments comments={rule.comments} />
+                                  <EntitiesPeer label="To Entities" entities={rule.toEntities} />
                                   {/* toEndpoints */}
                                   <div>
                                     <div className="flex items-center justify-between mb-2">
@@ -1663,8 +1682,14 @@ const NetworkPolicyEditor: React.FC<NetworkPolicyEditorProps> = ({ isOpen, onClo
                                           {Object.entries(ep.matchLabels).length > 0 && (
                                             <div className="flex flex-wrap gap-1">
                                               {Object.entries(ep.matchLabels).map(([key, value]) => (
-                                                <div key={key} className="flex items-center gap-1 bg-hubble-success/20 text-hubble-success px-2 py-1 rounded text-xs">
-                                                  <span className="font-mono">{key}={value}</span>
+                                                <div
+                                                  key={key}
+                                                  title={key === CILIUM_NAMESPACE_LABEL ? 'Peer namespace — without it Cilium scopes the selector to this policy\'s namespace' : undefined}
+                                                  className={`flex items-center gap-1 px-2 py-1 rounded text-xs ${
+                                                    key === CILIUM_NAMESPACE_LABEL ? 'bg-hubble-accent/20 text-hubble-accent' : 'bg-hubble-success/20 text-hubble-success'
+                                                  }`}
+                                                >
+                                                  <span className="font-mono">{key === CILIUM_NAMESPACE_LABEL ? `namespace: ${value}` : `${key}=${value}`}</span>
                                                   <button
                                                     onClick={() => removeLabelFromEndpoint(rule.id, epIndex, key, 'egress')}
                                                     className="hover:text-hubble-error-hover transition-colors"

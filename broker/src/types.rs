@@ -89,6 +89,17 @@ pub struct PodDetail {
     /// assumed complete. Positional, so it stays last.
     #[serde(default)]
     pub capture_level: Option<String>,
+    /// `spec.hostNetwork` of the pod. A host-network pod's address is
+    /// the node's address, so a peer that resolves to one is node
+    /// traffic and a NetworkPolicy `podSelector` on its labels can
+    /// never match it — the generators render an `ipBlock` (Kubernetes)
+    /// or `host`/`remote-node` entities (Cilium) instead. `None` from a
+    /// controller predating the field, unless the posted `pod_obj`
+    /// carries a manifest to derive it from (`upsert_pod_details`);
+    /// `None` on the wire means "unknown" and generators keep their
+    /// pre-existing behaviour. Positional, so it stays last.
+    #[serde(default)]
+    pub host_network: Option<bool>,
 }
 
 /// The syscall capture tiers, exactly as the controller and chart spell

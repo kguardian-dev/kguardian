@@ -352,6 +352,29 @@ fn normalise_capture_level(posted: Option<String>, pod: &str) -> Option<String> 
     }
 }
 
+/// Resolve the pod's `host_network` flag: the posted value when the
+/// controller sent one, else derived from the manifest in `pod_obj`.
+///
+/// The derivation exists for the release skew in RELEASES.md — a
+/// controller predating the field still posts the Pod manifest, and
+/// `spec.hostNetwork` is exactly what the advisor already read out of
+/// it. The API server omits the field when false, so a manifest
+/// without it is a non-host-network pod (`Some(false)`), not unknown.
+/// Only a missing/non-object manifest yields `None`, which
+/// `AsChangeset` then skips, leaving whatever the row already holds.
+fn resolve_host_network(posted: Option<bool>, pod_obj: Option<&serde_json::Value>) -> Option<bool> {
+    if posted.is_some() {
+        return posted;
+    }
+    let obj = pod_obj?.as_object()?;
+    Some(
+        obj.get("spec")
+            .and_then(|s| s.get("hostNetwork"))
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false),
+    )
+}
+
 pub fn upsert_pod_details(
     conn: &mut PgConnection,
     mut w: web::Json<PodDetail>,
@@ -372,6 +395,7 @@ pub fn upsert_pod_details(
     w.pod_ip = canonical_ip(&w.pod_ip);
     w.pod_ips = Some(canonical_pod_ips(w.pod_ips.as_ref(), &w.pod_ip));
     w.capture_level = normalise_capture_level(w.capture_level.take(), &w.pod_name);
+    w.host_network = resolve_host_network(w.host_network, w.pod_obj.as_ref());
     debug!(
         "storing the pod details {:?} into pod_details table",
         w.pod_name,
@@ -964,6 +988,99 @@ mod tests {
         assert!(normalise_capture_level(Some("   ".into()), "p").is_none());
         assert!(normalise_capture_level(Some("ultra".into()), "p").is_none());
         assert!(normalise_capture_level(Some("full;drop".into()), "p").is_none());
+    }
+
+    #[test]
+    fn pod_detail_accepts_payload_with_host_network() {
+        for (literal, want) in [("true", true), ("false", false)] {
+            let json = format!(
+                r#"{{"pod_name":"web-1","pod_ip":"10.42.3.5","pod_namespace":"prod",
+                "pod_obj":null,"time_stamp":"2026-08-31T00:00:00","node_name":"node-a",
+                "is_dead":false,"pod_identity":null,"workload_selector_labels":null,
+                "workload_kind":"DaemonSet","workload_name":"node-exporter",
+                "capture_level":"full","host_network":{literal}}}"#
+            );
+            let got: PodDetail = serde_json::from_str(&json).expect("must parse with host_network");
+            assert_eq!(got.host_network, Some(want), "{literal}");
+        }
+    }
+
+    #[test]
+    fn pod_detail_host_network_defaults_to_none_for_older_controllers() {
+        let json = r#"{"pod_name":"web-1","pod_ip":"10.42.3.5","pod_namespace":"prod",
+            "pod_obj":null,"time_stamp":"2026-08-31T00:00:00","node_name":"node-a",
+            "is_dead":false,"pod_identity":null,"workload_selector_labels":null,
+            "capture_level":"full"}"#;
+        let got: PodDetail = serde_json::from_str(json).unwrap();
+        assert!(got.host_network.is_none());
+    }
+
+    #[test]
+    fn pod_detail_serialises_host_network_as_bool_or_null() {
+        // The read endpoints return PodDetail verbatim, so this IS the
+        // wire shape the generators consume: a JSON boolean, or `null`
+        // when unknown — never an absent key.
+        let mut pod = PodDetail {
+            pod_name: "web-1".into(),
+            pod_ip: "10.42.3.5".into(),
+            node_name: "node-a".into(),
+            ..Default::default()
+        };
+        let v = serde_json::to_value(&pod).unwrap();
+        assert_eq!(v["host_network"], serde_json::Value::Null);
+        pod.host_network = Some(true);
+        let v = serde_json::to_value(&pod).unwrap();
+        assert_eq!(v["host_network"], serde_json::Value::Bool(true));
+        pod.host_network = Some(false);
+        let v = serde_json::to_value(&pod).unwrap();
+        assert_eq!(v["host_network"], serde_json::Value::Bool(false));
+    }
+
+    #[test]
+    fn resolve_host_network_prefers_the_posted_value() {
+        let manifest = serde_json::json!({"spec": {"hostNetwork": true}});
+        assert_eq!(
+            resolve_host_network(Some(false), Some(&manifest)),
+            Some(false)
+        );
+        assert_eq!(resolve_host_network(Some(true), None), Some(true));
+    }
+
+    #[test]
+    fn resolve_host_network_derives_from_the_manifest_for_older_controllers() {
+        // A Pod manifest carries spec.hostNetwork only when true.
+        let hn = serde_json::json!({"metadata": {"labels": {}}, "spec": {"hostNetwork": true}});
+        assert_eq!(resolve_host_network(None, Some(&hn)), Some(true));
+        let plain = serde_json::json!({"metadata": {"labels": {}}, "spec": {"containers": []}});
+        assert_eq!(resolve_host_network(None, Some(&plain)), Some(false));
+        let compacted = serde_json::json!({"metadata": {"labels": {}}});
+        assert_eq!(resolve_host_network(None, Some(&compacted)), Some(false));
+        let explicit_false = serde_json::json!({"spec": {"hostNetwork": false}});
+        assert_eq!(
+            resolve_host_network(None, Some(&explicit_false)),
+            Some(false)
+        );
+    }
+
+    #[test]
+    fn resolve_host_network_is_unknown_without_a_manifest() {
+        assert_eq!(resolve_host_network(None, None), None);
+        assert_eq!(
+            resolve_host_network(None, Some(&serde_json::Value::Null)),
+            None
+        );
+        assert_eq!(
+            resolve_host_network(None, Some(&serde_json::json!("not a manifest"))),
+            None
+        );
+        // A non-boolean hostNetwork is not trusted as true.
+        assert_eq!(
+            resolve_host_network(
+                None,
+                Some(&serde_json::json!({"spec": {"hostNetwork": "yes"}}))
+            ),
+            Some(false)
+        );
     }
 
     #[test]

@@ -37,6 +37,18 @@ type PodDetail struct {
 	Name      string `yaml:"pod_name" json:"pod_name"`
 	Namespace string `yaml:"pod_namespace" json:"pod_namespace"`
 	Pod       v1.Pod `yaml:"pod_obj" json:"pod_obj"`
+	// NodeName and WorkloadName are the broker's flat copies of the
+	// scheduling node and the owning workload (Deployment/DaemonSet/...).
+	// Both are optional on the wire; the generators fall back to the
+	// manifest / pod name when they are empty.
+	NodeName     string `yaml:"node_name,omitempty" json:"node_name,omitempty"`
+	WorkloadName string `yaml:"workload_name,omitempty" json:"workload_name,omitempty"`
+	IsDead       bool   `yaml:"is_dead,omitempty" json:"is_dead,omitempty"`
+	// HostNetwork mirrors pod_details.host_network: true when the pod runs
+	// with spec.hostNetwork (its IP is the node IP), false for a normal
+	// pod-network pod, nil when the broker does not know (row written by an
+	// old controller). nil MUST leave generator behaviour unchanged.
+	HostNetwork *bool `yaml:"host_network,omitempty" json:"host_network,omitempty"`
 }
 
 type SvcDetail struct {
@@ -90,7 +102,15 @@ var (
 	GetPodTrafficFunc = getRealPodTraffic
 	GetPodSpecFunc    = getRealPodSpec
 	GetSvcSpecFunc    = getRealSvcSpec
+	GetPodsFunc       = getRealPods
 )
+
+// GetPods lists every pod the broker knows (GET /pod/info; pod_obj is
+// compacted to metadata + spec.hostNetwork). nil, nil when the broker has no
+// rows. Used to find the pods backing a Service.
+func GetPods() ([]PodDetail, error) {
+	return GetPodsFunc()
+}
 
 // GetPodTraffic gets pod traffic information
 func GetPodTraffic(podName string) ([]PodTraffic, error) {
@@ -180,6 +200,31 @@ func getRealPodSpec(ip string) (*PodDetail, error) {
 	}
 
 	return details, nil
+}
+
+func getRealPods() ([]PodDetail, error) {
+	resp, err := brokerGet("/pod/info")
+	if err != nil {
+		log.Error().Err(err).Msg("GetPods: Error making GET request")
+		return nil, err
+	}
+	defer func() {
+		if closeErr := resp.Body.Close(); closeErr != nil {
+			log.Error().Err(closeErr).Msg("GetPods: Error closing response body")
+		}
+	}()
+	if resp.StatusCode == http.StatusNotFound {
+		return nil, nil
+	}
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("GetPods: received non-OK HTTP status code: %v", resp.StatusCode)
+	}
+	var pods []PodDetail
+	if err := json.NewDecoder(io.LimitReader(resp.Body, maxBrokerResponseBytes)).Decode(&pods); err != nil {
+		log.Error().Err(err).Msg("GetPods: Error decoding JSON")
+		return nil, err
+	}
+	return pods, nil
 }
 
 func getRealSvcSpec(svcIp string) (*SvcDetail, error) {

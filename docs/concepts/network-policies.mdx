@@ -48,6 +48,10 @@ spec:
 4. **Deduplicates** to create minimal policies
 5. **Generates YAML** ready to apply
 
+## Host-network peers
+
+A `podSelector` matches a pod's own network namespace. Pods running with `hostNetwork: true` (node-exporter, CNI agents, kube-proxy) share the node's namespace and IP, so a selector built from their labels never matches — the CNI sees the node, not the pod. Where a peer resolves to a host-network pod, kguardian emits an `ipBlock` for the node IP (Kubernetes) or `toEntities`/`fromEntities: [host, remote-node]` (Cilium) instead. A policy whose *target* is host-network is emitted with a warning: no NetworkPolicy can select it; that needs a Cilium host policy (`CiliumClusterwideNetworkPolicy` + `nodeSelector`). Details and a Prometheus example: [Host-network peers and targets](/guides/generating-network-policies#host-network-peers-and-targets).
+
 ## Default-Deny Strategy
 
 Best practice: Start with default-deny, then allowlist:

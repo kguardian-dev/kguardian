@@ -282,3 +282,226 @@ func extractCIDRs(yamlDoc string) []string {
 	}
 	return out
 }
+
+// ---- Host-network peers and targets -----------------------------------------
+//
+// A host-network pod shares its node's IP, so a podSelector/endpointSelector
+// built from its labels never matches its traffic. These goldens pin the
+// alternative rendering (ipBlock of the node IP / [host, remote-node]
+// entities) AND the YAML comments explaining it — so they are produced through
+// GenerateWithComments + MarshalPolicyYAML, the path PolicyService uses. The
+// reimplementations compare the parsed policy plus the ordered "#" lines.
+//
+// Peer identities come from the broker's flat host_network / node_name /
+// workload_name fields (broker-api-v3). host_network=false is used on the
+// ordinary peers deliberately: false and nil must both mean "as before".
+
+func hostFixturePodDetail(name, ns, ip string, labels map[string]string, node, workload string, hostNetwork bool) *api.PodDetail {
+	d := fixturePodDetail(name, ns, ip, labels)
+	d.NodeName = node
+	d.WorkloadName = workload
+	d.HostNetwork = &hostNetwork
+	return d
+}
+
+func checkCommentedPolicyGolden(t *testing.T, name string, gen CommentedPolicyGenerator, podName string, traffic []api.PodTraffic, detail *api.PodDetail) {
+	t.Helper()
+	policy, comments, err := gen.GenerateWithComments(podName, traffic, detail)
+	if err != nil {
+		t.Fatalf("generate: %v", err)
+	}
+	out, err := MarshalPolicyYAML(policy, comments)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	checkPolicyGolden(t, name, out)
+}
+
+// (a) Egress to host-network peers: Prometheus scrapes node-exporter on two
+// nodes (9100/TCP) and also reaches an unresolvable ClusterIP. Sorted peer
+// order is bytewise: 10.96.0.10 < 192.168.50.101 < 192.168.50.102.
+func hostNetworkEgressFixture() (stubBrokerData, *api.PodDetail, []api.PodTraffic) {
+	stub := stubBrokerData{
+		pods: map[string]*api.PodDetail{
+			"192.168.50.101": hostFixturePodDetail("node-exporter-abc12", "monitoring", "192.168.50.101",
+				map[string]string{"app": "node-exporter"}, "worker-1", "node-exporter", true),
+			"192.168.50.102": hostFixturePodDetail("node-exporter-def34", "monitoring", "192.168.50.102",
+				map[string]string{"app": "node-exporter"}, "worker-2", "node-exporter", true),
+		},
+		svcs: map[string]*api.SvcDetail{},
+	}
+	detail := hostFixturePodDetail("prometheus", "monitoring", "10.0.0.5", map[string]string{"app": "prometheus"}, "worker-3", "prometheus", false)
+	traffic := []api.PodTraffic{
+		{TrafficType: "EGRESS", SrcIP: "10.0.0.5", DstIP: "192.168.50.101", DstPort: "9100", Protocol: "TCP"},
+		{TrafficType: "EGRESS", SrcIP: "10.0.0.5", DstIP: "192.168.50.102", DstPort: "9100", Protocol: "TCP"},
+		{TrafficType: "EGRESS", SrcIP: "10.0.0.5", DstIP: "10.96.0.10", DstPort: "5432", Protocol: "TCP"},
+	}
+	return stub, detail, traffic
+}
+
+// (b) Ingress from a host-network peer: a hostNetwork ingress-nginx controller
+// and an ordinary frontend pod both reach web:8080.
+func hostNetworkIngressFixture() (stubBrokerData, *api.PodDetail, []api.PodTraffic) {
+	stub := stubBrokerData{
+		pods: map[string]*api.PodDetail{
+			"192.168.50.101": hostFixturePodDetail("ingress-nginx-controller-abc12", "ingress-nginx", "192.168.50.101",
+				map[string]string{"app.kubernetes.io/name": "ingress-nginx"}, "worker-1", "ingress-nginx-controller", true),
+			"10.0.0.7": hostFixturePodDetail("frontend-1", "prod", "10.0.0.7",
+				map[string]string{"app": "frontend"}, "worker-2", "frontend", false),
+		},
+		svcs: map[string]*api.SvcDetail{},
+	}
+	detail := hostFixturePodDetail("web", "prod", "10.0.0.1", map[string]string{"app": "web"}, "worker-3", "web", false)
+	traffic := []api.PodTraffic{
+		{TrafficType: "INGRESS", SrcIP: "10.0.0.1", SrcPodPort: "8080", DstIP: "192.168.50.101", Protocol: "TCP"},
+		{TrafficType: "INGRESS", SrcIP: "10.0.0.1", SrcPodPort: "8080", DstIP: "10.0.0.7", Protocol: "TCP"},
+	}
+	return stub, detail, traffic
+}
+
+// (c) The target itself is host-network: node-exporter scraped by Prometheus.
+// The policy is emitted as usual (the peer resolves to a normal pod) but is
+// headed by the WARNING block.
+func hostNetworkTargetFixture() (stubBrokerData, *api.PodDetail, []api.PodTraffic) {
+	stub := stubBrokerData{
+		pods: map[string]*api.PodDetail{
+			"10.0.0.5": hostFixturePodDetail("prometheus", "monitoring", "10.0.0.5",
+				map[string]string{"app": "prometheus"}, "worker-3", "prometheus", false),
+		},
+		svcs: map[string]*api.SvcDetail{},
+	}
+	detail := hostFixturePodDetail("node-exporter-abc12", "monitoring", "192.168.50.101",
+		map[string]string{"app": "node-exporter"}, "worker-1", "node-exporter", true)
+	traffic := []api.PodTraffic{
+		{TrafficType: "INGRESS", SrcIP: "192.168.50.101", SrcPodPort: "9100", DstIP: "10.0.0.5", Protocol: "TCP"},
+	}
+	return stub, detail, traffic
+}
+
+// (d) A Service whose backing pods are host-network: Prometheus scrapes the
+// node-exporter ClusterIP (10.96.0.20:9100). The Service's selector matches two
+// host-network DaemonSet pods, so the ClusterIP is pinned by IP / entities and
+// named "<ns>/svc/<name>", with the backends' nodes listed. The db Service
+// (10.96.0.10) is backed by a normal pod and keeps the podSelector rendering.
+func hostNetworkServiceFixture() (stubBrokerData, *api.PodDetail, []api.PodTraffic) {
+	svc := func(name, ns, ip string, selector map[string]string) *api.SvcDetail {
+		return &api.SvcDetail{SvcName: name, SvcNamespace: ns, SvcIp: ip,
+			Service: corev1.Service{Spec: corev1.ServiceSpec{Selector: selector}}}
+	}
+	stub := stubBrokerData{
+		pods: map[string]*api.PodDetail{},
+		svcs: map[string]*api.SvcDetail{
+			"10.96.0.20": svc("node-exporter", "monitoring", "10.96.0.20", map[string]string{"app": "node-exporter"}),
+			"10.96.0.10": svc("db", "prod", "10.96.0.10", map[string]string{"app": "db"}),
+		},
+		allPods: []api.PodDetail{
+			*hostFixturePodDetail("node-exporter-def34", "monitoring", "192.168.50.102",
+				map[string]string{"app": "node-exporter"}, "worker-2", "node-exporter", true),
+			*hostFixturePodDetail("node-exporter-abc12", "monitoring", "192.168.50.101",
+				map[string]string{"app": "node-exporter"}, "worker-1", "node-exporter", true),
+			*hostFixturePodDetail("db-0", "prod", "10.0.0.9",
+				map[string]string{"app": "db"}, "worker-3", "db", false),
+		},
+	}
+	detail := hostFixturePodDetail("prometheus", "monitoring", "10.0.0.5", map[string]string{"app": "prometheus"}, "worker-3", "prometheus", false)
+	traffic := []api.PodTraffic{
+		{TrafficType: "EGRESS", SrcIP: "10.0.0.5", DstIP: "10.96.0.20", DstPort: "9100", Protocol: "TCP"},
+		{TrafficType: "EGRESS", SrcIP: "10.0.0.5", DstIP: "10.96.0.10", DstPort: "5432", Protocol: "TCP"},
+	}
+	return stub, detail, traffic
+}
+
+func TestFixtureGolden_HostNetwork(t *testing.T) {
+	cases := []struct {
+		name    string
+		fixture func() (stubBrokerData, *api.PodDetail, []api.PodTraffic)
+	}{
+		{"egress_peer", hostNetworkEgressFixture},
+		{"ingress_peer", hostNetworkIngressFixture},
+		{"target", hostNetworkTargetFixture},
+		{"service_peer", hostNetworkServiceFixture},
+	}
+	for _, tc := range cases {
+		t.Run("standard_"+tc.name, func(t *testing.T) {
+			stub, detail, traffic := tc.fixture()
+			gen := NewStandardPolicyGenerator()
+			gen.setBrokerData(stub)
+			checkCommentedPolicyGolden(t, "standard_hostnetwork_"+tc.name+".golden.yaml", gen, detail.Name, traffic, detail)
+		})
+		t.Run("cilium_"+tc.name, func(t *testing.T) {
+			stub, detail, traffic := tc.fixture()
+			gen := NewCiliumPolicyGenerator()
+			gen.setBrokerData(stub)
+			checkCommentedPolicyGolden(t, "cilium_hostnetwork_"+tc.name+".golden.yaml", gen, detail.Name, traffic, detail)
+		})
+	}
+}
+
+// The comment path must be a no-op for every pre-existing scenario: with no
+// host-network involvement, MarshalPolicyYAML must equal yaml.Marshal byte for
+// byte, so the older goldens above stay valid through the same call path
+// PolicyService now uses.
+func TestFixtureGolden_NoHostNetworkIsByteIdentical(t *testing.T) {
+	detail := fixturePodDetail("web6", "prod", "fd00::1", map[string]string{"app": "web"})
+	for _, gen := range []CommentedPolicyGenerator{NewStandardPolicyGenerator(), NewCiliumPolicyGenerator()} {
+		policy, comments, err := gen.GenerateWithComments("web6", dualStackFixtureTraffic(), detail)
+		if err != nil {
+			t.Fatalf("generate: %v", err)
+		}
+		if !comments.IsEmpty() {
+			t.Fatalf("%s: expected no comments without host-network peers, got %+v", gen.GetType(), comments)
+		}
+		plain, _ := yaml.Marshal(policy)
+		withComments, _ := MarshalPolicyYAML(policy, comments)
+		if string(plain) != string(withComments) {
+			t.Errorf("%s: MarshalPolicyYAML must equal yaml.Marshal when there are no comments", gen.GetType())
+		}
+	}
+}
+
+// ---- Cross-namespace peers ----------------------------------------------------
+//
+// A CiliumNetworkPolicy endpoint selector without a namespace label is scoped
+// to the policy's own namespace, so a peer in another namespace rendered from
+// its labels alone matched nothing (media/maintainerr → downloads/sonarr was
+// denied). The Cilium golden pins `k8s:io.kubernetes.pod.namespace` beside the
+// labels for every cross-namespace peer (pod or Service); the standard golden
+// pins the namespaceSelector the NetworkPolicy generator already emitted. The
+// pre-existing cilium_endpoint_resolved golden is same-namespace (prod →
+// prod) and stays unchanged.
+func crossNamespaceFixture() (stubBrokerData, *api.PodDetail, []api.PodTraffic) {
+	stub := stubBrokerData{
+		pods: map[string]*api.PodDetail{
+			"10.0.0.30": fixturePodDetail("sonarr-0", "downloads", "10.0.0.30", map[string]string{"app": "sonarr"}),
+			"10.0.0.40": fixturePodDetail("maintainerr-0", "media", "10.0.0.40", map[string]string{"app": "maintainerr"}),
+		},
+		svcs: map[string]*api.SvcDetail{
+			"10.96.0.50": {SvcName: "prometheus", SvcNamespace: "monitoring", SvcIp: "10.96.0.50",
+				Service: corev1.Service{Spec: corev1.ServiceSpec{Selector: map[string]string{"app": "prometheus"}}}},
+		},
+	}
+	detail := fixturePodDetail("web", "prod", "10.0.0.1", map[string]string{"app": "web"})
+	traffic := []api.PodTraffic{
+		// Egress to a pod in another namespace and to a Service in a third.
+		{TrafficType: "EGRESS", SrcIP: "10.0.0.1", DstIP: "10.0.0.30", DstPort: "8989", Protocol: "TCP"},
+		{TrafficType: "EGRESS", SrcIP: "10.0.0.1", DstIP: "10.96.0.50", DstPort: "9090", Protocol: "TCP"},
+		// Ingress from a pod in another namespace.
+		{TrafficType: "INGRESS", SrcIP: "10.0.0.1", SrcPodPort: "8080", DstIP: "10.0.0.40", Protocol: "TCP"},
+	}
+	return stub, detail, traffic
+}
+
+func TestFixtureGolden_CrossNamespacePeer(t *testing.T) {
+	t.Run("standard", func(t *testing.T) {
+		stub, detail, traffic := crossNamespaceFixture()
+		gen := NewStandardPolicyGenerator()
+		gen.setBrokerData(stub)
+		checkCommentedPolicyGolden(t, "standard_cross_namespace_peer.golden.yaml", gen, detail.Name, traffic, detail)
+	})
+	t.Run("cilium", func(t *testing.T) {
+		stub, detail, traffic := crossNamespaceFixture()
+		gen := NewCiliumPolicyGenerator()
+		gen.setBrokerData(stub)
+		checkCommentedPolicyGolden(t, "cilium_cross_namespace_peer.golden.yaml", gen, detail.Name, traffic, detail)
+	})
+}
