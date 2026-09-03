@@ -190,8 +190,21 @@ pub fn load_candidates(conn: &mut PgConnection, ip: &str) -> Result<Candidates, 
 /// kept absorbing old flows under the earlier "rank last" rule) — or a
 /// Pending pod that has no address to be a peer with yet. Neither may
 /// attribute a flow.
+///
+/// A DEAD candidate is additionally bounded at the other end: its
+/// `time_stamp` — the row's last update, i.e. when the pod was last
+/// seen alive or was marked dead — must be `>= at`. A start-only check
+/// let a completed Job pod (rook-ceph-osd-prepare, started 2026-08-04,
+/// Succeeded for 30 days) absorb flows from 2026-09-01 on its long-
+/// recycled address. `time_stamp` is an upper bound on the pod's life:
+/// a row marked dead late is over-permissive, but bounded, and the
+/// controller marks pods dead within one resync. Live candidates are
+/// unchanged — an address a live pod holds now has been its since it
+/// started.
 pub fn passes_guard(pod: &PodDetail, at: NaiveDateTime) -> bool {
-    pod.started_at.is_some_and(|s| s <= at)
+    let started_by_then = pod.started_at.is_some_and(|s| s <= at);
+    let still_around = !pod.is_dead || pod.time_stamp >= at;
+    started_by_then && still_around
 }
 
 /// Pick the pod that held the address at `at`, from all rows that hold
@@ -527,12 +540,60 @@ mod tests {
             "job-b",
             true,
             Some("2026-07-23T09:00:00"),
-            "2026-07-23T09:30:00",
+            "2026-09-04T00:00:00",
         );
         assert_eq!(
             choose_pod(&[ghost, real], ts("2026-09-03T00:00:00")).map(|p| p.pod_name.as_str()),
             Some("job-b")
         );
+    }
+
+    #[test]
+    fn dead_candidate_is_bounded_by_its_last_update() {
+        // The rook-ceph-osd-prepare case: a completed Job pod, started
+        // 2026-08-04, last seen / marked dead 2026-08-05, must not absorb
+        // a flow from 2026-09-01 on its long-recycled address.
+        let flow = ts("2026-09-01T12:00:00");
+        let done_long_ago = pod(
+            "rook-ceph-osd-prepare-x",
+            true,
+            Some("2026-08-04T10:00:00"),
+            "2026-08-05T10:00:00",
+        );
+        assert!(!passes_guard(&done_long_ago, flow));
+        assert!(choose_pod(std::slice::from_ref(&done_long_ago), flow).is_none());
+        // A dead pod whose row was updated AFTER the flow (last seen
+        // alive, or marked dead, after it) was around at flow time and
+        // stays eligible.
+        let died_after = pod(
+            "job-late",
+            true,
+            Some("2026-08-04T10:00:00"),
+            "2026-09-02T00:00:00",
+        );
+        assert!(passes_guard(&died_after, flow));
+        assert_eq!(
+            choose_pod(&[done_long_ago.clone(), died_after], flow).map(|p| p.pod_name.as_str()),
+            Some("job-late")
+        );
+        // Boundary: last update exactly at the flow time is eligible.
+        let edge = pod(
+            "edge",
+            true,
+            Some("2026-08-04T10:00:00"),
+            "2026-09-01T12:00:00",
+        );
+        assert!(passes_guard(&edge, flow));
+        // Alive candidates are unchanged: an old time_stamp on a live row
+        // never excludes it (only the start bound applies).
+        let alive_old_row = pod(
+            "web-1",
+            false,
+            Some("2026-08-04T10:00:00"),
+            "2026-08-05T10:00:00",
+        );
+        assert!(passes_guard(&alive_old_row, flow));
+        assert!(!passes_guard(&alive_old_row, ts("2026-08-01T00:00:00")));
     }
 
     #[test]
@@ -579,7 +640,9 @@ mod tests {
     fn guarded_out_alive_pod_falls_back_to_the_dead_holder_with_the_newest_start() {
         // Three former holders plus today's owner; the row predates the
         // owner. The dead pod that started most recently BEFORE the row
-        // is the best guess, not the most recently seen one.
+        // (and was still around at the row's time) is the best guess.
+        // job-a was last seen before the flow (excluded by the dead-row
+        // upper bound), job-c started after it.
         let pods = vec![
             pod(
                 "autobrr-1",
@@ -597,7 +660,7 @@ mod tests {
                 "job-b",
                 true,
                 Some("2026-07-23T09:00:00"),
-                "2026-07-23T09:30:00",
+                "2026-07-23T11:00:00",
             ),
             pod(
                 "job-c",
@@ -620,7 +683,7 @@ mod tests {
                 "job-b",
                 true,
                 Some("2026-07-23T09:00:00"),
-                "2026-07-23T09:30:00",
+                "2026-09-01T00:00:00",
             ),
         ];
         assert_eq!(
@@ -653,7 +716,7 @@ mod tests {
                 "job-a",
                 true,
                 Some("2026-08-01T00:00:00"),
-                "2026-08-01T01:00:00",
+                "2026-09-03T12:00:00",
             )],
             service: Some(svc()),
         };
