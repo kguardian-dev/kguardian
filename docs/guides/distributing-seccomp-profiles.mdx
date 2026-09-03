@@ -151,8 +151,9 @@ List workloads with an observed syscall set, their capture completeness, and
 whether a CR already covers them:
 
 ```bash
-kubectl exec deploy/kguardian-broker -n kguardian -- \
-  wget -qO- localhost:9090/seccomp/profiles | jq
+# The broker image has no shell tools, so reach it through a port-forward.
+kubectl port-forward -n kguardian svc/kguardian-broker 9090:9090 &
+curl -s localhost:9090/seccomp/profiles | jq
 ```
 
 ```json
@@ -180,8 +181,7 @@ kubectl exec deploy/kguardian-broker -n kguardian -- \
 `cr: null` means no `SeccompProfile` references this workload yet. Export one:
 
 ```bash
-kubectl exec deploy/kguardian-broker -n kguardian -- \
-  wget -qO- localhost:9090/seccomp/profiles/prod/Deployment/web/export \
+curl -s localhost:9090/seccomp/profiles/prod/Deployment/web/export \
   > seccomp/prod/deployment-web.yaml
 ```
 
