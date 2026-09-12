@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.10.1](https://github.com/kguardian-dev/kguardian/compare/advisor/v1.10.0...advisor/v1.10.1) (2026-09-11)
+
+
+### Bug Fixes
+
+* **deps:** update ghcr.io/kguardian-dev/kguardian/controller docker tag to v1.14.0 - abandoned ([#1548](https://github.com/kguardian-dev/kguardian/issues/1548)) ([cb1e700](https://github.com/kguardian-dev/kguardian/commit/cb1e70055500d7b155935565aaf0d1b6c85f44ac))
+
 ## [1.10.0](https://github.com/kguardian-dev/kguardian/compare/advisor/v1.9.0...advisor/v1.10.0) (2026-09-11)
 
 
