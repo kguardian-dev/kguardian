@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.17.1](https://github.com/kguardian-dev/kguardian/compare/frontend/v1.17.0...frontend/v1.17.1) (2026-09-13)
+
+
+### Bug Fixes
+
+* **frontend:** decorate Service map nodes from the resolved backing pod, not an IP map ([#1569](https://github.com/kguardian-dev/kguardian/issues/1569)) ([39701f0](https://github.com/kguardian-dev/kguardian/commit/39701f0899d4cd0f1aac10b64cf745bcae6c414f)), closes [#1565](https://github.com/kguardian-dev/kguardian/issues/1565)
+
 ## [1.17.0](https://github.com/kguardian-dev/kguardian/compare/frontend/v1.16.0...frontend/v1.17.0) (2026-09-11)
 
 
