@@ -35,15 +35,13 @@ export interface ExternalNodesInput {
   svcIpToLocalPod: ReadonlyMap<string, PodNodeData>;
   /** Backing pod NAME → ClusterIP of the Service selecting it. */
   podNameToSvcIp: ReadonlyMap<string, string>;
-  /** Current pod record by IP — only to decorate synthetic Service members. */
-  ipToAllPods: ReadonlyMap<string, PodInfo>;
 }
 
 /** `svc:<ns>/<name>` — the peer key a Service node answers for. */
 export const serviceKey = (svc: ServiceInfo): string => `svc:${svc.svc_namespace ?? ''}/${svc.svc_name ?? svc.svc_ip}`;
 
 export function buildExternalNodes(input: ExternalNodesInput): PodNodeData[] {
-  const { pods, services, rowPeers, localPodByName, svcIpToLocalPod, podNameToSvcIp, ipToAllPods } = input;
+  const { pods, services, rowPeers, localPodByName, svcIpToLocalPod, podNameToSvcIp } = input;
 
   const svcByIp = new Map<string, ServiceInfo>();
   services.forEach((svc) => { if (svc.svc_ip) svcByIp.set(svc.svc_ip, svc); });
@@ -105,24 +103,25 @@ export function buildExternalNodes(input: ExternalNodesInput): PodNodeData[] {
   // Step 2: merge ACCEPTED pod peers that back a Service into that Service's
   // entry, so curl→ClusterIP and curl→backing-pod-IP produce one node (and
   // one edge). Matched by pod NAME — the pod resolvePeer chose — never by IP.
-  const mergedBackingIps = new Map<string, string[]>(); // svc key → [backing IP, ...]
+  const mergedBackingPods = new Map<string, PodInfo[]>(); // svc key → [resolved backing pod, ...]
   const mergedPeerKeys = new Map<string, string[]>(); // svc key → [pod peer key, ...]
-  const toMerge: Array<[string, ServiceInfo]> = [];
+  const toMerge: Array<[string, ServiceInfo, PodInfo]> = [];
   entries.forEach((e, key) => {
-    if (!e.podInfo) return;
-    const svcIp = podNameToSvcIp.get(e.podInfo.pod_name);
+    const backing = e.podInfo;
+    if (!backing) return;
+    const svcIp = podNameToSvcIp.get(backing.pod_name);
     const svc = svcIp ? svcByIp.get(svcIp) : undefined;
-    if (svc) toMerge.push([key, svc]);
+    if (svc) toMerge.push([key, svc, backing]);
   });
-  toMerge.forEach(([key, svc]) => {
+  toMerge.forEach(([key, svc, backing]) => {
     const e = entries.get(key)!;
     const target = entry(serviceKey(svc), { podInfo: null, svc, ip: svc.svc_ip, stored: false, unattributed: false });
     target.ingressTraffic.push(...e.ingressTraffic);
     target.egressTraffic.push(...e.egressTraffic);
     entries.delete(key);
     const sk = serviceKey(svc);
-    if (!mergedBackingIps.has(sk)) mergedBackingIps.set(sk, []);
-    mergedBackingIps.get(sk)!.push(e.ip);
+    if (!mergedBackingPods.has(sk)) mergedBackingPods.set(sk, []);
+    mergedBackingPods.get(sk)!.push(backing);
     if (!mergedPeerKeys.has(sk)) mergedPeerKeys.set(sk, []);
     mergedPeerKeys.get(sk)!.push(key);
   });
@@ -164,26 +163,31 @@ export function buildExternalNodes(input: ExternalNodesInput): PodNodeData[] {
       const g = group(`external-svc-${ns}-${name}`);
       g.peerKeys.add(entryKey);
       mergedPeerKeys.get(entryKey)?.forEach((k) => g.peerKeys.add(k));
-      const backingIps = mergedBackingIps.get(entryKey) || [];
-      if (backingIps.length > 0) {
-        // Use only the real backing pod IPs so the pod count reflects actual pods.
+      const backingPods = mergedBackingPods.get(entryKey) || [];
+      if (backingPods.length > 0) {
+        // Use only the real backing pods so the pod count reflects actual pods.
         // The service ClusterIP is a virtual IP and should not count as a pod.
-        backingIps.forEach((backingIp) => {
+        backingPods.forEach((backing) => {
           // Carry the backing pod's workload facts onto the synthetic member so
           // the DaemonSets toggle can recognise a Service fronting a DaemonSet or
           // host-network pods (node-exporter, CSI node plugins, ...).
-          const known = ipToAllPods.get(backingIp);
+          //
+          // Taken from the pod `resolvePeer` attributed to the flow, never from
+          // an IP → pod map: pod_details keeps every pod that ever held an
+          // address, so a by-IP lookup lands on an arbitrary former holder — on
+          // EKS a dead node agent — and a Deployment-backed Service rendered
+          // (and hid) as a DaemonSet peer (#1565).
           g.memberPods.push({
             pod_name: name,
-            pod_ip: backingIp,
+            pod_ip: backing.pod_ip,
             pod_namespace: ns,
             pod_identity: name,
             time_stamp: '',
-            node_name: known?.node_name ?? '',
+            node_name: backing.node_name ?? '',
             is_dead: false,
-            workload_kind: known?.workload_kind ?? null,
-            workload_name: known?.workload_name ?? null,
-            host_network: known?.host_network ?? null,
+            workload_kind: backing.workload_kind ?? null,
+            workload_name: backing.workload_name ?? null,
+            host_network: backing.host_network ?? null,
           });
         });
       } else if (ext.ip) {

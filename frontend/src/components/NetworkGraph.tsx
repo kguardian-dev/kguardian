@@ -119,17 +119,6 @@ const NetworkGraphInner: React.FC<NetworkGraphProps> = ({
     [onFocusChange, focusedNodeId],
   );
 
-  // Build IP-to-PodInfo lookup from allPodsLookup for cross-namespace resolution
-  const ipToAllPodsMap = useMemo(() => {
-    const map = new Map<string, PodInfo>();
-    allPodsLookup.forEach((pod) => {
-      if (pod.pod_ip) {
-        map.set(pod.pod_ip, pod);
-      }
-    });
-    return map;
-  }, [allPodsLookup]);
-
   // Peer attribution per traffic ROW (utils/peerResolution): the row's
   // stored peer_* identity first, else a by-IP lookup guarded by the flow
   // time. Pod IPs are recycled, so this — not an IP → pod map — decides
@@ -188,8 +177,8 @@ const NetworkGraphInner: React.FC<NetworkGraphProps> = ({
     return map;
   }, [services, pods]);
 
-  // Map backing pod NAME → service ClusterIP, for peers resolved to a pod
-  // record (the by-IP map above is ambiguous once an IP has changed hands).
+  // Map backing pod NAME → service ClusterIP. A resolved peer is matched by
+  // NAME — an IP is ambiguous once it has changed hands.
   const podNameToSvcIp = useMemo(() => {
     const map = new Map<string, string>();
     services.forEach((svc) => {
@@ -220,9 +209,8 @@ const NetworkGraphInner: React.FC<NetworkGraphProps> = ({
       localPodByName,
       svcIpToLocalPod: svcIpToLocalPodMap,
       podNameToSvcIp,
-      ipToAllPods: ipToAllPodsMap,
     });
-  }, [pods, showExternalNodes, showTraffic, ipToAllPodsMap, svcIpToLocalPodMap, services, podNameToSvcIp, rowPeers, localPodByName]);
+  }, [pods, showExternalNodes, showTraffic, svcIpToLocalPodMap, services, podNameToSvcIp, rowPeers, localPodByName]);
 
   // Combine in-namespace and external pods for rendering
   // When traffic is enabled, hide local pods that have no traffic

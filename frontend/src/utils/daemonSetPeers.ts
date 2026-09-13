@@ -19,8 +19,10 @@ export function isDaemonSetOrHostNetworkPod(p: PodInfo | undefined | null): bool
 
 /**
  * Whether a graph node is a DaemonSet / host-network PEER. In-namespace
- * workloads (`isExternal` false), the Internet node and Service nodes with
- * synthetic member pods never qualify.
+ * workloads (`isExternal` false) and the Unattributed / Internet aggregates
+ * never qualify. A Service node DOES qualify when any of its synthetic
+ * members — decorated from the backing pods `resolvePeer` attributed
+ * (utils/externalPeers) — is a DaemonSet or host-network pod.
  */
 export function isDaemonSetPeer(node: PodNodeData): boolean {
   if (!node.isExternal) return false;
