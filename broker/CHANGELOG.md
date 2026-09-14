@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.18.0](https://github.com/kguardian-dev/kguardian/compare/broker/v1.17.0...broker/v1.18.0) (2026-09-14)
+
+
+### Features
+
+* capture kernel seccomp verdicts and surface them as denials ([#1574](https://github.com/kguardian-dev/kguardian/issues/1574)) ([0db143c](https://github.com/kguardian-dev/kguardian/commit/0db143cb2643756ad0b78f5c7133f7753e91f61d))
+
 ## [1.17.0](https://github.com/kguardian-dev/kguardian/compare/broker/v1.16.1...broker/v1.17.0) (2026-09-11)
 
 
