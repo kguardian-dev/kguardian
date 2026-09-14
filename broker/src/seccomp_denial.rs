@@ -941,7 +941,13 @@ pub async fn post_seccomp_denials(
     let (unattributed, increments) = web::block(move || -> Result<_, DbError> {
         let mut conn = pool.get()?;
         let out = store_batch(&mut conn, &node_for_rows, &pod_names, rows)?;
-        heartbeat()?;
+        // The batch is committed. A heartbeat failure past this point must
+        // NOT turn into a 500: the controller would replay rows that already
+        // landed and double-count them. The next drain, 10 s away by
+        // default, carries the heartbeat again.
+        if let Err(e) = heartbeat() {
+            warn!(node = %node_for_rows, error = %e, "seccomp denials stored but the node heartbeat failed; the next report carries it");
+        }
         Ok(out)
     })
     .await?
