@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.18.0](https://github.com/kguardian-dev/kguardian/compare/frontend/v1.17.2...frontend/v1.18.0) (2026-09-14)
+
+
+### Features
+
+* **frontend:** selecting a card on the map opens it ([#1575](https://github.com/kguardian-dev/kguardian/issues/1575)) ([26eaad7](https://github.com/kguardian-dev/kguardian/commit/26eaad79d6ffab81bbc8c78fe2b87809692f0981))
+
 ## [1.17.2](https://github.com/kguardian-dev/kguardian/compare/frontend/v1.17.1...frontend/v1.17.2) (2026-09-14)
 
 
