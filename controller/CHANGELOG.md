@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.15.0](https://github.com/kguardian-dev/kguardian/compare/controller/v1.14.0...controller/v1.15.0) (2026-09-14)
+
+
+### Features
+
+* capture kernel seccomp verdicts and surface them as denials ([#1574](https://github.com/kguardian-dev/kguardian/issues/1574)) ([0db143c](https://github.com/kguardian-dev/kguardian/commit/0db143cb2643756ad0b78f5c7133f7753e91f61d))
+
 ## [1.14.0](https://github.com/kguardian-dev/kguardian/compare/controller/v1.13.0...controller/v1.14.0) (2026-09-11)
 
 
