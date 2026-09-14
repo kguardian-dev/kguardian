@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.17.2](https://github.com/kguardian-dev/kguardian/compare/frontend/v1.17.1...frontend/v1.17.2) (2026-09-14)
+
+
+### Bug Fixes
+
+* **frontend:** seed node compute sparklines from stored history ([#1577](https://github.com/kguardian-dev/kguardian/issues/1577)) ([860dc16](https://github.com/kguardian-dev/kguardian/commit/860dc168907376201606633eea5e69d6b75b0caa))
+
 ## [1.17.1](https://github.com/kguardian-dev/kguardian/compare/frontend/v1.17.0...frontend/v1.17.1) (2026-09-13)
 
 
