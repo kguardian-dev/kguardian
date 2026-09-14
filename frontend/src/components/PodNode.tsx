@@ -9,6 +9,7 @@ import { Sparkline } from './ui/Sparkline';
 import {
   COMPUTE_DOT_CLASS,
   COMPUTE_HISTORY_WINDOW_LABEL,
+  COMPUTE_SPARK_GAP_MS,
   denominatorLabel,
   formatBytes,
   formatMillicores,
@@ -98,7 +99,10 @@ const ComputeDetail: React.FC<{ compute: PodComputeData }> = ({ compute }) => {
           </span>
         </div>
         <Sparkline
-          values={compute.sparkCpu}
+          points={compute.sparkCpu}
+          from={compute.sparkWindow.from}
+          to={compute.sparkWindow.to}
+          gapMs={COMPUTE_SPARK_GAP_MS}
           max={cpuMax}
           height={26}
           title={`CPU, ${COMPUTE_HISTORY_WINDOW_LABEL}`}
@@ -115,7 +119,10 @@ const ComputeDetail: React.FC<{ compute: PodComputeData }> = ({ compute }) => {
           </span>
         </div>
         <Sparkline
-          values={compute.sparkMem}
+          points={compute.sparkMem}
+          from={compute.sparkWindow.from}
+          to={compute.sparkWindow.to}
+          gapMs={COMPUTE_SPARK_GAP_MS}
           max={memMax}
           height={26}
           color="var(--color-hubble-info)"

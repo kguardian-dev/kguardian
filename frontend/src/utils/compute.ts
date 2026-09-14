@@ -15,48 +15,55 @@ import type {
   ComputeStatus,
   PodComputeData,
   ProbeDrops,
+  SparkPoint,
 } from '../types/compute';
 import { parseBrokerTime, podUid } from './peerResolution';
 
-/**
- * Width of one client-side history bucket.
- *
- * The series has two sources — the 5 s `/compute/latest` poll and the
- * broker's stored `/compute/history/{pod_uid}` rows — and they only share an
- * x-axis on a common grid. A minute is that grid: it is the finest
- * resolution the broker keeps (`resolution_secs = 60`, un-downsampled for
- * `compute.history.minuteResolutionHours`, default 24 h), so nothing is lost
- * by bucketing to it and the seeded and live halves of a sparkline are
- * spaced identically.
- */
-export const COMPUTE_BUCKET_MS = 60_000;
-
-/** Client-side history depth per pod (D8: "last 60 samples kept client-side"
- *  — 60 one-minute buckets, so the window is the last hour rather than the
- *  last five minutes of uninterrupted polling). */
-export const COMPUTE_HISTORY_SAMPLES = 60;
-
-/** The span the sparklines cover, and what the backfill asks the broker for.
- *  One bucket is one minute, so it is the bucket count. */
-export const COMPUTE_HISTORY_WINDOW_MINUTES = COMPUTE_HISTORY_SAMPLES;
+/** How far back the sparklines reach, and what a seed asks the broker for. */
+export const COMPUTE_HISTORY_WINDOW_MINUTES = 60;
+export const COMPUTE_HISTORY_WINDOW_MS = COMPUTE_HISTORY_WINDOW_MINUTES * 60_000;
 
 /** Sparkline title copy, derived so the label cannot drift from the window. */
 export const COMPUTE_HISTORY_WINDOW_LABEL = `last ${COMPUTE_HISTORY_WINDOW_MINUTES} minutes`;
 
-/** How far a sample may fall behind the newest bucket and still be treated
- *  as ordinary jitter rather than the clock itself having moved back
- *  (`pushBucketed`). One bucket of slack absorbs two `Date.now()` reads
- *  landing either side of a boundary without a step being mistaken for it. */
-export const COMPUTE_CLOCK_STEP_MS = COMPUTE_BUCKET_MS;
+/**
+ * Samples kept per pod. A memory bound, not a resolution: the window is what
+ * decides which samples are kept, and an hour of 5 s polls is 720 of them,
+ * so this only bites if a broker returns far more history rows than an hour
+ * can hold.
+ */
+export const COMPUTE_MAX_SAMPLES = 2_000;
 
-/** Start of the bucket a timestamp falls in (samples are keyed by it). */
-export const bucketStart = (at: number): number => Math.floor(at / COMPUTE_BUCKET_MS) * COMPUTE_BUCKET_MS;
+/**
+ * Longer than this between two consecutive samples and the line breaks
+ * rather than joining them.
+ *
+ * Two and a half times the one-minute history cadence: dense 5 s live
+ * samples and minute-spaced seeded ones both stay connected, and a pod that
+ * reported nothing for over two minutes reads as the gap it is. Five-minute
+ * rows (only reachable when an operator downsamples sooner than this window)
+ * therefore draw as separate points, which is what a five-minute average
+ * observed once actually is.
+ */
+export const COMPUTE_SPARK_GAP_MS = 150_000;
+
+/**
+ * How close two containers' history rows must be to count as one observation
+ * of the pod.
+ *
+ * A fold stamps every container in it with the same instant
+ * (`MinuteFold::finish` builds one batch for all of them), so this is a
+ * tolerance for re-ingest and nothing more. It exists ONLY to sum a pod's
+ * containers: summing them as separate points would draw each container's
+ * share as if it were the pod's total.
+ */
+export const COMPUTE_SAMPLE_MERGE_MS = 2_000;
 
 /** Fixed-capacity FIFO of the last N samples, oldest first. */
 export class RingBuffer<T> {
   private items: T[] = [];
   readonly capacity: number;
-  constructor(capacity: number = COMPUTE_HISTORY_SAMPLES) {
+  constructor(capacity: number = COMPUTE_MAX_SAMPLES) {
     this.capacity = capacity;
   }
 
@@ -65,13 +72,8 @@ export class RingBuffer<T> {
     if (this.items.length > this.capacity) this.items.splice(0, this.items.length - this.capacity);
   }
 
-  /** Overwrite the newest item in place (a bucket upsert); no-op when empty. */
-  replaceLast(item: T): void {
-    if (this.items.length > 0) this.items[this.items.length - 1] = item;
-  }
-
-  /** Drop every item the predicate rejects (used to evict by age, which
-   *  capacity alone cannot do — see `pushBucketed`). */
+  /** Drop every item the predicate rejects (used to trim by age, which
+   *  capacity alone cannot do — see `appendSample`). */
   retain(keep: (item: T) => boolean): void {
     this.items = this.items.filter(keep);
   }
@@ -101,255 +103,150 @@ export function podLevelSample(containers: readonly ComputeContainer[], at: numb
   return { at, cpuMillis, workingSetBytes };
 }
 
-/** What a `pushBucketed` call did. `restarted` means the clock moved back
- *  far enough that every bucket held was in the future and the series began
- *  again — the one outcome that costs seeded history. */
-export type BucketPush = 'pushed' | 'upserted' | 'dropped' | 'restarted';
-
 /**
- * Fold a live sample into its bucket. The twelve 5 s polls that land inside
- * one minute overwrite the same entry — last one wins, so the newest poll is
- * still the value the gauges read — and only a rollover pushes a new bucket
- * (evicting the oldest). That is what keeps the x-axis uniform once history
- * is seeded, and the window an hour wide instead of five minutes of polling.
+ * Append a live sample to a pod's series and trim it to the window.
  *
- * A sample a bucket or so behind the newest (ordinary jitter between two
- * `Date.now()` reads either side of a boundary) is dropped rather than
- * appended out of order: the series must stay monotonic in time for the
- * sparkline to mean anything. A sample much further behind is not jitter but
- * the clock itself moving — an NTP correction, a laptop waking — and there
- * dropping is the worst answer: every later sample would be "in the past"
- * too, freezing the chart and the gauge beside it with no sign of why. The
- * buckets that the step put in the future are discarded and the series
- * carries on; everything older than the step survives.
+ * Samples carry the instant they were observed and are drawn against real
+ * time, so a 5 s poll is simply densely spaced points on the right of the
+ * chart and nothing has to be folded onto a grid to fit.
  *
- * Buckets are also evicted by AGE here, not just by the buffer's capacity:
- * a pod that reported for five minutes and then went quiet for six hours (a
- * hidden tab, a node away) would otherwise keep those five buckets — under a
- * heading that says the last hour — because nothing ever pushed them out.
+ * The series is kept strictly time-ordered. When the clock steps BACKWARD —
+ * an NTP correction, a laptop waking — the samples that are now in the
+ * future are dropped rather than left behind the new ones: they describe a
+ * timeline that no longer exists, and a series that is not ordered cannot be
+ * drawn. Everything older than the step survives, and seeding can refill
+ * whatever went with it.
  */
-export function pushBucketed(buf: RingBuffer<ComputeSample>, sample: ComputeSample): BucketPush {
-  const at = bucketStart(sample.at);
+export function appendSample(buf: RingBuffer<ComputeSample>, sample: ComputeSample): void {
   const last = buf.last();
-  let restarted = false;
-  if (last && at < last.at) {
-    if (last.at - at <= COMPUTE_CLOCK_STEP_MS) return 'dropped'; // jitter: keep the series monotonic
-    // The clock moved back. Only the buckets now in the FUTURE are wrong, so
-    // only those go: a two-minute correction costs two minutes, not the hour
-    // of seeded history that a windowed broker read paid for.
-    buf.retain((s) => s.at <= at);
-  }
-  // Every push, not only when the whole buffer is stale: a sparse series
-  // (minutes with no sample) can hold `capacity` buckets spanning far more
-  // than `capacity` minutes, so counting alone never bounds the window.
-  const oldest = at - (buf.capacity - 1) * COMPUTE_BUCKET_MS;
-  if (last) {
-    buf.retain((s) => s.at >= oldest);
-    // Emptied — by the trim above, or by age when time jumped FORWARD past
-    // the whole window (a tab left open overnight, a suspended laptop).
-    // Either way the series starts again and the caller is told, or a pod
-    // already marked seeded would refill at one bucket a minute for an hour.
-    restarted = buf.length === 0;
-  }
-  const bucketed: ComputeSample = { ...sample, at };
-  if (buf.last()?.at === at) {
-    buf.replaceLast(bucketed);
-    return restarted ? 'restarted' : 'upserted';
-  }
-  buf.push(bucketed);
-  return restarted ? 'restarted' : 'pushed';
-}
-
-const BUCKET_SECS = COMPUTE_BUCKET_MS / 1000;
-
-/**
- * Where one history row belongs, and why the two resolutions differ.
- *
- * - A MINUTE row is closed by the controller on its Nth sample, NOT on a
- *   wall-clock boundary (`MinuteFold::finish` stamps `ts: latest.ts`, the
- *   instant of the last 5 s sample folded in), so its `ts` is the END of the
- *   window it covers and drifts forward against the grid.
- * - A DOWNSAMPLED row is written by the broker's five-minute rollup, which
- *   floors (`floor(epoch/300)*300`), so its `ts` is the START of an exact,
- *   non-overlapping window.
- *
- * `claim` is the single bucket the row's midpoint falls in — the minute it
- * mostly describes, and the only one it may state a value for. `covers` is
- * every bucket its window touches, which is what fills a minute no row
- * claimed (see `historySamples`).
- */
-function rowBuckets(row: ComputeHistoryRow): { claim: number; covers: number[]; mid: number; secs: number } | null {
-  // `parseBrokerTime`, never `Date.parse`: the broker's own deserialiser
-  // accepts a zone-less stamp, and `Date.parse` would read one as LOCAL
-  // time — east of UTC every seeded sample would fall outside the window
-  // and vanish, west of it they would pile onto one bucket, silently.
-  const ts = parseBrokerTime(row.ts);
-  if (ts === null) return null; // an unparseable ts must not NaN the series
-  const raw = Number.isFinite(row.resolution_secs) && row.resolution_secs > 0 ? row.resolution_secs : BUCKET_SECS;
-  // Bounded so an absurd `resolution_secs` cannot fan out over the window.
-  const secs = Math.min(raw, COMPUTE_HISTORY_SAMPLES * BUCKET_SECS);
-  const span = secs * 1000;
-  const start = secs > BUCKET_SECS ? ts : ts - span;
-  const mid = start + span / 2;
-  const covers: number[] = [];
-  // `end` is exclusive: a window ending on a boundary stops at the minute
-  // before it, not at the one starting there.
-  for (let at = bucketStart(start); at <= bucketStart(start + span - 1); at += COMPUTE_BUCKET_MS) covers.push(at);
-  return { claim: bucketStart(mid), covers, mid, secs };
-}
-
-/** One container's contribution to one bucket, with how it got there. */
-interface BucketEntry {
-  cpuMillis: number;
-  workingSetBytes: number;
-  /** The row's resolution: a finer row always beats a coarser one. */
-  secs: number;
-  /** The row's midpoint fell in this bucket, rather than merely covering it. */
-  claimed: boolean;
-  /** |bucket centre − row midpoint|, to pick the nearest filler. */
-  distance: number;
-}
-
-/** Whether `next` should replace `held` for the same (bucket, container). */
-function preferEntry(next: BucketEntry, held: BucketEntry | undefined): boolean {
-  if (!held) return true;
-  // A claim beats a fill whatever their resolutions: the claim is the minute
-  // that row measured, the fill is a value stretched from a neighbour.
-  if (next.claimed !== held.claimed) return next.claimed;
-  if (next.secs !== held.secs) return next.secs < held.secs; // then finer resolution
-  if (next.claimed) return true; // two claims: the newer row, as drift intends
-  return next.distance <= held.distance; // two fills: the nearer row
+  if (last && sample.at < last.at) buf.retain((s) => s.at <= sample.at);
+  buf.push(sample);
+  buf.retain((s) => s.at >= sample.at - COMPUTE_HISTORY_WINDOW_MS);
 }
 
 /**
- * Per-container `/compute/history` rows → pod-level samples, one per bucket,
- * oldest first. Values are summed across the pod's containers within a
- * bucket, exactly as `podLevelSample` sums a live poll's rows — but keyed by
- * `container_uid` first, so two rows for one container in one bucket replace
- * each other instead of double-counting it.
+ * `/compute/history` rows → pod-level samples, oldest first, each at the
+ * instant it was actually observed.
  *
- * Two passes, because minute stamps drift. Each row first CLAIMS the bucket
- * its midpoint falls in, which is the minute it actually measured. Since a
- * fold spans 60 s plus whatever lag it accumulated, consecutive midpoints sit
- * slightly more than a minute apart and every thirtieth pair or so steps over
- * a bucket entirely — and an unclaimed bucket is a `null` the sparkline draws
- * as a break, inventing an outage on a pod that never had one. So a second
- * pass FILLS any bucket no row claimed from the nearest row whose window
- * covers it. Claims are never overwritten by fills, so this closes drift
- * holes without putting one row's measurement into another row's minute.
+ * Every row becomes ONE point:
  *
- * A minute row contributes `_last`, so a seeded bucket and a live bucket mean
- * the same thing — the value at the end of that minute — and the newest
- * bucket, which the gauges read as "now", stays an instantaneous number. A
- * downsampled row contributes `_avg`, the honest value for every minute of
- * the five it summarises.
+ * - A MINUTE row contributes `_last` at its own `ts`. The controller closes a
+ *   fold on its Nth sample and stamps it with the last sample folded in
+ *   (`MinuteFold::finish`), so `ts` IS when that value was read. Plotting it
+ *   there means the drift of those stamps needs no compensation at all — the
+ *   points are simply spaced as irregularly as the sampler was.
+ * - A DOWNSAMPLED row contributes `_avg` at the middle of the span it
+ *   summarises. The broker's rollup floors its `ts` to the 5-minute boundary
+ *   (`retention.rs`) and groups the minute rows stamped inside it — and those
+ *   are end-stamped, so the measurements actually run from about a minute
+ *   BEFORE that boundary to its end: `[ts - 60s, ts + resolution)`, whose
+ *   middle is `ts + (resolution - 60s) / 2`.
+ *
+ * A pod's containers are then summed: rows from one fold share an instant, so
+ * points within `COMPUTE_SAMPLE_MERGE_MS` of each other, one per container,
+ * are one observation of the pod (see `podLevelSample` for the live
+ * equivalent). A second row for a container closes the group, so nothing is
+ * double-counted.
  */
 export function historySamples(rows: readonly ComputeHistoryRow[]): ComputeSample[] {
-  const byBucket = new Map<number, Map<string, BucketEntry>>();
-  const put = (at: number, containerUid: string, entry: BucketEntry) => {
-    let containers = byBucket.get(at);
-    if (!containers) {
-      containers = new Map();
-      byBucket.set(at, containers);
-    }
-    if (preferEntry(entry, containers.get(containerUid))) containers.set(containerUid, entry);
-  };
-
-  const candidates: { at: number; containerUid: string; entry: BucketEntry }[] = [];
-  let oldestPlaced = Infinity;
-  let newestPlaced = -Infinity;
+  const points: { at: number; containerUid: string; cpuMillis: number; workingSetBytes: number }[] = [];
   for (const row of rows) {
-    const at = rowBuckets(row);
-    if (!at) continue;
-    const coarse = at.secs > BUCKET_SECS;
+    // `parseBrokerTime`, never `Date.parse`: the broker's own deserialiser
+    // accepts a zone-less stamp, and `Date.parse` would read one as LOCAL
+    // time, moving every seeded sample by the viewer's offset.
+    const ts = parseBrokerTime(row.ts);
+    if (ts === null) continue; // an unparseable ts must not NaN the series
+    const secs = Number.isFinite(row.resolution_secs) && row.resolution_secs > 0 ? row.resolution_secs : 60;
+    const coarse = secs > 60;
     const rawCpu = coarse ? row.cpu_usage_millis_avg : row.cpu_usage_millis_last;
     const rawMem = coarse ? row.mem_working_set_avg : row.mem_working_set_last;
-    const value = {
+    points.push({
+      at: coarse ? ts + ((secs - 60) * 1000) / 2 : ts,
+      containerUid: row.container_uid,
       cpuMillis: Number.isFinite(rawCpu) ? rawCpu : 0,
       workingSetBytes: Number.isFinite(rawMem) ? rawMem : 0,
-      secs: at.secs,
-    };
-    const place = (bucket: number, entry: BucketEntry) => {
-      put(bucket, row.container_uid, entry);
-      oldestPlaced = Math.min(oldestPlaced, bucket);
-      newestPlaced = Math.max(newestPlaced, bucket);
-    };
-    place(at.claim, { ...value, claimed: true, distance: 0 });
-    for (const bucket of at.covers) {
-      if (bucket === at.claim) continue;
-      const centre = bucket + COMPUTE_BUCKET_MS / 2;
-      const entry = { ...value, claimed: false, distance: Math.abs(centre - at.mid) };
-      // A downsampled row's window IS the extent of its measurement — the
-      // average of those five minutes — so it spreads over all of them.
-      // A minute row's window is only a repair kit: its value belongs to the
-      // minute it claimed, and may fill another one solely to close a hole
-      // drift opened BETWEEN real data. Letting it fill at the ends instead
-      // would stretch the series past anything the broker actually returned,
-      // on as little as a second of overlap.
-      if (coarse) place(bucket, entry);
-      else candidates.push({ at: bucket, containerUid: row.container_uid, entry });
-    }
+    });
   }
-  for (const c of candidates) {
-    if (c.at > oldestPlaced && c.at < newestPlaced) put(c.at, c.containerUid, c.entry);
-  }
+  points.sort((a, b) => a.at - b.at);
 
   const samples: ComputeSample[] = [];
-  for (const [at, containers] of byBucket) {
+  let group: typeof points = [];
+  const close = () => {
+    if (group.length === 0) return;
     let cpuMillis = 0;
     let workingSetBytes = 0;
-    for (const c of containers.values()) {
-      cpuMillis += c.cpuMillis;
-      workingSetBytes += c.workingSetBytes;
+    for (const p of group) {
+      cpuMillis += p.cpuMillis;
+      workingSetBytes += p.workingSetBytes;
     }
-    samples.push({ at, cpuMillis, workingSetBytes });
+    // The instant the last of the group was observed: by then every
+    // container's contribution to this sum had been read.
+    samples.push({ at: group[group.length - 1].at, cpuMillis, workingSetBytes });
+    group = [];
+  };
+  for (const p of points) {
+    const spans = group.length > 0 && p.at - group[0].at > COMPUTE_SAMPLE_MERGE_MS;
+    const repeats = group.some((g) => g.containerUid === p.containerUid);
+    if (spans || repeats) close();
+    group.push(p);
   }
-  return samples.sort((a, b) => a.at - b.at);
+  close();
+  return samples;
 }
 
 /**
- * A pod's buffer rebuilt from seeded history merged with whatever the live
- * poll has already collected — the backfill lands after the first poll, so
- * both always exist.
+ * Whether fetching this pod's history could add anything to its series.
  *
- * Live buckets win a collision: they are the fresher read of the same
- * minute, and the newest of them is what the gauges show. Buckets older than
- * the window are dropped instead of relying on capacity to evict them, so a
- * pod with sparse history cannot keep an hour-old bucket on screen just
- * because nothing pushed it out.
+ * Seeding is idempotent — a merge by timestamp — so it is safe to run again
+ * whenever a card is open, and it HAS to be: a tab hidden for twenty minutes
+ * leaves a hole the broker can fill, and a series that could only be seeded
+ * once would draw that hole as an outage for the rest of the session.
  *
- * Seeded buckets are clamped forward, not discarded: the row timestamps are
- * the broker's clock and `now` is the browser's, so a broker running a couple
- * of minutes ahead would otherwise cost every seed its newest and most
- * interesting minutes — the card would open on a gap immediately before the
- * live sample. They are clamped onto the newest LIVE bucket when there is
- * one, not merely onto the current minute: a seeded `_last` landing past it
- * would become the series' newest sample, which is what the gauge reports as
- * "now", and it would disagree with the live poll until the next tick.
+ * There is nothing to fetch when the series is already continuous up to now,
+ * which is the common case for a card left open.
  */
-export function seedHistory(
+export function needsSeed(samples: readonly ComputeSample[], now: number, gapMs: number = COMPUTE_SPARK_GAP_MS): boolean {
+  if (samples.length === 0) return true;
+  if (now - samples[samples.length - 1].at > gapMs) return true; // polling was paused
+  for (let i = 1; i < samples.length; i++) {
+    if (samples[i].at - samples[i - 1].at > gapMs) return true; // a hole inside the window
+  }
+  return false;
+}
+
+/**
+ * A pod's series with seeded history merged in: a union by timestamp, with
+ * the live samples winning any instant both describe.
+ *
+ * Merging rather than replacing is what makes re-seeding safe, and being safe
+ * to repeat is what lets a hole be refilled later instead of being drawn as
+ * an outage forever. Live samples collected while the read was in flight are
+ * kept for the same reason.
+ *
+ * Seeded points NEWER than the newest live sample are dropped, not clamped
+ * onto it: the broker's clock is not the browser's, and the newest sample is
+ * what the gauge reports as "now". That number comes from the live poll or
+ * not at all — a seeded `_last` must never sit at the right edge claiming to
+ * be the present.
+ */
+export function seedSamples(
   existing: RingBuffer<ComputeSample> | undefined,
   seeded: readonly ComputeSample[],
-  now: number,
-  // The existing buffer's own capacity: resizing it here would compute the
-  // `oldest` cut-off for a window the caller never asked for.
-  capacity: number = existing?.capacity ?? COMPUTE_HISTORY_SAMPLES,
 ): RingBuffer<ComputeSample> {
-  const newest = bucketStart(now);
-  const oldest = newest - (capacity - 1) * COMPUTE_BUCKET_MS;
-  // The live poll owns the newest bucket; a seeded row may at most join it.
-  const seedCeiling = Math.min(newest, existing?.last()?.at ?? newest);
-  // Keyed by `s.at` itself — the field the sparkline reads — so a key and its
-  // payload can never disagree about which minute a sample belongs to.
-  const byBucket = new Map<number, ComputeSample>();
+  const live = existing?.values() ?? [];
+  const newestLive = live.length > 0 ? live[live.length - 1].at : null;
+  const byInstant = new Map<number, ComputeSample>();
   for (const s of seeded) {
-    if (s.at < oldest) continue;
-    const at = Math.min(s.at, seedCeiling);
-    byBucket.set(at, at === s.at ? s : { ...s, at });
+    if (newestLive !== null && s.at > newestLive) continue;
+    byInstant.set(s.at, s);
   }
-  for (const s of existing?.values() ?? []) if (s.at >= oldest) byBucket.set(s.at, s);
-  const buf = new RingBuffer<ComputeSample>(capacity);
-  for (const s of [...byBucket.values()].sort((a, b) => a.at - b.at)) buf.push(s);
+  for (const s of live) byInstant.set(s.at, s); // the live read of an instant wins
+  const merged = [...byInstant.values()].sort((a, b) => a.at - b.at);
+  const newest = merged.length > 0 ? merged[merged.length - 1].at : 0;
+  const buf = new RingBuffer<ComputeSample>(existing?.capacity ?? COMPUTE_MAX_SAMPLES);
+  for (const s of merged) {
+    if (s.at >= newest - COMPUTE_HISTORY_WINDOW_MS) buf.push(s);
+  }
   return buf;
 }
 
@@ -487,36 +384,22 @@ export function containersForNode(
 export const podNameKey = (namespace: string | null | undefined, name: string): string => `${namespace ?? ''}/${name}`;
 
 /**
- * The sparkline series for a pod: exactly `capacity` slots ending at the
- * bucket `now` falls in, `null` for a minute no sample covers.
+ * The points a sparkline draws for one pod: every sample inside the window,
+ * each carrying the instant it was observed.
  *
- * It has to be dense because a sparkline plots by ARRAY INDEX, not by time.
- * Handing it a sparse series would slide everything before a gap to the
- * right — a node down for 35 minutes would draw its older points 35 minutes
- * too recent and the outage itself as one one-minute step, which is exactly
- * the lie the minute grid exists to prevent. Samples outside the window are
- * left out rather than plotted, so a buffer that stopped updating (a tab
- * hidden for hours) drains off the left edge instead of showing hours-old
- * values as the present.
+ * No slots and no padding — the chart maps x from the timestamp, so an
+ * irregular series stays irregular instead of being folded onto a grid that
+ * would have to invent a value, or a hole, for every minute it did not
+ * describe.
  */
-export function denseSeries(
+export function windowedSamples(
   samples: readonly ComputeSample[],
   now: number,
-  capacity: number = COMPUTE_HISTORY_SAMPLES,
-): { cpuMillis: (number | null)[]; workingSetBytes: (number | null)[]; latest: ComputeSample | undefined } {
-  const newest = bucketStart(now);
-  const oldest = newest - (capacity - 1) * COMPUTE_BUCKET_MS;
-  const cpuMillis: (number | null)[] = new Array(capacity).fill(null);
-  const workingSetBytes: (number | null)[] = new Array(capacity).fill(null);
-  let latest: ComputeSample | undefined;
-  for (const s of samples) {
-    if (s.at < oldest || s.at > newest) continue;
-    const slot = Math.round((s.at - oldest) / COMPUTE_BUCKET_MS);
-    cpuMillis[slot] = s.cpuMillis;
-    workingSetBytes[slot] = s.workingSetBytes;
-    if (!latest || s.at >= latest.at) latest = s;
-  }
-  return { cpuMillis, workingSetBytes, latest };
+  windowMs: number = COMPUTE_HISTORY_WINDOW_MS,
+): { points: ComputeSample[]; from: number; to: number; latest: ComputeSample | undefined } {
+  const from = now - windowMs;
+  const points = samples.filter((s) => s.at >= from && s.at <= now);
+  return { points, from, to: now, latest: points[points.length - 1] };
 }
 
 export interface BuildPodComputeInput {
@@ -528,15 +411,19 @@ export interface BuildPodComputeInput {
   samples: readonly ComputeSample[];
   /** Whether the pod's node reported compute at all (see nodeComputeState). */
   nodeState?: NodeComputeState;
-  /** End of the sparkline window; defaults to now (tests pin it). */
+  /** End of the sparkline window. One value for a whole render pass, so two
+   *  cards drawn together share a time origin; defaults to now. */
   now?: number;
 }
 
 const frozenArray = <T,>(): T[] => Object.freeze([]) as unknown as T[];
+/** A pod with no rows draws no chart, so its window is never read. */
+const EMPTY_WINDOW = Object.freeze({ from: 0, to: 0 });
 const emptyState = (status: ComputeStatus): PodComputeData =>
   Object.freeze({
     cpuPct: null, memPct: null, cpuDenominator: null, memDenominator: null,
-    status, findings: frozenArray<ComputeFinding>(), sparkCpu: frozenArray<number>(), sparkMem: frozenArray<number>(),
+    status, findings: frozenArray<ComputeFinding>(),
+    sparkCpu: frozenArray<SparkPoint>(), sparkMem: frozenArray<SparkPoint>(), sparkWindow: EMPTY_WINDOW,
     cpuMillis: null, memBytes: null, cpuCapacityMillis: null, memCapacityBytes: null,
     containers: frozenArray<ComputeContainer>(),
   });
@@ -568,7 +455,7 @@ export function buildPodComputeData(input: BuildPodComputeInput): PodComputeData
   }
 
   const now = input.now ?? Date.now();
-  const series = denseSeries(samples, now);
+  const series = windowedSamples(samples, now);
   // The newest sample INSIDE the window, else the live rows: a buffer whose
   // newest bucket has aged out must not keep reporting it as the current value.
   const latest = series.latest ?? podLevelSample(containers, now);
@@ -600,8 +487,9 @@ export function buildPodComputeData(input: BuildPodComputeInput): PodComputeData
     memDenominator: memDen?.kind ?? null,
     status,
     findings: [...findings],
-    sparkCpu: series.cpuMillis,
-    sparkMem: series.workingSetBytes,
+    sparkCpu: series.points.map((s) => ({ at: s.at, value: s.cpuMillis })),
+    sparkMem: series.points.map((s) => ({ at: s.at, value: s.workingSetBytes })),
+    sparkWindow: { from: series.from, to: series.to },
     cpuMillis: latest.cpuMillis,
     memBytes: latest.workingSetBytes,
     cpuCapacityMillis: cpuDen?.value ?? null,

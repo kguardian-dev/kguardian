@@ -244,11 +244,16 @@ export interface ComputeFindingsMeta {
   historyDisabled: boolean;
 }
 
+/** One point on a sparkline: a value and when it was observed. */
+export interface SparkPoint {
+  at: number;
+  value: number;
+}
+
 /** One client-side sample of a pod's summed containers (utils/compute). */
 export interface ComputeSample {
-  /** Start of the minute bucket this sample belongs to (`bucketStart`), so a
-   *  sample seeded from `/compute/history` and one folded in from a 5 s poll
-   *  are on the same grid — not the instant the poll landed. */
+  /** When this was observed: `Date.now()` for a live poll, the row's own
+   *  broker timestamp for one seeded from `/compute/history`. */
   at: number;
   cpuMillis: number;
   workingSetBytes: number;
@@ -268,12 +273,14 @@ export interface PodComputeData {
   memDenominator: ComputeDenominator | null;
   status: ComputeStatus;
   findings: ComputeFinding[];
-  /** One slot per minute of the window, oldest first, in millicores;
-   *  `null` where no sample covers that minute. Dense, because the
-   *  sparkline plots by index — see `denseSeries`. */
-  sparkCpu: (number | null)[];
-  /** The same slots in bytes. */
-  sparkMem: (number | null)[];
+  /** Sparkline points, oldest first, in millicores — each at the instant it
+   *  was observed, because the chart maps x from time, not from position. */
+  sparkCpu: SparkPoint[];
+  /** The same points in bytes. */
+  sparkMem: SparkPoint[];
+  /** The span the chart covers. One origin per render pass, so two cards
+   *  drawn together put the same instant at the same x. */
+  sparkWindow: { from: number; to: number };
   /** Current pod-level values behind the percentages. */
   cpuMillis: number | null;
   memBytes: number | null;

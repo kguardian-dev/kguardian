@@ -7,6 +7,8 @@ import type { PodInfo } from '../types';
 import type { ComputeFinding, PodComputeData } from '../types/compute';
 import { COMPUTE_DOT_CLASS } from '../utils/compute';
 
+const NOW = Date.parse('2026-09-14T10:00:00Z');
+
 // Compute gauges on the card (design D8): a node WITHOUT compute data must
 // render exactly as before the feature — no dot, no bar, no sparklines —
 // and a node WITH it gets the header dot + two-segment micro bar, and the
@@ -30,7 +32,14 @@ const finding = (over: Partial<ComputeFinding> = {}): ComputeFinding => ({
 
 const compute = (over: Partial<PodComputeData> = {}): PodComputeData => ({
   cpuPct: 42, memPct: 65, cpuDenominator: 'limit', memDenominator: 'request', status: 'ok', findings: [],
-  sparkCpu: [100, 120, 210], sparkMem: [800, 820, 850],
+  // Points carry the instant they were observed; the window is the hour to now.
+  sparkCpu: [
+    { at: NOW - 120_000, value: 100 }, { at: NOW - 60_000, value: 120 }, { at: NOW, value: 210 },
+  ],
+  sparkMem: [
+    { at: NOW - 120_000, value: 800 }, { at: NOW - 60_000, value: 820 }, { at: NOW, value: 850 },
+  ],
+  sparkWindow: { from: NOW - 60 * 60_000, to: NOW },
   cpuMillis: 210, memBytes: 850 * 1024 * 1024, cpuCapacityMillis: 500, memCapacityBytes: 1300 * 1024 * 1024,
   // A gauged card needs at least one container row (hasComputeGauges).
   containers: [{ container_uid: 'uid-a/app' } as PodComputeData['containers'][number]],
@@ -124,14 +133,14 @@ test('expanded: "Throttled NN%" chip for cpu-throttled; a critical finding paint
 // that a node-capacity denominator auto-scales (a 100m pod on a 32-core node
 // would otherwise be a flat line on the baseline).
 test('sparkline auto-scales when the denominator is node capacity, and follows the limit otherwise', () => {
-  const nodeScaled = renderNode(base({ isExpanded: true, compute: compute({ cpuDenominator: 'node', cpuCapacityMillis: 32_000, sparkCpu: [100, 200, 150] }) }));
+  const nodeScaled = renderNode(base({ isExpanded: true, compute: compute({ cpuDenominator: 'node', cpuCapacityMillis: 32_000, sparkCpu: [{ at: NOW - 120_000, value: 100 }, { at: NOW - 60_000, value: 200 }, { at: NOW, value: 150 }] }) }));
   const cpuSpark = nodeScaled.container.querySelectorAll('[data-testid="sparkline"]')[0]; // first = CPU, second = memory
   const d = cpuSpark.querySelector('path[fill="none"]')!.getAttribute('d')!;
   const ys = [...d.matchAll(/,([\d.]+)/g)].map((m) => Number(m[1]));
   expect(Math.max(...ys) - Math.min(...ys)).toBeGreaterThan(10); // not flat
   expect(cpuSpark.querySelector('line')).toBeNull(); // no capacity line against node capacity
   cleanup();
-  const limitScaled = renderNode(base({ isExpanded: true, compute: compute({ cpuDenominator: 'limit', cpuCapacityMillis: 500, sparkCpu: [100, 200, 150] }) }));
+  const limitScaled = renderNode(base({ isExpanded: true, compute: compute({ cpuDenominator: 'limit', cpuCapacityMillis: 500, sparkCpu: [{ at: NOW - 120_000, value: 100 }, { at: NOW - 60_000, value: 200 }, { at: NOW, value: 150 }] }) }));
   expect(limitScaled.container.querySelectorAll('[data-testid="sparkline"]')[0].querySelector('line')).not.toBeNull(); // limit reference line
 });
 

@@ -2,29 +2,40 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { ComputeUnsupportedError, apiClient } from '../services/api';
 import type { ComputeContainer, ComputeFinding, ComputeFindingsMeta, ComputeNode, ComputeSample } from '../types/compute';
 import {
-  COMPUTE_HISTORY_SAMPLES,
   COMPUTE_HISTORY_WINDOW_MINUTES,
   RingBuffer,
+  appendSample,
   historySamples,
+  needsSeed,
   podLevelSample,
   podNameKey,
-  pushBucketed,
-  seedHistory,
+  seedSamples,
 } from '../utils/compute';
 
 export const COMPUTE_POLL_MS = 5_000;
 export const COMPUTE_FINDINGS_POLL_MS = 15_000;
 
 /**
- * Attempts per pod before its history is written off for the session.
+ * How long after a completed seed the same pod may be read again.
+ *
+ * Seeding is idempotent and re-runnable by design — that is what refills the
+ * hole a hidden tab leaves — but an open card asks on every 5 s poll, so a
+ * pod is read at most once a minute. `needsSeed` means the usual answer is
+ * that there is nothing to fetch and no read happens at all.
+ */
+export const COMPUTE_SEED_COOLDOWN_MS = 60_000;
+
+/**
+ * First backoff after a failed seed, doubled per consecutive failure up to
+ * COMPUTE_SEED_MAX_BACKOFF_MS.
  *
  * The broker sheds a read that does not fit its budget with `503` and a
- * `Retry-After` (broker/src/read_budget.rs) — explicitly retryable. Giving up
- * on the first shed would leave a card that the user opened with no history
- * and nothing to fetch it again. A small bound still keeps a persistently
- * failing broker from being asked on every poll forever.
+ * `Retry-After` (broker/src/read_budget.rs) — explicitly retryable, so this
+ * never gives up permanently; it just stops asking a struggling broker on
+ * every poll.
  */
-export const COMPUTE_SEED_MAX_ATTEMPTS = 3;
+export const COMPUTE_SEED_RETRY_MS = 10_000;
+export const COMPUTE_SEED_MAX_BACKOFF_MS = 300_000;
 
 /**
  * Consecutive polls a pod may be missing from `/compute/latest` before its
@@ -72,6 +83,11 @@ export interface ComputeData {
   /** Last transient failure (network, 5xx). Cleared by the next good poll;
    *  polling continues. Never set for `unsupported`. */
   error: string | null;
+  /** When the last successful `/compute/latest` landed. The sparklines end
+   *  their window here rather than at a `Date.now()` read per card, so every
+   *  chart in a render pass puts the same instant at the same x — and render
+   *  stays pure. 0 before the first poll. */
+  polledAt: number;
   /** Seed one pod's history now (the user expanded its card). Idempotent,
    *  exempt from the eager backfill's pod cap, and a no-op for a pod already
    *  seeded or being read. */
@@ -106,6 +122,7 @@ export function useComputeData(namespace: string, opts: UseComputeDataOptions = 
   const [findingsMeta, setFindingsMeta] = useState<ComputeFindingsMeta>(NO_META);
   const [error, setError] = useState<string | null>(null);
   const [supported, setSupported] = useState(true);
+  const [polledAt, setPolledAt] = useState(0);
 
   // Request generation: bumped on every namespace change. A response whose
   // generation is no longer current (the user switched namespace while it
@@ -119,11 +136,12 @@ export function useComputeData(namespace: string, opts: UseComputeDataOptions = 
   // keyed on it re-reads them. Reset on namespace change.
   const historyRef = useRef<Map<string, RingBuffer<ComputeSample>>>(new Map());
   const [history, setHistory] = useState<Map<string, RingBuffer<ComputeSample>>>(() => new Map());
-  /** Per-pod seed bookkeeping: how many history reads have been attempted,
-   *  and whether the pod is finished with (seeded, or out of attempts). An
-   *  entry is dropped along with the pod's buffer, so a pod that genuinely
-   *  went away and came back can be seeded again. */
-  const backfillRef = useRef<Map<string, { attempts: number; done: boolean; inFlight: boolean }>>(new Map());
+  /** Per-pod seed bookkeeping: whether a read is in flight, how many have
+   *  failed in a row, and the earliest time to try again. There is no
+   *  permanent "seeded" latch — a series can always have a new hole worth
+   *  filling, and `needsSeed` is what decides whether a read is worth making.
+   *  An entry is dropped along with the pod's buffer. */
+  const seedRef = useRef<Map<string, { inFlight: boolean; failures: number; nextAt: number }>>(new Map());
   /** Consecutive polls each known pod has been missing from /compute/latest. */
   const missedPollsRef = useRef<Map<string, number>>(new Map());
   /** False once /compute/history answered 404/501: an optional endpoint this
@@ -166,22 +184,27 @@ export function useComputeData(namespace: string, opts: UseComputeDataOptions = 
    */
   const seedPod = useCallback((uid: string) => {
     const gen = generation.current;
-    const state = backfillRef.current;
+    const state = seedRef.current;
     if (!historySupportedRef.current) return;
     // `retentionDays: 0`: the broker answers every history read with an empty
     // row set, after charging a read permit for it.
     if (historyDisabledRef.current) return;
     const pod = state.get(uid);
-    if (pod?.done || pod?.inFlight) return;
+    const now = Date.now();
+    if (pod?.inFlight || (pod && now < pod.nextAt)) return;
     // No buffer means the pod is not being tracked (it never reported, or it
-    // stopped): there is nothing to seed and nothing to spend an attempt on.
+    // stopped): there is nothing to seed.
     const buffer = historyRef.current.get(uid);
     if (!buffer) return;
+    // Only a pod whose last read SUCCEEDED needs a reason to be read again:
+    // one never asked before has nothing behind its live samples however
+    // continuous they look, and one whose read failed fetched nothing. After
+    // a success, a hole is the reason — the usual answer for a card that has
+    // been open a while is that there is none, and no read is made.
+    const settled = pod !== undefined && pod.failures === 0;
+    if (settled && !needsSeed(buffer.values(), now)) return;
 
-    const attempts = (pod?.attempts ?? 0) + 1;
-    // Counted BEFORE the request, and `done` only on the last attempt, so a
-    // retryable failure leaves the pod eligible while a pending one does not.
-    const entry = { attempts, done: attempts >= COMPUTE_SEED_MAX_ATTEMPTS, inFlight: true };
+    const entry = { inFlight: true, failures: pod?.failures ?? 0, nextAt: pod?.nextAt ?? 0 };
     state.set(uid, entry);
 
     void (async () => {
@@ -195,8 +218,9 @@ export function useComputeData(namespace: string, opts: UseComputeDataOptions = 
         // Merging here rather than at read time also keeps every live bucket
         // the poll collected while this was outstanding.
         if (buffers.get(uid) !== buffer) return;
-        buffers.set(uid, seedHistory(buffer, historySamples(rows), Date.now()));
-        entry.done = true; // seeded: never ask for this pod again
+        buffers.set(uid, seedSamples(buffer, historySamples(rows)));
+        entry.failures = 0;
+        entry.nextAt = Date.now() + COMPUTE_SEED_COOLDOWN_MS;
         setHistory(new Map(buffers));
       } catch (err) {
         if (gen !== generation.current) return;
@@ -209,14 +233,19 @@ export function useComputeData(namespace: string, opts: UseComputeDataOptions = 
           console.debug(`[compute] ${err.message}; sparklines fall back to live samples only`);
         }
         // Anything else (a shed 503, a network blip) costs this pod its
-        // seeded history and nothing more: it is not surfaced as `error`,
-        // which is about the live poll the whole map depends on. The pod
-        // keeps whatever attempts it has left.
+        // seeded history for now and nothing more: it is not surfaced as
+        // `error`, which is about the live poll the whole map depends on.
+        // Backing off doubles per consecutive failure, so a struggling
+        // broker is not asked again on the next poll — and never gives up
+        // for good, because a shed read is explicitly retryable.
+        entry.failures += 1;
+        const backoff = Math.min(COMPUTE_SEED_RETRY_MS * 2 ** (entry.failures - 1), COMPUTE_SEED_MAX_BACKOFF_MS);
+        entry.nextAt = Date.now() + backoff;
       } finally {
         // Only our own entry: the pod may have been dropped and re-seeded
         // while this was in flight, and clearing that newer entry's flag
         // would let a second read start alongside it.
-        if (backfillRef.current.get(uid) === entry) entry.inFlight = false;
+        if (seedRef.current.get(uid) === entry) entry.inFlight = false;
       }
     })();
   }, [api]);
@@ -239,13 +268,10 @@ export function useComputeData(namespace: string, opts: UseComputeDataOptions = 
       byUid.forEach((rows, uid) => {
         let buf = history.get(uid);
         if (!buf) {
-          buf = new RingBuffer<ComputeSample>(COMPUTE_HISTORY_SAMPLES);
+          buf = new RingBuffer<ComputeSample>();
           history.set(uid, buf);
         }
-        // A clock step backwards can leave a pod with nothing: everything it
-        // held was in the future. Re-open seeding so the hour it lost can be
-        // fetched again, instead of leaving the card empty for an hour.
-        if (pushBucketed(buf, podLevelSample(rows, now)) === 'restarted') backfillRef.current.delete(uid);
+        appendSample(buf, podLevelSample(rows, now));
       });
       // Drop pods that stopped reporting so a recycled uid never inherits
       // history — but only after a few consecutive misses. A pod absent from
@@ -267,7 +293,7 @@ export function useComputeData(namespace: string, opts: UseComputeDataOptions = 
         history.delete(uid);
         // Forget the seed bookkeeping too, or a uid that comes back could
         // never be seeded again this session.
-        backfillRef.current.delete(uid);
+        seedRef.current.delete(uid);
       }
       setContainers(res.containers);
       // Namespace-scoped node rows are the live ones; keep any other node we
@@ -278,6 +304,7 @@ export function useComputeData(namespace: string, opts: UseComputeDataOptions = 
         return [...byName.values()];
       });
       setHistory(new Map(history));
+      setPolledAt(now);
       setError(null);
     } catch (err) {
       if (gen !== generation.current) return;
@@ -345,7 +372,7 @@ export function useComputeData(namespace: string, opts: UseComputeDataOptions = 
   useEffect(() => {
     generation.current += 1;
     historyRef.current = new Map();
-    backfillRef.current = new Map(); // a new namespace seeds its own pods
+    seedRef.current = new Map(); // a new namespace seeds its own pods
     missedPollsRef.current = new Map();
     historySupportedRef.current = true; // same cheap retry signal as `supported`
     historyDisabledRef.current = false;
@@ -359,6 +386,7 @@ export function useComputeData(namespace: string, opts: UseComputeDataOptions = 
     setHistory(new Map());
     setError(null);
     setSupported(true);
+    setPolledAt(0);
     /* eslint-enable react-hooks/set-state-in-effect */
   }, [namespace]);
 
@@ -425,6 +453,7 @@ export function useComputeData(namespace: string, opts: UseComputeDataOptions = 
     enabled,
     supported,
     error,
+    polledAt,
     seedPod,
   };
 }

@@ -1,7 +1,13 @@
 // Path geometry for the hand-rolled SVG sparkline (components/ui/Sparkline).
 // Pure, so the drawing can be asserted without rendering.
 
-/** One unbroken run of values; gaps (`null`) split the line into several. */
+/** A value and the instant it was observed. */
+export interface SparklinePoint {
+  at: number;
+  value: number;
+}
+
+/** One unbroken run of points; a gap in time splits the line into several. */
 export interface SparklineSegment {
   /** The line through the run. */
   d: string;
@@ -9,32 +15,40 @@ export interface SparklineSegment {
   area: string;
 }
 
+export interface SparklineGeometry {
+  width: number;
+  height: number;
+  /** Y-axis ceiling; values are clamped to [0, max]. */
+  max: number;
+  /** Start and end of the span the chart covers, in the same clock as `at`. */
+  from: number;
+  to: number;
+  /** Longer than this between two points and the line breaks. */
+  gapMs: number;
+}
+
 /**
- * Segments through `values`, one slot per value, oldest → newest. `max` is
- * the y-axis ceiling; values are clamped to [0, max].
+ * Segments through `points`, placed by TIME: x comes from each point's own
+ * timestamp, not from its position in the array.
  *
- * The series is always exactly as long as the window it draws (`denseSeries`
- * returns one slot per bucket, empty ones included), so there is no
- * right-alignment here: a short series would be a series of absolute-time
- * slots silently shifted along the axis.
+ * That is what lets the series be as irregular as the data really is — 5 s
+ * live samples on the right, minute-spaced seeded ones behind them, drifting
+ * fold stamps, whole minutes missing — with no grid to fold them onto, and
+ * without inventing a value, or a hole, for an instant nobody measured.
  *
- * A `null` is a slot with no sample — a minute the pod reported nothing —
- * and BREAKS the line rather than being interpolated across: joining the
- * points either side would draw an outage as a straight run of usage that
- * never happened. A run of one draws a zero-length line, which the round
- * line cap renders as a dot, so an isolated minute is still visible.
+ * Points further apart than `gapMs` are not joined: a line across them would
+ * assert a measurement nobody took. A run of one draws a zero-length line,
+ * which the round line cap renders as a dot, so a lone observation is still
+ * visible. Anything outside [from, to] is not drawn.
  */
-export function sparklineSegments(
-  values: readonly (number | null)[],
-  width: number,
-  height: number,
-  max: number,
-): SparklineSegment[] {
-  if (values.length === 0) return [];
-  const step = values.length > 1 ? width / (values.length - 1) : 0;
+export function sparklineSegments(points: readonly SparklinePoint[], geometry: SparklineGeometry): SparklineSegment[] {
+  const { width, height, max, from, to, gapMs } = geometry;
+  const span = to - from;
+  if (points.length === 0 || span <= 0) return [];
+  const x = (at: number) => (((at - from) / span) * width).toFixed(1);
   const y = (v: number) => {
     const clamped = max > 0 ? Math.min(Math.max(v, 0), max) / max : 0;
-    return height - clamped * (height - 1) - 0.5;
+    return (height - clamped * (height - 1) - 0.5).toFixed(1);
   };
 
   const segments: SparklineSegment[] = [];
@@ -48,13 +62,14 @@ export function sparklineSegments(
     run = [];
   };
 
-  values.forEach((v, i) => {
-    if (!Number.isFinite(v)) { // null, undefined and NaN alike: no sample
-      flush();
-      return;
-    }
-    run.push({ x: (i * step).toFixed(1), y: y(v as number).toFixed(1) });
-  });
+  let previous: number | null = null;
+  for (const p of points) {
+    if (!Number.isFinite(p.value) || !Number.isFinite(p.at)) continue;
+    if (p.at < from || p.at > to) continue;
+    if (previous !== null && p.at - previous > gapMs) flush();
+    run.push({ x: x(p.at), y: y(p.value) });
+    previous = p.at;
+  }
   flush();
   return segments;
 }

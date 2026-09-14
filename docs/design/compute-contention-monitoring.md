@@ -404,39 +404,31 @@ refresh; nothing else in `usePodData` changes. Node rendering:
   that order, with the denominator in the tooltip.
 - **Expanded body:** two hand-rolled SVG sparklines (no chart dependency) with
   the current value and denominator; a `Starved by <pod>` chip when a finding
-  names a culprit; a `Throttled 34 %` chip for `cpu-throttled`. The series is
-  60 one-minute buckets — the last hour — held client-side per pod. Expanding
-  a card seeds that pod from `GET /compute/history/{pod_uid}`, so it opens on
-  real trend instead of drawing itself over the following minutes, and the
-  5 s poll then upserts the current bucket (a
-  rollover pushes a new one; buckets are evicted by age, since a sparse series
-  can hold 60 of them spanning far more than 60 minutes). What the sparkline
-  receives is a dense 60-slot series with an explicit empty slot for any
-  minute the pod did not report, and the line breaks across those rather than
-  joining their neighbours — it plots by index, so a sparse series would draw
-  an outage as one short step and place everything before it too recently. A
-  minute is the grid because it is the finest resolution the broker stores,
-  un-downsampled for `compute.history.minuteResolutionHours` (24 h by
-  default) — comfortably wider than the window. Rows are not mapped by
-  flooring `ts`, because neither resolution is stamped on the grid the same
-  way. A minute row is stamped at the END of the fold it closes
-  (`MinuteFold::finish` takes the last sample's timestamp, and the fold
-  closes on its Nth sample rather than on a clock boundary, so stamps drift);
-  it goes to the one bucket holding its window's midpoint, which keeps each
-  row's own measurement in the minute it describes instead of writing it into
-  a neighbour's and losing it to the next row. The downsampler floors its
-  five-minute rows to the START of an exact, non-overlapping window, so those
-  spread their `_avg` across all five minutes they summarise. Either way the
-  axis stays one entry per minute. Seeding happens on expansion and nowhere
-  else: the sparklines are the only consumer of seeded buckets and render
-  only on an expanded card, while the collapsed dot and micro bar read the
-  current bucket that the poll fills — so seeding a namespace eagerly would
-  spend windowed range reads on charts that are not on screen. It is
-  best-effort: idempotent per pod, retried a small bounded number of times so
-  one shed read does not cost a card its history, and a pod whose reads fail
-  simply fills from the poll alone. It never touches the feature's
-  `supported` flag — a broker without `/compute/history` loses its seeded
-  sparklines, nothing else.
+  names a culprit; a `Throttled 34 %` chip for `cpu-throttled`. The chart
+  plots against REAL TIME: every sample carries the instant it was observed
+  and x is mapped from that instant, so the series can be as irregular as the
+  data is — 5 s live samples on the right, minute-spaced seeded ones behind
+  them, drifting fold stamps, whole minutes missing — with no grid to fold
+  them onto, and without inventing a value, or a hole, for an instant nobody
+  measured. The series is a time-ordered list per pod, trimmed to the last
+  hour. A live poll appends at `Date.now()`; a minute history row contributes
+  `_last` at its own `ts`, which is when that value was read
+  (`MinuteFold::finish` stamps the last 5 s sample folded in), so the drift of
+  those stamps needs no compensation at all. A downsampled row contributes
+  `_avg` once, at the middle of the span it summarises: the broker's rollup
+  floors `ts` to the five-minute boundary and aggregates END-stamped minute
+  rows from inside it (`retention.rs`), so the measurements run from about a
+  minute before that boundary to its end. Two points further apart than
+  `COMPUTE_SPARK_GAP_MS` are not joined — that one rule, in the renderer, is
+  the whole of gap handling. Expanding a card seeds it from
+  `GET /compute/history/{pod_uid}`; seeding is a union by timestamp and so is
+  safe to repeat, which is what refills the hole a hidden tab leaves rather
+  than drawing it as an outage for the rest of the session. Repeat reads are
+  made only when the series actually has a hole, are bounded by a cooldown
+  and back off on failure, and never touch the feature's `supported` flag — a
+  broker without `/compute/history` loses its seeded sparklines, nothing
+  else. A seeded point is never allowed newer than the newest live sample:
+  the value the gauge reports as "now" comes from the live poll or not at all.
 - **Contention edges:** when `showContention` (new `GraphControls` toggle,
   default on) is set, a dashed `error`-coloured edge from culprit to victim,
   labelled with the blame share. Culprits outside the selected namespace

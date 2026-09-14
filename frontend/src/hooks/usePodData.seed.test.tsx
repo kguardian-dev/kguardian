@@ -19,6 +19,7 @@ const computeState = {
   enabled: true,
   supported: true,
   error: null,
+  polledAt: Date.parse('2026-09-14T10:00:00Z'),
   seedPod,
 };
 
@@ -44,7 +45,11 @@ const container = (over: Partial<ComputeContainer> = {}): ComputeContainer => ({
 
 vi.mock('../services/api', () => ({
   apiClient: {
-    getAllPods: vi.fn(async () => [pod(), pod({ pod_name: 'api-2', pod_ip: '10.0.0.2' })]),
+    getAllPods: vi.fn(async () => [
+      pod(),
+      pod({ pod_name: 'api-2', pod_ip: '10.0.0.2' }),
+      pod({ pod_name: 'worker-1', pod_ip: '10.0.0.3', pod_identity: 'worker' }),
+    ]),
     getAllServices: vi.fn(async () => []),
     getPodTrafficByName: vi.fn(async () => []),
     getPodSyscalls: vi.fn(async () => []),
@@ -60,9 +65,11 @@ beforeEach(async () => {
     ['uid-a', [container()]],
     ['uid-b', [container({ container_uid: 'uid-b/app', pod_uid: 'uid-b', pod_name: 'api-2' })]],
   ]);
+  computeState.containersByPodUid.set('uid-c', [container({ container_uid: 'uid-c/app', pod_uid: 'uid-c', pod_name: 'worker-1' })]);
   computeState.containersByPodName = new Map([
     ['payments/api-1', [container()]],
     ['payments/api-2', [container({ container_uid: 'uid-b/app', pod_uid: 'uid-b', pod_name: 'api-2' })]],
+    ['payments/worker-1', [container({ container_uid: 'uid-c/app', pod_uid: 'uid-c', pod_name: 'worker-1' })]],
   ]);
   ({ usePodData } = await import('./usePodData'));
 });
@@ -75,7 +82,7 @@ afterEach(() => {
 describe('usePodData seeds compute history on expansion', () => {
   test('a collapsed card seeds nothing; expanding one seeds the uid its chart reads', async () => {
     const { result } = renderHook(() => usePodData('payments'));
-    await waitFor(() => expect(result.current.pods).toHaveLength(1));
+    await waitFor(() => expect(result.current.pods).toHaveLength(2));
     expect(seedPod).not.toHaveBeenCalled();
 
     const id = result.current.pods[0].id;
@@ -90,7 +97,7 @@ describe('usePodData seeds compute history on expansion', () => {
     computeState.enabled = false;
     try {
       const { result } = renderHook(() => usePodData('payments'));
-      await waitFor(() => expect(result.current.pods).toHaveLength(1));
+      await waitFor(() => expect(result.current.pods).toHaveLength(2));
       await act(async () => { result.current.togglePodExpansion(result.current.pods[0].id); });
       await act(async () => { await Promise.resolve(); });
       expect(seedPod).not.toHaveBeenCalled(); // no pod carries a chart to fill
@@ -99,9 +106,24 @@ describe('usePodData seeds compute history on expansion', () => {
     }
   });
 
+  // Two cards drawn in one pass must put the same instant at the same x, so
+  // their charts are comparable; a per-pod `Date.now()` would skew them.
+  test('every card in a render pass shares one time origin', async () => {
+    // A wall clock that moves on every read: the window must come from the
+    // poll's instant, shared by construction, not from a per-card reading.
+    let tick = Date.parse('2026-09-14T11:00:00Z');
+    vi.spyOn(Date, 'now').mockImplementation(() => (tick += 1_000));
+    const { result } = renderHook(() => usePodData('payments'));
+    await waitFor(() => expect(result.current.pods).toHaveLength(2));
+    const windows = result.current.pods.map((p) => p.compute?.sparkWindow);
+    expect(windows[0]).toBeDefined();
+    expect(windows[0]).toEqual(windows[1]);
+    expect(windows[0]).toEqual({ from: computeState.polledAt - 60 * 60_000, to: computeState.polledAt });
+  });
+
   test('collapsing stops seeding it again', async () => {
     const { result } = renderHook(() => usePodData('payments'));
-    await waitFor(() => expect(result.current.pods).toHaveLength(1));
+    await waitFor(() => expect(result.current.pods).toHaveLength(2));
     const id = result.current.pods[0].id;
 
     await act(async () => { result.current.togglePodExpansion(id); });

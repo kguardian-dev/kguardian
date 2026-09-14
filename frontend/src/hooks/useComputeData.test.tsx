@@ -1,14 +1,14 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 import { act, cleanup, renderHook } from '@testing-library/react';
-import { COMPUTE_MISSED_POLLS_BEFORE_DROP, COMPUTE_SEED_MAX_ATTEMPTS, useComputeData } from './useComputeData';
+import { COMPUTE_MISSED_POLLS_BEFORE_DROP, COMPUTE_SEED_RETRY_MS, useComputeData } from './useComputeData';
 import { ComputeUnsupportedError } from '../services/api';
 import type { ComputeContainer, ComputeFindingsResponse, ComputeHistoryRow, ComputeLatestResponse, ComputeNode } from '../types/compute';
 
 // Contract (design D8 / wire contract): 5 s poll of latest, 15 s poll of
-// findings, paused while the tab is hidden, 60 one-minute buckets per pod
-// summing the pod's containers — seeded once from /compute/history so an
-// expanded node opens on real trend — and `enabled=false` when no node reports.
+// findings, paused while the tab is hidden, an hour-long time series per pod
+// summing the pod's containers — seeded from /compute/history when a card is
+// expanded — and `enabled=false` when no node reports.
 
 /** A minute boundary, so bucket rollovers in these tests land where they read. */
 const T0 = Date.parse('2026-09-14T10:00:00Z');
@@ -133,86 +133,8 @@ describe('useComputeData', () => {
     expect(api.getComputeFindings).toHaveBeenCalledTimes(2);
   });
 
-  test('folds the 5 s polls into one-minute buckets, summing the pod containers', async () => {
-    let cpu = 0;
-    const api = fakeApi(() => {
-      cpu += 10;
-      return {
-        containers: [
-          container({ container_uid: 'uid-a/app', cpu_usage_millis: cpu, mem_working_set: 100 }),
-          container({ container_uid: 'uid-a/sidecar', container: 'sidecar', cpu_usage_millis: 5, mem_working_set: 50 }),
-        ],
-        nodes: [node()],
-      };
-    });
-    const { result } = renderHook(() => useComputeData('payments', { api }));
-    await flush();
-    expect(result.current.enabled).toBe(true);
-    expect(result.current.containersByPodUid.get('uid-a')).toHaveLength(2);
-    expect(result.current.containersByPodName.get('payments/api-1')).toHaveLength(2);
-    const first = result.current.history.get('uid-a')!.values();
-    expect(first).toHaveLength(1);
-    expect(first[0]).toMatchObject({ at: T0, cpuMillis: 15, workingSetBytes: 150 });
 
-    // Eleven more polls inside the same minute upsert that one bucket; the
-    // newest poll is what the gauges read.
-    for (let i = 0; i < 11; i++) {
-      await act(async () => { await vi.advanceTimersByTimeAsync(5_000); });
-    }
-    const sameMinute = result.current.history.get('uid-a')!.values();
-    expect(sameMinute).toHaveLength(1);
-    expect(sameMinute[0]).toMatchObject({ at: T0, cpuMillis: cpu + 5 });
 
-    // The twelfth crosses the minute: a new bucket, one minute along.
-    await act(async () => { await vi.advanceTimersByTimeAsync(5_000); });
-    const rolled = result.current.history.get('uid-a')!.values();
-    expect(rolled).toHaveLength(2);
-    expect(rolled[0].at).toBe(T0);
-    expect(rolled[1]).toMatchObject({ at: T0 + 60_000, cpuMillis: cpu + 5 });
-  });
-
-  test('keeps the last 60 buckets — an hour — oldest first', async () => {
-    let cpu = 0;
-    // One poll per bucket: the fold is the same, without 720 polls of it.
-    const api = fakeApi(() => {
-      cpu += 10;
-      return { containers: [container({ cpu_usage_millis: cpu, mem_working_set: 100 })], nodes: [node()] };
-    });
-    const { result } = renderHook(() => useComputeData('payments', { api, pollMs: 60_000 }));
-    await flush();
-    for (let i = 0; i < 70; i++) {
-      await act(async () => { await vi.advanceTimersByTimeAsync(60_000); });
-    }
-    const samples = result.current.history.get('uid-a')!.values();
-    expect(samples).toHaveLength(60);
-    expect(samples[59]).toMatchObject({ at: T0 + 70 * 60_000, cpuMillis: cpu });
-    expect(samples[0]).toMatchObject({ at: T0 + 11 * 60_000, cpuMillis: cpu - 59 * 10 });
-  });
-
-  // A hidden tab pauses the poll. Six hours later the buffer must not still
-  // be holding six-hour-old buckets under a "last 60 minutes" heading —
-  // capacity alone never evicts them, because nothing pushed them out.
-  test('drops buckets that aged out while polling was paused', async () => {
-    const api = fakeApi(() => ({ containers: [container()], nodes: [node()] }));
-    const { result } = renderHook(() => useComputeData('payments', { api }));
-    await flush();
-    for (let i = 0; i < 3; i++) {
-      await act(async () => { await vi.advanceTimersByTimeAsync(60_000); });
-    }
-    expect(result.current.history.get('uid-a')!.length).toBe(4);
-
-    hiddenValue = true;
-    const paused = api.getComputeLatest.mock.calls.length;
-    await act(async () => { await vi.advanceTimersByTimeAsync(6 * 60 * 60_000); });
-    expect(api.getComputeLatest).toHaveBeenCalledTimes(paused); // paused, as designed
-
-    hiddenValue = false;
-    await act(async () => { document.dispatchEvent(new Event('visibilitychange')); });
-    await flush();
-    const samples = result.current.history.get('uid-a')!.values();
-    expect(samples).toHaveLength(1); // the resume sample only
-    expect(samples[0].at).toBe(T0 + 6 * 60 * 60_000 + 3 * 60_000);
-  });
 
 
 
@@ -433,7 +355,92 @@ describe('useComputeData', () => {
   // under `isExpanded`, so a read is issued when a card is opened and never
   // speculatively for a namespace.
 
-  test('seedPod fills a pod buffer from history, summing its containers per bucket', async () => {
+
+
+
+
+
+
+
+
+  test('seedPod does nothing when the broker reports history_disabled', async () => {
+    const api = fakeApi(
+      () => ({ containers: [container()], nodes: [node()] }),
+      () => ({ findings: [], history_disabled: true }),
+    );
+    const { result } = renderHook(() => useComputeData('payments', { api }));
+    await settle();
+    expect(result.current.findingsMeta.historyDisabled).toBe(true);
+    await act(async () => { result.current.seedPod('uid-a'); });
+    await settle();
+    expect(api.getComputeHistory).not.toHaveBeenCalled();
+  });
+
+
+
+
+
+  test('a failing seed never escapes as an unhandled rejection', async () => {
+    const rejections: unknown[] = [];
+    const onRejection = (e: PromiseRejectionEvent) => { rejections.push(e.reason); e.preventDefault(); };
+    window.addEventListener('unhandledrejection', onRejection);
+    const api = fakeApi(
+      () => ({ containers: [container()], nodes: [node()] }),
+      undefined,
+      undefined,
+      () => { throw new Error('read budget exhausted'); },
+    );
+    const { result } = renderHook(() => useComputeData('payments', { api }));
+    await settle();
+    await act(async () => { result.current.seedPod('uid-a'); });
+    await settle();
+    window.removeEventListener('unhandledrejection', onRejection);
+    expect(rejections).toEqual([]);
+    expect(result.current.error).toBeNull();
+  });
+
+
+  test('each poll appends a sample at the instant it landed, summing the containers', async () => {
+    let cpu = 0;
+    const api = fakeApi(() => {
+      cpu += 10;
+      return {
+        containers: [
+          container({ cpu_usage_millis: cpu, mem_working_set: 100 }),
+          container({ container_uid: 'uid-a/sidecar', container: 'sidecar', cpu_usage_millis: 5, mem_working_set: 50 }),
+        ],
+        nodes: [node()],
+      };
+    });
+    const { result } = renderHook(() => useComputeData('payments', { api }));
+    await flush();
+    expect(result.current.history.get('uid-a')!.values()).toEqual([{ at: T0, cpuMillis: 15, workingSetBytes: 150 }]);
+
+    // Three more polls: four points, five seconds apart, none merged.
+    for (let i = 0; i < 3; i++) {
+      await act(async () => { await vi.advanceTimersByTimeAsync(5_000); });
+    }
+    const samples = result.current.history.get('uid-a')!.values();
+    expect(samples.map((x) => x.at)).toEqual([T0, T0 + 5_000, T0 + 10_000, T0 + 15_000]);
+    expect(samples[3].cpuMillis).toBe(cpu + 5);
+  });
+
+  test('samples older than the window are dropped as the series advances', async () => {
+    const api = fakeApi(() => ({ containers: [container()], nodes: [node()] }));
+    const { result } = renderHook(() => useComputeData('payments', { api, pollMs: 10 * 60_000 }));
+    await flush();
+    for (let i = 0; i < 7; i++) {
+      await act(async () => { await vi.advanceTimersByTimeAsync(10 * 60_000); });
+    }
+    const samples = result.current.history.get('uid-a')!.values();
+    const newest = samples[samples.length - 1].at;
+    expect(newest - samples[0].at).toBeLessThanOrEqual(60 * 60_000);
+    expect(samples.every((x) => x.at >= newest - 60 * 60_000)).toBe(true);
+  });
+
+  // ── Seeding from /compute/history, on demand and repeatable ──
+
+  test('seedPod fills the series from history, each row at its own instant', async () => {
     const api = fakeApi(
       () => ({ containers: [container({ cpu_usage_millis: 300, mem_working_set: 900 })], nodes: [node()] }),
       undefined,
@@ -447,102 +454,125 @@ describe('useComputeData', () => {
     const { result } = renderHook(() => useComputeData('payments', { api }));
     await settle();
     expect(api.getComputeHistory).not.toHaveBeenCalled(); // nothing expanded
-    expect(result.current.history.get('uid-a')!.length).toBe(1); // the live bucket
 
     await act(async () => { result.current.seedPod('uid-a'); });
     await settle();
     expect(api.getComputeHistory).toHaveBeenCalledWith('uid-a', 60);
     const samples = result.current.history.get('uid-a')!.values();
-    // A minute row is stamped at the END of the minute it folds, so a row at
-    // T0-3min carries the minute starting at T0-4min.
-    expect(samples.map((s) => s.at)).toEqual([T0 - 240_000, T0 - 180_000, T0]);
+    expect(samples.map((x) => x.at)).toEqual([T0 - 180_000, T0 - 120_000, T0]);
     expect(samples[0]).toMatchObject({ cpuMillis: 15, workingSetBytes: 150 }); // both containers
-    expect(samples[2]).toMatchObject({ cpuMillis: 300, workingSetBytes: 900 }); // live wins its bucket
+    expect(samples[2]).toMatchObject({ cpuMillis: 300, workingSetBytes: 900 }); // the live sample
   });
 
-  test('seedPod issues nothing for a pod already seeded, or one being read', async () => {
-    const pending: Array<(rows: ComputeHistoryRow[]) => void> = [];
-    const api = {
-      getComputeLatest: vi.fn(async () => ({ containers: [container()], nodes: [node()] })),
-      getComputeFindings: vi.fn(async () => ({ findings: [] })),
-      getComputeNodes: vi.fn(async () => []),
-      getComputeHistory: vi.fn(() => new Promise<ComputeHistoryRow[]>((resolve) => pending.push(resolve))),
-    };
+  test('an open card does not re-read while the series is already continuous', async () => {
+    const api = fakeApi(
+      () => ({ containers: [container()], nodes: [node()] }),
+      undefined,
+      undefined,
+      () => [historyRow({ ts: minutesBefore(2), cpu_usage_millis_last: 7 })],
+    );
     const { result } = renderHook(() => useComputeData('payments', { api }));
     await settle();
-
-    // Called on every poll while the card is open: one read, not one a poll.
-    for (let i = 0; i < 5; i++) {
+    for (let i = 0; i < 10; i++) {
       await act(async () => { result.current.seedPod('uid-a'); });
       await settle();
-    }
-    expect(api.getComputeHistory).toHaveBeenCalledTimes(1);
-
-    await act(async () => { pending[0]([historyRow({ ts: minutesBefore(2), cpu_usage_millis_last: 7 })]); });
-    await settle();
-    expect(result.current.history.get('uid-a')!.values().map((s) => s.cpuMillis)).toContain(7);
-
-    await act(async () => { result.current.seedPod('uid-a'); }); // seeded already
-    await settle();
-    expect(api.getComputeHistory).toHaveBeenCalledTimes(1);
-  });
-
-  test('a slow read keeps the live buckets collected while it was in flight', async () => {
-    const pending: Array<(rows: ComputeHistoryRow[]) => void> = [];
-    const api = {
-      getComputeLatest: vi.fn(async () => ({ containers: [container()], nodes: [node()] })),
-      getComputeFindings: vi.fn(async () => ({ findings: [] })),
-      getComputeNodes: vi.fn(async () => []),
-      getComputeHistory: vi.fn(() => new Promise<ComputeHistoryRow[]>((resolve) => pending.push(resolve))),
-    };
-    const { result } = renderHook(() => useComputeData('payments', { api }));
-    await settle();
-    await act(async () => { result.current.seedPod('uid-a'); });
-    await settle();
-
-    for (let i = 0; i < 3; i++) {
-      await act(async () => { await vi.advanceTimersByTimeAsync(60_000); });
-    }
-    expect(result.current.history.get('uid-a')!.length).toBe(4);
-
-    await act(async () => { pending[0]([historyRow({ ts: minutesBefore(2), cpu_usage_millis_last: 7 })]); });
-    await settle();
-    expect(result.current.history.get('uid-a')!.values().map((s) => s.at)).toEqual([
-      T0 - 180_000, T0, T0 + 60_000, T0 + 120_000, T0 + 180_000, // seeded, then the four live
-    ]);
-  });
-
-  test('a read that lands after the pod was replaced does not seed the new buffer', async () => {
-    let gone = false;
-    const pending: Array<(rows: ComputeHistoryRow[]) => void> = [];
-    const api = {
-      getComputeLatest: vi.fn(async () => ({ containers: gone ? [] : [container()], nodes: [node()] })),
-      getComputeFindings: vi.fn(async () => ({ findings: [] })),
-      getComputeNodes: vi.fn(async () => []),
-      getComputeHistory: vi.fn(() => new Promise<ComputeHistoryRow[]>((resolve) => pending.push(resolve))),
-    };
-    const { result } = renderHook(() => useComputeData('payments', { api }));
-    await settle();
-    await act(async () => { result.current.seedPod('uid-a'); });
-    await settle();
-
-    gone = true;
-    for (let i = 0; i < COMPUTE_MISSED_POLLS_BEFORE_DROP; i++) {
       await act(async () => { await vi.advanceTimersByTimeAsync(5_000); });
     }
-    expect(result.current.history.has('uid-a')).toBe(false);
-    gone = false;
-    await act(async () => { await vi.advanceTimersByTimeAsync(5_000); });
-    await settle();
-
-    await act(async () => { pending[0]([historyRow({ ts: minutesBefore(2), cpu_usage_millis_last: 999 })]); });
-    await settle();
-    expect(result.current.history.get('uid-a')!.values().some((s) => s.cpuMillis === 999)).toBe(false);
+    expect(api.getComputeHistory).toHaveBeenCalledTimes(1);
   });
 
-  // The in-flight flag must be cleared on the entry that set it: a pod can be
-  // dropped and re-seeded while its first read is outstanding, and clearing
-  // the NEWER entry would let a third read start alongside the second.
+  // The bug this design removes: a hidden tab leaves a hole the broker can
+  // fill, and a series that could only be seeded once would draw it as an
+  // outage for the rest of the session.
+  test('a hole left by a hidden tab is seeded again when the card is open', async () => {
+    const seeded: string[] = [];
+    const api = fakeApi(
+      () => ({ containers: [container()], nodes: [node()] }),
+      undefined,
+      undefined,
+      () => {
+        seeded.push('read');
+        // The broker has the minutes the paused tab missed.
+        return Array.from({ length: 20 }, (_, i) =>
+          historyRow({ ts: new Date(T0 + (i + 1) * 60_000).toISOString(), cpu_usage_millis_last: 50 + i }));
+      },
+    );
+    const { result } = renderHook(() => useComputeData('payments', { api }));
+    await settle();
+    await act(async () => { result.current.seedPod('uid-a'); });
+    await settle();
+    expect(seeded).toHaveLength(1);
+
+    hiddenValue = true;
+    await act(async () => { await vi.advanceTimersByTimeAsync(21 * 60_000); });
+    hiddenValue = false;
+    await act(async () => { document.dispatchEvent(new Event('visibilitychange')); });
+    await settle();
+    // A live sample 21 minutes after the last one: a hole nothing has filled.
+    expect(result.current.history.get('uid-a')!.length).toBe(2);
+
+    await act(async () => { result.current.seedPod('uid-a'); });
+    await settle();
+    expect(seeded).toHaveLength(2);
+    const samples = result.current.history.get('uid-a')!.values();
+    expect(samples.length).toBeGreaterThan(20); // the missed minutes are back
+    const gaps = samples.slice(1).map((x, i) => x.at - samples[i].at);
+    expect(Math.max(...gaps)).toBeLessThanOrEqual(60_000); // and the hole is closed
+  });
+
+  test('a shed read backs off, then succeeds — it is never written off for good', async () => {
+    let shed = true;
+    const api = fakeApi(
+      () => ({ containers: [container()], nodes: [node()] }),
+      undefined,
+      undefined,
+      () => {
+        if (shed) throw new Error('503 read budget exhausted');
+        return [historyRow({ ts: minutesBefore(2), cpu_usage_millis_last: 7 })];
+      },
+    );
+    const { result } = renderHook(() => useComputeData('payments', { api }));
+    await settle();
+    await act(async () => { result.current.seedPod('uid-a'); });
+    await settle();
+    expect(api.getComputeHistory).toHaveBeenCalledTimes(1);
+    expect(result.current.error).toBeNull(); // the banner is about the live poll
+    expect(result.current.supported).toBe(true);
+
+    // Asked again immediately: still backing off.
+    await act(async () => { result.current.seedPod('uid-a'); });
+    await settle();
+    expect(api.getComputeHistory).toHaveBeenCalledTimes(1);
+
+    shed = false;
+    await act(async () => { await vi.advanceTimersByTimeAsync(COMPUTE_SEED_RETRY_MS); });
+    await act(async () => { result.current.seedPod('uid-a'); });
+    await settle();
+    expect(api.getComputeHistory).toHaveBeenCalledTimes(2);
+    expect(result.current.history.get('uid-a')!.values().map((x) => x.cpuMillis)).toContain(7);
+  });
+
+  test('consecutive failures back off further each time', async () => {
+    const api = fakeApi(
+      () => ({ containers: [container()], nodes: [node()] }),
+      undefined,
+      undefined,
+      () => { throw new Error('503'); },
+    );
+    const { result } = renderHook(() => useComputeData('payments', { api }));
+    await settle();
+    const attempt = async (waitMs: number) => {
+      await act(async () => { await vi.advanceTimersByTimeAsync(waitMs); });
+      await act(async () => { result.current.seedPod('uid-a'); });
+      await settle();
+      return api.getComputeHistory.mock.calls.length;
+    };
+    expect(await attempt(0)).toBe(1);
+    expect(await attempt(COMPUTE_SEED_RETRY_MS)).toBe(2); // 10 s later
+    expect(await attempt(COMPUTE_SEED_RETRY_MS)).toBe(2); // 20 s needed now
+    expect(await attempt(COMPUTE_SEED_RETRY_MS)).toBe(3);
+  });
+
   test('a landing read clears only its own in-flight mark', async () => {
     let gone = false;
     const pending: Array<(rows: ComputeHistoryRow[]) => void> = [];
@@ -568,80 +598,63 @@ describe('useComputeData', () => {
     await settle();
     expect(api.getComputeHistory).toHaveBeenCalledTimes(2);
 
-    await act(async () => { pending[0]([]); }); // read 1 lands, for a pod that is gone
+    await act(async () => { pending[0]([]); }); // read 1 lands, for a pod long gone
     await settle();
     await act(async () => { result.current.seedPod('uid-a'); });
     await settle();
     expect(api.getComputeHistory).toHaveBeenCalledTimes(2); // read 2 is still in flight
   });
 
-  test('a pod that stops reporting and comes back can be seeded again', async () => {
+  test('a read that lands after the pod was replaced does not seed the new series', async () => {
     let gone = false;
-    const api = fakeApi(
-      () => ({ containers: gone ? [] : [container()], nodes: [node()] }),
-      undefined,
-      undefined,
-      () => [historyRow({ cpu_usage_millis_last: 7 })],
-    );
+    const pending: Array<(rows: ComputeHistoryRow[]) => void> = [];
+    const api = {
+      getComputeLatest: vi.fn(async () => ({ containers: gone ? [] : [container()], nodes: [node()] })),
+      getComputeFindings: vi.fn(async () => ({ findings: [] })),
+      getComputeNodes: vi.fn(async () => []),
+      getComputeHistory: vi.fn(() => new Promise<ComputeHistoryRow[]>((resolve) => pending.push(resolve))),
+    };
     const { result } = renderHook(() => useComputeData('payments', { api }));
     await settle();
     await act(async () => { result.current.seedPod('uid-a'); });
     await settle();
-    expect(api.getComputeHistory).toHaveBeenCalledTimes(1);
 
     gone = true;
     for (let i = 0; i < COMPUTE_MISSED_POLLS_BEFORE_DROP; i++) {
       await act(async () => { await vi.advanceTimersByTimeAsync(5_000); });
     }
+    expect(result.current.history.has('uid-a')).toBe(false);
     gone = false;
     await act(async () => { await vi.advanceTimersByTimeAsync(5_000); });
     await settle();
-    await act(async () => { result.current.seedPod('uid-a'); });
+
+    await act(async () => { pending[0]([historyRow({ ts: minutesBefore(2), cpu_usage_millis_last: 999 })]); });
     await settle();
-    expect(api.getComputeHistory).toHaveBeenCalledTimes(2);
+    expect(result.current.history.get('uid-a')!.values().some((x) => x.cpuMillis === 999)).toBe(false);
   });
 
-  test('a shed read is retried, bounded, and seeds when it succeeds', async () => {
-    let shed = true;
-    const api = fakeApi(
-      () => ({ containers: [container()], nodes: [node()] }),
-      undefined,
-      undefined,
-      () => {
-        if (shed) throw new Error('503 read budget exhausted');
-        return [historyRow({ ts: minutesBefore(2), cpu_usage_millis_last: 7 })];
-      },
-    );
+  test('a slow read keeps the live samples collected while it was in flight', async () => {
+    const pending: Array<(rows: ComputeHistoryRow[]) => void> = [];
+    const api = {
+      getComputeLatest: vi.fn(async () => ({ containers: [container()], nodes: [node()] })),
+      getComputeFindings: vi.fn(async () => ({ findings: [] })),
+      getComputeNodes: vi.fn(async () => []),
+      getComputeHistory: vi.fn(() => new Promise<ComputeHistoryRow[]>((resolve) => pending.push(resolve))),
+    };
     const { result } = renderHook(() => useComputeData('payments', { api }));
     await settle();
     await act(async () => { result.current.seedPod('uid-a'); });
     await settle();
-    expect(result.current.error).toBeNull(); // the banner is about the live poll
-    expect(result.current.supported).toBe(true);
-    expect(result.current.history.get('uid-a')!.length).toBe(1); // live only, so far
-
-    shed = false;
-    await act(async () => { result.current.seedPod('uid-a'); });
-    await settle();
-    expect(api.getComputeHistory).toHaveBeenCalledTimes(2);
-    expect(result.current.history.get('uid-a')!.values().map((s) => s.cpuMillis)).toContain(7);
-  });
-
-  test('a pod whose reads keep failing is written off after a bounded number of attempts', async () => {
-    const api = fakeApi(
-      () => ({ containers: [container()], nodes: [node()] }),
-      undefined,
-      undefined,
-      () => { throw new Error('503 read budget exhausted'); },
-    );
-    const { result } = renderHook(() => useComputeData('payments', { api }));
-    await settle();
-    for (let i = 0; i < COMPUTE_SEED_MAX_ATTEMPTS + 3; i++) {
-      await act(async () => { result.current.seedPod('uid-a'); });
-      await settle();
+    for (let i = 0; i < 3; i++) {
+      await act(async () => { await vi.advanceTimersByTimeAsync(5_000); });
     }
-    expect(api.getComputeHistory).toHaveBeenCalledTimes(COMPUTE_SEED_MAX_ATTEMPTS);
-    expect(result.current.error).toBeNull();
+    expect(result.current.history.get('uid-a')!.length).toBe(4);
+
+    await act(async () => { pending[0]([historyRow({ ts: minutesBefore(2), cpu_usage_millis_last: 7 })]); });
+    await settle();
+    expect(result.current.history.get('uid-a')!.values().map((x) => x.at)).toEqual([
+      T0 - 120_000, T0, T0 + 5_000, T0 + 10_000, T0 + 15_000,
+    ]);
   });
 
   test('seedPod does nothing when the broker reports history_disabled', async () => {
@@ -678,15 +691,12 @@ describe('useComputeData', () => {
     expect(debug.mock.calls[0][0]).toMatch(/live samples only/);
     expect(error).not.toHaveBeenCalled();
 
-    // The 5 s poll keeps running and the sparkline keeps filling from it;
-    // seeding is over for this namespace session.
     const latestCalls = api.getComputeLatest.mock.calls.length;
     await act(async () => { await vi.advanceTimersByTimeAsync(60_000); });
     await act(async () => { result.current.seedPod('uid-a'); });
     await settle();
     expect(api.getComputeLatest.mock.calls.length).toBeGreaterThan(latestCalls);
-    expect(api.getComputeHistory).toHaveBeenCalledTimes(1);
-    expect(result.current.history.get('uid-a')!.length).toBe(2);
+    expect(api.getComputeHistory).toHaveBeenCalledTimes(1); // seeding is over for this session
   });
 
   test('a namespace change lets its pods be seeded again', async () => {
@@ -694,7 +704,7 @@ describe('useComputeData', () => {
       () => ({ containers: [container()], nodes: [node()] }),
       undefined,
       undefined,
-      () => [historyRow({ cpu_usage_millis_last: 7 })],
+      () => [historyRow({ ts: minutesBefore(2), cpu_usage_millis_last: 7 })],
     );
     const { result, rerender } = renderHook(({ ns }) => useComputeData(ns, { api }), { initialProps: { ns: 'payments' } });
     await settle();
@@ -704,54 +714,6 @@ describe('useComputeData', () => {
 
     rerender({ ns: 'batch' });
     await settle();
-    await act(async () => { result.current.seedPod('uid-a'); });
-    await settle();
-    expect(api.getComputeHistory).toHaveBeenCalledTimes(2);
-  });
-
-  test('re-opens seeding for a pod whose series restarted after a clock step', async () => {
-    const api = fakeApi(
-      () => ({ containers: [container()], nodes: [node()] }),
-      undefined,
-      undefined,
-      () => [historyRow({ ts: minutesBefore(2), cpu_usage_millis_last: 7 })],
-    );
-    const { result } = renderHook(() => useComputeData('payments', { api }));
-    await settle();
-    await act(async () => { result.current.seedPod('uid-a'); });
-    await settle();
-    expect(result.current.history.get('uid-a')!.length).toBe(2);
-
-    vi.setSystemTime(T0 - 30 * 60_000); // NTP correction, half an hour back
-    await act(async () => { await vi.advanceTimersByTimeAsync(5_000); });
-    await settle();
-    expect(result.current.history.get('uid-a')!.length).toBe(1); // the series restarted
-    await act(async () => { result.current.seedPod('uid-a'); });
-    await settle();
-    expect(api.getComputeHistory).toHaveBeenCalledTimes(2); // seedable again
-  });
-
-  test('a time jump FORWARD past the window also re-opens seeding', async () => {
-    const api = fakeApi(
-      () => ({ containers: [container()], nodes: [node()] }),
-      undefined,
-      undefined,
-      () => [historyRow({ ts: minutesBefore(2), cpu_usage_millis_last: 7 })],
-    );
-    const { result } = renderHook(() => useComputeData('payments', { api }));
-    await settle();
-    await act(async () => { result.current.seedPod('uid-a'); });
-    await settle();
-    expect(result.current.history.get('uid-a')!.length).toBe(2);
-
-    // A tab left open overnight: every bucket ages out at once, and the pod
-    // must not stay marked seeded with a single dot to show for it.
-    hiddenValue = true;
-    await act(async () => { await vi.advanceTimersByTimeAsync(8 * 60 * 60_000); });
-    hiddenValue = false;
-    await act(async () => { document.dispatchEvent(new Event('visibilitychange')); });
-    await settle();
-    expect(result.current.history.get('uid-a')!.length).toBe(1);
     await act(async () => { result.current.seedPod('uid-a'); });
     await settle();
     expect(api.getComputeHistory).toHaveBeenCalledTimes(2);

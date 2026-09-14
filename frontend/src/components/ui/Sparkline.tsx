@@ -1,13 +1,18 @@
-// Hand-rolled SVG sparkline (design D8: no chart dependency). Draws the
-// last N samples as a line with a soft fill, optionally against a capacity
+// Hand-rolled SVG sparkline (design D8: no chart dependency). Draws points
+// against real time as a line with a soft fill, optionally against a capacity
 // line so "how close to the limit" reads at a glance.
 
-import { sparklineSegments } from '../../utils/sparkline';
+import { sparklineSegments, type SparklinePoint } from '../../utils/sparkline';
 
 export interface SparklineProps {
-  /** Oldest → newest, one slot per bucket. `null` is a bucket with no
-   *  sample: the line breaks there instead of being drawn across it. */
-  values: readonly (number | null)[];
+  /** Oldest → newest, each carrying the instant it was observed. x is mapped
+   *  from that instant, so the spacing on screen is the spacing in time. */
+  points: readonly SparklinePoint[];
+  /** The span drawn, in the same clock as the points. */
+  from: number;
+  to: number;
+  /** Longer than this between two points and the line breaks there. */
+  gapMs: number;
   /** Fixed y-axis maximum (e.g. the limit); default = max of values. */
   max?: number | null;
   width?: number;
@@ -19,7 +24,10 @@ export interface SparklineProps {
 }
 
 export function Sparkline({
-  values,
+  points,
+  from,
+  to,
+  gapMs,
   max,
   width = 200,
   height = 28,
@@ -27,9 +35,9 @@ export function Sparkline({
   className = '',
   title,
 }: SparklineProps) {
-  const dataMax = values.reduce<number>((m, v) => (v !== null && v > m ? v : m), 0);
+  const dataMax = points.reduce<number>((m, p) => (p.value > m ? p.value : m), 0);
   const yMax = max && max > 0 ? Math.max(max, dataMax) : dataMax || 1;
-  const segments = sparklineSegments(values, width, height, yMax);
+  const segments = sparklineSegments(points, { width, height, max: yMax, from, to, gapMs });
   const capY = max && max > 0 ? height - (Math.min(max, yMax) / yMax) * (height - 1) - 0.5 : null;
 
   return (

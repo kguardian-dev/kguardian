@@ -131,6 +131,10 @@ export const usePodData = (namespace: string) => {
 
   const pods = useMemo<PodNodeData[]>(() => {
     if (!compute.enabled) return basePods;
+    // One time origin for the whole pass — the instant the last poll landed.
+    // Every card drawn together then puts the same instant at the same x,
+    // which a `Date.now()` per card would not, and render stays pure.
+    const now = compute.polledAt;
     const findingsByPodKey = new Map<string, ComputeFinding[]>();
     for (const f of compute.findings) {
       for (const key of [f.victim.pod_uid, `${f.victim.namespace}/${f.victim.pod_name}`]) {
@@ -163,14 +167,14 @@ export const usePodData = (namespace: string) => {
       // podLevelSample per uid; a multi-replica identity shows the first).
       const uid = containers[0]?.pod_uid;
       const samples = uid ? compute.history.get(uid)?.values() ?? [] : [];
-      const data = buildPodComputeData({ containers, nodesByName: compute.nodesByName, findings, samples, nodeState });
+      const data = buildPodComputeData({ containers, nodesByName: compute.nodesByName, findings, samples, nodeState, now });
       // Same shared constant as last tick ⇒ same pod object, so PodNode's
       // identity memo holds for pods without rows.
       return pod.compute === data ? pod : { ...pod, compute: data };
     });
     // `history` is a fresh Map per poll over the in-place ring buffers, so it
     // is the dependency that re-reads the sparklines.
-  }, [basePods, compute.enabled, compute.containersByPodUid, compute.containersByPodName, compute.nodesByName, compute.findings, compute.history]);
+  }, [basePods, compute.enabled, compute.containersByPodUid, compute.containersByPodName, compute.nodesByName, compute.findings, compute.history, compute.polledAt]);
 
   return {
     pods,
