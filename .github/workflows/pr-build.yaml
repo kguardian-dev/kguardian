@@ -423,13 +423,43 @@ jobs:
       # at all. This is what makes the `--ignored` step below possible.
       #
       # Same major the chart deploys (charts/kguardian/values.yaml pins
-      # postgres 18), so CI exercises the version operators actually run.
+      # postgres 18) — but deliberately the glibc image, not the
+      # `18-alpine` the chart's in-cluster database defaults to, and with
+      # the locale pinned at initdb rather than inherited from the image.
+      #
+      # musl's strcoll() is strcmp(), so on the alpine image string
+      # collation IS byte order. The broker sorts denial rows in the
+      # database (`ORDER BY syscall, action`) and truncates the same list
+      # in Rust (`BTreeSet<String>`, byte order); any disagreement between
+      # those two orders is invisible on a database that cannot disagree.
+      # That is not hypothetical — it shipped: on glibc `en_US.UTF-8` the
+      # SQL keeps `ioctl` at the cap where Rust keeps `io_uring_enter`,
+      # and CI was green throughout. Both images report
+      # `datcollate = en_US.utf8`, so the image tag is the only thing that
+      # says which behaviour you get.
+      #
+      # glibc is also what operators run: RDS, Cloud SQL and the official
+      # postgres image all default to a libc locale, and
+      # `database.sslMode` exists because external managed Postgres is a
+      # first-class path in this chart.
+      #
+      # Not a matrix over both images: under musl the database sorts in
+      # exactly the order the Rust side truncates in, so the alpine leg
+      # could not go red for this class — it would double the most
+      # expensive Rust job to run tests in the one environment where they
+      # cannot fail. CI runs the harder of the two.
       postgres:
-        image: postgres:18-alpine
+        image: postgres:18
         env:
           POSTGRES_USER: kguardian
           POSTGRES_PASSWORD: kguardian
           POSTGRES_DB: kguardian
+          # Explicit, because the default is a moving target: PostgreSQL 18
+          # ships a `builtin` provider whose C.UTF-8 locale is byte order,
+          # and a future image picking it up by default would quietly
+          # restore the blind spot this job exists to close. The step below
+          # asserts the cluster really did come up collation-sensitive.
+          POSTGRES_INITDB_ARGS: '--locale-provider=libc --locale=en_US.UTF-8'
         ports:
           - 5432:5432
         # The job runs on the runner, not in a container, so without this
@@ -445,12 +475,15 @@ jobs:
 
       - name: Install system dependencies
         # diesel-postgres links against libpq at build time; libpq5 in the
-        # runtime Dockerfile is not enough for `cargo test`.
+        # runtime Dockerfile is not enough for `cargo test`. psql is for the
+        # collation assertion below, and is installed explicitly rather than
+        # taken from whatever the runner image happens to preinstall.
         run: |
           sudo apt-get update -y
           sudo apt-get install -y --no-install-recommends \
             build-essential \
             libpq-dev \
+            postgresql-client \
             pkg-config
 
       - name: Install Rust stable
@@ -486,22 +519,57 @@ jobs:
         # See job-level NOTE: env-mutating tests require --test-threads=1.
         run: cargo test --all-features -- --test-threads=1
 
+      - name: Assert the test database sorts by collation, not byte order
+        env:
+          KG_TEST_DATABASE_URL: postgres://kguardian:kguardian@localhost:5432/kguardian
+        # The live tests below can only catch a SQL-order/Rust-order
+        # disagreement on a database whose collation differs from byte
+        # order. That property comes from the service image and its initdb
+        # locale, neither of which fails loudly when it changes — swap the
+        # tag back to alpine, or let a future default flip to the builtin
+        # C.UTF-8 provider, and every collation-sensitive test goes green
+        # for the wrong reason. This is the one check that notices.
+        #
+        # `ioctl` before `io_uring_enter` is the glibc en_US.UTF-8 answer
+        # (punctuation is not weighted at the first level); byte order puts
+        # `_` (0x5F) before `c` (0x63) and returns the opposite.
+        run: |
+          set -euo pipefail
+          psql "$KG_TEST_DATABASE_URL" -Atc \
+            "SELECT 'collation ' || datcollate || ', provider ' || datlocprovider::text FROM pg_database WHERE datname = current_database()"
+          order=$(psql "$KG_TEST_DATABASE_URL" -Atc \
+            "SELECT string_agg(s, ',' ORDER BY s) FROM (VALUES ('io_uring_enter'), ('ioctl')) v(s)")
+          echo "ORDER BY returns: $order"
+          if [ "$order" != "ioctl,io_uring_enter" ]; then
+            echo "::error::This Postgres sorts strings in byte order, so the live tests cannot"
+            echo "::error::catch a bug where SQL orders by collation and Rust truncates by bytes."
+            echo "::error::Check the postgres service image and POSTGRES_INITDB_ARGS in this job."
+            exit 1
+          fi
+
       - name: cargo test --ignored (live Postgres)
         working-directory: broker
         env:
           KG_TEST_DATABASE_URL: postgres://kguardian:kguardian@localhost:5432/kguardian
-        # Filtered to `live_database`, not a bare `--ignored`, on purpose:
-        # the other #[ignore]d test in this crate
-        # (version_check::https_stack_performs_a_real_request) reaches a
-        # third-party host, and a PR gate that fails when someone else's TLS
-        # endpoint has a bad day is a gate people learn to ignore. The prefix
-        # is the contract — a live-database test named otherwise will not run
-        # here.
+        # Every #[ignore]d test in the crate runs here except the one named
+        # in --skip. It used to be the other way round — a `live_database`
+        # name filter — which meant an ignored test named anything else ran
+        # in no job at all and nothing said so. A deny-list inverts the
+        # default: a new live test is picked up whatever it is called, and
+        # the way this arrangement breaks (the skipped test gets renamed, so
+        # it starts running here) is a visible red, not a silent green.
+        #
+        # version_check::https_stack_performs_a_real_request is the skipped
+        # one: it reaches a third-party host, and a PR gate that fails when
+        # someone else's TLS endpoint has a bad day is a gate people learn
+        # to ignore.
         #
         # These tests share one database and reset the schema from the real
         # migrations, so --test-threads=1 is required for correctness, not
         # just for the env-var races the job note describes.
-        run: cargo test --all-features -- --ignored --test-threads=1 live_database
+        run: |
+          cargo test --all-features -- --ignored --test-threads=1 \
+            --skip https_stack_performs_a_real_request
 
   # Build Frontend
   build-frontend:

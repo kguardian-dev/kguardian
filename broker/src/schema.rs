@@ -416,6 +416,12 @@ diesel::table! {
         // capturing.
         capturing -> Bool,
         updated_at -> Timestamptz,
+        // The drain cadence the node declares, in seconds. Staleness is
+        // `max(300, interval * 3)` per node, because the Controller's drain
+        // interval is operator-set with no upper bound and a fixed window
+        // shorter than it reads a healthy fleet as Unknown. NULL = the node
+        // declared none, which falls back to the 300 s floor.
+        interval_seconds -> Nullable<Int8>,
     }
 }
 

@@ -21,11 +21,12 @@
 //!  3. compute the summary (`distribution`, `Ready`, and — from the
 //!     broker's observations — `CaptureComplete`, `Drift`, and
 //!     `DenialsObserved` with its `denials` block) and apply it under the
-//!     shared manager `kguardian-summary`; every node writes the same
-//!     value, so it converges. Both applies are skipped when nothing
-//!     changed — and because the denial count and its `lastSeen` never
-//!     stop moving while a workload keeps denying, "changed" is
-//!     deliberately coarse for those two (`settled_denials`);
+//!     shared manager `kguardian-summary`. Both applies are skipped when
+//!     nothing changed. The parts computed from the CR itself are the
+//!     same on every node, so last-writer-wins settles on its own; the
+//!     denial block is not — each node polls the broker separately and a
+//!     denial count never stops moving — so `settled_denials` has to
+//!     make that one converge explicitly;
 //!  4. mirror `{spec, hash, distribution}` to the broker so the UI can show
 //!     CR state without an API-server round trip.
 //!
@@ -221,6 +222,16 @@ pub async fn run() -> Result<(), Error> {
                     stream_ends = 0;
                     match event {
                         watcher::Event::Apply(cr) | watcher::Event::InitApply(cr) => {
+                            // Cluster inputs are refreshed once per
+                            // resync, not once per event. Another node's
+                            // status write arrives here as an Apply, so
+                            // refreshing per event would have every node
+                            // list nodes and poll the broker once per
+                            // node per write. The reading this path uses
+                            // is therefore up to `interval` old, which
+                            // `settled_denials` is built to tolerate: a
+                            // stale reading can only lose the ratchet,
+                            // never overwrite a fresher one.
                             if rec.cluster.is_none() {
                                 rec.refresh_cluster().await;
                             }
@@ -357,9 +368,10 @@ pub struct BrokerDenials {
     pub total: i64,
     #[serde(default)]
     pub syscalls: Vec<String>,
-    /// The `SCMP_ACT_*` spellings seen, for the condition message. Not
-    /// mirrored into `status.denials` — the CR carries the count and the
-    /// syscalls; which action fired is a `GET /seccomp/denials` question.
+    /// The `SCMP_ACT_*` spellings seen. Mirrored into `status.denials`
+    /// alongside the count and the syscalls, because the
+    /// `DenialsObserved` message names them and that message may only
+    /// render the published block — see `denials_condition`.
     #[serde(default)]
     pub actions: Vec<String>,
     #[serde(default, rename = "lastSeen")]
@@ -751,16 +763,20 @@ fn all_unknown(reason: &'static str, message: String) -> Observations {
 /// view of the CR's workload. `None` summaries (broker unreachable) ⇒
 /// `None` here, and the caller keeps whatever the conditions already say.
 ///
-/// `published` is the `status.denials` block already on the CR. It is an
-/// input because a denial count and its timestamp keep moving while a
-/// workload keeps denying, and republishing every refreshed value would
-/// re-apply the CR forever — see `settled_denials`.
+/// `published` is the `status.denials` block already on the CR, and
+/// `now` is this pass's RFC 3339 timestamp. Both are inputs because a
+/// denial count and its timestamp keep moving while a workload keeps
+/// denying, and because each node reads them from its own poll of the
+/// broker — republishing every reading would re-apply the CR forever and
+/// have nodes overwrite each other while doing it. See
+/// `settled_denials`.
 pub fn observation_conditions(
     namespace: &str,
     cr_name: &str,
     workload_ref: Option<&WorkloadRef>,
     summaries: Option<&[BrokerSummary]>,
     published: Option<&DenialSummary>,
+    now: &str,
 ) -> Option<Observations> {
     let Some(wr) = workload_ref else {
         return Some(all_unknown(
@@ -881,8 +897,8 @@ pub fn observation_conditions(
             // it is honest noise — it is the difference between "checked,
             // nothing" and "not checked", and it is the cheaper of the
             // two.
-            let block = settled_denials(published, denial_block(d));
-            let condition = denials_condition(&block, &sorted_unique(&d.actions));
+            let block = settled_denials(published, denial_block(d), now);
+            let condition = denials_condition(&block);
             (condition, Some(block))
         }
         // No block at all. NOT zero denials — this is the whole point of
@@ -918,38 +934,46 @@ pub fn observation_conditions(
     })
 }
 
-/// The `status.denials` block for one broker block.
+/// This pass's reading of one broker block, before `settled_denials`
+/// decides whether it is the one to publish.
 ///
-/// Sorts and de-duplicates the syscall names rather than mirroring the
-/// broker's order. Every node computes this same summary and applies it
-/// under the shared `kguardian-summary` manager, and `summary_equal`
-/// skips the apply when nothing changed — so a broker that returned the
-/// names in an unstable order (a `HashSet` drained on the other side,
-/// say) would make every node disagree with what is on the CR on every
-/// pass and turn an idle cluster into a patch loop. `render_profile`
-/// sorts for the same reason. Sorting closes that door; the count and
-/// the timestamp in this block move on their own even when the content
-/// does not, and `settled_denials` closes theirs.
+/// Sorts and de-duplicates the names rather than mirroring the broker's
+/// order, because the sorted form is what `denial_rank` compares and
+/// what `summary_equal` compares. A broker that returned them in an
+/// unstable order (a `HashSet` drained on the other side, say) would
+/// otherwise have two nodes rank identical readings differently and take
+/// turns overwriting each other. `render_profile` sorts for the same
+/// reason. Sorting closes that door; the count and the timestamp move on
+/// their own even when the content does not, and `settled_denials`
+/// closes theirs.
 fn denial_block(d: &BrokerDenials) -> DenialSummary {
     DenialSummary {
         // Clamped rather than trusted: `observed` is a `u64` in the CR
         // and the apiserver would reject a negative one outright.
         observed: d.total.max(0) as u64,
         syscalls: sorted_unique(&d.syscalls),
+        actions: sorted_unique(&d.actions),
         last_seen: normalised_last_seen(d.last_seen.as_deref()),
+        // Stamped by `settled_denials`, and only if this reading is the
+        // one that ends up published.
+        refreshed_at: None,
     }
 }
 
 /// The `DenialsObserved` condition for the block that is being
-/// published, plus the `SCMP_ACT_*` spellings this pass saw.
+/// published.
 ///
-/// Rendered from the published block and not from the broker row it came
-/// from, because `settled_denials` may decide to keep the block already
-/// on the CR: the count in the message an operator reads in
-/// `kubectl describe` is then always the count in the `Denials` column.
-/// Two numbers for one answer is the confusion this whole status is
-/// arranged to avoid.
-fn denials_condition(block: &DenialSummary, actions: &[String]) -> Desired {
+/// Rendered from that block and from nothing else, for two reasons that
+/// are really one reason. `settled_denials` may keep a block this pass
+/// did not compute, so anything fresh mixed into the message would
+/// narrate two different readings in one sentence — the count in
+/// `kubectl describe` must be the count in the `Denials` column. And the
+/// message is part of the condition, which `summary_equal` compares:
+/// anything in it that differs between two nodes' polls is a field the
+/// whole fleet would overwrite for each other on every pass. That is why
+/// the `SCMP_ACT_*` verdicts live on the block rather than being passed
+/// in beside it.
+fn denials_condition(block: &DenialSummary) -> Desired {
     // "Are there denials" is the count, except that a count of zero
     // alongside named syscalls can only be a broker bug — and of the two
     // ways to be wrong about it, saying "denials, go look" beats handing
@@ -964,10 +988,10 @@ fn denials_condition(block: &DenialSummary, actions: &[String]) -> Desired {
             message: "no denials in the retention window".into(),
         };
     }
-    let actions = if actions.is_empty() {
+    let actions = if block.actions.is_empty() {
         String::new()
     } else {
-        format!(" ({})", actions.join(", "))
+        format!(" ({})", block.actions.join(", "))
     };
     let last_seen = match &block.last_seen {
         Some(ts) => format!("; last seen {ts}"),
@@ -986,87 +1010,147 @@ fn denials_condition(block: &DenialSummary, actions: &[String]) -> Desired {
     }
 }
 
-/// How far a denial view has to have moved before it earns another
-/// status write. Thirty resyncs: long enough that a workload denying
-/// non-stop costs one apply a quarter of an hour rather than one per
-/// node per pass, short enough that an operator reading the `Denials`
-/// column is never behind by more than a coffee break.
+/// How stale the published reading may get before the next node to
+/// reconcile replaces it outright. Thirty resyncs: long enough that a
+/// workload denying non-stop costs one apply a quarter of an hour rather
+/// than one per node per pass, short enough that an operator reading the
+/// `Denials` column is never behind by more than a coffee break.
 const DENIAL_REFRESH_SECS: i64 = 15 * 60;
 
-/// Which denial block to publish: the one this pass computed, or the one
-/// the CR already carries.
+/// Which denial block to publish: the reading this pass computed, or the
+/// one the CR already carries.
 ///
 /// `observed` climbs and `lastSeen` advances for as long as a workload
-/// keeps tripping its filter, and `summary_equal` compares both — so
-/// publishing every refreshed value would have every node
+/// keeps tripping its filter, and `summary_equal` compares the whole
+/// block — so publishing every reading would have every node
 /// server-side-apply the CR on every resync for the entire time the
 /// denials continue, each apply bumping `resourceVersion` and fanning a
 /// watch event back to every other node's reflector. On a sixty-node
 /// cluster that is 120 writes a minute per CR, forever, on a cluster
-/// that has otherwise converged. It is the patch loop `denial_block`
-/// already sorts the syscall names to prevent; a monotonically rising
-/// count walks in through a door sorting cannot close.
+/// that has otherwise converged.
 ///
-/// So the fresh block replaces the published one only when it says
-/// something an operator would act on differently — a new syscall, an
-/// order of magnitude, or a quarter of an hour of continued denials.
-/// Otherwise the published block is kept, the whole summary compares
-/// equal, and no apply happens. That also settles the herd rather than
-/// just slowing it: the first node to see a real move writes it, and the
-/// other fifty-nine read it back off the CR and agree.
+/// Slowing that down is not enough, and this is the part that is easy to
+/// get wrong. Each node polls the broker on its own schedule and
+/// compares the CR against *its own* poll, so any symmetric "has this
+/// moved enough to be worth republishing" test has two nodes whose polls
+/// straddle the threshold each finding the other's published value worth
+/// overwriting — and they alternate for as long as both keep
+/// reconciling. A rate limit makes that slower, not finite. So the test
+/// here is one-directional in both of its halves:
 ///
-/// The cost, since this is a trade: `status.denials` is an
-/// order-of-magnitude reading of an aggregate over the broker's
-/// retention window, trailing live activity by up to `DENIAL_REFRESH_SECS`,
-/// and after a burst stops it keeps whatever that burst's last write
-/// said. `GET /seccomp/denials` is the live view.
-fn settled_denials(published: Option<&DenialSummary>, fresh: DenialSummary) -> DenialSummary {
-    match published {
-        Some(prev) if !worth_republishing(prev, &fresh) => prev.clone(),
-        _ => fresh,
+///  * `denial_rank` is a fixed total order over readings, and a node
+///    republishes only when its own reading ranks strictly above the
+///    published one. Of any two nodes at most one can then ever want to
+///    overwrite the other, so the block settles on the highest-ranked
+///    reading the fleet has taken — a function of the readings, not of
+///    which node reconciled first.
+///  * A ratchet only climbs, so on its own it would never let a weaker
+///    reading through: not a retention prune, not a burst ending, not a
+///    count returning to zero. `refreshedAt` is the release. Once the
+///    published reading is `DENIAL_REFRESH_SECS` old the next node to
+///    reconcile replaces it wholesale, whatever it says, and stamps it
+///    afresh. That decision reads the CR and the clock and nothing else,
+///    so every node agrees on when it is due; the few that reconcile in
+///    the same instant may each write once, and then the whole fleet is
+///    quiet again for another quarter of an hour.
+///
+/// The cost, since this is a trade: `status.denials` is a reading taken
+/// up to `DENIAL_REFRESH_SECS` ago, biased towards the loudest reading
+/// any node took in that window. A count climbing inside one order of
+/// magnitude, a count falling, and a workload going quiet all take up to
+/// that long to surface; a cleared workload is cleared late rather than
+/// early, which is the safe direction for a field an operator promotes a
+/// profile on. `GET /seccomp/denials` is the live view, and `refreshedAt`
+/// on the block says how old the published one is — both of which the
+/// CRD schema description says out loud, because a CRD consumer never
+/// sees this comment.
+fn settled_denials(
+    published: Option<&DenialSummary>,
+    mut fresh: DenialSummary,
+    now: &str,
+) -> DenialSummary {
+    if let Some(prev) = published {
+        if !refresh_due(prev, now) && denial_rank(&fresh) <= denial_rank(prev) {
+            return prev.clone();
+        }
     }
+    fresh.refreshed_at = Some(now.to_string());
+    fresh
 }
 
-/// Whether `fresh` says anything the published block does not.
+/// The fixed total order two readings of one workload are compared
+/// under. Breadth first — a syscall the kernel had not acted on before,
+/// or a verdict it had not returned before, is the strongest thing a
+/// reading can say, at any count — then the order of magnitude of the
+/// count. The names themselves are the last tie-break and their ordering
+/// is arbitrary: they are in the key so that two readings which are
+/// equally broad and equally loud still compare, which is what makes the
+/// order total and so the ratchet asymmetric.
 ///
-/// Deliberately coarse on the two fields that move on their own, and
-/// exact on the one that does not: a syscall the kernel had not acted on
-/// before is news at any count.
-fn worth_republishing(published: &DenialSummary, fresh: &DenialSummary) -> bool {
-    published.syscalls != fresh.syscalls
-        || count_magnitude(published.observed) != count_magnitude(fresh.observed)
-        || last_seen_moved(published.last_seen.as_deref(), fresh.last_seen.as_deref())
+/// The exact count is deliberately not in the key. It moves on every
+/// single denial, and a key that moved with it would be the patch loop
+/// again, one magnitude finer.
+///
+/// A reading that ranks lower is not lost, only late: it reaches the CR
+/// on the next `refresh_due`. In practice the case that matters most
+/// arrives early anyway — a profile going from logging to returning
+/// errors shows up as `[SCMP_ACT_ERRNO, SCMP_ACT_LOG]` for as long as
+/// the broker's retention window still holds both, which outranks
+/// `[SCMP_ACT_LOG]` on length.
+fn denial_rank(b: &DenialSummary) -> (usize, usize, u32, &[String], &[String]) {
+    (
+        b.syscalls.len(),
+        b.actions.len(),
+        count_magnitude(b.observed),
+        &b.syscalls,
+        &b.actions,
+    )
 }
 
 /// Digits in the count, with zero in a bucket of its own: 0, 1-9, 10-99,
 /// and so on. Zero is separate because "cleared" and "denied once" are
-/// opposite answers, and because a count reaching zero means the
-/// retention window emptied — which is worth a write however small the
-/// numbers either side of it are.
+/// opposite answers, and `observed: 0` is what clears a profile for
+/// promotion to an enforcing action.
+///
+/// Worth being exact about how much that carries, because it is less
+/// than it looks. In `denial_rank` the count is reached only when the
+/// two breadth terms tie, so on the common path — a first denial
+/// arriving with a syscall name on it — the name is what republishes and
+/// this never gets a vote. The zero bucket is the backstop for a reading
+/// carrying no names at all, which is what a denial the broker cannot
+/// put a syscall name to looks like once `sorted_unique` has dropped the
+/// empty one.
 fn count_magnitude(observed: u64) -> u32 {
     observed.checked_ilog10().map_or(0, |n| n + 1)
 }
 
-/// Whether denials are still arriving `DENIAL_REFRESH_SECS` past the
-/// timestamp the CR carries. Compares instants rather than strings, so
-/// two broker releases spelling one moment differently is not a move.
-fn last_seen_moved(published: Option<&str>, fresh: Option<&str>) -> bool {
-    match (published, fresh) {
-        (None, None) => false,
-        (Some(a), Some(b)) => match (
-            DateTime::parse_from_rfc3339(a),
-            DateTime::parse_from_rfc3339(b),
-        ) {
-            (Ok(a), Ok(b)) => (b - a).num_seconds().abs() >= DENIAL_REFRESH_SECS,
-            // What is on the CR is not a timestamp: hand edited, or
-            // written before `normalised_last_seen` existed. Replace it
-            // once, and the next pass has two instants to compare.
-            _ => true,
-        },
-        // Gaining or losing the timestamp altogether. That is the answer
-        // changing — "denied, and here is when" versus "denied, and we
-        // cannot say" — not the same answer arriving fresher.
-        _ => true,
+/// Whether the published reading is old enough that the next node to
+/// reconcile should replace it outright. Reads the CR and the clock and
+/// nothing else — no node's own poll — so the whole fleet reaches the
+/// same answer at the same moment instead of each deciding from what it
+/// happens to have seen.
+///
+/// A block with no `refreshedAt` is due at once: it was written by a
+/// controller from before the field existed, or edited by hand. Writing
+/// it stamps one and puts it back under the floor.
+///
+/// Deliberately not an absolute difference. A node whose clock runs fast
+/// stamps a `refreshedAt` in the future; the rest of the fleet then
+/// waits out the skew, rather than reading the future stamp as overdue
+/// and racing to correct it on every pass — which is the same alternation
+/// this function exists to avoid, moved onto the clock.
+fn refresh_due(published: &DenialSummary, now: &str) -> bool {
+    let (Some(stamp), Ok(now)) = (
+        published.refreshed_at.as_deref(),
+        DateTime::parse_from_rfc3339(now),
+    ) else {
+        return true;
+    };
+    match DateTime::parse_from_rfc3339(stamp) {
+        Ok(taken) => (now - taken).num_seconds() >= DENIAL_REFRESH_SECS,
+        // Not a timestamp at all: hand edited. Replace the block once,
+        // and the pass after that has two instants to compare.
+        Err(_) => true,
     }
 }
 
@@ -1085,12 +1169,11 @@ fn sorted_unique(values: &[String]) -> Vec<String> {
 /// Re-spell the broker's `lastSeen` the way `now_rfc3339` spells a
 /// timestamp, or drop it if it is not a timestamp at all.
 ///
-/// Canonicalising is no longer what keeps a re-spelling out of the patch
-/// loop — `last_seen_moved` parses both sides and compares instants, so
-/// `+00:00` from one broker release and `Z` from the next is not a move.
-/// It is what keeps `status.denials.lastSeen` a single spelling of a
-/// time across a mixed-version fleet, and dropping an unparseable value
-/// keeps it a field an operator can read as a time at all.
+/// Not what keeps a re-spelling out of the patch loop — `lastSeen` is
+/// not in `denial_rank`, so on its own it can never win a republish. It
+/// is what keeps `status.denials.lastSeen` a single spelling of a time
+/// across a mixed-version fleet, and dropping an unparseable value keeps
+/// it a field an operator can read as a time at all.
 fn normalised_last_seen(raw: Option<&str>) -> Option<String> {
     let raw = raw?.trim();
     if raw.is_empty() {
@@ -1150,6 +1233,7 @@ pub fn desired_summary(
         cr.spec.workload_ref.as_ref(),
         summaries,
         existing.denials.as_ref(),
+        &now,
     ) {
         Some(o) => {
             desired.push(o.capture);
@@ -1375,6 +1459,22 @@ mod tests {
         (base + chrono::Duration::seconds(secs as i64)).to_rfc3339_opts(SecondsFormat::Secs, true)
     }
 
+    /// A fixed `now` for tests that call `observation_conditions`
+    /// directly, so the stamp `settled_denials` writes is assertable.
+    const NOW: &str = "2026-09-14T05:00:00Z";
+
+    /// Push a published block's `refreshedAt` `secs` into the past, so a
+    /// test can reach the refresh floor without waiting for it. Relative
+    /// to the real clock because `desired_summary` reads the real clock.
+    fn backdate(s: &SeccompProfileStatus, secs: i64) -> SeccompProfileStatus {
+        let mut s = s.clone();
+        let then = Utc::now() - chrono::Duration::seconds(secs);
+        if let Some(d) = s.denials.as_mut() {
+            d.refreshed_at = Some(then.to_rfc3339_opts(SecondsFormat::Secs, true));
+        }
+        s
+    }
+
     fn denials(total: i64, syscalls: &[&str]) -> BrokerDenials {
         BrokerDenials {
             total,
@@ -1434,7 +1534,7 @@ mod tests {
     fn observation_conditions_cover_every_branch() {
         // No workloadRef ⇒ all three Unknown/NoWorkloadRef, even without
         // a broker.
-        let o = observation_conditions("prod", "deployment-web", None, None, None).unwrap();
+        let o = observation_conditions("prod", "deployment-web", None, None, None, NOW).unwrap();
         let (c, d) = (&o.capture, &o.drift);
         assert_eq!((c.status, c.reason), ("Unknown", "NoWorkloadRef"));
         assert_eq!((d.status, d.reason), ("Unknown", "NoWorkloadRef"));
@@ -1449,11 +1549,13 @@ mod tests {
             name: "web".into(),
         };
         // Broker unreachable ⇒ None (caller keeps existing conditions).
-        assert!(observation_conditions("prod", "deployment-web", Some(&wr), None, None).is_none());
+        assert!(
+            observation_conditions("prod", "deployment-web", Some(&wr), None, None, NOW).is_none()
+        );
 
         // No row for the workload ⇒ Unknown/NoObservations.
-        let o =
-            observation_conditions("prod", "deployment-web", Some(&wr), Some(&[]), None).unwrap();
+        let o = observation_conditions("prod", "deployment-web", Some(&wr), Some(&[]), None, NOW)
+            .unwrap();
         let (c, d) = (&o.capture, &o.drift);
         assert_eq!((c.status, c.reason), ("Unknown", "NoObservations"));
         assert_eq!((d.status, d.reason), ("Unknown", "NoObservations"));
@@ -1477,8 +1579,8 @@ mod tests {
                 }),
             }),
         )];
-        let o =
-            observation_conditions("prod", "deployment-web", Some(&wr), Some(&rows), None).unwrap();
+        let o = observation_conditions("prod", "deployment-web", Some(&wr), Some(&rows), None, NOW)
+            .unwrap();
         let (c, d) = (&o.capture, &o.drift);
         assert_eq!((c.status, c.reason), ("True", "Full"));
         assert_eq!((d.status, d.reason), ("False", "InSync"));
@@ -1497,8 +1599,8 @@ mod tests {
                 }),
             }),
         )];
-        let o =
-            observation_conditions("prod", "deployment-web", Some(&wr), Some(&rows), None).unwrap();
+        let o = observation_conditions("prod", "deployment-web", Some(&wr), Some(&rows), None, NOW)
+            .unwrap();
         let (c, d) = (&o.capture, &o.drift);
         assert_eq!((c.status, c.reason), ("False", "PartialCapture"));
         assert!(
@@ -1522,7 +1624,7 @@ mod tests {
                 drift: None,
             }),
         )];
-        let d = observation_conditions("prod", "deployment-web", Some(&wr), Some(&rows), None)
+        let d = observation_conditions("prod", "deployment-web", Some(&wr), Some(&rows), None, NOW)
             .unwrap()
             .drift;
         assert_eq!((d.status, d.reason), ("Unknown", "NoObservations"));
@@ -1530,7 +1632,7 @@ mod tests {
 
         // Namespace must match, not just the workload name.
         let rows = [summary_row("staging", "web", true, None)];
-        let c = observation_conditions("prod", "deployment-web", Some(&wr), Some(&rows), None)
+        let c = observation_conditions("prod", "deployment-web", Some(&wr), Some(&rows), None, NOW)
             .unwrap()
             .capture;
         assert_eq!(c.reason, "NoObservations");
@@ -1590,6 +1692,7 @@ mod tests {
             Some(&wr),
             Some(&silent_rows),
             None,
+            NOW,
         )
         .unwrap();
         assert_eq!(
@@ -1607,13 +1710,22 @@ mod tests {
             summary_row("prod", "web", true, None),
             BrokerDenials::default(),
         )];
-        let o =
-            observation_conditions("prod", "deployment-web", Some(&wr), Some(&clean_rows), None)
-                .unwrap();
+        let o = observation_conditions(
+            "prod",
+            "deployment-web",
+            Some(&wr),
+            Some(&clean_rows),
+            None,
+            NOW,
+        )
+        .unwrap();
         assert_eq!((o.denials.status, o.denials.reason), ("False", "NoDenials"));
         assert_eq!(
             o.denial_summary,
-            Some(DenialSummary::default()),
+            Some(DenialSummary {
+                refreshed_at: Some(NOW.to_string()),
+                ..Default::default()
+            }),
             "zero is a block with an explicit count, not an absent block"
         );
 
@@ -1726,8 +1838,8 @@ mod tests {
                 last_seen: Some("2026-09-14T04:05:14Z".into()),
             },
         )];
-        let o =
-            observation_conditions("prod", "deployment-web", Some(&wr), Some(&rows), None).unwrap();
+        let o = observation_conditions("prod", "deployment-web", Some(&wr), Some(&rows), None, NOW)
+            .unwrap();
         assert_eq!(
             (o.denials.status, o.denials.reason),
             ("True", "KernelDenied")
@@ -1741,6 +1853,12 @@ mod tests {
         assert_eq!(block.observed, 17);
         assert_eq!(block.syscalls, ["mount", "ptrace"]);
         assert_eq!(block.last_seen.as_deref(), Some("2026-09-14T04:05:14Z"));
+        assert_eq!(
+            block.actions,
+            ["SCMP_ACT_LOG"],
+            "the verdicts the message names are on the block it renders"
+        );
+        assert_eq!(block.refreshed_at.as_deref(), Some(NOW));
 
         // A count of zero next to named syscalls can only be a broker
         // bug. Of the two ways to be wrong about it, "there are denials,
@@ -1753,8 +1871,8 @@ mod tests {
                 ..Default::default()
             },
         )];
-        let o =
-            observation_conditions("prod", "deployment-web", Some(&wr), Some(&rows), None).unwrap();
+        let o = observation_conditions("prod", "deployment-web", Some(&wr), Some(&rows), None, NOW)
+            .unwrap();
         assert_eq!(o.denials.status, "True");
         assert_eq!(
             o.denial_summary.unwrap().observed,
@@ -1775,16 +1893,22 @@ mod tests {
         let a = denial_block(&BrokerDenials {
             total: 3,
             syscalls: vec!["ptrace".into(), "mount".into()],
-            actions: vec![],
+            actions: vec!["SCMP_ACT_LOG".into(), "SCMP_ACT_ERRNO".into()],
             last_seen: Some("2026-09-14T04:05:14Z".into()),
         });
         let b = denial_block(&BrokerDenials {
             total: 3,
             syscalls: vec!["mount".into(), "ptrace".into(), "mount".into()],
-            actions: vec!["SCMP_ACT_LOG".into()],
+            actions: vec![
+                "SCMP_ACT_ERRNO".into(),
+                "SCMP_ACT_LOG".into(),
+                "SCMP_ACT_ERRNO".into(),
+                String::new(),
+            ],
             last_seen: Some("2026-09-14T06:05:14+02:00".into()),
         });
         assert_eq!(a, b, "same denials, different spelling ⇒ same block");
+        assert_eq!(a.actions, ["SCMP_ACT_ERRNO", "SCMP_ACT_LOG"]);
 
         // A count that cannot exist clamps here rather than reaching the
         // CR, where the field is unsigned and the apiserver would reject
@@ -1996,16 +2120,20 @@ mod tests {
         assert_eq!(rehashed.denials.as_ref().unwrap().observed, 400);
     }
 
-    /// The refresh floor is a floor, not a mute: a climbing count still
-    /// reaches the CR the moment it says something an operator would act
-    /// on differently.
+    /// The ratchet is a ratchet, not a mute: a reading that says
+    /// something stronger than the one on the CR reaches it at once, and
+    /// one that says something weaker waits for the refresh floor and no
+    /// longer.
     ///
-    /// The cost of the floor is asserted here too, so it stays a
-    /// decision rather than a surprise: between those writes the
-    /// `Denials` column trails the live count. What it may never do is
-    /// disagree with itself — the condition message is rendered from the
-    /// block that was actually published, so `kubectl get` and
-    /// `kubectl describe` cannot name two different numbers.
+    /// Both costs are asserted here so they stay decisions rather than
+    /// surprises. Between writes the `Denials` column trails the live
+    /// count, and a workload that has been cleared stays dirty in the
+    /// column for up to `DENIAL_REFRESH_SECS` — late rather than early,
+    /// which is the safe direction for the number a profile gets
+    /// promoted on. What the status may never do is disagree with
+    /// itself: the condition message renders the block that was actually
+    /// published, verdicts included, so `kubectl get` and `kubectl
+    /// describe` cannot name two different readings.
     #[test]
     fn a_climbing_denial_count_is_republished_only_when_it_says_something_new() {
         let c = cr("prod", "deployment-web", Some("web"));
@@ -2072,31 +2200,362 @@ mod tests {
             "a write carries the fresh count"
         );
 
-        // … and so is the floor itself: still denying a quarter of an
-        // hour later earns a refreshed count and timestamp.
-        let later = step(&base, &rows(900, &["ptrace"], 15 * 60));
-        assert!(!summary_equal(&base, &later));
-        assert_eq!(block(&later).observed, 900);
-        assert_eq!(block(&later).last_seen, Some(at(15 * 60)));
-
-        // The retention window emptying is the answer changing, not a
-        // refresh: a real zero in the column and `False`/`NoDenials`.
-        let rolled = step(
+        // … and so is a verdict the kernel had not returned before: the
+        // profile has gone from logging to breaking the workload, which
+        // is the one thing here an operator is paged for.
+        let zero_rows = [with_denials(
+            summary_row("prod", "web", true, None),
+            BrokerDenials::default(),
+        )];
+        let harsher = step(
             &base,
             &[with_denials(
                 summary_row("prod", "web", true, None),
-                BrokerDenials::default(),
+                BrokerDenials {
+                    total: 401,
+                    syscalls: vec!["ptrace".into()],
+                    actions: vec!["SCMP_ACT_LOG".into(), "SCMP_ACT_ERRNO".into()],
+                    last_seen: Some(at(240)),
+                },
             )],
         );
-        assert!(!summary_equal(&base, &rolled));
-        assert_eq!(block(&rolled).observed, 0);
-        assert_eq!(message(&rolled), "no denials in the retention window");
+        assert!(!summary_equal(&base, &harsher));
+        assert_eq!(block(&harsher).actions, ["SCMP_ACT_ERRNO", "SCMP_ACT_LOG"]);
+        assert!(
+            message(&harsher).contains("(SCMP_ACT_ERRNO, SCMP_ACT_LOG)"),
+            "the verdicts in the message come from the published block: {}",
+            message(&harsher)
+        );
 
-        // And the broker going quiet about denials altogether is not a
-        // refresh either — the block goes away with the condition.
+        // What is never news is a reading that says *less* than the one
+        // on the CR, however fresh it is. That is the half of this that
+        // stops two nodes overwriting each other: a retention prune, a
+        // finished burst and a count back to zero all wait.
+        let pruned = step(&base, &rows(40, &["ptrace"], 600));
+        assert!(summary_equal(&base, &pruned));
+        assert_eq!(block(&pruned).observed, 400);
+        assert!(summary_equal(&base, &step(&base, &zero_rows)));
+
+        // They wait for the refresh floor, and no longer. Once the
+        // published reading is a quarter of an hour old the next node to
+        // reconcile replaces it with its own, weaker or not — the only
+        // way a cleared workload ever reaches `observed: 0` and
+        // `False`/`NoDenials`.
+        let stale = backdate(&base, DENIAL_REFRESH_SECS + 1);
+        let cleared = step(&stale, &zero_rows);
+        assert!(!summary_equal(&stale, &cleared));
+        assert_eq!(block(&cleared).observed, 0);
+        assert_eq!(message(&cleared), "no denials in the retention window");
+        // …and the replacement is stamped, so the floor starts again
+        // instead of every remaining node piling in behind the first.
+        assert!(block(&cleared).refreshed_at.is_some());
+        assert!(summary_equal(&cleared, &step(&cleared, &zero_rows)));
+
+        // The broker going quiet about denials altogether is not a
+        // reading at all, so neither half applies — the block goes away
+        // with the condition, floor or no floor.
         let silent = step(&base, &[summary_row("prod", "web", true, None)]);
         assert!(!summary_equal(&base, &silent));
         assert!(silent.denials.is_none());
+    }
+
+    /// The bug the ratchet exists for, and the one a refresh floor on its
+    /// own does not fix.
+    ///
+    /// Sixty nodes each poll the broker on their own schedule and each
+    /// compare the CR against their own poll, so at any moment two of
+    /// them hold readings taken seconds apart that straddle a threshold.
+    /// A symmetric "has this moved enough to republish" test then has
+    /// both of them find the other's published value worth overwriting,
+    /// and they alternate for as long as both keep reconciling — a write
+    /// per node per watch event, forever, on a cluster where nothing is
+    /// actually changing. Rate-limiting makes that slower, not finite.
+    ///
+    /// Two nodes, two snapshots taken moments apart, alternating passes.
+    /// The sequence has to stop writing; and it has to stop on the same
+    /// block whichever node reconciles first, because the published
+    /// value is decided by the readings and not by who got there first.
+    #[test]
+    fn two_nodes_with_different_snapshots_converge_instead_of_alternating() {
+        let c = cr("prod", "deployment-web", Some("web"));
+        let nodes = [node("a", "h1"), node("b", "h1")];
+        let path = "kguardian/prod/deployment-web.json";
+
+        // Node A polled just before the count crossed a thousand and
+        // just before the kernel first denied `mount`; node B polled
+        // just after. Nothing else about the cluster differs, and
+        // neither reading is wrong.
+        let a = [with_denials(
+            summary_row("prod", "web", true, None),
+            BrokerDenials {
+                total: 900,
+                syscalls: vec!["ptrace".into()],
+                actions: vec!["SCMP_ACT_LOG".into()],
+                last_seen: Some(at(0)),
+            },
+        )];
+        let b = [with_denials(
+            summary_row("prod", "web", true, None),
+            BrokerDenials {
+                total: 1_200,
+                syscalls: vec!["mount".into(), "ptrace".into()],
+                actions: vec!["SCMP_ACT_ERRNO".into(), "SCMP_ACT_LOG".into()],
+                last_seen: Some(at(4_000)),
+            },
+        )];
+
+        // Alternate the two over the shared CR and count the applies.
+        // Twenty passes is ten minutes of resyncs, well inside the
+        // refresh floor, so every write in here is the ratchet's doing.
+        let run = |first: &[BrokerSummary], second: &[BrokerSummary]| {
+            let mut status = SeccompProfileStatus::default();
+            let mut writes = 0usize;
+            for pass in 0..20 {
+                let rows = if pass % 2 == 0 { first } else { second };
+                let next = desired_summary(&c, &status, &nodes, "h1", path, 2, Some(rows));
+                if !summary_equal(&status, &next) {
+                    writes += 1;
+                    status = next;
+                }
+            }
+            (writes, status)
+        };
+        let (a_first_writes, a_first) = run(&a, &b);
+        let (b_first_writes, b_first) = run(&b, &a);
+
+        for (writes, who) in [
+            (a_first_writes, "node a first"),
+            (b_first_writes, "node b first"),
+        ] {
+            assert!(
+                writes <= 2,
+                "{who}: the fleet is still applying after it should have settled \
+                 — {writes} applies in 20 passes"
+            );
+        }
+
+        // The stamp is wall-clock, so compare the reading itself.
+        let reading = |s: &SeccompProfileStatus| {
+            s.denials.clone().map(|mut d| {
+                d.refreshed_at = None;
+                d
+            })
+        };
+        assert_eq!(
+            reading(&a_first),
+            reading(&b_first),
+            "the published reading must be a function of the readings, not of \
+             which node reconciled first"
+        );
+
+        // And it settles on B's: broader, and the kernel is returning
+        // errors rather than only logging.
+        let settled = a_first.denials.as_ref().expect("a block is published");
+        assert_eq!(settled.observed, 1_200);
+        assert_eq!(settled.syscalls, ["mount", "ptrace"]);
+        assert_eq!(settled.actions, ["SCMP_ACT_ERRNO", "SCMP_ACT_LOG"]);
+    }
+
+    /// The two halves of `settled_denials`, isolated from the wall clock
+    /// and from everything `desired_summary` wraps around them.
+    #[test]
+    fn the_denial_ratchet_only_climbs_and_the_refresh_floor_releases_it() {
+        let block = |observed: u64, syscalls: &[&str], actions: &[&str]| DenialSummary {
+            observed,
+            syscalls: syscalls.iter().map(|x| (*x).to_string()).collect(),
+            actions: actions.iter().map(|x| (*x).to_string()).collect(),
+            last_seen: Some(at(0)),
+            refreshed_at: Some(at(0)),
+        };
+        let quiet = block(900, &["ptrace"], &["SCMP_ACT_LOG"]);
+        let loud = block(
+            1_200,
+            &["mount", "ptrace"],
+            &["SCMP_ACT_ERRNO", "SCMP_ACT_LOG"],
+        );
+        let inside = at(60);
+        let past = at(DENIAL_REFRESH_SECS as u64 + 1);
+
+        // Inside the floor the ratchet only climbs. The louder reading
+        // replaces the quieter one; the quieter one never replaces the
+        // louder. That asymmetry is the fix — two nodes holding these
+        // two readings cannot both want to overwrite the other, so there
+        // is no sequence of passes in which they alternate.
+        assert_eq!(
+            settled_denials(Some(&quiet), loud.clone(), &inside).observed,
+            1_200
+        );
+        assert_eq!(
+            settled_denials(Some(&loud), quiet.clone(), &inside),
+            loud,
+            "a node holding a weaker reading must defer, stamp and all"
+        );
+        assert_eq!(
+            settled_denials(Some(&loud), DenialSummary::default(), &inside),
+            loud,
+            "including when the weaker reading is a real zero"
+        );
+
+        // A reading that wins is stamped with when it was taken, so the
+        // floor measures the age of the reading rather than the time
+        // since anything last changed.
+        assert_eq!(
+            settled_denials(Some(&quiet), loud.clone(), &inside).refreshed_at,
+            Some(inside.clone())
+        );
+
+        // Past the floor the next node to reconcile replaces the block
+        // outright, however much quieter its reading is. Without this
+        // the ratchet would never come down and a cleared workload would
+        // read as denied for the life of the CR.
+        let rolled = settled_denials(Some(&loud), DenialSummary::default(), &past);
+        assert_eq!(rolled.observed, 0);
+        assert_eq!(rolled.refreshed_at, Some(past.clone()));
+        assert_eq!(
+            settled_denials(Some(&rolled), DenialSummary::default(), &past),
+            rolled,
+            "the replacement resets the floor, so the rest of the fleet stays quiet"
+        );
+
+        // A block from before `refreshedAt` existed, or one an operator
+        // edited: due at once, which stamps it and puts it back under
+        // the floor rather than leaving it stuck outside forever.
+        let unstamped = DenialSummary {
+            refreshed_at: None,
+            ..loud.clone()
+        };
+        assert_eq!(
+            settled_denials(Some(&unstamped), quiet.clone(), &inside).observed,
+            900
+        );
+
+        // A clock that runs ahead delays the fleet's next refresh; it
+        // must not make every node think the stamp is overdue, which
+        // would be the alternation again with the clock as the disagreeing
+        // input.
+        let future = DenialSummary {
+            refreshed_at: Some(at(7_200)),
+            ..loud.clone()
+        };
+        assert_eq!(
+            settled_denials(Some(&future), DenialSummary::default(), &inside),
+            future
+        );
+    }
+
+    /// The zero bucket in `count_magnitude`, on the one input where it
+    /// is the only thing that can decide.
+    ///
+    /// It is easy to believe this bucket is what makes a first denial
+    /// reach a CR that reads `observed: 0`, and to test it with an input
+    /// where a syscall name arrives alongside the count — in which case
+    /// `denial_rank`'s breadth term has already decided and collapsing
+    /// 0 into 1-9 changes nothing. The count is only reached when both
+    /// breadth terms tie, so the reading has to carry no names on either
+    /// side of the transition. The broker produces exactly that when the
+    /// names it holds are empty: `sorted_unique` drops them, which is
+    /// what a denial on a syscall number its table cannot resolve, or a
+    /// row from a broker predating the `actions` field, looks like by
+    /// the time it reaches `denial_block`.
+    ///
+    /// Sabotage to confirm this goes red: `count_magnitude`'s
+    /// `map_or(0, |n| n + 1)` becomes `unwrap_or(0)`, which merges 0 and
+    /// 1-9 into one bucket and leaves every other bucket distinct.
+    #[test]
+    fn a_first_denial_escapes_a_cleared_block_on_the_zero_bucket_alone() {
+        // The buckets themselves. 0 and 1 must not share one: a CR at
+        // `observed: 0` reads as clear to promote.
+        assert_eq!(count_magnitude(0), 0);
+        assert_eq!(count_magnitude(1), 1);
+        assert_eq!(count_magnitude(9), 1);
+        assert_eq!(count_magnitude(10), 2);
+        assert_eq!(count_magnitude(u64::MAX), 20);
+        assert!(
+            count_magnitude(0) < count_magnitude(1),
+            "\"cleared\" and \"denied once\" are opposite answers, not one bucket"
+        );
+
+        // And the decision that rests on it. Syscalls, verdicts and
+        // `lastSeen` are identical across the transition, so the count
+        // is the only clause left that can fire, and the floor is
+        // nowhere near — a stale `0` here is the one direction that
+        // matters, because it is the reading an operator promotes on.
+        let inside = at(60);
+        let cleared = DenialSummary {
+            observed: 0,
+            syscalls: Vec::new(),
+            actions: Vec::new(),
+            last_seen: None,
+            refreshed_at: Some(at(0)),
+        };
+        let denied = DenialSummary {
+            observed: 4,
+            ..cleared.clone()
+        };
+        assert_eq!(
+            settled_denials(Some(&cleared), denied.clone(), &inside).observed,
+            4,
+            "a workload that has started denying must not keep reading `0` \
+             until the refresh floor"
+        );
+        // The other direction stays deferred, as everything weaker does:
+        // a count falling back is not news, it waits for the floor.
+        assert_eq!(
+            settled_denials(Some(&denied), cleared, &inside),
+            denied,
+            "the ratchet still only climbs"
+        );
+    }
+
+    /// The transition a promotion gate exists for: a profile promoted
+    /// from logging to killing, inside the refresh floor and inside one
+    /// magnitude bucket. An operator must not be left reading
+    /// `SCMP_ACT_LOG` while the kernel is killing the workload.
+    ///
+    /// This is why the verdicts live on the published block. Before that
+    /// they were rendered into the condition message straight from the
+    /// broker row, which forced an apply — and had every node whose poll
+    /// showed a different verdict set fight over the summary on every
+    /// pass. On the block they are ranked instead, and the ranking has
+    /// to carry the same guarantee.
+    #[test]
+    fn a_profile_that_starts_killing_republishes_inside_the_floor() {
+        let inside = at(60);
+        let logging = DenialSummary {
+            observed: 400,
+            syscalls: vec!["ptrace".into()],
+            actions: vec!["SCMP_ACT_LOG".into()],
+            last_seen: Some(at(0)),
+            refreshed_at: Some(at(0)),
+        };
+        // The broker's window holds both verdicts for as long as the
+        // pre-promotion rows live, so the reading is two verdicts wide
+        // against a published one verdict wide and outranks it at once.
+        let killing = DenialSummary {
+            observed: 402,
+            actions: vec!["SCMP_ACT_KILL_PROCESS".into(), "SCMP_ACT_LOG".into()],
+            ..logging.clone()
+        };
+        assert_eq!(
+            settled_denials(Some(&logging), killing.clone(), &inside).actions,
+            ["SCMP_ACT_KILL_PROCESS", "SCMP_ACT_LOG"],
+            "the kernel killing the workload cannot wait for the refresh floor"
+        );
+
+        // Once retention has rolled the logging rows out the reading
+        // narrows again, and a narrower reading waits for the floor.
+        // That costs nothing: the block it waits behind already names
+        // SCMP_ACT_KILL_PROCESS. The window is days and the floor is
+        // fifteen minutes, so there is no order of events in which the
+        // narrowing happens before the widening was published.
+        let killing_only = DenialSummary {
+            actions: vec!["SCMP_ACT_KILL_PROCESS".into()],
+            ..killing.clone()
+        };
+        assert_eq!(
+            settled_denials(Some(&killing), killing_only, &inside),
+            killing
+        );
     }
 
     #[test]

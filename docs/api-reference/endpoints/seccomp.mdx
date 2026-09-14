@@ -113,6 +113,12 @@ CR's deployment state and drift against the observed set.
   a CR's `.status` and therefore into etcd), and `lastSeen`, the newest
   observation. `lastSeen` is `null` when `total` is `0`.
 
+  On a cluster with more than 10 000 distinct `(workload, syscall, action)`
+  pairs the name lists are shortened **evenly across workloads** — every
+  workload keeps a share, none is emptied — and the Broker logs that it hit
+  the ceiling. `total` and `lastSeen` are read on their own uncapped query
+  and are never affected.
+
   **`null` and `{"total": 0}` are different answers, and the Controller
   treats them differently.** `null` means the Broker cannot say; `{"total":
   0}` means it can, and the answer is "clean". The Controller maps the first
@@ -123,11 +129,16 @@ CR's deployment state and drift against the observed set.
   What separates them is whether anything is **watching**, which the Broker
   knows from the per-node capture heartbeat (see
   [`POST /seccomp/denials`](#post-seccomp-denials)). A block is emitted when
-  at least one node has reported within the last 5 minutes with its probe
-  attached, or — for a Controller too old to send heartbeats — when any
-  denial has ever been stored. Until then every workload is `null`, because
-  "this workload was never denied" and "nothing on this cluster is capturing"
-  are the same observation.
+  at least one node has reported inside its own staleness window with its
+  probe attached, and at no other time. Until then every workload is `null`,
+  because "this workload was never denied" and "nothing on this cluster is
+  capturing" are the same observation.
+
+  A **stored denial is not liveness.** A row proves capture worked once; it
+  says nothing about whether anything is watching now, so disabling capture,
+  scaling the DaemonSet to zero or restoring a database from a cluster that
+  captured all read as `null` rather than as clean, however many denials are
+  on file.
 
   A node reporting in with `capturing: false` does **not** count. A
   `CONFIG_AUDIT=n` kernel makes the Controller skip the probe and carry on,
@@ -426,6 +437,7 @@ audit-to-enforcing promotion the feature exists to support.
 {
   "node": "ip-10-0-1-23.ec2.internal",
   "capturing": true,
+  "intervalSeconds": 10,
   "denials": [
     {
       "podUid": "3f2b1a0c-9d8e-7f6a-5b4c-3d2e1f0a9b8c",
@@ -455,14 +467,44 @@ distinct from whether the Controller is reachable. Send `false` when the
 probe was skipped — a kernel without `CONFIG_AUDIT=y` has no `audit_seccomp`
 symbol to hook, and the Controller degrades gracefully rather than
 crash-looping. It is recorded per node with the report time, and a node goes
-stale after 5 minutes (30 missed reports) rather than being assumed either
+stale after 5 minutes at the default cadence rather than being assumed either
 way.
 
-Denials in hand outrank the flag in both directions: a batch carrying rows
-proves the probe fired, so a Controller too old to send `capturing` at all is
-still recognised as capturing, and a node claiming `false` while shipping
-denials is believed on the evidence. Absent the flag **and** absent denials,
-the report proves nothing and is recorded as not capturing.
+`intervalSeconds` is the node's own drain cadence — the gap between the
+reports above — and the Broker sizes that staleness window from it per node
+rather than from a fixed number. Without it, raising
+`seccomp.denials.intervalSeconds` past a third of the window would make a
+perfectly healthy node read as stale on every report, and a stale node is
+`Unknown`, which blocks promotion. A report that omits the field is
+unaffected: absent or zero falls back to the 5-minute default. A node cannot
+declare more than a day, so it cannot buy itself a window measured in years.
+
+A pod with its own network namespace is attributed by that namespace. A
+`hostNetwork: true` pod has none — it shares the node's with every other
+hostNetwork pod and with kubelet, the container shims and any
+`SystemCallFilter=` unit — so the Controller attributes it by the cgroup the
+calling task was in, which is per container whatever the pod's network
+namespace is. Two hostNetwork pods on one node are told apart, and the node's
+own processes are credited to neither.
+
+A verdict whose cgroup matches no container on the node is **refused** rather
+than credited to whichever hostNetwork pod registered that namespace last: a
+denial pinned on the wrong workload flips that workload's `DenialsObserved`
+to `True` and blocks a promotion that should have gone ahead. That is the
+expected outcome for the node's own processes. For a container it means its
+cgroup could not be resolved, and that workload will report no denials of its
+own — the Controller warns once per drain with the cgroup id, and the pod
+watcher warns separately naming the container. Resolving a cgroup needs the
+host cgroup v2 root mounted into the Controller, which the chart does
+whenever `seccomp.denials.enabled` or `compute.enabled` is set.
+
+Denials in hand outrank the flag in both directions: a batch whose rows
+survive validation proves the probe fired, so a node claiming `false` while
+shipping real denials is believed on the evidence rather than on its own
+self-assessment. Absent the flag **and** absent any row that survived
+validation, the report proves nothing and is recorded as not capturing — a
+batch of nothing but rejected entries is not evidence that anything is
+watching.
 
 Each `count` is a **delta** since that node's previous drain, not a running
 total: the Controller clears its map after a successful POST. The Broker
@@ -480,6 +522,15 @@ in the Broker log rather than failing the batch: a missing `podUid`,
 `count` of zero or less. A zero-count entry is not a denial, and accepting
 one would add a workload to the rollup — and flip a CR's `DenialsObserved`
 condition — for something the kernel never did.
+
+`firstSeen` and `lastSeen` ahead of the Broker's clock are **clamped** to the
+ingest time rather than rejected, and the node is named in a warning. A clock
+a few seconds fast is ordinary drift and the denial it carries still happened,
+so the row is kept; but a `lastSeen` in the future is one the retention prune
+(`lastSeen < now - window`) can never match and one that holds the top of
+`GET /seccomp/denials`, which orders on it, until the clock catches up. The
+`count` is never adjusted — that one is a measurement, and a measurement
+nobody took is worse than a missing row.
 
 This route carries its own 4 MiB JSON body limit (the Broker default is 256
 KiB), which is roughly 20 000 denials per request. Chunk larger drains.

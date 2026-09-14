@@ -89,7 +89,44 @@
 // which is the SECCOMP_RET_* constant it means to report anyway.
 #define KG_SECCOMP_RET_ACTION_FULL 0xffff0000U
 
-// One row per (netns, generation, syscall, action).
+// One row per (netns, cgroup, generation, syscall, action).
+//
+// TWO identifiers, because neither alone names a workload on every pod.
+//
+// `netns` is the pod's network-namespace inode, the key every other
+// probe in this tree uses. It is 1:1 with a pod — unless the pod is
+// `hostNetwork: true`, in which case it has no namespace of its own and
+// the inode is the NODE's, shared with every other hostNetwork pod, with
+// kubelet, with the containerd shims and with any systemd unit carrying
+// `SystemCallFilter=`. Userspace cannot attribute such a row and will
+// not guess.
+//
+// `cgroup_id` is what closes that. `bpf_get_current_cgroup_id()` returns
+// the id of the task's cgroup on the unified hierarchy — for an ordinary
+// container, the scope the runtime created for it, which is per
+// container and owes nothing to the network namespace. Userspace
+// resolves it through the per-container registry the compute sampler
+// already maintains (controller/src/compute_registry.rs), keyed on
+// exactly this number: `name_to_handle_at` on the cgroup v2 directory
+// yields the same 64-bit id. A verdict from a host process is in no
+// container's cgroup, resolves to nothing and is refused — which is the
+// point, because before this field existed such a verdict was
+// indistinguishable from a hostNetwork pod's.
+//
+// It is the task's cgroup, not the container's, and those differ when a
+// workload nests its own: an image running systemd with cgroup
+// delegation puts its processes in children of the container scope, and
+// this returns the child's id, which the registry does not hold. Such a
+// row resolves to nothing and is refused and counted, the same as a host
+// process — a gap, not a misattribution, and userspace says so. Closing
+// it would mean resolving an id to its nearest REGISTERED ancestor,
+// which needs more than the id itself.
+//
+// Cost of carrying it: rows that used to be per (pod, syscall, action)
+// are now per (container, syscall, action), so a multi-container pod
+// occupies proportionally more of the LRU below. Userspace merges them
+// back together by pod identity before they reach the wire
+// (`merge_denials`), so nothing downstream sees the split.
 //
 // The generation is part of the key for the reason KG_GEN_SHIFT in
 // helper.h spells out: the kernel recycles netns inode numbers, so a
@@ -99,6 +136,8 @@
 // With it they stay separate, and userspace drops any row whose
 // generation no longer matches the pod registered on that inode — a
 // denial attributed to the wrong pod is worse than one not reported.
+// Cgroup ids need no such guard: they are kernfs node ids, which carry
+// their own generation counter and are not handed out twice in a boot.
 //
 // `pad` is explicit because this is a map key and the kernel compares
 // keys byte-for-byte: a compiler-inserted tail padding byte holding
@@ -106,6 +145,7 @@
 struct seccomp_denial_key
 {
     __u64 netns;
+    __u64 cgroup_id;
     __u32 generation;
     __u32 syscall_nr;
     __u32 action; // raw SECCOMP_RET_*, masked with ACTION_FULL
@@ -124,7 +164,7 @@ struct seccomp_denial_value
 // offsets this layout implies. Change a field and the Rust parsers
 // (`denial_key_from_bytes`, `denial_value_from_bytes`) must change with
 // it.
-_Static_assert(sizeof(struct seccomp_denial_key) == 24, "denial key is 24 bytes on the wire");
+_Static_assert(sizeof(struct seccomp_denial_key) == 32, "denial key is 32 bytes on the wire");
 _Static_assert(sizeof(struct seccomp_denial_value) == 24, "denial value is 24 bytes on the wire");
 
 // LRU, sized like `seen_syscalls` in syscall.bpf.c. Nothing in the
@@ -136,6 +176,13 @@ _Static_assert(sizeof(struct seccomp_denial_value) == 24, "denial value is 24 by
 // recording new pods entirely. Userspace reports occupancy so that
 // eviction pressure is a number on a dashboard rather than a quietly
 // short list.
+//
+// The 8-byte cgroup id added to the key above costs exactly 8 bytes per
+// entry and nothing else. Measured with `bpftool map show` on a loaded
+// object: 7 341 184 B at a 24-byte key, 7 865 472 B at 32 — 512 KiB
+// more, which is 65536 x 8. 7.5 MiB per node for the whole map, and the
+// node already carries a 10240-entry `inode_num` and the syscall probe's
+// own tables beside it.
 struct
 {
     __uint(type, BPF_MAP_TYPE_LRU_HASH);
@@ -212,11 +259,17 @@ static __always_inline void record_denial(struct seccomp_denial_key *key, __u64 
 SEC("kprobe/audit_seccomp")
 int BPF_KPROBE(trace_audit_seccomp, unsigned long syscall, long signr, int code)
 {
-    // Attribution is the syscall probe's, unchanged: the current task's
+    // The gate is the syscall probe's, unchanged: the current task's
     // network namespace inode, looked up in the tracked-pod map this
-    // object gets its own instance of (helper.h). A verdict from a host
-    // process or from a pod kguardian does not track resolves to no
-    // entry and costs one hash lookup.
+    // object gets its own instance of (helper.h). A verdict from a
+    // netns kguardian tracks no pod on resolves to no entry and costs
+    // one hash lookup.
+    //
+    // It remains a GATE and not the attribution. On a node netns —
+    // shared by every hostNetwork pod and every host process — the
+    // lookup succeeds for all of them alike, so it says only "somebody
+    // kguardian tracks lives here". The cgroup id recorded below is
+    // what names which one.
     //
     // `nsproxy` is NULL for a task past exit_task_namespaces(); the
     // CO-RE read then leaves net_ns at 0, which matches no tracked
@@ -238,6 +291,12 @@ int BPF_KPROBE(trace_audit_seccomp, unsigned long syscall, long signr, int code)
     // silent about its own denials.
     struct seccomp_denial_key key = {
         .netns = net_ns,
+        // The container that made the call, independent of whose
+        // network namespace it is in. Available since 4.18, below every
+        // floor this object already carries, and 0 on a host with no
+        // cgroup v2 — which matches no registered container, so such a
+        // row is refused rather than guessed at.
+        .cgroup_id = bpf_get_current_cgroup_id(),
         .generation = KG_GEN_OF(*flags),
         // Truncation is safe: Linux syscall numbers are three digits on
         // every supported arch, and `syscall` here is the number the

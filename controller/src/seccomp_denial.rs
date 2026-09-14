@@ -11,10 +11,18 @@
 //!
 //! The kernel side aggregates; this side drains. Every
 //! [`DEFAULT_INTERVAL_SECS`] the map is read-and-cleared, each row is
-//! attributed to the pod that owns its netns, the syscall number and the
-//! raw `SECCOMP_RET_*` action are resolved to the `SCMP_*` spellings the
-//! rest of the tree uses, and the result is POSTed to
-//! `POST /seccomp/denials`.
+//! attributed to a pod, the syscall number and the raw `SECCOMP_RET_*`
+//! action are resolved to the `SCMP_*` spellings the rest of the tree
+//! uses, and the result is POSTed to `POST /seccomp/denials`.
+//!
+//! Attribution takes two routes, because no one identifier names a
+//! workload on every pod. A pod with a network namespace of its own is
+//! named by its netns inode, the way everything else in this tree names
+//! it. A `hostNetwork: true` pod has no such namespace — its inode is
+//! the node's, shared with kubelet and with every other hostNetwork pod
+//! — so it is named by the cgroup id the probe records alongside,
+//! resolved through the per-container registry in
+//! [`crate::compute_registry`]. See [`build_denials`].
 //!
 //! Nothing in here is allowed to take the Controller down. The probe is
 //! skipped on a kernel without `audit_seccomp` (see
@@ -36,7 +44,8 @@ use tokio::sync::oneshot;
 use tracing::{debug, info, warn};
 
 use crate::capture_tiers::native_scmp_arch;
-use crate::client::api_post_call;
+use crate::client::api_post_call_json;
+use crate::compute_registry::{ComputeMap, ContainerCompute};
 use crate::models::{lookup_pod, pod_flags, ContainerMap};
 use crate::Error;
 
@@ -237,6 +246,7 @@ pub struct SeccompDenial {
 /// `DenialsObserved: Unknown` — and `Unknown` blocks promotion, which is
 /// the workflow this feature exists to unblock.
 #[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 struct DenialBatch<'a> {
     node: &'a str,
     /// Whether the probe is actually attached on this node.
@@ -247,7 +257,42 @@ struct DenialBatch<'a> {
     /// turn graceful degradation into a false all-clear, which is a worse
     /// outcome than the crash the degradation exists to avoid.
     capturing: bool,
+    /// This node's drain cadence in seconds — the interval between the
+    /// heartbeats above, declared by the node that sends them.
+    ///
+    /// The Broker has to decide when a node's last report is too old to
+    /// believe, and it cannot know that from a constant: the cadence is
+    /// `SECCOMP_DENIAL_INTERVAL_SECONDS`, an operator-set Helm value with
+    /// no upper bound, so any window the Broker hard-codes is wrong for
+    /// some supported configuration — and wrong in the direction that
+    /// makes a healthy cluster read as stale, which is `Unknown`, which
+    /// blocks promotion. Coupling the two settings would only move the
+    /// problem into the chart; the node declaring its own cadence needs
+    /// no agreement at all. The Broker computes
+    /// `max(300, intervalSeconds * 3)` from this and treats absent or
+    /// zero as 300, so an older Controller stays exactly as it was.
+    interval_seconds: u64,
     denials: &'a [SeccompDenial],
+}
+
+/// The POST body for one chunk, as JSON.
+///
+/// One place builds it, and the tests exercise that place, so
+/// `intervalSeconds` cannot end up on the denial-carrying report and
+/// missing from the empty heartbeat — which is the report a stalled node
+/// sends, and therefore the one the Broker's staleness window is FOR.
+fn denial_batch_body(
+    node: &str,
+    capturing: bool,
+    interval: Duration,
+    denials: &[SeccompDenial],
+) -> serde_json::Value {
+    json!(DenialBatch {
+        node,
+        capturing,
+        interval_seconds: interval.as_secs(),
+        denials,
+    })
 }
 
 /// RFC3339 at second precision (`2026-09-14T04:05:06Z`), which is the
@@ -266,6 +311,9 @@ where
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct RawDenial {
     netns: u64,
+    /// The cgroup the calling task was in — 1:1 with a container, and
+    /// the only identifier in the key that survives `hostNetwork: true`.
+    cgroup_id: u64,
     generation: u32,
     syscall_nr: u32,
     action: u32,
@@ -505,6 +553,10 @@ struct PodAttribution {
     /// `inode_num` value, recomputed from `uid` rather than read back
     /// from the kernel.
     generation: u32,
+    /// The pod does not have a netns of its own, so the inode this entry
+    /// is filed under is the node's and names no single pod. Such a row
+    /// is attributed by its cgroup id instead; see [`build_denials`].
+    host_network: bool,
     uid: String,
     name: String,
     namespace: String,
@@ -529,6 +581,7 @@ fn pod_attribution(container_map: &ContainerMap, netns: u64) -> Option<PodAttrib
     let uid = pod.info.config.metadata.uid.clone();
     Some(PodAttribution {
         generation: registration_generation(&uid),
+        host_network: pod.host_network,
         uid,
         name: pod.status.pod_name.clone(),
         namespace: pod.status.pod_namespace.clone().unwrap_or_default(),
@@ -554,14 +607,36 @@ fn registration_generation(pod_uid: &str) -> u32 {
 
 /// Why a drained row did not make it onto the wire. Counted rather than
 /// logged per row: under a denial storm the per-row log IS the storm.
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
 struct AttributionLosses {
-    /// No pod registered on the row's netns any more.
+    /// Neither route named a pod: nothing is registered on the row's
+    /// netns any more, AND its cgroup is not a container this node
+    /// knows.
     unknown_pod: usize,
-    /// A pod IS registered on the row's netns, but not the one the row
-    /// was recorded for: the inode was recycled by another pod between
-    /// the verdict and the drain. See `KG_GEN_SHIFT` in
-    /// `src/bpf/helper.h`.
+    /// The row's netns is the NODE's — every hostNetwork pod and every
+    /// host process shares it — and its cgroup resolved to no container
+    /// on this node, so the row names nothing. Most of these are the
+    /// node's own processes under a `SystemCallFilter=` unit, which is
+    /// the correct answer; a workload's rows landing here is not, and
+    /// nothing in the key tells them apart. See [`build_denials`].
+    unresolved_cgroup: usize,
+    /// One cgroup id counted above, so the warning points at something
+    /// an operator can resolve (`bpftool cgroup tree` prints these).
+    /// One example, not a list: under a storm every host process on the
+    /// node qualifies and naming them all would be its own noise.
+    unresolved_cgroup_example: Option<u64>,
+    /// The row needed the cgroup route and there is no container
+    /// registry to take it. Counted separately from a cgroup that
+    /// simply did not resolve, because this one is a misconfiguration
+    /// with a fix rather than a fact about the workload. See
+    /// [`build_denials`].
+    no_container_registry: usize,
+    /// The row's generation is not the one the pod now on its netns
+    /// registered with. Either the inode was recycled and the row is the
+    /// dead pod's, or the row is the LIVE pod's own and was recorded
+    /// before `bpf.rs` published its new generation — the two cannot be
+    /// told apart, so both are dropped. See the check in
+    /// [`build_denials`] and `KG_GEN_SHIFT` in `src/bpf/helper.h`.
     stale_generation: usize,
     /// Rows whose pod has no UID in the `ContainerMap`. Not dropped
     /// here — the row is still a real denial and the Broker may yet
@@ -571,31 +646,127 @@ struct AttributionLosses {
     missing_uid: usize,
 }
 
+/// Whether the Controller builds the per-container cgroup registry.
+///
+/// The registry was the compute sampler's, and for a while it was built
+/// only when `COMPUTE_ENABLED` was on. Denial attribution now depends on
+/// it: a `hostNetwork` pod's verdicts have no other identifier, so with
+/// no registry they are counted and dropped, and a workload nothing can
+/// attribute reports no denials — which the Broker reads as no denials.
+/// Switching off an unrelated observability feature would therefore have
+/// silently un-monitored every hostNetwork workload on the node, in the
+/// direction that reads as clean.
+///
+/// One function, called from `main.rs`, so the coupling has one
+/// definition and a test can pin it. The chart mounts the host cgroupfs
+/// under the matching condition
+/// (`charts/kguardian/templates/controller/daemonset.yaml`); without the
+/// mount there is nothing to resolve a container's cgroup against, so
+/// the two must be changed together.
+pub fn needs_container_registry(compute_enabled: bool, denial_capture_enabled: bool) -> bool {
+    compute_enabled || denial_capture_enabled
+}
+
+/// The pod identity one attributed row carries, borrowed from whichever
+/// of the two stores named it.
+struct Named<'a> {
+    uid: &'a str,
+    name: &'a str,
+    namespace: &'a str,
+}
+
+/// The container a cgroup id belongs to, in EITHER tier of the compute
+/// registry.
+///
+/// `kguardian.dev/compute: "off"` files a pod in the identity-only tier
+/// so it is never CPU-sampled. That annotation is about the cost of
+/// gauges; it says nothing about whether the kernel is denying the
+/// workload syscalls. Consulting `lookup_cgroup` alone would make
+/// opting out of compute sampling quietly opt a workload out of denial
+/// reporting too — a false all-clear bought with an unrelated
+/// annotation, and exactly the kind of coupling this route exists to
+/// remove rather than reintroduce.
+fn container_for_cgroup(registry: &ComputeMap, cgroup_id: u64) -> Option<Arc<ContainerCompute>> {
+    registry
+        .lookup_cgroup(cgroup_id)
+        .or_else(|| registry.lookup_identity(cgroup_id))
+}
+
 /// Attribute drained rows to pods and render them for the wire.
 ///
 /// Pure over its inputs (the clock anchor is passed in) so the
-/// attribution rules — especially the generation check — are testable
-/// without a kernel.
+/// attribution rules are testable without a kernel.
 ///
-/// Identity and the generation it is checked against come from the SAME
+/// # The cost of getting this wrong
+///
+/// A denial credited to the wrong workload flips that workload's
+/// `DenialsObserved` to `True` and blocks a promotion that should have
+/// gone ahead, while the denials that were real disappear into it. An
+/// unreported denial is a gap an operator can see; a misreported one is
+/// an accusation against a workload that did nothing. So every rule
+/// below refuses rather than guesses, and every refusal is counted into
+/// [`AttributionLosses`] so the gap is a number and not a silence.
+///
+/// Two distinct ways an inode fails to name one pod, and neither
+/// subsumes the other:
+///
+/// **The netns was reused.** The kernel hands netns inode numbers out of
+/// an IDA, so a dead pod's number is handed to the next pod on the node.
+/// The generation in the row's key settles it — but only because
+/// identity and the generation it is checked against come from the SAME
 /// `ContainerMap` entry, which is why this takes no kernel map. The
-/// probe's `inode_num` map holds the same generation, but it is written
+/// probe's `inode_num` map holds the same generation and is written
 /// LATER: `pod_watcher` inserts the `ContainerMap` entry, then sends the
 /// registration over an mpsc channel that `bpf.rs` only drains between
 /// ring-buffer polls — at least the 100ms poll behind, and seconds
 /// behind under load. Taking the generation from there while taking
-/// identity from here left a window in which a netns inode that had just
-/// been recycled resolved to its NEW pod while the kernel map still held
-/// the OLD pod's generation: the guard passed, and the dead pod's
-/// denials were written to the live pod. Netns inode numbers are
-/// node-global, so that pod is routinely an unrelated workload — its
-/// `DenialsObserved` flips to `True` and blocks a promotion it should
-/// have passed, while the denials that were real disappear. One entry
-/// carries one pod's UID, so deriving the expected generation from it
-/// leaves nothing to interleave.
+/// identity from here left a window in which a just-recycled inode
+/// resolved to its NEW pod while the kernel still held the OLD pod's
+/// generation: the check passed, and the dead pod's denials were written
+/// to the live pod. One entry carries one pod's UID, so deriving the
+/// expected generation from it leaves nothing to interleave.
+///
+/// **The netns was never the pod's.** A `hostNetwork: true` pod has no
+/// network namespace of its own: its inode is the NODE's, shared with
+/// every other hostNetwork pod and with every host process — kubelet,
+/// the containerd shims, a systemd unit with `SystemCallFilter=`. The
+/// generation check is blind to this, because there is no mismatch to
+/// find: whichever such pod registered last owns both the `ContainerMap`
+/// entry and the kernel `inode_num` value, so the two agree with each
+/// other and both name the wrong workload.
+///
+/// The netns cannot settle that, so a second identifier does. The probe
+/// records `bpf_get_current_cgroup_id()` in every row, and a container's
+/// cgroup is its own whether or not it shares the node's network
+/// namespace. It is the TASK's cgroup: a workload that nests its own
+/// (an image running systemd with cgroup delegation) reports a child of
+/// the container scope, which the registry does not hold, so its rows
+/// are refused and counted rather than misattributed. `cgroups` is the registry `pod_watcher` fills as it walks
+/// each pod's containers — keyed on exactly that number, because
+/// `name_to_handle_at` on the cgroup v2 directory yields what BPF
+/// yields. So a hostNetwork pod's denials are attributed to it, its
+/// neighbour's to the neighbour, and kubelet's to nobody: a host
+/// process is in no container's cgroup, resolves to nothing, and is
+/// refused. Only kubelet's row is refused now; the blanket refusal that
+/// preceded this took the two workloads' rows with it.
+///
+/// Refusing is not neutral, and this is the second half of why the
+/// cgroup route exists at all. A workload that produces no denial rows
+/// is not reported as unmonitored — the Broker has nothing to report it
+/// from, so it reads `DenialsObserved: False` with `observed: 0`,
+/// "checked, and clean". Every refusal here is therefore a potential
+/// false all-clear, which is why they are counted into
+/// [`AttributionLosses`] and warned about rather than merely dropped.
+///
+/// Order matters: netns first for a pod that owns one. That path is
+/// generation-checked against the same `ContainerMap` entry it takes
+/// identity from, it needs nothing from containerd, and it is the path
+/// every other probe in this tree uses. The cgroup route is what the
+/// netns cannot do, not a replacement for it.
 fn build_denials(
     rows: &[RawDenial],
     container_map: &ContainerMap,
+    cgroups: Option<&ComputeMap>,
     anchor: &ClockAnchor,
 ) -> (Vec<SeccompDenial>, AttributionLosses) {
     let arch = scmp_arch_token();
@@ -607,26 +778,92 @@ fn build_denials(
     // pod is also what keeps one drain self-consistent — a registration
     // landing mid-drain cannot split one netns's rows between two pods.
     let mut pods: HashMap<u64, Option<PodAttribution>> = HashMap::new();
+    // The cgroup route is memoised for the same reasons, and one more:
+    // a container registered or retired mid-drain would otherwise split
+    // one cgroup's rows between two answers.
+    let mut containers: HashMap<u64, Option<Arc<ContainerCompute>>> = HashMap::new();
     let mut out = Vec::with_capacity(rows.len());
 
     for row in rows {
-        let Some(pod) = pods
+        let netns_pod = pods
             .entry(row.netns)
             .or_insert_with(|| pod_attribution(container_map, row.netns))
-            .as_ref()
-        else {
-            losses.unknown_pod += 1;
-            continue;
+            .as_ref();
+
+        let named = match netns_pod {
+            // One inode, one pod: the netns route, generation-checked.
+            Some(pod) if !pod.host_network => {
+                // The check that stops a replacement pod being handed
+                // its predecessor's denials.
+                //
+                // A mismatch does NOT prove the row belongs to a pod
+                // that is gone, and this comment used to say it did.
+                // Two rows are indistinguishable here, both carrying
+                // the OLD generation: the dead pod's leftovers, and the
+                // LIVE pod's own verdicts recorded during the
+                // registration window, while `bpf.rs` had not yet
+                // written the new flags to `inode_num`. Nothing in the
+                // key separates them — that is what makes the window a
+                // window.
+                //
+                // Attributing the pair to the live pod is what the
+                // older code did, and it credited a dead workload's
+                // denials to whatever took its inode. Dropping the pair
+                // loses some of the live pod's own denials for as long
+                // as the window lasts (a 100ms ring-buffer poll, longer
+                // under load). That is the deliberate trade: the first
+                // is a wrong answer about a workload that made no such
+                // call, the second is a gap in a signal that is already
+                // a floor rather than a total. Counted, not silent.
+                if pod.generation != row.generation {
+                    losses.stale_generation += 1;
+                    continue;
+                }
+                Named {
+                    uid: &pod.uid,
+                    name: &pod.name,
+                    namespace: &pod.namespace,
+                }
+            }
+            // The inode names no single pod: either it is the node's
+            // (hostNetwork) or nothing is registered on it any more.
+            // The cgroup does name one.
+            shared => {
+                let Some(registry) = cgroups else {
+                    // Explicit, and counted on its own. The registry is
+                    // built whenever denial capture is on, so its
+                    // absence is a wiring fault rather than a property
+                    // of the row — and treating it as "unresolvable"
+                    // would file a fixable misconfiguration under the
+                    // same number as kubelet's own syscalls.
+                    losses.no_container_registry += 1;
+                    continue;
+                };
+                let resolved = containers
+                    .entry(row.cgroup_id)
+                    .or_insert_with(|| container_for_cgroup(registry, row.cgroup_id));
+                match resolved.as_deref() {
+                    Some(c) => Named {
+                        uid: &c.pod_uid,
+                        name: &c.pod_name,
+                        namespace: &c.namespace,
+                    },
+                    None => {
+                        if shared.is_some() {
+                            losses.unresolved_cgroup += 1;
+                            losses
+                                .unresolved_cgroup_example
+                                .get_or_insert(row.cgroup_id);
+                        } else {
+                            losses.unknown_pod += 1;
+                        }
+                        continue;
+                    }
+                }
+            }
         };
-        // The check that stops a replacement pod being handed its
-        // predecessor's denials. A row recorded under a generation the
-        // pod now on this netns does not have describes a pod that is
-        // gone; there is nothing left to attribute it to.
-        if pod.generation != row.generation {
-            losses.stale_generation += 1;
-            continue;
-        }
-        if pod.uid.is_empty() {
+
+        if named.uid.is_empty() {
             losses.missing_uid += 1;
         }
 
@@ -639,9 +876,9 @@ fn build_denials(
             .clone();
 
         out.push(SeccompDenial {
-            pod_uid: pod.uid.clone(),
-            pod_name: pod.name.clone(),
-            pod_namespace: pod.namespace.clone(),
+            pod_uid: named.uid.to_string(),
+            pod_name: named.name.to_string(),
+            pod_namespace: named.namespace.to_string(),
             syscall,
             syscall_nr,
             action: action_name(row.action),
@@ -717,9 +954,36 @@ fn post_chunks(batch: &[SeccompDenial]) -> Vec<&[SeccompDenial]> {
     }
 }
 
-/// True when the error `api_post_call` returned is a 404 from the Broker.
+/// How many rows the Broker says it stored, from its ingest response.
 ///
-/// `api_post_call` flattens every non-2xx into `Error::ApiError` with a
+/// `None` when the field is absent or not a number — an older Broker, or
+/// a proxy that rewrote the body. That is NOT a shortfall: treating an
+/// unreadable response as rows refused would turn every POST to an older
+/// Broker into a data-loss warning, which is the same false alarm in the
+/// other direction.
+fn accepted_rows(response: &serde_json::Value) -> Option<u64> {
+    response.get("accepted")?.as_u64()
+}
+
+/// How many of the `sent` rows the Broker did not store, or `None` when
+/// it stored them all or did not say.
+///
+/// `stored > sent` returns `None` rather than a negative: a Broker
+/// counting higher than it was offered is a Broker-side bug, and the
+/// Controller has nothing useful to say about it from here.
+fn refused_rows_in(sent: usize, response: &serde_json::Value) -> Option<u64> {
+    let stored = accepted_rows(response)?;
+    // `checked_sub`, not `(stored < sent).then_some(sent - stored)`:
+    // `then_some` takes its argument by value and so evaluates the
+    // subtraction whatever the condition says, which underflows on the
+    // `stored > sent` case — a panic in debug and a wrapped u64
+    // reported as "refused 18446744073709551615" in release.
+    (sent as u64).checked_sub(stored).filter(|&r| r > 0)
+}
+
+/// True when the error the POST returned is a 404 from the Broker.
+///
+/// `client::api_post_call_json` flattens every non-2xx into `Error::ApiError` with a
 /// formatted message, so the status has to be recovered from that text.
 /// The coupling is pinned by `a_404_body_is_recognised_as_a_missing_endpoint`
 /// below; if `client.rs` ever grows a typed status this should use it
@@ -773,9 +1037,10 @@ fn drain(maps: &DenialMaps) -> DrainOutcome {
         };
         rows.push(RawDenial {
             netns: k.0,
-            generation: k.1,
-            syscall_nr: k.2,
-            action: k.3,
+            cgroup_id: k.1,
+            generation: k.2,
+            syscall_nr: k.3,
+            action: k.4,
             count: v.0,
             first_seen_ns: v.1,
             last_seen_ns: v.2,
@@ -808,11 +1073,28 @@ pub async fn run(
     config: SeccompDenialConfig,
     node_name: String,
     container_map: ContainerMap,
+    cgroups: Option<ComputeMap>,
     maps: oneshot::Receiver<DenialMaps>,
 ) -> Result<(), Error> {
     if !config.enabled {
         info!("{CAPTURE_ENV} is off; kernel seccomp verdicts will not be captured");
         return Ok(());
+    }
+
+    // Said at startup, not only once a denial has been lost to it. The
+    // registry is constructed whenever this feature is on (`main.rs`),
+    // so `None` is a wiring fault — and the failure it produces is
+    // silence: hostNetwork workloads keep reporting nothing, and
+    // nothing reporting reads as nothing denied.
+    if cgroups.is_none() {
+        warn!(
+            "no per-container cgroup registry was handed to seccomp denial capture. \
+             hostNetwork pods share the node's network namespace, so their denials can \
+             only be attributed by cgroup id; without the registry they will be counted \
+             and dropped, and those workloads will appear never to have been denied \
+             anything. This is a wiring fault in the Controller, not a property of the \
+             node."
+        );
     }
 
     // The sender is dropped without a value when the eBPF loader skipped
@@ -857,6 +1139,33 @@ pub async fn run(
     let mut endpoint_missing = false;
     let mut last_update_failures = 0u64;
     let mut warned_missing_uid = false;
+    let mut warned_unresolved_cgroup = false;
+    let mut warned_no_registry = false;
+    // Rows the Broker accepted the request for but refused to store,
+    // accumulated for the life of the process.
+    //
+    // Counted, NOT retried, and that is a deliberate choice rather than
+    // the easy one. Every rejection the ingest can return is a fixed
+    // property of the row — an empty or oversized `podUid`, `podName`,
+    // `podNamespace`, `syscall`, `action` or `arch`, or a `count` that
+    // is zero, negative or past its ceiling (`reject_reason` in
+    // `broker/src/seccomp_denial.rs`). None of them can come good on a
+    // later attempt, so a retry is guaranteed to be refused again.
+    //
+    // Retrying them would make things worse in two concrete ways. The
+    // rows would sit in `pending` being re-POSTed every interval until
+    // they reached `MAX_PENDING_DENIALS` and started evicting VALID
+    // rows — trading one node's bad rows for every other pod's good
+    // ones. And each retry re-sends the whole chunk, including the rows
+    // that WERE stored: the Broker accumulates counts as deltas
+    // (`count = count + excluded`), so replaying an accepted row
+    // inflates a real workload's denial total. A retry loop here would
+    // manufacture denials that never happened in the signal an operator
+    // promotes a profile on.
+    //
+    // So the rows are lost, loudly. The fix for a refusal is in
+    // whatever built the row, and the warning says so.
+    let mut refused_rows = 0u64;
 
     loop {
         ticker.tick().await;
@@ -911,13 +1220,26 @@ pub async fn run(
             );
         }
 
-        let (fresh, losses) = build_denials(&drained.rows, &container_map, &anchor);
-        if losses.unknown_pod > 0 || losses.stale_generation > 0 {
+        let (fresh, losses) =
+            build_denials(&drained.rows, &container_map, cgroups.as_ref(), &anchor);
+        if losses.unknown_pod > 0
+            || losses.stale_generation > 0
+            || losses.unresolved_cgroup > 0
+            || losses.no_container_registry > 0
+        {
+            // Per tick, so the ongoing rate is countable. The warnings
+            // below fire once each and would otherwise be the only
+            // trace of a loss that is still happening every interval.
             debug!(
                 unknown_pod = losses.unknown_pod,
                 stale_generation = losses.stale_generation,
-                "seccomp denial rows dropped: their pod is gone, or its netns inode has \
-                 already been reused by another pod"
+                unresolved_cgroup = losses.unresolved_cgroup,
+                no_container_registry = losses.no_container_registry,
+                "seccomp denial rows dropped: their pod is gone and their cgroup is not a \
+                 container on this node; or the generation does not match the pod on that \
+                 inode, which is a recycled netns or a pod registered too recently for the \
+                 kernel to be stamping its new generation yet; or the netns is the node's \
+                 and the cgroup resolved to nothing, which is what a host process looks like"
             );
         }
         // Once, loudly. The Broker requires a non-empty podUid and
@@ -933,6 +1255,41 @@ pub async fn run(
                  the pod-watcher warning naming it."
             );
             warned_missing_uid = true;
+        }
+        // Also once, loudly, and for the same reason. Most rows here
+        // are the node's own processes — kubelet, a containerd shim, a
+        // systemd unit with `SystemCallFilter=` — which belong to no
+        // container and are correctly credited to nobody. But a
+        // CONTAINER whose cgroup never resolves lands in the same
+        // number, and that case is a workload reporting no denials
+        // because nothing could attribute them, which the Broker cannot
+        // tell from a workload that was never denied anything. The
+        // pod-watcher logs a warning naming any container whose cgroup
+        // it could not resolve; that is where to look if this count
+        // does not match the node's own noise.
+        if losses.unresolved_cgroup > 0 && !warned_unresolved_cgroup {
+            warn!(
+                rows = losses.unresolved_cgroup,
+                example_cgroup_id = losses.unresolved_cgroup_example.unwrap_or(0),
+                "seccomp denials from the node's own network namespace resolved to no \
+                 container on this node and were dropped rather than credited to whichever \
+                 hostNetwork pod registered that namespace last. Expected for the node's \
+                 own processes; for a container it means its cgroup is not registered, and \
+                 that workload will look as though it has never been denied anything. \
+                 `bpftool cgroup tree` resolves the id above."
+            );
+            warned_unresolved_cgroup = true;
+        }
+        // The wiring fault, once. Distinct from the above because it
+        // has a fix, and because it takes out every hostNetwork pod on
+        // the node at once rather than one whose cgroup went missing.
+        if losses.no_container_registry > 0 && !warned_no_registry {
+            warn!(
+                rows = losses.no_container_registry,
+                "seccomp denials that need cgroup attribution are being dropped because no \
+                 container registry was handed to this task. See the startup warning."
+            );
+            warned_no_registry = true;
         }
 
         let mut batch = std::mem::take(&mut pending);
@@ -955,14 +1312,33 @@ pub async fn run(
                 undelivered.extend_from_slice(chunk);
                 continue;
             }
-            let body = json!(DenialBatch {
-                node: &node_name,
-                capturing,
-                denials: chunk,
-            });
-            match api_post_call(body, DENIALS_PATH).await {
-                Ok(()) => {
+            let body = denial_batch_body(&node_name, capturing, config.interval, chunk);
+            match api_post_call_json(body, DENIALS_PATH).await {
+                Ok(response) => {
                     delivered += chunk.len();
+                    // A 2xx is not proof the rows were stored. The
+                    // Broker validates per row and answers
+                    // `200 {"accepted": n}`, so a batch it refused whole
+                    // still comes back as success — and the kernel map
+                    // was cleared before this POST, so a refused row
+                    // exists nowhere else on the node. Left unchecked
+                    // this is unrecoverable loss behind a green
+                    // `capturing: true` heartbeat, which reads as a
+                    // clean bill of health.
+                    if let Some(refused) = refused_rows_in(chunk.len(), &response) {
+                        refused_rows = refused_rows.saturating_add(refused);
+                        warn!(
+                            sent = chunk.len(),
+                            refused,
+                            refused_since_start = refused_rows,
+                            "the Broker did not store every seccomp denial it was sent. Those \
+                             rows are gone: the kernel map is cleared before the POST, so there \
+                             is no copy to resend, and they are not retried because every \
+                             rejection the ingest can return would reject them again. The \
+                             Broker's ingest log names the field it refused them on — this is a \
+                             row the Controller built wrong, not a transport failure."
+                        );
+                    }
                     if endpoint_missing {
                         info!("Broker now accepts {DENIALS_PATH}; denial reporting resumed");
                         endpoint_missing = false;
@@ -1020,25 +1396,43 @@ pub async fn run(
 // _Static_assert. Native endianness, because both sides are the same
 // machine.
 
-/// `(netns, generation, syscall_nr, action)`.
-type DenialKey = (u64, u32, u32, u32);
+/// `(netns, cgroup_id, generation, syscall_nr, action)`.
+type DenialKey = (u64, u64, u32, u32, u32);
 /// `(count, first_seen_ns, last_seen_ns)`.
 type DenialValue = (u64, u64, u64);
 
+/// `sizeof(struct seccomp_denial_key)`, pinned by `_Static_assert` in
+/// the probe.
+const DENIAL_KEY_BYTES: usize = 32;
+/// `sizeof(struct seccomp_denial_value)`, likewise.
+const DENIAL_VALUE_BYTES: usize = 24;
+
+/// Exact length, not a minimum.
+///
+/// A minimum was the wrong test the moment the key grew. `libbpf` hands
+/// back exactly `key_size` bytes, so a length that is not the expected
+/// one means this build's layout and the loaded object's disagree — and
+/// decoding the first 20 or 28 bytes of a longer key anyway reads
+/// `generation`, `syscall_nr` and `action` out of whatever now sits at
+/// those offsets. That is not a partial read, it is counts attributed to
+/// the wrong pod against the wrong syscall, which is the one outcome
+/// this whole module refuses everywhere else. Rejecting the row instead
+/// counts it into `DrainOutcome::read_errors`, which warns.
 fn denial_key_from_bytes(b: &[u8]) -> Option<DenialKey> {
-    if b.len() < 20 {
+    if b.len() != DENIAL_KEY_BYTES {
         return None;
     }
     Some((
         u64_from_bytes(&b[..8])?,
-        u32_from_bytes(&b[8..12])?,
-        u32_from_bytes(&b[12..16])?,
+        u64_from_bytes(&b[8..16])?,
         u32_from_bytes(&b[16..20])?,
+        u32_from_bytes(&b[20..24])?,
+        u32_from_bytes(&b[24..28])?,
     ))
 }
 
 fn denial_value_from_bytes(b: &[u8]) -> Option<DenialValue> {
-    if b.len() < 24 {
+    if b.len() != DENIAL_VALUE_BYTES {
         return None;
     }
     Some((
@@ -1084,7 +1478,16 @@ mod tests {
 
     fn pod_at_with_uid(netns: u64, name: &str, namespace: &str, uid: &str) -> ContainerMap {
         let map = DashMap::new();
-        let inspect = crate::PodInspect {
+        map.insert(netns, Arc::new(pod_entry(name, namespace, uid, false)));
+        Arc::new(map)
+    }
+
+    /// One `ContainerMap` value, built the way
+    /// `pod_watcher::netns_registration` builds one — including
+    /// `host_network`, which is what says whether the inode it is filed
+    /// under belongs to this pod or to the node.
+    fn pod_entry(name: &str, namespace: &str, uid: &str, host_network: bool) -> crate::PodInspect {
+        crate::PodInspect {
             status: crate::models::PodInfo {
                 pod_name: name.to_string(),
                 pod_namespace: Some(namespace.to_string()),
@@ -1099,21 +1502,53 @@ mod tests {
                     },
                 },
             },
+            host_network,
             ..Default::default()
-        };
-        map.insert(netns, Arc::new(inspect));
-        Arc::new(map)
+        }
     }
 
-    /// The generation `pod_watcher::pod_registration_flags` packs into
-    /// the `inode_num` value of a pod with this UID.
+    /// The generation the probe will stamp on a row for a pod with this
+    /// UID.
+    ///
+    /// Runs the REAL registration path to get it —
+    /// `pod_watcher::pod_registration_flags`, the same call whose result
+    /// `bpf.rs` writes into `inode_num` — rather than restating its
+    /// derivation. A fixture that re-derived it would keep agreeing with
+    /// itself after that function changed, so every test below would
+    /// stay green while the probe stamped a number the drain no longer
+    /// expects and the node dropped every denial as `stale_generation`.
     fn gen_of(uid: &str) -> u32 {
-        pod_flags::generation_for_uid(Some(uid))
+        let mut pod = k8s_openapi::api::core::v1::Pod::default();
+        pod.metadata.uid = Some(uid.to_string());
+        pod.metadata.name = Some("fixture".to_string());
+        pod.metadata.namespace = Some("media".to_string());
+        pod_flags::generation(crate::pod_watcher::pod_registration_flags(
+            &pod,
+            crate::capture_tiers::CaptureLevel::Medium,
+        ))
     }
 
+    /// A row whose cgroup id is 0 — what the kernel yields on a host
+    /// with no cgroup v2, and what no registered container can ever
+    /// have. Every pod-network case uses it, which is the point: those
+    /// rows must be attributed without the cgroup route being reachable
+    /// at all.
     fn raw(netns: u64, generation: u32, syscall_nr: u32, action: u32, count: u64) -> RawDenial {
+        raw_cg(netns, 0, generation, syscall_nr, action, count)
+    }
+
+    /// The same row with a cgroup id: the container that made the call.
+    fn raw_cg(
+        netns: u64,
+        cgroup_id: u64,
+        generation: u32,
+        syscall_nr: u32,
+        action: u32,
+        count: u64,
+    ) -> RawDenial {
         RawDenial {
             netns,
+            cgroup_id,
             generation,
             syscall_nr,
             action,
@@ -1121,6 +1556,37 @@ mod tests {
             first_seen_ns: 1_000,
             last_seen_ns: 2_000,
         }
+    }
+
+    /// One container in the cgroup registry, built the way
+    /// `pod_watcher::register_compute` builds one.
+    fn container(
+        pod_uid: &str,
+        namespace: &str,
+        pod_name: &str,
+        container_name: &str,
+        cgroup_id: u64,
+    ) -> ContainerCompute {
+        ContainerCompute {
+            pod_uid: pod_uid.to_string(),
+            namespace: namespace.to_string(),
+            pod_name: pod_name.to_string(),
+            container_name: container_name.to_string(),
+            container_id: format!("containerd://{cgroup_id:x}"),
+            pid: 4242,
+            cgroup_path: format!("kubepods.slice/cri-containerd-{cgroup_id:x}.scope"),
+            cgroup_id,
+            resources: Default::default(),
+            node: "ip-10-0-1-23.ec2.internal".to_string(),
+        }
+    }
+
+    fn registry(containers: &[ContainerCompute]) -> ComputeMap {
+        let r = Arc::new(crate::compute_registry::ComputeRegistry::new());
+        for c in containers {
+            r.insert_container(c.clone());
+        }
+        r
     }
 
     fn denial(pod: &str, syscall: &str, count: u64, first: &str, last: &str) -> SeccompDenial {
@@ -1148,6 +1614,32 @@ mod tests {
     // kernel KILLED this workload". Mapping one to the other's spelling
     // would misreport an outage as an audit note, so every raw value the
     // kernel can pass is pinned.
+
+    /// The raw values themselves, against the kernel's numbers.
+    ///
+    /// Every other test in this section feeds `action_name` a
+    /// `SECCOMP_RET_*` constant from this module and checks the name it
+    /// returns. That pins the mapping but not the constants: mistype one
+    /// and both sides of those assertions move together, so they stay
+    /// green while the kernel sends a number the table no longer has and
+    /// every denial from that action reports as `SCMP_ACT_UNKNOWN`.
+    /// These are the literals from `include/uapi/linux/seccomp.h`, which
+    /// is the only thing this file cannot re-derive.
+    #[test]
+    fn the_raw_action_values_are_the_kernels() {
+        assert_eq!(SECCOMP_RET_KILL_PROCESS, 0x8000_0000);
+        assert_eq!(SECCOMP_RET_KILL_THREAD, 0x0000_0000);
+        assert_eq!(SECCOMP_RET_TRAP, 0x0003_0000);
+        assert_eq!(SECCOMP_RET_ERRNO, 0x0005_0000);
+        assert_eq!(SECCOMP_RET_USER_NOTIF, 0x7fc0_0000);
+        assert_eq!(SECCOMP_RET_TRACE, 0x7ff0_0000);
+        assert_eq!(SECCOMP_RET_LOG, 0x7ffc_0000);
+        assert_eq!(SECCOMP_RET_ALLOW, 0x7fff_0000);
+        // Mirrors KG_SECCOMP_RET_ACTION_FULL in the probe; the two mask
+        // the same bits or the key the kernel writes and the value
+        // userspace names disagree.
+        assert_eq!(SECCOMP_RET_ACTION_FULL, 0xffff_0000);
+    }
 
     #[test]
     fn every_loggable_seccomp_action_maps_to_its_scmp_spelling() {
@@ -1207,6 +1699,7 @@ mod tests {
         let (rows, _) = build_denials(
             &[raw(42, gen_of("3f2b-uid"), u32::MAX, SECCOMP_RET_LOG, 1)],
             &map,
+            None,
             &anchor,
         );
 
@@ -1250,6 +1743,7 @@ mod tests {
         let (rows, losses) = build_denials(
             &[raw(42, gen_of("3f2b-uid"), 101, SECCOMP_RET_LOG, 17)],
             &map,
+            None,
             &anchor,
         );
 
@@ -1284,6 +1778,7 @@ mod tests {
         let (rows, losses) = build_denials(
             &[raw(42, gen_of("3f2b-uid"), 101, SECCOMP_RET_LOG, 1)],
             &map,
+            None,
             &anchor,
         );
 
@@ -1312,7 +1807,8 @@ mod tests {
         let map = pod_at_with_uid(42, "hand-built", "media", "");
         let anchor = anchor_at(utc("2026-09-14T04:05:14Z"), 10_000);
 
-        let (rows, losses) = build_denials(&[raw(42, 0, 101, SECCOMP_RET_LOG, 1)], &map, &anchor);
+        let (rows, losses) =
+            build_denials(&[raw(42, 0, 101, SECCOMP_RET_LOG, 1)], &map, None, &anchor);
 
         assert_eq!(rows.len(), 1, "the row is still reported, not dropped here");
         assert_eq!(rows[0].pod_uid, "");
@@ -1348,22 +1844,61 @@ mod tests {
         );
     }
 
-    /// The expected generation is the one the registration packs.
+    /// The expected generation is the one the registration actually
+    /// packs — checked by running both real derivations over one pod.
     ///
     /// `build_denials` no longer reads the generation back out of the
     /// kernel, so this is the only thing tying its expectation to what
-    /// `pod_watcher::pod_registration_flags` put there. A change to
-    /// either derivation that is not made to both fails here rather than
-    /// silently dropping every denial on the node as stale.
+    /// `pod_watcher::pod_registration_flags` put there. The two paths
+    /// start from the same `Pod` and must arrive at the same number:
+    ///
+    ///   * `pod_registration_flags(pod)` → `bpf.rs` → `inode_num` → the
+    ///     generation the probe stamps on the row.
+    ///   * `pod_identity_metadata(pod)` → the `ContainerMap` entry →
+    ///     `registration_generation` → the generation the drain expects.
+    ///
+    /// This test previously re-declared the first path inline as
+    /// `pack(level, generation_for_uid(uid))` and compared that to the
+    /// second. Both sides then derived from `generation_for_uid`, so it
+    /// agreed with itself no matter what `pod_registration_flags` did:
+    /// changing that function's derivation (and mirroring the change in
+    /// `pod_watcher`'s own test, as anyone making it would) left the
+    /// suite fully green while the two halves disagreed and every denial
+    /// on the node dropped as `stale_generation`. Calling the real
+    /// functions is the whole point — restating either body here puts
+    /// the hole straight back.
     #[test]
     fn the_expected_generation_is_the_one_the_registration_packs() {
-        let packed = pod_flags::pack(
+        let mut pod = k8s_openapi::api::core::v1::Pod::default();
+        pod.metadata.uid = Some("3f2b-uid".into());
+        pod.metadata.name = Some("media-transform-7d9c8-abc12".into());
+        pod.metadata.namespace = Some("media".into());
+
+        // What the probe will stamp, via the function bpf.rs calls.
+        let stamped = pod_flags::generation(crate::pod_watcher::pod_registration_flags(
+            &pod,
             crate::capture_tiers::CaptureLevel::Medium,
-            pod_flags::generation_for_uid(Some("3f2b-uid")),
-        );
+        ));
+        // What the drain will expect, via the entry pod_watcher stores.
+        let expected =
+            registration_generation(&crate::pod_watcher::pod_identity_metadata(&pod).uid);
+
         assert_eq!(
-            pod_flags::generation(packed),
-            registration_generation("3f2b-uid")
+            stamped, expected,
+            "the generation the registration packs and the one the drain derives have to be \
+             the same number; when they diverge the node reports no denials at all and says \
+             nothing about why"
+        );
+
+        // And for the UID-less pod, where the two paths spell a missing
+        // UID differently (`None` vs `""`) and still have to agree.
+        let bare = k8s_openapi::api::core::v1::Pod::default();
+        assert_eq!(
+            pod_flags::generation(crate::pod_watcher::pod_registration_flags(
+                &bare,
+                crate::capture_tiers::CaptureLevel::Medium,
+            )),
+            registration_generation(&crate::pod_watcher::pod_identity_metadata(&bare).uid),
         );
     }
 
@@ -1385,6 +1920,7 @@ mod tests {
         let (rows, losses) = build_denials(
             &[raw(42, gen_of("dead-pod-uid"), 101, SECCOMP_RET_LOG, 17)],
             &map,
+            None,
             &anchor,
         );
 
@@ -1393,20 +1929,373 @@ mod tests {
         assert_eq!(losses.unknown_pod, 0);
     }
 
+    /// The netns that is not the pod's, and the whole reason the key
+    /// carries a cgroup id.
+    ///
+    /// Both pods here are `hostNetwork: true`, so `/proc/<pid>/ns/net`
+    /// resolves to the SAME node netns for both and the `ContainerMap`
+    /// — one entry per inode — can only hold the pod that registered
+    /// last. Registering the winner evicts the loser, and the winner's
+    /// generation is also what the kernel's `inode_num` map holds, so
+    /// both stores agree with each other and both name the wrong
+    /// workload. There is no mismatch for the generation check to find:
+    /// it is not a timing window, and no ordering fixes it.
+    ///
+    /// The denial below is the LOSER's — the pod the netns route cannot
+    /// even see. It has to be credited to the loser. Two ways this can
+    /// go wrong and both have been shipped: crediting the winner is an
+    /// accusation against a workload that made no such call, and
+    /// refusing the row leaves the loser with no denial rows at all,
+    /// which the Broker reports as `DenialsObserved: False` with
+    /// `observed: 0` — "checked, and clean" — for a workload nothing was
+    /// watching.
     #[test]
-    fn a_row_whose_netns_is_no_longer_registered_is_dropped() {
+    fn a_host_network_pods_denial_is_credited_to_it_and_not_to_its_neighbour() {
+        const NODE_NETNS: u64 = 4_026_531_992;
+        const LOSER_CGROUP: u64 = 0xa1a1_0000_0000_0001;
+        const WINNER_CGROUP: u64 = 0xb2b2_0000_0000_0002;
+        let map = DashMap::new();
+        // Two hostNetwork pods on one node. The second insert evicting
+        // the first is not the test being lazy — it is precisely what
+        // registration does, and the reason the loser is unreachable
+        // through this map.
+        map.insert(
+            NODE_NETNS,
+            Arc::new(pod_entry(
+                "node-exporter-4k2wq",
+                "monitoring",
+                "loser-uid",
+                true,
+            )),
+        );
+        map.insert(
+            NODE_NETNS,
+            Arc::new(pod_entry("cilium-9xr7b", "kube-system", "winner-uid", true)),
+        );
+        let map: ContainerMap = Arc::new(map);
+        // The cgroup registry sees both, because a cgroup is per
+        // container and owes nothing to the network namespace.
+        let cgroups = registry(&[
+            container(
+                "loser-uid",
+                "monitoring",
+                "node-exporter-4k2wq",
+                "node-exporter",
+                LOSER_CGROUP,
+            ),
+            container(
+                "winner-uid",
+                "kube-system",
+                "cilium-9xr7b",
+                "cilium-agent",
+                WINNER_CGROUP,
+            ),
+        ]);
+        let anchor = anchor_at(utc("2026-09-14T04:05:14Z"), 10_000);
+
+        // The generation the probe stamps is the winner's: it is the
+        // value the winner's registration wrote to `inode_num`, and the
+        // loser's verdicts are recorded against it because they share
+        // the namespace the probe gates on. The cgroup is the loser's.
+        let (rows, losses) = build_denials(
+            &[raw_cg(
+                NODE_NETNS,
+                LOSER_CGROUP,
+                gen_of("winner-uid"),
+                101,
+                SECCOMP_RET_LOG,
+                9,
+            )],
+            &map,
+            Some(&cgroups),
+            &anchor,
+        );
+
+        assert_eq!(
+            rows.len(),
+            1,
+            "a hostNetwork pod's denial was dropped; that workload now reports no denials \
+             at all, which the Broker cannot tell from a workload that was never denied \
+             anything"
+        );
+        assert_eq!(rows[0].pod_uid, "loser-uid");
+        assert_eq!(rows[0].pod_name, "node-exporter-4k2wq");
+        assert_eq!(rows[0].pod_namespace, "monitoring");
+        assert_eq!(rows[0].count, 9);
+        assert_eq!(
+            losses,
+            AttributionLosses::default(),
+            "nothing was refused: the cgroup named the pod outright"
+        );
+
+        // And the winner's own denial is the winner's, from the same
+        // netns and the same generation — the two are told apart by the
+        // only field that differs.
+        let (rows, _) = build_denials(
+            &[raw_cg(
+                NODE_NETNS,
+                WINNER_CGROUP,
+                gen_of("winner-uid"),
+                101,
+                SECCOMP_RET_LOG,
+                4,
+            )],
+            &map,
+            Some(&cgroups),
+            &anchor,
+        );
+        assert_eq!(rows[0].pod_uid, "winner-uid");
+        assert_eq!(rows[0].pod_name, "cilium-9xr7b");
+    }
+
+    /// The refusal that survives, and must.
+    ///
+    /// kubelet, the containerd shims and any systemd unit with
+    /// `SystemCallFilter=` all run in the node's netns. Once one
+    /// hostNetwork pod is registered on it, their verdicts pass the
+    /// probe's gate and reach the drain. They are in no container's
+    /// cgroup, so they resolve to nothing and are refused — which is the
+    /// right answer, and the one the netns alone could never give:
+    /// before the cgroup id was in the key, a node process's verdict and
+    /// a hostNetwork pod's were the same row.
+    #[test]
+    fn a_denial_from_a_node_process_is_credited_to_nobody() {
+        const NODE_NETNS: u64 = 4_026_531_992;
+        const CILIUM_CGROUP: u64 = 0xb2b2_0000_0000_0002;
+        // systemd puts its units under system.slice, which is not under
+        // kubepods and is therefore in no container registry.
+        const KUBELET_CGROUP: u64 = 0x5151_0000_0000_0009;
+        let map = DashMap::new();
+        map.insert(
+            NODE_NETNS,
+            Arc::new(pod_entry("cilium-9xr7b", "kube-system", "cilium-uid", true)),
+        );
+        let map: ContainerMap = Arc::new(map);
+        let cgroups = registry(&[container(
+            "cilium-uid",
+            "kube-system",
+            "cilium-9xr7b",
+            "cilium-agent",
+            CILIUM_CGROUP,
+        )]);
+        let anchor = anchor_at(utc("2026-09-14T04:05:14Z"), 10_000);
+
+        let (rows, losses) = build_denials(
+            &[raw_cg(
+                NODE_NETNS,
+                KUBELET_CGROUP,
+                gen_of("cilium-uid"),
+                101,
+                SECCOMP_RET_LOG,
+                3,
+            )],
+            &map,
+            Some(&cgroups),
+            &anchor,
+        );
+
+        assert!(
+            rows.is_empty(),
+            "the node's own syscall was credited to the hostNetwork pod that happens to be \
+             registered on its namespace"
+        );
+        assert_eq!(losses.unresolved_cgroup, 1);
+        assert_eq!(
+            losses.unresolved_cgroup_example,
+            Some(KUBELET_CGROUP),
+            "the warning has to name something an operator can resolve"
+        );
+        assert_eq!(
+            losses.stale_generation, 0,
+            "the generations agree here — reporting this as a stale row would describe a \
+             netns recycle that did not happen and hide the real cause"
+        );
+    }
+
+    /// Opting out of CPU gauges must not opt a workload out of having
+    /// its kernel denials reported.
+    ///
+    /// `kguardian.dev/compute: "off"` files a container in the
+    /// registry's identity-only tier. That annotation is about the cost
+    /// of sampling; it says nothing about seccomp. Resolving only the
+    /// sampled tier would make an unrelated annotation silently
+    /// un-monitor a hostNetwork workload — a false all-clear bought for
+    /// free, and the exact shape of coupling this route exists to
+    /// remove.
+    #[test]
+    fn a_compute_opted_out_container_still_has_its_denials_attributed() {
+        const NODE_NETNS: u64 = 4_026_531_992;
+        const CGROUP: u64 = 0xc3c3_0000_0000_0003;
+        let map = DashMap::new();
+        map.insert(
+            NODE_NETNS,
+            Arc::new(pod_entry("batch-9xr7b", "batch", "batch-uid", true)),
+        );
+        let map: ContainerMap = Arc::new(map);
+        let cgroups: ComputeMap = Arc::new(crate::compute_registry::ComputeRegistry::new());
+        cgroups.insert_identity_only(container(
+            "batch-uid",
+            "batch",
+            "batch-9xr7b",
+            "worker",
+            CGROUP,
+        ));
+        assert!(
+            cgroups.lookup_cgroup(CGROUP).is_none(),
+            "this fixture is only meaningful while the sampled tier does NOT hold it"
+        );
+        let anchor = anchor_at(utc("2026-09-14T04:05:14Z"), 10_000);
+
+        let (rows, losses) = build_denials(
+            &[raw_cg(
+                NODE_NETNS,
+                CGROUP,
+                gen_of("batch-uid"),
+                101,
+                SECCOMP_RET_LOG,
+                2,
+            )],
+            &map,
+            Some(&cgroups),
+            &anchor,
+        );
+
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].pod_uid, "batch-uid");
+        assert_eq!(losses.unresolved_cgroup, 0);
+    }
+
+    /// The absence of the registry is counted on its own, never
+    /// mistaken for a clean node.
+    ///
+    /// `main.rs` builds the registry whenever denial capture is on, so
+    /// `None` here is a wiring fault. It has to be countable as one:
+    /// filing it under `unresolved_cgroup` would bury a fixable
+    /// misconfiguration in the same number as the node's own expected
+    /// noise, and silently attributing the row to the netns winner
+    /// would be the misattribution the whole module refuses.
+    #[test]
+    fn without_a_cgroup_registry_a_shared_netns_row_is_refused_and_counted_as_such() {
+        const NODE_NETNS: u64 = 4_026_531_992;
+        let map = DashMap::new();
+        map.insert(
+            NODE_NETNS,
+            Arc::new(pod_entry("cilium-9xr7b", "kube-system", "cilium-uid", true)),
+        );
+        let map: ContainerMap = Arc::new(map);
+        let anchor = anchor_at(utc("2026-09-14T04:05:14Z"), 10_000);
+
+        let (rows, losses) = build_denials(
+            &[raw_cg(
+                NODE_NETNS,
+                0xdead_beef,
+                gen_of("cilium-uid"),
+                101,
+                SECCOMP_RET_LOG,
+                3,
+            )],
+            &map,
+            None,
+            &anchor,
+        );
+
+        assert!(rows.is_empty());
+        assert_eq!(losses.no_container_registry, 1);
+        assert_eq!(losses.unresolved_cgroup, 0);
+        assert_eq!(losses.unknown_pod, 0);
+    }
+
+    /// A pod-network pod is still attributed by its netns, and without
+    /// the cgroup route being reachable at all.
+    ///
+    /// One pod to one inode, generation-checked. The cgroup registry is
+    /// deliberately empty here: if this path ever started consulting it,
+    /// denial reporting for ordinary pods would acquire a dependency on
+    /// containerd cgroup resolution that it does not have and does not
+    /// need.
+    #[test]
+    fn a_pod_with_its_own_netns_is_still_attributed_without_consulting_a_cgroup() {
+        let map = DashMap::new();
+        map.insert(
+            42,
+            Arc::new(pod_entry(
+                "media-transform-7d9c8-abc12",
+                "media",
+                "3f2b-uid",
+                false,
+            )),
+        );
+        let map: ContainerMap = Arc::new(map);
+        let empty = registry(&[]);
+        let anchor = anchor_at(utc("2026-09-14T04:05:14Z"), 10_000);
+
+        let (rows, losses) = build_denials(
+            &[raw_cg(42, 0, gen_of("3f2b-uid"), 101, SECCOMP_RET_LOG, 5)],
+            &map,
+            Some(&empty),
+            &anchor,
+        );
+
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].pod_name, "media-transform-7d9c8-abc12");
+        assert_eq!(losses, AttributionLosses::default());
+    }
+
+    /// Nothing on the netns and nothing on the cgroup: both routes
+    /// tried, both empty, and the row is dropped as unattributable.
+    ///
+    /// The cgroup route is offered a real (empty) registry rather than
+    /// `None`, so this counts the row's own condition and not the
+    /// Controller's. The two are different reports with different fixes
+    /// and must not share a number.
+    #[test]
+    fn a_row_neither_route_can_name_is_dropped_and_counted() {
         // A pod on some other netns: nothing at all is registered on 42.
+        let map = pod_at(7, "elsewhere", "media");
+        let empty = registry(&[]);
+        let anchor = anchor_at(utc("2026-09-14T04:05:14Z"), 10_000);
+
+        let (rows, losses) = build_denials(
+            &[raw_cg(
+                42,
+                0xfeed_face,
+                gen_of("3f2b-uid"),
+                101,
+                SECCOMP_RET_LOG,
+                1,
+            )],
+            &map,
+            Some(&empty),
+            &anchor,
+        );
+
+        assert!(rows.is_empty());
+        assert_eq!(losses.unknown_pod, 1);
+        assert_eq!(
+            losses.unresolved_cgroup, 0,
+            "an unregistered netns is not the node's shared one; conflating them would \
+             point an operator at hostNetwork when the pod has simply gone"
+        );
+        assert_eq!(losses.no_container_registry, 0);
+    }
+
+    /// The same row with no registry at all is the Controller's fault,
+    /// not the row's, and says so.
+    #[test]
+    fn a_row_that_needs_the_cgroup_route_with_no_registry_names_the_wiring_fault() {
         let map = pod_at(7, "elsewhere", "media");
         let anchor = anchor_at(utc("2026-09-14T04:05:14Z"), 10_000);
 
         let (rows, losses) = build_denials(
             &[raw(42, gen_of("3f2b-uid"), 101, SECCOMP_RET_LOG, 1)],
             &map,
+            None,
             &anchor,
         );
 
         assert!(rows.is_empty());
-        assert_eq!(losses.unknown_pod, 1);
+        assert_eq!(losses.no_container_registry, 1);
+        assert_eq!(losses.unknown_pod, 0);
     }
 
     /// The interleaving between the two stores that used to misattribute.
@@ -1437,6 +2326,7 @@ mod tests {
                 raw(42, gen_of("new-pod-uid"), 102, SECCOMP_RET_LOG, 3),
             ],
             &map,
+            None,
             &anchor,
         );
 
@@ -1448,6 +2338,79 @@ mod tests {
         );
         assert_eq!(rows[0].count, 3);
         assert_eq!(rows[0].pod_uid, "new-pod-uid");
+    }
+
+    /// The cost side of the generation check, pinned so it stays a
+    /// deliberate trade rather than an accident.
+    ///
+    /// Same registration window as the test above, but this row is the
+    /// NEW pod's own verdict, not the dead pod's: the pod is live, it
+    /// made the call itself, and the row still carries the old
+    /// generation because `bpf.rs` had not yet published the new one
+    /// when the probe fired. The older code — which read the expected
+    /// generation out of the kernel map — attributed this row
+    /// correctly, and the current code drops it.
+    ///
+    /// That is not a regression to fix by reverting: the two rows in
+    /// this window are byte-identical in every field attribution can
+    /// see, so any rule that keeps this one also credits the dead pod's
+    /// leftovers to this pod. The loss is bounded by how long `bpf.rs`
+    /// takes to drain its registration channel, and it is counted. It
+    /// is asserted here so that a future change which silently widens
+    /// the window, or which "fixes" this by reintroducing the
+    /// misattribution, has to come through this test and say so.
+    #[test]
+    fn a_live_pods_own_denials_are_dropped_while_its_registration_is_in_flight() {
+        let map = pod_at_with_uid(42, "media-transform-7d9c8-abc12", "media", "new-pod-uid");
+        let anchor = anchor_at(utc("2026-09-14T04:05:14Z"), 10_000);
+
+        // The pod is registered in the ContainerMap, but the kernel's
+        // `inode_num` still holds the previous occupant's flags, so its
+        // own verdict is stamped with the OLD generation.
+        let (rows, losses) = build_denials(
+            &[raw(42, gen_of("dead-pod-uid"), 101, SECCOMP_RET_LOG, 4)],
+            &map,
+            None,
+            &anchor,
+        );
+
+        assert!(
+            rows.is_empty(),
+            "this row is indistinguishable from the dead pod's leftovers; reporting it means \
+             reporting those too, against a workload that made no such call"
+        );
+        assert_eq!(
+            losses.stale_generation, 1,
+            "the loss has to be counted — an uncounted one is the silence the whole feature \
+             exists to remove"
+        );
+    }
+
+    // ---- the registry the cgroup route needs ----
+
+    /// The gate that used to be `COMPUTE_ENABLED` alone.
+    ///
+    /// `compute.enabled: false` is a supported install — it is one
+    /// Helm value, and the gauges are unrelated to seccomp. Before this,
+    /// setting it took the cgroup registry away, and with it every
+    /// hostNetwork workload's denials on the node; those workloads then
+    /// reported nothing, which the Broker cannot tell from having been
+    /// checked and found clean.
+    #[test]
+    fn denial_capture_alone_is_enough_to_build_the_container_registry() {
+        assert!(
+            needs_container_registry(false, true),
+            "with the gauges off and denial capture on there is still a registry to \
+             resolve a hostNetwork pod's cgroup against; without one those workloads \
+             report no denials and read as clean"
+        );
+        assert!(
+            needs_container_registry(true, false),
+            "the gauges still need it"
+        );
+        assert!(needs_container_registry(true, true));
+        // Both off is the only case that builds nothing: no reader.
+        assert!(!needs_container_registry(false, false));
     }
 
     // ---- merging ----
@@ -1540,18 +2503,18 @@ mod tests {
 
     #[test]
     fn a_denial_serialises_to_the_broker_contract() {
-        let body = serde_json::to_value(DenialBatch {
-            node: "ip-10-0-1-23.ec2.internal",
-            capturing: true,
-            denials: &[denial(
+        let body = denial_batch_body(
+            "ip-10-0-1-23.ec2.internal",
+            true,
+            Duration::from_secs(10),
+            &[denial(
                 "media-transform-7d9c8-abc12",
                 "ptrace",
                 17,
                 "2026-09-14T04:05:06Z",
                 "2026-09-14T04:05:14Z",
             )],
-        })
-        .expect("a batch serialises");
+        );
 
         assert_eq!(body["node"], "ip-10-0-1-23.ec2.internal");
         assert_eq!(body["capturing"], serde_json::json!(true));
@@ -1585,15 +2548,75 @@ mod tests {
         assert_eq!(chunks.len(), 1, "the heartbeat must still go out");
         assert!(chunks[0].is_empty());
 
-        let body = serde_json::to_value(DenialBatch {
-            node: "ip-10-0-1-23.ec2.internal",
-            capturing: true,
-            denials: chunks[0],
-        })
-        .expect("a heartbeat serialises");
+        let body = denial_batch_body(
+            "ip-10-0-1-23.ec2.internal",
+            true,
+            Duration::from_secs(10),
+            chunks[0],
+        );
         assert_eq!(body["node"], "ip-10-0-1-23.ec2.internal");
         assert_eq!(body["capturing"], serde_json::json!(true));
         assert_eq!(body["denials"], serde_json::json!([]));
+    }
+
+    /// The node declares its own cadence, on every report.
+    ///
+    /// The Broker decides whether a node's last report is too old to
+    /// believe, and `Unknown` — which is what a stale node produces —
+    /// blocks promotion. It cannot get the answer from a constant:
+    /// `SECCOMP_DENIAL_INTERVAL_SECONDS` is an operator-set Helm value
+    /// with no upper bound, so a hard-coded window makes a perfectly
+    /// healthy cluster read as stale forever at any interval above a
+    /// third of it. The Broker computes `max(300, intervalSeconds * 3)`
+    /// per node from this field.
+    ///
+    /// It has to be on the EMPTY report above all. A node that is
+    /// capturing and seeing nothing sends only heartbeats — that is
+    /// exactly the node whose freshness is being judged, and a field
+    /// present only on denial-carrying bodies would leave it falling
+    /// back to the 300s default the contract exists to replace.
+    #[test]
+    fn every_report_declares_the_nodes_drain_interval() {
+        let interval = Duration::from_secs(900);
+
+        let heartbeat = denial_batch_body("ip-10-0-1-23.ec2.internal", true, interval, &[]);
+        assert_eq!(
+            heartbeat["intervalSeconds"],
+            serde_json::json!(900),
+            "an empty heartbeat is the report a quiet node sends, and the one the staleness \
+             window is for"
+        );
+
+        let with_rows = denial_batch_body(
+            "ip-10-0-1-23.ec2.internal",
+            true,
+            interval,
+            &[denial(
+                "web-1",
+                "ptrace",
+                1,
+                "2026-09-14T04:05:06Z",
+                "2026-09-14T04:05:06Z",
+            )],
+        );
+        assert_eq!(with_rows["intervalSeconds"], serde_json::json!(900));
+
+        // camelCase on the wire, like every other field in the contract.
+        assert!(
+            heartbeat.get("interval_seconds").is_none(),
+            "the Broker deserialises intervalSeconds; the snake_case spelling would be \
+             dropped as an unknown field and silently fall back to 300s"
+        );
+
+        // The configured interval, not a constant. `from_values` clamps
+        // 0 to 1s, so the value on the wire is never the zero the
+        // Broker reads as "absent".
+        let configured = SeccompDenialConfig::from_values(None, Some("45"));
+        let body = denial_batch_body("n", true, configured.interval, &[]);
+        assert_eq!(body["intervalSeconds"], serde_json::json!(45));
+        let clamped = SeccompDenialConfig::from_values(None, Some("0"));
+        let body = denial_batch_body("n", true, clamped.interval, &[]);
+        assert_eq!(body["intervalSeconds"], serde_json::json!(1));
     }
 
     /// A node that degraded gracefully still reports in, and must report
@@ -1602,12 +2625,12 @@ mod tests {
     /// degradation exists to avoid.
     #[test]
     fn a_node_without_the_probe_reports_in_as_not_capturing() {
-        let body = serde_json::to_value(DenialBatch {
-            node: "ip-10-0-1-23.ec2.internal",
-            capturing: false,
-            denials: &[],
-        })
-        .expect("a heartbeat serialises");
+        let body = denial_batch_body(
+            "ip-10-0-1-23.ec2.internal",
+            false,
+            Duration::from_secs(10),
+            &[],
+        );
         assert_eq!(body["capturing"], serde_json::json!(false));
     }
 
@@ -1657,11 +2680,75 @@ mod tests {
         }
     }
 
+    // ---- what the Broker actually stored ----
+
+    /// A 200 is not proof the rows landed.
+    ///
+    /// The ingest validates per row and answers `200 {"accepted": n}`.
+    /// The Controller cleared the kernel map before the POST, so a row
+    /// the Broker refused exists nowhere else on the node — and a
+    /// wholly-refused batch still returns success alongside a
+    /// `capturing: true` heartbeat, which reads downstream as a clean
+    /// bill of health. Comparing what was sent against what was stored
+    /// is the only thing standing between that and silent,
+    /// unrecoverable loss.
+    #[test]
+    fn a_batch_the_broker_refused_is_detected_rather_than_read_as_delivered() {
+        // The case that matters most: every row refused, 200 OK.
+        assert_eq!(
+            refused_rows_in(37, &serde_json::json!({ "accepted": 0 })),
+            Some(37),
+            "a wholly-refused batch returns 200; read as delivered, 37 denials vanish with an \
+             all-clear behind them"
+        );
+        // Partial refusal — e.g. one row over the count ceiling.
+        assert_eq!(
+            refused_rows_in(10, &serde_json::json!({ "accepted": 9 })),
+            Some(1)
+        );
+        // Everything stored: nothing to say.
+        assert_eq!(
+            refused_rows_in(10, &serde_json::json!({ "accepted": 10 })),
+            None
+        );
+        // The heartbeat: no rows sent, none stored, not a shortfall.
+        assert_eq!(
+            refused_rows_in(0, &serde_json::json!({ "accepted": 0 })),
+            None,
+            "an empty heartbeat must not be reported as lost data every interval"
+        );
+    }
+
+    /// An older Broker must not be turned into a permanent data-loss
+    /// alarm.
+    ///
+    /// It answers without the field, or with a body that is not JSON at
+    /// all. That is "cannot say", not "refused everything" — reporting
+    /// it as loss would be the same false alarm pointing the other way,
+    /// and would train an operator to ignore the warning that matters.
+    #[test]
+    fn a_broker_that_does_not_report_a_count_is_not_read_as_refusal() {
+        assert_eq!(refused_rows_in(10, &serde_json::json!({})), None);
+        assert_eq!(refused_rows_in(10, &serde_json::Value::Null), None);
+        assert_eq!(
+            refused_rows_in(10, &serde_json::json!({ "accepted": "9" })),
+            None,
+            "a string is not a count; guessing at its meaning is how a wrong number gets \
+             reported as a real one"
+        );
+        // A Broker counting higher than it was offered is its own bug,
+        // and not one the Controller can describe from here.
+        assert_eq!(
+            refused_rows_in(10, &serde_json::json!({ "accepted": 11 })),
+            None
+        );
+    }
+
     // ---- forward compatibility ----
 
     /// An older Broker 404s this endpoint, and that must be a warning
     /// rather than anything that stops the Controller. The match is on
-    /// the exact text `client::api_post_call` formats; this pins the
+    /// the exact text `client::api_post_call_json` formats; this pins the
     /// coupling so a reword there fails here instead of silently turning
     /// every 404 into a generic error.
     #[test]
@@ -1735,14 +2822,25 @@ mod tests {
     fn a_key_decodes_at_the_offsets_the_c_struct_implies() {
         let mut bytes = Vec::new();
         bytes.extend_from_slice(&4_026_532_000u64.to_ne_bytes()); // netns
+        bytes.extend_from_slice(&0xa1a1_0000_0000_0001u64.to_ne_bytes()); // cgroup_id
         bytes.extend_from_slice(&7u32.to_ne_bytes()); // generation
         bytes.extend_from_slice(&101u32.to_ne_bytes()); // syscall_nr
         bytes.extend_from_slice(&SECCOMP_RET_LOG.to_ne_bytes()); // action
         bytes.extend_from_slice(&0u32.to_ne_bytes()); // pad
-        assert_eq!(bytes.len(), 24, "the C struct is 24 bytes");
+        assert_eq!(
+            bytes.len(),
+            DENIAL_KEY_BYTES,
+            "the C struct is pinned at this size by _Static_assert"
+        );
         assert_eq!(
             denial_key_from_bytes(&bytes),
-            Some((4_026_532_000, 7, 101, SECCOMP_RET_LOG))
+            Some((
+                4_026_532_000,
+                0xa1a1_0000_0000_0001,
+                7,
+                101,
+                SECCOMP_RET_LOG
+            ))
         );
     }
 
@@ -1755,10 +2853,25 @@ mod tests {
         assert_eq!(denial_value_from_bytes(&bytes), Some((17, 1_000, 9_000)));
     }
 
+    /// Any length but the exact one is refused, long as well as short.
+    ///
+    /// A minimum-length test was the wrong test the moment the key grew
+    /// by eight bytes: the old decoder would happily have read
+    /// `generation`, `syscall_nr` and `action` out of the new key's
+    /// `cgroup_id` and `generation`, producing confident counts against
+    /// the wrong pod and the wrong syscall — the failure this module
+    /// refuses everywhere else. A rejected row is counted into
+    /// `DrainOutcome::read_errors`, which warns.
     #[test]
-    fn a_short_key_or_value_is_rejected_rather_than_read_past() {
+    fn a_key_or_value_of_any_other_length_is_rejected_rather_than_reinterpreted() {
         assert_eq!(denial_key_from_bytes(&[0u8; 19]), None);
+        assert_eq!(denial_key_from_bytes(&[0u8; DENIAL_KEY_BYTES - 8]), None);
+        assert_eq!(denial_key_from_bytes(&[0u8; DENIAL_KEY_BYTES + 8]), None);
         assert_eq!(denial_value_from_bytes(&[0u8; 23]), None);
+        assert_eq!(
+            denial_value_from_bytes(&[0u8; DENIAL_VALUE_BYTES + 8]),
+            None
+        );
     }
 
     // ---- toolchain guard for build.rs's -mcpu=v2 ----

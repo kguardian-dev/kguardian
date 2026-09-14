@@ -197,9 +197,27 @@ pub enum DistributionState {
 /// syscalls the kernel's own filter acted on, as opposed to `drift`,
 /// which is inferred from what kguardian observed the workload call.
 ///
-/// Written whenever the broker has an answer, including when that answer
-/// is zero. `observed: 0` means "checked, and clean". The whole block
-/// being absent means "not known" — the broker was unreachable, it
+/// A settled reading, not a live counter, and `refreshedAt` says when it
+/// was taken. Every node polls the Broker on its own schedule, so every
+/// node holds a slightly different reading; writing each one back would
+/// have the fleet rewrite this CR without end. A node therefore
+/// republishes the block only when its own reading is strictly stronger
+/// than the published one — a syscall or a verdict not listed there, or
+/// an order of magnitude more events — and otherwise leaves it alone
+/// until it is more than 15 minutes old, at which point the next node to
+/// reconcile replaces it outright.
+///
+/// So `observed` trails live activity by up to 15 minutes, and it trails
+/// it in one direction: a workload climbing from 1,200 to 9,900 inside
+/// one order of magnitude keeps reporting 1,200 until the refresh, and
+/// so does a count that falls, whether because the retention window
+/// pruned older events or because the workload stopped. Read it as
+/// "denials on this scale, as of `refreshedAt`", not as a total. `GET
+/// /seccomp/denials` on the Broker is the live, per-event view.
+///
+/// Present whenever the Broker gave an answer, including when that
+/// answer is zero. `observed: 0` means "checked, and clean". The whole
+/// block being absent means "not known" — the Broker was unreachable, it
 /// predates denial capture, or nothing on this cluster is capturing
 /// denials at all.
 ///
@@ -211,19 +229,34 @@ pub enum DistributionState {
 /// so it shows `0` for a cleared workload and stays blank for an unknown
 /// one — readable without going and fetching the condition. The
 /// `DenialsObserved` condition carries the same distinction with a
-/// reason attached.
+/// reason attached, and its message renders this block and nothing else,
+/// so `kubectl get` and `kubectl describe` cannot name two different
+/// numbers.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct DenialSummary {
-    /// Denial events the broker holds for the workload, across every
-    /// syscall and action. This is the `Denials` printer column.
+    /// Denial events in this reading, across every syscall and action.
+    /// This is the `Denials` printer column. Up to 15 minutes behind the
+    /// Broker, and coarse — see the note on this block.
     pub observed: u64,
-    /// Distinct syscall names denied, sorted.
+    /// Distinct syscall names denied in this reading, sorted.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub syscalls: Vec<String>,
-    /// RFC 3339; the most recent denial, when there has been one.
+    /// The `SCMP_ACT_*` verdicts the kernel returned in this reading,
+    /// sorted. What separates a profile that is only logging from one
+    /// that is returning errors to the workload or killing it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub actions: Vec<String>,
+    /// RFC 3339; the most recent denial in this reading, when there has
+    /// been one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_seen: Option<String>,
+    /// RFC 3339; when this reading was taken from the Broker. Every
+    /// other field in the block is as of this instant. Absent on a block
+    /// written by a controller from before this field existed; the next
+    /// reconcile stamps one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub refreshed_at: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
@@ -503,7 +536,9 @@ workloadRef:
         s.denials = Some(DenialSummary {
             observed: 17,
             syscalls: vec!["mount".into(), "ptrace".into()],
+            actions: vec!["SCMP_ACT_LOG".into()],
             last_seen: Some("2026-09-14T04:05:14Z".into()),
+            refreshed_at: Some("2026-09-14T04:06:00Z".into()),
         });
         let v = serde_json::to_value(&s).unwrap();
         assert_eq!(
@@ -511,7 +546,9 @@ workloadRef:
             serde_json::json!({
                 "observed": 17,
                 "syscalls": ["mount", "ptrace"],
-                "lastSeen": "2026-09-14T04:05:14Z"
+                "actions": ["SCMP_ACT_LOG"],
+                "lastSeen": "2026-09-14T04:05:14Z",
+                "refreshedAt": "2026-09-14T04:06:00Z"
             })
         );
 
@@ -541,6 +578,10 @@ workloadRef:
             "name: Drift",
             "name: Denials",
             "jsonPath: .status.denials.observed",
+            // The reading's own timestamp: the CRD description points an
+            // operator at it for how far behind `observed` may be, so it
+            // has to be in the schema they can read.
+            "refreshedAt:",
             "name: Age",
             "- scmp",
         ] {

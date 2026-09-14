@@ -93,9 +93,18 @@ async fn main() -> Result<(), Error> {
     let cluster_capture_level = capture_config.level;
     let resolved_tiers = capture_config.resolve();
 
-    // Compute gauges (COMPUTE_*). Off means nothing is built, spawned
-    // or registered; the pod watcher gets `None` and never makes the
-    // extra containerd lookups. The registry is shared between the pod
+    // Kernel seccomp verdicts (SECCOMP_DENIAL_*). Read here rather than
+    // beside its own spawn site because the container registry below is
+    // built for this feature too — see there.
+    let seccomp_denial_config = SeccompDenialConfig::from_env();
+    info!(
+        enabled = seccomp_denial_config.enabled,
+        interval_secs = seccomp_denial_config.interval.as_secs(),
+        "seccomp denial capture"
+    );
+
+    // Compute gauges (COMPUTE_*). Off means nothing is SAMPLED and no
+    // envelope is ever posted. The registry is shared between the pod
     // watcher (writer) and the sampler (reader); its registration
     // channel feeds the contention probe's `tracked_cgroups` map, so
     // it is subscribed BEFORE the watcher can emit anything.
@@ -107,10 +116,30 @@ async fn main() -> Result<(), Error> {
         min_runq_latency_us = compute_config.min_runq_latency_us,
         "compute gauges"
     );
-    let compute_map: Option<ComputeMap> = compute_config
-        .enabled
-        .then(|| Arc::new(ComputeRegistry::new()));
-    let compute_events = compute_map.as_ref().map(|m| m.subscribe());
+    // The registry is NOT gated on `compute.enabled` alone, and that is
+    // deliberate. Seccomp denial capture attributes a hostNetwork pod's
+    // verdicts by cgroup id and has nowhere else to resolve one — so
+    // gating the registry on the gauges would mean switching off an
+    // unrelated observability feature silently switched off denial
+    // reporting for every hostNetwork workload on the node, and switched
+    // it off in the direction that reads as "clean". Either feature
+    // being on builds it; only the gauges sample from it. The chart
+    // mounts the host cgroupfs under the same condition
+    // (`templates/controller/daemonset.yaml`) — without that mount there
+    // is nothing to resolve a cgroup path against, so the two must agree.
+    let want_container_registry = kguardian::seccomp_denial::needs_container_registry(
+        compute_config.enabled,
+        seccomp_denial_config.enabled,
+    );
+    let compute_map: Option<ComputeMap> =
+        want_container_registry.then(|| Arc::new(ComputeRegistry::new()));
+    // Only the sampler consumes registrations, so only the sampler's
+    // switch subscribes. A receiver held with nothing draining it would
+    // make the broadcast channel back up to its capacity for no reason.
+    let compute_events = compute_map
+        .as_ref()
+        .filter(|_| compute_config.enabled)
+        .map(|m| m.subscribe());
     let compute_ctx = compute_map.as_ref().map(|m| ComputeContext {
         map: Arc::clone(m),
         cgroup_root: compute_config.cgroup_root.clone(),
@@ -163,19 +192,13 @@ async fn main() -> Result<(), Error> {
     let (syscall_event_sender, syscall_event_receiver) = mpsc::channel::<SyscallEventData>(1000);
     let (netpolicy_drop_sender, netpolicy_drop_receiver) = mpsc::channel::<PolicyDropEvent>(1000);
 
-    // Kernel seccomp verdicts (SECCOMP_DENIAL_*). The probe is loaded by
-    // the eBPF loader alongside the other three — it needs the pod
-    // registration stream, which only that loop consumes — and hands its
-    // map descriptors back over this channel. `None` means the feature is
-    // switched off and nothing is loaded at all; a sender that is dropped
-    // without a value means the loader decided this kernel cannot carry
-    // the probe, which the drain task treats as a clean retirement.
-    let seccomp_denial_config = SeccompDenialConfig::from_env();
-    info!(
-        enabled = seccomp_denial_config.enabled,
-        interval_secs = seccomp_denial_config.interval.as_secs(),
-        "seccomp denial capture"
-    );
+    // The denial probe is loaded by the eBPF loader alongside the other
+    // three — it needs the pod registration stream, which only that loop
+    // consumes — and hands its map descriptors back over this channel.
+    // `None` means the feature is switched off and nothing is loaded at
+    // all; a sender that is dropped without a value means the loader
+    // decided this kernel cannot carry the probe, which the drain task
+    // treats as a clean retirement.
     let (seccomp_denial_maps_sender, seccomp_denial_maps_receiver) =
         tokio::sync::oneshot::channel::<DenialMaps>();
     let seccomp_denial_maps_sender = seccomp_denial_config
@@ -199,6 +222,9 @@ async fn main() -> Result<(), Error> {
 
     let seccomp_denial_map = Arc::clone(&container_map);
     let seccomp_denial_node = node_name.clone();
+    // How a hostNetwork pod's denials get attributed at all; see
+    // `seccomp_denial::build_denials`.
+    let seccomp_denial_cgroups = compute_map.clone();
 
     // One task per subsystem.
     //
@@ -302,6 +328,7 @@ async fn main() -> Result<(), Error> {
             seccomp_denial_config,
             seccomp_denial_node,
             seccomp_denial_map,
+            seccomp_denial_cgroups,
             seccomp_denial_maps_receiver,
         )
         .await;
@@ -315,9 +342,13 @@ async fn main() -> Result<(), Error> {
         outcome
     });
     // Compute sampler, `MayRetire` for the same reason as the distributor.
-    // With COMPUTE_ENABLED=false there is no registry and no sampler;
-    // the same roster slot runs a five-minute node-only heartbeat so the
-    // broker can show the node as "off" rather than "pending" (D10).
+    // With COMPUTE_ENABLED=false there is no sampler; the same roster
+    // slot runs a five-minute node-only heartbeat so the broker can show
+    // the node as "off" rather than "pending" (D10). The registry may
+    // still exist in that case — seccomp denial capture resolves
+    // hostNetwork pods through it — which is why `compute_events` and
+    // not `compute_map` is what decides: it is subscribed only when the
+    // gauges are on.
     match (compute_map, compute_events) {
         (Some(map), Some(events)) => supervisor.spawn(
             Subsystem::ComputeSampler,

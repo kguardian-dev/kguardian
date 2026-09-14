@@ -306,17 +306,40 @@ seccomp:
     # (`SCMP_ACT_LOG`) is inert without this — the kernel logs the verdict
     # to the node's kernel ring buffer and nothing in kguardian ever reads
     # it back.
+    #
+    # Setting this also mounts the host's cgroup v2 root (`/sys/fs/cgroup`)
+    # read-only into the controller, the same mount `compute.enabled`
+    # asks for. A `hostNetwork: true` pod has no network namespace of its
+    # own, so its denials can only be attributed by the cgroup the calling
+    # task was in, and resolving a container's cgroup id needs that tree.
+    # Without it those verdicts are counted and dropped, and a workload
+    # whose denials nothing can attribute reports none at all.
     enabled: true
     # -- Seconds between drains of the in-kernel denial counter map.
-    # Denials are counted in an LRU hash keyed on (netns, generation,
-    # syscall, action) rather than streamed one ringbuffer event per
-    # denial — a compromised or malfunctioning process making the same
+    # Denials are counted in an LRU hash keyed on (netns, cgroup,
+    # generation, syscall, action) rather than streamed one ringbuffer
+    # event per denial — a compromised or malfunctioning process making the same
     # blocked syscall in a tight loop must not be able to flood the
     # controller — and the controller drains and clears that map on this
     # interval, posting the counts to the broker. Matches the syscall
-    # probe's own drain cadence (`controller/src/syscall.rs`). Lower it for
-    # faster metric/status visibility at the cost of more frequent broker
-    # POSTs; raise it on very large clusters to reduce broker load.
+    # probe's own drain cadence (`controller/src/syscall.rs`).
+    #
+    # The controller also declares this value to the broker on every
+    # report, empty heartbeats included, and the broker derives that node's
+    # staleness window from it: the node counts as still watching for
+    # `max(300, intervalSeconds * 3)` seconds after its last report, and a
+    # workload's `denials` block (and the `DenialsObserved` condition)
+    # falls back to "Unknown" only once no capturing node is inside its own
+    # window. So there is deliberately no upper bound here — the window
+    # follows the interval rather than being a second number to keep in
+    # sync with it. Below ~100 the 300 s floor governs, which is the point:
+    # a node that misses a drain or two is late, not gone. The broker does
+    # cap the cadence it will believe at one day, so beyond that the window
+    # stops widening; nothing sane is anywhere near it.
+    #
+    # Lower it for faster metric/status visibility at the cost of more
+    # frequent broker POSTs; raise it on very large clusters to reduce
+    # broker load.
     intervalSeconds: 10
 
 # -- Live compute gauges and noisy-neighbour detection. Three layers, each

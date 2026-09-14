@@ -220,19 +220,53 @@ const DENIAL_ROLLUP_NAME_ROW_COST_BYTES: u64 = 512;
 /// be the worse failure.
 const MAX_DENIAL_SERIES: usize = 10_000;
 
-/// How long a node's capture heartbeat stays trustworthy.
+/// Floor on how long a node's capture heartbeat stays trustworthy.
 ///
-/// The Controller reports every `SECCOMP_DENIAL_INTERVAL_SECONDS` (10 s by
-/// default), so this is 30 consecutive missed reports — generous enough that
-/// a node under load, a rolling Controller restart or a brief network
-/// partition never flips the cluster to "not capturing", short enough that a
-/// genuinely dead capture path is noticed in minutes rather than at the next
-/// retention pass.
+/// The window itself is PER NODE, computed from the cadence the node declares
+/// on every report — see [`CAPTURE_REPORT_STALE_INTERVALS`]. It has to be:
+/// the Controller's drain interval is an operator-set Helm value with no
+/// upper bound, so any fixed window shorter than it makes a fleet that is
+/// capturing perfectly read `Unknown` between every pair of reports, forever.
+/// Coupling the Broker to the Controller's chart value would be the obvious
+/// fix and the wrong one — the Broker cannot see that chart. The node
+/// declares its own cadence and the Broker trusts it.
+///
+/// This floor is what a node that declares nothing gets. At the 10 s default
+/// drain it is 30 consecutive missed reports — generous enough that a node
+/// under load, a rolling Controller restart or a brief network partition
+/// never flips the cluster to "not capturing", short enough that a genuinely
+/// dead capture path is noticed in minutes rather than at the next retention
+/// pass.
 ///
 /// Deliberately shorter than `pod_compute_latest`'s 600 s staleness: that one
 /// decides whether to delete a row, this one decides whether kguardian is
 /// willing to tell an operator a workload is clean.
-const CAPTURE_REPORT_STALE_SECS: i64 = 300;
+const CAPTURE_REPORT_STALE_FLOOR_SECS: i64 = 300;
+
+/// Consecutive reports a node may miss before its heartbeat stops counting.
+///
+/// Three, so the window is `max(300 s, declared interval x 3)`. Two drains
+/// can be lost to a Controller restart rolling over that node without the
+/// cluster flipping to Unknown, and a node that has genuinely gone quiet is
+/// noticed within three of its OWN intervals rather than at a wall-clock
+/// figure that has nothing to do with how often it speaks.
+const CAPTURE_REPORT_STALE_INTERVALS: i64 = 3;
+
+/// Ceiling on the drain interval a node may declare.
+///
+/// The declared interval widens that node's staleness window, so an absurd
+/// value is a node claiming its heartbeat stays trustworthy for years — the
+/// false all-clear again, arriving through a field that looks like a timeout.
+/// A day is four orders of magnitude above the 10 s default and three above
+/// anything an operator would set on purpose.
+///
+/// Clamped at ingest rather than rejected, unlike [`MAX_DENIAL_COUNT`]: the
+/// interval rides on the heartbeat, and refusing the report over it would
+/// throw away the capture evidence the report exists to carry because of a
+/// field that only widens a timeout. `seccomp_denial_nodes.interval_seconds`
+/// carries the same bound as a CHECK constraint, so the multiplication in
+/// [`capture_live_sql`] cannot overflow on a row this path did not write.
+const MAX_REPORT_INTERVAL_SECS: i64 = 86_400;
 
 /// Default refresh cadence for the one denial metric that needs a query. See
 /// [`metrics_interval`] for why this is 15 s and why it must not be folded
@@ -280,35 +314,108 @@ pub struct DenialInput {
 /// Sent on EVERY drain, including one that drained nothing. An empty batch
 /// is not a no-op here: it is the node's heartbeat, and it is what lets the
 /// Broker distinguish "nothing was denied" from "nothing was watching".
+///
+/// `camelCase` is load-bearing, not decoration: the Controller serialises
+/// this struct with `rename_all = "camelCase"`, so it sends `intervalSeconds`.
+/// Without the matching attribute here every multi-word field silently
+/// deserialises to its `#[serde(default)]` — the staleness window would fall
+/// back to the floor on every report while both halves looked implemented.
+/// `node`, `capturing` and `denials` are single words and cannot expose it,
+/// which is why it survived review. See
+/// `wire_field_names_match_what_the_controller_sends`.
 #[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct DenialBatch {
     node: String,
     /// Whether the denial probe is actually attached on this node.
     ///
-    /// `None` from a Controller that predates the heartbeat. That is not
-    /// treated as `false`: such a Controller only POSTs when it HAS denials,
-    /// so a batch carrying rows is itself proof of capture. See
-    /// [`DenialBatch::is_capturing`].
+    /// Absent means the report did not say, which is NOT the same as `false`
+    /// and is not treated as capture either: see [`DenialBatch::validate`].
     #[serde(default)]
     capturing: Option<bool>,
+    /// The node's configured drain cadence in seconds — how long the
+    /// Controller sleeps between drains, sent on every report including an
+    /// empty one.
+    ///
+    /// It is the node's own declaration, because the Broker has no way to
+    /// read the Controller's configuration and a fixed staleness window
+    /// shorter than a supported drain interval makes a healthy cluster read
+    /// `Unknown` forever. Absent or zero falls back to
+    /// [`CAPTURE_REPORT_STALE_FLOOR_SECS`]; see [`declared_interval_seconds`].
+    #[serde(default)]
+    interval_seconds: Option<u64>,
     #[serde(default)]
     denials: Vec<DenialInput>,
 }
 
-impl DenialBatch {
+/// One report, validated: everything the ingest path is allowed to act on.
+struct ValidatedReport {
+    /// See [`FoldedBatch::rows`].
+    rows: Vec<DenialInput>,
+    /// See [`FoldedBatch::rejected`].
+    rejected: BTreeMap<&'static str, usize>,
+    /// See [`FoldedBatch::from_the_future`].
+    from_the_future: usize,
     /// Whether this report is evidence that the node is capturing.
+    capturing: bool,
+    /// The cadence the node declared, normalised for storage.
+    interval_seconds: Option<i64>,
+}
+
+impl DenialBatch {
+    /// Validate and fold the report, and decide from the RESULT whether the
+    /// node is capturing.
     ///
-    /// Denials in hand outrank the flag in both directions. A batch carrying
-    /// rows proves the probe fired, whatever the flag says or fails to say —
-    /// so an older Controller with no flag is still recognised, and a node
-    /// that reports `capturing: false` while shipping denials is believed on
-    /// the evidence rather than on its own self-assessment.
+    /// The two are one function because the order between them is the whole
+    /// correctness argument, and a comment asking the caller to keep it was
+    /// not enough: this consumes the batch, so there is no raw vector left
+    /// for a later caller to count.
     ///
-    /// Absent the flag AND absent denials, the honest answer is "not known to
-    /// be capturing", which this returns as `false`. Claiming capture from a
-    /// silent report is the one error that produces a false all-clear.
-    fn is_capturing(&self) -> bool {
-        self.capturing.unwrap_or(false) || !self.denials.is_empty()
+    /// Counted before validation, a report whose every row was rejected — a
+    /// Controller shipping empty drains, or one unauthenticated POST of one
+    /// garbage row, since `BROKER_AUTH_TOKEN` is optional — still recorded
+    /// the node as capturing. That is the false all-clear arriving through
+    /// the one field that exists to withhold it.
+    ///
+    /// What survives validation still outranks the flag in both directions.
+    /// Rows the kernel produced prove the probe fired whatever the flag says,
+    /// so a node reporting `capturing: false` while shipping real denials is
+    /// believed on the evidence rather than on its own self-assessment.
+    /// Absent the flag AND absent accepted rows, the honest answer is "not
+    /// known to be capturing".
+    fn validate(self, now: DateTime<Utc>) -> ValidatedReport {
+        let interval_seconds = declared_interval_seconds(self.interval_seconds);
+        let FoldedBatch {
+            rows,
+            rejected,
+            from_the_future,
+        } = fold_batch(self.denials, now);
+        let capturing = self.capturing.unwrap_or(false) || !rows.is_empty();
+        ValidatedReport {
+            rows,
+            rejected,
+            from_the_future,
+            capturing,
+            interval_seconds,
+        }
+    }
+}
+
+/// The staleness cadence a report declares, normalised for storage.
+///
+/// `None` for absent or zero — the contract's fallback, which
+/// [`capture_live_sql`] reads as the [`CAPTURE_REPORT_STALE_FLOOR_SECS`]
+/// floor. Anything above [`MAX_REPORT_INTERVAL_SECS`] is clamped to it rather
+/// than rejected, so a nonsense cadence costs a timeout bound and never the
+/// heartbeat riding with it.
+fn declared_interval_seconds(raw: Option<u64>) -> Option<i64> {
+    match raw.unwrap_or(0) {
+        0 => None,
+        declared => Some(
+            i64::try_from(declared)
+                .unwrap_or(MAX_REPORT_INTERVAL_SECS)
+                .min(MAX_REPORT_INTERVAL_SECS),
+        ),
     }
 }
 
@@ -447,14 +554,55 @@ fn reject_reason(d: &DenialInput) -> Option<&'static str> {
 /// for the same reason, and that also normalises an inverted pair from a
 /// node whose clock stepped between the two reads.
 ///
-/// Returns the folded rows and the per-field reject counts.
-fn fold_batch(denials: Vec<DenialInput>) -> (Vec<DenialInput>, BTreeMap<&'static str, usize>) {
+/// # Why a future timestamp is clamped when a nonsense `count` is rejected
+///
+/// [`reject_reason`] validates seven fields and neither timestamp, and a
+/// `last_seen` ahead of the Broker's clock is the one bad value that never
+/// goes away: the prune is `last_seen < NOW() - interval`, so a row stamped a
+/// year ahead outlives every retention window that will run in that year, and
+/// `GET /seccomp/denials` orders `last_seen DESC`, so it also pins the top of
+/// the list for the same year. One node with a skewed clock reaches it by
+/// accident; a single POST reaches it on purpose, since `BROKER_AUTH_TOKEN`
+/// is optional.
+///
+/// Clamping rather than rejecting, which is the opposite of what
+/// [`MAX_DENIAL_COUNT`] gets, and for two reasons that do not apply to a
+/// count:
+///
+/// - the count ceiling is ~40x the most extreme physical bound on one drain,
+///   so no real node ever meets it and rejecting costs nothing real. A clock
+///   a few seconds ahead of the Broker's is ordinary NTP drift on a healthy
+///   node, so rejecting here would throw away real kernel verdicts over an
+///   environmental condition — in the signal whose entire claim is that it
+///   already happened.
+/// - a clamped count would be a number nobody counted, indistinguishable from
+///   a measurement from that point on. A timestamp clamped to the moment the
+///   report was read is not invented: the kernel acted before the node
+///   drained it and the node drained it before the Broker read it, so `now`
+///   is a bound that is true by construction. The `count` on the row — the
+///   quantity an operator acts on — is untouched either way.
+///
+/// `now` is passed in rather than read here so one report clamps every row
+/// against one ceiling, and so the rule is testable without a clock.
+///
+/// Returns the folded rows, the per-field reject counts and how many entries
+/// were ahead of the clock.
+fn fold_batch(denials: Vec<DenialInput>, now: DateTime<Utc>) -> FoldedBatch {
     let mut rejected: BTreeMap<&'static str, usize> = BTreeMap::new();
+    let mut from_the_future = 0usize;
     let mut folded: BTreeMap<(String, String, String), DenialInput> = BTreeMap::new();
-    for d in denials {
+    for mut d in denials {
         if let Some(field) = reject_reason(&d) {
             *rejected.entry(field).or_insert(0) += 1;
             continue;
+        }
+        // Before the fold, so no future value can reach the min/max below or
+        // the upsert's LEAST/GREATEST. Both ends take the same ceiling, so a
+        // clamped pair stays ordered.
+        if d.first_seen > now || d.last_seen > now {
+            from_the_future += 1;
+            d.first_seen = d.first_seen.min(now);
+            d.last_seen = d.last_seen.min(now);
         }
         let key = (d.pod_uid.clone(), d.syscall.clone(), d.action.clone());
         match folded.get_mut(&key) {
@@ -487,7 +635,24 @@ fn fold_batch(denials: Vec<DenialInput>) -> (Vec<DenialInput>, BTreeMap<&'static
             }
         }
     }
-    (folded.into_values().collect(), rejected)
+    FoldedBatch {
+        rows: folded.into_values().collect(),
+        rejected,
+        from_the_future,
+    }
+}
+
+/// What one batch amounted to after validation and folding.
+struct FoldedBatch {
+    /// The rows that survived, folded onto the storage key.
+    rows: Vec<DenialInput>,
+    /// Per-field reject counts, so the ingest log can name the field that
+    /// failed rather than report a bare total.
+    rejected: BTreeMap<&'static str, usize>,
+    /// Entries whose timestamps were ahead of the Broker's clock and were
+    /// pulled back to it. A skewed node clock, not a rejected row — but an
+    /// operator-visible condition either way.
+    from_the_future: usize,
 }
 
 // ---------------------------------------------------------------------------
@@ -578,17 +743,33 @@ pub async fn post_seccomp_denials(
         return Err(actix_web::error::ErrorBadRequest("node too long"));
     }
 
-    // Read BEFORE the batch is consumed by fold_batch, which takes the
-    // denials by value.
-    let capturing = batch.is_capturing();
-
-    let (rows, rejected) = fold_batch(batch.denials);
+    // One clock reading for the whole report: every row is clamped against
+    // the same ceiling, so the fold is a function of the batch rather than of
+    // how long it took to walk it.
+    let ValidatedReport {
+        rows,
+        rejected,
+        from_the_future,
+        capturing,
+        interval_seconds,
+    } = batch.validate(Utc::now());
     if !rejected.is_empty() {
         // Per-field, not a bare total: "12 rejected" tells an operator
         // nothing, "12 rejected on count" says the controller is shipping
         // empty drains and "12 rejected on podUid" says attribution broke on
         // the node.
         warn!(%node, ?rejected, "seccomp denial batch had unusable entries");
+    }
+    if from_the_future > 0 {
+        // Not a rejection, so it does not belong in the map above — but a
+        // node whose clock runs ahead of the Broker's is an operator-fixable
+        // fault, and the clamp would otherwise be silent.
+        warn!(
+            %node,
+            entries = from_the_future,
+            "seccomp denial batch carried timestamps ahead of the broker's clock; \
+             they were clamped to the ingest time, check the node's clock"
+        );
     }
 
     // The heartbeat, recorded on EVERY report including an empty one — and
@@ -602,7 +783,7 @@ pub async fn post_seccomp_denials(
     let heartbeat_node = node.clone();
     web::block(move || -> Result<(), DbError> {
         let mut conn = heartbeat_pool.get()?;
-        upsert_node_report(&mut conn, &heartbeat_node, capturing)
+        upsert_node_report(&mut conn, &heartbeat_node, capturing, interval_seconds)
     })
     .await?
     .map_err(actix_web::error::ErrorInternalServerError)?;
@@ -792,7 +973,19 @@ fn upsert_denials(conn: &mut PgConnection, rows: &[NewDenial]) -> Result<(), DbE
 
 /// Record one node's capture heartbeat. Replaces the node's row wholesale —
 /// it is a liveness snapshot, not history.
-fn upsert_node_report(conn: &mut PgConnection, node: &str, capturing: bool) -> Result<(), DbError> {
+///
+/// `interval_seconds` is overwritten on every report, `None` included, for
+/// exactly that reason: it is the cadence the node is running NOW, and a node
+/// that stops declaring one must fall back to the floor rather than keep a
+/// wide window some earlier configuration justified. That direction fails
+/// safe — too short a window reads Unknown, too long a window reads
+/// all-clear.
+fn upsert_node_report(
+    conn: &mut PgConnection,
+    node: &str,
+    capturing: bool,
+    interval_seconds: Option<i64>,
+) -> Result<(), DbError> {
     use schema::seccomp_denial_nodes::dsl as sdn;
     let now = Utc::now();
     diesel::insert_into(sdn::seccomp_denial_nodes)
@@ -800,54 +993,77 @@ fn upsert_node_report(conn: &mut PgConnection, node: &str, capturing: bool) -> R
             sdn::node_name.eq(node),
             sdn::capturing.eq(capturing),
             sdn::updated_at.eq(now),
+            sdn::interval_seconds.eq(interval_seconds),
         ))
         .on_conflict(sdn::node_name)
         .do_update()
-        .set((sdn::capturing.eq(capturing), sdn::updated_at.eq(now)))
+        .set((
+            sdn::capturing.eq(capturing),
+            sdn::updated_at.eq(now),
+            sdn::interval_seconds.eq(interval_seconds),
+        ))
         .execute(conn)?;
     Ok(())
+}
+
+/// The liveness question, as one statement: has any node reported
+/// `capturing = true` inside ITS OWN staleness window.
+///
+/// Rendered from the constants rather than written out so the window cannot
+/// drift from what ingest clamps the declared interval to, and built here
+/// rather than inline so a test can read the statement production sends.
+///
+/// `$1` is the Broker's clock, bound rather than taken as `NOW()`: the
+/// `updated_at` it is compared against was stamped by [`upsert_node_report`]
+/// from the same clock, and mixing in the database's would make the answer
+/// depend on the skew between two machines.
+///
+/// `LIMIT 1` rather than a COUNT — the question is existence, and one row is
+/// the whole answer.
+fn capture_live_sql() -> String {
+    format!(
+        "SELECT node_name FROM seccomp_denial_nodes \
+         WHERE capturing AND updated_at >= $1 - make_interval(secs => GREATEST(\
+         {CAPTURE_REPORT_STALE_FLOOR_SECS}, \
+         COALESCE(interval_seconds, 0) * {CAPTURE_REPORT_STALE_INTERVALS})) \
+         LIMIT 1"
+    )
 }
 
 /// Whether kguardian can currently see seccomp verdicts anywhere on this
 /// cluster — the fact that decides whether a `denials` block of `total: 0`
 /// is an all-clear or a lie.
 ///
-/// The question is "is anything watching", not "does a denial row exist",
-/// and the difference is the whole point. Three states, in order:
+/// One question, one answer: **a node reported `capturing = true` recently
+/// enough to be believed**. Nothing else counts, and in particular the
+/// existence of a denial row does not.
 ///
-/// 1. **A node reported within [`CAPTURE_REPORT_STALE_SECS`] with
-///    `capturing = true`** -> live. The real answer, and the only positive
-///    one that does not depend on something having been denied. It proves
-///    the whole path works — probe loaded, drain running, POST reaching the
-///    Broker.
-/// 2. **No such node, and the node table is EMPTY** -> fall back to "does
-///    any denial row exist". Empty means nothing has ever reported a
-///    heartbeat, which is exactly and only the pre-heartbeat Controller: it
-///    POSTs only when it HAS denials, so it never sends the empty batch that
-///    would create a row. A denial from one is still proof that capture
-///    worked. Without this arm, upgrading the Broker ahead of the Controller
-///    — the supported order — would blank every `denials` block.
-/// 3. **No such node, but the node table is NOT empty** -> not live. Nodes
-///    are reporting and none of them is capturing, or none has reported
-///    recently enough to be believed. Disabling capture, scaling the
-///    DaemonSet to zero, and rebuilding nodes with `CONFIG_AUDIT=n` all land
-///    here, and all of them should read as Unknown rather than as clean.
+/// # Why a stored row is not an answer
 ///
-/// That third arm is what stops old rows from outliving the capture that
-/// produced them. The fallback used to run unconditionally, so one denial
-/// row of any age anywhere kept the cluster reading "live" forever — the
-/// exact false all-clear the heartbeat was added to remove.
+/// It used to be one, as a fallback for a Controller too old to send the
+/// heartbeat. No such Controller exists: `seccomp_denials` and
+/// `seccomp_denial_nodes` were added in the same commit and the feature has
+/// never shipped, so the arm defended a case that cannot occur — and cost two
+/// false all-clears to keep. A denial row from a capture path that has since
+/// been switched off kept the whole cluster reading "live" for as long as the
+/// row survived retention, and a database restored into a cluster that never
+/// enabled capture read "live" off someone else's history. Both are gone with
+/// the arm, and so is every future route through row existence, because the
+/// question is now about what is watching rather than about what is stored.
 ///
-/// # Residual gap
+/// What is left is the honest set of states. A node reporting with the probe
+/// attached is live. Disabling capture, scaling the DaemonSet to zero,
+/// rebuilding nodes with `CONFIG_AUDIT=n` and a Controller that died all land
+/// on not-live, and all of them should read as Unknown rather than as clean.
 ///
-/// A database restored into a cluster that never enabled capture has an
-/// empty node table and old denial rows, so arm 2 calls it live and every
-/// workload gets a `total: 0` block computed from someone else's history.
-/// Nothing in the schema separates "these rows came from a Controller too
-/// old to send heartbeats" from "these rows came from somewhere else", so
-/// the fallback cannot tell the two apart. Narrowing arm 2 by row age would
-/// not fix it either: a restored dump carries its original timestamps.
-/// Closing it needs an install identity stamped on the rows.
+/// # Staleness is per node
+///
+/// The window is `max(CAPTURE_REPORT_STALE_FLOOR_SECS, declared interval x
+/// CAPTURE_REPORT_STALE_INTERVALS)`, evaluated per row from the cadence that
+/// node declared. A fixed window cannot work: the drain interval is an
+/// operator-set value with no upper bound, so one supported Helm value made
+/// every node on a capturing fleet look stale between reports and pinned the
+/// entire cluster at Unknown.
 ///
 /// # Known limit
 ///
@@ -856,39 +1072,20 @@ fn upsert_node_report(conn: &mut PgConnection, node: &str, capturing: bool) -> R
 /// still gets a `total: 0`. Fixing that needs the workload's pods resolved
 /// to their nodes; see [`load_denial_index`].
 fn capture_is_live(conn: &mut PgConnection) -> Result<bool, DbError> {
-    use schema::seccomp_denial_nodes::dsl as sdn;
-    use schema::seccomp_denials::dsl as sd;
-
-    let cutoff = Utc::now() - chrono::Duration::seconds(CAPTURE_REPORT_STALE_SECS);
-    let fresh_capturing: Option<String> = sdn::seccomp_denial_nodes
-        .filter(sdn::capturing.eq(true))
-        .filter(sdn::updated_at.ge(cutoff))
-        .select(sdn::node_name)
-        .first(conn)
-        .optional()?;
-    if fresh_capturing.is_some() {
-        return Ok(true);
+    // The name is never read — the row's existence IS the answer — but
+    // `sql_query` needs somewhere to decode a column into.
+    #[derive(diesel::QueryableByName)]
+    struct LiveNode {
+        #[diesel(sql_type = Text)]
+        #[allow(dead_code)]
+        node_name: String,
     }
 
-    // Any row at all, fresh or stale, capturing or not: the question this
-    // answers is whether heartbeats are a signal on this cluster, not
-    // whether they are currently positive.
-    let any_node_has_reported: Option<String> = sdn::seccomp_denial_nodes
-        .select(sdn::node_name)
-        .first(conn)
+    let live: Option<LiveNode> = diesel::sql_query(capture_live_sql())
+        .bind::<Timestamptz, _>(Utc::now())
+        .get_result(conn)
         .optional()?;
-    if any_node_has_reported.is_some() {
-        return Ok(false);
-    }
-
-    // `LIMIT 1` rather than a COUNT: the question is existence, and on a
-    // table with millions of rows a count would be the most expensive part
-    // of serving a profile list that mostly wants to say "nothing here".
-    Ok(sd::seccomp_denials
-        .select(sd::id)
-        .first::<i64>(conn)
-        .optional()?
-        .is_some())
+    Ok(live.is_some())
 }
 
 // ---------------------------------------------------------------------------
@@ -1060,8 +1257,11 @@ pub(crate) struct DenialIndex {
     /// an all-clear in the CR status for a workload nobody is watching.
     ///
     /// When it is true, a workload with no rows genuinely has no denials and
-    /// its `0` is a real all-clear. [`capture_is_live`] carries the residual
-    /// case where that is not quite so.
+    /// its `0` is a real all-clear — for every workload whose pods ran on a
+    /// node that is capturing. [`capture_is_live`] carries the one case left
+    /// where that is not quite so: the answer is cluster-wide, so a mixed
+    /// fleet can still hand a `0` to a workload that only ever ran on nodes
+    /// nobody was watching.
     observed: bool,
 }
 
@@ -1219,21 +1419,49 @@ fn rollup_totals_sql(scoped: bool) -> String {
     )
 }
 
-/// The `(syscall, action)` pairs behind a block's name lists, bounded on
-/// both axes.
+/// The `(syscall, action)` pairs behind a block's name lists, bounded per
+/// workload.
 ///
 /// `ROW_NUMBER()` caps each workload at
 /// [`MAX_DENIAL_ROLLUP_PAIRS_PER_WORKLOAD`] so one workload denied on
-/// hundreds of syscalls cannot crowd out the rest, and the outer LIMIT caps
-/// the whole read at [`MAX_DENIAL_ROLLUP_NAME_ROWS`] — the figure
-/// [`denial_index_charge_kib`] reserves against the read budget. A scoped
-/// read cannot need more than one workload's own cap, so that is its LIMIT.
+/// hundreds of syscalls cannot crowd out the rest. That is the bound that
+/// matters; the outer LIMIT of [`MAX_DENIAL_ROLLUP_NAME_ROWS`] — the figure
+/// [`denial_index_charge_kib`] reserves against the read budget — is the
+/// cluster-wide ceiling behind it. A scoped read cannot need more than one
+/// workload's own cap, so that is its LIMIT.
 ///
-/// Both orderings are `(syscall, action)`, the order the `BTreeSet`s in
-/// [`DenialIndex::block_for`] already truncate in, so SQL and Rust drop the
-/// same pairs rather than two different halves of the list. The outer ORDER
-/// BY runs before the LIMIT and is total, so truncation is deterministic
-/// across identical polls instead of reshuffling every 15 s.
+/// # Byte order, not the database's
+///
+/// Every `ORDER BY` here is `COLLATE "C"`, and that is not decoration. The
+/// ranks decide WHICH pairs survive the cap and
+/// [`DenialIndex::block_for`] then truncates the survivors through a
+/// `BTreeSet`, which orders by UTF-8 bytes. Unqualified, the SQL orders by
+/// the DATABASE's collation, and on a glibc Postgres — RDS, Cloud SQL, the
+/// official non-alpine image — `en_US.UTF-8` ignores punctuation at the
+/// primary level and inverts case, so it disagrees with byte order on
+/// exactly the shape syscall names have: it sorts `ioctl` before
+/// `io_uring_enter` where bytes sort `io_uring_enter` first. The two
+/// truncations then keep different sets, and an operator building an
+/// allow-list from `status.denials.syscalls` gets a syscall the kernel never
+/// denied in place of one it did. `COLLATE "C"` is memcmp, which is what
+/// `BTreeSet<String>` does, so the two orderings become one ordering. (musl's
+/// `en_US.UTF-8` IS byte order, which is why a Postgres on alpine cannot see
+/// any of this.)
+///
+/// # The cluster-wide ceiling truncates evenly
+///
+/// The outer `ORDER BY` leads with `rn`, so the LIMIT takes every workload's
+/// first pair before it takes any workload's second. That is the difference
+/// between a ceiling that shortens lists and one that erases them. Ordered by
+/// workload first, the workloads that sorted last lost their whole name list
+/// while keeping a non-zero `total` — which the distributor renders as "280
+/// denials on 0 syscalls" — and which workload fell past the cap depended on
+/// OTHER namespaces' pair counts, so a workload at the boundary flipped
+/// between a populated list and an empty one and made every node rewrite the
+/// CR on every flip. Leading with `rn` bounds the read by the same number of
+/// rows while guaranteeing each workload a share of it. It is still a total
+/// order, so truncation is deterministic across identical polls instead of
+/// reshuffling every 15 s.
 ///
 /// DISTINCT before the window: the same pair repeats once per pod, and
 /// ranking without collapsing that first would spend a 500-replica
@@ -1249,11 +1477,12 @@ fn rollup_names_sql(scoped: bool) -> String {
          SELECT pod_namespace, workload_kind, workload_name, syscall, action, \
          ROW_NUMBER() OVER ( \
          PARTITION BY pod_namespace, workload_kind, workload_name \
-         ORDER BY syscall, action) AS rn FROM ( \
+         ORDER BY syscall COLLATE \"C\", action COLLATE \"C\") AS rn FROM ( \
          SELECT DISTINCT pod_namespace, workload_kind, workload_name, syscall, action\
          {ROLLUP_ATTRIBUTED}{}) pairs) ranked \
          WHERE rn <= {MAX_DENIAL_ROLLUP_PAIRS_PER_WORKLOAD} \
-         ORDER BY pod_namespace, workload_kind, workload_name, syscall, action \
+         ORDER BY rn, pod_namespace COLLATE \"C\", workload_kind COLLATE \"C\", \
+         workload_name COLLATE \"C\", syscall COLLATE \"C\", action COLLATE \"C\" \
          LIMIT {limit}",
         if scoped { ROLLUP_ONLY } else { "" },
     )
@@ -1382,6 +1611,25 @@ fn load_denial_index(
             diesel::sql_query(names_sql).load(conn)?,
         ),
     };
+
+    // Hitting the cluster-wide ceiling is reported, not swallowed. Every
+    // workload still keeps a share of the read — see `rollup_names_sql` — so
+    // no block silently loses its whole list, but the lists ARE shorter than
+    // the data supports, and an operator reading `syscalls` to build an
+    // allow-list needs to know that. The totals are never affected.
+    let names_cap = if only.is_some() {
+        MAX_DENIAL_ROLLUP_PAIRS_PER_WORKLOAD
+    } else {
+        MAX_DENIAL_ROLLUP_NAME_ROWS
+    };
+    if names.len() as i64 >= names_cap {
+        warn!(
+            rows = names.len(),
+            cap = names_cap,
+            "seccomp denial rollup hit its name-row ceiling; syscall and action \
+             lists are truncated for every workload (totals are not)"
+        );
+    }
 
     let mut index = DenialIndex {
         by_workload: HashMap::new(),
@@ -1745,6 +1993,13 @@ mod tests {
         DateTime::parse_from_rfc3339(s).unwrap().with_timezone(&Utc)
     }
 
+    /// The Broker's clock, as the pure fold tests see it: after every
+    /// timestamp [`input`] produces, so the clamp is inert unless a test
+    /// deliberately reaches past it.
+    fn ingest_now() -> DateTime<Utc> {
+        ts("2026-09-14T09:00:00Z")
+    }
+
     fn input(pod: &str, syscall: &str, action: &str, count: i64) -> DenialInput {
         DenialInput {
             pod_uid: format!("uid-{pod}"),
@@ -1769,6 +2024,44 @@ mod tests {
     /// container's denials, and Postgres rejects an ON CONFLICT DO UPDATE
     /// that touches one row twice, so not folding is an error rather than a
     /// duplicate row.
+    /// The wire, spelled the way the Controller spells it.
+    ///
+    /// Deserialised from a JSON literal rather than from a `DenialBatch`
+    /// built in Rust, because a round-trip through the struct passes whether
+    /// or not the field names agree — it would serialise and deserialise
+    /// under the same rename, and prove nothing about what crosses the wire.
+    /// This body is the Controller's `rename_all = "camelCase"` output.
+    ///
+    /// The failure this pins is silent: drop the attribute on `DenialBatch`
+    /// and `intervalSeconds` no longer matches `interval_seconds`, so
+    /// `#[serde(default)]` yields `None`, every node falls back to the
+    /// staleness floor, and both halves of the feature still look
+    /// implemented. `node`, `capturing` and `denials` are single words and
+    /// cannot catch it.
+    #[test]
+    fn wire_field_names_match_what_the_controller_sends() {
+        let body = r#"{
+            "node": "ip-10-0-1-23",
+            "capturing": true,
+            "intervalSeconds": 900,
+            "denials": []
+        }"#;
+        let batch: DenialBatch = serde_json::from_str(body).expect("controller body must parse");
+        assert_eq!(
+            batch.interval_seconds,
+            Some(900),
+            "intervalSeconds did not reach the field; the struct is missing \
+             rename_all = \"camelCase\" and staleness silently uses the floor"
+        );
+        assert_eq!(batch.node, "ip-10-0-1-23");
+        assert_eq!(batch.capturing, Some(true));
+
+        // And the declared cadence survives into the validated report, so
+        // the assertion above cannot pass while the value is dropped later.
+        let report = batch.validate(ingest_now());
+        assert_eq!(report.interval_seconds, Some(900));
+    }
+
     #[test]
     fn folding_sums_counts_for_one_storage_key() {
         let mut a = input("web-1", "ptrace", "SCMP_ACT_LOG", 17);
@@ -1778,7 +2071,7 @@ mod tests {
         b.first_seen = ts("2026-09-14T04:06:00Z");
         b.last_seen = ts("2026-09-14T04:09:00Z");
 
-        let (rows, rejected) = fold_batch(vec![a, b]);
+        let FoldedBatch { rows, rejected, .. } = fold_batch(vec![a, b], ingest_now());
         assert!(rejected.is_empty());
         assert_eq!(rows.len(), 1, "one storage key must produce one row");
         assert_eq!(rows[0].count, 22, "counts accumulate, they do not replace");
@@ -1796,11 +2089,15 @@ mod tests {
 
     #[test]
     fn folding_keeps_distinct_syscalls_and_actions_apart() {
-        let (rows, _) = fold_batch(vec![
-            input("web-1", "ptrace", "SCMP_ACT_LOG", 1),
-            input("web-1", "mount", "SCMP_ACT_LOG", 2),
-            input("web-1", "ptrace", "SCMP_ACT_ERRNO", 3),
-        ]);
+        let rows = fold_batch(
+            vec![
+                input("web-1", "ptrace", "SCMP_ACT_LOG", 1),
+                input("web-1", "mount", "SCMP_ACT_LOG", 2),
+                input("web-1", "ptrace", "SCMP_ACT_ERRNO", 3),
+            ],
+            ingest_now(),
+        )
+        .rows;
         assert_eq!(rows.len(), 3, "the key is (pod, syscall, action)");
     }
 
@@ -1813,9 +2110,63 @@ mod tests {
         let mut d = input("web-1", "ptrace", "SCMP_ACT_LOG", 1);
         d.first_seen = ts("2026-09-14T05:00:00Z");
         d.last_seen = ts("2026-09-14T04:00:00Z");
-        let (rows, _) = fold_batch(vec![d]);
+        let rows = fold_batch(vec![d], ingest_now()).rows;
         assert_eq!(rows[0].first_seen, ts("2026-09-14T04:00:00Z"));
         assert_eq!(rows[0].last_seen, ts("2026-09-14T05:00:00Z"));
+    }
+
+    /// A timestamp the Broker's clock has not reached yet is the one bad
+    /// value that never goes away on its own: the prune matches
+    /// `last_seen < NOW() - interval`, so a row stamped a year ahead outlives
+    /// every retention pass that runs in that year, and `GET /seccomp/denials`
+    /// orders `last_seen DESC`, so it holds the top of the list for just as
+    /// long. One skewed node clock reaches it by accident and a single POST
+    /// reaches it on purpose.
+    #[test]
+    fn folding_clamps_a_timestamp_the_broker_has_not_reached_yet() {
+        let now = ingest_now();
+        let mut d = input("web-1", "ptrace", "SCMP_ACT_LOG", 7);
+        d.first_seen = now + chrono::Duration::days(365);
+        d.last_seen = now + chrono::Duration::days(366);
+
+        let folded = fold_batch(vec![d], now);
+        assert_eq!(
+            folded.rows.len(),
+            1,
+            "clamped, not rejected: a clock a few seconds ahead is ordinary \
+             NTP drift, and refusing the row would throw away a kernel \
+             verdict that demonstrably happened"
+        );
+        assert_eq!(folded.rows[0].last_seen, now);
+        assert_eq!(folded.rows[0].first_seen, now);
+        assert_eq!(
+            folded.rows[0].count, 7,
+            "the count is the measurement, and clamping a timestamp must not \
+             touch it — which is exactly why `count` itself is rejected \
+             rather than clamped"
+        );
+        assert_eq!(
+            folded.from_the_future, 1,
+            "and the clamp is reported, so a skewed node clock is a fact an \
+             operator can act on rather than a silent rewrite"
+        );
+    }
+
+    /// The ordinary case must not pay for the clamp: a report that is merely
+    /// recent is stored exactly as it arrived.
+    #[test]
+    fn folding_leaves_a_timestamp_at_or_before_now_alone() {
+        let now = ingest_now();
+        let mut d = input("web-1", "ptrace", "SCMP_ACT_LOG", 1);
+        d.first_seen = now - chrono::Duration::seconds(10);
+        d.last_seen = now;
+        let folded = fold_batch(vec![d], now);
+        assert_eq!(
+            folded.rows[0].first_seen,
+            now - chrono::Duration::seconds(10)
+        );
+        assert_eq!(folded.rows[0].last_seen, now);
+        assert_eq!(folded.from_the_future, 0);
     }
 
     /// A zero-count row would add a workload to the rollup — and therefore
@@ -1823,11 +2174,14 @@ mod tests {
     /// made.
     #[test]
     fn folding_rejects_non_positive_counts() {
-        let (rows, rejected) = fold_batch(vec![
-            input("web-1", "ptrace", "SCMP_ACT_LOG", 0),
-            input("web-2", "ptrace", "SCMP_ACT_LOG", -3),
-            input("web-3", "ptrace", "SCMP_ACT_LOG", 1),
-        ]);
+        let FoldedBatch { rows, rejected, .. } = fold_batch(
+            vec![
+                input("web-1", "ptrace", "SCMP_ACT_LOG", 0),
+                input("web-2", "ptrace", "SCMP_ACT_LOG", -3),
+                input("web-3", "ptrace", "SCMP_ACT_LOG", 1),
+            ],
+            ingest_now(),
+        );
         assert_eq!(rows.len(), 1);
         assert_eq!(rejected.get("count").copied(), Some(2));
     }
@@ -1862,11 +2216,14 @@ mod tests {
     /// forever and every later denial from that node is lost.
     #[test]
     fn folding_rejects_a_count_no_kernel_could_have_produced() {
-        let (rows, rejected) = fold_batch(vec![
-            input("web-1", "ptrace", "SCMP_ACT_LOG", i64::MAX),
-            input("web-2", "ptrace", "SCMP_ACT_LOG", MAX_DENIAL_COUNT + 1),
-            input("web-3", "ptrace", "SCMP_ACT_LOG", MAX_DENIAL_COUNT),
-        ]);
+        let FoldedBatch { rows, rejected, .. } = fold_batch(
+            vec![
+                input("web-1", "ptrace", "SCMP_ACT_LOG", i64::MAX),
+                input("web-2", "ptrace", "SCMP_ACT_LOG", MAX_DENIAL_COUNT + 1),
+                input("web-3", "ptrace", "SCMP_ACT_LOG", MAX_DENIAL_COUNT),
+            ],
+            ingest_now(),
+        );
         assert_eq!(
             rejected.get("count"),
             Some(&2),
@@ -1887,10 +2244,13 @@ mod tests {
     /// upsert's clamp — so the fold has to hold it too.
     #[test]
     fn folding_clamps_a_summed_count_to_the_ceiling() {
-        let (rows, rejected) = fold_batch(vec![
-            input("web-1", "ptrace", "SCMP_ACT_LOG", MAX_DENIAL_COUNT),
-            input("web-1", "ptrace", "SCMP_ACT_LOG", MAX_DENIAL_COUNT),
-        ]);
+        let FoldedBatch { rows, rejected, .. } = fold_batch(
+            vec![
+                input("web-1", "ptrace", "SCMP_ACT_LOG", MAX_DENIAL_COUNT),
+                input("web-1", "ptrace", "SCMP_ACT_LOG", MAX_DENIAL_COUNT),
+            ],
+            ingest_now(),
+        );
         assert!(rejected.is_empty(), "each entry is individually in range");
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].count, MAX_DENIAL_COUNT);
@@ -1907,7 +2267,10 @@ mod tests {
         let mut long_syscall = input("web-4", "ptrace", "SCMP_ACT_LOG", 1);
         long_syscall.syscall = "x".repeat(MAX_SYSCALL_LEN + 1);
 
-        let (rows, rejected) = fold_batch(vec![no_uid, no_syscall, no_action, long_syscall]);
+        let FoldedBatch { rows, rejected, .. } = fold_batch(
+            vec![no_uid, no_syscall, no_action, long_syscall],
+            ingest_now(),
+        );
         assert!(rows.is_empty());
         assert_eq!(rejected.get("podUid").copied(), Some(1));
         assert_eq!(
@@ -1929,7 +2292,7 @@ mod tests {
         b.arch = None;
         b.action_raw = None;
 
-        let (rows, _) = fold_batch(vec![a, b]);
+        let rows = fold_batch(vec![a, b], ingest_now()).rows;
         assert_eq!(rows[0].syscall_nr, Some(101));
         assert_eq!(rows[0].arch.as_deref(), Some("SCMP_ARCH_X86_64"));
         assert_eq!(rows[0].action_raw, Some(2_147_483_648));
@@ -1941,6 +2304,7 @@ mod tests {
         DenialBatch {
             node: "n1".into(),
             capturing,
+            interval_seconds: None,
             denials,
         }
     }
@@ -1950,7 +2314,7 @@ mod tests {
     /// real all-clear instead of sitting at Unknown forever.
     #[test]
     fn an_empty_report_from_a_capturing_node_still_proves_capture() {
-        assert!(batch(Some(true), vec![]).is_capturing());
+        assert!(batch(Some(true), vec![]).validate(ingest_now()).capturing);
     }
 
     /// The case the whole `capturing` field exists for. A node on a
@@ -1962,24 +2326,29 @@ mod tests {
     /// audit to enforcing.
     #[test]
     fn a_reporting_but_non_capturing_node_does_not_prove_capture() {
-        assert!(!batch(Some(false), vec![]).is_capturing());
+        assert!(!batch(Some(false), vec![]).validate(ingest_now()).capturing);
     }
 
     /// Denials in hand outrank the flag in both directions.
     #[test]
     fn denials_prove_capture_whatever_the_flag_says() {
-        // An older Controller sends no flag at all, and only POSTs when it
-        // has denials. Treating a missing flag as `false` would blank every
-        // block on a cluster running one — i.e. on the supported upgrade
-        // order, Broker first.
-        assert!(batch(None, vec![input("web-1", "ptrace", "SCMP_ACT_LOG", 1)]).is_capturing());
+        // A report carrying rows the kernel produced proves the probe fired,
+        // whatever the flag says or fails to say.
+        assert!(
+            batch(None, vec![input("web-1", "ptrace", "SCMP_ACT_LOG", 1)])
+                .validate(ingest_now())
+                .capturing
+        );
         // And a node that reports `false` while shipping denials is believed
         // on the evidence rather than on its own self-assessment.
-        assert!(batch(
-            Some(false),
-            vec![input("web-1", "ptrace", "SCMP_ACT_LOG", 1)]
-        )
-        .is_capturing());
+        assert!(
+            batch(
+                Some(false),
+                vec![input("web-1", "ptrace", "SCMP_ACT_LOG", 1)]
+            )
+            .validate(ingest_now())
+            .capturing
+        );
     }
 
     /// Absent the flag AND absent denials there is no evidence either way,
@@ -1988,7 +2357,149 @@ mod tests {
     /// all-clear.
     #[test]
     fn a_silent_report_with_no_flag_proves_nothing() {
-        assert!(!batch(None, vec![]).is_capturing());
+        assert!(!batch(None, vec![]).validate(ingest_now()).capturing);
+    }
+
+    /// The evidence is what SURVIVED validation, not what arrived.
+    ///
+    /// Counted off the wire vector, every batch below is non-empty and every
+    /// one of them recorded the node as capturing — a Controller shipping
+    /// empty drains, a node whose attribution broke, or one unauthenticated
+    /// POST of a single garbage row, since `BROKER_AUTH_TOKEN` is optional on
+    /// a default deploy. None of them is evidence that anything is watching,
+    /// and all of them produced the all-clear the flag exists to withhold.
+    #[test]
+    fn a_report_whose_every_row_was_rejected_proves_nothing() {
+        let unusable = || {
+            vec![
+                // Not a denial: the kernel acted zero times.
+                input("web-1", "ptrace", "SCMP_ACT_LOG", 0),
+                // Cannot identify itself.
+                DenialInput {
+                    pod_uid: "  ".into(),
+                    ..input("web-2", "ptrace", "SCMP_ACT_LOG", 1)
+                },
+                // Not a measurement any kernel could have produced.
+                DenialInput {
+                    count: i64::MAX,
+                    ..input("web-3", "ptrace", "SCMP_ACT_LOG", 1)
+                },
+            ]
+        };
+        assert_eq!(unusable().len(), 3, "the wire vector is not empty");
+
+        let report = batch(None, unusable()).validate(ingest_now());
+        assert!(report.rows.is_empty(), "and nothing survived validation");
+        assert!(
+            !report.capturing,
+            "a report that carried no usable row is not evidence that the \
+             probe fired, and recording it as capture is what turns a broken \
+             node into a cluster-wide all-clear"
+        );
+        assert!(
+            !batch(Some(false), unusable())
+                .validate(ingest_now())
+                .capturing,
+            "and it cannot overrule the node's own `capturing: false` either"
+        );
+        // The flag is still believed on its own: this rule subtracts
+        // evidence, it does not add a way to lose a real heartbeat.
+        assert!(
+            batch(Some(true), unusable())
+                .validate(ingest_now())
+                .capturing
+        );
+    }
+
+    /// The cadence a node declares decides its own staleness window, so it
+    /// is the one field on the batch that can widen a timeout. Absent or zero
+    /// falls back to the floor; an absurd value is clamped rather than
+    /// rejected, because rejecting would throw away the heartbeat riding
+    /// with it.
+    #[test]
+    fn a_declared_interval_falls_back_and_is_clamped() {
+        assert_eq!(declared_interval_seconds(None), None);
+        assert_eq!(declared_interval_seconds(Some(0)), None);
+        assert_eq!(declared_interval_seconds(Some(10)), Some(10));
+        assert_eq!(
+            declared_interval_seconds(Some(MAX_REPORT_INTERVAL_SECS as u64)),
+            Some(MAX_REPORT_INTERVAL_SECS)
+        );
+        assert_eq!(
+            declared_interval_seconds(Some(MAX_REPORT_INTERVAL_SECS as u64 + 1)),
+            Some(MAX_REPORT_INTERVAL_SECS),
+            "a node cannot buy itself a staleness window measured in years"
+        );
+        assert_eq!(
+            declared_interval_seconds(Some(u64::MAX)),
+            Some(MAX_REPORT_INTERVAL_SECS),
+            "including one that does not fit the column it lands in"
+        );
+        assert_eq!(
+            batch(Some(true), vec![])
+                .validate(ingest_now())
+                .interval_seconds,
+            None,
+            "and a report that declares nothing stores nothing, so the \
+             liveness query falls back to the floor"
+        );
+    }
+
+    /// Liveness is answered by the heartbeat and by nothing else.
+    ///
+    /// The row-existence fallback this used to carry defended a Controller
+    /// too old to send heartbeats — and none can exist, because both denial
+    /// migrations landed in one commit and the feature has never shipped. It
+    /// cost two false all-clears to keep: a denial row from a capture path
+    /// since switched off kept the cluster reading live until retention
+    /// removed the row, and a restored database read live off history that
+    /// was never this cluster's. Asking the question about what is watching
+    /// rather than about what is stored closes both, and every other route
+    /// through row existence with them.
+    ///
+    /// This pins the statement; `live_database_never_reads_liveness_off_a_\
+    /// stored_denial` pins the behaviour against a real database.
+    #[test]
+    fn liveness_reads_the_heartbeat_table_and_never_the_denial_table() {
+        let sql = capture_live_sql();
+        assert!(
+            sql.contains("FROM seccomp_denial_nodes"),
+            "the heartbeat is the whole answer: {sql}"
+        );
+        assert!(
+            !sql.contains("seccomp_denials"),
+            "a stored denial proves capture WORKED, never that anything is \
+             watching now, and treating it as liveness is how a switched-off \
+             capture path keeps handing out all-clears: {sql}"
+        );
+        assert!(sql.contains("WHERE capturing"), "{sql}");
+    }
+
+    /// The staleness window is per node, computed from the cadence that node
+    /// declared. A fixed one cannot work: the Controller's drain interval is
+    /// an operator-set value with no upper bound, so a supported Helm value
+    /// made every node on a capturing fleet look stale between its own
+    /// reports and pinned the cluster at Unknown forever.
+    #[test]
+    fn liveness_trusts_each_nodes_own_cadence_above_a_floor() {
+        let sql = capture_live_sql();
+        assert!(
+            sql.contains(&format!("GREATEST({CAPTURE_REPORT_STALE_FLOOR_SECS}")),
+            "a node that declares nothing still gets the floor: {sql}"
+        );
+        assert!(
+            sql.contains(&format!(
+                "COALESCE(interval_seconds, 0) * {CAPTURE_REPORT_STALE_INTERVALS}"
+            )),
+            "and one that declares a cadence is believed for that many of \
+             its own intervals: {sql}"
+        );
+        assert!(
+            MAX_REPORT_INTERVAL_SECS.saturating_mul(CAPTURE_REPORT_STALE_INTERVALS) < i64::MAX,
+            "ingest clamps the declared interval, and the column carries the \
+             same bound as a CHECK, so this multiplication cannot overflow \
+             inside the query"
+        );
     }
 
     // ---- attribution ---------------------------------------------------
@@ -2541,11 +3052,16 @@ mod tests {
             );
             assert!(sql.contains("SELECT DISTINCT"), "{sql}");
             assert!(
-                sql.contains(
-                    "ORDER BY pod_namespace, workload_kind, workload_name, syscall, action LIMIT"
-                ),
-                "the LIMIT must be applied to a total ordering, or the \
-                 truncated set reshuffles between two identical polls: {sql}"
+                sql.contains("ORDER BY rn, pod_namespace COLLATE"),
+                "the cluster-wide LIMIT must take every workload's first \
+                 pair before any workload's second, or the workloads that \
+                 sort last lose their whole name list while keeping a \
+                 non-zero total: {sql}"
+            );
+            assert!(
+                sql.contains("action COLLATE \"C\" LIMIT"),
+                "and it must still be a TOTAL ordering, or the truncated set \
+                 reshuffles between two identical polls: {sql}"
             );
         }
         assert!(
@@ -2557,6 +3073,59 @@ mod tests {
             rollup_names_sql(true)
                 .ends_with(&format!("LIMIT {MAX_DENIAL_ROLLUP_PAIRS_PER_WORKLOAD}")),
             "one workload cannot need more than its own per-workload cap"
+        );
+    }
+
+    /// SQL and Rust have to truncate in ONE order, and the doc comment used
+    /// to assert they did while the SQL was ordering by the DATABASE's
+    /// collation.
+    ///
+    /// [`DenialIndex::block_for`] keeps the first names out of a `BTreeSet`,
+    /// which is UTF-8 byte order. The SQL decides which pairs ever reach it.
+    /// Unqualified, glibc's `en_US.UTF-8` — RDS, Cloud SQL, the official
+    /// non-alpine image — folds punctuation and case, so it disagrees with
+    /// bytes on exactly the shape a syscall name has. `COLLATE "C"` is
+    /// memcmp, so the two become one order on every database.
+    #[test]
+    fn the_rollup_names_are_ordered_the_way_rust_truncates_them() {
+        for scoped in [false, true] {
+            let sql = rollup_names_sql(scoped);
+            assert!(
+                sql.contains("ORDER BY syscall COLLATE \"C\", action COLLATE \"C\") AS rn"),
+                "the RANKS decide which pairs survive the per-workload cap, \
+                 so this is the ordering that has to match Rust's: {sql}"
+            );
+            assert!(
+                !sql.contains("ORDER BY syscall, action"),
+                "an unqualified ORDER BY is the database's collation, not \
+                 byte order: {sql}"
+            );
+            assert!(
+                sql.contains("syscall COLLATE \"C\", action COLLATE \"C\" LIMIT"),
+                "the outer ordering decides which pairs survive the \
+                 cluster-wide cap, so it needs the same treatment: {sql}"
+            );
+        }
+
+        // The disagreement this defends against, spelled out: Rust sorts
+        // these one way and glibc sorts them the other, and `io_uring_enter`
+        // is a syscall the kernel really does deny. Under the database's
+        // collation the rollup dropped it and offered `ioctl` in its place,
+        // so an operator building an allow-list from `status.denials.syscalls`
+        // allowed a syscall nothing had asked for and left the denied one
+        // blocked.
+        let mut rust_order = vec![
+            "ioctl".to_string(),
+            "io_uring_enter".to_string(),
+            "sched_yield".to_string(),
+            "schedctl".to_string(),
+        ];
+        rust_order.sort();
+        assert_eq!(
+            rust_order,
+            vec!["io_uring_enter", "ioctl", "sched_yield", "schedctl"],
+            "byte order puts `_` (0x5F) before any lowercase letter; glibc \
+             ignores it at the primary level and orders on what follows"
         );
     }
 
@@ -2638,10 +3207,22 @@ mod tests {
             include_str!("../db/migrations/2026-09-14-100001_seccomp_denial_nodes/down.sql"),
             include_str!("../db/migrations/2026-09-14-100000_seccomp_denials/up.sql"),
             include_str!("../db/migrations/2026-09-14-100001_seccomp_denial_nodes/up.sql"),
+            include_str!("../db/migrations/2026-09-14-100002_seccomp_denial_node_interval/up.sql"),
         ] {
             conn.batch_execute(sql).expect("reset the denial schema");
         }
         conn
+    }
+
+    /// Push one node's heartbeat `secs` into the past, the way a Controller
+    /// that stopped reporting would.
+    fn age_heartbeat(conn: &mut PgConnection, node: &str, secs: i64) {
+        use diesel::connection::SimpleConnection;
+        conn.batch_execute(&format!(
+            "UPDATE seccomp_denial_nodes SET updated_at = NOW() - INTERVAL '{secs} seconds' \
+             WHERE node_name = '{node}'"
+        ))
+        .expect("age the heartbeat");
     }
 
     #[test]
@@ -2659,14 +3240,14 @@ mod tests {
             "no node has reported and no denial exists: nothing is known to \
              be watching"
         );
-        upsert_node_report(&mut conn, "n1", false).expect("degraded heartbeat");
+        upsert_node_report(&mut conn, "n1", false, None).expect("degraded heartbeat");
         assert!(
             !capture_is_live(&mut conn).expect("liveness"),
             "a node reporting in with the probe NOT attached (CONFIG_AUDIT=n) \
              is alive and watching nothing; treating that as capture is how \
              graceful degradation becomes a false all-clear"
         );
-        upsert_node_report(&mut conn, "n2", true).expect("capturing heartbeat");
+        upsert_node_report(&mut conn, "n2", true, None).expect("capturing heartbeat");
         assert!(
             capture_is_live(&mut conn).expect("liveness"),
             "one fresh capturing node proves the path works end to end, with \
@@ -2676,7 +3257,7 @@ mod tests {
         // reporting any more, so the answer goes back to "not known".
         conn.batch_execute(&format!(
             "UPDATE seccomp_denial_nodes SET updated_at = NOW() - INTERVAL '{} seconds'",
-            CAPTURE_REPORT_STALE_SECS + 60
+            CAPTURE_REPORT_STALE_FLOOR_SECS + 60
         ))
         .expect("age heartbeats");
         assert!(
@@ -2779,7 +3360,7 @@ mod tests {
             "rows exist but every node stopped reporting, so nothing is \
              known to be watching NOW and no block can honestly be emitted"
         );
-        upsert_node_report(&mut conn, "n2", true).expect("capturing heartbeat");
+        upsert_node_report(&mut conn, "n2", true, None).expect("capturing heartbeat");
         let block = denial_index_for(&mut conn, &key)
             .unwrap()
             .block_for(&key)
@@ -2821,7 +3402,7 @@ mod tests {
         // goes back to absent rather than reporting a zero.
         conn.batch_execute(&format!(
             "UPDATE seccomp_denial_nodes SET updated_at = NOW() - INTERVAL '{} seconds'",
-            CAPTURE_REPORT_STALE_SECS + 60
+            CAPTURE_REPORT_STALE_FLOOR_SECS + 60
         ))
         .expect("age heartbeats");
         assert!(
@@ -2837,7 +3418,7 @@ mod tests {
         // all-clear. This is the bootstrap case — a new install where
         // nothing has ever been denied — and it is the whole reason the
         // heartbeat exists.
-        upsert_node_report(&mut conn, "n2", true).expect("fresh heartbeat");
+        upsert_node_report(&mut conn, "n2", true, None).expect("fresh heartbeat");
         let block = denial_index_for(&mut conn, &key)
             .unwrap()
             .block_for(&key)
@@ -2867,15 +3448,18 @@ mod tests {
         let mut conn = live_conn();
 
         // A node that has been capturing for a while, with a real row.
-        upsert_node_report(&mut conn, "n1", true).expect("heartbeat");
+        upsert_node_report(&mut conn, "n1", true, None).expect("heartbeat");
         upsert_denials(&mut conn, std::slice::from_ref(&new_denial())).expect("first drain");
 
         // The hostile (or broken) report. It never becomes a row, because
         // ingest refuses the count before the insert is built.
-        let (rows, rejected) = fold_batch(vec![DenialInput {
-            count: i64::MAX,
-            ..input("web-1", "ptrace", "SCMP_ACT_LOG", 1)
-        }]);
+        let FoldedBatch { rows, rejected, .. } = fold_batch(
+            vec![DenialInput {
+                count: i64::MAX,
+                ..input("web-1", "ptrace", "SCMP_ACT_LOG", 1)
+            }],
+            Utc::now(),
+        );
         assert_eq!(rejected.get("count"), Some(&1));
         assert!(
             rows.is_empty(),
@@ -2888,7 +3472,7 @@ mod tests {
         // still commit rather than raise forever.
         conn.batch_execute("UPDATE seccomp_denials SET count = 9223372036854775807")
             .expect("plant a pre-ceiling value");
-        let heartbeat = upsert_node_report(&mut conn, "n1", true);
+        let heartbeat = upsert_node_report(&mut conn, "n1", true, None);
         let drain = conn.transaction::<_, DbError, _>(|conn| {
             upsert_denials(conn, std::slice::from_ref(&new_denial()))
         });
@@ -2932,7 +3516,7 @@ mod tests {
     #[ignore = "requires a live postgres (set KG_TEST_DATABASE_URL)"]
     fn live_database_keeps_a_denial_in_its_own_workloads_rollup() {
         let mut conn = live_conn();
-        upsert_node_report(&mut conn, "n1", true).expect("heartbeat");
+        upsert_node_report(&mut conn, "n1", true, None).expect("heartbeat");
 
         let base = new_denial();
         upsert_denials(&mut conn, std::slice::from_ref(&base)).expect("first drain");
@@ -2976,26 +3560,66 @@ mod tests {
     /// SQL — but the TOTALS must not be, because a truncated total is a
     /// silent undercount and a truncated workload becomes a `total: 0`
     /// all-clear.
+    /// The noisy workload's syscall names, chosen so the DATABASE's collation
+    /// and Rust's byte order disagree ACROSS the per-workload cap.
+    ///
+    /// This test used to seed `syscall_00001`-style zero-padded names, which
+    /// sort identically under every collation — so it could not fail whatever
+    /// the SQL ordered by, and CI's Postgres is alpine, where musl makes
+    /// `en_US.UTF-8` byte order anyway. These names discriminate:
+    ///
+    /// - glibc ignores `_` at the primary level, so `sched_yield` sorts after
+    ///   every `schedctl_NNN` there and before all of them in bytes. That is
+    ///   the same shape as the `io_uring_enter` / `ioctl` pair an auditor
+    ///   reproduced, stretched across the whole filler run so it crosses the
+    ///   cap rather than swapping two adjacent names.
+    /// - glibc folds case, so `Zsync_file_range` sorts last there and FIRST
+    ///   in bytes, where `Z` (0x5A) precedes every lowercase letter.
+    ///
+    /// Both are inside the block's visible 50 names under byte order and past
+    /// the 800-pair cap under glibc, so ranking by the database's collation
+    /// drops them and offers two `schedctl_NNN` the kernel never denied in
+    /// their place.
+    fn discriminating_syscalls() -> Vec<String> {
+        let filler = (MAX_DENIAL_ROLLUP_PAIRS_PER_WORKLOAD + 200) as usize - 4;
+        let mut names: Vec<String> = (0..filler).map(|i| format!("schedctl_{i:03}")).collect();
+        names.push("sched_yield".into());
+        names.push("io_uring_enter".into());
+        names.push("ioctl".into());
+        names.push("Zsync_file_range".into());
+        names
+    }
+
     #[test]
     #[ignore = "requires a live postgres (set KG_TEST_DATABASE_URL)"]
     fn live_database_caps_the_rollup_lists_without_capping_the_totals() {
         use diesel::connection::SimpleConnection;
 
         let mut conn = live_conn();
-        upsert_node_report(&mut conn, "n1", true).expect("heartbeat");
+        upsert_node_report(&mut conn, "n1", true, None).expect("heartbeat");
 
         // One workload far past both caps: more distinct pairs than
-        // `MAX_DENIAL_ROLLUP_PAIRS_PER_WORKLOAD`, spread over pods so the
-        // DISTINCT and the per-pod multiplication are both exercised.
-        let pairs = MAX_DENIAL_ROLLUP_PAIRS_PER_WORKLOAD + 200;
+        // `MAX_DENIAL_ROLLUP_PAIRS_PER_WORKLOAD`, every pair repeated on
+        // three pods so the DISTINCT has something to collapse and the
+        // per-pod multiplication is exercised.
+        const PODS: i64 = 3;
+        const PER_ROW: i64 = 3;
+        let names = discriminating_syscalls();
+        let pairs = names.len() as i64;
+        let mut values = Vec::with_capacity(names.len() * PODS as usize);
+        for name in &names {
+            for pod in 0..PODS {
+                values.push(format!(
+                    "('uid-{pod}', 'noisy-{pod}', 'media', 'Deployment', 'noisy', 'n1', \
+                     '{name}', NULL, 'SCMP_ACT_LOG', NULL, NULL, {PER_ROW}, NOW(), NOW())"
+                ));
+            }
+        }
         conn.batch_execute(&format!(
             "INSERT INTO seccomp_denials (pod_uid, pod_name, pod_namespace, workload_kind, \
              workload_name, node_name, syscall, syscall_nr, action, action_raw, arch, count, \
-             first_seen, last_seen) \
-             SELECT 'uid-' || (i % 5), 'noisy-' || (i % 5), 'media', 'Deployment', 'noisy', \
-             'n1', 'syscall_' || LPAD(i::TEXT, 5, '0'), NULL, 'SCMP_ACT_LOG', NULL, NULL, 3, \
-             NOW(), NOW() \
-             FROM generate_series(1, {pairs}) AS i"
+             first_seen, last_seen) VALUES {}",
+            values.join(", ")
         ))
         .expect("seed the noisy workload");
         // A second workload that must still be visible: the per-workload cap
@@ -3013,10 +3637,19 @@ mod tests {
         let noisy: WorkloadKey = ("media".into(), "Deployment".into(), "noisy".into());
         let quiet: WorkloadKey = ("media".into(), "Deployment".into(), "quiet".into());
 
+        // What the block must show: the first names in RUST's order, because
+        // that is the order `block_for` truncates in. Anything else means the
+        // SQL kept a different 800 pairs than the `BTreeSet` would have, and
+        // the difference is a syscall the kernel denied going missing from
+        // the list an operator builds an allow-list out of.
+        let mut expected = names.clone();
+        expected.sort();
+        expected.truncate(MAX_DENIAL_SYSCALLS);
+
         let noisy_block = index.block_for(&noisy).expect("denied, so a block");
         assert_eq!(
             noisy_block.total,
-            pairs * 3,
+            pairs * PODS * PER_ROW,
             "the total is summed in SQL over EVERY row, capped or not — an \
              undercount here is the number an operator promotes a profile to \
              enforcing on"
@@ -3028,9 +3661,11 @@ mod tests {
              one so it never shortens a block the Rust cap would have filled"
         );
         assert_eq!(
-            noisy_block.syscalls[0], "syscall_00001",
-            "SQL and Rust truncate in the same (syscall, action) order, so \
-             the surviving names are the same set either way"
+            noisy_block.syscalls, expected,
+            "SQL and Rust must truncate in ONE order. Ranked by the \
+             database's collation, a glibc Postgres drops `sched_yield` and \
+             `Zsync_file_range` past the cap and substitutes names the \
+             kernel never denied"
         );
 
         let quiet_block = index.block_for(&quiet).expect("denied, so a block");
@@ -3041,12 +3676,247 @@ mod tests {
             "a loud workload must not crowd a quiet one out of the read"
         );
 
-        // The scoped read answers the same way.
+        // The scoped read answers the same way, down to the same names.
         let scoped = denial_index_for(&mut conn, &noisy).expect("scoped rollup");
-        assert_eq!(scoped.block_for(&noisy).unwrap().total, pairs * 3);
         assert_eq!(
-            scoped.block_for(&noisy).unwrap().syscalls.len(),
-            MAX_DENIAL_SYSCALLS
+            scoped.block_for(&noisy).unwrap().total,
+            pairs * PODS * PER_ROW
+        );
+        assert_eq!(scoped.block_for(&noisy).unwrap().syscalls, expected);
+    }
+
+    /// The cluster-wide ceiling must shorten every workload's list, never
+    /// erase one.
+    ///
+    /// Ordered by workload before the LIMIT, the workloads that sorted last
+    /// got their correct `total` and an EMPTY `syscalls` list — which the
+    /// distributor renders as "280 seccomp denial(s) on 0 syscall(s): ",
+    /// because a non-zero total misses its zero branch. Worse, which
+    /// workloads fell past the cap depended on other namespaces' pair counts,
+    /// so a workload at the boundary flipped between a populated list and an
+    /// empty one and made every node rewrite the CR on every flip.
+    #[test]
+    #[ignore = "requires a live postgres (set KG_TEST_DATABASE_URL)"]
+    fn live_database_gives_every_workload_a_share_of_the_name_ceiling() {
+        use diesel::connection::SimpleConnection;
+
+        const WORKLOADS: i64 = 300;
+        const PAIRS: i64 = 40;
+        const PER_ROW: i64 = 7;
+        // The seed has to exceed the cluster-wide ceiling or this test
+        // proves nothing, and no workload may be capped by the Rust side, so
+        // that a short list can only have come from the SQL.
+        const { assert!(WORKLOADS * PAIRS > MAX_DENIAL_ROLLUP_NAME_ROWS) };
+        const { assert!(PAIRS < MAX_DENIAL_SYSCALLS as i64) };
+
+        let mut conn = live_conn();
+        upsert_node_report(&mut conn, "n1", true, None).expect("heartbeat");
+        conn.batch_execute(&format!(
+            "INSERT INTO seccomp_denials (pod_uid, pod_name, pod_namespace, workload_kind, \
+             workload_name, node_name, syscall, syscall_nr, action, action_raw, arch, count, \
+             first_seen, last_seen) \
+             SELECT 'uid-' || w || '-' || s, 'pod-' || w, 'ns-' || LPAD(w::TEXT, 3, '0'), \
+             'Deployment', 'app', 'n1', 'syscall_' || LPAD(s::TEXT, 3, '0'), NULL, \
+             'SCMP_ACT_LOG', NULL, NULL, {PER_ROW}, NOW(), NOW() \
+             FROM generate_series(1, {WORKLOADS}) AS w, generate_series(1, {PAIRS}) AS s"
+        ))
+        .expect("seed a cluster past the ceiling");
+
+        let index = denial_index(&mut conn).expect("rollup");
+        let mut blank: Vec<String> = Vec::new();
+        let mut shortest = usize::MAX;
+        for w in 1..=WORKLOADS {
+            let key: WorkloadKey = (format!("ns-{w:03}"), "Deployment".into(), "app".into());
+            let block = index.block_for(&key).expect("denied, so a block");
+            assert_eq!(
+                block.total,
+                PAIRS * PER_ROW,
+                "totals are read on their own uncapped axis: {}",
+                key.0
+            );
+            if block.syscalls.is_empty() {
+                blank.push(key.0.clone());
+            }
+            shortest = shortest.min(block.syscalls.len());
+        }
+        assert!(
+            blank.is_empty(),
+            "{} of {WORKLOADS} workloads were denied and got an empty syscall \
+             list, which reads as \"N denials on 0 syscalls\": {:?}",
+            blank.len(),
+            &blank[..blank.len().min(5)]
+        );
+        assert!(
+            shortest < PAIRS as usize,
+            "the ceiling has to actually bite here, or the seed is too small \
+             to prove anything: shortest list was {shortest}"
+        );
+    }
+
+    /// A stored denial is evidence that capture WORKED, never that anything
+    /// is watching now — and the difference is a false all-clear.
+    ///
+    /// The row-existence fallback this replaces was there for a Controller
+    /// too old to send heartbeats. No such Controller exists: both denial
+    /// migrations landed in one commit and the feature has never shipped.
+    #[test]
+    #[ignore = "requires a live postgres (set KG_TEST_DATABASE_URL)"]
+    fn live_database_never_reads_liveness_off_a_stored_denial() {
+        let mut conn = live_conn();
+        // A denial from a capture path that has since been switched off: the
+        // DaemonSet scaled to zero, the feature disabled, the nodes rebuilt
+        // with CONFIG_AUDIT=n. Or a database restored into a cluster that
+        // never enabled capture at all — same state, same wrong answer.
+        upsert_denials(&mut conn, std::slice::from_ref(&new_denial())).expect("an old denial");
+
+        assert!(
+            !capture_is_live(&mut conn).expect("liveness"),
+            "a row is not a heartbeat; nothing here has reported in, so \
+             nothing is known to be watching"
+        );
+        let key: WorkloadKey = ("media".into(), "Deployment".into(), "web".into());
+        let other: WorkloadKey = ("media".into(), "Deployment".into(), "quiet".into());
+        assert!(
+            denial_index(&mut conn).unwrap().block_for(&other).is_none(),
+            "and no other workload may be handed a `total: 0` computed off \
+             that row's existence"
+        );
+
+        // A node reporting in with the probe NOT attached does not rescue it.
+        upsert_node_report(&mut conn, "n1", false, None).expect("degraded heartbeat");
+        assert!(!capture_is_live(&mut conn).expect("liveness"));
+
+        // Only a node that is actually capturing does.
+        upsert_node_report(&mut conn, "n1", true, None).expect("capturing heartbeat");
+        assert!(capture_is_live(&mut conn).expect("liveness"));
+        assert_eq!(
+            denial_index(&mut conn)
+                .unwrap()
+                .block_for(&key)
+                .expect("capture is live")
+                .total,
+            17
+        );
+    }
+
+    /// Staleness is measured against the cadence each node declares.
+    ///
+    /// The window was a hard-coded 300 s while the Controller's drain
+    /// interval is an operator-set Helm value with no upper bound, so any
+    /// configured interval above 100 s — a supported value — left every node
+    /// looking stale between its own reports and pinned a perfectly healthy
+    /// cluster at Unknown forever.
+    #[test]
+    #[ignore = "requires a live postgres (set KG_TEST_DATABASE_URL)"]
+    fn live_database_measures_staleness_against_each_nodes_declared_cadence() {
+        let mut conn = live_conn();
+
+        // A node draining every 10 minutes.
+        const SLOW: i64 = 600;
+        upsert_node_report(&mut conn, "slow", true, Some(SLOW)).expect("heartbeat");
+        age_heartbeat(&mut conn, "slow", 900);
+        assert!(
+            capture_is_live(&mut conn).expect("liveness"),
+            "900 s is past the 300 s floor and well inside this node's own \
+             3 x 600 s window; calling it stale is how a supported Helm value \
+             turns a capturing fleet into Unknown"
+        );
+        age_heartbeat(
+            &mut conn,
+            "slow",
+            SLOW * CAPTURE_REPORT_STALE_INTERVALS + 600,
+        );
+        assert!(
+            !capture_is_live(&mut conn).expect("liveness"),
+            "and past three of its own intervals it is stale like any other"
+        );
+
+        // A node that declares nothing gets the floor, not the slow node's
+        // window.
+        upsert_node_report(&mut conn, "quiet", true, None).expect("heartbeat");
+        age_heartbeat(&mut conn, "quiet", 30);
+        assert!(capture_is_live(&mut conn).expect("liveness"));
+        age_heartbeat(&mut conn, "quiet", CAPTURE_REPORT_STALE_FLOOR_SECS + 600);
+        assert!(
+            !capture_is_live(&mut conn).expect("liveness"),
+            "the fallback is the floor, not forever"
+        );
+
+        // And a cadence below the floor cannot NARROW the window: three 10 s
+        // intervals is 30 s, which would flip the cluster to Unknown on one
+        // slow reconcile.
+        upsert_node_report(&mut conn, "fast", true, Some(10)).expect("heartbeat");
+        age_heartbeat(&mut conn, "fast", 200);
+        assert!(
+            capture_is_live(&mut conn).expect("liveness"),
+            "max(floor, interval x 3) — the floor wins for a fast node"
+        );
+    }
+
+    /// A `last_seen` the Broker's clock has not reached yet is a row no
+    /// retention window can ever match, so it lives forever and holds the top
+    /// of `GET /seccomp/denials` — ordered `last_seen DESC` — for just as
+    /// long. One node with a skewed clock produces it by accident; a single
+    /// POST produces it on purpose, since `BROKER_AUTH_TOKEN` is optional.
+    #[test]
+    #[ignore = "requires a live postgres (set KG_TEST_DATABASE_URL)"]
+    fn live_database_can_prune_a_row_that_arrived_from_the_future() {
+        let mut conn = live_conn();
+        upsert_node_report(&mut conn, "n1", true, None).expect("heartbeat");
+
+        // The handler's own sequence: validate and fold against one clock
+        // reading, then store what came out.
+        let now = Utc::now();
+        let skewed = DenialInput {
+            first_seen: now + chrono::Duration::days(3650),
+            last_seen: now + chrono::Duration::days(3650),
+            ..input("web-1", "ptrace", "SCMP_ACT_LOG", 4)
+        };
+        let folded = fold_batch(vec![skewed], now);
+        let row = &folded.rows[0];
+        upsert_denials(
+            &mut conn,
+            &[NewDenial {
+                count: row.count,
+                first_seen: row.first_seen,
+                last_seen: row.last_seen,
+                ..new_denial()
+            }],
+        )
+        .expect("drain");
+
+        let stored = denials_query(&mut conn, None, None, None, None, 100).expect("query");
+        assert_eq!(stored.len(), 1);
+        assert!(
+            stored[0].last_seen <= Utc::now(),
+            "stored ahead of the clock, it pins the top of the list until the \
+             clock catches up: {}",
+            stored[0].last_seen
+        );
+        assert_eq!(
+            stored[0].count, 4,
+            "and the measurement itself is untouched"
+        );
+
+        // The prune is `last_seen < NOW() - interval`, so the question is
+        // whether ANY window can reach this row. A zero-day window is the
+        // fastest way to ask it; the retention loop never uses one, and
+        // `live_database_accumulates_queries_and_prunes` covers the real
+        // window on both sides.
+        let pruned = diesel::sql_query(crate::retention::SECCOMP_DENIAL_PRUNE_SQL)
+            .bind::<diesel::sql_types::Text, _>("0 days")
+            .bind::<diesel::sql_types::BigInt, _>(5000)
+            .execute(&mut conn)
+            .expect("prune");
+        assert_eq!(
+            pruned, 1,
+            "a row stamped in the future is one retention can never match, \
+             so it outlives every pass that runs before the clock gets there"
+        );
+        assert_eq!(
+            folded.from_the_future, 1,
+            "and the skew is counted, so the ingest log names a node whose \
+             clock an operator has to go and fix"
         );
     }
 

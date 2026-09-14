@@ -605,11 +605,20 @@ pub fn ebpf_handle(
                     .update(&key, &val, MapFlags::ANY)
                     .map_err(|e| eprintln!("Failed to update netpolicy inode map: {}", e));
                 // Fourth instance, present only when the seccomp denial
-                // probe loaded. Its registration is what makes a verdict
-                // attributable at all: the probe drops anything from an
-                // unregistered netns, and the drain re-reads this map to
-                // confirm the generation on a row still matches the pod
-                // living on that inode.
+                // probe loaded. Its registration is the gate: the probe
+                // drops anything from an unregistered netns, and stamps
+                // the generation it reads here into every row it
+                // records. It is a gate and not the whole attribution —
+                // a hostNetwork pod's netns is the node's, so the entry
+                // says only that something tracked lives there, and the
+                // cgroup id the probe records alongside is what names
+                // which container. The drain does NOT read this map
+                // back — it derives the generation it expects from the
+                // same `ContainerMap` entry it takes the pod's identity
+                // from, because reading the two out of separate stores
+                // is what let a dead pod's denials be written to the pod
+                // that took its inode (see
+                // `seccomp_denial::build_denials`).
                 if let Some(sk) = seccomp_denial_sk.as_ref() {
                     let _ = sk
                         .maps

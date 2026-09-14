@@ -321,8 +321,8 @@ the retention window:
 
 ```json
 {
-  "denialsObserved": {"type":"DenialsObserved","status":"False","reason":"NoDenials","message":"0 denials in the retention window"},
-  "denials": {"observed": 0}
+  "denialsObserved": {"type":"DenialsObserved","status":"False","reason":"NoDenials","message":"no denials in the retention window"},
+  "denials": {"observed": 0, "refreshedAt": "2026-09-14T04:12:00Z"}
 }
 ```
 
@@ -331,7 +331,7 @@ the retention window:
 ```json
 {
   "denialsObserved": {"type":"DenialsObserved","status":"True","reason":"KernelDenied","message":"17 seccomp denial(s) (SCMP_ACT_LOG) on 1 syscall(s): ptrace; last seen 2026-09-14T04:05:14Z"},
-  "denials": {"observed": 17, "syscalls": ["ptrace"], "lastSeen": "2026-09-14T04:05:14Z"}
+  "denials": {"observed": 17, "syscalls": ["ptrace"], "actions": ["SCMP_ACT_LOG"], "lastSeen": "2026-09-14T04:05:14Z", "refreshedAt": "2026-09-14T04:12:00Z"}
 }
 ```
 
@@ -350,6 +350,20 @@ exist for the same "no data" verdict for a different cause:
 `NoWorkloadRef` (the CR has none) and `NoObservations` (nothing reported
 for this workload at all yet) — the same pair `CaptureComplete` already
 uses for the equivalent situations.
+
+Before any of that, read `refreshedAt`. `status.denials` is a settled
+reading, not a live counter: every node polls the broker separately, so
+rather than have the fleet rewrite the CR on every denial, a node
+republishes the block only when its reading says something strictly
+stronger than the published one — a syscall or a verdict not listed there,
+or an order of magnitude more events — and otherwise leaves it alone until
+it is more than 15 minutes old. So `observed` trails live activity by up to
+15 minutes, in one direction: a count climbing inside one order of
+magnitude, a count falling as the retention window prunes, and a workload
+going quiet all wait for that refresh. A cleared workload therefore reads
+clean late rather than early, which is the safe direction for a promotion
+gate — but `GET /seccomp/denials` is the live, per-event view when you want
+the current number.
 
 None of those three is the sharp edge, though. **A broker that cannot be
 reached doesn't turn `DenialsObserved` `Unknown` at all** — the reconciler

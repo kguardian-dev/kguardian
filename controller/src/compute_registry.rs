@@ -1,5 +1,15 @@
-//! Per-container compute identity: the cgroup id registry behind the
-//! compute sampler and the scheduler-contention probe.
+//! Per-container identity, keyed by cgroup id: the registry behind the
+//! compute sampler, the scheduler-contention probe and seccomp denial
+//! attribution.
+//!
+//! Three readers, switched independently. `seccomp_denial` is the one
+//! that is not about compute at all: a `hostNetwork` pod shares the
+//! node's network namespace with every other one, so the netns inode
+//! names none of them and the cgroup id is the only identifier left
+//! that is 1:1 with a container. `main.rs` therefore builds this
+//! registry when EITHER the gauges or denial capture is on
+//! (`seccomp_denial::needs_container_registry`); only the sampler
+//! subscribes to the registration events below.
 //!
 //! The netns `ContainerMap` (models.rs) is per pod and keyed by the
 //! network-namespace inode; that is the right key for traffic and

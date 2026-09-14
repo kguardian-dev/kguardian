@@ -314,10 +314,17 @@ async fn run_seccomp_denial_pass(pool: &DbPool, days: u32) {
 /// The window is deliberately the full retention window rather than the much
 /// shorter staleness window that `capture_is_live` uses. Those answer
 /// different questions: staleness decides whether to TRUST a node's report
-/// (minutes), this decides whether the node still exists (days). Pruning on
-/// the staleness window would delete a node's row during a long Controller
+/// (minutes, or a few multiples of that node's own declared drain interval),
+/// this decides whether the node still exists (days). Pruning on the
+/// staleness window would delete a node's row during a long Controller
 /// outage and then recreate it on recovery, which loses nothing but churns
 /// the table for no reason.
+///
+/// The widest staleness window a node can buy itself is three days (ingest
+/// clamps a declared interval to one), so the two only cross under an absurd
+/// pair of settings — that interval against a one- or two-day retention
+/// window — and the crossing fails safe: the row goes, so the cluster reads
+/// Unknown rather than clean.
 async fn prune_stale_denial_nodes(pool: &DbPool, days: u32) {
     let pool = pool.clone();
     let interval = format!("{} days", days);

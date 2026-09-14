@@ -124,7 +124,7 @@ spec:
           - name: seccomp-profiles
             mountPath: {{ .Values.seccomp.kubeletRoot }}/seccomp
           {{- end }}
-          {{- if $compute.enabled }}
+          {{- if or $compute.enabled .Values.seccomp.denials.enabled }}
           - name: cgroupfs
             mountPath: /sys/fs/cgroup
             readOnly: true
@@ -193,10 +193,24 @@ spec:
           path: {{ .Values.seccomp.kubeletRoot }}/seccomp
           type: DirectoryOrCreate
       {{- end }}
-      {{- if (.Values.compute | default dict).enabled }}
-      # cgroup v2 root, read-only: the compute sampler reads cpu.stat,
-      # cpu.pressure, memory.* per container and /sys/fs/cgroup/cgroup.controllers
-      # for the node facts. Nothing is ever written here.
+      {{- if or (.Values.compute | default dict).enabled .Values.seccomp.denials.enabled }}
+      # cgroup v2 root, read-only. Two features need it and they are
+      # switched independently:
+      #
+      #   * the compute sampler reads cpu.stat, cpu.pressure, memory.*
+      #     per container and /sys/fs/cgroup/cgroup.controllers for the
+      #     node facts;
+      #   * seccomp denial capture resolves each container's cgroup id
+      #     from this tree (name_to_handle_at), which is the only way to
+      #     attribute a hostNetwork pod's kernel verdicts — such a pod
+      #     shares the node's network namespace with every other one, so
+      #     the netns inode names none of them.
+      #
+      # Without the mount the second degrades to counting and dropping
+      # those verdicts, and a workload nothing can attribute reports no
+      # denials, which reads as no denials. Keep this condition in step
+      # with the registry's in controller/src/main.rs. Nothing is ever
+      # written here.
       - name: cgroupfs
         hostPath:
           path: /sys/fs/cgroup
