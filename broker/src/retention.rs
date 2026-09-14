@@ -380,27 +380,34 @@ async fn backfill_denial_attribution(pool: &DbPool) {
 /// The backfill statement, as a constant so the live-database test runs the
 /// SAME SQL this loop issues rather than a hand-copied approximation.
 ///
-/// `$1` bounds the candidate rows, not the updated ones: the CTE picks the
-/// oldest unattributed ids and the join then resolves whichever of them
-/// `pod_details` can prove. A candidate that stays unresolvable is re-picked
-/// every pass, which is cheap (it is an indexable NULL test over a table the
-/// prune keeps bounded) and is the behaviour that matters — a pod whose
-/// `pod_details` row arrives an hour late is resolved on the pass after it
-/// does.
+/// `$1` bounds the candidate rows. A candidate is an unattributed row whose
+/// pod `pod_details` now knows, in the right namespace, so every candidate
+/// resolves on the pass that picks it — either to the pod's owning workload
+/// or, for a pod with no owner, to the pod itself (`Pod`/pod name, the same
+/// rule ingest applies). Rows whose pod is still unknown are not candidates
+/// and cost nothing until it appears; without that guard they sat at the
+/// head of the id order on every pass and, past `$1` of them, starved every
+/// resolvable row behind them.
 pub(crate) const BACKFILL_DENIAL_ATTRIBUTION_SQL: &str = "WITH candidates AS (\
-         SELECT id FROM seccomp_denials \
-         WHERE workload_kind IS NULL OR workload_name IS NULL \
-         ORDER BY id \
+         SELECT d.id FROM seccomp_denials d \
+         WHERE (d.workload_kind IS NULL OR d.workload_name IS NULL) \
+           AND EXISTS (\
+             SELECT 1 FROM pod_details p \
+             WHERE p.pod_name = d.pod_name \
+               AND (p.pod_namespace IS NULL OR p.pod_namespace = d.pod_namespace) \
+               AND (p.workload_kind IS NULL) = (p.workload_name IS NULL)\
+           ) \
+         ORDER BY d.id \
          LIMIT $1 \
      ) \
      UPDATE seccomp_denials d \
-     SET workload_kind = p.workload_kind, workload_name = p.workload_name \
+     SET workload_kind = COALESCE(p.workload_kind, 'Pod'), \
+         workload_name = COALESCE(p.workload_name, d.pod_name) \
      FROM pod_details p \
      WHERE d.id IN (SELECT id FROM candidates) \
        AND p.pod_name = d.pod_name \
-       AND p.workload_kind IS NOT NULL \
-       AND p.workload_name IS NOT NULL \
-       AND (p.pod_namespace IS NULL OR p.pod_namespace = d.pod_namespace)";
+       AND (p.pod_namespace IS NULL OR p.pod_namespace = d.pod_namespace) \
+       AND (p.workload_kind IS NULL) = (p.workload_name IS NULL)";
 
 /// Drop heartbeat rows for nodes that stopped reporting a whole retention
 /// window ago — the node is gone, not merely quiet.

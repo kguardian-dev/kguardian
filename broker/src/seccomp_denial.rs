@@ -796,9 +796,22 @@ fn attribution_index(
 /// rule against `pod_details` later for rows that failed it only because the
 /// pod was not known yet.
 ///
+/// # A pod with no controller is its own workload
+///
+/// The pod watcher records a bare pod — `kubectl run`, a debug pod, a
+/// static control-plane pod — with NULL `workload_kind` / `workload_name`,
+/// and nothing ever fills that in. Treating such a row as "not resolvable
+/// yet" would put it in [`UnattributedNamespaces`] forever, withholding the
+/// all-clear from every CR in its namespace, and it would sit at the head
+/// of the backfill's candidate list on every pass. A pod the watcher HAS
+/// seen, in the right namespace, with no owner, is attributed to itself as
+/// `("Pod", pod_name)`: a real key the rollup can group on and the metrics
+/// can label, that no `workloadRef` will ever match.
+///
 /// Pure so the refusal has a test rather than a comment.
 fn attribute(
     denial_namespace: &str,
+    pod_name: &str,
     pod_details: Option<&PodAttribution>,
 ) -> (Option<String>, Option<String>) {
     let Some((ns, kind, workload)) = pod_details else {
@@ -813,11 +826,17 @@ fn attribute(
     }
     match (kind, workload) {
         (Some(k), Some(w)) => (Some(k.clone()), Some(w.clone())),
+        (None, None) => (Some(BARE_POD_KIND.to_string()), Some(pod_name.to_string())),
         // Partial attribution is no attribution: the rollup key needs both,
         // and half a key would group unrelated workloads together.
         _ => (None, None),
     }
 }
+
+/// `workload_kind` for a pod with no controller owner: the pod is the
+/// workload. Mirrors what the backfill writes in
+/// [`crate::retention::BACKFILL_DENIAL_ATTRIBUTION_SQL`].
+pub(crate) const BARE_POD_KIND: &str = "Pod";
 
 // ---------------------------------------------------------------------------
 // Ingest
@@ -864,8 +883,8 @@ pub async fn post_seccomp_denials(
             declared = ?batch_interval,
             ceiling = MAX_REPORT_INTERVAL_SECS,
             "seccomp denial report declared a drain interval above the ceiling \
-             the broker will trust; it was clamped, and this node will read as \
-             not capturing between its own reports. Lower \
+             the broker will trust; it was clamped to the ceiling, so the node \
+             reads as stale if its reports arrive more than 1800 s apart. Lower \
              seccomp.denials.intervalSeconds."
         );
     }
@@ -895,16 +914,22 @@ pub async fn post_seccomp_denials(
     // "nothing was watching", and it is the only thing that lets a fresh
     // install ever reach a real all-clear instead of sitting at Unknown
     // forever.
+    // The heartbeat is stamped only once the rows are stored, never before:
+    // it is what `capture_is_live` reads, and a node whose denials keep
+    // failing to land must not keep vouching for the cluster's all-clear.
+    // The controller replays a batch the broker 500s on, so nothing is lost
+    // by answering 500 without a heartbeat.
     let heartbeat_pool = pool.clone();
     let heartbeat_node = node.clone();
-    web::block(move || -> Result<(), DbError> {
+    let heartbeat = move || -> Result<(), DbError> {
         let mut conn = heartbeat_pool.get()?;
         upsert_node_report(&mut conn, &heartbeat_node, capturing, interval_seconds)
-    })
-    .await?
-    .map_err(actix_web::error::ErrorInternalServerError)?;
+    };
 
     if rows.is_empty() {
+        web::block(heartbeat)
+            .await?
+            .map_err(actix_web::error::ErrorInternalServerError)?;
         debug!(%node, capturing, "seccomp denial heartbeat (no denials drained)");
         return Ok(HttpResponse::Ok().json(crate::Accepted { accepted: 0 }));
     }
@@ -915,7 +940,9 @@ pub async fn post_seccomp_denials(
 
     let (unattributed, increments) = web::block(move || -> Result<_, DbError> {
         let mut conn = pool.get()?;
-        store_batch(&mut conn, &node_for_rows, &pod_names, rows)
+        let out = store_batch(&mut conn, &node_for_rows, &pod_names, rows)?;
+        heartbeat()?;
+        Ok(out)
     })
     .await?
     .map_err(actix_web::error::ErrorInternalServerError)?;
@@ -957,7 +984,8 @@ fn store_batch(
     let mut inserts: Vec<NewDenial> = Vec::with_capacity(rows.len());
     let mut increments: Vec<(DenialLabels, i64)> = Vec::with_capacity(rows.len());
     for d in rows {
-        let (workload_kind, workload_name) = attribute(&d.pod_namespace, index.get(&d.pod_name));
+        let (workload_kind, workload_name) =
+            attribute(&d.pod_namespace, &d.pod_name, index.get(&d.pod_name));
         if workload_kind.is_none() {
             unattributed += 1;
         }
@@ -2881,7 +2909,7 @@ mod tests {
             Some("media-transform".to_string()),
         );
         assert_eq!(
-            attribute("media", Some(&pd)),
+            attribute("media", "media-transform-abc", Some(&pd)),
             (
                 Some("Deployment".to_string()),
                 Some("media-transform".to_string())
@@ -2902,21 +2930,41 @@ mod tests {
             Some("Deployment".to_string()),
             Some("ledger".to_string()),
         );
-        assert_eq!(attribute("media", Some(&pd)), (None, None));
+        assert_eq!(attribute("media", "ledger-0", Some(&pd)), (None, None));
     }
 
     #[test]
     fn attribution_is_none_for_an_unknown_pod_or_a_half_resolved_one() {
-        assert_eq!(attribute("media", None), (None, None));
+        assert_eq!(attribute("media", "web-7", None), (None, None));
         let half = (
             Some("media".to_string()),
             Some("Deployment".to_string()),
             None,
         );
         assert_eq!(
-            attribute("media", Some(&half)),
+            attribute("media", "web-7", Some(&half)),
             (None, None),
             "half a workload key would group unrelated workloads together"
+        );
+    }
+
+    /// A bare pod is recorded with no workload at all and never gains one.
+    /// Refusing it would withhold the all-clear from its whole namespace
+    /// for as long as its rows live; it is its own workload instead.
+    #[test]
+    fn attribution_makes_a_known_bare_pod_its_own_workload() {
+        let pd = (Some("kube-system".to_string()), None, None);
+        assert_eq!(
+            attribute("kube-system", "kube-apiserver-node-a", Some(&pd)),
+            (
+                Some("Pod".to_string()),
+                Some("kube-apiserver-node-a".to_string())
+            )
+        );
+        assert_eq!(
+            attribute("shop", "kube-apiserver-node-a", Some(&pd)),
+            (None, None),
+            "the namespace guard applies to bare pods too"
         );
     }
 
@@ -2928,7 +2976,7 @@ mod tests {
             Some("node-exporter".to_string()),
         );
         assert_eq!(
-            attribute("kube-system", Some(&pd)),
+            attribute("kube-system", "node-exporter-x", Some(&pd)),
             (
                 Some("DaemonSet".to_string()),
                 Some("node-exporter".to_string())
@@ -4508,6 +4556,12 @@ mod tests {
                 pod_namespace: "payments".into(),
                 ..input("redis-0", "ptrace", "SCMP_ACT_ERRNO", 9)
             },
+            // A bare pod that races the watcher the same way.
+            DenialInput {
+                pod_uid: "uid-bare".into(),
+                pod_namespace: "shop".into(),
+                ..input("debug-1", "mount", "SCMP_ACT_LOG", 3)
+            },
         ];
         let names: BTreeSet<String> = rows.iter().map(|d| d.pod_name.clone()).collect();
         store_batch(&mut conn, "n1", &names, rows).expect("ingest");
@@ -4521,17 +4575,28 @@ mod tests {
         );
         assert!(index.block_for(&payments).is_none());
 
-        // The pod watcher catches up.
+        // The pod watcher catches up: one owned pod, one with no owner.
         seed_pod(&mut conn, "web-7", "shop", Some(("Deployment", "web")));
+        seed_pod(&mut conn, "debug-1", "shop", None);
         let resolved = diesel::sql_query(crate::retention::BACKFILL_DENIAL_ATTRIBUTION_SQL)
             .bind::<BigInt, _>(5_000)
             .execute(&mut conn)
             .expect("backfill");
         assert_eq!(
-            resolved, 1,
-            "the race resolves and the collision does not: a backfill that \
+            resolved, 2,
+            "the race resolves (the owned pod to its Deployment, the bare pod \
+             to itself) and the collision does not: a backfill that \
              attributed by pod name alone would name media's StatefulSet as \
              the owner of payments' denials"
+        );
+        let bare: WorkloadKey = ("shop".into(), "Pod".into(), "debug-1".into());
+        assert_eq!(
+            index_after_backfill(&mut conn)
+                .block_for(&bare)
+                .expect("attributed")
+                .total,
+            3,
+            "a bare pod is its own workload once the watcher has seen it"
         );
 
         let index = denial_index(&mut conn).expect("rollup");
@@ -4545,6 +4610,51 @@ mod tests {
             index.block_for(&payments).is_none(),
             "the collision is not resolvable by this rule and must stay \
              Unknown rather than be guessed at"
+        );
+    }
+
+    fn index_after_backfill(conn: &mut PgConnection) -> DenialIndex {
+        denial_index(conn).expect("rollup")
+    }
+
+    /// A pod with no controller — `kubectl run`, a debug pod, a static
+    /// control-plane pod — never gains a workload in `pod_details`. If ingest
+    /// refused it, one such pod tripping a profile would withhold the
+    /// all-clear from every CR in its namespace for as long as its rows
+    /// lived. It is attributed to itself instead, and its namespace stays
+    /// answerable.
+    #[test]
+    #[ignore = "requires a live postgres (set KG_TEST_DATABASE_URL)"]
+    fn live_database_attributes_a_known_bare_pod_to_itself() {
+        let mut conn = live_conn();
+        upsert_node_report(&mut conn, "n1", true, None).expect("heartbeat");
+        seed_pod(&mut conn, "aspmchk", "kube-system", None);
+        seed_pod(
+            &mut conn,
+            "coredns-1",
+            "kube-system",
+            Some(("Deployment", "coredns")),
+        );
+        let rows = vec![DenialInput {
+            pod_uid: "uid-bare".into(),
+            pod_namespace: "kube-system".into(),
+            ..input("aspmchk", "mount", "SCMP_ACT_LOG", 4)
+        }];
+        let names: BTreeSet<String> = rows.iter().map(|d| d.pod_name.clone()).collect();
+        let (unattributed, _) = store_batch(&mut conn, "n1", &names, rows).expect("ingest");
+        assert_eq!(unattributed, 0, "a known bare pod is not unattributed");
+
+        let index = denial_index(&mut conn).expect("rollup");
+        let bare: WorkloadKey = ("kube-system".into(), "Pod".into(), "aspmchk".into());
+        assert_eq!(index.block_for(&bare).expect("its own block").total, 4);
+        let coredns: WorkloadKey = ("kube-system".into(), "Deployment".into(), "coredns".into());
+        assert_eq!(
+            index
+                .block_for(&coredns)
+                .expect("the namespace is not withheld")
+                .total,
+            0,
+            "the Deployment sharing the namespace still gets its real all-clear"
         );
     }
 
