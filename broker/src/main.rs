@@ -501,11 +501,28 @@ fn escape_label_value(v: &str) -> String {
 /// valid exposition, and keeping the header unconditional means a dashboard
 /// query against the name never 404s just because nothing has been denied
 /// yet.
+///
+/// The denied workload's namespace is exposed as `workload_namespace`, not as
+/// `namespace`. prometheus-operator relabels `__meta_kubernetes_namespace`
+/// onto a `namespace` TARGET label for every ServiceMonitor-generated job, and
+/// `honor_labels` defaults to false, so a `namespace` label exposed here loses
+/// that conflict: Prometheus renames ours to `exported_namespace` and sets
+/// `namespace` to whichever namespace kguardian happens to be installed in.
+/// Every alert annotation would then name the wrong namespace, and the shipped
+/// `sum by (workload_namespace, ...)` rules would group on a constant, folding
+/// `payments/worker` and `media/worker` into one series — reintroducing in
+/// alerting exactly the cross-namespace confusion `attribute()` in
+/// `seccomp_denial.rs` works to prevent. A `honorLabels: true` endpoint toggle
+/// does not fix this: it only reaches operators scraping through this chart's
+/// ServiceMonitor, it would flip conflict resolution for every other broker
+/// metric on the same endpoint, and a Prometheus CR with `overrideHonorLabels`
+/// forces it back to false regardless. Choosing a label name the operator does
+/// not inject is correct however the broker is scraped.
 fn render_denial_series(series: &[SeccompDenialSeries]) -> String {
     let mut out = String::new();
     for s in series {
         out.push_str(&format!(
-            "kguardian_seccomp_denials_total{{namespace=\"{ns}\",workload_kind=\"{kind}\",workload=\"{workload}\",action=\"{action}\"}} {total}\n",
+            "kguardian_seccomp_denials_total{{workload_namespace=\"{ns}\",workload_kind=\"{kind}\",workload=\"{workload}\",action=\"{action}\"}} {total}\n",
             ns = escape_label_value(&s.namespace),
             kind = escape_label_value(&s.workload_kind),
             workload = escape_label_value(&s.workload),
@@ -836,7 +853,7 @@ mod tests {
         // keep stable.
         assert!(
             body.contains(
-                "\nkguardian_seccomp_denials_total{namespace=\"media\",workload_kind=\"Deployment\",workload=\"media-transform\",action=\"SCMP_ACT_LOG\"} 17\n"
+                "\nkguardian_seccomp_denials_total{workload_namespace=\"media\",workload_kind=\"Deployment\",workload=\"media-transform\",action=\"SCMP_ACT_LOG\"} 17\n"
             ),
             "attributed denial series missing or reshaped: {body}"
         );
@@ -844,7 +861,7 @@ mod tests {
         // empty workload labels, rather than being dropped from the counter.
         assert!(
             body.contains(
-                "\nkguardian_seccomp_denials_total{namespace=\"media\",workload_kind=\"\",workload=\"\",action=\"SCMP_ACT_ERRNO\"} 2\n"
+                "\nkguardian_seccomp_denials_total{workload_namespace=\"media\",workload_kind=\"\",workload=\"\",action=\"SCMP_ACT_ERRNO\"} 2\n"
             ),
             "unattributed denial series missing or reshaped: {body}"
         );
@@ -876,7 +893,7 @@ mod tests {
             total: 1,
         }];
         let line = render_denial_series(&hostile);
-        assert!(line.contains(r#"namespace="ev\"il""#), "{line}");
+        assert!(line.contains(r#"workload_namespace="ev\"il""#), "{line}");
         assert!(line.contains(r#"workload="a\nb""#), "{line}");
         assert_eq!(line.lines().count(), 1, "one series, one line: {line}");
     }
@@ -1075,19 +1092,19 @@ mod tests {
             // Name starting with a digit.
             "1broker_uptime_seconds 2",
             // Unterminated label block — a missing `}` in the format string.
-            r#"kguardian_seccomp_denials_total{namespace="media" 1"#,
+            r#"kguardian_seccomp_denials_total{workload_namespace="media" 1"#,
             // Unquoted label value.
-            "kguardian_seccomp_denials_total{namespace=media} 1",
+            "kguardian_seccomp_denials_total{workload_namespace=media} 1",
             // Missing space between the label block and the value.
-            r#"kguardian_seccomp_denials_total{namespace="media"}1"#,
+            r#"kguardian_seccomp_denials_total{workload_namespace="media"}1"#,
             // Empty label block.
             "kguardian_seccomp_denials_total{} 1",
             // Missing separator between labels.
-            r#"kguardian_seccomp_denials_total{namespace="a"workload="b"} 1"#,
+            r#"kguardian_seccomp_denials_total{workload_namespace="a"workload="b"} 1"#,
             // Unescaped quote inside a value — the failure `escape_label_
             // value` exists to prevent, which would otherwise terminate the
             // value early and leave trailing junk.
-            r#"kguardian_seccomp_denials_total{namespace="ev"il"} 1"#,
+            r#"kguardian_seccomp_denials_total{workload_namespace="ev"il"} 1"#,
         ] {
             assert!(
                 validate_sample_line(bad).is_err(),
@@ -1097,9 +1114,86 @@ mod tests {
         // And a well-formed labelled line still passes, so the rejections
         // above are not just "everything fails".
         assert!(validate_sample_line(
-            r#"kguardian_seccomp_denials_total{namespace="media",workload_kind="",workload="",action="SCMP_ACT_LOG"} 17"#
+            r#"kguardian_seccomp_denials_total{workload_namespace="media",workload_kind="",workload="",action="SCMP_ACT_LOG"} 17"#
         )
         .is_ok());
+    }
+
+    /// No label on the denial series may share a name with a label
+    /// prometheus-operator sets as a TARGET label on a ServiceMonitor job.
+    ///
+    /// `honor_labels` defaults to false — and a Prometheus CR with
+    /// `overrideHonorLabels` pins it there — so Prometheus resolves such a
+    /// collision in the target's favour: the exposed value is renamed to
+    /// `exported_<label>` and the label the alerts group by becomes a
+    /// constant, the namespace kguardian is installed in. The three shipped
+    /// rules in `prometheusrule.yaml` would then fold `payments/worker` and
+    /// `media/worker` into one series and name the wrong namespace in every
+    /// annotation, while the runbook query they print returns nothing.
+    ///
+    /// That is why the namespace label is `workload_namespace`. This test is
+    /// what stops a future reader shortening it back.
+    #[test]
+    fn denial_labels_cannot_collide_with_scrape_target_labels() {
+        // What prometheus-operator's generated relabel_configs write onto
+        // every ServiceMonitor target, plus the two Prometheus attaches
+        // itself.
+        const TARGET_LABELS: &[&str] = &[
+            "namespace",
+            "pod",
+            "container",
+            "service",
+            "endpoint",
+            "node",
+            "job",
+            "instance",
+        ];
+        let body = render_metrics_text(
+            1,
+            1,
+            1,
+            16,
+            0,
+            16,
+            16,
+            262_144,
+            262_144,
+            0,
+            0,
+            &denial_series(),
+            1,
+            19,
+        );
+        let mut saw_namespace_label = false;
+        let mut saw_series = false;
+        for line in body.lines() {
+            if !line.starts_with("kguardian_seccomp_denials_total{") {
+                continue;
+            }
+            saw_series = true;
+            let (_, labels, _) = parse_sample_line(line).unwrap();
+            let block = labels.expect("the denial family is labelled");
+            for (key, _) in parse_labels(block).unwrap() {
+                assert!(
+                    !TARGET_LABELS.contains(&key),
+                    "label {key:?} collides with a scrape target label: Prometheus \
+                     would rename ours to exported_{key} and the alerts would \
+                     group on the install namespace instead. Line: {line}"
+                );
+                if key == "workload_namespace" {
+                    saw_namespace_label = true;
+                }
+            }
+        }
+        assert!(
+            saw_series,
+            "no denial series rendered, so this test proved nothing"
+        );
+        assert!(
+            saw_namespace_label,
+            "the denied workload's namespace must still be exposed, under a \
+             name no scrape target label can shadow"
+        );
     }
 
     // db_pool_max_size is the env-var-driven tunable for the r2d2

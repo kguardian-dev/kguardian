@@ -23,7 +23,9 @@
 //!     `DenialsObserved` with its `denials` block) and apply it under the
 //!     shared manager `kguardian-summary`; every node writes the same
 //!     value, so it converges. Both applies are skipped when nothing
-//!     changed;
+//!     changed — and because the denial count and its `lastSeen` never
+//!     stop moving while a workload keeps denying, "changed" is
+//!     deliberately coarse for those two (`settled_denials`);
 //!  4. mirror `{spec, hash, distribution}` to the broker so the UI can show
 //!     CR state without an API-server round trip.
 //!
@@ -748,11 +750,17 @@ fn all_unknown(reason: &'static str, message: String) -> Observations {
 /// `CaptureComplete`, `Drift` and `DenialsObserved` from the broker's
 /// view of the CR's workload. `None` summaries (broker unreachable) ⇒
 /// `None` here, and the caller keeps whatever the conditions already say.
+///
+/// `published` is the `status.denials` block already on the CR. It is an
+/// input because a denial count and its timestamp keep moving while a
+/// workload keeps denying, and republishing every refreshed value would
+/// re-apply the CR forever — see `settled_denials`.
 pub fn observation_conditions(
     namespace: &str,
     cr_name: &str,
     workload_ref: Option<&WorkloadRef>,
     summaries: Option<&[BrokerSummary]>,
+    published: Option<&DenialSummary>,
 ) -> Option<Observations> {
     let Some(wr) = workload_ref else {
         return Some(all_unknown(
@@ -854,71 +862,28 @@ pub fn observation_conditions(
 
     let (denials, denial_summary) = match &row.denials {
         Some(d) => {
-            let summary = denial_block(d);
-            let actions = sorted_unique(&d.actions);
-            // "Are there denials" is the count, except that a count of
-            // zero alongside named syscalls can only be a broker bug —
-            // and of the two ways to be wrong about it, saying "denials,
-            // go look" beats handing out a clean bill of health. The
-            // printer column still shows the count the broker sent, so
-            // the contradiction stays visible rather than being papered
-            // over with a number kguardian made up.
-            if summary.observed == 0 && summary.syscalls.is_empty() {
-                (
-                    Desired {
-                        type_: COND_DENIALS_OBSERVED,
-                        status: "False",
-                        reason: "NoDenials",
-                        message: "no denials in the retention window".into(),
-                    },
-                    // Zero is an answer, so it gets written out as one.
-                    //
-                    // The `Denials` printer column is bound to
-                    // `.status.denials.observed`, and that table is the
-                    // surface operators actually read. Leave the block
-                    // unset here and the column goes blank for a workload
-                    // the broker affirmatively cleared — the same blank
-                    // it shows for a workload nothing is watching. Two
-                    // opposite meanings in one cell is precisely what the
-                    // three-valued condition exists to prevent, and it
-                    // would be reintroduced one layer down where nobody
-                    // reading the table can see the condition at all.
-                    // `0` for clean and blank for unknown makes the
-                    // column stand on its own.
-                    //
-                    // The cost, since this is a trade: every clean CR now
-                    // carries an all-zero `denials` block in `-o yaml`.
-                    // That is noise, but it is honest noise — it is the
-                    // difference between "checked, nothing" and "not
-                    // checked", and it is the cheaper of the two.
-                    Some(summary),
-                )
-            } else {
-                let actions = if actions.is_empty() {
-                    String::new()
-                } else {
-                    format!(" ({})", actions.join(", "))
-                };
-                let last_seen = match &summary.last_seen {
-                    Some(ts) => format!("; last seen {ts}"),
-                    None => String::new(),
-                };
-                let message = format!(
-                    "{} seccomp denial(s){actions} on {} syscall(s): {}{last_seen}",
-                    summary.observed,
-                    summary.syscalls.len(),
-                    summary.syscalls.join(", "),
-                );
-                (
-                    Desired {
-                        type_: COND_DENIALS_OBSERVED,
-                        status: "True",
-                        reason: "KernelDenied",
-                        message,
-                    },
-                    Some(summary),
-                )
-            }
+            // Zero is an answer, so it gets written out as one.
+            //
+            // The `Denials` printer column is bound to
+            // `.status.denials.observed`, and that table is the surface
+            // operators actually read. Leave the block unset for a zero
+            // and the column goes blank for a workload the broker
+            // affirmatively cleared — the same blank it shows for a
+            // workload nothing is watching. Two opposite meanings in one
+            // cell is precisely what the three-valued condition exists to
+            // prevent, and it would be reintroduced one layer down where
+            // nobody reading the table can see the condition at all. `0`
+            // for clean and blank for unknown makes the column stand on
+            // its own.
+            //
+            // The cost, since this is a trade: every clean CR carries an
+            // all-zero `denials` block in `-o yaml`. That is noise, but
+            // it is honest noise — it is the difference between "checked,
+            // nothing" and "not checked", and it is the cheaper of the
+            // two.
+            let block = settled_denials(published, denial_block(d));
+            let condition = denials_condition(&block, &sorted_unique(&d.actions));
+            (condition, Some(block))
         }
         // No block at all. NOT zero denials — this is the whole point of
         // the condition being three-valued. `False` here would tell an
@@ -962,7 +927,9 @@ pub fn observation_conditions(
 /// names in an unstable order (a `HashSet` drained on the other side,
 /// say) would make every node disagree with what is on the CR on every
 /// pass and turn an idle cluster into a patch loop. `render_profile`
-/// sorts for the same reason.
+/// sorts for the same reason. Sorting closes that door; the count and
+/// the timestamp in this block move on their own even when the content
+/// does not, and `settled_denials` closes theirs.
 fn denial_block(d: &BrokerDenials) -> DenialSummary {
     DenialSummary {
         // Clamped rather than trusted: `observed` is a `u64` in the CR
@@ -970,6 +937,136 @@ fn denial_block(d: &BrokerDenials) -> DenialSummary {
         observed: d.total.max(0) as u64,
         syscalls: sorted_unique(&d.syscalls),
         last_seen: normalised_last_seen(d.last_seen.as_deref()),
+    }
+}
+
+/// The `DenialsObserved` condition for the block that is being
+/// published, plus the `SCMP_ACT_*` spellings this pass saw.
+///
+/// Rendered from the published block and not from the broker row it came
+/// from, because `settled_denials` may decide to keep the block already
+/// on the CR: the count in the message an operator reads in
+/// `kubectl describe` is then always the count in the `Denials` column.
+/// Two numbers for one answer is the confusion this whole status is
+/// arranged to avoid.
+fn denials_condition(block: &DenialSummary, actions: &[String]) -> Desired {
+    // "Are there denials" is the count, except that a count of zero
+    // alongside named syscalls can only be a broker bug — and of the two
+    // ways to be wrong about it, saying "denials, go look" beats handing
+    // out a clean bill of health. The printer column still shows the
+    // count the broker sent, so the contradiction stays visible rather
+    // than being papered over with a number kguardian made up.
+    if block.observed == 0 && block.syscalls.is_empty() {
+        return Desired {
+            type_: COND_DENIALS_OBSERVED,
+            status: "False",
+            reason: "NoDenials",
+            message: "no denials in the retention window".into(),
+        };
+    }
+    let actions = if actions.is_empty() {
+        String::new()
+    } else {
+        format!(" ({})", actions.join(", "))
+    };
+    let last_seen = match &block.last_seen {
+        Some(ts) => format!("; last seen {ts}"),
+        None => String::new(),
+    };
+    Desired {
+        type_: COND_DENIALS_OBSERVED,
+        status: "True",
+        reason: "KernelDenied",
+        message: format!(
+            "{} seccomp denial(s){actions} on {} syscall(s): {}{last_seen}",
+            block.observed,
+            block.syscalls.len(),
+            block.syscalls.join(", "),
+        ),
+    }
+}
+
+/// How far a denial view has to have moved before it earns another
+/// status write. Thirty resyncs: long enough that a workload denying
+/// non-stop costs one apply a quarter of an hour rather than one per
+/// node per pass, short enough that an operator reading the `Denials`
+/// column is never behind by more than a coffee break.
+const DENIAL_REFRESH_SECS: i64 = 15 * 60;
+
+/// Which denial block to publish: the one this pass computed, or the one
+/// the CR already carries.
+///
+/// `observed` climbs and `lastSeen` advances for as long as a workload
+/// keeps tripping its filter, and `summary_equal` compares both — so
+/// publishing every refreshed value would have every node
+/// server-side-apply the CR on every resync for the entire time the
+/// denials continue, each apply bumping `resourceVersion` and fanning a
+/// watch event back to every other node's reflector. On a sixty-node
+/// cluster that is 120 writes a minute per CR, forever, on a cluster
+/// that has otherwise converged. It is the patch loop `denial_block`
+/// already sorts the syscall names to prevent; a monotonically rising
+/// count walks in through a door sorting cannot close.
+///
+/// So the fresh block replaces the published one only when it says
+/// something an operator would act on differently — a new syscall, an
+/// order of magnitude, or a quarter of an hour of continued denials.
+/// Otherwise the published block is kept, the whole summary compares
+/// equal, and no apply happens. That also settles the herd rather than
+/// just slowing it: the first node to see a real move writes it, and the
+/// other fifty-nine read it back off the CR and agree.
+///
+/// The cost, since this is a trade: `status.denials` is an
+/// order-of-magnitude reading of an aggregate over the broker's
+/// retention window, trailing live activity by up to `DENIAL_REFRESH_SECS`,
+/// and after a burst stops it keeps whatever that burst's last write
+/// said. `GET /seccomp/denials` is the live view.
+fn settled_denials(published: Option<&DenialSummary>, fresh: DenialSummary) -> DenialSummary {
+    match published {
+        Some(prev) if !worth_republishing(prev, &fresh) => prev.clone(),
+        _ => fresh,
+    }
+}
+
+/// Whether `fresh` says anything the published block does not.
+///
+/// Deliberately coarse on the two fields that move on their own, and
+/// exact on the one that does not: a syscall the kernel had not acted on
+/// before is news at any count.
+fn worth_republishing(published: &DenialSummary, fresh: &DenialSummary) -> bool {
+    published.syscalls != fresh.syscalls
+        || count_magnitude(published.observed) != count_magnitude(fresh.observed)
+        || last_seen_moved(published.last_seen.as_deref(), fresh.last_seen.as_deref())
+}
+
+/// Digits in the count, with zero in a bucket of its own: 0, 1-9, 10-99,
+/// and so on. Zero is separate because "cleared" and "denied once" are
+/// opposite answers, and because a count reaching zero means the
+/// retention window emptied — which is worth a write however small the
+/// numbers either side of it are.
+fn count_magnitude(observed: u64) -> u32 {
+    observed.checked_ilog10().map_or(0, |n| n + 1)
+}
+
+/// Whether denials are still arriving `DENIAL_REFRESH_SECS` past the
+/// timestamp the CR carries. Compares instants rather than strings, so
+/// two broker releases spelling one moment differently is not a move.
+fn last_seen_moved(published: Option<&str>, fresh: Option<&str>) -> bool {
+    match (published, fresh) {
+        (None, None) => false,
+        (Some(a), Some(b)) => match (
+            DateTime::parse_from_rfc3339(a),
+            DateTime::parse_from_rfc3339(b),
+        ) {
+            (Ok(a), Ok(b)) => (b - a).num_seconds().abs() >= DENIAL_REFRESH_SECS,
+            // What is on the CR is not a timestamp: hand edited, or
+            // written before `normalised_last_seen` existed. Replace it
+            // once, and the next pass has two instants to compare.
+            _ => true,
+        },
+        // Gaining or losing the timestamp altogether. That is the answer
+        // changing — "denied, and here is when" versus "denied, and we
+        // cannot say" — not the same answer arriving fresher.
+        _ => true,
     }
 }
 
@@ -988,11 +1085,12 @@ fn sorted_unique(values: &[String]) -> Vec<String> {
 /// Re-spell the broker's `lastSeen` the way `now_rfc3339` spells a
 /// timestamp, or drop it if it is not a timestamp at all.
 ///
-/// Canonicalising matters for the same reason the sort does: the value
-/// is part of what `summary_equal` compares, so a broker that spelled
-/// one instant `+00:00` in one release and `Z` in the next would re-apply
-/// every CR on every pass forever. Dropping an unparseable value keeps
-/// `status.denials.lastSeen` a field an operator can read as a time.
+/// Canonicalising is no longer what keeps a re-spelling out of the patch
+/// loop — `last_seen_moved` parses both sides and compares instants, so
+/// `+00:00` from one broker release and `Z` from the next is not a move.
+/// It is what keeps `status.denials.lastSeen` a single spelling of a
+/// time across a mixed-version fleet, and dropping an unparseable value
+/// keeps it a field an operator can read as a time at all.
 fn normalised_last_seen(raw: Option<&str>) -> Option<String> {
     let raw = raw?.trim();
     if raw.is_empty() {
@@ -1051,6 +1149,7 @@ pub fn desired_summary(
         &cr.name_any(),
         cr.spec.workload_ref.as_ref(),
         summaries,
+        existing.denials.as_ref(),
     ) {
         Some(o) => {
             desired.push(o.capture);
@@ -1269,6 +1368,13 @@ mod tests {
         }
     }
 
+    /// `secs` past a fixed instant, spelled the way the broker spells
+    /// `lastSeen`. Lets a test walk a workload's denials forward in time.
+    fn at(secs: u64) -> String {
+        let base = DateTime::parse_from_rfc3339("2026-09-14T04:00:00Z").expect("fixed base");
+        (base + chrono::Duration::seconds(secs as i64)).to_rfc3339_opts(SecondsFormat::Secs, true)
+    }
+
     fn denials(total: i64, syscalls: &[&str]) -> BrokerDenials {
         BrokerDenials {
             total,
@@ -1328,7 +1434,7 @@ mod tests {
     fn observation_conditions_cover_every_branch() {
         // No workloadRef ⇒ all three Unknown/NoWorkloadRef, even without
         // a broker.
-        let o = observation_conditions("prod", "deployment-web", None, None).unwrap();
+        let o = observation_conditions("prod", "deployment-web", None, None, None).unwrap();
         let (c, d) = (&o.capture, &o.drift);
         assert_eq!((c.status, c.reason), ("Unknown", "NoWorkloadRef"));
         assert_eq!((d.status, d.reason), ("Unknown", "NoWorkloadRef"));
@@ -1343,10 +1449,11 @@ mod tests {
             name: "web".into(),
         };
         // Broker unreachable ⇒ None (caller keeps existing conditions).
-        assert!(observation_conditions("prod", "deployment-web", Some(&wr), None).is_none());
+        assert!(observation_conditions("prod", "deployment-web", Some(&wr), None, None).is_none());
 
         // No row for the workload ⇒ Unknown/NoObservations.
-        let o = observation_conditions("prod", "deployment-web", Some(&wr), Some(&[])).unwrap();
+        let o =
+            observation_conditions("prod", "deployment-web", Some(&wr), Some(&[]), None).unwrap();
         let (c, d) = (&o.capture, &o.drift);
         assert_eq!((c.status, c.reason), ("Unknown", "NoObservations"));
         assert_eq!((d.status, d.reason), ("Unknown", "NoObservations"));
@@ -1370,7 +1477,8 @@ mod tests {
                 }),
             }),
         )];
-        let o = observation_conditions("prod", "deployment-web", Some(&wr), Some(&rows)).unwrap();
+        let o =
+            observation_conditions("prod", "deployment-web", Some(&wr), Some(&rows), None).unwrap();
         let (c, d) = (&o.capture, &o.drift);
         assert_eq!((c.status, c.reason), ("True", "Full"));
         assert_eq!((d.status, d.reason), ("False", "InSync"));
@@ -1389,7 +1497,8 @@ mod tests {
                 }),
             }),
         )];
-        let o = observation_conditions("prod", "deployment-web", Some(&wr), Some(&rows)).unwrap();
+        let o =
+            observation_conditions("prod", "deployment-web", Some(&wr), Some(&rows), None).unwrap();
         let (c, d) = (&o.capture, &o.drift);
         assert_eq!((c.status, c.reason), ("False", "PartialCapture"));
         assert!(
@@ -1413,7 +1522,7 @@ mod tests {
                 drift: None,
             }),
         )];
-        let d = observation_conditions("prod", "deployment-web", Some(&wr), Some(&rows))
+        let d = observation_conditions("prod", "deployment-web", Some(&wr), Some(&rows), None)
             .unwrap()
             .drift;
         assert_eq!((d.status, d.reason), ("Unknown", "NoObservations"));
@@ -1421,7 +1530,7 @@ mod tests {
 
         // Namespace must match, not just the workload name.
         let rows = [summary_row("staging", "web", true, None)];
-        let c = observation_conditions("prod", "deployment-web", Some(&wr), Some(&rows))
+        let c = observation_conditions("prod", "deployment-web", Some(&wr), Some(&rows), None)
             .unwrap()
             .capture;
         assert_eq!(c.reason, "NoObservations");
@@ -1475,8 +1584,14 @@ mod tests {
         // A broker that reports on the workload but says nothing about
         // denials.
         let silent_rows = [summary_row("prod", "web", true, None)];
-        let o = observation_conditions("prod", "deployment-web", Some(&wr), Some(&silent_rows))
-            .unwrap();
+        let o = observation_conditions(
+            "prod",
+            "deployment-web",
+            Some(&wr),
+            Some(&silent_rows),
+            None,
+        )
+        .unwrap();
         assert_eq!(
             (o.denials.status, o.denials.reason),
             ("Unknown", "NoDenialData"),
@@ -1493,7 +1608,8 @@ mod tests {
             BrokerDenials::default(),
         )];
         let o =
-            observation_conditions("prod", "deployment-web", Some(&wr), Some(&clean_rows)).unwrap();
+            observation_conditions("prod", "deployment-web", Some(&wr), Some(&clean_rows), None)
+                .unwrap();
         assert_eq!((o.denials.status, o.denials.reason), ("False", "NoDenials"));
         assert_eq!(
             o.denial_summary,
@@ -1610,7 +1726,8 @@ mod tests {
                 last_seen: Some("2026-09-14T04:05:14Z".into()),
             },
         )];
-        let o = observation_conditions("prod", "deployment-web", Some(&wr), Some(&rows)).unwrap();
+        let o =
+            observation_conditions("prod", "deployment-web", Some(&wr), Some(&rows), None).unwrap();
         assert_eq!(
             (o.denials.status, o.denials.reason),
             ("True", "KernelDenied")
@@ -1636,7 +1753,8 @@ mod tests {
                 ..Default::default()
             },
         )];
-        let o = observation_conditions("prod", "deployment-web", Some(&wr), Some(&rows)).unwrap();
+        let o =
+            observation_conditions("prod", "deployment-web", Some(&wr), Some(&rows), None).unwrap();
         assert_eq!(o.denials.status, "True");
         assert_eq!(
             o.denial_summary.unwrap().observed,
@@ -1790,78 +1908,195 @@ mod tests {
         assert_eq!(out[0].last_transition_time.as_deref(), Some("now"));
     }
 
+    /// The steady state this file is built for: a cluster where nothing
+    /// has changed applies nothing.
+    ///
+    /// The workload here is denying continuously — one Deployment
+    /// tripping one syscall under `SCMP_ACT_LOG` — so `observed` climbs
+    /// and `lastSeen` advances on every pass. `summary_equal` compares
+    /// both, and the `DenialsObserved` message quotes the count, so a
+    /// summary that tracks them exactly is a server-side apply per node
+    /// per resync for as long as the denials last, each one bumping
+    /// `resourceVersion` and fanning a watch event back to every other
+    /// node's reflector.
+    ///
+    /// This test passed `Some(&[])` before — no row for the workload, so
+    /// no denials and nothing that could move between passes. It proved
+    /// idempotence for the one input that could not break it.
     #[test]
     fn desired_summary_is_idempotent_so_it_is_only_applied_once() {
         let c = cr("prod", "deployment-web", Some("web"));
         let nodes = [node("a", "h1")];
+        let path = "kguardian/prod/deployment-web.json";
+        // Pass n, half a minute apart, one more denial each time.
+        let pass = |n: u64| {
+            [with_denials(
+                summary_row("prod", "web", true, None),
+                BrokerDenials {
+                    total: 400 + n as i64,
+                    syscalls: vec!["ptrace".into()],
+                    actions: vec!["SCMP_ACT_LOG".into()],
+                    last_seen: Some(at(30 * n)),
+                },
+            )]
+        };
+
         let first = desired_summary(
             &c,
             &SeccompProfileStatus::default(),
             &nodes,
             "h1",
-            "kguardian/prod/deployment-web.json",
+            path,
             1,
-            Some(&[]),
+            Some(&pass(0)),
         );
         assert_eq!(first.observed_generation, Some(3));
         assert_eq!(first.hash.as_deref(), Some("h1"));
-        assert_eq!(
-            first.localhost_profile.as_deref(),
-            Some("kguardian/prod/deployment-web.json")
-        );
+        assert_eq!(first.localhost_profile.as_deref(), Some(path));
         assert_eq!(
             first.distribution.as_ref().unwrap().state,
             DistributionState::Ready
         );
         assert_eq!(first.drift.as_deref(), Some("Unknown"));
         assert_eq!(first.conditions.len(), 4);
-        assert!(
-            first.denials.is_none(),
-            "a broker with no row for the workload has told us nothing \
-             about denials either"
-        );
+        assert_eq!(first.denials.as_ref().unwrap().observed, 400);
         assert!(first.nodes.is_empty(), "summary never carries nodes");
         assert!(!summary_equal(&SeccompProfileStatus::default(), &first));
 
-        // Recomputed against itself ⇒ equal ⇒ no patch.
-        let second = desired_summary(
-            &c,
-            &first,
-            &nodes,
-            "h1",
-            "kguardian/prod/deployment-web.json",
-            1,
-            Some(&[]),
-        );
-        assert!(summary_equal(&first, &second));
+        // Ten minutes of steady denials. The count and the timestamp
+        // move on every one of these passes and not one of them is worth
+        // a write.
+        let mut status = first.clone();
+        for n in 1..=20 {
+            let next = desired_summary(&c, &status, &nodes, "h1", path, 1, Some(&pass(n)));
+            assert!(
+                summary_equal(&status, &next),
+                "pass {n} re-applies the CR: {:?} then {:?}",
+                status.denials,
+                next.denials
+            );
+            status = next;
+        }
 
         // Broker outage keeps CaptureComplete/Drift exactly as they were.
-        let third = desired_summary(
-            &c,
-            &first,
-            &nodes,
-            "h1",
-            "kguardian/prod/deployment-web.json",
-            1,
-            None,
-        );
-        assert!(summary_equal(&first, &third));
+        let outage = desired_summary(&c, &status, &nodes, "h1", path, 1, None);
+        assert!(summary_equal(&status, &outage));
 
         // A new hash flips Ready and changes the summary.
-        let fourth = desired_summary(
-            &c,
-            &first,
-            &nodes,
-            "h2",
-            "kguardian/prod/deployment-web.json",
-            1,
-            Some(&[]),
-        );
-        assert!(!summary_equal(&first, &fourth));
+        let rehashed = desired_summary(&c, &status, &nodes, "h2", path, 1, Some(&pass(21)));
+        assert!(!summary_equal(&status, &rehashed));
         assert_eq!(
-            fourth.distribution.as_ref().unwrap().state,
+            rehashed.distribution.as_ref().unwrap().state,
             DistributionState::Pending
         );
+        // …and it carries the settled count, not a fresher one. The
+        // floor decides when the denial view is refreshed; it does not
+        // ride along on whatever else happens to be applied, so the
+        // count in the column is always one a pass deliberately chose.
+        assert_eq!(rehashed.denials.as_ref().unwrap().observed, 400);
+    }
+
+    /// The refresh floor is a floor, not a mute: a climbing count still
+    /// reaches the CR the moment it says something an operator would act
+    /// on differently.
+    ///
+    /// The cost of the floor is asserted here too, so it stays a
+    /// decision rather than a surprise: between those writes the
+    /// `Denials` column trails the live count. What it may never do is
+    /// disagree with itself — the condition message is rendered from the
+    /// block that was actually published, so `kubectl get` and
+    /// `kubectl describe` cannot name two different numbers.
+    #[test]
+    fn a_climbing_denial_count_is_republished_only_when_it_says_something_new() {
+        let c = cr("prod", "deployment-web", Some("web"));
+        let nodes = [node("a", "h1")];
+        let path = "kguardian/prod/deployment-web.json";
+        let rows = |total: i64, syscalls: &[&str], secs: u64| {
+            [with_denials(
+                summary_row("prod", "web", true, None),
+                BrokerDenials {
+                    total,
+                    syscalls: syscalls.iter().map(|s| (*s).to_string()).collect(),
+                    actions: vec!["SCMP_ACT_LOG".into()],
+                    last_seen: Some(at(secs)),
+                },
+            )]
+        };
+        let block = |s: &SeccompProfileStatus| s.denials.clone().expect("a block is published");
+        let message = |s: &SeccompProfileStatus| {
+            s.conditions
+                .iter()
+                .find(|c| c.type_ == COND_DENIALS_OBSERVED)
+                .expect("DenialsObserved is always emitted")
+                .message
+                .clone()
+        };
+        let base = desired_summary(
+            &c,
+            &SeccompProfileStatus::default(),
+            &nodes,
+            "h1",
+            path,
+            1,
+            Some(&rows(400, &["ptrace"], 0)),
+        );
+        let step = |prev: &SeccompProfileStatus, rows: &[BrokerSummary]| {
+            desired_summary(&c, prev, &nodes, "h1", path, 1, Some(rows))
+        };
+
+        // A denial a second for four minutes: same syscall, same order
+        // of magnitude, well inside the floor. Nothing is applied, and
+        // the message still names the count that was.
+        let quiet = step(&base, &rows(640, &["ptrace"], 240));
+        assert!(summary_equal(&base, &quiet));
+        assert_eq!(block(&quiet).observed, 400);
+        assert!(
+            message(&quiet).starts_with("400 seccomp denial(s)"),
+            "the message must render the published block: {}",
+            message(&quiet)
+        );
+
+        // An order of magnitude is news …
+        let louder = step(&base, &rows(4_000, &["ptrace"], 240));
+        assert!(!summary_equal(&base, &louder));
+        assert_eq!(block(&louder).observed, 4_000);
+
+        // … so is a syscall the kernel had not acted on before, at any
+        // count …
+        let wider = step(&base, &rows(401, &["mount", "ptrace"], 240));
+        assert!(!summary_equal(&base, &wider));
+        assert_eq!(block(&wider).syscalls, ["mount", "ptrace"]);
+        assert_eq!(
+            block(&wider).observed,
+            401,
+            "a write carries the fresh count"
+        );
+
+        // … and so is the floor itself: still denying a quarter of an
+        // hour later earns a refreshed count and timestamp.
+        let later = step(&base, &rows(900, &["ptrace"], 15 * 60));
+        assert!(!summary_equal(&base, &later));
+        assert_eq!(block(&later).observed, 900);
+        assert_eq!(block(&later).last_seen, Some(at(15 * 60)));
+
+        // The retention window emptying is the answer changing, not a
+        // refresh: a real zero in the column and `False`/`NoDenials`.
+        let rolled = step(
+            &base,
+            &[with_denials(
+                summary_row("prod", "web", true, None),
+                BrokerDenials::default(),
+            )],
+        );
+        assert!(!summary_equal(&base, &rolled));
+        assert_eq!(block(&rolled).observed, 0);
+        assert_eq!(message(&rolled), "no denials in the retention window");
+
+        // And the broker going quiet about denials altogether is not a
+        // refresh either — the block goes away with the condition.
+        let silent = step(&base, &[summary_row("prod", "web", true, None)]);
+        assert!(!summary_equal(&base, &silent));
+        assert!(silent.denials.is_none());
     }
 
     #[test]

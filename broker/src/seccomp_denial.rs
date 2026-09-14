@@ -55,7 +55,6 @@ use chrono::{DateTime, Utc};
 use diesel::prelude::*;
 use diesel::r2d2::{self, ConnectionManager};
 use diesel::sql_types::{BigInt, Nullable, Text, Timestamptz};
-use diesel::upsert::excluded;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -80,7 +79,11 @@ type PodAttribution = (Option<String>, Option<String>, Option<String>);
 type AttributionIndex = HashMap<String, PodAttribution>;
 
 /// `(namespace, kind, name, syscall, action, count, last_seen)` — one
-/// attributed denial, as the rollup index folds it.
+/// attributed denial, as `DenialIndex::with_rows` folds it. Test-only: the
+/// production loader reads totals and names on separate axes, and folding
+/// them back into one row is a convenience the tests want and the bounded
+/// read cannot offer.
+#[cfg(test)]
 type DenialRollupRow = (String, String, String, String, String, i64, DateTime<Utc>);
 
 /// `(pod_name, namespace, workload_kind, workload_name)` as selected from
@@ -122,6 +125,75 @@ const MAX_DENIAL_SYSCALLS: usize = 50;
 /// `SCMP_ACT_*` spellings plus `SCMP_ACT_UNKNOWN`, so this is a formality;
 /// it exists so the block cannot be unbounded on either axis.
 const MAX_DENIAL_ACTIONS: usize = 16;
+
+/// Ceiling on `count` — both the value one report may carry and the total
+/// the upsert is allowed to accumulate to.
+///
+/// Without it a single wire value near `i64::MAX` permanently kills a node's
+/// ingest. `count` lands in a `BIGINT` that the upsert adds to, Postgres
+/// RAISES on bigint overflow rather than saturating, and every chunk of a
+/// drain shares one transaction — so the POST 500s. The Controller clears
+/// its BPF map only on a successful POST, so it replays the same batch every
+/// interval, forever, and every subsequent denial from that node is lost.
+/// The heartbeat commits in an earlier, separate transaction and keeps
+/// succeeding, so the cluster still reads "capturing" while capture is in
+/// fact dead. `BROKER_AUTH_TOKEN` is optional, so on a default deploy this
+/// needs no credentials.
+///
+/// A trillion is roughly 40x the most extreme physical bound on one 10 s
+/// drain. A 256-core node cannot retire more than ~2.5e9 syscalls/s in
+/// total, and a DENIED syscall costs far more than an ordinary one because
+/// it goes through `seccomp_log()` and the audit subsystem, so ~2.5e10 is
+/// already unreachable. No real node arrives here.
+///
+/// It is also what keeps `SUM(count)` inside `BIGINT` in the rollup query,
+/// which casts the sum back to `BIGINT` and would raise the same way. A
+/// group there is one workload's one `(syscall, action)` pair across its
+/// pods, so the sum is bounded by `pods x MAX_DENIAL_COUNT`; reaching
+/// `i64::MAX` would need 9.2 million pods in one workload.
+const MAX_DENIAL_COUNT: i64 = 1_000_000_000_000;
+
+/// Distinct `(syscall, action)` pairs the rollup reads per workload.
+///
+/// [`DenialIndex::block_for`] keeps at most [`MAX_DENIAL_SYSCALLS`] syscalls
+/// and [`MAX_DENIAL_ACTIONS`] actions, and the SQL orders pairs the same way
+/// the `BTreeSet`s behind those lists do, so on real input every pair past
+/// this product is one the block would have dropped anyway — the cap bounds
+/// the read without changing a single visible block.
+///
+/// "On real input" is load-bearing. `action` is length-checked at ingest but
+/// not enumerated against the `SCMP_ACT_*` set, so a caller can fabricate
+/// more than [`MAX_DENIAL_ACTIONS`] distinct action strings for one syscall
+/// and crowd out later syscalls within this cap. The block is then shorter
+/// than it would have been. That is the deliberate trade: a shorter list on
+/// fabricated input, against an unbounded read on it.
+const MAX_DENIAL_ROLLUP_PAIRS_PER_WORKLOAD: i64 = (MAX_DENIAL_SYSCALLS * MAX_DENIAL_ACTIONS) as i64;
+
+/// Overall cap on the name rows one cluster-wide rollup reads.
+///
+/// The per-workload cap alone still multiplies by the workload count, and
+/// `GET /seccomp/profiles` is the endpoint that OOMKilled the Broker in
+/// #1514 for exactly this shape of mistake. 10 000 pairs is far above any
+/// real cluster — a denial is by definition the exception, so a cluster
+/// where a hundred workloads each trip ten syscalls is 1 000 rows — and it
+/// is what the read budget is charged for, so it is a reservation as much as
+/// a limit.
+///
+/// Truncating here can only shorten a `syscalls`/`actions` list, never a
+/// `total`: the totals are a separate query that is not capped, for exactly
+/// that reason. A workload whose pairs fall past this cap keeps its true
+/// total and loses its name list, which reads as "denied, names not shown"
+/// rather than as an all-clear.
+const MAX_DENIAL_ROLLUP_NAME_ROWS: i64 = 10_000;
+
+/// Peak in-flight bytes per rollup name row.
+///
+/// Five short strings — namespace, kind, workload, syscall, action — so
+/// ~60 B of text, 120 B of `String` headers, and libpq's own copy of the
+/// whole result set before diesel decodes it. 512 B is roughly 1.5x that,
+/// the same order of allowance [`crate::read_budget::AUDIT_ROW_COST_BYTES`]
+/// makes for a wider row. Estimated from the row shape, not measured.
+const DENIAL_ROLLUP_NAME_ROW_COST_BYTES: u64 = 512;
 
 /// Series cap for `kguardian_seccomp_denials_total`.
 ///
@@ -341,7 +413,19 @@ fn reject_reason(d: &DenialInput) -> Option<&'static str> {
     // A zero or negative count is not a denial. Accepting one would add a
     // row — and therefore a workload — to the rollup that the kernel never
     // actually acted on, which is the one thing this signal must not do.
-    if d.count <= 0 {
+    //
+    // A count above `MAX_DENIAL_COUNT` is not a measurement either, and it
+    // is the far more dangerous half: unbounded, it overflows the `BIGINT`
+    // the upsert accumulates into and takes the node's whole ingest down
+    // with it. See [`MAX_DENIAL_COUNT`].
+    //
+    // Rejected rather than clamped, deliberately. Clamping would store a
+    // number nobody measured, indistinguishable from a real one from that
+    // point on, in the signal an operator promotes a profile to enforcing
+    // on. Rejecting loses one row and says so: the per-field reject counter
+    // puts `count` in the ingest `warn!`, which is a diagnosable Controller
+    // bug rather than silent fiction.
+    if d.count <= 0 || d.count > MAX_DENIAL_COUNT {
         return Some("count");
     }
     None
@@ -375,7 +459,11 @@ fn fold_batch(denials: Vec<DenialInput>) -> (Vec<DenialInput>, BTreeMap<&'static
         let key = (d.pod_uid.clone(), d.syscall.clone(), d.action.clone());
         match folded.get_mut(&key) {
             Some(existing) => {
-                existing.count = existing.count.saturating_add(d.count);
+                // Clamped, not just saturated at `i64::MAX`: the ceiling
+                // is an invariant on what this file ever stores, and a
+                // fresh insert takes this value without passing through
+                // the upsert's own clamp.
+                existing.count = existing.count.saturating_add(d.count).min(MAX_DENIAL_COUNT);
                 existing.first_seen = existing.first_seen.min(d.first_seen).min(d.last_seen);
                 existing.last_seen = existing.last_seen.max(d.last_seen).max(d.first_seen);
                 // Keep whichever entry could resolve the optional fields; a
@@ -605,12 +693,26 @@ pub async fn post_seccomp_denials(
 /// `INSERT ... ON CONFLICT (pod_uid, syscall, action) DO UPDATE`, the
 /// accumulation the whole table shape depends on.
 ///
-/// Three things here are not interchangeable with the obvious alternative:
+/// Built here rather than inline in [`upsert_denials`] so a test can render
+/// the real statement. Every rule below is a raw SQL fragment the type
+/// system cannot check, and a test that re-declares them proves nothing
+/// about what production sends.
+///
+/// Four things here are not interchangeable with the obvious alternative:
 ///
 /// - `count` is `existing + EXCLUDED`, not `EXCLUDED`. The controller ships
 ///   the delta since its last drain and clears the map, so overwriting would
 ///   turn a cumulative count into "whatever the last 10 seconds held" and
 ///   make the Prometheus counter non-monotonic.
+/// - the sum is computed in `NUMERIC` and clamped by `LEAST` before it is
+///   cast back. `BIGINT + BIGINT` raises on overflow, and it raises BEFORE
+///   an enclosing `LEAST` could clamp it, so the cast has to be the last
+///   step. `MAX_DENIAL_COUNT` bounds each report, but nothing bounds how
+///   many reports land on one row — the ceiling on the running total is
+///   what actually stops a 500 that would replay forever. The clamp cannot
+///   lower a stored value: every write here is capped at the same ceiling,
+///   so `LEAST(existing + delta, CEILING) >= existing` holds for anything
+///   this code path put there.
 /// - `first_seen`/`last_seen` are `LEAST`/`GREATEST`, not `EXCLUDED`. Drains
 ///   from a node whose clock stepped, or two nodes' reports for a pod seen
 ///   across a migration, must widen the bracket rather than move it.
@@ -620,18 +722,32 @@ pub async fn post_seccomp_denials(
 ///   earlier one did resolve — that would silently drop the row out of the
 ///   per-workload rollup the CR status is built from, which reads as "the
 ///   denials stopped".
-fn upsert_denials(conn: &mut PgConnection, rows: &[NewDenial]) -> Result<(), DbError> {
+///
+/// `pod_name` and `pod_namespace` are absent from the SET list entirely,
+/// which is the one rule here that is about what is NOT written. They are
+/// `NOT NULL`, so the `COALESCE` guard the nullable columns get would be a
+/// no-op on them — `EXCLUDED.x` is never NULL, so the existing value could
+/// never be reached. Leaving them unwritten is the guard that actually
+/// holds. A pod uid's name and namespace are fixed for the life of the uid,
+/// so a conflicting report disagreeing about them is a lie or a bug either
+/// way; and the rollup groups on `(pod_namespace, workload_kind,
+/// workload_name)`, so honouring the new namespace would move an existing
+/// row into a DIFFERENT workload's rollup — counts appearing under a
+/// namespace that never made the syscall, and disappearing from the one
+/// that did.
+fn denial_upsert(
+    rows: &[NewDenial],
+) -> impl diesel::query_builder::QueryFragment<diesel::pg::Pg>
+       + diesel::query_builder::QueryId
+       + diesel::query_dsl::methods::ExecuteDsl<PgConnection>
+       + diesel::RunQueryDsl<PgConnection>
+       + '_ {
     use schema::seccomp_denials::dsl as sd;
-    if rows.is_empty() {
-        return Ok(());
-    }
     diesel::insert_into(sd::seccomp_denials)
         .values(rows)
         .on_conflict((sd::pod_uid, sd::syscall, sd::action))
         .do_update()
         .set((
-            sd::pod_name.eq(excluded(sd::pod_name)),
-            sd::pod_namespace.eq(excluded(sd::pod_namespace)),
             sd::node_name.eq(diesel::dsl::sql::<Nullable<Text>>(
                 "COALESCE(EXCLUDED.node_name, seccomp_denials.node_name)",
             )),
@@ -650,9 +766,12 @@ fn upsert_denials(conn: &mut PgConnection, rows: &[NewDenial]) -> Result<(), DbE
             sd::arch.eq(diesel::dsl::sql::<Nullable<Text>>(
                 "COALESCE(EXCLUDED.arch, seccomp_denials.arch)",
             )),
-            sd::count.eq(diesel::dsl::sql::<BigInt>(
-                "seccomp_denials.count + EXCLUDED.count",
-            )),
+            // Interpolated from the constant rather than written out, so the
+            // ceiling cannot drift from the one ingest validates against.
+            sd::count.eq(diesel::dsl::sql::<BigInt>(&format!(
+                "LEAST(seccomp_denials.count::NUMERIC + EXCLUDED.count, \
+                 {MAX_DENIAL_COUNT})::BIGINT"
+            ))),
             sd::first_seen.eq(diesel::dsl::sql::<Timestamptz>(
                 "LEAST(seccomp_denials.first_seen, EXCLUDED.first_seen)",
             )),
@@ -660,7 +779,14 @@ fn upsert_denials(conn: &mut PgConnection, rows: &[NewDenial]) -> Result<(), DbE
                 "GREATEST(seccomp_denials.last_seen, EXCLUDED.last_seen)",
             )),
         ))
-        .execute(conn)?;
+}
+
+/// Apply one chunk of the drain. See [`denial_upsert`] for the rules.
+fn upsert_denials(conn: &mut PgConnection, rows: &[NewDenial]) -> Result<(), DbError> {
+    if rows.is_empty() {
+        return Ok(());
+    }
+    denial_upsert(rows).execute(conn)?;
     Ok(())
 }
 
@@ -686,24 +812,49 @@ fn upsert_node_report(conn: &mut PgConnection, node: &str, capturing: bool) -> R
 /// cluster — the fact that decides whether a `denials` block of `total: 0`
 /// is an all-clear or a lie.
 ///
-/// Two signals, in order:
+/// The question is "is anything watching", not "does a denial row exist",
+/// and the difference is the whole point. Three states, in order:
 ///
-/// 1. **A fresh node reporting `capturing = true`.** The real answer. A node
-///    that reported within [`CAPTURE_REPORT_STALE_SECS`] with the probe
-///    attached proves the whole path works — probe loaded, drain running,
-///    POST reaching the Broker — independently of whether anything has
-///    actually been denied.
-/// 2. **Any denial row at all.** The fallback, and the reason this is not
-///    just the first check. A Controller that predates the heartbeat never
-///    sends an empty batch, so a cluster running one would have an empty
-///    node table forever; but if it has ever shipped a denial, capture
-///    demonstrably worked. Without this, upgrading the Broker ahead of the
-///    Controller — the supported order — would blank every `denials` block.
+/// 1. **A node reported within [`CAPTURE_REPORT_STALE_SECS`] with
+///    `capturing = true`** -> live. The real answer, and the only positive
+///    one that does not depend on something having been denied. It proves
+///    the whole path works — probe loaded, drain running, POST reaching the
+///    Broker.
+/// 2. **No such node, and the node table is EMPTY** -> fall back to "does
+///    any denial row exist". Empty means nothing has ever reported a
+///    heartbeat, which is exactly and only the pre-heartbeat Controller: it
+///    POSTs only when it HAS denials, so it never sends the empty batch that
+///    would create a row. A denial from one is still proof that capture
+///    worked. Without this arm, upgrading the Broker ahead of the Controller
+///    — the supported order — would blank every `denials` block.
+/// 3. **No such node, but the node table is NOT empty** -> not live. Nodes
+///    are reporting and none of them is capturing, or none has reported
+///    recently enough to be believed. Disabling capture, scaling the
+///    DaemonSet to zero, and rebuilding nodes with `CONFIG_AUDIT=n` all land
+///    here, and all of them should read as Unknown rather than as clean.
 ///
-/// Neither signal is per-workload, which is the known limit of this design:
-/// on a fleet where some nodes capture and some do not, a workload whose
-/// pods only ever ran on non-capturing nodes still gets a `total: 0`. Fixing
-/// that needs the workload's pods resolved to their nodes; see the report.
+/// That third arm is what stops old rows from outliving the capture that
+/// produced them. The fallback used to run unconditionally, so one denial
+/// row of any age anywhere kept the cluster reading "live" forever — the
+/// exact false all-clear the heartbeat was added to remove.
+///
+/// # Residual gap
+///
+/// A database restored into a cluster that never enabled capture has an
+/// empty node table and old denial rows, so arm 2 calls it live and every
+/// workload gets a `total: 0` block computed from someone else's history.
+/// Nothing in the schema separates "these rows came from a Controller too
+/// old to send heartbeats" from "these rows came from somewhere else", so
+/// the fallback cannot tell the two apart. Narrowing arm 2 by row age would
+/// not fix it either: a restored dump carries its original timestamps.
+/// Closing it needs an install identity stamped on the rows.
+///
+/// # Known limit
+///
+/// No signal here is per-workload. On a fleet where some nodes capture and
+/// some do not, a workload whose pods only ever ran on non-capturing nodes
+/// still gets a `total: 0`. Fixing that needs the workload's pods resolved
+/// to their nodes; see [`load_denial_index`].
 fn capture_is_live(conn: &mut PgConnection) -> Result<bool, DbError> {
     use schema::seccomp_denial_nodes::dsl as sdn;
     use schema::seccomp_denials::dsl as sd;
@@ -717,6 +868,17 @@ fn capture_is_live(conn: &mut PgConnection) -> Result<bool, DbError> {
         .optional()?;
     if fresh_capturing.is_some() {
         return Ok(true);
+    }
+
+    // Any row at all, fresh or stale, capturing or not: the question this
+    // answers is whether heartbeats are a signal on this cluster, not
+    // whether they are currently positive.
+    let any_node_has_reported: Option<String> = sdn::seccomp_denial_nodes
+        .select(sdn::node_name)
+        .first(conn)
+        .optional()?;
+    if any_node_has_reported.is_some() {
+        return Ok(false);
     }
 
     // `LIMIT 1` rather than a COUNT: the question is existence, and on a
@@ -808,14 +970,19 @@ pub async fn get_seccomp_denials(
     Ok(HttpResponse::Ok().json(rows))
 }
 
-pub(crate) fn denials_query(
-    conn: &mut PgConnection,
+/// The `GET /seccomp/denials` SELECT, built but not run.
+///
+/// Split out so a test can render the statement production actually issues.
+/// The ordering below is the only thing that makes the visible top-N stable,
+/// and it is invisible to any test that re-declares the query itself.
+fn denials_query_statement<'a>(
     by_namespace: Option<String>,
     by_kind: Option<String>,
     by_workload: Option<String>,
     since: Option<DateTime<Utc>>,
     row_limit: i64,
-) -> Result<Vec<DenialRow>, diesel::result::Error> {
+) -> impl diesel::query_dsl::LoadQuery<'a, PgConnection, DenialRow>
+       + diesel::query_builder::QueryFragment<diesel::pg::Pg> {
     use schema::seccomp_denials::dsl as sd;
     let mut q = sd::seccomp_denials.into_boxed();
     if let Some(ns) = by_namespace {
@@ -837,7 +1004,17 @@ pub(crate) fn denials_query(
     q.order((sd::last_seen.desc(), sd::id.desc()))
         .limit(row_limit)
         .select(DenialRow::as_select())
-        .load(conn)
+}
+
+pub(crate) fn denials_query(
+    conn: &mut PgConnection,
+    by_namespace: Option<String>,
+    by_kind: Option<String>,
+    by_workload: Option<String>,
+    since: Option<DateTime<Utc>>,
+    row_limit: i64,
+) -> Result<Vec<DenialRow>, diesel::result::Error> {
+    denials_query_statement(by_namespace, by_kind, by_workload, since, row_limit).load(conn)
 }
 
 // ---------------------------------------------------------------------------
@@ -871,20 +1048,20 @@ pub(crate) struct DenialRollup {
 /// `denials` block can be emitted at all.
 pub(crate) struct DenialIndex {
     by_workload: HashMap<WorkloadKey, DenialRollup>,
-    /// Whether the broker holds ANY denial row, attributed or not.
+    /// Whether anything on this cluster is known to be watching — the
+    /// answer [`capture_is_live`] gives, not "does a denial row exist".
     ///
-    /// This is the whole reason the block is an `Option`. With no denial
-    /// data at all, "this workload was never denied" and "nothing on this
+    /// This is the whole reason the block is an `Option`. With nothing
+    /// watching, "this workload was never denied" and "nothing on this
     /// cluster is capturing denials" produce identical database state —
     /// denial capture needs `CONFIG_AUDIT` on the node, can be switched off
     /// by the operator, and is skipped outright on a kernel without the
     /// `audit_seccomp` symbol. Emitting `total: 0` in that state would put
     /// an all-clear in the CR status for a workload nobody is watching.
     ///
-    /// A single row anywhere proves the pipeline works end to end — probe
-    /// attached, drain running, POST reaching the broker — and from that
-    /// point a workload with no rows genuinely has no denials, so its `0` is
-    /// a real all-clear.
+    /// When it is true, a workload with no rows genuinely has no denials and
+    /// its `0` is a real all-clear. [`capture_is_live`] carries the residual
+    /// case where that is not quite so.
     observed: bool,
 }
 
@@ -938,31 +1115,67 @@ impl DenialIndex {
     /// without a database.
     #[cfg(test)]
     pub(crate) fn with_rows(rows: Vec<DenialRollupRow>) -> Self {
-        Self::from_rows(rows, true)
+        let mut index = DenialIndex {
+            by_workload: HashMap::new(),
+            observed: true,
+        };
+        for (ns, kind, name, syscall, action, count, last_seen) in rows {
+            let key = (ns, kind, name);
+            index.add_total(&key, count, last_seen);
+            index.add_names(&key, syscall, action);
+        }
+        index
     }
 
-    /// Fold `(namespace, kind, name, syscall, action, count, last_seen)`
-    /// rows into the index. Pure; the DB side is [`load_denial_index`].
-    fn from_rows<I>(rows: I, observed: bool) -> Self
-    where
-        I: IntoIterator<Item = DenialRollupRow>,
-    {
-        let mut by_workload: HashMap<WorkloadKey, DenialRollup> = HashMap::new();
-        for (ns, kind, name, syscall, action, count, last_seen) in rows {
-            let e = by_workload.entry((ns, kind, name)).or_default();
-            e.total = e.total.saturating_add(count);
+    /// Fold one workload's `(total, last_seen)` into the index.
+    fn add_total(&mut self, key: &WorkloadKey, count: i64, last_seen: DateTime<Utc>) {
+        let e = self.by_workload.entry(key.clone()).or_default();
+        e.total = e.total.saturating_add(count);
+        e.last_seen = Some(match e.last_seen {
+            Some(prev) => prev.max(last_seen),
+            None => last_seen,
+        });
+    }
+
+    /// Attach one `(syscall, action)` pair to a workload the totals pass
+    /// already produced.
+    ///
+    /// A pair for an unknown workload is DROPPED rather than creating an
+    /// entry. The two queries read the same rows under the same filter, so a
+    /// name with no total means a row landed between them — and an entry
+    /// created from a name alone would carry `total: 0`, which is the false
+    /// all-clear this whole file exists to avoid. A pair arriving one poll
+    /// early is not worth manufacturing one.
+    fn add_names(&mut self, key: &WorkloadKey, syscall: String, action: String) {
+        if let Some(e) = self.by_workload.get_mut(key) {
             e.syscalls.insert(syscall);
             e.actions.insert(action);
-            e.last_seen = Some(match e.last_seen {
-                Some(prev) => prev.max(last_seen),
-                None => last_seen,
-            });
-        }
-        DenialIndex {
-            by_workload,
-            observed,
         }
     }
+}
+
+/// KiB to reserve before a cluster-wide [`denial_index`] call.
+///
+/// Charged from the cap rather than from a `COUNT(*)`: the count would be a
+/// scan of the largest table in this feature, run on the hot path of the
+/// endpoint the UI polls every 15 s, to bill a read that is almost always
+/// tiny. The neighbouring reservations make the same trade wherever the real
+/// count is not already in hand — see
+/// [`crate::read_budget::SECCOMP_DETAIL_ROWS_CHARGED`]. The cost is a flat
+/// over-charge on a cluster with few denials.
+pub(crate) fn denial_index_charge_kib() -> u32 {
+    cost_kib(
+        MAX_DENIAL_ROLLUP_NAME_ROWS,
+        DENIAL_ROLLUP_NAME_ROW_COST_BYTES,
+    )
+}
+
+/// KiB to reserve before a single-workload [`denial_index_for`] call.
+pub(crate) fn denial_index_for_charge_kib() -> u32 {
+    cost_kib(
+        MAX_DENIAL_ROLLUP_PAIRS_PER_WORKLOAD,
+        DENIAL_ROLLUP_NAME_ROW_COST_BYTES,
+    )
 }
 
 /// The denial rollup for every workload — the list endpoint's index.
@@ -978,13 +1191,99 @@ pub(crate) fn denial_index_for(
     load_denial_index(conn, Some(key))
 }
 
-/// Load the denial rollup. `only` narrows the per-workload scan to a single
-/// workload.
+/// Only attributed rows can be rolled up per workload; an unattributed
+/// denial is still visible through GET /seccomp/denials, which is the
+/// endpoint that can show it without having to claim a workload. That NOT
+/// NULL filter is also what lets the rollup row types declare the two
+/// workload columns non-nullable.
+const ROLLUP_ATTRIBUTED: &str =
+    " FROM seccomp_denials WHERE workload_kind IS NOT NULL AND workload_name IS NOT NULL";
+
+/// The single-workload narrowing, bound as `$1/$2/$3` by both rollup reads.
+const ROLLUP_ONLY: &str = " AND pod_namespace = $1 AND workload_kind = $2 AND workload_name = $3";
+
+/// One row per workload: the `total` and `lastSeen` half of a `denials`
+/// block. Deliberately uncapped — see [`load_denial_index`].
+///
+/// `SUM(count)` is cast because Postgres widens a sum of BIGINT to NUMERIC,
+/// which diesel would reject at runtime rather than at compile time. The
+/// cast is safe because [`MAX_DENIAL_COUNT`] bounds every stored count;
+/// without that ceiling this cast is itself an overflow waiting for a large
+/// enough workload.
+fn rollup_totals_sql(scoped: bool) -> String {
+    format!(
+        "SELECT pod_namespace, workload_kind, workload_name, \
+         SUM(count)::BIGINT AS total, MAX(last_seen) AS last_seen{ROLLUP_ATTRIBUTED}{} \
+         GROUP BY pod_namespace, workload_kind, workload_name",
+        if scoped { ROLLUP_ONLY } else { "" },
+    )
+}
+
+/// The `(syscall, action)` pairs behind a block's name lists, bounded on
+/// both axes.
+///
+/// `ROW_NUMBER()` caps each workload at
+/// [`MAX_DENIAL_ROLLUP_PAIRS_PER_WORKLOAD`] so one workload denied on
+/// hundreds of syscalls cannot crowd out the rest, and the outer LIMIT caps
+/// the whole read at [`MAX_DENIAL_ROLLUP_NAME_ROWS`] — the figure
+/// [`denial_index_charge_kib`] reserves against the read budget. A scoped
+/// read cannot need more than one workload's own cap, so that is its LIMIT.
+///
+/// Both orderings are `(syscall, action)`, the order the `BTreeSet`s in
+/// [`DenialIndex::block_for`] already truncate in, so SQL and Rust drop the
+/// same pairs rather than two different halves of the list. The outer ORDER
+/// BY runs before the LIMIT and is total, so truncation is deterministic
+/// across identical polls instead of reshuffling every 15 s.
+///
+/// DISTINCT before the window: the same pair repeats once per pod, and
+/// ranking without collapsing that first would spend a 500-replica
+/// Deployment's whole per-workload budget on one syscall.
+fn rollup_names_sql(scoped: bool) -> String {
+    let limit = if scoped {
+        MAX_DENIAL_ROLLUP_PAIRS_PER_WORKLOAD
+    } else {
+        MAX_DENIAL_ROLLUP_NAME_ROWS
+    };
+    format!(
+        "SELECT pod_namespace, workload_kind, workload_name, syscall, action FROM ( \
+         SELECT pod_namespace, workload_kind, workload_name, syscall, action, \
+         ROW_NUMBER() OVER ( \
+         PARTITION BY pod_namespace, workload_kind, workload_name \
+         ORDER BY syscall, action) AS rn FROM ( \
+         SELECT DISTINCT pod_namespace, workload_kind, workload_name, syscall, action\
+         {ROLLUP_ATTRIBUTED}{}) pairs) ranked \
+         WHERE rn <= {MAX_DENIAL_ROLLUP_PAIRS_PER_WORKLOAD} \
+         ORDER BY pod_namespace, workload_kind, workload_name, syscall, action \
+         LIMIT {limit}",
+        if scoped { ROLLUP_ONLY } else { "" },
+    )
+}
+
+/// Load the denial rollup. `only` narrows both reads to a single workload.
 ///
 /// `observed` is deliberately NOT narrowed by `only`: scoped to one
 /// workload it would be exactly `total > 0`, which collapses the
 /// "unknown" and "zero" cases back together and defeats the whole point of
 /// the flag. It is always a question about the cluster.
+///
+/// # Two queries, and why it is not one
+///
+/// A `denials` block needs a `total` and a `lastSeen`, which are per
+/// WORKLOAD, and a `syscalls`/`actions` list, which is per `(syscall,
+/// action)`. Folding both out of one grouped query is what made this read
+/// unbounded, and capping THAT query is what would make it wrong: drop a row
+/// and the total it contributed goes with it, silently, in the number an
+/// operator promotes a profile to enforcing on. Worse, dropping a
+/// workload's last row removes it from the index entirely, and
+/// [`DenialIndex::block_for`] answers for a missing workload with
+/// `total: 0` — a capped single query manufactures all-clears.
+///
+/// So the totals are read on their own axis and never capped, and the names
+/// are read on theirs and capped twice. The totals query returns one row per
+/// workload, which is the axis `GET /seccomp/profiles` already materialises
+/// and already charges for; and that axis is bounded by the cluster, not by
+/// the caller, because a row only reaches it once `attribute` has matched
+/// the pod against `pod_details`.
 fn load_denial_index(
     conn: &mut PgConnection,
     only: Option<&WorkloadKey>,
@@ -1015,28 +1314,42 @@ fn load_denial_index(
         return Ok(DenialIndex::empty());
     }
 
+    // ---- totals ---------------------------------------------------------
+    //
     // Aggregated in Postgres, not in Rust, and that is the difference
-    // between this read being bounded and being unbounded.
+    // between this read being bounded and being unbounded. The stored row is
+    // per POD per syscall per action, and every replica of a workload trips
+    // the same syscalls, so those are pure multiplication for a block that
+    // carries neither: a 500-replica Deployment tripping 20 syscalls is
+    // 10 000 rows read to produce one `{total, lastSeen}`. Grouping them
+    // away in SQL leaves one row per workload crossing libpq.
     //
-    // The stored row is per POD per syscall per action. Every replica of a
-    // workload trips the same syscalls, so the pod dimension is pure
-    // multiplication for a block that does not carry pods at all: a
-    // 500-replica Deployment tripping 20 syscalls is 10 000 rows read to
-    // produce one `{total, syscalls, actions, lastSeen}`. Grouping the pod
-    // dimension away in SQL leaves workloads x syscalls x actions crossing
-    // libpq.
+    // Not separately charged against the read budget. One row per workload
+    // is ~200 B against the 4 KiB per workload `list_seccomp_profiles`
+    // already reserves (`SECCOMP_WORKLOAD_COST_BYTES`), which has twenty
+    // times the margin this needs; the detail endpoint reads a single row.
+    // The NAMES query below is the one that scales on another axis, and it
+    // is charged for.
     //
-    // That bound matters because of where this runs. `GET /seccomp/profiles`
-    // is the endpoint that OOMKilled the broker in #1514, for exactly this
-    // shape of mistake — selecting per-row data to compute a per-workload
-    // summary — and the UI polls it every 15 s.
-    //
-    // Still row-per-syscall rather than an `array_agg`: the names ARE part
-    // of the block, so they have to arrive either way, and the per-workload
-    // cap belongs in `block_for` where the CR status size is decided rather
-    // than in SQL where it could not be tested without a database.
     #[derive(diesel::QueryableByName)]
-    struct RollupRow {
+    struct TotalRow {
+        #[diesel(sql_type = Text)]
+        pod_namespace: String,
+        #[diesel(sql_type = Text)]
+        workload_kind: String,
+        #[diesel(sql_type = Text)]
+        workload_name: String,
+        #[diesel(sql_type = BigInt)]
+        total: i64,
+        #[diesel(sql_type = Timestamptz)]
+        last_seen: DateTime<Utc>,
+    }
+
+    let totals_sql = rollup_totals_sql(only.is_some());
+
+    // ---- names: see `rollup_names_sql` for both caps ---------------------
+    #[derive(diesel::QueryableByName)]
+    struct NameRow {
         #[diesel(sql_type = Text)]
         pod_namespace: String,
         #[diesel(sql_type = Text)]
@@ -1047,52 +1360,48 @@ fn load_denial_index(
         syscall: String,
         #[diesel(sql_type = Text)]
         action: String,
-        #[diesel(sql_type = BigInt)]
-        total: i64,
-        #[diesel(sql_type = Timestamptz)]
-        last_seen: DateTime<Utc>,
     }
 
-    // Only attributed rows can be rolled up per workload; an unattributed
-    // denial is still visible through GET /seccomp/denials, which is the
-    // endpoint that can show it without having to claim a workload. That
-    // NOT NULL filter is also what lets the row type above declare the two
-    // workload columns non-nullable.
-    //
-    // `SUM(count)` is cast because Postgres widens a sum of BIGINT to
-    // NUMERIC, which diesel would reject at runtime rather than at compile
-    // time.
-    const SELECT: &str = "SELECT pod_namespace, workload_kind, workload_name, syscall, action, \
-         SUM(count)::BIGINT AS total, MAX(last_seen) AS last_seen \
-         FROM seccomp_denials \
-         WHERE workload_kind IS NOT NULL AND workload_name IS NOT NULL";
-    const GROUP: &str = " GROUP BY pod_namespace, workload_kind, workload_name, syscall, action";
+    let names_sql = rollup_names_sql(only.is_some());
 
-    let rows: Vec<RollupRow> = match only {
-        Some((ns, kind, name)) => diesel::sql_query(format!(
-            "{SELECT} AND pod_namespace = $1 AND workload_kind = $2 AND workload_name = $3{GROUP}"
-        ))
-        .bind::<Text, _>(ns)
-        .bind::<Text, _>(kind)
-        .bind::<Text, _>(name)
-        .load(conn)?,
-        None => diesel::sql_query(format!("{SELECT}{GROUP}")).load(conn)?,
+    let (totals, names): (Vec<TotalRow>, Vec<NameRow>) = match only {
+        Some((ns, kind, name)) => (
+            diesel::sql_query(totals_sql)
+                .bind::<Text, _>(ns)
+                .bind::<Text, _>(kind)
+                .bind::<Text, _>(name)
+                .load(conn)?,
+            diesel::sql_query(names_sql)
+                .bind::<Text, _>(ns)
+                .bind::<Text, _>(kind)
+                .bind::<Text, _>(name)
+                .load(conn)?,
+        ),
+        None => (
+            diesel::sql_query(totals_sql).load(conn)?,
+            diesel::sql_query(names_sql).load(conn)?,
+        ),
     };
 
-    Ok(DenialIndex::from_rows(
-        rows.into_iter().map(|r| {
-            (
-                r.pod_namespace,
-                r.workload_kind,
-                r.workload_name,
-                r.syscall,
-                r.action,
-                r.total,
-                r.last_seen,
-            )
-        }),
+    let mut index = DenialIndex {
+        by_workload: HashMap::new(),
         observed,
-    ))
+    };
+    for r in totals {
+        index.add_total(
+            &(r.pod_namespace, r.workload_kind, r.workload_name),
+            r.total,
+            r.last_seen,
+        );
+    }
+    for r in names {
+        index.add_names(
+            &(r.pod_namespace, r.workload_kind, r.workload_name),
+            r.syscall,
+            r.action,
+        );
+    }
+    Ok(index)
 }
 
 // ---------------------------------------------------------------------------
@@ -1101,13 +1410,36 @@ fn load_denial_index(
 
 /// The label set of one `kguardian_seccomp_denials_total` series.
 ///
-/// Labelled by namespace / workload_kind / workload / action and NOT by
-/// syscall. That is a deliberate cardinality choice, and it is now
+/// Labelled by workload_namespace / workload_kind / workload / action and
+/// NOT by syscall. That is a deliberate cardinality choice, and it is now
 /// load-bearing twice over: a syscall label would multiply the series count
 /// by ~300 for information that is one `GET /seccomp/denials` away and does
 /// not belong in an alerting rule, AND this key is the map key of a counter
 /// held in the broker's memory for the life of the process, so its
 /// cardinality is a memory bound rather than only a Prometheus bill.
+///
+/// # The field is `namespace`, the emitted label is `workload_namespace`
+///
+/// That asymmetry is deliberate on BOTH sides, and neither half is safe to
+/// "tidy" into agreement with the other.
+///
+/// The label cannot be `namespace`: prometheus-operator relabels
+/// `__meta_kubernetes_namespace` onto a `namespace` target label for every
+/// ServiceMonitor-generated job, and with `honor_labels` false (the default,
+/// and forceable by `overrideHonorLabels` on the Prometheus CR) ours would
+/// be renamed to `exported_namespace` and replaced by whichever namespace
+/// kguardian is installed in — every alert naming the wrong namespace, and
+/// `sum by (workload_namespace, ...)` grouping on a constant that folds
+/// `payments/worker` and `media/worker` together. See
+/// `main.rs::render_denial_series`, which owns the rendering and the full
+/// argument.
+///
+/// The field stays `namespace` because it is not a label name here: it is
+/// the pod's namespace as ingest resolved it, matching `DenialInput`,
+/// `NewDenial`, `DenialRow` and the `?namespace=` query parameter on
+/// `GET /seccomp/denials`. Renaming it would rename an API the runbooks
+/// pair with this metric on purpose. The one place the two spellings meet
+/// is the renderer.
 ///
 /// Empty `workload_kind` / `workload` mean the denial could not be
 /// attributed. Prometheus treats an empty label value as absent, so those
@@ -1500,6 +1832,70 @@ mod tests {
         assert_eq!(rejected.get("count").copied(), Some(2));
     }
 
+    /// One stored row, as both the SQL-shape tests and the live tests build
+    /// it. Shared so the statement the tests render is built from the same
+    /// struct the live tests actually store.
+    fn new_denial() -> NewDenial {
+        NewDenial {
+            pod_uid: "uid-web-1".into(),
+            pod_name: "web-1".into(),
+            pod_namespace: "media".into(),
+            workload_kind: Some("Deployment".into()),
+            workload_name: Some("web".into()),
+            node_name: Some("node-a".into()),
+            syscall: "ptrace".into(),
+            syscall_nr: Some(101),
+            action: "SCMP_ACT_LOG".into(),
+            action_raw: Some(2_147_483_648),
+            arch: Some("SCMP_ARCH_X86_64".into()),
+            count: 17,
+            first_seen: ts("2026-09-14T04:05:06Z"),
+            last_seen: ts("2026-09-14T04:05:14Z"),
+        }
+    }
+
+    /// The count arriving off the wire is added to a BIGINT that Postgres
+    /// RAISES on rather than saturating, inside the one transaction the
+    /// whole drain shares. An unbounded value there does not corrupt a
+    /// number — it 500s the POST, and the Controller clears its BPF map only
+    /// on a successful POST, so it replays the same batch every interval
+    /// forever and every later denial from that node is lost.
+    #[test]
+    fn folding_rejects_a_count_no_kernel_could_have_produced() {
+        let (rows, rejected) = fold_batch(vec![
+            input("web-1", "ptrace", "SCMP_ACT_LOG", i64::MAX),
+            input("web-2", "ptrace", "SCMP_ACT_LOG", MAX_DENIAL_COUNT + 1),
+            input("web-3", "ptrace", "SCMP_ACT_LOG", MAX_DENIAL_COUNT),
+        ]);
+        assert_eq!(
+            rejected.get("count"),
+            Some(&2),
+            "both out-of-range counts are rejected on `count`, so the warn! \
+             names the field an operator has to go and look at"
+        );
+        assert_eq!(
+            rows.len(),
+            1,
+            "the ceiling is generous enough that the boundary value itself \
+             is still accepted: {rows:?}"
+        );
+        assert_eq!(rows[0].count, MAX_DENIAL_COUNT);
+    }
+
+    /// The ceiling is an invariant on what this file ever STORES, and a
+    /// fresh insert takes the folded value without passing through the
+    /// upsert's clamp — so the fold has to hold it too.
+    #[test]
+    fn folding_clamps_a_summed_count_to_the_ceiling() {
+        let (rows, rejected) = fold_batch(vec![
+            input("web-1", "ptrace", "SCMP_ACT_LOG", MAX_DENIAL_COUNT),
+            input("web-1", "ptrace", "SCMP_ACT_LOG", MAX_DENIAL_COUNT),
+        ]);
+        assert!(rejected.is_empty(), "each entry is individually in range");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].count, MAX_DENIAL_COUNT);
+    }
+
     #[test]
     fn folding_rejects_rows_that_cannot_identify_themselves() {
         let mut no_uid = input("web-1", "ptrace", "SCMP_ACT_LOG", 1);
@@ -1697,7 +2093,7 @@ mod tests {
 
     #[test]
     fn denial_block_matches_the_runtime_contract() {
-        let index = DenialIndex::from_rows(rollup_rows(), true);
+        let index = DenialIndex::with_rows(rollup_rows());
         let v = serde_json::to_value(index.block_for(&key()).unwrap()).unwrap();
         assert_eq!(v["total"], 20, "counts sum across the workload's rows");
         assert_eq!(
@@ -1730,12 +2126,12 @@ mod tests {
         );
     }
 
-    /// The other half of the same rule: once ANY denial has been ingested,
-    /// the pipeline is proven end to end, so a workload with no rows really
-    /// does have zero denials and its all-clear is real.
+    /// The other half of the same rule: once capture is known to be live,
+    /// a workload with no rows really does have zero denials and its
+    /// all-clear is real.
     #[test]
     fn a_quiet_workload_gets_a_real_zero_once_capture_is_proven() {
-        let index = DenialIndex::from_rows(rollup_rows(), true);
+        let index = DenialIndex::with_rows(rollup_rows());
         let other = (
             "media".to_string(),
             "Deployment".to_string(),
@@ -1771,9 +2167,7 @@ mod tests {
                 )
             })
             .collect();
-        let block = DenialIndex::from_rows(rows, true)
-            .block_for(&key())
-            .unwrap();
+        let block = DenialIndex::with_rows(rows).block_for(&key()).unwrap();
         assert_eq!(block.syscalls.len(), MAX_DENIAL_SYSCALLS);
         assert_eq!(
             block.total,
@@ -1989,19 +2383,21 @@ mod tests {
 
     // ---- generated SQL -------------------------------------------------
     //
-    // There is no database in this test suite, so the query shape is pinned
-    // by asserting on the SQL diesel generates — the same technique
-    // `get.rs` uses for the by-IP lookups.
+    // These assert on the SQL the PRODUCTION builders emit, never on SQL the
+    // test declares. The previous versions of the two tests below built
+    // their own statement inline and asserted diesel rendered what the test
+    // had just supplied: they called nothing in this file, and an auditor
+    // changed the upsert to `count = EXCLUDED.count` with the whole suite
+    // still green. A test that cannot fail when production changes is not a
+    // test. The live tests further down prove Postgres then DOES what the
+    // fragments say; these prove the fragments are the ones being sent.
 
     #[test]
     fn the_query_orders_newest_first_with_a_deterministic_tie_break() {
-        use schema::seccomp_denials::dsl as sd;
-        let q = sd::seccomp_denials
-            .into_boxed()
-            .order((sd::last_seen.desc(), sd::id.desc()))
-            .limit(100)
-            .select(DenialRow::as_select());
-        let sql = diesel::debug_query::<diesel::pg::Pg, _>(&q).to_string();
+        let sql = diesel::debug_query::<diesel::pg::Pg, _>(&denials_query_statement(
+            None, None, None, None, 100,
+        ))
+        .to_string();
         assert!(
             sql.contains(
                 r#"ORDER BY "seccomp_denials"."last_seen" DESC, "seccomp_denials"."id" DESC"#
@@ -2011,56 +2407,53 @@ mod tests {
         );
     }
 
+    #[test]
+    fn the_query_applies_every_filter_it_is_given() {
+        let sql = diesel::debug_query::<diesel::pg::Pg, _>(&denials_query_statement(
+            Some("media".into()),
+            Some("Deployment".into()),
+            Some("web".into()),
+            Some(ts("2026-09-14T04:00:00Z")),
+            7,
+        ))
+        .to_string();
+        for column in [
+            "pod_namespace",
+            "workload_kind",
+            "workload_name",
+            "last_seen",
+        ] {
+            assert!(
+                sql.contains(&format!(r#""seccomp_denials"."{column}" ="#))
+                    || sql.contains(&format!(r#""seccomp_denials"."{column}" >="#)),
+                "a filter the caller supplied must reach the WHERE clause, or \
+                 the endpoint quietly returns another namespace's denials: {sql}"
+            );
+        }
+        assert!(
+            sql.contains("LIMIT $5"),
+            "the clamped limit must bind: {sql}"
+        );
+    }
+
     /// The upsert is where every accumulation rule actually lives, and all
-    /// of them are raw SQL fragments that the type system cannot check. Pin
-    /// the generated statement so a refactor cannot quietly turn
+    /// of them are raw SQL fragments the type system cannot check. Pin the
+    /// statement production builds so a refactor cannot quietly turn
     /// accumulation into replacement — which would look fine in every test
     /// that inserts one batch, and be wrong from the second drain onwards.
     #[test]
     fn the_upsert_accumulates_rather_than_replaces() {
-        use schema::seccomp_denials::dsl as sd;
-        let row = NewDenial {
-            pod_uid: "uid-web-1".into(),
-            pod_name: "web-1".into(),
-            pod_namespace: "media".into(),
-            workload_kind: Some("Deployment".into()),
-            workload_name: Some("web".into()),
-            node_name: Some("node-a".into()),
-            syscall: "ptrace".into(),
-            syscall_nr: Some(101),
-            action: "SCMP_ACT_LOG".into(),
-            action_raw: Some(2_147_483_648),
-            arch: Some("SCMP_ARCH_X86_64".into()),
-            count: 17,
-            first_seen: ts("2026-09-14T04:05:06Z"),
-            last_seen: ts("2026-09-14T04:05:14Z"),
-        };
-        let stmt = diesel::insert_into(sd::seccomp_denials)
-            .values(vec![row])
-            .on_conflict((sd::pod_uid, sd::syscall, sd::action))
-            .do_update()
-            .set((
-                sd::count.eq(diesel::dsl::sql::<BigInt>(
-                    "seccomp_denials.count + EXCLUDED.count",
-                )),
-                sd::first_seen.eq(diesel::dsl::sql::<Timestamptz>(
-                    "LEAST(seccomp_denials.first_seen, EXCLUDED.first_seen)",
-                )),
-                sd::last_seen.eq(diesel::dsl::sql::<Timestamptz>(
-                    "GREATEST(seccomp_denials.last_seen, EXCLUDED.last_seen)",
-                )),
-                sd::workload_kind.eq(diesel::dsl::sql::<Nullable<Text>>(
-                    "COALESCE(EXCLUDED.workload_kind, seccomp_denials.workload_kind)",
-                )),
-            ));
-        let sql = diesel::debug_query::<diesel::pg::Pg, _>(&stmt).to_string();
+        let sql = diesel::debug_query::<diesel::pg::Pg, _>(&denial_upsert(std::slice::from_ref(
+            &new_denial(),
+        )))
+        .to_string();
 
         assert!(
             sql.contains(r#"ON CONFLICT ("pod_uid", "syscall", "action") DO UPDATE"#),
             "the accumulation key must be the table's unique constraint: {sql}"
         );
         assert!(
-            sql.contains("seccomp_denials.count + EXCLUDED.count"),
+            sql.contains("seccomp_denials.count::NUMERIC + EXCLUDED.count"),
             "the controller ships a delta and clears its map; replacing the \
              count would make the Prometheus counter non-monotonic: {sql}"
         );
@@ -2069,10 +2462,145 @@ mod tests {
                 && sql.contains("GREATEST(seccomp_denials.last_seen, EXCLUDED.last_seen)"),
             "the observation bracket must widen, never move: {sql}"
         );
+        for column in [
+            "workload_kind",
+            "workload_name",
+            "node_name",
+            "arch",
+            "syscall_nr",
+            "action_raw",
+        ] {
+            assert!(
+                sql.contains(&format!(
+                    "COALESCE(EXCLUDED.{column}, seccomp_denials.{column})"
+                )),
+                "a later report that could not resolve {column} must not \
+                 erase what an earlier one did: {sql}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_upsert_clamps_the_running_total_to_the_ingest_ceiling() {
+        let sql = diesel::debug_query::<diesel::pg::Pg, _>(&denial_upsert(std::slice::from_ref(
+            &new_denial(),
+        )))
+        .to_string();
         assert!(
-            sql.contains("COALESCE(EXCLUDED.workload_kind, seccomp_denials.workload_kind)"),
-            "a later report that could not resolve attribution must not \
-             erase what an earlier one did: {sql}"
+            sql.contains(&format!(
+                "LEAST(seccomp_denials.count::NUMERIC + EXCLUDED.count, {MAX_DENIAL_COUNT})::BIGINT"
+            )),
+            "the sum must be computed in NUMERIC and clamped before it is \
+             cast back: BIGINT + BIGINT raises on overflow, and it raises \
+             before an enclosing LEAST could clamp it — which 500s the POST, \
+             and the Controller replays a failed POST forever: {sql}"
+        );
+    }
+
+    /// `pod_uid` is the key and a pod's name and namespace are fixed for the
+    /// life of that uid, so a conflicting report disagreeing about them is a
+    /// lie or a bug either way. The rollup groups on `(pod_namespace,
+    /// workload_kind, workload_name)`, so honouring a new namespace moves an
+    /// existing row into a DIFFERENT workload's rollup.
+    ///
+    /// A `COALESCE` guard would not help: both columns are NOT NULL, so
+    /// `COALESCE(EXCLUDED.x, ...)` can never reach the existing value. Not
+    /// assigning them is the only guard that holds.
+    #[test]
+    fn the_upsert_never_moves_a_row_to_another_pods_identity() {
+        let sql = diesel::debug_query::<diesel::pg::Pg, _>(&denial_upsert(std::slice::from_ref(
+            &new_denial(),
+        )))
+        .to_string();
+        let set_clause = sql
+            .split("DO UPDATE SET")
+            .nth(1)
+            .expect("the statement is an upsert");
+        for column in ["pod_name", "pod_namespace"] {
+            assert!(
+                !set_clause.contains(&format!(r#""{column}" ="#)),
+                "{column} is immutable for a pod uid, and rewriting \
+                 pod_namespace would move the row into another workload's \
+                 rollup: {sql}"
+            );
+        }
+    }
+
+    // ---- rollup query shape --------------------------------------------
+
+    #[test]
+    fn the_rollup_name_read_is_bounded_on_both_axes() {
+        for scoped in [false, true] {
+            let sql = rollup_names_sql(scoped);
+            assert!(
+                sql.contains(&format!(
+                    "WHERE rn <= {MAX_DENIAL_ROLLUP_PAIRS_PER_WORKLOAD}"
+                )),
+                "without the per-workload cap one workload denied on \
+                 hundreds of syscalls crowds out every other: {sql}"
+            );
+            assert!(sql.contains("SELECT DISTINCT"), "{sql}");
+            assert!(
+                sql.contains(
+                    "ORDER BY pod_namespace, workload_kind, workload_name, syscall, action LIMIT"
+                ),
+                "the LIMIT must be applied to a total ordering, or the \
+                 truncated set reshuffles between two identical polls: {sql}"
+            );
+        }
+        assert!(
+            rollup_names_sql(false).ends_with(&format!("LIMIT {MAX_DENIAL_ROLLUP_NAME_ROWS}")),
+            "the cluster-wide read is the one that OOMKilled the Broker in \
+             #1514, and it is what the permit reserves for"
+        );
+        assert!(
+            rollup_names_sql(true)
+                .ends_with(&format!("LIMIT {MAX_DENIAL_ROLLUP_PAIRS_PER_WORKLOAD}")),
+            "one workload cannot need more than its own per-workload cap"
+        );
+    }
+
+    /// The totals are the half that must NOT be capped. Cap them and a
+    /// truncated row takes its count with it — or takes the whole workload
+    /// out of the index, at which point `block_for` answers `total: 0` for a
+    /// workload that was denied. A bounded read that invents all-clears is
+    /// worse than the unbounded one it replaced.
+    #[test]
+    fn the_rollup_total_read_is_not_capped_and_groups_only_by_workload() {
+        for scoped in [false, true] {
+            let sql = rollup_totals_sql(scoped);
+            assert!(!sql.contains("LIMIT"), "totals must never truncate: {sql}");
+            assert!(
+                sql.ends_with("GROUP BY pod_namespace, workload_kind, workload_name"),
+                "grouping by syscall or action here would make this read \
+                 workloads x syscalls x actions again: {sql}"
+            );
+        }
+        assert!(rollup_totals_sql(true).contains("pod_namespace = $1"));
+        assert!(!rollup_totals_sql(false).contains('$'));
+    }
+
+    #[test]
+    fn the_rollup_reservation_covers_what_the_rollup_can_read() {
+        assert!(
+            denial_index_charge_kib()
+                >= cost_kib(
+                    MAX_DENIAL_ROLLUP_NAME_ROWS,
+                    DENIAL_ROLLUP_NAME_ROW_COST_BYTES
+                ),
+            "a reservation smaller than the LIMIT is a guardrail that fails \
+             open on exactly the read it exists to bound"
+        );
+        assert!(
+            denial_index_charge_kib() > denial_index_for_charge_kib(),
+            "the cluster-wide read is the larger of the two"
+        );
+        // The pair cap is derived from the two caps `block_for` applies, so
+        // widening either of those without widening the SQL cap would start
+        // truncating lists the block would have shown.
+        assert_eq!(
+            MAX_DENIAL_ROLLUP_PAIRS_PER_WORKLOAD as usize,
+            MAX_DENIAL_SYSCALLS * MAX_DENIAL_ACTIONS
         );
     }
 
@@ -2094,31 +2622,34 @@ mod tests {
     // It applies the REAL migration via include_str! rather than its own
     // DDL, so the schema it exercises cannot drift from the one shipped.
 
-    #[test]
-    #[ignore = "requires a live postgres (set KG_TEST_DATABASE_URL)"]
-    fn live_database_accumulates_queries_and_prunes() {
+    /// A connection with both denial tables freshly created from the REAL
+    /// migrations, so the schema these tests exercise cannot drift from the
+    /// one shipped. Every live test starts from the same empty state; they
+    /// share one database and must run with `--test-threads=1`.
+    fn live_conn() -> PgConnection {
         use diesel::connection::SimpleConnection;
 
         let Ok(url) = std::env::var("KG_TEST_DATABASE_URL") else {
             panic!("set KG_TEST_DATABASE_URL to run this test");
         };
         let mut conn = PgConnection::establish(&url).expect("connect");
-        conn.batch_execute(include_str!(
-            "../db/migrations/2026-09-14-100000_seccomp_denials/down.sql"
-        ))
-        .expect("down");
-        conn.batch_execute(include_str!(
-            "../db/migrations/2026-09-14-100001_seccomp_denial_nodes/down.sql"
-        ))
-        .expect("nodes down");
-        conn.batch_execute(include_str!(
-            "../db/migrations/2026-09-14-100000_seccomp_denials/up.sql"
-        ))
-        .expect("up");
-        conn.batch_execute(include_str!(
-            "../db/migrations/2026-09-14-100001_seccomp_denial_nodes/up.sql"
-        ))
-        .expect("nodes up");
+        for sql in [
+            include_str!("../db/migrations/2026-09-14-100000_seccomp_denials/down.sql"),
+            include_str!("../db/migrations/2026-09-14-100001_seccomp_denial_nodes/down.sql"),
+            include_str!("../db/migrations/2026-09-14-100000_seccomp_denials/up.sql"),
+            include_str!("../db/migrations/2026-09-14-100001_seccomp_denial_nodes/up.sql"),
+        ] {
+            conn.batch_execute(sql).expect("reset the denial schema");
+        }
+        conn
+    }
+
+    #[test]
+    #[ignore = "requires a live postgres (set KG_TEST_DATABASE_URL)"]
+    fn live_database_accumulates_queries_and_prunes() {
+        use diesel::connection::SimpleConnection;
+
+        let mut conn = live_conn();
 
         // Capture liveness, before any denial exists. This is the state a
         // fresh install is in, and getting it wrong is what left every
@@ -2154,22 +2685,7 @@ mod tests {
              stops reporting rather than reporting false"
         );
 
-        let base = NewDenial {
-            pod_uid: "uid-web-1".into(),
-            pod_name: "web-1".into(),
-            pod_namespace: "media".into(),
-            workload_kind: Some("Deployment".into()),
-            workload_name: Some("web".into()),
-            node_name: Some("node-a".into()),
-            syscall: "ptrace".into(),
-            syscall_nr: Some(101),
-            action: "SCMP_ACT_LOG".into(),
-            action_raw: Some(2_147_483_648),
-            arch: Some("SCMP_ARCH_X86_64".into()),
-            count: 17,
-            first_seen: ts("2026-09-14T04:05:06Z"),
-            last_seen: ts("2026-09-14T04:05:14Z"),
-        };
+        let base = new_denial();
         upsert_denials(&mut conn, std::slice::from_ref(&base)).expect("first drain");
 
         // Second drain for the same key: a smaller count, an EARLIER
@@ -2251,12 +2767,23 @@ mod tests {
         .unwrap()
         .is_empty());
 
-        // Rollup.
+        // Rollup. Needs a live capturing node, not just a stored row: the
+        // heartbeats above are still stale, and a stale fleet with old rows
+        // is the state that used to produce a false all-clear.
         let key: WorkloadKey = ("media".into(), "Deployment".into(), "web".into());
+        assert!(
+            denial_index_for(&mut conn, &key)
+                .unwrap()
+                .block_for(&key)
+                .is_none(),
+            "rows exist but every node stopped reporting, so nothing is \
+             known to be watching NOW and no block can honestly be emitted"
+        );
+        upsert_node_report(&mut conn, "n2", true).expect("capturing heartbeat");
         let block = denial_index_for(&mut conn, &key)
             .unwrap()
             .block_for(&key)
-            .expect("a row exists, so capture is proven");
+            .expect("a fresh capturing node proves capture");
         assert_eq!(block.total, 22);
         assert_eq!(block.syscalls, vec!["ptrace".to_string()]);
         assert_eq!(block.last_seen, Some(ts("2026-09-14T05:00:00Z")));
@@ -2292,6 +2819,11 @@ mod tests {
 
         // With the table empty again and every heartbeat stale, the block
         // goes back to absent rather than reporting a zero.
+        conn.batch_execute(&format!(
+            "UPDATE seccomp_denial_nodes SET updated_at = NOW() - INTERVAL '{} seconds'",
+            CAPTURE_REPORT_STALE_SECS + 60
+        ))
+        .expect("age heartbeats");
         assert!(
             denial_index_for(&mut conn, &key)
                 .unwrap()
@@ -2312,16 +2844,237 @@ mod tests {
             .expect("a capturing node makes zero a real answer");
         assert_eq!(block.total, 0);
         assert!(block.last_seen.is_none());
+    }
 
-        conn.batch_execute(include_str!(
-            "../db/migrations/2026-09-14-100001_seccomp_denial_nodes/down.sql"
-        ))
-        .expect("nodes cleanup");
+    /// The Critical one. `count` arrives off the wire, lands in a `BIGINT`,
+    /// and the upsert adds to it. Postgres RAISES on bigint overflow rather
+    /// than saturating, every chunk of a drain shares one transaction, and
+    /// the Controller clears its BPF map only on a successful POST — so one
+    /// row carrying a count near `i64::MAX` makes that node's ingest 500 on
+    /// the same replayed batch forever. The heartbeat commits earlier, in
+    /// its own transaction, and keeps succeeding, so the cluster reads
+    /// healthy the whole time.
+    ///
+    /// This runs the handler's own sequence: heartbeat first, then the one
+    /// transaction the chunks share. It does not go through actix, so it
+    /// does not cover the `map_err(ErrorInternalServerError)` that turns the
+    /// `Err` below into the 500 — that line is the only gap.
+    #[test]
+    #[ignore = "requires a live postgres (set KG_TEST_DATABASE_URL)"]
+    fn live_database_bounds_the_count_so_one_report_cannot_kill_ingest() {
+        use diesel::connection::SimpleConnection;
 
-        conn.batch_execute(include_str!(
-            "../db/migrations/2026-09-14-100000_seccomp_denials/down.sql"
+        let mut conn = live_conn();
+
+        // A node that has been capturing for a while, with a real row.
+        upsert_node_report(&mut conn, "n1", true).expect("heartbeat");
+        upsert_denials(&mut conn, std::slice::from_ref(&new_denial())).expect("first drain");
+
+        // The hostile (or broken) report. It never becomes a row, because
+        // ingest refuses the count before the insert is built.
+        let (rows, rejected) = fold_batch(vec![DenialInput {
+            count: i64::MAX,
+            ..input("web-1", "ptrace", "SCMP_ACT_LOG", 1)
+        }]);
+        assert_eq!(rejected.get("count"), Some(&1));
+        assert!(
+            rows.is_empty(),
+            "nothing reaches the transaction, so the drain that carried it \
+             still commits and the Controller still clears its map"
+        );
+
+        // And if such a value were already stored — this branch is what the
+        // ceiling cannot reach back in time to prevent — the next drain must
+        // still commit rather than raise forever.
+        conn.batch_execute("UPDATE seccomp_denials SET count = 9223372036854775807")
+            .expect("plant a pre-ceiling value");
+        let heartbeat = upsert_node_report(&mut conn, "n1", true);
+        let drain = conn.transaction::<_, DbError, _>(|conn| {
+            upsert_denials(conn, std::slice::from_ref(&new_denial()))
+        });
+        assert!(
+            heartbeat.is_ok(),
+            "the heartbeat commits in its own earlier transaction — which is \
+             why a dead ingest still reads as a healthy cluster"
+        );
+        assert!(
+            drain.is_ok(),
+            "the accumulation must clamp instead of raising; a raise here is \
+             a 500, and the Controller replays a 500 every interval forever, \
+             losing every denial from the node: {drain:?}"
+        );
+
+        let stored = denials_query(&mut conn, None, None, None, None, 100).expect("query");
+        assert_eq!(stored.len(), 1);
+        assert_eq!(
+            stored[0].count, MAX_DENIAL_COUNT,
+            "clamped to the ceiling rather than raising"
+        );
+
+        // Normal accumulation is untouched by the clamp.
+        conn.batch_execute("UPDATE seccomp_denials SET count = 17")
+            .expect("reset");
+        upsert_denials(&mut conn, std::slice::from_ref(&new_denial())).expect("second drain");
+        assert_eq!(
+            denials_query(&mut conn, None, None, None, None, 100).unwrap()[0].count,
+            34,
+            "a count nowhere near the ceiling still accumulates exactly"
+        );
+    }
+
+    /// A pod uid's name and namespace are fixed for the life of that uid, so
+    /// a conflicting report disagreeing about them is a lie or a bug. The
+    /// rollup groups on `(pod_namespace, workload_kind, workload_name)`, so
+    /// honouring a new namespace moves the row into a DIFFERENT workload's
+    /// rollup — counts appearing under a namespace that never made the
+    /// syscall, and vanishing from the one that did.
+    #[test]
+    #[ignore = "requires a live postgres (set KG_TEST_DATABASE_URL)"]
+    fn live_database_keeps_a_denial_in_its_own_workloads_rollup() {
+        let mut conn = live_conn();
+        upsert_node_report(&mut conn, "n1", true).expect("heartbeat");
+
+        let base = new_denial();
+        upsert_denials(&mut conn, std::slice::from_ref(&base)).expect("first drain");
+
+        // Same storage key, a different claimed identity.
+        let moved = NewDenial {
+            pod_name: "attacker-1".into(),
+            pod_namespace: "attacker".into(),
+            workload_kind: Some("Deployment".into()),
+            workload_name: Some("web".into()),
+            ..base.clone()
+        };
+        upsert_denials(&mut conn, &[moved]).expect("second drain");
+
+        let stored = denials_query(&mut conn, None, None, None, None, 100).expect("query");
+        assert_eq!(stored.len(), 1);
+        assert_eq!(stored[0].pod_namespace, "media");
+        assert_eq!(stored[0].pod_name, "web-1");
+
+        let key: WorkloadKey = ("media".into(), "Deployment".into(), "web".into());
+        let elsewhere: WorkloadKey = ("attacker".into(), "Deployment".into(), "web".into());
+        let index = denial_index(&mut conn).unwrap();
+        assert_eq!(
+            index.block_for(&key).expect("still its own workload").total,
+            34
+        );
+        assert_eq!(
+            index
+                .block_for(&elsewhere)
+                .expect("capture is live, so this workload gets a real zero")
+                .total,
+            0,
+            "the row must not appear under a namespace that never made the \
+             syscall"
+        );
+    }
+
+    /// `GET /seccomp/profiles` is the endpoint that OOMKilled the Broker in
+    /// #1514 and the UI polls it every 15 s. The rollup behind its `denials`
+    /// block is per `(workload, syscall, action)`, so it must be bounded in
+    /// SQL — but the TOTALS must not be, because a truncated total is a
+    /// silent undercount and a truncated workload becomes a `total: 0`
+    /// all-clear.
+    #[test]
+    #[ignore = "requires a live postgres (set KG_TEST_DATABASE_URL)"]
+    fn live_database_caps_the_rollup_lists_without_capping_the_totals() {
+        use diesel::connection::SimpleConnection;
+
+        let mut conn = live_conn();
+        upsert_node_report(&mut conn, "n1", true).expect("heartbeat");
+
+        // One workload far past both caps: more distinct pairs than
+        // `MAX_DENIAL_ROLLUP_PAIRS_PER_WORKLOAD`, spread over pods so the
+        // DISTINCT and the per-pod multiplication are both exercised.
+        let pairs = MAX_DENIAL_ROLLUP_PAIRS_PER_WORKLOAD + 200;
+        conn.batch_execute(&format!(
+            "INSERT INTO seccomp_denials (pod_uid, pod_name, pod_namespace, workload_kind, \
+             workload_name, node_name, syscall, syscall_nr, action, action_raw, arch, count, \
+             first_seen, last_seen) \
+             SELECT 'uid-' || (i % 5), 'noisy-' || (i % 5), 'media', 'Deployment', 'noisy', \
+             'n1', 'syscall_' || LPAD(i::TEXT, 5, '0'), NULL, 'SCMP_ACT_LOG', NULL, NULL, 3, \
+             NOW(), NOW() \
+             FROM generate_series(1, {pairs}) AS i"
         ))
-        .expect("cleanup");
+        .expect("seed the noisy workload");
+        // A second workload that must still be visible: the per-workload cap
+        // is what stops the noisy one from consuming the whole read.
+        conn.batch_execute(
+            "INSERT INTO seccomp_denials (pod_uid, pod_name, pod_namespace, workload_kind, \
+             workload_name, node_name, syscall, syscall_nr, action, action_raw, arch, count, \
+             first_seen, last_seen) VALUES \
+             ('uid-q', 'quiet-1', 'media', 'Deployment', 'quiet', 'n1', 'ptrace', NULL, \
+             'SCMP_ACT_ERRNO', NULL, NULL, 9, NOW(), NOW())",
+        )
+        .expect("seed the quiet workload");
+
+        let index = denial_index(&mut conn).expect("rollup");
+        let noisy: WorkloadKey = ("media".into(), "Deployment".into(), "noisy".into());
+        let quiet: WorkloadKey = ("media".into(), "Deployment".into(), "quiet".into());
+
+        let noisy_block = index.block_for(&noisy).expect("denied, so a block");
+        assert_eq!(
+            noisy_block.total,
+            pairs * 3,
+            "the total is summed in SQL over EVERY row, capped or not — an \
+             undercount here is the number an operator promotes a profile to \
+             enforcing on"
+        );
+        assert_eq!(
+            noisy_block.syscalls.len(),
+            MAX_DENIAL_SYSCALLS,
+            "the visible list is capped, and the SQL cap sits above the Rust \
+             one so it never shortens a block the Rust cap would have filled"
+        );
+        assert_eq!(
+            noisy_block.syscalls[0], "syscall_00001",
+            "SQL and Rust truncate in the same (syscall, action) order, so \
+             the surviving names are the same set either way"
+        );
+
+        let quiet_block = index.block_for(&quiet).expect("denied, so a block");
+        assert_eq!(quiet_block.total, 9);
+        assert_eq!(
+            quiet_block.syscalls,
+            vec!["ptrace".to_string()],
+            "a loud workload must not crowd a quiet one out of the read"
+        );
+
+        // The scoped read answers the same way.
+        let scoped = denial_index_for(&mut conn, &noisy).expect("scoped rollup");
+        assert_eq!(scoped.block_for(&noisy).unwrap().total, pairs * 3);
+        assert_eq!(
+            scoped.block_for(&noisy).unwrap().syscalls.len(),
+            MAX_DENIAL_SYSCALLS
+        );
+    }
+
+    /// A whole drain shares one `last_seen`, so without the `id` tie-break
+    /// the visible top-N reshuffles between two identical polls.
+    #[test]
+    #[ignore = "requires a live postgres (set KG_TEST_DATABASE_URL)"]
+    fn live_database_breaks_a_shared_last_seen_tie_by_id() {
+        let mut conn = live_conn();
+        let base = new_denial();
+        for syscall in ["a_open", "b_read", "c_write"] {
+            upsert_denials(
+                &mut conn,
+                &[NewDenial {
+                    syscall: syscall.into(),
+                    ..base.clone()
+                }],
+            )
+            .expect("drain");
+        }
+        let rows = denials_query(&mut conn, None, None, None, None, 100).expect("query");
+        assert_eq!(rows.len(), 3);
+        assert!(
+            rows[0].id > rows[1].id && rows[1].id > rows[2].id,
+            "every row shares one last_seen, so the id tie-break is the only \
+             thing ordering them: {:?}",
+            rows.iter().map(|r| (r.id, &r.syscall)).collect::<Vec<_>>()
+        );
     }
 
     #[test]

@@ -401,9 +401,9 @@ seccomp:
 The broker keeps rows for `broker.seccomp.denials.retention.days` (default
 30) and exposes three Prometheus metrics on the existing `/metrics`
 endpoint: `kguardian_seccomp_denials_total` (a counter, labelled
-`namespace`/`workload_kind`/`workload`/`action` — deliberately **not** by
-syscall, which would multiply cardinality by roughly the syscall table
-size), `kguardian_seccomp_denial_workloads` (distinct workloads with at
+`workload_namespace`/`workload_kind`/`workload`/`action` — deliberately
+**not** by syscall, which would multiply cardinality by roughly the syscall
+table size), `kguardian_seccomp_denial_workloads` (distinct workloads with at
 least one denial in the retention window), and
 `kguardian_seccomp_denial_rows_total` (rows ingested since broker start).
 

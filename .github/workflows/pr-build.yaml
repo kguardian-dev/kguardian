@@ -415,6 +415,30 @@ jobs:
     runs-on: ubuntu-latest
     needs: detect-changes
     if: needs.detect-changes.outputs.broker == 'true'
+    services:
+      # The broker's accumulation rules live in raw SQL fragments inside the
+      # upsert (count + EXCLUDED.count, LEAST/GREATEST, COALESCE). A unit
+      # test can prove the right fragment is SENT; only a database proves it
+      # does what it says, and a #[ignore]d test nothing runs proves nothing
+      # at all. This is what makes the `--ignored` step below possible.
+      #
+      # Same major the chart deploys (charts/kguardian/values.yaml pins
+      # postgres 18), so CI exercises the version operators actually run.
+      postgres:
+        image: postgres:18-alpine
+        env:
+          POSTGRES_USER: kguardian
+          POSTGRES_PASSWORD: kguardian
+          POSTGRES_DB: kguardian
+        ports:
+          - 5432:5432
+        # The job runs on the runner, not in a container, so without this
+        # the first test can connect before postgres is accepting queries.
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -461,6 +485,23 @@ jobs:
         working-directory: broker
         # See job-level NOTE: env-mutating tests require --test-threads=1.
         run: cargo test --all-features -- --test-threads=1
+
+      - name: cargo test --ignored (live Postgres)
+        working-directory: broker
+        env:
+          KG_TEST_DATABASE_URL: postgres://kguardian:kguardian@localhost:5432/kguardian
+        # Filtered to `live_database`, not a bare `--ignored`, on purpose:
+        # the other #[ignore]d test in this crate
+        # (version_check::https_stack_performs_a_real_request) reaches a
+        # third-party host, and a PR gate that fails when someone else's TLS
+        # endpoint has a bad day is a gate people learn to ignore. The prefix
+        # is the contract — a live-database test named otherwise will not run
+        # here.
+        #
+        # These tests share one database and reset the schema from the real
+        # migrations, so --test-threads=1 is required for correctness, not
+        # just for the env-var races the job note describes.
+        run: cargo test --all-features -- --ignored --test-threads=1 live_database
 
   # Build Frontend
   build-frontend:

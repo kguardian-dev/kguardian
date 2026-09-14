@@ -20,6 +20,19 @@
 # `broker.networkPolicy.enabled` is also set, add your Prometheus to
 # `broker.networkPolicy.allowMetricsFrom` too, or the same silent-nothing
 # outcome applies for a different reason (the scrape itself is dropped).
+#
+# Every rule below groups by `workload_namespace`, not `namespace`, and that
+# is load-bearing. prometheus-operator relabels `__meta_kubernetes_namespace`
+# onto a `namespace` TARGET label for every ServiceMonitor-generated job, and
+# `honor_labels` defaults to false, so an exposed `namespace` label loses the
+# conflict: Prometheus renames it to `exported_namespace` and sets `namespace`
+# to whichever namespace kguardian is installed in. Grouping on that would
+# fold `payments/worker` and `media/worker` into a single series and put the
+# wrong namespace in every annotation below. The broker therefore labels the
+# denied workload's namespace `workload_namespace` — do the same in any query
+# of your own. Note that `GET /seccomp/denials` still takes `?namespace=`:
+# that is the broker's own field name, and nothing relabels an HTTP query
+# string.
 apiVersion: monitoring.coreos.com/v1
 kind: PrometheusRule
 metadata:
@@ -44,17 +57,17 @@ spec:
         # requires the condition to survive more than one evaluation cycle.
         - alert: KguardianSeccompDenialsObserved
           expr: |
-            sum by (namespace, workload_kind, workload) (
+            sum by (workload_namespace, workload_kind, workload) (
               increase(kguardian_seccomp_denials_total{action="SCMP_ACT_LOG"}[15m])
             ) > 0
           for: 5m
           labels:
             severity: warning
           annotations:
-            summary: "{{`{{ $labels.workload_kind }}/{{ $labels.workload }}`}} in {{`{{ $labels.namespace }}`}} is producing seccomp denials in audit mode"
+            summary: "{{`{{ $labels.workload_kind }}/{{ $labels.workload }}`}} in {{`{{ $labels.workload_namespace }}`}} is producing seccomp denials in audit mode"
             description: >-
               {{`{{ $labels.workload_kind }}/{{ $labels.workload }}`}} in namespace
-              {{`{{ $labels.namespace }}`}} has an audit-mode SeccompProfile
+              {{`{{ $labels.workload_namespace }}`}} has an audit-mode SeccompProfile
               (defaultAction: SCMP_ACT_LOG) and the kernel has logged
               {{`{{ $value | humanize }}`}} denied-but-allowed syscall(s) over the
               last 15m. Nothing is blocked yet — that is what audit mode is for —
@@ -78,17 +91,17 @@ spec:
         # runs that much longer before anyone is told.
         - alert: KguardianSeccompEnforcingProfileDenials
           expr: |
-            sum by (namespace, workload_kind, workload, action) (
+            sum by (workload_namespace, workload_kind, workload, action) (
               increase(kguardian_seccomp_denials_total{action!="SCMP_ACT_LOG"}[5m])
             ) > 0
           for: 1m
           labels:
             severity: critical
           annotations:
-            summary: "{{`{{ $labels.workload_kind }}/{{ $labels.workload }}`}} in {{`{{ $labels.namespace }}`}} is being blocked by its own enforcing SeccompProfile"
+            summary: "{{`{{ $labels.workload_kind }}/{{ $labels.workload }}`}} in {{`{{ $labels.workload_namespace }}`}} is being blocked by its own enforcing SeccompProfile"
             description: >-
               {{`{{ $labels.workload_kind }}/{{ $labels.workload }}`}} in namespace
-              {{`{{ $labels.namespace }}`}} has an enforcing SeccompProfile and the
+              {{`{{ $labels.workload_namespace }}`}} has an enforcing SeccompProfile and the
               kernel is acting on it: {{`{{ $value | humanize }}`}}
               {{`{{ $labels.action }}`}} verdict(s) in the last 5m. This is not a
               drill — the application is failing syscalls or being killed right
@@ -113,23 +126,23 @@ spec:
         # above already fires critical for the same event.
         - alert: KguardianSeccompDenialRateAbnormal
           expr: |
-            sum by (namespace, workload_kind, workload) (
+            sum by (workload_namespace, workload_kind, workload) (
               rate(kguardian_seccomp_denials_total[5m])
             ) > 10
           for: 5m
           labels:
             severity: warning
           annotations:
-            summary: "{{`{{ $labels.workload_kind }}/{{ $labels.workload }}`}} in {{`{{ $labels.namespace }}`}} has an abnormally high seccomp denial rate"
+            summary: "{{`{{ $labels.workload_kind }}/{{ $labels.workload }}`}} in {{`{{ $labels.workload_namespace }}`}} has an abnormally high seccomp denial rate"
             description: >-
               {{`{{ $labels.workload_kind }}/{{ $labels.workload }}`}} in namespace
-              {{`{{ $labels.namespace }}`}} is generating seccomp denials at
+              {{`{{ $labels.workload_namespace }}`}} is generating seccomp denials at
               {{`{{ $value | humanize }}`}}/s, sustained for 5m or more. A
               legitimate workload accruing a new profile settles quickly; a rate
               this high and this sustained looks more like a retry loop, a
               malfunctioning integration, or an attempt to work around a blocked
               syscall. Check the syscall(s) and pod involved via
-              `GET /seccomp/denials?namespace={{`{{ $labels.namespace }}`}}&workload={{`{{ $labels.workload }}`}}`
+              `GET /seccomp/denials?namespace={{`{{ $labels.workload_namespace }}`}}&workload={{`{{ $labels.workload }}`}}`
               and treat it as a security event until ruled out, not only a
               profile-tuning task.
             runbook_url: "https://docs.kguardian.dev/guides/distributing-seccomp-profiles#promote-to-enforcing"

@@ -194,7 +194,7 @@ pub struct SeccompDenial {
     /// Pod UID, the stable half of the Broker's storage key — a pod name
     /// can be reused by a replacement pod of the same workload, a UID
     /// cannot. Empty only for a pod that reached the `ContainerMap`
-    /// without one, which the Broker rejects; see [`pod_identity`].
+    /// without one, which the Broker rejects; see [`pod_attribution`].
     pub pod_uid: String,
     pub pod_name: String,
     pub pod_namespace: String,
@@ -302,10 +302,6 @@ struct DrainOutcome {
 #[derive(Debug)]
 pub struct DenialMaps {
     denials: MapHandle,
-    /// The probe's own instance of the tracked-pod map. Read (never
-    /// written) here, to check that the pod on a netns is still the pod
-    /// whose generation a row carries.
-    tracked: MapHandle,
     stats: MapHandle,
     /// False once the kernel has refused `BPF_MAP_LOOKUP_AND_DELETE_ELEM`
     /// on this map — support for hash maps only arrived in Linux 5.14 —
@@ -320,7 +316,6 @@ impl DenialMaps {
     ) -> Result<Self, libbpf_rs::Error> {
         Ok(Self {
             denials: MapHandle::try_from(&maps.seccomp_denials)?,
-            tracked: MapHandle::try_from(&maps.inode_num)?,
             stats: MapHandle::try_from(&maps.denial_stats)?,
             atomic_take: AtomicBool::new(true),
         })
@@ -366,16 +361,6 @@ impl DenialMaps {
             Err(e) => return Err(Error::Custom(format!("seccomp_denials delete: {e}"))),
         }
         Ok(value)
-    }
-
-    /// The registration generation currently recorded for `netns`, or
-    /// `None` when nothing is registered on it.
-    fn generation_for(&self, netns: u64) -> Option<u32> {
-        let raw = self
-            .tracked
-            .lookup(&netns.to_ne_bytes(), MapFlags::ANY)
-            .ok()??;
-        Some(pod_flags::generation(u32_from_bytes(&raw)?))
     }
 
     fn stat(&self, index: u32) -> u64 {
@@ -508,8 +493,26 @@ fn syscall_display_name(nr: i32) -> String {
     resolved.unwrap_or_else(|| format!("syscall_{nr}"))
 }
 
-/// Pod identity for a denial row, or `None` when the netns belongs to no
-/// pod this node currently knows.
+/// Everything a drained row needs about the pod on its netns, taken from
+/// one `ContainerMap` entry.
+///
+/// One struct rather than a tuple plus a separate generation lookup
+/// because the two must describe the same pod: see [`build_denials`] for
+/// the misattribution that follows from reading them out of two stores.
+#[derive(Debug)]
+struct PodAttribution {
+    /// The generation this pod's registration put in every probe's
+    /// `inode_num` value, recomputed from `uid` rather than read back
+    /// from the kernel.
+    generation: u32,
+    uid: String,
+    name: String,
+    namespace: String,
+}
+
+/// Pod identity, and the generation it registered with, for a denial
+/// row's netns — `None` when that netns belongs to no pod this node
+/// currently knows.
 ///
 /// The UID comes from `info.config.metadata`, which
 /// `pod_watcher::pod_identity_metadata` fills when it registers the
@@ -521,13 +524,32 @@ fn syscall_display_name(nr: i32) -> String {
 /// ends. An empty UID reaching here is now the hand-built-pod case only,
 /// and it is counted (`AttributionLosses::missing_uid`) so it can never
 /// be silent again.
-fn pod_identity(container_map: &ContainerMap, netns: u64) -> Option<(String, String, String)> {
+fn pod_attribution(container_map: &ContainerMap, netns: u64) -> Option<PodAttribution> {
     let pod = lookup_pod(container_map, netns)?;
-    Some((
-        pod.info.config.metadata.uid.clone(),
-        pod.status.pod_name.clone(),
-        pod.status.pod_namespace.clone().unwrap_or_default(),
-    ))
+    let uid = pod.info.config.metadata.uid.clone();
+    Some(PodAttribution {
+        generation: registration_generation(&uid),
+        uid,
+        name: pod.status.pod_name.clone(),
+        namespace: pod.status.pod_namespace.clone().unwrap_or_default(),
+    })
+}
+
+/// The generation `pod_watcher::pod_registration_flags` derived for a pod
+/// with this UID — the value the probe stamps into every row it records
+/// for that pod's netns.
+///
+/// The empty string has to map to `None` and not to `Some("")`. The two
+/// spellings are the same pod to `pod_watcher` — `pod_identity_metadata`
+/// stores a missing `metadata.uid` as `""` while
+/// `pod_registration_flags` hashes the `Option` — but they are different
+/// numbers to `generation_for_uid`: `None` is 0, and `Some("")` is FNV's
+/// offset basis, which is not. Getting this backwards would drop every
+/// denial from exactly the UID-less pods the registration path goes out
+/// of its way to keep tracked, and drop them as a generation mismatch
+/// that never happened on the node.
+fn registration_generation(pod_uid: &str) -> u32 {
+    pod_flags::generation_for_uid(Some(pod_uid).filter(|uid| !uid.is_empty()))
 }
 
 /// Why a drained row did not make it onto the wire. Counted rather than
@@ -536,15 +558,16 @@ fn pod_identity(container_map: &ContainerMap, netns: u64) -> Option<(String, Str
 struct AttributionLosses {
     /// No pod registered on the row's netns any more.
     unknown_pod: usize,
-    /// A pod IS registered, but not the one the row was recorded for —
-    /// the netns inode was recycled between the verdict and the drain.
-    /// See `KG_GEN_SHIFT` in `src/bpf/helper.h`.
+    /// A pod IS registered on the row's netns, but not the one the row
+    /// was recorded for: the inode was recycled by another pod between
+    /// the verdict and the drain. See `KG_GEN_SHIFT` in
+    /// `src/bpf/helper.h`.
     stale_generation: usize,
     /// Rows whose pod has no UID in the `ContainerMap`. Not dropped
     /// here — the row is still a real denial and the Broker may yet
     /// learn to resolve it — but counted so the condition is loud
     /// rather than a table that stays mysteriously empty. See
-    /// [`pod_identity`].
+    /// [`pod_attribution`].
     missing_uid: usize,
 }
 
@@ -553,10 +576,26 @@ struct AttributionLosses {
 /// Pure over its inputs (the clock anchor is passed in) so the
 /// attribution rules — especially the generation check — are testable
 /// without a kernel.
+///
+/// Identity and the generation it is checked against come from the SAME
+/// `ContainerMap` entry, which is why this takes no kernel map. The
+/// probe's `inode_num` map holds the same generation, but it is written
+/// LATER: `pod_watcher` inserts the `ContainerMap` entry, then sends the
+/// registration over an mpsc channel that `bpf.rs` only drains between
+/// ring-buffer polls — at least the 100ms poll behind, and seconds
+/// behind under load. Taking the generation from there while taking
+/// identity from here left a window in which a netns inode that had just
+/// been recycled resolved to its NEW pod while the kernel map still held
+/// the OLD pod's generation: the guard passed, and the dead pod's
+/// denials were written to the live pod. Netns inode numbers are
+/// node-global, so that pod is routinely an unrelated workload — its
+/// `DenialsObserved` flips to `True` and blocks a promotion it should
+/// have passed, while the denials that were real disappear. One entry
+/// carries one pod's UID, so deriving the expected generation from it
+/// leaves nothing to interleave.
 fn build_denials(
     rows: &[RawDenial],
     container_map: &ContainerMap,
-    generation_for: &dyn Fn(u64) -> Option<u32>,
     anchor: &ClockAnchor,
 ) -> (Vec<SeccompDenial>, AttributionLosses) {
     let arch = scmp_arch_token();
@@ -564,37 +603,30 @@ fn build_denials(
     let mut names: HashMap<u32, String> = HashMap::new();
     // Both lookups are memoised across rows: under a storm one pod
     // contributes hundreds of rows, and neither the netns registration
-    // nor a syscall's name changes within a single drain.
-    let mut generations: HashMap<u64, Option<u32>> = HashMap::new();
+    // nor a syscall's name changes within a single drain. Memoising the
+    // pod is also what keeps one drain self-consistent — a registration
+    // landing mid-drain cannot split one netns's rows between two pods.
+    let mut pods: HashMap<u64, Option<PodAttribution>> = HashMap::new();
     let mut out = Vec::with_capacity(rows.len());
 
     for row in rows {
-        // Generation first: it is a map lookup against the probe's own
-        // tracked-pod map, and it is the check that stops a replacement
-        // pod being handed its predecessor's denials. A row whose netns
-        // now carries a different generation describes a pod that is
-        // gone; there is nothing left to attribute it to.
-        let current = *generations
+        let Some(pod) = pods
             .entry(row.netns)
-            .or_insert_with(|| generation_for(row.netns));
-        match current {
-            Some(current) if current == row.generation => {}
-            Some(_) => {
-                losses.stale_generation += 1;
-                continue;
-            }
-            None => {
-                losses.unknown_pod += 1;
-                continue;
-            }
-        }
-
-        let Some((pod_uid, pod_name, pod_namespace)) = pod_identity(container_map, row.netns)
+            .or_insert_with(|| pod_attribution(container_map, row.netns))
+            .as_ref()
         else {
             losses.unknown_pod += 1;
             continue;
         };
-        if pod_uid.is_empty() {
+        // The check that stops a replacement pod being handed its
+        // predecessor's denials. A row recorded under a generation the
+        // pod now on this netns does not have describes a pod that is
+        // gone; there is nothing left to attribute it to.
+        if pod.generation != row.generation {
+            losses.stale_generation += 1;
+            continue;
+        }
+        if pod.uid.is_empty() {
             losses.missing_uid += 1;
         }
 
@@ -607,9 +639,9 @@ fn build_denials(
             .clone();
 
         out.push(SeccompDenial {
-            pod_uid,
-            pod_name,
-            pod_namespace,
+            pod_uid: pod.uid.clone(),
+            pod_name: pod.name.clone(),
+            pod_namespace: pod.namespace.clone(),
             syscall,
             syscall_nr,
             action: action_name(row.action),
@@ -879,9 +911,7 @@ pub async fn run(
             );
         }
 
-        let generation_for = |netns: u64| -> Option<u32> { maps.as_ref()?.generation_for(netns) };
-        let (fresh, losses) =
-            build_denials(&drained.rows, &container_map, &generation_for, &anchor);
+        let (fresh, losses) = build_denials(&drained.rows, &container_map, &anchor);
         if losses.unknown_pod > 0 || losses.stale_generation > 0 {
             debug!(
                 unknown_pod = losses.unknown_pod,
@@ -1043,6 +1073,11 @@ mod tests {
 
     /// A `ContainerMap` shaped the way `pod_watcher::register_netns`
     /// builds one: `status` AND `info.config.metadata`, uid included.
+    ///
+    /// A row this pod should be credited with must carry
+    /// `gen_of(its uid)` — that is the generation the same registration
+    /// packed into the kernel map, and therefore the one the probe
+    /// stamps on its rows.
     fn pod_at(netns: u64, name: &str, namespace: &str) -> ContainerMap {
         pod_at_with_uid(netns, name, namespace, "3f2b-uid")
     }
@@ -1068,6 +1103,12 @@ mod tests {
         };
         map.insert(netns, Arc::new(inspect));
         Arc::new(map)
+    }
+
+    /// The generation `pod_watcher::pod_registration_flags` packs into
+    /// the `inode_num` value of a pod with this UID.
+    fn gen_of(uid: &str) -> u32 {
+        pod_flags::generation_for_uid(Some(uid))
     }
 
     fn raw(netns: u64, generation: u32, syscall_nr: u32, action: u32, count: u64) -> RawDenial {
@@ -1162,12 +1203,10 @@ mod tests {
     fn a_negative_syscall_number_survives_as_a_negative_number() {
         let map = pod_at(42, "hostile", "media");
         let anchor = anchor_at(utc("2026-09-14T04:05:14Z"), 10_000);
-        let generation_for = |_netns: u64| Some(7u32);
 
         let (rows, _) = build_denials(
-            &[raw(42, 7, u32::MAX, SECCOMP_RET_LOG, 1)],
+            &[raw(42, gen_of("3f2b-uid"), u32::MAX, SECCOMP_RET_LOG, 1)],
             &map,
-            &generation_for,
             &anchor,
         );
 
@@ -1207,12 +1246,10 @@ mod tests {
     fn a_row_is_attributed_to_the_pod_on_its_netns() {
         let map = pod_at(42, "media-transform-7d9c8-abc12", "media");
         let anchor = anchor_at(utc("2026-09-14T04:05:14Z"), 10_000);
-        let generation_for = |_netns: u64| Some(7u32);
 
         let (rows, losses) = build_denials(
-            &[raw(42, 7, 101, SECCOMP_RET_LOG, 17)],
+            &[raw(42, gen_of("3f2b-uid"), 101, SECCOMP_RET_LOG, 17)],
             &map,
-            &generation_for,
             &anchor,
         );
 
@@ -1243,12 +1280,10 @@ mod tests {
     fn the_pod_uid_reaches_the_wire() {
         let map = pod_at_with_uid(42, "media-transform-7d9c8-abc12", "media", "3f2b-uid");
         let anchor = anchor_at(utc("2026-09-14T04:05:14Z"), 10_000);
-        let generation_for = |_netns: u64| Some(7u32);
 
         let (rows, losses) = build_denials(
-            &[raw(42, 7, 101, SECCOMP_RET_LOG, 1)],
+            &[raw(42, gen_of("3f2b-uid"), 101, SECCOMP_RET_LOG, 1)],
             &map,
-            &generation_for,
             &anchor,
         );
 
@@ -1265,22 +1300,71 @@ mod tests {
     /// than blinding every probe for it, so this row can still reach
     /// here. The broker will reject it — which is the safe failure — and
     /// counting it is what stops that being silent.
+    ///
+    /// The row's generation is 0 because that is what such a pod's
+    /// registration packs: `pod_registration_flags` hashes
+    /// `metadata.uid` as an `Option`, and a pod without one hashes
+    /// `None`. `registration_generation` has to reach the same 0 from
+    /// the `""` the `ContainerMap` stores, or this pod loses every
+    /// denial it makes to a generation mismatch — see that function.
     #[test]
     fn a_row_whose_pod_has_no_uid_is_counted_rather_than_passed_off_as_fine() {
         let map = pod_at_with_uid(42, "hand-built", "media", "");
         let anchor = anchor_at(utc("2026-09-14T04:05:14Z"), 10_000);
-        let generation_for = |_netns: u64| Some(7u32);
 
-        let (rows, losses) = build_denials(
-            &[raw(42, 7, 101, SECCOMP_RET_LOG, 1)],
-            &map,
-            &generation_for,
-            &anchor,
-        );
+        let (rows, losses) = build_denials(&[raw(42, 0, 101, SECCOMP_RET_LOG, 1)], &map, &anchor);
 
         assert_eq!(rows.len(), 1, "the row is still reported, not dropped here");
         assert_eq!(rows[0].pod_uid, "");
         assert_eq!(losses.missing_uid, 1);
+        assert_eq!(
+            losses.stale_generation, 0,
+            "a UID-less pod's own denials must not read as another pod's"
+        );
+    }
+
+    /// The empty-UID conversion, pinned on its own.
+    ///
+    /// `generation_for_uid` distinguishes `None` (0) from `Some("")`
+    /// (FNV's offset basis, nonzero), and the two stores spell a missing
+    /// UID differently: `pod_registration_flags` passes the `Option`
+    /// straight through while `pod_identity_metadata` flattens it to
+    /// `""`. Reading the `ContainerMap`'s `""` back as `Some("")` would
+    /// therefore expect a generation no kernel row can carry, and drop
+    /// every denial from exactly the pods the registration path goes out
+    /// of its way to keep tracked.
+    #[test]
+    fn a_missing_uid_expects_the_generation_a_missing_uid_registers_with() {
+        assert_eq!(registration_generation(""), 0);
+        assert_eq!(
+            registration_generation(""),
+            pod_flags::generation_for_uid(None)
+        );
+        assert_ne!(
+            pod_flags::generation_for_uid(Some("")),
+            0,
+            "the empty string is not the absent UID; this test is only meaningful while they \
+             hash differently"
+        );
+    }
+
+    /// The expected generation is the one the registration packs.
+    ///
+    /// `build_denials` no longer reads the generation back out of the
+    /// kernel, so this is the only thing tying its expectation to what
+    /// `pod_watcher::pod_registration_flags` put there. A change to
+    /// either derivation that is not made to both fails here rather than
+    /// silently dropping every denial on the node as stale.
+    #[test]
+    fn the_expected_generation_is_the_one_the_registration_packs() {
+        let packed = pod_flags::pack(
+            crate::capture_tiers::CaptureLevel::Medium,
+            pod_flags::generation_for_uid(Some("3f2b-uid")),
+        );
+        assert_eq!(
+            pod_flags::generation(packed),
+            registration_generation("3f2b-uid")
+        );
     }
 
     /// The `KG_GEN_SHIFT` failure mode, at this layer.
@@ -1295,13 +1379,12 @@ mod tests {
     fn a_recycled_netns_does_not_hand_its_denials_to_the_replacement_pod() {
         let map = pod_at(42, "replacement-pod", "media");
         let anchor = anchor_at(utc("2026-09-14T04:05:14Z"), 10_000);
-        // The netns now carries generation 9; the row was recorded under 7.
-        let generation_for = |_netns: u64| Some(9u32);
 
+        // The netns now belongs to a pod with a different UID, so the
+        // row's generation is one no pod on this inode can claim.
         let (rows, losses) = build_denials(
-            &[raw(42, 7, 101, SECCOMP_RET_LOG, 17)],
+            &[raw(42, gen_of("dead-pod-uid"), 101, SECCOMP_RET_LOG, 17)],
             &map,
-            &generation_for,
             &anchor,
         );
 
@@ -1312,19 +1395,59 @@ mod tests {
 
     #[test]
     fn a_row_whose_netns_is_no_longer_registered_is_dropped() {
-        let map = pod_at(42, "gone", "media");
+        // A pod on some other netns: nothing at all is registered on 42.
+        let map = pod_at(7, "elsewhere", "media");
         let anchor = anchor_at(utc("2026-09-14T04:05:14Z"), 10_000);
-        let generation_for = |_netns: u64| None;
 
         let (rows, losses) = build_denials(
-            &[raw(42, 7, 101, SECCOMP_RET_LOG, 1)],
+            &[raw(42, gen_of("3f2b-uid"), 101, SECCOMP_RET_LOG, 1)],
             &map,
-            &generation_for,
             &anchor,
         );
 
         assert!(rows.is_empty());
         assert_eq!(losses.unknown_pod, 1);
+    }
+
+    /// The interleaving between the two stores that used to misattribute.
+    ///
+    /// `pod_watcher` inserts the `ContainerMap` entry for a pod and only
+    /// then sends its registration to `bpf.rs`, which writes the kernel
+    /// `inode_num` map between ring-buffer polls — 100ms later at best,
+    /// seconds under load. This is that window: netns 42 has already
+    /// been recycled to a new pod here, while the kernel still holds the
+    /// dead pod's generation, which is the generation its rows carry.
+    ///
+    /// The dead pod's row must be dropped rather than written to the
+    /// new pod. Netns inode numbers are node-global, so the new pod is
+    /// routinely an unrelated workload in another namespace: crediting
+    /// it flips its `DenialsObserved` to `True` and blocks a promotion
+    /// that should have gone ahead, and the denials that were real
+    /// vanish into it. The new pod's own rows — which the probe stamps
+    /// as soon as `bpf.rs` catches up, within the same drain — still
+    /// have to land.
+    #[test]
+    fn a_row_is_dropped_when_the_container_map_has_moved_on_but_the_kernel_map_has_not() {
+        let map = pod_at_with_uid(42, "unrelated-workload", "payments", "new-pod-uid");
+        let anchor = anchor_at(utc("2026-09-14T04:05:14Z"), 10_000);
+
+        let (rows, losses) = build_denials(
+            &[
+                raw(42, gen_of("dead-pod-uid"), 101, SECCOMP_RET_LOG, 17),
+                raw(42, gen_of("new-pod-uid"), 102, SECCOMP_RET_LOG, 3),
+            ],
+            &map,
+            &anchor,
+        );
+
+        assert_eq!(losses.stale_generation, 1);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(
+            rows[0].syscall_nr, 102,
+            "the dead pod's denials were written to the pod that took its netns inode"
+        );
+        assert_eq!(rows[0].count, 3);
+        assert_eq!(rows[0].pod_uid, "new-pod-uid");
     }
 
     // ---- merging ----

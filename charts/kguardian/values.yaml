@@ -806,6 +806,14 @@ broker:
       # `kguardian_seccomp_denial_workloads` and
       # `kguardian_seccomp_denial_rows_total` once `seccomp.denials.enabled`
       # is capturing data — see `prometheusRule` below for alerts over them.
+      #
+      # `kguardian_seccomp_denials_total` labels the denied workload's
+      # namespace `workload_namespace`, not `namespace`, so it survives the
+      # `namespace` target label prometheus-operator attaches to every
+      # ServiceMonitor job. Query and group on `workload_namespace`; there is
+      # deliberately no `honorLabels` setting here, because it would only
+      # cover operators scraping through this ServiceMonitor and a Prometheus
+      # with `overrideHonorLabels` pins it back to false anyway.
       labels: {}
 
     prometheusRule:

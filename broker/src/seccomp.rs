@@ -1557,8 +1557,16 @@ pub async fn list_seccomp_profiles(
     // workload), and over-charging there is harmless; charging for blobs that
     // will not be read is not the failure mode that matters.
     let blob_bearing = with_crs.min(workloads);
+    // The denial rollup below is charged too. Its totals pass is one row per
+    // workload and rides inside the per-workload allowance above, but its
+    // names pass is per `(syscall, action)` and scales on an axis neither
+    // count here measures — so it carries its own bounded reservation. It
+    // used to carry none at all, on the argument that the table "is already
+    // an aggregate", which was wrong twice: the query grouped by syscall and
+    // action as well as workload, and it had no LIMIT.
     let charge = cost_kib(workloads, SECCOMP_WORKLOAD_COST_BYTES)
-        .saturating_add(cost_kib(blob_bearing, SECCOMP_BLOB_COST_BYTES));
+        .saturating_add(cost_kib(blob_bearing, SECCOMP_BLOB_COST_BYTES))
+        .saturating_add(crate::seccomp_denial::denial_index_charge_kib());
 
     let _permit = match budget.acquire(charge).await {
         Ok(p) => p,
@@ -1572,11 +1580,7 @@ pub async fn list_seccomp_profiles(
         // One rollup for the whole call, like the capture and distribution
         // indexes above it, so adding the block keeps this endpoint at
         // O(rows + contributors + crs + denials) rather than a query per
-        // workload. Not separately charged against the read budget: the
-        // table is already an aggregate (one row per pod per syscall per
-        // action inside the retention window) and each workload's block is
-        // capped, so it fits inside the per-workload allowance the charge
-        // above already reserves.
+        // workload. Bounded in SQL and charged above.
         let denials = denial_index(&mut conn)?;
         Ok(all
             .iter()
@@ -1618,10 +1622,13 @@ pub async fn get_seccomp_profile(
     // node count rather than workload count, so it is charged as a small
     // multiple of one workload rather than the list endpoint's reservation.
     let _permit = match budget
-        .acquire(cost_kib(
-            SECCOMP_DETAIL_ROWS_CHARGED,
-            SECCOMP_WORKLOAD_COST_BYTES,
-        ))
+        .acquire(
+            cost_kib(SECCOMP_DETAIL_ROWS_CHARGED, SECCOMP_WORKLOAD_COST_BYTES).saturating_add(
+                // One workload's denial rollup, capped at its own
+                // per-workload pair limit rather than the cluster-wide one.
+                crate::seccomp_denial::denial_index_for_charge_kib(),
+            ),
+        )
         .await
     {
         Ok(p) => p,

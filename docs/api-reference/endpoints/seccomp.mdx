@@ -496,7 +496,7 @@ the distinction is what keeps the alerts on them honest.
 
 | Metric | Type | Source |
 |--------|------|--------|
-| `kguardian_seccomp_denials_total{namespace,workload_kind,workload,action}` | counter | Accumulated in memory at ingest |
+| `kguardian_seccomp_denials_total{workload_namespace,workload_kind,workload,action}` | counter | Accumulated in memory at ingest |
 | `kguardian_seccomp_denial_rows_total` | counter | Accumulated in memory at ingest |
 | `kguardian_seccomp_denial_workloads` | gauge | Queried from the table every `SECCOMP_DENIAL_METRICS_INTERVAL_SECS` (default 15) |
 
@@ -512,6 +512,17 @@ them, which is a genuine reset and the one case Prometheus handles by design.
 `kguardian_seccomp_denial_workloads` *is* table-derived, and that is correct:
 "distinct workloads with a denial inside the retention window" is a question
 about current state, so pruning should move it down.
+
+The workload's namespace is labelled `workload_namespace`, not `namespace`.
+prometheus-operator relabels `__meta_kubernetes_namespace` onto a `namespace`
+target label for every ServiceMonitor-generated job, and `honor_labels`
+defaults to false, so a `namespace` label exposed by the Broker would lose
+that conflict: Prometheus renames it to `exported_namespace` and sets
+`namespace` to whichever namespace kguardian is installed in. Grouping on
+that would fold `payments/worker` and `media/worker` into one series, so the
+shipped alerts and any query of your own should use `workload_namespace`.
+The API keeps its own spelling — `GET /seccomp/denials` still takes
+`?namespace=`, because nothing relabels an HTTP query string.
 
 `kguardian_seccomp_denials_total` is deliberately **not** labelled by
 syscall. There are ~300 syscalls on x86_64 and a workload running against the
