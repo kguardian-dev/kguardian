@@ -11,46 +11,20 @@ import {
   pushBucketed,
   seedHistory,
 } from '../utils/compute';
-import { withConcurrencyLimit } from '../utils/concurrency';
 
 export const COMPUTE_POLL_MS = 5_000;
 export const COMPUTE_FINDINGS_POLL_MS = 15_000;
 
 /**
- * Pods the EAGER backfill seeds per namespace session. A 200-pod namespace
- * would otherwise fire 200 history reads for gauges nobody may ever expand;
- * the first N pods the broker reports (it orders `/compute/latest` by pod
- * name, so "first" is stable across polls) cover the common case with no
- * interaction at all.
- *
- * What makes this cap tolerable is `seedPod`: a card the user actually opens
- * is seeded on demand regardless of it. Raising the cap instead would trade a
- * bounded burst for one proportional to namespace size, which is what the cap
- * exists to prevent — fix a thin sparkline by seeding on expansion, never by
- * making this number bigger.
- */
-export const COMPUTE_BACKFILL_MAX_PODS = 40;
-
-/**
- * History reads in flight at once. Each is a windowed range read the broker
- * charges against its read budget and sheds with a 503 when it does not fit,
- * so this stays well below the 10 `usePodData` uses for its cheap reads —
- * a self-inflicted shed would cost exactly the history we came for.
- */
-export const COMPUTE_BACKFILL_CONCURRENCY = 4;
-
-/**
  * Attempts per pod before its history is written off for the session.
  *
  * The broker sheds a read that does not fit its budget with `503` and a
- * `Retry-After` (broker/src/read_budget.rs) — explicitly retryable, and
- * likeliest exactly when a namespace loads and several windowed reads land
- * together. Giving up on the first shed would mean one budget spike at load
- * denies every pod in the namespace its history for the whole session: the
- * regression this feature exists to remove. A small bound still keeps a
- * persistently failing broker from being asked every 5 s forever.
+ * `Retry-After` (broker/src/read_budget.rs) — explicitly retryable. Giving up
+ * on the first shed would leave a card that the user opened with no history
+ * and nothing to fetch it again. A small bound still keeps a persistently
+ * failing broker from being asked on every poll forever.
  */
-export const COMPUTE_BACKFILL_MAX_ATTEMPTS = 3;
+export const COMPUTE_SEED_MAX_ATTEMPTS = 3;
 
 /**
  * Consecutive polls a pod may be missing from `/compute/latest` before its
@@ -150,20 +124,15 @@ export function useComputeData(namespace: string, opts: UseComputeDataOptions = 
    *  entry is dropped along with the pod's buffer, so a pod that genuinely
    *  went away and came back can be seeded again. */
   const backfillRef = useRef<Map<string, { attempts: number; done: boolean; inFlight: boolean }>>(new Map());
-  /** Distinct pods this namespace session has EVER asked history for. The cap
-   *  gates on this rather than on the bookkeeping map's size, which shrinks
-   *  as pods come and go and so would bound nothing under churn. */
-  const backfillPodsRef = useRef(0);
   /** Consecutive polls each known pod has been missing from /compute/latest. */
   const missedPollsRef = useRef<Map<string, number>>(new Map());
   /** False once /compute/history answered 404/501: an optional endpoint this
    *  broker does not have. Deliberately NOT `supported`, which would stop
    *  the live polls and blank the map (see backfillHistory). */
   const historySupportedRef = useRef(true);
-  /** Mirrors findingsMeta.historyDisabled for the backfill gate, plus
-   *  whether the findings poll has answered at all yet. */
+  /** Mirrors findingsMeta.historyDisabled: with history off, every seed read
+   *  is charged a permit and comes back empty. */
   const historyDisabledRef = useRef(false);
-  const findingsTriedRef = useRef(false);
   const inflightLatest = useRef(false);
   const inflightFindings = useRef(false);
 
@@ -179,157 +148,78 @@ export function useComputeData(namespace: string, opts: UseComputeDataOptions = 
   }, []);
 
   /**
-   * Seed the ring buffers from the broker's stored history, so expanding a
-   * node shows an hour of trend at once instead of a sparkline that draws
-   * itself over the next five minutes while you watch.
+   * Seed one pod's sparkline from the broker's stored history, because the
+   * user just opened its card.
    *
-   * Fire-and-forget: the live poll never awaits this, and a pod whose read
-   * fails simply keeps the pre-existing behaviour — a buffer that fills from
-   * the poll alone. A pod is asked for at most COMPUTE_BACKFILL_MAX_ATTEMPTS
-   * times per namespace session, counted BEFORE the request so a failure
-   * that never resolves cannot be retried by every 5 s poll.
+   * Seeding is on demand ONLY. The sparklines are the sole consumer of this
+   * data (`ComputeDetail`, rendered under `isExpanded`); the collapsed card's
+   * dot and micro bar read the current bucket, which the 5 s poll fills and
+   * which seeded buckets are always older than. So seeding a namespace's
+   * worth of pods eagerly would spend windowed range reads on charts that are
+   * not on screen and cannot affect anything that is. One expansion, one
+   * read.
    *
-   * Nothing here may touch `supported`. This is a cosmetic seed on top of a
-   * working map: a broker that serves /compute/latest but predates
-   * /compute/history (or has history off) must keep its gauges, micro bars,
-   * status dots and findings — turning the whole feature off because an
-   * optional read 404'd would be a far worse outcome than an empty
-   * sparkline. `historySupported` is therefore tracked separately and gates
-   * only this path.
-   */
-  const backfillHistory = useCallback(async (uids: readonly string[], opts: { onDemand?: boolean } = {}) => {
-    const gen = generation.current;
-    if (!historySupportedRef.current) return;
-    // `retentionDays: 0` — the broker answers every history read with an
-    // empty row set, after charging a read permit for it. Waiting for the
-    // first findings response (issued alongside the first latest poll) costs
-    // one round trip and saves a burst of guaranteed-empty reads per
-    // namespace. `findingsTried` also flips on a failed findings poll: not
-    // knowing is a reason to seed, not to give up on it.
-    if (historyDisabledRef.current) return;
-    // Only the eager path waits for that answer. An expansion is a deliberate
-    // request for one pod's history: making it a no-op because the findings
-    // poll has not landed yet would leave the card empty with nothing to
-    // retry it, where the eager path simply tries again next poll.
-    if (!opts.onDemand && !findingsTriedRef.current) return;
-
-    const state = backfillRef.current;
-    const todo: string[] = [];
-    for (const uid of uids) {
-      const pod = state.get(uid);
-      if (pod?.done) continue;
-      // Already being read. Without this, every 5 s poll re-issues a read for
-      // a pod whose first one is still pending and burns another attempt on
-      // it, so three polls exhaust the retry budget before any failure has
-      // even happened — tripling the load on a budgeted endpoint and leaving
-      // a genuinely shed pod with nothing left to retry with.
-      if (pod?.inFlight) continue;
-      // `continue`, not `break`: the cap only blocks pods never asked for
-      // before. Stopping the scan here would also skip retries for
-      // already-counted pods that sort after the first over-cap one.
-      // On-demand seeding is exempt: the cap bounds a burst proportional to
-      // namespace size, and one read for the card in front of the user is
-      // neither a burst nor proportional to anything but their clicking.
-      if (!pod && !opts.onDemand && backfillPodsRef.current >= COMPUTE_BACKFILL_MAX_PODS) continue;
-      // No buffer means the pod is not being tracked (it stopped reporting);
-      // there is nothing to seed, and counting an attempt for a read that is
-      // never issued would spend the pod's budget on nothing.
-      if (!historyRef.current.has(uid)) continue;
-      if (!pod && !opts.onDemand) backfillPodsRef.current += 1; // the cap counts eager reads
-      const attempts = (pod?.attempts ?? 0) + 1;
-      // Marked done on the LAST attempt, so a retryable failure before that
-      // leaves the pod eligible for the next poll to pick up again.
-      state.set(uid, { attempts, done: attempts >= COMPUTE_BACKFILL_MAX_ATTEMPTS, inFlight: true });
-      todo.push(uid);
-    }
-    if (todo.length === 0) return;
-
-    // The rows are kept, not a finished buffer: merging has to happen at
-    // COMMIT time. Reads run at COMPUTE_BACKFILL_CONCURRENCY against a
-    // budgeted endpoint, so the last of them can land many polls after the
-    // first — and a buffer merged at read time would then be committed over
-    // live buckets collected since, which `pushBucketed` can never restore
-    // because they are older than what it holds by then.
-    const seeded: { uid: string; buffer: RingBuffer<ComputeSample>; samples: ComputeSample[] }[] = [];
-    try {
-      await withConcurrencyLimit(
-        todo.map((uid) => async () => {
-          // An older broker answered 404 on an earlier pod: stop asking for
-          // the rest of this batch too.
-          if (!historySupportedRef.current || gen !== generation.current) return;
-          // Dropped between planning and running: no request goes out. Its
-          // bookkeeping went with the buffer (see the drop in refreshLatest),
-          // so there is no attempt left to refund.
-          const buffer = historyRef.current.get(uid);
-          if (!buffer) return;
-          try {
-            const rows = await api.getComputeHistory(uid, COMPUTE_HISTORY_WINDOW_MINUTES);
-            if (gen !== generation.current) return; // stale: namespace changed while in flight
-            seeded.push({ uid, buffer, samples: historySamples(rows) });
-            const pod = state.get(uid);
-            if (pod) pod.done = true; // seeded: never ask for this pod again
-          } catch (err) {
-            if (gen !== generation.current) return;
-            if (err instanceof ComputeUnsupportedError) {
-              historySupportedRef.current = false;
-              console.debug(`[compute] ${err.message}; sparklines fall back to live samples only`);
-            }
-            // Anything else (a shed 503, a network blip) costs this pod its
-            // seeded history and nothing more: it is not surfaced as `error`,
-            // which is about the live poll the whole map depends on. The pod
-            // keeps whatever attempts it has left.
-          }
-        }),
-        COMPUTE_BACKFILL_CONCURRENCY,
-      );
-
-      if (gen !== generation.current || seeded.length === 0) return;
-      // One commit for the whole batch. `history` is a dependency of the pods
-      // memo in usePodData, so every commit rebuilds `compute` for every pod
-      // and repaints the map: 40 of them in a burst is 40 repaints.
-      const buffers = historyRef.current;
-      const now = Date.now();
-      let changed = false;
-      for (const { uid, buffer, samples } of seeded) {
-        // Identity, not presence: a pod that vanished and returned while the
-        // read was in flight has a NEW buffer, and seeding it from the old
-        // pod's history is exactly what the drop-on-disappear rule prevents.
-        if (buffers.get(uid) !== buffer) continue;
-        buffers.set(uid, seedHistory(buffer, samples, now));
-        changed = true;
-      }
-      if (changed) setHistory(new Map(buffers));
-    } catch (err) {
-      // Nothing reaches this today: every read is already caught per pod
-      // just below. It is here because both call sites are deliberately
-      // un-awaited and the limiter is fail-fast, so the day a throw moves
-      // outside that per-pod catch it would surface as an unhandled
-      // rejection rather than the best-effort no-op this is documented as.
-      console.debug(`[compute] history backfill failed: ${describe(err)}`);
-    } finally {
-      // Whatever happened, these pods are no longer in flight: a later poll
-      // may retry the ones that still have attempts left.
-      for (const uid of todo) {
-        const pod = state.get(uid);
-        if (pod) pod.inFlight = false;
-      }
-    }
-  }, [api]);
-
-  /**
-   * Seed one pod's sparkline now, because the user just opened its card.
-   *
-   * The eager backfill is capped, so in a large namespace most pods are not
-   * seeded and would otherwise fill a 60-minute window at one bucket per
-   * minute — worse than the five minutes the old 5 s ring buffer took. This
-   * is the seam that fixes that: it shares the eager path's bookkeeping, so
-   * a pod already seeded, already being read, or out of attempts issues
-   * nothing, and an expansion can never double-fetch what the eager backfill
-   * already has in flight. Fire-and-forget, like everything else here.
+   * Idempotent: a pod already seeded, already being read, or out of attempts
+   * issues nothing, so this can safely be called on every poll for every open
+   * card. Fire-and-forget — nothing here may throw into the caller, and a
+   * failure costs this pod its seeded history and nothing else.
    */
   const seedPod = useCallback((uid: string) => {
-    void backfillHistory([uid], { onDemand: true });
-  }, [backfillHistory]);
+    const gen = generation.current;
+    const state = backfillRef.current;
+    if (!historySupportedRef.current) return;
+    // `retentionDays: 0`: the broker answers every history read with an empty
+    // row set, after charging a read permit for it.
+    if (historyDisabledRef.current) return;
+    const pod = state.get(uid);
+    if (pod?.done || pod?.inFlight) return;
+    // No buffer means the pod is not being tracked (it never reported, or it
+    // stopped): there is nothing to seed and nothing to spend an attempt on.
+    const buffer = historyRef.current.get(uid);
+    if (!buffer) return;
+
+    const attempts = (pod?.attempts ?? 0) + 1;
+    // Counted BEFORE the request, and `done` only on the last attempt, so a
+    // retryable failure leaves the pod eligible while a pending one does not.
+    const entry = { attempts, done: attempts >= COMPUTE_SEED_MAX_ATTEMPTS, inFlight: true };
+    state.set(uid, entry);
+
+    void (async () => {
+      try {
+        const rows = await api.getComputeHistory(uid, COMPUTE_HISTORY_WINDOW_MINUTES);
+        if (gen !== generation.current) return; // stale: namespace changed while in flight
+        const buffers = historyRef.current;
+        // Identity, not presence: a pod that vanished and returned while the
+        // read was in flight has a NEW buffer, and seeding it from the old
+        // pod's history is what the drop-on-disappear rule exists to prevent.
+        // Merging here rather than at read time also keeps every live bucket
+        // the poll collected while this was outstanding.
+        if (buffers.get(uid) !== buffer) return;
+        buffers.set(uid, seedHistory(buffer, historySamples(rows), Date.now()));
+        entry.done = true; // seeded: never ask for this pod again
+        setHistory(new Map(buffers));
+      } catch (err) {
+        if (gen !== generation.current) return;
+        if (err instanceof ComputeUnsupportedError) {
+          // Endpoint-level, not pod-level: the broker answers an unknown uid
+          // with an empty row set (compute_api.rs), so a 404/501 here means
+          // no /compute/history at all. Deliberately NOT `supported`, which
+          // would stop the live polls and blank the whole map.
+          historySupportedRef.current = false;
+          console.debug(`[compute] ${err.message}; sparklines fall back to live samples only`);
+        }
+        // Anything else (a shed 503, a network blip) costs this pod its
+        // seeded history and nothing more: it is not surfaced as `error`,
+        // which is about the live poll the whole map depends on. The pod
+        // keeps whatever attempts it has left.
+      } finally {
+        // Only our own entry: the pod may have been dropped and re-seeded
+        // while this was in flight, and clearing that newer entry's flag
+        // would let a second read start alongside it.
+        if (backfillRef.current.get(uid) === entry) entry.inFlight = false;
+      }
+    })();
+  }, [api]);
 
   const refreshLatest = useCallback(async () => {
     if (inflightLatest.current) return;
@@ -389,9 +279,6 @@ export function useComputeData(namespace: string, opts: UseComputeDataOptions = 
       });
       setHistory(new Map(history));
       setError(null);
-      // Deliberately not awaited: the 5 s cadence is the contract, the seed
-      // is best-effort and must never delay a poll (or the next one).
-      void backfillHistory([...byUid.keys()]);
     } catch (err) {
       if (gen !== generation.current) return;
       if (err instanceof ComputeUnsupportedError) markUnsupported(err);
@@ -399,7 +286,7 @@ export function useComputeData(namespace: string, opts: UseComputeDataOptions = 
     } finally {
       if (gen === generation.current) inflightLatest.current = false;
     }
-  }, [api, namespace, markUnsupported, backfillHistory]);
+  }, [api, namespace, markUnsupported]);
 
   const refreshFindings = useCallback(async () => {
     if (inflightFindings.current) return;
@@ -424,16 +311,9 @@ export function useComputeData(namespace: string, opts: UseComputeDataOptions = 
         inflightFindings.current = false;
         // Answered or failed, we have asked: the backfill waits for this, and
         // an outage of the findings poll must not hold the seed hostage.
-        const first = !findingsTriedRef.current;
-        findingsTriedRef.current = true;
-        // The two first polls race: the backfill needs `history_disabled`
-        // from this one and the pod uids from the latest one, so whichever
-        // lands second starts it. Waiting for the next 5 s tick instead would
-        // delay every sparkline by a poll for no reason.
-        if (first) void backfillHistory([...historyRef.current.keys()]);
       }
     }
-  }, [api, namespace, markUnsupported, backfillHistory]);
+  }, [api, namespace, markUnsupported]);
 
   // Every node's row, once per namespace load, so a pod with no sample yet
   // can still say `off` / `unsupported` / `pending` from its node's state.
@@ -466,11 +346,9 @@ export function useComputeData(namespace: string, opts: UseComputeDataOptions = 
     generation.current += 1;
     historyRef.current = new Map();
     backfillRef.current = new Map(); // a new namespace seeds its own pods
-    backfillPodsRef.current = 0;
     missedPollsRef.current = new Map();
     historySupportedRef.current = true; // same cheap retry signal as `supported`
     historyDisabledRef.current = false;
-    findingsTriedRef.current = false;
     inflightLatest.current = false;
     inflightFindings.current = false;
     /* eslint-disable react-hooks/set-state-in-effect -- reset-on-namespace, same shape as DataTable's reset-on-pod */

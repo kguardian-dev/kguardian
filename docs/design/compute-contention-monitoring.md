@@ -405,10 +405,10 @@ refresh; nothing else in `usePodData` changes. Node rendering:
 - **Expanded body:** two hand-rolled SVG sparklines (no chart dependency) with
   the current value and denominator; a `Starved by <pod>` chip when a finding
   names a culprit; a `Throttled 34 %` chip for `cpu-throttled`. The series is
-  60 one-minute buckets — the last hour — held client-side per pod. It is
-  seeded per pod per namespace session from `GET /compute/history/{pod_uid}`,
-  so an expanded card opens on real trend instead of drawing itself over the
-  following minutes, and the 5 s poll then upserts the current bucket (a
+  60 one-minute buckets — the last hour — held client-side per pod. Expanding
+  a card seeds that pod from `GET /compute/history/{pod_uid}`, so it opens on
+  real trend instead of drawing itself over the following minutes, and the
+  5 s poll then upserts the current bucket (a
   rollover pushes a new one; buckets are evicted by age, since a sparse series
   can hold 60 of them spanning far more than 60 minutes). What the sparkline
   receives is a dense 60-slot series with an explicit empty slot for any
@@ -427,12 +427,16 @@ refresh; nothing else in `usePodData` changes. Node rendering:
   a neighbour's and losing it to the next row. The downsampler floors its
   five-minute rows to the START of an exact, non-overlapping window, so those
   spread their `_avg` across all five minutes they summarise. Either way the
-  axis stays one entry per minute. The backfill is best-effort: capped per
-  namespace at a count of pods ever asked for, retried a small bounded number
-  of times so one shed read does not cost a pod its history for the session,
-  never awaited by the poll, and a pod whose reads fail simply fills from the
-  poll alone. It never touches the feature's `supported` flag — a broker
-  without `/compute/history` loses its seeded sparklines, nothing else.
+  axis stays one entry per minute. Seeding happens on expansion and nowhere
+  else: the sparklines are the only consumer of seeded buckets and render
+  only on an expanded card, while the collapsed dot and micro bar read the
+  current bucket that the poll fills — so seeding a namespace eagerly would
+  spend windowed range reads on charts that are not on screen. It is
+  best-effort: idempotent per pod, retried a small bounded number of times so
+  one shed read does not cost a card its history, and a pod whose reads fail
+  simply fills from the poll alone. It never touches the feature's
+  `supported` flag — a broker without `/compute/history` loses its seeded
+  sparklines, nothing else.
 - **Contention edges:** when `showContention` (new `GraphControls` toggle,
   default on) is set, a dashed `error`-coloured edge from culprit to victim,
   labelled with the blame share. Culprits outside the selected namespace

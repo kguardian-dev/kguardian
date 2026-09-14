@@ -8,7 +8,6 @@ import { Button } from './ui/Button';
 import { Sparkline } from './ui/Sparkline';
 import {
   COMPUTE_DOT_CLASS,
-  COMPUTE_HISTORY_SAMPLES,
   COMPUTE_HISTORY_WINDOW_LABEL,
   denominatorLabel,
   formatBytes,
@@ -101,7 +100,6 @@ const ComputeDetail: React.FC<{ compute: PodComputeData }> = ({ compute }) => {
         <Sparkline
           values={compute.sparkCpu}
           max={cpuMax}
-          capacity={COMPUTE_HISTORY_SAMPLES}
           height={26}
           title={`CPU, ${COMPUTE_HISTORY_WINDOW_LABEL}`}
         />
@@ -119,7 +117,6 @@ const ComputeDetail: React.FC<{ compute: PodComputeData }> = ({ compute }) => {
         <Sparkline
           values={compute.sparkMem}
           max={memMax}
-          capacity={COMPUTE_HISTORY_SAMPLES}
           height={26}
           color="var(--color-hubble-info)"
           title={`Working set, ${COMPUTE_HISTORY_WINDOW_LABEL}`}

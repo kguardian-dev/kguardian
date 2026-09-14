@@ -10,20 +10,20 @@ const H = 10;
 
 describe('sparklineSegments', () => {
   test('an unbroken series is one segment, right-aligned in its slots', () => {
-    const segments = sparklineSegments([0, 5, 10], W, H, 10, 3);
+    const segments = sparklineSegments([0, 5, 10], W, H, 10);
     expect(segments).toHaveLength(1);
     expect(segments[0].d.startsWith('M0.0,')).toBe(true);
     expect(segments[0].d.split('L')).toHaveLength(3); // M + two L
     expect(segments[0].area.endsWith('Z')).toBe(true);
   });
 
-  test('a short series grows from the right of its capacity', () => {
-    const [segment] = sparklineSegments([10, 10], W, H, 10, 5);
-    expect(segment.d.startsWith('M75.0,')).toBe(true); // slots 3 and 4 of 5
+  test('one slot per value: the series spans the full width, never shifted', () => {
+    const [segment] = sparklineSegments([10, 10], W, H, 10);
+    expect(segment.d).toBe('M0.0,0.5 L100.0,0.5');
   });
 
   test('a gap splits the line, and neither piece spans it', () => {
-    const segments = sparklineSegments([10, null, 10], W, H, 10, 3);
+    const segments = sparklineSegments([10, null, 10], W, H, 10);
     expect(segments).toHaveLength(2);
     expect(segments[0].d).toContain('M0.0,');
     expect(segments[1].d).toContain('M100.0,');
@@ -32,23 +32,23 @@ describe('sparklineSegments', () => {
   });
 
   test('each segment fills only under itself', () => {
-    const segments = sparklineSegments([10, null, 10], W, H, 10, 3);
+    const segments = sparklineSegments([10, null, 10], W, H, 10);
     expect(segments[0].area).toBe('M0.0,0.5 L0.0,10.0 L0.0,10.0 Z');
     expect(segments[1].area).toBe('M100.0,0.5 L100.0,10.0 L100.0,10.0 Z');
   });
 
   test('a lone point draws a zero-length line, which the round cap shows as a dot', () => {
-    const [segment] = sparklineSegments([null, 7, null], W, H, 10, 3);
+    const [segment] = sparklineSegments([null, 7, null], W, H, 10);
     expect(segment.d).toBe('M50.0,3.2 L50.0,3.2'); // 7 of 10, in a 10px box
   });
 
   test('leading and trailing gaps are not drawn', () => {
-    expect(sparklineSegments([null, null], W, H, 10, 2)).toEqual([]);
+    expect(sparklineSegments([null, null], W, H, 10)).toEqual([]);
   });
 
   test('values are clamped to [0, max] and an empty series draws nothing', () => {
-    const [segment] = sparklineSegments([-5, 50], W, H, 10, 2);
+    const [segment] = sparklineSegments([-5, 50], W, H, 10);
     expect(segment.d).toBe('M0.0,9.5 L100.0,0.5');
-    expect(sparklineSegments([], W, H, 10, 4)).toEqual([]);
+    expect(sparklineSegments([], W, H, 10)).toEqual([]);
   });
 });

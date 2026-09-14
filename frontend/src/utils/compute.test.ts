@@ -239,6 +239,31 @@ describe('history bucketing', () => {
     expect(zoneLess[0].at).toBe(Date.parse('2026-09-14T10:05:00Z'));
   });
 
+  // A fold closes on its Nth sample, so each one spans 60 s plus the lag it
+  // accumulated and the stamps creep forward. Every ~30th pair of midpoints
+  // steps over a bucket; left unclaimed it renders as a break in the line —
+  // an outage on a pod that never had one.
+  test('historySamples closes the holes drift opens, without moving measurements', () => {
+    const first = Date.parse('2026-09-14T10:00:29Z');
+    // 62 s apart: the sampler running a couple of seconds behind the minute.
+    const rows = Array.from({ length: 40 }, (_, i) =>
+      row({ ts: new Date(first + i * 62_000).toISOString(), cpu_usage_millis_last: i }));
+    const samples = historySamples(rows);
+
+    // Every minute between the first and last is present: no phantom gaps.
+    const ats = samples.map((s) => s.at);
+    for (let i = 1; i < ats.length; i++) expect(ats[i] - ats[i - 1]).toBe(60_000);
+    expect(ats.length).toBeGreaterThan(40); // drift means more minutes than rows
+
+    // And every row's own measurement still appears exactly where it was
+    // measured — the fills only closed minutes no row claimed.
+    const byBucket = new Map(samples.map((s) => [s.at, s.cpuMillis]));
+    for (const [i, r] of rows.entries()) {
+      const mid = Date.parse(r.ts) - 30_000;
+      expect(byBucket.get(Math.floor(mid / 60_000) * 60_000)).toBe(i);
+    }
+  });
+
   test('historySamples leaves a real outage empty', () => {
     const at = (hhmm: string) => Date.parse(`2026-09-14T${hhmm}:00Z`);
     const samples = historySamples([
@@ -258,6 +283,21 @@ describe('history bucketing', () => {
       const byBucket = new Map(historySamples(rows).map((s) => [s.at, s.cpuMillis]));
       expect(byBucket.get(T0 + 60_000)).toBe(9); // the minute row's own value
       expect(byBucket.get(T0)).toBe(40); // minutes only the coarse row covers
+    }
+  });
+
+  // At the downsample boundary a minute row's repair window can reach into a
+  // minute a five-minute row actually measured. The measurement wins: a fill
+  // is a value stretched from a neighbouring minute, whatever its resolution.
+  test('a minute row may not overwrite a minute the coarse row itself claimed', () => {
+    const coarse = row({ ts: new Date(T0).toISOString(), resolution_secs: 300, cpu_usage_millis_avg: 40 });
+    // Window [T0+2m30s, T0+3m30s): claims T0+3m, and its fill reaches T0+2m —
+    // which is the bucket the five-minute row's own midpoint claimed.
+    const minute = row({ ts: new Date(T0 + 3 * 60_000 + 30_000).toISOString(), cpu_usage_millis_last: 9 });
+    for (const rows of [[coarse, minute], [minute, coarse]]) {
+      const byBucket = new Map(historySamples(rows).map((x) => [x.at, x.cpuMillis]));
+      expect(byBucket.get(T0 + 2 * 60_000)).toBe(40); // the coarse row's claim
+      expect(byBucket.get(T0 + 3 * 60_000)).toBe(9); // the minute row's own
     }
   });
 
@@ -344,6 +384,15 @@ describe('history bucketing', () => {
   test('seedHistory folds a fast broker’s newest rows onto the current bucket', () => {
     const seeded = seedHistory(undefined, [sample(T0 - 60_000, 1), sample(T0 + 60_000, 2), sample(T0 + 120_000, 3)], T0);
     expect(seeded.values()).toEqual([sample(T0 - 60_000, 1), sample(T0, 3)]); // newest wins the clamp
+  });
+
+  // The gauge reads the newest sample as "now". A seeded `_last` clamped past
+  // the live bucket would become that, and disagree with the live poll.
+  test('seedHistory never lets a seeded bucket outrank the newest live one', () => {
+    const live = new RingBuffer<ComputeSample>(60);
+    pushBucketed(live, sample(T0 - 60_000, 300)); // the last poll, a minute ago
+    const seeded = seedHistory(live, [sample(T0 + 120_000, 11)], T0); // broker ahead
+    expect(seeded.last()).toEqual(sample(T0 - 60_000, 300));
   });
 
   test('seedHistory keeps the buffer\u2019s own capacity, and its window with it', () => {

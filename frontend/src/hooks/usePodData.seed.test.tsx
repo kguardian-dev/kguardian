@@ -4,9 +4,9 @@ import { act, cleanup, renderHook, waitFor } from '@testing-library/react';
 import type { ComputeContainer } from '../types/compute';
 import type { PodInfo } from '../types';
 
-// The seam that makes COMPUTE_BACKFILL_MAX_PODS tolerable: expanding a card
-// seeds that pod's sparkline from stored history, whatever the eager cap did.
-// The compute hook is stubbed so this pins the wiring, not the backfill.
+// Seeding happens on expansion and nowhere else: the sparklines are the only
+// consumer of seeded history and only render on an expanded card. The compute
+// hook is stubbed so this pins the wiring, not the seeding itself.
 
 const seedPod = vi.fn();
 const computeState = {
@@ -16,7 +16,7 @@ const computeState = {
   findings: [],
   findingsMeta: { truncated: false, victimsEvaluated: null, historyDisabled: false },
   history: new Map(),
-  enabled: false,
+  enabled: true,
   supported: true,
   error: null,
   seedPod,
@@ -73,7 +73,7 @@ afterEach(() => {
 });
 
 describe('usePodData seeds compute history on expansion', () => {
-  test('a collapsed card seeds nothing; expanding one seeds every replica uid', async () => {
+  test('a collapsed card seeds nothing; expanding one seeds the uid its chart reads', async () => {
     const { result } = renderHook(() => usePodData('payments'));
     await waitFor(() => expect(result.current.pods).toHaveLength(1));
     expect(seedPod).not.toHaveBeenCalled();
@@ -81,8 +81,22 @@ describe('usePodData seeds compute history on expansion', () => {
     const id = result.current.pods[0].id;
     await act(async () => { result.current.togglePodExpansion(id); });
     await waitFor(() => expect(seedPod).toHaveBeenCalled());
-    // An identity group is one card over several pods, so several uids.
-    expect(new Set(seedPod.mock.calls.map((c) => c[0]))).toEqual(new Set(['uid-a', 'uid-b']));
+    // One card, one chart, one read — even though the identity group has two
+    // replicas, the chart can only ever show the first.
+    expect(new Set(seedPod.mock.calls.map((c) => c[0]))).toEqual(new Set(['uid-a']));
+  });
+
+  test('expanding seeds nothing when compute is disabled cluster-wide', async () => {
+    computeState.enabled = false;
+    try {
+      const { result } = renderHook(() => usePodData('payments'));
+      await waitFor(() => expect(result.current.pods).toHaveLength(1));
+      await act(async () => { result.current.togglePodExpansion(result.current.pods[0].id); });
+      await act(async () => { await Promise.resolve(); });
+      expect(seedPod).not.toHaveBeenCalled(); // no pod carries a chart to fill
+    } finally {
+      computeState.enabled = true;
+    }
   });
 
   test('collapsing stops seeding it again', async () => {

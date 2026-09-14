@@ -136,16 +136,21 @@ export function pushBucketed(buf: RingBuffer<ComputeSample>, sample: ComputeSamp
     if (last.at - at <= COMPUTE_CLOCK_STEP_MS) return 'dropped'; // jitter: keep the series monotonic
     // The clock moved back. Only the buckets now in the FUTURE are wrong, so
     // only those go: a two-minute correction costs two minutes, not the hour
-    // of seeded history that a windowed broker read paid for. If that leaves
-    // nothing, the caller is told, and can seed the pod again.
+    // of seeded history that a windowed broker read paid for.
     buf.retain((s) => s.at <= at);
-    restarted = buf.length === 0;
   }
   // Every push, not only when the whole buffer is stale: a sparse series
   // (minutes with no sample) can hold `capacity` buckets spanning far more
   // than `capacity` minutes, so counting alone never bounds the window.
   const oldest = at - (buf.capacity - 1) * COMPUTE_BUCKET_MS;
-  if (last) buf.retain((s) => s.at >= oldest);
+  if (last) {
+    buf.retain((s) => s.at >= oldest);
+    // Emptied — by the trim above, or by age when time jumped FORWARD past
+    // the whole window (a tab left open overnight, a suspended laptop).
+    // Either way the series starts again and the caller is told, or a pod
+    // already marked seeded would refill at one bucket a minute for an hour.
+    restarted = buf.length === 0;
+  }
   const bucketed: ComputeSample = { ...sample, at };
   if (buf.last()?.at === at) {
     buf.replaceLast(bucketed);
@@ -158,89 +163,137 @@ export function pushBucketed(buf: RingBuffer<ComputeSample>, sample: ComputeSamp
 const BUCKET_SECS = COMPUTE_BUCKET_MS / 1000;
 
 /**
- * Which buckets one history row belongs in, and why the two resolutions are
- * treated differently.
+ * Where one history row belongs, and why the two resolutions differ.
  *
  * - A MINUTE row is closed by the controller on its Nth sample, NOT on a
  *   wall-clock boundary (`MinuteFold::finish` stamps `ts: latest.ts`, the
  *   instant of the last 5 s sample folded in), so its `ts` is the END of the
- *   minute it covers and it drifts against the grid. It goes to the single
- *   bucket holding its window's MIDPOINT — the minute it mostly describes.
- *   Flooring `ts` would invent a hole every time drift pushed a stamp past a
- *   boundary; filling every overlapped bucket would be worse still, writing
- *   one row's measurement into a neighbour's minute and letting the next row
- *   overwrite it, so roughly half the plotted minutes would show a value
- *   that was never measured for them.
+ *   window it covers and drifts forward against the grid.
  * - A DOWNSAMPLED row is written by the broker's five-minute rollup, which
  *   floors (`floor(epoch/300)*300`), so its `ts` is the START of an exact,
- *   non-overlapping window. It spreads across every minute it summarises:
- *   its `_avg` IS the value of each of those minutes, there is no neighbour
- *   to misattribute to, and a midpoint alone would leave four minutes in
- *   five empty for no reason.
+ *   non-overlapping window.
+ *
+ * `claim` is the single bucket the row's midpoint falls in — the minute it
+ * mostly describes, and the only one it may state a value for. `covers` is
+ * every bucket its window touches, which is what fills a minute no row
+ * claimed (see `historySamples`).
  */
-function rowBuckets(row: ComputeHistoryRow): number[] | null {
+function rowBuckets(row: ComputeHistoryRow): { claim: number; covers: number[]; mid: number; secs: number } | null {
   // `parseBrokerTime`, never `Date.parse`: the broker's own deserialiser
   // accepts a zone-less stamp, and `Date.parse` would read one as LOCAL
   // time — east of UTC every seeded sample would fall outside the window
   // and vanish, west of it they would pile onto one bucket, silently.
   const ts = parseBrokerTime(row.ts);
   if (ts === null) return null; // an unparseable ts must not NaN the series
-  const secs = Number.isFinite(row.resolution_secs) && row.resolution_secs > 0 ? row.resolution_secs : BUCKET_SECS;
-  if (secs <= BUCKET_SECS) return [bucketStart(ts - (secs * 1000) / 2)];
+  const raw = Number.isFinite(row.resolution_secs) && row.resolution_secs > 0 ? row.resolution_secs : BUCKET_SECS;
   // Bounded so an absurd `resolution_secs` cannot fan out over the window.
-  const span = Math.min(secs, COMPUTE_HISTORY_SAMPLES * BUCKET_SECS) * 1000;
-  const buckets: number[] = [];
+  const secs = Math.min(raw, COMPUTE_HISTORY_SAMPLES * BUCKET_SECS);
+  const span = secs * 1000;
+  const start = secs > BUCKET_SECS ? ts : ts - span;
+  const mid = start + span / 2;
+  const covers: number[] = [];
   // `end` is exclusive: a window ending on a boundary stops at the minute
   // before it, not at the one starting there.
-  for (let at = bucketStart(ts); at <= bucketStart(ts + span - 1); at += COMPUTE_BUCKET_MS) buckets.push(at);
-  return buckets;
+  for (let at = bucketStart(start); at <= bucketStart(start + span - 1); at += COMPUTE_BUCKET_MS) covers.push(at);
+  return { claim: bucketStart(mid), covers, mid, secs };
+}
+
+/** One container's contribution to one bucket, with how it got there. */
+interface BucketEntry {
+  cpuMillis: number;
+  workingSetBytes: number;
+  /** The row's resolution: a finer row always beats a coarser one. */
+  secs: number;
+  /** The row's midpoint fell in this bucket, rather than merely covering it. */
+  claimed: boolean;
+  /** |bucket centre − row midpoint|, to pick the nearest filler. */
+  distance: number;
+}
+
+/** Whether `next` should replace `held` for the same (bucket, container). */
+function preferEntry(next: BucketEntry, held: BucketEntry | undefined): boolean {
+  if (!held) return true;
+  // A claim beats a fill whatever their resolutions: the claim is the minute
+  // that row measured, the fill is a value stretched from a neighbour.
+  if (next.claimed !== held.claimed) return next.claimed;
+  if (next.secs !== held.secs) return next.secs < held.secs; // then finer resolution
+  if (next.claimed) return true; // two claims: the newer row, as drift intends
+  return next.distance <= held.distance; // two fills: the nearer row
 }
 
 /**
  * Per-container `/compute/history` rows → pod-level samples, one per bucket,
  * oldest first. Values are summed across the pod's containers within a
  * bucket, exactly as `podLevelSample` sums a live poll's rows — but keyed by
- * `container_uid` first, so two rows for one container in one bucket (drift,
- * a finer `resolution_secs`, a re-ingested row) replace each other instead of
- * double-counting that container.
+ * `container_uid` first, so two rows for one container in one bucket replace
+ * each other instead of double-counting it.
+ *
+ * Two passes, because minute stamps drift. Each row first CLAIMS the bucket
+ * its midpoint falls in, which is the minute it actually measured. Since a
+ * fold spans 60 s plus whatever lag it accumulated, consecutive midpoints sit
+ * slightly more than a minute apart and every thirtieth pair or so steps over
+ * a bucket entirely — and an unclaimed bucket is a `null` the sparkline draws
+ * as a break, inventing an outage on a pod that never had one. So a second
+ * pass FILLS any bucket no row claimed from the nearest row whose window
+ * covers it. Claims are never overwritten by fills, so this closes drift
+ * holes without putting one row's measurement into another row's minute.
  *
  * A minute row contributes `_last`, so a seeded bucket and a live bucket mean
  * the same thing — the value at the end of that minute — and the newest
  * bucket, which the gauges read as "now", stays an instantaneous number. A
- * downsampled row contributes `_avg` to every bucket it covers instead: its
- * `_last` is one instant out of five minutes, while the average is the honest
- * value to repeat across them.
+ * downsampled row contributes `_avg`, the honest value for every minute of
+ * the five it summarises.
  */
 export function historySamples(rows: readonly ComputeHistoryRow[]): ComputeSample[] {
-  const byBucket = new Map<number, Map<string, { cpuMillis: number; workingSetBytes: number; secs: number }>>();
-  for (const r of rows) {
-    const buckets = rowBuckets(r);
-    if (!buckets) continue;
-    const secs = Number.isFinite(r.resolution_secs) && r.resolution_secs > 0 ? r.resolution_secs : BUCKET_SECS;
-    const coarse = secs > BUCKET_SECS;
-    const rawCpu = coarse ? r.cpu_usage_millis_avg : r.cpu_usage_millis_last;
-    const rawMem = coarse ? r.mem_working_set_avg : r.mem_working_set_last;
+  const byBucket = new Map<number, Map<string, BucketEntry>>();
+  const put = (at: number, containerUid: string, entry: BucketEntry) => {
+    let containers = byBucket.get(at);
+    if (!containers) {
+      containers = new Map();
+      byBucket.set(at, containers);
+    }
+    if (preferEntry(entry, containers.get(containerUid))) containers.set(containerUid, entry);
+  };
+
+  const candidates: { at: number; containerUid: string; entry: BucketEntry }[] = [];
+  let oldestPlaced = Infinity;
+  let newestPlaced = -Infinity;
+  for (const row of rows) {
+    const at = rowBuckets(row);
+    if (!at) continue;
+    const coarse = at.secs > BUCKET_SECS;
+    const rawCpu = coarse ? row.cpu_usage_millis_avg : row.cpu_usage_millis_last;
+    const rawMem = coarse ? row.mem_working_set_avg : row.mem_working_set_last;
     const value = {
       cpuMillis: Number.isFinite(rawCpu) ? rawCpu : 0,
       workingSetBytes: Number.isFinite(rawMem) ? rawMem : 0,
-      secs,
+      secs: at.secs,
     };
-    for (const at of buckets) {
-      let containers = byBucket.get(at);
-      if (!containers) {
-        containers = new Map();
-        byBucket.set(at, containers);
-      }
-      // A five-minute average must never displace the minute row for the
-      // same minute. Nothing in the history handler promises an order for
-      // rows of mixed resolution, so the finer one is preferred explicitly
-      // rather than by whichever happened to be read last. Equal resolution
-      // keeps last-write-wins, which is how drifting minute rows resolve.
-      const held = containers.get(r.container_uid);
-      if (held && held.secs < secs) continue;
-      containers.set(r.container_uid, value);
+    const place = (bucket: number, entry: BucketEntry) => {
+      put(bucket, row.container_uid, entry);
+      oldestPlaced = Math.min(oldestPlaced, bucket);
+      newestPlaced = Math.max(newestPlaced, bucket);
+    };
+    place(at.claim, { ...value, claimed: true, distance: 0 });
+    for (const bucket of at.covers) {
+      if (bucket === at.claim) continue;
+      const centre = bucket + COMPUTE_BUCKET_MS / 2;
+      const entry = { ...value, claimed: false, distance: Math.abs(centre - at.mid) };
+      // A downsampled row's window IS the extent of its measurement — the
+      // average of those five minutes — so it spreads over all of them.
+      // A minute row's window is only a repair kit: its value belongs to the
+      // minute it claimed, and may fill another one solely to close a hole
+      // drift opened BETWEEN real data. Letting it fill at the ends instead
+      // would stretch the series past anything the broker actually returned,
+      // on as little as a second of overlap.
+      if (coarse) place(bucket, entry);
+      else candidates.push({ at: bucket, containerUid: row.container_uid, entry });
     }
   }
+  for (const c of candidates) {
+    if (c.at > oldestPlaced && c.at < newestPlaced) put(c.at, c.containerUid, c.entry);
+  }
+
   const samples: ComputeSample[] = [];
   for (const [at, containers] of byBucket) {
     let cpuMillis = 0;
@@ -265,13 +318,14 @@ export function historySamples(rows: readonly ComputeHistoryRow[]): ComputeSampl
  * pod with sparse history cannot keep an hour-old bucket on screen just
  * because nothing pushed it out.
  *
- * Seeded buckets are clamped forward to the CLIENT's current bucket, not
- * discarded: the row timestamps are the broker's clock and `now` is the
- * browser's, so a broker running a couple of minutes ahead would otherwise
- * cost every seed its newest and most interesting minutes — the card would
- * open on a gap immediately before the live sample. Clamping folds them onto
- * the current bucket (newest last, so it wins), where the live sample then
- * overwrites them on the very next poll.
+ * Seeded buckets are clamped forward, not discarded: the row timestamps are
+ * the broker's clock and `now` is the browser's, so a broker running a couple
+ * of minutes ahead would otherwise cost every seed its newest and most
+ * interesting minutes — the card would open on a gap immediately before the
+ * live sample. They are clamped onto the newest LIVE bucket when there is
+ * one, not merely onto the current minute: a seeded `_last` landing past it
+ * would become the series' newest sample, which is what the gauge reports as
+ * "now", and it would disagree with the live poll until the next tick.
  */
 export function seedHistory(
   existing: RingBuffer<ComputeSample> | undefined,
@@ -283,12 +337,14 @@ export function seedHistory(
 ): RingBuffer<ComputeSample> {
   const newest = bucketStart(now);
   const oldest = newest - (capacity - 1) * COMPUTE_BUCKET_MS;
+  // The live poll owns the newest bucket; a seeded row may at most join it.
+  const seedCeiling = Math.min(newest, existing?.last()?.at ?? newest);
   // Keyed by `s.at` itself — the field the sparkline reads — so a key and its
   // payload can never disagree about which minute a sample belongs to.
   const byBucket = new Map<number, ComputeSample>();
   for (const s of seeded) {
     if (s.at < oldest) continue;
-    const at = Math.min(s.at, newest);
+    const at = Math.min(s.at, seedCeiling);
     byBucket.set(at, at === s.at ? s : { ...s, at });
   }
   for (const s of existing?.values() ?? []) if (s.at >= oldest) byBucket.set(s.at, s);

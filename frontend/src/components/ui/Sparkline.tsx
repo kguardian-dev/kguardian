@@ -14,8 +14,6 @@ export interface SparklineProps {
   height?: number;
   /** CSS colour for the stroke; defaults to the accent token. */
   color?: string;
-  /** Number of slots the width is divided into (so a short buffer grows from the right). */
-  capacity?: number;
   className?: string;
   title?: string;
 }
@@ -26,13 +24,12 @@ export function Sparkline({
   width = 200,
   height = 28,
   color = 'var(--color-hubble-accent)',
-  capacity = values.length,
   className = '',
   title,
 }: SparklineProps) {
   const dataMax = values.reduce<number>((m, v) => (v !== null && v > m ? v : m), 0);
   const yMax = max && max > 0 ? Math.max(max, dataMax) : dataMax || 1;
-  const segments = sparklineSegments(values, width, height, yMax, capacity);
+  const segments = sparklineSegments(values, width, height, yMax);
   const capY = max && max > 0 ? height - (Math.min(max, yMax) / yMax) * (height - 1) - 0.5 : null;
 
   return (

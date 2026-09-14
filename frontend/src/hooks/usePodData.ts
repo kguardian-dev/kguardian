@@ -110,25 +110,24 @@ export const usePodData = (namespace: string) => {
   const compute = useComputeData(namespace);
   // Seed an expanded card's sparkline from stored history (design D8).
   //
-  // The eager backfill in useComputeData is capped, so in a namespace past
-  // that cap most cards would otherwise open on an empty chart and fill one
-  // bucket per minute — slower than the pre-history behaviour. Expanding a
-  // card is the signal that its history is worth a read, and `seedPod` is
-  // idempotent, so this runs on every poll for every open card and costs
-  // nothing once a pod is seeded or its read is in flight.
+  // Expanding a card is the only signal that its history is worth a read:
+  // the sparklines are the sole consumer of seeded buckets and render only
+  // when expanded, so nothing is fetched for a namespace nobody has opened a
+  // card in. `seedPod` is idempotent, so running this for every open card on
+  // every poll costs nothing once a pod is seeded or its read is in flight.
   //
-  // The uids come from the compute rows, not the pod records, because that is
-  // what the sparkline is keyed on below — and an identity group with several
-  // replicas has several of them.
+  // One uid per card, the same one the chart below reads: a replica group's
+  // other uids can never be displayed, so fetching them would be reads for
+  // charts that do not exist.
   const seedPod = compute.seedPod;
   useEffect(() => {
+    if (!compute.enabled) return; // no pod carries a `compute` field, so no chart can render
     for (const node of basePods) {
       if (!node.isExpanded) continue;
-      for (const row of containersForNode(node, compute.containersByPodUid, compute.containersByPodName)) {
-        seedPod(row.pod_uid);
-      }
+      const uid = containersForNode(node, compute.containersByPodUid, compute.containersByPodName)[0]?.pod_uid;
+      if (uid) seedPod(uid);
     }
-  }, [basePods, compute.containersByPodUid, compute.containersByPodName, seedPod]);
+  }, [basePods, compute.enabled, compute.containersByPodUid, compute.containersByPodName, seedPod]);
 
   const pods = useMemo<PodNodeData[]>(() => {
     if (!compute.enabled) return basePods;
