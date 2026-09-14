@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.4.2](https://github.com/kguardian-dev/kguardian/compare/evaluator/v0.4.1...evaluator/v0.4.2) (2026-09-11)
+
+
+### Bug Fixes
+
+* **deps:** update ghcr.io/kguardian-dev/kguardian/controller docker tag to v1.14.0 - abandoned ([#1548](https://github.com/kguardian-dev/kguardian/issues/1548)) ([cb1e700](https://github.com/kguardian-dev/kguardian/commit/cb1e70055500d7b155935565aaf0d1b6c85f44ac))
+
 ## [0.4.1](https://github.com/kguardian-dev/kguardian/compare/evaluator/v0.4.0...evaluator/v0.4.1) (2026-09-08)
 
 
