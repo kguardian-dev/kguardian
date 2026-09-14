@@ -139,6 +139,21 @@ pub struct PodInspect {
     pub namespace_pid: Option<u32>,
     pub pid: Option<u32>,
     pub inode_num: Option<u64>,
+    /// `spec.hostNetwork`: this pod has NO network namespace of its own,
+    /// so `inode_num` is the node's netns.
+    ///
+    /// That inode names the node, not this pod. Every other hostNetwork
+    /// pod on it resolves to the same number, and so does every host
+    /// process — kubelet, the containerd shims, any systemd unit. The
+    /// map can only hold one entry per key, so whichever of them
+    /// registered last is the one an inode lookup finds, and anything
+    /// keyed purely on the inode would credit all of them to that pod.
+    /// Carried here, next to the identity it qualifies, so a reader that
+    /// needs a 1:1 netns→pod mapping can tell that this entry is not one
+    /// and take another route: `seccomp_denial::build_denials` switches
+    /// to the cgroup id, which is per container whatever the pod's
+    /// network namespace is.
+    pub host_network: bool,
 }
 
 #[derive(Debug, Default, Deserialize, Clone)]

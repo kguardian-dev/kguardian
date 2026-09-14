@@ -210,10 +210,11 @@ macro_rules! subsystems {
 // observed, and observed-absence is what kguardian turns into "safe to
 // deny".
 //
-// `SeccompDistributor` is the one exception, and it is not a corner
-// case: `seccomp_distributor::run` returns `Ok(())` immediately unless
-// SECCOMP_DISTRIBUTE=true, which is the default install, so alarming on
-// it would cry wolf on every cluster that has not opted in.
+// The `MayRetire` entries are the exceptions, and none of them is a
+// corner case. Each is a feature an operator can switch off, and each
+// returns `Ok(())` immediately when it is off — alarming on that would
+// cry wolf on every cluster that has not opted in. `SeccompDistributor`
+// is the clearest: `SECCOMP_DISTRIBUTE` is unset in the default install.
 subsystems! {
     /// The pod watcher as `main` sees it; supervises the two below.
     PodWatcher => "pod-watcher", Disposition::Required;
@@ -228,6 +229,12 @@ subsystems! {
     SyscallRecorder => "syscall-recorder", Disposition::Required;
     PodReconciler => "pod-reconciler", Disposition::Required;
     SeccompDistributor => "seccomp-distributor", Disposition::MayRetire;
+    // Kernel seccomp verdicts (SECCOMP_DENIAL_CAPTURE, default on).
+    // `MayRetire` because the ONLY clean exit is the operator switching
+    // the feature off; a kernel that cannot carry the probe does NOT
+    // retire, it keeps running and reports `capturing: false` every
+    // interval so the broker can tell a blind node from a quiet one.
+    SeccompDenials => "seccomp-denials", Disposition::MayRetire;
     // Compute gauges (COMPUTE_ENABLED, default on). `run` returns `Ok`
     // straight away when the feature is off; an `Err` is still fatal.
     ComputeSampler => "compute-sampler", Disposition::MayRetire;
@@ -906,6 +913,24 @@ mod tests {
     // on". The disposition now lives on `Subsystem` rather than at the
     // call site, and these pin the table it reads.
 
+    /// `SeccompDenials` is deliberately NOT in this list, and the
+    /// distinction is worth stating because the name says "capture".
+    ///
+    /// What makes the subsystems below `Required` is that nothing can
+    /// legitimately stop them: they run until the process does, so an
+    /// exit is a hole in what this node observed. Denial capture has one
+    /// legitimate stop — `SECCOMP_DENIAL_CAPTURE=false`, an operator
+    /// switching the feature off — which is the same shape as the
+    /// distributor and the compute sampler.
+    ///
+    /// The case that looks like it belongs here is a kernel without
+    /// `audit_seccomp`, and that one is covered without `Required`:
+    /// `seccomp_denial::run` does not retire there. It keeps ticking and
+    /// posts `capturing: false` every interval, so the broker marks the
+    /// node not-capturing and the workload reads `Unknown` rather than a
+    /// false all-clear. Making this `Required` would instead exit the
+    /// whole Controller on every CONFIG_AUDITSYSCALL=n node, which is
+    /// the crash-loop the probe's degradation path exists to avoid.
     #[test]
     fn every_capture_subsystem_is_required() {
         for subsystem in [
@@ -944,7 +969,7 @@ mod tests {
             .collect();
         assert_eq!(
             retiring,
-            vec!["seccomp-distributor", "compute-sampler"],
+            vec!["seccomp-distributor", "seccomp-denials", "compute-sampler"],
             "only subsystems that are features an operator can switch off may retire; \
              everything else is capture and must be Required"
         );

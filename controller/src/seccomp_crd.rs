@@ -32,6 +32,7 @@ use std::collections::BTreeSet;
     printcolumn = r#"{"name":"Action","type":"string","jsonPath":".spec.defaultAction"}"#,
     printcolumn = r#"{"name":"Ready","type":"string","jsonPath":".status.distribution.summary"}"#,
     printcolumn = r#"{"name":"Drift","type":"string","jsonPath":".status.drift"}"#,
+    printcolumn = r#"{"name":"Denials","type":"integer","jsonPath":".status.denials.observed"}"#,
     printcolumn = r#"{"name":"Age","type":"date","jsonPath":".metadata.creationTimestamp"}"#
 )]
 #[serde(rename_all = "camelCase")]
@@ -163,6 +164,8 @@ pub struct SeccompProfileStatus {
     /// paths only, no `[?(@.type=="Drift")]` filters.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub drift: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub denials: Option<DenialSummary>,
     /// Per-node state; each entry is owned by that node's controller.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     #[schemars(extend("x-kubernetes-list-type" = "map", "x-kubernetes-list-map-keys" = ["name"]))]
@@ -188,6 +191,72 @@ pub enum DistributionState {
     Ready,
     Partial,
     Pending,
+}
+
+/// Seccomp denials the broker has attributed to this CR's workload:
+/// syscalls the kernel's own filter acted on, as opposed to `drift`,
+/// which is inferred from what kguardian observed the workload call.
+///
+/// A settled reading, not a live counter, and `refreshedAt` says when it
+/// was taken. Every node polls the Broker on its own schedule, so every
+/// node holds a slightly different reading; writing each one back would
+/// have the fleet rewrite this CR without end. A node therefore
+/// republishes the block only when its own reading is strictly stronger
+/// than the published one — a syscall or a verdict not listed there, or
+/// an order of magnitude more events — and otherwise leaves it alone
+/// until it is more than 15 minutes old, at which point the next node to
+/// reconcile replaces it outright.
+///
+/// So `observed` trails live activity by up to 15 minutes, and it trails
+/// it in one direction: a workload climbing from 1,200 to 9,900 inside
+/// one order of magnitude keeps reporting 1,200 until the refresh, and
+/// so does a count that falls, whether because the retention window
+/// pruned older events or because the workload stopped. Read it as
+/// "denials on this scale, as of `refreshedAt`", not as a total. `GET
+/// /seccomp/denials` on the Broker is the live, per-event view.
+///
+/// Present whenever the Broker gave an answer, including when that
+/// answer is zero. `observed: 0` means "checked, and clean". The whole
+/// block being absent means "not known" — the Broker was unreachable, it
+/// predates denial capture, or nothing on this cluster is capturing
+/// denials at all.
+///
+/// Keeping those two apart is the point of the field. Zero is what
+/// clears a profile for promotion from `SCMP_ACT_LOG` to an enforcing
+/// action; absent is no evidence whatsoever, and collapsing them would
+/// hand out that clearance on the strength of nobody having looked. The
+/// `Denials` printer column reads `observed` straight out of this block,
+/// so it shows `0` for a cleared workload and stays blank for an unknown
+/// one — readable without going and fetching the condition. The
+/// `DenialsObserved` condition carries the same distinction with a
+/// reason attached, and its message renders this block and nothing else,
+/// so `kubectl get` and `kubectl describe` cannot name two different
+/// numbers.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct DenialSummary {
+    /// Denial events in this reading, across every syscall and action.
+    /// This is the `Denials` printer column. Up to 15 minutes behind the
+    /// Broker, and coarse — see the note on this block.
+    pub observed: u64,
+    /// Distinct syscall names denied in this reading, sorted.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub syscalls: Vec<String>,
+    /// The `SCMP_ACT_*` verdicts the kernel returned in this reading,
+    /// sorted. What separates a profile that is only logging from one
+    /// that is returning errors to the workload or killing it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub actions: Vec<String>,
+    /// RFC 3339; the most recent denial in this reading, when there has
+    /// been one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_seen: Option<String>,
+    /// RFC 3339; when this reading was taken from the Broker. Every
+    /// other field in the block is as of this instant. Absent on a block
+    /// written by a controller from before this field existed; the next
+    /// reconcile stamps one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub refreshed_at: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
@@ -216,6 +285,31 @@ pub struct Condition {
     pub last_transition_time: Option<String>,
 }
 
+/// The seccomp filter flag that makes the kernel log a denying verdict.
+///
+/// `seccomp_log()` calls `audit_seccomp()` unconditionally for
+/// `SCMP_ACT_LOG` and the `KILL` actions, but for `SCMP_ACT_ERRNO` only
+/// when the filter was installed with `SECCOMP_FILTER_FLAG_LOG` (runc sets
+/// the libseccomp log bit from the OCI `flags` list). Without it an
+/// enforcing `SCMP_ACT_ERRNO` profile fails syscalls silently: no audit
+/// record, nothing for the `audit_seccomp` kprobe to see, and
+/// `DenialsObserved` reads clean at the exact moment the workload is being
+/// blocked. Every profile that denies anything — an enforcing
+/// `defaultAction`, or a rule whose own action denies — therefore carries
+/// it; a profile that only logs and allows is left byte-identical.
+pub const SECCOMP_FILTER_FLAG_LOG: &str = "SECCOMP_FILTER_FLAG_LOG";
+
+/// Does this spec deny any syscall, by default or by rule?
+fn spec_denies(spec: &SeccompProfileSpec) -> bool {
+    !matches!(spec.default_action, DefaultAction::Log)
+        || spec.syscalls.iter().any(|r| {
+            matches!(
+                r.action,
+                RuleAction::Errno | RuleAction::Kill | RuleAction::KillProcess
+            )
+        })
+}
+
 /// The file written to a node. Exactly the standard seccomp JSON the
 /// kubelet loads; field order is the struct order so the bytes are
 /// stable across nodes and controller versions.
@@ -226,6 +320,10 @@ pub struct RenderedProfile {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub architectures: Option<Vec<Architecture>>,
     pub syscalls: Vec<RenderedRule>,
+    /// OCI `linux.seccomp.flags`. Present exactly when something in the
+    /// profile denies — see [`SECCOMP_FILTER_FLAG_LOG`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub flags: Option<Vec<String>>,
 }
 
 #[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -242,7 +340,8 @@ pub struct RenderedRule {
 /// later rule for the same name is the user's business), architectures
 /// are de-duplicated and sorted, and the output is pretty-printed JSON
 /// with a trailing newline. Same spec ⇒ same bytes ⇒ same hash on every
-/// node.
+/// node. A profile that denies anything adds `SECCOMP_FILTER_FLAG_LOG` so
+/// the kernel's verdicts stay observable after promotion.
 pub fn render_profile(spec: &SeccompProfileSpec) -> Vec<u8> {
     let architectures = spec.architectures.as_ref().map(|a| {
         let mut a: Vec<Architecture> = a.clone();
@@ -262,10 +361,12 @@ pub fn render_profile(spec: &SeccompProfileSpec) -> Vec<u8> {
             }
         })
         .collect();
+    let flags = spec_denies(spec).then(|| vec![SECCOMP_FILTER_FLAG_LOG.to_string()]);
     let rendered = RenderedProfile {
         default_action: spec.default_action,
         architectures,
         syscalls,
+        flags,
     };
     let mut out = serde_json::to_vec_pretty(&rendered).expect("rendered profile serialises");
     out.push(b'\n');
@@ -379,6 +480,58 @@ mod tests {
     }
 
     #[test]
+    fn enforcing_profiles_carry_the_log_flag_and_audit_profiles_do_not() {
+        // The kernel only audits SCMP_ACT_ERRNO verdicts when the filter was
+        // installed with SECCOMP_FILTER_FLAG_LOG; without it a promoted
+        // profile blocks in silence and the denial probe sees nothing.
+        for action in [
+            DefaultAction::Errno,
+            DefaultAction::Kill,
+            DefaultAction::KillProcess,
+        ] {
+            let mut s = spec(&["read"]);
+            s.default_action = action;
+            let bytes = render_profile(&s);
+            let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(
+                v["flags"],
+                serde_json::json!([SECCOMP_FILTER_FLAG_LOG]),
+                "{action:?} must render the log flag"
+            );
+            // Round-trips through the same struct the runtime unmarshals.
+            let back: RenderedProfile = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(
+                back.flags.as_deref(),
+                Some(&[SECCOMP_FILTER_FLAG_LOG.to_string()][..])
+            );
+        }
+        // A log-mode profile with a denying RULE denies that syscall just as
+        // silently, so the rule alone earns the flag.
+        let mut s = spec(&["read"]);
+        s.syscalls.push(SyscallRule {
+            names: vec![SyscallName("ptrace".into())],
+            action: RuleAction::Errno,
+            errno_ret: Some(1),
+        });
+        let v: serde_json::Value = serde_json::from_slice(&render_profile(&s)).unwrap();
+        assert_eq!(v["flags"], serde_json::json!([SECCOMP_FILTER_FLAG_LOG]));
+        // Audit mode logs already; its bytes (and so its hash) are unchanged.
+        let v: serde_json::Value =
+            serde_json::from_slice(&render_profile(&spec(&["read"]))).unwrap();
+        assert!(
+            v.get("flags").is_none(),
+            "SCMP_ACT_LOG must not carry flags"
+        );
+        // Promotion changes the bytes, so every node rewrites the file.
+        let mut s = spec(&["read"]);
+        s.default_action = DefaultAction::Errno;
+        assert_ne!(
+            fingerprint(&render_profile(&s)),
+            fingerprint(&render_profile(&spec(&["read"])))
+        );
+    }
+
+    #[test]
     fn fingerprint_is_stable_and_sensitive() {
         assert_eq!(fingerprint(b""), "cbf29ce484222325");
         assert_eq!(fingerprint(b"a"), "af63dc4c8601ec8c");
@@ -426,6 +579,68 @@ workloadRef:
         .is_err());
     }
 
+    /// "Absent" and "zero" are different answers and must survive
+    /// serialisation as different bytes: absent is "not known", zero is
+    /// "checked, and clean".
+    ///
+    /// Two ways this could silently collapse, both guarded here. An
+    /// absent block must serialise to no key at all rather than an empty
+    /// object, which a JSONPath gate would read as a present answer. And
+    /// `observed` must never be skipped when the block is written — it is
+    /// what the `Denials` printer column reads, so a skipped zero would
+    /// blank the column for a cleared workload and make it indis-
+    /// tinguishable from one nobody has looked at.
+    #[test]
+    fn denial_summary_keeps_absent_and_zero_apart() {
+        let mut s = SeccompProfileStatus {
+            drift: Some("False".into()),
+            ..Default::default()
+        };
+        let v = serde_json::to_value(&s).unwrap();
+        assert!(
+            v.get("denials").is_none(),
+            "an absent block must not serialise as anything at all"
+        );
+
+        let absent = v;
+
+        s.denials = Some(DenialSummary::default());
+        let v = serde_json::to_value(&s).unwrap();
+        assert_eq!(
+            v["denials"],
+            serde_json::json!({ "observed": 0 }),
+            "zero is a present block carrying an explicit count, so the \
+             printer column shows a 0 rather than a blank"
+        );
+        assert_ne!(
+            absent, v,
+            "the two answers must not serialise to the same object"
+        );
+
+        s.denials = Some(DenialSummary {
+            observed: 17,
+            syscalls: vec!["mount".into(), "ptrace".into()],
+            actions: vec!["SCMP_ACT_LOG".into()],
+            last_seen: Some("2026-09-14T04:05:14Z".into()),
+            refreshed_at: Some("2026-09-14T04:06:00Z".into()),
+        });
+        let v = serde_json::to_value(&s).unwrap();
+        assert_eq!(
+            v["denials"],
+            serde_json::json!({
+                "observed": 17,
+                "syscalls": ["mount", "ptrace"],
+                "actions": ["SCMP_ACT_LOG"],
+                "lastSeen": "2026-09-14T04:05:14Z",
+                "refreshedAt": "2026-09-14T04:06:00Z"
+            })
+        );
+
+        // And back: a CR read from the API server round-trips.
+        let back: SeccompProfileStatus = serde_json::from_value(v).unwrap();
+        assert_eq!(back, s);
+    }
+
     #[test]
     fn crd_yaml_has_the_contract_surface() {
         let y = crd_yaml();
@@ -445,6 +660,12 @@ workloadRef:
             "name: Action",
             "name: Ready",
             "name: Drift",
+            "name: Denials",
+            "jsonPath: .status.denials.observed",
+            // The reading's own timestamp: the CRD description points an
+            // operator at it for how far behind `observed` may be, so it
+            // has to be in the schema they can read.
+            "refreshedAt:",
             "name: Age",
             "- scmp",
         ] {

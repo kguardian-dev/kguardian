@@ -8,6 +8,7 @@ const SYSCALL_SRC: &str = "src/bpf/syscall.bpf.c";
 const TCP_PROBE_SRC: &str = "src/bpf/network_probe.bpf.c";
 const PACKET_DROP_SRC: &str = "src/bpf/netpolicy_drop.bpf.c";
 const SCHED_CONTENTION_SRC: &str = "src/bpf/sched_contention.bpf.c";
+const SECCOMP_DENIAL_SRC: &str = "src/bpf/seccomp_denial.bpf.c";
 
 fn main() {
     // Generated skeletons go to OUT_DIR, never into the source tree.
@@ -31,11 +32,15 @@ fn main() {
     let pkt_drop_out = out_dir.join("netpolicy_drop.skel.rs");
     let tcp_probe_out = out_dir.join("network_probe.skel.rs");
     let sched_contention_out = out_dir.join("sched_contention.skel.rs");
+    let seccomp_denial_out = out_dir.join("seccomp_denial.skel.rs");
     // The sched_contention object is also kept on disk (the skeleton
     // embeds a copy of exactly this file) so
     // contention::tests::embedded_object_uses_legacy_xadd_atomics can
     // inspect the instruction encoding.
     let sched_contention_obj = out_dir.join("sched_contention.bpf.o");
+    // Same arrangement for the seccomp denial object, read by
+    // seccomp_denial::tests::embedded_object_uses_legacy_xadd_atomics.
+    let seccomp_denial_obj = out_dir.join("seccomp_denial.bpf.o");
 
     let arch = env::var("CARGO_CFG_TARGET_ARCH")
         .expect("CARGO_CFG_TARGET_ARCH must be set in build script");
@@ -81,10 +86,30 @@ fn main() {
         .obj(&sched_contention_obj)
         .clang_args([
             OsStr::new("-I"),
-            vmlinux::include_path_root().join(arch).as_os_str(),
+            vmlinux::include_path_root().join(&arch).as_os_str(),
             OsStr::new("-mcpu=v2"),
         ])
         .build_and_generate(&sched_contention_out)
+        .unwrap();
+
+    // -mcpu=v2 for the same reason as sched_contention above: this probe
+    // counts verdicts in place with __sync_fetch_and_add, and the v3
+    // lowering of that (BPF_ATOMIC|BPF_FETCH) is rejected by the verifier
+    // before 5.12 and by the arm64 JIT before 5.18. Unlike the other
+    // three, dropping the flag here is not a latent exposure — it is an
+    // immediate load failure on those kernels, on a probe whose entire
+    // point is to keep working on kernels that lack newer features.
+    // seccomp_denial::tests::embedded_object_uses_legacy_xadd_atomics
+    // fails the build's test run if a toolchain change undoes this.
+    SkeletonBuilder::new()
+        .source(SECCOMP_DENIAL_SRC)
+        .obj(&seccomp_denial_obj)
+        .clang_args([
+            OsStr::new("-I"),
+            vmlinux::include_path_root().join(arch).as_os_str(),
+            OsStr::new("-mcpu=v2"),
+        ])
+        .build_and_generate(&seccomp_denial_out)
         .unwrap();
 
     println!("cargo:rerun-if-changed=src/bpf");

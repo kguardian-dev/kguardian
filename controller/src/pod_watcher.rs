@@ -4,7 +4,7 @@ use crate::compute_registry::{
     cgroup_id_for_path, parse_cpu_millis, parse_memory_bytes, resolve_container_cgroup,
     resolve_pid_and_cgroups_path, ComputeMap, ContainerCompute, ResourceSpec, Tier,
 };
-use crate::models::{pod_flags, ContainerMap, PodRegistration};
+use crate::models::{pod_flags, Config, ContainerMap, Info, Metadata, PodRegistration};
 use crate::network::canonicalize_ip;
 use crate::supervisor::{Draining, Subsystem, Supervisor};
 use crate::watch_loop::run_watch;
@@ -37,10 +37,16 @@ use tokio::sync::mpsc;
 /// `try_join!` in the first place (#1346). An `Arc<[String]>` inside
 /// gives the two halves below a cheap shared handle without cloning
 /// the list per pod event.
-/// What the pod watcher needs to keep the per-container compute
-/// registry (design D1) in step with the pods on this node. `None` in
-/// `watch_pods` means the feature is off: no containerd lookups beyond
-/// the one the netns path already makes, nothing registered.
+/// What the pod watcher needs to keep the per-container cgroup registry
+/// (design D1) in step with the pods on this node.
+///
+/// Two features read that registry and they are switched independently:
+/// the compute sampler reads it for gauges, and seccomp denial capture
+/// reads it to attribute a `hostNetwork` pod's verdicts, which have no
+/// other identifier (`seccomp_denial::build_denials`). `main.rs` builds
+/// it when EITHER is on, so `None` here means both are off: no
+/// containerd lookups beyond the one the netns path already makes,
+/// nothing registered.
 #[derive(Clone)]
 pub struct ComputeContext {
     pub map: ComputeMap,
@@ -345,7 +351,7 @@ async fn process_pod(
                 )
                 .await;
             }
-            if plan.compute {
+            if plan.cgroups {
                 // Excluded namespace: no traffic or syscall tracking (those
                 // feed policies the operator chose not to generate here),
                 // but compute gauges are observation only, and every pod on
@@ -376,11 +382,16 @@ enum IgnoreMapAction {
 
 /// Decide whether a pod's addresses go into the eBPF ignore map.
 ///
-/// `IGNORE_DAEMONSET_TRAFFIC` means "don't capture DaemonSet pods". For
-/// a pod-network DaemonSet that is two things: don't register its
-/// netns (handled by never reaching `process_container_ids`) AND drop
-/// flows to/from its IPs in BPF, so its peers' recordings aren't
-/// flooded with kube-proxy / CNI chatter.
+/// `IGNORE_DAEMONSET_TRAFFIC` means "drop DaemonSet traffic from other
+/// pods' recordings": its addresses go into the BPF ignore map, so its
+/// peers' recordings aren't flooded with kube-proxy / CNI chatter.
+///
+/// It does NOT decide registration. Every branch here falls through to
+/// `registration_plan`, which gates on the excluded namespaces alone, so
+/// a DaemonSet pod in a tracked namespace still has its netns
+/// registered and is still captured in its own right. (This comment
+/// used to claim the opposite, for both the pod-network and the
+/// host-network case.)
 ///
 /// A host-network DaemonSet pod (node-exporter, Cilium, this controller)
 /// has `podIP == node IP`. Putting that in the map ignored every flow to
@@ -388,8 +399,9 @@ enum IgnoreMapAction {
 /// kubelet:10250, etcd:2381, the apiserver on a control-plane node —
 /// for every pod on the cluster, and `helper.h` drops on src OR dst.
 /// That traffic was simply never recorded, so generated policies
-/// omitted it. Such a pod is still not registered (unchanged); only the
-/// map insertion is withheld.
+/// omitted it. Only the map insertion is withheld; the pod is still
+/// registered, and `PodInspect::host_network` records that its netns is
+/// the node's (see `register_netns`).
 ///
 /// The excluded-namespace gate applies here too: it used to run only
 /// AFTER the insertion, so excluding `kguardian` did not stop the
@@ -456,20 +468,22 @@ fn log_host_network_skip_once(pod: &Pod, pod_ip: &str) {
 
 /// Which registrations a ready pod gets. `EXCLUDED_NAMESPACES` switches
 /// off the netns registration (traffic + syscalls, the policy inputs)
-/// only; compute sampling follows `COMPUTE_ENABLED` alone, so an excluded
-/// namespace still shows CPU/memory gauges and takes part in noisy-
-/// neighbour attribution. The per-pod opt-out for compute is the
-/// `kguardian.dev/compute: "off"` annotation, handled in `register_compute`.
+/// only; the cgroup registry follows whether it exists at all, so an
+/// excluded namespace still shows CPU/memory gauges and takes part in
+/// noisy-neighbour attribution. The per-pod opt-out for compute
+/// SAMPLING is the `kguardian.dev/compute: "off"` annotation, handled in
+/// `register_compute` — it moves a container to the identity-only tier
+/// rather than dropping it, so the pod can still be named.
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub struct RegistrationPlan {
     pub netns: bool,
-    pub compute: bool,
+    pub cgroups: bool,
 }
 
-pub fn registration_plan(namespace_tracked: bool, compute_enabled: bool) -> RegistrationPlan {
+pub fn registration_plan(namespace_tracked: bool, registry_present: bool) -> RegistrationPlan {
     RegistrationPlan {
         netns: namespace_tracked,
-        compute: compute_enabled,
+        cgroups: registry_present,
     }
 }
 
@@ -712,7 +726,17 @@ pub fn effective_capture_level(pod: &Pod, cluster: CaptureLevel) -> CaptureLevel
 
 /// The `inode_num` map value for a pod: tracked, at `level`, with a
 /// generation derived from the pod UID (see `pod_flags::GEN_SHIFT`).
-fn pod_registration_flags(pod: &Pod, level: CaptureLevel) -> u32 {
+///
+/// The generation half of this is one end of a cross-module invariant:
+/// the probe stamps what this packs into every denial row, and
+/// `seccomp_denial::registration_generation` recomputes the same number
+/// from the `ContainerMap` entry to decide whether a row still belongs
+/// to the pod on that inode. Change the derivation here and every denial
+/// on the node drops as `stale_generation`, silently. `pub(crate)` so
+/// the test that ties the two can call the real function rather than
+/// restate its body — a test that re-derives this cannot fail when it
+/// changes.
+pub(crate) fn pod_registration_flags(pod: &Pod, level: CaptureLevel) -> u32 {
     pod_flags::pack(
         level,
         pod_flags::generation_for_uid(pod.metadata.uid.as_deref()),
@@ -720,11 +744,11 @@ fn pod_registration_flags(pod: &Pod, level: CaptureLevel) -> u32 {
 }
 
 /// Register a pod's netns (unchanged behaviour, see [`register_netns`])
-/// and then, when compute is on, every one of its containers in the
-/// compute registry. The compute walk runs *after* the netns
+/// and then, when the cgroup registry exists, every one of its
+/// containers in it. The cgroup walk runs *after* the netns
 /// registration and never alters its result: a pod the netns path
 /// could not resolve is still not registered for traffic, whatever the
-/// compute walk finds.
+/// cgroup walk finds.
 async fn process_container_ids(
     con_ids: &[String],
     pod: &Pod,
@@ -740,6 +764,31 @@ async fn process_container_ids(
     reg
 }
 
+/// The `ContainerMap` entry for a pod, before `get_pod_inspect` fills in
+/// the container id, pid and netns inode.
+///
+/// Everything an attribution decision needs is assembled in this one
+/// place, and read back out of this one entry: who the pod is
+/// (`identity`), and whether its netns inode identifies it at all
+/// (`host_network`). Splitting those across two stores is what produced
+/// the misattribution `seccomp_denial::build_denials` documents; a pod
+/// whose netns is the node's is the same failure by a different route,
+/// so the fact travels with the identity rather than being re-derived
+/// downstream from something that only correlates with it.
+fn netns_registration(pod: &Pod, pod_ip: &str, identity: Metadata) -> PodInspect {
+    PodInspect {
+        status: create_pod_info(pod, pod_ip),
+        info: Info {
+            config: Config { metadata: identity },
+        },
+        // `spec.hostNetwork` is immutable and assigned at admission, so
+        // this is settled for the life of the pod and cannot drift from
+        // the netns the runtime actually put it in.
+        host_network: is_host_network(pod),
+        ..Default::default()
+    }
+}
+
 /// The netns registration: the first container whose network namespace
 /// resolves registers the pod, and the loop stops there.
 async fn register_netns(
@@ -750,12 +799,9 @@ async fn register_netns(
     capture_level: CaptureLevel,
 ) -> Option<PodRegistration> {
     let flags = pod_registration_flags(pod, capture_level);
+    let identity = pod_identity_metadata(pod);
     for con_id in con_ids {
-        let pod_info = create_pod_info(pod, pod_ip);
-        let pod_inspect = PodInspect {
-            status: pod_info,
-            ..Default::default()
-        };
+        let pod_inspect = netns_registration(pod, pod_ip, identity.clone());
         // debug not info — these two log lines fire inside the
         // per-container loop, per pod-event. Same per-event rate as
         // the upstream pod-watcher info logs already dropped to debug.
@@ -860,7 +906,10 @@ pub fn prune_compute_registry(
 /// A pod annotated `kguardian.dev/compute: "off"` is walked the same
 /// way but lands in the registry's identity-only tier (design D9): it
 /// is never sampled or tracked, yet blame can still name it
-/// `ns/pod/container` when it is the bully.
+/// `ns/pod/container` when it is the bully — and
+/// `seccomp_denial::container_for_cgroup` consults that tier too, so
+/// opting out of CPU sampling does not opt a workload out of having its
+/// kernel denials reported.
 ///
 /// Containers already registered under the same containerd id and tier
 /// are skipped, so the 60 s resync costs no containerd RPC for a steady
@@ -979,6 +1028,49 @@ fn create_pod_info(pod: &Pod, pod_ip: &str) -> PodInfo {
         pod_name: pod.name_any(),
         pod_namespace: pod.metadata.namespace.to_owned(),
         pod_ip: pod_ip.to_string(),
+    }
+}
+
+/// The pod's Kubernetes identity for its `ContainerMap` entry.
+///
+/// `register_netns` used to fill `PodInspect.status` and nothing else, so
+/// `info.config.metadata` was `Default` on every node — name, namespace
+/// AND uid all empty strings. That went unnoticed for as long as nothing
+/// read them. Seccomp denial capture does: it reports the pod UID to the
+/// broker, whose storage key is `(pod_uid, syscall, action)`. An empty
+/// UID there is not a cosmetically missing field, it is every pod on the
+/// cluster collapsing into a single row per syscall/action pair, so the
+/// broker rejects such rows outright rather than merge them
+/// (`broker/src/seccomp_denial.rs`, `reject_reason`) — and the entire
+/// feature stored nothing while looking healthy from both ends.
+///
+/// All three fields are filled, not just the uid that prompted this.
+/// Leaving two of three empty next to one that is populated is exactly
+/// the shape that made the gap invisible the first time.
+///
+/// A pod with no `metadata.uid` cannot arise from a real apiserver — it
+/// assigns one at admission — so this is the hand-built-object case. It
+/// is deliberately NOT a reason to skip registration: this entry is what
+/// makes traffic and syscall capture work at all, and refusing it would
+/// trade a missing UID for a pod no probe can see. Register it, say so
+/// once per event so the condition is never silent, and let the broker
+/// reject the denial rows that carry no UID rather than invent an
+/// identity for them here.
+pub(crate) fn pod_identity_metadata(pod: &Pod) -> Metadata {
+    let uid = pod.metadata.uid.clone().unwrap_or_default();
+    if uid.is_empty() {
+        warn!(
+            pod = %pod.name_any(),
+            namespace = %pod.metadata.namespace.as_deref().unwrap_or("?"),
+            "pod has no metadata.uid; it is still tracked for traffic and syscall capture, \
+             but the broker will reject its seccomp denial rows because they cannot be \
+             attributed to a stable pod identity"
+        );
+    }
+    Metadata {
+        name: pod.name_any(),
+        namespace: pod.metadata.namespace.clone().unwrap_or_default(),
+        uid,
     }
 }
 
@@ -1574,37 +1666,37 @@ mod tests {
     }
 
     #[test]
-    fn excluded_namespaces_skip_netns_but_keep_compute() {
-        // Tracked namespace, compute on: both.
+    fn excluded_namespaces_skip_netns_but_keep_cgroups() {
+        // Tracked namespace, registry present: both.
         assert_eq!(
             registration_plan(true, true),
             RegistrationPlan {
                 netns: true,
-                compute: true
+                cgroups: true
             }
         );
         // Excluded namespace (e.g. kguardian itself): no traffic/syscalls,
-        // but gauges and blame still work.
+        // but gauges, blame and denial attribution still work.
         assert_eq!(
             registration_plan(false, true),
             RegistrationPlan {
                 netns: false,
-                compute: true
+                cgroups: true
             }
         );
-        // Compute off: excluded namespaces register nothing at all.
+        // No registry at all: excluded namespaces register nothing.
         assert_eq!(
             registration_plan(false, false),
             RegistrationPlan {
                 netns: false,
-                compute: false
+                cgroups: false
             }
         );
         assert_eq!(
             registration_plan(true, false),
             RegistrationPlan {
                 netns: true,
-                compute: false
+                cgroups: false
             }
         );
     }
@@ -1747,6 +1839,102 @@ mod tests {
         // No UID (a hand-built test pod) still yields a tracked, tiered value.
         let f = pod_registration_flags(&Pod::default(), Full);
         assert_eq!(f, pod_flags::POD_TRACKED);
+    }
+
+    /// The `ContainerMap` entry has to carry the pod's Kubernetes
+    /// identity, not just its status.
+    ///
+    /// This is the fix for a gap that made seccomp denial capture store
+    /// nothing at all: `register_netns` filled `status` and left
+    /// `info.config.metadata` at `Default`, so the UID the denial
+    /// reporter sends to the broker was `""` on every node. The broker's
+    /// storage key is `(pod_uid, syscall, action)`, so it rejects an
+    /// empty UID rather than collapse every pod on the cluster into one
+    /// row per syscall/action pair — correct of it, and invisible from
+    /// both ends except for a warning about "unusable entries".
+    ///
+    /// Asserting all three fields, not just the uid: two empty fields
+    /// sitting beside one populated one is how this was missed before.
+    #[test]
+    fn the_container_map_entry_carries_the_pods_uid_name_and_namespace() {
+        let mut pod = Pod::default();
+        pod.metadata.uid = Some("11111111-2222-3333-4444-555555555555".into());
+        pod.metadata.name = Some("media-transform-7d9c8-abc12".into());
+        pod.metadata.namespace = Some("media".into());
+
+        let identity = pod_identity_metadata(&pod);
+
+        assert_eq!(identity.uid, "11111111-2222-3333-4444-555555555555");
+        assert_eq!(identity.name, "media-transform-7d9c8-abc12");
+        assert_eq!(identity.namespace, "media");
+    }
+
+    /// A pod with no UID stays tracked.
+    ///
+    /// It cannot happen against a real apiserver, which assigns one at
+    /// admission. If it somehow does, dropping the registration would
+    /// trade a missing pod UID for a pod invisible to every probe —
+    /// traffic and syscall capture both key off this entry. The row is
+    /// registered, the condition is logged, and only its denial rows are
+    /// refused downstream.
+    #[test]
+    fn a_pod_without_a_uid_is_still_registered_rather_than_dropped() {
+        let mut pod = Pod::default();
+        pod.metadata.name = Some("hand-built".into());
+
+        let identity = pod_identity_metadata(&pod);
+
+        assert_eq!(identity.name, "hand-built");
+        assert!(
+            identity.uid.is_empty(),
+            "an absent UID must stay absent; inventing one here would hand the broker a \
+             stable-looking identity that is not stable, which is worse than a rejected row"
+        );
+    }
+
+    /// The registration records whether the inode it will be filed under
+    /// is the pod's own netns or the node's.
+    ///
+    /// A `hostNetwork` pod resolves to the node's netns, which every
+    /// other hostNetwork pod and every host process shares, so the
+    /// `ContainerMap` — one entry per inode — keeps only whichever
+    /// registered last. Without this flag on the entry, a reader that
+    /// looks a denial up by inode gets a confident answer naming a
+    /// workload that may have had nothing to do with it. This is the
+    /// producing end of `seccomp_denial::AttributionLosses::shared_netns`;
+    /// leaving it unset here makes that refusal silently stop happening.
+    #[test]
+    fn the_container_map_entry_records_whether_the_netns_is_the_nodes() {
+        let identity = |p: &Pod| pod_identity_metadata(p);
+
+        let host = daemonset_pod("kube-system", true);
+        assert!(
+            netns_registration(&host, "10.0.0.4", identity(&host)).host_network,
+            "a hostNetwork pod's inode is the node's; an entry that does not say so lets a \
+             denial from any process on the node be credited to this pod"
+        );
+
+        let own = daemonset_pod("kube-system", false);
+        assert!(
+            !netns_registration(&own, "10.244.1.7", identity(&own)).host_network,
+            "a pod-network pod owns its netns and must stay attributable"
+        );
+
+        // hostNetwork absent from the spec is false, not unknown.
+        assert!(!netns_registration(&Pod::default(), "", identity(&Pod::default())).host_network);
+    }
+
+    /// The rest of the entry is unchanged by the flag above.
+    #[test]
+    fn the_registration_still_carries_identity_and_status() {
+        let pod = daemonset_pod("kube-system", true);
+        let entry = netns_registration(&pod, "10.0.0.4", pod_identity_metadata(&pod));
+
+        assert_eq!(entry.status.pod_name, "ds-x");
+        assert_eq!(entry.status.pod_namespace.as_deref(), Some("kube-system"));
+        assert_eq!(entry.status.pod_ip, "10.0.0.4");
+        assert_eq!(entry.info.config.metadata.name, "ds-x");
+        assert_eq!(entry.info.config.metadata.namespace, "kube-system");
     }
 
     fn pod_with_owners(owners: Vec<OwnerReference>) -> Pod {

@@ -48,6 +48,7 @@ use crate::read_budget::{
     SECCOMP_DETAIL_ROWS_CHARGED, SECCOMP_WORKLOAD_COST_BYTES,
 };
 use crate::schema;
+use crate::seccomp_denial::{denial_index, denial_index_for, DenialBlock, DenialIndex};
 use actix_web::{get, post, web, HttpResponse, Responder};
 use diesel::prelude::*;
 use diesel::r2d2::{self, ConnectionManager};
@@ -1185,10 +1186,15 @@ struct ProfileSummary {
     #[serde(rename = "crCount")]
     cr_count: usize,
     cr: Option<CrBlock>,
+    /// The kernel's own verdicts for this workload, or `None` when the
+    /// broker cannot tell "nothing denied" from "nothing capturing". See
+    /// [`DenialIndex::block_for`] — it follows the same
+    /// no-block-rather-than-an-empty-one rule as `cr` above.
+    denials: Option<DenialBlock>,
 }
 
 impl ProfileSummary {
-    fn build(obs: &Observed, index: &DistributionIndex) -> Self {
+    fn build(obs: &Observed, index: &DistributionIndex, denials: &DenialIndex) -> Self {
         let r = &obs.meta;
         let suggested = suggested_cr_name(&r.workload_kind, &r.workload_name);
         // Drift needs the real names. `zip` rather than an unwrap: if the
@@ -1245,6 +1251,15 @@ impl ProfileSummary {
             }),
             cr_count: obs.crs.len(),
             cr,
+            // Keyed on the same (namespace, kind, name) identity everything
+            // else in this summary is grouped on, so a denial and the
+            // profile it was measured against always agree on what the
+            // workload is.
+            denials: denials.block_for(&(
+                r.pod_namespace.clone(),
+                r.workload_kind.clone(),
+                r.workload_name.clone(),
+            )),
         }
     }
 }
@@ -1542,8 +1557,16 @@ pub async fn list_seccomp_profiles(
     // workload), and over-charging there is harmless; charging for blobs that
     // will not be read is not the failure mode that matters.
     let blob_bearing = with_crs.min(workloads);
+    // The denial rollup below is charged too. Its totals pass is one row per
+    // workload and rides inside the per-workload allowance above, but its
+    // names pass is per `(syscall, action)` and scales on an axis neither
+    // count here measures — so it carries its own bounded reservation. It
+    // used to carry none at all, on the argument that the table "is already
+    // an aggregate", which was wrong twice: the query grouped by syscall and
+    // action as well as workload, and it had no LIMIT.
     let charge = cost_kib(workloads, SECCOMP_WORKLOAD_COST_BYTES)
-        .saturating_add(cost_kib(blob_bearing, SECCOMP_BLOB_COST_BYTES));
+        .saturating_add(cost_kib(blob_bearing, SECCOMP_BLOB_COST_BYTES))
+        .saturating_add(crate::seccomp_denial::denial_index_charge_kib());
 
     let _permit = match budget.acquire(charge).await {
         Ok(p) => p,
@@ -1554,9 +1577,14 @@ pub async fn list_seccomp_profiles(
         let mut conn = pool.get()?;
         let all = workload_summaries(&mut conn)?;
         let index = distribution_index(&mut conn)?;
+        // One rollup for the whole call, like the capture and distribution
+        // indexes above it, so adding the block keeps this endpoint at
+        // O(rows + contributors + crs + denials) rather than a query per
+        // workload. Bounded in SQL and charged above.
+        let denials = denial_index(&mut conn)?;
         Ok(all
             .iter()
-            .map(|o| ProfileSummary::build(o, &index))
+            .map(|o| ProfileSummary::build(o, &index, &denials))
             .collect())
     })
     .await?
@@ -1594,10 +1622,13 @@ pub async fn get_seccomp_profile(
     // node count rather than workload count, so it is charged as a small
     // multiple of one workload rather than the list endpoint's reservation.
     let _permit = match budget
-        .acquire(cost_kib(
-            SECCOMP_DETAIL_ROWS_CHARGED,
-            SECCOMP_WORKLOAD_COST_BYTES,
-        ))
+        .acquire(
+            cost_kib(SECCOMP_DETAIL_ROWS_CHARGED, SECCOMP_WORKLOAD_COST_BYTES).saturating_add(
+                // One workload's denial rollup, capped at its own
+                // per-workload pair limit rather than the cluster-wide one.
+                crate::seccomp_denial::denial_index_for_charge_kib(),
+            ),
+        )
         .await
     {
         Ok(p) => p,
@@ -1609,8 +1640,13 @@ pub async fn get_seccomp_profile(
         match one_observed(&mut conn, &namespace, &kind, &name)? {
             Some(obs) => {
                 let index = distribution_index(&mut conn)?;
+                let key = (namespace.clone(), kind.clone(), name.clone());
+                let denials = denial_index_for(&mut conn, &key)?;
                 let profile = render(&obs, obs.require_names()?);
-                Ok(Some((ProfileSummary::build(&obs, &index), profile)))
+                Ok(Some((
+                    ProfileSummary::build(&obs, &index, &denials),
+                    profile,
+                )))
             }
             None => Ok(None),
         }
@@ -2691,8 +2727,9 @@ mod tests {
         assert_eq!(summary.syscall_count, full.syscall_count);
 
         let idx = empty_index();
-        let a = serde_json::to_value(ProfileSummary::build(&summary, &idx)).unwrap();
-        let b = serde_json::to_value(ProfileSummary::build(&full, &idx)).unwrap();
+        let no_denials = DenialIndex::empty();
+        let a = serde_json::to_value(ProfileSummary::build(&summary, &idx, &no_denials)).unwrap();
+        let b = serde_json::to_value(ProfileSummary::build(&full, &idx, &no_denials)).unwrap();
         assert_eq!(a["cr"]["drift"], b["cr"]["drift"]);
         assert_eq!(
             a["cr"]["drift"]["missing"],
@@ -2731,7 +2768,12 @@ mod tests {
                 .to_vec(),
         };
 
-        let v = serde_json::to_value(ProfileSummary::build(&obs, &empty_index())).unwrap();
+        let v = serde_json::to_value(ProfileSummary::build(
+            &obs,
+            &empty_index(),
+            &DenialIndex::empty(),
+        ))
+        .unwrap();
         assert!(
             v["cr"].is_null(),
             "no names means no drift can be computed, so no cr block"
@@ -2740,6 +2782,96 @@ mod tests {
             v["crCount"], 1,
             "the CR is still counted, so the omission is visible rather than \
              looking like there is no CR at all"
+        );
+    }
+
+    /// The denial counterpart of
+    /// `a_cr_without_names_emits_no_drift_rather_than_an_empty_one`, at the
+    /// summary level rather than the index level.
+    ///
+    /// The two blocks share one rule: an absent block means "could not
+    /// determine", and the controller already models that as a condition of
+    /// status Unknown. An empty block means "determined, and it is clear" —
+    /// so emitting one from data that could not determine anything writes a
+    /// false all-clear into an object an operator reads.
+    ///
+    /// For denials the undeterminable state is the common one: capture needs
+    /// CONFIG_AUDIT on the node, the operator can switch it off, and the
+    /// probe is skipped on a kernel without the `audit_seccomp` symbol. With
+    /// no denial row anywhere, "never denied" and "never watched" are the
+    /// same database state.
+    #[test]
+    fn no_denial_observations_emit_no_block_rather_than_an_empty_one() {
+        let obs = observed_fixture("openat,read,write", "x86_64", vec![]);
+        let v = serde_json::to_value(ProfileSummary::build(
+            &obs,
+            &empty_index(),
+            &DenialIndex::empty(),
+        ))
+        .unwrap();
+        assert!(
+            v["denials"].is_null(),
+            "no observations anywhere means unknown, and a total of 0 would              read as an all-clear for a workload nobody is watching"
+        );
+    }
+
+    /// The other half of the rule, and the shape the controller's
+    /// distributor parses. This is a hard contract: the keys, their
+    /// spelling, and the fact that `denials` hangs off the same summary the
+    /// `cr` block does.
+    #[test]
+    fn an_observed_workload_carries_the_contract_denials_block() {
+        let obs = observed_fixture("openat,read,write", "x86_64", vec![]);
+        let denials = DenialIndex::with_rows(vec![(
+            "prod".into(),
+            "Deployment".into(),
+            "web".into(),
+            "ptrace".into(),
+            "SCMP_ACT_LOG".into(),
+            17,
+            chrono::DateTime::parse_from_rfc3339("2026-09-14T04:05:14Z")
+                .unwrap()
+                .with_timezone(&chrono::Utc),
+        )]);
+        let v =
+            serde_json::to_value(ProfileSummary::build(&obs, &empty_index(), &denials)).unwrap();
+        assert_eq!(v["denials"]["total"], 17);
+        assert_eq!(v["denials"]["syscalls"], serde_json::json!(["ptrace"]));
+        assert_eq!(v["denials"]["actions"], serde_json::json!(["SCMP_ACT_LOG"]));
+        assert_eq!(v["denials"]["lastSeen"], "2026-09-14T04:05:14Z");
+    }
+
+    /// The block is keyed on the workload, not attached to whatever the
+    /// rollup happened to contain. A denial against another workload must
+    /// not leak into this one's summary — that would put another team's
+    /// kernel verdict into this CR's status.
+    #[test]
+    fn a_denial_against_another_workload_does_not_leak_into_this_summary() {
+        let obs = observed_fixture("openat", "x86_64", vec![]);
+        let denials = DenialIndex::with_rows(vec![(
+            "prod".into(),
+            "Deployment".into(),
+            "other".into(),
+            "ptrace".into(),
+            "SCMP_ACT_LOG".into(),
+            17,
+            chrono::DateTime::parse_from_rfc3339("2026-09-14T04:05:14Z")
+                .unwrap()
+                .with_timezone(&chrono::Utc),
+        )]);
+        let v =
+            serde_json::to_value(ProfileSummary::build(&obs, &empty_index(), &denials)).unwrap();
+        assert_eq!(
+            v["denials"]["total"], 0,
+            "this workload has no denials of its own"
+        );
+        assert!(
+            v["denials"]["lastSeen"].is_null(),
+            "and therefore no lastSeen"
+        );
+        assert!(
+            !v["denials"].is_null(),
+            "but capture is proven on the cluster, so its zero is a real              all-clear rather than an unknown"
         );
     }
 
@@ -3131,7 +3263,12 @@ mod tests {
     #[test]
     fn summary_without_cr_points_snippet_at_suggested_name() {
         let obs = observed_fixture("read,write", "x86_64", Vec::new());
-        let v = serde_json::to_value(ProfileSummary::build(&obs, &empty_index())).unwrap();
+        let v = serde_json::to_value(ProfileSummary::build(
+            &obs,
+            &empty_index(),
+            &DenialIndex::empty(),
+        ))
+        .unwrap();
         assert_eq!(v["suggestedName"], "deployment-web");
         assert_eq!(v["cr"], serde_json::Value::Null);
         assert_eq!(v["crCount"], 0);
@@ -3173,7 +3310,8 @@ mod tests {
             ],
             2,
         );
-        let v = serde_json::to_value(ProfileSummary::build(&obs, &index)).unwrap();
+        let v = serde_json::to_value(ProfileSummary::build(&obs, &index, &DenialIndex::empty()))
+            .unwrap();
         assert_eq!(v["crCount"], 2);
         let cr = &v["cr"];
         assert_eq!(cr["name"], "custom-name");

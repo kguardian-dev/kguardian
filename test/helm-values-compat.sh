@@ -28,6 +28,15 @@ render() {
 assert_has() { grep -q "$2" <<<"$OUT" || { echo "FAIL [$1]: expected to find '$2'"; fail=1; }; }
 # assert_absent <label> <needle> — OUT must NOT contain needle.
 assert_absent() { grep -q "$2" <<<"$OUT" && { echo "FAIL [$1]: did not expect '$2'"; fail=1; } || true; }
+# assert_cgroup_volume <label> — the cgroupfs hostPath volume is declared.
+# Matched on the hostPath block rather than on `name: cgroupfs`, which the
+# volumeMount also carries: the two halves are gated separately in the
+# template and a check that cannot tell them apart passes when only one
+# renders. See the compute-off case for what that costs.
+assert_cgroup_volume() {
+  grep -A2 '^      - name: cgroupfs' <<<"$OUT" | grep -q 'path: /sys/fs/cgroup' || \
+    { echo "FAIL [$1]: expected a cgroupfs hostPath volume"; fail=1; }
+}
 # assert_deploys <label> <n> — exactly n Deployment workloads.
 assert_deploys() {
   local got; got="$(grep -c '^kind: Deployment' <<<"$OUT" || true)"
@@ -225,17 +234,47 @@ render "compute-defaults" && {
 }
 
 # 9b. compute.enabled=false: COMPUTE_ENABLED=false is still rendered (the
-# controller must not fall back to its own default), and NO cgroup mount,
-# no sampler env, no probe env.
+# controller must not fall back to its own default), and no sampler env, no
+# probe env.
+#
+# The cgroup mount is deliberately NOT asserted absent here any more. It used
+# to be compute-specific, and this case pinned that. Denial attribution now
+# resolves a cgroup id to a container through the same registry — that is how
+# a `hostNetwork: true` pod's denials reach the right workload, since every
+# such pod shares one network namespace inode — so the mount renders under
+# `or compute.enabled seccomp.denials.enabled`. Asserting it absent on
+# compute alone would pin the coupling that made the denial fix inert.
+# 9b-ii below covers the case where it really must not render.
 render "compute-off" --set compute.enabled=false && {
   assert_has    "compute-off" "name: COMPUTE_ENABLED"
-  assert_absent "compute-off" "name: cgroupfs"
-  assert_absent "compute-off" "path: /sys/fs/cgroup"
   assert_absent "compute-off" "COMPUTE_SAMPLE_INTERVAL_SECS"
   assert_absent "compute-off" "COMPUTE_CONTENTION_ENABLED"
   assert_absent "compute-off" "COMPUTE_MIN_RUNQ_LATENCY_US"
   # Broker-side retention still renders: prune what was collected.
   assert_has    "compute-off" "name: COMPUTE_HISTORY_RETENTION_DAYS"
+  # ... and with denial capture at its default (on), the mount IS present,
+  # because the cgroup is what identifies the container the verdict came from.
+  #
+  # Both halves are asserted separately, and that is the point. `name:
+  # cgroupfs` appears twice in a correct render — once on the volumeMount and
+  # once on the volume — so a bare `assert_has` for it is satisfied by either
+  # one alone. Re-couple only the volumeMount to compute and the volume still
+  # renders, the substring is still found, and the check passes while the
+  # controller gets a volume it never mounts: `/sys/fs/cgroup` inside the pod
+  # is then its own cgroup directory rather than the host root, no container
+  # resolves, and every hostNetwork workload reports no denials. `mountPath:`
+  # is unique to the mount and `hostPath:` to the volume.
+  assert_has    "compute-off" "mountPath: /sys/fs/cgroup"
+  assert_cgroup_volume "compute-off"
+}
+
+# 9b-ii. Both consumers off: the mount and its volume disappear entirely.
+# This is the assertion that keeps the mount honest — it must be tied to
+# something wanting it, not rendered unconditionally.
+render "cgroup-consumers-off" --set compute.enabled=false \
+  --set seccomp.denials.enabled=false && {
+  assert_absent "cgroup-consumers-off" "name: cgroupfs"
+  assert_absent "cgroup-consumers-off" "path: /sys/fs/cgroup"
 }
 
 # 9c. Scheduler probe on: same mount, probe env flips, filter propagates.

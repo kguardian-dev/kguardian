@@ -67,6 +67,24 @@ fn broker_auth_token() -> Option<String> {
 }
 
 pub(crate) async fn api_post_call(v: Value, path: &str) -> Result<(), Error> {
+    api_post_call_json(v, path).await.map(|_| ())
+}
+
+/// `api_post_call`, plus the broker's response body.
+///
+/// A 2xx is not by itself proof that the broker stored what was sent:
+/// the seccomp denial ingest validates per row and answers
+/// `200 {"accepted": n}` with `n` below the number of rows posted when
+/// some were refused — including `n == 0` for a batch refused whole.
+/// The caller has already cleared the kernel map by then, so those rows
+/// exist nowhere else; a caller that reads only the status reports a
+/// clean delivery over silent, unrecoverable loss.
+///
+/// The same function body as `api_post_call` deliberately, with that one
+/// returning `()` from it. Two copies of the URL, auth and status
+/// handling would be two places for a broker-auth or 404 change to land
+/// in one and not the other.
+pub(crate) async fn api_post_call_json(v: Value, path: &str) -> Result<Value, Error> {
     // main.rs trims its API_ENDPOINT read but stores the trimmed
     // value in a local variable that doesn't propagate here. Re-trim
     // at this read site for consistency — operator pastes with
@@ -122,7 +140,11 @@ pub(crate) async fn api_post_call(v: Value, path: &str) -> Result<(), Error> {
     }
 
     debug!("Post url {} : Success", url);
-    Ok(())
+    // A body that is absent or not JSON is not an error: most endpoints
+    // answer 200 with nothing useful, and only callers that look for a
+    // specific field care. They get `Null` and decide for themselves.
+    let body = res.text().await.unwrap_or_default();
+    Ok(serde_json::from_str(&body).unwrap_or(Value::Null))
 }
 
 fn api_endpoint() -> Result<String, Error> {
