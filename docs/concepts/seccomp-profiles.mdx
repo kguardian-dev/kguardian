@@ -87,8 +87,10 @@ hand.
 
 kguardian closes that loop with a kprobe on the kernel's own
 `audit_seccomp()`, the function every loggable seccomp verdict passes
-through — unconditionally for `SCMP_ACT_LOG`, or for `SCMP_ACT_ERRNO` when
-the filter was loaded with `SECCOMP_FILTER_FLAG_LOG`. The controller
+through — unconditionally for `SCMP_ACT_LOG` and the `KILL` actions, and
+for `SCMP_ACT_ERRNO` only when the filter was loaded with
+`SECCOMP_FILTER_FLAG_LOG`, which the controller sets on every enforcing
+profile it renders so promotion never turns denials invisible. The controller
 attributes each verdict to a pod and workload, the broker stores it, and it
 comes back as `kguardian_seccomp_denial*` Prometheus metrics and the
 `SeccompProfile`'s `status.denials` / `DenialsObserved` condition. See

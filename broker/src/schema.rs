@@ -411,16 +411,16 @@ diesel::table! {
     // "nothing was watching". See the migration and src/seccomp_denial.rs.
     seccomp_denial_nodes (node_name) {
         node_name -> Text,
-        // The probe attached on this node. False on a CONFIG_AUDIT=n kernel
+        // The probe attached on this node. False on a CONFIG_AUDITSYSCALL=n kernel
         // where the Controller degraded gracefully: reporting in, not
         // capturing.
         capturing -> Bool,
         updated_at -> Timestamptz,
         // The drain cadence the node declares, in seconds. Staleness is
-        // `max(300, interval * 3)` per node, because the Controller's drain
-        // interval is operator-set with no upper bound and a fixed window
-        // shorter than it reads a healthy fleet as Unknown. NULL = the node
-        // declared none, which falls back to the 300 s floor.
+        // `max(300, interval * 3)` per node, capped at 1800, because the
+        // Controller's drain interval is operator-set (1-600) and a fixed
+        // window shorter than it reads a healthy fleet as Unknown. NULL =
+        // the node declared none, which falls back to the 300 s floor.
         interval_seconds -> Nullable<Int8>,
     }
 }

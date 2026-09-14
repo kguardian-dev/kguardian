@@ -71,8 +71,10 @@ status:
   drift: "False"
   denials:
     observed: 17
+    actions: [SCMP_ACT_LOG]
     syscalls: [mount, ptrace]
     lastSeen: "2026-09-14T04:05:14Z"
+    refreshedAt: "2026-09-14T04:05:30Z"
   nodes:
     - name: node-a
       hash: "a1b2c3d4e5f60718"
@@ -103,7 +105,7 @@ status:
 | `localhostProfile` | The value to put in `securityContext.seccompProfile.localhostProfile`. |
 | `distribution` | `ready` nodes whose entry in `nodes` carries the current `hash`, out of `total` live nodes; `state` is `Ready` (`ready == total > 0`), `Partial`, or `Pending` (`ready == 0`). `summary` is the `ready/total` string the printer column shows. |
 | `drift` | Mirror of the `Drift` condition's status (`True`/`False`/`Unknown`) for the printer column — printer columns take simple JSON paths, not condition filters. |
-| `denials` | Present whenever the Broker has an answer for `workloadRef`'s workload, **including when that answer is zero**. `observed` is the total across every syscall and action — it is the `DENIALS` printer column; `syscalls` is the distinct names, sorted; `lastSeen` is the most recent denial, RFC 3339. `observed: 0` means checked and clean; the block being **absent** means not known. |
+| `denials` | Present whenever the Broker has an answer for `workloadRef`'s workload, **including when that answer is zero**. `observed` is the total across every syscall and action — it is the `DENIALS` printer column; `actions` is the distinct verdicts the kernel returned (`SCMP_ACT_LOG` in audit mode; an enforcing action after promotion), sorted; `syscalls` is the distinct names, sorted; `lastSeen` is the most recent denial and `refreshedAt` the last time the controller re-read the answer from the Broker, both RFC 3339. `observed: 0` means checked and clean; the block being **absent** means not known. |
 | `nodes[]` | One entry per node, keyed by `name` (`x-kubernetes-list-type: map`). Each controller server-side-applies only its own entry, with field manager `kguardian-controller/<node>`. |
 | `conditions[]` | Standard `metav1.Condition` list, below. |
 

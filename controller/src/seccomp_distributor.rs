@@ -657,19 +657,23 @@ pub fn node_entry_patch(ns: &str, name: &str, entry: &NodeStatus) -> serde_json:
 /// Server-side-apply document for the shared summary: everything in
 /// `status` except `nodes`.
 pub fn summary_patch(ns: &str, name: &str, s: &SeccompProfileStatus) -> serde_json::Value {
+    // Serialise the struct rather than spelling the fields out in `json!`:
+    // the macro writes an absent `Option` as an explicit `null`, and the
+    // apiserver keeps a `null` on a nullable field, so `status.denials`
+    // would read as `null` instead of absent. The CRD contract is that the
+    // block is present exactly when the Broker answered, and server-side
+    // apply removes a field its manager stops sending. `nodes` is owned per
+    // node and is never part of the summary.
+    let status = serde_json::to_value(SeccompProfileStatus {
+        nodes: Vec::new(),
+        ..s.clone()
+    })
+    .expect("status serialises");
     json!({
         "apiVersion": "kguardian.dev/v1alpha1",
         "kind": "SeccompProfile",
         "metadata": { "name": name, "namespace": ns },
-        "status": {
-            "observedGeneration": s.observed_generation,
-            "hash": s.hash,
-            "localhostProfile": s.localhost_profile,
-            "distribution": s.distribution,
-            "drift": s.drift,
-            "denials": s.denials,
-            "conditions": s.conditions,
-        }
+        "status": status,
     })
 }
 
@@ -1736,8 +1740,12 @@ mod tests {
         assert!(unknown.denials.is_none());
         assert_eq!(clean.denials.as_ref().unwrap().observed, 0);
         assert!(
-            summary_patch("prod", "deployment-web", &unknown)["status"]["denials"].is_null(),
-            "the Denials column stays blank when nothing is known"
+            summary_patch("prod", "deployment-web", &unknown)["status"]
+                .get("denials")
+                .is_none(),
+            "an unknown block is absent from the applied status, not an explicit null: \
+             the apiserver keeps a null on a nullable field and the Denials column \
+             contract is present-exactly-when-answered"
         );
         assert_eq!(
             summary_patch("prod", "deployment-web", &clean)["status"]["denials"]["observed"],

@@ -285,6 +285,19 @@ pub struct Condition {
     pub last_transition_time: Option<String>,
 }
 
+/// The seccomp filter flag that makes the kernel log a denying verdict.
+///
+/// `seccomp_log()` calls `audit_seccomp()` unconditionally for
+/// `SCMP_ACT_LOG` and the `KILL` actions, but for `SCMP_ACT_ERRNO` only
+/// when the filter was installed with `SECCOMP_FILTER_FLAG_LOG` (runc sets
+/// the libseccomp log bit from the OCI `flags` list). Without it an
+/// enforcing `SCMP_ACT_ERRNO` profile fails syscalls silently: no audit
+/// record, nothing for the `audit_seccomp` kprobe to see, and
+/// `DenialsObserved` reads clean at the exact moment the workload is being
+/// blocked. Every enforcing profile kguardian renders therefore carries it;
+/// an audit-mode profile logs already and is left byte-identical.
+pub const SECCOMP_FILTER_FLAG_LOG: &str = "SECCOMP_FILTER_FLAG_LOG";
+
 /// The file written to a node. Exactly the standard seccomp JSON the
 /// kubelet loads; field order is the struct order so the bytes are
 /// stable across nodes and controller versions.
@@ -295,6 +308,10 @@ pub struct RenderedProfile {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub architectures: Option<Vec<Architecture>>,
     pub syscalls: Vec<RenderedRule>,
+    /// OCI `linux.seccomp.flags`. Present exactly when `defaultAction`
+    /// enforces — see [`SECCOMP_FILTER_FLAG_LOG`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub flags: Option<Vec<String>>,
 }
 
 #[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -311,7 +328,8 @@ pub struct RenderedRule {
 /// later rule for the same name is the user's business), architectures
 /// are de-duplicated and sorted, and the output is pretty-printed JSON
 /// with a trailing newline. Same spec ⇒ same bytes ⇒ same hash on every
-/// node.
+/// node. An enforcing `defaultAction` adds `SECCOMP_FILTER_FLAG_LOG` so
+/// the kernel's verdicts stay observable after promotion.
 pub fn render_profile(spec: &SeccompProfileSpec) -> Vec<u8> {
     let architectures = spec.architectures.as_ref().map(|a| {
         let mut a: Vec<Architecture> = a.clone();
@@ -331,10 +349,17 @@ pub fn render_profile(spec: &SeccompProfileSpec) -> Vec<u8> {
             }
         })
         .collect();
+    let flags = match spec.default_action {
+        DefaultAction::Log => None,
+        DefaultAction::Errno | DefaultAction::Kill | DefaultAction::KillProcess => {
+            Some(vec![SECCOMP_FILTER_FLAG_LOG.to_string()])
+        }
+    };
     let rendered = RenderedProfile {
         default_action: spec.default_action,
         architectures,
         syscalls,
+        flags,
     };
     let mut out = serde_json::to_vec_pretty(&rendered).expect("rendered profile serialises");
     out.push(b'\n');
@@ -445,6 +470,48 @@ mod tests {
         assert!(v.get("architectures").is_none());
         assert_eq!(v["syscalls"][1]["errnoRet"], 1);
         assert_eq!(v["syscalls"][1]["action"], "SCMP_ACT_ERRNO");
+    }
+
+    #[test]
+    fn enforcing_profiles_carry_the_log_flag_and_audit_profiles_do_not() {
+        // The kernel only audits SCMP_ACT_ERRNO verdicts when the filter was
+        // installed with SECCOMP_FILTER_FLAG_LOG; without it a promoted
+        // profile blocks in silence and the denial probe sees nothing.
+        for action in [
+            DefaultAction::Errno,
+            DefaultAction::Kill,
+            DefaultAction::KillProcess,
+        ] {
+            let mut s = spec(&["read"]);
+            s.default_action = action;
+            let bytes = render_profile(&s);
+            let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(
+                v["flags"],
+                serde_json::json!([SECCOMP_FILTER_FLAG_LOG]),
+                "{action:?} must render the log flag"
+            );
+            // Round-trips through the same struct the runtime unmarshals.
+            let back: RenderedProfile = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(
+                back.flags.as_deref(),
+                Some(&[SECCOMP_FILTER_FLAG_LOG.to_string()][..])
+            );
+        }
+        // Audit mode logs already; its bytes (and so its hash) are unchanged.
+        let v: serde_json::Value =
+            serde_json::from_slice(&render_profile(&spec(&["read"]))).unwrap();
+        assert!(
+            v.get("flags").is_none(),
+            "SCMP_ACT_LOG must not carry flags"
+        );
+        // Promotion changes the bytes, so every node rewrites the file.
+        let mut s = spec(&["read"]);
+        s.default_action = DefaultAction::Errno;
+        assert_ne!(
+            fingerprint(&render_profile(&s)),
+            fingerprint(&render_profile(&spec(&["read"])))
+        );
     }
 
     #[test]

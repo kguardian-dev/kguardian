@@ -345,7 +345,7 @@ the retention window:
 
 `NoDenialData` is the broker answering and having nothing to say: the CR
 predates this feature, `seccomp.denials.enabled` is off cluster-wide, or no
-node's kprobe loaded (missing `CONFIG_AUDIT`). Two sibling `Unknown` reasons
+node's kprobe loaded (missing `CONFIG_AUDITSYSCALL`). Two sibling `Unknown` reasons
 exist for the same "no data" verdict for a different cause:
 `NoWorkloadRef` (the CR has none) and `NoObservations` (nothing reported
 for this workload at all yet) — the same pair `CaptureComplete` already
@@ -391,7 +391,12 @@ A too-tight profile breaks the workload on its **next restart**, not
 immediately. Promote deliberately, and know that reverting is a one-line
 change in git. After promoting, watch `DenialsObserved` for a while longer:
 denials on a profile whose `defaultAction` now enforces mean the kernel is
-actively blocking or killing the workload, not just logging — see
+actively blocking or killing the workload, not just logging. That stays
+visible because the controller renders every enforcing profile with
+`SECCOMP_FILTER_FLAG_LOG` — without that flag the kernel does not audit
+`SCMP_ACT_ERRNO` verdicts at all, so a hand-written profile applied outside
+kguardian blocks in silence. Promotion changes the rendered file, so every
+node rewrites it and `Ready` briefly counts back up — see
 [metrics and alerting](#metrics-and-alerting) below for turning that into a
 page rather than something you notice later.
 </Warning>

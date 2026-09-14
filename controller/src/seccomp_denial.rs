@@ -263,15 +263,16 @@ struct DenialBatch<'a> {
     ///
     /// The Broker has to decide when a node's last report is too old to
     /// believe, and it cannot know that from a constant: the cadence is
-    /// `SECCOMP_DENIAL_INTERVAL_SECONDS`, an operator-set Helm value with
-    /// no upper bound, so any window the Broker hard-codes is wrong for
-    /// some supported configuration — and wrong in the direction that
+    /// `SECCOMP_DENIAL_INTERVAL_SECONDS`, an operator-set Helm value
+    /// (1-600, the chart refuses more), so any window the Broker
+    /// hard-codes is wrong for some supported configuration — and wrong in the direction that
     /// makes a healthy cluster read as stale, which is `Unknown`, which
     /// blocks promotion. Coupling the two settings would only move the
     /// problem into the chart; the node declaring its own cadence needs
     /// no agreement at all. The Broker computes
-    /// `max(300, intervalSeconds * 3)` from this and treats absent or
-    /// zero as 300, so an older Controller stays exactly as it was.
+    /// `max(300, intervalSeconds * 3)` from this, capped at 1800, and
+    /// treats absent or zero as 300, so an older Controller stays exactly
+    /// as it was.
     interval_seconds: u64,
     denials: &'a [SeccompDenial],
 }
@@ -2994,10 +2995,10 @@ mod tests {
     /// believe, and `Unknown` — which is what a stale node produces —
     /// blocks promotion. It cannot get the answer from a constant:
     /// `SECCOMP_DENIAL_INTERVAL_SECONDS` is an operator-set Helm value
-    /// with no upper bound, so a hard-coded window makes a perfectly
-    /// healthy cluster read as stale forever at any interval above a
-    /// third of it. The Broker computes `max(300, intervalSeconds * 3)`
-    /// per node from this field.
+    /// (1-600), so a hard-coded window makes a perfectly healthy cluster
+    /// read as stale forever at any interval above a third of it. The
+    /// Broker computes `max(300, intervalSeconds * 3)` per node from this
+    /// field, capped at 1800.
     ///
     /// It has to be on the EMPTY report above all. A node that is
     /// capturing and seeing nothing sends only heartbeats — that is

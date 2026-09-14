@@ -297,7 +297,7 @@ seccomp:
   # use denials to know the kernel is really acting on what you shipped.
   # See docs/guides/distributing-seccomp-profiles.
   denials:
-    # -- Load the `audit_seccomp` kprobe. Requires `CONFIG_AUDIT=y` on the
+    # -- Load the `audit_seccomp` kprobe. Requires `CONFIG_AUDITSYSCALL=y` on the
     # node kernel; where the symbol is absent the controller skips the
     # probe and logs a warning rather than failing to start — the same
     # degrade-gracefully pattern used for the syscall probe's IPv6 kprobe
@@ -338,7 +338,7 @@ seccomp:
     # will keep telling you a workload is clean on the strength of one old
     # report — so the Broker caps it at 1800 s. Without the cap, a large
     # interval meant that when the last capturing node went away (spot
-    # reclaim, autoscaler, a `CONFIG_AUDIT=n` rebuild) every workload kept
+    # reclaim, autoscaler, a `CONFIG_AUDITSYSCALL=n` rebuild) every workload kept
     # reading `total: 0` for hours with nothing watching. A node draining
     # slower than 600 s is heard from less often than the Broker will vouch
     # for it, so its workloads would sit at "Unknown" between reports:

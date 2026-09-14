@@ -247,7 +247,7 @@ fn kernel_can_kprobe(sym: &str) -> bool {
 /// here may reach `ebpf_handle`'s `?` — a probe that cannot load is not
 /// the same kind of event as the syscall probe failing to load, and
 /// turning it into one would trade a missing signal for a
-/// CrashLoopBackOff on every CONFIG_AUDIT=n cluster.
+/// CrashLoopBackOff on every CONFIG_AUDITSYSCALL=n cluster.
 ///
 /// The skeleton borrows its `OpenObject` storage for its whole life, so
 /// holding it in a local of the poll loop needs a `'static` borrow; the
