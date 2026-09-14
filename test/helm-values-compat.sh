@@ -28,6 +28,15 @@ render() {
 assert_has() { grep -q "$2" <<<"$OUT" || { echo "FAIL [$1]: expected to find '$2'"; fail=1; }; }
 # assert_absent <label> <needle> — OUT must NOT contain needle.
 assert_absent() { grep -q "$2" <<<"$OUT" && { echo "FAIL [$1]: did not expect '$2'"; fail=1; } || true; }
+# assert_cgroup_volume <label> — the cgroupfs hostPath volume is declared.
+# Matched on the hostPath block rather than on `name: cgroupfs`, which the
+# volumeMount also carries: the two halves are gated separately in the
+# template and a check that cannot tell them apart passes when only one
+# renders. See the compute-off case for what that costs.
+assert_cgroup_volume() {
+  grep -A2 '^      - name: cgroupfs' <<<"$OUT" | grep -q 'path: /sys/fs/cgroup' || \
+    { echo "FAIL [$1]: expected a cgroupfs hostPath volume"; fail=1; }
+}
 # assert_deploys <label> <n> — exactly n Deployment workloads.
 assert_deploys() {
   local got; got="$(grep -c '^kind: Deployment' <<<"$OUT" || true)"
@@ -245,7 +254,18 @@ render "compute-off" --set compute.enabled=false && {
   assert_has    "compute-off" "name: COMPUTE_HISTORY_RETENTION_DAYS"
   # ... and with denial capture at its default (on), the mount IS present,
   # because the cgroup is what identifies the container the verdict came from.
-  assert_has    "compute-off" "name: cgroupfs"
+  #
+  # Both halves are asserted separately, and that is the point. `name:
+  # cgroupfs` appears twice in a correct render — once on the volumeMount and
+  # once on the volume — so a bare `assert_has` for it is satisfied by either
+  # one alone. Re-couple only the volumeMount to compute and the volume still
+  # renders, the substring is still found, and the check passes while the
+  # controller gets a volume it never mounts: `/sys/fs/cgroup` inside the pod
+  # is then its own cgroup directory rather than the host root, no container
+  # resolves, and every hostNetwork workload reports no denials. `mountPath:`
+  # is unique to the mount and `hostPath:` to the volume.
+  assert_has    "compute-off" "mountPath: /sys/fs/cgroup"
+  assert_cgroup_volume "compute-off"
 }
 
 # 9b-ii. Both consumers off: the mount and its volume disappear entirely.
