@@ -84,16 +84,32 @@ describe('layoutIntent (what the viewport does after a layout)', () => {
     expect(layoutIntent(parts({ a: '00', b: '00' }), parts({ a: '00', b: '00' }, ['a>b'], 'TB'))).toEqual({ kind: 'refit' });
   });
 
-  test('expanding one card is laid out in place and names that card', () => {
+  test('opening one card is laid out in place and names that card', () => {
     expect(layoutIntent(parts({ a: '00', b: '00' }), parts({ a: '10', b: '00' }))).toEqual({ kind: 'in-place', toggledId: 'a' });
-    expect(layoutIntent(parts({ a: '10', b: '00' }), parts({ a: '00', b: '00' }))).toEqual({ kind: 'in-place', toggledId: 'a' });
+  });
+
+  // Selection drives expansion, so moving between cards closes one and opens
+  // another in the SAME pass. The card to follow is the one that opened: it is
+  // what the user asked for and the only one that can have grown out of view.
+  // Counting the closing card too would make "more than one changed" the
+  // normal case and leave the viewport following nothing.
+  test('moving the selection follows the card that opened, not the one that closed', () => {
+    expect(layoutIntent(parts({ a: '10', b: '00' }), parts({ a: '00', b: '10' }))).toEqual({ kind: 'in-place', toggledId: 'b' });
+  });
+
+  // Deselecting closes the open card and opens none. There is nothing to pan
+  // to — the user just dismissed it — so the viewport stays put.
+  test('closing the last open card leaves no card to pan to', () => {
+    expect(layoutIntent(parts({ a: '10', b: '00' }), parts({ a: '00', b: '00' }))).toEqual({ kind: 'in-place', toggledId: null });
   });
 
   test('gauges arriving on a poll tick are in place with no card to pan to', () => {
     expect(layoutIntent(parts({ a: '00', b: '00' }), parts({ a: '01', b: '01' }))).toEqual({ kind: 'in-place', toggledId: null });
   });
 
-  test('two cards toggled at once: in place, no single target', () => {
+  // Two cards open at once cannot happen under selection-driven expansion, but
+  // the rule must still degrade to "follow nothing" rather than pick arbitrarily.
+  test('two cards opening at once: in place, no single target', () => {
     expect(layoutIntent(parts({ a: '00', b: '00' }), parts({ a: '10', b: '10' }))).toEqual({ kind: 'in-place', toggledId: null });
   });
 

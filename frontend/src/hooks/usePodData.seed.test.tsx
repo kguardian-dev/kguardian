@@ -4,9 +4,16 @@ import { act, cleanup, renderHook, waitFor } from '@testing-library/react';
 import type { ComputeContainer } from '../types/compute';
 import type { PodInfo } from '../types';
 
-// Seeding happens on expansion and nowhere else: the sparklines are the only
-// consumer of seeded history and only render on an expanded card. The compute
-// hook is stubbed so this pins the wiring, not the seeding itself.
+// Seeding happens on SELECTION and nowhere else: selection is what opens a
+// card (NetworkGraph derives `isExpanded` from it), the sparklines are the
+// only consumer of seeded history, and they render only in an open card's
+// body. The compute hook is stubbed so this pins the wiring, not the seeding
+// itself.
+//
+// These drive the hook's `selectedPodId` argument rather than a toggle,
+// because the expanded flag on a pod object is no longer authoritative —
+// seeding off it would read nothing and the only symptom would be an open
+// card whose sparklines stayed empty.
 
 const seedPod = vi.fn();
 const computeState = {
@@ -79,26 +86,64 @@ afterEach(() => {
   vi.clearAllMocks();
 });
 
-describe('usePodData seeds compute history on expansion', () => {
-  test('a collapsed card seeds nothing; expanding one seeds the uid its chart reads', async () => {
-    const { result } = renderHook(() => usePodData('payments'));
+describe('usePodData seeds compute history on selection', () => {
+  test('no selection seeds nothing; selecting a card seeds the uid its chart reads', async () => {
+    const { result, rerender } = renderHook(
+      ({ sel }: { sel: string | null }) => usePodData('payments', sel),
+      { initialProps: { sel: null as string | null } },
+    );
     await waitFor(() => expect(result.current.pods).toHaveLength(2));
     expect(seedPod).not.toHaveBeenCalled();
 
     const id = result.current.pods[0].id;
-    await act(async () => { result.current.togglePodExpansion(id); });
+    await act(async () => { rerender({ sel: id }); });
     await waitFor(() => expect(seedPod).toHaveBeenCalled());
     // One card, one chart, one read — even though the identity group has two
     // replicas, the chart can only ever show the first.
     expect(new Set(seedPod.mock.calls.map((c) => c[0]))).toEqual(new Set(['uid-a']));
   });
 
-  test('expanding seeds nothing when compute is disabled cluster-wide', async () => {
+  // At most one card is open, so selecting another must not leave the previous
+  // one's read behind: the whole read budget for this feature is one pod.
+  test('selecting a second card seeds only that card', async () => {
+    const { result, rerender } = renderHook(
+      ({ sel }: { sel: string | null }) => usePodData('payments', sel),
+      { initialProps: { sel: null as string | null } },
+    );
+    await waitFor(() => expect(result.current.pods).toHaveLength(2));
+    const [first, second] = result.current.pods.map((p) => p.id);
+
+    await act(async () => { rerender({ sel: first }); });
+    await waitFor(() => expect(seedPod).toHaveBeenCalled());
+    seedPod.mockClear();
+
+    await act(async () => { rerender({ sel: second }); });
+    await waitFor(() => expect(seedPod).toHaveBeenCalled());
+    expect(new Set(seedPod.mock.calls.map((c) => c[0]))).toEqual(new Set(['uid-c']));
+  });
+
+  // An external peer or a synthesised culprit card can be selected on the map
+  // but has no local pod row, so there is no history to read and no crash.
+  test('selecting a card this namespace does not own seeds nothing', async () => {
+    const { result, rerender } = renderHook(
+      ({ sel }: { sel: string | null }) => usePodData('payments', sel),
+      { initialProps: { sel: null as string | null } },
+    );
+    await waitFor(() => expect(result.current.pods).toHaveLength(2));
+    await act(async () => { rerender({ sel: 'internet-1.2.3.4-out' }); });
+    await act(async () => { await Promise.resolve(); });
+    expect(seedPod).not.toHaveBeenCalled();
+  });
+
+  test('selecting seeds nothing when compute is disabled cluster-wide', async () => {
     computeState.enabled = false;
     try {
-      const { result } = renderHook(() => usePodData('payments'));
+      const { result, rerender } = renderHook(
+        ({ sel }: { sel: string | null }) => usePodData('payments', sel),
+        { initialProps: { sel: null as string | null } },
+      );
       await waitFor(() => expect(result.current.pods).toHaveLength(2));
-      await act(async () => { result.current.togglePodExpansion(result.current.pods[0].id); });
+      await act(async () => { rerender({ sel: result.current.pods[0].id }); });
       await act(async () => { await Promise.resolve(); });
       expect(seedPod).not.toHaveBeenCalled(); // no pod carries a chart to fill
     } finally {
@@ -121,16 +166,19 @@ describe('usePodData seeds compute history on expansion', () => {
     expect(windows[0]).toEqual({ from: computeState.polledAt - 60 * 60_000, to: computeState.polledAt });
   });
 
-  test('collapsing stops seeding it again', async () => {
-    const { result } = renderHook(() => usePodData('payments'));
+  test('deselecting stops seeding it again', async () => {
+    const { result, rerender } = renderHook(
+      ({ sel }: { sel: string | null }) => usePodData('payments', sel),
+      { initialProps: { sel: null as string | null } },
+    );
     await waitFor(() => expect(result.current.pods).toHaveLength(2));
     const id = result.current.pods[0].id;
 
-    await act(async () => { result.current.togglePodExpansion(id); });
+    await act(async () => { rerender({ sel: id }); });
     await waitFor(() => expect(seedPod).toHaveBeenCalled());
     seedPod.mockClear();
 
-    await act(async () => { result.current.togglePodExpansion(id); });
+    await act(async () => { rerender({ sel: null }); });
     expect(seedPod).not.toHaveBeenCalled();
   });
 });

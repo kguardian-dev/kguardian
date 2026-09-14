@@ -1,6 +1,6 @@
 import React from 'react';
 import { Handle, Position } from 'reactflow';
-import { ChevronDown, ChevronRight, Network, Server, Globe, FileCode, Crosshair, Cpu, MemoryStick, Zap, Gauge } from 'lucide-react';
+import { Network, Server, Globe, FileCode, Crosshair, Cpu, MemoryStick, Zap, Gauge } from 'lucide-react';
 import { isDaemonSetOrHostNetworkPod } from '../utils/daemonSetPeers';
 import type { PodNodeData } from '../types';
 import type { PodComputeData } from '../types/compute';
@@ -24,7 +24,6 @@ import {
 interface PodNodeProps {
   data: PodNodeData & {
     layoutDirection?: 'LR' | 'TB';
-    onToggle: (id: string) => void;
     onBuildPolicy?: (pod: PodNodeData) => void;
     onFocus?: (id: string) => void;
     isFocused?: boolean;
@@ -209,21 +208,11 @@ const PodNode: React.FC<PodNodeProps> = React.memo(({ data, selected }) => {
             graph canvas. Truncation only works when every nested flex level
             may shrink. */}
         <div className="flex items-center gap-2 flex-1 min-w-0">
-          {/* External endpoints aggregate traffic only — they have no syscalls
-              or policy to reveal (their toggle is a no-op), so no expander. */}
-          {!isExternal && (
-            <button
-              onClick={() => data.onToggle(data.id)}
-              className={`${accentColor} hover:opacity-75 transition-colors`}
-              aria-label={data.isExpanded ? 'Collapse' : 'Expand'}
-            >
-              {data.isExpanded ? (
-                <ChevronDown className="w-4 h-4" />
-              ) : (
-                <ChevronRight className="w-4 h-4" />
-              )}
-            </button>
-          )}
+          {/* No expander control: selecting the card opens it (NetworkGraph
+              derives `isExpanded` from the selection). The chevron that used
+              to live here was a second, smaller target for the thing the
+              whole card already did, and it made "selected" and "open" two
+              states a card could disagree about. */}
 
           <IconComponent className={`w-5 h-5 ${accentColor}`} />
 
