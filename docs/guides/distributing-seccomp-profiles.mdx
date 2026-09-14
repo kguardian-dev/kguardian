@@ -396,7 +396,13 @@ visible because the controller renders every enforcing profile with
 `SECCOMP_FILTER_FLAG_LOG` — without that flag the kernel does not audit
 `SCMP_ACT_ERRNO` verdicts at all, so a hand-written profile applied outside
 kguardian blocks in silence. Promotion changes the rendered file, so every
-node rewrites it and `Ready` briefly counts back up — see
+node rewrites it and `Ready` briefly counts back up. A rewritten file does
+not reach a running container: seccomp filters load at container start, so
+the promoted profile — and its flag — applies from the pods' next restart.
+The same holds for profiles promoted before kguardian rendered the flag:
+their files are rewritten on upgrade (expect `Ready` and `Drift` to flap
+while old and new controllers disagree during the rollout) and take effect
+on restart — see
 [metrics and alerting](#metrics-and-alerting) below for turning that into a
 page rather than something you notice later.
 </Warning>

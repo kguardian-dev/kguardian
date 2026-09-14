@@ -135,10 +135,10 @@ const MAX_DENIAL_ACTIONS: usize = 16;
 /// drain shares one transaction — so the POST 500s. The Controller clears
 /// its BPF map only on a successful POST, so it replays the same batch every
 /// interval, forever, and every subsequent denial from that node is lost.
-/// The heartbeat commits in an earlier, separate transaction and keeps
-/// succeeding, so the cluster still reads "capturing" while capture is in
-/// fact dead. `BROKER_AUTH_TOKEN` is optional, so on a default deploy this
-/// needs no credentials.
+/// The heartbeat shares the batch's transaction, so the node would at least
+/// go stale and its workloads read `Unknown` — honest, but capture is still
+/// dead until the row is repaired. `BROKER_AUTH_TOKEN` is optional, so on a
+/// default deploy this needs no credentials.
 ///
 /// A trillion is roughly 40x the most extreme physical bound on one 10 s
 /// drain. A 256-core node cannot retire more than ~2.5e9 syscalls/s in
@@ -798,15 +798,18 @@ fn attribution_index(
 ///
 /// # A pod with no controller is its own workload
 ///
-/// The pod watcher records a bare pod — `kubectl run`, a debug pod, a
-/// static control-plane pod — with NULL `workload_kind` / `workload_name`,
+/// The pod watcher records any pod without a controller it recognises —
+/// `kubectl run`, a debug pod, a static control-plane pod, a pod owned by
+/// an operator's own kind — with NULL `workload_kind` / `workload_name`,
 /// and nothing ever fills that in. Treating such a row as "not resolvable
 /// yet" would put it in [`UnattributedNamespaces`] forever, withholding the
 /// all-clear from every CR in its namespace, and it would sit at the head
 /// of the backfill's candidate list on every pass. A pod the watcher HAS
 /// seen, in the right namespace, with no owner, is attributed to itself as
 /// `("Pod", pod_name)`: a real key the rollup can group on and the metrics
-/// can label, that no `workloadRef` will ever match.
+/// can label, that no `workloadRef` will ever match. One series and one
+/// rollup block per such pod, and the upsert keeps the first attribution
+/// that lands.
 ///
 /// Pure so the refusal has a test rather than a comment.
 fn attribute(
@@ -907,29 +910,28 @@ pub async fn post_seccomp_denials(
         );
     }
 
-    // The heartbeat, recorded on EVERY report including an empty one — and
-    // before the early return below, because the empty report is the one
-    // that matters most. An empty drain from a healthy node is what tells
-    // the Broker that "no denials" means "nothing was denied" rather than
-    // "nothing was watching", and it is the only thing that lets a fresh
-    // install ever reach a real all-clear instead of sitting at Unknown
-    // forever.
-    // The heartbeat is stamped only once the rows are stored, never before:
-    // it is what `capture_is_live` reads, and a node whose denials keep
-    // failing to land must not keep vouching for the cluster's all-clear.
-    // The controller replays a batch the broker 500s on, so nothing is lost
-    // by answering 500 without a heartbeat.
-    let heartbeat_pool = pool.clone();
-    let heartbeat_node = node.clone();
-    let heartbeat = move || -> Result<(), DbError> {
-        let mut conn = heartbeat_pool.get()?;
-        upsert_node_report(&mut conn, &heartbeat_node, capturing, interval_seconds)
-    };
-
+    // The heartbeat is recorded on EVERY report, the empty one above all: an
+    // empty drain from a healthy node is what tells the Broker that "no
+    // denials" means "nothing was denied" rather than "nothing was
+    // watching", and it is the only thing that lets a fresh install ever
+    // reach a real all-clear instead of sitting at Unknown forever.
+    //
+    // With rows it is written INSIDE the batch's transaction, on the same
+    // connection, so the two commit or roll back together. Stamped first in
+    // its own transaction, a node whose rows kept failing to land would go
+    // on vouching for the cluster's all-clear; stamped afterwards on a
+    // second connection, a heartbeat failure past the commit would 500 a
+    // batch that had already landed, and the controller replays a 500 —
+    // every row counted twice. Atomic is the only ordering where a 500 means
+    // exactly "nothing landed, send it again".
     if rows.is_empty() {
-        web::block(heartbeat)
-            .await?
-            .map_err(actix_web::error::ErrorInternalServerError)?;
+        let heartbeat_node = node.clone();
+        web::block(move || -> Result<(), DbError> {
+            let mut conn = pool.get()?;
+            upsert_node_report(&mut conn, &heartbeat_node, capturing, interval_seconds)
+        })
+        .await?
+        .map_err(actix_web::error::ErrorInternalServerError)?;
         debug!(%node, capturing, "seccomp denial heartbeat (no denials drained)");
         return Ok(HttpResponse::Ok().json(crate::Accepted { accepted: 0 }));
     }
@@ -940,15 +942,14 @@ pub async fn post_seccomp_denials(
 
     let (unattributed, increments) = web::block(move || -> Result<_, DbError> {
         let mut conn = pool.get()?;
-        let out = store_batch(&mut conn, &node_for_rows, &pod_names, rows)?;
-        // The batch is committed. A heartbeat failure past this point must
-        // NOT turn into a 500: the controller would replay rows that already
-        // landed and double-count them. The next drain, 10 s away by
-        // default, carries the heartbeat again.
-        if let Err(e) = heartbeat() {
-            warn!(node = %node_for_rows, error = %e, "seccomp denials stored but the node heartbeat failed; the next report carries it");
-        }
-        Ok(out)
+        store_batch(
+            &mut conn,
+            &node_for_rows,
+            &pod_names,
+            rows,
+            capturing,
+            interval_seconds,
+        )
     })
     .await?
     .map_err(actix_web::error::ErrorInternalServerError)?;
@@ -984,6 +985,8 @@ fn store_batch(
     node: &str,
     pod_names: &BTreeSet<String>,
     rows: Vec<DenialInput>,
+    capturing: bool,
+    interval_seconds: Option<i64>,
 ) -> Result<(usize, Vec<(DenialLabels, i64)>), DbError> {
     let index = attribution_index(conn, pod_names)?;
     let mut unattributed = 0usize;
@@ -1029,11 +1032,13 @@ fn store_batch(
     // double-counted by the next one, because the controller clears its BPF
     // map on a successful POST and has no way to replay only the half that
     // landed.
+    // The node's heartbeat rides in the same transaction: see the handler
+    // for why neither "before" nor "after, separately" is acceptable.
     conn.transaction::<_, DbError, _>(|conn| {
         for chunk in inserts.chunks(INSERT_CHUNK) {
             upsert_denials(conn, chunk)?;
         }
-        Ok(())
+        upsert_node_report(conn, node, capturing, interval_seconds)
     })?;
     Ok((unattributed, increments))
 }
@@ -3933,14 +3938,14 @@ mod tests {
     /// than saturating, every chunk of a drain shares one transaction, and
     /// the Controller clears its BPF map only on a successful POST — so one
     /// row carrying a count near `i64::MAX` makes that node's ingest 500 on
-    /// the same replayed batch forever. The heartbeat commits earlier, in
-    /// its own transaction, and keeps succeeding, so the cluster reads
-    /// healthy the whole time.
+    /// the same replayed batch forever, and because the heartbeat shares
+    /// that transaction the node goes stale as well.
     ///
-    /// This runs the handler's own sequence: heartbeat first, then the one
-    /// transaction the chunks share. It does not go through actix, so it
-    /// does not cover the `map_err(ErrorInternalServerError)` that turns the
-    /// `Err` below into the 500 — that line is the only gap.
+    /// The handler runs the chunks and the heartbeat in ONE transaction;
+    /// here they are run apart so the assertion isolates the accumulation
+    /// (the heartbeat has nothing to raise on). It does not go through
+    /// actix, so it does not cover the `map_err(ErrorInternalServerError)`
+    /// that turns the `Err` below into the 500 — that line is the only gap.
     #[test]
     #[ignore = "requires a live postgres (set KG_TEST_DATABASE_URL)"]
     fn live_database_bounds_the_count_so_one_report_cannot_kill_ingest() {
@@ -3979,8 +3984,8 @@ mod tests {
         });
         assert!(
             heartbeat.is_ok(),
-            "the heartbeat commits in its own earlier transaction — which is \
-             why a dead ingest still reads as a healthy cluster"
+            "the heartbeat itself has nothing to raise on; only the \
+             accumulation below can"
         );
         assert!(
             drain.is_ok(),
@@ -4485,7 +4490,8 @@ mod tests {
             },
         ];
         let names: BTreeSet<String> = rows.iter().map(|d| d.pod_name.clone()).collect();
-        let (unattributed, _) = store_batch(&mut conn, "n1", &names, rows).expect("ingest");
+        let (unattributed, _) =
+            store_batch(&mut conn, "n1", &names, rows, true, None).expect("ingest");
         assert_eq!(
             unattributed, 1,
             "the payments row names a pod whose only pod_details row is \
@@ -4570,7 +4576,7 @@ mod tests {
             },
         ];
         let names: BTreeSet<String> = rows.iter().map(|d| d.pod_name.clone()).collect();
-        store_batch(&mut conn, "n1", &names, rows).expect("ingest");
+        store_batch(&mut conn, "n1", &names, rows, true, None).expect("ingest");
 
         let web: WorkloadKey = ("shop".into(), "Deployment".into(), "web".into());
         let payments: WorkloadKey = ("payments".into(), "StatefulSet".into(), "redis".into());
@@ -4647,7 +4653,8 @@ mod tests {
             ..input("aspmchk", "mount", "SCMP_ACT_LOG", 4)
         }];
         let names: BTreeSet<String> = rows.iter().map(|d| d.pod_name.clone()).collect();
-        let (unattributed, _) = store_batch(&mut conn, "n1", &names, rows).expect("ingest");
+        let (unattributed, _) =
+            store_batch(&mut conn, "n1", &names, rows, true, None).expect("ingest");
         assert_eq!(unattributed, 0, "a known bare pod is not unattributed");
 
         let index = denial_index(&mut conn).expect("rollup");

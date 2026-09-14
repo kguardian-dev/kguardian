@@ -294,9 +294,21 @@ pub struct Condition {
 /// enforcing `SCMP_ACT_ERRNO` profile fails syscalls silently: no audit
 /// record, nothing for the `audit_seccomp` kprobe to see, and
 /// `DenialsObserved` reads clean at the exact moment the workload is being
-/// blocked. Every enforcing profile kguardian renders therefore carries it;
-/// an audit-mode profile logs already and is left byte-identical.
+/// blocked. Every profile that denies anything — an enforcing
+/// `defaultAction`, or a rule whose own action denies — therefore carries
+/// it; a profile that only logs and allows is left byte-identical.
 pub const SECCOMP_FILTER_FLAG_LOG: &str = "SECCOMP_FILTER_FLAG_LOG";
+
+/// Does this spec deny any syscall, by default or by rule?
+fn spec_denies(spec: &SeccompProfileSpec) -> bool {
+    !matches!(spec.default_action, DefaultAction::Log)
+        || spec.syscalls.iter().any(|r| {
+            matches!(
+                r.action,
+                RuleAction::Errno | RuleAction::Kill | RuleAction::KillProcess
+            )
+        })
+}
 
 /// The file written to a node. Exactly the standard seccomp JSON the
 /// kubelet loads; field order is the struct order so the bytes are
@@ -308,8 +320,8 @@ pub struct RenderedProfile {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub architectures: Option<Vec<Architecture>>,
     pub syscalls: Vec<RenderedRule>,
-    /// OCI `linux.seccomp.flags`. Present exactly when `defaultAction`
-    /// enforces — see [`SECCOMP_FILTER_FLAG_LOG`].
+    /// OCI `linux.seccomp.flags`. Present exactly when something in the
+    /// profile denies — see [`SECCOMP_FILTER_FLAG_LOG`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub flags: Option<Vec<String>>,
 }
@@ -328,7 +340,7 @@ pub struct RenderedRule {
 /// later rule for the same name is the user's business), architectures
 /// are de-duplicated and sorted, and the output is pretty-printed JSON
 /// with a trailing newline. Same spec ⇒ same bytes ⇒ same hash on every
-/// node. An enforcing `defaultAction` adds `SECCOMP_FILTER_FLAG_LOG` so
+/// node. A profile that denies anything adds `SECCOMP_FILTER_FLAG_LOG` so
 /// the kernel's verdicts stay observable after promotion.
 pub fn render_profile(spec: &SeccompProfileSpec) -> Vec<u8> {
     let architectures = spec.architectures.as_ref().map(|a| {
@@ -349,12 +361,7 @@ pub fn render_profile(spec: &SeccompProfileSpec) -> Vec<u8> {
             }
         })
         .collect();
-    let flags = match spec.default_action {
-        DefaultAction::Log => None,
-        DefaultAction::Errno | DefaultAction::Kill | DefaultAction::KillProcess => {
-            Some(vec![SECCOMP_FILTER_FLAG_LOG.to_string()])
-        }
-    };
+    let flags = spec_denies(spec).then(|| vec![SECCOMP_FILTER_FLAG_LOG.to_string()]);
     let rendered = RenderedProfile {
         default_action: spec.default_action,
         architectures,
@@ -498,6 +505,16 @@ mod tests {
                 Some(&[SECCOMP_FILTER_FLAG_LOG.to_string()][..])
             );
         }
+        // A log-mode profile with a denying RULE denies that syscall just as
+        // silently, so the rule alone earns the flag.
+        let mut s = spec(&["read"]);
+        s.syscalls.push(SyscallRule {
+            names: vec![SyscallName("ptrace".into())],
+            action: RuleAction::Errno,
+            errno_ret: Some(1),
+        });
+        let v: serde_json::Value = serde_json::from_slice(&render_profile(&s)).unwrap();
+        assert_eq!(v["flags"], serde_json::json!([SECCOMP_FILTER_FLAG_LOG]));
         // Audit mode logs already; its bytes (and so its hash) are unchanged.
         let v: serde_json::Value =
             serde_json::from_slice(&render_profile(&spec(&["read"]))).unwrap();
