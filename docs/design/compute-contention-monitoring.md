@@ -402,10 +402,37 @@ refresh; nothing else in `usePodData` changes. Node rendering:
   driven by the pod's worst active compute finding, and a two-segment micro
   bar (CPU %, memory %) normalised to limit → request → node capacity, in
   that order, with the denominator in the tooltip.
-- **Expanded body:** two hand-rolled SVG sparklines (last 60 samples kept
-  client-side, no chart dependency) with the current value and denominator;
-  a `Starved by <pod>` chip when a finding names a culprit; a
-  `Throttled 34 %` chip for `cpu-throttled`.
+- **Expanded body:** two hand-rolled SVG sparklines (no chart dependency) with
+  the current value and denominator; a `Starved by <pod>` chip when a finding
+  names a culprit; a `Throttled 34 %` chip for `cpu-throttled`. The series is
+  60 one-minute buckets — the last hour — held client-side per pod. It is
+  seeded per pod per namespace session from `GET /compute/history/{pod_uid}`,
+  so an expanded card opens on real trend instead of drawing itself over the
+  following minutes, and the 5 s poll then upserts the current bucket (a
+  rollover pushes a new one; buckets are evicted by age, since a sparse series
+  can hold 60 of them spanning far more than 60 minutes). What the sparkline
+  receives is a dense 60-slot series with an explicit empty slot for any
+  minute the pod did not report, and the line breaks across those rather than
+  joining their neighbours — it plots by index, so a sparse series would draw
+  an outage as one short step and place everything before it too recently. A
+  minute is the grid because it is the finest resolution the broker stores,
+  un-downsampled for `compute.history.minuteResolutionHours` (24 h by
+  default) — comfortably wider than the window. Rows are not mapped by
+  flooring `ts`, because neither resolution is stamped on the grid the same
+  way. A minute row is stamped at the END of the fold it closes
+  (`MinuteFold::finish` takes the last sample's timestamp, and the fold
+  closes on its Nth sample rather than on a clock boundary, so stamps drift);
+  it goes to the one bucket holding its window's midpoint, which keeps each
+  row's own measurement in the minute it describes instead of writing it into
+  a neighbour's and losing it to the next row. The downsampler floors its
+  five-minute rows to the START of an exact, non-overlapping window, so those
+  spread their `_avg` across all five minutes they summarise. Either way the
+  axis stays one entry per minute. The backfill is best-effort: capped per
+  namespace at a count of pods ever asked for, retried a small bounded number
+  of times so one shed read does not cost a pod its history for the session,
+  never awaited by the poll, and a pod whose reads fail simply fills from the
+  poll alone. It never touches the feature's `supported` flag — a broker
+  without `/compute/history` loses its seeded sparklines, nothing else.
 - **Contention edges:** when `showContention` (new `GraphControls` toggle,
   default on) is set, a dashed `error`-coloured edge from culprit to victim,
   labelled with the blame share. Culprits outside the selected namespace

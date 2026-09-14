@@ -246,7 +246,9 @@ export interface ComputeFindingsMeta {
 
 /** One client-side sample of a pod's summed containers (utils/compute). */
 export interface ComputeSample {
-  /** `Date.now()` when the poll landed (samples are keyed by poll, not by row `ts`). */
+  /** Start of the minute bucket this sample belongs to (`bucketStart`), so a
+   *  sample seeded from `/compute/history` and one folded in from a 5 s poll
+   *  are on the same grid — not the instant the poll landed. */
   at: number;
   cpuMillis: number;
   workingSetBytes: number;
@@ -266,10 +268,12 @@ export interface PodComputeData {
   memDenominator: ComputeDenominator | null;
   status: ComputeStatus;
   findings: ComputeFinding[];
-  /** Last ≤ 60 samples, oldest first, in millicores. */
-  sparkCpu: number[];
-  /** Last ≤ 60 samples, oldest first, in bytes. */
-  sparkMem: number[];
+  /** One slot per minute of the window, oldest first, in millicores;
+   *  `null` where no sample covers that minute. Dense, because the
+   *  sparkline plots by index — see `denseSeries`. */
+  sparkCpu: (number | null)[];
+  /** The same slots in bytes. */
+  sparkMem: (number | null)[];
   /** Current pod-level values behind the percentages. */
   cpuMillis: number | null;
   memBytes: number | null;

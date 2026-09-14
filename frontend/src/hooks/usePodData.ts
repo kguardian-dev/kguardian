@@ -3,23 +3,8 @@ import type { PodInfo, PodNodeData, ServiceInfo } from '../types';
 import { apiClient } from '../services/api';
 import { useComputeData } from './useComputeData';
 import { buildPodComputeData, containersForNode, nodeComputeState } from '../utils/compute';
+import { withConcurrencyLimit } from '../utils/concurrency';
 import type { ComputeFinding } from '../types/compute';
-
-async function withConcurrencyLimit<T>(tasks: (() => Promise<T>)[], limit: number): Promise<T[]> {
-  const results: T[] = new Array(tasks.length);
-  const executing = new Set<Promise<void>>();
-  for (let i = 0; i < tasks.length; i++) {
-    const index = i;
-    const p = tasks[index]().then(r => { results[index] = r; });
-    const tracked = p.then(() => { executing.delete(tracked); });
-    executing.add(tracked);
-    if (executing.size >= limit) {
-      await Promise.race(executing);
-    }
-  }
-  await Promise.all(executing);
-  return results;
-}
 
 export const usePodData = (namespace: string) => {
   const [basePods, setPods] = useState<PodNodeData[]>([]);
@@ -123,6 +108,28 @@ export const usePodData = (namespace: string) => {
   // here — not fetched with traffic — so the 5 s poll never re-fetches
   // traffic or syscalls, and a pod without compute rows is left untouched.
   const compute = useComputeData(namespace);
+  // Seed an expanded card's sparkline from stored history (design D8).
+  //
+  // The eager backfill in useComputeData is capped, so in a namespace past
+  // that cap most cards would otherwise open on an empty chart and fill one
+  // bucket per minute — slower than the pre-history behaviour. Expanding a
+  // card is the signal that its history is worth a read, and `seedPod` is
+  // idempotent, so this runs on every poll for every open card and costs
+  // nothing once a pod is seeded or its read is in flight.
+  //
+  // The uids come from the compute rows, not the pod records, because that is
+  // what the sparkline is keyed on below — and an identity group with several
+  // replicas has several of them.
+  const seedPod = compute.seedPod;
+  useEffect(() => {
+    for (const node of basePods) {
+      if (!node.isExpanded) continue;
+      for (const row of containersForNode(node, compute.containersByPodUid, compute.containersByPodName)) {
+        seedPod(row.pod_uid);
+      }
+    }
+  }, [basePods, compute.containersByPodUid, compute.containersByPodName, seedPod]);
+
   const pods = useMemo<PodNodeData[]>(() => {
     if (!compute.enabled) return basePods;
     const findingsByPodKey = new Map<string, ComputeFinding[]>();

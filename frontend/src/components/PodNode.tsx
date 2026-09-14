@@ -9,6 +9,7 @@ import { Sparkline } from './ui/Sparkline';
 import {
   COMPUTE_DOT_CLASS,
   COMPUTE_HISTORY_SAMPLES,
+  COMPUTE_HISTORY_WINDOW_LABEL,
   denominatorLabel,
   formatBytes,
   formatMillicores,
@@ -102,7 +103,7 @@ const ComputeDetail: React.FC<{ compute: PodComputeData }> = ({ compute }) => {
           max={cpuMax}
           capacity={COMPUTE_HISTORY_SAMPLES}
           height={26}
-          title={`CPU, last ${COMPUTE_HISTORY_SAMPLES} samples`}
+          title={`CPU, ${COMPUTE_HISTORY_WINDOW_LABEL}`}
         />
       </div>
       <div>
@@ -121,7 +122,7 @@ const ComputeDetail: React.FC<{ compute: PodComputeData }> = ({ compute }) => {
           capacity={COMPUTE_HISTORY_SAMPLES}
           height={26}
           color="var(--color-hubble-info)"
-          title={`Working set, last ${COMPUTE_HISTORY_SAMPLES} samples`}
+          title={`Working set, ${COMPUTE_HISTORY_WINDOW_LABEL}`}
         />
       </div>
       {(starved || throttled) && (
