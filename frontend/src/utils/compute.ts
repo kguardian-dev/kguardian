@@ -78,6 +78,15 @@ export class RingBuffer<T> {
     this.items = this.items.filter(keep);
   }
 
+  /** Drop the leading run the predicate rejects. Equivalent to `retain` on a
+   *  series ordered by the value the predicate tests — which `appendSample`
+   *  guarantees — without rebuilding the array on every poll. */
+  dropWhile(drop: (item: T) => boolean): void {
+    let i = 0;
+    while (i < this.items.length && drop(this.items[i])) i++;
+    if (i > 0) this.items.splice(0, i);
+  }
+
   /** Oldest → newest snapshot (a copy; safe to hand to React). */
   values(): T[] {
     return [...this.items];
@@ -121,7 +130,8 @@ export function appendSample(buf: RingBuffer<ComputeSample>, sample: ComputeSamp
   const last = buf.last();
   if (last && sample.at < last.at) buf.retain((s) => s.at <= sample.at);
   buf.push(sample);
-  buf.retain((s) => s.at >= sample.at - COMPUTE_HISTORY_WINDOW_MS);
+  const oldest = sample.at - COMPUTE_HISTORY_WINDOW_MS;
+  buf.dropWhile((s) => s.at < oldest);
 }
 
 /**
@@ -168,6 +178,18 @@ export function historySamples(rows: readonly ComputeHistoryRow[]): ComputeSampl
     });
   }
   points.sort((a, b) => a.at - b.at);
+  // `pod_compute_history` has no unique index and the controller re-POSTs a
+  // batch whose response was lost, so the same container can appear twice at
+  // one instant. Dropping the repeat here keeps the pod's containers in one
+  // group: letting it split them would emit two samples at that instant, and
+  // the pod would plot as whichever container landed in the second one.
+  const seen = new Set<string>();
+  const distinct = points.filter((p) => {
+    const key = `${p.containerUid}@${p.at}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
 
   const samples: ComputeSample[] = [];
   let group: typeof points = [];
@@ -184,7 +206,7 @@ export function historySamples(rows: readonly ComputeHistoryRow[]): ComputeSampl
     samples.push({ at: group[group.length - 1].at, cpuMillis, workingSetBytes });
     group = [];
   };
-  for (const p of points) {
+  for (const p of distinct) {
     const spans = group.length > 0 && p.at - group[0].at > COMPUTE_SAMPLE_MERGE_MS;
     const repeats = group.some((g) => g.containerUid === p.containerUid);
     if (spans || repeats) close();
@@ -197,21 +219,34 @@ export function historySamples(rows: readonly ComputeHistoryRow[]): ComputeSampl
 /**
  * Whether fetching this pod's history could add anything to its series.
  *
- * Seeding is idempotent — a merge by timestamp — so it is safe to run again
- * whenever a card is open, and it HAS to be: a tab hidden for twenty minutes
- * leaves a hole the broker can fill, and a series that could only be seeded
- * once would draw that hole as an outage for the rest of the session.
+ * The question is not "does the series have a hole" — it is "is there time we
+ * have not asked about that the series does not cover". `askedAt` is when the
+ * last successful read was issued, and a read returns the whole window as of
+ * then, so everything up to it is already known: a hole older than `askedAt`
+ * is a hole the broker does not have (a controller restart, a node reboot),
+ * and asking again would fetch the same rows forever against an endpoint that
+ * sheds.
  *
- * There is nothing to fetch when the series is already continuous up to now,
- * which is the common case for a card left open.
+ * Everything AFTER `askedAt` is unknown, and that is what makes a pause
+ * recoverable: a tab hidden for longer than the window leaves a series
+ * holding a single current sample, with no hole in it to find, yet an hour of
+ * un-asked time behind it that the broker can fill. Measuring from `askedAt`
+ * rather than from the samples in hand is what tells those two apart.
  */
-export function needsSeed(samples: readonly ComputeSample[], now: number, gapMs: number = COMPUTE_SPARK_GAP_MS): boolean {
-  if (samples.length === 0) return true;
-  if (now - samples[samples.length - 1].at > gapMs) return true; // polling was paused
-  for (let i = 1; i < samples.length; i++) {
-    if (samples[i].at - samples[i - 1].at > gapMs) return true; // a hole inside the window
+export function needsSeed(
+  samples: readonly ComputeSample[],
+  now: number,
+  askedAt: number | null,
+  gapMs: number = COMPUTE_SPARK_GAP_MS,
+): boolean {
+  if (askedAt === null) return true; // never asked: whatever the poll has is all there is
+  let previous = askedAt;
+  for (const s of samples) {
+    if (s.at <= askedAt) continue; // already covered by that read
+    if (s.at - previous > gapMs) return true;
+    previous = s.at;
   }
-  return false;
+  return now - previous > gapMs;
 }
 
 /**

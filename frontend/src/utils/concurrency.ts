@@ -1,6 +1,6 @@
 // Bounded parallelism for the data hooks: usePodData fans out per-pod traffic
-// and syscall reads, useComputeData fans out compute-history backfills, and
-// neither may open an unbounded number of requests against the broker.
+// and syscall reads and may not open an unbounded number of requests against
+// the broker.
 
 /**
  * Run `tasks` with at most `limit` in flight, resolving to their results in

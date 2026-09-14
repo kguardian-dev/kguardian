@@ -73,8 +73,8 @@ const flush = async () => {
   });
 };
 
-/** `flush` is one poll deep; the history backfill the poll kicks off is
- *  several microtask hops further, and runs in waves of COMPUTE_BACKFILL_CONCURRENCY. */
+/** `flush` is one poll deep; a seed kicked off by one is several microtask
+ *  hops further. */
 const settle = async () => {
   await act(async () => {
     for (let i = 0; i < 100; i++) await Promise.resolve();
@@ -132,29 +132,6 @@ describe('useComputeData', () => {
     expect(api.getComputeLatest).toHaveBeenCalledTimes(2);
     expect(api.getComputeFindings).toHaveBeenCalledTimes(2);
   });
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
   test('drops the history of a pod that stopped reporting, but not on one missed poll', async () => {
     let gone = false;
@@ -355,14 +332,6 @@ describe('useComputeData', () => {
   // under `isExpanded`, so a read is issued when a card is opened and never
   // speculatively for a namespace.
 
-
-
-
-
-
-
-
-
   test('seedPod does nothing when the broker reports history_disabled', async () => {
     const api = fakeApi(
       () => ({ containers: [container()], nodes: [node()] }),
@@ -375,10 +344,6 @@ describe('useComputeData', () => {
     await settle();
     expect(api.getComputeHistory).not.toHaveBeenCalled();
   });
-
-
-
-
 
   test('a failing seed never escapes as an unhandled rejection', async () => {
     const rejections: unknown[] = [];
@@ -398,7 +363,6 @@ describe('useComputeData', () => {
     expect(rejections).toEqual([]);
     expect(result.current.error).toBeNull();
   });
-
 
   test('each poll appends a sample at the instant it landed, summing the containers', async () => {
     let cpu = 0;
@@ -518,6 +482,73 @@ describe('useComputeData', () => {
     expect(samples.length).toBeGreaterThan(20); // the missed minutes are back
     const gaps = samples.slice(1).map((x, i) => x.at - samples[i].at);
     expect(Math.max(...gaps)).toBeLessThanOrEqual(60_000); // and the hole is closed
+  });
+
+  // The regression that came back once: a pause longer than the window leaves
+  // a series with one current sample and no hole to find, and the pod must
+  // still be re-seeded from the hour of un-asked time behind it.
+  test('a pause longer than the whole window is still re-seeded', async () => {
+    const reads: number[] = [];
+    const api = fakeApi(
+      () => ({ containers: [container()], nodes: [node()] }),
+      undefined,
+      undefined,
+      () => {
+        reads.push(Date.now());
+        return [historyRow({ ts: new Date(Date.now() - 120_000).toISOString(), cpu_usage_millis_last: 7 })];
+      },
+    );
+    const { result } = renderHook(() => useComputeData('payments', { api }));
+    await settle();
+    await act(async () => { result.current.seedPod('uid-a'); });
+    await settle();
+    expect(reads).toHaveLength(1);
+
+    hiddenValue = true;
+    await act(async () => { await vi.advanceTimersByTimeAsync(90 * 60_000); }); // longer than the window
+    hiddenValue = false;
+    await act(async () => { document.dispatchEvent(new Event('visibilitychange')); });
+    await settle();
+    // Everything aged out: one current sample, no hole inside it.
+    expect(result.current.history.get('uid-a')!.length).toBe(1);
+
+    await act(async () => { result.current.seedPod('uid-a'); });
+    await settle();
+    expect(reads).toHaveLength(2);
+    expect(result.current.history.get('uid-a')!.values().map((x) => x.cpuMillis)).toContain(7);
+  });
+
+  // A controller restart leaves a hole no read can fill. Asking about it once
+  // is right; asking every 60 s for the life of the card is a read loop
+  // against an endpoint that sheds.
+  test('a gap the broker cannot fill is asked about once, not forever', async () => {
+    const api = fakeApi(
+      () => ({ containers: [container()], nodes: [node()] }),
+      undefined,
+      undefined,
+      () => [], // the broker has nothing for those minutes
+    );
+    const { result } = renderHook(() => useComputeData('payments', { api }));
+    await settle();
+
+    // A hole: the pod reported, went quiet for ten minutes, then came back.
+    hiddenValue = true;
+    await act(async () => { await vi.advanceTimersByTimeAsync(10 * 60_000); });
+    hiddenValue = false;
+    await act(async () => { document.dispatchEvent(new Event('visibilitychange')); });
+    await settle();
+    await act(async () => { result.current.seedPod('uid-a'); });
+    await settle();
+    expect(api.getComputeHistory).toHaveBeenCalledTimes(1);
+
+    // An open card asks on every poll for the next half hour: the hole is
+    // still there, and it is still not worth a read.
+    for (let i = 0; i < 30; i++) {
+      await act(async () => { await vi.advanceTimersByTimeAsync(60_000); });
+      await act(async () => { result.current.seedPod('uid-a'); });
+      await settle();
+    }
+    expect(api.getComputeHistory).toHaveBeenCalledTimes(1);
   });
 
   test('a shed read backs off, then succeeds — it is never written off for good', async () => {
@@ -655,19 +686,6 @@ describe('useComputeData', () => {
     expect(result.current.history.get('uid-a')!.values().map((x) => x.at)).toEqual([
       T0 - 120_000, T0, T0 + 5_000, T0 + 10_000, T0 + 15_000,
     ]);
-  });
-
-  test('seedPod does nothing when the broker reports history_disabled', async () => {
-    const api = fakeApi(
-      () => ({ containers: [container()], nodes: [node()] }),
-      () => ({ findings: [], history_disabled: true }),
-    );
-    const { result } = renderHook(() => useComputeData('payments', { api }));
-    await settle();
-    expect(result.current.findingsMeta.historyDisabled).toBe(true);
-    await act(async () => { result.current.seedPod('uid-a'); });
-    await settle();
-    expect(api.getComputeHistory).not.toHaveBeenCalled();
   });
 
   test('404 on /compute/history leaves the live poll running and the map populated', async () => {

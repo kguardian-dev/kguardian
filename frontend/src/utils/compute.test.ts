@@ -113,6 +113,13 @@ describe('compute history as a time series', () => {
     expect(buf.values().map((s) => s.at)).toEqual([T0, T0 + 5_000, T0 + 10_000, T0 + 15_000]);
   });
 
+  test('dropWhile removes the leading run and nothing else', () => {
+    const b = new RingBuffer<number>();
+    [1, 2, 3, 4, 1].forEach((n) => b.push(n));
+    b.dropWhile((n) => n < 3);
+    expect(b.values()).toEqual([3, 4, 1]); // stops at the first keeper
+  });
+
   test('appendSample trims by age to the window', () => {
     const buf = new RingBuffer<ComputeSample>();
     appendSample(buf, sample(T0, 1));
@@ -187,6 +194,18 @@ describe('compute history as a time series', () => {
     expect(samples).toEqual([sample(T0 + 400, 15)]);
   });
 
+  // pod_compute_history has no unique index and the controller re-POSTs a
+  // batch whose response was lost, so the same row can arrive twice.
+  test('a duplicated row is dropped, not allowed to split the pod apart', () => {
+    const ts = new Date(T0).toISOString();
+    const samples = historySamples([
+      row({ ts, cpu_usage_millis_last: 100 }),
+      row({ ts, container_uid: 'uid-a/sidecar', container: 'sidecar', cpu_usage_millis_last: 20 }),
+      row({ ts, container_uid: 'uid-a/sidecar', container: 'sidecar', cpu_usage_millis_last: 20 }), // re-POST
+    ]);
+    expect(samples).toEqual([sample(T0, 120)]); // never 20, and never 140
+  });
+
   test('two rows for one container are two observations, never one doubled', () => {
     // A re-ingest, or a controller that wrote twice inside the tolerance.
     const samples = historySamples([
@@ -247,13 +266,39 @@ describe('compute history as a time series', () => {
     expect(seeded.values()).toEqual([sample(T0, 300)]);
   });
 
-  test('needsSeed is true only when history could add something', () => {
-    const dense = Array.from({ length: 10 }, (_, i) => sample(T0 + i * 5_000, i));
-    expect(needsSeed(dense, T0 + 45_000)).toBe(false); // continuous up to now
-    expect(needsSeed([], T0)).toBe(true); // nothing at all
-    expect(needsSeed(dense, T0 + 20 * 60_000)).toBe(true); // polling was paused
-    expect(needsSeed([sample(T0, 1), sample(T0 + 20 * 60_000, 2)], T0 + 20 * 60_000)).toBe(true); // a hole inside
+  test('needsSeed asks when nothing has been asked yet', () => {
+    expect(needsSeed([], T0, null)).toBe(true);
+    expect(needsSeed([sample(T0, 1)], T0, null)).toBe(true);
   });
+
+  test('needsSeed stops asking about time already covered by a read', () => {
+    const dense = Array.from({ length: 10 }, (_, i) => sample(T0 + i * 5_000, i));
+    expect(needsSeed(dense, T0 + 45_000, T0 + 45_000)).toBe(false);
+    // A hole OLDER than the read is one the broker does not have — a
+    // controller restart, a node reboot. Asking again fetches the same rows.
+    const holed = [sample(T0 - 30 * 60_000, 1), sample(T0, 2)];
+    expect(needsSeed(holed, T0, T0)).toBe(false);
+  });
+
+  // The regression that came back once already: after a pause longer than the
+  // window every sample has aged out, so the series holds one current point
+  // with no hole in it — and an hour of un-asked time behind it.
+  test('needsSeed asks after a pause that emptied the window', () => {
+    const askedAt = T0;
+    const afterPause = [sample(T0 + 90 * 60_000, 1)]; // all that survived the trim
+    expect(needsSeed(afterPause, T0 + 90 * 60_000, askedAt)).toBe(true);
+  });
+
+  test('needsSeed asks about a hole that opened since the last read', () => {
+    const askedAt = T0;
+    const samples = [sample(T0, 1), sample(T0 + 20 * 60_000, 2)];
+    expect(needsSeed(samples, T0 + 20 * 60_000, askedAt)).toBe(true);
+  });
+
+  test('needsSeed asks when the poll itself has stopped reporting', () => {
+    expect(needsSeed([sample(T0, 1)], T0 + 10 * 60_000, T0)).toBe(true);
+  });
+
 });
 
 describe('podLevelSample', () => {

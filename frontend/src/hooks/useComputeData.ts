@@ -69,8 +69,9 @@ export interface ComputeData {
   findings: ComputeFinding[];
   /** Truncation / history-disabled flags from the findings endpoint. */
   findingsMeta: ComputeFindingsMeta;
-  /** Client-side ring buffer of the last 60 one-minute pod-level buckets per
-   *  `pod_uid`, seeded from `/compute/history` and kept current by the poll. */
+  /** The last hour of pod-level samples per `pod_uid`, each at the instant it
+   *  was observed: seeded from `/compute/history` when a card is expanded,
+   *  and appended to by the poll. */
   history: Map<string, RingBuffer<ComputeSample>>;
   /** False when the broker returned no node rows for the namespace (feature
    *  off, or a broker / controller predating it) or every node reports
@@ -88,9 +89,8 @@ export interface ComputeData {
    *  chart in a render pass puts the same instant at the same x — and render
    *  stays pure. 0 before the first poll. */
   polledAt: number;
-  /** Seed one pod's history now (the user expanded its card). Idempotent,
-   *  exempt from the eager backfill's pod cap, and a no-op for a pod already
-   *  seeded or being read. */
+  /** Seed one pod's history now (the user expanded its card). Idempotent, and
+   *  a no-op when a read is in flight or nothing new could be fetched. */
   seedPod: (uid: string) => void;
 }
 
@@ -106,10 +106,10 @@ function describe(err: unknown): string {
  * the tab is hidden and resumed (with an immediate refresh) when it is shown
  * again. Traffic and syscalls stay on manual refresh in usePodData.
  *
- * The per-pod sparkline buffers are one-minute buckets, seeded once per pod
- * from `GET /compute/history/{pod_uid}` after the first successful poll and
- * then kept current by it — so an expanded node opens on an hour of real
- * trend instead of an empty chart that fills while you watch.
+ * The per-pod series are samples at the instants they were observed, seeded
+ * from `GET /compute/history/{pod_uid}` when a card is expanded and appended
+ * to by the poll — so an expanded node opens on an hour of real trend instead
+ * of an empty chart that fills while you watch.
  */
 export function useComputeData(namespace: string, opts: UseComputeDataOptions = {}): ComputeData {
   const pollMs = opts.pollMs ?? COMPUTE_POLL_MS;
@@ -141,12 +141,12 @@ export function useComputeData(namespace: string, opts: UseComputeDataOptions = 
    *  permanent "seeded" latch — a series can always have a new hole worth
    *  filling, and `needsSeed` is what decides whether a read is worth making.
    *  An entry is dropped along with the pod's buffer. */
-  const seedRef = useRef<Map<string, { inFlight: boolean; failures: number; nextAt: number }>>(new Map());
+  const seedRef = useRef<Map<string, { inFlight: boolean; failures: number; nextAt: number; askedAt: number | null }>>(new Map());
   /** Consecutive polls each known pod has been missing from /compute/latest. */
   const missedPollsRef = useRef<Map<string, number>>(new Map());
   /** False once /compute/history answered 404/501: an optional endpoint this
    *  broker does not have. Deliberately NOT `supported`, which would stop
-   *  the live polls and blank the map (see backfillHistory). */
+   *  the live polls and blank the map (see seedPod). */
   const historySupportedRef = useRef(true);
   /** Mirrors findingsMeta.historyDisabled: with history off, every seed read
    *  is charged a permit and comes back empty. */
@@ -171,8 +171,8 @@ export function useComputeData(namespace: string, opts: UseComputeDataOptions = 
    *
    * Seeding is on demand ONLY. The sparklines are the sole consumer of this
    * data (`ComputeDetail`, rendered under `isExpanded`); the collapsed card's
-   * dot and micro bar read the current bucket, which the 5 s poll fills and
-   * which seeded buckets are always older than. So seeding a namespace's
+   * dot and micro bar read the newest sample, which comes from the 5 s poll
+   * and which seeded points are never newer than. So seeding a namespace's
    * worth of pods eagerly would spend windowed range reads on charts that are
    * not on screen and cannot affect anything that is. One expansion, one
    * read.
@@ -196,15 +196,16 @@ export function useComputeData(namespace: string, opts: UseComputeDataOptions = 
     // stopped): there is nothing to seed.
     const buffer = historyRef.current.get(uid);
     if (!buffer) return;
-    // Only a pod whose last read SUCCEEDED needs a reason to be read again:
-    // one never asked before has nothing behind its live samples however
-    // continuous they look, and one whose read failed fetched nothing. After
-    // a success, a hole is the reason — the usual answer for a card that has
-    // been open a while is that there is none, and no read is made.
-    const settled = pod !== undefined && pod.failures === 0;
-    if (settled && !needsSeed(buffer.values(), now)) return;
+    // `askedAt` is null until a read has succeeded, so a pod never asked
+    // about, and one whose last read failed and fetched nothing, both ask.
+    // After a success it is only the time since that read that can hold
+    // anything new — which is what makes a paused tab recoverable without
+    // asking forever about a gap the broker cannot fill.
+    if (!needsSeed(buffer.values(), now, pod?.askedAt ?? null)) return;
 
-    const entry = { inFlight: true, failures: pod?.failures ?? 0, nextAt: pod?.nextAt ?? 0 };
+    const entry = { inFlight: true, failures: pod?.failures ?? 0, nextAt: pod?.nextAt ?? 0, askedAt: pod?.askedAt ?? null };
+    // Issued now: everything up to this instant is what the read will cover.
+    const issuedAt = now;
     state.set(uid, entry);
 
     void (async () => {
@@ -215,11 +216,12 @@ export function useComputeData(namespace: string, opts: UseComputeDataOptions = 
         // Identity, not presence: a pod that vanished and returned while the
         // read was in flight has a NEW buffer, and seeding it from the old
         // pod's history is what the drop-on-disappear rule exists to prevent.
-        // Merging here rather than at read time also keeps every live bucket
+        // Merging here rather than at read time also keeps every live sample
         // the poll collected while this was outstanding.
         if (buffers.get(uid) !== buffer) return;
         buffers.set(uid, seedSamples(buffer, historySamples(rows)));
         entry.failures = 0;
+        entry.askedAt = issuedAt;
         entry.nextAt = Date.now() + COMPUTE_SEED_COOLDOWN_MS;
         setHistory(new Map(buffers));
       } catch (err) {
@@ -334,11 +336,7 @@ export function useComputeData(namespace: string, opts: UseComputeDataOptions = 
       if (err instanceof ComputeUnsupportedError) markUnsupported(err);
       else setError(describe(err));
     } finally {
-      if (gen === generation.current) {
-        inflightFindings.current = false;
-        // Answered or failed, we have asked: the backfill waits for this, and
-        // an outage of the findings poll must not hold the seed hostage.
-      }
+      if (gen === generation.current) inflightFindings.current = false;
     }
   }, [api, namespace, markUnsupported]);
 
