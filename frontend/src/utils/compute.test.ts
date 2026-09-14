@@ -1,5 +1,8 @@
 import { describe, expect, test } from 'vitest';
 import {
+  COMPUTE_HISTORY_WINDOW_LABEL,
+  COMPUTE_HISTORY_WINDOW_MINUTES,
+  COMPUTE_HISTORY_WINDOW_MS,
   COMPUTE_STATE_OFF,
   COMPUTE_STATE_PENDING,
   COMPUTE_STATE_UNSUPPORTED,
@@ -10,19 +13,23 @@ import {
   RingBuffer,
   buildPodComputeData,
   containersForNode,
+  appendSample,
   formatBytes,
   formatMicros,
   formatMillicores,
   hasComputeGauges,
+  historySamples,
   nodeComputeState,
   nodeHeight,
   pickDenominator,
   podLevelSample,
+  needsSeed,
+  seedSamples,
   statusFromFindings,
   statusTooltip,
   throttledRatio,
 } from './compute';
-import type { ComputeContainer, ComputeFinding, ComputeNode } from '../types/compute';
+import type { ComputeContainer, ComputeFinding, ComputeHistoryRow, ComputeNode, ComputeSample } from '../types/compute';
 import type { PodInfo } from '../types';
 
 const container = (over: Partial<ComputeContainer> = {}): ComputeContainer => ({
@@ -84,6 +91,214 @@ describe('RingBuffer', () => {
     v.push(99);
     expect(b.values()).toEqual([1]);
   });
+});
+
+// Samples carry the instant they were observed and are drawn against real
+// time, so nothing is folded onto a grid and no value is ever placed at a
+// time it was not measured.
+describe('compute history as a time series', () => {
+  const T0 = Date.parse('2026-09-14T10:00:00Z');
+  const sample = (at: number, cpuMillis: number, workingSetBytes = 0): ComputeSample => ({ at, cpuMillis, workingSetBytes });
+
+  test('the window constants and label agree', () => {
+    expect(COMPUTE_HISTORY_WINDOW_MINUTES).toBe(60);
+    expect(COMPUTE_HISTORY_WINDOW_MS).toBe(60 * 60_000);
+    expect(COMPUTE_HISTORY_WINDOW_LABEL).toBe('last 60 minutes');
+  });
+
+  test('appendSample keeps samples at their own instants, however often they arrive', () => {
+    const buf = new RingBuffer<ComputeSample>();
+    // A 5 s poll: dense points, none of them rounded or merged.
+    for (let i = 0; i < 4; i++) appendSample(buf, sample(T0 + i * 5_000, i));
+    expect(buf.values().map((s) => s.at)).toEqual([T0, T0 + 5_000, T0 + 10_000, T0 + 15_000]);
+  });
+
+  test('dropWhile removes the leading run and nothing else', () => {
+    const b = new RingBuffer<number>();
+    [1, 2, 3, 4, 1].forEach((n) => b.push(n));
+    b.dropWhile((n) => n < 3);
+    expect(b.values()).toEqual([3, 4, 1]); // stops at the first keeper
+  });
+
+  test('appendSample trims by age to the window', () => {
+    const buf = new RingBuffer<ComputeSample>();
+    appendSample(buf, sample(T0, 1));
+    appendSample(buf, sample(T0 + 30 * 60_000, 2));
+    appendSample(buf, sample(T0 + 61 * 60_000, 3)); // the first is now over an hour old
+    expect(buf.values().map((s) => s.cpuMillis)).toEqual([2, 3]);
+  });
+
+  // Invariant: the series must stay ordered, and a value must never be drawn
+  // at a time it was not measured — so points from the abandoned timeline go.
+  test('a backward clock step drops the samples now in the future, keeping the rest', () => {
+    const buf = new RingBuffer<ComputeSample>();
+    for (let i = 0; i < 10; i++) appendSample(buf, sample(T0 + i * 60_000, i));
+    appendSample(buf, sample(T0 + 7 * 60_000 + 1, 99)); // clock corrected back ~3 minutes
+    const values = buf.values();
+    expect(values.map((s) => s.cpuMillis)).toEqual([0, 1, 2, 3, 4, 5, 6, 7, 99]);
+    expect(values.every((s, i, all) => i === 0 || all[i - 1].at <= s.at)).toBe(true);
+  });
+
+  const row = (over: Partial<ComputeHistoryRow>): ComputeHistoryRow => ({
+    id: 1, container_uid: 'uid-a/app', pod_uid: 'uid-a', namespace: 'payments', pod_name: 'api-1', container: 'app', node: 'worker-1',
+    ts: new Date(T0).toISOString(), resolution_secs: 60,
+    cpu_usage_millis_avg: 0, cpu_usage_millis_max: 0, cpu_usage_millis_last: 0,
+    cpu_quota_usec: null, cpu_period_usec: 100000, cpu_request_millis: null, cpu_limit_millis: null,
+    cpu_nr_periods: 0, cpu_nr_throttled: 0, cpu_throttled_usec: 0,
+    cpu_psi_some10_avg: 0, cpu_psi_some10_max: 0, cpu_psi_full10_avg: 0, cpu_psi_full10_max: 0,
+    mem_current_avg: 0, mem_current_max: 0, mem_current_last: 0,
+    mem_working_set_avg: 0, mem_working_set_max: 0, mem_working_set_last: 0,
+    mem_limit: null, mem_request: null,
+    mem_psi_some10_avg: 0, mem_psi_some10_max: 0, mem_psi_full10_avg: 0, mem_psi_full10_max: 0,
+    mem_events_high: 0, mem_events_max: 0, mem_oom_kill: 0, mem_refault: 0, mem_pgmajfault: 0,
+    runq_count: null, runq_p50_us: null, runq_p95_us: null, runq_p99_us: null, runq_max_us: null, runq_overflow: null, runq_hist: null,
+    ...over,
+  });
+
+  test('a minute row is plotted at its own ts, drift and all', () => {
+    // Consecutive folds drifting past the minute boundary: no compensation,
+    // no grid — each value sits where it was actually read.
+    const stamps = ['10:05:59', '10:07:00', '10:07:58'].map((t) => Date.parse(`2026-09-14T${t}Z`));
+    const samples = historySamples(stamps.map((ts, i) => row({ ts: new Date(ts).toISOString(), cpu_usage_millis_last: i })));
+    expect(samples.map((s) => s.at)).toEqual(stamps);
+    expect(samples.map((s) => s.cpuMillis)).toEqual([0, 1, 2]);
+  });
+
+  // A five-minute row is floored to its boundary by the broker's rollup, and
+  // aggregates END-stamped minute rows from inside it — so it summarises
+  // roughly [ts - 60s, ts + 300s), whose middle is ts + 120s.
+  test('a five-minute row is plotted once, at the middle of what it summarises', () => {
+    const samples = historySamples([
+      row({ ts: new Date(T0).toISOString(), resolution_secs: 300, cpu_usage_millis_avg: 40, cpu_usage_millis_last: 999 }),
+    ]);
+    expect(samples).toEqual([sample(T0 + 120_000, 40)]); // `_avg`, once — never spread
+  });
+
+  test('a pod\u2019s containers are summed per observation, not drawn separately', () => {
+    const ts = new Date(T0).toISOString();
+    const samples = historySamples([
+      row({ ts, cpu_usage_millis_last: 10, mem_working_set_last: 100 }),
+      row({ ts, container_uid: 'uid-a/sidecar', container: 'sidecar', cpu_usage_millis_last: 5, mem_working_set_last: 50 }),
+      // The next fold, a minute later.
+      row({ ts: new Date(T0 + 60_000).toISOString(), cpu_usage_millis_last: 20, mem_working_set_last: 200 }),
+      row({ ts: new Date(T0 + 60_000).toISOString(), container_uid: 'uid-a/sidecar', container: 'sidecar', cpu_usage_millis_last: 6, mem_working_set_last: 60 }),
+    ]);
+    expect(samples).toEqual([sample(T0, 15, 150), sample(T0 + 60_000, 26, 260)]);
+  });
+
+  test('containers whose stamps differ slightly are still one observation', () => {
+    const samples = historySamples([
+      row({ ts: new Date(T0).toISOString(), cpu_usage_millis_last: 10 }),
+      row({ ts: new Date(T0 + 400).toISOString(), container_uid: 'uid-a/sidecar', container: 'sidecar', cpu_usage_millis_last: 5 }),
+    ]);
+    expect(samples).toEqual([sample(T0 + 400, 15)]);
+  });
+
+  // pod_compute_history has no unique index and the controller re-POSTs a
+  // batch whose response was lost, so the same row can arrive twice.
+  test('a duplicated row is dropped, not allowed to split the pod apart', () => {
+    const ts = new Date(T0).toISOString();
+    const samples = historySamples([
+      row({ ts, cpu_usage_millis_last: 100 }),
+      row({ ts, container_uid: 'uid-a/sidecar', container: 'sidecar', cpu_usage_millis_last: 20 }),
+      row({ ts, container_uid: 'uid-a/sidecar', container: 'sidecar', cpu_usage_millis_last: 20 }), // re-POST
+    ]);
+    expect(samples).toEqual([sample(T0, 120)]); // never 20, and never 140
+  });
+
+  test('two rows for one container are two observations, never one doubled', () => {
+    // A re-ingest, or a controller that wrote twice inside the tolerance.
+    const samples = historySamples([
+      row({ ts: new Date(T0).toISOString(), cpu_usage_millis_last: 10 }),
+      row({ ts: new Date(T0 + 500).toISOString(), cpu_usage_millis_last: 12 }),
+    ]);
+    expect(samples).toEqual([sample(T0, 10), sample(T0 + 500, 12)]);
+  });
+
+  test('a sidecar that reported once is summed once, never stretched', () => {
+    const app = Array.from({ length: 5 }, (_, i) =>
+      row({ ts: new Date(T0 + i * 60_000).toISOString(), cpu_usage_millis_last: 1 }));
+    const sidecar = row({ ts: new Date(T0 + 2 * 60_000).toISOString(), container_uid: 'uid-a/sidecar', container: 'sidecar', cpu_usage_millis_last: 50 });
+    const samples = historySamples([...app, sidecar]);
+    expect(samples.map((s) => s.cpuMillis)).toEqual([1, 1, 51, 1, 1]);
+  });
+
+  test('historySamples reads a zone-less broker stamp as UTC', () => {
+    const withZone = historySamples([row({ ts: '2026-09-14T10:05:30Z', cpu_usage_millis_last: 5 })]);
+    const zoneLess = historySamples([row({ ts: '2026-09-14T10:05:30', cpu_usage_millis_last: 5 })]);
+    expect(zoneLess).toEqual(withZone);
+    expect(zoneLess[0].at).toBe(Date.parse('2026-09-14T10:05:30Z'));
+  });
+
+  test('an unparseable stamp is skipped, never drawn', () => {
+    expect(historySamples([row({ ts: 'not-a-timestamp', cpu_usage_millis_last: 1000 })])).toEqual([]);
+  });
+
+  test('seedSamples merges history under the live samples, keeping both', () => {
+    const live = new RingBuffer<ComputeSample>();
+    appendSample(live, sample(T0, 300));
+    const seeded = seedSamples(live, [sample(T0 - 120_000, 1), sample(T0 - 60_000, 2)]);
+    expect(seeded.values()).toEqual([sample(T0 - 120_000, 1), sample(T0 - 60_000, 2), sample(T0, 300)]);
+  });
+
+  test('seedSamples is idempotent, so a later fetch can refill a hole', () => {
+    const live = new RingBuffer<ComputeSample>();
+    appendSample(live, sample(T0, 300));
+    const once = seedSamples(live, [sample(T0 - 60_000, 2)]);
+    const twice = seedSamples(once, [sample(T0 - 60_000, 2), sample(T0 - 120_000, 1)]);
+    expect(twice.values()).toEqual([sample(T0 - 120_000, 1), sample(T0 - 60_000, 2), sample(T0, 300)]);
+  });
+
+  // The gauge's "now" is the newest sample, and that number comes from the
+  // live poll or not at all.
+  test('seedSamples drops seeded points newer than the newest live sample', () => {
+    const live = new RingBuffer<ComputeSample>();
+    appendSample(live, sample(T0, 300));
+    const seeded = seedSamples(live, [sample(T0 - 60_000, 1), sample(T0 + 120_000, 11)]); // broker ahead
+    expect(seeded.last()).toEqual(sample(T0, 300));
+    expect(seeded.values().some((s) => s.cpuMillis === 11)).toBe(false);
+  });
+
+  test('seedSamples trims to the window and keeps the live read of a shared instant', () => {
+    const live = new RingBuffer<ComputeSample>();
+    appendSample(live, sample(T0, 300));
+    const seeded = seedSamples(live, [sample(T0 - 61 * 60_000, 1), sample(T0, 999)]);
+    expect(seeded.values()).toEqual([sample(T0, 300)]);
+  });
+
+  test('needsSeed asks when nothing has been asked yet', () => {
+    expect(needsSeed([], T0, null)).toBe(true);
+    expect(needsSeed([sample(T0, 1)], T0, null)).toBe(true);
+  });
+
+  test('needsSeed stops asking about time already covered by a read', () => {
+    const dense = Array.from({ length: 10 }, (_, i) => sample(T0 + i * 5_000, i));
+    expect(needsSeed(dense, T0 + 45_000, T0 + 45_000)).toBe(false);
+    // A hole OLDER than the read is one the broker does not have — a
+    // controller restart, a node reboot. Asking again fetches the same rows.
+    const holed = [sample(T0 - 30 * 60_000, 1), sample(T0, 2)];
+    expect(needsSeed(holed, T0, T0)).toBe(false);
+  });
+
+  // The regression that came back once already: after a pause longer than the
+  // window every sample has aged out, so the series holds one current point
+  // with no hole in it — and an hour of un-asked time behind it.
+  test('needsSeed asks after a pause that emptied the window', () => {
+    const askedAt = T0;
+    const afterPause = [sample(T0 + 90 * 60_000, 1)]; // all that survived the trim
+    expect(needsSeed(afterPause, T0 + 90 * 60_000, askedAt)).toBe(true);
+  });
+
+  test('needsSeed asks about a hole that opened since the last read', () => {
+    const askedAt = T0;
+    const samples = [sample(T0, 1), sample(T0 + 20 * 60_000, 2)];
+    expect(needsSeed(samples, T0 + 20 * 60_000, askedAt)).toBe(true);
+  });
+
+  test('needsSeed asks when the poll itself has stopped reporting', () => {
+    expect(needsSeed([sample(T0, 1)], T0 + 10 * 60_000, T0)).toBe(true);
+  });
+
 });
 
 describe('podLevelSample', () => {
@@ -156,17 +371,20 @@ describe('buildPodComputeData', () => {
   });
   test('percentages against the picked denominator, sparklines from the samples', () => {
     const rows = [container({ cpu_limit_millis: 500, mem_limit: null, mem_request: 2000 })];
+    const now = Date.parse('2026-09-14T10:00:00Z');
     const samples = [
-      { at: 1, cpuMillis: 100, workingSetBytes: 500 },
-      { at: 2, cpuMillis: 250, workingSetBytes: 1000 },
+      { at: now - 60_000, cpuMillis: 100, workingSetBytes: 500 },
+      { at: now, cpuMillis: 250, workingSetBytes: 1000 },
     ];
-    const d = buildPodComputeData({ containers: rows, nodesByName: new Map([['worker-1', node()]]), findings: [finding('high')], samples })!;
+    const d = buildPodComputeData({ containers: rows, nodesByName: new Map([['worker-1', node()]]), findings: [finding('high')], samples, now })!;
     expect(d.cpuPct).toBe(50);
     expect(d.cpuDenominator).toBe('limit');
     expect(d.memPct).toBe(50);
     expect(d.memDenominator).toBe('request');
-    expect(d.sparkCpu).toEqual([100, 250]);
-    expect(d.sparkMem).toEqual([500, 1000]);
+    // Points carry their own instants, and the window is the hour to `now`.
+    expect(d.sparkCpu).toEqual([{ at: now - 60_000, value: 100 }, { at: now, value: 250 }]);
+    expect(d.sparkMem).toEqual([{ at: now - 60_000, value: 500 }, { at: now, value: 1000 }]);
+    expect(d.sparkWindow).toEqual({ from: now - 60 * 60_000, to: now });
     expect(d.status).toBe('warning');
     expect(hasComputeGauges(d)).toBe(true);
   });

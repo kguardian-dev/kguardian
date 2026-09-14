@@ -3,23 +3,8 @@ import type { PodInfo, PodNodeData, ServiceInfo } from '../types';
 import { apiClient } from '../services/api';
 import { useComputeData } from './useComputeData';
 import { buildPodComputeData, containersForNode, nodeComputeState } from '../utils/compute';
+import { withConcurrencyLimit } from '../utils/concurrency';
 import type { ComputeFinding } from '../types/compute';
-
-async function withConcurrencyLimit<T>(tasks: (() => Promise<T>)[], limit: number): Promise<T[]> {
-  const results: T[] = new Array(tasks.length);
-  const executing = new Set<Promise<void>>();
-  for (let i = 0; i < tasks.length; i++) {
-    const index = i;
-    const p = tasks[index]().then(r => { results[index] = r; });
-    const tracked = p.then(() => { executing.delete(tracked); });
-    executing.add(tracked);
-    if (executing.size >= limit) {
-      await Promise.race(executing);
-    }
-  }
-  await Promise.all(executing);
-  return results;
-}
 
 export const usePodData = (namespace: string) => {
   const [basePods, setPods] = useState<PodNodeData[]>([]);
@@ -123,8 +108,33 @@ export const usePodData = (namespace: string) => {
   // here — not fetched with traffic — so the 5 s poll never re-fetches
   // traffic or syscalls, and a pod without compute rows is left untouched.
   const compute = useComputeData(namespace);
+  // Seed an expanded card's sparkline from stored history (design D8).
+  //
+  // Expanding a card is the only signal that its history is worth a read:
+  // the sparklines are the sole consumer of seeded buckets and render only
+  // when expanded, so nothing is fetched for a namespace nobody has opened a
+  // card in. `seedPod` is idempotent, so running this for every open card on
+  // every poll costs nothing once a pod is seeded or its read is in flight.
+  //
+  // One uid per card, the same one the chart below reads: a replica group's
+  // other uids can never be displayed, so fetching them would be reads for
+  // charts that do not exist.
+  const seedPod = compute.seedPod;
+  useEffect(() => {
+    if (!compute.enabled) return; // no pod carries a `compute` field, so no chart can render
+    for (const node of basePods) {
+      if (!node.isExpanded) continue;
+      const uid = containersForNode(node, compute.containersByPodUid, compute.containersByPodName)[0]?.pod_uid;
+      if (uid) seedPod(uid);
+    }
+  }, [basePods, compute.enabled, compute.containersByPodUid, compute.containersByPodName, seedPod]);
+
   const pods = useMemo<PodNodeData[]>(() => {
     if (!compute.enabled) return basePods;
+    // One time origin for the whole pass — the instant the last poll landed.
+    // Every card drawn together then puts the same instant at the same x,
+    // which a `Date.now()` per card would not, and render stays pure.
+    const now = compute.polledAt;
     const findingsByPodKey = new Map<string, ComputeFinding[]>();
     for (const f of compute.findings) {
       for (const key of [f.victim.pod_uid, `${f.victim.namespace}/${f.victim.pod_name}`]) {
@@ -157,14 +167,14 @@ export const usePodData = (namespace: string) => {
       // podLevelSample per uid; a multi-replica identity shows the first).
       const uid = containers[0]?.pod_uid;
       const samples = uid ? compute.history.get(uid)?.values() ?? [] : [];
-      const data = buildPodComputeData({ containers, nodesByName: compute.nodesByName, findings, samples, nodeState });
+      const data = buildPodComputeData({ containers, nodesByName: compute.nodesByName, findings, samples, nodeState, now });
       // Same shared constant as last tick ⇒ same pod object, so PodNode's
       // identity memo holds for pods without rows.
       return pod.compute === data ? pod : { ...pod, compute: data };
     });
     // `history` is a fresh Map per poll over the in-place ring buffers, so it
     // is the dependency that re-reads the sparklines.
-  }, [basePods, compute.enabled, compute.containersByPodUid, compute.containersByPodName, compute.nodesByName, compute.findings, compute.history]);
+  }, [basePods, compute.enabled, compute.containersByPodUid, compute.containersByPodName, compute.nodesByName, compute.findings, compute.history, compute.polledAt]);
 
   return {
     pods,

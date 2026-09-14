@@ -88,9 +88,10 @@ Traffic and syscalls stay on manual refresh.
     container drives the dot.
   </Step>
   <Step title="Sparklines">
-    Expand the pod and the bar becomes two sparklines — the last 60 samples
-    (five minutes at the default interval), kept in the browser — with the
-    current value and denominator. Two chips can appear below them:
+    Expand the pod and the bar becomes two sparklines — the last 60 minutes,
+    seeded from the broker's stored history when you open the card and kept
+    current by the 5-second poll — with the current value and denominator.
+    A stretch the pod did not report shows as a break in the line. Two chips can appear below them:
     `Starved by <pod>` when a finding names a culprit, and `Throttled N %`
     for `cpu-throttled`.
   </Step>

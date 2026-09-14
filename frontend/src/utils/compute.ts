@@ -8,29 +8,83 @@ import type {
   ComputeDenominator,
   ComputeFinding,
   ComputeFindingKind,
+  ComputeHistoryRow,
   ComputeNode,
   ComputeSample,
   ComputeSeverity,
   ComputeStatus,
   PodComputeData,
   ProbeDrops,
+  SparkPoint,
 } from '../types/compute';
-import { podUid } from './peerResolution';
+import { parseBrokerTime, podUid } from './peerResolution';
 
-/** Client-side history depth per pod (D8: "last 60 samples kept client-side"). */
-export const COMPUTE_HISTORY_SAMPLES = 60;
+/** How far back the sparklines reach, and what a seed asks the broker for. */
+export const COMPUTE_HISTORY_WINDOW_MINUTES = 60;
+export const COMPUTE_HISTORY_WINDOW_MS = COMPUTE_HISTORY_WINDOW_MINUTES * 60_000;
+
+/** Sparkline title copy, derived so the label cannot drift from the window. */
+export const COMPUTE_HISTORY_WINDOW_LABEL = `last ${COMPUTE_HISTORY_WINDOW_MINUTES} minutes`;
+
+/**
+ * Samples kept per pod. A memory bound, not a resolution: the window is what
+ * decides which samples are kept, and an hour of 5 s polls is 720 of them,
+ * so this only bites if a broker returns far more history rows than an hour
+ * can hold.
+ */
+export const COMPUTE_MAX_SAMPLES = 2_000;
+
+/**
+ * Longer than this between two consecutive samples and the line breaks
+ * rather than joining them.
+ *
+ * Two and a half times the one-minute history cadence: dense 5 s live
+ * samples and minute-spaced seeded ones both stay connected, and a pod that
+ * reported nothing for over two minutes reads as the gap it is. Five-minute
+ * rows (only reachable when an operator downsamples sooner than this window)
+ * therefore draw as separate points, which is what a five-minute average
+ * observed once actually is.
+ */
+export const COMPUTE_SPARK_GAP_MS = 150_000;
+
+/**
+ * How close two containers' history rows must be to count as one observation
+ * of the pod.
+ *
+ * A fold stamps every container in it with the same instant
+ * (`MinuteFold::finish` builds one batch for all of them), so this is a
+ * tolerance for re-ingest and nothing more. It exists ONLY to sum a pod's
+ * containers: summing them as separate points would draw each container's
+ * share as if it were the pod's total.
+ */
+export const COMPUTE_SAMPLE_MERGE_MS = 2_000;
 
 /** Fixed-capacity FIFO of the last N samples, oldest first. */
 export class RingBuffer<T> {
   private items: T[] = [];
   readonly capacity: number;
-  constructor(capacity: number = COMPUTE_HISTORY_SAMPLES) {
+  constructor(capacity: number = COMPUTE_MAX_SAMPLES) {
     this.capacity = capacity;
   }
 
   push(item: T): void {
     this.items.push(item);
     if (this.items.length > this.capacity) this.items.splice(0, this.items.length - this.capacity);
+  }
+
+  /** Drop every item the predicate rejects (used to trim by age, which
+   *  capacity alone cannot do — see `appendSample`). */
+  retain(keep: (item: T) => boolean): void {
+    this.items = this.items.filter(keep);
+  }
+
+  /** Drop the leading run the predicate rejects. Equivalent to `retain` on a
+   *  series ordered by the value the predicate tests — which `appendSample`
+   *  guarantees — without rebuilding the array on every poll. */
+  dropWhile(drop: (item: T) => boolean): void {
+    let i = 0;
+    while (i < this.items.length && drop(this.items[i])) i++;
+    if (i > 0) this.items.splice(0, i);
   }
 
   /** Oldest → newest snapshot (a copy; safe to hand to React). */
@@ -56,6 +110,179 @@ export function podLevelSample(containers: readonly ComputeContainer[], at: numb
     workingSetBytes += Number.isFinite(c.mem_working_set) ? c.mem_working_set : 0;
   }
   return { at, cpuMillis, workingSetBytes };
+}
+
+/**
+ * Append a live sample to a pod's series and trim it to the window.
+ *
+ * Samples carry the instant they were observed and are drawn against real
+ * time, so a 5 s poll is simply densely spaced points on the right of the
+ * chart and nothing has to be folded onto a grid to fit.
+ *
+ * The series is kept strictly time-ordered. When the clock steps BACKWARD —
+ * an NTP correction, a laptop waking — the samples that are now in the
+ * future are dropped rather than left behind the new ones: they describe a
+ * timeline that no longer exists, and a series that is not ordered cannot be
+ * drawn. Everything older than the step survives, and seeding can refill
+ * whatever went with it.
+ */
+export function appendSample(buf: RingBuffer<ComputeSample>, sample: ComputeSample): void {
+  const last = buf.last();
+  if (last && sample.at < last.at) buf.retain((s) => s.at <= sample.at);
+  buf.push(sample);
+  const oldest = sample.at - COMPUTE_HISTORY_WINDOW_MS;
+  buf.dropWhile((s) => s.at < oldest);
+}
+
+/**
+ * `/compute/history` rows → pod-level samples, oldest first, each at the
+ * instant it was actually observed.
+ *
+ * Every row becomes ONE point:
+ *
+ * - A MINUTE row contributes `_last` at its own `ts`. The controller closes a
+ *   fold on its Nth sample and stamps it with the last sample folded in
+ *   (`MinuteFold::finish`), so `ts` IS when that value was read. Plotting it
+ *   there means the drift of those stamps needs no compensation at all — the
+ *   points are simply spaced as irregularly as the sampler was.
+ * - A DOWNSAMPLED row contributes `_avg` at the middle of the span it
+ *   summarises. The broker's rollup floors its `ts` to the 5-minute boundary
+ *   (`retention.rs`) and groups the minute rows stamped inside it — and those
+ *   are end-stamped, so the measurements actually run from about a minute
+ *   BEFORE that boundary to its end: `[ts - 60s, ts + resolution)`, whose
+ *   middle is `ts + (resolution - 60s) / 2`.
+ *
+ * A pod's containers are then summed: rows from one fold share an instant, so
+ * points within `COMPUTE_SAMPLE_MERGE_MS` of each other, one per container,
+ * are one observation of the pod (see `podLevelSample` for the live
+ * equivalent). A second row for a container closes the group, so nothing is
+ * double-counted.
+ */
+export function historySamples(rows: readonly ComputeHistoryRow[]): ComputeSample[] {
+  const points: { at: number; containerUid: string; cpuMillis: number; workingSetBytes: number }[] = [];
+  for (const row of rows) {
+    // `parseBrokerTime`, never `Date.parse`: the broker's own deserialiser
+    // accepts a zone-less stamp, and `Date.parse` would read one as LOCAL
+    // time, moving every seeded sample by the viewer's offset.
+    const ts = parseBrokerTime(row.ts);
+    if (ts === null) continue; // an unparseable ts must not NaN the series
+    const secs = Number.isFinite(row.resolution_secs) && row.resolution_secs > 0 ? row.resolution_secs : 60;
+    const coarse = secs > 60;
+    const rawCpu = coarse ? row.cpu_usage_millis_avg : row.cpu_usage_millis_last;
+    const rawMem = coarse ? row.mem_working_set_avg : row.mem_working_set_last;
+    points.push({
+      at: coarse ? ts + ((secs - 60) * 1000) / 2 : ts,
+      containerUid: row.container_uid,
+      cpuMillis: Number.isFinite(rawCpu) ? rawCpu : 0,
+      workingSetBytes: Number.isFinite(rawMem) ? rawMem : 0,
+    });
+  }
+  points.sort((a, b) => a.at - b.at);
+  // `pod_compute_history` has no unique index and the controller re-POSTs a
+  // batch whose response was lost, so the same container can appear twice at
+  // one instant. Dropping the repeat here keeps the pod's containers in one
+  // group: letting it split them would emit two samples at that instant, and
+  // the pod would plot as whichever container landed in the second one.
+  const seen = new Set<string>();
+  const distinct = points.filter((p) => {
+    const key = `${p.containerUid}@${p.at}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+
+  const samples: ComputeSample[] = [];
+  let group: typeof points = [];
+  const close = () => {
+    if (group.length === 0) return;
+    let cpuMillis = 0;
+    let workingSetBytes = 0;
+    for (const p of group) {
+      cpuMillis += p.cpuMillis;
+      workingSetBytes += p.workingSetBytes;
+    }
+    // The instant the last of the group was observed: by then every
+    // container's contribution to this sum had been read.
+    samples.push({ at: group[group.length - 1].at, cpuMillis, workingSetBytes });
+    group = [];
+  };
+  for (const p of distinct) {
+    const spans = group.length > 0 && p.at - group[0].at > COMPUTE_SAMPLE_MERGE_MS;
+    const repeats = group.some((g) => g.containerUid === p.containerUid);
+    if (spans || repeats) close();
+    group.push(p);
+  }
+  close();
+  return samples;
+}
+
+/**
+ * Whether fetching this pod's history could add anything to its series.
+ *
+ * The question is not "does the series have a hole" — it is "is there time we
+ * have not asked about that the series does not cover". `askedAt` is when the
+ * last successful read was issued, and a read returns the whole window as of
+ * then, so everything up to it is already known: a hole older than `askedAt`
+ * is a hole the broker does not have (a controller restart, a node reboot),
+ * and asking again would fetch the same rows forever against an endpoint that
+ * sheds.
+ *
+ * Everything AFTER `askedAt` is unknown, and that is what makes a pause
+ * recoverable: a tab hidden for longer than the window leaves a series
+ * holding a single current sample, with no hole in it to find, yet an hour of
+ * un-asked time behind it that the broker can fill. Measuring from `askedAt`
+ * rather than from the samples in hand is what tells those two apart.
+ */
+export function needsSeed(
+  samples: readonly ComputeSample[],
+  now: number,
+  askedAt: number | null,
+  gapMs: number = COMPUTE_SPARK_GAP_MS,
+): boolean {
+  if (askedAt === null) return true; // never asked: whatever the poll has is all there is
+  let previous = askedAt;
+  for (const s of samples) {
+    if (s.at <= askedAt) continue; // already covered by that read
+    if (s.at - previous > gapMs) return true;
+    previous = s.at;
+  }
+  return now - previous > gapMs;
+}
+
+/**
+ * A pod's series with seeded history merged in: a union by timestamp, with
+ * the live samples winning any instant both describe.
+ *
+ * Merging rather than replacing is what makes re-seeding safe, and being safe
+ * to repeat is what lets a hole be refilled later instead of being drawn as
+ * an outage forever. Live samples collected while the read was in flight are
+ * kept for the same reason.
+ *
+ * Seeded points NEWER than the newest live sample are dropped, not clamped
+ * onto it: the broker's clock is not the browser's, and the newest sample is
+ * what the gauge reports as "now". That number comes from the live poll or
+ * not at all — a seeded `_last` must never sit at the right edge claiming to
+ * be the present.
+ */
+export function seedSamples(
+  existing: RingBuffer<ComputeSample> | undefined,
+  seeded: readonly ComputeSample[],
+): RingBuffer<ComputeSample> {
+  const live = existing?.values() ?? [];
+  const newestLive = live.length > 0 ? live[live.length - 1].at : null;
+  const byInstant = new Map<number, ComputeSample>();
+  for (const s of seeded) {
+    if (newestLive !== null && s.at > newestLive) continue;
+    byInstant.set(s.at, s);
+  }
+  for (const s of live) byInstant.set(s.at, s); // the live read of an instant wins
+  const merged = [...byInstant.values()].sort((a, b) => a.at - b.at);
+  const newest = merged.length > 0 ? merged[merged.length - 1].at : 0;
+  const buf = new RingBuffer<ComputeSample>(existing?.capacity ?? COMPUTE_MAX_SAMPLES);
+  for (const s of merged) {
+    if (s.at >= newest - COMPUTE_HISTORY_WINDOW_MS) buf.push(s);
+  }
+  return buf;
 }
 
 /**
@@ -191,6 +418,25 @@ export function containersForNode(
 /** `<ns>/<pod_name>` — the fallback join key for rows and pods. */
 export const podNameKey = (namespace: string | null | undefined, name: string): string => `${namespace ?? ''}/${name}`;
 
+/**
+ * The points a sparkline draws for one pod: every sample inside the window,
+ * each carrying the instant it was observed.
+ *
+ * No slots and no padding — the chart maps x from the timestamp, so an
+ * irregular series stays irregular instead of being folded onto a grid that
+ * would have to invent a value, or a hole, for every minute it did not
+ * describe.
+ */
+export function windowedSamples(
+  samples: readonly ComputeSample[],
+  now: number,
+  windowMs: number = COMPUTE_HISTORY_WINDOW_MS,
+): { points: ComputeSample[]; from: number; to: number; latest: ComputeSample | undefined } {
+  const from = now - windowMs;
+  const points = samples.filter((s) => s.at >= from && s.at <= now);
+  return { points, from, to: now, latest: points[points.length - 1] };
+}
+
 export interface BuildPodComputeInput {
   containers: readonly ComputeContainer[];
   nodesByName: ReadonlyMap<string, ComputeNode>;
@@ -200,13 +446,19 @@ export interface BuildPodComputeInput {
   samples: readonly ComputeSample[];
   /** Whether the pod's node reported compute at all (see nodeComputeState). */
   nodeState?: NodeComputeState;
+  /** End of the sparkline window. One value for a whole render pass, so two
+   *  cards drawn together share a time origin; defaults to now. */
+  now?: number;
 }
 
 const frozenArray = <T,>(): T[] => Object.freeze([]) as unknown as T[];
+/** A pod with no rows draws no chart, so its window is never read. */
+const EMPTY_WINDOW = Object.freeze({ from: 0, to: 0 });
 const emptyState = (status: ComputeStatus): PodComputeData =>
   Object.freeze({
     cpuPct: null, memPct: null, cpuDenominator: null, memDenominator: null,
-    status, findings: frozenArray<ComputeFinding>(), sparkCpu: frozenArray<number>(), sparkMem: frozenArray<number>(),
+    status, findings: frozenArray<ComputeFinding>(),
+    sparkCpu: frozenArray<SparkPoint>(), sparkMem: frozenArray<SparkPoint>(), sparkWindow: EMPTY_WINDOW,
     cpuMillis: null, memBytes: null, cpuCapacityMillis: null, memCapacityBytes: null,
     containers: frozenArray<ComputeContainer>(),
   });
@@ -237,7 +489,11 @@ export function buildPodComputeData(input: BuildPodComputeInput): PodComputeData
     return COMPUTE_STATE_PENDING;
   }
 
-  const latest = samples[samples.length - 1] ?? podLevelSample(containers, Date.now());
+  const now = input.now ?? Date.now();
+  const series = windowedSamples(samples, now);
+  // The newest sample INSIDE the window, else the live rows: a buffer whose
+  // newest bucket has aged out must not keep reporting it as the current value.
+  const latest = series.latest ?? podLevelSample(containers, now);
   const cpuDen = pickDenominator(
     containers.map((c) => c.cpu_limit_millis),
     containers.map((c) => c.cpu_request_millis),
@@ -266,8 +522,9 @@ export function buildPodComputeData(input: BuildPodComputeInput): PodComputeData
     memDenominator: memDen?.kind ?? null,
     status,
     findings: [...findings],
-    sparkCpu: samples.map((s) => s.cpuMillis),
-    sparkMem: samples.map((s) => s.workingSetBytes),
+    sparkCpu: series.points.map((s) => ({ at: s.at, value: s.cpuMillis })),
+    sparkMem: series.points.map((s) => ({ at: s.at, value: s.workingSetBytes })),
+    sparkWindow: { from: series.from, to: series.to },
     cpuMillis: latest.cpuMillis,
     memBytes: latest.workingSetBytes,
     cpuCapacityMillis: cpuDen?.value ?? null,
