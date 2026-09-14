@@ -62,7 +62,6 @@ interface NetworkGraphProps {
   computeFindings?: ComputeFinding[];
   layoutDirection: 'LR' | 'TB';
   onToggleLayoutDirection: () => void;
-  onPodToggle: (podId: string) => void;
   onPodSelect: (pod: PodNodeData | null) => void;
   selectedPodId: string | null;
   onBuildPolicy?: (pod: PodNodeData) => void;
@@ -82,9 +81,6 @@ const edgeTypes = {
 
 const NO_FINDINGS: ComputeFinding[] = [];
 
-// Noop toggle for external nodes (they don't expand)
-const noopToggle = () => {};
-
 const NetworkGraphInner: React.FC<NetworkGraphProps> = ({
   pods,
   allPodsLookup,
@@ -100,7 +96,6 @@ const NetworkGraphInner: React.FC<NetworkGraphProps> = ({
   computeFindings = NO_FINDINGS,
   layoutDirection,
   onToggleLayoutDirection,
-  onPodToggle,
   onPodSelect,
   selectedPodId,
   onBuildPolicy,
@@ -286,7 +281,16 @@ const NetworkGraphInner: React.FC<NetworkGraphProps> = ({
         data: {
           ...pod,
           layoutDirection,
-          onToggle: isExternal ? noopToggle : onPodToggle,
+          // Expansion IS selection. Selecting a card opens it and closes
+          // whichever card was open before, so exactly one body is ever
+          // shown. That is what keeps this affordable: the card that grows
+          // and the card that shrinks cancel out, so ELK re-runs on a
+          // bounded delta rather than on a graph that accumulates height
+          // with every card the user has ever opened.
+          //
+          // `pod.isExpanded` off the wire is deliberately overridden rather
+          // than read — nothing else may open a card.
+          isExpanded: pod.id === selectedPodId,
           onBuildPolicy: isExternal ? undefined : onBuildPolicy,
           onFocus,
           isFocused: pod.id === focusedNodeId,
@@ -294,7 +298,7 @@ const NetworkGraphInner: React.FC<NetworkGraphProps> = ({
         selected: pod.id === selectedPodId,
       };
     });
-  }, [allDisplayPods, onPodToggle, selectedPodId, onBuildPolicy, layoutDirection, onFocus, focusedNodeId]);
+  }, [allDisplayPods, selectedPodId, onBuildPolicy, layoutDirection, onFocus, focusedNodeId]);
 
   // Track ELK-computed node positions
   const [elkPositions, setElkPositions] = useState<Map<string, { x: number; y: number }>>(new Map());

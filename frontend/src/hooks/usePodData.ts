@@ -6,7 +6,15 @@ import { buildPodComputeData, containersForNode, nodeComputeState } from '../uti
 import { withConcurrencyLimit } from '../utils/concurrency';
 import type { ComputeFinding } from '../types/compute';
 
-export const usePodData = (namespace: string) => {
+/**
+ * @param selectedPodId The open card, or null. Selection is what opens a card
+ *   (NetworkGraph derives `isExpanded` from it), so it is also the only signal
+ *   that a pod's stored history is worth reading — see the seeding effect
+ *   below. Passed in rather than read off `basePods`: the expanded flag on a
+ *   pod object is no longer authoritative, and seeding off it would silently
+ *   read nothing.
+ */
+export const usePodData = (namespace: string, selectedPodId: string | null = null) => {
   const [basePods, setPods] = useState<PodNodeData[]>([]);
   const [allPodsLookup, setAllPodsLookup] = useState<PodInfo[]>([]);
   const [services, setServices] = useState<ServiceInfo[]>([]);
@@ -92,14 +100,6 @@ export const usePodData = (namespace: string) => {
     fetchPodData();
   }, [fetchPodData]);
 
-  const togglePodExpansion = useCallback((podId: string) => {
-    setPods((prevPods) =>
-      prevPods.map((pod) =>
-        pod.id === podId ? { ...pod, isExpanded: !pod.isExpanded } : pod
-      )
-    );
-  }, []);
-
   const refreshData = useCallback(() => {
     fetchPodData();
   }, [fetchPodData]);
@@ -108,13 +108,20 @@ export const usePodData = (namespace: string) => {
   // here — not fetched with traffic — so the 5 s poll never re-fetches
   // traffic or syscalls, and a pod without compute rows is left untouched.
   const compute = useComputeData(namespace);
-  // Seed an expanded card's sparkline from stored history (design D8).
+  // Seed the open card's sparkline from stored history (design D8).
   //
-  // Expanding a card is the only signal that its history is worth a read:
-  // the sparklines are the sole consumer of seeded buckets and render only
-  // when expanded, so nothing is fetched for a namespace nobody has opened a
-  // card in. `seedPod` is idempotent, so running this for every open card on
-  // every poll costs nothing once a pod is seeded or its read is in flight.
+  // Selecting a card is the only signal that its history is worth a read: the
+  // sparklines are the sole consumer of seeded buckets and render only in the
+  // expanded body, so nothing is fetched for a namespace nobody has opened a
+  // card in. `seedPod` is idempotent, so re-running on every poll costs
+  // nothing once a pod is seeded or its read is in flight.
+  //
+  // Keyed off `selectedPodId`, NOT off `isExpanded`. Expansion is derived
+  // from selection in NetworkGraph and is never written back here, so the
+  // flag on these pod objects is always false — seeding off it would fetch
+  // nothing, and the only symptom would be an expanded card whose sparklines
+  // stayed empty. At most one card is open, so this is one read, not one per
+  // card as it was when cards expanded independently.
   //
   // One uid per card, the same one the chart below reads: a replica group's
   // other uids can never be displayed, so fetching them would be reads for
@@ -122,12 +129,12 @@ export const usePodData = (namespace: string) => {
   const seedPod = compute.seedPod;
   useEffect(() => {
     if (!compute.enabled) return; // no pod carries a `compute` field, so no chart can render
-    for (const node of basePods) {
-      if (!node.isExpanded) continue;
-      const uid = containersForNode(node, compute.containersByPodUid, compute.containersByPodName)[0]?.pod_uid;
-      if (uid) seedPod(uid);
-    }
-  }, [basePods, compute.enabled, compute.containersByPodUid, compute.containersByPodName, seedPod]);
+    if (!selectedPodId) return; // nothing open, so no sparkline to fill
+    const node = basePods.find((p) => p.id === selectedPodId);
+    if (!node) return; // an external or synthesised card: no local history to read
+    const uid = containersForNode(node, compute.containersByPodUid, compute.containersByPodName)[0]?.pod_uid;
+    if (uid) seedPod(uid);
+  }, [basePods, selectedPodId, compute.enabled, compute.containersByPodUid, compute.containersByPodName, seedPod]);
 
   const pods = useMemo<PodNodeData[]>(() => {
     if (!compute.enabled) return basePods;
@@ -183,7 +190,6 @@ export const usePodData = (namespace: string) => {
     services,
     loading,
     error,
-    togglePodExpansion,
     refreshData,
   };
 };

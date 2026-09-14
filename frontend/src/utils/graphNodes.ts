@@ -93,8 +93,15 @@ export function layoutSignatureOf(parts: LayoutParts): string {
 /**
  * Decide how the viewport should react once the next layout lands.
  * Same node ids, same edges, same direction ⇒ in place; `toggledId` is the
- * one node whose expanded bit flipped (null when it was only gauges, or more
- * than one card changed at once).
+ * card the viewport should follow, or null when nothing worth following
+ * moved (only gauges arrived).
+ *
+ * Selecting a card opens it AND closes the previously open one, so the
+ * ordinary case is TWO bits flipping at once. The card to follow is the one
+ * that OPENED: it is the card that just grew, the one the user asked for,
+ * and the only one that can have grown out of view. Following the card that
+ * closed — or giving up and following neither, which a plain "exactly one
+ * changed" rule does — would leave the user's own selection off screen.
  */
 export function layoutIntent(prev: LayoutParts | null, next: LayoutParts): LayoutIntent {
   if (!prev) return { kind: 'refit' };
@@ -104,12 +111,16 @@ export function layoutIntent(prev: LayoutParts | null, next: LayoutParts): Layou
   if (prev.edges.length !== next.edges.length) return { kind: 'refit' };
   for (let i = 0; i < next.edges.length; i++) if (prev.edges[i] !== next.edges[i]) return { kind: 'refit' };
 
-  const toggled: string[] = [];
+  // Only cards that OPENED are candidates. A card that closed is deliberately
+  // ignored rather than counted: under selection-driven expansion one closes
+  // on almost every change, and counting it would make "more than one card
+  // changed" the normal case and leave the viewport following nothing.
+  const opened: string[] = [];
   for (const [id, bits] of next.nodes) {
     const before = prev.nodes.get(id) ?? '';
-    if (before.charAt(0) !== bits.charAt(0)) toggled.push(id);
+    if (bits.charAt(0) === '1' && before.charAt(0) !== '1') opened.push(id);
   }
-  return { kind: 'in-place', toggledId: toggled.length === 1 ? toggled[0] : null };
+  return { kind: 'in-place', toggledId: opened.length === 1 ? opened[0] : null };
 }
 
 export interface Rect {

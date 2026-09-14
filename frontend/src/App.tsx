@@ -100,12 +100,25 @@ function App() {
   // effect — no extra render, and it can't loop.
   const effectiveNamespace =
     namespaces.length > 0 && !namespaces.includes(namespace) ? namespaces[0] : namespace;
-  const { pods, compute, allPodsLookup, services, loading, error, togglePodExpansion, refreshData } = usePodData(effectiveNamespace);
+  // Selected workload id from the URL (`?pod=<id>`). Derived before the data
+  // hook because the hook needs it: selection is what opens a card, and an
+  // open card is the only thing that reads stored compute history.
+  const selectedPodId = loc.params.pod ?? null;
+  const { pods, compute, allPodsLookup, services, loading, error, refreshData } = usePodData(effectiveNamespace, selectedPodId);
 
   // Selected workload is derived from the URL (`?pod=<id>`) and resolved against
   // the loaded pods — so a deep link opens straight to that workload once data
   // arrives, and back/forward restores it.
-  const selectedPodId = loc.params.pod ?? null;
+  //
+  // The raw id and the resolved pod are NOT interchangeable, and which one a
+  // consumer gets matters now that selection also opens the card. `pods` holds
+  // only this namespace's own workloads, while the map additionally draws
+  // external peers, DaemonSet peers and contention culprits that NetworkGraph
+  // synthesises for itself — none of which resolve here. So the graph gets the
+  // raw id, which it matches against its own full node set; the DataTable and
+  // the Policy Builder get the resolved pod, which genuinely needs a local
+  // workload's traffic and syscalls. Passing the resolved id to the graph
+  // would collapse every card the moment an external peer was selected.
   const selectedPod = useMemo(
     () => (selectedPodId ? pods.find((p) => p.id === selectedPodId) ?? null : null),
     [pods, selectedPodId],
@@ -443,9 +456,8 @@ function App() {
             <div className="flex-1 min-h-0">
               <NetworkGraph
                 pods={pods}
-                onPodToggle={togglePodExpansion}
                 onPodSelect={handlePodSelect}
-                selectedPodId={selectedPod?.id || null}
+                selectedPodId={selectedPodId}
                 onBuildPolicy={handleBuildPolicy}
                 focusedNodeId={focusedNodeId}
                 onFocusChange={setFocusedNodeId}
