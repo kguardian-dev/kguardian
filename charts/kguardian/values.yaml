@@ -324,22 +324,29 @@ seccomp:
     # interval, posting the counts to the broker. Matches the syscall
     # probe's own drain cadence (`controller/src/syscall.rs`).
     #
-    # The controller also declares this value to the broker on every
-    # report, empty heartbeats included, and the broker derives that node's
+    # The Controller also declares this value to the Broker on every
+    # report, empty heartbeats included, and the Broker derives that node's
     # staleness window from it: the node counts as still watching for
     # `max(300, intervalSeconds * 3)` seconds after its last report, and a
     # workload's `denials` block (and the `DenialsObserved` condition)
     # falls back to "Unknown" only once no capturing node is inside its own
-    # window. So there is deliberately no upper bound here — the window
-    # follows the interval rather than being a second number to keep in
-    # sync with it. Below ~100 the 300 s floor governs, which is the point:
-    # a node that misses a drain or two is late, not gone. The broker does
-    # cap the cadence it will believe at one day, so beyond that the window
-    # stops widening; nothing sane is anywhere near it.
+    # window. Below ~100 the 300 s floor governs, which is the point: a
+    # node that misses a drain or two is late, not gone.
+    #
+    # The supported range is 1-600 and the chart refuses anything larger.
+    # That staleness window is not only a timeout — it is how long kguardian
+    # will keep telling you a workload is clean on the strength of one old
+    # report — so the Broker caps it at 1800 s. Without the cap, a large
+    # interval meant that when the last capturing node went away (spot
+    # reclaim, autoscaler, a `CONFIG_AUDIT=n` rebuild) every workload kept
+    # reading `total: 0` for hours with nothing watching. A node draining
+    # slower than 600 s is heard from less often than the Broker will vouch
+    # for it, so its workloads would sit at "Unknown" between reports:
+    # the honest answer, but not a useful setting.
     #
     # Lower it for faster metric/status visibility at the cost of more
-    # frequent broker POSTs; raise it on very large clusters to reduce
-    # broker load.
+    # frequent Broker POSTs; raise it on very large clusters to reduce
+    # Broker load — 600 is 60x fewer POSTs than the default.
     intervalSeconds: 10
 
 # -- Live compute gauges and noisy-neighbour detection. Three layers, each

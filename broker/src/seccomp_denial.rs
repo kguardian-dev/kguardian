@@ -186,6 +186,34 @@ const MAX_DENIAL_ROLLUP_PAIRS_PER_WORKLOAD: i64 = (MAX_DENIAL_SYSCALLS * MAX_DEN
 /// rather than as an all-clear.
 const MAX_DENIAL_ROLLUP_NAME_ROWS: i64 = 10_000;
 
+/// Cap on the namespaces one rollup will enumerate as unattributable.
+///
+/// An unattributed denial withholds the all-clear from every workload in its
+/// namespace — see [`UnattributedNamespaces`] — so this read is the third
+/// thing `GET /seccomp/profiles` does on a 15 s poll and it needs a bound
+/// like the other two. `pod_namespace` comes straight off the wire on an
+/// unattributed row, so the bound must not assume the caller is a real
+/// Controller with a real cluster's worth of namespaces.
+///
+/// Unlike the name-row ceiling, hitting this one is NOT a truncation: a
+/// truncated list here would silently hand the all-clear back to the
+/// namespaces that fell past the cap, which is the failure this whole read
+/// exists to prevent. Past the cap the index stops enumerating and withholds
+/// from everything — see [`UnattributedNamespaces::TooMany`]. A thousand is
+/// far above any cluster where the answer is meaningful; reaching it means
+/// attribution is broken cluster-wide or someone is feeding the endpoint,
+/// and `Unknown` is the right answer to both.
+const MAX_UNATTRIBUTED_NAMESPACES: usize = 1_000;
+
+/// Peak in-flight bytes per unattributed-namespace row.
+///
+/// One string, but the ingest bound on it is [`MAX_DNS_NAME_LEN`] rather than
+/// the length a real namespace has, and the value arrives off the wire on
+/// exactly the rows this read returns. Budgeted at the bound plus `String`
+/// and libpq overhead rather than at what a cluster would really send.
+/// Estimated from the row shape, not measured.
+const UNATTRIBUTED_NAMESPACE_ROW_COST_BYTES: u64 = 768;
+
 /// Peak in-flight bytes per rollup name row.
 ///
 /// Five short strings — namespace, kind, workload, syscall, action — so
@@ -224,12 +252,12 @@ const MAX_DENIAL_SERIES: usize = 10_000;
 ///
 /// The window itself is PER NODE, computed from the cadence the node declares
 /// on every report — see [`CAPTURE_REPORT_STALE_INTERVALS`]. It has to be:
-/// the Controller's drain interval is an operator-set Helm value with no
-/// upper bound, so any fixed window shorter than it makes a fleet that is
-/// capturing perfectly read `Unknown` between every pair of reports, forever.
-/// Coupling the Broker to the Controller's chart value would be the obvious
-/// fix and the wrong one — the Broker cannot see that chart. The node
-/// declares its own cadence and the Broker trusts it.
+/// the Controller's drain interval is an operator-set Helm value, so any
+/// fixed window shorter than it makes a fleet that is capturing perfectly
+/// read `Unknown` between every pair of reports, forever. Coupling the Broker
+/// to the Controller's chart value would be the obvious fix and the wrong one
+/// — the Broker cannot see that chart. The node declares its own cadence and
+/// the Broker trusts it, up to [`CAPTURE_REPORT_STALE_CEILING_SECS`].
 ///
 /// This floor is what a node that declares nothing gets. At the 10 s default
 /// drain it is 30 consecutive missed reports — generous enough that a node
@@ -252,21 +280,57 @@ const CAPTURE_REPORT_STALE_FLOOR_SECS: i64 = 300;
 /// figure that has nothing to do with how often it speaks.
 const CAPTURE_REPORT_STALE_INTERVALS: i64 = 3;
 
+/// Hard ceiling on the staleness window, whatever cadence a node declares.
+///
+/// The per-node window exists so a large drain interval cannot make a
+/// capturing fleet read `Unknown`. It was given no ceiling, and that is the
+/// same mistake pointing the other way: this window IS the all-clear gate, so
+/// widening it does not widen "a timeout", it widens how long kguardian keeps
+/// telling an operator a workload is clean on the strength of one old report.
+/// Against the previous 86 400 s interval bound the window reached three
+/// days, and a single report — a node departing on a spot reclaim, or one
+/// unauthenticated POST, since `BROKER_AUTH_TOKEN` is optional — bought the
+/// whole cluster 72 hours of `total: 0`.
+///
+/// Thirty minutes is the longest this file will vouch for a node it has not
+/// heard from. It is chosen against what the all-clear is FOR — promoting a
+/// profile from audit to enforcing, a decision an operator takes over minutes
+/// — rather than against how slowly a Controller might be configured to
+/// drain. Six times the floor still leaves the per-node mechanism real range:
+/// a node draining every 10 minutes is trusted for 30, where the fixed window
+/// this replaced called it stale at 5.
+///
+/// The two directions are not symmetric, which is why the ceiling is tight
+/// where the floor is generous. Too short a window costs `Unknown`: visible,
+/// self-correcting on the next report, and the answer an operator would want
+/// anyway. Too long a window costs a false all-clear: invisible, and acted
+/// on.
+const CAPTURE_REPORT_STALE_CEILING_SECS: i64 = 1_800;
+
 /// Ceiling on the drain interval a node may declare.
 ///
-/// The declared interval widens that node's staleness window, so an absurd
-/// value is a node claiming its heartbeat stays trustworthy for years — the
-/// false all-clear again, arriving through a field that looks like a timeout.
-/// A day is four orders of magnitude above the 10 s default and three above
-/// anything an operator would set on purpose.
+/// Derived from the window ceiling rather than chosen separately, because
+/// widening the window is the only thing a declared interval does: a cadence
+/// the window cannot cover is a cadence this file cannot honour. It lands at
+/// ten minutes — 60x the 10 s default, and so 60x fewer POSTs, which is the
+/// entire reason the chart offers the knob.
+///
+/// Past it the honest answer is `Unknown` rather than a wider all-clear. A
+/// node draining every hour is heard from once an hour, and no amount of
+/// trust turns a 59-minute-old silence into evidence that anything is
+/// watching. The chart refuses such a value at install time and ingest warns
+/// about one that arrives anyway, so that state is diagnosable rather than
+/// silent.
 ///
 /// Clamped at ingest rather than rejected, unlike [`MAX_DENIAL_COUNT`]: the
 /// interval rides on the heartbeat, and refusing the report over it would
-/// throw away the capture evidence the report exists to carry because of a
-/// field that only widens a timeout. `seccomp_denial_nodes.interval_seconds`
-/// carries the same bound as a CHECK constraint, so the multiplication in
-/// [`capture_live_sql`] cannot overflow on a row this path did not write.
-const MAX_REPORT_INTERVAL_SECS: i64 = 86_400;
+/// throw away the capture evidence the report exists to carry.
+/// `seccomp_denial_nodes.interval_seconds` carries the same bound as a CHECK
+/// constraint, and [`capture_live_sql`] clamps the window a second time in
+/// SQL — so neither a row written by some other path nor one left behind by
+/// the wider bound this replaced can buy a window this file would not grant.
+const MAX_REPORT_INTERVAL_SECS: i64 =
+    CAPTURE_REPORT_STALE_CEILING_SECS / CAPTURE_REPORT_STALE_INTERVALS;
 
 /// Default refresh cadence for the one denial metric that needs a query. See
 /// [`metrics_interval`] for why this is 15 s and why it must not be folded
@@ -360,6 +424,9 @@ struct ValidatedReport {
     capturing: bool,
     /// The cadence the node declared, normalised for storage.
     interval_seconds: Option<i64>,
+    /// Whether that cadence was above [`MAX_REPORT_INTERVAL_SECS`] and had to
+    /// be cut down to it.
+    interval_clamped: bool,
 }
 
 impl DenialBatch {
@@ -384,7 +451,7 @@ impl DenialBatch {
     /// Absent the flag AND absent accepted rows, the honest answer is "not
     /// known to be capturing".
     fn validate(self, now: DateTime<Utc>) -> ValidatedReport {
-        let interval_seconds = declared_interval_seconds(self.interval_seconds);
+        let (interval_seconds, interval_clamped) = declared_interval_seconds(self.interval_seconds);
         let FoldedBatch {
             rows,
             rejected,
@@ -397,25 +464,37 @@ impl DenialBatch {
             from_the_future,
             capturing,
             interval_seconds,
+            interval_clamped,
         }
     }
 }
 
-/// The staleness cadence a report declares, normalised for storage.
+/// The staleness cadence a report declares, normalised for storage, and
+/// whether it had to be cut down to get there.
 ///
 /// `None` for absent or zero — the contract's fallback, which
 /// [`capture_live_sql`] reads as the [`CAPTURE_REPORT_STALE_FLOOR_SECS`]
 /// floor. Anything above [`MAX_REPORT_INTERVAL_SECS`] is clamped to it rather
-/// than rejected, so a nonsense cadence costs a timeout bound and never the
-/// heartbeat riding with it.
-fn declared_interval_seconds(raw: Option<u64>) -> Option<i64> {
+/// than rejected, so a cadence this file cannot honour costs a timeout bound
+/// and never the heartbeat riding with it.
+///
+/// The clamp is returned rather than applied silently because it has a
+/// consequence an operator has to be able to find: a node draining slower
+/// than the ceiling is heard from less often than it is trusted for, so it
+/// reads stale between its own reports and its workloads sit at `Unknown`.
+/// That is the correct answer — see [`CAPTURE_REPORT_STALE_CEILING_SECS`] —
+/// but discovering it by watching a condition flap is not. See
+/// [`post_seccomp_denials`], which warns.
+fn declared_interval_seconds(raw: Option<u64>) -> (Option<i64>, bool) {
     match raw.unwrap_or(0) {
-        0 => None,
-        declared => Some(
-            i64::try_from(declared)
-                .unwrap_or(MAX_REPORT_INTERVAL_SECS)
-                .min(MAX_REPORT_INTERVAL_SECS),
-        ),
+        0 => (None, false),
+        declared => {
+            let declared = i64::try_from(declared).unwrap_or(i64::MAX);
+            (
+                Some(declared.min(MAX_REPORT_INTERVAL_SECS)),
+                declared > MAX_REPORT_INTERVAL_SECS,
+            )
+        }
     }
 }
 
@@ -696,9 +775,26 @@ fn attribution_index(
 /// collapse to one row, and attributing a denial by name alone would then
 /// name ANOTHER TEAM'S workload as the one the kernel acted on — in a
 /// `SeccompProfile` status, on a dashboard, and in an alert. Refusing to
-/// attribute is the correct answer there: the denial is still stored and
-/// still queryable by pod, it simply does not claim a workload it cannot
-/// prove.
+/// attribute is the correct answer there.
+///
+/// # Refusing is not free, and it used to be treated as if it were
+///
+/// The obvious reading — "the denial is still stored and still queryable by
+/// pod, it simply does not claim a workload it cannot prove" — is wrong, and
+/// it was this function's doc comment until it cost a false all-clear. The
+/// rollup filters unattributed rows out and [`DenialIndex::block_for`]
+/// answers a workload with no rows with `total: 0`, so a refusal here does
+/// not leave the workload's status silent: it fills it in with the clean
+/// answer. The workload's block is what the promotion gate reads, and nothing
+/// sends an operator to `GET /seccomp/denials` first.
+///
+/// So the refusal is still right — a wrong workload name is worse than none —
+/// but it is a fact the read path has to carry rather than absorb. It does:
+/// see [`UnattributedNamespaces`], which withholds the all-clear from the
+/// whole namespace the unattributable row is in, and
+/// [`crate::retention::BACKFILL_DENIAL_ATTRIBUTION_SQL`], which re-runs this
+/// rule against `pod_details` later for rows that failed it only because the
+/// pod was not known yet.
 ///
 /// Pure so the refusal has a test rather than a comment.
 fn attribute(
@@ -743,6 +839,9 @@ pub async fn post_seccomp_denials(
         return Err(actix_web::error::ErrorBadRequest("node too long"));
     }
 
+    // Read off before `validate` consumes the batch, so the warning below can
+    // name the value the operator actually set rather than the clamped one.
+    let batch_interval = batch.interval_seconds;
     // One clock reading for the whole report: every row is clamped against
     // the same ceiling, so the fold is a function of the batch rather than of
     // how long it took to walk it.
@@ -752,7 +851,24 @@ pub async fn post_seccomp_denials(
         from_the_future,
         capturing,
         interval_seconds,
+        interval_clamped,
     } = batch.validate(Utc::now());
+    if interval_clamped {
+        // Not a rejection either — the heartbeat is kept. But a node that
+        // drains slower than the Broker will vouch for it reads stale between
+        // its own reports, so its workloads sit at `DenialsObserved: Unknown`
+        // and an operator needs to be told why rather than left to infer it
+        // from a flapping condition.
+        warn!(
+            %node,
+            declared = ?batch_interval,
+            ceiling = MAX_REPORT_INTERVAL_SECS,
+            "seccomp denial report declared a drain interval above the ceiling \
+             the broker will trust; it was clamped, and this node will read as \
+             not capturing between its own reports. Lower \
+             seccomp.denials.intervalSeconds."
+        );
+    }
     if !rejected.is_empty() {
         // Per-field, not a bare total: "12 rejected" tells an operator
         // nothing, "12 rejected on count" says the controller is shipping
@@ -799,60 +915,7 @@ pub async fn post_seccomp_denials(
 
     let (unattributed, increments) = web::block(move || -> Result<_, DbError> {
         let mut conn = pool.get()?;
-        let index = attribution_index(&mut conn, &pod_names)?;
-        let mut unattributed = 0usize;
-        let mut inserts: Vec<NewDenial> = Vec::with_capacity(rows.len());
-        // The Prometheus counter's increments, built here because this is
-        // where attribution is resolved: the series is labelled by the
-        // workload, so the label set does not exist until this loop runs.
-        let mut increments: Vec<(DenialLabels, i64)> = Vec::with_capacity(rows.len());
-        for d in rows {
-            let (workload_kind, workload_name) =
-                attribute(&d.pod_namespace, index.get(&d.pod_name));
-            if workload_kind.is_none() {
-                unattributed += 1;
-            }
-            increments.push((
-                DenialLabels {
-                    namespace: d.pod_namespace.clone(),
-                    // Unattributed denials keep their namespace and action
-                    // and carry empty workload labels rather than being
-                    // dropped from the counter: "something was denied and we
-                    // could not say whose" is a signal, not a non-event.
-                    workload_kind: workload_kind.clone().unwrap_or_default(),
-                    workload: workload_name.clone().unwrap_or_default(),
-                    action: d.action.clone(),
-                },
-                d.count,
-            ));
-            inserts.push(NewDenial {
-                pod_uid: d.pod_uid,
-                pod_name: d.pod_name,
-                pod_namespace: d.pod_namespace,
-                workload_kind,
-                workload_name,
-                node_name: Some(node_for_rows.clone()),
-                syscall: d.syscall,
-                syscall_nr: d.syscall_nr,
-                action: d.action,
-                action_raw: d.action_raw,
-                arch: d.arch,
-                count: d.count,
-                first_seen: d.first_seen,
-                last_seen: d.last_seen,
-            });
-        }
-        // One transaction for the whole batch: a partially applied drain
-        // would be double-counted by the next one, because the controller
-        // clears its BPF map on a successful POST and has no way to replay
-        // only the half that landed.
-        conn.transaction::<_, DbError, _>(|conn| {
-            for chunk in inserts.chunks(INSERT_CHUNK) {
-                upsert_denials(conn, chunk)?;
-            }
-            Ok(())
-        })?;
-        Ok((unattributed, increments))
+        store_batch(&mut conn, &node_for_rows, &pod_names, rows)
     })
     .await?
     .map_err(actix_web::error::ErrorInternalServerError)?;
@@ -869,6 +932,76 @@ pub async fn post_seccomp_denials(
         "seccomp denials ingested"
     );
     Ok(HttpResponse::Ok().json(crate::Accepted { accepted }))
+}
+
+/// Resolve attribution for one validated drain and store it.
+///
+/// Extracted from [`post_seccomp_denials`] rather than inlined so the live
+/// tests can run the real path — attribution, the refusal, and the upsert —
+/// against a real `pod_details`. A test that rebuilt this loop would be
+/// asserting its own copy of the rule it is meant to be checking, which is a
+/// failure mode this feature has already shipped once.
+///
+/// Returns how many rows named no workload and the Prometheus increments,
+/// which are built here because this is where attribution is resolved: the
+/// series is labelled by the workload, so the label set does not exist until
+/// this loop runs.
+fn store_batch(
+    conn: &mut PgConnection,
+    node: &str,
+    pod_names: &BTreeSet<String>,
+    rows: Vec<DenialInput>,
+) -> Result<(usize, Vec<(DenialLabels, i64)>), DbError> {
+    let index = attribution_index(conn, pod_names)?;
+    let mut unattributed = 0usize;
+    let mut inserts: Vec<NewDenial> = Vec::with_capacity(rows.len());
+    let mut increments: Vec<(DenialLabels, i64)> = Vec::with_capacity(rows.len());
+    for d in rows {
+        let (workload_kind, workload_name) = attribute(&d.pod_namespace, index.get(&d.pod_name));
+        if workload_kind.is_none() {
+            unattributed += 1;
+        }
+        increments.push((
+            DenialLabels {
+                namespace: d.pod_namespace.clone(),
+                // Unattributed denials keep their namespace and action and
+                // carry empty workload labels rather than being dropped from
+                // the counter: "something was denied and we could not say
+                // whose" is a signal, not a non-event.
+                workload_kind: workload_kind.clone().unwrap_or_default(),
+                workload: workload_name.clone().unwrap_or_default(),
+                action: d.action.clone(),
+            },
+            d.count,
+        ));
+        inserts.push(NewDenial {
+            pod_uid: d.pod_uid,
+            pod_name: d.pod_name,
+            pod_namespace: d.pod_namespace,
+            workload_kind,
+            workload_name,
+            node_name: Some(node.to_string()),
+            syscall: d.syscall,
+            syscall_nr: d.syscall_nr,
+            action: d.action,
+            action_raw: d.action_raw,
+            arch: d.arch,
+            count: d.count,
+            first_seen: d.first_seen,
+            last_seen: d.last_seen,
+        });
+    }
+    // One transaction for the whole batch: a partially applied drain would be
+    // double-counted by the next one, because the controller clears its BPF
+    // map on a successful POST and has no way to replay only the half that
+    // landed.
+    conn.transaction::<_, DbError, _>(|conn| {
+        for chunk in inserts.chunks(INSERT_CHUNK) {
+            upsert_denials(conn, chunk)?;
+        }
+        Ok(())
+    })?;
+    Ok((unattributed, increments))
 }
 
 /// `INSERT ... ON CONFLICT (pod_uid, syscall, action) DO UPDATE`, the
@@ -1020,12 +1153,21 @@ fn upsert_node_report(
 ///
 /// `LIMIT 1` rather than a COUNT — the question is existence, and one row is
 /// the whole answer.
+///
+/// The `LEAST` is the ceiling, and it is applied here rather than only at
+/// ingest on purpose. Ingest clamps what it writes and the column's CHECK
+/// clamps what anything else writes, but a row written under the wider bound
+/// this replaced survives both — it was legal when it was stored. Bounding
+/// the window where the window is computed means no stored value, from any
+/// path or any past version, can buy more trust than
+/// [`CAPTURE_REPORT_STALE_CEILING_SECS`].
 fn capture_live_sql() -> String {
     format!(
         "SELECT node_name FROM seccomp_denial_nodes \
-         WHERE capturing AND updated_at >= $1 - make_interval(secs => GREATEST(\
-         {CAPTURE_REPORT_STALE_FLOOR_SECS}, \
-         COALESCE(interval_seconds, 0) * {CAPTURE_REPORT_STALE_INTERVALS})) \
+         WHERE capturing AND updated_at >= $1 - make_interval(secs => LEAST(\
+         GREATEST({CAPTURE_REPORT_STALE_FLOOR_SECS}, \
+         COALESCE(interval_seconds, 0) * {CAPTURE_REPORT_STALE_INTERVALS}), \
+         {CAPTURE_REPORT_STALE_CEILING_SECS})) \
          LIMIT 1"
     )
 }
@@ -1058,12 +1200,16 @@ fn capture_live_sql() -> String {
 ///
 /// # Staleness is per node
 ///
-/// The window is `max(CAPTURE_REPORT_STALE_FLOOR_SECS, declared interval x
-/// CAPTURE_REPORT_STALE_INTERVALS)`, evaluated per row from the cadence that
+/// The window is `min(CAPTURE_REPORT_STALE_CEILING_SECS,
+/// max(CAPTURE_REPORT_STALE_FLOOR_SECS, declared interval x
+/// CAPTURE_REPORT_STALE_INTERVALS))`, evaluated per row from the cadence that
 /// node declared. A fixed window cannot work: the drain interval is an
-/// operator-set value with no upper bound, so one supported Helm value made
-/// every node on a capturing fleet look stale between reports and pinned the
-/// entire cluster at Unknown.
+/// operator-set value, so one supported Helm value made every node on a
+/// capturing fleet look stale between reports and pinned the entire cluster
+/// at Unknown. Nor can an unbounded one: the window is the all-clear gate, so
+/// the cadence that widens it is also the cadence that decides how long a
+/// departed node keeps the cluster reading clean. Hence a floor AND a
+/// ceiling.
 ///
 /// # Known limit
 ///
@@ -1241,6 +1387,55 @@ pub(crate) struct DenialRollup {
     last_seen: Option<DateTime<Utc>>,
 }
 
+/// The namespaces holding at least one denial that no workload could be
+/// proved for.
+///
+/// A denial the Broker cannot attribute is not a neutral gap. The rollup
+/// filters `workload_kind IS NULL` away and [`DenialIndex::block_for`]
+/// answers a missing key with `total: 0`, so refusing to attribute MANUFACTURES
+/// the clean answer for whichever workload the row belonged to — and that
+/// workload's block is what the promotion gate reads. Storing the row and
+/// leaving it visible on `GET /seccomp/denials` does not undo that, because
+/// nothing makes an operator look there before promoting a profile whose
+/// status says zero.
+///
+/// The namespace is the whole of what is known about such a row: `attribute`
+/// failed precisely because the owning workload could not be proved, so there
+/// is no narrower set to withhold from. It is also not a guess — it is the
+/// namespace the node reported the pod in, `NOT NULL` and length-checked at
+/// ingest, and it is the value that made attribution refuse in the collision
+/// case (a `pod_details` row for another namespace's pod of the same name).
+///
+/// So the all-clear is withheld from that namespace and from nowhere else:
+/// every workload in it reads `Unknown`, every other namespace is unaffected.
+/// That is the honest answer, because at least one workload in that namespace
+/// WAS denied and the Broker cannot say which.
+#[derive(Debug, Clone)]
+pub(crate) enum UnattributedNamespaces {
+    /// The namespaces are known and listed. An empty set is the healthy
+    /// state: every stored denial names a workload.
+    Listed(BTreeSet<String>),
+    /// More namespaces than [`MAX_UNATTRIBUTED_NAMESPACES`] hold an
+    /// unattributed denial, so the set was not enumerated.
+    ///
+    /// Withholds from EVERYTHING. The alternative — keep the first thousand
+    /// and let the rest through — hands a clean bill of health to exactly the
+    /// namespaces the read ran out of room to warn about, which is the bug
+    /// this type exists for, arriving through its own fix.
+    TooMany,
+}
+
+impl UnattributedNamespaces {
+    /// Whether this namespace has a denial nobody could attribute, and so
+    /// cannot be told it is clean.
+    fn withholds(&self, namespace: &str) -> bool {
+        match self {
+            UnattributedNamespaces::Listed(set) => set.contains(namespace),
+            UnattributedNamespaces::TooMany => true,
+        }
+    }
+}
+
 /// Per-workload denial rollups plus the one fact that decides whether a
 /// `denials` block can be emitted at all.
 pub(crate) struct DenialIndex {
@@ -1263,6 +1458,9 @@ pub(crate) struct DenialIndex {
     /// fleet can still hand a `0` to a workload that only ever ran on nodes
     /// nobody was watching.
     observed: bool,
+    /// Namespaces with a denial that named no workload. See
+    /// [`UnattributedNamespaces`].
+    unattributed: UnattributedNamespaces,
 }
 
 impl DenialIndex {
@@ -1272,6 +1470,7 @@ impl DenialIndex {
         DenialIndex {
             by_workload: HashMap::new(),
             observed: false,
+            unattributed: UnattributedNamespaces::Listed(BTreeSet::new()),
         }
     }
 
@@ -1289,8 +1488,18 @@ impl DenialIndex {
     /// `total: 0` block it writes "False", which an operator reads as "the
     /// kernel has not acted on this profile", on a cluster where nothing was
     /// ever looking.
+    ///
+    /// Two facts can withhold the block, and they are different questions.
+    /// `observed` asks whether anything on the cluster is watching at all.
+    /// [`UnattributedNamespaces`] asks whether this namespace holds a denial
+    /// the Broker could not pin on a workload — because such a row is not
+    /// absent from the rollup neutrally, it is absent in a way that reads as
+    /// `total: 0` for whichever workload it belonged to.
     pub(crate) fn block_for(&self, key: &WorkloadKey) -> Option<DenialBlock> {
         if !self.observed {
+            return None;
+        }
+        if self.unattributed.withholds(&key.0) {
             return None;
         }
         let rollup = self.by_workload.get(key).cloned().unwrap_or_default();
@@ -1318,6 +1527,7 @@ impl DenialIndex {
         let mut index = DenialIndex {
             by_workload: HashMap::new(),
             observed: true,
+            unattributed: UnattributedNamespaces::Listed(BTreeSet::new()),
         };
         for (ns, kind, name, syscall, action, count, last_seen) in rows {
             let key = (ns, kind, name);
@@ -1368,9 +1578,19 @@ pub(crate) fn denial_index_charge_kib() -> u32 {
         MAX_DENIAL_ROLLUP_NAME_ROWS,
         DENIAL_ROLLUP_NAME_ROW_COST_BYTES,
     )
+    .saturating_add(cost_kib(
+        // The read stops one row past the cap, and that row is read before
+        // it is counted.
+        MAX_UNATTRIBUTED_NAMESPACES as i64 + 1,
+        UNATTRIBUTED_NAMESPACE_ROW_COST_BYTES,
+    ))
 }
 
 /// KiB to reserve before a single-workload [`denial_index_for`] call.
+///
+/// The scoped unattributed read is one row by construction — it asks about a
+/// single namespace — so it is inside the rounding on this reservation rather
+/// than a term of its own.
 pub(crate) fn denial_index_for_charge_kib() -> u32 {
     cost_kib(
         MAX_DENIAL_ROLLUP_PAIRS_PER_WORKLOAD,
@@ -1391,11 +1611,18 @@ pub(crate) fn denial_index_for(
     load_denial_index(conn, Some(key))
 }
 
-/// Only attributed rows can be rolled up per workload; an unattributed
-/// denial is still visible through GET /seccomp/denials, which is the
-/// endpoint that can show it without having to claim a workload. That NOT
-/// NULL filter is also what lets the rollup row types declare the two
-/// workload columns non-nullable.
+/// Only attributed rows can be rolled up per workload, because a rollup key
+/// needs a workload and an unattributed row has none. That NOT NULL filter is
+/// also what lets the rollup row types declare the two workload columns
+/// non-nullable.
+///
+/// What the filter removes does NOT stop mattering here. A row it drops still
+/// belonged to some workload in its namespace, and dropping it silently is
+/// how an unattributable denial became a `total: 0` all-clear. The rows this
+/// filter excludes are counted on their own axis by
+/// [`unattributed_namespaces_sql`] and withhold the block for their
+/// namespace; `GET /seccomp/denials` remains the endpoint that can show them
+/// individually, without having to claim a workload for them.
 const ROLLUP_ATTRIBUTED: &str =
     " FROM seccomp_denials WHERE workload_kind IS NOT NULL AND workload_name IS NOT NULL";
 
@@ -1488,6 +1715,88 @@ fn rollup_names_sql(scoped: bool) -> String {
     )
 }
 
+/// The namespaces holding a denial that named no workload.
+///
+/// The complement of [`ROLLUP_ATTRIBUTED`], on its own axis: the rollup reads
+/// the rows that HAVE a workload, this reads which namespaces have rows that
+/// do not. `DISTINCT` because the answer is a set of namespaces and the row
+/// count behind each is irrelevant — one unattributable denial withholds the
+/// namespace's all-clear exactly as firmly as a thousand.
+///
+/// `LIMIT MAX_UNATTRIBUTED_NAMESPACES + 1` so the caller can tell "this is
+/// the whole set" from "there are more", which are different answers and must
+/// not be confused: see [`UnattributedNamespaces::TooMany`]. The scoped form
+/// is the detail endpoint's, narrowed to the one namespace it is asked about,
+/// and cannot return more than one row.
+///
+/// Either workload column being NULL is enough. `attribute` returns both or
+/// neither, so a half-filled pair should not exist — but the rollup's filter
+/// requires both, so a row with one of them set would otherwise be dropped
+/// from the rollup AND missed here, which is precisely the hole this closes.
+fn unattributed_namespaces_sql(scoped: bool) -> String {
+    let limit = if scoped {
+        1
+    } else {
+        MAX_UNATTRIBUTED_NAMESPACES + 1
+    };
+    format!(
+        "SELECT DISTINCT pod_namespace FROM seccomp_denials \
+         WHERE (workload_kind IS NULL OR workload_name IS NULL){} \
+         LIMIT {limit}",
+        if scoped {
+            " AND pod_namespace = $1"
+        } else {
+            ""
+        },
+    )
+}
+
+/// Read [`unattributed_namespaces_sql`] into the set `block_for` consults.
+fn unattributed_namespaces(
+    conn: &mut PgConnection,
+    only: Option<&WorkloadKey>,
+) -> Result<UnattributedNamespaces, DbError> {
+    #[derive(diesel::QueryableByName)]
+    struct NamespaceRow {
+        #[diesel(sql_type = Text)]
+        pod_namespace: String,
+    }
+
+    let sql = unattributed_namespaces_sql(only.is_some());
+    let rows: Vec<NamespaceRow> = match only {
+        Some((ns, _, _)) => diesel::sql_query(sql).bind::<Text, _>(ns).load(conn)?,
+        None => diesel::sql_query(sql).load(conn)?,
+    };
+    if rows.len() > MAX_UNATTRIBUTED_NAMESPACES {
+        warn!(
+            cap = MAX_UNATTRIBUTED_NAMESPACES,
+            "more namespaces hold an unattributable seccomp denial than the rollup \
+             will enumerate; no workload will be reported as clean until attribution \
+             recovers"
+        );
+        return Ok(UnattributedNamespaces::TooMany);
+    }
+    let set: BTreeSet<String> = rows.into_iter().map(|r| r.pod_namespace).collect();
+    // Only from the cluster-wide read. The scoped one is a narrowing of the
+    // same question asked once per workload on the detail endpoint, so
+    // logging there would repeat what the list endpoint already says, per
+    // workload, for as long as the condition lasts.
+    if !set.is_empty() && only.is_none() {
+        // Named, not counted: the operator's next move is to look at
+        // `GET /seccomp/denials?namespace=<ns>` for the pod behind it, and a
+        // bare total does not tell them where to look. These namespaces are
+        // reporting `DenialsObserved: Unknown` until it is resolved, which is
+        // a state worth explaining rather than leaving to be inferred.
+        warn!(
+            namespaces = ?set,
+            "seccomp denials in these namespaces name no workload, so no workload \
+             in them can be reported clean; the pod was not in pod_details when the \
+             denial arrived, or two namespaces share a pod name"
+        );
+    }
+    Ok(UnattributedNamespaces::Listed(set))
+}
+
 /// Load the denial rollup. `only` narrows both reads to a single workload.
 ///
 /// `observed` is deliberately NOT narrowed by `only`: scoped to one
@@ -1542,6 +1851,12 @@ fn load_denial_index(
     if !observed {
         return Ok(DenialIndex::empty());
     }
+
+    // The second thing that can withhold a block, and a different question
+    // from the first: not "is anything watching" but "did something get
+    // watched and land nowhere". Read before the rollup because it decides
+    // which of the rollup's answers may be emitted at all.
+    let unattributed = unattributed_namespaces(conn, only)?;
 
     // ---- totals ---------------------------------------------------------
     //
@@ -1634,6 +1949,7 @@ fn load_denial_index(
     let mut index = DenialIndex {
         by_workload: HashMap::new(),
         observed,
+        unattributed,
     };
     for r in totals {
         index.add_total(
@@ -2043,13 +2359,13 @@ mod tests {
         let body = r#"{
             "node": "ip-10-0-1-23",
             "capturing": true,
-            "intervalSeconds": 900,
+            "intervalSeconds": 120,
             "denials": []
         }"#;
         let batch: DenialBatch = serde_json::from_str(body).expect("controller body must parse");
         assert_eq!(
             batch.interval_seconds,
-            Some(900),
+            Some(120),
             "intervalSeconds did not reach the field; the struct is missing \
              rename_all = \"camelCase\" and staleness silently uses the floor"
         );
@@ -2058,8 +2374,15 @@ mod tests {
 
         // And the declared cadence survives into the validated report, so
         // the assertion above cannot pass while the value is dropped later.
+        //
+        // 120 s is deliberately inside `MAX_REPORT_INTERVAL_SECS`, so this
+        // stays a test about the field's NAME. A value above the ceiling is
+        // clamped, which would make this assertion fail for a reason that has
+        // nothing to do with the wire spelling — it did exactly that when the
+        // ceiling was tightened. The clamp has its own test in
+        // `a_declared_interval_falls_back_and_is_clamped`.
         let report = batch.validate(ingest_now());
-        assert_eq!(report.interval_seconds, Some(900));
+        assert_eq!(report.interval_seconds, Some(120));
     }
 
     #[test]
@@ -2412,27 +2735,28 @@ mod tests {
     }
 
     /// The cadence a node declares decides its own staleness window, so it
-    /// is the one field on the batch that can widen a timeout. Absent or zero
-    /// falls back to the floor; an absurd value is clamped rather than
-    /// rejected, because rejecting would throw away the heartbeat riding
-    /// with it.
+    /// is the one field on the batch that can widen the all-clear gate.
+    /// Absent or zero falls back to the floor; a value past the ceiling is
+    /// clamped rather than rejected, because rejecting would throw away the
+    /// heartbeat riding with it — and the clamp is reported, because it has a
+    /// consequence the operator has to be able to find.
     #[test]
     fn a_declared_interval_falls_back_and_is_clamped() {
-        assert_eq!(declared_interval_seconds(None), None);
-        assert_eq!(declared_interval_seconds(Some(0)), None);
-        assert_eq!(declared_interval_seconds(Some(10)), Some(10));
+        assert_eq!(declared_interval_seconds(None), (None, false));
+        assert_eq!(declared_interval_seconds(Some(0)), (None, false));
+        assert_eq!(declared_interval_seconds(Some(10)), (Some(10), false));
         assert_eq!(
             declared_interval_seconds(Some(MAX_REPORT_INTERVAL_SECS as u64)),
-            Some(MAX_REPORT_INTERVAL_SECS)
+            (Some(MAX_REPORT_INTERVAL_SECS), false)
         );
         assert_eq!(
             declared_interval_seconds(Some(MAX_REPORT_INTERVAL_SECS as u64 + 1)),
-            Some(MAX_REPORT_INTERVAL_SECS),
-            "a node cannot buy itself a staleness window measured in years"
+            (Some(MAX_REPORT_INTERVAL_SECS), true),
+            "a node cannot buy itself a wider window than the broker grants"
         );
         assert_eq!(
             declared_interval_seconds(Some(u64::MAX)),
-            Some(MAX_REPORT_INTERVAL_SECS),
+            (Some(MAX_REPORT_INTERVAL_SECS), true),
             "including one that does not fit the column it lands in"
         );
         assert_eq!(
@@ -2442,6 +2766,51 @@ mod tests {
             None,
             "and a report that declares nothing stores nothing, so the \
              liveness query falls back to the floor"
+        );
+    }
+
+    /// The window has a CEILING as well as a floor, and the ceiling is the
+    /// half that guards the all-clear.
+    ///
+    /// The floor stops a fast node flipping to Unknown between drains. The
+    /// ceiling stops a slow one — or a fabricated one — claiming its single
+    /// report is still evidence days later. Without it the bound was
+    /// `MAX_REPORT_INTERVAL_SECS * 3`, and at the 86 400 s interval bound
+    /// that was 259 200 s: exactly three days of cluster-wide `total: 0`
+    /// bought by one POST.
+    #[test]
+    fn the_staleness_window_is_bounded_at_both_ends() {
+        assert_eq!(
+            MAX_REPORT_INTERVAL_SECS * CAPTURE_REPORT_STALE_INTERVALS,
+            CAPTURE_REPORT_STALE_CEILING_SECS,
+            "the interval bound is derived from the window ceiling, so a \
+             declared cadence at the bound uses the whole window and no \
+             cadence can ask for more"
+        );
+        // `const` blocks: both are compile-time facts about the constants,
+        // so they fail the build rather than a test run — and clippy refuses
+        // a runtime assertion whose value is constant anyway.
+        const {
+            assert!(
+                CAPTURE_REPORT_STALE_CEILING_SECS > CAPTURE_REPORT_STALE_FLOOR_SECS,
+                "a ceiling below the floor would make the floor unreachable \
+                 and every node permanently stale"
+            )
+        };
+        const {
+            assert!(
+                CAPTURE_REPORT_STALE_CEILING_SECS <= 3_600,
+                "the window is how long kguardian will tell an operator a \
+                 workload is clean on the strength of one old report; an hour \
+                 is already past what that claim can carry"
+            )
+        };
+        let sql = capture_live_sql();
+        assert!(
+            sql.contains("LEAST(")
+                && sql.contains(&format!("), {CAPTURE_REPORT_STALE_CEILING_SECS})")),
+            "and the ceiling is applied in the query, so a row stored under \
+             the wider bound this replaced cannot outlive it: {sql}"
         );
     }
 
@@ -2477,9 +2846,9 @@ mod tests {
 
     /// The staleness window is per node, computed from the cadence that node
     /// declared. A fixed one cannot work: the Controller's drain interval is
-    /// an operator-set value with no upper bound, so a supported Helm value
-    /// made every node on a capturing fleet look stale between its own
-    /// reports and pinned the cluster at Unknown forever.
+    /// an operator-set value, so a supported Helm value made every node on a
+    /// capturing fleet look stale between its own reports and pinned the
+    /// cluster at Unknown forever.
     #[test]
     fn liveness_trusts_each_nodes_own_cadence_above_a_floor() {
         let sql = capture_live_sql();
@@ -3134,6 +3503,40 @@ mod tests {
     /// out of the index, at which point `block_for` answers `total: 0` for a
     /// workload that was denied. A bounded read that invents all-clears is
     /// worse than the unbounded one it replaced.
+    /// The unattributed read must be able to say "there are more than I will
+    /// list", because truncating it silently would hand the all-clear back to
+    /// exactly the namespaces it ran out of room to warn about.
+    #[test]
+    fn the_unattributed_read_is_bounded_and_can_tell_it_was_bounded() {
+        let sql = unattributed_namespaces_sql(false);
+        assert!(
+            sql.contains("workload_kind IS NULL OR workload_name IS NULL"),
+            "either column missing means the rollup dropped the row: {sql}"
+        );
+        assert!(
+            sql.contains(&format!("LIMIT {}", MAX_UNATTRIBUTED_NAMESPACES + 1)),
+            "one row past the cap, so the caller can distinguish a full set \
+             from a truncated one: {sql}"
+        );
+        let scoped = unattributed_namespaces_sql(true);
+        assert!(
+            scoped.contains("AND pod_namespace = $1") && scoped.contains("LIMIT 1"),
+            "the detail endpoint asks about one namespace and one row settles \
+             it: {scoped}"
+        );
+        assert!(
+            UnattributedNamespaces::TooMany.withholds("anything"),
+            "past the cap nothing may be reported clean"
+        );
+        let listed = UnattributedNamespaces::Listed(BTreeSet::from(["payments".to_string()]));
+        assert!(listed.withholds("payments"));
+        assert!(
+            !listed.withholds("media"),
+            "and the blast radius is the namespace the row was in, not the \
+             cluster"
+        );
+    }
+
     #[test]
     fn the_rollup_total_read_is_not_capped_and_groups_only_by_workload() {
         for scoped in [false, true] {
@@ -3188,30 +3591,74 @@ mod tests {
     //   KG_TEST_DATABASE_URL=postgres://postgres:pw@localhost:5432/kg \
     //     cargo test --lib -- --ignored live_database
     //
-    // It applies the REAL migration via include_str! rather than its own
-    // DDL, so the schema it exercises cannot drift from the one shipped.
+    // It applies the REAL migrations — the same embedded set `main` runs —
+    // rather than its own DDL, so the schema it exercises cannot drift from
+    // the one shipped.
 
-    /// A connection with both denial tables freshly created from the REAL
-    /// migrations, so the schema these tests exercise cannot drift from the
-    /// one shipped. Every live test starts from the same empty state; they
+    /// A connection with the shipped schema applied and every table these
+    /// tests touch emptied. Every live test starts from the same state; they
     /// share one database and must run with `--test-threads=1`.
+    ///
+    /// The whole embedded migration set runs, not just the denial ones.
+    /// `pod_details` is part of what this feature reads — attribution
+    /// resolves against it and the backfill repairs against it — so a test
+    /// that hand-rolled a stand-in for it would be testing a table nothing
+    /// ships. `run_pending_migrations` is a no-op after the first test.
+    /// The same directory `main.rs` embeds and runs at startup. Declared
+    /// again here because that one lives in the binary and this module is in
+    /// the library, so the test cannot reach it — but it is the same path, so
+    /// it cannot be a different schema.
+    const TEST_MIGRATIONS: diesel_migrations::EmbeddedMigrations =
+        diesel_migrations::embed_migrations!("./db/migrations");
+
     fn live_conn() -> PgConnection {
         use diesel::connection::SimpleConnection;
+        use diesel_migrations::MigrationHarness;
 
         let Ok(url) = std::env::var("KG_TEST_DATABASE_URL") else {
             panic!("set KG_TEST_DATABASE_URL to run this test");
         };
         let mut conn = PgConnection::establish(&url).expect("connect");
-        for sql in [
-            include_str!("../db/migrations/2026-09-14-100000_seccomp_denials/down.sql"),
-            include_str!("../db/migrations/2026-09-14-100001_seccomp_denial_nodes/down.sql"),
-            include_str!("../db/migrations/2026-09-14-100000_seccomp_denials/up.sql"),
-            include_str!("../db/migrations/2026-09-14-100001_seccomp_denial_nodes/up.sql"),
-            include_str!("../db/migrations/2026-09-14-100002_seccomp_denial_node_interval/up.sql"),
-        ] {
-            conn.batch_execute(sql).expect("reset the denial schema");
-        }
+        conn.run_pending_migrations(TEST_MIGRATIONS)
+            .expect("apply the shipped migrations");
+        // TRUNCATE rather than drop-and-recreate: the migrations own the
+        // schema now, so a test that dropped a table would leave diesel
+        // believing it still existed.
+        conn.batch_execute(
+            "TRUNCATE seccomp_denials, seccomp_denial_nodes, pod_details RESTART IDENTITY",
+        )
+        .expect("reset the tables these tests use");
         conn
+    }
+
+    /// Register a pod the way the pod watcher does, for the columns
+    /// attribution and its backfill read.
+    fn seed_pod(
+        conn: &mut PgConnection,
+        pod_name: &str,
+        namespace: &str,
+        workload: Option<(&str, &str)>,
+    ) {
+        use schema::pod_details::dsl as pd;
+        let (kind, name) = match workload {
+            Some((k, n)) => (Some(k.to_string()), Some(n.to_string())),
+            None => (None, None),
+        };
+        diesel::insert_into(pd::pod_details)
+            .values((
+                pd::pod_name.eq(pod_name),
+                pd::pod_ip.eq("10.0.0.1"),
+                pd::pod_namespace.eq(namespace),
+                pd::time_stamp.eq(Utc::now().naive_utc()),
+                pd::node_name.eq("n1"),
+                pd::is_dead.eq(false),
+                pd::workload_kind.eq(kind),
+                pd::workload_name.eq(name),
+            ))
+            .on_conflict(pd::pod_name)
+            .do_nothing()
+            .execute(conn)
+            .expect("seed pod_details");
     }
 
     /// Push one node's heartbeat `secs` into the past, the way a Controller
@@ -3850,6 +4297,254 @@ mod tests {
         assert!(
             capture_is_live(&mut conn).expect("liveness"),
             "max(floor, interval x 3) — the floor wins for a fast node"
+        );
+    }
+
+    /// One heartbeat must not buy days of cluster-wide all-clear.
+    ///
+    /// The window is `max(floor, declared x 3)`, and the declared cadence had
+    /// no ceiling worth the name: clamped at a day, three days of window. Two
+    /// ways to reach it. Routine — the chart recommends raising
+    /// `intervalSeconds` on large clusters, and when the last capturing node
+    /// goes away (spot reclaim, autoscaler, a `CONFIG_AUDIT=n` rebuild) every
+    /// workload reads `total: 0` for the rest of the window. Adversarial —
+    /// `BROKER_AUTH_TOKEN` is optional and `node` is checked against no known
+    /// node, so one POST of a fabricated node pins the whole cluster.
+    #[test]
+    #[ignore = "requires a live postgres (set KG_TEST_DATABASE_URL)"]
+    fn live_database_caps_how_long_one_heartbeat_buys_an_all_clear() {
+        use diesel::connection::SimpleConnection;
+
+        let mut conn = live_conn();
+
+        // The handler's own sequence, so the clamp under test is the one
+        // ingest applies rather than one the test performs.
+        let report = DenialBatch {
+            node: "ghost".into(),
+            capturing: Some(true),
+            interval_seconds: Some(86_400),
+            denials: vec![],
+        }
+        .validate(Utc::now());
+        assert!(
+            report.interval_clamped,
+            "the report declared a day; ingest has to notice it cut it down, \
+             because the node will now read stale between its own reports"
+        );
+        upsert_node_report(
+            &mut conn,
+            "ghost",
+            report.capturing,
+            report.interval_seconds,
+        )
+        .expect("heartbeat");
+
+        // Inside the ceiling the heartbeat still counts: the bound is a
+        // ceiling on trust, not a refusal to trust.
+        age_heartbeat(&mut conn, "ghost", CAPTURE_REPORT_STALE_CEILING_SECS - 60);
+        assert!(
+            capture_is_live(&mut conn).expect("liveness"),
+            "a node inside the window is still watching"
+        );
+
+        age_heartbeat(&mut conn, "ghost", CAPTURE_REPORT_STALE_CEILING_SECS + 60);
+        assert!(
+            !capture_is_live(&mut conn).expect("liveness"),
+            "past the ceiling one report is not evidence any more. Unbounded, \
+             this row bought {} seconds — three days in which every workload \
+             on the cluster reads a clean bill of health with nothing watching",
+            86_400 * CAPTURE_REPORT_STALE_INTERVALS
+        );
+        let key: WorkloadKey = ("media".into(), "Deployment".into(), "web".into());
+        assert!(
+            denial_index(&mut conn).unwrap().block_for(&key).is_none(),
+            "and no workload may be handed a block off it"
+        );
+
+        // A row stored under the wider bound this replaced — an upgrade that
+        // ran the new binary against rows the old one wrote — must not
+        // outlive the ceiling either. The CHECK now refuses such a value, so
+        // reproducing it means standing the old constraint back up.
+        //
+        // Inside a transaction that is always rolled back, because Postgres
+        // makes DDL transactional: the constraint comes back whether this
+        // block passes, fails an assertion, or panics — a failing test must
+        // not leave the next one running against a schema it did not ask
+        // for. (On a panic the rollback is the server's, when the connection
+        // closes.)
+        let rolled_back = conn.transaction::<(), diesel::result::Error, _>(|conn| {
+            conn.batch_execute(
+                "ALTER TABLE seccomp_denial_nodes \
+                 DROP CONSTRAINT seccomp_denial_nodes_interval_seconds_check; \
+                 UPDATE seccomp_denial_nodes SET interval_seconds = 86400 \
+                 WHERE node_name = 'ghost'",
+            )?;
+            assert!(
+                !capture_is_live(conn).expect("liveness"),
+                "the window is clamped where it is computed, so a legacy \
+                 value buys nothing the ceiling does not grant"
+            );
+            Err(diesel::result::Error::RollbackTransaction)
+        });
+        assert!(matches!(
+            rolled_back,
+            Err(diesel::result::Error::RollbackTransaction)
+        ));
+    }
+
+    /// A denial nobody could attribute must not become an all-clear for the
+    /// workload it belonged to.
+    ///
+    /// `pod_details`' primary key is `pod_name` ALONE, so `payments/redis-0`
+    /// and `media/redis-0` collapse to one row. Attribution refuses on the
+    /// namespace mismatch — correctly, since naming the other team's workload
+    /// would be worse — but the rollup filters unattributed rows out and
+    /// `block_for` answers a workload with no rows with `total: 0`. Thousands
+    /// of `SCMP_ACT_ERRNO` denials then read as a clean bill of health for
+    /// the workload that made them.
+    #[test]
+    #[ignore = "requires a live postgres (set KG_TEST_DATABASE_URL)"]
+    fn live_database_withholds_the_all_clear_from_an_unattributable_namespace() {
+        let mut conn = live_conn();
+        upsert_node_report(&mut conn, "n1", true, None).expect("heartbeat");
+
+        // Only one `redis-0` row can exist, and it is media's.
+        seed_pod(
+            &mut conn,
+            "redis-0",
+            "media",
+            Some(("StatefulSet", "redis")),
+        );
+        seed_pod(&mut conn, "web-1", "shop", Some(("Deployment", "web")));
+
+        let rows = vec![
+            DenialInput {
+                pod_uid: "uid-payments".into(),
+                pod_namespace: "payments".into(),
+                count: 4_200,
+                ..input("redis-0", "ptrace", "SCMP_ACT_ERRNO", 4_200)
+            },
+            DenialInput {
+                pod_uid: "uid-shop".into(),
+                pod_namespace: "shop".into(),
+                ..input("web-1", "ptrace", "SCMP_ACT_LOG", 3)
+            },
+        ];
+        let names: BTreeSet<String> = rows.iter().map(|d| d.pod_name.clone()).collect();
+        let (unattributed, _) = store_batch(&mut conn, "n1", &names, rows).expect("ingest");
+        assert_eq!(
+            unattributed, 1,
+            "the payments row names a pod whose only pod_details row is \
+             another namespace's"
+        );
+
+        let index = denial_index(&mut conn).expect("rollup");
+        let payments: WorkloadKey = ("payments".into(), "StatefulSet".into(), "redis".into());
+        assert!(
+            index.block_for(&payments).is_none(),
+            "4 200 denials the broker could not attribute must not read as \
+             `total: 0` for the workload that made them — `observed: 0` has \
+             to mean \"we checked and found none\", never \"we could not tell\""
+        );
+
+        // And the withholding is namespace-scoped, not a cluster-wide
+        // blackout: a namespace whose denials all resolved still reports.
+        let shop: WorkloadKey = ("shop".into(), "Deployment".into(), "web".into());
+        assert_eq!(
+            index
+                .block_for(&shop)
+                .expect("attributed, so a block")
+                .total,
+            3
+        );
+        // Including a quiet workload in that namespace, which is the real
+        // all-clear this feature exists to be able to give.
+        let quiet: WorkloadKey = ("shop".into(), "Deployment".into(), "quiet".into());
+        assert_eq!(index.block_for(&quiet).expect("a real zero").total, 0);
+
+        // The detail endpoint answers the same way, on its own narrowed read.
+        assert!(denial_index_for(&mut conn, &payments)
+            .expect("scoped rollup")
+            .block_for(&payments)
+            .is_none());
+        assert_eq!(
+            denial_index_for(&mut conn, &shop)
+                .expect("scoped rollup")
+                .block_for(&shop)
+                .expect("attributed, so a block")
+                .total,
+            3
+        );
+    }
+
+    /// A pod that trips a syscall before its `pod_details` row lands is
+    /// unattributed forever, because the ingest upsert only re-resolves a row
+    /// when the same `(syscall, action)` is reported again — and a one-shot
+    /// startup denial is exactly that shape. The backfill is what makes that
+    /// state transient rather than a 30-day reporting outage for the
+    /// namespace.
+    #[test]
+    #[ignore = "requires a live postgres (set KG_TEST_DATABASE_URL)"]
+    fn live_database_backfills_attribution_once_the_pod_is_known() {
+        let mut conn = live_conn();
+        upsert_node_report(&mut conn, "n1", true, None).expect("heartbeat");
+
+        // The race: the denial arrives first. And the collision, which the
+        // backfill must NOT resolve.
+        seed_pod(
+            &mut conn,
+            "redis-0",
+            "media",
+            Some(("StatefulSet", "redis")),
+        );
+        let rows = vec![
+            DenialInput {
+                pod_uid: "uid-race".into(),
+                pod_namespace: "shop".into(),
+                ..input("web-7", "ptrace", "SCMP_ACT_LOG", 11)
+            },
+            DenialInput {
+                pod_uid: "uid-collision".into(),
+                pod_namespace: "payments".into(),
+                ..input("redis-0", "ptrace", "SCMP_ACT_ERRNO", 9)
+            },
+        ];
+        let names: BTreeSet<String> = rows.iter().map(|d| d.pod_name.clone()).collect();
+        store_batch(&mut conn, "n1", &names, rows).expect("ingest");
+
+        let web: WorkloadKey = ("shop".into(), "Deployment".into(), "web".into());
+        let payments: WorkloadKey = ("payments".into(), "StatefulSet".into(), "redis".into());
+        let index = denial_index(&mut conn).expect("rollup");
+        assert!(
+            index.block_for(&web).is_none(),
+            "withheld before the pod is known"
+        );
+        assert!(index.block_for(&payments).is_none());
+
+        // The pod watcher catches up.
+        seed_pod(&mut conn, "web-7", "shop", Some(("Deployment", "web")));
+        let resolved = diesel::sql_query(crate::retention::BACKFILL_DENIAL_ATTRIBUTION_SQL)
+            .bind::<BigInt, _>(5_000)
+            .execute(&mut conn)
+            .expect("backfill");
+        assert_eq!(
+            resolved, 1,
+            "the race resolves and the collision does not: a backfill that \
+             attributed by pod name alone would name media's StatefulSet as \
+             the owner of payments' denials"
+        );
+
+        let index = denial_index(&mut conn).expect("rollup");
+        assert_eq!(
+            index.block_for(&web).expect("attributed, so a block").total,
+            11,
+            "and the workload gets its real count, not merely its namespace \
+             back"
+        );
+        assert!(
+            index.block_for(&payments).is_none(),
+            "the collision is not resolvable by this rule and must stay \
+             Unknown rather than be guessed at"
         );
     }
 

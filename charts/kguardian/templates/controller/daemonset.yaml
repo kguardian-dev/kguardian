@@ -89,6 +89,9 @@ spec:
           {{- if le $denialInterval 0 }}
           {{- fail (printf "seccomp.denials.intervalSeconds must be a positive integer (got %d)" $denialInterval) }}
           {{- end }}
+          {{- if gt $denialInterval 600 }}
+          {{- fail (printf "seccomp.denials.intervalSeconds must be 600 or less (got %d). The controller declares this cadence to the broker and the broker trusts a node for max(300, interval * 3) seconds after its last report, capped at 1800 - and that window is how long a workload keeps reporting DenialsObserved: False with nothing watching. A node draining slower than 600s is heard from less often than the broker will vouch for it, so its workloads sit at Unknown between reports. Lower seccomp.denials.intervalSeconds." $denialInterval) }}
+          {{- end }}
           - name: SECCOMP_DENIAL_INTERVAL_SECONDS
             value: {{ $denialInterval | quote }}
           {{- end }}

@@ -293,9 +293,25 @@ int BPF_KPROBE(trace_audit_seccomp, unsigned long syscall, long signr, int code)
         .netns = net_ns,
         // The container that made the call, independent of whose
         // network namespace it is in. Available since 4.18, below every
-        // floor this object already carries, and 0 on a host with no
-        // cgroup v2 — which matches no registered container, so such a
-        // row is refused rather than guessed at.
+        // floor this object already carries.
+        //
+        // This helper does NOT return 0 as a "no cgroup" sentinel, and
+        // nothing downstream may treat it as one. It is
+        // `task_dfl_cgroup(current)->kn->id`; `task_dfl_cgroup()` is
+        // never NULL, because a host with no cgroup v2 mounted still has
+        // `cgrp_dfl_root` and every task sits in its root. A task in the
+        // root cgroup therefore carries the ROOT's kernfs id — measured
+        // on a live kernel: 1 for kernel threads on a normally booted
+        // host, and 0 never observed for any task.
+        //
+        // What refuses such a row is the registry, not the value: a
+        // container's cgroup is always a strict descendant of the root,
+        // and `compute_registry::resolve_container_cgroup` will not
+        // register one under the root itself, so the root's id matches
+        // nothing and `seccomp_denial::build_denials` drops the row and
+        // counts it. That matters most on a node whose cgroups are
+        // managed on the v1 hierarchy, where the unified hierarchy is
+        // mounted but empty and EVERY task reports the root's id.
         .cgroup_id = bpf_get_current_cgroup_id(),
         .generation = KG_GEN_OF(*flags),
         // Truncation is safe: Linux syscall numbers are three digits on

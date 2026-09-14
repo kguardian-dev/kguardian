@@ -40,12 +40,13 @@ use libbpf_rs::{ErrorKind as BpfErrorKind, MapCore, MapFlags, MapHandle};
 use libseccomp::ScmpSyscall;
 use serde::Serialize;
 use serde_json::json;
-use tokio::sync::oneshot;
+use tokio::sync::{broadcast, oneshot};
 use tracing::{debug, info, warn};
 
 use crate::capture_tiers::native_scmp_arch;
 use crate::client::api_post_call_json;
-use crate::compute_registry::{ComputeMap, ContainerCompute};
+use crate::compute_config::ComputeConfig;
+use crate::compute_registry::{ComputeMap, ComputeRegistration, ComputeRegistry, ContainerCompute};
 use crate::models::{lookup_pod, pod_flags, ContainerMap};
 use crate::Error;
 
@@ -631,6 +632,12 @@ struct AttributionLosses {
     /// with a fix rather than a fact about the workload. See
     /// [`build_denials`].
     no_container_registry: usize,
+    /// The row's netns names one pod and the row's cgroup names a
+    /// container of a DIFFERENT one. Two independent identifiers
+    /// disagree; nothing in the row says which is stale, so it is
+    /// refused. The reachable cause is `EXCLUDED_NAMESPACES` — see
+    /// [`build_denials`].
+    netns_cgroup_mismatch: usize,
     /// The row's generation is not the one the pod now on its netns
     /// registered with. Either the inode was recycled and the row is the
     /// dead pod's, or the row is the LIVE pod's own and was recorded
@@ -665,6 +672,81 @@ struct AttributionLosses {
 /// the two must be changed together.
 pub fn needs_container_registry(compute_enabled: bool, denial_capture_enabled: bool) -> bool {
     compute_enabled || denial_capture_enabled
+}
+
+/// The cgroup registry handle denial attribution resolves `hostNetwork`
+/// pods through.
+///
+/// A newtype with a private field, and the only thing that can build one
+/// is [`wire_registry`]. That is the whole point of it: while this was a
+/// plain `Option<ComputeMap>` threaded through `main.rs`, one word at
+/// the call site —
+///
+/// ```text
+/// let seccomp_denial_cgroups: Option<ComputeMap> = None;
+/// ```
+///
+/// — switched denial reporting off for every hostNetwork workload on the
+/// node, and no test anywhere could see it, because `main.rs` is a
+/// binary with no tests and the decision lived only there. It was spelt
+/// exactly that way in a scratch tree during review and the suite stayed
+/// green at 331 passing. The failure it produces is silence: those
+/// workloads keep reporting nothing, and the Broker reads nothing as
+/// `DenialsObserved: False, observed: 0` — checked, and clean.
+///
+/// `main.rs` now has no decision left to get wrong; it destructures what
+/// `wire_registry` returns, and `wire_registry` is pinned by a test.
+pub struct DenialRegistry(Option<ComputeMap>);
+
+impl DenialRegistry {
+    /// The registry, if denial capture is on. Borrowed, so a caller
+    /// cannot detach it from the wiring it came out of.
+    pub fn registry(&self) -> Option<&ComputeMap> {
+        self.0.as_ref()
+    }
+}
+
+/// Who gets the per-container cgroup registry, decided once.
+///
+/// Returned as owned handles rather than the booleans behind them,
+/// because the booleans were what went wrong: see [`DenialRegistry`].
+pub struct RegistryWiring {
+    /// The registry itself, for the pod watcher to fill. `None` only
+    /// when nothing on this node reads it.
+    pub registry: Option<ComputeMap>,
+    /// Registration events for the compute sampler. Subscribed ONLY when
+    /// the gauges are on: a receiver with nothing draining it makes the
+    /// broadcast channel back up to capacity for no reason.
+    pub compute_events: Option<broadcast::Receiver<ComputeRegistration>>,
+    /// The handle seccomp denial attribution resolves cgroups through.
+    pub denial_cgroups: DenialRegistry,
+}
+
+/// Wire the container registry to its readers from the two switches that
+/// decide it.
+///
+/// Takes the config structs, not two `bool`s, so the arguments cannot be
+/// transposed or both filled from the same switch — the other sabotage
+/// that survived the suite was `want_container_registry =
+/// compute_config.enabled`, re-coupling the registry to the gauges,
+/// which is the exact bug [`needs_container_registry`] exists to close.
+///
+/// One registry, shared: the sampler and the denial drain must resolve
+/// the same cgroup ids, and handing them two would reintroduce the split
+/// store this feature already had to remove once.
+pub fn wire_registry(compute: &ComputeConfig, denial: &SeccompDenialConfig) -> RegistryWiring {
+    let registry: Option<ComputeMap> = needs_container_registry(compute.enabled, denial.enabled)
+        .then(|| Arc::new(ComputeRegistry::new()));
+    RegistryWiring {
+        compute_events: registry
+            .as_ref()
+            .filter(|_| compute.enabled)
+            .map(|m| m.subscribe()),
+        denial_cgroups: DenialRegistry(
+            registry.as_ref().filter(|_| denial.enabled).map(Arc::clone),
+        ),
+        registry,
+    }
 }
 
 /// The pod identity one attributed row carries, borrowed from whichever
@@ -763,6 +845,19 @@ fn container_for_cgroup(registry: &ComputeMap, cgroup_id: u64) -> Option<Arc<Con
 /// identity from, it needs nothing from containerd, and it is the path
 /// every other probe in this tree uses. The cgroup route is what the
 /// netns cannot do, not a replacement for it.
+///
+/// **The generation is not enough on its own**, because only a TRACKED
+/// pod ever writes one. `EXCLUDED_NAMESPACES` switches off the netns
+/// registration and nothing else, and no entry is ever removed from
+/// either store, so an excluded pod handed a dead tracked pod's recycled
+/// inode registers nothing: the stale `ContainerMap` entry and the stale
+/// kernel generation survive together and agree with each other. The
+/// check above passes on a row that belongs to neither pod. So when the
+/// row's cgroup resolves to a container of a DIFFERENT pod — the one
+/// identifier the exclusion list does not touch, because the registry is
+/// filled for every pod on the node — the row is refused and counted
+/// (`netns_cgroup_mismatch`). A cgroup the registry does not hold
+/// contradicts nothing and costs a legitimate row nothing.
 fn build_denials(
     rows: &[RawDenial],
     container_map: &ContainerMap,
@@ -817,6 +912,52 @@ fn build_denials(
                 // a floor rather than a total. Counted, not silent.
                 if pod.generation != row.generation {
                     losses.stale_generation += 1;
+                    continue;
+                }
+                // The generation is not on its own enough, because it is
+                // only ever written by a pod the node TRACKS.
+                //
+                // `EXCLUDED_NAMESPACES` switches off the netns
+                // registration (`pod_watcher::registration_plan`), and
+                // nothing ever removes a `ContainerMap` entry or an
+                // `inode_num` value — the generation is what handles
+                // recycling. So when a tracked pod dies and an
+                // EXCLUDED-namespace pod is handed its netns inode, the
+                // successor never registers: the stale entry and the
+                // stale kernel generation survive together and AGREE
+                // with each other. The check above passes, and the new
+                // pod's denials are credited, permanently, to a dead
+                // workload in another namespace. A tracked successor
+                // cannot do this — its own registration overwrites both
+                // — so the exclusion list is the whole difference
+                // between a gap and an accusation.
+                //
+                // The row carries a second, independent identifier that
+                // the exclusion list does not touch: the cgroup id of
+                // the task that made the call. The cgroup registry is
+                // filled for every pod on the node, excluded namespaces
+                // included, so when it names a container the answer owes
+                // nothing to whether the namespace is tracked. If it
+                // names a container of a DIFFERENT pod, one of the two
+                // identifiers is stale and the row says nothing about
+                // which — so it is refused, like every other
+                // disagreement in this function.
+                //
+                // It cannot fire on a legitimate row. A cgroup id it
+                // does not hold — a nested cgroup, an init or ephemeral
+                // container, the pause container, a host process —
+                // resolves to `None` and contradicts nothing; only two
+                // positive answers that name different pods count.
+                let contradicted = match cgroups {
+                    None => false,
+                    Some(registry) => containers
+                        .entry(row.cgroup_id)
+                        .or_insert_with(|| container_for_cgroup(registry, row.cgroup_id))
+                        .as_deref()
+                        .is_some_and(|c| c.pod_uid != pod.uid),
+                };
+                if contradicted {
+                    losses.netns_cgroup_mismatch += 1;
                     continue;
                 }
                 Named {
@@ -1073,7 +1214,7 @@ pub async fn run(
     config: SeccompDenialConfig,
     node_name: String,
     container_map: ContainerMap,
-    cgroups: Option<ComputeMap>,
+    cgroups: DenialRegistry,
     maps: oneshot::Receiver<DenialMaps>,
 ) -> Result<(), Error> {
     if !config.enabled {
@@ -1081,11 +1222,17 @@ pub async fn run(
         return Ok(());
     }
 
-    // Said at startup, not only once a denial has been lost to it. The
-    // registry is constructed whenever this feature is on (`main.rs`),
-    // so `None` is a wiring fault — and the failure it produces is
-    // silence: hostNetwork workloads keep reporting nothing, and
-    // nothing reporting reads as nothing denied.
+    // Said at startup, not only once a denial has been lost to it.
+    //
+    // `wire_registry` cannot hand this task an absent registry while the
+    // feature is on — `needs_container_registry` builds one for either
+    // switch, and `DenialRegistry`'s field is private, so no caller can
+    // substitute `None`. This is therefore unreachable today and is kept
+    // for the day a second construction route appears: the failure it
+    // would announce is silence, and silence is what this whole module
+    // is arranged to make loud. hostNetwork workloads would keep
+    // reporting nothing, and nothing reporting reads as nothing denied.
+    let cgroups: Option<ComputeMap> = cgroups.registry().map(Arc::clone);
     if cgroups.is_none() {
         warn!(
             "no per-container cgroup registry was handed to seccomp denial capture. \
@@ -1141,6 +1288,7 @@ pub async fn run(
     let mut warned_missing_uid = false;
     let mut warned_unresolved_cgroup = false;
     let mut warned_no_registry = false;
+    let mut warned_netns_cgroup_mismatch = false;
     // Rows the Broker accepted the request for but refused to store,
     // accumulated for the life of the process.
     //
@@ -1290,6 +1438,28 @@ pub async fn run(
                  container registry was handed to this task. See the startup warning."
             );
             warned_no_registry = true;
+        }
+        // Once, and loudly: unlike the counts above this one is never
+        // expected on a healthy node. It means a netns inode that still
+        // resolves to one pod carried denials from a container of
+        // another, which is a stale `ContainerMap` entry whose successor
+        // never registered. `EXCLUDED_NAMESPACES` is the way that
+        // happens: an excluded pod inherits a tracked pod's recycled
+        // inode and registers nothing, so the dead pod's entry and the
+        // kernel's generation agree with each other and name the wrong
+        // workload. The rows are refused rather than credited; naming
+        // the namespace list is what lets an operator act on it.
+        if losses.netns_cgroup_mismatch > 0 && !warned_netns_cgroup_mismatch {
+            warn!(
+                rows = losses.netns_cgroup_mismatch,
+                "seccomp denials arrived on a network namespace registered to one pod while \
+                 their cgroup belongs to a container of another, and were dropped rather \
+                 than credited to either. The usual cause is a pod in an EXCLUDED_NAMESPACES \
+                 namespace inheriting a recycled netns inode from a tracked pod: it registers \
+                 nothing, so the dead pod's registration survives and looks current. Narrowing \
+                 EXCLUDED_NAMESPACES removes it."
+            );
+            warned_netns_cgroup_mismatch = true;
         }
 
         let mut batch = std::mem::take(&mut pending);
@@ -1528,13 +1698,29 @@ mod tests {
         ))
     }
 
-    /// A row whose cgroup id is 0 — what the kernel yields on a host
-    /// with no cgroup v2, and what no registered container can ever
-    /// have. Every pod-network case uses it, which is the point: those
-    /// rows must be attributed without the cgroup route being reachable
-    /// at all.
+    /// The cgroup id a task in the ROOT cgroup carries.
+    ///
+    /// `bpf_get_current_cgroup_id()` has no "no cgroup" sentinel — it is
+    /// `task_dfl_cgroup(current)->kn->id` and `task_dfl_cgroup()` is
+    /// never NULL, so a host with no cgroup v2 in use still yields the
+    /// root's kernfs id rather than 0. Measured on a live kernel: 1 for
+    /// kernel threads on a normally booted host, and 0 never observed
+    /// for any task. On a node whose cgroups are managed on the v1
+    /// hierarchy this is what EVERY row carries.
+    ///
+    /// It is in no container's registry entry, because a container's
+    /// cgroup is a strict descendant of the root and
+    /// `compute_registry::resolve_container_cgroup` refuses to register
+    /// one under the root itself. That — not the value — is what makes a
+    /// row carrying it unattributable.
+    const ROOT_CGROUP_ID: u64 = 1;
+
+    /// A row from a task in the root cgroup: a real id that resolves to
+    /// no container. Every pod-network case uses it, which is the point:
+    /// those rows must be attributed by the netns alone, without the
+    /// cgroup route having anything to offer.
     fn raw(netns: u64, generation: u32, syscall_nr: u32, action: u32, count: u64) -> RawDenial {
-        raw_cg(netns, 0, generation, syscall_nr, action, count)
+        raw_cg(netns, ROOT_CGROUP_ID, generation, syscall_nr, action, count)
     }
 
     /// The same row with a cgroup id: the container that made the call.
@@ -2165,6 +2351,168 @@ mod tests {
         assert_eq!(losses.unresolved_cgroup, 0);
     }
 
+    /// A row whose netns and cgroup name different pods is refused, not
+    /// credited to the netns.
+    ///
+    /// `EXCLUDED_NAMESPACES` turns off the netns registration and
+    /// nothing else. Nothing ever removes a `ContainerMap` entry or an
+    /// `inode_num` value — the generation is what handles a recycled
+    /// inode — so when an excluded-namespace pod inherits a tracked
+    /// pod's netns inode it registers nothing, and the dead pod's entry
+    /// and the kernel's generation survive together and AGREE. The
+    /// generation check passes, and without this rule the new pod's
+    /// denials are credited, permanently, to a dead workload in another
+    /// namespace. That is an accusation, not a gap, and the exclusion
+    /// list is the only reason a tracked successor could not have
+    /// overwritten both stores.
+    #[test]
+    fn a_netns_whose_cgroup_names_another_pod_is_refused_rather_than_misattributed() {
+        // The tracked pod that owned inode 42 and is now gone. Its
+        // entry, and the generation the kernel still stamps, are its.
+        const RECYCLED_NETNS: u64 = 42;
+        const KUBE_PROXY_CGROUP: u64 = 0x5ca1_ab1e;
+        const PLEX_CGROUP: u64 = 0x0bad_cafe;
+        let map = DashMap::new();
+        map.insert(
+            RECYCLED_NETNS,
+            Arc::new(pod_entry("plex-0", "media", "plex-uid", false)),
+        );
+        let map: ContainerMap = Arc::new(map);
+        // The cgroup registry is filled for every pod on the node,
+        // excluded namespaces included — which is what makes it the
+        // identifier the exclusion list cannot corrupt.
+        let cgroups = registry(&[
+            container(
+                "kube-proxy-uid",
+                "kube-system",
+                "kube-proxy-t4r9v",
+                "kube-proxy",
+                KUBE_PROXY_CGROUP,
+            ),
+            container("plex-uid", "media", "plex-0", "plex", PLEX_CGROUP),
+        ]);
+        let anchor = anchor_at(utc("2026-09-14T04:05:14Z"), 10_000);
+
+        let (rows, losses) = build_denials(
+            &[raw_cg(
+                RECYCLED_NETNS,
+                KUBE_PROXY_CGROUP,
+                gen_of("plex-uid"),
+                101,
+                SECCOMP_RET_LOG,
+                7,
+            )],
+            &map,
+            Some(&cgroups),
+            &anchor,
+        );
+        assert!(
+            rows.is_empty(),
+            "kube-proxy's denials were credited to media/plex-0: an accusation against a              workload that made no such call, and it blocks that workload's promotion              while the denials that were real disappear into it. Got {rows:?}"
+        );
+        assert_eq!(
+            losses.netns_cgroup_mismatch, 1,
+            "and the refusal has to be counted: an uncounted one is the silence this              module exists to remove"
+        );
+        assert_eq!(
+            losses.stale_generation, 0,
+            "the generation MATCHED — that is the point"
+        );
+
+        // The same netns and the same generation, with the pod's OWN
+        // container's cgroup: attributed, nothing refused. Without this
+        // half the rule above could be a blanket refusal and look right.
+        let (rows, losses) = build_denials(
+            &[raw_cg(
+                RECYCLED_NETNS,
+                PLEX_CGROUP,
+                gen_of("plex-uid"),
+                101,
+                SECCOMP_RET_LOG,
+                7,
+            )],
+            &map,
+            Some(&cgroups),
+            &anchor,
+        );
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].pod_uid, "plex-uid");
+        assert_eq!(losses, AttributionLosses::default());
+
+        // And a cgroup the registry does not hold contradicts nothing:
+        // a nested cgroup, an init or ephemeral container, the pause
+        // container. The netns answer stands.
+        let (rows, losses) = build_denials(
+            &[raw(
+                RECYCLED_NETNS,
+                gen_of("plex-uid"),
+                101,
+                SECCOMP_RET_LOG,
+                7,
+            )],
+            &map,
+            Some(&cgroups),
+            &anchor,
+        );
+        assert_eq!(
+            rows.len(),
+            1,
+            "an unresolvable cgroup must not cost a pod-network pod its denials; only two              positive answers naming different pods are a contradiction"
+        );
+        assert_eq!(rows[0].pod_uid, "plex-uid");
+        assert_eq!(losses, AttributionLosses::default());
+    }
+
+    /// A task in the ROOT cgroup is credited to nobody, and the reason
+    /// is the registry, not the value.
+    ///
+    /// `bpf_get_current_cgroup_id()` has no "no cgroup" sentinel: a task
+    /// in the root cgroup carries the root's own kernfs id (measured: 1
+    /// for kernel threads on a normally booted host; 0 never observed).
+    /// On a node whose cgroups are managed on the v1 hierarchy that is
+    /// what EVERY row carries. What refuses it is that no container is
+    /// ever registered under the root —
+    /// `compute_registry::resolve_container_cgroup` will not accept the
+    /// root as a container's cgroup — so the id resolves to nothing.
+    #[test]
+    fn a_root_cgroup_row_on_the_node_netns_is_refused_and_counted() {
+        const NODE_NETNS: u64 = 4_026_531_992;
+        let map = DashMap::new();
+        map.insert(
+            NODE_NETNS,
+            Arc::new(pod_entry("cilium-9xr7b", "kube-system", "cilium-uid", true)),
+        );
+        let map: ContainerMap = Arc::new(map);
+        let cgroups = registry(&[container(
+            "cilium-uid",
+            "kube-system",
+            "cilium-9xr7b",
+            "cilium-agent",
+            0x0c17_0000,
+        )]);
+        let anchor = anchor_at(utc("2026-09-14T04:05:14Z"), 10_000);
+
+        let (rows, losses) = build_denials(
+            &[raw_cg(
+                NODE_NETNS,
+                ROOT_CGROUP_ID,
+                gen_of("cilium-uid"),
+                101,
+                SECCOMP_RET_LOG,
+                3,
+            )],
+            &map,
+            Some(&cgroups),
+            &anchor,
+        );
+        assert!(
+            rows.is_empty(),
+            "kubelet's own denied syscalls were credited to whichever hostNetwork pod              registered the node's namespace last. Got {rows:?}"
+        );
+        assert_eq!(losses.unresolved_cgroup, 1);
+        assert_eq!(losses.unresolved_cgroup_example, Some(ROOT_CGROUP_ID));
+    }
+
     /// The absence of the registry is counted on its own, never
     /// mistaken for a clean node.
     ///
@@ -2411,6 +2759,87 @@ mod tests {
         assert!(needs_container_registry(true, true));
         // Both off is the only case that builds nothing: no reader.
         assert!(!needs_container_registry(false, false));
+    }
+
+    /// The predicate above is two tokens; what broke was its CALL SITE.
+    ///
+    /// `main.rs` is a binary with no tests, and while the wiring lived
+    /// there two separate one-line reversals each left the whole suite
+    /// green at 331 passing:
+    ///
+    ///   * `want_container_registry = compute_config.enabled` — the
+    ///     re-coupling `needs_container_registry` exists to prevent;
+    ///   * `let seccomp_denial_cgroups: Option<ComputeMap> = None;` —
+    ///     the drain handed no registry at all, which this module's own
+    ///     startup warning calls a wiring fault.
+    ///
+    /// Both spell the same outcome: hostNetwork workloads lose cgroup
+    /// attribution, their denials are counted and dropped, and the
+    /// Broker reads the silence as `DenialsObserved: False, observed: 0`.
+    /// So the decision moved to `wire_registry`, and this is the test it
+    /// could not have. Sabotaging either line inside `wire_registry`
+    /// fails it.
+    #[test]
+    fn wiring_gives_denial_capture_the_registry_whether_or_not_the_gauges_are_on() {
+        let cfg = |compute_on: bool, denial_on: bool| {
+            (
+                ComputeConfig {
+                    enabled: compute_on,
+                    ..Default::default()
+                },
+                SeccompDenialConfig {
+                    enabled: denial_on,
+                    ..Default::default()
+                },
+            )
+        };
+
+        // The install that used to lose hostNetwork attribution: one
+        // Helm value, `compute.enabled: false`, and the gauges are the
+        // only thing it is meant to switch off.
+        let (c, d) = cfg(false, true);
+        let w = wire_registry(&c, &d);
+        let registry = w
+            .registry
+            .as_ref()
+            .expect("denial capture alone must build the registry");
+        let denial = w
+            .denial_cgroups
+            .registry()
+            .expect("with the gauges off the drain still needs a registry: a hostNetwork                      pod's cgroup is the only identifier it has, and without one its                      workloads report nothing, which reads as clean");
+        assert!(
+            Arc::ptr_eq(registry, denial),
+            "the drain must resolve against the registry the pod watcher FILLS, not a              second one; two stores that drift is a bug class this tree has already paid              for once"
+        );
+        assert!(
+            w.compute_events.is_none(),
+            "nothing drains registrations with the sampler off; a held receiver backs the              broadcast channel up to capacity"
+        );
+
+        // Gauges only: registry built, and the drain is handed nothing
+        // because there is no drain.
+        let (c, d) = cfg(true, false);
+        let w = wire_registry(&c, &d);
+        assert!(w.registry.is_some(), "the gauges still need it");
+        assert!(w.compute_events.is_some());
+        assert!(w.denial_cgroups.registry().is_none());
+
+        // Both on: one registry, and both readers hold that same one.
+        let (c, d) = cfg(true, true);
+        let w = wire_registry(&c, &d);
+        let registry = w.registry.as_ref().expect("both readers are on");
+        assert!(w.compute_events.is_some());
+        assert!(Arc::ptr_eq(
+            registry,
+            w.denial_cgroups.registry().expect("denial capture is on")
+        ));
+
+        // Both off is the only case that builds nothing.
+        let (c, d) = cfg(false, false);
+        let w = wire_registry(&c, &d);
+        assert!(w.registry.is_none());
+        assert!(w.compute_events.is_none());
+        assert!(w.denial_cgroups.registry().is_none());
     }
 
     // ---- merging ----

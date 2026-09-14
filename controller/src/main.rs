@@ -7,14 +7,15 @@ use tracing::info;
 
 use kguardian::bpf::ebpf_handle;
 use kguardian::compute_config::ComputeConfig;
-use kguardian::compute_registry::{ComputeMap, ComputeRegistry};
 use kguardian::compute_sampler::{
     run as run_compute_sampler, run_heartbeat as run_compute_heartbeat, ContentionSource,
 };
 use kguardian::log::init_logger;
 use kguardian::network::{handle_network_events, handle_policy_drop_events, PolicyDropEvent};
 use kguardian::pod_watcher::ComputeContext;
-use kguardian::seccomp_denial::{run as run_seccomp_denials, DenialMaps, SeccompDenialConfig};
+use kguardian::seccomp_denial::{
+    run as run_seccomp_denials, wire_registry, DenialMaps, RegistryWiring, SeccompDenialConfig,
+};
 use kguardian::seccomp_distributor::run as run_seccomp_distributor;
 use kguardian::service_watcher::watch_service;
 use kguardian::supervisor::{report, shut_down, Draining, Subsystem, Supervisor};
@@ -116,30 +117,27 @@ async fn main() -> Result<(), Error> {
         min_runq_latency_us = compute_config.min_runq_latency_us,
         "compute gauges"
     );
-    // The registry is NOT gated on `compute.enabled` alone, and that is
-    // deliberate. Seccomp denial capture attributes a hostNetwork pod's
-    // verdicts by cgroup id and has nowhere else to resolve one — so
-    // gating the registry on the gauges would mean switching off an
-    // unrelated observability feature silently switched off denial
-    // reporting for every hostNetwork workload on the node, and switched
-    // it off in the direction that reads as "clean". Either feature
-    // being on builds it; only the gauges sample from it. The chart
-    // mounts the host cgroupfs under the same condition
+    // Who gets the container registry is NOT decided here, and that is
+    // the point. The registry is not gated on `compute.enabled` alone:
+    // seccomp denial capture attributes a hostNetwork pod's verdicts by
+    // cgroup id and has nowhere else to resolve one, so gating it on the
+    // gauges meant switching off an unrelated observability feature
+    // silently switched off denial reporting for every hostNetwork
+    // workload on the node — in the direction that reads as "clean".
+    //
+    // That decision lived here, in a file with no tests, and two
+    // one-line reversals of it were each shown to leave the whole suite
+    // green. It now lives in `seccomp_denial::wire_registry`, which is
+    // pinned by a test; this file destructures the answer and has
+    // nothing left to get wrong. The chart mounts the host cgroupfs
+    // under the matching condition
     // (`templates/controller/daemonset.yaml`) — without that mount there
     // is nothing to resolve a cgroup path against, so the two must agree.
-    let want_container_registry = kguardian::seccomp_denial::needs_container_registry(
-        compute_config.enabled,
-        seccomp_denial_config.enabled,
-    );
-    let compute_map: Option<ComputeMap> =
-        want_container_registry.then(|| Arc::new(ComputeRegistry::new()));
-    // Only the sampler consumes registrations, so only the sampler's
-    // switch subscribes. A receiver held with nothing draining it would
-    // make the broadcast channel back up to its capacity for no reason.
-    let compute_events = compute_map
-        .as_ref()
-        .filter(|_| compute_config.enabled)
-        .map(|m| m.subscribe());
+    let RegistryWiring {
+        registry: compute_map,
+        compute_events,
+        denial_cgroups: seccomp_denial_cgroups,
+    } = wire_registry(&compute_config, &seccomp_denial_config);
     let compute_ctx = compute_map.as_ref().map(|m| ComputeContext {
         map: Arc::clone(m),
         cgroup_root: compute_config.cgroup_root.clone(),
@@ -222,9 +220,6 @@ async fn main() -> Result<(), Error> {
 
     let seccomp_denial_map = Arc::clone(&container_map);
     let seccomp_denial_node = node_name.clone();
-    // How a hostNetwork pod's denials get attributed at all; see
-    // `seccomp_denial::build_denials`.
-    let seccomp_denial_cgroups = compute_map.clone();
 
     // One task per subsystem.
     //

@@ -6,10 +6,12 @@
 //! that is not about compute at all: a `hostNetwork` pod shares the
 //! node's network namespace with every other one, so the netns inode
 //! names none of them and the cgroup id is the only identifier left
-//! that is 1:1 with a container. `main.rs` therefore builds this
-//! registry when EITHER the gauges or denial capture is on
-//! (`seccomp_denial::needs_container_registry`); only the sampler
-//! subscribes to the registration events below.
+//! that is 1:1 with a container. This registry is therefore built when
+//! EITHER the gauges or denial capture is on, and only the sampler
+//! subscribes to the registration events below. `main.rs` does not
+//! decide that — `seccomp_denial::wire_registry` does, and hands each
+//! reader its handle, because while the decision lived in `main.rs` two
+//! one-line reversals of it each left the whole suite green.
 //!
 //! The netns `ContainerMap` (models.rs) is per pod and keyed by the
 //! network-namespace inode; that is the right key for traffic and
@@ -650,7 +652,33 @@ pub fn resolve_container_cgroup(
     cid: &str,
     spec_path: Option<&str>,
 ) -> Result<CgroupResolution, CgroupResolveFailure> {
-    let exists = |rel: &str| root.join(rel).join("cpu.stat").exists() || root.join(rel).is_dir();
+    // A container's cgroup is a DESCENDANT of the root, never the root
+    // itself — and the root is the one relative path this test used to
+    // accept unconditionally, because `root.join("")` IS `root`, so
+    // `exists("")` only ever asked whether the cgroupfs mount exists.
+    //
+    // That is reachable, not theoretical. `parse_proc_cgroup_v2` yields
+    // `""` for a `0::/` line, which is what `/proc/<pid>/cgroup` reads
+    // for every task on a node whose cgroups are managed on the v1
+    // hierarchy: the unified hierarchy is mounted but holds nothing, so
+    // every task sits in its root. The proc route then registered the
+    // container under the ROOT's cgroup id — and
+    // `bpf_get_current_cgroup_id()` reports exactly that id for every
+    // task in the root cgroup, kernel threads included (measured on a
+    // live kernel: 1 on a normally booted host; 0 is never returned).
+    // Every one of those denials would have been credited to whichever
+    // container last claimed the root, which is the misattribution
+    // `seccomp_denial::build_denials` refuses everywhere else.
+    //
+    // Requiring one `Normal` component rejects the root however it is
+    // spelled (`""`, `"/"`, `"."`) rather than special-casing the empty
+    // string on the one route known to produce it.
+    let exists = |rel: &str| {
+        Path::new(rel)
+            .components()
+            .any(|c| matches!(c, std::path::Component::Normal(_)))
+            && (root.join(rel).join("cpu.stat").exists() || root.join(rel).is_dir())
+    };
 
     let spec = match spec_path {
         None => "unavailable".to_string(),
@@ -689,6 +717,15 @@ pub fn resolve_container_cgroup(
         Ok(rel) if rel.contains("..") => {
             format!("{rel:?} is relative to another cgroup namespace (contains ..)")
         }
+        // Said explicitly rather than left to fall through `exists`,
+        // which would report the root as "does not exist" and send an
+        // operator looking for a missing directory. `0::/` means the
+        // task is in the cgroup root, which every task is on a node
+        // whose cgroups are managed on the v1 hierarchy; there is no
+        // per-container cgroup to find and none must be invented.
+        Ok(rel) if rel.is_empty() => format!(
+            "pid {pid} reports \"0::/\" — the cgroup root, which is no container's own cgroup"
+        ),
         Ok(rel) if exists(&rel) => {
             return Ok(CgroupResolution {
                 path: rel,
@@ -1078,6 +1115,67 @@ mod tests {
         std::fs::write(proc_.join("4242/cgroup"), format!("0::/{scope}\n")).unwrap();
         let r = resolve_container_cgroup(&root, &proc_, 4242, "nope", None).unwrap();
         assert_eq!(r.via, "proc");
+        let _ = std::fs::remove_dir_all(root.parent().unwrap());
+    }
+
+    /// The cgroup ROOT must never be accepted as a container's own
+    /// cgroup.
+    ///
+    /// `/proc/<pid>/cgroup` reads `0::/` for every task on a node whose
+    /// cgroups are managed on the v1 hierarchy — the unified hierarchy
+    /// is mounted but empty, so every task sits in its root — and
+    /// `parse_proc_cgroup_v2` renders that as `""`. `root.join("")` is
+    /// `root`, so the existence test the proc route gates on used to
+    /// pass unconditionally and the container was registered under the
+    /// cgroup root's own id.
+    ///
+    /// That id is not a spare value. `bpf_get_current_cgroup_id()`
+    /// returns it for every task in the root cgroup, kernel threads
+    /// included (measured on a live kernel: 1 on a normally booted
+    /// host, and 0 never observed). With `/sys/fs/cgroup` mounted from
+    /// the host, every root-cgroup denial on the node would then have
+    /// been credited to whichever container last claimed the root:
+    /// kubelet's syscalls filed against a workload that never made
+    /// them, which is the one outcome `seccomp_denial` refuses
+    /// everywhere else.
+    #[test]
+    fn the_cgroup_root_is_never_accepted_as_a_containers_cgroup() {
+        let (root, proc_, scope) = cgroupns_fixture("rootcg");
+        // The v1/hybrid node: the unified hierarchy holds every task in
+        // its root, so this is what the file says.
+        std::fs::write(proc_.join("4242/cgroup"), "0::/\n").unwrap();
+
+        let e = resolve_container_cgroup(&root, &proc_, 4242, "nope", None).expect_err(
+            "the cgroup root is no container's cgroup; accepting it credits every root-cgroup \
+             task on the node, kernel threads included, to this container",
+        );
+        assert!(
+            e.proc.contains("0::/"),
+            "the failure has to name the root so an operator is not sent looking for a \
+             missing directory: {e}"
+        );
+
+        // The same on a hybrid node, where the v1 controller lines sit
+        // alongside the single `0::` line.
+        std::fs::write(
+            proc_.join("4242/cgroup"),
+            "12:cpu,cpuacct:/kubepods/pod1/abc\n1:name=systemd:/kubepods/pod1/abc\n0::/\n",
+        )
+        .unwrap();
+        assert!(
+            resolve_container_cgroup(&root, &proc_, 4242, "nope", None).is_err(),
+            "a v1 path on another hierarchy is not this container's v2 cgroup either"
+        );
+
+        // And the guard is not a blanket refusal of the proc route: a
+        // real per-container path on the same fixture still resolves.
+        std::fs::write(proc_.join("4242/cgroup"), format!("0::/{scope}\n")).unwrap();
+        assert_eq!(
+            resolve_container_cgroup(&root, &proc_, 4242, "nope", None)
+                .unwrap()
+                .via,
+            "proc"
+        );
         let _ = std::fs::remove_dir_all(root.parent().unwrap());
     }
 

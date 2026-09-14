@@ -56,8 +56,13 @@
 //!
 //! # Seccomp denials
 //!
-//! A third loop prunes `seccomp_denials` by `last_seen`, on the same batched
-//! CTE pattern:
+//! A third loop does two things to `seccomp_denials`. It **backfills
+//! attribution** — resolving rows whose pod was not yet in `pod_details` when
+//! the denial arrived — and it prunes by `last_seen`, on the same batched CTE
+//! pattern. The backfill runs whatever the retention window is set to,
+//! because it is not retention: an unattributed row withholds the all-clear
+//! from its whole namespace, so leaving one unresolved is a reporting outage
+//! rather than a housekeeping backlog. Settings:
 //!
 //! - `SECCOMP_DENIALS_RETENTION_DAYS` (default 30; 0 disables pruning)
 //! - `SECCOMP_DENIALS_RETENTION_INTERVAL_SECS` (default 3600)
@@ -238,21 +243,31 @@ fn spawn_seccomp_denials(pool: DbPool) {
     info!(
         days,
         interval_secs = interval.as_secs(),
-        "seccomp denial retention loop scheduled (days=0 means pruning off)"
+        "seccomp denial retention loop scheduled (days=0 means pruning off; \
+         attribution backfill still runs)"
     );
-    if days == 0 {
-        return;
-    }
     actix_web::rt::spawn(async move {
         // Staggered against the other two loops' 60 s and 90 s warmups so
         // three full-table prunes do not land on a cold pool together.
         tokio::time::sleep(Duration::from_secs(120)).await;
         loop {
-            run_seccomp_denial_pass(&pool, days).await;
-            // Once per pass, after the denial prune: the node table is one
-            // row per node, so it needs no batching and no cadence of its
-            // own.
-            prune_stale_denial_nodes(&pool, days).await;
+            // Denial pruning only when enabled; attribution backfill always,
+            // the same split the audit loop makes for dead pods. The backfill
+            // is not housekeeping — an unattributed row is why a namespace
+            // reads `DenialsObserved: Unknown` — so switching pruning off
+            // must not switch it off too.
+            //
+            // Before the prune, so a row on the edge of the window is
+            // attributed for whatever poll it has left rather than being
+            // repaired and deleted in the same pass.
+            backfill_denial_attribution(&pool).await;
+            if days > 0 {
+                run_seccomp_denial_pass(&pool, days).await;
+                // Once per pass, after the denial prune: the node table is
+                // one row per node, so it needs no batching and no cadence of
+                // its own.
+                prune_stale_denial_nodes(&pool, days).await;
+            }
             tokio::time::sleep(interval).await;
         }
     });
@@ -304,6 +319,89 @@ async fn run_seccomp_denial_pass(pool: &DbPool, days: u32) {
     );
 }
 
+/// Re-run attribution against `pod_details` for denials that had none.
+///
+/// # Why a denial arrives unattributed, and why leaving it there is not free
+///
+/// Ingest resolves the owning workload from `pod_details` at the moment the
+/// report lands. A pod that trips a syscall in its first seconds can beat its
+/// own `pod_details` row to the Broker, and the ingest upsert only re-resolves
+/// a row when the same `(pod_uid, syscall, action)` is reported again — so a
+/// one-shot startup denial, which is exactly the shape that race produces,
+/// stays unattributed for the life of the row.
+///
+/// That is not a cosmetic gap. An unattributed row is filtered out of the
+/// per-workload rollup, and `DenialIndex::block_for` withholds the whole
+/// namespace's `denials` block because of it, so one unrepaired row sits a
+/// namespace at `DenialsObserved: Unknown` until it is pruned — 30 days at
+/// the default. This pass is what makes that state transient.
+///
+/// # The rule is `seccomp_denial::attribute`'s, in SQL
+///
+/// Both workload columns or neither, and the pod's namespace must match the
+/// denial's (a `pod_details` row with no namespace recorded cannot be
+/// disproved and is taken as a match). That equivalence is the point: a
+/// backfill that attributed more loosely than ingest would resolve exactly
+/// the rows ingest refused, which are the ones where `pod_details`' pod-name
+/// primary key has collapsed two namespaces' pods — and would then name the
+/// wrong team's workload in a `SeccompProfile` status. The collision case
+/// stays unattributed here on purpose, and its namespace keeps reading
+/// Unknown, which is the honest answer for it.
+///
+/// # Bounded, and it fails in the safe direction
+///
+/// One batch per pass, the same size the prune uses. Anything left is retried
+/// on the next pass, and a row left unattributed keeps its namespace at
+/// Unknown — so running out of budget here costs a delayed all-clear, never a
+/// false one.
+async fn backfill_denial_attribution(pool: &DbPool) {
+    let batch_size = seccomp_denial_batch_size();
+    let pool = pool.clone();
+    let result = tokio::task::spawn_blocking(move || -> Result<usize, RetentionError> {
+        let mut conn = pool.get().map_err(RetentionError::Pool)?;
+        sql_query(BACKFILL_DENIAL_ATTRIBUTION_SQL)
+            .bind::<diesel::sql_types::BigInt, _>(batch_size)
+            .execute(&mut conn)
+            .map_err(RetentionError::Diesel)
+    })
+    .await;
+    match result {
+        Ok(Ok(0)) => debug!("seccomp denial attribution backfill: 0 rows resolved"),
+        Ok(Ok(n)) => info!(
+            rows = n,
+            "seccomp denial attribution backfill resolved rows whose pod was not \
+             known when the denial arrived"
+        ),
+        Ok(Err(e)) => warn!(error = %e, "seccomp denial attribution backfill failed"),
+        Err(e) => warn!(error = %e, "seccomp denial attribution backfill task panicked"),
+    }
+}
+
+/// The backfill statement, as a constant so the live-database test runs the
+/// SAME SQL this loop issues rather than a hand-copied approximation.
+///
+/// `$1` bounds the candidate rows, not the updated ones: the CTE picks the
+/// oldest unattributed ids and the join then resolves whichever of them
+/// `pod_details` can prove. A candidate that stays unresolvable is re-picked
+/// every pass, which is cheap (it is an indexable NULL test over a table the
+/// prune keeps bounded) and is the behaviour that matters — a pod whose
+/// `pod_details` row arrives an hour late is resolved on the pass after it
+/// does.
+pub(crate) const BACKFILL_DENIAL_ATTRIBUTION_SQL: &str = "WITH candidates AS (\
+         SELECT id FROM seccomp_denials \
+         WHERE workload_kind IS NULL OR workload_name IS NULL \
+         ORDER BY id \
+         LIMIT $1 \
+     ) \
+     UPDATE seccomp_denials d \
+     SET workload_kind = p.workload_kind, workload_name = p.workload_name \
+     FROM pod_details p \
+     WHERE d.id IN (SELECT id FROM candidates) \
+       AND p.pod_name = d.pod_name \
+       AND p.workload_kind IS NOT NULL \
+       AND p.workload_name IS NOT NULL \
+       AND (p.pod_namespace IS NULL OR p.pod_namespace = d.pod_namespace)";
+
 /// Drop heartbeat rows for nodes that stopped reporting a whole retention
 /// window ago — the node is gone, not merely quiet.
 ///
@@ -320,11 +418,11 @@ async fn run_seccomp_denial_pass(pool: &DbPool, days: u32) {
 /// outage and then recreate it on recovery, which loses nothing but churns
 /// the table for no reason.
 ///
-/// The widest staleness window a node can buy itself is three days (ingest
-/// clamps a declared interval to one), so the two only cross under an absurd
-/// pair of settings — that interval against a one- or two-day retention
-/// window — and the crossing fails safe: the row goes, so the cluster reads
-/// Unknown rather than clean.
+/// The widest staleness window a node can buy itself is half an hour (see
+/// `CAPTURE_REPORT_STALE_CEILING_SECS`), so with a retention window measured
+/// in days the two cannot cross at all unless pruning is disabled entirely —
+/// and if they somehow did, the crossing fails safe: the row goes, so the
+/// cluster reads Unknown rather than clean.
 async fn prune_stale_denial_nodes(pool: &DbPool, days: u32) {
     let pool = pool.clone();
     let interval = format!("{} days", days);

@@ -128,11 +128,27 @@ CR's deployment state and drift against the observed set.
 
   What separates them is whether anything is **watching**, which the Broker
   knows from the per-node capture heartbeat (see
-  [`POST /seccomp/denials`](#post-seccomp-denials)). A block is emitted when
-  at least one node has reported inside its own staleness window with its
-  probe attached, and at no other time. Until then every workload is `null`,
-  because "this workload was never denied" and "nothing on this cluster is
-  capturing" are the same observation.
+  [`POST /seccomp/denials`](#post-seccomp-denials)). A block needs at least
+  one node to have reported inside its own staleness window with its probe
+  attached. Until then every workload is `null`, because "this workload was
+  never denied" and "nothing on this cluster is capturing" are the same
+  observation.
+
+  A second condition withholds the block for **one namespace at a time**: a
+  stored denial the Broker could not attribute to a workload. Attribution
+  resolves the owning workload from `pod_details`, and it refuses rather than
+  guesses — the pod was not yet known when the denial arrived, or two
+  namespaces have a pod of the same name, which collapses to one row because
+  that table is keyed on the pod name alone. A refusal is not neutral: the
+  per-workload rollup only sees attributed rows, so without this the denial's
+  own workload would read `{"total": 0}`. Every workload in that namespace
+  reads `null` until the row is resolved or pruned; other namespaces are
+  unaffected. The Broker logs the namespaces, and
+  [`GET /seccomp/denials?namespace=<ns>`](#get-seccomp-denials) shows the
+  rows themselves, which is the endpoint that can show a denial without
+  having to claim a workload for it. A Broker pass re-runs attribution
+  hourly, so a denial that merely beat its pod's registration resolves on its
+  own.
 
   A **stored denial is not liveness.** A row proves capture worked once; it
   says nothing about whether anything is watching now, so disabling capture,
@@ -476,8 +492,16 @@ rather than from a fixed number. Without it, raising
 `seccomp.denials.intervalSeconds` past a third of the window would make a
 perfectly healthy node read as stale on every report, and a stale node is
 `Unknown`, which blocks promotion. A report that omits the field is
-unaffected: absent or zero falls back to the 5-minute default. A node cannot
-declare more than a day, so it cannot buy itself a window measured in years.
+unaffected: absent or zero falls back to the 5-minute default.
+
+The window is bounded at **30 minutes**, and a declared cadence above **600
+seconds** is clamped to it (the chart refuses one at install time). The window
+is not only a timeout — it is how long kguardian keeps reporting a workload
+clean on the strength of one old report — so an unbounded cadence meant a
+departing node, or a single POST, bought the whole cluster hours of
+`{"total": 0}` with nothing watching. A node draining slower than 600 s is
+heard from less often than the Broker will vouch for it, so its workloads read
+`null` between reports; the Broker warns when it clamps.
 
 A pod with its own network namespace is attributed by that namespace. A
 `hostNetwork: true` pod has none — it shares the node's with every other
