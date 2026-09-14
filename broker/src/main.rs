@@ -11,8 +11,9 @@ use api::{
     get_compute_nodes, get_pod_by_ip, get_pod_by_name, get_pod_details, get_pod_syscall_name,
     get_pod_traffic, get_pod_traffic_name, get_pods_by_node, get_seccomp_profile,
     get_seccomp_profile_file, get_svc_by_ip, get_svc_details, get_version, list_seccomp_profiles,
-    mark_pod_dead, post_seccomp_node_status, put_seccomp_cr, set_statement_timeout,
-    spawn_peer_late_resolve, spawn_retention, spawn_version_check, AuditClient, ReadBudget,
+    mark_pod_dead, post_seccomp_node_status, put_seccomp_cr, seccomp_denials_resource,
+    set_statement_timeout, spawn_peer_late_resolve, spawn_retention, spawn_seccomp_denial_metrics,
+    spawn_version_check, AuditClient, ReadBudget, SeccompDenialMetrics, SeccompDenialSeries,
     StatementTimeoutCustomizer, VersionCheckState,
 };
 
@@ -337,6 +338,22 @@ async fn main() -> Result<(), std::io::Error> {
     let version_state = web::Data::new(VersionCheckState::default());
     spawn_version_check(pool.clone(), version_state.clone());
 
+    // Prometheus state for seccomp denials, shared by ingest and /metrics.
+    //
+    // Both `_total` counters live in this object and are incremented at
+    // ingest, never read back off `seccomp_denials`. That is a correctness
+    // requirement rather than an optimisation: retention deletes from that
+    // table, so a counter derived from it would fall at every prune and
+    // Prometheus would read the fall as a reset — injecting a phantom spike
+    // into the `rate()` / `increase()` expressions the denial alerts are
+    // built on. The full argument is on SeccompDenialMetrics.
+    //
+    // Only the workload GAUGE is table-derived, and it is refreshed on its
+    // own short timer so /metrics — which gives up on the pool after 100 ms
+    // so a saturated pool can never block a scrape — never queries at all.
+    let denial_metrics = web::Data::new(SeccompDenialMetrics::default());
+    spawn_seccomp_denial_metrics(pool.clone(), denial_metrics.clone());
+
     // Aggregate memory bound for whole-result-set reads. Constructed before
     // the server so its resolved budget (and any coherence clamp) is logged
     // at startup next to the pool size it has to coexist with — the two
@@ -363,6 +380,7 @@ async fn main() -> Result<(), std::io::Error> {
             .app_data(web::Data::new(auth_config.clone()))
             .app_data(version_state.clone())
             .app_data(read_budget.clone())
+            .app_data(denial_metrics.clone())
             .service(add_pods_batch)
             .service(add_pod_details)
             .service(add_pods_syscalls)
@@ -381,6 +399,9 @@ async fn main() -> Result<(), std::io::Error> {
             .service(export_seccomp_profile)
             .service(export_seccomp_profile_post)
             .service(post_seccomp_node_status)
+            // GET + POST /seccomp/denials on one resource, carrying their
+            // own JSON body limit (api::DENIAL_JSON_LIMIT_BYTES).
+            .service(seccomp_denials_resource())
             .service(put_seccomp_cr)
             .service(delete_seccomp_cr)
             .service(get_pods_by_node)
@@ -446,6 +467,55 @@ pub async fn health_check(
     }
 }
 
+/// Escape a Prometheus label VALUE.
+///
+/// The exposition format defines exactly three escapes inside a quoted
+/// label value: backslash, double quote, and newline. Nothing else is
+/// escaped, and nothing else needs to be.
+///
+/// Every value the broker puts in a label today is a Kubernetes name or a
+/// fixed `SCMP_ACT_*` enum, none of which can contain any of the three. It
+/// is escaped anyway because these values originate on a node and travel
+/// through an ingest endpoint: one unescaped quote would not corrupt one
+/// series, it would make the entire `/metrics` payload unparseable and take
+/// every other broker metric — including the ones an operator alerts on to
+/// notice the breakage — off the air at the same moment.
+fn escape_label_value(v: &str) -> String {
+    let mut out = String::with_capacity(v.len());
+    for c in v.chars() {
+        match c {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            '\n' => out.push_str("\\n"),
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
+/// Render the `kguardian_seccomp_denials_total` sample lines (without the
+/// HELP/TYPE header, which `render_metrics_text` owns).
+///
+/// Empty when there are no denial series, which is the expected state on a
+/// healthy cluster — a metric family with a HELP and TYPE but no samples is
+/// valid exposition, and keeping the header unconditional means a dashboard
+/// query against the name never 404s just because nothing has been denied
+/// yet.
+fn render_denial_series(series: &[SeccompDenialSeries]) -> String {
+    let mut out = String::new();
+    for s in series {
+        out.push_str(&format!(
+            "kguardian_seccomp_denials_total{{namespace=\"{ns}\",workload_kind=\"{kind}\",workload=\"{workload}\",action=\"{action}\"}} {total}\n",
+            ns = escape_label_value(&s.namespace),
+            kind = escape_label_value(&s.workload_kind),
+            workload = escape_label_value(&s.workload),
+            action = escape_label_value(&s.action),
+            total = s.total,
+        ));
+    }
+    out
+}
+
 /// Build the Prometheus text-format payload for the broker. Pure
 /// formatting — no I/O — so it's testable in isolation without
 /// spinning up the actix runtime.
@@ -462,6 +532,9 @@ pub(crate) fn render_metrics_text(
     read_budget_kib_available: u32,
     read_shed_total: u64,
     uptime_secs: u64,
+    seccomp_denial_series: &[SeccompDenialSeries],
+    seccomp_denial_workloads: u64,
+    seccomp_denial_rows_total: u64,
 ) -> String {
     format!(
         concat!(
@@ -498,6 +571,15 @@ pub(crate) fn render_metrics_text(
             "# HELP broker_uptime_seconds Process uptime\n",
             "# TYPE broker_uptime_seconds counter\n",
             "broker_uptime_seconds {uptime_secs}\n",
+            "# HELP kguardian_seccomp_denials_total Kernel seccomp verdicts observed, by workload and action; deliberately not labelled by syscall (query /seccomp/denials for that)\n",
+            "# TYPE kguardian_seccomp_denials_total counter\n",
+            "{seccomp_denial_series}",
+            "# HELP kguardian_seccomp_denial_workloads Distinct workloads with at least one seccomp denial inside the retention window\n",
+            "# TYPE kguardian_seccomp_denial_workloads gauge\n",
+            "kguardian_seccomp_denial_workloads {seccomp_denial_workloads}\n",
+            "# HELP kguardian_seccomp_denial_rows_total Denial rows ingested since broker start (a process counter, so it resets on restart and answers whether ingest is alive)\n",
+            "# TYPE kguardian_seccomp_denial_rows_total counter\n",
+            "kguardian_seccomp_denial_rows_total {seccomp_denial_rows_total}\n",
         ),
         schema_ready = schema_ready,
         db_reachable = db_reachable,
@@ -510,6 +592,9 @@ pub(crate) fn render_metrics_text(
         read_budget_kib_available = read_budget_kib_available,
         read_shed_total = read_shed_total,
         uptime_secs = uptime_secs,
+        seccomp_denial_series = render_denial_series(seccomp_denial_series),
+        seccomp_denial_workloads = seccomp_denial_workloads,
+        seccomp_denial_rows_total = seccomp_denial_rows_total,
     )
 }
 
@@ -528,6 +613,7 @@ pub async fn metrics(
     pool: web::Data<r2d2::Pool<r2d2::ConnectionManager<diesel::PgConnection>>>,
     audit: web::Data<api::AuditClient>,
     read_budget: web::Data<ReadBudget>,
+    denials: web::Data<SeccompDenialMetrics>,
 ) -> HttpResponse {
     let pool_inner = pool.get_ref().clone();
     let schema_state = tokio::task::spawn_blocking(
@@ -567,6 +653,13 @@ pub async fn metrics(
     let db_pool_idle = pool_state.idle_connections;
     let db_pool_max = pool.get_ref().max_size();
     let uptime_secs = UPTIME_ANCHOR.get_or_init(Instant::now).elapsed().as_secs();
+    // In-memory reads, not queries. Two of the three denial metrics are
+    // counters accumulated at ingest and never derived from the table (see
+    // SeccompDenialMetrics — a table-derived counter is not monotonic across
+    // retention); the third is a gauge refreshed on its own 15 s timer.
+    // Nothing here reaches a pool that this handler deliberately gives up on
+    // after 100 ms.
+    let denial_series = denials.get_ref().series();
 
     let body = render_metrics_text(
         u8::from(schema_ready),
@@ -580,6 +673,9 @@ pub async fn metrics(
         read_budget.get_ref().available_kib(),
         read_budget.get_ref().shed_count(),
         uptime_secs,
+        &denial_series,
+        denials.get_ref().workloads(),
+        denials.get_ref().rows_total(),
     );
 
     HttpResponse::Ok()
@@ -597,43 +693,79 @@ mod tests {
     // metric_name<space>value, newline. A regression in the format
     // string would silently break operator dashboards.
 
+    /// Every metric name the endpoint exposes. Kept as one list so a new
+    /// metric cannot be added without appearing in both the name and the
+    /// HELP/TYPE assertions.
+    const ALL_METRIC_NAMES: &[&str] = &[
+        "broker_db_schema_ready",
+        "broker_db_reachable",
+        "broker_audit_enabled",
+        "broker_audit_inflight_available",
+        "broker_audit_dropped_total",
+        "broker_db_pool_idle",
+        "broker_db_pool_max",
+        "broker_read_budget_kib_total",
+        "broker_read_budget_kib_available",
+        "broker_read_shed_total",
+        "broker_uptime_seconds",
+        "kguardian_seccomp_denials_total",
+        "kguardian_seccomp_denial_workloads",
+        "kguardian_seccomp_denial_rows_total",
+    ];
+
+    fn denial_series() -> Vec<SeccompDenialSeries> {
+        vec![
+            SeccompDenialSeries {
+                namespace: "media".into(),
+                workload_kind: "Deployment".into(),
+                workload: "media-transform".into(),
+                action: "SCMP_ACT_LOG".into(),
+                total: 17,
+            },
+            // Unattributed: empty label values, which Prometheus reads as
+            // absent labels rather than as a broken series.
+            SeccompDenialSeries {
+                namespace: "media".into(),
+                workload_kind: String::new(),
+                workload: String::new(),
+                action: "SCMP_ACT_ERRNO".into(),
+                total: 2,
+            },
+        ]
+    }
+
     #[test]
     fn renders_all_metric_names() {
-        let body = render_metrics_text(1, 1, 1, 16, 0, 16, 16, 262_144, 262_144, 0, 0);
-        for name in [
-            "broker_db_schema_ready",
-            "broker_db_reachable",
-            "broker_audit_enabled",
-            "broker_audit_inflight_available",
-            "broker_audit_dropped_total",
-            "broker_db_pool_idle",
-            "broker_db_pool_max",
-            "broker_read_budget_kib_total",
-            "broker_read_budget_kib_available",
-            "broker_read_shed_total",
-            "broker_uptime_seconds",
-        ] {
+        let body = render_metrics_text(
+            1,
+            1,
+            1,
+            16,
+            0,
+            16,
+            16,
+            262_144,
+            262_144,
+            0,
+            0,
+            &denial_series(),
+            1,
+            19,
+        );
+        for name in ALL_METRIC_NAMES {
             assert!(body.contains(name), "missing metric: {name}");
         }
     }
 
     #[test]
     fn each_metric_has_help_and_type() {
-        let body = render_metrics_text(1, 1, 1, 16, 0, 16, 16, 262_144, 262_144, 0, 0);
+        // Deliberately rendered with NO denial series: a labelled family
+        // with zero samples must still carry its HELP and TYPE, or a
+        // dashboard query against the name breaks on exactly the healthy
+        // cluster where nothing has been denied yet.
+        let body = render_metrics_text(1, 1, 1, 16, 0, 16, 16, 262_144, 262_144, 0, 0, &[], 0, 0);
         // Each metric must have a # HELP and a # TYPE line.
-        for name in [
-            "broker_db_schema_ready",
-            "broker_db_reachable",
-            "broker_audit_enabled",
-            "broker_audit_inflight_available",
-            "broker_audit_dropped_total",
-            "broker_db_pool_idle",
-            "broker_db_pool_max",
-            "broker_read_budget_kib_total",
-            "broker_read_budget_kib_available",
-            "broker_read_shed_total",
-            "broker_uptime_seconds",
-        ] {
+        for name in ALL_METRIC_NAMES {
             let help_line = format!("# HELP {name}");
             let type_line = format!("# TYPE {name}");
             assert!(body.contains(&help_line), "missing HELP for {name}");
@@ -645,7 +777,7 @@ mod tests {
     fn renders_zero_state() {
         // All-zero state: DB unreachable, audit disabled, no permits available,
         // pool saturated (0 idle).
-        let body = render_metrics_text(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0);
+        let body = render_metrics_text(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, &[], 0, 0);
         assert!(body.contains("\nbroker_db_schema_ready 0\n"));
         assert!(body.contains("\nbroker_db_reachable 0\n"));
         assert!(body.contains("\nbroker_audit_enabled 0\n"));
@@ -657,11 +789,34 @@ mod tests {
         assert!(body.contains("\nbroker_read_budget_kib_available 0\n"));
         assert!(body.contains("\nbroker_read_shed_total 0\n"));
         assert!(body.contains("\nbroker_uptime_seconds 0\n"));
+        assert!(body.contains("\nkguardian_seccomp_denial_workloads 0\n"));
+        assert!(body.contains("\nkguardian_seccomp_denial_rows_total 0\n"));
+        // No denial series at all: header present, no sample lines. This is
+        // the steady state on a cluster where nothing trips seccomp.
+        assert!(
+            !body.contains("kguardian_seccomp_denials_total{"),
+            "a family with no samples must render no sample lines"
+        );
     }
 
     #[test]
     fn renders_populated_state() {
-        let body = render_metrics_text(1, 1, 1, 16, 7, 12, 16, 262_144, 131_072, 3, 12345);
+        let body = render_metrics_text(
+            1,
+            1,
+            1,
+            16,
+            7,
+            12,
+            16,
+            262_144,
+            131_072,
+            3,
+            12345,
+            &denial_series(),
+            1,
+            19,
+        );
         assert!(body.contains("\nbroker_db_schema_ready 1\n"));
         assert!(body.contains("\nbroker_audit_inflight_available 16\n"));
         assert!(body.contains("\nbroker_audit_dropped_total 7\n"));
@@ -675,28 +830,276 @@ mod tests {
         assert!(body.contains("\nbroker_read_budget_kib_available 131072\n"));
         assert!(body.contains("\nbroker_read_shed_total 3\n"));
         assert!(body.contains("\nbroker_uptime_seconds 12345\n"));
+        // The labelled series, in full. Label ORDER is part of the assertion
+        // on purpose: Prometheus does not care, but a dashboard's recording
+        // rules and an operator's `grep` both do, and the order is cheap to
+        // keep stable.
+        assert!(
+            body.contains(
+                "\nkguardian_seccomp_denials_total{namespace=\"media\",workload_kind=\"Deployment\",workload=\"media-transform\",action=\"SCMP_ACT_LOG\"} 17\n"
+            ),
+            "attributed denial series missing or reshaped: {body}"
+        );
+        // An unattributed denial keeps its namespace and action and carries
+        // empty workload labels, rather than being dropped from the counter.
+        assert!(
+            body.contains(
+                "\nkguardian_seccomp_denials_total{namespace=\"media\",workload_kind=\"\",workload=\"\",action=\"SCMP_ACT_ERRNO\"} 2\n"
+            ),
+            "unattributed denial series missing or reshaped: {body}"
+        );
+        assert!(body.contains("\nkguardian_seccomp_denial_workloads 1\n"));
+        assert!(body.contains("\nkguardian_seccomp_denial_rows_total 19\n"));
+    }
+
+    /// A label value is the only part of this payload that originates
+    /// outside the broker: namespace, workload and action all arrive over
+    /// the denial ingest endpoint from a node. An unescaped quote there does
+    /// not corrupt one series — it makes the WHOLE /metrics payload
+    /// unparseable, taking every other broker metric off the air, including
+    /// the ones an operator would alert on to notice.
+    #[test]
+    fn label_values_are_escaped() {
+        assert_eq!(escape_label_value("plain-name"), "plain-name");
+        assert_eq!(escape_label_value(r#"a"b"#), r#"a\"b"#);
+        assert_eq!(escape_label_value(r"a\b"), r"a\\b");
+        assert_eq!(escape_label_value("a\nb"), r"a\nb");
+        // Not escaped, because the exposition format defines exactly three
+        // escapes and over-escaping changes the value Prometheus stores.
+        assert_eq!(escape_label_value("a{b}c=d"), "a{b}c=d");
+
+        let hostile = vec![SeccompDenialSeries {
+            namespace: r#"ev"il"#.into(),
+            workload_kind: "Deployment".into(),
+            workload: "a\nb".into(),
+            action: "SCMP_ACT_LOG".into(),
+            total: 1,
+        }];
+        let line = render_denial_series(&hostile);
+        assert!(line.contains(r#"namespace="ev\"il""#), "{line}");
+        assert!(line.contains(r#"workload="a\nb""#), "{line}");
+        assert_eq!(line.lines().count(), 1, "one series, one line: {line}");
+    }
+
+    /// Split one exposition sample line into `(name, label block, value)`.
+    ///
+    /// This replaced a `split_whitespace().len() == 2` check when the first
+    /// labelled family (`kguardian_seccomp_denials_total`) arrived. That
+    /// check could not be kept — `name{...} value` is three or more
+    /// whitespace-separated parts — and it must not simply be DELETED
+    /// either: it was the only thing pinning the line shape, and Prometheus
+    /// rejects the whole payload on one bad line, so a formatting regression
+    /// takes every broker metric off the air at once.
+    ///
+    /// So it is replaced with a real parser: name, an optional brace-
+    /// delimited label block whose quoting is honoured (a `}` inside a label
+    /// value does not end it), exactly one space, then the value. Anything
+    /// else is an error, and `rejects_malformed_sample_lines` below proves
+    /// the parser still says no.
+    fn parse_sample_line(line: &str) -> Result<(&str, Option<&str>, &str), String> {
+        let name_len = line
+            .char_indices()
+            .take_while(|(i, c)| {
+                if *i == 0 {
+                    c.is_ascii_alphabetic() || *c == '_' || *c == ':'
+                } else {
+                    c.is_ascii_alphanumeric() || *c == '_' || *c == ':'
+                }
+            })
+            .count();
+        if name_len == 0 {
+            return Err(format!("no metric name in {line:?}"));
+        }
+        let (name, rest) = line.split_at(name_len);
+        let (labels, rest) = match rest.strip_prefix('{') {
+            Some(after) => {
+                let end = find_unquoted(after, '}')
+                    .ok_or_else(|| format!("unterminated label block in {line:?}"))?;
+                (Some(&after[..end]), &after[end + 1..])
+            }
+            None => (None, rest),
+        };
+        let value = rest
+            .strip_prefix(' ')
+            .ok_or_else(|| format!("expected exactly one space before the value in {line:?}"))?;
+        Ok((name, labels, value))
+    }
+
+    /// Byte offset of the closing quote of a label value whose OPENING
+    /// quote has already been consumed, honouring backslash escapes.
+    ///
+    /// Not the same scan as `find_unquoted`: this one starts INSIDE the
+    /// string, so it must stop at the first unescaped quote rather than
+    /// treating it as the start of one.
+    fn find_value_end(s: &str) -> Option<usize> {
+        let mut escaped = false;
+        for (i, c) in s.char_indices() {
+            if escaped {
+                escaped = false;
+                continue;
+            }
+            match c {
+                '\\' => escaped = true,
+                '"' => return Some(i),
+                _ => {}
+            }
+        }
+        None
+    }
+
+    /// Byte offset of the first `needle` that is not inside a quoted,
+    /// backslash-escaped string. Starts OUTSIDE any string.
+    fn find_unquoted(s: &str, needle: char) -> Option<usize> {
+        let mut in_quote = false;
+        let mut escaped = false;
+        for (i, c) in s.char_indices() {
+            if escaped {
+                escaped = false;
+                continue;
+            }
+            match c {
+                '\\' if in_quote => escaped = true,
+                '"' => in_quote = !in_quote,
+                c if c == needle && !in_quote => return Some(i),
+                _ => {}
+            }
+        }
+        None
+    }
+
+    /// Parse a label block into `key="value"` pairs, rejecting anything that
+    /// is not that shape.
+    fn parse_labels(block: &str) -> Result<Vec<(&str, &str)>, String> {
+        let mut out = Vec::new();
+        let mut rest = block;
+        while !rest.is_empty() {
+            let eq = rest
+                .find('=')
+                .ok_or_else(|| format!("label without `=` in {block:?}"))?;
+            let key = &rest[..eq];
+            if key.is_empty() || !key.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+                return Err(format!("invalid label name {key:?} in {block:?}"));
+            }
+            let after = rest[eq + 1..]
+                .strip_prefix('"')
+                .ok_or_else(|| format!("label value not quoted in {block:?}"))?;
+            let end = find_value_end(after)
+                .ok_or_else(|| format!("unterminated label value in {block:?}"))?;
+            out.push((key, &after[..end]));
+            rest = &after[end + 1..];
+            match rest.strip_prefix(',') {
+                Some(r) => rest = r,
+                None if rest.is_empty() => {}
+                None => return Err(format!("expected `,` between labels in {block:?}")),
+            }
+        }
+        Ok(out)
+    }
+
+    /// Full validation of one sample line: shape, label syntax, and a
+    /// numeric value with no embedded whitespace.
+    fn validate_sample_line(line: &str) -> Result<(), String> {
+        let (_name, labels, value) = parse_sample_line(line)?;
+        if let Some(block) = labels {
+            let pairs = parse_labels(block)?;
+            if pairs.is_empty() {
+                return Err(format!("empty label block in {line:?}"));
+            }
+        }
+        if value.contains(char::is_whitespace) {
+            return Err(format!("value has embedded whitespace in {line:?}"));
+        }
+        value
+            .parse::<f64>()
+            .map_err(|_| format!("value not numeric: {line:?}"))?;
+        Ok(())
     }
 
     #[test]
     fn wire_shape_is_prometheus_compatible() {
-        // Each non-comment line must look like `<name> <value>\n`.
-        let body = render_metrics_text(1, 1, 0, 8, 0, 4, 16, 262_144, 0, 0, 60);
+        // Rendered WITH labelled series, so the labelled shape is what is
+        // actually exercised rather than only the bare one.
+        let body = render_metrics_text(
+            1,
+            1,
+            0,
+            8,
+            0,
+            4,
+            16,
+            262_144,
+            0,
+            0,
+            60,
+            &denial_series(),
+            1,
+            19,
+        );
+        let mut saw_labelled = false;
+        let mut saw_bare = false;
         for line in body.lines() {
             if line.is_empty() || line.starts_with('#') {
                 continue;
             }
-            let parts: Vec<_> = line.split_whitespace().collect();
-            assert_eq!(
-                parts.len(),
-                2,
-                "non-comment line not `name value`: {line:?}"
-            );
-            // Value must parse as a number (gauge or counter).
+            validate_sample_line(line).unwrap_or_else(|e| panic!("{e}"));
+            let (_, labels, _) = parse_sample_line(line).unwrap();
+            match labels {
+                Some(_) => saw_labelled = true,
+                None => saw_bare = true,
+            }
+        }
+        assert!(
+            saw_bare,
+            "the bare `name value` shape must still be covered"
+        );
+        assert!(
+            saw_labelled,
+            "the labelled shape must be covered; if this fires the new \
+             series stopped rendering and the test would otherwise pass \
+             vacuously"
+        );
+    }
+
+    /// The half of the rewrite that matters: relaxing the line check to
+    /// allow labels must not relax it into accepting anything. Each case
+    /// here is a real way the formatter could break.
+    #[test]
+    fn rejects_malformed_sample_lines() {
+        for bad in [
+            // No value at all.
+            "broker_uptime_seconds",
+            // Two values — what a stray space in a format string produces.
+            "broker_uptime_seconds 1 2",
+            // Non-numeric value.
+            "broker_uptime_seconds abc",
+            // Name starting with a digit.
+            "1broker_uptime_seconds 2",
+            // Unterminated label block — a missing `}` in the format string.
+            r#"kguardian_seccomp_denials_total{namespace="media" 1"#,
+            // Unquoted label value.
+            "kguardian_seccomp_denials_total{namespace=media} 1",
+            // Missing space between the label block and the value.
+            r#"kguardian_seccomp_denials_total{namespace="media"}1"#,
+            // Empty label block.
+            "kguardian_seccomp_denials_total{} 1",
+            // Missing separator between labels.
+            r#"kguardian_seccomp_denials_total{namespace="a"workload="b"} 1"#,
+            // Unescaped quote inside a value — the failure `escape_label_
+            // value` exists to prevent, which would otherwise terminate the
+            // value early and leave trailing junk.
+            r#"kguardian_seccomp_denials_total{namespace="ev"il"} 1"#,
+        ] {
             assert!(
-                parts[1].parse::<f64>().is_ok(),
-                "value not numeric: {line:?}",
+                validate_sample_line(bad).is_err(),
+                "malformed line was accepted: {bad:?}"
             );
         }
+        // And a well-formed labelled line still passes, so the rejections
+        // above are not just "everything fails".
+        assert!(validate_sample_line(
+            r#"kguardian_seccomp_denials_total{namespace="media",workload_kind="",workload="",action="SCMP_ACT_LOG"} 17"#
+        )
+        .is_ok());
     }
 
     // db_pool_max_size is the env-var-driven tunable for the r2d2

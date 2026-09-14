@@ -19,9 +19,10 @@
 //!  2. server-side-apply this node's `status.nodes[name=<node>]` entry
 //!     (field manager `kguardian-controller/<node>`);
 //!  3. compute the summary (`distribution`, `Ready`, and — from the
-//!     broker's observations — `CaptureComplete` and `Drift`) and apply it
-//!     under the shared manager `kguardian-summary`; every node writes the
-//!     same value, so it converges. Both applies are skipped when nothing
+//!     broker's observations — `CaptureComplete`, `Drift`, and
+//!     `DenialsObserved` with its `denials` block) and apply it under the
+//!     shared manager `kguardian-summary`; every node writes the same
+//!     value, so it converges. Both applies are skipped when nothing
 //!     changed;
 //!  4. mirror `{spec, hash, distribution}` to the broker so the UI can show
 //!     CR state without an API-server round trip.
@@ -40,12 +41,12 @@
 use crate::client::{api_delete_call, api_get_bytes, api_post_call, api_put_call};
 use crate::pod_watcher::parse_lenient_bool;
 use crate::seccomp_crd::{
-    fingerprint, localhost_profile_path, render_profile, Condition, Distribution,
+    fingerprint, localhost_profile_path, render_profile, Condition, DenialSummary, Distribution,
     DistributionState, NodeStatus, SeccompProfile, SeccompProfileSpec, SeccompProfileStatus,
     WorkloadRef,
 };
 use crate::Error;
-use chrono::{SecondsFormat, Utc};
+use chrono::{DateTime, SecondsFormat, Utc};
 use futures::StreamExt;
 use k8s_openapi::api::core::v1::Node;
 use kube::api::{ListParams, Patch, PatchParams};
@@ -54,6 +55,7 @@ use kube::runtime::{watcher, WatchStreamExt};
 use kube::{Api, Client, ResourceExt};
 use serde::Deserialize;
 use serde_json::json;
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 use tracing::{debug, error, info, warn};
@@ -73,6 +75,13 @@ const MANAGER_MAX_LEN: usize = 128;
 pub const COND_READY: &str = "Ready";
 pub const COND_CAPTURE_COMPLETE: &str = "CaptureComplete";
 pub const COND_DRIFT: &str = "Drift";
+pub const COND_DENIALS_OBSERVED: &str = "DenialsObserved";
+
+/// The three conditions computed from broker observations rather than
+/// from this node's own files. They share a fate: all three are decided
+/// together in `observation_conditions`, and all three are carried
+/// forward untouched when the broker cannot be reached.
+const OBSERVED_CONDITIONS: [&str; 3] = [COND_CAPTURE_COMPLETE, COND_DRIFT, COND_DENIALS_OBSERVED];
 
 struct Config {
     root: PathBuf,
@@ -258,9 +267,10 @@ fn cr_id(cr: &SeccompProfile) -> String {
 
 /// Cluster-wide inputs refreshed once per pass: how many nodes exist
 /// (the `total` in `distribution`) and what the broker has observed
-/// (for `CaptureComplete` / `Drift`). `summaries` is `None` when the
-/// broker could not be reached, in which case those two conditions are
-/// left as they are rather than flapping to `Unknown`.
+/// (for `CaptureComplete` / `Drift` / `DenialsObserved`). `summaries` is
+/// `None` when the broker could not be reached, in which case those
+/// three conditions — and `status.denials` — are left as they are rather
+/// than flapping to `Unknown`.
 struct ClusterData {
     total_nodes: u32,
     summaries: Option<Vec<BrokerSummary>>,
@@ -288,6 +298,11 @@ pub struct BrokerSummary {
     pub capture: Option<BrokerCapture>,
     #[serde(default)]
     pub cr: Option<BrokerCr>,
+    /// Kernel seccomp verdicts for this workload. `None` from a broker
+    /// that predates denial capture, and from one holding no denial rows
+    /// at all — never "zero denials"; see `BrokerDenials`.
+    #[serde(default)]
+    pub denials: Option<BrokerDenials>,
 }
 
 #[derive(Debug, Default, Deserialize, Clone, PartialEq, Eq)]
@@ -314,6 +329,39 @@ pub struct BrokerCr {
     pub name: String,
     #[serde(default)]
     pub drift: Option<BrokerDrift>,
+}
+
+/// The `denials` block of one `GET /seccomp/profiles` row: what the
+/// kernel's seccomp filter actually acted on for this workload, as the
+/// broker has aggregated it over its retention window.
+///
+/// The block being absent and the block saying zero are different
+/// answers and stay different all the way into the CR. Absent means the
+/// broker did not tell us. Zero means it told us the workload is clean.
+/// Collapsing them would hand an operator a clean bill of health for a
+/// workload nobody has looked at — the same failure the broker's own
+/// `a_cr_without_names_emits_no_drift_rather_than_an_empty_one` guards
+/// on the other side of the wire.
+#[derive(Debug, Default, Deserialize, Clone, PartialEq, Eq)]
+pub struct BrokerDenials {
+    /// Denial events across every syscall and action.
+    ///
+    /// Signed on the wire even though a count cannot be negative: the
+    /// whole `Vec<BrokerSummary>` is parsed in one go, so a broker that
+    /// ever emitted `-1` here would fail the parse and take
+    /// `CaptureComplete` and `Drift` down with it for every CR in the
+    /// cluster. It clamps to zero instead.
+    #[serde(default)]
+    pub total: i64,
+    #[serde(default)]
+    pub syscalls: Vec<String>,
+    /// The `SCMP_ACT_*` spellings seen, for the condition message. Not
+    /// mirrored into `status.denials` — the CR carries the count and the
+    /// syscalls; which action fired is a `GET /seccomp/denials` question.
+    #[serde(default)]
+    pub actions: Vec<String>,
+    #[serde(default, rename = "lastSeen")]
+    pub last_seen: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize, Clone, PartialEq, Eq)]
@@ -605,6 +653,7 @@ pub fn summary_patch(ns: &str, name: &str, s: &SeccompProfileStatus) -> serde_js
             "localhostProfile": s.localhost_profile,
             "distribution": s.distribution,
             "drift": s.drift,
+            "denials": s.denials,
             "conditions": s.conditions,
         }
     })
@@ -653,29 +702,62 @@ pub fn ready_condition(d: &Distribution) -> Desired {
     }
 }
 
-/// `CaptureComplete` and `Drift` from the broker's view of the CR's
-/// workload. `None` summaries (broker unreachable) ⇒ `None` here, and the
-/// caller keeps whatever the conditions already say.
+/// What one pass concluded about the three broker-derived conditions,
+/// and the `status.denials` block that belongs with the last of them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Observations {
+    pub capture: Desired,
+    pub drift: Desired,
+    pub denials: Desired,
+    /// `Some` exactly when `denials` is `True` or `False`, `None` when it
+    /// is `Unknown`. The block and the condition are two readings of one
+    /// answer and must never disagree: a count beside an `Unknown`
+    /// condition reads as current, and an absent block beside a `False`
+    /// would put a blank in the `Denials` column for a workload the
+    /// broker affirmatively cleared.
+    pub denial_summary: Option<DenialSummary>,
+}
+
+/// All three observation conditions `Unknown` for one reason. They are
+/// decided from a single broker row, so when there is no row to decide
+/// from they are unknown together.
+fn all_unknown(reason: &'static str, message: String) -> Observations {
+    Observations {
+        capture: Desired {
+            type_: COND_CAPTURE_COMPLETE,
+            status: "Unknown",
+            reason,
+            message: message.clone(),
+        },
+        drift: Desired {
+            type_: COND_DRIFT,
+            status: "Unknown",
+            reason,
+            message: message.clone(),
+        },
+        denials: Desired {
+            type_: COND_DENIALS_OBSERVED,
+            status: "Unknown",
+            reason,
+            message,
+        },
+        denial_summary: None,
+    }
+}
+
+/// `CaptureComplete`, `Drift` and `DenialsObserved` from the broker's
+/// view of the CR's workload. `None` summaries (broker unreachable) ⇒
+/// `None` here, and the caller keeps whatever the conditions already say.
 pub fn observation_conditions(
     namespace: &str,
     cr_name: &str,
     workload_ref: Option<&WorkloadRef>,
     summaries: Option<&[BrokerSummary]>,
-) -> Option<(Desired, Desired)> {
+) -> Option<Observations> {
     let Some(wr) = workload_ref else {
-        return Some((
-            Desired {
-                type_: COND_CAPTURE_COMPLETE,
-                status: "Unknown",
-                reason: "NoWorkloadRef",
-                message: "spec.workloadRef is not set".into(),
-            },
-            Desired {
-                type_: COND_DRIFT,
-                status: "Unknown",
-                reason: "NoWorkloadRef",
-                message: "spec.workloadRef is not set".into(),
-            },
+        return Some(all_unknown(
+            "NoWorkloadRef",
+            "spec.workloadRef is not set".into(),
         ));
     };
     let summaries = summaries?;
@@ -683,25 +765,14 @@ pub fn observation_conditions(
         .iter()
         .find(|s| s.namespace == namespace && s.kind == wr.kind.as_str() && s.name == wr.name);
     let Some(row) = row else {
-        let msg = format!(
-            "no observations yet for {} {}/{}",
-            wr.kind.as_str(),
-            namespace,
-            wr.name
-        );
-        return Some((
-            Desired {
-                type_: COND_CAPTURE_COMPLETE,
-                status: "Unknown",
-                reason: "NoObservations",
-                message: msg.clone(),
-            },
-            Desired {
-                type_: COND_DRIFT,
-                status: "Unknown",
-                reason: "NoObservations",
-                message: msg,
-            },
+        return Some(all_unknown(
+            "NoObservations",
+            format!(
+                "no observations yet for {} {}/{}",
+                wr.kind.as_str(),
+                namespace,
+                wr.name
+            ),
         ));
     };
 
@@ -780,7 +851,159 @@ pub fn observation_conditions(
             message: "broker has not seen this SeccompProfile yet".into(),
         },
     };
-    Some((capture, drift))
+
+    let (denials, denial_summary) = match &row.denials {
+        Some(d) => {
+            let summary = denial_block(d);
+            let actions = sorted_unique(&d.actions);
+            // "Are there denials" is the count, except that a count of
+            // zero alongside named syscalls can only be a broker bug —
+            // and of the two ways to be wrong about it, saying "denials,
+            // go look" beats handing out a clean bill of health. The
+            // printer column still shows the count the broker sent, so
+            // the contradiction stays visible rather than being papered
+            // over with a number kguardian made up.
+            if summary.observed == 0 && summary.syscalls.is_empty() {
+                (
+                    Desired {
+                        type_: COND_DENIALS_OBSERVED,
+                        status: "False",
+                        reason: "NoDenials",
+                        message: "no denials in the retention window".into(),
+                    },
+                    // Zero is an answer, so it gets written out as one.
+                    //
+                    // The `Denials` printer column is bound to
+                    // `.status.denials.observed`, and that table is the
+                    // surface operators actually read. Leave the block
+                    // unset here and the column goes blank for a workload
+                    // the broker affirmatively cleared — the same blank
+                    // it shows for a workload nothing is watching. Two
+                    // opposite meanings in one cell is precisely what the
+                    // three-valued condition exists to prevent, and it
+                    // would be reintroduced one layer down where nobody
+                    // reading the table can see the condition at all.
+                    // `0` for clean and blank for unknown makes the
+                    // column stand on its own.
+                    //
+                    // The cost, since this is a trade: every clean CR now
+                    // carries an all-zero `denials` block in `-o yaml`.
+                    // That is noise, but it is honest noise — it is the
+                    // difference between "checked, nothing" and "not
+                    // checked", and it is the cheaper of the two.
+                    Some(summary),
+                )
+            } else {
+                let actions = if actions.is_empty() {
+                    String::new()
+                } else {
+                    format!(" ({})", actions.join(", "))
+                };
+                let last_seen = match &summary.last_seen {
+                    Some(ts) => format!("; last seen {ts}"),
+                    None => String::new(),
+                };
+                let message = format!(
+                    "{} seccomp denial(s){actions} on {} syscall(s): {}{last_seen}",
+                    summary.observed,
+                    summary.syscalls.len(),
+                    summary.syscalls.join(", "),
+                );
+                (
+                    Desired {
+                        type_: COND_DENIALS_OBSERVED,
+                        status: "True",
+                        reason: "KernelDenied",
+                        message,
+                    },
+                    Some(summary),
+                )
+            }
+        }
+        // No block at all. NOT zero denials — this is the whole point of
+        // the condition being three-valued. `False` here would tell an
+        // operator, and any alert reading the CR, that the kernel has
+        // never acted on this profile, on no evidence whatsoever.
+        //
+        // The broker omits the block when it holds no denial rows for
+        // anything, because at that point "this workload was never
+        // denied" and "nothing on this cluster is capturing denials" are
+        // the same database state — capture needs CONFIG_AUDIT on the
+        // node and can be switched off. An older broker omits it because
+        // the field did not exist. Both are genuinely "we do not know",
+        // and the message names both because the fix differs.
+        None => (
+            Desired {
+                type_: COND_DENIALS_OBSERVED,
+                status: "Unknown",
+                reason: "NoDenialData",
+                message: "broker reported no denials data; either it predates denial \
+                          capture or no node is capturing"
+                    .into(),
+            },
+            None,
+        ),
+    };
+
+    Some(Observations {
+        capture,
+        drift,
+        denials,
+        denial_summary,
+    })
+}
+
+/// The `status.denials` block for one broker block.
+///
+/// Sorts and de-duplicates the syscall names rather than mirroring the
+/// broker's order. Every node computes this same summary and applies it
+/// under the shared `kguardian-summary` manager, and `summary_equal`
+/// skips the apply when nothing changed — so a broker that returned the
+/// names in an unstable order (a `HashSet` drained on the other side,
+/// say) would make every node disagree with what is on the CR on every
+/// pass and turn an idle cluster into a patch loop. `render_profile`
+/// sorts for the same reason.
+fn denial_block(d: &BrokerDenials) -> DenialSummary {
+    DenialSummary {
+        // Clamped rather than trusted: `observed` is a `u64` in the CR
+        // and the apiserver would reject a negative one outright.
+        observed: d.total.max(0) as u64,
+        syscalls: sorted_unique(&d.syscalls),
+        last_seen: normalised_last_seen(d.last_seen.as_deref()),
+    }
+}
+
+/// Sorted, de-duplicated, empties dropped.
+fn sorted_unique(values: &[String]) -> Vec<String> {
+    values
+        .iter()
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .collect::<BTreeSet<&str>>()
+        .into_iter()
+        .map(str::to_string)
+        .collect()
+}
+
+/// Re-spell the broker's `lastSeen` the way `now_rfc3339` spells a
+/// timestamp, or drop it if it is not a timestamp at all.
+///
+/// Canonicalising matters for the same reason the sort does: the value
+/// is part of what `summary_equal` compares, so a broker that spelled
+/// one instant `+00:00` in one release and `Z` in the next would re-apply
+/// every CR on every pass forever. Dropping an unparseable value keeps
+/// `status.denials.lastSeen` a field an operator can read as a time.
+fn normalised_last_seen(raw: Option<&str>) -> Option<String> {
+    let raw = raw?.trim();
+    if raw.is_empty() {
+        return None;
+    }
+    let parsed = DateTime::parse_from_rfc3339(raw).ok()?;
+    Some(
+        parsed
+            .with_timezone(&Utc)
+            .to_rfc3339_opts(SecondsFormat::Secs, true),
+    )
 }
 
 /// Merge desired conditions over the existing ones: the transition time
@@ -823,19 +1046,26 @@ pub fn desired_summary(
     let now = now_rfc3339();
 
     let mut desired: Vec<Desired> = vec![ready];
-    match observation_conditions(
+    let denials = match observation_conditions(
         cr.namespace().as_deref().unwrap_or_default(),
         &cr.name_any(),
         cr.spec.workload_ref.as_ref(),
         summaries,
     ) {
-        Some((capture, drift)) => {
-            desired.push(capture);
-            desired.push(drift);
+        Some(o) => {
+            desired.push(o.capture);
+            desired.push(o.drift);
+            desired.push(o.denials);
+            o.denial_summary
         }
-        // Broker unreachable: carry the existing two forward untouched.
+        // Broker unreachable: carry the existing three forward untouched,
+        // and with them whatever `status.denials` already said. Dropping
+        // the block here would blank the `Denials` printer column on every
+        // broker blip, and a blank column is how this status spells "no
+        // data" — an outage would keep announcing that kguardian had
+        // forgotten what it already knew.
         None => {
-            for t in [COND_CAPTURE_COMPLETE, COND_DRIFT] {
+            for t in OBSERVED_CONDITIONS {
                 if let Some(c) = existing.conditions.iter().find(|c| c.type_ == t) {
                     desired.push(Desired {
                         type_: t,
@@ -849,8 +1079,9 @@ pub fn desired_summary(
                     });
                 }
             }
+            existing.denials.clone()
         }
-    }
+    };
     let conditions = merge_conditions(&existing.conditions, &desired, &now);
     let drift = conditions
         .iter()
@@ -863,13 +1094,15 @@ pub fn desired_summary(
         localhost_profile: Some(localhost.to_string()),
         distribution: Some(distribution),
         drift,
+        denials,
         nodes: Vec::new(),
         conditions,
     }
 }
 
-/// Map a stored reason back onto the static set (unknown ⇒ kept as
-/// `NoObservations`, the only reason a stale broker row can have).
+/// Map a stored reason back onto the static set. Anything unrecognised
+/// falls back to `NoObservations`, which is a valid `Unknown` reason for
+/// every one of these conditions.
 fn leak_reason(reason: &str) -> &'static str {
     match reason {
         "Full" => "Full",
@@ -877,6 +1110,9 @@ fn leak_reason(reason: &str) -> &'static str {
         "NoWorkloadRef" => "NoWorkloadRef",
         "InSync" => "InSync",
         "ObservedNotInSpec" => "ObservedNotInSpec",
+        "KernelDenied" => "KernelDenied",
+        "NoDenials" => "NoDenials",
+        "NoDenialData" => "NoDenialData",
         _ => "NoObservations",
     }
 }
@@ -888,6 +1124,7 @@ pub fn summary_equal(existing: &SeccompProfileStatus, desired: &SeccompProfileSt
         && existing.localhost_profile == desired.localhost_profile
         && existing.distribution == desired.distribution
         && existing.drift == desired.drift
+        && existing.denials == desired.denials
         && existing.conditions == desired.conditions
 }
 
@@ -1017,6 +1254,27 @@ mod tests {
                 ],
             }),
             cr,
+            // A broker that predates denial capture: the field is simply
+            // not in the JSON. Every test that wants denials opts in
+            // with `with_denials`, so the default row keeps proving the
+            // older-broker path stays `Unknown`.
+            denials: None,
+        }
+    }
+
+    fn with_denials(row: BrokerSummary, denials: BrokerDenials) -> BrokerSummary {
+        BrokerSummary {
+            denials: Some(denials),
+            ..row
+        }
+    }
+
+    fn denials(total: i64, syscalls: &[&str]) -> BrokerDenials {
+        BrokerDenials {
+            total,
+            syscalls: syscalls.iter().map(|s| (*s).to_string()).collect(),
+            actions: vec!["SCMP_ACT_LOG".into()],
+            last_seen: Some("2026-09-14T04:05:14Z".into()),
         }
     }
 
@@ -1068,10 +1326,17 @@ mod tests {
 
     #[test]
     fn observation_conditions_cover_every_branch() {
-        // No workloadRef ⇒ both Unknown/NoWorkloadRef, even without a broker.
-        let (c, d) = observation_conditions("prod", "deployment-web", None, None).unwrap();
+        // No workloadRef ⇒ all three Unknown/NoWorkloadRef, even without
+        // a broker.
+        let o = observation_conditions("prod", "deployment-web", None, None).unwrap();
+        let (c, d) = (&o.capture, &o.drift);
         assert_eq!((c.status, c.reason), ("Unknown", "NoWorkloadRef"));
         assert_eq!((d.status, d.reason), ("Unknown", "NoWorkloadRef"));
+        assert_eq!(
+            (o.denials.status, o.denials.reason),
+            ("Unknown", "NoWorkloadRef")
+        );
+        assert!(o.denial_summary.is_none());
 
         let wr = WorkloadRef {
             kind: WorkloadKind::Deployment,
@@ -1081,10 +1346,15 @@ mod tests {
         assert!(observation_conditions("prod", "deployment-web", Some(&wr), None).is_none());
 
         // No row for the workload ⇒ Unknown/NoObservations.
-        let (c, d) =
-            observation_conditions("prod", "deployment-web", Some(&wr), Some(&[])).unwrap();
+        let o = observation_conditions("prod", "deployment-web", Some(&wr), Some(&[])).unwrap();
+        let (c, d) = (&o.capture, &o.drift);
         assert_eq!((c.status, c.reason), ("Unknown", "NoObservations"));
         assert_eq!((d.status, d.reason), ("Unknown", "NoObservations"));
+        assert_eq!(
+            (o.denials.status, o.denials.reason),
+            ("Unknown", "NoObservations")
+        );
+        assert!(o.denial_summary.is_none());
 
         // Complete capture + in-sync CR.
         let rows = [summary_row(
@@ -1100,8 +1370,8 @@ mod tests {
                 }),
             }),
         )];
-        let (c, d) =
-            observation_conditions("prod", "deployment-web", Some(&wr), Some(&rows)).unwrap();
+        let o = observation_conditions("prod", "deployment-web", Some(&wr), Some(&rows)).unwrap();
+        let (c, d) = (&o.capture, &o.drift);
         assert_eq!((c.status, c.reason), ("True", "Full"));
         assert_eq!((d.status, d.reason), ("False", "InSync"));
 
@@ -1119,8 +1389,8 @@ mod tests {
                 }),
             }),
         )];
-        let (c, d) =
-            observation_conditions("prod", "deployment-web", Some(&wr), Some(&rows)).unwrap();
+        let o = observation_conditions("prod", "deployment-web", Some(&wr), Some(&rows)).unwrap();
+        let (c, d) = (&o.capture, &o.drift);
         assert_eq!((c.status, c.reason), ("False", "PartialCapture"));
         assert!(
             c.message.contains("low tier on 1 pod(s): web-1 (low)"),
@@ -1143,16 +1413,334 @@ mod tests {
                 drift: None,
             }),
         )];
-        let (_, d) =
-            observation_conditions("prod", "deployment-web", Some(&wr), Some(&rows)).unwrap();
+        let d = observation_conditions("prod", "deployment-web", Some(&wr), Some(&rows))
+            .unwrap()
+            .drift;
         assert_eq!((d.status, d.reason), ("Unknown", "NoObservations"));
         assert!(d.message.contains("\"other\""));
 
         // Namespace must match, not just the workload name.
         let rows = [summary_row("staging", "web", true, None)];
-        let (c, _) =
-            observation_conditions("prod", "deployment-web", Some(&wr), Some(&rows)).unwrap();
+        let c = observation_conditions("prod", "deployment-web", Some(&wr), Some(&rows))
+            .unwrap()
+            .capture;
         assert_eq!(c.reason, "NoObservations");
+    }
+
+    /// The distinction this feature exists to preserve: a row whose
+    /// `denials` block is absent is not a row that says zero.
+    ///
+    /// Absent is what a broker sends when it predates denial capture, and
+    /// when it holds no denial rows at all — at which point "this workload
+    /// was never denied" and "nothing on this cluster is capturing" are
+    /// the same database state. Zero is an answer: the broker looked, and
+    /// nothing has fired.
+    ///
+    /// Collapsing them costs an operator the difference between
+    /// "kguardian checked and this profile has never fired" and "nothing
+    /// checked". Only the first is grounds for promoting a profile to an
+    /// enforcing action, and it is exactly the reading `False` invites.
+    /// Both the condition and `status.denials` carry the distinction, so
+    /// neither a `kubectl get` nor a JSONPath gate can land on the wrong
+    /// one. The broker guards the other end of the same wire — see
+    /// `a_cr_without_names_emits_no_drift_rather_than_an_empty_one`.
+    #[test]
+    fn an_absent_denials_block_is_unknown_rather_than_zero() {
+        let wr = WorkloadRef {
+            kind: WorkloadKind::Deployment,
+            name: "web".into(),
+        };
+        let c = cr("prod", "deployment-web", Some("web"));
+        let path = "kguardian/prod/deployment-web.json";
+        let nodes = [node("a", "h1")];
+        let summarise = |rows: &[BrokerSummary]| {
+            desired_summary(
+                &c,
+                &SeccompProfileStatus::default(),
+                &nodes,
+                "h1",
+                path,
+                1,
+                Some(rows),
+            )
+        };
+        let denials_of = |s: &SeccompProfileStatus| {
+            s.conditions
+                .iter()
+                .find(|c| c.type_ == COND_DENIALS_OBSERVED)
+                .cloned()
+                .expect("DenialsObserved is always emitted")
+        };
+
+        // A broker that reports on the workload but says nothing about
+        // denials.
+        let silent_rows = [summary_row("prod", "web", true, None)];
+        let o = observation_conditions("prod", "deployment-web", Some(&wr), Some(&silent_rows))
+            .unwrap();
+        assert_eq!(
+            (o.denials.status, o.denials.reason),
+            ("Unknown", "NoDenialData"),
+            "silence from the broker is not a clean bill of health"
+        );
+        assert!(
+            o.denial_summary.is_none(),
+            "no block may be published beside an Unknown condition"
+        );
+
+        // The same broker, explicitly reporting zero for this workload.
+        let clean_rows = [with_denials(
+            summary_row("prod", "web", true, None),
+            BrokerDenials::default(),
+        )];
+        let o =
+            observation_conditions("prod", "deployment-web", Some(&wr), Some(&clean_rows)).unwrap();
+        assert_eq!((o.denials.status, o.denials.reason), ("False", "NoDenials"));
+        assert_eq!(
+            o.denial_summary,
+            Some(DenialSummary::default()),
+            "zero is a block with an explicit count, not an absent block"
+        );
+
+        // Both readings of the CR keep them apart: the status block and
+        // the condition.
+        let unknown = summarise(&silent_rows);
+        let clean = summarise(&clean_rows);
+        assert!(unknown.denials.is_none());
+        assert_eq!(clean.denials.as_ref().unwrap().observed, 0);
+        assert!(
+            summary_patch("prod", "deployment-web", &unknown)["status"]["denials"].is_null(),
+            "the Denials column stays blank when nothing is known"
+        );
+        assert_eq!(
+            summary_patch("prod", "deployment-web", &clean)["status"]["denials"]["observed"],
+            0,
+            "the Denials column shows a real 0 for a cleared workload"
+        );
+        assert_eq!(denials_of(&clean).status, "False");
+        assert_eq!(denials_of(&unknown).status, "Unknown");
+    }
+
+    /// One rule ties the block to the condition across every branch:
+    /// `status.denials` is present exactly when `DenialsObserved` has
+    /// decided something — `True` or `False` — and absent exactly when it
+    /// is `Unknown`. The two are readings of one answer, so a stale count
+    /// can never sit beside an `Unknown`, and a `False` can never leave
+    /// the `Denials` column blank.
+    ///
+    /// This holds across a broker outage too, where the condition and the
+    /// block are carried forward together rather than recomputed.
+    #[test]
+    fn a_denials_block_is_present_exactly_when_the_condition_is_decided() {
+        let c = cr("prod", "deployment-web", Some("web"));
+        let path = "kguardian/prod/deployment-web.json";
+        let nodes = [node("a", "h1")];
+        let row = |d: Option<BrokerDenials>| match d {
+            Some(d) => with_denials(summary_row("prod", "web", true, None), d),
+            None => summary_row("prod", "web", true, None),
+        };
+        let cases = [
+            // (rows for this pass, what it is)
+            (vec![row(Some(denials(17, &["ptrace"])))], "denials present"),
+            (
+                vec![row(Some(BrokerDenials::default()))],
+                "broker reports zero",
+            ),
+            (vec![row(None)], "broker sent no denials block"),
+            (vec![], "no row for the workload at all"),
+        ];
+        let mut status = SeccompProfileStatus::default();
+        for (rows, what) in cases {
+            status = desired_summary(&c, &status, &nodes, "h1", path, 1, Some(&rows));
+            let decided = status
+                .conditions
+                .iter()
+                .find(|c| c.type_ == COND_DENIALS_OBSERVED)
+                .map(|c| c.status != "Unknown")
+                .unwrap_or(false);
+            assert_eq!(
+                status.denials.is_some(),
+                decided,
+                "{what}: block presence must track a decided DenialsObserved"
+            );
+        }
+
+        // And the same holds through an outage, which carries both
+        // forward rather than recomputing either.
+        let seen = desired_summary(
+            &c,
+            &SeccompProfileStatus::default(),
+            &nodes,
+            "h1",
+            path,
+            1,
+            Some(&[row(Some(denials(17, &["ptrace"])))]),
+        );
+        let outage = desired_summary(&c, &seen, &nodes, "h1", path, 1, None);
+        assert!(outage.denials.is_some());
+        assert_eq!(
+            outage
+                .conditions
+                .iter()
+                .find(|c| c.type_ == COND_DENIALS_OBSERVED)
+                .unwrap()
+                .status,
+            "True"
+        );
+    }
+
+    #[test]
+    fn denials_set_the_condition_the_block_and_the_message() {
+        let wr = WorkloadRef {
+            kind: WorkloadKind::Deployment,
+            name: "web".into(),
+        };
+        let rows = [with_denials(
+            summary_row("prod", "web", true, None),
+            BrokerDenials {
+                total: 17,
+                // Unsorted, duplicated, and with an empty name: whatever
+                // the broker's aggregation happened to emit.
+                syscalls: vec![
+                    "ptrace".into(),
+                    "mount".into(),
+                    "ptrace".into(),
+                    String::new(),
+                ],
+                actions: vec!["SCMP_ACT_LOG".into(), "SCMP_ACT_LOG".into()],
+                last_seen: Some("2026-09-14T04:05:14Z".into()),
+            },
+        )];
+        let o = observation_conditions("prod", "deployment-web", Some(&wr), Some(&rows)).unwrap();
+        assert_eq!(
+            (o.denials.status, o.denials.reason),
+            ("True", "KernelDenied")
+        );
+        assert_eq!(
+            o.denials.message,
+            "17 seccomp denial(s) (SCMP_ACT_LOG) on 2 syscall(s): mount, ptrace; \
+             last seen 2026-09-14T04:05:14Z"
+        );
+        let block = o.denial_summary.unwrap();
+        assert_eq!(block.observed, 17);
+        assert_eq!(block.syscalls, ["mount", "ptrace"]);
+        assert_eq!(block.last_seen.as_deref(), Some("2026-09-14T04:05:14Z"));
+
+        // A count of zero next to named syscalls can only be a broker
+        // bug. Of the two ways to be wrong about it, "there are denials,
+        // go look" beats handing out a clean bill of health.
+        let rows = [with_denials(
+            summary_row("prod", "web", true, None),
+            BrokerDenials {
+                total: 0,
+                syscalls: vec!["ptrace".into()],
+                ..Default::default()
+            },
+        )];
+        let o = observation_conditions("prod", "deployment-web", Some(&wr), Some(&rows)).unwrap();
+        assert_eq!(o.denials.status, "True");
+        assert_eq!(
+            o.denial_summary.unwrap().observed,
+            0,
+            "the column still shows the count the broker sent, so the \
+             contradiction stays visible instead of being papered over"
+        );
+    }
+
+    /// Every node computes this block and applies it under the shared
+    /// `kguardian-summary` manager, and the apply is skipped only when it
+    /// compares equal to what is already on the CR. So the block has to be
+    /// a function of the broker's content, not of the order or spelling
+    /// the broker happened to use — otherwise an idle cluster re-patches
+    /// every CR on every pass, forever, for no change at all.
+    #[test]
+    fn the_denials_block_is_a_function_of_content_not_spelling() {
+        let a = denial_block(&BrokerDenials {
+            total: 3,
+            syscalls: vec!["ptrace".into(), "mount".into()],
+            actions: vec![],
+            last_seen: Some("2026-09-14T04:05:14Z".into()),
+        });
+        let b = denial_block(&BrokerDenials {
+            total: 3,
+            syscalls: vec!["mount".into(), "ptrace".into(), "mount".into()],
+            actions: vec!["SCMP_ACT_LOG".into()],
+            last_seen: Some("2026-09-14T06:05:14+02:00".into()),
+        });
+        assert_eq!(a, b, "same denials, different spelling ⇒ same block");
+
+        // A count that cannot exist clamps here rather than reaching the
+        // CR, where the field is unsigned and the apiserver would reject
+        // it outright.
+        assert_eq!(
+            denial_block(&BrokerDenials {
+                total: -1,
+                ..Default::default()
+            })
+            .observed,
+            0
+        );
+        // A lastSeen that is not a time is dropped rather than mirrored
+        // into a status field an operator reads as a time.
+        assert_eq!(
+            denial_block(&BrokerDenials {
+                total: 1,
+                last_seen: Some("whenever".into()),
+                ..Default::default()
+            })
+            .last_seen,
+            None
+        );
+    }
+
+    /// A broker outage must not look like an answer. The three
+    /// observation conditions keep whatever they last said, and so does
+    /// `status.denials`: blanking the block would drop the `Denials`
+    /// column back to the blank that means "no data", so every blip would
+    /// announce that kguardian had forgotten a count it still has.
+    #[test]
+    fn a_broker_outage_leaves_the_denials_condition_and_block_alone() {
+        let c = cr("prod", "deployment-web", Some("web"));
+        let path = "kguardian/prod/deployment-web.json";
+        let nodes = [node("a", "h1")];
+        let rows = [with_denials(
+            summary_row("prod", "web", true, None),
+            denials(17, &["ptrace"]),
+        )];
+        let cond = |s: &SeccompProfileStatus| {
+            s.conditions
+                .iter()
+                .find(|c| c.type_ == COND_DENIALS_OBSERVED)
+                .cloned()
+                .expect("DenialsObserved is always emitted")
+        };
+
+        let first = desired_summary(
+            &c,
+            &SeccompProfileStatus::default(),
+            &nodes,
+            "h1",
+            path,
+            1,
+            Some(&rows),
+        );
+        assert_eq!(first.denials.as_ref().unwrap().observed, 17);
+        assert_eq!(cond(&first).status, "True");
+
+        let during = desired_summary(&c, &first, &nodes, "h1", path, 1, None);
+        assert!(
+            summary_equal(&first, &during),
+            "an outage changes nothing, so nothing is applied"
+        );
+        assert_eq!(during.denials, first.denials);
+        let (was, now) = (cond(&first), cond(&during));
+        assert_eq!(
+            (now.status, now.reason),
+            (was.status.clone(), was.reason.clone())
+        );
+        assert_eq!(
+            now.last_transition_time, was.last_transition_time,
+            "carrying a condition forward is not a transition"
+        );
     }
 
     #[test]
@@ -1226,7 +1814,12 @@ mod tests {
             DistributionState::Ready
         );
         assert_eq!(first.drift.as_deref(), Some("Unknown"));
-        assert_eq!(first.conditions.len(), 3);
+        assert_eq!(first.conditions.len(), 4);
+        assert!(
+            first.denials.is_none(),
+            "a broker with no row for the workload has told us nothing \
+             about denials either"
+        );
         assert!(first.nodes.is_empty(), "summary never carries nodes");
         assert!(!summary_equal(&SeccompProfileStatus::default(), &first));
 
@@ -1317,8 +1910,16 @@ mod tests {
             .iter()
             .map(|c| c["type"].as_str().unwrap())
             .collect();
-        assert_eq!(types, ["Ready", "CaptureComplete", "Drift"]);
+        assert_eq!(
+            types,
+            ["Ready", "CaptureComplete", "Drift", "DenialsObserved"]
+        );
         assert_eq!(p["status"]["conditions"][1]["reason"], "NoWorkloadRef");
+        assert_eq!(p["status"]["conditions"][3]["reason"], "NoWorkloadRef");
+        assert!(
+            p["status"]["denials"].is_null(),
+            "no workloadRef means no workload to attribute denials to"
+        );
 
         // Field managers.
         assert_eq!(node_manager("node-a"), "kguardian-controller/node-a");
@@ -1363,16 +1964,34 @@ mod tests {
             "cr":{"name":"deployment-web","defaultAction":"SCMP_ACT_LOG","hash":"y","syscallCount":2,
                   "distribution":{"ready":1,"total":1,"state":"Ready"},
                   "drift":{"missing":["a"],"extra":[],"inSync":false}},
+            "denials":{"total":17,"syscalls":["ptrace"],"actions":["SCMP_ACT_LOG"],
+                       "lastSeen":"2026-09-14T04:05:14Z","perNode":{"n1":17}},
             "captureComplete":true,"recommendedSnippet":{}},
-            {"namespace":"prod","kind":"Deployment","name":"api","cr":null}]"#;
+            {"namespace":"prod","kind":"Deployment","name":"api","cr":null,"denials":null}]"#;
         let v: Vec<BrokerSummary> = serde_json::from_str(json).unwrap();
         assert_eq!(v.len(), 2);
         assert_eq!(
             v[0].cr.as_ref().unwrap().drift.as_ref().unwrap().missing,
             ["a"]
         );
+        let d = v[0].denials.as_ref().unwrap();
+        assert_eq!(d.total, 17);
+        assert_eq!(d.syscalls, ["ptrace"]);
+        assert_eq!(d.actions, ["SCMP_ACT_LOG"]);
+        assert_eq!(d.last_seen.as_deref(), Some("2026-09-14T04:05:14Z"));
         assert!(v[1].cr.is_none());
         assert!(v[1].capture.is_none());
+        assert!(
+            v[1].denials.is_none(),
+            "an explicit null is as absent as a missing key"
+        );
+
+        // An older broker sends no `denials` key at all. That must parse,
+        // and must not become a zero: the whole list failing here would
+        // also take CaptureComplete and Drift down for every CR.
+        let old = r#"[{"namespace":"prod","kind":"Deployment","name":"web"}]"#;
+        let v: Vec<BrokerSummary> = serde_json::from_str(old).unwrap();
+        assert!(v[0].denials.is_none());
     }
 
     #[test]

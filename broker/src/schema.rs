@@ -370,6 +370,55 @@ diesel::table! {
     }
 }
 
+diesel::table! {
+    // Kernel seccomp verdicts, aggregated per (pod, syscall, action).
+    // One row accumulates every drain the controller ships for that key
+    // — `count` is summed and the timestamps bracketed by the ingest
+    // upsert — so this is a rollup table, not an event log. See the
+    // migration and src/seccomp_denial.rs.
+    //
+    // `first_seen` / `last_seen` are Timestamptz, not the Timestamp the
+    // rest of this schema uses: they are produced on the node rather
+    // than stamped by the broker, so the zone travels with the value.
+    seccomp_denials (id) {
+        id -> BigSerial,
+        pod_uid -> Text,
+        pod_name -> Text,
+        pod_namespace -> Text,
+        // NULL = attribution unresolved when the row was written. The
+        // upsert COALESCEs, so a later resolvable report fills it in and
+        // an unresolvable one never erases it.
+        workload_kind -> Nullable<Text>,
+        workload_name -> Nullable<Text>,
+        node_name -> Nullable<Text>,
+        syscall -> Text,
+        syscall_nr -> Nullable<Integer>,
+        action -> Text,
+        // Raw SECCOMP_RET_* value. Int8 because SECCOMP_RET_KILL_PROCESS
+        // (0x80000000) overflows a signed 32-bit column.
+        action_raw -> Nullable<Int8>,
+        arch -> Nullable<Text>,
+        count -> Int8,
+        first_seen -> Timestamptz,
+        last_seen -> Timestamptz,
+    }
+}
+
+diesel::table! {
+    // Per-node seccomp denial capture heartbeat. Upserted on every
+    // Controller drain, INCLUDING an empty one — the empty report is the
+    // point, because it is what separates "nothing was denied" from
+    // "nothing was watching". See the migration and src/seccomp_denial.rs.
+    seccomp_denial_nodes (node_name) {
+        node_name -> Text,
+        // The probe attached on this node. False on a CONFIG_AUDIT=n kernel
+        // where the Controller degraded gracefully: reporting in, not
+        // capturing.
+        capturing -> Bool,
+        updated_at -> Timestamptz,
+    }
+}
+
 diesel::allow_tables_to_appear_in_same_query!(
     pod_details,
     pod_traffic,

@@ -3,15 +3,18 @@ use crate::models::PodRegistration;
 use crate::network::netpolicy_drop::NetpolicyDropSkelBuilder;
 use crate::network::network_probe::NetworkProbeSkelBuilder;
 use crate::network::{ip_to_wire_addr, PolicyDropEvent};
+use crate::seccomp_denial::seccomp_denial_skel::{SeccompDenialSkel, SeccompDenialSkelBuilder};
+use crate::seccomp_denial::{DenialMaps, AUDIT_SECCOMP_SYMBOL};
 use crate::syscall::{sycallprobe::SyscallSkelBuilder, SyscallEventData};
 use crate::{error::Error, network::NetworkEventData};
 use anyhow::Result;
 use libbpf_rs::skel::{OpenSkel, Skel, SkelBuilder};
-use libbpf_rs::{MapCore, MapFlags, RingBufferBuilder};
+use libbpf_rs::{MapCore, MapFlags, OpenObject, RingBufferBuilder};
 use std::mem::MaybeUninit;
 use std::net::IpAddr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::sync::mpsc::{Receiver, Sender};
+use tokio::sync::oneshot;
 use tokio::{task, task::JoinHandle};
 use tracing::{info, warn};
 
@@ -163,6 +166,24 @@ fn symbol_location(kallsyms: &str, sym: &str) -> Option<Option<String>> {
     })
 }
 
+/// [`symbol_location`] against the RUNNING kernel's `/proc/kallsyms`.
+///
+/// A file we cannot read is reported as "symbol absent", deliberately
+/// indistinguishable from the real thing: every caller has a
+/// skip-this-probe fallback, and skipping costs one signal whereas
+/// trusting a dump we never read costs a failed load — which, for the
+/// probes this gates, means a Controller that will not start.
+fn kernel_symbol(sym: &str) -> Option<Option<String>> {
+    let kallsyms = match std::fs::read_to_string("/proc/kallsyms") {
+        Ok(contents) => contents,
+        Err(e) => {
+            warn!("could not read /proc/kallsyms ({e}); assuming {sym} is absent");
+            return None;
+        }
+    };
+    symbol_location(&kallsyms, sym)
+}
+
 /// True when an fentry program targeting `sym` can actually LOAD.
 ///
 /// Used to decide whether the `fentry/udpv6_sendmsg` twins stay
@@ -181,16 +202,7 @@ fn symbol_location(kallsyms: &str, sym: &str) -> Option<Option<String>> {
 /// crash-loop the controller. So a module symbol is only trusted when
 /// /sys/kernel/btf/<module> exists.
 fn kernel_can_fentry(sym: &str) -> bool {
-    let kallsyms = match std::fs::read_to_string("/proc/kallsyms") {
-        Ok(contents) => contents,
-        Err(e) => {
-            // Failing open would abort the load on kernels without the
-            // symbol; failing closed only costs IPv6 UDP visibility.
-            warn!("could not read /proc/kallsyms ({e}); assuming {sym} is absent");
-            return false;
-        }
-    };
-    match symbol_location(&kallsyms, sym) {
+    match kernel_symbol(sym) {
         None => false,
         Some(None) => true,
         Some(Some(module)) => {
@@ -207,6 +219,111 @@ fn kernel_can_fentry(sym: &str) -> bool {
     }
 }
 
+/// True when a kprobe can plausibly attach to `sym`.
+///
+/// The BTF half of [`kernel_can_fentry`] does not apply: a kprobe
+/// resolves its target by symbol name through the kprobe subsystem, so a
+/// symbol in a loaded module is attachable whether or not that module
+/// shipped split BTF. Presence in kallsyms is the whole test.
+///
+/// It is still only a *plausibility* test — the symbol could be on the
+/// kprobe blacklist, or in a `noinstr` section — so the caller must also
+/// survive an attach that fails anyway. Both layers exist because
+/// `audit_seccomp` is genuinely absent on a CONFIG_AUDITSYSCALL=n kernel
+/// and that node has to keep running.
+fn kernel_can_kprobe(sym: &str) -> bool {
+    kernel_symbol(sym).is_some()
+}
+
+/// Open, load and attach the seccomp-denial probe and hand its map
+/// handles to the drain task. `None` means this node does not get the
+/// feature.
+///
+/// Every failure path here returns `None` with a warning, and that is
+/// the most important property of this function rather than a
+/// convenience. `audit_seccomp` genuinely does not exist on a kernel
+/// built without CONFIG_AUDITSYSCALL; such a node is a supported node
+/// and must lose seccomp denial capture, not the Controller. Nothing in
+/// here may reach `ebpf_handle`'s `?` — a probe that cannot load is not
+/// the same kind of event as the syscall probe failing to load, and
+/// turning it into one would trade a missing signal for a
+/// CrashLoopBackOff on every CONFIG_AUDIT=n cluster.
+///
+/// The skeleton borrows its `OpenObject` storage for its whole life, so
+/// holding it in a local of the poll loop needs a `'static` borrow; the
+/// storage (one pointer-sized `MaybeUninit`) is `Box::leak`ed, exactly
+/// as `contention::open_load_attach` does. It happens at most once per
+/// process, and a failed attempt leaks the same 8 bytes once — the
+/// object itself is still dropped and closed.
+fn load_seccomp_denial_probe(
+    maps_tx: oneshot::Sender<DenialMaps>,
+) -> Option<SeccompDenialSkel<'static>> {
+    if !kernel_can_kprobe(AUDIT_SECCOMP_SYMBOL) {
+        warn!(
+            "{AUDIT_SECCOMP_SYMBOL} is not in /proc/kallsyms (kernel built without \
+             CONFIG_AUDITSYSCALL, or the symbol inlined away by a full-LTO build); the \
+             kernel's seccomp verdicts will not be captured on this node. Every other \
+             probe is unaffected."
+        );
+        return None;
+    }
+
+    let storage: &'static mut MaybeUninit<OpenObject> = Box::leak(Box::new(MaybeUninit::uninit()));
+    let mut skel = match SeccompDenialSkelBuilder::default()
+        .open(storage)
+        .and_then(|open| open.load())
+    {
+        Ok(skel) => skel,
+        Err(e) => {
+            warn!(
+                "could not load the seccomp denial eBPF program ({e}); the kernel's seccomp \
+                 verdicts will not be captured on this node"
+            );
+            return None;
+        }
+    };
+
+    // Duplicate the map fds BEFORE attaching. If this fails there is
+    // nothing that could ever drain the probe, so attaching it would
+    // only count verdicts into a map no one reads — and on an LRU map
+    // that is invisible rather than noisy.
+    let maps = match DenialMaps::from_skel(&skel.maps) {
+        Ok(maps) => maps,
+        Err(e) => {
+            warn!(
+                "could not duplicate the seccomp denial map descriptors ({e}); skipping the \
+                 probe"
+            );
+            return None;
+        }
+    };
+
+    // The second layer of the graceful-degradation guard. kallsyms says
+    // the symbol exists, which is necessary but not sufficient: it can
+    // still be on the kprobe blacklist or in a section the kernel
+    // refuses to instrument.
+    if let Err(e) = skel.attach() {
+        warn!(
+            "could not attach kprobe/{AUDIT_SECCOMP_SYMBOL} ({e}); the symbol is present but \
+             not instrumentable on this kernel. Seccomp verdicts will not be captured here."
+        );
+        return None;
+    }
+
+    if maps_tx.send(maps).is_err() {
+        warn!("the seccomp denial drain task is not listening; not keeping the probe attached");
+        return None;
+    }
+
+    info!("Seccomp denial eBPF program loaded and attached (kprobe/{AUDIT_SECCOMP_SYMBOL})");
+    Some(skel)
+}
+
+// Eight parameters, one per thing `main` has to hand the loader. They are
+// not a bag of options with a sensible grouping waiting to be found: each
+// is a distinct channel end or a resolved startup value, and bundling them
+// into a config struct would only move the same list one file over.
+#[allow(clippy::too_many_arguments)]
 pub fn ebpf_handle(
     network_event_sender: Sender<NetworkEventData>,
     syscall_event_sender: Sender<SyscallEventData>,
@@ -215,6 +332,7 @@ pub fn ebpf_handle(
     mut ignore_ips: Receiver<String>,
     ignore_daemonset_traffic: bool,
     tiers: ResolvedTiers,
+    seccomp_denial_maps: Option<oneshot::Sender<DenialMaps>>,
 ) -> JoinHandle<Result<(), Error>> {
     task::spawn_blocking(move || {
         // The IPv6 UDP twins target udpv6_sendmsg; on a kernel where
@@ -287,6 +405,13 @@ pub fn ebpf_handle(
             .attach()
             .map_err(|e| Error::Custom(format!("Failed to attach syscall eBPF: {}", e)))?;
         info!("Syscall probe eBPF program loaded and attached");
+
+        // Load and attach the seccomp denial probe. `None` here means
+        // SECCOMP_DENIAL_CAPTURE is off and nothing is loaded at all;
+        // `None` back from the loader means this kernel cannot carry the
+        // probe. Neither is an error — unlike the three above, this one
+        // is never allowed to stop the Controller.
+        let seccomp_denial_sk = seccomp_denial_maps.and_then(load_seccomp_denial_probe);
 
         // Build a unified ring buffer that polls all three maps efficiently
         let mut ring_buffer_builder = RingBufferBuilder::new();
@@ -453,15 +578,15 @@ pub fn ebpf_handle(
             while drained < MAX_DRAIN_PER_ITERATION {
                 let Ok(reg) = rx.try_recv() else { break };
                 drained += 1;
-                // The same flags value goes into all three maps. All
-                // three probes read the generation bits out of their
-                // instance — every per-netns dedup map in the tree is
-                // keyed on (inode, generation), because the kernel
-                // recycles netns inode numbers and a bare-inode key
-                // hands a dead pod's "already reported" state to its
-                // replacement (see KG_GEN_SHIFT in src/bpf/helper.h).
-                // Only the syscall probe reads the tier bits; for the
-                // network and netpolicy probes those stay inert.
+                // The same flags value goes into every probe's map. They
+                // all read the generation bits out of their own
+                // instance — every per-netns key in the tree folds in
+                // the generation, because the kernel recycles netns
+                // inode numbers and a bare-inode key hands a dead pod's
+                // state to its replacement (see KG_GEN_SHIFT in
+                // src/bpf/helper.h). Only the syscall probe reads the
+                // tier bits; for the network, netpolicy and seccomp
+                // denial probes those stay inert.
                 let key = reg.netns_inode.to_ne_bytes();
                 let val = reg.flags.to_ne_bytes();
                 let _ = network_sk
@@ -479,6 +604,19 @@ pub fn ebpf_handle(
                     .inode_num
                     .update(&key, &val, MapFlags::ANY)
                     .map_err(|e| eprintln!("Failed to update netpolicy inode map: {}", e));
+                // Fourth instance, present only when the seccomp denial
+                // probe loaded. Its registration is what makes a verdict
+                // attributable at all: the probe drops anything from an
+                // unregistered netns, and the drain re-reads this map to
+                // confirm the generation on a row still matches the pod
+                // living on that inode.
+                if let Some(sk) = seccomp_denial_sk.as_ref() {
+                    let _ = sk
+                        .maps
+                        .inode_num
+                        .update(&key, &val, MapFlags::ANY)
+                        .map_err(|e| eprintln!("Failed to update seccomp denial inode map: {}", e));
+                }
             }
             if ignore_daemonset_traffic {
                 // Same starvation, same bound: one IP per iteration meant the
@@ -549,6 +687,37 @@ mod tests {
         assert_eq!(
             symbol_location(dump, "udpv6_sendmsg"),
             Some(Some("ipv6".to_string()))
+        );
+    }
+
+    /// The one thing `audit_seccomp`'s gate must never get wrong.
+    ///
+    /// A kernel built without CONFIG_AUDITSYSCALL has no such symbol, and
+    /// on that node the probe has to be skipped. Attaching optimistically
+    /// — or treating an unreadable /proc/kallsyms as "probably there" —
+    /// turns a missing signal into a DaemonSet that will not start, on
+    /// every cluster whose kernel was built that way.
+    #[test]
+    fn an_absent_symbol_is_never_attached_by_either_gate() {
+        const NONSENSE: &str = "kguardian_definitely_not_a_kernel_symbol";
+        assert!(!kernel_can_kprobe(NONSENSE));
+        assert!(!kernel_can_fentry(NONSENSE));
+    }
+
+    /// The two gates part company on a module symbol, and only there.
+    ///
+    /// `kernel_can_fentry` additionally demands /sys/kernel/btf/<module>,
+    /// because fentry resolves through BTF. `kernel_can_kprobe` does not,
+    /// because a kprobe resolves by name through the kprobe subsystem —
+    /// so a module symbol with no split BTF is attachable by one and not
+    /// the other. Both read this same parse; the divergence is in what
+    /// each does with `Some(Some(module))`.
+    #[test]
+    fn a_module_symbol_is_located_for_both_gates_to_judge() {
+        let dump = "ffffffffc0aa0000 t audit_seccomp\t[somemod]\n";
+        assert_eq!(
+            symbol_location(dump, "audit_seccomp"),
+            Some(Some("somemod".to_string()))
         );
     }
 

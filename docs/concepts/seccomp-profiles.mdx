@@ -76,6 +76,62 @@ Example generated profile:
 - `SCMP_ACT_KILL`: Kill the calling thread
 - `SCMP_ACT_KILL_PROCESS`: Kill the whole process (most restrictive)
 
+## Denials: The Kernel's Own Verdict
+
+`SCMP_ACT_LOG` writes every would-be denial to the node's kernel audit log
+(`type=SECCOMP` in `dmesg` / auditd) — that is what audit mode has always
+meant. Until now kguardian never read that back: the audit output of the
+very profile it generated was invisible to it, so knowing whether a profile
+was ready to enforce meant an operator going and reading node kernel logs by
+hand.
+
+kguardian closes that loop with a kprobe on the kernel's own
+`audit_seccomp()`, the function every loggable seccomp verdict passes
+through — unconditionally for `SCMP_ACT_LOG`, or for `SCMP_ACT_ERRNO` when
+the filter was loaded with `SECCOMP_FILTER_FLAG_LOG`. The controller
+attributes each verdict to a pod and workload, the broker stores it, and it
+comes back as `kguardian_seccomp_denial*` Prometheus metrics and the
+`SeccompProfile`'s `status.denials` / `DenialsObserved` condition. See
+[distributing profiles](/guides/distributing-seccomp-profiles) for how this
+gates promotion in practice.
+
+This is a different question from the `Drift` condition, and the two are
+easy to conflate because both are about "a syscall the CR doesn't cover":
+
+| | `Drift` | Denials |
+|---|---|---|
+| Source | eBPF syscall **observation** (`syscalls.captureLevel`) | The kernel's own seccomp **verdict** (`audit_seccomp` kprobe) |
+| Fires when | the workload makes a syscall `spec.syscalls` doesn't allow | a **loaded** filter actually evaluates a syscall it denies or logs |
+| Can be true with no pod referencing the profile | yes | no — a denial cannot exist without a loaded filter |
+| Answers | "is my profile falling behind the workload?" | "is the kernel actually doing what I shipped?" |
+
+A workload can drift heavily while producing zero denials, simply because
+nothing has referenced its profile yet. A profile can also show no drift at
+all — the observed set and `spec.syscalls` agree completely — and still
+start producing denials the moment it is promoted to `SCMP_ACT_ERRNO`,
+because enforcement (unlike observation) also depends on exact timing,
+process ancestry, and architecture in ways a syscall-name union can't
+capture. Track both; they fail differently.
+
+A denial count means nothing without its confidence, so `DenialsObserved`
+carries three states rather than two: `True` means the broker found
+denials; `False` with an explicit `status.denials.observed: 0` means it
+looked and found none; `Unknown` means it answered with nothing to check
+against — no `workloadRef`, nothing observed yet, or a response with no
+denials data at all (predates this feature, or no node is capturing).
+Treat `Unknown` as "no data", never as "clean". A broker kguardian cannot
+reach is a sharper edge still: rather than turning `Unknown`, every
+condition — this one included — is simply left as it last was, so a CR can
+read `False` for hours into an outage and look exactly as clean as before
+it started. See
+[promote to enforcing](/guides/distributing-seccomp-profiles#promote-to-enforcing)
+for exactly how that distinction gates a real decision.
+
+Denial capture does not depend on `syscalls.captureLevel` — it reads the
+kernel's own decision, not traced syscalls — so it works at every capture
+tier, including `low` or `custom`, and even for a workload with no observed
+syscall set at all.
+
 ---
 
 **Next steps:**

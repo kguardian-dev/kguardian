@@ -10,6 +10,7 @@ mod peer;
 mod read_budget;
 mod retention;
 mod seccomp;
+mod seccomp_denial;
 mod telemetry;
 mod types;
 mod version_check;
@@ -44,6 +45,13 @@ pub use schema::{pod_details, pod_traffic};
 pub use seccomp::{
     delete_seccomp_cr, export_seccomp_profile, export_seccomp_profile_post, get_seccomp_profile,
     get_seccomp_profile_file, list_seccomp_profiles, post_seccomp_node_status, put_seccomp_cr,
+};
+// `seccomp_denials_resource` rather than two `#[get]`/`#[post]` handlers:
+// the ingest side needs its own JSON body limit, which has to be attached to
+// the resource rather than applied app-wide. See the doc comment there.
+pub use seccomp_denial::{
+    seccomp_denials_resource, spawn_metrics_refresh as spawn_seccomp_denial_metrics, DenialLabels,
+    DenialRow, SeccompDenialMetrics, SeccompDenialSeries,
 };
 
 #[cfg(test)]

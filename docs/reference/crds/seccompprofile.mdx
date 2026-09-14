@@ -5,7 +5,7 @@ icon: "file-shield"
 ---
 
 `SeccompProfile` is a namespaced kguardian CRD that describes one seccomp
-profile file. You own the object; the kguardian controller on every node
+profile file. You own the object; the Controller on every node
 renders `spec` to standard seccomp JSON at
 `<kubeletRoot>/seccomp/kguardian/<namespace>/<name>.json` and reports per-node
 state in `status`. See the
@@ -50,7 +50,7 @@ spec:
 | `syscalls[].names` | list of string | yes | `^[a-z][a-z0-9_]{0,63}$` each. |
 | `syscalls[].action` | enum | yes | `SCMP_ACT_ALLOW` plus the four `defaultAction` values. kguardian only generates `SCMP_ACT_ALLOW`; the rest are for hand edits. |
 | `syscalls[].errnoRet` | integer | no | errno returned for `SCMP_ACT_ERRNO` entries. |
-| `workloadRef` | object | no | `{ kind, name }` in the CR's namespace. `kind` is one of `Deployment`, `StatefulSet`, `DaemonSet`, `CronJob`, `Job`, `ReplicaSet`, `ReplicationController`. Enables the `CaptureComplete` and `Drift` conditions and the UI's drift view. Distribution works without it. |
+| `workloadRef` | object | no | `{ kind, name }` in the CR's namespace. `kind` is one of `Deployment`, `StatefulSet`, `DaemonSet`, `CronJob`, `Job`, `ReplicaSet`, `ReplicationController`. Enables the `CaptureComplete`, `Drift` and `DenialsObserved` conditions and the UI's drift view. Distribution works without it. |
 
 The rendered node file is exactly `{ defaultAction, architectures?, syscalls[] }`
 from `spec`, serialised deterministically. Nothing observed by kguardian is
@@ -69,6 +69,10 @@ status:
   localhostProfile: kguardian/prod/deployment-web.json
   distribution: { ready: 12, total: 12, state: Ready, summary: "12/12" }
   drift: "False"
+  denials:
+    observed: 17
+    syscalls: [mount, ptrace]
+    lastSeen: "2026-09-14T04:05:14Z"
   nodes:
     - name: node-a
       hash: "a1b2c3d4e5f60718"
@@ -81,11 +85,15 @@ status:
     - type: CaptureComplete
       status: "True"
       reason: Full
-      message: "full on 2 pod(s)"
+      message: "full capture on 2 pod(s)"
     - type: Drift
       status: "False"
       reason: InSync
-      message: "spec matches the observed set"
+      message: "every observed syscall is in spec"
+    - type: DenialsObserved
+      status: "True"
+      reason: KernelDenied
+      message: "17 seccomp denial(s) (SCMP_ACT_LOG) on 2 syscall(s): mount, ptrace; last seen 2026-09-14T04:05:14Z"
 ```
 
 | Field | Meaning |
@@ -95,6 +103,7 @@ status:
 | `localhostProfile` | The value to put in `securityContext.seccompProfile.localhostProfile`. |
 | `distribution` | `ready` nodes whose entry in `nodes` carries the current `hash`, out of `total` live nodes; `state` is `Ready` (`ready == total > 0`), `Partial`, or `Pending` (`ready == 0`). `summary` is the `ready/total` string the printer column shows. |
 | `drift` | Mirror of the `Drift` condition's status (`True`/`False`/`Unknown`) for the printer column — printer columns take simple JSON paths, not condition filters. |
+| `denials` | Present whenever the Broker has an answer for `workloadRef`'s workload, **including when that answer is zero**. `observed` is the total across every syscall and action — it is the `DENIALS` printer column; `syscalls` is the distinct names, sorted; `lastSeen` is the most recent denial, RFC 3339. `observed: 0` means checked and clean; the block being **absent** means not known. |
 | `nodes[]` | One entry per node, keyed by `name` (`x-kubernetes-list-type: map`). Each controller server-side-applies only its own entry, with field manager `kguardian-controller/<node>`. |
 | `conditions[]` | Standard `metav1.Condition` list, below. |
 
@@ -109,24 +118,63 @@ status:
 | | `Unknown` | `NoWorkloadRef` / `NoObservations` | no `workloadRef`, or nothing observed yet |
 | `Drift` | `True` | `ObservedNotInSpec` | the workload made syscalls not allowed by `spec`; message lists them |
 | | `False` | `InSync` | |
-| | `Unknown` | `NoWorkloadRef` | |
+| | `Unknown` | `NoWorkloadRef` / `NoObservations` | no `workloadRef`, or the Broker has no observations for the workload |
+| `DenialsObserved` | `True` | `KernelDenied` | a loaded filter acted on at least one syscall for this workload inside the retention window; `status.denials` carries the count, the syscalls, and `lastSeen` |
+| | `False` | `NoDenials` | the Broker looked and found none. `status.denials` is `{observed: 0}` |
+| | `Unknown` | `NoWorkloadRef` / `NoObservations` / `NoDenialData` | no `workloadRef`; nothing observed for the workload; or the Broker sent no `denials` block at all — it predates denial capture, or nothing in the cluster is capturing denials |
 
 The summary (`distribution`, `Ready`) is computed by every controller from the
 CR's own `nodes` list plus a live node count and applied with field manager
 `kguardian-summary`; every node computes the same value, so last-writer-wins
-converges. `CaptureComplete` and `Drift` come from the broker's observed set
-and are applied the same way. Controllers only patch when a value changes.
+converges. `CaptureComplete`, `Drift` and `DenialsObserved` come from the
+Broker and are applied the same way. Controllers only patch when a value
+changes.
+
+When the Broker cannot be reached at all, those three conditions and
+`status.denials` are left exactly as they were rather than flapping to
+`Unknown` — an outage is not an answer, and the CR should not start
+contradicting what it last knew because a scrape failed. On a CR that has
+never had a successful pass there is nothing to carry forward, so the three
+are **absent from `conditions` entirely** rather than present as `Unknown`.
+Anything selecting a condition by type has to handle it not being there.
+
+<Warning>
+`observed: 0` and an **absent** `denials` block are opposite answers, and the
+difference is what gates promotion. `0` means kguardian checked and this
+workload's profile has never fired. Absent means nobody checked — the Broker
+was unreachable, predates denial capture, or nothing in the cluster is
+capturing denials. Promoting a profile to an enforcing action on an absent
+block is promoting on no evidence at all.
+
+The rule to automate against: `status.denials` is present **exactly** when
+`DenialsObserved` is `True` or `False`, and absent **exactly** when it is
+`Unknown`. The block and the condition are two readings of one answer and
+never disagree, so gate on whichever is convenient — `.status.denials.observed
+== 0` and `DenialsObserved == False` mean the same thing.
+</Warning>
+
+Denials are a different signal from `Drift`, which is inferred from observed
+syscalls rather than from the kernel's verdict — see
+[Denials vs Drift](/concepts/seccomp-profiles#denials-the-kernels-own-verdict).
 
 ### Printer columns
 
 ```
 $ kubectl -n prod get seccompprofiles
-NAME             ACTION           READY   DRIFT   AGE
-deployment-web   SCMP_ACT_ERRNO   12/12   False   3d
+NAME             ACTION           READY   DRIFT   DENIALS   AGE
+deployment-web   SCMP_ACT_ERRNO   12/12   False   17        3d
+media-transform  SCMP_ACT_LOG     12/12   False   0         2d
+batch-indexer    SCMP_ACT_LOG     12/12   True              5h
 ```
 
 `ACTION` is `spec.defaultAction`, `READY` is `status.distribution.summary`,
-`DRIFT` is `status.drift`.
+`DRIFT` is `status.drift`, `DENIALS` is `status.denials.observed`.
+
+The three `DENIALS` cells above are three different answers, readable without
+leaving the table. `17` — the kernel is acting on this profile. `0` — checked,
+and it has never fired, so `media-transform` is the one clear to promote. Blank
+— nothing is known, and `batch-indexer` is not a promotion candidate however
+good the rest of its row looks. A blank is never a quiet `0`.
 
 ---
 
@@ -151,7 +199,7 @@ every profile reference.
 
 ## RBAC
 
-With `seccomp.distribute=true` the chart grants the controller ServiceAccount
+With `seccomp.distribute=true` the chart grants the Controller's ServiceAccount
 `get`/`list`/`watch` on `seccompprofiles`, `patch` on `seccompprofiles/status`,
 and `list` on `nodes`. Nothing is granted when distribution is off. Users need
 ordinary namespaced RBAC on `seccompprofiles.kguardian.dev` to create and edit

@@ -1,18 +1,24 @@
 ---
 title: "Seccomp Endpoints"
-description: "Observed syscall sets per workload, capture completeness, SeccompProfile export, CR mirror, and node status"
+description: "Observed syscall sets per workload, capture completeness, kernel seccomp denials, SeccompProfile export, CR mirror, and node status"
 icon: "shield-halved"
 ---
 
-These endpoints expose the per-workload syscall sets the broker aggregates
-from the controller's observations, and turn them into `SeccompProfile`
-manifests. The broker holds **no** profile lifecycle state: whether a profile
+These endpoints expose the per-workload syscall sets the Broker aggregates
+from the Controller's observations, and turn them into `SeccompProfile`
+manifests. The Broker holds **no** profile lifecycle state: whether a profile
 is deployed, in audit or enforcing is decided entirely by the `SeccompProfile`
 CR you apply (see the [CRD reference](/reference/crds/seccompprofile) and the
 [distribution guide](/guides/distributing-seccomp-profiles)). The read
 endpoints are open; the write endpoints (`PUT`/`DELETE /seccomp/crs/…`,
-`POST /seccomp/node-status`) are for the controller and require the broker
-bearer token when `broker.auth.enabled` is set.
+`POST /seccomp/node-status`, `POST /seccomp/denials`) are for the Controller
+and require the Broker bearer token when `broker.auth.enabled` is set.
+
+Two kinds of signal live here and they are not the same thing. The observed
+syscall set and its `drift` are kguardian's own **inference** — what the eBPF
+observer saw, compared against what a CR allows. A **denial** is the kernel's
+own verdict: `seccomp` was consulted, and it acted. See
+[`GET /seccomp/denials`](#get-seccomp-denials).
 
 ---
 
@@ -47,6 +53,12 @@ CR's deployment state and drift against the observed set.
     "captureComplete": true,
     "suggestedName": "deployment-web",
     "crCount": 1,
+    "denials": {
+      "total": 25,
+      "syscalls": ["mount", "ptrace"],
+      "actions": ["SCMP_ACT_ERRNO", "SCMP_ACT_LOG"],
+      "lastSeen": "2026-09-14T06:00:00Z"
+    },
     "cr": {
       "name": "deployment-web",
       "defaultAction": "SCMP_ACT_LOG",
@@ -94,8 +106,46 @@ CR's deployment state and drift against the observed set.
   written). `drift.missing` = observed but not allowed by the CR,
   `drift.extra` = allowed by the CR but never observed, `inSync` = `missing`
   is empty.
+- `denials` — what the kernel's seccomp filter actually acted on for this
+  workload, rolled up over the Broker's retention window: `total` denial
+  events across every syscall and action, the `syscalls` and `actions` seen
+  (both sorted; `syscalls` is capped at 50, since this list is mirrored into
+  a CR's `.status` and therefore into etcd), and `lastSeen`, the newest
+  observation. `lastSeen` is `null` when `total` is `0`.
+
+  **`null` and `{"total": 0}` are different answers, and the Controller
+  treats them differently.** `null` means the Broker cannot say; `{"total":
+  0}` means it can, and the answer is "clean". The Controller maps the first
+  to a `DenialsObserved` condition of `Unknown` and the second to `False`.
+  This mirrors the rule the `cr` block follows — emit no block rather than an
+  empty one that reads as "all clear".
+
+  What separates them is whether anything is **watching**, which the Broker
+  knows from the per-node capture heartbeat (see
+  [`POST /seccomp/denials`](#post-seccomp-denials)). A block is emitted when
+  at least one node has reported within the last 5 minutes with its probe
+  attached, or — for a Controller too old to send heartbeats — when any
+  denial has ever been stored. Until then every workload is `null`, because
+  "this workload was never denied" and "nothing on this cluster is capturing"
+  are the same observation.
+
+  A node reporting in with `capturing: false` does **not** count. A
+  `CONFIG_AUDIT=n` kernel makes the Controller skip the probe and carry on,
+  so that node is demonstrably alive and watching nothing; reading it as
+  capture would turn graceful degradation into a false all-clear — and a
+  `denials` block of zero is what promotes a profile from audit to
+  enforcing.
 - `recommendedSnippet` — `kguardian/<namespace>/<cr.name>.json` when a CR
   exists, else `<suggestedName>`.
+
+<Warning>
+Capture liveness is currently a **cluster-wide** fact, not a per-workload
+one. On a mixed fleet — mid kernel upgrade, say — a workload whose pods only
+ever ran on non-capturing nodes will still report `denials: {"total": 0}` as
+long as some other node is capturing. Check
+`kguardian_seccomp_denial_workloads` and your nodes' kernel config before
+promoting a profile to enforcing on a fleet you know to be mixed.
+</Warning>
 
 ---
 
@@ -113,6 +163,7 @@ seccomp document with `SCMP_ACT_LOG` — a preview, not what is on any node.
   "suggestedName": "deployment-web",
   "crCount": 0,
   "cr": null,
+  "denials": null,
   "profile": {
     "defaultAction": "SCMP_ACT_LOG",
     "architectures": ["SCMP_ARCH_X86_64"],
@@ -273,6 +324,234 @@ Returns `200` `{ "namespace", "name", "hash", "syscallCount" }`.
 `DELETE /seccomp/crs/{namespace}/{name}` removes the mirror row when the CR
 is deleted: `200` `{ "deleted": true }`, or `404` if unknown (every node
 sends it; the controller treats `404` as success).
+
+---
+
+## GET /seccomp/denials
+
+Kernel seccomp verdicts, newest `last_seen` first, tie-broken on the
+BIGSERIAL primary key so two pages of the same query never reshuffle their
+boundary rows.
+
+A row here means the kernel consulted a seccomp filter and acted — under
+`SCMP_ACT_LOG` it recorded what it *would* have blocked, under
+`SCMP_ACT_ERRNO` or a killing action it blocked for real. That is a different
+claim from `cr.drift` on the summary above, which is kguardian comparing its
+own observations against a CR and would report the same thing whether or not
+the profile was ever loaded into a kernel.
+
+Rows are **aggregated, not an event log**. The Controller drains a BPF map
+every 10 s and ships counts, so one row covers an arbitrary number of kernel
+events: `count` accumulates across every drain for that `(pod, syscall,
+action)` and `firstSeen`/`lastSeen` bracket the whole accumulation rather
+than one report.
+
+### Query Parameters
+
+All filters are optional and combine with AND. `namespace`, `kind` and
+`workload` are index-backed by `(pod_namespace, workload_kind,
+workload_name)`; `since` is index-backed by `last_seen`.
+
+| Parameter   | Type    | Default | Description |
+|-------------|---------|---------|-------------|
+| `namespace` | string  | none    | Filter to one pod namespace. An empty value (`?namespace=`) is treated as "no filter" — unlike `/audit/verdicts`, where an empty namespace is itself a filter. A pod always has a namespace, so there is no equivalent meaning here. |
+| `kind`      | string  | none    | Filter to one workload kind (`Deployment`, `DaemonSet`, `StatefulSet`, `CronJob`, …). Matches `workloadKind`, so it selects only attributed rows. |
+| `workload`  | string  | none    | Filter to one workload name. Matches `workloadName`; likewise attributed rows only. |
+| `since`     | RFC3339 | none    | Rows whose `lastSeen` is at or after this instant. **The zone is required** — `2026-09-14T04:05:14Z` or `2026-09-14T06:05:14+02:00`. A zone-less timestamp returns 400 rather than being assumed to be UTC, because these timestamps are produced on the node. |
+| `limit`     | integer | 100     | Cap rows returned. Clamped to `[1, 500]`; values outside that range are silently clamped to the nearest bound. Non-numeric input returns 400. |
+
+### Example
+
+```bash
+# Everything one workload has been denied
+curl 'http://localhost:9090/seccomp/denials?namespace=media&kind=Deployment&workload=media-transform'
+
+# Cluster-wide, last hour only
+curl 'http://localhost:9090/seccomp/denials?since=2026-09-14T05:00:00Z&limit=500'
+```
+
+### Response
+
+```json
+[
+  {
+    "id": 2,
+    "podUid": "3f2b1a0c-9d8e-7f6a-5b4c-3d2e1f0a9b8c",
+    "podName": "media-transform-7d9c8-abc12",
+    "podNamespace": "media",
+    "workloadKind": "Deployment",
+    "workloadName": "media-transform",
+    "nodeName": "ip-10-0-1-23.ec2.internal",
+    "syscall": "ptrace",
+    "syscallNr": 101,
+    "action": "SCMP_ACT_LOG",
+    "actionRaw": 2147483648,
+    "arch": "SCMP_ARCH_X86_64",
+    "count": 23,
+    "firstSeen": "2026-09-14T03:00:00Z",
+    "lastSeen": "2026-09-14T06:00:00Z"
+  }
+]
+```
+
+| Field | Notes |
+|-------|-------|
+| `id` | BIGSERIAL primary key. Combined with `lastSeen` to make ordering deterministic — a whole drain routinely shares one `lastSeen`. |
+| `podUid` | The pod's Kubernetes UID. The stable half of the storage key: a pod name can be reused by a new pod of the same workload, a UID cannot. |
+| `workloadKind` / `workloadName` | The top-level owning controller, resolved **Broker-side** by joining the pod to its `pod_details` row (ReplicaSet → Deployment, Job → CronJob). Both `null` when attribution could not be resolved — a bare pod, a pod whose spec had not arrived yet, or a pod name that resolves to a row in a different namespace, which is refused rather than guessed. A later report that *can* resolve it fills the gap; one that cannot never erases it. |
+| `syscall` | The resolved name, or `syscall_<nr>` when libseccomp could not resolve the number. An unresolvable number on a newer kernel is never dropped — it is exactly the case worth seeing. |
+| `action` | The `SCMP_ACT_*` spelling the rest of kguardian uses, or `SCMP_ACT_UNKNOWN` for a raw value the Controller does not map. |
+| `actionRaw` | The raw `SECCOMP_RET_*` the kernel reported. Kept because `SCMP_ACT_UNKNOWN` on its own is unactionable. |
+| `count` | Denial events for this `(pod, syscall, action)`, accumulated across every drain since the row was created — not a rate, and not the size of the last report. |
+| `firstSeen` / `lastSeen` | RFC3339 with an explicit zone. The bracket only ever widens: a later drain that reports an earlier `firstSeen` moves it back rather than forward. |
+
+Returns an empty array `[]` when no rows match — never `null`. Status is
+always 200 on a successful query.
+
+---
+
+## POST /seccomp/denials
+
+Controller-only. One node's drain of its BPF denial map, on the interval set
+by `seccomp.denials.intervalSeconds` (default 10).
+
+Sent on **every** drain, including one that drained nothing. An empty batch
+is not a wasted request — it is the node's capture heartbeat, and it is the
+only thing that lets the Broker tell "nothing was denied" from "nothing was
+watching". Without it a cluster where no workload has ever tripped a filter
+sits at `DenialsObserved: Unknown` forever, which blocks exactly the
+audit-to-enforcing promotion the feature exists to support.
+
+```json
+{
+  "node": "ip-10-0-1-23.ec2.internal",
+  "capturing": true,
+  "denials": [
+    {
+      "podUid": "3f2b1a0c-9d8e-7f6a-5b4c-3d2e1f0a9b8c",
+      "podName": "media-transform-7d9c8-abc12",
+      "podNamespace": "media",
+      "syscall": "ptrace",
+      "syscallNr": 101,
+      "action": "SCMP_ACT_LOG",
+      "actionRaw": 2147483648,
+      "arch": "SCMP_ARCH_X86_64",
+      "count": 17,
+      "firstSeen": "2026-09-14T04:05:06Z",
+      "lastSeen": "2026-09-14T04:05:14Z"
+    }
+  ]
+}
+```
+
+`node` is required and non-empty; an empty `denials` array is valid.
+`syscallNr`, `actionRaw` and `arch` are optional. Returns `200`
+`{ "accepted": <n> }`, where `n` counts **stored rows**, not wire entries —
+entries are folded onto `(podUid, syscall, action)` before the write, so a
+batch carrying the same key twice reports one.
+
+`capturing` says whether the denial probe actually attached on this node, as
+distinct from whether the Controller is reachable. Send `false` when the
+probe was skipped — a kernel without `CONFIG_AUDIT=y` has no `audit_seccomp`
+symbol to hook, and the Controller degrades gracefully rather than
+crash-looping. It is recorded per node with the report time, and a node goes
+stale after 5 minutes (30 missed reports) rather than being assumed either
+way.
+
+Denials in hand outrank the flag in both directions: a batch carrying rows
+proves the probe fired, so a Controller too old to send `capturing` at all is
+still recognised as capturing, and a node claiming `false` while shipping
+denials is believed on the evidence. Absent the flag **and** absent denials,
+the report proves nothing and is recorded as not capturing.
+
+Each `count` is a **delta** since that node's previous drain, not a running
+total: the Controller clears its map after a successful POST. The Broker
+accumulates (`count = count + excluded`, `firstSeen = LEAST(…)`,
+`lastSeen = GREATEST(…)`), so resending a level rather than a delta would
+inflate the stored count and the `kguardian_seccomp_denials_total` counter
+with it.
+
+The whole batch is one transaction, so a drain either lands completely or not
+at all — a partially applied batch would be double-counted by the retry.
+
+Entries that cannot identify themselves are dropped with a per-field warning
+in the Broker log rather than failing the batch: a missing `podUid`,
+`podName`, `podNamespace`, `syscall` or `action`, an oversized field, or a
+`count` of zero or less. A zero-count entry is not a denial, and accepting
+one would add a workload to the rollup — and flip a CR's `DenialsObserved`
+condition — for something the kernel never did.
+
+This route carries its own 4 MiB JSON body limit (the Broker default is 256
+KiB), which is roughly 20 000 denials per request. Chunk larger drains.
+
+An older Broker returns `404` for this route. The Controller treats that as a
+warning and keeps running.
+
+---
+
+## Metrics
+
+`/metrics` exposes three denial series. Note where each number comes from —
+the distinction is what keeps the alerts on them honest.
+
+| Metric | Type | Source |
+|--------|------|--------|
+| `kguardian_seccomp_denials_total{namespace,workload_kind,workload,action}` | counter | Accumulated in memory at ingest |
+| `kguardian_seccomp_denial_rows_total` | counter | Accumulated in memory at ingest |
+| `kguardian_seccomp_denial_workloads` | gauge | Queried from the table every `SECCOMP_DENIAL_METRICS_INTERVAL_SECS` (default 15) |
+
+The two counters are **not** derived from `seccomp_denials`. Retention
+deletes from that table, so a counter read off it would fall at every prune —
+and Prometheus reads a counter decrease as a process restart, compensating in
+a way that injects a phantom spike into `rate()` and `increase()`. Both
+shipped alerts sit on exactly those functions, so a table-derived counter
+would page at every retention boundary with a spike indistinguishable from
+the real signal. Accumulating at ingest means only a Broker restart resets
+them, which is a genuine reset and the one case Prometheus handles by design.
+
+`kguardian_seccomp_denial_workloads` *is* table-derived, and that is correct:
+"distinct workloads with a denial inside the retention window" is a question
+about current state, so pruning should move it down.
+
+`kguardian_seccomp_denials_total` is deliberately **not** labelled by
+syscall. There are ~300 syscalls on x86_64 and a workload running against the
+wrong profile can trip dozens, so a syscall label would multiply series count
+by two orders of magnitude for something `GET /seccomp/denials` already
+answers. Unattributed denials keep their namespace and action and carry empty
+`workload_kind` / `workload` labels rather than being dropped. The series
+count is capped at 1000; beyond that new label sets are refused (existing
+ones are never evicted, which would restart them from zero) and the Broker
+logs how many increments were dropped.
+
+---
+
+## Retention
+
+The Broker prunes `seccomp_denials` rows whose `lastSeen` is older than
+`SECCOMP_DENIALS_RETENTION_DAYS` (default 30) every
+`SECCOMP_DENIALS_RETENTION_INTERVAL_SECS` (default 3600), in batches of
+`SECCOMP_DENIALS_RETENTION_BATCH_SIZE` (default 5000, clamped to
+`[100, 100000]`) — the same batched-delete discipline as
+[audit verdicts](/api-reference/endpoints/audit-verdicts#retention). Set
+`SECCOMP_DENIALS_RETENTION_DAYS=0` to disable pruning; the table then grows
+unbounded.
+
+Heartbeat rows in `seccomp_denial_nodes` are pruned in the same pass, for
+nodes that stopped reporting a full retention window ago — the node is gone,
+not merely quiet. That window is deliberately much longer than the 5-minute
+staleness check above: staleness decides whether to *trust* a node's report,
+this decides whether the node still *exists*.
+
+Pruning is on `lastSeen`, not `firstSeen`. A row accumulates across drains,
+so a pod that has been tripping the same syscall for two months has a
+`firstSeen` well outside a 30-day window while still being an active denial —
+pruning on `firstSeen` would delete exactly the longest-running problems.
+
+This window is not only a disk setting. `GET /seccomp/profiles`' `denials`
+block and the `kguardian_seccomp_denial_workloads` gauge both report over
+whatever is left in the table and apply no date filter of their own, so
+widening it widens what a CR's `DenialsObserved` condition considers current.
+That is also why it has its own env vars rather than sharing the audit ones.
 
 ---
 

@@ -77,6 +77,21 @@ spec:
           - name: SYSCALL_CUSTOM_LIST
             value: {{ .Values.syscalls.customList | join "," | quote }}
           {{- end }}
+          # Kernel seccomp verdict capture (the audit_seccomp kprobe). This
+          # is a different signal from SYSCALL_CAPTURE_LEVEL above: that is
+          # eBPF syscall *observation*, used to build a profile; this is
+          # the kernel's own *verdict* on a filter already loaded from one.
+          # See values.yaml `seccomp.denials`.
+          - name: SECCOMP_DENIAL_CAPTURE
+            value: {{ .Values.seccomp.denials.enabled | quote }}
+          {{- if .Values.seccomp.denials.enabled }}
+          {{- $denialInterval := .Values.seccomp.denials.intervalSeconds | int }}
+          {{- if le $denialInterval 0 }}
+          {{- fail (printf "seccomp.denials.intervalSeconds must be a positive integer (got %d)" $denialInterval) }}
+          {{- end }}
+          - name: SECCOMP_DENIAL_INTERVAL_SECONDS
+            value: {{ $denialInterval | quote }}
+          {{- end }}
           {{- if .Values.seccomp.distribute }}
           - name: SECCOMP_DISTRIBUTE
             value: "true"

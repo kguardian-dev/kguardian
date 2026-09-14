@@ -121,6 +121,38 @@ spec:
             - name: AUDIT_VERDICTS_RETENTION_BATCH_SIZE
               value: {{ .Values.broker.audit.retention.batchSize | quote }}
             {{- end }}
+            {{/*
+              seccomp_denials retention (values.yaml `broker.seccomp.denials.retention`).
+              Same hasKey reasoning as AUDIT_VERDICTS_RETENTION_DAYS above:
+              `with` treats 0 as falsy, and 0 is the documented
+              "disable retention" value here too.
+            */}}
+            {{- $denials := (.Values.broker.seccomp | default dict).denials | default dict }}
+            {{- $denialRetention := $denials.retention | default dict }}
+            {{- if hasKey $denialRetention "days" }}
+            - name: SECCOMP_DENIALS_RETENTION_DAYS
+              value: {{ $denialRetention.days | quote }}
+            {{- end }}
+            {{- if hasKey $denialRetention "intervalSeconds" }}
+            - name: SECCOMP_DENIALS_RETENTION_INTERVAL_SECS
+              value: {{ $denialRetention.intervalSeconds | quote }}
+            {{- end }}
+            {{- if hasKey $denialRetention "batchSize" }}
+            - name: SECCOMP_DENIALS_RETENTION_BATCH_SIZE
+              value: {{ $denialRetention.batchSize | quote }}
+            {{- end }}
+            {{/*
+              Deliberately a separate timer from the retention interval
+              above — NOT reused for the /metrics cache refresh. See
+              values.yaml `broker.seccomp.denials.metricsIntervalSeconds`:
+              merging the two would leave KguardianSeccompEnforcingProfileDenials
+              (a 5-minute increase() window over a metric that would then only
+              refresh hourly) up to an hour stale.
+            */}}
+            {{- if hasKey $denials "metricsIntervalSeconds" }}
+            - name: SECCOMP_DENIAL_METRICS_INTERVAL_SECS
+              value: {{ $denials.metricsIntervalSeconds | quote }}
+            {{- end }}
             {{- if hasKey .Values.broker.audit "inflightPermits" }}
             - name: AUDIT_INFLIGHT_PERMITS
               value: {{ .Values.broker.audit.inflightPermits | quote }}

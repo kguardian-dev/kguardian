@@ -51,13 +51,23 @@ true, and tells you when what it observes has drifted from what you committed.
     `Ready`. Add the `Localhost` reference to the pod template once.
   </Step>
   <Step title="Promote">
-    After a full usage cycle under audit with a clean kernel log, change
-    `defaultAction` to `SCMP_ACT_ERRNO` in git and apply. The file is rewritten
-    on every node; it applies to each pod on its next restart.
+    Once the denial signal confirms clean — the CR's `DenialsObserved`
+    condition is `False` **and** `status.denials.observed` is `0` — change
+    `defaultAction` to `SCMP_ACT_ERRNO` in git and apply. The file is
+    rewritten on every node; it applies to each pod on its next restart. An
+    *unset* `status.denials`, or `DenialsObserved: Unknown`, means "no data",
+    not "clean" — do not promote on either of those. See
+    [promote to enforcing](#promote-to-enforcing) below.
   </Step>
-  <Step title="Watch for drift">
-    When the workload starts making a syscall your CR does not allow, the CR's
-    `Drift` condition and the UI say so. Re-export, diff, commit.
+  <Step title="Watch for drift and denials">
+    Two signals matter after that, and they answer different questions. When
+    the workload starts making a syscall your CR does not allow, the CR's
+    `Drift` condition and the UI say so — re-export, diff, commit. When the
+    kernel actually denies (or, in audit mode, logs) a syscall against a
+    *loaded* filter, that shows up as a denial — `DenialsObserved`, the
+    `kguardian_seccomp_denials_total` metric, `GET /seccomp/denials`. See
+    [Denials vs Drift](/concepts/seccomp-profiles#denials-the-kernels-own-verdict)
+    for why both exist.
   </Step>
 </Steps>
 
@@ -286,8 +296,76 @@ add/remove lines against your current CR before the YAML.
 
 `SCMP_ACT_LOG` logs disallowed syscalls to the kernel audit log
 (`type=SECCOMP` in `dmesg` / auditd) and blocks nothing. Run a full usage
-cycle in this mode — for a CronJob, several runs — and confirm the log shows
-nothing the workload needs. Then change one line and apply:
+cycle in this mode — for a CronJob, several runs — and confirm the workload
+is not tripping the profile before promoting.
+
+<Info>
+Before this release, "confirm" meant reading node kernel logs by hand — the
+audit trail existed but kguardian never read it back. It now does: the
+controller runs a kprobe on the kernel's `audit_seccomp()` (the function
+every loggable seccomp verdict passes through), attributes each one to a pod
+and workload, and the broker turns it into the same denial signal described
+in [Denials vs Drift](/concepts/seccomp-profiles#denials-the-kernels-own-verdict).
+**The denial signal is what gates promotion now** — it is the in-cluster,
+queryable, alertable replacement for "grep dmesg on every node."
+</Info>
+
+Check the CR before promoting:
+
+```bash
+kubectl -n prod get seccompprofile deployment-web -o json | jq '{denialsObserved: (.status.conditions[] | select(.type=="DenialsObserved")), denials: .status.denials}'
+```
+
+**Clear to promote** — the broker checked this workload and found nothing in
+the retention window:
+
+```json
+{
+  "denialsObserved": {"type":"DenialsObserved","status":"False","reason":"NoDenials","message":"0 denials in the retention window"},
+  "denials": {"observed": 0}
+}
+```
+
+**Not clear** — a nonzero count is unambiguous:
+
+```json
+{
+  "denialsObserved": {"type":"DenialsObserved","status":"True","reason":"KernelDenied","message":"17 seccomp denial(s) (SCMP_ACT_LOG) on 1 syscall(s): ptrace; last seen 2026-09-14T04:05:14Z"},
+  "denials": {"observed": 17, "syscalls": ["ptrace"], "lastSeen": "2026-09-14T04:05:14Z"}
+}
+```
+
+**Also not clear** — `Unknown` means "no data", never "clean":
+
+```json
+{
+  "denialsObserved": {"type":"DenialsObserved","status":"Unknown","reason":"NoDenialData","message":"broker reported no denials data; either it predates denial capture or no node is capturing"}
+}
+```
+
+`NoDenialData` is the broker answering and having nothing to say: the CR
+predates this feature, `seccomp.denials.enabled` is off cluster-wide, or no
+node's kprobe loaded (missing `CONFIG_AUDIT`). Two sibling `Unknown` reasons
+exist for the same "no data" verdict for a different cause:
+`NoWorkloadRef` (the CR has none) and `NoObservations` (nothing reported
+for this workload at all yet) — the same pair `CaptureComplete` already
+uses for the equivalent situations.
+
+None of those three is the sharp edge, though. **A broker that cannot be
+reached doesn't turn `DenialsObserved` `Unknown` at all** — the reconciler
+skips the status write entirely that pass and every condition, including
+`DenialsObserved` and `status.denials`, is left exactly as it was. A CR can
+sit on `False`/`NoDenials`/`{"observed": 0}` for hours into a broker outage
+and look precisely as clean as it did before the outage started, because
+nothing ever told it otherwise. This is the actual limit on using the CR
+alone as a promotion gate: it tells you the last answer the broker gave, not
+whether that answer is still current. If the stakes are high enough that a
+stale "clean" would matter, don't stop at the CR — check the controller
+pods' own logs for failed POSTs to the broker, and confirm the broker
+itself is healthy (`GET /health`) before you promote.
+
+Only once you have an explicit `DenialsObserved: False` with
+`status.denials.observed: 0` should you change one line and apply:
 
 ```yaml
 spec:
@@ -296,9 +374,85 @@ spec:
 
 <Warning>
 A too-tight profile breaks the workload on its **next restart**, not
-immediately. Promote deliberately, keep the audit log open, and know that
-reverting is a one-line change in git.
+immediately. Promote deliberately, and know that reverting is a one-line
+change in git. After promoting, watch `DenialsObserved` for a while longer:
+denials on a profile whose `defaultAction` now enforces mean the kernel is
+actively blocking or killing the workload, not just logging — see
+[metrics and alerting](#metrics-and-alerting) below for turning that into a
+page rather than something you notice later.
 </Warning>
+
+---
+
+## Metrics and alerting
+
+Denial capture is on by default (`seccomp.denials.enabled`, default `true`)
+— it needs no configuration to start attributing kernel verdicts to pods and
+storing them in the broker:
+
+```yaml
+# values.yaml
+seccomp:
+  denials:
+    enabled: true            # default; set false to disable the kprobe entirely
+    intervalSeconds: 10       # drain cadence for the in-kernel denial counters
+```
+
+The broker keeps rows for `broker.seccomp.denials.retention.days` (default
+30) and exposes three Prometheus metrics on the existing `/metrics`
+endpoint: `kguardian_seccomp_denials_total` (a counter, labelled
+`namespace`/`workload_kind`/`workload`/`action` — deliberately **not** by
+syscall, which would multiply cardinality by roughly the syscall table
+size), `kguardian_seccomp_denial_workloads` (distinct workloads with at
+least one denial in the retention window), and
+`kguardian_seccomp_denial_rows_total` (rows ingested since broker start).
+
+`/metrics` never queries Postgres on the scrape path — it reads a cached
+aggregate, refreshed every `broker.seccomp.denials.metricsIntervalSeconds`
+(default 15s, 5s floor). That timer is deliberately separate from
+`retention.intervalSeconds` above (default 3600s): `KguardianSeccompEnforcingProfileDenials`
+fires on a 5-minute `increase()` window, and if the cache only refreshed on
+the retention loop's hourly cadence, the metric backing that alert could lag
+reality by most of an hour — turning a "page right now" alert into one that
+notices well after the fact. Lower `metricsIntervalSeconds` for faster
+alerting if 15s isn't tight enough for your stakes.
+
+```yaml
+# values.yaml
+broker:
+  metrics:
+    serviceMonitor:
+      enabled: true          # scrape /metrics at all
+    prometheusRule:
+      enabled: true          # ship alert rules over the three metrics above
+```
+
+Three independent toggles have to agree before an alert can fire, and it is
+easy to enable only one of them and see nothing happen:
+
+1. **`broker.metrics.serviceMonitor.enabled`** (or your own scrape config) —
+   without a scrape, the metrics exist in-process but Prometheus never sees
+   them.
+2. **`broker.networkPolicy.allowMetricsFrom`** — only relevant if
+   `broker.networkPolicy.enabled` is also `true`. That NetworkPolicy is
+   ingress-only and default-deny by construction; a Prometheus that isn't
+   listed here is blocked at the network layer before the scrape toggle
+   above even matters. Add your Prometheus's namespace/pod selector here the
+   same way you would for any other broker scraper.
+3. **`broker.metrics.prometheusRule.enabled`** — renders the alert rules
+   themselves. A prometheus-operator installation needs to select this
+   `PrometheusRule` the same way it selects the `ServiceMonitor` (usually a
+   shared `release: kube-prometheus-stack` label on both — set it via
+   `broker.metrics.serviceMonitor.labels` and
+   `broker.metrics.prometheusRule.labels`).
+
+The shipped alerts:
+
+| Alert | Severity | Fires when |
+|---|---|---|
+| `KguardianSeccompDenialsObserved` | warning | a workload's audit-mode (`SCMP_ACT_LOG`) profile has logged denials in the last 15m — the promotion gate above, as a push notification instead of a pull |
+| `KguardianSeccompEnforcingProfileDenials` | critical | a workload's **enforcing** profile (`defaultAction` other than `SCMP_ACT_LOG`) is actually being acted on by the kernel — this is a production workload failing syscalls or being killed right now, not a tuning signal |
+| `KguardianSeccompDenialRateAbnormal` | warning | a workload's denial rate is high and sustained enough (>10/s for 5m) to look more like a retry loop or a probe than a profile settling in |
 
 ---
 
@@ -327,3 +481,18 @@ reverting is a one-line change in git.
   at controller startup.
 - **The CLI still works.** `kubectl kguardian gen seccomp` writes the same
   profile as plain seccomp JSON for use outside the CR flow.
+- **Denials age out; the observed syscall set never does.** Unlike the
+  monotonic syscall union above, `seccomp_denials` rows are pruned after
+  `broker.seccomp.denials.retention.days` (default 30). A workload with a
+  clean `DenialsObserved` today may simply have aged out an old denial, not
+  necessarily never produced one — check `lastSeen` in `GET /seccomp/denials`
+  if that distinction matters for an audit.
+- **Denial capture doesn't need `syscalls.captureLevel: full`, or even
+  `seccomp.distribute`.** It reads the kernel's own verdict on a loaded
+  filter, not traced syscalls, so it captures denials at any capture tier,
+  and for a profile applied outside kguardian's distribution path entirely
+  (hand-applied, or shipped by another tool). Pod-to-workload attribution
+  works the same way it does for the observed syscall set — it needs no
+  `SeccompProfile` CR or `workloadRef` — but rolling the denial signal up
+  onto a *specific CR's* `status.denials` still needs that CR's
+  `workloadRef` to match, the same as `CaptureComplete` and `Drift` do.

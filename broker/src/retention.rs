@@ -53,6 +53,23 @@
 //! 3. **Dead containers**: `pod_compute_latest` rows not refreshed for
 //!    10 minutes (the container is gone, or its node's controller is).
 //!    Runs regardless of the history setting.
+//!
+//! # Seccomp denials
+//!
+//! A third loop prunes `seccomp_denials` by `last_seen`, on the same batched
+//! CTE pattern:
+//!
+//! - `SECCOMP_DENIALS_RETENTION_DAYS` (default 30; 0 disables pruning)
+//! - `SECCOMP_DENIALS_RETENTION_INTERVAL_SECS` (default 3600)
+//! - `SECCOMP_DENIALS_RETENTION_BATCH_SIZE` (default 5 000, clamped to
+//!   [100, 100 000])
+//!
+//! The window is not cosmetic here the way it is for verdicts. The retention
+//! window IS the window `kguardian_seccomp_denial_workloads` and the
+//! `denials` block on `GET /seccomp/profiles` report over — neither applies
+//! a date filter of its own, precisely so there is one place the window is
+//! defined. Widening this setting widens what a CR's `DenialsObserved`
+//! condition considers current.
 
 use chrono::NaiveDateTime;
 use diesel::pg::PgConnection;
@@ -129,6 +146,7 @@ pub fn spawn(pool: DbPool) {
     );
 
     let compute_pool = pool.clone();
+    let denial_pool = pool.clone();
     actix_web::rt::spawn(async move {
         // First pass after a short warmup so the broker doesn't hammer
         // a cold pool the second it starts.
@@ -143,6 +161,7 @@ pub fn spawn(pool: DbPool) {
         }
     });
     spawn_compute(compute_pool);
+    spawn_seccomp_denials(denial_pool);
 }
 
 /// The compute-history loop (module docs, "Compute history"). Separate
@@ -167,6 +186,201 @@ fn spawn_compute(pool: DbPool) {
         }
     });
 }
+
+// ---------------------------------------------------------------------
+// Seccomp denials
+// ---------------------------------------------------------------------
+
+const DEFAULT_SECCOMP_DENIAL_RETENTION_DAYS: u32 = 30;
+const DEFAULT_SECCOMP_DENIAL_INTERVAL_SECS: u64 = 3600;
+
+/// `SECCOMP_DENIALS_RETENTION_DAYS` (default 30). 0 disables pruning.
+///
+/// Unlike the audit window this one is read by more than the pruner: it is
+/// the window the denial metrics and the `denials` block on
+/// `GET /seccomp/profiles` implicitly report over, because neither filters
+/// by date — the table is the window. That is deliberate (one definition,
+/// not three), and it is why this setting deserves its own env var rather
+/// than being folded into the audit one.
+fn seccomp_denial_retention_days() -> u32 {
+    std::env::var("SECCOMP_DENIALS_RETENTION_DAYS")
+        .ok()
+        // Same trim defense as every other env reader here.
+        .and_then(|v| v.trim().parse().ok())
+        .unwrap_or(DEFAULT_SECCOMP_DENIAL_RETENTION_DAYS)
+}
+
+fn seccomp_denial_retention_interval() -> Duration {
+    let secs = std::env::var("SECCOMP_DENIALS_RETENTION_INTERVAL_SECS")
+        .ok()
+        .and_then(|v| v.trim().parse().ok())
+        .unwrap_or(DEFAULT_SECCOMP_DENIAL_INTERVAL_SECS);
+    Duration::from_secs(secs.max(60))
+}
+
+/// Rows deleted per batch, clamped to the same [MIN_BATCH_SIZE,
+/// MAX_BATCH_SIZE] window and for the same reasons as
+/// [`retention_batch_size`].
+fn seccomp_denial_batch_size() -> i64 {
+    std::env::var("SECCOMP_DENIALS_RETENTION_BATCH_SIZE")
+        .ok()
+        .and_then(|v| v.trim().parse::<i64>().ok())
+        .map(|n| n.clamp(MIN_BATCH_SIZE, MAX_BATCH_SIZE))
+        .unwrap_or(DEFAULT_BATCH_SIZE)
+}
+
+/// The seccomp-denial prune loop. Its own task and cadence, matching the
+/// compute loop's separation: one loop's failure mode must not delay
+/// another's.
+fn spawn_seccomp_denials(pool: DbPool) {
+    let days = seccomp_denial_retention_days();
+    let interval = seccomp_denial_retention_interval();
+    info!(
+        days,
+        interval_secs = interval.as_secs(),
+        "seccomp denial retention loop scheduled (days=0 means pruning off)"
+    );
+    if days == 0 {
+        return;
+    }
+    actix_web::rt::spawn(async move {
+        // Staggered against the other two loops' 60 s and 90 s warmups so
+        // three full-table prunes do not land on a cold pool together.
+        tokio::time::sleep(Duration::from_secs(120)).await;
+        loop {
+            run_seccomp_denial_pass(&pool, days).await;
+            // Once per pass, after the denial prune: the node table is one
+            // row per node, so it needs no batching and no cadence of its
+            // own.
+            prune_stale_denial_nodes(&pool, days).await;
+            tokio::time::sleep(interval).await;
+        }
+    });
+}
+
+/// One pass pruning denials older than the window. Same batched-DELETE
+/// discipline as the verdict prune — see [`run_pass`].
+async fn run_seccomp_denial_pass(pool: &DbPool, days: u32) {
+    let batch_size = seccomp_denial_batch_size();
+    let mut total_deleted: usize = 0;
+    for batch_idx in 0..MAX_BATCHES_PER_PASS {
+        let pool = pool.clone();
+        let result = tokio::task::spawn_blocking(move || -> Result<usize, RetentionError> {
+            run_seccomp_denial_batch(&pool, days, batch_size)
+        })
+        .await;
+        match result {
+            Ok(Ok(0)) => {
+                if total_deleted == 0 {
+                    debug!("seccomp_denials retention: 0 rows pruned");
+                } else {
+                    info!(
+                        rows = total_deleted,
+                        batches = batch_idx,
+                        "seccomp_denials retention pruned old rows",
+                    );
+                }
+                return;
+            }
+            Ok(Ok(n)) => total_deleted += n,
+            Ok(Err(RetentionError::Pool(e))) => {
+                warn!(error = %e, pruned_before_failure = total_deleted, "seccomp_denials retention: could not get db conn");
+                return;
+            }
+            Ok(Err(RetentionError::Diesel(e))) => {
+                warn!(error = %e, pruned_before_failure = total_deleted, "seccomp_denials retention: DELETE failed");
+                return;
+            }
+            Err(e) => {
+                warn!(error = %e, pruned_before_failure = total_deleted, "seccomp_denials retention task panicked");
+                return;
+            }
+        }
+    }
+    info!(
+        rows = total_deleted,
+        cap = MAX_BATCHES_PER_PASS,
+        "seccomp_denials retention hit per-pass batch cap; remaining rows will be pruned on next interval",
+    );
+}
+
+/// Drop heartbeat rows for nodes that stopped reporting a whole retention
+/// window ago — the node is gone, not merely quiet.
+///
+/// Not batched, and not on its own cadence: the table holds one row per
+/// node, so a single unbounded DELETE here is bounded by cluster size rather
+/// than by ingest volume.
+///
+/// The window is deliberately the full retention window rather than the much
+/// shorter staleness window that `capture_is_live` uses. Those answer
+/// different questions: staleness decides whether to TRUST a node's report
+/// (minutes), this decides whether the node still exists (days). Pruning on
+/// the staleness window would delete a node's row during a long Controller
+/// outage and then recreate it on recovery, which loses nothing but churns
+/// the table for no reason.
+async fn prune_stale_denial_nodes(pool: &DbPool, days: u32) {
+    let pool = pool.clone();
+    let interval = format!("{} days", days);
+    let result = tokio::task::spawn_blocking(move || -> Result<usize, RetentionError> {
+        let mut conn = pool.get().map_err(RetentionError::Pool)?;
+        sql_query("DELETE FROM seccomp_denial_nodes WHERE updated_at < NOW() - $1::interval")
+            .bind::<diesel::sql_types::Text, _>(interval)
+            .execute(&mut conn)
+            .map_err(RetentionError::Diesel)
+    })
+    .await;
+    match result {
+        Ok(Ok(0)) => debug!("seccomp_denial_nodes retention: 0 stale nodes pruned"),
+        Ok(Ok(n)) => info!(
+            rows = n,
+            "seccomp_denial_nodes retention pruned departed nodes"
+        ),
+        Ok(Err(e)) => warn!(error = %e, "seccomp_denial_nodes retention failed"),
+        Err(e) => warn!(error = %e, "seccomp_denial_nodes retention task panicked"),
+    }
+}
+
+/// Batched DELETE of denials whose newest observation is outside the
+/// window.
+///
+/// `last_seen`, not `first_seen`: a row accumulates across drains, so a pod
+/// that has been tripping the same syscall for two months has a `first_seen`
+/// well outside a 30-day window while still being an active denial. Pruning
+/// on `first_seen` would delete exactly the longest-running problems.
+///
+/// The comparison is bare `NOW()`, unlike every other prune in this file.
+/// `last_seen` is TIMESTAMPTZ (produced on a node, so it carries its zone),
+/// and Postgres compares a timestamptz against `NOW()` in absolute time
+/// regardless of the session timezone. The `timezone('UTC', NOW())` wrapper
+/// the other prunes need exists to build a UTC-NAIVE right-hand side for
+/// their naive columns; applying it here would strip the zone off `NOW()`
+/// and reintroduce exactly the session-timezone dependency it was added to
+/// remove.
+fn run_seccomp_denial_batch(
+    pool: &DbPool,
+    days: u32,
+    batch_size: i64,
+) -> Result<usize, RetentionError> {
+    let mut conn = pool.get().map_err(RetentionError::Pool)?;
+    let interval = format!("{} days", days);
+    let deleted = sql_query(SECCOMP_DENIAL_PRUNE_SQL)
+        .bind::<diesel::sql_types::Text, _>(interval)
+        .bind::<diesel::sql_types::BigInt, _>(batch_size)
+        .execute(&mut conn)
+        .map_err(RetentionError::Diesel)?;
+    Ok(deleted)
+}
+
+/// The prune statement itself, as a constant so the live-database test in
+/// `seccomp_denial.rs` runs the SAME SQL this loop issues rather than a
+/// hand-copied approximation that can silently drift from it.
+pub(crate) const SECCOMP_DENIAL_PRUNE_SQL: &str = "WITH expired AS (\
+         SELECT id FROM seccomp_denials \
+         WHERE last_seen < NOW() - $1::interval \
+         ORDER BY id \
+         LIMIT $2 \
+     ) \
+     DELETE FROM seccomp_denials WHERE id IN (SELECT id FROM expired)";
 
 /// One pass pruning pods that have been dead longer than the retention
 /// window. `pod_details` keeps a row per pod ever seen and dead pods are
@@ -1090,6 +1304,105 @@ mod tests {
         assert_eq!(select_cols + 2, insert_cols.len());
         assert!(sql.contains("resolution_secs = 60 AND ts >= $1 AND ts < $2"));
         assert!(sql.contains("GROUP BY container_uid, bucket"));
+    }
+
+    // ---- seccomp denial retention ----------------------------------
+    //
+    // These read their own env vars rather than sharing the audit ones,
+    // because this window is not only a prune window: the denial metrics
+    // and the `denials` block on GET /seccomp/profiles report over exactly
+    // what this leaves in the table. Coupling it to AUDIT_VERDICTS_* would
+    // mean an operator shortening audit retention silently narrowed what a
+    // CR's DenialsObserved condition considers current.
+
+    #[test]
+    fn seccomp_denial_retention_defaults() {
+        with_env("SECCOMP_DENIALS_RETENTION_DAYS", None, || {
+            assert_eq!(
+                seccomp_denial_retention_days(),
+                DEFAULT_SECCOMP_DENIAL_RETENTION_DAYS
+            );
+        });
+        with_env("SECCOMP_DENIALS_RETENTION_INTERVAL_SECS", None, || {
+            assert_eq!(
+                seccomp_denial_retention_interval(),
+                Duration::from_secs(DEFAULT_SECCOMP_DENIAL_INTERVAL_SECS)
+            );
+        });
+        with_env("SECCOMP_DENIALS_RETENTION_BATCH_SIZE", None, || {
+            assert_eq!(seccomp_denial_batch_size(), DEFAULT_BATCH_SIZE);
+        });
+    }
+
+    #[test]
+    fn seccomp_denial_retention_is_not_coupled_to_the_audit_window() {
+        // Regression guard for the coupling described above: disabling or
+        // shortening audit retention must leave the denial window alone.
+        let _guard = crate::test_support::env_lock();
+        let prev_audit = std::env::var("AUDIT_VERDICTS_RETENTION_DAYS").ok();
+        let prev_denial = std::env::var("SECCOMP_DENIALS_RETENTION_DAYS").ok();
+        std::env::set_var("AUDIT_VERDICTS_RETENTION_DAYS", "0");
+        std::env::remove_var("SECCOMP_DENIALS_RETENTION_DAYS");
+        assert_eq!(
+            seccomp_denial_retention_days(),
+            DEFAULT_SECCOMP_DENIAL_RETENTION_DAYS
+        );
+        match prev_audit {
+            Some(v) => std::env::set_var("AUDIT_VERDICTS_RETENTION_DAYS", v),
+            None => std::env::remove_var("AUDIT_VERDICTS_RETENTION_DAYS"),
+        }
+        match prev_denial {
+            Some(v) => std::env::set_var("SECCOMP_DENIALS_RETENTION_DAYS", v),
+            None => std::env::remove_var("SECCOMP_DENIALS_RETENTION_DAYS"),
+        }
+    }
+
+    #[test]
+    fn seccomp_denial_retention_zero_disables() {
+        // Documented contract, and spawn_seccomp_denials checks for exactly
+        // this before starting a task at all.
+        with_env("SECCOMP_DENIALS_RETENTION_DAYS", Some("0"), || {
+            assert_eq!(seccomp_denial_retention_days(), 0);
+        });
+    }
+
+    #[test]
+    fn seccomp_denial_retention_trims_clamps_and_falls_back() {
+        with_env("SECCOMP_DENIALS_RETENTION_DAYS", Some("  7\n"), || {
+            assert_eq!(seccomp_denial_retention_days(), 7);
+        });
+        with_env(
+            "SECCOMP_DENIALS_RETENTION_DAYS",
+            Some("not-a-number"),
+            || {
+                assert_eq!(
+                    seccomp_denial_retention_days(),
+                    DEFAULT_SECCOMP_DENIAL_RETENTION_DAYS
+                );
+            },
+        );
+        with_env(
+            "SECCOMP_DENIALS_RETENTION_INTERVAL_SECS",
+            Some("10"),
+            || {
+                assert_eq!(
+                    seccomp_denial_retention_interval(),
+                    Duration::from_secs(60),
+                    "same 60s floor as the other loops, so a typo'd 1 cannot \
+                 hammer the table"
+                );
+            },
+        );
+        with_env("SECCOMP_DENIALS_RETENTION_BATCH_SIZE", Some("5"), || {
+            assert_eq!(seccomp_denial_batch_size(), MIN_BATCH_SIZE);
+        });
+        with_env(
+            "SECCOMP_DENIALS_RETENTION_BATCH_SIZE",
+            Some("1000000"),
+            || {
+                assert_eq!(seccomp_denial_batch_size(), MAX_BATCH_SIZE);
+            },
+        );
     }
 
     #[test]

@@ -4,7 +4,7 @@ use crate::compute_registry::{
     cgroup_id_for_path, parse_cpu_millis, parse_memory_bytes, resolve_container_cgroup,
     resolve_pid_and_cgroups_path, ComputeMap, ContainerCompute, ResourceSpec, Tier,
 };
-use crate::models::{pod_flags, ContainerMap, PodRegistration};
+use crate::models::{pod_flags, Config, ContainerMap, Info, Metadata, PodRegistration};
 use crate::network::canonicalize_ip;
 use crate::supervisor::{Draining, Subsystem, Supervisor};
 use crate::watch_loop::run_watch;
@@ -750,10 +750,16 @@ async fn register_netns(
     capture_level: CaptureLevel,
 ) -> Option<PodRegistration> {
     let flags = pod_registration_flags(pod, capture_level);
+    let identity = pod_identity_metadata(pod);
     for con_id in con_ids {
         let pod_info = create_pod_info(pod, pod_ip);
         let pod_inspect = PodInspect {
             status: pod_info,
+            info: Info {
+                config: Config {
+                    metadata: identity.clone(),
+                },
+            },
             ..Default::default()
         };
         // debug not info — these two log lines fire inside the
@@ -979,6 +985,49 @@ fn create_pod_info(pod: &Pod, pod_ip: &str) -> PodInfo {
         pod_name: pod.name_any(),
         pod_namespace: pod.metadata.namespace.to_owned(),
         pod_ip: pod_ip.to_string(),
+    }
+}
+
+/// The pod's Kubernetes identity for its `ContainerMap` entry.
+///
+/// `register_netns` used to fill `PodInspect.status` and nothing else, so
+/// `info.config.metadata` was `Default` on every node — name, namespace
+/// AND uid all empty strings. That went unnoticed for as long as nothing
+/// read them. Seccomp denial capture does: it reports the pod UID to the
+/// broker, whose storage key is `(pod_uid, syscall, action)`. An empty
+/// UID there is not a cosmetically missing field, it is every pod on the
+/// cluster collapsing into a single row per syscall/action pair, so the
+/// broker rejects such rows outright rather than merge them
+/// (`broker/src/seccomp_denial.rs`, `reject_reason`) — and the entire
+/// feature stored nothing while looking healthy from both ends.
+///
+/// All three fields are filled, not just the uid that prompted this.
+/// Leaving two of three empty next to one that is populated is exactly
+/// the shape that made the gap invisible the first time.
+///
+/// A pod with no `metadata.uid` cannot arise from a real apiserver — it
+/// assigns one at admission — so this is the hand-built-object case. It
+/// is deliberately NOT a reason to skip registration: this entry is what
+/// makes traffic and syscall capture work at all, and refusing it would
+/// trade a missing UID for a pod no probe can see. Register it, say so
+/// once per event so the condition is never silent, and let the broker
+/// reject the denial rows that carry no UID rather than invent an
+/// identity for them here.
+fn pod_identity_metadata(pod: &Pod) -> Metadata {
+    let uid = pod.metadata.uid.clone().unwrap_or_default();
+    if uid.is_empty() {
+        warn!(
+            pod = %pod.name_any(),
+            namespace = %pod.metadata.namespace.as_deref().unwrap_or("?"),
+            "pod has no metadata.uid; it is still tracked for traffic and syscall capture, \
+             but the broker will reject its seccomp denial rows because they cannot be \
+             attributed to a stable pod identity"
+        );
+    }
+    Metadata {
+        name: pod.name_any(),
+        namespace: pod.metadata.namespace.clone().unwrap_or_default(),
+        uid,
     }
 }
 
@@ -1747,6 +1796,57 @@ mod tests {
         // No UID (a hand-built test pod) still yields a tracked, tiered value.
         let f = pod_registration_flags(&Pod::default(), Full);
         assert_eq!(f, pod_flags::POD_TRACKED);
+    }
+
+    /// The `ContainerMap` entry has to carry the pod's Kubernetes
+    /// identity, not just its status.
+    ///
+    /// This is the fix for a gap that made seccomp denial capture store
+    /// nothing at all: `register_netns` filled `status` and left
+    /// `info.config.metadata` at `Default`, so the UID the denial
+    /// reporter sends to the broker was `""` on every node. The broker's
+    /// storage key is `(pod_uid, syscall, action)`, so it rejects an
+    /// empty UID rather than collapse every pod on the cluster into one
+    /// row per syscall/action pair — correct of it, and invisible from
+    /// both ends except for a warning about "unusable entries".
+    ///
+    /// Asserting all three fields, not just the uid: two empty fields
+    /// sitting beside one populated one is how this was missed before.
+    #[test]
+    fn the_container_map_entry_carries_the_pods_uid_name_and_namespace() {
+        let mut pod = Pod::default();
+        pod.metadata.uid = Some("11111111-2222-3333-4444-555555555555".into());
+        pod.metadata.name = Some("media-transform-7d9c8-abc12".into());
+        pod.metadata.namespace = Some("media".into());
+
+        let identity = pod_identity_metadata(&pod);
+
+        assert_eq!(identity.uid, "11111111-2222-3333-4444-555555555555");
+        assert_eq!(identity.name, "media-transform-7d9c8-abc12");
+        assert_eq!(identity.namespace, "media");
+    }
+
+    /// A pod with no UID stays tracked.
+    ///
+    /// It cannot happen against a real apiserver, which assigns one at
+    /// admission. If it somehow does, dropping the registration would
+    /// trade a missing pod UID for a pod invisible to every probe —
+    /// traffic and syscall capture both key off this entry. The row is
+    /// registered, the condition is logged, and only its denial rows are
+    /// refused downstream.
+    #[test]
+    fn a_pod_without_a_uid_is_still_registered_rather_than_dropped() {
+        let mut pod = Pod::default();
+        pod.metadata.name = Some("hand-built".into());
+
+        let identity = pod_identity_metadata(&pod);
+
+        assert_eq!(identity.name, "hand-built");
+        assert!(
+            identity.uid.is_empty(),
+            "an absent UID must stay absent; inventing one here would hand the broker a \
+             stable-looking identity that is not stable, which is worse than a rejected row"
+        );
     }
 
     fn pod_with_owners(owners: Vec<OwnerReference>) -> Pod {

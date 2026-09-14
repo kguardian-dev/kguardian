@@ -14,6 +14,7 @@ use kguardian::compute_sampler::{
 use kguardian::log::init_logger;
 use kguardian::network::{handle_network_events, handle_policy_drop_events, PolicyDropEvent};
 use kguardian::pod_watcher::ComputeContext;
+use kguardian::seccomp_denial::{run as run_seccomp_denials, DenialMaps, SeccompDenialConfig};
 use kguardian::seccomp_distributor::run as run_seccomp_distributor;
 use kguardian::service_watcher::watch_service;
 use kguardian::supervisor::{report, shut_down, Draining, Subsystem, Supervisor};
@@ -162,6 +163,25 @@ async fn main() -> Result<(), Error> {
     let (syscall_event_sender, syscall_event_receiver) = mpsc::channel::<SyscallEventData>(1000);
     let (netpolicy_drop_sender, netpolicy_drop_receiver) = mpsc::channel::<PolicyDropEvent>(1000);
 
+    // Kernel seccomp verdicts (SECCOMP_DENIAL_*). The probe is loaded by
+    // the eBPF loader alongside the other three — it needs the pod
+    // registration stream, which only that loop consumes — and hands its
+    // map descriptors back over this channel. `None` means the feature is
+    // switched off and nothing is loaded at all; a sender that is dropped
+    // without a value means the loader decided this kernel cannot carry
+    // the probe, which the drain task treats as a clean retirement.
+    let seccomp_denial_config = SeccompDenialConfig::from_env();
+    info!(
+        enabled = seccomp_denial_config.enabled,
+        interval_secs = seccomp_denial_config.interval.as_secs(),
+        "seccomp denial capture"
+    );
+    let (seccomp_denial_maps_sender, seccomp_denial_maps_receiver) =
+        tokio::sync::oneshot::channel::<DenialMaps>();
+    let seccomp_denial_maps_sender = seccomp_denial_config
+        .enabled
+        .then_some(seccomp_denial_maps_sender);
+
     // Spawned before anything is supervised: `ebpf_handle` is a
     // `spawn_blocking` that starts loading and attaching programs the
     // moment it is called, and its `JoinHandle` is what the supervised
@@ -174,7 +194,11 @@ async fn main() -> Result<(), Error> {
         recv_ip,
         ignore_daemonset_traffic,
         resolved_tiers,
+        seccomp_denial_maps_sender,
     );
+
+    let seccomp_denial_map = Arc::clone(&container_map);
+    let seccomp_denial_node = node_name.clone();
 
     // One task per subsystem.
     //
@@ -258,6 +282,38 @@ async fn main() -> Result<(), Error> {
     // unreachable; if you add one, that is the behaviour you are
     // choosing, and "best-effort" will no longer describe it.
     supervisor.spawn(Subsystem::SeccompDistributor, run_seccomp_distributor());
+    // Kernel seccomp verdicts. `MayRetire` for the same reason as the
+    // distributor: `run` returns `Ok(())` immediately when
+    // SECCOMP_DENIAL_CAPTURE is off. A kernel that cannot carry the probe
+    // does NOT retire — it keeps posting `capturing: false` heartbeats so
+    // the broker can tell a blind node from a quiet one.
+    //
+    // Supervised rather than a bare `tokio::spawn` specifically because
+    // tokio swallows a panic in a spawned task. Unsupervised, a panic in
+    // the drain loop would end denial capture on this node with no log
+    // line at all; the chain downstream still fails safe (no heartbeat →
+    // the broker's TTL expires → `Unknown` rather than a false
+    // all-clear), but "fails safe and tells nobody why" leaves an
+    // operator unable to tell a crashed task from a kernel without the
+    // probe. The inner `if let Err` stays: the supervisor's fault report
+    // and the task naming what stopped are different messages.
+    supervisor.spawn(Subsystem::SeccompDenials, async move {
+        let outcome = run_seccomp_denials(
+            seccomp_denial_config,
+            seccomp_denial_node,
+            seccomp_denial_map,
+            seccomp_denial_maps_receiver,
+        )
+        .await;
+        if let Err(e) = &outcome {
+            tracing::error!(
+                error = %e,
+                "seccomp denial capture stopped; kernel verdicts are no longer being \
+                 reported from this node"
+            );
+        }
+        outcome
+    });
     // Compute sampler, `MayRetire` for the same reason as the distributor.
     // With COMPUTE_ENABLED=false there is no registry and no sampler;
     // the same roster slot runs a five-minute node-only heartbeat so the

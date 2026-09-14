@@ -275,6 +275,50 @@ seccomp:
   # itself reacts to changes immediately). Empty uses the controller default (30).
   distributeIntervalSeconds: ""
 
+  # -- Capture the kernel's own seccomp verdicts and turn them into a
+  # kguardian signal. A `SeccompProfile` with `defaultAction: SCMP_ACT_LOG`
+  # (kguardian's own default export — see above) makes the kernel write
+  # every would-be denial to the node's audit log (`type=SECCOMP` in
+  # `dmesg` / auditd); until this feature, kguardian never read that back,
+  # so the audit output of the very profile it generated was invisible to
+  # it. This attaches a kprobe on the kernel's `audit_seccomp()` — called
+  # whenever seccomp has decided an action is loggable — so the controller
+  # sees the verdict directly, attributes it to a pod/workload, and the
+  # broker stores it, exports `kguardian_seccomp_denial*` Prometheus
+  # metrics (see `broker.metrics.prometheusRule`), and mirrors it onto the
+  # `SeccompProfile`'s `status.denials` and `DenialsObserved` condition.
+  #
+  # This answers a different question than the `Drift` condition. `Drift`
+  # is inferred from eBPF syscall observation and fires as soon as the
+  # workload makes a syscall your CR does not allow — even if no pod has
+  # ever referenced the profile. A denial only exists once a kernel filter
+  # built from that profile has actually been loaded and evaluated a
+  # syscall. Use `Drift` to catch a profile falling behind the workload;
+  # use denials to know the kernel is really acting on what you shipped.
+  # See docs/guides/distributing-seccomp-profiles.
+  denials:
+    # -- Load the `audit_seccomp` kprobe. Requires `CONFIG_AUDIT=y` on the
+    # node kernel; where the symbol is absent the controller skips the
+    # probe and logs a warning rather than failing to start — the same
+    # degrade-gracefully pattern used for the syscall probe's IPv6 kprobe
+    # pair (see `controller/src/bpf.rs`, `kernel_can_fentry` /
+    # `symbol_location`). On by default: an audit-mode profile
+    # (`SCMP_ACT_LOG`) is inert without this — the kernel logs the verdict
+    # to the node's kernel ring buffer and nothing in kguardian ever reads
+    # it back.
+    enabled: true
+    # -- Seconds between drains of the in-kernel denial counter map.
+    # Denials are counted in an LRU hash keyed on (netns, generation,
+    # syscall, action) rather than streamed one ringbuffer event per
+    # denial — a compromised or malfunctioning process making the same
+    # blocked syscall in a tight loop must not be able to flood the
+    # controller — and the controller drains and clears that map on this
+    # interval, posting the counts to the broker. Matches the syscall
+    # probe's own drain cadence (`controller/src/syscall.rs`). Lower it for
+    # faster metric/status visibility at the cost of more frequent broker
+    # POSTs; raise it on very large clusters to reduce broker load.
+    intervalSeconds: 10
+
 # -- Live compute gauges and noisy-neighbour detection. Three layers, each
 # gating the next: **usage** (CPU / memory per container against its limit,
 # request or the node), **stall** (cgroup v2 PSI, CFS throttle counters,
@@ -543,6 +587,42 @@ broker:
     # more. Clamped to a minimum 50ms broker-side.
     evalTimeoutMs: 500
 
+  seccomp:
+    denials:
+      # -- Retention for the `seccomp_denials` table — the kernel-verdict
+      # rows the broker ingests from `POST /seccomp/denials` (fed by the
+      # controller's `audit_seccomp` kprobe; see `seccomp.denials` above).
+      # Mirrors `broker.audit.retention` in shape and mechanism: a tokio
+      # task wakes every `intervalSeconds` and deletes rows whose
+      # `last_seen` is older than `days`, `batchSize` rows per DELETE.
+      retention:
+        # -- Retain seccomp_denials rows for this many days. Also bounds
+        # the window `kguardian_seccomp_denial_workloads` counts over and
+        # what `GET /seccomp/denials?since=` can return. Set to 0 to
+        # disable retention entirely (table grows unbounded).
+        days: 30
+        # -- How often the cleanup pass runs, in seconds. Minimum 60.
+        intervalSeconds: 3600
+        # -- Rows deleted per batched DELETE. Same [100, 100000] clamp as
+        # `broker.audit.retention.batchSize`, for the same reason: bounded
+        # lock hold and bounded WAL chunk per statement.
+        batchSize: 5000
+      # -- Seconds between refreshes of the cached `kguardian_seccomp_denial*`
+      # aggregate that `/metrics` reads (the broker deliberately never queries
+      # Postgres on the scrape path — see `broker.metrics.prometheusRule`).
+      # Deliberately its own timer, NOT `retention.intervalSeconds` above:
+      # `KguardianSeccompEnforcingProfileDenials` fires on a 5-minute
+      # `increase()` window, and reusing the retention loop's cadence
+      # (default 3600s) would leave that alert — the one covering an
+      # enforcing profile actively blocking or killing a workload right
+      # now — up to an hour stale. Resist merging these two timers even
+      # though they look redundant; that is exactly the simplification that
+      # would quietly break the critical alert's latency. Broker default is
+      # 15s if unset, with a 5s floor. Lower for faster alerting at the cost
+      # of more frequent aggregation passes; there is little reason to raise
+      # it above the default.
+      metricsIntervalSeconds: 15
+
   # -- r2d2 connection-pool max_size. r2d2's own default is 10, which
   # is the bottleneck under heavy ingest: each audit evaluator
   # round-trip and each regular request handler needs a pool
@@ -721,6 +801,36 @@ broker:
       scrapeTimeout: 10s
       # -- Extra labels to add to the ServiceMonitor (so prometheus-operator
       # picks it up — usually `release: kube-prometheus-stack`).
+      #
+      # /metrics also carries `kguardian_seccomp_denials_total`,
+      # `kguardian_seccomp_denial_workloads` and
+      # `kguardian_seccomp_denial_rows_total` once `seccomp.denials.enabled`
+      # is capturing data — see `prometheusRule` below for alerts over them.
+      labels: {}
+
+    prometheusRule:
+      # -- Create a PrometheusRule for prometheus-operator with alerts over
+      # the three `kguardian_seccomp_denial*` metrics above (fed by
+      # `seccomp.denials` — see that value for what feeds them). Off by
+      # default, like `serviceMonitor` above, for the same reason: it
+      # assumes a prometheus-operator Prometheus already exists and is
+      # configured to select PrometheusRule objects it did not create.
+      #
+      # This toggle, `serviceMonitor.enabled`, and (if
+      # `broker.networkPolicy.enabled` is on)
+      # `broker.networkPolicy.allowMetricsFrom` are three independent
+      # switches. All three matter: a Prometheus that cannot reach the
+      # broker's /metrics — because nothing scrapes it, or because a
+      # default-deny NetworkPolicy blocks it — scrapes nothing, so
+      # enabling only this one renders alert rules that never fire because
+      # the series they name are simply absent, which alerts on absence
+      # (`absent()`) rather than the condition would surface, but plain
+      # threshold rules like these never will.
+      enabled: false
+      # -- Extra labels on the PrometheusRule object (so prometheus-operator
+      # selects it — usually the same `release: kube-prometheus-stack`
+      # value set on `serviceMonitor.labels`; most installs require the
+      # matching label on both object kinds).
       labels: {}
 
   helmTest:

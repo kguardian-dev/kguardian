@@ -32,6 +32,7 @@ use std::collections::BTreeSet;
     printcolumn = r#"{"name":"Action","type":"string","jsonPath":".spec.defaultAction"}"#,
     printcolumn = r#"{"name":"Ready","type":"string","jsonPath":".status.distribution.summary"}"#,
     printcolumn = r#"{"name":"Drift","type":"string","jsonPath":".status.drift"}"#,
+    printcolumn = r#"{"name":"Denials","type":"integer","jsonPath":".status.denials.observed"}"#,
     printcolumn = r#"{"name":"Age","type":"date","jsonPath":".metadata.creationTimestamp"}"#
 )]
 #[serde(rename_all = "camelCase")]
@@ -163,6 +164,8 @@ pub struct SeccompProfileStatus {
     /// paths only, no `[?(@.type=="Drift")]` filters.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub drift: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub denials: Option<DenialSummary>,
     /// Per-node state; each entry is owned by that node's controller.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     #[schemars(extend("x-kubernetes-list-type" = "map", "x-kubernetes-list-map-keys" = ["name"]))]
@@ -188,6 +191,39 @@ pub enum DistributionState {
     Ready,
     Partial,
     Pending,
+}
+
+/// Seccomp denials the broker has attributed to this CR's workload:
+/// syscalls the kernel's own filter acted on, as opposed to `drift`,
+/// which is inferred from what kguardian observed the workload call.
+///
+/// Written whenever the broker has an answer, including when that answer
+/// is zero. `observed: 0` means "checked, and clean". The whole block
+/// being absent means "not known" — the broker was unreachable, it
+/// predates denial capture, or nothing on this cluster is capturing
+/// denials at all.
+///
+/// Keeping those two apart is the point of the field. Zero is what
+/// clears a profile for promotion from `SCMP_ACT_LOG` to an enforcing
+/// action; absent is no evidence whatsoever, and collapsing them would
+/// hand out that clearance on the strength of nobody having looked. The
+/// `Denials` printer column reads `observed` straight out of this block,
+/// so it shows `0` for a cleared workload and stays blank for an unknown
+/// one — readable without going and fetching the condition. The
+/// `DenialsObserved` condition carries the same distinction with a
+/// reason attached.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct DenialSummary {
+    /// Denial events the broker holds for the workload, across every
+    /// syscall and action. This is the `Denials` printer column.
+    pub observed: u64,
+    /// Distinct syscall names denied, sorted.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub syscalls: Vec<String>,
+    /// RFC 3339; the most recent denial, when there has been one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_seen: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
@@ -426,6 +462,64 @@ workloadRef:
         .is_err());
     }
 
+    /// "Absent" and "zero" are different answers and must survive
+    /// serialisation as different bytes: absent is "not known", zero is
+    /// "checked, and clean".
+    ///
+    /// Two ways this could silently collapse, both guarded here. An
+    /// absent block must serialise to no key at all rather than an empty
+    /// object, which a JSONPath gate would read as a present answer. And
+    /// `observed` must never be skipped when the block is written — it is
+    /// what the `Denials` printer column reads, so a skipped zero would
+    /// blank the column for a cleared workload and make it indis-
+    /// tinguishable from one nobody has looked at.
+    #[test]
+    fn denial_summary_keeps_absent_and_zero_apart() {
+        let mut s = SeccompProfileStatus {
+            drift: Some("False".into()),
+            ..Default::default()
+        };
+        let v = serde_json::to_value(&s).unwrap();
+        assert!(
+            v.get("denials").is_none(),
+            "an absent block must not serialise as anything at all"
+        );
+
+        let absent = v;
+
+        s.denials = Some(DenialSummary::default());
+        let v = serde_json::to_value(&s).unwrap();
+        assert_eq!(
+            v["denials"],
+            serde_json::json!({ "observed": 0 }),
+            "zero is a present block carrying an explicit count, so the \
+             printer column shows a 0 rather than a blank"
+        );
+        assert_ne!(
+            absent, v,
+            "the two answers must not serialise to the same object"
+        );
+
+        s.denials = Some(DenialSummary {
+            observed: 17,
+            syscalls: vec!["mount".into(), "ptrace".into()],
+            last_seen: Some("2026-09-14T04:05:14Z".into()),
+        });
+        let v = serde_json::to_value(&s).unwrap();
+        assert_eq!(
+            v["denials"],
+            serde_json::json!({
+                "observed": 17,
+                "syscalls": ["mount", "ptrace"],
+                "lastSeen": "2026-09-14T04:05:14Z"
+            })
+        );
+
+        // And back: a CR read from the API server round-trips.
+        let back: SeccompProfileStatus = serde_json::from_value(v).unwrap();
+        assert_eq!(back, s);
+    }
+
     #[test]
     fn crd_yaml_has_the_contract_surface() {
         let y = crd_yaml();
@@ -445,6 +539,8 @@ workloadRef:
             "name: Action",
             "name: Ready",
             "name: Drift",
+            "name: Denials",
+            "jsonPath: .status.denials.observed",
             "name: Age",
             "- scmp",
         ] {

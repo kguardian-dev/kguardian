@@ -24,6 +24,9 @@ spec:
     - jsonPath: .status.drift
       name: Drift
       type: string
+    - jsonPath: .status.denials.observed
+      name: Denials
+      type: integer
     - jsonPath: .metadata.creationTimestamp
       name: Age
       type: date
@@ -157,6 +160,48 @@ spec:
                 x-kubernetes-list-map-keys:
                 - type
                 x-kubernetes-list-type: map
+              denials:
+                description: |-
+                  Seccomp denials the broker has attributed to this CR's workload:
+                  syscalls the kernel's own filter acted on, as opposed to `drift`,
+                  which is inferred from what kguardian observed the workload call.
+
+                  Written whenever the broker has an answer, including when that answer
+                  is zero. `observed: 0` means "checked, and clean". The whole block
+                  being absent means "not known" — the broker was unreachable, it
+                  predates denial capture, or nothing on this cluster is capturing
+                  denials at all.
+
+                  Keeping those two apart is the point of the field. Zero is what
+                  clears a profile for promotion from `SCMP_ACT_LOG` to an enforcing
+                  action; absent is no evidence whatsoever, and collapsing them would
+                  hand out that clearance on the strength of nobody having looked. The
+                  `Denials` printer column reads `observed` straight out of this block,
+                  so it shows `0` for a cleared workload and stays blank for an unknown
+                  one — readable without going and fetching the condition. The
+                  `DenialsObserved` condition carries the same distinction with a
+                  reason attached.
+                nullable: true
+                properties:
+                  lastSeen:
+                    description: RFC 3339; the most recent denial, when there has been one.
+                    nullable: true
+                    type: string
+                  observed:
+                    description: |-
+                      Denial events the broker holds for the workload, across every
+                      syscall and action. This is the `Denials` printer column.
+                    format: uint64
+                    minimum: 0.0
+                    type: integer
+                  syscalls:
+                    description: Distinct syscall names denied, sorted.
+                    items:
+                      type: string
+                    type: array
+                required:
+                - observed
+                type: object
               distribution:
                 nullable: true
                 properties:

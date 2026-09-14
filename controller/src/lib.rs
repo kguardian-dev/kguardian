@@ -1,5 +1,8 @@
 pub mod network;
 pub mod seccomp_crd;
+/// Kernel seccomp verdicts (`type=SECCOMP` audit records), captured on
+/// the node and reported to the Broker.
+pub mod seccomp_denial;
 pub mod seccomp_distributor;
 pub mod syscall;
 
