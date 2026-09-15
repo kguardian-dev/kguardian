@@ -1,5 +1,22 @@
 # Changelog
 
+## [1.24.0](https://github.com/kguardian-dev/kguardian/compare/chart/v1.23.1...chart/v1.24.0) (2026-09-15)
+
+
+### Features
+
+* capture kernel seccomp verdicts and surface them as denials ([#1574](https://github.com/kguardian-dev/kguardian/issues/1574)) ([0db143c](https://github.com/kguardian-dev/kguardian/commit/0db143cb2643756ad0b78f5c7133f7753e91f61d))
+
+
+### Bug Fixes
+
+* **deps:** update ghcr.io/kguardian-dev/kguardian/broker docker tag to v1.18.0 ([#1588](https://github.com/kguardian-dev/kguardian/issues/1588)) ([df2cf04](https://github.com/kguardian-dev/kguardian/commit/df2cf04e0fb11571476a3441642574517bd9bf1a))
+* **deps:** update ghcr.io/kguardian-dev/kguardian/controller docker tag to v1.15.0 ([#1589](https://github.com/kguardian-dev/kguardian/issues/1589)) ([508fc12](https://github.com/kguardian-dev/kguardian/commit/508fc12a13124d65d40e303434f2985ab21b8aca))
+* **deps:** update ghcr.io/kguardian-dev/kguardian/evaluator docker tag to v0.4.2 ([#1587](https://github.com/kguardian-dev/kguardian/issues/1587)) ([244e9e5](https://github.com/kguardian-dev/kguardian/commit/244e9e5fe61dadf8da52dd6822245acfc1bc13bb))
+* **deps:** update ghcr.io/kguardian-dev/kguardian/frontend docker tag to v1.17.1 - abandoned ([#1572](https://github.com/kguardian-dev/kguardian/issues/1572)) ([96945ef](https://github.com/kguardian-dev/kguardian/commit/96945efe0987f721e6f3d6e2b52beaf04ae38579))
+* **deps:** update ghcr.io/kguardian-dev/kguardian/frontend docker tag to v1.17.2 ([#1580](https://github.com/kguardian-dev/kguardian/issues/1580)) ([0d61c33](https://github.com/kguardian-dev/kguardian/commit/0d61c331e8a67c477abeec2f7270f86c7a696c2f))
+* **deps:** update ghcr.io/kguardian-dev/kguardian/frontend docker tag to v1.18.0 ([#1585](https://github.com/kguardian-dev/kguardian/issues/1585)) ([ced5935](https://github.com/kguardian-dev/kguardian/commit/ced5935a69ad80c1af4b20ffefd3882fe4649dea))
+
 ## [1.23.1](https://github.com/kguardian-dev/kguardian/compare/chart/v1.23.0...chart/v1.23.1) (2026-09-13)
 
 
