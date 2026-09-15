@@ -305,6 +305,9 @@ const DataTable: React.FC<DataTableProps> = ({ selectedPod, allPodsLookup, servi
   // the live rows usePodData merged onto the node. Only for gauged pods.
   const compute = selectedPod?.compute;
   const hasCompute = hasComputeGauges(compute);
+  // Read off `compute` rather than `hasCompute`: the header renders for a
+  // workload with no compute at all, and must still say "0 containers".
+  const containerCount = compute?.containers.length ?? 0;
   const blame = useMemo(() => {
     if (!compute) return { rows: [] as Array<ComputeBlame & { victim: string }>, totalWaitNs: 0 };
     // One list across the pod's containers, largest wait first. The share is
@@ -782,236 +785,260 @@ const DataTable: React.FC<DataTableProps> = ({ selectedPod, allPodsLookup, servi
         )}
       </div>
 
-      {/* Compute Section */}
-      {hasCompute && compute && (
-        <div data-testid="compute-section">
-          <button
-            onClick={() => setIsComputeExpanded(!isComputeExpanded)}
+      {/* Compute Section. The header renders whether or not this workload has
+          compute data, and the same goes for System Calls below. The panel is
+          three fixed sections: a section that disappears when its data is
+          missing changes the panel's shape between one selection and the next,
+          so there is nothing stable to aim at and "this workload has none"
+          becomes indistinguishable from "this section does not exist". The
+          empty state says which. */}
+      <div data-testid="compute-section">
+        <button
+          onClick={() => setIsComputeExpanded(!isComputeExpanded)}
           aria-expanded={isComputeExpanded}
-            className="w-full text-md font-semibold text-primary mb-3 flex items-center gap-2 hover:text-hubble-accent transition-colors"
-          >
-            {isComputeExpanded ? (
-              <ChevronDown className="w-4 h-4 text-hubble-accent" />
-            ) : (
-              <ChevronRight className="w-4 h-4 text-hubble-accent" />
-            )}
-            <Cpu className="w-4 h-4 text-hubble-accent" />
-            Compute ({compute.containers.length} container{compute.containers.length !== 1 ? 's' : ''})
-            {compute.findings.length > 0 && (
-              <span className="ml-1 rounded-full bg-hubble-error/15 text-hubble-error text-xs font-medium px-2 py-0.5 tabular-nums">
-                {compute.findings.length} finding{compute.findings.length !== 1 ? 's' : ''}
-              </span>
-            )}
-          </button>
-
-          {isComputeExpanded && (
-            <div className="space-y-3">
-              {compute.findings.length > 0 && (
-                <ul className="space-y-1">
-                  {compute.findings.map((f) => (
-                    <li
-                      key={`${f.kind}:${f.victim.container_uid}`}
-                      className={`rounded-surface border px-3 py-2 text-xs ${
-                        f.severity === 'critical'
-                          ? 'border-hubble-error/30 bg-hubble-error/10 text-hubble-error'
-                          : 'border-hubble-warning/30 bg-hubble-warning/10 text-hubble-warning'
-                      }`}
-                    >
-                      <span className="font-semibold">{COMPUTE_KIND_LABEL[f.kind] ?? f.kind}</span>
-                      <span className="text-secondary"> · {f.message}</span>
-                    </li>
-                  ))}
-                </ul>
-              )}
-
-              <div className="bg-hubble-card rounded-surface border border-hubble-border overflow-hidden">
-                <div className="overflow-x-auto">
-                  <table className="w-full text-sm">
-                    <thead className="sticky top-0 z-10 bg-hubble-dark border-b border-hubble-border">
-                      <tr className="text-left text-xs font-medium text-tertiary uppercase tracking-wide">
-                        <th className="px-4 py-2">Container</th>
-                        <th className="px-4 py-2">CPU</th>
-                        <th className="px-4 py-2">CPU req / lim</th>
-                        <th className="px-4 py-2" title="Share of CFS periods spent throttled by the container's own limit (design D3)">Throttled</th>
-                        <th className="px-4 py-2" title="cpu.pressure some / full avg10">CPU PSI</th>
-                        <th className="px-4 py-2">Memory</th>
-                        <th className="px-4 py-2">Mem req / lim</th>
-                        <th className="px-4 py-2" title="memory.pressure some / full avg10">Mem PSI</th>
-                        <th className="px-4 py-2" title="Run-queue latency p99 over the sample (scheduler probe)">p99 wait</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {compute.containers.map((c: ComputeContainer) => {
-                        const ratio = throttledRatio(c);
-                        return (
-                          <tr key={c.container_uid} className="border-b border-hubble-border hover:bg-hubble-dark/50 transition-colors">
-                            <td className="px-4 py-2 font-mono text-xs text-primary">
-                              {c.container}
-                              {selectedPod.pods.length > 1 && <div className="text-tertiary">{c.pod_name}</div>}
-                            </td>
-                            <td className="px-4 py-2 font-mono text-xs tabular-nums text-secondary">{formatMillicores(c.cpu_usage_millis)}</td>
-                            <td className="px-4 py-2 font-mono text-xs tabular-nums text-tertiary">
-                              {formatMillicores(c.cpu_request_millis)} / {formatMillicores(c.cpu_limit_millis)}
-                            </td>
-                            <td className={`px-4 py-2 font-mono text-xs tabular-nums ${ratio !== null && ratio >= 0.25 ? 'text-hubble-warning' : 'text-secondary'}`}>
-                              {ratio === null ? '—' : formatPercent(ratio * 100)}
-                            </td>
-                            <td className={`px-4 py-2 font-mono text-xs tabular-nums ${c.cpu_psi_some10 >= 20 ? 'text-hubble-error' : 'text-secondary'}`}>
-                              {formatPercent(c.cpu_psi_some10, 1)} / {formatPercent(c.cpu_psi_full10, 1)}
-                            </td>
-                            <td className="px-4 py-2 font-mono text-xs tabular-nums text-secondary">{formatBytes(c.mem_working_set)}</td>
-                            <td className="px-4 py-2 font-mono text-xs tabular-nums text-tertiary">
-                              {formatBytes(c.mem_request)} / {formatBytes(c.mem_limit)}
-                            </td>
-                            <td className={`px-4 py-2 font-mono text-xs tabular-nums ${c.mem_psi_some10 >= 10 ? 'text-hubble-error' : 'text-secondary'}`}>
-                              {formatPercent(c.mem_psi_some10, 1)} / {formatPercent(c.mem_psi_full10, 1)}
-                            </td>
-                            <td className="px-4 py-2 font-mono text-xs tabular-nums text-secondary" title={c.runq_p99_us === null ? 'Scheduler probe not loaded on this node' : undefined}>
-                              {formatMicros(c.runq_p99_us)}
-                            </td>
-                          </tr>
-                        );
-                      })}
-                    </tbody>
-                  </table>
-                </div>
-                <div className="px-4 py-2 bg-hubble-dark border-t border-hubble-border text-xs text-tertiary">
-                  Pod gauge: {formatMillicores(compute.cpuMillis)} of {formatMillicores(compute.cpuCapacityMillis)} CPU {denominatorLabel(compute.cpuDenominator)} ·{' '}
-                  {formatBytes(compute.memBytes)} of {formatBytes(compute.memCapacityBytes)} memory {denominatorLabel(compute.memDenominator)}
-                </div>
-              </div>
-
-              {blameRows.length > 0 && (
-                <div className="bg-hubble-card rounded-surface border border-hubble-border overflow-hidden" data-testid="compute-blame">
-                  <div className="px-4 py-2 bg-hubble-dark border-b border-hubble-border text-xs font-medium text-tertiary uppercase tracking-wide">
-                    Blame — who was on the CPU while this pod waited
-                  </div>
-                  <table className="w-full text-sm">
-                    <thead className="border-b border-hubble-border">
-                      <tr className="text-left text-xs font-medium text-tertiary uppercase tracking-wide">
-                        <th className="px-4 py-2">Culprit</th>
-                        <th className="px-4 py-2">Kind</th>
-                        <th className="px-4 py-2">Victim</th>
-                        <th className="px-4 py-2">Share</th>
-                        <th className="px-4 py-2">Wait</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {blameRows.map((b) => (
-                        <tr key={`${b.victim}:${b.cgroup_id}`} className="border-b border-hubble-border">
-                          <td className="px-4 py-2 font-mono text-xs text-primary">{b.ref}</td>
-                          <td className="px-4 py-2">
-                            <span className={`px-2 py-0.5 rounded text-xs ${b.kind === 'pod' ? 'bg-hubble-error/15 text-hubble-error' : 'bg-hubble-border/30 text-secondary'}`}>{b.kind}</span>
-                          </td>
-                          <td className="px-4 py-2 font-mono text-xs text-secondary">{b.victim}</td>
-                          <td className="px-4 py-2 font-mono text-xs tabular-nums text-secondary">
-                            {totalWaitNs > 0 ? formatPercent((b.wait_ns / totalWaitNs) * 100) : '—'}
-                          </td>
-                          <td className="px-4 py-2 font-mono text-xs tabular-nums text-secondary">{formatMicros(b.wait_ns / 1000)}</td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
-              )}
-            </div>
+          className="w-full text-md font-semibold text-primary mb-3 flex items-center gap-2 hover:text-hubble-accent transition-colors"
+        >
+          {isComputeExpanded ? (
+            <ChevronDown className="w-4 h-4 text-hubble-accent" />
+          ) : (
+            <ChevronRight className="w-4 h-4 text-hubble-accent" />
           )}
-        </div>
-      )}
+          <Cpu className="w-4 h-4 text-hubble-accent" />
+          Compute ({containerCount} container{containerCount !== 1 ? 's' : ''})
+          {compute && compute.findings.length > 0 && (
+            <span className="ml-1 rounded-full bg-hubble-error/15 text-hubble-error text-xs font-medium px-2 py-0.5 tabular-nums">
+              {compute.findings.length} finding{compute.findings.length !== 1 ? 's' : ''}
+            </span>
+          )}
+        </button>
+
+        {isComputeExpanded && !(hasCompute && compute) && (
+          <div className="bg-hubble-card rounded-surface border border-hubble-border">
+            <EmptyState
+              icon={Cpu}
+              title="No compute data for this workload"
+              description="Compute metrics arrive from the node agent. A workload with no gauges is either unscheduled or on a node that is not reporting."
+              compact
+            />
+          </div>
+        )}
+
+        {isComputeExpanded && hasCompute && compute && (
+          <div className="space-y-3">
+            {compute.findings.length > 0 && (
+              <ul className="space-y-1">
+                {compute.findings.map((f) => (
+                  <li
+                    key={`${f.kind}:${f.victim.container_uid}`}
+                    className={`rounded-surface border px-3 py-2 text-xs ${
+                      f.severity === 'critical'
+                        ? 'border-hubble-error/30 bg-hubble-error/10 text-hubble-error'
+                        : 'border-hubble-warning/30 bg-hubble-warning/10 text-hubble-warning'
+                    }`}
+                  >
+                    <span className="font-semibold">{COMPUTE_KIND_LABEL[f.kind] ?? f.kind}</span>
+                    <span className="text-secondary"> · {f.message}</span>
+                  </li>
+                ))}
+              </ul>
+            )}
+
+            <div className="bg-hubble-card rounded-surface border border-hubble-border overflow-hidden">
+              <div className="overflow-x-auto">
+                <table className="w-full text-sm">
+                  <thead className="sticky top-0 z-10 bg-hubble-dark border-b border-hubble-border">
+                    <tr className="text-left text-xs font-medium text-tertiary uppercase tracking-wide">
+                      <th className="px-4 py-2">Container</th>
+                      <th className="px-4 py-2">CPU</th>
+                      <th className="px-4 py-2">CPU req / lim</th>
+                      <th className="px-4 py-2" title="Share of CFS periods spent throttled by the container's own limit (design D3)">Throttled</th>
+                      <th className="px-4 py-2" title="cpu.pressure some / full avg10">CPU PSI</th>
+                      <th className="px-4 py-2">Memory</th>
+                      <th className="px-4 py-2">Mem req / lim</th>
+                      <th className="px-4 py-2" title="memory.pressure some / full avg10">Mem PSI</th>
+                      <th className="px-4 py-2" title="Run-queue latency p99 over the sample (scheduler probe)">p99 wait</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {compute.containers.map((c: ComputeContainer) => {
+                      const ratio = throttledRatio(c);
+                      return (
+                        <tr key={c.container_uid} className="border-b border-hubble-border hover:bg-hubble-dark/50 transition-colors">
+                          <td className="px-4 py-2 font-mono text-xs text-primary">
+                            {c.container}
+                            {selectedPod.pods.length > 1 && <div className="text-tertiary">{c.pod_name}</div>}
+                          </td>
+                          <td className="px-4 py-2 font-mono text-xs tabular-nums text-secondary">{formatMillicores(c.cpu_usage_millis)}</td>
+                          <td className="px-4 py-2 font-mono text-xs tabular-nums text-tertiary">
+                            {formatMillicores(c.cpu_request_millis)} / {formatMillicores(c.cpu_limit_millis)}
+                          </td>
+                          <td className={`px-4 py-2 font-mono text-xs tabular-nums ${ratio !== null && ratio >= 0.25 ? 'text-hubble-warning' : 'text-secondary'}`}>
+                            {ratio === null ? '—' : formatPercent(ratio * 100)}
+                          </td>
+                          <td className={`px-4 py-2 font-mono text-xs tabular-nums ${c.cpu_psi_some10 >= 20 ? 'text-hubble-error' : 'text-secondary'}`}>
+                            {formatPercent(c.cpu_psi_some10, 1)} / {formatPercent(c.cpu_psi_full10, 1)}
+                          </td>
+                          <td className="px-4 py-2 font-mono text-xs tabular-nums text-secondary">{formatBytes(c.mem_working_set)}</td>
+                          <td className="px-4 py-2 font-mono text-xs tabular-nums text-tertiary">
+                            {formatBytes(c.mem_request)} / {formatBytes(c.mem_limit)}
+                          </td>
+                          <td className={`px-4 py-2 font-mono text-xs tabular-nums ${c.mem_psi_some10 >= 10 ? 'text-hubble-error' : 'text-secondary'}`}>
+                            {formatPercent(c.mem_psi_some10, 1)} / {formatPercent(c.mem_psi_full10, 1)}
+                          </td>
+                          <td className="px-4 py-2 font-mono text-xs tabular-nums text-secondary" title={c.runq_p99_us === null ? 'Scheduler probe not loaded on this node' : undefined}>
+                            {formatMicros(c.runq_p99_us)}
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+              <div className="px-4 py-2 bg-hubble-dark border-t border-hubble-border text-xs text-tertiary">
+                Pod gauge: {formatMillicores(compute.cpuMillis)} of {formatMillicores(compute.cpuCapacityMillis)} CPU {denominatorLabel(compute.cpuDenominator)} ·{' '}
+                {formatBytes(compute.memBytes)} of {formatBytes(compute.memCapacityBytes)} memory {denominatorLabel(compute.memDenominator)}
+              </div>
+            </div>
+
+            {blameRows.length > 0 && (
+              <div className="bg-hubble-card rounded-surface border border-hubble-border overflow-hidden" data-testid="compute-blame">
+                <div className="px-4 py-2 bg-hubble-dark border-b border-hubble-border text-xs font-medium text-tertiary uppercase tracking-wide">
+                  Blame — who was on the CPU while this pod waited
+                </div>
+                <table className="w-full text-sm">
+                  <thead className="border-b border-hubble-border">
+                    <tr className="text-left text-xs font-medium text-tertiary uppercase tracking-wide">
+                      <th className="px-4 py-2">Culprit</th>
+                      <th className="px-4 py-2">Kind</th>
+                      <th className="px-4 py-2">Victim</th>
+                      <th className="px-4 py-2">Share</th>
+                      <th className="px-4 py-2">Wait</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {blameRows.map((b) => (
+                      <tr key={`${b.victim}:${b.cgroup_id}`} className="border-b border-hubble-border">
+                        <td className="px-4 py-2 font-mono text-xs text-primary">{b.ref}</td>
+                        <td className="px-4 py-2">
+                          <span className={`px-2 py-0.5 rounded text-xs ${b.kind === 'pod' ? 'bg-hubble-error/15 text-hubble-error' : 'bg-hubble-border/30 text-secondary'}`}>{b.kind}</span>
+                        </td>
+                        <td className="px-4 py-2 font-mono text-xs text-secondary">{b.victim}</td>
+                        <td className="px-4 py-2 font-mono text-xs tabular-nums text-secondary">
+                          {totalWaitNs > 0 ? formatPercent((b.wait_ns / totalWaitNs) * 100) : '—'}
+                        </td>
+                        <td className="px-4 py-2 font-mono text-xs tabular-nums text-secondary">{formatMicros(b.wait_ns / 1000)}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
+        )}
+      </div>
 
       {/* Syscalls Section */}
-      {hasSyscalls && (
-        <div>
-          <button
-            onClick={() => setIsSyscallsExpanded(!isSyscallsExpanded)}
+      <div>
+        <button
+          onClick={() => setIsSyscallsExpanded(!isSyscallsExpanded)}
           aria-expanded={isSyscallsExpanded}
-            className="w-full text-md font-semibold text-primary mb-3 flex items-center gap-2 hover:text-hubble-accent transition-colors"
-          >
-            {isSyscallsExpanded ? (
-              <ChevronDown className="w-4 h-4 text-hubble-warning" />
-            ) : (
-              <ChevronRight className="w-4 h-4 text-hubble-warning" />
-            )}
-            <Activity className="w-4 h-4 text-hubble-warning" />
-            System Calls
-          </button>
-
-          {isSyscallsExpanded && (
-            <div className="bg-hubble-card rounded-surface border border-hubble-border overflow-hidden">
-            <div className="overflow-x-auto">
-              <table className="w-full text-sm">
-                <thead className="sticky top-0 z-10 bg-hubble-dark border-b border-hubble-border">
-                  <tr className="text-left text-xs font-medium text-tertiary uppercase tracking-wide">
-                    <th className="px-4 py-2">Architecture</th>
-                    <th className="px-4 py-2">Syscalls</th>
-                    <th className="px-4 py-2">Timestamp</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {selectedPod.syscalls?.map((syscall, index) => {
-                    // Sorted + de-duplicated: capture emits in observation
-                    // order, which varies between pods and refreshes; the
-                    // collapsed 10-chip preview must show a stable prefix.
-                    const syscallList = displaySyscallList(syscall.syscalls);
-                    const isExpanded = expandedSyscalls.has(index);
-                    const displayedSyscalls = isExpanded ? syscallList : syscallList.slice(0, 10);
-
-                    const toggleExpanded = () => {
-                      setExpandedSyscalls(prev => {
-                        const newSet = new Set(prev);
-                        if (newSet.has(index)) {
-                          newSet.delete(index);
-                        } else {
-                          newSet.add(index);
-                        }
-                        return newSet;
-                      });
-                    };
-
-                    return (
-                      <tr
-                        key={index}
-                        className="border-b border-hubble-border hover:bg-hubble-dark/50 transition-colors"
-                      >
-                        <td className="px-4 py-2 text-secondary">
-                          <span className="px-2 py-1 bg-hubble-accent/20 text-hubble-accent rounded text-xs">
-                            {syscall.arch}
-                          </span>
-                        </td>
-                        <td className="px-4 py-2 text-secondary">
-                          <div className="flex flex-wrap gap-1">
-                            {displayedSyscalls.map((sc, i) => (
-                              <span key={i} className="px-2 py-1 bg-hubble-warning/20 text-hubble-warning rounded text-xs font-mono">
-                                {sc.trim()}
-                              </span>
-                            ))}
-                            {syscallList.length > 10 && (
-                              <button
-                                onClick={toggleExpanded}
-                                className="px-2 py-1 bg-hubble-card border border-hubble-border text-secondary rounded text-xs hover:bg-hubble-dark
-                                           transition-colors cursor-pointer"
-                              >
-                                {isExpanded
-                                  ? 'Show less'
-                                  : `+${syscallList.length - 10} more`
-                                }
-                              </button>
-                            )}
-                          </div>
-                        </td>
-                        <td className="px-4 py-2 text-tertiary text-xs font-mono tabular-nums whitespace-nowrap">
-                          {new Date(syscall.time_stamp).toLocaleString()}
-                        </td>
-                      </tr>
-                    );
-                  })}
-                </tbody>
-              </table>
-            </div>
-          </div>
+          className="w-full text-md font-semibold text-primary mb-3 flex items-center gap-2 hover:text-hubble-accent transition-colors"
+        >
+          {isSyscallsExpanded ? (
+            <ChevronDown className="w-4 h-4 text-hubble-warning" />
+          ) : (
+            <ChevronRight className="w-4 h-4 text-hubble-warning" />
           )}
+          <Activity className="w-4 h-4 text-hubble-warning" />
+          System Calls
+        </button>
+
+        {isSyscallsExpanded && !hasSyscalls && (
+          <div className="bg-hubble-card rounded-surface border border-hubble-border">
+            <EmptyState
+              icon={Activity}
+              title="No syscalls recorded"
+              description="Syscall capture has not reported for this workload yet. Start a capture from the Seccomp Profiles view to collect them."
+              compact
+            />
+          </div>
+        )}
+
+        {isSyscallsExpanded && hasSyscalls && (
+          <div className="bg-hubble-card rounded-surface border border-hubble-border overflow-hidden">
+          <div className="overflow-x-auto">
+            <table className="w-full text-sm">
+              <thead className="sticky top-0 z-10 bg-hubble-dark border-b border-hubble-border">
+                <tr className="text-left text-xs font-medium text-tertiary uppercase tracking-wide">
+                  <th className="px-4 py-2">Architecture</th>
+                  <th className="px-4 py-2">Syscalls</th>
+                  <th className="px-4 py-2">Timestamp</th>
+                </tr>
+              </thead>
+              <tbody>
+                {selectedPod.syscalls?.map((syscall, index) => {
+                  // Sorted + de-duplicated: capture emits in observation
+                  // order, which varies between pods and refreshes; the
+                  // collapsed 10-chip preview must show a stable prefix.
+                  const syscallList = displaySyscallList(syscall.syscalls);
+                  const isExpanded = expandedSyscalls.has(index);
+                  const displayedSyscalls = isExpanded ? syscallList : syscallList.slice(0, 10);
+
+                  const toggleExpanded = () => {
+                    setExpandedSyscalls(prev => {
+                      const newSet = new Set(prev);
+                      if (newSet.has(index)) {
+                        newSet.delete(index);
+                      } else {
+                        newSet.add(index);
+                      }
+                      return newSet;
+                    });
+                  };
+
+                  return (
+                    <tr
+                      key={index}
+                      className="border-b border-hubble-border hover:bg-hubble-dark/50 transition-colors"
+                    >
+                      <td className="px-4 py-2 text-secondary">
+                        <span className="px-2 py-1 bg-hubble-accent/20 text-hubble-accent rounded text-xs">
+                          {syscall.arch}
+                        </span>
+                      </td>
+                      <td className="px-4 py-2 text-secondary">
+                        <div className="flex flex-wrap gap-1">
+                          {displayedSyscalls.map((sc, i) => (
+                            <span key={i} className="px-2 py-1 bg-hubble-warning/20 text-hubble-warning rounded text-xs font-mono">
+                              {sc.trim()}
+                            </span>
+                          ))}
+                          {syscallList.length > 10 && (
+                            <button
+                              onClick={toggleExpanded}
+                              className="px-2 py-1 bg-hubble-card border border-hubble-border text-secondary rounded text-xs hover:bg-hubble-dark
+                                         transition-colors cursor-pointer"
+                            >
+                              {isExpanded
+                                ? 'Show less'
+                                : `+${syscallList.length - 10} more`
+                              }
+                            </button>
+                          )}
+                        </div>
+                      </td>
+                      <td className="px-4 py-2 text-tertiary text-xs font-mono tabular-nums whitespace-nowrap">
+                        {new Date(syscall.time_stamp).toLocaleString()}
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
         </div>
-      )}
+        )}
+      </div>
     </div>
   );
 };

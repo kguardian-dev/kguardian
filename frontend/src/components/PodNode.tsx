@@ -1,6 +1,6 @@
 import React from 'react';
 import { Handle, Position } from 'reactflow';
-import { Network, Server, Globe, FileCode, Cpu, MemoryStick, Zap, Gauge } from 'lucide-react';
+import { Network, Server, Globe, FileCode, Cpu, MemoryStick, Zap, Gauge, ShieldAlert } from 'lucide-react';
 import { isDaemonSetOrHostNetworkPod } from '../utils/daemonSetPeers';
 import type { PodNodeData } from '../types';
 import type { PodComputeData } from '../types/compute';
@@ -156,6 +156,16 @@ const ComputeDetail: React.FC<{ compute: PodComputeData }> = ({ compute }) => {
 
 const PodNode: React.FC<PodNodeProps> = React.memo(({ data, selected }) => {
   const trafficCount = data.traffic?.length || 0;
+  // Denied flows, counted on the card itself. The namespace total is in the
+  // summary panel and the individual flows are red edges, but neither answers
+  // "which workload is being denied" without tracing the graph by eye — and a
+  // denial is the signal this tool exists to surface. Counted here rather than
+  // threaded down as a prop so it cannot drift from the rows the card holds.
+  const deniedCount = data.traffic?.reduce(
+    (total, t) => total + (t.decision?.toUpperCase() === 'DROP' ? 1 : 0),
+    0,
+  ) || 0;
+  const deniedLabel = `${deniedCount} denied flow${deniedCount !== 1 ? 's' : ''}`;
   const identityName = data.label || data.pod.pod_identity || data.pod.pod_name;
   const podCount = data.pods?.length || 1;
   const isExternal = data.isExternal ?? false;
@@ -229,6 +239,19 @@ const PodNode: React.FC<PodNodeProps> = React.memo(({ data, selected }) => {
               <div className="font-semibold text-sm text-primary truncate" title={data.tooltip ?? identityName}>
                 {identityName}
               </div>
+              {/* Icon AND number, not colour alone: the badge has to survive a
+                  red/green colour deficiency and a screenshot in greyscale. */}
+              {deniedCount > 0 && (
+                <span
+                  className="shrink-0 inline-flex items-center gap-0.5 rounded-full bg-hubble-error/15 text-hubble-error text-[10px] font-semibold px-1.5 py-0.5 tabular-nums"
+                  title={deniedLabel}
+                  aria-label={deniedLabel}
+                  data-testid="denied-badge"
+                >
+                  <ShieldAlert className="w-3 h-3" aria-hidden="true" />
+                  {deniedCount}
+                </span>
+              )}
             </div>
             {data.externalNamespace && !AGGREGATE_NAMESPACES.has(data.externalNamespace) && (
               <div className="text-xs text-tertiary truncate" title={data.externalNamespace}>
