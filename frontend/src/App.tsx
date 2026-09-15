@@ -17,6 +17,7 @@ import { findingAction, policyTypeForFinding, type FindingKind } from './utils/f
 import { recommendedPolicyType } from './utils/cniPolicySupport';
 import type { PolicyType } from './hooks/policyEditor';
 import { useCluster } from './contexts/ClusterContext';
+import { paramsForSelection } from './utils/mapSelection';
 
 // Heavy surfaces — lazy so they stay out of the initial bundle and only load
 // when first opened (the NetworkPolicyEditor alone is ~2k lines).
@@ -123,9 +124,17 @@ function App() {
     () => (selectedPodId ? pods.find((p) => p.id === selectedPodId) ?? null : null),
     [pods, selectedPodId],
   );
+  // Selecting a card focuses it as well as opening it: one click means "show
+  // me this workload", and the map isolates it with its direct peers.
+  //
+  // Focus stays a SEPARATE url param rather than being folded into `pod`,
+  // because the two are not the same question and the escape hatch depends on
+  // it: Esc (NetworkGraph) drops the focus and leaves the card open, so you
+  // get the whole map back without losing what you were reading. Folding them
+  // together would make Esc either close the card or do nothing.
   const selectPod = useCallback(
-    (pod: PodNodeData | null) => navigate('map', { ns: loc.params.ns, pod: pod?.id, focus: loc.params.focus }, { replace: true }),
-    [navigate, loc.params.ns, loc.params.focus],
+    (pod: PodNodeData | null) => navigate('map', paramsForSelection(pod?.id, loc.params.ns), { replace: true }),
+    [navigate, loc.params.ns],
   );
 
   // Graph focus mode is URL state (`?focus=<node id>`) so a focused view can
@@ -478,10 +487,19 @@ function App() {
             </div>
 
             {/* Collapsible Bottom Panel: Resize Handle + Data Table */}
+            {/* The panel takes its CONTENT's height, capped at `tableHeight`,
+                rather than always standing at the cap. With every section
+                collapsed that is three header rows, and the map keeps the
+                rest — which is the point of not repeating the workload's
+                identity down here. Opening a section grows the panel back to
+                the cap and scrolls inside it. `maxHeight` rather than
+                `height` because a height transition cannot animate to
+                `auto`. Dragging the handle sets the cap, so it still bounds
+                the panel at its tallest and no longer pins it there. */}
             <div
               className="overflow-hidden transition-all duration-300 ease-in-out"
               style={{
-                height: selectedPod ? `${tableHeight + 4}px` : '0px',
+                maxHeight: selectedPod ? `${tableHeight + 4}px` : '0px',
                 opacity: selectedPod ? 1 : 0,
               }}
             >
@@ -503,8 +521,8 @@ function App() {
 
               {/* Data Table */}
               <div
-                className="border-t border-hubble-border bg-hubble-dark overflow-hidden"
-                style={{ height: `${tableHeight}px` }}
+                className="border-t border-hubble-border bg-hubble-dark overflow-auto"
+                style={{ maxHeight: `${tableHeight}px` }}
               >
                 <DataTable selectedPod={selectedPod} allPodsLookup={allPodsLookup} services={services} />
               </div>

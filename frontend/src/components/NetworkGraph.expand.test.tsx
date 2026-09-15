@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, beforeAll, expect, test, vi } from 'vitest';
-import { cleanup, render, waitFor } from '@testing-library/react';
+import { cleanup, fireEvent, render, waitFor } from '@testing-library/react';
 import NetworkGraph from './NetworkGraph';
 import { NODE_HEIGHT_EXPANDED } from '../utils/compute';
 import type { PodInfo, PodNodeData } from '../types';
@@ -55,7 +55,7 @@ const node = (id: string, flows: number): PodNodeData =>
 
 const pods = [node('api', 3), node('worker', 1)];
 
-const graph = (selectedPodId: string | null) => (
+const graph = (selectedPodId: string | null, onPodSelect: (p: PodNodeData | null) => void = () => {}) => (
   <NetworkGraph
     pods={pods}
     allPodsLookup={pods.map((p) => p.pod)}
@@ -68,9 +68,63 @@ const graph = (selectedPodId: string | null) => (
     onToggleTraffic={() => {}}
     layoutDirection="LR"
     onToggleLayoutDirection={() => {}}
-    onPodSelect={() => {}}
+    onPodSelect={onPodSelect}
     selectedPodId={selectedPodId}
     focusedNodeId={null}
+    onFocusChange={() => {}}
+  />
+);
+
+// Focus fixture. `api` egresses to `cache` carrying a STORED peer identity
+// (`peer_kind`/`peer_name`), which is the path peer resolution takes before
+// it ever looks at an IP — so this produces a genuine edge between two local
+// nodes. `db` is unconnected.
+//
+// Three nodes is the minimum that can distinguish the two outcomes: with two,
+// "isolated to the neighbourhood" and "drew the whole map" render identically,
+// which is how the previous version of this test passed while describing
+// behaviour that blanked the map.
+const flow = (type: 'EGRESS' | 'INGRESS', peerName: string, ip: string) => ({
+  traffic_in_out_ip: ip,
+  traffic_type: type,
+  peer_kind: 'pod',
+  peer_name: peerName,
+  peer_namespace: 'payments',
+  time_stamp: 't',
+});
+
+const focusPod = (name: string, traffic: unknown[]): PodNodeData =>
+  ({ id: name, label: name, pod: pod(name), pods: [pod(name)], traffic }) as unknown as PodNodeData;
+
+// Every workload needs at least one flow: with the Traffic view on, `keepOnMap`
+// drops a local pod that has neither traffic nor compute gauges, so a pod with
+// an empty `traffic` array never reaches the map to be isolated away.
+//
+// `db`'s peer names a workload that is not in the namespace listing, so it
+// resolves to a placeholder and draws no edge — an unconnected card that is
+// still on the map, which is exactly what focus has to remove.
+const focusPods = [
+  focusPod('api', [flow('EGRESS', 'cache', '10.0.0.2')]),
+  focusPod('cache', [flow('INGRESS', 'api', '10.0.0.1')]),
+  focusPod('db', [flow('EGRESS', 'ghost', '10.0.0.9')]),
+];
+
+const graphFocused = (focusedNodeId: string | null, showTraffic: boolean) => (
+  <NetworkGraph
+    pods={focusPods}
+    allPodsLookup={focusPods.map((p) => p.pod)}
+    services={[]}
+    showExternalNodes={false}
+    onToggleExternalNodes={() => {}}
+    showDaemonSetNodes={false}
+    onToggleDaemonSetNodes={() => {}}
+    showTraffic={showTraffic}
+    onToggleTraffic={() => {}}
+    layoutDirection="LR"
+    onToggleLayoutDirection={() => {}}
+    onPodSelect={() => {}}
+    selectedPodId={focusedNodeId}
+    focusedNodeId={focusedNodeId}
     onFocusChange={() => {}}
   />
 );
@@ -160,4 +214,58 @@ test('selection re-runs layout, and the swap is one net change', async () => {
   // `worker` open equals the total with `api` open.
   expect([...lastReservedHeights().values()].reduce((a, b) => a + b, 0)).toBe(totalOneOpen);
   expect(totalOneOpen).toBe(totalShut + NODE_HEIGHT_EXPANDED);
+});
+
+// Selecting a card focuses it as well as opening it. There is no focus
+// control on the card any more: the crosshair was a third target on a card
+// that already had two, and it let "selected" and "focused" drift apart.
+test('there is no focus control on a card', async () => {
+  const { container } = render(graph(null));
+  await laidOut(container);
+  expect(container.querySelector('[aria-label="Focus on connections"]')).toBeNull();
+  expect(container.querySelector('[aria-label="Exit focus"]')).toBeNull();
+});
+
+// Focus isolates the node and its direct peers.
+test('focusing a card isolates it to its neighbourhood', async () => {
+  const { container } = render(graphFocused('api', true));
+  await waitFor(() => expect(container.querySelectorAll('.react-flow__node').length).toBe(2));
+  expect(container.textContent).toMatch(/api/);
+  expect(container.textContent).toMatch(/cache/);
+  // The unconnected workload is the one that has to disappear; without a
+  // third node there is nothing here that isolation could remove.
+  expect(container.textContent).not.toMatch(/db/);
+  expect(container.textContent).toMatch(/Focused on/);
+});
+
+// The guard. Selection focuses, and selection is now an ordinary click, so
+// focus must never be the thing that empties the screen. `allEdges` is empty
+// whenever the Traffic toggle is off, and a workload whose flows are all
+// unattributed draws no edges even with it on — so a neighbourhood of one is
+// reachable in a normal cluster, not a corner case.
+test('focusing a card with no peers leaves the whole map drawn', async () => {
+  const { container } = render(graphFocused('api', false));
+  await waitFor(() => expect(container.querySelectorAll('.react-flow__node').length).toBe(3));
+  // And the pill must not claim an isolation that did not happen.
+  expect(container.textContent).not.toMatch(/Focused on/);
+});
+
+// Selection is the only expander since the chevron went, so it has to be able
+// to shut a card as well as open one. Without this, a click on the card you
+// already have open does nothing at all, and the only ways out both drop the
+// focus as a side effect.
+test('clicking the open card closes it, and clicking another moves the selection', async () => {
+  const onPodSelect = vi.fn();
+  const { container } = render(graph('api', onPodSelect));
+  await laidOut(container);
+
+  const nodeEl = (id: string) => container.querySelector(`.react-flow__node[data-id="${id}"]`)!;
+
+  fireEvent.click(nodeEl('api'));
+  expect(onPodSelect).toHaveBeenCalledWith(null);
+
+  onPodSelect.mockClear();
+  fireEvent.click(nodeEl('worker'));
+  expect(onPodSelect).toHaveBeenCalledTimes(1);
+  expect(onPodSelect.mock.calls[0][0]).toMatchObject({ id: 'worker' });
 });

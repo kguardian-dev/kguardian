@@ -109,10 +109,6 @@ const NetworkGraphInner: React.FC<NetworkGraphProps> = ({
   // and re-lay-out the subset. Toggling the same node (or Esc / the pill) exits.
   // The focused id lives in the URL hash (see App) so the view is shareable.
   const setFocusedNodeId = onFocusChange;
-  const onFocus = useCallback(
-    (id: string) => onFocusChange(focusedNodeId === id ? null : id),
-    [onFocusChange, focusedNodeId],
-  );
 
   // Peer attribution per traffic ROW (utils/peerResolution): the row's
   // stored peer_* identity first, else a by-IP lookup guarded by the flow
@@ -292,13 +288,11 @@ const NetworkGraphInner: React.FC<NetworkGraphProps> = ({
           // than read — nothing else may open a card.
           isExpanded: pod.id === selectedPodId,
           onBuildPolicy: isExternal ? undefined : onBuildPolicy,
-          onFocus,
-          isFocused: pod.id === focusedNodeId,
         },
         selected: pod.id === selectedPodId,
       };
     });
-  }, [allDisplayPods, selectedPodId, onBuildPolicy, layoutDirection, onFocus, focusedNodeId]);
+  }, [allDisplayPods, selectedPodId, onBuildPolicy, layoutDirection]);
 
   // Track ELK-computed node positions
   const [elkPositions, setElkPositions] = useState<Map<string, { x: number; y: number }>>(new Map());
@@ -495,6 +489,13 @@ const NetworkGraphInner: React.FC<NetworkGraphProps> = ({
       if (e.source === focusedNodeId) ids.add(e.target);
       if (e.target === focusedNodeId) ids.add(e.source);
     }
+    // A neighborhood of one is not a neighborhood, and isolating to it would
+    // blank the map on an ordinary click. `allEdges` is empty whenever the
+    // Traffic toggle is off, and a workload whose flows are all unattributed
+    // (recycled peer IPs, no stored identity) draws no edges even with it on
+    // — so this is reachable in a normal cluster, not a corner case. Selection
+    // focuses; it must never be the thing that empties the screen.
+    if (ids.size < 2) return null;
     return ids;
   }, [focusedNodeId, allEdges]);
 
@@ -710,7 +711,9 @@ const NetworkGraphInner: React.FC<NetworkGraphProps> = ({
       pendingIntent.current = null;
       if (!intent) return;
       if (intent.kind === 'refit') {
-        fitView({ padding: 0.2, duration: UI_TIMING.FIT_VIEW_DURATION });
+        // `maxZoom` because focus can cut the graph down to two or three
+        // cards, and an uncapped fit scales those up to fill the pane.
+        fitView({ padding: 0.2, maxZoom: 1, duration: UI_TIMING.FIT_VIEW_DURATION });
         return;
       }
       if (!intent.toggledId) return;
@@ -737,10 +740,18 @@ const NetworkGraphInner: React.FC<NetworkGraphProps> = ({
 
   const onNodeClick = useCallback(
     (_event: React.MouseEvent, node: Node) => {
+      // Clicking the open card closes it. Selection is the only expander
+      // since the chevron went, so without this there is no way to shut a
+      // card short of clicking empty canvas, and a click on the card you
+      // already have open does nothing at all.
+      if (node.id === selectedPodId) {
+        onPodSelect(null);
+        return;
+      }
       const pod = allDisplayPods.find((p) => p.id === node.id);
       onPodSelect(pod || null);
     },
-    [allDisplayPods, onPodSelect]
+    [allDisplayPods, onPodSelect, selectedPodId]
   );
 
   const onPaneClick = useCallback(() => {
@@ -782,7 +793,7 @@ const NetworkGraphInner: React.FC<NetworkGraphProps> = ({
         <Controls className="bg-hubble-card border-hubble-border" />
 
         {/* Focus pill — shown while a node's neighborhood is isolated */}
-        {focusedNodeId && (
+        {focusedNodeId && focusNeighborhood && (
           <Panel position="top-center">
             <div className="flex items-center gap-2 pl-3 pr-1.5 py-1.5 rounded-full bg-hubble-accent/15 border border-hubble-accent/40 backdrop-blur-sm text-xs">
               <Crosshair className="w-3.5 h-3.5 text-hubble-accent shrink-0" />

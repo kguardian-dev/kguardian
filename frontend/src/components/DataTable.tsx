@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo, useCallback } from 'react';
+import React, { useState, useMemo, useCallback } from 'react';
 import type { NetworkTraffic, PodInfo, PodNodeData, ServiceInfo } from '../types';
 import { ArrowRight, Activity, ChevronDown, ChevronRight, Filter, MousePointerClick, Inbox, Cpu } from 'lucide-react';
 import { EmptyState } from './ui/EmptyState';
@@ -49,9 +49,18 @@ const TRAFFIC_PROFILE_MAX = 8;
 
 const DataTable: React.FC<DataTableProps> = ({ selectedPod, allPodsLookup, services }) => {
   const [expandedSyscalls, setExpandedSyscalls] = useState<Set<number>>(new Set());
-  const [isTrafficExpanded, setIsTrafficExpanded] = useState(true);
-  const [isSyscallsExpanded, setIsSyscallsExpanded] = useState(true);
-  const [isComputeExpanded, setIsComputeExpanded] = useState(true);
+  // Every section starts collapsed. The panel shares the screen with the map
+  // and a selection now focuses the graph as well as opening the card, so the
+  // useful default is the three section headers and nothing else: the reader
+  // opens the one they came for. Expanded-by-default meant a selection pushed
+  // the map off screen on the way to a table nobody had asked for yet.
+  const [isTrafficExpanded, setIsTrafficExpanded] = useState(false);
+  const [isSyscallsExpanded, setIsSyscallsExpanded] = useState(false);
+  const [isComputeExpanded, setIsComputeExpanded] = useState(false);
+  // External nodes get a fourth block. It collapses like the rest: an
+  // always-open grid of up to eight port cards above three shut headers would
+  // be the one thing the panel still opened with.
+  const [isProfileExpanded, setIsProfileExpanded] = useState(false);
 
   // Helper function to render identity with pod name or service name
   const renderIdentity = (identity: TrafficIdentity, ip: string | null | undefined, port: string | null) => {
@@ -254,17 +263,33 @@ const DataTable: React.FC<DataTableProps> = ({ selectedPod, allPodsLookup, servi
       .sort((a, b) => a[1].localeCompare(b[1]));
   }, [selectedPod]);
 
-  // Reset expanded state, filters, and pagination when pod changes
-  useEffect(() => {
-    /* eslint-disable react-hooks/set-state-in-effect */
+  // Sections close again with the new selection: a section left open from the
+  // previous workload would show that one's data under this one's name, and
+  // closing re-answers "which section did I want" per workload rather than
+  // carrying one choice across all of them.
+  //
+  // This resets DURING RENDER rather than in an effect, and that is the whole
+  // point of it. An effect runs after paint, so the new workload's rows get
+  // painted once inside the previous workload's open section before snapping
+  // shut — precisely the frame this reset exists to prevent. React re-renders
+  // immediately when a component sets its own state while rendering, so the
+  // browser never sees the stale combination. Testing-library flushes effects
+  // inside `act()` before any assertion, which is why the effect version
+  // looked correct under test and flashed in the browser.
+  const [lastPodId, setLastPodId] = useState(selectedPod?.id);
+  if (selectedPod?.id !== lastPodId) {
+    setLastPodId(selectedPod?.id);
+    setIsTrafficExpanded(false);
+    setIsSyscallsExpanded(false);
+    setIsComputeExpanded(false);
+    setIsProfileExpanded(false);
     setExpandedSyscalls(new Set());
     setDecisionFilter('all');
     setTrafficTypeFilter('all');
     setProtocolFilter('all');
     setPortFilter('all');
     setTrafficPage(0);
-    /* eslint-enable react-hooks/set-state-in-effect */
-  }, [selectedPod?.id]);
+  }
   // Memoize expensive calculations
   const hasTraffic = useMemo(
     () => selectedPod?.traffic && selectedPod.traffic.length > 0,
@@ -273,11 +298,6 @@ const DataTable: React.FC<DataTableProps> = ({ selectedPod, allPodsLookup, servi
 
   const hasSyscalls = useMemo(
     () => selectedPod?.syscalls && selectedPod.syscalls.length > 0,
-    [selectedPod]
-  );
-
-  const identityName = useMemo(
-    () => selectedPod?.label || selectedPod?.pod.pod_identity || selectedPod?.pod.pod_name || '',
     [selectedPod]
   );
 
@@ -363,7 +383,7 @@ const DataTable: React.FC<DataTableProps> = ({ selectedPod, allPodsLookup, servi
 
   if (!selectedPod) {
     return (
-      <div className="h-full flex items-center justify-center">
+      <div className="py-8 flex items-center justify-center">
         <EmptyState
           icon={MousePointerClick}
           title="No workload selected"
@@ -375,39 +395,35 @@ const DataTable: React.FC<DataTableProps> = ({ selectedPod, allPodsLookup, servi
   }
 
   return (
-    <div className="h-full overflow-auto p-4 space-y-4">
-      {/* Identity Information Header */}
-      <div className="bg-hubble-card p-4 rounded-surface border border-hubble-border">
-        <h3 className="text-lg font-semibold text-primary mb-2">
-          {identityName}
-        </h3>
-        <div className="text-sm space-y-2">
-          {selectedPod.externalNamespace !== 'internet' && (
-            <div>
-              <span className="text-tertiary">Namespace:</span>
-              <span className="ml-2 text-secondary">{selectedPod.pod.pod_namespace || 'default'}</span>
-            </div>
-          )}
-          {selectedPod.pods && selectedPod.pods.length > 0 && (
-            <div>
-              <span className="text-tertiary">{selectedPod.isExternal ? (selectedPod.externalNamespace === 'internet' ? 'IPs' : 'Pods') : 'Replicas'} ({selectedPod.pods.length}):</span>
-              <div className="ml-2 mt-1 flex flex-wrap gap-2">
-                {selectedPod.pods.map((pod) => (
-                  <span key={pod.pod_name} className="px-2 py-1 bg-hubble-dark text-secondary font-mono text-xs rounded border border-hubble-border">
-                    {pod.pod_name}
-                  </span>
-                ))}
-              </div>
-            </div>
-          )}
-        </div>
-      </div>
+    <div className="p-4 space-y-4">
+      {/* No identity header. It cost a fixed block of vertical space at the
+          top of a surface whose whole job is the three sections below, and
+          the panel is opened by selecting a card that is right there on the
+          map and highlighted as selected.
+          Note the card does NOT repeat all of it: `ns:` renders only for
+          external peers (PodNode gates it on `externalNamespace`) and
+          replicas show as a count, not a list. Losing the namespace of a
+          local workload from this surface is a deliberate trade for the
+          space, not a duplicate being removed. */}
 
       {/* Traffic Profile Summary (external nodes only) */}
       {selectedPod.isExternal && trafficAggregation && trafficAggregation.length > 0 && (
         <div>
-          <h4 className="text-md font-semibold text-primary mb-1">Traffic Profile</h4>
-          <p className="text-xs text-tertiary mb-3">(grouped by port/protocol)</p>
+          <button
+            onClick={() => setIsProfileExpanded(!isProfileExpanded)}
+            aria-expanded={isProfileExpanded}
+            className="w-full text-md font-semibold text-primary mb-3 flex items-center gap-2 hover:text-hubble-accent transition-colors"
+          >
+            {isProfileExpanded ? (
+              <ChevronDown className="w-4 h-4 text-hubble-accent" />
+            ) : (
+              <ChevronRight className="w-4 h-4 text-hubble-accent" />
+            )}
+            Traffic Profile ({trafficAggregation.length})
+            <span className="text-xs text-tertiary font-normal">(grouped by port/protocol)</span>
+          </button>
+
+          {isProfileExpanded && (
           <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-2">
             {trafficAggregation.slice(0, TRAFFIC_PROFILE_MAX).map((entry) => (
               <div
@@ -428,7 +444,8 @@ const DataTable: React.FC<DataTableProps> = ({ selectedPod, allPodsLookup, servi
               </div>
             ))}
           </div>
-          {trafficAggregation.length > TRAFFIC_PROFILE_MAX && (
+          )}
+          {isProfileExpanded && trafficAggregation.length > TRAFFIC_PROFILE_MAX && (
             <p className="text-xs text-tertiary mt-2">
               +{trafficAggregation.length - TRAFFIC_PROFILE_MAX} more port groups
             </p>
@@ -440,6 +457,7 @@ const DataTable: React.FC<DataTableProps> = ({ selectedPod, allPodsLookup, servi
       <div>
         <button
           onClick={() => setIsTrafficExpanded(!isTrafficExpanded)}
+          aria-expanded={isTrafficExpanded}
           className="w-full text-md font-semibold text-primary mb-3 flex items-center gap-2 hover:text-hubble-accent transition-colors"
         >
           {isTrafficExpanded ? (
@@ -769,6 +787,7 @@ const DataTable: React.FC<DataTableProps> = ({ selectedPod, allPodsLookup, servi
         <div data-testid="compute-section">
           <button
             onClick={() => setIsComputeExpanded(!isComputeExpanded)}
+          aria-expanded={isComputeExpanded}
             className="w-full text-md font-semibold text-primary mb-3 flex items-center gap-2 hover:text-hubble-accent transition-colors"
           >
             {isComputeExpanded ? (
@@ -905,6 +924,7 @@ const DataTable: React.FC<DataTableProps> = ({ selectedPod, allPodsLookup, servi
         <div>
           <button
             onClick={() => setIsSyscallsExpanded(!isSyscallsExpanded)}
+          aria-expanded={isSyscallsExpanded}
             className="w-full text-md font-semibold text-primary mb-3 flex items-center gap-2 hover:text-hubble-accent transition-colors"
           >
             {isSyscallsExpanded ? (
