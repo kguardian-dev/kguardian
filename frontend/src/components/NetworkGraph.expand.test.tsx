@@ -75,6 +75,26 @@ const graph = (selectedPodId: string | null) => (
   />
 );
 
+const graphFocused = (focusedNodeId: string | null) => (
+  <NetworkGraph
+    pods={pods}
+    allPodsLookup={pods.map((p) => p.pod)}
+    services={[]}
+    showExternalNodes={false}
+    onToggleExternalNodes={() => {}}
+    showDaemonSetNodes={false}
+    onToggleDaemonSetNodes={() => {}}
+    showTraffic={false}
+    onToggleTraffic={() => {}}
+    layoutDirection="LR"
+    onToggleLayoutDirection={() => {}}
+    onPodSelect={() => {}}
+    selectedPodId={focusedNodeId}
+    focusedNodeId={focusedNodeId}
+    onFocusChange={() => {}}
+  />
+);
+
 /** The heights ELK was last asked to reserve, by node id. */
 const lastReservedHeights = () =>
   new Map(elkGraphs[elkGraphs.length - 1].children.map((c) => [c.id, c.height]));
@@ -160,4 +180,24 @@ test('selection re-runs layout, and the swap is one net change', async () => {
   // `worker` open equals the total with `api` open.
   expect([...lastReservedHeights().values()].reduce((a, b) => a + b, 0)).toBe(totalOneOpen);
   expect(totalOneOpen).toBe(totalShut + NODE_HEIGHT_EXPANDED);
+});
+
+// Selecting a card focuses it as well as opening it. There is no focus
+// control on the card any more: the crosshair was a third target on a card
+// that already had two, and it let "selected" and "focused" drift apart.
+test('there is no focus control on a card', async () => {
+  const { container } = render(graph(null));
+  await laidOut(container);
+  expect(container.querySelector('[aria-label="Focus on connections"]')).toBeNull();
+  expect(container.querySelector('[aria-label="Exit focus"]')).toBeNull();
+});
+
+// Focus isolates the node and its direct peers. With `showTraffic` off these
+// two cards have no edges between them, so focusing one hides the other
+// entirely — which is the whole point of the mode.
+test('a focused card is the only one drawn when it has no peers', async () => {
+  const { container } = render(graphFocused('api'));
+  await waitFor(() => expect(container.querySelectorAll('.react-flow__node').length).toBe(1));
+  expect(container.textContent).toMatch(/api/);
+  expect(container.textContent).not.toMatch(/worker/);
 });

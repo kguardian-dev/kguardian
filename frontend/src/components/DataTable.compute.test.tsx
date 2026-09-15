@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, expect, test } from 'vitest';
-import { cleanup, render } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen } from '@testing-library/react';
 import DataTable from './DataTable';
 import type { PodInfo, PodNodeData } from '../types';
 import type { ComputeBlame, ComputeContainer, PodComputeData } from '../types/compute';
@@ -27,6 +27,9 @@ const selected: PodNodeData = { id: 'payments-api', label: 'api', pod, pods: [po
 
 test('blame share is computed over the full blame list, and only the top 10 rows are shown', () => {
   const { container: root } = render(<DataTable selectedPod={selected} allPodsLookup={[pod]} services={[]} />);
+  // Sections start collapsed, so the panel opens on three headers and nothing
+  // else. Open Compute the way a reader does.
+  fireEvent.click(screen.getByRole('button', { name: /^Compute \(/ }));
   const table = root.querySelector('[data-testid="compute-blame"]')!;
   const rows = [...table.querySelectorAll('tbody tr')];
   expect(rows).toHaveLength(10);

@@ -109,10 +109,6 @@ const NetworkGraphInner: React.FC<NetworkGraphProps> = ({
   // and re-lay-out the subset. Toggling the same node (or Esc / the pill) exits.
   // The focused id lives in the URL hash (see App) so the view is shareable.
   const setFocusedNodeId = onFocusChange;
-  const onFocus = useCallback(
-    (id: string) => onFocusChange(focusedNodeId === id ? null : id),
-    [onFocusChange, focusedNodeId],
-  );
 
   // Peer attribution per traffic ROW (utils/peerResolution): the row's
   // stored peer_* identity first, else a by-IP lookup guarded by the flow
@@ -292,13 +288,11 @@ const NetworkGraphInner: React.FC<NetworkGraphProps> = ({
           // than read — nothing else may open a card.
           isExpanded: pod.id === selectedPodId,
           onBuildPolicy: isExternal ? undefined : onBuildPolicy,
-          onFocus,
-          isFocused: pod.id === focusedNodeId,
         },
         selected: pod.id === selectedPodId,
       };
     });
-  }, [allDisplayPods, selectedPodId, onBuildPolicy, layoutDirection, onFocus, focusedNodeId]);
+  }, [allDisplayPods, selectedPodId, onBuildPolicy, layoutDirection]);
 
   // Track ELK-computed node positions
   const [elkPositions, setElkPositions] = useState<Map<string, { x: number; y: number }>>(new Map());

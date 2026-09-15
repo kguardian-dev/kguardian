@@ -1,6 +1,6 @@
 import React from 'react';
 import { Handle, Position } from 'reactflow';
-import { Network, Server, Globe, FileCode, Crosshair, Cpu, MemoryStick, Zap, Gauge } from 'lucide-react';
+import { Network, Server, Globe, FileCode, Cpu, MemoryStick, Zap, Gauge } from 'lucide-react';
 import { isDaemonSetOrHostNetworkPod } from '../utils/daemonSetPeers';
 import type { PodNodeData } from '../types';
 import type { PodComputeData } from '../types/compute';
@@ -25,8 +25,6 @@ interface PodNodeProps {
   data: PodNodeData & {
     layoutDirection?: 'LR' | 'TB';
     onBuildPolicy?: (pod: PodNodeData) => void;
-    onFocus?: (id: string) => void;
-    isFocused?: boolean;
   };
   selected?: boolean;
 }
@@ -247,20 +245,11 @@ const PodNode: React.FC<PodNodeProps> = React.memo(({ data, selected }) => {
           </div>
         </div>
 
-        {data.onFocus && (
-          <button
-            onClick={(e) => { e.stopPropagation(); data.onFocus?.(data.id); }}
-            className={`shrink-0 p-1 rounded transition-colors ${
-              data.isFocused
-                ? 'text-hubble-accent bg-hubble-accent/15'
-                : 'text-tertiary hover:text-primary hover:bg-hubble-hover'
-            }`}
-            title={data.isFocused ? 'Exit focus' : 'Focus on this node’s connections'}
-            aria-label={data.isFocused ? 'Exit focus' : 'Focus on connections'}
-          >
-            <Crosshair className="w-3.5 h-3.5" />
-          </button>
-        )}
+        {/* No focus control: selecting the card focuses it, the same click
+            that opens it. The crosshair that used to live here was a third
+            target on a card that already had two, and it let "selected" and
+            "focused" drift apart. Esc still drops the focus and leaves the
+            card open — see App's selectPod. */}
       </div>
 
       {data.isExpanded && (
@@ -316,7 +305,6 @@ const PodNode: React.FC<PodNodeProps> = React.memo(({ data, selected }) => {
   return (
     prevProps.data.id === nextProps.data.id &&
     prevProps.data.isExpanded === nextProps.data.isExpanded &&
-    prevProps.data.isFocused === nextProps.data.isFocused &&
     prevProps.selected === nextProps.selected &&
     prevProps.data.traffic?.length === nextProps.data.traffic?.length &&
     prevProps.data.syscalls?.length === nextProps.data.syscalls?.length &&
