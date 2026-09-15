@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.19.0](https://github.com/kguardian-dev/kguardian/compare/frontend/v1.18.0...frontend/v1.19.0) (2026-09-15)
+
+
+### Features
+
+* **frontend:** selecting a card focuses it, and the panel opens shut ([#1590](https://github.com/kguardian-dev/kguardian/issues/1590)) ([975055c](https://github.com/kguardian-dev/kguardian/commit/975055cc408c91b862e33f5e751b6aa3915ad15c))
+* **frontend:** show denied flows on the card, and keep the panel's three sections ([#1598](https://github.com/kguardian-dev/kguardian/issues/1598)) ([2b52b37](https://github.com/kguardian-dev/kguardian/commit/2b52b37e89ff7a0099ecf454ab8b499415fe0600))
+
 ## [1.18.0](https://github.com/kguardian-dev/kguardian/compare/frontend/v1.17.2...frontend/v1.18.0) (2026-09-14)
 
 
