@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo, useCallback } from 'react';
+import React, { useState, useMemo, useCallback } from 'react';
 import type { NetworkTraffic, PodInfo, PodNodeData, ServiceInfo } from '../types';
 import { ArrowRight, Activity, ChevronDown, ChevronRight, Filter, MousePointerClick, Inbox, Cpu } from 'lucide-react';
 import { EmptyState } from './ui/EmptyState';
@@ -263,13 +263,22 @@ const DataTable: React.FC<DataTableProps> = ({ selectedPod, allPodsLookup, servi
       .sort((a, b) => a[1].localeCompare(b[1]));
   }, [selectedPod]);
 
-  // Reset expanded state, filters, and pagination when pod changes
-  useEffect(() => {
-    /* eslint-disable react-hooks/set-state-in-effect */
-    // Sections close again with the new selection: a section left open from
-    // the previous workload would show that one's data under this one's name
-    // for a frame, and it re-answers "which section did I want" per workload
-    // rather than carrying one choice across all of them.
+  // Sections close again with the new selection: a section left open from the
+  // previous workload would show that one's data under this one's name, and
+  // closing re-answers "which section did I want" per workload rather than
+  // carrying one choice across all of them.
+  //
+  // This resets DURING RENDER rather than in an effect, and that is the whole
+  // point of it. An effect runs after paint, so the new workload's rows get
+  // painted once inside the previous workload's open section before snapping
+  // shut — precisely the frame this reset exists to prevent. React re-renders
+  // immediately when a component sets its own state while rendering, so the
+  // browser never sees the stale combination. Testing-library flushes effects
+  // inside `act()` before any assertion, which is why the effect version
+  // looked correct under test and flashed in the browser.
+  const [lastPodId, setLastPodId] = useState(selectedPod?.id);
+  if (selectedPod?.id !== lastPodId) {
+    setLastPodId(selectedPod?.id);
     setIsTrafficExpanded(false);
     setIsSyscallsExpanded(false);
     setIsComputeExpanded(false);
@@ -280,8 +289,7 @@ const DataTable: React.FC<DataTableProps> = ({ selectedPod, allPodsLookup, servi
     setProtocolFilter('all');
     setPortFilter('all');
     setTrafficPage(0);
-    /* eslint-enable react-hooks/set-state-in-effect */
-  }, [selectedPod?.id]);
+  }
   // Memoize expensive calculations
   const hasTraffic = useMemo(
     () => selectedPod?.traffic && selectedPod.traffic.length > 0,
@@ -375,7 +383,7 @@ const DataTable: React.FC<DataTableProps> = ({ selectedPod, allPodsLookup, servi
 
   if (!selectedPod) {
     return (
-      <div className="h-full flex items-center justify-center">
+      <div className="py-8 flex items-center justify-center">
         <EmptyState
           icon={MousePointerClick}
           title="No workload selected"
@@ -387,11 +395,16 @@ const DataTable: React.FC<DataTableProps> = ({ selectedPod, allPodsLookup, servi
   }
 
   return (
-    <div className="h-full overflow-auto p-4 space-y-4">
-      {/* No identity header. The name, namespace and replica list are all on
-          the card that is open on the map, and repeating them here cost the
-          panel a fixed block of vertical space on a surface whose whole job
-          is the three sections below. */}
+    <div className="p-4 space-y-4">
+      {/* No identity header. It cost a fixed block of vertical space at the
+          top of a surface whose whole job is the three sections below, and
+          the panel is opened by selecting a card that is right there on the
+          map and highlighted as selected.
+          Note the card does NOT repeat all of it: `ns:` renders only for
+          external peers (PodNode gates it on `externalNamespace`) and
+          replicas show as a count, not a list. Losing the namespace of a
+          local workload from this surface is a deliberate trade for the
+          space, not a duplicate being removed. */}
 
       {/* Traffic Profile Summary (external nodes only) */}
       {selectedPod.isExternal && trafficAggregation && trafficAggregation.length > 0 && (

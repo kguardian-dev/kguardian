@@ -104,12 +104,13 @@ test('an external node opens with its traffic profile shut as well', () => {
     externalNamespace: 'internet',
   } as Partial<PodNodeData>);
   render1(external);
-  const profile = screen.queryByRole('button', { name: /Traffic Profile/ });
-  if (profile) {
-    expect(profile.getAttribute('aria-expanded')).toBe('false');
-    fireEvent.click(profile);
-    expect(profile.getAttribute('aria-expanded')).toBe('true');
-  }
+  // Fetched unconditionally: a `queryByRole` guarded by `if (profile)` would
+  // silently degrade into a duplicate of the first test the day a fixture
+  // change stops rendering this block.
+  const profile = screen.getByRole('button', { name: /Traffic Profile/ });
+  expect(profile.getAttribute('aria-expanded')).toBe('false');
+  fireEvent.click(profile);
+  expect(profile.getAttribute('aria-expanded')).toBe('true');
   // The three always-present sections are shut regardless.
   for (const s of sections()) expect(s.getAttribute('aria-expanded')).toBe('false');
 });
@@ -117,10 +118,15 @@ test('an external node opens with its traffic profile shut as well', () => {
 test('the identity header is gone: no name, namespace or replica list', () => {
   const { container } = render1(selected());
   const text = container.textContent ?? '';
-  // The replica list was the tallest part of it: one chip per pod.
+  // Asserted on the VALUES in the fixture, not on the labels that used to sit
+  // beside them. An earlier version of this test checked for `Namespace:` and
+  // `Replicas`, which left the workload's name free to come back untouched and
+  // the namespace free to return under any other label — two of the three
+  // things the test names. `api` covers both the entity name and the replica
+  // names (`api-1`, `api-2`); `payments` is the namespace.
+  expect(text).not.toMatch(/api/);
+  expect(text).not.toMatch(/payments/);
+  // Nothing renders the old labels either.
   expect(text).not.toMatch(/Replicas/);
-  expect(text).not.toMatch(/Namespace:/);
-  // And the two replica names it listed are not rendered anywhere while the
-  // sections are shut.
-  expect(text).not.toMatch(/api-2/);
+  expect(text).not.toMatch(/Namespace/);
 });

@@ -487,10 +487,19 @@ function App() {
             </div>
 
             {/* Collapsible Bottom Panel: Resize Handle + Data Table */}
+            {/* The panel takes its CONTENT's height, capped at `tableHeight`,
+                rather than always standing at the cap. With every section
+                collapsed that is three header rows, and the map keeps the
+                rest — which is the point of not repeating the workload's
+                identity down here. Opening a section grows the panel back to
+                the cap and scrolls inside it. `maxHeight` rather than
+                `height` because a height transition cannot animate to
+                `auto`. Dragging the handle sets the cap, so it still bounds
+                the panel at its tallest and no longer pins it there. */}
             <div
               className="overflow-hidden transition-all duration-300 ease-in-out"
               style={{
-                height: selectedPod ? `${tableHeight + 4}px` : '0px',
+                maxHeight: selectedPod ? `${tableHeight + 4}px` : '0px',
                 opacity: selectedPod ? 1 : 0,
               }}
             >
@@ -512,8 +521,8 @@ function App() {
 
               {/* Data Table */}
               <div
-                className="border-t border-hubble-border bg-hubble-dark overflow-hidden"
-                style={{ height: `${tableHeight}px` }}
+                className="border-t border-hubble-border bg-hubble-dark overflow-auto"
+                style={{ maxHeight: `${tableHeight}px` }}
               >
                 <DataTable selectedPod={selectedPod} allPodsLookup={allPodsLookup} services={services} />
               </div>
