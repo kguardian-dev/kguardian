@@ -130,3 +130,36 @@ test('the identity header is gone: no name, namespace or replica list', () => {
   expect(text).not.toMatch(/Replicas/);
   expect(text).not.toMatch(/Namespace/);
 });
+
+// The panel is three fixed sections. Compute used to render only for a pod
+// with gauges and System Calls only for one with recorded syscalls, so the
+// panel's shape changed between selections and "this workload has none" was
+// indistinguishable from "this section does not exist".
+const bare = (): PodNodeData => ({
+  id: 'payments-bare', label: 'bare', pod, pods: [pod], traffic: [],
+  isExpanded: false,
+} as unknown as PodNodeData);
+
+test('a workload with no compute and no syscalls still shows all three sections', () => {
+  render1(bare());
+  const [traffic, compute, syscalls] = sections();
+  expect(traffic).toBeTruthy();
+  expect(compute).toBeTruthy();
+  expect(syscalls).toBeTruthy();
+  for (const s of [traffic, compute, syscalls]) expect(s.getAttribute('aria-expanded')).toBe('false');
+  // The count is still spelled out rather than the header being dropped.
+  expect(compute.textContent).toMatch(/0 containers/);
+});
+
+test('opening an empty section explains why it is empty', () => {
+  render1(bare());
+
+  fireEvent.click(screen.getByRole('button', { name: /^Compute \(/ }));
+  expect(screen.getByText(/No compute data for this workload/)).toBeTruthy();
+
+  fireEvent.click(screen.getByRole('button', { name: /System Calls/ }));
+  expect(screen.getByText(/No syscalls recorded/)).toBeTruthy();
+
+  fireEvent.click(screen.getByRole('button', { name: /Network Traffic/ }));
+  expect(screen.getByText(/No network traffic recorded/)).toBeTruthy();
+});
