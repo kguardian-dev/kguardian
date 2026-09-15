@@ -182,7 +182,7 @@ The following table lists the configurable parameters of the kguardian chart and
 | controller.image.pullPolicy | string | `"IfNotPresent"` | Controller image pull policy |
 | controller.image.repository | string | `"ghcr.io/kguardian-dev/kguardian/controller"` | Controller container image repository |
 | controller.image.sha | string | `""` | Overrides the image tag using SHA digest |
-| controller.image.tag | string | `"1.14.0"` | Controller version tag (auto-updated by release-please) |
+| controller.image.tag | string | `"1.15.0"` | Controller version tag (auto-updated by release-please) |
 | controller.imagePullSecrets | list | `[]` | List of image pull secrets for private registries |
 | controller.initContainer.image.pullPolicy | string | `"IfNotPresent"` | Init container image pull policy. `IfNotPresent`, not `Always`: this init container runs on every node, and `Always` forces a registry manifest request on every pod start even when the image is already cached locally. Those requests count against Docker Hub's anonymous pull limit, which is per source IP, so a NATed cluster shares one bucket across the whole fleet. A throttled pull leaves the init container in ImagePullBackOff and the agent never starts on that node, so its pods are never observed and the generated policy silently omits their rules. |
 | controller.initContainer.image.repository | string | `"busybox"` | Init container image repository |
