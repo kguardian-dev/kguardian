@@ -75,15 +75,20 @@ const graph = (selectedPodId: string | null, onPodSelect: (p: PodNodeData | null
   />
 );
 
-// Focus fixture. `api` egresses to `cache` carrying a STORED peer identity
-// (`peer_kind`/`peer_name`), which is the path peer resolution takes before
-// it ever looks at an IP — so this produces a genuine edge between two local
-// nodes. `db` is unconnected.
+// Focus fixture. Flows carry a STORED peer identity (`peer_kind`/`peer_name`),
+// which is the path peer resolution takes before it ever looks at an IP, so
+// these produce genuine edges between local nodes.
 //
-// Three nodes is the minimum that can distinguish the two outcomes: with two,
-// "isolated to the neighbourhood" and "drew the whole map" render identically,
-// which is how the previous version of this test passed while describing
-// behaviour that blanked the map.
+// The shape is deliberate. `api` is the focus target; `cache` and `db` are its
+// peers; `cache` ALSO talks to `db`, which is a peer-to-peer path that `api`
+// is not on; `lonely` touches none of them. That is the minimum that can tell
+// the three outcomes apart:
+//   - `lonely` disappearing proves focus isolates at all
+//   - the cache-to-db edge disappearing proves focus keeps only the paths the
+//     focused workload is an endpoint of
+//   - `cache` and `db` staying proves it did not over-filter
+// With a smaller graph these collapse into each other and a broken filter
+// still passes.
 const flow = (type: 'EGRESS' | 'INGRESS', peerName: string, ip: string) => ({
   traffic_in_out_ip: ip,
   traffic_type: type,
@@ -100,13 +105,14 @@ const focusPod = (name: string, traffic: unknown[]): PodNodeData =>
 // drops a local pod that has neither traffic nor compute gauges, so a pod with
 // an empty `traffic` array never reaches the map to be isolated away.
 //
-// `db`'s peer names a workload that is not in the namespace listing, so it
-// resolves to a placeholder and draws no edge — an unconnected card that is
-// still on the map, which is exactly what focus has to remove.
+// `lonely`'s peer names a workload that is not in the namespace listing, so it
+// resolves to a placeholder and draws no edge: an unconnected card that is
+// still on the map, which is what focus has to remove.
 const focusPods = [
-  focusPod('api', [flow('EGRESS', 'cache', '10.0.0.2')]),
-  focusPod('cache', [flow('INGRESS', 'api', '10.0.0.1')]),
-  focusPod('db', [flow('EGRESS', 'ghost', '10.0.0.9')]),
+  focusPod('api', [flow('EGRESS', 'cache', '10.0.0.2'), flow('EGRESS', 'db', '10.0.0.3')]),
+  focusPod('cache', [flow('INGRESS', 'api', '10.0.0.1'), flow('EGRESS', 'db', '10.0.0.3')]),
+  focusPod('db', [flow('INGRESS', 'api', '10.0.0.1'), flow('INGRESS', 'cache', '10.0.0.2')]),
+  focusPod('lonely', [flow('EGRESS', 'ghost', '10.0.0.9')]),
 ];
 
 const graphFocused = (focusedNodeId: string | null, showTraffic: boolean) => (
@@ -229,14 +235,19 @@ test('there is no focus control on a card', async () => {
 // Focus isolates the node and its direct peers.
 test('focusing a card isolates it to its neighbourhood', async () => {
   const { container } = render(graphFocused('api', true));
-  await waitFor(() => expect(container.querySelectorAll('.react-flow__node').length).toBe(2));
+  await waitFor(() => expect(container.querySelectorAll('.react-flow__node').length).toBe(3));
   expect(container.textContent).toMatch(/api/);
   expect(container.textContent).toMatch(/cache/);
-  // The unconnected workload is the one that has to disappear; without a
-  // third node there is nothing here that isolation could remove.
-  expect(container.textContent).not.toMatch(/db/);
+  expect(container.textContent).toMatch(/db/);
+  // The workload with no path to `api` is the one that has to disappear.
+  expect(container.textContent).not.toMatch(/lonely/);
   expect(container.textContent).toMatch(/Focused on/);
 });
+
+// The edge rule itself is asserted in utils/focus.test.ts, not here: ReactFlow
+// only emits edge elements once its nodes have been measured, which does not
+// happen under jsdom, so a DOM assertion about edges passes no matter what the
+// filter does. What this file can prove is which CARDS are drawn.
 
 // The guard. Selection focuses, and selection is now an ordinary click, so
 // focus must never be the thing that empties the screen. `allEdges` is empty
@@ -245,7 +256,7 @@ test('focusing a card isolates it to its neighbourhood', async () => {
 // reachable in a normal cluster, not a corner case.
 test('focusing a card with no peers leaves the whole map drawn', async () => {
   const { container } = render(graphFocused('api', false));
-  await waitFor(() => expect(container.querySelectorAll('.react-flow__node').length).toBe(3));
+  await waitFor(() => expect(container.querySelectorAll('.react-flow__node').length).toBe(4));
   // And the pill must not claim an isolation that did not happen.
   expect(container.textContent).not.toMatch(/Focused on/);
 });
