@@ -181,11 +181,12 @@ pub async fn get_pod_details(
     })
 }
 
-/// Reduce a stored Pod manifest to just the fields consumers need: labels
-/// (under metadata — advisor uses them for the policy podSelector, the frontend
-/// for the same) and `spec.hostNetwork` (the advisor's Cilium generator reads it
-/// to skip host-networked / node-IP pods). Everything else in spec, all of
-/// status, and the verbose metadata.managedFields are dropped. Operates in
+/// Reduce a stored Pod manifest to just the fields consumers need: `labels`,
+/// `uid`, `name` and `namespace` under metadata (the advisor uses labels for
+/// the policy podSelector and uid for peer attribution; the frontend the same)
+/// and `spec.hostNetwork` (the advisor's Cilium generator reads it to skip
+/// host-networked / node-IP pods). Everything else in spec, all of status, and
+/// every other metadata key — `annotations` above all — are dropped. Operates in
 /// place; non-object values are left untouched. Applied at write time (add.rs)
 /// so the bulk never reaches storage, and kept here as a defensive read-time
 /// pass for rows written before that.
@@ -210,7 +211,20 @@ pub(crate) fn compact_pod_obj(v: &mut serde_json::Value) {
         }
         obj.remove("status");
         if let Some(meta) = obj.get_mut("metadata").and_then(|m| m.as_object_mut()) {
-            meta.remove("managedFields");
+            // An allowlist, not a denylist. Removing only `managedFields` left
+            // `annotations` behind, and annotations are unbounded: a real
+            // cluster carries kubectl's last-applied-configuration and whole
+            // JSON check configs from sidecars in there, which dwarf
+            // everything else this function drops. On a 43k-pod cluster
+            // /pod/info still weighed 72 MB after compaction, and serialising
+            // that repeatedly OOM-killed a 4 GiB broker.
+            //
+            // These four are what consumers actually read off the manifest:
+            // `labels` (advisor podSelectors, frontend policy generation),
+            // `uid` (peer attribution in both) and `name`/`namespace`.
+            // A key that is absent is simply absent: every consumer
+            // deserializes this into a type whose other fields default.
+            meta.retain(|k, _| matches!(k.as_str(), "labels" | "uid" | "name" | "namespace"));
         }
     }
 }
@@ -1014,16 +1028,60 @@ mod tests {
     }
 
     #[test]
+    fn compact_pod_obj_shrinks_a_realistic_manifest_by_an_order_of_magnitude() {
+        // The reason the allowlist exists, expressed as a number. A pod
+        // carrying ordinary annotations (last-applied-configuration plus a
+        // sidecar's check config) is what an unremarkable cluster workload
+        // looks like, and 43k of them made /pod/info 72 MB.
+        let mut v = serde_json::json!({
+            "metadata": {
+                "name": "web-1",
+                "namespace": "prod",
+                "uid": "11111111-2222-3333-4444-555555555555",
+                "labels": {"app": "web", "version": "v2"},
+                "annotations": {
+                    "kubectl.kubernetes.io/last-applied-configuration": "y".repeat(6000),
+                    "ad.datadoghq.com/web.checks": "z".repeat(3000)
+                },
+                "managedFields": [{"manager": "kubelet", "big": "x".repeat(2000)}]
+            },
+            "spec": {"containers": [{"name": "c", "image": "nginx", "env": ["e".repeat(500)]}]},
+            "status": {"phase": "Running", "podIPs": [{"ip": "10.0.0.1"}]}
+        });
+        let before = serde_json::to_string(&v).expect("serialize").len();
+        compact_pod_obj(&mut v);
+        let after = serde_json::to_string(&v).expect("serialize").len();
+        assert!(
+            after * 10 < before,
+            "compaction should shrink a realistic manifest by >10x, got {before} -> {after}"
+        );
+    }
+
+    #[test]
     fn compact_pod_obj_drops_bulk_keeps_labels() {
         // Guards the /pod/info weight fix: the response must drop the
         // heavy spec/status/managedFields but keep metadata.labels (the
         // only part the frontend reads), so /pod/info can't balloon back
         // to multi-MB and overload the broker.
+        //
+        // The fixture carries `annotations` deliberately. It did not before,
+        // which is why this test stayed green while annotations shipped in
+        // every response: on a real cluster they hold kubectl's
+        // last-applied-configuration and sidecar check configs, and they were
+        // the bulk of a 72 MB /pod/info.
         let mut v = serde_json::json!({
             "metadata": {
                 "name": "web-1",
                 "namespace": "prod",
+                "uid": "11111111-2222-3333-4444-555555555555",
                 "labels": {"app": "web"},
+                "annotations": {
+                    "kubectl.kubernetes.io/last-applied-configuration": "y".repeat(4000),
+                    "ad.datadoghq.com/checks": "z".repeat(2000)
+                },
+                "creationTimestamp": "2026-09-16T00:00:00Z",
+                "resourceVersion": "849302",
+                "ownerReferences": [{"kind": "ReplicaSet", "name": "web-abc"}],
                 "managedFields": [{"manager": "kubelet", "big": "x".repeat(1000)}]
             },
             "spec": {"hostNetwork": true, "containers": [{"name": "c", "image": "nginx"}]},
@@ -1042,6 +1100,25 @@ mod tests {
             "metadata.labels must be preserved"
         );
         assert_eq!(meta.get("name").and_then(|x| x.as_str()), Some("web-1"));
+        assert_eq!(meta.get("namespace").and_then(|x| x.as_str()), Some("prod"));
+        // uid is read for peer attribution by both the advisor and the
+        // frontend, so it has to survive the allowlist.
+        assert_eq!(
+            meta.get("uid").and_then(|x| x.as_str()),
+            Some("11111111-2222-3333-4444-555555555555"),
+            "metadata.uid must be preserved"
+        );
+        // The unbounded ones, and everything else nothing reads.
+        assert!(
+            meta.get("annotations").is_none(),
+            "metadata.annotations must be dropped: they are unbounded and were the bulk of the payload"
+        );
+        for dropped in ["creationTimestamp", "resourceVersion", "ownerReferences"] {
+            assert!(
+                meta.get(dropped).is_none(),
+                "metadata.{dropped} must be dropped"
+            );
+        }
         // spec.hostNetwork must survive (the Cilium generator reads it) but the
         // rest of spec (containers, etc.) must be dropped.
         assert_eq!(
