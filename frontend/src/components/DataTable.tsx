@@ -296,6 +296,22 @@ const DataTable: React.FC<DataTableProps> = ({ selectedPod, allPodsLookup, servi
     [selectedPod?.traffic]
   );
 
+  // Allow/drop tally for the workload. Counted over every flow it has, not
+  // over the filtered page: this answers "how is this workload doing", and a
+  // number that moved every time you changed a filter would answer nothing.
+  // The header's "(filtered / total)" already says how much you are looking at.
+  const verdicts = useMemo(() => {
+    const rows = selectedPod?.traffic ?? [];
+    let allowed = 0;
+    let dropped = 0;
+    for (const t of rows) {
+      if (isDrop(t.decision)) dropped += 1;
+      else if (t.decision) allowed += 1;
+    }
+    const decided = allowed + dropped;
+    return { allowed, dropped, decided, successPct: decided > 0 ? Math.round((allowed / decided) * 100) : null };
+  }, [selectedPod?.traffic]);
+
   const hasSyscalls = useMemo(
     () => selectedPod?.syscalls && selectedPod.syscalls.length > 0,
     [selectedPod]
@@ -571,6 +587,26 @@ const DataTable: React.FC<DataTableProps> = ({ selectedPod, allPodsLookup, servi
             </div>
 
             <div className="bg-hubble-card rounded-surface border border-hubble-border overflow-hidden">
+            {/* Verdict tally for the workload, not for the filtered page. */}
+            {verdicts.decided > 0 && (
+              <div className="flex items-center justify-end gap-4 mb-2 text-xs">
+                <span className="text-secondary">
+                  Allowed: <span className="text-hubble-success font-medium tabular-nums">{verdicts.allowed}</span>
+                </span>
+                <span className="text-secondary">
+                  Dropped: <span className={`font-medium tabular-nums ${verdicts.dropped > 0 ? 'text-hubble-error' : 'text-secondary'}`}>{verdicts.dropped}</span>
+                </span>
+                {verdicts.successPct !== null && (
+                  <span
+                    className="text-secondary"
+                    title="Share of decided flows that completed. A drop means a handshake never completed, which is not by itself a policy denial."
+                  >
+                    Ratio: <span className={`font-medium tabular-nums ${verdicts.successPct === 100 ? 'text-hubble-success' : 'text-hubble-warning'}`}>{verdicts.successPct}% completed</span>
+                  </span>
+                )}
+              </div>
+            )}
+
             <div className="overflow-x-auto">
               <table className="w-full text-sm">
                 <thead className="sticky top-0 z-10 bg-hubble-dark border-b border-hubble-border">
@@ -579,6 +615,7 @@ const DataTable: React.FC<DataTableProps> = ({ selectedPod, allPodsLookup, servi
                     <th className="px-4 py-2">Source</th>
                     <th className="px-4 py-2">Destination</th>
                     <th className="px-4 py-2">Protocol</th>
+                    <th className="px-4 py-2">Summary</th>
                     <th className="px-4 py-2">Decision</th>
                     <th className="px-4 py-2">Timestamp</th>
                   </tr>
@@ -689,6 +726,17 @@ const DataTable: React.FC<DataTableProps> = ({ selectedPod, allPodsLookup, servi
                           <span className="px-2 py-1 bg-hubble-accent/20 text-hubble-accent rounded text-xs">
                             {traffic.ip_protocol || 'TCP'}
                           </span>
+                        </td>
+
+                        {/* Summary: protocol and the port that was CONNECTED
+                            TO, which is the one that names the service. The
+                            row's own Source/Destination cells carry both ends
+                            in full; this is the at-a-glance version. No TCP
+                            flags: the probe observes whether a handshake
+                            completed, never the individual segments. */}
+                        <td className="px-4 py-2 font-mono text-xs text-secondary whitespace-nowrap tabular-nums">
+                          {traffic.ip_protocol || 'TCP'}
+                          {destinationPort ? ` :${destinationPort}` : ''}
                         </td>
 
                         {/* Decision */}
