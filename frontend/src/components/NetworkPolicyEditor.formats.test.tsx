@@ -84,7 +84,7 @@ test('on a Cilium cluster the Cilium format is selectable and the tab strip is N
   expect(tabs.map((t) => t.textContent?.trim())).toEqual(['Network Policy', 'Seccomp Profile']);
   const cilium = await screen.findByRole('radio', { name: /CiliumNetworkPolicy/ });
   await vi.waitFor(() => expect(cilium.getAttribute('aria-checked')).toBe('true'));
-  expect(screen.getByText('Cilium Policy Builder')).toBeTruthy();
+  expect(screen.getByText('Cilium Network Policy Builder')).toBeTruthy();
 });
 
 test('switching to Seccomp and back to Network restores the Cilium format', async () => {
@@ -95,7 +95,7 @@ test('switching to Seccomp and back to Network restores the Cilium format', asyn
   fireEvent.click(screen.getByRole('tab', { name: 'Seccomp Profile' }));
   expect(screen.getByText('Seccomp Profile Builder')).toBeTruthy();
   fireEvent.click(screen.getByRole('tab', { name: 'Network Policy' }));
-  expect(screen.getByText('Cilium Policy Builder')).toBeTruthy();
+  expect(screen.getByText('Cilium Network Policy Builder')).toBeTruthy();
 });
 
 // The format buttons sit directly under the Network Policy / Seccomp Profile
@@ -121,4 +121,36 @@ test('the selected format reads as selected: white on a solid accent, like the t
   const unselected = screen.getByRole('radio', { name: /AuditNetworkPolicy/ });
   expect(unselected.getAttribute('aria-checked')).toBe('false');
   expect(unselected.className).not.toContain('text-white');
+});
+
+// Cilium is a FORMAT of the network tab, sitting in the same switch as Audit
+// and NetworkPolicy. Picking it used to swap the header icon (shield to a
+// network glyph) and retitle the modal "Cilium Policy Builder", so choosing a
+// format read as switching to a different tool. The other two formats never
+// did that, which is what made it look wrong.
+const headerIcon = () => {
+  const h2 = document.querySelector('h2')!;
+  const iconBox = h2.parentElement!.previousElementSibling!;
+  return iconBox.querySelector('svg')!.getAttribute('class') ?? '';
+};
+
+test('the builder header holds still across every network format', async () => {
+  cni = 'unknown';
+  render(<NetworkPolicyEditor isOpen onClose={() => {}} pod={target} initialPolicyType="network" />);
+  await screen.findByText((_, el) => el?.tagName === 'PRE' && !!el.textContent?.includes('kind: NetworkPolicy'));
+
+  expect(screen.getByText('Network Policy Builder')).toBeTruthy();
+  expect(headerIcon()).toContain('lucide-shield');
+
+  fireEvent.click(screen.getByRole('radio', { name: /AuditNetworkPolicy/ }));
+  expect(screen.getByText('Audit Network Policy Builder')).toBeTruthy();
+  expect(headerIcon()).toContain('lucide-shield');
+
+  fireEvent.click(screen.getByRole('radio', { name: 'CiliumNetworkPolicy' }));
+  await screen.findByText((_, el) => el?.tagName === 'PRE' && !!el.textContent?.includes('kind: CiliumNetworkPolicy'));
+  // Same icon as its siblings, and a title in the same family rather than one
+  // that drops the "Network" the other two carry.
+  expect(headerIcon()).toContain('lucide-shield');
+  expect(headerIcon()).not.toContain('lucide-network');
+  expect(screen.getByText('Cilium Network Policy Builder')).toBeTruthy();
 });
