@@ -15,6 +15,7 @@ import { Activity, ShieldAlert, Server, Crosshair, X } from 'lucide-react';
 import PodNode from './PodNode';
 import ContentionEdge from './ContentionEdge';
 import { EDGE_COLOR_CONTENTION, buildContentionEdges } from '../utils/contentionEdges';
+import { focusEdges, focusNeighborhood as focusNeighborhoodOf } from '../utils/focus';
 import { hasComputeGauges, nodeHeight } from '../utils/compute';
 import {
   isRectInView,
@@ -480,34 +481,21 @@ const NetworkGraphInner: React.FC<NetworkGraphProps> = ({
 
   const allEdges: Edge[] = useMemo(() => [...initialEdges, ...contentionEdges], [initialEdges, contentionEdges]);
 
-  // Focus filter: the focused node + everything one hop up/downstream. Applied
-  // before ELK so the isolated subset gets its own clean layout.
-  const focusNeighborhood = useMemo(() => {
-    if (!focusedNodeId) return null;
-    const ids = new Set<string>([focusedNodeId]);
-    for (const e of allEdges) {
-      if (e.source === focusedNodeId) ids.add(e.target);
-      if (e.target === focusedNodeId) ids.add(e.source);
-    }
-    // A neighborhood of one is not a neighborhood, and isolating to it would
-    // blank the map on an ordinary click. `allEdges` is empty whenever the
-    // Traffic toggle is off, and a workload whose flows are all unattributed
-    // (recycled peer IPs, no stored identity) draws no edges even with it on
-    // — so this is reachable in a normal cluster, not a corner case. Selection
-    // focuses; it must never be the thing that empties the screen.
-    if (ids.size < 2) return null;
-    return ids;
-  }, [focusedNodeId, allEdges]);
+  // Focus filter (utils/focus): the focused node + everything one hop
+  // up/downstream. Applied before ELK so the isolated subset gets its own
+  // clean layout.
+  const focusNeighborhood = useMemo(
+    () => focusNeighborhoodOf(focusedNodeId, allEdges),
+    [focusedNodeId, allEdges],
+  );
 
   const displayNodes: Node[] = useMemo(
     () => (focusNeighborhood ? baseNodes.filter((n) => focusNeighborhood.has(n.id)) : baseNodes),
     [baseNodes, focusNeighborhood],
   );
   const displayEdges: Edge[] = useMemo(
-    () => (focusNeighborhood
-      ? allEdges.filter((e) => focusNeighborhood.has(e.source) && focusNeighborhood.has(e.target))
-      : allEdges),
-    [allEdges, focusNeighborhood],
+    () => (focusNeighborhood && focusedNodeId ? focusEdges(focusedNodeId, allEdges) : allEdges),
+    [allEdges, focusNeighborhood, focusedNodeId],
   );
 
   const focusedLabel = useMemo(
