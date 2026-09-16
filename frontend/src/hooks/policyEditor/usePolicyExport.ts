@@ -22,7 +22,7 @@ export type PolicyType = 'network' | 'cilium' | 'seccomp';
 export type NetworkExportFormat = 'audit' | 'network' | 'cilium';
 
 export const NETWORK_EXPORT_FORMATS: { id: NetworkExportFormat; label: string; hint: string; requiresCilium?: boolean }[] = [
-  { id: 'audit', label: 'Audit (kguardian CR)', hint: 'kguardian.dev/v1alpha1 AuditNetworkPolicy — same spec, nothing is dropped; the evaluator reports what it would deny' },
+  { id: 'audit', label: 'AuditNetworkPolicy', hint: 'kguardian.dev/v1alpha1 AuditNetworkPolicy — same spec, nothing is dropped; the evaluator reports what it would deny' },
   { id: 'network', label: 'NetworkPolicy', hint: 'networking.k8s.io/v1 NetworkPolicy — enforced by the CNI once applied' },
   { id: 'cilium', label: 'CiliumNetworkPolicy', hint: 'cilium.io/v2 CiliumNetworkPolicy — only Cilium reads it', requiresCilium: true },
 ];

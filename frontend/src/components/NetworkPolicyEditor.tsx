@@ -284,7 +284,7 @@ const NetworkPolicyEditor: React.FC<NetworkPolicyEditorProps> = ({ isOpen, onClo
                           onClick={() => selectNetworkFormat(f.id)}
                           className={`px-3 py-1.5 text-xs rounded-control border transition-colors ${
                             networkFormat === f.id
-                              ? 'bg-hubble-accent/20 border-hubble-accent text-hubble-accent'
+                              ? 'bg-hubble-accent border-hubble-accent text-white'
                               : blocked
                                 ? 'border-hubble-border text-tertiary opacity-60 cursor-not-allowed'
                                 : 'border-hubble-border text-secondary hover:border-hubble-accent/50'
@@ -309,7 +309,7 @@ const NetworkPolicyEditor: React.FC<NetworkPolicyEditorProps> = ({ isOpen, onClo
                         title={f.hint}
                         onClick={() => setSeccompFormat(f.id)}
                         className={`px-3 py-1.5 text-xs rounded-control border transition-colors ${
-                          seccompFormat === f.id ? 'bg-hubble-accent/20 border-hubble-accent text-hubble-accent' : 'border-hubble-border text-secondary hover:border-hubble-accent/50'
+                          seccompFormat === f.id ? 'bg-hubble-accent border-hubble-accent text-white' : 'border-hubble-border text-secondary hover:border-hubble-accent/50'
                         }`}
                       >
                         {f.label}
