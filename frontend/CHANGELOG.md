@@ -1,5 +1,21 @@
 # Changelog
 
+## [1.19.0](https://github.com/kguardian-dev/kguardian/compare/frontend/v1.18.0...frontend/v1.19.0) (2026-09-16)
+
+
+### Features
+
+* **frontend:** selecting a card focuses it, and the panel opens shut ([#1590](https://github.com/kguardian-dev/kguardian/issues/1590)) ([975055c](https://github.com/kguardian-dev/kguardian/commit/975055cc408c91b862e33f5e751b6aa3915ad15c))
+* **frontend:** show denied flows on the card, and keep the panel's three sections ([#1598](https://github.com/kguardian-dev/kguardian/issues/1598)) ([2b52b37](https://github.com/kguardian-dev/kguardian/commit/2b52b37e89ff7a0099ecf454ab8b499415fe0600))
+* **frontend:** summarise each flow and tally the verdicts on the traffic table ([#1606](https://github.com/kguardian-dev/kguardian/issues/1606)) ([9f46f15](https://github.com/kguardian-dev/kguardian/commit/9f46f150997f3f1961cf3829155dbe2cd9197d9f))
+
+
+### Bug Fixes
+
+* **frontend:** fetch the pod inventory once per load, not once per caller ([#1604](https://github.com/kguardian-dev/kguardian/issues/1604)) ([90b8b8c](https://github.com/kguardian-dev/kguardian/commit/90b8b8c66ea148af944cb9c5aa4ea47c1d9694fa))
+* **frontend:** focus draws only the focused card's own paths, and drops the denial badge ([#1601](https://github.com/kguardian-dev/kguardian/issues/1601)) ([7059d69](https://github.com/kguardian-dev/kguardian/commit/7059d6961b023b4e2c08d457def0e7190a53beac))
+* **frontend:** make the policy builder's format tabs consistent and readable ([#1605](https://github.com/kguardian-dev/kguardian/issues/1605)) ([02961fd](https://github.com/kguardian-dev/kguardian/commit/02961fdd487c8d33ed89229805f00a9fc90f3e7f))
+
 ## [1.18.0](https://github.com/kguardian-dev/kguardian/compare/frontend/v1.17.2...frontend/v1.18.0) (2026-09-14)
 
 
