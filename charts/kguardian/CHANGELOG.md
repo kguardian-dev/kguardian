@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.25.0](https://github.com/kguardian-dev/kguardian/compare/chart/v1.24.0...chart/v1.25.0) (2026-09-16)
+
+
+### Features
+
+* **chart:** move to broker 1.18.1, frontend 1.19.0 and llm-bridge 1.11.1 ([#1607](https://github.com/kguardian-dev/kguardian/issues/1607)) ([985d4d7](https://github.com/kguardian-dev/kguardian/commit/985d4d7d8c15c9e3c04acf43505d45b09e6754d8))
+
 ## [1.24.0](https://github.com/kguardian-dev/kguardian/compare/chart/v1.23.1...chart/v1.24.0) (2026-09-15)
 
 
