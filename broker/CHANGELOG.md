@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.18.1](https://github.com/kguardian-dev/kguardian/compare/broker/v1.18.0...broker/v1.18.1) (2026-09-16)
+
+
+### Bug Fixes
+
+* **broker:** drop pod annotations from /pod/info, which were most of its weight ([#1602](https://github.com/kguardian-dev/kguardian/issues/1602)) ([e4462c9](https://github.com/kguardian-dev/kguardian/commit/e4462c97ac028921bc779bb43daf93d005fbfb28))
+
 ## [1.18.0](https://github.com/kguardian-dev/kguardian/compare/broker/v1.17.0...broker/v1.18.0) (2026-09-14)
 
 
