@@ -215,18 +215,48 @@ class BrokerAPIClient {
   /**
    * Get all pod details
    */
+  /**
+   * In-flight `/pod/info` request, shared by every concurrent caller.
+   *
+   * The whole pod inventory is the single heaviest response the broker
+   * produces, and a page load asks for it more than once: `usePodData` wants
+   * the listing, `useNamespaces` derives the namespace list from the same
+   * listing, and the policy generators ask again when opened. Un-coalesced
+   * those overlap, and the broker pays to serialise the entire inventory once
+   * per caller. On a 43k-pod cluster that was two concurrent 72 MB responses
+   * per page load, which OOM-killed the broker at a 4 GiB limit.
+   *
+   * Only IN-FLIGHT requests are shared, with no time-based cache: a request
+   * that has already returned is not reused, so `refreshData` and a namespace
+   * change still fetch genuinely fresh data. The entry is cleared as soon as
+   * the request settles, failures included, so a failed load does not poison
+   * the next attempt.
+   */
+  private podsInFlight: Promise<PodInfo[]> | null = null;
+
   async getAllPods(): Promise<PodInfo[]> {
-    try {
-      const response = await this.client.get('/pod/info');
-      // Ensure we always return an array
-      if (Array.isArray(response.data)) {
-        return response.data;
+    if (this.podsInFlight) return this.podsInFlight;
+
+    const request = (async () => {
+      try {
+        const response = await this.client.get('/pod/info');
+        // Ensure we always return an array
+        if (Array.isArray(response.data)) {
+          return response.data;
+        }
+        console.warn('API returned non-array data for /pod/info:', response.data);
+        return [];
+      } catch (error) {
+        console.error('Error fetching all pods:', error);
+        return [];
       }
-      console.warn('API returned non-array data for /pod/info:', response.data);
-      return [];
-    } catch (error) {
-      console.error('Error fetching all pods:', error);
-      return [];
+    })();
+
+    this.podsInFlight = request;
+    try {
+      return await request;
+    } finally {
+      this.podsInFlight = null;
     }
   }
 
