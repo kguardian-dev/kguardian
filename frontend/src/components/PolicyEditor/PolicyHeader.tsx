@@ -1,5 +1,5 @@
 import React from 'react';
-import { X, Copy, Download, Shield, Lock, Network, AlertTriangle } from 'lucide-react';
+import { X, Copy, Download, Shield, Lock, AlertTriangle } from 'lucide-react';
 import type { NetworkExportFormat, PolicyType, SeccompExportFormat } from '../../hooks/policyEditor';
 
 interface PolicyHeaderProps {
@@ -23,10 +23,13 @@ interface PolicyHeaderProps {
   networkFormat?: NetworkExportFormat;
 }
 
+// All three are network policies picked from one format switch, so the titles
+// stay in one family. "Cilium Policy Builder" dropped the "Network" the other
+// two carry, which read as a different tool rather than a different format.
 const NETWORK_FORMAT_TITLE: Record<NetworkExportFormat, string> = {
   audit: 'Audit Network Policy Builder',
   network: 'Network Policy Builder',
-  cilium: 'Cilium Policy Builder',
+  cilium: 'Cilium Network Policy Builder',
 };
 
 const SECCOMP_FORMAT_LABEL: Record<SeccompExportFormat, string> = {
@@ -60,10 +63,12 @@ export const PolicyHeader: React.FC<PolicyHeaderProps> = ({
     <div className="flex items-center justify-between px-6 py-4 border-b border-hubble-border">
       <div className="flex items-center gap-3">
         <div className="flex items-center justify-center w-10 h-10 rounded-lg bg-hubble-success/20">
-          {policyType === 'network' ? (
+          {/* The icon tracks the TAB, not the export format. Cilium is a
+              format of the network tab like Audit and NetworkPolicy are, so
+              swapping the icon for it made picking a format look like
+              switching tools. Seccomp is a different tab and keeps its own. */}
+          {networkTab ? (
             <Shield className="w-5 h-5 text-hubble-success" />
-          ) : policyType === 'cilium' ? (
-            <Network className="w-5 h-5 text-hubble-success" />
           ) : (
             <Lock className="w-5 h-5 text-hubble-success" />
           )}
