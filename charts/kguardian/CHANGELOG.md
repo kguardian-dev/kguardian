@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.25.1](https://github.com/kguardian-dev/kguardian/compare/chart/v1.25.0...chart/v1.25.1) (2026-09-19)
+
+
+### Bug Fixes
+
+* **deps:** update ghcr.io/kguardian-dev/kguardian/frontend docker tag to v1.19.0 - abandoned ([#1610](https://github.com/kguardian-dev/kguardian/issues/1610)) ([fa55da0](https://github.com/kguardian-dev/kguardian/commit/fa55da0d5b5322b9860146a1eed7dd348f9b1ca8))
+* **deps:** update ghcr.io/kguardian-dev/kguardian/llm-bridge docker tag to v1.11.1 - abandoned ([#1609](https://github.com/kguardian-dev/kguardian/issues/1609)) ([980434c](https://github.com/kguardian-dev/kguardian/commit/980434c069e70ec5a90f9302aa89a6f5eccb6db8))
+
 ## [1.25.0](https://github.com/kguardian-dev/kguardian/compare/chart/v1.24.0...chart/v1.25.0) (2026-09-16)
 
 
