@@ -1487,6 +1487,7 @@ dependencies = [
  "libseccomp",
  "moka",
  "openssl",
+ "percent-encoding",
  "plain",
  "procfs",
  "regex",

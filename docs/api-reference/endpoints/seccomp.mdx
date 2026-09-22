@@ -203,6 +203,14 @@ seccomp document with `SCMP_ACT_LOG` — a preview, not what is on any node.
 
 `404` if the workload has no observed set yet.
 
+This is the read the Controller's distributor makes: one request per distinct
+`workloadRef` per resync, to compute the referencing CR's `CaptureComplete`,
+`Drift` and `DenialsObserved` conditions. A `404` becomes
+`Unknown`/`NoObservations`; any other failure leaves the conditions as they
+were. The Controller never reads the cluster-wide list above, and a cluster
+with no `SeccompProfile` objects costs the Broker nothing per resync beyond the
+node-status report.
+
 ---
 
 ## GET /seccomp/profiles/{namespace}/{kind}/{name}/export
