@@ -7,7 +7,8 @@
 //! - `POST /pod/compute/batch` — every sample interval, one per node.
 //!   Upserts `pod_compute_latest` (PK `container_uid`) and
 //!   `node_compute_latest` (PK `node`), so neither table grows with
-//!   cadence.
+//!   cadence; `retention.rs` prunes the rows a node stops refreshing, so
+//!   neither grows with churn either.
 //! - `POST /pod/compute/history/batch` — every 60 s. Inserts one
 //!   `pod_compute_history` row per container and one
 //!   `pod_contention_history` row per blame pair. Silently accepted and
@@ -99,7 +100,13 @@ pub const FINDINGS_HISTORY_ROW_CAP: i64 = FINDINGS_MAX_CONTAINERS * FINDINGS_ROW
 pub const FINDINGS_PAIRS_PER_VICTIM: i64 = 30;
 /// Pair row cap and charge for one findings call.
 pub const FINDINGS_PAIR_ROW_CAP: i64 = FINDINGS_MAX_VICTIMS * FINDINGS_PAIRS_PER_VICTIM;
-/// `GET /compute/nodes` charge; the table is node-count sized.
+/// `GET /compute/nodes` charge. The table is node-count sized only
+/// because retention prunes rows their node stopped refreshing an hour
+/// ago (`retention::NODE_COMPUTE_LATEST_STALE_SECS`); before that prune it
+/// grew with node churn — 1 232 rows on a 44-node autoscaled cluster, a
+/// 548 KB response already past this 512 KiB charge and growing daily.
+/// The endpoint has no row cap of its own, so this constant is only exact
+/// while that prune runs.
 pub const NODES_ROWS_CHARGED: i64 = 512;
 
 // ---------------------------------------------------------------------
