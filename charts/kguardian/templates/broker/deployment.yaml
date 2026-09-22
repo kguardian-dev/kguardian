@@ -127,7 +127,8 @@ spec:
               `with` treats 0 as falsy, and 0 is the documented
               "disable retention" value here too.
             */}}
-            {{- $denials := (.Values.broker.seccomp | default dict).denials | default dict }}
+            {{- $seccomp := .Values.broker.seccomp | default dict }}
+            {{- $denials := $seccomp.denials | default dict }}
             {{- $denialRetention := $denials.retention | default dict }}
             {{- if hasKey $denialRetention "days" }}
             - name: SECCOMP_DENIALS_RETENTION_DAYS
@@ -152,6 +153,16 @@ spec:
             {{- if hasKey $denials "metricsIntervalSeconds" }}
             - name: SECCOMP_DENIAL_METRICS_INTERVAL_SECS
               value: {{ $denials.metricsIntervalSeconds | quote }}
+            {{- end }}
+            {{/*
+              GET /seccomp/profiles body cache (values.yaml
+              `broker.seccomp.profilesCacheTtlSeconds`). hasKey rather than
+              `with` for the same reason as the retention knobs: 0 is the
+              documented "rebuild every request" value and `with` drops it.
+            */}}
+            {{- if hasKey $seccomp "profilesCacheTtlSeconds" }}
+            - name: SECCOMP_PROFILES_CACHE_TTL_SECS
+              value: {{ $seccomp.profilesCacheTtlSeconds | quote }}
             {{- end }}
             {{- if hasKey .Values.broker.audit "inflightPermits" }}
             - name: AUDIT_INFLIGHT_PERMITS
