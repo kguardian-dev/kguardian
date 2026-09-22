@@ -49,6 +49,7 @@ use crate::read_budget::{
 };
 use crate::schema;
 use crate::seccomp_denial::{denial_index, denial_index_for, DenialBlock, DenialIndex};
+use crate::seccomp_profiles_cache::SeccompProfilesCache;
 use actix_web::{get, post, web, HttpResponse, Responder};
 use diesel::prelude::*;
 use diesel::r2d2::{self, ConnectionManager};
@@ -1466,13 +1467,20 @@ fn render(obs: &Observed, names: &BTreeSet<String>) -> SeccompProfile {
 
 /// `GET /seccomp/profiles` — every workload that has an observed
 /// aggregate, with its capture summary and any deployed CR (readiness +
-/// drift). Read-only; the UI lists it, the controller reads the
-/// `captureComplete` / `cr.drift` it needs for CR conditions.
+/// drift). Read-only; the UI lists it. The controller read the
+/// `captureComplete` / `cr.drift` it needs for CR conditions from here
+/// until #1632 moved that to the per-workload route.
+///
+/// Served from [`SeccompProfilesCache`]: the body is rebuilt at most once
+/// per `SECCOMP_PROFILES_CACHE_TTL_SECS` and every caller inside that
+/// window gets the same bytes. The rebuild itself is
+/// [`rebuild_profiles_body`].
 #[get("/seccomp/profiles")]
 pub async fn list_seccomp_profiles(
     req: actix_web::HttpRequest,
     pool: web::Data<DbPool>,
     budget: web::Data<ReadBudget>,
+    cache: web::Data<SeccompProfilesCache>,
 ) -> actix_web::Result<impl Responder> {
     // The v1 `?state=published` filter is gone. Fail loudly rather than
     // return everything: a distributor that predates CR-driven
@@ -1482,38 +1490,62 @@ pub async fn list_seccomp_profiles(
             "the ?state= filter was removed; distribution is driven by SeccompProfile CRs",
         ));
     }
-    info!("list seccomp profiles");
+    // No per-request log: a hit is a buffer clone, and the cache logs hits
+    // at debug. The rebuild path logs at info, so the log now shows how
+    // often the list is actually rebuilt rather than how often it is polled.
 
-    // A whole-result-set read that took no permit — the only one in the
-    // broker that did not. This endpoint OOMKilled the broker in the dev
-    // cluster: the UI polls it every 15s (frontend useSeccompProfiles) and
-    // the container died at steady ingest with zero `/pod/traffic` reads in
-    // its log, so the budget that already existed never engaged.
+    // Why this endpoint is cached when nothing else in the broker is.
     //
-    // BUT THE PERMIT IS NOT WHAT FIXES THAT, and it should not be read as
-    // the remedy. Measured on the dev cluster, four SEQUENTIAL calls 25s
-    // apart moved RSS 352 -> 366 -> 381 -> 396 -> 411 MiB: ~15 MiB per call,
-    // linear, nothing reclaimed in between. A permit is released when the
-    // handler returns, so retention that outlives the response is invisible
-    // to the budget — it holds no permit and `available_kib` counts it free.
-    // A semaphore cannot bound a quantity that persists after the request
-    // completes.
+    // It is the heaviest read and the most polled one: every open UI tab
+    // asks every 15s (frontend useSeccompProfiles), and until #1632 moved it
+    // to the per-workload route every controller's seccomp distributor asked
+    // every 30s per node, so a 44-node cluster sent ~90 calls a minute, and
+    // with ~2,000 observed workloads each one ran ~2.5s and answered with
+    // ~3.3 MB. Measured before 5af98b6 (which
+    // stopped this list reading the syscall blobs), four SEQUENTIAL calls
+    // 25s apart moved RSS 352 -> 366 -> 381 -> 396 -> 411 MiB — ~15 MiB per
+    // call, linear, nothing reclaimed in between (#1514) — and under the
+    // polling load above the container went 380 MiB -> 4 GiB and
+    // OOM-looped. Whatever a rebuild still retains after that commit, this
+    // cache does not shrink it; what it bounds is the RATE of rebuilds: that
+    // cluster's ~90 a minute would have been at most 6 at the default TTL,
+    // and the same bound holds for however many UI tabs, or whatever future
+    // caller, poll it next. Every caller
+    // wants the same list, so it is built once per TTL: a hit hands back a
+    // reference to the buffer the last rebuild left, with no query, no
+    // serialisation and no permit, and concurrent misses queue behind the
+    // one rebuild in flight instead of each running their own. The cost is
+    // staleness bounded by the TTL, which the module docs on
+    // SeccompProfilesCache spell out.
     //
-    // Nor would it have fired here. Both callers are self-limiting to one
-    // in-flight request each: `useSeccompProfiles` holds an `inflight` ref
-    // and returns early while a call is outstanding, and the seccomp
-    // distributor ticks a single reconciler loop every 30s. Steady state is
-    // 2 concurrent against a reservation that admits 4, so in the exact
-    // configuration that killed the broker this permit would never have been
-    // contended.
-    //
-    // What attacks the measured growth is `workload_summaries` below, which
-    // no longer reads the syscall blobs at all: the count comes from a stored
-    // column, and blobs are fetched only for workloads whose drift is
-    // actually computed. The permit is a guardrail for a future caller with
-    // no in-flight guard, and it closes the structural gap that every read in
-    // get.rs is admitted while every read here was not.
-    //
+    // The read-budget permit survives, but only a rebuild takes it. It is
+    // not what fixes the growth above, and never was: a permit is released
+    // when the handler returns, so retention that outlives the response is
+    // invisible to the budget — it holds no permit and `available_kib`
+    // counts it free. What the permit does is bound what a rebuild holds in
+    // flight beside every other admitted read, closing the structural gap
+    // that every whole-result read in get.rs was admitted while this one
+    // was not. The cached body is the one thing that outlives its permit
+    // by design, and it is a single buffer that is replaced, not
+    // accumulated, at each expiry.
+    let body = cache
+        .get_or_build(|| rebuild_profiles_body(pool, budget))
+        .await?;
+
+    Ok(HttpResponse::Ok()
+        .content_type(actix_web::http::header::ContentType::json())
+        .body(body))
+}
+
+/// One full rebuild of the `GET /seccomp/profiles` body: count, charge and
+/// take a read-budget permit, run the summary queries, serialise. Only
+/// [`SeccompProfilesCache::get_or_build`] calls this, and only on a miss.
+async fn rebuild_profiles_body(
+    pool: web::Data<DbPool>,
+    budget: web::Data<ReadBudget>,
+) -> actix_web::Result<web::Bytes> {
+    info!("list seccomp profiles: rebuilding");
+
     // Charged from the REAL counts on BOTH axes, not a flat assumption.
     //
     // The previous `ASSUMED_MAX_WORKLOADS` reservation under-charged above
@@ -1526,11 +1558,11 @@ pub async fn list_seccomp_profiles(
     // and it does so on the axis this product is trying to grow, since the
     // whole feature exists to get operators committing SeccompProfile CRs.
     //
-    // So: two cheap counts, and a charge that tracks what the handler will
+    // So: two cheap counts, and a charge that tracks what the rebuild will
     // actually do. `SECCOMP_BLOB_COST_BYTES` is the surcharge for a workload
     // whose names are materialised.
     //
-    // Both counts run before the permit, so a request that is ultimately shed
+    // Both counts run before the permit, so a rebuild that is ultimately shed
     // still costs two round trips, and the counts can go stale against the
     // load below. Both are accepted: the alternative is charging after doing
     // the work, which is not a bound.
@@ -1570,10 +1602,12 @@ pub async fn list_seccomp_profiles(
 
     let _permit = match budget.acquire(charge).await {
         Ok(p) => p,
-        Err(shed) => return Ok(shed.into_response()),
+        // The 503 travels as an error so the cache stores nothing for it and
+        // the handler returns it unchanged, Retry-After and all.
+        Err(shed) => return Err(shed.into_error()),
     };
 
-    let out: Vec<ProfileSummary> = web::block(move || -> Result<_, DbError> {
+    let body: Vec<u8> = web::block(move || -> Result<_, DbError> {
         let mut conn = pool.get()?;
         let all = workload_summaries(&mut conn)?;
         let index = distribution_index(&mut conn)?;
@@ -1582,15 +1616,23 @@ pub async fn list_seccomp_profiles(
         // O(rows + contributors + crs + denials) rather than a query per
         // workload. Bounded in SQL and charged above.
         let denials = denial_index(&mut conn)?;
-        Ok(all
+        let out: Vec<ProfileSummary> = all
             .iter()
             .map(|o| ProfileSummary::build(o, &index, &denials))
-            .collect())
+            .collect();
+        // Serialised here, on the blocking thread, so the summaries are
+        // dropped before this closure returns and the only thing that leaves
+        // it is the buffer the cache will keep. Shrunk first: a Vec grown by
+        // doubling can carry up to 2x its length in spare capacity, and this
+        // buffer is retained for a whole TTL, not dropped at end of request.
+        let mut buf = serde_json::to_vec(&out)?;
+        buf.shrink_to_fit();
+        Ok(buf)
     })
     .await?
     .map_err(actix_web::error::ErrorInternalServerError)?;
 
-    Ok(HttpResponse::Ok().json(out))
+    Ok(web::Bytes::from(body))
 }
 
 fn has_query_param(query: &str, key: &str) -> bool {
@@ -3784,6 +3826,10 @@ spec:
                 .app_data(web::Data::new(ReadBudget::with_budget_kib(
                     64 * 1024,
                     std::time::Duration::from_millis(0),
+                )))
+                // Same for the list route's body cache.
+                .app_data(web::Data::new(SeccompProfilesCache::new(
+                    std::time::Duration::from_secs(10),
                 )))
                 .service(list_seccomp_profiles)
                 .service(get_seccomp_profile)

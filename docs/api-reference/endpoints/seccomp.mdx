@@ -28,6 +28,17 @@ Every workload with an observed syscall set: the set, its capture
 completeness, and — if a `SeccompProfile` CR references the workload — that
 CR's deployment state and drift against the observed set.
 
+The Broker caches the rendered body for `SECCOMP_PROFILES_CACHE_TTL_SECS`
+(chart value `broker.seccomp.profilesCacheTtlSeconds`, default 10) and serves
+every caller the same bytes within that window; requests that arrive during a
+rebuild wait for it rather than each querying the database. The UI polls this
+route every 15 s per open tab; the Controller polled it every 30 s per node
+until #1632 moved it to the per-workload route. A CR's deployment
+state or drift can therefore lag this list by up to the TTL — the per-workload
+route below is never cached. Set the TTL to `0` to rebuild on every request.
+`/metrics` reports `broker_seccomp_profiles_cache_hits_total` and
+`broker_seccomp_profiles_cache_misses_total`.
+
 ### Response
 
 ```json

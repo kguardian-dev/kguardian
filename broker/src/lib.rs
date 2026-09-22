@@ -11,6 +11,7 @@ mod read_budget;
 mod retention;
 mod seccomp;
 mod seccomp_denial;
+mod seccomp_profiles_cache;
 mod telemetry;
 mod types;
 mod version_check;
@@ -53,6 +54,7 @@ pub use seccomp_denial::{
     seccomp_denials_resource, spawn_metrics_refresh as spawn_seccomp_denial_metrics, DenialLabels,
     DenialRow, SeccompDenialMetrics, SeccompDenialSeries,
 };
+pub use seccomp_profiles_cache::{SeccompProfilesCache, DEFAULT_PROFILES_CACHE_TTL_SECS};
 
 #[cfg(test)]
 pub(crate) mod test_support {
