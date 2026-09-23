@@ -1,5 +1,14 @@
 # Changelog
 
+## [1.11.2](https://github.com/kguardian-dev/kguardian/compare/llm-bridge/v1.11.1...llm-bridge/v1.11.2) (2026-09-23)
+
+
+### Bug Fixes
+
+* **deps:** update dependency @anthropic-ai/sdk to ^0.127.0 ([#1617](https://github.com/kguardian-dev/kguardian/issues/1617)) ([b911cff](https://github.com/kguardian-dev/kguardian/commit/b911cffe9ecea571e5dc72b03adc8143edda599f))
+* **deps:** update dependency @anthropic-ai/sdk to ^0.128.0 ([#1629](https://github.com/kguardian-dev/kguardian/issues/1629)) ([96b5fe2](https://github.com/kguardian-dev/kguardian/commit/96b5fe2f888eed4a4108032941a1c34cb0c5ded4))
+* **deps:** update dependency dotenv to v18 ([#1615](https://github.com/kguardian-dev/kguardian/issues/1615)) ([84ff907](https://github.com/kguardian-dev/kguardian/commit/84ff907b57de73eb2a9f6f2a4bfde8d463305405))
+
 ## [1.11.1](https://github.com/kguardian-dev/kguardian/compare/llm-bridge/v1.11.0...llm-bridge/v1.11.1) (2026-09-16)
 
 
