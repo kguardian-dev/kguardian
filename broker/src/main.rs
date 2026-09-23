@@ -14,7 +14,7 @@ use api::{
     mark_pod_dead, post_seccomp_node_status, put_seccomp_cr, seccomp_denials_resource,
     set_statement_timeout, spawn_peer_late_resolve, spawn_retention, spawn_seccomp_denial_metrics,
     spawn_version_check, AuditClient, ReadBudget, SeccompDenialMetrics, SeccompDenialSeries,
-    StatementTimeoutCustomizer, VersionCheckState,
+    SeccompProfilesCache, StatementTimeoutCustomizer, VersionCheckState,
 };
 
 use diesel::r2d2;
@@ -361,6 +361,12 @@ async fn main() -> Result<(), std::io::Error> {
     // concurrent heavy reads be admitted into a 1 GiB container.
     let read_budget = web::Data::new(ReadBudget::from_env());
 
+    // Rendered-body cache for GET /seccomp/profiles, created once here and
+    // cloned into every worker so the PROCESS rebuilds the list once per
+    // TTL rather than once per actix thread. Its TTL is logged at startup
+    // beside the read budget each rebuild takes a permit from.
+    let profiles_cache = web::Data::new(SeccompProfilesCache::from_env());
+
     let listener = broker_listener()?;
     info!(addr = %listener.local_addr()?, "broker HTTP server starting");
     HttpServer::new(move || {
@@ -380,6 +386,7 @@ async fn main() -> Result<(), std::io::Error> {
             .app_data(web::Data::new(auth_config.clone()))
             .app_data(version_state.clone())
             .app_data(read_budget.clone())
+            .app_data(profiles_cache.clone())
             .app_data(denial_metrics.clone())
             .service(add_pods_batch)
             .service(add_pod_details)
@@ -552,6 +559,8 @@ pub(crate) fn render_metrics_text(
     seccomp_denial_series: &[SeccompDenialSeries],
     seccomp_denial_workloads: u64,
     seccomp_denial_rows_total: u64,
+    seccomp_profiles_cache_hits: u64,
+    seccomp_profiles_cache_misses: u64,
 ) -> String {
     format!(
         concat!(
@@ -585,6 +594,12 @@ pub(crate) fn render_metrics_text(
             "# HELP broker_read_shed_total Reads refused with 503 because the memory budget was exhausted (refused, never truncated)\n",
             "# TYPE broker_read_shed_total counter\n",
             "broker_read_shed_total {read_shed_total}\n",
+            "# HELP broker_seccomp_profiles_cache_hits_total GET /seccomp/profiles responses served from the cached body (no query, no serialisation; SECCOMP_PROFILES_CACHE_TTL_SECS)\n",
+            "# TYPE broker_seccomp_profiles_cache_hits_total counter\n",
+            "broker_seccomp_profiles_cache_hits_total {seccomp_profiles_cache_hits}\n",
+            "# HELP broker_seccomp_profiles_cache_misses_total GET /seccomp/profiles responses that rebuilt the body from the database; concurrent callers share one rebuild, so this is the rebuild count\n",
+            "# TYPE broker_seccomp_profiles_cache_misses_total counter\n",
+            "broker_seccomp_profiles_cache_misses_total {seccomp_profiles_cache_misses}\n",
             "# HELP broker_uptime_seconds Process uptime\n",
             "# TYPE broker_uptime_seconds counter\n",
             "broker_uptime_seconds {uptime_secs}\n",
@@ -612,6 +627,8 @@ pub(crate) fn render_metrics_text(
         seccomp_denial_series = render_denial_series(seccomp_denial_series),
         seccomp_denial_workloads = seccomp_denial_workloads,
         seccomp_denial_rows_total = seccomp_denial_rows_total,
+        seccomp_profiles_cache_hits = seccomp_profiles_cache_hits,
+        seccomp_profiles_cache_misses = seccomp_profiles_cache_misses,
     )
 }
 
@@ -631,6 +648,7 @@ pub async fn metrics(
     audit: web::Data<api::AuditClient>,
     read_budget: web::Data<ReadBudget>,
     denials: web::Data<SeccompDenialMetrics>,
+    profiles_cache: web::Data<SeccompProfilesCache>,
 ) -> HttpResponse {
     let pool_inner = pool.get_ref().clone();
     let schema_state = tokio::task::spawn_blocking(
@@ -693,6 +711,9 @@ pub async fn metrics(
         &denial_series,
         denials.get_ref().workloads(),
         denials.get_ref().rows_total(),
+        // Atomic loads, like the denial counters above: nothing here waits.
+        profiles_cache.get_ref().hits(),
+        profiles_cache.get_ref().misses(),
     );
 
     HttpResponse::Ok()
@@ -724,6 +745,8 @@ mod tests {
         "broker_read_budget_kib_total",
         "broker_read_budget_kib_available",
         "broker_read_shed_total",
+        "broker_seccomp_profiles_cache_hits_total",
+        "broker_seccomp_profiles_cache_misses_total",
         "broker_uptime_seconds",
         "kguardian_seccomp_denials_total",
         "kguardian_seccomp_denial_workloads",
@@ -768,6 +791,8 @@ mod tests {
             &denial_series(),
             1,
             19,
+            0,
+            0,
         );
         for name in ALL_METRIC_NAMES {
             assert!(body.contains(name), "missing metric: {name}");
@@ -780,7 +805,24 @@ mod tests {
         // with zero samples must still carry its HELP and TYPE, or a
         // dashboard query against the name breaks on exactly the healthy
         // cluster where nothing has been denied yet.
-        let body = render_metrics_text(1, 1, 1, 16, 0, 16, 16, 262_144, 262_144, 0, 0, &[], 0, 0);
+        let body = render_metrics_text(
+            1,
+            1,
+            1,
+            16,
+            0,
+            16,
+            16,
+            262_144,
+            262_144,
+            0,
+            0,
+            &[],
+            0,
+            0,
+            0,
+            0,
+        );
         // Each metric must have a # HELP and a # TYPE line.
         for name in ALL_METRIC_NAMES {
             let help_line = format!("# HELP {name}");
@@ -794,7 +836,7 @@ mod tests {
     fn renders_zero_state() {
         // All-zero state: DB unreachable, audit disabled, no permits available,
         // pool saturated (0 idle).
-        let body = render_metrics_text(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, &[], 0, 0);
+        let body = render_metrics_text(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, &[], 0, 0, 0, 0);
         assert!(body.contains("\nbroker_db_schema_ready 0\n"));
         assert!(body.contains("\nbroker_db_reachable 0\n"));
         assert!(body.contains("\nbroker_audit_enabled 0\n"));
@@ -805,6 +847,8 @@ mod tests {
         assert!(body.contains("\nbroker_read_budget_kib_total 0\n"));
         assert!(body.contains("\nbroker_read_budget_kib_available 0\n"));
         assert!(body.contains("\nbroker_read_shed_total 0\n"));
+        assert!(body.contains("\nbroker_seccomp_profiles_cache_hits_total 0\n"));
+        assert!(body.contains("\nbroker_seccomp_profiles_cache_misses_total 0\n"));
         assert!(body.contains("\nbroker_uptime_seconds 0\n"));
         assert!(body.contains("\nkguardian_seccomp_denial_workloads 0\n"));
         assert!(body.contains("\nkguardian_seccomp_denial_rows_total 0\n"));
@@ -833,6 +877,8 @@ mod tests {
             &denial_series(),
             1,
             19,
+            40,
+            5,
         );
         assert!(body.contains("\nbroker_db_schema_ready 1\n"));
         assert!(body.contains("\nbroker_audit_inflight_available 16\n"));
@@ -846,6 +892,10 @@ mod tests {
         assert!(body.contains("\nbroker_read_budget_kib_total 262144\n"));
         assert!(body.contains("\nbroker_read_budget_kib_available 131072\n"));
         assert!(body.contains("\nbroker_read_shed_total 3\n"));
+        // 40 hits to 5 rebuilds: the ratio an operator reads to see the
+        // GET /seccomp/profiles cache absorbing the pollers.
+        assert!(body.contains("\nbroker_seccomp_profiles_cache_hits_total 40\n"));
+        assert!(body.contains("\nbroker_seccomp_profiles_cache_misses_total 5\n"));
         assert!(body.contains("\nbroker_uptime_seconds 12345\n"));
         // The labelled series, in full. Label ORDER is part of the assertion
         // on purpose: Prometheus does not care, but a dashboard's recording
@@ -1051,6 +1101,8 @@ mod tests {
             &denial_series(),
             1,
             19,
+            0,
+            0,
         );
         let mut saw_labelled = false;
         let mut saw_bare = false;
@@ -1163,6 +1215,8 @@ mod tests {
             &denial_series(),
             1,
             19,
+            0,
+            0,
         );
         let mut saw_namespace_label = false;
         let mut saw_series = false;

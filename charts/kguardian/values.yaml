@@ -620,6 +620,20 @@ broker:
     evalTimeoutMs: 500
 
   seccomp:
+    # -- Seconds the Broker serves the same rendered `GET /seccomp/profiles`
+    # body before rebuilding it from the database. It is the Broker's
+    # heaviest read (~3 MB and ~2.5s per call at ~2,000 workloads): every
+    # open UI tab polls it every 15s, and the Controller's seccomp
+    # distributor polled it every 30s per node until #1632 moved that to the
+    # per-workload route, which on a 44-node cluster meant ~90 rebuilds a
+    # minute and grew the Broker from 380 MiB to its 4 GiB limit until it
+    # OOM-looped. Within the TTL every caller gets the
+    # same bytes and concurrent misses wait for one rebuild. The cost is
+    # staleness: a SeccompProfile CR's deployment state or drift can lag
+    # this list by up to this many seconds (the per-workload
+    # `GET /seccomp/profiles/{ns}/{kind}/{name}` route is never cached).
+    # Broker default is 10 if unset. Set 0 to rebuild on every request.
+    profilesCacheTtlSeconds: 10
     denials:
       # -- Retention for the `seccomp_denials` table — the kernel-verdict
       # rows the broker ingests from `POST /seccomp/denials` (fed by the

@@ -18,7 +18,7 @@
 use std::time::Duration;
 
 use actix_web::{test, web, App};
-use api::ReadBudget;
+use api::{ReadBudget, SeccompProfilesCache};
 use diesel::r2d2::{self, ConnectionManager};
 use diesel::PgConnection;
 
@@ -147,6 +147,100 @@ sheds_when_budget_exhausted!(
     api::get_compute_nodes,
     "/compute/nodes"
 );
+
+/// `GET /seccomp/profiles` is deliberately NOT in the list above. Its charge
+/// is derived from two `COUNT(*)` queries that run *before* the permit (see
+/// `rebuild_profiles_body`), so against the unreachable pool it answers 500
+/// at the counts and the budget is never consulted; a database-free test
+/// cannot drive it to the shed. What can be pinned is the path its shed takes
+/// when it does happen: the rebuild runs behind `SeccompProfilesCache` as a
+/// `Result`, so the 503 travels as an `Err` via `BudgetExhausted::into_error`
+/// instead of being returned as a response. A handler that does exactly that
+/// stands in for the rebuild here, and must be indistinguishable on the wire
+/// from the direct 503 every other budgeted read returns.
+#[actix_web::test]
+async fn a_shed_carried_as_an_error_is_the_same_503_on_the_wire() {
+    #[actix_web::get("/shed")]
+    async fn shed_inside_result(budget: web::Data<ReadBudget>) -> actix_web::Result<String> {
+        match budget.acquire(1).await {
+            Ok(_permit) => Ok("admitted".to_string()),
+            Err(shed) => Err(shed.into_error()),
+        }
+    }
+
+    let (budget, _hog) = exhausted_budget().await;
+    let app = test::init_service(
+        App::new()
+            .app_data(budget.clone())
+            .service(shed_inside_result),
+    )
+    .await;
+
+    let resp = test::call_service(&app, test::TestRequest::get().uri("/shed").to_request()).await;
+
+    assert_eq!(
+        resp.status(),
+        actix_web::http::StatusCode::SERVICE_UNAVAILABLE,
+        "a shed converted to an Err must still be a 503, not actix's default 500"
+    );
+    assert_eq!(
+        resp.headers()
+            .get("Retry-After")
+            .and_then(|v| v.to_str().ok()),
+        Some("1"),
+        "Retry-After must survive the conversion"
+    );
+    let text = String::from_utf8_lossy(&test::read_body(resp).await).into_owned();
+    assert!(
+        text.contains("REFUSED, not truncated"),
+        "the shed body must survive the conversion, got: {text}"
+    );
+    assert_eq!(budget.get_ref().shed_count(), 1);
+}
+
+/// With budget available `GET /seccomp/profiles` is admitted through its
+/// cache to the database (which fails, because there isn't one): a 500 here
+/// proves the cache is not answering from nothing on a cold start and that
+/// the route is wired with every `app_data` it needs — a missing one would
+/// also be a 500, so the shed counter and a second, cached-TTL-zero pass pin
+/// that it really reached the rebuild each time.
+#[actix_web::test]
+async fn seccomp_profiles_is_admitted_through_its_cache_when_budget_is_available() {
+    let budget = web::Data::new(ReadBudget::with_budget_kib(
+        1024 * 1024,
+        Duration::from_millis(0),
+    ));
+    let cache = web::Data::new(SeccompProfilesCache::new(Duration::ZERO));
+    let app = test::init_service(
+        App::new()
+            .app_data(web::Data::new(unreachable_pool()))
+            .app_data(budget.clone())
+            .app_data(cache.clone())
+            .service(api::list_seccomp_profiles),
+    )
+    .await;
+
+    for _ in 0..2 {
+        let resp = test::call_service(
+            &app,
+            test::TestRequest::get()
+                .uri("/seccomp/profiles")
+                .to_request(),
+        )
+        .await;
+        assert_eq!(
+            resp.status(),
+            actix_web::http::StatusCode::INTERNAL_SERVER_ERROR,
+            "with budget free the rebuild must be admitted and fail at the DB, not be shed"
+        );
+    }
+    assert_eq!(budget.get_ref().shed_count(), 0);
+    assert_eq!(
+        cache.get_ref().misses(),
+        2,
+        "each call reached the rebuild; nothing was served from an empty cache"
+    );
+}
 
 /// The complement of the shed tests: with budget available, the request is
 /// admitted and proceeds to the database (which then fails, because there

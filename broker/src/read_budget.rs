@@ -369,6 +369,16 @@ impl BudgetExhausted {
                 self.waited.as_millis()
             ))
     }
+
+    /// The same 503, as an `actix_web::Error`, for a shed that happens inside
+    /// a helper returning `Result` rather than directly in a handler (the
+    /// `GET /seccomp/profiles` rebuild behind its cache). The response is
+    /// carried verbatim, so status, `Retry-After` and body reach the client
+    /// exactly as [`Self::into_response`] renders them, and because it is an
+    /// `Err` nothing upstream caches it.
+    pub fn into_error(self) -> actix_web::Error {
+        actix_web::error::InternalError::from_response("read shed", self.into_response()).into()
+    }
 }
 
 impl std::fmt::Display for BudgetExhausted {
