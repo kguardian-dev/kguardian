@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.15.1](https://github.com/kguardian-dev/kguardian/compare/controller/v1.15.0...controller/v1.15.1) (2026-09-23)
+
+
+### Bug Fixes
+
+* **controller:** read one broker profile per CR instead of the cluster list every pass ([#1632](https://github.com/kguardian-dev/kguardian/issues/1632)) ([89a74de](https://github.com/kguardian-dev/kguardian/commit/89a74def897702056c6d2d24fe0a45b0af6ba171))
+
 ## [1.15.0](https://github.com/kguardian-dev/kguardian/compare/controller/v1.14.0...controller/v1.15.0) (2026-09-14)
 
 
