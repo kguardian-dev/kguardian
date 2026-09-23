@@ -1,5 +1,14 @@
 # Changelog
 
+## [1.18.2](https://github.com/kguardian-dev/kguardian/compare/broker/v1.18.1...broker/v1.18.2) (2026-09-23)
+
+
+### Bug Fixes
+
+* **broker:** cache the GET /seccomp/profiles body so pollers share one rebuild ([dc40064](https://github.com/kguardian-dev/kguardian/commit/dc400642f62e90f62fc70ac332ba351f5c0fba94))
+* **broker:** cache the GET /seccomp/profiles body so pollers share one rebuild ([a8d0abe](https://github.com/kguardian-dev/kguardian/commit/a8d0abeaecfd1f2929cf1dbfd120138a853438ea))
+* **broker:** prune node_compute_latest rows for nodes that left the cluster ([#1631](https://github.com/kguardian-dev/kguardian/issues/1631)) ([2d48b44](https://github.com/kguardian-dev/kguardian/commit/2d48b445fb2e16b15d3e816544d839cb6140f4dd))
+
 ## [1.18.1](https://github.com/kguardian-dev/kguardian/compare/broker/v1.18.0...broker/v1.18.1) (2026-09-16)
 
 
