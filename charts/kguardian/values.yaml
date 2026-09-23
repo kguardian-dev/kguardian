@@ -41,7 +41,7 @@ controller:
     # -- Controller image pull policy
     pullPolicy: IfNotPresent
     # -- Controller version tag (auto-updated by release-please)
-    tag: "1.15.0"
+    tag: "1.15.1"
     # -- Overrides the image tag using SHA digest
     sha: ""
   initContainer:
@@ -452,7 +452,7 @@ broker:
     # -- Broker image pull policy
     pullPolicy: IfNotPresent
     # -- Broker version tag (auto-updated by release-please)
-    tag: "1.18.1"
+    tag: "1.18.2"
     # -- Overrides the image tag using SHA digest
     sha: ""
   initContainer:
@@ -1385,7 +1385,7 @@ llmBridge:
     # -- LLM Bridge image pull policy
     pullPolicy: IfNotPresent
     # -- LLM Bridge version tag (auto-updated by release-please)
-    tag: "1.11.1"
+    tag: "1.11.2"
     # -- Overrides the image tag using SHA digest
     sha: ""
 
