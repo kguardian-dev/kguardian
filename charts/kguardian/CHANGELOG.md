@@ -1,5 +1,21 @@
 # Changelog
 
+## [1.26.0](https://github.com/kguardian-dev/kguardian/compare/chart/v1.25.0...chart/v1.26.0) (2026-09-23)
+
+
+### Features
+
+* **chart:** add broker.seccomp.profilesCacheTtlSeconds ([1d46583](https://github.com/kguardian-dev/kguardian/commit/1d46583f925049593caca814278da954e1504bfa))
+* **chart:** move to broker 1.18.2, controller 1.15.1 and llm-bridge 1.11.2 ([#1636](https://github.com/kguardian-dev/kguardian/issues/1636)) ([915a490](https://github.com/kguardian-dev/kguardian/commit/915a4908ccbf2142292b300c8543dd1eecdd9188))
+
+
+### Bug Fixes
+
+* **broker:** cache the GET /seccomp/profiles body so pollers share one rebuild ([dc40064](https://github.com/kguardian-dev/kguardian/commit/dc400642f62e90f62fc70ac332ba351f5c0fba94))
+* **controller:** read one broker profile per CR instead of the cluster list every pass ([#1632](https://github.com/kguardian-dev/kguardian/issues/1632)) ([89a74de](https://github.com/kguardian-dev/kguardian/commit/89a74def897702056c6d2d24fe0a45b0af6ba171))
+* **deps:** update ghcr.io/kguardian-dev/kguardian/frontend docker tag to v1.19.0 - abandoned ([#1610](https://github.com/kguardian-dev/kguardian/issues/1610)) ([fa55da0](https://github.com/kguardian-dev/kguardian/commit/fa55da0d5b5322b9860146a1eed7dd348f9b1ca8))
+* **deps:** update ghcr.io/kguardian-dev/kguardian/llm-bridge docker tag to v1.11.1 - abandoned ([#1609](https://github.com/kguardian-dev/kguardian/issues/1609)) ([980434c](https://github.com/kguardian-dev/kguardian/commit/980434c069e70ec5a90f9302aa89a6f5eccb6db8))
+
 ## [1.25.0](https://github.com/kguardian-dev/kguardian/compare/chart/v1.24.0...chart/v1.25.0) (2026-09-16)
 
 
