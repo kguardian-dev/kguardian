@@ -272,7 +272,9 @@ seccomp:
   # OpenShift differ.
   kubeletRoot: /var/lib/kubelet
   # -- Seconds between full resyncs of the `SeccompProfile` watch (the watch
-  # itself reacts to changes immediately). Empty uses the controller default (30).
+  # itself reacts to changes immediately). A resync lists nodes once and reads
+  # one Broker profile per distinct `workloadRef`; with no `SeccompProfile`
+  # objects it reads nothing. Empty uses the controller default (30).
   distributeIntervalSeconds: ""
 
   # -- Capture the kernel's own seccomp verdicts and turn them into a

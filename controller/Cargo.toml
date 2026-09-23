@@ -32,6 +32,7 @@ uuid = { version = "1.21.0", features = ["v4"]}
 chrono = { version = "0.4.43", features = ["serde"] }
 openssl = { version = "0.10.73", features = ["vendored"] }
 lazy_static = "1.5.0"
+percent-encoding = "2"
 libc = "0.2"
 libseccomp = "0.4"
 moka = { version = "0.12.13", features = ["future"]}

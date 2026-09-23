@@ -13,6 +13,24 @@
 //! `seccompprofiles` (get/list/watch), `seccompprofiles/status` (patch)
 //! and `nodes` (list).
 //!
+//! Every pass lists the nodes once (the `total` in `distribution`) and
+//! asks the broker about each workload a CR references — one
+//! `GET /seccomp/profiles/{ns}/{kind}/{name}` per distinct `workloadRef`,
+//! however many CRs share it. A pass over an empty store asks for
+//! neither and only posts this node's (empty) file list. It used to pull
+//! the cluster-wide `GET /seccomp/profiles` on every pass, CRs or not:
+//! megabytes of JSON per node per resync on a large cluster, against a
+//! handler that retains memory per call (see `list_seccomp_profiles` in
+//! the broker) — enough to OOMKill the broker when distribution was
+//! switched on for a fleet that had no CRs at all.
+//!
+//! What a resync now costs the broker is distinct `workloadRef`s × nodes
+//! requests, each detail call a handful of queries. That is the right
+//! trade from zero to tens of CRs, which is where every fleet starts and
+//! where the list was pure waste. Once CR counts grow past that, the
+//! follow-up is a batched lookup by key — one request carrying every
+//! referenced workload — not a return to the cluster-wide list.
+//!
 //! Per CR, every pass:
 //!  1. render the file from spec, write it atomically only when the bytes
 //!     on disk differ;
@@ -50,15 +68,17 @@ use crate::seccomp_crd::{
 };
 use crate::Error;
 use chrono::{DateTime, SecondsFormat, Utc};
+use futures::future::BoxFuture;
 use futures::StreamExt;
 use k8s_openapi::api::core::v1::Node;
 use kube::api::{ListParams, Patch, PatchParams};
 use kube::runtime::reflector::{self, Store};
 use kube::runtime::{watcher, WatchStreamExt};
 use kube::{Api, Client, ResourceExt};
+use percent_encoding::{utf8_percent_encode, AsciiSet, NON_ALPHANUMERIC};
 use serde::Deserialize;
 use serde_json::json;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 use tracing::{debug, error, info, warn};
@@ -172,6 +192,8 @@ pub async fn run() -> Result<(), Error> {
         client,
         store,
         cluster: None,
+        fetch: |key| Box::pin(fetch_workload(key)),
+        last_total_nodes: 0,
     };
 
     let mut ticker = tokio::time::interval(rec.cfg.interval);
@@ -226,9 +248,16 @@ pub async fn run() -> Result<(), Error> {
                             // resync, not once per event. Another node's
                             // status write arrives here as an Apply, so
                             // refreshing per event would have every node
-                            // list nodes and poll the broker once per
-                            // node per write. The reading this path uses
-                            // is therefore up to `interval` old, which
+                            // list nodes and re-read the broker once per
+                            // node per write. Instead the node count is
+                            // taken here only when no pass has one yet,
+                            // and a workload's broker reading is taken
+                            // the first time a CR naming it is reconciled
+                            // after a refresh and reused until the next —
+                            // so a replayed Apply costs the broker
+                            // nothing and a brand-new CR costs it one
+                            // read. The reading this path uses is
+                            // therefore up to `interval` old, which
                             // `settled_denials` is built to tolerate: a
                             // stale reading can only lose the ratchet,
                             // never overwrite a fresher one.
@@ -279,26 +308,217 @@ fn cr_id(cr: &SeccompProfile) -> String {
 }
 
 /// Cluster-wide inputs refreshed once per pass: how many nodes exist
-/// (the `total` in `distribution`) and what the broker has observed
-/// (for `CaptureComplete` / `Drift` / `DenialsObserved`). `summaries` is
-/// `None` when the broker could not be reached, in which case those
-/// three conditions — and `status.denials` — are left as they are rather
-/// than flapping to `Unknown`.
+/// (the `total` in `distribution`) and what the broker has said about
+/// each workload a CR references (for `CaptureComplete` / `Drift` /
+/// `DenialsObserved`). Held only while there is a CR to spend them on —
+/// `None` after a pass over an empty store — so the first CR to arrive
+/// after a quiet spell gets a node count taken now, not one from
+/// whenever CRs last existed (or, if that list fails, the last count a
+/// list did return; see `Reconciler::last_total_nodes`).
 struct ClusterData {
     total_nodes: u32,
-    summaries: Option<Vec<BrokerSummary>>,
+    readings: BrokerReadings,
 }
+
+/// `(namespace, kind, name)` of a CR's workload: the key the broker's
+/// rows carry, and the path `GET /seccomp/profiles/{ns}/{kind}/{name}`
+/// takes. The namespace is the CR's own — a `workloadRef` names only a
+/// kind and a name, because a CR speaks for its own namespace and no
+/// other.
+type WorkloadKey = (String, String, String);
+
+fn workload_key(ns: &str, wr: &WorkloadRef) -> WorkloadKey {
+    (
+        ns.to_string(),
+        wr.kind.as_str().to_string(),
+        wr.name.clone(),
+    )
+}
+
+/// `Deployment prod/web`, the spelling the condition messages use.
+fn workload_id((ns, kind, name): &WorkloadKey) -> String {
+    format!("{kind} {ns}/{name}")
+}
+
+/// One workload, as the broker answered when this pass asked.
+///
+/// Three answers, because the CR's conditions have three outcomes and
+/// the outcomes must not blur into each other: a row decides them; a 404
+/// means the broker has no observed set for the workload, which is
+/// `NoObservations`; anything else means the broker could not be asked,
+/// and the conditions are carried forward as they are. The same three
+/// used to fall out of one cluster-wide list — a row present, a row
+/// absent, no list at all — and `observation_conditions` still reads
+/// that shape, so `summaries` renders each answer as the zero-or-one-row
+/// list it would have found there.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum BrokerReading {
+    /// Boxed because a row is a few hundred bytes and the other two
+    /// answers carry nothing; the cache holds one of these per workload.
+    Observed(Box<BrokerSummary>),
+    Unobserved,
+    Unavailable,
+}
+
+impl BrokerReading {
+    /// From the raw answer to `GET /seccomp/profiles/{ns}/{kind}/{name}`.
+    ///
+    /// A body that does not parse is `Unavailable`, not `Unobserved`: the
+    /// broker plainly knows the workload, this controller just cannot
+    /// read what it said, and flipping three conditions to `Unknown` over
+    /// that would be the flap a parse failure of the cluster list was
+    /// already kept from causing.
+    fn from_response(key: &WorkloadKey, response: Result<Option<Vec<u8>>, Error>) -> Self {
+        match response {
+            Ok(Some(body)) => match serde_json::from_slice::<BrokerSummary>(&body) {
+                Ok(row) => Self::Observed(Box::new(row)),
+                Err(e) => {
+                    warn!(workload = %workload_id(key), "parsing the broker's seccomp profile: {e}");
+                    Self::Unavailable
+                }
+            },
+            Ok(None) => Self::Unobserved,
+            Err(e) => {
+                debug!(
+                    workload = %workload_id(key),
+                    "broker seccomp profile unavailable (conditions kept as-is): {e}"
+                );
+                Self::Unavailable
+            }
+        }
+    }
+
+    /// The reading as the list `observation_conditions` finds a row in:
+    /// one row, no row, or no list.
+    fn summaries(&self) -> Option<&[BrokerSummary]> {
+        match self {
+            Self::Observed(row) => Some(std::slice::from_ref(row.as_ref())),
+            Self::Unobserved => Some(&[]),
+            Self::Unavailable => None,
+        }
+    }
+}
+
+/// What this pass has asked the broker so far, one entry per distinct
+/// workload. Emptied when the node count is refreshed, so a reading is
+/// at most one resync old — the age the cluster list used to be — and is
+/// taken at most once per resync however many CRs reference the workload
+/// and however many watch events replay them.
+#[derive(Debug, Default)]
+struct BrokerReadings {
+    by_workload: BTreeMap<WorkloadKey, BrokerReading>,
+    /// Set by the first fetch this pass that fails outright. From then on
+    /// every workload not already read answers `Unavailable` without a
+    /// request; see `get_or_fetch`.
+    broker_down: bool,
+}
+
+/// What the latch hands out. A `static` rather than a `const` because
+/// `BrokerReading` owns a `Box` in one arm, so a borrowed `const` would
+/// be a temporary and not promote to `'static`.
+static UNAVAILABLE: BrokerReading = BrokerReading::Unavailable;
+
+impl BrokerReadings {
+    /// The reading for `key`, asking the broker through `fetch` only when
+    /// this pass has not asked yet. A 404 is kept like a row: a workload
+    /// nobody has observed is not re-asked per CR.
+    ///
+    /// A failure is not retried within the pass either, and it does more
+    /// than cache: it latches `broker_down`, and every workload not yet
+    /// read this pass then answers `Unavailable` without a request. The
+    /// reason is the timeout. Fetches run one after another inside the
+    /// per-CR loop, and `run` handles no watch events while a pass is in
+    /// progress, so against a broker that accepts and never answers each
+    /// fetch costs a whole `REQUEST_TIMEOUT`: twenty distinct workloads
+    /// would hold the pass, and every new CR waiting behind it, for ten
+    /// minutes. The cluster list cost one timeout per pass, and the latch
+    /// keeps that bound. The skipped workloads get the outcome a failed
+    /// fetch gives anyway — conditions carried forward — and the next
+    /// pass starts clean and asks again.
+    ///
+    /// A body that does not parse does not latch: the broker answered.
+    ///
+    /// `fetch` is a parameter rather than `fetch_workload` itself so a
+    /// test can count what a pass actually asks for.
+    async fn get_or_fetch<F, Fut>(&mut self, key: WorkloadKey, fetch: F) -> &BrokerReading
+    where
+        F: FnOnce(WorkloadKey) -> Fut,
+        Fut: std::future::Future<Output = Result<Option<Vec<u8>>, Error>>,
+    {
+        if self.by_workload.contains_key(&key) {
+            return &self.by_workload[&key];
+        }
+        if self.broker_down {
+            debug!(
+                workload = %workload_id(&key),
+                "broker already failed this pass; not asked (conditions kept as-is)"
+            );
+            return &UNAVAILABLE;
+        }
+        let response = fetch(key.clone()).await;
+        if response.is_err() {
+            self.broker_down = true;
+        }
+        let reading = BrokerReading::from_response(&key, response);
+        self.by_workload.insert(key.clone(), reading);
+        &self.by_workload[&key]
+    }
+
+    /// Requests this pass sent, latched answers excluded.
+    fn len(&self) -> usize {
+        self.by_workload.len()
+    }
+}
+
+/// Everything outside RFC 3986's unreserved set is escaped in a path
+/// segment. `workloadRef.name` is a bare string in the CRD — the schema
+/// puts no pattern on it — so a `/` or `?` in a name must reach the
+/// broker as data inside one segment, not as another route or a query.
+const PATH_SEGMENT: &AsciiSet = &NON_ALPHANUMERIC
+    .remove(b'-')
+    .remove(b'.')
+    .remove(b'_')
+    .remove(b'~');
+
+/// `seccomp/profiles/{ns}/{kind}/{name}`, each component escaped.
+fn workload_path((ns, kind, name): &WorkloadKey) -> String {
+    let seg = |s: &str| utf8_percent_encode(s, PATH_SEGMENT).to_string();
+    format!("seccomp/profiles/{}/{}/{}", seg(ns), seg(kind), seg(name))
+}
+
+/// `GET /seccomp/profiles/{ns}/{kind}/{name}`: one workload's row, as the
+/// cluster-wide list would carry it, plus a rendered `profile` the
+/// controller ignores.
+async fn fetch_workload(key: WorkloadKey) -> Result<Option<Vec<u8>>, Error> {
+    api_get_bytes(&workload_path(&key)).await
+}
+
+/// The reconciler's one outbound broker read: `fetch_workload` in
+/// production. Injectable so a test can stand in a broker that answers
+/// — or one that never does — without a listener or `API_ENDPOINT`,
+/// which is process-wide.
+type WorkloadFetch = fn(WorkloadKey) -> BoxFuture<'static, Result<Option<Vec<u8>>, Error>>;
 
 struct Reconciler {
     cfg: Config,
     client: Client,
     store: Store<SeccompProfile>,
     cluster: Option<ClusterData>,
+    fetch: WorkloadFetch,
+    /// The last node count a list returned, standing in when the next
+    /// list fails. Kept here rather than read back from `ClusterData`
+    /// because that is dropped after a pass over an empty store, and a
+    /// failed list on the pass after would otherwise fall back to zero:
+    /// `distribution` reading `n/0` and `Ready` flipping to `False` for
+    /// a pass, both mirrored to the broker.
+    last_total_nodes: u32,
 }
 
-/// One row of the broker's `GET /seccomp/profiles`. Only what the
-/// conditions need; everything is lenient so an older or newer broker
-/// still parses.
+/// One row of the broker's `GET /seccomp/profiles`, which is also the
+/// body of `GET /seccomp/profiles/{ns}/{kind}/{name}` — the same fields
+/// plus a rendered `profile` this controller has no use for. Only what
+/// the conditions need; everything is lenient so an older or newer
+/// broker still parses, and fields not named here fall away.
 #[derive(Debug, Default, Deserialize, Clone, PartialEq, Eq)]
 pub struct BrokerSummary {
     #[serde(default)]
@@ -391,39 +611,45 @@ pub struct BrokerDrift {
 }
 
 impl Reconciler {
+    /// Take a fresh node count and forget this pass's broker readings.
+    /// The readings are not fetched here: `reconcile_cr` asks for each
+    /// CR's workload as it gets to it, so a pass reads exactly the
+    /// workloads its CRs name, and nothing when they name none.
     async fn refresh_cluster(&mut self) {
         let nodes: Api<Node> = Api::all(self.client.clone());
         let total_nodes = match nodes.list_metadata(&ListParams::default()).await {
-            Ok(list) => list.items.len() as u32,
+            Ok(list) => {
+                self.last_total_nodes = list.items.len() as u32;
+                self.last_total_nodes
+            }
             Err(e) => {
                 warn!("cannot list nodes for seccomp distribution totals: {e}");
-                self.cluster.as_ref().map(|c| c.total_nodes).unwrap_or(0)
-            }
-        };
-        let summaries = match api_get_bytes("seccomp/profiles").await {
-            Ok(body) => match serde_json::from_slice::<Vec<BrokerSummary>>(&body) {
-                Ok(s) => Some(s),
-                Err(e) => {
-                    warn!("parsing /seccomp/profiles: {e}");
-                    None
-                }
-            },
-            Err(e) => {
-                debug!("broker /seccomp/profiles unavailable (conditions kept as-is): {e}");
-                None
+                self.last_total_nodes
             }
         };
         self.cluster = Some(ClusterData {
             total_nodes,
-            summaries,
+            readings: BrokerReadings::default(),
         });
     }
 
-    /// Resync: refresh cluster inputs, reconcile every CR in the
-    /// reflector store, then report this node's files to the broker.
+    /// Resync: reconcile every CR in the reflector store, then report
+    /// this node's files to the broker.
+    ///
+    /// Cluster inputs are refreshed only when there is a CR to use them
+    /// on. Nothing else in the pass needs them — `report_node_status`
+    /// posts this node's file list and nothing more — and on a fleet with
+    /// distribution enabled and no CRs yet, which is every fleet for a
+    /// while, they used to be the entire cost of the feature: one node
+    /// list and one cluster-wide profile list per node per resync, for
+    /// nobody.
     async fn full_pass(&mut self) {
-        self.refresh_cluster().await;
         let crs = self.store.state();
+        if crs.is_empty() {
+            self.cluster = None;
+        } else {
+            self.refresh_cluster().await;
+        }
         let mut present: Vec<(String, String)> = Vec::new();
         let mut failed = 0usize;
         for cr in &crs {
@@ -440,6 +666,7 @@ impl Reconciler {
             crs = crs.len(),
             present = present.len(),
             failed,
+            broker_reads = self.cluster.as_ref().map_or(0, |c| c.readings.len()),
             "seccomp profile distribution pass"
         );
         self.report_node_status(&present).await;
@@ -447,7 +674,10 @@ impl Reconciler {
 
     /// Bring one CR's file, status and broker mirror up to date. Returns
     /// the `(localhostProfile, hash)` now on disk.
-    async fn reconcile_cr(&self, cr: &SeccompProfile) -> Result<Option<(String, String)>, Error> {
+    async fn reconcile_cr(
+        &mut self,
+        cr: &SeccompProfile,
+    ) -> Result<Option<(String, String)>, Error> {
         let Some(ns) = cr.namespace() else {
             warn!(name = %cr.name_any(), "SeccompProfile without a namespace; skipped");
             return Ok(None);
@@ -492,9 +722,23 @@ impl Reconciler {
             nodes_view.push(desired);
         }
 
-        // 3. The summary (only when it changed).
+        // 3. The summary (only when it changed). The broker is asked about
+        // this CR's workload here, through the pass's cache, so the first
+        // CR naming a workload pays for the read and the rest of the pass
+        // reuses it. Without a `workloadRef` there is nothing to ask and
+        // `observation_conditions` says so on its own; without cluster
+        // inputs at all — not a path either caller takes — the broker
+        // counts as unreachable and the conditions carry forward.
         let total = self.cluster.as_ref().map(|c| c.total_nodes).unwrap_or(0);
-        let summaries = self.cluster.as_ref().and_then(|c| c.summaries.as_deref());
+        let fetch = self.fetch;
+        let summaries = match (cr.spec.workload_ref.as_ref(), self.cluster.as_mut()) {
+            (Some(wr), Some(cluster)) => cluster
+                .readings
+                .get_or_fetch(workload_key(&ns, wr), fetch)
+                .await
+                .summaries(),
+            _ => None,
+        };
         let desired = desired_summary(
             cr,
             &status,
@@ -1486,6 +1730,68 @@ mod tests {
             actions: vec!["SCMP_ACT_LOG".into()],
             last_seen: Some("2026-09-14T04:05:14Z".into()),
         }
+    }
+
+    fn key(ns: &str, name: &str) -> WorkloadKey {
+        (ns.into(), "Deployment".into(), name.into())
+    }
+
+    fn web_ref() -> WorkloadRef {
+        WorkloadRef {
+            kind: WorkloadKind::Deployment,
+            name: "web".into(),
+        }
+    }
+
+    /// A fresh directory under the system temp dir for a `Reconciler` to
+    /// write profiles into. Callers remove it.
+    fn test_root(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("kg-seccomp-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        dir
+    }
+
+    /// A `Reconciler` whose kube client points at a closed loopback port,
+    /// so every API-server call fails fast, whose node name is empty, so
+    /// no per-node status is applied before the broker is consulted, and
+    /// whose broker is `fetch`. Enough to run `full_pass` and see what it
+    /// decides to ask for.
+    async fn offline_reconciler(
+        root: PathBuf,
+        fetch: WorkloadFetch,
+    ) -> (Reconciler, reflector::store::Writer<SeccompProfile>) {
+        // What `main` does at startup; kube's client construction needs a
+        // rustls provider even for a plain-http server. `Err` means another
+        // test got there first.
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let kubeconfig = kube::config::Kubeconfig::from_yaml(
+            "apiVersion: v1\nkind: Config\ncurrent-context: dead\n\
+             clusters:\n- name: dead\n  cluster:\n    server: http://127.0.0.1:1\n\
+             contexts:\n- name: dead\n  context:\n    cluster: dead\n    user: nobody\n\
+             users:\n- name: nobody\n  user: {}\n",
+        )
+        .expect("kubeconfig");
+        let config = kube::Config::from_custom_kubeconfig(
+            kubeconfig,
+            &kube::config::KubeConfigOptions::default(),
+        )
+        .await
+        .expect("config");
+        let client = Client::try_from(config).expect("client");
+        let (store, writer) = reflector::store();
+        let rec = Reconciler {
+            cfg: Config {
+                root,
+                interval: DEFAULT_INTERVAL,
+                node_name: String::new(),
+            },
+            client,
+            store,
+            cluster: None,
+            fetch,
+            last_total_nodes: 0,
+        };
+        (rec, writer)
     }
 
     #[test]
@@ -2694,6 +3000,354 @@ mod tests {
         let old = r#"[{"namespace":"prod","kind":"Deployment","name":"web"}]"#;
         let v: Vec<BrokerSummary> = serde_json::from_str(old).unwrap();
         assert!(v[0].denials.is_none());
+    }
+
+    /// The body of `GET /seccomp/profiles/{ns}/{kind}/{name}` is a list
+    /// row plus a rendered `profile`. It must parse into the same
+    /// `BrokerSummary` the row does, with the extra field falling away,
+    /// or moving from the list to per-workload reads would blind every
+    /// condition at once.
+    #[test]
+    fn a_per_workload_body_reads_as_the_row_it_contains() {
+        let body = br#"{"namespace":"prod","kind":"Deployment","name":"web","hash":"x",
+            "syscallCount":3,"architectures":["SCMP_ARCH_X86_64"],
+            "capture":{"level":"full","complete":true,"pods":[{"name":"w","level":"full"}],"more":0},
+            "captureComplete":true,"suggestedName":"deployment-web","crCount":1,
+            "cr":{"name":"deployment-web","drift":{"missing":[],"extra":[],"inSync":true}},
+            "denials":{"total":0,"syscalls":[],"actions":[],"lastSeen":null},
+            "recommendedSnippet":{},
+            "profile":{"defaultAction":"SCMP_ACT_LOG","architectures":["SCMP_ARCH_X86_64"],
+                       "syscalls":[{"names":["read","write"],"action":"SCMP_ACT_ALLOW"}]}}"#;
+        let reading = BrokerReading::from_response(&key("prod", "web"), Ok(Some(body.to_vec())));
+        let BrokerReading::Observed(row) = &reading else {
+            panic!("a 200 with a row is an observation, got {reading:?}");
+        };
+        assert_eq!(
+            (row.namespace.as_str(), row.kind.as_str(), row.name.as_str()),
+            ("prod", "Deployment", "web")
+        );
+
+        let o = observation_conditions(
+            "prod",
+            "deployment-web",
+            Some(&web_ref()),
+            reading.summaries(),
+            None,
+            NOW,
+        )
+        .expect("a row decides the conditions");
+        assert_eq!((o.capture.status, o.capture.reason), ("True", "Full"));
+        assert_eq!((o.drift.status, o.drift.reason), ("False", "InSync"));
+        assert_eq!((o.denials.status, o.denials.reason), ("False", "NoDenials"));
+    }
+
+    /// A 404 is the broker saying it has never observed the workload.
+    /// That is exactly what a row missing from the cluster-wide list
+    /// meant, and it must land on the same conditions — `Unknown` /
+    /// `NoObservations` on all three — rather than be carried forward as
+    /// if the broker were down, which would freeze a CR's conditions for
+    /// as long as its workload stays unobserved.
+    #[test]
+    fn an_unknown_workload_is_no_observations_not_an_outage() {
+        let reading = BrokerReading::from_response(&key("prod", "web"), Ok(None));
+        assert_eq!(reading, BrokerReading::Unobserved);
+
+        let wr = web_ref();
+        let from_404 = observation_conditions(
+            "prod",
+            "deployment-web",
+            Some(&wr),
+            reading.summaries(),
+            None,
+            NOW,
+        )
+        .expect("a 404 decides the conditions");
+        let from_absent_row = observation_conditions(
+            "prod",
+            "deployment-web",
+            Some(&wr),
+            Some(&[summary_row("prod", "api", true, None)]),
+            None,
+            NOW,
+        )
+        .expect("an absent row decides the conditions");
+        assert_eq!(from_404, from_absent_row);
+        for c in [&from_404.capture, &from_404.drift, &from_404.denials] {
+            assert_eq!((c.status, c.reason), ("Unknown", "NoObservations"));
+        }
+        assert!(from_404.denial_summary.is_none());
+    }
+
+    /// Anything else — the broker down, a 5xx, a body this controller
+    /// cannot read — is the broker not answering, and the three
+    /// observation conditions and `status.denials` are carried forward
+    /// untouched, as an outage of the cluster list always was.
+    #[test]
+    fn a_failed_or_unreadable_read_leaves_the_conditions_alone() {
+        let k = key("prod", "web");
+        let down = BrokerReading::from_response(&k, Err(Error::ApiError("refused".into())));
+        let garbage =
+            BrokerReading::from_response(&k, Ok(Some(b"<html>bad gateway</html>".to_vec())));
+        assert_eq!(down, BrokerReading::Unavailable);
+        assert_eq!(garbage, BrokerReading::Unavailable);
+        assert!(down.summaries().is_none());
+
+        let c = cr("prod", "deployment-web", Some("web"));
+        let path = "kguardian/prod/deployment-web.json";
+        let nodes = [node("a", "h1")];
+        let rows = [with_denials(
+            summary_row("prod", "web", true, None),
+            denials(17, &["ptrace"]),
+        )];
+        let first = desired_summary(
+            &c,
+            &SeccompProfileStatus::default(),
+            &nodes,
+            "h1",
+            path,
+            1,
+            Some(&rows),
+        );
+        let during = desired_summary(&c, &first, &nodes, "h1", path, 1, down.summaries());
+        assert!(
+            summary_equal(&first, &during),
+            "an outage changes nothing, so nothing is applied"
+        );
+        assert_eq!(during.denials.as_ref().map(|d| d.observed), Some(17));
+    }
+
+    /// One read per distinct workload per pass. Several CRs naming the
+    /// same workload, and the watch replaying a CR after another node's
+    /// status write, all land on the cached reading — and a 404 or a
+    /// failure is cached too, so neither is retried for the next CR.
+    #[tokio::test]
+    async fn a_pass_asks_the_broker_once_per_workload() {
+        let asked = std::cell::RefCell::new(Vec::<WorkloadKey>::new());
+        let record = |k: WorkloadKey, answer: Result<Option<Vec<u8>>, Error>| {
+            asked.borrow_mut().push(k);
+            async move { answer }
+        };
+        let body = serde_json::to_vec(&json!({
+            "namespace": "prod", "kind": "Deployment", "name": "web",
+            "capture": {"level": "full", "complete": true, "pods": []},
+            "profile": {}
+        }))
+        .unwrap();
+        let (web, api, db) = (key("prod", "web"), key("prod", "api"), key("prod", "db"));
+        let mut readings = BrokerReadings::default();
+
+        // Two CRs name `web`: one read, and both see the row.
+        let first = readings
+            .get_or_fetch(web.clone(), |k| record(k, Ok(Some(body.clone()))))
+            .await
+            .clone();
+        let again = readings
+            .get_or_fetch(web.clone(), |k| {
+                record(k, Err(Error::ApiError("must not be asked".into())))
+            })
+            .await
+            .clone();
+        assert!(matches!(first, BrokerReading::Observed(_)), "{first:?}");
+        assert_eq!(again, first, "the second CR reuses the first CR's reading");
+        assert_eq!(asked.borrow().as_slice(), std::slice::from_ref(&web));
+
+        // A 404 is kept: the next CR naming `api` does not ask again.
+        let r = readings
+            .get_or_fetch(api.clone(), |k| record(k, Ok(None)))
+            .await
+            .clone();
+        assert_eq!(r, BrokerReading::Unobserved);
+        let r = readings
+            .get_or_fetch(api.clone(), |k| record(k, Ok(Some(body.clone()))))
+            .await
+            .clone();
+        assert_eq!(r, BrokerReading::Unobserved);
+        assert_eq!(asked.borrow().as_slice(), [web.clone(), api.clone()]);
+
+        // So is a failure (which also latches the pass; next test).
+        let r = readings
+            .get_or_fetch(db.clone(), |k| {
+                record(k, Err(Error::ApiError("down".into())))
+            })
+            .await
+            .clone();
+        assert_eq!(r, BrokerReading::Unavailable);
+        let r = readings
+            .get_or_fetch(db.clone(), |k| record(k, Ok(None)))
+            .await
+            .clone();
+        assert_eq!(r, BrokerReading::Unavailable);
+        assert_eq!(asked.borrow().len(), 3);
+        assert_eq!(readings.len(), 3);
+
+        // A refresh starts the pass over, and the next CR asks again.
+        let mut readings = BrokerReadings::default();
+        readings
+            .get_or_fetch(web.clone(), |k| record(k, Ok(None)))
+            .await;
+        assert_eq!(asked.borrow().len(), 4);
+    }
+
+    /// The latch. Against a broker that accepts and never answers, every
+    /// fetch costs a full request timeout and fetches run one after
+    /// another inside the pass — so after the first failure the rest of
+    /// the pass's workloads answer `Unavailable` without a request: the
+    /// outcome a failed fetch gives them anyway, at one timeout per pass
+    /// instead of one per workload. An answer of any kind does not latch,
+    /// and a fresh pass asks again.
+    #[tokio::test]
+    async fn one_failure_stops_a_pass_asking_the_broker_again() {
+        let asked = std::cell::RefCell::new(Vec::<WorkloadKey>::new());
+        let record = |k: WorkloadKey, answer: Result<Option<Vec<u8>>, Error>| {
+            asked.borrow_mut().push(k);
+            async move { answer }
+        };
+        let keys: Vec<WorkloadKey> = (0..20).map(|i| key("prod", &format!("w{i}"))).collect();
+
+        let mut readings = BrokerReadings::default();
+        for k in &keys {
+            let r = readings
+                .get_or_fetch(k.clone(), |k| {
+                    record(k, Err(Error::ApiError("timed out".into())))
+                })
+                .await
+                .clone();
+            assert_eq!(r, BrokerReading::Unavailable);
+        }
+        assert_eq!(
+            asked.borrow().as_slice(),
+            std::slice::from_ref(&keys[0]),
+            "one attempt, then the latch"
+        );
+        assert_eq!(readings.len(), 1);
+
+        // A 404, a row, or a body that does not parse is the broker
+        // answering: no latch, the next workload is asked.
+        let mut readings = BrokerReadings::default();
+        readings
+            .get_or_fetch(keys[0].clone(), |k| record(k, Ok(None)))
+            .await;
+        readings
+            .get_or_fetch(keys[1].clone(), |k| {
+                record(k, Ok(Some(b"not json".to_vec())))
+            })
+            .await;
+        readings
+            .get_or_fetch(keys[2].clone(), |k| record(k, Ok(None)))
+            .await;
+        assert_eq!(asked.borrow().len(), 4);
+
+        // A new pass starts clean.
+        let mut readings = BrokerReadings::default();
+        readings
+            .get_or_fetch(keys[0].clone(), |k| {
+                record(k, Err(Error::ApiError("still down".into())))
+            })
+            .await;
+        assert_eq!(asked.borrow().len(), 5);
+    }
+
+    /// `workloadRef.name` is a bare string in the CRD. A name with a `/`
+    /// or `?` in it must reach the broker as one escaped path segment,
+    /// not as a different route or a query string; a plain name passes
+    /// through untouched.
+    #[test]
+    fn a_workload_path_escapes_anything_that_is_not_a_plain_segment() {
+        assert_eq!(
+            workload_path(&key("prod", "web-api.v2_x")),
+            "seccomp/profiles/prod/Deployment/web-api.v2_x"
+        );
+        assert_eq!(
+            workload_path(&(
+                "prod".into(),
+                "Deployment".into(),
+                "web/../admin?x=1&y".into()
+            )),
+            "seccomp/profiles/prod/Deployment/web%2F..%2Fadmin%3Fx%3D1%26y"
+        );
+    }
+
+    /// The pass every node runs every resync on a fleet with distribution
+    /// enabled and no CRs. It used to list the nodes and pull the
+    /// cluster-wide profile list each time — the list the broker OOMKilled
+    /// on — for CRs that did not exist. Now it takes no cluster inputs at
+    /// all: `cluster` stays `None`, which it could not if the node list
+    /// had run, because even a failed list records a count.
+    #[tokio::test]
+    async fn an_empty_store_takes_no_cluster_inputs() {
+        let root = test_root("empty-store");
+        let (mut rec, _writer) = offline_reconciler(root.clone(), |_| {
+            Box::pin(async { panic!("an empty store asks the broker for nothing") })
+        })
+        .await;
+        rec.full_pass().await;
+        assert!(
+            rec.cluster.is_none(),
+            "an empty store must not list nodes or read the broker"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The CRs behind the next two tests: two naming `web`, one naming
+    /// `api`, one naming nothing.
+    fn four_crs(writer: &mut reflector::store::Writer<SeccompProfile>) {
+        for c in [
+            cr("prod", "deployment-web", Some("web")),
+            cr("prod", "deployment-web-canary", Some("web")),
+            cr("prod", "deployment-api", Some("api")),
+            cr("prod", "unbound", None),
+        ] {
+            writer.apply_watcher_event(&watcher::Event::Apply(c));
+        }
+    }
+
+    /// With CRs in the store the pass takes its inputs per CR: the node
+    /// count once, and one broker read per distinct workload — two CRs
+    /// naming `web` share one, and a CR without a `workloadRef` asks for
+    /// nothing. The broker here answers 404 to everything, so each
+    /// reading is `Unobserved` and none of them latches.
+    #[tokio::test]
+    async fn a_pass_reads_one_workload_per_distinct_workload_ref() {
+        let root = test_root("per-cr");
+        let (mut rec, mut writer) =
+            offline_reconciler(root.clone(), |_| Box::pin(async { Ok(None) })).await;
+        four_crs(&mut writer);
+        rec.full_pass().await;
+        let cluster = rec
+            .cluster
+            .as_ref()
+            .expect("a store with CRs takes cluster inputs");
+        let asked: Vec<(&WorkloadKey, &BrokerReading)> =
+            cluster.readings.by_workload.iter().collect();
+        assert_eq!(
+            asked,
+            [
+                (&key("prod", "api"), &BrokerReading::Unobserved),
+                (&key("prod", "web"), &BrokerReading::Unobserved),
+            ]
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The same store against a broker that fails every read: the pass
+    /// sends one request, the latch answers the rest, and the pass still
+    /// completes with every CR reconciled as far as the API server allows.
+    #[tokio::test]
+    async fn a_failing_broker_costs_a_pass_one_request() {
+        let root = test_root("latched");
+        let (mut rec, mut writer) = offline_reconciler(root.clone(), |_| {
+            Box::pin(async { Err(Error::ApiError("timed out".into())) })
+        })
+        .await;
+        four_crs(&mut writer);
+        rec.full_pass().await;
+        let cluster = rec
+            .cluster
+            .as_ref()
+            .expect("a store with CRs takes cluster inputs");
+        assert_eq!(cluster.readings.len(), 1, "{:?}", cluster.readings);
+        assert!(cluster.readings.broker_down);
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

@@ -210,19 +210,28 @@ pub(crate) async fn api_delete_call(path: &str) -> Result<(), Error> {
 }
 
 /// Authenticated, timeout-bounded GET against the broker, returning the
-/// raw response body. Mirrors `api_post_call`'s endpoint / auth / status
-/// handling. Used by the seccomp distributor, which needs the profile
-/// JSON verbatim to write to disk.
-pub(crate) async fn api_get_bytes(path: &str) -> Result<Vec<u8>, Error> {
-    let api_endpoint = env::var("API_ENDPOINT")
-        .map(|s| s.trim().to_string())
-        .ok()
-        .filter(|s| !s.is_empty())
-        .ok_or_else(|| Error::Custom("API_ENDPOINT environment variable not set".to_string()))?;
-    let url = build_url(&api_endpoint, path);
+/// raw response body — or `None` when the broker answered 404. Mirrors
+/// `api_post_call`'s endpoint / auth / status handling.
+///
+/// A 404 is an answer here rather than an error because the one caller,
+/// the seccomp distributor, reads the broker one workload at a time
+/// (`GET seccomp/profiles/{ns}/{kind}/{name}`), and "the broker has never
+/// seen this workload" decides a CR's conditions one way while "the
+/// broker could not be asked" leaves them alone. Folded into `ApiError`
+/// the two are one string, and the caller would be parsing an error
+/// message to tell them apart.
+pub(crate) async fn api_get_bytes(path: &str) -> Result<Option<Vec<u8>>, Error> {
+    let url = build_url(&api_endpoint()?, path);
+    get_url_bytes(&url).await
+}
+
+/// `api_get_bytes` with the URL already built. Split out so a test can
+/// point it at a loopback listener without setting `API_ENDPOINT`, which
+/// is process-wide and would leak into every other test in the binary.
+async fn get_url_bytes(url: &str) -> Result<Option<Vec<u8>>, Error> {
     debug!("Getting {}", url);
 
-    let mut request = CLIENT.get(&url);
+    let mut request = CLIENT.get(url);
     if let Some(token) = broker_auth_token() {
         request = request.bearer_auth(token);
     }
@@ -233,6 +242,10 @@ pub(crate) async fn api_get_bytes(path: &str) -> Result<Vec<u8>, Error> {
         .map_err(|e| Error::ApiError(format!("{}", e)))?;
 
     let status = res.status();
+    if status == reqwest::StatusCode::NOT_FOUND {
+        debug!("GET url {} : {}", url, status);
+        return Ok(None);
+    }
     if !status.is_success() {
         let body = res
             .text()
@@ -248,7 +261,7 @@ pub(crate) async fn api_get_bytes(path: &str) -> Result<Vec<u8>, Error> {
         .bytes()
         .await
         .map_err(|e| Error::ApiError(format!("reading GET {} body: {}", url, e)))?;
-    Ok(bytes.to_vec())
+    Ok(Some(bytes.to_vec()))
 }
 
 #[cfg(test)]
@@ -346,6 +359,62 @@ mod tests {
             "callers must share one client, so connections are pooled rather than re-dialled"
         );
         assert!(CONNECT_TIMEOUT < REQUEST_TIMEOUT);
+    }
+
+    /// A broker that answers its one request with a fixed status line
+    /// and body, then closes. Just enough HTTP/1.1 for reqwest: it reads
+    /// to the end of the request head and never looks at it.
+    fn broker_answering(status_line: &'static str, body: &'static str) -> String {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind loopback");
+        let addr = listener.local_addr().expect("local addr");
+        std::thread::spawn(move || {
+            use std::io::{Read, Write};
+            let (mut sock, _) = listener.accept().expect("accept");
+            let mut head = Vec::new();
+            let mut buf = [0u8; 1024];
+            while !head.windows(4).any(|w| w == b"\r\n\r\n") {
+                match sock.read(&mut buf) {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => head.extend_from_slice(&buf[..n]),
+                }
+            }
+            let response = format!(
+                "HTTP/1.1 {status_line}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            let _ = sock.write_all(response.as_bytes());
+        });
+        format!("http://{addr}/seccomp/profiles/prod/Deployment/web")
+    }
+
+    /// The seccomp distributor asks about one workload at a time, and the
+    /// broker's answer for a workload it has never observed is a 404.
+    /// That is a reading, not a failure: it must come back as `None`, so
+    /// the caller can say `NoObservations` rather than carry the CR's
+    /// conditions forward as if the broker were down.
+    #[tokio::test]
+    async fn a_404_is_an_answer_rather_than_an_error() {
+        let url = broker_answering("404 Not Found", "no seccomp profile for that workload");
+        let got = get_url_bytes(&url).await.expect("a 404 is not an error");
+        assert_eq!(got, None);
+    }
+
+    /// The body comes back verbatim, and every other non-2xx stays the
+    /// error it always was: 404 is the only status with a meaning of its
+    /// own.
+    #[tokio::test]
+    async fn a_body_comes_back_verbatim_and_other_failures_stay_errors() {
+        let url = broker_answering("200 OK", r#"{"namespace":"prod","profile":{}}"#);
+        let got = get_url_bytes(&url).await.expect("2xx");
+        assert_eq!(
+            got.as_deref(),
+            Some(br#"{"namespace":"prod","profile":{}}"#.as_slice())
+        );
+
+        let url = broker_answering("503 Service Unavailable", "restarting");
+        let err = get_url_bytes(&url).await.expect_err("a 503 is an error");
+        let msg = err.to_string();
+        assert!(msg.contains("503") && msg.contains("restarting"), "{msg}");
     }
 
     // build_url is the URL constructor for every controller → broker
