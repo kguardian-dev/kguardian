@@ -50,9 +50,12 @@
 //! 2. **Prune**: `pod_compute_history` and `pod_contention_history` rows
 //!    older than `COMPUTE_HISTORY_RETENTION_DAYS` (default 7; 0 disables
 //!    history entirely, ingest included) — same batched CTE DELETE.
-//! 3. **Dead containers**: `pod_compute_latest` rows not refreshed for
-//!    10 minutes (the container is gone, or its node's controller is).
-//!    Runs regardless of the history setting.
+//! 3. **Dead containers and departed nodes**: `pod_compute_latest` rows
+//!    not refreshed for 10 minutes (the container is gone, or its node's
+//!    controller is) and `node_compute_latest` rows not refreshed for an
+//!    hour (the node left the cluster; `NODE_COMPUTE_LATEST_STALE_SECS`
+//!    says why the two windows differ). Runs regardless of the history
+//!    setting.
 //!
 //! # Seccomp denials
 //!
@@ -685,6 +688,50 @@ const DEFAULT_COMPUTE_INTERVAL_SECS: u64 = 600;
 /// container (the controller upserts every 5 s; 10 minutes is two
 /// orders of magnitude of slack for a slow node).
 const COMPUTE_LATEST_STALE_SECS: i64 = 600;
+/// A `node_compute_latest` row not refreshed for this long belongs to a
+/// node that left the cluster.
+///
+/// The table is upserted in place, one row per node, so it never grew
+/// with cadence — but nothing removed a row when its node went away, so
+/// it grew with node churn instead. On a 44-node cluster under an
+/// autoscaler that replaces nodes daily it held 1 232 rows after eleven
+/// days, and `GET /compute/nodes`, which serves the whole table to every
+/// open UI on every ~5 s poll, shipped half a megabyte of nodes that no
+/// longer existed.
+///
+/// An hour rather than the 10 minutes `pod_compute_latest` gets, because
+/// the node row is refreshed on two very different cadences. A Controller
+/// with the gauges on posts it every sample (`compute.sampleInterval`,
+/// 5 s); one with the gauges OFF posts only a node-only heartbeat every
+/// five minutes (`HEARTBEAT_INTERVAL` in the controller's
+/// `compute_sampler.rs`), and that heartbeat is the only thing that lets
+/// the UI say a node's pods are `off` rather than `pending`. At the pod
+/// window, two missed heartbeats — a Controller rollout pulling a fresh
+/// image plus one slow tick — would drop the row and tell an operator who
+/// switched the feature off on purpose that their pods are "not yet
+/// sampled". Twelve missed heartbeats, or 720 missed samples, is a node
+/// that is gone. The pod rows go first, so between the two windows the
+/// UI keeps explaining WHY a silent node's pods have no gauge before it
+/// collapses to `pending`.
+///
+/// Not days, the way `seccomp_denial_nodes` is pruned, because that table
+/// is consulted one row at a time by a liveness check whereas this one is
+/// served whole: every departed node costs every viewer bandwidth until it
+/// is pruned. And there is no churn to avoid by keeping the row through a
+/// long Controller outage — the first sample after recovery recreates it
+/// in the same upsert that would have refreshed it. Cordoned nodes keep
+/// running the DaemonSet, so they keep posting and are never at risk; a
+/// node rebooting for a kernel upgrade is back well inside the hour.
+///
+/// A pruned row reads as `pending` in the UI (`nodeComputeState`), the
+/// right answer for a node that no longer exists. The findings engine
+/// reads a missing node row as zero node pressure, so at worst it withholds
+/// a `memory-pressure` finding on a node that has posted nothing for an
+/// hour; it cannot invent one. The table's migration
+/// (`2026-09-10-100004_node_compute_latest`) still says "Stale rows are
+/// left in place": that comment predates this prune, and shipped
+/// migrations are not edited.
+pub(crate) const NODE_COMPUTE_LATEST_STALE_SECS: i64 = 3_600;
 /// Width of a downsampled row.
 pub(crate) const DOWNSAMPLE_BUCKET_SECS: i64 = 300;
 /// Whole buckets folded per transaction. Two buckets = 10 minutes of
@@ -763,8 +810,9 @@ pub(crate) fn downsample_range(
 }
 
 /// One compute retention pass: downsample, prune, drop stale latest
-/// rows. Each step is independent — a failure in one is logged and the
-/// next still runs — and each batch is its own `spawn_blocking`.
+/// rows (containers, then nodes). Each step is independent — a failure
+/// in one is logged and the next still runs — and each batch is its own
+/// `spawn_blocking`.
 async fn run_compute_pass(pool: &DbPool, days: u32, minute_hours: u32) {
     if days > 0 {
         run_downsample(pool, minute_hours).await;
@@ -772,6 +820,7 @@ async fn run_compute_pass(pool: &DbPool, days: u32, minute_hours: u32) {
         run_compute_prune(pool, "pod_contention_history", days).await;
     }
     run_stale_latest(pool).await;
+    run_stale_node_latest(pool).await;
 }
 
 async fn run_downsample(pool: &DbPool, minute_hours: u32) {
@@ -1043,6 +1092,74 @@ async fn run_stale_latest(pool: &DbPool) {
         Ok(Err(e)) => warn!(error = %e, "pod_compute_latest stale prune failed"),
         Err(e) => warn!(error = %e, "pod_compute_latest stale prune task panicked"),
     }
+}
+
+/// The statement `run_stale_node_latest` issues, as a constant so the live
+/// test runs the SAME SQL rather than a copy that can drift from it. Same
+/// shape as the pod prune above: the CTE bounds the DELETE through
+/// `LIMIT`, and `ORDER BY updated_at` hands it the longest-departed nodes
+/// first, so a pass that hits the cap still retires the oldest debt.
+///
+/// The staleness predicate appears twice on purpose. The CTE alone is a
+/// race: a node whose Controller comes back mid-pass upserts its row in
+/// the same instant the DELETE reaches it, the DELETE waits on the row
+/// lock, and under READ COMMITTED Postgres then re-evaluates only the
+/// outer `WHERE` against the refreshed row — `node IN (stale)` is still
+/// true, because the CTE was materialised from the pass's snapshot, so the
+/// row that was just refreshed is deleted anyway (verified on Postgres
+/// 18). Repeating the window on the outer DELETE makes that recheck see
+/// the new `updated_at` and skip the row. The pod prune above has the
+/// same shape and the same gap; it is left for a follow-up. `$1` is bound
+/// once and referenced twice, which Postgres allows.
+///
+/// No index on `updated_at`: the table is node-count sized once this
+/// prune has run, and even the one-off backlog on a cluster upgrading to
+/// it (every node that churned since the feature shipped) is a few
+/// thousand rows — a sequential scan and sort that finishes in
+/// milliseconds, nowhere near the pool's 30 s statement timeout.
+const NODE_COMPUTE_STALE_PRUNE_SQL: &str = "WITH stale AS (\
+         SELECT node FROM node_compute_latest \
+         WHERE updated_at < timezone('UTC', NOW()) - $1::interval \
+         ORDER BY updated_at \
+         LIMIT $2 \
+     ) \
+     DELETE FROM node_compute_latest \
+     WHERE node IN (SELECT node FROM stale) \
+       AND updated_at < timezone('UTC', NOW()) - $1::interval";
+
+/// Drop `node_compute_latest` rows for nodes that left the cluster (see
+/// `NODE_COMPUTE_LATEST_STALE_SECS`). One bounded DELETE per pass, like
+/// the pod prune: the live table is node-count sized, so a pass whose
+/// batch cap is hit — only ever the upgrade backlog — simply finishes on
+/// the next interval.
+async fn run_stale_node_latest(pool: &DbPool) {
+    let pool = pool.clone();
+    let batch_size = retention_batch_size();
+    let result = tokio::task::spawn_blocking(move || -> Result<usize, RetentionError> {
+        let mut conn = pool.get().map_err(RetentionError::Pool)?;
+        prune_stale_node_latest(&mut conn, batch_size)
+    })
+    .await;
+    match result {
+        Ok(Ok(0)) => debug!("node_compute_latest: no departed nodes"),
+        Ok(Ok(n)) => info!(rows = n, "node_compute_latest: pruned departed nodes"),
+        Ok(Err(e)) => warn!(error = %e, "node_compute_latest stale prune failed"),
+        Err(e) => warn!(error = %e, "node_compute_latest stale prune task panicked"),
+    }
+}
+
+/// The blocking half of `run_stale_node_latest`, on a bare connection so
+/// the live test can drive the exact statement and window the loop uses
+/// against the shipped schema.
+fn prune_stale_node_latest(
+    conn: &mut PgConnection,
+    batch_size: i64,
+) -> Result<usize, RetentionError> {
+    sql_query(NODE_COMPUTE_STALE_PRUNE_SQL)
+        .bind::<diesel::sql_types::Text, _>(format!("{} seconds", NODE_COMPUTE_LATEST_STALE_SECS))
+        .bind::<diesel::sql_types::BigInt, _>(batch_size)
+        .execute(conn)
+        .map_err(RetentionError::Diesel)
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -1416,6 +1533,190 @@ mod tests {
         assert_eq!(select_cols + 2, insert_cols.len());
         assert!(sql.contains("resolution_secs = 60 AND ts >= $1 AND ts < $2"));
         assert!(sql.contains("GROUP BY container_uid, bucket"));
+    }
+
+    // ---- node_compute_latest stale prune ---------------------------
+
+    /// Cadence of the node-only heartbeat a Controller with the gauges off
+    /// posts (`HEARTBEAT_INTERVAL` in the controller's `compute_sampler.rs`).
+    /// Restated here because the broker cannot see the controller crate; if
+    /// that constant moves, this pin is what says the window must follow.
+    const DISABLED_HEARTBEAT_SECS: i64 = 300;
+
+    /// `const` blocks, as in `seccomp_denial`'s window test: these are
+    /// compile-time facts about the constants, so they fail the build
+    /// rather than a test run — and clippy refuses a runtime assertion
+    /// whose value is constant anyway.
+    #[test]
+    fn node_compute_stale_window_outlives_pods_and_missed_heartbeats() {
+        const {
+            assert!(
+                NODE_COMPUTE_LATEST_STALE_SECS > COMPUTE_LATEST_STALE_SECS,
+                "a node row must outlive its pods' rows: between the two \
+                 windows the UI keeps saying WHY a silent node's pods have no \
+                 gauge (off / unsupported) instead of collapsing to pending"
+            )
+        };
+        const {
+            assert!(
+                NODE_COMPUTE_LATEST_STALE_SECS >= 12 * DISABLED_HEARTBEAT_SECS,
+                "a Controller with the gauges off must be able to miss a run \
+                 of heartbeats — a rollout is a couple of them, not a dozen"
+            )
+        };
+        const {
+            assert!(
+                NODE_COMPUTE_LATEST_STALE_SECS <= 24 * 3_600,
+                "a departed node must not sit in GET /compute/nodes for \
+                 days: that endpoint serves the whole table on every poll"
+            )
+        };
+    }
+
+    #[test]
+    fn node_compute_stale_prune_sql_is_bounded_and_takes_the_oldest_first() {
+        let sql = NODE_COMPUTE_STALE_PRUNE_SQL;
+        // UTC-naive right-hand side, like every other naive-column prune in
+        // this file; `updated_at` is TIMESTAMP, not TIMESTAMPTZ.
+        let window = "updated_at < timezone('UTC', NOW()) - $1::interval";
+        let (cte, delete) = sql
+            .split_once("DELETE FROM node_compute_latest")
+            .expect("a CTE followed by the DELETE");
+        assert!(cte.contains("SELECT node FROM node_compute_latest"));
+        assert!(cte.contains(window), "the CTE selects by the window");
+        assert!(
+            cte.contains("ORDER BY updated_at"),
+            "longest-departed nodes go first"
+        );
+        assert!(cte.contains("LIMIT $2"), "bounded through the CTE");
+        assert!(delete.contains("WHERE node IN (SELECT node FROM stale)"));
+        assert!(
+            delete.contains(&format!("AND {window}")),
+            "the outer DELETE repeats the window, so the READ COMMITTED \
+             recheck skips a row its node refreshed while the DELETE waited"
+        );
+    }
+
+    // ---- live database ----------------------------------------------
+    //
+    // The prune is one SQL statement. The unit test above proves the right
+    // statement is SENT; only Postgres proves the window and the LIMIT do
+    // what they say. Same gate and shape as `seccomp_denial`'s live tests:
+    // ignored by default, `KG_TEST_DATABASE_URL` to run, the REAL
+    // migrations applied so the schema cannot drift from the one shipped,
+    // and `--test-threads=1` because every live test shares one database.
+    // Declared again here rather than shared because that module's helper
+    // lives inside its own private `tests`.
+
+    const TEST_MIGRATIONS: diesel_migrations::EmbeddedMigrations =
+        diesel_migrations::embed_migrations!("./db/migrations");
+
+    fn live_conn() -> PgConnection {
+        use diesel::connection::SimpleConnection;
+        use diesel_migrations::MigrationHarness;
+
+        let Ok(url) = std::env::var("KG_TEST_DATABASE_URL") else {
+            panic!("set KG_TEST_DATABASE_URL to run this test");
+        };
+        let mut conn = PgConnection::establish(&url).expect("connect");
+        conn.run_pending_migrations(TEST_MIGRATIONS)
+            .expect("apply the shipped migrations");
+        conn.batch_execute("TRUNCATE node_compute_latest")
+            .expect("reset the table this test uses");
+        conn
+    }
+
+    /// One node's row, `age_secs` behind the SERVER's clock. The prune
+    /// compares against the server's `NOW()`; a row stamped from the test
+    /// process would make the boundary depend on clock skew between the
+    /// two, so the age is applied with the same expression the prune uses.
+    fn seed_node(conn: &mut PgConnection, name: &str, age_secs: i64) {
+        use crate::compute_types::NodeComputeLatest;
+        use crate::schema::node_compute_latest::dsl::*;
+        use diesel::connection::SimpleConnection;
+
+        let now = chrono::Utc::now().naive_utc();
+        let row = NodeComputeLatest {
+            node: name.to_string(),
+            ts: now,
+            interval_ms: 5_000,
+            ctxt_per_sec: 0.0,
+            compute_enabled: true,
+            compute_supported: true,
+            contention_loaded: false,
+            cpu_some10: 0.0,
+            cpu_full10: 0.0,
+            mem_some10: 0.0,
+            mem_full10: 0.0,
+            cpu_cores: 4,
+            memory_bytes: 0,
+            bpf_runq_enqueued: 0,
+            bpf_runq_hist: 0,
+            bpf_pair: 0,
+            unknown_blame_share: 0.0,
+            updated_at: now,
+            bpf_hist_update_failures: None,
+            bpf_pair_update_failures: None,
+        };
+        diesel::insert_into(node_compute_latest)
+            .values(&row)
+            .execute(conn)
+            .expect("seed node_compute_latest");
+        conn.batch_execute(&format!(
+            "UPDATE node_compute_latest \
+             SET updated_at = timezone('UTC', NOW()) - INTERVAL '{age_secs} seconds' \
+             WHERE node = '{name}'"
+        ))
+        .expect("age the row");
+    }
+
+    fn remaining_nodes(conn: &mut PgConnection) -> Vec<String> {
+        use crate::schema::node_compute_latest::dsl::*;
+        node_compute_latest
+            .select(node)
+            .order(node.asc())
+            .load(conn)
+            .expect("list nodes")
+    }
+
+    #[test]
+    #[ignore = "requires a live postgres (set KG_TEST_DATABASE_URL)"]
+    fn live_database_prunes_departed_nodes_oldest_first_and_keeps_the_rest() {
+        let mut conn = live_conn();
+        let window = NODE_COMPUTE_LATEST_STALE_SECS;
+        // One reporting now; one quiet but inside the window (a Controller
+        // mid-rollout, or one with the gauges off between heartbeats); two
+        // that left the cluster, at different times.
+        seed_node(&mut conn, "live", 0);
+        seed_node(&mut conn, "quiet", window / 2);
+        seed_node(&mut conn, "left-this-morning", window * 2);
+        seed_node(&mut conn, "left-yesterday", window * 24);
+
+        // A batch of one: the CTE's LIMIT bounds the DELETE, and its ORDER
+        // BY hands it the longest-departed node, not an arbitrary one.
+        assert_eq!(prune_stale_node_latest(&mut conn, 1).expect("prune"), 1);
+        assert_eq!(
+            remaining_nodes(&mut conn),
+            ["left-this-morning", "live", "quiet"].map(String::from)
+        );
+
+        // A full batch takes what is left outside the window and nothing
+        // inside it.
+        assert_eq!(
+            prune_stale_node_latest(&mut conn, DEFAULT_BATCH_SIZE).expect("prune"),
+            1
+        );
+        assert_eq!(
+            remaining_nodes(&mut conn),
+            ["live", "quiet"].map(String::from)
+        );
+
+        // And a pass over a table with nothing to prune deletes nothing:
+        // the loop runs this every interval on healthy clusters.
+        assert_eq!(
+            prune_stale_node_latest(&mut conn, DEFAULT_BATCH_SIZE).expect("prune"),
+            0
+        );
     }
 
     // ---- seccomp denial retention ----------------------------------

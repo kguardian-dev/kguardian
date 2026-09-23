@@ -50,7 +50,11 @@ and no `/sys/fs/cgroup` mount.
 
 **Broker** (`kguardian-broker` Deployment) — rendered regardless of
 `compute.enabled`, so a cluster that turns the feature off still prunes what
-it collected.
+it collected. Two windows are fixed and run whatever `retentionDays` is: a
+container's live row goes 10 minutes after its node last reported it, and a
+node's row goes about an hour after the node last reported at all (the pass
+runs every 600 s), so a node that left the cluster drops out of
+`GET /compute/nodes` about an hour after its last report.
 
 | Env | From | Default |
 |---|---|---|
@@ -85,7 +89,7 @@ auth middleware is global, not per route.
 | `GET /compute/history/{pod_uid}?minutes=60` | `{ "rows": [...] }` — history rows for the pod, oldest first, at whatever resolution the window has. `minutes` is capped at 10080. |
 | `GET /compute/contention?namespace=<ns>&node=<node>&minutes=5` | `{ "pairs": [...] }` — victim→culprit pairs. One of `namespace` / `node` is required. Up to 50 pairs per victim. |
 | `GET /compute/findings?namespace=<ns>&node=<node>` | `{ "findings": [Finding], "truncated": bool, "victims_evaluated": int, "history_disabled": bool }` — see [findings response](#findings-response). Both filters optional; neither means the whole cluster. |
-| `GET /compute/nodes` | `{ "nodes": [...] }` — every node's latest sample: pressure, context-switch rate, capacity, BPF map occupancy, and the `compute_enabled` / `compute_supported` / `contention_loaded` flags. |
+| `GET /compute/nodes` | `{ "nodes": [...] }` — every node's latest sample: pressure, context-switch rate, capacity, BPF map occupancy, and the `compute_enabled` / `compute_supported` / `contention_loaded` flags. A node that has not reported for about an hour is pruned from the list; its pods then read `pending`. |
 | `POST /pod/compute/batch` | Controller → broker, every sample interval. |
 | `POST /pod/compute/history/batch` | Controller → broker, every 60 s. |
 
