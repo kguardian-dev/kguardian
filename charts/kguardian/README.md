@@ -104,7 +104,7 @@ The following table lists the configurable parameters of the kguardian chart and
 | broker.image.pullPolicy | string | `"IfNotPresent"` | Broker image pull policy |
 | broker.image.repository | string | `"ghcr.io/kguardian-dev/kguardian/broker"` | Broker container image repository |
 | broker.image.sha | string | `""` | Overrides the image tag using SHA digest |
-| broker.image.tag | string | `"1.18.1"` | Broker version tag (auto-updated by release-please) |
+| broker.image.tag | string | `"1.18.2"` | Broker version tag (auto-updated by release-please) |
 | broker.imagePullSecrets | list | `[]` | List of image pull secrets for private registries |
 | broker.initContainer.image.pullPolicy | string | `"IfNotPresent"` | Broker init container image pull policy. See the controller's init container for why this is not `Always`. |
 | broker.initContainer.image.repository | string | `"busybox"` | Broker init container image repository |
@@ -183,7 +183,7 @@ The following table lists the configurable parameters of the kguardian chart and
 | controller.image.pullPolicy | string | `"IfNotPresent"` | Controller image pull policy |
 | controller.image.repository | string | `"ghcr.io/kguardian-dev/kguardian/controller"` | Controller container image repository |
 | controller.image.sha | string | `""` | Overrides the image tag using SHA digest |
-| controller.image.tag | string | `"1.15.0"` | Controller version tag (auto-updated by release-please) |
+| controller.image.tag | string | `"1.15.1"` | Controller version tag (auto-updated by release-please) |
 | controller.imagePullSecrets | list | `[]` | List of image pull secrets for private registries |
 | controller.initContainer.image.pullPolicy | string | `"IfNotPresent"` | Init container image pull policy. `IfNotPresent`, not `Always`: this init container runs on every node, and `Always` forces a registry manifest request on every pod start even when the image is already cached locally. Those requests count against Docker Hub's anonymous pull limit, which is per source IP, so a NATed cluster shares one bucket across the whole fleet. A throttled pull leaves the init container in ImagePullBackOff and the agent never starts on that node, so its pods are never observed and the generated policy silently omits their rules. |
 | controller.initContainer.image.repository | string | `"busybox"` | Init container image repository |
@@ -348,7 +348,7 @@ The following table lists the configurable parameters of the kguardian chart and
 | llmBridge.image.pullPolicy | string | `"IfNotPresent"` | LLM Bridge image pull policy |
 | llmBridge.image.repository | string | `"ghcr.io/kguardian-dev/kguardian/llm-bridge"` | LLM Bridge container image repository |
 | llmBridge.image.sha | string | `""` | Overrides the image tag using SHA digest |
-| llmBridge.image.tag | string | `"1.11.1"` | LLM Bridge version tag (auto-updated by release-please) |
+| llmBridge.image.tag | string | `"1.11.2"` | LLM Bridge version tag (auto-updated by release-please) |
 | llmBridge.imagePullSecrets | list | `[]` | List of image pull secrets for private registries |
 | llmBridge.metrics.serviceMonitor.enabled | bool | `false` | Create a ServiceMonitor for prometheus-operator. llm-bridge does not currently expose /metrics — forward-compatible toggle. |
 | llmBridge.metrics.serviceMonitor.interval | string | `"30s"` |  |
