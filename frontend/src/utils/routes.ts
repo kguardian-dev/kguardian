@@ -2,7 +2,7 @@ import type { HashLocation } from '../hooks/useHashLocation';
 
 /**
  * The app's hash routes. Every location is shareable, so a route that is
- * renamed keeps working through LEGACY_REDIRECTS rather than 404-ing an old
+ * renamed keeps working through legacyRedirect rather than 404-ing an old
  * bookmark or a link pasted into a ticket.
  */
 export const VIEWS = ['map', 'risks', 'workloads', 'workload'] as const;
@@ -13,21 +13,31 @@ export const DEFAULT_VIEW: View = 'map';
 
 type Params = Record<string, string>;
 
+/** Retired route names that still resolve, via legacyRedirect. */
+export const LEGACY_VIEWS: readonly string[] = ['findings', 'seccomp'];
+
 /**
  * Old route → new route, carrying the old params across.
  *  - `#/findings` was renamed to `#/risks` (same view, same params).
  *  - `#/seccomp` was absorbed into the Workloads coverage table, opened on its
  *    seccomp columns and, when the link names a namespace, narrowed to it.
  *
- * A Map, not an object literal: the key is the user-controlled hash, and an
- * object lookup would resolve `#/constructor` or `#/toString` to an inherited
- * Object.prototype method and call it as a redirect.
+ * A switch over literal names, deliberately: the input is the user-controlled
+ * hash, and any keyed lookup of a function (an object literal would resolve
+ * `#/constructor` to Object.prototype's) followed by a call is dynamic
+ * dispatch on user input. Unknown names return undefined.
  */
-export const LEGACY_REDIRECTS: ReadonlyMap<string, (params: Params) => { view: View; params: Params }> = new Map([
-  ['findings', (params: Params) => ({ view: 'risks' as View, params })],
-  // The old view was namespace-scoped, so an old link keeps that scope.
-  ['seccomp', (params: Params) => ({ view: 'workloads' as View, params: { ...params, control: 'seccomp', ...(params.ns ? { scope: 'ns' } : {}) } })],
-]);
+export function legacyRedirect(view: string, params: Params): { view: View; params: Params } | undefined {
+  switch (view) {
+    case 'findings':
+      return { view: 'risks', params };
+    case 'seccomp':
+      // The old view was namespace-scoped, so an old link keeps that scope.
+      return { view: 'workloads', params: { ...params, control: 'seccomp', ...(params.ns ? { scope: 'ns' } : {}) } };
+    default:
+      return undefined;
+  }
+}
 
 export interface ResolvedRoute {
   view: View;
@@ -36,11 +46,8 @@ export interface ResolvedRoute {
 }
 
 export function resolveRoute(loc: HashLocation): ResolvedRoute {
-  const legacy = LEGACY_REDIRECTS.get(loc.view);
-  if (legacy) {
-    const target = legacy(loc.params);
-    return { view: target.view, redirect: target };
-  }
+  const target = legacyRedirect(loc.view, loc.params);
+  if (target) return { view: target.view, redirect: target };
   if ((VIEWS as readonly string[]).includes(loc.view)) return { view: loc.view as View };
   return { view: DEFAULT_VIEW };
 }

@@ -1,5 +1,5 @@
 import { expect, test } from 'vitest';
-import { DEFAULT_VIEW, isAllNamespaces, resolveRoute, routeHref, workloadParams, workloadsBackParams } from './routes';
+import { DEFAULT_VIEW, LEGACY_VIEWS, legacyRedirect, isAllNamespaces, resolveRoute, routeHref, workloadParams, workloadsBackParams } from './routes';
 
 // Old links live in tickets, runbooks and browser history. A rename that
 // silently sends them to the map is a broken link; these pin the redirects.
@@ -50,4 +50,9 @@ test('Workloads defaults to all namespaces; scope=ns narrows it; other views are
   expect(isAllNamespaces('workloads', { scope: 'ns' })).toBe(false);
   expect(isAllNamespaces('risks', {})).toBe(false);
   expect(isAllNamespaces('map', {})).toBe(false);
+});
+
+test('every LEGACY_VIEWS name has a redirect, and nothing else does', () => {
+  for (const v of LEGACY_VIEWS) expect(legacyRedirect(v, {})).toBeDefined();
+  for (const v of ['map', 'risks', 'workloads', 'constructor', '__proto__', '']) expect(legacyRedirect(v, {})).toBeUndefined();
 });
