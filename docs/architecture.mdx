@@ -340,7 +340,7 @@ The Controller **must** run on every node you want to monitor. Use node selector
   </Accordion>
 
   <Accordion icon="key" title="Data Access">
-    - The Broker API is **unauthenticated by default**, with opt-in bearer-token auth via `broker.auth` (`BROKER_AUTH_TOKEN`); `/health` and `/metrics` stay exempt
+    - The Broker API is **unauthenticated by default**, with opt-in [scoped bearer tokens](/api-reference/introduction#authentication) via `broker.auth`: `read` (frontend proxy, llm-bridge, CLI), `ingest` (controller), `supplychain` (supply-chain writes) and optional `admin`. Every route declares its scope. `/health` and `/metrics` stay open
     - The chart can also manage a **NetworkPolicy** restricting Broker access
     - For production, additionally consider:
       - Ingress with authentication (OAuth2 proxy, etc.)

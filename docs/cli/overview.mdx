@@ -23,11 +23,23 @@ Available for all commands:
 | `-n, --namespace` | Namespace scope | Current namespace |
 | `--broker-namespace` | Namespace where the kguardian broker is installed | `kguardian` |
 | `--broker-service` | Name of the kguardian broker service | `broker` |
+| `--broker-token-file` | File holding the broker `read` token, when broker auth is enabled | `$KGUARDIAN_BROKER_TOKEN`, then `$BROKER_AUTH_TOKEN` |
 | `--debug` | Enable debug logging | `false` |
 
 `--broker-namespace` and `--broker-service` matter when kguardian is
 installed outside the default `kguardian` namespace — the CLI
 port-forwards to the broker and needs to find it.
+
+With [broker authentication](/api-reference/introduction#authentication)
+enabled, give the CLI the `read` token. There is no flag that takes the
+token directly, because anything in argv is visible through `ps`:
+
+```bash
+export KGUARDIAN_BROKER_TOKEN="$(kubectl -n kguardian get secret kguardian-broker-auth -o jsonpath='{.data.read}' | base64 -d)"
+```
+
+Without it, the CLI stops with `broker requires authentication (HTTP 401)`.
+It won't carry on and treat every peer as unknown.
 
 ## Commands
 

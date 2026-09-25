@@ -38,7 +38,7 @@ already-upgraded nodes speak for it.
 
 ## GET /cluster/environment
 
-Requires bearer auth when `BROKER_AUTH_TOKEN` is set. Always returns
+Requires the `read` scope when broker auth is on. Always returns
 `200` — database trouble degrades to all-`unknown`, never an error.
 
 ```json
