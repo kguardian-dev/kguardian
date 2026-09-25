@@ -321,8 +321,14 @@ async fn process_pod(
         if let (Some(ctx), Some(uid)) = (compute, pod.metadata.uid.as_deref()) {
             ctx.map.remove_pod(uid);
         }
-        if let Some(uid) = pod.metadata.uid.as_deref() {
-            crate::early_capture::forget_known_pod(uid);
+        // Startup capture keeps a finished pod known (with its final
+        // container ids): a short-lived Job's startup syscalls are often
+        // still buffered when it completes, and they are still its own.
+        // Forgetting it here made every container of a finished Job look
+        // unclaimed (counted as a sandbox and discarded). The resync LIST
+        // retires it once the pod object is actually deleted.
+        if should_process_pod(&pod.metadata.namespace, excluded_namespaces) {
+            crate::early_capture::note_known_pod(pod);
         }
         return None;
     }

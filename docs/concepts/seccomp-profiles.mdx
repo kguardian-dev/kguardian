@@ -74,12 +74,12 @@ a profile recorded from fresh pods.
 
 Known limitations:
 
-- **hostNetwork pods** are not startup-complete. They share the node's network
-  namespace, so once any hostNetwork pod on the node is registered, a starting
-  hostNetwork container is captured by the registered path and credited to
-  whichever hostNetwork pod holds the node's namespace entry. Per-container
-  attribution by cgroup fixes this and is planned. Until then, use the
-  restart-under-`SCMP_ACT_LOG` step above for hostNetwork workloads.
+- **hostNetwork pods**: startup is captured by cgroup like any other pod, but
+  once a hostNetwork pod is registered, its steady-state syscalls are keyed by
+  the node's network namespace. They are credited to whichever hostNetwork pod
+  on the node holds that entry. Per-container attribution by cgroup fixes this
+  and is planned. Until then, treat a hostNetwork pod's recorded set as shared
+  with its hostNetwork neighbours.
 - **Static pods** are not covered: their mirror pod UID differs from the UID
   in the cgroup path.
 

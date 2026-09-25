@@ -1,6 +1,6 @@
 use crate::capture_tiers::{native_scmp_arch, ResolvedTiers};
 use crate::early_capture::{
-    filter_for_tier, known_pod_containers, PendingCapture, PodState, StartupCaptureConfig,
+    filter_for_tier, known_pod_containers, resolve_pod_state, PendingCapture, StartupCaptureConfig,
     SYSCALL_EVENT_PENDING,
 };
 use crate::models::{lookup_pod, ContainerMap};
@@ -216,18 +216,7 @@ async fn attribute_pending(
 
     let result = pending.attribute(Instant::now(), |identity| {
         let containers = known_pod_containers(&identity.pod_uid);
-        let claims = match (&containers, identity.container_id.as_deref()) {
-            (Some(ids), Some(cid)) => ids.contains(cid),
-            _ => false,
-        };
-        match (by_uid.get(&identity.pod_uid), containers) {
-            (Some(pod), _) => PodState::Registered {
-                pod: Arc::clone(pod),
-                claims,
-            },
-            (None, Some(_)) => PodState::Known,
-            (None, None) => PodState::Unknown,
-        }
+        resolve_pod_state(identity, &by_uid, containers.as_ref())
     });
     for id in result.forget {
         forgets.push(id);

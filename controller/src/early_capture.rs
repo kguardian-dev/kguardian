@@ -435,6 +435,37 @@ enum Tombstone {
     Unattributable,
 }
 
+/// What the watcher knows about `identity`'s pod, from the registered pods
+/// by UID (`ContainerMap`, which is never pruned and may hold a dead pod's
+/// entry) and the known-pods registry (which the watcher prunes when a pod
+/// terminates or leaves the node).
+///
+/// The known-pods registry is authoritative for "is this pod alive": a
+/// pod the watcher has forgotten is `Unknown` even if a stale
+/// `ContainerMap` entry still carries its UID. Treating that as
+/// "registered, container not claimed" classified every container of a
+/// finished Job as a sandbox (seen live as `sandboxes_discarded` exceeding
+/// the unattributed cgroups).
+pub fn resolve_pod_state<P: Clone>(
+    identity: &CgroupIdentity,
+    registered_by_uid: &HashMap<String, P>,
+    known_containers: Option<&BTreeSet<String>>,
+) -> PodState<P> {
+    let Some(ids) = known_containers else {
+        return PodState::Unknown;
+    };
+    match registered_by_uid.get(&identity.pod_uid) {
+        Some(pod) => PodState::Registered {
+            pod: pod.clone(),
+            claims: identity
+                .container_id
+                .as_deref()
+                .is_some_and(|cid| ids.contains(cid)),
+        },
+        None => PodState::Known,
+    }
+}
+
 /// One cgroup's syscalls, ready to be merged into a pod's set.
 #[derive(Debug, PartialEq, Eq)]
 pub struct Flush<P> {
@@ -1283,11 +1314,266 @@ mod tests {
     fn the_pending_path_is_gated_before_any_lookup() {
         let src = include_str!("bpf/syscall.bpf.c");
         let body = &src[src
-            .find("static __always_inline int capture_pending")
+            .find("static __always_inline bool capture_pending")
             .unwrap()..];
         let gate = body.find("*created == *retired").expect("gate present");
         let lookup = body.find("bpf_get_current_cgroup_id").unwrap();
         assert!(gate < lookup, "the gate must come before the cgroup lookup");
+    }
+
+    // ---- event-sequence harness (cluster-00 defects A and B) ---------------
+    //
+    // Drives PendingCapture through the same resolver the controller uses
+    // (resolve_pod_state), with a registered-pods table that keeps stale
+    // entries the way ContainerMap does and a known-pods table the watcher
+    // prunes. The kernel routing half (pending before netns) is pinned by
+    // the_probe_consults_pending_cgroups_before_the_netns_map.
+
+    struct Node {
+        pending: PendingCapture,
+        /// uid -> pod label; never pruned (like ContainerMap).
+        registered: HashMap<String, &'static str>,
+        /// uid -> container ids; pruned on termination (like KNOWN_PODS).
+        known: HashMap<String, BTreeSet<String>>,
+        /// What each pod label accumulated.
+        sets: HashMap<&'static str, BTreeSet<u32>>,
+    }
+
+    impl Node {
+        fn new() -> Self {
+            Self {
+                pending: PendingCapture::default(),
+                registered: HashMap::new(),
+                known: HashMap::new(),
+                sets: HashMap::new(),
+            }
+        }
+        fn path(uid: &str, cid: &str) -> String {
+            format!("/kubepods/besteffort/pod{uid}/{cid}")
+        }
+        fn start(&mut self, cgroup: u64, uid: &str, cid: &str, t: Instant) {
+            self.pending
+                .cgroup_created(cgroup, &Self::path(uid, cid), t);
+            self.known.entry(uid.to_string()).or_default();
+        }
+        fn status_names(&mut self, uid: &str, cid: &str) {
+            self.known
+                .entry(uid.to_string())
+                .or_default()
+                .insert(cid.to_string());
+        }
+        fn register(&mut self, uid: &str, label: &'static str) {
+            self.registered.insert(uid.to_string(), label);
+        }
+        /// Pod completes: the watcher keeps it known with its final
+        /// container ids until the object is deleted.
+        fn terminate(&mut self, _uid: &str) {}
+        /// Pod object deleted: gone from the known registry at the next
+        /// resync; ContainerMap keeps its entry.
+        fn delete(&mut self, uid: &str) {
+            self.known.remove(uid);
+        }
+        fn tick(&mut self, t: Instant) {
+            let registered = self.registered.clone();
+            let known = self.known.clone();
+            let a = self.pending.attribute(t, |id| {
+                resolve_pod_state(id, &registered, known.get(&id.pod_uid))
+            });
+            for f in a.flush {
+                self.sets.entry(f.pod).or_default().extend(f.syscalls);
+            }
+        }
+    }
+
+    const UID_CURL1: &str = "c0c0c0c0-0000-4000-8000-000000000001";
+    const UID_CURL2: &str = "c0c0c0c0-0000-4000-8000-000000000002";
+    const UID_NGINX: &str = "e0e0e0e0-0000-4000-8000-000000000003";
+    const UID_NGINX2: &str = "e0e0e0e0-0000-4000-8000-000000000004";
+
+    /// Defect B: a pod name reused (curlcheck deleted, a new curlcheck
+    /// created) next to a live nginx pod. The second curlcheck's startup
+    /// syscalls must land on the second curlcheck's UID and nowhere else;
+    /// nothing here is keyed by name or netns inode.
+    #[test]
+    fn a_reused_pod_name_never_leaks_startup_syscalls_into_another_pod() {
+        let t0 = Instant::now();
+        let mut n = Node::new();
+        let (fork, pipe, stat, membarrier, exit) = (57, 22, 4, 324, 60);
+
+        // First curlcheck runs, is attributed, terminates.
+        n.start(10, UID_CURL1, "cc1", t0);
+        n.pending.pending_syscall(10, fork, t0);
+        n.status_names(UID_CURL1, "cc1");
+        n.register(UID_CURL1, "curlcheck#1");
+        n.tick(t0 + secs(1));
+        n.terminate(UID_CURL1);
+        n.delete(UID_CURL1);
+
+        // nginx starts (sandbox + app), registers.
+        n.start(20, UID_NGINX, "sbx", t0 + secs(2));
+        n.start(21, UID_NGINX, "ngx", t0 + secs(2));
+        n.pending.pending_syscall(20, 34, t0 + secs(2));
+        n.pending.pending_syscall(21, 232, t0 + secs(2)); // epoll_wait
+        n.status_names(UID_NGINX, "ngx");
+        n.register(UID_NGINX, "nginx");
+
+        // Second curlcheck (same NAME, new UID) starts while nginx lives.
+        n.start(30, UID_CURL2, "cc2", t0 + secs(3));
+        for nr in [fork, pipe, stat, membarrier, exit] {
+            n.pending.pending_syscall(30, nr, t0 + secs(3));
+        }
+        n.tick(t0 + secs(4)); // curlcheck#2 known, not registered yet
+        n.status_names(UID_CURL2, "cc2");
+        n.register(UID_CURL2, "curlcheck#2");
+        n.terminate(UID_CURL2); // ...and it may even be gone by the tick
+        n.tick(t0 + secs(5));
+
+        assert_eq!(
+            n.sets["nginx"],
+            BTreeSet::from([232]),
+            "nginx has only its own"
+        );
+        assert_eq!(
+            n.sets["curlcheck#2"],
+            BTreeSet::from([fork, pipe, stat, membarrier, exit]),
+            "a pod that completed before the tick still gets its own startup set"
+        );
+        assert_eq!(n.sets["curlcheck#1"], BTreeSet::from([fork]));
+        for (label, set) in &n.sets {
+            if *label != "curlcheck#1" && *label != "curlcheck#2" {
+                assert!(
+                    set.is_disjoint(&BTreeSet::from([fork, pipe, stat, membarrier, exit])),
+                    "{label} got curl's syscalls"
+                );
+            }
+        }
+    }
+
+    /// Defect A, userspace half: a pod created after others died (so its
+    /// netns inode is a dead pod's, still "registered" in the kernel map)
+    /// is attributed by its cgroup's UID, and the dead pod — whose stale
+    /// ContainerMap entry survives — resolves to nobody.
+    #[test]
+    fn a_pod_starting_on_a_dead_pods_netns_inode_is_attributed_to_itself() {
+        let t0 = Instant::now();
+        let mut n = Node::new();
+        // Dead pod: registered once, terminated; stale entry remains.
+        n.register(UID_NGINX, "nginx-old");
+        n.status_names(UID_NGINX, "old");
+        n.terminate(UID_NGINX);
+        n.delete(UID_NGINX);
+
+        // New pod, same image, same node, after the churn.
+        n.start(40, UID_NGINX2, "sbx2", t0);
+        n.start(41, UID_NGINX2, "new", t0);
+        for nr in [59, 4, 257, 262, 302] {
+            n.pending.pending_syscall(41, nr, t0);
+        }
+        n.tick(t0 + secs(1));
+        n.status_names(UID_NGINX2, "new");
+        n.register(UID_NGINX2, "nginx-new");
+        n.tick(t0 + secs(2));
+
+        assert_eq!(n.sets["nginx-new"], BTreeSet::from([4, 59, 257, 262, 302]));
+        assert!(!n.sets.contains_key("nginx-old"));
+    }
+
+    /// Live evidence: sandboxes_discarded exceeded the cgroups that were
+    /// never attributed, because a terminated (Job) pod's stale
+    /// ContainerMap entry made its app containers look unclaimed.
+    #[test]
+    fn a_terminated_pods_containers_are_not_counted_as_sandboxes() {
+        let t0 = Instant::now();
+        let mut n = Node::new();
+        n.start(50, UID_CURL1, "job", t0);
+        n.pending.pending_syscall(50, 59, t0);
+        n.status_names(UID_CURL1, "job");
+        n.register(UID_CURL1, "job-pod");
+        // Completes before the first attribution tick.
+        n.terminate(UID_CURL1);
+        n.tick(t0 + secs(1));
+        assert_eq!(n.sets["job-pod"], BTreeSet::from([59]));
+        n.tick(t0 + secs(1) + ATTRIBUTED_LINGER);
+        n.delete(UID_CURL1);
+        n.tick(t0 + secs(2) + ATTRIBUTED_LINGER + SANDBOX_GRACE);
+        assert_eq!(n.pending.stats.sandboxes_discarded, 0);
+        assert_eq!(n.pending.stats.cgroups_attributed, 1);
+        assert!(n.pending.is_empty());
+
+        // Attributed, then the pod object deleted inside the linger
+        // window: retired as attributed, not as a sandbox.
+        let mut n = Node::new();
+        n.start(51, UID_CURL2, "job2", t0);
+        n.pending.pending_syscall(51, 59, t0);
+        n.status_names(UID_CURL2, "job2");
+        n.register(UID_CURL2, "job-pod-2");
+        n.tick(t0 + secs(1));
+        n.delete(UID_CURL2);
+        n.tick(t0 + secs(2));
+        n.tick(t0 + secs(3) + SANDBOX_GRACE);
+        assert_eq!(n.pending.stats.sandboxes_discarded, 0);
+        assert!(
+            n.pending.is_empty(),
+            "retired as attributed once the pod is gone"
+        );
+    }
+
+    #[test]
+    fn resolve_pod_state_trusts_the_known_registry_over_stale_registrations() {
+        let id = ident(Some(CID)).unwrap();
+        let reg = HashMap::from([(UID.to_string(), "p")]);
+        let claimed = BTreeSet::from([CID.to_string()]);
+        let other = BTreeSet::from(["x".to_string()]);
+        assert_eq!(resolve_pod_state(&id, &reg, None), PodState::Unknown);
+        assert_eq!(
+            resolve_pod_state(&id, &reg, Some(&claimed)),
+            PodState::Registered {
+                pod: "p",
+                claims: true
+            }
+        );
+        assert_eq!(
+            resolve_pod_state(&id, &reg, Some(&other)),
+            PodState::Registered {
+                pod: "p",
+                claims: false
+            }
+        );
+        assert_eq!(
+            resolve_pod_state(&id, &HashMap::<String, &str>::new(), Some(&claimed)),
+            PodState::Known
+        );
+    }
+
+    /// Defects A and B (cluster-00, 2026-09-26), kernel half. A new pod
+    /// usually gets a dead pod's netns inode number, and inode_num still
+    /// holds the dead pod's entry. When the probe consulted inode_num
+    /// first, a new pod's startup took the registered path with the dead
+    /// pod's generation: deduplicated against the dead pod's set, credited
+    /// to the dead pod, and never seen by the pending path. The pending
+    /// (cgroup) check must come first in the sys_enter handler.
+    #[test]
+    fn the_probe_consults_pending_cgroups_before_the_netns_map() {
+        let src = include_str!("bpf/syscall.bpf.c");
+        let handler = &src[src
+            .find("SEC(\"tracepoint/raw_syscalls/sys_enter\")")
+            .expect("sys_enter handler")..];
+        let pending = handler
+            .find("if (capture_pending(net_ns, syscall_id))")
+            .expect("pending check in the handler");
+        let netns = handler
+            .find("bpf_map_lookup_elem(&inode_num, &net_ns)")
+            .expect("netns lookup in the handler");
+        assert!(
+            pending < netns,
+            "the pending-cgroup check must run before the inode_num lookup, or a pod \
+             that reuses a dead pod's netns inode is captured as the dead pod"
+        );
+        // And a pending hit must end the handler, not fall through to the
+        // registered path (which would count the syscall twice, once under
+        // the dead pod).
+        assert!(handler[pending..]
+            .starts_with("if (capture_pending(net_ns, syscall_id))\n        return 0;"));
     }
     // ---- filter_for_tier --------------------------------------------------
 

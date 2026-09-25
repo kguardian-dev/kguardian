@@ -288,25 +288,42 @@ int BPF_PROG(trace_cgroup_mkdir, struct cgroup *cgrp, const char *path)
     return 0;
 }
 
-// Pending path of the syscall probe: the netns is not registered, so
-// look the task's cgroup up in pending_cgroups instead. Cost for every
-// untracked task on the node while nothing is pending: two array reads
+// Pending path of the syscall probe. Returns true when the calling task
+// sits in a pending cgroup, i.e. the event is this path's to handle (or to
+// drop) and the registered path must NOT see it; false otherwise.
+//
+// This runs BEFORE the inode_num lookup, not only when the netns is
+// unregistered. The kernel hands netns inode numbers out lowest-free
+// first, so a new pod almost always gets the number of a pod that died
+// recently, and inode_num still holds the dead pod's entry (nothing
+// deletes it on pod death; it only ages out of the LRU). Gating on the
+// netns first sent every such new pod down the registered path with the
+// DEAD pod's generation: its startup syscalls were deduplicated against
+// the dead pod's set and the rest were credited to the dead pod by
+// userspace, and the pending path never saw the new pod at all
+// (cluster-00, 2026-09-26: new nginx pods got no syscall row; an nginx
+// pod's row gained the musl-only syscalls of a curl pod that had reused
+// its netns inode). The cgroup is new per container and never reused, so
+// it is the identity to trust while the container is pending.
+//
+// Cost for every task while nothing is pending: two array reads
 // (pending_gate). While something is pending: plus one helper call and
 // one hash lookup.
-static __always_inline int capture_pending(__u64 net_ns, u32 syscall_id)
+static __always_inline bool capture_pending(__u64 net_ns, u32 syscall_id)
 {
     u32 created_key = KG_GATE_CREATED, retired_key = KG_GATE_RETIRED;
     __u64 *created = bpf_map_lookup_elem(&pending_gate, &created_key);
     __u64 *retired = bpf_map_lookup_elem(&pending_gate, &retired_key);
     if (!created || !retired || *created == *retired)
-        return 0;
-
-    if (runtime_prefilter_skip(syscall_id))
-        return 0;
+        return false;
 
     __u64 cgroup_id = bpf_get_current_cgroup_id();
     if (!bpf_map_lookup_elem(&pending_cgroups, &cgroup_id))
-        return 0;
+        return false;
+
+    // From here on the event belongs to the pending path, captured or not.
+    if (runtime_prefilter_skip(syscall_id))
+        return true;
 
     struct pending_syscall_key key = {
         .cgroup_id = cgroup_id,
@@ -315,7 +332,7 @@ static __always_inline int capture_pending(__u64 net_ns, u32 syscall_id)
     };
     u8 one = 1;
     if (bpf_map_update_elem(&pending_seen, &key, &one, BPF_NOEXIST) != 0)
-        return 0;
+        return true;
 
     struct data_t *data = bpf_ringbuf_reserve(&syscall_events, sizeof(*data), 0);
     if (!data)
@@ -323,14 +340,14 @@ static __always_inline int capture_pending(__u64 net_ns, u32 syscall_id)
         // Same reasoning as the registered path: forget the sighting so
         // the next occurrence is reported instead of never.
         bpf_map_delete_elem(&pending_seen, &key);
-        return 0;
+        return true;
     }
     data->inum = net_ns;
     data->sysnbr = syscall_id;
     data->kind = KG_SYSCALL_EVENT_PENDING;
     data->cgroup_id = cgroup_id;
     bpf_ringbuf_submit(data, 0);
-    return 0;
+    return true;
 }
 
 // True when `syscall_id` passes the allowlist for `tier`. Full (and any
@@ -370,28 +387,31 @@ int trace_execve(struct trace_event_raw_sys_enter *ctx)
 
     u32 syscall_id = (__u32)ctx->id;
 
-    // Not a registered netns: either nothing kube-guardian tracks, or a
-    // container that is not registered YET (startup). The pending path
-    // tells the two apart by cgroup.
-    //
-    // TODO(1533): a hostNetwork pod's netns is the node's, so once any
-    // hostNetwork pod on the node is registered, a starting hostNetwork
-    // container takes the registered path below (never the pending one)
-    // and its syscalls go to whichever pod holds the node netns key in the
-    // ContainerMap. The fix is attribution by cgroup id, which lands with
-    // the per-container keying of P1-2.
+    // A container that started after the controller and is not yet
+    // attributed is captured by cgroup, whatever inode_num says about its
+    // netns (see capture_pending for why the netns cannot be trusted yet).
+    if (capture_pending(net_ns, syscall_id))
+        return 0;
+
+    // TODO(1533): a hostNetwork pod's netns is the node's, so after its
+    // startup (pending) window a hostNetwork container's syscalls go to
+    // whichever pod holds the node netns key in the ContainerMap. The fix
+    // is attribution by cgroup id, which lands with the per-container
+    // keying of P1-2. The same stale-key problem affects any pod that is
+    // never registered but reuses a dead pod's netns inode.
     flags = bpf_map_lookup_elem(&inode_num, &net_ns);
     if (!flags)
-        return capture_pending(net_ns, syscall_id);
+        return 0;
 
     // Tier filter first: cheap, and keeps the dedup map from filling
     // with syscalls nobody asked to see.
     if (!tier_allows(KG_TIER_OF(*flags), syscall_id))
         return 0;
 
-    // A container (re)starting in an already-registered netns: skip the
-    // runtime's pre-filter setup syscalls here too, or the profile would
-    // depend on whether a restart happened to be observed.
+    // A container that started before the controller (no pending mark)
+    // and is restarted in place still runs runc here: skip its pre-filter
+    // setup syscalls too, so the profile does not depend on which path
+    // happened to see a restart.
     if (runtime_prefilter_skip(syscall_id))
         return 0;
 
