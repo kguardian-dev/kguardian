@@ -89,19 +89,17 @@ type SvcDetail struct {
 
 // BrokerBaseURL is the base URL of the kguardian broker. It defaults to the
 // port-forward target the kubectl-plugin CLI sets up (a forward to
-// localhost:9090). The `serve` command overrides it (from BROKER_URL) so the
-// in-cluster service reaches the broker directly without a port-forward.
+// localhost:9090).
 //
-// BrokerBaseURL and BrokerAuthToken are configure-once values: set them before
-// serving traffic (the CLI sets up the port-forward first; `serve` sets them
-// from the environment before ListenAndServe). They are only read afterwards,
-// so concurrent broker calls need no synchronisation.
+// BrokerBaseURL and BrokerAuthToken are configure-once values: the CLI sets
+// them before its first broker call and only reads them afterwards, so
+// concurrent broker calls need no synchronisation.
 var BrokerBaseURL = "http://127.0.0.1:9090"
 
 // BrokerAuthToken, when non-empty, is sent as a Bearer token on every broker
-// request. The broker requires it on all data endpoints when deployed with
-// BROKER_AUTH_TOKEN set; the `serve` command wires it from the environment so
-// the in-cluster service authenticates the same way the mcp-server does.
+// request. With broker.auth.enabled the broker refuses unauthenticated data
+// requests; the CLI takes the read token from KGUARDIAN_BROKER_TOKEN,
+// BROKER_AUTH_TOKEN or --broker-token-file (see cmd/root.go).
 var BrokerAuthToken = ""
 
 // maxBrokerResponseBytes caps the broker response body read (10 MB) so a
@@ -123,7 +121,34 @@ func brokerGet(path string) (*http.Response, error) {
 	if BrokerAuthToken != "" {
 		req.Header.Set("Authorization", "Bearer "+BrokerAuthToken)
 	}
-	return brokerHTTPClient.Do(req)
+	resp, err := brokerHTTPClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	// 401/403 is an error, never an answer. Several callers read any
+	// non-200 as "the broker has no row" (getRealPodSpec returns nil, nil),
+	// so a missing token used to turn every peer into an unknown IP and
+	// the generated policy pinned ipBlocks instead of podSelectors, with
+	// nothing logged above debug.
+	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+		_ = resp.Body.Close()
+		return nil, &BrokerAuthError{Status: resp.StatusCode, TokenSet: BrokerAuthToken != ""}
+	}
+	return resp, nil
+}
+
+// BrokerAuthError is returned when the broker refuses a request for lack of
+// a valid token (401) or scope (403).
+type BrokerAuthError struct {
+	Status   int
+	TokenSet bool
+}
+
+func (e *BrokerAuthError) Error() string {
+	if !e.TokenSet {
+		return fmt.Sprintf("broker requires authentication (HTTP %d): set KGUARDIAN_BROKER_TOKEN or --broker-token-file to the broker's read token", e.Status)
+	}
+	return fmt.Sprintf("broker rejected the configured token (HTTP %d): check it is the broker's read token", e.Status)
 }
 
 // Function variables for easier mocking in tests
