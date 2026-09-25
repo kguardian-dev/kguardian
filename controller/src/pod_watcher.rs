@@ -647,6 +647,11 @@ async fn update_pods_details(
             workload_name,
             capture_level: Some(capture_level.as_str().to_string()),
             host_network: is_host_network(pod),
+            // Typed image identity + securityContext subset. The
+            // broker's compaction drops spec/status from pod_obj, so
+            // this is the only path by which image digests survive.
+            containers: Some(crate::image_inventory::pod_containers(pod)),
+            pod_security: Some(crate::image_inventory::pod_security(pod)),
         };
 
         if let Err(e) = api_post_call(json!(z), "pod/spec").await {
