@@ -38,12 +38,14 @@ CREATE INDEX IF NOT EXISTS idx_images_last_seen ON images (last_seen);
 -- kubelet (or a spec pin) supplies a digest: a pending container with a
 -- bare image ref never creates one.
 --
--- "Currently running" = last_seen within image_inventory::RUNNING_WINDOW_SECS.
--- Every live, ready pod is re-posted by its node's controller at least
--- every 60 s (resync), and a re-post refreshes last_seen at most every
--- REFRESH_SECS, so a digest no pod reports any more drops out of the
--- running set within the window and is pruned by retention after
--- IMAGE_INVENTORY_RETENTION_DAYS.
+-- "Currently running" = last_seen within the running window
+-- (IMAGE_INVENTORY_RUNNING_WINDOW_SECS, default 900) OR last_pod_name is a
+-- live, not-dead pod in pod_details. Every live pod, ready or not, is
+-- re-posted by its node's controller at least every 60 s (resync), and a
+-- re-post refreshes last_seen at most every REFRESH_SECS, so a digest no
+-- pod reports any more drops out of the running set within the window
+-- and is pruned by retention after IMAGE_INVENTORY_RETENTION_DAYS. See
+-- image_inventory::running_window_secs.
 CREATE TABLE IF NOT EXISTS workload_containers (
     cluster_id       VARCHAR   NOT NULL DEFAULT 'primary',
     -- Same (namespace, kind, name) key as workload_syscalls and the

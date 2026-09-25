@@ -34,7 +34,7 @@
 //!   `("Pod", pod_name)`. The digest is in the key because a container
 //!   can run several at once (rollout, mixed node images); a row is only
 //!   created once a digest is known. "Running" is defined by
-//!   [`RUNNING_WINDOW_SECS`].
+//!   [`running_window_secs`].
 //! - Retention (`retention.rs`, "Image inventory") prunes digest rows no
 //!   running pod has refreshed within `IMAGE_INVENTORY_RETENTION_DAYS`,
 //!   then images nothing references.
@@ -68,21 +68,68 @@ pub const DEFAULT_CLUSTER_ID: &str = "primary";
 /// buys nothing and would cost one write per pod per resync.
 pub const REFRESH_SECS: i64 = 300;
 
-/// A (workload, container, digest) row counts as RUNNING while its
-/// `last_seen` is within this window.
+/// Default for [`running_window_secs`]: three refresh periods.
+pub const DEFAULT_RUNNING_WINDOW_SECS: i64 = 3 * REFRESH_SECS;
+/// Floor for the window: shorter than one refresh period plus a resync
+/// and a live digest would flicker out between refreshes.
+pub const MIN_RUNNING_WINDOW_SECS: i64 = REFRESH_SECS + 60;
+/// Ceiling: a week. Beyond that "running" stops meaning anything.
+pub const MAX_RUNNING_WINDOW_SECS: i64 = 7 * 24 * 3600;
+
+/// Parse `IMAGE_INVENTORY_RUNNING_WINDOW_SECS` (chart:
+/// `broker.imageInventory.runningWindowSeconds`). Pure for testing.
+pub(crate) fn parse_running_window(raw: Option<&str>) -> i64 {
+    raw.and_then(|v| v.trim().parse::<i64>().ok())
+        .map(|n| n.clamp(MIN_RUNNING_WINDOW_SECS, MAX_RUNNING_WINDOW_SECS))
+        .unwrap_or(DEFAULT_RUNNING_WINDOW_SECS)
+}
+
+/// A (workload, container, digest) row counts as RUNNING when EITHER:
 ///
-/// Why a freshness window and not a join to live `pod_details` rows: a
-/// row records only the pod that last refreshed it, not every replica,
-/// so "that pod is alive" is neither necessary nor sufficient. What IS
-/// guaranteed is the refresh cadence: the controller re-posts every live,
-/// ready pod on its node at least every 60 s (resync), and a re-post
-/// refreshes `last_seen` whenever it is older than [`REFRESH_SECS`]. A
-/// running digest is therefore never more than ~6 minutes stale; three
-/// refresh periods leave room for a missed resync or a controller
-/// restart. The cost is that a digest keeps reading as running for up to
-/// this long after its last pod goes (end of a rollout), and a pod that
-/// stays not-Ready (which the controller does not re-post) drops out.
-pub const RUNNING_WINDOW_SECS: i64 = 3 * REFRESH_SECS;
+/// 1. its `last_seen` is within this window, or
+/// 2. the pod that last reported it (`last_pod_name`) is still live — in
+///    `pod_details`, same namespace, not marked dead.
+///
+/// (1) is the primary signal. The controller re-posts every live,
+/// non-terminal pod on its node at least every 60 s, ready or not, and a
+/// re-post refreshes `last_seen` whenever it is older than
+/// [`REFRESH_SECS`], so a running digest is never more than ~6 minutes
+/// stale; the default of three refresh periods leaves room for a missed
+/// resync or a controller restart. Its cost: a digest keeps reading as
+/// running for up to the window after its last pod goes.
+///
+/// (2) is the backstop for a pod whose re-posts stop while it lives (an
+/// older controller that only re-posts Ready pods, a controller down on
+/// that node). It is one indexed lookup on `pod_details`' primary key.
+/// When a pod reports a DIFFERENT digest for the same container (an
+/// in-place image update), the old row's `last_pod_name` is cleared at
+/// ingest so the backstop cannot keep a replaced digest alive.
+///
+/// Read once from the environment.
+pub fn running_window_secs() -> i64 {
+    static WINDOW: std::sync::OnceLock<i64> = std::sync::OnceLock::new();
+    *WINDOW.get_or_init(|| {
+        parse_running_window(
+            std::env::var("IMAGE_INVENTORY_RUNNING_WINDOW_SECS")
+                .ok()
+                .as_deref(),
+        )
+    })
+}
+
+/// SQL for "this `workload_containers` row (aliased `wc`) is running";
+/// `$W` is replaced by the bind parameter carrying the window in seconds.
+/// One definition so the three read queries cannot disagree.
+macro_rules! running_sql {
+    ($w:literal) => {
+        concat!(
+            "(wc.last_seen >= timezone('UTC', NOW()) - make_interval(secs => ",
+            $w,
+            ") OR EXISTS (SELECT 1 FROM pod_details pd WHERE pd.pod_name = wc.last_pod_name \
+             AND pd.pod_namespace = wc.pod_namespace AND NOT pd.is_dead))"
+        )
+    };
+}
 
 /// Containers accepted per pod. Matches the controller's own cap.
 pub const MAX_CONTAINERS_PER_POD: usize = 64;
@@ -492,6 +539,17 @@ WHERE workload_containers.last_seen < EXCLUDED.last_seen - make_interval(secs =>
    OR workload_containers.security_context IS DISTINCT FROM EXCLUDED.security_context \
    OR workload_containers.pod_security IS DISTINCT FROM EXCLUDED.pod_security";
 
+/// When a pod reports digest D for a container, it no longer runs any
+/// other digest there: drop its name from those rows so the live-pod
+/// backstop in [`running_window_secs`] cannot keep a replaced digest
+/// running (in-place image update, a StatefulSet pod recreated under the
+/// same name on a new image). Matches nothing in the steady state, so it
+/// writes nothing.
+pub(crate) const CONTAINER_RELEASE_SQL: &str = "\
+UPDATE workload_containers SET last_pod_name = NULL \
+WHERE cluster_id = $1 AND pod_namespace = $2 AND workload_kind = $3 AND workload_name = $4 \
+  AND container_name = $5 AND image_digest <> $6 AND last_pod_name = $7";
+
 /// A container reported with an image ref but no digest yet — the pod is
 /// (re)starting and the kubelet has not resolved one. It never creates a
 /// row (that would be a phantom: no digest is known to run). If the same
@@ -525,6 +583,17 @@ pub fn upsert_inventory(conn: &mut PgConnection, inv: &Inventory) -> Result<usiz
                 .execute(conn)?;
         }
         for c in &inv.containers {
+            if let Some(digest) = c.image_digest.as_deref() {
+                n += sql_query(CONTAINER_RELEASE_SQL)
+                    .bind::<Text, _>(&c.cluster_id)
+                    .bind::<Text, _>(&c.namespace)
+                    .bind::<Text, _>(&c.workload_kind)
+                    .bind::<Text, _>(&c.workload_name)
+                    .bind::<Text, _>(&c.container_name)
+                    .bind::<Text, _>(digest)
+                    .bind::<Text, _>(&c.last_pod_name)
+                    .execute(conn)?;
+            }
             n += match c.image_digest.as_deref() {
                 Some(digest) => sql_query(CONTAINER_UPSERT_SQL)
                     .bind::<Text, _>(&c.cluster_id)
@@ -622,7 +691,7 @@ pub struct ImageSummary {
     #[diesel(sql_type = Timestamp)]
     pub last_seen: NaiveDateTime,
     /// Workload containers running this digest now (refreshed within
-    /// [`RUNNING_WINDOW_SECS`]). 0 = no longer running; kept until
+    /// [`running_window_secs`]). 0 = no longer running; kept until
     /// retention prunes it.
     #[diesel(sql_type = BigInt)]
     pub running_containers: i64,
@@ -636,18 +705,19 @@ pub struct ImagePage {
     pub next_after: Option<String>,
 }
 
-const IMAGES_LIST_SQL: &str = "\
-SELECT i.digest, i.repository, i.tags, i.digest_kind, i.first_seen, i.last_seen, \
-    (SELECT count(*) FROM workload_containers wc WHERE wc.image_digest = i.digest \
-        AND wc.last_seen >= timezone('UTC', NOW()) - make_interval(secs => $5)) \
-        AS running_containers \
+const IMAGES_LIST_SQL: &str = concat!(
+    "SELECT i.digest, i.repository, i.tags, i.digest_kind, i.first_seen, i.last_seen, \
+    (SELECT count(*) FROM workload_containers wc WHERE wc.image_digest = i.digest AND ",
+    running_sql!("$5"),
+    ") AS running_containers \
 FROM images i \
 WHERE ($1::text IS NULL OR i.digest > $1) \
   AND ($2::text IS NULL OR EXISTS (SELECT 1 FROM workload_containers wc \
         WHERE wc.image_digest = i.digest AND wc.pod_namespace = $2)) \
   AND ($3::text IS NULL OR i.repository = $3) \
 ORDER BY i.digest \
-LIMIT $4";
+LIMIT $4"
+);
 
 pub fn list_images(
     conn: &mut PgConnection,
@@ -661,7 +731,7 @@ pub fn list_images(
         .bind::<Nullable<Text>, _>(namespace)
         .bind::<Nullable<Text>, _>(repository)
         .bind::<BigInt, _>(limit + 1)
-        .bind::<Double, _>(RUNNING_WINDOW_SECS as f64)
+        .bind::<Double, _>(running_window_secs() as f64)
         .load(conn)?;
     let next_after = if items.len() as i64 > limit {
         items.truncate(limit as usize);
@@ -746,7 +816,7 @@ pub struct ImageUser {
     pub first_seen: NaiveDateTime,
     #[diesel(sql_type = Timestamp)]
     pub last_seen: NaiveDateTime,
-    /// Refreshed within [`RUNNING_WINDOW_SECS`].
+    /// Refreshed within [`running_window_secs`].
     #[diesel(sql_type = Bool)]
     pub running: bool,
 }
@@ -762,13 +832,15 @@ pub struct ImageDetail {
     pub truncated: bool,
 }
 
-const IMAGE_USERS_SQL: &str = "\
-SELECT cluster_id, pod_namespace AS namespace, workload_kind, workload_name, container_name, \
-    container_kind, image_ref, first_seen, last_seen, \
-    (last_seen >= timezone('UTC', NOW()) - make_interval(secs => $2)) AS running \
-FROM workload_containers WHERE image_digest = $1 \
-ORDER BY running DESC, pod_namespace, workload_kind, workload_name, container_name \
-LIMIT $3";
+const IMAGE_USERS_SQL: &str = concat!(
+    "SELECT wc.cluster_id, wc.pod_namespace AS namespace, wc.workload_kind, wc.workload_name, \
+    wc.container_name, wc.container_kind, wc.image_ref, wc.first_seen, wc.last_seen, ",
+    running_sql!("$2"),
+    " AS running \
+FROM workload_containers wc WHERE wc.image_digest = $1 \
+ORDER BY running DESC, wc.pod_namespace, wc.workload_kind, wc.workload_name, wc.container_name \
+LIMIT $3"
+);
 
 pub fn image_detail(conn: &mut PgConnection, d: &str) -> Result<Option<ImageDetail>, DbError> {
     use schema::images::dsl as im;
@@ -782,7 +854,7 @@ pub fn image_detail(conn: &mut PgConnection, d: &str) -> Result<Option<ImageDeta
     };
     let mut workloads: Vec<ImageUser> = sql_query(IMAGE_USERS_SQL)
         .bind::<Text, _>(d)
-        .bind::<Double, _>(RUNNING_WINDOW_SECS as f64)
+        .bind::<Double, _>(running_window_secs() as f64)
         .bind::<BigInt, _>(IMAGE_WORKLOADS_MAX + 1)
         .load(conn)?;
     let truncated = workloads.len() as i64 > IMAGE_WORKLOADS_MAX;
@@ -878,7 +950,7 @@ pub struct ContainerImages {
     /// More than one digest running at once: a rollout in progress, or
     /// nodes that resolved the same tag to different images.
     pub mixed_digests: bool,
-    /// Digests refreshed within [`RUNNING_WINDOW_SECS`], newest first.
+    /// Digests refreshed within [`running_window_secs`], newest first.
     pub digests: Vec<ContainerDigest>,
     /// Digests no pod has reported within the window, kept until
     /// retention prunes them (`IMAGE_INVENTORY_RETENTION_DAYS`).
@@ -898,14 +970,16 @@ pub struct WorkloadContainers {
     pub truncated: bool,
 }
 
-const WORKLOAD_CONTAINERS_SQL: &str = "\
-SELECT cluster_id, container_name, container_kind, image_digest, image_ref, security_context, \
-    pod_security, last_pod_name, first_seen, last_seen, \
-    (last_seen >= timezone('UTC', NOW()) - make_interval(secs => $4)) AS running \
-FROM workload_containers \
-WHERE pod_namespace = $1 AND workload_kind = $2 AND workload_name = $3 \
-ORDER BY cluster_id, container_name, last_seen DESC, image_digest \
-LIMIT $5";
+const WORKLOAD_CONTAINERS_SQL: &str = concat!(
+    "SELECT wc.cluster_id, wc.container_name, wc.container_kind, wc.image_digest, wc.image_ref, \
+    wc.security_context, wc.pod_security, wc.last_pod_name, wc.first_seen, wc.last_seen, ",
+    running_sql!("$4"),
+    " AS running \
+FROM workload_containers wc \
+WHERE wc.pod_namespace = $1 AND wc.workload_kind = $2 AND wc.workload_name = $3 \
+ORDER BY wc.cluster_id, wc.container_name, wc.last_seen DESC, wc.image_digest \
+LIMIT $5"
+);
 
 /// Group rows (already ordered by cluster, container, newest first) per
 /// container. Pure, so the grouping is unit-tested without a database.
@@ -956,7 +1030,7 @@ pub fn workload_containers(
         .bind::<Text, _>(ns)
         .bind::<Text, _>(kind)
         .bind::<Text, _>(name)
-        .bind::<Double, _>(RUNNING_WINDOW_SECS as f64)
+        .bind::<Double, _>(running_window_secs() as f64)
         .bind::<BigInt, _>(WORKLOAD_CONTAINERS_MAX + 1)
         .load(conn)?;
     let truncated = rows.len() as i64 > WORKLOAD_CONTAINERS_MAX;
@@ -965,7 +1039,7 @@ pub fn workload_containers(
         namespace: ns.to_string(),
         kind: kind.to_string(),
         name: name.to_string(),
-        running_window_seconds: RUNNING_WINDOW_SECS,
+        running_window_seconds: running_window_secs(),
         containers: group_containers(rows),
         truncated,
     })
@@ -1221,6 +1295,36 @@ mod tests {
         assert_eq!(clamp_images_limit(Some(42)), 42);
     }
 
+    #[test]
+    fn running_window_parses_and_clamps() {
+        assert_eq!(parse_running_window(None), DEFAULT_RUNNING_WINDOW_SECS);
+        assert_eq!(parse_running_window(Some("900")), 900);
+        assert_eq!(parse_running_window(Some(" 1800 ")), 1800);
+        assert_eq!(parse_running_window(Some("10")), MIN_RUNNING_WINDOW_SECS);
+        assert_eq!(parse_running_window(Some("0")), MIN_RUNNING_WINDOW_SECS);
+        assert_eq!(
+            parse_running_window(Some("99999999")),
+            MAX_RUNNING_WINDOW_SECS
+        );
+        assert_eq!(
+            parse_running_window(Some("soon")),
+            DEFAULT_RUNNING_WINDOW_SECS
+        );
+    }
+
+    #[test]
+    fn every_read_uses_the_same_running_predicate() {
+        let pred = running_sql!("$N");
+        assert!(pred.contains("NOT pd.is_dead"));
+        for (sql, w) in [
+            (IMAGES_LIST_SQL, "$5"),
+            (IMAGE_USERS_SQL, "$2"),
+            (WORKLOAD_CONTAINERS_SQL, "$4"),
+        ] {
+            assert!(sql.contains(&pred.replace("$N", w)), "{sql}");
+        }
+    }
+
     fn digest_row(container: &str, digest: &str, running: bool) -> ContainerDigestRow {
         ContainerDigestRow {
             cluster_id: "primary".into(),
@@ -1416,7 +1520,7 @@ mod tests {
         conn.batch_execute(&format!(
             "UPDATE workload_containers SET last_seen = timezone('UTC', NOW()) \
                - INTERVAL '{} seconds' WHERE image_digest = '{D}'",
-            RUNNING_WINDOW_SECS + 60
+            running_window_secs() + 60
         ))
         .unwrap();
         post(&mut conn, "web-new-1", "nginx:1.28", D2);
@@ -1433,6 +1537,87 @@ mod tests {
             .find(|i| i.digest == D)
             .unwrap();
         assert_eq!(old.running_containers, 0);
+    }
+
+    #[test]
+    #[ignore = "requires a live postgres (set KG_TEST_DATABASE_URL)"]
+    fn live_database_live_pod_keeps_its_digest_running_and_dead_pod_drops_out() {
+        use diesel::connection::SimpleConnection;
+        let mut conn = live_conn();
+        let reset = "DELETE FROM pod_details WHERE pod_name LIKE 'inv-test-%'";
+        conn.batch_execute(reset).unwrap();
+        // A CrashLoopBackOff pod: live in pod_details, not dead.
+        conn.batch_execute(
+            "INSERT INTO pod_details (pod_name, pod_ip, pod_namespace, time_stamp, node_name, is_dead) \
+             VALUES ('inv-test-crash', '10.9.9.9', 'prod', timezone('UTC', NOW()), 'n', false)",
+        )
+        .unwrap();
+        let post = |conn: &mut PgConnection, digest: &str, image: &str| {
+            let mut p = pod(Some("prod"), Some("Deployment"), Some("web"));
+            p.pod_name = "inv-test-crash".into();
+            let list = json!([{"name": "app", "kind": "regular", "image": image,
+                "digest": digest, "digest_kind": "repo"}]);
+            upsert_inventory(conn, &inventory_from_post(&p, Some(&list), None)).unwrap()
+        };
+        let age_past_window = |conn: &mut PgConnection| {
+            conn.batch_execute(&format!(
+                "UPDATE workload_containers SET last_seen = timezone('UTC', NOW()) \
+                   - INTERVAL '{} seconds'",
+                running_window_secs() + 60
+            ))
+            .unwrap();
+        };
+        let running_count = |conn: &mut PgConnection, d: &str| {
+            list_images(conn, None, None, None, 10)
+                .unwrap()
+                .items
+                .into_iter()
+                .find(|i| i.digest == d)
+                .map(|i| i.running_containers)
+                .unwrap_or(0)
+        };
+
+        post(&mut conn, D, "nginx:1.27");
+        // Its re-posts stopped (say an older controller that only re-posts
+        // Ready pods), so the row is well past the freshness window...
+        age_past_window(&mut conn);
+        // ...but the pod is live, so the digest still reads as running.
+        let app = app_group(&mut conn);
+        assert_eq!(app.digests.len(), 1, "live pod keeps its digest running");
+        assert_eq!(app.digests[0].digest, D);
+        assert_eq!(running_count(&mut conn, D), 1);
+        assert!(image_detail(&mut conn, D).unwrap().unwrap().workloads[0].running);
+
+        // Marked dead: it drops out.
+        conn.batch_execute(
+            "UPDATE pod_details SET is_dead = true WHERE pod_name = 'inv-test-crash'",
+        )
+        .unwrap();
+        let app = app_group(&mut conn);
+        assert!(app.digests.is_empty());
+        assert_eq!(app.previous_digests[0].digest, D);
+        assert_eq!(running_count(&mut conn, D), 0);
+        assert!(!image_detail(&mut conn, D).unwrap().unwrap().workloads[0].running);
+
+        // Revived, then updated in place to D2: the backstop must not keep
+        // the replaced digest running once the pod reports the new one.
+        conn.batch_execute(
+            "UPDATE pod_details SET is_dead = false WHERE pod_name = 'inv-test-crash'",
+        )
+        .unwrap();
+        post(&mut conn, D2, "nginx:1.28");
+        let app = app_group(&mut conn);
+        assert_eq!(
+            app.digests
+                .iter()
+                .map(|d| d.digest.as_str())
+                .collect::<Vec<_>>(),
+            vec![D2]
+        );
+        assert_eq!(app.previous_digests[0].digest, D);
+        assert_eq!(app.previous_digests[0].last_pod_name, None);
+
+        conn.batch_execute(reset).unwrap();
     }
 
     #[test]
