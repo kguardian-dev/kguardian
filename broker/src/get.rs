@@ -14,7 +14,10 @@ use tracing::{debug, info};
 type DbPool = r2d2::Pool<ConnectionManager<PgConnection>>;
 type DbError = Box<dyn std::error::Error + Send + Sync>;
 
-#[get("/pod/traffic")]
+#[get(
+    "/pod/traffic",
+    wrap = "::actix_web::middleware::from_fn(crate::auth::authorize)"
+)]
 pub async fn get_pod_traffic(
     pool: web::Data<DbPool>,
     budget: web::Data<ReadBudget>,
@@ -128,7 +131,10 @@ pub fn pod_traffic(
     Ok(pod)
 }
 
-#[get("/pod/info")]
+#[get(
+    "/pod/info",
+    wrap = "::actix_web::middleware::from_fn(crate::auth::authorize)"
+)]
 pub async fn get_pod_details(
     pool: web::Data<DbPool>,
     budget: web::Data<ReadBudget>,
@@ -258,7 +264,10 @@ pub fn pod_details(conn: &mut PgConnection) -> Result<Option<Vec<PodDetail>>, Db
 }
 
 // New API: Get all pods for a specific node
-#[get("/pod/list/{node}")]
+#[get(
+    "/pod/list/{node}",
+    wrap = "::actix_web::middleware::from_fn(crate::auth::authorize)"
+)]
 pub async fn get_pods_by_node(
     pool: web::Data<DbPool>,
     budget: web::Data<ReadBudget>,
@@ -302,7 +311,10 @@ pub fn pods_by_node(conn: &mut PgConnection, node: &str) -> Result<Vec<PodDetail
     Ok(pods)
 }
 
-#[get("/svc/info")]
+#[get(
+    "/svc/info",
+    wrap = "::actix_web::middleware::from_fn(crate::auth::authorize)"
+)]
 pub async fn get_svc_details(
     pool: web::Data<DbPool>,
     budget: web::Data<ReadBudget>,
@@ -349,7 +361,10 @@ pub fn svc_details_all(conn: &mut PgConnection) -> Result<Option<Vec<SvcDetail>>
     Ok(svcs)
 }
 
-#[get("/svc/ip/{ip}")]
+#[get(
+    "/svc/ip/{ip}",
+    wrap = "::actix_web::middleware::from_fn(crate::auth::authorize)"
+)]
 pub async fn get_svc_by_ip(
     pool: web::Data<DbPool>,
     ip: web::Path<String>,
@@ -395,7 +410,10 @@ pub fn svc_ip(conn: &mut PgConnection, ip: &str) -> Result<Option<SvcDetail>, Db
 }
 
 // POD BY NAME
-#[get("/pod/name/{name}")]
+#[get(
+    "/pod/name/{name}",
+    wrap = "::actix_web::middleware::from_fn(crate::auth::authorize)"
+)]
 pub async fn get_pod_by_name(
     pool: web::Data<DbPool>,
     name: web::Path<String>,
@@ -451,7 +469,10 @@ pub struct PodByIpQuery {
 }
 
 // POD BY IP
-#[get("/pod/ip/{ip}")]
+#[get(
+    "/pod/ip/{ip}",
+    wrap = "::actix_web::middleware::from_fn(crate::auth::authorize)"
+)]
 pub async fn get_pod_by_ip(
     pool: web::Data<DbPool>,
     ip: web::Path<String>,
@@ -563,7 +584,10 @@ pub fn pod_ip(conn: &mut PgConnection, ip: &str) -> Result<Option<PodDetail>, Db
 }
 
 // POD TRAFFIC BY PODNAME
-#[get("/pod/traffic/{name}")]
+#[get(
+    "/pod/traffic/{name}",
+    wrap = "::actix_web::middleware::from_fn(crate::auth::authorize)"
+)]
 pub async fn get_pod_traffic_name(
     pool: web::Data<DbPool>,
     budget: web::Data<ReadBudget>,
@@ -636,7 +660,10 @@ pub fn pod_traffic_by_name(
 pub(crate) const PER_POD_TRAFFIC_ROW_CEILING: i64 = 20_000;
 
 // POD SYS CALLS BY PODNAME
-#[get("/pod/syscalls/{name}")]
+#[get(
+    "/pod/syscalls/{name}",
+    wrap = "::actix_web::middleware::from_fn(crate::auth::authorize)"
+)]
 pub async fn get_pod_syscall_name(
     pool: web::Data<DbPool>,
     budget: web::Data<ReadBudget>,
@@ -758,7 +785,10 @@ pub(crate) fn validate_enum_filter(
     }
 }
 
-#[get("/audit/verdicts")]
+#[get(
+    "/audit/verdicts",
+    wrap = "::actix_web::middleware::from_fn(crate::auth::authorize)"
+)]
 pub async fn get_audit_verdicts(
     pool: web::Data<DbPool>,
     budget: web::Data<ReadBudget>,

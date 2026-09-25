@@ -2333,8 +2333,10 @@ pub fn spawn_metrics_refresh(pool: DbPool, metrics: web::Data<SeccompDenialMetri
 /// `/seccomp/denials` — both verbs on one resource so the raised JSON body
 /// limit ([`DENIAL_JSON_LIMIT_BYTES`]) is scoped to exactly this path
 /// instead of being applied app-wide.
-pub fn seccomp_denials_resource() -> actix_web::Resource {
+pub fn seccomp_denials_resource() -> impl actix_web::dev::HttpServiceFactory {
     web::resource("/seccomp/denials")
+        // Per-route authorisation after routing; see crate::auth.
+        .wrap(::actix_web::middleware::from_fn(crate::auth::authorize))
         .app_data(web::JsonConfig::default().limit(DENIAL_JSON_LIMIT_BYTES))
         .route(web::get().to(get_seccomp_denials))
         .route(web::post().to(post_seccomp_denials))

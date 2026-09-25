@@ -25,7 +25,7 @@ Query (GET):
 - `/audit/verdicts`
 - `/version`, `/health`, `/metrics` (Prometheus text format)
 
-When `BROKER_AUTH_TOKEN` is set, all endpoints except `/health` and `/metrics` require a bearer token.
+With auth on (any `BROKER_TOKEN_*` or `BROKER_AUTH_TOKEN` set), every endpoint except `/health` and `/metrics` requires a bearer token carrying the endpoint's scope (`401` without a valid token, `403` without the scope). Each route's scope is declared in `src/auth.rs` (`ROUTES`), and each route carries `wrap = "::actix_web::middleware::from_fn(crate::auth::authorize)"`, which checks the scope after routing, against the route the router actually matched. A unit test fails for any route that is missing either one. At runtime a route with no `ROUTES` entry answers `403` to everyone, and a path that matches no route answers `404` before any handler runs. See the [authentication docs](https://kguardian.dev/api-reference/introduction#authentication).
 
 ## Configuration
 
@@ -36,7 +36,11 @@ When `BROKER_AUTH_TOKEN` is set, all endpoints except `/health` and `/metrics` r
 | `DB_POOL_MAX_SIZE` | `32` | r2d2 pool size (floored to keep headroom over audit permits) |
 | `DB_STATEMENT_TIMEOUT_MS` | `30000` | Per-statement timeout backstop; `0` disables |
 | `DB_MIGRATION_MAX_RETRIES` | `10` | Startup migration retry budget (2s spacing) |
-| `BROKER_AUTH_TOKEN` | unset | Enables bearer-token auth when set |
+| `BROKER_TOKEN_READ` | unset | Token with the `read` scope (frontend proxy, llm-bridge, CLI) |
+| `BROKER_TOKEN_INGEST` | unset | Token with `ingest` + `read` (controller) |
+| `BROKER_TOKEN_SUPPLYCHAIN` | unset | Token with `supplychain` + `read` (supply-chain writes) |
+| `BROKER_TOKEN_ADMIN` | unset | Token with every scope (operators) |
+| `BROKER_AUTH_TOKEN` | unset | Shared token from before scopes existed: `read` + `ingest` |
 | `EVALUATOR_URL` | unset | Enables audit-evaluator forwarding when set |
 | `AUDIT_INFLIGHT_PERMITS` | `16` | Max concurrent evaluator calls |
 | `AUDIT_QUEUE_CAPACITY` | `2048` | Bounded ingest→audit queue size |

@@ -11,7 +11,10 @@ use tracing::{debug, info};
 type DbPool = r2d2::Pool<ConnectionManager<PgConnection>>;
 type DbError = Box<dyn std::error::Error + Send + Sync>;
 
-#[post("/pod/traffic/batch")]
+#[post(
+    "/pod/traffic/batch",
+    wrap = "::actix_web::middleware::from_fn(crate::auth::authorize)"
+)]
 pub async fn add_pods_batch(
     pool: web::Data<DbPool>,
     audit: web::Data<AuditClient>,
@@ -240,7 +243,10 @@ impl PodTraffic {
     }
 }
 
-#[post("/pod/spec")]
+#[post(
+    "/pod/spec",
+    wrap = "::actix_web::middleware::from_fn(crate::auth::authorize)"
+)]
 pub async fn add_pod_details(
     pool: web::Data<DbPool>,
     form: web::Json<PodDetail>,
@@ -468,7 +474,10 @@ pub struct MarkDeadRequest {
     pub pod_ip: Option<String>,
 }
 
-#[post("/pod/mark_dead")]
+#[post(
+    "/pod/mark_dead",
+    wrap = "::actix_web::middleware::from_fn(crate::auth::authorize)"
+)]
 pub async fn mark_pod_dead(
     pool: web::Data<DbPool>,
     form: web::Json<MarkDeadRequest>,
@@ -584,7 +593,10 @@ pub(crate) fn is_routable_svc_ip(s: &str) -> bool {
     !s.is_empty() && s != "None"
 }
 
-#[post("/svc/spec")]
+#[post(
+    "/svc/spec",
+    wrap = "::actix_web::middleware::from_fn(crate::auth::authorize)"
+)]
 pub async fn add_svc_details(
     pool: web::Data<DbPool>,
     form: web::Json<SvcDetail>,
@@ -667,7 +679,10 @@ impl PodInputSyscalls {
     }
 }
 
-#[post("/pod/syscalls")]
+#[post(
+    "/pod/syscalls",
+    wrap = "::actix_web::middleware::from_fn(crate::auth::authorize)"
+)]
 pub async fn add_pods_syscalls(
     pool: web::Data<DbPool>,
     form: web::Json<Vec<PodInputSyscalls>>,
@@ -1418,7 +1433,10 @@ mod tests {
 /// the controller once per start; the telemetry check-in aggregates the
 /// table. Light validation only — the version service re-whitelists
 /// every value before anything is recorded upstream.
-#[post("/node/facts")]
+#[post(
+    "/node/facts",
+    wrap = "::actix_web::middleware::from_fn(crate::auth::authorize)"
+)]
 pub async fn add_node_facts(
     pool: web::Data<DbPool>,
     form: web::Json<crate::NodeFact>,
