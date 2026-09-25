@@ -13,8 +13,10 @@ function parse(): HashLocation {
   const raw = window.location.hash.replace(/^#\/?/, '');
   const qi = raw.indexOf('?');
   const view = qi >= 0 ? raw.slice(0, qi) : raw;
-  const params: Record<string, string> = {};
-  if (qi >= 0) new URLSearchParams(raw.slice(qi + 1)).forEach((v, k) => { params[k] = v; });
+  // fromEntries defines OWN properties, so a `__proto__=` key in a pasted
+  // link becomes a plain param instead of assigning the object's prototype.
+  // Later duplicates win, as with repeated assignment.
+  const params: Record<string, string> = qi >= 0 ? Object.fromEntries(new URLSearchParams(raw.slice(qi + 1))) : {};
   return { view, params };
 }
 
