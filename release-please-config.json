@@ -68,6 +68,16 @@
         "VERSION"
       ],
       "include-component-in-tag": true
+    },
+    "supplychain": {
+      "component": "supplychain",
+      "release-type": "go",
+      "package-name": "supplychain",
+      "changelog-path": "CHANGELOG.md",
+      "extra-files": [
+        "supplychain/VERSION"
+      ],
+      "include-component-in-tag": true
     }
   },
   "changelog-sections": [
