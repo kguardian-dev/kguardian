@@ -44,7 +44,8 @@ When `BROKER_AUTH_TOKEN` is set, all endpoints except `/health` and `/metrics` r
 | `AUDIT_VERDICTS_RETENTION_DAYS` | `30` | Verdict retention; `0` disables pruning |
 | `AUDIT_VERDICTS_RETENTION_INTERVAL_SECS` | `3600` | Pruner cadence |
 | `AUDIT_VERDICTS_RETENTION_BATCH_SIZE` | `5000` | Rows deleted per pruning batch |
-| `POD_TRAFFIC_RETENTION_DAYS` | `14` | Traffic retention for departed pods (running pods' rows are never pruned); `0` disables pruning |
+| `POD_TRAFFIC_RETENTION_DAYS` | `14` | Traffic retention for departed pods, and for running pods' rows superseded by a newer row with the same rule and in-cluster peer; `0` disables pruning |
+| `POD_TRAFFIC_MAX_ROWS_PER_POD` | `0` | Opt-in per-pod cap; over it, the pod's oldest rows with no peer identity are deleted (never in-cluster peers). `0` = off |
 | `POD_TRAFFIC_RETENTION_INTERVAL_SECS` | `3600` | Pruner cadence (min 60) |
 | `POD_TRAFFIC_RETENTION_BATCH_SIZE` | `5000` | Rows examined per pruning batch, clamped to [100, 100000] |
 | `TELEMETRY_ENABLED` | `true` | Daily anonymous version check-in; `false` disables |

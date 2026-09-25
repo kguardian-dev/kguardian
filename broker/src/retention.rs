@@ -95,6 +95,17 @@
 //!   the ones whose pod is dead, gone from `pod_details`, or a previous
 //!   incarnation of a reused name (a StatefulSet pod): a replacement pod
 //!   has a fresh network namespace and re-reports what it actually does.
+//! - **...unless a newer row carries the same rule.** An expired row of a
+//!   live pod IS deleted when a newer row of that pod has the same
+//!   direction, protocol, ports, decision and in-cluster peer identity
+//!   (peer workload, or peer name when it has none). That bounds the rows
+//!   a live pod gains as its callers change IP, e.g. one per CronJob run.
+//!   See [`POD_TRAFFIC_PRUNE_SQL`].
+//! - **An opt-in per-pod cap for peers with no identity.** Rows whose peer
+//!   is external or unresolved cannot be superseded. With
+//!   `POD_TRAFFIC_MAX_ROWS_PER_POD` set, a pod over the cap loses its
+//!   oldest such rows, never a row naming an in-cluster peer, and the
+//!   broker warns naming the pod. See [`run_pod_traffic_cap`].
 //! - **A keyset cursor instead of "delete until nothing matches".** Live
 //!   pods' old rows stay, so they pile up at the head of the `time_stamp`
 //!   order. Each batch examines the next `batch_size` expired rows after
@@ -109,6 +120,7 @@
 //! - `POD_TRAFFIC_RETENTION_INTERVAL_SECS` (default 3600)
 //! - `POD_TRAFFIC_RETENTION_BATCH_SIZE` (default 5 000, clamped to
 //!   [100, 100 000])
+//! - `POD_TRAFFIC_MAX_ROWS_PER_POD` (default 0 = no cap)
 
 use chrono::NaiveDateTime;
 use diesel::pg::PgConnection;
@@ -575,27 +587,203 @@ fn pod_traffic_batch_size() -> i64 {
 /// starts no task at all.
 fn spawn_pod_traffic(pool: DbPool) {
     let days = pod_traffic_retention_days();
+    let max_rows = pod_traffic_max_rows_per_pod();
     let interval = pod_traffic_retention_interval();
-    if days == 0 {
+    if days == 0 && max_rows == 0 {
         info!(
-            "pod_traffic retention disabled (POD_TRAFFIC_RETENTION_DAYS=0); table grows unbounded"
+            "pod_traffic retention disabled (POD_TRAFFIC_RETENTION_DAYS=0, no per-pod cap); \
+             table grows unbounded"
         );
         return;
     }
     info!(
         days,
+        max_rows_per_pod = max_rows,
         interval_secs = interval.as_secs(),
-        "pod_traffic retention loop scheduled (rows of live pods are never pruned)"
+        "pod_traffic retention loop scheduled (days=0 means age pruning off; \
+         max_rows_per_pod=0 means no per-pod cap)"
     );
     actix_web::rt::spawn(async move {
         // Staggered after the 60 / 90 / 120 s warmups of the other loops.
         tokio::time::sleep(Duration::from_secs(150)).await;
         let mut cursor = None;
         loop {
-            cursor = run_pod_traffic_pass(&pool, days, cursor).await;
+            if days > 0 {
+                cursor = run_pod_traffic_pass(&pool, days, cursor).await;
+            }
+            // After the age pass, so the cap only counts rows that age and
+            // supersede pruning have already left.
+            if max_rows > 0 {
+                run_pod_traffic_cap(&pool, max_rows).await;
+            }
             tokio::time::sleep(interval).await;
         }
     });
+}
+
+/// `POD_TRAFFIC_MAX_ROWS_PER_POD` (default 0 = no cap). Garbage falls back
+/// to 0 rather than to some cap: this setting deletes rows regardless of
+/// age, so it only ever runs when an operator set it on purpose.
+fn pod_traffic_max_rows_per_pod() -> i64 {
+    std::env::var("POD_TRAFFIC_MAX_ROWS_PER_POD")
+        .ok()
+        .and_then(|v| v.trim().parse::<u32>().ok())
+        .map(i64::from)
+        .unwrap_or(0)
+}
+
+/// Most over-cap pods handled per pass; the rest wait for the next one.
+const MAX_CAPPED_PODS_PER_PASS: i64 = 100;
+
+#[derive(Debug, QueryableByName)]
+struct OverCapName {
+    #[diesel(sql_type = diesel::sql_types::Varchar)]
+    pod_name: String,
+}
+
+#[derive(Debug, QueryableByName)]
+struct OverCapPod {
+    #[diesel(sql_type = diesel::sql_types::Nullable<diesel::sql_types::Varchar>)]
+    pod_namespace: Option<String>,
+    #[diesel(sql_type = diesel::sql_types::BigInt)]
+    rows: i64,
+}
+
+/// Pod names holding more than `$1` rows, largest first, at most `$2`.
+///
+/// Grouped by name alone so it can be answered from
+/// `idx_pod_traffic_pod_name` without touching `pod_namespace`; the
+/// per-namespace count follows in [`POD_TRAFFIC_OVER_CAP_PODS_SQL`], so a
+/// name shared across namespaces (`postgres-0` in three of them) is never
+/// capped on the sum of its namespaces. This is the one statement in the
+/// loop that reads the whole table (or its pod_name index) rather than a
+/// bounded range, which is part of why the cap is opt-in.
+pub(crate) const POD_TRAFFIC_OVER_CAP_NAMES_SQL: &str = "SELECT pod_name \
+     FROM pod_traffic \
+     WHERE pod_name IS NOT NULL \
+     GROUP BY pod_name \
+     HAVING count(*) > $1 \
+     ORDER BY count(*) DESC \
+     LIMIT $2";
+
+/// Per-namespace row counts for one over-cap name, over-cap only.
+pub(crate) const POD_TRAFFIC_OVER_CAP_PODS_SQL: &str = "SELECT pod_namespace, count(*) AS rows \
+     FROM pod_traffic \
+     WHERE pod_name = $1 \
+     GROUP BY pod_namespace \
+     HAVING count(*) > $2";
+
+/// Delete up to `$3` of one pod's oldest rows with NO stored peer identity
+/// (`peer_kind IS NULL`: external, never resolved, or written before
+/// #1447). A row naming an in-cluster peer is never touched here, however
+/// far over the cap the pod is: it may be the only record of a rule, and
+/// dropping it would break the next generated policy.
+pub(crate) const POD_TRAFFIC_CAP_PRUNE_SQL: &str = "WITH victims AS (\
+         SELECT uuid FROM pod_traffic \
+         WHERE pod_name = $1 \
+           AND pod_namespace IS NOT DISTINCT FROM $2 \
+           AND peer_kind IS NULL \
+         ORDER BY time_stamp, uuid \
+         LIMIT $3 \
+     ) \
+     DELETE FROM pod_traffic WHERE uuid IN (SELECT uuid FROM victims)";
+
+/// Summary of capping one pod: rows before, rows pruned.
+#[derive(Debug, PartialEq, Eq)]
+struct CapOutcome {
+    pod_name: String,
+    pod_namespace: Option<String>,
+    rows_before: i64,
+    pruned: i64,
+}
+
+/// The opt-in per-pod cap. For every pod over `max_rows`, delete its oldest
+/// rows with no stored peer identity, in batches, until it is at the cap or
+/// has none of those left, and warn with the pod and the count. The age
+/// pass cannot bound a live pod whose peers are external (an IP-preserving
+/// ingress sees a row per client IP; a scanned pod collects a DROP row per
+/// scanner), because those rows have no identity to supersede on.
+async fn run_pod_traffic_cap(pool: &DbPool, max_rows: i64) {
+    let batch_size = pod_traffic_batch_size();
+    let pool = pool.clone();
+    let result = tokio::task::spawn_blocking(move || -> Result<Vec<CapOutcome>, RetentionError> {
+        let mut conn = pool.get().map_err(RetentionError::Pool)?;
+        cap_pod_traffic(&mut conn, max_rows, batch_size, MAX_BATCHES_PER_PASS)
+    })
+    .await;
+    match result {
+        Ok(Ok(outcomes)) if outcomes.is_empty() => {
+            debug!(max_rows, "pod_traffic per-pod cap: no pod over the cap");
+        }
+        Ok(Ok(outcomes)) => {
+            for o in outcomes {
+                let remaining = o.rows_before - o.pruned;
+                warn!(
+                    pod = %o.pod_name,
+                    namespace = o.pod_namespace.as_deref().unwrap_or(""),
+                    rows_before = o.rows_before,
+                    pruned = o.pruned,
+                    rows_after = remaining,
+                    max_rows,
+                    still_over_cap = remaining > max_rows,
+                    "pod_traffic per-pod cap exceeded; pruned oldest rows with no in-cluster peer \
+                     identity (rows naming an in-cluster peer are never pruned by the cap)",
+                );
+            }
+        }
+        Ok(Err(e)) => warn!(error = %e, "pod_traffic per-pod cap failed"),
+        Err(e) => warn!(error = %e, "pod_traffic per-pod cap task panicked"),
+    }
+}
+
+/// The cap itself, synchronous so the live test can drive it directly.
+/// `batch_budget` bounds the DELETE statements issued across all pods in
+/// one call; a pod left over the cap is picked up on the next pass.
+fn cap_pod_traffic(
+    conn: &mut PgConnection,
+    max_rows: i64,
+    batch_size: i64,
+    batch_budget: u32,
+) -> Result<Vec<CapOutcome>, RetentionError> {
+    let names: Vec<OverCapName> = sql_query(POD_TRAFFIC_OVER_CAP_NAMES_SQL)
+        .bind::<diesel::sql_types::BigInt, _>(max_rows)
+        .bind::<diesel::sql_types::BigInt, _>(MAX_CAPPED_PODS_PER_PASS)
+        .load(conn)?;
+    let mut budget = batch_budget;
+    let mut outcomes = Vec::new();
+    for name in names {
+        let pods: Vec<OverCapPod> = sql_query(POD_TRAFFIC_OVER_CAP_PODS_SQL)
+            .bind::<diesel::sql_types::Varchar, _>(&name.pod_name)
+            .bind::<diesel::sql_types::BigInt, _>(max_rows)
+            .load(conn)?;
+        for pod in pods {
+            let mut excess = pod.rows - max_rows;
+            let mut pruned = 0i64;
+            while excess > 0 && budget > 0 {
+                budget -= 1;
+                let n = sql_query(POD_TRAFFIC_CAP_PRUNE_SQL)
+                    .bind::<diesel::sql_types::Varchar, _>(&name.pod_name)
+                    .bind::<diesel::sql_types::Nullable<diesel::sql_types::Varchar>, _>(
+                        pod.pod_namespace.as_deref(),
+                    )
+                    .bind::<diesel::sql_types::BigInt, _>(excess.min(batch_size))
+                    .execute(conn)? as i64;
+                if n == 0 {
+                    // Only rows naming an in-cluster peer are left.
+                    break;
+                }
+                pruned += n;
+                excess -= n;
+            }
+            outcomes.push(CapOutcome {
+                pod_name: name.pod_name.clone(),
+                pod_namespace: pod.pod_namespace,
+                rows_before: pod.rows,
+                pruned,
+            });
+        }
+    }
+    Ok(outcomes)
 }
 
 /// Where the scan resumes: the `(time_stamp, uuid)` of the last row a batch
@@ -738,11 +926,32 @@ fn run_pod_traffic_batch(
 ///   skew between the API server, which sets it, and the broker, which
 ///   stamps rows — a live pod's first rows are exactly the ones it will
 ///   never report again.
+/// - A live pod's row is also deleted once it is SUPERSEDED: a newer row
+///   of the same pod has the same direction, protocol, ports and decision
+///   and the same in-cluster peer identity, stamped at ingest (#1447) —
+///   same `peer_kind`, `peer_namespace` and owning workload, or the peer's
+///   own name when it has no owner (a bare pod, a Service). Whatever rule
+///   the old row contributes to a generated policy, the newer row still
+///   contributes. That is what bounds a live pod whose peers change IP:
+///   each run of a CronJob caller arrives from a new pod and a new IP and
+///   writes a new row, and without this they piled up forever. Only
+///   `pod` and `service` peers qualify. A `node` peer renders as an
+///   `ipBlock` for that node's IP, so another node's row does not carry
+///   its rule, and a row with no stored identity (external, unresolved,
+///   pre-#1447) has nothing to match on — those are what the opt-in
+///   per-pod cap ([`run_pod_traffic_cap`]) is for. The newest row of each
+///   group has nothing newer than itself, so a group never loses its last
+///   row. The lookup is served by `idx_pod_traffic_supersede`
+///   (2026-09-26-100000), a partial index over exactly those peer kinds.
 macro_rules! pod_traffic_prune_sql {
     ($cursor:literal) => {
         concat!(
             "WITH candidates AS (\
-                 SELECT t.uuid, t.time_stamp, t.pod_name, t.pod_namespace \
+                 SELECT t.uuid, t.time_stamp, t.pod_name, t.pod_namespace, \
+                        t.traffic_type, t.ip_protocol, t.pod_port, \
+                        t.traffic_in_out_port, t.decision, t.peer_kind, \
+                        t.peer_namespace, t.peer_name, t.peer_workload_kind, \
+                        t.peer_workload_name \
                  FROM pod_traffic t \
                  WHERE t.time_stamp < timezone('UTC', NOW()) - $1::interval ",
             $cursor,
@@ -753,7 +962,7 @@ macro_rules! pod_traffic_prune_sql {
                  DELETE FROM pod_traffic d \
                  USING candidates c \
                  WHERE d.uuid = c.uuid \
-                   AND NOT EXISTS (\
+                   AND (NOT EXISTS (\
                      SELECT 1 FROM pod_details p \
                      WHERE p.pod_name = c.pod_name \
                        AND p.is_dead = false \
@@ -762,6 +971,26 @@ macro_rules! pod_traffic_prune_sql {
                        AND (p.started_at IS NULL \
                             OR c.time_stamp >= p.started_at - INTERVAL '1 hour')\
                    ) \
+                   OR (c.peer_kind IN ('pod', 'service') \
+                     AND EXISTS (\
+                     SELECT 1 FROM pod_traffic n \
+                     WHERE n.peer_kind IN ('pod', 'service') \
+                       AND n.pod_name = c.pod_name \
+                       AND n.peer_namespace = c.peer_namespace \
+                       AND COALESCE(n.peer_workload_name, n.peer_name) \
+                           = COALESCE(c.peer_workload_name, c.peer_name) \
+                       AND n.time_stamp >= c.time_stamp \
+                       AND (n.time_stamp, n.uuid) > (c.time_stamp, c.uuid) \
+                       AND n.peer_kind = c.peer_kind \
+                       AND COALESCE(n.peer_workload_kind, '') \
+                           = COALESCE(c.peer_workload_kind, '') \
+                       AND n.pod_namespace IS NOT DISTINCT FROM c.pod_namespace \
+                       AND n.traffic_type IS NOT DISTINCT FROM c.traffic_type \
+                       AND n.ip_protocol IS NOT DISTINCT FROM c.ip_protocol \
+                       AND n.pod_port IS NOT DISTINCT FROM c.pod_port \
+                       AND n.traffic_in_out_port IS NOT DISTINCT FROM c.traffic_in_out_port \
+                       AND n.decision IS NOT DISTINCT FROM c.decision\
+                   ))) \
                  RETURNING d.uuid \
              ) \
              SELECT c.time_stamp, c.uuid, \
@@ -2233,6 +2462,65 @@ mod tests {
             POD_TRAFFIC_PRUNE_AFTER_SQL.replace("AND (t.time_stamp, t.uuid) > ($3, $4) ", ""),
             POD_TRAFFIC_PRUNE_SQL
         );
+        // The supersede rule: only identified in-cluster peers, keyed the
+        // way idx_pod_traffic_supersede is (the partial predicate and the
+        // COALESCE expression must appear verbatim for the planner to use
+        // it), and strictly newer so the newest row of a group survives.
+        let sql = POD_TRAFFIC_PRUNE_SQL;
+        assert!(sql.contains("c.peer_kind IN ('pod', 'service')"), "{sql}");
+        assert!(sql.contains("n.peer_kind IN ('pod', 'service')"), "{sql}");
+        assert!(
+            sql.contains("COALESCE(n.peer_workload_name, n.peer_name)"),
+            "{sql}"
+        );
+        assert!(
+            sql.contains("(n.time_stamp, n.uuid) > (c.time_stamp, c.uuid)"),
+            "{sql}"
+        );
+        for col in [
+            "traffic_type",
+            "ip_protocol",
+            "pod_port",
+            "traffic_in_out_port",
+            "decision",
+            "pod_namespace",
+        ] {
+            assert!(
+                sql.contains(&format!("n.{col} IS NOT DISTINCT FROM c.{col}")),
+                "supersede key must include {col}: {sql}"
+            );
+        }
+        // A node peer's rule is its own IP; it must never supersede.
+        assert!(!sql.contains("'node'"), "{sql}");
+    }
+
+    #[test]
+    fn pod_traffic_max_rows_per_pod_defaults_off_and_parses() {
+        with_env("POD_TRAFFIC_MAX_ROWS_PER_POD", None, || {
+            assert_eq!(pod_traffic_max_rows_per_pod(), 0);
+        });
+        with_env("POD_TRAFFIC_MAX_ROWS_PER_POD", Some(" 50000\n"), || {
+            assert_eq!(pod_traffic_max_rows_per_pod(), 50_000);
+        });
+        // It deletes regardless of age, so garbage must mean OFF, never
+        // some accidental cap.
+        for junk in ["-1", "lots", "1e6"] {
+            with_env("POD_TRAFFIC_MAX_ROWS_PER_POD", Some(junk), || {
+                assert_eq!(pod_traffic_max_rows_per_pod(), 0, "{junk}");
+            });
+        }
+    }
+
+    #[test]
+    fn pod_traffic_cap_never_targets_identified_peers() {
+        let sql = POD_TRAFFIC_CAP_PRUNE_SQL;
+        assert!(sql.contains("peer_kind IS NULL"), "{sql}");
+        assert!(sql.contains("ORDER BY time_stamp, uuid"), "{sql}");
+        assert!(sql.contains("LIMIT $3"), "{sql}");
+        assert!(
+            sql.contains("pod_namespace IS NOT DISTINCT FROM $2"),
+            "{sql}"
+        );
     }
 
     fn reset_traffic_tables(conn: &mut PgConnection) {
@@ -2432,6 +2720,401 @@ mod tests {
                 !plan.contains("Sort Key: t.time_stamp"),
                 "prune must not sort the expired rows:\n{plan}"
             );
+        }
+        reset_traffic_tables(&mut conn);
+    }
+
+    /// `(kind, namespace, name, workload_kind, workload_name)`; `None` is an
+    /// unresolved/external peer.
+    type Peer<'a> = Option<(&'a str, &'a str, &'a str, Option<&'a str>, Option<&'a str>)>;
+
+    /// One flow row with a stored peer identity (see [`Peer`]).
+    #[allow(clippy::too_many_arguments)]
+    fn seed_flow(
+        conn: &mut PgConnection,
+        id: &str,
+        pod: &str,
+        ns: &str,
+        age_days: i64,
+        peer_ip: &str,
+        port: &str,
+        peer: Peer<'_>,
+    ) {
+        use diesel::connection::SimpleConnection;
+        let q = |v: Option<&str>| v.map_or("NULL".to_string(), |s| format!("'{s}'"));
+        let (kind, pns, pname, wk, wn) = match peer {
+            Some((k, n, p, wk, wn)) => (Some(k), Some(n), Some(p), wk, wn),
+            None => (None, None, None, None, None),
+        };
+        conn.batch_execute(&format!(
+            "INSERT INTO pod_traffic \
+               (uuid, pod_name, pod_namespace, pod_ip, pod_port, ip_protocol, traffic_type, \
+                traffic_in_out_ip, traffic_in_out_port, decision, time_stamp, \
+                peer_kind, peer_namespace, peer_name, peer_workload_kind, peer_workload_name) \
+             VALUES ('{id}', '{pod}', '{ns}', '10.0.0.9', '{port}', 'TCP', 'INGRESS', \
+                     '{peer_ip}', '0', 'ALLOW', \
+                     timezone('UTC', NOW()) - INTERVAL '{age_days} days', \
+                     {}, {}, {}, {}, {})",
+            q(kind),
+            q(pns),
+            q(pname),
+            q(wk),
+            q(wn),
+        ))
+        .expect("seed flow");
+    }
+
+    #[test]
+    #[ignore = "requires a live postgres (set KG_TEST_DATABASE_URL)"]
+    fn live_database_supersedes_a_live_pods_rows_from_a_cronjob_caller() {
+        let mut conn = live_conn();
+        reset_traffic_tables(&mut conn);
+        let days = 14;
+        seed_pod(&mut conn, "api", "prod", false, Some(90));
+        let nightly =
+            |pod: &'static str| Some(("pod", "batch", pod, Some("CronJob"), Some("nightly")));
+
+        // Three runs of a CronJob calling api:8080, each from a new pod on a
+        // new IP. All expired; only the newest may stay.
+        seed_flow(
+            &mut conn,
+            "r1",
+            "api",
+            "prod",
+            40,
+            "10.1.0.1",
+            "8080",
+            nightly("nightly-1"),
+        );
+        seed_flow(
+            &mut conn,
+            "r2",
+            "api",
+            "prod",
+            30,
+            "10.1.0.2",
+            "8080",
+            nightly("nightly-2"),
+        );
+        seed_flow(
+            &mut conn,
+            "r3",
+            "api",
+            "prod",
+            20,
+            "10.1.0.3",
+            "8080",
+            nightly("nightly-3"),
+        );
+        // Same caller on ANOTHER port is another rule: kept.
+        seed_flow(
+            &mut conn,
+            "r4-port",
+            "api",
+            "prod",
+            35,
+            "10.1.0.1",
+            "9090",
+            nightly("nightly-1"),
+        );
+        // A different workload in the same namespace: kept.
+        seed_flow(
+            &mut conn,
+            "r5-other-wl",
+            "api",
+            "prod",
+            35,
+            "10.1.0.7",
+            "8080",
+            Some(("pod", "batch", "weekly-1", Some("CronJob"), Some("weekly"))),
+        );
+        // Node peers render as their own ipBlock: two nodes, both kept.
+        seed_flow(
+            &mut conn,
+            "r6-node-a",
+            "api",
+            "prod",
+            40,
+            "192.168.1.1",
+            "8080",
+            Some((
+                "node",
+                "kube-system",
+                "cilium-a",
+                Some("DaemonSet"),
+                Some("cilium"),
+            )),
+        );
+        seed_flow(
+            &mut conn,
+            "r7-node-b",
+            "api",
+            "prod",
+            30,
+            "192.168.1.2",
+            "8080",
+            Some((
+                "node",
+                "kube-system",
+                "cilium-b",
+                Some("DaemonSet"),
+                Some("cilium"),
+            )),
+        );
+        // No identity: nothing to supersede on, left to the cap.
+        seed_flow(
+            &mut conn,
+            "r8-ext-a",
+            "api",
+            "prod",
+            40,
+            "203.0.113.1",
+            "8080",
+            None,
+        );
+        seed_flow(
+            &mut conn,
+            "r9-ext-b",
+            "api",
+            "prod",
+            30,
+            "203.0.113.2",
+            "8080",
+            None,
+        );
+        // A Service peer superseded by a newer row that is still INSIDE the
+        // window: the old one goes, the fresh one stays.
+        let svc = Some(("service", "data", "postgres", None, None));
+        seed_flow(
+            &mut conn,
+            "s1",
+            "api",
+            "prod",
+            30,
+            "10.96.0.10",
+            "8080",
+            svc,
+        );
+        seed_flow(&mut conn, "s2", "api", "prod", 1, "10.96.0.10", "8080", svc);
+
+        let mut cursor = None;
+        let mut deleted = 0;
+        while let Some(b) =
+            run_pod_traffic_batch(&mut conn, days, 2, cursor.as_ref()).expect("prune")
+        {
+            deleted += b.deleted;
+            cursor = Some((b.time_stamp, b.uuid));
+        }
+        assert_eq!(deleted, 3);
+        assert_eq!(
+            remaining_traffic(&mut conn),
+            [
+                "r3",
+                "r4-port",
+                "r5-other-wl",
+                "r6-node-a",
+                "r7-node-b",
+                "r8-ext-a",
+                "r9-ext-b",
+                "s2",
+            ]
+            .map(String::from)
+        );
+        // Idempotent: a second full scan finds nothing more to supersede.
+        let mut cursor = None;
+        while let Some(b) =
+            run_pod_traffic_batch(&mut conn, days, DEFAULT_BATCH_SIZE, cursor.as_ref())
+                .expect("prune")
+        {
+            assert_eq!(b.deleted, 0);
+            cursor = Some((b.time_stamp, b.uuid));
+        }
+        reset_traffic_tables(&mut conn);
+    }
+
+    #[test]
+    #[ignore = "requires a live postgres (set KG_TEST_DATABASE_URL)"]
+    fn live_database_per_pod_cap_prunes_only_unidentified_rows_oldest_first() {
+        let mut conn = live_conn();
+        reset_traffic_tables(&mut conn);
+        seed_pod(&mut conn, "ingress", "edge", false, Some(90));
+        // 6 external client IPs (oldest first by age) and 3 in-cluster
+        // peers, all fresh, so the age pass would touch none of them.
+        for (i, age) in [9i64, 8, 7, 6, 5, 4].iter().enumerate() {
+            seed_flow(
+                &mut conn,
+                &format!("x{i}"),
+                "ingress",
+                "edge",
+                *age,
+                &format!("198.51.100.{i}"),
+                "443",
+                None,
+            );
+        }
+        for (i, age) in [9i64, 8, 7].iter().enumerate() {
+            seed_flow(
+                &mut conn,
+                &format!("p{i}"),
+                "ingress",
+                "edge",
+                *age,
+                &format!("10.2.0.{i}"),
+                "443",
+                Some((
+                    "pod",
+                    "web",
+                    "frontend-x",
+                    Some("Deployment"),
+                    Some(["a", "b", "c"][i]),
+                )),
+            );
+        }
+        // Same pod name in another namespace, under the cap: untouched, and
+        // not counted towards edge/ingress.
+        for i in 0..3 {
+            seed_flow(
+                &mut conn,
+                &format!("o{i}"),
+                "ingress",
+                "other",
+                9,
+                &format!("198.51.100.{i}"),
+                "443",
+                None,
+            );
+        }
+
+        // Cap 5: edge/ingress has 9, so 4 of its external rows go, oldest
+        // first, in batches of 3 (the batch clamp floor is not applied here,
+        // the function takes the size it is given).
+        let out = cap_pod_traffic(&mut conn, 5, 3, MAX_BATCHES_PER_PASS).expect("cap");
+        assert_eq!(
+            out,
+            vec![CapOutcome {
+                pod_name: "ingress".into(),
+                pod_namespace: Some("edge".into()),
+                rows_before: 9,
+                pruned: 4,
+            }]
+        );
+        assert_eq!(
+            remaining_traffic(&mut conn),
+            ["o0", "o1", "o2", "p0", "p1", "p2", "x4", "x5"].map(String::from)
+        );
+
+        // Cap 2: only 2 external rows are left; the in-cluster rows are
+        // never pruned, so the pod stays over the cap (the loop warns).
+        let out = cap_pod_traffic(&mut conn, 2, 100, MAX_BATCHES_PER_PASS).expect("cap");
+        let edge = out
+            .iter()
+            .find(|o| o.pod_namespace.as_deref() == Some("edge"))
+            .expect("edge over cap");
+        assert_eq!((edge.rows_before, edge.pruned), (5, 2));
+        let left = remaining_traffic(&mut conn);
+        assert!(left.iter().all(|u| !u.starts_with('x')), "{left:?}");
+        assert!(["p0", "p1", "p2"]
+            .iter()
+            .all(|p| left.contains(&p.to_string())));
+
+        // The batch budget bounds the work per call.
+        reset_traffic_tables(&mut conn);
+        for i in 0..10 {
+            seed_flow(
+                &mut conn,
+                &format!("b{i:02}"),
+                "busy",
+                "edge",
+                1,
+                &format!("198.51.100.{i}"),
+                "443",
+                None,
+            );
+        }
+        let out = cap_pod_traffic(&mut conn, 1, 2, 2).expect("cap");
+        assert_eq!(out[0].pruned, 4, "two batches of two");
+        reset_traffic_tables(&mut conn);
+    }
+
+    fn explain(conn: &mut PgConnection, sql: &str) -> String {
+        #[derive(QueryableByName)]
+        struct PlanLine {
+            #[diesel(sql_type = diesel::sql_types::Text, column_name = "QUERY PLAN")]
+            line: String,
+        }
+        let plan: Vec<PlanLine> = sql_query(format!("EXPLAIN {sql}"))
+            .load(conn)
+            .expect("explain");
+        plan.into_iter()
+            .map(|l| l.line)
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[test]
+    #[ignore = "requires a live postgres (set KG_TEST_DATABASE_URL)"]
+    fn live_database_supersede_and_cap_lookups_use_their_indexes() {
+        use diesel::connection::SimpleConnection;
+        let mut conn = live_conn();
+        reset_traffic_tables(&mut conn);
+        // 50 live pods, 1 000 rows each, every row an identified CronJob
+        // caller (20 workloads) on a fresh IP, half of them expired; plus
+        // 500 small pods so a per-pod lookup is selective.
+        conn.batch_execute(
+            "INSERT INTO pod_details \
+               (pod_name, pod_ip, pod_namespace, time_stamp, node_name, is_dead) \
+             SELECT 'p' || g, '10.0.0.1', 'ns', timezone('UTC', NOW()), 'n', false \
+             FROM generate_series(0, 549) g; \
+             INSERT INTO pod_traffic \
+               (uuid, pod_name, pod_namespace, pod_port, ip_protocol, traffic_type, \
+                traffic_in_out_ip, traffic_in_out_port, decision, time_stamp, \
+                peer_kind, peer_namespace, peer_name, peer_workload_kind, peer_workload_name) \
+             SELECT 'u' || g, 'p' || (g % 50), 'ns', '8080', 'TCP', 'INGRESS', \
+                    '10.9.' || (g % 250) || '.' || (g % 200), '0', 'ALLOW', \
+                    timezone('UTC', NOW()) - ((g / 2) || ' minutes')::interval, \
+                    'pod', 'batch', 'job-' || g, 'CronJob', 'cron-' || (g % 20) \
+             FROM generate_series(1, 50000) g; \
+             INSERT INTO pod_traffic (uuid, pod_name, pod_namespace, time_stamp) \
+             SELECT 'v' || g, 'p' || (50 + g % 500), 'ns', timezone('UTC', NOW()) \
+             FROM generate_series(1, 5000) g; \
+             ANALYZE pod_traffic; ANALYZE pod_details;",
+        )
+        .expect("seed");
+
+        let prune = explain(
+            &mut conn,
+            &POD_TRAFFIC_PRUNE_SQL
+                .replace("$1::interval", "'14 days'::interval")
+                .replace("$2", "5000"),
+        );
+        assert!(
+            prune.contains("idx_pod_traffic_supersede"),
+            "the newer-row lookup should use idx_pod_traffic_supersede:\n{prune}"
+        );
+        assert!(
+            !prune.contains("Sort Key: t.time_stamp"),
+            "the supersede rule must not reintroduce a sort of expired rows:\n{prune}"
+        );
+
+        let pods = explain(
+            &mut conn,
+            &POD_TRAFFIC_OVER_CAP_PODS_SQL
+                .replace("$1", "'p60'")
+                .replace("$2", "5"),
+        );
+        let cap = explain(
+            &mut conn,
+            &POD_TRAFFIC_CAP_PRUNE_SQL
+                .replace("$1", "'p60'")
+                .replace("$2", "'ns'")
+                .replace("$3", "5"),
+        );
+        for plan in [pods, cap] {
+            assert!(
+                plan.contains("idx_pod_traffic_pod_name"),
+                "per-pod cap statements should use idx_pod_traffic_pod_name:\n{plan}"
+            );
+            assert!(!plan.contains("Seq Scan on pod_traffic"), "{plan}");
         }
         reset_traffic_tables(&mut conn);
     }

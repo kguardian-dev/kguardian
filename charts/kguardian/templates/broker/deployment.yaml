@@ -141,6 +141,10 @@ spec:
             - name: POD_TRAFFIC_RETENTION_BATCH_SIZE
               value: {{ $trafficRetention.batchSize | quote }}
             {{- end }}
+            {{- if hasKey $trafficRetention "maxRowsPerPod" }}
+            - name: POD_TRAFFIC_MAX_ROWS_PER_POD
+              value: {{ $trafficRetention.maxRowsPerPod | quote }}
+            {{- end }}
             {{/*
               seccomp_denials retention (values.yaml `broker.seccomp.denials.retention`).
               Same hasKey reasoning as AUDIT_VERDICTS_RETENTION_DAYS above:

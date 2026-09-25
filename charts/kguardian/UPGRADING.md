@@ -9,6 +9,26 @@ that held the same name (a recreated StatefulSet pod). Rows of running
 pods are kept however old, because a running pod reports each flow only
 once and would never re-record a pruned one.
 
+Two things still bound a running pod:
+
+- **Superseded rows.** A running pod's row older than `days` is deleted
+  when a newer row of the same pod has the same direction, protocol,
+  port, decision and in-cluster peer (same peer workload, or the same
+  pod/Service name when it has no owner). The newer row keeps the rule.
+  This is what stops a pod called by a CronJob from gaining a row per
+  run. Only `pod` and `service` peers qualify: a `node` peer is rendered
+  as an `ipBlock` for its own IP, and a row with no stored peer identity
+  has nothing to match on.
+- **An opt-in per-pod cap**, `broker.traffic.retention.maxRowsPerPod`
+  (default `0`, off). Over it, the pod's oldest rows with no peer
+  identity (external clients, scanners, unresolved or pre-#1447 rows) are
+  deleted regardless of age, and the broker logs a warning naming the
+  pod. Rows naming an in-cluster peer are never deleted by the cap.
+
+The upgrade adds a partial index, `idx_pod_traffic_supersede`, built at
+broker startup. As with earlier `pod_traffic` index migrations, ingest
+waits for the build; on a table of a few million rows that takes seconds.
+
 **After upgrading the broker:**
 
 1. The first passes work through the backlog, oldest first, 5 000 rows

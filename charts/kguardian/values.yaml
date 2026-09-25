@@ -624,11 +624,17 @@ broker:
     # generated NetworkPolicy is built from. A tokio task in the broker
     # wakes every `intervalSeconds` and deletes rows older than `days`
     # whose pod no longer exists: dead, gone from the pod table, or an
-    # earlier pod that held the same name. Rows of running pods are
-    # never pruned, however old. Each flow is recorded once, when first
-    # seen, and a running pod does not report it again, so deleting
-    # those rows would drop rules from the next policy generated for
-    # that pod.
+    # earlier pod that held the same name. A running pod's rows are
+    # kept however old: each flow is recorded once, when first seen,
+    # and a running pod does not report it again, so deleting them
+    # would drop rules from the next policy generated for that pod. The
+    # exception is a SUPERSEDED row: when a newer row of the same pod
+    # has the same direction, protocol, port, decision and in-cluster
+    # peer (same workload, or same pod/Service name when it has no
+    # owner), the older row is deleted once past `days`, because the
+    # newer one carries the same rule. That keeps a pod called by a
+    # CronJob from gaining a row per run. Peers with no stored identity
+    # (external, unresolved) are never superseded; see `maxRowsPerPod`.
     retention:
       # -- Keep traffic of departed pods for this many days. The default
       # of 14 keeps two runs of a weekly CronJob; raise it for jobs that
@@ -642,6 +648,17 @@ broker:
       # deleted per statement). Same [100, 100000] clamp as
       # `broker.audit.retention.batchSize`, for the same reason.
       batchSize: 5000
+      # -- Opt-in cap on rows per pod. Off (0) by default. When a pod
+      # holds more rows than this, each pass deletes its oldest rows
+      # whose peer has no stored identity (external clients, scanners,
+      # unresolved IPs), regardless of age, until it is back at the cap,
+      # and the broker logs a warning naming the pod. Rows that name an
+      # in-cluster peer are never deleted by the cap, so a pod can stay
+      # over it. Useful for pods that see many external IPs, such as an
+      # ingress controller that preserves client IPs or a pod behind a
+      # public LoadBalancer. Finding over-cap pods reads the whole
+      # pod_name index once per pass.
+      maxRowsPerPod: 0
 
   seccomp:
     # -- Seconds the Broker serves the same rendered `GET /seccomp/profiles`
