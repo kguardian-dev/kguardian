@@ -801,7 +801,10 @@ async fn register_netns(
     let flags = pod_registration_flags(pod, capture_level);
     let identity = pod_identity_metadata(pod);
     for con_id in con_ids {
-        let pod_inspect = netns_registration(pod, pod_ip, identity.clone());
+        let pod_inspect = PodInspect {
+            capture_flags: flags,
+            ..netns_registration(pod, pod_ip, identity.clone())
+        };
         // debug not info — these two log lines fire inside the
         // per-container loop, per pod-event. Same per-event rate as
         // the upstream pod-watcher info logs already dropped to debug.

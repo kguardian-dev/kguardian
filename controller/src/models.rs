@@ -154,6 +154,13 @@ pub struct PodInspect {
     /// to the cgroup id, which is per container whatever the pod's
     /// network namespace is.
     pub host_network: bool,
+    /// The `pod_flags` value this pod was registered with (the same value
+    /// written into the eBPF `inode_num` map). Startup capture
+    /// (`early_capture`) reads the capture tier out of it, because the
+    /// kernel captures a not-yet-registered container at full tier and
+    /// the pod's own tier can only be applied once the pod is known.
+    #[serde(default)]
+    pub capture_flags: u32,
 }
 
 #[derive(Debug, Default, Deserialize, Clone)]

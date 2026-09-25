@@ -66,11 +66,190 @@ struct
     __type(value, u8);
 } seen_syscalls SEC(".maps");
 
+// Keep in sync with `SyscallEventData` in controller/src/syscall.rs.
+//
+// `kind` says which path produced the event:
+//   KG_SYSCALL_EVENT_REGISTERED  the netns is in inode_num; userspace
+//                                attributes by `inum`, as it always has.
+//   KG_SYSCALL_EVENT_PENDING     the netns is NOT registered yet, but the
+//                                calling task sits in a kubepods cgroup
+//                                created since the controller started
+//                                (pending_cgroups). Userspace buffers it
+//                                by `cgroup_id` until the pod watcher has
+//                                registered the pod, then attributes it
+//                                (controller/src/early_capture.rs).
+// `cgroup_id` is filled on both paths: it names the container, where
+// `inum` only names the pod.
+#define KG_SYSCALL_EVENT_REGISTERED 0
+#define KG_SYSCALL_EVENT_PENDING    1
+
 struct data_t
 {
     __u64 inum;
-    __u64 sysnbr;
+    __u32 sysnbr;
+    __u32 kind;
+    __u64 cgroup_id;
 };
+
+// ---- Startup capture (closes the seccomp startup-capture gap) ----------
+//
+// The pod watcher can only register a pod's netns once an app container
+// is running (it needs a containerID out of the pod status and a pid out
+// of containerd). Everything before that — runc's container setup and
+// the app's first instructions — used to fall through the inode_num gate
+// and was never seen, so a profile recorded from a fresh pod was missing
+// its startup syscalls and crashlooped on the next restart once it was
+// enforced with SCMP_ACT_ERRNO.
+//
+// The fix keys capture on the one identity that exists before the
+// container runs: its cgroup. The runtime creates a container's cgroup
+// before runc moves the init process into it, so the cgroup_mkdir probe
+// below sees it first, marks it pending, and tells userspace its path
+// (which carries the pod UID and container id). From then on, any
+// syscall from a task in that cgroup whose netns is not registered is
+// captured, deduplicated per (cgroup, syscall), and attributed by
+// userspace once the pod watcher has registered the pod. There is no
+// race window: the mark is set in the kernel, synchronously, before any
+// task can run in the cgroup, so nothing depends on how fast userspace
+// reacts.
+//
+// Kernfs cgroup ids are 64-bit and not recycled, so unlike the netns
+// keys no generation is needed in these keys.
+#define KG_CGROUP_PATH_MAX 256
+// "kubepods" must start within this many bytes of the path. Every
+// layout seen in practice has it in the first or second segment:
+//   /kubepods/burstable/pod<uid>/<cid>                        (cgroupfs)
+//   /kubepods.slice/kubepods-burstable.slice/...              (systemd)
+//   /kubelet.slice/kubelet-kubepods.slice/...                 (kind)
+#define KG_KUBEPODS_SCAN 96
+
+struct
+{
+    __uint(type, BPF_MAP_TYPE_LRU_HASH);
+    __uint(max_entries, 8192);
+    __type(key, u64);   // cgroup id
+    __type(value, u64); // bpf_ktime_get_ns() at mkdir
+} pending_cgroups SEC(".maps");
+
+struct pending_syscall_key
+{
+    __u64 cgroup_id;
+    __u32 syscall;
+    __u32 _pad;
+};
+
+// Dedup for the pending path, mirroring seen_syscalls. The pending path
+// captures at FULL tier because the pod's tier is not known until it is
+// registered; userspace applies the tier when it attributes. Bounded by
+// (containers starting) x (distinct syscalls during startup).
+struct
+{
+    __uint(type, BPF_MAP_TYPE_LRU_HASH);
+    __uint(max_entries, 65536);
+    __type(key, struct pending_syscall_key);
+    __type(value, u8);
+} pending_seen SEC(".maps");
+
+// Keep in sync with `CgroupEventData` in controller/src/early_capture.rs.
+struct cgroup_event_t
+{
+    __u64 cgroup_id;
+    __u32 level;
+    __u32 _pad;
+    char path[KG_CGROUP_PATH_MAX];
+};
+
+struct
+{
+    __uint(type, BPF_MAP_TYPE_RINGBUF);
+    __uint(max_entries, 64 * 1024); // ~240 events; cgroup mkdir is rare
+} cgroup_events SEC(".maps");
+
+// True when the NUL-terminated `p` contains "kubepods" starting within
+// the first KG_KUBEPODS_SCAN bytes. `p` points at a KG_CGROUP_PATH_MAX
+// buffer, so every index read here stays in bounds.
+static __always_inline bool path_has_kubepods(const char *p)
+{
+    for (int i = 0; i < KG_KUBEPODS_SCAN; i++)
+    {
+        if (p[i] == 0)
+            return false;
+        if (p[i] == 'k' && p[i + 1] == 'u' && p[i + 2] == 'b' && p[i + 3] == 'e' &&
+            p[i + 4] == 'p' && p[i + 5] == 'o' && p[i + 6] == 'd' && p[i + 7] == 's')
+            return true;
+    }
+    return false;
+}
+
+SEC("tp_btf/cgroup_mkdir")
+int BPF_PROG(trace_cgroup_mkdir, struct cgroup *cgrp, const char *path)
+{
+    struct cgroup_event_t *ev;
+
+    // Reserve first: a cgroup is only marked pending if userspace is
+    // also told what it is. A pending mark userspace never hears about
+    // would capture into a buffer nothing can attribute (it would still
+    // expire, but it is wasted work).
+    ev = bpf_ringbuf_reserve(&cgroup_events, sizeof(*ev), 0);
+    if (!ev)
+        return 0;
+
+    if (bpf_probe_read_kernel_str(ev->path, sizeof(ev->path), path) < 0 ||
+        !path_has_kubepods(ev->path))
+    {
+        bpf_ringbuf_discard(ev, 0);
+        return 0;
+    }
+
+    __u64 id = BPF_CORE_READ(cgrp, kn, id);
+    ev->cgroup_id = id;
+    ev->level = BPF_CORE_READ(cgrp, level);
+    ev->_pad = 0;
+
+    __u64 now = bpf_ktime_get_ns();
+    if (bpf_map_update_elem(&pending_cgroups, &id, &now, BPF_ANY) != 0)
+    {
+        bpf_ringbuf_discard(ev, 0);
+        return 0;
+    }
+    bpf_ringbuf_submit(ev, 0);
+    return 0;
+}
+
+// Pending path of the syscall probe: the netns is not registered, so
+// look the task's cgroup up in pending_cgroups instead. Cost for every
+// untracked task on the node: one helper call and one hash lookup that
+// misses.
+static __always_inline int capture_pending(__u64 net_ns, u32 syscall_id)
+{
+    __u64 cgroup_id = bpf_get_current_cgroup_id();
+    if (!bpf_map_lookup_elem(&pending_cgroups, &cgroup_id))
+        return 0;
+
+    struct pending_syscall_key key = {
+        .cgroup_id = cgroup_id,
+        .syscall = syscall_id,
+        ._pad = 0,
+    };
+    u8 one = 1;
+    if (bpf_map_update_elem(&pending_seen, &key, &one, BPF_NOEXIST) != 0)
+        return 0;
+
+    struct data_t *data = bpf_ringbuf_reserve(&syscall_events, sizeof(*data), 0);
+    if (!data)
+    {
+        // Same reasoning as the registered path: forget the sighting so
+        // the next occurrence is reported instead of never.
+        bpf_map_delete_elem(&pending_seen, &key);
+        return 0;
+    }
+    data->inum = net_ns;
+    data->sysnbr = syscall_id;
+    data->kind = KG_SYSCALL_EVENT_PENDING;
+    data->cgroup_id = cgroup_id;
+    bpf_ringbuf_submit(data, 0);
+    return 0;
+}
 
 // True when `syscall_id` passes the allowlist for `tier`. Full (and any
 // tier index userspace does not emit) is unfiltered so a bad value can
@@ -107,12 +286,14 @@ int trace_execve(struct trace_event_raw_sys_enter *ctx)
     task = (struct task_struct *)bpf_get_current_task();
     __u64 net_ns = BPF_CORE_READ(task, nsproxy, net_ns, ns.inum);
 
-    // Early exit if not in tracked namespace
+    u32 syscall_id = (__u32)ctx->id;
+
+    // Not a registered netns: either nothing kube-guardian tracks, or a
+    // container that is not registered YET (startup). The pending path
+    // tells the two apart by cgroup.
     flags = bpf_map_lookup_elem(&inode_num, &net_ns);
     if (!flags)
-        return 0;
-
-    u32 syscall_id = (__u32)ctx->id;
+        return capture_pending(net_ns, syscall_id);
 
     // Tier filter first: cheap, and keeps the dedup map from filling
     // with syscalls nobody asked to see.
@@ -145,8 +326,10 @@ int trace_execve(struct trace_event_raw_sys_enter *ctx)
     }
 
     // Fill event data
-    data->sysnbr = ctx->id;
+    data->sysnbr = syscall_id;
+    data->kind = KG_SYSCALL_EVENT_REGISTERED;
     data->inum = net_ns;
+    data->cgroup_id = bpf_get_current_cgroup_id();
 
     // Submit to userspace
     bpf_ringbuf_submit(data, 0);

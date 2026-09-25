@@ -45,6 +45,23 @@ monitoring clusters that never intend to enforce; `full` is the default
 because syscalls are de-duplicated per pod inside BPF, so its cost is close to
 `low`.
 
+### Startup coverage
+
+A container makes some of its syscalls only while it starts: the runtime's
+setup and the application's first few hundred milliseconds. The controller
+captures these from the moment the container's cgroup is created, before the
+pod is registered, and adds them to the pod's set once the pod watcher has
+registered it (at the pod's tier). A profile recorded from a fresh pod is
+therefore startup-complete. The set can include a few syscalls of the
+container runtime's own setup (`runc init`); they widen the allowlist
+slightly and never deny anything.
+
+A controller with startup capture logs `Startup syscall capture attached` at
+start. On older controllers, or where that line is replaced by a warning,
+trigger at least one container restart under
+`SCMP_ACT_LOG` before enforcing a profile recorded from fresh pods. Static
+pods (whose mirror pod UID differs from the cgroup's) are not covered.
+
 ### From observation to a node
 
 kguardian never applies a profile itself. It exports a `SeccompProfile`

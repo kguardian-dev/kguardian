@@ -27,6 +27,9 @@ pub mod compute_config;
 pub mod compute_registry;
 pub mod compute_sampler;
 pub mod contention;
+/// Startup syscall capture: containers that run before the pod watcher
+/// has registered their pod (the seccomp startup-capture gap).
+pub mod early_capture;
 pub mod log;
 pub mod node_facts;
 /// One task per subsystem, with explicit supervision over what each

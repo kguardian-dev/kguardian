@@ -1,4 +1,5 @@
 use crate::capture_tiers::{CaptureLevel, ResolvedTiers};
+use crate::early_capture::CgroupEventData;
 use crate::models::PodRegistration;
 use crate::network::netpolicy_drop::NetpolicyDropSkelBuilder;
 use crate::network::network_probe::NetworkProbeSkelBuilder;
@@ -30,6 +31,7 @@ use tracing::{info, warn};
 static NETWORK_SEND_FAILED: AtomicBool = AtomicBool::new(false);
 static SYSCALL_SEND_FAILED: AtomicBool = AtomicBool::new(false);
 static POLICY_DROP_SEND_FAILED: AtomicBool = AtomicBool::new(false);
+static CGROUP_SEND_FAILED: AtomicBool = AtomicBool::new(false);
 
 // Set when ANY receiver closes, and by main on its way out — signals
 // the spawn_blocking poll loop to exit on its next iteration. Without
@@ -319,7 +321,7 @@ fn load_seccomp_denial_probe(
     Some(skel)
 }
 
-// Eight parameters, one per thing `main` has to hand the loader. They are
+// Ten parameters, one per thing `main` has to hand the loader. They are
 // not a bag of options with a sensible grouping waiting to be found: each
 // is a distinct channel end or a resolved startup value, and bundling them
 // into a config struct would only move the same list one file over.
@@ -333,6 +335,8 @@ pub fn ebpf_handle(
     ignore_daemonset_traffic: bool,
     tiers: ResolvedTiers,
     seccomp_denial_maps: Option<oneshot::Sender<DenialMaps>>,
+    cgroup_event_sender: Sender<(u64, String)>,
+    mut forget_pending: Receiver<u64>,
 ) -> JoinHandle<Result<(), Error>> {
     task::spawn_blocking(move || {
         // The IPv6 UDP twins target udpv6_sendmsg; on a kernel where
@@ -393,7 +397,7 @@ pub fn ebpf_handle(
         let syscall_probe_skel = skel_builder
             .open(&mut open_object)
             .map_err(|e| Error::Custom(format!("Failed to open syscall eBPF: {}", e)))?;
-        let mut syscall_sk = syscall_probe_skel
+        let syscall_sk = syscall_probe_skel
             .load()
             .map_err(|e| Error::Custom(format!("Failed to load syscall eBPF: {}", e)))?;
 
@@ -401,10 +405,34 @@ pub fn ebpf_handle(
         // events are already filtered by tier.
         populate_tier_maps(&syscall_sk.maps, &tiers);
 
-        syscall_sk
+        // Attached one program at a time rather than with skel.attach(),
+        // so the startup-capture program can fail on its own. The
+        // syscall tracepoint is required; without cgroup_mkdir the probe
+        // simply behaves as it did before startup capture existed.
+        let _syscall_link = syscall_sk
+            .progs
+            .trace_execve
             .attach()
             .map_err(|e| Error::Custom(format!("Failed to attach syscall eBPF: {}", e)))?;
         info!("Syscall probe eBPF program loaded and attached");
+        let _cgroup_mkdir_link = match syscall_sk.progs.trace_cgroup_mkdir.attach() {
+            Ok(link) => {
+                info!(
+                    "Startup syscall capture attached (tp_btf/cgroup_mkdir): containers are \
+                     captured from cgroup creation, before their pod is registered"
+                );
+                Some(link)
+            }
+            Err(e) => {
+                warn!(
+                    error = %e,
+                    "could not attach tp_btf/cgroup_mkdir; syscalls a container makes before \
+                     its pod is registered (runtime setup, app startup) will NOT be captured, \
+                     so seccomp profiles recorded from fresh pods are not startup-complete"
+                );
+                None
+            }
+        };
 
         // Load and attach the seccomp denial probe. `None` here means
         // SECCOMP_DENIAL_CAPTURE is off and nothing is loaded at all;
@@ -465,6 +493,32 @@ pub fn ebpf_handle(
             })
             .map_err(|e| {
                 Error::Custom(format!("Failed to add syscall events ring buffer: {}", e))
+            })?;
+
+        // Cgroup creations for startup capture (see early_capture). Rare —
+        // one per container, sandbox and pod-level cgroup — so a string
+        // allocation per event is fine.
+        ring_buffer_builder
+            .add(&syscall_sk.maps.cgroup_events, move |data: &[u8]| {
+                if data.len() < std::mem::size_of::<CgroupEventData>() {
+                    eprintln!(
+                        "Cgroup event data too small: {} < {}",
+                        data.len(),
+                        std::mem::size_of::<CgroupEventData>()
+                    );
+                    return 0;
+                }
+                let ev: CgroupEventData = unsafe { *(data.as_ptr() as *const CgroupEventData) };
+                if let Err(e) = cgroup_event_sender.blocking_send((ev.cgroup_id, ev.path_str())) {
+                    if !CGROUP_SEND_FAILED.swap(true, Ordering::Relaxed) {
+                        warn!(error = ?e, "cgroup event channel closed; signalling eBPF poll loop to exit");
+                    }
+                    signal_ebpf_shutdown();
+                }
+                0
+            })
+            .map_err(|e| {
+                Error::Custom(format!("Failed to add cgroup events ring buffer: {}", e))
             })?;
 
         // Add network policy drop events ring buffer
@@ -627,6 +681,21 @@ pub fn ebpf_handle(
                         .map_err(|e| eprintln!("Failed to update seccomp denial inode map: {}", e));
                 }
             }
+            // Startup capture: cgroups userspace is done with (attributed,
+            // expired, or never a container). Deleting the pending mark
+            // stops the kernel capturing them; a miss (already evicted by
+            // the LRU) is harmless.
+            let mut forgotten = 0;
+            while forgotten < MAX_DRAIN_PER_ITERATION {
+                let Ok(cgroup_id) = forget_pending.try_recv() else {
+                    break;
+                };
+                forgotten += 1;
+                let _ = syscall_sk
+                    .maps
+                    .pending_cgroups
+                    .delete(&cgroup_id.to_ne_bytes());
+            }
             if ignore_daemonset_traffic {
                 // Same starvation, same bound: one IP per iteration meant the
                 // daemonset ignore-list lagged behind the pods it describes,
@@ -743,6 +812,7 @@ mod tests {
         NETWORK_SEND_FAILED.store(false, Ordering::Relaxed);
         SYSCALL_SEND_FAILED.store(false, Ordering::Relaxed);
         POLICY_DROP_SEND_FAILED.store(false, Ordering::Relaxed);
+        CGROUP_SEND_FAILED.store(false, Ordering::Relaxed);
     }
 
     #[test]

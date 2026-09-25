@@ -1,13 +1,16 @@
-use crate::capture_tiers::native_scmp_arch;
+use crate::capture_tiers::{native_scmp_arch, ResolvedTiers};
+use crate::early_capture::{filter_for_tier, PendingCapture, SYSCALL_EVENT_PENDING};
 use crate::models::{lookup_pod, ContainerMap};
 use chrono::Utc;
 use libseccomp::ScmpSyscall;
 use moka::future::Cache;
 use serde_json::json;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
+use tokio::sync::mpsc::{Receiver, Sender};
 use tokio::sync::Mutex;
-use tracing::{debug, error};
+use tracing::{debug, error, info};
 
 use crate::{api_post_call, Error, PodInspect, SyscallData};
 
@@ -22,28 +25,169 @@ lazy_static::lazy_static! {
     static ref LAST_SENT_CACHE: SyscallCache = Cache::new(10_000);
 }
 
+/// One syscall event as the probe writes it. Keep in sync with `struct
+/// data_t` in `bpf/syscall.bpf.c`.
 #[repr(C)]
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, Default)]
 pub struct SyscallEventData {
     pub inum: u64,
     pub sysnbr: u32,
+    /// `early_capture::SYSCALL_EVENT_REGISTERED` or `_PENDING`.
+    pub kind: u32,
+    /// The calling task's cgroup v2 id — the container, where `inum`
+    /// names only the pod.
+    pub cgroup_id: u64,
+}
+
+/// How often buffered startup syscalls are checked against the pods the
+/// watcher has registered.
+const ATTRIBUTION_TICK: Duration = Duration::from_secs(1);
+
+/// How often the startup-capture counters are logged.
+const STATS_EVERY: Duration = Duration::from_secs(300);
+
+/// Everything startup capture needs besides the syscall stream itself.
+/// See `early_capture`.
+pub struct StartupCapture {
+    /// Cgroup creations from the `cgroup_events` ring buffer: id, path.
+    pub cgroup_events: Receiver<(u64, String)>,
+    /// Cgroup ids whose kernel pending mark the eBPF loop should delete.
+    pub forget: Sender<u64>,
+    /// The tier allowlists, to apply a pod's tier to syscalls the kernel
+    /// captured before it knew the pod.
+    pub tiers: ResolvedTiers,
 }
 
 pub async fn handle_syscall_events(
-    mut event_receiver: tokio::sync::mpsc::Receiver<SyscallEventData>,
+    mut event_receiver: Receiver<SyscallEventData>,
     container_map: ContainerMap,
+    startup: StartupCapture,
 ) -> Result<(), Error> {
-    while let Some(event) = event_receiver.recv().await {
-        // Resolve before awaiting. This was the worst of the three sites: the
-        // inline `get()` held the shard's read guard across
-        // process_syscall_event, which itself awaits a tokio Mutex shared
-        // with the periodic sender — so the guard could be held for as long
-        // as that lock was contended. See ContainerMap in models.rs.
-        if let Some(pod_inspect) = lookup_pod(&container_map, event.inum) {
-            process_syscall_event(&event, &pod_inspect).await?
+    let StartupCapture {
+        mut cgroup_events,
+        forget,
+        tiers,
+    } = startup;
+    let mut pending = PendingCapture::default();
+    let mut cgroup_events_open = true;
+    let mut tick = tokio::time::interval(ATTRIBUTION_TICK);
+    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let mut last_stats = Instant::now();
+
+    loop {
+        tokio::select! {
+            event = event_receiver.recv() => {
+                let Some(event) = event else { break };
+                if event.kind == SYSCALL_EVENT_PENDING {
+                    pending.pending_syscall(event.cgroup_id, event.sysnbr, Instant::now());
+                    continue;
+                }
+                // Resolve before awaiting. This was the worst of the three
+                // sites: the inline `get()` held the shard's read guard
+                // across process_syscall_event, which itself awaits a tokio
+                // Mutex shared with the periodic sender — so the guard could
+                // be held for as long as that lock was contended. See
+                // ContainerMap in models.rs.
+                if let Some(pod_inspect) = lookup_pod(&container_map, event.inum) {
+                    process_syscall_event(&event, &pod_inspect).await?
+                }
+            }
+            created = cgroup_events.recv(), if cgroup_events_open => {
+                match created {
+                    Some((id, path)) => {
+                        if let Some(id) = pending.cgroup_created(id, &path, Instant::now()) {
+                            forget_pending(&forget, id);
+                        }
+                    }
+                    // The eBPF loop is going away; the syscall channel
+                    // closes with it and ends this loop.
+                    None => cgroup_events_open = false,
+                }
+            }
+            _ = tick.tick() => {
+                if !pending.is_empty() {
+                    attribute_pending(&mut pending, &container_map, &tiers, &forget).await?;
+                }
+                if last_stats.elapsed() >= STATS_EVERY {
+                    last_stats = Instant::now();
+                    let s = pending.stats;
+                    if s.cgroups_seen > 0 {
+                        info!(
+                            cgroups_seen = s.cgroups_seen,
+                            cgroups_attributed = s.cgroups_attributed,
+                            cgroups_expired = s.cgroups_expired,
+                            syscalls_attributed = s.syscalls_attributed,
+                            dropped_at_capacity = s.events_dropped_full,
+                            buffered_now = pending.len(),
+                            "startup syscall capture (cumulative)"
+                        );
+                    }
+                }
+            }
         }
     }
     tracing::error!("Syscall event receiver exited unexpectedly!");
+    Ok(())
+}
+
+/// Best effort: a full channel only means the kernel keeps capturing
+/// that cgroup a little longer. Its events land in a fresh entry here
+/// that expires on its own, and the forget is retried then.
+fn forget_pending(forget: &Sender<u64>, cgroup_id: u64) {
+    if forget.try_send(cgroup_id).is_err() {
+        debug!(cgroup_id, "startup capture: forget queue full or closed");
+    }
+}
+
+/// One attribution pass: resolve buffered cgroups to registered pods by
+/// UID, merge their syscalls (at the pod's tier) into the pod's set, and
+/// retire finished or expired cgroups in the kernel.
+async fn attribute_pending(
+    pending: &mut PendingCapture,
+    container_map: &ContainerMap,
+    tiers: &ResolvedTiers,
+    forget: &Sender<u64>,
+) -> Result<(), Error> {
+    // Snapshot uid -> pod without holding any shard guard past this
+    // statement (see ContainerMap). A few hundred entries, once a second,
+    // and only while something is pending.
+    let by_uid: HashMap<String, Arc<PodInspect>> = container_map
+        .iter()
+        .filter(|e| !e.value().info.config.metadata.uid.is_empty())
+        .map(|e| {
+            (
+                e.value().info.config.metadata.uid.clone(),
+                Arc::clone(e.value()),
+            )
+        })
+        .collect();
+
+    let result = pending.attribute(Instant::now(), |uid| by_uid.get(uid).cloned());
+    for id in result.forget {
+        forget_pending(forget, id);
+    }
+    for flush in result.flush {
+        let pod = flush.pod;
+        let allowed = filter_for_tier(pod.capture_flags, tiers, &flush.syscalls);
+        debug!(
+            pod = %pod.status.pod_name,
+            namespace = %pod.info.config.metadata.namespace,
+            container_id = flush.identity.container_id.as_deref().unwrap_or(""),
+            cgroup_id = flush.cgroup_id,
+            captured = flush.syscalls.len(),
+            kept_by_tier = allowed.len(),
+            "startup capture: attributing syscalls captured before the pod was registered"
+        );
+        for nr in allowed {
+            let event = SyscallEventData {
+                inum: pod.inode_num.unwrap_or_default(),
+                sysnbr: nr,
+                kind: SYSCALL_EVENT_PENDING,
+                cgroup_id: flush.cgroup_id,
+            };
+            process_syscall_event(&event, &pod).await?;
+        }
+    }
     Ok(())
 }
 
@@ -166,4 +310,21 @@ fn get_syscall_name(syscall_number: i32) -> Option<String> {
     let syscall = ScmpSyscall::from(syscall_number);
     let name = syscall.get_name_by_arch(arch).ok()?;
     Some(name)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn event_layout_matches_the_kernel_struct() {
+        // struct data_t in bpf/syscall.bpf.c: u64 inum, u32 sysnbr,
+        // u32 kind, u64 cgroup_id. The ring-buffer callback casts the raw
+        // bytes to this type, so a size or order mismatch silently reads
+        // garbage rather than failing.
+        assert_eq!(std::mem::size_of::<SyscallEventData>(), 24);
+        assert_eq!(std::mem::offset_of!(SyscallEventData, sysnbr), 8);
+        assert_eq!(std::mem::offset_of!(SyscallEventData, kind), 12);
+        assert_eq!(std::mem::offset_of!(SyscallEventData, cgroup_id), 16);
+    }
 }
