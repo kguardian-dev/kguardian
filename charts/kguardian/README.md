@@ -111,6 +111,7 @@ The following table lists the configurable parameters of the kguardian chart and
 | broker.imageInventory.retention.batchSize | int | `5000` | Rows deleted per batched DELETE. Same [100, 100000] clamp as `broker.audit.retention.batchSize`, for the same reason. |
 | broker.imageInventory.retention.days | int | `30` | Prune inventory rows no running pod has refreshed for this many days. Set to 0 to disable pruning (rows of deleted workloads are then kept forever). |
 | broker.imageInventory.retention.intervalSeconds | int | `3600` | How often the cleanup pass runs, in seconds. Minimum 60. |
+| broker.imageInventory.runningWindowSeconds | int | `900` | How long, in seconds, an image digest keeps counting as running after a pod last reported it. The controller re-posts every live pod (ready or not) every 60 s and the broker refreshes a row at most every 300 s, so the default of 900 leaves room for a missed resync or a controller restart. Independently of this window, a digest also counts as running while the pod that last reported it is live and not marked dead. Lower it to see finished rollouts drop out sooner; clamped to [360, 604800]. |
 | broker.imagePullSecrets | list | `[]` | List of image pull secrets for private registries |
 | broker.initContainer.image.pullPolicy | string | `"IfNotPresent"` | Broker init container image pull policy. See the controller's init container for why this is not `Always`. |
 | broker.initContainer.image.repository | string | `"busybox"` | Broker init container image repository |

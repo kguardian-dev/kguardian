@@ -199,6 +199,10 @@ spec:
             */}}
             {{- $inventory := .Values.broker.imageInventory | default dict }}
             {{- $inventoryRetention := $inventory.retention | default dict }}
+            {{- if hasKey $inventory "runningWindowSeconds" }}
+            - name: IMAGE_INVENTORY_RUNNING_WINDOW_SECS
+              value: {{ $inventory.runningWindowSeconds | quote }}
+            {{- end }}
             {{- if hasKey $inventoryRetention "days" }}
             - name: IMAGE_INVENTORY_RETENTION_DAYS
               value: {{ $inventoryRetention.days | quote }}
