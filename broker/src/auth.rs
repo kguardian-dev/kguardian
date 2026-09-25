@@ -160,6 +160,14 @@ pub const ROUTES: &[RouteRule] = &[
         READ,
     ),
     rule("GET", "/seccomp/denials", READ),
+    // Image inventory (#1533).
+    rule("GET", "/images", READ),
+    rule("GET", "/images/{digest}", READ),
+    rule(
+        "GET",
+        "/workloads/{namespace}/{kind}/{name}/containers",
+        READ,
+    ),
 ];
 
 /// The declared access for `method` on the registered `pattern`, if any.

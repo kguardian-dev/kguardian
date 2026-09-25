@@ -425,6 +425,44 @@ diesel::table! {
     }
 }
 
+diesel::table! {
+    // Image inventory, keyed by digest (#1533). One row per distinct
+    // digest any container has been seen running; pruned when no
+    // workload_containers row references it for the retention window.
+    // See the migration and src/image_inventory.rs.
+    images (digest) {
+        digest -> Varchar,
+        cluster_id -> Varchar,
+        repository -> Nullable<Varchar>,
+        tags -> Array<Text>,
+        digest_kind -> Varchar,
+        first_seen -> Timestamp,
+        last_seen -> Timestamp,
+    }
+}
+
+diesel::table! {
+    // One row per (workload, container): image ref + digest and the
+    // securityContext / pod-level posture subset the controller reports
+    // on /pod/spec. Same (namespace, kind, name) workload key as
+    // workload_syscalls, plus cluster_id.
+    workload_containers (cluster_id, pod_namespace, workload_kind, workload_name, container_name) {
+        cluster_id -> Varchar,
+        pod_namespace -> Varchar,
+        workload_kind -> Varchar,
+        workload_name -> Varchar,
+        container_name -> Varchar,
+        container_kind -> Varchar,
+        image_ref -> Varchar,
+        image_digest -> Nullable<Varchar>,
+        security_context -> Jsonb,
+        pod_security -> Jsonb,
+        last_pod_name -> Nullable<Varchar>,
+        first_seen -> Timestamp,
+        updated_at -> Timestamp,
+    }
+}
+
 diesel::allow_tables_to_appear_in_same_query!(
     pod_details,
     pod_traffic,

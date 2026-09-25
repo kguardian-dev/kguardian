@@ -11,11 +11,11 @@ use crate::{
     add_node_facts, add_pod_details, add_pods_batch, add_pods_syscalls, add_svc_details,
     compute_ingest_scope, delete_seccomp_cr, export_seccomp_profile, export_seccomp_profile_post,
     get_audit_verdicts, get_cluster_environment, get_compute_contention, get_compute_findings,
-    get_compute_history, get_compute_latest, get_compute_nodes, get_pod_by_ip, get_pod_by_name,
-    get_pod_details, get_pod_syscall_name, get_pod_traffic, get_pod_traffic_name, get_pods_by_node,
-    get_seccomp_profile, get_seccomp_profile_file, get_svc_by_ip, get_svc_details, get_version,
-    list_seccomp_profiles, mark_pod_dead, post_seccomp_node_status, put_seccomp_cr,
-    seccomp_denials_resource,
+    get_compute_history, get_compute_latest, get_compute_nodes, get_image, get_images,
+    get_pod_by_ip, get_pod_by_name, get_pod_details, get_pod_syscall_name, get_pod_traffic,
+    get_pod_traffic_name, get_pods_by_node, get_seccomp_profile, get_seccomp_profile_file,
+    get_svc_by_ip, get_svc_details, get_version, get_workload_containers, list_seccomp_profiles,
+    mark_pod_dead, post_seccomp_node_status, put_seccomp_cr, seccomp_denials_resource,
 };
 
 pub fn configure(cfg: &mut web::ServiceConfig) {
@@ -54,6 +54,11 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
         .service(get_compute_contention)
         .service(get_compute_findings)
         .service(get_compute_nodes)
+        // Image inventory (#1533): paginated, LIMIT-clamped and charged
+        // to the read budget like every other read.
+        .service(get_images)
+        .service(get_image)
+        .service(get_workload_containers)
         .service(get_version)
         .service(get_cluster_environment);
 }

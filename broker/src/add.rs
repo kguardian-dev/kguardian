@@ -249,8 +249,23 @@ impl PodTraffic {
 )]
 pub async fn add_pod_details(
     pool: web::Data<DbPool>,
-    form: web::Json<PodDetail>,
+    body: web::Json<crate::image_inventory::PodSpecIngest>,
 ) -> Result<HttpResponse, Error> {
+    let crate::image_inventory::PodSpecIngest {
+        pod,
+        containers,
+        pod_security,
+    } = body.into_inner();
+    // Image inventory comes from the typed `containers` / `pod_security`
+    // fields, never from `pod_obj` — so it is extracted here, before
+    // `upsert_pod_details` compacts the manifest, and cannot be lost to
+    // that compaction. Pure; the write happens after the pod upsert.
+    let inventory = crate::image_inventory::inventory_from_post(
+        &pod,
+        containers.as_ref(),
+        pod_security.as_ref(),
+    );
+    let form = web::Json(pod);
     // Defense-in-depth: reject empty/whitespace-only pod_name before
     // it reaches the diesel upsert. pod_name is the table PK and the
     // CRD validator would never produce an empty value, but the
@@ -268,7 +283,14 @@ pub async fn add_pod_details(
     }
     let pods = web::block(move || {
         let mut conn = pool.get()?;
-        upsert_pod_details(&mut conn, form)
+        let pod = upsert_pod_details(&mut conn, form)?;
+        // Inventory is additive: a failure here is logged and the pod
+        // upsert still succeeds, because /pod/spec is on the path every
+        // other feature depends on. The next re-post retries it.
+        if let Err(e) = crate::image_inventory::upsert_inventory(&mut conn, &inventory) {
+            tracing::warn!(pod = %pod.pod_name, error = %e, "image inventory upsert failed");
+        }
+        Ok::<_, DbError>(pod)
     })
     .await?
     .map_err(actix_web::error::ErrorInternalServerError)?;

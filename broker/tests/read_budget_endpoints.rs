@@ -106,6 +106,17 @@ sheds_when_budget_exhausted!(
     "/pod/traffic/some-pod"
 );
 sheds_when_budget_exhausted!(pod_info_sheds, api::get_pod_details, "/pod/info");
+sheds_when_budget_exhausted!(images_sheds, api::get_images, "/images?limit=500");
+sheds_when_budget_exhausted!(
+    image_detail_sheds,
+    api::get_image,
+    "/images/sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+);
+sheds_when_budget_exhausted!(
+    workload_containers_sheds,
+    api::get_workload_containers,
+    "/workloads/prod/Deployment/web/containers"
+);
 sheds_when_budget_exhausted!(svc_info_sheds, api::get_svc_details, "/svc/info");
 sheds_when_budget_exhausted!(
     pods_by_node_sheds,
@@ -312,6 +323,35 @@ async fn bad_input_is_rejected_before_the_budget_is_consulted() {
         0,
         "a rejected request must not consume or shed budget"
     );
+}
+
+/// Same property for the image inventory reads: a malformed digest or
+/// cursor is a 400 before the budget is consulted.
+#[actix_web::test]
+async fn image_reads_reject_bad_digests_before_the_budget() {
+    let (budget, _hog) = exhausted_budget().await;
+    let app = test::init_service(
+        App::new()
+            .app_data(web::Data::new(unreachable_pool()))
+            .app_data(budget.clone())
+            .service(api::get_images)
+            .service(api::get_image),
+    )
+    .await;
+    for uri in [
+        "/images/latest",
+        "/images/sha256:short",
+        "/images?after=nginx",
+        "/images?after=sha256:ABC",
+    ] {
+        let resp = test::call_service(&app, test::TestRequest::get().uri(uri).to_request()).await;
+        assert_eq!(
+            resp.status(),
+            actix_web::http::StatusCode::BAD_REQUEST,
+            "{uri} must 400 even with the budget exhausted"
+        );
+    }
+    assert_eq!(budget.get_ref().shed_count(), 0);
 }
 
 /// Same property for the compute reads: a missing required filter is a
