@@ -131,6 +131,65 @@ struct
     __type(value, u64); // bpf_ktime_get_ns() at mkdir
 } pending_cgroups SEC(".maps");
 
+// Hot-path gate for the pending path. Every syscall from a task whose
+// netns is not registered (host daemons, excluded namespaces) reaches
+// capture_pending; without this gate each one paid a helper call and an
+// LRU miss even when nothing was pending, which is the steady state.
+//
+//   [KG_GATE_CREATED]  pending marks set, incremented here by the mkdir
+//                      program (atomically; mkdirs can race on CPUs)
+//   [KG_GATE_RETIRED]  pending marks deleted, written only by userspace
+//                      (controller/src/bpf.rs) after a successful delete
+//
+// created == retired means nothing is pending and the pending path is two
+// array reads. A mark lost to LRU eviction is never counted as retired,
+// which leaves the gate open: the old per-syscall cost, never lost data.
+#define KG_GATE_CREATED 0
+#define KG_GATE_RETIRED 1
+struct
+{
+    __uint(type, BPF_MAP_TYPE_ARRAY);
+    __uint(max_entries, 2);
+    __type(key, u32);
+    __type(value, u64);
+} pending_gate SEC(".maps");
+
+// Syscalls the container runtime makes BEFORE it installs the container's
+// seccomp filter, and so never need to be in the profile: the rootfs,
+// hostname, keyring and namespace setup runc performs ahead of
+// syncParentReady. Indexed by syscall number, filled by userspace from
+// `early_capture::RUNTIME_PREFILTER_SYSCALLS` for this arch.
+//
+// Deliberately NOT "everything runc init does": with NoNewPrivileges
+// unset (the Kubernetes default, allowPrivilegeEscalation: true) runc
+// installs the filter BEFORE finalizeNamespace, so its capset, prctl,
+// setgroups, setresuid/gid, close_range, chdir, the exec-fifo
+// openat/write/close and its Go runtime's own syscalls all run UNDER the
+// profile. Dropping those would make an enforced profile fail the
+// container at create time.
+struct
+{
+    __uint(type, BPF_MAP_TYPE_ARRAY);
+    __uint(max_entries, 1024);
+    __type(key, u32);
+    __type(value, u8);
+} runtime_prefilter SEC(".maps");
+
+// runc names its init stages "runc:[0:PARENT]", "runc:[1:CHILD]",
+// "runc:[2:INIT]" (comm is at most 15 bytes). True for a task in one of
+// them making a syscall runc only makes before the filter exists.
+static __always_inline bool runtime_prefilter_skip(u32 syscall_id)
+{
+    u8 *pre = bpf_map_lookup_elem(&runtime_prefilter, &syscall_id);
+    if (!pre || !*pre)
+        return false;
+    char comm[16];
+    if (bpf_get_current_comm(comm, sizeof(comm)) != 0)
+        return false;
+    return comm[0] == 'r' && comm[1] == 'u' && comm[2] == 'n' && comm[3] == 'c' &&
+           comm[4] == ':' && comm[5] == '[';
+}
+
 struct pending_syscall_key
 {
     __u64 cgroup_id;
@@ -186,6 +245,15 @@ int BPF_PROG(trace_cgroup_mkdir, struct cgroup *cgrp, const char *path)
 {
     struct cgroup_event_t *ev;
 
+    // Default (v2) hierarchy only. On a hybrid v1+v2 host every container
+    // also gets a directory in each v1 hierarchy, whose ids can never
+    // match bpf_get_current_cgroup_id() (always the v2 id). The task
+    // doing the mkdir sits in some v2 cgroup, so its dfl_cgrp->root IS
+    // the default hierarchy root.
+    struct task_struct *task = (struct task_struct *)bpf_get_current_task();
+    if (BPF_CORE_READ(cgrp, root) != BPF_CORE_READ(task, cgroups, dfl_cgrp, root))
+        return 0;
+
     // Reserve first: a cgroup is only marked pending if userspace is
     // also told what it is. A pending mark userspace never hears about
     // would capture into a buffer nothing can attribute (it would still
@@ -207,21 +275,35 @@ int BPF_PROG(trace_cgroup_mkdir, struct cgroup *cgrp, const char *path)
     ev->_pad = 0;
 
     __u64 now = bpf_ktime_get_ns();
-    if (bpf_map_update_elem(&pending_cgroups, &id, &now, BPF_ANY) != 0)
+    if (bpf_map_update_elem(&pending_cgroups, &id, &now, BPF_NOEXIST) != 0)
     {
         bpf_ringbuf_discard(ev, 0);
         return 0;
     }
+    u32 created_key = KG_GATE_CREATED;
+    __u64 *created = bpf_map_lookup_elem(&pending_gate, &created_key);
+    if (created)
+        __sync_fetch_and_add(created, 1);
     bpf_ringbuf_submit(ev, 0);
     return 0;
 }
 
 // Pending path of the syscall probe: the netns is not registered, so
 // look the task's cgroup up in pending_cgroups instead. Cost for every
-// untracked task on the node: one helper call and one hash lookup that
-// misses.
+// untracked task on the node while nothing is pending: two array reads
+// (pending_gate). While something is pending: plus one helper call and
+// one hash lookup.
 static __always_inline int capture_pending(__u64 net_ns, u32 syscall_id)
 {
+    u32 created_key = KG_GATE_CREATED, retired_key = KG_GATE_RETIRED;
+    __u64 *created = bpf_map_lookup_elem(&pending_gate, &created_key);
+    __u64 *retired = bpf_map_lookup_elem(&pending_gate, &retired_key);
+    if (!created || !retired || *created == *retired)
+        return 0;
+
+    if (runtime_prefilter_skip(syscall_id))
+        return 0;
+
     __u64 cgroup_id = bpf_get_current_cgroup_id();
     if (!bpf_map_lookup_elem(&pending_cgroups, &cgroup_id))
         return 0;
@@ -291,6 +373,13 @@ int trace_execve(struct trace_event_raw_sys_enter *ctx)
     // Not a registered netns: either nothing kube-guardian tracks, or a
     // container that is not registered YET (startup). The pending path
     // tells the two apart by cgroup.
+    //
+    // TODO(1533): a hostNetwork pod's netns is the node's, so once any
+    // hostNetwork pod on the node is registered, a starting hostNetwork
+    // container takes the registered path below (never the pending one)
+    // and its syscalls go to whichever pod holds the node netns key in the
+    // ContainerMap. The fix is attribution by cgroup id, which lands with
+    // the per-container keying of P1-2.
     flags = bpf_map_lookup_elem(&inode_num, &net_ns);
     if (!flags)
         return capture_pending(net_ns, syscall_id);
@@ -298,6 +387,12 @@ int trace_execve(struct trace_event_raw_sys_enter *ctx)
     // Tier filter first: cheap, and keeps the dedup map from filling
     // with syscalls nobody asked to see.
     if (!tier_allows(KG_TIER_OF(*flags), syscall_id))
+        return 0;
+
+    // A container (re)starting in an already-registered netns: skip the
+    // runtime's pre-filter setup syscalls here too, or the profile would
+    // depend on whether a restart happened to be observed.
+    if (runtime_prefilter_skip(syscall_id))
         return 0;
 
     // Dedup: only the first sighting per (netns, generation, syscall)

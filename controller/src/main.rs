@@ -197,6 +197,7 @@ async fn main() -> Result<(), Error> {
         cgroup_events: cgroup_event_receiver,
         forget: forget_pending_sender,
         tiers: resolved_tiers.clone(),
+        config: kguardian::early_capture::StartupCaptureConfig::from_env(),
     };
 
     // The denial probe is loaded by the eBPF loader alongside the other

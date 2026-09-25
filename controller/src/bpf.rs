@@ -147,6 +147,43 @@ fn populate_tier_maps(maps: &crate::syscall::sycallprobe::SyscallMaps<'_>, tiers
     }
 }
 
+/// Index of userspace's retired-marks counter in the `pending_gate` map.
+/// Keep in sync with `KG_GATE_RETIRED` in syscall.bpf.c.
+const PENDING_GATE_RETIRED: u32 = 1;
+
+/// Fill `runtime_prefilter` (indexed by syscall number) with the
+/// syscalls runc only makes before the container's seccomp filter exists
+/// (`early_capture::RUNTIME_PREFILTER_SYSCALLS`), resolved for this arch.
+/// A failure leaves the map empty, which records those syscalls as
+/// before: a slightly wider profile, never a narrower one.
+fn populate_runtime_prefilter(map: &libbpf_rs::Map) {
+    let Some(arch) = crate::capture_tiers::native_scmp_arch() else {
+        return;
+    };
+    let (nrs, _unknown) = crate::capture_tiers::resolve_names(
+        crate::early_capture::RUNTIME_PREFILTER_SYSCALLS
+            .iter()
+            .copied(),
+        arch,
+    );
+    let mut written = 0;
+    for nr in nrs {
+        // The map holds 1024 slots; syscall numbers on every supported
+        // arch are well below that.
+        if nr < 1024
+            && map
+                .update(&nr.to_ne_bytes(), &1u8.to_ne_bytes(), MapFlags::ANY)
+                .is_ok()
+        {
+            written += 1;
+        }
+    }
+    info!(
+        entries = written,
+        "runtime pre-filter syscall map populated (runc setup syscalls skipped)"
+    );
+}
+
 /// Where `sym` lives according to a `/proc/kallsyms` dump: `None` if
 /// absent, `Some(None)` if built in, `Some(Some(module))` if exported
 /// by a module (kallsyms appends the module as a bracketed 4th field).
@@ -426,6 +463,11 @@ pub fn ebpf_handle(
         // Populate the tier allowlists BEFORE attaching so the very first
         // events are already filtered by tier.
         populate_tier_maps(&syscall_sk.maps, &tiers);
+        populate_runtime_prefilter(&syscall_sk.maps.runtime_prefilter);
+        // Userspace's half of the pending-path gate (see pending_gate in
+        // syscall.bpf.c): marks this process has deleted. Only this loop
+        // writes it.
+        let mut pending_retired: u64 = 0;
 
         // Attached one program at a time rather than with skel.attach(),
         // so the startup-capture program can fail on its own. The
@@ -717,15 +759,35 @@ pub fn ebpf_handle(
             // stops the kernel capturing them; a miss (already evicted by
             // the LRU) is harmless.
             let mut forgotten = 0;
+            let mut retired_now = 0u64;
             while forgotten < MAX_DRAIN_PER_ITERATION {
                 let Ok(cgroup_id) = forget_pending.try_recv() else {
                     break;
                 };
                 forgotten += 1;
-                let _ = syscall_sk
+                // Only a delete that removed a mark counts towards the
+                // gate: a repeat forget (late event re-attributed) or a
+                // mark the LRU already evicted must not.
+                if syscall_sk
                     .maps
                     .pending_cgroups
-                    .delete(&cgroup_id.to_ne_bytes());
+                    .delete(&cgroup_id.to_ne_bytes())
+                    .is_ok()
+                {
+                    retired_now += 1;
+                }
+            }
+            if retired_now > 0 {
+                pending_retired += retired_now;
+                let _ = syscall_sk
+                    .maps
+                    .pending_gate
+                    .update(
+                        &PENDING_GATE_RETIRED.to_ne_bytes(),
+                        &pending_retired.to_ne_bytes(),
+                        MapFlags::ANY,
+                    )
+                    .map_err(|e| eprintln!("Failed to update pending_gate: {}", e));
             }
             if ignore_daemonset_traffic {
                 // Same starvation, same bound: one IP per iteration meant the

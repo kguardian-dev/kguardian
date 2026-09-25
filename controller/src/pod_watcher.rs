@@ -254,6 +254,16 @@ async fn resync_pods(
                     }
                 }
                 debug!("Pod resync pass processed {} on-node pods", processed);
+                // Deletions are decoded away by the watch; retire pods
+                // that left the node from startup capture's registry too.
+                {
+                    let live: std::collections::HashSet<String> = list
+                        .items
+                        .iter()
+                        .filter_map(|p| p.metadata.uid.clone())
+                        .collect();
+                    crate::early_capture::retain_known_pods(&live, listed_at);
+                }
                 // The streaming watch decodes deletions away
                 // (`applied_objects`), so a pod that vanished between
                 // resyncs is retired here: the compute registry must
@@ -311,7 +321,17 @@ async fn process_pod(
         if let (Some(ctx), Some(uid)) = (compute, pod.metadata.uid.as_deref()) {
             ctx.map.remove_pod(uid);
         }
+        if let Some(uid) = pod.metadata.uid.as_deref() {
+            crate::early_capture::forget_known_pod(uid);
+        }
         return None;
+    }
+    // Startup capture needs to know the pod long before it is Ready (and
+    // registered): a known pod's pending cgroups wait longer, and its
+    // container ids tell app containers from the sandbox. Only pods in
+    // tracked namespaces — an excluded pod's cgroups should expire.
+    if should_process_pod(&pod.metadata.namespace, excluded_namespaces) {
+        crate::early_capture::note_known_pod(pod);
     }
     if let Some(con_ids) = pod_unready(pod) {
         // Computed once here so the broker payload and the eBPF

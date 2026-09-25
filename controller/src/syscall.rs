@@ -1,11 +1,14 @@
 use crate::capture_tiers::{native_scmp_arch, ResolvedTiers};
-use crate::early_capture::{filter_for_tier, PendingCapture, SYSCALL_EVENT_PENDING};
+use crate::early_capture::{
+    filter_for_tier, known_pod_containers, PendingCapture, PodState, StartupCaptureConfig,
+    SYSCALL_EVENT_PENDING,
+};
 use crate::models::{lookup_pod, ContainerMap};
 use chrono::Utc;
 use libseccomp::ScmpSyscall;
 use moka::future::Cache;
 use serde_json::json;
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc::{Receiver, Sender};
@@ -56,6 +59,50 @@ pub struct StartupCapture {
     /// The tier allowlists, to apply a pod's tier to syscalls the kernel
     /// captured before it knew the pod.
     pub tiers: ResolvedTiers,
+    /// TTLs (`STARTUP_CAPTURE_*` env).
+    pub config: StartupCaptureConfig,
+}
+
+/// Cap on forgets waiting for room in the channel to the eBPF loop.
+/// Only reachable if that loop stops draining; beyond it the oldest are
+/// dropped (their kernel marks then age out of the LRU).
+const MAX_QUEUED_FORGETS: usize = 16_384;
+
+/// Forgets not yet handed to the eBPF loop. Retried every tick instead
+/// of being dropped on a full channel: a mark that is never deleted
+/// keeps the kernel capturing that cgroup and holds the hot-path gate
+/// open.
+#[derive(Default)]
+struct ForgetQueue {
+    queued: VecDeque<u64>,
+    dropped: u64,
+}
+
+impl ForgetQueue {
+    fn push(&mut self, id: u64) {
+        if self.queued.len() >= MAX_QUEUED_FORGETS {
+            self.queued.pop_front();
+            self.dropped += 1;
+        }
+        self.queued.push_back(id);
+    }
+
+    /// Hand over as many as the channel takes; keep the rest.
+    fn flush(&mut self, forget: &Sender<u64>) {
+        while let Some(&id) = self.queued.front() {
+            match forget.try_send(id) {
+                Ok(()) => {
+                    self.queued.pop_front();
+                }
+                Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => break,
+                Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+                    // The eBPF loop is gone; the controller is going down.
+                    self.queued.clear();
+                    break;
+                }
+            }
+        }
+    }
 }
 
 pub async fn handle_syscall_events(
@@ -67,8 +114,15 @@ pub async fn handle_syscall_events(
         mut cgroup_events,
         forget,
         tiers,
+        config,
     } = startup;
-    let mut pending = PendingCapture::default();
+    info!(
+        pending_ttl_secs = config.pending_ttl.as_secs(),
+        known_pod_ttl_secs = config.known_pod_ttl.as_secs(),
+        "startup syscall capture TTLs"
+    );
+    let mut pending = PendingCapture::new(config);
+    let mut forgets = ForgetQueue::default();
     let mut cgroup_events_open = true;
     let mut tick = tokio::time::interval(ATTRIBUTION_TICK);
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -96,7 +150,8 @@ pub async fn handle_syscall_events(
                 match created {
                     Some((id, path)) => {
                         if let Some(id) = pending.cgroup_created(id, &path, Instant::now()) {
-                            forget_pending(&forget, id);
+                            forgets.push(id);
+                            forgets.flush(&forget);
                         }
                     }
                     // The eBPF loop is going away; the syscall channel
@@ -106,8 +161,9 @@ pub async fn handle_syscall_events(
             }
             _ = tick.tick() => {
                 if !pending.is_empty() {
-                    attribute_pending(&mut pending, &container_map, &tiers, &forget).await?;
+                    attribute_pending(&mut pending, &container_map, &tiers, &mut forgets).await?;
                 }
+                forgets.flush(&forget);
                 if last_stats.elapsed() >= STATS_EVERY {
                     last_stats = Instant::now();
                     let s = pending.stats;
@@ -116,8 +172,13 @@ pub async fn handle_syscall_events(
                             cgroups_seen = s.cgroups_seen,
                             cgroups_attributed = s.cgroups_attributed,
                             cgroups_expired = s.cgroups_expired,
+                            sandboxes_discarded = s.sandboxes_discarded,
                             syscalls_attributed = s.syscalls_attributed,
+                            late_events_attributed = s.late_events_attributed,
+                            syscalls_unattributable = s.syscalls_unattributable,
                             dropped_at_capacity = s.events_dropped_full,
+                            forgets_queued = forgets.queued.len(),
+                            forgets_dropped = forgets.dropped,
                             buffered_now = pending.len(),
                             "startup syscall capture (cumulative)"
                         );
@@ -130,23 +191,14 @@ pub async fn handle_syscall_events(
     Ok(())
 }
 
-/// Best effort: a full channel only means the kernel keeps capturing
-/// that cgroup a little longer. Its events land in a fresh entry here
-/// that expires on its own, and the forget is retried then.
-fn forget_pending(forget: &Sender<u64>, cgroup_id: u64) {
-    if forget.try_send(cgroup_id).is_err() {
-        debug!(cgroup_id, "startup capture: forget queue full or closed");
-    }
-}
-
-/// One attribution pass: resolve buffered cgroups to registered pods by
-/// UID, merge their syscalls (at the pod's tier) into the pod's set, and
-/// retire finished or expired cgroups in the kernel.
+/// One attribution pass: resolve buffered cgroups to pods by UID, merge
+/// the syscalls of the pod's own containers (at the pod's tier) into its
+/// set, and retire finished, expired or sandbox cgroups in the kernel.
 async fn attribute_pending(
     pending: &mut PendingCapture,
     container_map: &ContainerMap,
     tiers: &ResolvedTiers,
-    forget: &Sender<u64>,
+    forgets: &mut ForgetQueue,
 ) -> Result<(), Error> {
     // Snapshot uid -> pod without holding any shard guard past this
     // statement (see ContainerMap). A few hundred entries, once a second,
@@ -162,9 +214,23 @@ async fn attribute_pending(
         })
         .collect();
 
-    let result = pending.attribute(Instant::now(), |uid| by_uid.get(uid).cloned());
+    let result = pending.attribute(Instant::now(), |identity| {
+        let containers = known_pod_containers(&identity.pod_uid);
+        let claims = match (&containers, identity.container_id.as_deref()) {
+            (Some(ids), Some(cid)) => ids.contains(cid),
+            _ => false,
+        };
+        match (by_uid.get(&identity.pod_uid), containers) {
+            (Some(pod), _) => PodState::Registered {
+                pod: Arc::clone(pod),
+                claims,
+            },
+            (None, Some(_)) => PodState::Known,
+            (None, None) => PodState::Unknown,
+        }
+    });
     for id in result.forget {
-        forget_pending(forget, id);
+        forgets.push(id);
     }
     for flush in result.flush {
         let pod = flush.pod;

@@ -41,15 +41,26 @@ fn main() {
     // Same arrangement for the seccomp denial object, read by
     // seccomp_denial::tests::embedded_object_uses_legacy_xadd_atomics.
     let seccomp_denial_obj = out_dir.join("seccomp_denial.bpf.o");
+    // And the syscall object, read by
+    // early_capture::tests::embedded_syscall_object_uses_legacy_xadd_atomics.
+    let syscall_obj = out_dir.join("syscall.bpf.o");
 
     let arch = env::var("CARGO_CFG_TARGET_ARCH")
         .expect("CARGO_CFG_TARGET_ARCH must be set in build script");
 
+    // -mcpu=v2 for the same reason as sched_contention below: the
+    // startup-capture gate counts marks with __sync_fetch_and_add, whose
+    // v3 lowering (BPF_ATOMIC|BPF_FETCH) the verifier rejects before 5.12
+    // and the arm64 JIT before 5.18. This object carries the REQUIRED
+    // syscall probe, so an encoding a kernel refuses would cost syscall
+    // capture itself (bpf.rs does retry without the startup program).
     SkeletonBuilder::new()
         .source(SYSCALL_SRC)
+        .obj(&syscall_obj)
         .clang_args([
             OsStr::new("-I"),
             vmlinux::include_path_root().join(&arch).as_os_str(),
+            OsStr::new("-mcpu=v2"),
         ])
         .build_and_generate(&out)
         .unwrap();

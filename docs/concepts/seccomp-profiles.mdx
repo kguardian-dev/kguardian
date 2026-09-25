@@ -52,15 +52,36 @@ setup and the application's first few hundred milliseconds. The controller
 captures these from the moment the container's cgroup is created, before the
 pod is registered, and adds them to the pod's set once the pod watcher has
 registered it (at the pod's tier). A profile recorded from a fresh pod is
-therefore startup-complete. The set can include a few syscalls of the
-container runtime's own setup (`runc init`); they widen the allowlist
-slightly and never deny anything.
+therefore startup-complete.
+
+Two things are left out on purpose. The container runtime's rootfs, hostname,
+keyring and namespace setup (`mount`, `pivot_root`, `sethostname`, `keyctl`,
+`unshare`, …) runs before the runtime installs the container's seccomp filter,
+so it never needs to be allowed. What the runtime does *after* installing the
+filter (`capset`, `setresuid`, `execve`, …) is kept, because an enforced
+profile has to allow it. The pod sandbox (pause) container has its own seccomp
+profile, and its syscalls are not merged into the pod's set.
+
+A pod is registered once it is Ready. A container waits up to
+`STARTUP_CAPTURE_KNOWN_POD_TTL_SECONDS` (default 3600) for its pod to become
+Ready. It waits up to `STARTUP_CAPTURE_PENDING_TTL_SECONDS` (default 600) if
+the pod watcher does not know the pod.
 
 A controller with startup capture logs `Startup syscall capture attached` at
 start. On older controllers, or where that line is replaced by a warning,
-trigger at least one container restart under
-`SCMP_ACT_LOG` before enforcing a profile recorded from fresh pods. Static
-pods (whose mirror pod UID differs from the cgroup's) are not covered.
+trigger at least one container restart under `SCMP_ACT_LOG` before enforcing
+a profile recorded from fresh pods.
+
+Known limitations:
+
+- **hostNetwork pods** are not startup-complete. They share the node's network
+  namespace, so once any hostNetwork pod on the node is registered, a starting
+  hostNetwork container is captured by the registered path and credited to
+  whichever hostNetwork pod holds the node's namespace entry. Per-container
+  attribution by cgroup fixes this and is planned. Until then, use the
+  restart-under-`SCMP_ACT_LOG` step above for hostNetwork workloads.
+- **Static pods** are not covered: their mirror pod UID differs from the UID
+  in the cgroup path.
 
 ### From observation to a node
 
