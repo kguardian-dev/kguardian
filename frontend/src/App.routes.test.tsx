@@ -97,6 +97,18 @@ test('Workloads is cluster-wide by default; the chip says so, and picking a name
   expect(screen.getByTestId('scope-chip').textContent).toBe('All namespaces');
 });
 
+test('on Workloads the namespace selector offers All namespaces and narrows on pick', async () => {
+  renderAt('#/workloads?ns=payments');
+  const select = (await screen.findByLabelText('Namespace:')) as HTMLSelectElement;
+  expect(select.value).toBe('');
+  fireEvent.change(select, { target: { value: 'observability' } });
+  await waitFor(() => expect(screen.getByTestId('workloads').dataset.all).toBe('false'));
+  expect(hashParams().get('ns')).toBe('observability');
+  expect(hashParams().get('scope')).toBe('ns');
+  fireEvent.change(select, { target: { value: '' } });
+  await waitFor(() => expect(screen.getByTestId('workloads').dataset.all).toBe('true'));
+});
+
 test('a narrowed Workloads view can be widened from the chip', async () => {
   renderAt('#/workloads?ns=payments&scope=ns');
   await waitFor(() => expect(screen.getByTestId('workloads').dataset.all).toBe('false'));

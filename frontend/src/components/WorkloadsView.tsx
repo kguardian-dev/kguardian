@@ -188,7 +188,7 @@ export function WorkloadsView({ allPods, namespace, allNamespaces, control, onCo
                     <tr className="border-b border-hubble-border">
                       <th className="text-left font-medium px-4 py-2">Workload</th>
                       <th className="text-right font-medium px-3 py-2">Pods</th>
-                      <th className="text-left font-medium px-3 py-2">Network policy</th>
+                      <th className="text-left font-medium px-3 py-2 whitespace-nowrap">Network policy</th>
                       <th className="text-left font-medium px-3 py-2">Seccomp</th>
                       <th className="text-left font-medium px-3 py-2">Drift</th>
                       <th className="text-left font-medium px-3 py-2">Capture</th>
@@ -196,7 +196,7 @@ export function WorkloadsView({ allPods, namespace, allNamespaces, control, onCo
                     </tr>
                   )}
                 </thead>
-                <tbody className="divide-y divide-hubble-border">
+                <tbody className="divide-y divide-hubble-border [&_td]:whitespace-nowrap">
                   {rows.map((r) => (
                     <tr
                       key={r.key}

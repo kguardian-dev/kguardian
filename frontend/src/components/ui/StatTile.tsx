@@ -27,7 +27,7 @@ export function StatTile({ label, value, icon: Icon, tone = 'text-secondary', su
     <>
       <div className="flex items-center gap-2 text-tertiary text-[11px] uppercase tracking-wide">
         <Icon className={`w-3.5 h-3.5 shrink-0 ${tone}`} aria-hidden />
-        <span className="truncate">{label}</span>
+        <span>{label}</span>
       </div>
       <div className={`mt-1 text-2xl font-semibold font-mono tabular-nums ${tone}`}>
         {value}

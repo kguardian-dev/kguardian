@@ -434,9 +434,10 @@ function App() {
               <kbd className="text-[10px] font-mono border border-hubble-border rounded px-1 py-0.5 leading-none">{cmdKey}</kbd>
             </button>
             <NamespaceSelector
-              selectedNamespace={effectiveNamespace}
-              onNamespaceChange={setNamespace}
+              selectedNamespace={allNamespaces ? '' : effectiveNamespace}
+              onNamespaceChange={(ns) => (ns === '' ? showAllNamespaces() : setNamespace(ns))}
               namespaces={namespaces}
+              allOption={CLUSTER_SCOPED_VIEWS.has(view)}
             />
             <Button
               variant="secondary"

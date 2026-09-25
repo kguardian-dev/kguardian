@@ -5,12 +5,19 @@ interface NamespaceSelectorProps {
   selectedNamespace: string;
   onNamespaceChange: (namespace: string) => void;
   namespaces?: string[];
+  /** Offer "All namespaces" (value '') first — for cluster-wide views, where
+   *  the selector is a filter rather than the scope. */
+  allOption?: boolean;
 }
+
+/** Sentinel value of the "All namespaces" option. */
+const ALL = '';
 
 const NamespaceSelector: React.FC<NamespaceSelectorProps> = ({
   selectedNamespace,
   onNamespaceChange,
   namespaces = ['default'],
+  allOption = false,
 }) => {
   return (
     <div className="flex items-center gap-2 bg-hubble-card px-4 py-2 rounded-lg border border-hubble-border">
@@ -26,6 +33,7 @@ const NamespaceSelector: React.FC<NamespaceSelectorProps> = ({
                    focus:outline-none focus:ring-2 focus:ring-hubble-accent focus:border-transparent
                    cursor-pointer"
       >
+        {allOption && <option value={ALL}>All namespaces</option>}
         {namespaces.map((ns) => (
           <option key={ns} value={ns}>
             {ns}
