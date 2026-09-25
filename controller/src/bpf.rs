@@ -392,14 +392,36 @@ pub fn ebpf_handle(
         info!("Network policy drop eBPF program loaded and attached");
 
         // Load and attach syscall probe
+        //
+        // The startup-capture program (tp_btf/cgroup_mkdir) lives in the
+        // same object because it shares pending_cgroups with the syscall
+        // probe. It is optional, the syscall probe is not: if the object
+        // fails to load (a verifier or BTF problem on some kernel), load
+        // it again without that program rather than lose syscall capture
+        // altogether.
         let mut open_object = MaybeUninit::uninit();
-        let skel_builder = SyscallSkelBuilder::default();
-        let syscall_probe_skel = skel_builder
+        let mut fallback_object = MaybeUninit::uninit();
+        let syscall_probe_skel = SyscallSkelBuilder::default()
             .open(&mut open_object)
             .map_err(|e| Error::Custom(format!("Failed to open syscall eBPF: {}", e)))?;
-        let syscall_sk = syscall_probe_skel
-            .load()
-            .map_err(|e| Error::Custom(format!("Failed to load syscall eBPF: {}", e)))?;
+        let (syscall_sk, cgroup_mkdir_loaded) = match syscall_probe_skel.load() {
+            Ok(sk) => (sk, true),
+            Err(e) => {
+                warn!(
+                    error = %e,
+                    "syscall eBPF object failed to load with startup capture; retrying \
+                     without tp_btf/cgroup_mkdir"
+                );
+                let mut fallback = SyscallSkelBuilder::default()
+                    .open(&mut fallback_object)
+                    .map_err(|e| Error::Custom(format!("Failed to open syscall eBPF: {}", e)))?;
+                fallback.progs.trace_cgroup_mkdir.set_autoload(false);
+                let sk = fallback
+                    .load()
+                    .map_err(|e| Error::Custom(format!("Failed to load syscall eBPF: {}", e)))?;
+                (sk, false)
+            }
+        };
 
         // Populate the tier allowlists BEFORE attaching so the very first
         // events are already filtered by tier.
@@ -415,7 +437,16 @@ pub fn ebpf_handle(
             .attach()
             .map_err(|e| Error::Custom(format!("Failed to attach syscall eBPF: {}", e)))?;
         info!("Syscall probe eBPF program loaded and attached");
-        let _cgroup_mkdir_link = match syscall_sk.progs.trace_cgroup_mkdir.attach() {
+        let cgroup_mkdir_attach: Result<_, String> = if cgroup_mkdir_loaded {
+            syscall_sk
+                .progs
+                .trace_cgroup_mkdir
+                .attach()
+                .map_err(|e| e.to_string())
+        } else {
+            Err("program not loaded (see the load warning above)".into())
+        };
+        let _cgroup_mkdir_link = match cgroup_mkdir_attach {
             Ok(link) => {
                 info!(
                     "Startup syscall capture attached (tp_btf/cgroup_mkdir): containers are \
