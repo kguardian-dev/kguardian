@@ -21,17 +21,6 @@ jobs:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
-      - name: Cache Node modules
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
-        with:
-          path: |
-            ~/.npm
-            llm-bridge/node_modules
-          key: ${{ runner.os }}-node-llm-bridge-${{ hashFiles('llm-bridge/package-lock.json') }}
-          restore-keys: |
-            ${{ runner.os }}-node-llm-bridge-
-            ${{ runner.os }}-node-
-
       - name: Set up QEMU
         uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4
         with:
@@ -43,6 +32,7 @@ jobs:
         with:
           install: true
           version: latest
+          cache-binary: false # no shared runner cache in signed release builds
 
       - name: Login to GHCR
         uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4
@@ -69,8 +59,6 @@ jobs:
           tags: |
             ghcr.io/kguardian-dev/kguardian/llm-bridge:${{ steps.extract_tag.outputs.TAG_NAME }}
             ghcr.io/kguardian-dev/kguardian/llm-bridge:latest
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
           # Provenance comes from actions/attest in the sign step below (signed,
           # pushed as a referrer). Buildx's own attestation manifests are
           # unsigned and would add unknown/unknown entries to the index.
