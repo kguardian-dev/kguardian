@@ -228,7 +228,8 @@ chosen by the guard, so a historical row whose peer was that pod renders
 as unattributed rather than being guessed from the IP's current holder.
 Live pods gain `started_at` within a minute, and every flow recorded
 after the upgrade carries its peer identity, so the gap is confined to
-pre-upgrade history and closes as retention removes those rows.
+pre-upgrade history and closes as the pods that recorded it are replaced
+and retention removes their rows (a running pod's rows are never pruned).
 
 Because legacy history is only as good as the guard, **regenerate
 policies after a fresh observation window** rather than from the

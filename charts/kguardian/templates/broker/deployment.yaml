@@ -122,6 +122,26 @@ spec:
               value: {{ .Values.broker.audit.retention.batchSize | quote }}
             {{- end }}
             {{/*
+              pod_traffic retention (values.yaml `broker.traffic.retention`).
+              Same hasKey reasoning as AUDIT_VERDICTS_RETENTION_DAYS above:
+              0 is the documented "disable retention" value. The dict
+              defaults keep an old values file without the block rendering.
+            */}}
+            {{- $traffic := .Values.broker.traffic | default dict }}
+            {{- $trafficRetention := $traffic.retention | default dict }}
+            {{- if hasKey $trafficRetention "days" }}
+            - name: POD_TRAFFIC_RETENTION_DAYS
+              value: {{ $trafficRetention.days | quote }}
+            {{- end }}
+            {{- if hasKey $trafficRetention "intervalSeconds" }}
+            - name: POD_TRAFFIC_RETENTION_INTERVAL_SECS
+              value: {{ $trafficRetention.intervalSeconds | quote }}
+            {{- end }}
+            {{- if hasKey $trafficRetention "batchSize" }}
+            - name: POD_TRAFFIC_RETENTION_BATCH_SIZE
+              value: {{ $trafficRetention.batchSize | quote }}
+            {{- end }}
+            {{/*
               seccomp_denials retention (values.yaml `broker.seccomp.denials.retention`).
               Same hasKey reasoning as AUDIT_VERDICTS_RETENTION_DAYS above:
               `with` treats 0 as falsy, and 0 is the documented

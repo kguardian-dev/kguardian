@@ -619,6 +619,30 @@ broker:
     # more. Clamped to a minimum 50ms broker-side.
     evalTimeoutMs: 500
 
+  traffic:
+    # -- Retention for the `pod_traffic` table, the observed flows every
+    # generated NetworkPolicy is built from. A tokio task in the broker
+    # wakes every `intervalSeconds` and deletes rows older than `days`
+    # whose pod no longer exists: dead, gone from the pod table, or an
+    # earlier pod that held the same name. Rows of running pods are
+    # never pruned, however old. Each flow is recorded once, when first
+    # seen, and a running pod does not report it again, so deleting
+    # those rows would drop rules from the next policy generated for
+    # that pod.
+    retention:
+      # -- Keep traffic of departed pods for this many days. The default
+      # of 14 keeps two runs of a weekly CronJob; raise it for jobs that
+      # run less often than every `days` / 2 days, or their flows can be
+      # gone by the time you generate a policy. Set to 0 to disable
+      # retention entirely (table grows unbounded).
+      days: 14
+      # -- How often the cleanup pass runs, in seconds. Minimum 60.
+      intervalSeconds: 3600
+      # -- Rows examined per batched DELETE (at most this many are
+      # deleted per statement). Same [100, 100000] clamp as
+      # `broker.audit.retention.batchSize`, for the same reason.
+      batchSize: 5000
+
   seccomp:
     # -- Seconds the Broker serves the same rendered `GET /seccomp/profiles`
     # body before rebuilding it from the database. It is the Broker's
@@ -982,8 +1006,10 @@ database:
     # reasoning; the same argument applies to the payload, which is why
     # enabling it should be a deliberate choice rather than a default.
     #
-    # It is also large: with no retention on `pod_traffic` the dump grows
-    # without bound and is emitted as a single burst on every upgrade.
+    # It is also large: `pod_traffic` keeps every flow of every running
+    # pod (only departed pods' traffic is pruned, see
+    # `broker.traffic.retention`), and the whole dump is emitted as a
+    # single burst on every upgrade.
     #
     # Set to true if your log pipeline is an acceptable destination for
     # that data, or prefer a backup that writes somewhere with access
