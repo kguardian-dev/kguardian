@@ -1,5 +1,48 @@
 # Upgrading the kguardian Helm chart
 
+## `pod_traffic` is now pruned for departed pods
+
+Until now nothing ever deleted a `pod_traffic` row. The broker now prunes
+rows older than `broker.traffic.retention.days` (default 14) whose pod no
+longer exists: marked dead, gone from `pod_details`, or an earlier pod
+that held the same name (a recreated StatefulSet pod). Rows of running
+pods are kept however old, because a running pod reports each flow only
+once and would never re-record a pruned one.
+
+Two things still bound a running pod:
+
+- **Superseded rows.** A running pod's row older than `days` is deleted
+  when a newer row of the same pod has the same direction, protocol,
+  port, decision and in-cluster peer (same peer workload, or the same
+  pod/Service name when it has no owner). The newer row keeps the rule.
+  This is what stops a pod called by a CronJob from gaining a row per
+  run. Only `pod` and `service` peers qualify: a `node` peer is rendered
+  as an `ipBlock` for its own IP, and a row with no stored peer identity
+  has nothing to match on.
+- **An opt-in per-pod cap**, `broker.traffic.retention.maxRowsPerPod`
+  (default `0`, off). Over it, the pod's oldest rows with no peer
+  identity (external clients, scanners, unresolved or pre-#1447 rows) are
+  deleted regardless of age, and the broker logs a warning naming the
+  pod. Rows naming an in-cluster peer are never deleted by the cap.
+
+The upgrade adds a partial index, `idx_pod_traffic_supersede`, built at
+broker startup. As with earlier `pod_traffic` index migrations, ingest
+waits for the build; on a table of a few million rows that takes seconds.
+
+**After upgrading the broker:**
+
+1. The first passes work through the backlog, oldest first, 5 000 rows
+   examined per statement and at most 200 statements per hourly pass. A
+   pass that stops at that cap hands its position to the next one, so a
+   large backlog drains over a few hours rather than in one burst. Watch
+   for `pod_traffic retention pruned` in the broker log.
+2. Deleted rows free space inside Postgres for reuse; the files on disk do
+   not shrink. Run `VACUUM FULL pod_traffic` in a maintenance window if
+   you need the disk back.
+3. If you generate policies for CronJobs that run less often than every
+   seven days, raise `broker.traffic.retention.days` to at least twice
+   their period, or set it to `0` to keep the old unbounded behaviour.
+
 ## Peer identity is now fixed when a flow is ingested
 
 `pod_traffic` rows used to store only the peer's IP. The Network Map, the
