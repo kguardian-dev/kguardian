@@ -1,0 +1,138 @@
+---
+title: "Verifying Releases"
+description: "Check that kguardian images and the Helm chart were built by the kguardian release workflows"
+icon: "signature"
+---
+
+Every container image and Helm chart that kguardian releases is signed and
+attested in the GitHub Actions workflow that built it, using Sigstore keyless
+signing. There are no long-lived keys: the signing certificate is issued to
+the release workflow's GitHub OIDC identity and recorded in the public Rekor
+transparency log.
+
+For each release you get:
+
+| What | Covers | Stored |
+| --- | --- | --- |
+| cosign signature | image index and each platform manifest (`--recursive`); the chart manifest | GHCR, next to the artifact |
+| SLSA build provenance (`https://slsa.dev/provenance/v1`) | image index; chart manifest | GHCR (OCI referrer) and the GitHub attestations API |
+| CycloneDX SBOM (`https://cyclonedx.org/bom`) | each platform manifest (`linux/amd64`, `linux/arm64`) | GHCR (OCI referrer) and the GitHub attestations API |
+
+Signing started with the first release of each component published after
+September 2026. Older tags are not signed, and verifying them fails with
+`no signatures found`.
+
+<Note>
+  Everything is bound to a digest. A tag like `:1.18.0` can be moved; the
+  signature and attestations are attached to the digest the tag pointed at when
+  the release workflow pushed it. Pin the digest in your manifests when you rely
+  on these checks.
+</Note>
+
+## Signer identities
+
+The certificate subject is the release workflow file at the release tag:
+
+| Artifact | Repository | Certificate identity |
+| --- | --- | --- |
+| Controller | `ghcr.io/kguardian-dev/kguardian/controller` | `https://github.com/kguardian-dev/kguardian/.github/workflows/controller-release.yaml@refs/tags/controller/vX.Y.Z` |
+| Broker | `ghcr.io/kguardian-dev/kguardian/broker` | `https://github.com/kguardian-dev/kguardian/.github/workflows/broker-release.yaml@refs/tags/broker/vX.Y.Z` |
+| Frontend | `ghcr.io/kguardian-dev/kguardian/frontend` | `https://github.com/kguardian-dev/kguardian/.github/workflows/frontend-release.yaml@refs/tags/frontend/vX.Y.Z` |
+| LLM bridge | `ghcr.io/kguardian-dev/kguardian/llm-bridge` | `https://github.com/kguardian-dev/kguardian/.github/workflows/llm-bridge-release.yaml@refs/tags/llm-bridge/vX.Y.Z` |
+| Evaluator | `ghcr.io/kguardian-dev/kguardian/evaluator` | `https://github.com/kguardian-dev/kguardian/.github/workflows/evaluator-release.yaml@refs/tags/evaluator/vX.Y.Z` |
+| Helm chart | `ghcr.io/kguardian-dev/charts/kguardian` | `https://github.com/kguardian-dev/kguardian/.github/workflows/charts-release.yaml@refs/tags/chart/vX.Y.Z` |
+
+The OIDC issuer is always `https://token.actions.githubusercontent.com`.
+
+One regular expression that accepts any kguardian image release, and nothing
+built from a branch, a pull request, or another repository:
+
+```text
+^https://github\.com/kguardian-dev/kguardian/\.github/workflows/(controller|broker|frontend|llm-bridge|evaluator)-release\.yaml@refs/tags/(controller|broker|frontend|llm-bridge|evaluator)/v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$
+```
+
+For a single component, prefer the narrower form, for example the controller:
+
+```text
+^https://github\.com/kguardian-dev/kguardian/\.github/workflows/controller-release\.yaml@refs/tags/controller/v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$
+```
+
+The same identity and issuer go into admission policies (Kyverno
+`verifyImages`, Sigstore policy-controller `ClusterImagePolicy`) if you want
+the cluster to enforce them.
+
+## Verify a signature with cosign
+
+Requires [cosign](https://docs.sigstore.dev/cosign/system_config/installation/) v3 or later.
+
+```bash
+cosign verify ghcr.io/kguardian-dev/kguardian/controller:<version> \
+  --certificate-identity-regexp '^https://github\.com/kguardian-dev/kguardian/\.github/workflows/controller-release\.yaml@refs/tags/controller/v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$' \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com
+```
+
+cosign resolves the tag to a digest first; pass `image@sha256:...` to check the
+exact digest you deploy. The per-platform manifests are signed too, so the same
+command works against the `linux/amd64` or `linux/arm64` digest your node
+actually pulled.
+
+The Helm chart:
+
+```bash
+cosign verify ghcr.io/kguardian-dev/charts/kguardian:<chart-version> \
+  --certificate-identity-regexp '^https://github\.com/kguardian-dev/kguardian/\.github/workflows/charts-release\.yaml@refs/tags/chart/v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$' \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com
+```
+
+## Verify build provenance with the GitHub CLI
+
+```bash
+gh attestation verify oci://ghcr.io/kguardian-dev/kguardian/controller:<version> \
+  --repo kguardian-dev/kguardian \
+  --signer-workflow kguardian-dev/kguardian/.github/workflows/controller-release.yaml
+```
+
+The default predicate type is SLSA provenance v1. Add `--bundle-from-oci` to
+read the attestation from GHCR instead of the GitHub API, which is useful when
+you mirror the images. Add `--format json` to inspect the source commit,
+workflow run and builder recorded in the provenance.
+
+The same check works for the chart:
+
+```bash
+gh attestation verify oci://ghcr.io/kguardian-dev/charts/kguardian:<chart-version> \
+  --repo kguardian-dev/kguardian \
+  --signer-workflow kguardian-dev/kguardian/.github/workflows/charts-release.yaml
+```
+
+cosign can verify the same attestation:
+
+```bash
+cosign verify-attestation ghcr.io/kguardian-dev/kguardian/controller:<version> \
+  --type https://slsa.dev/provenance/v1 \
+  --certificate-identity-regexp '^https://github\.com/kguardian-dev/kguardian/\.github/workflows/controller-release\.yaml@refs/tags/controller/v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$' \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com
+```
+
+## Verify and read the SBOM
+
+An SBOM describes one filesystem, so it is attached to each platform manifest
+rather than the multi-arch index. Resolve the platform digest first:
+
+```bash
+DIGEST=$(crane digest --platform linux/amd64 ghcr.io/kguardian-dev/kguardian/controller:<version>)
+
+gh attestation verify oci://ghcr.io/kguardian-dev/kguardian/controller@${DIGEST} \
+  --repo kguardian-dev/kguardian \
+  --signer-workflow kguardian-dev/kguardian/.github/workflows/controller-release.yaml \
+  --predicate-type https://cyclonedx.org/bom \
+  --format json --jq '.[0].verificationResult.statement.predicate' > controller-amd64.cdx.json
+```
+
+`docker buildx imagetools inspect <image>:<version>` also lists the platform
+digests if you don't have `crane`. The extracted file is a standard CycloneDX
+JSON document that Grype, Trivy and other scanners read directly, for example
+`grype sbom:controller-amd64.cdx.json`.
+
+The chart has provenance but no SBOM; it contains templates, not software
+packages.
