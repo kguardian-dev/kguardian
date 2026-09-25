@@ -66,6 +66,8 @@ spec:
               value: "http://{{ .Values.broker.service.name }}.{{ include "kguardian.namespace" . }}.svc.cluster.local:{{ .Values.broker.service.port }}"
             - name: BROKER_INGEST_ENABLED
               value: {{ .Values.supplychain.brokerIngest.enabled | quote }}
+            - name: REGISTRY_LOOKUP_ENABLED
+              value: {{ .Values.supplychain.registryLookup.enabled | quote }}
             {{- /*
               TODO(1533): once broker auth scopes land (feat/1533-broker-auth-scopes),
               add the scoped token and the render guard here:

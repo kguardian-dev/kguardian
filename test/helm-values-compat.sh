@@ -478,6 +478,8 @@ render "supplychain-enabled" --set supplychain.enabled=true && {
     { echo "FAIL [supplychain-enabled]: BROKER_INGEST_ENABLED must default to false"; fail=1; }
   grep -A1 'name: TRIVY_OPERATOR_ENABLED' <<<"$OUT" | grep -q 'value: "true"' || \
     { echo "FAIL [supplychain-enabled]: TRIVY_OPERATOR_ENABLED must default to true"; fail=1; }
+  grep -A1 'name: REGISTRY_LOOKUP_ENABLED' <<<"$OUT" | grep -q 'value: "true"' || \
+    { echo "FAIL [supplychain-enabled]: REGISTRY_LOOKUP_ENABLED must render"; fail=1; }
 }
 
 # 10c. The ClusterRole is exactly get/list/watch on the two report resources.

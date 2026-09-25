@@ -1833,6 +1833,16 @@ supplychain:
     # logged only.
     enabled: false
 
+  registryLookup:
+    # -- Ask each image's registry, anonymously, whether the reported digest
+    # is a multi-arch index or a single manifest, and list an index's
+    # platform manifests (digest_kind / platform_manifests in the payload).
+    # Never uses pull secrets or any credential: private images stay
+    # "unknown". This is outbound HTTPS to the registries your running
+    # images came from, cached per digest; set false for air-gapped
+    # clusters or to keep the component API-server-only.
+    enabled: true
+
   # -- List of image pull secrets for private registries
   imagePullSecrets: []
 
