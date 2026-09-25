@@ -56,6 +56,9 @@ With auth on (any `BROKER_TOKEN_*` or `BROKER_AUTH_TOKEN` set), every endpoint e
 | `TELEMETRY_ENDPOINT` | `https://version.kguardian.dev/v1/check` | Check-in endpoint override |
 | `TELEMETRY_INTERVAL_SECS` | `86400` | Check-in cadence (min 3600) |
 | `CHART_VERSION` / `KUBE_VERSION` | unset | Reported in the version check-in |
+| `IMAGE_INVENTORY_RETENTION_DAYS` | `30` | Prune image inventory digests no running pod has refreshed for this long; `0` disables pruning |
+| `IMAGE_INVENTORY_RETENTION_INTERVAL_SECS` | `3600` | Pruner cadence (min 60) |
+| `IMAGE_INVENTORY_RETENTION_BATCH_SIZE` | `5000` | Rows deleted per pruning batch, clamped to [100, 100000] |
 | `RUST_LOG` | `info` | Log level |
 
 PR images (`pr-<N>` tags on GHCR) are multi-arch: each architecture builds

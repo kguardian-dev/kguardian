@@ -14,15 +14,12 @@
 -- and retention.rs prunes rows not refreshed within
 -- IMAGE_INVENTORY_RETENTION_DAYS (default 30).
 --
--- cluster_id: every row is 'primary' until multi-cluster ingest lands.
--- On workload_containers it is part of the key (a workload is per
--- cluster). On images it is NOT: a digest names the same content in any
--- cluster, so the digest alone stays the key and cluster_id records the
--- cluster that last reported it.
+-- cluster_id: 'primary' until multi-cluster ingest lands. It lives on
+-- workload_containers only (a workload is per cluster); a digest names the
+-- same content in every cluster, so `images` is global.
 
 CREATE TABLE IF NOT EXISTS images (
     digest       VARCHAR   PRIMARY KEY,           -- sha256:<hex> / sha512:<hex>
-    cluster_id   VARCHAR   NOT NULL DEFAULT 'primary',
     repository   VARCHAR   NULL,                  -- docker.io/library/nginx
     tags         TEXT[]    NOT NULL DEFAULT '{}', -- every tag seen for it, capped
     -- repo    = status.imageID repo@digest (registry-resolvable)
@@ -34,6 +31,19 @@ CREATE TABLE IF NOT EXISTS images (
 );
 CREATE INDEX IF NOT EXISTS idx_images_last_seen ON images (last_seen);
 
+-- One row per (workload, container, digest). A workload mid-rollout, or a
+-- DaemonSet whose nodes resolved a tag to different digests, runs several
+-- digests for one container at once, and posture must see every one of
+-- them, so the digest is part of the key. A row is only created once the
+-- kubelet (or a spec pin) supplies a digest: a pending container with a
+-- bare image ref never creates one.
+--
+-- "Currently running" = last_seen within image_inventory::RUNNING_WINDOW_SECS.
+-- Every live, ready pod is re-posted by its node's controller at least
+-- every 60 s (resync), and a re-post refreshes last_seen at most every
+-- REFRESH_SECS, so a digest no pod reports any more drops out of the
+-- running set within the window and is pruned by retention after
+-- IMAGE_INVENTORY_RETENTION_DAYS.
 CREATE TABLE IF NOT EXISTS workload_containers (
     cluster_id       VARCHAR   NOT NULL DEFAULT 'primary',
     -- Same (namespace, kind, name) key as workload_syscalls and the
@@ -44,17 +54,17 @@ CREATE TABLE IF NOT EXISTS workload_containers (
     workload_kind    VARCHAR   NOT NULL,
     workload_name    VARCHAR   NOT NULL,
     container_name   VARCHAR   NOT NULL,
+    image_digest     VARCHAR   NOT NULL,
     container_kind   VARCHAR   NOT NULL,          -- init | regular | ephemeral
     image_ref        VARCHAR   NOT NULL,          -- as written in the spec
-    image_digest     VARCHAR   NULL,              -- NULL until the kubelet reports one
     security_context JSONB     NOT NULL DEFAULT '{}'::jsonb,
     pod_security     JSONB     NOT NULL DEFAULT '{}'::jsonb,
-    last_pod_name    VARCHAR   NULL,              -- the pod that last reported it
+    last_pod_name    VARCHAR   NULL,              -- a pod that last reported it
     first_seen       TIMESTAMP NOT NULL DEFAULT (now() AT TIME ZONE 'utc'),
-    updated_at       TIMESTAMP NOT NULL DEFAULT (now() AT TIME ZONE 'utc'),
-    PRIMARY KEY (cluster_id, pod_namespace, workload_kind, workload_name, container_name)
+    last_seen        TIMESTAMP NOT NULL DEFAULT (now() AT TIME ZONE 'utc'),
+    PRIMARY KEY (cluster_id, pod_namespace, workload_kind, workload_name, container_name, image_digest)
 );
 -- "Which workloads run this digest" (GET /images/{digest}, the GC's
 -- NOT EXISTS) and the GC's own scan.
 CREATE INDEX IF NOT EXISTS idx_workload_containers_digest ON workload_containers (image_digest);
-CREATE INDEX IF NOT EXISTS idx_workload_containers_updated_at ON workload_containers (updated_at);
+CREATE INDEX IF NOT EXISTS idx_workload_containers_last_seen ON workload_containers (last_seen);

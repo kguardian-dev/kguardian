@@ -24,14 +24,20 @@
 //!
 //! # Shape and bounds
 //!
-//! - `images`: one row per digest. Growth is O(distinct running images).
+//! - `images`: one row per digest, global (no cluster id: a digest names
+//!   the same content everywhere). Growth is O(distinct images run).
 //! - `workload_containers`: one row per (cluster, namespace, kind, name,
-//!   container). A workload is keyed exactly as `workload_syscalls` and
-//!   the SeccompProfile `workloadRef` are — the controller's owner-ref
-//!   resolution posted as `workload_kind` / `workload_name` — and a pod
-//!   with no owner is keyed `("Pod", pod_name)`.
-//! - Retention (`retention.rs`, "Image inventory") prunes rows not
-//!   refreshed within `IMAGE_INVENTORY_RETENTION_DAYS`.
+//!   container, digest). A workload is keyed exactly as
+//!   `workload_syscalls` and the SeccompProfile `workloadRef` are — the
+//!   controller's owner-ref resolution posted as `workload_kind` /
+//!   `workload_name` — and a pod with no owner is keyed
+//!   `("Pod", pod_name)`. The digest is in the key because a container
+//!   can run several at once (rollout, mixed node images); a row is only
+//!   created once a digest is known. "Running" is defined by
+//!   [`RUNNING_WINDOW_SECS`].
+//! - Retention (`retention.rs`, "Image inventory") prunes digest rows no
+//!   running pod has refreshed within `IMAGE_INVENTORY_RETENTION_DAYS`,
+//!   then images nothing references.
 //! - Re-posts are cheap: the controller re-posts every pod on every
 //!   status change and resync, so both upserts carry a `WHERE` that skips
 //!   the write unless something changed or the row is more than
@@ -45,7 +51,7 @@ use diesel::pg::PgConnection;
 use diesel::prelude::*;
 use diesel::r2d2::{self, ConnectionManager};
 use diesel::sql_query;
-use diesel::sql_types::{Array, BigInt, Jsonb, Nullable, Text, Timestamp};
+use diesel::sql_types::{Array, BigInt, Bool, Double, Jsonb, Nullable, Text, Timestamp};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use tracing::{debug, warn};
@@ -61,6 +67,22 @@ pub const DEFAULT_CLUSTER_ID: &str = "primary";
 /// the retention window is days, so minute-level `last_seen` precision
 /// buys nothing and would cost one write per pod per resync.
 pub const REFRESH_SECS: i64 = 300;
+
+/// A (workload, container, digest) row counts as RUNNING while its
+/// `last_seen` is within this window.
+///
+/// Why a freshness window and not a join to live `pod_details` rows: a
+/// row records only the pod that last refreshed it, not every replica,
+/// so "that pod is alive" is neither necessary nor sufficient. What IS
+/// guaranteed is the refresh cadence: the controller re-posts every live,
+/// ready pod on its node at least every 60 s (resync), and a re-post
+/// refreshes `last_seen` whenever it is older than [`REFRESH_SECS`]. A
+/// running digest is therefore never more than ~6 minutes stale; three
+/// refresh periods leave room for a missed resync or a controller
+/// restart. The cost is that a digest keeps reading as running for up to
+/// this long after its last pod goes (end of a rollout), and a pod that
+/// stays not-Ready (which the controller does not re-post) drops out.
+pub const RUNNING_WINDOW_SECS: i64 = 3 * REFRESH_SECS;
 
 /// Containers accepted per pod. Matches the controller's own cap.
 pub const MAX_CONTAINERS_PER_POD: usize = 64;
@@ -423,62 +445,65 @@ pub fn inventory_from_post(
 /// refreshed within [`REFRESH_SECS`]: tags only grow (until the cap),
 /// repository only fills in, and `digest_kind` only moves towards `repo`.
 pub(crate) const IMAGE_UPSERT_SQL: &str = "\
-INSERT INTO images (digest, cluster_id, repository, tags, digest_kind, first_seen, last_seen) \
-VALUES ($1, $2, $3, $4, $5, timezone('UTC', NOW()), timezone('UTC', NOW())) \
+INSERT INTO images (digest, repository, tags, digest_kind, first_seen, last_seen) \
+VALUES ($1, $2, $3, $4, timezone('UTC', NOW()), timezone('UTC', NOW())) \
 ON CONFLICT (digest) DO UPDATE SET \
-    cluster_id = EXCLUDED.cluster_id, \
     repository = COALESCE(images.repository, EXCLUDED.repository), \
     tags = (SELECT COALESCE(array_agg(t ORDER BY t), '{}'::text[]) FROM ( \
         SELECT t FROM (SELECT DISTINCT unnest(images.tags || EXCLUDED.tags) AS t) d \
-        ORDER BY (t = ANY(images.tags)) DESC, t LIMIT $6) s), \
+        ORDER BY (t = ANY(images.tags)) DESC, t LIMIT $5) s), \
     digest_kind = CASE \
         WHEN EXCLUDED.digest_kind = 'repo' OR images.digest_kind = 'repo' THEN 'repo' \
         WHEN EXCLUDED.digest_kind = 'config' OR images.digest_kind = 'config' THEN 'config' \
         ELSE images.digest_kind END, \
     last_seen = GREATEST(images.last_seen, EXCLUDED.last_seen) \
-WHERE images.last_seen < EXCLUDED.last_seen - make_interval(secs => $7) \
-   OR (NOT (EXCLUDED.tags <@ images.tags) AND cardinality(images.tags) < $6) \
+WHERE images.last_seen < EXCLUDED.last_seen - make_interval(secs => $6) \
+   OR (NOT (EXCLUDED.tags <@ images.tags) AND cardinality(images.tags) < $5) \
    OR (images.repository IS NULL AND EXCLUDED.repository IS NOT NULL) \
    OR (images.digest_kind <> 'repo' AND EXCLUDED.digest_kind = 'repo') \
    OR (images.digest_kind = 'pinned' AND EXCLUDED.digest_kind = 'config')";
 
-/// Upsert one workload container.
+/// Upsert one (workload, container, digest) sighting.
 ///
-/// `image_digest`: a re-post with no digest (the replacement pod is still
-/// pulling) keeps the stored digest as long as the image reference is
-/// unchanged, so a restart does not blank a known digest. A changed
-/// reference takes the new value, NULL included — the old digest no
-/// longer describes the container.
-///
-/// Last writer wins across replicas. Mid-rollout, old and new pods of one
-/// workload both post, so the row follows whichever posted last until
-/// the rollout completes; that is the cost of the one-row-per-container
-/// key.
+/// The digest is part of the key, so a workload running several digests
+/// for one container at once — mid-rollout, or a DaemonSet whose nodes
+/// resolved a tag differently — keeps one row per digest, each refreshed
+/// by the pods that run it. The `WHERE` skips the write unless something
+/// about the row changed or it is more than [`REFRESH_SECS`] old;
+/// `last_pod_name` alone never forces a write, so replicas sharing a
+/// digest do not take turns rewriting it.
 pub(crate) const CONTAINER_UPSERT_SQL: &str = "\
 INSERT INTO workload_containers (cluster_id, pod_namespace, workload_kind, workload_name, \
-    container_name, container_kind, image_ref, image_digest, security_context, pod_security, \
-    last_pod_name, first_seen, updated_at) \
+    container_name, image_digest, container_kind, image_ref, security_context, pod_security, \
+    last_pod_name, first_seen, last_seen) \
 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, \
     timezone('UTC', NOW()), timezone('UTC', NOW())) \
-ON CONFLICT (cluster_id, pod_namespace, workload_kind, workload_name, container_name) \
+ON CONFLICT (cluster_id, pod_namespace, workload_kind, workload_name, container_name, image_digest) \
 DO UPDATE SET \
     container_kind = EXCLUDED.container_kind, \
     image_ref = EXCLUDED.image_ref, \
-    image_digest = CASE \
-        WHEN EXCLUDED.image_digest IS NULL AND EXCLUDED.image_ref = workload_containers.image_ref \
-        THEN workload_containers.image_digest \
-        ELSE EXCLUDED.image_digest END, \
     security_context = EXCLUDED.security_context, \
     pod_security = EXCLUDED.pod_security, \
     last_pod_name = EXCLUDED.last_pod_name, \
-    updated_at = EXCLUDED.updated_at \
-WHERE workload_containers.updated_at < EXCLUDED.updated_at - make_interval(secs => $12) \
+    last_seen = EXCLUDED.last_seen \
+WHERE workload_containers.last_seen < EXCLUDED.last_seen - make_interval(secs => $12) \
    OR workload_containers.container_kind IS DISTINCT FROM EXCLUDED.container_kind \
    OR workload_containers.image_ref IS DISTINCT FROM EXCLUDED.image_ref \
-   OR (EXCLUDED.image_digest IS NOT NULL \
-       AND workload_containers.image_digest IS DISTINCT FROM EXCLUDED.image_digest) \
    OR workload_containers.security_context IS DISTINCT FROM EXCLUDED.security_context \
    OR workload_containers.pod_security IS DISTINCT FROM EXCLUDED.pod_security";
+
+/// A container reported with an image ref but no digest yet — the pod is
+/// (re)starting and the kubelet has not resolved one. It never creates a
+/// row (that would be a phantom: no digest is known to run). If the same
+/// ref already has a known digest for this container, that row is kept
+/// alive, as a restart of the same image deserves; a new ref gets its row
+/// once the digest arrives.
+pub(crate) const CONTAINER_REFRESH_SQL: &str = "\
+UPDATE workload_containers SET \
+    last_seen = timezone('UTC', NOW()), last_pod_name = $7 \
+WHERE cluster_id = $1 AND pod_namespace = $2 AND workload_kind = $3 AND workload_name = $4 \
+  AND container_name = $5 AND image_ref = $6 \
+  AND last_seen < timezone('UTC', NOW()) - make_interval(secs => $8)";
 
 /// Write one post's inventory in a single transaction. Returns the number
 /// of rows actually written (inserted or changed); a steady-state re-post
@@ -492,7 +517,6 @@ pub fn upsert_inventory(conn: &mut PgConnection, inv: &Inventory) -> Result<usiz
         for img in &inv.images {
             n += sql_query(IMAGE_UPSERT_SQL)
                 .bind::<Text, _>(&img.digest)
-                .bind::<Text, _>(DEFAULT_CLUSTER_ID)
                 .bind::<Nullable<Text>, _>(img.repository.as_deref())
                 .bind::<Array<Text>, _>(&img.tags)
                 .bind::<Text, _>(&img.digest_kind)
@@ -501,20 +525,32 @@ pub fn upsert_inventory(conn: &mut PgConnection, inv: &Inventory) -> Result<usiz
                 .execute(conn)?;
         }
         for c in &inv.containers {
-            n += sql_query(CONTAINER_UPSERT_SQL)
-                .bind::<Text, _>(&c.cluster_id)
-                .bind::<Text, _>(&c.namespace)
-                .bind::<Text, _>(&c.workload_kind)
-                .bind::<Text, _>(&c.workload_name)
-                .bind::<Text, _>(&c.container_name)
-                .bind::<Text, _>(&c.container_kind)
-                .bind::<Text, _>(&c.image_ref)
-                .bind::<Nullable<Text>, _>(c.image_digest.as_deref())
-                .bind::<Jsonb, _>(&c.security_context)
-                .bind::<Jsonb, _>(&c.pod_security)
-                .bind::<Text, _>(&c.last_pod_name)
-                .bind::<diesel::sql_types::Double, _>(REFRESH_SECS as f64)
-                .execute(conn)?;
+            n += match c.image_digest.as_deref() {
+                Some(digest) => sql_query(CONTAINER_UPSERT_SQL)
+                    .bind::<Text, _>(&c.cluster_id)
+                    .bind::<Text, _>(&c.namespace)
+                    .bind::<Text, _>(&c.workload_kind)
+                    .bind::<Text, _>(&c.workload_name)
+                    .bind::<Text, _>(&c.container_name)
+                    .bind::<Text, _>(digest)
+                    .bind::<Text, _>(&c.container_kind)
+                    .bind::<Text, _>(&c.image_ref)
+                    .bind::<Jsonb, _>(&c.security_context)
+                    .bind::<Jsonb, _>(&c.pod_security)
+                    .bind::<Text, _>(&c.last_pod_name)
+                    .bind::<diesel::sql_types::Double, _>(REFRESH_SECS as f64)
+                    .execute(conn)?,
+                None => sql_query(CONTAINER_REFRESH_SQL)
+                    .bind::<Text, _>(&c.cluster_id)
+                    .bind::<Text, _>(&c.namespace)
+                    .bind::<Text, _>(&c.workload_kind)
+                    .bind::<Text, _>(&c.workload_name)
+                    .bind::<Text, _>(&c.container_name)
+                    .bind::<Text, _>(&c.image_ref)
+                    .bind::<Text, _>(&c.last_pod_name)
+                    .bind::<diesel::sql_types::Double, _>(REFRESH_SECS as f64)
+                    .execute(conn)?,
+            };
         }
         Ok(n)
     })?;
@@ -575,8 +611,6 @@ pub struct ImagesQuery {
 pub struct ImageSummary {
     #[diesel(sql_type = Text)]
     pub digest: String,
-    #[diesel(sql_type = Text)]
-    pub cluster_id: String,
     #[diesel(sql_type = Nullable<Text>)]
     pub repository: Option<String>,
     #[diesel(sql_type = Array<Text>)]
@@ -587,9 +621,11 @@ pub struct ImageSummary {
     pub first_seen: NaiveDateTime,
     #[diesel(sql_type = Timestamp)]
     pub last_seen: NaiveDateTime,
-    /// Workload containers currently recorded as running this digest.
+    /// Workload containers running this digest now (refreshed within
+    /// [`RUNNING_WINDOW_SECS`]). 0 = no longer running; kept until
+    /// retention prunes it.
     #[diesel(sql_type = BigInt)]
-    pub workload_count: i64,
+    pub running_containers: i64,
 }
 
 #[derive(Debug, Serialize)]
@@ -601,8 +637,10 @@ pub struct ImagePage {
 }
 
 const IMAGES_LIST_SQL: &str = "\
-SELECT i.digest, i.cluster_id, i.repository, i.tags, i.digest_kind, i.first_seen, i.last_seen, \
-    (SELECT count(*) FROM workload_containers wc WHERE wc.image_digest = i.digest) AS workload_count \
+SELECT i.digest, i.repository, i.tags, i.digest_kind, i.first_seen, i.last_seen, \
+    (SELECT count(*) FROM workload_containers wc WHERE wc.image_digest = i.digest \
+        AND wc.last_seen >= timezone('UTC', NOW()) - make_interval(secs => $5)) \
+        AS running_containers \
 FROM images i \
 WHERE ($1::text IS NULL OR i.digest > $1) \
   AND ($2::text IS NULL OR EXISTS (SELECT 1 FROM workload_containers wc \
@@ -623,6 +661,7 @@ pub fn list_images(
         .bind::<Nullable<Text>, _>(namespace)
         .bind::<Nullable<Text>, _>(repository)
         .bind::<BigInt, _>(limit + 1)
+        .bind::<Double, _>(RUNNING_WINDOW_SECS as f64)
         .load(conn)?;
     let next_after = if items.len() as i64 > limit {
         items.truncate(limit as usize);
@@ -673,31 +712,10 @@ pub async fn get_images(
 }
 
 #[derive(Debug, Clone, Queryable, Selectable, Serialize)]
-#[diesel(table_name = schema::workload_containers)]
-#[serde(rename_all = "camelCase")]
-pub struct WorkloadContainer {
-    pub cluster_id: String,
-    #[serde(rename = "namespace")]
-    pub pod_namespace: String,
-    pub workload_kind: String,
-    pub workload_name: String,
-    pub container_name: String,
-    pub container_kind: String,
-    pub image_ref: String,
-    pub image_digest: Option<String>,
-    pub security_context: serde_json::Value,
-    pub pod_security: serde_json::Value,
-    pub last_pod_name: Option<String>,
-    pub first_seen: NaiveDateTime,
-    pub updated_at: NaiveDateTime,
-}
-
-#[derive(Debug, Clone, Queryable, Selectable, Serialize)]
 #[diesel(table_name = schema::images)]
 #[serde(rename_all = "camelCase")]
 pub struct Image {
     pub digest: String,
-    pub cluster_id: String,
     pub repository: Option<String>,
     pub tags: Vec<String>,
     pub digest_kind: String,
@@ -705,19 +723,32 @@ pub struct Image {
     pub last_seen: NaiveDateTime,
 }
 
-/// A workload container that runs an image, without the posture blobs
-/// (those are on `GET /workloads/.../containers`).
-#[derive(Debug, Clone, Queryable, Serialize)]
+/// A workload container that runs (or ran) an image, without the posture
+/// blobs (those are on `GET /workloads/.../containers`).
+#[derive(Debug, Clone, QueryableByName, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ImageUser {
+    #[diesel(sql_type = Text)]
     pub cluster_id: String,
+    #[diesel(sql_type = Text)]
     pub namespace: String,
+    #[diesel(sql_type = Text)]
     pub workload_kind: String,
+    #[diesel(sql_type = Text)]
     pub workload_name: String,
+    #[diesel(sql_type = Text)]
     pub container_name: String,
+    #[diesel(sql_type = Text)]
     pub container_kind: String,
+    #[diesel(sql_type = Text)]
     pub image_ref: String,
-    pub updated_at: NaiveDateTime,
+    #[diesel(sql_type = Timestamp)]
+    pub first_seen: NaiveDateTime,
+    #[diesel(sql_type = Timestamp)]
+    pub last_seen: NaiveDateTime,
+    /// Refreshed within [`RUNNING_WINDOW_SECS`].
+    #[diesel(sql_type = Bool)]
+    pub running: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -725,14 +756,22 @@ pub struct ImageUser {
 pub struct ImageDetail {
     #[serde(flatten)]
     pub image: Image,
+    /// Running rows first, then most recently seen.
     pub workloads: Vec<ImageUser>,
-    /// More than [`IMAGE_WORKLOADS_MAX`] workload containers run it.
+    /// More than [`IMAGE_WORKLOADS_MAX`] workload containers reference it.
     pub truncated: bool,
 }
 
+const IMAGE_USERS_SQL: &str = "\
+SELECT cluster_id, pod_namespace AS namespace, workload_kind, workload_name, container_name, \
+    container_kind, image_ref, first_seen, last_seen, \
+    (last_seen >= timezone('UTC', NOW()) - make_interval(secs => $2)) AS running \
+FROM workload_containers WHERE image_digest = $1 \
+ORDER BY running DESC, pod_namespace, workload_kind, workload_name, container_name \
+LIMIT $3";
+
 pub fn image_detail(conn: &mut PgConnection, d: &str) -> Result<Option<ImageDetail>, DbError> {
     use schema::images::dsl as im;
-    use schema::workload_containers::dsl as wc;
     let Some(image) = im::images
         .find(d)
         .select(Image::as_select())
@@ -741,25 +780,10 @@ pub fn image_detail(conn: &mut PgConnection, d: &str) -> Result<Option<ImageDeta
     else {
         return Ok(None);
     };
-    let mut workloads: Vec<ImageUser> = wc::workload_containers
-        .filter(wc::image_digest.eq(d))
-        .order((
-            wc::pod_namespace.asc(),
-            wc::workload_kind.asc(),
-            wc::workload_name.asc(),
-            wc::container_name.asc(),
-        ))
-        .select((
-            wc::cluster_id,
-            wc::pod_namespace,
-            wc::workload_kind,
-            wc::workload_name,
-            wc::container_name,
-            wc::container_kind,
-            wc::image_ref,
-            wc::updated_at,
-        ))
-        .limit(IMAGE_WORKLOADS_MAX + 1)
+    let mut workloads: Vec<ImageUser> = sql_query(IMAGE_USERS_SQL)
+        .bind::<Text, _>(d)
+        .bind::<Double, _>(RUNNING_WINDOW_SECS as f64)
+        .bind::<BigInt, _>(IMAGE_WORKLOADS_MAX + 1)
         .load(conn)?;
     let truncated = workloads.len() as i64 > IMAGE_WORKLOADS_MAX;
     workloads.truncate(IMAGE_WORKLOADS_MAX as usize);
@@ -804,16 +828,122 @@ pub async fn get_image(
     })
 }
 
+/// One `workload_containers` row as read for the workload view.
+#[derive(Debug, Clone, QueryableByName)]
+struct ContainerDigestRow {
+    #[diesel(sql_type = Text)]
+    cluster_id: String,
+    #[diesel(sql_type = Text)]
+    container_name: String,
+    #[diesel(sql_type = Text)]
+    container_kind: String,
+    #[diesel(sql_type = Text)]
+    image_digest: String,
+    #[diesel(sql_type = Text)]
+    image_ref: String,
+    #[diesel(sql_type = Jsonb)]
+    security_context: serde_json::Value,
+    #[diesel(sql_type = Jsonb)]
+    pod_security: serde_json::Value,
+    #[diesel(sql_type = Nullable<Text>)]
+    last_pod_name: Option<String>,
+    #[diesel(sql_type = Timestamp)]
+    first_seen: NaiveDateTime,
+    #[diesel(sql_type = Timestamp)]
+    last_seen: NaiveDateTime,
+    #[diesel(sql_type = Bool)]
+    running: bool,
+}
+
+/// One digest a container runs (or ran).
+#[derive(Debug, Clone, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ContainerDigest {
+    pub digest: String,
+    pub image_ref: String,
+    pub security_context: serde_json::Value,
+    pub pod_security: serde_json::Value,
+    pub last_pod_name: Option<String>,
+    pub first_seen: NaiveDateTime,
+    pub last_seen: NaiveDateTime,
+}
+
+/// One container of a workload, with every digest it runs.
+#[derive(Debug, Clone, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ContainerImages {
+    pub cluster_id: String,
+    pub container_name: String,
+    pub container_kind: String,
+    /// More than one digest running at once: a rollout in progress, or
+    /// nodes that resolved the same tag to different images.
+    pub mixed_digests: bool,
+    /// Digests refreshed within [`RUNNING_WINDOW_SECS`], newest first.
+    pub digests: Vec<ContainerDigest>,
+    /// Digests no pod has reported within the window, kept until
+    /// retention prunes them (`IMAGE_INVENTORY_RETENTION_DAYS`).
+    pub previous_digests: Vec<ContainerDigest>,
+}
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WorkloadContainers {
     pub namespace: String,
     pub kind: String,
     pub name: String,
-    pub containers: Vec<WorkloadContainer>,
-    /// More than [`WORKLOAD_CONTAINERS_MAX`] rows (container names that
-    /// changed across versions linger until retention prunes them).
+    /// The freshness window that defines "running", in seconds.
+    pub running_window_seconds: i64,
+    pub containers: Vec<ContainerImages>,
+    /// More than [`WORKLOAD_CONTAINERS_MAX`] (container, digest) rows.
     pub truncated: bool,
+}
+
+const WORKLOAD_CONTAINERS_SQL: &str = "\
+SELECT cluster_id, container_name, container_kind, image_digest, image_ref, security_context, \
+    pod_security, last_pod_name, first_seen, last_seen, \
+    (last_seen >= timezone('UTC', NOW()) - make_interval(secs => $4)) AS running \
+FROM workload_containers \
+WHERE pod_namespace = $1 AND workload_kind = $2 AND workload_name = $3 \
+ORDER BY cluster_id, container_name, last_seen DESC, image_digest \
+LIMIT $5";
+
+/// Group rows (already ordered by cluster, container, newest first) per
+/// container. Pure, so the grouping is unit-tested without a database.
+fn group_containers(rows: Vec<ContainerDigestRow>) -> Vec<ContainerImages> {
+    let mut out: Vec<ContainerImages> = Vec::new();
+    for r in rows {
+        let d = ContainerDigest {
+            digest: r.image_digest,
+            image_ref: r.image_ref,
+            security_context: r.security_context,
+            pod_security: r.pod_security,
+            last_pod_name: r.last_pod_name,
+            first_seen: r.first_seen,
+            last_seen: r.last_seen,
+        };
+        let same = out
+            .last()
+            .is_some_and(|c| c.cluster_id == r.cluster_id && c.container_name == r.container_name);
+        if !same {
+            out.push(ContainerImages {
+                cluster_id: r.cluster_id,
+                container_name: r.container_name,
+                // Newest row first, so this is the current kind.
+                container_kind: r.container_kind,
+                mixed_digests: false,
+                digests: Vec::new(),
+                previous_digests: Vec::new(),
+            });
+        }
+        let c = out.last_mut().expect("pushed above");
+        if r.running {
+            c.digests.push(d);
+        } else {
+            c.previous_digests.push(d);
+        }
+        c.mixed_digests = c.digests.len() > 1;
+    }
+    out
 }
 
 pub fn workload_containers(
@@ -822,18 +952,12 @@ pub fn workload_containers(
     kind: &str,
     name: &str,
 ) -> Result<WorkloadContainers, DbError> {
-    use schema::workload_containers::dsl as wc;
-    let mut rows: Vec<WorkloadContainer> = wc::workload_containers
-        .filter(wc::pod_namespace.eq(ns))
-        .filter(wc::workload_kind.eq(kind))
-        .filter(wc::workload_name.eq(name))
-        .order((
-            wc::cluster_id.asc(),
-            wc::container_kind.asc(),
-            wc::container_name.asc(),
-        ))
-        .select(WorkloadContainer::as_select())
-        .limit(WORKLOAD_CONTAINERS_MAX + 1)
+    let mut rows: Vec<ContainerDigestRow> = sql_query(WORKLOAD_CONTAINERS_SQL)
+        .bind::<Text, _>(ns)
+        .bind::<Text, _>(kind)
+        .bind::<Text, _>(name)
+        .bind::<Double, _>(RUNNING_WINDOW_SECS as f64)
+        .bind::<BigInt, _>(WORKLOAD_CONTAINERS_MAX + 1)
         .load(conn)?;
     let truncated = rows.len() as i64 > WORKLOAD_CONTAINERS_MAX;
     rows.truncate(WORKLOAD_CONTAINERS_MAX as usize);
@@ -841,7 +965,8 @@ pub fn workload_containers(
         namespace: ns.to_string(),
         kind: kind.to_string(),
         name: name.to_string(),
-        containers: rows,
+        running_window_seconds: RUNNING_WINDOW_SECS,
+        containers: group_containers(rows),
         truncated,
     })
 }
@@ -1096,6 +1221,43 @@ mod tests {
         assert_eq!(clamp_images_limit(Some(42)), 42);
     }
 
+    fn digest_row(container: &str, digest: &str, running: bool) -> ContainerDigestRow {
+        ContainerDigestRow {
+            cluster_id: "primary".into(),
+            container_name: container.into(),
+            container_kind: "regular".into(),
+            image_digest: digest.into(),
+            image_ref: "r:1".into(),
+            security_context: json!({}),
+            pod_security: json!({}),
+            last_pod_name: None,
+            first_seen: NaiveDateTime::default(),
+            last_seen: NaiveDateTime::default(),
+            running,
+        }
+    }
+
+    #[test]
+    fn grouping_flags_mixed_digests_and_splits_previous() {
+        let groups = group_containers(vec![
+            digest_row("app", D, true),
+            digest_row("app", D2, true),
+            digest_row("app", "sha256:old", false),
+            digest_row("side", D, true),
+            digest_row("gone", D2, false),
+        ]);
+        assert_eq!(groups.len(), 3);
+        assert!(groups[0].mixed_digests);
+        assert_eq!(groups[0].digests.len(), 2);
+        assert_eq!(groups[0].previous_digests.len(), 1);
+        assert!(!groups[1].mixed_digests);
+        assert_eq!(groups[1].digests.len(), 1);
+        // A container nothing runs any more: no current digests, not mixed.
+        assert!(!groups[2].mixed_digests);
+        assert!(groups[2].digests.is_empty());
+        assert_eq!(groups[2].previous_digests.len(), 1);
+    }
+
     // ---- live database ------------------------------------------------
     //
     // Same gate as the other live tests: ignored by default, run by CI's
@@ -1127,6 +1289,23 @@ mod tests {
         .expect("age rows");
     }
 
+    fn app_group(conn: &mut PgConnection) -> ContainerImages {
+        workload_containers(conn, "prod", "Deployment", "web")
+            .unwrap()
+            .containers
+            .into_iter()
+            .find(|c| c.container_name == "app")
+            .expect("app container")
+    }
+
+    fn row_count(conn: &mut PgConnection) -> i64 {
+        use schema::workload_containers::dsl as wc;
+        wc::workload_containers
+            .count()
+            .get_result(conn)
+            .expect("count")
+    }
+
     #[test]
     #[ignore = "requires a live postgres (set KG_TEST_DATABASE_URL)"]
     fn live_database_upsert_is_idempotent_and_merges() {
@@ -1134,8 +1313,10 @@ mod tests {
         let p = pod(Some("prod"), Some("Deployment"), Some("web"));
         let inv = inventory_from_post(&p, Some(&containers()), None);
 
-        // First post writes 2 images + 4 containers.
-        assert_eq!(upsert_inventory(&mut conn, &inv).unwrap(), 6);
+        // First post writes 2 images + 3 container rows. `debug` has no
+        // digest, so it creates no row.
+        assert_eq!(upsert_inventory(&mut conn, &inv).unwrap(), 5);
+        assert_eq!(row_count(&mut conn), 3);
         // The identical re-post (every resync does this) writes nothing.
         assert_eq!(upsert_inventory(&mut conn, &inv).unwrap(), 0);
         assert_eq!(upsert_inventory(&mut conn, &inv).unwrap(), 0);
@@ -1144,52 +1325,114 @@ mod tests {
         assert_eq!(page.items.len(), 2);
         assert_eq!(page.next_after, None);
         let nginx = page.items.iter().find(|i| i.digest == D).unwrap();
-        assert_eq!(nginx.workload_count, 2);
+        assert_eq!(nginx.running_containers, 2);
         assert_eq!(nginx.tags, vec!["1.27", "stable"]);
         assert_eq!(nginx.digest_kind, "repo");
 
-        // A new tag for a known digest merges into the row.
+        // A new tag for a known digest merges into the image row; the
+        // container row for (app, D) is updated in place (new ref).
         let more = json!([{"name": "app", "kind": "regular", "image": "nginx:mainline",
             "digest": D, "digest_kind": "repo", "tag": "mainline"}]);
         let inv2 = inventory_from_post(&p, Some(&more), None);
         assert_eq!(upsert_inventory(&mut conn, &inv2).unwrap(), 2);
         let d = image_detail(&mut conn, D).unwrap().unwrap();
         assert_eq!(d.image.tags, vec!["1.27", "mainline", "stable"]);
+        assert_eq!(row_count(&mut conn), 3);
 
-        // A restart with no digest yet keeps the known digest when the ref
-        // is unchanged...
+        // A restart with no digest yet creates no phantom row and keeps
+        // the known digest for the same ref alive...
+        age(
+            &mut conn,
+            "workload_containers",
+            "last_seen",
+            REFRESH_SECS * 2,
+        );
         let pending = json!([{"name": "app", "kind": "regular", "image": "nginx:mainline"}]);
         let inv3 = inventory_from_post(&p, Some(&pending), None);
-        assert_eq!(upsert_inventory(&mut conn, &inv3).unwrap(), 0);
-        let wc = workload_containers(&mut conn, "prod", "Deployment", "web").unwrap();
-        let app = wc
-            .containers
-            .iter()
-            .find(|c| c.container_name == "app")
-            .unwrap();
-        assert_eq!(app.image_digest.as_deref(), Some(D));
-        // ...and a changed ref with no digest clears it.
+        assert_eq!(upsert_inventory(&mut conn, &inv3).unwrap(), 1);
+        assert_eq!(row_count(&mut conn), 3);
+        let app = app_group(&mut conn);
+        assert_eq!(app.digests.len(), 1);
+        assert_eq!(app.digests[0].digest, D);
+        // ...while a new ref with no digest yet writes nothing at all.
         let rollout = json!([{"name": "app", "kind": "regular", "image": "nginx:1.28"}]);
         let inv4 = inventory_from_post(&p, Some(&rollout), None);
-        assert_eq!(upsert_inventory(&mut conn, &inv4).unwrap(), 1);
-        let wc = workload_containers(&mut conn, "prod", "Deployment", "web").unwrap();
-        let app = wc
-            .containers
-            .iter()
-            .find(|c| c.container_name == "app")
-            .unwrap();
-        assert_eq!(app.image_digest, None);
-        assert_eq!(app.image_ref, "nginx:1.28");
+        assert_eq!(upsert_inventory(&mut conn, &inv4).unwrap(), 0);
+        assert_eq!(row_count(&mut conn), 3);
 
         // A stale row is refreshed even when nothing changed.
         age(
             &mut conn,
             "workload_containers",
-            "updated_at",
+            "last_seen",
             REFRESH_SECS * 2,
         );
         age(&mut conn, "images", "last_seen", REFRESH_SECS * 2);
-        assert_eq!(upsert_inventory(&mut conn, &inv).unwrap(), 6);
+        assert_eq!(upsert_inventory(&mut conn, &inv).unwrap(), 5);
+    }
+
+    #[test]
+    #[ignore = "requires a live postgres (set KG_TEST_DATABASE_URL)"]
+    fn live_database_mixed_digest_rollout() {
+        let mut conn = live_conn();
+        let post = |conn: &mut PgConnection, pod_name: &str, image: &str, digest: &str| {
+            let mut p = pod(Some("prod"), Some("Deployment"), Some("web"));
+            p.pod_name = pod_name.to_string();
+            let list = json!([{"name": "app", "kind": "regular", "image": image,
+                "digest": digest, "digest_kind": "repo", "repository": "docker.io/library/nginx"}]);
+            upsert_inventory(conn, &inventory_from_post(&p, Some(&list), None)).unwrap()
+        };
+
+        // Steady state on D.
+        post(&mut conn, "web-old-1", "nginx:1.27", D);
+        let app = app_group(&mut conn);
+        assert!(!app.mixed_digests);
+        assert_eq!(app.digests.len(), 1);
+
+        // Rollout: a new pod on D2 while old pods still run D. Old and new
+        // posts interleave; neither overwrites the other.
+        post(&mut conn, "web-new-1", "nginx:1.28", D2);
+        post(&mut conn, "web-old-2", "nginx:1.27", D);
+        post(&mut conn, "web-new-2", "nginx:1.28", D2);
+        assert_eq!(row_count(&mut conn), 2);
+        let app = app_group(&mut conn);
+        assert!(app.mixed_digests, "two digests running at once");
+        let mut running: Vec<_> = app.digests.iter().map(|d| d.digest.as_str()).collect();
+        running.sort();
+        assert_eq!(running, vec![D, D2]);
+        let refs: BTreeSet<_> = app.digests.iter().map(|d| d.image_ref.as_str()).collect();
+        assert_eq!(refs, BTreeSet::from(["nginx:1.27", "nginx:1.28"]));
+        // Both images read as in use.
+        for d in [D, D2] {
+            let detail = image_detail(&mut conn, d).unwrap().unwrap();
+            assert_eq!(detail.workloads.len(), 1);
+            assert!(detail.workloads[0].running);
+        }
+
+        // Rollout done: the old pods are gone, so nothing refreshes D.
+        // Once its row falls out of the running window it moves to
+        // previousDigests and the container is no longer mixed.
+        use diesel::connection::SimpleConnection;
+        conn.batch_execute(&format!(
+            "UPDATE workload_containers SET last_seen = timezone('UTC', NOW()) \
+               - INTERVAL '{} seconds' WHERE image_digest = '{D}'",
+            RUNNING_WINDOW_SECS + 60
+        ))
+        .unwrap();
+        post(&mut conn, "web-new-1", "nginx:1.28", D2);
+        let app = app_group(&mut conn);
+        assert!(!app.mixed_digests);
+        assert_eq!(app.digests.len(), 1);
+        assert_eq!(app.digests[0].digest, D2);
+        assert_eq!(app.previous_digests.len(), 1);
+        assert_eq!(app.previous_digests[0].digest, D);
+        let old = list_images(&mut conn, None, None, None, 10)
+            .unwrap()
+            .items
+            .into_iter()
+            .find(|i| i.digest == D)
+            .unwrap();
+        assert_eq!(old.running_containers, 0);
     }
 
     #[test]

@@ -1723,10 +1723,12 @@ fn retention_batch_size() -> i64 {
 // Image inventory (#1533)
 // ---------------------------------------------------------------------
 //
-// `workload_containers` rows are refreshed (at most every
-// image_inventory::REFRESH_SECS) by every /pod/spec post of a live pod,
-// so a row that has not been refreshed for the window belongs to a
-// workload, or a container name, that no longer runs. `images` rows are
+// `workload_containers` rows are keyed per digest and refreshed (at most
+// every image_inventory::REFRESH_SECS) by every /pod/spec post of a live
+// pod running that digest, so a row not refreshed for the window is a
+// digest no running pod has reported: a finished rollout's old image, a
+// deleted workload, a renamed container. It is pruned even while its
+// workload keeps running other digests. `images` rows are
 // pruned once they are both stale and referenced by no
 // `workload_containers` row — in that order, so one pass can retire a
 // deleted workload's container rows and then the digests they held.
@@ -1762,19 +1764,20 @@ fn image_inventory_batch_size() -> i64 {
         .unwrap_or(DEFAULT_BATCH_SIZE)
 }
 
-/// Batched prune of container rows not refreshed within the window.
-/// Deletes by primary key; oldest first.
+/// Batched prune of (workload, container, digest) rows no running pod has
+/// refreshed within the window. Deletes by primary key; oldest first.
 pub(crate) const WORKLOAD_CONTAINERS_PRUNE_SQL: &str = "WITH expired AS (\
-         SELECT cluster_id, pod_namespace, workload_kind, workload_name, container_name \
+         SELECT cluster_id, pod_namespace, workload_kind, workload_name, container_name, \
+                image_digest \
          FROM workload_containers \
-         WHERE updated_at < timezone('UTC', NOW()) - $1::interval \
-         ORDER BY updated_at \
+         WHERE last_seen < timezone('UTC', NOW()) - $1::interval \
+         ORDER BY last_seen \
          LIMIT $2 \
      ) \
      DELETE FROM workload_containers wc USING expired e \
      WHERE wc.cluster_id = e.cluster_id AND wc.pod_namespace = e.pod_namespace \
        AND wc.workload_kind = e.workload_kind AND wc.workload_name = e.workload_name \
-       AND wc.container_name = e.container_name";
+       AND wc.container_name = e.container_name AND wc.image_digest = e.image_digest";
 
 /// Batched prune of images last seen before the window that no container
 /// row still references. A digest still referenced is kept however old
@@ -1959,11 +1962,30 @@ mod image_inventory_retention_tests {
                ('{digest}', 'repo', timezone('UTC', NOW()) - INTERVAL '{age_days} days', \
                 timezone('UTC', NOW()) - INTERVAL '{age_days} days') ON CONFLICT DO NOTHING; \
              INSERT INTO workload_containers (pod_namespace, workload_kind, workload_name, \
-               container_name, container_kind, image_ref, image_digest, updated_at) VALUES \
+               container_name, container_kind, image_ref, image_digest, last_seen) VALUES \
                ('prod', 'Deployment', '{workload}', 'app', 'regular', 'r:1', '{digest}', \
                 timezone('UTC', NOW()) - INTERVAL '{age_days} days');"
         ))
         .expect("seed");
+    }
+
+    fn remaining_rows(conn: &mut PgConnection) -> Vec<(String, String)> {
+        #[derive(QueryableByName)]
+        struct R {
+            #[diesel(sql_type = diesel::sql_types::Text)]
+            w: String,
+            #[diesel(sql_type = diesel::sql_types::Text)]
+            d: String,
+        }
+        sql_query(
+            "SELECT workload_name AS w, image_digest AS d FROM workload_containers \
+             ORDER BY workload_name, image_digest",
+        )
+        .load::<R>(conn)
+        .expect("rows")
+        .into_iter()
+        .map(|r| (r.w, r.d))
+        .collect()
     }
 
     fn count(conn: &mut PgConnection, table: &str) -> i64 {
@@ -1986,6 +2008,10 @@ mod image_inventory_retention_tests {
         seed(&mut conn, "live", &d(1), 0);
         seed(&mut conn, "gone-a", &d(2), 40);
         seed(&mut conn, "gone-b", &d(3), 45);
+        // The live workload's container also has a digest it stopped
+        // running 40 days ago (an old rollout): that row is pruned while
+        // the workload's current digest row stays.
+        seed(&mut conn, "live", &d(5), 40);
         // An old image still referenced by a live container is kept.
         conn.batch_execute(&format!(
             "INSERT INTO images (digest, digest_kind, last_seen) VALUES \
@@ -2008,17 +2034,22 @@ mod image_inventory_retention_tests {
             prune_batch(&mut conn, WORKLOAD_CONTAINERS_PRUNE_SQL, 30, 1).unwrap(),
             1
         );
-        assert_eq!(count(&mut conn, "workload_containers"), 3);
+        assert_eq!(count(&mut conn, "workload_containers"), 4);
+        assert!(!remaining_rows(&mut conn).contains(&("gone-b".into(), d(3))));
         assert_eq!(
             prune_batch(&mut conn, WORKLOAD_CONTAINERS_PRUNE_SQL, 30, 100).unwrap(),
-            1
+            2
         );
-        assert_eq!(count(&mut conn, "workload_containers"), 2);
-        // Now the two unreferenced stale images go; the fresh one and the
+        assert_eq!(
+            remaining_rows(&mut conn),
+            vec![("live".to_string(), d(1)), ("live".to_string(), d(4))]
+        );
+        // Now the three unreferenced stale images go (including the
+        // digest the live workload no longer runs); the fresh one and the
         // old-but-referenced one stay.
         assert_eq!(
             prune_batch(&mut conn, IMAGES_PRUNE_SQL, 30, 100).unwrap(),
-            2
+            3
         );
         assert_eq!(count(&mut conn, "images"), 2);
         // Idempotent on a clean table.

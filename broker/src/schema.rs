@@ -432,7 +432,6 @@ diesel::table! {
     // See the migration and src/image_inventory.rs.
     images (digest) {
         digest -> Varchar,
-        cluster_id -> Varchar,
         repository -> Nullable<Varchar>,
         tags -> Array<Text>,
         digest_kind -> Varchar,
@@ -442,24 +441,24 @@ diesel::table! {
 }
 
 diesel::table! {
-    // One row per (workload, container): image ref + digest and the
+    // One row per (workload, container, digest): image ref and the
     // securityContext / pod-level posture subset the controller reports
     // on /pod/spec. Same (namespace, kind, name) workload key as
     // workload_syscalls, plus cluster_id.
-    workload_containers (cluster_id, pod_namespace, workload_kind, workload_name, container_name) {
+    workload_containers (cluster_id, pod_namespace, workload_kind, workload_name, container_name, image_digest) {
         cluster_id -> Varchar,
         pod_namespace -> Varchar,
         workload_kind -> Varchar,
         workload_name -> Varchar,
         container_name -> Varchar,
+        image_digest -> Varchar,
         container_kind -> Varchar,
         image_ref -> Varchar,
-        image_digest -> Nullable<Varchar>,
         security_context -> Jsonb,
         pod_security -> Jsonb,
         last_pod_name -> Nullable<Varchar>,
         first_seen -> Timestamp,
-        updated_at -> Timestamp,
+        last_seen -> Timestamp,
     }
 }
 
