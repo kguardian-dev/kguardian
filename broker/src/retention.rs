@@ -1766,11 +1766,15 @@ fn image_inventory_batch_size() -> i64 {
 
 /// Batched prune of (workload, container, digest) rows no running pod has
 /// refreshed within the window. Deletes by primary key; oldest first.
+/// `ref_seen_at` (a pod stuck pulling the same ref) keeps the most recent
+/// digest for that ref too, so a long ImagePullBackOff does not erase the
+/// last known image of the workload.
 pub(crate) const WORKLOAD_CONTAINERS_PRUNE_SQL: &str = "WITH expired AS (\
          SELECT cluster_id, pod_namespace, workload_kind, workload_name, container_name, \
                 image_digest \
          FROM workload_containers \
          WHERE last_seen < timezone('UTC', NOW()) - $1::interval \
+           AND (ref_seen_at IS NULL OR ref_seen_at < timezone('UTC', NOW()) - $1::interval) \
          ORDER BY last_seen \
          LIMIT $2 \
      ) \
@@ -2012,6 +2016,14 @@ mod image_inventory_retention_tests {
         // running 40 days ago (an old rollout): that row is pruned while
         // the workload's current digest row stays.
         seed(&mut conn, "live", &d(5), 40);
+        // A workload whose only pod is stuck pulling the same ref: its last
+        // known digest is 40 days old but was ref-seen just now, so it stays.
+        seed(&mut conn, "pulling", &d(6), 40);
+        conn.batch_execute(
+            "UPDATE workload_containers SET ref_seen_at = timezone('UTC', NOW()) \
+             WHERE workload_name = 'pulling'",
+        )
+        .unwrap();
         // An old image still referenced by a live container is kept.
         conn.batch_execute(&format!(
             "INSERT INTO images (digest, digest_kind, last_seen) VALUES \
@@ -2034,7 +2046,7 @@ mod image_inventory_retention_tests {
             prune_batch(&mut conn, WORKLOAD_CONTAINERS_PRUNE_SQL, 30, 1).unwrap(),
             1
         );
-        assert_eq!(count(&mut conn, "workload_containers"), 4);
+        assert_eq!(count(&mut conn, "workload_containers"), 5);
         assert!(!remaining_rows(&mut conn).contains(&("gone-b".into(), d(3))));
         assert_eq!(
             prune_batch(&mut conn, WORKLOAD_CONTAINERS_PRUNE_SQL, 30, 100).unwrap(),
@@ -2042,7 +2054,11 @@ mod image_inventory_retention_tests {
         );
         assert_eq!(
             remaining_rows(&mut conn),
-            vec![("live".to_string(), d(1)), ("live".to_string(), d(4))]
+            vec![
+                ("live".to_string(), d(1)),
+                ("live".to_string(), d(4)),
+                ("pulling".to_string(), d(6))
+            ]
         );
         // Now the three unreferenced stale images go (including the
         // digest the live workload no longer runs); the fresh one and the
@@ -2051,7 +2067,7 @@ mod image_inventory_retention_tests {
             prune_batch(&mut conn, IMAGES_PRUNE_SQL, 30, 100).unwrap(),
             3
         );
-        assert_eq!(count(&mut conn, "images"), 2);
+        assert_eq!(count(&mut conn, "images"), 3);
         // Idempotent on a clean table.
         assert_eq!(
             prune_batch(&mut conn, WORKLOAD_CONTAINERS_PRUNE_SQL, 30, 100).unwrap(),

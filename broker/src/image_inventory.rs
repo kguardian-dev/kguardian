@@ -84,11 +84,20 @@ pub(crate) fn parse_running_window(raw: Option<&str>) -> i64 {
         .unwrap_or(DEFAULT_RUNNING_WINDOW_SECS)
 }
 
-/// A (workload, container, digest) row counts as RUNNING when EITHER:
+/// A (workload, container, digest) row counts as RUNNING when its latest
+/// report says the container is active — `state = running`, or `waiting`
+/// with reason `CrashLoopBackOff` (it has run from this digest and will
+/// again) — AND EITHER:
 ///
 /// 1. its `last_seen` is within this window, or
 /// 2. the pod that last reported it (`last_pod_name`) is still live — in
 ///    `pod_details`, same namespace, not marked dead.
+///
+/// The state term keeps a completed init container (`terminated`, exposed
+/// as `ranAsInit`) and a digest that never started (`waiting` in
+/// `ContainerCreating` / `ImagePullBackOff`, e.g. a spec pin) out of the
+/// running set. A NULL state comes from a controller that predates the
+/// field and falls back to (1)/(2) alone.
 ///
 /// (1) is the primary signal. The controller re-posts every live,
 /// non-terminal pod on its node at least every 60 s, ready or not, and a
@@ -123,10 +132,12 @@ pub fn running_window_secs() -> i64 {
 macro_rules! running_sql {
     ($w:literal) => {
         concat!(
-            "(wc.last_seen >= timezone('UTC', NOW()) - make_interval(secs => ",
+            "((wc.state IS NULL OR wc.state = 'running' \
+             OR (wc.state = 'waiting' AND wc.state_reason = 'CrashLoopBackOff')) \
+             AND (wc.last_seen >= timezone('UTC', NOW()) - make_interval(secs => ",
             $w,
             ") OR EXISTS (SELECT 1 FROM pod_details pd WHERE pd.pod_name = wc.last_pod_name \
-             AND pd.pod_namespace = wc.pod_namespace AND NOT pd.is_dead))"
+             AND pd.pod_namespace = wc.pod_namespace AND NOT pd.is_dead)))"
         )
     };
 }
@@ -235,7 +246,14 @@ pub struct ContainerInput {
     pub tag: Option<String>,
     #[serde(default)]
     pub security_context: Option<ContainerSecurity>,
+    /// `running` | `waiting` | `terminated`; absent from older controllers.
+    #[serde(default)]
+    pub state: Option<String>,
+    #[serde(default)]
+    pub state_reason: Option<String>,
 }
+
+const CONTAINER_STATES: [&str; 3] = ["running", "waiting", "terminated"];
 
 /// The `/pod/spec` body: the existing `PodDetail` plus the two inventory
 /// fields, which are not `pod_details` columns and so cannot live on
@@ -327,6 +345,10 @@ pub struct ContainerRow {
     pub security_context: serde_json::Value,
     pub pod_security: serde_json::Value,
     pub last_pod_name: String,
+    /// Validated `running|waiting|terminated`, or `None` (older controller
+    /// or an unknown value).
+    pub state: Option<String>,
+    pub state_reason: Option<String>,
 }
 
 /// One validated `images` upsert, merged across every container of the
@@ -463,7 +485,17 @@ pub fn inventory_from_post(
             _ => None,
         };
         let sc = sanitise_container_security(c.security_context.unwrap_or_default());
+        let state = c
+            .state
+            .map(|s| s.trim().to_ascii_lowercase())
+            .filter(|s| CONTAINER_STATES.contains(&s.as_str()));
+        // A reason only means something next to a known state.
+        let state_reason = state
+            .as_ref()
+            .and_then(|_| bounded(c.state_reason, MAX_SHORT_LEN));
         out.containers.push(ContainerRow {
+            state,
+            state_reason,
             cluster_id: DEFAULT_CLUSTER_ID.to_string(),
             namespace: namespace.to_string(),
             workload_kind: workload_kind.clone(),
@@ -515,15 +547,16 @@ WHERE images.last_seen < EXCLUDED.last_seen - make_interval(secs => $6) \
 /// The digest is part of the key, so a workload running several digests
 /// for one container at once — mid-rollout, or a DaemonSet whose nodes
 /// resolved a tag differently — keeps one row per digest, each refreshed
-/// by the pods that run it. The `WHERE` skips the write unless something
+/// by the pods that run it. `state` / `state_reason` record the latest
+/// report for that digest. The `WHERE` skips the write unless something
 /// about the row changed or it is more than [`REFRESH_SECS`] old;
 /// `last_pod_name` alone never forces a write, so replicas sharing a
 /// digest do not take turns rewriting it.
 pub(crate) const CONTAINER_UPSERT_SQL: &str = "\
 INSERT INTO workload_containers (cluster_id, pod_namespace, workload_kind, workload_name, \
     container_name, image_digest, container_kind, image_ref, security_context, pod_security, \
-    last_pod_name, first_seen, last_seen) \
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, \
+    last_pod_name, state, state_reason, first_seen, last_seen) \
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $13, $14, \
     timezone('UTC', NOW()), timezone('UTC', NOW())) \
 ON CONFLICT (cluster_id, pod_namespace, workload_kind, workload_name, container_name, image_digest) \
 DO UPDATE SET \
@@ -532,12 +565,16 @@ DO UPDATE SET \
     security_context = EXCLUDED.security_context, \
     pod_security = EXCLUDED.pod_security, \
     last_pod_name = EXCLUDED.last_pod_name, \
+    state = EXCLUDED.state, \
+    state_reason = EXCLUDED.state_reason, \
     last_seen = EXCLUDED.last_seen \
 WHERE workload_containers.last_seen < EXCLUDED.last_seen - make_interval(secs => $12) \
    OR workload_containers.container_kind IS DISTINCT FROM EXCLUDED.container_kind \
    OR workload_containers.image_ref IS DISTINCT FROM EXCLUDED.image_ref \
    OR workload_containers.security_context IS DISTINCT FROM EXCLUDED.security_context \
-   OR workload_containers.pod_security IS DISTINCT FROM EXCLUDED.pod_security";
+   OR workload_containers.pod_security IS DISTINCT FROM EXCLUDED.pod_security \
+   OR workload_containers.state IS DISTINCT FROM EXCLUDED.state \
+   OR workload_containers.state_reason IS DISTINCT FROM EXCLUDED.state_reason";
 
 /// When a pod reports digest D for a container, it no longer runs any
 /// other digest there: drop its name from those rows so the live-pod
@@ -551,17 +588,23 @@ WHERE cluster_id = $1 AND pod_namespace = $2 AND workload_kind = $3 AND workload
   AND container_name = $5 AND image_digest <> $6 AND last_pod_name = $7";
 
 /// A container reported with an image ref but no digest yet — the pod is
-/// (re)starting and the kubelet has not resolved one. It never creates a
-/// row (that would be a phantom: no digest is known to run). If the same
-/// ref already has a known digest for this container, that row is kept
-/// alive, as a restart of the same image deserves; a new ref gets its row
-/// once the digest arrives.
+/// (re)starting or stuck pulling (`ContainerCreating`, `ImagePullBackOff`).
+/// It never creates a row (no digest is known to run) and it never makes
+/// one read as running: it touches only `ref_seen_at`, which retention
+/// honours and the running predicate ignores, and only on the single most
+/// recent digest row for that ref. With a mutable tag (`app:latest`)
+/// several historical digests share the ref; bumping all of them, or
+/// setting `last_pod_name` on them (the live-pod backstop), would make
+/// every one of them read as running for as long as the pod stayed stuck.
 pub(crate) const CONTAINER_REFRESH_SQL: &str = "\
-UPDATE workload_containers SET \
-    last_seen = timezone('UTC', NOW()), last_pod_name = $7 \
-WHERE cluster_id = $1 AND pod_namespace = $2 AND workload_kind = $3 AND workload_name = $4 \
-  AND container_name = $5 AND image_ref = $6 \
-  AND last_seen < timezone('UTC', NOW()) - make_interval(secs => $8)";
+UPDATE workload_containers SET ref_seen_at = timezone('UTC', NOW()) \
+WHERE (cluster_id, pod_namespace, workload_kind, workload_name, container_name, image_digest) = ( \
+    SELECT cluster_id, pod_namespace, workload_kind, workload_name, container_name, image_digest \
+    FROM workload_containers \
+    WHERE cluster_id = $1 AND pod_namespace = $2 AND workload_kind = $3 AND workload_name = $4 \
+      AND container_name = $5 AND image_ref = $6 \
+    ORDER BY last_seen DESC, image_digest LIMIT 1) \
+  AND (ref_seen_at IS NULL OR ref_seen_at < timezone('UTC', NOW()) - make_interval(secs => $7))";
 
 /// Write one post's inventory in a single transaction. Returns the number
 /// of rows actually written (inserted or changed); a steady-state re-post
@@ -608,6 +651,8 @@ pub fn upsert_inventory(conn: &mut PgConnection, inv: &Inventory) -> Result<usiz
                     .bind::<Jsonb, _>(&c.pod_security)
                     .bind::<Text, _>(&c.last_pod_name)
                     .bind::<diesel::sql_types::Double, _>(REFRESH_SECS as f64)
+                    .bind::<Nullable<Text>, _>(c.state.as_deref())
+                    .bind::<Nullable<Text>, _>(c.state_reason.as_deref())
                     .execute(conn)?,
                 None => sql_query(CONTAINER_REFRESH_SQL)
                     .bind::<Text, _>(&c.cluster_id)
@@ -616,7 +661,6 @@ pub fn upsert_inventory(conn: &mut PgConnection, inv: &Inventory) -> Result<usiz
                     .bind::<Text, _>(&c.workload_name)
                     .bind::<Text, _>(&c.container_name)
                     .bind::<Text, _>(&c.image_ref)
-                    .bind::<Text, _>(&c.last_pod_name)
                     .bind::<diesel::sql_types::Double, _>(REFRESH_SECS as f64)
                     .execute(conn)?,
             };
@@ -816,7 +860,19 @@ pub struct ImageUser {
     pub first_seen: NaiveDateTime,
     #[diesel(sql_type = Timestamp)]
     pub last_seen: NaiveDateTime,
-    /// Refreshed within [`running_window_secs`].
+    /// Container state in the latest report for this digest (`running` |
+    /// `waiting` | `terminated`); `null` from an older controller.
+    #[diesel(sql_type = Nullable<Text>)]
+    pub state: Option<String>,
+    /// Kubelet reason for `waiting` / `terminated` (e.g. `CrashLoopBackOff`,
+    /// `ImagePullBackOff`, `Completed`).
+    #[diesel(sql_type = Nullable<Text>)]
+    pub state_reason: Option<String>,
+    /// An init container that ran from this digest and completed. Kept in
+    /// the inventory, never counted as running.
+    #[diesel(sql_type = Bool)]
+    pub ran_as_init: bool,
+    /// See [`running_window_secs`] for the definition.
     #[diesel(sql_type = Bool)]
     pub running: bool,
 }
@@ -834,7 +890,9 @@ pub struct ImageDetail {
 
 const IMAGE_USERS_SQL: &str = concat!(
     "SELECT wc.cluster_id, wc.pod_namespace AS namespace, wc.workload_kind, wc.workload_name, \
-    wc.container_name, wc.container_kind, wc.image_ref, wc.first_seen, wc.last_seen, ",
+    wc.container_name, wc.container_kind, wc.image_ref, wc.first_seen, wc.last_seen, \
+    wc.state, wc.state_reason, \
+    (wc.container_kind = 'init' AND wc.state IS NOT DISTINCT FROM 'terminated') AS ran_as_init, ",
     running_sql!("$2"),
     " AS running \
 FROM workload_containers wc WHERE wc.image_digest = $1 \
@@ -923,6 +981,12 @@ struct ContainerDigestRow {
     first_seen: NaiveDateTime,
     #[diesel(sql_type = Timestamp)]
     last_seen: NaiveDateTime,
+    #[diesel(sql_type = Nullable<Text>)]
+    state: Option<String>,
+    #[diesel(sql_type = Nullable<Text>)]
+    state_reason: Option<String>,
+    #[diesel(sql_type = Bool)]
+    ran_as_init: bool,
     #[diesel(sql_type = Bool)]
     running: bool,
 }
@@ -938,6 +1002,14 @@ pub struct ContainerDigest {
     pub last_pod_name: Option<String>,
     pub first_seen: NaiveDateTime,
     pub last_seen: NaiveDateTime,
+    /// `running` | `waiting` | `terminated` in the latest report for this
+    /// digest; `null` from an older controller.
+    pub state: Option<String>,
+    /// e.g. `CrashLoopBackOff`, `ImagePullBackOff`, `Completed`.
+    pub state_reason: Option<String>,
+    /// A completed init container: it ran from this digest, it is not
+    /// running now.
+    pub ran_as_init: bool,
 }
 
 /// One container of a workload, with every digest it runs.
@@ -950,10 +1022,13 @@ pub struct ContainerImages {
     /// More than one digest running at once: a rollout in progress, or
     /// nodes that resolved the same tag to different images.
     pub mixed_digests: bool,
-    /// Digests refreshed within [`running_window_secs`], newest first.
+    /// Digests running now (see [`running_window_secs`]), newest first.
     pub digests: Vec<ContainerDigest>,
-    /// Digests no pod has reported within the window, kept until
-    /// retention prunes them (`IMAGE_INVENTORY_RETENTION_DAYS`).
+    /// Digests known for this container but not running now: no pod has
+    /// reported them within the window, they never started (`waiting` in
+    /// `ContainerCreating` / `ImagePullBackOff`), or a completed init
+    /// container (`ranAsInit`). Each carries its `state` for labelling;
+    /// kept until retention prunes them (`IMAGE_INVENTORY_RETENTION_DAYS`).
     pub previous_digests: Vec<ContainerDigest>,
 }
 
@@ -972,7 +1047,9 @@ pub struct WorkloadContainers {
 
 const WORKLOAD_CONTAINERS_SQL: &str = concat!(
     "SELECT wc.cluster_id, wc.container_name, wc.container_kind, wc.image_digest, wc.image_ref, \
-    wc.security_context, wc.pod_security, wc.last_pod_name, wc.first_seen, wc.last_seen, ",
+    wc.security_context, wc.pod_security, wc.last_pod_name, wc.first_seen, wc.last_seen, \
+    wc.state, wc.state_reason, \
+    (wc.container_kind = 'init' AND wc.state IS NOT DISTINCT FROM 'terminated') AS ran_as_init, ",
     running_sql!("$4"),
     " AS running \
 FROM workload_containers wc \
@@ -994,6 +1071,9 @@ fn group_containers(rows: Vec<ContainerDigestRow>) -> Vec<ContainerImages> {
             last_pod_name: r.last_pod_name,
             first_seen: r.first_seen,
             last_seen: r.last_seen,
+            state: r.state,
+            state_reason: r.state_reason,
+            ran_as_init: r.ran_as_init,
         };
         let same = out
             .last()
@@ -1296,6 +1376,37 @@ mod tests {
     }
 
     #[test]
+    fn container_state_is_validated() {
+        let p = pod(Some("prod"), Some("Deployment"), Some("web"));
+        let list = json!([
+            {"name": "a", "kind": "regular", "image": "a", "state": " Running "},
+            {"name": "b", "kind": "regular", "image": "b", "state": "exploded",
+             "state_reason": "Boom"},
+            {"name": "c", "kind": "regular", "image": "c", "state": "waiting",
+             "state_reason": "x".repeat(300)},
+            {"name": "d", "kind": "regular", "image": "d"}
+        ]);
+        let inv = inventory_from_post(&p, Some(&list), None);
+        let st: Vec<_> = inv
+            .containers
+            .iter()
+            .map(|c| (c.state.as_deref(), c.state_reason.as_deref()))
+            .collect();
+        assert_eq!(
+            st,
+            vec![
+                (Some("running"), None),
+                // Unknown state: dropped, and its reason with it.
+                (None, None),
+                // Oversized reason: dropped, state kept.
+                (Some("waiting"), None),
+                // Older controller: no state.
+                (None, None),
+            ]
+        );
+    }
+
+    #[test]
     fn running_window_parses_and_clamps() {
         assert_eq!(parse_running_window(None), DEFAULT_RUNNING_WINDOW_SECS);
         assert_eq!(parse_running_window(Some("900")), 900);
@@ -1337,6 +1448,9 @@ mod tests {
             last_pod_name: None,
             first_seen: NaiveDateTime::default(),
             last_seen: NaiveDateTime::default(),
+            state: Some("running".into()),
+            state_reason: None,
+            ran_as_init: false,
             running,
         }
     }
@@ -1618,6 +1732,164 @@ mod tests {
         assert_eq!(app.previous_digests[0].last_pod_name, None);
 
         conn.batch_execute(reset).unwrap();
+    }
+
+    fn post_state(conn: &mut PgConnection, pod_name: &str, containers: serde_json::Value) -> usize {
+        let mut p = pod(Some("prod"), Some("Deployment"), Some("web"));
+        p.pod_name = pod_name.to_string();
+        upsert_inventory(conn, &inventory_from_post(&p, Some(&containers), None)).unwrap()
+    }
+
+    #[test]
+    #[ignore = "requires a live postgres (set KG_TEST_DATABASE_URL)"]
+    fn live_database_image_pull_backoff_never_revives_old_digests() {
+        use diesel::connection::SimpleConnection;
+        let mut conn = live_conn();
+        let reset = "DELETE FROM pod_details WHERE pod_name LIKE 'inv-test-%'";
+        conn.batch_execute(reset).unwrap();
+        // Three historical digests of app:latest, each run by a pod long gone.
+        let digests: Vec<String> = (1..=3u8).map(|i| format!("sha256:{:064x}", i)).collect();
+        for (i, d) in digests.iter().enumerate() {
+            post_state(
+                &mut conn,
+                &format!("web-old-{i}"),
+                json!([{"name": "app", "kind": "regular", "image": "app:latest",
+                    "digest": d, "digest_kind": "repo", "state": "running"}]),
+            );
+            // Age each one, oldest first, past the window.
+            conn.batch_execute(&format!(
+                "UPDATE workload_containers SET last_seen = timezone('UTC', NOW()) \
+                   - INTERVAL '{} seconds' WHERE image_digest = '{d}'",
+                running_window_secs() + 600 - (i as i64) * 60
+            ))
+            .unwrap();
+        }
+        // A live pod stuck in ImagePullBackOff on the same mutable tag: ref
+        // only, no digest.
+        conn.batch_execute(
+            "INSERT INTO pod_details (pod_name, pod_ip, pod_namespace, time_stamp, node_name, is_dead) \
+             VALUES ('inv-test-pull', '10.9.9.8', 'prod', timezone('UTC', NOW()), 'n', false)",
+        )
+        .unwrap();
+        let pulling = json!([{"name": "app", "kind": "regular", "image": "app:latest",
+            "state": "waiting", "state_reason": "ImagePullBackOff"}]);
+        // Touches exactly one row (the most recent digest's ref_seen_at)...
+        assert_eq!(post_state(&mut conn, "inv-test-pull", pulling.clone()), 1);
+        // ...and a repeat inside the refresh period touches none.
+        assert_eq!(post_state(&mut conn, "inv-test-pull", pulling), 0);
+
+        let app = app_group(&mut conn);
+        assert!(app.digests.is_empty(), "no old digest may read as running");
+        assert_eq!(app.previous_digests.len(), 3);
+        for d in &digests {
+            assert_eq!(running_count_of(&mut conn, d), 0, "{d}");
+        }
+        // The stuck pod never lends its name to the live-pod backstop.
+        assert!(app
+            .previous_digests
+            .iter()
+            .all(|d| d.last_pod_name.as_deref() != Some("inv-test-pull")));
+        // Only the most recent digest is kept alive for retention.
+        #[derive(QueryableByName)]
+        struct R {
+            #[diesel(sql_type = Text)]
+            image_digest: String,
+        }
+        let kept: Vec<R> =
+            sql_query("SELECT image_digest FROM workload_containers WHERE ref_seen_at IS NOT NULL")
+                .load(&mut conn)
+                .unwrap();
+        assert_eq!(kept.len(), 1);
+        assert_eq!(kept[0].image_digest, digests[2]);
+        conn.batch_execute(reset).unwrap();
+    }
+
+    fn running_count_of(conn: &mut PgConnection, d: &str) -> i64 {
+        list_images(conn, None, None, None, 100)
+            .unwrap()
+            .items
+            .into_iter()
+            .find(|i| i.digest == d)
+            .map(|i| i.running_containers)
+            .unwrap_or(0)
+    }
+
+    #[test]
+    #[ignore = "requires a live postgres (set KG_TEST_DATABASE_URL)"]
+    fn live_database_container_state_decides_running() {
+        let mut conn = live_conn();
+        let d = |i: u8| format!("sha256:{:064x}", i);
+        post_state(
+            &mut conn,
+            "web-1",
+            json!([
+                {"name": "migrate", "kind": "init", "image": "m:1", "digest": d(1),
+                 "digest_kind": "repo", "state": "terminated", "state_reason": "Completed"},
+                {"name": "app", "kind": "regular", "image": "a:1", "digest": d(2),
+                 "digest_kind": "repo", "state": "running"},
+                {"name": "crash", "kind": "regular", "image": "c:1", "digest": d(3),
+                 "digest_kind": "repo", "state": "waiting", "state_reason": "CrashLoopBackOff"},
+                {"name": "pinned", "kind": "regular", "image": format!("p@{}", d(4)),
+                 "digest": d(4), "digest_kind": "pinned", "state": "waiting",
+                 "state_reason": "ContainerCreating"}
+            ]),
+        );
+        let wc = workload_containers(&mut conn, "prod", "Deployment", "web").unwrap();
+        let by = |n: &str| {
+            wc.containers
+                .iter()
+                .find(|c| c.container_name == n)
+                .unwrap()
+                .clone()
+        };
+        let migrate = by("migrate");
+        assert!(
+            migrate.digests.is_empty(),
+            "a completed init container is not running"
+        );
+        assert!(migrate.previous_digests[0].ran_as_init);
+        assert_eq!(
+            migrate.previous_digests[0].state.as_deref(),
+            Some("terminated")
+        );
+        assert_eq!(
+            migrate.previous_digests[0].state_reason.as_deref(),
+            Some("Completed")
+        );
+        assert_eq!(by("app").digests[0].state.as_deref(), Some("running"));
+        let crash = by("crash");
+        assert_eq!(crash.digests.len(), 1, "crash-looping counts as running");
+        assert_eq!(
+            crash.digests[0].state_reason.as_deref(),
+            Some("CrashLoopBackOff")
+        );
+        let pinned = by("pinned");
+        assert!(
+            pinned.digests.is_empty(),
+            "a digest that never started is not running"
+        );
+        assert_eq!(
+            pinned.previous_digests[0].state_reason.as_deref(),
+            Some("ContainerCreating")
+        );
+        assert_eq!(running_count_of(&mut conn, &d(1)), 0);
+        assert_eq!(running_count_of(&mut conn, &d(2)), 1);
+        assert_eq!(running_count_of(&mut conn, &d(3)), 1);
+        assert_eq!(running_count_of(&mut conn, &d(4)), 0);
+        let init_user = &image_detail(&mut conn, &d(1)).unwrap().unwrap().workloads[0];
+        assert!(init_user.ran_as_init && !init_user.running);
+
+        // The pinned container starts: the same digest row flips to running.
+        assert_eq!(
+            post_state(
+                &mut conn,
+                "web-1",
+                json!([{"name": "pinned", "kind": "regular", "image": format!("p@{}", d(4)),
+                    "digest": d(4), "digest_kind": "repo", "state": "running"}]),
+            ),
+            2 // image row (pinned -> repo) + container row (state changed)
+        );
+        assert_eq!(running_count_of(&mut conn, &d(4)), 1);
     }
 
     #[test]

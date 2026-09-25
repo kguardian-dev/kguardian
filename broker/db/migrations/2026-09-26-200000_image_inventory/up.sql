@@ -64,6 +64,18 @@ CREATE TABLE IF NOT EXISTS workload_containers (
     last_pod_name    VARCHAR   NULL,              -- a pod that last reported it
     first_seen       TIMESTAMP NOT NULL DEFAULT (now() AT TIME ZONE 'utc'),
     last_seen        TIMESTAMP NOT NULL DEFAULT (now() AT TIME ZONE 'utc'),
+    -- Container state in the latest report for this digest: running |
+    -- waiting | terminated, plus the kubelet's reason (CrashLoopBackOff,
+    -- ImagePullBackOff, Completed, ...). NULL = reported by a controller
+    -- that predates the field. Only running (or waiting in
+    -- CrashLoopBackOff, i.e. between runs) counts as running.
+    state            VARCHAR   NULL,
+    state_reason     VARCHAR   NULL,
+    -- Last time a pod reported this row's image ref with NO digest yet
+    -- (ContainerCreating, ImagePullBackOff). Keeps the most recent known
+    -- digest for a ref in retention while a pod restarts; it never makes
+    -- the row read as running.
+    ref_seen_at      TIMESTAMP NULL,
     PRIMARY KEY (cluster_id, pod_namespace, workload_kind, workload_name, container_name, image_digest)
 );
 -- "Which workloads run this digest" (GET /images/{digest}, the GC's

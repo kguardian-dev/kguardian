@@ -459,6 +459,9 @@ diesel::table! {
         last_pod_name -> Nullable<Varchar>,
         first_seen -> Timestamp,
         last_seen -> Timestamp,
+        state -> Nullable<Varchar>,
+        state_reason -> Nullable<Varchar>,
+        ref_seen_at -> Nullable<Timestamp>,
     }
 }
 
