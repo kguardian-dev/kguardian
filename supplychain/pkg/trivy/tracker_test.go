@@ -3,6 +3,7 @@ package trivy
 import (
 	"context"
 	"errors"
+	"fmt"
 	"reflect"
 	"testing"
 
@@ -249,5 +250,51 @@ func TestTrackerEmissionsDoNotAliasState(t *testing.T) {
 	es[0].Vulns.ObservedIn = nil
 	if es := tr.UpsertVulnerabilityReport(ctx, loadVuln(t, "vulnerabilityreport-api-digest.yaml")); len(es) != 0 {
 		t.Errorf("mutating an emission changed tracker state: %+v", es)
+	}
+}
+
+// Memory scales with distinct images, not with reports: 300 reports (15
+// workload containers per image) over 20 digests hold 20 payloads per kind.
+func TestTrackerHoldsOnePayloadPerDigest(t *testing.T) {
+	tr := NewTracker(nil)
+	var emitted int
+	for i := 0; i < 300; i++ {
+		digest := fmt.Sprintf("sha256:%064x", i%20)
+		v := loadVuln(t, "vulnerabilityreport-api-digest.yaml")
+		v.Metadata.UID = fmt.Sprintf("v-%d", i)
+		v.Metadata.Labels[LabelResourceName] = fmt.Sprintf("workload-%d", i)
+		v.Report.Artifact.Digest = digest
+		emitted += len(tr.UpsertVulnerabilityReport(ctx, v))
+
+		s := loadSBOM(t, "sbomreport-api-digest.yaml")
+		s.Metadata.UID = fmt.Sprintf("s-%d", i)
+		s.Metadata.Labels[LabelResourceName] = fmt.Sprintf("workload-%d", i)
+		s.Report.Artifact.Digest = digest
+		emitted += len(tr.UpsertSbomReport(ctx, s))
+	}
+	st := tr.Stats()
+	if st.VulnPayloads != 20 || st.SBOMPayloads != 20 || st.VulnDigests != 20 || st.SBOMDigests != 20 {
+		t.Fatalf("stats: %+v", st)
+	}
+	tr.mu.Lock()
+	for d, ds := range tr.vulnDigests {
+		if len(ds.refs) != 15 {
+			t.Errorf("%s: %d refs, want 15", d, len(ds.refs))
+		}
+	}
+	tr.mu.Unlock()
+	// Per digest: the first vuln report, the first SBOM, and the vuln
+	// re-emit that picks up the SBOM's file paths. Nothing per replica.
+	if emitted != 60 {
+		t.Errorf("emitted %d payloads, want 60", emitted)
+	}
+	// Deleting all but one report per digest keeps every payload.
+	for i := 20; i < 300; i++ {
+		v := loadVuln(t, "vulnerabilityreport-api-digest.yaml")
+		v.Metadata.UID = fmt.Sprintf("v-%d", i)
+		tr.DeleteVulnerabilityReport(v)
+	}
+	if st := tr.Stats(); st.VulnDigests != 20 {
+		t.Errorf("after deletes: %+v", st)
 	}
 }

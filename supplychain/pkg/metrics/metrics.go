@@ -25,6 +25,11 @@ type Metrics struct {
 	// Emissions counts payloads handed to the broker client, by kind and
 	// result (ok, error).
 	Emissions *prometheus.CounterVec
+	// Dropped counts payloads discarded as non-retryable, by kind and
+	// reason (http_<code>, too_large, encoding).
+	Dropped *prometheus.CounterVec
+	// SourceHealthy is 0 while a source's watch is failing repeatedly.
+	SourceHealthy *prometheus.GaugeVec
 	// PendingEmissions is the size of the coalescing send queue.
 	PendingEmissions prometheus.Gauge
 }
@@ -53,8 +58,16 @@ func New() *Metrics {
 		}, []string{"source", "kind"}),
 		Emissions: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "kguardian_supplychain_emissions_total",
-			Help: "Payloads handed to the broker client, by kind and result.",
+			Help: "Payloads handed to the broker client, by kind and result (ok, retry, dropped).",
 		}, []string{"kind", "result"}),
+		Dropped: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "kguardian_supplychain_emissions_dropped_total",
+			Help: "Payloads dropped as non-retryable, by kind and reason.",
+		}, []string{"kind", "reason"}),
+		SourceHealthy: prometheus.NewGaugeVec(prometheus.GaugeOpts{
+			Name: "kguardian_supplychain_source_healthy",
+			Help: "0 while a source's list/watch is failing repeatedly, else 1.",
+		}, []string{"source"}),
 		PendingEmissions: prometheus.NewGauge(prometheus.GaugeOpts{
 			Name: "kguardian_supplychain_pending_emissions",
 			Help: "Payloads waiting in the coalescing send queue.",
@@ -64,7 +77,7 @@ func New() *Metrics {
 		collectors.NewGoCollector(),
 		collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}),
 		m.ReportEvents, m.SourceAvailable, m.TrackedDigests,
-		m.UnresolvedReports, m.Emissions, m.PendingEmissions,
+		m.UnresolvedReports, m.Emissions, m.Dropped, m.SourceHealthy, m.PendingEmissions,
 	)
 	return m
 }

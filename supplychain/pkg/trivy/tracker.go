@@ -31,7 +31,7 @@ type DigestResolver interface {
 }
 
 // Emission is one payload ready for the broker. Exactly one of Vulns/SBOM
-// is set, matching Kind.
+// is set, matching Kind. The payload is the receiver's own copy.
 type Emission struct {
 	Kind   Kind
 	Digest string
@@ -39,20 +39,24 @@ type Emission struct {
 	SBOM   *types.ImageSBOM
 }
 
-type vulnEntry struct {
+// objEntry is what the tracker remembers about one Kubernetes report
+// object: only its identity and which digest it points at. The payload
+// itself lives once per digest, except for a report still waiting for a
+// digest, which keeps its own (pendingV/pendingS) until resolved.
+type objEntry struct {
 	workload types.WorkloadRef
 	ref      string
 	digest   string // "" while unresolved
-	// payload is normalised without the SBOM file-path join, which is
-	// applied at emission time against whatever SBOM is current.
-	payload *types.ImageVulnerabilities
+	pendingV *types.ImageVulnerabilities
+	pendingS *types.ImageSBOM
 }
 
-type sbomEntry struct {
-	workload types.WorkloadRef
-	ref      string
-	digest   string // "" while unresolved
-	payload  *types.ImageSBOM
+// digestState holds the single payload kept for one (kind, digest) - the
+// newest scan seen from any report - plus the reports that point at it.
+type digestState struct {
+	vulns *types.ImageVulnerabilities
+	sbom  *types.ImageSBOM
+	refs  map[string]types.WorkloadRef
 }
 
 type sentKey struct {
@@ -65,27 +69,31 @@ type sentState struct {
 	scannedAt   time.Time
 }
 
-// Tracker holds the latest report per Kubernetes object and turns report
-// churn into per-digest emissions. Many reports (one per workload
-// container) usually describe the same image; the tracker collapses them
-// to one payload per (kind, digest) and only emits when that payload's
-// content changes. It is safe for concurrent use.
+// Tracker turns report churn into per-digest emissions. Many reports (one
+// per workload container) usually describe the same image; the tracker
+// keeps one payload per (kind, digest) - memory scales with distinct
+// images, not with replicas or workloads - and only emits when that
+// payload's content changes. It is safe for concurrent use.
 type Tracker struct {
 	resolver DigestResolver
 
-	mu    sync.Mutex
-	vulns map[string]*vulnEntry
-	sboms map[string]*sbomEntry
-	sent  map[sentKey]sentState
+	mu          sync.Mutex
+	vulnObjs    map[string]*objEntry
+	sbomObjs    map[string]*objEntry
+	vulnDigests map[string]*digestState
+	sbomDigests map[string]*digestState
+	sent        map[sentKey]sentState
 }
 
 // NewTracker returns an empty tracker. resolver may be nil.
 func NewTracker(resolver DigestResolver) *Tracker {
 	return &Tracker{
-		resolver: resolver,
-		vulns:    map[string]*vulnEntry{},
-		sboms:    map[string]*sbomEntry{},
-		sent:     map[sentKey]sentState{},
+		resolver:    resolver,
+		vulnObjs:    map[string]*objEntry{},
+		sbomObjs:    map[string]*objEntry{},
+		vulnDigests: map[string]*digestState{},
+		sbomDigests: map[string]*digestState{},
+		sent:        map[sentKey]sentState{},
 	}
 }
 
@@ -96,50 +104,55 @@ func objectKey(m reportMeta) string {
 	return m.Namespace + "/" + m.Name
 }
 
+// resolve returns the digest for a report: the one it states, else one
+// correlated from another report for the same workload container, else
+// the external resolver's answer, else "".
+func (t *Tracker) resolve(ctx context.Context, stated string, w types.WorkloadRef, ref string) string {
+	if stated != "" {
+		return stated
+	}
+	t.mu.Lock()
+	d := t.correlateLocked(w, ref)
+	t.mu.Unlock()
+	if d != "" {
+		return d
+	}
+	return t.resolveExternal(ctx, w, ref)
+}
+
 // UpsertVulnerabilityReport records r (add or update) and returns the
 // emissions it causes.
 func (t *Tracker) UpsertVulnerabilityReport(ctx context.Context, r *VulnerabilityReport) []Emission {
 	key := objectKey(r.Metadata)
 	w := workloadOf(r.Metadata)
 	ref := imageRefOf(r.Report.Registry, r.Report.Artifact, "").Ref
-	digest := NormaliseDigest(r.Report.Artifact.Digest)
-	if digest == "" {
-		t.mu.Lock()
-		digest = t.correlateLocked(w, ref)
-		t.mu.Unlock()
-	}
-	if digest == "" {
-		digest = t.resolveExternal(ctx, w, ref)
-	}
+	digest := t.resolve(ctx, NormaliseDigest(r.Report.Artifact.Digest), w, ref)
 	payload := NormaliseVulnerabilities(r, digest, nil)
+	payload.ObservedIn = nil
 
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	affected := map[string]struct{}{}
-	if prev, ok := t.vulns[key]; ok && prev.digest != "" {
-		affected[prev.digest] = struct{}{}
+	t.detachLocked(KindVulnerabilities, key, digest)
+	e := &objEntry{workload: w, ref: ref, digest: digest}
+	t.vulnObjs[key] = e
+	if digest == "" {
+		e.pendingV = payload
+		return nil
 	}
-	t.vulns[key] = &vulnEntry{workload: w, ref: ref, digest: digest, payload: payload}
+	t.attachVulnLocked(key, e, payload)
 	var out []Emission
-	if digest != "" {
-		affected[digest] = struct{}{}
-		// The reverse correlation: a tag-only SBOM for the same container.
-		resolvedSBOM := false
-		for _, e := range t.sboms {
-			if e.digest == "" && e.workload == w && e.ref == ref {
-				e.digest = digest
-				e.payload.Image.Digest = digest
-				resolvedSBOM = true
-			}
-		}
-		if resolvedSBOM {
+	// The reverse correlation: tag-only SBOMs for the same container.
+	for k, se := range t.sbomObjs {
+		if se.digest == "" && se.workload == w && se.ref == ref {
+			se.digest = digest
+			p := se.pendingS
+			se.pendingS = nil
+			p.Image.Digest = digest
+			t.attachSBOMLocked(k, se, p)
 			out = appendEmission(out, t.evaluateSBOMLocked(digest))
 		}
 	}
-	for _, d := range sortedKeys(affected) {
-		out = appendEmission(out, t.evaluateVulnsLocked(d))
-	}
-	return out
+	return appendEmission(out, t.evaluateVulnsLocked(digest))
 }
 
 // UpsertSbomReport records r and returns the emissions it causes. A new
@@ -150,108 +163,145 @@ func (t *Tracker) UpsertSbomReport(ctx context.Context, r *SbomReport) []Emissio
 	key := objectKey(r.Metadata)
 	w := workloadOf(r.Metadata)
 	ref := imageRefOf(r.Report.Registry, r.Report.Artifact, "").Ref
-	digest := sbomDigest(r)
-	if digest == "" {
-		t.mu.Lock()
-		digest = t.correlateLocked(w, ref)
-		t.mu.Unlock()
-	}
-	if digest == "" {
-		digest = t.resolveExternal(ctx, w, ref)
-	}
+	digest := t.resolve(ctx, sbomDigest(r), w, ref)
+	payload := NormaliseSBOM(r, digest)
+	payload.ObservedIn = nil
 
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	affected := map[string]struct{}{}
-	if prev, ok := t.sboms[key]; ok && prev.digest != "" {
-		affected[prev.digest] = struct{}{}
+	t.detachLocked(KindSBOM, key, digest)
+	e := &objEntry{workload: w, ref: ref, digest: digest}
+	t.sbomObjs[key] = e
+	if digest == "" {
+		e.pendingS = payload
+		return nil
 	}
-	t.sboms[key] = &sbomEntry{workload: w, ref: ref, digest: digest, payload: NormaliseSBOM(r, digest)}
-	if digest != "" {
-		affected[digest] = struct{}{}
-		// Resolve tag-only vulnerability reports for the same container.
-		for _, e := range t.vulns {
-			if e.digest == "" && e.workload == w && e.ref == ref {
-				e.digest = digest
-				e.payload.Image.Digest = digest
-			}
+	t.attachSBOMLocked(key, e, payload)
+	// Resolve tag-only vulnerability reports for the same container.
+	for k, ve := range t.vulnObjs {
+		if ve.digest == "" && ve.workload == w && ve.ref == ref {
+			ve.digest = digest
+			p := ve.pendingV
+			ve.pendingV = nil
+			p.Image.Digest = digest
+			t.attachVulnLocked(k, ve, p)
 		}
 	}
-	var out []Emission
-	for _, d := range sortedKeys(affected) {
-		out = appendEmission(out, t.evaluateSBOMLocked(d))
-	}
-	// The same digests' vulnerability payloads pick up (or lose) this
-	// SBOM's file paths.
-	for _, d := range sortedKeys(affected) {
-		out = appendEmission(out, t.evaluateVulnsLocked(d))
-	}
-	return out
+	out := appendEmission(nil, t.evaluateSBOMLocked(digest))
+	// This digest's vulnerability payload picks up the SBOM's file paths
+	// (and any report just resolved above).
+	return appendEmission(out, t.evaluateVulnsLocked(digest))
 }
 
 // DeleteVulnerabilityReport forgets the report with the given UID (or
 // namespace/name). Deleting a report never emits a deletion to the broker:
-// image lifetime is owned by the broker's digest GC. It can emit a new
-// payload when another report for the same digest now wins.
+// image lifetime is owned by the broker's digest GC.
 func (t *Tracker) DeleteVulnerabilityReport(r *VulnerabilityReport) []Emission {
 	key := objectKey(r.Metadata)
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	prev, ok := t.vulns[key]
-	if !ok {
+	if _, ok := t.vulnObjs[key]; !ok {
 		return nil
 	}
-	delete(t.vulns, key)
-	if prev.digest == "" {
-		return nil
-	}
-	return appendEmission(nil, t.evaluateVulnsLocked(prev.digest))
+	t.detachLocked(KindVulnerabilities, key, "")
+	delete(t.vulnObjs, key)
+	return nil
 }
 
-// DeleteSbomReport is DeleteVulnerabilityReport for SbomReports.
+// DeleteSbomReport is DeleteVulnerabilityReport for SbomReports. When the
+// last SBOM for a digest goes, that digest's vulnerability payload loses
+// the joined file paths and is re-emitted.
 func (t *Tracker) DeleteSbomReport(r *SbomReport) []Emission {
 	key := objectKey(r.Metadata)
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	prev, ok := t.sboms[key]
+	prev, ok := t.sbomObjs[key]
 	if !ok {
 		return nil
 	}
-	delete(t.sboms, key)
-	if prev.digest == "" {
-		return nil
+	gone := t.detachLocked(KindSBOM, key, "")
+	delete(t.sbomObjs, key)
+	if gone && prev.digest != "" {
+		return appendEmission(nil, t.evaluateVulnsLocked(prev.digest))
 	}
-	out := appendEmission(nil, t.evaluateSBOMLocked(prev.digest))
-	return appendEmission(out, t.evaluateVulnsLocked(prev.digest))
+	return nil
+}
+
+// detachLocked removes object key's reference from the digest it pointed
+// at, unless that is newDigest. It reports whether the digest's state was
+// dropped because nothing references it any more.
+func (t *Tracker) detachLocked(kind Kind, key, newDigest string) bool {
+	objs, states := t.vulnObjs, t.vulnDigests
+	if kind == KindSBOM {
+		objs, states = t.sbomObjs, t.sbomDigests
+	}
+	prev, ok := objs[key]
+	if !ok || prev.digest == "" || prev.digest == newDigest {
+		return false
+	}
+	ds := states[prev.digest]
+	if ds == nil {
+		return false
+	}
+	delete(ds.refs, key)
+	if len(ds.refs) > 0 {
+		return false
+	}
+	delete(states, prev.digest)
+	delete(t.sent, sentKey{kind, prev.digest})
+	return true
+}
+
+func (t *Tracker) attachVulnLocked(key string, e *objEntry, p *types.ImageVulnerabilities) {
+	ds := t.vulnDigests[e.digest]
+	if ds == nil {
+		ds = &digestState{refs: map[string]types.WorkloadRef{}}
+		t.vulnDigests[e.digest] = ds
+	}
+	ds.refs[key] = e.workload
+	if ds.vulns == nil || !p.ScannedAt.Before(ds.vulns.ScannedAt) {
+		ds.vulns = p
+	}
+}
+
+func (t *Tracker) attachSBOMLocked(key string, e *objEntry, p *types.ImageSBOM) {
+	ds := t.sbomDigests[e.digest]
+	if ds == nil {
+		ds = &digestState{refs: map[string]types.WorkloadRef{}}
+		t.sbomDigests[e.digest] = ds
+	}
+	ds.refs[key] = e.workload
+	if ds.sbom == nil || !p.ScannedAt.Before(ds.sbom.ScannedAt) {
+		ds.sbom = p
+	}
 }
 
 // Stats reports what the tracker currently holds.
 type Stats struct {
 	VulnDigests, SBOMDigests         int
 	UnresolvedVulns, UnresolvedSBOMs int
+	// VulnPayloads/SBOMPayloads count normalised payloads held in memory:
+	// one per digest plus one per unresolved report.
+	VulnPayloads, SBOMPayloads int
 }
 
 // Stats returns current counts for metrics.
 func (t *Tracker) Stats() Stats {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	var s Stats
-	vd, sd := map[string]struct{}{}, map[string]struct{}{}
-	for _, e := range t.vulns {
+	s := Stats{VulnDigests: len(t.vulnDigests), SBOMDigests: len(t.sbomDigests)}
+	for _, e := range t.vulnObjs {
 		if e.digest == "" {
 			s.UnresolvedVulns++
-		} else {
-			vd[e.digest] = struct{}{}
 		}
 	}
-	for _, e := range t.sboms {
+	for _, e := range t.sbomObjs {
 		if e.digest == "" {
 			s.UnresolvedSBOMs++
-		} else {
-			sd[e.digest] = struct{}{}
 		}
 	}
-	s.VulnDigests, s.SBOMDigests = len(vd), len(sd)
+	s.VulnPayloads = s.VulnDigests + s.UnresolvedVulns
+	s.SBOMPayloads = s.SBOMDigests + s.UnresolvedSBOMs
 	return s
 }
 
@@ -263,12 +313,12 @@ func (t *Tracker) correlateLocked(w types.WorkloadRef, ref string) string {
 	if ref == "" {
 		return ""
 	}
-	for _, e := range t.sboms {
+	for _, e := range t.sbomObjs {
 		if e.digest != "" && e.workload == w && e.ref == ref {
 			return e.digest
 		}
 	}
-	for _, e := range t.vulns {
+	for _, e := range t.vulnObjs {
 		if e.digest != "" && e.workload == w && e.ref == ref {
 			return e.digest
 		}
@@ -287,81 +337,43 @@ func (t *Tracker) resolveExternal(ctx context.Context, w types.WorkloadRef, ref 
 	return NormaliseDigest(d)
 }
 
-func (t *Tracker) sbomForDigestLocked(digest string) *types.ImageSBOM {
-	var best *types.ImageSBOM
-	for _, e := range t.sboms {
-		if e.digest != digest {
-			continue
-		}
-		if best == nil || e.payload.ScannedAt.After(best.ScannedAt) {
-			best = e.payload
-		}
-	}
-	return best
-}
-
 func (t *Tracker) evaluateVulnsLocked(digest string) *Emission {
-	var winnerKey string
-	var winner *vulnEntry
-	var observed []types.WorkloadRef
-	for k, e := range t.vulns {
-		if e.digest != digest {
-			continue
-		}
-		observed = append(observed, e.workload)
-		if winner == nil || e.payload.ScannedAt.After(winner.payload.ScannedAt) ||
-			(e.payload.ScannedAt.Equal(winner.payload.ScannedAt) && k < winnerKey) {
-			winner, winnerKey = e, k
-		}
-	}
-	sk := sentKey{KindVulnerabilities, digest}
-	if winner == nil {
-		delete(t.sent, sk)
+	ds := t.vulnDigests[digest]
+	if ds == nil || ds.vulns == nil {
 		return nil
 	}
-	p := withFilePaths(winner.payload, FilePathsByPURL(t.sbomForDigestLocked(digest)))
+	var sbom *types.ImageSBOM
+	if ss := t.sbomDigests[digest]; ss != nil {
+		sbom = ss.sbom
+	}
+	p := withFilePaths(ds.vulns, FilePathsByPURL(sbom))
 	p.ObservedIn = nil
 	fp := fingerprint(p)
-	p.ObservedIn = uniqueWorkloads(observed)
-	if !t.shouldSendLocked(sk, fp, p.ScannedAt) {
+	if !t.shouldSendLocked(sentKey{KindVulnerabilities, digest}, fp, p.ScannedAt) {
 		return nil
 	}
+	p.ObservedIn = workloadsOf(ds.refs)
 	return &Emission{Kind: KindVulnerabilities, Digest: digest, Vulns: p}
 }
 
 func (t *Tracker) evaluateSBOMLocked(digest string) *Emission {
-	var winnerKey string
-	var winner *sbomEntry
-	var observed []types.WorkloadRef
-	for k, e := range t.sboms {
-		if e.digest != digest {
-			continue
-		}
-		observed = append(observed, e.workload)
-		if winner == nil || e.payload.ScannedAt.After(winner.payload.ScannedAt) ||
-			(e.payload.ScannedAt.Equal(winner.payload.ScannedAt) && k < winnerKey) {
-			winner, winnerKey = e, k
-		}
-	}
-	sk := sentKey{KindSBOM, digest}
-	if winner == nil {
-		delete(t.sent, sk)
+	ds := t.sbomDigests[digest]
+	if ds == nil || ds.sbom == nil {
 		return nil
 	}
-	// Copy: the stored payload is shared with the file-path join.
-	p := *winner.payload
+	p := *ds.sbom // shallow copy; the stored payload is never mutated
 	p.ObservedIn = nil
 	fp := fingerprint(&p)
-	p.ObservedIn = uniqueWorkloads(observed)
-	if !t.shouldSendLocked(sk, fp, p.ScannedAt) {
+	if !t.shouldSendLocked(sentKey{KindSBOM, digest}, fp, p.ScannedAt) {
 		return nil
 	}
+	p.Components = append([]types.Component(nil), ds.sbom.Components...)
+	p.ObservedIn = workloadsOf(ds.refs)
 	return &Emission{Kind: KindSBOM, Digest: digest, SBOM: &p}
 }
 
 // shouldSendLocked records and approves a payload unless it is identical to
-// the last one sent for the key, or older than it (a stale report for the
-// same digest must not overwrite a newer scan).
+// the last one sent for the key, or older than it.
 func (t *Tracker) shouldSendLocked(k sentKey, fp string, scannedAt time.Time) bool {
 	if prev, ok := t.sent[k]; ok {
 		if prev.fingerprint == fp || scannedAt.Before(prev.scannedAt) {
@@ -381,10 +393,10 @@ func fingerprint(v interface{}) string {
 	return hex.EncodeToString(sum[:])
 }
 
-func uniqueWorkloads(in []types.WorkloadRef) []types.WorkloadRef {
+func workloadsOf(refs map[string]types.WorkloadRef) []types.WorkloadRef {
 	seen := map[types.WorkloadRef]struct{}{}
-	out := make([]types.WorkloadRef, 0, len(in))
-	for _, w := range in {
+	out := make([]types.WorkloadRef, 0, len(refs))
+	for _, w := range refs {
 		if _, ok := seen[w]; ok {
 			continue
 		}

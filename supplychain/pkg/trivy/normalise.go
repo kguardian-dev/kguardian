@@ -88,6 +88,7 @@ func imageRefOf(reg registry, a artifact, digest string) types.ImageRef {
 		Registry:   reg.Server,
 		Repository: a.Repository,
 		Tag:        string(a.Tag),
+		DigestKind: types.DigestKindUnknown,
 	}
 }
 

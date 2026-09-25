@@ -1,12 +1,22 @@
 // Package dispatch decouples sources from the broker client. Informer event
 // handlers must not block on network I/O, so emissions go into a coalescing
 // queue keyed by (kind, digest): if a digest changes twice before it is
-// sent, only the latest payload is sent. A failed send is retried with
-// backoff unless a newer payload for the same key has arrived meanwhile.
+// sent, only the latest payload is sent.
+//
+// Failures are handled per key, so one bad payload never holds up the
+// others:
+//   - a non-retryable failure (4xx other than 408/429, an oversized or
+//     unencodable payload) is dropped, logged and counted;
+//   - a retryable one (network, 5xx, 408, 429) waits out its own
+//     exponential backoff with jitter while every other key keeps draining.
+//
+// A payload replaced while in flight or backing off is never retried over
+// its replacement; the replacement starts with a clean backoff.
 package dispatch
 
 import (
 	"context"
+	"math/rand/v2"
 	"sync"
 	"time"
 
@@ -21,18 +31,37 @@ type key struct {
 	digest string
 }
 
-// Dispatcher is a coalescing send queue in front of a broker.Client.
+type item struct {
+	e         trivy.Emission
+	attempts  int
+	notBefore time.Time
+	// gen increments on every Enqueue for the key, so a failure can tell
+	// whether it is still the current payload.
+	gen uint64
+}
+
+// Enricher fills in image metadata (e.g. digest kind) before a send. It
+// runs on the dispatcher goroutine, never in an informer handler.
+type Enricher func(ctx context.Context, e *trivy.Emission)
+
+// Dispatcher is a coalescing, per-key-backoff send queue in front of a
+// broker.Client.
 type Dispatcher struct {
 	client  broker.Client
 	log     *logrus.Logger
 	metrics *metrics.Metrics
 
-	// Backoff bounds for failed sends.
+	// Enrich, when set, runs before each send.
+	Enrich Enricher
+	// Backoff bounds for retryable failures.
 	MinBackoff, MaxBackoff time.Duration
+	// now and jitter are replaceable in tests.
+	now    func() time.Time
+	jitter func(time.Duration) time.Duration
 
 	mu      sync.Mutex
-	pending map[key]trivy.Emission
-	order   []key
+	pending map[key]*item
+	gens    map[key]uint64
 	notify  chan struct{}
 }
 
@@ -44,29 +73,41 @@ func New(client broker.Client, log *logrus.Logger, m *metrics.Metrics) *Dispatch
 		metrics:    m,
 		MinBackoff: 5 * time.Second,
 		MaxBackoff: 5 * time.Minute,
-		pending:    map[key]trivy.Emission{},
-		notify:     make(chan struct{}, 1),
+		now:        time.Now,
+		// Full jitter in [d/2, d): spreads retries without ever retrying
+		// sooner than half the nominal backoff.
+		jitter: func(d time.Duration) time.Duration {
+			if d <= 1 {
+				return d
+			}
+			return d/2 + rand.N(d/2)
+		},
+		pending: map[key]*item{},
+		gens:    map[key]uint64{},
+		notify:  make(chan struct{}, 1),
 	}
 }
 
-// Enqueue queues e, replacing any unsent payload for the same key. Never
-// blocks.
+// Enqueue queues e, replacing any unsent payload for the same key (and its
+// backoff). Never blocks.
 func (d *Dispatcher) Enqueue(e trivy.Emission) {
 	d.mu.Lock()
 	k := key{e.Kind, e.Digest}
-	if _, ok := d.pending[k]; !ok {
-		d.order = append(d.order, k)
-	}
-	d.pending[k] = e
+	d.gens[k]++
+	d.pending[k] = &item{e: e, gen: d.gens[k]}
 	d.setPendingLocked()
 	d.mu.Unlock()
+	d.wake()
+}
+
+func (d *Dispatcher) wake() {
 	select {
 	case d.notify <- struct{}{}:
 	default:
 	}
 }
 
-// Pending returns the number of queued payloads.
+// Pending returns the number of queued payloads (including ones backing off).
 func (d *Dispatcher) Pending() int {
 	d.mu.Lock()
 	defer d.mu.Unlock()
@@ -75,63 +116,114 @@ func (d *Dispatcher) Pending() int {
 
 // Run sends queued payloads until ctx is cancelled.
 func (d *Dispatcher) Run(ctx context.Context) {
-	backoff := time.Duration(0)
 	for {
-		if backoff > 0 {
+		wait := d.sendDue(ctx)
+		var timer <-chan time.Time
+		if wait > 0 {
+			t := time.NewTimer(wait)
+			timer = t.C
 			select {
 			case <-ctx.Done():
-				return
-			case <-time.After(backoff):
-			}
-		} else {
-			select {
-			case <-ctx.Done():
+				t.Stop()
 				return
 			case <-d.notify:
+				t.Stop()
+			case <-timer:
 			}
-		}
-		if d.drain(ctx) {
-			backoff = 0
 			continue
 		}
-		// A send failed: retry the remainder after a backoff.
-		if backoff == 0 {
-			backoff = d.MinBackoff
-		} else if backoff *= 2; backoff > d.MaxBackoff {
-			backoff = d.MaxBackoff
+		select {
+		case <-ctx.Done():
+			return
+		case <-d.notify:
 		}
 	}
 }
 
-// drain sends everything queued, in arrival order. It returns false as soon
-// as one send fails; the failed payload is put back unless it has already
-// been superseded.
-func (d *Dispatcher) drain(ctx context.Context) bool {
+// sendDue sends every payload whose backoff has elapsed, one at a time,
+// and returns how long until the next one is due (0 when nothing waits).
+func (d *Dispatcher) sendDue(ctx context.Context) time.Duration {
 	for {
-		d.mu.Lock()
-		if len(d.order) == 0 {
-			d.mu.Unlock()
-			return true
+		if ctx.Err() != nil {
+			return 0
 		}
-		k := d.order[0]
-		d.order = d.order[1:]
-		e := d.pending[k]
-		delete(d.pending, k)
-		d.setPendingLocked()
-		d.mu.Unlock()
+		k, it, wait := d.nextDue()
+		if it == nil {
+			return wait
+		}
+		if d.Enrich != nil {
+			d.Enrich(ctx, &it.e)
+		}
+		err := d.send(ctx, it.e)
+		d.finish(k, it, err)
+	}
+}
 
-		if err := d.send(ctx, e); err != nil {
-			d.log.WithError(err).WithFields(logrus.Fields{"kind": e.Kind, "digest": e.Digest}).
-				Warn("broker submission failed; will retry")
-			d.mu.Lock()
-			if _, superseded := d.pending[k]; !superseded {
-				d.pending[k] = e
-				d.order = append([]key{k}, d.order...)
-				d.setPendingLocked()
+// nextDue pops the due item with the earliest notBefore. When none is due
+// it returns the time until the soonest one.
+func (d *Dispatcher) nextDue() (key, *item, time.Duration) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	now := d.now()
+	var bestK key
+	var best *item
+	var soonest time.Duration
+	for k, it := range d.pending {
+		if it.notBefore.After(now) {
+			if w := it.notBefore.Sub(now); soonest == 0 || w < soonest {
+				soonest = w
 			}
-			d.mu.Unlock()
-			return false
+			continue
 		}
+		if best == nil || it.notBefore.Before(best.notBefore) {
+			bestK, best = k, it
+		}
+	}
+	if best == nil {
+		return key{}, nil, soonest
+	}
+	delete(d.pending, bestK)
+	d.setPendingLocked()
+	return bestK, best, 0
+}
+
+func (d *Dispatcher) finish(k key, it *item, err error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	fields := logrus.Fields{"kind": it.e.Kind, "digest": it.e.Digest, "attempt": it.attempts + 1}
+	switch {
+	case err == nil:
+		d.forgetLocked(k)
+		return
+	case !broker.Retryable(err):
+		d.log.WithError(err).WithFields(fields).Error("broker rejected payload; dropping it (not retryable)")
+		if d.metrics != nil {
+			d.metrics.Dropped.WithLabelValues(string(it.e.Kind), broker.Reason(err)).Inc()
+		}
+		d.forgetLocked(k)
+		return
+	}
+	if _, superseded := d.pending[k]; superseded || d.gens[k] != it.gen {
+		return // a newer payload replaced it; that one is what gets sent
+	}
+	it.attempts++
+	backoff := d.MinBackoff << min(it.attempts-1, 30)
+	if backoff <= 0 || backoff > d.MaxBackoff {
+		backoff = d.MaxBackoff
+	}
+	backoff = d.jitter(backoff)
+	it.notBefore = d.now().Add(backoff)
+	d.pending[k] = it
+	d.setPendingLocked()
+	d.log.WithError(err).WithFields(fields).WithField("retry_in", backoff.String()).
+		Warn("broker submission failed; will retry")
+}
+
+// forgetLocked drops the generation counter once nothing is queued for k,
+// so the map stays bounded by the digests currently in play.
+func (d *Dispatcher) forgetLocked(k key) {
+	if _, queued := d.pending[k]; !queued {
+		delete(d.gens, k)
 	}
 }
 
@@ -145,8 +237,12 @@ func (d *Dispatcher) send(ctx context.Context, e trivy.Emission) error {
 	}
 	if d.metrics != nil {
 		result := "ok"
-		if err != nil {
-			result = "error"
+		switch {
+		case err == nil:
+		case broker.Retryable(err):
+			result = "retry"
+		default:
+			result = "dropped"
 		}
 		d.metrics.Emissions.WithLabelValues(string(e.Kind), result).Inc()
 	}

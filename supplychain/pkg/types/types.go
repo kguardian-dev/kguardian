@@ -48,7 +48,21 @@ type ImageRef struct {
 	Registry   string `json:"registry,omitempty"`
 	Repository string `json:"repository,omitempty"`
 	Tag        string `json:"tag,omitempty"`
+	// DigestKind says what Digest points at: an image index (multi-arch
+	// list), a single-platform manifest, or unknown when the registry was
+	// not consulted or could not be reached anonymously.
+	DigestKind string `json:"digest_kind"`
+	// PlatformManifests maps "os/arch[/variant]" to the platform manifest
+	// digest, when Digest is an index. Empty otherwise.
+	PlatformManifests map[string]string `json:"platform_manifests,omitempty"`
 }
+
+// DigestKind values.
+const (
+	DigestKindIndex    = "index"
+	DigestKindManifest = "manifest"
+	DigestKindUnknown  = "unknown"
+)
 
 // WorkloadRef names a workload container a source report was produced for.
 // Informational provenance only: it records which report(s) this payload
@@ -158,5 +172,18 @@ type ImageSBOM struct {
 	Format      string        `json:"format"`
 	SpecVersion string        `json:"spec_version,omitempty"`
 	ObservedIn  []WorkloadRef `json:"observed_in,omitempty"`
-	Components  []Component   `json:"components"`
+	// Page is set when the SBOM is sent in several requests (see Page).
+	Page       *Page       `json:"page,omitempty"`
+	Components []Component `json:"components"`
+}
+
+// Page identifies one request of an SBOM split across several. Every page
+// repeats the header fields; the broker assembles pages sharing SetID and
+// replaces the stored SBOM for (digest, source) only once all Total pages
+// (Index 0..Total-1) of that set have arrived. A newer set supersedes an
+// incomplete older one.
+type Page struct {
+	SetID string `json:"set_id"`
+	Index int    `json:"index"`
+	Total int    `json:"total"`
 }

@@ -46,7 +46,7 @@ func TestLoadConfigDefaults(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if c.ListenAddr != ":8083" || !c.TrivyEnabled || c.BrokerIngest ||
+	if c.ListenAddr != ":8083" || !c.TrivyEnabled || c.BrokerIngest || !c.RegistryLookup ||
 		c.TrivyResync != 10*time.Minute || c.TrivyRecheck != 5*time.Minute {
 		t.Errorf("defaults: %+v", c)
 	}
@@ -88,6 +88,7 @@ func TestLoadConfigOverridesAndErrors(t *testing.T) {
 		{"BROKER_INGEST_ENABLED": "yes please"},
 		{"TRIVY_RESYNC_PERIOD": "0s"},
 		{"TRIVY_RECHECK_PERIOD": "soon"},
+		{"REGISTRY_LOOKUP_ENABLED": "sometimes"},
 	} {
 		if _, err := loadConfig(envMap(bad)); err == nil {
 			t.Errorf("accepted %v", bad)

@@ -31,29 +31,115 @@ payload per image digest, and hands each payload to a broker client.
 - **Optional source.** If the Trivy Operator CRDs are not installed the
   source idles, `/readyz` still passes, and
   `kguardian_supplychain_source_available{source="trivy-operator"}` is 0.
-  Discovery is re-checked every `TRIVY_RECHECK_PERIOD`. The component makes
-  no outbound requests except to the Kubernetes API (and, once enabled, the
-  broker).
 - **Trivy's format, not Trivy's code.** The report types are a small local
   mirror of trivy-operator's `v1alpha1` API. Nothing from the Trivy module
   tree is linked in.
+
+### Lifecycle and readiness
+
+- At startup, discovery of `aquasecurity.github.io/v1alpha1` is retried with
+  exponential backoff (1 s doubling to 2 min). `/readyz` fails until it
+  answers.
+- Discovery re-runs every `TRIVY_RECHECK_PERIOD`. When the set of served
+  report resources changes (Trivy Operator installed, upgraded or removed),
+  the informers are restarted for the new set. Restarting re-lists, but
+  nothing already sent is sent again.
+- While watching, `/readyz` passes once every informer has synced and none
+  has failed `WatchErrorThreshold` (3) consecutive list/watch calls. A
+  streak ends as soon as a list or watch makes progress.
+  `kguardian_supplychain_source_healthy` mirrors this.
+- **Missing RBAC leaves the pod NotReady.** If the ClusterRole is absent or
+  wrong, the list is Forbidden, the cache never syncs, and `/readyz` returns
+  503. Check the pod's logs for `forbidden`.
+
+### Memory
+
+The informer stores a **slim** copy of each report. A transform decodes it
+and keeps only the fields the tracker reads: identity labels, artifact,
+scanner, and per-vulnerability ids, packages, versions, severity and scores.
+For SBOMs it keeps the component name, version, PURL, type, licences and the
+Trivy properties listed in `pkg/trivy/slim.go`. Descriptions, links, the
+dependency graph, hashes, suppliers and `managedFields` are dropped before
+caching.
+
+The tracker holds **one normalised payload per (kind, digest)** plus the set
+of reports that point at it. The only per-report payloads are for tag-only
+reports still waiting for a digest.
+
+So, roughly: memory ≈ (number of reports × slim report size) + (distinct
+digests × normalised payload size). The first term grows with workload
+containers, the second with distinct images. No figures are given here
+because none have been measured on a real cluster yet. Watch the pod's
+working set against `kguardian_supplychain_tracked_digests` and raise
+`supplychain.resources.limits.memory` on large clusters.
+
+### Digest kind (registry lookup)
+
+Trivy Operator reports the digest it resolved. That can be a multi-arch
+**index**, while kubelet's `imageID` for a running container is often the
+platform **manifest**. So that the broker can join either way, each payload
+carries:
+
+- `image.digest`: exactly what the source reported.
+- `image.digest_kind`: `index`, `manifest` or `unknown`.
+- `image.platform_manifests`: for an index, `"os/arch[/variant]"` → manifest
+  digest. Attestation entries (`unknown/unknown`) are skipped.
+
+These come from an anonymous registry lookup (go-containerregistry with
+`authn.Anonymous`) done on the send path, never in an informer handler. It
+**never** uses pull secrets or any other credential. A private or
+unreachable registry leaves the kind as `unknown`, and that result is cached
+for an hour. Definitive answers are cached per digest, since digests are
+immutable. Disable the lookup with `REGISTRY_LOOKUP_ENABLED=false`
+(`supplychain.registryLookup.enabled`), for example on air-gapped clusters.
+Everything then stays `unknown`.
+
+**Join contract for the broker (P1-3).** To attach a payload to running
+containers, the broker should try, in order:
+
+1. the container's kubelet `imageID` digest equal to `image.digest`;
+2. the `imageID` digest equal to a value in `image.platform_manifests`
+   (index → platform manifest);
+3. `(workload, container, repository:tag)` matching an `observed_in` entry
+   plus `image.repository`/`image.tag`, as a last resort.
+
+It should record which rule matched.
 
 ### Broker hand-off
 
 Broker ingest is **off** until the broker's supply-chain routes land (#1533
 P1-3). Until then the default `LoggingClient` logs one line per payload
-(digest, ref, counts by severity) and sends nothing.
+(digest, digest kind, ref, counts by severity) and sends nothing.
 
-With `BROKER_INGEST_ENABLED=true` the `HTTPClient` POSTs each payload as JSON
-to the broker with `Authorization: Bearer $BROKER_AUTH_TOKEN`. That token is
-the broker's scoped key for the `supplychain` scope. The route paths
-(`POST /images/{digest}/vulnerabilities`, `POST /images/{digest}/sbom`) are
-provisional; P1-3 owns the final shape.
+With `BROKER_INGEST_ENABLED=true`, the `HTTPClient`:
 
-Sends go through a coalescing queue keyed by (kind, digest). Informer
-handlers never block on the network, a burst of updates to one digest
-sends only the latest, and a failed send retries with backoff (5 s doubling
-to 5 min) unless a newer payload has replaced it.
+- POSTs **gzip-compressed JSON** (`Content-Encoding: gzip`,
+  `Content-Type: application/json`) with
+  `Authorization: Bearer $BROKER_AUTH_TOKEN`, the broker's scoped key for
+  the `supplychain` scope.
+- Keeps every request body at or under **1 MiB compressed**
+  (`broker.MaxRequestBytes`). P1-3 sets the broker's ingest limit to match.
+  - Vulnerability sets are sent whole. They come from one Kubernetes object,
+    which etcd already bounds. One that still compresses above the limit is
+    rejected locally as `too_large` and never sent.
+  - SBOMs are sent whole when they fit. Otherwise they are **paged**: see
+    [SBOM paging](#sbom-paging).
+- Uses provisional route paths `POST /images/{digest}/vulnerabilities` and
+  `POST /images/{digest}/sbom`; P1-3 owns the final shape.
+
+Sends go through a queue keyed by (kind, digest). Informer handlers never
+block on the network, and a burst of updates to one digest sends only the
+latest. Each key has its own retry state, so one bad payload never holds up
+the others:
+
+| Outcome | Handling |
+|---|---|
+| 2xx | Done. |
+| 5xx, 408, 429, network error | Retried on that key only, with exponential backoff (5 s doubling to 5 min) and jitter (each wait lies between half and all of the nominal backoff). Other keys keep draining. |
+| Any other 4xx (400, 401, 403, 404, 413, 422, ...), a payload too large even after paging, an encoding error | **Dropped**: logged at error level and counted in `kguardian_supplychain_emissions_dropped_total{kind,reason}`. Never retried. |
+
+A payload replaced by a newer one for the same key is never retried over
+it. The replacement starts with a clean backoff.
 
 ## Commands
 
@@ -71,7 +157,8 @@ to 5 min) unless a newer payload has replaced it.
 | `LOG_LEVEL` | `info` | logrus level. |
 | `TRIVY_OPERATOR_ENABLED` | `true` | Enable the Trivy Operator source. The chart sets this from `supplychain.sources.trivyOperator.enabled`. |
 | `TRIVY_RESYNC_PERIOD` | `10m` | Informer resync. It also retries digest resolution for held-back reports. |
-| `TRIVY_RECHECK_PERIOD` | `5m` | How often to re-check whether the CRDs have been installed. |
+| `TRIVY_RECHECK_PERIOD` | `5m` | How often discovery re-runs to pick up installed or removed CRDs. |
+| `REGISTRY_LOOKUP_ENABLED` | `true` | Anonymous registry lookup for `digest_kind` / `platform_manifests`. |
 | `BROKER_INGEST_ENABLED` | `false` | Send payloads to the broker instead of logging them. |
 | `BROKER_URL` | `http://kguardian-broker:9090` | Broker base URL. |
 | `BROKER_AUTH_TOKEN` | *(unset)* | Scoped broker token, sent as a bearer token. |
@@ -81,7 +168,7 @@ to 5 min) unless a newer payload has replaced it.
 | Path | |
 |---|---|
 | `GET /healthz` | 200 while the process serves. |
-| `GET /readyz` | 200 once every enabled source has synced its caches or found its API absent. |
+| `GET /readyz` | 200 once discovery has answered and every running informer has synced and is not failing (see [Lifecycle and readiness](#lifecycle-and-readiness)). |
 | `GET /metrics` | Prometheus text format. |
 
 There is no data endpoint. Findings go to the broker, which owns storage,
@@ -92,11 +179,13 @@ auth and the read APIs.
 | Metric | Labels | |
 |---|---|---|
 | `kguardian_supplychain_source_available` | `source` | 1 when the source's API is served. |
+| `kguardian_supplychain_source_healthy` | `source` | 0 while an informer is on a list/watch failure streak. |
 | `kguardian_supplychain_report_events_total` | `source`, `kind`, `event` | Informer events: `add`, `update`, `delete`, `decode_error`. |
-| `kguardian_supplychain_tracked_digests` | `source`, `kind` | Distinct digests held. |
+| `kguardian_supplychain_tracked_digests` | `source`, `kind` | Distinct digests held (one payload each). |
 | `kguardian_supplychain_unresolved_reports` | `source`, `kind` | Reports held back for lack of a digest. |
-| `kguardian_supplychain_emissions_total` | `kind`, `result` | Payloads handed to the broker client (`ok` / `error`). |
-| `kguardian_supplychain_pending_emissions` | | Coalescing queue depth. |
+| `kguardian_supplychain_emissions_total` | `kind`, `result` | Send attempts: `ok`, `retry`, `dropped`. |
+| `kguardian_supplychain_emissions_dropped_total` | `kind`, `reason` | Payloads dropped as non-retryable (`http_<code>`, `too_large`, `encoding`). |
+| `kguardian_supplychain_pending_emissions` | | Queue depth, including keys waiting out a backoff. |
 
 Plus the standard Go runtime and process collectors.
 
@@ -116,7 +205,12 @@ broker holds for `(image.digest, source)`. Go definitions are in
     "ref": "ghcr.io/example/api:2.4.1",
     "registry": "ghcr.io",
     "repository": "example/api",
-    "tag": "2.4.1"
+    "tag": "2.4.1",
+    "digest_kind": "index",
+    "platform_manifests": {
+      "linux/amd64": "sha256:1f3a...",
+      "linux/arm64": "sha256:9c0d..."
+    }
   },
   "source": "trivy-operator",
   "scanner": { "name": "Trivy", "vendor": "Aqua Security", "version": "0.58.1" },
@@ -147,7 +241,9 @@ broker holds for `(image.digest, source)`. Go definitions are in
 
 | Field | Notes |
 |---|---|
-| `image.digest` | `sha256:<64 hex>`. Always set: payloads are never keyed by tag. This is the digest the scanner reported, which can be a multi-arch index digest rather than the platform manifest. The broker should match it against both. |
+| `image.digest` | `sha256:<64 hex>`. Always set: payloads are never keyed by tag. This is the digest the scanner reported. It can be a multi-arch index digest rather than the platform manifest. |
+| `image.digest_kind` | `index`, `manifest` or `unknown`. See [Digest kind](#digest-kind-registry-lookup). |
+| `image.platform_manifests` | For an index: `"os/arch[/variant]"` → platform manifest digest. Omitted otherwise. |
 | `scanned_at` | When the source produced the report (`report.updateTimestamp`). |
 | `db_updated_at` | Build time of the vulnerability DB used. **Omitted for Trivy Operator**, which does not record it. The Grype matcher will set it. |
 | `observed_in` | The report(s) this payload was built from at send time. Provenance only. The authoritative workload-to-image mapping is the broker's inventory. |
@@ -191,6 +287,35 @@ serialises the same way.
 
 Components are the CycloneDX `components` with Trivy's `aquasecurity:trivy:*`
 properties lifted into fields. The dependency graph is not carried in v1.
+
+### SBOM paging
+
+An `ImageSBOM` whose gzip body would exceed 1 MiB is split into pages.
+
+- Pages start at 2000 components each, and any page still over the limit is
+  halved until it fits.
+- Every page repeats the header fields (`schema_version`, `image`, `source`,
+  `scanner`, `scanned_at`, `format`, `spec_version`, `observed_in`) and adds:
+
+  ```json
+  "page": { "set_id": "5f0c...", "index": 0, "total": 3 }
+  ```
+
+- `set_id` is a hash of the SBOM's content. A retry of the same SBOM reuses
+  it, so re-sent pages are idempotent.
+- Pages are sent in index order. If any page fails, the whole set is retried
+  later (or dropped, per the table under Broker hand-off).
+
+The broker should:
+
+- store pages by `(digest, source, set_id)`;
+- replace the stored SBOM only once all `total` pages (`index` 0 to
+  `total-1`) of one set have arrived;
+- let a newer complete set supersede an older one, and discard incomplete
+  sets after a timeout.
+
+An SBOM that fits in one request carries no `page` field. A single component
+too large to fit on its own is dropped as `too_large`.
 
 ## Development
 

@@ -26,6 +26,7 @@ import (
 	"github.com/kguardian-dev/kguardian/supplychain/pkg/broker"
 	"github.com/kguardian-dev/kguardian/supplychain/pkg/dispatch"
 	"github.com/kguardian-dev/kguardian/supplychain/pkg/metrics"
+	"github.com/kguardian-dev/kguardian/supplychain/pkg/registry"
 	"github.com/kguardian-dev/kguardian/supplychain/pkg/server"
 	"github.com/kguardian-dev/kguardian/supplychain/pkg/trivy"
 	"github.com/sirupsen/logrus"
@@ -83,14 +84,15 @@ func run(args []string, stdout, stderr io.Writer) int {
 
 // config is the serve-mode configuration, read from the environment.
 type config struct {
-	ListenAddr   string
-	LogLevel     string
-	TrivyEnabled bool
-	TrivyResync  time.Duration
-	TrivyRecheck time.Duration
-	BrokerIngest bool
-	BrokerURL    string
-	BrokerToken  string
+	ListenAddr     string
+	LogLevel       string
+	TrivyEnabled   bool
+	TrivyResync    time.Duration
+	TrivyRecheck   time.Duration
+	BrokerIngest   bool
+	RegistryLookup bool
+	BrokerURL      string
+	BrokerToken    string
 }
 
 func loadConfig(getenv func(string) string) (config, error) {
@@ -112,6 +114,9 @@ func loadConfig(getenv func(string) string) (config, error) {
 	}
 	if c.BrokerIngest, err = strconv.ParseBool(env("BROKER_INGEST_ENABLED", "false")); err != nil {
 		return c, fmt.Errorf("BROKER_INGEST_ENABLED: %w", err)
+	}
+	if c.RegistryLookup, err = strconv.ParseBool(env("REGISTRY_LOOKUP_ENABLED", "true")); err != nil {
+		return c, fmt.Errorf("REGISTRY_LOOKUP_ENABLED: %w", err)
 	}
 	if c.TrivyResync, err = time.ParseDuration(env("TRIVY_RESYNC_PERIOD", "10m")); err != nil || c.TrivyResync <= 0 {
 		return c, fmt.Errorf("TRIVY_RESYNC_PERIOD must be a positive duration")
@@ -142,10 +147,11 @@ func serve() error {
 		log.Warnf("LOG_LEVEL=%q is not a valid logrus level; using info", c.LogLevel)
 	}
 	log.WithFields(logrus.Fields{
-		"version":       version,
-		"trivyOperator": c.TrivyEnabled,
-		"brokerIngest":  c.BrokerIngest,
-		"brokerAuth":    c.BrokerToken != "",
+		"version":        version,
+		"trivyOperator":  c.TrivyEnabled,
+		"brokerIngest":   c.BrokerIngest,
+		"registryLookup": c.RegistryLookup,
+		"brokerAuth":     c.BrokerToken != "",
 	}).Info("kguardian-supplychain starting")
 
 	client, err := newBrokerClient(c, log)
@@ -158,6 +164,9 @@ func serve() error {
 
 	m := metrics.New()
 	disp := dispatch.New(client, log, m)
+	if c.RegistryLookup {
+		disp.Enrich = enricher(registry.New())
+	}
 
 	var readiness []func() bool
 	var wg sync.WaitGroup
@@ -225,6 +234,19 @@ func serve() error {
 	}
 	wg.Wait()
 	return err
+}
+
+// enricher classifies each payload's digest (index vs manifest) with an
+// anonymous registry lookup before it is sent.
+func enricher(in *registry.Inspector) dispatch.Enricher {
+	return func(ctx context.Context, e *trivy.Emission) {
+		switch {
+		case e.Vulns != nil:
+			in.Enrich(ctx, &e.Vulns.Image)
+		case e.SBOM != nil:
+			in.Enrich(ctx, &e.SBOM.Image)
+		}
+	}
 }
 
 // loadKubeConfig prefers in-cluster config and falls back to the local

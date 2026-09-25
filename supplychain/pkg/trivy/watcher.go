@@ -3,6 +3,8 @@ package trivy
 import (
 	"context"
 	"fmt"
+	"sort"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -28,9 +30,16 @@ type Sink interface {
 // Watcher list/watches Trivy Operator reports (get/list/watch only) and
 // feeds them through a Tracker into a Sink.
 //
-// If the CRDs are not served (Trivy Operator not installed) the watcher
-// idles, reports the source unavailable, and re-checks discovery every
-// RecheckPeriod. It never fails the process for a missing optional source.
+// Lifecycle:
+//   - Discovery is retried with exponential backoff until it answers; the
+//     source is not ready before that.
+//   - If the CRDs are not served (Trivy Operator not installed) the source
+//     idles and is ready. Discovery re-runs every RecheckPeriod, and the
+//     informers are (re)started whenever the set of served report
+//     resources changes, so CRDs installed later get watched.
+//   - While watching, the source is ready once every informer has synced
+//     and none has failed WatchErrorThreshold times in a row. Missing RBAC
+//     (a Forbidden list) therefore keeps the pod NotReady.
 type Watcher struct {
 	Dynamic   dynamic.Interface
 	Discovery discovery.ServerResourcesInterfaceWithContext
@@ -42,48 +51,181 @@ type Watcher struct {
 	// ResyncPeriod re-delivers every cached report; it is also what
 	// retries digest resolution for held-back reports. Default 10m.
 	ResyncPeriod time.Duration
-	// RecheckPeriod is how often discovery is retried while the CRDs are
-	// absent. Default 5m.
+	// RecheckPeriod is how often discovery re-runs. Default 5m.
 	RecheckPeriod time.Duration
+	// DiscoveryMinBackoff/MaxBackoff bound the retry of a failing
+	// discovery call. Defaults 1s and 2m.
+	DiscoveryMinBackoff, DiscoveryMaxBackoff time.Duration
+	// WatchErrorThreshold consecutive list/watch errors on one informer
+	// mark the source not ready. Default 3.
+	WatchErrorThreshold int
 
-	ready atomic.Bool
+	discovered atomic.Bool
+	mu         sync.Mutex
+	running    *runningSet
 }
 
-// Ready is true once the source has either synced its caches or
-// established that the CRDs are absent.
-func (w *Watcher) Ready() bool { return w.ready.Load() }
+type runningSet struct {
+	gvrs      []schema.GroupVersionResource
+	cancel    context.CancelFunc
+	factory   dynamicinformer.DynamicSharedInformerFactory
+	informers []*watchedInformer
+}
 
-// Run blocks until ctx is cancelled.
-func (w *Watcher) Run(ctx context.Context) error {
+// watchedInformer tracks consecutive list/watch failures of one informer.
+// A failure streak ends when the informer's last-synced resourceVersion
+// moves, i.e. a list or watch has succeeded since the last error.
+type watchedInformer struct {
+	inf cache.SharedIndexInformer
+
+	mu        sync.Mutex
+	errors    int
+	rvAtError string
+}
+
+func (wi *watchedInformer) onError() {
+	wi.mu.Lock()
+	defer wi.mu.Unlock()
+	wi.errors++
+	wi.rvAtError = wi.inf.LastSyncResourceVersion()
+}
+
+func (wi *watchedInformer) healthy(threshold int) bool {
+	wi.mu.Lock()
+	defer wi.mu.Unlock()
+	if wi.errors == 0 {
+		return true
+	}
+	if wi.inf.LastSyncResourceVersion() != wi.rvAtError {
+		wi.errors = 0
+		return true
+	}
+	return wi.errors < threshold
+}
+
+func (w *Watcher) defaults() {
 	if w.ResyncPeriod <= 0 {
 		w.ResyncPeriod = 10 * time.Minute
 	}
 	if w.RecheckPeriod <= 0 {
 		w.RecheckPeriod = 5 * time.Minute
 	}
-	loggedAbsent := false
+	if w.DiscoveryMinBackoff <= 0 {
+		w.DiscoveryMinBackoff = time.Second
+	}
+	if w.DiscoveryMaxBackoff <= 0 {
+		w.DiscoveryMaxBackoff = 2 * time.Minute
+	}
+	if w.WatchErrorThreshold <= 0 {
+		w.WatchErrorThreshold = 3
+	}
+}
+
+// Ready reports whether the source is usable: discovery has answered, and
+// any running informers have synced and are not failing.
+func (w *Watcher) Ready() bool {
+	if !w.discovered.Load() {
+		return false
+	}
+	w.mu.Lock()
+	rs := w.running
+	w.mu.Unlock()
+	healthy := true
+	if rs != nil {
+		for _, wi := range rs.informers {
+			if !wi.inf.HasSynced() {
+				return false
+			}
+			if !wi.healthy(w.WatchErrorThreshold) {
+				healthy = false
+			}
+		}
+	}
+	if w.Metrics != nil {
+		v := 0.0
+		if healthy {
+			v = 1
+		}
+		w.Metrics.SourceHealthy.WithLabelValues(SourceName).Set(v)
+	}
+	return healthy
+}
+
+// Run blocks until ctx is cancelled.
+func (w *Watcher) Run(ctx context.Context) error {
+	w.defaults()
+	defer w.stop()
+	backoff := w.DiscoveryMinBackoff
 	for {
 		served, err := w.servedResources(ctx)
+		wait := w.RecheckPeriod
 		if err != nil {
-			w.Log.WithError(err).Warn("trivy-operator: discovery failed; will retry")
-		}
-		if len(served) > 0 {
-			w.setAvailable(true)
-			return w.watch(ctx, served)
-		}
-		w.setAvailable(false)
-		w.ready.Store(true) // nothing to sync: an absent optional source is a ready state
-		if !loggedAbsent && err == nil {
-			w.Log.WithField("recheck", w.RecheckPeriod.String()).
-				Info("trivy-operator: VulnerabilityReport/SbomReport CRDs not served; source idle")
-			loggedAbsent = true
+			if ctx.Err() != nil {
+				return nil
+			}
+			w.Log.WithError(err).WithField("retry_in", backoff.String()).
+				Warn("trivy-operator: discovery failed; retrying")
+			wait = backoff
+			backoff = min(backoff*2, w.DiscoveryMaxBackoff)
+		} else {
+			backoff = w.DiscoveryMinBackoff
+			w.reconcile(ctx, served)
+			w.discovered.Store(true)
 		}
 		select {
 		case <-ctx.Done():
 			return nil
-		case <-time.After(w.RecheckPeriod):
+		case <-time.After(wait):
 		}
 	}
+}
+
+// reconcile (re)starts the informers when the served set changes.
+func (w *Watcher) reconcile(ctx context.Context, served []schema.GroupVersionResource) {
+	w.mu.Lock()
+	cur := w.running
+	w.mu.Unlock()
+	if cur != nil && sameGVRs(cur.gvrs, served) {
+		return
+	}
+	w.stop()
+	w.setAvailable(len(served) > 0)
+	if len(served) == 0 {
+		w.Log.WithField("recheck", w.RecheckPeriod.String()).
+			Info("trivy-operator: VulnerabilityReport/SbomReport CRDs not served; source idle")
+		return
+	}
+	rs, err := w.start(ctx, served)
+	if err != nil {
+		w.Log.WithError(err).Error("trivy-operator: starting informers")
+		return
+	}
+	w.mu.Lock()
+	w.running = rs
+	w.mu.Unlock()
+}
+
+func (w *Watcher) stop() {
+	w.mu.Lock()
+	rs := w.running
+	w.running = nil
+	w.mu.Unlock()
+	if rs != nil {
+		rs.cancel()
+		rs.factory.Shutdown()
+	}
+}
+
+func sameGVRs(a, b []schema.GroupVersionResource) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }
 
 func (w *Watcher) setAvailable(ok bool) {
@@ -98,7 +240,7 @@ func (w *Watcher) setAvailable(ok bool) {
 }
 
 // servedResources returns which of the two report GVRs the API server
-// serves.
+// serves, sorted. A NotFound group version means "none".
 func (w *Watcher) servedResources(ctx context.Context) ([]schema.GroupVersionResource, error) {
 	list, err := w.Discovery.ServerResourcesForGroupVersionWithContext(ctx, Group+"/"+Version)
 	if err != nil {
@@ -116,39 +258,43 @@ func (w *Watcher) servedResources(ctx context.Context) ([]schema.GroupVersionRes
 			out = append(out, SbomReportGVR)
 		}
 	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Resource < out[j].Resource })
 	return out, nil
 }
 
-func (w *Watcher) watch(ctx context.Context, gvrs []schema.GroupVersionResource) error {
+func (w *Watcher) start(parent context.Context, gvrs []schema.GroupVersionResource) (*runningSet, error) {
+	ctx, cancel := context.WithCancel(parent)
 	factory := dynamicinformer.NewDynamicSharedInformerFactory(w.Dynamic, w.ResyncPeriod)
-	var synced []cache.InformerSynced
+	rs := &runningSet{gvrs: gvrs, cancel: cancel, factory: factory}
 	for _, gvr := range gvrs {
 		inf := factory.ForResource(gvr).Informer()
-		// Reports are the largest objects this process caches; drop the
-		// fields it never reads before they are stored.
-		if err := inf.SetTransform(stripUnused); err != nil {
-			return fmt.Errorf("setting transform for %s: %w", gvr.Resource, err)
-		}
 		kind := KindVulnerabilities
 		if gvr == SbomReportGVR {
 			kind = KindSBOM
 		}
-		if _, err := inf.AddEventHandler(w.handlers(ctx, kind)); err != nil {
-			return fmt.Errorf("adding handler for %s: %w", gvr.Resource, err)
+		// Reports are the largest objects this process caches: store only
+		// the fields the tracker reads.
+		if err := inf.SetTransform(slimTransform(kind)); err != nil {
+			cancel()
+			return nil, fmt.Errorf("setting transform for %s: %w", gvr.Resource, err)
 		}
-		synced = append(synced, inf.HasSynced)
+		wi := &watchedInformer{inf: inf}
+		if err := inf.SetWatchErrorHandlerWithContext(func(ctx context.Context, r *cache.Reflector, err error) {
+			wi.onError()
+			cache.DefaultWatchErrorHandler(ctx, r, err)
+		}); err != nil {
+			cancel()
+			return nil, fmt.Errorf("setting watch error handler for %s: %w", gvr.Resource, err)
+		}
+		if _, err := inf.AddEventHandler(w.handlers(ctx, kind)); err != nil {
+			cancel()
+			return nil, fmt.Errorf("adding handler for %s: %w", gvr.Resource, err)
+		}
+		rs.informers = append(rs.informers, wi)
 		w.Log.WithField("resource", gvr.Resource).Info("trivy-operator: watching")
 	}
 	factory.Start(ctx.Done())
-	if !cache.WaitForCacheSync(ctx.Done(), synced...) {
-		return ctx.Err()
-	}
-	w.ready.Store(true)
-	w.updateGauges()
-	w.Log.Info("trivy-operator: caches synced")
-	<-ctx.Done()
-	factory.Shutdown()
-	return nil
+	return rs, nil
 }
 
 func (w *Watcher) handlers(ctx context.Context, kind Kind) cache.ResourceEventHandlerFuncs {
@@ -223,17 +369,4 @@ func (w *Watcher) updateGauges() {
 	w.Metrics.TrackedDigests.WithLabelValues(SourceName, string(KindSBOM)).Set(float64(s.SBOMDigests))
 	w.Metrics.UnresolvedReports.WithLabelValues(SourceName, string(KindVulnerabilities)).Set(float64(s.UnresolvedVulns))
 	w.Metrics.UnresolvedReports.WithLabelValues(SourceName, string(KindSBOM)).Set(float64(s.UnresolvedSBOMs))
-}
-
-// stripUnused drops managedFields and the last-applied annotation from
-// cached report objects.
-func stripUnused(obj interface{}) (interface{}, error) {
-	if u, ok := obj.(*unstructured.Unstructured); ok {
-		u.SetManagedFields(nil)
-		if ann := u.GetAnnotations(); ann != nil {
-			delete(ann, "kubectl.kubernetes.io/last-applied-configuration")
-			u.SetAnnotations(ann)
-		}
-	}
-	return obj, nil
 }

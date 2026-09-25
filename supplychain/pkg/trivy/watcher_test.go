@@ -3,7 +3,6 @@ package trivy
 import (
 	"context"
 	"io"
-	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -185,28 +184,6 @@ func TestWatcherBadObjectIsCountedNotFatal(t *testing.T) {
 	w.handle(context.Background(), KindVulnerabilities, "add", bad)
 	if v := testutil.ToFloat64(m.ReportEvents.WithLabelValues(SourceName, string(KindVulnerabilities), "decode_error")); v != 1 {
 		t.Errorf("decode_error = %v", v)
-	}
-}
-
-func TestStripUnused(t *testing.T) {
-	u := toUnstructured(t, "vulnerabilityreport-api-digest.yaml", "VulnerabilityReport")
-	u.SetAnnotations(map[string]string{
-		"kubectl.kubernetes.io/last-applied-configuration": strings.Repeat("x", 100),
-		"keep": "me",
-	})
-	if len(u.GetManagedFields()) == 0 {
-		t.Fatal("fixture should carry managedFields")
-	}
-	out, err := stripUnused(u)
-	if err != nil {
-		t.Fatal(err)
-	}
-	s := out.(*unstructured.Unstructured)
-	if len(s.GetManagedFields()) != 0 {
-		t.Error("managedFields kept")
-	}
-	if a := s.GetAnnotations(); len(a) != 1 || a["keep"] != "me" {
-		t.Errorf("annotations: %v", a)
 	}
 }
 
