@@ -1,0 +1,77 @@
+# Derived fixture (not an upstream file). Shape follows trivy-operator v0.34.0
+# pkg/apis/aquasecurity/v1alpha1/sbom_types.go and the CycloneDX properties in
+# docs/docs/crds/sbom-report.md, plus the aquasecurity:trivy:FilePath property
+# Trivy writes for language packages. Same image as
+# vulnerabilityreport-api-digest.yaml, so its file paths join onto that
+# report's express finding.
+apiVersion: aquasecurity.github.io/v1alpha1
+kind: SbomReport
+metadata:
+  name: replicaset-api-7c9d8f6b5-api
+  namespace: shop
+  uid: 0b0a51e2-3f0e-4c55-9d0e-0d1c1f7a0003
+  labels:
+    trivy-operator.container.name: api
+    trivy-operator.resource.kind: ReplicaSet
+    trivy-operator.resource.name: api-7c9d8f6b5
+    trivy-operator.resource.namespace: shop
+report:
+  updateTimestamp: "2026-09-20T08:00:05Z"
+  artifact:
+    repository: example/api
+    tag: "2.4.1"
+    digest: sha256:9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08
+  registry:
+    server: ghcr.io
+  scanner:
+    name: Trivy
+    vendor: Aqua Security
+    version: 0.58.1
+  summary:
+    componentsCount: 3
+    dependenciesCount: 2
+  components:
+    bomFormat: CycloneDX
+    specVersion: "1.6"
+    version: 1
+    components:
+    - bom-ref: pkg:npm/express@4.18.2
+      name: express
+      version: 4.18.2
+      purl: pkg:npm/express@4.18.2
+      type: library
+      licenses:
+      - license:
+          id: MIT
+      properties:
+      - name: aquasecurity:trivy:FilePath
+        value: app/node_modules/express/package.json
+      - name: aquasecurity:trivy:PkgID
+        value: express@4.18.2
+      - name: aquasecurity:trivy:PkgType
+        value: node-pkg
+    - bom-ref: pkg:apk/alpine/libcrypto3@3.3.2-r0?arch=x86_64&distro=3.20.3
+      name: libcrypto3
+      version: 3.3.2-r0
+      purl: pkg:apk/alpine/libcrypto3@3.3.2-r0?arch=x86_64&distro=3.20.3
+      type: library
+      licenses:
+      - expression: Apache-2.0
+      properties:
+      - name: aquasecurity:trivy:LayerDigest
+        value: sha256:1111111111111111111111111111111111111111111111111111111111111111
+      - name: aquasecurity:trivy:PkgType
+        value: alpine
+      - name: aquasecurity:trivy:SrcName
+        value: openssl
+      - name: aquasecurity:trivy:SrcVersion
+        value: 3.3.2-r0
+    - bom-ref: 3c1e4b0e-8f2a-4f7b-9d38-4a3f1c2b0001
+      name: alpine
+      version: 3.20.3
+      type: operating-system
+      properties:
+      - name: aquasecurity:trivy:Class
+        value: os-pkgs
+      - name: aquasecurity:trivy:Type
+        value: alpine
