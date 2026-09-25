@@ -500,6 +500,8 @@ mod tests {
             repository: Some("docker.io/library/nginx".into()),
             tag: Some("1.27".into()),
             security_context: Default::default(),
+            state: None,
+            state_reason: None,
         }]);
         d.pod_security = Some(PodSecurity {
             service_account_name: Some("web".into()),

@@ -111,6 +111,51 @@ pub struct ContainerInventory {
     pub tag: Option<String>,
     #[serde(default)]
     pub security_context: ContainerSecurity,
+    /// Current state from the container's status. `waiting` when the
+    /// kubelet has reported no status for it yet (not started). The broker
+    /// only counts a digest as running when the container is running (or
+    /// crash-looping between runs), so a completed init container or a
+    /// spec-pinned digest that never started is not "in use".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub state: Option<ContainerStateKind>,
+    /// `waiting.reason` / `terminated.reason` (e.g. `CrashLoopBackOff`,
+    /// `ImagePullBackOff`, `Completed`), capped at [`MAX_REASON_LEN`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub state_reason: Option<String>,
+}
+
+/// Longest `state_reason` sent. Kubelet reasons are short CamelCase words.
+pub const MAX_REASON_LEN: usize = 64;
+
+/// A container's current state, from `ContainerStatus.state`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ContainerStateKind {
+    Running,
+    Waiting,
+    Terminated,
+}
+
+/// State and reason from a container status; `(Waiting, None)` when there
+/// is no status (the container has not been created yet).
+pub fn container_state(status: Option<&ContainerStatus>) -> (ContainerStateKind, Option<String>) {
+    let cap = |r: Option<&String>| {
+        r.map(|r| r.trim().chars().take(MAX_REASON_LEN).collect::<String>())
+            .filter(|r| !r.is_empty())
+    };
+    let Some(state) = status.and_then(|s| s.state.as_ref()) else {
+        return (ContainerStateKind::Waiting, None);
+    };
+    if state.running.is_some() {
+        (ContainerStateKind::Running, None)
+    } else if let Some(t) = &state.terminated {
+        (ContainerStateKind::Terminated, cap(t.reason.as_ref()))
+    } else if let Some(w) = &state.waiting {
+        (ContainerStateKind::Waiting, cap(w.reason.as_ref()))
+    } else {
+        // The API defaults an empty state to waiting.
+        (ContainerStateKind::Waiting, None)
+    }
 }
 
 /// Pod securityContext subset.
@@ -357,8 +402,9 @@ fn one_container(
 ) -> ContainerInventory {
     let image = image.unwrap_or_default().trim().to_string();
     let spec_ref = parse_image_ref(&image);
-    let image_id = statuses
-        .and_then(|ss| ss.iter().find(|s| s.name == name))
+    let status = statuses.and_then(|ss| ss.iter().find(|s| s.name == name));
+    let (state, state_reason) = container_state(status);
+    let image_id = status
         .map(|s| s.image_id.trim().to_string())
         .filter(|s| !s.is_empty());
     let parsed = image_id.as_deref().and_then(parse_image_id);
@@ -389,6 +435,8 @@ fn one_container(
         digest_kind,
         repository,
         security_context: container_security(sc),
+        state: Some(state),
+        state_reason,
     }
 }
 
@@ -672,7 +720,8 @@ mod tests {
             "spec": {"containers": [{"name": "a", "image": "nginx",
                 "securityContext": {"capabilities": {"drop": ["ALL"]}}}]},
             "status": {"containerStatuses": [{"name": "a", "image": "",
-                "imageID": format!("docker.io/library/nginx@{D}"), "ready": true, "restartCount": 0}]}
+                "imageID": format!("docker.io/library/nginx@{D}"), "ready": true, "restartCount": 0,
+                "state": {"running": {"startedAt": "2026-09-26T00:00:00Z"}}}]}
         }));
         let v = serde_json::to_value(pod_containers(&p)).unwrap();
         assert_eq!(
@@ -686,9 +735,57 @@ mod tests {
                 "digest_kind": "repo",
                 "repository": "docker.io/library/nginx",
                 "tag": "latest",
-                "security_context": {"capabilitiesDrop": ["ALL"]}
+                "security_context": {"capabilitiesDrop": ["ALL"]},
+                "state": "running"
             }])
         );
+    }
+
+    #[test]
+    fn container_state_mapping() {
+        let p = pod(json!({
+            "metadata": {"name": "x"},
+            "spec": {
+                "initContainers": [{"name": "migrate", "image": "m:1"}],
+                "containers": [
+                    {"name": "crash", "image": "c:1"},
+                    {"name": "pull", "image": format!("p@{D2}")},
+                    {"name": "nostatus", "image": "n:1"}
+                ]
+            },
+            "status": {
+                "initContainerStatuses": [{"name": "migrate", "image": "", "imageID": D,
+                    "ready": false, "restartCount": 0,
+                    "state": {"terminated": {"exitCode": 0, "reason": "Completed"}}}],
+                "containerStatuses": [
+                    {"name": "crash", "image": "", "imageID": format!("docker.io/library/c@{D}"),
+                     "ready": false, "restartCount": 7,
+                     "state": {"waiting": {"reason": "CrashLoopBackOff", "message": "back-off"}}},
+                    {"name": "pull", "image": "", "imageID": "", "ready": false, "restartCount": 0,
+                     "state": {"waiting": {"reason": format!("ImagePullBackOff{}", "x".repeat(200))}}}
+                ]
+            }
+        }));
+        let cs = pod_containers(&p);
+        let by = |n: &str| cs.iter().find(|c| c.name == n).unwrap();
+        assert_eq!(by("migrate").state, Some(ContainerStateKind::Terminated));
+        assert_eq!(by("migrate").state_reason.as_deref(), Some("Completed"));
+        assert_eq!(by("crash").state, Some(ContainerStateKind::Waiting));
+        assert_eq!(
+            by("crash").state_reason.as_deref(),
+            Some("CrashLoopBackOff")
+        );
+        // A crash-looping container still carries the digest of its last run.
+        assert_eq!(by("crash").digest.as_deref(), Some(D));
+        let pull = by("pull");
+        assert_eq!(pull.state, Some(ContainerStateKind::Waiting));
+        assert_eq!(pull.digest_kind, Some(DigestKind::Pinned));
+        let reason = pull.state_reason.as_deref().unwrap();
+        assert!(reason.starts_with("ImagePullBackOff"));
+        assert_eq!(reason.chars().count(), MAX_REASON_LEN);
+        // No status yet: waiting, no reason.
+        assert_eq!(by("nostatus").state, Some(ContainerStateKind::Waiting));
+        assert_eq!(by("nostatus").state_reason, None);
     }
 
     #[test]
