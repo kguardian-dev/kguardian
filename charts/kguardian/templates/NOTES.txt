@@ -76,6 +76,13 @@ audit's results, promote it to an enforced policy:
 For cluster-scoped policies (AuditClusterNetworkPolicy):
   kguardian audit promote-cluster <name> | kubectl apply -f -
 {{- end }}
+{{- if .Values.supplychain.enabled }}
+
+The supplychain component is enabled (preview). It reads Trivy Operator
+VulnerabilityReports/SbomReports (read-only) and, until broker ingest
+ships, only logs what it would send:
+  kubectl -n {{ include "kguardian.namespace" . | trim }} logs deploy/{{ .Values.supplychain.service.name }}
+{{- end }}
 {{- if include "kguardian.llmBridgeEnabled" . }}
 
 AI assistant: ENABLED (llm-bridge — tools and policy/seccomp generation run in-process).

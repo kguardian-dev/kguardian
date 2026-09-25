@@ -455,6 +455,76 @@ for dist in false true; do
   assert_absent "$label" "secrets"
 done
 
+# ---------------------------------------------------------------------------
+# Supplychain (#1533). Off by default; when on, its RBAC is read-only on the
+# two Trivy Operator report resources and never touches Secrets (decision
+# D3: kguardian does not read imagePullSecrets).
+# ---------------------------------------------------------------------------
+
+# 10a. Defaults render nothing of it.
+render "supplychain-default-off" && {
+  assert_absent  "supplychain-default-off" "kguardian-supplychain"
+  assert_absent  "supplychain-default-off" "aquasecurity.github.io"
+  assert_deploys "supplychain-default-off" 4
+}
+
+# 10b. Enabled: one more Deployment, hardened, broker ingest still off.
+render "supplychain-enabled" --set supplychain.enabled=true && {
+  assert_deploys "supplychain-enabled" 5
+  assert_has     "supplychain-enabled" "name: kguardian-supplychain"
+  assert_has     "supplychain-enabled" 'args: \["serve"\]'
+  assert_has     "supplychain-enabled" "readOnlyRootFilesystem: true"
+  grep -A1 'name: BROKER_INGEST_ENABLED' <<<"$OUT" | grep -q 'value: "false"' || \
+    { echo "FAIL [supplychain-enabled]: BROKER_INGEST_ENABLED must default to false"; fail=1; }
+  grep -A1 'name: TRIVY_OPERATOR_ENABLED' <<<"$OUT" | grep -q 'value: "true"' || \
+    { echo "FAIL [supplychain-enabled]: TRIVY_OPERATOR_ENABLED must default to true"; fail=1; }
+}
+
+# 10c. The ClusterRole is exactly get/list/watch on the two report resources.
+# Rendered alone so nothing else in the chart can satisfy or mask the checks.
+if role="$(helm template compat "$CHART" --set supplychain.enabled=true \
+    --show-only templates/supplychain/clusterrole.yaml 2>/dev/null)"; then
+  rules="$(awk '/^kind: ClusterRole$/{f=1} /^---/{f=0} f' <<<"$role" | sed -n '/^rules:/,$p')"
+  grep -q 'apiGroups: \["aquasecurity.github.io"\]' <<<"$rules" || \
+    { echo "FAIL [supplychain-rbac]: missing aquasecurity.github.io rule"; fail=1; }
+  grep -q 'resources: \[vulnerabilityreports, sbomreports\]' <<<"$rules" || \
+    { echo "FAIL [supplychain-rbac]: rule must cover exactly vulnerabilityreports, sbomreports"; fail=1; }
+  grep -q 'verbs: \[get, list, watch\]' <<<"$rules" || \
+    { echo "FAIL [supplychain-rbac]: verbs must be exactly get, list, watch"; fail=1; }
+  [ "$(grep -c 'apiGroups:' <<<"$rules")" = "1" ] || \
+    { echo "FAIL [supplychain-rbac]: expected exactly one rule"; fail=1; }
+  grep -qiE 'secrets|\*' <<<"$rules" && \
+    { echo "FAIL [supplychain-rbac]: ClusterRole must never grant secrets or wildcards (D3)"; fail=1; } || true
+else
+  echo "FAIL [supplychain-rbac]: clusterrole did not render"; fail=1
+fi
+
+# 10d. Source off: no ClusterRole, and no API token mounted.
+render "supplychain-no-trivy" --set supplychain.enabled=true \
+  --set supplychain.sources.trivyOperator.enabled=false && {
+  assert_absent  "supplychain-no-trivy" "aquasecurity.github.io"
+  assert_has     "supplychain-no-trivy" "automountServiceAccountToken: false"
+  assert_deploys "supplychain-no-trivy" 5
+}
+
+# 10e. With the broker NetworkPolicy on, supplychain is an admitted peer;
+# without supplychain, it is not.
+render "supplychain-broker-netpol" --set supplychain.enabled=true \
+  --set broker.networkPolicy.enabled=true --set 'broker.networkPolicy.allowedNodeCIDRs={10.0.0.0/16}' && {
+  grep -B1 -A2 'podSelector:' <<<"$OUT" | grep -q 'app.kubernetes.io/name: kguardian-supplychain' || \
+    { echo "FAIL [supplychain-broker-netpol]: broker policy must admit supplychain"; fail=1; }
+}
+render "broker-netpol-no-supplychain" --set broker.networkPolicy.enabled=true \
+  --set 'broker.networkPolicy.allowedNodeCIDRs={10.0.0.0/16}' && {
+  assert_absent "broker-netpol-no-supplychain" "kguardian-supplychain"
+}
+
+# 10f. Its own NetworkPolicy: closed ingress unless scrapers are listed.
+render "supplychain-netpol" --set supplychain.enabled=true \
+  --set supplychain.networkPolicy.enabled=true && {
+  assert_has "supplychain-netpol" "ingress: \[\]"
+}
+
 if [ "$fail" -ne 0 ]; then
   echo "G4 values-compatibility check FAILED"
   exit 1

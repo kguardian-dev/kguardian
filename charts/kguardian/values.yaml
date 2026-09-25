@@ -1778,3 +1778,141 @@ evaluator:
       interval: 30s
       scrapeTimeout: 10s
       labels: {}
+
+supplychain:
+  # -- Deploy the supply-chain component (#1533). It reads vulnerability and
+  # SBOM data about the images your workloads run and reports it; it never
+  # blocks or changes a workload. Off by default. Today its only source is
+  # Trivy Operator (install Trivy Operator separately). Payloads are logged,
+  # not sent, until broker ingest ships (see brokerIngest.enabled).
+  enabled: false
+
+  image:
+    # -- Supplychain container image repository
+    repository: ghcr.io/kguardian-dev/kguardian/supplychain
+    # -- Supplychain image pull policy
+    pullPolicy: IfNotPresent
+    # -- Supplychain version tag
+    tag: "v0.1.0"
+    # -- Overrides the image tag using SHA digest
+    sha: ""
+
+  # -- Log level (panic|fatal|error|warn|info|debug|trace)
+  logLevel: info
+
+  # -- Additional environment variables for the supplychain container
+  env: []
+
+  container:
+    # -- HTTP port for /healthz, /readyz and /metrics
+    port: 8083
+
+  service:
+    # -- Supplychain service name (also the pod's app.kubernetes.io/name)
+    name: "kguardian-supplychain"
+    # -- Supplychain service port
+    port: 8083
+
+  sources:
+    trivyOperator:
+      # -- Read Trivy Operator VulnerabilityReports and SbomReports. Adds a
+      # ClusterRole with get/list/watch on those two resources in
+      # aquasecurity.github.io and nothing else (never Secrets). If Trivy
+      # Operator is not installed the source idles and re-checks every
+      # recheckPeriod.
+      enabled: true
+      # -- Informer resync period. Also how often reports that name their
+      # image only by tag retry digest resolution.
+      resyncPeriod: 10m
+      # -- How often to re-check for the Trivy Operator CRDs while absent
+      recheckPeriod: 5m
+
+  brokerIngest:
+    # -- Send payloads to the broker. Leave false until the broker's
+    # supply-chain ingest endpoints are released; until then payloads are
+    # logged only.
+    enabled: false
+
+  # -- List of image pull secrets for private registries
+  imagePullSecrets: []
+
+  serviceAccount:
+    # -- Specifies whether a service account should be created
+    create: true
+    # -- Annotations to add to the service account
+    annotations: {}
+    # -- The name of the service account to use (defaults to "supplychain")
+    name: ""
+
+  # -- Annotations to add to supplychain pods
+  podAnnotations: {}
+
+  # -- Pod security context. Runs as the distroless nonroot user (65532).
+  podSecurityContext:
+    runAsNonRoot: true
+    runAsUser: 65532
+    runAsGroup: 65532
+    fsGroup: 65532
+    seccompProfile:
+      type: RuntimeDefault
+
+  # -- Container security context: read-only root filesystem, no
+  # capabilities, no privilege escalation.
+  securityContext:
+    privileged: false
+    capabilities:
+      drop:
+      - ALL
+    readOnlyRootFilesystem: true
+    runAsNonRoot: true
+    runAsUser: 65532
+    allowPrivilegeEscalation: false
+
+  # -- Resource requests and limits. Memory grows with the number and size
+  # of Trivy reports in the cluster (the reports are cached); raise the
+  # limit on large clusters.
+  resources:
+    limits:
+      memory: 256Mi
+    requests:
+      cpu: 10m
+      memory: 48Mi
+
+  # -- Node labels for supplychain pod assignment
+  nodeSelector:
+    kubernetes.io/os: linux
+
+  # -- Tolerations for supplychain pod assignment
+  tolerations: []
+
+  # -- Affinity rules for supplychain pod assignment
+  affinity: {}
+
+  # -- Priority class for the supplychain pod
+  priorityClassName: ""
+
+  # -- Topology spread constraints for the supplychain pod
+  topologySpreadConstraints: []
+
+  # -- Ingress NetworkPolicy for the supplychain pod. Nothing calls it, so
+  # ingress is closed except to allowMetricsFrom. Ingress-only; egress (API
+  # server, broker) is not restricted. Opt-in like the broker's policy;
+  # requires a NetworkPolicy-enforcing CNI.
+  networkPolicy:
+    enabled: false
+    # -- Peers allowed to scrape /metrics. Each entry is a standard
+    # NetworkPolicyPeer.
+    allowMetricsFrom: []
+
+  metrics:
+    serviceMonitor:
+      # -- Create a ServiceMonitor for prometheus-operator
+      enabled: false
+      # -- Namespace for the ServiceMonitor (defaults to the release namespace)
+      namespace: ""
+      # -- Scrape interval
+      interval: 30s
+      # -- Scrape timeout
+      scrapeTimeout: 10s
+      # -- Extra labels for the ServiceMonitor
+      labels: {}

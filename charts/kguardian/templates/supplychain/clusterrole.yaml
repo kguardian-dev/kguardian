@@ -1,0 +1,33 @@
+{{- if and .Values.supplychain.enabled .Values.supplychain.sources.trivyOperator.enabled }}
+{{- /*
+  Read-only access to Trivy Operator's per-workload reports, and nothing
+  else. By design (#1533 decision D3) this role never gains `secrets`:
+  kguardian does not read imagePullSecrets or hold registry credentials.
+  test/helm-values-compat.sh asserts both properties.
+*/ -}}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "kguardian.name" . }}-supplychain
+  labels:
+    {{- include "kguardian.labels" . | nindent 4 }}
+rules:
+  - apiGroups: ["aquasecurity.github.io"]
+    resources: [vulnerabilityreports, sbomreports]
+    verbs: [get, list, watch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ .Release.Name }}-{{ include "kguardian.name" . }}-supplychain
+  labels:
+    {{- include "kguardian.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ include "kguardian.name" . }}-supplychain
+subjects:
+  - kind: ServiceAccount
+    name: {{ default "supplychain" .Values.supplychain.serviceAccount.name }}
+    namespace: {{ include "kguardian.namespace" . | trim }}
+{{- end }}

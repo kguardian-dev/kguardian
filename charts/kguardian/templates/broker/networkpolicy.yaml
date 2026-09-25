@@ -44,6 +44,12 @@ spec:
             matchLabels:
               app.kubernetes.io/name: {{ .Values.llmBridge.service.name }}
         {{- end }}
+        # supplychain — pushes normalised vulnerability/SBOM payloads (#1533).
+        {{- if .Values.supplychain.enabled }}
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: {{ .Values.supplychain.service.name }}
+        {{- end }}
         # frontend — reads telemetry directly for the dashboard.
         - podSelector:
             matchLabels:

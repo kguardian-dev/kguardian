@@ -410,6 +410,40 @@ The following table lists the configurable parameters of the kguardian chart and
 | seccomp.distributeIntervalSeconds | string | `""` | Seconds between full resyncs of the `SeccompProfile` watch (the watch itself reacts to changes immediately). A resync lists nodes once and reads one Broker profile per distinct `workloadRef`; with no `SeccompProfile` objects it reads nothing. Empty uses the controller default (30). |
 | seccomp.installCRDs | bool | `true` | Install the `SeccompProfile` CRD as a chart template (with `helm.sh/resource-policy: keep`) rather than from `crds/`. Helm applies `crds/` on install only and never upgrades them; a templated CRD is upgraded with the release, so schema changes ship with the chart. The trade-off: the CRD is part of the release, so a `helm uninstall` leaves it behind on purpose (the `keep` policy) — delete it by hand if you also want every `SeccompProfile` object gone. Set to `false` if you manage CRDs separately; then apply `charts/kguardian/files/kguardian.dev_seccompprofiles.yaml` yourself before enabling `distribute`. |
 | seccomp.kubeletRoot | string | `"/var/lib/kubelet"` | Kubelet root directory on the host. Profiles are written under `<kubeletRoot>/seccomp/kguardian/`. Not `/var/lib/kubelet` everywhere: k3s uses `/var/lib/rancher/k3s/agent/kubelet`, some kubeadm installs and OpenShift differ. |
+| supplychain.affinity | object | `{}` | Affinity rules for supplychain pod assignment |
+| supplychain.brokerIngest.enabled | bool | `false` | Send payloads to the broker. Leave false until the broker's supply-chain ingest endpoints are released; until then payloads are logged only. |
+| supplychain.container.port | int | `8083` | HTTP port for /healthz, /readyz and /metrics |
+| supplychain.enabled | bool | `false` | Deploy the supply-chain component (#1533). It reads vulnerability and SBOM data about the images your workloads run and reports it; it never blocks or changes a workload. Off by default. Today its only source is Trivy Operator (install Trivy Operator separately). Payloads are logged, not sent, until broker ingest ships (see brokerIngest.enabled). |
+| supplychain.env | list | `[]` | Additional environment variables for the supplychain container |
+| supplychain.image.pullPolicy | string | `"IfNotPresent"` | Supplychain image pull policy |
+| supplychain.image.repository | string | `"ghcr.io/kguardian-dev/kguardian/supplychain"` | Supplychain container image repository |
+| supplychain.image.sha | string | `""` | Overrides the image tag using SHA digest |
+| supplychain.image.tag | string | `"v0.1.0"` | Supplychain version tag |
+| supplychain.imagePullSecrets | list | `[]` | List of image pull secrets for private registries |
+| supplychain.logLevel | string | `"info"` | Log level (panic|fatal|error|warn|info|debug|trace) |
+| supplychain.metrics.serviceMonitor.enabled | bool | `false` | Create a ServiceMonitor for prometheus-operator |
+| supplychain.metrics.serviceMonitor.interval | string | `"30s"` | Scrape interval |
+| supplychain.metrics.serviceMonitor.labels | object | `{}` | Extra labels for the ServiceMonitor |
+| supplychain.metrics.serviceMonitor.namespace | string | `""` | Namespace for the ServiceMonitor (defaults to the release namespace) |
+| supplychain.metrics.serviceMonitor.scrapeTimeout | string | `"10s"` | Scrape timeout |
+| supplychain.networkPolicy | object | `{"allowMetricsFrom":[],"enabled":false}` | Ingress NetworkPolicy for the supplychain pod. Nothing calls it, so ingress is closed except to allowMetricsFrom. Ingress-only; egress (API server, broker) is not restricted. Opt-in like the broker's policy; requires a NetworkPolicy-enforcing CNI. |
+| supplychain.networkPolicy.allowMetricsFrom | list | `[]` | Peers allowed to scrape /metrics. Each entry is a standard NetworkPolicyPeer. |
+| supplychain.nodeSelector | object | `{"kubernetes.io/os":"linux"}` | Node labels for supplychain pod assignment |
+| supplychain.podAnnotations | object | `{}` | Annotations to add to supplychain pods |
+| supplychain.podSecurityContext | object | `{"fsGroup":65532,"runAsGroup":65532,"runAsNonRoot":true,"runAsUser":65532,"seccompProfile":{"type":"RuntimeDefault"}}` | Pod security context. Runs as the distroless nonroot user (65532). |
+| supplychain.priorityClassName | string | `""` | Priority class for the supplychain pod |
+| supplychain.resources | object | `{"limits":{"memory":"256Mi"},"requests":{"cpu":"10m","memory":"48Mi"}}` | Resource requests and limits. Memory grows with the number and size of Trivy reports in the cluster (the reports are cached); raise the limit on large clusters. |
+| supplychain.securityContext | object | `{"allowPrivilegeEscalation":false,"capabilities":{"drop":["ALL"]},"privileged":false,"readOnlyRootFilesystem":true,"runAsNonRoot":true,"runAsUser":65532}` | Container security context: read-only root filesystem, no capabilities, no privilege escalation. |
+| supplychain.service.name | string | `"kguardian-supplychain"` | Supplychain service name (also the pod's app.kubernetes.io/name) |
+| supplychain.service.port | int | `8083` | Supplychain service port |
+| supplychain.serviceAccount.annotations | object | `{}` | Annotations to add to the service account |
+| supplychain.serviceAccount.create | bool | `true` | Specifies whether a service account should be created |
+| supplychain.serviceAccount.name | string | `""` | The name of the service account to use (defaults to "supplychain") |
+| supplychain.sources.trivyOperator.enabled | bool | `true` | Read Trivy Operator VulnerabilityReports and SbomReports. Adds a ClusterRole with get/list/watch on those two resources in aquasecurity.github.io and nothing else (never Secrets). If Trivy Operator is not installed the source idles and re-checks every recheckPeriod. |
+| supplychain.sources.trivyOperator.recheckPeriod | string | `"5m"` | How often to re-check for the Trivy Operator CRDs while absent |
+| supplychain.sources.trivyOperator.resyncPeriod | string | `"10m"` | Informer resync period. Also how often reports that name their image only by tag retry digest resolution. |
+| supplychain.tolerations | list | `[]` | Tolerations for supplychain pod assignment |
+| supplychain.topologySpreadConstraints | list | `[]` | Topology spread constraints for the supplychain pod |
 | syscalls | object | `{"captureLevel":"full","customList":[]}` | Syscall capture tier for the controller's eBPF probe. Sets `SYSCALL_CAPTURE_LEVEL` / `SYSCALL_CUSTOM_LIST` on the controller DaemonSet. |
 | syscalls.captureLevel | string | `"full"` | Cluster-wide capture level: `full` (default, every syscall — the only tier an enforcing seccomp profile can be exported from), `high`, `medium`, `low` or `custom`. Full capture is de-duplicated in BPF so it costs about the same CPU as `low`; pick a lower tier only if you never intend to enforce seccomp profiles and want a smaller syscall table in the broker. Below `full`, the broker still exports audit-only (`SCMP_ACT_LOG`) profiles and stamps every manifest with `kguardian.dev/capture-level` and `kguardian.dev/capture-complete`, but refuses to render a denying `defaultAction` unless the request passes `acknowledgePartial=true`. The block above lists what each tier traces. |
 | syscalls.customList | list | `[]` | Syscall names for `captureLevel: custom` (ignored on any other level), rendered comma-joined into `SYSCALL_CUSTOM_LIST`, e.g. `[execve, openat, connect]`. A name unknown on the node's architecture is logged and skipped, never fatal. |
