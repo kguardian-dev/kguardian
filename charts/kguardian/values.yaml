@@ -732,7 +732,9 @@ broker:
     # every 300 s, so the default of 900 leaves room for a missed resync
     # or a controller restart. Independently of this window, a digest also
     # counts as running while the pod that last reported it is live and
-    # not marked dead. Lower it to see finished rollouts drop out sooner;
+    # not marked dead. Either way the container must be running (or
+    # crash-looping) in its latest report: completed init containers and
+    # digests that never started are listed but not counted. Lower it to see finished rollouts drop out sooner;
     # clamped to [360, 604800].
     runningWindowSeconds: 900
     # -- Retention for the image inventory: `images` (one row per image
