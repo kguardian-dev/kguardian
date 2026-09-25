@@ -1,0 +1,126 @@
+---
+# yaml-language-server: $schema=https://json.schemastore.org/github-action.json
+name: Sign and attest a pushed OCI artifact
+description: >
+  Keyless cosign signature, SLSA build provenance and (optionally) per-platform
+  CycloneDX SBOM attestations for an image or OCI artifact that was already
+  pushed to GHCR. Everything is bound to the digest, never a tag.
+
+  This is a composite action, so the steps run inside the calling job and the
+  Sigstore certificate identity is the CALLING workflow
+  (https://github.com/kguardian-dev/kguardian/.github/workflows/<component>-release.yaml@refs/tags/<component>/vX.Y.Z).
+  docs/verifying-releases.mdx documents how users verify it; keep the two
+  in sync if the release workflows are renamed.
+
+  The calling job must already be logged in to the registry and needs:
+    contents: read, packages: write, id-token: write, attestations: write,
+    artifact-metadata: write
+
+inputs:
+  image:
+    description: Fully-qualified repository without tag or digest, e.g. ghcr.io/kguardian-dev/kguardian/controller
+    required: true
+  digest:
+    description: Digest of the pushed manifest or index (sha256:...)
+    required: true
+  recursive:
+    description: Also sign every platform manifest of a multi-arch index (cosign --recursive)
+    required: false
+    default: "true"
+  sbom:
+    description: >
+      Generate a CycloneDX SBOM per platform (linux/amd64, linux/arm64) with
+      Syft and attest each one against that platform's manifest digest.
+    required: false
+    default: "true"
+
+runs:
+  using: composite
+  steps:
+    - name: Validate inputs
+      shell: bash
+      env:
+        IMAGE: ${{ inputs.image }}
+        DIGEST: ${{ inputs.digest }}
+      run: |
+        set -euo pipefail
+        if ! [[ "$DIGEST" =~ ^sha256:[a-f0-9]{64}$ ]]; then
+          echo "::error::digest must be sha256:<64 hex>, got '$DIGEST'"
+          exit 1
+        fi
+        if [[ "$IMAGE" == *@* ]] || [[ "${IMAGE##*/}" == *:* ]]; then
+          echo "::error::image must not carry a tag or digest, got '$IMAGE'"
+          exit 1
+        fi
+
+    - name: Install cosign
+      uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+
+    - name: Sign with cosign (keyless, by digest)
+      shell: bash
+      env:
+        IMAGE: ${{ inputs.image }}
+        DIGEST: ${{ inputs.digest }}
+        RECURSIVE: ${{ inputs.recursive }}
+      run: |
+        set -euo pipefail
+        args=(--yes)
+        if [ "$RECURSIVE" = "true" ]; then args+=(--recursive); fi
+        cosign sign "${args[@]}" "${IMAGE}@${DIGEST}"
+
+    - name: Attest SLSA build provenance
+      uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+      with:
+        subject-name: ${{ inputs.image }}
+        subject-digest: ${{ inputs.digest }}
+        push-to-registry: true
+
+    - name: Install Syft
+      if: inputs.sbom == 'true'
+      id: syft
+      uses: anchore/sbom-action/download-syft@3ad7283483fc7af8ff2b4ea19663c2d5ca935e26 # v0.24.2
+
+    # An SBOM describes one filesystem, so it is generated from and attested
+    # against each platform manifest rather than the multi-arch index.
+    - name: Generate per-platform SBOMs
+      if: inputs.sbom == 'true'
+      id: sbom
+      shell: bash
+      env:
+        IMAGE: ${{ inputs.image }}
+        DIGEST: ${{ inputs.digest }}
+        SYFT: ${{ steps.syft.outputs.cmd }}
+      run: |
+        set -euo pipefail
+        index=$(docker buildx imagetools inspect --raw "${IMAGE}@${DIGEST}")
+        for arch in amd64 arm64; do
+          pdigest=$(jq -r --arg a "$arch" \
+            '[.manifests[]? | select(.platform.os == "linux" and .platform.architecture == $a) | .digest][0] // empty' \
+            <<<"$index")
+          if [ -z "$pdigest" ]; then
+            echo "::error::${IMAGE}@${DIGEST} has no linux/${arch} manifest"
+            exit 1
+          fi
+          out="${RUNNER_TEMP}/sbom-${arch}.cdx.json"
+          "$SYFT" scan "registry:${IMAGE}@${pdigest}" -o "cyclonedx-json=${out}"
+          echo "${arch}-digest=${pdigest}" >> "$GITHUB_OUTPUT"
+          echo "${arch}-path=${out}" >> "$GITHUB_OUTPUT"
+        done
+
+    - name: Attest SBOM (linux/amd64)
+      if: inputs.sbom == 'true'
+      uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+      with:
+        subject-name: ${{ inputs.image }}
+        subject-digest: ${{ steps.sbom.outputs.amd64-digest }}
+        sbom-path: ${{ steps.sbom.outputs.amd64-path }}
+        push-to-registry: true
+
+    - name: Attest SBOM (linux/arm64)
+      if: inputs.sbom == 'true'
+      uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+      with:
+        subject-name: ${{ inputs.image }}
+        subject-digest: ${{ steps.sbom.outputs.arm64-digest }}
+        sbom-path: ${{ steps.sbom.outputs.arm64-path }}
+        push-to-registry: true

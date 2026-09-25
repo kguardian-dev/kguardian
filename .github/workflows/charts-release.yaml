@@ -16,7 +16,12 @@ jobs:
   release-charts:
     name: Release Charts
     runs-on: ubuntu-latest
-    permissions: write-all
+    permissions:
+      contents: read
+      packages: write # push the chart, its signature and provenance
+      id-token: write # Sigstore keyless signing (cosign + actions/attest)
+      attestations: write # store the provenance attestation in GitHub
+      artifact-metadata: write # storage record for the attested chart
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -39,8 +44,25 @@ jobs:
         uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5
 
       - name: Publish Helm Chart to GHCR
+        id: push
         run: |
-          helm package charts/${{ env.CHARTS_SRC_DIR }}
-          helm push kguardian-*.tgz oci://${{ env.TARGET_REGISTRY }}/${{ github.repository_owner }}/charts
+          set -euo pipefail
+          helm package "charts/${CHARTS_SRC_DIR}"
+          helm push kguardian-*.tgz "oci://${TARGET_REGISTRY}/${GITHUB_REPOSITORY_OWNER}/charts" 2>&1 | tee "${RUNNER_TEMP}/helm-push.log"
+          # helm prints "Digest: sha256:..." for the pushed chart manifest.
+          digest=$(sed -nE 's/^Digest: (sha256:[a-f0-9]{64})$/\1/p' "${RUNNER_TEMP}/helm-push.log" | tail -n1)
+          if [ -z "$digest" ]; then
+            echo "::error::could not read the pushed chart digest from helm push output"
+            exit 1
+          fi
+          echo "digest=${digest}" >> "$GITHUB_OUTPUT"
         env:
           GITHUB_TOKEN: "${{ secrets.GITHUB_TOKEN }}"
+
+      - name: Sign and attest chart
+        uses: ./.github/actions/sign-image
+        with:
+          image: ${{ env.TARGET_REGISTRY }}/${{ github.repository_owner }}/charts/${{ env.CHARTS_SRC_DIR }}
+          digest: ${{ steps.push.outputs.digest }}
+          recursive: "false"
+          sbom: "false"
