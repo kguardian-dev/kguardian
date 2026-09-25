@@ -1,8 +1,9 @@
 import { useState, useCallback, useEffect, useMemo, useRef, Suspense } from 'react';
 import { lazyRetry } from './utils/lazyRetry';
-import { Bot, RefreshCw, Share2, ShieldAlert, LayoutDashboard, FileCode, Boxes, Search, Lock } from 'lucide-react';
+import { Bot, RefreshCw, Share2, ShieldAlert, FileCode, Boxes, Search, Lock, Layers, TriangleAlert } from 'lucide-react';
 import NetworkGraph from './components/NetworkGraph';
-import { FindingsView } from './components/FindingsView';
+import { RisksRoute } from './components/RisksView';
+import { ScopeChip } from './components/ScopeChip';
 import { CommandPalette, type Command } from './components/CommandPalette';
 import { useHashLocation } from './hooks/useHashLocation';
 import NamespaceSelector from './components/NamespaceSelector';
@@ -18,6 +19,7 @@ import { recommendedPolicyType } from './utils/cniPolicySupport';
 import type { PolicyType } from './hooks/policyEditor';
 import { useCluster } from './contexts/ClusterContext';
 import { paramsForSelection } from './utils/mapSelection';
+import { CLUSTER_SCOPED_VIEWS, isAllNamespaces, resolveRoute, workloadParams, type View } from './utils/routes';
 
 // Heavy surfaces — lazy so they stay out of the initial bundle and only load
 // when first opened (the NetworkPolicyEditor alone is ~2k lines).
@@ -26,7 +28,8 @@ const AuditVerdictsPanel = lazyRetry(() => import('./components/AuditVerdictsPan
 const PolicyBuilderModal = lazyRetry(() =>
   import('./components/PolicyBuilderModal').then((m) => ({ default: m.PolicyBuilderModal })),
 );
-const SeccompProfilesView = lazyRetry(() => import('./components/SeccompProfilesView'));
+const WorkloadsView = lazyRetry(() => import('./components/WorkloadsView'));
+const WorkloadView = lazyRetry(() => import('./components/WorkloadView'));
 import { Button } from './components/ui/Button';
 import { EmptyState } from './components/ui/EmptyState';
 import { GraphSkeleton } from './components/ui/Skeleton';
@@ -35,8 +38,6 @@ import { usePodData } from './hooks/usePodData';
 import { useNamespaces } from './hooks/useNamespaces';
 import type { PodNodeData } from './types';
 import { UI_DIMENSIONS } from './constants/ui';
-
-const ROUTES = ['map', 'findings', 'seccomp'] as const;
 
 function App() {
   const { settings, updateSettings, toggleSetting } = useSettings();
@@ -48,9 +49,17 @@ function App() {
   // hash so it's shareable and refreshable. Namespace is also remembered per
   // cluster (below) as the fallback when the URL carries none.
   const { loc, navigate } = useHashLocation();
-  const view: (typeof ROUTES)[number] = (ROUTES as readonly string[]).includes(loc.view)
-    ? (loc.view as (typeof ROUTES)[number])
-    : 'map';
+  const route = resolveRoute(loc);
+  const view = route.view;
+
+  // Renamed routes (#/findings → #/risks, #/seccomp → #/workloads?control=
+  // seccomp) keep old links working: swap the URL in place, no history entry.
+  const redirect = route.redirect;
+  useEffect(() => {
+    if (redirect) navigate(redirect.view, redirect.params, { replace: true });
+  }, [redirect, navigate]);
+
+  const allNamespaces = isAllNamespaces(view, loc.params);
 
   // Namespace remembered per cluster — seeded from a deep-linked ns on first load.
   const [nsByCluster, setNsByCluster] = useState<Record<string, string>>(() => {
@@ -62,16 +71,29 @@ function App() {
   // Map-only params (selected workload, focused node) travel with the map view
   // and are dropped when leaving it.
   const setView = useCallback(
-    (v: (typeof ROUTES)[number]) =>
-      navigate(v, { ns: loc.params.ns, pod: v === 'map' ? loc.params.pod : undefined, focus: v === 'map' ? loc.params.focus : undefined }),
+    (v: View, extra: Record<string, string | undefined> = {}) =>
+      navigate(v, { ns: loc.params.ns, pod: v === 'map' ? loc.params.pod : undefined, focus: v === 'map' ? loc.params.focus : undefined, ...extra }),
     [navigate, loc.params.ns, loc.params.pod, loc.params.focus],
   );
   const setNamespace = useCallback(
     (ns: string) => {
       setNsByCluster((prev) => ({ ...prev, [activeCluster.id]: ns }));
-      navigate(view, { ns, pod: undefined, focus: undefined }); // namespace change clears the workload + focus
+      // A namespace change clears the workload + focus. On a cluster-wide
+      // view, picking a namespace is a filter: narrow to it (scope=ns). The
+      // single-workload page has nothing to show in another namespace, so it
+      // falls back to the Workloads list narrowed to the new one.
+      if (view === 'workload') navigate('workloads', { ns, scope: 'ns' });
+      else navigate(view, { ns, scope: CLUSTER_SCOPED_VIEWS.has(view) ? 'ns' : undefined, control: loc.params.control });
     },
-    [navigate, view, activeCluster.id],
+    [navigate, view, activeCluster.id, loc.params.control],
+  );
+  const showAllNamespaces = useCallback(
+    () => navigate(view, { ...loc.params, scope: undefined }),
+    [navigate, view, loc.params],
+  );
+  const openWorkload = useCallback(
+    (w: { namespace: string; kind: string; name: string }) => navigate('workload', workloadParams(w.namespace, w.kind, w.name)),
+    [navigate],
   );
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [paletteOpen, setPaletteOpen] = useState(false);
@@ -152,16 +174,17 @@ function App() {
   useEffect(() => {
     if (prevCluster.current === activeCluster.id) return;
     prevCluster.current = activeCluster.id;
-    navigate(view, { ns: nsByCluster[activeCluster.id], pod: undefined, focus: undefined }, { replace: true });
+    // A single-workload page is meaningless in another cluster: land on the list.
+    navigate(view === 'workload' ? 'workloads' : view, { ns: nsByCluster[activeCluster.id], pod: undefined, focus: undefined }, { replace: true });
   }, [activeCluster.id, nsByCluster, view, navigate]);
 
   // Keep the resolved namespace in the URL so the link is always shareable,
   // even before the user has explicitly picked one.
   useEffect(() => {
-    if (!loc.params.ns && namespaces.length > 0) {
-      navigate(view, { ns: effectiveNamespace, pod: loc.params.pod, focus: loc.params.focus }, { replace: true });
+    if (!redirect && !loc.params.ns && namespaces.length > 0) {
+      navigate(view, { ...loc.params, ns: effectiveNamespace }, { replace: true });
     }
-  }, [loc.params.ns, loc.params.pod, loc.params.focus, namespaces.length, effectiveNamespace, view, navigate]);
+  }, [redirect, loc.params, namespaces.length, effectiveNamespace, view, navigate]);
 
   const toggleRail = useCallback(() => {
     setRailCollapsed((c) => {
@@ -299,8 +322,9 @@ function App() {
   const commands: Command[] = useMemo(() => {
     const list: Command[] = [
       { id: 'view-map', group: 'Views', label: 'Network Map', icon: Share2, keywords: 'graph traffic', run: () => setView('map') },
-      { id: 'view-findings', group: 'Views', label: 'Findings', icon: LayoutDashboard, keywords: 'risk signals triage', run: () => setView('findings') },
-      { id: 'view-seccomp', group: 'Views', label: 'Seccomp Profiles', icon: Lock, keywords: 'syscall publish enforce capture', run: () => setView('seccomp') },
+      { id: 'view-risks', group: 'Views', label: 'Risks', icon: TriangleAlert, keywords: 'findings signals triage posture', run: () => setView('risks') },
+      { id: 'view-workloads', group: 'Views', label: 'Workloads', icon: Layers, keywords: 'coverage controls network seccomp', run: () => setView('workloads') },
+      { id: 'view-seccomp', group: 'Views', label: 'Seccomp Profiles', icon: Lock, keywords: 'syscall publish enforce capture workloads', run: () => setView('workloads', { control: 'seccomp' }) },
       { id: 'tool-policy', group: 'Tools', label: 'Policy Builder', icon: FileCode, keywords: 'networkpolicy seccomp cilium generate', run: openPolicyBuilder },
       { id: 'tool-audit', group: 'Tools', label: 'Audit Verdicts', icon: ShieldAlert, keywords: 'would deny', run: () => setIsAuditPanelOpen(true) },
       { id: 'tool-ai', group: 'Tools', label: 'AI Assistant', icon: Bot, keywords: 'chat ask', run: () => setIsAIAssistantOpen(true) },
@@ -325,9 +349,9 @@ function App() {
 
   const navItems: NavItem[] = [
     {
-      id: 'findings', label: 'Findings', icon: LayoutDashboard, group: 'Views',
+      id: 'risks', label: 'Risks', icon: TriangleAlert, group: 'Views',
       hint: 'Prioritized runtime-security signals',
-      active: view === 'findings', onClick: () => setView('findings'),
+      active: view === 'risks', onClick: () => setView('risks'),
     },
     {
       id: 'map', label: 'Network Map', icon: Share2, group: 'Views', hint: 'Live pod traffic graph',
@@ -335,9 +359,9 @@ function App() {
       onClick: () => setView('map'),
     },
     {
-      id: 'seccomp', label: 'Seccomp Profiles', icon: Lock, group: 'Views',
-      hint: 'Publish, enforce, and edit per-workload seccomp profiles',
-      active: view === 'seccomp', onClick: () => setView('seccomp'),
+      id: 'workloads', label: 'Workloads', icon: Layers, group: 'Views',
+      hint: 'Control coverage per workload: network policy, seccomp, capture',
+      active: view === 'workloads' || view === 'workload', onClick: () => setView('workloads'),
     },
     {
       id: 'policy', label: 'Policy Builder', icon: FileCode, group: 'Tools',
@@ -361,11 +385,14 @@ function App() {
     [],
   );
 
-  const sectionTitle = view === 'findings' ? 'Findings' : view === 'seccomp' ? 'Seccomp Profiles' : 'Network Map';
+  const SECTION_TITLE: Record<View, string> = { map: 'Network Map', risks: 'Risks', workloads: 'Workloads', workload: 'Workload' };
+  const sectionTitle = view === 'workload' && loc.params.name ? loc.params.name : SECTION_TITLE[view];
   const sectionSubtitle =
     view === 'map'
-      ? `Namespace ${effectiveNamespace} · ${pods.length} pods`
-      : `Namespace ${effectiveNamespace}`;
+      ? `${pods.length} pods`
+      : view === 'workload'
+        ? loc.params.kind ?? ''
+        : '';
 
   return (
     <div className="flex h-screen bg-hubble-darker">
@@ -385,8 +412,15 @@ function App() {
         {/* Top bar */}
         <header className="h-14 shrink-0 flex items-center justify-between gap-4 px-5 border-b border-hubble-border bg-hubble-dark">
           <div className="min-w-0">
-            <h1 className="text-sm font-semibold text-primary truncate">{sectionTitle}</h1>
-            <p className="text-xs text-tertiary truncate">{sectionSubtitle}</p>
+            <div className="flex items-center gap-2 min-w-0">
+              <h1 className="text-sm font-semibold text-primary truncate">{sectionTitle}</h1>
+              <ScopeChip
+                namespace={effectiveNamespace}
+                allNamespaces={allNamespaces}
+                onShowAll={CLUSTER_SCOPED_VIEWS.has(view) ? showAllNamespaces : undefined}
+              />
+            </div>
+            {sectionSubtitle && <p className="text-xs text-tertiary truncate">{sectionSubtitle}</p>}
           </div>
 
           <div className="flex items-center gap-2">
@@ -418,12 +452,35 @@ function App() {
 
         {/* Main Content */}
       <div className="flex-1 flex flex-col overflow-hidden">
-        {view === 'seccomp' ? (
+        {view === 'workloads' ? (
           <Suspense fallback={null}>
-            <SeccompProfilesView namespace={effectiveNamespace} />
+            <WorkloadsView
+              allPods={allPodsLookup}
+              namespace={effectiveNamespace}
+              allNamespaces={allNamespaces}
+              control={loc.params.control === 'seccomp' ? 'seccomp' : undefined}
+              onControlChange={(control) => navigate('workloads', { ...loc.params, control }, { replace: true })}
+              onOpenWorkload={openWorkload}
+            />
           </Suspense>
-        ) : view === 'findings' ? (
-          <FindingsView
+        ) : view === 'workload' ? (
+          <Suspense fallback={null}>
+            <WorkloadView
+              // The URL's ns, not the resolved one: a profile-only workload
+              // (scaled to zero) can live in a namespace with no live pods.
+              ns={loc.params.ns ?? effectiveNamespace}
+              kind={loc.params.kind ?? ''}
+              name={loc.params.name ?? ''}
+              pods={pods}
+              allPods={allPodsLookup}
+              services={services}
+              onBack={() => navigate('workloads', { ns: loc.params.ns })}
+              onOpenInMap={(podId) => navigate('map', { ns: loc.params.ns, pod: podId })}
+            />
+          </Suspense>
+        ) : view === 'risks' ? (
+          <RisksRoute
+            onOpenWorkloads={(control) => navigate('workloads', { ns: effectiveNamespace, scope: 'ns', control })}
             pods={pods}
             namespace={effectiveNamespace}
             onSelectPod={handleFindingSelect}

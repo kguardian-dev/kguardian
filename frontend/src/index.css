@@ -15,6 +15,18 @@
   --theme-text-primary: #F3F4F6;
   --theme-text-secondary: #9AA5B8;
   --theme-text-tertiary: #7E8BA3;
+
+  /* Severity scale (dark). Its own ramp, deliberately NOT the brand indigo
+     (that is selection / in-cluster) and NOT the trust-state success/error
+     pair, so "medium" never reads as "selected" and "critical" never shares
+     a colour with a good posture state. 400-step tones keep >= 4.5:1 on the
+     card surface. Tiers (P0/P1/P2) alias critical/high/medium below. */
+  --theme-sev-critical: #F87171;
+  --theme-sev-high: #FB923C;
+  --theme-sev-medium: #FACC15;
+  --theme-sev-low: #94A3B8;
+  /* Posture: a control that is enforcing is a GOOD state (green + lock). */
+  --theme-state-enforcing: #34D399;
 }
 
 /* Light theme override */
@@ -28,6 +40,15 @@
   --theme-text-primary: #0F1626;
   --theme-text-secondary: #4A5468;
   --theme-text-tertiary: #5B6478;
+
+  /* Severity scale (light): 700/800-step tones, because yellow/orange/green at
+     their dark-theme brightness fall well under 4.5:1 on white (and on the
+     15% pill tint, which is what the orange and yellow steps are sized for). */
+  --theme-sev-critical: #B91C1C;
+  --theme-sev-high: #9A3412;
+  --theme-sev-medium: #854D0E;
+  --theme-sev-low: #475569;
+  --theme-state-enforcing: #065F46;
 }
 
 @theme {
@@ -60,6 +81,17 @@
      (amber) at a glance. teal-600 keeps ≥4.5:1 on the dark ground. */
   --color-hubble-info: #0D9488;
   --color-hubble-info-hover: #0F766E;
+
+  /* Severity + risk-tier scale (theme-aware; values above). Use these via
+     utils/severity.ts, never hubble-accent/-error, for anything ranked. */
+  --color-severity-critical: var(--theme-sev-critical);
+  --color-severity-high: var(--theme-sev-high);
+  --color-severity-medium: var(--theme-sev-medium);
+  --color-severity-low: var(--theme-sev-low);
+  --color-tier-p0: var(--theme-sev-critical);
+  --color-tier-p1: var(--theme-sev-high);
+  --color-tier-p2: var(--theme-sev-medium);
+  --color-state-enforcing: var(--theme-state-enforcing);
 
   /* One radius step for interactive controls (buttons, inputs, tabs) so the
      app stops mixing rounded / rounded-lg / rounded-full at random. */

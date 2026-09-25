@@ -18,6 +18,7 @@ import type {
   SparkPoint,
 } from '../types/compute';
 import { parseBrokerTime, podUid } from './peerResolution';
+import { SEVERITY_DOT_CLASS } from './severity';
 
 /** How far back the sparklines reach, and what a seed asks the broker for. */
 export const COMPUTE_HISTORY_WINDOW_MINUTES = 60;
@@ -551,13 +552,15 @@ export function throttledFinding(findings: readonly ComputeFinding[]): ComputeFi
   return findings.find((f) => f.kind === 'cpu-throttled');
 }
 
-// Header status dot per compute state (design D8). ok/warning/critical take
-// the semantic tokens; unsupported/off take a muted token so "no gauge" never
+// Header status dot per compute state (design D8). warning/critical are the
+// worst finding's severity, so they take the shared severity scale
+// (utils/severity) — the same colours as the finding pills in Risks; ok takes
+// the success token; unsupported/off take a muted token so "no gauge" never
 // reads as "healthy" — the tooltip says which of the two it is.
 export const COMPUTE_DOT_CLASS: Record<ComputeStatus, string> = {
   ok: 'bg-hubble-success',
-  warning: 'bg-hubble-warning',
-  critical: 'bg-hubble-error',
+  warning: SEVERITY_DOT_CLASS.high,
+  critical: SEVERITY_DOT_CLASS.critical,
   unsupported: 'bg-hubble-border-strong',
   off: 'bg-hubble-border',
   pending: 'bg-hubble-border animate-pulse',

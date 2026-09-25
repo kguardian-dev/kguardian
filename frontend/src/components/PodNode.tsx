@@ -2,7 +2,7 @@ import React from 'react';
 import { Handle, Position } from 'reactflow';
 import { Network, Server, Globe, FileCode, Cpu, MemoryStick, Zap, Gauge } from 'lucide-react';
 import { isDaemonSetOrHostNetworkPod } from '../utils/daemonSetPeers';
-import type { PodNodeData } from '../types';
+import { cardPods, countSyscalls, podNodePropsEqual, type PodNodeRenderData } from './podNodeMemo';
 import type { PodComputeData } from '../types/compute';
 import { Button } from './ui/Button';
 import { Sparkline } from './ui/Sparkline';
@@ -22,10 +22,7 @@ import {
 } from '../utils/compute';
 
 interface PodNodeProps {
-  data: PodNodeData & {
-    layoutDirection?: 'LR' | 'TB';
-    onBuildPolicy?: (pod: PodNodeData) => void;
-  };
+  data: PodNodeRenderData;
   selected?: boolean;
 }
 
@@ -163,11 +160,7 @@ const PodNode: React.FC<PodNodeProps> = React.memo(({ data, selected }) => {
   const targetPosition = isTB ? Position.Top : Position.Left;
   const sourcePosition = isTB ? Position.Bottom : Position.Right;
 
-  // Count total syscalls from comma-separated strings
-  const syscallCount = data.syscalls?.reduce((total, syscallRecord) => {
-    const syscalls = syscallRecord.syscalls.split(',').filter(s => s.trim());
-    return total + syscalls.length;
-  }, 0) || 0;
+  const syscallCount = countSyscalls(data);
 
   const IconComponent = isExternal ? Globe : Server;
   // Compute gauges (design D8). `compute` absent ⇒ the card is exactly the
@@ -177,7 +170,7 @@ const PodNode: React.FC<PodNodeProps> = React.memo(({ data, selected }) => {
   // DaemonSet / host-network peers (see utils/daemonSetPeers) take the same
   // teal as their toolbar toggle and their edges — colour alone carries the
   // association, no tag text on the card.
-  const daemonSetPeer = isExternal && (data.pods && data.pods.length > 0 ? data.pods : [data.pod]).some(isDaemonSetOrHostNetworkPod);
+  const daemonSetPeer = isExternal && cardPods(data).some(isDaemonSetOrHostNetworkPod);
   // Trust state → accent: external endpoints = warning amber, in-cluster
   // workloads = brand indigo, DaemonSet/host-network peers = teal. Encoded as
   // a left spine rather than a full tinted border (elevation + a spine reads
@@ -299,21 +292,9 @@ const PodNode: React.FC<PodNodeProps> = React.memo(({ data, selected }) => {
       <Handle type="source" position={sourcePosition} />
     </div>
   );
-}, (prevProps, nextProps) => {
-  // Custom comparison function for React.memo
-  // Only re-render if these specific props change
-  return (
-    prevProps.data.id === nextProps.data.id &&
-    prevProps.data.isExpanded === nextProps.data.isExpanded &&
-    prevProps.selected === nextProps.selected &&
-    prevProps.data.traffic?.length === nextProps.data.traffic?.length &&
-    prevProps.data.syscalls?.length === nextProps.data.syscalls?.length &&
-    prevProps.data.isExternal === nextProps.data.isExternal &&
-    prevProps.data.layoutDirection === nextProps.data.layoutDirection &&
-    // A new compute object arrives with every 5 s poll; identity is the
-    // cheapest correct signal (usePodData builds a fresh one per gauged pod).
-    prevProps.data.compute === nextProps.data.compute
-  );
-});
+  // Re-render only when a rendered field changes. The field list, and the
+  // test that keeps it complete, live in podNodeMemo.ts: add any new field
+  // the card renders there, or it will not refresh on poll.
+}, podNodePropsEqual);
 
 export default PodNode;
