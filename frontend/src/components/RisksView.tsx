@@ -171,7 +171,9 @@ export function RisksView({
         (pod.syscalls ?? []).forEach((record) => {
           record.syscalls.split(',').forEach((raw) => {
             const name = raw.trim();
-            const severity = DANGEROUS_SYSCALLS[name];
+            // Own keys only: a syscall string is external data, and
+            // "constructor" must not resolve to Object.prototype's.
+            const severity = Object.hasOwn(DANGEROUS_SYSCALLS, name) ? DANGEROUS_SYSCALLS[name] : undefined;
             if (severity) seen.set(name, severity);
           });
         });

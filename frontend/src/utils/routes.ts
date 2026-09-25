@@ -18,12 +18,16 @@ type Params = Record<string, string>;
  *  - `#/findings` was renamed to `#/risks` (same view, same params).
  *  - `#/seccomp` was absorbed into the Workloads coverage table, opened on its
  *    seccomp columns and, when the link names a namespace, narrowed to it.
+ *
+ * A Map, not an object literal: the key is the user-controlled hash, and an
+ * object lookup would resolve `#/constructor` or `#/toString` to an inherited
+ * Object.prototype method and call it as a redirect.
  */
-export const LEGACY_REDIRECTS: Record<string, (params: Params) => { view: View; params: Params }> = {
-  findings: (params) => ({ view: 'risks', params }),
+export const LEGACY_REDIRECTS: ReadonlyMap<string, (params: Params) => { view: View; params: Params }> = new Map([
+  ['findings', (params: Params) => ({ view: 'risks' as View, params })],
   // The old view was namespace-scoped, so an old link keeps that scope.
-  seccomp: (params) => ({ view: 'workloads', params: { ...params, control: 'seccomp', ...(params.ns ? { scope: 'ns' } : {}) } }),
-};
+  ['seccomp', (params: Params) => ({ view: 'workloads' as View, params: { ...params, control: 'seccomp', ...(params.ns ? { scope: 'ns' } : {}) } })],
+]);
 
 export interface ResolvedRoute {
   view: View;
@@ -32,7 +36,7 @@ export interface ResolvedRoute {
 }
 
 export function resolveRoute(loc: HashLocation): ResolvedRoute {
-  const legacy = LEGACY_REDIRECTS[loc.view];
+  const legacy = LEGACY_REDIRECTS.get(loc.view);
   if (legacy) {
     const target = legacy(loc.params);
     return { view: target.view, redirect: target };

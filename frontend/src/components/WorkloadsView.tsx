@@ -32,6 +32,11 @@ const READINESS_CLASS: Record<string, string> = {
   Pending: 'text-tertiary',
 };
 
+/** Own keys only: the state string comes from the broker. */
+function readinessClass(state: string): string {
+  return Object.hasOwn(READINESS_CLASS, state) ? READINESS_CLASS[state] : 'text-secondary';
+}
+
 const CONTROLS: Array<{ id: WorkloadControl | undefined; label: string }> = [
   { id: undefined, label: 'All controls' },
   { id: 'seccomp', label: 'Seccomp' },
@@ -229,7 +234,7 @@ export function WorkloadsView({ allPods, namespace, allNamespaces, control, onCo
                               {r.profile.cr && <span className="font-mono text-[11px] text-tertiary">{r.profile.cr.name}</span>}
                             </span>
                           </td>
-                          <td className={`px-3 py-2.5 font-mono text-xs tabular-nums ${r.profile.cr ? READINESS_CLASS[r.profile.cr.distribution.state] ?? 'text-secondary' : 'text-tertiary'}`}>
+                          <td className={`px-3 py-2.5 font-mono text-xs tabular-nums ${r.profile.cr ? readinessClass(r.profile.cr.distribution.state) : 'text-tertiary'}`}>
                             {r.profile.cr ? (
                               <>
                                 {r.profile.cr.distribution.ready}/{r.profile.cr.distribution.total}

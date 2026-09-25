@@ -1,5 +1,5 @@
 import { expect, test } from 'vitest';
-import { isAllNamespaces, resolveRoute, routeHref, workloadParams, workloadsBackParams } from './routes';
+import { DEFAULT_VIEW, isAllNamespaces, resolveRoute, routeHref, workloadParams, workloadsBackParams } from './routes';
 
 // Old links live in tickets, runbooks and browser history. A rename that
 // silently sends them to the map is a broken link; these pin the redirects.
@@ -29,6 +29,14 @@ test('workload links carry the list context and Back restores it', () => {
 test('current routes resolve to themselves with no redirect', () => {
   for (const view of ['map', 'risks', 'workloads', 'workload']) {
     expect(resolveRoute({ view, params: {} })).toEqual({ view });
+  }
+});
+
+test('Object.prototype names in the hash are unknown routes, never redirects', () => {
+  // CodeQL js/unvalidated-dynamic-method-call: an object-literal lookup
+  // resolved these to inherited methods and invoked them as redirects.
+  for (const view of ['constructor', 'toString', '__proto__', 'hasOwnProperty', 'valueOf']) {
+    expect(resolveRoute({ view, params: { ns: 'payments' } })).toEqual({ view: DEFAULT_VIEW });
   }
 });
 

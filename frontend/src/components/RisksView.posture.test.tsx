@@ -67,3 +67,15 @@ test('sensitive-syscall pills use the severity scale, and medium is not brand in
   expect(medium.className).not.toContain('hubble-accent');
   expect(screen.getByText('bpf').className).toContain('text-severity-critical');
 });
+
+test('syscall names that collide with Object.prototype are not sensitive', () => {
+  const pod = { pod_name: 'api-1', pod_ip: '10.0.0.1', pod_namespace: 'payments', time_stamp: 't', node_name: 'n', is_dead: false };
+  view({
+    pods: [{
+      id: 'payments-api', label: 'api', pod, pods: [pod], traffic: [], isExpanded: false,
+      syscalls: [{ pod_name: 'api-1', pod_namespace: 'payments', syscalls: 'constructor,toString,__proto__', arch: 'x86_64', time_stamp: 't' }],
+    }],
+  });
+  expect(screen.queryByText('Sensitive syscalls', { selector: 'h3' })).toBeNull();
+  expect(screen.queryByText('constructor')).toBeNull();
+});
