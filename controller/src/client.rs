@@ -19,19 +19,40 @@ pub(crate) const CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::fro
 /// forever — so its broker GET could park indefinitely and pods
 /// stopped being marked dead with nothing logged. Timeouts are not a
 /// per-call-site decision; they belong to the client.
+///
+/// The broker token belongs to the client for the same reason. Before
+/// it did, three call sites attached it by hand and two did not: the
+/// pod reconciler's `GET /pod/list/{node}` and the node-facts
+/// `POST /node/facts` went out bare, so with broker auth enabled the
+/// reconciler got 401 on every tick (pods were never marked dead) and
+/// node facts were never stored. A default header cannot be forgotten
+/// by the next caller. It is marked sensitive so it stays out of debug
+/// output, and reqwest drops it on a cross-host redirect.
 fn build_http_client(
     request_timeout: std::time::Duration,
     connect_timeout: std::time::Duration,
+    token: Option<&str>,
 ) -> reqwest::Client {
-    reqwest::Client::builder()
+    let mut builder = reqwest::Client::builder()
         .timeout(request_timeout)
-        .connect_timeout(connect_timeout)
-        .build()
-        .expect("Failed to create HTTP client")
+        .connect_timeout(connect_timeout);
+    if let Some(token) = token {
+        let mut value = reqwest::header::HeaderValue::from_str(&format!("Bearer {token}"))
+            .expect("BROKER_AUTH_TOKEN must be a valid HTTP header value");
+        value.set_sensitive(true);
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert(reqwest::header::AUTHORIZATION, value);
+        builder = builder.default_headers(headers);
+    }
+    builder.build().expect("Failed to create HTTP client")
 }
 
 lazy_static! {
-    static ref CLIENT: reqwest::Client = build_http_client(REQUEST_TIMEOUT, CONNECT_TIMEOUT);
+    static ref CLIENT: reqwest::Client = build_http_client(
+        REQUEST_TIMEOUT,
+        CONNECT_TIMEOUT,
+        broker_auth_token().as_deref()
+    );
 }
 
 /// The Controller's one HTTP client for broker traffic.
@@ -55,10 +76,11 @@ pub(crate) fn build_url(api_endpoint: &str, path: &str) -> String {
     format!("{}/{}", endpoint, p)
 }
 
-/// Optional shared secret for the broker API. When `BROKER_AUTH_TOKEN`
-/// is set (matching the broker's own config), the controller sends it as
-/// a bearer token on every POST. Empty / whitespace-only is treated as
-/// unset.
+/// Optional broker token. When `BROKER_AUTH_TOKEN` is set, the shared
+/// client sends it as a bearer token on every request. The chart mounts
+/// the broker's `ingest` token here; that token also grants `read`,
+/// which the reconciler and the seccomp distributor need. Empty or
+/// whitespace-only is treated as unset.
 fn broker_auth_token() -> Option<String> {
     env::var("BROKER_AUTH_TOKEN")
         .ok()
@@ -103,21 +125,11 @@ pub(crate) async fn api_post_call_json(v: Value, path: &str) -> Result<Value, Er
     let json_bytes = serde_json::to_vec(&v)
         .map_err(|e| Error::Custom(format!("Failed to serialize JSON: {}", e)))?;
 
-    let mut request = CLIENT
+    // The bearer token, when configured, is a default header of CLIENT.
+    let res = CLIENT
         .post(&url)
         .header("content-type", "application/json")
-        .body(json_bytes);
-
-    // Optional bearer auth: when the broker is deployed with
-    // BROKER_AUTH_TOKEN set, the controller must present the same token
-    // or its writes are rejected (401). Unset preserves the original
-    // no-auth behaviour. Read per-call to match the API_ENDPOINT pattern
-    // above; the value is stable for the process lifetime.
-    if let Some(token) = broker_auth_token() {
-        request = request.bearer_auth(token);
-    }
-
-    let res = request
+        .body(json_bytes)
         .send()
         .await
         .map_err(|e| Error::ApiError(format!("{}", e)))?;
@@ -164,10 +176,6 @@ async fn send_checked(
     url: &str,
     tolerate_404: bool,
 ) -> Result<(), Error> {
-    let mut request = request;
-    if let Some(token) = broker_auth_token() {
-        request = request.bearer_auth(token);
-    }
     let res = request
         .send()
         .await
@@ -231,12 +239,8 @@ pub(crate) async fn api_get_bytes(path: &str) -> Result<Option<Vec<u8>>, Error> 
 async fn get_url_bytes(url: &str) -> Result<Option<Vec<u8>>, Error> {
     debug!("Getting {}", url);
 
-    let mut request = CLIENT.get(url);
-    if let Some(token) = broker_auth_token() {
-        request = request.bearer_auth(token);
-    }
-
-    let res = request
+    let res = CLIENT
+        .get(url)
         .send()
         .await
         .map_err(|e| Error::ApiError(format!("{}", e)))?;
@@ -304,6 +308,7 @@ mod tests {
         let client = build_http_client(
             std::time::Duration::from_millis(200),
             std::time::Duration::from_millis(100),
+            None,
         );
 
         let started = tokio::time::Instant::now();
@@ -319,6 +324,51 @@ mod tests {
             "took {:?}",
             started.elapsed()
         );
+    }
+
+    /// A broker that captures the head of its one request and answers
+    /// 200. Returns the URL and a receiver for the captured head.
+    fn capturing_broker() -> (String, std::sync::mpsc::Receiver<String>) {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind loopback");
+        let addr = listener.local_addr().expect("local addr");
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            use std::io::{Read, Write};
+            let (mut sock, _) = listener.accept().expect("accept");
+            let mut head = Vec::new();
+            let mut buf = [0u8; 1024];
+            while !head.windows(4).any(|w| w == b"\r\n\r\n") {
+                match sock.read(&mut buf) {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => head.extend_from_slice(&buf[..n]),
+                }
+            }
+            let _ = tx.send(String::from_utf8_lossy(&head).to_string());
+            let _ = sock
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\n[]");
+        });
+        (format!("http://{addr}/pod/list/node-a"), rx)
+    }
+
+    /// Every request from a client built with a token carries it, with
+    /// no per-call opt-in. This is what the reconciler GET and the
+    /// node-facts POST were missing.
+    #[tokio::test]
+    async fn a_client_built_with_a_token_sends_it_on_every_request() {
+        let (url, rx) = capturing_broker();
+        let client = build_http_client(REQUEST_TIMEOUT, CONNECT_TIMEOUT, Some("tok-123"));
+        client.get(&url).send().await.expect("request");
+        let head = rx.recv().expect("captured head").to_ascii_lowercase();
+        assert!(
+            head.contains("authorization: bearer tok-123"),
+            "missing bearer header in: {head}"
+        );
+
+        let (url, rx) = capturing_broker();
+        let client = build_http_client(REQUEST_TIMEOUT, CONNECT_TIMEOUT, None);
+        client.get(&url).send().await.expect("request");
+        let head = rx.recv().expect("captured head").to_ascii_lowercase();
+        assert!(!head.contains("authorization"), "unexpected header: {head}");
     }
 
     /// The shipped ceilings, guarded.

@@ -480,9 +480,25 @@ pub async fn report_node_facts(node_name: String, broker_url: String) {
     ));
     debug!(?facts, "derived node environment facts");
     let url = format!("{}/node/facts", broker_url.trim_end_matches('/'));
-    match reqwest::Client::new().post(&url).json(&facts).send().await {
+    // The shared client: it carries the request/connect ceilings and the
+    // broker bearer token. `reqwest::Client::new()` here had neither, so
+    // with broker auth enabled every node-facts POST was a silent 401.
+    match crate::client::http_client()
+        .post(&url)
+        .json(&facts)
+        .send()
+        .await
+    {
         Ok(resp) if resp.status().is_success() => {
             debug!(node = %node_name, "node facts reported");
+        }
+        Ok(resp)
+            if resp.status() == reqwest::StatusCode::UNAUTHORIZED
+                || resp.status() == reqwest::StatusCode::FORBIDDEN =>
+        {
+            // Not a version skew: the token is missing, wrong, or lacks
+            // the ingest scope. Say so where an operator will see it.
+            warn!(status = %resp.status(), "broker rejected node facts: check BROKER_AUTH_TOKEN (needs the ingest token)");
         }
         Ok(resp) => {
             // An older broker without the endpoint 404s — expected
