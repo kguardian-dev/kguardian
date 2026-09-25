@@ -49,12 +49,21 @@ function over(fg: string, bg: string, alpha: number): string {
   return '#' + [1, 3, 5].map((i) => Math.round(ch(fg, i) * alpha + ch(bg, i) * (1 - alpha)).toString(16).padStart(2, '0')).join('');
 }
 
-const SEV_VARS = ['--theme-sev-critical', '--theme-sev-high', '--theme-sev-medium', '--theme-sev-low', '--theme-state-enforcing'];
+const SEV_VARS = ['--theme-sev-critical', '--theme-sev-high', '--theme-sev-medium', '--theme-sev-low'];
+/** Control-lifecycle pill tokens (StatePill, NetworkPill). */
+const STATE_VARS = ['--theme-state-enforcing', '--theme-state-audit'];
+const ALL_VARS = [...SEV_VARS, ...STATE_VARS];
 
 describe('severity tokens', () => {
-  test.each(SEV_VARS)('%s is defined in both themes', (v) => {
+  test.each(ALL_VARS)('%s is defined in both themes', (v) => {
     expect(dark[v]).toMatch(/^#[0-9A-Fa-f]{6}$/);
     expect(light[v]).toMatch(/^#[0-9A-Fa-f]{6}$/);
+  });
+
+  test('audit has its own token, not the brand accent', () => {
+    expect(theme['--color-state-audit']).toBe('var(--theme-state-audit)');
+    const accent = theme['--color-hubble-accent'].toLowerCase();
+    expect(dark['--theme-state-audit'].toLowerCase()).not.toBe(accent);
   });
 
   test('medium is not the brand indigo, critical is not the enforcing green', () => {
@@ -67,7 +76,7 @@ describe('severity tokens', () => {
 
   test('the four severities are four distinct colours per theme', () => {
     for (const t of [dark, light]) {
-      const vals = SEV_VARS.slice(0, 4).map((v) => t[v].toLowerCase());
+      const vals = SEV_VARS.map((v) => t[v].toLowerCase());
       expect(new Set(vals).size).toBe(4);
     }
   });
@@ -79,8 +88,8 @@ describe('severity tokens', () => {
     ['dark (page)', dark, dark['--theme-bg-dark']],
     ['light', light, light['--theme-bg-card']],
     ['light (page)', light, light['--theme-bg-dark']],
-  ])('every severity token meets AA on the %s surface', (_name, t, surface) => {
-    for (const v of SEV_VARS) {
+  ])('every severity and state token meets AA on the %s surface', (_name, t, surface) => {
+    for (const v of ALL_VARS) {
       expect(contrast(t[v], surface), `${v} on ${surface}`).toBeGreaterThanOrEqual(4.5);
       expect(contrast(t[v], over(t[v], surface, 0.15)), `${v} on its pill`).toBeGreaterThanOrEqual(4.5);
     }

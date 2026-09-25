@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   ShieldAlert,
   ShieldCheck,
@@ -515,8 +515,15 @@ export function RisksView({
  * reads. Kept out of RisksView so the view stays a pure props-in component.
  * A failed profile fetch hides the tile rather than showing a false 0/0.
  */
-export function RisksRoute(props: Omit<RisksViewProps, 'seccompProfiles'>) {
-  const { profiles, error, loading } = useSeccompProfiles();
+export function RisksRoute({ refreshTick = 0, ...props }: Omit<RisksViewProps, 'seccompProfiles'> & { refreshTick?: number }) {
+  const { profiles, error, loading, refresh } = useSeccompProfiles();
+  // Reload the posture tile's data on the header Refresh (skip the mount).
+  const seenTick = useRef(refreshTick);
+  useEffect(() => {
+    if (seenTick.current === refreshTick) return;
+    seenTick.current = refreshTick;
+    void refresh();
+  }, [refreshTick, refresh]);
   const available = !loading && !(error && profiles.length === 0);
   return <RisksView {...props} seccompProfiles={available ? profiles : undefined} />;
 }

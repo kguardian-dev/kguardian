@@ -1,9 +1,8 @@
 import { useMemo, useState } from 'react';
-import { Lock, RefreshCw, Search, AlertTriangle, ChevronRight, Radar, GitCompareArrows, Layers, ShieldAlert } from 'lucide-react';
+import { Lock, Search, AlertTriangle, ChevronRight, Radar, GitCompareArrows, Layers, ShieldAlert } from 'lucide-react';
 import type { PodInfo } from '../types';
 import { useWorkloadCoverage } from '../hooks/useWorkloadCoverage';
-import type { WorkloadRow } from '../utils/workloads';
-import { Button } from './ui/Button';
+import { routeHref, workloadParams } from '../utils/routes';
 import { EmptyState } from './ui/EmptyState';
 import { Skeleton } from './ui/Skeleton';
 import { StatStrip, StatTile, type StatTileProps } from './ui/StatTile';
@@ -21,7 +20,10 @@ interface WorkloadsViewProps {
   /** `seccomp` opens the table on the seccomp columns (the old Seccomp Profiles view). */
   control?: WorkloadControl;
   onControlChange: (control: WorkloadControl | undefined) => void;
-  onOpenWorkload: (row: Pick<WorkloadRow, 'namespace' | 'kind' | 'name'>) => void;
+  /** Opens `#/workload` with these params (utils/routes workloadParams). */
+  onOpenWorkload: (params: Record<string, string>) => void;
+  /** Increments on the header Refresh; reloads profiles and verdicts. */
+  refreshTick?: number;
 }
 
 const READINESS_CLASS: Record<string, string> = {
@@ -44,8 +46,8 @@ const CONTROLS: Array<{ id: WorkloadControl | undefined; label: string }> = [
  * Cluster-wide by default, because profiles and the pod list are; the header
  * scope chip narrows it to one namespace.
  */
-export function WorkloadsView({ allPods, namespace, allNamespaces, control, onControlChange, onOpenWorkload }: WorkloadsViewProps) {
-  const { rows: allRows, loading, error, refresh, profiles } = useWorkloadCoverage(allPods);
+export function WorkloadsView({ allPods, namespace, allNamespaces, control, onControlChange, onOpenWorkload, refreshTick }: WorkloadsViewProps) {
+  const { rows: allRows, loading, error, profiles } = useWorkloadCoverage(allPods, refreshTick, allNamespaces ? undefined : namespace);
   const [query, setQuery] = useState('');
   const seccompMode = control === 'seccomp';
 
@@ -108,9 +110,6 @@ export function WorkloadsView({ allPods, namespace, allNamespaces, control, onCo
               )}
             </p>
           </div>
-          <Button variant="secondary" size="sm" leftIcon={RefreshCw} onClick={() => void refresh()} disabled={loading}>
-            Refresh
-          </Button>
         </div>
 
         <StatStrip count={stats.length} label="Coverage">
@@ -135,14 +134,14 @@ export function WorkloadsView({ allPods, namespace, allNamespaces, control, onCo
                 className="flex-1 bg-transparent text-xs text-primary placeholder:text-tertiary focus:outline-none"
               />
             </div>
-            <div role="tablist" aria-label="Control" className="inline-flex rounded-control border border-hubble-border overflow-hidden">
+            <div role="group" aria-label="Control" className="inline-flex rounded-control border border-hubble-border overflow-hidden">
               {CONTROLS.map((c) => {
                 const on = c.id === control;
                 return (
                   <button
                     key={c.label}
-                    role="tab"
-                    aria-selected={on}
+                    type="button"
+                    aria-pressed={on}
                     onClick={() => onControlChange(c.id)}
                     className={`px-3 h-8 text-xs transition-colors ${on ? 'bg-hubble-accent/20 text-primary' : 'text-secondary hover:bg-hubble-hover/60'}`}
                   >
@@ -197,16 +196,20 @@ export function WorkloadsView({ allPods, namespace, allNamespaces, control, onCo
                   )}
                 </thead>
                 <tbody className="divide-y divide-hubble-border [&_td]:whitespace-nowrap">
-                  {rows.map((r) => (
+                  {rows.map((r) => {
+                    // One builder for both the click and the href, carrying
+                    // this list's scope/control so Back returns here.
+                    const target = workloadParams(r.namespace, r.kind, r.name, { scope: allNamespaces ? undefined : 'ns', control });
+                    return (
                     <tr
                       key={r.key}
                       data-testid="workload-row"
-                      onClick={() => onOpenWorkload(r)}
+                      onClick={() => onOpenWorkload(target)}
                       className="cursor-pointer hover:bg-hubble-hover/40 transition-colors"
                     >
                       <td className="px-4 py-2.5 min-w-0">
                         <a
-                          href={`#/workload?ns=${encodeURIComponent(r.namespace)}&kind=${encodeURIComponent(r.kind)}&name=${encodeURIComponent(r.name)}`}
+                          href={routeHref('workload', target)}
                           onClick={(e) => e.stopPropagation()}
                           className="font-medium text-primary truncate hover:underline"
                         >
@@ -258,7 +261,8 @@ export function WorkloadsView({ allPods, namespace, allNamespaces, control, onCo
                         <ChevronRight className="w-4 h-4" />
                       </td>
                     </tr>
-                  ))}
+                    );
+                  })}
                 </tbody>
               </table>
             </div>

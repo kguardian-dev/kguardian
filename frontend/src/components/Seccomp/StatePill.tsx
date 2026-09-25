@@ -14,7 +14,7 @@ const STATE_PILL: Record<CrStatus, { label: string; className: string; title: st
   },
   audit: {
     label: 'Audit',
-    className: 'bg-hubble-accent/15 text-hubble-accent border-hubble-accent/30',
+    className: 'bg-state-audit/15 text-state-audit border-state-audit/30',
     title: 'A SeccompProfile CR is deployed with SCMP_ACT_LOG — syscalls are logged, never blocked.',
   },
   enforcing: {

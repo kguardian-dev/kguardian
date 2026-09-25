@@ -21,6 +21,11 @@ interface WorkloadViewProps {
   services: ServiceInfo[];
   onBack: () => void;
   onOpenInMap: (podId: string) => void;
+  /** Increments on the header Refresh; reloads profiles and verdicts. */
+  refreshTick?: number;
+  /** The cluster-wide pod list has not arrived yet. Until it has, a missing
+   *  row means "not loaded", not "no such workload". */
+  podsLoading?: boolean;
 }
 
 /**
@@ -29,8 +34,9 @@ interface WorkloadViewProps {
  * control posture, the seccomp profile (with the existing drawer for export),
  * and observed traffic. The full workload security profile replaces this.
  */
-export function WorkloadView({ ns, kind, name, pods, allPods, services, onBack, onOpenInMap }: WorkloadViewProps) {
-  const { rows, loading, seccompApi } = useWorkloadCoverage(allPods);
+export function WorkloadView({ ns, kind, name, pods, allPods, services, onBack, onOpenInMap, refreshTick, podsLoading = false }: WorkloadViewProps) {
+  const { rows, loading: profilesLoading, seccompApi } = useWorkloadCoverage(allPods, refreshTick, ns);
+  const loading = profilesLoading || podsLoading;
   const [drawerOpen, setDrawerOpen] = useState(false);
   const key = workloadKey(ns, kind, name);
   const row = rows.find((r) => r.key === key) ?? null;
@@ -97,7 +103,8 @@ export function WorkloadView({ ns, kind, name, pods, allPods, services, onBack, 
           <header className="px-4 py-3 border-b border-hubble-border">
             <h3 className="text-sm font-semibold text-primary">Controls</h3>
           </header>
-          <table className="w-full text-sm">
+          <div className="overflow-x-auto">
+          <table className="w-full text-sm [&_td]:whitespace-nowrap">
             <thead className="text-[11px] uppercase tracking-wide text-tertiary">
               <tr className="border-b border-hubble-border">
                 <th className="text-left font-medium px-4 py-2">Control</th>
@@ -123,6 +130,7 @@ export function WorkloadView({ ns, kind, name, pods, allPods, services, onBack, 
               </tr>
             </tbody>
           </table>
+          </div>
         </section>
 
         <section className="rounded-surface border border-hubble-border bg-hubble-card overflow-hidden" aria-label="Seccomp">

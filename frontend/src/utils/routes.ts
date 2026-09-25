@@ -17,11 +17,12 @@ type Params = Record<string, string>;
  * Old route → new route, carrying the old params across.
  *  - `#/findings` was renamed to `#/risks` (same view, same params).
  *  - `#/seccomp` was absorbed into the Workloads coverage table, opened on its
- *    seccomp columns.
+ *    seccomp columns and, when the link names a namespace, narrowed to it.
  */
 export const LEGACY_REDIRECTS: Record<string, (params: Params) => { view: View; params: Params }> = {
   findings: (params) => ({ view: 'risks', params }),
-  seccomp: (params) => ({ view: 'workloads', params: { ...params, control: 'seccomp' } }),
+  // The old view was namespace-scoped, so an old link keeps that scope.
+  seccomp: (params) => ({ view: 'workloads', params: { ...params, control: 'seccomp', ...(params.ns ? { scope: 'ns' } : {}) } }),
 };
 
 export interface ResolvedRoute {
@@ -52,7 +53,35 @@ export function isAllNamespaces(view: View, params: Params): boolean {
   return CLUSTER_SCOPED_VIEWS.has(view) && params.scope !== 'ns';
 }
 
-/** Params for the placeholder workload profile route. */
-export function workloadParams(ns: string, kind: string, name: string): Params {
-  return { ns, kind, name };
+/** Where a workload page was opened from, so Back can return there. */
+export interface WorkloadsContext {
+  scope?: string;
+  control?: string;
+}
+
+/**
+ * Params for the placeholder workload profile route. The Workloads list's
+ * scope and control ride along (the workload page ignores them) so Back
+ * restores the list exactly as it was.
+ */
+export function workloadParams(ns: string, kind: string, name: string, from: WorkloadsContext = {}): Params {
+  const p: Params = { ns, kind, name };
+  if (from.scope) p.scope = from.scope;
+  if (from.control) p.control = from.control;
+  return p;
+}
+
+/** Params for Back from a workload page: the list it came from. */
+export function workloadsBackParams(params: Params): Params {
+  const p: Params = {};
+  if (params.ns) p.ns = params.ns;
+  if (params.scope) p.scope = params.scope;
+  if (params.control) p.control = params.control;
+  return p;
+}
+
+/** Shareable href for a route — same encoding as useHashLocation's navigate. */
+export function routeHref(view: View, params: Params): string {
+  const q = new URLSearchParams(params).toString();
+  return `#/${view}${q ? `?${q}` : ''}`;
 }

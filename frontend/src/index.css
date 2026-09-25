@@ -25,8 +25,11 @@
   --theme-sev-high: #FB923C;
   --theme-sev-medium: #FACC15;
   --theme-sev-low: #94A3B8;
-  /* Posture: a control that is enforcing is a GOOD state (green + lock). */
+  /* Control lifecycle (none → audit → enforcing). Enforcing is a GOOD state
+     (green + lock). Audit is "watching, not blocking": an indigo tint light
+     enough to read on the dark card, where the brand #4E3AD9 is ~2.4:1. */
   --theme-state-enforcing: #34D399;
+  --theme-state-audit: #A5B4FC;
 }
 
 /* Light theme override */
@@ -49,6 +52,7 @@
   --theme-sev-medium: #854D0E;
   --theme-sev-low: #475569;
   --theme-state-enforcing: #065F46;
+  --theme-state-audit: #4338CA;
 }
 
 @theme {
@@ -92,6 +96,7 @@
   --color-tier-p1: var(--theme-sev-high);
   --color-tier-p2: var(--theme-sev-medium);
   --color-state-enforcing: var(--theme-state-enforcing);
+  --color-state-audit: var(--theme-state-audit);
 
   /* One radius step for interactive controls (buttons, inputs, tabs) so the
      app stops mixing rounded / rounded-lg / rounded-full at random. */

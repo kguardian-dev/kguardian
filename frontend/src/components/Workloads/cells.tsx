@@ -10,11 +10,11 @@ import type { NetworkCoverage } from '../../utils/workloads';
 export function NetworkPill({ network }: { network: NetworkCoverage }) {
   if (network.state === 'audit') {
     const title =
-      `AuditNetworkPolicy verdicts name this workload (${network.verdicts} recent): ${network.policies.join(', ')}.` +
+      `Recent AuditNetworkPolicy verdicts name this workload (${network.verdicts} in the latest window): ${network.policies.join(', ')}.` +
       (network.wouldDeny > 0 ? ` ${network.wouldDeny} would be denied if enforcing.` : ' None would be denied.');
     return (
       <span className="inline-flex items-center gap-1.5">
-        <span title={title} className="shrink-0 rounded-full border px-2 py-0.5 text-xs font-medium bg-hubble-accent/15 text-hubble-accent border-hubble-accent/30">
+        <span title={title} className="shrink-0 rounded-full border px-2 py-0.5 text-xs font-medium bg-state-audit/15 text-state-audit border-state-audit/30">
           Audit
         </span>
         {network.wouldDeny > 0 && (
@@ -27,7 +27,7 @@ export function NetworkPill({ network }: { network: NetworkCoverage }) {
   }
   return (
     <span
-      title="kguardian does not inventory NetworkPolicy objects yet. This shows AuditNetworkPolicy coverage only, from recent audit verdicts."
+      title="kguardian does not inventory NetworkPolicy objects yet. This shows AuditNetworkPolicy coverage only, from the most recent audit verdicts (a recent window, not full history), so a covered but quiet workload can read as not reported."
       className="shrink-0 rounded-full border px-2 py-0.5 text-xs font-medium bg-hubble-border/40 text-tertiary border-hubble-border"
     >
       Not reported

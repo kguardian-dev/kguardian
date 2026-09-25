@@ -15,7 +15,12 @@ export interface StatTileProps {
   onClick?: () => void;
 }
 
-const SHELL = 'rounded-surface border border-hubble-border bg-hubble-card px-4 py-3 text-left';
+// Each tile spans two rows of the strip's grid and adopts them as a subgrid
+// (label row, value row). Tiles side by side therefore share row heights: when
+// one label wraps to two lines, every value in that row still sits on the same
+// baseline. Outside a StatStrip the tile is a plain two-row grid.
+const SHELL =
+  'grid grid-rows-subgrid row-span-2 content-start gap-y-1 min-w-0 rounded-surface border border-hubble-border bg-hubble-card px-4 py-3 text-left';
 
 /**
  * One number with a label — the posture strip's unit. Extracted from the
@@ -25,11 +30,11 @@ const SHELL = 'rounded-surface border border-hubble-border bg-hubble-card px-4 p
 export function StatTile({ label, value, icon: Icon, tone = 'text-secondary', suffix, title, onClick }: StatTileProps) {
   const body = (
     <>
-      <div className="flex items-center gap-2 text-tertiary text-[11px] uppercase tracking-wide">
-        <Icon className={`w-3.5 h-3.5 shrink-0 ${tone}`} aria-hidden />
-        <span>{label}</span>
+      <div className="flex items-start gap-2 text-tertiary text-[11px] leading-4 uppercase tracking-wide">
+        <Icon className={`w-3.5 h-3.5 mt-px shrink-0 ${tone}`} aria-hidden />
+        <span className="min-w-0 [overflow-wrap:anywhere]">{label}</span>
       </div>
-      <div className={`mt-1 text-2xl font-semibold font-mono tabular-nums ${tone}`}>
+      <div className={`self-end text-2xl leading-8 font-semibold font-mono tabular-nums ${tone}`}>
         {value}
         {suffix != null && <span className="text-base text-tertiary">{suffix}</span>}
       </div>
@@ -60,7 +65,7 @@ export function StatStrip({ children, count, label }: { children: ReactNode; cou
     <div
       role="group"
       aria-label={label}
-      className={`grid grid-cols-2 sm:grid-cols-4 gap-3 ${count >= 5 ? 'lg:grid-cols-5' : ''}`}
+      className={`grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-x-3 gap-y-3 ${count >= 5 ? 'lg:grid-cols-5' : ''}`}
     >
       {children}
     </div>

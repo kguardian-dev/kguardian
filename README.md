@@ -53,8 +53,8 @@ It's built for platform and security teams who want policy-as-code without writi
   </tr>
   <tr>
     <td width="50%" align="center">
-      <a href="docs/images/readme/seccomp-profiles.png"><img src="docs/images/readme/seccomp-profiles.png" alt="Seccomp Profiles: an enforcing SeccompProfile CR with node readiness and drift" /></a>
-      <br /><sub><b>Seccomp Profiles</b> — per-workload syscall allow-lists with node readiness and drift against the deployed <code>SeccompProfile</code>, audit mode by default.</sub>
+      <a href="docs/images/readme/seccomp-profiles.png"><img src="docs/images/readme/seccomp-profiles.png" alt="Workloads, seccomp columns: an enforcing SeccompProfile CR with node readiness and drift" /></a>
+      <br /><sub><b>Workloads · Seccomp</b> — per-workload syscall allow-lists with node readiness and drift against the deployed <code>SeccompProfile</code>, audit mode by default.</sub>
     </td>
     <td width="50%" align="center">
       <a href="docs/images/readme/seccomp-export.png"><img src="docs/images/readme/seccomp-export.png" alt="Export a SeccompProfile CR: diff against the deployed CR and the manifest to commit" /></a>

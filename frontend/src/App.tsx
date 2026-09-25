@@ -19,7 +19,7 @@ import { recommendedPolicyType } from './utils/cniPolicySupport';
 import type { PolicyType } from './hooks/policyEditor';
 import { useCluster } from './contexts/ClusterContext';
 import { paramsForSelection } from './utils/mapSelection';
-import { CLUSTER_SCOPED_VIEWS, isAllNamespaces, resolveRoute, workloadParams, type View } from './utils/routes';
+import { CLUSTER_SCOPED_VIEWS, isAllNamespaces, resolveRoute, workloadsBackParams, type View } from './utils/routes';
 
 // Heavy surfaces — lazy so they stay out of the initial bundle and only load
 // when first opened (the NetworkPolicyEditor alone is ~2k lines).
@@ -91,10 +91,7 @@ function App() {
     () => navigate(view, { ...loc.params, scope: undefined }),
     [navigate, view, loc.params],
   );
-  const openWorkload = useCallback(
-    (w: { namespace: string; kind: string; name: string }) => navigate('workload', workloadParams(w.namespace, w.kind, w.name)),
-    [navigate],
-  );
+  const openWorkload = useCallback((params: Record<string, string>) => navigate('workload', params), [navigate]);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [isAIAssistantOpen, setIsAIAssistantOpen] = useState(false);
@@ -114,7 +111,12 @@ function App() {
   });
   const [tableHeight, setTableHeight] = useState<number>(UI_DIMENSIONS.TABLE_DEFAULT_HEIGHT);
   const [isResizing, setIsResizing] = useState(false);
-  const [railCollapsed, setRailCollapsed] = useState<boolean>(() => localStorage.getItem('kg-rail-collapsed') === '1');
+  // Remembered choice wins; with none, start collapsed on a narrow viewport
+  // (the 224px rail would otherwise leave a phone ~160px of content).
+  const [railCollapsed, setRailCollapsed] = useState<boolean>(() => {
+    const stored = localStorage.getItem('kg-rail-collapsed');
+    return stored !== null ? stored === '1' : window.innerWidth < 768;
+  });
 
   const { namespaces } = useNamespaces();
   // If the current selection isn't a namespace that actually has monitored pods
@@ -128,6 +130,13 @@ function App() {
   // open card is the only thing that reads stored compute history.
   const selectedPodId = loc.params.pod ?? null;
   const { pods, compute, allPodsLookup, services, loading, error, refreshData } = usePodData(effectiveNamespace, selectedPodId);
+  // The header Refresh is the one refresh control. Views with their own
+  // broker data (seccomp profiles, audit verdicts) reload when this ticks.
+  const [refreshTick, setRefreshTick] = useState(0);
+  const refreshAll = useCallback(() => {
+    refreshData();
+    setRefreshTick((t) => t + 1);
+  }, [refreshData]);
 
   // Selected workload is derived from the URL (`?pod=<id>`) and resolved against
   // the loaded pods — so a deep link opens straight to that workload once data
@@ -410,24 +419,28 @@ function App() {
         style={{ paddingRight: `${contentPaddingRightPx}px` }}
       >
         {/* Top bar */}
-        <header className="h-14 shrink-0 flex items-center justify-between gap-4 px-5 border-b border-hubble-border bg-hubble-dark">
+        {/* Narrow widths: the search box, selector label, Refresh label and
+            scope chip step down so the header never forces a page scroll. */}
+        <header className="h-14 shrink-0 flex items-center justify-between gap-2 sm:gap-4 px-3 sm:px-5 border-b border-hubble-border bg-hubble-dark">
           <div className="min-w-0">
             <div className="flex items-center gap-2 min-w-0">
               <h1 className="text-sm font-semibold text-primary truncate">{sectionTitle}</h1>
-              <ScopeChip
-                namespace={effectiveNamespace}
-                allNamespaces={allNamespaces}
-                onShowAll={CLUSTER_SCOPED_VIEWS.has(view) ? showAllNamespaces : undefined}
-              />
+              <div className="hidden sm:block">
+                <ScopeChip
+                  namespace={effectiveNamespace}
+                  allNamespaces={allNamespaces}
+                  onShowAll={CLUSTER_SCOPED_VIEWS.has(view) ? showAllNamespaces : undefined}
+                />
+              </div>
             </div>
             {sectionSubtitle && <p className="text-xs text-tertiary truncate">{sectionSubtitle}</p>}
           </div>
 
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-2 shrink-0">
             <button
               onClick={() => setPaletteOpen(true)}
               title="Search & commands"
-              className="hidden md:flex items-center gap-2 h-8 pl-2.5 pr-1.5 rounded-control border border-hubble-border bg-hubble-card text-tertiary hover:text-secondary hover:border-hubble-border-strong transition-colors"
+              className="hidden lg:flex items-center gap-2 h-8 pl-2.5 pr-1.5 rounded-control border border-hubble-border bg-hubble-card text-tertiary hover:text-secondary hover:border-hubble-border-strong transition-colors"
             >
               <Search className="w-3.5 h-3.5" />
               <span className="text-xs">Search</span>
@@ -442,11 +455,13 @@ function App() {
             <Button
               variant="secondary"
               leftIcon={RefreshCw}
-              onClick={refreshData}
+              onClick={refreshAll}
               disabled={loading}
               className={loading ? '[&_svg]:animate-spin' : ''}
+              aria-label="Refresh"
+              title="Refresh"
             >
-              Refresh
+              <span className="hidden lg:inline">Refresh</span>
             </Button>
           </div>
         </header>
@@ -456,6 +471,7 @@ function App() {
         {view === 'workloads' ? (
           <Suspense fallback={null}>
             <WorkloadsView
+              refreshTick={refreshTick}
               allPods={allPodsLookup}
               namespace={effectiveNamespace}
               allNamespaces={allNamespaces}
@@ -467,6 +483,8 @@ function App() {
         ) : view === 'workload' ? (
           <Suspense fallback={null}>
             <WorkloadView
+              refreshTick={refreshTick}
+              podsLoading={loading && allPodsLookup.length === 0}
               // The URL's ns, not the resolved one: a profile-only workload
               // (scaled to zero) can live in a namespace with no live pods.
               ns={loc.params.ns ?? effectiveNamespace}
@@ -475,12 +493,13 @@ function App() {
               pods={pods}
               allPods={allPodsLookup}
               services={services}
-              onBack={() => navigate('workloads', { ns: loc.params.ns })}
+              onBack={() => navigate('workloads', workloadsBackParams(loc.params))}
               onOpenInMap={(podId) => navigate('map', { ns: loc.params.ns, pod: podId })}
             />
           </Suspense>
         ) : view === 'risks' ? (
           <RisksRoute
+            refreshTick={refreshTick}
             onOpenWorkloads={(control) => navigate('workloads', { ns: effectiveNamespace, scope: 'ns', control })}
             pods={pods}
             namespace={effectiveNamespace}

@@ -10,12 +10,17 @@ import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/re
 vi.mock('./components/NetworkGraph', () => ({ default: () => <div data-testid="map" /> }));
 vi.mock('./components/DataTable', () => ({ default: () => <div /> }));
 vi.mock('./components/WorkloadsView', () => ({
-  default: (p: { control?: string; allNamespaces: boolean }) => (
-    <div data-testid="workloads" data-control={p.control ?? ''} data-all={String(p.allNamespaces)} />
+  default: (p: { control?: string; allNamespaces: boolean; refreshTick?: number }) => (
+    <div data-testid="workloads" data-control={p.control ?? ''} data-all={String(p.allNamespaces)} data-tick={String(p.refreshTick ?? 0)} />
   ),
 }));
 vi.mock('./components/WorkloadView', () => ({
-  default: (p: { ns: string; kind: string; name: string }) => <div data-testid="workload">{`${p.ns}/${p.kind}/${p.name}`}</div>,
+  default: (p: { ns: string; kind: string; name: string; onBack: () => void }) => (
+    <div>
+      <div data-testid="workload">{`${p.ns}/${p.kind}/${p.name}`}</div>
+      <button onClick={p.onBack}>back</button>
+    </div>
+  ),
 }));
 vi.mock('./hooks/useSeccompProfiles', () => ({
   useSeccompProfiles: () => ({ api: {}, profiles: [], loading: false, error: null, refresh: async () => {} }),
@@ -88,6 +93,8 @@ test('#/seccomp redirects to the Workloads seccomp columns', async () => {
   await waitFor(() => expect(window.location.hash.startsWith('#/workloads')).toBe(true));
   expect(hashParams().get('control')).toBe('seccomp');
   expect(hashParams().get('ns')).toBe('payments');
+  // The old view was namespace-scoped; the redirect keeps that scope.
+  expect(hashParams().get('scope')).toBe('ns');
   await waitFor(() => expect(screen.getByTestId('workloads').dataset.control).toBe('seccomp'));
 });
 
@@ -131,4 +138,22 @@ test('the rail names the renamed views', async () => {
   expect(screen.getAllByText('Workloads').length).toBeGreaterThan(0);
   expect(screen.queryByText('Findings')).toBeNull();
   expect(screen.queryByText('Seccomp Profiles')).toBeNull();
+});
+
+test('Workloads has no Refresh of its own: the header Refresh reloads its data', async () => {
+  renderAt('#/workloads?ns=payments');
+  await waitFor(() => expect(screen.getByTestId('workloads').dataset.tick).toBe('0'));
+  const refreshButtons = screen.getAllByRole('button', { name: /Refresh/ });
+  expect(refreshButtons).toHaveLength(1);
+  fireEvent.click(refreshButtons[0]);
+  await waitFor(() => expect(screen.getByTestId('workloads').dataset.tick).toBe('1'));
+});
+
+test('Back from a workload page restores the list scope and control it came from', async () => {
+  renderAt('#/workload?ns=payments&kind=Deployment&name=api&scope=ns&control=seccomp');
+  await waitFor(() => expect(screen.getByTestId('workload')).not.toBeNull());
+  fireEvent.click(screen.getByText('back'));
+  await waitFor(() => expect(window.location.hash.startsWith('#/workloads')).toBe(true));
+  expect(Object.fromEntries(hashParams())).toEqual({ ns: 'payments', scope: 'ns', control: 'seccomp' });
+  await waitFor(() => expect(screen.getByTestId('workloads').dataset.all).toBe('false'));
 });
