@@ -146,15 +146,18 @@ export const POSTURE_PAGE_SIZE = 100;
 
 /**
  * `GET /workloads` posture summaries for the Workloads table's posture
- * column, one server page at a time (same `(namespace, kind, name)` order
- * the table uses): the first page on load / scope change / refresh, more
- * only when the user asks (`loadMore`). `namespace` and `status` are
- * server-side filters. `error` set means the column is unavailable (older
+ * column, one server page at a time (the Broker orders by `(namespace,
+ * kind, name)`; the table's `(namespace, name, kind)` is close enough that
+ * a page covers the top of the table): the first page on load / scope or
+ * filter change / refresh, more only when the user asks (`loadMore`).
+ * `namespace`, `status` and `search` are server-side filters. `error` set means the column is unavailable (older
  * Broker, read budget); the rest of the table works.
  */
 export function useWorkloadPostures(
   namespace: string | undefined,
   status: PostureStatus | undefined,
+  /** Server-side, case-insensitive substring of the workload name. */
+  search: string | undefined,
   refreshTick = 0,
   api: ProfileApi = profileApi,
   pageSize = POSTURE_PAGE_SIZE,
@@ -168,8 +171,9 @@ export function useWorkloadPostures(
   const begin = useLatest();
 
   const page = useCallback(
-    (after: string | undefined) => api.listWorkloads({ limit: pageSize, ...(namespace ? { namespace } : {}), ...(status ? { status } : {}), after }),
-    [api, namespace, status, pageSize],
+    (after: string | undefined) =>
+      api.listWorkloads({ limit: pageSize, ...(namespace ? { namespace } : {}), ...(status ? { status } : {}), ...(search ? { search } : {}), after }),
+    [api, namespace, status, search, pageSize],
   );
 
   const load = useCallback(async () => {

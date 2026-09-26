@@ -16,20 +16,27 @@ export type DimensionName = 'network' | 'syscalls' | 'podSecurity' | 'images' | 
 export type PssLevel = 'privileged' | 'baseline' | 'restricted';
 export type LevelConfidence = 'confirmed' | 'upper_bound';
 
+/**
+ * Rollup (contract v1.2: no numeric score). Status is the worst known
+ * dimension status, derived from findings; `coverage` is the share of the
+ * weighted dimensions that have a known status.
+ */
 export interface Posture {
   status: PostureStatus;
-  score: number | null;
   coverage: number;
-  grade: string | null;
-  /** Every weighted dimension that is NOT SCORED — status unknown, or known
-   *  but unscored (e.g. images with an inventory and no vulnerability source).
-   *  Not the same as "no data" (contract v1.1). */
+  /** Dimensions whose status is unknown (excluded, never counted as clean). */
   unknownDimensions: DimensionName[];
+}
+
+/** Why the rollup is what it is: one line per contributing dimension. */
+export interface PostureReason {
+  dimension: DimensionName;
+  status: PostureStatus;
+  message: string;
 }
 
 export interface DimensionBrief {
   status: PostureStatus;
-  score: number | null;
 }
 
 export interface WorkloadListItem {
@@ -79,11 +86,9 @@ export interface Coverage {
   note: string;
 }
 
-/** §2.1 — the envelope every dimension carries. */
+/** §2.1 — the envelope every dimension carries (v1.2: no score). */
 export interface DimensionEnvelope {
   status: PostureStatus;
-  score: number | null;
-  scored: boolean;
   coverage: Coverage;
   reasons: Reason[];
 }
@@ -124,6 +129,8 @@ export interface PodSecurityDimension extends DimensionEnvelope {
   levelConfidence: LevelConfidence | null;
   unevaluatedChecks: string[];
   pod: {
+    /** Whether any pod-level fields have been reported. */
+    known: boolean;
     /** Pod-level failing checks (contract v1.1); the workload level accounts for them. */
     failing: FailingCheck[];
     serviceAccountName: string | null;
@@ -141,6 +148,8 @@ export interface PodSecurityDimension extends DimensionEnvelope {
     };
   } | null;
   containers: PodSecurityContainer[];
+  /** Containers with inventory rows but no recent report; not evaluated. */
+  staleContainers: Array<{ name: string; kind: string; digest: string; lastSeen: string }>;
   recommendation: {
     recommendation: true;
     targetLevel: PssLevel;
@@ -217,6 +226,8 @@ export interface ImageContainer {
   name: string;
   kind: string;
   mixedDigests: boolean;
+  /** No digest of this container has been reported recently. */
+  stale: boolean;
   running: ImageDigestRow[];
   previous: ImageDigestRow[];
 }
@@ -281,10 +292,7 @@ export interface WorkloadProfile {
   contentHash: string;
   version: VersionRef | null;
   snapshotPending: boolean;
-  posture: Posture & {
-    weights: Record<string, number>;
-    deductions: Array<{ dimension: DimensionName; findingId: string; points: number }>;
-  };
+  posture: Posture & { reasons: PostureReason[] };
   attention: Finding[];
   findings: Finding[];
   controls: Control[];
@@ -308,7 +316,7 @@ export interface VersionListItem extends VersionRef {
   dimensionHashes: Record<string, string>;
   /** null = unknown: the predecessor was trimmed by retention (contract v1.1). */
   changedDimensions: DimensionName[] | null;
-  posture: Pick<Posture, 'status' | 'score' | 'coverage' | 'grade'>;
+  posture: Pick<Posture, 'status' | 'coverage'>;
 }
 
 export interface VersionList {
@@ -342,6 +350,9 @@ export interface ProfileDiff {
   kind: string;
   name: string;
   from: VersionRef | null;
+  /** `from` was omitted and the predecessor of `to` was trimmed by
+   *  retention, so everything in `to` shows as added. */
+  fromTrimmed?: boolean;
   to: VersionRef;
   changed: boolean;
   dimensions: {
@@ -370,7 +381,6 @@ export interface ProfileDiff {
       changed: boolean;
       added: NetworkRule[];
       removed: NetworkRule[];
-      audited: Change<boolean | null> | null;
     };
   };
 }

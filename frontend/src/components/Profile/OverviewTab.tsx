@@ -5,7 +5,7 @@ import { SEVERITY_BADGE_CLASS, TIER_BADGE_CLASS } from '../../utils/severity';
 import { DIMENSION_LABEL, findingSeverity } from '../../utils/posture';
 import { Button } from '../ui/Button';
 import { EmptyState } from '../ui/EmptyState';
-import { CheckMark, Panel } from './parts';
+import { CantTell, CheckMark, Panel } from './parts';
 import type { ProfileTab } from '../../utils/profileView';
 
 const TAB_OF: Record<DimensionName, ProfileTab> = {
@@ -40,9 +40,8 @@ function NeedsAttention({ profile, onOpenTab }: { profile: WorkloadProfile; onOp
   const list = showAll
     ? [...profile.findings].sort((a, b) => FINDING_RANK[b.severity] - FINDING_RANK[a.severity])
     : profile.attention.slice(0, ATTENTION_MAX);
-  // Dimensions with no data at all (status unknown) — not the same as the
-  // rollup's unknownDimensions, which also lists known-but-unscored ones.
-  const unknown = (['network', 'syscalls', 'podSecurity', 'images'] as const).filter((d) => profile.dimensions[d].status === 'unknown');
+  // Core dimensions with status unknown (contract v1.2).
+  const unknown = profile.posture.unknownDimensions;
   return (
     <Panel
       icon={Radar}
@@ -216,7 +215,10 @@ function Readiness({ profile }: { profile: WorkloadProfile }) {
         {profile.readiness.map((r) => (
           <li key={r.id} data-ok={String(r.ok)} className="flex items-start gap-2 py-1.5 text-xs">
             <CheckMark ok={r.ok} />
-            <span className={r.ok === null ? 'text-tertiary' : 'text-primary'}>{r.message}</span>
+            <span className={`min-w-0 ${r.ok === null ? 'text-tertiary' : 'text-primary'}`}>
+              {r.ok === null && <><CantTell />{' '}</>}
+              {r.message}
+            </span>
           </li>
         ))}
       </ul>

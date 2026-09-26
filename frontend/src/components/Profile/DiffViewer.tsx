@@ -22,6 +22,10 @@ export function DiffViewer({ diff }: { diff: ProfileDiff }) {
     <>
       <span className="font-mono">v{diff.from.revision}</span> ({formatTimestamp(diff.from.createdAt)}) → <span className="font-mono">v{diff.to.revision}</span> ({formatTimestamp(diff.to.createdAt)})
     </>
+  ) : diff.fromTrimmed ? (
+    <>
+      Earlier versions were trimmed by retention, so <span className="font-mono">v{diff.to.revision}</span> ({formatTimestamp(diff.to.createdAt)}) has nothing to compare with: everything shows as added
+    </>
   ) : (
     <>
       First revision <span className="font-mono">v{diff.to.revision}</span> ({formatTimestamp(diff.to.createdAt)}): everything shows as added

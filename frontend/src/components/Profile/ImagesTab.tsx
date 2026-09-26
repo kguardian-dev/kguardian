@@ -3,7 +3,7 @@ import type { ImageContainer, ImageDigestRow, ImagesDimension } from '../../type
 import { asStatus, formatAgo, formatTimestamp, shortDigest } from '../../utils/posture';
 import { digestStateLabel } from '../../utils/profileView';
 import { EmptyState } from '../ui/EmptyState';
-import { Panel, Reasons, ScoredStatus } from './parts';
+import { Panel, Reasons, StatusPill } from './parts';
 
 function DigestRows({ rows, current }: { rows: ImageDigestRow[]; current: boolean }) {
   return (
@@ -36,6 +36,14 @@ function ContainerCard({ c }: { c: ImageContainer }) {
       <div className="flex flex-wrap items-center gap-2 px-4 py-2 bg-hubble-hover/30 border-b border-hubble-border">
         <span className="font-mono text-sm text-primary">{c.name}</span>
         <span className="text-[11px] text-tertiary">{c.kind}</span>
+        {c.stale && (
+          <span
+            className="rounded-full border border-dashed border-hubble-border-strong px-2 py-0.5 text-[11px] text-tertiary"
+            title="No digest of this container has been reported recently: it may have been removed from the spec. Kept until retention prunes it."
+          >
+            Stale
+          </span>
+        )}
         {c.mixedDigests && (
           <span
             className="rounded-full border px-2 py-0.5 text-[11px] font-medium bg-severity-medium/15 text-severity-medium border-severity-medium/30"
@@ -70,7 +78,7 @@ export function ImagesTab({ dim }: { dim: ImagesDimension }) {
         icon={Package}
         title="Image inventory"
         hint={`Digests per container, keyed by digest. "Running" means reported in the last ${Math.round(dim.runningWindowSeconds / 60)} min.`}
-        action={<ScoredStatus status={status} score={dim.score} />}
+        action={<StatusPill status={status} />}
       >
         <div className="px-4 py-3 space-y-3">
           <Reasons reasons={dim.reasons} />

@@ -1,9 +1,9 @@
 import { FileCode, ShieldCheck, UserCog } from 'lucide-react';
 import type { FailingCheck, PodSecurityDimension } from '../../types/profile';
-import { asStatus, fieldValue, pssLevelText, shortDigest } from '../../utils/posture';
+import { asStatus, fieldValue, formatAgo, formatTimestamp, pssLevelText, shortDigest } from '../../utils/posture';
 import { CopyButton } from '../ui/CopyButton';
 import { EmptyState } from '../ui/EmptyState';
-import { Fact, Panel, Reasons, ScoredStatus } from './parts';
+import { Fact, Panel, Reasons, StatusPill } from './parts';
 
 const LEVEL_TONE: Record<string, string> = {
   privileged: 'text-severity-critical',
@@ -39,7 +39,7 @@ export function PodSecurityTab({ dim }: { dim: PodSecurityDimension }) {
   const status = asStatus(dim.status);
   if (dim.level === null && dim.containers.length === 0) {
     return (
-      <Panel icon={ShieldCheck} title="Pod Security Standards" action={<ScoredStatus status={status} score={dim.score} />}>
+      <Panel icon={ShieldCheck} title="Pod Security Standards" action={<StatusPill status={status} />}>
         <EmptyState
           icon={ShieldCheck}
           compact
@@ -52,7 +52,7 @@ export function PodSecurityTab({ dim }: { dim: PodSecurityDimension }) {
   const pod = dim.pod;
   return (
     <div className="space-y-4">
-      <Panel icon={ShieldCheck} title="Pod Security Standards" hint={dim.pssVersion} action={<ScoredStatus status={status} score={dim.score} />}>
+      <Panel icon={ShieldCheck} title="Pod Security Standards" hint={dim.pssVersion} action={<StatusPill status={status} />}>
         <div className="px-4 py-3 space-y-3">
           <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
             <span className="text-[11px] uppercase tracking-wide text-tertiary">Level</span>
@@ -71,7 +71,12 @@ export function PodSecurityTab({ dim }: { dim: PodSecurityDimension }) {
               <p className="mt-1 text-tertiary">{dim.coverage.note}</p>
             </details>
           )}
-          {pod && (
+          {pod && !pod.known && (
+            <p className="text-xs text-tertiary" data-testid="pss-pod-unknown">
+              Pod-level fields (host namespaces, pod securityContext) have not been reported, so those checks are unevaluated, not passed.
+            </p>
+          )}
+          {pod && pod.known && (
             <dl className="divide-y divide-hubble-border">
               <Fact label="ServiceAccount"><span className="font-mono">{pod.serviceAccountName ?? 'unset'}</span></Fact>
               <Fact label="automountServiceAccountToken">
@@ -116,6 +121,17 @@ export function PodSecurityTab({ dim }: { dim: PodSecurityDimension }) {
             </li>
           ))}
         </ul>
+        {dim.staleContainers.length > 0 && (
+          <div className="px-4 py-2 border-t border-hubble-border text-xs text-tertiary" data-testid="pss-stale">
+            Not evaluated (no recent report, may have been removed):{' '}
+            {dim.staleContainers.map((c, i) => (
+              <span key={`${c.kind}-${c.name}`}>
+                {i > 0 && ', '}
+                <span className="font-mono text-secondary">{c.name}</span> <span title={formatTimestamp(c.lastSeen)}>(last seen {formatAgo(c.lastSeen)})</span>
+              </span>
+            ))}
+          </div>
+        )}
       </Panel>
 
       <Panel

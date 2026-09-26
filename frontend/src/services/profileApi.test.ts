@@ -1,58 +1,79 @@
 import { expect, test, vi } from 'vitest';
 import { ProfileApi, ProfileApiError } from './profileApi';
-import { workloadsPage } from '../fixtures/profile';
+import { replayApi } from '../fixtures/replay';
+import {
+  err400BadOrder,
+  err400BadStatus,
+  err404RevisionNotFound,
+  err404WorkloadNotFound,
+  listPage1,
+  listPage2,
+  listSearchLedger,
+} from '../fixtures/profile';
 
-const respond = (status: number, body: unknown) => new Response(typeof body === 'string' ? body : JSON.stringify(body), { status });
+const kindOf = (e: unknown) => (e instanceof ProfileApiError ? e.kind : 'not-a-profile-error');
 
-function api(handler: (url: string) => Response) {
-  const calls: string[] = [];
-  const fetchImpl = vi.fn(async (input: RequestInfo | URL) => {
-    calls.push(String(input));
-    return handler(String(input));
-  }) as unknown as typeof fetch;
-  return { client: new ProfileApi({ fetchImpl }), calls };
-}
-
-test('error codes classify per the contract', async () => {
-  const cases: Array<[number, unknown, string]> = [
-    [404, { error: 'workload_not_found', message: 'x' }, 'workload_not_found'],
-    [404, { error: 'revision_not_found', message: 'x' }, 'revision_not_found'],
-    [404, 'Not Found', 'unsupported'],
-    [503, 'busy', 'busy'],
-    [400, { error: 'bad_request', message: 'from must be < to' }, 'bad_request'],
-    [500, 'db error', 'error'],
-  ];
-  for (const [status, body, kind] of cases) {
-    const { client } = api(() => respond(status, body));
-    const err = await client.getProfile('payments', 'Deployment', 'checkout').catch((e: unknown) => e);
-    expect(err).toBeInstanceOf(ProfileApiError);
-    expect((err as ProfileApiError).kind).toBe(kind);
-  }
-  const { client } = api(() => respond(400, { error: 'bad_request', message: 'from must be < to' }));
-  await expect(client.getDiff('a', 'b', 'c', { from: 3, to: 2 })).rejects.toThrow('from must be < to');
-});
-
-test('a network failure is an error, not a crash', async () => {
-  const client = new ProfileApi({ fetchImpl: (async () => Promise.reject(new TypeError('Failed to fetch'))) as unknown as typeof fetch });
-  await expect(client.getProfile('a', 'b', 'c')).rejects.toMatchObject({ kind: 'error' });
-});
-
-test('paths and queries: segments encoded, unset params omitted', async () => {
-  const { client, calls } = api((u) => respond(200, u.includes('/versions') ? { items: [], nextBefore: null } : {}));
-  await client.listVersions('payments', 'Deployment', 'a/b', { before: 3 });
-  await client.getDiff('payments', 'Deployment', 'checkout', { to: 3 });
-  expect(calls).toEqual([
-    '/api/workloads/payments/Deployment/a%2Fb/profile/versions?before=3',
-    '/api/workloads/payments/Deployment/checkout/profile/diff?to=3',
+test('captured error bodies classify per the contract', async () => {
+  const { api } = replayApi();
+  expect(kindOf(await api.getProfile('payments', 'Deployment', 'does-not-exist').catch((e: unknown) => e))).toBe('workload_not_found');
+  expect(kindOf(await api.getDiff('payments', 'Deployment', 'checkout', { from: 1, to: 3 }).catch((e: unknown) => e))).toBe('revision_not_found');
+  const badOrder = await api.getDiff('payments', 'Deployment', 'checkout', { from: 4, to: 3 }).catch((e: unknown) => e);
+  expect(kindOf(badOrder)).toBe('bad_request');
+  expect((badOrder as Error).message).toBe(err400BadOrder.body.message);
+  expect(kindOf(await api.listWorkloads({ status: 'great' as never }).catch((e: unknown) => e))).toBe('bad_request');
+  // The captures these came from, so a re-capture that changes a code fails here.
+  expect([err404WorkloadNotFound, err404RevisionNotFound, err400BadOrder, err400BadStatus].map((c) => [c.status, c.body.error])).toEqual([
+    [404, 'workload_not_found'],
+    [404, 'revision_not_found'],
+    [400, 'bad_request'],
+    [400, 'bad_request'],
   ]);
 });
 
-test('listWorkloads sends paging and filters as query params, and nothing unset', async () => {
-  const { client, calls } = api(() => respond(200, workloadsPage));
-  await client.listWorkloads({ limit: 100, namespace: 'payments', status: 'risk', after: 'payments/Deployment/api' });
-  await client.listWorkloads({ limit: 100 });
+test('non-contract failures: a bare 404 is an older Broker, 503 is busy, 500 an error, a network failure an error', async () => {
+  const cases: Array<[number, string, string]> = [
+    [404, '', 'unsupported'],
+    [503, 'busy', 'busy'],
+    [500, 'db error', 'error'],
+  ];
+  for (const [status, body, kind] of cases) {
+    const client = new ProfileApi({ fetchImpl: (async () => new Response(body, { status })) as unknown as typeof fetch });
+    expect(kindOf(await client.getProfile('a', 'b', 'c').catch((e: unknown) => e))).toBe(kind);
+  }
+  const offline = new ProfileApi({ fetchImpl: (async () => Promise.reject(new TypeError('Failed to fetch'))) as unknown as typeof fetch });
+  await expect(offline.getProfile('a', 'b', 'c')).rejects.toMatchObject({ kind: 'error' });
+});
+
+test('paging follows the captured nextAfter to the next captured page', async () => {
+  const { api, calls } = replayApi();
+  const p1 = await api.listWorkloads({ limit: 2 });
+  expect(p1).toEqual(listPage1.body);
+  expect(p1.nextAfter).toBe('observability/DaemonSet/node-exporter');
+  const p2 = await api.listWorkloads({ limit: 2, after: p1.nextAfter! });
+  expect(p2).toEqual(listPage2.body);
+  expect(calls).toEqual(['GET /workloads?limit=2', 'GET /workloads?limit=2&after=observability%2FDaemonSet%2Fnode-exporter']);
+  expect(listPage2.request).toBe('GET /workloads?limit=2&after=observability/DaemonSet/node-exporter');
+});
+
+test('search is sent as the contract query param', async () => {
+  const { api } = replayApi();
+  expect(await api.listWorkloads({ search: 'LEDG' })).toEqual(listSearchLedger.body);
+});
+
+test('paths and queries: segments encoded, unset params omitted', async () => {
+  const calls: string[] = [];
+  const client = new ProfileApi({
+    fetchImpl: vi.fn(async (input: RequestInfo | URL) => {
+      calls.push(String(input));
+      return new Response(JSON.stringify({ items: [], nextBefore: null }), { status: 200 });
+    }) as unknown as typeof fetch,
+  });
+  await client.listVersions('payments', 'Deployment', 'a/b', { before: 3 });
+  await client.getDiff('payments', 'Deployment', 'checkout', { to: 3 });
+  await client.listWorkloads({ limit: 100, namespace: 'payments', status: 'risk', search: 'led', after: 'payments/Deployment/api' });
   expect(calls).toEqual([
-    '/api/workloads?limit=100&namespace=payments&status=risk&after=payments%2FDeployment%2Fapi',
-    '/api/workloads?limit=100',
+    '/api/workloads/payments/Deployment/a%2Fb/profile/versions?before=3',
+    '/api/workloads/payments/Deployment/checkout/profile/diff?to=3',
+    '/api/workloads?limit=100&namespace=payments&status=risk&search=led&after=payments%2FDeployment%2Fapi',
   ]);
 });

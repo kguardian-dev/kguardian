@@ -3,14 +3,14 @@ import type { NetworkDimension } from '../../types/profile';
 import { peerLabel } from '../../utils/profileView';
 import { asStatus, formatAgo, formatTimestamp } from '../../utils/posture';
 import { EmptyState } from '../ui/EmptyState';
-import { Fact, Panel, Reasons, ScoredStatus } from './parts';
+import { Fact, Panel, Reasons, StatusPill } from './parts';
 
 export function NetworkTab({ dim }: { dim: NetworkDimension }) {
   const status = asStatus(dim.status);
   const audit = dim.policy.audit;
   return (
     <div className="space-y-4">
-      <Panel icon={ShieldAlert} title="Policy" hint="AuditNetworkPolicy verdicts in the last 24h. Applied NetworkPolicies are not visible to the Broker yet." action={<ScoredStatus status={status} score={dim.score} />}>
+      <Panel icon={ShieldAlert} title="Policy" hint="AuditNetworkPolicy verdicts in the last 24h. Applied NetworkPolicies are not visible to the Broker yet." action={<StatusPill status={status} />}>
         <div className="px-4 py-3 space-y-3">
           <Reasons reasons={dim.reasons} />
           {audit ? (

@@ -61,6 +61,8 @@ const seg = encodeURIComponent;
 
 export interface ListWorkloadsQuery {
   namespace?: string;
+  /** Case-insensitive substring of the workload name (server-side). */
+  search?: string;
   kind?: string;
   status?: PostureStatus;
   limit?: number;

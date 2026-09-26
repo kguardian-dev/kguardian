@@ -3,7 +3,7 @@ import type { SyscallsDimension } from '../../types/profile';
 import { asStatus, formatAgo, formatTimestamp } from '../../utils/posture';
 import { Button } from '../ui/Button';
 import { EmptyState } from '../ui/EmptyState';
-import { Fact, Panel, Reasons, ScoredStatus } from './parts';
+import { Fact, Panel, Reasons, StatusPill } from './parts';
 import { ControlStatePill } from './OverviewTab';
 
 export function SyscallsTab({ dim, onOpenSeccomp }: { dim: SyscallsDimension; onOpenSeccomp?: () => void }) {
@@ -15,7 +15,7 @@ export function SyscallsTab({ dim, onOpenSeccomp }: { dim: SyscallsDimension; on
   );
   if (!dim.observed) {
     return (
-      <Panel icon={Cpu} title="Syscalls" action={<ScoredStatus status={status} score={dim.score} />}>
+      <Panel icon={Cpu} title="Syscalls" action={<StatusPill status={status} />}>
         <EmptyState
           icon={Cpu}
           compact
@@ -28,7 +28,7 @@ export function SyscallsTab({ dim, onOpenSeccomp }: { dim: SyscallsDimension; on
   const cr = dim.cr;
   return (
     <div className="space-y-4">
-      <Panel icon={Cpu} title="Observed syscalls" hint={dim.coverage.note || undefined} action={<ScoredStatus status={status} score={dim.score} />}>
+      <Panel icon={Cpu} title="Observed syscalls" hint={dim.coverage.note || undefined} action={<StatusPill status={status} />}>
         <div className="px-4 py-3 space-y-3">
           <Reasons reasons={dim.reasons} />
           <dl className="divide-y divide-hubble-border">

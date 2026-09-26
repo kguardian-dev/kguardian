@@ -1,0 +1,8 @@
+{
+  "request": "GET /workloads/payments/Deployment/checkout/profile/versions/99",
+  "status": 404,
+  "body": {
+    "error": "revision_not_found",
+    "message": "no stored profile version with that revision"
+  }
+}

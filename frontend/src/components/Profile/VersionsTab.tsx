@@ -5,7 +5,7 @@ import { asStatus, DIMENSION_LABEL, formatAgo, formatTimestamp } from '../../uti
 import { Button } from '../ui/Button';
 import { EmptyState } from '../ui/EmptyState';
 import { DiffViewer } from './DiffViewer';
-import { Panel, ScoredStatus, SectionError, SectionSkeleton } from './parts';
+import { Panel, StatusPill, SectionError, SectionSkeleton } from './parts';
 
 interface VersionsTabProps {
   ns: string;
@@ -30,8 +30,14 @@ export function VersionsTab({ ns, kind, name, refreshTick, snapshotPending, from
   const items = versions.data?.items ?? [];
   const hasVersions = items.length > 0;
   const diff = useProfileDiff(ns, kind, name, from, to, hasVersions, api);
-  const selectedTo = to ?? items[0]?.revision;
-  const selectedFrom = from ?? (selectedTo !== undefined && selectedTo > 1 ? selectedTo - 1 : undefined);
+  // The pickers show what was asked for, else what the Broker answered with
+  // (its default `from` is the newest retained revision below `to`, or none
+  // when earlier ones were trimmed): never a guess like `to - 1`.
+  const selectedTo = to ?? diff.diff?.to.revision ?? items[0]?.revision;
+  const selectedFrom: number | null | undefined = from ?? (diff.diff ? (diff.diff.from?.revision ?? null) : undefined);
+  const fromOptions = items.filter((v) => selectedTo === undefined || v.revision < selectedTo).map((v) => v.revision);
+  // A requested revision that is not in the list (trimmed, or an old link).
+  const fromMissing = typeof selectedFrom === 'number' && !fromOptions.includes(selectedFrom);
 
   const listBody = versions.loading && !versions.data ? (
     <SectionSkeleton />
@@ -68,7 +74,12 @@ export function VersionsTab({ ns, kind, name, refreshTick, snapshotPending, from
                         : 'no dimension changed'}
                   </span>
                 </span>
-                <ScoredStatus status={asStatus(v.posture.status)} score={v.posture.score} />
+                <span className="flex items-center gap-1.5 shrink-0">
+                  <StatusPill status={asStatus(v.posture.status)} />
+                  <span className="font-mono text-[11px] tabular-nums text-tertiary" title="Share of the four core dimensions with a known status">
+                    {Math.round(v.posture.coverage * 100)}%
+                  </span>
+                </span>
               </button>
             </li>
           );
@@ -99,14 +110,15 @@ export function VersionsTab({ ns, kind, name, refreshTick, snapshotPending, from
               <label className="flex items-center gap-1 text-tertiary">
                 From
                 <select
-                  value={selectedFrom ?? ''}
+                  value={selectedFrom == null ? '' : String(selectedFrom)}
                   onChange={(e) => onSelect(e.target.value ? Number(e.target.value) : undefined, selectedTo)}
                   className="h-7 rounded-control border border-hubble-border bg-hubble-darker px-1.5 text-primary font-mono"
                 >
-                  {items.filter((v) => selectedTo === undefined || v.revision < selectedTo).map((v) => (
-                    <option key={v.revision} value={v.revision}>v{v.revision}</option>
+                  {selectedFrom == null && <option value="">{diff.diff?.fromTrimmed ? 'trimmed' : 'none'}</option>}
+                  {fromMissing && <option value={String(selectedFrom)}>v{selectedFrom} (not retained)</option>}
+                  {fromOptions.map((r) => (
+                    <option key={r} value={r}>v{r}</option>
                   ))}
-                  {selectedFrom === undefined && <option value="">none</option>}
                 </select>
               </label>
               <label className="flex items-center gap-1 text-tertiary">

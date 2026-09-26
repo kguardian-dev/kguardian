@@ -38,9 +38,11 @@ export function PostureCell({
   }
   const status = asStatus(item.posture.status);
   const unknown = item.posture.unknownDimensions.map((d) => DIMENSION_LABEL[d] ?? d);
+  const coverage = Math.round(item.posture.coverage * 100);
   const title = [
-    item.posture.score !== null ? `Score ${item.posture.score} over ${Math.round(item.posture.coverage * 100)}% of the weight` : 'Not scored',
-    unknown.length ? `Not scored: ${unknown.join(', ')}` : '',
+    status === 'unknown' ? 'No dimension has data yet' : 'Worst status across the dimensions with data',
+    `coverage ${coverage}% of the four core dimensions`,
+    unknown.length ? `No data: ${unknown.join(', ')}` : '',
   ]
     .filter(Boolean)
     .join('. ');
@@ -48,11 +50,11 @@ export function PostureCell({
     <span className="inline-flex items-center gap-1.5">
       <StatusPill status={status} title={title}>
         {STATUS_LABEL[status]}
-        {item.posture.score !== null && <span className="font-mono tabular-nums">· {item.posture.score}</span>}
       </StatusPill>
-      {status !== 'unknown' && unknown.length > 0 && (
-        <span className="text-[11px] text-tertiary" title={`Not scored (no data, or not scorable yet): ${unknown.join(', ')}`}>
-          {unknown.length} not scored
+      {/* Coverage whenever anything is known: a partial unknown is not a blank one. */}
+      {item.posture.coverage > 0 && (
+        <span className="font-mono text-[11px] tabular-nums text-tertiary" title={title}>
+          {coverage}%
         </span>
       )}
     </span>

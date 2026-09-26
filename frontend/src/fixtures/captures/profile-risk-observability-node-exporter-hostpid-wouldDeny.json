@@ -1,0 +1,485 @@
+{
+  "request": "GET /workloads/observability/DaemonSet/node-exporter/profile",
+  "status": 200,
+  "body": {
+    "workload": {
+      "clusterId": "primary",
+      "namespace": "observability",
+      "kind": "DaemonSet",
+      "name": "node-exporter",
+      "transient": false,
+      "pods": {
+        "live": 1,
+        "names": [
+          "node-exporter-x7k2p"
+        ],
+        "truncated": false
+      }
+    },
+    "generatedAt": "2026-09-26T02:22:31.817902679Z",
+    "contentHash": "fnv1a64:8bf410a491511788",
+    "version": {
+      "revision": 1,
+      "contentHash": "fnv1a64:8bf410a491511788",
+      "createdAt": "2026-09-26T02:18:02.826768Z"
+    },
+    "snapshotPending": false,
+    "posture": {
+      "status": "risk",
+      "coverage": 0.5,
+      "unknownDimensions": [
+        "syscalls",
+        "images"
+      ],
+      "reasons": [
+        {
+          "dimension": "network",
+          "status": "warn",
+          "message": "1 flow(s) would be denied by the audit policy in the last 24 h"
+        },
+        {
+          "dimension": "syscalls",
+          "status": "unknown",
+          "message": "No syscalls have been captured for this workload"
+        },
+        {
+          "dimension": "podSecurity",
+          "status": "risk",
+          "message": "Privileged under PSS: pod spec fail(s) a baseline check"
+        },
+        {
+          "dimension": "images",
+          "status": "unknown",
+          "message": "1 running digest(s) across 1 container(s); vulnerability data not configured"
+        }
+      ]
+    },
+    "attention": [
+      {
+        "id": "podSecurity.hostNetwork",
+        "dimension": "podSecurity",
+        "severity": "high",
+        "tier": "P1",
+        "title": "Pod shares the node's Network namespace (hostNetwork: true)",
+        "detail": "hostNetwork: true gives the pod the node's namespace; baseline forbids it.",
+        "container": null
+      },
+      {
+        "id": "podSecurity.hostPID",
+        "dimension": "podSecurity",
+        "severity": "high",
+        "tier": "P1",
+        "title": "Pod shares the node's PID namespace (hostPID: true)",
+        "detail": "hostPID: true gives the pod the node's namespace; baseline forbids it.",
+        "container": null
+      },
+      {
+        "id": "network.wouldDeny",
+        "dimension": "network",
+        "severity": "medium",
+        "tier": "P2",
+        "title": "1 flow(s) would be denied by the audit policy in the last 24 h",
+        "detail": "The observed traffic is not covered by the audited NetworkPolicy; review before enforcing.",
+        "container": null
+      },
+      {
+        "id": "podSecurity.allowPrivilegeEscalation/node-exporter",
+        "dimension": "podSecurity",
+        "severity": "medium",
+        "tier": "P2",
+        "title": "Container node-exporter allows privilege escalation",
+        "detail": "allowPrivilegeEscalation is not set to false, so setuid binaries can gain privileges.",
+        "container": "node-exporter"
+      },
+      {
+        "id": "podSecurity.capabilitiesNotDropped/node-exporter",
+        "dimension": "podSecurity",
+        "severity": "medium",
+        "tier": "P2",
+        "title": "Container node-exporter does not drop ALL capabilities",
+        "detail": "The runtime's default capability set stays granted.",
+        "container": "node-exporter"
+      }
+    ],
+    "findings": [
+      {
+        "id": "podSecurity.hostNetwork",
+        "dimension": "podSecurity",
+        "severity": "high",
+        "tier": "P1",
+        "title": "Pod shares the node's Network namespace (hostNetwork: true)",
+        "detail": "hostNetwork: true gives the pod the node's namespace; baseline forbids it.",
+        "container": null
+      },
+      {
+        "id": "podSecurity.hostPID",
+        "dimension": "podSecurity",
+        "severity": "high",
+        "tier": "P1",
+        "title": "Pod shares the node's PID namespace (hostPID: true)",
+        "detail": "hostPID: true gives the pod the node's namespace; baseline forbids it.",
+        "container": null
+      },
+      {
+        "id": "network.wouldDeny",
+        "dimension": "network",
+        "severity": "medium",
+        "tier": "P2",
+        "title": "1 flow(s) would be denied by the audit policy in the last 24 h",
+        "detail": "The observed traffic is not covered by the audited NetworkPolicy; review before enforcing.",
+        "container": null
+      },
+      {
+        "id": "podSecurity.allowPrivilegeEscalation/node-exporter",
+        "dimension": "podSecurity",
+        "severity": "medium",
+        "tier": "P2",
+        "title": "Container node-exporter allows privilege escalation",
+        "detail": "allowPrivilegeEscalation is not set to false, so setuid binaries can gain privileges.",
+        "container": "node-exporter"
+      },
+      {
+        "id": "podSecurity.capabilitiesNotDropped/node-exporter",
+        "dimension": "podSecurity",
+        "severity": "medium",
+        "tier": "P2",
+        "title": "Container node-exporter does not drop ALL capabilities",
+        "detail": "The runtime's default capability set stays granted.",
+        "container": "node-exporter"
+      },
+      {
+        "id": "podSecurity.seccompUnset/node-exporter",
+        "dimension": "podSecurity",
+        "severity": "medium",
+        "tier": "P2",
+        "title": "Container node-exporter has no seccomp profile set",
+        "detail": "Without seccompProfile the container runtime's default applies only if the kubelet enables it; restricted requires RuntimeDefault or Localhost.",
+        "container": "node-exporter"
+      }
+    ],
+    "controls": [
+      {
+        "control": "networkPolicy",
+        "state": "audit",
+        "detail": "Audited by 1 polic(ies); 1 would-deny in the last 24 h",
+        "inSync": false
+      },
+      {
+        "control": "seccompProfile",
+        "state": "none",
+        "detail": "No SeccompProfile CR references this workload",
+        "inSync": null
+      },
+      {
+        "control": "imageAdmission",
+        "state": null,
+        "detail": "Signature/admission checks are not configured",
+        "inSync": null
+      }
+    ],
+    "readiness": [
+      {
+        "id": "trafficObserved24h",
+        "ok": true,
+        "message": "Traffic observed for 3d 0h"
+      },
+      {
+        "id": "syscallCaptureComplete",
+        "ok": null,
+        "message": "No syscall capture for this workload"
+      },
+      {
+        "id": "noWouldDeny24h",
+        "ok": false,
+        "message": "1 would-deny in the last 24 h"
+      },
+      {
+        "id": "imageSigned",
+        "ok": null,
+        "message": "Signature verification is not configured"
+      },
+      {
+        "id": "podSecurityRestricted",
+        "ok": false,
+        "message": "At most privileged"
+      }
+    ],
+    "exposure": {
+      "ingressPeers": 1,
+      "ingressExternal": 0,
+      "egressPeers": 1,
+      "egressExternal": 1
+    },
+    "dimensions": {
+      "network": {
+        "status": "warn",
+        "coverage": {
+          "level": "full",
+          "fraction": null,
+          "observedSince": "2026-09-23T02:17:01.229165Z",
+          "note": "Flows from the workload's pod(s) (1 live)"
+        },
+        "reasons": [],
+        "summary": {
+          "egress": {
+            "peers": 1,
+            "external": 1,
+            "ports": [
+              "TCP/443"
+            ]
+          },
+          "ingress": {
+            "peers": 1,
+            "external": 0,
+            "ports": [
+              "TCP/9100"
+            ]
+          }
+        },
+        "peers": [
+          {
+            "direction": "ingress",
+            "protocol": "TCP",
+            "port": 9100,
+            "peer": {
+              "kind": "pod",
+              "namespace": "observability",
+              "workloadKind": "StatefulSet",
+              "workloadName": "prometheus",
+              "name": "prometheus-0",
+              "ip": "10.42.2.5"
+            },
+            "flows": 1,
+            "firstSeen": "2026-09-23T02:17:01.229165Z",
+            "lastSeen": "2026-09-23T02:17:01.229165Z"
+          },
+          {
+            "direction": "egress",
+            "protocol": "TCP",
+            "port": 443,
+            "peer": {
+              "kind": "external",
+              "namespace": null,
+              "workloadKind": null,
+              "workloadName": null,
+              "name": null,
+              "ip": "198.51.100.7"
+            },
+            "flows": 1,
+            "firstSeen": "2026-09-26T00:17:01.229165Z",
+            "lastSeen": "2026-09-26T00:17:01.229165Z"
+          }
+        ],
+        "truncated": false,
+        "policy": {
+          "audit": {
+            "policies": [
+              {
+                "namespace": "observability",
+                "name": "node-exporter"
+              }
+            ],
+            "allow": 1,
+            "wouldDeny": 1,
+            "lastVerdictAt": "2026-09-26T01:17:01.231848Z",
+            "windowHours": 24
+          },
+          "enforced": null
+        }
+      },
+      "syscalls": {
+        "status": "unknown",
+        "coverage": {
+          "level": "none",
+          "fraction": null,
+          "observedSince": null,
+          "note": "no syscall aggregate for this workload"
+        },
+        "reasons": [
+          {
+            "code": "no_observations",
+            "message": "No syscalls have been captured for this workload"
+          }
+        ],
+        "observed": null,
+        "capture": null,
+        "cr": null,
+        "denials": null
+      },
+      "podSecurity": {
+        "status": "risk",
+        "coverage": {
+          "level": "partial",
+          "fraction": 0.5,
+          "observedSince": "2026-09-20T02:17:01.219542Z",
+          "note": "9 of 18 PSS checks evaluated; volumes, ports, probes, AppArmor, SELinux, procMount, sysctls and hostProcess are not ingested"
+        },
+        "reasons": [
+          {
+            "code": "pss_fails_baseline",
+            "message": "Privileged under PSS: pod spec fail(s) a baseline check"
+          }
+        ],
+        "pssVersion": "kubernetes/website@2c1aa11c (Kubernetes v1.37 docs)",
+        "level": "privileged",
+        "levelConfidence": "confirmed",
+        "unevaluatedChecks": [
+          "hostProcess",
+          "hostPathVolumes",
+          "hostPorts",
+          "hostProbesLifecycle",
+          "appArmor",
+          "seLinux",
+          "procMount",
+          "sysctls",
+          "volumeTypes"
+        ],
+        "pod": {
+          "known": true,
+          "serviceAccountName": "node-exporter",
+          "automountServiceAccountToken": false,
+          "hostNetwork": true,
+          "hostPID": true,
+          "hostIPC": null,
+          "hostUsers": null,
+          "securityContext": {
+            "runAsNonRoot": null,
+            "runAsUser": null,
+            "runAsGroup": null,
+            "fsGroup": null,
+            "seccompProfileType": null
+          },
+          "failing": [
+            {
+              "check": "hostNamespaces",
+              "level": "baseline",
+              "field": "spec.hostNetwork",
+              "value": true,
+              "message": "hostNetwork must be unset or false"
+            },
+            {
+              "check": "hostNamespaces",
+              "level": "baseline",
+              "field": "spec.hostPID",
+              "value": true,
+              "message": "hostPID must be unset or false"
+            }
+          ]
+        },
+        "containers": [
+          {
+            "name": "node-exporter",
+            "kind": "regular",
+            "source": "running",
+            "digest": "sha256:7d4eaaf37d4eaaf37d4eaaf37d4eaaf37d4eaaf37d4eaaf37d4eaaf37d4eaaf3",
+            "securityContext": {
+              "privileged": null,
+              "allowPrivilegeEscalation": null,
+              "runAsNonRoot": true,
+              "runAsUser": 65534,
+              "runAsGroup": null,
+              "readOnlyRootFilesystem": true,
+              "capabilitiesAdd": null,
+              "capabilitiesDrop": null,
+              "seccompProfileType": null
+            },
+            "level": "baseline",
+            "failing": [
+              {
+                "check": "privilegeEscalation",
+                "level": "restricted",
+                "field": "spec.containers[node-exporter].securityContext.allowPrivilegeEscalation",
+                "value": null,
+                "message": "allowPrivilegeEscalation must be set to false"
+              },
+              {
+                "check": "seccompRestricted",
+                "level": "restricted",
+                "field": "spec.containers[node-exporter].securityContext.seccompProfile.type",
+                "value": null,
+                "message": "seccompProfile.type must be RuntimeDefault or Localhost (on the container, or on the pod)"
+              },
+              {
+                "check": "capabilitiesRestricted",
+                "level": "restricted",
+                "field": "spec.containers[node-exporter].securityContext.capabilities.drop",
+                "value": null,
+                "message": "capabilities.drop must include ALL"
+              }
+            ]
+          }
+        ],
+        "recommendation": {
+          "recommendation": true,
+          "targetLevel": "restricted",
+          "format": "strategic-merge-patch",
+          "yaml": "# kguardian recommendation, not applied. Review before use.\n# Target: Pod Security Standards restricted (kubernetes.io/docs/concepts/security/pod-security-standards)\nspec:\n  template:\n    spec:\n      hostNetwork: false\n      hostPID: false\n      securityContext:\n        seccompProfile:\n          type: RuntimeDefault\n      containers:\n      - name: node-exporter\n        securityContext:\n          allowPrivilegeEscalation: false\n          capabilities:\n            drop: [\"ALL\"]\n",
+          "caveats": [
+            "Checks kguardian cannot see (hostPath and other volume types, hostPort, probe hosts, AppArmor, SELinux, procMount, sysctls) may still fail restricted.",
+            "This looks like a node agent (DaemonSet or hostNetwork). CNI plugins, CSI drivers and node agents usually need privileges restricted forbids; a namespace-level PSS exemption is often the right answer instead of this patch.",
+            "Turning off hostNetwork/hostPID/hostIPC breaks components that need the node's namespaces (CNI, node exporters, service meshes' node proxies); hostNetwork: false also changes the pod's IP and port bindings.",
+            "drop: [\"ALL\"] also removes CHOWN, SETUID, SETGID, DAC_OVERRIDE and NET_BIND_SERVICE. Images that start as root and drop privileges, change file ownership at startup, or bind ports below 1024 may fail; add back NET_BIND_SERVICE only if the app needs it."
+          ]
+        },
+        "staleContainers": []
+      },
+      "images": {
+        "status": "unknown",
+        "coverage": {
+          "level": "partial",
+          "fraction": null,
+          "observedSince": "2026-09-20T02:17:01.219542Z",
+          "note": "inventory only (running window 900 s); no vulnerability data"
+        },
+        "reasons": [
+          {
+            "code": "vulnerabilities_not_configured",
+            "message": "1 running digest(s) across 1 container(s); vulnerability data not configured"
+          }
+        ],
+        "runningWindowSeconds": 900,
+        "containers": [
+          {
+            "name": "node-exporter",
+            "kind": "regular",
+            "mixedDigests": false,
+            "stale": false,
+            "running": [
+              {
+                "digest": "sha256:7d4eaaf37d4eaaf37d4eaaf37d4eaaf37d4eaaf37d4eaaf37d4eaaf37d4eaaf3",
+                "imageRef": "quay.io/prometheus/node-exporter:v1.8.2",
+                "state": "running",
+                "stateReason": null,
+                "ranAsInit": false,
+                "lastPodName": "node-exporter-x7k2p",
+                "firstSeen": "2026-09-20T02:17:01.219542Z",
+                "lastSeen": "2026-09-26T02:17:01.214278Z"
+              }
+            ],
+            "previous": []
+          }
+        ],
+        "truncated": false,
+        "vulnerabilities": null,
+        "supplyChain": null
+      },
+      "compute": {
+        "status": "unknown",
+        "coverage": {
+          "level": "none",
+          "fraction": null,
+          "observedSince": null,
+          "note": "no compute samples"
+        },
+        "reasons": [
+          {
+            "code": "no_compute_data",
+            "message": "No compute samples for this workload's live pods (collection off or no live pods)"
+          }
+        ],
+        "containers": [],
+        "truncated": false
+      }
+    }
+  }
+}

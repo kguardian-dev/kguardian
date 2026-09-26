@@ -31,21 +31,20 @@ export function StatusPill({ status, children, title }: { status: PostureStatus;
   );
 }
 
-/** Status pill with the dimension score when it is scored. */
-export function ScoredStatus({ status, score }: { status: PostureStatus; score: number | null }) {
-  return (
-    <StatusPill status={status} title={score === null ? 'Not scored' : `Score ${score}/100`}>
-      {STATUS_LABEL[status]}
-      {score !== null && <span className="font-mono tabular-nums">· {score}</span>}
-    </StatusPill>
-  );
-}
-
 /** A tri-state check: true passes, false fails, null "can't tell". */
 export function CheckMark({ ok }: { ok: boolean | null }) {
   if (ok === true) return <CheckCircle2 className="w-4 h-4 shrink-0 text-state-enforcing" aria-label="Pass" role="img" />;
   if (ok === false) return <XCircle className="w-4 h-4 shrink-0 text-severity-critical" aria-label="Fail" role="img" />;
   return <CircleHelp className="w-4 h-4 shrink-0 text-tertiary" aria-label="Can't tell" role="img" />;
+}
+
+/** Visible label for a tri-state null: kguardian cannot tell, which is not a pass. */
+export function CantTell() {
+  return (
+    <span className="shrink-0 rounded-full border border-dashed border-hubble-border-strong px-1.5 py-px text-[11px] text-tertiary" data-testid="cant-tell">
+      Can&apos;t tell
+    </span>
+  );
 }
 
 /** A card section: icon, title, hint, optional action. */

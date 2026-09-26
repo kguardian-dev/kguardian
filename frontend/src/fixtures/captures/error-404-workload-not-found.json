@@ -1,0 +1,8 @@
+{
+  "request": "GET /workloads/payments/Deployment/does-not-exist/profile",
+  "status": 404,
+  "body": {
+    "error": "workload_not_found",
+    "message": "the broker has no inventory, syscall aggregate, live pod or stored profile for this workload"
+  }
+}

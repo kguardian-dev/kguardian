@@ -1,0 +1,105 @@
+{
+  "request": "GET /workloads?limit=2&after=observability/DaemonSet/node-exporter",
+  "status": 200,
+  "body": {
+    "items": [
+      {
+        "clusterId": "primary",
+        "computedAt": "2026-09-26T02:22:26.388244Z",
+        "contentHash": "fnv1a64:edc8ee3dbec5d0e4",
+        "dimensions": {
+          "compute": {
+            "status": "unknown"
+          },
+          "images": {
+            "mixedDigests": null,
+            "runningDigests": null,
+            "status": "unknown"
+          },
+          "network": {
+            "status": "unknown"
+          },
+          "podSecurity": {
+            "level": null,
+            "levelConfidence": null,
+            "status": "unknown"
+          },
+          "syscalls": {
+            "status": "unknown"
+          }
+        },
+        "findingCounts": {
+          "critical": 0,
+          "high": 0,
+          "info": 0,
+          "low": 0,
+          "medium": 0
+        },
+        "kind": "Deployment",
+        "lastChangedAt": "2026-09-26T02:18:02.832148Z",
+        "name": "otel-collector",
+        "namespace": "observability",
+        "posture": {
+          "coverage": 0.0,
+          "status": "unknown",
+          "unknownDimensions": [
+            "network",
+            "syscalls",
+            "podSecurity",
+            "images"
+          ]
+        },
+        "revision": 1
+      },
+      {
+        "clusterId": "primary",
+        "computedAt": "2026-09-26T02:22:26.393130Z",
+        "contentHash": "fnv1a64:edc8ee3dbec5d0e4",
+        "dimensions": {
+          "compute": {
+            "status": "unknown"
+          },
+          "images": {
+            "mixedDigests": null,
+            "runningDigests": null,
+            "status": "unknown"
+          },
+          "network": {
+            "status": "unknown"
+          },
+          "podSecurity": {
+            "level": null,
+            "levelConfidence": null,
+            "status": "unknown"
+          },
+          "syscalls": {
+            "status": "unknown"
+          }
+        },
+        "findingCounts": {
+          "critical": 0,
+          "high": 0,
+          "info": 0,
+          "low": 0,
+          "medium": 0
+        },
+        "kind": "StatefulSet",
+        "lastChangedAt": "2026-09-26T02:18:02.837521Z",
+        "name": "prometheus",
+        "namespace": "observability",
+        "posture": {
+          "coverage": 0.0,
+          "status": "unknown",
+          "unknownDimensions": [
+            "network",
+            "syscalls",
+            "podSecurity",
+            "images"
+          ]
+        },
+        "revision": 1
+      }
+    ],
+    "nextAfter": "observability/StatefulSet/prometheus"
+  }
+}

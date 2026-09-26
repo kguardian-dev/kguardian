@@ -80,7 +80,6 @@ export function diffLines(diff: ProfileDiff): Record<'podSecurity' | 'images' | 
   const nw: DiffLine[] = [];
   for (const r of d.network.added) nw.push({ kind: 'add', text: ruleText(r) });
   for (const r of d.network.removed) nw.push({ kind: 'remove', text: ruleText(r) });
-  if (d.network.audited) nw.push(change('covered by audit policy', d.network.audited));
 
   return { podSecurity: ps, images: im, syscalls: sc, network: nw };
 }

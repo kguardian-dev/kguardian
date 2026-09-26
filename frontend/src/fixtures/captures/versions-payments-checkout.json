@@ -1,0 +1,64 @@
+{
+  "request": "GET /workloads/payments/Deployment/checkout/profile/versions",
+  "status": 200,
+  "body": {
+    "items": [
+      {
+        "changedDimensions": [
+          "podSecurity"
+        ],
+        "contentHash": "fnv1a64:4c1d1714495b7cb8",
+        "createdAt": "2026-09-26T02:21:21.027754Z",
+        "dimensionHashes": {
+          "images": "fnv1a64:de99962acfed6b4a",
+          "network": "fnv1a64:076a93e6e419f917",
+          "podSecurity": "fnv1a64:14765c2d405c573e",
+          "syscalls": "fnv1a64:c9b16fe56ade7d93"
+        },
+        "posture": {
+          "coverage": 0.25,
+          "status": "warn"
+        },
+        "revision": 4
+      },
+      {
+        "changedDimensions": [
+          "network"
+        ],
+        "contentHash": "fnv1a64:3369d0d1f33d02b4",
+        "createdAt": "2026-09-26T02:20:17.370827Z",
+        "dimensionHashes": {
+          "images": "fnv1a64:de99962acfed6b4a",
+          "network": "fnv1a64:076a93e6e419f917",
+          "podSecurity": "fnv1a64:897ac36794f36952",
+          "syscalls": "fnv1a64:c9b16fe56ade7d93"
+        },
+        "posture": {
+          "coverage": 0.5,
+          "status": "warn"
+        },
+        "revision": 3
+      },
+      {
+        "changedDimensions": null,
+        "contentHash": "fnv1a64:5b1a787eefd2a711",
+        "createdAt": "2026-09-26T02:19:10.101753Z",
+        "dimensionHashes": {
+          "images": "fnv1a64:de99962acfed6b4a",
+          "network": "fnv1a64:b9240aadb672a54c",
+          "podSecurity": "fnv1a64:897ac36794f36952",
+          "syscalls": "fnv1a64:c9b16fe56ade7d93"
+        },
+        "posture": {
+          "coverage": 0.5,
+          "status": "warn"
+        },
+        "revision": 2
+      }
+    ],
+    "kind": "Deployment",
+    "name": "checkout",
+    "namespace": "payments",
+    "nextBefore": null
+  }
+}

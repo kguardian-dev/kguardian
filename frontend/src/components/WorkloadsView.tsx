@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { Lock, Search, AlertTriangle, ChevronRight, Radar, GitCompareArrows, Layers, ShieldAlert } from 'lucide-react';
 import type { PodInfo } from '../types';
 import { useWorkloadCoverage } from '../hooks/useWorkloadCoverage';
@@ -13,6 +13,15 @@ import { useWorkloadPostures } from '../hooks/useWorkloadProfile';
 import { errorMessage } from '../services/profileApi';
 import type { PostureStatus } from '../types/profile';
 import { Button } from './ui/Button';
+
+function useDebounced<T>(value: T, ms: number): T {
+  const [v, setV] = useState(value);
+  useEffect(() => {
+    const t = setTimeout(() => setV(value), ms);
+    return () => clearTimeout(t);
+  }, [value, ms]);
+  return v;
+}
 
 export type WorkloadControl = 'seccomp';
 
@@ -63,7 +72,10 @@ export function WorkloadsView({ allPods, namespace, allNamespaces, control, onCo
   const seccompMode = control === 'seccomp';
   // The posture column only exists on the all-controls table; the seccomp
   // columns never ask for it.
-  const postures = useWorkloadPostures(allNamespaces ? undefined : namespace, postureFilter || undefined, refreshTick, undefined, undefined, !seccompMode);
+  // The name filter also narrows the posture request (server-side search),
+  // debounced so typing does not fire one request per keystroke.
+  const search = useDebounced(query.trim(), 300);
+  const postures = useWorkloadPostures(allNamespaces ? undefined : namespace, postureFilter || undefined, search || undefined, refreshTick, undefined, undefined, !seccompMode);
 
   const rows = useMemo(() => {
     const q = query.trim().toLowerCase();
