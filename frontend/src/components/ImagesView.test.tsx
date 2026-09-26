@@ -71,7 +71,7 @@ describe('ImagesView: Images tab', () => {
     render(view({ tab: 'images' }));
     const rows = await screen.findAllByTestId('image-row');
     const ne = rows.find((r) => within(r).queryByText('quay.io/prometheus/node-exporter:v1.8.2'))!;
-    await waitFor(() => expect(within(ne).getByText('No data')).toBeTruthy());
+    await waitFor(() => expect(within(ne).getAllByText('No data').length).toBeGreaterThan(0));
   });
 });
 

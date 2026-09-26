@@ -77,7 +77,7 @@ export function fixedVersionsFor(e: Exposure, digest: string): string[] {
 export function cveRowFactors(c: CveSummary): Factor[] {
   const exposure: Factor[] =
     c.exposedWorkloads != null && c.exposedWorkloads > 0
-      ? [{ key: 'exposure', tone: 'risk', label: `Exposed: ${c.exposedWorkloads} workload${c.exposedWorkloads === 1 ? '' : 's'}`, title: 'Affected workloads with observed ingress from outside their namespace' }]
+      ? [{ key: 'exposure', tone: 'risk', label: `${c.exposedWorkloads} exposed`, title: `${c.exposedWorkloads} affected workload${c.exposedWorkloads === 1 ? '' : 's'} with observed ingress from outside the namespace` }]
       : [];
   return mergeFactors([], [inUseFactor(c.inUseState), ...exposure, ...factChips({ kev: c.kev, epss: c.maxEpss, score: c.maxScore, fixable: c.fixable })]);
 }

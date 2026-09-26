@@ -113,9 +113,9 @@ export function ImagesView({ namespace, allNamespaces, tab: tabParam, cve, diges
           <StatTile label="CVEs on running workloads" value={cves.loading ? '…' : unread ? '—' : counts.running} icon={Layers} suffix={loadedAll || unread ? undefined : '+'} />
           <StatTile label="In CISA KEV" value={cves.loading ? '…' : unread ? '—' : counts.kev} icon={Bug} tone={counts.kev > 0 ? 'text-severity-critical' : 'text-secondary'} suffix={loadedAll || unread ? undefined : '+'} />
           {loadedKnown ? (
-            <StatTile label="Loaded" value={cves.loading ? '…' : unread ? '—' : counts.loaded} icon={ShieldQuestion} suffix={loadedAll || unread ? undefined : '+'} title="CVEs in a package observed loaded by a running workload." />
+            <StatTile label="Executed or loaded" value={cves.loading ? '…' : unread ? '—' : counts.loaded} icon={ShieldQuestion} suffix={loadedAll || unread ? undefined : '+'} title="CVEs whose package a workload was observed executing or loading." />
           ) : (
-            <StatTile label="Loaded" value="unknown" icon={ShieldQuestion} tone="text-tertiary" title={IN_USE_UNKNOWN_TITLE} />
+            <StatTile label="Executed or loaded" value={unread ? '—' : 'unknown'} icon={ShieldQuestion} tone="text-tertiary" title={IN_USE_UNKNOWN_TITLE} />
           )}
         </StatStrip>
 
@@ -190,7 +190,7 @@ export function ImagesView({ namespace, allNamespaces, tab: tabParam, cve, diges
                                 <SeverityBadge severity={c.severity} />
                                 <span className="text-[11px] text-tertiary font-mono [overflow-wrap:anywhere]">{c.packages.join(', ')}</span>
                               </div>
-                              <div className="mt-1.5 sm:hidden"><FactorChips factors={factors} only={LIST_FACTORS} /></div>
+                              <div className="mt-1.5 sm:hidden"><FactorChips factors={factors} only={LIST_FACTORS} wrap /></div>
                             </td>
                             <td className="hidden sm:table-cell px-3 py-2.5 align-top"><FactorChips factors={factors} only={LIST_FACTORS} /></td>
                             <td className="hidden md:table-cell px-3 py-2.5 align-top text-right font-mono text-xs tabular-nums text-secondary">{c.images}</td>
@@ -210,8 +210,9 @@ export function ImagesView({ namespace, allNamespaces, tab: tabParam, cve, diges
                   </div>
                   <footer className="flex flex-wrap items-center justify-between gap-2 px-4 py-2 border-t border-hubble-border text-[11px] text-tertiary">
                     <span title={IN_USE_UNKNOWN_TITLE}>
-                      {tiersKnown ? '' : 'This Broker does not rank tiers yet (tier unknown). '}
-                      {loadedKnown ? '' : 'No runtime evidence of loading yet: unknown is ranked as if loaded. '}
+                      {!tiersKnown
+                        ? 'This Broker does not rank tiers or report loaded packages yet: both unknown. '
+                        : loadedKnown ? '' : 'No runtime evidence of loading yet: unknown is ranked as if loaded. '}
                       Privilege and per-workload exposure are in the CVE drawer.
                     </span>
                     {cves.hasMore && (
@@ -298,9 +299,9 @@ function ImagesTable({ namespace, scopeLabel, refreshTick, api, onOpen }: { name
               <thead className="text-[11px] uppercase tracking-wide text-tertiary">
                 <tr className="border-b border-hubble-border">
                   <th scope="col" className="text-left font-medium px-4 py-2">Image</th>
-                  <th scope="col" className="text-left font-medium px-3 py-2">Workloads</th>
-                  <th scope="col" className="text-left font-medium px-3 py-2">Vulnerability data</th>
-                  <th scope="col" className="text-left font-medium px-3 py-2">SBOM</th>
+                  <th scope="col" className="hidden sm:table-cell text-left font-medium px-3 py-2">Workloads</th>
+                  <th scope="col" className="hidden sm:table-cell text-left font-medium px-3 py-2">Vulnerability data</th>
+                  <th scope="col" className="hidden sm:table-cell text-left font-medium px-3 py-2">SBOM</th>
                   <th scope="col" className="relative px-2 py-2"><span className="sr-only">Open</span></th>
                 </tr>
               </thead>
@@ -325,53 +326,74 @@ function ImagesTable({ namespace, scopeLabel, refreshTick, api, onOpen }: { name
   );
 }
 
+const UnknownPill = ({ error }: { error: unknown }) => (
+  <span className="rounded-full border border-dashed border-hubble-border-strong px-2 py-0.5 text-[11px] text-tertiary" title={`Could not read: ${vulnErrorMessage(error)}`}>Unknown</span>
+);
+
+function WorkloadsCell({ e }: { e: ImageEnrichment | undefined }) {
+  if (e === undefined) return <span className="text-tertiary">…</span>;
+  if (e.error) return <UnknownPill error={e.error} />;
+  const workloads = e.workloads ?? [];
+  const running = workloads.filter((w) => w.running);
+  const names = [...new Set(workloads.map((w) => `${w.namespace}/${w.workloadName}`))];
+  return (
+    <>
+      <div className="text-primary break-words">{names.slice(0, 2).join(', ') || <span className="text-tertiary">none now</span>}{names.length > 2 && <span className="text-tertiary"> +{names.length - 2}</span>}</div>
+      <div className="text-[11px] text-tertiary">{running.length} running container{running.length === 1 ? '' : 's'}{e.workloadsTruncated ? ' (more not listed)' : ''}</div>
+    </>
+  );
+}
+
+function VulnDataCell({ e }: { e: ImageEnrichment | undefined }) {
+  if (e === undefined) return <span className="text-tertiary">…</span>;
+  if (e.error) return <UnknownPill error={e.error} />;
+  if (e.vulnReports && e.vulnReports.length === 0) {
+    return <span className="rounded-full border border-dashed border-hubble-border-strong px-2 py-0.5 text-[11px] text-tertiary" title="No source has reported on this digest: unknown, not clean">No data</span>;
+  }
+  return (
+    <div className="flex flex-wrap items-center gap-1">
+      {e.vulnReports?.map((r) => (
+        <span key={r.source} className="inline-flex flex-wrap items-center gap-1 text-[11px] text-secondary">
+          {sourceLabel(r.source)} <span className="text-tertiary tabular-nums">{r.itemCount} finding{r.itemCount === 1 ? '' : 's'}</span> <JoinBadge join={r.join} />
+        </span>
+      ))}
+    </div>
+  );
+}
+
+function SbomCell({ e }: { e: ImageEnrichment | undefined }) {
+  if (e === undefined) return <span className="text-tertiary">…</span>;
+  if (e.error) return <UnknownPill error={e.error} />;
+  if (e.sbomReports && e.sbomReports.length === 0) return <span className="text-[11px] text-tertiary">No SBOM</span>;
+  return (
+    <div className="flex flex-col gap-1">
+      {e.sbomReports?.map((r) => (
+        <span key={r.source} className="inline-flex flex-wrap items-center gap-1 text-[11px] text-secondary">
+          {sourceLabel(r.source)} <TrustBadge trust={r.sbomTrust} />
+        </span>
+      ))}
+    </div>
+  );
+}
+
 function ImageRow({ img, e, onOpen }: { img: ImageSummary; e: ImageEnrichment | undefined; onOpen: () => void }) {
-  const loading = e === undefined;
-  const workloads = e?.workloads ?? null;
-  const running = workloads?.filter((w) => w.running) ?? [];
-  const names = [...new Set((workloads ?? []).map((w) => `${w.namespace}/${w.workloadName}`))];
   return (
     <tr data-testid="image-row" onClick={onOpen} className="cursor-pointer hover:bg-hubble-hover/40 transition-colors">
-      <td className="px-4 py-2.5 align-top min-w-52">
+      <td className="px-4 py-2.5 align-top sm:min-w-52">
         <button type="button" onClick={(ev) => { ev.stopPropagation(); onOpen(); }} className="text-left font-mono text-xs text-primary hover:underline [overflow-wrap:anywhere]">
           {img.repository ?? 'unknown repository'}{img.tags.length ? `:${img.tags.join(', ')}` : ''}
         </button>
         <div className="text-[11px] text-tertiary font-mono" title={img.digest}>{shortDigest(img.digest)} · {img.digestKind}</div>
+        {/* Phones: the other columns stack here. */}
+        <div className="sm:hidden mt-2 space-y-1.5 text-xs">
+          <WorkloadsCell e={e} />
+          <VulnDataCell e={e} />
+          <SbomCell e={e} />
+        </div>
       </td>
-      <td className="px-3 py-2.5 align-top text-xs min-w-40">
-        {loading ? <span className="text-tertiary">…</span> : e?.error ? <span className="rounded-full border border-dashed border-hubble-border-strong px-2 py-0.5 text-[11px] text-tertiary" title={`Could not read: ${vulnErrorMessage(e.error)}`}>Unknown</span> : (
-          <>
-            <div className="text-primary break-words">{names.slice(0, 2).join(', ') || <span className="text-tertiary">none now</span>}{names.length > 2 && <span className="text-tertiary"> +{names.length - 2}</span>}</div>
-            <div className="text-[11px] text-tertiary">{running.length} running container{running.length === 1 ? '' : 's'}{e?.workloadsTruncated ? ' (more not listed)' : ''}</div>
-          </>
-        )}
-      </td>
-      <td className="px-3 py-2.5 align-top text-xs">
-        {loading ? <span className="text-tertiary">…</span> : e?.error ? <span className="rounded-full border border-dashed border-hubble-border-strong px-2 py-0.5 text-[11px] text-tertiary" title={`Could not read: ${vulnErrorMessage(e.error)}`}>Unknown</span> : e?.vulnReports && e.vulnReports.length === 0 ? (
-          <span className="rounded-full border border-dashed border-hubble-border-strong px-2 py-0.5 text-[11px] text-tertiary" title="No source has reported on this digest: unknown, not clean">No data</span>
-        ) : (
-          <div className="flex flex-wrap items-center gap-1">
-            {e?.vulnReports?.map((r) => (
-              <span key={r.source} className="inline-flex items-center gap-1 text-[11px] text-secondary">
-                {sourceLabel(r.source)} <span className="text-tertiary tabular-nums">{r.itemCount} finding{r.itemCount === 1 ? '' : 's'}</span> <JoinBadge join={r.join} />
-              </span>
-            ))}
-          </div>
-        )}
-      </td>
-      <td className="px-3 py-2.5 align-top text-xs">
-        {loading ? <span className="text-tertiary">…</span> : e?.error ? <span className="rounded-full border border-dashed border-hubble-border-strong px-2 py-0.5 text-[11px] text-tertiary" title={`Could not read: ${vulnErrorMessage(e.error)}`}>Unknown</span> : e?.sbomReports && e.sbomReports.length === 0 ? (
-          <span className="text-[11px] text-tertiary">None</span>
-        ) : (
-          <div className="flex flex-col gap-1">
-            {e?.sbomReports?.map((r) => (
-              <span key={r.source} className="inline-flex flex-wrap items-center gap-1 text-[11px] text-secondary">
-                {sourceLabel(r.source)} <TrustBadge trust={r.sbomTrust} />
-              </span>
-            ))}
-          </div>
-        )}
-      </td>
+      <td className="hidden sm:table-cell px-3 py-2.5 align-top text-xs min-w-40"><WorkloadsCell e={e} /></td>
+      <td className="hidden sm:table-cell px-3 py-2.5 align-top text-xs"><VulnDataCell e={e} /></td>
+      <td className="hidden sm:table-cell px-3 py-2.5 align-top text-xs"><SbomCell e={e} /></td>
       <td className="px-2 py-2.5 align-top text-tertiary"><ChevronRight className="w-4 h-4" aria-hidden /></td>
     </tr>
   );
