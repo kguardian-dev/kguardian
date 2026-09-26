@@ -588,6 +588,10 @@ if dep="$(helm template compat "$CHART" "${SC_ON[@]}" --set supplychain.grype.en
     { echo "FAIL [supplychain-grype]: supplychain must point GRYPE_MATCHER_URL at the sidecar"; fail=1; }
   grep -A2 -- '- name: grype-db' <<<"$dep" | grep -q 'sizeLimit: 8Gi' || \
     { echo "FAIL [supplychain-grype]: default DB volume must be an 8Gi emptyDir"; fail=1; }
+  grep -q 'ephemeral-storage: 7Gi' <<<"$matcher" && grep -q 'ephemeral-storage: 9Gi' <<<"$matcher" || \
+    { echo "FAIL [supplychain-grype]: emptyDir mode must request 7Gi / limit 9Gi ephemeral storage"; fail=1; }
+  grep -A1 'name: GRYPE_DB_UPDATE_INTERVAL' <<<"$matcher" | grep -q 'value: "12h"' || \
+    { echo "FAIL [supplychain-grype]: DB update interval must default to 12h"; fail=1; }
   # The supplychain container still reaches the API (Trivy Operator on).
   sc="$(awk '/- name: supplychain$/{f=1} /- name: grype-matcher/{f=0} f' <<<"$dep")"
   grep -q 'mountPath: /var/run/secrets/kubernetes.io/serviceaccount' <<<"$sc" || \
@@ -600,6 +604,7 @@ render "supplychain-grype-pvc" "${SC_ON[@]}" --set supplychain.grype.enabled=tru
   assert_has "supplychain-grype-pvc" "name: kguardian-supplychain-grype-db"
   assert_has "supplychain-grype-pvc" "type: Recreate"
   assert_has "supplychain-grype-pvc" "claimName: kguardian-supplychain-grype-db"
+  assert_absent "supplychain-grype-pvc" "ephemeral-storage"
 }
 render "supplychain-grype-existing-claim" "${SC_ON[@]}" --set supplychain.grype.enabled=true \
   --set supplychain.grype.persistence.enabled=true --set supplychain.grype.persistence.existingClaim=my-db && {

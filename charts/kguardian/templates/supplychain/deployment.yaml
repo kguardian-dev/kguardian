@@ -168,7 +168,14 @@ spec:
             initialDelaySeconds: 10
             periodSeconds: 30
             timeoutSeconds: 5
-          {{- with $g.resources }}
+          {{- /* emptyDir mode: reserve node ephemeral storage for the DB
+               (3.1 GB unpacked, about 6.4 GB during a refresh). */}}
+          {{- $res := deepCopy ($g.resources | default dict) }}
+          {{- if not $g.persistence.enabled }}
+          {{- $_ := set $res "requests" (merge (dict "ephemeral-storage" "7Gi") (get $res "requests" | default dict)) }}
+          {{- $_ := set $res "limits" (merge (dict "ephemeral-storage" "9Gi") (get $res "limits" | default dict)) }}
+          {{- end }}
+          {{- with $res }}
           resources:
             {{- toYaml . | nindent 12 }}
           {{- end }}

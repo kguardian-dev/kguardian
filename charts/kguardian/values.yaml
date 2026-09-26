@@ -1867,6 +1867,11 @@ supplychain:
       # pull secrets), through the same address guard as registryLookup
       # (allowPrivateRegistries applies). Running digests come from the
       # broker's image inventory. Unset (null) follows brokerIngest.enabled.
+      # Registry SBOMs are UNVERIFIED: no signature is checked, so anyone
+      # who can push to a repository can attach one. They are therefore
+      # only ever ADDED to what Trivy found (a union), never used to replace
+      # or shrink it; empty SBOMs and in-toto statements whose subject is
+      # not the running image are rejected.
       # Egress: HTTPS to the registries of your running images.
       enabled: null
       # -- How often to list running images. Each digest is looked up at
@@ -1874,12 +1879,16 @@ supplychain:
       interval: 15m
 
   grype:
-    # -- Match SBOMs (registry-attached, else Trivy SbomReports) against the
-    # Grype vulnerability database, as a second container in the
-    # supplychain pod (image supplychain-matcher). Off by default. It
-    # listens on 127.0.0.1 only and gets no Kubernetes or broker token.
-    # Egress: HTTPS to db.url's host (grype.anchore.io by default) for the
-    # DB listing and archive.
+    # -- Match SBOMs against the Grype vulnerability database, as a second
+    # container in the supplychain pod (image supplychain-matcher). Off by
+    # default. It listens on 127.0.0.1 only and gets no Kubernetes or
+    # broker token. The input for each image is the UNION of Trivy's
+    # SbomReport and any registry SBOM; registry SBOMs are unverified and
+    # can only add packages, never remove Trivy's. No CPEs are sent, so a
+    # binary without a package URL is never matched. Egress: HTTPS to
+    # db.url's host (grype.anchore.io by default) for the DB listing and
+    # archive. The image exists from the first supplychain-matcher release
+    # (v0.1.0); until then leave this off or set image.tag to a pr-<N> build.
     enabled: false
     image:
       # -- Matcher image repository
@@ -1901,7 +1910,7 @@ supplychain:
       autoUpdate: true
       # -- How often to check for a newer DB (Grype also limits checks to
       # once per 2h). Anchore publishes a new build daily.
-      updateInterval: 6h
+      updateInterval: 12h
       # -- Refuse a DB older than this; "0" disables the check (for a
       # rarely refreshed air-gapped mirror).
       maxAge: 120h
@@ -1911,8 +1920,10 @@ supplychain:
     goMemLimit: 400MiB
     persistence:
       # -- Keep the DB on a PersistentVolumeClaim instead of an emptyDir, so
-      # a restart does not re-download it (181 MB, about 2.5 min to fetch,
-      # verify and unpack on the measuring machine).
+      # a restart does not re-download it (181 MB; 75-80 s to fetch, verify
+      # and unpack on the measuring machine). Recommended for nodes with
+      # less than about 40 GB of free ephemeral storage: the emptyDir needs
+      # up to about 6.4 GB during a refresh.
       enabled: false
       # -- Use an existing claim instead of creating one
       existingClaim: ""
@@ -1926,9 +1937,10 @@ supplychain:
       size: 8Gi
     # -- Matcher resources. Measured locally with grype v0.119.0: peak RSS
     # about 78 MiB matching nginx:1.27 (151 components, 624 matches, about
-    # 2.4 s) and 225 MiB while downloading and unpacking the DB. SQLite
+    # 2.4 s) and 330 MiB while downloading and unpacking the DB. SQLite
     # page cache for the 3.1 GB DB is charged to the container but is
-    # reclaimable.
+    # reclaimable. With persistence disabled the chart also adds
+    # ephemeral-storage (request 7Gi, limit 9Gi) for the DB emptyDir.
     resources:
       limits:
         memory: 512Mi
