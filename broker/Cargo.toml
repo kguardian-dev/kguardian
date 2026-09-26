@@ -45,6 +45,9 @@ reqwest = { version = "0.13", default-features = false, features = ["json", "que
 # bound is a build that breaks on someone else's dependency bump, so they are
 # declared here explicitly.
 tokio = { version = "1", features = ["rt", "macros", "sync", "time"] }
+# Inflates gzip supply-chain payloads under a hard ceiling (supplychain.rs).
+# Already in the tree through actix-http's compression support.
+flate2 = "1"
 
 [dev-dependencies]
 # Used in unit tests to exercise the same query-string parsing path

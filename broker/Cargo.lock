@@ -317,6 +317,7 @@ dependencies = [
  "diesel",
  "diesel_migrations",
  "dotenv",
+ "flate2",
  "reqwest",
  "serde",
  "serde_json",
