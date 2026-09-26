@@ -1712,7 +1712,7 @@ From `GET /workloads/payments/Deployment/checkout/export?mode=enforce&format=zip
     `capabilities`: `drop: ["ALL"]` + `add` = the observed set; emitted also when PSS passes but the
     current set is wider than the observed one. New caveats name evidence-based and default containers.
   - New `GET /workloads/{ns}/{kind}/{name}/capabilities` (READ): the same `capabilities` block.
-- 2026-09-26 (**v1.7**, P2-5 runtime drift; additive, on top of v1.6):
+- 2026-09-27 (**v1.7**, P2-5 runtime drift; additive, on top of v1.6):
   - New drift type `unshippedExecutable` (section 2.8): files a current container ran that its image did
     not ship (writable layer, memfd, deleted), from the runtime inventory (#1683). Finding id
     `drift.unshippedExecutable/<container>`, dimension `drift`; like every drift finding it never sets
