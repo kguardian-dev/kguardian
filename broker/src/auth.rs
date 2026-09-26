@@ -203,6 +203,10 @@ pub const ROUTES: &[RouteRule] = &[
     // it takes the operator (admin) token, never the read one.
     rule("GET", "/workloads/{namespace}/{kind}/{name}/export", READ),
     rule("POST", "/workloads/{namespace}/{kind}/{name}/export", ADMIN),
+    // Image signatures and attestations (#1533 P2-1).
+    rule("POST", "/images/{digest}/attestation", SUPPLYCHAIN),
+    rule("GET", "/images/{digest}/attestation", READ),
+    rule("GET", "/attestations", READ),
 ];
 
 /// The declared access for `method` on the registered `pattern`, if any.

@@ -326,6 +326,11 @@ async fn main() -> Result<(), std::io::Error> {
     // chart. Disable by setting AUDIT_VERDICTS_RETENTION_DAYS=0.
     spawn_retention(pool.clone());
 
+    // Image attestation results not re-checked within
+    // IMAGE_ATTESTATION_RETENTION_DAYS (attestation.rs). Results for
+    // digests that stopped running go with the inventory (FK cascade).
+    api::spawn_attestation_retention(pool.clone());
+
     // Re-resolves the peer identity of recently ingested traffic rows
     // whose peer pod's spec had not arrived yet (peer.rs). Disable with
     // PEER_LATE_RESOLVE_WINDOW_SECS=0.
