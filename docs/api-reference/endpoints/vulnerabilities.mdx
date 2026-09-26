@@ -37,6 +37,9 @@ each payload replaces only its own `(digest, source)`.
   make one finding with `sources: ["grype", "trivy-operator"]`, never two.
   Severity, score and EPSS are the highest any source gives, `kev` is true
   if any source says so, and a fix from any source makes it fixable.
+  `fixedVersions` lists every distinct fixed version the sources give,
+  ordered by source; the broker does not pick one, because text order is
+  not version order (`"10.1"` sorts before `"9.2"`).
 - `grype` findings add `kev`, `kevDateAdded`, `epss` and `epssPercentile`
   from the Grype DB, and its report names the SBOM(s) it matched
   (`sbomSources`). Trivy never sets these, so `null` means unknown, not
@@ -70,7 +73,11 @@ the damage a bad or stolen token can do:
 - item caps enforced while parsing, and a global ceiling on half-sent SBOM
   page sets.
 
-Keep the token in the supplychain component only.
+The limits do not stop a token holder from hiding findings: sending a
+slightly newer (up to 60 s ahead) empty scan, again and again, keeps an
+image's findings wiped until the next real rescan replaces it. Treat the
+supplychain token as a write credential for your vulnerability data, and
+keep it in the supplychain component only.
 
 ## How a report is matched to what runs
 
@@ -162,7 +169,7 @@ severe first.
   "items": [
     {"id": "CVE-2099-1002",
      "package": {"name": "express", "type": "node-pkg", "purl": "pkg:npm/express@4.18.2"},
-     "installedVersion": "4.18.2", "fixedVersion": "4.19.2", "fixable": true,
+     "installedVersion": "4.18.2", "fixedVersions": ["4.19.2"], "fixable": true,
      "severity": "MEDIUM", "score": 6.1, "cvss": {"nvd": {"v3_score": 6.1}},
      "title": "…", "primaryUrl": "https://…", "filePaths": ["app/node_modules/express/package.json"],
      "kev": null, "kevDateAdded": null, "epss": null, "epssPercentile": null,
@@ -240,12 +247,13 @@ digest is affected.
               "sources": ["grype", "trivy-operator"], "reportDigests": ["sha256:9f86…"],
               "join": "platform_manifest", "severity": "HIGH",
               "packages": [{"name": "express", "installedVersion": "4.18.2",
-                            "fixedVersion": "4.19.2", "severity": "HIGH",
+                            "fixedVersions": ["4.19.2"], "severity": "HIGH",
                             "sources": ["grype", "trivy-operator"]}]}],
   "workloads": [{"clusterId": "primary", "namespace": "shop", "kind": "Deployment", "name": "api",
                  "container": "api", "imageDigest": "sha256:1f3a…", "join": "platform_manifest",
                  "running": true, "lastSeen": "2026-09-27T11:58:00",
                  "network": {"windowHours": 168, "podsObserved": 3, "flowsObserved": 412,
+                             "ingressFlowsObserved": 180,
                              "ingressFromOtherNamespaces": 1, "ingressFromUnattributedPeers": 4,
                              "ingressFromPublicIps": 2, "ingressFromNodes": 3,
                              "exposed": true,
@@ -266,7 +274,8 @@ are generated from, with the peer identity the broker stamps at ingest
 1. Take up to 50 of the workload's pods the broker knows (live, or dead
    but not yet pruned), newest first.
 2. Take their rows inside the window, matched on pod name **and**
-   namespace. `flowsObserved` counts them (either direction).
+   namespace. `flowsObserved` counts them (either direction) and
+   `ingressFlowsObserved` the `INGRESS` ones.
 3. Of the `INGRESS` rows, count distinct peers:
    - `ingressFromOtherNamespaces`: a pod or service peer in another
      namespace;
@@ -283,9 +292,11 @@ are generated from, with the peer identity the broker stamps at ingest
      apart.
 4. `exposed` is `true` when any of those is non-zero, and `exposedVia`
    names which (`other_namespace`, `unattributed`, `public_ip`, `node`).
-   It is `false` when the pods had flows in the window and none of them
-   was such ingress. It is `null` (unknown) when the broker knows no pods
-   for the workload, or they had no flows in the window: nothing observed
+   It is `false` when `INGRESS` flows were observed in the window and none
+   came from outside. It is `null` (unknown) when the broker knows no pods
+   for the workload, or they had no ingress flows in the window, even if
+   they had egress: the controller does not capture inbound UDP, so a
+   UDP-only server shows outbound flows and no ingress. Nothing observed
    is not the same as nothing reachable.
 
 `false` means no such ingress was seen in the window, not that none is
