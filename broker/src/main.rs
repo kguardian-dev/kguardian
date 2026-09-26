@@ -328,7 +328,7 @@ async fn main() -> Result<(), std::io::Error> {
 
     // Image attestation results not re-checked within
     // IMAGE_ATTESTATION_RETENTION_DAYS (attestation.rs). Results for
-    // digests that stopped running go with the inventory (FK cascade).
+    // digests that left the inventory are deleted by the same pass.
     api::spawn_attestation_retention(pool.clone());
 
     // Re-resolves the peer identity of recently ingested traffic rows

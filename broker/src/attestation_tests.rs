@@ -72,8 +72,40 @@ fn parses_a_result_and_drops_unverified_identity() {
 
 #[test]
 fn key_signed_is_a_verdict() {
-    let p = parse(&body(&d(2), "key_signed"), &d(2)).unwrap();
+    let mut v = body(&d(2), "key_signed");
+    v["signatures"] = json!([v["signatures"][1].clone()]);
+    let p = parse(&v, &d(2)).unwrap();
     assert_eq!(p.verdict, "key_signed");
+}
+
+#[test]
+fn verdict_must_match_the_signatures() {
+    let unverified_only = |verdict: &str| {
+        let mut v = body(&d(5), verdict);
+        v["signatures"] =
+            json!([{"format": "cosign-legacy", "verified": false, "error": "bad_signature"}]);
+        v
+    };
+    // "verified" with no verified signature; "unsigned" with signatures;
+    // "invalid"/"key_signed"/"unknown" next to a verified one.
+    for v in [
+        unverified_only("verified"),
+        body(&d(5), "unsigned"),
+        body(&d(5), "invalid"),
+        body(&d(5), "unknown"),
+        unverified_only("key_signed"),
+    ] {
+        assert!(
+            matches!(parse(&v, &d(5)), Err(Reject::Unprocessable(_))),
+            "{} accepted",
+            v["verdict"]
+        );
+    }
+    assert!(parse(&unverified_only("invalid"), &d(5)).is_ok());
+    assert!(parse(&unverified_only("unknown"), &d(5)).is_ok());
+    let mut none = body(&d(5), "unsigned");
+    none["signatures"] = json!([]);
+    assert!(parse(&none, &d(5)).is_ok());
 }
 
 #[test]
@@ -174,7 +206,7 @@ fn caps_list_lengths() {
         MAX_ATTESTATIONS + 1
     ]);
     assert!(matches!(parse(&v, &d(1)), Err(Reject::TooLarge(_))));
-    let mut v = body(&d(1), "verified");
+    let mut v = body(&d(1), "invalid");
     v["signatures"] = json!(vec![
         json!({"format": "f", "verified": false});
         MAX_SIGNATURES
@@ -185,11 +217,26 @@ fn caps_list_lengths() {
 #[test]
 fn truncates_long_strings_on_char_boundaries() {
     let mut v = body(&d(1), "verified");
-    v["signatures"][0]["san"] = json!("é".repeat(MAX_URI));
-    v["signatures"][0]["detail"] = json!("x".repeat(10_000));
+    v["signatures"][1]["detail"] = json!("é".repeat(10_000));
     let p = parse(&v, &d(1)).unwrap();
-    assert!(p.signatures[0].san.as_ref().unwrap().len() <= MAX_URI);
-    assert!(p.signatures[0].detail.as_ref().unwrap().len() <= MAX_DETAIL);
+    let det = p.signatures[1].detail.as_ref().unwrap();
+    assert!(det.len() <= MAX_DETAIL && det.chars().all(|c| c == 'é'));
+}
+
+// A verified identity is stored whole or refused, never truncated: a
+// prefix of a SAN could match a policy the real SAN does not.
+#[test]
+fn verified_identity_is_never_truncated() {
+    let mut v = body(&d(1), "verified");
+    v["signatures"][0]["san"] = json!("é".repeat(MAX_URI));
+    assert!(matches!(parse(&v, &d(1)), Err(Reject::Unprocessable(_))));
+    let mut v = body(&d(1), "verified");
+    v["attestations"][0]["provenance"]["source_repo"] = json!("x".repeat(MAX_URI + 1));
+    assert!(matches!(parse(&v, &d(1)), Err(Reject::Unprocessable(_))));
+    // An unverified signature's claimed identity is dropped, not refused.
+    let mut v = body(&d(1), "verified");
+    v["signatures"][1]["san"] = json!("x".repeat(MAX_URI * 2));
+    assert!(parse(&v, &d(1)).unwrap().signatures[1].san.is_none());
 }
 
 // ---------------------------------------------------------------------
@@ -227,6 +274,16 @@ fn add_image(conn: &mut PgConnection, digest: &str) {
 fn post_at(digest: &str, verdict: &str, checked_at: &str) -> AttestationPost {
     let mut v = body(digest, verdict);
     v["checked_at"] = json!(checked_at);
+    // Signatures consistent with the verdict (parse_post checks it).
+    match verdict {
+        "unsigned" => v["signatures"] = json!([]),
+        "key_signed" => v["signatures"] = json!([v["signatures"][1].clone()]),
+        "invalid" | "unknown" => {
+            v["signatures"] =
+                json!([{"format": "cosign-legacy", "verified": false, "error": "bad_signature"}])
+        }
+        _ => {}
+    }
     parse_post(digest, &serde_json::to_vec(&v).unwrap(), Utc::now()).unwrap()
 }
 
@@ -266,8 +323,11 @@ fn live_store_replacement_rules() {
     );
     let row = load_one(&mut conn, &dg).unwrap().unwrap();
     assert_eq!(row.verdict, "key_signed");
-    assert_eq!(row.signatures[0]["signerKind"], "keyless");
-    assert!(row.signatures[1].get("issuer").is_none());
+    // The one unverified key signature: its claimed identity is not
+    // stored, its key hint is.
+    assert_eq!(row.signatures.as_array().unwrap().len(), 1);
+    assert!(row.signatures[0].get("issuer").is_none());
+    assert!(row.signatures[0].get("keyHint").is_some());
 }
 
 #[test]
@@ -345,4 +405,52 @@ fn live_gc_follows_inventory_and_age() {
     assert_eq!(prune(&mut conn, 0).unwrap(), 0);
     assert_eq!(prune(&mut conn, 7).unwrap(), 1);
     assert!(load_one(&mut conn, &d(31)).unwrap().is_none());
+}
+
+/// The summary and single-row charges cover the largest rows the caps
+/// allow.
+#[test]
+#[ignore = "requires a live postgres (set KG_TEST_DATABASE_URL)"]
+fn live_summary_cost_covers_the_largest_row() {
+    let mut conn = live_conn();
+    let dg = d(90);
+    add_image(&mut conn, &dg);
+    let long = |c: char, n: usize| c.to_string().repeat(n);
+    let sigs: Vec<_> = (0..MAX_SIGNATURES)
+        .map(|i| json!({"format": "cosign-bundle", "source": "referrers", "verified": true,
+            "signer_kind": if i % 2 == 0 { "keyless" } else { "key" },
+            "issuer": format!("{i:02}{}", long('i', MAX_URI - 2)), "san": format!("{i:02}{}", long('s', MAX_URI - 2)),
+            "key_name": format!("{i:02}{}", long('k', MAX_SHORT - 2)), "key_fingerprint": format!("{i:064x}")}))
+        .collect();
+    let atts: Vec<_> = (0..MAX_ATTESTATIONS)
+        .map(|i| {
+            json!({"predicate_type": format!("{i:02}{}", long('p', MAX_URI - 2)), "verified": true,
+            "signer_kind": "keyless", "issuer": "i", "san": "s"})
+        })
+        .collect();
+    let v = json!({"schema_version": 1, "digest": dg, "repository": long('r', MAX_URI),
+        "checked_at": "2026-09-01T00:00:00Z", "verdict": "verified", "reason": long('a', MAX_SHORT),
+        "signed_via": "self", "signatures": sigs, "attestations": atts});
+    let body = serde_json::to_vec(&v).unwrap();
+    assert!(
+        body.len() <= MAX_BODY_BYTES,
+        "fixture over the body cap: {}",
+        body.len()
+    );
+    let p = parse_post(&dg, &body, Utc::now()).unwrap();
+    assert_eq!(store(&mut conn, &p).unwrap(), Outcome::Stored);
+    let page = list(&mut conn, None, None, None, 10).unwrap();
+    let row = serde_json::to_vec(&page.items[0]).unwrap().len() as u64;
+    assert!(
+        row <= ATTESTATION_SUMMARY_COST_BYTES,
+        "largest summary row is {row} bytes, charged {ATTESTATION_SUMMARY_COST_BYTES}"
+    );
+    let one = serde_json::to_vec(&load_one(&mut conn, &dg).unwrap().unwrap())
+        .unwrap()
+        .len() as u64;
+    assert!(
+        one <= ATTESTATION_ROW_COST_BYTES,
+        "largest row is {one} bytes"
+    );
+    eprintln!("largest summary row {row} bytes; largest stored row {one} bytes");
 }

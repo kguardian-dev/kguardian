@@ -275,6 +275,15 @@ impl Reject {
 /// Caps the signer fields and drops the identity of an unverified
 /// signature (it has none worth storing); the key hint is kept, since it
 /// only says which key the signature claims.
+fn too_long(v: &Option<String>, max: usize, what: &str) -> Result<(), Reject> {
+    match v {
+        Some(s) if s.len() > max => Err(Reject::Unprocessable(format!(
+            "{what} of a verified signer is longer than {max} bytes; refusing to store it truncated"
+        ))),
+        _ => Ok(()),
+    }
+}
+
 fn cap_signer(
     kind: &mut Option<String>,
     issuer: &mut Option<String>,
@@ -284,6 +293,15 @@ fn cap_signer(
     key_hint: &mut Option<String>,
     verified: bool,
 ) -> Result<(), Reject> {
+    // A verified identity is matched by trust policies, so it is stored
+    // whole or refused: a truncated SAN could match a policy the real one
+    // does not.
+    if verified {
+        too_long(issuer, MAX_URI, "issuer")?;
+        too_long(san, MAX_URI, "san")?;
+        too_long(key_name, MAX_SHORT, "key_name")?;
+        too_long(key_fingerprint, 64, "key_fingerprint")?;
+    }
     if let Some(k) = kind.as_deref() {
         if !k.is_empty() && !SIGNER_KINDS.contains(&k) {
             return Err(Reject::Unprocessable(format!(
@@ -404,6 +422,13 @@ pub fn parse_post(
             &mut a.key_hint,
             a.verified,
         )?;
+        if let (true, Some(pr)) = (a.verified, &a.provenance) {
+            // Provenance of a verified attestation is matched by policies
+            // too: whole or refused.
+            too_long(&pr.builder_id, MAX_URI, "provenance.builder_id")?;
+            too_long(&pr.source_repo, MAX_URI, "provenance.source_repo")?;
+            too_long(&pr.source_ref, MAX_URI, "provenance.source_ref")?;
+        }
         if let Some(pr) = &mut a.provenance {
             cap(&mut pr.builder_id, MAX_URI);
             cap(&mut pr.build_type, MAX_URI);
@@ -415,7 +440,32 @@ pub fn parse_post(
             a.provenance = None; // unverified claims are not shown as facts
         }
     }
+    check_verdict(&p)?;
     Ok(p)
+}
+
+/// The verdict must agree with the signatures it was derived from.
+fn check_verdict(p: &AttestationPost) -> Result<(), Reject> {
+    let verified = p.signatures.iter().any(|s| s.verified);
+    let untrusted_key = p
+        .signatures
+        .iter()
+        .any(|s| s.error.as_deref() == Some("untrusted_key"));
+    let ok = match p.verdict.as_str() {
+        "verified" => verified,
+        "unsigned" => p.signatures.is_empty(),
+        "invalid" => !p.signatures.is_empty() && !verified,
+        "key_signed" => untrusted_key && !verified,
+        _ => !verified, // unknown
+    };
+    if ok {
+        Ok(())
+    } else {
+        Err(Reject::Unprocessable(format!(
+            "verdict {} does not match the signatures sent",
+            p.verdict
+        )))
+    }
 }
 
 /// Result of storing a post.
@@ -615,9 +665,14 @@ pub fn attestation_resource() -> impl actix_web::dev::HttpServiceFactory {
 
 /// Per stored row: two bounded jsonb lists (≤ 96 entries of ≤ ~2 KiB after
 /// the caps above), charged generously.
-pub const ATTESTATION_ROW_COST_BYTES: u64 = 64 * 1024;
+/// A stored row is at most one accepted body; serialised it can be larger
+/// (camelCase keys, escaping), so twice the body cap.
+pub const ATTESTATION_ROW_COST_BYTES: u64 = 2 * MAX_BODY_BYTES as u64;
 /// Per summary row on `GET /attestations`.
-pub const ATTESTATION_SUMMARY_COST_BYTES: u64 = 2 * 1024;
+/// Measured against the largest possible summary row (the summary
+/// projection caps each identity string at 256 characters);
+/// `live_summary_cost_covers_the_largest_row` checks it.
+pub const ATTESTATION_SUMMARY_COST_BYTES: u64 = 24 * 1024;
 pub const ATTESTATIONS_DEFAULT_LIMIT: i64 = 100;
 pub const ATTESTATIONS_MAX_LIMIT: i64 = 500;
 
@@ -732,10 +787,10 @@ pub struct SummaryPage {
 
 const LIST_SQL: &str = "SELECT a.digest, a.repository, a.verdict, a.reason, a.signed_via, \
     COALESCE((SELECT jsonb_agg(x) FROM (SELECT DISTINCT jsonb_strip_nulls(jsonb_build_object(\
-            'kind', COALESCE(s->>'signerKind', 'keyless'), 'issuer', s->>'issuer', 'san', s->>'san', \
+            'kind', COALESCE(s->>'signerKind', 'keyless'), 'issuer', left(s->>'issuer', 256), 'san', left(s->>'san', 256), \
             'keyName', s->>'keyName', 'keyFingerprint', s->>'keyFingerprint')) AS x \
         FROM jsonb_array_elements(a.signatures) s WHERE (s->>'verified')::boolean LIMIT 8) q), '[]'::jsonb) AS signers, \
-    COALESCE((SELECT jsonb_agg(x) FROM (SELECT DISTINCT e->>'predicateType' AS x \
+    COALESCE((SELECT jsonb_agg(x) FROM (SELECT DISTINCT left(e->>'predicateType', 256) AS x \
         FROM jsonb_array_elements(a.attestations) e WHERE (e->>'verified')::boolean LIMIT 16) q), '[]'::jsonb) AS verified_predicates, \
     a.checked_at \
     FROM image_attestations a \
