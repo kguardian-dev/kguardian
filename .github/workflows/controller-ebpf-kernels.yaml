@@ -20,6 +20,11 @@ name: Controller eBPF kernel matrix
 # Each VM also runs the syscall ownership gate end to end: loading is not
 # enough, a 6.1 verifier loaded a gate that credited nothing.
 #
+# Each VM also runs the runtime inventory end-to-end test: a process in a
+# kubepods-shaped cgroup execs from disk, from a memfd and (with the
+# image's overlay.ko loaded) from an overlayfs lower and upper layer, and
+# the probe must attribute and classify each one.
+#
 # Run the same check locally (no KVM needed, TCG works):
 #   cargo test --all-features --lib --no-run
 #   vmtest -k <vmlinuz> "<test binary> --ignored --exact \
@@ -104,6 +109,11 @@ jobs:
             ver="${pair%%:*}"; image="${pair#*:}"
             id=$(docker create "$image" /nonexistent)
             docker cp "$id:/data/kernels/$ver/boot/." "kernels/$ver"
+            # overlayfs is a module in these images; the runtime inventory
+            # test insmods it to check image vs writable-layer detection
+            # (it skips that part, and says so, without it).
+            docker export "$id" | tar -x -C "kernels/$ver" --wildcards '*/fs/overlayfs/overlay.ko' || true
+            find "kernels/$ver" -name overlay.ko -exec cp {} "kernels/overlay-$ver.ko" \; -quit
             docker rm "$id" >/dev/null
             cp kernels/$ver/vmlinuz-* "kernels/vmlinuz-$ver"
           done
@@ -114,25 +124,25 @@ jobs:
         with:
           name: linux-6.1
           kernel: kernels/vmlinuz-6.1
-          command: /bin/bash -c "${{ github.workspace }}/ebpf-load-test --ignored --exact bpf::tests::every_probe_object_loads_on_this_kernel --nocapture && ${{ github.workspace }}/ebpf-load-test --ignored --exact bpf::tests::syscall_ownership_gate_credits_a_pod_cgroup --nocapture"
+          command: /bin/bash -c "insmod ${{ github.workspace }}/kernels/overlay-6.1.ko || true; ${{ github.workspace }}/ebpf-load-test --ignored --exact bpf::tests::every_probe_object_loads_on_this_kernel --nocapture && ${{ github.workspace }}/ebpf-load-test --ignored --exact bpf::tests::syscall_ownership_gate_credits_a_pod_cgroup --nocapture && ${{ github.workspace }}/ebpf-load-test --ignored --exact bpf::tests::runtime_inventory_reports_execs_and_libraries_per_container --nocapture"
 
       - name: Load on 6.6
         uses: danobi/vmtest-action@c0fe6f82e21db9b9a8105f2a385e8a6e3fff2d23 # v0.9
         with:
           name: linux-6.6
           kernel: kernels/vmlinuz-6.6
-          command: /bin/bash -c "${{ github.workspace }}/ebpf-load-test --ignored --exact bpf::tests::every_probe_object_loads_on_this_kernel --nocapture && ${{ github.workspace }}/ebpf-load-test --ignored --exact bpf::tests::syscall_ownership_gate_credits_a_pod_cgroup --nocapture"
+          command: /bin/bash -c "insmod ${{ github.workspace }}/kernels/overlay-6.6.ko || true; ${{ github.workspace }}/ebpf-load-test --ignored --exact bpf::tests::every_probe_object_loads_on_this_kernel --nocapture && ${{ github.workspace }}/ebpf-load-test --ignored --exact bpf::tests::syscall_ownership_gate_credits_a_pod_cgroup --nocapture && ${{ github.workspace }}/ebpf-load-test --ignored --exact bpf::tests::runtime_inventory_reports_execs_and_libraries_per_container --nocapture"
 
       - name: Load on 6.12
         uses: danobi/vmtest-action@c0fe6f82e21db9b9a8105f2a385e8a6e3fff2d23 # v0.9
         with:
           name: linux-6.12
           kernel: kernels/vmlinuz-6.12
-          command: /bin/bash -c "${{ github.workspace }}/ebpf-load-test --ignored --exact bpf::tests::every_probe_object_loads_on_this_kernel --nocapture && ${{ github.workspace }}/ebpf-load-test --ignored --exact bpf::tests::syscall_ownership_gate_credits_a_pod_cgroup --nocapture"
+          command: /bin/bash -c "insmod ${{ github.workspace }}/kernels/overlay-6.12.ko || true; ${{ github.workspace }}/ebpf-load-test --ignored --exact bpf::tests::every_probe_object_loads_on_this_kernel --nocapture && ${{ github.workspace }}/ebpf-load-test --ignored --exact bpf::tests::syscall_ownership_gate_credits_a_pod_cgroup --nocapture && ${{ github.workspace }}/ebpf-load-test --ignored --exact bpf::tests::runtime_inventory_reports_execs_and_libraries_per_container --nocapture"
 
       - name: Load on 6.18
         uses: danobi/vmtest-action@c0fe6f82e21db9b9a8105f2a385e8a6e3fff2d23 # v0.9
         with:
           name: linux-6.18
           kernel: kernels/vmlinuz-6.18
-          command: /bin/bash -c "${{ github.workspace }}/ebpf-load-test --ignored --exact bpf::tests::every_probe_object_loads_on_this_kernel --nocapture && ${{ github.workspace }}/ebpf-load-test --ignored --exact bpf::tests::syscall_ownership_gate_credits_a_pod_cgroup --nocapture"
+          command: /bin/bash -c "insmod ${{ github.workspace }}/kernels/overlay-6.18.ko || true; ${{ github.workspace }}/ebpf-load-test --ignored --exact bpf::tests::every_probe_object_loads_on_this_kernel --nocapture && ${{ github.workspace }}/ebpf-load-test --ignored --exact bpf::tests::syscall_ownership_gate_credits_a_pod_cgroup --nocapture && ${{ github.workspace }}/ebpf-load-test --ignored --exact bpf::tests::runtime_inventory_reports_execs_and_libraries_per_container --nocapture"

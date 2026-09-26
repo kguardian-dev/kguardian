@@ -4,6 +4,10 @@ use crate::models::PodRegistration;
 use crate::network::netpolicy_drop::NetpolicyDropSkelBuilder;
 use crate::network::network_probe::NetworkProbeSkelBuilder;
 use crate::network::{ip_to_wire_addr, PolicyDropEvent};
+use crate::runtime_inventory::runtime_inventory_skel::{
+    RuntimeInventorySkel, RuntimeInventorySkelBuilder,
+};
+use crate::runtime_inventory::RuntimeEventData;
 use crate::seccomp_denial::seccomp_denial_skel::{SeccompDenialSkel, SeccompDenialSkelBuilder};
 use crate::seccomp_denial::{DenialMaps, AUDIT_SECCOMP_SYMBOL};
 use crate::syscall::{sycallprobe::SyscallSkelBuilder, SyscallEventData};
@@ -32,6 +36,7 @@ static NETWORK_SEND_FAILED: AtomicBool = AtomicBool::new(false);
 static SYSCALL_SEND_FAILED: AtomicBool = AtomicBool::new(false);
 static POLICY_DROP_SEND_FAILED: AtomicBool = AtomicBool::new(false);
 static CGROUP_SEND_FAILED: AtomicBool = AtomicBool::new(false);
+static RUNTIME_SEND_FAILED: AtomicBool = AtomicBool::new(false);
 
 // Set when ANY receiver closes, and by main on its way out — signals
 // the spawn_blocking poll loop to exit on its next iteration. Without
@@ -224,6 +229,59 @@ fn open_and_load_syscall(
     }
     open.load().map_err(|e| format!("load: {e}"))
 }
+
+/// Load and attach the runtime inventory probe (exec always, executable
+/// mmaps when `libs`). Every failure is a warning and `None`: the feature
+/// degrades to /proc backfill, capture of everything else is untouched.
+pub(crate) fn load_runtime_inventory(
+    storage: &mut MaybeUninit<OpenObject>,
+    libs: bool,
+) -> Option<(RuntimeInventorySkel<'_>, Vec<libbpf_rs::Link>)> {
+    let libs = libs && kernel_can_fentry(RUNTIME_MMAP_SYMBOL);
+    let mut open = match RuntimeInventorySkelBuilder::default().open(storage) {
+        Ok(o) => o,
+        Err(e) => {
+            warn!(error = %e, "runtime inventory probe failed to open; exec/library inventory \
+                   comes from /proc backfill only");
+            return None;
+        }
+    };
+    if !libs {
+        open.progs.trace_runtime_mmap.set_autoload(false);
+    }
+    let sk = match open.load() {
+        Ok(sk) => sk,
+        Err(e) => {
+            warn!(error = %e, "runtime inventory probe failed to load; exec/library inventory \
+                   comes from /proc backfill only");
+            return None;
+        }
+    };
+    let mut links = Vec::new();
+    match sk.progs.trace_runtime_exec.attach() {
+        Ok(l) => links.push(l),
+        Err(e) => {
+            warn!(error = %e, "could not attach tp_btf/sched_process_exec; exec inventory \
+                   comes from /proc backfill only");
+            return None;
+        }
+    }
+    if libs {
+        match sk.progs.trace_runtime_mmap.attach() {
+            Ok(l) => links.push(l),
+            Err(e) => warn!(error = %e, "could not attach fentry/{RUNTIME_MMAP_SYMBOL}; \
+                   library inventory comes from /proc backfill only"),
+        }
+    }
+    info!(
+        libraries = links.len() > 1,
+        "Runtime inventory eBPF program loaded and attached"
+    );
+    Some((sk, links))
+}
+
+/// The kernel function the library probe attaches to.
+pub const RUNTIME_MMAP_SYMBOL: &str = "security_mmap_file";
 
 /// Delete `key` from `map` only while its value is still `expected`.
 /// True when something was deleted.
@@ -461,6 +519,7 @@ pub fn ebpf_handle(
     seccomp_denial_maps: Option<oneshot::Sender<DenialMaps>>,
     cgroup_event_sender: Sender<(u64, String)>,
     mut forget_pending: Receiver<u64>,
+    runtime_events: Option<(Sender<RuntimeEventData>, bool)>,
 ) -> JoinHandle<Result<(), Error>> {
     task::spawn_blocking(move || {
         // The IPv6 UDP twins target udpv6_sendmsg; on a kernel where
@@ -616,6 +675,18 @@ pub fn ebpf_handle(
             }
         };
 
+        // Runtime inventory: optional, its own object. `None` when the
+        // feature is off or this kernel refuses it; the sender is kept
+        // alive either way so the consumer keeps running (backfill).
+        let mut runtime_storage = MaybeUninit::uninit();
+        let (runtime_sender, runtime_libs) = match runtime_events {
+            Some((tx, libs)) => (Some(tx), libs),
+            None => (None, false),
+        };
+        let runtime = runtime_sender
+            .as_ref()
+            .and_then(|_| load_runtime_inventory(&mut runtime_storage, runtime_libs));
+
         // Load and attach the seccomp denial probe. `None` here means
         // SECCOMP_DENIAL_CAPTURE is off and nothing is loaded at all;
         // `None` back from the loader means this kernel cannot carry the
@@ -702,6 +773,28 @@ pub fn ebpf_handle(
             .map_err(|e| {
                 Error::Custom(format!("Failed to add cgroup events ring buffer: {}", e))
             })?;
+
+        // Runtime inventory events, when the probe loaded.
+        if let (Some((sk, _links)), Some(tx)) = (runtime.as_ref(), runtime_sender.clone()) {
+            ring_buffer_builder
+                .add(&sk.maps.runtime_events, move |data: &[u8]| {
+                    if data.len() < std::mem::size_of::<RuntimeEventData>() {
+                        return 0;
+                    }
+                    let ev: RuntimeEventData =
+                        unsafe { std::ptr::read_unaligned(data.as_ptr() as *const RuntimeEventData) };
+                    if let Err(e) = tx.blocking_send(ev) {
+                        if !RUNTIME_SEND_FAILED.swap(true, Ordering::Relaxed) {
+                            warn!(error = ?e, "runtime inventory channel closed; signalling eBPF poll loop to exit");
+                        }
+                        signal_ebpf_shutdown();
+                    }
+                    0
+                })
+                .map_err(|e| {
+                    Error::Custom(format!("Failed to add runtime events ring buffer: {}", e))
+                })?;
+        }
 
         // Add network policy drop events ring buffer
         ring_buffer_builder
@@ -1177,12 +1270,282 @@ mod tests {
                 .expect("load seccomp denial probe");
         }
 
+        // Runtime inventory: exec and, where security_mmap_file can be
+        // fentry-attached, the library probe too. Both must load AND attach.
+        let mut storage = MaybeUninit::uninit();
+        let (_sk, links) =
+            load_runtime_inventory(&mut storage, true).expect("runtime inventory probe");
+        assert_eq!(
+            links.len(),
+            if kernel_can_fentry(RUNTIME_MMAP_SYMBOL) {
+                2
+            } else {
+                1
+            },
+            "runtime inventory programs attached"
+        );
+
         let mut storage = MaybeUninit::uninit();
         crate::contention::sched_contention_skel::SchedContentionSkelBuilder::default()
             .open(&mut storage)
             .expect("open sched contention probe")
             .load()
             .expect("load sched contention probe");
+    }
+
+    /// End to end on the RUNNING kernel: a process placed in a
+    /// kubepods-shaped cgroup execs a binary; the probe must report the
+    /// exec (and, where attachable, its libraries) with the canonical
+    /// path, the pod generation and the container's cgroup name. Needs
+    /// root and cgroup v2; run by the ebpf-kernels CI job.
+    #[test]
+    #[ignore = "needs root, cgroup v2 and a BTF-enabled kernel; run by the ebpf-kernels CI job"]
+    fn runtime_inventory_reports_execs_and_libraries_per_container() {
+        use crate::runtime_inventory::{RuntimeEventData, KIND_EXEC, KIND_LIB};
+        use std::os::unix::process::CommandExt;
+        use std::sync::{Arc, Mutex};
+
+        const UID: &str = "7e3a9c1e-7b4d-4e0a-9f1c-0123456789ab";
+        const CID: &str = "5e1e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c4b5a69788796a5b4c3d2e1f0";
+        let pod_dir = format!("/sys/fs/cgroup/kubepods/besteffort/pod{UID}");
+        let ctr_dir = format!("{pod_dir}/{CID}");
+        std::fs::create_dir_all(&ctr_dir).expect("create a kubepods-shaped cgroup");
+
+        let mut storage = MaybeUninit::uninit();
+        let (sk, links) = load_runtime_inventory(&mut storage, true).expect("load");
+        let libs = links.len() > 1;
+
+        let events: Arc<Mutex<Vec<RuntimeEventData>>> = Arc::default();
+        let sink = Arc::clone(&events);
+        let mut rb = RingBufferBuilder::new();
+        rb.add(&sk.maps.runtime_events, move |data: &[u8]| {
+            let ev: RuntimeEventData =
+                unsafe { std::ptr::read_unaligned(data.as_ptr() as *const RuntimeEventData) };
+            sink.lock().unwrap().push(ev);
+            0
+        })
+        .unwrap();
+        let rb = rb.build().unwrap();
+
+        let procs = format!("{ctr_dir}/cgroup.procs");
+        let status = unsafe {
+            std::process::Command::new("/bin/sh")
+                .args(["-c", "/bin/true"])
+                .pre_exec(move || {
+                    std::fs::write(&procs, std::process::id().to_string())?;
+                    Ok(())
+                })
+                .status()
+        }
+        .expect("spawn");
+        assert!(status.success());
+
+        // A binary run from memory: copy /bin/true into a memfd and
+        // fexecve it (what a fileless dropper does).
+        let procs = format!("{ctr_dir}/cgroup.procs");
+        let image = std::fs::read("/bin/true").expect("read /bin/true");
+        let status = unsafe {
+            std::process::Command::new("/bin/false")
+                .pre_exec(move || {
+                    std::fs::write(&procs, std::process::id().to_string())?;
+                    let fd = libc::memfd_create(c"kg-e2e".as_ptr(), 0);
+                    if fd < 0 {
+                        return Err(std::io::Error::last_os_error());
+                    }
+                    let mut off = 0;
+                    while off < image.len() {
+                        let n = libc::write(fd, image[off..].as_ptr().cast(), image.len() - off);
+                        if n <= 0 {
+                            return Err(std::io::Error::last_os_error());
+                        }
+                        off += n as usize;
+                    }
+                    let argv = [c"true".as_ptr(), std::ptr::null()];
+                    let envp = [std::ptr::null()];
+                    libc::fexecve(fd, argv.as_ptr(), envp.as_ptr());
+                    Err(std::io::Error::last_os_error())
+                })
+                .status()
+        }
+        .expect("spawn the memfd exec");
+        assert!(
+            status.success(),
+            "ran the memfd copy of true, not /bin/false"
+        );
+
+        // overlayfs, as a container rootfs: a binary from the lower
+        // (image) layer, and one written through the merged view (so it
+        // lives in the upper, writable layer). Skipped, and said so, where
+        // overlay cannot be mounted.
+        let ov = std::path::Path::new("/mnt/kg-ov");
+        let mount = |src: &str, dst: &std::path::Path, fs: &str, opts: &str| -> bool {
+            let c = |s: &str| std::ffi::CString::new(s).unwrap();
+            let rc = unsafe {
+                libc::mount(
+                    c(src).as_ptr(),
+                    c(dst.to_str().unwrap()).as_ptr(),
+                    c(fs).as_ptr(),
+                    0,
+                    c(opts).as_ptr().cast(),
+                )
+            };
+            if rc != 0 {
+                eprintln!(
+                    "mount {fs} on {}: {}",
+                    dst.display(),
+                    std::io::Error::last_os_error()
+                );
+            }
+            rc == 0
+        };
+        let overlay = std::fs::create_dir_all(ov).is_ok()
+            && mount("none", ov, "tmpfs", "")
+            && ["lower", "upper", "work", "merged"]
+                .iter()
+                .all(|d| std::fs::create_dir(ov.join(d)).is_ok())
+            && std::fs::copy("/bin/true", ov.join("lower/from-image")).is_ok()
+            && mount(
+                "overlay",
+                &ov.join("merged"),
+                "overlay",
+                "lowerdir=/mnt/kg-ov/lower,upperdir=/mnt/kg-ov/upper,workdir=/mnt/kg-ov/work",
+            )
+            && std::fs::copy("/bin/true", ov.join("merged/written-later")).is_ok();
+        if overlay {
+            for bin in ["merged/from-image", "merged/written-later"] {
+                let procs = format!("{ctr_dir}/cgroup.procs");
+                let status = unsafe {
+                    std::process::Command::new(ov.join(bin))
+                        .pre_exec(move || {
+                            std::fs::write(&procs, std::process::id().to_string())?;
+                            Ok(())
+                        })
+                        .status()
+                }
+                .expect("spawn from overlay");
+                assert!(status.success(), "{bin}");
+            }
+        } else {
+            eprintln!("overlayfs not available here; the layer check is skipped");
+        }
+
+        for _ in 0..20 {
+            rb.poll(std::time::Duration::from_millis(100)).unwrap();
+        }
+
+        let got = events.lock().unwrap().clone();
+        let gen = crate::models::pod_flags::generation_for_uid(Some(UID));
+        let expect_exec = std::fs::canonicalize("/bin/true").unwrap();
+        let expect_sh = std::fs::canonicalize("/bin/sh").unwrap();
+        let mut execs = Vec::new();
+        let mut lib_paths = Vec::new();
+        let mut memfd_execs = Vec::new();
+        let mut overlay_execs = Vec::new();
+        for ev in &got {
+            assert_eq!(ev.generation, gen, "pod generation from the cgroup path");
+            assert_eq!(
+                ev.container_id().as_deref(),
+                Some(CID),
+                "container cgroup name"
+            );
+            let (path, complete) = ev.path();
+            assert!(complete, "{path}");
+            let origin = ev.origin(&path);
+            eprintln!(
+                "{path}: origin={origin:?} magic={:#x} nlink={} upper={}",
+                ev.fs_magic, ev.nlink, ev.upper
+            );
+            if origin == crate::runtime_inventory::Origin::Memfd {
+                assert_eq!(ev.kind, KIND_EXEC);
+                memfd_execs.push(path);
+                continue;
+            }
+            if path.starts_with("/mnt/kg-ov/") {
+                overlay_execs.push((path, origin));
+                continue;
+            }
+            // On disk and linked: never Deleted/Memfd, and never Unknown
+            // (Unknown is only overlayfs without its BTF type).
+            assert!(
+                matches!(
+                    origin,
+                    crate::runtime_inventory::Origin::OtherFs
+                        | crate::runtime_inventory::Origin::Image
+                        | crate::runtime_inventory::Origin::WritableLayer
+                ),
+                "{path}: {origin:?}"
+            );
+            match ev.kind {
+                KIND_EXEC => execs.push(path),
+                KIND_LIB => lib_paths.push(path),
+                k => panic!("kind {k}"),
+            }
+        }
+        eprintln!("execs: {execs:?}\nlibs: {lib_paths:?}");
+        // Diagnostics for a failure: what the ownership cache and the
+        // dedup map hold.
+        for k in sk.maps.cgroup_pod_gen.keys() {
+            let v = sk
+                .maps
+                .cgroup_pod_gen
+                .lookup(&k, MapFlags::ANY)
+                .ok()
+                .flatten();
+            eprintln!("cgroup_pod_gen {k:?} -> {v:?}");
+        }
+        eprintln!(
+            "runtime_seen entries: {}",
+            sk.maps.runtime_seen.keys().count()
+        );
+        assert!(
+            execs.contains(&expect_sh.to_string_lossy().into_owned()),
+            "{execs:?}"
+        );
+        assert!(
+            execs.contains(&expect_exec.to_string_lossy().into_owned()),
+            "{execs:?}"
+        );
+        assert_eq!(execs.len(), 2, "each file once per container: {execs:?}");
+        assert_eq!(
+            memfd_execs,
+            vec!["/memfd:kg-e2e".to_string()],
+            "the fexecve'd memfd is reported as a memfd exec"
+        );
+        if overlay {
+            overlay_execs.sort();
+            assert_eq!(
+                overlay_execs,
+                vec![
+                    (
+                        "/mnt/kg-ov/merged/from-image".to_string(),
+                        crate::runtime_inventory::Origin::Image
+                    ),
+                    (
+                        "/mnt/kg-ov/merged/written-later".to_string(),
+                        crate::runtime_inventory::Origin::WritableLayer
+                    ),
+                ],
+                "overlay lower vs upper layer"
+            );
+            unsafe {
+                libc::umount2(c"/mnt/kg-ov/merged".as_ptr(), libc::MNT_DETACH);
+                libc::umount2(c"/mnt/kg-ov".as_ptr(), libc::MNT_DETACH);
+            }
+        }
+        if libs {
+            assert!(
+                lib_paths.iter().any(|p| p.contains("libc.so")),
+                "the C library is mapped executable: {lib_paths:?}"
+            );
+            assert!(
+                !lib_paths.iter().any(|p| execs.contains(p)),
+                "the main executable is not also reported as a library"
+            );
+        }
+
+        drop(links);
+        let _ = std::fs::remove_dir(&ctr_dir);
+        let _ = std::fs::remove_dir(&pod_dir);
     }
 
     /// End to end on the RUNNING kernel: the syscall probe's ownership
@@ -1289,6 +1652,7 @@ mod tests {
         SYSCALL_SEND_FAILED.store(false, Ordering::Relaxed);
         POLICY_DROP_SEND_FAILED.store(false, Ordering::Relaxed);
         CGROUP_SEND_FAILED.store(false, Ordering::Relaxed);
+        RUNTIME_SEND_FAILED.store(false, Ordering::Relaxed);
     }
 
     #[test]
