@@ -8,7 +8,12 @@ import { seccompFromBrokerSyscalls } from "./generators/seccomp.js";
 import { computeQuery, selectPodFromLatest, summariseComputeHistory } from "./compute.js";
 import {
   buildQuery, clampToolLimit, trimImagePage, trimProfile, trimProfileDiff, trimProfileList, workloadPath, POSTURE_VALUES,
+  MAX_TOOL_LIMIT, UNTRUSTED_NOTE,
 } from "./posture.js";
+import {
+  parseBool, parseDigest, parseSeverity, parseSource, parseVulnId,
+  trimCveList, trimExposure, trimImageVulns, trimSbomPage,
+} from "./vulns.js";
 import {
   generateNetworkPolicyWithComments, generateCiliumPolicyWithComments, policyToYAML, makePeerResolver,
   type PeerResolver, type PodInfo, type TrafficRow, type BrokerPodListEntry, type BrokerServiceRecord,
@@ -234,6 +239,52 @@ const handlers: Record<string, Handler> = {
       }
       throw err;
     }
+  },
+  // --- vulnerabilities, CVE exposure and SBOMs (#1533 P1-7) --------------
+  // Digests are regex-validated (sha256:<hex>) before use, so they go into
+  // the path as-is: the ':' stays literal, matching the broker's routes.
+  get_image_vulnerabilities: async (a) => {
+    const digest = parseDigest(a.digest);
+    const severity = parseSeverity(a.severity);
+    const fixable = parseBool(a.fixable, "fixable");
+    const limit = clampToolLimit(a.limit);
+    const page = await brokerGetJSON(`/images/${digest}/vulnerabilities${buildQuery({
+      severity, fixable: fixable === undefined ? undefined : String(fixable), limit,
+    })}`);
+    return trimImageVulns(page, { severity, fixable });
+  },
+  list_vulnerabilities: async (a) => {
+    const namespace = s(a.namespace).trim();
+    const severity = parseSeverity(a.severity);
+    const kev = parseBool(a.kev, "kev");
+    const limit = clampToolLimit(a.limit);
+    // With a KEV filter (applied here, not by the broker) ask for the
+    // broker's largest page the assistant allows, then filter and cut.
+    const brokerLimit = kev === undefined ? limit : MAX_TOOL_LIMIT;
+    const page = await brokerGetJSON(`/vulnerabilities${buildQuery({ namespace, severity, limit: brokerLimit })}`);
+    return trimCveList(page, { namespace, severity, kev }, limit);
+  },
+  explain_cve_exposure: async (a) => {
+    const id = parseVulnId(a.id);
+    const w = typeof a.window_hours === "number" && Number.isFinite(a.window_hours)
+      ? Math.min(720, Math.max(1, Math.floor(a.window_hours))) : undefined;
+    try {
+      return trimExposure(await brokerGetJSON(`/vulnerabilities/${enc(id)}/exposure${buildQuery({ window_hours: w })}`));
+    } catch (err) {
+      if (err instanceof BrokerHTTPError && err.status === 404) {
+        return {
+          found: false, id,
+          note: `No image in the inventory has a vulnerability report listing ${id}. That is not proof the cluster is unaffected: images no source has scanned are unknown. ${UNTRUSTED_NOTE}`,
+        };
+      }
+      throw err;
+    }
+  },
+  get_image_sbom: async (a) => {
+    const digest = parseDigest(a.digest);
+    const source = parseSource(a.source);
+    const limit = clampToolLimit(a.limit);
+    return trimSbomPage(await brokerGetJSON(`/images/${digest}/sbom${buildQuery({ source, limit })}`));
   },
   get_image_inventory: async (a) => {
     const namespace = s(a.namespace).trim();

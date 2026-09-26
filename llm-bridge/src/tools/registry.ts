@@ -203,6 +203,66 @@ export const TOOL_DEFS: ToolDef[] = [
       required: [],
     },
   },
+  // --- vulnerabilities, CVE exposure and SBOMs (#1533 P1-7) ----------------
+  // Every description forbids inventing vulnerability ids and says that
+  // missing data and inUse are unknown, never safe.
+  {
+    name: "get_image_vulnerabilities",
+    description:
+      "Get the vulnerability findings for one image digest, deduplicated across sources (trivy-operator, grype, registry), most severe first: id, package, installedVersion, fixedVersions (every source's fix, in source order, not version order: quote all), fixable, severity, score, kev/epss (null = unknown, not 'not exploited'), sources, plus the per-source reports (scanner, scannedAt, join to the running image, sbomTrust). reports empty / noVulnerabilityData=true means no source has scanned the image: UNKNOWN, never clean or safe. inUse is always null for now (kguardian cannot yet tell which packages load), so treat every finding as potentially reachable. kguardian reports what scanners found; it never scans, blocks or applies anything. NEVER invent vulnerability ids: every CVE/GHSA id in your answer must appear in this tool's output. Requires digest (sha256:...; get it from get_image_inventory or get_workload_security_profile). Optional severity (comma list of CRITICAL,HIGH,MEDIUM,LOW,NONE,UNKNOWN), fixable (true/false), limit (default 25, max 100). truncated=true means more findings exist; narrow by severity.",
+    parameters: {
+      type: "object",
+      properties: {
+        digest: str("Image digest, sha256:<64 hex>"),
+        severity: str("Optional comma-separated severities: CRITICAL, HIGH, MEDIUM, LOW, NONE, UNKNOWN"),
+        fixable: { type: "boolean", description: "Optional: true = only findings with a fix, false = only without" },
+        limit: { type: "integer", description: "Max findings to return (default 25, max 100)." },
+      },
+      required: ["digest"],
+    },
+  },
+  {
+    name: "list_vulnerabilities",
+    description:
+      "List vulnerabilities affecting images in the cluster inventory, grouped by id, most severe first: id, severity, maxScore, fixable, kev, maxEpss, packages, sources, and counts of affected images, workloads, running workloads and namespaces (weakestJoin workload_tag = some matches are by tag only). Built from a summary the broker refreshes every few minutes (computedAt). Only images that have vulnerability data are counted; images never scanned are UNKNOWN and absent, so an empty list is not 'no vulnerabilities'. kev null = unknown. inUse is null for now: treat CVEs as potentially reachable. kguardian reports; it never applies anything. NEVER invent vulnerability ids: every CVE/GHSA id in your answer must appear in this tool's output. Filters optional: namespace, severity (comma list), kev (true/false; applied to the broker's page, null rows excluded), limit (default 25, max 100). Follow up with explain_cve_exposure for one id.",
+    parameters: {
+      type: "object",
+      properties: {
+        namespace: str("Optional namespace: only CVEs affecting workloads in it, with counts for it"),
+        severity: str("Optional comma-separated severities: CRITICAL, HIGH, MEDIUM, LOW, NONE, UNKNOWN"),
+        kev: { type: "boolean", description: "Optional: true = only CVEs a source lists in CISA KEV; false = only those a source says are not. Unknown (null) rows are excluded either way." },
+        limit: { type: "integer", description: "Max CVEs to return (default 25, max 100)." },
+      },
+      required: [],
+    },
+  },
+  {
+    name: "explain_cve_exposure",
+    description:
+      "Explain where one vulnerability id is present and how exposed it is: affected images (digest, repository, tags, packages with installedVersion and fixedVersions, sources, join) → the workloads and containers running or having run them (running true/false, lastSeen) → per-workload observed network exposure over the last window_hours (default 168, max 720): ingress from other namespaces, unattributed peers, public IPs and nodes, with exposed and exposedVia. exposed null = UNKNOWN (no ingress observed at all, even if there was egress: inbound UDP is not captured), never 'not exposed'; exposed false = ingress was observed (ingressFlowsObserved > 0) and none came from outside, not proof none is possible. 'In use' is not known yet (inUse null): never describe the vulnerable package as unused, unloaded or unreachable. found=false means no inventory image with vulnerability data has it, which is not proof the cluster is unaffected (unscanned images are unknown). kguardian reports; it never applies anything. NEVER invent vulnerability ids: only use the id you were given or ids that appear in tool output. Requires id (e.g. CVE-2024-3094).",
+    parameters: {
+      type: "object",
+      properties: {
+        id: str("Vulnerability id, e.g. CVE-2024-3094 or GHSA-xxxx-xxxx-xxxx"),
+        window_hours: { type: "integer", description: "Optional traffic window in hours (default 168, max 720)." },
+      },
+      required: ["id"],
+    },
+  },
+  {
+    name: "get_image_sbom",
+    description:
+      "Get an image's software bill of materials: every source's SBOM (reports, each with sbomTrust and, for registry SBOMs, the attestation it came through) and the components of one of them (report): name, version, purl, type, licenses. sbomTrust, weakest first: attached-unbound, unverified, scanned (Trivy Operator in-cluster scan), verified; ONLY 'verified' may be called signed. report null = no SBOM: contents UNKNOWN. A component being listed says nothing about whether it is loaded at runtime. kguardian reports; it never applies anything. NEVER invent vulnerability ids or packages: cite only what the tools return. Requires digest (sha256:...). Optional source (trivy-operator, grype or registry; default: the broker's choice, Trivy Operator first) and limit (default 25, max 100) — use the CLI or the UI for the full SBOM.",
+    parameters: {
+      type: "object",
+      properties: {
+        digest: str("Image digest, sha256:<64 hex>"),
+        source: str("Optional SBOM source: trivy-operator, grype or registry"),
+        limit: { type: "integer", description: "Max components to return (default 25, max 100)." },
+      },
+      required: ["digest"],
+    },
+  },
 ];
 
 /** Build the system-prompt tool guide from the registry — one source of truth. */

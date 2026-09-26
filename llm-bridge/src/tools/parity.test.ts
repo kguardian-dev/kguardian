@@ -44,6 +44,10 @@ const CALLS: Record<string, Record<string, unknown>> = {
   list_workload_profiles: {},
   diff_workload_profile: { namespace: "payments", kind: "Deployment", name: "checkout" },
   get_image_inventory: {},
+  get_image_vulnerabilities: { digest: "sha256:00000000000000000000000000000000000000000000000000000000000000a2" },
+  list_vulnerabilities: {},
+  explain_cve_exposure: { id: "CVE-2099-10003" },
+  get_image_sbom: { digest: "sha256:00000000000000000000000000000000000000000000000000000000000000a2" },
 };
 
 // The #1533 profile and image tools also post-date the mcp-server. They are
@@ -57,7 +61,18 @@ const POSTURE_FIXTURES: Record<string, unknown> = {
   "/workloads/payments/Deployment/checkout/profile/diff": postureFixture("profile_diff.json"),
   "/images": postureFixture("images_page.json"),
 };
-const POSTURE_TOOLS = new Set(["get_workload_security_profile", "list_workload_profiles", "diff_workload_profile", "get_image_inventory"]);
+// Vulnerability tools (P1-7): real broker captures in test/fixtures/vulns;
+// their rules are vulns.test.ts's job.
+const vulnsDir = path.resolve(here, "../../../test/fixtures/vulns");
+const vulnCapture = (f: string): unknown => (JSON.parse(fs.readFileSync(path.join(vulnsDir, f), "utf8")) as { body: unknown }).body;
+POSTURE_FIXTURES["/images/sha256:00000000000000000000000000000000000000000000000000000000000000a2/vulnerabilities"] = vulnCapture("image-vulns-storefront.json");
+POSTURE_FIXTURES["/vulnerabilities"] = vulnCapture("vulns-list.json");
+POSTURE_FIXTURES["/vulnerabilities/CVE-2099-10003/exposure"] = vulnCapture("exposure-shared.json");
+POSTURE_FIXTURES["/images/sha256:00000000000000000000000000000000000000000000000000000000000000a2/sbom"] = vulnCapture("sbom-storefront.json");
+const POSTURE_TOOLS = new Set([
+  "get_workload_security_profile", "list_workload_profiles", "diff_workload_profile", "get_image_inventory",
+  "get_image_vulnerabilities", "list_vulnerabilities", "explain_cve_exposure", "get_image_sbom",
+]);
 
 // The compute tools post-date the retired mcp-server, so the shared contract
 // fixtures carry no routes or goldens for them. They are served from this

@@ -1,0 +1,118 @@
+{
+  "request": "GET /images/sha256:00000000000000000000000000000000000000000000000000000000000000a2/sbom?source=registry",
+  "status": 200,
+  "body": {
+    "digest": "sha256:00000000000000000000000000000000000000000000000000000000000000a2",
+    "reports": [
+      {
+        "source": "trivy-operator",
+        "reportDigest": "sha256:00000000000000000000000000000000000000000000000000000000000000a1",
+        "join": "platform_manifest",
+        "digestKind": "index",
+        "scannedAt": "2026-09-26T02:28:12",
+        "dbUpdatedAt": null,
+        "scannerName": "Trivy",
+        "scannerVersion": "0.58.1",
+        "osFamily": null,
+        "osName": null,
+        "osEosl": false,
+        "imageRef": null,
+        "itemCount": 3,
+        "sbomFormat": "CycloneDX",
+        "receivedAt": "2026-09-26T02:58:12.091240",
+        "sbomSources": [],
+        "sbomTrust": "scanned",
+        "attestation": null
+      },
+      {
+        "source": "registry",
+        "reportDigest": "sha256:00000000000000000000000000000000000000000000000000000000000000a1",
+        "join": "platform_manifest",
+        "digestKind": "index",
+        "scannedAt": "2026-09-26T02:28:12",
+        "dbUpdatedAt": null,
+        "scannerName": "buildkit",
+        "scannerVersion": null,
+        "osFamily": null,
+        "osName": null,
+        "osEosl": false,
+        "imageRef": null,
+        "itemCount": 2,
+        "sbomFormat": "SPDX",
+        "receivedAt": "2026-09-26T02:58:12.100341",
+        "sbomSources": [],
+        "sbomTrust": "unverified",
+        "attestation": {
+          "artifact_digest": "sha256:00000000000000000000000000000000000000000000000000000000000000f1",
+          "mechanism": "oci-referrer",
+          "media_type": "application/vnd.in-toto+json",
+          "predicate_type": "https://spdx.dev/Document",
+          "verified": false
+        }
+      }
+    ],
+    "report": {
+      "source": "registry",
+      "reportDigest": "sha256:00000000000000000000000000000000000000000000000000000000000000a1",
+      "join": "platform_manifest",
+      "digestKind": "index",
+      "scannedAt": "2026-09-26T02:28:12",
+      "dbUpdatedAt": null,
+      "scannerName": "buildkit",
+      "scannerVersion": null,
+      "osFamily": null,
+      "osName": null,
+      "osEosl": false,
+      "imageRef": null,
+      "itemCount": 2,
+      "sbomFormat": "SPDX",
+      "receivedAt": "2026-09-26T02:58:12.100341",
+      "sbomSources": [],
+      "sbomTrust": "unverified",
+      "attestation": {
+        "artifact_digest": "sha256:00000000000000000000000000000000000000000000000000000000000000f1",
+        "mechanism": "oci-referrer",
+        "media_type": "application/vnd.in-toto+json",
+        "predicate_type": "https://spdx.dev/Document",
+        "verified": false
+      }
+    },
+    "items": [
+      {
+        "id": 4,
+        "name": "fastparse",
+        "version": "2.1.0",
+        "purl": "pkg:npm/fastparse@2.1.0",
+        "type": "npm",
+        "class": null,
+        "srcName": null,
+        "srcVersion": null,
+        "licenses": [
+          "MIT"
+        ],
+        "layerDigest": null,
+        "filePaths": [
+          "app/node_modules/fastparse/package.json"
+        ]
+      },
+      {
+        "id": 5,
+        "name": "tinyrouter",
+        "version": "4.18.2",
+        "purl": "pkg:npm/tinyrouter@4.18.2",
+        "type": "npm",
+        "class": null,
+        "srcName": null,
+        "srcVersion": null,
+        "licenses": [
+          "MIT"
+        ],
+        "layerDigest": null,
+        "filePaths": [
+          "app/node_modules/tinyrouter/package.json"
+        ]
+      }
+    ],
+    "nextAfter": null
+  }
+}

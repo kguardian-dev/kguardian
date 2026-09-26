@@ -1,0 +1,112 @@
+{
+  "request": "GET /images/sha256:00000000000000000000000000000000000000000000000000000000000000b1/vulnerabilities",
+  "status": 200,
+  "body": {
+    "digest": "sha256:00000000000000000000000000000000000000000000000000000000000000b1",
+    "reports": [
+      {
+        "source": "trivy-operator",
+        "reportDigest": "sha256:00000000000000000000000000000000000000000000000000000000000000b1",
+        "join": "image_id",
+        "digestKind": "manifest",
+        "scannedAt": "2026-09-26T02:28:12",
+        "dbUpdatedAt": null,
+        "scannerName": "Trivy",
+        "scannerVersion": "0.58.1",
+        "osFamily": "debian",
+        "osName": "12.7",
+        "osEosl": false,
+        "imageRef": "ghcr.io/example/ledger:1.9.4",
+        "itemCount": 2,
+        "sbomFormat": null,
+        "receivedAt": "2026-09-26T02:58:12.075718",
+        "sbomSources": [],
+        "sbomTrust": "scanned",
+        "attestation": null
+      }
+    ],
+    "items": [
+      {
+        "id": "CVE-2099-10003",
+        "package": {
+          "name": "libexample",
+          "type": "deb",
+          "purl": "pkg:deb/libexample@1.2.3"
+        },
+        "installedVersion": "1.2.3",
+        "fixedVersions": [],
+        "fixable": false,
+        "severity": "HIGH",
+        "score": 7.5,
+        "cvss": {
+          "nvd": {
+            "v3_score": 7.5
+          }
+        },
+        "title": "Example advisory for libexample",
+        "primaryUrl": "https://advisories.example.invalid/CVE-2099-10003",
+        "target": null,
+        "class": null,
+        "publishedAt": null,
+        "lastModifiedAt": null,
+        "filePaths": [
+          "app/node_modules/libexample/package.json"
+        ],
+        "kev": null,
+        "kevDateAdded": null,
+        "epss": null,
+        "epssPercentile": null,
+        "sources": [
+          "trivy-operator"
+        ],
+        "reportDigests": [
+          "sha256:00000000000000000000000000000000000000000000000000000000000000b1"
+        ],
+        "inUse": null,
+        "inUseState": "unknown"
+      },
+      {
+        "id": "CVE-2099-20001",
+        "package": {
+          "name": "yamlish",
+          "type": "pypi",
+          "purl": "pkg:pypi/yamlish@0.9.0"
+        },
+        "installedVersion": "0.9.0",
+        "fixedVersions": [
+          "0.9.3"
+        ],
+        "fixable": true,
+        "severity": "LOW",
+        "score": 3.1,
+        "cvss": {
+          "nvd": {
+            "v3_score": 3.1
+          }
+        },
+        "title": "Example advisory for yamlish",
+        "primaryUrl": "https://advisories.example.invalid/CVE-2099-20001",
+        "target": null,
+        "class": null,
+        "publishedAt": null,
+        "lastModifiedAt": null,
+        "filePaths": [
+          "app/node_modules/yamlish/package.json"
+        ],
+        "kev": null,
+        "kevDateAdded": null,
+        "epss": null,
+        "epssPercentile": null,
+        "sources": [
+          "trivy-operator"
+        ],
+        "reportDigests": [
+          "sha256:00000000000000000000000000000000000000000000000000000000000000b1"
+        ],
+        "inUse": null,
+        "inUseState": "unknown"
+      }
+    ],
+    "nextAfter": null
+  }
+}
