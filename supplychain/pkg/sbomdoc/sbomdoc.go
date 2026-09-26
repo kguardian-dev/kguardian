@@ -9,7 +9,9 @@
 package sbomdoc
 
 import (
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -48,10 +50,15 @@ type Doc struct {
 	// predicate; Subjects are that statement's subject digests
 	// ("sha256:<hex>"), which a caller must check against the image the
 	// document is attached to.
-	InToto     bool
-	Subjects   []string
-	Components []types.Component
-	Truncated  bool
+	InToto   bool
+	Subjects []string
+	// PayloadSHA256 is the lowercase hex sha256 of the raw DSSE payload
+	// bytes (after base64 decoding, before JSON parsing), when the document
+	// came from a DSSE envelope or sigstore bundle. Signature verification
+	// (#1533 P2-1) binds its verdict to this hash.
+	PayloadSHA256 string
+	Components    []types.Component
+	Truncated     bool
 }
 
 // IsSBOMPredicate reports whether an in-toto predicate type is an SBOM.
@@ -138,7 +145,13 @@ func parseDSSE(payloadType, payload string) (*Doc, error) {
 			return nil, fmt.Errorf("DSSE payload: %w", err)
 		}
 	}
-	return Parse(b)
+	d, err := Parse(b)
+	if err != nil {
+		return nil, err
+	}
+	sum := sha256.Sum256(b)
+	d.PayloadSHA256 = hex.EncodeToString(sum[:])
+	return d, nil
 }
 
 // --- CycloneDX ---------------------------------------------------------

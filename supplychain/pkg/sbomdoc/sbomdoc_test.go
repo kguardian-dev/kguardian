@@ -11,7 +11,9 @@ package sbomdoc
 //     `-o cyclonedx-json` of the same manifest (CycloneDX 1.6).
 
 import (
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"os"
@@ -113,11 +115,20 @@ func TestParseDSSEAndBundle(t *testing.T) {
 		"verificationMaterial": map[string]interface{}{},
 		"dsseEnvelope":         env,
 	})
+	want := sha256.Sum256(stmt)
 	for name, b := range map[string][]byte{"dsse": envJSON, "bundle": bundle} {
 		d, err := Parse(b)
 		if err != nil || len(d.Components) != 17 || d.PredicateType != PredicateSPDX {
 			t.Errorf("%s: %v %+v", name, err, d)
+			continue
 		}
+		if d.PayloadSHA256 != hex.EncodeToString(want[:]) {
+			t.Errorf("%s: payload sha256 %q", name, d.PayloadSHA256)
+		}
+	}
+	// A bare statement has no DSSE payload to hash.
+	if d, _ := Parse(stmt); d == nil || d.PayloadSHA256 != "" {
+		t.Errorf("bare statement payload hash: %+v", d)
 	}
 }
 

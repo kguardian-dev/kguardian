@@ -240,6 +240,7 @@ func TestFetchCosignAttestationAndSBOMTags(t *testing.T) {
 	r.push(tagBase+".sbom", artifact(t, stmt.Predicate, mtSPDXJSON, nil))
 	found, _ := fetchAll(t, r.host, "app", d.String())
 	if len(found) != 1 || found[0].Attestation.Mechanism != sctypes.MechanismCosignSBOM || found[0].Subject != d.String() ||
+		found[0].Attestation.PayloadSHA256 != "" ||
 		found[0].Trust != sctypes.SBOMTrustAttachedUnbound || found[0].IndexDigest != "" {
 		t.Fatalf("sbom tag: %+v", found)
 	}
@@ -249,6 +250,9 @@ func TestFetchCosignAttestationAndSBOMTags(t *testing.T) {
 	found, _ = fetchAll(t, r.host, "app", d.String())
 	if len(found) != 1 {
 		t.Fatalf("att tag: %+v", found)
+	}
+	if a := found[0].Attestation; a.PayloadSHA256 == "" || len(a.PayloadSHA256) != 64 {
+		t.Errorf("att payload sha256 %q", a.PayloadSHA256)
 	}
 	if a := found[0].Attestation; a.Mechanism != sctypes.MechanismCosignAttestation || a.MediaType != mtDSSE ||
 		a.PredicateType != sbomdoc.PredicateCycloneDX || found[0].Doc.Format != sbomdoc.FormatCycloneDX || found[0].Trust != sctypes.SBOMTrustUnverified {

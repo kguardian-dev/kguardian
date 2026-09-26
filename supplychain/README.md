@@ -465,12 +465,16 @@ For `source: "registry"` the SBOM also carries:
   "artifact_digest": "sha256:6243...",
   "media_type": "application/vnd.in-toto+json",
   "predicate_type": "https://spdx.dev/Document",
+  "payload_sha256": "<hex, DSSE/bundle only>",
   "verified": false
 }
 ```
 
 with `scanner: {"name": "registry", "vendor": "<mechanism>"}` and, for a
-BuildKit platform SBOM, `image.index_digest`. Every `ImageSBOM` carries
+BuildKit platform SBOM, `image.index_digest`. `attestation.payload_sha256` is the hex sha256
+of the raw DSSE payload bytes (after base64 decoding, before JSON parsing).
+It is set only when the SBOM came from a DSSE envelope or sigstore bundle,
+and signature verification (P2-1) binds its verdict to it. Every `ImageSBOM` carries
 `sbom_trust` (`scanned` for Trivy Operator). `format`
 is `CycloneDX` or `SPDX`.
 

@@ -232,6 +232,10 @@ type Attestation struct {
 	ArtifactDigest string `json:"artifact_digest,omitempty"`
 	MediaType      string `json:"media_type,omitempty"`
 	PredicateType  string `json:"predicate_type,omitempty"`
+	// PayloadSHA256 is the hex sha256 of the raw DSSE payload the SBOM
+	// was read from (DSSE envelope or sigstore bundle only); signature
+	// verification (#1533 P2-1) binds its verdict to it.
+	PayloadSHA256 string `json:"payload_sha256,omitempty"`
 	// Verified is always false in this version: the document was found
 	// attached to the image, but no signature was checked. Signature and
 	// identity verification is a separate step (#1533 P2).

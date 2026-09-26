@@ -176,6 +176,7 @@ func (f *fetch) accept(doc *sbomdoc.Doc, want string, att sctypes.Attestation) (
 		f.rejected = append(f.rejected, RejectEmpty)
 		return FoundSBOM{}, false
 	}
+	att.PayloadSHA256 = doc.PayloadSHA256
 	found := FoundSBOM{Doc: doc, Attestation: att, Subject: want, Trust: sctypes.SBOMTrustAttachedUnbound}
 	if doc.InToto {
 		if len(doc.Subjects) == 0 {
