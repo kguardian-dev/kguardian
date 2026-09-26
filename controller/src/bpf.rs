@@ -1185,6 +1185,104 @@ mod tests {
             .expect("load sched contention probe");
     }
 
+    /// End to end on the RUNNING kernel: the syscall probe's ownership
+    /// gate must credit a task in a pod's own cgroup to that pod. The
+    /// test registers its own netns under a pod generation (as the pod
+    /// watcher would), runs a process in a kubepods-shaped cgroup whose
+    /// pod UID hashes to that generation, and checks both what the gate
+    /// cached for the cgroup and that the syscalls arrive. Startup capture
+    /// is left off so the registered path, and the gate, are what run.
+    /// Needs root and cgroup v2; run by the ebpf-kernels CI job.
+    #[test]
+    #[ignore = "needs root, cgroup v2 and a BTF-enabled kernel; run by the ebpf-kernels CI job"]
+    fn syscall_ownership_gate_credits_a_pod_cgroup() {
+        use std::os::unix::fs::MetadataExt;
+        use std::os::unix::process::CommandExt;
+        use std::sync::Arc;
+
+        const UID: &str = "0c8f5a1e-2b4d-4e0a-9f1c-0123456789ab";
+        const CID: &str = "7a1e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c4b5a69788796a5b4c3d2e1f0";
+        let pod_dir = format!("/sys/fs/cgroup/kubepods/besteffort/pod{UID}");
+        let ctr_dir = format!("{pod_dir}/{CID}");
+        std::fs::create_dir_all(&ctr_dir).expect("create a kubepods-shaped cgroup");
+        let cgid = std::fs::metadata(&ctr_dir).unwrap().ino();
+
+        let mut storage = MaybeUninit::uninit();
+        let variant = SyscallLoadVariant {
+            ownership_gate: true,
+            startup_capture: false,
+            inject_failure: false,
+        };
+        let sk = open_and_load_syscall(&mut storage, variant).expect("load the gated object");
+        let _link = sk.progs.trace_execve.attach().expect("attach sys_enter");
+
+        let gen = crate::models::pod_flags::generation_for_uid(Some(UID));
+        let netns = std::fs::metadata("/proc/self/ns/net").unwrap().ino();
+        sk.maps
+            .inode_num
+            .update(
+                &netns.to_ne_bytes(),
+                &crate::models::pod_flags::pack(CaptureLevel::Full, gen).to_ne_bytes(),
+                MapFlags::ANY,
+            )
+            .expect("register the netns");
+
+        let events: Arc<Mutex<Vec<SyscallEventData>>> = Arc::default();
+        let sink = Arc::clone(&events);
+        let mut rb = RingBufferBuilder::new();
+        rb.add(&sk.maps.syscall_events, move |data: &[u8]| {
+            let ev: SyscallEventData =
+                unsafe { std::ptr::read_unaligned(data.as_ptr() as *const SyscallEventData) };
+            sink.lock().unwrap().push(ev);
+            0
+        })
+        .unwrap();
+        let rb = rb.build().unwrap();
+
+        let procs = format!("{ctr_dir}/cgroup.procs");
+        let status = unsafe {
+            std::process::Command::new("/bin/sh")
+                .args(["-c", "/bin/true"])
+                .pre_exec(move || {
+                    std::fs::write(&procs, std::process::id().to_string())?;
+                    Ok(())
+                })
+                .status()
+        }
+        .expect("spawn");
+        assert!(status.success());
+        for _ in 0..20 {
+            rb.poll(std::time::Duration::from_millis(100)).unwrap();
+        }
+
+        let cached = sk
+            .maps
+            .cgroup_pod_gen
+            .lookup(&cgid.to_ne_bytes(), MapFlags::ANY)
+            .ok()
+            .flatten()
+            .map(|v| u32::from_ne_bytes(v[..4].try_into().unwrap()));
+        let credited = events
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|e| e.cgroup_id == cgid && e.generation == gen)
+            .count();
+        eprintln!(
+            "gate for cgroup {cgid}: cached {cached:#x?}, expected {:#x}; \
+             syscalls credited to the pod: {credited}",
+            (1u32 << 31) | gen
+        );
+        let _ = std::fs::remove_dir(&ctr_dir);
+        let _ = std::fs::remove_dir(&pod_dir);
+        assert_eq!(
+            cached,
+            Some((1u32 << 31) | gen),
+            "the gate must recognise the pod-level cgroup"
+        );
+        assert!(credited > 0, "the pod's syscalls must be credited to it");
+    }
+
     fn reset_state() {
         EBPF_SHUTDOWN.store(false, Ordering::Relaxed);
         NETWORK_SEND_FAILED.store(false, Ordering::Relaxed);

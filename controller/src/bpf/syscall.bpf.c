@@ -441,49 +441,75 @@ static __always_inline struct kernfs_node *kn_parent(struct kernfs_node *kn)
 // state the caller can be in. Inlined into the 4-level walk, the parser's
 // data-dependent loops pushed trace_execve past the verifier's 1M
 // instruction budget (E2BIG) on every kernel tried.
-struct kg_cg_name
+//
+// All parser state lives in a per-CPU map value; the loop context on the
+// stack holds only a pointer to it (bpf_loop accepts nothing but a stack
+// pointer as its context). Verifiers before Linux 6.7 check a bpf_loop
+// callback as if it ran once, so state kept on the stack was tracked as
+// the constants of that single iteration, and the branches on it
+// (prev == '-', the UID length and dash count) were removed as dead code:
+// at runtime every cgroup name parsed as "not a pod" and the ownership
+// gate dropped every syscall. Map value contents are never tracked, so
+// nothing is hard-wired. It also keeps the 192-byte name off the stack.
+struct kg_parse_state
 {
-    char s[KG_CG_NAME_BUF];
-};
-
-struct kg_scan_ctx
-{
-    const char *n;
+    char n[KG_CG_NAME_BUF];
     int at;
     char prev;
-};
-
-static long kg_scan_cb(__u64 i, void *ctx)
-{
-    struct kg_scan_ctx *c = ctx;
-    return kg_scan_step(c->n, (__u32)i, &c->at, &c->prev);
-}
-
-struct kg_uid_ctx
-{
-    const char *n;
     __u32 s;
     struct kg_uid u;
 };
 
-static long kg_uid_cb(__u64 k, void *ctx)
+struct
 {
-    struct kg_uid_ctx *c = ctx;
-    return kg_uid_step(c->n, c->s, (__u32)k, &c->u);
+    __uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
+    __uint(max_entries, 1);
+    __type(key, u32);
+    __type(value, struct kg_parse_state);
+} kg_parse_state SEC(".maps");
+
+struct kg_parse_ctx
+{
+    struct kg_parse_state *p;
+};
+
+static long kg_scan_cb(__u64 i, void *ctx)
+{
+    struct kg_parse_state *p = ((struct kg_parse_ctx *)ctx)->p;
+    if (!p)
+        return 1;
+    return kg_scan_step(p->n, (__u32)i, &p->at, &p->prev);
 }
 
-__noinline __u32 kg_name_generation(struct kg_cg_name *name)
+static long kg_uid_cb(__u64 k, void *ctx)
 {
-    if (!name)
+    struct kg_parse_state *p = ((struct kg_parse_ctx *)ctx)->p;
+    if (!p)
+        return 1;
+    return kg_uid_step(p->n, p->s, (__u32)k, &p->u);
+}
+
+// KG_CG_POD|generation when the kernfs name at `kn_name` (a kernel
+// address, passed as a scalar) is a pod-level cgroup's, else 0.
+__noinline __u32 kg_name_generation(__u64 kn_name)
+{
+    __u32 zero = 0;
+    struct kg_parse_state *p = bpf_map_lookup_elem(&kg_parse_state, &zero);
+    if (!p)
         return 0;
-    struct kg_scan_ctx scan = {.n = name->s, .at = -1, .prev = 0};
-    bpf_loop(KG_CG_NAME_SCAN, kg_scan_cb, &scan, 0);
-    if (scan.at < 0 || scan.at >= KG_CG_NAME_SCAN)
+    if (bpf_probe_read_kernel_str(p->n, sizeof(p->n), (const void *)kn_name) < 0)
         return 0;
-    struct kg_uid_ctx uid = {.n = name->s, .s = (__u32)scan.at};
-    kg_uid_init(&uid.u);
-    bpf_loop(KG_CG_UID_MAX, kg_uid_cb, &uid, 0);
-    return kg_uid_finish(name->s, uid.s, &uid.u);
+    struct kg_parse_ctx c = {.p = p};
+    p->at = -1;
+    p->prev = 0;
+    bpf_loop(KG_CG_NAME_SCAN, kg_scan_cb, &c, 0);
+    int at = p->at;
+    if (at < 0 || at >= KG_CG_NAME_SCAN)
+        return 0;
+    p->s = (__u32)at;
+    kg_uid_init(&p->u);
+    bpf_loop(KG_CG_UID_MAX, kg_uid_cb, &c, 0);
+    return kg_uid_finish(p->n, p->s, &p->u);
 }
 
 // Pod-level cgroup at most this many levels above the task's: the
@@ -503,16 +529,12 @@ static __always_inline __u32 task_pod_generation(void)
 
     struct task_struct *task = (struct task_struct *)bpf_get_current_task();
     struct kernfs_node *kn = BPF_CORE_READ(task, cgroups, dfl_cgrp, kn);
-    struct kg_cg_name name;
     __u32 gen = 0;
     for (int lvl = 0; lvl < KG_CG_LEVELS; lvl++)
     {
         if (!kn)
             break;
-        const char *kn_name = BPF_CORE_READ(kn, name);
-        if (bpf_probe_read_kernel_str(name.s, sizeof(name.s), kn_name) < 0)
-            break;
-        gen = kg_name_generation(&name);
+        gen = kg_name_generation((__u64)BPF_CORE_READ(kn, name));
         if (gen)
             break;
         kn = kn_parent(kn);
