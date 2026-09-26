@@ -3,7 +3,7 @@
 //!
 //! The probe (`trace_runtime_capable` in `bpf/runtime_inventory.bpf.c`)
 //! counts every capability check a container's tasks make, per (cgroup,
-//! capability, granted), in the kernel map `cap_seen`, and sends an event
+//! capability, flags: granted, probed), in the kernel map `cap_seen`, and sends an event
 //! for the first one of each so userspace learns which container the
 //! cgroup is. The eBPF poll loop snapshots the map's counts periodically
 //! ([`CapMsg::Counts`]); this module turns snapshots into per-container
@@ -28,7 +28,8 @@ pub struct CapEventData {
     pub cgroup_id: u64,
     pub generation: u32,
     pub cap: u32,
-    pub granted: u32,
+    /// [`FLAG_GRANTED`] | [`FLAG_PROBED`].
+    pub flags: u32,
     pub pid: u32,
     pub container: [u8; CONTAINER_NAME],
 }
@@ -46,8 +47,13 @@ impl CapEventData {
     }
 }
 
-/// `(cgroup id, capability, granted)`, the kernel map's key.
-pub type CapMapKey = (u64, u32, bool);
+/// Keep in sync with `KG_CAP_*` in the probe.
+pub const FLAG_GRANTED: u32 = 1;
+/// A `CAP_OPT_NOAUDIT` check ("probed"): see the probe.
+pub const FLAG_PROBED: u32 = 2;
+
+/// `(cgroup id, capability, flags)`, the kernel map's key.
+pub type CapMapKey = (u64, u32, u32);
 
 /// What the eBPF poll loop sends.
 #[derive(Clone)]
@@ -140,6 +146,9 @@ pub struct CapPost {
     pub image_digest: String,
     pub capability: String,
     pub granted: bool,
+    /// A `CAP_OPT_NOAUDIT` check: the kernel asked whether the task was
+    /// privileged. Kept apart from ordinary uses.
+    pub probed: bool,
     /// Checks since the previous post of this entry.
     pub count: u64,
     pub first_seen: NaiveDateTime,
@@ -153,12 +162,12 @@ pub struct CapStore {
     cgroups: HashMap<u64, ContainerKey>,
     /// The kernel count last applied, per map key.
     applied: HashMap<CapMapKey, u64>,
-    entries: HashMap<(ContainerKey, u32, bool), CapEntry>,
+    entries: HashMap<(ContainerKey, u32, u32), CapEntry>,
 }
 
 /// A mark to apply after a successful POST: the key and how many uses it
 /// carried.
-pub type CapMark = ((ContainerKey, u32, bool), u64);
+pub type CapMark = ((ContainerKey, u32, u32), u64);
 
 impl CapStore {
     /// A first sighting: learn the cgroup, open the entry. Its count comes
@@ -168,11 +177,11 @@ impl CapStore {
         cgroup_id: u64,
         key: ContainerKey,
         cap: u32,
-        granted: bool,
+        flags: u32,
         wall: NaiveDateTime,
     ) {
         self.cgroups.insert(cgroup_id, key.clone());
-        self.entries.entry((key, cap, granted)).or_insert(CapEntry {
+        self.entries.entry((key, cap, flags)).or_insert(CapEntry {
             first_seen: wall,
             last_seen: wall,
             unsent: 0,
@@ -219,7 +228,7 @@ impl CapStore {
             if posts.len() >= max {
                 break;
             }
-            let ((generation, cid), cap, granted) = k;
+            let ((generation, cid), cap, flags) = k;
             let Some(pod) = resolve(*generation) else {
                 continue;
             };
@@ -242,7 +251,8 @@ impl CapStore {
                 container_name: info.name.clone(),
                 image_digest: info.digest.clone(),
                 capability: cap_name(*cap),
-                granted: *granted,
+                granted: flags & FLAG_GRANTED != 0,
+                probed: flags & FLAG_PROBED != 0,
                 count: e.unsent,
                 first_seen: e.first_seen,
                 last_seen: e.last_seen,
@@ -341,10 +351,10 @@ mod tests {
         let key: ContainerKey = (7, CID.to_string());
         let mut s = CapStore::default();
         // A snapshot before the event is held (cgroup unknown).
-        s.counts(&[((99, 10, true), 3)], wall(0));
+        s.counts(&[((99, 10, FLAG_GRANTED), 3)], wall(0));
         assert!(s.is_empty());
-        s.event(99, key.clone(), 10, true, wall(0));
-        s.counts(&[((99, 10, true), 3)], wall(1));
+        s.event(99, key.clone(), 10, FLAG_GRANTED, wall(0));
+        s.counts(&[((99, 10, FLAG_GRANTED), 3)], wall(1));
         let t0 = Instant::now();
         let (p, m) = s.due(t0, 100, |_| Some(pod(true)));
         assert_eq!(p.len(), 1);
@@ -355,13 +365,13 @@ mod tests {
         );
         s.mark_sent(&m, t0);
         // 3 -> 5: two new uses.
-        s.counts(&[((99, 10, true), 5)], wall(2));
+        s.counts(&[((99, 10, FLAG_GRANTED), 5)], wall(2));
         let (p, m) = s.due(t0, 100, |_| Some(pod(true)));
         assert_eq!(p[0].count, 2);
         assert_eq!(p[0].last_seen, wall(2));
         s.mark_sent(&m, t0);
         // Evicted and re-created at 1: one new use, not a negative one.
-        s.counts(&[((99, 10, true), 1)], wall(3));
+        s.counts(&[((99, 10, FLAG_GRANTED), 1)], wall(3));
         assert_eq!(s.due(t0, 100, |_| Some(pod(true))).0[0].count, 1);
     }
 
@@ -369,7 +379,7 @@ mod tests {
     fn unchanged_entries_are_reposted_hourly_while_running_only() {
         let key: ContainerKey = (7, CID.to_string());
         let mut s = CapStore::default();
-        s.event(99, key, 21, false, wall(0));
+        s.event(99, key, 21, 0, wall(0));
         let t0 = Instant::now();
         let (p, m) = s.due(t0, 100, |_| Some(pod(true)));
         assert_eq!((p.len(), p[0].count, p[0].granted), (1, 0, false));
@@ -391,8 +401,8 @@ mod tests {
     fn unknown_pods_are_held_and_a_failed_post_keeps_the_uses() {
         let key: ContainerKey = (7, CID.to_string());
         let mut s = CapStore::default();
-        s.event(99, key, 12, true, wall(0));
-        s.counts(&[((99, 12, true), 4)], wall(0));
+        s.event(99, key, 12, FLAG_GRANTED, wall(0));
+        s.counts(&[((99, 12, FLAG_GRANTED), 4)], wall(0));
         let t0 = Instant::now();
         assert!(s.due(t0, 100, |_| None).0.is_empty(), "held");
         // Due, but the POST fails: nothing marked, the 4 uses are posted

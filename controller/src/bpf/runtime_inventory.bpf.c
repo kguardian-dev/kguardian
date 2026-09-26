@@ -396,28 +396,49 @@ int BPF_PROG(trace_runtime_mmap, struct file *file, unsigned long prot, unsigned
 // it sees every check security_capable does plus those commoncap makes
 // directly (capset's SETPCAP test, xattr and prctl checks), and its
 // verdict is the capability bits alone. security_capable is the fallback
-// where cap_capable cannot be traced (bpf.rs picks). Counted per
-// (container cgroup, capability, verdict) in the kernel; the first
-// sighting of each is also sent as an event (which carries the container
-// identity), later ones only bump the count userspace reads from the map.
+// where cap_capable cannot be traced (bpf.rs picks; the heartbeat says
+// which, and the broker does not treat the fallback as full evidence).
+// Counted per (container cgroup, capability, verdict, audited) in the
+// kernel; the first sighting of each is also sent as an event (which
+// carries the container identity), later ones only bump the count
+// userspace reads from the map.
+//
+// Classes:
+//  - audited: an ordinary check (capable(), ns_capable()).
+//  - probed: a CAP_OPT_NOAUDIT check (ns_capable_noaudit,
+//    has_capability_noaudit). Often the kernel asking whether a task would
+//    be privileged, but some gate real behaviour (seccomp filters without
+//    no_new_privs, ptrace access to other tasks, the admin memory
+//    reserve), so they are recorded, as their own class, and never
+//    recommended for dropping.
 //
 // Not counted:
-//  - CAP_OPT_NOAUDIT checks (ns_capable_noaudit, has_capability_noaudit):
-//    the kernel asking "would this task be privileged?" without the task
-//    needing it (e.g. picking a code path). They are probes, not uses.
-//  - runc's own setup: runc init runs in the container's cgroup before
-//    the container starts and uses privileges the container itself never
-//    gets (mount, setuid, ...). Same comm test as the syscall probe.
+//  - Container runtime setup: a task that has not exec'd since it was
+//    forked by a process outside every pod cgroup (runc init, whose
+//    CLONE_PARENT clones have the host runc as parent, before it execs
+//    the container's command). Decided by provenance, not by name: a
+//    container process that renames itself "runc:[...]" is still counted.
+//    If the parent's owner cannot be worked out, the check is counted.
+//  - Checks against a user namespace the task's own namespace owns (a
+//    user namespace the container created): capabilities there come from
+//    creating the namespace, not from securityContext.capabilities.
 
 // include/linux/security.h
 #define KG_CAP_OPT_NOAUDIT (1u << 1)
+// A user namespace's parents are walked at most this far (the kernel
+// allows 32 levels; containers nest one or two).
+#define KG_USERNS_LEVELS 8
 
 struct cap_seen_key
 {
     __u64 cgroup_id;
     __u32 cap;
-    __u32 granted;
+    // Bit 0: granted. Bit 1: probed (CAP_OPT_NOAUDIT).
+    __u32 flags;
 };
+
+#define KG_CAP_GRANTED 1u
+#define KG_CAP_PROBED 2u
 
 struct cap_seen_val
 {
@@ -432,13 +453,13 @@ struct
     __type(value, struct cap_seen_val);
 } cap_seen SEC(".maps");
 
-// Keep in sync with CapEventData in controller/src/runtime_inventory.rs.
+// Keep in sync with CapEventData in controller/src/runtime_capabilities.rs.
 struct cap_event
 {
     __u64 cgroup_id;
     __u32 generation;
     __u32 cap;
-    __u32 granted;
+    __u32 flags;
     __u32 pid;
     char container[KG_CONTAINER_NAME];
 };
@@ -449,18 +470,43 @@ struct
     __uint(max_entries, 64 * 1024);
 } cap_events SEC(".maps");
 
-static __always_inline bool is_runc_init(void)
+// True for container runtime setup (see above). False when unsure.
+static __always_inline bool is_runtime_setup(void)
 {
-    char comm[8] = {};
-    bpf_get_current_comm(comm, sizeof(comm));
-    return comm[0] == 'r' && comm[1] == 'u' && comm[2] == 'n' && comm[3] == 'c' &&
-           comm[4] == ':' && comm[5] == '[';
+    struct task_struct *task = (struct task_struct *)bpf_get_current_task();
+    __u64 self_exec = BPF_CORE_READ(task, self_exec_id);
+    __u64 parent_exec = BPF_CORE_READ(task, parent_exec_id);
+    if (self_exec != parent_exec)
+        return false; // exec'd since the fork: the container's own code
+    struct task_struct *parent = BPF_CORE_READ(task, real_parent);
+    if (!parent)
+        return false;
+    __u32 owner = task_pod_generation_of(parent);
+    if (owner == KG_OWNER_UNKNOWN)
+        return false;
+    return !(owner & KG_CG_POD);
 }
 
-static __always_inline int report_capable(int cap, unsigned int opts, int ret)
+// True when `target` is a user namespace strictly below `own` (one the
+// task's namespace created, directly or not).
+static __always_inline bool userns_below(struct user_namespace *target, struct user_namespace *own)
 {
-    if (opts & KG_CAP_OPT_NOAUDIT)
-        return 0;
+    struct user_namespace *ns = target;
+    for (int i = 0; i < KG_USERNS_LEVELS; i++)
+    {
+        if (!ns)
+            return false;
+        struct user_namespace *up = BPF_CORE_READ(ns, parent);
+        if (up == own)
+            return true;
+        ns = up;
+    }
+    return false;
+}
+
+static __always_inline int report_capable(const struct cred *cred, struct user_namespace *ns,
+                                          int cap, unsigned int opts, int ret)
+{
     if (cap < 0 || cap > 63)
         return 0;
     __u32 owner = task_pod_generation();
@@ -471,13 +517,15 @@ static __always_inline int report_capable(int cap, unsigned int opts, int ret)
     }
     if (!(owner & KG_CG_POD))
         return 0;
-    if (is_runc_init())
+    if (is_runtime_setup())
+        return 0;
+    if (userns_below(ns, BPF_CORE_READ(cred, user_ns)))
         return 0;
 
     struct cap_seen_key key = {
         .cgroup_id = bpf_get_current_cgroup_id(),
         .cap = (__u32)cap,
-        .granted = ret == 0,
+        .flags = (ret == 0 ? KG_CAP_GRANTED : 0) | ((opts & KG_CAP_OPT_NOAUDIT) ? KG_CAP_PROBED : 0),
     };
     struct cap_seen_val *seen = bpf_map_lookup_elem(&cap_seen, &key);
     if (seen)
@@ -501,7 +549,7 @@ static __always_inline int report_capable(int cap, unsigned int opts, int ret)
         .cgroup_id = key.cgroup_id,
         .generation = owner & KG_CG_GEN_MASK,
         .cap = key.cap,
-        .granted = key.granted,
+        .flags = key.flags,
         .pid = bpf_get_current_pid_tgid() >> 32,
     };
     if (!container_cgroup_name(ev.container) ||
@@ -519,7 +567,7 @@ SEC("fexit/security_capable")
 int BPF_PROG(trace_runtime_capable, const struct cred *cred, struct user_namespace *ns,
              int cap, unsigned int opts, int ret)
 {
-    return report_capable(cap, opts, ret);
+    return report_capable(cred, ns, cap, opts, ret);
 }
 
 // Preferred hook.
@@ -527,7 +575,7 @@ SEC("fexit/cap_capable")
 int BPF_PROG(trace_runtime_cap_capable, const struct cred *cred, struct user_namespace *ns,
              int cap, unsigned int opts, int ret)
 {
-    return report_capable(cap, opts, ret);
+    return report_capable(cred, ns, cap, opts, ret);
 }
 
 char LICENSE[] SEC("license") = "GPL";
