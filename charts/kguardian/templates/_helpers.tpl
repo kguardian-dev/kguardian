@@ -389,3 +389,18 @@ Usage: {{- include "kguardian.mcpEnv" . | nindent 12 }}
 {{- end }}
 {{- end -}}
 {{- end -}}
+
+{{/*
+ImageTrustPolicy evaluation in the evaluator (#1533 P2-2): "true" or "".
+evaluator.imageTrust.enabled wins when set; unset (null) follows
+supplychain.signatureDiscovery.enabled. Used by the evaluator Deployment,
+its ClusterRole and the broker NetworkPolicy, so they cannot disagree.
+*/}}
+{{- define "kguardian.imageTrustEnabled" -}}
+{{- $it := .Values.evaluator.imageTrust | default dict -}}
+{{- $on := and .Values.evaluator.enabled .Values.supplychain.enabled (.Values.supplychain.signatureDiscovery | default dict).enabled -}}
+{{- if not (kindIs "invalid" $it.enabled) -}}
+{{- $on = and .Values.evaluator.enabled $it.enabled -}}
+{{- end -}}
+{{- if $on -}}true{{- end -}}
+{{- end -}}
