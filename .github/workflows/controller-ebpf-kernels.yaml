@@ -127,25 +127,36 @@ jobs:
         with:
           name: linux-6.1
           kernel: kernels/vmlinuz-6.1
-          command: /bin/bash -c "insmod ${{ github.workspace }}/kernels/overlay-6.1.ko || true; ${{ github.workspace }}/ebpf-load-test --ignored --exact bpf::tests::every_probe_object_loads_on_this_kernel --nocapture && ${{ github.workspace }}/ebpf-load-test --ignored --exact bpf::tests::syscall_ownership_gate_credits_a_pod_cgroup --nocapture && ${{ github.workspace }}/ebpf-load-test --ignored --exact bpf::tests::runtime_inventory_reports_execs_and_libraries_per_container --nocapture && ${{ github.workspace }}/ebpf-load-test --ignored --exact bpf::tests::owner_parse_is_right_for_every_cgroup_under_concurrency --nocapture"
+          command: /bin/bash -c "insmod ${{ github.workspace }}/kernels/overlay-6.1.ko || true; ${{ github.workspace }}/ebpf-load-test --ignored --exact bpf::tests::every_probe_object_loads_on_this_kernel --nocapture && ${{ github.workspace }}/ebpf-load-test --ignored --exact bpf::tests::syscall_ownership_gate_credits_a_pod_cgroup --nocapture && ${{ github.workspace }}/ebpf-load-test --ignored --exact bpf::tests::runtime_inventory_reports_execs_and_libraries_per_container --nocapture && ${{ github.workspace }}/ebpf-load-test --ignored --exact bpf::tests::owner_parse_is_right_for_every_cgroup_under_concurrency --nocapture && ${{ github.workspace }}/ebpf-load-test --ignored --exact bpf::tests::a_lost_container_lookup_is_counted_and_the_file_reported_again --nocapture"
 
       - name: Load on 6.6
         uses: danobi/vmtest-action@c0fe6f82e21db9b9a8105f2a385e8a6e3fff2d23 # v0.9
         with:
           name: linux-6.6
           kernel: kernels/vmlinuz-6.6
-          command: /bin/bash -c "insmod ${{ github.workspace }}/kernels/overlay-6.6.ko || true; ${{ github.workspace }}/ebpf-load-test --ignored --exact bpf::tests::every_probe_object_loads_on_this_kernel --nocapture && ${{ github.workspace }}/ebpf-load-test --ignored --exact bpf::tests::syscall_ownership_gate_credits_a_pod_cgroup --nocapture && ${{ github.workspace }}/ebpf-load-test --ignored --exact bpf::tests::runtime_inventory_reports_execs_and_libraries_per_container --nocapture && ${{ github.workspace }}/ebpf-load-test --ignored --exact bpf::tests::owner_parse_is_right_for_every_cgroup_under_concurrency --nocapture"
+          command: /bin/bash -c "insmod ${{ github.workspace }}/kernels/overlay-6.6.ko || true; ${{ github.workspace }}/ebpf-load-test --ignored --exact bpf::tests::every_probe_object_loads_on_this_kernel --nocapture && ${{ github.workspace }}/ebpf-load-test --ignored --exact bpf::tests::syscall_ownership_gate_credits_a_pod_cgroup --nocapture && ${{ github.workspace }}/ebpf-load-test --ignored --exact bpf::tests::runtime_inventory_reports_execs_and_libraries_per_container --nocapture && ${{ github.workspace }}/ebpf-load-test --ignored --exact bpf::tests::owner_parse_is_right_for_every_cgroup_under_concurrency --nocapture && ${{ github.workspace }}/ebpf-load-test --ignored --exact bpf::tests::a_lost_container_lookup_is_counted_and_the_file_reported_again --nocapture"
 
       - name: Load on 6.12
         uses: danobi/vmtest-action@c0fe6f82e21db9b9a8105f2a385e8a6e3fff2d23 # v0.9
         with:
           name: linux-6.12
           kernel: kernels/vmlinuz-6.12
-          command: /bin/bash -c "insmod ${{ github.workspace }}/kernels/overlay-6.12.ko || true; ${{ github.workspace }}/ebpf-load-test --ignored --exact bpf::tests::every_probe_object_loads_on_this_kernel --nocapture && ${{ github.workspace }}/ebpf-load-test --ignored --exact bpf::tests::syscall_ownership_gate_credits_a_pod_cgroup --nocapture && ${{ github.workspace }}/ebpf-load-test --ignored --exact bpf::tests::runtime_inventory_reports_execs_and_libraries_per_container --nocapture && ${{ github.workspace }}/ebpf-load-test --ignored --exact bpf::tests::owner_parse_is_right_for_every_cgroup_under_concurrency --nocapture"
+          command: /bin/bash -c "insmod ${{ github.workspace }}/kernels/overlay-6.12.ko || true; ${{ github.workspace }}/ebpf-load-test --ignored --exact bpf::tests::every_probe_object_loads_on_this_kernel --nocapture && ${{ github.workspace }}/ebpf-load-test --ignored --exact bpf::tests::syscall_ownership_gate_credits_a_pod_cgroup --nocapture && ${{ github.workspace }}/ebpf-load-test --ignored --exact bpf::tests::runtime_inventory_reports_execs_and_libraries_per_container --nocapture && ${{ github.workspace }}/ebpf-load-test --ignored --exact bpf::tests::owner_parse_is_right_for_every_cgroup_under_concurrency --nocapture && ${{ github.workspace }}/ebpf-load-test --ignored --exact bpf::tests::a_lost_container_lookup_is_counted_and_the_file_reported_again --nocapture"
 
       - name: Load on 6.18
         uses: danobi/vmtest-action@c0fe6f82e21db9b9a8105f2a385e8a6e3fff2d23 # v0.9
         with:
           name: linux-6.18
           kernel: kernels/vmlinuz-6.18
-          command: /bin/bash -c "insmod ${{ github.workspace }}/kernels/overlay-6.18.ko || true; ${{ github.workspace }}/ebpf-load-test --ignored --exact bpf::tests::every_probe_object_loads_on_this_kernel --nocapture && ${{ github.workspace }}/ebpf-load-test --ignored --exact bpf::tests::syscall_ownership_gate_credits_a_pod_cgroup --nocapture && ${{ github.workspace }}/ebpf-load-test --ignored --exact bpf::tests::runtime_inventory_reports_execs_and_libraries_per_container --nocapture && ${{ github.workspace }}/ebpf-load-test --ignored --exact bpf::tests::owner_parse_is_right_for_every_cgroup_under_concurrency --nocapture"
+          command: /bin/bash -c "insmod ${{ github.workspace }}/kernels/overlay-6.18.ko || true; ${{ github.workspace }}/ebpf-load-test --ignored --exact bpf::tests::every_probe_object_loads_on_this_kernel --nocapture && ${{ github.workspace }}/ebpf-load-test --ignored --exact bpf::tests::syscall_ownership_gate_credits_a_pod_cgroup --nocapture && ${{ github.workspace }}/ebpf-load-test --ignored --exact bpf::tests::runtime_inventory_reports_execs_and_libraries_per_container --nocapture && ${{ github.workspace }}/ebpf-load-test --ignored --exact bpf::tests::owner_parse_is_right_for_every_cgroup_under_concurrency --nocapture && ${{ github.workspace }}/ebpf-load-test --ignored --exact bpf::tests::a_lost_container_lookup_is_counted_and_the_file_reported_again --nocapture"
+
+      # The steps above boot the images' default (voluntary) preemption,
+      # where the library probe cannot be preempted mid-parse. One kernel
+      # again with preempt=full, where it can, for the concurrency test.
+      - name: Concurrency on 6.18 (preempt=full)
+        uses: danobi/vmtest-action@c0fe6f82e21db9b9a8105f2a385e8a6e3fff2d23 # v0.9
+        with:
+          name: linux-6.18-preempt-full
+          kernel: kernels/vmlinuz-6.18
+          kernel_args: preempt=full
+          command: /bin/bash -c "grep -q preempt=full /proc/cmdline && ${{ github.workspace }}/ebpf-load-test --ignored --exact bpf::tests::owner_parse_is_right_for_every_cgroup_under_concurrency --nocapture"
