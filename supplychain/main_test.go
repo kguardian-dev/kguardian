@@ -98,13 +98,14 @@ func TestLoadConfigOverridesAndErrors(t *testing.T) {
 }
 
 // The registry lookup follows broker ingest unless set explicitly.
-func TestRegistryLookupFollowsIngest(t *testing.T) {
+func TestRegistryLookupIsOptIn(t *testing.T) {
 	for _, c := range []struct {
 		env  map[string]string
 		want bool
 	}{
 		{map[string]string{}, false},
-		{map[string]string{"BROKER_INGEST_ENABLED": "true"}, true},
+		{map[string]string{"BROKER_INGEST_ENABLED": "true"}, false},
+		{map[string]string{"BROKER_INGEST_ENABLED": "true", "REGISTRY_LOOKUP_ENABLED": "true"}, true},
 		{map[string]string{"BROKER_INGEST_ENABLED": "true", "REGISTRY_LOOKUP_ENABLED": "false"}, false},
 		{map[string]string{"REGISTRY_LOOKUP_ENABLED": "true"}, true},
 	} {

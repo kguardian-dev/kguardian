@@ -95,11 +95,11 @@ one worker, not the queue.
   immutable. Failures and refusals are cached for an hour. A private,
   unreachable or refused registry leaves `digest_kind` as reported
   (`unknown`) and `platform_manifests` empty.
-- **Default.** The lookup follows broker ingest: with
-  `supplychain.registryLookup.enabled` unset it is on exactly when
-  `brokerIngest.enabled` is, so nothing leaves the cluster while payloads
-  are only logged. Set it explicitly to override, e.g. `false` for
-  air-gapped clusters.
+- **Default.** Off, and independent of broker ingest: set
+  `supplychain.registryLookup.enabled=true` (`REGISTRY_LOOKUP_ENABLED=true`)
+  to turn it on. While it is off, every payload carries `digest_kind:
+  "unknown"` and no `platform_manifests`, which consumers must read as
+  unknown, never as single-arch.
 
 **Address guard.** The registry name comes from a pod spec, so anyone who
 can create a pod picks the destination. Every connection goes through a
@@ -323,7 +323,7 @@ The coordinator (`pkg/match`):
 | `TRIVY_OPERATOR_ENABLED` | `true` | Enable the Trivy Operator source. The chart sets this from `supplychain.sources.trivyOperator.enabled`. |
 | `TRIVY_RESYNC_PERIOD` | `10m` | Informer resync. It also retries digest resolution for held-back reports. |
 | `TRIVY_RECHECK_PERIOD` | `5m` | How often discovery re-runs to pick up installed or removed CRDs. |
-| `REGISTRY_LOOKUP_ENABLED` | value of `BROKER_INGEST_ENABLED` | Anonymous registry lookup for `digest_kind` / `platform_manifests`. |
+| `REGISTRY_LOOKUP_ENABLED` | `false` | Anonymous registry lookup for `digest_kind` / `platform_manifests` (opt-in; egress to image registries). While off, `digest_kind` is `unknown`. |
 | `REGISTRY_ALLOW_PRIVATE` | `false` | Let lookups reach RFC1918/CGNAT/ULA addresses, `.local` and single-label names. Loopback, link-local, unspecified and multicast are always refused. |
 | `REGISTRY_SBOM_ENABLED` | `false` | Fetch registry-attached SBOMs for running digests (opt-in; egress to image registries). Needs `BROKER_URL` and a token with the read scope (the supplychain token has it). |
 | `REGISTRY_SBOM_INTERVAL` | `15m` | How often to list running images. |

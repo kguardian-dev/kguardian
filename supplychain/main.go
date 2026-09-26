@@ -124,9 +124,9 @@ func loadConfig(getenv func(string) string) (config, error) {
 	if c.BrokerIngest, err = strconv.ParseBool(env("BROKER_INGEST_ENABLED", "false")); err != nil {
 		return c, fmt.Errorf("BROKER_INGEST_ENABLED: %w", err)
 	}
-	// The registry lookup only feeds payloads the broker receives, so by
-	// default it follows broker ingest: no lookups while ingest is off.
-	if c.RegistryLookup, err = strconv.ParseBool(env("REGISTRY_LOOKUP_ENABLED", strconv.FormatBool(c.BrokerIngest))); err != nil {
+	// The registry lookup is egress to image registries: opt-in only, never
+	// implied by broker ingest. While off, digest_kind stays "unknown".
+	if c.RegistryLookup, err = strconv.ParseBool(env("REGISTRY_LOOKUP_ENABLED", "false")); err != nil {
 		return c, fmt.Errorf("REGISTRY_LOOKUP_ENABLED: %w", err)
 	}
 	if c.RegistryAllowPrivate, err = strconv.ParseBool(env("REGISTRY_ALLOW_PRIVATE", "false")); err != nil {
