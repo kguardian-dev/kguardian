@@ -40,7 +40,24 @@ const CALLS: Record<string, Record<string, unknown>> = {
   get_pod_compute: { namespace: "default", pod_name: "web-1" },
   get_compute_findings: {},
   get_node_contention: { node: "node-a" },
+  get_workload_security_profile: { namespace: "payments", kind: "Deployment", name: "checkout" },
+  list_workload_profiles: {},
+  diff_workload_profile: { namespace: "payments", kind: "Deployment", name: "checkout" },
+  get_image_inventory: {},
 };
+
+// The #1533 profile and image tools also post-date the mcp-server. They are
+// served from test/fixtures/posture and wiring-checked here; trimming and
+// the no-fabrication rules are posture.test.ts's job.
+const postureDir = path.resolve(here, "../../../test/fixtures/posture");
+const postureFixture = (f: string): unknown => JSON.parse(fs.readFileSync(path.join(postureDir, f), "utf8"));
+const POSTURE_FIXTURES: Record<string, unknown> = {
+  "/workloads/payments/Deployment/checkout/profile": postureFixture("profile_full.json"),
+  "/workloads": postureFixture("profiles_page.json"),
+  "/workloads/payments/Deployment/checkout/profile/diff": postureFixture("profile_diff.json"),
+  "/images": postureFixture("images_page.json"),
+};
+const POSTURE_TOOLS = new Set(["get_workload_security_profile", "list_workload_profiles", "diff_workload_profile", "get_image_inventory"]);
 
 // The compute tools post-date the retired mcp-server, so the shared contract
 // fixtures carry no routes or goldens for them. They are served from this
@@ -72,7 +89,7 @@ before(async () => {
   server = http.createServer((req, res) => {
     const urlPath = (req.url || "").split("?")[0];
     // Advisor generate endpoints are keyed in fixtures without the query string.
-    const body = fixtures[urlPath] ?? COMPUTE_FIXTURES[urlPath];
+    const body = fixtures[urlPath] ?? COMPUTE_FIXTURES[urlPath] ?? POSTURE_FIXTURES[urlPath];
     if (body === undefined) { res.writeHead(404); res.end(); return; }
     if (typeof body === "string") { res.writeHead(200, { "Content-Type": "text/plain" }); res.end(body); return; }
     res.writeHead(200, { "Content-Type": "application/json" }); res.end(JSON.stringify(body));
@@ -99,7 +116,7 @@ for (const [tool, args] of Object.entries(CALLS)) {
       assert.ok(got.text.length > 0, `${tool} produced empty output`);
       return;
     }
-    if (COMPUTE_TOOLS.has(tool)) {
+    if (COMPUTE_TOOLS.has(tool) || POSTURE_TOOLS.has(tool)) {
       // No mcp-server golden exists; assert the wiring reached the broker
       // fixture and produced parseable JSON (shape is compute.test.ts's job).
       assert.ok(typeof JSON.parse(got.text) === "object", `${tool} did not return JSON`);

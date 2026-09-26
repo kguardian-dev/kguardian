@@ -1,0 +1,143 @@
+{
+  "workload": {
+    "clusterId": "primary",
+    "namespace": "payments",
+    "kind": "Deployment",
+    "name": "checkout",
+    "transient": false,
+    "pods": { "live": 2, "names": ["checkout-7d9f8b6c5-2xkqp", "checkout-7d9f8b6c5-9hmtz"], "truncated": false }
+  },
+  "generatedAt": "2026-09-26T10:07:31Z",
+  "contentHash": "fnv1a64:6f1c2a9e0b7d4c31",
+  "version": { "revision": 3, "contentHash": "fnv1a64:6f1c2a9e0b7d4c31", "createdAt": "2026-09-25T18:40:12Z" },
+  "snapshotPending": false,
+  "posture": {
+    "status": "warn",
+    "score": 71,
+    "coverage": 0.41,
+    "grade": null,
+    "weights": { "network": 20, "syscalls": 15, "podSecurity": 20, "images": 30 },
+    "unknownDimensions": ["network", "images"],
+    "deductions": [
+      { "dimension": "syscalls", "findingId": "syscalls.no_enforcing_profile", "points": 40 },
+      { "dimension": "podSecurity", "findingId": "podSecurity.readOnlyRootFilesystem/app", "points": 5 }
+    ]
+  },
+  "attention": [
+    { "id": "syscalls.no_enforcing_profile", "dimension": "syscalls", "severity": "medium", "tier": "P2",
+      "title": "No SeccompProfile CR enforces the observed syscall set",
+      "detail": "Pods run with RuntimeDefault only. Export the observed profile (61 syscalls) and apply it in audit mode first.",
+      "container": null }
+  ],
+  "findings": [
+    { "id": "syscalls.no_enforcing_profile", "dimension": "syscalls", "severity": "medium", "tier": "P2",
+      "title": "No SeccompProfile CR enforces the observed syscall set",
+      "detail": "Pods run with RuntimeDefault only.", "container": null },
+    { "id": "podSecurity.readOnlyRootFilesystem/app", "dimension": "podSecurity", "severity": "low", "tier": null,
+      "title": "Root filesystem is writable", "detail": "readOnlyRootFilesystem is not set", "container": "app" }
+  ],
+  "controls": [
+    { "control": "networkPolicy", "state": "unknown", "detail": "No audit policy covers this workload; applied NetworkPolicies are not visible to the broker", "inSync": null },
+    { "control": "seccompProfile", "state": "none", "detail": "No SeccompProfile CR references this workload", "inSync": null },
+    { "control": "imageAdmission", "state": null, "detail": "Signature/admission checks are not configured", "inSync": null }
+  ],
+  "readiness": [
+    { "id": "trafficObserved24h", "ok": true, "message": "Traffic observed for 6d 4h" },
+    { "id": "noWouldDeny24h", "ok": null, "message": "No audit policy covers this workload" },
+    { "id": "imageSigned", "ok": null, "message": "Signature verification is not configured" }
+  ],
+  "exposure": { "ingressPeers": 3, "ingressExternal": 0, "egressPeers": 4, "egressExternal": 1 },
+  "dimensions": {
+    "network": {
+      "status": "unknown", "score": null, "scored": false,
+      "coverage": { "level": "partial", "fraction": null, "observedSince": "2026-09-20T06:02:11Z", "note": "Flows from 2 live pods; 214 flow rows summarised" },
+      "reasons": [ { "code": "policy_state_unknown", "message": "No audit policy covers this workload" } ],
+      "summary": {
+        "ingress": { "peers": 3, "external": 0, "ports": ["TCP/8080"] },
+        "egress": { "peers": 4, "external": 1, "ports": ["TCP/443", "TCP/5432", "UDP/53"] }
+      },
+      "peers": [
+        { "direction": "ingress", "protocol": "TCP", "port": 8080,
+          "peer": { "kind": "pod", "namespace": "ingress-nginx", "workloadKind": "Deployment", "workloadName": "ingress-nginx-controller", "name": "ingress-nginx-controller-5c8d7f9b4-q2w8r", "ip": "10.42.1.17" },
+          "flows": 12, "firstSeen": "2026-09-20T06:02:11Z", "lastSeen": "2026-09-26T09:58:40Z" },
+        { "direction": "egress", "protocol": "TCP", "port": 443,
+          "peer": { "kind": "external", "namespace": null, "workloadKind": null, "workloadName": null, "name": null, "ip": "203.0.113.10" },
+          "flows": 3, "firstSeen": "2026-09-21T11:00:00Z", "lastSeen": "2026-09-26T08:00:00Z" }
+      ],
+      "truncated": false,
+      "policy": { "audit": null, "enforced": null }
+    },
+    "syscalls": {
+      "status": "warn", "score": 60, "scored": true,
+      "coverage": { "level": "full", "fraction": 1.0, "observedSince": null, "note": "capture level full on 2 pods" },
+      "reasons": [ { "code": "no_cr", "message": "No SeccompProfile CR references this workload" } ],
+      "observed": { "syscallCount": 61, "hash": "a1b2c3d4e5f60718", "architectures": ["x86_64"], "updatedAt": "2026-09-26T09:40:00Z" },
+      "capture": { "level": "full", "complete": true, "incompletePods": 0 },
+      "cr": null,
+      "denials": { "total": 0, "syscalls": [], "lastSeen": null }
+    },
+    "podSecurity": {
+      "status": "ok", "score": 80, "scored": true,
+      "coverage": { "level": "partial", "fraction": 0.5, "observedSince": "2026-09-19T08:12:00Z", "note": "9 of 18 PSS checks evaluated" },
+      "reasons": [ { "code": "pss_upper_bound", "message": "Evaluated checks pass restricted; unevaluated checks may lower the level" } ],
+      "pssVersion": "kubernetes/website@2c1aa11c (Kubernetes v1.37 docs)",
+      "level": "baseline",
+      "levelConfidence": "upper_bound",
+      "unevaluatedChecks": ["hostProcess", "hostPathVolumes", "hostPorts", "hostProbesLifecycle", "appArmor", "seLinux", "procMount", "sysctls", "volumeTypes"],
+      "pod": {
+        "serviceAccountName": "checkout", "automountServiceAccountToken": null, "hostNetwork": false,
+        "hostPID": null, "hostIPC": null, "hostUsers": null,
+        "securityContext": { "runAsNonRoot": true, "runAsUser": null, "runAsGroup": null, "fsGroup": 2000, "seccompProfileType": "RuntimeDefault" }
+      },
+      "containers": [
+        { "name": "app", "kind": "regular", "source": "running", "digest": "sha256:9f2c0d1e",
+          "securityContext": { "privileged": null, "allowPrivilegeEscalation": false, "runAsNonRoot": null, "runAsUser": 10001,
+            "runAsGroup": null, "readOnlyRootFilesystem": null, "capabilitiesAdd": null, "capabilitiesDrop": ["ALL"], "seccompProfileType": null },
+          "level": "restricted", "failing": [] },
+        { "name": "migrate", "kind": "init", "source": "last_known", "digest": "sha256:41ab77c0",
+          "securityContext": { "privileged": null, "allowPrivilegeEscalation": null, "runAsNonRoot": null, "runAsUser": null,
+            "runAsGroup": null, "readOnlyRootFilesystem": null, "capabilitiesAdd": null, "capabilitiesDrop": null, "seccompProfileType": null },
+          "level": "baseline",
+          "failing": [
+            { "check": "privilegeEscalation", "level": "restricted", "field": "spec.initContainers[migrate].securityContext.allowPrivilegeEscalation", "value": null, "message": "allowPrivilegeEscalation must be set to false" },
+            { "check": "capabilitiesRestricted", "level": "restricted", "field": "spec.initContainers[migrate].securityContext.capabilities.drop", "value": null, "message": "capabilities.drop must include ALL" }
+          ] }
+      ],
+      "recommendation": {
+        "recommendation": true,
+        "targetLevel": "restricted",
+        "format": "strategic-merge-patch",
+        "yaml": "# kguardian recommendation, not applied. Review before use.\n# Target: Pod Security Standards restricted (kubernetes.io/docs/concepts/security/pod-security-standards)\nspec:\n  template:\n    spec:\n      initContainers:\n      - name: migrate\n        securityContext:\n          allowPrivilegeEscalation: false\n          capabilities:\n            drop: [\"ALL\"]\n",
+        "caveats": [
+          "Checks kguardian cannot see (hostPath and other volume types, hostPort, AppArmor, SELinux, procMount, sysctls) may still fail restricted.",
+          "runAsNonRoot: true fails at container start if the image's USER is root; set runAsUser to a UID the image supports."
+        ]
+      }
+    },
+    "images": {
+      "status": "ok", "score": null, "scored": false,
+      "coverage": { "level": "full", "fraction": null, "observedSince": "2026-09-19T08:12:00Z", "note": "running window 900 s" },
+      "reasons": [ { "code": "vulnerabilities_not_configured", "message": "No vulnerability source is configured; images are inventoried but not scored" } ],
+      "runningWindowSeconds": 900,
+      "containers": [
+        { "name": "app", "kind": "regular", "mixedDigests": false,
+          "running": [ { "digest": "sha256:9f2c0d1e", "imageRef": "ghcr.io/example/checkout:4.0.9", "state": "running", "stateReason": null, "ranAsInit": false, "lastPodName": "checkout-7d9f8b6c5-2xkqp", "firstSeen": "2026-09-19T08:12:00Z", "lastSeen": "2026-09-26T10:05:00Z" } ],
+          "previous": [ { "digest": "sha256:0c3d", "imageRef": "ghcr.io/example/checkout:4.0.8", "state": "terminated", "stateReason": "Completed", "ranAsInit": false, "lastPodName": null, "firstSeen": "2026-09-10T07:00:00Z", "lastSeen": "2026-09-19T08:20:00Z" } ] }
+      ],
+      "truncated": false,
+      "vulnerabilities": null,
+      "supplyChain": null
+    },
+    "compute": {
+      "status": "warn", "score": null, "scored": false,
+      "coverage": { "level": "full", "fraction": null, "observedSince": "2026-09-26T10:04:00Z", "note": "2 containers reporting" },
+      "reasons": [ { "code": "missing_limits", "message": "1 container has no memory limit" } ],
+      "containers": [
+        { "pod": "checkout-7d9f8b6c5-2xkqp", "container": "app", "cpuRequestMillis": 100, "cpuLimitMillis": null,
+          "memRequestBytes": 134217728, "memLimitBytes": null, "cpuUsageMillis": 12.5, "memWorkingSetBytes": 98566144,
+          "oomKills": 0, "throttledRatio": 0.0, "updatedAt": "2026-09-26T10:04:00Z" }
+      ],
+      "truncated": false
+    }
+  }
+}

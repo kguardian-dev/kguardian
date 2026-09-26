@@ -1,0 +1,27 @@
+{
+  "namespace": "payments", "kind": "Deployment", "name": "checkout",
+  "from": { "revision": 2, "contentHash": "fnv1a64:1111111111111111", "createdAt": "2026-09-22T09:00:00Z" },
+  "to": { "revision": 3, "contentHash": "fnv1a64:6f1c2a9e0b7d4c31", "createdAt": "2026-09-25T18:40:12Z" },
+  "changed": true,
+  "dimensions": {
+    "podSecurity": {
+      "changed": true,
+      "level": { "from": "baseline", "to": "restricted" },
+      "pod": [ { "field": "securityContext.seccompProfileType", "from": null, "to": "RuntimeDefault" } ],
+      "containersAdded": [], "containersRemoved": [],
+      "containers": [ { "name": "app", "fields": [ { "field": "allowPrivilegeEscalation", "from": null, "to": false } ] } ]
+    },
+    "images": {
+      "changed": true,
+      "containersAdded": [], "containersRemoved": [],
+      "containers": [ { "name": "app", "added": ["sha256:9f2c0d1e"], "removed": ["sha256:0c3d"] } ]
+    },
+    "syscalls": { "changed": true, "added": ["io_uring_setup", "io_uring_enter"], "removed": [], "captureLevel": null, "cr": null },
+    "network": {
+      "changed": true,
+      "added": [ { "direction": "egress", "protocol": "TCP", "port": 443, "peer": "external:203.0.113.10" } ],
+      "removed": [],
+      "audited": null
+    }
+  }
+}

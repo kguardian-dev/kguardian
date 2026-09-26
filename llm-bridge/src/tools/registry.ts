@@ -142,6 +142,67 @@ export const TOOL_DEFS: ToolDef[] = [
       required: ["node"],
     },
   },
+  // --- workload security profile & image inventory (#1533) -------------------
+  // Every description carries the two rules the model must not break:
+  // null/unknown is never "safe", and kguardian recommends but never applies.
+  {
+    name: "get_workload_security_profile",
+    description:
+      "Get a workload's security profile, computed live by the broker: posture (score 0-100, coverage 0-1, grade only when coverage >= 0.8, unknownDimensions), the top findings (attention) and all findings with severity, controls (NetworkPolicy audit, SeccompProfile CR), readiness checks, observed exposure, and per-dimension detail — podSecurity (Pod Security Standards level with levelConfidence, per-container securityContext and failing checks, and a recommended securityContext patch), network (observed peers, audit verdicts), syscalls (observed set, capture completeness, SeccompProfile CR sync, denials), images (running digests per container), compute (requests/limits). null anywhere means UNKNOWN (no data or not configured) — never treat it as safe, passing, zero or none; unknown dimensions are excluded from the score, so always quote coverage with the score. levelConfidence 'upper_bound' means checks kguardian cannot see (hostPath, hostPort, AppArmor, ...) may still lower the level. kguardian only recommends: the patch and any generated policy are for the user to review and apply; nothing is applied. Requires namespace, kind (case-sensitive: Deployment, StatefulSet, DaemonSet, CronJob, Job, Pod, ...) and name (the workload name, not a pod name). found=false means kguardian has no data for the workload. Use for 'how secure is X', 'what should I fix on X', 'what PSS level does X meet', 'give me a securityContext for X'.",
+    parameters: {
+      type: "object",
+      properties: {
+        namespace: str("Namespace of the workload"),
+        kind: str("Workload kind, case-sensitive: Deployment, StatefulSet, DaemonSet, CronJob, Job, ReplicaSet or Pod (for a pod with no owner)"),
+        name: str("Workload name (e.g. the Deployment name, not a pod name)"),
+      },
+      required: ["namespace", "kind", "name"],
+    },
+  },
+  {
+    name: "list_workload_profiles",
+    description:
+      "List workloads with their security posture summary from the broker's profile read model: namespace, kind, name, revision, posture (status ok|warn|risk|unknown, score, coverage, grade, unknownDimensions), per-dimension status/score and finding counts by severity. A null score means unknown, never safe; status 'unknown' means kguardian has no data to judge, not that the workload is fine. Rows are refreshed every few minutes (computedAt). kguardian reports and recommends; it applies nothing. Filters optional: namespace, posture ('ok'|'warn'|'risk'|'unknown'), limit (default 25, max 100). truncated=true means more workloads match; narrow the filter. Use for 'which workloads are riskiest', 'posture of namespace X', 'what has no data yet'. Follow up with get_workload_security_profile for detail.",
+    parameters: {
+      type: "object",
+      properties: {
+        namespace: str("Optional namespace filter"),
+        posture: str("Optional posture status filter: 'ok', 'warn', 'risk' or 'unknown'"),
+        limit: { type: "integer", description: "Max workloads to return (default 25, max 100)." },
+      },
+      required: [],
+    },
+  },
+  {
+    name: "diff_workload_profile",
+    description:
+      "Compare two stored versions (revisions) of a workload's security profile: per dimension (podSecurity, images, syscalls, network) what changed — PSS level and securityContext fields, digests added/removed per container, syscalls added/removed, SeccompProfile CR changes, network rules added/removed. A version is recorded whenever the observed policy-relevant behaviour changes; it is not a record of what was applied. Defaults: to = latest revision, from = the one before it. A null scalar in the diff means unchanged; within a {from,to} pair null means unset or unknown at that revision, never 'safe'. kguardian recommends but never applies. Requires namespace, kind, name; from and to are optional revision numbers (from < to). Use for 'what changed in X since last week', 'why did X's posture drop', 'did the new release add syscalls or egress'.",
+    parameters: {
+      type: "object",
+      properties: {
+        namespace: str("Namespace of the workload"),
+        kind: str("Workload kind, case-sensitive (Deployment, StatefulSet, DaemonSet, CronJob, Job, Pod, ...)"),
+        name: str("Workload name"),
+        from: { type: "integer", description: "Optional older revision (default: the revision before `to`)." },
+        to: { type: "integer", description: "Optional newer revision (default: the latest)." },
+      },
+      required: ["namespace", "kind", "name"],
+    },
+  },
+  {
+    name: "get_image_inventory",
+    description:
+      "List the image digests workloads run, from the broker's image inventory: digest, repository, tags, digestKind, firstSeen/lastSeen and runningContainers (containers running it now; 0 = no longer running, which says nothing about safety). A null field is unknown, never safe. Inventory only — it has NO vulnerability, SBOM or signature data, so never describe an image as vulnerable, clean, signed or unsigned from this tool. Filters optional: namespace (images some workload in that namespace runs), repository (exact normalised name, e.g. docker.io/library/nginx), limit (default 25, max 100). truncated=true means more images exist than were returned; narrow by namespace or repository. Use for 'what images run in X', 'which digest of nginx is deployed', 'is image Y still running'. kguardian only reports: it never applies or changes anything.",
+    parameters: {
+      type: "object",
+      properties: {
+        namespace: str("Optional namespace: only images some workload in it runs."),
+        repository: str("Optional exact normalised repository, e.g. docker.io/library/nginx."),
+        limit: { type: "integer", description: "Max images to return (default 25, max 100)." },
+      },
+      required: [],
+    },
+  },
 ];
 
 /** Build the system-prompt tool guide from the registry — one source of truth. */

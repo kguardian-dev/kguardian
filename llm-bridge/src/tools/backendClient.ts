@@ -31,13 +31,22 @@ async function getWithTimeout(url: string, timeoutMs: number, headers: Record<st
   }
 }
 
+/** A non-2xx broker answer. `status` lets a tool tell "no data" (404)
+ *  from a failure; the message is unchanged from the plain Error it replaced. */
+export class BrokerHTTPError extends Error {
+  constructor(public readonly status: number, public readonly path: string) {
+    super(`broker returned ${status} for ${path}`);
+    this.name = "BrokerHTTPError";
+  }
+}
+
 /** GET a broker endpoint and parse JSON. Throws on non-2xx or abort. */
 export async function brokerGetJSON(path: string): Promise<unknown> {
   const url = `${brokerURL()}${path}`;
   const resp = await getWithTimeout(url, BROKER_TIMEOUT_MS, brokerAuthHeaders(), "application/json");
   if (!resp.ok) {
     log.error(`broker GET ${path} -> ${resp.status}`);
-    throw new Error(`broker returned ${resp.status} for ${path}`);
+    throw new BrokerHTTPError(resp.status, path);
   }
   return resp.json();
 }

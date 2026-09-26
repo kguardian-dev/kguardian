@@ -1,0 +1,68 @@
+{
+  "workload": {
+    "clusterId": "primary",
+    "namespace": "batch",
+    "kind": "CronJob",
+    "name": "nightly-report",
+    "transient": false,
+    "pods": { "live": 0, "names": [], "truncated": false }
+  },
+  "generatedAt": "2026-09-26T10:07:31Z",
+  "contentHash": "fnv1a64:0000000000000001",
+  "version": null,
+  "snapshotPending": true,
+  "posture": {
+    "status": "unknown",
+    "score": null,
+    "coverage": 0,
+    "grade": null,
+    "weights": { "network": 20, "syscalls": 15, "podSecurity": 20, "images": 30 },
+    "unknownDimensions": ["network", "syscalls", "podSecurity", "images"],
+    "deductions": []
+  },
+  "attention": [],
+  "findings": [],
+  "controls": [
+    { "control": "networkPolicy", "state": "unknown", "detail": "No audit policy covers this workload", "inSync": null },
+    { "control": "seccompProfile", "state": "none", "detail": "No SeccompProfile CR references this workload", "inSync": null },
+    { "control": "imageAdmission", "state": null, "detail": "Signature/admission checks are not configured", "inSync": null }
+  ],
+  "readiness": [
+    { "id": "trafficObserved24h", "ok": null, "message": "No flows observed" }
+  ],
+  "exposure": { "ingressPeers": null, "ingressExternal": null, "egressPeers": null, "egressExternal": null },
+  "dimensions": {
+    "network": {
+      "status": "unknown", "score": null, "scored": false,
+      "coverage": { "level": "none", "fraction": null, "observedSince": null, "note": "no flows" },
+      "reasons": [ { "code": "no_flows", "message": "No flows observed for this workload" } ],
+      "summary": { "ingress": { "peers": 0, "external": 0, "ports": [] }, "egress": { "peers": 0, "external": 0, "ports": [] } },
+      "peers": [], "truncated": false, "policy": { "audit": null, "enforced": null }
+    },
+    "syscalls": {
+      "status": "unknown", "score": null, "scored": false,
+      "coverage": { "level": "none", "fraction": null, "observedSince": null, "note": null },
+      "reasons": [ { "code": "no_syscalls", "message": "No syscall aggregate for this workload" } ],
+      "observed": null, "capture": { "level": "unknown", "complete": null, "incompletePods": null }, "cr": null, "denials": null
+    },
+    "podSecurity": {
+      "status": "unknown", "score": null, "scored": false,
+      "coverage": { "level": "none", "fraction": 0, "observedSince": null, "note": "no container securityContext reported" },
+      "reasons": [ { "code": "no_inventory", "message": "No container has been reported for this workload" } ],
+      "pssVersion": "kubernetes/website@2c1aa11c (Kubernetes v1.37 docs)",
+      "level": null, "levelConfidence": null, "unevaluatedChecks": [], "pod": null, "containers": [], "recommendation": null
+    },
+    "images": {
+      "status": "unknown", "score": null, "scored": false,
+      "coverage": { "level": "none", "fraction": null, "observedSince": null, "note": null },
+      "reasons": [ { "code": "no_inventory", "message": "No image inventory for this workload" } ],
+      "runningWindowSeconds": 900, "containers": [], "truncated": false, "vulnerabilities": null, "supplyChain": null
+    },
+    "compute": {
+      "status": "unknown", "score": null, "scored": false,
+      "coverage": { "level": "none", "fraction": null, "observedSince": null, "note": null },
+      "reasons": [ { "code": "no_compute_data", "message": "No live pods" } ],
+      "containers": [], "truncated": false
+    }
+  }
+}
