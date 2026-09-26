@@ -703,6 +703,7 @@ pub async fn metrics(
     );
     // Supply-chain ingest counters (process atomics, no query).
     body.push_str(&api::supplychain::render_metrics());
+    body.push_str(&api::attestation_metrics());
     // In-memory, refreshed on its own timer (profile_drift.rs).
     body.push_str(&drift.get_ref().render());
 

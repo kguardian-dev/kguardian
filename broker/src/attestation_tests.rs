@@ -87,13 +87,17 @@ fn verdict_must_match_the_signatures() {
         v
     };
     // "verified" with no verified signature; "unsigned" with signatures;
-    // "invalid"/"key_signed"/"unknown" next to a verified one.
+    // "invalid"/"key_signed"/"unknown" next to a verified one; "key_signed"
+    // with no signature at all.
+    let mut no_sigs = body(&d(5), "key_signed");
+    no_sigs["signatures"] = json!([]);
     for v in [
         unverified_only("verified"),
         body(&d(5), "unsigned"),
         body(&d(5), "invalid"),
         body(&d(5), "unknown"),
-        unverified_only("key_signed"),
+        body(&d(5), "key_signed"),
+        no_sigs,
     ] {
         assert!(
             matches!(parse(&v, &d(5)), Err(Reject::Unprocessable(_))),
@@ -102,6 +106,8 @@ fn verdict_must_match_the_signatures() {
         );
     }
     assert!(parse(&unverified_only("invalid"), &d(5)).is_ok());
+    // The reasons never decide it: key_signed with whatever error codes.
+    assert!(parse(&unverified_only("key_signed"), &d(5)).is_ok());
     assert!(parse(&unverified_only("unknown"), &d(5)).is_ok());
     let mut none = body(&d(5), "unsigned");
     none["signatures"] = json!([]);
@@ -591,16 +597,51 @@ fn bidi_controls_and_unknown_reasons_are_refused() {
         }
     }
     let mut v = body(&d(9), "verified");
-    v["signatures"][1]["error"] = json!("made_up");
+    // A malformed reason token is refused, naming the field.
+    v["signatures"][1]["error"] = json!("Not A Token");
     match parse(&v, &d(9)) {
         Err(Reject::Unprocessable(m)) => assert!(m.starts_with("signatures[1].error"), "{m}"),
         other => panic!("{other:?}"),
     }
+}
+
+/// Version skew: a well-formed reason code this broker does not know (a
+/// newer supplychain) is stored as unrecognised_reason and counted, never
+/// refused, and never changes the verdict. Verdicts and signer kinds stay
+/// strict.
+#[test]
+fn unknown_reason_codes_are_tolerated() {
+    let before = UNRECOGNISED_REASONS.load(std::sync::atomic::Ordering::Relaxed);
+    let mut v = body(&d(9), "verified");
+    v["signatures"][1]["error"] = json!("brand_new_reason");
+    v["attestations"][1]["error"] = json!("another_new_one");
+    let p = parse(&v, &d(9)).unwrap();
+    assert_eq!(p.verdict, "verified");
+    assert_eq!(p.signatures[1].error.as_deref(), Some(UNRECOGNISED_REASON));
+    assert_eq!(
+        p.attestations[1].error.as_deref(),
+        Some(UNRECOGNISED_REASON)
+    );
     let mut v = body(&d(9), "unknown");
     v["signatures"] = json!([]);
     v["reason"] = json!("registry_auth");
-    assert!(parse(&v, &d(9)).is_ok());
+    assert_eq!(
+        parse(&v, &d(9)).unwrap().reason.as_deref(),
+        Some("registry_auth")
+    );
     v["reason"] = json!("made_up");
+    let p = parse(&v, &d(9)).unwrap();
+    assert_eq!(
+        (p.verdict.as_str(), p.reason.as_deref()),
+        ("unknown", Some(UNRECOGNISED_REASON))
+    );
+    assert!(UNRECOGNISED_REASONS.load(std::sync::atomic::Ordering::Relaxed) >= before + 3);
+    assert!(render_metrics().contains("kguardian_attestation_unrecognised_reason_total "));
+    // Still strict: verdicts and signer kinds.
+    let mut v = body(&d(9), "brand_new_verdict");
+    assert!(matches!(parse(&v, &d(9)), Err(Reject::Unprocessable(_))));
+    v = body(&d(9), "verified");
+    v["signatures"][0]["signer_kind"] = json!("brand_new_kind");
     assert!(matches!(parse(&v, &d(9)), Err(Reject::Unprocessable(_))));
 }
 
@@ -629,4 +670,22 @@ fn truncate_bytes_stays_on_char_boundaries() {
         }
         assert!(std::str::from_utf8(s.as_bytes()).is_ok());
     }
+}
+
+/// An unknown reason from a newer supplychain is stored (201 path), as
+/// unrecognised_reason, with the verdict it came with.
+#[test]
+#[ignore = "requires a live postgres (set KG_TEST_DATABASE_URL)"]
+fn live_unknown_reason_is_stored() {
+    let mut conn = live_conn();
+    let dg = d(95);
+    add_image(&mut conn, &dg);
+    let mut v = body(&dg, "verified");
+    v["checked_at"] = json!("2026-09-01T00:00:00Z");
+    v["signatures"][1]["error"] = json!("brand_new_reason");
+    let p = parse_post(&dg, &serde_json::to_vec(&v).unwrap(), Utc::now()).unwrap();
+    assert_eq!(store(&mut conn, &p).unwrap(), Outcome::Stored);
+    let row = load_one(&mut conn, &dg).unwrap().unwrap();
+    assert_eq!(row.verdict, "verified");
+    assert_eq!(row.signatures[1]["error"], UNRECOGNISED_REASON);
 }

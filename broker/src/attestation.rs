@@ -97,6 +97,40 @@ pub const REASONS: [&str; 18] = [
     "untrusted_root",
 ];
 
+/// What an unknown (well-formed) reason code is stored as.
+pub const UNRECOGNISED_REASON: &str = "unrecognised_reason";
+
+static UNRECOGNISED_REASONS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Counts an unknown reason code and logs each distinct code once (at
+/// most 64 are remembered; the counter keeps counting).
+fn note_unrecognised_reason(code: &str) {
+    use std::collections::HashSet;
+    use std::sync::{Mutex, OnceLock};
+    UNRECOGNISED_REASONS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    static SEEN: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+    let mut seen = SEEN
+        .get_or_init(|| Mutex::new(HashSet::new()))
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+    if seen.len() < 64 && seen.insert(code.to_string()) {
+        warn!(
+            code,
+            "attestation result carries a reason code this broker does not know; stored as unrecognised_reason (is supplychain newer than the broker?)"
+        );
+    }
+}
+
+/// Prometheus text for the attestation ingest counters.
+pub fn render_metrics() -> String {
+    format!(
+        "# HELP kguardian_attestation_unrecognised_reason_total Reason codes in attestation results this broker does not know (stored as unrecognised_reason; supplychain newer than the broker)\n\
+         # TYPE kguardian_attestation_unrecognised_reason_total counter\n\
+         kguardian_attestation_unrecognised_reason_total {}\n",
+        UNRECOGNISED_REASONS.load(std::sync::atomic::Ordering::Relaxed)
+    )
+}
+
 pub const VERDICTS: [&str; 5] = ["verified", "key_signed", "unsigned", "invalid", "unknown"];
 
 // ---------------------------------------------------------------------
@@ -482,20 +516,29 @@ pub fn parse_post(
             "repository is empty or too long".into(),
         ));
     }
-    let known = |field: String, v: &Option<String>| -> Result<(), Reject> {
+    // Reason codes: a malformed token is refused; a well-formed code this
+    // broker does not know (a newer supplychain: separate releases) is kept
+    // as unrecognised_reason, counted and logged, never refused, so version
+    // skew cannot leave digests unchecked. Reasons never decide the verdict.
+    let known = |field: String, v: &mut Option<String>| -> Result<(), Reject> {
         match v.as_deref() {
-            Some(r) if !r.is_empty() && !REASONS.contains(&r) => Err(Reject::Unprocessable(
-                format!("{field}: {r:?} is not a known reason code"),
-            )),
+            Some(r) if !r.is_empty() && !is_token(r) => Err(Reject::Unprocessable(format!(
+                "{field}: {r:?} is not a valid reason token"
+            ))),
+            Some(r) if !r.is_empty() && !REASONS.contains(&r) => {
+                note_unrecognised_reason(r);
+                *v = Some(UNRECOGNISED_REASON.to_string());
+                Ok(())
+            }
             _ => Ok(()),
         }
     };
-    known("reason".into(), &p.reason)?;
-    for (i, s) in p.signatures.iter().enumerate() {
-        known(format!("signatures[{i}].error"), &s.error)?;
+    known("reason".into(), &mut p.reason)?;
+    for (i, s) in p.signatures.iter_mut().enumerate() {
+        known(format!("signatures[{i}].error"), &mut s.error)?;
     }
-    for (i, a) in p.attestations.iter().enumerate() {
-        known(format!("attestations[{i}].error"), &a.error)?;
+    for (i, a) in p.attestations.iter_mut().enumerate() {
+        known(format!("attestations[{i}].error"), &mut a.error)?;
     }
     for tok in [&p.reason, &p.trust_root, &p.signed_via]
         .into_iter()
@@ -573,18 +616,15 @@ pub fn parse_post(
     Ok(p)
 }
 
-/// The verdict must agree with the signatures it was derived from.
+/// The verdict must agree with the signatures it was derived from (never
+/// with reason codes, which may be unknown to this broker).
 fn check_verdict(p: &AttestationPost) -> Result<(), Reject> {
     let verified = p.signatures.iter().any(|s| s.verified);
-    let untrusted_key = p
-        .signatures
-        .iter()
-        .any(|s| s.error.as_deref() == Some("untrusted_key"));
     let ok = match p.verdict.as_str() {
         "verified" => verified,
         "unsigned" => p.signatures.is_empty(),
         "invalid" => !p.signatures.is_empty() && !verified,
-        "key_signed" => untrusted_key && !verified,
+        "key_signed" => !p.signatures.is_empty() && !verified,
         _ => !verified, // unknown
     };
     if ok {
