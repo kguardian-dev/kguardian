@@ -1,0 +1,689 @@
+{
+ "schema_version": 1,
+ "digest": "sha256:abababababababababababababababababababababababababababababababab",
+ "repository": "ghcr.io/example/api",
+ "checked_at": "2026-09-27T12:00:00Z",
+ "verdict": "verified",
+ "trust_root": "public-good",
+ "signed_via": "self",
+ "signed_digest": "sha256:abababababababababababababababababababababababababababababababab",
+ "signatures": [
+  {
+   "format": "cosign-bundle",
+   "source": "referrers",
+   "verified": true,
+   "signer_kind": "keyless",
+   "issuer": "https://token.actions.githubusercontent.com",
+   "san": "https://github.com/example/api/.github/workflows/release.yaml@refs/tags/v1.0.0"
+  },
+  {
+   "format": "cosign-bundle",
+   "source": "referrers",
+   "verified": false,
+   "error": "untrusted_key",
+   "detail": "junk 9"
+  },
+  {
+   "format": "cosign-bundle",
+   "source": "referrers",
+   "verified": false,
+   "error": "untrusted_key",
+   "detail": "junk 19"
+  },
+  {
+   "format": "cosign-bundle",
+   "source": "referrers",
+   "verified": false,
+   "error": "untrusted_key",
+   "detail": "junk 29"
+  },
+  {
+   "format": "cosign-bundle",
+   "source": "referrers",
+   "verified": false,
+   "error": "untrusted_key",
+   "detail": "junk 39"
+  },
+  {
+   "format": "cosign-bundle",
+   "source": "referrers",
+   "verified": false,
+   "error": "bad_signature",
+   "detail": "junk 0"
+  },
+  {
+   "format": "cosign-bundle",
+   "source": "referrers",
+   "verified": false,
+   "error": "bad_signature",
+   "detail": "junk 1"
+  },
+  {
+   "format": "cosign-bundle",
+   "source": "referrers",
+   "verified": false,
+   "error": "bad_signature",
+   "detail": "junk 2"
+  },
+  {
+   "format": "cosign-bundle",
+   "source": "referrers",
+   "verified": false,
+   "error": "bad_signature",
+   "detail": "junk 3"
+  },
+  {
+   "format": "cosign-bundle",
+   "source": "referrers",
+   "verified": false,
+   "error": "bad_signature",
+   "detail": "junk 4"
+  },
+  {
+   "format": "cosign-bundle",
+   "source": "referrers",
+   "verified": false,
+   "error": "bad_signature",
+   "detail": "junk 5"
+  },
+  {
+   "format": "cosign-bundle",
+   "source": "referrers",
+   "verified": false,
+   "error": "bad_signature",
+   "detail": "junk 6"
+  },
+  {
+   "format": "cosign-bundle",
+   "source": "referrers",
+   "verified": false,
+   "error": "bad_signature",
+   "detail": "junk 7"
+  },
+  {
+   "format": "cosign-bundle",
+   "source": "referrers",
+   "verified": false,
+   "error": "bad_signature",
+   "detail": "junk 8"
+  },
+  {
+   "format": "cosign-bundle",
+   "source": "referrers",
+   "verified": false,
+   "error": "bad_signature",
+   "detail": "junk 10"
+  },
+  {
+   "format": "cosign-bundle",
+   "source": "referrers",
+   "verified": false,
+   "error": "bad_signature",
+   "detail": "junk 11"
+  },
+  {
+   "format": "cosign-bundle",
+   "source": "referrers",
+   "verified": false,
+   "error": "bad_signature",
+   "detail": "junk 12"
+  },
+  {
+   "format": "cosign-bundle",
+   "source": "referrers",
+   "verified": false,
+   "error": "bad_signature",
+   "detail": "junk 13"
+  },
+  {
+   "format": "cosign-bundle",
+   "source": "referrers",
+   "verified": false,
+   "error": "bad_signature",
+   "detail": "junk 14"
+  },
+  {
+   "format": "cosign-bundle",
+   "source": "referrers",
+   "verified": false,
+   "error": "bad_signature",
+   "detail": "junk 15"
+  },
+  {
+   "format": "cosign-bundle",
+   "source": "referrers",
+   "verified": false,
+   "error": "bad_signature",
+   "detail": "junk 16"
+  },
+  {
+   "format": "cosign-bundle",
+   "source": "referrers",
+   "verified": false,
+   "error": "bad_signature",
+   "detail": "junk 17"
+  },
+  {
+   "format": "cosign-bundle",
+   "source": "referrers",
+   "verified": false,
+   "error": "bad_signature",
+   "detail": "junk 18"
+  },
+  {
+   "format": "cosign-bundle",
+   "source": "referrers",
+   "verified": false,
+   "error": "bad_signature",
+   "detail": "junk 20"
+  },
+  {
+   "format": "cosign-bundle",
+   "source": "referrers",
+   "verified": false,
+   "error": "bad_signature",
+   "detail": "junk 21"
+  },
+  {
+   "format": "cosign-bundle",
+   "source": "referrers",
+   "verified": false,
+   "error": "bad_signature",
+   "detail": "junk 22"
+  },
+  {
+   "format": "cosign-bundle",
+   "source": "referrers",
+   "verified": false,
+   "error": "bad_signature",
+   "detail": "junk 23"
+  },
+  {
+   "format": "cosign-bundle",
+   "source": "referrers",
+   "verified": false,
+   "error": "bad_signature",
+   "detail": "junk 24"
+  },
+  {
+   "format": "cosign-bundle",
+   "source": "referrers",
+   "verified": false,
+   "error": "bad_signature",
+   "detail": "junk 25"
+  },
+  {
+   "format": "cosign-bundle",
+   "source": "referrers",
+   "verified": false,
+   "error": "bad_signature",
+   "detail": "junk 26"
+  },
+  {
+   "format": "cosign-bundle",
+   "source": "referrers",
+   "verified": false,
+   "error": "bad_signature",
+   "detail": "junk 27"
+  },
+  {
+   "format": "cosign-bundle",
+   "source": "referrers",
+   "verified": false,
+   "error": "bad_signature",
+   "detail": "junk 28"
+  }
+ ],
+ "attestations": [
+  {
+   "predicate_type": "https://slsa.dev/provenance/v1",
+   "format": "bundle",
+   "source": "referrers",
+   "verified": true,
+   "signer_kind": "keyless",
+   "issuer": "https://token.actions.githubusercontent.com",
+   "san": "s"
+  },
+  {
+   "predicate_type": "https://slsa.dev/provenance/v1",
+   "format": "bundle",
+   "source": "referrers",
+   "verified": false,
+   "error": "bad_signature"
+  },
+  {
+   "predicate_type": "https://slsa.dev/provenance/v1",
+   "format": "bundle",
+   "source": "referrers",
+   "verified": false,
+   "error": "bad_signature"
+  },
+  {
+   "predicate_type": "https://slsa.dev/provenance/v1",
+   "format": "bundle",
+   "source": "referrers",
+   "verified": false,
+   "error": "bad_signature"
+  },
+  {
+   "predicate_type": "https://slsa.dev/provenance/v1",
+   "format": "bundle",
+   "source": "referrers",
+   "verified": false,
+   "error": "bad_signature"
+  },
+  {
+   "predicate_type": "https://slsa.dev/provenance/v1",
+   "format": "bundle",
+   "source": "referrers",
+   "verified": false,
+   "error": "bad_signature"
+  },
+  {
+   "predicate_type": "https://slsa.dev/provenance/v1",
+   "format": "bundle",
+   "source": "referrers",
+   "verified": false,
+   "error": "bad_signature"
+  },
+  {
+   "predicate_type": "https://slsa.dev/provenance/v1",
+   "format": "bundle",
+   "source": "referrers",
+   "verified": false,
+   "error": "bad_signature"
+  },
+  {
+   "predicate_type": "https://slsa.dev/provenance/v1",
+   "format": "bundle",
+   "source": "referrers",
+   "verified": false,
+   "error": "bad_signature"
+  },
+  {
+   "predicate_type": "https://slsa.dev/provenance/v1",
+   "format": "bundle",
+   "source": "referrers",
+   "verified": false,
+   "error": "bad_signature"
+  },
+  {
+   "predicate_type": "https://slsa.dev/provenance/v1",
+   "format": "bundle",
+   "source": "referrers",
+   "verified": false,
+   "error": "bad_signature"
+  },
+  {
+   "predicate_type": "https://slsa.dev/provenance/v1",
+   "format": "bundle",
+   "source": "referrers",
+   "verified": false,
+   "error": "bad_signature"
+  },
+  {
+   "predicate_type": "https://slsa.dev/provenance/v1",
+   "format": "bundle",
+   "source": "referrers",
+   "verified": false,
+   "error": "bad_signature"
+  },
+  {
+   "predicate_type": "https://slsa.dev/provenance/v1",
+   "format": "bundle",
+   "source": "referrers",
+   "verified": false,
+   "error": "bad_signature"
+  },
+  {
+   "predicate_type": "https://slsa.dev/provenance/v1",
+   "format": "bundle",
+   "source": "referrers",
+   "verified": false,
+   "error": "bad_signature"
+  },
+  {
+   "predicate_type": "https://slsa.dev/provenance/v1",
+   "format": "bundle",
+   "source": "referrers",
+   "verified": false,
+   "error": "bad_signature"
+  },
+  {
+   "predicate_type": "https://slsa.dev/provenance/v1",
+   "format": "bundle",
+   "source": "referrers",
+   "verified": false,
+   "error": "bad_signature"
+  },
+  {
+   "predicate_type": "https://slsa.dev/provenance/v1",
+   "format": "bundle",
+   "source": "referrers",
+   "verified": false,
+   "error": "bad_signature"
+  },
+  {
+   "predicate_type": "https://slsa.dev/provenance/v1",
+   "format": "bundle",
+   "source": "referrers",
+   "verified": false,
+   "error": "bad_signature"
+  },
+  {
+   "predicate_type": "https://slsa.dev/provenance/v1",
+   "format": "bundle",
+   "source": "referrers",
+   "verified": false,
+   "error": "bad_signature"
+  },
+  {
+   "predicate_type": "https://slsa.dev/provenance/v1",
+   "format": "bundle",
+   "source": "referrers",
+   "verified": false,
+   "error": "bad_signature"
+  },
+  {
+   "predicate_type": "https://slsa.dev/provenance/v1",
+   "format": "bundle",
+   "source": "referrers",
+   "verified": false,
+   "error": "bad_signature"
+  },
+  {
+   "predicate_type": "https://slsa.dev/provenance/v1",
+   "format": "bundle",
+   "source": "referrers",
+   "verified": false,
+   "error": "bad_signature"
+  },
+  {
+   "predicate_type": "https://slsa.dev/provenance/v1",
+   "format": "bundle",
+   "source": "referrers",
+   "verified": false,
+   "error": "bad_signature"
+  },
+  {
+   "predicate_type": "https://slsa.dev/provenance/v1",
+   "format": "bundle",
+   "source": "referrers",
+   "verified": false,
+   "error": "bad_signature"
+  },
+  {
+   "predicate_type": "https://slsa.dev/provenance/v1",
+   "format": "bundle",
+   "source": "referrers",
+   "verified": false,
+   "error": "bad_signature"
+  },
+  {
+   "predicate_type": "https://slsa.dev/provenance/v1",
+   "format": "bundle",
+   "source": "referrers",
+   "verified": false,
+   "error": "bad_signature"
+  },
+  {
+   "predicate_type": "https://slsa.dev/provenance/v1",
+   "format": "bundle",
+   "source": "referrers",
+   "verified": false,
+   "error": "bad_signature"
+  },
+  {
+   "predicate_type": "https://slsa.dev/provenance/v1",
+   "format": "bundle",
+   "source": "referrers",
+   "verified": false,
+   "error": "bad_signature"
+  },
+  {
+   "predicate_type": "https://slsa.dev/provenance/v1",
+   "format": "bundle",
+   "source": "referrers",
+   "verified": false,
+   "error": "bad_signature"
+  },
+  {
+   "predicate_type": "https://slsa.dev/provenance/v1",
+   "format": "bundle",
+   "source": "referrers",
+   "verified": false,
+   "error": "bad_signature"
+  },
+  {
+   "predicate_type": "https://slsa.dev/provenance/v1",
+   "format": "bundle",
+   "source": "referrers",
+   "verified": false,
+   "error": "bad_signature"
+  },
+  {
+   "predicate_type": "https://slsa.dev/provenance/v1",
+   "format": "bundle",
+   "source": "referrers",
+   "verified": false,
+   "error": "bad_signature"
+  },
+  {
+   "predicate_type": "https://slsa.dev/provenance/v1",
+   "format": "bundle",
+   "source": "referrers",
+   "verified": false,
+   "error": "bad_signature"
+  },
+  {
+   "predicate_type": "https://slsa.dev/provenance/v1",
+   "format": "bundle",
+   "source": "referrers",
+   "verified": false,
+   "error": "bad_signature"
+  },
+  {
+   "predicate_type": "https://slsa.dev/provenance/v1",
+   "format": "bundle",
+   "source": "referrers",
+   "verified": false,
+   "error": "bad_signature"
+  },
+  {
+   "predicate_type": "https://slsa.dev/provenance/v1",
+   "format": "bundle",
+   "source": "referrers",
+   "verified": false,
+   "error": "bad_signature"
+  },
+  {
+   "predicate_type": "https://slsa.dev/provenance/v1",
+   "format": "bundle",
+   "source": "referrers",
+   "verified": false,
+   "error": "bad_signature"
+  },
+  {
+   "predicate_type": "https://slsa.dev/provenance/v1",
+   "format": "bundle",
+   "source": "referrers",
+   "verified": false,
+   "error": "bad_signature"
+  },
+  {
+   "predicate_type": "https://slsa.dev/provenance/v1",
+   "format": "bundle",
+   "source": "referrers",
+   "verified": false,
+   "error": "bad_signature"
+  },
+  {
+   "predicate_type": "https://slsa.dev/provenance/v1",
+   "format": "bundle",
+   "source": "referrers",
+   "verified": false,
+   "error": "bad_signature"
+  },
+  {
+   "predicate_type": "https://slsa.dev/provenance/v1",
+   "format": "bundle",
+   "source": "referrers",
+   "verified": false,
+   "error": "bad_signature"
+  },
+  {
+   "predicate_type": "https://slsa.dev/provenance/v1",
+   "format": "bundle",
+   "source": "referrers",
+   "verified": false,
+   "error": "bad_signature"
+  },
+  {
+   "predicate_type": "https://slsa.dev/provenance/v1",
+   "format": "bundle",
+   "source": "referrers",
+   "verified": false,
+   "error": "bad_signature"
+  },
+  {
+   "predicate_type": "https://slsa.dev/provenance/v1",
+   "format": "bundle",
+   "source": "referrers",
+   "verified": false,
+   "error": "bad_signature"
+  },
+  {
+   "predicate_type": "https://slsa.dev/provenance/v1",
+   "format": "bundle",
+   "source": "referrers",
+   "verified": false,
+   "error": "bad_signature"
+  },
+  {
+   "predicate_type": "https://slsa.dev/provenance/v1",
+   "format": "bundle",
+   "source": "referrers",
+   "verified": false,
+   "error": "bad_signature"
+  },
+  {
+   "predicate_type": "https://slsa.dev/provenance/v1",
+   "format": "bundle",
+   "source": "referrers",
+   "verified": false,
+   "error": "bad_signature"
+  },
+  {
+   "predicate_type": "https://slsa.dev/provenance/v1",
+   "format": "bundle",
+   "source": "referrers",
+   "verified": false,
+   "error": "bad_signature"
+  },
+  {
+   "predicate_type": "https://slsa.dev/provenance/v1",
+   "format": "bundle",
+   "source": "referrers",
+   "verified": false,
+   "error": "bad_signature"
+  },
+  {
+   "predicate_type": "https://slsa.dev/provenance/v1",
+   "format": "bundle",
+   "source": "referrers",
+   "verified": false,
+   "error": "bad_signature"
+  },
+  {
+   "predicate_type": "https://slsa.dev/provenance/v1",
+   "format": "bundle",
+   "source": "referrers",
+   "verified": false,
+   "error": "bad_signature"
+  },
+  {
+   "predicate_type": "https://slsa.dev/provenance/v1",
+   "format": "bundle",
+   "source": "referrers",
+   "verified": false,
+   "error": "bad_signature"
+  },
+  {
+   "predicate_type": "https://slsa.dev/provenance/v1",
+   "format": "bundle",
+   "source": "referrers",
+   "verified": false,
+   "error": "bad_signature"
+  },
+  {
+   "predicate_type": "https://slsa.dev/provenance/v1",
+   "format": "bundle",
+   "source": "referrers",
+   "verified": false,
+   "error": "bad_signature"
+  },
+  {
+   "predicate_type": "https://slsa.dev/provenance/v1",
+   "format": "bundle",
+   "source": "referrers",
+   "verified": false,
+   "error": "bad_signature"
+  },
+  {
+   "predicate_type": "https://slsa.dev/provenance/v1",
+   "format": "bundle",
+   "source": "referrers",
+   "verified": false,
+   "error": "bad_signature"
+  },
+  {
+   "predicate_type": "https://slsa.dev/provenance/v1",
+   "format": "bundle",
+   "source": "referrers",
+   "verified": false,
+   "error": "bad_signature"
+  },
+  {
+   "predicate_type": "https://slsa.dev/provenance/v1",
+   "format": "bundle",
+   "source": "referrers",
+   "verified": false,
+   "error": "bad_signature"
+  },
+  {
+   "predicate_type": "https://slsa.dev/provenance/v1",
+   "format": "bundle",
+   "source": "referrers",
+   "verified": false,
+   "error": "bad_signature"
+  },
+  {
+   "predicate_type": "https://slsa.dev/provenance/v1",
+   "format": "bundle",
+   "source": "referrers",
+   "verified": false,
+   "error": "bad_signature"
+  },
+  {
+   "predicate_type": "https://slsa.dev/provenance/v1",
+   "format": "bundle",
+   "source": "referrers",
+   "verified": false,
+   "error": "bad_signature"
+  },
+  {
+   "predicate_type": "https://slsa.dev/provenance/v1",
+   "format": "bundle",
+   "source": "referrers",
+   "verified": false,
+   "error": "bad_signature"
+  },
+  {
+   "predicate_type": "https://slsa.dev/provenance/v1",
+   "format": "bundle",
+   "source": "referrers",
+   "verified": false,
+   "error": "bad_signature"
+  }
+ ]
+}

@@ -454,3 +454,87 @@ fn live_summary_cost_covers_the_largest_row() {
     );
     eprintln!("largest summary row {row} bytes; largest stored row {one} bytes");
 }
+
+/// VERDICTS and SIGNER_KINDS equal the shared contract file, which
+/// supplychain's constants are tested against too (contract_test.go).
+#[test]
+fn verdict_contract_matches_supplychain() {
+    let c: serde_json::Value = serde_json::from_str(include_str!(
+        "../../test/fixtures/contracts/attestation-verdicts.json"
+    ))
+    .unwrap();
+    let set = |k: &str| -> std::collections::BTreeSet<String> {
+        c[k].as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap().to_string())
+            .collect()
+    };
+    let ours = |v: &[&str]| -> std::collections::BTreeSet<String> {
+        v.iter().map(|s| s.to_string()).collect()
+    };
+    assert_eq!(
+        ours(&VERDICTS),
+        set("verdicts"),
+        "broker VERDICTS drifted from the contract"
+    );
+    assert_eq!(
+        ours(&SIGNER_KINDS),
+        set("signer_kinds"),
+        "broker SIGNER_KINDS drifted from the contract"
+    );
+}
+
+/// Every string is checked: a control character or U+2028/U+2029 anywhere
+/// is a 422 naming the field.
+#[test]
+fn control_characters_are_refused_naming_the_field() {
+    for bad in [
+        "\n", "\r", "\t", "\u{0001}", "\u{0085}", "\u{2028}", "\u{2029}",
+    ] {
+        for (path, field) in [
+            ("/repository", "repository"),
+            ("/signatures/0/san", "signatures[0].san"),
+            ("/signatures/0/issuer", "signatures[0].issuer"),
+            ("/signatures/1/detail", "signatures[1].detail"),
+            (
+                "/attestations/0/predicate_type",
+                "attestations[0].predicate_type",
+            ),
+            (
+                "/attestations/0/provenance/builder_id",
+                "attestations[0].provenance.builder_id",
+            ),
+        ] {
+            let mut v = body(&d(7), "verified");
+            *v.pointer_mut(path).unwrap() = json!(format!("x{bad}y"));
+            match parse(&v, &d(7)) {
+                Err(Reject::Unprocessable(m)) => {
+                    assert!(m.starts_with(field), "{bad:?} {field}: {m}")
+                }
+                other => panic!("{bad:?} {field}: {other:?}"),
+            }
+        }
+    }
+    // The summary-cost worst case with control characters (each \u0001
+    // serialises to 6 bytes) cannot be stored.
+    let mut v = body(&d(7), "verified");
+    v["attestations"][0]["predicate_type"] = json!("\u{0001}".repeat(1000));
+    assert!(matches!(parse(&v, &d(7)), Err(Reject::Unprocessable(_))));
+}
+
+/// supplychain's encodeBounded puts the verified signature ahead of 40 junk
+/// ones before capping; the payload it produces (checked in by its test)
+/// is accepted as verified.
+#[test]
+fn verified_signature_survives_the_caps() {
+    let raw = include_str!("../../test/fixtures/contracts/attestation-post-buried-signature.json");
+    let v: serde_json::Value = serde_json::from_str(raw).unwrap();
+    let dg = v["digest"].as_str().unwrap().to_string();
+    // The fixture's checked_at is the test clock (2026-09-27T12:00Z).
+    let p = parse_post(&dg, raw.as_bytes(), now()).unwrap();
+    assert_eq!(p.verdict, "verified");
+    assert_eq!(p.signatures.len(), MAX_SIGNATURES);
+    assert!(p.signatures[0].verified);
+    assert!(p.attestations[0].verified);
+}

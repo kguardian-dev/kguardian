@@ -1,0 +1,5 @@
+{
+  "_comment": "Contract between supplychain (supplychain/pkg/attest) and the broker (broker/src/attestation.rs) for POST /images/{digest}/attestation. Both sides test their sets against this file; changing one side without the other fails CI.",
+  "verdicts": ["verified", "key_signed", "unsigned", "invalid", "unknown"],
+  "signer_kinds": ["keyless", "key"]
+}

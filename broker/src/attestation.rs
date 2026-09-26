@@ -327,6 +327,83 @@ fn cap_signer(
 
 pub const SIGNER_KINDS: [&str; 2] = ["keyless", "key"];
 
+/// A control character or a Unicode line/paragraph separator (U+2028,
+/// U+2029) in any string is refused: these values end up in generated YAML
+/// and comments, where one would start a new line, and a truncated or
+/// stripped identity must never pass for the real one. supplychain
+/// neutralises signer-supplied values before posting, so a refusal here
+/// means a broken or hostile client.
+fn check_text(p: &AttestationPost) -> Result<(), Reject> {
+    fn bad(s: &str) -> bool {
+        s.chars()
+            .any(|c| c.is_control() || c == '\u{2028}' || c == '\u{2029}')
+    }
+    fn opt(v: &Option<String>) -> &str {
+        v.as_deref().unwrap_or("")
+    }
+    let mut fields: Vec<(String, &str)> = vec![
+        ("digest".into(), &p.digest),
+        ("repository".into(), &p.repository),
+        ("reason".into(), opt(&p.reason)),
+        ("trust_root".into(), opt(&p.trust_root)),
+        ("signed_via".into(), opt(&p.signed_via)),
+        ("signed_digest".into(), opt(&p.signed_digest)),
+    ];
+    for (i, s) in p.signatures.iter().enumerate() {
+        for (k, v) in [
+            ("format", s.format.as_str()),
+            ("source", &s.source),
+            ("error", opt(&s.error)),
+            ("detail", opt(&s.detail)),
+            ("subject", opt(&s.subject)),
+            ("signer_kind", opt(&s.signer_kind)),
+            ("issuer", opt(&s.issuer)),
+            ("san", opt(&s.san)),
+            ("key_name", opt(&s.key_name)),
+            ("key_fingerprint", opt(&s.key_fingerprint)),
+            ("key_hint", opt(&s.key_hint)),
+        ] {
+            fields.push((format!("signatures[{i}].{k}"), v));
+        }
+    }
+    for (i, a) in p.attestations.iter().enumerate() {
+        for (k, v) in [
+            ("predicate_type", a.predicate_type.as_str()),
+            ("format", &a.format),
+            ("source", &a.source),
+            ("error", opt(&a.error)),
+            ("detail", opt(&a.detail)),
+            ("subject", opt(&a.subject)),
+            ("payload_sha256", opt(&a.payload_sha256)),
+            ("signer_kind", opt(&a.signer_kind)),
+            ("issuer", opt(&a.issuer)),
+            ("san", opt(&a.san)),
+            ("key_name", opt(&a.key_name)),
+            ("key_fingerprint", opt(&a.key_fingerprint)),
+            ("key_hint", opt(&a.key_hint)),
+        ] {
+            fields.push((format!("attestations[{i}].{k}"), v));
+        }
+        if let Some(pr) = &a.provenance {
+            for (k, v) in [
+                ("builder_id", opt(&pr.builder_id)),
+                ("build_type", opt(&pr.build_type)),
+                ("source_repo", opt(&pr.source_repo)),
+                ("source_commit", opt(&pr.source_commit)),
+                ("source_ref", opt(&pr.source_ref)),
+            ] {
+                fields.push((format!("attestations[{i}].provenance.{k}"), v));
+            }
+        }
+    }
+    match fields.into_iter().find(|(_, v)| bad(v)) {
+        Some((name, _)) => Err(Reject::Unprocessable(format!(
+            "{name} contains a control character or line separator"
+        ))),
+        None => Ok(()),
+    }
+}
+
 /// Parses and validates a body for `path_digest`. Pure: no I/O.
 pub fn parse_post(
     path_digest: &str,
@@ -342,6 +419,7 @@ pub fn parse_post(
             Reject::BadRequest(format!("invalid body: {e}"))
         }
     })?;
+    check_text(&p)?;
     if p.schema_version != SCHEMA_VERSION {
         return Err(Reject::Unprocessable(format!(
             "schema_version {} is not supported (want {SCHEMA_VERSION})",
