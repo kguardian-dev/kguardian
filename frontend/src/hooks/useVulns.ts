@@ -142,15 +142,22 @@ export const IMAGE_PAGE_SIZE = 25;
 /** Per-digest reads in flight at once while enriching an Images page. */
 export const IMAGE_ENRICH_CONCURRENCY = 3;
 
-/** What the Images table adds to each inventory row (three reads per digest). */
+/**
+ * What the Images table adds to each inventory row (three reads per
+ * digest). Each read settles on its own: a failed SBOM read leaves the
+ * workloads and vulnerability columns intact, and says "Unknown" in its
+ * own column only.
+ */
 export interface ImageEnrichment {
   workloads: ImageDetail['workloads'] | null;
   workloadsTruncated: boolean;
+  workloadsError: unknown;
   /** Vulnerability reports; [] = no vulnerability data (unknown). */
   vulnReports: Report[] | null;
+  vulnError: unknown;
   /** SBOM reports (every source, with trust); [] = no SBOM. */
   sbomReports: Report[] | null;
-  error: unknown;
+  sbomError: unknown;
 }
 
 /**
@@ -175,16 +182,16 @@ export function useImageList(namespace: string | undefined, refreshTick = 0, api
   const enrich = useCallback(
     async (rows: ImageSummary[], current: () => boolean) => {
       const tasks = rows.map((r) => async () => {
-        const e: ImageEnrichment = { workloads: null, workloadsTruncated: false, vulnReports: null, sbomReports: null, error: null };
-        try {
-          const [d, v, s] = await Promise.all([api.getImage(r.digest), api.getImageVulns(r.digest, { limit: 1 }), api.getImageSbom(r.digest, { limit: 1 })]);
-          e.workloads = d.workloads;
-          e.workloadsTruncated = d.truncated;
-          e.vulnReports = v.reports;
-          e.sbomReports = s.reports;
-        } catch (err) {
-          e.error = err;
-        }
+        const [d, v, sb] = await Promise.allSettled([api.getImage(r.digest), api.getImageVulns(r.digest, { limit: 1 }), api.getImageSbom(r.digest, { limit: 1 })]);
+        const e: ImageEnrichment = {
+          workloads: d.status === 'fulfilled' ? d.value.workloads : null,
+          workloadsTruncated: d.status === 'fulfilled' ? d.value.truncated : false,
+          workloadsError: d.status === 'rejected' ? d.reason ?? 'read failed' : null,
+          vulnReports: v.status === 'fulfilled' ? v.value.reports : null,
+          vulnError: v.status === 'rejected' ? v.reason ?? 'read failed' : null,
+          sbomReports: sb.status === 'fulfilled' ? sb.value.reports : null,
+          sbomError: sb.status === 'rejected' ? sb.reason ?? 'read failed' : null,
+        };
         if (current()) setEnriched((prev) => new Map(prev).set(r.digest, e));
       });
       await withConcurrencyLimit(tasks, IMAGE_ENRICH_CONCURRENCY);

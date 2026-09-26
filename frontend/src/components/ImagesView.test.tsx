@@ -2,7 +2,7 @@
 import { afterEach, describe, expect, test } from 'vitest';
 import { cleanup, render, screen, waitFor, within } from '@testing-library/react';
 import { ImagesView } from './ImagesView';
-import { replayVulnApi, cvePage } from '../fixtures/vulns';
+import { replayVulnApi, cvePage, imageDetail } from '../fixtures/vulns';
 import { answer, replayApi } from '../fixtures/replay';
 import { listNamespacePayments } from '../fixtures/profile';
 import { VulnApi } from '../services/vulnApi';
@@ -67,6 +67,19 @@ describe('ImagesView: Vulnerabilities tab', () => {
 });
 
 describe('ImagesView: Images tab', () => {
+  test('one failed read blanks only its own column (a 503 on the SBOM read is not "No SBOM")', async () => {
+    const grafana = imageDetail('grafana').digest;
+    const { api } = replayVulnApi([answer(`GET /images/${grafana}/sbom?limit=1`, 'busy', 503)]);
+    render(view({ tab: 'images', api }));
+    const rows = await screen.findAllByTestId('image-row');
+    const row = rows.find((r) => within(r).queryByText('docker.io/grafana/grafana:11.2.0'))!;
+    await waitFor(() => expect(within(row).getAllByText('Unknown').length).toBeGreaterThan(0));
+    expect(within(row).queryByText('No SBOM')).toBeNull();
+    // The other columns still read.
+    expect(within(row).getAllByText('observability/grafana').length).toBeGreaterThan(0);
+    expect(within(row).getAllByText(/2 findings/).length).toBeGreaterThan(0);
+  });
+
   test('an image no source reported on reads "No data", not clean', async () => {
     render(view({ tab: 'images' }));
     const rows = await screen.findAllByTestId('image-row');

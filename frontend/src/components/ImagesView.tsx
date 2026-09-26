@@ -332,7 +332,7 @@ const UnknownPill = ({ error }: { error: unknown }) => (
 
 function WorkloadsCell({ e }: { e: ImageEnrichment | undefined }) {
   if (e === undefined) return <span className="text-tertiary">…</span>;
-  if (e.error) return <UnknownPill error={e.error} />;
+  if (e.workloadsError) return <UnknownPill error={e.workloadsError} />;
   const workloads = e.workloads ?? [];
   const running = workloads.filter((w) => w.running);
   const names = [...new Set(workloads.map((w) => `${w.namespace}/${w.workloadName}`))];
@@ -346,7 +346,7 @@ function WorkloadsCell({ e }: { e: ImageEnrichment | undefined }) {
 
 function VulnDataCell({ e }: { e: ImageEnrichment | undefined }) {
   if (e === undefined) return <span className="text-tertiary">…</span>;
-  if (e.error) return <UnknownPill error={e.error} />;
+  if (e.vulnError) return <UnknownPill error={e.vulnError} />;
   if (e.vulnReports && e.vulnReports.length === 0) {
     return <span className="rounded-full border border-dashed border-hubble-border-strong px-2 py-0.5 text-[11px] text-tertiary" title="No source has reported on this digest: unknown, not clean">No data</span>;
   }
@@ -363,7 +363,7 @@ function VulnDataCell({ e }: { e: ImageEnrichment | undefined }) {
 
 function SbomCell({ e }: { e: ImageEnrichment | undefined }) {
   if (e === undefined) return <span className="text-tertiary">…</span>;
-  if (e.error) return <UnknownPill error={e.error} />;
+  if (e.sbomError) return <UnknownPill error={e.sbomError} />;
   if (e.sbomReports && e.sbomReports.length === 0) return <span className="text-[11px] text-tertiary">No SBOM</span>;
   return (
     <div className="flex flex-col gap-1">
