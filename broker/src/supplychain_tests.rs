@@ -2032,19 +2032,51 @@ fn live_database_only_the_dlopened_library_is_loaded() {
     );
 
     // The export bundle's `vex` artifact is that draft, as JSON.
-    let d = crate::profile_export::vex_doc(&mut conn, &key, "audit").unwrap();
-    assert!(d.available, "{:?}", d.reason);
-    assert_eq!(d.file_name, "vex.openvex.json");
-    let parsed: serde_json::Value = serde_json::from_str(d.content.as_deref().unwrap()).unwrap();
+    let vd = crate::profile_export::vex_doc(&mut conn, &key, "audit").unwrap();
+    assert!(vd.available, "{:?}", vd.reason);
+    assert_eq!(vd.file_name, "vex.openvex.json");
+    let parsed: serde_json::Value = serde_json::from_str(vd.content.as_deref().unwrap()).unwrap();
     assert_eq!(parsed, vex.doc);
 
     exec(
         &mut conn,
         "DROP FUNCTION kg_runtime_coverage(text, text, text, text, text, text, integer)",
     );
+    // The export bundle's `sbom` artifact: the stored SBOM of the one
+    // container image, labelled with its source.
+    let src = crate::workload_profile::load_sources(&mut conn, &key).unwrap();
+    let prof = crate::workload_profile::build(&key, &src, Utc::now());
+    let sb = crate::profile_export::sbom_docs(&mut conn, &prof, "audit").unwrap();
+    assert_eq!(sb.len(), 1, "{sb:?}");
+    assert!(sb[0].available, "{:?}", sb[0].reason);
+    let im = sb[0].image.as_ref().unwrap();
+    assert_eq!(
+        (im.digest.as_str(), im.source.as_deref(), im.components),
+        (img.as_str(), Some("trivy-operator"), Some(2))
+    );
+    assert_eq!(im.containers, ["app"]);
+    let cdx: serde_json::Value = serde_json::from_str(sb[0].content.as_deref().unwrap()).unwrap();
+    assert_eq!(cdx["bomFormat"], "CycloneDX");
+    assert_eq!(cdx["components"].as_array().unwrap().len(), 2);
+    assert!(sb[0]
+        .apply_with
+        .as_deref()
+        .unwrap()
+        .contains("trivy-operator"));
+    // Over the cap: listed, not loaded, with the per-image route.
+    assert!(matches!(
+        crate::supplychain_read::cyclonedx_for(&mut conn, &img, 1).unwrap(),
+        crate::supplychain_read::CycloneDx::TooLarge(_)
+    ));
+    // An image with no SBOM is unknown, never an empty SBOM.
+    assert!(matches!(
+        crate::supplychain_read::cyclonedx_for(&mut conn, &d(78), 100).unwrap(),
+        crate::supplychain_read::CycloneDx::NoSbom
+    ));
+
     // Without coverage the artifact is unavailable, with the reason.
     iu::refresh_coverage(&mut conn, &t).unwrap();
-    let d = crate::profile_export::vex_doc(&mut conn, &key, "audit").unwrap();
-    assert!(!d.available);
-    assert!(d.reason.unwrap().contains("installed-but-not-observed"));
+    let vd = crate::profile_export::vex_doc(&mut conn, &key, "audit").unwrap();
+    assert!(!vd.available);
+    assert!(vd.reason.unwrap().contains("installed-but-not-observed"));
 }

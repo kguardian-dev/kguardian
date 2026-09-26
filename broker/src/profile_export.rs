@@ -14,7 +14,7 @@
 //! | `seccompprofile` | [`crate::seccomp::bundle_export`] (the `/seccomp/profiles/{..}/export` path) |
 //! | `securitycontext` | the profile's PSS recommendation ([`crate::pod_security`]) |
 //! | `vex` | [`crate::in_use_store::openvex_draft`]: an OpenVEX 0.2.0 draft (JSON, not part of the apply stream) |
-//! | `sbom` | not available until a runtime SBOM exists |
+//! | `sbom` | the stored SBOM of each container image ([`crate::supplychain_read::cyclonedx_for`], the `/images/{digest}/sbom/cyclonedx` document): one CycloneDX JSON document per digest, labelled with its source and trust |
 //! | `admission` | not available until the image trust policy exists (P2-3) |
 //!
 //! Report and generate only: kguardian never applies anything. Every
@@ -205,6 +205,29 @@ pub struct Document {
     pub content: Option<String>,
     /// How to use it (`kubectl apply -f <file>` / `kubectl patch ...`).
     pub apply_with: Option<String>,
+    /// The container image a per-image document (`sbom`) is about;
+    /// `null` for every other artifact.
+    pub image: Option<ExportImage>,
+}
+
+/// Which container image a per-image document covers, and where its data
+/// came from.
+#[derive(Debug, Clone, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ExportImage {
+    /// Containers of the workload running (or last running) the digest.
+    pub containers: Vec<String>,
+    pub digest: String,
+    pub image_ref: String,
+    /// `trivy-operator` | `registry` | another scanner; `null` when no
+    /// source has an SBOM.
+    pub source: Option<String>,
+    /// `scanned` (Trivy Operator's in-cluster scan), `unverified` or
+    /// `attached-unbound` (registry-attached, signature not checked),
+    /// `verified`; `null` when no source has an SBOM.
+    pub sbom_trust: Option<String>,
+    pub scanned_at: Option<String>,
+    pub components: Option<i32>,
 }
 
 fn unavailable(artifact: &'static str, mode: &'static str, reason: &str) -> Document {
@@ -220,6 +243,7 @@ fn unavailable(artifact: &'static str, mode: &'static str, reason: &str) -> Docu
         content_type: None,
         content: None,
         apply_with: None,
+        image: None,
     }
 }
 
@@ -627,6 +651,7 @@ fn network_doc(
         content_type: Some("application/yaml"),
         content: Some(header + &body),
         apply_with: Some(format!("kubectl apply -f {artifact}.yaml")),
+        image: None,
     }
 }
 
@@ -669,6 +694,7 @@ fn seccomp_doc(
         content_type: Some("application/yaml"),
         content: b.yaml.map(|y| doc_header(artifact, mode) + &y),
         apply_with: Some(format!("kubectl apply -f {artifact}.yaml")),
+        image: None,
     })
 }
 
@@ -715,12 +741,157 @@ fn security_context_doc(key: &Key, p: &Profile, plan: &Plan) -> Document {
             key.name,
             key.namespace
         )),
+        image: None,
     }
 }
 
 /// Artifacts that are not Kubernetes objects: never in the `kubectl apply`
 /// stream of the YAML bundle, appended there as comments instead.
-const NOT_APPLIED: [&str; 2] = ["securitycontext", "vex"];
+const NOT_APPLIED: [&str; 3] = ["securitycontext", "vex", "sbom"];
+
+/// Components across every SBOM of one bundle. The export charges the
+/// read budget for this many up front (only when `sbom` is requested);
+/// an image that does not fit is listed as unavailable with the per-image
+/// route to download it from.
+pub const BUNDLE_SBOM_MAX_COMPONENTS: i64 = 10_000;
+
+/// What the SBOM's trust level means, for the document's `applyWith`.
+fn trust_words(trust: Option<&str>) -> &'static str {
+    match trust {
+        Some("scanned") => "Trivy Operator's in-cluster scan of the image",
+        Some("verified") => "a registry-attached SBOM whose signature was verified",
+        Some("unverified") => "a registry-attached SBOM whose signature was NOT checked",
+        Some("attached-unbound") => {
+            "a document attached to the image in the registry, not bound to it and NOT signature-checked"
+        }
+        _ => "a source of unknown trust",
+    }
+}
+
+/// The images to cover: every current container's running digests, or
+/// its newest digest when none is running (stale containers left out).
+/// Grouped by digest, in container order.
+fn sbom_targets(p: &Profile) -> Vec<(String, String, Vec<String>)> {
+    let mut out: Vec<(String, String, Vec<String>)> = Vec::new();
+    for c in p.dimensions.images.containers.iter().filter(|c| !c.stale) {
+        let picks: Vec<&wp::DigestView> = if c.running.is_empty() {
+            c.previous
+                .iter()
+                .max_by_key(|d| d.last_seen)
+                .into_iter()
+                .collect()
+        } else {
+            c.running.iter().collect()
+        };
+        for d in picks {
+            match out.iter_mut().find(|t| t.0 == d.digest) {
+                Some(t) => {
+                    if !t.2.contains(&c.name) {
+                        t.2.push(c.name.clone());
+                    }
+                }
+                None => out.push((d.digest.clone(), d.image_ref.clone(), vec![c.name.clone()])),
+            }
+        }
+    }
+    out
+}
+
+/// One `sbom` document per container image of the workload: the stored
+/// SBOM as CycloneDX, or unavailable with the reason (no SBOM: unknown
+/// contents; too large for the bundle: the per-image route).
+pub(crate) fn sbom_docs(
+    conn: &mut PgConnection,
+    p: &Profile,
+    mode: &'static str,
+) -> Result<Vec<Document>, DbError> {
+    use crate::supplychain_read::{cyclonedx_for, CycloneDx};
+    let artifact = "sbom";
+    let targets = sbom_targets(p);
+    if targets.is_empty() {
+        return Ok(vec![unavailable(
+            artifact,
+            mode,
+            "not available: no container image of this workload is in the image inventory",
+        )]);
+    }
+    let mut left = BUNDLE_SBOM_MAX_COMPONENTS;
+    let mut docs = Vec::new();
+    for (digest, image_ref, containers) in targets {
+        let hex = digest.split_once(':').map_or(digest.as_str(), |x| x.1);
+        let file_name = format!(
+            "sbom-{}-{}.cdx.json",
+            containers[0],
+            &hex[..hex.len().min(12)]
+        );
+        let mut image = ExportImage {
+            containers,
+            digest: digest.clone(),
+            image_ref,
+            source: None,
+            sbom_trust: None,
+            scanned_at: None,
+            components: None,
+        };
+        let doc = match cyclonedx_for(conn, &digest, left)? {
+            CycloneDx::NoSbom => Document {
+                file_name,
+                image: Some(image),
+                ..unavailable(
+                    artifact,
+                    mode,
+                    &format!("not available: no source has an SBOM for {digest}, so its contents are unknown"),
+                )
+            },
+            CycloneDx::TooLarge(r) => {
+                image.source = Some(r.source.clone());
+                image.sbom_trust = r.sbom_trust.clone();
+                image.scanned_at = Some(r.scanned_at.and_utc().to_rfc3339());
+                image.components = Some(r.item_count);
+                Document {
+                    file_name,
+                    image: Some(image),
+                    ..unavailable(
+                        artifact,
+                        mode,
+                        &format!(
+                            "not included: {} components, over the {left} left of the {BUNDLE_SBOM_MAX_COMPONENTS} per bundle; \
+                             download it with GET /images/{digest}/sbom/cyclonedx",
+                            r.item_count
+                        ),
+                    )
+                }
+            }
+            CycloneDx::Doc(doc, r) => {
+                left -= i64::from(r.item_count);
+                image.source = Some(r.source.clone());
+                image.sbom_trust = r.sbom_trust.clone();
+                image.scanned_at = Some(r.scanned_at.and_utc().to_rfc3339());
+                image.components = Some(r.item_count);
+                Document {
+                    artifact,
+                    file_name,
+                    available: true,
+                    refused: None,
+                    reason: None,
+                    api_version: None,
+                    kind: None,
+                    mode,
+                    content_type: Some("application/vnd.cyclonedx+json"),
+                    content: Some(serde_json::to_string_pretty(&doc)? + "\n"),
+                    apply_with: Some(format!(
+                        "not applied: an SBOM from {} ({}), for review or your SBOM tooling",
+                        r.source,
+                        trust_words(r.sbom_trust.as_deref())
+                    )),
+                    image: Some(image),
+                }
+            }
+        };
+        docs.push(doc);
+    }
+    Ok(docs)
+}
 
 /// The OpenVEX draft ([`crate::in_use_store::openvex_draft`]): `not_affected`
 /// statements only for packages unseen in every container of the workload
@@ -759,6 +930,7 @@ pub(crate) fn vex_doc(
              then give it to your scanner, e.g. trivy image --vex {artifact}.openvex.json <image>",
             draft.statements
         )),
+        image: None,
     })
 }
 
@@ -810,11 +982,10 @@ pub fn build_documents(
             }
             "seccompprofile" => seccomp_doc(conn, key, p, plan)?,
             "securitycontext" => security_context_doc(key, p, plan),
-            "sbom" => unavailable(
-                "sbom",
-                mode,
-                "not available: a CycloneDX runtime SBOM needs the runtime package data from P1-3/P1-5, which does not exist yet",
-            ),
+            "sbom" => {
+                docs.extend(sbom_docs(conn, p, mode)?);
+                continue;
+            }
             "vex" => vex_doc(conn, key, mode)?,
             _ => unavailable(
                 "admission",
@@ -869,9 +1040,24 @@ pub fn render_bundle_yaml(
         y.push_str("---\n");
         y.push_str(d.content.as_deref().unwrap_or(""));
     }
+    for d in docs.iter().filter(|d| d.available && d.artifact == "sbom") {
+        // An SBOM can be thousands of lines: named here, carried in full by
+        // format=zip-manifest.
+        let im = d.image.as_ref();
+        y.push_str(&format!(
+            "# sbom: {} ({} for {}, source {}, trust {}; CycloneDX JSON, in format=zip-manifest)\n",
+            d.file_name,
+            im.and_then(|i| i.components)
+                .map_or("?".into(), |n| format!("{n} components")),
+            im.map_or("?", |i| i.digest.as_str()),
+            im.and_then(|i| i.source.as_deref()).unwrap_or("?"),
+            im.and_then(|i| i.sbom_trust.as_deref())
+                .unwrap_or("unknown"),
+        ));
+    }
     for d in docs
         .iter()
-        .filter(|d| d.available && NOT_APPLIED.contains(&d.artifact))
+        .filter(|d| d.available && NOT_APPLIED.contains(&d.artifact) && d.artifact != "sbom")
     {
         y.push_str(&format!(
             "\n# ---- {} ({}; not part of the apply stream) ----\n",
@@ -952,9 +1138,20 @@ async fn export(
     plan.record = record;
     // The profile, plus the export's own bounded reads: flow rows for the
     // network generator and its memoised per-IP lookups.
+    // With `sbom`, the SBOM documents too (at most
+    // BUNDLE_SBOM_MAX_COMPONENTS, built and serialised in memory).
+    let sbom_charge = if plan.artifacts.contains(&"sbom") {
+        cost_kib(
+            BUNDLE_SBOM_MAX_COMPONENTS,
+            crate::supplychain_read::EXPORT_COMPONENT_COST_BYTES,
+        )
+    } else {
+        0
+    };
     let charge = wp::profile_charge_kib()
         .saturating_add(cost_kib(EXPORT_TRAFFIC_ROWS, TRAFFIC_ROW_COST_BYTES))
-        .saturating_add(cost_kib(wp::PODS_MAX, 4_096));
+        .saturating_add(cost_kib(wp::PODS_MAX, 4_096))
+        .saturating_add(sbom_charge);
     let _permit = match budget.acquire(charge).await {
         Ok(p) => p,
         Err(shed) => return Ok(shed.into_response()),
@@ -1203,6 +1400,91 @@ mod tests {
     }
 
     #[test]
+    fn sbom_targets_cover_each_running_digest_once() {
+        let mut p = wp::build(&key(), &sources(), Utc::now());
+        let running = p.dimensions.images.containers[0].running[0].clone();
+        // A sidecar on the same digest shares the document; a stopped
+        // container contributes its newest digest; a stale one nothing.
+        let mut side = p.dimensions.images.containers[0].clone();
+        side.name = "side".into();
+        let mut stopped = side.clone();
+        stopped.name = "job".into();
+        let mut old = running.clone();
+        old.digest = format!("sha256:{}", "b".repeat(64));
+        old.last_seen -= chrono::Duration::hours(2);
+        let mut newest = old.clone();
+        newest.digest = format!("sha256:{}", "c".repeat(64));
+        newest.last_seen = running.last_seen;
+        stopped.running = vec![];
+        stopped.previous = vec![old, newest];
+        let mut stale = side.clone();
+        stale.name = "gone".into();
+        stale.stale = true;
+        stale.running[0].digest = format!("sha256:{}", "d".repeat(64));
+        p.dimensions
+            .images
+            .containers
+            .extend([side, stopped, stale]);
+        let t = sbom_targets(&p);
+        assert_eq!(
+            t.iter()
+                .map(|x| (x.0.clone(), x.2.clone()))
+                .collect::<Vec<_>>(),
+            [
+                (
+                    running.digest.clone(),
+                    vec!["app".to_string(), "side".to_string()]
+                ),
+                (
+                    format!("sha256:{}", "c".repeat(64)),
+                    vec!["job".to_string()]
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn an_sbom_is_named_not_embedded_in_the_yaml_stream() {
+        let p = wp::build(&key(), &sources(), Utc::now());
+        let pl = plan(&q(Some("sbom"), None, None)).unwrap();
+        let big = format!("{{\n{}}}\n", "  \"x\": 1,\n".repeat(500));
+        let docs = vec![Document {
+            artifact: "sbom",
+            file_name: "sbom-app-aaaaaaaaaaaa.cdx.json".into(),
+            available: true,
+            refused: None,
+            reason: None,
+            api_version: None,
+            kind: None,
+            mode: "audit",
+            content_type: Some("application/vnd.cyclonedx+json"),
+            content: Some(big),
+            apply_with: None,
+            image: Some(ExportImage {
+                containers: vec!["app".into()],
+                digest: format!("sha256:{}", "a".repeat(64)),
+                image_ref: "ghcr.io/example/checkout:1".into(),
+                source: Some("registry".into()),
+                sbom_trust: Some("unverified".into()),
+                scanned_at: None,
+                components: Some(2),
+            }),
+        }];
+        let y = render_bundle_yaml(&key(), &p, &pl, &docs, false);
+        assert!(y.contains("# sbom: sbom-app-aaaaaaaaaaaa.cdx.json (2 components for sha256:aaaa"));
+        assert!(y.contains("source registry, trust unverified"));
+        assert!(!y.contains("\"x\""), "the SBOM body stays out of the YAML");
+        for line in y.lines().filter(|l| !l.trim().is_empty()) {
+            assert!(
+                line.starts_with('#'),
+                "non-comment line in the stream: {line}"
+            );
+        }
+        assert!(trust_words(Some("unverified")).contains("NOT checked"));
+        assert!(trust_words(Some("scanned")).contains("Trivy Operator"));
+    }
+
+    #[test]
     fn a_vex_draft_is_commented_out_of_the_apply_stream() {
         let p = wp::build(&key(), &sources(), Utc::now());
         let pl = plan(&q(Some("vex"), None, None)).unwrap();
@@ -1218,6 +1500,7 @@ mod tests {
             content_type: Some("application/json"),
             content: Some("{\n  \"@context\": \"https://openvex.dev/ns/v0.2.0\"\n}\n".into()),
             apply_with: None,
+            image: None,
         }];
         let y = render_bundle_yaml(&key(), &p, &pl, &docs, false);
         assert!(y.contains(

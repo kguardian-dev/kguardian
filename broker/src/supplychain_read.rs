@@ -1060,6 +1060,67 @@ enum Export {
     Doc(serde_json::Value),
 }
 
+/// Every component of `report`'s SBOM, in id order, read in chunks.
+/// Stops past `max` (the caller checks the count first).
+fn load_all_components(
+    conn: &mut PgConnection,
+    report: &Report,
+    max: i64,
+) -> QueryResult<Vec<Component>> {
+    let mut comps = Vec::with_capacity(report.item_count.clamp(0, max as i32) as usize);
+    let mut after = 0;
+    loop {
+        let chunk = load_components(conn, report, after, EXPORT_CHUNK)?;
+        let n = chunk.len() as i64;
+        if let Some(last) = chunk.last() {
+            after = last.id;
+        }
+        comps.extend(chunk);
+        if n < EXPORT_CHUNK || comps.len() as i64 > max {
+            break;
+        }
+    }
+    Ok(comps)
+}
+
+/// The SBOM of one inventory digest as a CycloneDX document, for callers
+/// inside the broker (the workload export bundle).
+#[derive(Debug)]
+pub(crate) enum CycloneDx {
+    /// No source has an SBOM for the digest: its contents are unknown.
+    NoSbom,
+    /// The chosen SBOM has more components than `max_components`.
+    TooLarge(Report),
+    Doc(serde_json::Value, Report),
+}
+
+/// The SBOM the per-image route would choose (Trivy Operator's first, a
+/// registry SBOM only when it is the only one), as CycloneDX. Refuses
+/// more than `max_components` without loading them.
+pub(crate) fn cyclonedx_for(
+    conn: &mut PgConnection,
+    digest: &str,
+    max_components: i64,
+) -> Result<CycloneDx, DbError> {
+    let Some(report) = pick_sbom(conn, digest, None)?.1 else {
+        return Ok(CycloneDx::NoSbom);
+    };
+    if i64::from(report.item_count) > max_components {
+        return Ok(CycloneDx::TooLarge(report));
+    }
+    let comps = load_all_components(conn, &report, max_components)?;
+    if comps.is_empty() && report.item_count > 0 {
+        return Ok(CycloneDx::NoSbom);
+    }
+    if comps.len() as i64 > max_components {
+        return Ok(CycloneDx::TooLarge(report));
+    }
+    Ok(CycloneDx::Doc(
+        cyclonedx_document(digest, &report, &comps),
+        report,
+    ))
+}
+
 pub async fn get_image_sbom_cyclonedx(
     pool: web::Data<DbPool>,
     budget: web::Data<ReadBudget>,
@@ -1101,19 +1162,7 @@ pub async fn get_image_sbom_cyclonedx(
             return Ok(Export::TooLarge(report.item_count));
         }
         let mut conn = pool.get()?;
-        let mut comps = Vec::with_capacity(report.item_count.max(0) as usize);
-        let mut after = 0;
-        loop {
-            let chunk = load_components(&mut conn, &report, after, EXPORT_CHUNK)?;
-            let n = chunk.len() as i64;
-            if let Some(last) = chunk.last() {
-                after = last.id;
-            }
-            comps.extend(chunk);
-            if n < EXPORT_CHUNK || comps.len() as i64 > EXPORT_MAX_COMPONENTS {
-                break;
-            }
-        }
+        let comps = load_all_components(&mut conn, &report, EXPORT_MAX_COMPONENTS)?;
         if comps.is_empty() && report.item_count > 0 {
             return Ok(Export::None);
         }
