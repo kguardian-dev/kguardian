@@ -1,0 +1,5 @@
+{
+  "request": "GET /images/sha256:00000000000000000000000000000000000000000000000000000000000000b1/vulnerabilities",
+  "status": 401,
+  "body": "missing or invalid bearer token"
+}

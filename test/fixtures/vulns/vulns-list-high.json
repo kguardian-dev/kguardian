@@ -1,0 +1,54 @@
+{
+  "request": "GET /vulnerabilities?severity=CRITICAL,HIGH&limit=2",
+  "status": 200,
+  "body": {
+    "items": [
+      {
+        "id": "CVE-2099-10001",
+        "severity": "CRITICAL",
+        "maxScore": 9.8,
+        "fixable": true,
+        "kev": true,
+        "maxEpss": 0.42,
+        "packages": [
+          "fastparse"
+        ],
+        "sources": [
+          "grype",
+          "trivy-operator"
+        ],
+        "images": 1,
+        "workloads": 2,
+        "runningWorkloads": 2,
+        "namespaces": 2,
+        "weakestJoin": "platform_manifest",
+        "inUse": null,
+        "inUseState": "unknown"
+      },
+      {
+        "id": "CVE-2099-10003",
+        "severity": "HIGH",
+        "maxScore": 7.5,
+        "fixable": false,
+        "kev": null,
+        "maxEpss": null,
+        "packages": [
+          "libexample"
+        ],
+        "sources": [
+          "trivy-operator"
+        ],
+        "images": 2,
+        "workloads": 3,
+        "runningWorkloads": 3,
+        "namespaces": 2,
+        "weakestJoin": "platform_manifest",
+        "inUse": null,
+        "inUseState": "unknown"
+      }
+    ],
+    "nextAfter": null,
+    "computedAt": "2026-09-26T02:59:00.469121",
+    "staleSeconds": 1
+  }
+}

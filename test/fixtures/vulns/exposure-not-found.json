@@ -1,0 +1,5 @@
+{
+  "request": "GET /vulnerabilities/CVE-2099-99999/exposure",
+  "status": 404,
+  "body": "No affected image in the inventory"
+}

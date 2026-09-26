@@ -1,0 +1,5 @@
+{
+  "request": "GET /images/sha256:00000000000000000000000000000000000000000000000000000000000000b1/vulnerabilities?severity=SEVERE",
+  "status": 400,
+  "body": "unknown severity 'SEVERE'; use CRITICAL, HIGH, MEDIUM, LOW, NONE or UNKNOWN"
+}

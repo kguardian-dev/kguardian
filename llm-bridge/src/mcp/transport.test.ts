@@ -87,7 +87,7 @@ test("tools/list serves exactly the registry, verbatim", async () => {
     // this file must keep the test passing, and adding one that MCP fails to
     // serve must break it. A hardcoded list of 12 names would do neither.
     assert.equal(tools.length, TOOL_DEFS.length);
-    assert.equal(tools.length, 19, "the tool set is 19 tools (12 network/policy + 3 compute + 4 profile/image); a change here is a product decision");
+    assert.equal(tools.length, 23, "the tool set is 23 tools (12 network/policy + 3 compute + 4 profile/image + 4 vulnerability); a change here is a product decision");
     assert.deepEqual(
       tools.map((t) => ({ name: t.name, description: t.description, inputSchema: t.inputSchema })),
       TOOL_DEFS.map((t) => ({ name: t.name, description: t.description, inputSchema: t.parameters })),

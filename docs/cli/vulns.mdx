@@ -1,0 +1,115 @@
+---
+title: "vulns"
+description: "List the vulnerabilities affecting your running images, and where one CVE runs and how exposed it is"
+icon: "bug"
+---
+
+## Synopsis
+
+Read-only views over the vulnerabilities scanners found in the images your
+workloads run. The data comes from the supplychain component (Trivy Operator
+reports, Grype matches, registry SBOMs); kguardian reports it and never
+scans, blocks or applies anything.
+
+```bash
+kubectl kguardian vulns list [flags]
+kubectl kguardian vulns exposure <id> [flags]
+```
+
+For one image's findings, or a CI gate, use
+[`images vulns`](/cli/images#images-vulns).
+
+<Warning>
+**Unknown is not safe.** Images no source has scanned are unknown and do not
+appear here, so an empty list is not "no vulnerabilities". kguardian cannot
+yet tell which packages a workload loads: "in use" is unknown, so treat every
+finding as potentially reachable.
+</Warning>
+
+## vulns list
+
+Calls `GET /vulnerabilities`: every vulnerability affecting an inventory
+image, grouped by id, most severe first. It reads a summary the broker
+rebuilds every few minutes; when it was computed is printed on stderr.
+
+| Flag | Type | Description | Default |
+|------|------|-------------|---------|
+| `-n, --namespace` | string | Only vulnerabilities affecting this namespace, with counts for it | all namespaces |
+| `--severity` | string | Only these severities, comma-separated | all |
+| `--fixable` | bool | Only vulnerabilities with a fix (`--fixable=false`: only without) | all |
+| `--running` | bool | Only vulnerabilities with at least one running workload | off |
+| `--limit`, `--after` | | Page size (max 500) and cursor | `100` |
+| `-o, --output` | string | `table`, `json` or `yaml` | `table` |
+
+```
+SEVERITY  ID              SCORE  FIXABLE  KEV      IMAGES  WORKLOADS  RUNNING  NAMESPACES  JOIN               PACKAGES
+CRITICAL  CVE-2099-10001  9.8    yes      yes      1       2          2        2           platform_manifest  fastparse
+HIGH      CVE-2099-10003  7.5    no       unknown  2       3          3        2           platform_manifest  libexample
+MEDIUM    CVE-2099-10002  6.1    yes      unknown  1       2          2        2           platform_manifest  tinyrouter
+LOW       CVE-2099-20001  3.1    yes      unknown  1       1          1        1           image_id           yamlish
+```
+
+Counts are distinct images and workloads, so two sources reporting the same
+CVE never count twice. `KEV` `unknown` means no source said either way.
+`JOIN` is the weakest match behind the counts: `workload_tag` means some are
+by tag only, and the tag may have moved since the scan.
+
+## vulns exposure
+
+Calls `GET /vulnerabilities/{id}/exposure`: the inventory images a
+vulnerability affects, the workloads running (or having run) them, and each
+workload's observed ingress over the window.
+
+| Flag | Type | Description | Default |
+|------|------|-------------|---------|
+| `--window-hours` | int | How far back traffic counts (max 720) | `168` |
+| `-o, --output` | string | `table`, `json` or `yaml` | `table` |
+
+```
+CVE-2099-10003  HIGH, no fix available
+
+Images:
+  DIGEST               REPOSITORY                  TAGS   PACKAGE     INSTALLED  FIXED  JOIN
+  sha256:000000000000  ghcr.io/example/storefront  3.2.0  libexample  1.2.3      -      platform_manifest
+  sha256:000000000000  ghcr.io/example/ledger      1.9.4  libexample  1.2.3      -      image_id
+
+Workloads:
+  NAMESPACE  WORKLOAD                 CONTAINER  RUNNING  EXPOSED  VIA                                     INGRESS FLOWS
+  billing    Deployment/catalog-sync  sync       true     unknown  -                                       0
+  billing    Deployment/ledger        api        true     no       -                                       1
+  shop       Deployment/storefront    web        true     yes      other_namespace,unattributed,public_ip  2
+
+Exposure window: 168h of observed traffic. unknown = no ingress observed (egress alone does not count; inbound UDP is not captured), never "not exposed".
+In use: unknown. kguardian cannot yet tell whether the vulnerable package is loaded; do not treat it as unreachable.
+```
+
+`EXPOSED` is observed traffic, not reachability analysis:
+
+| Value | Meaning |
+|-------|---------|
+| `yes` | Ingress seen from another namespace, an unattributed or public IP, or a node IP. `VIA` names which. `node` also covers kubelet probes and NodePort or LoadBalancer traffic. |
+| `no` | Ingress was observed in the window and none of it came from outside. Not proof that none is possible. |
+| `unknown` | No ingress observed in the window, even if the workload had egress. The controller does not capture inbound UDP, so a UDP-only server looks like this. Never "not exposed". |
+
+`FIXED` lists every fixed version the sources give, in source order. A
+vulnerability no inventory image with data lists exits non-zero with a
+message saying that is not proof the cluster is unaffected.
+
+`-o json` and `-o yaml` print the broker's response unchanged. Global flags
+(`--kubeconfig`, `--context`, `--broker-namespace`, `--broker-service`,
+`--broker-token-file`, `--debug`) are listed in the
+[CLI overview](/cli/overview). A `401` or `403` prints a hint: these commands
+need a token with the `read` scope.
+
+## Examples
+
+```bash
+# Critical and high, running somewhere in production
+kubectl kguardian vulns list -n production --severity critical,high --running
+
+# Where a CVE runs, over the last day of traffic
+kubectl kguardian vulns exposure CVE-2024-3094 --window-hours 24
+
+# Every exposed workload, for scripting
+kubectl kguardian vulns exposure CVE-2024-3094 -o json | jq '.workloads[] | select(.network.exposed == true)'
+```

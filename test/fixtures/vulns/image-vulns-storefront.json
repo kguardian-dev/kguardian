@@ -1,0 +1,177 @@
+{
+  "request": "GET /images/sha256:00000000000000000000000000000000000000000000000000000000000000a2/vulnerabilities",
+  "status": 200,
+  "body": {
+    "digest": "sha256:00000000000000000000000000000000000000000000000000000000000000a2",
+    "reports": [
+      {
+        "source": "grype",
+        "reportDigest": "sha256:00000000000000000000000000000000000000000000000000000000000000a1",
+        "join": "platform_manifest",
+        "digestKind": "index",
+        "scannedAt": "2026-09-26T02:28:12",
+        "dbUpdatedAt": "2026-09-25T20:58:12",
+        "scannerName": "grype",
+        "scannerVersion": "0.87.0",
+        "osFamily": "alpine",
+        "osName": "3.20.3",
+        "osEosl": false,
+        "imageRef": "ghcr.io/example/storefront:3.2.0",
+        "itemCount": 1,
+        "sbomFormat": null,
+        "receivedAt": "2026-09-26T02:58:12.067190",
+        "sbomSources": [
+          "registry"
+        ],
+        "sbomTrust": "unverified",
+        "attestation": null
+      },
+      {
+        "source": "trivy-operator",
+        "reportDigest": "sha256:00000000000000000000000000000000000000000000000000000000000000a1",
+        "join": "platform_manifest",
+        "digestKind": "index",
+        "scannedAt": "2026-09-26T02:28:12",
+        "dbUpdatedAt": null,
+        "scannerName": "Trivy",
+        "scannerVersion": "0.58.1",
+        "osFamily": "alpine",
+        "osName": "3.20.3",
+        "osEosl": false,
+        "imageRef": "ghcr.io/example/storefront:3.2.0",
+        "itemCount": 3,
+        "sbomFormat": null,
+        "receivedAt": "2026-09-26T02:58:12.055847",
+        "sbomSources": [],
+        "sbomTrust": "scanned",
+        "attestation": null
+      }
+    ],
+    "items": [
+      {
+        "id": "CVE-2099-10001",
+        "package": {
+          "name": "fastparse",
+          "type": "npm",
+          "purl": "pkg:npm/fastparse@2.1.0"
+        },
+        "installedVersion": "2.1.0",
+        "fixedVersions": [
+          "2.1.10",
+          "2.1.4"
+        ],
+        "fixable": true,
+        "severity": "CRITICAL",
+        "score": 9.8,
+        "cvss": {
+          "nvd": {
+            "v3_score": 9.8
+          }
+        },
+        "title": "Example advisory for fastparse",
+        "primaryUrl": "https://advisories.example.invalid/CVE-2099-10001",
+        "target": null,
+        "class": null,
+        "publishedAt": null,
+        "lastModifiedAt": null,
+        "filePaths": [
+          "app/node_modules/fastparse/package.json"
+        ],
+        "kev": true,
+        "kevDateAdded": null,
+        "epss": 0.42,
+        "epssPercentile": 0.97,
+        "sources": [
+          "grype",
+          "trivy-operator"
+        ],
+        "reportDigests": [
+          "sha256:00000000000000000000000000000000000000000000000000000000000000a1"
+        ],
+        "inUse": null,
+        "inUseState": "unknown"
+      },
+      {
+        "id": "CVE-2099-10003",
+        "package": {
+          "name": "libexample",
+          "type": "apk",
+          "purl": "pkg:apk/libexample@1.2.3"
+        },
+        "installedVersion": "1.2.3",
+        "fixedVersions": [],
+        "fixable": false,
+        "severity": "HIGH",
+        "score": 7.5,
+        "cvss": {
+          "nvd": {
+            "v3_score": 7.5
+          }
+        },
+        "title": "Example advisory for libexample",
+        "primaryUrl": "https://advisories.example.invalid/CVE-2099-10003",
+        "target": null,
+        "class": null,
+        "publishedAt": null,
+        "lastModifiedAt": null,
+        "filePaths": [
+          "app/node_modules/libexample/package.json"
+        ],
+        "kev": null,
+        "kevDateAdded": null,
+        "epss": null,
+        "epssPercentile": null,
+        "sources": [
+          "trivy-operator"
+        ],
+        "reportDigests": [
+          "sha256:00000000000000000000000000000000000000000000000000000000000000a1"
+        ],
+        "inUse": null,
+        "inUseState": "unknown"
+      },
+      {
+        "id": "CVE-2099-10002",
+        "package": {
+          "name": "tinyrouter",
+          "type": "npm",
+          "purl": "pkg:npm/tinyrouter@4.18.2"
+        },
+        "installedVersion": "4.18.2",
+        "fixedVersions": [
+          "4.19.2"
+        ],
+        "fixable": true,
+        "severity": "MEDIUM",
+        "score": 6.1,
+        "cvss": {
+          "nvd": {
+            "v3_score": 6.1
+          }
+        },
+        "title": "Example advisory for tinyrouter",
+        "primaryUrl": "https://advisories.example.invalid/CVE-2099-10002",
+        "target": null,
+        "class": null,
+        "publishedAt": null,
+        "lastModifiedAt": null,
+        "filePaths": [
+          "app/node_modules/tinyrouter/package.json"
+        ],
+        "kev": null,
+        "kevDateAdded": null,
+        "epss": null,
+        "epssPercentile": null,
+        "sources": [
+          "trivy-operator"
+        ],
+        "reportDigests": [
+          "sha256:00000000000000000000000000000000000000000000000000000000000000a1"
+        ],
+        "inUse": null,
+        "inUseState": "unknown"
+      }
+    ],
+    "nextAfter": null
+  }
+}

@@ -1,0 +1,163 @@
+{
+  "request": "GET /vulnerabilities/CVE-2099-10003/exposure",
+  "status": 200,
+  "body": {
+    "id": "CVE-2099-10003",
+    "severity": "HIGH",
+    "fixable": false,
+    "images": [
+      {
+        "digest": "sha256:00000000000000000000000000000000000000000000000000000000000000a2",
+        "repository": "ghcr.io/example/storefront",
+        "tags": [
+          "3.2.0"
+        ],
+        "sources": [
+          "trivy-operator"
+        ],
+        "reportDigests": [
+          "sha256:00000000000000000000000000000000000000000000000000000000000000a1"
+        ],
+        "join": "platform_manifest",
+        "severity": "HIGH",
+        "packages": [
+          {
+            "fixedVersions": [],
+            "installedVersion": "1.2.3",
+            "name": "libexample",
+            "severity": "HIGH",
+            "sources": [
+              "trivy-operator"
+            ]
+          }
+        ]
+      },
+      {
+        "digest": "sha256:00000000000000000000000000000000000000000000000000000000000000b1",
+        "repository": "ghcr.io/example/ledger",
+        "tags": [
+          "1.9.4"
+        ],
+        "sources": [
+          "trivy-operator"
+        ],
+        "reportDigests": [
+          "sha256:00000000000000000000000000000000000000000000000000000000000000b1"
+        ],
+        "join": "image_id",
+        "severity": "HIGH",
+        "packages": [
+          {
+            "fixedVersions": [],
+            "installedVersion": "1.2.3",
+            "name": "libexample",
+            "severity": "HIGH",
+            "sources": [
+              "trivy-operator"
+            ]
+          }
+        ]
+      }
+    ],
+    "workloads": [
+      {
+        "clusterId": "primary",
+        "namespace": "billing",
+        "kind": "Deployment",
+        "name": "catalog-sync",
+        "container": "sync",
+        "imageDigest": "sha256:00000000000000000000000000000000000000000000000000000000000000a2",
+        "join": "platform_manifest",
+        "running": true,
+        "lastSeen": "2026-09-26T02:58:12.035072",
+        "network": {
+          "windowHours": 168,
+          "podsObserved": 1,
+          "flowsObserved": 1,
+          "ingressFlowsObserved": 0,
+          "ingressFromOtherNamespaces": 0,
+          "ingressFromUnattributedPeers": 0,
+          "ingressFromPublicIps": 0,
+          "ingressFromNodes": 0,
+          "exposed": null,
+          "exposedVia": []
+        },
+        "inUse": null,
+        "inUseState": "unknown"
+      },
+      {
+        "clusterId": "primary",
+        "namespace": "billing",
+        "kind": "Deployment",
+        "name": "ledger",
+        "container": "api",
+        "imageDigest": "sha256:00000000000000000000000000000000000000000000000000000000000000b1",
+        "join": "image_id",
+        "running": true,
+        "lastSeen": "2026-09-26T02:58:12.020874",
+        "network": {
+          "windowHours": 168,
+          "podsObserved": 1,
+          "flowsObserved": 2,
+          "ingressFlowsObserved": 1,
+          "ingressFromOtherNamespaces": 0,
+          "ingressFromUnattributedPeers": 0,
+          "ingressFromPublicIps": 0,
+          "ingressFromNodes": 0,
+          "exposed": false,
+          "exposedVia": []
+        },
+        "inUse": null,
+        "inUseState": "unknown"
+      },
+      {
+        "clusterId": "primary",
+        "namespace": "shop",
+        "kind": "Deployment",
+        "name": "storefront",
+        "container": "web",
+        "imageDigest": "sha256:00000000000000000000000000000000000000000000000000000000000000a2",
+        "join": "platform_manifest",
+        "running": true,
+        "lastSeen": "2026-09-26T02:58:12.011967",
+        "network": {
+          "windowHours": 168,
+          "podsObserved": 1,
+          "flowsObserved": 3,
+          "ingressFlowsObserved": 2,
+          "ingressFromOtherNamespaces": 1,
+          "ingressFromUnattributedPeers": 1,
+          "ingressFromPublicIps": 1,
+          "ingressFromNodes": 0,
+          "exposed": true,
+          "exposedVia": [
+            "other_namespace",
+            "unattributed",
+            "public_ip"
+          ]
+        },
+        "inUse": null,
+        "inUseState": "unknown"
+      }
+    ],
+    "namespaces": [
+      {
+        "namespace": "billing",
+        "workloads": 2,
+        "runningWorkloads": 2,
+        "exposedWorkloads": 0,
+        "unknownExposureWorkloads": 1
+      },
+      {
+        "namespace": "shop",
+        "workloads": 1,
+        "runningWorkloads": 1,
+        "exposedWorkloads": 1,
+        "unknownExposureWorkloads": 0
+      }
+    ],
+    "truncated": false,
+    "inUse": null,
+    "inUseState": "unknown"
+  }
+}

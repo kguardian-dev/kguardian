@@ -63,7 +63,10 @@ It won't carry on and treat every peer as unknown.
     Show a workload's security posture, diff profile revisions, and print a recommended securityContext patch. Read-only.
   </Card>
   <Card title="images" icon="box" href="/cli/images">
-    List the image digests workloads run, and which workloads run a digest. Read-only.
+    List the image digests workloads run, their vulnerabilities (with a CI gate) and SBOMs. Read-only.
+  </Card>
+  <Card title="vulns" icon="bug" href="/cli/vulns">
+    List vulnerabilities across the cluster, and where one CVE runs and how exposed it is. Read-only.
   </Card>
   <Card title="version" icon="tag">
     Print client version information. Also available as `-v` / `--version` on the root command.
@@ -91,4 +94,10 @@ kubectl kguardian profile export production/Deployment/api --format pss
 
 # Which image digests run in a namespace
 kubectl kguardian images list -n production
+
+# Fail a pipeline on high or critical findings
+kubectl kguardian images vulns sha256:... --fail-on high
+
+# Where does a CVE run, and is it exposed
+kubectl kguardian vulns exposure CVE-2024-3094
 ```

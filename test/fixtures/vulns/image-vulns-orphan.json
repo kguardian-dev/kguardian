@@ -1,0 +1,73 @@
+{
+  "request": "GET /images/sha256:00000000000000000000000000000000000000000000000000000000000000d1/vulnerabilities",
+  "status": 200,
+  "body": {
+    "digest": "sha256:00000000000000000000000000000000000000000000000000000000000000d1",
+    "reports": [
+      {
+        "source": "trivy-operator",
+        "reportDigest": "sha256:00000000000000000000000000000000000000000000000000000000000000d1",
+        "join": "report_digest",
+        "digestKind": "manifest",
+        "scannedAt": "2026-09-26T02:28:12",
+        "dbUpdatedAt": null,
+        "scannerName": "Trivy",
+        "scannerVersion": "0.58.1",
+        "osFamily": null,
+        "osName": null,
+        "osEosl": false,
+        "imageRef": null,
+        "itemCount": 1,
+        "sbomFormat": null,
+        "receivedAt": "2026-09-26T02:58:12.083251",
+        "sbomSources": [],
+        "sbomTrust": null,
+        "attestation": null
+      }
+    ],
+    "items": [
+      {
+        "id": "CVE-2099-30001",
+        "package": {
+          "name": "oldlib",
+          "type": "npm",
+          "purl": "pkg:npm/oldlib@0.1.0"
+        },
+        "installedVersion": "0.1.0",
+        "fixedVersions": [
+          "0.2.0"
+        ],
+        "fixable": true,
+        "severity": "HIGH",
+        "score": 8.1,
+        "cvss": {
+          "nvd": {
+            "v3_score": 8.1
+          }
+        },
+        "title": "Example advisory for oldlib",
+        "primaryUrl": "https://advisories.example.invalid/CVE-2099-30001",
+        "target": null,
+        "class": null,
+        "publishedAt": null,
+        "lastModifiedAt": null,
+        "filePaths": [
+          "app/node_modules/oldlib/package.json"
+        ],
+        "kev": null,
+        "kevDateAdded": null,
+        "epss": null,
+        "epssPercentile": null,
+        "sources": [
+          "trivy-operator"
+        ],
+        "reportDigests": [
+          "sha256:00000000000000000000000000000000000000000000000000000000000000d1"
+        ],
+        "inUse": null,
+        "inUseState": "unknown"
+      }
+    ],
+    "nextAfter": null
+  }
+}

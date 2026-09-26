@@ -65,7 +65,8 @@
               "cli/gen-seccomp",
               "cli/compute-findings",
               "cli/profile",
-              "cli/images"
+              "cli/images",
+              "cli/vulns"
             ]
           },
           {

@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -146,6 +147,13 @@ func Execute() {
 	}
 
 	if err := rootCmd.Execute(); err != nil {
+		// A gate result (images vulns --fail-on) is not a failure to run:
+		// it exits with its own code and its own message.
+		var ge *gateError
+		if errors.As(err, &ge) {
+			fmt.Fprintln(os.Stderr, ge.msg)
+			os.Exit(ge.code)
+		}
 		log.Fatal().Err(err).Msg("Error executing command")
 	}
 }
