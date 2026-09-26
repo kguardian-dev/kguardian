@@ -6,6 +6,7 @@ import { RisksRoute } from './components/RisksView';
 import { ScopeChip } from './components/ScopeChip';
 import { CommandPalette, type Command } from './components/CommandPalette';
 import { useHashLocation } from './hooks/useHashLocation';
+import { NARROW_QUERY, useMediaQuery } from './hooks/useMediaQuery';
 import NamespaceSelector from './components/NamespaceSelector';
 import DataTable from './components/DataTable';
 import { Sidebar, type NavItem } from './components/Sidebar';
@@ -219,12 +220,33 @@ function App() {
     }
   }, [redirect, loc.params, namespaces.length, effectiveNamespace, view, navigate]);
 
+  // Narrow screens (below md, live on resize / rotation): the rail is a
+  // 56px icon column, and expanding it opens an overlay over the content
+  // rather than a 224px column beside it. The overlay is not a preference:
+  // it closes on navigation, backdrop or Esc, and never touches the stored
+  // desktop choice.
+  const narrow = useMediaQuery(NARROW_QUERY);
+  const [railOverlay, setRailOverlay] = useState(false);
+  const railShowsCollapsed = narrow ? !railOverlay : railCollapsed;
   const toggleRail = useCallback(() => {
+    if (narrow) {
+      setRailOverlay((o) => !o);
+      return;
+    }
     setRailCollapsed((c) => {
       localStorage.setItem('kg-rail-collapsed', c ? '0' : '1');
       return !c;
     });
-  }, []);
+  }, [narrow]);
+  const closeRailOverlay = useCallback(() => setRailOverlay(false), []);
+  useEffect(() => {
+    if (!railOverlay) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setRailOverlay(false);
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [railOverlay]);
 
   // Calculate the right padding for content when AI panel is docked (in pixels)
   const contentPaddingRightPx = aiSidePanel.isSidePanel
@@ -429,14 +451,30 @@ function App() {
 
   return (
     <div className="flex h-screen bg-hubble-darker">
-      <Sidebar
-        items={navItems}
-        version={__APP_VERSION__}
-        topSlot={<ClusterSwitcher collapsed={railCollapsed} />}
-        footer={<AccountMenu collapsed={railCollapsed} onOpenSettings={() => setSettingsOpen(true)} />}
-        collapsed={railCollapsed}
-        onToggleCollapse={toggleRail}
-      />
+      {(() => {
+        const rail = (
+          <Sidebar
+            items={navItems}
+            version={__APP_VERSION__}
+            topSlot={<ClusterSwitcher collapsed={railShowsCollapsed} />}
+            footer={<AccountMenu collapsed={railShowsCollapsed} onOpenSettings={() => setSettingsOpen(true)} />}
+            collapsed={railShowsCollapsed}
+            onToggleCollapse={toggleRail}
+            onNavigate={narrow ? closeRailOverlay : undefined}
+          />
+        );
+        if (!narrow) return rail;
+        // Narrow: a fixed 56px column keeps the content still; the open
+        // rail floats over it.
+        return (
+          <div className="relative w-14 shrink-0" data-testid="rail-slot">
+            {railOverlay && (
+              <button type="button" aria-label="Close sidebar" className="fixed inset-0 z-40 bg-black/40 cursor-default" onClick={closeRailOverlay} />
+            )}
+            <div className={railOverlay ? 'fixed inset-y-0 left-0 z-50 shadow-2xl' : 'h-full'}>{rail}</div>
+          </div>
+        );
+      })()}
 
       <div
         className="flex-1 flex flex-col min-w-0 transition-all duration-300"

@@ -801,8 +801,9 @@ const NetworkGraphInner: React.FC<NetworkGraphProps> = ({
         )}
 
         {/* Security Summary Panel */}
+        {/* Phones: below the toolbar row (top-right), which would otherwise cover it. */}
         <Panel position="top-left">
-          <div className="flex items-center gap-3 px-3 py-2 rounded-surface bg-hubble-card/90 border border-hubble-border backdrop-blur-sm text-xs">
+          <div className="mt-11 sm:mt-0 flex items-center gap-3 px-3 py-2 rounded-surface bg-hubble-card/90 border border-hubble-border backdrop-blur-sm text-xs">
             <div className="flex items-center gap-1.5 text-secondary" title="Total workload identities in the current namespace">
               <Server className="w-3.5 h-3.5 text-hubble-accent" />
               <span className="font-medium font-mono tabular-nums">{summaryStats.podCount}</span>

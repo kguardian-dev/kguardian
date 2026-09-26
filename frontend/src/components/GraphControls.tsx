@@ -24,6 +24,11 @@ export interface GraphControlsProps {
   onToggleLayoutDirection: () => void;
 }
 
+// Below lg the map is too narrow for labelled toggles next to the summary
+// panel (it sits top-left, the toolbar top-right): the labels go
+// screen-reader-only and each toggle keeps its icon, hue and title.
+const LABEL = 'sr-only lg:not-sr-only';
+
 const base = 'flex items-center gap-2 h-8 px-3 rounded-control border text-xs font-medium transition-colors';
 const off = 'bg-hubble-card border-hubble-border text-tertiary hover:border-hubble-border-strong hover:text-secondary';
 
@@ -57,14 +62,14 @@ export function GraphControls({
   onToggleLayoutDirection,
 }: GraphControlsProps) {
   return (
-    <div className="flex gap-2">
+    <div className="flex flex-wrap justify-end gap-2">
       <button
         onClick={onToggleTraffic}
         className={`${base} ${showTraffic ? TRAFFIC_ACTIVE : off}`}
         title={showTraffic ? 'Hide traffic edges' : 'Show traffic edges'}
       >
         {showTraffic ? <Eye className="w-3.5 h-3.5" /> : <EyeOff className="w-3.5 h-3.5" />}
-        Traffic
+        <span className={LABEL}>Traffic</span>
       </button>
       {showTraffic && (
         <button
@@ -73,7 +78,7 @@ export function GraphControls({
           title={showExternalNodes ? 'Hide external namespace nodes' : 'Show external namespace nodes'}
         >
           {showExternalNodes ? <Eye className="w-3.5 h-3.5" /> : <EyeOff className="w-3.5 h-3.5" />}
-          External{externalCount > 0 ? ` (${externalCount})` : ''}
+          <span className={LABEL}>External{externalCount > 0 ? ` (${externalCount})` : ''}</span>
         </button>
       )}
       {showTraffic && showExternalNodes && (
@@ -84,15 +89,17 @@ export function GraphControls({
           title={DAEMONSET_TOGGLE_TOOLTIP}
         >
           {showDaemonSetNodes ? <Layers className="w-3.5 h-3.5" /> : <EyeOff className="w-3.5 h-3.5 text-hubble-info" />}
-          DaemonSets
-          {daemonSetCount > 0 && ' '}
-          {daemonSetCount > 0 && (
-            // The hidden-count hint keeps the toggle's hue even while off, so
-            // the user can see what the teal toggle is holding back.
-            <span className={showDaemonSetNodes ? '' : 'text-hubble-info'}>
-              ({daemonSetCount}{showDaemonSetNodes ? '' : ' hidden'})
-            </span>
-          )}
+          <span className={LABEL}>
+            DaemonSets
+            {daemonSetCount > 0 && ' '}
+            {daemonSetCount > 0 && (
+              // The hidden-count hint keeps the toggle's hue even while off, so
+              // the user can see what the teal toggle is holding back.
+              <span className={showDaemonSetNodes ? '' : 'text-hubble-info'}>
+                ({daemonSetCount}{showDaemonSetNodes ? '' : ' hidden'})
+              </span>
+            )}
+          </span>
         </button>
       )}
       {contentionCount > 0 && onToggleContention && (
@@ -103,9 +110,11 @@ export function GraphControls({
           title={CONTENTION_TOGGLE_TOOLTIP}
         >
           {showContention ? <Zap className="w-3.5 h-3.5" /> : <EyeOff className="w-3.5 h-3.5 text-hubble-error" />}
-          Contention{' '}
-          <span className={showContention ? '' : 'text-hubble-error'}>
-            ({contentionCount}{showContention ? '' : ' hidden'})
+          <span className={LABEL}>
+            Contention{' '}
+            <span className={showContention ? '' : 'text-hubble-error'}>
+              ({contentionCount}{showContention ? '' : ' hidden'})
+            </span>
           </span>
         </button>
       )}
@@ -116,7 +125,7 @@ export function GraphControls({
           title={`Switch to ${layoutDirection === 'LR' ? 'vertical' : 'horizontal'} layout`}
         >
           {layoutDirection === 'LR' ? <ArrowRight className="w-3.5 h-3.5" /> : <ArrowDown className="w-3.5 h-3.5" />}
-          Layout
+          <span className={LABEL}>Layout</span>
         </button>
       )}
     </div>

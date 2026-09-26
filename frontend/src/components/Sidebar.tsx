@@ -23,6 +23,8 @@ interface SidebarProps {
   version: string;
   collapsed?: boolean;
   onToggleCollapse?: () => void;
+  /** Called after a nav item runs (the narrow-screen overlay closes on it). */
+  onNavigate?: () => void;
 }
 
 /**
@@ -47,10 +49,10 @@ function groupItems(items: NavItem[]): Array<[string, NavItem[]]> {
   return order.map((group) => [group, map.get(group)!]);
 }
 
-export function Sidebar({ items, footer, topSlot, version, collapsed = false, onToggleCollapse }: SidebarProps) {
+export function Sidebar({ items, footer, topSlot, version, collapsed = false, onToggleCollapse, onNavigate }: SidebarProps) {
   return (
     <aside
-      className={`${collapsed ? 'w-14' : 'w-56'} shrink-0 flex flex-col bg-hubble-dark border-r border-hubble-border transition-[width] duration-200 ease-out`}
+      className={`${collapsed ? 'w-14' : 'w-56'} h-full shrink-0 flex flex-col bg-hubble-dark border-r border-hubble-border transition-[width] duration-200 ease-out`}
     >
       {/* Brand + collapse toggle */}
       <div className={`h-14 flex items-center border-b border-hubble-border ${collapsed ? 'justify-center px-0' : 'gap-2.5 px-4'}`}>
@@ -90,7 +92,10 @@ export function Sidebar({ items, footer, topSlot, version, collapsed = false, on
               return (
                 <button
                   key={item.id}
-                  onClick={item.onClick}
+                  onClick={() => {
+                    item.onClick();
+                    onNavigate?.();
+                  }}
                   title={item.hint ?? item.label}
                   aria-current={item.active ? 'page' : undefined}
                   className={`w-full flex items-center h-9 rounded-control text-sm transition-colors ${
