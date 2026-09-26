@@ -737,7 +737,7 @@ fn admission_doc(
         let list: Vec<String> = ap
             .uncovered
             .iter()
-            .map(|(r, w)| format!("{r} ({w})"))
+            .map(|(r, w)| crate::admission::comment(&format!("{r} ({w})")))
             .collect();
         return Ok(refused(
             artifact,
@@ -755,7 +755,7 @@ fn admission_doc(
                 "no image of this workload has every running digest signed by a verified signer ({})",
                 ap.uncovered
                     .iter()
-                    .map(|(r, w)| format!("{r}: {w}"))
+                    .map(|(r, w)| crate::admission::comment(&format!("{r}: {w}")))
                     .collect::<Vec<_>>()
                     .join("; ")
             ),

@@ -86,6 +86,9 @@ pub struct Repo {
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct Plan {
     pub groups: Vec<Group>,
+    /// Every identity a policy trusts, with the (repository, digest) pairs
+    /// it was seen verifying: observed, not vetted, so listed for review.
+    pub evidence: BTreeMap<Authority, BTreeSet<(String, String)>>,
     /// Repository -> why it is not covered.
     pub uncovered: BTreeMap<String, String>,
 }
@@ -189,9 +192,13 @@ pub fn plan(rows: &[RunningImage]) -> Plan {
     let mut groups: BTreeMap<(Vec<Authority>, Vec<String>), Vec<Repo>> = BTreeMap::new();
     'repo: for (repo, acc) in by_repo {
         let mut auths = BTreeSet::new();
-        for Seen {
-            verdict, signers, ..
-        } in acc.digests.values()
+        let mut seen: Vec<(Authority, String)> = Vec::new();
+        for (
+            digest,
+            Seen {
+                verdict, signers, ..
+            },
+        ) in &acc.digests
         {
             match verdict.as_deref() {
                 Some("verified") => {}
@@ -207,6 +214,7 @@ pub fn plan(rows: &[RunningImage]) -> Plan {
                 }
             }
             let mine: Vec<Authority> = signers.iter().filter_map(authority_of).collect();
+            seen.extend(mine.iter().map(|a| (a.clone(), digest.clone())));
             if mine.is_empty() {
                 out.uncovered.insert(
                     repo.clone(),
@@ -228,6 +236,9 @@ pub fn plan(rows: &[RunningImage]) -> Plan {
                 predicates.push(p.to_string());
                 break;
             }
+        }
+        for (a, d) in seen {
+            out.evidence.entry(a).or_default().insert((repo.clone(), d));
         }
         groups
             .entry((auths.into_iter().collect(), predicates))
@@ -324,13 +335,20 @@ pub fn documents(p: &Plan, o: &Options) -> Vec<Value> {
 }
 
 fn kyverno(g: &Group, name: &str, enforce: bool) -> Value {
-    let mut globs = Vec::new();
+    // Kyverno matches the image string as the pod spec writes it, so every
+    // spelling of the repository must be listed or an image escapes the
+    // policy: bare (no tag, i.e. :latest), with any tag, with a digest.
+    // "*" crosses "/" in Kyverno globs; the ":" / "@" pin the name.
+    let mut names = BTreeSet::new();
     for r in &g.repositories {
-        for n in &r.spec_names {
-            // "*" crosses "/" in Kyverno globs; the ":" / "@" pin the name.
-            globs.push(json!({"glob": format!("{n}:*")}));
-            globs.push(json!({"glob": format!("{n}@*")}));
-        }
+        names.extend(spellings(&r.repository));
+        names.extend(r.spec_names.iter().cloned());
+    }
+    let mut globs = Vec::new();
+    for n in &names {
+        globs.push(json!({"glob": n}));
+        globs.push(json!({"glob": format!("{n}:*")}));
+        globs.push(json!({"glob": format!("{n}@*")}));
     }
     let mut attestors = Vec::new();
     let mut refs = Vec::new();
@@ -407,6 +425,30 @@ fn kyverno(g: &Group, name: &str, enforce: bool) -> Value {
         "metadata": {"name": name, "annotations": annotations(&[])},
         "spec": spec,
     })
+}
+
+/// Every way a pod spec can name `repository` (normalised, as the
+/// inventory stores it). Docker Hub has several: `nginx`, `library/nginx`,
+/// `docker.io/nginx`, `docker.io/library/nginx` and
+/// `index.docker.io/library/nginx` all pull the same image.
+pub fn spellings(repository: &str) -> Vec<String> {
+    let hub = repository
+        .strip_prefix("docker.io/")
+        .or_else(|| repository.strip_prefix("index.docker.io/"));
+    let Some(path) = hub else {
+        return vec![repository.to_string()];
+    };
+    let mut out = vec![
+        path.to_string(),
+        format!("docker.io/{path}"),
+        format!("index.docker.io/{path}"),
+    ];
+    if let Some(short) = path.strip_prefix("library/") {
+        out.push(short.to_string());
+        out.push(format!("docker.io/{short}"));
+        out.push(format!("index.docker.io/{short}"));
+    }
+    out
 }
 
 /// policy-controller's name for a repository: Docker Hub is
@@ -536,6 +578,7 @@ pub fn header(p: &Plan, o: &Options, scope: &str) -> String {
         ("policy-controller", true) => "Sigstore policy-controller ClusterImagePolicy, mode enforce",
         _ => "kguardian ImageTrustPolicy (report only, evaluated by the kguardian evaluator)",
     };
+    let scope = comment(scope);
     let mut h = format!(
         "# kguardian image admission policy for {scope}\n\
          # {what}\n\
@@ -548,10 +591,65 @@ pub fn header(p: &Plan, o: &Options, scope: &str) -> String {
     if p.groups.is_empty() {
         h.push_str("# No repository qualifies: none has every running digest signed by a signer kguardian verified.\n");
     }
+    if !p.evidence.is_empty() {
+        h.push_str("# REVIEW EVERY IDENTITY BEFORE APPLYING: identities were observed on running images, not vetted.\n");
+        h.push_str("# A signer that signed an image you run is trusted by this policy for every image it covers.\n");
+        for (a, seen) in &p.evidence {
+            h.push_str(&format!("# identity: {}\n", comment(&describe(a))));
+            for (repo, digest) in seen {
+                h.push_str(&format!(
+                    "#   verified {}@{}\n",
+                    comment(repo),
+                    comment(digest)
+                ));
+            }
+        }
+    }
     for (repo, why) in &p.uncovered {
-        h.push_str(&format!("# not covered: {repo} ({why})\n"));
+        h.push_str(&format!(
+            "# not covered: {} ({})\n",
+            comment(repo),
+            comment(why)
+        ));
     }
     h
+}
+
+/// One line describing a trusted identity.
+pub fn describe(a: &Authority) -> String {
+    match a {
+        Authority::Keyless {
+            issuer,
+            subject,
+            regexp: false,
+        } => format!("keyless issuer={issuer} subject={subject}"),
+        Authority::Keyless {
+            issuer,
+            subject,
+            regexp: true,
+        } => {
+            format!("keyless issuer={issuer} subjectRegExp={subject} (widened from observed tag subjects)")
+        }
+        Authority::Key { fingerprint, .. } => format!("key sha256:{fingerprint}"),
+    }
+}
+
+/// Text for inside one comment line.
+///
+/// TODO(#1678): once #1678 merges, call its shared
+/// `profile_export::comment_text` here (made pub(crate)) instead: one
+/// implementation for every generated comment. Until then this removes the
+/// same five YAML/Unicode line breaks, and other control characters.
+pub fn comment(s: &str) -> String {
+    s.chars()
+        .map(|c| {
+            if c.is_control() || c == '\u{2028}' || c == '\u{2029}' {
+                ' '
+            } else {
+                c
+            }
+        })
+        .collect()
 }
 
 /// Renders a plan to a multi-document YAML stream.

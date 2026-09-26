@@ -1,6 +1,8 @@
 use super::*;
 use crate::attestation::RunningImage;
+use serde::Deserialize;
 use serde_json::json;
+use std::collections::BTreeSet;
 
 const PEM: &str = "-----BEGIN PUBLIC KEY-----
 MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAErBclBIBz28Uo7W6PFzioZ8s5BVr2
@@ -304,7 +306,7 @@ fn kyverno_audit_policy() {
     assert_eq!(d.len(), 2);
     let pause = d
         .iter()
-        .find(|x| x["spec"]["matchImageReferences"][0]["glob"] == "registry.k8s.io/pause:*")
+        .find(|x| x["spec"]["matchImageReferences"][0]["glob"] == "registry.k8s.io/pause")
         .unwrap();
     assert_eq!(pause["apiVersion"], "policies.kyverno.io/v1beta1");
     assert_eq!(pause["kind"], "ImageValidatingPolicy");
@@ -313,9 +315,19 @@ fn kyverno_audit_policy() {
         pause["spec"]["validationConfigurations"],
         json!({"mutateDigest": false, "verifyDigest": false})
     );
+    let globs: Vec<&str> = pause["spec"]["matchImageReferences"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|g| g["glob"].as_str().unwrap())
+        .collect();
     assert_eq!(
-        pause["spec"]["matchImageReferences"][1]["glob"],
-        "registry.k8s.io/pause@*"
+        globs,
+        vec![
+            "registry.k8s.io/pause",
+            "registry.k8s.io/pause:*",
+            "registry.k8s.io/pause@*"
+        ]
     );
     assert_eq!(
         pause["spec"]["attestors"][0]["cosign"]["keyless"]["identities"][0],
@@ -329,7 +341,7 @@ fn kyverno_audit_policy() {
     );
     let keyed = d
         .iter()
-        .find(|x| x["spec"]["matchImageReferences"][0]["glob"] == "ghcr.io/example/keyed:*")
+        .find(|x| x["spec"]["matchImageReferences"][0]["glob"] == "ghcr.io/example/keyed")
         .unwrap();
     assert_eq!(keyed["spec"]["attestors"][0]["cosign"]["key"]["data"], PEM);
     let enf = docs("kyverno", true);
@@ -394,7 +406,25 @@ fn policy_controller_warn_policy_and_provenance_split() {
             ..o.clone()
         },
     );
-    assert_eq!(k[0]["spec"]["matchImageReferences"][0]["glob"], "nginx:*");
+    // Every Docker Hub spelling, bare, tagged and by digest.
+    let globs: BTreeSet<&str> = k[0]["spec"]["matchImageReferences"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|g| g["glob"].as_str().unwrap())
+        .collect();
+    for n in [
+        "nginx",
+        "library/nginx",
+        "docker.io/nginx",
+        "docker.io/library/nginx",
+        "index.docker.io/library/nginx",
+        "index.docker.io/nginx",
+    ] {
+        for g in [n.to_string(), format!("{n}:*"), format!("{n}@*")] {
+            assert!(globs.contains(g.as_str()), "missing {g}");
+        }
+    }
     assert_eq!(k[0]["spec"]["attestations"][0]["intoto"]["type"], SLSA_V1);
     assert_eq!(k[0]["spec"]["validations"].as_array().unwrap().len(), 6);
 }
@@ -501,4 +531,145 @@ fn live_load_rows_scopes_to_the_workload() {
         plan(&all).uncovered["ghcr.io/example/other"],
         "a running digest has not been checked"
     );
+}
+
+/// Glob semantics of Kyverno's matchImageReferences (gobwas glob, no
+/// separators: "*" matches any run of characters), to check what the
+/// generated globs select.
+fn kyverno_glob(pattern: &str, image: &str) -> bool {
+    fn m(p: &[u8], s: &[u8]) -> bool {
+        match (p.first(), s.first()) {
+            (None, None) => true,
+            (Some(b'*'), _) => m(&p[1..], s) || (!s.is_empty() && m(p, &s[1..])),
+            (Some(a), Some(b)) if a == b => m(&p[1..], &s[1..]),
+            _ => false,
+        }
+    }
+    m(pattern.as_bytes(), image.as_bytes())
+}
+
+/// Every way a pod can reference an observed image is matched: a tagless
+/// reference, a digest, and a docker.io/library form of an image observed
+/// by its short name.
+#[test]
+fn kyverno_globs_match_every_spelling() {
+    let rows = vec![row(
+        "a",
+        "x",
+        1,
+        "nginx:1.27",
+        Some("docker.io/library/nginx"),
+        Some("verified"),
+        json!([keyless("https://accounts.google.com", K8S_SAN)]),
+        json!([]),
+    )];
+    let o = Options {
+        format: "kyverno",
+        enforce: true,
+        name_prefix: "p",
+        namespace: None,
+    };
+    let d = documents(&plan(&rows), &o);
+    let globs: Vec<String> = d[0]["spec"]["matchImageReferences"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|g| g["glob"].as_str().unwrap().to_string())
+        .collect();
+    let matched = |img: &str| globs.iter().any(|g| kyverno_glob(g, img));
+    for img in [
+        "nginx",
+        "nginx:1.28",
+        "nginx@sha256:abc",
+        "library/nginx:1.27",
+        "docker.io/nginx",
+        "docker.io/library/nginx:1.27",
+        "docker.io/library/nginx@sha256:abc",
+        "index.docker.io/library/nginx:latest",
+    ] {
+        assert!(matched(img), "{img} escapes the policy");
+    }
+    for img in ["nginx-exporter:1", "evil/nginx:1", "ghcr.io/nginx:1"] {
+        assert!(!matched(img), "{img} wrongly selected");
+    }
+    // A non-Docker Hub repository has one spelling.
+    assert_eq!(
+        spellings("ghcr.io/example/api"),
+        vec!["ghcr.io/example/api"]
+    );
+}
+
+/// D3: every trusted identity is listed with the images and digests it was
+/// seen verifying, under a review warning.
+#[test]
+fn header_lists_every_identity_with_its_evidence() {
+    let p = plan(&fixtures());
+    let o = Options {
+        format: "kyverno",
+        enforce: false,
+        name_prefix: "k",
+        namespace: None,
+    };
+    let y = render(&p, &o, "the cluster").unwrap();
+    assert!(y.contains("# REVIEW EVERY IDENTITY BEFORE APPLYING: identities were observed on running images, not vetted."));
+    assert!(y.contains(&format!(
+        "# identity: keyless issuer=https://accounts.google.com subject={K8S_SAN}"
+    )));
+    assert!(y.contains(&format!(
+        "#   verified registry.k8s.io/pause@sha256:{:064x}",
+        1
+    )));
+    assert!(y.contains(&format!("# identity: key sha256:{FP}")));
+    assert!(y.contains(&format!(
+        "#   verified ghcr.io/example/keyed@sha256:{:064x}",
+        2
+    )));
+    // Nothing trusted, no identity section.
+    let none = render(&plan(&fixtures()[2..3]), &o, "x").unwrap();
+    assert!(!none.contains("REVIEW EVERY IDENTITY"));
+}
+
+/// Values that reach header comments (repository names, scope, reasons)
+/// cannot start a line: whatever the separator, the stream decodes to the
+/// generated policies only, never an injected object.
+#[test]
+fn comments_cannot_inject_documents() {
+    for sep in ["\n", "\r", "\r\n", "\u{0085}", "\u{2028}", "\u{2029}"] {
+        let inj = format!(
+            "evil{sep}---{sep}apiVersion: v1{sep}kind: Secret{sep}metadata:{sep}  name: pwned{sep}#"
+        );
+        let mut rows = fixtures();
+        // An uncovered repository and a covered one carry the payload.
+        rows[2].repository = Some(inj.clone());
+        rows[0].repository = Some(format!("registry.k8s.io/{inj}"));
+        let p = plan(&rows);
+        for format in ["kyverno", "policy-controller", "kguardian"] {
+            let o = Options {
+                format,
+                enforce: false,
+                name_prefix: "k",
+                namespace: Some("shop"),
+            };
+            let y = render(&p, &o, &format!("namespace {inj}")).unwrap();
+            let want: Vec<String> = documents(&p, &o)
+                .iter()
+                .map(|d| d["kind"].as_str().unwrap().to_string())
+                .collect();
+            let mut got = Vec::new();
+            for doc in serde_norway::Deserializer::from_str(&y) {
+                let v = Value::deserialize(doc).unwrap();
+                if let Some(k) = v.get("kind").and_then(Value::as_str) {
+                    got.push(k.to_string());
+                }
+            }
+            assert_eq!(got, want, "{format} {sep:?}: decoded kinds");
+            // No comment line carries a line break of any kind.
+            for line in y.split('\n').filter(|l| l.starts_with('#')) {
+                assert!(
+                    !line.contains(['\r', '\u{0085}', '\u{2028}', '\u{2029}']),
+                    "{format} {sep:?}: separator in comment {line:?}"
+                );
+            }
+        }
+    }
 }
