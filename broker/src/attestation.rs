@@ -13,6 +13,7 @@
 //! | `POST /images/{digest}/attestation` | supplychain | replace the result for a digest |
 //! | `GET /images/{digest}/attestation` | read | the stored result |
 //! | `GET /attestations` | read | a keyset page of summaries, filterable by verdict/repository |
+//! | `GET /attestations/running` | read | running workload containers with their image's verified signers (evaluator feed) |
 //!
 //! # Ingest rules
 //!
@@ -46,9 +47,10 @@ use diesel::pg::PgConnection;
 use diesel::prelude::*;
 use diesel::r2d2::{self, ConnectionManager};
 use diesel::sql_query;
-use diesel::sql_types::{BigInt, Bool, Jsonb, Nullable, Text, Timestamp};
+use diesel::sql_types::{BigInt, Bool, Double, Jsonb, Nullable, Text, Timestamp};
 use serde::de::{self, Deserializer, SeqAccess, Visitor};
 use serde::{Deserialize, Serialize};
+use serde_json::json;
 use std::marker::PhantomData;
 use std::time::Duration;
 use tracing::{info, warn};
@@ -1087,6 +1089,190 @@ pub async fn get_attestations(
             repository.as_deref(),
             limit,
         )
+    })
+    .await?
+    .map_err(actix_web::error::ErrorInternalServerError)?;
+    Ok(HttpResponse::Ok().json(page))
+}
+
+// ---------------------------------------------------------------------
+// Running feed (#1533 P2-2): every running workload container with the
+// signature result of its digest, for the evaluator's ImageTrustPolicy
+// pass.
+// ---------------------------------------------------------------------
+
+/// Per row: two bounded jsonb lists of verified entries.
+pub const RUNNING_ROW_COST_BYTES: u64 = 16 * 1024;
+pub const RUNNING_DEFAULT_LIMIT: i64 = 500;
+pub const RUNNING_MAX_LIMIT: i64 = 1000;
+
+/// One running workload container and what is known about who signed its
+/// image. `verdict` is `None` when the digest has not been checked (no
+/// result yet, or signature discovery is off): not checked, never
+/// "unsigned".
+#[derive(Debug, QueryableByName, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RunningImage {
+    #[diesel(sql_type = Text)]
+    #[serde(skip)]
+    pub cluster_id: String,
+    #[diesel(sql_type = Text)]
+    pub namespace: String,
+    #[diesel(sql_type = Text)]
+    pub workload_kind: String,
+    #[diesel(sql_type = Text)]
+    pub workload_name: String,
+    #[diesel(sql_type = Text)]
+    pub container: String,
+    #[diesel(sql_type = Text)]
+    pub digest: String,
+    #[diesel(sql_type = Text)]
+    pub image_ref: String,
+    #[diesel(sql_type = Nullable<Text>)]
+    pub repository: Option<String>,
+    #[diesel(sql_type = Nullable<Text>)]
+    pub verdict: Option<String>,
+    #[diesel(sql_type = Nullable<Text>)]
+    pub reason: Option<String>,
+    #[diesel(sql_type = Nullable<Timestamp>)]
+    pub checked_at: Option<NaiveDateTime>,
+    /// Verified signatures only.
+    #[diesel(sql_type = Jsonb)]
+    pub signers: serde_json::Value,
+    /// Verified attestations only, without payload hashes.
+    #[diesel(sql_type = Jsonb)]
+    pub attestations: serde_json::Value,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RunningPage {
+    pub items: Vec<RunningImage>,
+    /// Opaque; pass as `?after=` for the next page.
+    pub next_after: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct RunningQuery {
+    pub namespace: Option<String>,
+    pub limit: Option<i64>,
+    pub after: Option<String>,
+}
+
+const RUNNING_SQL: &str = concat!(
+    "SELECT wc.cluster_id, wc.pod_namespace AS namespace, wc.workload_kind, wc.workload_name, \
+     wc.container_name AS container, wc.image_digest AS digest, wc.image_ref, i.repository, \
+     a.verdict, a.reason, a.checked_at, \
+     COALESCE((SELECT jsonb_agg(s - 'detail' - 'error') FROM jsonb_array_elements(a.signatures) s \
+         WHERE (s->>'verified')::boolean), '[]'::jsonb) AS signers, \
+     COALESCE((SELECT jsonb_agg(e - 'detail' - 'error' - 'payloadSha256') FROM jsonb_array_elements(a.attestations) e \
+         WHERE (e->>'verified')::boolean), '[]'::jsonb) AS attestations \
+     FROM workload_containers wc \
+     LEFT JOIN images i ON i.digest = wc.image_digest \
+     LEFT JOIN image_attestations a ON a.digest = wc.image_digest \
+     WHERE ",
+    crate::image_inventory::running_sql!("$1"),
+    " AND ($2::text IS NULL OR wc.pod_namespace = $2) \
+     AND ($3::text IS NULL OR (wc.cluster_id, wc.pod_namespace, wc.workload_kind, wc.workload_name, \
+          wc.container_name, wc.image_digest) > ($3, $4, $5, $6, $7, $8)) \
+     ORDER BY wc.cluster_id, wc.pod_namespace, wc.workload_kind, wc.workload_name, wc.container_name, wc.image_digest \
+     LIMIT $9"
+);
+
+fn hex_encode(b: &[u8]) -> String {
+    b.iter().map(|x| format!("{x:02x}")).collect()
+}
+
+fn hex_decode(s: &str) -> Option<Vec<u8>> {
+    if !s.len().is_multiple_of(2) || s.len() > 8192 {
+        return None;
+    }
+    (0..s.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(s.get(i..i + 2)?, 16).ok())
+        .collect()
+}
+
+/// The keyset cursor: the six key columns of the last row, JSON, hex.
+fn encode_cursor(r: &RunningImage) -> String {
+    let v = json!([
+        r.cluster_id,
+        r.namespace,
+        r.workload_kind,
+        r.workload_name,
+        r.container,
+        r.digest
+    ]);
+    hex_encode(v.to_string().as_bytes())
+}
+
+fn decode_cursor(s: &str) -> Option<[String; 6]> {
+    let raw = hex_decode(s)?;
+    let v: Vec<String> = serde_json::from_slice(&raw).ok()?;
+    v.try_into().ok()
+}
+
+pub fn running(
+    conn: &mut PgConnection,
+    namespace: Option<&str>,
+    after: Option<&[String; 6]>,
+    limit: i64,
+) -> Result<RunningPage, DbError> {
+    let a = |i: usize| after.map(|c| c[i].as_str());
+    let mut items: Vec<RunningImage> = sql_query(RUNNING_SQL)
+        .bind::<Double, _>(crate::image_inventory::running_window_secs() as f64)
+        .bind::<Nullable<Text>, _>(namespace)
+        .bind::<Nullable<Text>, _>(a(0))
+        .bind::<Nullable<Text>, _>(a(1))
+        .bind::<Nullable<Text>, _>(a(2))
+        .bind::<Nullable<Text>, _>(a(3))
+        .bind::<Nullable<Text>, _>(a(4))
+        .bind::<Nullable<Text>, _>(a(5))
+        .bind::<BigInt, _>(limit + 1)
+        .load(conn)?;
+    let next_after = if items.len() as i64 > limit {
+        items.truncate(limit as usize);
+        items.last().map(encode_cursor)
+    } else {
+        None
+    };
+    Ok(RunningPage { items, next_after })
+}
+
+#[get(
+    "/attestations/running",
+    wrap = "::actix_web::middleware::from_fn(crate::auth::authorize)"
+)]
+pub async fn get_running_attestations(
+    pool: web::Data<DbPool>,
+    budget: web::Data<ReadBudget>,
+    query: web::Query<RunningQuery>,
+) -> actix_web::Result<impl Responder> {
+    let q = query.into_inner();
+    let limit = q
+        .limit
+        .unwrap_or(RUNNING_DEFAULT_LIMIT)
+        .clamp(1, RUNNING_MAX_LIMIT);
+    let after = match non_empty(q.after) {
+        None => None,
+        Some(a) => match decode_cursor(&a) {
+            Some(c) => Some(c),
+            None => {
+                return Ok(HttpResponse::BadRequest().body("after is not a cursor from nextAfter"))
+            }
+        },
+    };
+    let namespace = non_empty(q.namespace);
+    let _permit = match budget
+        .acquire(cost_kib(limit + 1, RUNNING_ROW_COST_BYTES))
+        .await
+    {
+        Ok(p) => p,
+        Err(shed) => return Ok(shed.into_response()),
+    };
+    let page = web::block(move || {
+        let mut conn = pool.get()?;
+        running(&mut conn, namespace.as_deref(), after.as_ref(), limit)
     })
     .await?
     .map_err(actix_web::error::ErrorInternalServerError)?;

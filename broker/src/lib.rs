@@ -34,8 +34,8 @@ pub use add::{
     mark_pod_dead,
 };
 pub use attestation::{
-    attestation_resource, get_attestations, render_metrics as attestation_metrics,
-    spawn_retention as spawn_attestation_retention,
+    attestation_resource, get_attestations, get_running_attestations,
+    render_metrics as attestation_metrics, spawn_retention as spawn_attestation_retention,
 };
 pub use audit::AuditClient;
 pub use compute::{compute_findings, ComputeThresholds};

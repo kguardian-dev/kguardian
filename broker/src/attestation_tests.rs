@@ -742,3 +742,101 @@ fn verdict_follows_the_signature_classes() {
         );
     }
 }
+
+#[test]
+fn cursor_round_trips_and_rejects_garbage() {
+    let r = RunningImage {
+        cluster_id: "primary".into(),
+        namespace: "shop".into(),
+        workload_kind: "Deployment".into(),
+        workload_name: "api\"x".into(),
+        container: "app".into(),
+        digest: d(1),
+        image_ref: "r".into(),
+        repository: None,
+        verdict: None,
+        reason: None,
+        checked_at: None,
+        signers: json!([]),
+        attestations: json!([]),
+    };
+    let c = decode_cursor(&encode_cursor(&r)).unwrap();
+    assert_eq!(c[3], "api\"x");
+    assert_eq!(c[5], d(1));
+    for bad in [
+        "",
+        "zz",
+        "abc",
+        &hex_encode(b"[1,2]"),
+        &hex_encode(b"[\"a\"]"),
+    ] {
+        assert!(decode_cursor(bad).is_none(), "{bad}");
+    }
+}
+
+fn add_container(conn: &mut PgConnection, ns: &str, name: &str, container: &str, digest: &str) {
+    sql_query(
+        "INSERT INTO workload_containers (pod_namespace, workload_kind, workload_name, container_name, \
+         image_digest, container_kind, image_ref, state) \
+         VALUES ($1, 'Deployment', $2, $3, $4, 'regular', 'ghcr.io/example/api:1', 'running')",
+    )
+    .bind::<Text, _>(ns)
+    .bind::<Text, _>(name)
+    .bind::<Text, _>(container)
+    .bind::<Text, _>(digest)
+    .execute(conn)
+    .expect("insert container");
+}
+
+#[test]
+#[ignore = "requires a live postgres (set KG_TEST_DATABASE_URL)"]
+fn live_running_feed() {
+    use diesel::connection::SimpleConnection;
+    let mut conn = live_conn();
+    conn.batch_execute("TRUNCATE workload_containers").unwrap();
+    add_image(&mut conn, &d(40));
+    add_image(&mut conn, &d(41));
+    store(
+        &mut conn,
+        &post_at(&d(40), "verified", "2026-09-01T00:00:00Z"),
+    )
+    .unwrap();
+    add_container(&mut conn, "shop", "api", "app", &d(40));
+    add_container(&mut conn, "shop", "api", "sidecar", &d(41));
+    add_container(&mut conn, "tools", "job", "run", &d(40));
+    // Not running: excluded.
+    sql_query(
+        "INSERT INTO workload_containers (pod_namespace, workload_kind, workload_name, container_name, \
+         image_digest, container_kind, image_ref, state) \
+         VALUES ('shop', 'Deployment', 'old', 'app', $1, 'regular', 'x', 'terminated')",
+    )
+    .bind::<Text, _>(d(40))
+    .execute(&mut conn)
+    .unwrap();
+
+    let mut all = Vec::new();
+    let mut after: Option<[String; 6]> = None;
+    loop {
+        let p = running(&mut conn, None, after.as_ref(), 2).unwrap();
+        all.extend(p.items);
+        match p.next_after {
+            Some(c) => after = Some(decode_cursor(&c).unwrap()),
+            None => break,
+        }
+    }
+    assert_eq!(all.len(), 3);
+    let app = all.iter().find(|r| r.container == "app").unwrap();
+    assert_eq!(app.verdict.as_deref(), Some("verified"));
+    // Only the verified signature, without detail/error.
+    assert_eq!(app.signers.as_array().unwrap().len(), 1);
+    assert!(app.signers[0].get("detail").is_none());
+    assert_eq!(app.attestations.as_array().unwrap().len(), 1);
+    assert!(app.attestations[0].get("payloadSha256").is_none());
+    // A digest with no result is "not checked": verdict null.
+    let side = all.iter().find(|r| r.container == "sidecar").unwrap();
+    assert!(side.verdict.is_none());
+    assert_eq!(side.signers, json!([]));
+
+    let shop = running(&mut conn, Some("shop"), None, 10).unwrap();
+    assert_eq!(shop.items.len(), 2);
+}
