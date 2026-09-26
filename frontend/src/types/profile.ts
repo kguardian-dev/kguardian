@@ -324,8 +324,8 @@ export interface DriftNotEvaluated {
 }
 
 export interface ProfileDrift {
-  /** Checks that ran for the whole workload. One not listed was not evaluated. */
-  evaluated: string[];
+  /** Checks that ran for the whole workload. One not listed was not evaluated. Absent = none. */
+  evaluated?: string[];
   notEvaluated?: DriftNotEvaluated[];
   items: { type: string; findingId: string; severity: FindingSeverity; container: string | null }[];
 }

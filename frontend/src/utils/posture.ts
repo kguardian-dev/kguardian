@@ -71,6 +71,8 @@ export function driftNotEvaluatedText(reason: string): string {
       return 'no earlier securityContext to compare with';
     case 'no_container_data':
       return 'no container securityContext reported';
+    case 'coverage_unavailable':
+      return 'runtime coverage cannot be read (the coverage function is missing)';
     case 'not_reported':
       return 'not evaluated (this broker does not say why)';
     default:
@@ -142,11 +144,15 @@ const DRIFT_CHECKS_V14 = ['tagMoved', 'imageChangedSinceExport', 'securityContex
 /**
  * Drift checks not evaluated. A v1.7+ broker lists them (notEvaluated); a
  * v1.4-v1.6 broker only sends `evaluated`, so the v1.4 checks it did not
- * evaluate are gaps too (reason `not_reported`).
+ * evaluate are gaps too (reason `not_reported`); a drift block without
+ * `evaluated` counts as nothing evaluated. A pre-v1.4 broker sends no
+ * drift block at all: there is nothing to caveat, and no drift finding
+ * can appear either.
  */
 export function driftGapsOf(drift: ProfileDrift | undefined): DriftNotEvaluated[] {
   if (!drift) return [];
   if (drift.notEvaluated) return drift.notEvaluated;
-  return DRIFT_CHECKS_V14.filter((t) => !drift.evaluated.includes(t)).map((type) => ({ type, container: null, reason: 'not_reported' }));
+  const evaluated = drift.evaluated ?? [];
+  return DRIFT_CHECKS_V14.filter((t) => !evaluated.includes(t)).map((type) => ({ type, container: null, reason: 'not_reported' }));
 }
 
