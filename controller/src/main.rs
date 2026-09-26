@@ -204,12 +204,19 @@ async fn main() -> Result<(), Error> {
     let runtime_mode = kguardian::runtime_inventory::Mode::from_env();
     let (runtime_event_sender, runtime_event_receiver) =
         mpsc::channel::<kguardian::runtime_inventory::RuntimeEventData>(1000);
+    // Capability inventory (RUNTIME_INVENTORY_CAPABILITIES), only with the
+    // runtime inventory on.
+    let runtime_caps = runtime_mode != kguardian::runtime_inventory::Mode::Off
+        && kguardian::runtime_inventory::capabilities_from_env();
+    let (cap_sender, cap_receiver) = mpsc::channel::<kguardian::runtime_capabilities::CapMsg>(1000);
     let runtime_events = (runtime_mode != kguardian::runtime_inventory::Mode::Off).then(|| {
-        (
-            runtime_event_sender,
-            runtime_mode == kguardian::runtime_inventory::Mode::Full,
-        )
+        kguardian::runtime_inventory::ProbeConfig {
+            files: runtime_event_sender,
+            libs: runtime_mode == kguardian::runtime_inventory::Mode::Full,
+            caps: runtime_caps.then_some(cap_sender),
+        }
     });
+    let cap_receiver = runtime_caps.then_some(cap_receiver);
 
     // The denial probe is loaded by the eBPF loader alongside the other
     // three — it needs the pod registration stream, which only that loop
@@ -306,7 +313,7 @@ async fn main() -> Result<(), Error> {
     );
     supervisor.spawn(
         Subsystem::RuntimeInventory,
-        kguardian::runtime_inventory::run(runtime_event_receiver, runtime_mode),
+        kguardian::runtime_inventory::run(runtime_event_receiver, cap_receiver, runtime_mode),
     );
     supervisor.spawn(
         Subsystem::NetpolicyDropEvents,

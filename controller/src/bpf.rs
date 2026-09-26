@@ -230,26 +230,96 @@ fn open_and_load_syscall(
     open.load().map_err(|e| format!("load: {e}"))
 }
 
-/// Load and attach the runtime inventory probe (exec always, executable
-/// mmaps when `libs`). Every failure is a warning and `None`: the feature
-/// degrades to /proc backfill, capture of everything else is untouched.
-pub(crate) fn load_runtime_inventory(
-    storage: &mut MaybeUninit<OpenObject>,
+/// Open and load the runtime inventory object with the library program
+/// when `libs` and the capability program for `cap_symbol` (if any).
+fn open_runtime<'a>(
+    storage: &'a mut MaybeUninit<OpenObject>,
     libs: bool,
-) -> Option<(RuntimeInventorySkel<'_>, Vec<libbpf_rs::Link>)> {
-    let libs = libs && kernel_can_fentry(RUNTIME_MMAP_SYMBOL);
-    let mut open = match RuntimeInventorySkelBuilder::default().open(storage) {
-        Ok(o) => o,
-        Err(e) => {
-            warn!(error = %e, "runtime inventory probe failed to open; exec/library inventory \
-                   comes from /proc backfill only");
-            return None;
-        }
-    };
+    cap_symbol: Option<&str>,
+) -> std::result::Result<RuntimeInventorySkel<'a>, String> {
+    let mut open = RuntimeInventorySkelBuilder::default()
+        .open(storage)
+        .map_err(|e| format!("open: {e}"))?;
     if !libs {
         open.progs.trace_runtime_mmap.set_autoload(false);
     }
-    let sk = match open.load() {
+    if cap_symbol != Some("security_capable") {
+        open.progs.trace_runtime_capable.set_autoload(false);
+    }
+    if cap_symbol != Some("cap_capable") {
+        open.progs.trace_runtime_cap_capable.set_autoload(false);
+    }
+    open.load().map_err(|e| format!("load: {e}"))
+}
+
+/// Which optional runtime inventory programs attached.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct RuntimeAttached {
+    /// fentry/security_mmap_file (libraries).
+    pub libs: bool,
+    /// fexit on security_capable or cap_capable (capabilities).
+    pub caps: bool,
+    /// Which capability hook, when `caps`.
+    pub cap_hook: Option<&'static str>,
+}
+
+/// The capability hooks, in order of preference. cap_capable, the
+/// commoncap check, sees every check security_capable does plus the ones
+/// commoncap makes directly (capset's SETPCAP test, xattr and prctl
+/// checks), which security_capable misses; its verdict is the capability
+/// bits alone, which is what securityContext.capabilities controls.
+/// security_capable is the fallback where cap_capable cannot be traced.
+pub const RUNTIME_CAP_SYMBOLS: [&str; 2] = ["cap_capable", "security_capable"];
+
+/// Load and attach the runtime inventory probe (exec always, executable
+/// mmaps when `libs`, capability checks when `caps`). Every failure is a
+/// warning: the feature degrades (to /proc backfill for files, to no
+/// capability data), capture of everything else is untouched. A kernel
+/// that refuses the capability program costs only that program: the
+/// object is loaded again without it.
+pub(crate) fn load_runtime_inventory(
+    storage: &mut MaybeUninit<OpenObject>,
+    libs: bool,
+    caps: bool,
+) -> Option<(
+    RuntimeInventorySkel<'_>,
+    Vec<libbpf_rs::Link>,
+    RuntimeAttached,
+)> {
+    let libs = libs && kernel_can_fentry(RUNTIME_MMAP_SYMBOL);
+    // RUNTIME_INVENTORY_CAP_HOOK pins one hook (tests exercise the
+    // fallback with it; an operator can use it to steer around a kernel).
+    let pinned = std::env::var("RUNTIME_INVENTORY_CAP_HOOK").ok();
+    let cap_symbol = if caps {
+        RUNTIME_CAP_SYMBOLS
+            .into_iter()
+            .filter(|s| pinned.as_deref().is_none_or(|p| p == *s))
+            .find(|s| kernel_can_fentry(s))
+    } else {
+        None
+    };
+    if caps && cap_symbol.is_none() {
+        warn!(
+            "no traceable capability hook (security_capable, cap_capable); capability \
+               inventory is off on this node"
+        );
+    }
+    // A trial load with the capability program, in its own storage and
+    // dropped at once: a kernel that refuses it then costs only the
+    // capability inventory, not exec and library capture.
+    let caps_loadable = cap_symbol.is_some() && {
+        let mut trial = MaybeUninit::uninit();
+        let outcome = open_runtime(&mut trial, libs, cap_symbol).map(drop);
+        match outcome {
+            Ok(()) => true,
+            Err(e) => {
+                warn!(error = %e, "the capability program does not load on this kernel; \
+                       no capability inventory on this node");
+                false
+            }
+        }
+    };
+    let sk = match open_runtime(storage, libs, cap_symbol.filter(|_| caps_loadable)) {
         Ok(sk) => sk,
         Err(e) => {
             warn!(error = %e, "runtime inventory probe failed to load; exec/library inventory \
@@ -257,7 +327,9 @@ pub(crate) fn load_runtime_inventory(
             return None;
         }
     };
+    let caps_loaded = caps_loadable;
     let mut links = Vec::new();
+    let mut attached = RuntimeAttached::default();
     match sk.progs.trace_runtime_exec.attach() {
         Ok(l) => links.push(l),
         Err(e) => {
@@ -268,16 +340,36 @@ pub(crate) fn load_runtime_inventory(
     }
     if libs {
         match sk.progs.trace_runtime_mmap.attach() {
-            Ok(l) => links.push(l),
+            Ok(l) => {
+                links.push(l);
+                attached.libs = true;
+            }
             Err(e) => warn!(error = %e, "could not attach fentry/{RUNTIME_MMAP_SYMBOL}; \
                    library inventory comes from /proc backfill only"),
         }
     }
+    if caps_loaded {
+        let prog = match cap_symbol {
+            Some("security_capable") => &sk.progs.trace_runtime_capable,
+            _ => &sk.progs.trace_runtime_cap_capable,
+        };
+        match prog.attach() {
+            Ok(l) => {
+                links.push(l);
+                attached.caps = true;
+                attached.cap_hook = cap_symbol;
+            }
+            Err(e) => warn!(error = %e, symbol = cap_symbol.unwrap_or(""),
+                "could not attach the capability probe; no capability inventory on this node"),
+        }
+    }
     info!(
-        libraries = links.len() > 1,
+        libraries = attached.libs,
+        capabilities = attached.caps,
+        capability_hook = cap_symbol.filter(|_| attached.caps).unwrap_or("none"),
         "Runtime inventory eBPF program loaded and attached"
     );
-    Some((sk, links))
+    Some((sk, links, attached))
 }
 
 /// The kernel function the library probe attaches to.
@@ -519,7 +611,7 @@ pub fn ebpf_handle(
     seccomp_denial_maps: Option<oneshot::Sender<DenialMaps>>,
     cgroup_event_sender: Sender<(u64, String)>,
     mut forget_pending: Receiver<u64>,
-    runtime_events: Option<(Sender<RuntimeEventData>, bool)>,
+    runtime_events: Option<crate::runtime_inventory::ProbeConfig>,
 ) -> JoinHandle<Result<(), Error>> {
     task::spawn_blocking(move || {
         // The IPv6 UDP twins target udpv6_sendmsg; on a kernel where
@@ -679,16 +771,17 @@ pub fn ebpf_handle(
         // feature is off or this kernel refuses it; the sender is kept
         // alive either way so the consumer keeps running (backfill).
         let mut runtime_storage = MaybeUninit::uninit();
-        let (runtime_sender, runtime_libs) = match runtime_events {
-            Some((tx, libs)) => (Some(tx), libs),
-            None => (None, false),
+        let (runtime_sender, runtime_libs, caps_sender) = match runtime_events {
+            Some(c) => (Some(c.files), c.libs, c.caps),
+            None => (None, false, None),
         };
-        let runtime = runtime_sender
-            .as_ref()
-            .and_then(|_| load_runtime_inventory(&mut runtime_storage, runtime_libs));
-        if let Some((_, links)) = runtime.as_ref() {
-            crate::runtime_inventory::probe_attached(links.len() > 1);
+        let runtime = runtime_sender.as_ref().and_then(|_| {
+            load_runtime_inventory(&mut runtime_storage, runtime_libs, caps_sender.is_some())
+        });
+        if let Some((_, _, attached)) = runtime.as_ref() {
+            crate::runtime_inventory::probe_attached(attached.libs, attached.caps);
         }
+        let caps_sender = caps_sender.filter(|_| runtime.as_ref().is_some_and(|r| r.2.caps));
 
         // Load and attach the seccomp denial probe. `None` here means
         // SECCOMP_DENIAL_CAPTURE is off and nothing is loaded at all;
@@ -778,7 +871,28 @@ pub fn ebpf_handle(
             })?;
 
         // Runtime inventory events, when the probe loaded.
-        if let (Some((sk, _links)), Some(tx)) = (runtime.as_ref(), runtime_sender.clone()) {
+        if let (Some((sk, _, _)), Some(tx)) = (runtime.as_ref(), caps_sender.clone()) {
+            ring_buffer_builder
+                .add(&sk.maps.cap_events, move |data: &[u8]| {
+                    use crate::runtime_capabilities::{CapEventData, CapMsg};
+                    if data.len() < std::mem::size_of::<CapEventData>() {
+                        return 0;
+                    }
+                    let ev: CapEventData =
+                        unsafe { std::ptr::read_unaligned(data.as_ptr() as *const CapEventData) };
+                    if let Err(e) = tx.blocking_send(CapMsg::Event(ev)) {
+                        if !RUNTIME_SEND_FAILED.swap(true, Ordering::Relaxed) {
+                            warn!(error = ?e, "capability channel closed; signalling eBPF poll loop to exit");
+                        }
+                        signal_ebpf_shutdown();
+                    }
+                    0
+                })
+                .map_err(|e| {
+                    Error::Custom(format!("Failed to add capability events ring buffer: {}", e))
+                })?;
+        }
+        if let (Some((sk, _, _)), Some(tx)) = (runtime.as_ref(), runtime_sender.clone()) {
             ring_buffer_builder
                 .add(&sk.maps.runtime_events, move |data: &[u8]| {
                     if data.len() < std::mem::size_of::<RuntimeEventData>() {
@@ -837,6 +951,7 @@ pub fn ebpf_handle(
 
         let mut consecutive_poll_errors: u32 = 0;
         let mut last_drop_read = std::time::Instant::now();
+        let mut last_caps_read = std::time::Instant::now();
 
         loop {
             // Honour the shutdown flag before polling so we exit promptly
@@ -881,7 +996,27 @@ pub fn ebpf_handle(
 
             // Runtime inventory: publish the kernel's drop count for the
             // coverage heartbeat (a few times a minute is plenty).
-            if let Some((sk, _)) = runtime.as_ref() {
+            // Capability counts: a snapshot of the kernel map.
+            if let (Some((sk, _, _)), Some(tx)) = (runtime.as_ref(), caps_sender.as_ref()) {
+                if last_caps_read.elapsed() >= crate::runtime_capabilities::COUNTS_EVERY {
+                    last_caps_read = std::time::Instant::now();
+                    let snapshot: Vec<_> = sk
+                        .maps
+                        .cap_seen
+                        .keys()
+                        .filter_map(|k| {
+                            let v = sk.maps.cap_seen.lookup(&k, MapFlags::ANY).ok().flatten()?;
+                            let cg = u64::from_ne_bytes(k.get(..8)?.try_into().ok()?);
+                            let cap = u32::from_ne_bytes(k.get(8..12)?.try_into().ok()?);
+                            let granted = u32::from_ne_bytes(k.get(12..16)?.try_into().ok()?) != 0;
+                            let count = u64::from_ne_bytes(v.get(..8)?.try_into().ok()?);
+                            Some(((cg, cap, granted), count))
+                        })
+                        .collect();
+                    let _ = tx.try_send(crate::runtime_capabilities::CapMsg::Counts(snapshot));
+                }
+            }
+            if let Some((sk, _, _)) = runtime.as_ref() {
                 if last_drop_read.elapsed() >= std::time::Duration::from_secs(5) {
                     last_drop_read = std::time::Instant::now();
                     if let Ok(Some(per_cpu)) = sk
@@ -1299,16 +1434,17 @@ mod tests {
         // Runtime inventory: exec and, where security_mmap_file can be
         // fentry-attached, the library probe too. Both must load AND attach.
         let mut storage = MaybeUninit::uninit();
-        let (_sk, links) =
-            load_runtime_inventory(&mut storage, true).expect("runtime inventory probe");
+        let (_sk, _links, attached) =
+            load_runtime_inventory(&mut storage, true, true).expect("runtime inventory probe");
         assert_eq!(
-            links.len(),
-            if kernel_can_fentry(RUNTIME_MMAP_SYMBOL) {
-                2
-            } else {
-                1
-            },
-            "runtime inventory programs attached"
+            attached.libs,
+            kernel_can_fentry(RUNTIME_MMAP_SYMBOL),
+            "library program attached where fentry works"
+        );
+        assert_eq!(
+            attached.caps,
+            RUNTIME_CAP_SYMBOLS.iter().any(|s| kernel_can_fentry(s)),
+            "capability program attached where a hook is traceable"
         );
 
         let mut storage = MaybeUninit::uninit();
@@ -1338,8 +1474,9 @@ mod tests {
         std::fs::create_dir_all(&ctr_dir).expect("create a kubepods-shaped cgroup");
 
         let mut storage = MaybeUninit::uninit();
-        let (sk, links) = load_runtime_inventory(&mut storage, true).expect("load");
-        let libs = links.len() > 1;
+        let (sk, links, attached) =
+            load_runtime_inventory(&mut storage, true, false).expect("load");
+        let libs = attached.libs;
 
         let events: Arc<Mutex<Vec<RuntimeEventData>>> = Arc::default();
         let sink = Arc::clone(&events);
@@ -1703,8 +1840,9 @@ mod tests {
         use std::os::unix::process::CommandExt;
 
         let mut storage = MaybeUninit::uninit();
-        let (sk, links) = load_runtime_inventory(&mut storage, true).expect("load");
-        if links.len() < 2 {
+        let (sk, links, attached) =
+            load_runtime_inventory(&mut storage, true, false).expect("load");
+        if !attached.libs {
             eprintln!("library probe not attachable here; nothing preemptible to test");
             return;
         }
@@ -1819,7 +1957,7 @@ mod tests {
         let cgid = std::fs::metadata(&ctr_dir).unwrap().ino();
 
         let mut storage = MaybeUninit::uninit();
-        let (mut sk, _links) = load_runtime_inventory(&mut storage, true).expect("load");
+        let (mut sk, _links, _) = load_runtime_inventory(&mut storage, true, false).expect("load");
         let events: Arc<Mutex<Vec<RuntimeEventData>>> = Arc::default();
         let sink = Arc::clone(&events);
         let mut rb = RingBufferBuilder::new();
@@ -1907,6 +2045,176 @@ mod tests {
             "the same file is reported on its next use"
         );
         let _ = std::fs::remove_dir(&ctr_dir);
+        let _ = std::fs::remove_dir(&pod_dir);
+    }
+
+    /// End to end on the RUNNING kernel: capability checks by a
+    /// container's tasks are counted per (container, capability, verdict),
+    /// and runc's own setup is not. Needs root and cgroup v2.
+    #[test]
+    #[ignore = "needs root, cgroup v2 and a BTF-enabled kernel; run by the ebpf-kernels CI job"]
+    fn capability_checks_are_counted_per_container_and_runc_is_not() {
+        use crate::runtime_capabilities::CapEventData;
+        use std::os::unix::fs::MetadataExt;
+        use std::os::unix::process::CommandExt;
+        use std::sync::{Arc, Mutex};
+
+        const UID: &str = "6a2c9a1e-7b4d-4e0a-9f1c-0123456789ab";
+        const CID: &str = "4c1e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c4b5a69788796a5b4c3d2e1f0";
+        const RUNC: &str = "4d1e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c4b5a69788796a5b4c3d2e1f0";
+        let pod_dir = format!("/sys/fs/cgroup/kubepods/besteffort/pod{UID}");
+        let ctr_dir = format!("{pod_dir}/{CID}");
+        let runc_dir = format!("{pod_dir}/{RUNC}");
+        std::fs::create_dir_all(&ctr_dir).unwrap();
+        std::fs::create_dir_all(&runc_dir).unwrap();
+        let cgid = std::fs::metadata(&ctr_dir).unwrap().ino();
+        let runc_cgid = std::fs::metadata(&runc_dir).unwrap().ino();
+
+        let mut storage = MaybeUninit::uninit();
+        let (sk, _links, attached) =
+            load_runtime_inventory(&mut storage, false, true).expect("load");
+        if !attached.caps {
+            eprintln!("no traceable capability hook on this kernel; skipped");
+            return;
+        }
+        eprintln!("capability hook: {:?}", attached.cap_hook);
+        let events: Arc<Mutex<Vec<CapEventData>>> = Arc::default();
+        let sink = Arc::clone(&events);
+        let mut rb = RingBufferBuilder::new();
+        rb.add(&sk.maps.cap_events, move |data: &[u8]| {
+            let ev: CapEventData =
+                unsafe { std::ptr::read_unaligned(data.as_ptr() as *const CapEventData) };
+            sink.lock().unwrap().push(ev);
+            0
+        })
+        .unwrap();
+        let rb = rb.build().unwrap();
+
+        // In the container: keep only NET_BIND_SERVICE, bind :80 twice
+        // (granted), sethostname (CAP_SYS_ADMIN, denied).
+        let child = |dir: String, runc: bool| {
+            let procs = format!("{dir}/cgroup.procs");
+            unsafe {
+                std::process::Command::new("/bin/true")
+                    .pre_exec(move || {
+                        std::fs::write(&procs, std::process::id().to_string())?;
+                        if runc {
+                            libc::prctl(libc::PR_SET_NAME, c"runc:[2:INIT]".as_ptr());
+                        }
+                        #[repr(C)]
+                        struct Hdr {
+                            version: u32,
+                            pid: i32,
+                        }
+                        #[repr(C)]
+                        struct Data {
+                            effective: u32,
+                            permitted: u32,
+                            inheritable: u32,
+                        }
+                        let hdr = Hdr {
+                            version: 0x2008_0522,
+                            pid: 0,
+                        };
+                        let bind_only = 1u32 << 10;
+                        let data = [
+                            Data {
+                                effective: bind_only,
+                                permitted: bind_only,
+                                inheritable: 0,
+                            },
+                            Data {
+                                effective: 0,
+                                permitted: 0,
+                                inheritable: 0,
+                            },
+                        ];
+                        if libc::syscall(libc::SYS_capset, &hdr, data.as_ptr()) != 0 {
+                            return Err(std::io::Error::last_os_error());
+                        }
+                        for _ in 0..2 {
+                            let fd = libc::socket(libc::AF_INET, libc::SOCK_STREAM, 0);
+                            let addr = libc::sockaddr_in {
+                                sin_family: libc::AF_INET as u16,
+                                sin_port: 80u16.to_be(),
+                                sin_addr: libc::in_addr { s_addr: 0 },
+                                sin_zero: [0; 8],
+                            };
+                            libc::bind(
+                                fd,
+                                &addr as *const libc::sockaddr_in as *const libc::sockaddr,
+                                std::mem::size_of::<libc::sockaddr_in>() as u32,
+                            );
+                            libc::close(fd);
+                        }
+                        libc::sethostname(c"kg".as_ptr(), 2);
+                        Ok(())
+                    })
+                    .status()
+                    .expect("spawn")
+            }
+        };
+        assert!(child(ctr_dir.clone(), false).success());
+        assert!(child(runc_dir.clone(), true).success());
+        for _ in 0..10 {
+            rb.poll(std::time::Duration::from_millis(100)).unwrap();
+        }
+
+        let mut counts: std::collections::BTreeMap<(u64, u32, u32), u64> = Default::default();
+        for k in sk.maps.cap_seen.keys() {
+            let v = sk.maps.cap_seen.lookup(&k, MapFlags::ANY).unwrap().unwrap();
+            counts.insert(
+                (
+                    u64::from_ne_bytes(k[..8].try_into().unwrap()),
+                    u32::from_ne_bytes(k[8..12].try_into().unwrap()),
+                    u32::from_ne_bytes(k[12..16].try_into().unwrap()),
+                ),
+                u64::from_ne_bytes(v[..8].try_into().unwrap()),
+            );
+        }
+        let ours: Vec<_> = counts.iter().filter(|(k, _)| k.0 == cgid).collect();
+        eprintln!("container: {ours:?}");
+        eprintln!(
+            "runc cgroup: {:?}",
+            counts
+                .iter()
+                .filter(|(k, _)| k.0 == runc_cgid)
+                .collect::<Vec<_>>()
+        );
+        let bind = counts.get(&(cgid, 10, 1)).copied().unwrap_or(0);
+        let admin_denied = counts.get(&(cgid, 21, 0)).copied().unwrap_or(0);
+        assert!(bind >= 2, "NET_BIND_SERVICE granted twice: {bind}");
+        assert!(
+            admin_denied >= 1,
+            "SYS_ADMIN checked and denied: {admin_denied}"
+        );
+        assert!(
+            !counts.contains_key(&(cgid, 21, 1)),
+            "SYS_ADMIN was never granted to the container"
+        );
+        assert!(
+            !counts.keys().any(|k| k.0 == runc_cgid),
+            "runc's own checks are not the container's"
+        );
+        let evs = events.lock().unwrap();
+        let first: Vec<_> = evs.iter().filter(|e| e.cgroup_id == cgid).collect();
+        assert!(first
+            .iter()
+            .all(|e| e.container_id().as_deref() == Some(CID)));
+        assert!(
+            first.iter().any(|e| e.cap == 10 && e.granted == 1),
+            "a first-sighting event names the container"
+        );
+        assert_eq!(
+            first
+                .iter()
+                .filter(|e| e.cap == 10 && e.granted == 1)
+                .count(),
+            1,
+            "one event per (container, capability, verdict); the rest are counts"
+        );
+        let _ = std::fs::remove_dir(&ctr_dir);
+        let _ = std::fs::remove_dir(&runc_dir);
         let _ = std::fs::remove_dir(&pod_dir);
     }
 
