@@ -264,25 +264,99 @@ pub struct DriftView {
 // Runtime input (unshippedExecutable)
 // ---------------------------------------------------------------------
 
-/// Unshipped rows read per workload; beyond this the read is truncated.
-pub const UNSHIPPED_ROWS_MAX: i64 = 500;
-/// Paths listed per drift item.
+/// Unshipped files listed per current (container, digest); `filesTotal`
+/// counts them all.
 pub const UNSHIPPED_PATHS_PER_ITEM: usize = 20;
+/// Current (container, digest) pairs read per workload.
+pub const UNSHIPPED_PAIRS_MAX: usize = 32;
+/// Worst-case bytes of one unshipped row: a PATH_MAX path plus the rest.
+const UNSHIPPED_ROW_COST_BYTES: u64 = 4_608;
+
+/// The unshipped files of one current (container, digest), newest first,
+/// at most [`UNSHIPPED_PATHS_PER_ITEM`], and how many there are in all.
+#[derive(Debug, Clone, Default)]
+pub struct UnshippedPair {
+    pub container: String,
+    pub digest: String,
+    pub total: i64,
+    pub entries: Vec<crate::runtime_inventory::RuntimeEntry>,
+}
 
 /// What the `unshippedExecutable` check reads from the runtime inventory
-/// (#1683): the workload's unshipped rows and its capture coverage.
+/// (#1683): the unshipped files of the workload's CURRENT pairs and the
+/// capture coverage.
 #[derive(Debug, Clone, Default)]
 pub struct RuntimeDriftInput {
     /// The controller has reported any runtime inventory for the workload.
     pub has_inventory: bool,
-    pub unshipped: Vec<crate::runtime_inventory::ContainerRuntime>,
-    pub unshipped_truncated: bool,
+    /// Only pairs with at least one unshipped file.
+    pub unshipped: Vec<UnshippedPair>,
+    /// More current pairs than [`UNSHIPPED_PAIRS_MAX`]: the rest unread.
+    pub pairs_truncated: bool,
     /// Per (container, digest) coverage over the default window.
     pub coverage: Vec<crate::runtime_inventory::CoverageView>,
 }
 
-/// Load the runtime input of one workload (bounded reads).
-pub fn load_runtime(conn: &mut PgConnection, key: &Key) -> Result<RuntimeDriftInput, DbError> {
+/// Unshipped files of the given current (container, digest) pairs: per
+/// pair the count and the newest few, in one statement. Both lateral
+/// reads are ranges of the runtime_executables primary key (cluster,
+/// namespace, kind, name, container, digest), so the cost is bounded by
+/// the current pairs, never by what old digests left behind.
+const UNSHIPPED_PAIRS_SQL: &str = "\
+WITH p AS ( \
+    SELECT * FROM unnest($5::text[], $6::text[]) AS p(container_name, image_digest) \
+) \
+SELECT p.container_name, p.image_digest, t.total, r.kind, r.path, r.source, r.origin, \
+    r.path_complete, r.first_seen, r.last_seen \
+FROM p \
+CROSS JOIN LATERAL ( \
+    SELECT count(*) AS total FROM runtime_executables e \
+    WHERE e.cluster_id = $1 AND e.pod_namespace = $2 AND e.workload_kind = $3 \
+      AND e.workload_name = $4 AND e.container_name = p.container_name \
+      AND e.image_digest = p.image_digest AND e.origin = ANY($7) \
+) t \
+CROSS JOIN LATERAL ( \
+    SELECT e.kind, e.path, e.source, e.origin, e.path_complete, e.first_seen, e.last_seen \
+    FROM runtime_executables e \
+    WHERE e.cluster_id = $1 AND e.pod_namespace = $2 AND e.workload_kind = $3 \
+      AND e.workload_name = $4 AND e.container_name = p.container_name \
+      AND e.image_digest = p.image_digest AND e.origin = ANY($7) \
+    ORDER BY e.last_seen DESC, e.path \
+    LIMIT $8 \
+) r \
+ORDER BY p.container_name, p.image_digest, r.last_seen DESC, r.path";
+
+#[derive(QueryableByName)]
+struct UnshippedRow {
+    #[diesel(sql_type = Text)]
+    container_name: String,
+    #[diesel(sql_type = Text)]
+    image_digest: String,
+    #[diesel(sql_type = BigInt)]
+    total: i64,
+    #[diesel(sql_type = Text)]
+    kind: String,
+    #[diesel(sql_type = Text)]
+    path: String,
+    #[diesel(sql_type = Text)]
+    source: String,
+    #[diesel(sql_type = Text)]
+    origin: String,
+    #[diesel(sql_type = diesel::sql_types::Bool)]
+    path_complete: bool,
+    #[diesel(sql_type = Timestamp)]
+    first_seen: NaiveDateTime,
+    #[diesel(sql_type = Timestamp)]
+    last_seen: NaiveDateTime,
+}
+
+/// Load the runtime input of one workload for its current (container,
+/// digest) pairs (bounded reads).
+pub fn load_runtime(
+    conn: &mut PgConnection,
+    key: &Key,
+    current: &[(String, String)],
+) -> Result<RuntimeDriftInput, DbError> {
     use crate::runtime_inventory as ri;
     let has_inventory = ri::workload_has_inventory(conn, &key.namespace, &key.kind, &key.name)?;
     let coverage = ri::workload_coverage(
@@ -292,31 +366,69 @@ pub fn load_runtime(conn: &mut PgConnection, key: &Key) -> Result<RuntimeDriftIn
         &key.name,
         ri::DEFAULT_COVERAGE_WINDOW_HOURS,
     )?;
-    let (unshipped, unshipped_truncated) = if has_inventory {
-        let w = ri::workload_unshipped_executables(
-            conn,
-            &key.namespace,
-            &key.kind,
-            &key.name,
-            UNSHIPPED_ROWS_MAX,
-        )?;
-        (w.containers, w.truncated)
-    } else {
-        (Vec::new(), false)
-    };
+    let mut pairs: Vec<(String, String)> = current
+        .iter()
+        .filter(|(_, d)| !d.is_empty())
+        .cloned()
+        .collect();
+    pairs.sort();
+    pairs.dedup();
+    let pairs_truncated = pairs.len() > UNSHIPPED_PAIRS_MAX;
+    pairs.truncate(UNSHIPPED_PAIRS_MAX);
+    let mut unshipped: Vec<UnshippedPair> = Vec::new();
+    if has_inventory && !pairs.is_empty() {
+        let rows: Vec<UnshippedRow> = sql_query(UNSHIPPED_PAIRS_SQL)
+            .bind::<Text, _>(DEFAULT_CLUSTER_ID)
+            .bind::<Text, _>(&key.namespace)
+            .bind::<Text, _>(&key.kind)
+            .bind::<Text, _>(&key.name)
+            .bind::<Array<Text>, _>(pairs.iter().map(|p| p.0.as_str()).collect::<Vec<_>>())
+            .bind::<Array<Text>, _>(pairs.iter().map(|p| p.1.as_str()).collect::<Vec<_>>())
+            .bind::<Array<Text>, _>(ri::UNSHIPPED_ORIGINS.to_vec())
+            .bind::<BigInt, _>(UNSHIPPED_PATHS_PER_ITEM as i64)
+            .load(conn)?;
+        for r in rows {
+            let entry = ri::RuntimeEntry {
+                path: r.path,
+                kind: r.kind,
+                source: r.source,
+                origin: r.origin,
+                path_complete: r.path_complete,
+                first_seen: r.first_seen,
+                last_seen: r.last_seen,
+            };
+            match unshipped.last_mut() {
+                Some(p) if p.container == r.container_name && p.digest == r.image_digest => {
+                    p.entries.push(entry)
+                }
+                _ => unshipped.push(UnshippedPair {
+                    container: r.container_name,
+                    digest: r.image_digest,
+                    total: r.total,
+                    entries: vec![entry],
+                }),
+            }
+        }
+    }
     Ok(RuntimeDriftInput {
         has_inventory,
         unshipped,
-        unshipped_truncated,
+        pairs_truncated,
         coverage,
     })
 }
 
-/// Read-budget charge of [`load_runtime`].
+/// Read-budget charge of [`load_runtime`]: every row it can return, at
+/// the worst-case row size (a PATH_MAX path), plus the coverage groups.
 pub fn runtime_charge_kib() -> u32 {
-    crate::read_budget::cost_kib(UNSHIPPED_ROWS_MAX + 1, 1_024).saturating_add(
-        crate::read_budget::cost_kib(crate::runtime_inventory::MAX_COVERAGE_GROUPS, 512),
+    crate::read_budget::cost_kib(
+        (UNSHIPPED_PAIRS_MAX * UNSHIPPED_PATHS_PER_ITEM) as i64,
+        UNSHIPPED_ROW_COST_BYTES,
     )
+    .saturating_add(crate::read_budget::cost_kib(
+        crate::runtime_inventory::MAX_COVERAGE_GROUPS,
+        512,
+    ))
 }
 
 /// Severity of an unshipped item: a file written into the container or
@@ -330,48 +442,55 @@ fn unshipped_severity(origins: &BTreeSet<&str>) -> &'static str {
     }
 }
 
-/// The `unshippedExecutable` check. Items for current containers' running
-/// digests; `evaluated` only when every current running container is
-/// covered and nothing was cut; otherwise `notEvaluated` entries.
+/// The `unshippedExecutable` check. One item per current container with
+/// unshipped files on a digest it runs now. `evaluated` only when every
+/// current running container is covered; otherwise `notEvaluated`
+/// entries (a workload with no running container is one, too).
 fn unshipped_check(
     containers: &[ImageContainerView],
     rt: Option<&RuntimeDriftInput>,
 ) -> (bool, Vec<NotEvaluated>, Vec<DriftItem>) {
     const T: &str = "unshippedExecutable";
+    let whole = |reason: &str| NotEvaluated {
+        kind: T,
+        container: None,
+        reason: reason.into(),
+    };
     let current: Vec<&ImageContainerView> = containers
         .iter()
         .filter(|c| !c.stale && !c.running.is_empty())
         .collect();
     let Some(rt) = rt else {
-        return (
-            false,
-            vec![NotEvaluated {
-                kind: T,
-                container: None,
-                reason: "no_inventory".into(),
-            }],
-            Vec::new(),
-        );
+        return (false, vec![whole("no_inventory")], Vec::new());
     };
+    if current.is_empty() {
+        return (false, vec![whole("no_running_containers")], Vec::new());
+    }
     let mut items = Vec::new();
     let mut not = Vec::new();
+    if rt.pairs_truncated {
+        not.push(whole("truncated"));
+    }
     for c in &current {
         let digests: BTreeSet<&str> = c.running.iter().map(|d| d.digest.as_str()).collect();
-        // Positive evidence first: rows of this container's running digests.
-        let mut entries: Vec<(&str, &crate::runtime_inventory::RuntimeEntry)> = rt
+        // Positive evidence first: this container's running digests.
+        let pairs: Vec<&UnshippedPair> = rt
             .unshipped
             .iter()
-            .filter(|r| r.container_name == c.name && digests.contains(r.image_digest.as_str()))
-            .flat_map(|r| r.entries.iter().map(move |e| (r.image_digest.as_str(), e)))
+            .filter(|p| p.container == c.name && digests.contains(p.digest.as_str()))
+            .collect();
+        let mut entries: Vec<(&str, &crate::runtime_inventory::RuntimeEntry)> = pairs
+            .iter()
+            .flat_map(|p| p.entries.iter().map(move |e| (p.digest.as_str(), e)))
             .collect();
         entries.sort_by(|a, b| {
             b.1.last_seen
                 .cmp(&a.1.last_seen)
                 .then(a.1.path.cmp(&b.1.path))
         });
+        let total: i64 = pairs.iter().map(|p| p.total).sum();
         if !entries.is_empty() {
             let origins: BTreeSet<&str> = entries.iter().map(|(_, e)| e.origin.as_str()).collect();
-            let total = entries.len();
             let files: Vec<Value> = entries
                 .iter()
                 .take(UNSHIPPED_PATHS_PER_ITEM)
@@ -392,15 +511,13 @@ fn unshipped_check(
                     "origins": origins,
                     "files": files,
                     "filesTotal": total,
-                    "truncated": total > UNSHIPPED_PATHS_PER_ITEM || rt.unshipped_truncated,
+                    "truncated": total > files.len() as i64,
                 }),
             });
         }
         // Can "nothing unshipped" be claimed for this container?
         let reason = if !rt.has_inventory {
             Some("no_inventory".to_string())
-        } else if rt.unshipped_truncated && entries.is_empty() {
-            Some("truncated".to_string())
         } else {
             digests.iter().find_map(|d| {
                 match rt
@@ -427,7 +544,7 @@ fn unshipped_check(
             });
         }
     }
-    let evaluated = !current.is_empty() && not.is_empty();
+    let evaluated = not.is_empty();
     (evaluated, not, items)
 }
 
@@ -527,8 +644,20 @@ pub fn detect(
     let mut items: Vec<DriftItem> = Vec::new();
     let mut evaluated: Vec<&'static str> = Vec::new();
 
+    // --- unshipped executables (runtime inventory) ---------------------------
+    let (unshipped_ok, mut not_evaluated, unshipped_items) =
+        unshipped_check(containers, s.runtime.as_ref());
+    // Every check that does not run says so (never silently "no drift").
+    let workload_gap = |kind: &'static str, reason: &str| NotEvaluated {
+        kind,
+        container: None,
+        reason: reason.into(),
+    };
+
     // --- tag moved ---------------------------------------------------
-    if !containers.is_empty() {
+    if containers.is_empty() {
+        not_evaluated.push(workload_gap("tagMoved", "no_image_inventory"));
+    } else {
         evaluated.push("tagMoved");
         for (c, r, digests, since) in tag_moved(containers) {
             items.push(DriftItem {
@@ -541,16 +670,16 @@ pub fn detect(
         }
     }
 
-    // --- unshipped executables (runtime inventory) ---------------------------
-    let (unshipped_ok, not_evaluated, unshipped_items) =
-        unshipped_check(containers, s.runtime.as_ref());
-    if unshipped_ok {
-        evaluated.push("unshippedExecutable");
-    }
-    items.extend(unshipped_items);
-
     // --- image changed since export ---------------------------------------
     let export = s.last_export.as_ref();
+    match (export, containers.is_empty()) {
+        (None, _) => not_evaluated.push(workload_gap("imageChangedSinceExport", "no_export")),
+        (Some(_), true) => not_evaluated.push(workload_gap(
+            "imageChangedSinceExport",
+            "no_image_inventory",
+        )),
+        _ => {}
+    }
     if let (Some(e), false) = (export, containers.is_empty()) {
         evaluated.push("imageChangedSinceExport");
         let base = e
@@ -614,6 +743,20 @@ pub fn detect(
                 )
             }),
     };
+    let compared = baseline.as_ref().and_then(|(_, base_ps)| {
+        Some((
+            failing_of(workload_kind, base_ps)?,
+            failing_of(workload_kind, &live_ps)?,
+        ))
+    });
+    match (&baseline, &compared) {
+        (None, _) => not_evaluated.push(workload_gap("securityContextRegression", "no_baseline")),
+        (Some(_), None) => not_evaluated.push(workload_gap(
+            "securityContextRegression",
+            "no_container_data",
+        )),
+        _ => {}
+    }
     if let Some((_, base_ps)) = &baseline {
         if let (Some((base_level, base_fail)), Some((live_level, live_fail))) = (
             failing_of(workload_kind, base_ps),
@@ -659,6 +802,12 @@ pub fn detect(
             }
         }
     }
+
+    // Unshipped last, as the check was added last (v1.7).
+    if unshipped_ok {
+        evaluated.push("unshippedExecutable");
+    }
+    items.extend(unshipped_items);
 
     let findings = items
         .iter()
@@ -892,10 +1041,14 @@ mod live_tests {
     }
 
     fn row(path: &str, origin: &str) -> serde_json::Value {
+        row_on(D, path, origin)
+    }
+
+    fn row_on(digest: &str, path: &str, origin: &str) -> serde_json::Value {
         let now = chrono::Utc::now().naive_utc();
         json!({
             "pod_namespace": NS, "pod_name": "web-1", "workload_kind": "Deployment",
-            "workload_name": "web", "container_name": "app", "image_digest": D,
+            "workload_name": "web", "container_name": "app", "image_digest": digest,
             "kind": "exec", "path": path, "path_complete": true, "source": "ebpf",
             "origin": origin, "first_seen": now - chrono::Duration::seconds(60), "last_seen": now
         })
@@ -985,6 +1138,94 @@ mod live_tests {
             serde_json::to_value(&clean.posture).unwrap(),
             "drift never sets posture"
         );
+        conn.batch_execute(&format!(
+            "DELETE FROM runtime_executables WHERE pod_namespace = '{NS}'; \
+             DELETE FROM runtime_coverage WHERE pod_namespace = '{NS}'; \
+             DELETE FROM workload_containers WHERE pod_namespace = '{NS}';"
+        ))
+        .unwrap();
+    }
+
+    /// The unshipped read is bounded by the CURRENT (container, digest)
+    /// pairs: 600 unshipped rows left by an old digest never push the
+    /// current digest's one memfd exec out of the read. And a current pair
+    /// with more files than listed says how many there are.
+    #[test]
+    #[ignore = "requires a live postgres (set KG_TEST_DATABASE_URL)"]
+    fn live_database_old_digest_rows_never_hide_a_current_unshipped_exec() {
+        const OLD: &str = "sha256:0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e";
+        let mut conn = live_conn();
+        ri::upsert_coverage(&mut conn, &[heartbeat()]).unwrap();
+        // Old digest: 600 unshipped rows (sorted before the current digest's
+        // paths, and newer, so any "all rows, LIMIT n" read would fill up).
+        let old: Vec<_> = (0..600)
+            .map(|i| row_on(OLD, &format!("/aaa/old{i:04}"), "writableLayer"))
+            .collect();
+        ri::upsert_rows(
+            &mut conn,
+            &ri::prepare(&serde_json::to_vec(&old).unwrap())
+                .unwrap()
+                .rows,
+        )
+        .unwrap();
+        let cur = vec![row("/memfd:payload (deleted)", "memfd")];
+        ri::upsert_rows(
+            &mut conn,
+            &ri::prepare(&serde_json::to_vec(&cur).unwrap())
+                .unwrap()
+                .rows,
+        )
+        .unwrap();
+        conn.batch_execute(&format!(
+            "UPDATE runtime_executables SET last_seen = last_seen + INTERVAL '1 hour' \
+             WHERE pod_namespace = '{NS}' AND image_digest = '{OLD}'"
+        ))
+        .unwrap();
+        let p = profile(&mut conn);
+        let items: Vec<_> = p
+            .drift
+            .items
+            .iter()
+            .filter(|i| i.kind == "unshippedExecutable")
+            .collect();
+        assert_eq!(items.len(), 1, "{:?}", p.drift.not_evaluated);
+        assert_eq!(items[0].severity, "high");
+        assert_eq!(items[0].detail["filesTotal"], json!(1));
+        assert_eq!(
+            items[0].detail["files"][0]["path"],
+            json!("/memfd:payload (deleted)")
+        );
+        assert_eq!(items[0].detail["files"][0]["digest"], json!(D));
+        assert!(
+            p.drift.evaluated.contains(&"unshippedExecutable"),
+            "{:?}",
+            p.drift.not_evaluated
+        );
+
+        // More current files than listed: 20 listed, all counted.
+        let many: Vec<_> = (0..30)
+            .map(|i| row(&format!("/tmp/w{i:02}"), "writableLayer"))
+            .collect();
+        ri::upsert_rows(
+            &mut conn,
+            &ri::prepare(&serde_json::to_vec(&many).unwrap())
+                .unwrap()
+                .rows,
+        )
+        .unwrap();
+        let p = profile(&mut conn);
+        let i = p
+            .drift
+            .items
+            .iter()
+            .find(|i| i.kind == "unshippedExecutable")
+            .unwrap();
+        assert_eq!(
+            i.detail["files"].as_array().unwrap().len(),
+            super::UNSHIPPED_PATHS_PER_ITEM
+        );
+        assert_eq!(i.detail["filesTotal"], json!(31));
+        assert_eq!(i.detail["truncated"], json!(true));
         conn.batch_execute(&format!(
             "DELETE FROM runtime_executables WHERE pod_namespace = '{NS}'; \
              DELETE FROM runtime_coverage WHERE pod_namespace = '{NS}'; \
