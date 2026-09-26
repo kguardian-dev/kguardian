@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -87,24 +88,25 @@ func runImagesAdmission(cmd *cobra.Command, _ []string) error {
 		return err
 	}
 	defer closeFn()
-	w := io.Writer(os.Stdout)
-	if admissionFile != "" {
-		f, err := os.Create(admissionFile)
-		if err != nil {
-			return err
-		}
-		defer func() { _ = f.Close() }()
-		w = f
-	}
-	return fetchAdmissionPolicy(o, w)
+	return writeAdmissionPolicy(o, admissionFile, os.Stdout)
 }
 
-// fetchAdmissionPolicy is the testable core of images admission-policy.
-func fetchAdmissionPolicy(o api.AdmissionPolicyOptions, w io.Writer) error {
+// writeAdmissionPolicy fetches the whole policy first and only then
+// writes it (to file, or else to stdout), so a failed or incomplete read
+// never leaves a partial policy behind. An incomplete read exits 2
+// ("could not check").
+func writeAdmissionPolicy(o api.AdmissionPolicyOptions, file string, stdout io.Writer) error {
 	body, err := api.GetAdmissionPolicy(o)
+	if errors.Is(err, api.ErrResponseTooLarge) {
+		return &gateError{code: exitGateNoCheck, msg: fmt.Sprintf(
+			"admission policy: could not check (exit %d): %v; nothing was written", exitGateNoCheck, err)}
+	}
 	if err != nil {
 		return brokerReadErr("generating the admission policy", err)
 	}
-	_, err = w.Write(body)
-	return err
+	if file == "" {
+		_, err = stdout.Write(body)
+		return err
+	}
+	return os.WriteFile(file, body, 0o644)
 }
