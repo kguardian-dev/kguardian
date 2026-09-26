@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.5.0](https://github.com/kguardian-dev/kguardian/compare/evaluator/v0.4.2...evaluator/v0.5.0) (2026-09-26)
+
+
+### Features
+
+* **evaluator:** ApplicationSecurityProfile CRD with evaluator-written status ([8f7c3bd](https://github.com/kguardian-dev/kguardian/commit/8f7c3bd28a376c73ddfd35c43531fc80df72da5c))
+
+
+### Bug Fixes
+
+* **deps:** update kubernetes monorepo to v0.37.1 ([#1640](https://github.com/kguardian-dev/kguardian/issues/1640)) ([2ec380b](https://github.com/kguardian-dev/kguardian/commit/2ec380b9d5517e74275cc87c207c779812b28c4b))
+* **evaluator:** bound how long a stale ApplicationSecurityProfile posture is shown ([7bfc2c2](https://github.com/kguardian-dev/kguardian/commit/7bfc2c2ae6252604644d3356037676c0bfd54106))
+* **evaluator:** check the response body close error and lint the evaluator in CI ([#1687](https://github.com/kguardian-dev/kguardian/issues/1687)) ([eef83af](https://github.com/kguardian-dev/kguardian/commit/eef83afdda5b3c819db65a6e5346c2865f885b6f))
+* **evaluator:** map an unrecognised profile status to unknown ([047df9e](https://github.com/kguardian-dev/kguardian/commit/047df9e94f4a1712c7b8a53bbf8d89360e94ef9d))
+
 ## [0.4.2](https://github.com/kguardian-dev/kguardian/compare/evaluator/v0.4.1...evaluator/v0.4.2) (2026-09-11)
 
 
