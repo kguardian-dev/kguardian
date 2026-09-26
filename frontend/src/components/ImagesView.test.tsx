@@ -26,13 +26,13 @@ const failing = (status: number) => new VulnApi({ fetchImpl: (async () => new Re
 
 describe('ImagesView: Vulnerabilities tab', () => {
   test("tiers are the Broker's: one row per CVE, the KEV row P0, with its chips", async () => {
-    render(view({ api: replayVulnApi([], { tiers: true }).api }));
+    render(view({ api: replayVulnApi().api }));
     const rows = await screen.findAllByTestId('cve-row');
     expect(rows).toHaveLength(cvePage.items.length);
     const tierOf = (id: string) => rows.find((r) => within(r).queryByText(id))!.querySelector('[data-tier]')!.getAttribute('data-tier');
     expect(tierOf('CVE-2099-0001')).toBe('P0');
     expect(tierOf('CVE-2099-0005')).toBe('P2'); // high, no fix, not exposed: the Broker's rule, not ours
-    expect(tierOf('CVE-2099-0004')).toBe('Background');
+    expect(tierOf('CVE-2099-0004')).toBe('P2'); // installed but in use unknown: no runtime inventory on main yet
     const kev = rows.find((r) => within(r).queryByText('CVE-2099-0001'))!;
     // Chips render twice (stacked under the id on phones, own column from sm up).
     const chips = [...kev.querySelectorAll('td:nth-child(3) [data-factor]')].map((c) => c.getAttribute('data-factor'));
@@ -41,7 +41,7 @@ describe('ImagesView: Vulnerabilities tab', () => {
   });
 
   test('a Broker without tiers: every row "Tier ?", tier tiles unknown, no tier filter; never a computed tier', async () => {
-    render(view());
+    render(view({ api: replayVulnApi([], { broker: '1671' }).api }));
     const rows = await screen.findAllByTestId('cve-row');
     for (const r of rows) expect(r.querySelector('[data-tier]')!.getAttribute('data-tier')).toBe('unknown');
     expect(screen.getAllByText('unknown').length).toBeGreaterThanOrEqual(2);
@@ -91,7 +91,7 @@ describe('ImagesView: Images tab', () => {
 describe('CVE drawer', () => {
   test("each workload row: its image's Broker tier, its own exposure and in-use, privilege from its profile", async () => {
     const { api: profileApi } = replayApi([answer('GET /workloads?namespace=payments&limit=500', listNamespacePayments.body)]);
-    render(view({ cve: 'CVE-2099-0001', profileApi, api: replayVulnApi([], { tiers: true }).api }));
+    render(view({ cve: 'CVE-2099-0001', profileApi, api: replayVulnApi().api }));
     await waitFor(() => expect(screen.getAllByTestId('cve-workload').length).toBeGreaterThan(0));
     const row = (name: string) => screen.getAllByTestId('cve-workload').find((r) => within(r).queryByText(name))!;
     await waitFor(() => expect(row('payments/checkout').querySelector('[data-tier]')!.getAttribute('data-tier')).toBe('P0'));
@@ -107,7 +107,7 @@ describe('CVE drawer', () => {
   });
 
   test('on a Broker without tiers the drawer shows "Tier ?", not a computed tier', async () => {
-    render(view({ cve: 'CVE-2099-0001' }));
+    render(view({ cve: 'CVE-2099-0001', api: replayVulnApi([], { broker: '1671' }).api }));
     await waitFor(() => expect(screen.getAllByTestId('cve-workload').length).toBeGreaterThan(0));
     for (const r of screen.getAllByTestId('cve-workload')) expect(r.querySelector('[data-tier]')!.getAttribute('data-tier')).toBe('unknown');
   });
@@ -127,7 +127,10 @@ test('a failed read never shows zero counts', async () => {
 
 describe('Background and null tiers', () => {
   test('a Background row carries a visible caveat, not only a tooltip', async () => {
-    render(view({ api: replayVulnApi([], { tiers: true }).api }));
+    // Test-local: busybox as Background, as a Broker with runtime data would send it
+    // (the runtime inventory, P1-2, is not on main, so no capture has Background yet).
+    const withBackground = { ...cvePage, items: cvePage.items.map((c) => (c.id === 'CVE-2099-0004' ? { ...c, tier: 'Background', inUse: false, inUseState: 'installed_not_observed' } : c)) };
+    render(view({ api: replayVulnApi([answer('GET /vulnerabilities?limit=50', withBackground)]).api }));
     await screen.findAllByTestId('cve-row');
     expect(screen.getByTestId('background-caveat').textContent).toMatch(/Not proof it is unreachable/);
   });

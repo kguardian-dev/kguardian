@@ -2,8 +2,8 @@
   "body": {
     "digest": "sha256:4832e654a05c1e66ce1982c0300effaca0c7b1a90be575e0f52bd465a12dc18a",
     "digestKind": "repo",
-    "firstSeen": "2026-09-26T02:58:50.720589",
-    "lastSeen": "2026-09-26T02:58:50.720589",
+    "firstSeen": "2026-09-26T09:31:43.339875",
+    "lastSeen": "2026-09-26T09:31:43.339875",
     "repository": "ghcr.io/fluxcd/source-controller",
     "tags": [
       "v1.6.2"
@@ -14,9 +14,9 @@
         "clusterId": "primary",
         "containerKind": "regular",
         "containerName": "manager",
-        "firstSeen": "2026-09-26T02:58:50.720589",
+        "firstSeen": "2026-09-26T09:31:43.339875",
         "imageRef": "ghcr.io/fluxcd/source-controller:v1.6.2",
-        "lastSeen": "2026-09-26T02:58:50.720589",
+        "lastSeen": "2026-09-26T09:31:43.339875",
         "namespace": "flux-system",
         "ranAsInit": false,
         "running": true,
@@ -27,6 +27,7 @@
       }
     ]
   },
+  "provenance": "captured from broker eef83afdd (frontend/src/fixtures/vuln-captures/capture.py), no edits",
   "request": "GET /images/sha256:4832e654a05c1e66ce1982c0300effaca0c7b1a90be575e0f52bd465a12dc18a",
   "status": 200
 }

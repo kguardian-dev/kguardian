@@ -1,3 +1,4 @@
+import type { ReactNode } from 'react';
 import { BadgeCheck, Bug, CircleHelp, FileWarning, KeyRound, Link2, ShieldQuestion } from 'lucide-react';
 import { vulnErrorKind, vulnErrorMessage } from '../../services/vulnApi';
 import { EmptyState } from '../ui/EmptyState';
@@ -20,10 +21,10 @@ export function SeverityBadge({ severity }: { severity: VulnSeverity }) {
 /**
  * The Broker's tier; null (no tier yet) is a dashed "Tier ?", never a
  * guessed tier. `atLeast`: other rows are unknown, so the real answer may be
- * higher; it reads "≥P2" (a P0 cannot be exceeded, so it stays "P0").
+ * higher; it reads "≥P2" (read out as "at least P2"), or "Background + N unknown" (a P0 cannot be exceeded, so it stays "P0").
  * `pending`: the read for this row is still in flight ("…").
  */
-export function TierBadge({ tier, title, atLeast = false, pending = false }: { tier: RiskTierName | null; title?: string; atLeast?: boolean; pending?: boolean }) {
+export function TierBadge({ tier, title, atLeast = false, unknownRows = 0, pending = false }: { tier: RiskTierName | null; title?: string; atLeast?: boolean; unknownRows?: number; pending?: boolean }) {
   if (pending) {
     return (
       <span data-tier="pending" title="Reading this image's finding" className="shrink-0 rounded-md border border-dashed border-hubble-border-strong px-1.5 py-px text-[11px] font-mono text-tertiary">
@@ -39,10 +40,36 @@ export function TierBadge({ tier, title, atLeast = false, pending = false }: { t
     );
   }
   const cls = tier === 'Background' ? 'bg-hubble-border/40 text-secondary border-hubble-border' : TIER_BADGE_CLASS[tier];
+  const floor = atLeast && tier !== 'P0';
+  const unknown = `${unknownRows > 0 ? unknownRows : 'some'} unknown`;
+  const floorText = `at least ${tier}; ${unknownRows > 0 ? `${unknownRows} row${unknownRows === 1 ? '' : 's'}` : 'some rows'} unknown`;
+  // The floor is read out as words, not as a "≥" glyph: the glyph is
+  // aria-hidden and a visually hidden "at least" stands in for it. A
+  // Background floor has nothing lower to exceed, so it spells out what is
+  // unknown instead of a cryptic "≥Bkg".
+  let body: ReactNode;
+  if (floor && tier === 'Background') {
+    body = <>Background + {unknown}</>;
+  } else if (floor) {
+    body = (
+      <>
+        <span aria-hidden="true">≥</span>
+        <span className="sr-only">at least </span>
+        {tier}
+        <span className="sr-only">; {unknown}</span>
+      </>
+    );
+  } else {
+    body = tier === 'Background' ? 'Bkg' : tier;
+  }
   return (
-    <span data-tier={tier} data-at-least={atLeast && tier !== 'P0' ? 'true' : undefined} title={atLeast && tier !== 'P0' ? `${title ? `${title}. ` : ''}At least ${tier}: some workloads have no tier yet.` : title} className={`shrink-0 rounded-md border px-1.5 py-px text-[11px] font-mono font-semibold ${cls}`}>
-      {atLeast && tier !== 'P0' ? '≥' : ''}
-      {tier === 'Background' ? 'Bkg' : tier}
+    <span
+      data-tier={tier}
+      data-at-least={floor ? 'true' : undefined}
+      title={floor ? floorText : title}
+      className={`shrink-0 rounded-md border px-1.5 py-px text-[11px] font-mono font-semibold whitespace-nowrap ${cls}`}
+    >
+      {body}
     </span>
   );
 }

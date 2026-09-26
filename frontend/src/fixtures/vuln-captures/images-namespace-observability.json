@@ -1,0 +1,43 @@
+{
+  "body": {
+    "items": [
+      {
+        "digest": "sha256:1eb73105a1fe5826de974a647f3d2e72905e16803a8ca2b9c891bf3545bc242c",
+        "digestKind": "repo",
+        "firstSeen": "2026-09-26T09:31:43.251544",
+        "lastSeen": "2026-09-26T09:31:43.251544",
+        "repository": "docker.io/grafana/grafana",
+        "runningContainers": 1,
+        "tags": [
+          "11.2.0"
+        ]
+      },
+      {
+        "digest": "sha256:2f802f6162499e19393cf17fb615e5037cfafd5bd421ed7d36208d0c24ac56e7",
+        "digestKind": "repo",
+        "firstSeen": "2026-09-26T09:31:43.287927",
+        "lastSeen": "2026-09-26T09:31:43.287927",
+        "repository": "quay.io/prometheus/prometheus",
+        "runningContainers": 1,
+        "tags": [
+          "v2.54.1"
+        ]
+      },
+      {
+        "digest": "sha256:f50806e18227349c4b827b7d70cbf67a9ca3087226a89bc3aa6826b13fd1d7fa",
+        "digestKind": "repo",
+        "firstSeen": "2026-09-26T09:31:43.311751",
+        "lastSeen": "2026-09-26T09:31:43.311751",
+        "repository": "quay.io/prometheus/node-exporter",
+        "runningContainers": 1,
+        "tags": [
+          "v1.8.2"
+        ]
+      }
+    ],
+    "nextAfter": null
+  },
+  "provenance": "captured from broker eef83afdd (frontend/src/fixtures/vuln-captures/capture.py), no edits",
+  "request": "GET /images?namespace=observability",
+  "status": 200
+}

@@ -3,6 +3,7 @@ import { afterEach, expect, test } from 'vitest';
 import { useRef, useState } from 'react';
 import { cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { useDialogFocus } from './useDialogFocus';
+import { Modal } from '../components/ui/Modal';
 
 afterEach(cleanup);
 
@@ -70,7 +71,7 @@ test('closing by picking a nav item also returns focus to the opener', () => {
 test('Esc belongs to the dialog: an Esc elsewhere on the page does not close it', () => {
   render(<Harness />);
   fireEvent.click(screen.getByText('Expand sidebar'));
-  fireEvent.keyDown(window, { key: 'Escape' });
+  fireEvent.keyDown(screen.getByText('Outside'), { key: 'Escape' });
   expect(screen.getByRole('dialog')).toBeTruthy();
 });
 
@@ -99,4 +100,57 @@ test('closed from outside (a layout change): focus goes to the toggle, not the b
   fireEvent.mouseDown(screen.getByTestId('layout'));
   expect(screen.queryByRole('dialog')).toBeNull();
   expect(active()).toBe('Collapse sidebar');
+});
+
+test('Esc still closes when a click inside left focus on the body (the backdrop must not stay up)', () => {
+  render(<Harness />);
+  fireEvent.click(screen.getByText('Expand sidebar'));
+  (document.activeElement as HTMLElement).blur();
+  expect(document.activeElement).toBe(document.body);
+  fireEvent.keyDown(document.body, { key: 'Escape' });
+  expect(screen.queryByRole('dialog')).toBeNull();
+});
+
+// The rail overlay with the command palette (a Modal) stacked on top.
+function Stacked() {
+  const [rail, setRail] = useState(true);
+  const [palette, setPalette] = useState(false);
+  const dialogRef = useRef<HTMLDivElement>(null);
+  const openerRef = useRef<HTMLButtonElement>(null);
+  useDialogFocus({ open: rail, dialogRef, returnFocusRef: openerRef, onClose: () => setRail(false), initialFocus: 'nav button' });
+  return (
+    <div>
+      {!rail && <button ref={openerRef}>Expand sidebar</button>}
+      {rail && (
+        <div ref={dialogRef} role="dialog" aria-modal="true" aria-label="Navigation">
+          <nav>
+            <button onClick={() => setPalette(true)}>Search</button>
+          </nav>
+        </div>
+      )}
+      {/* Mounted only while open, like App renders the CommandPalette. */}
+      {palette && (
+        <Modal isOpen onClose={() => setPalette(false)} hideHeader ariaLabel="Search and commands">
+          <input aria-label="Command" />
+        </Modal>
+      )}
+    </div>
+  );
+}
+
+test('stacked: a body Esc closes only the topmost modal, the rail underneath stays open', () => {
+  render(<Stacked />);
+  fireEvent.click(screen.getByText('Search'));
+  expect(screen.getByRole('dialog', { name: 'Search and commands' })).toBeTruthy();
+  (document.activeElement as HTMLElement).blur();
+  expect(document.activeElement).toBe(document.body);
+  fireEvent.keyDown(document.body, { key: 'Escape' });
+  expect(screen.queryByRole('dialog', { name: 'Search and commands' })).toBeNull();
+  expect(screen.getByRole('dialog', { name: 'Navigation' })).toBeTruthy();
+  expect(screen.queryByText('Expand sidebar')).toBeNull();
+  // The next body Esc, with the palette gone, closes the rail.
+  (document.activeElement as HTMLElement | null)?.blur?.();
+  fireEvent.keyDown(document.body, { key: 'Escape' });
+  expect(screen.queryByRole('dialog', { name: 'Navigation' })).toBeNull();
+  expect(active()).toBe('Expand sidebar');
 });

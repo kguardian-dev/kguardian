@@ -12,14 +12,16 @@ use crate::{
     attestation_resource, compute_ingest_scope, delete_seccomp_cr, export_seccomp_profile,
     export_seccomp_profile_post, get_attestations, get_audit_verdicts, get_cluster_environment,
     get_compute_contention, get_compute_findings, get_compute_history, get_compute_latest,
-    get_compute_nodes, get_image, get_images, get_pod_by_ip, get_pod_by_name, get_pod_details,
-    get_pod_syscall_name, get_pod_traffic, get_pod_traffic_name, get_pods_by_node,
+    get_compute_nodes, get_image, get_image_runtime, get_images, get_pod_by_ip, get_pod_by_name,
+    get_pod_details, get_pod_syscall_name, get_pod_traffic, get_pod_traffic_name, get_pods_by_node,
     get_seccomp_profile, get_seccomp_profile_file, get_svc_by_ip, get_svc_details, get_version,
     get_vulnerabilities, get_vulnerability_exposure, get_workload_containers, get_workload_export,
     get_workload_profile, get_workload_profile_diff, get_workload_profile_version,
-    get_workload_profile_versions, get_workloads, image_sbom_cyclonedx_resource,
-    image_sbom_resource, image_vulnerabilities_resource, list_seccomp_profiles, mark_pod_dead,
-    post_seccomp_node_status, post_workload_export, put_seccomp_cr, seccomp_denials_resource,
+    get_workload_profile_versions, get_workload_runtime, get_workloads,
+    image_sbom_cyclonedx_resource, image_sbom_resource, image_vulnerabilities_resource,
+    list_seccomp_profiles, mark_pod_dead, post_seccomp_node_status, post_workload_export,
+    put_seccomp_cr, runtime_coverage_resource, runtime_executables_resource,
+    seccomp_denials_resource,
 };
 
 pub fn configure(cfg: &mut web::ServiceConfig) {
@@ -63,6 +65,14 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
         .service(get_images)
         .service(get_image)
         .service(get_workload_containers)
+        // Runtime executable / shared-library inventory (#1533 P1-2): the
+        // ingest carries its own JSON body limit
+        // (runtime_inventory::RUNTIME_JSON_LIMIT_BYTES); both reads are
+        // LIMIT-clamped and charged to the read budget.
+        .service(runtime_executables_resource())
+        .service(runtime_coverage_resource())
+        .service(get_workload_runtime)
+        .service(get_image_runtime)
         // Workload security profile (#1533 P0-5): list, detail, versions, diff.
         .service(get_workloads)
         .service(get_workload_profile)

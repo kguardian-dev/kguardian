@@ -6,6 +6,7 @@
     "report": null,
     "reports": []
   },
+  "provenance": "captured from broker eef83afdd (frontend/src/fixtures/vuln-captures/capture.py), no edits",
   "request": "GET /images/sha256:f50806e18227349c4b827b7d70cbf67a9ca3087226a89bc3aa6826b13fd1d7fa/sbom",
   "status": 200
 }

@@ -1,0 +1,32 @@
+{
+  "body": {
+    "digest": "sha256:2f802f6162499e19393cf17fb615e5037cfafd5bd421ed7d36208d0c24ac56e7",
+    "digestKind": "repo",
+    "firstSeen": "2026-09-26T02:58:50.678",
+    "lastSeen": "2026-09-26T02:58:50.678",
+    "repository": "quay.io/prometheus/prometheus",
+    "tags": [
+      "v2.54.1"
+    ],
+    "truncated": false,
+    "workloads": [
+      {
+        "clusterId": "primary",
+        "containerKind": "regular",
+        "containerName": "prometheus",
+        "firstSeen": "2026-09-26T02:58:50.678",
+        "imageRef": "quay.io/prometheus/prometheus:v2.54.1",
+        "lastSeen": "2026-09-26T02:58:50.678",
+        "namespace": "observability",
+        "ranAsInit": false,
+        "running": true,
+        "state": "running",
+        "stateReason": null,
+        "workloadKind": "StatefulSet",
+        "workloadName": "prometheus"
+      }
+    ]
+  },
+  "request": "GET /images/sha256:2f802f6162499e19393cf17fb615e5037cfafd5bd421ed7d36208d0c24ac56e7",
+  "status": 200
+}

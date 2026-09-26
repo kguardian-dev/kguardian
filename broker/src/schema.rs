@@ -519,6 +519,59 @@ diesel::table! {
     }
 }
 
+diesel::table! {
+    // Executables and shared libraries seen running, one row per
+    // (workload, container, digest, kind, path) (#1533 P1-2). See the
+    // migration and src/runtime_inventory.rs.
+    runtime_executables (cluster_id, pod_namespace, workload_kind, workload_name, container_name, image_digest, kind, path) {
+        cluster_id -> Varchar,
+        pod_namespace -> Varchar,
+        workload_kind -> Varchar,
+        workload_name -> Varchar,
+        container_name -> Varchar,
+        image_digest -> Varchar,
+        kind -> Varchar,
+        path -> Varchar,
+        path_complete -> Bool,
+        source -> Varchar,
+        origin -> Varchar,
+        last_pod_name -> Nullable<Varchar>,
+        first_seen -> Timestamp,
+        last_seen -> Timestamp,
+    }
+}
+
+diesel::table! {
+    // Capture coverage heartbeats per container instance (#1533 P1-2);
+    // read through the kg_runtime_coverage SQL function.
+    runtime_coverage (cluster_id, container_id) {
+        cluster_id -> Varchar,
+        container_id -> Varchar,
+        pod_namespace -> Varchar,
+        workload_kind -> Varchar,
+        workload_name -> Varchar,
+        container_name -> Varchar,
+        image_digest -> Varchar,
+        pod_name -> Varchar,
+        node_name -> Varchar,
+        mode -> Varchar,
+        exec_probe -> Bool,
+        lib_probe -> Bool,
+        start_mode -> Varchar,
+        tracking_since -> Timestamp,
+        covered_since -> Timestamp,
+        last_heartbeat -> Timestamp,
+        heartbeat_secs -> Int4,
+        gaps -> Int4,
+        last_gap -> Nullable<Varchar>,
+        events_dropped -> Int8,
+        last_drop_at -> Nullable<Timestamp>,
+        unsent -> Int8,
+        incomplete -> Bool,
+        ended -> Bool,
+    }
+}
+
 diesel::allow_tables_to_appear_in_same_query!(
     pod_details,
     pod_traffic,

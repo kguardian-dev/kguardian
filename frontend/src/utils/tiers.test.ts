@@ -1,6 +1,6 @@
 import { expect, test } from 'vitest';
 import { brokerFactors, brokerTier, factChips, inUseFactor, mergeFactors, privilegedFactor, tierRank } from './tiers';
-import { tierFixture, TIER_CONTRACT_FIXTURES } from '../fixtures/vulns';
+import { vulnCapture, VULN_CAPTURES } from '../fixtures/vulns';
 import type { ImageVulnsPage } from '../types/vulns';
 import { findingFactors } from './vulnView';
 import * as tiers from './tiers';
@@ -62,19 +62,18 @@ test('privileged is context from the profile: unknown without one, absent when n
   expect(privilegedFactor({ level: 'restricted', confidence: 'confirmed' })!.label).toBe('Not privileged');
 });
 
-test('contract fixtures are marked as derived, not captured', () => {
-  expect(TIER_CONTRACT_FIXTURES.length).toBeGreaterThan(0);
-  for (const c of TIER_CONTRACT_FIXTURES) expect(c.provenance).toMatch(/^contract-derived, not captured/);
+test('the fixtures are real captures and say which Broker they came from', () => {
+  expect(VULN_CAPTURES.length).toBeGreaterThan(0);
+  for (const c of VULN_CAPTURES) expect(c.provenance).toMatch(/^captured from broker [0-9a-f]{7,}/);
 });
 
 test("a finding's chips are the Broker's factors with the facts' labels", () => {
-  const checkout = tierFixture<ImageVulnsPage>('image-checkout-vulnerabilities').body;
+  const checkout = vulnCapture<ImageVulnsPage>('image-checkout-vulnerabilities').body;
   const kev = checkout.items.find((f) => f.id === 'CVE-2099-0001')!;
   expect(kev.tier).toBe('P0');
-  expect(findingFactors(kev).map((f) => f.label).sort()).toEqual(['CVSS 9.8', 'EPSS 34%', 'Exposed', 'Fix: 3.3.2-r0', 'KEV', 'Loaded']);
-  const bg = checkout.items.find((f) => f.id === 'CVE-2099-0004')!;
-  expect(bg.tier).toBe('Background');
-  expect(findingFactors(bg).find((f) => f.key === 'inuse')!.label).toBe('Not observed loaded');
+  // No runtime inventory on main yet: in use is unknown, for a stated reason.
+  expect(findingFactors(kev).map((f) => f.label).sort()).toEqual(['CVSS 9.8', 'EPSS 34%', 'Exposed', 'Fix: 3.3.2-r0', 'KEV', 'Loaded: unknown']);
+  expect(findingFactors(kev).find((f) => f.key === 'inuse')!.title).toMatch(/no runtime capture/);
 });
 
 test('KEV / EPSS: null is "not reported" (unknown), false and absent are not', () => {
@@ -82,4 +81,23 @@ test('KEV / EPSS: null is "not reported" (unknown), false and absent are not', (
   expect(factChips({ kev: false })).toEqual([]);
   expect(factChips({ epss: null })[0]).toMatchObject({ key: 'epss', tone: 'unknown', label: 'EPSS: not reported' });
   expect(factChips({})).toEqual([]);
+});
+
+test('captured: a finding no source reported on shows KEV and EPSS as "not reported", a KEV "no" shows nothing', () => {
+  const items = vulnCapture<ImageVulnsPage>('image-checkout-vulnerabilities').body.items;
+  const zlib = items.find((f) => f.id === 'CVE-2099-0003')!;
+  expect([zlib.kev, zlib.epss]).toEqual([null, null]);
+  const labels = findingFactors(zlib).map((f) => f.label);
+  expect(labels).toContain('KEV: not reported');
+  expect(labels).toContain('EPSS: not reported');
+  const express = items.find((f) => f.id === 'CVE-2099-0002')!;
+  expect(express.kev).toBe(false);
+  expect(findingFactors(express).some((f) => f.key === 'kev')).toBe(false);
+});
+
+test('a Background finding reads "Not observed loaded" (not in any capture until the runtime inventory lands)', () => {
+  const busybox = vulnCapture<ImageVulnsPage>('image-checkout-vulnerabilities').body.items.find((f) => f.id === 'CVE-2099-0004')!;
+  // Test-local: the captured finding as a Broker with runtime data would send it.
+  const bg = { ...busybox, tier: 'Background', tierFactors: ['in_use:installed_not_observed', 'severity:low', 'exposed'], inUseState: 'installed_not_observed', inUse: false };
+  expect(findingFactors(bg).find((f) => f.key === 'inuse')!.label).toBe('Not observed loaded');
 });

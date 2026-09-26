@@ -238,6 +238,10 @@ subsystems! {
     // Compute gauges (COMPUTE_ENABLED, default on). `run` returns `Ok`
     // straight away when the feature is off; an `Err` is still fatal.
     ComputeSampler => "compute-sampler", Disposition::MayRetire;
+    // Runtime inventory (RUNTIME_INVENTORY, default off). `run` returns
+    // `Ok` straight away when the feature is off. On a kernel that cannot
+    // carry the probe it keeps running (backfill still works).
+    RuntimeInventory => "runtime-inventory", Disposition::MayRetire;
     EbpfLoader => "ebpf-loader", Disposition::Required;
 }
 
@@ -969,7 +973,12 @@ mod tests {
             .collect();
         assert_eq!(
             retiring,
-            vec!["seccomp-distributor", "seccomp-denials", "compute-sampler"],
+            vec![
+                "seccomp-distributor",
+                "seccomp-denials",
+                "compute-sampler",
+                "runtime-inventory"
+            ],
             "only subsystems that are features an operator can switch off may retire; \
              everything else is capture and must be Required"
         );

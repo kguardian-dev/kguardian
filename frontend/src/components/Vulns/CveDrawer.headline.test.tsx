@@ -4,7 +4,7 @@ import { act, cleanup, render, screen } from '@testing-library/react';
 import { CveDrawer } from './CveDrawer';
 import { VulnApi } from '../../services/vulnApi';
 import { ProfileApi } from '../../services/profileApi';
-import { tierFixture } from '../../fixtures/vulns';
+import { vulnCapture } from '../../fixtures/vulns';
 import type { CveSummary, CvePage, Exposure, ImageVulnsPage } from '../../types/vulns';
 
 // The headline is the worst case over EVERY workload row, and says nothing
@@ -37,8 +37,8 @@ function controlled(exposure: Exposure) {
 }
 
 const noProfiles = new ProfileApi({ fetchImpl: (async () => new Response('', { status: 404 })) as typeof fetch });
-const exposure = tierFixture<Exposure>('exposure-CVE-2099-0001').body;
-const page = (name: string) => tierFixture<ImageVulnsPage>(`image-${name}-vulnerabilities`).body;
+const exposure = vulnCapture<Exposure>('exposure-CVE-2099-0001').body;
+const page = (name: string) => vulnCapture<ImageVulnsPage>(`image-${name}-vulnerabilities`).body;
 const digestOf = (repo: string) => exposure.images.find((i) => i.repository?.endsWith(repo))!.digest;
 
 const renderDrawer = (api: VulnApi, e: Exposure = exposure, summary?: CveSummary) =>
@@ -70,7 +70,8 @@ describe('CVE drawer headline', () => {
     const labels = headlineLabels();
     expect(labels).toContain('KEV');
     expect(labels.some((l) => l?.startsWith('Exposed'))).toBe(true);
-    expect(labels).toContain('Loaded');
+    // In use is unknown on every captured row (no runtime inventory on main yet).
+    expect(labels).toContain('Loaded: unknown');
     expect(labels).not.toContain('No outside ingress seen (7d)');
   });
 
@@ -89,7 +90,13 @@ describe('CVE drawer headline', () => {
     expect(headlineTier()).toBe('P2');
     expect(headlineLabels()).toContain('1 unknown');
     // With an unknown row the known P2 is a floor, not the answer.
-    expect(screen.getByRole('dialog').querySelector('[data-at-least]')!.textContent).toBe('≥P2');
+    const floor = screen.getByRole('dialog').querySelector('[data-at-least]')!;
+    // Seen: "≥P2"; read out: "at least P2; 1 unknown" (the glyph is aria-hidden).
+    const seen = [...floor.childNodes].filter((n) => !(n instanceof HTMLElement && n.classList.contains('sr-only'))).map((n) => n.textContent).join('');
+    expect(seen).toBe('≥P2');
+    expect(floor.querySelector('[aria-hidden="true"]')!.textContent).toBe('≥');
+    expect(floor.textContent!.replace('≥', '')).toBe('at least P2; 1 unknown');
+    expect(floor.getAttribute('title')).toBe('at least P2; 1 row unknown');
   });
 
   test('a failed read: "read failed" in the headline, and its row is unknown', async () => {
@@ -110,7 +117,7 @@ test("the Broker's CVE-level tier is folded in: a P0 summary beats a P1 row, wit
     workloads: exposure.workloads,
     images: exposure.images,
   };
-  const summary = { ...tierFixture<CvePage>('vulnerabilities').body.items.find((c) => c.id === exposure.id)!, tier: 'P0' };
+  const summary = { ...vulnCapture<CvePage>('vulnerabilities').body.items.find((c) => c.id === exposure.id)!, tier: 'P0' };
   const { api, answer } = controlled(two);
   renderDrawer(api, two, summary);
   const noTier = { ...page('checkout'), items: page('checkout').items.map((f) => (f.id === exposure.id ? { ...f, tier: null, tierFactors: [] } : f)) };

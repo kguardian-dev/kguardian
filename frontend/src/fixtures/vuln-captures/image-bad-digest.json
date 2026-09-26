@@ -1,5 +1,6 @@
 {
   "body": "digest must be sha256:<64 hex> or sha512:<128 hex>",
+  "provenance": "captured from broker eef83afdd (frontend/src/fixtures/vuln-captures/capture.py), no edits",
   "request": "GET /images/latest/vulnerabilities",
   "status": 400
 }

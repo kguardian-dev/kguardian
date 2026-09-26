@@ -1,20 +1,21 @@
 import { describe, expect, test } from 'vitest';
-import { imageDetail, imageSbom, imageVulns, tierFixture } from '../fixtures/vulns';
+import { imageDetail, imageSbom, imageVulns, vulnCapture } from '../fixtures/vulns';
 import { listNamespacePayments } from '../fixtures/profile';
 import type { PodInfo, PodNodeData } from '../types';
 import type { ImageVulnsPage } from '../types/vulns';
 import { badgesByNode, coverageBadge, imagesByWorkload, supplyBadge, vulnBadge, type ImageFacts } from './useMapLens';
 
-// Inputs are Broker responses: #1671 captures (fixtures/vuln-captures) and,
-// for tiers, the #1678 contract-derived fixtures (fixtures/vuln-contract-1678).
-// Only the map nodes are written here.
+// Inputs are Broker responses: captures from a Broker at main
+// (fixtures/vuln-captures) and, for an older Broker, from #1671
+// (fixtures/vuln-captures-1671). Only the map nodes are written here.
 
 const IMAGES = ['checkout', 'grafana', 'ledger', 'node-exporter', 'prometheus', 'reports', 'source-controller'];
 
 /** What the lens reads per image: `tier=P0,P1` findings on a Broker with tiers. */
 function facts(tiered: boolean): ImageFacts[] {
   return IMAGES.map((n) => {
-    const v = tiered ? tierFixture<ImageVulnsPage>(`image-${n}-vulnerabilities-p0p1`).body : imageVulns(n);
+    // Current Broker: its real `tier=P0,P1` read. Older Broker (#1671): findings without tiers.
+    const v = tiered ? vulnCapture<ImageVulnsPage>(`image-${n}-vulnerabilities-p0p1`).body : imageVulns(n, '1671');
     const hasTier = v.items.length === 0 ? null : v.items.every((f) => f.tier !== undefined);
     return {
       digest: imageDetail(n).digest,

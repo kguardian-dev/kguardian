@@ -34,6 +34,8 @@ pub mod contention;
 pub mod early_capture;
 pub mod log;
 pub mod node_facts;
+/// Per-container executables and executable mappings (P1-2).
+pub mod runtime_inventory;
 /// One task per subsystem, with explicit supervision over what each
 /// one stopping means. Replaces the `try_join!` fabric main used to
 /// have; see the module docs for what that fused together.

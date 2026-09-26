@@ -10,6 +10,13 @@ const FOCUSABLE = 'button, [href], input, select, textarea, [tabindex]:not([tabi
  * focus returns to `returnFocusRef`, read after the close renders so an
  * element that remounted in the meantime is found.
  */
+/** Another open aria-modal dialog, outside `d` and not hidden (a closing Modal keeps its node under aria-hidden). */
+function otherModalOpen(d: HTMLElement | null): boolean {
+  return [...document.querySelectorAll<HTMLElement>('[role="dialog"][aria-modal="true"]')].some(
+    (el) => el !== d && !(d && d.contains(el)) && !el.closest('[aria-hidden="true"]'),
+  );
+}
+
 export function useDialogFocus(opts: {
   open: boolean;
   dialogRef: RefObject<HTMLElement | null>;
@@ -33,18 +40,28 @@ export function useDialogFocus(opts: {
     }
   }, [open, dialogRef, returnFocusRef, initialFocus]);
 
-  // Esc belongs to the dialog: focus is trapped inside it, so the event
-  // reaches it, and other Esc handlers on the page are left alone.
+  // Esc belongs to the dialog. It is handled when it comes from inside the
+  // dialog or from the body: a click on a non-focusable part of the dialog
+  // (or its backdrop) leaves focus on the body, and the Esc must still close
+  // it. Esc from anywhere else on the page is left to its own handlers.
+  // A body Esc goes to the topmost dialog only: when another open modal
+  // (e.g. the command palette) is stacked on this one, it is left to that
+  // modal's own handler.
   useEffect(() => {
-    const d = dialogRef.current;
-    if (!open || !d) return;
+    if (!open) return;
     const onEsc = (e: KeyboardEvent) => {
       if (e.key !== 'Escape') return;
+      const d = dialogRef.current;
+      const t = e.target as Node | null;
+      const fromDialog = !!(d && t && d.contains(t));
+      const fromBody = t === document.body || t === document.documentElement;
+      if (!fromDialog && !fromBody) return;
+      if (!fromDialog && otherModalOpen(d)) return;
       e.stopPropagation();
       onClose();
     };
-    d.addEventListener('keydown', onEsc);
-    return () => d.removeEventListener('keydown', onEsc);
+    window.addEventListener('keydown', onEsc, true);
+    return () => window.removeEventListener('keydown', onEsc, true);
   }, [open, dialogRef, onClose]);
 
   // Tab is caught on the window so focus that did get out is pulled back in.

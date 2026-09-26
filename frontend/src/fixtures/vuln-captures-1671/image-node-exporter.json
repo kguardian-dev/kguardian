@@ -1,0 +1,32 @@
+{
+  "body": {
+    "digest": "sha256:f50806e18227349c4b827b7d70cbf67a9ca3087226a89bc3aa6826b13fd1d7fa",
+    "digestKind": "repo",
+    "firstSeen": "2026-09-26T02:58:50.698063",
+    "lastSeen": "2026-09-26T02:58:50.698063",
+    "repository": "quay.io/prometheus/node-exporter",
+    "tags": [
+      "v1.8.2"
+    ],
+    "truncated": false,
+    "workloads": [
+      {
+        "clusterId": "primary",
+        "containerKind": "regular",
+        "containerName": "node-exporter",
+        "firstSeen": "2026-09-26T02:58:50.698063",
+        "imageRef": "quay.io/prometheus/node-exporter:v1.8.2",
+        "lastSeen": "2026-09-26T02:58:50.698063",
+        "namespace": "observability",
+        "ranAsInit": false,
+        "running": true,
+        "state": "running",
+        "stateReason": null,
+        "workloadKind": "DaemonSet",
+        "workloadName": "node-exporter"
+      }
+    ]
+  },
+  "request": "GET /images/sha256:f50806e18227349c4b827b7d70cbf67a9ca3087226a89bc3aa6826b13fd1d7fa",
+  "status": 200
+}

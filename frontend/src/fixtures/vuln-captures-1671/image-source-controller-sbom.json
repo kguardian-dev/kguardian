@@ -1,0 +1,79 @@
+{
+  "body": {
+    "digest": "sha256:4832e654a05c1e66ce1982c0300effaca0c7b1a90be575e0f52bd465a12dc18a",
+    "items": [
+      {
+        "class": null,
+        "filePaths": [],
+        "id": 8,
+        "layerDigest": null,
+        "licenses": [
+          "Apache-2.0"
+        ],
+        "name": "source-controller",
+        "purl": "pkg:golang/github.com/fluxcd/source-controller@v1.6.2",
+        "srcName": null,
+        "srcVersion": null,
+        "type": "application",
+        "version": "v1.6.2"
+      }
+    ],
+    "nextAfter": null,
+    "report": {
+      "attestation": {
+        "artifact_digest": "sha256:25b08a67cc6e537c489a91a56119da6cc12bb614d9d3f01f0c945d151a71c4dd",
+        "mechanism": "cosign-attestation",
+        "media_type": "application/vnd.dsse.envelope.v1+json",
+        "predicate_type": "https://cyclonedx.org/bom",
+        "verified": true
+      },
+      "dbUpdatedAt": null,
+      "digestKind": "manifest",
+      "imageRef": "ghcr.io/fluxcd/source-controller:v1.6.2",
+      "itemCount": 1,
+      "join": "image_id",
+      "osEosl": false,
+      "osFamily": null,
+      "osName": null,
+      "receivedAt": "2026-09-26T02:58:50.915590",
+      "reportDigest": "sha256:4832e654a05c1e66ce1982c0300effaca0c7b1a90be575e0f52bd465a12dc18a",
+      "sbomFormat": "CycloneDX",
+      "sbomSources": [],
+      "sbomTrust": "verified",
+      "scannedAt": "2026-09-25T20:58:50",
+      "scannerName": "registry",
+      "scannerVersion": null,
+      "source": "registry"
+    },
+    "reports": [
+      {
+        "attestation": {
+          "artifact_digest": "sha256:25b08a67cc6e537c489a91a56119da6cc12bb614d9d3f01f0c945d151a71c4dd",
+          "mechanism": "cosign-attestation",
+          "media_type": "application/vnd.dsse.envelope.v1+json",
+          "predicate_type": "https://cyclonedx.org/bom",
+          "verified": true
+        },
+        "dbUpdatedAt": null,
+        "digestKind": "manifest",
+        "imageRef": "ghcr.io/fluxcd/source-controller:v1.6.2",
+        "itemCount": 1,
+        "join": "image_id",
+        "osEosl": false,
+        "osFamily": null,
+        "osName": null,
+        "receivedAt": "2026-09-26T02:58:50.915590",
+        "reportDigest": "sha256:4832e654a05c1e66ce1982c0300effaca0c7b1a90be575e0f52bd465a12dc18a",
+        "sbomFormat": "CycloneDX",
+        "sbomSources": [],
+        "sbomTrust": "verified",
+        "scannedAt": "2026-09-25T20:58:50",
+        "scannerName": "registry",
+        "scannerVersion": null,
+        "source": "registry"
+      }
+    ]
+  },
+  "request": "GET /images/sha256:4832e654a05c1e66ce1982c0300effaca0c7b1a90be575e0f52bd465a12dc18a/sbom",
+  "status": 200
+}

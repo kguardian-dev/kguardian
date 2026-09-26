@@ -200,6 +200,17 @@ async fn main() -> Result<(), Error> {
         config: kguardian::early_capture::StartupCaptureConfig::from_env(),
     };
 
+    // Runtime inventory (RUNTIME_INVENTORY: off | exec | full).
+    let runtime_mode = kguardian::runtime_inventory::Mode::from_env();
+    let (runtime_event_sender, runtime_event_receiver) =
+        mpsc::channel::<kguardian::runtime_inventory::RuntimeEventData>(1000);
+    let runtime_events = (runtime_mode != kguardian::runtime_inventory::Mode::Off).then(|| {
+        (
+            runtime_event_sender,
+            runtime_mode == kguardian::runtime_inventory::Mode::Full,
+        )
+    });
+
     // The denial probe is loaded by the eBPF loader alongside the other
     // three — it needs the pod registration stream, which only that loop
     // consumes — and hands its map descriptors back over this channel.
@@ -228,6 +239,7 @@ async fn main() -> Result<(), Error> {
         seccomp_denial_maps_sender,
         cgroup_event_sender,
         forget_pending_receiver,
+        runtime_events,
     );
 
     let seccomp_denial_map = Arc::clone(&container_map);
@@ -291,6 +303,10 @@ async fn main() -> Result<(), Error> {
     supervisor.spawn(
         Subsystem::SyscallEvents,
         handle_syscall_events(syscall_event_receiver, syscall_map, startup_capture),
+    );
+    supervisor.spawn(
+        Subsystem::RuntimeInventory,
+        kguardian::runtime_inventory::run(runtime_event_receiver, runtime_mode),
     );
     supervisor.spawn(
         Subsystem::NetpolicyDropEvents,

@@ -263,6 +263,12 @@ spec:
             - name: IMAGE_ATTESTATION_RETENTION_DAYS
               value: {{ $scRetention.attestationDays | quote }}
             {{- end }}
+            {{/* Runtime inventory retention; hasKey because 0 disables. */}}
+            {{- $runtimeInventory := .Values.broker.runtimeInventory | default dict }}
+            {{- if hasKey $runtimeInventory "retentionDays" }}
+            - name: RUNTIME_INVENTORY_RETENTION_DAYS
+              value: {{ $runtimeInventory.retentionDays | quote }}
+            {{- end }}
             {{- if hasKey .Values.broker.audit "inflightPermits" }}
             - name: AUDIT_INFLIGHT_PERMITS
               value: {{ .Values.broker.audit.inflightPermits | quote }}
