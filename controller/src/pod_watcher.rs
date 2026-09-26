@@ -263,6 +263,7 @@ async fn resync_pods(
                         .filter_map(|p| p.metadata.uid.clone())
                         .collect();
                     crate::early_capture::retain_known_pods(&live, listed_at);
+                    crate::early_capture::retain_host_network_pods(&live, listed_at);
                     // Pods deleted between resyncs never reach the terminal
                     // branch (the watch decodes deletions away): retire
                     // their netns registrations here. Only entries older
@@ -921,8 +922,17 @@ async fn register_netns(
                 // Takes a write lock on this key's shard. It is only safe to
                 // block here because no reader holds a guard across an await
                 // any more — see ContainerMap and lookup_pod in models.rs.
-                container_map.insert(inode_num, Arc::new(pod_inspect));
-                return Some(PodRegistration::register(inode_num, flags));
+                let pod_inspect = Arc::new(pod_inspect);
+                let host_network = pod_inspect.host_network;
+                if host_network {
+                    crate::early_capture::note_host_network_pod(Arc::clone(&pod_inspect));
+                }
+                container_map.insert(inode_num, pod_inspect);
+                return Some(PodRegistration {
+                    alias_gen: static_pod_alias_generation(pod),
+                    host_network,
+                    ..PodRegistration::register(inode_num, flags)
+                });
             }
         }
     }
@@ -978,6 +988,19 @@ pub fn container_resources(pod: &Pod, container_name: &str) -> ResourceSpec {
         .and_then(|s| s.containers.iter().find(|c| c.name == container_name))
         .and_then(|c| c.resources.as_ref());
     resource_spec_from(from_spec)
+}
+
+/// A static pod's cgroup path carries its config hash, not the mirror
+/// pod's UID. Returns the generation of that hash (which the probe maps to
+/// the registered generation), or 0 for any other pod.
+pub(crate) fn static_pod_alias_generation(pod: &Pod) -> u32 {
+    pod.metadata
+        .annotations
+        .as_ref()
+        .and_then(|a| a.get("kubernetes.io/config.mirror"))
+        .filter(|h| !h.is_empty() && Some(h.as_str()) != pod.metadata.uid.as_deref())
+        .map(|h| pod_flags::generation_for_uid(Some(h)))
+        .unwrap_or(0)
 }
 
 /// True once none of the pod's containers can still run: a terminal

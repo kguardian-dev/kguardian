@@ -380,6 +380,92 @@ pub fn known_pod_containers(uid: &str) -> Option<BTreeSet<String>> {
     KNOWN_PODS.read().ok()?.get(uid).map(|(_, ids)| ids.clone())
 }
 
+// ---- hostNetwork pods by generation ---------------------------------------
+//
+// Every hostNetwork pod on a node shares the node's netns, and the
+// ContainerMap (keyed by netns inode) holds only the last one registered.
+// The probe credits their tasks by the generation of their own cgroup, and
+// userspace resolves that generation here.
+
+static HOST_NETWORK_PODS: std::sync::LazyLock<
+    std::sync::RwLock<HashMap<u32, std::sync::Arc<crate::PodInspect>>>,
+> = std::sync::LazyLock::new(Default::default);
+
+pub fn note_host_network_pod(pod: std::sync::Arc<crate::PodInspect>) {
+    let generation = pod_flags::generation(pod.capture_flags);
+    if let Ok(mut pods) = HOST_NETWORK_PODS.write() {
+        pods.insert(generation, pod);
+    }
+}
+
+pub fn host_network_pod(generation: u32) -> Option<std::sync::Arc<crate::PodInspect>> {
+    HOST_NETWORK_PODS.read().ok()?.get(&generation).cloned()
+}
+
+pub fn host_network_pods_by_uid() -> HashMap<String, std::sync::Arc<crate::PodInspect>> {
+    HOST_NETWORK_PODS
+        .read()
+        .map(|pods| {
+            pods.values()
+                .map(|p| (p.info.config.metadata.uid.clone(), std::sync::Arc::clone(p)))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Drop hostNetwork pods registered before `listed_at` whose UID is not in
+/// `live` (the resync LIST taken at `listed_at`).
+pub fn retain_host_network_pods(live: &std::collections::HashSet<String>, listed_at: Instant) {
+    if let Ok(mut pods) = HOST_NETWORK_PODS.write() {
+        pods.retain(|_, p| {
+            live.contains(&p.info.config.metadata.uid)
+                || p.registered_at.is_none_or(|at| at >= listed_at)
+        });
+    }
+}
+
+// ---- Pod-level cgroup names (mirror of bpf/pod_cgroup.h) -------------------
+
+/// `kg_pod_gen_from_name` in `bpf/pod_cgroup.h`, in Rust: the registration
+/// generation of the pod a pod-level cgroup name belongs to, or `None`.
+/// Kept byte-for-byte equivalent; `the_c_pod_cgroup_parser_matches_the_rust_one`
+/// compiles the C and compares them on the same names.
+pub fn pod_generation_from_cgroup_name(name: &str) -> Option<u32> {
+    let n = name.as_bytes();
+    let scan = n.len().min(128 - 3);
+    let mut at = None;
+    for i in 0..scan {
+        if n[i..].starts_with(b"pod") && (i == 0 || n[i - 1] == b'-') {
+            at = Some(i + 3);
+        }
+    }
+    let rest = &n[at?..];
+    let len = rest
+        .iter()
+        .take(36)
+        .position(|&c| c == b'.')
+        .unwrap_or(rest.len().min(36));
+    let uid: Vec<u8> = rest[..len]
+        .iter()
+        .map(|&c| if c == b'_' { b'-' } else { c })
+        .collect();
+    if let Some(&end) = rest.get(len) {
+        if end != b'.' {
+            return None;
+        }
+    }
+    let dashes_ok = uid.iter().enumerate().all(|(k, &c)| match c {
+        b'-' => matches!(k, 8 | 13 | 18 | 23),
+        c => c.is_ascii_digit() || (b'a'..=b'f').contains(&c),
+    });
+    let dashes = uid.iter().filter(|&&c| c == b'-').count();
+    if !dashes_ok || !((len == 36 && dashes == 4) || (len == 32 && dashes == 0)) {
+        return None;
+    }
+    let uid = std::str::from_utf8(&uid).ok()?;
+    Some(pod_flags::generation_for_uid(Some(uid)))
+}
+
 // ---- Attribution ----------------------------------------------------------
 
 /// What the watcher knows about the pod a pending cgroup belongs to.
@@ -1232,6 +1318,209 @@ mod tests {
         note_known_pod(&pod);
         forget_known_pod(uid);
         assert_eq!(known_pod_containers(uid), None);
+    }
+
+    // ---- registered-path ownership (bpf/pod_cgroup.h) ------------------------
+
+    const OWNER_NAMES: &[&str] = &[
+        // pod-level cgroups
+        "pod3f2a9c1e-7b4d-4e0a-9f1c-0123456789ab",
+        "kubepods-burstable-pod3f2a9c1e_7b4d_4e0a_9f1c_0123456789ab.slice",
+        "kubepods-pod3f2a9c1e_7b4d_4e0a_9f1c_0123456789ab.slice",
+        "kubelet-kubepods-besteffort-pod3f2a9c1e_7b4d_4e0a_9f1c_0123456789ab.slice",
+        "pod8d5b2c7f1a3e4b6c9d0e1f2a3b4c5d6e", // static pod config hash
+        // not pod cgroups
+        "kubepods",
+        "kubepods.slice",
+        "kubepods-besteffort.slice",
+        "besteffort",
+        "cri-containerd-0f1e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c4b5a69788796a5b4c3d2e1f0.scope",
+        "0f1e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c4b5a69788796a5b4c3d2e1f0",
+        "podruntime",
+        "runtime",
+        "containerd.service",
+        "system.slice",
+        "init.scope",
+        "",
+        // malformed
+        "podnot-a-uid",
+        "pod3F2A9C1E-7B4D-4E0A-9F1C-0123456789AB",
+        "pod3f2a9c1e-7b4d-4e0a-9f1c-0123456789abX",
+        "pod3f2a9c1e7b4d-4e0a-9f1c-0123456789ab-",
+        "xpod3f2a9c1e-7b4d-4e0a-9f1c-0123456789ab",
+    ];
+
+    #[test]
+    fn pod_generation_from_cgroup_name_matches_generation_for_uid() {
+        let g = pod_flags::generation_for_uid(Some(UID));
+        assert_eq!(
+            pod_generation_from_cgroup_name(&format!("pod{UID}")),
+            Some(g)
+        );
+        assert_eq!(
+            pod_generation_from_cgroup_name(&format!("kubepods-burstable-pod{UID_US}.slice")),
+            Some(g)
+        );
+        for n in &OWNER_NAMES[5..] {
+            assert_eq!(pod_generation_from_cgroup_name(n), None, "{n:?}");
+        }
+    }
+
+    /// The probe's parser is C; this compiles bpf/pod_cgroup.h with the
+    /// host compiler and checks it agrees with the Rust mirror (and so
+    /// with pod_flags::generation_for_uid) on every name above. Needs a C
+    /// compiler, which building the eBPF objects already requires.
+    #[test]
+    fn the_c_pod_cgroup_parser_matches_the_rust_one() {
+        let dir = std::env::temp_dir().join(format!("kg-podcg-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let header = concat!(env!("CARGO_MANIFEST_DIR"), "/src/bpf/pod_cgroup.h");
+        let src = dir.join("harness.c");
+        std::fs::write(
+            &src,
+            format!(
+                r#"typedef unsigned int __u32;
+#define __always_inline inline __attribute__((always_inline))
+#include "{header}"
+#include <stdio.h>
+#include <string.h>
+int main(int argc, char **argv) {{
+    for (int i = 1; i < argc; i++) {{
+        char buf[KG_CG_NAME_BUF];
+        memset(buf, 0, sizeof buf);
+        strncpy(buf, argv[i], sizeof buf - 1);
+        printf("%u\n", kg_pod_gen_from_name(buf));
+    }}
+    return 0;
+}}
+"#
+            ),
+        )
+        .unwrap();
+        let bin = dir.join("harness");
+        let cc = std::env::var("CC").unwrap_or_else(|_| "cc".into());
+        let status = std::process::Command::new(&cc)
+            .args(["-O2", "-std=c99", "-o"])
+            .arg(&bin)
+            .arg(&src)
+            .status()
+            .expect("a host C compiler");
+        assert!(status.success(), "compiling pod_cgroup.h failed");
+        let out = std::process::Command::new(&bin)
+            .args(OWNER_NAMES)
+            .output()
+            .unwrap();
+        let text = String::from_utf8(out.stdout).unwrap();
+        let c: Vec<u32> = text.lines().map(|l| l.parse().unwrap()).collect();
+        assert_eq!(c.len(), OWNER_NAMES.len());
+        for (name, v) in OWNER_NAMES.iter().zip(c) {
+            let c_gen = (v != 0).then_some(v & 0x0fff_ffff);
+            assert!(v == 0 || v & (1 << 31) != 0, "{name:?}: pod bit");
+            assert_eq!(c_gen, pod_generation_from_cgroup_name(name), "{name:?}");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Model of the probe's registered-path decision (credit_generation in
+    /// syscall.bpf.c), driven by the parser above, for the three cases the
+    /// live defect turned on.
+    fn credit(
+        netns_gen: u32,
+        cgroup_names: &[&str],
+        alias: &HashMap<u32, u32>,
+        hostnet: &[u32],
+    ) -> Option<u32> {
+        let owner = cgroup_names
+            .iter()
+            .take(4)
+            .find_map(|n| pod_generation_from_cgroup_name(n))?;
+        if owner == netns_gen {
+            return Some(owner);
+        }
+        let gen = alias.get(&owner).copied().unwrap_or(owner);
+        (gen == netns_gen || hostnet.contains(&gen)).then_some(gen)
+    }
+
+    #[test]
+    fn host_processes_in_a_pod_netns_are_not_credited_to_the_pod() {
+        let g = pod_flags::generation_for_uid(Some(UID));
+        let none = HashMap::new();
+        // containerd pinning / unmounting the netns, a CNI plugin: their
+        // cgroups name no pod (leaf first, then ancestors).
+        for chain in [
+            &["containerd.service", "system.slice"][..],
+            &["runtime", "podruntime"][..],
+            &["kubelet.service", "system.slice"][..],
+        ] {
+            assert_eq!(credit(g, chain, &none, &[]), None, "{chain:?}");
+        }
+    }
+
+    #[test]
+    fn the_pods_own_tasks_are_credited() {
+        let g = pod_flags::generation_for_uid(Some(UID));
+        let none = HashMap::new();
+        let leaf = format!("cri-containerd-{CID}.scope");
+        let pod = format!("kubepods-besteffort-pod{UID_US}.slice");
+        let chain = [
+            leaf.as_str(),
+            pod.as_str(),
+            "kubepods-besteffort.slice",
+            "kubepods.slice",
+        ];
+        assert_eq!(credit(g, &chain, &none, &[]), Some(g));
+        // cgroupfs, and a sub-cgroup the container manages itself.
+        let pod = format!("pod{UID}");
+        let chain = ["init.scope", CID, pod.as_str(), "besteffort"];
+        assert_eq!(credit(g, &chain, &none, &[]), Some(g));
+    }
+
+    #[test]
+    fn another_pods_task_on_a_recycled_inode_is_not_credited() {
+        // inode_num still names the DEAD pod; the task is a new pod's.
+        let dead = pod_flags::generation_for_uid(Some("aaaaaaaa-0000-4000-8000-000000000001"));
+        let new_uid = "bbbbbbbb-0000-4000-8000-000000000002";
+        let pod = format!("pod{new_uid}");
+        let chain = [CID, pod.as_str(), "burstable", "kubepods"];
+        assert_eq!(credit(dead, &chain, &HashMap::new(), &[]), None);
+    }
+
+    #[test]
+    fn host_network_and_static_pods_are_credited_to_themselves() {
+        let holder = pod_flags::generation_for_uid(Some("cccccccc-0000-4000-8000-000000000003"));
+        let g = pod_flags::generation_for_uid(Some(UID));
+        let pod = format!("pod{UID}");
+        let chain = [CID, pod.as_str()];
+        // Another hostNetwork pod holds the node netns entry.
+        assert_eq!(credit(holder, &chain, &HashMap::new(), &[g]), Some(g));
+        // Static pod: cgroup carries the config hash, registration the
+        // mirror UID.
+        let hash = "8d5b2c7f1a3e4b6c9d0e1f2a3b4c5d6e";
+        let mirror = pod_flags::generation_for_uid(Some(UID));
+        let alias = HashMap::from([(pod_flags::generation_for_uid(Some(hash)), mirror)]);
+        let pod = format!("pod{hash}");
+        let chain = [CID, pod.as_str()];
+        assert_eq!(credit(mirror, &chain, &alias, &[]), Some(mirror));
+    }
+
+    #[test]
+    fn the_probe_checks_cgroup_ownership_before_crediting_a_registered_syscall() {
+        let src = include_str!("bpf/syscall.bpf.c");
+        let handler = &src[src
+            .find("SEC(\"tracepoint/raw_syscalls/sys_enter\")")
+            .unwrap()..];
+        let netns = handler
+            .find("bpf_map_lookup_elem(&inode_num, &net_ns)")
+            .unwrap();
+        let owner = handler
+            .find("credit_generation(KG_GEN_OF(*flags))")
+            .unwrap();
+        let dedup = handler.find("bpf_map_update_elem(&seen_syscalls").unwrap();
+        assert!(netns < owner && owner < dedup);
+        assert!(
+            handler.contains(".generation = gen,"),
+            "dedup keyed by the credited pod"
+        );
     }
 
     // ---- runtime pre-filter list -------------------------------------------

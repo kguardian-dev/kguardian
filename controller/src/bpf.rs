@@ -752,6 +752,29 @@ pub fn ebpf_handle(
                     );
                     continue;
                 }
+                // Ownership side tables for the syscall probe's registered
+                // path (credit_generation in syscall.bpf.c). Written before
+                // inode_num so the first syscall credited under this
+                // registration already sees them.
+                let generation = crate::models::pod_flags::generation(reg.flags);
+                if reg.alias_gen != 0 {
+                    let _ = syscall_sk
+                        .maps
+                        .gen_alias
+                        .update(
+                            &reg.alias_gen.to_ne_bytes(),
+                            &generation.to_ne_bytes(),
+                            MapFlags::ANY,
+                        )
+                        .map_err(|e| eprintln!("Failed to update gen_alias: {}", e));
+                }
+                if reg.host_network {
+                    let _ = syscall_sk
+                        .maps
+                        .hostnet_gens
+                        .update(&generation.to_ne_bytes(), &1u8.to_ne_bytes(), MapFlags::ANY)
+                        .map_err(|e| eprintln!("Failed to update hostnet_gens: {}", e));
+                }
                 let _ = network_sk
                     .maps
                     .inode_num

@@ -174,6 +174,25 @@ pub struct SyscallEventData {
     /// The calling task's cgroup v2 id — the container, where `inum`
     /// names only the pod.
     pub cgroup_id: u64,
+    /// Registered path: generation of the pod owning the task's cgroup
+    /// (`task_pod_generation` in the probe). 0 on the pending path.
+    pub generation: u32,
+    pub _pad: u32,
+}
+
+/// The pod a registered-path event belongs to: the netns's pod when the
+/// task's cgroup is that pod's, otherwise a hostNetwork pod with the
+/// task's generation (they all share the node's netns, whose entry names
+/// only one of them). The probe already dropped every other case.
+fn registered_event_pod(
+    container_map: &ContainerMap,
+    event: &SyscallEventData,
+) -> Option<Arc<PodInspect>> {
+    let pod = lookup_pod(container_map, event.inum)?;
+    if crate::models::pod_flags::generation(pod.capture_flags) == event.generation {
+        return Some(pod);
+    }
+    crate::early_capture::host_network_pod(event.generation)
 }
 
 /// How often buffered startup syscalls are checked against the pods the
@@ -276,8 +295,13 @@ pub async fn handle_syscall_events(
                 // Mutex shared with the periodic sender — so the guard could
                 // be held for as long as that lock was contended. See
                 // ContainerMap in models.rs.
-                if let Some(pod_inspect) = lookup_pod(&container_map, event.inum) {
-                    process_syscall_event(&event, &pod_inspect).await?
+                match registered_event_pod(&container_map, &event) {
+                    Some(pod_inspect) => process_syscall_event(&event, &pod_inspect).await?,
+                    None => debug!(
+                        inum = event.inum,
+                        generation = event.generation,
+                        "syscall from a registered netns names no registered pod; dropped"
+                    ),
                 }
             }
             created = cgroup_events.recv(), if cgroup_events_open => {
@@ -340,16 +364,21 @@ async fn attribute_pending(
     // Finished pods' entries stay in the map (marked unregistered), so a
     // Job that completed before its startup syscalls were attributed
     // still resolves by UID.
-    let by_uid: HashMap<String, Arc<PodInspect>> = container_map
-        .iter()
-        .filter(|e| !e.value().info.config.metadata.uid.is_empty())
-        .map(|e| {
-            (
-                e.value().info.config.metadata.uid.clone(),
-                Arc::clone(e.value()),
-            )
-        })
-        .collect();
+    // hostNetwork pods first: they share one ContainerMap key (the node's
+    // netns), so all but the last registered are only in their own registry.
+    let mut by_uid: HashMap<String, Arc<PodInspect>> =
+        crate::early_capture::host_network_pods_by_uid();
+    by_uid.extend(
+        container_map
+            .iter()
+            .filter(|e| !e.value().info.config.metadata.uid.is_empty())
+            .map(|e| {
+                (
+                    e.value().info.config.metadata.uid.clone(),
+                    Arc::clone(e.value()),
+                )
+            }),
+    );
 
     let result = pending.attribute(Instant::now(), |identity| {
         let containers = known_pod_containers(&identity.pod_uid);
@@ -376,6 +405,7 @@ async fn attribute_pending(
                 sysnbr: nr,
                 kind: SYSCALL_EVENT_PENDING,
                 cgroup_id: flush.cgroup_id,
+                ..Default::default()
             };
             process_syscall_event(&event, &pod).await?;
         }
@@ -559,7 +589,8 @@ mod tests {
         // u32 kind, u64 cgroup_id. The ring-buffer callback casts the raw
         // bytes to this type, so a size or order mismatch silently reads
         // garbage rather than failing.
-        assert_eq!(std::mem::size_of::<SyscallEventData>(), 24);
+        assert_eq!(std::mem::size_of::<SyscallEventData>(), 32);
+        assert_eq!(std::mem::offset_of!(SyscallEventData, generation), 24);
         assert_eq!(std::mem::offset_of!(SyscallEventData, sysnbr), 8);
         assert_eq!(std::mem::offset_of!(SyscallEventData, kind), 12);
         assert_eq!(std::mem::offset_of!(SyscallEventData, cgroup_id), 16);

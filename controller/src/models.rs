@@ -79,6 +79,12 @@ pub struct PodRegistration {
     /// still holds exactly `flags` (compare-and-delete), so a newer pod
     /// already registered on a recycled inode is never unregistered.
     pub unregister: bool,
+    /// Static pods: the generation of the config hash their cgroup path
+    /// carries, which the probe maps to `flags`' generation. 0 otherwise.
+    pub alias_gen: u32,
+    /// The pod runs in the node's netns; the probe credits its tasks by
+    /// generation rather than by the netns entry.
+    pub host_network: bool,
 }
 
 impl PodRegistration {
@@ -87,14 +93,15 @@ impl PodRegistration {
             netns_inode,
             flags,
             unregister: false,
+            alias_gen: 0,
+            host_network: false,
         }
     }
 
     pub fn unregister(netns_inode: u64, flags: u32) -> Self {
         Self {
-            netns_inode,
-            flags,
             unregister: true,
+            ..Self::register(netns_inode, flags)
         }
     }
 }

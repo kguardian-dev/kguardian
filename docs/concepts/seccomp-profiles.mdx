@@ -72,16 +72,29 @@ start. On older controllers, or where that line is replaced by a warning,
 trigger at least one container restart under `SCMP_ACT_LOG` before enforcing
 a profile recorded from fresh pods.
 
+### Whose syscalls count
+
+A syscall is credited to a pod only when the calling process is in one of that
+pod's cgroups. Host processes that enter a pod's network namespace are
+excluded, as are the syscalls they make there. These include containerd
+pinning and unmounting the namespace (`mount`, `umount2`), CNI plugins on pod
+setup and teardown, and anything else that `setns()`es in. Before this change
+they were credited to the pod, so most profiles allowed `mount` and `umount2`.
+See the upgrade note in the chart's `UPGRADING.md`.
+
+hostNetwork pods share the node's network namespace and are told apart the
+same way, by cgroup, so each gets its own set. Static pods are matched through
+their config hash.
+
+A pod deleted and recreated under the same name starts a fresh set; nothing
+recorded for the previous pod carries over.
+
 Known limitations:
 
-- **hostNetwork pods**: startup is captured by cgroup like any other pod, but
-  once a hostNetwork pod is registered, its steady-state syscalls are keyed by
-  the node's network namespace. They are credited to whichever hostNetwork pod
-  on the node holds that entry. Per-container attribution by cgroup fixes this
-  and is planned. Until then, treat a hostNetwork pod's recorded set as shared
-  with its hostNetwork neighbours.
-- **Static pods** are not covered: their mirror pod UID differs from the UID
-  in the cgroup path.
+- The pod sandbox (pause) container's steady-state syscalls are still part of
+  the pod's set; only its startup is excluded.
+- Startup capture does not cover static pods: their cgroup carries the config
+  hash, and the pending path matches the cgroup's UID to a registered pod.
 
 ### From observation to a node
 

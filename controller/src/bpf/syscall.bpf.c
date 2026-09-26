@@ -4,6 +4,7 @@
 #include <bpf/bpf_endian.h>
 #include <bpf/bpf_tracing.h>
 #include "helper.h"
+#include "pod_cgroup.h"
 
 struct
 {
@@ -89,6 +90,12 @@ struct data_t
     __u32 sysnbr;
     __u32 kind;
     __u64 cgroup_id;
+    // Registered path: the generation of the pod whose cgroup the task is
+    // in (see task_pod_generation). Userspace attributes by it, which is
+    // what separates hostNetwork pods sharing the node's netns. 0 on the
+    // pending path.
+    __u32 generation;
+    __u32 _pad;
 };
 
 // ---- Startup capture (closes the seccomp startup-capture gap) ----------
@@ -349,8 +356,115 @@ static __always_inline bool capture_pending(__u64 net_ns, u32 syscall_id)
     data->sysnbr = syscall_id;
     data->kind = KG_SYSCALL_EVENT_PENDING;
     data->cgroup_id = cgroup_id;
+    data->generation = 0;
+    data->_pad = 0;
     bpf_ringbuf_submit(data, 0);
     return true;
+}
+
+// ---- Who owns the calling task (registered path) -----------------------
+//
+// The registered path is keyed by netns, and a netns is not a pod: host
+// processes enter pod network namespaces all the time. containerd pins a
+// new netns with a bind mount from a thread inside it and unmounts it at
+// teardown; CNI ADD/DEL plugins setns() in; anything else that does
+// setns() lands there too. Keyed by netns alone, all of it was credited to
+// the pod: 83% of the pod_syscalls rows written by v1.15.1 on cluster-00
+// contained mount and umount2, so nearly every generated profile allowed
+// them. A task is now credited to a pod only when its cgroup is that
+// pod's: the kernfs name of the pod-level cgroup carries the pod UID,
+// hashed to the same generation the inode_num entry names.
+//
+// cgroup id -> KG_CG_POD|generation, or 0 for "not a pod cgroup". Kernfs
+// cgroup ids are never reused, so an entry never goes stale; the LRU only
+// bounds memory.
+struct
+{
+    __uint(type, BPF_MAP_TYPE_LRU_HASH);
+    __uint(max_entries, 16384);
+    __type(key, u64);
+    __type(value, u32);
+} cgroup_pod_gen SEC(".maps");
+
+// Static pods: the cgroup carries the config hash, the registered (mirror)
+// pod a different UID. generation(config hash) -> generation(mirror uid),
+// written by userspace at registration.
+struct
+{
+    __uint(type, BPF_MAP_TYPE_LRU_HASH);
+    __uint(max_entries, 1024);
+    __type(key, u32);
+    __type(value, u32);
+} gen_alias SEC(".maps");
+
+// Generations of registered hostNetwork pods. They all share the node's
+// netns, whose inode_num entry names only the last one registered; a task
+// of any of them is credited to its own pod by generation.
+struct
+{
+    __uint(type, BPF_MAP_TYPE_LRU_HASH);
+    __uint(max_entries, 1024);
+    __type(key, u32);
+    __type(value, u8);
+} hostnet_gens SEC(".maps");
+
+// Pod-level cgroup at most this many levels above the task's: the
+// container's own cgroup is one below it, and a container managing its own
+// sub-cgroups adds a level or two.
+#define KG_CG_LEVELS 4
+
+// KG_CG_POD|generation of the pod owning the calling task's cgroup, or 0.
+// Cached per cgroup: after the first syscall from a cgroup this is one
+// hash lookup.
+static __always_inline __u32 task_pod_generation(void)
+{
+    __u64 cgid = bpf_get_current_cgroup_id();
+    __u32 *cached = bpf_map_lookup_elem(&cgroup_pod_gen, &cgid);
+    if (cached)
+        return *cached;
+
+    struct task_struct *task = (struct task_struct *)bpf_get_current_task();
+    struct kernfs_node *kn = BPF_CORE_READ(task, cgroups, dfl_cgrp, kn);
+    char name[KG_CG_NAME_BUF];
+    __u32 gen = 0;
+    for (int lvl = 0; lvl < KG_CG_LEVELS; lvl++)
+    {
+        if (!kn)
+            break;
+        const char *kn_name = BPF_CORE_READ(kn, name);
+        if (bpf_probe_read_kernel_str(name, sizeof(name), kn_name) < 0)
+            break;
+        gen = kg_pod_gen_from_name(name);
+        if (gen)
+            break;
+        kn = BPF_CORE_READ(kn, parent);
+    }
+    bpf_map_update_elem(&cgroup_pod_gen, &cgid, &gen, BPF_ANY);
+    return gen;
+}
+
+// The generation to credit the calling task to, given the netns entry's
+// generation, or 0 to drop the syscall:
+//   - not in a pod cgroup (a host process in the pod's netns): 0
+//   - the netns's own pod (static pods via gen_alias): that generation
+//   - a registered hostNetwork pod sharing the node netns: its own
+//   - any other pod (a stale entry on a recycled inode): 0
+static __always_inline __u32 credit_generation(__u32 netns_gen)
+{
+    __u32 owner = task_pod_generation();
+    if (!(owner & KG_CG_POD))
+        return 0;
+    __u32 gen = owner & KG_CG_GEN_MASK;
+    if (gen == netns_gen)
+        return gen;
+    __u32 *alias = bpf_map_lookup_elem(&gen_alias, &gen);
+    if (alias)
+        gen = *alias;
+    if (gen == netns_gen)
+        return gen;
+    if (bpf_map_lookup_elem(&hostnet_gens, &gen))
+        return gen;
+    return 0;
 }
 
 // True when `syscall_id` passes the allowlist for `tier`. Full (and any
@@ -396,14 +510,16 @@ int trace_execve(struct trace_event_raw_sys_enter *ctx)
     if (capture_pending(net_ns, syscall_id))
         return 0;
 
-    // TODO(1533): a hostNetwork pod's netns is the node's, so after its
-    // startup (pending) window a hostNetwork container's syscalls go to
-    // whichever pod holds the node netns key in the ContainerMap. The fix
-    // is attribution by cgroup id, which lands with the per-container
-    // keying of P1-2. The same stale-key problem affects any pod that is
-    // never registered but reuses a dead pod's netns inode.
     flags = bpf_map_lookup_elem(&inode_num, &net_ns);
     if (!flags)
+        return 0;
+
+    // Credit only tasks in a pod's own cgroup (see task_pod_generation).
+    // This also resolves hostNetwork pods, which share the node's netns,
+    // and a stale entry on a recycled inode, whose generation no live
+    // task's cgroup carries.
+    __u32 gen = credit_generation(KG_GEN_OF(*flags));
+    if (!gen)
         return 0;
 
     // Tier filter first: cheap, and keeps the dedup map from filling
@@ -423,7 +539,7 @@ int trace_execve(struct trace_event_raw_sys_enter *ctx)
     // already there, which is exactly the "seen before" signal.
     struct seen_syscall_key seen = {
         .netns = net_ns,
-        .generation = KG_GEN_OF(*flags),
+        .generation = gen,
         .syscall = syscall_id,
     };
     u8 one = 1;
@@ -448,6 +564,8 @@ int trace_execve(struct trace_event_raw_sys_enter *ctx)
     data->kind = KG_SYSCALL_EVENT_REGISTERED;
     data->inum = net_ns;
     data->cgroup_id = bpf_get_current_cgroup_id();
+    data->generation = gen;
+    data->_pad = 0;
 
     // Submit to userspace
     bpf_ringbuf_submit(data, 0);
