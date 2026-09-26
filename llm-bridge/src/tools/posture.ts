@@ -151,6 +151,9 @@ export const PROFILE_CAPS = {
   denialSyscalls: 50,
   computeContainers: 10,
   diffEntries: 50,
+  driftItems: 20,
+  driftNotEvaluated: 20,
+  driftFilesPerItem: 5,
 } as const;
 
 /** Set out[key] to a capped copy of src[key] (when present) and record the cut. */
@@ -241,7 +244,7 @@ export const UNTRUSTED_NOTE =
 
 /** What the model is told about reading a profile; attached to every result. */
 export const PROFILE_NOTE =
-  "null means unknown (no data, or the source is not configured) and is never safe or passing; readiness ok:null means kguardian cannot tell. Status is a tier from findings (ok|warn|risk|unknown); there is no numeric score. posture.status is ok only when all four core dimensions are known and ok; with any unknown dimension it is the worst known warn/risk, else unknown. Always report posture.coverage and unknownDimensions with it. images is unknown until vulnerability data exists; its digests, crash loops and pull failures are inventory facts, not a verdict. A podSecurity level of restricted is an upper bound, not confirmed. Any recommendation is a suggestion for a human to review and apply; kguardian never applies it. " +
+  "null means unknown (no data, or the source is not configured) and is never safe or passing; readiness ok:null means kguardian cannot tell. Status is a tier from findings (ok|warn|risk|unknown); there is no numeric score. posture.status is ok only when all four core dimensions are known and ok; with any unknown dimension it is the worst known warn/risk, else unknown. Always report posture.coverage and unknownDimensions with it. images is unknown until vulnerability data exists; its digests, crash loops and pull failures are inventory facts, not a verdict. A podSecurity level of restricted is an upper bound, not confirmed. Any recommendation is a suggestion for a human to review and apply; kguardian never applies it. drift lists what changed since a baseline or ran without being shipped in the image (dimension drift findings; drift never sets posture). drift.evaluated names the checks that ran for the whole workload; a check not listed there, or listed in drift.notEvaluated (with its reason), was NOT evaluated, so no drift item for it never means no drift. " +
   UNTRUSTED_NOTE;
 
 /** Trim GET /workloads/{ns}/{kind}/{name}/profile for the model. */
@@ -258,6 +261,21 @@ export function trimProfile(p: unknown): Rec {
     out.workload = w;
   }
   capInto(out, p, "findings", PROFILE_CAPS.findings);
+  if (isRecord(p.drift)) {
+    const d = pick(p.drift, ["evaluated"]);
+    capInto(d, p.drift, "notEvaluated", PROFILE_CAPS.driftNotEvaluated);
+    capInto(d, p.drift, "items", PROFILE_CAPS.driftItems, (i) => {
+      if (!isRecord(i)) return i;
+      const o = pick(i, ["type", "findingId", "severity", "container"]);
+      if (isRecord(i.detail)) {
+        const det = { ...i.detail };
+        capInto(det, i.detail, "files", PROFILE_CAPS.driftFilesPerItem);
+        o.detail = det;
+      }
+      return o;
+    });
+    out.drift = d;
+  }
   if (isRecord(p.dimensions)) {
     const dims: Rec = {};
     for (const [k, v] of Object.entries(p.dimensions)) {
@@ -287,6 +305,11 @@ export function shrinkProfile(out: Rec, maxChars = MAX_RESPONSE_CHARS): Rec {
   };
   const steps: [string, () => void][] = [
     ["findings (attention keeps the top 5)", () => { delete out.findings; delete out.findingsOmitted; }],
+    ["drift.items detail", () => {
+      if (isRecord(out.drift) && Array.isArray(out.drift.items)) {
+        out.drift.items = out.drift.items.map((i) => (isRecord(i) ? { ...i, detail: undefined } : i));
+      }
+    }],
     ["dimensions.network.peers", dropFrom("network", "peers")],
     ["dimensions.compute.containers", dropFrom("compute", "containers")],
     ["dimensions.images.containers", dropFrom("images", "containers")],
