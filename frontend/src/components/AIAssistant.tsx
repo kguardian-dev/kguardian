@@ -5,6 +5,7 @@ import { X, Send, ArrowRight, Minimize2, Maximize2, ChevronRight, ChevronLeft, C
 import { streamChatMessage, type HistoryMessage } from '../services/aiApi';
 import { UI_DIMENSIONS } from '../constants/ui';
 import { initialViewMode, storeViewMode, type AssistantViewMode } from '../utils/assistantViewMode';
+import { useMediaQuery } from '../hooks/useMediaQuery';
 import { Button } from './ui/Button';
 import { Modal } from './ui/Modal';
 
@@ -235,6 +236,11 @@ const AIAssistant: React.FC<AIAssistantProps> = ({ isOpen, onClose, onLayoutChan
   const [inputValue, setInputValue] = useState('');
   const [isTyping, setIsTyping] = useState(false);
   const [viewMode, setViewMode] = useState<ViewMode>(initialViewMode);
+  // Docked, the panel takes 448px: below 1024px that leaves the map ~100-450px
+  // (measured with the rail open), too narrow for its toolbar and summary. There
+  // the assistant opens as a modal; the stored preference is kept for wider screens.
+  const tooNarrowToDock = useMediaQuery('(max-width: 1023px)');
+  const mode: ViewMode = tooNarrowToDock ? 'modal' : viewMode;
   const [isCollapsed, setIsCollapsed] = useState(false);
   const [panelWidth, setPanelWidth] = useState<number>(UI_DIMENSIONS.AI_PANEL_DEFAULT_WIDTH);
   const [isResizing, setIsResizing] = useState(false);
@@ -266,9 +272,9 @@ const AIAssistant: React.FC<AIAssistantProps> = ({ isOpen, onClose, onLayoutChan
   // Notify parent of layout changes
   useEffect(() => {
     if (onLayoutChange && isOpen) {
-      onLayoutChange(viewMode === 'side-panel', isCollapsed, panelWidth);
+      onLayoutChange(mode === 'side-panel', isCollapsed, panelWidth);
     }
-  }, [viewMode, isCollapsed, panelWidth, onLayoutChange, isOpen]);
+  }, [mode, isCollapsed, panelWidth, onLayoutChange, isOpen]);
 
   // Auto-scroll to bottom when new messages arrive
   useEffect(() => {
@@ -472,7 +478,7 @@ const AIAssistant: React.FC<AIAssistantProps> = ({ isOpen, onClose, onLayoutChan
   );
 
   // Modal view (centered, with backdrop)
-  if (viewMode === 'modal') {
+  if (mode === 'modal') {
     return (
       <Modal
         isOpen
@@ -482,7 +488,7 @@ const AIAssistant: React.FC<AIAssistantProps> = ({ isOpen, onClose, onLayoutChan
         contentClassName="flex-1 min-h-0 flex flex-col"
       >
         <ChatHeader showClear={messages.length > 0} onClear={handleClearChat} onClose={onClose}>
-          <Button variant="ghost" size="sm" iconOnly leftIcon={Minimize2} onClick={toggleViewMode} aria-label="Dock to side" title="Dock to side" />
+          {!tooNarrowToDock && <Button variant="ghost" size="sm" iconOnly leftIcon={Minimize2} onClick={toggleViewMode} aria-label="Dock to side" title="Dock to side" />}
         </ChatHeader>
         {chatMessages('max-w-md mx-auto w-full')}
         {chatInput}

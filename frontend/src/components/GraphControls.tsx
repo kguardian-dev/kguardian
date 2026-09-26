@@ -28,10 +28,10 @@ export interface GraphControlsProps {
   onLensChange?: (lens: MapLens) => void;
 }
 
-// Below lg the map is too narrow for labelled toggles next to the summary
-// panel (it sits top-left, the toolbar top-right): the labels go
-// screen-reader-only and each toggle keeps its icon, hue and title.
-const LABEL = 'sr-only lg:not-sr-only';
+// The map (not the viewport: the rail and a docked AI panel both narrow it)
+// is a CSS container (NetworkGraph). Below a 768px-wide map the toggle labels
+// go screen-reader-only and each toggle keeps its icon, hue and title.
+const LABEL = 'sr-only @3xl:not-sr-only';
 const LENSES: Array<{ id: MapLens; label: string; title: string }> = [
   // "None", not "Traffic": the edges toggle next to it is already called Traffic.
   { id: 'traffic', label: 'None', title: 'No lens: cards show their name, traffic and compute only' },
@@ -76,21 +76,21 @@ export function GraphControls({
 }: GraphControlsProps) {
   return (
     <div className="flex flex-wrap justify-end gap-2">
-      {/* The labelled button group needs about 330px on top of the toggles:
-          below xl (with the 224px rail) it would cover the summary panel
-          top-left, so the lens is a select there. Measured at 640-1440. */}
+      {/* The labelled lens group needs about 330px on top of the toggles: on
+          a map narrower than 1024px it would cover the summary, so the lens
+          is a select there. Measured with the rail and AI panel both open. */}
       {lens && onLensChange && (
         <select
           aria-label="Map lens"
           value={lens}
           onChange={(e) => onLensChange(e.target.value as MapLens)}
-          className="xl:hidden h-8 rounded-control border border-hubble-border bg-hubble-card px-2 text-xs text-primary"
+          className="@5xl:hidden h-8 rounded-control border border-hubble-border bg-hubble-card px-2 text-xs text-primary"
         >
           {LENSES.map((l) => <option key={l.id} value={l.id}>{l.label}</option>)}
         </select>
       )}
       {lens && onLensChange && (
-        <div role="group" aria-label="Map lens" className="hidden xl:inline-flex h-8 rounded-control border border-hubble-border bg-hubble-card overflow-hidden">
+        <div role="group" aria-label="Map lens" className="hidden @5xl:inline-flex h-8 rounded-control border border-hubble-border bg-hubble-card overflow-hidden">
           {LENSES.map((l) => (
             <button
               key={l.id}

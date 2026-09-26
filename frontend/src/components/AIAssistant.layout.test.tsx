@@ -49,3 +49,26 @@ describe('AIAssistant opens docked', () => {
     expect(screen.getByLabelText('Dock to side')).toBeTruthy();
   });
 });
+
+describe('AIAssistant below 1024px', () => {
+  beforeEach(() => {
+    localStorage.clear();
+    // A narrow window: the docked panel would leave the map too little room.
+    vi.stubGlobal('matchMedia', (query: string) => ({ matches: query.includes('1023'), media: query, addEventListener: () => {}, removeEventListener: () => {} }));
+  });
+  afterEach(() => {
+    cleanup();
+    vi.unstubAllGlobals();
+  });
+
+  it('opens as a modal even when docking is the stored choice, and offers no dock button', () => {
+    localStorage.setItem('kguardian.ai-assistant.view-mode', 'side-panel');
+    const onLayoutChange = vi.fn();
+    render(<AIAssistant isOpen onClose={() => {}} onLayoutChange={onLayoutChange} namespace="default" podNames={[]} />);
+    expect(onLayoutChange).toHaveBeenCalledWith(false, false, 448);
+    expect(screen.queryByLabelText('Dock to side')).toBeNull();
+    expect(screen.queryByLabelText('Expand to center')).toBeNull();
+    // The preference is kept for wider screens.
+    expect(localStorage.getItem('kguardian.ai-assistant.view-mode')).toBe('side-panel');
+  });
+});
