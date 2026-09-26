@@ -1873,6 +1873,69 @@ supplychain:
       # most once a day whatever the interval.
       interval: 15m
 
+  grype:
+    # -- Match SBOMs (registry-attached, else Trivy SbomReports) against the
+    # Grype vulnerability database, as a second container in the
+    # supplychain pod (image supplychain-matcher). Off by default. It
+    # listens on 127.0.0.1 only and gets no Kubernetes or broker token.
+    # Egress: HTTPS to db.url's host (grype.anchore.io by default) for the
+    # DB listing and archive.
+    enabled: false
+    image:
+      # -- Matcher image repository
+      repository: ghcr.io/kguardian-dev/kguardian/supplychain-matcher
+      # -- Matcher image pull policy
+      pullPolicy: IfNotPresent
+      # -- Matcher version tag
+      tag: "v0.1.0"
+      # -- Overrides the image tag using SHA digest
+      sha: ""
+    # -- Loopback port the matcher listens on inside the pod
+    port: 8090
+    db:
+      # -- DB listing base URL. Point at an internal mirror serving the same
+      # layout (v6/latest.json plus archives) for air-gapped clusters.
+      url: https://grype.anchore.io/databases
+      # -- Download and refresh the DB. false = use only a DB already on
+      # the volume (e.g. preloaded into a PVC).
+      autoUpdate: true
+      # -- How often to check for a newer DB (Grype also limits checks to
+      # once per 2h). Anchore publishes a new build daily.
+      updateInterval: 6h
+      # -- Refuse a DB older than this; "0" disables the check (for a
+      # rarely refreshed air-gapped mirror).
+      maxAge: 120h
+    # -- Time limit for matching one SBOM
+    matchTimeout: 2m
+    # -- Go soft memory limit for the matcher (keep below the memory limit)
+    goMemLimit: 400MiB
+    persistence:
+      # -- Keep the DB on a PersistentVolumeClaim instead of an emptyDir, so
+      # a restart does not re-download it (181 MB, about 2.5 min to fetch,
+      # verify and unpack on the measuring machine).
+      enabled: false
+      # -- Use an existing claim instead of creating one
+      existingClaim: ""
+      # -- Storage class for the created claim ("" = cluster default)
+      storageClass: ""
+      # -- Volume size (emptyDir sizeLimit or PVC request). Measured
+      # 2026-09-26: the v6.1.9 DB unpacks to 3.1 GB, and a refresh unpacks
+      # the new DB (plus its 181 MB archive) beside the current one, so
+      # about 6.4 GB is needed at peak. With emptyDir this is node
+      # ephemeral storage.
+      size: 8Gi
+    # -- Matcher resources. Measured locally with grype v0.119.0: peak RSS
+    # about 78 MiB matching nginx:1.27 (151 components, 624 matches, about
+    # 2.4 s) and 225 MiB while downloading and unpacking the DB. SQLite
+    # page cache for the 3.1 GB DB is charged to the container but is
+    # reclaimable.
+    resources:
+      limits:
+        memory: 512Mi
+      requests:
+        cpu: 50m
+        memory: 128Mi
+
   brokerIngest:
     # -- Send payloads to the broker. Leave false until the broker's
     # supply-chain ingest endpoints are released; until then payloads are

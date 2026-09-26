@@ -15,6 +15,11 @@ metadata:
     {{- include "kguardian.labels" . | nindent 4 }}
 spec:
   replicas: 1
+  {{- if and .Values.supplychain.grype.enabled .Values.supplychain.grype.persistence.enabled }}
+  # A ReadWriteOnce DB volume cannot be attached to two pods at once.
+  strategy:
+    type: Recreate
+  {{- end }}
   selector:
     matchLabels:
       app.kubernetes.io/name: {{ .Values.supplychain.service.name }}
@@ -28,8 +33,10 @@ spec:
         {{- include "kguardian.labels" . | nindent 8 }}
         app.kubernetes.io/name: {{ .Values.supplychain.service.name }}
     spec:
-      # The token is only needed to list/watch Trivy Operator reports.
-      automountServiceAccountToken: {{ .Values.supplychain.sources.trivyOperator.enabled }}
+      # Never auto-mounted: a pod-level mount would reach every container,
+      # including the Grype matcher. The supplychain container alone gets a
+      # projected token, and only when it needs the API (Trivy Operator).
+      automountServiceAccountToken: false
       {{- with .Values.supplychain.imagePullSecrets }}
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}
@@ -87,6 +94,10 @@ spec:
               value: {{ .Values.supplychain.sources.registry.interval | quote }}
             {{- /* Scoped token: this component can only reach the supplychain routes. */}}
             {{- include "kguardian.brokerAuthClientEnv" (dict "root" $ "scope" "supplychain") | nindent 12 }}
+            {{- if .Values.supplychain.grype.enabled }}
+            - name: GRYPE_MATCHER_URL
+              value: "http://127.0.0.1:{{ .Values.supplychain.grype.port }}"
+            {{- end }}
             {{- with .Values.supplychain.env }}
             {{- toYaml . | nindent 12 }}
             {{- end }}
@@ -109,12 +120,106 @@ spec:
           volumeMounts:
             - name: tmp
               mountPath: /tmp
+            {{- if .Values.supplychain.sources.trivyOperator.enabled }}
+            - name: kube-api-access
+              mountPath: /var/run/secrets/kubernetes.io/serviceaccount
+              readOnly: true
+            {{- end }}
+        {{- if .Values.supplychain.grype.enabled }}
+        {{- $g := .Values.supplychain.grype }}
+        # Grype matcher (#1533, option B): separate image, loopback only, no
+        # Kubernetes or broker token, owns the vulnerability DB volume.
+        - name: grype-matcher
+          securityContext:
+            {{- toYaml .Values.supplychain.securityContext | nindent 12 }}
+          {{- if $g.image.sha }}
+          image: "{{ $g.image.repository }}@{{ $g.image.sha }}"
+          {{- else }}
+          image: "{{ $g.image.repository }}:{{ include "kguardian.imageTag" $g.image.tag }}"
+          {{- end }}
+          imagePullPolicy: {{ $g.image.pullPolicy }}
+          args: ["serve"]
+          env:
+            - name: LISTEN_ADDR
+              value: "127.0.0.1:{{ $g.port }}"
+            - name: LOG_LEVEL
+              value: {{ .Values.supplychain.logLevel | quote }}
+            - name: GRYPE_DB_DIR
+              value: /var/lib/grype
+            - name: GRYPE_DB_URL
+              value: {{ $g.db.url | quote }}
+            - name: GRYPE_DB_AUTO_UPDATE
+              value: {{ $g.db.autoUpdate | quote }}
+            - name: GRYPE_DB_UPDATE_INTERVAL
+              value: {{ $g.db.updateInterval | quote }}
+            - name: GRYPE_DB_MAX_AGE
+              value: {{ $g.db.maxAge | quote }}
+            - name: MATCH_TIMEOUT
+              value: {{ $g.matchTimeout | quote }}
+            - name: GOMEMLIMIT
+              value: {{ $g.goMemLimit | quote }}
+          # The server listens on loopback only, which kubelet HTTP probes
+          # cannot reach, so the binary probes itself. No readiness probe:
+          # the first DB download takes minutes and must not hold the pod
+          # (and the supplychain container's own sources) NotReady.
+          livenessProbe:
+            exec:
+              command: ["/usr/local/bin/kguardian-supplychain-matcher", "probe", "healthz"]
+            initialDelaySeconds: 10
+            periodSeconds: 30
+            timeoutSeconds: 5
+          {{- with $g.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          volumeMounts:
+            - name: grype-db
+              mountPath: /var/lib/grype
+            - name: grype-tmp
+              mountPath: /tmp
+        {{- end }}
       volumes:
         # Read-only root filesystem; client-go and the Go runtime get a
         # small scratch dir.
         - name: tmp
           emptyDir:
             sizeLimit: 16Mi
+        {{- if .Values.supplychain.sources.trivyOperator.enabled }}
+        # The standard service-account projection, mounted into the
+        # supplychain container only.
+        - name: kube-api-access
+          projected:
+            defaultMode: 0444
+            sources:
+              - serviceAccountToken:
+                  path: token
+                  expirationSeconds: 3607
+              - configMap:
+                  name: kube-root-ca.crt
+                  items:
+                    - key: ca.crt
+                      path: ca.crt
+              - downwardAPI:
+                  items:
+                    - path: namespace
+                      fieldRef:
+                        fieldPath: metadata.namespace
+        {{- end }}
+        {{- if .Values.supplychain.grype.enabled }}
+        {{- $p := .Values.supplychain.grype.persistence }}
+        - name: grype-db
+          {{- if $p.enabled }}
+          persistentVolumeClaim:
+            claimName: {{ $p.existingClaim | default (printf "%s-grype-db" .Values.supplychain.service.name) }}
+          {{- else }}
+          emptyDir:
+            sizeLimit: {{ $p.size }}
+          {{- end }}
+        # Listing download scratch (a few KiB).
+        - name: grype-tmp
+          emptyDir:
+            sizeLimit: 64Mi
+        {{- end }}
       {{- with .Values.supplychain.nodeSelector }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}

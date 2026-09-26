@@ -422,6 +422,23 @@ The following table lists the configurable parameters of the kguardian chart and
 | supplychain.container.port | int | `8083` | HTTP port for /healthz, /readyz and /metrics |
 | supplychain.enabled | bool | `false` | Deploy the supply-chain component (#1533). It reads vulnerability and SBOM data about the images your workloads run and reports it; it never blocks or changes a workload. Off by default. Today its only source is Trivy Operator (install Trivy Operator separately). Payloads are logged, not sent, until broker ingest ships (see brokerIngest.enabled). Requires broker.auth.enabled=true in scoped mode with a supplychain key; the chart refuses to render otherwise. |
 | supplychain.env | list | `[]` | Additional environment variables for the supplychain container |
+| supplychain.grype.db.autoUpdate | bool | `true` | Download and refresh the DB. false = use only a DB already on the volume (e.g. preloaded into a PVC). |
+| supplychain.grype.db.maxAge | string | `"120h"` | Refuse a DB older than this; "0" disables the check (for a rarely refreshed air-gapped mirror). |
+| supplychain.grype.db.updateInterval | string | `"6h"` | How often to check for a newer DB (Grype also limits checks to once per 2h). Anchore publishes a new build daily. |
+| supplychain.grype.db.url | string | `"https://grype.anchore.io/databases"` | DB listing base URL. Point at an internal mirror serving the same layout (v6/latest.json plus archives) for air-gapped clusters. |
+| supplychain.grype.enabled | bool | `false` | Match SBOMs (registry-attached, else Trivy SbomReports) against the Grype vulnerability database, as a second container in the supplychain pod (image supplychain-matcher). Off by default. It listens on 127.0.0.1 only and gets no Kubernetes or broker token. Egress: HTTPS to db.url's host (grype.anchore.io by default) for the DB listing and archive. |
+| supplychain.grype.goMemLimit | string | `"400MiB"` | Go soft memory limit for the matcher (keep below the memory limit) |
+| supplychain.grype.image.pullPolicy | string | `"IfNotPresent"` | Matcher image pull policy |
+| supplychain.grype.image.repository | string | `"ghcr.io/kguardian-dev/kguardian/supplychain-matcher"` | Matcher image repository |
+| supplychain.grype.image.sha | string | `""` | Overrides the image tag using SHA digest |
+| supplychain.grype.image.tag | string | `"v0.1.0"` | Matcher version tag |
+| supplychain.grype.matchTimeout | string | `"2m"` | Time limit for matching one SBOM |
+| supplychain.grype.persistence.enabled | bool | `false` | Keep the DB on a PersistentVolumeClaim instead of an emptyDir, so a restart does not re-download it (181 MB, about 2.5 min to fetch, verify and unpack on the measuring machine). |
+| supplychain.grype.persistence.existingClaim | string | `""` | Use an existing claim instead of creating one |
+| supplychain.grype.persistence.size | string | `"8Gi"` | Volume size (emptyDir sizeLimit or PVC request). Measured 2026-09-26: the v6.1.9 DB unpacks to 3.1 GB, and a refresh unpacks the new DB (plus its 181 MB archive) beside the current one, so about 6.4 GB is needed at peak. With emptyDir this is node ephemeral storage. |
+| supplychain.grype.persistence.storageClass | string | `""` | Storage class for the created claim ("" = cluster default) |
+| supplychain.grype.port | int | `8090` | Loopback port the matcher listens on inside the pod |
+| supplychain.grype.resources | object | `{"limits":{"memory":"512Mi"},"requests":{"cpu":"50m","memory":"128Mi"}}` | Matcher resources. Measured locally with grype v0.119.0: peak RSS about 78 MiB matching nginx:1.27 (151 components, 624 matches, about 2.4 s) and 225 MiB while downloading and unpacking the DB. SQLite page cache for the 3.1 GB DB is charged to the container but is reclaimable. |
 | supplychain.image.pullPolicy | string | `"IfNotPresent"` | Supplychain image pull policy |
 | supplychain.image.repository | string | `"ghcr.io/kguardian-dev/kguardian/supplychain"` | Supplychain container image repository |
 | supplychain.image.sha | string | `""` | Overrides the image tag using SHA digest |

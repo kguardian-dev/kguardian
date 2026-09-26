@@ -1,0 +1,20 @@
+{{- $g := .Values.supplychain.grype }}
+{{- if and .Values.supplychain.enabled $g.enabled $g.persistence.enabled (not $g.persistence.existingClaim) }}
+# Grype vulnerability database volume. Sized for two databases at once:
+# a refresh unpacks the new one next to the current one before swapping.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ .Values.supplychain.service.name }}-grype-db
+  namespace: {{ include "kguardian.namespace" . }}
+  labels:
+    {{- include "kguardian.labels" . | nindent 4 }}
+spec:
+  accessModes: [ReadWriteOnce]
+  {{- with $g.persistence.storageClass }}
+  storageClassName: {{ . | quote }}
+  {{- end }}
+  resources:
+    requests:
+      storage: {{ $g.persistence.size }}
+{{- end }}
