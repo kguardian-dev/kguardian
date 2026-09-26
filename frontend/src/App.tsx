@@ -7,6 +7,7 @@ import { ScopeChip } from './components/ScopeChip';
 import { CommandPalette, type Command } from './components/CommandPalette';
 import { useHashLocation } from './hooks/useHashLocation';
 import { NARROW_QUERY, useMediaQuery } from './hooks/useMediaQuery';
+import { useDialogFocus } from './hooks/useDialogFocus';
 import NamespaceSelector from './components/NamespaceSelector';
 import DataTable from './components/DataTable';
 import { Sidebar, type NavItem } from './components/Sidebar';
@@ -136,12 +137,10 @@ function App() {
   });
   const [tableHeight, setTableHeight] = useState<number>(UI_DIMENSIONS.TABLE_DEFAULT_HEIGHT);
   const [isResizing, setIsResizing] = useState(false);
-  // Remembered choice wins; with none, start collapsed on a narrow viewport
-  // (the 224px rail would otherwise leave a phone ~160px of content).
-  const [railCollapsed, setRailCollapsed] = useState<boolean>(() => {
-    const stored = localStorage.getItem('kg-rail-collapsed');
-    return stored !== null ? stored === '1' : window.innerWidth < 768;
-  });
+  // The desktop rail preference: expanded unless the user collapsed it.
+  // Narrow screens never read it (they always show the icon column, see
+  // `narrow` below), so a phone-first visit cannot leave desktop collapsed.
+  const [railCollapsed, setRailCollapsed] = useState<boolean>(() => localStorage.getItem('kg-rail-collapsed') === '1');
 
   const { namespaces } = useNamespaces();
   // If the current selection isn't a namespace that actually has monitored pods
@@ -228,6 +227,12 @@ function App() {
   const narrow = useMediaQuery(NARROW_QUERY);
   const [railOverlay, setRailOverlay] = useState(false);
   const railShowsCollapsed = narrow ? !railOverlay : railCollapsed;
+  // The open overlay is a modal dialog (hooks/useDialogFocus): focus moves
+  // into it, Tab stays in it, and every way of closing it (Esc, backdrop, a
+  // nav pick, the collapse button) returns focus to the expand button.
+  const railDialogRef = useRef<HTMLDivElement>(null);
+  const railExpandRef = useRef<HTMLButtonElement>(null);
+  const closeRailOverlay = useCallback(() => setRailOverlay(false), []);
   const toggleRail = useCallback(() => {
     if (narrow) {
       setRailOverlay((o) => !o);
@@ -238,15 +243,13 @@ function App() {
       return !c;
     });
   }, [narrow]);
-  const closeRailOverlay = useCallback(() => setRailOverlay(false), []);
+  useDialogFocus({ open: railOverlay, dialogRef: railDialogRef, returnFocusRef: railExpandRef, onClose: closeRailOverlay, initialFocus: 'nav button' });
+  // Leaving the narrow layout drops the overlay, so it cannot pop back
+  // open on the next resize to a phone width.
   useEffect(() => {
-    if (!railOverlay) return;
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') setRailOverlay(false);
-    };
-    window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
-  }, [railOverlay]);
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- reset UI state when the layout mode changes
+    if (!narrow) setRailOverlay(false);
+  }, [narrow]);
 
   // Calculate the right padding for content when AI panel is docked (in pixels)
   const contentPaddingRightPx = aiSidePanel.isSidePanel
@@ -461,6 +464,7 @@ function App() {
             collapsed={railShowsCollapsed}
             onToggleCollapse={toggleRail}
             onNavigate={narrow ? closeRailOverlay : undefined}
+            expandButtonRef={railExpandRef}
           />
         );
         if (!narrow) return rail;
@@ -471,7 +475,13 @@ function App() {
             {railOverlay && (
               <button type="button" aria-label="Close sidebar" className="fixed inset-0 z-40 bg-black/40 cursor-default" onClick={closeRailOverlay} />
             )}
-            <div className={railOverlay ? 'fixed inset-y-0 left-0 z-50 shadow-2xl' : 'h-full'}>{rail}</div>
+            {railOverlay ? (
+              <div ref={railDialogRef} role="dialog" aria-modal="true" aria-label="Navigation" className="fixed inset-y-0 left-0 z-50 shadow-2xl">
+                {rail}
+              </div>
+            ) : (
+              <div className="h-full">{rail}</div>
+            )}
           </div>
         );
       })()}
