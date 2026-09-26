@@ -340,6 +340,9 @@ func renderProfileTable(dst io.Writer, ref workloadRef, p *api.Profile) error {
 			fmt.Fprintf(&b, "Stale:      %s (%s, last seen %s) is no longer in the spec and is excluded\n", sc.Name, sc.Kind, sc.LastSeen)
 		}
 	}
+	if sc := p.SupplyChain(); sc != nil {
+		fmt.Fprintf(&b, "Signature:  %s\n", fmtSupplyChain(sc))
+	}
 	b.WriteByte('\n')
 	out.WriteString(b.String())
 
@@ -437,6 +440,35 @@ func renderDrift(d *api.ProfileDrift) string {
 		fmt.Fprintf(&b, "  not evaluated: %s for %s (%s): no item here is not \"no drift\"\n", n.Type, who, n.Reason)
 	}
 	return b.String()
+}
+
+// fmtSupplyChain is the worst signature verdict over the current digests:
+// "unsigned (container app, sha256:0123456789ab…)". A verified verdict
+// names its signer and says it is not a trust decision.
+func fmtSupplyChain(sc *api.ProfileSupplyChain) string {
+	if sc.Status == "not_configured" || sc.Verdict == "not_configured" {
+		return "not configured (image signature discovery is off; signatures are not checked)"
+	}
+	d := sc.Digest
+	if len(d) > 19 {
+		d = d[:19] + "…"
+	}
+	s := cell(sc.Verdict)
+	if sc.Reason != nil && *sc.Reason != "" {
+		s += " (" + cell(*sc.Reason) + ")"
+	}
+	if sc.Verdict == "verified" {
+		if len(sc.Signers) > 0 {
+			g := sc.Signers[0]
+			who := g.SAN + " via " + g.Issuer
+			if g.SignerKind == "key" {
+				who = "key " + g.KeyName
+			}
+			s += " by " + cell(who)
+		}
+		return s + " on every current digest (valid, not a trust decision)"
+	}
+	return s + ", worst on container " + cell(sc.Container) + " " + cell(d)
 }
 
 // fetchAndRenderProfiles is the testable core of `profile list`.

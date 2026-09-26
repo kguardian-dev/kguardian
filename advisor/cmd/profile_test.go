@@ -396,3 +396,61 @@ func TestRenderDrift_NotEvaluatedIsNotNoDrift(t *testing.T) {
 		t.Errorf("empty drift: %q", s)
 	}
 }
+
+// Contract v1.8: images.supplyChain from a local broker (captures
+// profile_signature_*.json: real sigstore-go signature results of the
+// supplychain fixtures over SQL-seeded `shop` workloads with some synthetic
+// digests; see test/fixtures/signing/README.md from #1698). The Signature line shows the worst verdict; verified says it is
+// not a trust decision; not checked is unknown.
+func TestProfileGet_SupplyChainLine(t *testing.T) {
+	routes := map[string]string{
+		"/workloads/shop/Deployment/storefront/profile": postureFixture(t, "profile_signature_verified.json"),
+		"/workloads/shop/StatefulSet/ledger/profile":    postureFixture(t, "profile_signature_invalid.json"),
+		"/workloads/shop/Deployment/recs/profile":       postureFixture(t, "profile_signature_not_checked.json"),
+	}
+	startFakeBroker(t, routes)
+	render := func(kind, name string) string {
+		var out bytes.Buffer
+		if err := fetchAndRenderProfile(workloadRef{"shop", kind, name}, "table", &out); err != nil {
+			t.Fatal(err)
+		}
+		return out.String()
+	}
+	mustContain(t, render("Deployment", "storefront"),
+		"Signature:  verified by https://github.com/chainguard-images/images/.github/workflows/release.yaml@refs/heads/main via https://token.actions.githubusercontent.com on every current digest (valid, not a trust decision)",
+		"imageSigned", "1 current digest(s): 1 verified; verified means valid for its signer, not trusted")
+	ledger := render("StatefulSet", "ledger")
+	mustContain(t, ledger,
+		"Posture:    risk",
+		"Signature:  invalid (bad_signature), worst on container app sha256:ee6521f290b2…",
+		"images.signatureInvalid/app")
+	mustContain(t, render("Deployment", "recs"),
+		"Signature:  unknown (not_checked), worst on container app sha256:dddddddddddd…",
+		"imageSigned             can't tell")
+	// Signature discovery switched off: said so, distinct from unknown.
+	startFakeBroker(t, map[string]string{"/workloads/shop/StatefulSet/ledger/profile": postureFixture(t, "profile_signature_not_configured.json")})
+	nc := render("StatefulSet", "ledger")
+	mustContain(t, nc, "Signature:  not configured (image signature discovery is off; signatures are not checked)")
+	if strings.Contains(nc, "Posture:    risk") || strings.Contains(nc, "signatureInvalid") {
+		t.Errorf("not configured must not gate on stored signature results:\n%s", nc)
+	}
+	// A broker before v1.8 (supplyChain null): no Signature line.
+	var out bytes.Buffer
+	startFakeBroker(t, profileRoutes(t))
+	if err := fetchAndRenderProfile(checkoutRef, "table", &out); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(out.String(), "Signature:") {
+		t.Errorf("null supplyChain must not render a Signature line:\n%s", out.String())
+	}
+}
+
+func TestCellBlanksControlAndFormatCharacters(t *testing.T) {
+	if got := cell("a\tb\nc\x1b[31m\u202ed\u200be"); got != "a b c?[31m?d?e" {
+		t.Errorf("cell = %q", got)
+	}
+	// Line and paragraph separators and NEL break table rows too.
+	if got := cell("x\u2028y\u2029z\u0085w"); got != "x?y?z?w" {
+		t.Errorf("cell = %q", got)
+	}
+}

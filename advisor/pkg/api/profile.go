@@ -186,6 +186,41 @@ func (p *Profile) DimensionEnvelope(name string) (Dimension, bool) {
 	return d, true
 }
 
+// ProfileSupplyChain is images.supplyChain (contract v1.8): the worst
+// signature verdict over the workload's current digests.
+type ProfileSupplyChain struct {
+	// Status is "configured", or "not_configured" when signature
+	// discovery is switched off (then Verdict is "not_configured").
+	Status    string  `json:"status"`
+	Verdict   string  `json:"verdict"`
+	Reason    *string `json:"reason"`
+	Container string  `json:"container"`
+	Digest    string  `json:"digest"`
+	CheckedAt *string `json:"checkedAt"`
+	Signers   []struct {
+		SignerKind string `json:"signerKind"`
+		Issuer     string `json:"issuer"`
+		SAN        string `json:"san"`
+		KeyName    string `json:"keyName"`
+	} `json:"signers"`
+}
+
+// SupplyChain decodes images.supplyChain; nil when absent, null (a broker
+// before v1.8, or no current digest) or malformed.
+func (p *Profile) SupplyChain() *ProfileSupplyChain {
+	raw, ok := p.Dimensions["images"]
+	if !ok {
+		return nil
+	}
+	var d struct {
+		SupplyChain *ProfileSupplyChain `json:"supplyChain"`
+	}
+	if json.Unmarshal(raw, &d) != nil {
+		return nil
+	}
+	return d.SupplyChain
+}
+
 // PodSecurity decodes the podSecurity dimension; nil when absent.
 func (p *Profile) PodSecurity() *PodSecurityDimension {
 	raw, ok := p.Dimensions["podSecurity"]
