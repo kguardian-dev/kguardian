@@ -1,0 +1,32 @@
+{
+  "body": {
+    "digest": "sha256:4832e654a05c1e66ce1982c0300effaca0c7b1a90be575e0f52bd465a12dc18a",
+    "items": [],
+    "nextAfter": null,
+    "reports": [
+      {
+        "attestation": null,
+        "dbUpdatedAt": null,
+        "digestKind": "manifest",
+        "imageRef": "ghcr.io/fluxcd/source-controller:v1.6.2",
+        "itemCount": 0,
+        "join": "image_id",
+        "osEosl": false,
+        "osFamily": "alpine",
+        "osName": "3.20.3",
+        "receivedAt": "2026-09-26T09:31:43.645459",
+        "reportDigest": "sha256:4832e654a05c1e66ce1982c0300effaca0c7b1a90be575e0f52bd465a12dc18a",
+        "sbomFormat": null,
+        "sbomSources": [],
+        "sbomTrust": "scanned",
+        "scannedAt": "2026-09-26T03:31:41",
+        "scannerName": "Trivy",
+        "scannerVersion": "0.58.1",
+        "source": "trivy-operator"
+      }
+    ]
+  },
+  "provenance": "captured from broker eef83afdd (frontend/src/fixtures/vuln-captures/capture.py), no edits",
+  "request": "GET /images/sha256:4832e654a05c1e66ce1982c0300effaca0c7b1a90be575e0f52bd465a12dc18a/vulnerabilities?tier=P0,P1",
+  "status": 200
+}

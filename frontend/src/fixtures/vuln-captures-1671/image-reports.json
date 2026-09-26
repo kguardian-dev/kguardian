@@ -1,0 +1,32 @@
+{
+  "body": {
+    "digest": "sha256:7533b1c0c510e06c0385bf2c3d0424c3e7942093c40d9051bf853e610d656dfa",
+    "digestKind": "repo",
+    "firstSeen": "2026-09-26T02:58:50.647044",
+    "lastSeen": "2026-09-26T02:58:50.647044",
+    "repository": "ghcr.io/example/reports",
+    "tags": [
+      "1.0.3"
+    ],
+    "truncated": false,
+    "workloads": [
+      {
+        "clusterId": "primary",
+        "containerKind": "regular",
+        "containerName": "reports",
+        "firstSeen": "2026-09-26T02:58:50.647044",
+        "imageRef": "ghcr.io/example/reports:1.0.3",
+        "lastSeen": "2026-09-26T02:58:50.647044",
+        "namespace": "payments",
+        "ranAsInit": false,
+        "running": false,
+        "state": "terminated",
+        "stateReason": "Completed",
+        "workloadKind": "CronJob",
+        "workloadName": "reports"
+      }
+    ]
+  },
+  "request": "GET /images/sha256:7533b1c0c510e06c0385bf2c3d0424c3e7942093c40d9051bf853e610d656dfa",
+  "status": 200
+}

@@ -1,10 +1,16 @@
 /**
- * Supply-chain fixtures: raw responses captured from a local Broker built
- * from main after #1671 merged (f3595b640), seeded only through its real
- * ingest routes (POST /pod/spec, /pod/traffic/batch,
- * /images/{digest}/vulnerabilities, /images/{digest}/sbom). Stored verbatim
- * in ./vuln-captures as `{request, status, body}`; nothing here is written
- * by hand. The seed script lives outside the repo (scratchpad).
+ * Supply-chain fixtures. Both sets are raw Broker responses, stored verbatim
+ * as `{request, status, body}`; nothing here is written by hand.
+ *
+ *  - ./vuln-captures (default): a Broker at current main with in-use tiers
+ *    (#1678), seeded through its real ingest routes by
+ *    ./vuln-captures/capture.py. Every file carries `provenance: "captured
+ *    from broker <sha> ..."`. The runtime inventory (P1-2) is not on main
+ *    yet, so every finding's in-use state is `unknown` (no_runtime_data):
+ *    Loaded / Executed / Background come only from tests that say so.
+ *  - ./vuln-captures-1671: the same world captured from a Broker at #1671
+ *    (f3595b640), before tiers: no `tier`, `tierFactors` or `inUseDetail`.
+ *    It stands in for an older Broker.
  *
  * The seeded world (neutral names, fictional CVE-2099-* ids):
  *  - payments/Deployment/checkout: index report joined by platform
@@ -28,64 +34,53 @@ export interface Capture<T = unknown> {
   request: string;
   status: number;
   body: T;
+  /** Where the response came from (current captures). */
+  provenance?: string;
 }
 
-const raw = import.meta.glob('./vuln-captures/*.json', { eager: true, import: 'default' }) as Record<string, Capture>;
-const byName = new Map(Object.entries(raw).map(([path, c]) => [path.replace(/^.*\/(.+)\.json$/, '$1'), c]));
+/** Which Broker the responses come from: current main (tiers) or #1671 (no tiers). */
+export type CaptureSet = 'current' | '1671';
 
-export function vulnCapture<T>(name: string): Capture<T> {
-  const c = byName.get(name);
-  if (!c) throw new Error(`no vuln capture named ${name}`);
+const index = (raw: Record<string, Capture>) => new Map(Object.entries(raw).map(([path, c]) => [path.replace(/^.*\/(.+)\.json$/, '$1'), c]));
+const SETS: Record<CaptureSet, Map<string, Capture>> = {
+  current: index(import.meta.glob('./vuln-captures/*.json', { eager: true, import: 'default' }) as Record<string, Capture>),
+  '1671': index(import.meta.glob('./vuln-captures-1671/*.json', { eager: true, import: 'default' }) as Record<string, Capture>),
+};
+
+export function vulnCapture<T>(name: string, set: CaptureSet = 'current'): Capture<T> {
+  const c = SETS[set].get(name);
+  if (!c) throw new Error(`no ${set} vuln capture named ${name}`);
   return c as Capture<T>;
 }
 
-export const VULN_CAPTURES: Capture[] = [...byName.values()];
-
-/**
- * #1678 (in-use tiers) shapes: CONTRACT-DERIVED, NOT CAPTURED. Each is the
- * #1671 capture of the same request with tier, tierFactors, inUseDetail and
- * the CVE tier counts added per #1678's documented rule
- * (./vuln-contract-1678/derive.py; every file says so in `provenance`).
- * Swap for real captures once #1678 merges.
- */
-const tierRaw = import.meta.glob('./vuln-contract-1678/*.json', { eager: true, import: 'default' }) as Record<string, Capture & { provenance: string }>;
-const tierByName = new Map(Object.entries(tierRaw).map(([path, c]) => [path.replace(/^.*\/(.+)\.json$/, '$1'), c]));
-export const TIER_CONTRACT_FIXTURES: Array<Capture & { provenance: string }> = [...tierByName.values()];
-
-export function tierFixture<T>(name: string): Capture<T> {
-  const c = tierByName.get(name);
-  if (!c) throw new Error(`no #1678 contract fixture named ${name}`);
-  return c as unknown as Capture<T>;
-}
+export const VULN_CAPTURES: Capture[] = [...SETS.current.values()];
+export const PRE_TIER_CAPTURES: Capture[] = [...SETS['1671'].values()];
 
 export const cvePage = vulnCapture<CvePage>('vulnerabilities').body;
 export const imagesPage = vulnCapture<ImagePage>('images').body;
-export const exposureOf = (id: string) => vulnCapture<Exposure>(`exposure-${id}`).body;
-export const imageDetail = (name: string) => vulnCapture<ImageDetail>(`image-${name}`).body;
-export const imageVulns = (name: string) => vulnCapture<ImageVulnsPage>(`image-${name}-vulnerabilities`).body;
-export const imageSbom = (name: string) => vulnCapture<SbomPage>(`image-${name}-sbom`).body;
+export const exposureOf = (id: string, set: CaptureSet = 'current') => vulnCapture<Exposure>(`exposure-${id}`, set).body;
+export const imageDetail = (name: string, set: CaptureSet = 'current') => vulnCapture<ImageDetail>(`image-${name}`, set).body;
+export const imageVulns = (name: string, set: CaptureSet = 'current') => vulnCapture<ImageVulnsPage>(`image-${name}-vulnerabilities`, set).body;
+export const imageSbom = (name: string, set: CaptureSet = 'current') => vulnCapture<SbomPage>(`image-${name}-sbom`, set).body;
 
 /** The inventory digest of a seeded workload's image, from its capture. */
 export const digestOf = (name: string) => imageDetail(name).digest;
 
 /**
- * A VulnApi whose fetch replays the captures by request line (URL-decoded;
- * `extra` first; a request with `limit=` falls back to the capture without
- * it). Unmatched requests are an empty 404, which is what a Broker without
- * the route sends. `tiers: true` answers with the #1678 contract-derived
- * shapes first (a Broker with in-use tiers); without it, a Broker before them.
+ * A VulnApi whose fetch replays one capture set by request line
+ * (URL-decoded; `extra` first; a request with `limit=` falls back to the
+ * capture without it, since every captured list is shorter than the UI's
+ * page sizes). Unmatched requests are an empty 404, which is what a Broker
+ * without the route sends. `broker: '1671'` replays the Broker before tiers.
  */
-export function replayVulnApi(extra: Capture[] = [], opts: { tiers?: boolean } = {}) {
+export function replayVulnApi(extra: Capture[] = [], opts: { broker?: CaptureSet } = {}) {
   const calls: string[] = [];
-  const all = [...extra, ...(opts.tiers ? TIER_CONTRACT_FIXTURES : []), ...VULN_CAPTURES];
+  const all = [...extra, ...SETS[opts.broker ?? 'current'].values()];
   const norm = (r: string) => decodeURIComponent(r.replace(/\+/g, ' '));
   const fetchImpl = (async (input: RequestInfo | URL) => {
     const url = new URL(String(input), 'http://x');
     const line = `GET ${url.pathname.replace(/^\/api/, '')}${url.search}`;
     calls.push(line);
-    // The UI pages with `limit=`; most captures were taken without it. Every
-    // captured list is shorter than the UI's page sizes, so the unlimited
-    // capture is the same answer. Exact matches win.
     const noLimit = (() => {
       const u = new URL(line.slice(4), 'http://x');
       u.searchParams.delete('limit');

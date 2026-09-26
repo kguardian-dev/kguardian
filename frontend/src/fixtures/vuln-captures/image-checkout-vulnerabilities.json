@@ -4,11 +4,7 @@
     "items": [
       {
         "class": null,
-        "cvss": {
-          "nvd": {
-            "v3_score": 9.8
-          }
-        },
+        "cvss": {},
         "epss": 0.34,
         "epssPercentile": 0.97,
         "filePaths": [],
@@ -18,6 +14,14 @@
         ],
         "id": "CVE-2099-0001",
         "inUse": null,
+        "inUseDetail": {
+          "containers": 1,
+          "coverage": "file",
+          "observedSince": null,
+          "reason": "no_runtime_data",
+          "state": "unknown",
+          "windowHours": 24
+        },
         "inUseState": "unknown",
         "installedVersion": "3.3.1-r0",
         "kev": true,
@@ -29,7 +33,7 @@
           "type": "apk"
         },
         "primaryUrl": "https://avd.aquasec.com/nvd/cve-2099-0001",
-        "publishedAt": "2099-01-02T03:04:05",
+        "publishedAt": null,
         "reportDigests": [
           "sha256:17ebfb68fefc63fba2251c8d2ff2d194fa031f8d2b59e63e710a23768136d4ca"
         ],
@@ -40,15 +44,19 @@
           "trivy-operator"
         ],
         "target": null,
+        "tier": "P0",
+        "tierFactors": [
+          "in_use:unknown",
+          "kev",
+          "epss>=0.1",
+          "severity:critical",
+          "exposed"
+        ],
         "title": "openssl: heap overflow in X.509 name constraint check"
       },
       {
         "class": null,
-        "cvss": {
-          "nvd": {
-            "v3_score": 7.5
-          }
-        },
+        "cvss": {},
         "epss": 0.004,
         "epssPercentile": 0.41,
         "filePaths": [
@@ -61,6 +69,14 @@
         ],
         "id": "CVE-2099-0002",
         "inUse": null,
+        "inUseDetail": {
+          "containers": 1,
+          "coverage": "interpreted",
+          "observedSince": null,
+          "reason": "no_runtime_data",
+          "state": "unknown",
+          "windowHours": 24
+        },
         "inUseState": "unknown",
         "installedVersion": "4.18.2",
         "kev": false,
@@ -72,7 +88,7 @@
           "type": "npm"
         },
         "primaryUrl": "https://avd.aquasec.com/nvd/cve-2099-0002",
-        "publishedAt": "2099-01-02T03:04:05",
+        "publishedAt": null,
         "reportDigests": [
           "sha256:17ebfb68fefc63fba2251c8d2ff2d194fa031f8d2b59e63e710a23768136d4ca"
         ],
@@ -83,15 +99,17 @@
           "trivy-operator"
         ],
         "target": null,
+        "tier": "P1",
+        "tierFactors": [
+          "in_use:unknown",
+          "severity:high",
+          "exposed"
+        ],
         "title": "express: open redirect in res.location"
       },
       {
         "class": null,
-        "cvss": {
-          "nvd": {
-            "v3_score": 7.5
-          }
-        },
+        "cvss": {},
         "epss": 0.012,
         "epssPercentile": 0.62,
         "filePaths": [],
@@ -101,6 +119,14 @@
         ],
         "id": "CVE-2099-0007",
         "inUse": null,
+        "inUseDetail": {
+          "containers": 1,
+          "coverage": "interpreted",
+          "observedSince": null,
+          "reason": "no_runtime_data",
+          "state": "unknown",
+          "windowHours": 24
+        },
         "inUseState": "unknown",
         "installedVersion": "7.5.2",
         "kev": false,
@@ -112,7 +138,7 @@
           "type": "npm"
         },
         "primaryUrl": "https://avd.aquasec.com/nvd/cve-2099-0007",
-        "publishedAt": "2099-01-02T03:04:05",
+        "publishedAt": null,
         "reportDigests": [
           "sha256:17ebfb68fefc63fba2251c8d2ff2d194fa031f8d2b59e63e710a23768136d4ca"
         ],
@@ -122,15 +148,17 @@
           "grype"
         ],
         "target": null,
+        "tier": "P1",
+        "tierFactors": [
+          "in_use:unknown",
+          "severity:high",
+          "exposed"
+        ],
         "title": "semver: regular expression denial of service"
       },
       {
         "class": null,
-        "cvss": {
-          "nvd": {
-            "v3_score": 5.3
-          }
-        },
+        "cvss": {},
         "epss": null,
         "epssPercentile": null,
         "filePaths": [],
@@ -138,6 +166,14 @@
         "fixedVersions": [],
         "id": "CVE-2099-0003",
         "inUse": null,
+        "inUseDetail": {
+          "containers": 1,
+          "coverage": "file",
+          "observedSince": null,
+          "reason": "no_runtime_data",
+          "state": "unknown",
+          "windowHours": 24
+        },
         "inUseState": "unknown",
         "installedVersion": "1.3.1-r0",
         "kev": null,
@@ -149,7 +185,7 @@
           "type": "apk"
         },
         "primaryUrl": "https://avd.aquasec.com/nvd/cve-2099-0003",
-        "publishedAt": "2099-01-02T03:04:05",
+        "publishedAt": null,
         "reportDigests": [
           "sha256:17ebfb68fefc63fba2251c8d2ff2d194fa031f8d2b59e63e710a23768136d4ca"
         ],
@@ -159,15 +195,18 @@
           "trivy-operator"
         ],
         "target": null,
+        "tier": "P2",
+        "tierFactors": [
+          "in_use:unknown",
+          "severity:medium",
+          "exposed",
+          "no_fix"
+        ],
         "title": "zlib: out-of-bounds read in inflate"
       },
       {
         "class": null,
-        "cvss": {
-          "nvd": {
-            "v3_score": 3.1
-          }
-        },
+        "cvss": {},
         "epss": null,
         "epssPercentile": null,
         "filePaths": [],
@@ -177,6 +216,14 @@
         ],
         "id": "CVE-2099-0004",
         "inUse": null,
+        "inUseDetail": {
+          "containers": 1,
+          "coverage": "file",
+          "observedSince": null,
+          "reason": "no_runtime_data",
+          "state": "unknown",
+          "windowHours": 24
+        },
         "inUseState": "unknown",
         "installedVersion": "1.36.1-r29",
         "kev": null,
@@ -188,7 +235,7 @@
           "type": "apk"
         },
         "primaryUrl": "https://avd.aquasec.com/nvd/cve-2099-0004",
-        "publishedAt": "2099-01-02T03:04:05",
+        "publishedAt": null,
         "reportDigests": [
           "sha256:17ebfb68fefc63fba2251c8d2ff2d194fa031f8d2b59e63e710a23768136d4ca"
         ],
@@ -198,6 +245,12 @@
           "trivy-operator"
         ],
         "target": null,
+        "tier": "P2",
+        "tierFactors": [
+          "in_use:unknown",
+          "severity:low",
+          "exposed"
+        ],
         "title": "busybox: sample finding for CVE-2099-0004"
       }
     ],
@@ -205,7 +258,7 @@
     "reports": [
       {
         "attestation": null,
-        "dbUpdatedAt": "2026-09-25T06:58:50",
+        "dbUpdatedAt": "2026-09-25T13:31:41",
         "digestKind": "index",
         "imageRef": "ghcr.io/example/checkout:4.2.0",
         "itemCount": 3,
@@ -213,14 +266,14 @@
         "osEosl": false,
         "osFamily": "alpine",
         "osName": "3.20.3",
-        "receivedAt": "2026-09-26T02:58:50.792144",
+        "receivedAt": "2026-09-26T09:31:43.558749",
         "reportDigest": "sha256:17ebfb68fefc63fba2251c8d2ff2d194fa031f8d2b59e63e710a23768136d4ca",
         "sbomFormat": null,
         "sbomSources": [
           "trivy-operator"
         ],
         "sbomTrust": "scanned",
-        "scannedAt": "2026-09-26T00:58:50",
+        "scannedAt": "2026-09-26T07:31:41",
         "scannerName": "grype",
         "scannerVersion": "0.86.1",
         "source": "grype"
@@ -235,18 +288,19 @@
         "osEosl": false,
         "osFamily": "alpine",
         "osName": "3.20.3",
-        "receivedAt": "2026-09-26T02:58:50.771964",
+        "receivedAt": "2026-09-26T09:31:43.425984",
         "reportDigest": "sha256:17ebfb68fefc63fba2251c8d2ff2d194fa031f8d2b59e63e710a23768136d4ca",
         "sbomFormat": null,
         "sbomSources": [],
-        "sbomTrust": null,
-        "scannedAt": "2026-09-25T20:58:50",
+        "sbomTrust": "scanned",
+        "scannedAt": "2026-09-26T03:31:41",
         "scannerName": "Trivy",
         "scannerVersion": "0.58.1",
         "source": "trivy-operator"
       }
     ]
   },
+  "provenance": "captured from broker eef83afdd (frontend/src/fixtures/vuln-captures/capture.py), no edits",
   "request": "GET /images/sha256:f48949f11f15c0e2b8fa2132d1ab201cf50e80dea612783e5c3ac78c6b378235/vulnerabilities",
   "status": 200
 }

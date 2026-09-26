@@ -1,0 +1,11 @@
+{
+  "body": {
+    "digest": "sha256:2f802f6162499e19393cf17fb615e5037cfafd5bd421ed7d36208d0c24ac56e7",
+    "items": [],
+    "nextAfter": null,
+    "report": null,
+    "reports": []
+  },
+  "request": "GET /images/sha256:2f802f6162499e19393cf17fb615e5037cfafd5bd421ed7d36208d0c24ac56e7/sbom",
+  "status": 200
+}

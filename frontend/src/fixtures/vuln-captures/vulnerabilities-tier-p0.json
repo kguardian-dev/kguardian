@@ -1,0 +1,40 @@
+{
+  "body": {
+    "computedAt": "2026-09-26T09:32:16.354023",
+    "items": [
+      {
+        "executedWorkloads": 0,
+        "exposedWorkloads": 1,
+        "fixable": true,
+        "id": "CVE-2099-0001",
+        "images": 3,
+        "inUse": null,
+        "inUseState": "unknown",
+        "kev": true,
+        "loadedWorkloads": 0,
+        "maxEpss": 0.34,
+        "maxScore": 9.8,
+        "namespaces": 1,
+        "notObservedWorkloads": 0,
+        "packages": [
+          "openssl"
+        ],
+        "runningWorkloads": 2,
+        "severity": "CRITICAL",
+        "sources": [
+          "grype",
+          "trivy-operator"
+        ],
+        "tier": "P0",
+        "unknownWorkloads": 3,
+        "weakestJoin": "platform_manifest",
+        "workloads": 3
+      }
+    ],
+    "nextAfter": null,
+    "staleSeconds": 10
+  },
+  "provenance": "captured from broker eef83afdd (frontend/src/fixtures/vuln-captures/capture.py), no edits",
+  "request": "GET /vulnerabilities?tier=P0",
+  "status": 200
+}

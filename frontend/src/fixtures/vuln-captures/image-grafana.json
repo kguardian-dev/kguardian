@@ -2,8 +2,8 @@
   "body": {
     "digest": "sha256:1eb73105a1fe5826de974a647f3d2e72905e16803a8ca2b9c891bf3545bc242c",
     "digestKind": "repo",
-    "firstSeen": "2026-09-26T02:58:50.660437",
-    "lastSeen": "2026-09-26T02:58:50.660437",
+    "firstSeen": "2026-09-26T09:31:43.251544",
+    "lastSeen": "2026-09-26T09:31:43.251544",
     "repository": "docker.io/grafana/grafana",
     "tags": [
       "11.2.0"
@@ -14,9 +14,9 @@
         "clusterId": "primary",
         "containerKind": "regular",
         "containerName": "grafana",
-        "firstSeen": "2026-09-26T02:58:50.660437",
+        "firstSeen": "2026-09-26T09:31:43.251544",
         "imageRef": "docker.io/grafana/grafana:11.2.0",
-        "lastSeen": "2026-09-26T02:58:50.660437",
+        "lastSeen": "2026-09-26T09:31:43.251544",
         "namespace": "observability",
         "ranAsInit": false,
         "running": true,
@@ -27,6 +27,7 @@
       }
     ]
   },
+  "provenance": "captured from broker eef83afdd (frontend/src/fixtures/vuln-captures/capture.py), no edits",
   "request": "GET /images/sha256:1eb73105a1fe5826de974a647f3d2e72905e16803a8ca2b9c891bf3545bc242c",
   "status": 200
 }
