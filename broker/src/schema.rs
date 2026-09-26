@@ -569,6 +569,29 @@ diesel::table! {
         unsent -> Int8,
         incomplete -> Bool,
         ended -> Bool,
+        // Added by 2026-09-29-200000_runtime_capabilities (ALTER TABLE ADD
+        // COLUMN appends it last).
+        cap_probe -> Bool,
+    }
+}
+
+diesel::table! {
+    // Capability checks per workload container (#1533 P2-7). See the
+    // migration and src/runtime_capabilities.rs.
+    runtime_capabilities (cluster_id, pod_namespace, workload_kind, workload_name, container_name, image_digest, capability, granted) {
+        cluster_id -> Varchar,
+        pod_namespace -> Varchar,
+        workload_kind -> Varchar,
+        workload_name -> Varchar,
+        container_name -> Varchar,
+        image_digest -> Varchar,
+        capability -> Varchar,
+        granted -> Bool,
+        count -> Int8,
+        last_pod_name -> Nullable<Varchar>,
+        first_seen -> Timestamp,
+        last_seen -> Timestamp,
+        last_reported -> Timestamp,
     }
 }
 

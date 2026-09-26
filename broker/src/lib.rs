@@ -18,6 +18,7 @@ mod profile_export;
 mod read_budget;
 mod retention;
 pub mod routes;
+pub mod runtime_capabilities;
 pub mod runtime_inventory;
 mod seccomp;
 mod seccomp_denial;
@@ -46,6 +47,7 @@ pub use profile_drift::{spawn_metrics_refresh as spawn_drift_metrics, DriftMetri
 pub use profile_export::{get_workload_export, post_workload_export};
 pub use read_budget::*;
 pub use retention::spawn as spawn_retention;
+pub use runtime_capabilities::{get_workload_capabilities, runtime_capabilities_resource};
 pub use runtime_inventory::{
     get_image_runtime, get_workload_runtime, runtime_coverage_resource,
     runtime_executables_resource,

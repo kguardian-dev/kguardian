@@ -194,6 +194,11 @@ pub struct ContainerInput {
     pub source: &'static str,
     pub digest: String,
     pub security: ContainerSecurity,
+    /// Capabilities the container was seen to use, only when the evidence
+    /// covers the window (see runtime_capabilities): the recommendation
+    /// then drops ALL and adds exactly these. `None` = no evidence, the
+    /// restricted default applies.
+    pub observed_capabilities: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -687,7 +692,13 @@ pub fn recommend(
     per_container: &[Vec<FailingCheck>],
 ) -> Option<Recommendation> {
     let any_fail = !pod_failing.is_empty() || per_container.iter().any(|f| !f.is_empty());
-    if !any_fail {
+    // With observed-capability evidence a tighter set is worth a patch even
+    // when every PSS check passes (e.g. an added capability never used).
+    let cap_tighten = containers
+        .iter()
+        .filter(|c| c.kind != "ephemeral")
+        .any(|c| observed_caps_change(c).is_some());
+    if !any_fail && !cap_tighten {
         return None;
     }
     let psc = pod.security_context.clone().unwrap_or_default();
@@ -783,7 +794,25 @@ pub fn recommend(
                 .capabilities_drop
                 .as_ref()
                 .is_some_and(|d| d.iter().any(|x| x == "ALL"));
-            if bad_add || drop_missing {
+            if c.observed_capabilities.is_some() {
+                // Evidence: drop ALL, add exactly what the container used.
+                if let Some((want, cur)) = observed_caps_change(c) {
+                    sc.push(format!("{e}capabilities:"));
+                    sc.push(format!("{e}  drop: [\"ALL\"]"));
+                    if !want.is_empty() {
+                        let q: Vec<String> = want.iter().map(|w| format!("\"{w}\"")).collect();
+                        sc.push(format!(
+                            "{e}  add: [{}]  # observed in use; never drop these",
+                            q.join(", ")
+                        ));
+                    } else if !cur.is_empty() {
+                        sc.push(format!(
+                            "{e}  add: null  # was {}; none used in the observation window",
+                            cur.join(", ")
+                        ));
+                    }
+                }
+            } else if bad_add || drop_missing {
                 sc.push(format!("{e}capabilities:"));
                 if drop_missing {
                     sc.push(format!("{e}  drop: [\"ALL\"]"));
@@ -836,6 +865,47 @@ pub fn recommend(
     {
         caveats.push("Turning off hostNetwork/hostPID/hostIPC breaks components that need the node's namespaces (CNI, node exporters, service meshes' node proxies); hostNetwork: false also changes the pod's IP and port bindings.".into());
     }
+    let observed: Vec<&ContainerInput> = patchable
+        .iter()
+        .map(|(_, c)| *c)
+        .filter(|c| c.observed_capabilities.is_some())
+        .collect();
+    if !observed.is_empty() {
+        caveats.push(format!(
+            "Capabilities for {} come from observed use: every capability check the container made while kguardian watched it continuously for the evidence window. A capability used less often than that window (a yearly rotation, a rare admin path) would be missing; widen the window (CAPABILITY_EVIDENCE_WINDOW_HOURS) for such workloads.",
+            observed.iter().map(|c| c.name.as_str()).collect::<Vec<_>>().join(", ")
+        ));
+        for c in &observed {
+            let beyond: Vec<&String> = c
+                .observed_capabilities
+                .iter()
+                .flatten()
+                .filter(|x| *x != "NET_BIND_SERVICE")
+                .collect();
+            if !beyond.is_empty() {
+                caveats.push(format!(
+                    "Container {} used {}; the patch keeps them because the container needs them, so it stays below restricted, which allows only NET_BIND_SERVICE.",
+                    c.name,
+                    beyond.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", ")
+                ));
+            }
+        }
+    }
+    let unobserved: Vec<&str> = patchable
+        .iter()
+        .filter(|(i, c)| {
+            c.observed_capabilities.is_none()
+                && (has(&per_container[*i], "capabilitiesRestricted")
+                    || has(&per_container[*i], "capabilitiesBaseline"))
+        })
+        .map(|(_, c)| c.name.as_str())
+        .collect();
+    if !unobserved.is_empty() {
+        caveats.push(format!(
+            "Capabilities for {} are the restricted default, not observed evidence: kguardian has not watched their capability checks continuously for the evidence window (see the profile's capabilities block for why).",
+            unobserved.join(", ")
+        ));
+    }
     if body.contains("drop: [\"ALL\"]") {
         caveats.push("drop: [\"ALL\"] also removes CHOWN, SETUID, SETGID, DAC_OVERRIDE and NET_BIND_SERVICE. Images that start as root and drop privileges, change file ownership at startup, or bind ports below 1024 may fail; add back NET_BIND_SERVICE only if the app needs it.".into());
     }
@@ -860,6 +930,26 @@ pub fn recommend(
         yaml,
         caveats,
     })
+}
+
+/// With evidence (`observed_capabilities`), the capabilities the container
+/// should keep and the ones it adds now, both sorted, when they differ
+/// from drop [ALL] + add exactly the observed set; `None` when there is
+/// no evidence or nothing to change.
+fn observed_caps_change(c: &ContainerInput) -> Option<(Vec<String>, Vec<String>)> {
+    let obs = c.observed_capabilities.as_ref()?;
+    let mut want: Vec<String> = obs.clone();
+    want.sort();
+    want.dedup();
+    let mut cur: Vec<String> = c.security.capabilities_add.clone().unwrap_or_default();
+    cur.sort();
+    cur.dedup();
+    let drops_all = c
+        .security
+        .capabilities_drop
+        .as_ref()
+        .is_some_and(|d| d.iter().any(|x| x == "ALL"));
+    (!drops_all || cur != want).then_some((want, cur))
 }
 
 /// Analyse one workload. `pod = None` means the pod-level block was
@@ -1012,6 +1102,7 @@ mod tests {
             source: "running",
             digest: format!("sha256:{}", "a".repeat(64)),
             security: sc,
+            observed_capabilities: None,
         }
     }
 
@@ -1220,6 +1311,73 @@ mod tests {
             let got = ids(&check_container("regular", "app", &sc, &pod, true));
             assert_eq!(got.contains(&"seccompRestricted"), fails, "{c:?} {p:?}");
         }
+    }
+
+    fn observed(add: &[&str], drop_all: bool, obs: Option<&[&str]>) -> ContainerInput {
+        let mut c = input(
+            "app",
+            "regular",
+            ContainerSecurity {
+                capabilities_drop: drop_all.then(|| vec!["ALL".to_string()]),
+                capabilities_add: (!add.is_empty())
+                    .then(|| add.iter().map(|s| s.to_string()).collect()),
+                ..restricted_sc()
+            },
+        );
+        c.observed_capabilities = obs.map(|o| o.iter().map(|s| s.to_string()).collect());
+        c
+    }
+
+    fn patch(c: ContainerInput) -> Option<Recommendation> {
+        let pod = PodSecurity::default();
+        let per = vec![check_container(&c.kind, &c.name, &c.security, &pod, true)];
+        recommend("Deployment", &pod, true, &[c], &[], &per)
+    }
+
+    #[test]
+    fn observed_capabilities_shape_the_patch() {
+        // Passes restricted (drop ALL, add NET_BIND_SERVICE) but never used
+        // it: with evidence there is still something to tighten.
+        let r = patch(observed(&["NET_BIND_SERVICE"], true, Some(&[]))).expect("a patch");
+        assert!(r.yaml.contains("drop: [\"ALL\"]"));
+        assert!(r
+            .yaml
+            .contains("add: null  # was NET_BIND_SERVICE; none used"));
+        // Without evidence the same container needs no patch.
+        assert!(patch(observed(&["NET_BIND_SERVICE"], true, None)).is_none());
+        // Adds NET_ADMIN and SYS_TIME, used only SYS_TIME: keep SYS_TIME
+        // (a used capability is never dropped), say it stays below
+        // restricted.
+        let r = patch(observed(
+            &["NET_ADMIN", "SYS_TIME"],
+            false,
+            Some(&["SYS_TIME"]),
+        ))
+        .unwrap();
+        assert!(r.yaml.contains("add: [\"SYS_TIME\"]  # observed in use"));
+        assert!(!r.yaml.contains("NET_ADMIN\"]"));
+        assert!(r
+            .caveats
+            .iter()
+            .any(|c| c.contains("Container app used SYS_TIME")));
+        assert!(r
+            .caveats
+            .iter()
+            .any(|c| c.contains("come from observed use")));
+        // Already exactly drop ALL + the used set: nothing to change.
+        assert!(patch(observed(
+            &["NET_BIND_SERVICE"],
+            true,
+            Some(&["NET_BIND_SERVICE"])
+        ))
+        .is_none());
+        // No evidence and failing restricted: the default, flagged as such.
+        let r = patch(observed(&["NET_ADMIN"], false, None)).unwrap();
+        assert!(r
+            .caveats
+            .iter()
+            .any(|c| c.contains("restricted default, not observed evidence")));
+        assert!(!r.yaml.contains("observed in use"));
     }
 
     #[test]
