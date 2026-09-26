@@ -110,6 +110,9 @@ func TestKeySigned(t *testing.T) {
 			wantVerdict(t, r, VerdictVerified, "")
 			s := verified(t, r)
 			ks, _ := parseKeys([]PublicKey{fixtureKey(t)})
+			if !strings.HasPrefix(s.KeyPEM, "-----BEGIN PUBLIC KEY-----") {
+				t.Fatalf("key pem = %q", s.KeyPEM)
+			}
 			if s.Kind != SignerKey || s.KeyName != "fixture" || s.KeyFingerprint != ks[0].fingerprint || s.Issuer != "" || s.SAN != "" {
 				t.Fatalf("signer = %+v", s)
 			}
