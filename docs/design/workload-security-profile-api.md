@@ -850,7 +850,7 @@ Three checks, each a finding with `dimension: "drift"` and an entry in `drift.it
 | `type` | when | severity |
 |---|---|---|
 | `tagMoved` | a current container's image **tag** (a reference without `@digest`) has resolved to more than one digest in the inventory (re-pushed tag, or nodes resolved it differently) | medium |
-| `imageChangedSinceExport` | a current container runs a digest the last export's snapshot did not have, or the container is new since that export. Needs an export record (section 4) | medium |
+| `imageChangedSinceExport` | a current container runs a digest the last export's snapshot did not have, or the container is new since that export. Needs an export record (a `POST .../export`, section 4) | medium |
 | `securityContextRegression` | a PSS check that passed in the baseline fails now, for a container that existed in the baseline or at pod level. Baseline = the last export when there is one, else the newest stored version whose podSecurity content differs from the live one | high if a baseline check newly fails, else medium |
 
 From `GET /workloads/payments/Deployment/checkout/profile` -> 200 (capture `profile-drift-payments-checkout-after-export.json`, `body.drift`):
@@ -1151,7 +1151,7 @@ From `GET /workloads/payments/Deployment/checkout/profile/diff?from=4&to=6` -> 2
 - A changed scalar is `{ "from": x, "to": y }`; an unchanged scalar is `null`.
 - `syscalls.cr` when changed: `{ "from": {name, defaultAction, hash} | null, "to": … }`.
 
-## 4. `GET /workloads/{namespace}/{kind}/{name}/export` — export bundle (P2-4)
+## 4. `GET|POST /workloads/{namespace}/{kind}/{name}/export` — export bundle (P2-4)
 
 Query (all optional):
 
@@ -1161,10 +1161,14 @@ Query (all optional):
 | `mode` | `audit` \| `enforce` | `audit` |
 | `format` | `yaml` (multi-document YAML) \| `zip-manifest` (JSON manifest of files) | `yaml` |
 | `acknowledgePartial` | `true` to take enforce-mode artifacts built from partial evidence | `false` |
-| `record` | `false` to skip recording this export as the drift baseline (use for previews) | `true` |
+`GET` (READ scope) is side-effect free: it generates the bundle and writes nothing. `POST` on the same
+path with the same query (**admin** scope) returns the same bundle and also records it as the workload's
+drift baseline (see Recording below). Recording says "this is what the operator accepted", so a read token
+must not be able to do it. `GET ...?record=<truthy>` is a 400 pointing at POST; `record` is ignored on POST.
 
-READ scope. Report and generate only: **kguardian never applies anything**, and every document says so.
-The response carries `X-Kguardian-Export-Mode` and `X-Kguardian-Export-Recorded`.
+Report and generate only: **kguardian never applies anything**, and every document says so.
+The response carries `X-Kguardian-Export-Mode` and `X-Kguardian-Export-Recorded` (`true` only for a POST
+that stored a record).
 
 Artifacts and where they come from (existing generators only):
 
@@ -1186,7 +1190,7 @@ Artifacts and where they come from (existing generators only):
   `networkpolicy` / `ciliumnetworkpolicy` when no flows were seen, the flow summary is truncated, or
   traffic has been observed for under 24 h. Any refusal answers **409** unless `acknowledgePartial=true`:
 
-From `GET /workloads/payments/Deployment/checkout/export?mode=enforce&record=false` -> 409 (capture `export-409-enforce-refused.json`, `body`):
+From `GET /workloads/payments/Deployment/checkout/export?mode=enforce` -> 409 (capture `export-409-enforce-refused.json`, `body`):
 
 ```json
 {
@@ -1205,11 +1209,12 @@ From `GET /workloads/payments/Deployment/checkout/export?mode=enforce&record=fal
   `generated-at`, `source-workload` (`ns/Kind/name`), `profile-revision` (or `unversioned`),
   `profile-hash`, `export-mode`, and `applied-by-kguardian: "false"`. Each document is preceded by a
   `# kguardian export: <artifact> (<mode> mode)` / `# kguardian never applies this document` header.
-- **Recording:** unless `record=false`, a successful export with at least one included artifact is stored
+- **Recording (POST only):** a successful export with at least one included artifact is stored
   (`workload_profile_exports`: newest 20 per workload, aged out by `PROFILE_VERSIONS_RETENTION_DAYS`
   except each live workload's newest). It is the `imageChangedSinceExport` / securityContext baseline
   (section 2.8).
-- **Errors:** 400 `bad_request` (unknown artifact, mode or format), 404 `workload_not_found`, 409
+- **Errors:** 400 `bad_request` (unknown artifact, mode or format; `record` on GET), 401/403 without the
+  required scope when auth is on, 404 `workload_not_found`, 409
   `export_refused` as above, 503 read budget.
 
 ### 4.1 `format=yaml`
@@ -1219,7 +1224,7 @@ A bundle header (workload, mode, profile revision, "kguardian never applies anyt
 included Kubernetes object. The securityContext patch is **not** an object, so it is appended as comments
 after the last document; the stream stays safe to pass to `kubectl apply -f`.
 
-From `GET /workloads/payments/Deployment/checkout/export?record=false` -> 200 (capture `export-yaml-audit-payments-checkout.json`, body verbatim):
+From `GET /workloads/payments/Deployment/checkout/export` -> 200 (capture `export-yaml-audit-payments-checkout.json`, body verbatim):
 
 ```yaml
 # kguardian export bundle for payments/Deployment/checkout
@@ -1364,7 +1369,7 @@ spec:
 
 A JSON manifest whose `documents[]` are the files a client zips:
 
-From `GET /workloads/payments/Deployment/checkout/export?mode=enforce&format=zip-manifest&acknowledgePartial=true&record=false` -> 200 (capture `export-manifest-enforce-payments-checkout.json`, `body`):
+From `GET /workloads/payments/Deployment/checkout/export?mode=enforce&format=zip-manifest&acknowledgePartial=true` -> 200 (capture `export-manifest-enforce-payments-checkout.json`, `body`):
 
 ```json
 {
@@ -1512,9 +1517,11 @@ From `GET /workloads/payments/Deployment/checkout/export?mode=enforce&format=zip
     `profile-unknown-partial-flux-system-source-controller`, `profile-warn-payments-checkout` ->
     `profile-warn-payments-checkout-after-fix`; new `profile-warn-payments-refunds-init-fails-restricted`.
 - 2026-09-27 (**v1.4**, P2-4 export + P2-5 drift; additive only, no existing field or status changes):
-  - New `GET /workloads/{ns}/{kind}/{name}/export` (section 4): `artifacts`, `mode=audit|enforce`,
-    `format=yaml|zip-manifest`, `acknowledgePartial`, `record`; 409 `export_refused` for enforce-mode
-    artifacts built from partial evidence.
+  - New `GET /workloads/{ns}/{kind}/{name}/export` (section 4, READ, side-effect free): `artifacts`,
+    `mode=audit|enforce`, `format=yaml|zip-manifest`, `acknowledgePartial`; 409 `export_refused` for
+    enforce-mode artifacts built from partial evidence.
+  - New `POST` on the same path (admin scope): the same bundle, also recorded as the drift baseline.
+    Recording is not reachable with a read token.
   - New top-level `drift` in the profile (section 2.8) with `baselines`, `evaluated` and `items`; drift
     findings (dimension `"drift"`: `drift.tagMoved/<c>`, `drift.imageChangedSinceExport/<c>`,
     `drift.securityContextRegression/<c|pod>`) join `findings` / `attention`. Drift never sets posture.

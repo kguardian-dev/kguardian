@@ -1,5 +1,8 @@
 //! Workload profile export bundle (#1533 P2-4):
-//! `GET /workloads/{ns}/{kind}/{name}/export`.
+//! `GET /workloads/{ns}/{kind}/{name}/export` (READ, side-effect free) and
+//! `POST` on the same path (ADMIN), which returns the same bundle and also
+//! records it as the workload's drift baseline. A read token can therefore
+//! never write a row; recording what was exported is an operator action.
 //!
 //! One request, every artifact kguardian can generate for a workload,
 //! assembled from the EXISTING generators:
@@ -43,7 +46,7 @@ use crate::netpol::{
 };
 use crate::read_budget::{cost_kib, ReadBudget, TRAFFIC_ROW_COST_BYTES};
 use crate::workload_profile::{self as wp, error, not_found_workload, Key, Profile};
-use actix_web::{get, http::StatusCode, web, HttpResponse, Responder};
+use actix_web::{get, http::StatusCode, post, web, HttpResponse};
 use chrono::{NaiveDateTime, Utc};
 use diesel::pg::PgConnection;
 use diesel::prelude::*;
@@ -97,7 +100,8 @@ pub struct ExportQuery {
     pub format: Option<String>,
     #[serde(rename = "acknowledgePartial")]
     pub acknowledge_partial: Option<String>,
-    /// Record this export as the drift baseline (default true).
+    /// Removed from GET (it is side-effect free); a truthy value is a 400
+    /// pointing at POST. Ignored on POST, which always records.
     pub record: Option<String>,
 }
 
@@ -115,6 +119,7 @@ pub struct Plan {
     pub enforce: bool,
     pub manifest: bool,
     pub acknowledge_partial: bool,
+    /// Set by the handler: true only for POST.
     pub record: bool,
 }
 
@@ -167,7 +172,7 @@ pub fn plan(q: &ExportQuery) -> Result<Plan, String> {
         enforce,
         manifest,
         acknowledge_partial: flag(q.acknowledge_partial.as_deref(), false),
-        record: flag(q.record.as_deref(), true),
+        record: false,
     })
 }
 
@@ -846,6 +851,7 @@ pub fn render_bundle_yaml(
 // Handler
 // ---------------------------------------------------------------------
 
+/// Build (and, for POST, record) the bundle. Read-only unless `record`.
 #[get(
     "/workloads/{namespace}/{kind}/{name}/export",
     wrap = "::actix_web::middleware::from_fn(crate::auth::authorize)"
@@ -855,15 +861,47 @@ pub async fn get_workload_export(
     budget: web::Data<ReadBudget>,
     path: web::Path<(String, String, String)>,
     query: web::Query<ExportQuery>,
-) -> actix_web::Result<impl Responder> {
-    let (ns, kind, name) = path.into_inner();
+) -> actix_web::Result<HttpResponse> {
+    let q = query.into_inner();
+    if flag(q.record.as_deref(), false) {
+        return Ok(error(
+            StatusCode::BAD_REQUEST,
+            "bad_request",
+            "GET never records an export; POST to the same path (admin scope) to record it as the drift baseline",
+        ));
+    }
+    export(pool, budget, path.into_inner(), q, false).await
+}
+
+/// The same bundle as GET, recorded as the workload's drift baseline.
+#[post(
+    "/workloads/{namespace}/{kind}/{name}/export",
+    wrap = "::actix_web::middleware::from_fn(crate::auth::authorize)"
+)]
+pub async fn post_workload_export(
+    pool: web::Data<DbPool>,
+    budget: web::Data<ReadBudget>,
+    path: web::Path<(String, String, String)>,
+    query: web::Query<ExportQuery>,
+) -> actix_web::Result<HttpResponse> {
+    export(pool, budget, path.into_inner(), query.into_inner(), true).await
+}
+
+async fn export(
+    pool: web::Data<DbPool>,
+    budget: web::Data<ReadBudget>,
+    (ns, kind, name): (String, String, String),
+    query: ExportQuery,
+    record: bool,
+) -> actix_web::Result<HttpResponse> {
     let Some(key) = Key::parse(ns, kind, name) else {
         return Ok(wp::bad_key());
     };
-    let plan = match plan(&query.into_inner()) {
+    let mut plan = match plan(&query) {
         Ok(p) => p,
         Err(m) => return Ok(error(StatusCode::BAD_REQUEST, "bad_request", &m)),
     };
+    plan.record = record;
     // The profile, plus the export's own bounded reads: flow rows for the
     // network generator and its memoised per-IP lookups.
     let charge = wp::profile_charge_kib()
@@ -973,10 +1011,11 @@ mod tests {
     }
 
     #[test]
-    fn plan_defaults_to_audit_yaml_all_artifacts_recorded() {
+    fn plan_defaults_to_audit_yaml_all_artifacts_unrecorded() {
         let p = plan(&q(None, None, None)).unwrap();
         assert_eq!(p.artifacts, ARTIFACTS.to_vec());
-        assert!(!p.enforce && !p.manifest && !p.acknowledge_partial && p.record);
+        // Only the POST handler turns recording on; no query can.
+        assert!(!p.enforce && !p.manifest && !p.acknowledge_partial && !p.record);
     }
 
     #[test]
@@ -994,10 +1033,55 @@ mod tests {
         assert!(plan(&q(None, Some("dry-run"), None)).is_err());
         assert!(plan(&q(None, None, Some("tar"))).is_err());
         let mut x = q(None, None, None);
-        x.record = Some("false".into());
+        x.record = Some("true".into());
         x.acknowledge_partial = Some("1".into());
         let p = plan(&x).unwrap();
         assert!(!p.record && p.acknowledge_partial);
+    }
+
+    /// GET is side-effect free: asking it to record is refused before any
+    /// DB access, and recording is only reachable through POST.
+    #[actix_web::test]
+    async fn get_refuses_to_record_and_post_is_routed() {
+        use actix_web::{http::Method, test as atest, App};
+        let pool: DbPool = r2d2::Pool::builder()
+            .max_size(1)
+            .connection_timeout(std::time::Duration::from_millis(100))
+            .build_unchecked(ConnectionManager::<PgConnection>::new(
+                "postgres://nobody@127.0.0.1:1/none",
+            ));
+        let app = atest::init_service(
+            App::new()
+                .app_data(web::Data::new(pool))
+                .app_data(web::Data::new(ReadBudget::with_budget_kib(
+                    1024 * 1024,
+                    std::time::Duration::from_millis(0),
+                )))
+                .service(get_workload_export)
+                .service(post_workload_export),
+        )
+        .await;
+        let status = |m: Method, uri: &str| {
+            let req = atest::TestRequest::default()
+                .method(m)
+                .uri(uri)
+                .to_request();
+            atest::call_service(&app, req)
+        };
+        let uri = "/workloads/ns/Deployment/web/export";
+        for q in ["?record=true", "?record=1", "?mode=enforce&record=yes"] {
+            let r = status(Method::GET, &format!("{uri}{q}")).await;
+            assert_eq!(r.status(), StatusCode::BAD_REQUEST, "GET {q}");
+        }
+        // Without record, GET goes on to the (unreachable) DB.
+        let r = status(
+            Method::GET,
+            "/workloads/ns/Deployment/web/export?record=false",
+        )
+        .await;
+        assert!(r.status().is_server_error(), "{}", r.status());
+        let r = status(Method::POST, "/workloads/ns/Deployment/web/export").await;
+        assert!(r.status().is_server_error(), "{}", r.status());
     }
 
     #[test]

@@ -473,7 +473,7 @@ pub fn detect(
                 "imageChangedSinceExport" => (
                     format!("Container {who} runs an image not in the last exported profile"),
                     format!(
-                        "New digest(s): {}. Review and re-export the profile if the change is expected.",
+                        "New digest(s): {}. Review it; if the change is expected, record a new export (POST .../export) as the baseline.",
                         i.detail["newDigests"]
                             .as_array()
                             .map(|a| a.iter().filter_map(Value::as_str).collect::<Vec<_>>().join(", "))

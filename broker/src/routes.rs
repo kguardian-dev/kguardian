@@ -18,8 +18,8 @@ use crate::{
     get_workload_containers, get_workload_export, get_workload_profile, get_workload_profile_diff,
     get_workload_profile_version, get_workload_profile_versions, get_workloads,
     image_sbom_cyclonedx_resource, image_sbom_resource, image_vulnerabilities_resource,
-    list_seccomp_profiles, mark_pod_dead, post_seccomp_node_status, put_seccomp_cr,
-    seccomp_denials_resource,
+    list_seccomp_profiles, mark_pod_dead, post_seccomp_node_status, post_workload_export,
+    put_seccomp_cr, seccomp_denials_resource,
 };
 
 pub fn configure(cfg: &mut web::ServiceConfig) {
@@ -78,6 +78,7 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
         .service(get_vulnerability_exposure)
         // Export bundle (#1533 P2-4).
         .service(get_workload_export)
+        .service(post_workload_export)
         .service(get_version)
         .service(get_cluster_environment);
 }
