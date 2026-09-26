@@ -180,18 +180,24 @@ export function trimCveList(
   page: unknown,
   filters: { namespace?: string; severity?: string; kev?: boolean },
   limit: number,
+  /** The page size asked of the broker; a page this full may not be all. */
+  brokerLimit = limit,
 ): Rec {
   if (!isRecord(page)) return { vulnerabilities: null, note: VULN_NOTE };
   let items = Array.isArray(page.items) ? page.items : [];
   const brokerRows = items.length;
-  // The broker has no KEV filter; apply it here, strictly: kev must equal
-  // the requested value, so null (unknown) rows are excluded either way.
+  const morePages = typeof page.nextAfter === "string";
+  // The broker has no KEV filter yet; apply it here, strictly: kev must
+  // equal the requested value, so null (unknown) rows are excluded either
+  // way. It only sees the rows the broker returned, so a full page (or a
+  // next-page cursor) means the scan was partial.
   if (filters.kev !== undefined) items = items.filter((i) => isRecord(i) && i.kev === filters.kev);
   const kept = items.slice(0, limit);
+  const partialKevScan = filters.kev !== undefined && (morePages || brokerRows >= brokerLimit);
   const out: Rec = {
     count: kept.length,
     vulnerabilities: kept.map((i) => pick(i, CVE_KEYS)),
-    truncated: typeof page.nextAfter === "string" || items.length > kept.length,
+    truncated: morePages || items.length > kept.length || partialKevScan,
     computedAt: page.computedAt ?? null,
     staleSeconds: page.staleSeconds ?? null,
   };
@@ -199,7 +205,10 @@ export function trimCveList(
   if (filters.severity) out.severity = filters.severity;
   if (filters.kev !== undefined) {
     out.kev = filters.kev;
-    out.kevFilter = `applied by the assistant to the ${brokerRows} most severe rows the broker returned; rows whose kev is null (unknown, e.g. Trivy-only findings) are excluded, so an empty list does not mean no KEV CVEs`;
+    out.kevScan = partialKevScan ? "partial" : "complete";
+    out.kevFilter = partialKevScan
+      ? `partial scan: only the first ${brokerRows} CVEs by severity were checked for kev=${filters.kev}; more exist, so this list may be missing matches. Narrow by namespace or severity to check the rest. Rows whose kev is null (unknown, e.g. Trivy-only findings) are excluded.`
+      : `checked all ${brokerRows} CVEs the broker holds for this scope; rows whose kev is null (unknown, e.g. Trivy-only findings) are excluded, so an empty list does not mean no KEV CVEs`;
   }
   const stale = page.computedAt === null || page.computedAt === undefined;
   out.note = `${stale ? "The CVE summary has not been built yet since the broker started, so an empty list is unknown, not clean. " : ""}Counts cover images in the inventory that have vulnerability data; images without any report are unknown and not counted. weakestJoin workload_tag means some matches are by tag only. ${VULN_NOTE}`;

@@ -262,7 +262,7 @@ const handlers: Record<string, Handler> = {
     // broker's largest page the assistant allows, then filter and cut.
     const brokerLimit = kev === undefined ? limit : MAX_TOOL_LIMIT;
     const page = await brokerGetJSON(`/vulnerabilities${buildQuery({ namespace, severity, limit: brokerLimit })}`);
-    return trimCveList(page, { namespace, severity, kev }, limit);
+    return trimCveList(page, { namespace, severity, kev }, limit, brokerLimit);
   },
   explain_cve_exposure: async (a) => {
     const id = parseVulnId(a.id);

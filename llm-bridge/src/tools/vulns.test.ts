@@ -199,8 +199,34 @@ test("list_vulnerabilities: kev filter is strict and says unknown rows are exclu
   assert.equal(seen[0].query.get("limit"), String(MAX_TOOL_LIMIT), "kev filtering asks for the largest page");
   assert.deepEqual(got.vulnerabilities.map((v: any) => v.id), ["CVE-2099-10001"]);
   assert.match(got.kevFilter, /kev is null \(unknown/);
+  assert.equal(got.kevScan, "complete", "4 rows < the 100 asked for, no cursor: every CVE was checked");
+  assert.equal(got.truncated, false);
   const none = JSON.parse((await executeInProcessTool("list_vulnerabilities", { kev: false })).text);
   assert.equal(none.count, 0, "no source said kev=false; null rows are not 'false'");
+});
+
+test("list_vulnerabilities: a full broker page makes the KEV scan partial, never complete", async () => {
+  // A broker page exactly as full as the limit asked for, with no cursor:
+  // more CVEs may exist, so the KEV result must not read as complete.
+  const row = capture("vulns-list").body.items[1]; // kev null
+  const full = Array.from({ length: MAX_TOOL_LIMIT }, (_, i) => ({ ...row, id: `CVE-2099-${String(50000 + i)}` }));
+  routes["/vulnerabilities"] = { status: 200, body: { items: full, nextAfter: null, computedAt: "2026-09-26T03:00:00", staleSeconds: 5 } };
+  const got = JSON.parse((await executeInProcessTool("list_vulnerabilities", { kev: true })).text);
+  assert.equal(got.count, 0);
+  assert.equal(got.kevScan, "partial");
+  assert.equal(got.truncated, true, "an empty KEV result from a full page is not complete");
+  assert.match(got.kevFilter, new RegExp(`partial scan: only the first ${MAX_TOOL_LIMIT} CVEs by severity were checked`));
+
+  // A next-page cursor also means partial, even on a short page.
+  routes["/vulnerabilities"] = { status: 200, body: { ...capture("vulns-list").body, nextAfter: "3.CVE-2099-20001" } };
+  const cursor = JSON.parse((await executeInProcessTool("list_vulnerabilities", { kev: true })).text);
+  assert.equal(cursor.kevScan, "partial");
+  assert.equal(cursor.truncated, true);
+
+  // Without a KEV filter nothing is said about KEV scanning.
+  routes["/vulnerabilities"] = { status: 200, body: capture("vulns-list").body };
+  const plain = JSON.parse((await executeInProcessTool("list_vulnerabilities", {})).text);
+  assert.equal("kevScan" in plain, false);
 });
 
 test("list_vulnerabilities: a summary not built yet is unknown", async () => {
