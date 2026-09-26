@@ -79,8 +79,9 @@ func TestProfileGet_TableWarn(t *testing.T) {
 	}
 	s := out.String()
 	mustContain(t, s,
-		"Posture:    warn  coverage 50% (known core dimensions)",
-		"Unknown:    network, podSecurity (no data; not counted as ok or risk)",
+		"Posture:    warn  coverage 25% (known core dimensions)",
+		"  images unknown: 1 running digest(s) across 2 container(s); vulnerability data not configured",
+		"Unknown:    network, podSecurity, images (no data; not counted as ok or risk)",
 		"  syscalls warn: No SeccompProfile CR enforces the observed syscall set",
 		"Revision:   4",
 		"PSS level:  at most restricted (unconfirmed: 9 checks not visible to kguardian)",
@@ -130,7 +131,7 @@ func TestProfileGet_RiskAndStale(t *testing.T) {
 		t.Fatalf("get: %v", err)
 	}
 	mustContain(t, out.String(),
-		"Posture:    risk  coverage 75%",
+		"Posture:    risk  coverage 50%",
 		"podSecurity risk: Privileged under PSS",
 		"PSS level:  privileged",
 		"podSecurity.hostPID",
@@ -140,7 +141,47 @@ func TestProfileGet_RiskAndStale(t *testing.T) {
 	if err := fetchAndRenderProfile(ledgerRef, "table", &out); err != nil {
 		t.Fatalf("get: %v", err)
 	}
-	mustContain(t, out.String(), "Stale:      legacy-proxy (regular, last seen 2026-09-24T02:04:20.420873Z) is no longer in the spec and is excluded")
+	var stale struct {
+		Dimensions struct {
+			PodSecurity struct {
+				StaleContainers []api.StaleContainer `json:"staleContainers"`
+			} `json:"podSecurity"`
+		} `json:"dimensions"`
+	}
+	_ = json.Unmarshal([]byte(postureFixture(t, "profile_stale.json")), &stale)
+	sc := stale.Dimensions.PodSecurity.StaleContainers
+	if len(sc) == 0 {
+		t.Fatal("fixture has no stale container")
+	}
+	mustContain(t, out.String(), "Stale:      "+sc[0].Name+" ("+sc[0].Kind+", last seen "+sc[0].LastSeen+") is no longer in the spec and is excluded")
+}
+
+// Contract v1.3: known dimensions all ok but others unknown -> posture
+// unknown, never ok; an init container failing restricted -> warn and a
+// patch for initContainers.
+func TestProfileGet_PartialIsUnknownAndInitFails(t *testing.T) {
+	r := profileRoutes(t)
+	r["/workloads/flux-system/Deployment/source-controller/profile"] = postureFixture(t, "profile_partial.json")
+	r["/workloads/payments/Deployment/refunds/profile"] = postureFixture(t, "profile_init_fails.json")
+	startFakeBroker(t, r)
+	var out bytes.Buffer
+	if err := fetchAndRenderProfile(workloadRef{"flux-system", "Deployment", "source-controller"}, "table", &out); err != nil {
+		t.Fatal(err)
+	}
+	mustContain(t, out.String(), "Posture:    unknown  coverage 50%", "Unknown:    podSecurity, images")
+	if strings.Contains(out.String(), "Posture:    ok") {
+		t.Errorf("posture must not be ok while a dimension is unknown:\n%s", out.String())
+	}
+	out.Reset()
+	if err := fetchAndRenderProfile(workloadRef{"payments", "Deployment", "refunds"}, "table", &out); err != nil {
+		t.Fatal(err)
+	}
+	mustContain(t, out.String(), "Posture:    warn", "PSS level:  at most baseline", "podSecurityRestricted   no", "profile export payments/Deployment/refunds --format pss")
+	var patch, errOut bytes.Buffer
+	if err := exportPSSPatch(workloadRef{"payments", "Deployment", "refunds"}, &patch, &errOut); err != nil {
+		t.Fatal(err)
+	}
+	mustContain(t, patch.String(), "initContainers:", "- name: migrate", "allowPrivilegeEscalation: false")
 }
 
 func TestProfileGet_JSONAndYAMLPassThrough(t *testing.T) {
@@ -191,13 +232,13 @@ func TestProfileList_TableQueryAndCursor(t *testing.T) {
 		t.Errorf("query wrong: %s", fb.lastReq.URL.RawQuery)
 	}
 	rows := strings.Split(strings.TrimSpace(out.String()), "\n")
-	if len(rows) != 3 {
-		t.Fatalf("want header + 2 rows:\n%s", out.String())
+	if len(rows) != 4 {
+		t.Fatalf("want header + 3 rows:\n%s", out.String())
 	}
 	if h := strings.Join(strings.Fields(rows[0]), " "); h != "NAMESPACE KIND NAME STATUS COVERAGE UNKNOWN FINDINGS (C/H/M) REV" {
 		t.Errorf("header: %q", h)
 	}
-	if f := strings.Join(strings.Fields(rows[1]), " "); f != "payments Deployment checkout warn 50% network,podSecurity 0/0/1 4" {
+	if f := strings.Join(strings.Fields(rows[1]), " "); f != "payments Deployment checkout warn 25% network,podSecurity,images 0/0/1 4" {
 		t.Errorf("row 1: %q", f)
 	}
 	if errOut.Len() != 0 {
@@ -227,7 +268,8 @@ func TestProfileDiff_Table(t *testing.T) {
 	}
 	s := out.String()
 	mustContain(t, s,
-		"From:     2 (2026-09-26T02:05:41.141561Z)",
+		"From:     2 (",
+		"To:       4 (",
 		"podSecurity: changed",
 		"level: baseline -> restricted",
 		"\n      fields:\n        securityContext.allowPrivilegeEscalation: unset -> false\n",

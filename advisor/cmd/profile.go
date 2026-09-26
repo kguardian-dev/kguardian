@@ -35,8 +35,10 @@ compute settings.
 
 "unknown" means kguardian has no data for that dimension, or the source is not
 configured. It is never a pass. Status is a tier (ok, warn, risk, unknown)
-derived from findings; there is no numeric score. The posture status only
-covers known dimensions, so read the coverage next to it. A Pod Security
+derived from findings; there is no numeric score. Posture is ok only when
+all four core dimensions are known and ok; otherwise it is the worst known
+warn or risk, else unknown. Images stay unknown until vulnerability data
+exists. A Pod Security
 Standards level of restricted is an upper bound kguardian cannot confirm.`,
 }
 
