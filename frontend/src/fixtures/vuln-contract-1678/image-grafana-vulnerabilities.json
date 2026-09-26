@@ -134,7 +134,7 @@
       }
     ]
   },
-  "provenance": "contract-derived, not captured: the #1671 capture of the same request with the fields #1678 (feat/1533-in-use-tiers @ 1cc299a3) adds, set by hand per its docs/api-reference/endpoints/vulnerabilities.mdx and broker/src/in_use.rs tier() with default settings (EPSS 0.1, unknown exposure counts as exposed). Replace with real captures once #1678 merges.",
+  "provenance": "contract-derived, not captured: the #1671 capture of the same request with the fields #1678 (feat/1533-in-use-tiers @ 0c25f288) adds. In-use states and exposure are set by hand in derive.py; KEV/EPSS are resolved per CVE across every source row, and tier/tierFactors are computed with broker/src/in_use.rs tier() at default settings (EPSS 0.1, unknown exposure counts as exposed). Replace with real captures once #1678 merges.",
   "request": "GET /images/sha256:1eb73105a1fe5826de974a647f3d2e72905e16803a8ca2b9c891bf3545bc242c/vulnerabilities",
   "status": 200
 }

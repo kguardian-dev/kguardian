@@ -11,8 +11,9 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 SRC = os.path.join(HERE, '..', 'vuln-captures')
 DST = HERE
 PROV = ("contract-derived, not captured: the #1671 capture of the same request with the fields #1678 "
-        "(feat/1533-in-use-tiers @ 1cc299a3) adds, set by hand per its docs/api-reference/endpoints/vulnerabilities.mdx "
-        "and broker/src/in_use.rs tier() with default settings (EPSS 0.1, unknown exposure counts as exposed). "
+        "(feat/1533-in-use-tiers @ 0c25f288) adds. In-use states and exposure are set by hand in derive.py; KEV/EPSS "
+        "are resolved per CVE across every source row, and tier/tierFactors are computed with broker/src/in_use.rs "
+        "tier() at default settings (EPSS 0.1, unknown exposure counts as exposed). "
         "Replace with real captures once #1678 merges.")
 def load(n): return json.load(open(os.path.join(SRC, n + '.json')))
 def save(n, cap):
@@ -21,20 +22,37 @@ def save(n, cap):
 OBS = '2026-09-25T03:00:00'
 def detail(state, reason, coverage, covered=True):
     return {'state': state, 'reason': reason, 'observedSince': OBS if covered else None, 'windowHours': 24, 'containers': 1, 'coverage': coverage}
-# (image, cve) -> (tier, state, reason, coverage, exposure factor)
+# (image, cve) -> (in-use state, unknown reason, coverage, exposure factor). The
+# tier is computed below with the broker's rule, never set here.
 F = {
- ('checkout','CVE-2099-0001'): ('P0','loaded',None,'file','exposed'),
- ('checkout','CVE-2099-0002'): ('P1','unknown','language_package','interpreted','exposed'),
- ('checkout','CVE-2099-0007'): ('P1','unknown','language_package','interpreted','exposed'),
- ('checkout','CVE-2099-0003'): ('P2','loaded',None,'file','exposed'),
- ('checkout','CVE-2099-0004'): ('Background','installed_not_observed',None,'file','exposed'),
- ('ledger','CVE-2099-0001'): ('P1','loaded',None,'file','internal'),
- ('ledger','CVE-2099-0005'): ('P2','unknown','capture_gap','file','internal'),
- ('reports','CVE-2099-0001'): ('P1','unknown','no_runtime_data','file','exposure:unknown'),
- ('grafana','CVE-2099-0006'): ('P1','executed',None,'static_binary','exposed'),
- ('grafana','CVE-2099-0003'): ('P2','unknown','no_package_files','file','exposed'),
- ('prometheus','CVE-2099-0006'): ('P1','executed',None,'static_binary','exposed'),
+ ('checkout','CVE-2099-0001'): ('loaded',None,'file','exposed'),
+ ('checkout','CVE-2099-0002'): ('unknown','language_package','interpreted','exposed'),
+ ('checkout','CVE-2099-0007'): ('unknown','language_package','interpreted','exposed'),
+ ('checkout','CVE-2099-0003'): ('loaded',None,'file','exposed'),
+ ('checkout','CVE-2099-0004'): ('installed_not_observed',None,'file','exposed'),
+ ('ledger','CVE-2099-0001'): ('loaded',None,'file','internal'),
+ ('ledger','CVE-2099-0005'): ('unknown','capture_gap','file','internal'),
+ ('reports','CVE-2099-0001'): ('unknown','no_runtime_data','file','exposure:unknown'),
+ ('grafana','CVE-2099-0006'): ('executed',None,'static_binary','exposed'),
+ ('grafana','CVE-2099-0003'): ('unknown','no_package_files','file','exposed'),
+ ('prometheus','CVE-2099-0006'): ('executed',None,'static_binary','exposed'),
 }
+EPSS_T = 0.1
+SEV_RANK = {'CRITICAL': 5, 'HIGH': 4, 'MEDIUM': 3, 'LOW': 2, 'NONE': 1, 'UNKNOWN': 0}
+
+def broker_tier(state, severity, kev, epss, exp, fixable):
+    """broker/src/in_use.rs tier(), default settings."""
+    if state == 'installed_not_observed':
+        return 'Background'
+    exposed = {'exposed': True, 'internal': False, 'exposure:unknown': True}[exp]
+    hot = bool(kev) or (epss is not None and epss >= EPSS_T)
+    if hot and exposed: return 'P0'
+    if hot: return 'P1'
+    r = SEV_RANK[severity]
+    if r == 4 and not fixable and not exposed: return 'P2'
+    if r in (4, 5): return 'P1'
+    return 'P2'
+
 IN_USE_BOOL = {'executed': True, 'loaded': True, 'installed_not_observed': False, 'unknown': None}
 def factors(f, state, exp):
     out = [f'in_use:{state}']
@@ -45,10 +63,25 @@ def factors(f, state, exp):
     if not f['fixable']: out.append('no_fix')
     return out
 IMAGES = ['checkout','ledger','reports','grafana','prometheus','source-controller','node-exporter']
+# #1678 @ 0c25f288: KEV and EPSS are per CVE over every source row of every
+# image (kev true if any says true, false if some says false and none true,
+# null if none reports it; EPSS and its percentile the highest).
+rows = [f for n in IMAGES for f in load(f'image-{n}-vulnerabilities')['body']['items']]
+CVL = {}
+for f in rows:
+    c = CVL.setdefault(f['id'], {'kev': None, 'kevDateAdded': None, 'epss': None, 'epssPercentile': None})
+    if f['kev'] is True or (f['kev'] is False and c['kev'] is None): c['kev'] = f['kev']
+    if f['kevDateAdded'] and (c['kevDateAdded'] is None or f['kevDateAdded'] < c['kevDateAdded']): c['kevDateAdded'] = f['kevDateAdded']
+    for k in ('epss', 'epssPercentile'):
+        if f[k] is not None and (c[k] is None or f[k] > c[k]): c[k] = f[k]
+TIERS = {}
 for n in IMAGES:
     cap = load(f'image-{n}-vulnerabilities')
     for f in cap['body']['items']:
-        tier, state, reason, cov, exp = F[(n, f['id'])]
+        f.update(CVL[f['id']])
+        state, reason, cov, exp = F[(n, f['id'])]
+        tier = broker_tier(state, f['severity'], f['kev'], f['epss'], exp, f['fixable'])
+        TIERS[(n, f['id'])] = tier
         f['inUse'] = IN_USE_BOOL[state]; f['inUseState'] = state
         f['inUseDetail'] = detail(state, reason, cov, covered=(n != 'reports'))
         f['tier'] = tier; f['tierFactors'] = factors(f, state, exp)
@@ -67,7 +100,8 @@ for c in cves['body']['items']:
     rows = []
     for w in e['workloads']:
         name = w['name']
-        tier, state, reason, cov, exp = F[(name, c['id'])]
+        state, reason, cov, exp = F[(name, c['id'])]
+        tier = TIERS[(name, c['id'])]
         rows.append((tier, state, exp))
         w['inUse'] = IN_USE_BOOL[state]; w['inUseState'] = state
     top = min((r[1] for r in rows), key=STRONG.index)

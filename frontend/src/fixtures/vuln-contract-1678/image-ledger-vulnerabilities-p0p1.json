@@ -9,8 +9,8 @@
             "v3_score": 9.8
           }
         },
-        "epss": null,
-        "epssPercentile": null,
+        "epss": 0.34,
+        "epssPercentile": 0.97,
         "filePaths": [],
         "fixable": true,
         "fixedVersions": [
@@ -28,8 +28,8 @@
         },
         "inUseState": "loaded",
         "installedVersion": "3.3.1-r0",
-        "kev": null,
-        "kevDateAdded": null,
+        "kev": true,
+        "kevDateAdded": "2099-09-20T00:00:00",
         "lastModifiedAt": null,
         "package": {
           "name": "openssl",
@@ -50,6 +50,8 @@
         "tier": "P1",
         "tierFactors": [
           "in_use:loaded",
+          "kev",
+          "epss>=0.1",
           "severity:critical",
           "internal"
         ],
@@ -80,7 +82,7 @@
       }
     ]
   },
-  "provenance": "contract-derived, not captured: the #1671 capture of the same request with the fields #1678 (feat/1533-in-use-tiers @ 1cc299a3) adds, set by hand per its docs/api-reference/endpoints/vulnerabilities.mdx and broker/src/in_use.rs tier() with default settings (EPSS 0.1, unknown exposure counts as exposed). Replace with real captures once #1678 merges.",
+  "provenance": "contract-derived, not captured: the #1671 capture of the same request with the fields #1678 (feat/1533-in-use-tiers @ 0c25f288) adds. In-use states and exposure are set by hand in derive.py; KEV/EPSS are resolved per CVE across every source row, and tier/tierFactors are computed with broker/src/in_use.rs tier() at default settings (EPSS 0.1, unknown exposure counts as exposed). Replace with real captures once #1678 merges.",
   "request": "GET /images/sha256:f57d4908af0027fb38feb4e8d5a8d5e2c1511ccf52c596837d2314611f1640fe/vulnerabilities?tier=P0,P1",
   "status": 200
 }

@@ -96,7 +96,9 @@ describe('CVE drawer', () => {
     const row = (name: string) => screen.getAllByTestId('cve-workload').find((r) => within(r).queryByText(name))!;
     await waitFor(() => expect(row('payments/checkout').querySelector('[data-tier]')!.getAttribute('data-tier')).toBe('P0'));
     expect(row('payments/ledger').querySelector('[data-tier]')!.getAttribute('data-tier')).toBe('P1');
-    expect(row('payments/reports').querySelector('[data-tier]')!.getAttribute('data-tier')).toBe('P1');
+    // KEV is per CVE across sources (#1678 @ 0c25f288): the Trivy-only reports row
+    // is KEV too, and with exposure unknown (counted as exposed) it is P0.
+    expect(row('payments/reports').querySelector('[data-tier]')!.getAttribute('data-tier')).toBe('P0');
     const checkout = row('payments/checkout');
     await waitFor(() => expect(within(checkout).getAllByText('Not privileged').length).toBeGreaterThan(0));
     const chips = [...checkout.querySelectorAll('td:last-child [data-factor]')].map((c) => c.getAttribute('data-factor'));
