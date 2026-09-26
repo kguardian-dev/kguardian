@@ -1,0 +1,126 @@
+---
+title: "ImageTrustPolicy"
+description: "Say who must have signed your images, and see which running containers would fail"
+icon: "signature"
+---
+
+`ImageTrustPolicy` (namespaced) and `ClusterImageTrustPolicy` (cluster-wide,
+with a `namespaceSelector`) say who must have signed the images your
+workloads run. Like [`AuditNetworkPolicy`](/concepts/audit-network-policy)
+they only report: the kguardian evaluator compares every running container
+with the signatures kguardian verified and writes what would be denied to
+the policy's status. There is no webhook. Nothing is admitted, blocked or
+changed.
+
+## What it needs
+
+- `supplychain.signatureDiscovery.enabled: true`: the supplychain component
+  checks who signed every running digest (keyless identity, a configured
+  key, unsigned, invalid, or unknown). See
+  [Signature endpoints](/api-reference/endpoints/attestations).
+- The evaluator (on by default). `evaluator.imageTrust.enabled` follows
+  signature discovery unless set.
+- The CRDs in `charts/kguardian/crds/`. Helm installs that directory on
+  first install only; on an upgrade apply them yourself:
+  `kubectl apply -f charts/kguardian/crds/`. Without them the evaluator
+  logs once and evaluates nothing.
+
+## Example
+
+```yaml
+apiVersion: kguardian.dev/v1alpha1
+kind: ImageTrustPolicy
+metadata:
+  name: release-signed
+  namespace: shop
+spec:
+  images:
+    - ghcr.io/example/**        # "*" = one path segment, "**" = any
+  authorities:
+    - name: ci
+      keyless:
+        issuer: https://token.actions.githubusercontent.com
+        subjectRegExp: https://github\.com/example/.+/\.github/workflows/release\.yaml@refs/tags/v.+
+    - name: legacy-key
+      key:
+        publicKey: |
+          -----BEGIN PUBLIC KEY-----
+          ...
+          -----END PUBLIC KEY-----
+  attestations:
+    - predicateType: https://slsa.dev/provenance/v1
+      sourceRepoRegExp: https://github\.com/example/.+
+```
+
+- An image is trusted when a signature from **any** authority verified,
+  and every listed attestation is attached, verified and signed by one of
+  them.
+- `keyless` needs an issuer and a subject, each exact or a regular
+  expression. Regular expressions must match the **whole** value.
+- `key` takes the PEM or its `fingerprint` (sha256 of the DER public key,
+  as kguardian reports it). kguardian's supplychain component must hold
+  the same key (`supplychain.signatureDiscovery.publicKeys`) to verify
+  those signatures; otherwise they read as `key-not-verified`.
+- `images` is matched against the image repository
+  (`docker.io/library/nginx`). Empty matches every image.
+
+## Status
+
+```
+$ kubectl get itp -n shop
+NAME             STATE        CONTAINERS   WOULD-DENY   UNKNOWN   LAST-EVALUATED   AGE
+release-signed   evaluated    12           2            1         4m               3d
+```
+
+`STATE` says whether there is a current evaluation: `evaluated`;
+`never-read` (the broker has never been read); `broker-unavailable` or
+`broker-unauthorized` (every container is `Unknown`). Without a current
+evaluation the counts are left out of status, so their columns are blank,
+never a reassuring `0`; the containers last known are still listed in
+`findings` with the reason. The `BrokerRead` condition carries the same with a reason
+(`Read`, `NeverRead`, `BrokerUnavailable`, `BrokerUnauthorized`) and the
+error.
+
+`status.evaluation` has the counts and up to 20 `findings` (would-deny
+first):
+
+| `verdict` | `reason` | Meaning |
+|---|---|---|
+| `WouldDeny` | `unsigned` | No signature at all. |
+| | `invalid` | Signatures exist and none verify. |
+| | `untrusted-signer` | Signed, but not by any authority in this policy. |
+| | `key-not-verified` | Signed with a key kguardian does not hold; the policy trusts a key, so give it to supplychain. |
+| | `attestation-missing` | Signed, but a required attestation is absent, unverified, or signed by someone else. |
+| `Unknown` | `not-checked` | kguardian has no signature result for the image yet. |
+| | `registry_auth`, `rate_limited`, ... | Discovery could not check it (a private image, for example). |
+| | `namespace-unknown` | A cluster policy with a `namespaceSelector`, and a namespace the evaluator's cache does not know yet. |
+| | `broker-unavailable` | The broker could not be read for longer than 3x the interval; `status.message` has the error and the last successful read. |
+| | `broker-unauthorized` | The broker rejected the evaluator's token (401/403); reported at once. |
+
+Unknown is never counted as trusted. An enforcing policy would most likely
+deny these images, so treat them as findings to resolve.
+
+`status.error` is set when the spec cannot be evaluated (a bad regular
+expression or key). `evaluation.lastEvaluated` is when the running
+containers were last read from the broker; `lastChanged` is when the
+verdicts last changed, so status is written once per interval while the
+broker is readable. It is written with server-side apply, so a finding or
+error that no longer holds is removed, not left behind.
+
+If the broker cannot be read, the last verdicts stay for up to 3x the
+interval; after that every container is reported `Unknown`
+(`broker-unavailable`), never as its last verdict. A rejected token makes
+them `Unknown` at once.
+
+The evaluator also serves the per-container results at `GET /image-trust`
+on its own port (`?namespace=`, `?verdict=`). It requires the same broker
+READ-scope token as the broker's read API (`Authorization: Bearer ...`);
+with broker auth off it is open, like the broker.
+
+## How it works
+
+Every `evaluator.imageTrust.interval` (5 minutes) the evaluator lists the
+policies and reads `GET /attestations/running` from the broker with the
+read token: every running workload container, the digest it runs, and the
+signers kguardian verified for it. It never verifies a signature itself;
+that is the supplychain component's job.

@@ -158,3 +158,22 @@ func TestAuditNetworkPolicy_DeepCopyObjectOnNil(t *testing.T) {
 		t.Errorf("nil receiver cluster should return nil, got %#v", got)
 	}
 }
+
+func TestImageTrustDeepCopyIsIndependent(t *testing.T) {
+	in := &ClusterImageTrustPolicy{
+		Spec: ClusterImageTrustPolicySpec{
+			NamespaceSelector:    &metav1.LabelSelector{MatchLabels: map[string]string{"a": "b"}},
+			ImageTrustPolicySpec: ImageTrustPolicySpec{Images: []string{"x"}, Authorities: []Authority{{Keyless: &KeylessAuthority{Issuer: "i", Subject: "s"}}}},
+		},
+		Status: ImageTrustPolicyStatus{Evaluation: ImageTrustEvaluation{Findings: []ImageTrustFinding{{Digest: "d"}}}},
+	}
+	out := in.DeepCopyObject().(*ClusterImageTrustPolicy)
+	out.Spec.NamespaceSelector.MatchLabels["a"] = "c"
+	out.Spec.Images[0] = "y"
+	out.Spec.Authorities[0].Keyless.Issuer = "j"
+	out.Status.Evaluation.Findings[0].Digest = "e"
+	if in.Spec.NamespaceSelector.MatchLabels["a"] != "b" || in.Spec.Images[0] != "x" ||
+		in.Spec.Authorities[0].Keyless.Issuer != "i" || in.Status.Evaluation.Findings[0].Digest != "d" {
+		t.Fatalf("copy shares memory: %+v", in)
+	}
+}

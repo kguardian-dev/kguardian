@@ -69,6 +69,9 @@ spec:
               value: ":{{ .Values.evaluator.container.port }}"
             - name: LOG_LEVEL
               value: {{ .Values.evaluator.logLevel | quote }}
+            {{- /* ImageTrustPolicy evaluation: unset follows signature discovery. */}}
+            {{- $it := .Values.evaluator.imageTrust | default dict }}
+            {{- $itOn := include "kguardian.imageTrustEnabled" . }}
             {{- if .Values.evaluator.applicationSecurityProfiles.enabled }}
             # ApplicationSecurityProfile status: reads workload profiles from
             # the broker with the READ-scope token only.
@@ -83,6 +86,16 @@ spec:
             - name: ASP_STALE_AFTER
               value: {{ . | quote }}
             {{- end }}
+            {{- end }}
+            {{- if $itOn }}
+            # ImageTrustPolicy evaluation: reads running images and their
+            # verified signers from the broker with the READ-scope token.
+            - name: IMAGE_TRUST_ENABLED
+              value: "true"
+            - name: IMAGE_TRUST_INTERVAL
+              value: {{ $it.interval | default "5m" | quote }}
+            {{- end }}
+            {{- if or .Values.evaluator.applicationSecurityProfiles.enabled $itOn }}
             - name: BROKER_URL
               value: "http://{{ .Values.broker.service.name }}.{{ include "kguardian.namespace" . }}.svc.cluster.local:{{ .Values.broker.service.port }}"
             {{- include "kguardian.brokerAuthClientEnv" (dict "root" $ "scope" "read") | nindent 12 }}

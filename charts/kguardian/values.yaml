@@ -1754,6 +1754,17 @@ evaluator:
   # -- Log level for the evaluator process (panic|fatal|error|warn|info|debug|trace)
   logLevel: info
 
+  imageTrust:
+    # -- (bool) Evaluate ImageTrustPolicy / ClusterImageTrustPolicy: compare
+    # every running container's image with the signers kguardian verified
+    # and write what would be denied to each policy's status. Report only;
+    # nothing is blocked. Unset (null) follows
+    # supplychain.signatureDiscovery.enabled. Reads the broker with the
+    # read token.
+    enabled: null
+    # -- How often every policy is re-evaluated (minimum 30s).
+    interval: 5m
+
   # -- Additional environment variables for the evaluator
   env: []
 

@@ -48,6 +48,15 @@ type Server struct {
 	ready  atomic.Bool
 	srv    *http.Server
 	denied atomic.Int64 // process-wide counter for /metrics-style debugging
+	extra  map[string]http.Handler
+}
+
+// Handle registers an extra handler; call before Start.
+func (s *Server) Handle(path string, h http.Handler) {
+	if s.extra == nil {
+		s.extra = map[string]http.Handler{}
+	}
+	s.extra[path] = h
 }
 
 // New constructs a Server. Call Start to begin serving.
@@ -65,6 +74,9 @@ func (s *Server) Start(ctx context.Context) error {
 	mux.HandleFunc("/readyz", s.handleReady)
 	mux.HandleFunc("/evaluate", s.handleEvaluate)
 	mux.HandleFunc("/policy-coverage", s.handlePolicyCoverage)
+	for p, h := range s.extra {
+		mux.Handle(p, h)
+	}
 
 	s.srv = &http.Server{
 		Addr:              s.addr,

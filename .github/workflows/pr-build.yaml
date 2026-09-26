@@ -888,6 +888,18 @@ jobs:
           working-directory: evaluator
           args: --timeout=5m
 
+      # A real kube-apiserver + etcd for the tests that need one (the
+      # ImageTrustPolicy status test: server-side apply removing stale
+      # fields, CRD schema not pruning them). Pinned: setup-envtest from
+      # controller-runtime v0.25.1, Kubernetes 1.34.x. Tests skip without
+      # KUBEBUILDER_ASSETS, so this step is what makes them run here.
+      - name: Install envtest binaries
+        run: |
+          go install sigs.k8s.io/controller-runtime/tools/setup-envtest@v0.25.1
+          assets="$("$(go env GOPATH)/bin/setup-envtest" use 1.34.x --bin-dir "$RUNNER_TEMP/envtest" -p path)"
+          test -x "$assets/kube-apiserver"
+          echo "KUBEBUILDER_ASSETS=$assets" >> "$GITHUB_ENV"
+
       - name: go test
         run: go test -race -count=1 ./...
 

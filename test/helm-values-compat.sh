@@ -711,6 +711,32 @@ assert_render_fails "asp-stale-bad" "is not a Go duration" \
 assert_render_fails "asp-without-evaluator" "requires evaluator.enabled=true" \
   "${ASP_ON[@]}" --set evaluator.enabled=false
 
+# 13. ImageTrustPolicy evaluation (#1533 P2-2) follows signature discovery.
+IT_ON=("${SC_ON[@]}" --set supplychain.brokerIngest.enabled=true --set supplychain.signatureDiscovery.enabled=true)
+render "image-trust-on" "${IT_ON[@]}" && {
+  workload Deployment kguardian-evaluator | grep -A1 'name: IMAGE_TRUST_ENABLED' | grep -q 'value: "true"' || \
+    { echo "FAIL [image-trust-on]: evaluator must evaluate ImageTrustPolicies when discovery is on"; fail=1; }
+  assert_client_key "image-trust-on" Deployment kguardian-evaluator read
+  assert_has "image-trust-on" "imagetrustpolicies/status, clusterimagetrustpolicies/status"
+}
+render "image-trust-default-off" "${SC_ON[@]}" && {
+  assert_absent "image-trust-default-off" "name: IMAGE_TRUST_ENABLED"
+  assert_absent "image-trust-default-off" "imagetrustpolicies/status"
+}
+# The broker NetworkPolicy must admit the evaluator when image trust alone
+# needs the broker, or every pass fails.
+render "image-trust-broker-netpol" "${IT_ON[@]}" --set broker.networkPolicy.enabled=true \
+  --set 'broker.networkPolicy.allowedNodeCIDRs={10.0.0.0/16}' && {
+  workload NetworkPolicy kguardian-broker | grep -q 'app.kubernetes.io/name: kguardian-evaluator' || \
+    { echo "FAIL [image-trust-broker-netpol]: broker NetworkPolicy must admit the evaluator for image trust"; fail=1; }
+}
+render "image-trust-off-broker-netpol" "${SC_ON[@]}" --set broker.networkPolicy.enabled=true \
+  --set 'broker.networkPolicy.allowedNodeCIDRs={10.0.0.0/16}' && {
+  if workload NetworkPolicy kguardian-broker | grep -q 'app.kubernetes.io/name: kguardian-evaluator'; then
+    echo "FAIL [image-trust-off-broker-netpol]: evaluator must not be admitted when nothing needs it"; fail=1
+  fi
+}
+
 if [ "$fail" -ne 0 ]; then
   echo "G4 values-compatibility check FAILED"
   exit 1

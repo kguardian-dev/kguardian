@@ -51,8 +51,9 @@ spec:
               app.kubernetes.io/name: {{ .Values.supplychain.service.name }}
         {{- end }}
         # evaluator — reads workload profiles for ApplicationSecurityProfile
-        # status (#1533). Only when that feature is on.
-        {{- if and .Values.evaluator.enabled .Values.evaluator.applicationSecurityProfiles.enabled }}
+        # status and running images for ImageTrustPolicy (#1533). Only when
+        # one of those is on.
+        {{- if and .Values.evaluator.enabled (or .Values.evaluator.applicationSecurityProfiles.enabled (include "kguardian.imageTrustEnabled" .)) }}
         - podSelector:
             matchLabels:
               app.kubernetes.io/name: {{ .Values.evaluator.service.name }}

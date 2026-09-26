@@ -212,6 +212,7 @@ pub const ROUTES: &[RouteRule] = &[
     rule("POST", "/images/{digest}/attestation", SUPPLYCHAIN),
     rule("GET", "/images/{digest}/attestation", READ),
     rule("GET", "/attestations", READ),
+    rule("GET", "/attestations/running", READ),
 ];
 
 /// The declared access for `method` on the registered `pattern`, if any.

@@ -78,3 +78,20 @@ func TestStartAppProfiles_OffByDefaultAndNeedsBrokerURL(t *testing.T) {
 		t.Error("enabled without BROKER_URL must fail loudly")
 	}
 }
+
+func TestLoadImageTrustConfig(t *testing.T) {
+	env := func(m map[string]string) func(string) string { return func(k string) string { return m[k] } }
+	c, err := loadImageTrustConfig(env(nil))
+	if err != nil || c.Enabled || c.Interval != 5*time.Minute || c.BrokerURL == "" {
+		t.Fatalf("defaults: %+v %v", c, err)
+	}
+	c, err = loadImageTrustConfig(env(map[string]string{"IMAGE_TRUST_ENABLED": "true", "IMAGE_TRUST_INTERVAL": "1m", "BROKER_AUTH_TOKEN": " t \n"}))
+	if err != nil || !c.Enabled || c.Interval != time.Minute || c.BrokerToken != "t" {
+		t.Fatalf("set: %+v %v", c, err)
+	}
+	for _, bad := range []map[string]string{{"IMAGE_TRUST_ENABLED": "sure"}, {"IMAGE_TRUST_INTERVAL": "5s"}} {
+		if _, err := loadImageTrustConfig(env(bad)); err == nil {
+			t.Errorf("accepted %v", bad)
+		}
+	}
+}

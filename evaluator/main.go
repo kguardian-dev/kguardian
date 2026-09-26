@@ -9,11 +9,13 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
 
 	"github.com/kguardian-dev/kguardian/evaluator/pkg/appprofile"
+	"github.com/kguardian-dev/kguardian/evaluator/pkg/imagetrust"
 	"github.com/kguardian-dev/kguardian/evaluator/pkg/server"
 	"github.com/kguardian-dev/kguardian/evaluator/pkg/status"
 	"github.com/kguardian-dev/kguardian/evaluator/pkg/store"
@@ -84,6 +86,25 @@ func run() error {
 	}
 
 	srv := server.New(addr, st, agg, log)
+
+	// ImageTrustPolicy evaluation (#1533 P2-2): off unless enabled; reads
+	// running images and their verified signers from the broker.
+	itc, err := loadImageTrustConfig(os.Getenv)
+	if err != nil {
+		return err
+	}
+	if itc.Enabled {
+		itr := &imagetrust.Runner{
+			Dynamic:    dynClient,
+			Feed:       &imagetrust.BrokerFeed{BaseURL: itc.BrokerURL, Token: itc.BrokerToken},
+			Namespaces: st.GetNamespaceLabels,
+			Log:        log,
+			Interval:   itc.Interval,
+		}
+		srv.Handle("/image-trust", itr.Handler(itc.BrokerToken))
+		go itr.Run(ctx)
+		log.WithFields(logrus.Fields{"interval": itc.Interval.String(), "broker": itc.BrokerURL}).Info("image trust policy evaluation enabled")
+	}
 	srv.SetReady() // caches are synced before we get here
 	if err := srv.Start(ctx); err != nil {
 		return fmt.Errorf("server: %w", err)
@@ -172,4 +193,32 @@ func signalContext() (context.Context, context.CancelFunc) {
 		cancel()
 	}()
 	return ctx, cancel
+}
+
+// imageTrustConfig is the ImageTrustPolicy evaluation configuration.
+type imageTrustConfig struct {
+	Enabled     bool
+	Interval    time.Duration
+	BrokerURL   string
+	BrokerToken string
+}
+
+func loadImageTrustConfig(getenv func(string) string) (imageTrustConfig, error) {
+	var c imageTrustConfig
+	env := func(k, def string) string {
+		if v := strings.TrimSpace(getenv(k)); v != "" {
+			return v
+		}
+		return def
+	}
+	var err error
+	if c.Enabled, err = strconv.ParseBool(env("IMAGE_TRUST_ENABLED", "false")); err != nil {
+		return c, fmt.Errorf("IMAGE_TRUST_ENABLED: %w", err)
+	}
+	if c.Interval, err = time.ParseDuration(env("IMAGE_TRUST_INTERVAL", "5m")); err != nil || c.Interval < 30*time.Second {
+		return c, fmt.Errorf("IMAGE_TRUST_INTERVAL must be a duration of at least 30s")
+	}
+	c.BrokerURL = env("BROKER_URL", "http://kguardian-broker:9090")
+	c.BrokerToken = strings.TrimSpace(getenv("BROKER_AUTH_TOKEN"))
+	return c, nil
 }
