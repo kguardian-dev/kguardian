@@ -573,6 +573,7 @@ diesel::table! {
         // COLUMN appends it last).
         cap_probe -> Bool,
         cap_hook -> Nullable<Varchar>,
+        probe_attached_at -> Nullable<Timestamp>,
     }
 }
 

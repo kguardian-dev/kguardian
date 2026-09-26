@@ -47,6 +47,12 @@ CREATE INDEX IF NOT EXISTS idx_runtime_capabilities_last_reported
 -- gap-free run like any other probe change.
 ALTER TABLE runtime_coverage ADD COLUMN IF NOT EXISTS cap_probe BOOLEAN NOT NULL DEFAULT false;
 ALTER TABLE runtime_coverage ADD COLUMN IF NOT EXISTS cap_hook VARCHAR NULL;
+-- When the controller's probes attached (its start). A heartbeat whose
+-- probes attached after the previous heartbeat means they were detached
+-- in between (a controller restart, however short): the gap-free run
+-- restarts, so a container is never "watched for its whole life" across
+-- one.
+ALTER TABLE runtime_coverage ADD COLUMN IF NOT EXISTS probe_attached_at TIMESTAMP NULL;
 
 -- Whether a workload container running `image` had its capability checks
 -- watched for its whole life, for the last `window_hours`. Stricter than

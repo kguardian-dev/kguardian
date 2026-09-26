@@ -656,6 +656,10 @@ pub struct CoveragePost {
     /// Its hook: `cap_capable` (every check) or `security_capable` (the
     /// fallback, which misses commoncap's direct checks).
     pub cap_hook: Option<String>,
+    /// When this controller's probes attached. The broker ends the gap-free
+    /// run when it is after the previous heartbeat (a restart, however
+    /// short, left the container unwatched meanwhile).
+    pub probe_attached_at: Option<NaiveDateTime>,
     /// The container is gone; its last heartbeat.
     pub ended: bool,
     pub heartbeat_at: NaiveDateTime,
@@ -980,6 +984,7 @@ impl Store {
                         .cap_hook
                         .filter(|_| self.cap_probe && exec_probe)
                         .map(str::to_string),
+                    probe_attached_at: probe.map(|(at, _)| at),
                     ended: false,
                     heartbeat_at: wall,
                     heartbeat_secs: HEARTBEAT_EVERY.as_secs() as u32,
@@ -1733,6 +1738,11 @@ mod tests {
         assert_eq!((b.start_mode.as_str(), b.tracking_since), ("start", at(1)));
         assert!(b.exec_probe && b.lib_probe && !b.ended);
         assert_eq!((b.events_dropped, b.unsent), (0, 0));
+        assert_eq!(
+            b.probe_attached_at,
+            Some(at(0)),
+            "the broker ends the gap-free run on a restart by this"
+        );
         assert_eq!((b.container_id.as_str(), b.node_name.as_str()), (CID, "n1"));
         assert_eq!(b.heartbeat_secs, 300);
 

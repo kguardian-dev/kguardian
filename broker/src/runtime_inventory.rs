@@ -1327,6 +1327,11 @@ pub struct CoverageEntry {
     /// Its hook: `cap_capable` or `security_capable` (absent: unknown).
     #[serde(default)]
     pub cap_hook: Option<String>,
+    /// When the controller's probes attached (absent from an older
+    /// controller). After the previous heartbeat: they were detached in
+    /// between, a gap however short.
+    #[serde(default)]
+    pub probe_attached_at: Option<NaiveDateTime>,
     #[serde(default)]
     pub ended: bool,
     pub heartbeat_at: NaiveDateTime,
@@ -1379,7 +1384,10 @@ pub fn valid_coverage(e: CoverageEntry) -> Option<CoverageEntry> {
 /// restarts at this heartbeat when a probe or the mode changed, or when
 /// the previous heartbeat is older than 3 x heartbeat_secs + 60 s (the
 /// controller, the node or the broker was away: nobody can say what ran
-/// meanwhile). Lost events are recorded separately (`last_drop_at`), so a
+/// meanwhile), or when the probes attached after the previous heartbeat
+/// (the controller restarted in between, however quickly: what ran while
+/// it was down was not watched). Lost events are recorded separately
+/// (`last_drop_at`), so a
 /// window containing one is never covered. A heartbeat older than the
 /// stored one is ignored, and an ended row is frozen. Times are clamped
 /// to the database clock.
@@ -1387,32 +1395,37 @@ pub(crate) const COVERAGE_UPSERT_SQL: &str = "\
 INSERT INTO runtime_coverage AS r (cluster_id, container_id, pod_namespace, workload_kind, \
     workload_name, container_name, image_digest, pod_name, node_name, mode, exec_probe, \
     lib_probe, start_mode, tracking_since, covered_since, last_heartbeat, heartbeat_secs, \
-    events_dropped, last_drop_at, unsent, incomplete, ended, cap_probe, cap_hook) \
+    events_dropped, last_drop_at, unsent, incomplete, ended, cap_probe, cap_hook, \
+    probe_attached_at) \
 SELECT $1, t.cid, t.ns, t.wk, t.wn, t.cn, t.dg, t.pn, t.nn, t.md, t.ep, t.lp, t.sm, \
     LEAST(t.ts, t.hb, timezone('UTC', NOW())), \
     CASE WHEN t.ep THEN LEAST(t.ts, t.hb, timezone('UTC', NOW())) \
          ELSE LEAST(t.hb, timezone('UTC', NOW())) END, \
     LEAST(t.hb, timezone('UTC', NOW())), t.hs, t.dr, \
     CASE WHEN t.dr > 0 THEN LEAST(t.hb, timezone('UTC', NOW())) END, t.us, t.inc, t.ended, t.cp, \
-    t.ch \
+    t.ch, CASE WHEN t.pa IS NOT NULL THEN LEAST(t.pa, timezone('UTC', NOW())) END \
 FROM unnest($2::text[], $3::text[], $4::text[], $5::text[], $6::text[], $7::text[], $8::text[], \
     $9::text[], $10::text[], $11::bool[], $12::bool[], $13::text[], $14::timestamp[], \
-    $15::bigint[], $16::timestamp[], $17::int[], $18::bool[], $19::bigint[], $20::bool[], $21::bool[], $22::text[]) \
-    AS t(cid, ns, wk, wn, cn, dg, pn, nn, md, ep, lp, sm, ts, dr, hb, hs, ended, us, inc, cp, ch) \
+    $15::bigint[], $16::timestamp[], $17::int[], $18::bool[], $19::bigint[], $20::bool[], $21::bool[], $22::text[], \
+    $23::timestamp[]) \
+    AS t(cid, ns, wk, wn, cn, dg, pn, nn, md, ep, lp, sm, ts, dr, hb, hs, ended, us, inc, cp, ch, pa) \
 ON CONFLICT (cluster_id, container_id) DO UPDATE SET \
     covered_since = CASE WHEN EXCLUDED.mode <> r.mode OR EXCLUDED.exec_probe <> r.exec_probe \
             OR EXCLUDED.lib_probe <> r.lib_probe OR EXCLUDED.cap_probe <> r.cap_probe \
             OR EXCLUDED.cap_hook IS DISTINCT FROM r.cap_hook \
+            OR EXCLUDED.probe_attached_at > r.last_heartbeat \
             OR EXCLUDED.last_heartbeat - r.last_heartbeat \
                 > make_interval(secs => 3 * r.heartbeat_secs + 60) \
         THEN EXCLUDED.last_heartbeat ELSE r.covered_since END, \
     gaps = r.gaps + CASE WHEN EXCLUDED.mode <> r.mode OR EXCLUDED.exec_probe <> r.exec_probe \
             OR EXCLUDED.lib_probe <> r.lib_probe OR EXCLUDED.cap_probe <> r.cap_probe \
             OR EXCLUDED.cap_hook IS DISTINCT FROM r.cap_hook \
+            OR EXCLUDED.probe_attached_at > r.last_heartbeat \
             OR EXCLUDED.last_heartbeat - r.last_heartbeat \
                 > make_interval(secs => 3 * r.heartbeat_secs + 60) THEN 1 ELSE 0 END, \
     last_gap = CASE WHEN EXCLUDED.last_heartbeat - r.last_heartbeat \
             > make_interval(secs => 3 * r.heartbeat_secs + 60) THEN 'late_heartbeat' \
+        WHEN EXCLUDED.probe_attached_at > r.last_heartbeat THEN 'probe_restart' \
         WHEN EXCLUDED.mode <> r.mode OR EXCLUDED.exec_probe <> r.exec_probe \
             OR EXCLUDED.lib_probe <> r.lib_probe OR EXCLUDED.cap_probe <> r.cap_probe \
             OR EXCLUDED.cap_hook IS DISTINCT FROM r.cap_hook \
@@ -1426,6 +1439,7 @@ ON CONFLICT (cluster_id, container_id) DO UPDATE SET \
     pod_name = EXCLUDED.pod_name, node_name = EXCLUDED.node_name, mode = EXCLUDED.mode, \
     exec_probe = EXCLUDED.exec_probe, lib_probe = EXCLUDED.lib_probe, \
     cap_probe = EXCLUDED.cap_probe, cap_hook = EXCLUDED.cap_hook, \
+    probe_attached_at = EXCLUDED.probe_attached_at, \
     last_heartbeat = EXCLUDED.last_heartbeat, heartbeat_secs = EXCLUDED.heartbeat_secs, \
     ended = r.ended OR EXCLUDED.ended \
 WHERE EXCLUDED.last_heartbeat >= r.last_heartbeat AND NOT r.ended";
@@ -1499,6 +1513,9 @@ pub fn upsert_coverage(conn: &mut PgConnection, rows: &[CoverageEntry]) -> Resul
                 rows.iter()
                     .map(|r| r.cap_hook.as_deref())
                     .collect::<Vec<_>>(),
+            )
+            .bind::<Array<Nullable<Timestamp>>, _>(
+                rows.iter().map(|r| r.probe_attached_at).collect::<Vec<_>>(),
             )
             .execute(conn)
     })?;
@@ -2402,6 +2419,7 @@ mod tests {
             incomplete: false,
             cap_probe: false,
             cap_hook: None,
+            probe_attached_at: None,
             ended: false,
             heartbeat_at: now - chrono::Duration::hours(beat_h),
             heartbeat_secs: 300,
