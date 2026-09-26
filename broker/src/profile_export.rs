@@ -122,6 +122,10 @@ pub struct Plan {
     pub acknowledge_partial: bool,
     /// Set by the handler: true only for POST.
     pub record: bool,
+    /// SBOM components this bundle may carry: the handler probes the
+    /// chosen SBOMs' sizes and charges the read budget for exactly this
+    /// many (at most [`BUNDLE_SBOM_MAX_COMPONENTS`]).
+    pub sbom_components: i64,
 }
 
 pub fn plan(q: &ExportQuery) -> Result<Plan, String> {
@@ -174,6 +178,7 @@ pub fn plan(q: &ExportQuery) -> Result<Plan, String> {
         manifest,
         acknowledge_partial: flag(q.acknowledge_partial.as_deref(), false),
         record: false,
+        sbom_components: BUNDLE_SBOM_MAX_COMPONENTS,
     })
 }
 
@@ -756,6 +761,56 @@ const NOT_APPLIED: [&str; 3] = ["securitycontext", "vex", "sbom"];
 /// route to download it from.
 pub const BUNDLE_SBOM_MAX_COMPONENTS: i64 = 10_000;
 
+/// Read-budget charge for the SBOM documents of one bundle: the probed
+/// `plan.sbom_components` (at most [`BUNDLE_SBOM_MAX_COMPONENTS`]).
+/// `format=yaml` holds three
+/// copies at its peak (the parsed document, its pretty-printed JSON and
+/// the commented copy in the stream), the manifest one fewer; the
+/// per-component cost is the CycloneDX route's, which holds one.
+fn sbom_charge_kib(plan: &Plan) -> u32 {
+    if !plan.artifacts.contains(&"sbom") {
+        return 0;
+    }
+    let copies = if plan.manifest { 2 } else { 3 };
+    cost_kib(
+        plan.sbom_components.clamp(0, BUNDLE_SBOM_MAX_COMPONENTS),
+        crate::supplychain_read::EXPORT_COMPONENT_COST_BYTES,
+    )
+    .saturating_mul(copies)
+}
+
+/// Components of the SBOM each image of the workload would export with,
+/// summed and capped: an upper bound on what [`sbom_docs`] loads (it
+/// covers every digest the inventory holds for the workload, a superset of
+/// the ones exported).
+pub(crate) fn probe_sbom_components(conn: &mut PgConnection, key: &Key) -> Result<i64, DbError> {
+    #[derive(QueryableByName)]
+    struct D {
+        #[diesel(sql_type = diesel::sql_types::Text)]
+        image_digest: String,
+    }
+    let digests: Vec<D> = diesel::sql_query(
+        "SELECT DISTINCT image_digest FROM workload_containers \
+         WHERE pod_namespace = $1 AND workload_kind = $2 AND workload_name = $3 AND image_digest <> '' \
+         ORDER BY image_digest LIMIT 64",
+    )
+    .bind::<diesel::sql_types::Text, _>(&key.namespace)
+    .bind::<diesel::sql_types::Text, _>(&key.kind)
+    .bind::<diesel::sql_types::Text, _>(&key.name)
+    .load(conn)?;
+    let mut n = 0i64;
+    for d in digests {
+        n = n.saturating_add(crate::supplychain_read::chosen_sbom_components(
+            conn,
+            &d.image_digest,
+        )?);
+        if n >= BUNDLE_SBOM_MAX_COMPONENTS {
+            return Ok(BUNDLE_SBOM_MAX_COMPONENTS);
+        }
+    }
+    Ok(n)
+}
+
 /// What the SBOM's trust level means, for the document's `applyWith`.
 fn trust_words(trust: Option<&str>) -> &'static str {
     match trust {
@@ -805,6 +860,7 @@ pub(crate) fn sbom_docs(
     conn: &mut PgConnection,
     p: &Profile,
     mode: &'static str,
+    max_components: i64,
 ) -> Result<Vec<Document>, DbError> {
     use crate::supplychain_read::{cyclonedx_for, CycloneDx};
     let artifact = "sbom";
@@ -816,7 +872,7 @@ pub(crate) fn sbom_docs(
             "not available: no container image of this workload is in the image inventory",
         )]);
     }
-    let mut left = BUNDLE_SBOM_MAX_COMPONENTS;
+    let mut left = max_components.min(BUNDLE_SBOM_MAX_COMPONENTS);
     let mut docs = Vec::new();
     for (digest, image_ref, containers) in targets {
         let hex = digest.split_once(':').map_or(digest.as_str(), |x| x.1);
@@ -984,7 +1040,7 @@ pub fn build_documents(
             "seccompprofile" => seccomp_doc(conn, key, p, plan)?,
             "securitycontext" => security_context_doc(key, p, plan),
             "sbom" => {
-                docs.extend(sbom_docs(conn, p, mode)?);
+                docs.extend(sbom_docs(conn, p, mode, plan.sbom_components)?);
                 continue;
             }
             "vex" => vex_doc(conn, key, mode)?,
@@ -1170,22 +1226,24 @@ async fn export(
         Err(m) => return Ok(error(StatusCode::BAD_REQUEST, "bad_request", &m)),
     };
     plan.record = record;
+    // Size the SBOM part of the charge from the SBOMs this workload's images
+    // would actually export (one cheap indexed read per digest), so a small
+    // workload does not reserve the whole bundle cap.
+    if plan.artifacts.contains(&"sbom") {
+        let (p, k) = (pool.clone(), key.clone());
+        plan.sbom_components = web::block(move || -> Result<i64, DbError> {
+            let mut conn = p.get()?;
+            probe_sbom_components(&mut conn, &k)
+        })
+        .await?
+        .map_err(actix_web::error::ErrorInternalServerError)?;
+    }
     // The profile, plus the export's own bounded reads: flow rows for the
     // network generator and its memoised per-IP lookups.
-    // With `sbom`, the SBOM documents too (at most
-    // BUNDLE_SBOM_MAX_COMPONENTS, built and serialised in memory).
-    let sbom_charge = if plan.artifacts.contains(&"sbom") {
-        cost_kib(
-            BUNDLE_SBOM_MAX_COMPONENTS,
-            crate::supplychain_read::EXPORT_COMPONENT_COST_BYTES,
-        )
-    } else {
-        0
-    };
     let charge = wp::profile_charge_kib()
         .saturating_add(cost_kib(EXPORT_TRAFFIC_ROWS, TRAFFIC_ROW_COST_BYTES))
         .saturating_add(cost_kib(wp::PODS_MAX, 4_096))
-        .saturating_add(sbom_charge);
+        .saturating_add(sbom_charge_kib(&plan));
     let _permit = match budget.acquire(charge).await {
         Ok(p) => p,
         Err(shed) => return Ok(shed.into_response()),
@@ -1503,6 +1561,32 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n");
         assert_eq!(serde_json::from_str::<serde_json::Value>(&back).unwrap(), v);
+    }
+
+    #[test]
+    fn the_sbom_charge_covers_every_copy_the_format_holds() {
+        let one = cost_kib(
+            BUNDLE_SBOM_MAX_COMPONENTS,
+            crate::supplychain_read::EXPORT_COMPONENT_COST_BYTES,
+        );
+        let mut yaml = plan(&q(Some("sbom"), None, None)).unwrap();
+        assert!(!yaml.manifest);
+        assert_eq!(
+            yaml.sbom_components, BUNDLE_SBOM_MAX_COMPONENTS,
+            "unprobed: the cap"
+        );
+        assert_eq!(sbom_charge_kib(&yaml), 3 * one);
+        yaml.sbom_components = 250;
+        assert_eq!(
+            sbom_charge_kib(&yaml),
+            3 * cost_kib(250, crate::supplychain_read::EXPORT_COMPONENT_COST_BYTES)
+        );
+        yaml.sbom_components = BUNDLE_SBOM_MAX_COMPONENTS;
+        let mut manifest = yaml.clone();
+        manifest.manifest = true;
+        assert_eq!(sbom_charge_kib(&manifest), 2 * one);
+        let none = plan(&q(Some("vex"), None, None)).unwrap();
+        assert_eq!(sbom_charge_kib(&none), 0);
     }
 
     #[test]

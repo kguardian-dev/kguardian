@@ -1189,8 +1189,10 @@ Artifacts and where they come from (existing generators only):
   (`sbomTrust: scanned`) first, a registry-attached one (`unverified` / `attached-unbound`: signature not
   checked) only when it is the only one. `image.source` and `image.sbomTrust` say which; `applyWith` says it
   in words. No SBOM for a digest is an unavailable document for that image ("contents are unknown"), never
-  an empty SBOM. At most 10 000 components per bundle (the export charges the read budget for that when
-  `sbom` is requested); an image that does not fit is unavailable with the per-image route to download it.
+  an empty SBOM. At most 10 000 components per bundle. When `sbom` is requested the export first reads the
+  chosen SBOMs' sizes and charges the read budget for exactly that many components (three copies for
+  `format=yaml`, two for `zip-manifest`), and never loads more than it charged for; an image that does not
+  fit is unavailable with the per-image route to download it.
 - **OpenVEX (v1.5):** see the `vex` row. Statements come only from packages unseen in every container over a
   covered capture window (vulnerabilities API, "In use"); without that coverage signal the artifact is
   unavailable, with the reason.

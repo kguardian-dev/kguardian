@@ -1787,8 +1787,8 @@ fn live_database_sources_are_deduplicated_and_registry_sboms_never_replace_trivy
 // Runtime in-use and tiers (#1533 P1-5)
 // ---------------------------------------------------------------------
 
-/// The runtime inventory table as P1-2 (feat/1533-exec-tracking,
-/// migration 2026-09-27-300000_runtime_executables) defines it: the input
+/// The runtime inventory table as P1-2's runtime_executables migration
+/// (feat/1533-exec-tracking) defines it: the input
 /// contract of in_use_store. Created here only when that migration is not
 /// in this tree yet; identical DDL, so the real one is a no-op after it.
 const RUNTIME_EXECUTABLES_CONTRACT: &str = "\
@@ -2085,7 +2085,10 @@ fn live_database_only_the_dlopened_library_is_loaded() {
     // container image, labelled with its source.
     let src = crate::workload_profile::load_sources(&mut conn, &key).unwrap();
     let prof = crate::workload_profile::build(&key, &src, Utc::now());
-    let sb = crate::profile_export::sbom_docs(&mut conn, &prof, "audit").unwrap();
+    // The size probe the export charges from: this workload's one SBOM.
+    let probed = crate::profile_export::probe_sbom_components(&mut conn, &key).unwrap();
+    assert_eq!(probed, 2);
+    let sb = crate::profile_export::sbom_docs(&mut conn, &prof, "audit", probed).unwrap();
     assert_eq!(sb.len(), 1, "{sb:?}");
     assert!(sb[0].available, "{:?}", sb[0].reason);
     let im = sb[0].image.as_ref().unwrap();
@@ -2102,6 +2105,14 @@ fn live_database_only_the_dlopened_library_is_loaded() {
         .as_deref()
         .unwrap()
         .contains("trivy-operator"));
+    // It never loads more than it was charged for.
+    let short = crate::profile_export::sbom_docs(&mut conn, &prof, "audit", 1).unwrap();
+    assert!(!short[0].available);
+    assert!(short[0]
+        .reason
+        .as_deref()
+        .unwrap()
+        .contains("/sbom/cyclonedx"));
     // Over the cap: listed, not loaded, with the per-image route.
     assert!(matches!(
         crate::supplychain_read::cyclonedx_for(&mut conn, &img, 1).unwrap(),
@@ -2260,6 +2271,101 @@ fn live_database_truncated_or_unfinished_use_is_never_covered() {
     .unwrap();
     assert_eq!(bar_state(&mut conn).0, "loaded");
 
+    exec(
+        &mut conn,
+        "DROP FUNCTION kg_runtime_coverage(text, text, text, text, text, text, integer)",
+    );
+}
+
+/// Two installed versions of one package on one image, in two containers.
+/// With the read cut between groups, a statement must still be judged on
+/// every container of its (package, version): rows come grouped by version
+/// before container, so the cut drops a whole group, never half of one.
+#[test]
+#[ignore = "requires a live postgres (set KG_TEST_DATABASE_URL)"]
+fn live_database_vex_cap_never_splits_a_version_group() {
+    use crate::in_use_store::{self as iu, UseEvidence, VexOutcome};
+    let mut conn = live_conn();
+    exec(
+        &mut conn,
+        "TRUNCATE runtime_package_use, runtime_unowned_paths, runtime_in_use_coverage, \
+            workload_network_exposure;",
+    );
+    exec(&mut conn, COVERAGE_STUB);
+    let img = d(80);
+    for c in ["app", "side"] {
+        seed_inventory(
+            &mut conn,
+            &img,
+            "ghcr.io/example/api",
+            "2.4.1",
+            "Deployment",
+            "api",
+            c,
+            0,
+        );
+    }
+    let mut s = sbom_json(&img, "2026-09-20T08:00:00Z", &[], None);
+    s["components"] = json!([{"name": "libbar1", "version": "1", "type": "debian",
+        "purl": "pkg:deb/debian/libbar1@1", "file_paths": ["/usr/lib/x86_64-linux-gnu/libbar.so.1"]}]);
+    store_s(&mut conn, s).unwrap();
+    let mut v = vulns_json(
+        &img,
+        "2026-09-20T08:00:00Z",
+        &[
+            ("CVE-2026-0201", "HIGH", None),
+            ("CVE-2026-0201", "HIGH", None),
+        ],
+    );
+    v["observed_in"] = json!([]);
+    for (i, ver) in ["1", "2"].iter().enumerate() {
+        v["vulnerabilities"][i]["package"] = json!({"name": "libbar1", "version": ver,
+            "type": "debian", "purl": format!("pkg:deb/debian/libbar1@{ver}")});
+        v["vulnerabilities"][i]["class"] = json!("os-pkgs");
+    }
+    store_v(&mut conn, v);
+    relink_batch(&mut conn, None, 100).unwrap();
+    // 'side' loads libbar; 'app' never does.
+    exec(
+        &mut conn,
+        &format!(
+            "INSERT INTO runtime_package_use (cluster_id, pod_namespace, workload_kind, workload_name, \
+                container_name, image_digest, pkg_name, pkg_version, state, path_match, sample_path, \
+                first_seen, last_seen) VALUES ('primary', '{NS}', 'Deployment', 'api', 'side', '{img}', \
+                'libbar1', '1', 'loaded', 'exact', '/usr/lib/x86_64-linux-gnu/libbar.so.1', \
+                timezone('UTC', NOW()), timezone('UTC', NOW()))"
+        ),
+    );
+    let t = crate::in_use::TierSettings::default();
+    iu::refresh_coverage(
+        &mut conn,
+        &t,
+        &UseEvidence {
+            complete: true,
+            truncated: vec![],
+        },
+    )
+    .unwrap();
+    let key = crate::workload_profile::Key {
+        namespace: NS.into(),
+        kind: "Deployment".into(),
+        name: "api".into(),
+    };
+    // 4 rows: (v1, app) (v1, side) (v2, app) (v2, side). Uncut: no
+    // statement, since 'side' loaded the package.
+    assert!(matches!(
+        iu::openvex_draft(&mut conn, &key).unwrap(),
+        VexOutcome::Unavailable(_)
+    ));
+    // Cut at 3: the v2 group loses 'side'. It must be dropped whole, not
+    // judged on 'app' alone (which would state not_affected).
+    for cap in 1..=4 {
+        let out = iu::openvex_draft_capped(&mut conn, &key, cap).unwrap();
+        assert!(
+            matches!(out, VexOutcome::Unavailable(_)),
+            "cap {cap}: a statement from part of a group: {out:?}"
+        );
+    }
     exec(
         &mut conn,
         "DROP FUNCTION kg_runtime_coverage(text, text, text, text, text, text, integer)",

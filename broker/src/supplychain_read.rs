@@ -1094,6 +1094,14 @@ pub(crate) enum CycloneDx {
     Doc(serde_json::Value, Report),
 }
 
+/// Components in the SBOM [`cyclonedx_for`] would choose for `digest`
+/// (0 without one): the size probe the export charges its budget from.
+pub(crate) fn chosen_sbom_components(conn: &mut PgConnection, digest: &str) -> QueryResult<i64> {
+    Ok(pick_sbom(conn, digest, None)?
+        .1
+        .map_or(0, |r| i64::from(r.item_count.max(0))))
+}
+
 /// The SBOM the per-image route would choose (Trivy Operator's first, a
 /// registry SBOM only when it is the only one), as CycloneDX. Refuses
 /// more than `max_components` without loading them.

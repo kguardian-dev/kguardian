@@ -692,7 +692,7 @@ LEFT JOIN runtime_in_use_coverage cv ON cv.cluster_id = wc.cluster_id \
     AND cv.pod_namespace = wc.pod_namespace AND cv.workload_kind = wc.workload_kind \
     AND cv.workload_name = wc.workload_name AND cv.container_name = wc.container_name \
     AND cv.image_digest = wc.image_digest \
-ORDER BY f.image_digest, f.vuln_id, f.pkg_name, wc.container_name \
+ORDER BY f.image_digest, f.vuln_id, f.pkg_name, f.installed_version, wc.container_name \
 LIMIT $4";
 
 /// Statements at most per draft.
@@ -724,14 +724,25 @@ pub fn openvex_draft(
     conn: &mut PgConnection,
     key: &crate::workload_profile::Key,
 ) -> Result<VexOutcome, DbError> {
+    openvex_draft_capped(conn, key, VEX_MAX_ROWS)
+}
+
+/// [`openvex_draft`] with the row cap as a parameter (tests).
+pub(crate) fn openvex_draft_capped(
+    conn: &mut PgConnection,
+    key: &crate::workload_profile::Key,
+    cap: i64,
+) -> Result<VexOutcome, DbError> {
     let s = TierSettings::from_env();
+    // Rows come grouped by finding (image, vuln, package, version), then
+    // container, which drop_partial_group relies on.
     let mut rows: Vec<VexRow> = sql_query(VEX_ROWS_SQL)
         .bind::<Text, _>(&key.namespace)
         .bind::<Text, _>(&key.kind)
         .bind::<Text, _>(&key.name)
-        .bind::<BigInt, _>(VEX_MAX_ROWS + 1)
+        .bind::<BigInt, _>(cap + 1)
         .load(conn)?;
-    drop_partial_group(&mut rows, VEX_MAX_ROWS as usize);
+    drop_partial_group(&mut rows, cap as usize);
     if rows.is_empty() {
         return Ok(VexOutcome::Unavailable(
             "no vulnerability findings for the images this workload runs".into(),
