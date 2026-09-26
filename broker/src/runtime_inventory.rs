@@ -930,7 +930,7 @@ const WORKLOAD_RUNTIME_SQL: &str = "\
 SELECT container_name, image_digest, kind, path, source, origin, path_complete, first_seen, \
     last_seen \
 FROM runtime_executables \
-WHERE pod_namespace = $1 AND workload_kind = $2 AND workload_name = $3 \
+WHERE cluster_id = $8 AND pod_namespace = $1 AND workload_kind = $2 AND workload_name = $3 \
   AND ($4::text IS NULL OR container_name = $4) \
   AND ($5::text IS NULL OR kind = $5) \
   AND (cardinality($7::text[]) = 0 OR origin = ANY($7)) \
@@ -995,6 +995,7 @@ pub fn workload_runtime(
         .bind::<Nullable<Text>, _>(filter.kind.as_deref())
         .bind::<BigInt, _>(limit + 1)
         .bind::<Array<Text>, _>(&filter.origins)
+        .bind::<Text, _>(DEFAULT_CLUSTER_ID)
         .load(conn)?;
     let truncated = rows.len() as i64 > limit;
     rows.truncate(limit as usize);
@@ -1611,6 +1612,26 @@ pub fn runtime_coverage(
     .get_result(conn)?)
 }
 
+/// Re-create `kg_runtime_coverage` exactly as the migration defines it.
+/// Other modules' live tests stand in a stub for it and drop it; on a
+/// database shared by several runs the real one is then missing, although
+/// the migration that creates it is recorded as applied.
+#[cfg(test)]
+pub(crate) fn restore_coverage_function(conn: &mut PgConnection) {
+    use diesel::connection::SimpleConnection;
+    const UP: &str = include_str!("../db/migrations/2026-09-29-100000_runtime_executables/up.sql");
+    let start = UP
+        .find("CREATE OR REPLACE FUNCTION kg_runtime_coverage")
+        .expect("the migration defines kg_runtime_coverage");
+    let body = &UP[start..];
+    let end = body
+        .find("$fn$;")
+        .expect("the function body ends with $fn$;")
+        + "$fn$;".len();
+    conn.batch_execute(&body[..end])
+        .expect("re-create kg_runtime_coverage from the migration");
+}
+
 // ---------------------------------------------------------------------
 // For P2-5 drift
 // ---------------------------------------------------------------------
@@ -1652,11 +1673,13 @@ pub fn workload_has_inventory(
     }
     let r: E = sql_query(
         "SELECT EXISTS (SELECT 1 FROM runtime_executables \
-         WHERE pod_namespace = $1 AND workload_kind = $2 AND workload_name = $3) AS e",
+         WHERE cluster_id = $4 AND pod_namespace = $1 AND workload_kind = $2 \
+           AND workload_name = $3) AS e",
     )
     .bind::<Text, _>(ns)
     .bind::<Text, _>(kind)
     .bind::<Text, _>(name)
+    .bind::<Text, _>(DEFAULT_CLUSTER_ID)
     .get_result(conn)?;
     Ok(r.e)
 }
@@ -2022,6 +2045,7 @@ mod tests {
         let mut conn = PgConnection::establish(&url).expect("connect");
         conn.run_pending_migrations(TEST_MIGRATIONS)
             .expect("apply the shipped migrations");
+        restore_coverage_function(&mut conn);
         conn.batch_execute("TRUNCATE runtime_executables")
             .expect("reset the runtime inventory");
         conn
