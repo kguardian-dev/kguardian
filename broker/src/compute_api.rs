@@ -128,7 +128,10 @@ pub(crate) fn validate_envelope(node: &str, interval_ms: i64) -> Result<(), &'st
 }
 
 /// `POST /pod/compute/batch` (path relative to [`compute_ingest_scope`]).
-#[post("/batch")]
+#[post(
+    "/batch",
+    wrap = "::actix_web::middleware::from_fn(crate::auth::authorize)"
+)]
 pub async fn add_compute_batch(
     pool: web::Data<DbPool>,
     form: web::Json<ComputeBatch>,
@@ -247,7 +250,10 @@ fn upsert_latest(conn: &mut PgConnection, rows: &[PodComputeLatest]) -> Result<(
 }
 
 /// `POST /pod/compute/history/batch` (path relative to [`compute_ingest_scope`]).
-#[post("/history/batch")]
+#[post(
+    "/history/batch",
+    wrap = "::actix_web::middleware::from_fn(crate::auth::authorize)"
+)]
 pub async fn add_compute_history_batch(
     pool: web::Data<DbPool>,
     form: web::Json<ComputeHistoryBatch>,
@@ -357,7 +363,10 @@ pub struct LatestResponse {
     pub nodes: Vec<NodeComputeLatest>,
 }
 
-#[get("/compute/latest")]
+#[get(
+    "/compute/latest",
+    wrap = "::actix_web::middleware::from_fn(crate::auth::authorize)"
+)]
 pub async fn get_compute_latest(
     pool: web::Data<DbPool>,
     budget: web::Data<ReadBudget>,
@@ -416,7 +425,10 @@ pub struct HistoryResponse {
     pub rows: Vec<PodComputeHistoryRow>,
 }
 
-#[get("/compute/history/{pod_uid}")]
+#[get(
+    "/compute/history/{pod_uid}",
+    wrap = "::actix_web::middleware::from_fn(crate::auth::authorize)"
+)]
 pub async fn get_compute_history(
     pool: web::Data<DbPool>,
     budget: web::Data<ReadBudget>,
@@ -526,7 +538,10 @@ pub struct ContentionResponse {
     pub pairs: Vec<PodContentionRow>,
 }
 
-#[get("/compute/contention")]
+#[get(
+    "/compute/contention",
+    wrap = "::actix_web::middleware::from_fn(crate::auth::authorize)"
+)]
 pub async fn get_compute_contention(
     pool: web::Data<DbPool>,
     budget: web::Data<ReadBudget>,
@@ -613,7 +628,10 @@ pub struct FindingsScope {
     pub nodes: Vec<NodeComputeLatest>,
 }
 
-#[get("/compute/findings")]
+#[get(
+    "/compute/findings",
+    wrap = "::actix_web::middleware::from_fn(crate::auth::authorize)"
+)]
 pub async fn get_compute_findings(
     pool: web::Data<DbPool>,
     budget: web::Data<ReadBudget>,
@@ -905,7 +923,10 @@ pub struct NodesResponse {
     pub nodes: Vec<NodeComputeLatest>,
 }
 
-#[get("/compute/nodes")]
+#[get(
+    "/compute/nodes",
+    wrap = "::actix_web::middleware::from_fn(crate::auth::authorize)"
+)]
 pub async fn get_compute_nodes(
     pool: web::Data<DbPool>,
     budget: web::Data<ReadBudget>,

@@ -43,6 +43,42 @@ waits for the build; on a table of a few million rows that takes seconds.
    seven days, raise `broker.traffic.retention.days` to at least twice
    their period, or set it to `0` to keep the old unbounded behaviour.
 
+## Broker auth now uses scoped tokens, and it works end to end
+
+Before this release, `broker.auth.enabled=true` couldn't be used. The
+controller's pod reconciler and node-facts reporter sent no token, so
+pods were never marked dead and node facts were never stored. The
+frontend's `/api` proxy also sent none, so the UI got `401` on every
+call, and the CLI had no way to supply a token. The one shared token
+could also do everything, so any component holding it could write rows.
+
+Tokens are now scoped (`read`, `ingest`, `supplychain`, `admin`), every
+route declares the scope it requires, and each component mounts only
+its own key from one Secret. Nothing changes if auth is off (the default).
+
+**If you had `broker.auth.enabled=true`:** the default is now
+`broker.auth.mode: scoped`, which reads the Secret keys `read` and
+`ingest` (plus `supplychain` and `admin` if present). Pick one:
+
+1. Scoped, recommended. Add the keys:
+   ```bash
+   kubectl -n <ns> patch secret <existingSecret> --type merge -p \
+     "{\"stringData\":{\"read\":\"$(openssl rand -hex 32)\",\"ingest\":\"$(openssl rand -hex 32)\"}}"
+   ```
+2. Keep the old single token: set `broker.auth.mode: shared`. That token
+   grants `read` + `ingest`, so the frontend no longer gets it unless
+   you also set `frontend.brokerAuth.allowSharedToken: true`. Without
+   that, the UI gets `401`.
+
+With auth on, anyone who can reach the frontend Service can read the
+broker's data through it. Put SSO in front of it or restrict it with a
+NetworkPolicy.
+
+Without one of these, the pods stay in `CreateContainerConfigError`
+because the `read` key is missing. That's deliberate: a missing scope
+never falls back to "open". The CLI now reads its token from
+`KGUARDIAN_BROKER_TOKEN` or `--broker-token-file`.
+
 ## Peer identity is now fixed when a flow is ingested
 
 `pod_traffic` rows used to store only the peer's IP. The Network Map, the

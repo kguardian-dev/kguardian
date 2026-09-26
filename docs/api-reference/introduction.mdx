@@ -22,17 +22,119 @@ kubectl port-forward -n kguardian svc/kguardian-broker 9090:9090
 
 ## Authentication
 
-Authentication is **opt-in** bearer-token auth, off by default. Set the
-`BROKER_AUTH_TOKEN` environment variable on the broker and every
-endpoint except `/health` and `/metrics` requires an
-`Authorization: Bearer <token>` header; a missing or invalid token
-returns `401`.
+The broker supports scoped bearer tokens. Auth is off by default. When it
+is on, every endpoint except `/health` and `/metrics` needs an
+`Authorization: Bearer <token>` header, and the token must carry the
+scope the endpoint requires. A missing or unknown token gets `401`. A
+valid token without the required scope gets `403`.
+
+| Scope | Held by | Grants |
+|---|---|---|
+| `read` | frontend (server side, in its `/api` proxy), llm-bridge, the CLI | every `GET`, plus `POST /seccomp/profiles/.../export` |
+| `ingest` | controller | everything the controller writes, plus `read` |
+| `supplychain` | the supply-chain component (vulnerability reports, attestations) | supply-chain writes, plus `read` |
+| `admin` | operators (optional) | everything |
+
+`supplychain` is kept separate from `ingest` so that a compromised pod
+holding the controller's token can't post a forged clean scan result.
+
+The frontend's read token stays on the server. The browser calls `/api`
+on the frontend, and the frontend's proxy removes any `Authorization`
+header the browser sent and adds the read token. The proxy forwards only
+`GET`, `HEAD` and the seccomp export `POST`. It answers every other
+method with `405`, and any path with `%`, `..` or empty segments with
+`400`, without forwarding either.
 
 <Warning>
-Without `BROKER_AUTH_TOKEN` set, the API is unauthenticated and should
-only be reachable within the cluster network. For production
-deployments, enable token auth and/or restrict access with
-NetworkPolicies, a service mesh, or an API gateway.
+With auth on, **anyone who can reach the frontend Service can read
+everything the broker holds**, because the frontend adds the read token
+for them. The UI has no login of its own. Put
+[SSO](/installation#gate-the-ui-behind-sso) in front of the frontend, or restrict
+who can reach its Service with a NetworkPolicy (or both). Auth on the
+broker stops pods from writing to it or reading from it directly. It
+doesn't protect the UI.
+</Warning>
+
+### Enable it with the Helm chart
+
+Create one Secret with a key per scope. The chart doesn't generate
+tokens, so they stay stable across upgrades.
+
+```bash
+kubectl -n kguardian create secret generic kguardian-broker-auth \
+  --from-literal=read="$(openssl rand -hex 32)" \
+  --from-literal=ingest="$(openssl rand -hex 32)"
+# add --from-literal=supplychain=... and/or admin=... when you need them
+```
+
+```yaml
+broker:
+  auth:
+    enabled: true
+    existingSecret: kguardian-broker-auth
+```
+
+The chart mounts each key only where it's needed: the controller gets
+`ingest`, the frontend and llm-bridge get `read`, and the broker gets all
+of them. The broker won't start with the same token under two scopes. A
+Secret missing the `read` or `ingest` key keeps the pods in
+`CreateContainerConfigError` until you add it. `supplychain.enabled=true`
+refuses to render unless auth is on.
+
+To check it:
+
+```bash
+kubectl -n kguardian port-forward svc/kguardian-broker 9090:9090 &
+READ=$(kubectl -n kguardian get secret kguardian-broker-auth -o jsonpath='{.data.read}' | base64 -d)
+curl -s -o /dev/null -w '%{http_code}\n' localhost:9090/pod/info                       # 401
+curl -s -o /dev/null -w '%{http_code}\n' -H "Authorization: Bearer $READ" localhost:9090/pod/info   # 200
+curl -s -o /dev/null -w '%{http_code}\n' -H "Authorization: Bearer $READ" \
+  -H 'content-type: application/json' -d '{}' localhost:9090/pod/mark_dead              # 403
+```
+
+The CLI reads its token from `KGUARDIAN_BROKER_TOKEN` (or
+`--broker-token-file`):
+
+```bash
+export KGUARDIAN_BROKER_TOKEN="$READ"
+kubectl kguardian gen networkpolicy my-app -n my-namespace
+```
+
+Installed before scoped tokens existed, with a single `token` key? Set
+`broker.auth.mode: shared` to keep that key working. The shared token
+grants `read` and `ingest`, so by default the chart doesn't give it to
+the frontend in shared mode, and the UI gets `401`. Set
+`frontend.brokerAuth.allowSharedToken: true` to accept that (the proxy
+allowlist above still applies), or better, move to the scoped layout.
+
+### /metrics
+
+`/metrics` stays open so Prometheus can scrape it without a token. It
+carries no pod names or IPs. The `kguardian_seccomp_denials_total`
+series, though, are labelled with `workload_namespace`, `workload_kind`
+and `workload`, which is enough to list the namespaces and workloads
+that hit seccomp denials. The bundled alerts need those labels, so they
+stay. Treat `/metrics` as sensitive and limit who can reach it with
+`broker.networkPolicy.allowMetricsFrom`.
+
+### Broker environment
+
+| Variable | Scopes |
+|---|---|
+| `BROKER_TOKEN_READ` | read |
+| `BROKER_TOKEN_INGEST` | ingest, read |
+| `BROKER_TOKEN_SUPPLYCHAIN` | supplychain, read |
+| `BROKER_TOKEN_ADMIN` | all |
+| `BROKER_AUTH_TOKEN` | read, ingest (the shared token from before scopes existed) |
+
+Setting any of these turns auth on. Tokens are compared in constant time.
+
+<Warning>
+With auth off, the API is unauthenticated. Any pod that can reach the
+broker Service can read everything and write rows, including pod specs
+(peer identity), syscalls, `mark_dead` and seccomp node status. Turn auth
+on, or at least restrict access with the chart's NetworkPolicy, a
+service mesh, or an API gateway.
 </Warning>
 
 For the broker's current released version, see
@@ -69,7 +171,8 @@ All responses are JSON with standard HTTP status codes:
 
 - `200 OK` - Success
 - `400 Bad Request` - Invalid parameters
-- `401 Unauthorized` - Missing or invalid bearer token (only when `BROKER_AUTH_TOKEN` is set)
+- `401 Unauthorized` - Missing or invalid bearer token (only with auth on)
+- `403 Forbidden` - Valid token without the scope this endpoint requires (only with auth on)
 - `404 Not Found` - Resource not found
 - `500 Internal Server Error` - Server error
 

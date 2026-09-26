@@ -182,7 +182,10 @@ pub(crate) fn update_available(
         .unwrap_or(false)
 }
 
-#[get("/version")]
+#[get(
+    "/version",
+    wrap = "::actix_web::middleware::from_fn(crate::auth::authorize)"
+)]
 pub async fn get_version(state: web::Data<VersionCheckState>) -> impl Responder {
     let outcome = state.outcome.read().map(|o| o.clone()).unwrap_or_default();
     let chart = chart_version();
@@ -238,7 +241,10 @@ fn clamp_enum(value: String, allowed: &[&str]) -> String {
 
 /// Always 200: DB trouble degrades to all-unknown/0 like env_signals —
 /// an environment hint must never break a page load.
-#[get("/cluster/environment")]
+#[get(
+    "/cluster/environment",
+    wrap = "::actix_web::middleware::from_fn(crate::auth::authorize)"
+)]
 pub async fn get_cluster_environment(pool: web::Data<DbPool>) -> impl Responder {
     let p = pool.get_ref().clone();
     let (signals, nodes) = tokio::task::spawn_blocking(move || {

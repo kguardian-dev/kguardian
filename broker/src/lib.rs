@@ -1,5 +1,6 @@
 mod add;
 mod audit;
+pub mod auth;
 mod compute;
 mod compute_api;
 mod compute_types;
@@ -9,6 +10,7 @@ mod ip;
 mod peer;
 mod read_budget;
 mod retention;
+pub mod routes;
 mod seccomp;
 mod seccomp_denial;
 mod seccomp_profiles_cache;

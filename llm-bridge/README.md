@@ -203,7 +203,7 @@ Every value below is trimmed before use, and a whitespace-only value counts as u
 |----------|----------|-------------|
 | `PORT` | No | Server port (default: `8080`) |
 | `BROKER_URL` | No | Broker URL (default: `http://kguardian-broker.kguardian.svc.cluster.local:9090`) |
-| `BROKER_AUTH_TOKEN` | No | Bearer token sent to the Broker, if the Broker requires auth |
+| `BROKER_AUTH_TOKEN` | No | Bearer token sent to the Broker when broker auth is on. The chart mounts the broker's `read` token here |
 | `ALLOWED_ORIGIN` | No | CORS allowed origin (default: `*`) |
 | `LOG_LEVEL` | No | Log level (default: `info`) |
 

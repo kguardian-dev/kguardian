@@ -1475,7 +1475,10 @@ fn render(obs: &Observed, names: &BTreeSet<String>) -> SeccompProfile {
 /// per `SECCOMP_PROFILES_CACHE_TTL_SECS` and every caller inside that
 /// window gets the same bytes. The rebuild itself is
 /// [`rebuild_profiles_body`].
-#[get("/seccomp/profiles")]
+#[get(
+    "/seccomp/profiles",
+    wrap = "::actix_web::middleware::from_fn(crate::auth::authorize)"
+)]
 pub async fn list_seccomp_profiles(
     req: actix_web::HttpRequest,
     pool: web::Data<DbPool>,
@@ -1650,7 +1653,10 @@ struct ProfileDetail {
 
 /// `GET /seccomp/profiles/{namespace}/{kind}/{name}` — one workload's
 /// summary plus the observed set rendered as a profile document.
-#[get("/seccomp/profiles/{namespace}/{kind}/{name}")]
+#[get(
+    "/seccomp/profiles/{namespace}/{kind}/{name}",
+    wrap = "::actix_web::middleware::from_fn(crate::auth::authorize)"
+)]
 pub async fn get_seccomp_profile(
     pool: web::Data<DbPool>,
     budget: web::Data<ReadBudget>,
@@ -1706,7 +1712,10 @@ pub async fn get_seccomp_profile(
 /// render of the observed set as a bare profile document. Kept from v1
 /// for `curl`-level inspection; nothing distributes it. `hash` must be
 /// the current observed hash (a stale one is a 404).
-#[get("/seccomp/profile-file/{namespace}/{kind}/{name}/{hash}")]
+#[get(
+    "/seccomp/profile-file/{namespace}/{kind}/{name}/{hash}",
+    wrap = "::actix_web::middleware::from_fn(crate::auth::authorize)"
+)]
 pub async fn get_seccomp_profile_file(
     pool: web::Data<DbPool>,
     path: web::Path<(String, String, String, String)>,
@@ -2229,7 +2238,10 @@ fn capture_headers(
 ///
 /// `409` when the capture is partial and `defaultAction` enforces,
 /// unless `acknowledgePartial=true`.
-#[get("/seccomp/profiles/{namespace}/{kind}/{name}/export")]
+#[get(
+    "/seccomp/profiles/{namespace}/{kind}/{name}/export",
+    wrap = "::actix_web::middleware::from_fn(crate::auth::authorize)"
+)]
 pub async fn export_seccomp_profile(
     pool: web::Data<DbPool>,
     path: web::Path<(String, String, String)>,
@@ -2243,7 +2255,10 @@ pub async fn export_seccomp_profile(
 /// document, with the options in a JSON body plus `add` / `remove`
 /// syscall edits applied to the observed set (the UI's staged edits).
 /// Same partial-capture gate as the GET form.
-#[post("/seccomp/profiles/{namespace}/{kind}/{name}/export")]
+#[post(
+    "/seccomp/profiles/{namespace}/{kind}/{name}/export",
+    wrap = "::actix_web::middleware::from_fn(crate::auth::authorize)"
+)]
 pub async fn export_seccomp_profile_post(
     pool: web::Data<DbPool>,
     path: web::Path<(String, String, String)>,
@@ -2311,7 +2326,10 @@ impl NodeStatusInput {
 /// `POST /seccomp/node-status` — the distributor reports, after each
 /// pass, the full set of profile files present on its node. Replaces the
 /// node's row wholesale.
-#[post("/seccomp/node-status")]
+#[post(
+    "/seccomp/node-status",
+    wrap = "::actix_web::middleware::from_fn(crate::auth::authorize)"
+)]
 pub async fn post_seccomp_node_status(
     pool: web::Data<DbPool>,
     body: web::Json<NodeStatusInput>,
@@ -2481,7 +2499,10 @@ impl CrMirror {
 /// `PUT /seccomp/crs/{namespace}/{name}` — upsert the mirror of one
 /// `SeccompProfile` CR. Idempotent; every controller sends the same
 /// thing on every watch event / resync.
-#[actix_web::put("/seccomp/crs/{namespace}/{name}")]
+#[actix_web::put(
+    "/seccomp/crs/{namespace}/{name}",
+    wrap = "::actix_web::middleware::from_fn(crate::auth::authorize)"
+)]
 pub async fn put_seccomp_cr(
     pool: web::Data<DbPool>,
     path: web::Path<(String, String)>,
@@ -2543,7 +2564,10 @@ pub async fn put_seccomp_cr(
 
 /// `DELETE /seccomp/crs/{namespace}/{name}` — the CR is gone; drop the
 /// mirror row. The summaries stop reporting a `cr` for that workload.
-#[actix_web::delete("/seccomp/crs/{namespace}/{name}")]
+#[actix_web::delete(
+    "/seccomp/crs/{namespace}/{name}",
+    wrap = "::actix_web::middleware::from_fn(crate::auth::authorize)"
+)]
 pub async fn delete_seccomp_cr(
     pool: web::Data<DbPool>,
     path: web::Path<(String, String)>,

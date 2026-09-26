@@ -17,7 +17,7 @@ current versions with `latest` and `checked_at` as `null`.
 
 ## GET /version
 
-Requires bearer auth when `BROKER_AUTH_TOKEN` is set — unlike
+Requires the `read` scope when broker auth is on. Unlike
 `/health` and `/metrics`, it is not on the exempt list.
 
 ### Example

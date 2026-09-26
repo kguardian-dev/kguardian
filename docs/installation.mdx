@@ -363,7 +363,9 @@ This renders two Envoy Gateway objects, and nothing at all while `enabled` is `f
   The oauth2-proxy Service usually lives in another namespace, so a `ReferenceGrant` **in that namespace** must allow `SecurityPolicy` and `HTTPRoute` from the release namespace to reference it. The chart cannot render this for you. Without it the policy attaches but the route cannot reach the proxy.
 </Warning>
 
-This gates the **UI route only**. It does not authenticate the Broker API, which the browser calls directly — see `broker.auth.enabled` for that, and note the frontend cannot hold a static token. It also does not cover the MCP endpoint above, which carries its own bearer token.
+This gates the **UI route only**. The Broker API is a separate Service. To authenticate it too, turn on [scoped broker tokens](/api-reference/introduction#authentication) (`broker.auth.enabled`). The frontend's `/api` proxy then adds the `read` token on the server side and drops the SSO `Authorization` header before the request reaches the broker. SSO also doesn't cover the MCP endpoint above, which has its own bearer token.
+
+SSO guards the Gateway route, not the frontend Service itself. With broker auth on, anything in the cluster that can reach the frontend Service directly can read everything the broker holds, because the proxy adds the read token for it. Restrict ingress to the frontend pods with a NetworkPolicy that admits only your Gateway.
 
 ---
 

@@ -9,10 +9,11 @@ from the Controller's observations, and turn them into `SeccompProfile`
 manifests. The Broker holds **no** profile lifecycle state: whether a profile
 is deployed, in audit or enforcing is decided entirely by the `SeccompProfile`
 CR you apply (see the [CRD reference](/reference/crds/seccompprofile) and the
-[distribution guide](/guides/distributing-seccomp-profiles)). The read
-endpoints are open; the write endpoints (`PUT`/`DELETE /seccomp/crs/…`,
+[distribution guide](/guides/distributing-seccomp-profiles)). With
+`broker.auth.enabled`, the read endpoints (including the `POST .../export`)
+need the `read` scope. The write endpoints (`PUT`/`DELETE /seccomp/crs/…`,
 `POST /seccomp/node-status`, `POST /seccomp/denials`) are for the Controller
-and require the Broker bearer token when `broker.auth.enabled` is set.
+and need `ingest`.
 
 Two kinds of signal live here and they are not the same thing. The observed
 syscall set and its `drift` are kguardian's own **inference** — what the eBPF
