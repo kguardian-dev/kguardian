@@ -25,10 +25,11 @@ owner. A ReplicaSet's pods are profiled under their Deployment.
 
 <Warning>
 **unknown is not a pass.** When kguardian has no data for a dimension, or the
-source is not configured (vulnerability scanning, signatures), the value is
-unknown. The CLI prints `unknown`, never `0` or `ok`. The posture score is a
-weighted mean over the known dimensions only, so always read it with its
-coverage.
+source is not configured (vulnerability scanning, signatures), its status is
+`unknown`, and a readiness check it cannot evaluate prints `can't tell`. There
+is no numeric score: status is a tier (`ok`, `warn`, `risk`, `unknown`)
+derived from findings. The posture status only covers the dimensions
+kguardian knows, so always read it with its coverage.
 </Warning>
 
 ## profile get
@@ -39,33 +40,47 @@ computes live.
 ```
 Workload:   payments/Deployment/checkout
 Live pods:  2
-Posture:    warn  score 71  coverage 41%  grade -
-Not scored: network, images (unknown or unscored; excluded from the score)
-Revision:   3 (2026-09-25T18:40:12Z)
-PSS level:  at most baseline (9 checks not visible to kguardian)
+Posture:    warn  coverage 50% (known core dimensions)
+Unknown:    network, podSecurity (no data; not counted as ok or risk)
+  network unknown: No audit policy covers this workload; applied NetworkPolicies are not visible to the broker
+  syscalls warn: No SeccompProfile CR enforces the observed syscall set
+  podSecurity unknown: Every evaluated check passes restricted, but 9 checks cannot be seen (e.g. hostPath), so restricted is not confirmed
+Revision:   4 (2026-09-26T02:07:55.676169Z)
+PSS level:  at most restricted (unconfirmed: 9 checks not visible to kguardian)
 
-DIMENSION    STATUS   SCORE       COVERAGE  REASON
-podSecurity  ok       80          partial   Evaluated checks pass restricted; unevaluated checks may lower the level
-network      unknown  unknown     partial   No audit policy covers this workload
-syscalls     warn     60          full      No SeccompProfile CR references this workload
-images       ok       not scored  full      No vulnerability source is configured; images are inventoried but not scored
-compute      warn     not scored  full      1 container has no memory limit
+DIMENSION    STATUS   COVERAGE  REASON
+podSecurity  unknown  partial   Every evaluated check passes restricted, but 9 checks cannot be seen (e.g. hostPath), so restricted is not confirmed
+network      unknown  full      No audit policy covers this workload; applied NetworkPolicies are not visible to the broker
+syscalls     warn     partial   No SeccompProfile CR references this workload
+images       ok       full      No vulnerability source is configured; images are inventoried but not assessed for vulnerabilities
+compute      ok       full      1 container(s) have no memory limit
 
 Needs attention:
 SEVERITY  FINDING                        CONTAINER  TITLE
 medium    syscalls.no_enforcing_profile  -          No SeccompProfile CR enforces the observed syscall set
 
 Readiness:
-  trafficObserved24h  yes      Traffic observed for 6d 4h
-  noWouldDeny24h      unknown  No audit policy covers this workload
+  trafficObserved24h      yes         Traffic observed for 6d 0h
+  syscallCaptureComplete  no          Capture level medium on 1 pod(s)
+  noWouldDeny24h          can't tell  No audit policy covers this workload
+  imageSigned             can't tell  Signature verification is not configured
+  podSecurityRestricted   can't tell  Every evaluated check passes restricted; 9 checks cannot be seen, so restricted is not confirmed
 ```
 
-- **grade** is shown only when coverage is at least 80%.
-- **PSS level** "at most" means every check kguardian can evaluate passes,
-  but volumes, host ports, AppArmor, SELinux, procMount and sysctls are not
-  reported to kguardian and could still lower the level.
-- **not scored** means the dimension has data but no score in this release
-  (images without a vulnerability source; compute is informational).
+- **Posture** is the worst status among the four core dimensions kguardian
+  knows (network, syscalls, podSecurity, images). **Coverage** is how many of
+  those four it knows. Compute is informational and outside the rollup. Each
+  dimension that is not `ok` gets a one-line reason under the posture.
+- **PSS level** "at most restricted" means every check kguardian can evaluate
+  passes, but volumes, host ports, AppArmor, SELinux, procMount and sysctls
+  are not reported to kguardian and could still fail. That is why
+  podSecurity is `unknown` there rather than `ok`, and why
+  `podSecurityRestricted` prints `can't tell`. A `privileged` level is
+  `risk`; `baseline` is at least `warn`.
+- A container that was renamed or removed from the spec prints as a
+  **Stale** line and is left out of the level, the findings and the patch.
+- When the broker has a patch to recommend, the output ends with the
+  `profile export` command that prints it.
 
 `-o json` and `-o yaml` print the broker's response unchanged, including
 every finding, per-container securityContext, network peer and the
@@ -86,21 +101,22 @@ refreshed every few minutes.
 | `-o, --output` | string | `table`, `json` or `yaml` | `table` |
 
 ```
-NAMESPACE  KIND         NAME       STATUS   SCORE    COVERAGE  GRADE  FINDINGS (C/H/M)  REV
-payments   Deployment   checkout   warn     71       41%       -      0/0/1             3
-payments   StatefulSet  ledger-db  unknown  unknown  0%        -      0/0/0             1
+NAMESPACE  KIND        NAME      STATUS  COVERAGE  UNKNOWN              FINDINGS (C/H/M)  REV
+payments   Deployment  checkout  warn    50%       network,podSecurity  0/0/1             4
+payments   Deployment  ledger    warn    50%       network,podSecurity  0/0/2             1
 ```
 
-`--status unknown` lists the workloads kguardian cannot judge yet. When more
+`UNKNOWN` lists the core dimensions kguardian has no data for.
+`--status unknown` lists the workloads it cannot judge at all. When more
 pages exist, the `--after` cursor is printed on stderr.
 
 ## profile diff
 
 Calls `GET /workloads/{namespace}/{kind}/{name}/profile/diff`. The broker
 stores a new revision whenever the observed, policy-relevant behaviour
-changes: securityContext, running digests, the syscall set, or network rules.
-A revision records what kguardian observed, not what is applied in the
-cluster.
+changes: securityContext, running digests, the syscall set, or the set of
+network rules. A revision records what kguardian observed, not what is
+applied in the cluster.
 
 | Flag | Type | Description | Default |
 |------|------|-------------|---------|
@@ -110,38 +126,31 @@ cluster.
 
 ```
 Workload: payments/Deployment/checkout
-From:     2 (2026-09-22T09:00:00Z)
-To:       3 (2026-09-25T18:40:12Z)
+From:     2 (2026-09-26T02:05:41.141561Z)
+To:       4 (2026-09-26T02:07:55.676169Z)
 
 podSecurity: changed
   containers:
-    app
+    migrate
       fields:
-        allowPrivilegeEscalation: unset -> false
+        securityContext.allowPrivilegeEscalation: unset -> false
+        securityContext.capabilitiesDrop: unset -> ["ALL"]
   level: baseline -> restricted
-  pod:
-    securityContext.seccompProfileType: unset -> RuntimeDefault
 
 network: changed
   added:
-    + egress TCP/443 external:203.0.113.10
+    + egress TCP/443 external:198.51.100.20
 
-syscalls: changed
-  added:
-    + io_uring_setup
-    + io_uring_enter
+syscalls: unchanged
 
-images: changed
-  containers:
-    app
-      added:
-        + sha256:9f2c0d1e...
-      removed:
-        - sha256:0c3d...
+images: unchanged
 ```
 
-`unset` means the field was not set at that revision. The latest revision
-number is shown by `profile get`.
+`unset` means a spec field was not set at that revision. `unknown` means a
+derived value (the PSS level, the capture level) was not known at that
+revision. If retention has trimmed the revision before `--to`, the broker
+compares with the newest retained one and the output says so in a `Note:`
+line. The latest revision number is shown by `profile get`.
 
 ## profile export
 
@@ -154,11 +163,11 @@ it.
 
 The patch sets only the fields that fail an evaluated Pod Security Standards
 check, under the right path for the kind (`spec.template.spec` for a
-Deployment, `spec.jobTemplate.spec.template.spec` for a CronJob). stdout is
-the patch and nothing else; caveats go to stderr:
+Deployment or DaemonSet, `spec.jobTemplate.spec.template.spec` for a
+CronJob). stdout is the patch and nothing else; caveats go to stderr:
 
 ```bash
-kubectl kguardian profile export payments/Deployment/checkout --format pss > checkout-pss.yaml
+kubectl kguardian profile export observability/DaemonSet/node-exporter --format pss > node-exporter-pss.yaml
 ```
 
 ```yaml
@@ -167,27 +176,36 @@ kubectl kguardian profile export payments/Deployment/checkout --format pss > che
 spec:
   template:
     spec:
-      initContainers:
-      - name: migrate
+      hostNetwork: false
+      hostPID: false
+      securityContext:
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+      - name: node-exporter
         securityContext:
           allowPrivilegeEscalation: false
           capabilities:
             drop: ["ALL"]
 ```
 
-Review it, then apply it yourself:
+Read the caveats before applying anything. For this node agent they say
+that turning off `hostNetwork` and `hostPID` breaks components that need the
+node's namespaces, and that a namespace-level PSS exemption is often the
+right answer instead. If you still want the patch, apply it yourself:
 
 ```bash
-kubectl patch deployment checkout -n payments --patch-file checkout-pss.yaml
+kubectl patch daemonset node-exporter -n observability --patch-file node-exporter-pss.yaml
 ```
 
-`runAsNonRoot: true` fails at container start when the image's `USER` is
-root, which kguardian cannot see; the caveats say so when it applies. If
-every evaluated check already passes, the command prints nothing on stdout
-and says so on stderr. If no container `securityContext` has been reported
-for the workload, it exits non-zero: there is nothing to base a
-recommendation on.
+When the broker has no patch to recommend, the command prints nothing on
+stdout and explains why on stderr. That is not a pass: it happens when every
+check kguardian can see passes, which is only an upper bound, or when the
+only failing container is an ephemeral one that a patch cannot change. If no
+container `securityContext` has been reported for the workload, the command
+exits non-zero: there is nothing to base a recommendation on.
 
 Global flags (`--kubeconfig`, `--context`, `--broker-namespace`,
 `--broker-service`, `--broker-token-file`, `--debug`) are listed in the
-[CLI overview](/cli/overview).
+[CLI overview](/cli/overview). A `401` or `403` from the broker prints a hint:
+these commands need a token with the `read` scope.
