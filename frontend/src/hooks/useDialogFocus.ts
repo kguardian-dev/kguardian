@@ -10,6 +10,13 @@ const FOCUSABLE = 'button, [href], input, select, textarea, [tabindex]:not([tabi
  * focus returns to `returnFocusRef`, read after the close renders so an
  * element that remounted in the meantime is found.
  */
+/** Another open aria-modal dialog, outside `d` and not hidden (a closing Modal keeps its node under aria-hidden). */
+function otherModalOpen(d: HTMLElement | null): boolean {
+  return [...document.querySelectorAll<HTMLElement>('[role="dialog"][aria-modal="true"]')].some(
+    (el) => el !== d && !(d && d.contains(el)) && !el.closest('[aria-hidden="true"]'),
+  );
+}
+
 export function useDialogFocus(opts: {
   open: boolean;
   dialogRef: RefObject<HTMLElement | null>;
@@ -37,6 +44,9 @@ export function useDialogFocus(opts: {
   // dialog or from the body: a click on a non-focusable part of the dialog
   // (or its backdrop) leaves focus on the body, and the Esc must still close
   // it. Esc from anywhere else on the page is left to its own handlers.
+  // A body Esc goes to the topmost dialog only: when another open modal
+  // (e.g. the command palette) is stacked on this one, it is left to that
+  // modal's own handler.
   useEffect(() => {
     if (!open) return;
     const onEsc = (e: KeyboardEvent) => {
@@ -46,6 +56,7 @@ export function useDialogFocus(opts: {
       const fromDialog = !!(d && t && d.contains(t));
       const fromBody = t === document.body || t === document.documentElement;
       if (!fromDialog && !fromBody) return;
+      if (!fromDialog && otherModalOpen(d)) return;
       e.stopPropagation();
       onClose();
     };
