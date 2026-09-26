@@ -30,6 +30,12 @@ type Metrics struct {
 	Dropped *prometheus.CounterVec
 	// SourceHealthy is 0 while a source's watch is failing repeatedly.
 	SourceHealthy *prometheus.GaugeVec
+	// RegistryLookups counts uncached registry lookups by result (index,
+	// manifest, unknown, skipped).
+	RegistryLookups *prometheus.CounterVec
+	// RegistryLookupsSkipped counts lookups refused by the address guard,
+	// by reason.
+	RegistryLookupsSkipped *prometheus.CounterVec
 	// PendingEmissions is the size of the coalescing send queue.
 	PendingEmissions prometheus.Gauge
 }
@@ -64,6 +70,14 @@ func New() *Metrics {
 			Name: "kguardian_supplychain_emissions_dropped_total",
 			Help: "Payloads dropped as non-retryable, by kind and reason.",
 		}, []string{"kind", "reason"}),
+		RegistryLookups: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "kguardian_supplychain_registry_lookups_total",
+			Help: "Uncached registry digest lookups, by result (index, manifest, unknown, skipped).",
+		}, []string{"result"}),
+		RegistryLookupsSkipped: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "kguardian_supplychain_registry_lookups_skipped_total",
+			Help: "Registry lookups refused by the address guard, by reason.",
+		}, []string{"reason"}),
 		SourceHealthy: prometheus.NewGaugeVec(prometheus.GaugeOpts{
 			Name: "kguardian_supplychain_source_healthy",
 			Help: "0 while a source's list/watch is failing repeatedly, else 1.",
@@ -77,7 +91,7 @@ func New() *Metrics {
 		collectors.NewGoCollector(),
 		collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}),
 		m.ReportEvents, m.SourceAvailable, m.TrackedDigests,
-		m.UnresolvedReports, m.Emissions, m.Dropped, m.SourceHealthy, m.PendingEmissions,
+		m.UnresolvedReports, m.Emissions, m.Dropped, m.SourceHealthy, m.RegistryLookups, m.RegistryLookupsSkipped, m.PendingEmissions,
 	)
 	return m
 }

@@ -4,9 +4,12 @@
 //
 // It only ever uses anonymous access. It never reads imagePullSecrets or
 // any other credential (#1533 decision D3): a private image simply stays
-// DigestKindUnknown. Results are cached per digest (digests are immutable);
-// failures are cached for FailureTTL so an unreachable registry is not
-// hammered.
+// DigestKindUnknown. Every connection - registry, token realm, redirect -
+// goes through a Guard that refuses loopback, link-local (cloud metadata),
+// unspecified and multicast addresses always, and private/LAN addresses
+// unless explicitly allowed, checked after DNS resolution. Results are
+// cached per digest (digests are immutable); failures and refusals are
+// cached for FailureTTL.
 package registry
 
 import (
@@ -24,24 +27,42 @@ import (
 	"github.com/kguardian-dev/kguardian/supplychain/pkg/types"
 )
 
+// Lookup outcomes, reported through OnLookup.
+const (
+	ResultIndex    = "index"
+	ResultManifest = "manifest"
+	ResultUnknown  = "unknown" // registry unreachable, private, or error
+	ResultSkipped  = "skipped" // refused by the Guard; reason says why
+)
+
 // Result is what is known about one digest.
 type Result struct {
 	Kind              string
 	PlatformManifests map[string]string
+	// Skipped is the Guard's reason when the lookup was refused.
+	Skipped string
 }
 
 // Inspector looks digests up anonymously, with a bounded cache.
 type Inspector struct {
-	// Timeout bounds one registry lookup. Default 10s.
+	// Guard restricts destinations. The zero value refuses private
+	// addresses.
+	Guard Guard
+	// Timeout bounds one lookup end to end. Default 5s.
 	Timeout time.Duration
-	// FailureTTL is how long an unknown result is cached. Default 1h.
+	// FailureTTL is how long an unknown or skipped result is cached.
+	// Default 1h.
 	FailureTTL time.Duration
 	// MaxEntries bounds the cache; when full it is cleared. Default 10000.
 	MaxEntries int
+	// OnLookup, if set, is called once per uncached lookup with the
+	// outcome (Result*) and, for skipped lookups, the Guard reason.
+	OnLookup func(result, reason string)
 	// Insecure allows plain-HTTP registries (tests only).
 	Insecure bool
-	// Transport overrides the HTTP transport (tests).
-	Transport http.RoundTripper
+
+	transportOnce sync.Once
+	transport     http.RoundTripper
 
 	mu    sync.Mutex
 	cache map[string]entry
@@ -54,13 +75,29 @@ type entry struct {
 }
 
 // New returns an Inspector with defaults.
-func New() *Inspector {
-	return &Inspector{Timeout: 10 * time.Second, FailureTTL: time.Hour, MaxEntries: 10000}
+func New(g Guard) *Inspector {
+	return &Inspector{Guard: g, Timeout: 5 * time.Second, FailureTTL: time.Hour, MaxEntries: 10000}
+}
+
+func (i *Inspector) timeout() time.Duration {
+	if i.Timeout <= 0 {
+		return 5 * time.Second
+	}
+	return i.Timeout
+}
+
+func (i *Inspector) rt() http.RoundTripper {
+	i.transportOnce.Do(func() {
+		if i.transport == nil {
+			i.transport = i.Guard.Transport(i.timeout())
+		}
+	})
+	return i.transport
 }
 
 // Inspect classifies digest in repository (e.g. "index.docker.io",
-// "library/nginx"). It never returns an error: anything it cannot
-// determine is DigestKindUnknown.
+// "library/nginx"). It never returns an error: anything it cannot or may
+// not determine is DigestKindUnknown.
 func (i *Inspector) Inspect(ctx context.Context, registry, repository, digest string) Result {
 	unknown := Result{Kind: types.DigestKindUnknown}
 	if repository == "" || digest == "" {
@@ -74,12 +111,24 @@ func (i *Inspector) Inspect(ctx context.Context, registry, repository, digest st
 	if r, ok := i.cached(key); ok {
 		return r
 	}
-	res, definitive := i.lookup(ctx, key)
+	res, definitive := i.lookup(ctx, registry, key)
 	i.store(key, res, definitive)
+	if i.OnLookup != nil {
+		switch {
+		case res.Skipped != "":
+			i.OnLookup(ResultSkipped, res.Skipped)
+		case res.Kind == types.DigestKindIndex:
+			i.OnLookup(ResultIndex, "")
+		case res.Kind == types.DigestKindManifest:
+			i.OnLookup(ResultManifest, "")
+		default:
+			i.OnLookup(ResultUnknown, "")
+		}
+	}
 	return res
 }
 
-func (i *Inspector) lookup(ctx context.Context, ref string) (Result, bool) {
+func (i *Inspector) lookup(ctx context.Context, registry, ref string) (Result, bool) {
 	unknown := Result{Kind: types.DigestKindUnknown}
 	var opts []name.Option
 	if i.Insecure {
@@ -89,18 +138,23 @@ func (i *Inspector) lookup(ctx context.Context, ref string) (Result, bool) {
 	if err != nil {
 		return unknown, true // malformed will not get better
 	}
-	timeout := i.Timeout
-	if timeout <= 0 {
-		timeout = 10 * time.Second
+	// Cheap pre-check before any network use; the transport re-checks
+	// every request and every resolved address.
+	if err := i.Guard.CheckHost(hostOnly(d.RegistryStr())); err != nil {
+		reason, _ := blockedReason(err)
+		return Result{Kind: types.DigestKindUnknown, Skipped: reason}, false
 	}
-	ctx, cancel := context.WithTimeout(ctx, timeout)
+	ctx, cancel := context.WithTimeout(ctx, i.timeout())
 	defer cancel()
-	ropts := []remote.Option{remote.WithAuth(authn.Anonymous), remote.WithContext(ctx)}
-	if i.Transport != nil {
-		ropts = append(ropts, remote.WithTransport(i.Transport))
-	}
-	desc, err := remote.Get(d, ropts...)
+	desc, err := remote.Get(d,
+		remote.WithAuth(authn.Anonymous),
+		remote.WithContext(ctx),
+		remote.WithTransport(i.rt()),
+	)
 	if err != nil {
+		if reason, ok := blockedReason(err); ok {
+			return Result{Kind: types.DigestKindUnknown, Skipped: reason}, false
+		}
 		return unknown, false
 	}
 	switch {
@@ -118,6 +172,18 @@ func (i *Inspector) lookup(ctx context.Context, ref string) (Result, bool) {
 		return Result{Kind: types.DigestKindManifest}, true
 	}
 	return unknown, true
+}
+
+func hostOnly(hostport string) string {
+	if strings.HasPrefix(hostport, "[") {
+		if i := strings.Index(hostport, "]"); i > 0 {
+			return hostport[1:i]
+		}
+	}
+	if i := strings.LastIndex(hostport, ":"); i > 0 && strings.Count(hostport, ":") == 1 {
+		return hostport[:i]
+	}
+	return hostport
 }
 
 // platforms maps "os/arch[/variant]" to manifest digest, skipping
@@ -182,10 +248,13 @@ func (i *Inspector) clock() time.Time {
 	return time.Now()
 }
 
-// Enrich sets DigestKind and PlatformManifests on img.
+// Enrich sets DigestKind and PlatformManifests on img. A skipped or failed
+// lookup leaves the kind as reported (unknown) and no platform map.
 func (i *Inspector) Enrich(ctx context.Context, img *types.ImageRef) {
 	r := i.Inspect(ctx, normaliseRegistry(img.Registry), img.Repository, img.Digest)
-	img.DigestKind = r.Kind
+	if r.Kind != types.DigestKindUnknown {
+		img.DigestKind = r.Kind
+	}
 	img.PlatformManifests = r.PlatformManifests
 }
 
@@ -201,5 +270,8 @@ func normaliseRegistry(r string) string {
 
 // String is for logs.
 func (r Result) String() string {
+	if r.Skipped != "" {
+		return "skipped: " + r.Skipped
+	}
 	return fmt.Sprintf("%s (%d platforms)", r.Kind, len(r.PlatformManifests))
 }

@@ -71,8 +71,7 @@ func setup(t *testing.T) (*counting, string, v1.Hash, v1.Hash, map[string]string
 
 func TestInspectIndexAndManifest(t *testing.T) {
 	c, host, idx, single, want := setup(t)
-	in := New()
-	in.Insecure = true
+	in := testInspector()
 
 	r := in.Inspect(context.Background(), host, "example/api", idx.String())
 	if r.Kind != types.DigestKindIndex || len(r.PlatformManifests) != 2 ||
@@ -103,8 +102,7 @@ func TestInspectIndexAndManifest(t *testing.T) {
 func TestInspectPrivateIsUnknownAndBackedOff(t *testing.T) {
 	c, host, idx, _, _ := setup(t)
 	c.deny = true
-	in := New()
-	in.Insecure = true
+	in := testInspector()
 	now := time.Unix(1000, 0)
 	in.now = func() time.Time { return now }
 
@@ -127,7 +125,7 @@ func TestInspectPrivateIsUnknownAndBackedOff(t *testing.T) {
 }
 
 func TestInspectDegenerateInputs(t *testing.T) {
-	in := New()
+	in := New(Guard{})
 	for _, c := range [][3]string{{"", "", "sha256:x"}, {"r", "repo", ""}, {"r", "Bad Repo", "sha256:nothex"}} {
 		if r := in.Inspect(context.Background(), c[0], c[1], c[2]); r.Kind != types.DigestKindUnknown {
 			t.Errorf("%v: %+v", c, r)
@@ -136,4 +134,12 @@ func TestInspectDegenerateInputs(t *testing.T) {
 	if normaliseRegistry("docker.io") != "index.docker.io" || normaliseRegistry("ghcr.io") != "ghcr.io" {
 		t.Error("registry normalisation")
 	}
+}
+
+// testInspector reaches the loopback httptest registry; everything else
+// about the guard is live.
+func testInspector() *Inspector {
+	in := New(Guard{allowLoopbackForTest: true})
+	in.Insecure = true
+	return in
 }

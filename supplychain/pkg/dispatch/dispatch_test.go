@@ -5,6 +5,7 @@ import (
 	"io"
 	"net/http"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -268,4 +269,55 @@ func TestEnricherRunsBeforeSend(t *testing.T) {
 	if c.sent[0].Image.DigestKind != types.DigestKindIndex {
 		t.Error("enricher did not run")
 	}
+}
+
+// A slow lookup on one key occupies one worker; the others keep sending,
+// and the lookup is cut off at EnrichTimeout.
+func TestSlowEnrichDoesNotStallOthers(t *testing.T) {
+	c := newFake()
+	d := New(c, quiet(), nil)
+	d.Workers = 2
+	d.EnrichTimeout = 300 * time.Millisecond
+	var timedOut atomic.Bool
+	d.Enrich = func(ctx context.Context, e *trivy.Emission) {
+		if e.Digest == "slow" {
+			<-ctx.Done() // a registry that never answers
+			timedOut.Store(true)
+		}
+	}
+	d.Enqueue(vulnEmission("slow", "x"))
+	for _, g := range []string{"g1", "g2", "g3", "g4"} {
+		d.Enqueue(vulnEmission(g, "x"))
+	}
+	run(t, d)
+	waitFor(t, func() bool { return len(c.sentDigests()) >= 4 })
+	if _, ok := c.sentDigests()["slow"]; ok && !timedOut.Load() {
+		t.Error("slow key sent before its lookup finished")
+	}
+	waitFor(t, func() bool { _, ok := c.sentDigests()["slow"]; return ok })
+	if !timedOut.Load() {
+		t.Error("enrich was not bounded by EnrichTimeout")
+	}
+}
+
+// Keys are never sent concurrently with themselves: a replacement waits
+// for the in-flight send of the same key.
+func TestSameKeyNeverConcurrent(t *testing.T) {
+	c := newFake()
+	c.block, c.entered = make(chan struct{}), make(chan struct{})
+	d := New(c, quiet(), nil)
+	d.Workers = 4
+	run(t, d)
+	d.Enqueue(vulnEmission("a", "1"))
+	<-c.entered
+	d.Enqueue(vulnEmission("a", "2"))
+	select {
+	case <-c.entered:
+		t.Fatal("second send of the same key started while the first was in flight")
+	case <-time.After(100 * time.Millisecond):
+	}
+	c.block <- struct{}{}
+	<-c.entered
+	c.block <- struct{}{}
+	waitFor(t, func() bool { return d.Pending() == 0 && c.sentDigests()["a"] == "2" })
 }

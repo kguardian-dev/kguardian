@@ -85,14 +85,42 @@ carries:
 - `image.platform_manifests`: for an index, `"os/arch[/variant]"` → manifest
   digest. Attestation entries (`unknown/unknown`) are skipped.
 
-These come from an anonymous registry lookup (go-containerregistry with
-`authn.Anonymous`) done on the send path, never in an informer handler. It
-**never** uses pull secrets or any other credential. A private or
-unreachable registry leaves the kind as `unknown`, and that result is cached
-for an hour. Definitive answers are cached per digest, since digests are
-immutable. Disable the lookup with `REGISTRY_LOOKUP_ENABLED=false`
-(`supplychain.registryLookup.enabled`), for example on air-gapped clusters.
-Everything then stays `unknown`.
+These come from an anonymous registry lookup: go-containerregistry with
+`authn.Anonymous`, and never pull secrets or any other credential. The
+lookup runs on the dispatcher's worker pool (3 workers), never in an
+informer handler. Each lookup has a 5 s timeout, so a slow registry ties up
+one worker, not the queue.
+
+- **Caching.** Definitive answers are cached per digest, since digests are
+  immutable. Failures and refusals are cached for an hour. A private,
+  unreachable or refused registry leaves `digest_kind` as reported
+  (`unknown`) and `platform_manifests` empty.
+- **Default.** The lookup follows broker ingest: with
+  `supplychain.registryLookup.enabled` unset it is on exactly when
+  `brokerIngest.enabled` is, so nothing leaves the cluster while payloads
+  are only logged. Set it explicitly to override, e.g. `false` for
+  air-gapped clusters.
+
+**Address guard.** The registry name comes from a pod spec, so anyone who
+can create a pod picks the destination. Every connection goes through a
+guard: the registry, the token realm it advertises, and every redirect.
+
+| Destination | Handling |
+|---|---|
+| Loopback, link-local (`169.254.0.0/16` incl. cloud metadata, `fe80::/10`), unspecified, multicast, `localhost` | Always refused. |
+| RFC1918, CGNAT `100.64.0.0/10`, ULA `fc00::/7`, `*.local`, single-label names | Refused unless `supplychain.registryLookup.allowPrivateRegistries=true` (`REGISTRY_ALLOW_PRIVATE`), e.g. for a homelab LAN registry. |
+
+- The host name is checked on every request.
+- The **resolved IP** is checked again in the dialer, immediately before
+  each connect, so DNS rebinding cannot get round the name check.
+- Proxy environment variables are ignored for lookups: behind a proxy, the
+  dial check would only see the proxy's address.
+- go-containerregistry already rejects a token realm that is a private or
+  link-local IP literal; that is reported as `blocked_realm`.
+- Refused lookups are counted in
+  `kguardian_supplychain_registry_lookups_skipped_total{reason}`, with
+  reason `blocked_address`, `private_address`, `local_hostname` or
+  `blocked_realm`.
 
 **Join contract for the broker (P1-3).** To attach a payload to running
 containers, the broker should try, in order:
@@ -127,9 +155,10 @@ With `BROKER_INGEST_ENABLED=true`, the `HTTPClient`:
 - Uses provisional route paths `POST /images/{digest}/vulnerabilities` and
   `POST /images/{digest}/sbom`; P1-3 owns the final shape.
 
-Sends go through a queue keyed by (kind, digest). Informer handlers never
-block on the network, and a burst of updates to one digest sends only the
-latest. Each key has its own retry state, so one bad payload never holds up
+Sends go through a queue keyed by (kind, digest) and run on a pool of 3
+workers, never more than one send per key at a time. Informer handlers
+never block on the network, and a burst of updates to one digest sends only
+the latest. Each key has its own retry state, so one bad payload never holds up
 the others:
 
 | Outcome | Handling |
@@ -158,7 +187,8 @@ it. The replacement starts with a clean backoff.
 | `TRIVY_OPERATOR_ENABLED` | `true` | Enable the Trivy Operator source. The chart sets this from `supplychain.sources.trivyOperator.enabled`. |
 | `TRIVY_RESYNC_PERIOD` | `10m` | Informer resync. It also retries digest resolution for held-back reports. |
 | `TRIVY_RECHECK_PERIOD` | `5m` | How often discovery re-runs to pick up installed or removed CRDs. |
-| `REGISTRY_LOOKUP_ENABLED` | `true` | Anonymous registry lookup for `digest_kind` / `platform_manifests`. |
+| `REGISTRY_LOOKUP_ENABLED` | value of `BROKER_INGEST_ENABLED` | Anonymous registry lookup for `digest_kind` / `platform_manifests`. |
+| `REGISTRY_ALLOW_PRIVATE` | `false` | Let lookups reach RFC1918/CGNAT/ULA addresses, `.local` and single-label names. Loopback, link-local, unspecified and multicast are always refused. |
 | `BROKER_INGEST_ENABLED` | `false` | Send payloads to the broker instead of logging them. |
 | `BROKER_URL` | `http://kguardian-broker:9090` | Broker base URL. |
 | `BROKER_AUTH_TOKEN` | *(unset)* | Scoped broker token, sent as a bearer token. |
@@ -186,6 +216,8 @@ auth and the read APIs.
 | `kguardian_supplychain_emissions_total` | `kind`, `result` | Send attempts: `ok`, `retry`, `dropped`. |
 | `kguardian_supplychain_emissions_dropped_total` | `kind`, `reason` | Payloads dropped as non-retryable (`http_<code>`, `too_large`, `encoding`). |
 | `kguardian_supplychain_pending_emissions` | | Queue depth, including keys waiting out a backoff. |
+| `kguardian_supplychain_registry_lookups_total` | `result` | Uncached registry lookups: `index`, `manifest`, `unknown`, `skipped`. |
+| `kguardian_supplychain_registry_lookups_skipped_total` | `reason` | Lookups refused by the address guard. |
 
 Plus the standard Go runtime and process collectors.
 

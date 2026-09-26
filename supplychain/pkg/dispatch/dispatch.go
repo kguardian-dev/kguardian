@@ -12,6 +12,10 @@
 //
 // A payload replaced while in flight or backing off is never retried over
 // its replacement; the replacement starts with a clean backoff.
+//
+// Sends (including the enrichment step, e.g. a registry lookup) run on a
+// small bounded worker pool, one key at a time, so a slow lookup or a slow
+// broker call occupies one worker, not the whole queue.
 package dispatch
 
 import (
@@ -41,7 +45,8 @@ type item struct {
 }
 
 // Enricher fills in image metadata (e.g. digest kind) before a send. It
-// runs on the dispatcher goroutine, never in an informer handler.
+// runs on a dispatcher worker, never in an informer handler, under
+// EnrichTimeout.
 type Enricher func(ctx context.Context, e *trivy.Emission)
 
 // Dispatcher is a coalescing, per-key-backoff send queue in front of a
@@ -51,18 +56,23 @@ type Dispatcher struct {
 	log     *logrus.Logger
 	metrics *metrics.Metrics
 
-	// Enrich, when set, runs before each send.
+	// Enrich, when set, runs before each send, bounded by EnrichTimeout.
 	Enrich Enricher
+	// EnrichTimeout bounds one Enrich call. Default 5s.
+	EnrichTimeout time.Duration
+	// Workers is the number of concurrent sends. Default 3.
+	Workers int
 	// Backoff bounds for retryable failures.
 	MinBackoff, MaxBackoff time.Duration
 	// now and jitter are replaceable in tests.
 	now    func() time.Time
 	jitter func(time.Duration) time.Duration
 
-	mu      sync.Mutex
-	pending map[key]*item
-	gens    map[key]uint64
-	notify  chan struct{}
+	mu       sync.Mutex
+	pending  map[key]*item
+	inFlight map[key]bool
+	gens     map[key]uint64
+	notify   chan struct{}
 }
 
 // New returns a Dispatcher. m may be nil.
@@ -82,9 +92,12 @@ func New(client broker.Client, log *logrus.Logger, m *metrics.Metrics) *Dispatch
 			}
 			return d/2 + rand.N(d/2)
 		},
-		pending: map[key]*item{},
-		gens:    map[key]uint64{},
-		notify:  make(chan struct{}, 1),
+		EnrichTimeout: 5 * time.Second,
+		Workers:       3,
+		pending:       map[key]*item{},
+		inFlight:      map[key]bool{},
+		gens:          map[key]uint64{},
+		notify:        make(chan struct{}, 1),
 	}
 }
 
@@ -114,53 +127,83 @@ func (d *Dispatcher) Pending() int {
 	return len(d.pending)
 }
 
-// Run sends queued payloads until ctx is cancelled.
+type job struct {
+	k  key
+	it *item
+}
+
+// Run sends queued payloads until ctx is cancelled, then waits for the
+// workers to finish their current send.
 func (d *Dispatcher) Run(ctx context.Context) {
+	workers := d.Workers
+	if workers <= 0 {
+		workers = 3
+	}
+	jobs := make(chan job)
+	var wg sync.WaitGroup
+	for range workers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case j := <-jobs:
+					d.process(ctx, j)
+				}
+			}
+		}()
+	}
+	defer wg.Wait()
+
 	for {
-		wait := d.sendDue(ctx)
+		k, it, wait := d.nextDue()
+		if it != nil {
+			select {
+			case jobs <- job{k, it}:
+				continue
+			case <-ctx.Done():
+				return
+			}
+		}
+		var t *time.Timer
 		var timer <-chan time.Time
 		if wait > 0 {
-			t := time.NewTimer(wait)
+			t = time.NewTimer(wait)
 			timer = t.C
-			select {
-			case <-ctx.Done():
-				t.Stop()
-				return
-			case <-d.notify:
-				t.Stop()
-			case <-timer:
-			}
-			continue
 		}
 		select {
 		case <-ctx.Done():
-			return
 		case <-d.notify:
+		case <-timer:
 		}
-	}
-}
-
-// sendDue sends every payload whose backoff has elapsed, one at a time,
-// and returns how long until the next one is due (0 when nothing waits).
-func (d *Dispatcher) sendDue(ctx context.Context) time.Duration {
-	for {
+		if t != nil {
+			t.Stop()
+		}
 		if ctx.Err() != nil {
-			return 0
+			return
 		}
-		k, it, wait := d.nextDue()
-		if it == nil {
-			return wait
-		}
-		if d.Enrich != nil {
-			d.Enrich(ctx, &it.e)
-		}
-		err := d.send(ctx, it.e)
-		d.finish(k, it, err)
 	}
 }
 
-// nextDue pops the due item with the earliest notBefore. When none is due
-// it returns the time until the soonest one.
+func (d *Dispatcher) process(ctx context.Context, j job) {
+	if d.Enrich != nil {
+		timeout := d.EnrichTimeout
+		if timeout <= 0 {
+			timeout = 5 * time.Second
+		}
+		ectx, cancel := context.WithTimeout(ctx, timeout)
+		d.Enrich(ectx, &j.it.e)
+		cancel()
+	}
+	err := d.send(ctx, j.it.e)
+	d.finish(j.k, j.it, err)
+}
+
+// nextDue pops the due item with the earliest notBefore, skipping keys
+// already being sent. When none is due it returns the time until the
+// soonest one.
 func (d *Dispatcher) nextDue() (key, *item, time.Duration) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
@@ -169,6 +212,9 @@ func (d *Dispatcher) nextDue() (key, *item, time.Duration) {
 	var best *item
 	var soonest time.Duration
 	for k, it := range d.pending {
+		if d.inFlight[k] {
+			continue // its replacement waits for the current send to finish
+		}
 		if it.notBefore.After(now) {
 			if w := it.notBefore.Sub(now); soonest == 0 || w < soonest {
 				soonest = w
@@ -183,6 +229,7 @@ func (d *Dispatcher) nextDue() (key, *item, time.Duration) {
 		return key{}, nil, soonest
 	}
 	delete(d.pending, bestK)
+	d.inFlight[bestK] = true
 	d.setPendingLocked()
 	return bestK, best, 0
 }
@@ -190,6 +237,9 @@ func (d *Dispatcher) nextDue() (key, *item, time.Duration) {
 func (d *Dispatcher) finish(k key, it *item, err error) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
+	delete(d.inFlight, k)
+	// A replacement may have been waiting on this key.
+	defer d.wake()
 	fields := logrus.Fields{"kind": it.e.Kind, "digest": it.e.Digest, "attempt": it.attempts + 1}
 	switch {
 	case err == nil:
