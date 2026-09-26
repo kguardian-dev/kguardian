@@ -298,7 +298,7 @@ func fetchAndRenderProfile(ref workloadRef, output string, w io.Writer) error {
 		return profileNotFound(ref, err)
 	}
 	if err != nil {
-		return fmt.Errorf("fetching profile for %s: %w", ref, err)
+		return brokerReadErr(fmt.Sprintf("fetching profile for %s", ref), err)
 	}
 	if output != "table" {
 		return writeRaw(w, raw, output)
@@ -403,7 +403,7 @@ func renderProfileTable(dst io.Writer, ref workloadRef, p *api.Profile) error {
 func fetchAndRenderProfiles(opts api.ProfileListOptions, output string, w, errw io.Writer) error {
 	page, raw, err := api.GetProfiles(opts)
 	if err != nil {
-		return fmt.Errorf("fetching workload profiles: %w", err)
+		return brokerReadErr("fetching workload profiles", err)
 	}
 	if output != "table" {
 		return writeRaw(w, raw, output)
@@ -449,7 +449,7 @@ func fetchAndRenderProfileDiff(ref workloadRef, from, to int, output string, w i
 		return fmt.Errorf("%s has no stored profile revisions yet", ref)
 	}
 	if err != nil {
-		return fmt.Errorf("fetching profile diff for %s: %w", ref, err)
+		return brokerReadErr(fmt.Sprintf("fetching profile diff for %s", ref), err)
 	}
 	if output != "table" {
 		return writeRaw(w, raw, output)
@@ -464,7 +464,26 @@ func fmtRev(v *api.ProfileVersion) string {
 	return fmt.Sprintf("%d (%s)", v.Revision, v.CreatedAt)
 }
 
-// fmtValue renders a diff value; null is "unset".
+// Diff scalars whose null means "kguardian could not tell" rather than
+// "not set in the spec": a derived level or state, never a pass.
+var unknownWhenNull = map[string]string{
+	"level":        "unknown",
+	"captureLevel": "unknown",
+	"audited":      "unknown",
+	"cr":           "none",
+}
+
+// fmtSide renders one side of a {from,to} pair for key.
+func fmtSide(key string, v any) string {
+	if v == nil {
+		if s, ok := unknownWhenNull[key]; ok {
+			return s
+		}
+	}
+	return fmtValue(v)
+}
+
+// fmtValue renders a diff value; null is "unset" (a spec field not set).
 func fmtValue(v any) string {
 	if v == nil {
 		return "unset"
@@ -487,7 +506,11 @@ func fmtDiffEntry(v any) string {
 		return fmtValue(v)
 	}
 	if dir, ok := m["direction"]; ok {
-		return fmt.Sprintf("%s %s/%s %s", fmtValue(dir), fmtValue(m["protocol"]), fmtValue(m["port"]), fmtValue(m["peer"]))
+		port := "unknown"
+		if m["port"] != nil {
+			port = fmtValue(m["port"])
+		}
+		return fmt.Sprintf("%s %s/%s %s", fmtValue(dir), fmtValue(m["protocol"]), port, fmtValue(m["peer"]))
 	}
 	if f, ok := m["field"]; ok {
 		return fmt.Sprintf("%s: %s -> %s", fmtValue(f), fmtValue(m["from"]), fmtValue(m["to"]))
@@ -537,7 +560,7 @@ func writeDiffField(b *strings.Builder, key string, v any, indent string) {
 		// unchanged
 	case map[string]any:
 		if _, hasFrom := val["from"]; hasFrom {
-			fmt.Fprintf(b, "%s%s: %s -> %s\n", indent, key, fmtValue(val["from"]), fmtValue(val["to"]))
+			fmt.Fprintf(b, "%s%s: %s -> %s\n", indent, key, fmtSide(key, val["from"]), fmtSide(key, val["to"]))
 			return
 		}
 		fmt.Fprintf(b, "%s%s: %s\n", indent, key, fmtValue(val))
@@ -593,7 +616,7 @@ func exportPSSPatch(ref workloadRef, w, errw io.Writer) error {
 		return profileNotFound(ref, err)
 	}
 	if err != nil {
-		return fmt.Errorf("fetching profile for %s: %w", ref, err)
+		return brokerReadErr(fmt.Sprintf("fetching profile for %s", ref), err)
 	}
 	ps := p.PodSecurity()
 	if ps == nil || ps.Level == nil {

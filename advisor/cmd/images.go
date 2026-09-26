@@ -130,7 +130,7 @@ func runImagesGet(cmd *cobra.Command, args []string) error {
 func fetchAndRenderImages(opts api.ImageListOptions, output string, w, errw io.Writer) error {
 	page, raw, err := api.GetImages(opts)
 	if err != nil {
-		return fmt.Errorf("fetching image inventory: %w", err)
+		return brokerReadErr("fetching image inventory", err)
 	}
 	if output != "table" {
 		return writeRaw(w, raw, output)
@@ -171,7 +171,7 @@ func fetchAndRenderImage(digest, output string, w io.Writer) error {
 		return fmt.Errorf("image %s is not in the inventory", digest)
 	}
 	if err != nil {
-		return fmt.Errorf("fetching image %s: %w", digest, err)
+		return brokerReadErr(fmt.Sprintf("fetching image %s", digest), err)
 	}
 	if output != "table" {
 		return writeRaw(w, raw, output)

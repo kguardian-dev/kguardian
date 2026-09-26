@@ -291,7 +291,7 @@ func TestProfileDiff_Revision1FromNull(t *testing.T) {
 		t.Fatalf("diff: %v", err)
 	}
 	s := out.String()
-	for _, want := range []string{"From:     (none)", "To:       1", "level: unset -> baseline", "captureLevel: unset -> full", "audited: unset -> false", "+ read"} {
+	for _, want := range []string{"From:     (none)", "To:       1", "level: unknown -> baseline", "captureLevel: unknown -> full", "audited: unknown -> false", "+ read"} {
 		if !strings.Contains(s, want) {
 			t.Errorf("missing %q in:\n%s", want, s)
 		}

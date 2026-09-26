@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"bytes"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
@@ -157,6 +158,37 @@ func TestImagesGet_AuthErrorSurfaces(t *testing.T) {
 	err := fetchAndRenderImage(testDigest, "table", &out)
 	if err == nil || !strings.Contains(err.Error(), "KGUARDIAN_BROKER_TOKEN") {
 		t.Fatalf("want auth guidance, got %v", err)
+	}
+	if !strings.Contains(err.Error(), "hint: this needs a broker token with the read scope") || !strings.Contains(err.Error(), "--broker-token-file") {
+		t.Errorf("want the read-scope hint, got %v", err)
+	}
+}
+
+// A 403 (token set, wrong scope) on every new read command gets the hint;
+// other errors do not.
+func TestBrokerReadErr_HintOnlyForAuth(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusForbidden)
+	}))
+	defer srv.Close()
+	origURL, origTok := api.BrokerBaseURL, api.BrokerAuthToken
+	api.BrokerBaseURL, api.BrokerAuthToken = srv.URL, "ingest-only"
+	defer func() { api.BrokerBaseURL, api.BrokerAuthToken = origURL, origTok }()
+	var out, errOut bytes.Buffer
+	checks := map[string]error{
+		"images list":    fetchAndRenderImages(api.ImageListOptions{}, "table", &out, &errOut),
+		"profile get":    fetchAndRenderProfile(checkoutRef, "table", &out),
+		"profile list":   fetchAndRenderProfiles(api.ProfileListOptions{}, "table", &out, &errOut),
+		"profile diff":   fetchAndRenderProfileDiff(checkoutRef, 0, 0, "table", &out),
+		"profile export": exportPSSPatch(checkoutRef, &out, &errOut),
+	}
+	for name, err := range checks {
+		if err == nil || !strings.Contains(err.Error(), "HTTP 403") || !strings.Contains(err.Error(), "read scope") {
+			t.Errorf("%s: want 403 with read-scope hint, got %v", name, err)
+		}
+	}
+	if e := brokerReadErr("x", errors.New("boom")); strings.Contains(e.Error(), "hint") {
+		t.Errorf("non-auth error must not carry the hint: %v", e)
 	}
 }
 

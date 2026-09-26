@@ -4,11 +4,13 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"strings"
 	"time"
 
+	"github.com/kguardian-dev/kguardian/advisor/pkg/api"
 	"github.com/kguardian-dev/kguardian/advisor/pkg/k8s"
 	log "github.com/rs/zerolog/log"
 	"github.com/spf13/cobra"
@@ -41,6 +43,16 @@ func connectBroker(cmd *cobra.Command) (func(), error) {
 		close(stopChan)
 		return nil, fmt.Errorf("timeout waiting for broker port-forward")
 	}
+}
+
+// brokerReadErr wraps a broker read failure. A 401/403 gets the token hint:
+// these endpoints need a token carrying the broker's read scope.
+func brokerReadErr(what string, err error) error {
+	var ae *api.BrokerAuthError
+	if errors.As(err, &ae) {
+		return fmt.Errorf("%s: %w\nhint: this needs a broker token with the read scope (the \"read\" key of the broker auth Secret, e.g. kubectl -n kguardian get secret kguardian-broker-auth -o jsonpath='{.data.read}' | base64 -d > token); pass it with --broker-token-file token or set KGUARDIAN_BROKER_TOKEN", what, err)
+	}
+	return fmt.Errorf("%s: %w", what, err)
 }
 
 // parseOutput normalises -o and checks it against the allowed formats.
