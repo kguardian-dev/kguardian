@@ -936,24 +936,33 @@ From `GET /workloads/payments/Deployment/checkout/profile` -> 200 (capture `prof
   workload was never exported. `baselines.securityContext`: `{source: "export"|"previousVersion", revision,
   since}`, `null` when there is no baseline.
 - `evaluated`: the checks that could run for the whole workload. A check that is not listed was **not
-  evaluated** (no inventory, no export, no baseline, no runtime coverage); its absence from `items` means
-  nothing. `unshippedExecutable` is listed only when every current running container's capture covered it
-  over the coverage window (`kg_runtime_coverage`) and the unshipped read was not cut.
-- `notEvaluated` (v1.7): `[{type, container, reason}]`, per container, the checks that could not run and
-  why; `container` is `null` for the whole workload. For `unshippedExecutable` the reason is
-  `no_inventory` (the controller reports no runtime inventory for the workload: mode off, excluded or
-  opted out), `no_runtime_data` (no coverage heartbeat for the container's running digest),
-  `truncated` (more unshipped rows than the read returns), or the coverage function's own reason
-  (`capture_gap`, lost events, incomplete backfill, ...). A file seen running from an unshipped origin is
-  an item whatever the coverage; coverage only decides whether "none seen" may be said.
+  evaluated**; its absence from `items` means nothing. Every check is in exactly one of `evaluated` and
+  `notEvaluated`. `unshippedExecutable` is listed only when every current running container's capture
+  covered it over the drift window (`kg_runtime_coverage`, **24 h**; the `capabilities` block of section
+  2.9 uses its own evidence window, 168 h by default) and every current (container, digest) pair was read.
+- `notEvaluated` (v1.7): `[{type, container, reason}]`, every check that could not run and why;
+  `container` is `null` for the whole workload. Reasons:
+  - `tagMoved`: `no_image_inventory`;
+  - `imageChangedSinceExport`: `no_export` (never exported), `no_image_inventory`;
+  - `securityContextRegression`: `no_baseline` (no export and no earlier version with different
+    podSecurity content), `no_container_data`;
+  - `unshippedExecutable`: `no_inventory` (the controller reports no runtime inventory for the workload:
+    mode off, excluded or opted out), `no_running_containers`, `no_runtime_data` (no coverage heartbeat
+    for the container's running digest), `truncated` (more than 32 current (container, digest) pairs:
+    the rest were not read), or the coverage function's own reason (`capture_gap`, `events_dropped`,
+    `events_pending`, `libraries_not_tracked`, `incomplete_paths`, `probes_missing`, ...).
+  A file seen running from an unshipped origin is an item whatever the coverage; coverage only decides
+  whether "none seen" may be said.
 - `items[]`: `{type, findingId, severity, container, detail}`. `detail` by type:
   - `tagMoved`: `{imageRef, digests[], since}`;
   - `imageChangedSinceExport`: `{containerInExport, exportedDigests[], newDigests[]}`;
   - `securityContextRegression`: `{newlyFailing[] (check ids), levelFrom, levelTo}`; `container` is `null`
     for a pod-level regression;
   - `unshippedExecutable`: `{origins[], files[] (newest first, at most 20: {path, kind, origin, digest,
-    pathComplete, firstSeen, lastSeen}), filesTotal, truncated}`. Rows of a digest the container no
-    longer runs are not current drift and are not listed. `pathComplete: false` means the kernel path walk
+    pathComplete, firstSeen, lastSeen}), filesTotal, truncated}`. Only the container's CURRENT digests are
+    read (each (container, digest) pair on its own, newest 20 plus a count), so rows a digest the
+    container no longer runs left behind can neither appear nor crowd out a current one. `truncated` =
+    `filesTotal` is more than the files listed. `pathComplete: false` means the kernel path walk
     was cut and `path` is a suffix.
 - A new container is not a securityContext regression. An improvement is never reported.
 - Metrics: `/metrics` exposes the gauge `kguardian_workload_drift{workload_namespace, workload_kind,
@@ -1708,6 +1717,8 @@ From `GET /workloads/payments/Deployment/checkout/export?mode=enforce&format=zip
     not ship (writable layer, memfd, deleted), from the runtime inventory (#1683). Finding id
     `drift.unshippedExecutable/<container>`, dimension `drift`; like every drift finding it never sets
     posture.
-  - New `drift.notEvaluated[]` `{type, container, reason}`: why a check could not run for a container.
-    No runtime inventory or no capture coverage is "not evaluated", never "no drift".
+  - New `drift.notEvaluated[]` `{type, container, reason}`: every drift check that could not run (the
+    v1.4 checks too: `no_image_inventory`, `no_export`, `no_baseline`, `no_container_data`) and why. No
+    runtime inventory, no running container or no capture coverage is "not evaluated", never "no drift".
+    Every check is in exactly one of `evaluated` and `notEvaluated`.
   - `/metrics` `kguardian_workload_drift` gains the `type="unshippedExecutable"` series.
