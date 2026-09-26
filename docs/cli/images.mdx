@@ -211,7 +211,9 @@ in the header as not covered. See
 [ImageTrustPolicy](/concepts/image-trust-policy#generating-policies) for what
 is generated.
 
-The policy is fetched whole before anything is written. If the broker's
+The policy is fetched whole before anything is written, and `-f` writes a
+temporary file in the same directory and renames it over the target, so a
+crash never leaves a partial file. If the broker's
 answer is larger than the client reads (10 MiB), nothing is written and the
 command exits 2 ("could not check") rather than leaving a cut-off policy.
 
