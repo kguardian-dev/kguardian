@@ -361,7 +361,11 @@ pub fn load_evidence(
         .iter()
         .map(|(c, d)| (c.as_str(), d.as_str()))
         .unzip();
-    let coverage: Vec<CapCoverageRow> = if current.is_empty() {
+    let coverage: Vec<CapCoverageRow> = if current.is_empty() || !coverage_functions_present(conn)?
+    {
+        // No coverage function (a database without the runtime inventory
+        // migrations, or one a test stubbed out): no evidence, never an
+        // error; the profile must not fail because of capabilities.
         Vec::new()
     } else {
         sql_query(
@@ -385,6 +389,25 @@ pub fn load_evidence(
         coverage,
         window_hours,
     })
+}
+
+/// Both coverage functions exist (kg_capability_coverage calls
+/// kg_runtime_coverage). Checked instead of calling and catching the
+/// error, which would abort the caller's transaction.
+fn coverage_functions_present(conn: &mut PgConnection) -> Result<bool, DbError> {
+    #[derive(QueryableByName)]
+    struct E {
+        #[diesel(sql_type = Bool)]
+        e: bool,
+    }
+    Ok(sql_query(
+        "SELECT to_regprocedure('kg_capability_coverage(text,text,text,text,text,text,integer)') \
+             IS NOT NULL \
+         AND to_regprocedure('kg_runtime_coverage(text,text,text,text,text,text,integer)') \
+             IS NOT NULL AS e",
+    )
+    .get_result::<E>(conn)?
+    .e)
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
@@ -793,6 +816,8 @@ mod tests {
         let mut conn = PgConnection::establish(&url).expect("connect");
         conn.run_pending_migrations(TEST_MIGRATIONS)
             .expect("migrate");
+        // kg_capability_coverage calls it; other live tests drop it.
+        crate::runtime_inventory::restore_coverage_function(&mut conn);
         conn
     }
 
@@ -1020,6 +1045,40 @@ mod tests {
             ["capture_gap", "capabilities_not_tracked"].contains(&a.reason.as_deref().unwrap()),
             "{a:?}"
         );
+        conn.batch_execute("DELETE FROM runtime_coverage WHERE pod_namespace = 'capns'")
+            .unwrap();
+
+        // Without the coverage functions the evidence is insufficient, and
+        // reading it is not an error inside a transaction: the profile
+        // never fails because of capabilities.
+        crate::runtime_inventory::upsert_coverage(&mut conn, &[beat("k2", true, 200)]).unwrap();
+        conn.batch_execute(
+            "DROP FUNCTION kg_capability_coverage(text, text, text, text, text, text, integer); \
+             DROP FUNCTION kg_runtime_coverage(text, text, text, text, text, text, integer);",
+        )
+        .unwrap();
+        let ev = conn
+            .transaction::<_, DbError, _>(|conn| {
+                load_evidence(
+                    conn,
+                    "capns",
+                    "Deployment",
+                    "capweb",
+                    &[("app".into(), D.into())],
+                    168,
+                )
+            })
+            .expect("no error, and the transaction is not aborted");
+        assert!(ev.coverage.is_empty());
+        let view = build_view(&[container(&[], &[D])], &ev);
+        assert_eq!(view.containers[0].evidence, "insufficient");
+        crate::runtime_inventory::restore_coverage_function(&mut conn);
+        let up = include_str!("../db/migrations/2026-09-29-200000_runtime_capabilities/up.sql");
+        let f = &up[up
+            .find("CREATE OR REPLACE FUNCTION kg_capability_coverage")
+            .unwrap()..];
+        conn.batch_execute(&f[..f.find("$fn$;").unwrap() + 5])
+            .unwrap();
         conn.batch_execute("DELETE FROM runtime_coverage WHERE pod_namespace = 'capns'")
             .unwrap();
     }
