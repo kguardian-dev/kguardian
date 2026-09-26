@@ -208,9 +208,26 @@ fn compute_image_use(rows: &[RtRow], comps: &[Component], has_sbom: bool) -> Ima
     out
 }
 
-/// Recompute package use for one inventory digest. Returns rows written.
-pub fn refresh_image_use(conn: &mut PgConnection, image: &str) -> Result<usize, DbError> {
-    let rows: Vec<RtRow> = sql_query(format!(
+/// What one image's refresh did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ImageRefresh {
+    pub rows_written: usize,
+    /// The image had more runtime rows than were read: packages seen only
+    /// in the rest are not recorded, so its coverage must not be trusted.
+    pub truncated: bool,
+}
+
+/// Recompute package use for one inventory digest.
+pub fn refresh_image_use(conn: &mut PgConnection, image: &str) -> Result<ImageRefresh, DbError> {
+    refresh_image_use_capped(conn, image, MAX_RUNTIME_ROWS_PER_IMAGE)
+}
+
+pub(crate) fn refresh_image_use_capped(
+    conn: &mut PgConnection,
+    image: &str,
+    cap: i64,
+) -> Result<ImageRefresh, DbError> {
+    let mut rows: Vec<RtRow> = sql_query(format!(
         "SELECT cluster_id, pod_namespace, workload_kind, workload_name, container_name, \
              kind, path, first_seen, last_seen \
          FROM {RUNTIME_TABLE} \
@@ -218,8 +235,10 @@ pub fn refresh_image_use(conn: &mut PgConnection, image: &str) -> Result<usize, 
          ORDER BY last_seen DESC LIMIT $2"
     ))
     .bind::<Text, _>(image)
-    .bind::<BigInt, _>(MAX_RUNTIME_ROWS_PER_IMAGE)
+    .bind::<BigInt, _>(cap + 1)
     .load(conn)?;
+    let truncated = rows.len() as i64 > cap;
+    rows.truncate(cap as usize);
     let paths: BTreeSet<&str> = rows.iter().map(|r| r.path.as_str()).collect();
     let mut cands: Vec<String> = paths
         .iter()
@@ -330,7 +349,10 @@ pub fn refresh_image_use(conn: &mut PgConnection, image: &str) -> Result<usize, 
         .bind::<Text, _>(image)
         .bind::<Text, _>(&unowned_json)
         .execute(conn)?;
-        Ok(a + b)
+        Ok(ImageRefresh {
+            rows_written: a + b,
+            truncated,
+        })
     })
 }
 
@@ -357,13 +379,22 @@ pub fn clear_package_use(conn: &mut PgConnection) -> QueryResult<usize> {
     Ok(a + b)
 }
 
+/// One batch of [`refresh_package_use_batch`].
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct BatchRefresh {
+    pub rows_written: usize,
+    /// The cursor for the next batch; `None` when every digest is done.
+    pub next: Option<String>,
+    /// Digests whose runtime rows were cut at the per-image cap.
+    pub truncated: Vec<String>,
+}
+
 /// Recompute package use for up to `batch` digests after the cursor.
-/// Returns rows written and the next cursor (None when done).
 pub fn refresh_package_use_batch(
     conn: &mut PgConnection,
     after: Option<&str>,
     batch: i64,
-) -> Result<(usize, Option<String>), DbError> {
+) -> Result<BatchRefresh, DbError> {
     let digests: Vec<DigestRow> = sql_query(format!(
         "SELECT DISTINCT image_digest FROM {RUNTIME_TABLE} \
          WHERE image_digest <> '' AND ($1::text IS NULL OR image_digest > $1) \
@@ -372,16 +403,20 @@ pub fn refresh_package_use_batch(
     .bind::<Nullable<Text>, _>(after)
     .bind::<BigInt, _>(batch)
     .load(conn)?;
-    let mut n = 0;
+    let mut out = BatchRefresh::default();
     for d in &digests {
-        n += refresh_image_use(conn, &d.image_digest)?;
+        let r = refresh_image_use(conn, &d.image_digest)?;
+        out.rows_written += r.rows_written;
+        if r.truncated {
+            out.truncated.push(d.image_digest.clone());
+        }
     }
-    let next = if (digests.len() as i64) < batch {
+    out.next = if (digests.len() as i64) < batch {
         None
     } else {
         digests.last().map(|d| d.image_digest.clone())
     };
-    Ok((n, next))
+    Ok(out)
 }
 
 /// Drop derived rows of digests the runtime inventory no longer has.
@@ -419,24 +454,46 @@ pub fn coverage_available(conn: &mut PgConnection) -> QueryResult<bool> {
         .map(|r| r.e)
 }
 
+/// Whether this pass's package-use evidence is whole, so coverage may be
+/// believed. Coverage says capture watched a container; it proves
+/// "installed, not observed" only if every path capture saw was also
+/// matched to its package.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct UseEvidence {
+    /// Every inventory digest's package use was refreshed this pass.
+    pub complete: bool,
+    /// Digests whose runtime rows were cut at the per-image cap.
+    pub truncated: Vec<String>,
+}
+
 /// Rebuild `runtime_in_use_coverage` for every inventory workload
 /// container: from `kg_runtime_coverage` when present, else unknown
-/// (`no_runtime_data`) everywhere.
-pub fn refresh_coverage(conn: &mut PgConnection, s: &TierSettings) -> QueryResult<usize> {
+/// (`no_runtime_data`) everywhere. Where the package-use evidence is not
+/// whole (`evidence`: the pass stopped early, or a digest's runtime rows
+/// were truncated), a covered container is downgraded to
+/// `capture_gap`, so nothing is claimed installed-but-not-observed from
+/// part of the evidence.
+pub fn refresh_coverage(
+    conn: &mut PgConnection,
+    s: &TierSettings,
+    evidence: &UseEvidence,
+) -> QueryResult<usize> {
     let available = coverage_available(conn)?;
     conn.transaction(|conn| {
         sql_query("DELETE FROM runtime_in_use_coverage").execute(conn)?;
         let select = if available {
             "SELECT wc.cluster_id, wc.pod_namespace, wc.workload_kind, wc.workload_name, \
-                 wc.container_name, wc.image_digest, COALESCE(k.covered, false), \
-                 CASE WHEN k.covered IS TRUE THEN NULL \
+                 wc.container_name, wc.image_digest, COALESCE(k.covered, false) AND NOT g.gap, \
+                 CASE WHEN k.covered IS TRUE AND NOT g.gap THEN NULL \
+                      WHEN k.covered IS TRUE THEN 'capture_gap' \
                       ELSE COALESCE(NULLIF(k.reason, ''), 'no_runtime_data') END, \
-                 CASE WHEN k.covered IS TRUE THEN k.observed_since END, \
+                 CASE WHEN k.covered IS TRUE AND NOT g.gap THEN k.observed_since END, \
                  $1, timezone('UTC', NOW()) \
              FROM workload_containers wc \
              LEFT JOIN LATERAL kg_runtime_coverage(wc.cluster_id, wc.pod_namespace, \
                  wc.workload_kind, wc.workload_name, wc.container_name, wc.image_digest, $1) k \
-                 ON true"
+                 ON true \
+             CROSS JOIN LATERAL (SELECT (NOT $2 OR wc.image_digest = ANY($3)) AS gap) g"
         } else {
             "SELECT wc.cluster_id, wc.pod_namespace, wc.workload_kind, wc.workload_name, \
                  wc.container_name, wc.image_digest, false, 'no_runtime_data', \
@@ -449,6 +506,8 @@ pub fn refresh_coverage(conn: &mut PgConnection, s: &TierSettings) -> QueryResul
                  window_hours, computed_at) {select}"
         ))
         .bind::<Integer, _>(s.min_window_hours as i32)
+        .bind::<Bool, _>(evidence.complete)
+        .bind::<Array<Text>, _>(&evidence.truncated)
         .execute(conn)
     })
 }

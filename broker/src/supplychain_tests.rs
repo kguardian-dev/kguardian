@@ -1889,7 +1889,12 @@ fn live_database_only_the_dlopened_library_is_loaded() {
     );
     // The fixture's soname link must reach libfoo1's '.so.1' entry.
     assert!(iu::runtime_inventory_available(&mut conn).unwrap());
-    iu::refresh_package_use_batch(&mut conn, None, 10).unwrap();
+    let b = iu::refresh_package_use_batch(&mut conn, None, 10).unwrap();
+    assert_eq!((b.next.as_deref(), b.truncated.len()), (None, 0));
+    let whole = iu::UseEvidence {
+        complete: true,
+        truncated: vec![],
+    };
     assert_eq!(
         count(&mut conn, "SELECT count(*) AS n FROM runtime_package_use"),
         1,
@@ -1930,7 +1935,7 @@ fn live_database_only_the_dlopened_library_is_loaded() {
     // No coverage function (P1-2 has not shipped one): the unseen library
     // is unknown, never "not in use", and is tiered as if loaded.
     let t = crate::in_use::TierSettings::default();
-    iu::refresh_coverage(&mut conn, &t).unwrap();
+    iu::refresh_coverage(&mut conn, &t, &whole).unwrap();
     iu::refresh_exposure(&mut conn, 168).unwrap();
     let mut got = state_of(&mut conn, &all);
     got.sort();
@@ -1961,7 +1966,7 @@ fn live_database_only_the_dlopened_library_is_loaded() {
 
     // With coverage: the unseen library is installed-not-observed.
     exec(&mut conn, COVERAGE_STUB);
-    iu::refresh_coverage(&mut conn, &t).unwrap();
+    iu::refresh_coverage(&mut conn, &t, &whole).unwrap();
     let mut got = state_of(&mut conn, &all);
     got.sort();
     assert_eq!(
@@ -2083,8 +2088,154 @@ fn live_database_only_the_dlopened_library_is_loaded() {
     ));
 
     // Without coverage the artifact is unavailable, with the reason.
-    iu::refresh_coverage(&mut conn, &t).unwrap();
+    iu::refresh_coverage(&mut conn, &t, &whole).unwrap();
     let vd = crate::profile_export::vex_doc(&mut conn, &key, "audit").unwrap();
     assert!(!vd.available);
     assert!(vd.reason.unwrap().contains("installed-but-not-observed"));
+}
+
+/// Coverage is not believed from part of the evidence: a digest whose
+/// runtime rows were cut at the cap, or any digest when the package-use
+/// pass did not finish, is a capture gap, never installed-not-observed,
+/// so no VEX not_affected can come from a package seen only in the rows
+/// that were not read.
+#[test]
+#[ignore = "requires a live postgres (set KG_TEST_DATABASE_URL)"]
+fn live_database_truncated_or_unfinished_use_is_never_covered() {
+    use crate::in_use_store::{self as iu, UseEvidence, VexOutcome};
+    use crate::supplychain_read::{image_vulnerabilities_filtered, ListFilters};
+    let mut conn = live_conn();
+    exec(&mut conn, RUNTIME_EXECUTABLES_CONTRACT);
+    exec(
+        &mut conn,
+        "TRUNCATE runtime_executables, runtime_package_use, runtime_unowned_paths, \
+            runtime_in_use_coverage, workload_network_exposure;",
+    );
+    exec(&mut conn, COVERAGE_STUB);
+    let img = d(79);
+    seed_inventory(
+        &mut conn,
+        &img,
+        "ghcr.io/example/api",
+        "2.4.1",
+        "Deployment",
+        "api",
+        "app",
+        0,
+    );
+    let mut s = sbom_json(&img, "2026-09-20T08:00:00Z", &[], None);
+    s["components"] = json!([
+        {"name": "libfoo1", "version": "1", "purl": "pkg:deb/debian/libfoo1@1", "type": "debian",
+         "file_paths": ["/usr/lib/x86_64-linux-gnu/libfoo.so.1"]},
+        {"name": "libbar1", "version": "1", "purl": "pkg:deb/debian/libbar1@1", "type": "debian",
+         "file_paths": ["/usr/lib/x86_64-linux-gnu/libbar.so.1"]},
+    ]);
+    store_s(&mut conn, s).unwrap();
+    let mut v = vulns_json(
+        &img,
+        "2026-09-20T08:00:00Z",
+        &[("CVE-2026-0101", "HIGH", None)],
+    );
+    v["observed_in"] = json!([]);
+    v["vulnerabilities"][0]["package"] = json!({"name": "libbar1", "version": "1", "type": "debian", "purl": "pkg:deb/debian/libbar1@1"});
+    v["vulnerabilities"][0]["class"] = json!("os-pkgs");
+    store_v(&mut conn, v);
+    relink_batch(&mut conn, None, 100).unwrap();
+    // libbar was loaded an hour ago; libfoo just now. Read newest-first
+    // with a cap of 1, only libfoo's row is seen.
+    exec(
+        &mut conn,
+        &format!(
+            "INSERT INTO runtime_executables (pod_namespace, workload_kind, workload_name, \
+                container_name, image_digest, kind, path, source, first_seen, last_seen) VALUES \
+             ('{NS}', 'Deployment', 'api', 'app', '{img}', 'lib', '/usr/lib/x86_64-linux-gnu/libbar.so.1', \
+                'ebpf', timezone('UTC', NOW()) - INTERVAL '2 hours', timezone('UTC', NOW()) - INTERVAL '1 hour'), \
+             ('{NS}', 'Deployment', 'api', 'app', '{img}', 'lib', '/usr/lib/x86_64-linux-gnu/libfoo.so.1', \
+                'ebpf', timezone('UTC', NOW()) - INTERVAL '1 hour', timezone('UTC', NOW()))"
+        ),
+    );
+    let t = crate::in_use::TierSettings::default();
+    let key = crate::workload_profile::Key {
+        namespace: NS.into(),
+        kind: "Deployment".into(),
+        name: "api".into(),
+    };
+    let bar_state = |conn: &mut PgConnection| {
+        let p = image_vulnerabilities_filtered(conn, &img, None, &ListFilters::default(), None, 10)
+            .unwrap();
+        let f = p
+            .items
+            .iter()
+            .find(|f| f.package.name == "libbar1")
+            .unwrap();
+        (f.in_use_state, f.in_use_detail.reason, f.tier)
+    };
+
+    // 1. Truncated: libbar's row was not read. Without the guard it would
+    //    be installed_not_observed / Background / VEX not_affected.
+    let r = iu::refresh_image_use_capped(&mut conn, &img, 1).unwrap();
+    assert!(r.truncated);
+    assert_eq!(
+        count(
+            &mut conn,
+            "SELECT count(*) AS n FROM runtime_package_use WHERE pkg_name = 'libbar1'"
+        ),
+        0
+    );
+    iu::refresh_coverage(
+        &mut conn,
+        &t,
+        &UseEvidence {
+            complete: true,
+            truncated: vec![img.clone()],
+        },
+    )
+    .unwrap();
+    assert_eq!(bar_state(&mut conn), ("unknown", Some("capture_gap"), "P1"));
+    assert!(matches!(
+        iu::openvex_draft(&mut conn, &key).unwrap(),
+        VexOutcome::Unavailable(_)
+    ));
+
+    // 2. Unfinished pass: every digest is a gap, truncated or not.
+    iu::refresh_coverage(
+        &mut conn,
+        &t,
+        &UseEvidence {
+            complete: false,
+            truncated: vec![],
+        },
+    )
+    .unwrap();
+    assert_eq!(bar_state(&mut conn), ("unknown", Some("capture_gap"), "P1"));
+    assert!(matches!(
+        iu::openvex_draft(&mut conn, &key).unwrap(),
+        VexOutcome::Unavailable(_)
+    ));
+    assert_eq!(
+        count(
+            &mut conn,
+            "SELECT count(*) AS n FROM runtime_in_use_coverage WHERE covered"
+        ),
+        0
+    );
+
+    // 3. The whole evidence, read in full: libbar is loaded, correctly.
+    let r = iu::refresh_image_use(&mut conn, &img).unwrap();
+    assert!(!r.truncated);
+    iu::refresh_coverage(
+        &mut conn,
+        &t,
+        &UseEvidence {
+            complete: true,
+            truncated: vec![],
+        },
+    )
+    .unwrap();
+    assert_eq!(bar_state(&mut conn).0, "loaded");
+
+    exec(
+        &mut conn,
+        "DROP FUNCTION kg_runtime_coverage(text, text, text, text, text, text, integer)",
+    );
 }

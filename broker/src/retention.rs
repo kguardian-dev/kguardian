@@ -2325,6 +2325,10 @@ async fn run_in_use_pass(pool: &DbPool, batch: i64) {
             false
         }
     };
+    // Coverage is only believed where this pass matched every runtime path
+    // to its package: a pass that stops early (error, panic, batch cap)
+    // leaves the rest stale, and a truncated image lost its older paths.
+    let mut evidence = s::UseEvidence::default();
     if available {
         let mut cursor: Option<String> = None;
         let mut rows = 0usize;
@@ -2338,11 +2342,15 @@ async fn run_in_use_pass(pool: &DbPool, batch: i64) {
             })
             .await;
             match r {
-                Ok(Ok((n, next))) => {
-                    rows += n;
-                    match next {
+                Ok(Ok(b)) => {
+                    rows += b.rows_written;
+                    evidence.truncated.extend(b.truncated);
+                    match b.next {
                         Some(c) => cursor = Some(c),
-                        None => break,
+                        None => {
+                            evidence.complete = true;
+                            break;
+                        }
                     }
                 }
                 Ok(Err(e)) => {
@@ -2354,6 +2362,18 @@ async fn run_in_use_pass(pool: &DbPool, batch: i64) {
                     break;
                 }
             }
+        }
+        if !evidence.complete {
+            warn!(
+                rows,
+                "in-use: package use did not finish this pass; no container is treated as covered"
+            );
+        } else if !evidence.truncated.is_empty() {
+            warn!(
+                images = evidence.truncated.len(),
+                cap = s::MAX_RUNTIME_ROWS_PER_IMAGE,
+                "in-use: runtime rows truncated; those images are not treated as covered"
+            );
         }
         debug!(rows, "in-use: package use refreshed");
     }
@@ -2368,7 +2388,8 @@ async fn run_in_use_pass(pool: &DbPool, batch: i64) {
             }
             .map_err(RetentionError::Diesel)?;
             let t = crate::in_use::TierSettings::from_env();
-            let cov = s::refresh_coverage(&mut conn, &t).map_err(RetentionError::Diesel)?;
+            let cov =
+                s::refresh_coverage(&mut conn, &t, &evidence).map_err(RetentionError::Diesel)?;
             let exp = s::refresh_exposure(
                 &mut conn,
                 crate::supplychain_read::EXPOSURE_DEFAULT_WINDOW_HOURS,
