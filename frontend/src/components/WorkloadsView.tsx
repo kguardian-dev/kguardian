@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { Lock, Search, AlertTriangle, ChevronRight, Radar, GitCompareArrows, Layers, ShieldAlert } from 'lucide-react';
 import type { PodInfo } from '../types';
 import { useWorkloadCoverage } from '../hooks/useWorkloadCoverage';
@@ -8,6 +8,20 @@ import { Skeleton } from './ui/Skeleton';
 import { StatStrip, StatTile, type StatTileProps } from './ui/StatTile';
 import { CaptureBadge, StatePill } from './Seccomp';
 import { DriftCell, NetworkPill } from './Workloads/cells';
+import { PostureCell } from './Workloads/PostureCell';
+import { useWorkloadPostures } from '../hooks/useWorkloadProfile';
+import { errorMessage } from '../services/profileApi';
+import type { PostureStatus } from '../types/profile';
+import { Button } from './ui/Button';
+
+function useDebounced<T>(value: T, ms: number): T {
+  const [v, setV] = useState(value);
+  useEffect(() => {
+    const t = setTimeout(() => setV(value), ms);
+    return () => clearTimeout(t);
+  }, [value, ms]);
+  return v;
+}
 
 export type WorkloadControl = 'seccomp';
 
@@ -54,15 +68,24 @@ const CONTROLS: Array<{ id: WorkloadControl | undefined; label: string }> = [
 export function WorkloadsView({ allPods, namespace, allNamespaces, control, onControlChange, onOpenWorkload, refreshTick }: WorkloadsViewProps) {
   const { rows: allRows, loading, error, profiles } = useWorkloadCoverage(allPods, refreshTick, allNamespaces ? undefined : namespace);
   const [query, setQuery] = useState('');
+  const [postureFilter, setPostureFilter] = useState<PostureStatus | ''>('');
   const seccompMode = control === 'seccomp';
+  // The posture column only exists on the all-controls table; the seccomp
+  // columns never ask for it.
+  // The name filter also narrows the posture request (server-side search),
+  // debounced so typing does not fire one request per keystroke.
+  const search = useDebounced(query.trim(), 300);
+  const postures = useWorkloadPostures(allNamespaces ? undefined : namespace, postureFilter || undefined, search || undefined, refreshTick, undefined, undefined, !seccompMode);
 
   const rows = useMemo(() => {
     const q = query.trim().toLowerCase();
     return allRows
       .filter((r) => allNamespaces || r.namespace === namespace)
       .filter((r) => !seccompMode || r.profile)
+      // A posture filter is server-side: keep the rows the Broker returned.
+      .filter((r) => seccompMode || !postureFilter || postures.byKey.has(r.key))
       .filter((r) => !q || r.key.toLowerCase().includes(q));
-  }, [allRows, allNamespaces, namespace, seccompMode, query]);
+  }, [allRows, allNamespaces, namespace, seccompMode, query, postureFilter, postures.byKey]);
 
   const stats = useMemo<StatTileProps[]>(() => {
     const enforcing = rows.filter((r) => r.seccomp === 'enforcing').length;
@@ -139,6 +162,23 @@ export function WorkloadsView({ allPods, namespace, allNamespaces, control, onCo
                 className="flex-1 bg-transparent text-xs text-primary placeholder:text-tertiary focus:outline-none"
               />
             </div>
+            <div className="flex flex-wrap items-center gap-2">
+            {!seccompMode && (
+              <label className="flex items-center gap-1.5 text-xs text-tertiary">
+                Posture
+                <select
+                  value={postureFilter}
+                  onChange={(e) => setPostureFilter(e.target.value as PostureStatus | '')}
+                  className="h-8 rounded-control border border-hubble-border bg-hubble-darker px-2 text-xs text-primary"
+                >
+                  <option value="">Any</option>
+                  <option value="risk">Risk</option>
+                  <option value="warn">Warn</option>
+                  <option value="ok">OK</option>
+                  <option value="unknown">No data</option>
+                </select>
+              </label>
+            )}
             <div role="group" aria-label="Control" className="inline-flex rounded-control border border-hubble-border overflow-hidden">
               {CONTROLS.map((c) => {
                 const on = c.id === control;
@@ -155,6 +195,7 @@ export function WorkloadsView({ allPods, namespace, allNamespaces, control, onCo
                 );
               })}
             </div>
+            </div>
           </header>
 
           {loading && profiles.length === 0 && allRows.length === 0 ? (
@@ -166,7 +207,7 @@ export function WorkloadsView({ allPods, namespace, allNamespaces, control, onCo
           ) : rows.length === 0 ? (
             <EmptyState
               icon={Radar}
-              title={query ? 'No matching workloads' : seccompMode ? `No seccomp profiles in ${scopeLabel}` : `No workloads in ${scopeLabel}`}
+              title={query || postureFilter ? 'No matching workloads' : seccompMode ? `No seccomp profiles in ${scopeLabel}` : `No workloads in ${scopeLabel}`}
               description={
                 seccompMode
                   ? 'A workload appears once the controller has reported syscalls for it and it has an owning controller (Deployment, StatefulSet, DaemonSet, CronJob).'
@@ -191,6 +232,7 @@ export function WorkloadsView({ allPods, namespace, allNamespaces, control, onCo
                   ) : (
                     <tr className="border-b border-hubble-border">
                       <th className="text-left font-medium px-4 py-2">Workload</th>
+                      <th className="text-left font-medium px-3 py-2" title="Worst status across the profile's dimensions with data, from the Broker's profile read model">Posture</th>
                       <th className="text-right font-medium px-3 py-2">Pods</th>
                       <th className="text-left font-medium px-3 py-2 whitespace-nowrap">Network policy</th>
                       <th className="text-left font-medium px-3 py-2">Seccomp</th>
@@ -249,6 +291,9 @@ export function WorkloadsView({ allPods, namespace, allNamespaces, control, onCo
                         </>
                       ) : (
                         <>
+                          <td className="px-3 py-2.5">
+                            <PostureCell item={postures.byKey.get(r.key)} loading={postures.loading} unavailable={postures.error != null} morePages={postures.hasMore} />
+                          </td>
                           <td className="px-3 py-2.5 text-right font-mono text-xs tabular-nums text-secondary">{r.pods.length}</td>
                           <td className="px-3 py-2.5"><NetworkPill network={r.network} /></td>
                           <td className="px-3 py-2.5">
@@ -270,6 +315,22 @@ export function WorkloadsView({ allPods, namespace, allNamespaces, control, onCo
                   })}
                 </tbody>
               </table>
+            </div>
+          )}
+          {!seccompMode && postures.error != null && rows.length > 0 && (
+            <p className="px-4 py-2 text-[11px] text-tertiary border-t border-hubble-border">
+              Posture unavailable: {errorMessage(postures.error)}
+            </p>
+          )}
+          {!seccompMode && postures.hasMore && (
+            <div className="flex flex-wrap items-center justify-between gap-2 px-4 py-2 text-[11px] text-tertiary border-t border-hubble-border">
+              <span>
+                Posture loaded for {postures.byKey.size} workload{postures.byKey.size === 1 ? '' : 's'}
+                {postureFilter ? ' matching the filter; more may match' : ''}.
+              </span>
+              <Button variant="secondary" size="sm" onClick={() => void postures.loadMore()} disabled={postures.loadingMore}>
+                {postures.loadingMore ? 'Loading…' : 'Load more postures'}
+              </Button>
             </div>
           )}
         </section>

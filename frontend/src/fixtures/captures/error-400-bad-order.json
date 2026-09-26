@@ -1,0 +1,8 @@
+{
+  "request": "GET /workloads/payments/Deployment/checkout/profile/diff?from=4&to=3",
+  "status": 400,
+  "body": {
+    "error": "bad_request",
+    "message": "from must be lower than to"
+  }
+}

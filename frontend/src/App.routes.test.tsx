@@ -10,15 +10,18 @@ import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/re
 vi.mock('./components/NetworkGraph', () => ({ default: () => <div data-testid="map" /> }));
 vi.mock('./components/DataTable', () => ({ default: () => <div /> }));
 vi.mock('./components/WorkloadsView', () => ({
-  default: (p: { control?: string; allNamespaces: boolean; refreshTick?: number }) => (
-    <div data-testid="workloads" data-control={p.control ?? ''} data-all={String(p.allNamespaces)} data-tick={String(p.refreshTick ?? 0)} />
+  default: (p: { control?: string; allNamespaces: boolean; refreshTick?: number; onOpenWorkload: (x: Record<string, string>) => void }) => (
+    <div data-testid="workloads" data-control={p.control ?? ''} data-all={String(p.allNamespaces)} data-tick={String(p.refreshTick ?? 0)}>
+      <button onClick={() => p.onOpenWorkload({ ns: 'payments', kind: 'Deployment', name: 'checkout', scope: 'ns' })}>open checkout</button>
+    </div>
   ),
 }));
 vi.mock('./components/WorkloadView', () => ({
-  default: (p: { ns: string; kind: string; name: string; onBack: () => void }) => (
+  default: (p: { ns: string; kind: string; name: string; tab?: string; to?: string; onBack: () => void; onParamsChange: (x: Record<string, string | undefined>) => void }) => (
     <div>
-      <div data-testid="workload">{`${p.ns}/${p.kind}/${p.name}`}</div>
+      <div data-testid="workload" data-tab={p.tab ?? ''} data-to={p.to ?? ''}>{`${p.ns}/${p.kind}/${p.name}`}</div>
       <button onClick={p.onBack}>back</button>
+      <button onClick={() => p.onParamsChange({ tab: 'versions', to: '2' })}>versions</button>
     </div>
   ),
 }));
@@ -156,4 +159,53 @@ test('Back from a workload page restores the list scope and control it came from
   await waitFor(() => expect(window.location.hash.startsWith('#/workloads')).toBe(true));
   expect(Object.fromEntries(hashParams())).toEqual({ ns: 'payments', scope: 'ns', control: 'seccomp' });
   await waitFor(() => expect(screen.getByTestId('workloads').dataset.all).toBe('false'));
+});
+
+test('profile tabs live in the URL, replace the history entry, and Back drops them', async () => {
+  renderAt('#/workloads?ns=payments&scope=ns');
+  await waitFor(() => expect(screen.getByTestId('workloads')).not.toBeNull());
+  window.location.hash = '#/workload?ns=payments&kind=Deployment&name=checkout&scope=ns';
+  await waitFor(() => expect(screen.getByTestId('workload').dataset.tab).toBe(''));
+  const depth = window.history.length;
+  fireEvent.click(screen.getByText('versions'));
+  await waitFor(() => expect(screen.getByTestId('workload').dataset.tab).toBe('versions'));
+  expect(screen.getByTestId('workload').dataset.to).toBe('2');
+  // Replaced, not pushed: browser Back from a tab returns to the list.
+  expect(window.history.length).toBe(depth);
+  expect(Object.fromEntries(hashParams())).toEqual({ ns: 'payments', kind: 'Deployment', name: 'checkout', scope: 'ns', tab: 'versions', to: '2' });
+  fireEvent.click(screen.getByText('back'));
+  await waitFor(() => expect(window.location.hash.startsWith('#/workloads')).toBe(true));
+  expect(Object.fromEntries(hashParams())).toEqual({ ns: 'payments', scope: 'ns' });
+});
+
+test('a deep link straight to a profile tab opens that tab', async () => {
+  renderAt('#/workload?ns=payments&kind=Deployment&name=checkout&tab=podSecurity');
+  await waitFor(() => expect(screen.getByTestId('workload').dataset.tab).toBe('podSecurity'));
+});
+
+test('Back from a workload opened from the list pops the list entry instead of pushing a new one', async () => {
+  renderAt('#/workloads?ns=payments&scope=ns');
+  await waitFor(() => expect(screen.getByTestId('workloads')).not.toBeNull());
+  fireEvent.click(screen.getByText('open checkout'));
+  await waitFor(() => expect(screen.getByTestId('workload').textContent).toBe('payments/Deployment/checkout'));
+  // A tab change replaces the entry, so the list is still the one below.
+  fireEvent.click(screen.getByText('versions'));
+  await waitFor(() => expect(screen.getByTestId('workload').dataset.tab).toBe('versions'));
+  const back = vi.spyOn(window.history, 'back');
+  const depth = window.history.length;
+  fireEvent.click(screen.getByText('back'));
+  expect(back).toHaveBeenCalledTimes(1);
+  await waitFor(() => expect(window.location.hash).toBe('#/workloads?ns=payments&scope=ns'));
+  expect(window.history.length).toBe(depth);
+  back.mockRestore();
+});
+
+test('Back from a deep-linked workload (no list below it) navigates to the list', async () => {
+  renderAt('#/workload?ns=payments&kind=Deployment&name=checkout&scope=ns&tab=versions');
+  await waitFor(() => expect(screen.getByTestId('workload')).not.toBeNull());
+  const back = vi.spyOn(window.history, 'back');
+  fireEvent.click(screen.getByText('back'));
+  expect(back).not.toHaveBeenCalled();
+  await waitFor(() => expect(window.location.hash).toBe('#/workloads?ns=payments&scope=ns'));
+  back.mockRestore();
 });

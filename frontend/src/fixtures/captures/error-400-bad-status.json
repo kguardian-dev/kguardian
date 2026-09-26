@@ -1,0 +1,8 @@
+{
+  "request": "GET /workloads?status=great",
+  "status": 400,
+  "body": {
+    "error": "bad_request",
+    "message": "status must be ok, warn, risk or unknown"
+  }
+}

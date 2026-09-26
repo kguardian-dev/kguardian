@@ -71,7 +71,7 @@ export interface WorkloadsContext {
 }
 
 /**
- * Params for the placeholder workload profile route. The Workloads list's
+ * Params for the workload security profile route. The Workloads list's
  * scope and control ride along (the workload page ignores them) so Back
  * restores the list exactly as it was.
  */

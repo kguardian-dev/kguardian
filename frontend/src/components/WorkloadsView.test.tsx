@@ -34,6 +34,30 @@ const getAuditVerdicts = vi.fn(async (opts: { verdict?: string; namespace?: stri
 );
 vi.mock('../services/api', () => ({ default: { getAuditVerdicts: (o: never) => getAuditVerdicts(o) } }));
 
+// GET /workloads posture summaries: the captured list pages (real Broker
+// responses), keyed like the rows. Posture tests render pods for exactly
+// those captured workloads.
+import { listNamespacePayments, listPage1, listPage2 } from '../fixtures/profile';
+import type { WorkloadListItem } from '../types/profile';
+const capturedItems: WorkloadListItem[] = [...listPage1.body.items, ...listPage2.body.items, ...listNamespacePayments.body.items];
+const keyOf = (i: WorkloadListItem) => `${i.namespace}/${i.kind}/${i.name}`;
+const loadMore = vi.fn(async () => {});
+const postureState: { byKey: Map<string, WorkloadListItem>; loading: boolean; loadingMore: boolean; error: unknown; hasMore: boolean; loadMore: () => Promise<void> } = {
+  byKey: new Map(capturedItems.map((i) => [keyOf(i), i])),
+  loading: false,
+  loadingMore: false,
+  error: null,
+  hasMore: false,
+  loadMore,
+};
+const postureArgs: unknown[][] = [];
+vi.mock('../hooks/useWorkloadProfile', () => ({
+  useWorkloadPostures: (...args: unknown[]) => {
+    postureArgs.push(args);
+    return postureState;
+  },
+}));
+
 import { WorkloadsView } from './WorkloadsView';
 import { StatePill } from './Seccomp';
 
@@ -166,4 +190,104 @@ test('verdicts are fetched per kind (so Allow noise cannot push out would-denies
   renderView();
   await waitFor(() => expect(getAuditVerdicts).toHaveBeenCalledTimes(2));
   expect(getAuditVerdicts).toHaveBeenCalledWith({ limit: 500, verdict: 'WouldDeny' });
+});
+
+// Pods for the captured workloads (and one the snapshotter has not reached).
+const capturedPods = [
+  pod('source-controller-1', 'flux-system', 'Deployment', 'source-controller'),
+  pod('node-exporter-a', 'observability', 'DaemonSet', 'node-exporter'),
+  pod('otel-collector-1', 'observability', 'Deployment', 'otel-collector'),
+  pod('checkout-1', 'payments', 'Deployment', 'checkout'),
+  pod('ledger-1', 'payments', 'Deployment', 'ledger'),
+  pod('reports-1', 'payments', 'Deployment', 'reports'),
+];
+const rowNamed = (name: string) => rows().find((r) => r.querySelector('a')!.textContent === name)!;
+const pill = (row: HTMLElement) => row.querySelector('td:nth-child(2) [data-status]') as HTMLElement;
+
+test('posture column: the captured status per workload, with coverage and no score; unknown reads "No data"', () => {
+  renderView({ allPods: capturedPods });
+  // v1.3: known dimensions all ok but images unknown reads unknown, not ok.
+  expect(pill(rowNamed('source-controller')).dataset.status).toBe('unknown');
+  expect(pill(rowNamed('node-exporter')).dataset.status).toBe('risk');
+  expect(pill(rowNamed('checkout')).dataset.status).toBe('warn');
+  const otel = pill(rowNamed('otel-collector'));
+  expect(otel.dataset.status).toBe('unknown');
+  expect(otel.textContent).toBe('No data');
+  expect(otel.className).not.toContain('state-enforcing');
+  // Coverage beside a known status, never a number inside the pill.
+  expect(within(rowNamed('node-exporter')).getByText('50%')).not.toBeNull();
+  // Partial unknown shows how much is known; fully unknown shows no percentage.
+  expect(within(rowNamed('source-controller')).getByText('50%')).not.toBeNull();
+  expect(within(rowNamed('otel-collector')).queryByText(/%$/)).toBeNull();
+  for (const r of rows()) {
+    const p = pill(r);
+    if (p) expect(p.textContent).not.toMatch(/\d/);
+  }
+});
+
+test('posture column: a workload the snapshotter has not reached yet is "not computed yet"', () => {
+  renderView({ allPods: capturedPods });
+  expect(within(rowNamed('reports')).getByText('not computed yet')).not.toBeNull();
+});
+
+test('posture column: a Broker that cannot serve postures leaves the table working and says why', () => {
+  const saved = postureState.byKey;
+  postureState.byKey = new Map();
+  postureState.error = new Error('This Broker does not serve workload profiles.');
+  try {
+    renderView({ allPods: capturedPods });
+    // Every pod's workload, plus payments/api from the seccomp profile list.
+    expect(rows()).toHaveLength(capturedPods.length + 1);
+    expect(screen.getByText(/Posture unavailable: This Broker does not serve workload profiles/)).not.toBeNull();
+    expect(screen.queryByText('not computed yet')).toBeNull();
+  } finally {
+    postureState.byKey = saved;
+    postureState.error = null;
+  }
+});
+
+test('posture column: pages not yet fetched say "not loaded" and offer Load more', () => {
+  const saved = postureState.byKey;
+  // Only the first captured page (limit=2) has arrived.
+  postureState.byKey = new Map(listPage1.body.items.map((i) => [keyOf(i), i]));
+  postureState.hasMore = true;
+  loadMore.mockClear();
+  try {
+    renderView({ allPods: capturedPods });
+    expect(within(rowNamed('checkout')).getByText('not loaded')).not.toBeNull();
+    expect(screen.queryByText('not computed yet')).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: 'Load more postures' }));
+    expect(loadMore).toHaveBeenCalledTimes(1);
+  } finally {
+    postureState.byKey = saved;
+    postureState.hasMore = false;
+  }
+});
+
+test('postures are requested with the narrowed namespace, posture filter and debounced name search; seccomp mode requests none', async () => {
+  postureArgs.length = 0;
+  renderView({ allNamespaces: false, namespace: 'payments' });
+  expect(postureArgs.at(-1)!.slice(0, 3)).toEqual(['payments', undefined, undefined]);
+  fireEvent.change(screen.getByLabelText('Posture'), { target: { value: 'risk' } });
+  expect(postureArgs.at(-1)!.slice(0, 3)).toEqual(['payments', 'risk', undefined]);
+  fireEvent.change(screen.getByLabelText('Filter workloads'), { target: { value: ' ledg ' } });
+  await waitFor(() => expect(postureArgs.at(-1)!.slice(0, 3)).toEqual(['payments', 'risk', 'ledg']));
+  cleanup();
+  postureArgs.length = 0;
+  renderView({ control: 'seccomp' });
+  // enabled = false (7th argument) in seccomp mode.
+  expect(postureArgs.at(-1)![6]).toBe(false);
+});
+
+test('a posture filter keeps only the rows the Broker returned for it', () => {
+  const saved = postureState.byKey;
+  // What the captured ?status=risk page returned.
+  postureState.byKey = new Map(capturedItems.filter((i) => i.posture.status === 'risk').map((i) => [keyOf(i), i]));
+  try {
+    renderView({ allPods: capturedPods });
+    fireEvent.change(screen.getByLabelText('Posture'), { target: { value: 'risk' } });
+    expect(rows().map((r) => r.querySelector('a')!.textContent)).toEqual(['node-exporter']);
+  } finally {
+    postureState.byKey = saved;
+  }
 });

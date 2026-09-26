@@ -22,6 +22,8 @@ test('workload links carry the list context and Back restores it', () => {
   const p = workloadParams('payments', 'Deployment', 'api', { scope: 'ns', control: 'seccomp' });
   expect(p).toEqual({ ns: 'payments', kind: 'Deployment', name: 'api', scope: 'ns', control: 'seccomp' });
   expect(workloadsBackParams(p)).toEqual({ ns: 'payments', scope: 'ns', control: 'seccomp' });
+  // The profile page's own params (tab, diff selection) never leak into the list.
+  expect(workloadsBackParams({ ...p, tab: 'versions', from: '1', to: '2' })).toEqual({ ns: 'payments', scope: 'ns', control: 'seccomp' });
   expect(workloadParams('payments', 'Deployment', 'api')).toEqual({ ns: 'payments', kind: 'Deployment', name: 'api' });
   expect(routeHref('workload', { ns: 'a b', kind: 'Deployment', name: 'x' })).toBe('#/workload?ns=a+b&kind=Deployment&name=x');
 });

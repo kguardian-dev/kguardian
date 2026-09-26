@@ -1,0 +1,101 @@
+{
+  "request": "GET /workloads?limit=2",
+  "status": 200,
+  "body": {
+    "items": [
+      {
+        "clusterId": "primary",
+        "computedAt": "2026-09-26T02:22:26.378256Z",
+        "contentHash": "fnv1a64:5ba183ed9b98a6fa",
+        "dimensions": {
+          "compute": {
+            "status": "ok"
+          },
+          "images": {
+            "mixedDigests": false,
+            "runningDigests": 1,
+            "status": "unknown"
+          },
+          "network": {
+            "status": "ok"
+          },
+          "podSecurity": {
+            "level": "restricted",
+            "levelConfidence": "upper_bound",
+            "status": "unknown"
+          },
+          "syscalls": {
+            "status": "ok"
+          }
+        },
+        "findingCounts": {
+          "critical": 0,
+          "high": 0,
+          "info": 0,
+          "low": 0,
+          "medium": 0
+        },
+        "kind": "Deployment",
+        "lastChangedAt": "2026-09-26T02:18:02.820047Z",
+        "name": "source-controller",
+        "namespace": "flux-system",
+        "posture": {
+          "coverage": 0.5,
+          "status": "unknown",
+          "unknownDimensions": [
+            "podSecurity",
+            "images"
+          ]
+        },
+        "revision": 1
+      },
+      {
+        "clusterId": "primary",
+        "computedAt": "2026-09-26T02:22:26.383445Z",
+        "contentHash": "fnv1a64:8bf410a491511788",
+        "dimensions": {
+          "compute": {
+            "status": "unknown"
+          },
+          "images": {
+            "mixedDigests": false,
+            "runningDigests": 1,
+            "status": "unknown"
+          },
+          "network": {
+            "status": "warn"
+          },
+          "podSecurity": {
+            "level": "privileged",
+            "levelConfidence": "confirmed",
+            "status": "risk"
+          },
+          "syscalls": {
+            "status": "unknown"
+          }
+        },
+        "findingCounts": {
+          "critical": 0,
+          "high": 2,
+          "info": 0,
+          "low": 0,
+          "medium": 4
+        },
+        "kind": "DaemonSet",
+        "lastChangedAt": "2026-09-26T02:18:02.826768Z",
+        "name": "node-exporter",
+        "namespace": "observability",
+        "posture": {
+          "coverage": 0.5,
+          "status": "risk",
+          "unknownDimensions": [
+            "syscalls",
+            "images"
+          ]
+        },
+        "revision": 1
+      }
+    ],
+    "nextAfter": "observability/DaemonSet/node-exporter"
+  }
+}
