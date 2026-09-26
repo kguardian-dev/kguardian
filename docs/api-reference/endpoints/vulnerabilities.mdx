@@ -42,11 +42,18 @@ each payload replaces only its own `(digest, source)`.
   (`sbomSources`). Trivy never sets these, so `null` means unknown, not
   "not exploited".
 - **SBOMs are kept per source and never replace each other.** A `registry`
-  SBOM is one found attached to the image in its registry. It carries
-  `sbomTrust` (`unverified`, `attached-unbound` or `verified`; a registry
-  SBOM that says nothing is stored as `unverified`) and the `attestation`
-  it was found through. `verified: false` means no signature was checked:
-  never show it as signed. `GET /images/{digest}/sbom` lists every
+  SBOM is one found attached to the image in its registry, with the
+  `attestation` it was found through.
+- Every report carries `sbomTrust`, weakest first: `attached-unbound` (a
+  bare document attached to the image), `unverified` (an in-toto statement
+  naming the image, signature not checked), `scanned` (Trivy Operator's
+  in-cluster scan), `verified`. A `grype` report carries the weakest trust
+  among the SBOMs it matched. Unknown values, and a registry SBOM that
+  states none, are stored as `attached-unbound`. Only `verified` may be
+  shown as signed.
+- A BuildKit SBOM for one platform manifest names its index in
+  `image.index_digest`; it joins to an inventory digest equal to that
+  index by the `platform_manifest` rule. `GET /images/{digest}/sbom` lists every
   source's SBOM and shows Trivy Operator's unless you ask for another.
 
 ### Trust
@@ -150,7 +157,7 @@ severe first.
      "digestKind": "index", "scannedAt": "2026-09-20T08:00:00", "dbUpdatedAt": null,
      "scannerName": "Trivy", "scannerVersion": "0.58.1", "osFamily": "alpine",
      "osName": "3.20.3", "osEosl": false, "itemCount": 12, "sbomSources": [],
-     "sbomTrust": null, "…": "…"}
+     "sbomTrust": "scanned", "…": "…"}
   ],
   "items": [
     {"id": "CVE-2099-1002",
