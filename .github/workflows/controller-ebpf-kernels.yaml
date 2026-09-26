@@ -109,7 +109,7 @@ jobs:
       - name: No shell variables in vmtest commands
         run: |
           if grep -nE '^[[:space:]]+command: .*[$]([^{]|$)' .github/workflows/controller-ebpf-kernels.yaml; then
-            echo "::error::a vmtest command contains a shell variable; use \${{ }} expressions or literals"
+            echo "::error::a vmtest command contains a shell variable; use workflow expressions or literals"
             exit 1
           fi
 
