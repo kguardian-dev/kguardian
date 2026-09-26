@@ -70,6 +70,9 @@ export function useDialogFocus(opts: {
     const onKey = (e: KeyboardEvent) => {
       const d = dialogRef.current;
       if (e.key !== 'Tab' || !d) return;
+      // A modal stacked on top (the command palette) owns Tab; pulling focus
+      // back into this dialog would put it behind that modal's backdrop.
+      if (otherModalOpen(d)) return;
       const focusables = [...d.querySelectorAll<HTMLElement>(FOCUSABLE)].filter((el) => !el.hasAttribute('disabled'));
       if (focusables.length === 0) return;
       const first = focusables[0];

@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, expect, test } from 'vitest';
-import { useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { useDialogFocus } from './useDialogFocus';
 import { Modal } from '../components/ui/Modal';
@@ -31,7 +31,11 @@ function Harness() {
   );
 }
 
-const active = () => (document.activeElement as HTMLElement | null)?.textContent;
+// Never the body's text: with little else on the page it can equal a button's.
+const active = () => {
+  const el = document.activeElement as HTMLElement | null;
+  return !el || el === document.body ? '<body>' : el.textContent;
+};
 
 test('opening focuses the first nav item, not the body', () => {
   render(<Harness />);
@@ -118,6 +122,12 @@ function Stacked() {
   const dialogRef = useRef<HTMLDivElement>(null);
   const openerRef = useRef<HTMLButtonElement>(null);
   useDialogFocus({ open: rail, dialogRef, returnFocusRef: openerRef, onClose: () => setRail(false), initialFocus: 'nav button' });
+  // Ctrl+K opens the palette from anywhere, like App's shortcut.
+  useEffect(() => {
+    const onK = (e: KeyboardEvent) => e.ctrlKey && e.key === 'k' && setPalette(true);
+    window.addEventListener('keydown', onK);
+    return () => window.removeEventListener('keydown', onK);
+  }, []);
   return (
     <div>
       {!rail && <button ref={openerRef}>Expand sidebar</button>}
@@ -153,4 +163,28 @@ test('stacked: a body Esc closes only the topmost modal, the rail underneath sta
   fireEvent.keyDown(document.body, { key: 'Escape' });
   expect(screen.queryByRole('dialog', { name: 'Navigation' })).toBeNull();
   expect(active()).toBe('Expand sidebar');
+});
+
+test('stacked: Tab inside the palette stays there, it is not pulled into the rail underneath', () => {
+  render(<Stacked />);
+  fireEvent.click(screen.getByText('Search'));
+  const input = screen.getByLabelText('Command');
+  input.focus();
+  fireEvent.keyDown(input, { key: 'Tab' });
+  expect(document.activeElement).toBe(input);
+  expect(screen.getByRole('dialog', { name: 'Navigation' }).contains(document.activeElement)).toBe(false);
+});
+
+test('stacked: closing a palette opened from the body puts focus in the rail, not on the body', async () => {
+  render(<Stacked />);
+  // A click on a non-focusable part of the rail leaves focus on the body; then Ctrl+K.
+  (document.activeElement as HTMLElement).blur();
+  fireEvent.keyDown(document.body, { key: 'k', ctrlKey: true });
+  expect(screen.getByRole('dialog', { name: 'Search and commands' })).toBeTruthy();
+  (document.activeElement as HTMLElement).blur();
+  fireEvent.keyDown(document.body, { key: 'Escape' });
+  expect(screen.queryByRole('dialog', { name: 'Search and commands' })).toBeNull();
+  // The element itself: the body's text is also "Search" here.
+  expect(document.activeElement).not.toBe(document.body);
+  expect(document.activeElement).toBe(screen.getByRole('button', { name: 'Search' }));
 });

@@ -105,7 +105,18 @@ export function Modal({
       const first = node.querySelector<HTMLElement>(FOCUSABLE);
       (first ?? node).focus();
     }
-    return () => lastFocused.current?.focus?.();
+    return () => {
+      const prev = lastFocused.current;
+      if (prev && prev !== document.body && prev.isConnected) prev.focus?.();
+      const now = document.activeElement;
+      if (now && now !== document.body && now.isConnected && !node?.contains(now)) return;
+      // Opened with focus on the body (or its trigger is gone): don't drop
+      // focus on the body, go to the dialog still open underneath, if any.
+      const under = [...document.querySelectorAll<HTMLElement>('[role="dialog"][aria-modal="true"]')].filter(
+        (el) => el !== node && !el.closest('[aria-hidden="true"]'),
+      );
+      under.at(-1)?.querySelector<HTMLElement>(FOCUSABLE)?.focus();
+    };
   }, [isOpen]);
 
   // Body-scroll-lock while any modal is open.
