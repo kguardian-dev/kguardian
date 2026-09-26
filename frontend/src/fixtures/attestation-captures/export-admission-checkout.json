@@ -1,0 +1,36 @@
+{
+  "body": {
+    "documents": [
+      {
+        "apiVersion": "kguardian.dev/v1alpha1",
+        "applyWith": "kubectl apply -f admission.yaml",
+        "artifact": "admission",
+        "available": true,
+        "content": "# kguardian export: admission (audit mode)\n# kguardian never applies this document. Review it, commit it, and apply it yourself.\n# kguardian image admission policy for payments/Deployment/checkout\n# kguardian ImageTrustPolicy (report only, evaluated by the kguardian evaluator)\n# Generated from the signers kguardian verified on running images. kguardian never applies\n# anything: review, commit and apply it yourself.\n# REVIEW EVERY IDENTITY BEFORE APPLYING: identities were observed on running images, not vetted.\n# A signer that signed an image you run is trusted by this policy for every image it covers.\n# identity: keyless issuer=https://token.actions.githubusercontent.com subjectRegExp=^https://github\\.com/example-org/checkout/\\.github/workflows/release\\.yaml@refs/tags/.+$ (widened from observed tag subjects)\n#   verified ghcr.io/example/checkout@sha256:f48949f11f15c0e2b8fa2132d1ab201cf50e80dea612783e5c3ac78c6b378235\napiVersion: kguardian.dev/v1alpha1\nkind: ImageTrustPolicy\nmetadata:\n  annotations:\n    kguardian.dev/applied-by-kguardian: 'false'\n    kguardian.dev/export-mode: audit\n    kguardian.dev/generated-at: 2026-09-26T22:20:56.047662296+00:00\n    kguardian.dev/generated-by: kguardian-broker/1.18.2\n    kguardian.dev/profile-hash: fnv1a64:f325212fa98a4eac\n    kguardian.dev/profile-revision: unversioned\n    kguardian.dev/source: observed verified image signers\n    kguardian.dev/source-workload: payments/Deployment/checkout\n  name: checkout-kguardian-checkout-0cd14f55\n  namespace: payments\nspec:\n  attestations:\n  - predicateType: https://slsa.dev/provenance/v1\n  authorities:\n  - keyless:\n      issuer: https://token.actions.githubusercontent.com\n      subjectRegExp: ^https://github\\.com/example-org/checkout/\\.github/workflows/release\\.yaml@refs/tags/.+$\n    name: a0\n  images:\n  - ghcr.io/example/checkout\n",
+        "contentType": "application/yaml",
+        "fileName": "admission.yaml",
+        "image": null,
+        "kind": "ImageTrustPolicy",
+        "mode": "audit",
+        "reason": null,
+        "refused": null
+      }
+    ],
+    "generatedAt": "2026-09-26T22:20:56.047662296+00:00",
+    "mode": "audit",
+    "profile": {
+      "contentHash": "fnv1a64:f325212fa98a4eac",
+      "revision": null
+    },
+    "recorded": false,
+    "workload": {
+      "clusterId": "primary",
+      "kind": "Deployment",
+      "name": "checkout",
+      "namespace": "payments"
+    }
+  },
+  "provenance": "captured from broker e7339ae0b (frontend/src/fixtures/attestation-captures/capture.py), no edits",
+  "request": "GET /workloads/payments/Deployment/checkout/export?artifacts=admission&mode=audit&format=zip-manifest",
+  "status": 200
+}
