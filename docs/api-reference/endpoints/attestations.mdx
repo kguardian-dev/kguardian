@@ -103,12 +103,16 @@ POST /images/{digest}/attestation
 - `422` for an unknown `schema_version`, `verdict` or `signer_kind`, a body
   digest that differs from the path, a control character, U+2028/U+2029
   or a bidi/format control (U+200E/F, U+202A-E, U+2066-9, U+FEFF) in any
-  string, or a reason code supplychain does not emit (the message names
-  the field), `checked_at` more than 60 s ahead, a
+  string, or a malformed reason code (the message names the field),
+  `checked_at` more than 60 s ahead, a
   verdict that does not match the signatures (`verified` with none
   verified, `unsigned` with signatures, ...), or a verified signer's
   identity or provenance longer than the limits: those are stored whole or
   refused, never truncated, because trust policies match them.
+- A well-formed reason code this broker does not know (a newer
+  supplychain) is stored as `unrecognised_reason`, logged once per code and
+  counted in `kguardian_attestation_unrecognised_reason_total`; it never
+  changes the verdict. Unknown verdicts and signer kinds are still `422`.
 - The digest must be in the image inventory (`404` otherwise).
 - A result replaces the stored one only with a strictly newer
   `checked_at`. The same result again answers `200`; a different result
