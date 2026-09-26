@@ -79,6 +79,16 @@
       ],
       "include-component-in-tag": true,
       "initial-version": "0.1.0"
+    },
+    "supplychain-matcher": {
+      "component": "supplychain-matcher",
+      "release-type": "go",
+      "package-name": "supplychain-matcher",
+      "changelog-path": "CHANGELOG.md",
+      "extra-files": [
+        "VERSION"
+      ],
+      "include-component-in-tag": true
     }
   },
   "changelog-sections": [

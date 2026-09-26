@@ -13,6 +13,7 @@ on:
       - 'llm-bridge/**'
       - 'evaluator/**'
       - 'supplychain/**'
+      - 'supplychain-matcher/**'
       - 'charts/**'
       - 'test/fixtures/**'
       - '.github/workflows/pr-build.yaml'
@@ -33,6 +34,7 @@ jobs:
       llm-bridge: ${{ steps.changes.outputs.llm-bridge }}
       evaluator: ${{ steps.changes.outputs.evaluator }}
       supplychain: ${{ steps.changes.outputs.supplychain }}
+      supplychain-matcher: ${{ steps.changes.outputs.supplychain-matcher }}
       charts: ${{ steps.changes.outputs.charts }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -57,6 +59,9 @@ jobs:
               - 'test/fixtures/**'
             evaluator:
               - 'evaluator/**'
+            supplychain-matcher:
+              - 'supplychain-matcher/**'
+              - '.github/workflows/pr-build.yaml'
             supplychain:
               - 'supplychain/**'
               - '.github/workflows/pr-build.yaml'
@@ -1035,11 +1040,98 @@ jobs:
           cache-from: type=gha,scope=supplychain
           cache-to: type=gha,mode=max,scope=supplychain
 
+  # Supplychain matcher (Go, embeds Grype): vet, lint, test. Path-filtered like every component
+  # here; the concurrency group cancels a superseded run for the same PR
+  # (only when the newer run also runs this job, so a later push that does
+  # not touch supplychain never cancels its checks).
+  test-supplychain-matcher:
+    runs-on: ubuntu-latest
+    needs: detect-changes
+    if: needs.detect-changes.outputs.supplychain-matcher == 'true'
+    permissions:
+      contents: read
+    concurrency:
+      group: pr-build-${{ github.event.pull_request.number }}-test-supplychain-matcher
+      cancel-in-progress: true
+    defaults:
+      run:
+        working-directory: supplychain-matcher
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      # go-version-file keeps the toolchain in step with go.mod, so CI can
+      # never fall behind the module's go directive (GOTOOLCHAIN=local).
+      - name: Setup Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+        with:
+          go-version-file: supplychain-matcher/go.mod
+          cache-dependency-path: supplychain-matcher/go.sum
+
+      - name: go vet
+        run: go vet ./...
+
+      - name: golangci-lint
+        uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9
+        with:
+          version: v2.14.0 # pinned; bump deliberately (a new release can add failing linters)
+          working-directory: supplychain-matcher
+          args: --timeout=15m
+
+      - name: go test
+        run: go test -race -count=1 ./...
+
+  # Build the Supplychain matcher image. One job for both platforms: the Dockerfile
+  # cross-compiles static Go on the build platform and the runtime stage has
+  # no RUN steps, so arm64 needs neither QEMU nor an arm64 runner.
+  build-supplychain-matcher:
+    runs-on: ubuntu-latest
+    needs: [detect-changes, test-supplychain-matcher]
+    if: needs.detect-changes.outputs.supplychain-matcher == 'true'
+    concurrency:
+      group: pr-build-${{ github.event.pull_request.number }}-build-supplychain-matcher
+      cancel-in-progress: true
+    outputs:
+      digest: ${{ steps.build.outputs.digest }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4
+        with:
+          install: true
+          version: latest
+
+      - name: Login to GHCR
+        if: github.event.pull_request.head.repo.full_name == github.repository
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and Push
+        id: build
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7
+        with:
+          context: supplychain-matcher/
+          file: supplychain-matcher/Dockerfile
+          platforms: linux/amd64,linux/arm64
+          build-args: |
+            VERSION=pr-${{ github.event.pull_request.number }}
+          # Read-only token on fork PRs — build without publishing there.
+          push: ${{ github.event.pull_request.head.repo.full_name == github.repository }}
+          tags: |
+            ghcr.io/kguardian-dev/kguardian/supplychain-matcher:pr-${{ github.event.pull_request.number }}
+          cache-from: type=gha,scope=supplychain-matcher
+          cache-to: type=gha,mode=max,scope=supplychain-matcher
+
   # Build and publish Helm chart for PR testing
   build-helm-chart:
     runs-on: ubuntu-latest
     needs: detect-changes
-    if: needs.detect-changes.outputs.charts == 'true' || needs.detect-changes.outputs.controller == 'true' || needs.detect-changes.outputs.broker == 'true' || needs.detect-changes.outputs.frontend == 'true' || needs.detect-changes.outputs.llm-bridge == 'true' || needs.detect-changes.outputs.evaluator == 'true' || needs.detect-changes.outputs.supplychain == 'true'
+    if: needs.detect-changes.outputs.charts == 'true' || needs.detect-changes.outputs.controller == 'true' || needs.detect-changes.outputs.broker == 'true' || needs.detect-changes.outputs.frontend == 'true' || needs.detect-changes.outputs.llm-bridge == 'true' || needs.detect-changes.outputs.evaluator == 'true' || needs.detect-changes.outputs.supplychain == 'true' || needs.detect-changes.outputs.supplychain-matcher == 'true'
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -1118,7 +1210,7 @@ jobs:
   # cannot create comments anyway.
   pr-summary:
     runs-on: ubuntu-latest
-    needs: [detect-changes, push-controller, build-broker, push-broker, build-frontend, push-frontend, build-llm-bridge, push-llm-bridge, build-evaluator, push-evaluator, build-supplychain, build-helm-chart]
+    needs: [detect-changes, push-controller, build-broker, push-broker, build-frontend, push-frontend, build-llm-bridge, push-llm-bridge, build-evaluator, push-evaluator, build-supplychain, build-supplychain-matcher, build-helm-chart]
     if: always() && github.event.pull_request.head.repo.full_name == github.repository
     steps:
       - name: Update or create summary comment
@@ -1132,12 +1224,13 @@ jobs:
             const llmBridge = '${{ needs.detect-changes.outputs.llm-bridge }}' === 'true';
             const evaluator = '${{ needs.detect-changes.outputs.evaluator }}' === 'true';
             const supplychain = '${{ needs.detect-changes.outputs.supplychain }}' === 'true';
+            const supplychainMatcher = '${{ needs.detect-changes.outputs.supplychain-matcher }}' === 'true';
             const charts = '${{ needs.detect-changes.outputs.charts }}' === 'true';
             const helmBuilt = '${{ needs.build-helm-chart.result }}' === 'success';
 
             let body = marker + '\n\n';
 
-            if (!controller && !broker && !frontend && !llmBridge && !evaluator && !supplychain && !charts) {
+            if (!controller && !broker && !frontend && !llmBridge && !evaluator && !supplychain && !supplychainMatcher && !charts) {
               body += '⏭️ No component changes detected. Skipping builds.\n';
             } else {
               body += '### Built Images\n\n';
@@ -1159,6 +1252,9 @@ jobs:
               }
               if (supplychain) {
                 body += '✅ **Supplychain**: `ghcr.io/kguardian-dev/kguardian/supplychain:pr-${{ github.event.pull_request.number }}`\n';
+              }
+              if (supplychainMatcher) {
+                body += '✅ **Supplychain matcher**: `ghcr.io/kguardian-dev/kguardian/supplychain-matcher:pr-${{ github.event.pull_request.number }}`\n';
               }
 
               body += '\n### 🧪 Testing Instructions\n\n';
