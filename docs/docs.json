@@ -117,6 +117,7 @@
               "api-reference/endpoints/services",
               "api-reference/endpoints/audit-verdicts",
               "api-reference/endpoints/vulnerabilities",
+              "api-reference/endpoints/attestations",
               "api-reference/endpoints/version",
               "api-reference/endpoints/environment"
             ]
