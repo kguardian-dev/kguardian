@@ -52,7 +52,7 @@ export function findingDimensionLabel(d: string): string {
   return (DIMENSION_LABEL as Record<string, string>)[d] ?? d;
 }
 
-/** Human text for why a drift check was not evaluated (contract v1.6). */
+/** Human text for why a drift check was not evaluated (contract v1.7). */
 export function driftNotEvaluatedText(reason: string): string {
   switch (reason) {
     case 'no_inventory':
