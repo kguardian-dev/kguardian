@@ -72,10 +72,12 @@ NAME             STATE        CONTAINERS   WOULD-DENY   UNKNOWN   LAST-EVALUATED
 release-signed   evaluated    12           2            1         4m               3d
 ```
 
-`STATE` says whether the counts mean anything: `evaluated`; `never-read`
-(the broker has never been read, so the zeros are not "nothing to deny");
-`broker-unavailable` or `broker-unauthorized` (every container is
-`Unknown`). The `BrokerRead` condition carries the same with a reason
+`STATE` says whether there is a current evaluation: `evaluated`;
+`never-read` (the broker has never been read); `broker-unavailable` or
+`broker-unauthorized` (every container is `Unknown`). Without a current
+evaluation the counts are left out of status, so their columns are blank,
+never a reassuring `0`; the containers last known are still listed in
+`findings` with the reason. The `BrokerRead` condition carries the same with a reason
 (`Read`, `NeverRead`, `BrokerUnavailable`, `BrokerUnauthorized`) and the
 error.
 
