@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/kguardian-dev/kguardian/advisor/pkg/api"
@@ -108,5 +109,35 @@ func writeAdmissionPolicy(o api.AdmissionPolicyOptions, file string, stdout io.W
 		_, err = stdout.Write(body)
 		return err
 	}
-	return os.WriteFile(file, body, 0o644)
+	return writeFileAtomic(file, body)
+}
+
+// writeFileAtomic writes to a temporary file in the target's directory and
+// renames it over the target, so a crash or full disk mid-write leaves
+// either the old file or none, never a partial policy.
+func writeFileAtomic(file string, body []byte) (err error) {
+	tmp, err := os.CreateTemp(filepath.Dir(file), "."+filepath.Base(file)+".*.tmp")
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if err != nil {
+			_ = os.Remove(tmp.Name())
+		}
+	}()
+	if _, err = tmp.Write(body); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err = tmp.Sync(); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err = tmp.Close(); err != nil {
+		return err
+	}
+	if err = os.Chmod(tmp.Name(), 0o644); err != nil {
+		return err
+	}
+	return os.Rename(tmp.Name(), file)
 }

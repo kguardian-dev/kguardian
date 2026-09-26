@@ -85,3 +85,38 @@ func TestAdmissionPolicyOversizedResponse(t *testing.T) {
 		t.Fatalf("file = %v, %v", st, err)
 	}
 }
+
+// -f replaces the file whole: an existing policy survives a failed fetch
+// untouched, a successful one replaces it, and no temporary file is left.
+func TestAdmissionPolicyAtomicWrite(t *testing.T) {
+	dir := t.TempDir()
+	file := filepath.Join(dir, "policy.yaml")
+	if err := os.WriteFile(file, []byte("old policy\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	startFakeBroker(t, map[string]string{"/attestations/policy": "# header\n" + strings.Repeat("x", 10*1024*1024)})
+	if err := writeAdmissionPolicy(api.AdmissionPolicyOptions{Format: "kyverno"}, file, &bytes.Buffer{}); err == nil {
+		t.Fatal("oversized response accepted")
+	}
+	if b, _ := os.ReadFile(file); string(b) != "old policy\n" {
+		t.Fatalf("old policy changed: %q", b)
+	}
+	startFakeBroker(t, map[string]string{"/attestations/policy": policyYAML})
+	if err := writeAdmissionPolicy(api.AdmissionPolicyOptions{Format: "kyverno"}, file, &bytes.Buffer{}); err != nil {
+		t.Fatal(err)
+	}
+	if b, _ := os.ReadFile(file); string(b) != policyYAML {
+		t.Fatalf("policy = %q", b)
+	}
+	if st, _ := os.Stat(file); st.Mode().Perm() != 0o644 {
+		t.Fatalf("mode = %v", st.Mode())
+	}
+	ents, _ := os.ReadDir(dir)
+	if len(ents) != 1 {
+		t.Fatalf("leftover files: %v", ents)
+	}
+	// A directory that cannot be written: an error, nothing left behind.
+	if err := writeFileAtomic(filepath.Join(dir, "missing", "p.yaml"), []byte("x")); err == nil {
+		t.Fatal("write into a missing directory succeeded")
+	}
+}
