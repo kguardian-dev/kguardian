@@ -3,9 +3,7 @@ package attest
 import (
 	"context"
 	"errors"
-	"fmt"
 	"net/http"
-	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -28,55 +26,6 @@ type Target struct {
 	// Tags seen for the digest; used to find a signed multi-arch index
 	// that lists it.
 	Tags []string
-}
-
-// Identity is a trusted signer: the OIDC issuer and the certificate SAN,
-// each matched exactly or by a Go regular expression that must match the
-// whole value.
-type Identity struct {
-	Issuer        string
-	IssuerRegExp  string
-	Subject       string
-	SubjectRegExp string
-}
-
-type compiledIdentity struct {
-	issuer, subject     string
-	issuerRE, subjectRE *regexp.Regexp
-}
-
-func compileIdentities(ids []Identity) ([]compiledIdentity, error) {
-	out := make([]compiledIdentity, 0, len(ids))
-	for _, id := range ids {
-		c := compiledIdentity{issuer: id.Issuer, subject: id.Subject}
-		var err error
-		if id.Issuer != "" && id.IssuerRegExp != "" || id.Subject != "" && id.SubjectRegExp != "" {
-			return nil, fmt.Errorf("identity: set the issuer (subject) exactly or as a regexp, not both")
-		}
-		// Regular expressions must match the whole value: unanchored, a
-		// trusted SAN would also match any SAN that merely contains it.
-		if id.IssuerRegExp != "" {
-			if c.issuerRE, err = regexp.Compile("^(?:" + id.IssuerRegExp + ")$"); err != nil {
-				return nil, fmt.Errorf("issuer regexp %q: %w", id.IssuerRegExp, err)
-			}
-		}
-		if id.SubjectRegExp != "" {
-			if c.subjectRE, err = regexp.Compile("^(?:" + id.SubjectRegExp + ")$"); err != nil {
-				return nil, fmt.Errorf("subject regexp %q: %w", id.SubjectRegExp, err)
-			}
-		}
-		if c.issuer == "" && c.issuerRE == nil || c.subject == "" && c.subjectRE == nil {
-			return nil, fmt.Errorf("identity needs an issuer and a subject (exact or regexp)")
-		}
-		out = append(out, c)
-	}
-	return out, nil
-}
-
-func (c compiledIdentity) matches(s Signer) bool {
-	okIss := (c.issuer != "" && s.Issuer == c.issuer) || (c.issuerRE != nil && c.issuerRE.MatchString(s.Issuer))
-	okSub := (c.subject != "" && s.SAN == c.subject) || (c.subjectRE != nil && c.subjectRE.MatchString(s.SAN))
-	return okIss && okSub
 }
 
 // Options configure a Verifier.
@@ -106,11 +55,6 @@ type Options struct {
 	// TrustedKeys verify key-signed ("cosign sign --key") signatures.
 	// Without them a key signature is reported as VerdictKeySigned.
 	TrustedKeys []PublicKey
-	// TrustedIdentities, when set, turns a verified keyless signature from
-	// any other signer into VerdictUntrustedIdentity (a signature verified
-	// by a TrustedKeys key is trusted by that configuration). Discovery leaves it
-	// empty; trust policies are evaluated from the recorded signers.
-	TrustedIdentities []Identity
 	// Insecure allows plain-HTTP registries (tests only).
 	Insecure bool
 	// transport replaces the guarded transport and skipHostCheck the
@@ -123,10 +67,9 @@ type Options struct {
 // Verifier discovers and verifies the signatures and attestations of
 // image digests, with a per-digest cache.
 type Verifier struct {
-	opts       Options
-	fetch      *fetcher
-	identities []compiledIdentity
-	keys       []trustedKey
+	opts  Options
+	fetch *fetcher
+	keys  []trustedKey
 
 	mu       sync.Mutex
 	cache    map[string]cacheEntry
@@ -167,10 +110,6 @@ func New(o Options) (*Verifier, error) {
 	if o.MaxEntries <= 0 {
 		o.MaxEntries = 10000
 	}
-	ids, err := compileIdentities(o.TrustedIdentities)
-	if err != nil {
-		return nil, err
-	}
 	keys, err := parseKeys(o.TrustedKeys)
 	if err != nil {
 		return nil, err
@@ -181,12 +120,11 @@ func New(o Options) (*Verifier, error) {
 	}
 	rt = RateLimit(rt, o.RegistryRPS, o.RegistryBurst)
 	return &Verifier{
-		opts:       o,
-		fetch:      &fetcher{rt: rt, insecure: o.Insecure},
-		identities: ids,
-		keys:       keys,
-		cache:      map[string]cacheEntry{},
-		byDigest:   map[string]string{},
+		opts:     o,
+		fetch:    &fetcher{rt: rt, insecure: o.Insecure},
+		keys:     keys,
+		cache:    map[string]cacheEntry{},
+		byDigest: map[string]string{},
 	}, nil
 }
 
@@ -318,6 +256,7 @@ func (v *Verifier) check(ctx context.Context, t Target) Result {
 	if len(c.sigs) > 0 && r.SignedVia == "" {
 		r.SignedVia, r.SignedDigest = SignedViaSelf, t.Digest
 	}
+	c.neutralize()
 	r.Signatures, r.Attestations = c.sigs, c.atts
 	if r.Signatures == nil {
 		r.Signatures = []Signature{}
@@ -326,27 +265,7 @@ func (v *Verifier) check(ctx context.Context, t Target) Result {
 		r.Attestations = []Attestation{}
 	}
 	r.Verdict, r.Reason = c.verdict()
-	if r.Verdict == VerdictVerified && len(v.identities) > 0 && !v.trusted(r.Signatures) {
-		r.Verdict, r.Reason = VerdictUntrustedIdentity, ""
-	}
 	return r
-}
-
-func (v *Verifier) trusted(sigs []Signature) bool {
-	for _, s := range sigs {
-		if !s.Verified {
-			continue
-		}
-		if s.Kind == SignerKey {
-			return true // a configured key is itself the trust decision
-		}
-		for _, id := range v.identities {
-			if id.matches(s.Signer) {
-				return true
-			}
-		}
-	}
-	return false
 }
 
 // collector gathers and verifies everything attached to one digest.

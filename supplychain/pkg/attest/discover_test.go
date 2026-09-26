@@ -19,9 +19,6 @@ const (
 	sanK8sRelease    = "krel-trust@k8s-releng-prod.iam.gserviceaccount.com"
 	issuerGoogle     = "https://accounts.google.com"
 	issuerGitHub     = "https://token.actions.githubusercontent.com"
-
-	// kguardian's own release identity (docs/verifying-releases.mdx).
-	kguardianReleaseSAN = `^https://github\.com/kguardian-dev/kguardian/\.github/workflows/(controller|broker|frontend|llm-bridge|evaluator|supplychain)-release\.yaml@refs/tags/(controller|broker|frontend|llm-bridge|evaluator|supplychain)/v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$`
 )
 
 func verified(t *testing.T, r Result) Signature {
@@ -231,54 +228,6 @@ func TestTamperedBundleReferrer(t *testing.T) {
 	wantVerdict(t, r, VerdictInvalid, ReasonDigestMismatch)
 }
 
-// A valid signature from a signer the identity list does not trust.
-func TestWrongIdentity(t *testing.T) {
-	reg := newFixtureRegistry(t, false)
-	tg := reg.load(loadRecording(t, "cosign-v3.1.3"), "")
-	kg := Identity{Issuer: issuerGitHub, SubjectRegExp: kguardianReleaseSAN}
-	r := newFixtureVerifier(t, kg).Verify(context.Background(), tg)
-	wantVerdict(t, r, VerdictUntrustedIdentity, "")
-	if s := verified(t, r); s.SAN != sanCosignKeyless {
-		t.Fatalf("signer = %+v", s)
-	}
-	ok := Identity{Issuer: issuerGoogle, Subject: sanCosignKeyless}
-	r = newFixtureVerifier(t, kg, ok).Verify(context.Background(), tg)
-	wantVerdict(t, r, VerdictVerified, "")
-}
-
-// The four outcomes the brief requires are distinct and correct.
-func TestFourDistinctVerdicts(t *testing.T) {
-	reg := newFixtureRegistry(t, false)
-	signed := reg.load(loadRecording(t, "cosign-v3.1.3"), "")
-	unsigned := reg.load(loadRecording(t, "kguardian-controller-v1.15.1"), "")
-	pause := loadRecording(t, "pause-3.10")
-	tampered := reg.load(loadRecording(t, "kguardian-controller-v1.15.1"), "tampered/controller")
-	for _, b := range pause.Blobs {
-		reg.putBlob("tampered/controller", b.Digest, b.Body)
-	}
-	for _, m := range pause.Manifests {
-		if strings.HasSuffix(m.Ref, ".sig") {
-			reg.putManifest("tampered/controller", "sha256-"+strings.TrimPrefix(tampered.Digest, "sha256:")+".sig", m.MediaType, m.Body)
-		}
-	}
-	v := newFixtureVerifier(t, Identity{Issuer: issuerGoogle, Subject: sanCosignKeyless})
-	wrong := newFixtureVerifier(t, Identity{Issuer: issuerGitHub, SubjectRegExp: kguardianReleaseSAN})
-	got := map[string]bool{
-		v.Verify(context.Background(), signed).Verdict:     true,
-		v.Verify(context.Background(), unsigned).Verdict:   true,
-		v.Verify(context.Background(), tampered).Verdict:   true,
-		wrong.Verify(context.Background(), signed).Verdict: true,
-	}
-	for _, want := range []string{VerdictVerified, VerdictUnsigned, VerdictInvalid, VerdictUntrustedIdentity} {
-		if !got[want] {
-			t.Fatalf("missing %s in %v", want, got)
-		}
-	}
-	if len(got) != 4 {
-		t.Fatalf("verdicts = %v", got)
-	}
-}
-
 // A platform manifest whose signature is on the index that lists it.
 func TestSignedViaIndex(t *testing.T) {
 	reg := newFixtureRegistry(t, false)
@@ -394,39 +343,6 @@ func TestCache(t *testing.T) {
 type roundTripFunc func(*http.Request) (*http.Response, error)
 
 func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
-
-// Identity regexps match the whole value: near misses of a trusted SAN or
-// issuer are untrusted.
-func TestIdentityRegexpsAreAnchored(t *testing.T) {
-	ids, err := compileIdentities([]Identity{{IssuerRegExp: `https://accounts\.google\.com`, SubjectRegExp: `krel-trust@k8s-releng-prod\.iam\.gserviceaccount\.com`}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	good := Signer{Kind: SignerKeyless, Issuer: issuerGoogle, SAN: sanK8sRelease}
-	if !ids[0].matches(good) {
-		t.Fatal("exact identity rejected")
-	}
-	for _, s := range []Signer{
-		{Kind: SignerKeyless, Issuer: issuerGoogle, SAN: sanK8sRelease + ".evil"},
-		{Kind: SignerKeyless, Issuer: issuerGoogle, SAN: "evil-" + sanK8sRelease},
-		{Kind: SignerKeyless, Issuer: "https://evil.example/" + issuerGoogle, SAN: sanK8sRelease},
-		{Kind: SignerKeyless, Issuer: issuerGoogle + "?x", SAN: sanK8sRelease},
-	} {
-		if ids[0].matches(s) {
-			t.Errorf("near miss matched: %+v", s)
-		}
-	}
-	gh, err := compileIdentities([]Identity{{Issuer: issuerGitHub, SubjectRegExp: `https://github\.com/org/.+`}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if gh[0].matches(Signer{Issuer: issuerGitHub, SAN: "https://github.com/evil-org/x/.github/workflows/y.yaml@refs/heads/main?https://github.com/org/"}) {
-		t.Error("SAN containing the trusted prefix matched")
-	}
-	if _, err := compileIdentities([]Identity{{Issuer: "a", IssuerRegExp: "a", Subject: "s"}}); err == nil {
-		t.Error("exact and regexp together accepted")
-	}
-}
 
 // A signature whose transparency-log entry names a log the trusted root
 // does not hold (a private or staging Sigstore) is unknown, not invalid.

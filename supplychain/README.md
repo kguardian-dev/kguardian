@@ -355,6 +355,14 @@ and no identity.
   a hint; if the hint names a configured key and the signature fails, the
   result is `invalid`. A legacy `.sig` has no hint, so an altered one reads
   as `key_signed`, never `verified`.
+- **Printable only.** A signature or attestation whose signer-supplied
+  fields (SAN, predicate type, provenance) hold a control character or a
+  Unicode line separator is reported malformed and unverified, without
+  those fields. The broker refuses such characters anywhere, so one odd
+  attestation cannot get a digest's whole result refused.
+- **Real signatures first.** Before a payload is capped (32 signatures, 64
+  attestations), verified entries go first, then key signatures, so junk
+  attached to an image cannot push the real signature out.
 - **Bounded.** Results are cached per digest (24h, 1h for `unknown`) and a
   result is posted only when it changes. Registry requests are rate-limited
   (`ATTESTATION_REGISTRY_RPS`), each digest has a 60s budget, and sizes are

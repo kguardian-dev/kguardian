@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"slices"
 	"strings"
 	"time"
 )
@@ -153,8 +154,16 @@ func (b *BrokerClient) Post(ctx context.Context, r Result) error {
 }
 
 // encodeBounded serialises r within MaxPostBytes: the lists are capped
-// first, then details dropped, then attestations trimmed.
+// first, then details dropped, then attestations trimmed. Before any cap,
+// the entries the verdict rests on go first (verified, then key
+// signatures, then the rest; verified attestations first), so junk
+// attached to an image cannot push the one real signature out of the
+// payload.
 func encodeBounded(r Result) ([]byte, error) {
+	r.Signatures = slices.Clone(r.Signatures)
+	slices.SortStableFunc(r.Signatures, func(a, b Signature) int { return sigRank(a) - sigRank(b) })
+	r.Attestations = slices.Clone(r.Attestations)
+	slices.SortStableFunc(r.Attestations, func(a, b Attestation) int { return attRank(a) - attRank(b) })
 	if len(r.Signatures) > maxSignatures {
 		r.Signatures = r.Signatures[:maxSignatures]
 	}
@@ -182,6 +191,23 @@ func encodeBounded(r Result) ([]byte, error) {
 		return nil, fmt.Errorf("attestation result for %s exceeds %d bytes", r.Digest, MaxPostBytes)
 	}
 	return b, err
+}
+
+func sigRank(s Signature) int {
+	switch {
+	case s.Verified:
+		return 0
+	case s.Error == ReasonUntrustedKey:
+		return 1
+	}
+	return 2
+}
+
+func attRank(a Attestation) int {
+	if a.Verified {
+		return 0
+	}
+	return 1
 }
 
 // Retryable reports whether a failed post may succeed unchanged later.

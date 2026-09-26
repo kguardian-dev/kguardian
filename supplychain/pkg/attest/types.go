@@ -28,9 +28,11 @@ import "time"
 // SchemaVersion of the broker payload (Result).
 const SchemaVersion = 1
 
-// Discovery verdicts, from the signatures alone. Trust-policy verdicts
-// (untrusted_identity, attestation_missing) are derived from these by the
-// policy layer.
+// Discovery verdicts, from the signatures alone. Whether a signer is
+// trusted is not decided here: ImageTrustPolicy (the evaluator) does that
+// from the signers recorded. The same set is in
+// test/fixtures/contracts/attestation-verdicts.json, which the broker's
+// whitelist is tested against.
 const (
 	// VerdictVerified: at least one signature verified against the trusted
 	// root, whoever signed it.
@@ -49,11 +51,14 @@ const (
 	// Configure the key (Options.TrustedKeys) to turn this into verified
 	// or invalid.
 	VerdictKeySigned = "key_signed"
-	// VerdictUntrustedIdentity: a valid signature, but no signer the
-	// caller's identity list accepts. Only produced when identities are
-	// given (Options.TrustedIdentities).
-	VerdictUntrustedIdentity = "untrusted_identity"
 )
+
+// Verdicts is every verdict discovery emits (the contract with the
+// broker; see TestVerdictContract).
+var Verdicts = []string{VerdictVerified, VerdictKeySigned, VerdictUnsigned, VerdictInvalid, VerdictUnknown}
+
+// SignerKinds is every Signer.Kind discovery emits.
+var SignerKinds = []string{SignerKeyless, SignerKey}
 
 // Signer kinds.
 const (

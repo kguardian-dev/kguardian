@@ -120,21 +120,6 @@ func TestKeySigned(t *testing.T) {
 	}
 }
 
-// A configured key makes identity lists irrelevant for its signatures.
-func TestKeySignedWithIdentityList(t *testing.T) {
-	reg := newFixtureRegistry(t, false)
-	tg := reg.load(loadRecording(t, "key-legacy"), "")
-	v, err := New(Options{
-		TrustRoot: fixtureTrustRoot(t), TrustedKeys: []PublicKey{fixtureKey(t)},
-		TrustedIdentities: []Identity{{Issuer: issuerGitHub, SubjectRegExp: kguardianReleaseSAN}},
-		Insecure:          true, transport: http.DefaultTransport, skipHostCheck: true, RegistryRPS: 1000, RegistryBurst: 1000,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	wantVerdict(t, v.Verify(context.Background(), tg), VerdictVerified, "")
-}
-
 // tamperKeyBundle flips one byte of the DSSE signature in the key-bundle
 // recording and re-links the referrer manifest and fallback index to the
 // altered blob, as an attacker with registry write access would.

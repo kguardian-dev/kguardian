@@ -279,16 +279,15 @@ func fixtureTrustRoot(t *testing.T) TrustRoot {
 	return &FileTrustRoot{Path: filepath.Join("testdata", "trusted_root.json")}
 }
 
-func newFixtureVerifier(t *testing.T, ids ...Identity) *Verifier {
+func newFixtureVerifier(t *testing.T) *Verifier {
 	t.Helper()
 	v, err := New(Options{
-		TrustRoot:         fixtureTrustRoot(t),
-		TrustedIdentities: ids,
-		Insecure:          true,
-		transport:         http.DefaultTransport,
-		skipHostCheck:     true,
-		RegistryRPS:       1000,
-		RegistryBurst:     1000,
+		TrustRoot:     fixtureTrustRoot(t),
+		Insecure:      true,
+		transport:     http.DefaultTransport,
+		skipHostCheck: true,
+		RegistryRPS:   1000,
+		RegistryBurst: 1000,
 	})
 	if err != nil {
 		t.Fatal(err)
