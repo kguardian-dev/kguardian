@@ -85,7 +85,7 @@ export function CveDrawer({ id, summary, onClose, onOpenWorkload, onShowOnMap, o
               <span data-testid="headline-pending" title="Reading each affected image's finding" className="rounded-md border border-dashed border-hubble-border-strong px-1.5 py-px text-[11px] font-mono text-tertiary">…</span>
             ) : (
               <>
-                <TierBadge tier={overall} atLeast={head.unknownRows > 0} title="The most urgent tier over every affected workload (the Broker's tiers)" />
+                <TierBadge tier={overall} atLeast={head.unknownRows > 0} unknownRows={head.unknownRows} title="The most urgent tier over every affected workload (the Broker's tiers)" />
                 <FactorChips factors={head.factors} only={['inuse', 'exposure', 'kev', 'epss', 'cvss', 'fix']} />
                 {head.unknownRows > 0 && (
                   <FactorChips factors={[{ key: 'tier-unknown', tone: 'unknown', label: `${head.unknownRows} unknown`, title: `${head.unknownRows} affected workload${head.unknownRows === 1 ? ' has' : 's have'} no tier yet. Unknown, not low.` }]} />
