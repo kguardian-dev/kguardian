@@ -65,7 +65,7 @@ test("parseContext handles pre-empty arrays", () => {
 test("getToolsCached returns every registered tool in provider format", async () => {
   const tools = await McpClient.getToolsCached();
   assert.equal(tools.length, TOOL_DEFS.length);
-  assert.equal(tools.length, 23); // 12 network/policy + 3 compute + 4 profile/image + 4 vulnerability
+  assert.equal(tools.length, 25); // 12 network/policy + 3 compute + 4 profile/image + 4 vulnerability + 2 signature
   for (const t of tools) {
     assert.equal(typeof t.name, "string");
     assert.equal(typeof t.description, "string");

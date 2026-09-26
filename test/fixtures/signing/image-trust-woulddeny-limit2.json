@@ -1,0 +1,39 @@
+{
+  "request": "GET /image-trust?verdict=WouldDeny&limit=2",
+  "status": 200,
+  "body": {
+    "available": true,
+    "evaluatedAt": "2026-09-27T08:28:39.026536084+10:00",
+    "total": 5,
+    "wouldDeny": 5,
+    "unknown": 0,
+    "trusted": 0,
+    "policies": [
+      "cluster/require-provenance",
+      "shop/release-signers"
+    ],
+    "results": [
+      {
+        "policy": "shop/release-signers",
+        "namespace": "shop",
+        "workload": "Deployment/cart",
+        "container": "app",
+        "digest": "sha256:f6ab986a3a713f127b0f03c6f5319756883249bbf58cebbee9911d80eb7fa1f8",
+        "image": "ghcr.io/kguardian-dev/kguardian/controller",
+        "verdict": "WouldDeny",
+        "reason": "unsigned"
+      },
+      {
+        "policy": "cluster/require-provenance",
+        "namespace": "shop",
+        "workload": "Deployment/checkout",
+        "container": "app",
+        "digest": "sha256:94be8ca1be31f007a2a31fd67a3830ee9dbde9cc971a699f35d419b5f51b242b",
+        "image": "127.0.0.1:5557/fixture/key-legacy",
+        "verdict": "WouldDeny",
+        "reason": "untrusted-signer"
+      }
+    ],
+    "truncated": true
+  }
+}
