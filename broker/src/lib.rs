@@ -47,7 +47,8 @@ pub use profile_export::{get_workload_export, post_workload_export};
 pub use read_budget::*;
 pub use retention::spawn as spawn_retention;
 pub use runtime_inventory::{
-    get_image_runtime, get_workload_runtime, runtime_executables_resource,
+    get_image_runtime, get_workload_runtime, runtime_coverage_resource,
+    runtime_executables_resource,
 };
 pub use telemetry::*;
 pub use types::*;

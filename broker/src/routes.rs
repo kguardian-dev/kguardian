@@ -19,7 +19,8 @@ use crate::{
     get_workload_profile_diff, get_workload_profile_version, get_workload_profile_versions,
     get_workload_runtime, get_workloads, image_sbom_cyclonedx_resource, image_sbom_resource,
     image_vulnerabilities_resource, list_seccomp_profiles, mark_pod_dead, post_seccomp_node_status,
-    post_workload_export, put_seccomp_cr, runtime_executables_resource, seccomp_denials_resource,
+    post_workload_export, put_seccomp_cr, runtime_coverage_resource, runtime_executables_resource,
+    seccomp_denials_resource,
 };
 
 pub fn configure(cfg: &mut web::ServiceConfig) {
@@ -68,6 +69,7 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
         // (runtime_inventory::RUNTIME_JSON_LIMIT_BYTES); both reads are
         // LIMIT-clamped and charged to the read budget.
         .service(runtime_executables_resource())
+        .service(runtime_coverage_resource())
         .service(get_workload_runtime)
         .service(get_image_runtime)
         // Workload security profile (#1533 P0-5): list, detail, versions, diff.

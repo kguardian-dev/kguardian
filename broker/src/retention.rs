@@ -1940,6 +1940,17 @@ pub(crate) const RUNTIME_EXECUTABLES_PRUNE_SQL: &str = "WITH expired AS (\
        AND r.container_name = e.container_name AND r.image_digest = e.image_digest \
        AND r.kind = e.kind AND r.path = e.path";
 
+/// Coverage heartbeats not refreshed within the window: containers long
+/// gone. Same window as the inventory rows they vouch for.
+pub(crate) const RUNTIME_COVERAGE_PRUNE_SQL: &str = "WITH expired AS (\
+         SELECT cluster_id, container_id FROM runtime_coverage \
+         WHERE last_heartbeat < timezone('UTC', NOW()) - $1::interval \
+         ORDER BY last_heartbeat \
+         LIMIT $2 \
+     ) \
+     DELETE FROM runtime_coverage r USING expired e \
+     WHERE r.cluster_id = e.cluster_id AND r.container_id = e.container_id";
+
 fn spawn_runtime_inventory(pool: DbPool) {
     let days = runtime_inventory_retention_days();
     let interval = runtime_inventory_retention_interval();
@@ -1960,6 +1971,14 @@ fn spawn_runtime_inventory(pool: DbPool) {
                 &pool,
                 "runtime_executables",
                 RUNTIME_EXECUTABLES_PRUNE_SQL,
+                days,
+                image_inventory_batch_size(),
+            )
+            .await;
+            run_batched_prune(
+                &pool,
+                "runtime_coverage",
+                RUNTIME_COVERAGE_PRUNE_SQL,
                 days,
                 image_inventory_batch_size(),
             )
@@ -2629,6 +2648,9 @@ mod runtime_inventory_retention_tests {
         for col in ["image_digest", "r.kind = e.kind", "r.path = e.path"] {
             assert!(sql.contains(col), "{col}");
         }
+        let cov = RUNTIME_COVERAGE_PRUNE_SQL;
+        assert!(cov.contains("LIMIT $2") && cov.contains("$1::interval"));
+        assert!(cov.contains("r.container_id = e.container_id"));
     }
 
     const TEST_MIGRATIONS: diesel_migrations::EmbeddedMigrations =

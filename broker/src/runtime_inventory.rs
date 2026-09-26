@@ -1098,6 +1098,272 @@ pub async fn get_image_runtime(
 }
 
 // ---------------------------------------------------------------------
+// Coverage heartbeats (read by P1-5 through kg_runtime_coverage)
+// ---------------------------------------------------------------------
+
+/// Heartbeats accepted in one post.
+pub const MAX_COVERAGE_ENTRIES: usize = 5_000;
+/// Body limit for the coverage route. A heartbeat is ~600 bytes, so a
+/// full batch is ~3 MB.
+pub const COVERAGE_BODY_LIMIT_BYTES: usize = 4 << 20;
+const GAP_REASONS: [&str; 2] = ["kernel_drops", "overflow"];
+
+/// One posted heartbeat (controller `runtime_inventory::CoveragePost`).
+/// Strings are bounded by the body limit; every one is length-checked
+/// before use.
+#[derive(Debug, Clone, Deserialize)]
+pub struct CoverageEntry {
+    pub pod_namespace: String,
+    pub pod_name: String,
+    pub workload_kind: String,
+    pub workload_name: String,
+    pub container_name: String,
+    #[serde(default)]
+    pub image_digest: String,
+    pub container_id: String,
+    pub node_name: String,
+    pub mode: String,
+    pub exec_probe: bool,
+    pub lib_probe: bool,
+    pub start_mode: String,
+    pub tracking_since: NaiveDateTime,
+    #[serde(default)]
+    pub gap: Option<String>,
+    #[serde(default)]
+    pub ended: bool,
+    pub heartbeat_at: NaiveDateTime,
+    pub heartbeat_secs: u32,
+}
+
+/// Validate one heartbeat; `None` = drop it.
+pub fn valid_coverage(e: CoverageEntry) -> Option<CoverageEntry> {
+    let names = [
+        &e.pod_namespace,
+        &e.pod_name,
+        &e.workload_name,
+        &e.container_name,
+        &e.node_name,
+    ];
+    if names
+        .iter()
+        .any(|n| bounded(n, MAX_NAME_LEN).as_deref() != Some(n.as_str()))
+    {
+        return None;
+    }
+    if bounded(&e.workload_kind, MAX_KIND_LEN).as_deref() != Some(e.workload_kind.as_str()) {
+        return None;
+    }
+    let id_ok = !e.container_id.is_empty()
+        && e.container_id.len() <= 128
+        && e.container_id.bytes().all(|b| b.is_ascii_alphanumeric());
+    if !id_ok {
+        return None;
+    }
+    if !e.image_digest.is_empty() && !is_valid_digest(&e.image_digest) {
+        return None;
+    }
+    if !["exec", "full"].contains(&e.mode.as_str())
+        || !["start", "backfill"].contains(&e.start_mode.as_str())
+        || !(1..=86_400).contains(&e.heartbeat_secs)
+    {
+        return None;
+    }
+    // An unknown gap reason is still a gap.
+    let gap = e.gap.map(|g| {
+        if GAP_REASONS.contains(&g.as_str()) {
+            g
+        } else {
+            "other".to_string()
+        }
+    });
+    Some(CoverageEntry { gap, ..e })
+}
+
+/// Upsert heartbeats. The run of gap-free coverage (`covered_since`)
+/// restarts at this heartbeat when the controller reports a gap, when a
+/// probe or the mode changed, or when the previous heartbeat is older
+/// than 3 x heartbeat_secs + 60 s (the controller, the node or the
+/// broker was away: nobody can say what ran meanwhile). A heartbeat
+/// older than the stored one is ignored. Times are clamped to the
+/// database clock.
+pub(crate) const COVERAGE_UPSERT_SQL: &str = "\
+INSERT INTO runtime_coverage AS r (cluster_id, container_id, pod_namespace, workload_kind, \
+    workload_name, container_name, image_digest, pod_name, node_name, mode, exec_probe, \
+    lib_probe, start_mode, tracking_since, covered_since, last_heartbeat, heartbeat_secs, gaps, \
+    last_gap, last_gap_at, ended) \
+SELECT $1, t.cid, t.ns, t.wk, t.wn, t.cn, t.dg, t.pn, t.nn, t.md, t.ep, t.lp, t.sm, \
+    LEAST(t.ts, t.hb, timezone('UTC', NOW())), \
+    CASE WHEN t.gap IS NULL AND t.ep AND t.lp THEN LEAST(t.ts, t.hb, timezone('UTC', NOW())) \
+         ELSE LEAST(t.hb, timezone('UTC', NOW())) END, \
+    LEAST(t.hb, timezone('UTC', NOW())), t.hs, \
+    CASE WHEN t.gap IS NULL THEN 0 ELSE 1 END, t.gap, \
+    CASE WHEN t.gap IS NULL THEN NULL ELSE LEAST(t.hb, timezone('UTC', NOW())) END, t.ended \
+FROM unnest($2::text[], $3::text[], $4::text[], $5::text[], $6::text[], $7::text[], $8::text[], \
+    $9::text[], $10::text[], $11::bool[], $12::bool[], $13::text[], $14::timestamp[], \
+    $15::text[], $16::timestamp[], $17::int[], $18::bool[]) \
+    AS t(cid, ns, wk, wn, cn, dg, pn, nn, md, ep, lp, sm, ts, gap, hb, hs, ended) \
+ON CONFLICT (cluster_id, container_id) DO UPDATE SET \
+    covered_since = CASE WHEN EXCLUDED.last_gap IS NOT NULL \
+            OR EXCLUDED.mode <> r.mode OR EXCLUDED.exec_probe <> r.exec_probe \
+            OR EXCLUDED.lib_probe <> r.lib_probe \
+            OR EXCLUDED.last_heartbeat - r.last_heartbeat \
+                > make_interval(secs => 3 * r.heartbeat_secs + 60) \
+        THEN EXCLUDED.last_heartbeat ELSE r.covered_since END, \
+    gaps = r.gaps + CASE WHEN EXCLUDED.last_gap IS NOT NULL \
+            OR EXCLUDED.last_heartbeat - r.last_heartbeat \
+                > make_interval(secs => 3 * r.heartbeat_secs + 60) THEN 1 ELSE 0 END, \
+    last_gap = CASE WHEN EXCLUDED.last_gap IS NOT NULL THEN EXCLUDED.last_gap \
+        WHEN EXCLUDED.last_heartbeat - r.last_heartbeat \
+            > make_interval(secs => 3 * r.heartbeat_secs + 60) THEN 'late_heartbeat' \
+        ELSE r.last_gap END, \
+    last_gap_at = CASE WHEN EXCLUDED.last_gap IS NOT NULL \
+            OR EXCLUDED.last_heartbeat - r.last_heartbeat \
+                > make_interval(secs => 3 * r.heartbeat_secs + 60) \
+        THEN EXCLUDED.last_heartbeat ELSE r.last_gap_at END, \
+    pod_name = EXCLUDED.pod_name, node_name = EXCLUDED.node_name, mode = EXCLUDED.mode, \
+    exec_probe = EXCLUDED.exec_probe, lib_probe = EXCLUDED.lib_probe, \
+    last_heartbeat = EXCLUDED.last_heartbeat, heartbeat_secs = EXCLUDED.heartbeat_secs, \
+    ended = r.ended OR EXCLUDED.ended \
+WHERE EXCLUDED.last_heartbeat >= r.last_heartbeat AND NOT r.ended";
+
+/// Write heartbeats in one transaction; returns rows written.
+pub fn upsert_coverage(conn: &mut PgConnection, rows: &[CoverageEntry]) -> Result<usize, DbError> {
+    if rows.is_empty() {
+        return Ok(0);
+    }
+    // One INSERT ... ON CONFLICT may not touch a row twice: keep the
+    // newest heartbeat per container id (merging a gap into it).
+    let mut by_id: std::collections::BTreeMap<&str, CoverageEntry> = Default::default();
+    for r in rows {
+        match by_id.get_mut(r.container_id.as_str()) {
+            Some(prev) if prev.heartbeat_at > r.heartbeat_at => {
+                prev.gap = prev.gap.take().or_else(|| r.gap.clone());
+            }
+            Some(prev) => {
+                let gap = r.gap.clone().or_else(|| prev.gap.take());
+                *prev = CoverageEntry { gap, ..r.clone() };
+            }
+            None => {
+                by_id.insert(&r.container_id, r.clone());
+            }
+        }
+    }
+    let rows: Vec<&CoverageEntry> = by_id.values().collect();
+    let col = |f: fn(&CoverageEntry) -> &str| -> Vec<&str> { rows.iter().map(|r| f(r)).collect() };
+    let written = conn.transaction::<usize, diesel::result::Error, _>(|conn| {
+        sql_query(COVERAGE_UPSERT_SQL)
+            .bind::<Text, _>(DEFAULT_CLUSTER_ID)
+            .bind::<Array<Text>, _>(col(|r| &r.container_id))
+            .bind::<Array<Text>, _>(col(|r| &r.pod_namespace))
+            .bind::<Array<Text>, _>(col(|r| &r.workload_kind))
+            .bind::<Array<Text>, _>(col(|r| &r.workload_name))
+            .bind::<Array<Text>, _>(col(|r| &r.container_name))
+            .bind::<Array<Text>, _>(col(|r| &r.image_digest))
+            .bind::<Array<Text>, _>(col(|r| &r.pod_name))
+            .bind::<Array<Text>, _>(col(|r| &r.node_name))
+            .bind::<Array<Text>, _>(col(|r| &r.mode))
+            .bind::<Array<Bool>, _>(rows.iter().map(|r| r.exec_probe).collect::<Vec<_>>())
+            .bind::<Array<Bool>, _>(rows.iter().map(|r| r.lib_probe).collect::<Vec<_>>())
+            .bind::<Array<Text>, _>(col(|r| &r.start_mode))
+            .bind::<Array<Timestamp>, _>(rows.iter().map(|r| r.tracking_since).collect::<Vec<_>>())
+            .bind::<Array<Nullable<Text>>, _>(
+                rows.iter().map(|r| r.gap.as_deref()).collect::<Vec<_>>(),
+            )
+            .bind::<Array<Timestamp>, _>(rows.iter().map(|r| r.heartbeat_at).collect::<Vec<_>>())
+            .bind::<Array<diesel::sql_types::Integer>, _>(
+                rows.iter()
+                    .map(|r| r.heartbeat_secs as i32)
+                    .collect::<Vec<_>>(),
+            )
+            .bind::<Array<Bool>, _>(rows.iter().map(|r| r.ended).collect::<Vec<_>>())
+            .execute(conn)
+    })?;
+    Ok(written)
+}
+
+async fn post_runtime_coverage(
+    pool: web::Data<DbPool>,
+    body: web::Bytes,
+) -> actix_web::Result<HttpResponse> {
+    let entries: Vec<CoverageEntry> = match serde_json::from_slice::<Vec<CoverageEntry>>(&body) {
+        Ok(v) => v,
+        Err(e) => {
+            return Ok(HttpResponse::BadRequest().body(format!("invalid coverage batch: {e}")));
+        }
+    };
+    drop(body);
+    if entries.len() > MAX_COVERAGE_ENTRIES {
+        return Ok(HttpResponse::PayloadTooLarge().body(format!(
+            "at most {MAX_COVERAGE_ENTRIES} heartbeats per post; chunk the batch"
+        )));
+    }
+    let total = entries.len();
+    let rows: Vec<CoverageEntry> = entries.into_iter().filter_map(valid_coverage).collect();
+    let dropped = total - rows.len();
+    if dropped > 0 {
+        warn!(
+            dropped,
+            kept = rows.len(),
+            "/runtime/coverage entries malformed; dropped"
+        );
+    }
+    let accepted = rows.len();
+    let written = web::block(move || {
+        let mut conn = pool.get()?;
+        upsert_coverage(&mut conn, &rows)
+    })
+    .await?
+    .map_err(actix_web::error::ErrorInternalServerError)?;
+    Ok(HttpResponse::Ok().json(IngestSummary {
+        accepted,
+        dropped,
+        written,
+    }))
+}
+
+/// `POST /runtime/coverage` with its own body limit.
+pub fn runtime_coverage_resource() -> impl actix_web::dev::HttpServiceFactory {
+    web::resource("/runtime/coverage")
+        .wrap(::actix_web::middleware::from_fn(crate::auth::authorize))
+        .app_data(web::PayloadConfig::new(COVERAGE_BODY_LIMIT_BYTES))
+        .route(web::post().to(post_runtime_coverage))
+}
+
+/// One `kg_runtime_coverage` answer.
+#[derive(Debug, Clone, QueryableByName, PartialEq, Serialize)]
+pub struct CoverageAnswer {
+    #[diesel(sql_type = Nullable<Bool>)]
+    pub covered: Option<bool>,
+    #[diesel(sql_type = Nullable<Timestamp>)]
+    pub observed_since: Option<NaiveDateTime>,
+    #[diesel(sql_type = Nullable<Text>)]
+    pub reason: Option<String>,
+}
+
+/// Call `kg_runtime_coverage` (the migration defines it; P1-5 calls it
+/// from SQL). Here for the broker's own tests and callers.
+pub fn runtime_coverage(
+    conn: &mut PgConnection,
+    key: (&str, &str, &str, &str, &str),
+    image: &str,
+    window_hours: i32,
+) -> Result<CoverageAnswer, DbError> {
+    let (ns, kind, name, container, cluster) = key;
+    Ok(sql_query(
+        "SELECT covered, observed_since, reason \
+         FROM kg_runtime_coverage($1, $2, $3, $4, $5, $6, $7)",
+    )
+    .bind::<Text, _>(cluster)
+    .bind::<Text, _>(ns)
+    .bind::<Text, _>(kind)
+    .bind::<Text, _>(name)
+    .bind::<Text, _>(container)
+    .bind::<Text, _>(image)
+    .bind::<diesel::sql_types::Integer, _>(window_hours)
+    .get_result(conn)?)
+}
+
+// ---------------------------------------------------------------------
 // For P2-5 drift
 // ---------------------------------------------------------------------
 
@@ -1722,5 +1988,307 @@ mod tests {
             .unwrap()
             .entries
             .is_empty());
+    }
+
+    // ---- coverage ------------------------------------------------------
+
+    fn beat(
+        cid: &str,
+        pod: &str,
+        name: &str,
+        start_mode: &str,
+        tracking_h: i64,
+        beat_h: i64,
+    ) -> CoverageEntry {
+        let now = chrono::Utc::now().naive_utc();
+        CoverageEntry {
+            pod_namespace: "covns".into(),
+            pod_name: pod.into(),
+            workload_kind: "Deployment".into(),
+            workload_name: name.into(),
+            container_name: "app".into(),
+            image_digest: D.into(),
+            container_id: cid.into(),
+            node_name: "n1".into(),
+            mode: "full".into(),
+            exec_probe: true,
+            lib_probe: true,
+            start_mode: start_mode.into(),
+            tracking_since: now - chrono::Duration::hours(tracking_h),
+            gap: None,
+            ended: false,
+            heartbeat_at: now - chrono::Duration::hours(beat_h),
+            heartbeat_secs: 300,
+        }
+    }
+
+    #[test]
+    fn heartbeats_are_validated() {
+        let ok = beat("abc123", "web-1", "web", "start", 1, 0);
+        assert!(valid_coverage(ok.clone()).is_some());
+        for bad in [
+            CoverageEntry {
+                container_id: "../x".into(),
+                ..ok.clone()
+            },
+            CoverageEntry {
+                mode: "some".into(),
+                ..ok.clone()
+            },
+            CoverageEntry {
+                start_mode: "later".into(),
+                ..ok.clone()
+            },
+            CoverageEntry {
+                image_digest: "sha256:XYZ".into(),
+                ..ok.clone()
+            },
+            CoverageEntry {
+                heartbeat_secs: 0,
+                ..ok.clone()
+            },
+            CoverageEntry {
+                pod_namespace: " ".into(),
+                ..ok.clone()
+            },
+        ] {
+            assert!(valid_coverage(bad.clone()).is_none(), "{bad:?}");
+        }
+        let odd = valid_coverage(CoverageEntry {
+            gap: Some("cosmic_ray".into()),
+            ..ok
+        })
+        .unwrap();
+        assert_eq!(
+            odd.gap.as_deref(),
+            Some("other"),
+            "an unknown gap is still a gap"
+        );
+    }
+
+    #[test]
+    #[ignore = "requires a live postgres (set KG_TEST_DATABASE_URL)"]
+    fn live_database_coverage_function_follows_the_contract() {
+        use diesel::connection::SimpleConnection;
+        let mut conn = live_conn();
+        conn.batch_execute(
+            "DELETE FROM runtime_coverage WHERE pod_namespace = 'covns'; \
+             DELETE FROM pod_details WHERE pod_namespace = 'covns';",
+        )
+        .unwrap();
+        let cov = |conn: &mut PgConnection, name: &str| {
+            runtime_coverage(conn, ("covns", "Deployment", name, "app", "primary"), D, 24).unwrap()
+        };
+        let put =
+            |conn: &mut PgConnection, b: Vec<CoverageEntry>| upsert_coverage(conn, &b).unwrap();
+        let hours_ago = |t: Option<NaiveDateTime>| {
+            (chrono::Utc::now().naive_utc() - t.unwrap()).num_minutes() as f64 / 60.0
+        };
+
+        // The signature P1-5 checks for with to_regprocedure.
+        #[derive(QueryableByName)]
+        struct E {
+            #[diesel(sql_type = Bool)]
+            e: bool,
+        }
+        let e: E = sql_query(
+            "SELECT to_regprocedure('kg_runtime_coverage(text,text,text,text,text,text,integer)') \
+             IS NOT NULL AS e",
+        )
+        .get_result(&mut conn)
+        .unwrap();
+        assert!(e.e);
+
+        // Nothing reported.
+        let a = cov(&mut conn, "none");
+        assert_eq!(
+            (a.covered, a.reason.as_deref()),
+            (Some(false), Some("no_runtime_data"))
+        );
+
+        // Captured from its start 30 h ago, heartbeating: covered.
+        put(
+            &mut conn,
+            vec![beat("c1", "p1", "fromstart", "start", 30, 0)],
+        );
+        let a = cov(&mut conn, "fromstart");
+        assert_eq!((a.covered, a.reason.as_deref()), (Some(true), None));
+        assert!((hours_ago(a.observed_since) - 30.0).abs() < 0.1);
+
+        // From start, but only 2 h old: not yet long enough.
+        put(&mut conn, vec![beat("c2", "p2", "young", "start", 2, 0)]);
+        let a = cov(&mut conn, "young");
+        assert_eq!(
+            (a.covered, a.reason.as_deref()),
+            (Some(false), Some("capture_gap"))
+        );
+
+        // Backfilled 30 h ago: covered for the window after the backfill.
+        put(
+            &mut conn,
+            vec![beat("c3", "p3", "backfilled", "backfill", 30, 0)],
+        );
+        assert_eq!(cov(&mut conn, "backfilled").covered, Some(true));
+        // Backfilled 3 h ago: the container ran unobserved before that.
+        put(
+            &mut conn,
+            vec![beat("c3b", "p3b", "backfill-late", "backfill", 3, 0)],
+        );
+        assert_eq!(
+            cov(&mut conn, "backfill-late").reason.as_deref(),
+            Some("capture_gap")
+        );
+
+        // A heartbeat gap (30 h of silence) restarts coverage.
+        put(&mut conn, vec![beat("c4", "p4", "silent", "start", 31, 30)]);
+        put(&mut conn, vec![beat("c4", "p4", "silent", "start", 31, 0)]);
+        let a = cov(&mut conn, "silent");
+        assert_eq!(
+            (a.covered, a.reason.as_deref()),
+            (Some(false), Some("capture_gap"))
+        );
+        assert!(
+            hours_ago(a.observed_since) < 0.1,
+            "coverage restarts at the late beat"
+        );
+        #[derive(QueryableByName)]
+        struct G {
+            #[diesel(sql_type = diesel::sql_types::Integer)]
+            gaps: i32,
+            #[diesel(sql_type = Nullable<Text>)]
+            last_gap: Option<String>,
+        }
+        let g: G =
+            sql_query("SELECT gaps, last_gap FROM runtime_coverage WHERE container_id = 'c4'")
+                .get_result(&mut conn)
+                .unwrap();
+        assert_eq!((g.gaps, g.last_gap.as_deref()), (1, Some("late_heartbeat")));
+
+        // Heartbeats on time keep coverage; a reported gap restarts it.
+        let mut b = beat("c5", "p5", "drops", "start", 30, 0);
+        b.heartbeat_at -= chrono::Duration::minutes(10);
+        put(&mut conn, vec![b.clone()]);
+        b.heartbeat_at += chrono::Duration::minutes(5);
+        put(&mut conn, vec![b.clone()]);
+        assert_eq!(
+            cov(&mut conn, "drops").covered,
+            Some(true),
+            "on-time beats keep it"
+        );
+        b.heartbeat_at += chrono::Duration::minutes(5);
+        b.gap = Some("kernel_drops".into());
+        put(&mut conn, vec![b.clone()]);
+        assert_eq!(
+            cov(&mut conn, "drops").reason.as_deref(),
+            Some("capture_gap")
+        );
+        // An out-of-order (older) heartbeat is ignored.
+        let mut old = b.clone();
+        old.heartbeat_at -= chrono::Duration::hours(1);
+        old.gap = None;
+        assert_eq!(put(&mut conn, vec![old]), 0);
+
+        // Exec-only capture cannot vouch for libraries.
+        let mut x = beat("c6", "p6", "execonly", "start", 30, 0);
+        x.mode = "exec".into();
+        x.lib_probe = false;
+        put(&mut conn, vec![x]);
+        assert_eq!(
+            cov(&mut conn, "execonly").reason.as_deref(),
+            Some("probes_missing")
+        );
+
+        // Stopped heartbeating without ending: the controller is gone.
+        put(&mut conn, vec![beat("c7", "p7", "stale", "start", 30, 2)]);
+        assert_eq!(
+            cov(&mut conn, "stale").reason.as_deref(),
+            Some("capture_gap")
+        );
+
+        // A replica that ended cleanly plus its successor, both from start.
+        let mut gone = beat("c8a", "p8a", "rolled", "start", 40, 10);
+        gone.ended = true;
+        put(&mut conn, vec![gone.clone()]);
+        put(
+            &mut conn,
+            vec![beat("c8b", "p8b", "rolled", "start", 10, 0)],
+        );
+        let a = cov(&mut conn, "rolled");
+        assert_eq!(a.covered, Some(true));
+        assert!((hours_ago(a.observed_since) - 40.0).abs() < 0.1);
+        // Ended rows are frozen.
+        gone.ended = false;
+        gone.heartbeat_at = chrono::Utc::now().naive_utc();
+        assert_eq!(put(&mut conn, vec![gone]), 0);
+
+        // A live pod of the workload with no heartbeat (a node with the
+        // feature off) makes the whole workload uncovered.
+        put(&mut conn, vec![beat("c9", "p9", "partial", "start", 30, 0)]);
+        assert_eq!(cov(&mut conn, "partial").covered, Some(true));
+        conn.batch_execute(
+            "INSERT INTO pod_details (pod_name, pod_ip, pod_namespace, pod_obj, time_stamp, \
+               node_name, is_dead, workload_kind, workload_name) VALUES \
+             ('p9', '10.0.0.9', 'covns', '{\"spec\":{\"containers\":[{\"name\":\"app\"}]}}', \
+               timezone('UTC', NOW()), 'n1', false, 'Deployment', 'partial'), \
+             ('p9-other-node', '10.0.0.10', 'covns', \
+               '{\"spec\":{\"containers\":[{\"name\":\"app\"}]}}', \
+               timezone('UTC', NOW()), 'n2', false, 'Deployment', 'partial'), \
+             ('p9-no-app', '10.0.0.11', 'covns', \
+               '{\"spec\":{\"containers\":[{\"name\":\"sidecar\"}]}}', \
+               timezone('UTC', NOW()), 'n2', false, 'Deployment', 'partial');",
+        )
+        .unwrap();
+        assert_eq!(
+            cov(&mut conn, "partial").reason.as_deref(),
+            Some("capture_gap")
+        );
+        conn.batch_execute(
+            "UPDATE pod_details SET is_dead = true WHERE pod_name = 'p9-other-node'",
+        )
+        .unwrap();
+        assert_eq!(
+            cov(&mut conn, "partial").covered,
+            Some(true),
+            "dead pods do not count"
+        );
+
+        // Called the way P1-5 calls it: LATERAL over varchar columns.
+        #[derive(QueryableByName)]
+        struct L {
+            #[diesel(sql_type = Nullable<Bool>)]
+            covered: Option<bool>,
+        }
+        let l: L = sql_query(
+            "SELECT k.covered FROM (SELECT 'primary'::varchar AS c, 'covns'::varchar AS ns, \
+               'Deployment'::varchar AS wk, 'fromstart'::varchar AS wn, 'app'::varchar AS cn, \
+               $1::varchar AS dg) wc \
+             LEFT JOIN LATERAL kg_runtime_coverage(wc.c, wc.ns, wc.wk, wc.wn, wc.cn, wc.dg, $2) k \
+               ON true",
+        )
+        .bind::<Text, _>(D)
+        .bind::<diesel::sql_types::Integer, _>(24)
+        .get_result(&mut conn)
+        .unwrap();
+        assert_eq!(l.covered, Some(true));
+
+        // Other images of the same container are not this image's evidence.
+        assert_eq!(
+            runtime_coverage(
+                &mut conn,
+                ("covns", "Deployment", "fromstart", "app", "primary"),
+                D2,
+                24
+            )
+            .unwrap()
+            .reason
+            .as_deref(),
+            Some("no_runtime_data")
+        );
+
+        conn.batch_execute(
+            "DELETE FROM runtime_coverage WHERE pod_namespace = 'covns'; \
+             DELETE FROM pod_details WHERE pod_namespace = 'covns';",
+        )
+        .unwrap();
     }
 }

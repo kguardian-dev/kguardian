@@ -123,6 +123,7 @@ pub const ROUTES: &[RouteRule] = &[
     rule("POST", "/seccomp/node-status", INGEST),
     rule("POST", "/seccomp/denials", INGEST),
     rule("POST", "/runtime/executables", INGEST),
+    rule("POST", "/runtime/coverage", INGEST),
     rule("PUT", "/seccomp/crs/{namespace}/{name}", INGEST),
     rule("DELETE", "/seccomp/crs/{namespace}/{name}", INGEST),
     // Reads: UI, assistant, CLI (and the controller's reconciler and
