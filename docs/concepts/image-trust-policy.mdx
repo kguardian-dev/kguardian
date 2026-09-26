@@ -153,6 +153,10 @@ export bundle (`ImageTrustPolicy` in audit, Kyverno `Deny` in enforce).
   digests it was seen verifying, under "review every identity before
   applying": they were observed on running images, not vetted. If a rogue
   signer signed an image you run, it is in that list.
+- A pod whose image reference was malformed when reported (a control
+  character, line separator or over-long value) is kept in the inventory as
+  `malformed_reference` and listed as not covered, never dropped. The broker
+  counts these in `kguardian_image_inventory_malformed_total{field}`.
 - policy-controller only checks namespaces labelled
   `policy.sigstore.dev/include=true`.
 
