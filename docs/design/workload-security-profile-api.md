@@ -1235,9 +1235,9 @@ A bundle header (workload, mode, profile revision, "kguardian never applies anyt
 `# not included: <artifact> (<reason>)` line per unavailable artifact), then one `---` document per
 included Kubernetes object. The securityContext patch is **not** an object, so it is appended as comments
 after the last document; the stream stays safe to pass to `kubectl apply -f`. From v1.5 the OpenVEX draft
-is appended as comments the same way, and each available SBOM is named in one comment line
-(`# sbom: <fileName> (<n> components for <digest>, source <source>, trust <trust>; ...)`) but not embedded:
-use `format=zip-manifest` for the documents.
+and each available SBOM are appended as comments the same way, each SBOM under a header naming its image,
+source and trust (`# ---- sbom (CycloneDX SBOM <fileName> for <digest> (<containers>), source <source>,
+trust <trust>; not part of the apply stream) ----`). `format=zip-manifest` carries them as plain files.
 
 From `GET /workloads/payments/Deployment/checkout/export` -> 200 (capture `export-yaml-audit-payments-checkout.json`, body verbatim):
 
@@ -1552,6 +1552,7 @@ From `GET /workloads/payments/Deployment/checkout/export?mode=enforce&format=zip
     apply stream; unavailable with the reason when no statement qualifies.
   - `sbom` is the stored SBOM of each container image as CycloneDX (`application/vnd.cyclonedx+json`):
     **one document per digest**, so `artifact: "sbom"` can appear more than once in `documents[]` (the
-    semantic change). Named in one comment line in `format=yaml`, carried in full by `format=zip-manifest`.
+    semantic change). Carried as comments in `format=yaml` (under a header naming image, source and trust),
+    as files by `format=zip-manifest`.
     At most 10 000 components per bundle.
   - New `documents[].image` (`null` except on `sbom`): which image, source and SBOM trust.

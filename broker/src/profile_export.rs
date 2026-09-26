@@ -746,7 +746,8 @@ fn security_context_doc(key: &Key, p: &Profile, plan: &Plan) -> Document {
 }
 
 /// Artifacts that are not Kubernetes objects: never in the `kubectl apply`
-/// stream of the YAML bundle, appended there as comments instead.
+/// stream of the YAML bundle, appended there as comments instead (an SBOM
+/// under a header naming its image, source and trust).
 const NOT_APPLIED: [&str; 3] = ["securitycontext", "vex", "sbom"];
 
 /// Components across every SBOM of one bundle. The export charges the
@@ -1040,33 +1041,30 @@ pub fn render_bundle_yaml(
         y.push_str("---\n");
         y.push_str(d.content.as_deref().unwrap_or(""));
     }
-    for d in docs.iter().filter(|d| d.available && d.artifact == "sbom") {
-        // An SBOM can be thousands of lines: named here, carried in full by
-        // format=zip-manifest.
-        let im = d.image.as_ref();
-        y.push_str(&format!(
-            "# sbom: {} ({} for {}, source {}, trust {}; CycloneDX JSON, in format=zip-manifest)\n",
-            d.file_name,
-            im.and_then(|i| i.components)
-                .map_or("?".into(), |n| format!("{n} components")),
-            im.map_or("?", |i| i.digest.as_str()),
-            im.and_then(|i| i.source.as_deref()).unwrap_or("?"),
-            im.and_then(|i| i.sbom_trust.as_deref())
-                .unwrap_or("unknown"),
-        ));
-    }
     for d in docs
         .iter()
-        .filter(|d| d.available && NOT_APPLIED.contains(&d.artifact) && d.artifact != "sbom")
+        .filter(|d| d.available && NOT_APPLIED.contains(&d.artifact))
     {
-        y.push_str(&format!(
-            "\n# ---- {} ({}; not part of the apply stream) ----\n",
-            d.artifact,
-            if d.artifact == "vex" {
-                "OpenVEX draft for human review"
-            } else {
-                "strategic-merge patch"
+        let what = match d.artifact {
+            "vex" => "OpenVEX draft for human review".to_string(),
+            "sbom" => {
+                // Which image, and where the SBOM came from.
+                let im = d.image.as_ref();
+                format!(
+                    "CycloneDX SBOM {} for {} ({}), source {}, trust {}",
+                    d.file_name,
+                    im.map_or("?", |i| i.digest.as_str()),
+                    im.map_or(String::new(), |i| i.containers.join(",")),
+                    im.and_then(|i| i.source.as_deref()).unwrap_or("?"),
+                    im.and_then(|i| i.sbom_trust.as_deref())
+                        .unwrap_or("unknown"),
+                )
             }
+            _ => "strategic-merge patch".to_string(),
+        };
+        y.push_str(&format!(
+            "\n# ---- {} ({what}; not part of the apply stream) ----\n",
+            d.artifact
         ));
         for line in d.content.as_deref().unwrap_or("").lines() {
             if line.starts_with('#') {
@@ -1444,7 +1442,7 @@ mod tests {
     }
 
     #[test]
-    fn an_sbom_is_named_not_embedded_in_the_yaml_stream() {
+    fn an_sbom_is_carried_as_comments_with_its_source() {
         let p = wp::build(&key(), &sources(), Utc::now());
         let pl = plan(&q(Some("sbom"), None, None)).unwrap();
         let big = format!("{{\n{}}}\n", "  \"x\": 1,\n".repeat(500));
@@ -1471,9 +1469,19 @@ mod tests {
             }),
         }];
         let y = render_bundle_yaml(&key(), &p, &pl, &docs, false);
-        assert!(y.contains("# sbom: sbom-app-aaaaaaaaaaaa.cdx.json (2 components for sha256:aaaa"));
-        assert!(y.contains("source registry, trust unverified"));
-        assert!(!y.contains("\"x\""), "the SBOM body stays out of the YAML");
+        assert!(y.contains(
+            "# ---- sbom (CycloneDX SBOM sbom-app-aaaaaaaaaaaa.cdx.json for sha256:aaaa"
+        ));
+        assert!(y.contains(
+            "(app), source registry, trust unverified; not part of the apply stream) ----"
+        ));
+        assert_eq!(
+            y.lines()
+                .filter(|l| l.starts_with("#     \"x\": 1,"))
+                .count(),
+            500,
+            "the whole SBOM, commented"
+        );
         for line in y.lines().filter(|l| !l.trim().is_empty()) {
             assert!(
                 line.starts_with('#'),
