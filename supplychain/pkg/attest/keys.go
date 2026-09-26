@@ -29,6 +29,7 @@ type trustedKey struct {
 	name        string
 	fingerprint string // hex sha256 of the DER SubjectPublicKeyInfo
 	hint        string // base64 of the same sha256: cosign's bundle key hint
+	pem         string // canonical PEM, reported so policies can be generated
 	v           signature.Verifier
 }
 
@@ -56,7 +57,12 @@ func parseKeys(keys []PublicKey) ([]trustedKey, error) {
 			return nil, fmt.Errorf("public key %q: %w", k.Name, err)
 		}
 		sum := sha256.Sum256(der)
+		canon, err := cryptoutils.MarshalPublicKeyToPEM(pub)
+		if err != nil {
+			return nil, fmt.Errorf("public key %q: %w", k.Name, err)
+		}
 		out = append(out, trustedKey{
+			pem:         string(canon),
 			name:        k.Name,
 			fingerprint: hex.EncodeToString(sum[:]),
 			hint:        base64.StdEncoding.EncodeToString(sum[:]),
@@ -82,7 +88,7 @@ func verifyWithKeys(keys []trustedKey, msg []byte, sigs [][]byte, hint string) (
 	for _, k := range keys {
 		for _, sig := range sigs {
 			if k.v.VerifySignature(bytes.NewReader(sig), bytes.NewReader(msg)) == nil {
-				return Signer{Kind: SignerKey, KeyName: k.name, KeyFingerprint: k.fingerprint, KeyHint: hint}, nil
+				return Signer{Kind: SignerKey, KeyName: k.name, KeyFingerprint: k.fingerprint, KeyPEM: k.pem, KeyHint: hint}, nil
 			}
 		}
 	}

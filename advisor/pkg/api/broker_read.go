@@ -15,6 +15,10 @@ import (
 // ErrNotFound is matched (errors.Is) by every broker 404.
 var ErrNotFound = errors.New("not found")
 
+// ErrResponseTooLarge: the broker response exceeded the read limit, so
+// the result would have been incomplete.
+var ErrResponseTooLarge = fmt.Errorf("broker response larger than %d bytes; the result would be incomplete", maxBrokerResponseBytes)
+
 // NotFoundError is a broker 404. Code and Message come from the JSON error
 // body the profile endpoints send ({"error":"workload_not_found",...});
 // both are empty for the plain-text "No data found" body.
@@ -56,9 +60,14 @@ func brokerGetBody(op, path string) ([]byte, error) {
 			log.Error().Err(closeErr).Msgf("%s: Error closing response body", op)
 		}
 	}()
-	body, err := io.ReadAll(io.LimitReader(resp.Body, maxBrokerResponseBytes))
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxBrokerResponseBytes+1))
 	if err != nil {
 		return nil, fmt.Errorf("%s: reading response body: %w", op, err)
+	}
+	if len(body) > maxBrokerResponseBytes {
+		// Never hand back a cut-off body: a truncated policy or JSON
+		// document must not pass for a complete one.
+		return nil, fmt.Errorf("%s: %w", op, ErrResponseTooLarge)
 	}
 	switch resp.StatusCode {
 	case http.StatusOK:

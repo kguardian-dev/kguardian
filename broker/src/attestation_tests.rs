@@ -887,3 +887,19 @@ fn live_running_feed_cost_covers_the_largest_row() {
     );
     eprintln!("largest feed row {row} bytes ({} byte body)", body.len());
 }
+
+/// A verified key's PEM is multi-line by design: accepted despite the
+/// control-character check on every other string, and still validated as
+/// a PEM public key.
+#[test]
+fn key_pem_newlines_are_accepted() {
+    let pem = include_str!("../../supplychain/pkg/attest/testdata/cosign.pub").trim();
+    let mut v = body(&d(8), "verified");
+    v["signatures"] = json!([{"format": "cosign-legacy", "source": "sig-tag", "verified": true,
+        "signer_kind": "key", "key_name": "release", "key_fingerprint": "cd".repeat(32), "key_pem": pem}]);
+    let p = parse(&v, &d(8)).unwrap();
+    assert_eq!(p.signatures[0].key_pem.as_deref(), Some(pem));
+    v["signatures"][0]["key_pem"] =
+        json!("-----BEGIN PRIVATE KEY-----\nx\n-----END PRIVATE KEY-----");
+    assert!(matches!(parse(&v, &d(8)), Err(Reject::Unprocessable(_))));
+}

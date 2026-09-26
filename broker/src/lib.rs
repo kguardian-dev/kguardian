@@ -1,4 +1,5 @@
 mod add;
+pub mod admission;
 mod attestation;
 mod audit;
 pub mod auth;
@@ -33,6 +34,7 @@ pub use add::{
     add_node_facts, add_pod_details, add_pods_batch, add_pods_syscalls, add_svc_details,
     mark_pod_dead,
 };
+pub use admission::get_attestation_policy;
 pub use attestation::{
     attestation_resource, get_attestations, get_running_attestations,
     render_metrics as attestation_metrics, spawn_retention as spawn_attestation_retention,
@@ -45,6 +47,7 @@ pub use compute_api::{
 };
 pub use compute_types::*;
 pub use error::*;
+pub use image_inventory::render_malformed_metrics as image_inventory_malformed_metrics;
 pub use image_inventory::{get_image, get_images, get_workload_containers};
 pub use peer::spawn as spawn_peer_late_resolve;
 pub use profile_drift::{spawn_metrics_refresh as spawn_drift_metrics, DriftMetrics};
