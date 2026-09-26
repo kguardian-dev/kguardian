@@ -46,7 +46,7 @@ export function Tabs<T extends string>({ tabs, active, onChange, label, idPrefix
     <div
       role="tablist"
       aria-label={label}
-      className="flex gap-1 overflow-x-auto border-b border-hubble-border [scrollbar-width:thin]"
+      className="flex gap-1 overflow-x-auto overflow-y-hidden border-b border-hubble-border [scrollbar-width:thin]"
     >
       {tabs.map((t, i) => {
         const on = t.id === active;

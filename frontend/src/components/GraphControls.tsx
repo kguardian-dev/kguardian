@@ -1,4 +1,5 @@
 import { ArrowDown, ArrowRight, Eye, EyeOff, Layers, Zap } from 'lucide-react';
+import type { MapLens } from '../types';
 
 // The Network Map toolbar (top-right). Extracted from NetworkGraph so the
 // toggles can be rendered and tested without ReactFlow/ELK.
@@ -22,12 +23,21 @@ export interface GraphControlsProps {
   contentionCount?: number;
   layoutDirection: 'LR' | 'TB';
   onToggleLayoutDirection: () => void;
+  /** Map lens (URL `lens=`). One control instead of more toggles; omitted = no lens selector. */
+  lens?: MapLens;
+  onLensChange?: (lens: MapLens) => void;
 }
 
 // Below lg the map is too narrow for labelled toggles next to the summary
 // panel (it sits top-left, the toolbar top-right): the labels go
 // screen-reader-only and each toggle keeps its icon, hue and title.
 const LABEL = 'sr-only lg:not-sr-only';
+const LENSES: Array<{ id: MapLens; label: string; title: string }> = [
+  { id: 'traffic', label: 'Traffic', title: 'Cards show traffic, syscalls and compute' },
+  { id: 'vulns', label: 'Vulnerabilities', title: 'Each card: its worst P0/P1 vulnerability on a running image, or that its images have no vulnerability data' },
+  { id: 'supply', label: 'Supply chain', title: 'Each card: whether its running images have an SBOM and how it is trusted. Signatures are not checked yet' },
+  { id: 'coverage', label: 'Coverage', title: "Each card: how much of the workload's profile has data" },
+];
 
 const base = 'flex items-center gap-2 h-8 px-3 rounded-control border text-xs font-medium transition-colors';
 const off = 'bg-hubble-card border-hubble-border text-tertiary hover:border-hubble-border-strong hover:text-secondary';
@@ -60,9 +70,37 @@ export function GraphControls({
   contentionCount = 0,
   layoutDirection,
   onToggleLayoutDirection,
+  lens,
+  onLensChange,
 }: GraphControlsProps) {
   return (
     <div className="flex flex-wrap justify-end gap-2">
+      {lens && onLensChange && (
+        <select
+          aria-label="Map lens"
+          value={lens}
+          onChange={(e) => onLensChange(e.target.value as MapLens)}
+          className="sm:hidden h-8 rounded-control border border-hubble-border bg-hubble-card px-2 text-xs text-primary"
+        >
+          {LENSES.map((l) => <option key={l.id} value={l.id}>{l.label}</option>)}
+        </select>
+      )}
+      {lens && onLensChange && (
+        <div role="group" aria-label="Map lens" className="hidden sm:inline-flex h-8 rounded-control border border-hubble-border bg-hubble-card overflow-hidden">
+          {LENSES.map((l) => (
+            <button
+              key={l.id}
+              type="button"
+              aria-pressed={lens === l.id}
+              title={l.title}
+              onClick={() => onLensChange(l.id)}
+              className={`px-3 text-xs font-medium transition-colors ${lens === l.id ? 'bg-hubble-accent/20 text-primary' : 'text-tertiary hover:text-secondary'}`}
+            >
+              {l.label}
+            </button>
+          ))}
+        </div>
+      )}
       <button
         onClick={onToggleTraffic}
         className={`${base} ${showTraffic ? TRAFFIC_ACTIVE : off}`}

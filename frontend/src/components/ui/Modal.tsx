@@ -25,8 +25,9 @@ interface ModalProps {
   contentClassName?: string;
   /** Disable close-on-backdrop-click (e.g. destructive-in-progress). */
   disableBackdropClose?: boolean;
-  /** Vertical placement. 'top' anchors near the top (command-palette style). */
-  align?: 'center' | 'top';
+  /** Placement. 'top' anchors near the top (command-palette style);
+   *  'right' is a full-height side drawer over the current view. */
+  align?: 'center' | 'top' | 'right';
 }
 
 const SIZE_CLASS: Record<ModalSize, string> = {
@@ -148,8 +149,9 @@ export function Modal({
 
   // Let an explicit width/height in `className` win over the size defaults
   // instead of emitting a conflicting utility whose winner is order-dependent.
+  const drawer = align === 'right';
   const sizeClass = /(?:^|\s)(max-w-|w-)/.test(className) ? '' : `w-full ${SIZE_CLASS[size]}`;
-  const heightClass = /(?:^|\s)(max-h-|h-)\[/.test(className) ? '' : 'max-h-[88vh]';
+  const heightClass = drawer ? 'h-full' : /(?:^|\s)(max-h-|h-)\[/.test(className) ? '' : 'max-h-[88vh]';
 
   return (
     <div className="fixed inset-0 z-50" aria-hidden={!isOpen}>
@@ -160,8 +162,8 @@ export function Modal({
         onClick={disableBackdropClose ? undefined : onClose}
       />
       <div
-        className={`absolute inset-0 flex justify-center p-4 pointer-events-none ${
-          align === 'top' ? 'items-start pt-[12vh]' : 'items-center'
+        className={`absolute inset-0 flex pointer-events-none ${
+          drawer ? 'justify-end' : `justify-center p-4 ${align === 'top' ? 'items-start pt-[12vh]' : 'items-center'}`
         }`}
       >
         <div
@@ -172,9 +174,12 @@ export function Modal({
           tabIndex={-1}
           onClick={(e) => e.stopPropagation()}
           className={`pointer-events-auto ${sizeClass} ${heightClass} flex flex-col
-            bg-hubble-card border border-hubble-border rounded-surface shadow-2xl
+            bg-hubble-card border-hubble-border shadow-2xl
             outline-none transition-all duration-200 ease-out
-            ${entered ? 'opacity-100 scale-100 translate-y-0' : 'opacity-0 scale-[0.98] translate-y-1'}
+            ${drawer ? 'border-l' : 'border rounded-surface'}
+            ${drawer
+              ? entered ? 'opacity-100 translate-x-0' : 'opacity-0 translate-x-4'
+              : entered ? 'opacity-100 scale-100 translate-y-0' : 'opacity-0 scale-[0.98] translate-y-1'}
             ${className}`}
         >
           {!hideHeader && (

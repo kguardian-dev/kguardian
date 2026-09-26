@@ -54,6 +54,8 @@ export const POD_NODE_MEMO_KEYS: Readonly<Record<string, (d: PodNodeRenderData) 
   // A new compute object arrives with every poll; identity is the cheapest
   // correct signal (usePodData builds a fresh one per gauged pod).
   compute: (d) => d.compute,
+  // Lens badge: every field renders (text on the card, label as tooltip).
+  lensBadge: (d) => (d.lensBadge ? `${d.lensBadge.lens}|${d.lensBadge.tone}|${d.lensBadge.text}|${d.lensBadge.label}` : undefined),
 };
 
 /** Fields PodNode reads that deliberately do NOT trigger a re-render. */

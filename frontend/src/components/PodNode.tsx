@@ -5,6 +5,8 @@ import { isDaemonSetOrHostNetworkPod } from '../utils/daemonSetPeers';
 import { cardPods, countSyscalls, podNodePropsEqual, type PodNodeRenderData } from './podNodeMemo';
 import type { PodComputeData } from '../types/compute';
 import { Button } from './ui/Button';
+import type { LensBadge } from '../types';
+import { TIER_BADGE_CLASS } from '../utils/severity';
 import { Sparkline } from './ui/Sparkline';
 import {
   COMPUTE_DOT_CLASS,
@@ -41,6 +43,31 @@ const gaugeTitle = (label: string, value: string, pct: number | null, den: PodCo
   pct === null
     ? `${label} ${value} (${denominatorLabel(den)})`
     : `${label} ${value} — ${formatPercent(pct)} of ${capacity} ${denominatorLabel(den)}`;
+
+/** Map lens badge tones: tiers use the tier tokens, unknown is dashed and never reads as good. */
+const LENS_TONE_CLASS: Record<LensBadge['tone'], string> = {
+  p0: TIER_BADGE_CLASS.P0,
+  p1: TIER_BADGE_CLASS.P1,
+  risk: 'bg-severity-critical/15 text-severity-critical border-severity-critical/30',
+  warn: 'bg-severity-medium/15 text-severity-medium border-severity-medium/30',
+  good: 'bg-state-enforcing/15 text-state-enforcing border-state-enforcing/30',
+  neutral: 'bg-hubble-border/30 text-secondary border-hubble-border',
+  unknown: 'text-tertiary border-dashed border-hubble-border-strong',
+};
+
+const LensBadgeChip: React.FC<{ badge: LensBadge }> = ({ badge }) => (
+  <span
+    className={`shrink-0 rounded border px-1 text-[10px] font-mono font-semibold leading-4 whitespace-nowrap ${LENS_TONE_CLASS[badge.tone]}`}
+    title={badge.label}
+    role="img"
+    aria-label={badge.label}
+    data-testid="lens-badge"
+    data-lens={badge.lens}
+    data-tone={badge.tone}
+  >
+    {badge.text}
+  </span>
+);
 
 /** Two-segment micro bar (CPU %, memory %) under the title. */
 const ComputeMicroBar: React.FC<{ compute: PodComputeData }> = ({ compute }) => {
@@ -166,6 +193,7 @@ const PodNode: React.FC<PodNodeProps> = React.memo(({ data, selected }) => {
   // Compute gauges (design D8). `compute` absent ⇒ the card is exactly the
   // pre-feature card; present without rows ⇒ just the muted dot + tooltip.
   const compute = data.compute;
+  const lensBadge = data.lensBadge;
   const gauged = compute !== undefined && hasComputeGauges(compute);
   // DaemonSet / host-network peers (see utils/daemonSetPeers) take the same
   // teal as their toolbar toggle and their edges — colour alone carries the
@@ -222,6 +250,7 @@ const PodNode: React.FC<PodNodeProps> = React.memo(({ data, selected }) => {
               <div className="font-semibold text-sm text-primary truncate" title={data.tooltip ?? identityName}>
                 {identityName}
               </div>
+              {lensBadge && <LensBadgeChip badge={lensBadge} />}
             </div>
             {data.externalNamespace && !AGGREGATE_NAMESPACES.has(data.externalNamespace) && (
               <div className="text-xs text-tertiary truncate" title={data.externalNamespace}>

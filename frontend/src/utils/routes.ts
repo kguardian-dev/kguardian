@@ -5,7 +5,7 @@ import type { HashLocation } from '../hooks/useHashLocation';
  * renamed keeps working through legacyRedirect rather than 404-ing an old
  * bookmark or a link pasted into a ticket.
  */
-export const VIEWS = ['map', 'risks', 'workloads', 'workload'] as const;
+export const VIEWS = ['map', 'risks', 'workloads', 'workload', 'images'] as const;
 export type View = (typeof VIEWS)[number];
 
 /** Where an unknown or empty hash lands. */
@@ -13,8 +13,12 @@ export const DEFAULT_VIEW: View = 'map';
 
 type Params = Record<string, string>;
 
-/** Retired route names that still resolve, via legacyRedirect. */
-export const LEGACY_VIEWS: readonly string[] = ['findings', 'seccomp'];
+/**
+ * Route names that resolve to another view, via legacyRedirect: retired
+ * ones (`findings`, `seccomp`) and the `cve` alias the UX spec names
+ * (`#/cve?id=`), which is the Images view with the CVE drawer open.
+ */
+export const LEGACY_VIEWS: readonly string[] = ['findings', 'seccomp', 'cve'];
 
 /**
  * Old route → new route, carrying the old params across.
@@ -34,6 +38,11 @@ export function legacyRedirect(view: string, params: Params): { view: View; para
     case 'seccomp':
       // The old view was namespace-scoped, so an old link keeps that scope.
       return { view: 'workloads', params: { ...params, control: 'seccomp', ...(params.ns ? { scope: 'ns' } : {}) } };
+    case 'cve': {
+      // `#/cve?id=CVE-…` → the Images view with that CVE's drawer open.
+      const { id, ...rest } = params;
+      return { view: 'images', params: { ...rest, ...(id ? { cve: id } : {}) } };
+    }
     default:
       return undefined;
   }
@@ -53,7 +62,7 @@ export function resolveRoute(loc: HashLocation): ResolvedRoute {
 }
 
 /** Views whose data is cluster-wide, so they can drop the namespace scope. */
-export const CLUSTER_SCOPED_VIEWS: ReadonlySet<View> = new Set<View>(['workloads']);
+export const CLUSTER_SCOPED_VIEWS: ReadonlySet<View> = new Set<View>(['workloads', 'images']);
 
 /**
  * Whether a view is showing all namespaces. Cluster-scoped views default to

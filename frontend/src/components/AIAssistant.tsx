@@ -220,11 +220,17 @@ interface AIAssistantProps {
   onLayoutChange?: (isSidePanel: boolean, isCollapsed: boolean, width?: number) => void;
   namespace?: string;
   podNames?: string[];
+  /**
+   * Context handed over by a view ("Ask AI" on a CVE): placed in the input,
+   * visible and editable, never sent on the user's behalf. A new `nonce`
+   * re-applies the same text.
+   */
+  prefill?: { text: string; nonce: number };
 }
 
 type ViewMode = AssistantViewMode;
 
-const AIAssistant: React.FC<AIAssistantProps> = ({ isOpen, onClose, onLayoutChange, namespace, podNames }) => {
+const AIAssistant: React.FC<AIAssistantProps> = ({ isOpen, onClose, onLayoutChange, namespace, podNames, prefill }) => {
   const [messages, setMessages] = useState<Message[]>([]);
   const [inputValue, setInputValue] = useState('');
   const [isTyping, setIsTyping] = useState(false);
@@ -234,6 +240,16 @@ const AIAssistant: React.FC<AIAssistantProps> = ({ isOpen, onClose, onLayoutChan
   const [isResizing, setIsResizing] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
+
+  // A view's "Ask AI" context lands in the input for the user to review.
+  const prefillNonce = prefill?.nonce;
+  const prefillText = prefill?.text;
+  useEffect(() => {
+    if (prefillNonce === undefined || prefillText === undefined) return;
+    // Apply a handed-over prompt once per nonce.
+    setInputValue(prefillText);
+    inputRef.current?.focus();
+  }, [prefillNonce, prefillText]);
   // Aborts the in-flight streaming request so the model stream (and its
   // server-side tool calls / token spend) is cancelled when the user closes,
   // clears, navigates away, or sends a new message mid-stream.

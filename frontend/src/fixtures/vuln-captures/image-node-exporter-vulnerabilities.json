@@ -1,0 +1,10 @@
+{
+  "body": {
+    "digest": "sha256:f50806e18227349c4b827b7d70cbf67a9ca3087226a89bc3aa6826b13fd1d7fa",
+    "items": [],
+    "nextAfter": null,
+    "reports": []
+  },
+  "request": "GET /images/sha256:f50806e18227349c4b827b7d70cbf67a9ca3087226a89bc3aa6826b13fd1d7fa/vulnerabilities",
+  "status": 200
+}

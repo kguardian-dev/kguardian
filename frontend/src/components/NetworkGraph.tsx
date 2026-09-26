@@ -35,7 +35,7 @@ import { EDGE_COLOR_DAEMONSET, edgeStrokeColor, isDaemonSetPeer, partitionDaemon
 import { GraphControls } from './GraphControls';
 import { buildPeerIndex, resolvePeer, type PeerResolution } from '../utils/peerResolution';
 import { buildExternalNodes, remoteNodeForRow } from '../utils/externalPeers';
-import type { PodNodeData, PodInfo, ServiceInfo, NetworkTraffic } from '../types';
+import type { MapLens, PodNodeData, PodInfo, ServiceInfo, NetworkTraffic } from '../types';
 import { UI_TIMING } from '../constants/ui';
 
 const elk = new ELK();
@@ -70,6 +70,11 @@ interface NetworkGraphProps {
    *  focused view is shareable; the graph reports every change back. */
   focusedNodeId: string | null;
   onFocusChange: (id: string | null) => void;
+  /** Map lens (URL `lens=`); the cards' badges arrive on `pods` (PodNodeData.lensBadge). */
+  lens?: MapLens;
+  onLensChange?: (lens: MapLens) => void;
+  /** Legend under the toolbar while a non-traffic lens is on. */
+  lensLegend?: React.ReactNode;
 }
 
 // Define nodeTypes / edgeTypes outside component to prevent recreation
@@ -102,6 +107,9 @@ const NetworkGraphInner: React.FC<NetworkGraphProps> = ({
   onBuildPolicy,
   focusedNodeId,
   onFocusChange,
+  lens,
+  onLensChange,
+  lensLegend,
 }) => {
   const { fitView, setCenter, getViewport } = useReactFlow();
   const paneRef = useRef<HTMLDivElement>(null);
@@ -857,7 +865,10 @@ const NetworkGraphInner: React.FC<NetworkGraphProps> = ({
             contentionCount={contentionCount}
             layoutDirection={layoutDirection}
             onToggleLayoutDirection={onToggleLayoutDirection}
+            lens={lens}
+            onLensChange={onLensChange}
           />
+          {lensLegend && <div className="mt-2 flex justify-end">{lensLegend}</div>}
         </Panel>
       </ReactFlow>
     </div>
