@@ -17,6 +17,9 @@ name: Controller eBPF kernel matrix
 # tags <ver>-main). Path-filtered to the eBPF sources and the loader so it
 # only costs CI minutes when those change.
 #
+# Each VM also runs the syscall ownership gate end to end: loading is not
+# enough, a 6.1 verifier loaded a gate that credited nothing.
+#
 # Run the same check locally (no KVM needed, TCG works):
 #   cargo test --all-features --lib --no-run
 #   vmtest -k <vmlinuz> "<test binary> --ignored --exact \
@@ -111,25 +114,25 @@ jobs:
         with:
           name: linux-6.1
           kernel: kernels/vmlinuz-6.1
-          command: /bin/bash -c "${{ github.workspace }}/ebpf-load-test --ignored --exact bpf::tests::every_probe_object_loads_on_this_kernel --nocapture"
+          command: /bin/bash -c "${{ github.workspace }}/ebpf-load-test --ignored --exact bpf::tests::every_probe_object_loads_on_this_kernel --nocapture && ${{ github.workspace }}/ebpf-load-test --ignored --exact bpf::tests::syscall_ownership_gate_credits_a_pod_cgroup --nocapture"
 
       - name: Load on 6.6
         uses: danobi/vmtest-action@c0fe6f82e21db9b9a8105f2a385e8a6e3fff2d23 # v0.9
         with:
           name: linux-6.6
           kernel: kernels/vmlinuz-6.6
-          command: /bin/bash -c "${{ github.workspace }}/ebpf-load-test --ignored --exact bpf::tests::every_probe_object_loads_on_this_kernel --nocapture"
+          command: /bin/bash -c "${{ github.workspace }}/ebpf-load-test --ignored --exact bpf::tests::every_probe_object_loads_on_this_kernel --nocapture && ${{ github.workspace }}/ebpf-load-test --ignored --exact bpf::tests::syscall_ownership_gate_credits_a_pod_cgroup --nocapture"
 
       - name: Load on 6.12
         uses: danobi/vmtest-action@c0fe6f82e21db9b9a8105f2a385e8a6e3fff2d23 # v0.9
         with:
           name: linux-6.12
           kernel: kernels/vmlinuz-6.12
-          command: /bin/bash -c "${{ github.workspace }}/ebpf-load-test --ignored --exact bpf::tests::every_probe_object_loads_on_this_kernel --nocapture"
+          command: /bin/bash -c "${{ github.workspace }}/ebpf-load-test --ignored --exact bpf::tests::every_probe_object_loads_on_this_kernel --nocapture && ${{ github.workspace }}/ebpf-load-test --ignored --exact bpf::tests::syscall_ownership_gate_credits_a_pod_cgroup --nocapture"
 
       - name: Load on 6.18
         uses: danobi/vmtest-action@c0fe6f82e21db9b9a8105f2a385e8a6e3fff2d23 # v0.9
         with:
           name: linux-6.18
           kernel: kernels/vmlinuz-6.18
-          command: /bin/bash -c "${{ github.workspace }}/ebpf-load-test --ignored --exact bpf::tests::every_probe_object_loads_on_this_kernel --nocapture"
+          command: /bin/bash -c "${{ github.workspace }}/ebpf-load-test --ignored --exact bpf::tests::every_probe_object_loads_on_this_kernel --nocapture && ${{ github.workspace }}/ebpf-load-test --ignored --exact bpf::tests::syscall_ownership_gate_credits_a_pod_cgroup --nocapture"
