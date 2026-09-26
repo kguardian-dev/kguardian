@@ -2,7 +2,7 @@ import { useState } from 'react';
 import { ChevronRight, ClipboardCheck, Package, Radar, ShieldCheck, SlidersHorizontal, Lock } from 'lucide-react';
 import type { Control, DimensionName, Finding, WorkloadProfile } from '../../types/profile';
 import { SEVERITY_BADGE_CLASS, TIER_BADGE_CLASS } from '../../utils/severity';
-import { DIMENSION_LABEL, findingSeverity } from '../../utils/posture';
+import { DIMENSION_LABEL, driftNotEvaluatedText, findingDimensionLabel, findingSeverity } from '../../utils/posture';
 import { Button } from '../ui/Button';
 import { EmptyState } from '../ui/EmptyState';
 import { CantTell, CheckMark, Panel } from './parts';
@@ -69,7 +69,7 @@ function NeedsAttention({ profile, onOpenTab }: { profile: WorkloadProfile; onOp
       ) : (
         <ul className="divide-y divide-hubble-border" aria-label={showAll ? 'All findings' : 'Top findings'}>
           {list.map((f) => {
-            const tab = TAB_OF[f.dimension] ?? 'overview';
+            const tab = f.dimension === 'drift' ? 'overview' : (TAB_OF[f.dimension] ?? 'overview');
             return (
               <li key={f.id}>
                 <button
@@ -85,7 +85,7 @@ function NeedsAttention({ profile, onOpenTab }: { profile: WorkloadProfile; onOp
                     </span>
                     <span className="block mt-1 text-xs text-secondary">{f.detail}</span>
                     <span className="block mt-1 text-[11px] text-tertiary">
-                      {DIMENSION_LABEL[f.dimension] ?? f.dimension}
+                      {findingDimensionLabel(f.dimension)}
                       {f.container && <> · container <span className="font-mono">{f.container}</span></>}
                     </span>
                   </span>
@@ -94,6 +94,17 @@ function NeedsAttention({ profile, onOpenTab }: { profile: WorkloadProfile; onOp
               </li>
             );
           })}
+        </ul>
+      )}
+      {(profile.drift?.notEvaluated?.length ?? 0) > 0 && (
+        <ul className="px-4 py-2 border-t border-hubble-border text-[11px] text-tertiary" aria-label="Drift checks not evaluated">
+          {profile.drift!.notEvaluated!.map((n) => (
+            <li key={`${n.type}/${n.container ?? ''}`}>
+              Drift check <span className="font-mono">{n.type}</span> not evaluated
+              {n.container ? <> for container <span className="font-mono">{n.container}</span></> : null}:{' '}
+              {driftNotEvaluatedText(n.reason)}. No drift finding here does not mean no drift.
+            </li>
+          ))}
         </ul>
       )}
     </Panel>
