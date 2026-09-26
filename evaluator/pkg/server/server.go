@@ -18,10 +18,10 @@ import (
 
 	"github.com/kguardian-dev/kguardian/evaluator/pkg/matcher"
 	"github.com/kguardian-dev/kguardian/evaluator/pkg/policycoverage"
-	networkingv1 "k8s.io/api/networking/v1"
 	"github.com/kguardian-dev/kguardian/evaluator/pkg/status"
 	v1alpha1 "github.com/kguardian-dev/kguardian/evaluator/pkg/v1alpha1"
 	"github.com/sirupsen/logrus"
+	networkingv1 "k8s.io/api/networking/v1"
 )
 
 // PolicyLookup is the slice of *store.Store the server actually uses.
