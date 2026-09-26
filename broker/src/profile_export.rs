@@ -946,12 +946,15 @@ pub(crate) fn sbom_docs(
                     )
                 }
             }
-            CycloneDx::Doc(doc, r) => {
-                left -= i64::from(r.item_count);
+            CycloneDx::Doc(doc, r, loaded) => {
+                // Charge what was loaded, not the header's count: a
+                // re-ingest between the two reads can make the header stale.
+                left -= loaded;
+                let loaded_i32 = i32::try_from(loaded).unwrap_or(i32::MAX);
                 image.source = Some(r.source.clone());
                 image.sbom_trust = r.sbom_trust.clone();
                 image.scanned_at = Some(r.scanned_at.and_utc().to_rfc3339());
-                image.components = Some(r.item_count);
+                image.components = Some(loaded_i32);
                 Document {
                     artifact,
                     file_name,
@@ -966,7 +969,7 @@ pub(crate) fn sbom_docs(
                     apply_with: Some(sbom_apply_with(
                         &r.source,
                         r.sbom_trust.as_deref(),
-                        r.item_count,
+                        loaded_i32,
                     )),
                     image: Some(image),
                 }

@@ -1060,23 +1060,35 @@ enum Export {
     Doc(serde_json::Value),
 }
 
-/// Every component of `report`'s SBOM, in id order, read in chunks.
-/// Stops past `max` (the caller checks the count first).
+/// Every component of `report`'s SBOM, in id order, read in chunks, and
+/// never more than `max + 1` rows: the extra row only tells the caller the
+/// SBOM is over `max`. The header's `item_count` can be stale (a re-ingest
+/// between reading it and the components), so the bound is on rows read,
+/// not on the header.
 fn load_all_components(
     conn: &mut PgConnection,
     report: &Report,
     max: i64,
 ) -> QueryResult<Vec<Component>> {
-    let mut comps = Vec::with_capacity(report.item_count.clamp(0, max as i32) as usize);
+    let max = max.max(0);
+    let mut comps = Vec::with_capacity(
+        report
+            .item_count
+            .clamp(0, max.min(i64::from(i32::MAX)) as i32) as usize,
+    );
     let mut after = 0;
     loop {
-        let chunk = load_components(conn, report, after, EXPORT_CHUNK)?;
+        let want = EXPORT_CHUNK.min(max + 1 - comps.len() as i64);
+        if want <= 0 {
+            break;
+        }
+        let chunk = load_components(conn, report, after, want)?;
         let n = chunk.len() as i64;
         if let Some(last) = chunk.last() {
             after = last.id;
         }
         comps.extend(chunk);
-        if n < EXPORT_CHUNK || comps.len() as i64 > max {
+        if n < want || comps.len() as i64 > max {
             break;
         }
     }
@@ -1091,7 +1103,9 @@ pub(crate) enum CycloneDx {
     NoSbom,
     /// The chosen SBOM has more components than `max_components`.
     TooLarge(Report),
-    Doc(serde_json::Value, Report),
+    /// The document, its report header, and the components actually
+    /// loaded (the header's `item_count` can be stale).
+    Doc(serde_json::Value, Report, i64),
 }
 
 /// Components in the SBOM [`cyclonedx_for`] would choose for `digest`
@@ -1123,9 +1137,12 @@ pub(crate) fn cyclonedx_for(
     if comps.len() as i64 > max_components {
         return Ok(CycloneDx::TooLarge(report));
     }
+    // What was loaded, not the header (which may be stale).
+    let loaded = comps.len() as i64;
     Ok(CycloneDx::Doc(
         cyclonedx_document(digest, &report, &comps),
         report,
+        loaded,
     ))
 }
 

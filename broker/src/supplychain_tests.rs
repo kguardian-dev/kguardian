@@ -2371,3 +2371,68 @@ fn live_database_vex_cap_never_splits_a_version_group() {
         "DROP FUNCTION kg_runtime_coverage(text, text, text, text, text, text, integer)",
     );
 }
+
+/// A re-ingest between the SBOM header read and the component read leaves
+/// the header's item_count stale. The bundle must still load no more
+/// components than it was charged for: `left` shrinks by what was loaded,
+/// and each load reads at most `left + 1` rows.
+#[test]
+#[ignore = "requires a live postgres (set KG_TEST_DATABASE_URL)"]
+fn live_database_sbom_export_load_is_bounded_by_the_charge_not_the_header() {
+    let mut conn = live_conn();
+    for (i, c) in ["a", "b", "c"].iter().enumerate() {
+        let img = d(90 + i as u32);
+        seed_inventory(
+            &mut conn,
+            &img,
+            "ghcr.io/example/api",
+            "2.4.1",
+            "Deployment",
+            "api",
+            c,
+            0,
+        );
+        let mut s = sbom_json(&img, "2026-09-20T08:00:00Z", &[], None);
+        s["components"] = json!([
+            {"name": format!("{c}1"), "version": "1", "type": "debian", "purl": format!("pkg:deb/debian/{c}1@1"), "file_paths": []},
+            {"name": format!("{c}2"), "version": "1", "type": "debian", "purl": format!("pkg:deb/debian/{c}2@1"), "file_paths": []},
+        ]);
+        store_s(&mut conn, s).unwrap();
+    }
+    relink_batch(&mut conn, None, 100).unwrap();
+    // Stale headers: they claim 0 components; each SBOM really has 2.
+    exec(
+        &mut conn,
+        "UPDATE vuln_sources SET item_count = 0 WHERE kind = 'sbom'",
+    );
+    let key = crate::workload_profile::Key {
+        namespace: NS.into(),
+        kind: "Deployment".into(),
+        name: "api".into(),
+    };
+    let src = crate::workload_profile::load_sources(&mut conn, &key).unwrap();
+    let prof = crate::workload_profile::build(&key, &src, Utc::now());
+    let loaded = |docs: &[crate::profile_export::Document]| -> usize {
+        docs.iter()
+            .filter(|d| d.available)
+            .map(|d| {
+                let v: serde_json::Value =
+                    serde_json::from_str(d.content.as_deref().unwrap()).unwrap();
+                v["components"].as_array().unwrap().len()
+            })
+            .sum()
+    };
+    for charge in [0i64, 1, 2, 3, 4, 6] {
+        let docs = crate::profile_export::sbom_docs(&mut conn, &prof, "audit", charge).unwrap();
+        assert_eq!(docs.len(), 3);
+        let n = loaded(&docs);
+        assert!(n as i64 <= charge, "charge {charge}: loaded {n}");
+        // Each available document reports what it carries, not the header.
+        for d in docs.iter().filter(|d| d.available) {
+            assert_eq!(d.image.as_ref().unwrap().components, Some(2));
+        }
+    }
+    // With room for everything, everything is exported.
+    let docs = crate::profile_export::sbom_docs(&mut conn, &prof, "audit", 6).unwrap();
+    assert_eq!(loaded(&docs), 6);
+}
