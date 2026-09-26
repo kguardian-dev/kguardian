@@ -1451,6 +1451,30 @@ fn one_observed(
     Ok(Some(Observed::build(row, &captures, &crs)))
 }
 
+/// One workload's seccomp summary for the workload security profile
+/// (`workload_profile.rs`): exactly the summary `GET
+/// /seccomp/profiles/{namespace}/{kind}/{name}` serves, serialised, plus
+/// the observed syscall names. `None` when the workload has no observed
+/// aggregate. Built by the same `one_observed` / `ProfileSummary::build`
+/// path as that endpoint, so the two can never disagree about capture
+/// completeness, CR drift or denials.
+pub(crate) fn workload_summary_json(
+    conn: &mut PgConnection,
+    ns: &str,
+    kind: &str,
+    name: &str,
+) -> Result<Option<(serde_json::Value, BTreeSet<String>)>, DbError> {
+    let Some(obs) = one_observed(conn, ns, kind, name)? else {
+        return Ok(None);
+    };
+    let index = distribution_index(conn)?;
+    let key = (ns.to_string(), kind.to_string(), name.to_string());
+    let denials = denial_index_for(conn, &key)?;
+    let names = obs.require_names()?.clone();
+    let summary = serde_json::to_value(ProfileSummary::build(&obs, &index, &denials))?;
+    Ok(Some((summary, names)))
+}
+
 /// Render the observed set as a profile document (audit action).
 ///
 /// Takes `names` rather than reading `obs.syscalls`, so the `Option` is

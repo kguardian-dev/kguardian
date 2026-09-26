@@ -465,6 +465,42 @@ diesel::table! {
     }
 }
 
+diesel::table! {
+    // Workload security profile read model (#1533 P0-5): one row per
+    // workload the snapshotter computed; backs GET /workloads. See
+    // src/workload_profile.rs and the migration.
+    workload_profile_latest (cluster_id, pod_namespace, workload_kind, workload_name) {
+        cluster_id -> Varchar,
+        pod_namespace -> Varchar,
+        workload_kind -> Varchar,
+        workload_name -> Varchar,
+        revision -> Int4,
+        content_hash -> Varchar,
+        posture_status -> Varchar,
+        summary -> Jsonb,
+        computed_at -> Timestamp,
+        last_changed_at -> Timestamp,
+    }
+}
+
+diesel::table! {
+    // Immutable, content-hashed profile snapshots, written only when the
+    // hash changes. Bounded per workload and by age (retention.rs).
+    workload_profile_versions (id) {
+        id -> Int8,
+        cluster_id -> Varchar,
+        pod_namespace -> Varchar,
+        workload_kind -> Varchar,
+        workload_name -> Varchar,
+        revision -> Int4,
+        content_hash -> Varchar,
+        dimension_hashes -> Jsonb,
+        snapshot -> Jsonb,
+        posture -> Jsonb,
+        created_at -> Timestamp,
+    }
+}
+
 diesel::allow_tables_to_appear_in_same_query!(
     pod_details,
     pod_traffic,

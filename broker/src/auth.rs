@@ -168,6 +168,24 @@ pub const ROUTES: &[RouteRule] = &[
         "/workloads/{namespace}/{kind}/{name}/containers",
         READ,
     ),
+    // Workload security profile (#1533 P0-5).
+    rule("GET", "/workloads", READ),
+    rule("GET", "/workloads/{namespace}/{kind}/{name}/profile", READ),
+    rule(
+        "GET",
+        "/workloads/{namespace}/{kind}/{name}/profile/versions",
+        READ,
+    ),
+    rule(
+        "GET",
+        "/workloads/{namespace}/{kind}/{name}/profile/versions/{revision}",
+        READ,
+    ),
+    rule(
+        "GET",
+        "/workloads/{namespace}/{kind}/{name}/profile/diff",
+        READ,
+    ),
 ];
 
 /// The declared access for `method` on the registered `pattern`, if any.
