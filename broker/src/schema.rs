@@ -567,6 +567,7 @@ diesel::table! {
         events_dropped -> Int8,
         last_drop_at -> Nullable<Timestamp>,
         unsent -> Int8,
+        incomplete -> Bool,
         ended -> Bool,
     }
 }

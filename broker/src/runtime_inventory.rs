@@ -1293,7 +1293,7 @@ pub const COVERAGE_BODY_LIMIT_BYTES: usize = 4 << 20;
 /// One posted heartbeat (controller `runtime_inventory::CoveragePost`).
 /// Strings are bounded by the body limit; every one is length-checked
 /// before use.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct CoverageEntry {
     pub pod_namespace: String,
     pub pod_name: String,
@@ -1315,6 +1315,10 @@ pub struct CoverageEntry {
     /// Entries seen but not yet accepted by the broker.
     #[serde(default)]
     pub unsent: u64,
+    /// The container's inventory is known incomplete (the controller's
+    /// /proc backfill could not read all its mappings). Sticky.
+    #[serde(default)]
+    pub incomplete: bool,
     #[serde(default)]
     pub ended: bool,
     pub heartbeat_at: NaiveDateTime,
@@ -1369,17 +1373,17 @@ pub(crate) const COVERAGE_UPSERT_SQL: &str = "\
 INSERT INTO runtime_coverage AS r (cluster_id, container_id, pod_namespace, workload_kind, \
     workload_name, container_name, image_digest, pod_name, node_name, mode, exec_probe, \
     lib_probe, start_mode, tracking_since, covered_since, last_heartbeat, heartbeat_secs, \
-    events_dropped, last_drop_at, unsent, ended) \
+    events_dropped, last_drop_at, unsent, incomplete, ended) \
 SELECT $1, t.cid, t.ns, t.wk, t.wn, t.cn, t.dg, t.pn, t.nn, t.md, t.ep, t.lp, t.sm, \
     LEAST(t.ts, t.hb, timezone('UTC', NOW())), \
     CASE WHEN t.ep THEN LEAST(t.ts, t.hb, timezone('UTC', NOW())) \
          ELSE LEAST(t.hb, timezone('UTC', NOW())) END, \
     LEAST(t.hb, timezone('UTC', NOW())), t.hs, t.dr, \
-    CASE WHEN t.dr > 0 THEN LEAST(t.hb, timezone('UTC', NOW())) END, t.us, t.ended \
+    CASE WHEN t.dr > 0 THEN LEAST(t.hb, timezone('UTC', NOW())) END, t.us, t.inc, t.ended \
 FROM unnest($2::text[], $3::text[], $4::text[], $5::text[], $6::text[], $7::text[], $8::text[], \
     $9::text[], $10::text[], $11::bool[], $12::bool[], $13::text[], $14::timestamp[], \
-    $15::bigint[], $16::timestamp[], $17::int[], $18::bool[], $19::bigint[]) \
-    AS t(cid, ns, wk, wn, cn, dg, pn, nn, md, ep, lp, sm, ts, dr, hb, hs, ended, us) \
+    $15::bigint[], $16::timestamp[], $17::int[], $18::bool[], $19::bigint[], $20::bool[]) \
+    AS t(cid, ns, wk, wn, cn, dg, pn, nn, md, ep, lp, sm, ts, dr, hb, hs, ended, us, inc) \
 ON CONFLICT (cluster_id, container_id) DO UPDATE SET \
     covered_since = CASE WHEN EXCLUDED.mode <> r.mode OR EXCLUDED.exec_probe <> r.exec_probe \
             OR EXCLUDED.lib_probe <> r.lib_probe \
@@ -1399,6 +1403,7 @@ ON CONFLICT (cluster_id, container_id) DO UPDATE SET \
     last_drop_at = CASE WHEN EXCLUDED.events_dropped > 0 THEN EXCLUDED.last_heartbeat \
         ELSE r.last_drop_at END, \
     unsent = EXCLUDED.unsent, \
+    incomplete = r.incomplete OR EXCLUDED.incomplete, \
     pod_name = EXCLUDED.pod_name, node_name = EXCLUDED.node_name, mode = EXCLUDED.mode, \
     exec_probe = EXCLUDED.exec_probe, lib_probe = EXCLUDED.lib_probe, \
     last_heartbeat = EXCLUDED.last_heartbeat, heartbeat_secs = EXCLUDED.heartbeat_secs, \
@@ -1417,11 +1422,14 @@ pub fn upsert_coverage(conn: &mut PgConnection, rows: &[CoverageEntry]) -> Resul
         match by_id.get_mut(r.container_id.as_str()) {
             Some(prev) if prev.heartbeat_at > r.heartbeat_at => {
                 prev.events_dropped = prev.events_dropped.saturating_add(r.events_dropped);
+                prev.incomplete |= r.incomplete;
             }
             Some(prev) => {
                 let events_dropped = prev.events_dropped.saturating_add(r.events_dropped);
+                let incomplete = prev.incomplete || r.incomplete;
                 *prev = CoverageEntry {
                     events_dropped,
+                    incomplete,
                     ..r.clone()
                 };
             }
@@ -1465,27 +1473,78 @@ pub fn upsert_coverage(conn: &mut PgConnection, rows: &[CoverageEntry]) -> Resul
                     .map(|r| r.unsent.min(i64::MAX as u64) as i64)
                     .collect::<Vec<_>>(),
             )
+            .bind::<Array<Bool>, _>(rows.iter().map(|r| r.incomplete).collect::<Vec<_>>())
             .execute(conn)
     })?;
     Ok(written)
+}
+
+/// A heartbeat batch, capped at [`MAX_COVERAGE_ENTRIES`] while parsing
+/// (as the executables route does): the element past the cap is refused
+/// without being built.
+struct CoverageBatch(Vec<CoverageEntry>);
+
+impl<'de> Deserialize<'de> for CoverageBatch {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        struct V;
+        impl<'de> serde::de::Visitor<'de> for V {
+            type Value = CoverageBatch;
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                write!(
+                    f,
+                    "a JSON array of at most {MAX_COVERAGE_ENTRIES} heartbeats"
+                )
+            }
+            fn visit_seq<A: serde::de::SeqAccess<'de>>(
+                self,
+                mut a: A,
+            ) -> Result<CoverageBatch, A::Error> {
+                let mut out = Vec::with_capacity(a.size_hint().unwrap_or(0).min(1024));
+                loop {
+                    if out.len() == MAX_COVERAGE_ENTRIES {
+                        if a.next_element::<serde::de::IgnoredAny>()?.is_some() {
+                            return Err(serde::de::Error::custom(TOO_MANY_ENTRIES));
+                        }
+                        return Ok(CoverageBatch(out));
+                    }
+                    match a.next_element::<CoverageEntry>()? {
+                        Some(e) => out.push(e),
+                        None => return Ok(CoverageBatch(out)),
+                    }
+                }
+            }
+        }
+        d.deserialize_seq(V)
+    }
+}
+
+/// Parse a heartbeat batch. `Err(None)` = over the cap (413),
+/// `Err(Some(msg))` = malformed (400).
+pub fn parse_coverage(body: &[u8]) -> Result<Vec<CoverageEntry>, Option<String>> {
+    let mut de = serde_json::Deserializer::from_slice(body);
+    match CoverageBatch::deserialize(&mut de).and_then(|b| de.end().map(|_| b)) {
+        Ok(b) => Ok(b.0),
+        Err(e) if e.to_string().contains(TOO_MANY_ENTRIES) => Err(None),
+        Err(e) => Err(Some(e.to_string())),
+    }
 }
 
 async fn post_runtime_coverage(
     pool: web::Data<DbPool>,
     body: web::Bytes,
 ) -> actix_web::Result<HttpResponse> {
-    let entries: Vec<CoverageEntry> = match serde_json::from_slice::<Vec<CoverageEntry>>(&body) {
+    let entries = match parse_coverage(&body) {
         Ok(v) => v,
-        Err(e) => {
+        Err(None) => {
+            return Ok(HttpResponse::PayloadTooLarge().body(format!(
+                "at most {MAX_COVERAGE_ENTRIES} heartbeats per post; chunk the batch"
+            )));
+        }
+        Err(Some(e)) => {
             return Ok(HttpResponse::BadRequest().body(format!("invalid coverage batch: {e}")));
         }
     };
     drop(body);
-    if entries.len() > MAX_COVERAGE_ENTRIES {
-        return Ok(HttpResponse::PayloadTooLarge().body(format!(
-            "at most {MAX_COVERAGE_ENTRIES} heartbeats per post; chunk the batch"
-        )));
-    }
     let total = entries.len();
     let rows: Vec<CoverageEntry> = entries.into_iter().filter_map(valid_coverage).collect();
     let dropped = total - rows.len();
@@ -2291,10 +2350,40 @@ mod tests {
             tracking_since: now - chrono::Duration::hours(tracking_h),
             events_dropped: 0,
             unsent: 0,
+            incomplete: false,
             ended: false,
             heartbeat_at: now - chrono::Duration::hours(beat_h),
             heartbeat_secs: 300,
         }
+    }
+
+    #[test]
+    fn the_heartbeat_cap_is_enforced_while_parsing() {
+        let one = serde_json::to_string(&serde_json::json!({
+            "pod_namespace": "ns", "pod_name": "p", "workload_kind": "Deployment",
+            "workload_name": "w", "container_name": "app", "container_id": "abc",
+            "node_name": "n1", "mode": "full", "exec_probe": true, "lib_probe": true,
+            "start_mode": "start", "tracking_since": "2026-09-26T10:00:00",
+            "heartbeat_at": "2026-09-26T10:05:00", "heartbeat_secs": 300
+        }))
+        .unwrap();
+        let body = |n: usize| format!("[{}]", vec![one.as_str(); n].join(","));
+        assert_eq!(
+            parse_coverage(body(MAX_COVERAGE_ENTRIES).as_bytes())
+                .unwrap()
+                .len(),
+            MAX_COVERAGE_ENTRIES
+        );
+        assert_eq!(
+            parse_coverage(body(MAX_COVERAGE_ENTRIES + 1).as_bytes()),
+            Err(None)
+        );
+        // The element past the cap is refused whatever its shape.
+        let tiny = format!("[{},0]", vec![one.as_str(); MAX_COVERAGE_ENTRIES].join(","));
+        assert_eq!(parse_coverage(tiny.as_bytes()), Err(None));
+        assert!(matches!(parse_coverage(b"{}"), Err(Some(_))));
+        let old = parse_coverage(body(1).as_bytes()).unwrap();
+        assert!(!old[0].incomplete, "absent (older controller) is complete");
     }
 
     #[test]
@@ -2505,6 +2594,25 @@ mod tests {
         assert_eq!(
             cov(&mut conn, "pending").reason.as_deref(),
             Some("events_pending")
+        );
+
+        // A heartbeat saying the inventory is incomplete (the /proc
+        // backfill hit its maps cap): never covered, and sticky.
+        let mut x = beat("c6f", "p6f", "cutmaps", "backfill", 30, 0);
+        x.heartbeat_at -= chrono::Duration::minutes(5);
+        x.incomplete = true;
+        put(&mut conn, vec![x.clone()]);
+        assert_eq!(
+            cov(&mut conn, "cutmaps").reason.as_deref(),
+            Some("incomplete_paths")
+        );
+        x.incomplete = false;
+        x.heartbeat_at += chrono::Duration::minutes(5);
+        put(&mut conn, vec![x]);
+        assert_eq!(
+            cov(&mut conn, "cutmaps").reason.as_deref(),
+            Some("incomplete_paths"),
+            "a later heartbeat does not clear it"
         );
 
         // An incomplete path cannot be matched to its package.

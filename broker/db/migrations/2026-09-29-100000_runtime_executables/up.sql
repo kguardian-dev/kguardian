@@ -95,6 +95,9 @@ CREATE TABLE IF NOT EXISTS runtime_coverage (
     events_dropped BIGINT    NOT NULL DEFAULT 0,
     last_drop_at   TIMESTAMP NULL,
     unsent         BIGINT    NOT NULL DEFAULT 0,
+    -- The controller knows this container's inventory is incomplete (its
+    -- /proc backfill could not read all the mappings). Sticky.
+    incomplete     BOOLEAN   NOT NULL DEFAULT false,
     ended          BOOLEAN   NOT NULL DEFAULT false,
     PRIMARY KEY (cluster_id, container_id)
 );
@@ -123,7 +126,8 @@ CREATE INDEX IF NOT EXISTS idx_runtime_coverage_last_heartbeat
 --   * no live pod of the workload runs the container without a fresh
 --     heartbeat (a node with the feature off, an opted-out pod);
 --   * no path of the container and image is incomplete (a truncated path
---     cannot be matched to the package that owns it);
+--     cannot be matched to the package that owns it), and no instance
+--     reported its inventory incomplete (a /proc backfill cut short);
 --   * coverage began at least window_hours ago (observed_since).
 -- Otherwise covered=false with the first failing reason, in this order:
 --   no_runtime_data, probes_missing, libraries_not_tracked,
@@ -141,7 +145,7 @@ WITH w AS (
 inst AS (
     SELECT c.exec_probe, (c.lib_probe AND c.mode = 'full') AS libs, c.tracking_since,
            c.covered_since, (c.last_drop_at IS NOT NULL AND c.last_drop_at >= w.start_) AS dropped,
-           (c.unsent > 0 AND NOT c.ended) AS pending,
+           (c.unsent > 0 AND NOT c.ended) AS pending, c.incomplete,
            (c.ended OR c.last_heartbeat
                >= w.now_ - make_interval(secs => 3 * c.heartbeat_secs + 60)) AS on_time,
            (c.start_mode = 'start' AND c.covered_since = c.tracking_since) AS whole_life
@@ -156,6 +160,7 @@ agg AS (
            COALESCE(bool_or(NOT libs), false) AS no_libs,
            COALESCE(bool_or(dropped), false) AS dropped,
            COALESCE(bool_or(pending), false) AS pending,
+           COALESCE(bool_or(incomplete), false) AS incomplete,
            COALESCE(bool_or(NOT on_time), false) AS late_beat,
            COALESCE(bool_or(NOT whole_life AND covered_since > (SELECT start_ FROM w)), false)
                AS gap_in_window,
@@ -193,7 +198,7 @@ verdict AS (
             WHEN a.no_libs THEN 'libraries_not_tracked'
             WHEN a.dropped THEN 'events_dropped'
             WHEN a.pending THEN 'events_pending'
-            WHEN i.any_ THEN 'incomplete_paths'
+            WHEN a.incomplete OR i.any_ THEN 'incomplete_paths'
             WHEN a.late_beat OR a.gap_in_window OR u.n > 0 OR a.since > w.start_
                 THEN 'capture_gap'
         END AS reason
