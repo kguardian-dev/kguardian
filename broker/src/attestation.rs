@@ -1102,9 +1102,13 @@ pub async fn get_attestations(
 // ---------------------------------------------------------------------
 
 /// Per row: two bounded jsonb lists of verified entries.
-pub const RUNNING_ROW_COST_BYTES: u64 = 16 * 1024;
-pub const RUNNING_DEFAULT_LIMIT: i64 = 500;
-pub const RUNNING_MAX_LIMIT: i64 = 1000;
+/// A row carries its digest's verified signers and attestations whole
+/// (trust policies match them, so they are never cut), which is at most
+/// one stored result: charged like one. Pages are small to match.
+/// `live_running_feed_cost_covers_the_largest_row` checks it.
+pub const RUNNING_ROW_COST_BYTES: u64 = ATTESTATION_ROW_COST_BYTES;
+pub const RUNNING_DEFAULT_LIMIT: i64 = 100;
+pub const RUNNING_MAX_LIMIT: i64 = 200;
 
 /// One running workload container and what is known about who signed its
 /// image. `verdict` is `None` when the digest has not been checked (no

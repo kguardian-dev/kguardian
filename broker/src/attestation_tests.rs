@@ -840,3 +840,50 @@ fn live_running_feed() {
     let shop = running(&mut conn, Some("shop"), None, 10).unwrap();
     assert_eq!(shop.items.len(), 2);
 }
+
+/// The feed charge covers its largest row: a container of a digest whose
+/// stored result is as large as ingest allows.
+#[test]
+#[ignore = "requires a live postgres (set KG_TEST_DATABASE_URL)"]
+fn live_running_feed_cost_covers_the_largest_row() {
+    use diesel::connection::SimpleConnection;
+    let mut conn = live_conn();
+    conn.batch_execute("TRUNCATE workload_containers").unwrap();
+    let dg = d(91);
+    add_image(&mut conn, &dg);
+    let long = |c: char, n: usize| c.to_string().repeat(n);
+    let sigs: Vec<_> = (0..MAX_SIGNATURES)
+        .map(|i| json!({"format": "cosign-bundle", "source": "referrers", "verified": true, "signer_kind": "keyless",
+            "issuer": format!("{i:02}{}", long('i', MAX_URI - 2)), "san": format!("{i:02}{}", long('s', MAX_URI - 2))}))
+        .collect();
+    let atts: Vec<_> = (0..MAX_ATTESTATIONS)
+        .map(|i| json!({"predicate_type": format!("{i:02}{}", long('p', 600)), "verified": true, "signer_kind": "keyless",
+            "issuer": long('i', 600), "san": long('s', 600),
+            "provenance": {"builder_id": long('b', 300), "source_repo": long('r', 300)}}))
+        .collect();
+    let v = json!({"schema_version": 1, "digest": dg, "repository": long('r', MAX_URI),
+        "checked_at": "2026-09-01T00:00:00Z", "verdict": "verified",
+        "signed_via": "self", "signatures": sigs, "attestations": atts});
+    let body = serde_json::to_vec(&v).unwrap();
+    assert!(
+        body.len() <= MAX_BODY_BYTES,
+        "fixture over the body cap: {}",
+        body.len()
+    );
+    let p = parse_post(&dg, &body, Utc::now()).unwrap();
+    store(&mut conn, &p).unwrap();
+    add_container(
+        &mut conn,
+        &long('n', 253),
+        &long('w', 253),
+        &long('c', 63),
+        &dg,
+    );
+    let page = running(&mut conn, None, None, 10).unwrap();
+    let row = serde_json::to_vec(&page.items[0]).unwrap().len() as u64;
+    assert!(
+        row <= RUNNING_ROW_COST_BYTES,
+        "largest feed row is {row} bytes"
+    );
+    eprintln!("largest feed row {row} bytes ({} byte body)", body.len());
+}

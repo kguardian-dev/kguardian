@@ -315,7 +315,9 @@ type BrokerFeed struct {
 	BaseURL string
 	Token   string
 	HTTP    *http.Client
-	// MaxPages bounds one pass (default 100 pages of 1000).
+	// MaxPages bounds one pass (default 500 pages of 200: 100 000
+	// containers). Pages are small because the broker charges each row
+	// at its worst case against its read budget.
 	MaxPages int
 }
 
@@ -331,7 +333,7 @@ type runningPage struct {
 func (b *BrokerFeed) Running(ctx context.Context) ([]Container, error) {
 	max := b.MaxPages
 	if max <= 0 {
-		max = 100
+		max = 500
 	}
 	hc := b.HTTP
 	if hc == nil {
@@ -340,7 +342,7 @@ func (b *BrokerFeed) Running(ctx context.Context) ([]Container, error) {
 	var out []Container
 	after := ""
 	for page := 0; page < max; page++ {
-		q := url.Values{"limit": {"1000"}}
+		q := url.Values{"limit": {"200"}}
 		if after != "" {
 			q.Set("after", after)
 		}
