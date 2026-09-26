@@ -786,6 +786,25 @@ broker:
       # -- A paged SBOM whose pages stop arriving is discarded this many
       # seconds after its last page (minimum 60).
       sbomPageTtlSeconds: 3600
+    # -- Risk tiers for vulnerability findings (P0, P1, P2, Background).
+    # P0: package in use AND (CISA KEV or EPSS >= epss) AND exposed by
+    # observed ingress. P1: in use and critical/high, or the P0 factors
+    # without exposure. P2: in use and medium/low, or high with no fix and
+    # not exposed. Background: installed, never seen executed or loaded
+    # over a fully covered window. An unknown in-use state always tiers as
+    # in use.
+    tiers:
+      # -- EPSS probability (0-1) at or above which a finding counts as
+      # likely exploited.
+      epss: 0.1
+      # -- Treat a workload with no captured ingress as exposed. false
+      # ranks it as internal, which can move a finding from P0 to P1 on
+      # missing data.
+      unknownExposureAsExposed: true
+      # -- Hours of continuous exec/library capture a container needs
+      # before a package in it can be called installed-but-not-observed
+      # (clamped to [1, 720]).
+      inUseMinWindowHours: 24
 
   # -- Per-statement timeout (ms) applied to every broker DB connection as a
   # backstop: the broker runs as a single replica, so one slow or accidentally

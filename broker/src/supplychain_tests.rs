@@ -1774,3 +1774,265 @@ fn live_database_sources_are_deduplicated_and_registry_sboms_never_replace_trivy
         json!(["2", "10.1"])
     );
 }
+
+// ---------------------------------------------------------------------
+// Runtime in-use and tiers (#1533 P1-5)
+// ---------------------------------------------------------------------
+
+/// The runtime inventory table as P1-2 (feat/1533-exec-tracking,
+/// migration 2026-09-27-300000_runtime_executables) defines it: the input
+/// contract of in_use_store. Created here only when that migration is not
+/// in this tree yet; identical DDL, so the real one is a no-op after it.
+const RUNTIME_EXECUTABLES_CONTRACT: &str = "\
+CREATE TABLE IF NOT EXISTS runtime_executables ( \
+    cluster_id VARCHAR NOT NULL DEFAULT 'primary', pod_namespace VARCHAR NOT NULL, \
+    workload_kind VARCHAR NOT NULL, workload_name VARCHAR NOT NULL, \
+    container_name VARCHAR NOT NULL, image_digest VARCHAR NOT NULL, \
+    kind VARCHAR NOT NULL CHECK (kind IN ('exec', 'lib')), path VARCHAR NOT NULL, \
+    path_complete BOOLEAN NOT NULL DEFAULT true, \
+    source VARCHAR NOT NULL CHECK (source IN ('ebpf', 'backfill')), \
+    last_pod_name VARCHAR NULL, first_seen TIMESTAMP NOT NULL, last_seen TIMESTAMP NOT NULL, \
+    PRIMARY KEY (cluster_id, pod_namespace, workload_kind, workload_name, container_name, \
+                 image_digest, kind, path))";
+
+/// A stand-in for the coverage function the runtime inventory is to
+/// provide (in_use_store module docs): every container covered for the
+/// last 48 hours.
+const COVERAGE_STUB: &str = "\
+CREATE OR REPLACE FUNCTION kg_runtime_coverage(text, text, text, text, text, text, integer) \
+RETURNS TABLE (covered boolean, observed_since timestamp, reason text) LANGUAGE sql STABLE AS $$ \
+    SELECT true, timezone('UTC', NOW()) - INTERVAL '48 hours', NULL::text \
+$$";
+
+/// Acceptance fixture: an image whose SBOM has two shared libraries, each
+/// with a CVE; the process dlopen()s only one of them. Exactly one package
+/// is marked loaded; the other is unknown without capture coverage and
+/// installed-not-observed (Background, and a VEX draft statement) with it.
+#[test]
+#[ignore = "requires a live postgres (set KG_TEST_DATABASE_URL)"]
+fn live_database_only_the_dlopened_library_is_loaded() {
+    use crate::in_use_store::{self as iu, VexOutcome};
+    use crate::supplychain_read::{
+        image_vulnerabilities_filtered, list_cves_filtered, ListFilters,
+    };
+    let mut conn = live_conn();
+    exec(&mut conn, RUNTIME_EXECUTABLES_CONTRACT);
+    exec(
+        &mut conn,
+        "DROP FUNCTION IF EXISTS kg_runtime_coverage(text, text, text, text, text, text, integer); \
+         TRUNCATE runtime_executables, runtime_package_use, runtime_unowned_paths, \
+            runtime_in_use_coverage, workload_network_exposure;",
+    );
+    let img = d(77);
+    seed_inventory(
+        &mut conn,
+        &img,
+        "ghcr.io/example/api",
+        "2.4.1",
+        "Deployment",
+        "api",
+        "app",
+        0,
+    );
+
+    let lib = |n: &str| format!("/usr/lib/x86_64-linux-gnu/lib{n}.so.1");
+    let mut s = sbom_json(&img, "2026-09-20T08:00:00Z", &[], None);
+    s["components"] = json!([
+        {"name": "libfoo1", "version": "1.2.3-1", "purl": "pkg:deb/debian/libfoo1@1.2.3-1",
+         "type": "debian", "file_paths": [lib("foo"), "/usr/share/doc/libfoo1/copyright"]},
+        {"name": "libbar1", "version": "4.5-2", "purl": "pkg:deb/debian/libbar1@4.5-2",
+         "type": "debian", "file_paths": [lib("bar"), "/usr/share/doc/libbar1/copyright"]},
+    ]);
+    store_s(&mut conn, s).unwrap();
+    let mut v = vulns_json(
+        &img,
+        "2026-09-20T08:00:00Z",
+        &[
+            ("CVE-2026-0001", "HIGH", Some("1.2.4")),
+            ("CVE-2026-0002", "HIGH", Some("4.6")),
+        ],
+    );
+    v["observed_in"] = json!([]);
+    for (i, (name, ver)) in [("libfoo1", "1.2.3-1"), ("libbar1", "4.5-2")]
+        .iter()
+        .enumerate()
+    {
+        v["vulnerabilities"][i]["package"] = json!({"name": name, "version": ver, "type": "debian",
+            "purl": format!("pkg:deb/debian/{name}@{ver}")});
+        v["vulnerabilities"][i]["class"] = json!("os-pkgs");
+        v["vulnerabilities"][i]["file_paths"] = json!([]);
+    }
+    store_v(&mut conn, v);
+    relink_batch(&mut conn, None, 100).unwrap();
+
+    // The kernel reports the real file behind the soname symlink the
+    // program dlopen()ed, and the unpackaged app binary itself.
+    exec(
+        &mut conn,
+        &format!(
+            "INSERT INTO runtime_executables (pod_namespace, workload_kind, workload_name, \
+                container_name, image_digest, kind, path, source, first_seen, last_seen) VALUES \
+             ('{NS}', 'Deployment', 'api', 'app', '{img}', 'lib', \
+                '/usr/lib/x86_64-linux-gnu/libfoo.so.1.2.3', 'ebpf', \
+                timezone('UTC', NOW()) - INTERVAL '1 hour', timezone('UTC', NOW())), \
+             ('{NS}', 'Deployment', 'api', 'app', '{img}', 'exec', '/app/server', 'ebpf', \
+                timezone('UTC', NOW()) - INTERVAL '1 hour', timezone('UTC', NOW()))"
+        ),
+    );
+    // The fixture's soname link must reach libfoo1's '.so.1' entry.
+    assert!(iu::runtime_inventory_available(&mut conn).unwrap());
+    iu::refresh_package_use_batch(&mut conn, None, 10).unwrap();
+    assert_eq!(
+        count(&mut conn, "SELECT count(*) AS n FROM runtime_package_use"),
+        1,
+        "exactly one package marked in use"
+    );
+    assert_eq!(
+        count(
+            &mut conn,
+            "SELECT count(*) AS n FROM runtime_package_use \
+             WHERE pkg_name = 'libfoo1' AND state = 'loaded' AND path_match = 'soname'"
+        ),
+        1
+    );
+    assert_eq!(
+        count(
+            &mut conn,
+            "SELECT count(*) AS n FROM runtime_unowned_paths WHERE path = '/app/server'"
+        ),
+        1
+    );
+
+    let state_of = |conn: &mut PgConnection, f: &ListFilters| {
+        let p = image_vulnerabilities_filtered(conn, &img, None, f, None, 50).unwrap();
+        p.items
+            .iter()
+            .map(|f| {
+                (
+                    f.package.name.clone(),
+                    f.in_use_state,
+                    f.tier,
+                    f.in_use_detail.reason,
+                )
+            })
+            .collect::<Vec<_>>()
+    };
+    let all = ListFilters::default();
+
+    // No coverage function (P1-2 has not shipped one): the unseen library
+    // is unknown, never "not in use", and is tiered as if loaded.
+    let t = crate::in_use::TierSettings::default();
+    iu::refresh_coverage(&mut conn, &t).unwrap();
+    iu::refresh_exposure(&mut conn, 168).unwrap();
+    let mut got = state_of(&mut conn, &all);
+    got.sort();
+    assert_eq!(
+        got,
+        [
+            (
+                "libbar1".to_string(),
+                "unknown",
+                "P1",
+                Some("no_runtime_data")
+            ),
+            ("libfoo1".to_string(), "loaded", "P1", None),
+        ]
+    );
+    assert!(matches!(
+        iu::openvex_draft(
+            &mut conn,
+            &crate::workload_profile::Key {
+                namespace: NS.into(),
+                kind: "Deployment".into(),
+                name: "api".into()
+            }
+        )
+        .unwrap(),
+        VexOutcome::Unavailable(_)
+    ));
+
+    // With coverage: the unseen library is installed-not-observed.
+    exec(&mut conn, COVERAGE_STUB);
+    iu::refresh_coverage(&mut conn, &t).unwrap();
+    let mut got = state_of(&mut conn, &all);
+    got.sort();
+    assert_eq!(
+        got,
+        [
+            (
+                "libbar1".to_string(),
+                "installed_not_observed",
+                "Background",
+                None
+            ),
+            ("libfoo1".to_string(), "loaded", "P1", None),
+        ]
+    );
+    let loaded_only = ListFilters {
+        in_use: Some(vec!["loaded".into()]),
+        ..Default::default()
+    };
+    assert_eq!(state_of(&mut conn, &loaded_only).len(), 1);
+
+    // Cluster-wide: the summary carries tier and in-use per CVE.
+    crate::supplychain_read::refresh_cve_summary(&mut conn).unwrap();
+    let bg = ListFilters {
+        tiers: Some(vec![3]),
+        ..Default::default()
+    };
+    let page = list_cves_filtered(&mut conn, &bg, None, false, None, 10).unwrap();
+    assert_eq!(
+        page.items
+            .iter()
+            .map(|c| (c.summary.id.as_str(), c.in_use_state))
+            .collect::<Vec<_>>(),
+        [("CVE-2026-0002", "installed_not_observed")]
+    );
+    assert_eq!(page.items[0].summary.not_observed_workloads, 1);
+    let p1 = list_cves_filtered(
+        &mut conn,
+        &ListFilters {
+            tiers: Some(vec![1]),
+            ..Default::default()
+        },
+        None,
+        false,
+        None,
+        10,
+    )
+    .unwrap();
+    assert_eq!(p1.items.len(), 1);
+    assert_eq!(p1.items[0].summary.id, "CVE-2026-0001");
+    assert_eq!(p1.items[0].summary.loaded_workloads, 1);
+
+    // The exposure view carries the same per-workload state.
+    let e = crate::supplychain_read::vulnerability_exposure(&mut conn, "CVE-2026-0001", 168)
+        .unwrap()
+        .unwrap();
+    assert_eq!(e.in_use_state, "loaded");
+    assert_eq!(e.workloads[0].in_use_state, "loaded");
+
+    // And the VEX draft states not_affected for the unseen library only.
+    let key = crate::workload_profile::Key {
+        namespace: NS.into(),
+        kind: "Deployment".into(),
+        name: "api".into(),
+    };
+    let VexOutcome::Draft(vex) = iu::openvex_draft(&mut conn, &key).unwrap() else {
+        panic!("expected a VEX draft");
+    };
+    assert_eq!(vex.statements, 1);
+    assert_eq!(
+        vex.doc["statements"][0]["vulnerability"]["name"],
+        "CVE-2026-0002"
+    );
+    assert_eq!(
+        vex.doc["statements"][0]["products"][0]["subcomponents"][0]["@id"],
+        "pkg:deb/debian/libbar1@4.5-2"
+    );
+
+    exec(
+        &mut conn,
+        "DROP FUNCTION kg_runtime_coverage(text, text, text, text, text, text, integer)",
+    );
+}

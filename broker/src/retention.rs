@@ -2070,8 +2070,10 @@ mod workload_profile_retention_tests {
 //
 // 1. Relink every stored payload to the inventory (supplychain::relink),
 //    so a digest the inventory learns after the scan arrived is joined
-//    within one interval, then rebuild the per-CVE summary that
-//    GET /vulnerabilities reads (vuln_cve_summary).
+//    within one interval; refresh runtime in-use evidence, capture
+//    coverage and observed exposure (in_use_store, P1-5); then rebuild the
+//    per-CVE summary with tiers that GET /vulnerabilities reads
+//    (vuln_cve_summary).
 // 2. Expire staged SBOM sets that stopped receiving pages
 //    (`SUPPLYCHAIN_SBOM_PAGE_TTL_SECS`, default 3600).
 // 3. Delete payloads nothing runs: no linked inventory digest has a
@@ -2184,6 +2186,9 @@ pub(crate) async fn run_supplychain_pass(pool: &DbPool, days: u32, grace_hours: 
     if changed > 0 {
         info!(links_changed = changed, "supply-chain links refreshed");
     }
+    // 1a. Runtime in-use evidence and exposure (P1-5), which the summary
+    //     below tiers from.
+    run_in_use_pass(pool, batch).await;
     // 1b. Rebuild the per-CVE summary GET /vulnerabilities reads, from the
     //     links just refreshed.
     let p = pool.clone();
@@ -2225,6 +2230,94 @@ pub(crate) async fn run_supplychain_pass(pool: &DbPool, days: u32, grace_hours: 
         );
     } else {
         debug!("supply-chain retention: nothing to remove");
+    }
+}
+
+/// Rebuild the derived in-use tables (in_use_store module docs): package
+/// use from the runtime inventory, per-container coverage, and observed
+/// exposure. Each step logs and gives up on its own error; a failed step
+/// leaves the previous pass's rows, and unknowns only push tiers up.
+async fn run_in_use_pass(pool: &DbPool, batch: i64) {
+    use crate::in_use_store as s;
+    let p = pool.clone();
+    let available = match tokio::task::spawn_blocking(move || -> Result<bool, RetentionError> {
+        let mut conn = p.get().map_err(RetentionError::Pool)?;
+        s::runtime_inventory_available(&mut conn).map_err(RetentionError::Diesel)
+    })
+    .await
+    {
+        Ok(Ok(a)) => a,
+        Ok(Err(e)) => {
+            warn!(error = %e, "in-use: runtime inventory check failed");
+            false
+        }
+        Err(e) => {
+            warn!(error = %e, "in-use: runtime inventory check panicked");
+            false
+        }
+    };
+    if available {
+        let mut cursor: Option<String> = None;
+        let mut rows = 0usize;
+        for _ in 0..MAX_SUPPLYCHAIN_BATCHES {
+            let p = pool.clone();
+            let after = cursor.clone();
+            let r = tokio::task::spawn_blocking(move || {
+                let mut conn = p.get().map_err(|e| e.to_string())?;
+                s::refresh_package_use_batch(&mut conn, after.as_deref(), batch)
+                    .map_err(|e| e.to_string())
+            })
+            .await;
+            match r {
+                Ok(Ok((n, next))) => {
+                    rows += n;
+                    match next {
+                        Some(c) => cursor = Some(c),
+                        None => break,
+                    }
+                }
+                Ok(Err(e)) => {
+                    warn!(error = %e, "in-use: package use refresh failed");
+                    break;
+                }
+                Err(e) => {
+                    warn!(error = %e, "in-use: package use task panicked");
+                    break;
+                }
+            }
+        }
+        debug!(rows, "in-use: package use refreshed");
+    }
+    let p = pool.clone();
+    let r =
+        tokio::task::spawn_blocking(move || -> Result<(usize, usize, usize), RetentionError> {
+            let mut conn = p.get().map_err(RetentionError::Pool)?;
+            let pruned = if available {
+                s::prune_package_use(&mut conn)
+            } else {
+                s::clear_package_use(&mut conn)
+            }
+            .map_err(RetentionError::Diesel)?;
+            let t = crate::in_use::TierSettings::from_env();
+            let cov = s::refresh_coverage(&mut conn, &t).map_err(RetentionError::Diesel)?;
+            let exp = s::refresh_exposure(
+                &mut conn,
+                crate::supplychain_read::EXPOSURE_DEFAULT_WINDOW_HOURS,
+            )
+            .map_err(RetentionError::Diesel)?;
+            Ok((pruned, cov, exp))
+        })
+        .await;
+    match r {
+        Ok(Ok((pruned, cov, exp))) => debug!(
+            pruned,
+            coverage_rows = cov,
+            exposure_rows = exp,
+            runtime_inventory = available,
+            "in-use: coverage and exposure refreshed"
+        ),
+        Ok(Err(e)) => warn!(error = %e, "in-use: coverage/exposure refresh failed"),
+        Err(e) => warn!(error = %e, "in-use: coverage/exposure task panicked"),
     }
 }
 
