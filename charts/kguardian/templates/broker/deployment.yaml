@@ -246,6 +246,19 @@ spec:
             - name: SUPPLYCHAIN_SBOM_PAGE_TTL_SECS
               value: {{ $scRetention.sbomPageTtlSeconds | quote }}
             {{- end }}
+            {{- $scTiers := $supplychain.tiers | default dict }}
+            {{- if hasKey $scTiers "epss" }}
+            - name: SUPPLYCHAIN_TIER_EPSS
+              value: {{ $scTiers.epss | quote }}
+            {{- end }}
+            {{- if hasKey $scTiers "unknownExposureAsExposed" }}
+            - name: SUPPLYCHAIN_TIER_UNKNOWN_EXPOSURE_AS_EXPOSED
+              value: {{ $scTiers.unknownExposureAsExposed | quote }}
+            {{- end }}
+            {{- if hasKey $scTiers "inUseMinWindowHours" }}
+            - name: SUPPLYCHAIN_IN_USE_MIN_WINDOW_HOURS
+              value: {{ $scTiers.inUseMinWindowHours | quote }}
+            {{- end }}
             {{- if hasKey .Values.broker.audit "inflightPermits" }}
             - name: AUDIT_INFLIGHT_PERMITS
               value: {{ .Values.broker.audit.inflightPermits | quote }}

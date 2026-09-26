@@ -98,8 +98,14 @@ func TestImagesVulns_Table(t *testing.T) {
 		"SOURCE", "grype", "trivy-operator", "platform_manifest", "unverified", "scanned",
 		"CRITICAL  CVE-2099-10001",
 		"fastparse", "2.1.10 or 2.1.4", "yes", "grype,trivy-operator",
-		"In use: unknown",
+		"TIER", "IN USE", "never as unused", "a KEV finding\nthere is P0",
 	)
+	// This capture predates tiers: TIER prints "-", IN USE "unknown".
+	for _, line := range strings.Split(s, "\n") {
+		if strings.Contains(line, "CVE-2099-10001") && (!strings.HasPrefix(line, "-") || !strings.Contains(line, "unknown")) {
+			t.Errorf("no tier = '-', no in-use = unknown: %q", line)
+		}
+	}
 	for _, line := range strings.Split(s, "\n") {
 		if strings.Contains(line, "CVE-2099-10002") && !strings.Contains(line, "unknown") {
 			t.Errorf("KEV null must print unknown: %q", line)
@@ -299,7 +305,7 @@ func TestVulnsExposure_TableTrueFalseUnknown(t *testing.T) {
 		t.Errorf("query: %s", fb.lastReq.URL.RawQuery)
 	}
 	s := out.String()
-	mustContain(t, s, "CVE-2099-10003  HIGH, no fix available", "libexample", "In use: unknown", "INGRESS FLOWS", "egress alone does not count")
+	mustContain(t, s, "CVE-2099-10003  HIGH, no fix available", "libexample", "In use: unknown", "IN USE", "INGRESS FLOWS", "egress alone does not count")
 	// catalog-sync had egress but no ingress: unknown, never "no".
 	want := map[string][3]string{
 		"Deployment/storefront":   {"yes", "other_namespace,unattributed,public_ip", "2"},
@@ -310,10 +316,13 @@ func TestVulnsExposure_TableTrueFalseUnknown(t *testing.T) {
 		found := false
 		for _, line := range strings.Split(s, "\n") {
 			f := strings.Fields(line)
-			if len(f) >= 7 && f[1] == wl {
+			if len(f) >= 8 && f[1] == wl {
 				found = true
-				if f[4] != exp[0] || f[5] != exp[1] || f[6] != exp[2] {
-					t.Errorf("%s: exposed/via/ingress = %s %s %s, want %v", wl, f[4], f[5], f[6], exp)
+				if f[4] != "unknown" {
+					t.Errorf("%s: in use = %s, want unknown (capture predates in-use)", wl, f[4])
+				}
+				if f[5] != exp[0] || f[6] != exp[1] || f[7] != exp[2] {
+					t.Errorf("%s: exposed/via/ingress = %s %s %s, want %v", wl, f[5], f[6], f[7], exp)
 				}
 			}
 		}
@@ -416,6 +425,116 @@ func TestImagesVulns_ProcessExitCodes(t *testing.T) {
 	}
 	if code, _ := run("images vulns " + storefrontDigest); code != 1 {
 		t.Errorf("port-forward failure without a gate: exit %d, want 1", code)
+	}
+}
+
+// --- tiers and in-use (#1533 P1-5) ------------------------------------------
+
+// A finding as the in-use broker serialises it (supplychain_read.rs
+// Finding); not a capture, the id is fake.
+const tieredFinding = `{"id":"CVE-2099-30001","package":{"name":"libfoo1","type":"debian","purl":null},
+ "installedVersion":"1.2.3-1","fixedVersions":["1.2.4"],"fixable":true,"severity":"HIGH","score":7.5,
+ "kev":true,"epss":0.31,"sources":["trivy-operator"],"inUse":true,"inUseState":"loaded",
+ "inUseDetail":{"state":"loaded","reason":null,"observedSince":null,"windowHours":24,"containers":1,"coverage":"file"},
+ "tier":"P0","tierFactors":["in_use:loaded","kev","severity:high","exposure:unknown"]}`
+
+func tieredPage(items string) string {
+	return `{"digest":"` + storefrontDigest + `","reports":[{"source":"trivy-operator","reportDigest":"x","join":"image_id",
+ "digestKind":"manifest","scannedAt":"2026-09-20T08:00:00","itemCount":1}],"items":[` + items + `],"nextAfter":null}`
+}
+
+func TestFailOnGateAndRiskFlagParsing(t *testing.T) {
+	for in, want := range map[string]string{"p0": "tier:P0", "P1": "tier:P0,P1", "p2": "tier:P0,P1,P2", "high": "CRITICAL,HIGH,UNKNOWN"} {
+		if got, err := failOnGate(in); err != nil || got != want {
+			t.Errorf("failOnGate(%q) = %q %v, want %q", in, got, err, want)
+		}
+	}
+	for _, bad := range []string{"background", "p3", "none"} {
+		if _, err := failOnGate(bad); err == nil {
+			t.Errorf("--fail-on %s must be rejected", bad)
+		}
+	}
+	if s, err := parseTierList("p1, background,P1"); err != nil || s != "P1,Background" {
+		t.Errorf("tiers: %q %v", s, err)
+	}
+	if _, err := parseTierList("urgent"); err == nil {
+		t.Error("an unknown tier must be rejected")
+	}
+	if s, err := parseInUseList("Loaded,unknown"); err != nil || s != "loaded,unknown" {
+		t.Errorf("in-use: %q %v", s, err)
+	}
+	if _, err := parseInUseList("maybe"); err == nil {
+		t.Error("an unknown in-use state must be rejected")
+	}
+}
+
+func TestImagesVulns_TiersFiltersAndInUse(t *testing.T) {
+	fb := startFakeBroker(t, map[string]string{"/images/" + storefrontDigest + "/vulnerabilities": tieredPage(tieredFinding)})
+	var out, errOut bytes.Buffer
+	kev, epss := true, 0.1
+	opts := api.ImageVulnsOptions{Kev: &kev, EpssMin: &epss, InUse: "loaded,unknown", Tier: "P0,P1"}
+	if err := fetchAndRenderImageVulns(storefrontDigest, opts, "", "", "table", &out, &errOut); err != nil {
+		t.Fatal(err)
+	}
+	q := fb.lastReq.URL.Query()
+	if q.Get("kev") != "true" || q.Get("epss_min") != "0.1" || q.Get("in_use") != "loaded,unknown" || q.Get("tier") != "P0,P1" {
+		t.Errorf("query: %s", fb.lastReq.URL.RawQuery)
+	}
+	var row string
+	for _, line := range strings.Split(out.String(), "\n") {
+		if strings.Contains(line, "CVE-2099-30001") {
+			row = line
+		}
+	}
+	if f := strings.Fields(row); len(f) < 9 || f[0] != "P0" || f[8] != "loaded" {
+		t.Errorf("row: %q", row)
+	}
+}
+
+func TestImagesVulns_FailOnTier(t *testing.T) {
+	fb := startFakeBroker(t, map[string]string{"/images/" + storefrontDigest + "/vulnerabilities": tieredPage(tieredFinding)})
+	var out, errOut bytes.Buffer
+	gate, _ := failOnGate("p0")
+	err := fetchAndRenderImageVulns(storefrontDigest, api.ImageVulnsOptions{}, gate, "P0", "table", &out, &errOut)
+	if gateCode(t, err) != exitGateFindings {
+		t.Fatalf("want exit %d, got %v", exitGateFindings, err)
+	}
+	if q := fb.lastReq.URL.Query(); q.Get("tier") != "P0" || q.Get("severity") != "" || q.Get("limit") != "1" {
+		t.Errorf("gate query: %s", fb.lastReq.URL.RawQuery)
+	}
+	mustContain(t, err.Error(), "P0 HIGH CVE-2099-30001")
+
+	// A broker without tiers ignores the filter and returns any finding:
+	// that is "could not check" (2), never a result.
+	startFakeBroker(t, vulnRoutes(t, "image-vulns-storefront"))
+	err = fetchAndRenderImageVulns(storefrontDigest, api.ImageVulnsOptions{}, gate, "P0", "table", &out, &errOut)
+	if gateCode(t, err) != exitGateNoCheck {
+		t.Fatalf("want exit %d, got %v", exitGateNoCheck, err)
+	}
+	mustContain(t, err.Error(), "does not report risk tiers")
+}
+
+func TestVulnsList_TierColumnsAndFilters(t *testing.T) {
+	body := `{"items":[{"id":"CVE-2099-30001","severity":"HIGH","maxScore":7.5,"fixable":true,"kev":true,"maxEpss":0.31,
+ "packages":["libfoo1"],"sources":["trivy-operator"],"images":1,"workloads":2,"runningWorkloads":2,"namespaces":1,
+ "weakestJoin":"image_id","tier":"P0","executedWorkloads":0,"loadedWorkloads":1,"unknownWorkloads":1,
+ "notObservedWorkloads":0,"exposedWorkloads":1,"inUse":true,"inUseState":"loaded"}],
+ "nextAfter":null,"computedAt":"2026-09-26T03:00:00","staleSeconds":5}`
+	fb := startFakeBroker(t, map[string]string{"/vulnerabilities": body})
+	var out, errOut bytes.Buffer
+	if err := fetchAndRenderVulns(api.VulnsListOptions{Tier: "P0", InUse: "loaded"}, "table", &out, &errOut); err != nil {
+		t.Fatal(err)
+	}
+	if q := fb.lastReq.URL.Query(); q.Get("tier") != "P0" || q.Get("in_use") != "loaded" {
+		t.Errorf("query: %s", fb.lastReq.URL.RawQuery)
+	}
+	for _, line := range strings.Split(out.String(), "\n") {
+		if strings.Contains(line, "CVE-2099-30001") {
+			// TIER SEVERITY ID SCORE FIXABLE KEV IN-USE IMAGES WORKLOADS RUNNING EXPOSED
+			if f := strings.Fields(line); len(f) < 11 || f[0] != "P0" || f[6] != "loaded" || f[10] != "1" {
+				t.Errorf("row: %q", line)
+			}
+		}
 	}
 }
 

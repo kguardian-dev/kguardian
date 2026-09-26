@@ -8,10 +8,10 @@ import { seccompFromBrokerSyscalls } from "./generators/seccomp.js";
 import { computeQuery, selectPodFromLatest, summariseComputeHistory } from "./compute.js";
 import {
   buildQuery, clampToolLimit, trimImagePage, trimProfile, trimProfileDiff, trimProfileList, workloadPath, POSTURE_VALUES,
-  MAX_TOOL_LIMIT, UNTRUSTED_NOTE,
+  UNTRUSTED_NOTE,
 } from "./posture.js";
 import {
-  parseBool, parseDigest, parseSeverity, parseSource, parseVulnId,
+  parseBool, parseDigest, parseEpssMin, parseInUse, parseSeverity, parseSource, parseTier, parseVulnId,
   trimCveList, trimExposure, trimImageVulns, trimSbomPage,
 } from "./vulns.js";
 import {
@@ -247,22 +247,36 @@ const handlers: Record<string, Handler> = {
     const digest = parseDigest(a.digest);
     const severity = parseSeverity(a.severity);
     const fixable = parseBool(a.fixable, "fixable");
+    const kev = parseBool(a.kev, "kev");
+    const epssMin = parseEpssMin(a.epss_min);
+    const inUse = parseInUse(a.in_use);
+    const tier = parseTier(a.tier);
     const limit = clampToolLimit(a.limit);
     const page = await brokerGetJSON(`/images/${digest}/vulnerabilities${buildQuery({
-      severity, fixable: fixable === undefined ? undefined : String(fixable), limit,
+      severity, fixable: fixable === undefined ? undefined : String(fixable),
+      kev: kev === undefined ? undefined : String(kev),
+      epss_min: epssMin === undefined ? undefined : String(epssMin),
+      in_use: inUse, tier, limit,
     })}`);
-    return trimImageVulns(page, { severity, fixable });
+    return trimImageVulns(page, { severity, fixable, kev, epssMin, inUse, tier }, limit);
   },
   list_vulnerabilities: async (a) => {
     const namespace = s(a.namespace).trim();
     const severity = parseSeverity(a.severity);
     const kev = parseBool(a.kev, "kev");
+    const epssMin = parseEpssMin(a.epss_min);
+    const inUse = parseInUse(a.in_use);
+    const tier = parseTier(a.tier);
     const limit = clampToolLimit(a.limit);
-    // With a KEV filter (applied here, not by the broker) ask for the
-    // broker's largest page the assistant allows, then filter and cut.
-    const brokerLimit = kev === undefined ? limit : MAX_TOOL_LIMIT;
-    const page = await brokerGetJSON(`/vulnerabilities${buildQuery({ namespace, severity, limit: brokerLimit })}`);
-    return trimCveList(page, { namespace, severity, kev }, limit, brokerLimit);
+    // Every filter is the broker's. trimCveList re-applies kev as a guard
+    // for an older broker that ignores it.
+    const page = await brokerGetJSON(`/vulnerabilities${buildQuery({
+      namespace, severity,
+      kev: kev === undefined ? undefined : String(kev),
+      epss_min: epssMin === undefined ? undefined : String(epssMin),
+      in_use: inUse, tier, limit,
+    })}`);
+    return trimCveList(page, { namespace, severity, kev, epssMin, inUse, tier }, limit, limit);
   },
   explain_cve_exposure: async (a) => {
     const id = parseVulnId(a.id);

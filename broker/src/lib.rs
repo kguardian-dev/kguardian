@@ -7,6 +7,8 @@ mod compute_types;
 mod error;
 mod get;
 mod image_inventory;
+pub mod in_use;
+pub mod in_use_store;
 mod ip;
 mod netpol;
 mod peer;

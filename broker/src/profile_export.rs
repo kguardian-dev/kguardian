@@ -13,7 +13,8 @@
 //! | `ciliumnetworkpolicy` | same, Cilium kind |
 //! | `seccompprofile` | [`crate::seccomp::bundle_export`] (the `/seccomp/profiles/{..}/export` path) |
 //! | `securitycontext` | the profile's PSS recommendation ([`crate::pod_security`]) |
-//! | `sbom`, `vex` | not available until runtime SBOM data exists (P1-3 / P1-5) |
+//! | `vex` | [`crate::in_use_store::openvex_draft`]: an OpenVEX 0.2.0 draft (JSON, not part of the apply stream) |
+//! | `sbom` | the stored SBOM of each container image ([`crate::supplychain_read::cyclonedx_for`], the `/images/{digest}/sbom/cyclonedx` document): one CycloneDX JSON document per digest, labelled with its source and trust |
 //! | `admission` | not available until the image trust policy exists (P2-3) |
 //!
 //! Report and generate only: kguardian never applies anything. Every
@@ -121,6 +122,10 @@ pub struct Plan {
     pub acknowledge_partial: bool,
     /// Set by the handler: true only for POST.
     pub record: bool,
+    /// SBOM components this bundle may carry: the handler probes the
+    /// chosen SBOMs' sizes and charges the read budget for exactly this
+    /// many (at most [`BUNDLE_SBOM_MAX_COMPONENTS`]).
+    pub sbom_components: i64,
 }
 
 pub fn plan(q: &ExportQuery) -> Result<Plan, String> {
@@ -173,6 +178,7 @@ pub fn plan(q: &ExportQuery) -> Result<Plan, String> {
         manifest,
         acknowledge_partial: flag(q.acknowledge_partial.as_deref(), false),
         record: false,
+        sbom_components: BUNDLE_SBOM_MAX_COMPONENTS,
     })
 }
 
@@ -204,6 +210,29 @@ pub struct Document {
     pub content: Option<String>,
     /// How to use it (`kubectl apply -f <file>` / `kubectl patch ...`).
     pub apply_with: Option<String>,
+    /// The container image a per-image document (`sbom`) is about;
+    /// `null` for every other artifact.
+    pub image: Option<ExportImage>,
+}
+
+/// Which container image a per-image document covers, and where its data
+/// came from.
+#[derive(Debug, Clone, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ExportImage {
+    /// Containers of the workload running (or last running) the digest.
+    pub containers: Vec<String>,
+    pub digest: String,
+    pub image_ref: String,
+    /// `trivy-operator` | `registry` | another scanner; `null` when no
+    /// source has an SBOM.
+    pub source: Option<String>,
+    /// `scanned` (Trivy Operator's in-cluster scan), `unverified` or
+    /// `attached-unbound` (registry-attached, signature not checked),
+    /// `verified`; `null` when no source has an SBOM.
+    pub sbom_trust: Option<String>,
+    pub scanned_at: Option<String>,
+    pub components: Option<i32>,
 }
 
 fn unavailable(artifact: &'static str, mode: &'static str, reason: &str) -> Document {
@@ -219,6 +248,7 @@ fn unavailable(artifact: &'static str, mode: &'static str, reason: &str) -> Docu
         content_type: None,
         content: None,
         apply_with: None,
+        image: None,
     }
 }
 
@@ -626,6 +656,7 @@ fn network_doc(
         content_type: Some("application/yaml"),
         content: Some(header + &body),
         apply_with: Some(format!("kubectl apply -f {artifact}.yaml")),
+        image: None,
     }
 }
 
@@ -668,6 +699,7 @@ fn seccomp_doc(
         content_type: Some("application/yaml"),
         content: b.yaml.map(|y| doc_header(artifact, mode) + &y),
         apply_with: Some(format!("kubectl apply -f {artifact}.yaml")),
+        image: None,
     })
 }
 
@@ -714,7 +746,279 @@ fn security_context_doc(key: &Key, p: &Profile, plan: &Plan) -> Document {
             key.name,
             key.namespace
         )),
+        image: None,
     }
+}
+
+/// Artifacts that are not Kubernetes objects: never in the `kubectl apply`
+/// stream of the YAML bundle, appended there as comments instead (an SBOM
+/// under a header naming its image, source and trust).
+const NOT_APPLIED: [&str; 3] = ["securitycontext", "vex", "sbom"];
+
+/// Components across every SBOM of one bundle. The export charges the
+/// read budget for this many up front (only when `sbom` is requested);
+/// an image that does not fit is listed as unavailable with the per-image
+/// route to download it from.
+pub const BUNDLE_SBOM_MAX_COMPONENTS: i64 = 10_000;
+
+/// Read-budget charge for the SBOM documents of one bundle: the probed
+/// `plan.sbom_components` (at most [`BUNDLE_SBOM_MAX_COMPONENTS`]).
+/// `format=yaml` holds three
+/// copies at its peak (the parsed document, its pretty-printed JSON and
+/// the commented copy in the stream), the manifest one fewer; the
+/// per-component cost is the CycloneDX route's, which holds one.
+fn sbom_charge_kib(plan: &Plan) -> u32 {
+    if !plan.artifacts.contains(&"sbom") {
+        return 0;
+    }
+    let copies = if plan.manifest { 2 } else { 3 };
+    cost_kib(
+        plan.sbom_components.clamp(0, BUNDLE_SBOM_MAX_COMPONENTS),
+        crate::supplychain_read::EXPORT_COMPONENT_COST_BYTES,
+    )
+    .saturating_mul(copies)
+}
+
+/// Components of the SBOM each image of the workload would export with,
+/// summed and capped: an upper bound on what [`sbom_docs`] loads (it
+/// covers every digest the inventory holds for the workload, a superset of
+/// the ones exported).
+pub(crate) fn probe_sbom_components(conn: &mut PgConnection, key: &Key) -> Result<i64, DbError> {
+    #[derive(QueryableByName)]
+    struct D {
+        #[diesel(sql_type = diesel::sql_types::Text)]
+        image_digest: String,
+    }
+    let digests: Vec<D> = diesel::sql_query(
+        "SELECT DISTINCT image_digest FROM workload_containers \
+         WHERE pod_namespace = $1 AND workload_kind = $2 AND workload_name = $3 AND image_digest <> '' \
+         ORDER BY image_digest LIMIT 64",
+    )
+    .bind::<diesel::sql_types::Text, _>(&key.namespace)
+    .bind::<diesel::sql_types::Text, _>(&key.kind)
+    .bind::<diesel::sql_types::Text, _>(&key.name)
+    .load(conn)?;
+    let mut n = 0i64;
+    for d in digests {
+        n = n.saturating_add(crate::supplychain_read::chosen_sbom_components(
+            conn,
+            &d.image_digest,
+        )?);
+        if n >= BUNDLE_SBOM_MAX_COMPONENTS {
+            return Ok(BUNDLE_SBOM_MAX_COMPONENTS);
+        }
+    }
+    Ok(n)
+}
+
+/// `0 components reported by <source> (<trust>)` for an empty SBOM: the
+/// source reported and listed nothing, which is not the same as a checked,
+/// clean image.
+fn empty_sbom_words(source: &str, trust: Option<&str>) -> String {
+    format!(
+        "0 components reported by {source} ({})",
+        trust.unwrap_or("unknown trust")
+    )
+}
+
+/// The `applyWith` of an SBOM document: where it came from, how far to
+/// trust it, and, when it lists nothing, that it is empty as reported.
+fn sbom_apply_with(source: &str, trust: Option<&str>, components: i32) -> String {
+    let empty = if components == 0 {
+        format!(
+            "; {}, not a checked clean image",
+            empty_sbom_words(source, trust)
+        )
+    } else {
+        String::new()
+    };
+    format!(
+        "not applied: an SBOM from {source} ({}){empty}, for review or your SBOM tooling",
+        trust_words(trust)
+    )
+}
+
+/// What the SBOM's trust level means, for the document's `applyWith`.
+fn trust_words(trust: Option<&str>) -> &'static str {
+    match trust {
+        Some("scanned") => "Trivy Operator's in-cluster scan of the image",
+        Some("verified") => "a registry-attached SBOM whose signature was verified",
+        Some("unverified") => "a registry-attached SBOM whose signature was NOT checked",
+        Some("attached-unbound") => {
+            "a document attached to the image in the registry, not bound to it and NOT signature-checked"
+        }
+        _ => "a source of unknown trust",
+    }
+}
+
+/// The images to cover: every current container's running digests, or
+/// its newest digest when none is running (stale containers left out).
+/// Grouped by digest, in container order.
+fn sbom_targets(p: &Profile) -> Vec<(String, String, Vec<String>)> {
+    let mut out: Vec<(String, String, Vec<String>)> = Vec::new();
+    for c in p.dimensions.images.containers.iter().filter(|c| !c.stale) {
+        let picks: Vec<&wp::DigestView> = if c.running.is_empty() {
+            c.previous
+                .iter()
+                .max_by_key(|d| d.last_seen)
+                .into_iter()
+                .collect()
+        } else {
+            c.running.iter().collect()
+        };
+        for d in picks {
+            match out.iter_mut().find(|t| t.0 == d.digest) {
+                Some(t) => {
+                    if !t.2.contains(&c.name) {
+                        t.2.push(c.name.clone());
+                    }
+                }
+                None => out.push((d.digest.clone(), d.image_ref.clone(), vec![c.name.clone()])),
+            }
+        }
+    }
+    out
+}
+
+/// One `sbom` document per container image of the workload: the stored
+/// SBOM as CycloneDX, or unavailable with the reason (no SBOM: unknown
+/// contents; too large for the bundle: the per-image route).
+pub(crate) fn sbom_docs(
+    conn: &mut PgConnection,
+    p: &Profile,
+    mode: &'static str,
+    max_components: i64,
+) -> Result<Vec<Document>, DbError> {
+    use crate::supplychain_read::{cyclonedx_for, CycloneDx};
+    let artifact = "sbom";
+    let targets = sbom_targets(p);
+    if targets.is_empty() {
+        return Ok(vec![unavailable(
+            artifact,
+            mode,
+            "not available: no container image of this workload is in the image inventory",
+        )]);
+    }
+    let mut left = max_components.min(BUNDLE_SBOM_MAX_COMPONENTS);
+    let mut docs = Vec::new();
+    for (digest, image_ref, containers) in targets {
+        let hex = digest.split_once(':').map_or(digest.as_str(), |x| x.1);
+        let file_name = format!(
+            "sbom-{}-{}.cdx.json",
+            containers[0],
+            &hex[..hex.len().min(12)]
+        );
+        let mut image = ExportImage {
+            containers,
+            digest: digest.clone(),
+            image_ref,
+            source: None,
+            sbom_trust: None,
+            scanned_at: None,
+            components: None,
+        };
+        let doc = match cyclonedx_for(conn, &digest, left)? {
+            CycloneDx::NoSbom => Document {
+                file_name,
+                image: Some(image),
+                ..unavailable(
+                    artifact,
+                    mode,
+                    &format!("not available: no source has an SBOM for {digest}, so its contents are unknown"),
+                )
+            },
+            CycloneDx::TooLarge(r) => {
+                image.source = Some(r.source.clone());
+                image.sbom_trust = r.sbom_trust.clone();
+                image.scanned_at = Some(r.scanned_at.and_utc().to_rfc3339());
+                image.components = Some(r.item_count);
+                Document {
+                    file_name,
+                    image: Some(image),
+                    ..unavailable(
+                        artifact,
+                        mode,
+                        &format!(
+                            "not included: {} components, over the {left} left of the {BUNDLE_SBOM_MAX_COMPONENTS} per bundle; \
+                             download it with GET /images/{digest}/sbom/cyclonedx",
+                            r.item_count
+                        ),
+                    )
+                }
+            }
+            CycloneDx::Doc(doc, r, loaded) => {
+                // Charge what was loaded, not the header's count: a
+                // re-ingest between the two reads can make the header stale.
+                left -= loaded;
+                let loaded_i32 = i32::try_from(loaded).unwrap_or(i32::MAX);
+                image.source = Some(r.source.clone());
+                image.sbom_trust = r.sbom_trust.clone();
+                image.scanned_at = Some(r.scanned_at.and_utc().to_rfc3339());
+                image.components = Some(loaded_i32);
+                Document {
+                    artifact,
+                    file_name,
+                    available: true,
+                    refused: None,
+                    reason: None,
+                    api_version: None,
+                    kind: None,
+                    mode,
+                    content_type: Some("application/vnd.cyclonedx+json"),
+                    content: Some(serde_json::to_string_pretty(&doc)? + "\n"),
+                    apply_with: Some(sbom_apply_with(
+                        &r.source,
+                        r.sbom_trust.as_deref(),
+                        loaded_i32,
+                    )),
+                    image: Some(image),
+                }
+            }
+        };
+        docs.push(doc);
+    }
+    Ok(docs)
+}
+
+/// The OpenVEX draft ([`crate::in_use_store::openvex_draft`]): `not_affected`
+/// statements only for packages unseen in every container of the workload
+/// over a covered window, each marked as a draft needing human review.
+pub(crate) fn vex_doc(
+    conn: &mut PgConnection,
+    key: &Key,
+    mode: &'static str,
+) -> Result<Document, DbError> {
+    use crate::in_use_store::{openvex_draft, VexOutcome};
+    let artifact = "vex";
+    let draft = match openvex_draft(conn, key)? {
+        VexOutcome::Draft(d) => d,
+        VexOutcome::Unavailable(why) => {
+            return Ok(unavailable(
+                artifact,
+                mode,
+                &format!("not available: {why}"),
+            ))
+        }
+    };
+    let content = serde_json::to_string_pretty(&draft.doc)?;
+    Ok(Document {
+        artifact,
+        file_name: format!("{artifact}.openvex.json"),
+        available: true,
+        refused: None,
+        reason: None,
+        api_version: None,
+        kind: None,
+        mode,
+        content_type: Some("application/json"),
+        content: Some(content + "\n"),
+        apply_with: Some(format!(
+            "not applied: a DRAFT with {} not_affected statement(s) that a human must review; \
+             then give it to your scanner, e.g. trivy image --vex {artifact}.openvex.json <image>",
+            draft.statements
+        )),
+        image: None,
+    })
 }
 
 /// The whole bundle.
@@ -765,16 +1069,11 @@ pub fn build_documents(
             }
             "seccompprofile" => seccomp_doc(conn, key, p, plan)?,
             "securitycontext" => security_context_doc(key, p, plan),
-            "sbom" => unavailable(
-                "sbom",
-                mode,
-                "not available: a CycloneDX runtime SBOM needs the runtime package data from P1-3/P1-5, which does not exist yet",
-            ),
-            "vex" => unavailable(
-                "vex",
-                mode,
-                "not available: an OpenVEX draft needs vulnerability data and runtime package evidence (P1-3/P1-5), which do not exist yet",
-            ),
+            "sbom" => {
+                docs.extend(sbom_docs(conn, p, mode, plan.sbom_components)?);
+                continue;
+            }
+            "vex" => vex_doc(conn, key, mode)?,
             _ => unavailable(
                 "admission",
                 mode,
@@ -786,10 +1085,54 @@ pub fn build_documents(
     Ok(docs)
 }
 
+/// Every character a YAML parser may treat as a line break. YAML 1.2 has
+/// only CR and LF, but YAML 1.1 (go-yaml, which kubectl's decoder uses)
+/// also breaks lines on NEL, LINE SEPARATOR and PARAGRAPH SEPARATOR, and
+/// serde_json emits those three raw inside strings.
+const YAML_LINE_BREAKS: [char; 5] = ['\n', '\r', '\u{85}', '\u{2028}', '\u{2029}'];
+
+/// NEL / LS / PS as JSON escape text (`\u0085`, `\u2028`, `\u2029`), so a
+/// commented JSON document stays valid JSON once the `#` is removed and
+/// no parser sees a line break there.
+fn escape_unicode_breaks(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '\u{85}' => out.push_str("\\u0085"),
+            '\u{2028}' => out.push_str("\\u2028"),
+            '\u{2029}' => out.push_str("\\u2029"),
+            c => out.push(c),
+        }
+    }
+    out
+}
+
+/// Text for inside a single comment line: no line break of any kind.
+fn comment_text(s: &str) -> String {
+    escape_unicode_breaks(s).replace(YAML_LINE_BREAKS, " ")
+}
+
+/// `text` as comment lines: every segment between any YAML line break
+/// starts with `#`, so nothing in it (a package name, a status note) can
+/// start a document or a key in the `kubectl apply` stream.
+fn push_commented(y: &mut String, text: &str) {
+    let t = escape_unicode_breaks(text).replace("\r\n", "\n");
+    let t = t.strip_suffix('\n').unwrap_or(&t);
+    // NEL/LS/PS are escaped above; split on every break anyway.
+    for seg in t.split(YAML_LINE_BREAKS) {
+        if !seg.starts_with('#') {
+            y.push_str("#   ");
+        }
+        y.push_str(seg);
+        y.push('\n');
+    }
+}
+
 /// The multi-document YAML: a bundle header, then every available
-/// Kubernetes object as its own document. The securityContext PATCH is not
-/// an object, so it is appended as comments (the stream stays safe to
-/// `kubectl apply -f`); the manifest format carries it as its own file.
+/// Kubernetes object as its own document. The securityContext PATCH and the
+/// OpenVEX draft are not objects, so they are appended as comments (the
+/// stream stays safe to `kubectl apply -f`); the manifest format carries
+/// each as its own file.
 pub fn render_bundle_yaml(
     key: &Key,
     p: &Profile,
@@ -817,32 +1160,48 @@ pub fn render_bundle_yaml(
         y.push_str(&format!(
             "# not included: {} ({})\n",
             d.artifact,
-            d.reason.as_deref().unwrap_or("not available")
+            comment_text(d.reason.as_deref().unwrap_or("not available"))
         ));
     }
     for d in docs
         .iter()
-        .filter(|d| d.available && d.artifact != "securitycontext")
+        .filter(|d| d.available && !NOT_APPLIED.contains(&d.artifact))
     {
         y.push_str("---\n");
         y.push_str(d.content.as_deref().unwrap_or(""));
     }
-    if let Some(d) = docs
+    for d in docs
         .iter()
-        .find(|d| d.available && d.artifact == "securitycontext")
+        .filter(|d| d.available && NOT_APPLIED.contains(&d.artifact))
     {
-        y.push_str(
-            "\n# ---- securitycontext (strategic-merge patch; not part of the apply stream) ----\n",
-        );
-        for line in d.content.as_deref().unwrap_or("").lines() {
-            if line.starts_with('#') {
-                y.push_str(line);
-            } else {
-                y.push_str("#   ");
-                y.push_str(line);
+        let what = match d.artifact {
+            "vex" => "OpenVEX draft for human review".to_string(),
+            "sbom" => {
+                // Which image, and where the SBOM came from.
+                let im = d.image.as_ref();
+                let source = im.and_then(|i| i.source.as_deref()).unwrap_or("?");
+                let trust = im.and_then(|i| i.sbom_trust.as_deref());
+                let empty = if im.and_then(|i| i.components) == Some(0) {
+                    format!("; {}", empty_sbom_words(source, trust))
+                } else {
+                    String::new()
+                };
+                format!(
+                    "CycloneDX SBOM {} for {} ({}), source {source}, trust {}{empty}",
+                    d.file_name,
+                    im.map_or("?", |i| i.digest.as_str()),
+                    im.map_or(String::new(), |i| i.containers.join(",")),
+                    trust.unwrap_or("unknown"),
+                )
             }
-            y.push('\n');
-        }
+            _ => "strategic-merge patch".to_string(),
+        };
+        y.push_str(&format!(
+            "\n# ---- {} ({}; not part of the apply stream) ----\n",
+            d.artifact,
+            comment_text(&what)
+        ));
+        push_commented(&mut y, d.content.as_deref().unwrap_or(""));
     }
     y
 }
@@ -902,11 +1261,24 @@ async fn export(
         Err(m) => return Ok(error(StatusCode::BAD_REQUEST, "bad_request", &m)),
     };
     plan.record = record;
+    // Size the SBOM part of the charge from the SBOMs this workload's images
+    // would actually export (one cheap indexed read per digest), so a small
+    // workload does not reserve the whole bundle cap.
+    if plan.artifacts.contains(&"sbom") {
+        let (p, k) = (pool.clone(), key.clone());
+        plan.sbom_components = web::block(move || -> Result<i64, DbError> {
+            let mut conn = p.get()?;
+            probe_sbom_components(&mut conn, &k)
+        })
+        .await?
+        .map_err(actix_web::error::ErrorInternalServerError)?;
+    }
     // The profile, plus the export's own bounded reads: flow rows for the
     // network generator and its memoised per-IP lookups.
     let charge = wp::profile_charge_kib()
         .saturating_add(cost_kib(EXPORT_TRAFFIC_ROWS, TRAFFIC_ROW_COST_BYTES))
-        .saturating_add(cost_kib(wp::PODS_MAX, 4_096));
+        .saturating_add(cost_kib(wp::PODS_MAX, 4_096))
+        .saturating_add(sbom_charge_kib(&plan));
     let _permit = match budget.acquire(charge).await {
         Ok(p) => p,
         Err(shed) => return Ok(shed.into_response()),
@@ -1151,6 +1523,279 @@ mod tests {
                 previous_digests: vec![],
             }],
             ..Default::default()
+        }
+    }
+
+    /// No package name, status note or reason can break out of a comment:
+    /// every segment between any YAML line break (LF, CR, NEL, LS, PS)
+    /// starts with `#`, for SBOM, VEX and unavailable documents alike.
+    #[test]
+    fn no_line_break_escapes_a_comment() {
+        let p = wp::build(&key(), &sources(), Utc::now());
+        let pl = plan(&q(Some("sbom,vex"), None, None)).unwrap();
+        let mut docs = Vec::new();
+        for sep in YAML_LINE_BREAKS {
+            let evil = format!(
+                "evil{sep}---{sep}apiVersion: v1{sep}kind: Secret{sep}metadata:{sep}  name: injected{sep}  namespace: default{sep}"
+            );
+            // Raw in the content (worse than serde_json, which escapes CR/LF),
+            // and as serde_json really emits it.
+            let json = serde_json::to_string_pretty(&json!({"name": evil})).unwrap();
+            for (artifact, content) in
+                [("sbom", evil.clone()), ("vex", evil.clone()), ("vex", json)]
+            {
+                docs.push(Document {
+                    artifact,
+                    file_name: "x.json".into(),
+                    available: true,
+                    refused: None,
+                    reason: None,
+                    api_version: None,
+                    kind: None,
+                    mode: "audit",
+                    content_type: Some("application/json"),
+                    content: Some(content),
+                    apply_with: None,
+                    image: Some(ExportImage {
+                        containers: vec![evil.clone()],
+                        digest: evil.clone(),
+                        image_ref: evil.clone(),
+                        source: Some(evil.clone()),
+                        sbom_trust: Some(evil.clone()),
+                        scanned_at: None,
+                        components: None,
+                    }),
+                });
+            }
+            docs.push(unavailable("sbom", "audit", &evil));
+        }
+        let y = render_bundle_yaml(&key(), &p, &pl, &docs, false);
+        let mut segments = 0;
+        for seg in y.split(YAML_LINE_BREAKS).filter(|s| !s.trim().is_empty()) {
+            assert!(seg.starts_with('#'), "segment escapes the comment: {seg:?}");
+            segments += 1;
+        }
+        assert!(segments > 50);
+        assert!(!y.contains('\u{85}') && !y.contains('\u{2028}') && !y.contains('\u{2029}'));
+        assert!(
+            y.contains("\\u2028---\\u2028apiVersion"),
+            "kept as escape text"
+        );
+    }
+
+    /// A commented JSON document is still the same JSON once the comment
+    /// prefix is removed, LS/PS/NEL included (as escape text).
+    #[test]
+    fn a_commented_json_document_round_trips() {
+        let v = json!({"a": "x\u{2028}y\u{2029}z\u{85}w", "b": [1, 2]});
+        let mut y = String::new();
+        push_commented(&mut y, &(serde_json::to_string_pretty(&v).unwrap() + "\n"));
+        let back: String = y
+            .lines()
+            .map(|l| l.strip_prefix("#   ").unwrap_or(l))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert_eq!(serde_json::from_str::<serde_json::Value>(&back).unwrap(), v);
+    }
+
+    #[test]
+    fn the_sbom_charge_covers_every_copy_the_format_holds() {
+        let one = cost_kib(
+            BUNDLE_SBOM_MAX_COMPONENTS,
+            crate::supplychain_read::EXPORT_COMPONENT_COST_BYTES,
+        );
+        let mut yaml = plan(&q(Some("sbom"), None, None)).unwrap();
+        assert!(!yaml.manifest);
+        assert_eq!(
+            yaml.sbom_components, BUNDLE_SBOM_MAX_COMPONENTS,
+            "unprobed: the cap"
+        );
+        assert_eq!(sbom_charge_kib(&yaml), 3 * one);
+        yaml.sbom_components = 250;
+        assert_eq!(
+            sbom_charge_kib(&yaml),
+            3 * cost_kib(250, crate::supplychain_read::EXPORT_COMPONENT_COST_BYTES)
+        );
+        yaml.sbom_components = BUNDLE_SBOM_MAX_COMPONENTS;
+        let mut manifest = yaml.clone();
+        manifest.manifest = true;
+        assert_eq!(sbom_charge_kib(&manifest), 2 * one);
+        let none = plan(&q(Some("vex"), None, None)).unwrap();
+        assert_eq!(sbom_charge_kib(&none), 0);
+    }
+
+    /// An SBOM listing nothing says so, with its source and trust, in both
+    /// the applyWith and the YAML header: it is not a checked clean image.
+    #[test]
+    fn an_empty_sbom_says_zero_components_reported_by_its_source() {
+        let a = sbom_apply_with("trivy-operator", Some("scanned"), 0);
+        assert!(
+            a.contains("0 components reported by trivy-operator (scanned)"),
+            "{a}"
+        );
+        assert!(a.contains("not a checked clean image"));
+        assert!(!sbom_apply_with("trivy-operator", Some("scanned"), 3).contains("0 components"));
+
+        let p = wp::build(&key(), &sources(), Utc::now());
+        let pl = plan(&q(Some("sbom"), None, None)).unwrap();
+        let doc = |components| Document {
+            artifact: "sbom",
+            file_name: "sbom-app-aaaaaaaaaaaa.cdx.json".into(),
+            available: true,
+            refused: None,
+            reason: None,
+            api_version: None,
+            kind: None,
+            mode: "audit",
+            content_type: Some("application/vnd.cyclonedx+json"),
+            content: Some("{}\n".into()),
+            apply_with: None,
+            image: Some(ExportImage {
+                containers: vec!["app".into()],
+                digest: format!("sha256:{}", "a".repeat(64)),
+                image_ref: "ghcr.io/example/checkout:1".into(),
+                source: Some("registry".into()),
+                sbom_trust: Some("unverified".into()),
+                scanned_at: None,
+                components: Some(components),
+            }),
+        };
+        let y = render_bundle_yaml(&key(), &p, &pl, &[doc(0)], false);
+        assert!(
+            y.contains("trust unverified; 0 components reported by registry (unverified); not part of the apply stream"),
+            "{y}"
+        );
+        let y = render_bundle_yaml(&key(), &p, &pl, &[doc(2)], false);
+        assert!(!y.contains("0 components reported"));
+    }
+
+    #[test]
+    fn sbom_targets_cover_each_running_digest_once() {
+        let mut p = wp::build(&key(), &sources(), Utc::now());
+        let running = p.dimensions.images.containers[0].running[0].clone();
+        // A sidecar on the same digest shares the document; a stopped
+        // container contributes its newest digest; a stale one nothing.
+        let mut side = p.dimensions.images.containers[0].clone();
+        side.name = "side".into();
+        let mut stopped = side.clone();
+        stopped.name = "job".into();
+        let mut old = running.clone();
+        old.digest = format!("sha256:{}", "b".repeat(64));
+        old.last_seen -= chrono::Duration::hours(2);
+        let mut newest = old.clone();
+        newest.digest = format!("sha256:{}", "c".repeat(64));
+        newest.last_seen = running.last_seen;
+        stopped.running = vec![];
+        stopped.previous = vec![old, newest];
+        let mut stale = side.clone();
+        stale.name = "gone".into();
+        stale.stale = true;
+        stale.running[0].digest = format!("sha256:{}", "d".repeat(64));
+        p.dimensions
+            .images
+            .containers
+            .extend([side, stopped, stale]);
+        let t = sbom_targets(&p);
+        assert_eq!(
+            t.iter()
+                .map(|x| (x.0.clone(), x.2.clone()))
+                .collect::<Vec<_>>(),
+            [
+                (
+                    running.digest.clone(),
+                    vec!["app".to_string(), "side".to_string()]
+                ),
+                (
+                    format!("sha256:{}", "c".repeat(64)),
+                    vec!["job".to_string()]
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn an_sbom_is_carried_as_comments_with_its_source() {
+        let p = wp::build(&key(), &sources(), Utc::now());
+        let pl = plan(&q(Some("sbom"), None, None)).unwrap();
+        let big = format!("{{\n{}}}\n", "  \"x\": 1,\n".repeat(500));
+        let docs = vec![Document {
+            artifact: "sbom",
+            file_name: "sbom-app-aaaaaaaaaaaa.cdx.json".into(),
+            available: true,
+            refused: None,
+            reason: None,
+            api_version: None,
+            kind: None,
+            mode: "audit",
+            content_type: Some("application/vnd.cyclonedx+json"),
+            content: Some(big),
+            apply_with: None,
+            image: Some(ExportImage {
+                containers: vec!["app".into()],
+                digest: format!("sha256:{}", "a".repeat(64)),
+                image_ref: "ghcr.io/example/checkout:1".into(),
+                source: Some("registry".into()),
+                sbom_trust: Some("unverified".into()),
+                scanned_at: None,
+                components: Some(2),
+            }),
+        }];
+        let y = render_bundle_yaml(&key(), &p, &pl, &docs, false);
+        assert!(y.contains(
+            "# ---- sbom (CycloneDX SBOM sbom-app-aaaaaaaaaaaa.cdx.json for sha256:aaaa"
+        ));
+        assert!(y.contains(
+            "(app), source registry, trust unverified; not part of the apply stream) ----"
+        ));
+        assert_eq!(
+            y.lines()
+                .filter(|l| l.starts_with("#     \"x\": 1,"))
+                .count(),
+            500,
+            "the whole SBOM, commented"
+        );
+        for line in y.lines().filter(|l| !l.trim().is_empty()) {
+            assert!(
+                line.starts_with('#'),
+                "non-comment line in the stream: {line}"
+            );
+        }
+        assert!(trust_words(Some("unverified")).contains("NOT checked"));
+        assert!(trust_words(Some("scanned")).contains("Trivy Operator"));
+    }
+
+    #[test]
+    fn a_vex_draft_is_commented_out_of_the_apply_stream() {
+        let p = wp::build(&key(), &sources(), Utc::now());
+        let pl = plan(&q(Some("vex"), None, None)).unwrap();
+        let docs = vec![Document {
+            artifact: "vex",
+            file_name: "vex.openvex.json".into(),
+            available: true,
+            refused: None,
+            reason: None,
+            api_version: None,
+            kind: None,
+            mode: "audit",
+            content_type: Some("application/json"),
+            content: Some("{\n  \"@context\": \"https://openvex.dev/ns/v0.2.0\"\n}\n".into()),
+            apply_with: None,
+            image: None,
+        }];
+        let y = render_bundle_yaml(&key(), &p, &pl, &docs, false);
+        assert!(y.contains(
+            "# ---- vex (OpenVEX draft for human review; not part of the apply stream) ----"
+        ));
+        assert!(y
+            .lines()
+            .any(|l| l.starts_with('#')
+                && l.contains("\"@context\": \"https://openvex.dev/ns/v0.2.0\"")));
+        assert!(!y.contains("\n---\n"));
+        for line in y.lines().filter(|l| !l.trim().is_empty()) {
+            assert!(
+                line.starts_with('#'),
+                "non-comment line in the stream: {line}"
+            );
         }
     }
 

@@ -9,7 +9,7 @@ import type { AddressInfo } from "node:net";
 import { executeInProcessTool } from "./execute.js";
 import { TOOL_DEFS } from "./registry.js";
 import { MAX_RESPONSE_CHARS, MAX_TOOL_LIMIT } from "./posture.js";
-import { hardFit, parseDigest, parseSeverity, parseVulnId } from "./vulns.js";
+import { IN_USE_NOTE, TIER_NOTE, hardFit, parseDigest, parseEpssMin, parseInUse, parseSeverity, parseTier, parseVulnId } from "./vulns.js";
 
 // #1533 P1-7 vulnerability tools, replayed against real broker output:
 // test/fixtures/vulns holds {request, status, body} captures from a local
@@ -107,7 +107,14 @@ test("every vulnerability tool forbids inventing ids and says unknown is not saf
     assert.match(d, /UNKNOWN/, `${name}: must explain unknown`);
     assert.match(d, /never[^.]*applies anything/, `${name}: must say kguardian never applies`);
   }
-  assert.match(TOOL_DEFS.find((t) => t.name === "explain_cve_exposure")!.description, /never describe the vulnerable package as unused, unloaded or unreachable/);
+  const exposure = TOOL_DEFS.find((t) => t.name === "explain_cve_exposure")!.description;
+  assert.match(exposure, /unknown is potentially reachable/);
+  assert.match(exposure, /never describe the package as unreachable/);
+  for (const name of ["get_image_vulnerabilities", "list_vulnerabilities"]) {
+    const d = TOOL_DEFS.find((t) => t.name === name)!.description;
+    assert.match(d, /unknown is potentially reachable, never unused/, `${name}: unknown in-use is never unused`);
+    assert.match(d, /P0, P1, P2, Background/, `${name}: names the tiers`);
+  }
   assert.match(TOOL_DEFS.find((t) => t.name === "get_image_sbom")!.description, /ONLY 'verified' may be called signed/);
 });
 
@@ -120,11 +127,20 @@ test("arguments are validated before any broker call", async () => {
   assert.throws(() => parseSeverity("SEVERE"));
   assert.equal(parseVulnId(" cve-2099-10001 "), "CVE-2099-10001");
   assert.throws(() => parseVulnId("../../pod/info"));
+  assert.equal(parseTier("p0, background,P0"), "P0,Background");
+  assert.equal(parseInUse("Loaded,unknown"), "loaded,unknown");
+  assert.equal(parseEpssMin("0.1"), 0.1);
+  assert.equal(parseEpssMin(undefined), undefined);
+  assert.throws(() => parseEpssMin("-1"));
   for (const [tool, args] of [
     ["get_image_vulnerabilities", { digest: "latest" }],
     ["get_image_vulnerabilities", { digest: STOREFRONT, severity: "SEVERE" }],
     ["get_image_vulnerabilities", { digest: STOREFRONT, fixable: "maybe" }],
     ["list_vulnerabilities", { kev: "yes" }],
+    ["list_vulnerabilities", { tier: "P9" }],
+    ["list_vulnerabilities", { in_use: "maybe" }],
+    ["get_image_vulnerabilities", { digest: STOREFRONT, epss_min: 2 }],
+    ["get_image_vulnerabilities", { digest: STOREFRONT, tier: "urgent" }],
     ["explain_cve_exposure", { id: "a/b" }],
     ["get_image_sbom", { digest: STOREFRONT, source: "somewhere" }],
   ] as const) {
@@ -193,16 +209,99 @@ test("list_vulnerabilities: filters reach the broker; rows pass through; freshne
   assert.equal(got.truncated, true, "cut locally at limit");
 });
 
-test("list_vulnerabilities: kev filter is strict and says unknown rows are excluded", async () => {
+test("list_vulnerabilities: kev is the broker's filter; the strict guard still excludes unknown rows", async () => {
   serve("vulns-list");
   const got = JSON.parse((await executeInProcessTool("list_vulnerabilities", { kev: true, limit: 10 })).text);
-  assert.equal(seen[0].query.get("limit"), String(MAX_TOOL_LIMIT), "kev filtering asks for the largest page");
+  assert.equal(seen[0].query.get("kev"), "true", "kev reaches the broker");
+  assert.equal(seen[0].query.get("limit"), "10", "no oversized page: the broker filters");
+  // This capture predates the broker's kev filter (it returns every row),
+  // so the local guard does the filtering: still strict.
   assert.deepEqual(got.vulnerabilities.map((v: any) => v.id), ["CVE-2099-10001"]);
   assert.match(got.kevFilter, /kev is null \(unknown/);
-  assert.equal(got.kevScan, "complete", "4 rows < the 100 asked for, no cursor: every CVE was checked");
+  assert.equal(got.kevScan, "complete", "4 rows < the 10 asked for, no cursor: every CVE was checked");
   assert.equal(got.truncated, false);
   const none = JSON.parse((await executeInProcessTool("list_vulnerabilities", { kev: false })).text);
   assert.equal(none.count, 0, "no source said kev=false; null rows are not 'false'");
+});
+
+test("list_vulnerabilities: a broker that applied kev is complete even on a full page", async () => {
+  const row = { ...capture("vulns-list").body.items[0], kev: true };
+  const full = Array.from({ length: 5 }, (_, i) => ({ ...row, id: `CVE-2099-${String(60000 + i)}` }));
+  routes["/vulnerabilities"] = { status: 200, body: { items: full, nextAfter: null, computedAt: "2026-09-26T03:00:00", staleSeconds: 5 } };
+  const got = JSON.parse((await executeInProcessTool("list_vulnerabilities", { kev: true, limit: 5 })).text);
+  assert.equal(got.count, 5);
+  assert.equal(got.kevScan, "complete", "nothing was dropped locally: the broker filtered");
+});
+
+// Rows as the in-use broker (#1678) serialises them: supplychain_read.rs
+// Finding / CveSummary + CveItem. Not captures: the ids are fake.
+const TIERED_FINDING = {
+  id: "CVE-2099-30001", package: { name: "libfoo1", type: "debian", purl: "pkg:deb/debian/libfoo1@1.2.3-1" },
+  installedVersion: "1.2.3-1", fixedVersions: ["1.2.4"], fixable: true, severity: "HIGH", score: 7.5,
+  kev: true, kevDateAdded: "2026-01-02", epss: 0.31, epssPercentile: 0.97, sources: ["trivy-operator"],
+  reportDigests: ["sha256:9f"], inUse: true, inUseState: "loaded",
+  inUseDetail: { state: "loaded", reason: null, observedSince: null, windowHours: 24, containers: 1, coverage: "file" },
+  tier: "P0", tierFactors: ["in_use:loaded", "kev", "epss>=0.1", "severity:high", "exposure:unknown"],
+};
+const TIERED_CVE = {
+  id: "CVE-2099-30001", severity: "HIGH", maxScore: 7.5, fixable: true, kev: true, maxEpss: 0.31,
+  packages: ["libfoo1"], sources: ["trivy-operator"], images: 1, workloads: 2, runningWorkloads: 2, namespaces: 1,
+  weakestJoin: "image_id", tier: "P0", executedWorkloads: 0, loadedWorkloads: 1, unknownWorkloads: 1,
+  notObservedWorkloads: 0, exposedWorkloads: 0, inUse: true, inUseState: "loaded",
+};
+
+test("an old broker that ignores tier/in_use/epss_min: filtered here, and says so", async () => {
+  // The pre-tier capture: no tier or inUseState fields' values match, and
+  // the broker returned every finding despite the filters.
+  const c = serve("image-vulns-storefront");
+  const got = JSON.parse((await executeInProcessTool("get_image_vulnerabilities", {
+    digest: STOREFRONT, tier: "P0", in_use: "installed_not_observed", epss_min: 0.1,
+  })).text);
+  assert.ok(c.body.items.length > 0);
+  assert.equal(got.count, 0, "no unfiltered rows labelled as filtered");
+  assert.deepEqual(got.findings, []);
+  assert.deepEqual(got.filtersAppliedLocally, ["epss_min", "in_use", "tier"]);
+  assert.match(got.note, /The broker did not apply epss_min, in_use, tier/);
+  assert.equal(got.tier, "P0", "the filter is still echoed");
+
+  // Cluster list: a tierless summary row never matches tier=P0.
+  routes["/vulnerabilities"] = { status: 200, body: capture("vulns-list").body };
+  const list = JSON.parse((await executeInProcessTool("list_vulnerabilities", { tier: "P0" })).text);
+  assert.equal(list.count, 0);
+  assert.deepEqual(list.filtersAppliedLocally, ["tier"]);
+  assert.match(list.note, /did not apply tier/);
+
+  // A broker that applied the filters: nothing dropped, nothing said.
+  routes[`/images/${STOREFRONT}/vulnerabilities`] = { status: 200, body: { digest: STOREFRONT, reports: [{ source: "trivy-operator" }], items: [TIERED_FINDING], nextAfter: null } };
+  const ok = JSON.parse((await executeInProcessTool("get_image_vulnerabilities", { digest: STOREFRONT, tier: "P0", in_use: "loaded", epss_min: 0.1 })).text);
+  assert.equal(ok.count, 1);
+  assert.equal("filtersAppliedLocally" in ok, false);
+  assert.doesNotMatch(ok.note, /did not apply/);
+});
+
+test("tier and in-use filters reach the broker and tier fields pass through", async () => {
+  routes[`/images/${STOREFRONT}/vulnerabilities`] = { status: 200, body: { digest: STOREFRONT, reports: [{ source: "trivy-operator" }], items: [TIERED_FINDING], nextAfter: null } };
+  const img = JSON.parse((await executeInProcessTool("get_image_vulnerabilities", {
+    digest: STOREFRONT, kev: true, epss_min: 0.1, in_use: "loaded,unknown", tier: "p0,p1",
+  })).text);
+  const q = seen[0].query;
+  assert.deepEqual([q.get("kev"), q.get("epss_min"), q.get("in_use"), q.get("tier")], ["true", "0.1", "loaded,unknown", "P0,P1"]);
+  const f = img.findings[0];
+  assert.equal(f.tier, "P0");
+  assert.deepEqual(f.tierFactors, TIERED_FINDING.tierFactors);
+  assert.deepEqual(f.inUseDetail, TIERED_FINDING.inUseDetail);
+  assert.equal(img.tier, "P0,P1", "filters are echoed");
+  assert.match(img.note, /a KEV finding there is P0/);
+
+  seen = [];
+  routes["/vulnerabilities"] = { status: 200, body: { items: [TIERED_CVE], nextAfter: null, computedAt: "2026-09-26T03:00:00", staleSeconds: 5 } };
+  const list = JSON.parse((await executeInProcessTool("list_vulnerabilities", { tier: "P0", in_use: "loaded", epss_min: "0.2" })).text);
+  assert.deepEqual([seen[0].query.get("tier"), seen[0].query.get("in_use"), seen[0].query.get("epss_min")], ["P0", "loaded", "0.2"]);
+  const c = list.vulnerabilities[0];
+  for (const k of ["tier", "executedWorkloads", "loadedWorkloads", "unknownWorkloads", "notObservedWorkloads", "exposedWorkloads", "inUseState"]) {
+    assert.deepEqual(c[k], (TIERED_CVE as any)[k], k);
+  }
+  assert.ok(list.note.includes(TIER_NOTE) && list.note.includes(IN_USE_NOTE));
 });
 
 test("list_vulnerabilities: a full broker page makes the KEV scan partial, never complete", async () => {

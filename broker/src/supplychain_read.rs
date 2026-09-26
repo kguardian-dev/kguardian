@@ -68,8 +68,6 @@ pub const EXPOSURE_MAX_WINDOW_HOURS: i64 = 720;
 /// One exposure answer: images x packages + workloads with their peers.
 pub const EXPOSURE_COST_BYTES: u64 = 8 * 1024 * 1024;
 
-pub const IN_USE_UNKNOWN: &str = "unknown";
-
 pub(crate) fn clamp_limit(raw: Option<i64>) -> i64 {
     raw.unwrap_or(VULNS_DEFAULT_LIMIT).clamp(1, VULNS_MAX_LIMIT)
 }
@@ -97,6 +95,60 @@ pub(crate) fn parse_severities(raw: Option<&str>) -> Result<Option<Vec<i16>>, St
         }
     }
     Ok(Some(out))
+}
+
+/// `in_use=executed,loaded` -> the states asked for. Unknown names are a
+/// 400.
+pub(crate) fn parse_in_use(raw: Option<&str>) -> Result<Option<Vec<String>>, String> {
+    let Some(raw) = raw.map(str::trim).filter(|s| !s.is_empty()) else {
+        return Ok(None);
+    };
+    let mut out = Vec::new();
+    for part in raw.split(',').map(str::trim).filter(|p| !p.is_empty()) {
+        let p = part.to_ascii_lowercase();
+        if !["executed", "loaded", "unknown", "installed_not_observed"].contains(&p.as_str()) {
+            return Err(format!(
+                "unknown in_use '{part}'; use executed, loaded, unknown or installed_not_observed"
+            ));
+        }
+        if !out.contains(&p) {
+            out.push(p);
+        }
+    }
+    Ok(Some(out))
+}
+
+/// `tier=P0,P1` (or `background`) -> tier ranks.
+pub(crate) fn parse_tiers(raw: Option<&str>) -> Result<Option<Vec<i16>>, String> {
+    let Some(raw) = raw.map(str::trim).filter(|s| !s.is_empty()) else {
+        return Ok(None);
+    };
+    let mut out = Vec::new();
+    for part in raw.split(',').map(str::trim).filter(|p| !p.is_empty()) {
+        let r = match part.to_ascii_lowercase().as_str() {
+            "p0" => 0,
+            "p1" => 1,
+            "p2" => 2,
+            "background" => 3,
+            _ => {
+                return Err(format!(
+                    "unknown tier '{part}'; use P0, P1, P2 or Background"
+                ))
+            }
+        };
+        if !out.contains(&r) {
+            out.push(r);
+        }
+    }
+    Ok(Some(out))
+}
+
+pub(crate) fn parse_epss_min(raw: Option<f64>) -> Result<Option<f64>, String> {
+    match raw {
+        None => Ok(None),
+        Some(v) if v.is_finite() && (0.0..=1.0).contains(&v) => Ok(Some(v)),
+        Some(_) => Err("epss_min must be between 0 and 1".into()),
+    }
 }
 
 /// Keyset cursor `<rank>.<tail>`; the tail is an id or a CVE id.
@@ -245,8 +297,29 @@ pub struct ImageVulnsQuery {
     pub fixable: Option<bool>,
     /// Only this source's report.
     pub source: Option<String>,
+    /// true: only KEV-listed; false: only findings a source says are NOT
+    /// in KEV. Findings no source says either way are in neither.
+    pub kev: Option<bool>,
+    /// Only findings with EPSS at or above this (0-1); unknown EPSS is
+    /// excluded.
+    pub epss_min: Option<f64>,
+    /// Comma-separated in-use states.
+    pub in_use: Option<String>,
+    /// Comma-separated tiers: P0, P1, P2, Background.
+    pub tier: Option<String>,
     pub limit: Option<i64>,
     pub after: Option<String>,
+}
+
+/// Filters shared by the per-image and cluster-wide lists.
+#[derive(Debug, Clone, Default)]
+pub struct ListFilters {
+    pub severities: Option<Vec<i16>>,
+    pub fixable: Option<bool>,
+    pub kev: Option<bool>,
+    pub epss_min: Option<f64>,
+    pub in_use: Option<Vec<String>>,
+    pub tiers: Option<Vec<i16>>,
 }
 
 #[derive(Debug, Clone, QueryableByName)]
@@ -300,6 +373,66 @@ struct VulnDbRow {
     epss: Option<f32>,
     #[diesel(sql_type = Nullable<Float>)]
     epss_percentile: Option<f32>,
+    /// kg_pkg_in_use of the strongest container.
+    #[diesel(sql_type = Text)]
+    in_use_state: String,
+    #[diesel(sql_type = SmallInt)]
+    tier_rank: i16,
+    /// The in-use state and exposure of the container that set the tier.
+    #[diesel(sql_type = Text)]
+    tier_state: String,
+    #[diesel(sql_type = Nullable<Bool>)]
+    tier_exposed: Option<bool>,
+    #[diesel(sql_type = Nullable<Timestamp>)]
+    observed_since: Option<NaiveDateTime>,
+    #[diesel(sql_type = BigInt)]
+    containers: i64,
+}
+
+/// In-use of a finding, with its evidence window (P1-5).
+#[derive(Debug, Clone, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct InUseDetail {
+    /// executed | loaded | installed_not_observed | unknown
+    pub state: &'static str,
+    /// Why it is unknown: no_runtime_data | capture_gap | host_network |
+    /// language_package | no_package_files. `null` otherwise.
+    pub reason: Option<&'static str>,
+    /// Start of continuous capture coverage (the common window across the
+    /// containers), when covered.
+    pub observed_since: Option<NaiveDateTime>,
+    /// Minimum window required before installed_not_observed is claimed.
+    pub window_hours: i64,
+    /// Workload containers the state was derived from.
+    pub containers: i64,
+    /// What exec/mmap capture can see for this package type: `file` (OS
+    /// package), `static_binary` (Go/Rust module: the whole binary is
+    /// credited when it runs), `interpreted` (npm/pip/jar/...: never seen,
+    /// always unknown).
+    pub coverage: &'static str,
+}
+
+impl InUseDetail {
+    pub(crate) fn from_state(
+        state: &str,
+        observed_since: Option<NaiveDateTime>,
+        containers: i64,
+        coverage: crate::in_use::Coverage,
+    ) -> Self {
+        let (s, reason) = crate::in_use_store::parse_state(state);
+        InUseDetail {
+            state: s.as_str(),
+            reason: reason.map(|r| r.as_str()),
+            observed_since: if s == crate::in_use::InUse::Unknown {
+                None
+            } else {
+                observed_since
+            },
+            window_hours: crate::in_use::TierSettings::from_env().min_window_hours,
+            containers,
+            coverage: coverage.as_str(),
+        }
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -342,13 +475,39 @@ pub struct Finding {
     /// One finding, however many sources agree.
     pub sources: Vec<String>,
     pub report_digests: Vec<String>,
-    /// Filled by the runtime join (P1-5). `null` = unknown, never "safe".
+    /// true executed/loaded, false installed_not_observed (covered),
+    /// `null` unknown. Unknown is never "safe".
     pub in_use: Option<bool>,
     pub in_use_state: &'static str,
+    pub in_use_detail: InUseDetail,
+    /// P0 | P1 | P2 | Background (team/04-ux.md section 3).
+    pub tier: &'static str,
+    /// The factors that produced the tier, for the chips.
+    pub tier_factors: Vec<String>,
 }
 
 impl From<VulnDbRow> for Finding {
     fn from(r: VulnDbRow) -> Self {
+        let detail = InUseDetail::from_state(
+            &r.in_use_state,
+            r.observed_since,
+            r.containers,
+            crate::in_use::coverage_of(r.pkg_type.as_deref(), r.class.as_deref()),
+        );
+        let (in_use, _) = crate::in_use_store::parse_state(&r.in_use_state);
+        let (tier_in_use, _) = crate::in_use_store::parse_state(&r.tier_state);
+        let fixable = !r.fixed_versions.is_empty();
+        let factors = crate::in_use::tier_factors(
+            &crate::in_use::TierInput {
+                in_use: tier_in_use,
+                severity_rank: r.severity_rank,
+                kev: r.kev.unwrap_or(false),
+                epss: r.epss.map(f64::from),
+                exposed: r.tier_exposed,
+                fixable,
+            },
+            &crate::in_use::TierSettings::from_env(),
+        );
         Finding {
             id: r.vuln_id,
             package: PackageRef {
@@ -375,8 +534,11 @@ impl From<VulnDbRow> for Finding {
             epss_percentile: r.epss_percentile,
             sources: r.sources,
             report_digests: r.report_digests,
-            in_use: None,
-            in_use_state: IN_USE_UNKNOWN,
+            in_use: in_use.as_bool(),
+            in_use_state: in_use.as_str(),
+            in_use_detail: detail,
+            tier: crate::in_use::Tier::from_rank(r.tier_rank).as_str(),
+            tier_factors: factors,
         }
     }
 }
@@ -400,12 +562,21 @@ pub struct ImageVulnsPage {
 /// source makes it fixable. Fixed versions are NOT reduced to one: text
 /// order is not version order ("10.1" < "9.2"), so every distinct fixed
 /// version is returned, ordered by the first source that gives it.
+/// KEV and EPSS are facts about a CVE, not about one source's row: Trivy
+/// reports kev null where Grype, for the same CVE, reports true. They come
+/// from `vuln_cve_facts` (one row per CVE, LEFT JOINed by primary key),
+/// merged with the finding's own values: kev = kg_kev_merge(facts,
+/// finding) (true if either is true), EPSS = GREATEST. A CVE not in the
+/// facts table yet (between an ingest and the next rebuild) reads as its
+/// own per-finding values; a NULL facts value never overrides a finding's
+/// true, so the merge only pushes up. Findings, filters and
+/// tiers use the result. Same rule in refresh_cve_summary_sql.
 const IMAGE_VULNS_SQL: &str = "\
 WITH v AS ( \
     SELECT v.* FROM image_vulnerabilities v \
     JOIN unnest($1::text[], $2::text[]) AS k(digest, source) \
         ON v.digest = k.digest AND v.source = k.source \
-), g AS ( \
+), g0 AS ( \
     SELECT min(id) AS rep, vuln_id, pkg_name, installed_version, \
         max(severity_rank) AS severity_rank, max(score) AS score, \
         COALESCE((SELECT array_agg(f.fv ORDER BY f.first_source, f.fv) FROM ( \
@@ -418,23 +589,73 @@ WITH v AS ( \
         min(kev_date_added) AS kev_date_added, max(epss) AS epss, \
         max(epss_percentile) AS epss_percentile, \
         array_agg(DISTINCT source ORDER BY source) AS sources, \
-        array_agg(DISTINCT digest ORDER BY digest) AS report_digests \
+        array_agg(DISTINCT digest ORDER BY digest) AS report_digests, \
+        bool_or(kg_pkg_observable(pkg_type, class)) AS obs \
     FROM v GROUP BY vuln_id, pkg_name, installed_version \
+), g AS ( \
+    SELECT g0.rep, g0.vuln_id, g0.pkg_name, g0.installed_version, g0.severity_rank, g0.score, \
+        g0.fixed_versions, kg_kev_merge(f.kev, g0.kev) AS kev, \
+        LEAST(f.kev_date_added, g0.kev_date_added) AS kev_date_added, \
+        GREATEST(f.epss, g0.epss) AS epss, GREATEST(f.epss_percentile, g0.epss_percentile) AS epss_percentile, \
+        g0.sources, g0.report_digests, g0.obs \
+    FROM g0 LEFT JOIN vuln_cve_facts f ON f.vuln_id = g0.vuln_id \
+), c AS ( \
+    SELECT wc.cluster_id, wc.pod_namespace, wc.workload_kind, wc.workload_name, \
+        wc.container_name, wc.image_digest \
+    FROM workload_containers wc WHERE wc.image_digest = $8 \
+), s AS ( \
+    SELECT g.*, \
+        COALESCE(st.state, 'unknown:no_runtime_data') AS in_use_state, \
+        COALESCE(st.tier, kg_vuln_tier('unknown', g.severity_rank, g.kev, g.epss, NULL, \
+            cardinality(g.fixed_versions) > 0, $9, $10)) AS tier_rank, \
+        COALESCE(st.tier_state, 'unknown:no_runtime_data') AS tier_state, \
+        st.tier_exposed, st.observed_since, COALESCE(st.containers, 0) AS containers \
+    FROM g LEFT JOIN LATERAL ( \
+        SELECT (array_agg(x.st ORDER BY kg_in_use_rank(x.st)))[1] AS state, \
+            min(x.tier) AS tier, \
+            (array_agg(x.st ORDER BY x.tier, kg_in_use_rank(x.st)))[1] AS tier_state, \
+            (array_agg(x.exposed ORDER BY x.tier, kg_in_use_rank(x.st)))[1] AS tier_exposed, \
+            max(x.observed_since) FILTER (WHERE x.covered) AS observed_since, \
+            count(*) AS containers \
+        FROM ( \
+            SELECT y.st, e.exposed, cv.covered IS TRUE AS covered, cv.observed_since, \
+                kg_vuln_tier(split_part(y.st, ':', 1), g.severity_rank, g.kev, g.epss, \
+                    e.exposed, cardinality(g.fixed_versions) > 0, $9, $10) AS tier \
+            FROM c \
+            CROSS JOIN LATERAL (SELECT kg_pkg_in_use(c.cluster_id, c.pod_namespace, \
+                c.workload_kind, c.workload_name, c.container_name, c.image_digest, \
+                g.pkg_name, g.obs) AS st) y \
+            LEFT JOIN workload_network_exposure e ON e.cluster_id = c.cluster_id \
+                AND e.pod_namespace = c.pod_namespace AND e.workload_kind = c.workload_kind \
+                AND e.workload_name = c.workload_name \
+            LEFT JOIN runtime_in_use_coverage cv ON cv.cluster_id = c.cluster_id \
+                AND cv.pod_namespace = c.pod_namespace AND cv.workload_kind = c.workload_kind \
+                AND cv.workload_name = c.workload_name AND cv.container_name = c.container_name \
+                AND cv.image_digest = c.image_digest \
+        ) x \
+    ) st ON true \
 ) \
-SELECT g.rep AS id, g.report_digests, g.sources, g.vuln_id, g.pkg_name, r.pkg_type, r.pkg_purl, \
-    g.installed_version, g.fixed_versions, \
-    CASE g.severity_rank WHEN 5 THEN 'CRITICAL' WHEN 4 THEN 'HIGH' WHEN 3 THEN 'MEDIUM' \
+SELECT s.rep AS id, s.report_digests, s.sources, s.vuln_id, s.pkg_name, r.pkg_type, r.pkg_purl, \
+    s.installed_version, s.fixed_versions, \
+    CASE s.severity_rank WHEN 5 THEN 'CRITICAL' WHEN 4 THEN 'HIGH' WHEN 3 THEN 'MEDIUM' \
         WHEN 2 THEN 'LOW' WHEN 1 THEN 'NONE' ELSE 'UNKNOWN' END AS severity, \
-    g.severity_rank, g.score, r.cvss, r.title, r.primary_url, r.target, r.class, \
-    r.published_at, r.last_modified_at, r.file_paths, g.kev, g.kev_date_added, g.epss, \
-    g.epss_percentile \
-FROM g JOIN image_vulnerabilities r ON r.id = g.rep \
-WHERE ($3::smallint[] IS NULL OR g.severity_rank = ANY($3)) \
-  AND ($4::bool IS NULL OR (cardinality(g.fixed_versions) > 0) = $4) \
-  AND ($5::smallint IS NULL OR g.severity_rank < $5 OR (g.severity_rank = $5 AND g.rep > $6)) \
-ORDER BY g.severity_rank DESC, g.rep \
+    s.severity_rank, s.score, r.cvss, r.title, r.primary_url, r.target, r.class, \
+    r.published_at, r.last_modified_at, r.file_paths, s.kev, s.kev_date_added, s.epss, \
+    s.epss_percentile, s.in_use_state, s.tier_rank, s.tier_state, s.tier_exposed, \
+    s.observed_since, s.containers \
+FROM s JOIN image_vulnerabilities r ON r.id = s.rep \
+WHERE ($3::smallint[] IS NULL OR s.severity_rank = ANY($3)) \
+  AND ($4::bool IS NULL OR (cardinality(s.fixed_versions) > 0) = $4) \
+  AND ($5::smallint IS NULL OR s.severity_rank < $5 OR (s.severity_rank = $5 AND s.rep > $6)) \
+  AND ($11::bool IS NULL OR s.kev = $11) \
+  AND ($12::double precision IS NULL OR s.epss >= $12) \
+  AND ($13::text[] IS NULL OR split_part(s.in_use_state, ':', 1) = ANY($13)) \
+  AND ($14::smallint[] IS NULL OR s.tier_rank = ANY($14)) \
+ORDER BY s.severity_rank DESC, s.rep \
 LIMIT $7";
 
+/// Test shorthand for the unfiltered-by-tier read.
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 pub fn image_vulnerabilities(
     conn: &mut PgConnection,
@@ -445,6 +666,23 @@ pub fn image_vulnerabilities(
     after: Option<(i16, i64)>,
     limit: i64,
 ) -> Result<ImageVulnsPage, DbError> {
+    let f = ListFilters {
+        severities: severities.map(|s| s.to_vec()),
+        fixable,
+        ..Default::default()
+    };
+    image_vulnerabilities_filtered(conn, digest, source, &f, after, limit)
+}
+
+pub fn image_vulnerabilities_filtered(
+    conn: &mut PgConnection,
+    digest: &str,
+    source: Option<&str>,
+    f: &ListFilters,
+    after: Option<(i16, i64)>,
+    limit: i64,
+) -> Result<ImageVulnsPage, DbError> {
+    let t = crate::in_use::TierSettings::from_env();
     let reports = resolve_reports(conn, digest, KIND_VULNERABILITIES, source)?;
     let digests: Vec<&str> = reports.iter().map(|r| r.report_digest.as_str()).collect();
     let sources: Vec<&str> = reports.iter().map(|r| r.source.as_str()).collect();
@@ -454,11 +692,18 @@ pub fn image_vulnerabilities(
         sql_query(IMAGE_VULNS_SQL)
             .bind::<Array<Text>, _>(&digests)
             .bind::<Array<Text>, _>(&sources)
-            .bind::<Nullable<Array<SmallInt>>, _>(severities)
-            .bind::<Nullable<Bool>, _>(fixable)
+            .bind::<Nullable<Array<SmallInt>>, _>(f.severities.as_deref())
+            .bind::<Nullable<Bool>, _>(f.fixable)
             .bind::<Nullable<SmallInt>, _>(after.map(|a| a.0))
             .bind::<BigInt, _>(after.map(|a| a.1).unwrap_or(0))
             .bind::<BigInt, _>(limit + 1)
+            .bind::<Text, _>(digest)
+            .bind::<Double, _>(t.epss_threshold)
+            .bind::<Bool, _>(t.unknown_exposure_as_exposed)
+            .bind::<Nullable<Bool>, _>(f.kev)
+            .bind::<Nullable<Double>, _>(f.epss_min)
+            .bind::<Nullable<Array<Text>>, _>(f.in_use.as_deref())
+            .bind::<Nullable<Array<SmallInt>>, _>(f.tiers.as_deref())
             .load(conn)?
     };
     let next_after = if rows.len() as i64 > limit {
@@ -472,6 +717,24 @@ pub fn image_vulnerabilities(
         reports,
         items: rows.into_iter().map(Finding::from).collect(),
         next_after,
+    })
+}
+
+fn list_filters(
+    severities: Option<Vec<i16>>,
+    fixable: Option<bool>,
+    kev: Option<bool>,
+    epss_min: Option<f64>,
+    in_use: Option<&str>,
+    tier: Option<&str>,
+) -> Result<ListFilters, String> {
+    Ok(ListFilters {
+        severities,
+        fixable,
+        kev,
+        epss_min: parse_epss_min(epss_min)?,
+        in_use: parse_in_use(in_use)?,
+        tiers: parse_tiers(tier)?,
     })
 }
 
@@ -507,6 +770,17 @@ pub async fn get_image_vulnerabilities(
         Err(e) => return Ok(HttpResponse::BadRequest().body(e)),
     };
     let source = empty_to_none(q.source);
+    let filters = match list_filters(
+        severities,
+        q.fixable,
+        q.kev,
+        q.epss_min,
+        q.in_use.as_deref(),
+        q.tier.as_deref(),
+    ) {
+        Ok(f) => f,
+        Err(e) => return Ok(HttpResponse::BadRequest().body(e)),
+    };
     let _permit = match budget
         .acquire(cost_kib(limit + 1, VULN_ROW_COST_BYTES))
         .await
@@ -516,12 +790,11 @@ pub async fn get_image_vulnerabilities(
     };
     let page = web::block(move || {
         let mut conn = pool.get()?;
-        image_vulnerabilities(
+        image_vulnerabilities_filtered(
             &mut conn,
             &digest,
             source.as_deref(),
-            severities.as_deref(),
-            q.fixable,
+            &filters,
             after,
             limit,
         )
@@ -803,6 +1076,92 @@ enum Export {
     Doc(serde_json::Value),
 }
 
+/// Every component of `report`'s SBOM, in id order, read in chunks, and
+/// never more than `max + 1` rows: the extra row only tells the caller the
+/// SBOM is over `max`. The header's `item_count` can be stale (a re-ingest
+/// between reading it and the components), so the bound is on rows read,
+/// not on the header.
+fn load_all_components(
+    conn: &mut PgConnection,
+    report: &Report,
+    max: i64,
+) -> QueryResult<Vec<Component>> {
+    let max = max.max(0);
+    let mut comps = Vec::with_capacity(
+        report
+            .item_count
+            .clamp(0, max.min(i64::from(i32::MAX)) as i32) as usize,
+    );
+    let mut after = 0;
+    loop {
+        let want = EXPORT_CHUNK.min(max + 1 - comps.len() as i64);
+        if want <= 0 {
+            break;
+        }
+        let chunk = load_components(conn, report, after, want)?;
+        let n = chunk.len() as i64;
+        if let Some(last) = chunk.last() {
+            after = last.id;
+        }
+        comps.extend(chunk);
+        if n < want || comps.len() as i64 > max {
+            break;
+        }
+    }
+    Ok(comps)
+}
+
+/// The SBOM of one inventory digest as a CycloneDX document, for callers
+/// inside the broker (the workload export bundle).
+#[derive(Debug)]
+pub(crate) enum CycloneDx {
+    /// No source has an SBOM for the digest: its contents are unknown.
+    NoSbom,
+    /// The chosen SBOM has more components than `max_components`.
+    TooLarge(Report),
+    /// The document, its report header, and the components actually
+    /// loaded (the header's `item_count` can be stale).
+    Doc(serde_json::Value, Report, i64),
+}
+
+/// Components in the SBOM [`cyclonedx_for`] would choose for `digest`
+/// (0 without one): the size probe the export charges its budget from.
+pub(crate) fn chosen_sbom_components(conn: &mut PgConnection, digest: &str) -> QueryResult<i64> {
+    Ok(pick_sbom(conn, digest, None)?
+        .1
+        .map_or(0, |r| i64::from(r.item_count.max(0))))
+}
+
+/// The SBOM the per-image route would choose (Trivy Operator's first, a
+/// registry SBOM only when it is the only one), as CycloneDX. Refuses
+/// more than `max_components` without loading them.
+pub(crate) fn cyclonedx_for(
+    conn: &mut PgConnection,
+    digest: &str,
+    max_components: i64,
+) -> Result<CycloneDx, DbError> {
+    let Some(report) = pick_sbom(conn, digest, None)?.1 else {
+        return Ok(CycloneDx::NoSbom);
+    };
+    if i64::from(report.item_count) > max_components {
+        return Ok(CycloneDx::TooLarge(report));
+    }
+    let comps = load_all_components(conn, &report, max_components)?;
+    if comps.is_empty() && report.item_count > 0 {
+        return Ok(CycloneDx::NoSbom);
+    }
+    if comps.len() as i64 > max_components {
+        return Ok(CycloneDx::TooLarge(report));
+    }
+    // What was loaded, not the header (which may be stale).
+    let loaded = comps.len() as i64;
+    Ok(CycloneDx::Doc(
+        cyclonedx_document(digest, &report, &comps),
+        report,
+        loaded,
+    ))
+}
+
 pub async fn get_image_sbom_cyclonedx(
     pool: web::Data<DbPool>,
     budget: web::Data<ReadBudget>,
@@ -844,19 +1203,7 @@ pub async fn get_image_sbom_cyclonedx(
             return Ok(Export::TooLarge(report.item_count));
         }
         let mut conn = pool.get()?;
-        let mut comps = Vec::with_capacity(report.item_count.max(0) as usize);
-        let mut after = 0;
-        loop {
-            let chunk = load_components(&mut conn, &report, after, EXPORT_CHUNK)?;
-            let n = chunk.len() as i64;
-            if let Some(last) = chunk.last() {
-                after = last.id;
-            }
-            comps.extend(chunk);
-            if n < EXPORT_CHUNK || comps.len() as i64 > EXPORT_MAX_COMPONENTS {
-                break;
-            }
-        }
+        let comps = load_all_components(&mut conn, &report, EXPORT_MAX_COMPONENTS)?;
         if comps.is_empty() && report.item_count > 0 {
             return Ok(Export::None);
         }
@@ -894,6 +1241,14 @@ pub struct VulnsQuery {
     pub namespace: Option<String>,
     /// true: only CVEs with at least one running workload.
     pub running: Option<bool>,
+    /// true: only KEV-listed; false: only CVEs a source says are not.
+    pub kev: Option<bool>,
+    /// Only CVEs whose highest EPSS is at or above this (0-1).
+    pub epss_min: Option<f64>,
+    /// Comma-separated in-use states (strongest over the workloads).
+    pub in_use: Option<String>,
+    /// Comma-separated tiers: P0, P1, P2, Background.
+    pub tier: Option<String>,
     pub limit: Option<i64>,
     pub after: Option<String>,
 }
@@ -941,6 +1296,28 @@ pub struct CveSummary {
     /// exact; workload_tag means a tag match only.
     #[diesel(sql_type = Text)]
     pub weakest_join: String,
+    /// P0 | P1 | P2 | Background: the most urgent tier over every
+    /// affected workload container in scope. `null` = not computed yet
+    /// (a row from before the first retention pass after upgrade), never
+    /// a low tier.
+    #[diesel(sql_type = Nullable<Text>)]
+    pub tier: Option<String>,
+    /// Strongest in-use state over the affected workloads in scope.
+    #[serde(skip)]
+    #[diesel(sql_type = Text)]
+    pub in_use_raw: String,
+    /// Workloads by in-use state of the affected package(s), and those
+    /// with observed exposure.
+    #[diesel(sql_type = BigInt)]
+    pub executed_workloads: i64,
+    #[diesel(sql_type = BigInt)]
+    pub loaded_workloads: i64,
+    #[diesel(sql_type = BigInt)]
+    pub unknown_workloads: i64,
+    #[diesel(sql_type = BigInt)]
+    pub not_observed_workloads: i64,
+    #[diesel(sql_type = BigInt)]
+    pub exposed_workloads: i64,
 }
 
 #[derive(Debug, Serialize)]
@@ -996,12 +1373,19 @@ const FOR_VULN: &str = "l.image_digest IN (SELECT l2.image_digest FROM supplycha
 fn refresh_cve_summary_sql() -> String {
     format!(
         "WITH {eff}, \
-         hits AS ( \
-            SELECT v.vuln_id, e.image_digest, max(v.severity_rank) AS sr, max(v.score) AS sc, \
-                bool_or(v.fixed_version IS NOT NULL) AS fx, bool_or(v.kev) AS kev, \
-                max(v.epss) AS ep, max(e.join_rank) AS jr \
+         hp0 AS ( \
+            SELECT v.vuln_id, e.image_digest, v.pkg_name, max(v.severity_rank) AS sr, \
+                max(v.score) AS sc, bool_or(v.fixed_version IS NOT NULL) AS fx, \
+                bool_or(v.kev) AS kev, max(v.epss) AS ep, max(e.join_rank) AS jr, \
+                bool_or(kg_pkg_observable(v.pkg_type, v.class)) AS obs \
             FROM eff e JOIN image_vulnerabilities v ON v.digest = e.digest AND v.source = e.source \
-            GROUP BY v.vuln_id, e.image_digest \
+            GROUP BY v.vuln_id, e.image_digest, v.pkg_name \
+         ), \
+         hp AS ( \
+            SELECT hp0.vuln_id, hp0.image_digest, hp0.pkg_name, hp0.sr, hp0.sc, hp0.fx, \
+                kg_kev_merge(f.kev, hp0.kev) AS kev, GREATEST(f.epss, hp0.ep) AS ep, \
+                hp0.jr, hp0.obs \
+            FROM hp0 LEFT JOIN vuln_cve_facts f ON f.vuln_id = hp0.vuln_id \
          ), \
          pk AS ( \
             SELECT v.vuln_id, (array_agg(DISTINCT v.pkg_name ORDER BY v.pkg_name))[1:5] AS packages, \
@@ -1009,23 +1393,74 @@ fn refresh_cve_summary_sql() -> String {
             FROM eff e JOIN image_vulnerabilities v ON v.digest = e.digest AND v.source = e.source \
             GROUP BY v.vuln_id \
          ), \
+         iu AS ( \
+            SELECT p.image_digest, p.pkg_name, wc.cluster_id, wc.pod_namespace, \
+                wc.workload_kind, wc.workload_name, wc.container_name, \
+                kg_in_use_rank(kg_pkg_in_use(wc.cluster_id, wc.pod_namespace, wc.workload_kind, \
+                    wc.workload_name, wc.container_name, wc.image_digest, p.pkg_name, p.obs)) AS iur \
+            FROM (SELECT image_digest, pkg_name, bool_or(obs) AS obs FROM hp \
+                  GROUP BY image_digest, pkg_name) p \
+            JOIN workload_containers wc ON wc.image_digest = p.image_digest \
+         ), \
          b AS ( \
-            SELECT h.*, wc.pod_namespace AS ns, \
-                wc.cluster_id || '/' || wc.pod_namespace || '/' || wc.workload_kind || '/' || \
-                    wc.workload_name AS wl, \
-                {running} AS running \
-            FROM hits h JOIN workload_containers wc ON wc.image_digest = h.image_digest \
+            SELECT hp.vuln_id, hp.image_digest, wc.cluster_id, wc.pod_namespace AS ns, \
+                wc.workload_kind, wc.workload_name, wc.container_name, \
+                bool_or({running}) AS running, max(hp.sr) AS sr, max(hp.sc) AS sc, \
+                bool_or(hp.fx) AS fx, bool_or(hp.kev) AS kev, max(hp.ep) AS ep, \
+                max(hp.jr) AS jr, min(iu.iur) AS iur \
+            FROM hp JOIN workload_containers wc ON wc.image_digest = hp.image_digest \
+            JOIN iu ON iu.image_digest = hp.image_digest AND iu.pkg_name = hp.pkg_name \
+                AND iu.cluster_id = wc.cluster_id AND iu.pod_namespace = wc.pod_namespace \
+                AND iu.workload_kind = wc.workload_kind AND iu.workload_name = wc.workload_name \
+                AND iu.container_name = wc.container_name \
+            GROUP BY hp.vuln_id, hp.image_digest, wc.cluster_id, wc.pod_namespace, \
+                wc.workload_kind, wc.workload_name, wc.container_name \
+         ), \
+         bt AS ( \
+            SELECT b.*, \
+                b.cluster_id || '/' || b.ns || '/' || b.workload_kind || '/' || b.workload_name AS wl, \
+                x.exposed, \
+                kg_vuln_tier(CASE b.iur WHEN 0 THEN 'executed' WHEN 1 THEN 'loaded' \
+                    WHEN 3 THEN 'installed_not_observed' ELSE 'unknown' END, \
+                    b.sr, b.kev, b.ep, x.exposed, b.fx, $2, $3) AS tier \
+            FROM b LEFT JOIN workload_network_exposure x ON x.cluster_id = b.cluster_id \
+                AND x.pod_namespace = b.ns AND x.workload_kind = b.workload_kind \
+                AND x.workload_name = b.workload_name \
+         ), \
+         w AS ( \
+            SELECT vuln_id, ns, wl, min(iur) AS iur, min(tier) AS tier, bool_or(running) AS running, \
+                bool_or(exposed IS TRUE) AS exposed \
+            FROM bt GROUP BY vuln_id, ns, wl \
+         ), \
+         ai AS ( \
+            SELECT COALESCE(ns, '') AS scope, vuln_id, max(sr) AS sr, max(sc) AS sc, \
+                bool_or(fx) AS fx, bool_or(kev) AS kev, max(ep) AS ep, max(jr) AS jr, \
+                count(DISTINCT image_digest) AS images \
+            FROM bt GROUP BY GROUPING SETS ((vuln_id), (vuln_id, ns)) \
+         ), \
+         aw AS ( \
+            SELECT COALESCE(ns, '') AS scope, vuln_id, count(DISTINCT wl) AS workloads, \
+                count(DISTINCT wl) FILTER (WHERE running) AS running_workloads, \
+                count(DISTINCT ns) AS namespaces, min(tier) AS tier, min(iur) AS iur, \
+                count(DISTINCT wl) FILTER (WHERE iur = 0) AS executed, \
+                count(DISTINCT wl) FILTER (WHERE iur = 1) AS loaded, \
+                count(DISTINCT wl) FILTER (WHERE iur = 2) AS unknown, \
+                count(DISTINCT wl) FILTER (WHERE iur = 3) AS not_observed, \
+                count(DISTINCT wl) FILTER (WHERE exposed) AS exposed \
+            FROM w GROUP BY GROUPING SETS ((vuln_id), (vuln_id, ns)) \
          ) \
          INSERT INTO vuln_cve_summary (scope_namespace, vuln_id, severity_rank, max_score, \
             fixable, kev, max_epss, packages, sources, images, workloads, running_workloads, \
-            namespaces, weakest_rank) \
-         SELECT COALESCE(b.ns, ''), b.vuln_id, max(b.sr), max(b.sc), bool_or(b.fx), \
-            bool_or(b.kev), max(b.ep), COALESCE(min(pk.packages), '{{}}'), \
-            COALESCE(min(pk.sources), '{{}}'), \
-            count(DISTINCT b.image_digest), count(DISTINCT b.wl), \
-            count(DISTINCT b.wl) FILTER (WHERE b.running), count(DISTINCT b.ns), max(b.jr) \
-         FROM b JOIN pk ON pk.vuln_id = b.vuln_id \
-         GROUP BY GROUPING SETS ((b.vuln_id), (b.vuln_id, b.ns))",
+            namespaces, weakest_rank, tier, in_use, executed_workloads, loaded_workloads, \
+            unknown_workloads, not_observed_workloads, exposed_workloads) \
+         SELECT ai.scope, ai.vuln_id, ai.sr, ai.sc, ai.fx, ai.kev, ai.ep, \
+            COALESCE(pk.packages, '{{}}'), COALESCE(pk.sources, '{{}}'), ai.images, \
+            aw.workloads, aw.running_workloads, aw.namespaces, ai.jr, aw.tier, \
+            CASE aw.iur WHEN 0 THEN 'executed' WHEN 1 THEN 'loaded' \
+                WHEN 3 THEN 'installed_not_observed' ELSE 'unknown' END, \
+            aw.executed, aw.loaded, aw.unknown, aw.not_observed, aw.exposed \
+         FROM ai JOIN aw ON aw.scope = ai.scope AND aw.vuln_id = ai.vuln_id \
+         JOIN pk ON pk.vuln_id = ai.vuln_id",
         eff = effective_cte("true"),
         running = running_sql!("$1"),
     )
@@ -1033,11 +1468,67 @@ fn refresh_cve_summary_sql() -> String {
 
 /// Rebuild the CVE summary in one transaction (readers see the old or the
 /// new table, never half). Returns the cluster-wide CVE count.
+/// Rebuild `vuln_cve_facts` from every stored finding in one grouped
+/// scan. The rebuild REPLACES the table (DELETE, then this INSERT, in
+/// [`refresh_cve_facts`]'s own transaction); it never merges into
+/// existing rows. That is
+/// what lets values come down: the ingest upsert only ever raises them
+/// (kev by OR, EPSS by GREATEST), so a KEV a source retracted or an EPSS
+/// that decayed is corrected here, within one retention interval. CVEs with
+/// no image_vulnerabilities row left (garbage-collected) are not
+/// re-inserted, so their facts go in the same pass.
+pub const REFRESH_CVE_FACTS_SQL: &str = "\
+INSERT INTO vuln_cve_facts (vuln_id, kev, kev_date_added, epss, epss_percentile, updated_at) \
+SELECT vuln_id, bool_or(kev), min(kev_date_added), max(epss), max(epss_percentile), \
+    timezone('UTC', NOW()) \
+FROM image_vulnerabilities \
+GROUP BY vuln_id \
+HAVING bool_or(kev) IS NOT NULL OR max(epss) IS NOT NULL \
+    OR min(kev_date_added) IS NOT NULL OR max(epss_percentile) IS NOT NULL";
+
+/// Rebuild `vuln_cve_facts` in its own short transaction (see
+/// [`REFRESH_CVE_FACTS_SQL`]). It starts with a SHARE ROW EXCLUSIVE lock on
+/// the table, taken before any row lock, so concurrent ingest upserts wait
+/// for this rebuild only (not for the CVE summary, which commits
+/// separately) and cannot interleave with the DELETE + INSERT: no
+/// duplicate-key abort for a CVE committed mid-rebuild, and no lock cycle
+/// with an ingest updating several CVEs. Readers see the old table or the
+/// new one, never an empty one.
+pub fn refresh_cve_facts(conn: &mut PgConnection) -> QueryResult<usize> {
+    refresh_cve_facts_with(conn, || {})
+}
+
+/// [`refresh_cve_facts`] with a hook run between the DELETE and the
+/// INSERT, holding the lock (tests drive concurrent ingest from it).
+pub(crate) fn refresh_cve_facts_with(
+    conn: &mut PgConnection,
+    between: impl FnOnce(),
+) -> QueryResult<usize> {
+    conn.transaction(|conn| {
+        sql_query("LOCK TABLE vuln_cve_facts IN SHARE ROW EXCLUSIVE MODE").execute(conn)?;
+        sql_query("DELETE FROM vuln_cve_facts").execute(conn)?;
+        between();
+        sql_query(REFRESH_CVE_FACTS_SQL).execute(conn)
+    })
+}
+
+/// The CVE-level facts (committed on their own, first), then the summary.
 pub fn refresh_cve_summary(conn: &mut PgConnection) -> QueryResult<i64> {
+    refresh_cve_facts(conn)?;
+    refresh_cve_summary_only(conn)
+}
+
+/// The per-CVE summary alone, from the facts as they are. Reads
+/// `vuln_cve_facts` and never writes it, so it holds no lock an ingest
+/// upsert waits on, however long it runs.
+pub(crate) fn refresh_cve_summary_only(conn: &mut PgConnection) -> QueryResult<i64> {
     conn.transaction(|conn| {
         sql_query("DELETE FROM vuln_cve_summary").execute(conn)?;
+        let t = crate::in_use::TierSettings::from_env();
         sql_query(refresh_cve_summary_sql())
             .bind::<Double, _>(running_window_secs() as f64)
+            .bind::<Double, _>(t.epss_threshold)
+            .bind::<Bool, _>(t.unknown_exposure_as_exposed)
             .execute(conn)?;
         #[derive(QueryableByName)]
         struct N {
@@ -1065,9 +1556,16 @@ SELECT vuln_id AS id, \
     severity_rank, max_score, fixable, kev, max_epss, packages, sources, images, workloads, \
     running_workloads, namespaces, \
     CASE weakest_rank WHEN 1 THEN 'image_id' WHEN 2 THEN 'platform_manifest' \
-        ELSE 'workload_tag' END AS weakest_join \
+        ELSE 'workload_tag' END AS weakest_join, \
+    CASE tier WHEN 0 THEN 'P0' WHEN 1 THEN 'P1' WHEN 2 THEN 'P2' WHEN 3 THEN 'Background' END AS tier, \
+    in_use AS in_use_raw, executed_workloads, loaded_workloads, \
+    unknown_workloads, not_observed_workloads, exposed_workloads \
 FROM vuln_cve_summary \
 WHERE scope_namespace = COALESCE($3, '') \
+  AND ($8::bool IS NULL OR kev = $8) \
+  AND ($9::double precision IS NULL OR max_epss >= $9) \
+  AND ($10::text[] IS NULL OR in_use = ANY($10)) \
+  AND ($11::smallint[] IS NULL OR tier = ANY($11)) \
   AND ($1::smallint[] IS NULL OR severity_rank = ANY($1)) \
   AND ($2::bool IS NULL OR fixable = $2) \
   AND ($4::bool IS NOT TRUE OR running_workloads > 0) \
@@ -1083,6 +1581,8 @@ struct SummaryState {
     age: i64,
 }
 
+/// Test shorthand for the unfiltered-by-tier read.
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 pub fn list_cves(
     conn: &mut PgConnection,
@@ -1093,14 +1593,34 @@ pub fn list_cves(
     after: Option<(i16, String)>,
     limit: i64,
 ) -> Result<CvePage, DbError> {
+    let f = ListFilters {
+        severities: severities.map(|s| s.to_vec()),
+        fixable,
+        ..Default::default()
+    };
+    list_cves_filtered(conn, &f, namespace, running_only, after, limit)
+}
+
+pub fn list_cves_filtered(
+    conn: &mut PgConnection,
+    f: &ListFilters,
+    namespace: Option<&str>,
+    running_only: bool,
+    after: Option<(i16, String)>,
+    limit: i64,
+) -> Result<CvePage, DbError> {
     let mut rows: Vec<CveSummary> = sql_query(CVES_SQL)
-        .bind::<Nullable<Array<SmallInt>>, _>(severities)
-        .bind::<Nullable<Bool>, _>(fixable)
+        .bind::<Nullable<Array<SmallInt>>, _>(f.severities.as_deref())
+        .bind::<Nullable<Bool>, _>(f.fixable)
         .bind::<Nullable<Text>, _>(namespace)
         .bind::<Bool, _>(running_only)
         .bind::<Nullable<SmallInt>, _>(after.as_ref().map(|a| a.0))
         .bind::<Text, _>(after.as_ref().map(|a| a.1.clone()).unwrap_or_default())
         .bind::<BigInt, _>(limit + 1)
+        .bind::<Nullable<Bool>, _>(f.kev)
+        .bind::<Nullable<Double>, _>(f.epss_min)
+        .bind::<Nullable<Array<Text>>, _>(f.in_use.as_deref())
+        .bind::<Nullable<Array<SmallInt>>, _>(f.tiers.as_deref())
         .load(conn)?;
     let state: Option<SummaryState> = sql_query(
         "SELECT refreshed_at, \
@@ -1118,10 +1638,13 @@ pub fn list_cves(
     Ok(CvePage {
         items: rows
             .into_iter()
-            .map(|summary| CveItem {
-                summary,
-                in_use: None,
-                in_use_state: IN_USE_UNKNOWN,
+            .map(|summary| {
+                let (u, _) = crate::in_use_store::parse_state(&summary.in_use_raw);
+                CveItem {
+                    summary,
+                    in_use: u.as_bool(),
+                    in_use_state: u.as_str(),
+                }
             })
             .collect(),
         next_after,
@@ -1150,6 +1673,17 @@ pub async fn get_vulnerabilities(
         Err(e) => return Ok(HttpResponse::BadRequest().body(e)),
     };
     let namespace = empty_to_none(q.namespace);
+    let filters = match list_filters(
+        severities,
+        q.fixable,
+        q.kev,
+        q.epss_min,
+        q.in_use.as_deref(),
+        q.tier.as_deref(),
+    ) {
+        Ok(f) => f,
+        Err(e) => return Ok(HttpResponse::BadRequest().body(e)),
+    };
     let _permit = match budget
         .acquire(cost_kib(limit + 1, CVE_ROW_COST_BYTES))
         .await
@@ -1159,10 +1693,9 @@ pub async fn get_vulnerabilities(
     };
     let page = web::block(move || {
         let mut conn = pool.get()?;
-        list_cves(
+        list_cves_filtered(
             &mut conn,
-            severities.as_deref(),
-            q.fixable,
+            &filters,
             namespace.as_deref(),
             q.running.unwrap_or(false),
             after,
@@ -1241,6 +1774,9 @@ struct ExposedWorkloadRow {
     running: bool,
     #[diesel(sql_type = Timestamp)]
     last_seen: NaiveDateTime,
+    /// kg_in_use_rank of the strongest affected package in this container.
+    #[diesel(sql_type = SmallInt)]
+    in_use_rank: i16,
 }
 
 #[derive(Debug, Clone, QueryableByName)]
@@ -1397,12 +1933,21 @@ fn exposure_workloads_sql() -> String {
             WHERE EXISTS (SELECT 1 FROM image_vulnerabilities v \
                 WHERE v.digest = e.digest AND v.source = e.source AND v.vuln_id = $1) \
             GROUP BY e.image_digest \
+         ), \
+         pk AS ( \
+            SELECT e.image_digest, v.pkg_name, bool_or(kg_pkg_observable(v.pkg_type, v.class)) AS obs \
+            FROM eff e JOIN image_vulnerabilities v ON v.digest = e.digest AND v.source = e.source \
+            WHERE v.vuln_id = $1 GROUP BY e.image_digest, v.pkg_name \
          ) \
          SELECT wc.cluster_id, wc.pod_namespace AS namespace, wc.workload_kind, \
             wc.workload_name, wc.container_name, wc.image_digest, \
             CASE h.join_rank WHEN 1 THEN 'image_id' WHEN 2 THEN 'platform_manifest' \
                 ELSE 'workload_tag' END AS join_kind, \
-            {running} AS running, wc.last_seen \
+            {running} AS running, wc.last_seen, \
+            COALESCE((SELECT min(kg_in_use_rank(kg_pkg_in_use(wc.cluster_id, wc.pod_namespace, \
+                wc.workload_kind, wc.workload_name, wc.container_name, wc.image_digest, \
+                p.pkg_name, p.obs))) FROM pk p WHERE p.image_digest = wc.image_digest), 2)::smallint \
+                AS in_use_rank \
          FROM hit h JOIN workload_containers wc ON wc.image_digest = h.image_digest \
          ORDER BY running DESC, wc.pod_namespace, wc.workload_kind, wc.workload_name, \
             wc.container_name, wc.image_digest \
@@ -1452,6 +1997,31 @@ SELECT w.idx, \
         AS unresolved \
 FROM w LEFT JOIN flows i ON i.idx = w.idx \
 GROUP BY w.idx ORDER BY w.idx";
+
+/// Observed network exposure of each (namespace, kind, name) in `keys`,
+/// in the same order. One statement for all of them. Shared by the
+/// exposure view and the retention pass that precomputes exposure for
+/// tiers, so the two can never disagree.
+pub(crate) fn network_exposure_for(
+    conn: &mut PgConnection,
+    keys: &[(String, String, String)],
+    window_hours: i64,
+) -> QueryResult<Vec<NetworkExposure>> {
+    if keys.is_empty() {
+        return Ok(Vec::new());
+    }
+    let net: Vec<NetRow> = sql_query(NETWORK_SQL)
+        .bind::<Array<Text>, _>(keys.iter().map(|k| k.0.as_str()).collect::<Vec<_>>())
+        .bind::<Array<Text>, _>(keys.iter().map(|k| k.1.as_str()).collect::<Vec<_>>())
+        .bind::<Array<Text>, _>(keys.iter().map(|k| k.2.as_str()).collect::<Vec<_>>())
+        .bind::<Integer, _>(window_hours as i32)
+        .bind::<BigInt, _>(EXPOSURE_PODS_PER_WORKLOAD)
+        .bind::<Integer, _>(EXPOSURE_PEERS_PER_WORKLOAD as i32)
+        .load(conn)?;
+    Ok((0..keys.len())
+        .map(|p| network_from(net.iter().find(|n| n.idx == p as i64 + 1), window_hours))
+        .collect())
+}
 
 fn network_from(row: Option<&NetRow>, window_hours: i64) -> NetworkExposure {
     let Some(r) = row else {
@@ -1577,24 +2147,12 @@ pub fn vulnerability_exposure(
         .collect();
     keys.sort();
     keys.dedup();
-    let net: Vec<NetRow> = if keys.is_empty() {
-        Vec::new()
-    } else {
-        sql_query(NETWORK_SQL)
-            .bind::<Array<Text>, _>(keys.iter().map(|k| k.0.as_str()).collect::<Vec<_>>())
-            .bind::<Array<Text>, _>(keys.iter().map(|k| k.1.as_str()).collect::<Vec<_>>())
-            .bind::<Array<Text>, _>(keys.iter().map(|k| k.2.as_str()).collect::<Vec<_>>())
-            .bind::<Integer, _>(window_hours as i32)
-            .bind::<BigInt, _>(EXPOSURE_PODS_PER_WORKLOAD)
-            .bind::<Integer, _>(EXPOSURE_PEERS_PER_WORKLOAD as i32)
-            .load(conn)?
-    };
+    let net = network_exposure_for(conn, &keys, window_hours)?;
     let net_for = |r: &ExposedWorkloadRow| {
-        let pos = keys
-            .iter()
-            .position(|k| k.0 == r.namespace && k.1 == r.workload_kind && k.2 == r.workload_name);
-        let row = pos.and_then(|p| net.iter().find(|n| n.idx == p as i64 + 1));
-        network_from(row, window_hours)
+        keys.iter()
+            .position(|k| k.0 == r.namespace && k.1 == r.workload_kind && k.2 == r.workload_name)
+            .map(|p| net[p].clone())
+            .unwrap_or_else(|| network_from(None, window_hours))
     };
     let workloads: Vec<ExposedWorkload> = rows
         .iter()
@@ -1609,10 +2167,14 @@ pub fn vulnerability_exposure(
             join: r.join_kind.clone(),
             running: r.running,
             last_seen: r.last_seen,
-            in_use: None,
-            in_use_state: IN_USE_UNKNOWN,
+            in_use: crate::in_use::InUse::from_rank(r.in_use_rank).as_bool(),
+            in_use_state: crate::in_use::InUse::from_rank(r.in_use_rank).as_str(),
         })
         .collect();
+    // The CVE as a whole: the strongest listed workload's state; no
+    // workloads (an image nothing runs any more) is unknown.
+    let overall =
+        crate::in_use::InUse::from_rank(rows.iter().map(|r| r.in_use_rank).min().unwrap_or(2));
 
     let severity_rank = images.iter().map(|i| i.severity_rank).max().unwrap_or(0);
     let mut fixable = false;
@@ -1650,8 +2212,8 @@ pub fn vulnerability_exposure(
         images,
         workloads,
         truncated,
-        in_use: None,
-        in_use_state: IN_USE_UNKNOWN,
+        in_use: overall.as_bool(),
+        in_use_state: overall.as_str(),
     }))
 }
 

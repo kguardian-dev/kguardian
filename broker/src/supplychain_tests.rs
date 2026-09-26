@@ -80,6 +80,14 @@ fn gzip(bytes: &[u8]) -> Vec<u8> {
 // ---------------------------------------------------------------------
 
 #[test]
+fn clean_drops_every_yaml_line_break() {
+    assert_eq!(
+        clean(Some("a\nb\rc\u{85}d\u{2028}e\u{2029}f"), 100).as_deref(),
+        Some("abcdef")
+    );
+}
+
+#[test]
 fn repositories_normalise_like_the_inventory() {
     let n = |r: Option<&str>, p: &str| normalise_repository(r, Some(p));
     assert_eq!(
@@ -484,7 +492,7 @@ fn live_conn() -> PgConnection {
     conn.batch_execute(&format!(
         "TRUNCATE vuln_sources, image_vulnerabilities, image_sbom_components, image_sbom_pages, \
             supplychain_image_links, images, workload_containers, vuln_cve_summary, \
-            vuln_cve_summary_state; \
+            vuln_cve_summary_state, vuln_cve_facts; \
          DELETE FROM pod_traffic WHERE pod_namespace IN ('{NS}', 'sc-other'); \
          DELETE FROM pod_details WHERE pod_namespace = '{NS}';"
     ))
@@ -1772,5 +1780,1157 @@ fn live_database_sources_are_deduplicated_and_registry_sboms_never_replace_trivy
     assert_eq!(
         e.images[0].packages[0]["fixedVersions"],
         json!(["2", "10.1"])
+    );
+}
+
+// ---------------------------------------------------------------------
+// Runtime in-use and tiers (#1533 P1-5)
+// ---------------------------------------------------------------------
+
+/// The runtime inventory table as P1-2's runtime_executables migration
+/// (feat/1533-exec-tracking) defines it: the input
+/// contract of in_use_store. Created here only when that migration is not
+/// in this tree yet; identical DDL, so the real one is a no-op after it.
+const RUNTIME_EXECUTABLES_CONTRACT: &str = "\
+CREATE TABLE IF NOT EXISTS runtime_executables ( \
+    cluster_id VARCHAR NOT NULL DEFAULT 'primary', pod_namespace VARCHAR NOT NULL, \
+    workload_kind VARCHAR NOT NULL, workload_name VARCHAR NOT NULL, \
+    container_name VARCHAR NOT NULL, image_digest VARCHAR NOT NULL, \
+    kind VARCHAR NOT NULL CHECK (kind IN ('exec', 'lib')), path VARCHAR NOT NULL, \
+    path_complete BOOLEAN NOT NULL DEFAULT true, \
+    source VARCHAR NOT NULL CHECK (source IN ('ebpf', 'backfill')), \
+    last_pod_name VARCHAR NULL, first_seen TIMESTAMP NOT NULL, last_seen TIMESTAMP NOT NULL, \
+    PRIMARY KEY (cluster_id, pod_namespace, workload_kind, workload_name, container_name, \
+                 image_digest, kind, path))";
+
+/// A stand-in for the coverage function the runtime inventory is to
+/// provide (in_use_store module docs): every container covered for the
+/// last 48 hours.
+const COVERAGE_STUB: &str = "\
+CREATE OR REPLACE FUNCTION kg_runtime_coverage(text, text, text, text, text, text, integer) \
+RETURNS TABLE (covered boolean, observed_since timestamp, reason text) LANGUAGE sql STABLE AS $$ \
+    SELECT true, timezone('UTC', NOW()) - INTERVAL '48 hours', NULL::text \
+$$";
+
+/// Acceptance fixture: an image whose SBOM has two shared libraries, each
+/// with a CVE; the process dlopen()s only one of them. Exactly one package
+/// is marked loaded; the other is unknown without capture coverage and
+/// installed-not-observed (Background, and a VEX draft statement) with it.
+#[test]
+#[ignore = "requires a live postgres (set KG_TEST_DATABASE_URL)"]
+fn live_database_only_the_dlopened_library_is_loaded() {
+    use crate::in_use_store::{self as iu, VexOutcome};
+    use crate::supplychain_read::{
+        image_vulnerabilities_filtered, list_cves_filtered, ListFilters,
+    };
+    let mut conn = live_conn();
+    exec(&mut conn, RUNTIME_EXECUTABLES_CONTRACT);
+    exec(
+        &mut conn,
+        "DROP FUNCTION IF EXISTS kg_runtime_coverage(text, text, text, text, text, text, integer); \
+         TRUNCATE runtime_executables, runtime_package_use, runtime_unowned_paths, \
+            runtime_in_use_coverage, workload_network_exposure;",
+    );
+    let img = d(77);
+    seed_inventory(
+        &mut conn,
+        &img,
+        "ghcr.io/example/api",
+        "2.4.1",
+        "Deployment",
+        "api",
+        "app",
+        0,
+    );
+
+    let lib = |n: &str| format!("/usr/lib/x86_64-linux-gnu/lib{n}.so.1");
+    let mut s = sbom_json(&img, "2026-09-20T08:00:00Z", &[], None);
+    s["components"] = json!([
+        {"name": "libfoo1", "version": "1.2.3-1", "purl": "pkg:deb/debian/libfoo1@1.2.3-1",
+         "type": "debian", "file_paths": [lib("foo"), "/usr/share/doc/libfoo1/copyright"]},
+        {"name": "libbar1", "version": "4.5-2", "purl": "pkg:deb/debian/libbar1@4.5-2",
+         "type": "debian", "file_paths": [lib("bar"), "/usr/share/doc/libbar1/copyright"]},
+    ]);
+    store_s(&mut conn, s).unwrap();
+    let mut v = vulns_json(
+        &img,
+        "2026-09-20T08:00:00Z",
+        &[
+            ("CVE-2026-0001", "HIGH", Some("1.2.4")),
+            ("CVE-2026-0002", "HIGH", Some("4.6")),
+        ],
+    );
+    v["observed_in"] = json!([]);
+    for (i, (name, ver)) in [("libfoo1", "1.2.3-1"), ("libbar1", "4.5-2")]
+        .iter()
+        .enumerate()
+    {
+        v["vulnerabilities"][i]["package"] = json!({"name": name, "version": ver, "type": "debian",
+            "purl": format!("pkg:deb/debian/{name}@{ver}")});
+        v["vulnerabilities"][i]["class"] = json!("os-pkgs");
+        v["vulnerabilities"][i]["file_paths"] = json!([]);
+    }
+    store_v(&mut conn, v);
+    relink_batch(&mut conn, None, 100).unwrap();
+
+    // The kernel reports the real file behind the soname symlink the
+    // program dlopen()ed, and the unpackaged app binary itself.
+    exec(
+        &mut conn,
+        &format!(
+            "INSERT INTO runtime_executables (pod_namespace, workload_kind, workload_name, \
+                container_name, image_digest, kind, path, source, first_seen, last_seen) VALUES \
+             ('{NS}', 'Deployment', 'api', 'app', '{img}', 'lib', \
+                '/usr/lib/x86_64-linux-gnu/libfoo.so.1.2.3', 'ebpf', \
+                timezone('UTC', NOW()) - INTERVAL '1 hour', timezone('UTC', NOW())), \
+             ('{NS}', 'Deployment', 'api', 'app', '{img}', 'exec', '/app/server', 'ebpf', \
+                timezone('UTC', NOW()) - INTERVAL '1 hour', timezone('UTC', NOW()))"
+        ),
+    );
+    // The fixture's soname link must reach libfoo1's '.so.1' entry.
+    assert!(iu::runtime_inventory_available(&mut conn).unwrap());
+    let b = iu::refresh_package_use_batch(&mut conn, None, 10).unwrap();
+    assert_eq!((b.next.as_deref(), b.truncated.len()), (None, 0));
+    let whole = iu::UseEvidence {
+        complete: true,
+        truncated: vec![],
+    };
+    assert_eq!(
+        count(&mut conn, "SELECT count(*) AS n FROM runtime_package_use"),
+        1,
+        "exactly one package marked in use"
+    );
+    assert_eq!(
+        count(
+            &mut conn,
+            "SELECT count(*) AS n FROM runtime_package_use \
+             WHERE pkg_name = 'libfoo1' AND state = 'loaded' AND path_match = 'soname'"
+        ),
+        1
+    );
+    assert_eq!(
+        count(
+            &mut conn,
+            "SELECT count(*) AS n FROM runtime_unowned_paths WHERE path = '/app/server'"
+        ),
+        1
+    );
+
+    let state_of = |conn: &mut PgConnection, f: &ListFilters| {
+        let p = image_vulnerabilities_filtered(conn, &img, None, f, None, 50).unwrap();
+        p.items
+            .iter()
+            .map(|f| {
+                (
+                    f.package.name.clone(),
+                    f.in_use_state,
+                    f.tier,
+                    f.in_use_detail.reason,
+                )
+            })
+            .collect::<Vec<_>>()
+    };
+    let all = ListFilters::default();
+
+    // No coverage function (P1-2 has not shipped one): the unseen library
+    // is unknown, never "not in use", and is tiered as if loaded.
+    let t = crate::in_use::TierSettings::default();
+    iu::refresh_coverage(&mut conn, &t, &whole).unwrap();
+    iu::refresh_exposure(&mut conn, 168).unwrap();
+    let mut got = state_of(&mut conn, &all);
+    got.sort();
+    assert_eq!(
+        got,
+        [
+            (
+                "libbar1".to_string(),
+                "unknown",
+                "P1",
+                Some("no_runtime_data")
+            ),
+            ("libfoo1".to_string(), "loaded", "P1", None),
+        ]
+    );
+    assert!(matches!(
+        iu::openvex_draft(
+            &mut conn,
+            &crate::workload_profile::Key {
+                namespace: NS.into(),
+                kind: "Deployment".into(),
+                name: "api".into()
+            }
+        )
+        .unwrap(),
+        VexOutcome::Unavailable(_)
+    ));
+
+    // With coverage: the unseen library is installed-not-observed.
+    exec(&mut conn, COVERAGE_STUB);
+    iu::refresh_coverage(&mut conn, &t, &whole).unwrap();
+    let mut got = state_of(&mut conn, &all);
+    got.sort();
+    assert_eq!(
+        got,
+        [
+            (
+                "libbar1".to_string(),
+                "installed_not_observed",
+                "Background",
+                None
+            ),
+            ("libfoo1".to_string(), "loaded", "P1", None),
+        ]
+    );
+    let loaded_only = ListFilters {
+        in_use: Some(vec!["loaded".into()]),
+        ..Default::default()
+    };
+    assert_eq!(state_of(&mut conn, &loaded_only).len(), 1);
+
+    // Cluster-wide: the summary carries tier and in-use per CVE.
+    crate::supplychain_read::refresh_cve_summary(&mut conn).unwrap();
+    let bg = ListFilters {
+        tiers: Some(vec![3]),
+        ..Default::default()
+    };
+    let page = list_cves_filtered(&mut conn, &bg, None, false, None, 10).unwrap();
+    assert_eq!(
+        page.items
+            .iter()
+            .map(|c| (c.summary.id.as_str(), c.in_use_state))
+            .collect::<Vec<_>>(),
+        [("CVE-2026-0002", "installed_not_observed")]
+    );
+    assert_eq!(page.items[0].summary.not_observed_workloads, 1);
+    let p1 = list_cves_filtered(
+        &mut conn,
+        &ListFilters {
+            tiers: Some(vec![1]),
+            ..Default::default()
+        },
+        None,
+        false,
+        None,
+        10,
+    )
+    .unwrap();
+    assert_eq!(p1.items.len(), 1);
+    assert_eq!(p1.items[0].summary.id, "CVE-2026-0001");
+    assert_eq!(p1.items[0].summary.loaded_workloads, 1);
+    // A row summarised before the tier migration: tier null ("not
+    // computed yet"), never Background, and no tier filter matches it.
+    exec(
+        &mut conn,
+        "UPDATE vuln_cve_summary SET tier = NULL WHERE vuln_id = 'CVE-2026-0001'",
+    );
+    let all =
+        list_cves_filtered(&mut conn, &ListFilters::default(), None, false, None, 10).unwrap();
+    let row = all
+        .items
+        .iter()
+        .find(|c| c.summary.id == "CVE-2026-0001")
+        .unwrap();
+    assert_eq!(row.summary.tier, None);
+    for t in 0..=3 {
+        let f = ListFilters {
+            tiers: Some(vec![t]),
+            ..Default::default()
+        };
+        let p = list_cves_filtered(&mut conn, &f, None, false, None, 10).unwrap();
+        assert!(
+            p.items.iter().all(|c| c.summary.id != "CVE-2026-0001"),
+            "tier {t}"
+        );
+    }
+    crate::supplychain_read::refresh_cve_summary(&mut conn).unwrap();
+
+    // The exposure view carries the same per-workload state.
+    let e = crate::supplychain_read::vulnerability_exposure(&mut conn, "CVE-2026-0001", 168)
+        .unwrap()
+        .unwrap();
+    assert_eq!(e.in_use_state, "loaded");
+    assert_eq!(e.workloads[0].in_use_state, "loaded");
+
+    // And the VEX draft states not_affected for the unseen library only.
+    let key = crate::workload_profile::Key {
+        namespace: NS.into(),
+        kind: "Deployment".into(),
+        name: "api".into(),
+    };
+    let VexOutcome::Draft(vex) = iu::openvex_draft(&mut conn, &key).unwrap() else {
+        panic!("expected a VEX draft");
+    };
+    assert_eq!(vex.statements, 1);
+    assert_eq!(
+        vex.doc["statements"][0]["vulnerability"]["name"],
+        "CVE-2026-0002"
+    );
+    assert_eq!(
+        vex.doc["statements"][0]["products"][0]["subcomponents"][0]["@id"],
+        "pkg:deb/debian/libbar1@4.5-2"
+    );
+
+    // The export bundle's `vex` artifact is that draft, as JSON.
+    let vd = crate::profile_export::vex_doc(&mut conn, &key, "audit").unwrap();
+    assert!(vd.available, "{:?}", vd.reason);
+    assert_eq!(vd.file_name, "vex.openvex.json");
+    let parsed: serde_json::Value = serde_json::from_str(vd.content.as_deref().unwrap()).unwrap();
+    assert_eq!(parsed, vex.doc);
+
+    exec(
+        &mut conn,
+        "DROP FUNCTION kg_runtime_coverage(text, text, text, text, text, text, integer)",
+    );
+    // The export bundle's `sbom` artifact: the stored SBOM of the one
+    // container image, labelled with its source.
+    let src = crate::workload_profile::load_sources(&mut conn, &key).unwrap();
+    let prof = crate::workload_profile::build(&key, &src, Utc::now());
+    // The size probe the export charges from: this workload's one SBOM.
+    let probed = crate::profile_export::probe_sbom_components(&mut conn, &key).unwrap();
+    assert_eq!(probed, 2);
+    let sb = crate::profile_export::sbom_docs(&mut conn, &prof, "audit", probed).unwrap();
+    assert_eq!(sb.len(), 1, "{sb:?}");
+    assert!(sb[0].available, "{:?}", sb[0].reason);
+    let im = sb[0].image.as_ref().unwrap();
+    assert_eq!(
+        (im.digest.as_str(), im.source.as_deref(), im.components),
+        (img.as_str(), Some("trivy-operator"), Some(2))
+    );
+    assert_eq!(im.containers, ["app"]);
+    let cdx: serde_json::Value = serde_json::from_str(sb[0].content.as_deref().unwrap()).unwrap();
+    assert_eq!(cdx["bomFormat"], "CycloneDX");
+    assert_eq!(cdx["components"].as_array().unwrap().len(), 2);
+    assert!(sb[0]
+        .apply_with
+        .as_deref()
+        .unwrap()
+        .contains("trivy-operator"));
+    // It never loads more than it was charged for.
+    let short = crate::profile_export::sbom_docs(&mut conn, &prof, "audit", 1).unwrap();
+    assert!(!short[0].available);
+    assert!(short[0]
+        .reason
+        .as_deref()
+        .unwrap()
+        .contains("/sbom/cyclonedx"));
+    // Over the cap: listed, not loaded, with the per-image route.
+    assert!(matches!(
+        crate::supplychain_read::cyclonedx_for(&mut conn, &img, 1).unwrap(),
+        crate::supplychain_read::CycloneDx::TooLarge(_)
+    ));
+    // An image with no SBOM is unknown, never an empty SBOM.
+    assert!(matches!(
+        crate::supplychain_read::cyclonedx_for(&mut conn, &d(78), 100).unwrap(),
+        crate::supplychain_read::CycloneDx::NoSbom
+    ));
+
+    // Without coverage the artifact is unavailable, with the reason.
+    iu::refresh_coverage(&mut conn, &t, &whole).unwrap();
+    let vd = crate::profile_export::vex_doc(&mut conn, &key, "audit").unwrap();
+    assert!(!vd.available);
+    assert!(vd.reason.unwrap().contains("installed-but-not-observed"));
+}
+
+/// Coverage is not believed from part of the evidence: a digest whose
+/// runtime rows were cut at the cap, or any digest when the package-use
+/// pass did not finish, is a capture gap, never installed-not-observed,
+/// so no VEX not_affected can come from a package seen only in the rows
+/// that were not read.
+#[test]
+#[ignore = "requires a live postgres (set KG_TEST_DATABASE_URL)"]
+fn live_database_truncated_or_unfinished_use_is_never_covered() {
+    use crate::in_use_store::{self as iu, UseEvidence, VexOutcome};
+    use crate::supplychain_read::{image_vulnerabilities_filtered, ListFilters};
+    let mut conn = live_conn();
+    exec(&mut conn, RUNTIME_EXECUTABLES_CONTRACT);
+    exec(
+        &mut conn,
+        "TRUNCATE runtime_executables, runtime_package_use, runtime_unowned_paths, \
+            runtime_in_use_coverage, workload_network_exposure;",
+    );
+    exec(&mut conn, COVERAGE_STUB);
+    let img = d(79);
+    seed_inventory(
+        &mut conn,
+        &img,
+        "ghcr.io/example/api",
+        "2.4.1",
+        "Deployment",
+        "api",
+        "app",
+        0,
+    );
+    let mut s = sbom_json(&img, "2026-09-20T08:00:00Z", &[], None);
+    s["components"] = json!([
+        {"name": "libfoo1", "version": "1", "purl": "pkg:deb/debian/libfoo1@1", "type": "debian",
+         "file_paths": ["/usr/lib/x86_64-linux-gnu/libfoo.so.1"]},
+        {"name": "libbar1", "version": "1", "purl": "pkg:deb/debian/libbar1@1", "type": "debian",
+         "file_paths": ["/usr/lib/x86_64-linux-gnu/libbar.so.1"]},
+    ]);
+    store_s(&mut conn, s).unwrap();
+    let mut v = vulns_json(
+        &img,
+        "2026-09-20T08:00:00Z",
+        &[("CVE-2026-0101", "HIGH", None)],
+    );
+    v["observed_in"] = json!([]);
+    v["vulnerabilities"][0]["package"] = json!({"name": "libbar1", "version": "1", "type": "debian", "purl": "pkg:deb/debian/libbar1@1"});
+    v["vulnerabilities"][0]["class"] = json!("os-pkgs");
+    store_v(&mut conn, v);
+    relink_batch(&mut conn, None, 100).unwrap();
+    // libbar was loaded an hour ago; libfoo just now. Read newest-first
+    // with a cap of 1, only libfoo's row is seen.
+    exec(
+        &mut conn,
+        &format!(
+            "INSERT INTO runtime_executables (pod_namespace, workload_kind, workload_name, \
+                container_name, image_digest, kind, path, source, first_seen, last_seen) VALUES \
+             ('{NS}', 'Deployment', 'api', 'app', '{img}', 'lib', '/usr/lib/x86_64-linux-gnu/libbar.so.1', \
+                'ebpf', timezone('UTC', NOW()) - INTERVAL '2 hours', timezone('UTC', NOW()) - INTERVAL '1 hour'), \
+             ('{NS}', 'Deployment', 'api', 'app', '{img}', 'lib', '/usr/lib/x86_64-linux-gnu/libfoo.so.1', \
+                'ebpf', timezone('UTC', NOW()) - INTERVAL '1 hour', timezone('UTC', NOW()))"
+        ),
+    );
+    let t = crate::in_use::TierSettings::default();
+    let key = crate::workload_profile::Key {
+        namespace: NS.into(),
+        kind: "Deployment".into(),
+        name: "api".into(),
+    };
+    let bar_state = |conn: &mut PgConnection| {
+        let p = image_vulnerabilities_filtered(conn, &img, None, &ListFilters::default(), None, 10)
+            .unwrap();
+        let f = p
+            .items
+            .iter()
+            .find(|f| f.package.name == "libbar1")
+            .unwrap();
+        (f.in_use_state, f.in_use_detail.reason, f.tier)
+    };
+
+    // 1. Truncated: libbar's row was not read. Without the guard it would
+    //    be installed_not_observed / Background / VEX not_affected.
+    let r = iu::refresh_image_use_capped(&mut conn, &img, 1).unwrap();
+    assert!(r.truncated);
+    assert_eq!(
+        count(
+            &mut conn,
+            "SELECT count(*) AS n FROM runtime_package_use WHERE pkg_name = 'libbar1'"
+        ),
+        0
+    );
+    iu::refresh_coverage(
+        &mut conn,
+        &t,
+        &UseEvidence {
+            complete: true,
+            truncated: vec![img.clone()],
+        },
+    )
+    .unwrap();
+    assert_eq!(bar_state(&mut conn), ("unknown", Some("capture_gap"), "P1"));
+    assert!(matches!(
+        iu::openvex_draft(&mut conn, &key).unwrap(),
+        VexOutcome::Unavailable(_)
+    ));
+
+    // 2. Unfinished pass: every digest is a gap, truncated or not.
+    iu::refresh_coverage(
+        &mut conn,
+        &t,
+        &UseEvidence {
+            complete: false,
+            truncated: vec![],
+        },
+    )
+    .unwrap();
+    assert_eq!(bar_state(&mut conn), ("unknown", Some("capture_gap"), "P1"));
+    assert!(matches!(
+        iu::openvex_draft(&mut conn, &key).unwrap(),
+        VexOutcome::Unavailable(_)
+    ));
+    assert_eq!(
+        count(
+            &mut conn,
+            "SELECT count(*) AS n FROM runtime_in_use_coverage WHERE covered"
+        ),
+        0
+    );
+
+    // 3. The whole evidence, read in full: libbar is loaded, correctly.
+    let r = iu::refresh_image_use(&mut conn, &img).unwrap();
+    assert!(!r.truncated);
+    iu::refresh_coverage(
+        &mut conn,
+        &t,
+        &UseEvidence {
+            complete: true,
+            truncated: vec![],
+        },
+    )
+    .unwrap();
+    assert_eq!(bar_state(&mut conn).0, "loaded");
+
+    exec(
+        &mut conn,
+        "DROP FUNCTION kg_runtime_coverage(text, text, text, text, text, text, integer)",
+    );
+}
+
+/// Two installed versions of one package on one image, in two containers.
+/// With the read cut between groups, a statement must still be judged on
+/// every container of its (package, version): rows come grouped by version
+/// before container, so the cut drops a whole group, never half of one.
+#[test]
+#[ignore = "requires a live postgres (set KG_TEST_DATABASE_URL)"]
+fn live_database_vex_cap_never_splits_a_version_group() {
+    use crate::in_use_store::{self as iu, UseEvidence, VexOutcome};
+    let mut conn = live_conn();
+    exec(
+        &mut conn,
+        "TRUNCATE runtime_package_use, runtime_unowned_paths, runtime_in_use_coverage, \
+            workload_network_exposure;",
+    );
+    exec(&mut conn, COVERAGE_STUB);
+    let img = d(80);
+    for c in ["app", "side"] {
+        seed_inventory(
+            &mut conn,
+            &img,
+            "ghcr.io/example/api",
+            "2.4.1",
+            "Deployment",
+            "api",
+            c,
+            0,
+        );
+    }
+    let mut s = sbom_json(&img, "2026-09-20T08:00:00Z", &[], None);
+    s["components"] = json!([{"name": "libbar1", "version": "1", "type": "debian",
+        "purl": "pkg:deb/debian/libbar1@1", "file_paths": ["/usr/lib/x86_64-linux-gnu/libbar.so.1"]}]);
+    store_s(&mut conn, s).unwrap();
+    let mut v = vulns_json(
+        &img,
+        "2026-09-20T08:00:00Z",
+        &[
+            ("CVE-2026-0201", "HIGH", None),
+            ("CVE-2026-0201", "HIGH", None),
+        ],
+    );
+    v["observed_in"] = json!([]);
+    for (i, ver) in ["1", "2"].iter().enumerate() {
+        v["vulnerabilities"][i]["package"] = json!({"name": "libbar1", "version": ver,
+            "type": "debian", "purl": format!("pkg:deb/debian/libbar1@{ver}")});
+        v["vulnerabilities"][i]["class"] = json!("os-pkgs");
+    }
+    store_v(&mut conn, v);
+    relink_batch(&mut conn, None, 100).unwrap();
+    // 'side' loads libbar; 'app' never does.
+    exec(
+        &mut conn,
+        &format!(
+            "INSERT INTO runtime_package_use (cluster_id, pod_namespace, workload_kind, workload_name, \
+                container_name, image_digest, pkg_name, pkg_version, state, path_match, sample_path, \
+                first_seen, last_seen) VALUES ('primary', '{NS}', 'Deployment', 'api', 'side', '{img}', \
+                'libbar1', '1', 'loaded', 'exact', '/usr/lib/x86_64-linux-gnu/libbar.so.1', \
+                timezone('UTC', NOW()), timezone('UTC', NOW()))"
+        ),
+    );
+    let t = crate::in_use::TierSettings::default();
+    iu::refresh_coverage(
+        &mut conn,
+        &t,
+        &UseEvidence {
+            complete: true,
+            truncated: vec![],
+        },
+    )
+    .unwrap();
+    let key = crate::workload_profile::Key {
+        namespace: NS.into(),
+        kind: "Deployment".into(),
+        name: "api".into(),
+    };
+    // 4 rows: (v1, app) (v1, side) (v2, app) (v2, side). Uncut: no
+    // statement, since 'side' loaded the package.
+    assert!(matches!(
+        iu::openvex_draft(&mut conn, &key).unwrap(),
+        VexOutcome::Unavailable(_)
+    ));
+    // Cut at 3: the v2 group loses 'side'. It must be dropped whole, not
+    // judged on 'app' alone (which would state not_affected).
+    for cap in 1..=4 {
+        let out = iu::openvex_draft_capped(&mut conn, &key, cap).unwrap();
+        assert!(
+            matches!(out, VexOutcome::Unavailable(_)),
+            "cap {cap}: a statement from part of a group: {out:?}"
+        );
+    }
+    exec(
+        &mut conn,
+        "DROP FUNCTION kg_runtime_coverage(text, text, text, text, text, text, integer)",
+    );
+}
+
+/// A re-ingest between the SBOM header read and the component read leaves
+/// the header's item_count stale. The bundle must still load no more
+/// components than it was charged for: `left` shrinks by what was loaded,
+/// and each load reads at most `left + 1` rows.
+#[test]
+#[ignore = "requires a live postgres (set KG_TEST_DATABASE_URL)"]
+fn live_database_sbom_export_load_is_bounded_by_the_charge_not_the_header() {
+    let mut conn = live_conn();
+    for (i, c) in ["a", "b", "c"].iter().enumerate() {
+        let img = d(90 + i as u32);
+        seed_inventory(
+            &mut conn,
+            &img,
+            "ghcr.io/example/api",
+            "2.4.1",
+            "Deployment",
+            "api",
+            c,
+            0,
+        );
+        let mut s = sbom_json(&img, "2026-09-20T08:00:00Z", &[], None);
+        s["components"] = json!([
+            {"name": format!("{c}1"), "version": "1", "type": "debian", "purl": format!("pkg:deb/debian/{c}1@1"), "file_paths": []},
+            {"name": format!("{c}2"), "version": "1", "type": "debian", "purl": format!("pkg:deb/debian/{c}2@1"), "file_paths": []},
+        ]);
+        store_s(&mut conn, s).unwrap();
+    }
+    relink_batch(&mut conn, None, 100).unwrap();
+    // Stale headers: they claim 0 components; each SBOM really has 2.
+    exec(
+        &mut conn,
+        "UPDATE vuln_sources SET item_count = 0 WHERE kind = 'sbom'",
+    );
+    let key = crate::workload_profile::Key {
+        namespace: NS.into(),
+        kind: "Deployment".into(),
+        name: "api".into(),
+    };
+    let src = crate::workload_profile::load_sources(&mut conn, &key).unwrap();
+    let prof = crate::workload_profile::build(&key, &src, Utc::now());
+    let loaded = |docs: &[crate::profile_export::Document]| -> usize {
+        docs.iter()
+            .filter(|d| d.available)
+            .map(|d| {
+                let v: serde_json::Value =
+                    serde_json::from_str(d.content.as_deref().unwrap()).unwrap();
+                v["components"].as_array().unwrap().len()
+            })
+            .sum()
+    };
+    for charge in [0i64, 1, 2, 3, 4, 6] {
+        let docs = crate::profile_export::sbom_docs(&mut conn, &prof, "audit", charge).unwrap();
+        assert_eq!(docs.len(), 3);
+        let n = loaded(&docs);
+        assert!(n as i64 <= charge, "charge {charge}: loaded {n}");
+        // Each available document reports what it carries, not the header.
+        for d in docs.iter().filter(|d| d.available) {
+            assert_eq!(d.image.as_ref().unwrap().components, Some(2));
+        }
+    }
+    // With room for everything, everything is exported.
+    let docs = crate::profile_export::sbom_docs(&mut conn, &prof, "audit", 6).unwrap();
+    assert_eq!(loaded(&docs), 6);
+}
+
+/// KEV and EPSS are CVE-level: Trivy reports kev null, Grype reports kev
+/// true for the same CVE (here on a finding Grype spells with a different
+/// installed version, so the rows do not merge). The Trivy finding must
+/// still rank P0 when in use and exposed, show kev true, and say so in its
+/// factors; the CVE summary likewise.
+#[test]
+#[ignore = "requires a live postgres (set KG_TEST_DATABASE_URL)"]
+fn live_database_kev_and_epss_are_resolved_per_cve_across_sources() {
+    use crate::supplychain_read::{
+        image_vulnerabilities_filtered, list_cves_filtered, ListFilters,
+    };
+    let mut conn = live_conn();
+    exec(
+        &mut conn,
+        "TRUNCATE runtime_package_use, runtime_unowned_paths, runtime_in_use_coverage, \
+            workload_network_exposure;",
+    );
+    let img = d(95);
+    seed_inventory(
+        &mut conn,
+        &img,
+        "ghcr.io/example/api",
+        "2.4.1",
+        "Deployment",
+        "api",
+        "app",
+        0,
+    );
+    let finding = |v: &mut serde_json::Value, ver: &str| {
+        v["observed_in"] = json!([]);
+        v["vulnerabilities"][0]["package"] = json!({"name": "libz", "version": ver, "type": "debian", "purl": format!("pkg:deb/debian/libz@{ver}")});
+        v["vulnerabilities"][0]["class"] = json!("os-pkgs");
+    };
+    let mut trivy = vulns_json(
+        &img,
+        "2026-09-20T08:00:00Z",
+        &[("CVE-2026-0301", "HIGH", Some("2"))],
+    );
+    finding(&mut trivy, "1.0.0");
+    store_v(&mut conn, trivy);
+    let mut grype = vulns_json(
+        &img,
+        "2026-09-21T08:00:00Z",
+        &[("CVE-2026-0301", "HIGH", Some("2"))],
+    );
+    grype["source"] = json!("grype");
+    grype["sbom_source"] = json!("registry");
+    finding(&mut grype, "1.0.0-r0");
+    grype["vulnerabilities"][0]["kev"] = json!(true);
+    grype["vulnerabilities"][0]["epss"] = json!(0.4);
+    store_v(&mut conn, grype);
+    relink_batch(&mut conn, None, 100).unwrap();
+    // In use (loaded) and exposed by observed ingress.
+    exec(
+        &mut conn,
+        &format!(
+            "INSERT INTO runtime_package_use (cluster_id, pod_namespace, workload_kind, workload_name, \
+                container_name, image_digest, pkg_name, pkg_version, state, path_match, sample_path, \
+                first_seen, last_seen) VALUES ('primary', '{NS}', 'Deployment', 'api', 'app', '{img}', \
+                'libz', '1.0.0', 'loaded', 'exact', '/usr/lib/libz.so.1', \
+                timezone('UTC', NOW()), timezone('UTC', NOW())); \
+             INSERT INTO workload_network_exposure (cluster_id, pod_namespace, workload_kind, \
+                workload_name, window_hours, pods, ingress_flows, exposed, exposed_via, computed_at) \
+             VALUES ('primary', '{NS}', 'Deployment', 'api', 168, 1, 10, true, '{{public_ip}}', \
+                timezone('UTC', NOW()))"
+        ),
+    );
+    // The Trivy report alone: its row says kev null, but the CVE is in KEV.
+    let p = image_vulnerabilities_filtered(
+        &mut conn,
+        &img,
+        Some("trivy-operator"),
+        &ListFilters::default(),
+        None,
+        10,
+    )
+    .unwrap();
+    assert_eq!(p.items.len(), 1);
+    let f = &p.items[0];
+    assert_eq!((f.kev, f.epss), (Some(true), Some(0.4)));
+    assert_eq!(f.tier, "P0", "{:?}", f.tier_factors);
+    assert!(
+        f.tier_factors.iter().any(|x| x == "kev"),
+        "{:?}",
+        f.tier_factors
+    );
+    assert!(
+        f.tier_factors.iter().any(|x| x == "exposed"),
+        "{:?}",
+        f.tier_factors
+    );
+    // Both findings, and the kev filter, agree.
+    let all =
+        image_vulnerabilities_filtered(&mut conn, &img, None, &ListFilters::default(), None, 10)
+            .unwrap();
+    assert_eq!(all.items.len(), 2);
+    assert!(all
+        .items
+        .iter()
+        .all(|f| f.kev == Some(true) && f.tier == "P0"));
+    let kev = ListFilters {
+        kev: Some(true),
+        ..Default::default()
+    };
+    assert_eq!(
+        image_vulnerabilities_filtered(&mut conn, &img, Some("trivy-operator"), &kev, None, 10)
+            .unwrap()
+            .items
+            .len(),
+        1
+    );
+    // The CVE summary: P0, kev true.
+    crate::supplychain_read::refresh_cve_summary(&mut conn).unwrap();
+    let p0 = ListFilters {
+        tiers: Some(vec![0]),
+        ..Default::default()
+    };
+    let l = list_cves_filtered(&mut conn, &p0, None, false, None, 10).unwrap();
+    assert_eq!(
+        l.items
+            .iter()
+            .map(|c| c.summary.id.as_str())
+            .collect::<Vec<_>>(),
+        ["CVE-2026-0301"]
+    );
+    assert_eq!(l.items[0].summary.kev, Some(true));
+}
+
+/// The CVE summary for one namespace uses the CVE-level KEV even when the
+/// only source saying KEV reports on an image in ANOTHER namespace. Trivy
+/// (kev null) on the image in NS, Grype (kev true) on an image in
+/// sc-other: NS's summary row is P0 (in use + exposed), not P1.
+#[test]
+#[ignore = "requires a live postgres (set KG_TEST_DATABASE_URL)"]
+fn live_database_namespace_summary_uses_kev_reported_elsewhere() {
+    use crate::supplychain_read::{list_cves_filtered, ListFilters};
+    let mut conn = live_conn();
+    exec(
+        &mut conn,
+        "TRUNCATE runtime_package_use, runtime_unowned_paths, runtime_in_use_coverage, \
+            workload_network_exposure;",
+    );
+    let (here, there) = (d(96), d(97));
+    seed_inventory(
+        &mut conn,
+        &here,
+        "ghcr.io/example/api",
+        "2.4.1",
+        "Deployment",
+        "api",
+        "app",
+        0,
+    );
+    exec(
+        &mut conn,
+        &format!(
+            "INSERT INTO images (digest, repository, tags, digest_kind) \
+               VALUES ('{there}', 'ghcr.io/example/web', ARRAY['1'], 'repo') ON CONFLICT DO NOTHING; \
+             INSERT INTO workload_containers (pod_namespace, workload_kind, workload_name, \
+               container_name, container_kind, image_ref, image_digest, state, last_seen) \
+             VALUES ('sc-other', 'Deployment', 'web', 'web', 'regular', 'ghcr.io/example/web:1', \
+               '{there}', 'running', timezone('UTC', NOW()))"
+        ),
+    );
+    let mut trivy = vulns_json(
+        &here,
+        "2026-09-20T08:00:00Z",
+        &[("CVE-2026-0401", "MEDIUM", Some("2"))],
+    );
+    trivy["observed_in"] = json!([]);
+    trivy["vulnerabilities"][0]["package"] =
+        json!({"name": "libq", "version": "1", "type": "debian", "purl": "pkg:deb/debian/libq@1"});
+    trivy["vulnerabilities"][0]["class"] = json!("os-pkgs");
+    store_v(&mut conn, trivy);
+    let mut grype = vulns_json(
+        &there,
+        "2026-09-21T08:00:00Z",
+        &[("CVE-2026-0401", "MEDIUM", Some("2"))],
+    );
+    grype["source"] = json!("grype");
+    grype["sbom_source"] = json!("registry");
+    grype["observed_in"] = json!([]);
+    grype["vulnerabilities"][0]["kev"] = json!(true);
+    store_v(&mut conn, grype);
+    relink_batch(&mut conn, None, 100).unwrap();
+    exec(
+        &mut conn,
+        &format!(
+            "INSERT INTO runtime_package_use (cluster_id, pod_namespace, workload_kind, workload_name, \
+                container_name, image_digest, pkg_name, pkg_version, state, path_match, sample_path, \
+                first_seen, last_seen) VALUES ('primary', '{NS}', 'Deployment', 'api', 'app', '{here}', \
+                'libq', '1', 'loaded', 'exact', '/usr/lib/libq.so.1', \
+                timezone('UTC', NOW()), timezone('UTC', NOW())); \
+             INSERT INTO workload_network_exposure (cluster_id, pod_namespace, workload_kind, \
+                workload_name, window_hours, pods, ingress_flows, exposed, exposed_via, computed_at) \
+             VALUES ('primary', '{NS}', 'Deployment', 'api', 168, 1, 10, true, '{{public_ip}}', \
+                timezone('UTC', NOW()))"
+        ),
+    );
+    crate::supplychain_read::refresh_cve_summary(&mut conn).unwrap();
+    let all = ListFilters::default();
+    let page = list_cves_filtered(&mut conn, &all, Some(NS), false, None, 10).unwrap();
+    assert_eq!(page.items.len(), 1);
+    let row = &page.items[0].summary;
+    assert_eq!(row.id, "CVE-2026-0401");
+    assert_eq!(
+        row.kev,
+        Some(true),
+        "the namespace's own rows say null; the CVE is in KEV"
+    );
+    assert_eq!(
+        row.tier.as_deref(),
+        Some("P0"),
+        "medium + in use + KEV + exposed"
+    );
+    // The per-image read agrees, from the image whose only report is Trivy's.
+    let f = crate::supplychain_read::image_vulnerabilities_filtered(
+        &mut conn, &here, None, &all, None, 10,
+    )
+    .unwrap();
+    assert_eq!((f.items[0].kev, f.items[0].tier), (Some(true), "P0"));
+}
+
+/// vuln_cve_facts: ingest folds facts in (never lowering them), the
+/// retention rebuild recomputes them from what is stored, and a read
+/// without a facts row falls back to the finding's own values.
+#[test]
+#[ignore = "requires a live postgres (set KG_TEST_DATABASE_URL)"]
+fn live_database_cve_facts_upsert_rebuild_and_fallback() {
+    let mut conn = live_conn();
+    let facts = |conn: &mut PgConnection| -> Option<(Option<bool>, Option<f32>)> {
+        #[derive(QueryableByName)]
+        struct F {
+            #[diesel(sql_type = diesel::sql_types::Nullable<diesel::sql_types::Bool>)]
+            kev: Option<bool>,
+            #[diesel(sql_type = diesel::sql_types::Nullable<diesel::sql_types::Float>)]
+            epss: Option<f32>,
+        }
+        sql_query("SELECT kev, epss FROM vuln_cve_facts WHERE vuln_id = 'CVE-2026-0501'")
+            .get_result::<F>(conn)
+            .optional()
+            .unwrap()
+            .map(|f| (f.kev, f.epss))
+    };
+    let payload =
+        |img: &str, source: &str, at: &str, kev: serde_json::Value, epss: serde_json::Value| {
+            let mut v = vulns_json(img, at, &[("CVE-2026-0501", "LOW", None)]);
+            v["source"] = json!(source);
+            if source == "grype" {
+                v["sbom_source"] = json!("registry");
+            }
+            v["observed_in"] = json!([]);
+            v["vulnerabilities"][0]["kev"] = kev;
+            v["vulnerabilities"][0]["epss"] = epss;
+            v
+        };
+    // Trivy alone: no fact, no row.
+    store_v(
+        &mut conn,
+        payload(
+            &d(98),
+            "trivy-operator",
+            "2026-09-20T08:00:00Z",
+            json!(null),
+            json!(null),
+        ),
+    );
+    assert_eq!(facts(&mut conn), None);
+    // Grype says not KEV, EPSS 0.2.
+    store_v(
+        &mut conn,
+        payload(
+            &d(98),
+            "grype",
+            "2026-09-20T09:00:00Z",
+            json!(false),
+            json!(0.2),
+        ),
+    );
+    assert_eq!(facts(&mut conn), Some((Some(false), Some(0.2))));
+    // Another image's Grype says KEV, EPSS 0.1: kev true, EPSS stays 0.2.
+    store_v(
+        &mut conn,
+        payload(
+            &d(99),
+            "grype",
+            "2026-09-20T09:00:00Z",
+            json!(true),
+            json!(0.1),
+        ),
+    );
+    assert_eq!(facts(&mut conn), Some((Some(true), Some(0.2))));
+    // A newer scan of the first image drops its EPSS; ingest never lowers.
+    store_v(
+        &mut conn,
+        payload(
+            &d(98),
+            "grype",
+            "2026-09-21T09:00:00Z",
+            json!(false),
+            json!(0.05),
+        ),
+    );
+    assert_eq!(facts(&mut conn), Some((Some(true), Some(0.2))));
+    // The rebuild recomputes from what is stored: EPSS falls to 0.1.
+    crate::supplychain_read::refresh_cve_summary(&mut conn).unwrap();
+    assert_eq!(facts(&mut conn), Some((Some(true), Some(0.1))));
+    // The KEV rows go (GC): the rebuild keeps the remaining "false".
+    exec(
+        &mut conn,
+        &format!(
+            "DELETE FROM image_vulnerabilities WHERE digest = '{}'",
+            d(99)
+        ),
+    );
+    crate::supplychain_read::refresh_cve_summary(&mut conn).unwrap();
+    assert_eq!(facts(&mut conn), Some((Some(false), Some(0.05))));
+    // Retracted: the only remaining source now says nothing about KEV or
+    // EPSS. Ingest cannot lower the row; the rebuild removes it.
+    store_v(
+        &mut conn,
+        payload(
+            &d(98),
+            "grype",
+            "2026-09-22T09:00:00Z",
+            json!(null),
+            json!(null),
+        ),
+    );
+    assert_eq!(
+        facts(&mut conn),
+        Some((Some(false), Some(0.05))),
+        "ingest never lowers"
+    );
+    crate::supplychain_read::refresh_cve_summary(&mut conn).unwrap();
+    assert_eq!(facts(&mut conn), None, "the rebuild replaces, not merges");
+    // Every row of the CVE gone (GC): its facts row goes in the same pass.
+    store_v(
+        &mut conn,
+        payload(
+            &d(98),
+            "grype",
+            "2026-09-23T09:00:00Z",
+            json!(true),
+            json!(0.3),
+        ),
+    );
+    assert_eq!(facts(&mut conn), Some((Some(true), Some(0.3))));
+    exec(
+        &mut conn,
+        "DELETE FROM image_vulnerabilities WHERE vuln_id = 'CVE-2026-0501'",
+    );
+    crate::supplychain_read::refresh_cve_summary(&mut conn).unwrap();
+    assert_eq!(
+        facts(&mut conn),
+        None,
+        "no rows left for the CVE, no facts row"
+    );
+    store_v(
+        &mut conn,
+        payload(
+            &d(98),
+            "grype",
+            "2026-09-24T09:00:00Z",
+            json!(false),
+            json!(0.05),
+        ),
+    );
+    // No facts row at all: a read uses the finding's own values.
+    exec(&mut conn, "DELETE FROM vuln_cve_facts");
+    let p = crate::supplychain_read::image_vulnerabilities_filtered(
+        &mut conn,
+        &d(98),
+        Some("grype"),
+        &crate::supplychain_read::ListFilters::default(),
+        None,
+        10,
+    )
+    .unwrap();
+    assert_eq!((p.items[0].kev, p.items[0].epss), (Some(false), Some(0.05)));
+}
+
+/// A second connection to the test database (never live_conn(), which
+/// resets tables), with a lock timeout so a blocked statement fails
+/// instead of hanging the test.
+fn second_conn(lock_timeout: &str) -> PgConnection {
+    use diesel::connection::SimpleConnection;
+    let url = std::env::var("KG_TEST_DATABASE_URL").unwrap();
+    let mut c = PgConnection::establish(&url).expect("connect");
+    c.batch_execute(&format!("SET lock_timeout = '{lock_timeout}'"))
+        .unwrap();
+    c
+}
+
+/// A Grype payload for `img` with one finding of `id`, KEV and EPSS set.
+fn kev_payload(img: &str, id: &str, at: &str, epss: f64) -> VulnPayload {
+    let mut v = vulns_json(img, at, &[(id, "HIGH", None)]);
+    v["source"] = json!("grype");
+    v["sbom_source"] = json!("registry");
+    v["observed_in"] = json!([]);
+    v["vulnerabilities"][0]["kev"] = json!(true);
+    v["vulnerabilities"][0]["epss"] = json!(epss);
+    normalise_vulnerabilities(img, parse_vulns(v), Utc::now()).unwrap()
+}
+
+/// The CVE summary never holds a lock an ingest waits on: with the
+/// summary's transaction still open, an ingest that updates an existing
+/// CVE's facts and one that adds a new CVE both finish at once (a 3 s lock
+/// timeout would fail them), instead of waiting for the whole pass.
+#[test]
+#[ignore = "requires a live postgres (set KG_TEST_DATABASE_URL)"]
+fn live_database_ingest_never_waits_for_the_cve_summary() {
+    let mut conn = live_conn();
+    store_vulnerabilities(
+        &mut conn,
+        kev_payload(&d(120), "CVE-2026-0601", "2026-09-20T08:00:00Z", 0.2),
+    )
+    .unwrap();
+    crate::supplychain_read::refresh_cve_facts(&mut conn).unwrap();
+    conn.transaction::<_, diesel::result::Error, _>(|c| {
+        crate::supplychain_read::refresh_cve_summary_only(c)?;
+        // The summary's transaction is still open here.
+        let h = std::thread::spawn(|| {
+            let mut b = second_conn("3s");
+            let t = std::time::Instant::now();
+            store_vulnerabilities(
+                &mut b,
+                kev_payload(&d(120), "CVE-2026-0601", "2026-09-21T08:00:00Z", 0.9),
+            )
+            .map_err(|e| format!("existing CVE: {e}"))?;
+            store_vulnerabilities(
+                &mut b,
+                kev_payload(&d(121), "CVE-2026-0602", "2026-09-21T08:00:00Z", 0.5),
+            )
+            .map_err(|e| format!("new CVE: {e}"))?;
+            Ok::<_, String>(t.elapsed())
+        });
+        let took = h
+            .join()
+            .unwrap()
+            .expect("ingest must not block on the summary");
+        assert!(
+            took < std::time::Duration::from_secs(2),
+            "ingest waited {took:?}"
+        );
+        Ok(())
+    })
+    .unwrap();
+    assert_eq!(
+        count(&mut conn, "SELECT count(*) AS n FROM vuln_cve_facts WHERE kev AND (vuln_id = 'CVE-2026-0602' OR (vuln_id = 'CVE-2026-0601' AND epss > 0.8))"),
+        2
+    );
+}
+
+/// A new CVE ingested while the facts rebuild is between its DELETE and
+/// INSERT neither aborts the rebuild (duplicate key) nor is lost: the
+/// ingest waits on the table lock (it has not committed after 700 ms),
+/// then lands after the rebuild commits.
+#[test]
+#[ignore = "requires a live postgres (set KG_TEST_DATABASE_URL)"]
+fn live_database_a_cve_ingested_mid_rebuild_waits_and_is_kept() {
+    let mut conn = live_conn();
+    store_vulnerabilities(
+        &mut conn,
+        kev_payload(&d(122), "CVE-2026-0603", "2026-09-20T08:00:00Z", 0.1),
+    )
+    .unwrap();
+    let (tx, rx) = std::sync::mpsc::channel::<Result<(), String>>();
+    let mut handle = None;
+    crate::supplychain_read::refresh_cve_facts_with(&mut conn, || {
+        handle = Some(std::thread::spawn(move || {
+            let mut b = second_conn("20s");
+            let r = store_vulnerabilities(
+                &mut b,
+                kev_payload(&d(123), "CVE-2026-0604", "2026-09-21T08:00:00Z", 0.95),
+            )
+            .map(|_| ())
+            .map_err(|e| e.to_string());
+            tx.send(r).unwrap();
+        }));
+        std::thread::sleep(std::time::Duration::from_millis(700));
+        assert!(
+            rx.try_recv().is_err(),
+            "the ingest committed during the rebuild"
+        );
+    })
+    .expect("the rebuild must not abort");
+    handle.unwrap().join().unwrap();
+    rx.recv()
+        .unwrap()
+        .expect("the ingest must succeed after the rebuild");
+    assert_eq!(
+        count(&mut conn, "SELECT count(*) AS n FROM vuln_cve_facts WHERE vuln_id IN ('CVE-2026-0603', 'CVE-2026-0604') AND kev"),
+        2,
+        "both the rebuilt and the late CVE are there"
     );
 }

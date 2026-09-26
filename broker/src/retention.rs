@@ -2139,8 +2139,10 @@ mod workload_profile_retention_tests {
 //
 // 1. Relink every stored payload to the inventory (supplychain::relink),
 //    so a digest the inventory learns after the scan arrived is joined
-//    within one interval, then rebuild the per-CVE summary that
-//    GET /vulnerabilities reads (vuln_cve_summary).
+//    within one interval; refresh runtime in-use evidence, capture
+//    coverage and observed exposure (in_use_store, P1-5); then rebuild the
+//    per-CVE summary with tiers that GET /vulnerabilities reads
+//    (vuln_cve_summary).
 // 2. Expire staged SBOM sets that stopped receiving pages
 //    (`SUPPLYCHAIN_SBOM_PAGE_TTL_SECS`, default 3600).
 // 3. Delete payloads nothing runs: no linked inventory digest has a
@@ -2253,6 +2255,9 @@ pub(crate) async fn run_supplychain_pass(pool: &DbPool, days: u32, grace_hours: 
     if changed > 0 {
         info!(links_changed = changed, "supply-chain links refreshed");
     }
+    // 1a. Runtime in-use evidence and exposure (P1-5), which the summary
+    //     below tiers from.
+    run_in_use_pass(pool, batch).await;
     // 1b. Rebuild the per-CVE summary GET /vulnerabilities reads, from the
     //     links just refreshed.
     let p = pool.clone();
@@ -2294,6 +2299,134 @@ pub(crate) async fn run_supplychain_pass(pool: &DbPool, days: u32, grace_hours: 
         );
     } else {
         debug!("supply-chain retention: nothing to remove");
+    }
+}
+
+/// Run package-use batches from the start until one reports no next
+/// cursor, at most `max_batches`. The evidence is `complete` only when the
+/// last batch said so; an error, a panic, or running out of batches leaves
+/// it incomplete (so refresh_coverage believes no container). Truncated
+/// digests from every batch are collected. Returns the rows written too.
+async fn collect_use_evidence<F, Fut>(
+    max_batches: u32,
+    mut next_batch: F,
+) -> (crate::in_use_store::UseEvidence, usize)
+where
+    F: FnMut(Option<String>) -> Fut,
+    Fut: std::future::Future<Output = Result<crate::in_use_store::BatchRefresh, String>>,
+{
+    let mut evidence = crate::in_use_store::UseEvidence::default();
+    let mut rows = 0usize;
+    let mut cursor: Option<String> = None;
+    for _ in 0..max_batches {
+        match next_batch(cursor.take()).await {
+            Ok(b) => {
+                rows += b.rows_written;
+                evidence.truncated.extend(b.truncated);
+                match b.next {
+                    Some(c) => cursor = Some(c),
+                    None => {
+                        evidence.complete = true;
+                        break;
+                    }
+                }
+            }
+            Err(e) => {
+                warn!(error = %e, "in-use: package use refresh failed");
+                break;
+            }
+        }
+    }
+    (evidence, rows)
+}
+
+/// Rebuild the derived in-use tables (in_use_store module docs): package
+/// use from the runtime inventory, per-container coverage, and observed
+/// exposure. Each step logs and gives up on its own error; a failed step
+/// leaves the previous pass's rows, and unknowns only push tiers up.
+async fn run_in_use_pass(pool: &DbPool, batch: i64) {
+    use crate::in_use_store as s;
+    let p = pool.clone();
+    let available = match tokio::task::spawn_blocking(move || -> Result<bool, RetentionError> {
+        let mut conn = p.get().map_err(RetentionError::Pool)?;
+        s::runtime_inventory_available(&mut conn).map_err(RetentionError::Diesel)
+    })
+    .await
+    {
+        Ok(Ok(a)) => a,
+        Ok(Err(e)) => {
+            warn!(error = %e, "in-use: runtime inventory check failed");
+            false
+        }
+        Err(e) => {
+            warn!(error = %e, "in-use: runtime inventory check panicked");
+            false
+        }
+    };
+    // Coverage is only believed where this pass matched every runtime path
+    // to its package: a pass that stops early (error, panic, batch cap)
+    // leaves the rest stale, and a truncated image lost its older paths.
+    let mut evidence = s::UseEvidence::default();
+    if available {
+        let (ev, rows) = collect_use_evidence(MAX_SUPPLYCHAIN_BATCHES, |after| {
+            let p = pool.clone();
+            async move {
+                tokio::task::spawn_blocking(move || {
+                    let mut conn = p.get().map_err(|e| e.to_string())?;
+                    s::refresh_package_use_batch(&mut conn, after.as_deref(), batch)
+                        .map_err(|e| e.to_string())
+                })
+                .await
+                .unwrap_or_else(|e| Err(format!("task panicked: {e}")))
+            }
+        })
+        .await;
+        evidence = ev;
+        if !evidence.complete {
+            warn!(
+                rows,
+                "in-use: package use did not finish this pass; no container is treated as covered"
+            );
+        } else if !evidence.truncated.is_empty() {
+            warn!(
+                images = evidence.truncated.len(),
+                cap = s::MAX_RUNTIME_ROWS_PER_IMAGE,
+                "in-use: runtime rows truncated; those images are not treated as covered"
+            );
+        }
+        debug!(rows, "in-use: package use refreshed");
+    }
+    let p = pool.clone();
+    let r =
+        tokio::task::spawn_blocking(move || -> Result<(usize, usize, usize), RetentionError> {
+            let mut conn = p.get().map_err(RetentionError::Pool)?;
+            let pruned = if available {
+                s::prune_package_use(&mut conn)
+            } else {
+                s::clear_package_use(&mut conn)
+            }
+            .map_err(RetentionError::Diesel)?;
+            let t = crate::in_use::TierSettings::from_env();
+            let cov =
+                s::refresh_coverage(&mut conn, &t, &evidence).map_err(RetentionError::Diesel)?;
+            let exp = s::refresh_exposure(
+                &mut conn,
+                crate::supplychain_read::EXPOSURE_DEFAULT_WINDOW_HOURS,
+            )
+            .map_err(RetentionError::Diesel)?;
+            Ok((pruned, cov, exp))
+        })
+        .await;
+    match r {
+        Ok(Ok((pruned, cov, exp))) => debug!(
+            pruned,
+            coverage_rows = cov,
+            exposure_rows = exp,
+            runtime_inventory = available,
+            "in-use: coverage and exposure refreshed"
+        ),
+        Ok(Err(e)) => warn!(error = %e, "in-use: coverage/exposure refresh failed"),
+        Err(e) => warn!(error = %e, "in-use: coverage/exposure task panicked"),
     }
 }
 
@@ -3963,5 +4096,69 @@ mod tests {
             assert!(!plan.contains("Seq Scan on pod_traffic"), "{plan}");
         }
         reset_traffic_tables(&mut conn);
+    }
+}
+
+#[cfg(test)]
+mod in_use_pass_tests {
+    use super::collect_use_evidence;
+    use crate::in_use_store::BatchRefresh;
+
+    fn batch(next: Option<&str>, truncated: &[&str]) -> Result<BatchRefresh, String> {
+        Ok(BatchRefresh {
+            rows_written: 1,
+            next: next.map(String::from),
+            truncated: truncated.iter().map(|s| s.to_string()).collect(),
+        })
+    }
+
+    /// Replays `script` one result per batch, recording the cursors asked
+    /// for.
+    async fn run(
+        max: u32,
+        script: Vec<Result<BatchRefresh, String>>,
+    ) -> (crate::in_use_store::UseEvidence, Vec<Option<String>>) {
+        let mut it = script.into_iter();
+        let mut asked = Vec::new();
+        let (ev, _) = collect_use_evidence(max, |after| {
+            asked.push(after);
+            let r = it.next().unwrap_or_else(|| Err("script exhausted".into()));
+            async move { r }
+        })
+        .await;
+        (ev, asked)
+    }
+
+    #[tokio::test]
+    async fn a_finished_pass_is_complete_and_keeps_every_truncated_digest() {
+        let (ev, asked) = run(10, vec![batch(Some("d2"), &["d1"]), batch(None, &["d3"])]).await;
+        assert!(ev.complete);
+        assert_eq!(ev.truncated, ["d1", "d3"]);
+        assert_eq!(
+            asked,
+            [None, Some("d2".to_string())],
+            "the cursor is carried"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_error_leaves_the_pass_incomplete() {
+        let (ev, _) = run(10, vec![batch(Some("d2"), &[]), Err("db down".into())]).await;
+        assert!(!ev.complete);
+    }
+
+    #[tokio::test]
+    async fn running_out_of_batches_leaves_the_pass_incomplete() {
+        let (ev, asked) = run(
+            2,
+            vec![
+                batch(Some("a"), &[]),
+                batch(Some("b"), &[]),
+                batch(None, &[]),
+            ],
+        )
+        .await;
+        assert!(!ev.complete, "the cap stopped it before the last batch");
+        assert_eq!(asked.len(), 2);
     }
 }

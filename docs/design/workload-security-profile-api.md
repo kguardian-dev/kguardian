@@ -4,12 +4,13 @@ Part of #1533. Implemented in `broker/src/workload_profile.rs` (read model, post
 `broker/src/pod_security.rs` (Pod Security Standards analyser), PR #1669. Consumers: the frontend profile
 page (#1672), llm-bridge tools and the advisor `profile` commands (#1668).
 
-Status: **v1.4, stable**. Every change is appended to the CHANGELOG at the bottom, dated.
+Status: **v1.5, stable**. Every change is appended to the CHANGELOG at the bottom, dated.
 
 **Examples:** every example below is generated from raw responses of a v1.4 broker build against a
 seeded test database (neutral names only). Values are verbatim. The only edits are: lists longer than the stated
 limit are cut and end with a `"(N more in the capture)"` string, and a key listed in `_omitted` was left out
-(it is shown in its own section).
+(it is shown in its own section). The section 4 captures are from v1.4; the v1.5 changes to the `sbom` and
+`vex` artifacts are described in text next to them.
 
 ## 0. Conventions (apply to every response below)
 
@@ -1178,10 +1179,25 @@ Artifacts and where they come from (existing generators only):
 | `ciliumnetworkpolicy` | **withheld** (a CNP has no per-policy audit mode) | `CiliumNetworkPolicy` | same |
 | `seccompprofile` | `SeccompProfile` with `SCMP_ACT_LOG` | `SCMP_ACT_ERRNO` | the `/seccomp/profiles/{..}/export` path |
 | `securitycontext` | strategic-merge **patch** + `pod-security.kubernetes.io/audit=restricted` label suggestion | same patch + `.../enforce=restricted` | the profile's `podSecurity.recommendation` |
-| `sbom` | not available (needs runtime SBOM data, P1-3/P1-5) | same | stub |
-| `vex` | not available (needs vulnerability data, P1-3/P1-5) | same | stub |
+| `sbom` | the stored SBOM of each container image as CycloneDX 1.5 JSON (`sbom-<container>-<digest12>.cdx.json`), one document per digest, with `image` saying which source and trust it came from; unavailable per image, with the reason, when no source has an SBOM or it does not fit the bundle cap | same | `supplychain_read::cyclonedx_for`, the `/images/{digest}/sbom/cyclonedx` document (#1671) |
+| `vex` | OpenVEX 0.2.0 draft (`vex.openvex.json`): `not_affected` only for packages unseen in every container over a covered capture window, each statement marked as a draft for human review; commented out of the YAML apply stream; unavailable, with the reason, when no statement qualifies | same | `in_use_store::openvex_draft` (P1-5) |
 | `admission` | not available (needs the image trust policy, P2-3) | same | stub |
 
+- **SBOM per image (v1.5):** the images are each current container's running digests (or its newest
+  digest when none runs; stale containers are left out), one document per digest, shared by every container
+  running it. The SBOM is the one `GET /images/{digest}/sbom/cyclonedx` returns: Trivy Operator's
+  (`sbomTrust: scanned`) first, a registry-attached one (`unverified` / `attached-unbound`: signature not
+  checked) only when it is the only one. `image.source` and `image.sbomTrust` say which; `applyWith` says it
+  in words. No SBOM for a digest is an unavailable document for that image ("contents are unknown"), never
+  an empty SBOM. An SBOM whose source listed no components is still an available document, but its
+  `applyWith` and YAML header say "0 components reported by <source> (<trust>)", so it is not read as a
+  checked clean image. At most 10 000 components per bundle. When `sbom` is requested the export first reads the
+  chosen SBOMs' sizes and charges the read budget for exactly that many components (three copies for
+  `format=yaml`, two for `zip-manifest`), and never loads more than it charged for; an image that does not
+  fit is unavailable with the per-image route to download it.
+- **OpenVEX (v1.5):** see the `vex` row. Statements come only from packages unseen in every container over a
+  covered capture window (vulnerabilities API, "In use"); without that coverage signal the artifact is
+  unavailable, with the reason.
 - **Network policies for a workload:** the generator is per pod. It gets the newest flow rows of every
   pod of the workload (at most 20 000) and, as its target, the newest live pod with the workload's
   selector labels (so it selects every replica, not one ReplicaSet's `pod-template-hash`). Its object name
@@ -1222,7 +1238,10 @@ From `GET /workloads/payments/Deployment/checkout/export?mode=enforce` -> 409 (c
 A bundle header (workload, mode, profile revision, "kguardian never applies anything", one
 `# not included: <artifact> (<reason>)` line per unavailable artifact), then one `---` document per
 included Kubernetes object. The securityContext patch is **not** an object, so it is appended as comments
-after the last document; the stream stays safe to pass to `kubectl apply -f`.
+after the last document; the stream stays safe to pass to `kubectl apply -f`. From v1.5 the OpenVEX draft
+and each available SBOM are appended as comments the same way, each SBOM under a header naming its image,
+source and trust (`# ---- sbom (CycloneDX SBOM <fileName> for <digest> (<containers>), source <source>,
+trust <trust>; not part of the apply stream) ----`). `format=zip-manifest` carries them as plain files.
 
 From `GET /workloads/payments/Deployment/checkout/export` -> 200 (capture `export-yaml-audit-payments-checkout.json`, body verbatim):
 
@@ -1432,9 +1451,14 @@ From `GET /workloads/payments/Deployment/checkout/export?mode=enforce&format=zip
 ```
 
 - `documents[]`: `{artifact, fileName, available, refused, reason, apiVersion, kind, mode, contentType,
-  content, applyWith}`, one per requested artifact in bundle order. `available: false` means `content`
-  is `null` and `reason` says why. `refused` is only set on a 409. `fileName` is
-  `securitycontext.patch.yaml` for the patch, otherwise `<artifact>.yaml`.
+  content, applyWith, image}`, in bundle order: one per requested artifact, except `sbom`, which has one per
+  container image (v1.5). `available: false` means `content` is `null` and `reason` says why. `refused` is
+  only set on a 409. `fileName` is `securitycontext.patch.yaml` for the patch, `vex.openvex.json`,
+  `sbom-<container>-<digest12>.cdx.json`, otherwise `<artifact>.yaml`. `contentType` is
+  `application/yaml`, `application/json` (vex) or `application/vnd.cyclonedx+json` (sbom).
+- `image` (v1.5; `null` except on `sbom` documents): `{containers, digest, imageRef, source, sbomTrust,
+  scannedAt, components}`. `source` / `sbomTrust` / `scannedAt` / `components` are `null` when no source
+  has an SBOM for the digest.
 
 ## 5. Storage (for reviewers; not an API)
 
@@ -1527,3 +1551,12 @@ From `GET /workloads/payments/Deployment/checkout/export?mode=enforce&format=zip
     `drift.securityContextRegression/<c|pod>`) join `findings` / `attention`. Drift never sets posture.
   - List items gain `drift: {count, byType}`.
   - `/metrics` gains `kguardian_workload_drift{workload_namespace, workload_kind, workload, type}`.
+- 2026-09-26 (**v1.5**, export bundle `sbom` and `vex` artifacts; additive fields, one semantic change):
+  - `vex` is the OpenVEX 0.2.0 draft (`vex.openvex.json`, `application/json`), commented out of the YAML
+    apply stream; unavailable with the reason when no statement qualifies.
+  - `sbom` is the stored SBOM of each container image as CycloneDX (`application/vnd.cyclonedx+json`):
+    **one document per digest**, so `artifact: "sbom"` can appear more than once in `documents[]` (the
+    semantic change). Carried as comments in `format=yaml` (under a header naming image, source and trust),
+    as files by `format=zip-manifest`.
+    At most 10 000 components per bundle.
+  - New `documents[].image` (`null` except on `sbom`): which image, source and SBOM trust.

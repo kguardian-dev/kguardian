@@ -21,12 +21,87 @@ All reads are paginated, capped and charged to the broker's read-memory
 budget; they answer `503` with `Retry-After` rather than a partial result.
 No list response carries an SBOM document.
 
-### "In use" is unknown for now
+### In use
 
-Findings, CVE rows and exposure rows carry `inUse: null` and
-`inUseState: "unknown"`. They are filled when kguardian can tell which
-packages a workload actually loads. Until then, treat every finding as
-potentially reachable: unknown never means safe.
+The controller records which files each container executes and which
+shared libraries it maps (the runtime inventory).
+Each retention pass matches those paths to the files the image's SBOM
+lists per package and gives every finding, per workload container, one of:
+
+| `inUseState` | Meaning |
+|---|---|
+| `executed` | A binary the package owns was executed. |
+| `loaded` | A shared library the package owns was mapped, at start or later by `dlopen()`. |
+| `unknown` | No evidence either way. `inUseDetail.reason` says why. |
+| `installed_not_observed` | Capture covered the container for the whole window and nothing the package owns ran. |
+
+Paths are matched as the kernel reports them (symlinks resolved) against
+the package database's spelling: `/usr/lib/...` also matches `/lib/...` on
+merged-/usr images, and `libz.so.1.2.13` also matches the `libz.so.1`
+soname link, never the `libz.so` development link. Executed or loaded
+paths no package owns are kept per image as unowned (a binary copied in
+outside a package manager).
+
+`inUseDetail.coverage` says how much the state is worth for the package type:
+
+- `file`: OS packages (deb, apk, rpm). Per file.
+- `static_binary`: Go and Rust modules. The SBOM lists the binary as each
+  module's file, so every module linked into a binary is `executed` when
+  it runs. That means linked into running code, not that the vulnerable
+  function was reached.
+- `interpreted`: npm, pip, jar, gem and similar. An interpreter reads
+  them; nothing is mapped or executed, so they are always `unknown`
+  (`reason: language_package`).
+
+Other `unknown` reasons: `no_runtime_data` (no capture for the container,
+or the capture coverage signal is not available yet), `capture_gap`,
+`host_network`, `no_package_files` (no SBOM lists the package's files).
+`installed_not_observed` is only claimed with a coverage signal from the
+runtime inventory; until the inventory provides one, every finding is
+`executed`, `loaded` or `unknown`. Unknown never means safe: it is ranked
+as if loaded.
+
+`inUse` is the same as a boolean: `true` executed/loaded, `false`
+installed_not_observed, `null` unknown.
+
+### Risk tiers
+
+Every finding and CVE row has a `tier`, most urgent first:
+
+| Tier | Rule |
+|---|---|
+| `P0` | In use, AND (in CISA KEV or EPSS >= 10%), AND the workload is exposed by observed ingress. |
+| `P1` | In use and critical or high; or the P0 factors without exposure. |
+| `P2` | In use and medium, low or unknown severity; or high with no fix and not exposed. |
+| `Background` | Installed, never seen executed or loaded over a covered window (`inUseDetail.observedSince`, `windowHours`). |
+
+"In use" includes `unknown`. Exposure is the rule in
+[How network exposure is computed](#how-network-exposure-is-computed). A
+workload with no observed ingress at all counts as exposed by default, so a
+KEV finding (or one at or above the EPSS threshold) in a package in use
+there is P0, not P1: missing data pushes a tier up, never down. Set
+`unknownExposureAsExposed: false` to rank it P1 instead. A CVE's
+tier is its most urgent over every affected workload container.
+A CVE row's `tier` is `null` until the retention pass after an upgrade has
+computed it ("not computed yet", never a low tier); a `tier` filter does not
+match those rows. `tierFactors` lists what produced a finding's tier, for example
+`["in_use:loaded", "kev", "severity:high", "exposed"]`.
+
+The thresholds are Helm values under `broker.supplychain.tiers`:
+`epss` (default `0.1`), `unknownExposureAsExposed` (default `true`) and
+`inUseMinWindowHours` (default `24`, the coverage needed before
+`installed_not_observed`).
+
+### OpenVEX draft
+
+For a workload, the broker can draft an OpenVEX 0.2.0 document with one
+`not_affected` / `vulnerable_code_not_in_execute_path` statement per
+finding whose package is `installed_not_observed` in every container of
+the workload that runs the image. Each statement is marked as a draft
+requiring human review and carries the observation window. Nothing else
+gets a statement: no `affected` claims, and no statement from missing
+data. The draft is produced for the workload export bundle's `vex`
+artifact.
 
 ### Sources
 
@@ -37,8 +112,19 @@ each payload replaces only its own `(digest, source)`.
 - **Findings are deduplicated across sources** on (vulnerability id,
   package name, installed version). Two sources reporting the same thing
   make one finding with `sources: ["grype", "trivy-operator"]`, never two.
-  Severity, score and EPSS are the highest any source gives, `kev` is true
-  if any source says so, and a fix from any source makes it fixable.
+  Severity and score are the highest any source gives, and a fix from any
+  source makes it fixable.
+- **KEV and EPSS are per CVE**, not per finding: `kev`, `kevDateAdded`,
+  `epss` and `epssPercentile` on every finding (and on CVE rows) are
+  resolved over every source's rows for that vulnerability id. `kev` is
+  true if any source says true, false if one says false and none true,
+  and `null` only when no source reports it; EPSS is the highest reported.
+  So a Trivy finding (Trivy never reports KEV) shows `kev: true` when Grype
+  lists the same CVE in KEV, even if the two name the package version
+  differently, and its tier and `tierFactors` use that. The broker keeps these
+  per-CVE facts in one row per CVE, updated at ingest and rebuilt each
+  retention pass (so a lower EPSS takes effect, and CVEs whose findings
+  were removed drop out, within one interval).
   `fixedVersions` lists every distinct fixed version the sources give,
   ordered by source; the broker does not pick one, because text order is
   not version order (`"10.1"` sorts before `"9.2"`).
@@ -155,6 +241,10 @@ severe first.
 | `severity` | all | Comma-separated: `CRITICAL,HIGH,MEDIUM,LOW,NONE,UNKNOWN`. Unknown names are a `400`. |
 | `fixable` | all | `true`: only findings some source has a fix for. `false`: only without. |
 | `source` | all | Only this source's report. |
+| `kev` | all | `true`: only KEV-listed. `false`: only findings a source says are not. |
+| `epss_min` | | Only findings with EPSS at or above this (0-1). Unknown EPSS is excluded. |
+| `in_use` | all | Comma-separated `inUseState` values. |
+| `tier` | all | Comma-separated: `P0,P1,P2,Background`. |
 | `limit` | 100 | Clamped to `[1, 500]`. |
 | `after` | | The previous page's `nextAfter`. |
 
@@ -176,7 +266,10 @@ severe first.
      "title": "…", "primaryUrl": "https://…", "filePaths": ["app/node_modules/express/package.json"],
      "kev": null, "kevDateAdded": null, "epss": null, "epssPercentile": null,
      "sources": ["grype", "trivy-operator"], "reportDigests": ["sha256:9f86…"],
-     "inUse": null, "inUseState": "unknown"}
+     "inUse": null, "inUseState": "unknown",
+     "inUseDetail": {"state": "unknown", "reason": "language_package", "observedSince": null,
+                     "windowHours": 24, "containers": 1, "coverage": "interpreted"},
+     "tier": "P2", "tierFactors": ["in_use:unknown", "severity:medium", "exposed"]}
   ],
   "nextAfter": "3.4812"
 }
@@ -213,6 +306,7 @@ costs the same however many findings there are; `computedAt` and
 | `fixable` | all | Whether any source has a fix. |
 | `namespace` | all | Counts for this namespace, and only CVEs that affect one. |
 | `running` | `false` | `true`: only CVEs with at least one running workload. |
+| `kev`, `epss_min`, `in_use`, `tier` | all | As above, on the CVE's values in scope. |
 | `limit`, `after` | 100 | As above. |
 
 ```json
@@ -222,7 +316,9 @@ costs the same however many findings there are; `computedAt` and
      "kev": null, "maxEpss": null, "packages": ["openssl"],
      "sources": ["grype", "trivy-operator"], "images": 3, "workloads": 5,
      "runningWorkloads": 4, "namespaces": 2, "weakestJoin": "image_id",
-     "inUse": null, "inUseState": "unknown"}
+     "tier": "P1", "executedWorkloads": 0, "loadedWorkloads": 2, "unknownWorkloads": 3,
+     "notObservedWorkloads": 0, "exposedWorkloads": 1,
+     "inUse": true, "inUseState": "loaded"}
   ],
   "nextAfter": "5.CVE-2099-1002",
   "computedAt": "2026-09-27T12:00:00",
@@ -260,10 +356,10 @@ digest is affected.
                              "ingressFromPublicIps": 2, "ingressFromNodes": 3,
                              "exposed": true,
                              "exposedVia": ["other_namespace", "unattributed", "public_ip", "node"]},
-                 "inUse": null, "inUseState": "unknown"}],
+                 "inUse": true, "inUseState": "loaded"}],
   "namespaces": [{"namespace": "shop", "workloads": 1, "runningWorkloads": 1,
                   "exposedWorkloads": 1, "unknownExposureWorkloads": 0}],
-  "inUse": null, "inUseState": "unknown"
+  "inUse": true, "inUseState": "loaded"
 }
 ```
 
