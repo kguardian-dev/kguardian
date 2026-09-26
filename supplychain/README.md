@@ -1,7 +1,8 @@
 # kguardian-supplychain
 
 Supply-chain data for the workloads kguardian already profiles: which
-vulnerabilities and packages are in the images they run. Part of
+vulnerabilities and packages are in the images they run, and who signed
+them. Part of
 [#1533](https://github.com/kguardian-dev/kguardian/issues/1533).
 
 It is off by default (`supplychain.enabled: false` in the Helm chart) and
@@ -305,6 +306,57 @@ The coordinator (`pkg/match`):
 - emits `ImageVulnerabilities` with `source: "grype"`, `sbom_sources`,
   `sbom_trust`, `db_updated_at`, and per-vulnerability `kev` / `epss` when
   the database has them.
+### Signature discovery
+
+Off unless `ATTESTATION_ENABLED=true` (chart:
+`supplychain.signatureDiscovery.enabled`). Every `interval` the component
+reads the running digests from the broker (`GET /images`), finds out who
+signed each one and posts one result per digest to
+`POST /images/{digest}/attestation`. It reports; it never blocks.
+
+For each digest it reads the cosign `sha256-<hex>.sig` and `.att` tags and
+the Sigstore bundles attached as OCI referrers (referrers API, or the
+`sha256-<hex>` tag fallback on registries without it, such as GHCR). A
+platform manifest with no signature of its own is also checked through the
+multi-arch index its tags resolve to (`signed_via: index`). Everything is
+verified with sigstore-go, offline against the trusted root: the
+transparency-log proofs travel with the signature, so Rekor is never
+called.
+
+| Verdict | Meaning |
+|---|---|
+| `verified` | At least one signature verified. `signer_kind: keyless` gives the OIDC issuer and certificate SAN; `key` gives the configured key's name and fingerprint. |
+| `key_signed` | Signed with a public key that is not configured, so the signature exists but was not checked. Configure the key to get `verified` or `invalid`. |
+| `unsigned` | Every lookup answered and there is no signature. |
+| `invalid` | Signatures exist and none verified: a bad signature, a signature for another digest, or a malformed one. |
+| `unknown` | Something could not be checked (`reason`: `registry_auth` for a private image, `rate_limited`, `network`, `no_repo_digest`, ...). Never read as unsigned. |
+
+Attestations (SLSA provenance, SPDX/CycloneDX SBOMs, anything else) are
+listed with their predicate type, signer and, for provenance, the builder
+and source repository. An unverified attestation is listed with its error
+and no identity.
+
+- **Anonymous only.** Pull secrets are never read (#1533 D3); every
+  registry request goes through the same address guard as the digest
+  lookup.
+- **Trust root.** The public-good Sigstore instance, fetched through its
+  TUF repository and refreshed daily; or a mounted `trusted_root.json`
+  (`ATTESTATION_TRUSTED_ROOT_FILE`) for a private Sigstore or an air-gapped
+  cluster, in which case nothing is fetched.
+- **Keys.** PEM public keys in `ATTESTATION_KEYS_DIR` (chart:
+  `signatureDiscovery.publicKeys`) verify key-signed images. A key
+  signature needs no transparency-log entry, like
+  `cosign verify --key --insecure-ignore-tlog`. A bundle names its key with
+  a hint; if the hint names a configured key and the signature fails, the
+  result is `invalid`. A legacy `.sig` has no hint, so an altered one reads
+  as `key_signed`, never `verified`.
+- **Bounded.** Results are cached per digest (24h, 1h for `unknown`) and a
+  result is posted only when it changes. Registry requests are rate-limited
+  (`ATTESTATION_REGISTRY_RPS`), each digest has a 60s budget, and sizes are
+  capped (64 KiB signature payload, 1 MiB bundle, 16 MiB attestation).
+- **Keyed by digest.** The broker stores one result per digest. The same
+  digest pulled from two repositories whose signatures differ shows the
+  last one checked.
 
 ## Commands
 
@@ -331,6 +383,14 @@ The coordinator (`pkg/match`):
 | `BROKER_INGEST_ENABLED` | `false` | Send payloads to the broker instead of logging them. |
 | `BROKER_URL` | `http://kguardian-broker:9090` | Broker base URL. |
 | `BROKER_AUTH_TOKEN` | *(unset)* | Scoped broker token, sent as a bearer token. |
+| `ATTESTATION_ENABLED` | `false` | Signature discovery. Needs `BROKER_INGEST_ENABLED=true`. |
+| `ATTESTATION_INTERVAL` | `10m` | Time between passes over the running digests (at least `1m`). |
+| `ATTESTATION_WORKERS` | `2` | Digests verified concurrently (1-16). |
+| `ATTESTATION_REGISTRY_RPS` | `5` | Registry requests per second, all registries together. |
+| `ATTESTATION_TRUSTED_ROOT_FILE` | *(unset)* | `trusted_root.json` to use instead of the public-good instance over TUF. |
+| `ATTESTATION_TUF_MIRROR` | *(unset)* | TUF repository URL (must serve the public-good root). |
+| `ATTESTATION_SKIP_SCT` | `false` | Drop the SCT requirement (private Fulcio without a CT log). |
+| `ATTESTATION_KEYS_DIR` | *(unset)* | Directory of PEM public keys (`*.pub`, `*.pem`); the file name is the key name. |
 
 ## HTTP endpoints
 
@@ -364,6 +424,11 @@ auth and the read APIs.
 | `kguardian_supplychain_grype_matches_total` | | Vulnerabilities returned by match runs. |
 | `kguardian_supplychain_grype_match_duration_seconds` | | Time to match one SBOM. |
 | `kguardian_supplychain_grype_sboms_held` | | Digests whose SBOMs are held for re-matching. |
+| `kguardian_supplychain_attestation_results_total` | `verdict`, `reason` | Signature discovery results posted. |
+| `kguardian_supplychain_attestation_posts_total` | `result` | Result sends: `ok`, `retry`, `dropped`. |
+| `kguardian_supplychain_attestation_passes_total` | `result` | Passes over the running digests: `ok`, `error`. |
+| `kguardian_supplychain_attestation_targets` | | Running digests in the last pass. |
+| `kguardian_supplychain_attestation_pass_seconds` | | Duration of the last pass. |
 
 Plus the standard Go runtime and process collectors.
 
@@ -534,3 +599,12 @@ Test fixtures are in [`pkg/trivy/testdata`](pkg/trivy/testdata). Each one
 says where it came from. The `*-docs*` files are the samples from
 trivy-operator v0.34.0 `docs/docs/crds/`. The others are derived from the
 v0.34.0 Go API types and use synthetic `CVE-2099-*` ids.
+
+Signature fixtures are in [`pkg/attest/testdata`](pkg/attest/testdata):
+real signature artifacts recorded byte for byte from public registries
+(`ATTEST_RECORD=1 go test -run TestRecord ./pkg/attest`), plus two images
+signed by cosign v3.0.5 with the key in `testdata/cosign.pub` (the private
+key was discarded; see `localRecordTargets`). Tests replay them into an
+in-memory registry, so CI never touches the network. `ATTEST_LIVE=1` checks
+real public images; `ATTEST_E2E_BROKER=<url> ATTEST_E2E_TOKEN=<token>` posts
+the acceptance fixtures to a running broker.

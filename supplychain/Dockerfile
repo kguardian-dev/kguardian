@@ -7,7 +7,7 @@ WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
 
-COPY main.go ./
+COPY main.go attest.go ./
 COPY pkg ./pkg
 
 ARG TARGETOS
