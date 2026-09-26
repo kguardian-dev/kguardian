@@ -897,6 +897,13 @@ fn build_pod_security(
                 .find(|x| x.container == c.container_name)
                 .and_then(|x| x.recommendation.as_ref())
                 .map(|r| r.add.clone()),
+            probed_capabilities: caps
+                .containers
+                .iter()
+                .find(|x| x.container == c.container_name)
+                .and_then(|x| x.recommendation.as_ref())
+                .map(|r| r.probed_kept.clone())
+                .unwrap_or_default(),
         });
     }
     let pod = pod.and_then(|(_, p)| p);

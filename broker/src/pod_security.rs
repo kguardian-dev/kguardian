@@ -199,6 +199,9 @@ pub struct ContainerInput {
     /// then drops ALL and adds exactly these. `None` = no evidence, the
     /// restricted default applies.
     pub observed_capabilities: Option<Vec<String>>,
+    /// The part of `observed_capabilities` seen only in non-audited
+    /// (CAP_OPT_NOAUDIT) checks: kept, and named in a caveat.
+    pub probed_capabilities: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -875,12 +878,23 @@ pub fn recommend(
             "Capabilities for {} come from observed use: every capability check the container made while kguardian watched it continuously for the evidence window. A capability used less often than that window (a yearly rotation, a rare admin path) would be missing; widen the window (CAPABILITY_EVIDENCE_WINDOW_HOURS) for such workloads.",
             observed.iter().map(|c| c.name.as_str()).collect::<Vec<_>>().join(", ")
         ));
+        for c in observed
+            .iter()
+            .filter(|c| !c.probed_capabilities.is_empty())
+        {
+            caveats.push(format!(
+                "Container {} keeps {} only because of non-audited kernel checks (the kernel asking whether the process is privileged, e.g. the memory admin-reserve check every root process makes for SYS_ADMIN, a seccomp filter installed without no_new_privs, ptrace access to other processes). Remove them only after confirming the workload does not need them.",
+                c.name,
+                c.probed_capabilities.join(", ")
+            ));
+        }
         for c in &observed {
             let beyond: Vec<&String> = c
                 .observed_capabilities
                 .iter()
                 .flatten()
                 .filter(|x| *x != "NET_BIND_SERVICE")
+                .filter(|x| !c.probed_capabilities.contains(x))
                 .collect();
             if !beyond.is_empty() {
                 caveats.push(format!(
@@ -1103,6 +1117,7 @@ mod tests {
             digest: format!("sha256:{}", "a".repeat(64)),
             security: sc,
             observed_capabilities: None,
+            probed_capabilities: Vec::new(),
         }
     }
 
@@ -1332,6 +1347,20 @@ mod tests {
         let pod = PodSecurity::default();
         let per = vec![check_container(&c.kind, &c.name, &c.security, &pod, true)];
         recommend("Deployment", &pod, true, &[c], &[], &per)
+    }
+
+    #[test]
+    fn probed_capabilities_stay_in_the_patch_with_a_caveat() {
+        let mut c = observed(&[], false, Some(&["NET_BIND_SERVICE", "SYS_ADMIN"]));
+        c.probed_capabilities = vec!["SYS_ADMIN".into()];
+        let r = patch(c).unwrap();
+        assert!(r
+            .yaml
+            .contains("add: [\"NET_BIND_SERVICE\", \"SYS_ADMIN\"]"));
+        assert!(r
+            .caveats
+            .iter()
+            .any(|x| x.contains("keeps SYS_ADMIN only because of non-audited kernel checks")));
     }
 
     #[test]

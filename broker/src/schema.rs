@@ -572,6 +572,7 @@ diesel::table! {
         // Added by 2026-09-29-200000_runtime_capabilities (ALTER TABLE ADD
         // COLUMN appends it last).
         cap_probe -> Bool,
+        cap_hook -> Nullable<Varchar>,
     }
 }
 
@@ -587,6 +588,7 @@ diesel::table! {
         image_digest -> Varchar,
         capability -> Varchar,
         granted -> Bool,
+        probed -> Bool,
         count -> Int8,
         last_pod_name -> Nullable<Varchar>,
         first_seen -> Timestamp,

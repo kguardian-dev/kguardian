@@ -79,6 +79,9 @@ pub struct CapEntry {
     pub image_digest: String,
     pub capability: String,
     pub granted: bool,
+    /// A CAP_OPT_NOAUDIT check (absent from an older controller: false).
+    #[serde(default)]
+    pub probed: bool,
     /// Checks since the previous post of this entry.
     pub count: u64,
     pub first_seen: NaiveDateTime,
@@ -156,7 +159,16 @@ pub fn valid(e: CapEntry) -> Option<CapEntry> {
     ok.then_some(e)
 }
 
-type CapKey<'a> = (&'a str, &'a str, &'a str, &'a str, &'a str, &'a str, bool);
+type CapKey<'a> = (
+    &'a str,
+    &'a str,
+    &'a str,
+    &'a str,
+    &'a str,
+    &'a str,
+    bool,
+    bool,
+);
 
 fn key(e: &CapEntry) -> CapKey<'_> {
     (
@@ -167,6 +179,7 @@ fn key(e: &CapEntry) -> CapKey<'_> {
         &e.image_digest,
         &e.capability,
         e.granted,
+        e.probed,
     )
 }
 
@@ -195,16 +208,16 @@ pub fn merge(mut rows: Vec<CapEntry>) -> Vec<CapEntry> {
 
 pub(crate) const CAP_UPSERT_SQL: &str = "\
 INSERT INTO runtime_capabilities AS r (cluster_id, pod_namespace, workload_kind, workload_name, \
-    container_name, image_digest, capability, granted, count, last_pod_name, first_seen, \
+    container_name, image_digest, capability, granted, probed, count, last_pod_name, first_seen, \
     last_seen, last_reported) \
-SELECT $1, t.ns, t.wk, t.wn, t.cn, t.dg, t.cap, t.gr, t.n, t.lpn, \
+SELECT $1, t.ns, t.wk, t.wn, t.cn, t.dg, t.cap, t.gr, t.pr, t.n, t.lpn, \
     LEAST(t.fs, t.ls, timezone('UTC', NOW())), LEAST(t.ls, timezone('UTC', NOW())), \
     timezone('UTC', NOW()) \
 FROM unnest($2::text[], $3::text[], $4::text[], $5::text[], $6::text[], $7::text[], \
-    $8::bool[], $9::bigint[], $10::text[], $11::timestamp[], $12::timestamp[]) \
-    AS t(ns, wk, wn, cn, dg, cap, gr, n, lpn, fs, ls) \
+    $8::bool[], $9::bigint[], $10::text[], $11::timestamp[], $12::timestamp[], $13::bool[]) \
+    AS t(ns, wk, wn, cn, dg, cap, gr, n, lpn, fs, ls, pr) \
 ON CONFLICT (cluster_id, pod_namespace, workload_kind, workload_name, container_name, \
-    image_digest, capability, granted) \
+    image_digest, capability, granted, probed) \
 DO UPDATE SET \
     count = r.count + EXCLUDED.count, \
     first_seen = LEAST(r.first_seen, EXCLUDED.first_seen), \
@@ -235,6 +248,7 @@ pub fn upsert(conn: &mut PgConnection, rows: &[CapEntry]) -> Result<usize, DbErr
         )
         .bind::<Array<Timestamp>, _>(rows.iter().map(|r| r.first_seen).collect::<Vec<_>>())
         .bind::<Array<Timestamp>, _>(rows.iter().map(|r| r.last_seen).collect::<Vec<_>>())
+        .bind::<Array<Bool>, _>(rows.iter().map(|r| r.probed).collect::<Vec<_>>())
         .execute(conn)?)
 }
 
@@ -301,6 +315,8 @@ pub struct CapRow {
     pub capability: String,
     #[diesel(sql_type = Bool)]
     pub granted: bool,
+    #[diesel(sql_type = Bool)]
+    pub probed: bool,
     #[diesel(sql_type = BigInt)]
     pub count: i64,
     #[diesel(sql_type = Timestamp)]
@@ -344,7 +360,8 @@ pub fn load_evidence(
     window_hours: i32,
 ) -> Result<CapEvidence, DbError> {
     let mut rows: Vec<CapRow> = sql_query(
-        "SELECT container_name, image_digest, capability, granted, count, first_seen, last_seen \
+        "SELECT container_name, image_digest, capability, granted, probed, count, first_seen, \
+             last_seen \
          FROM runtime_capabilities \
          WHERE cluster_id = $1 AND pod_namespace = $2 AND workload_kind = $3 AND workload_name = $4 \
          ORDER BY container_name, capability, granted DESC, image_digest LIMIT $5",
@@ -424,6 +441,10 @@ pub struct CapUse {
 pub struct CapRecommendation {
     pub drop: Vec<String>,
     pub add: Vec<String>,
+    /// The part of `add` kept only because of probed (non-audited) checks:
+    /// never dropped without a person confirming the workload does not
+    /// need it.
+    pub probed_kept: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
@@ -443,7 +464,14 @@ pub struct ContainerCaps {
     pub used: Vec<CapUse>,
     /// Checks the container made without holding the capability.
     pub denied: Vec<CapUse>,
-    /// Only with sufficient evidence: drop ALL, add every used capability.
+    /// Non-audited (CAP_OPT_NOAUDIT) checks that succeeded: the kernel
+    /// asking whether the container was privileged. Every root process's
+    /// memory admin-reserve check asks for SYS_ADMIN this way; others gate
+    /// real behaviour (seccomp filters without no_new_privs, ptrace access
+    /// to other tasks).
+    pub probed: Vec<CapUse>,
+    /// Only with sufficient evidence: drop ALL, add every used and every
+    /// probed capability.
     pub recommendation: Option<CapRecommendation>,
     /// Capabilities the current securityContext adds that were never used
     /// (only with sufficient evidence).
@@ -473,12 +501,19 @@ pub fn build_view(containers: &[ContainerImages], ev: &CapEvidence) -> Capabilit
         let digests: Vec<String> = c.digests.iter().map(|d| d.digest.clone()).collect();
         let mut used: BTreeMap<String, CapUse> = BTreeMap::new();
         let mut denied: BTreeMap<String, CapUse> = BTreeMap::new();
+        let mut probed: BTreeMap<String, CapUse> = BTreeMap::new();
         for r in ev
             .rows
             .iter()
             .filter(|r| r.container_name == c.container_name)
         {
-            let m = if r.granted { &mut used } else { &mut denied };
+            let m = match (r.granted, r.probed) {
+                (true, false) => &mut used,
+                (false, false) => &mut denied,
+                (true, true) => &mut probed,
+                // A non-audited check that failed: nothing to keep or show.
+                (false, true) => continue,
+            };
             let e = m.entry(r.capability.clone()).or_insert(CapUse {
                 capability: r.capability.clone(),
                 count: 0,
@@ -512,15 +547,26 @@ pub fn build_view(containers: &[ContainerImages], ev: &CapEvidence) -> Capabilit
         let sufficient = reason.is_none();
         let observed_since = cov.iter().filter_map(|k| k.observed_since).max();
         let used_names: BTreeSet<String> = used.keys().cloned().collect();
+        let probed_only: Vec<String> = probed
+            .keys()
+            .filter(|p| !used_names.contains(*p))
+            .cloned()
+            .collect();
+        let keep: BTreeSet<String> = used_names
+            .iter()
+            .chain(probed_only.iter())
+            .cloned()
+            .collect();
         let (recommendation, unused_added) = if sufficient {
             let unused: Vec<String> = current_add(c)
                 .into_iter()
-                .filter(|a| !used_names.contains(a) && a != "ALL")
+                .filter(|a| !keep.contains(a) && a != "ALL")
                 .collect();
             (
                 Some(CapRecommendation {
                     drop: vec!["ALL".into()],
-                    add: used_names.iter().cloned().collect(),
+                    add: keep.iter().cloned().collect(),
+                    probed_kept: probed_only.clone(),
                 }),
                 unused,
             )
@@ -539,6 +585,7 @@ pub fn build_view(containers: &[ContainerImages], ev: &CapEvidence) -> Capabilit
             observed_since,
             used: used.into_values().collect(),
             denied: denied.into_values().collect(),
+            probed: probed.into_values().collect(),
             recommendation,
             unused_added,
         });
@@ -710,9 +757,17 @@ mod tests {
             image_digest: digest.into(),
             capability: cap.into(),
             granted,
+            probed: false,
             count: n,
             first_seen: t(0),
             last_seen: t(1),
+        }
+    }
+
+    fn probed_row(digest: &str, cap: &str, granted: bool, n: i64) -> CapRow {
+        CapRow {
+            probed: true,
+            ..row(digest, cap, granted, n)
         }
     }
 
@@ -747,6 +802,7 @@ mod tests {
             Some(CapRecommendation {
                 drop: vec!["ALL".into()],
                 add: vec!["NET_BIND_SERVICE".into(), "SYS_TIME".into()],
+                probed_kept: vec![],
             })
         );
         assert_eq!(c.unused_added, vec!["NET_ADMIN"]);
@@ -759,6 +815,64 @@ mod tests {
                 .unwrap()
                 .count,
             5
+        );
+    }
+
+    #[test]
+    fn probed_capabilities_are_kept_and_named_never_dropped() {
+        let ev = CapEvidence {
+            rows: vec![
+                row(D, "NET_BIND_SERVICE", true, 5),
+                // The memory admin-reserve check every root process makes.
+                probed_row(D, "SYS_ADMIN", true, 25),
+                // A non-audited check that failed: nothing to keep.
+                probed_row(D, "SYS_PTRACE", false, 1),
+                // Probed and also used for real: an ordinary use.
+                row(D, "CHOWN", true, 1),
+                probed_row(D, "CHOWN", true, 3),
+            ],
+            coverage: vec![cov(D, true, None)],
+            window_hours: 168,
+            ..Default::default()
+        };
+        let v = build_view(&[container(&["SYS_ADMIN"], &[D])], &ev);
+        let c = &v.containers[0];
+        let r = c.recommendation.as_ref().unwrap();
+        assert_eq!(r.add, vec!["CHOWN", "NET_BIND_SERVICE", "SYS_ADMIN"]);
+        assert_eq!(
+            r.probed_kept,
+            vec!["SYS_ADMIN"],
+            "kept only because of a probe"
+        );
+        assert!(
+            c.unused_added.is_empty(),
+            "a probed capability is not reported as unused"
+        );
+        assert_eq!(
+            c.probed
+                .iter()
+                .map(|p| p.capability.as_str())
+                .collect::<Vec<_>>(),
+            vec!["CHOWN", "SYS_ADMIN"]
+        );
+        assert!(c.denied.iter().all(|d| d.capability != "SYS_PTRACE"));
+    }
+
+    #[test]
+    fn capability_retention_never_undercuts_the_evidence_window() {
+        use crate::retention::capability_retention_days;
+        assert_eq!(capability_retention_days(30, 168), 30);
+        assert_eq!(
+            capability_retention_days(1, 168),
+            8,
+            "7 days of window plus one"
+        );
+        assert_eq!(capability_retention_days(30, 2160), 91);
+        assert_eq!(capability_retention_days(30, 25), 30);
+        assert_eq!(
+            capability_retention_days(1, 25),
+            3,
+            "25 h rounds up to 2 days, plus one"
         );
     }
 
@@ -845,6 +959,7 @@ mod tests {
             unsent: 0,
             incomplete: false,
             cap_probe,
+            cap_hook: cap_probe.then(|| "cap_capable".to_string()),
             ended: false,
             heartbeat_at: now,
             heartbeat_secs: 300,
@@ -895,6 +1010,17 @@ mod tests {
         post(&mut conn, "NET_BIND_SERVICE", true, 2, D);
         post(&mut conn, "SYS_TIME", true, 1, D2);
         post(&mut conn, "SYS_ADMIN", false, 4, D);
+        // The memory admin-reserve check every root process makes: probed.
+        let mut pr = entry("SYS_ADMIN", true, 25);
+        pr["pod_namespace"] = json!("capns");
+        pr["workload_name"] = json!("capweb");
+        pr["probed"] = json!(true);
+        let rows: Vec<CapEntry> = vec![serde_json::from_value(pr).unwrap()];
+        upsert(
+            &mut conn,
+            &merge(rows.into_iter().filter_map(valid).collect()),
+        )
+        .unwrap();
 
         let p = profile(&mut conn);
         let c = &p.capabilities.containers[0];
@@ -910,7 +1036,12 @@ mod tests {
         assert_eq!(c.denied[0].capability, "SYS_ADMIN");
         assert_eq!(
             c.recommendation.as_ref().unwrap().add,
-            vec!["NET_BIND_SERVICE", "SYS_TIME"]
+            vec!["NET_BIND_SERVICE", "SYS_ADMIN", "SYS_TIME"],
+            "probed SYS_ADMIN is kept"
+        );
+        assert_eq!(
+            c.recommendation.as_ref().unwrap().probed_kept,
+            vec!["SYS_ADMIN"]
         );
         assert_eq!(c.unused_added, vec!["NET_ADMIN"]);
         let rec = p
@@ -924,12 +1055,16 @@ mod tests {
         assert!(rec.yaml.contains("drop: [\"ALL\"]"));
         assert!(rec
             .yaml
-            .contains("add: [\"NET_BIND_SERVICE\", \"SYS_TIME\"]"));
+            .contains("add: [\"NET_BIND_SERVICE\", \"SYS_ADMIN\", \"SYS_TIME\"]"));
         assert!(
             !rec.yaml.contains("NET_ADMIN\", \""),
             "the unused capability goes"
         );
         assert!(rec.caveats.iter().any(|c| c.contains("used SYS_TIME")));
+        assert!(rec
+            .caveats
+            .iter()
+            .any(|c| c.contains("keeps SYS_ADMIN only because of non-audited kernel checks")));
         // The export bundle's securitycontext artifact carries the same patch.
         let plan = crate::profile_export::plan(&crate::profile_export::ExportQuery {
             artifacts: Some("securitycontext".into()),
@@ -942,7 +1077,9 @@ mod tests {
         let docs = crate::profile_export::build_documents(&mut conn, &key, &p, &plan).unwrap();
         let bundle = crate::profile_export::render_bundle_yaml(&key, &p, &plan, &docs, false);
         assert!(
-            bundle.contains("add: [\"NET_BIND_SERVICE\", \"SYS_TIME\"]  # observed in use"),
+            bundle.contains(
+                "add: [\"NET_BIND_SERVICE\", \"SYS_ADMIN\", \"SYS_TIME\"]  # observed in use"
+            ),
             "{bundle}"
         );
         let v = serde_json::to_value(&p).unwrap();
@@ -1034,6 +1171,43 @@ mod tests {
         assert_eq!(ask(&mut conn).reason.as_deref(), Some("no_runtime_data"));
         crate::runtime_inventory::upsert_coverage(&mut conn, &[beat("k1", true, 200)]).unwrap();
         assert_eq!(ask(&mut conn).covered, Some(true));
+        // B3: a container backfilled from /proc (already running when the
+        // probe attached) is never capability-covered, however long it has
+        // been watched since: its startup capabilities were never seen.
+        let mut bf = beat("k0", true, 200);
+        bf.start_mode = "backfill".into();
+        bf.container_name = "bf".into();
+        crate::runtime_inventory::upsert_coverage(&mut conn, &[bf]).unwrap();
+        let ask_bf: CapCoverageRow = sql_query(
+            "SELECT 'bf'::text AS container_name, $1::text AS image_digest, k.covered, \
+               k.observed_since, k.reason \
+             FROM kg_capability_coverage('primary', 'capns', 'Deployment', 'capweb', 'bf', $1, 168) k",
+        )
+        .bind::<Text, _>(D)
+        .get_result(&mut conn)
+        .unwrap();
+        assert_eq!(
+            (ask_bf.covered, ask_bf.reason.as_deref()),
+            (Some(false), Some("capabilities_not_seen_since_start"))
+        );
+        // M2: the security_capable fallback misses checks: not full evidence.
+        let mut fb = beat("k9", true, 200);
+        fb.cap_hook = Some("security_capable".into());
+        fb.container_name = "fb".into();
+        crate::runtime_inventory::upsert_coverage(&mut conn, &[fb]).unwrap();
+        let ask_fb: CapCoverageRow = sql_query(
+            "SELECT 'fb'::text AS container_name, $1::text AS image_digest, k.covered, \
+               k.observed_since, k.reason \
+             FROM kg_capability_coverage('primary', 'capns', 'Deployment', 'capweb', 'fb', $1, 168) k",
+        )
+        .bind::<Text, _>(D)
+        .get_result(&mut conn)
+        .unwrap();
+        assert_eq!(
+            (ask_fb.covered, ask_fb.reason.as_deref()),
+            (Some(false), Some("capabilities_partial_hook"))
+        );
+
         // The probe went off: a probe change restarts the run, so the window
         // is no longer covered, and the probe is off now.
         let mut off = beat("k1", false, 200);
