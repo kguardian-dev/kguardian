@@ -1,0 +1,38 @@
+{{- $sd := .Values.supplychain.signatureDiscovery | default dict }}
+{{- if and .Values.supplychain.enabled $sd.enabled }}
+{{- /* Public keys only (never private keys): safe in a ConfigMap. */}}
+{{- if $sd.publicKeys }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ .Values.supplychain.service.name }}-signing-keys
+  namespace: {{ include "kguardian.namespace" . }}
+  labels:
+    {{- include "kguardian.labels" . | nindent 4 }}
+data:
+  {{- range $name, $pem := $sd.publicKeys }}
+  {{- if not (regexMatch "^[A-Za-z0-9][A-Za-z0-9_.-]*$" $name) }}
+  {{- fail (printf "supplychain.signatureDiscovery.publicKeys: %q is not a valid key name (letters, digits, '.', '_', '-')" $name) }}
+  {{- end }}
+  {{- if not (contains "BEGIN PUBLIC KEY" $pem) }}
+  {{- fail (printf "supplychain.signatureDiscovery.publicKeys.%s must be a PEM public key (-----BEGIN PUBLIC KEY-----)" $name) }}
+  {{- end }}
+  {{ $name }}.pub: |
+    {{- $pem | nindent 4 }}
+  {{- end }}
+{{- end }}
+{{- if $sd.trustedRoot }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ .Values.supplychain.service.name }}-sigstore-root
+  namespace: {{ include "kguardian.namespace" . }}
+  labels:
+    {{- include "kguardian.labels" . | nindent 4 }}
+data:
+  trusted_root.json: |
+    {{- $sd.trustedRoot | nindent 4 }}
+{{- end }}
+{{- end }}

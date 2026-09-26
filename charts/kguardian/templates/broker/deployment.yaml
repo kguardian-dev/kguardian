@@ -259,6 +259,10 @@ spec:
             - name: SUPPLYCHAIN_IN_USE_MIN_WINDOW_HOURS
               value: {{ $scTiers.inUseMinWindowHours | quote }}
             {{- end }}
+            {{- if hasKey $scRetention "attestationDays" }}
+            - name: IMAGE_ATTESTATION_RETENTION_DAYS
+              value: {{ $scRetention.attestationDays | quote }}
+            {{- end }}
             {{- if hasKey .Values.broker.audit "inflightPermits" }}
             - name: AUDIT_INFLIGHT_PERMITS
               value: {{ .Values.broker.audit.inflightPermits | quote }}
