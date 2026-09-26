@@ -433,6 +433,28 @@ render "gitops-no-apipath" \
   assert_has    "gitops-no-apipath" "path: /"
 }
 
+# 10. Controller ClusterRole. Pods spawned by a CronJob are keyed on the
+# CronJob, which needs a get on the owning Job; without it the controller logs
+# "jobs.batch is forbidden" and keys every run on its throwaway Job name. The
+# grant is get only, and the role never gains secrets (charter D3), with or
+# without seccomp distribution.
+for dist in false true; do
+  label="clusterrole-distribute-$dist"
+  if ! OUT="$(helm template compat "$CHART" -s templates/clusterrole.yaml \
+      --set seccomp.distribute=$dist 2>/dev/null)"; then
+    echo "FAIL [$label]: ClusterRole did not render"; fail=1; continue
+  fi
+  # The batch rule: from its apiGroups line up to the next rule.
+  jobs_rule="$(awk '/^- apiGroups:/{inrule=/"batch"/} inrule' <<<"$OUT")"
+  grep -q 'resources: \["jobs"\]' <<<"$jobs_rule" || \
+    { echo "FAIL [$label]: expected a batch/jobs rule"; fail=1; }
+  verbs="$(grep -E '^ +- [a-z*]+$' <<<"$jobs_rule" | tr -d ' -' | tr '\n' ' ')"
+  [ "$verbs" = "get " ] || \
+    { echo "FAIL [$label]: batch/jobs must be get only, got: $verbs"; fail=1; }
+  assert_absent "$label" "cronjobs"
+  assert_absent "$label" "secrets"
+done
+
 if [ "$fail" -ne 0 ]; then
   echo "G4 values-compatibility check FAILED"
   exit 1
