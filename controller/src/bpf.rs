@@ -147,6 +147,15 @@ fn populate_tier_maps(maps: &crate::syscall::sycallprobe::SyscallMaps<'_>, tiers
     }
 }
 
+/// Delete `key` from `map` only while its value is still `expected`.
+/// True when something was deleted.
+fn compare_and_delete(map: &libbpf_rs::Map, key: &[u8], expected: &[u8]) -> bool {
+    match map.lookup(key, MapFlags::ANY) {
+        Ok(Some(current)) if current.as_slice() == expected => map.delete(key).is_ok(),
+        _ => false,
+    }
+}
+
 /// Index of userspace's retired-marks counter in the `pending_gate` map.
 /// Keep in sync with `KG_GATE_RETIRED` in syscall.bpf.c.
 const PENDING_GATE_RETIRED: u32 = 1;
@@ -716,6 +725,33 @@ pub fn ebpf_handle(
                 // denial probes those stay inert.
                 let key = reg.netns_inode.to_ne_bytes();
                 let val = reg.flags.to_ne_bytes();
+                if reg.unregister {
+                    // Compare-and-delete in every instance. Registrations
+                    // and unregistrations travel this one channel in the
+                    // order the pod watcher sent them and are applied only
+                    // here, so nothing can slip in between the lookup and
+                    // the delete; the compare protects a newer pod already
+                    // registered on the recycled inode.
+                    let mut maps: Vec<&libbpf_rs::Map> = vec![
+                        &network_sk.maps.inode_num,
+                        &syscall_sk.maps.inode_num,
+                        &netpolicy_sk.maps.inode_num,
+                    ];
+                    if let Some(sk) = seccomp_denial_sk.as_ref() {
+                        maps.push(&sk.maps.inode_num);
+                    }
+                    let removed = maps
+                        .into_iter()
+                        .filter(|m| compare_and_delete(m, &key, &val))
+                        .count();
+                    tracing::debug!(
+                        inode = reg.netns_inode,
+                        flags = reg.flags,
+                        removed,
+                        "netns unregistered (pod finished)"
+                    );
+                    continue;
+                }
                 let _ = network_sk
                     .maps
                     .inode_num

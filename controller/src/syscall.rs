@@ -6,13 +6,11 @@ use crate::early_capture::{
 use crate::models::{lookup_pod, ContainerMap};
 use chrono::Utc;
 use libseccomp::ScmpSyscall;
-use moka::future::Cache;
 use serde_json::json;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc::{Receiver, Sender};
-use tokio::sync::Mutex;
 use tracing::{debug, error, info};
 
 use crate::{api_post_call, Error, PodInspect, SyscallData};
@@ -21,11 +19,147 @@ pub mod sycallprobe {
     include!(concat!(env!("OUT_DIR"), "/syscall.skel.rs"));
 }
 
-type SyscallCache = Cache<String, Arc<Mutex<HashSet<String>>>>;
+/// Upper bound on pods whose syscall sets are held in memory, matching the
+/// capacity of the caches this replaced.
+const MAX_POD_SETS: usize = 10_000;
 
-lazy_static::lazy_static! {
-    static ref SYSCALL_CACHE: SyscallCache = Cache::new(10_000);
-    static ref LAST_SENT_CACHE: SyscallCache = Cache::new(10_000);
+/// One pod incarnation's syscall set and what was last posted for it.
+#[derive(Debug, Default)]
+struct PodSet {
+    name: String,
+    syscalls: HashSet<String>,
+    last_sent: HashSet<String>,
+    touched: u64,
+}
+
+/// Syscall sets per pod INCARNATION (pod UID), posted under the pod name.
+///
+/// These used to be keyed by pod name, so a pod deleted and recreated
+/// under the same name (bare pods, StatefulSets) shared one set with its
+/// predecessor: anything credited to the old pod after the new one
+/// existed — the old containers' teardown, or host processes in a
+/// recycled netns that still resolved to the old pod's stale entry —
+/// was merged into the new pod's profile. The broker row is keyed by name
+/// only, so the name has exactly one CURRENT incarnation: the newest one
+/// seen (by creation time; a first-seen UID wins a tie). An older
+/// incarnation's events are dropped once a newer one exists, and its set
+/// is discarded, so the row carries the current pod's own set.
+#[derive(Debug, Default)]
+pub struct SyscallSets {
+    pods: HashMap<String, PodSet>,
+    /// name -> (uid, created_unix) of the current incarnation.
+    current: HashMap<String, (String, i64)>,
+    /// UIDs superseded by a newer same-name pod; never current again.
+    superseded: HashSet<String>,
+    clock: u64,
+}
+
+/// What `SyscallSets::record` did with a syscall.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Recorded {
+    New,
+    Duplicate,
+    /// From an incarnation a newer same-name pod has superseded.
+    Superseded,
+}
+
+impl SyscallSets {
+    pub fn record(&mut self, uid: &str, name: &str, created_unix: i64, syscall: &str) -> Recorded {
+        if self.superseded.contains(uid) {
+            return Recorded::Superseded;
+        }
+        match self.current.get(name).cloned() {
+            Some((cur, _)) if cur == uid => {}
+            Some((cur, cur_created)) => {
+                if created_unix < cur_created {
+                    // Older than the current holder of the name.
+                    self.superseded.insert(uid.to_string());
+                    self.pods.remove(uid);
+                    return Recorded::Superseded;
+                }
+                self.superseded.insert(cur.clone());
+                self.pods.remove(&cur);
+                self.current
+                    .insert(name.to_string(), (uid.to_string(), created_unix));
+            }
+            None => {
+                self.current
+                    .insert(name.to_string(), (uid.to_string(), created_unix));
+            }
+        }
+        self.clock += 1;
+        let clock = self.clock;
+        let set = self.pods.entry(uid.to_string()).or_insert_with(|| PodSet {
+            name: name.to_string(),
+            ..Default::default()
+        });
+        set.touched = clock;
+        let new = set.syscalls.insert(syscall.to_string());
+        self.evict_if_full();
+        if new {
+            Recorded::New
+        } else {
+            Recorded::Duplicate
+        }
+    }
+
+    fn evict_if_full(&mut self) {
+        if self.pods.len() <= MAX_POD_SETS {
+            return;
+        }
+        if let Some(oldest) = self
+            .pods
+            .iter()
+            .min_by_key(|(_, s)| s.touched)
+            .map(|(uid, _)| uid.clone())
+        {
+            if let Some(set) = self.pods.remove(&oldest) {
+                if self
+                    .current
+                    .get(&set.name)
+                    .is_some_and(|(u, _)| *u == oldest)
+                {
+                    self.current.remove(&set.name);
+                }
+            }
+        }
+        if self.superseded.len() > MAX_POD_SETS {
+            self.superseded.clear();
+        }
+    }
+
+    /// (uid, name, snapshot) for every set that changed since it was last
+    /// posted successfully.
+    pub fn changed(&self) -> Vec<(String, String, HashSet<String>)> {
+        self.pods
+            .iter()
+            .filter(|(_, s)| s.syscalls != s.last_sent)
+            .map(|(uid, s)| (uid.clone(), s.name.clone(), s.syscalls.clone()))
+            .collect()
+    }
+
+    /// Record a successful post. A set superseded meanwhile is gone and
+    /// stays gone.
+    pub fn mark_sent(&mut self, uid: &str, snapshot: HashSet<String>) {
+        if let Some(s) = self.pods.get_mut(uid) {
+            s.last_sent = snapshot;
+        }
+    }
+
+    #[cfg(test)]
+    fn set_of(&self, uid: &str) -> Option<&HashSet<String>> {
+        self.pods.get(uid).map(|s| &s.syscalls)
+    }
+}
+
+static SYSCALL_SETS: std::sync::LazyLock<std::sync::Mutex<SyscallSets>> =
+    std::sync::LazyLock::new(Default::default);
+
+fn with_sets<T>(f: impl FnOnce(&mut SyscallSets) -> T) -> T {
+    // A poisoned lock only means a panic elsewhere mid-update; the sets
+    // are still usable.
+    let mut guard = SYSCALL_SETS.lock().unwrap_or_else(|p| p.into_inner());
+    f(&mut guard)
 }
 
 /// One syscall event as the probe writes it. Keep in sync with `struct
@@ -203,6 +337,9 @@ async fn attribute_pending(
     // Snapshot uid -> pod without holding any shard guard past this
     // statement (see ContainerMap). A few hundred entries, once a second,
     // and only while something is pending.
+    // Finished pods' entries stay in the map (marked unregistered), so a
+    // Job that completed before its startup syscalls were attributed
+    // still resolves by UID.
     let by_uid: HashMap<String, Arc<PodInspect>> = container_map
         .iter()
         .filter(|e| !e.value().info.config.metadata.uid.is_empty())
@@ -250,7 +387,11 @@ pub async fn process_syscall_event(
     data: &SyscallEventData,
     pod_data: &PodInspect,
 ) -> Result<(), Error> {
-    let pod_name = pod_data.status.pod_name.to_string();
+    let pod_name = pod_data.status.pod_name.as_str();
+    let uid = match pod_data.info.config.metadata.uid.as_str() {
+        "" => pod_name,
+        uid => uid,
+    };
     let syscall_number = data.sysnbr;
     // u32 → i32 truncation. Real syscall numbers fit in 16 bits (the
     // highest defined Linux syscall is well under 1000). The previous
@@ -262,23 +403,16 @@ pub async fn process_syscall_event(
         .and_then(get_syscall_name)
         .unwrap_or_else(|| format!("{}", syscall_number));
 
-    let syscalls = SYSCALL_CACHE
-        .get_with(pod_name.clone(), async {
-            Arc::new(Mutex::new(HashSet::new()))
-        })
-        .await;
-
-    let mut syscalls_lock = syscalls.lock().await;
-
-    if syscalls_lock.contains(&syscall_name) {
+    let outcome = with_sets(|s| s.record(uid, pod_name, pod_data.created_unix, &syscall_name));
+    if outcome != Recorded::New {
         debug!(
-            "Skipping duplicate syscall: {} for pod: {}",
-            syscall_name, pod_name
+            pod = pod_name,
+            uid,
+            syscall = %syscall_name,
+            ?outcome,
+            "syscall not added"
         );
-    } else {
-        syscalls_lock.insert(syscall_name.clone());
     }
-
     Ok(())
 }
 
@@ -286,65 +420,35 @@ pub async fn send_syscall_cache_periodically() -> Result<(), Error> {
     // Reduced from 60s to 10s for faster visibility of syscall data
     let interval_duration = std::time::Duration::from_secs(10);
     loop {
-        let mut batch = Vec::new();
-        // Track which (pod, snapshot) pairs to mark as last_sent
-        // AFTER the POST succeeds. The pre-fix code eagerly updated
-        // last_sent inside the loop, before the POST — so a
-        // transient broker failure permanently dropped the batch:
-        // next iteration the diff `syscalls_lock != last_sent_lock`
-        // was false (we'd just made them equal), no retry, broker
-        // never got those syscalls. Stable-state pods (no new
-        // syscalls between iterations) lost data.
-        let mut pending_updates: Vec<(String, HashSet<String>)> = Vec::new();
-
-        for (pod_name, syscalls) in SYSCALL_CACHE.iter() {
-            let syscalls_lock = syscalls.lock().await;
-            let last_sent = LAST_SENT_CACHE
-                .get_with(pod_name.to_string(), async {
-                    Arc::new(Mutex::new(HashSet::new()))
+        // Snapshot under the lock, post without it. Only a successful
+        // POST marks a snapshot sent: a transient broker failure must
+        // retry next pass rather than lose the batch.
+        let changed = with_sets(|s| s.changed());
+        if !changed.is_empty() {
+            let batch: Vec<_> = changed
+                .iter()
+                .map(|(_, name, snapshot)| {
+                    json!(SyscallData {
+                        pod_name: name.clone(),
+                        pod_namespace: "".to_string(), // We will not store the namespace and rather read it from the pod_details table
+                        syscalls: snapshot.iter().cloned().collect(),
+                        arch: std::env::consts::ARCH.to_string(),
+                        time_stamp: Utc::now().naive_utc()
+                    })
                 })
-                .await;
-            let last_sent_lock = last_sent.lock().await;
-
-            if *syscalls_lock != *last_sent_lock {
-                let snapshot = syscalls_lock.clone();
-                let syscall_names: Vec<String> = snapshot.iter().cloned().collect();
-                let z = json!(SyscallData {
-                    pod_name: pod_name.to_string(),
-                    pod_namespace: "".to_string(), // We will not store the namespace and rather read it from the pod_details table
-                    syscalls: syscall_names,
-                    arch: std::env::consts::ARCH.to_string(),
-                    time_stamp: Utc::now().naive_utc()
-                });
-                batch.push(z);
-                pending_updates.push((pod_name.to_string(), snapshot));
-            }
-        }
-
-        if !batch.is_empty() {
+                .collect();
             debug!("Sending batch of {} syscalls to API", batch.len());
             match api_post_call(json!(batch), "pod/syscalls").await {
-                Ok(()) => {
-                    // POST succeeded — persist the snapshots as
-                    // last_sent so we don't re-send them next pass.
-                    // No race: this loop is the only writer of
-                    // LAST_SENT_CACHE entries. If new syscalls
-                    // arrived between POST and update, the next
-                    // iteration's diff catches them.
-                    for (pod_name, snapshot) in pending_updates {
-                        let last_sent = LAST_SENT_CACHE
-                            .get_with(pod_name, async { Arc::new(Mutex::new(HashSet::new())) })
-                            .await;
-                        *last_sent.lock().await = snapshot;
+                Ok(()) => with_sets(|s| {
+                    for (uid, _, snapshot) in changed {
+                        s.mark_sent(&uid, snapshot);
                     }
-                }
+                }),
                 Err(e) => {
-                    // Don't touch last_sent. Next iteration will see
-                    // the same diff and retry.
                     error!(
                         "Failed to post Syscall Event: {}; {} pod batches will retry next pass",
                         e,
-                        pending_updates.len()
+                        changed.len()
                     );
                 }
             }
@@ -370,6 +474,84 @@ fn get_syscall_name(syscall_number: i32) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn names(v: &[&str]) -> HashSet<String> {
+        v.iter().map(|s| s.to_string()).collect()
+    }
+
+    /// cluster-00 round 2: bare pod ng-5 deleted and recreated under the
+    /// same name. Anything still credited to the OLD incarnation after the
+    /// new one exists (its teardown, or host processes in a recycled netns
+    /// resolving to its stale entry, such as a `mount`) must not reach the
+    /// new pod's set, and the row must carry the new pod's own set.
+    #[test]
+    fn a_recreated_same_name_pod_never_inherits_its_predecessors_syscalls() {
+        let mut s = SyscallSets::default();
+        for sc in ["read", "epoll_wait", "exit_group"] {
+            s.record("uid-old", "ng-5", 100, sc);
+        }
+        s.mark_sent("uid-old", names(&["read", "epoll_wait", "exit_group"]));
+
+        // New incarnation starts.
+        assert_eq!(s.record("uid-new", "ng-5", 200, "execve"), Recorded::New);
+        assert_eq!(s.record("uid-new", "ng-5", 200, "read"), Recorded::New);
+
+        // Late events for the old one (teardown, stale-netns credit).
+        assert_eq!(
+            s.record("uid-old", "ng-5", 100, "mount"),
+            Recorded::Superseded
+        );
+        assert_eq!(
+            s.record("uid-old", "ng-5", 100, "tgkill"),
+            Recorded::Superseded
+        );
+
+        assert_eq!(s.set_of("uid-new"), Some(&names(&["execve", "read"])));
+        assert!(s.set_of("uid-old").is_none(), "old set discarded");
+        let changed = s.changed();
+        assert_eq!(changed.len(), 1);
+        assert_eq!(changed[0].0, "uid-new");
+        assert_eq!(changed[0].1, "ng-5");
+        assert!(!changed[0].2.contains("mount"));
+    }
+
+    #[test]
+    fn an_older_incarnation_seen_after_the_newer_one_is_dropped() {
+        let mut s = SyscallSets::default();
+        s.record("uid-new", "ng-5", 200, "execve");
+        assert_eq!(
+            s.record("uid-old", "ng-5", 100, "mount"),
+            Recorded::Superseded
+        );
+        assert_eq!(s.set_of("uid-new"), Some(&names(&["execve"])));
+        assert!(s.set_of("uid-old").is_none());
+    }
+
+    #[test]
+    fn a_same_second_recreate_goes_to_the_newcomer_and_never_flips_back() {
+        let mut s = SyscallSets::default();
+        s.record("uid-a", "ng-5", 100, "read");
+        s.record("uid-b", "ng-5", 100, "execve"); // same second: newcomer wins
+        assert_eq!(
+            s.record("uid-a", "ng-5", 100, "mount"),
+            Recorded::Superseded
+        );
+        assert_eq!(s.record("uid-b", "ng-5", 100, "write"), Recorded::New);
+        assert_eq!(s.set_of("uid-b"), Some(&names(&["execve", "write"])));
+    }
+
+    #[test]
+    fn distinct_names_are_independent_and_sends_retry_until_marked() {
+        let mut s = SyscallSets::default();
+        s.record("u1", "a", 1, "read");
+        s.record("u2", "b", 1, "write");
+        assert_eq!(s.changed().len(), 2);
+        s.mark_sent("u1", names(&["read"]));
+        let changed = s.changed();
+        assert_eq!(changed.len(), 1, "b not marked sent: retried");
+        assert_eq!(changed[0].1, "b");
+        assert_eq!(s.record("u1", "a", 1, "read"), Recorded::Duplicate);
+    }
 
     #[test]
     fn event_layout_matches_the_kernel_struct() {

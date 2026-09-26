@@ -176,8 +176,12 @@ struct
 } runtime_prefilter SEC(".maps");
 
 // runc names its init stages "runc:[0:PARENT]", "runc:[1:CHILD]",
-// "runc:[2:INIT]" (comm is at most 15 bytes). True for a task in one of
-// them making a syscall runc only makes before the filter exists.
+// "runc:[2:INIT]"; before nsexec renames it the process is plain "runc",
+// and runc 1.2's exec helper is "runc-dmz". Matching the "runc" prefix
+// covers all of them (comm is at most 15 bytes). True for such a task
+// making a syscall runc only makes before the filter exists. The app
+// itself is never matched unless its binary is named runc*, and then only
+// for this short list.
 static __always_inline bool runtime_prefilter_skip(u32 syscall_id)
 {
     u8 *pre = bpf_map_lookup_elem(&runtime_prefilter, &syscall_id);
@@ -186,8 +190,7 @@ static __always_inline bool runtime_prefilter_skip(u32 syscall_id)
     char comm[16];
     if (bpf_get_current_comm(comm, sizeof(comm)) != 0)
         return false;
-    return comm[0] == 'r' && comm[1] == 'u' && comm[2] == 'n' && comm[3] == 'c' &&
-           comm[4] == ':' && comm[5] == '[';
+    return comm[0] == 'r' && comm[1] == 'u' && comm[2] == 'n' && comm[3] == 'c';
 }
 
 struct pending_syscall_key

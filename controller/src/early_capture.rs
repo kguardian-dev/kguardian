@@ -1284,7 +1284,6 @@ mod tests {
         assert!(
             src.contains("comm[0] == 'r' && comm[1] == 'u' && comm[2] == 'n' && comm[3] == 'c'")
         );
-        assert!(src.contains("comm[4] == ':' && comm[5] == '['"));
         assert_eq!(
             src.matches("if (runtime_prefilter_skip(syscall_id))")
                 .count(),
