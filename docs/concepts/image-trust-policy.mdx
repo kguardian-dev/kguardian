@@ -68,9 +68,16 @@ spec:
 
 ```
 $ kubectl get itp -n shop
-NAME             CONTAINERS   WOULD-DENY   UNKNOWN   AGE
-release-signed   12           2            1         3d
+NAME             STATE        CONTAINERS   WOULD-DENY   UNKNOWN   LAST-EVALUATED   AGE
+release-signed   evaluated    12           2            1         4m               3d
 ```
+
+`STATE` says whether the counts mean anything: `evaluated`; `never-read`
+(the broker has never been read, so the zeros are not "nothing to deny");
+`broker-unavailable` or `broker-unauthorized` (every container is
+`Unknown`). The `BrokerRead` condition carries the same with a reason
+(`Read`, `NeverRead`, `BrokerUnavailable`, `BrokerUnauthorized`) and the
+error.
 
 `status.evaluation` has the counts and up to 20 `findings` (would-deny
 first):
@@ -94,8 +101,9 @@ deny these images, so treat them as findings to resolve.
 `status.error` is set when the spec cannot be evaluated (a bad regular
 expression or key). `evaluation.lastEvaluated` is when the running
 containers were last read from the broker; `lastChanged` is when the
-verdicts last changed. Status is written with server-side apply, so a
-finding or error that no longer holds is removed, not left behind.
+verdicts last changed, so status is written once per interval while the
+broker is readable. It is written with server-side apply, so a finding or
+error that no longer holds is removed, not left behind.
 
 If the broker cannot be read, the last verdicts stay for up to 3x the
 interval; after that every container is reported `Unknown`
