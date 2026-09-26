@@ -70,7 +70,7 @@ test('closing by picking a nav item also returns focus to the opener', () => {
 test('Esc belongs to the dialog: an Esc elsewhere on the page does not close it', () => {
   render(<Harness />);
   fireEvent.click(screen.getByText('Expand sidebar'));
-  fireEvent.keyDown(window, { key: 'Escape' });
+  fireEvent.keyDown(screen.getByText('Outside'), { key: 'Escape' });
   expect(screen.getByRole('dialog')).toBeTruthy();
 });
 
@@ -99,4 +99,13 @@ test('closed from outside (a layout change): focus goes to the toggle, not the b
   fireEvent.mouseDown(screen.getByTestId('layout'));
   expect(screen.queryByRole('dialog')).toBeNull();
   expect(active()).toBe('Collapse sidebar');
+});
+
+test('Esc still closes when a click inside left focus on the body (the backdrop must not stay up)', () => {
+  render(<Harness />);
+  fireEvent.click(screen.getByText('Expand sidebar'));
+  (document.activeElement as HTMLElement).blur();
+  expect(document.activeElement).toBe(document.body);
+  fireEvent.keyDown(document.body, { key: 'Escape' });
+  expect(screen.queryByRole('dialog')).toBeNull();
 });
