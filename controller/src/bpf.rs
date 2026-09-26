@@ -1688,6 +1688,117 @@ mod tests {
         assert!(credited > 0, "the pod's syscalls must be credited to it");
     }
 
+    /// The cgroup-to-pod parse must give every cgroup its own pod under
+    /// concurrency, including from the library probe (fentry), which runs
+    /// preemptible: another task on the same CPU can run the parser while
+    /// one is mid-parse. Many fresh container cgroups of distinct pods are
+    /// first touched at once through an executable mmap (so the parse runs
+    /// in the fentry program), then the cached owner of every cgroup is
+    /// checked. Run it under `preempt=full` to make the fentry program
+    /// actually preemptible. Needs root and cgroup v2.
+    #[test]
+    #[ignore = "needs root, cgroup v2 and a BTF-enabled kernel; run by the ebpf-kernels CI job"]
+    fn owner_parse_is_right_for_every_cgroup_under_concurrency() {
+        use std::os::unix::fs::MetadataExt;
+        use std::os::unix::process::CommandExt;
+
+        let mut storage = MaybeUninit::uninit();
+        let (sk, links) = load_runtime_inventory(&mut storage, true).expect("load");
+        if links.len() < 2 {
+            eprintln!("library probe not attachable here; nothing preemptible to test");
+            return;
+        }
+        const PODS: usize = 16;
+        const CONTAINERS: usize = 8;
+        const ROUNDS: usize = 4;
+        let mut wrong = Vec::new();
+        let mut checked = 0;
+        for round in 0..ROUNDS {
+            let mut cgroups = Vec::new();
+            for p in 0..PODS {
+                let uid = format!("{round:08x}-{p:04x}-4e0a-9f1c-0123456789ab");
+                let gen = crate::models::pod_flags::generation_for_uid(Some(&uid));
+                let pod_dir = format!("/sys/fs/cgroup/kubepods/burstable/pod{uid}");
+                for c in 0..CONTAINERS {
+                    let dir = format!("{pod_dir}/{round:02x}{p:02x}{c:02x}{}", "a".repeat(58));
+                    std::fs::create_dir_all(&dir).expect("cgroup");
+                    let cgid = std::fs::metadata(&dir).unwrap().ino();
+                    cgroups.push((dir, pod_dir.clone(), cgid, gen));
+                }
+            }
+            let children: Vec<_> = cgroups
+                .iter()
+                .map(|(dir, _, _, _)| {
+                    let procs = format!("{dir}/cgroup.procs");
+                    unsafe {
+                        std::process::Command::new("/bin/true")
+                            .pre_exec(move || {
+                                std::fs::write(&procs, std::process::id().to_string())?;
+                                // First event in this cgroup: an executable
+                                // mapping, so the fentry program parses.
+                                let fd = libc::open(c"/bin/true".as_ptr(), libc::O_RDONLY);
+                                if fd >= 0 {
+                                    for _ in 0..4 {
+                                        let m = libc::mmap(
+                                            std::ptr::null_mut(),
+                                            4096,
+                                            libc::PROT_READ | libc::PROT_EXEC,
+                                            libc::MAP_PRIVATE,
+                                            fd,
+                                            0,
+                                        );
+                                        if m != libc::MAP_FAILED {
+                                            libc::munmap(m, 4096);
+                                        }
+                                    }
+                                }
+                                Ok(())
+                            })
+                            .spawn()
+                            .expect("spawn")
+                    }
+                })
+                .collect();
+            for mut c in children {
+                let _ = c.wait();
+            }
+            for (dir, _, cgid, gen) in &cgroups {
+                let cached = sk
+                    .maps
+                    .cgroup_pod_gen
+                    .lookup(&cgid.to_ne_bytes(), MapFlags::ANY)
+                    .ok()
+                    .flatten()
+                    .map(|v| u32::from_ne_bytes(v[..4].try_into().unwrap()));
+                checked += 1;
+                // Absent is allowed (the parse may be skipped, never
+                // cached wrong); present must be this cgroup's own pod.
+                if let Some(v) = cached {
+                    if v != (1u32 << 31) | gen {
+                        wrong.push((dir.clone(), v, (1u32 << 31) | gen));
+                    }
+                }
+            }
+            for (dir, pod_dir, _, _) in &cgroups {
+                let _ = std::fs::remove_dir(dir);
+                let _ = std::fs::remove_dir(pod_dir);
+            }
+        }
+        eprintln!(
+            "owner parse under concurrency: {checked} cgroups, {} cached wrong",
+            wrong.len()
+        );
+        for w in wrong.iter().take(5) {
+            eprintln!("  {} cached {:#x}, expected {:#x}", w.0, w.1, w.2);
+        }
+        drop(links);
+        assert!(
+            wrong.is_empty(),
+            "{} cgroups cached another owner",
+            wrong.len()
+        );
+    }
+
     fn reset_state() {
         EBPF_SHUTDOWN.store(false, Ordering::Relaxed);
         NETWORK_SEND_FAILED.store(false, Ordering::Relaxed);

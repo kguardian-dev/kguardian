@@ -86,12 +86,24 @@ struct
     __type(value, u64);
 } runtime_drops SEC(".maps");
 
-// Scratch for building one event (too big for the 512-byte stack).
+static __always_inline void count_drop(void)
+{
+    __u32 zero = 0;
+    __u64 *drops = bpf_map_lookup_elem(&runtime_drops, &zero);
+    if (drops)
+        __sync_fetch_and_add(drops, 1);
+}
+
+// Scratch for building one event (too big for the 512-byte stack). Task
+// storage, not per-CPU: the library probe (fentry) runs preemptible, and
+// another task on the same CPU building its own event in a shared per-CPU
+// slot would overwrite this one mid-build (a wrong path or container in
+// the event). Deleted once the event is out.
 struct
 {
-    __uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
-    __uint(max_entries, 1);
-    __type(key, u32);
+    __uint(type, KG_MAP_TYPE_TASK_STORAGE);
+    __uint(map_flags, BPF_F_NO_PREALLOC);
+    __type(key, int);
     __type(value, struct runtime_event);
 } runtime_scratch SEC(".maps");
 
@@ -158,7 +170,8 @@ static long kg_path_step(__u64 i, void *vctx)
 {
     struct kg_path_ctx *c = vctx;
     __u32 key = 0;
-    struct runtime_event *ev = bpf_map_lookup_elem(&runtime_scratch, &key);
+    struct runtime_event *ev =
+        bpf_task_storage_get(&runtime_scratch, bpf_get_current_task_btf(), 0, 0);
     if (!ev)
         return 1;
     // Copy out of the (local, non-kernel) context struct before any CO-RE
@@ -243,7 +256,7 @@ static __always_inline void container_cgroup_name(struct runtime_event *ev)
     {
         if (!kn)
             return;
-        if (kg_name_generation((__u64)BPF_CORE_READ(kn, name)))
+        if (kg_name_generation((__u64)BPF_CORE_READ(kn, name)) & KG_CG_POD)
         {
             if (below)
                 bpf_probe_read_kernel_str(ev->container, sizeof(ev->container),
@@ -260,6 +273,12 @@ static __always_inline int report_file(struct file *file, __u32 kind)
     if (!file)
         return 0;
     __u32 owner = task_pod_generation();
+    if (owner == KG_OWNER_UNKNOWN)
+    {
+        // Could not tell whose it is: a sighting possibly lost.
+        count_drop();
+        return 0;
+    }
     if (!(owner & KG_CG_POD))
         return 0;
     __u32 gen = owner & KG_CG_GEN_MASK;
@@ -282,14 +301,13 @@ static __always_inline int report_file(struct file *file, __u32 kind)
     if (bpf_map_update_elem(&runtime_seen, &key, &one, BPF_NOEXIST) != 0)
         return 0;
 
-    __u32 zero = 0;
-    struct runtime_event *ev = bpf_map_lookup_elem(&runtime_scratch, &zero);
+    struct task_struct *task = bpf_get_current_task_btf();
+    struct runtime_event *ev =
+        bpf_task_storage_get(&runtime_scratch, task, 0, KG_LOCAL_STORAGE_GET_F_CREATE);
     if (!ev)
     {
         bpf_map_delete_elem(&runtime_seen, &key);
-        __u64 *lost = bpf_map_lookup_elem(&runtime_drops, &zero);
-        if (lost)
-            *lost += 1;
+        count_drop();
         return 0;
     }
     ev->cgroup_id = key.cgroup_id;
@@ -317,10 +335,9 @@ static __always_inline int report_file(struct file *file, __u32 kind)
     {
         // Forget the sighting so the next one is reported, not never.
         bpf_map_delete_elem(&runtime_seen, &key);
-        __u64 *drops = bpf_map_lookup_elem(&runtime_drops, &zero);
-        if (drops)
-            *drops += 1;
+        count_drop();
     }
+    bpf_task_storage_delete(&runtime_scratch, task);
     return 0;
 }
 

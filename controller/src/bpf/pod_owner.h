@@ -11,6 +11,12 @@
 #ifndef KG_POD_OWNER_H
 #define KG_POD_OWNER_H
 
+// Task storage (Linux 5.11) is newer than the bundled vmlinux.h, so its
+// UAPI values are spelled out: enum bpf_map_type BPF_MAP_TYPE_TASK_STORAGE
+// and BPF_LOCAL_STORAGE_GET_F_CREATE (include/uapi/linux/bpf.h).
+#define KG_MAP_TYPE_TASK_STORAGE 29
+#define KG_LOCAL_STORAGE_GET_F_CREATE 1
+
 // cgroup id -> KG_CG_POD|generation, or 0 for "not a pod cgroup". Kernfs
 // cgroup ids are never reused, so an entry never goes stale; the LRU only
 // bounds memory.
@@ -48,9 +54,9 @@ static __always_inline struct kernfs_node *kn_parent(struct kernfs_node *kn)
 // data-dependent loops pushed trace_execve past the verifier's 1M
 // instruction budget (E2BIG) on every kernel tried.
 //
-// All parser state lives in a per-CPU map value, and the loop context on
-// the stack holds only a pointer to it (bpf_loop takes a stack pointer
-// and nothing else: "R3 type=map_value expected=fp"). Two reasons:
+// All parser state lives in a map value, and the loop context on the
+// stack holds only a pointer to it (bpf_loop takes a stack pointer and
+// nothing else: "R3 type=map_value expected=fp"). Two reasons:
 //  - Verifiers before Linux 6.7 check a bpf_loop callback as if it ran
 //    once. State kept on the stack is tracked as the constants of that
 //    one iteration, and branches on it (prev == '-', the UID length and
@@ -59,6 +65,15 @@ static __always_inline struct kernfs_node *kn_parent(struct kernfs_node *kn)
 //    tracked, so nothing is hard-wired.
 //  - It keeps the 192-byte name off the stack (the combined stack of the
 //    caller and this global function is capped at 512 bytes).
+//
+// The map is TASK storage, not per-CPU: the runtime inventory's library
+// probe (fentry) runs preemptible, so another task on the same CPU could
+// run the parser mid-parse and clobber a per-CPU slot, and the wrong
+// answer would then be cached for the cgroup. A task's own storage is
+// never touched by another task; a nested use by the same task is
+// refused by the helper (NULL), which the caller treats as "unknown"
+// and does not cache. The entry is deleted after each parse, so it is
+// only held for the duration of one.
 struct kg_parse_state
 {
     char n[KG_CG_NAME_BUF];
@@ -70,11 +85,14 @@ struct kg_parse_state
 
 struct
 {
-    __uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
-    __uint(max_entries, 1);
-    __type(key, u32);
+    __uint(type, KG_MAP_TYPE_TASK_STORAGE);
+    __uint(map_flags, BPF_F_NO_PREALLOC);
+    __type(key, int);
     __type(value, struct kg_parse_state);
 } kg_parse_state SEC(".maps");
+
+// The parse could not run (no task storage): not an answer, never cached.
+#define KG_OWNER_UNKNOWN (1u << 30)
 
 struct kg_parse_ctx
 {
@@ -98,26 +116,32 @@ static long kg_uid_cb(__u64 k, void *ctx)
 }
 
 // KG_CG_POD|generation when the kernfs name at `kn_name` (a kernel
-// address, passed as a scalar) is a pod-level cgroup's, else 0.
+// address, passed as a scalar) is a pod-level cgroup's, 0 when it is not,
+// KG_OWNER_UNKNOWN when the parse could not run.
 __noinline __u32 kg_name_generation(__u64 kn_name)
 {
-    __u32 zero = 0;
-    struct kg_parse_state *p = bpf_map_lookup_elem(&kg_parse_state, &zero);
+    struct task_struct *task = bpf_get_current_task_btf();
+    struct kg_parse_state *p = bpf_task_storage_get(&kg_parse_state, task, 0,
+                                                    KG_LOCAL_STORAGE_GET_F_CREATE);
     if (!p)
-        return 0;
+        return KG_OWNER_UNKNOWN;
+    __u32 gen = 0;
     if (bpf_probe_read_kernel_str(p->n, sizeof(p->n), (const void *)kn_name) < 0)
-        return 0;
+        goto out;
     struct kg_parse_ctx c = {.p = p};
     p->at = -1;
     p->prev = 0;
     bpf_loop(KG_CG_NAME_SCAN, kg_scan_cb, &c, 0);
     int at = p->at;
     if (at < 0 || at >= KG_CG_NAME_SCAN)
-        return 0;
+        goto out;
     p->s = (__u32)at;
     kg_uid_init(&p->u);
     bpf_loop(KG_CG_UID_MAX, kg_uid_cb, &c, 0);
-    return kg_uid_finish(p->n, p->s, &p->u);
+    gen = kg_uid_finish(p->n, p->s, &p->u);
+out:
+    bpf_task_storage_delete(&kg_parse_state, task);
+    return gen;
 }
 
 // Pod-level cgroup at most this many levels above the task's: the
@@ -125,7 +149,9 @@ __noinline __u32 kg_name_generation(__u64 kn_name)
 // sub-cgroups adds a level or two.
 #define KG_CG_LEVELS 4
 
-// KG_CG_POD|generation of the pod owning the calling task's cgroup, or 0.
+// KG_CG_POD|generation of the pod owning the calling task's cgroup, 0 when
+// it is not a pod's, or KG_OWNER_UNKNOWN (not cached) when it could not be
+// worked out.
 // Cached per cgroup: after the first syscall from a cgroup this is one
 // hash lookup.
 static __always_inline __u32 task_pod_generation(void)
@@ -143,6 +169,10 @@ static __always_inline __u32 task_pod_generation(void)
         if (!kn)
             break;
         gen = kg_name_generation((__u64)BPF_CORE_READ(kn, name));
+        // Could not parse: answer "unknown" and cache nothing, so the
+        // next call tries again instead of inheriting a wrong answer.
+        if (gen == KG_OWNER_UNKNOWN)
+            return KG_OWNER_UNKNOWN;
         if (gen)
             break;
         kn = kn_parent(kn);
