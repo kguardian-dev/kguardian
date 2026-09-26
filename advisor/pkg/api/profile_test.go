@@ -22,7 +22,7 @@ func TestGetProfile_EscapesSegmentsAndSendsToken(t *testing.T) {
 	var gotPath, gotAuth string
 	withBroker(t, func(w http.ResponseWriter, r *http.Request) {
 		gotPath, gotAuth = r.URL.EscapedPath(), r.Header.Get("Authorization")
-		_, _ = w.Write([]byte(`{"posture":{"status":"unknown","score":null,"coverage":0,"grade":null,"unknownDimensions":[]},"dimensions":{}}`))
+		_, _ = w.Write([]byte(`{"posture":{"status":"unknown","coverage":null,"unknownDimensions":[],"reasons":[]},"dimensions":{}}`))
 	})
 	p, _, err := GetProfile("a/b", "Deployment", "x?y")
 	if err != nil {
@@ -34,8 +34,8 @@ func TestGetProfile_EscapesSegmentsAndSendsToken(t *testing.T) {
 	if gotAuth != "Bearer tok" {
 		t.Errorf("auth = %q", gotAuth)
 	}
-	if p.Posture.Score != nil {
-		t.Error("null score must decode as nil (unknown), not 0")
+	if p.Posture.Coverage != nil {
+		t.Error("null coverage must decode as nil (unknown), not 0")
 	}
 }
 

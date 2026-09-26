@@ -34,8 +34,10 @@ compute settings.
   export   print a recommendation (--format pss: securityContext patch)
 
 "unknown" means kguardian has no data for that dimension, or the source is not
-configured. It is never a pass. The posture score only covers known
-dimensions; read the coverage next to it.`,
+configured. It is never a pass. Status is a tier (ok, warn, risk, unknown)
+derived from findings; there is no numeric score. The posture status only
+covers known dimensions, so read the coverage next to it. A Pod Security
+Standards level of restricted is an upper bound kguardian cannot confirm.`,
 }
 
 var (
@@ -241,14 +243,6 @@ func runProfileExport(cmd *cobra.Command, args []string) error {
 
 // --- rendering ---------------------------------------------------------------
 
-// fmtScore renders a 0-100 score, "unknown" when nil.
-func fmtScore(v *float64) string {
-	if v == nil || math.IsNaN(*v) {
-		return "unknown"
-	}
-	return fmt.Sprintf("%d", int(math.Round(*v)))
-}
-
 // fmtFraction renders a 0-1 fraction as a percent, "-" when nil.
 func fmtFraction(v *float64) string {
 	if v == nil || math.IsNaN(*v) {
@@ -257,11 +251,11 @@ func fmtFraction(v *float64) string {
 	return fmt.Sprintf("%d%%", int(math.Round(*v*100)))
 }
 
-// fmtOK renders a readiness result; nil is "unknown", never a pass.
+// fmtOK renders a readiness result; nil is "can't tell", never a pass.
 func fmtOK(v *bool) string {
 	switch {
 	case v == nil:
-		return "unknown"
+		return "can't tell"
 	case *v:
 		return "yes"
 	default:
@@ -315,14 +309,12 @@ func renderProfileTable(dst io.Writer, ref workloadRef, p *api.Profile) error {
 	if p.Workload.Pods != nil {
 		fmt.Fprintf(&b, "Live pods:  %d\n", p.Workload.Pods.Live)
 	}
-	grade := "-"
-	if p.Posture.Grade != nil {
-		grade = *p.Posture.Grade
-	}
-	fmt.Fprintf(&b, "Posture:    %s  score %s  coverage %s  grade %s\n",
-		p.Posture.Status, fmtScore(p.Posture.Score), fmtFraction(p.Posture.Coverage), grade)
+	fmt.Fprintf(&b, "Posture:    %s  coverage %s (known core dimensions)\n", p.Posture.Status, fmtFraction(p.Posture.Coverage))
 	if len(p.Posture.UnknownDimensions) > 0 {
-		fmt.Fprintf(&b, "Not scored: %s (unknown or unscored; excluded from the score)\n", strings.Join(p.Posture.UnknownDimensions, ", "))
+		fmt.Fprintf(&b, "Unknown:    %s (no data; not counted as ok or risk)\n", strings.Join(p.Posture.UnknownDimensions, ", "))
+	}
+	for _, r := range p.Posture.Reasons {
+		fmt.Fprintf(&b, "  %s %s: %s\n", r.Dimension, r.Status, cell(r.Message))
 	}
 	if p.Version != nil {
 		fmt.Fprintf(&b, "Revision:   %d (%s)", p.Version.Revision, p.Version.CreatedAt)
@@ -338,24 +330,23 @@ func renderProfileTable(dst io.Writer, ref workloadRef, p *api.Profile) error {
 		if ps.Level != nil {
 			level = *ps.Level
 			if ps.LevelConfidence != nil && *ps.LevelConfidence == "upper_bound" {
-				level = "at most " + level + " (" + fmt.Sprint(len(ps.UnevaluatedChecks)) + " checks not visible to kguardian)"
+				level = "at most " + level + " (unconfirmed: " + fmt.Sprint(len(ps.UnevaluatedChecks)) + " checks not visible to kguardian)"
 			}
 		}
 		fmt.Fprintf(&b, "PSS level:  %s\n", level)
+		for _, sc := range ps.StaleContainers {
+			fmt.Fprintf(&b, "Stale:      %s (%s, last seen %s) is no longer in the spec and is excluded\n", sc.Name, sc.Kind, sc.LastSeen)
+		}
 	}
 	b.WriteByte('\n')
 	out.WriteString(b.String())
 
 	tw := tabwriter.NewWriter(w, 0, 8, 2, ' ', 0)
-	_, _ = fmt.Fprintln(tw, "DIMENSION\tSTATUS\tSCORE\tCOVERAGE\tREASON")
+	_, _ = fmt.Fprintln(tw, "DIMENSION\tSTATUS\tCOVERAGE\tREASON")
 	for _, name := range orderedDimensions(p.Dimensions) {
 		d, ok := p.DimensionEnvelope(name)
 		if !ok {
 			continue
-		}
-		score := fmtScore(d.Score)
-		if !d.Scored && d.Status != "unknown" {
-			score = "not scored"
 		}
 		cov := "-"
 		if d.Coverage != nil {
@@ -365,7 +356,7 @@ func renderProfileTable(dst io.Writer, ref workloadRef, p *api.Profile) error {
 		if len(d.Reasons) > 0 {
 			reason = cell(d.Reasons[0].Message)
 		}
-		_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\n", name, d.Status, score, cov, reason)
+		_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\t%s\n", name, d.Status, cov, reason)
 	}
 	if err := tw.Flush(); err != nil {
 		return err
@@ -413,20 +404,20 @@ func fetchAndRenderProfiles(opts api.ProfileListOptions, output string, w, errw 
 		return err
 	}
 	tw := tabwriter.NewWriter(w, 0, 8, 2, ' ', 0)
-	_, _ = fmt.Fprintln(tw, "NAMESPACE\tKIND\tNAME\tSTATUS\tSCORE\tCOVERAGE\tGRADE\tFINDINGS (C/H/M)\tREV")
+	_, _ = fmt.Fprintln(tw, "NAMESPACE\tKIND\tNAME\tSTATUS\tCOVERAGE\tUNKNOWN\tFINDINGS (C/H/M)\tREV")
 	for _, it := range page.Items {
-		grade := "-"
-		if it.Posture.Grade != nil {
-			grade = *it.Posture.Grade
+		unknown := "-"
+		if len(it.Posture.UnknownDimensions) > 0 {
+			unknown = strings.Join(it.Posture.UnknownDimensions, ",")
 		}
 		rev := "-"
 		if it.Revision != nil {
 			rev = fmt.Sprint(*it.Revision)
 		}
 		counts := fmt.Sprintf("%d/%d/%d", it.FindingCounts["critical"], it.FindingCounts["high"], it.FindingCounts["medium"])
-		_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
-			it.Namespace, it.Kind, it.Name, it.Posture.Status, fmtScore(it.Posture.Score),
-			fmtFraction(it.Posture.Coverage), grade, counts, rev)
+		_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
+			it.Namespace, it.Kind, it.Name, it.Posture.Status,
+			fmtFraction(it.Posture.Coverage), unknown, counts, rev)
 	}
 	if err := tw.Flush(); err != nil {
 		return err
@@ -469,7 +460,6 @@ func fmtRev(v *api.ProfileVersion) string {
 var unknownWhenNull = map[string]string{
 	"level":        "unknown",
 	"captureLevel": "unknown",
-	"audited":      "unknown",
 	"cr":           "none",
 }
 
@@ -523,6 +513,13 @@ func fmtDiffEntry(v any) string {
 func renderProfileDiff(w io.Writer, ref workloadRef, d *api.ProfileDiff) error {
 	var b strings.Builder
 	fmt.Fprintf(&b, "Workload: %s\nFrom:     %s\nTo:       %s\n", ref, fmtRev(d.From), fmtRev(d.To))
+	if d.FromTrimmed {
+		b.WriteString("Note:     the revision before --to was trimmed by retention; compared with the newest retained revision below it")
+		if d.From == nil {
+			b.WriteString(" (none, so everything shows as added)")
+		}
+		b.WriteByte('\n')
+	}
 	if !d.Changed {
 		b.WriteString("\nNo changes.\n")
 		_, err := io.WriteString(w, b.String())
@@ -623,8 +620,18 @@ func exportPSSPatch(ref workloadRef, w, errw io.Writer) error {
 		return fmt.Errorf("%s: no container securityContext has been reported, so there is nothing to base a recommendation on (unknown, not compliant)", ref)
 	}
 	if ps.Recommendation == nil || strings.TrimSpace(ps.Recommendation.YAML) == "" {
-		_, err := fmt.Fprintf(errw, "%s: every evaluated Pod Security Standards check already passes restricted; nothing to recommend. %d checks are not visible to kguardian.\n", ref, len(ps.UnevaluatedChecks))
-		return err
+		// null = nothing failing that a patch can fix: every evaluated check
+		// passes, or only an ephemeral container fails (never patched).
+		if _, err := fmt.Fprintf(errw, "%s: no securityContext patch to recommend (level %s). This is not a pass: %d checks are not visible to kguardian.\n",
+			ref, orDash(ps.Level), len(ps.UnevaluatedChecks)); err != nil {
+			return err
+		}
+		for _, r := range ps.Reasons {
+			if _, err := fmt.Fprintf(errw, "reason: %s\n", r.Message); err != nil {
+				return err
+			}
+		}
+		return nil
 	}
 	patch := ps.Recommendation.YAML
 	if !strings.HasSuffix(patch, "\n") {

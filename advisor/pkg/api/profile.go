@@ -12,15 +12,22 @@ import (
 // optional value here is a pointer: nil must render as "unknown", never as
 // 0, "none" or a pass.
 
-// Posture is the rollup: Score is a weighted mean over known dimensions
-// only, Coverage the fraction of weight that is known, Grade only set when
-// coverage >= 0.8.
+// PostureReason says why one core dimension is not ok.
+type PostureReason struct {
+	Dimension string `json:"dimension"`
+	Status    string `json:"status"`
+	Message   string `json:"message"`
+}
+
+// Posture is the rollup (contract v1.2): Status is the worst known core
+// dimension status, derived from findings (there is no numeric score);
+// Coverage is the share of the four core dimensions that are known;
+// UnknownDimensions lists the core dimensions with status unknown.
 type Posture struct {
-	Status            string   `json:"status"`
-	Score             *float64 `json:"score"`
-	Coverage          *float64 `json:"coverage"`
-	Grade             *string  `json:"grade"`
-	UnknownDimensions []string `json:"unknownDimensions"`
+	Status            string          `json:"status"`
+	Coverage          *float64        `json:"coverage"`
+	UnknownDimensions []string        `json:"unknownDimensions"`
+	Reasons           []PostureReason `json:"reasons"`
 }
 
 // ProfileSummary is one row of GET /workloads.
@@ -73,8 +80,6 @@ type DimensionReason struct {
 // Dimension is the common envelope every dimension carries.
 type Dimension struct {
 	Status   string             `json:"status"`
-	Score    *float64           `json:"score"`
-	Scored   bool               `json:"scored"`
 	Coverage *DimensionCoverage `json:"coverage"`
 	Reasons  []DimensionReason  `json:"reasons"`
 }
@@ -95,7 +100,17 @@ type PodSecurityDimension struct {
 	Level             *string            `json:"level"`
 	LevelConfidence   *string            `json:"levelConfidence"`
 	UnevaluatedChecks []string           `json:"unevaluatedChecks"`
+	StaleContainers   []StaleContainer   `json:"staleContainers"`
 	Recommendation    *PSSRecommendation `json:"recommendation"`
+}
+
+// StaleContainer is a container no longer in the spec (renamed or
+// removed); it is excluded from the level, findings and patch.
+type StaleContainer struct {
+	Name     string `json:"name"`
+	Kind     string `json:"kind"`
+	Digest   string `json:"digest"`
+	LastSeen string `json:"lastSeen"`
 }
 
 // ProfileVersion identifies a stored snapshot.
@@ -158,13 +173,14 @@ func (p *Profile) PodSecurity() *PodSecurityDimension {
 
 // ProfileDiff is GET .../profile/diff. Dimensions stay raw for the renderer.
 type ProfileDiff struct {
-	Namespace  string                     `json:"namespace"`
-	Kind       string                     `json:"kind"`
-	Name       string                     `json:"name"`
-	From       *ProfileVersion            `json:"from"`
-	To         *ProfileVersion            `json:"to"`
-	Changed    bool                       `json:"changed"`
-	Dimensions map[string]json.RawMessage `json:"dimensions"`
+	Namespace   string                     `json:"namespace"`
+	Kind        string                     `json:"kind"`
+	Name        string                     `json:"name"`
+	From        *ProfileVersion            `json:"from"`
+	FromTrimmed bool                       `json:"fromTrimmed"`
+	To          *ProfileVersion            `json:"to"`
+	Changed     bool                       `json:"changed"`
+	Dimensions  map[string]json.RawMessage `json:"dimensions"`
 }
 
 // ProfileListOptions filters GET /workloads. Zero values are not sent.
