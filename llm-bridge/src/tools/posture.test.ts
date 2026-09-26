@@ -328,6 +328,31 @@ test("diff_workload_profile: defaults omit from/to; bad revisions are rejected l
   assert.equal(seen.length, 0);
 });
 
+test("get_workload_security_profile: the broker's own sample (contract v1.1) keeps every dimension field and invents nothing", async () => {
+  const body = fixture("profile_broker_sample.json") as Record<string, any>;
+  routes[PROFILE_PATH] = { status: 200, body };
+  const r = await executeInProcessTool("get_workload_security_profile", { namespace: "payments", kind: "Deployment", name: "checkout" });
+  assert.equal(r.isError, false, r.text);
+  const got = JSON.parse(r.text);
+  assertSubsetOfBroker(got, body, "profile_broker_sample");
+  assertNullsPreserved(got, body);
+  for (const [dim, v] of Object.entries(body.dimensions as Record<string, Record<string, unknown>>)) {
+    assert.deepEqual(Object.keys(got.dimensions[dim]).filter((k) => !k.endsWith("Omitted")).sort(), Object.keys(v).sort(), `${dim} lost a field`);
+  }
+  assert.deepEqual(got.dimensions.podSecurity.pod, body.dimensions.podSecurity.pod, "pod-level failing checks pass through");
+  assert.equal(got.dimensions.podSecurity.recommendation.yaml, body.dimensions.podSecurity.recommendation.yaml);
+});
+
+test("diff_workload_profile: revision 1 with from=null passes through as null", async () => {
+  const body = fixture("profile_diff_rev1.json");
+  routes[DIFF_PATH] = { status: 200, body };
+  const r = await executeInProcessTool("diff_workload_profile", { namespace: "payments", kind: "Deployment", name: "checkout", to: 1 });
+  const got = JSON.parse(r.text);
+  assert.equal(got.from, null);
+  assertSubsetOfBroker(got, body, "profile_diff_rev1");
+  assertNullsPreserved(got, body);
+});
+
 test("diff_workload_profile: capped lists and 404 as found=false", async () => {
   const body = fixture("profile_diff.json") as Record<string, any>;
   body.dimensions.syscalls.added = Array.from({ length: 120 }, (_, i) => `sys_${i}`);
