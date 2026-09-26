@@ -100,6 +100,23 @@ jobs:
           test -x "$bin"
           cp "$bin" "$GITHUB_WORKSPACE/ebpf-load-test"
 
+      # Real container runtimes for the capability probe's runtime-setup
+      # test: static release binaries, pinned by version and sha256 (the
+      # checksums published with each release), never installed.
+      - name: Fetch container runtimes
+        env:
+          RUNC_VERSION: v1.5.2
+          RUNC_SHA256: 599f6f94ff8c5057241eff0d54c3c74f95c34935b6457b33fe545defc61e9488
+          CRUN_VERSION: 1.30.1
+          CRUN_SHA256: e7b059390e27d0f283e1debbe89d9c5847870f3d8325f31ccd954533fdd6ea78
+        run: |
+          mkdir -p runtimes
+          curl -fsSL -o runtimes/runc "https://github.com/opencontainers/runc/releases/download/${RUNC_VERSION}/runc.amd64"
+          curl -fsSL -o runtimes/crun "https://github.com/containers/crun/releases/download/${CRUN_VERSION}/crun-${CRUN_VERSION}-linux-amd64-disable-systemd"
+          echo "${RUNC_SHA256}  runtimes/runc" | sha256sum -c -
+          echo "${CRUN_SHA256}  runtimes/crun" | sha256sum -c -
+          chmod +x runtimes/runc runtimes/crun
+
       - name: Fetch kernels
         env:
           K61: quay.io/lvh-images/kernel-images@sha256:8775ad49b3bc9e5f30b134f081ddf305bbd761084116768866918fe421e548e0 # 6.1-main
@@ -122,33 +139,38 @@ jobs:
           done
           ls -la kernels
 
+      # No shell variables ($x) in these commands: vmtest runs the command
+      # through a shell of its own first, which expands them to "" before
+      # the /bin/bash -c inside the VM sees them. A `for h in ...; do
+      # HOOK=$h` loop here once pinned an empty hook and the capability
+      # test skipped on every kernel.
       - name: Load on 6.1
         uses: danobi/vmtest-action@c0fe6f82e21db9b9a8105f2a385e8a6e3fff2d23 # v0.9
         with:
           name: linux-6.1
           kernel: kernels/vmlinuz-6.1
-          command: /bin/bash -c "insmod ${{ github.workspace }}/kernels/overlay-6.1.ko || true; ${{ github.workspace }}/ebpf-load-test --ignored --exact bpf::tests::every_probe_object_loads_on_this_kernel --nocapture && ${{ github.workspace }}/ebpf-load-test --ignored --exact bpf::tests::syscall_ownership_gate_credits_a_pod_cgroup --nocapture && ${{ github.workspace }}/ebpf-load-test --ignored --exact bpf::tests::runtime_inventory_reports_execs_and_libraries_per_container --nocapture && ${{ github.workspace }}/ebpf-load-test --ignored --exact bpf::tests::owner_parse_is_right_for_every_cgroup_under_concurrency --nocapture && ${{ github.workspace }}/ebpf-load-test --ignored --exact bpf::tests::a_lost_container_lookup_is_counted_and_the_file_reported_again --nocapture && for h in cap_capable security_capable; do RUNTIME_INVENTORY_CAP_HOOK=$h ${{ github.workspace }}/ebpf-load-test --ignored --exact bpf::tests::capability_checks_are_counted_per_container_and_setup_is_not --nocapture || exit 1; done"
+          command: /bin/bash -c "insmod ${{ github.workspace }}/kernels/overlay-6.1.ko || true; ${{ github.workspace }}/ebpf-load-test --ignored --exact bpf::tests::every_probe_object_loads_on_this_kernel --nocapture && ${{ github.workspace }}/ebpf-load-test --ignored --exact bpf::tests::syscall_ownership_gate_credits_a_pod_cgroup --nocapture && ${{ github.workspace }}/ebpf-load-test --ignored --exact bpf::tests::runtime_inventory_reports_execs_and_libraries_per_container --nocapture && ${{ github.workspace }}/ebpf-load-test --ignored --exact bpf::tests::owner_parse_is_right_for_every_cgroup_under_concurrency --nocapture && ${{ github.workspace }}/ebpf-load-test --ignored --exact bpf::tests::a_lost_container_lookup_is_counted_and_the_file_reported_again --nocapture && RUNTIME_INVENTORY_CAP_HOOK=cap_capable ${{ github.workspace }}/ebpf-load-test --ignored --exact bpf::tests::capability_checks_are_counted_per_container_and_setup_is_not --nocapture && RUNTIME_INVENTORY_CAP_HOOK=security_capable ${{ github.workspace }}/ebpf-load-test --ignored --exact bpf::tests::capability_checks_are_counted_per_container_and_setup_is_not --nocapture && KG_RUNC=${{ github.workspace }}/runtimes/runc KG_CRUN=${{ github.workspace }}/runtimes/crun ${{ github.workspace }}/ebpf-load-test --ignored --exact bpf::tests::capability_setup_of_real_runtimes_is_not_counted --nocapture"
 
       - name: Load on 6.6
         uses: danobi/vmtest-action@c0fe6f82e21db9b9a8105f2a385e8a6e3fff2d23 # v0.9
         with:
           name: linux-6.6
           kernel: kernels/vmlinuz-6.6
-          command: /bin/bash -c "insmod ${{ github.workspace }}/kernels/overlay-6.6.ko || true; ${{ github.workspace }}/ebpf-load-test --ignored --exact bpf::tests::every_probe_object_loads_on_this_kernel --nocapture && ${{ github.workspace }}/ebpf-load-test --ignored --exact bpf::tests::syscall_ownership_gate_credits_a_pod_cgroup --nocapture && ${{ github.workspace }}/ebpf-load-test --ignored --exact bpf::tests::runtime_inventory_reports_execs_and_libraries_per_container --nocapture && ${{ github.workspace }}/ebpf-load-test --ignored --exact bpf::tests::owner_parse_is_right_for_every_cgroup_under_concurrency --nocapture && ${{ github.workspace }}/ebpf-load-test --ignored --exact bpf::tests::a_lost_container_lookup_is_counted_and_the_file_reported_again --nocapture && for h in cap_capable security_capable; do RUNTIME_INVENTORY_CAP_HOOK=$h ${{ github.workspace }}/ebpf-load-test --ignored --exact bpf::tests::capability_checks_are_counted_per_container_and_setup_is_not --nocapture || exit 1; done"
+          command: /bin/bash -c "insmod ${{ github.workspace }}/kernels/overlay-6.6.ko || true; ${{ github.workspace }}/ebpf-load-test --ignored --exact bpf::tests::every_probe_object_loads_on_this_kernel --nocapture && ${{ github.workspace }}/ebpf-load-test --ignored --exact bpf::tests::syscall_ownership_gate_credits_a_pod_cgroup --nocapture && ${{ github.workspace }}/ebpf-load-test --ignored --exact bpf::tests::runtime_inventory_reports_execs_and_libraries_per_container --nocapture && ${{ github.workspace }}/ebpf-load-test --ignored --exact bpf::tests::owner_parse_is_right_for_every_cgroup_under_concurrency --nocapture && ${{ github.workspace }}/ebpf-load-test --ignored --exact bpf::tests::a_lost_container_lookup_is_counted_and_the_file_reported_again --nocapture && RUNTIME_INVENTORY_CAP_HOOK=cap_capable ${{ github.workspace }}/ebpf-load-test --ignored --exact bpf::tests::capability_checks_are_counted_per_container_and_setup_is_not --nocapture && RUNTIME_INVENTORY_CAP_HOOK=security_capable ${{ github.workspace }}/ebpf-load-test --ignored --exact bpf::tests::capability_checks_are_counted_per_container_and_setup_is_not --nocapture && KG_RUNC=${{ github.workspace }}/runtimes/runc KG_CRUN=${{ github.workspace }}/runtimes/crun ${{ github.workspace }}/ebpf-load-test --ignored --exact bpf::tests::capability_setup_of_real_runtimes_is_not_counted --nocapture"
 
       - name: Load on 6.12
         uses: danobi/vmtest-action@c0fe6f82e21db9b9a8105f2a385e8a6e3fff2d23 # v0.9
         with:
           name: linux-6.12
           kernel: kernels/vmlinuz-6.12
-          command: /bin/bash -c "insmod ${{ github.workspace }}/kernels/overlay-6.12.ko || true; ${{ github.workspace }}/ebpf-load-test --ignored --exact bpf::tests::every_probe_object_loads_on_this_kernel --nocapture && ${{ github.workspace }}/ebpf-load-test --ignored --exact bpf::tests::syscall_ownership_gate_credits_a_pod_cgroup --nocapture && ${{ github.workspace }}/ebpf-load-test --ignored --exact bpf::tests::runtime_inventory_reports_execs_and_libraries_per_container --nocapture && ${{ github.workspace }}/ebpf-load-test --ignored --exact bpf::tests::owner_parse_is_right_for_every_cgroup_under_concurrency --nocapture && ${{ github.workspace }}/ebpf-load-test --ignored --exact bpf::tests::a_lost_container_lookup_is_counted_and_the_file_reported_again --nocapture && for h in cap_capable security_capable; do RUNTIME_INVENTORY_CAP_HOOK=$h ${{ github.workspace }}/ebpf-load-test --ignored --exact bpf::tests::capability_checks_are_counted_per_container_and_setup_is_not --nocapture || exit 1; done"
+          command: /bin/bash -c "insmod ${{ github.workspace }}/kernels/overlay-6.12.ko || true; ${{ github.workspace }}/ebpf-load-test --ignored --exact bpf::tests::every_probe_object_loads_on_this_kernel --nocapture && ${{ github.workspace }}/ebpf-load-test --ignored --exact bpf::tests::syscall_ownership_gate_credits_a_pod_cgroup --nocapture && ${{ github.workspace }}/ebpf-load-test --ignored --exact bpf::tests::runtime_inventory_reports_execs_and_libraries_per_container --nocapture && ${{ github.workspace }}/ebpf-load-test --ignored --exact bpf::tests::owner_parse_is_right_for_every_cgroup_under_concurrency --nocapture && ${{ github.workspace }}/ebpf-load-test --ignored --exact bpf::tests::a_lost_container_lookup_is_counted_and_the_file_reported_again --nocapture && RUNTIME_INVENTORY_CAP_HOOK=cap_capable ${{ github.workspace }}/ebpf-load-test --ignored --exact bpf::tests::capability_checks_are_counted_per_container_and_setup_is_not --nocapture && RUNTIME_INVENTORY_CAP_HOOK=security_capable ${{ github.workspace }}/ebpf-load-test --ignored --exact bpf::tests::capability_checks_are_counted_per_container_and_setup_is_not --nocapture && KG_RUNC=${{ github.workspace }}/runtimes/runc KG_CRUN=${{ github.workspace }}/runtimes/crun ${{ github.workspace }}/ebpf-load-test --ignored --exact bpf::tests::capability_setup_of_real_runtimes_is_not_counted --nocapture"
 
       - name: Load on 6.18
         uses: danobi/vmtest-action@c0fe6f82e21db9b9a8105f2a385e8a6e3fff2d23 # v0.9
         with:
           name: linux-6.18
           kernel: kernels/vmlinuz-6.18
-          command: /bin/bash -c "insmod ${{ github.workspace }}/kernels/overlay-6.18.ko || true; ${{ github.workspace }}/ebpf-load-test --ignored --exact bpf::tests::every_probe_object_loads_on_this_kernel --nocapture && ${{ github.workspace }}/ebpf-load-test --ignored --exact bpf::tests::syscall_ownership_gate_credits_a_pod_cgroup --nocapture && ${{ github.workspace }}/ebpf-load-test --ignored --exact bpf::tests::runtime_inventory_reports_execs_and_libraries_per_container --nocapture && ${{ github.workspace }}/ebpf-load-test --ignored --exact bpf::tests::owner_parse_is_right_for_every_cgroup_under_concurrency --nocapture && ${{ github.workspace }}/ebpf-load-test --ignored --exact bpf::tests::a_lost_container_lookup_is_counted_and_the_file_reported_again --nocapture && for h in cap_capable security_capable; do RUNTIME_INVENTORY_CAP_HOOK=$h ${{ github.workspace }}/ebpf-load-test --ignored --exact bpf::tests::capability_checks_are_counted_per_container_and_setup_is_not --nocapture || exit 1; done"
+          command: /bin/bash -c "insmod ${{ github.workspace }}/kernels/overlay-6.18.ko || true; ${{ github.workspace }}/ebpf-load-test --ignored --exact bpf::tests::every_probe_object_loads_on_this_kernel --nocapture && ${{ github.workspace }}/ebpf-load-test --ignored --exact bpf::tests::syscall_ownership_gate_credits_a_pod_cgroup --nocapture && ${{ github.workspace }}/ebpf-load-test --ignored --exact bpf::tests::runtime_inventory_reports_execs_and_libraries_per_container --nocapture && ${{ github.workspace }}/ebpf-load-test --ignored --exact bpf::tests::owner_parse_is_right_for_every_cgroup_under_concurrency --nocapture && ${{ github.workspace }}/ebpf-load-test --ignored --exact bpf::tests::a_lost_container_lookup_is_counted_and_the_file_reported_again --nocapture && RUNTIME_INVENTORY_CAP_HOOK=cap_capable ${{ github.workspace }}/ebpf-load-test --ignored --exact bpf::tests::capability_checks_are_counted_per_container_and_setup_is_not --nocapture && RUNTIME_INVENTORY_CAP_HOOK=security_capable ${{ github.workspace }}/ebpf-load-test --ignored --exact bpf::tests::capability_checks_are_counted_per_container_and_setup_is_not --nocapture && KG_RUNC=${{ github.workspace }}/runtimes/runc KG_CRUN=${{ github.workspace }}/runtimes/crun ${{ github.workspace }}/ebpf-load-test --ignored --exact bpf::tests::capability_setup_of_real_runtimes_is_not_counted --nocapture"
 
       # The steps above boot the images' default (voluntary) preemption,
       # where the library probe cannot be preempted mid-parse. One kernel

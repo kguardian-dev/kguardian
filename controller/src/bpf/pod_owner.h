@@ -207,4 +207,48 @@ static __always_inline __u32 task_pod_generation(void)
     return task_pod_generation_of((struct task_struct *)bpf_get_current_task());
 }
 
+// True when the calling task is the container runtime setting a container
+// up, not the container's own code. Decided by provenance: its real parent
+// is outside every pod cgroup (the runtime on the host), and counting the
+// execs since that parent created it (self_exec_id - parent_exec_id, which
+// CLONE_PARENT and CLONE_THREAD children copy from their creator):
+//  - 0: forked, not exec'd yet. A runtime that forks without exec (crun)
+//    until it execs the container's command. Container code always runs
+//    after an exec, so it is never here.
+//  - 1, and either the same executable file as the parent or a parent
+//    named "runc*": runc init. runc execs it from a sealed copy of its own
+//    binary (an overlayfs file or a memfd since 1.2, libcontainer/exeseal),
+//    so the file differs from host runc's; the parent's name is the host
+//    process's, which nothing in the container can set. The container's
+//    command that runc then execs is at 2; a crun container's command is
+//    at 1 but its parent is crun or the shim.
+//  - anything else: counted. runc 1.1 re-execs itself from a memfd first,
+//    so its runc init is at 2 and is counted: extra checks, never hidden
+//    ones.
+// A container process renaming itself changes none of this. False
+// whenever unsure, so the caller counts the event.
+static __always_inline bool is_runtime_setup(void)
+{
+    struct task_struct *task = (struct task_struct *)bpf_get_current_task();
+    struct task_struct *parent = BPF_CORE_READ(task, real_parent);
+    if (!parent)
+        return false;
+    __u64 execs = BPF_CORE_READ(task, self_exec_id) - BPF_CORE_READ(task, parent_exec_id);
+    if (execs > 1)
+        return false;
+    __u32 owner = task_pod_generation_of(parent);
+    if (owner == KG_OWNER_UNKNOWN || (owner & KG_CG_POD))
+        return false;
+    if (execs == 0)
+        return true;
+    struct inode *exe = BPF_CORE_READ(task, mm, exe_file, f_inode);
+    struct inode *parent_exe = BPF_CORE_READ(parent, mm, exe_file, f_inode);
+    if (exe && exe == parent_exe)
+        return true;
+    char comm[4];
+    if (bpf_core_read(comm, sizeof(comm), &parent->comm) != 0)
+        return false;
+    return comm[0] == 'r' && comm[1] == 'u' && comm[2] == 'n' && comm[3] == 'c';
+}
+
 #endif

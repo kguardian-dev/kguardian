@@ -413,15 +413,25 @@ int BPF_PROG(trace_runtime_mmap, struct file *file, unsigned long prot, unsigned
 //    recommended for dropping.
 //
 // Not counted:
-//  - Container runtime setup: a task that has not exec'd since it was
-//    forked by a process outside every pod cgroup (runc init, whose
-//    CLONE_PARENT clones have the host runc as parent, before it execs
-//    the container's command). Decided by provenance, not by name: a
-//    container process that renames itself "runc:[...]" is still counted.
-//    If the parent's owner cannot be worked out, the check is counted.
-//  - Checks against a user namespace the task's own namespace owns (a
-//    user namespace the container created): capabilities there come from
-//    creating the namespace, not from securityContext.capabilities.
+//  - Container runtime setup (is_runtime_setup in pod_owner.h): a task
+//    whose real parent is outside every pod cgroup and runs the same
+//    executable as that parent (runc init, before it execs the container's
+//    command). Decided by provenance, not by name: a container process
+//    that renames itself "runc:[...]" is still counted. When unsure, the
+//    check is counted.
+//  - Checks the kernel decides without the container's capability bits
+//    (not_the_containers_caps): a task that moved into a user namespace
+//    below the container's own (unshare) is checked against the full set
+//    it got by creating that namespace; and a check against a namespace
+//    below the container's own is granted by ownership alone when the
+//    task's euid owns that namespace's top (the child of the container's).
+//    A check against a descendant namespace that the task does NOT own
+//    falls through to the task's own capability bits in the container's
+//    namespace (cap_capable), so it is a real use and is counted. The
+//    container's own user namespace is the owner of its cgroup namespace,
+//    which the runtime creates with the container and a later
+//    unshare(CLONE_NEWUSER) does not change (unless it also unshares the
+//    cgroup namespace).
 
 // include/linux/security.h
 #define KG_CAP_OPT_NOAUDIT (1u << 1)
@@ -470,35 +480,50 @@ struct
     __uint(max_entries, 64 * 1024);
 } cap_events SEC(".maps");
 
-// True for container runtime setup (see above). False when unsure.
-static __always_inline bool is_runtime_setup(void)
+// True when `ns` is strictly below `base` (created from it, directly or
+// not). False when unsure.
+static __always_inline bool userns_below(struct user_namespace *ns, struct user_namespace *base)
 {
-    struct task_struct *task = (struct task_struct *)bpf_get_current_task();
-    __u64 self_exec = BPF_CORE_READ(task, self_exec_id);
-    __u64 parent_exec = BPF_CORE_READ(task, parent_exec_id);
-    if (self_exec != parent_exec)
-        return false; // exec'd since the fork: the container's own code
-    struct task_struct *parent = BPF_CORE_READ(task, real_parent);
-    if (!parent)
-        return false;
-    __u32 owner = task_pod_generation_of(parent);
-    if (owner == KG_OWNER_UNKNOWN)
-        return false;
-    return !(owner & KG_CG_POD);
-}
-
-// True when `target` is a user namespace strictly below `own` (one the
-// task's namespace created, directly or not).
-static __always_inline bool userns_below(struct user_namespace *target, struct user_namespace *own)
-{
-    struct user_namespace *ns = target;
     for (int i = 0; i < KG_USERNS_LEVELS; i++)
     {
         if (!ns)
             return false;
         struct user_namespace *up = BPF_CORE_READ(ns, parent);
-        if (up == own)
+        if (up == base)
             return true;
+        ns = up;
+    }
+    return false;
+}
+
+// True when the kernel answers this check without the capability bits the
+// container was given in its own user namespace `base`, mirroring
+// cap_capable() (security/commoncap.c):
+//  - the task's credentials live in a namespace below `base`: it has the
+//    full set there from creating it, whatever the container was given;
+//  - the target is below the task's (== `base`) namespace and the
+//    namespace just below `base` on the way to it is owned by the task's
+//    euid: granted by ownership, the bits are never read.
+// Every other check reads the task's bits in `base`, including one
+// against a descendant the task does not own, and is counted. False when
+// unsure, so the check is counted.
+static __always_inline bool not_the_containers_caps(const struct cred *cred,
+                                                    struct user_namespace *target,
+                                                    struct user_namespace *base)
+{
+    struct user_namespace *cred_ns = BPF_CORE_READ(cred, user_ns);
+    if (!base || !cred_ns)
+        return false;
+    if (cred_ns != base)
+        return userns_below(cred_ns, base);
+    struct user_namespace *ns = target;
+    for (int i = 0; i < KG_USERNS_LEVELS; i++)
+    {
+        if (!ns || ns == base)
+            return false;
+        struct user_namespace *up = BPF_CORE_READ(ns, parent);
+        if (up == base)
+            return BPF_CORE_READ(ns, owner.val) == BPF_CORE_READ(cred, euid.val);
         ns = up;
     }
     return false;
@@ -519,7 +544,8 @@ static __always_inline int report_capable(const struct cred *cred, struct user_n
         return 0;
     if (is_runtime_setup())
         return 0;
-    if (userns_below(ns, BPF_CORE_READ(cred, user_ns)))
+    struct task_struct *task = (struct task_struct *)bpf_get_current_task();
+    if (not_the_containers_caps(cred, ns, BPF_CORE_READ(task, nsproxy, cgroup_ns, user_ns)))
         return 0;
 
     struct cap_seen_key key = {
