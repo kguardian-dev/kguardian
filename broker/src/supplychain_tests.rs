@@ -1165,7 +1165,8 @@ fn live_database_exposure_reports_images_workloads_and_observed_ingress() {
                ('sc-t5', 'sc-shared-0', '{NS}', '10.9.0.3', 'INGRESS', '10.9.0.9', timezone('UTC', NOW()), 'pod', '{NS}', 'same-ns'), \
                ('sc-t6', 'sc-shared-0', 'sc-other', '10.8.0.3', 'INGRESS', '8.8.4.4', timezone('UTC', NOW()), NULL, NULL, NULL), \
                ('sc-t7', 'sc-shared-0', 'sc-other', '10.8.0.3', 'INGRESS', '10.8.1.1', timezone('UTC', NOW()), 'pod', 'elsewhere', 'x'), \
-               ('sc-t8', 'sc-idle-1', '{NS}', '10.9.0.4', 'INGRESS', '9.9.9.9', timezone('UTC', NOW()) - INTERVAL '30 days', NULL, NULL, NULL);"
+               ('sc-t8', 'sc-idle-1', '{NS}', '10.9.0.4', 'INGRESS', '9.9.9.9', timezone('UTC', NOW()) - INTERVAL '30 days', NULL, NULL, NULL), \
+               ('sc-t9', 'sc-idle-1', '{NS}', '10.9.0.4', 'EGRESS', '1.1.1.1', timezone('UTC', NOW()), NULL, NULL, NULL);"
         ),
     );
     let e = crate::supplychain_read::vulnerability_exposure(&mut conn, "CVE-X", 168)
@@ -1203,9 +1204,17 @@ fn live_database_exposure_reports_images_workloads_and_observed_ingress() {
     assert_eq!(internal.exposed, Some(false));
     assert_eq!(internal.ingress_from_public_ips, 0);
     assert_eq!(internal.ingress_from_other_namespaces, 0);
-    // Pods, but no flows in the window: unknown, not safe.
+    // Pods with egress in the window but no ingress (a UDP server looks
+    // like this: inbound UDP is not captured): unknown, not safe.
     let idle = &by("idle").network;
-    assert_eq!((idle.pods_observed, idle.flows_observed), (1, 0));
+    assert_eq!(
+        (
+            idle.pods_observed,
+            idle.flows_observed,
+            idle.ingress_flows_observed
+        ),
+        (1, 1, 0)
+    );
     assert_eq!(idle.exposed, None);
     assert_eq!(by("nopods").network.exposed, None, "no pods = unknown");
     assert!(by("api").running);
@@ -1620,6 +1629,7 @@ fn live_database_sources_are_deduplicated_and_registry_sboms_never_replace_trivy
     assert_eq!(c1.report_digests, [d(1)]);
     assert_eq!((c1.kev, c1.epss), (Some(true), Some(0.5)));
     assert!(c1.fixable, "a fix from any source counts");
+    assert_eq!(c1.fixed_versions, ["2"]);
     let c2 = page.items.iter().find(|f| f.id == "CVE-2").unwrap();
     assert_eq!(c2.sources, ["grype"]);
     assert_eq!(c2.kev, None, "grype did not flag it: unknown, not false");
@@ -1734,5 +1744,33 @@ fn live_database_sources_are_deduplicated_and_registry_sboms_never_replace_trivy
             .filter(|n| *n == "trivy-pkg")
             .count(),
         1
+    );
+    // Sources disagree on the fix: both are returned, ordered by source,
+    // and neither is chosen by text order ("10.1" < "2" as text).
+    let mut t4 = vulns_json(
+        &d(1),
+        "2026-09-24T08:00:00Z",
+        &[("CVE-1", "HIGH", Some("10.1"))],
+    );
+    t4["observed_in"] = json!([]);
+    store_v(&mut conn, t4);
+    let page = crate::supplychain_read::image_vulnerabilities(
+        &mut conn,
+        &d(1),
+        None,
+        None,
+        None,
+        None,
+        10,
+    )
+    .unwrap();
+    let c1 = page.items.iter().find(|f| f.id == "CVE-1").unwrap();
+    assert_eq!(c1.fixed_versions, ["2", "10.1"]);
+    let e = crate::supplychain_read::vulnerability_exposure(&mut conn, "CVE-1", 168)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        e.images[0].packages[0]["fixedVersions"],
+        json!(["2", "10.1"])
     );
 }

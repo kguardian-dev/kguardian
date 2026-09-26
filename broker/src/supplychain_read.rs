@@ -268,8 +268,8 @@ struct VulnDbRow {
     pkg_purl: Option<String>,
     #[diesel(sql_type = Text)]
     installed_version: String,
-    #[diesel(sql_type = Nullable<Text>)]
-    fixed_version: Option<String>,
+    #[diesel(sql_type = Array<Text>)]
+    fixed_versions: Vec<String>,
     #[diesel(sql_type = Text)]
     severity: String,
     #[diesel(sql_type = SmallInt)]
@@ -317,7 +317,10 @@ pub struct Finding {
     pub id: String,
     pub package: PackageRef,
     pub installed_version: String,
-    pub fixed_version: Option<String>,
+    /// Every distinct fixed version the sources give, ordered by source.
+    /// Empty = no source knows a fix. Not reduced to one: sources can
+    /// disagree, and version order depends on the ecosystem.
+    pub fixed_versions: Vec<String>,
     pub fixable: bool,
     pub severity: String,
     pub score: Option<f32>,
@@ -354,8 +357,8 @@ impl From<VulnDbRow> for Finding {
                 purl: r.pkg_purl,
             },
             installed_version: r.installed_version,
-            fixable: r.fixed_version.is_some(),
-            fixed_version: r.fixed_version,
+            fixable: !r.fixed_versions.is_empty(),
+            fixed_versions: r.fixed_versions,
             severity: r.severity,
             score: r.score,
             cvss: r.cvss,
@@ -394,7 +397,9 @@ pub struct ImageVulnsPage {
 /// group listing the contributing sources. Descriptive fields come from
 /// the group's first row; severity, score and EPSS are the highest any
 /// source gives, `kev` is true if any source says so, and a fix from any
-/// source makes it fixable.
+/// source makes it fixable. Fixed versions are NOT reduced to one: text
+/// order is not version order ("10.1" < "9.2"), so every distinct fixed
+/// version is returned, ordered by the first source that gives it.
 const IMAGE_VULNS_SQL: &str = "\
 WITH v AS ( \
     SELECT v.* FROM image_vulnerabilities v \
@@ -403,7 +408,13 @@ WITH v AS ( \
 ), g AS ( \
     SELECT min(id) AS rep, vuln_id, pkg_name, installed_version, \
         max(severity_rank) AS severity_rank, max(score) AS score, \
-        min(fixed_version) AS any_fix, bool_or(kev) AS kev, \
+        COALESCE((SELECT array_agg(f.fv ORDER BY f.first_source, f.fv) FROM ( \
+            SELECT v2.fixed_version AS fv, min(v2.source) AS first_source FROM v v2 \
+            WHERE v2.vuln_id = v.vuln_id AND v2.pkg_name = v.pkg_name \
+              AND v2.installed_version = v.installed_version \
+              AND v2.fixed_version IS NOT NULL \
+            GROUP BY v2.fixed_version) f), '{}') AS fixed_versions, \
+        bool_or(kev) AS kev, \
         min(kev_date_added) AS kev_date_added, max(epss) AS epss, \
         max(epss_percentile) AS epss_percentile, \
         array_agg(DISTINCT source ORDER BY source) AS sources, \
@@ -411,7 +422,7 @@ WITH v AS ( \
     FROM v GROUP BY vuln_id, pkg_name, installed_version \
 ) \
 SELECT g.rep AS id, g.report_digests, g.sources, g.vuln_id, g.pkg_name, r.pkg_type, r.pkg_purl, \
-    g.installed_version, COALESCE(r.fixed_version, g.any_fix) AS fixed_version, \
+    g.installed_version, g.fixed_versions, \
     CASE g.severity_rank WHEN 5 THEN 'CRITICAL' WHEN 4 THEN 'HIGH' WHEN 3 THEN 'MEDIUM' \
         WHEN 2 THEN 'LOW' WHEN 1 THEN 'NONE' ELSE 'UNKNOWN' END AS severity, \
     g.severity_rank, g.score, r.cvss, r.title, r.primary_url, r.target, r.class, \
@@ -419,7 +430,7 @@ SELECT g.rep AS id, g.report_digests, g.sources, g.vuln_id, g.pkg_name, r.pkg_ty
     g.epss_percentile \
 FROM g JOIN image_vulnerabilities r ON r.id = g.rep \
 WHERE ($3::smallint[] IS NULL OR g.severity_rank = ANY($3)) \
-  AND ($4::bool IS NULL OR (g.any_fix IS NOT NULL) = $4) \
+  AND ($4::bool IS NULL OR (cardinality(g.fixed_versions) > 0) = $4) \
   AND ($5::smallint IS NULL OR g.severity_rank < $5 OR (g.severity_rank = $5 AND g.rep > $6)) \
 ORDER BY g.severity_rank DESC, g.rep \
 LIMIT $7";
@@ -1205,7 +1216,7 @@ pub struct ExposedImage {
     /// Best join among them.
     pub join: String,
     pub severity: &'static str,
-    /// `[{name, installedVersion, fixedVersion, severity, sources}]`,
+    /// `[{name, installedVersion, fixedVersions, severity, sources}]`,
     /// deduplicated across sources on (name, installed version), capped.
     pub packages: serde_json::Value,
 }
@@ -1241,6 +1252,8 @@ struct NetRow {
     #[diesel(sql_type = BigInt)]
     flows: i64,
     #[diesel(sql_type = BigInt)]
+    ingress_flows: i64,
+    #[diesel(sql_type = BigInt)]
     cross_namespace: i64,
     #[diesel(sql_type = BigInt)]
     from_nodes: i64,
@@ -1259,9 +1272,12 @@ pub struct NetworkExposure {
     /// Pods of the workload the broker knows (live, or dead within its
     /// retention) whose traffic was examined.
     pub pods_observed: i64,
-    /// Flows (either direction) those pods had in the window: the
-    /// evidence that capture was seeing them at all.
+    /// Flows (either direction) those pods had in the window.
     pub flows_observed: i64,
+    /// Of those, INGRESS flows: the evidence `exposed` rests on. Egress
+    /// alone is not: the controller does not capture inbound UDP, so a
+    /// UDP-only server can show outbound flows and no ingress.
+    pub ingress_flows_observed: i64,
     /// Distinct pod/service peers in ANOTHER namespace that sent ingress.
     pub ingress_from_other_namespaces: i64,
     /// Distinct peer IPs the broker never attributed to a pod, service or
@@ -1275,10 +1291,10 @@ pub struct NetworkExposure {
     /// land here too; the broker cannot tell them apart).
     pub ingress_from_nodes: i64,
     /// true: ingress from outside the namespace, an unattributed peer or a
-    /// node was observed; `exposedVia` says which. false: the pods had
-    /// flows in the window and none of them was such ingress. null:
-    /// unknown (no pods, or no flows captured in the window). Never read
-    /// false as "cannot be reached".
+    /// node was observed; `exposedVia` says which. false: INGRESS flows
+    /// were observed in the window and none came from outside. null:
+    /// unknown (no pods, or no ingress flows captured in the window, even
+    /// if there was egress). Never read false as "cannot be reached".
     pub exposed: Option<bool>,
     /// Why `exposed` is true: any of `other_namespace`, `unattributed`,
     /// `public_ip`, `node`.
@@ -1339,7 +1355,13 @@ fn exposure_images_sql() -> String {
             WHERE v.vuln_id = $1 \
          ), \
          pk AS ( \
-            SELECT image_digest, pkg_name, installed_version, max(fixed_version) AS fv, \
+            SELECT image_digest, pkg_name, installed_version, \
+                COALESCE((SELECT array_agg(f.fv ORDER BY f.first_source, f.fv) FROM ( \
+            SELECT x2.fixed_version AS fv, min(x2.source) AS first_source FROM x x2 \
+            WHERE x2.image_digest = x.image_digest AND x2.pkg_name = x.pkg_name \
+              AND x2.installed_version = x.installed_version \
+              AND x2.fixed_version IS NOT NULL \
+            GROUP BY x2.fixed_version) f), '{{}}') AS fvs, \
                 max(severity_rank) AS sr, array_agg(DISTINCT source ORDER BY source) AS srcs \
             FROM x GROUP BY image_digest, pkg_name, installed_version \
          ), \
@@ -1354,7 +1376,7 @@ fn exposure_images_sql() -> String {
                 ELSE 'workload_tag' END AS join_kind, \
             img.sr AS severity_rank, \
             (SELECT jsonb_agg(jsonb_build_object('name', pk.pkg_name, \
-                'installedVersion', pk.installed_version, 'fixedVersion', pk.fv, \
+                'installedVersion', pk.installed_version, 'fixedVersions', pk.fvs, \
                 'severity', CASE pk.sr WHEN 5 THEN 'CRITICAL' WHEN 4 THEN 'HIGH' \
                     WHEN 3 THEN 'MEDIUM' WHEN 2 THEN 'LOW' WHEN 1 THEN 'NONE' \
                     ELSE 'UNKNOWN' END, \
@@ -1417,6 +1439,7 @@ WITH w AS ( \
 SELECT w.idx, \
     (SELECT count(*) FROM pods WHERE pods.idx = w.idx) AS pods, \
     count(i.idx) AS flows, \
+    count(i.idx) FILTER (WHERE i.ingress) AS ingress_flows, \
     count(DISTINCT i.peer_namespace || '/' || i.peer) FILTER ( \
         WHERE i.ingress AND i.peer_kind IN ('pod', 'service') \
           AND i.peer_namespace IS DISTINCT FROM i.pod_namespace) AS cross_namespace, \
@@ -1439,6 +1462,7 @@ fn network_from(row: Option<&NetRow>, window_hours: i64) -> NetworkExposure {
             ingress_from_unattributed_peers: 0,
             ingress_from_public_ips: 0,
             flows_observed: 0,
+            ingress_flows_observed: 0,
             ingress_from_nodes: 0,
             exposed: None,
             exposed_via: Vec::new(),
@@ -1467,17 +1491,19 @@ fn network_from(row: Option<&NetRow>, window_hours: i64) -> NetworkExposure {
         window_hours,
         pods_observed: r.pods,
         flows_observed: r.flows,
+        ingress_flows_observed: r.ingress_flows,
         ingress_from_other_namespaces: r.cross_namespace,
         ingress_from_unattributed_peers: r.unresolved,
         ingress_from_public_ips: public,
         ingress_from_nodes: r.from_nodes,
-        // No pods or no captured flows: nothing was observed, so unknown.
-        exposed: if r.pods == 0 || r.flows == 0 {
+        // No pods or no captured ingress: nothing inbound was observed, so
+        // unknown (inbound UDP is not captured; egress proves nothing).
+        exposed: if r.pods == 0 || r.ingress_flows == 0 {
             None
         } else {
             Some(!via.is_empty())
         },
-        exposed_via: if r.pods == 0 || r.flows == 0 {
+        exposed_via: if r.pods == 0 || r.ingress_flows == 0 {
             Vec::new()
         } else {
             via
@@ -1597,7 +1623,9 @@ pub fn vulnerability_exposure(
                 serde_json::Value::Array(a) => a,
                 _ => Vec::new(),
             };
-            fixable |= pkgs.iter().any(|p| !p["fixedVersion"].is_null());
+            fixable |= pkgs
+                .iter()
+                .any(|p| p["fixedVersions"].as_array().is_some_and(|a| !a.is_empty()));
             if pkgs.len() as i64 > EXPOSURE_MAX_PACKAGES {
                 pkgs.truncate(EXPOSURE_MAX_PACKAGES as usize);
                 truncated = true;
@@ -1778,6 +1806,7 @@ mod tests {
             idx: 1,
             pods: 0,
             flows: 0,
+            ingress_flows: 0,
             cross_namespace: 0,
             from_nodes: 0,
             unresolved_ips: vec![],
@@ -1793,9 +1822,18 @@ mod tests {
             None,
             "pods but no captured flows is unknown, not safe"
         );
+        // Egress only (e.g. a UDP server: inbound UDP is not captured):
+        // unknown, not "not exposed".
+        let egress_only = NetRow {
+            pods: 2,
+            flows: 5,
+            ..row.clone()
+        };
+        assert_eq!(network_from(Some(&egress_only), 24).exposed, None);
         let internal = NetRow {
             pods: 2,
             flows: 5,
+            ingress_flows: 2,
             ..row.clone()
         };
         let n = network_from(Some(&internal), 24);
@@ -1806,6 +1844,7 @@ mod tests {
         let node = NetRow {
             pods: 2,
             flows: 5,
+            ingress_flows: 1,
             from_nodes: 1,
             ..row.clone()
         };
@@ -1815,6 +1854,7 @@ mod tests {
         let internet = NetRow {
             pods: 2,
             flows: 3,
+            ingress_flows: 2,
             unresolved: 2,
             unresolved_ips: vec!["8.8.8.8".into(), "10.0.0.9".into()],
             ..row.clone()
@@ -1826,6 +1866,7 @@ mod tests {
         let cross = NetRow {
             pods: 1,
             flows: 1,
+            ingress_flows: 1,
             cross_namespace: 1,
             ..row
         };
