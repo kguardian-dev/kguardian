@@ -67,7 +67,16 @@ export function Modal({
   align = 'center',
 }: ModalProps) {
   const panelRef = useRef<HTMLDivElement>(null);
-  const lastFocused = useRef<HTMLElement | null>(null);
+  // Record the opener while rendering the open, before commit: a child with
+  // autoFocus (the command palette's input) takes focus during commit, ahead
+  // of any effect here, and would be recorded as the "opener" instead.
+  const activeNow = () => (typeof document === 'undefined' ? null : (document.activeElement as HTMLElement | null));
+  const [opener, setOpener] = useState<HTMLElement | null>(() => (isOpen ? activeNow() : null));
+  const [openSeen, setOpenSeen] = useState(isOpen);
+  if (isOpen !== openSeen) {
+    setOpenSeen(isOpen);
+    if (isOpen) setOpener(activeNow());
+  }
   const labelId = useId();
   // Keep the node mounted through the exit transition.
   const [mounted, setMounted] = useState(isOpen);
@@ -99,14 +108,13 @@ export function Modal({
   // Focus management: remember the trigger, move focus in, restore on close.
   useEffect(() => {
     if (!isOpen) return;
-    lastFocused.current = document.activeElement as HTMLElement | null;
     const node = panelRef.current;
     if (node) {
       const first = node.querySelector<HTMLElement>(FOCUSABLE);
       (first ?? node).focus();
     }
     return () => {
-      const prev = lastFocused.current;
+      const prev = opener;
       if (prev && prev !== document.body && prev.isConnected) prev.focus?.();
       const now = document.activeElement;
       if (now && now !== document.body && now.isConnected && !node?.contains(now)) return;
@@ -117,7 +125,7 @@ export function Modal({
       );
       under.at(-1)?.querySelector<HTMLElement>(FOCUSABLE)?.focus();
     };
-  }, [isOpen]);
+  }, [isOpen, opener]);
 
   // Body-scroll-lock while any modal is open.
   useEffect(() => {
