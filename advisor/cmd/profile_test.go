@@ -378,3 +378,21 @@ func TestProfileExport_NullRecommendationIsNotAPass(t *testing.T) {
 		t.Errorf("unknown podSecurity must be an error, got %v", err)
 	}
 }
+
+func TestRenderDrift_NotEvaluatedIsNotNoDrift(t *testing.T) {
+	var d api.ProfileDrift
+	if err := json.Unmarshal([]byte(`{"evaluated":["tagMoved"],
+		"notEvaluated":[{"type":"unshippedExecutable","container":"app","reason":"no_runtime_data"},
+		                {"type":"unshippedExecutable","container":null,"reason":"no_inventory"}],
+		"items":[{"type":"unshippedExecutable","findingId":"drift.unshippedExecutable/side","severity":"high",
+		          "container":"side","detail":{"origins":["memfd"]}}]}`), &d); err != nil {
+		t.Fatal(err)
+	}
+	s := renderDrift(&d)
+	mustContain(t, s, "1 unshippedExecutable", "never sets posture", "evaluated:     tagMoved",
+		"not evaluated: unshippedExecutable for container app (no_runtime_data)",
+		"not evaluated: unshippedExecutable for workload (no_inventory)", `is not "no drift"`)
+	if s := renderDrift(&api.ProfileDrift{}); !strings.Contains(s, "no items") || !strings.Contains(s, "evaluated:     none") {
+		t.Errorf("empty drift: %q", s)
+	}
+}
