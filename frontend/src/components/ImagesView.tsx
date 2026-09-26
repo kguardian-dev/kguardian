@@ -98,8 +98,14 @@ export function ImagesView({ namespace, allNamespaces, tab: tabParam, cve, diges
   const tierTile = (n: number) => (tiersKnown || cves.items.length === 0 ? n : 'unknown');
   // A count of known values says how many it could not count.
   const tileSuffix = (unknown: number) => {
-    const parts = [loadedAll || unread ? '' : '+', unknown > 0 && !unread ? ` · ${unknown} unknown` : ''].join('');
-    return parts || undefined;
+    const more = loadedAll || unread ? '' : '+';
+    if (unknown <= 0 || unread) return more || undefined;
+    return (
+      <>
+        {more}
+        <span className="ml-2 text-xs font-sans font-normal">{unknown} unknown</span>
+      </>
+    );
   };
 
   return (

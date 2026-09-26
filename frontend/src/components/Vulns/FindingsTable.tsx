@@ -76,7 +76,7 @@ export function FindingsTable({ items, onOpenCve, hasMore, loadingMore, onLoadMo
                   </td>
                   <td className="hidden sm:table-cell px-3 py-2 align-top text-xs">
                     <div className="font-mono text-primary [overflow-wrap:anywhere]">{f.package.name}</div>
-                    <div className="text-tertiary font-mono">{f.installedVersion}</div>
+                    <div className="text-tertiary font-mono whitespace-nowrap">{f.installedVersion}</div>
                   </td>
                   <td className="hidden sm:table-cell px-3 py-2 align-top"><FactorChips factors={factors} only={LIST_FACTORS} /></td>
                   <td className="hidden sm:table-cell px-3 py-2 align-top text-[11px] text-tertiary whitespace-nowrap">{f.sources.map(sourceLabel).join(', ')}</td>
