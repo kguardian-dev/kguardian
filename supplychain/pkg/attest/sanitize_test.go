@@ -10,7 +10,7 @@ import (
 // so the result is still posted (the broker refuses control characters)
 // and nothing unprintable is shown as a verified identity.
 func TestNeutralizeControlCharacters(t *testing.T) {
-	for _, bad := range []string{"\n", "\r", "\t", "\x00", "\u0085", " ", " "} {
+	for _, bad := range []string{"\n", "\r", "\t", "\x00", "\x7f", "\u0085", "\u2028", "\u2029", "\u200e", "\u200f", "\u202a", "\u202e", "\u2066", "\u2069", "\ufeff"} {
 		c := &collector{
 			sigs: []Signature{
 				{Format: FormatCosignBundle, Verified: true, Signer: Signer{Kind: SignerKeyless, Issuer: issuerGoogle, SAN: sanK8sRelease}},
@@ -25,6 +25,9 @@ func TestNeutralizeControlCharacters(t *testing.T) {
 			},
 		}
 		c.neutralize()
+		if len(c.sigs) != 3 || len(c.atts) != 3 {
+			t.Fatalf("%q: entries dropped", bad)
+		}
 		if !c.sigs[0].Verified {
 			t.Fatalf("%q: clean signature touched", bad)
 		}

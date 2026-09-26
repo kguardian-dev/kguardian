@@ -356,9 +356,10 @@ and no identity.
   result is `invalid`. A legacy `.sig` has no hint, so an altered one reads
   as `key_signed`, never `verified`.
 - **Printable only.** A signature or attestation whose signer-supplied
-  fields (SAN, predicate type, provenance) hold a control character or a
-  Unicode line separator is reported malformed and unverified, without
-  those fields. The broker refuses such characters anywhere, so one odd
+  fields (SAN, predicate type, provenance) hold a control character, a
+  Unicode line separator or a bidi/format control (which can make an
+  identity display as another) is reported malformed and unverified,
+  without those fields. The broker refuses such characters anywhere, so one odd
   attestation cannot get a digest's whole result refused.
 - **Real signatures first.** Before a payload is capped (32 signatures, 64
   attestations), verified entries go first, then key signatures, so junk

@@ -5,13 +5,25 @@ import (
 	"unicode"
 )
 
-// The broker refuses any string with a control character or a Unicode
+// The broker refuses any string with a control character, a Unicode
 // line/paragraph separator (they would let a value start a new line in
-// generated YAML). Signer-supplied values (SAN, predicate type, provenance)
+// generated YAML) or a bidi/format control (display spoofing of an
+// identity an operator is asked to review). Signer-supplied values (SAN, predicate type, provenance)
 // can hold them, so they are neutralised here instead of letting one odd
 // attestation get the whole result refused and the digest left unchecked.
 
-func badRune(r rune) bool { return unicode.IsControl(r) || r == ' ' || r == ' ' }
+// badRune: control characters, Unicode line/paragraph separators, and the
+// bidirectional and invisible format controls that can make an identity
+// display as something else (U+200E/F, U+202A-E, U+2066-9, U+FEFF).
+func badRune(r rune) bool {
+	switch {
+	case unicode.IsControl(r), r == '\u2028', r == '\u2029',
+		r == '\u200e', r == '\u200f', r >= '\u202a' && r <= '\u202e',
+		r >= '\u2066' && r <= '\u2069', r == '\ufeff':
+		return true
+	}
+	return false
+}
 
 func hasBad(ss ...string) bool {
 	for _, s := range ss {

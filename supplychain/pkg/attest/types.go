@@ -23,7 +23,11 @@
 // is reported as unknown, never as unsigned.
 package attest
 
-import "time"
+import (
+	"time"
+
+	"github.com/kguardian-dev/kguardian/supplychain/pkg/registry"
+)
 
 // SchemaVersion of the broker payload (Result).
 const SchemaVersion = 1
@@ -56,6 +60,16 @@ const (
 // Verdicts is every verdict discovery emits (the contract with the
 // broker; see TestVerdictContract).
 var Verdicts = []string{VerdictVerified, VerdictKeySigned, VerdictUnsigned, VerdictInvalid, VerdictUnknown}
+
+// Reasons is every reason code discovery emits, in Result.Reason and in a
+// signature's or attestation's Error (the registry guard's refusals
+// included).
+var Reasons = []string{
+	ReasonRegistryAuth, ReasonRateLimited, ReasonNetwork, ReasonTimeout, ReasonNoRepoDigest,
+	ReasonTrustRootUnavailable, ReasonUnsupportedFormat, ReasonTooLarge, ReasonRegistryError,
+	ReasonDigestMismatch, ReasonBadSignature, ReasonMalformed, ReasonUntrustedKey, ReasonUntrustedRoot,
+	registry.ReasonBlockedAddress, registry.ReasonPrivateAddress, registry.ReasonLocalHostname, registry.ReasonBlockedRealm,
+}
 
 // SignerKinds is every Signer.Kind discovery emits.
 var SignerKinds = []string{SignerKeyless, SignerKey}

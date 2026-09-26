@@ -25,6 +25,7 @@ func TestVerdictContract(t *testing.T) {
 	var c struct {
 		Verdicts    []string `json:"verdicts"`
 		SignerKinds []string `json:"signer_kinds"`
+		Reasons     []string `json:"reasons"`
 	}
 	if err := json.Unmarshal(raw, &c); err != nil {
 		t.Fatal(err)
@@ -32,7 +33,7 @@ func TestVerdictContract(t *testing.T) {
 	for _, x := range []struct {
 		name       string
 		got, wants []string
-	}{{"verdicts", Verdicts, c.Verdicts}, {"signer_kinds", SignerKinds, c.SignerKinds}} {
+	}{{"verdicts", Verdicts, c.Verdicts}, {"signer_kinds", SignerKinds, c.SignerKinds}, {"reasons", Reasons, c.Reasons}} {
 		got, want := slices.Clone(x.got), slices.Clone(x.wants)
 		slices.Sort(got)
 		slices.Sort(want)
@@ -42,8 +43,14 @@ func TestVerdictContract(t *testing.T) {
 	}
 	// Every Verdict* / Signer{Keyless,Key} constant in the package is in
 	// the lists, so a new constant cannot bypass the contract.
-	consts := stringConsts(t)
+	consts := stringConsts(t, ".")
+	for name, val := range stringConsts(t, "../registry") {
+		consts["registry."+name] = val
+	}
 	for name, val := range consts {
+		if (strings.HasPrefix(name, "Reason") || strings.HasPrefix(name, "registry.Reason")) && !slices.Contains(Reasons, val) {
+			t.Errorf("reason constant %s = %q is not in Reasons", name, val)
+		}
 		switch {
 		case strings.HasPrefix(name, "Verdict") && !slices.Contains(Verdicts, val):
 			t.Errorf("constant %s = %q is not in Verdicts", name, val)
@@ -53,12 +60,13 @@ func TestVerdictContract(t *testing.T) {
 	}
 }
 
-// stringConsts parses the package's non-test files for string constants.
-func stringConsts(t *testing.T) map[string]string {
+// stringConsts parses a package directory's non-test files for string
+// constants.
+func stringConsts(t *testing.T, dir string) map[string]string {
 	t.Helper()
 	fset := token.NewFileSet()
 	out := map[string]string{}
-	files, _ := filepath.Glob("*.go")
+	files, _ := filepath.Glob(filepath.Join(dir, "*.go"))
 	for _, f := range files {
 		if strings.HasSuffix(f, "_test.go") {
 			continue
@@ -85,8 +93,8 @@ func stringConsts(t *testing.T) map[string]string {
 			}
 		}
 	}
-	if _, ok := out["VerdictVerified"]; !ok {
-		t.Fatal("constant parser found no verdicts")
+	if len(out) == 0 {
+		t.Fatalf("constant parser found nothing in %s", dir)
 	}
 	return out
 }
