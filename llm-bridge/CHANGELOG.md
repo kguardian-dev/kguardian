@@ -1,5 +1,32 @@
 # Changelog
 
+## [1.12.0](https://github.com/kguardian-dev/kguardian/compare/llm-bridge/v1.11.2...llm-bridge/v1.12.0) (2026-09-26)
+
+
+### Features
+
+* **llm-bridge:** add vulnerability, CVE exposure and SBOM tools ([f828601](https://github.com/kguardian-dev/kguardian/commit/f8286011c44fe888a35d0f392a225a656eafb4cf))
+* **llm-bridge:** add workload security profile and image inventory tools ([f9a9efd](https://github.com/kguardian-dev/kguardian/commit/f9a9efd2c22dc9f92bf99bec2e8c27413c8aaa98))
+* **llm-bridge:** adopt profile contract v1.2 (no scores) ([d758d75](https://github.com/kguardian-dev/kguardian/commit/d758d75875c57393df83ec2eedb44a896ee24e36))
+* **llm-bridge:** adopt profile contract v1.3 status rules ([1eb6a53](https://github.com/kguardian-dev/kguardian/commit/1eb6a53bb493285576c1ce49712a6c2d8a60be1b))
+
+
+### Bug Fixes
+
+* **llm-bridge:** a null tier means not computed yet, never low risk ([3709b28](https://github.com/kguardian-dev/kguardian/commit/3709b28f4304f81eb7a886c73683c7fda25f508d))
+* **llm-bridge:** mark a KEV filter over a full broker page as a partial scan ([d3a086b](https://github.com/kguardian-dev/kguardian/commit/d3a086b63fc7dab335fba87e4eb4be4b3ed7a927))
+* **llm-bridge:** mark tool strings as untrusted and hard-cap profile size ([97da32c](https://github.com/kguardian-dev/kguardian/commit/97da32cb9a59368509af5bacf32ca7df3426e406))
+* **llm-bridge:** pass vulnerability tiers, in-use detail and filters through ([f99693a](https://github.com/kguardian-dev/kguardian/commit/f99693a76dddea6ca13e8d8b29cd54d96ab4d86c))
+* **llm-bridge:** re-apply every vulnerability filter against an older broker ([ff79bd8](https://github.com/kguardian-dev/kguardian/commit/ff79bd8666fdd2fdaf1dd64a85661995fee4c096))
+* **llm-bridge:** say where vulnerability findings come from ([423adc8](https://github.com/kguardian-dev/kguardian/commit/423adc8a6190e9ff88e9ca44c202a5c947ffc0cf))
+
+
+### Documentation
+
+* add the vulns and images vulns/sbom commands and the vulnerability tools ([c5c6118](https://github.com/kguardian-dev/kguardian/commit/c5c6118b5ad760385aa797257174702898c0a646))
+* document the profile and images commands and assistant tools ([1c49ef9](https://github.com/kguardian-dev/kguardian/commit/1c49ef93c6b83461cc6b7b10f040c0536542fb04))
+* **llm-bridge:** BROKER_AUTH_TOKEN carries the broker read token ([285b600](https://github.com/kguardian-dev/kguardian/commit/285b6008633ef2b477b7b9afce072c152ff85e47))
+
 ## [1.11.2](https://github.com/kguardian-dev/kguardian/compare/llm-bridge/v1.11.1...llm-bridge/v1.11.2) (2026-09-23)
 
 

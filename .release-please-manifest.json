@@ -4,7 +4,7 @@
   "frontend": "1.19.0",
   "advisor": "1.10.0",
   "charts/kguardian": "1.26.0",
-  "llm-bridge": "1.11.2",
+  "llm-bridge": "1.12.0",
   "evaluator": "0.4.2",
   "supplychain": "0.0.0",
   "supplychain-matcher": "0.0.0"
