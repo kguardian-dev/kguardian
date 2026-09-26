@@ -260,7 +260,7 @@ fn pod_uid_from_segment(seg: &str) -> Option<String> {
 /// systemd driver: `<runtime-prefix>-<id>.scope`
 /// (`cri-containerd-<id>.scope`, `crio-<id>.scope`, `docker-<id>.scope`).
 /// cgroupfs driver: the bare id.
-fn container_id_from_segment(seg: &str) -> Option<String> {
+pub(crate) fn container_id_from_segment(seg: &str) -> Option<String> {
     let id = match seg.strip_suffix(".scope") {
         Some(scope) => &scope[scope.rfind('-').map_or(0, |i| i + 1)..],
         None => seg,

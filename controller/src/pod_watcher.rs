@@ -264,6 +264,7 @@ async fn resync_pods(
                         .collect();
                     crate::early_capture::retain_known_pods(&live, listed_at);
                     crate::early_capture::retain_host_network_pods(&live, listed_at);
+                    crate::runtime_inventory::retain_pods(&live);
                     // Pods deleted between resyncs never reach the terminal
                     // branch (the watch decodes deletions away): retire
                     // their netns registrations here. Only entries older
@@ -380,7 +381,9 @@ async fn process_pod(
     // being posted has always kept its row. See `post_plan`.
     let plan = post_plan(pod);
     let pod_ip = if plan.post_details {
-        update_pods_details(pod, node_name, client, capture_level).await
+        let runtime_inventory = should_process_pod(&pod.metadata.namespace, excluded_namespaces)
+            && !crate::runtime_inventory::opted_out(pod);
+        update_pods_details(pod, node_name, client, capture_level, runtime_inventory).await
     } else {
         Ok(None)
     };
@@ -676,6 +679,7 @@ async fn update_pods_details(
     node_name: &str,
     client: &Client,
     capture_level: CaptureLevel,
+    runtime_inventory: bool,
 ) -> Result<Option<String>, Error> {
     let pod_name = pod.name_any();
     let pod_namespace = pod.metadata.namespace.to_owned();
@@ -710,6 +714,15 @@ async fn update_pods_details(
             Some((k, n)) => (Some(k), Some(n)),
             None => (None, None),
         };
+
+        // Runtime inventory is keyed by the same workload; its events are
+        // attributed through this registry (see runtime_inventory).
+        if runtime_inventory {
+            let workload = workload_kind.as_deref().zip(workload_name.as_deref());
+            crate::runtime_inventory::note_pod(pod, workload);
+        } else {
+            crate::runtime_inventory::ignore_pod(pod);
+        }
 
         // debug not info — fires for every pod-watcher event with a
         // pod_ip (i.e. essentially every status transition during a

@@ -9,6 +9,7 @@ const TCP_PROBE_SRC: &str = "src/bpf/network_probe.bpf.c";
 const PACKET_DROP_SRC: &str = "src/bpf/netpolicy_drop.bpf.c";
 const SCHED_CONTENTION_SRC: &str = "src/bpf/sched_contention.bpf.c";
 const SECCOMP_DENIAL_SRC: &str = "src/bpf/seccomp_denial.bpf.c";
+const RUNTIME_INVENTORY_SRC: &str = "src/bpf/runtime_inventory.bpf.c";
 
 fn main() {
     // Generated skeletons go to OUT_DIR, never into the source tree.
@@ -117,10 +118,21 @@ fn main() {
         .obj(&seccomp_denial_obj)
         .clang_args([
             OsStr::new("-I"),
-            vmlinux::include_path_root().join(arch).as_os_str(),
+            vmlinux::include_path_root().join(&arch).as_os_str(),
             OsStr::new("-mcpu=v2"),
         ])
         .build_and_generate(&seccomp_denial_out)
+        .unwrap();
+
+    // Runtime inventory (exec + executable mmaps). No atomics, so no
+    // -mcpu pin; loaded optionally by bpf.rs.
+    SkeletonBuilder::new()
+        .source(RUNTIME_INVENTORY_SRC)
+        .clang_args([
+            OsStr::new("-I"),
+            vmlinux::include_path_root().join(&arch).as_os_str(),
+        ])
+        .build_and_generate(out_dir.join("runtime_inventory.skel.rs"))
         .unwrap();
 
     println!("cargo:rerun-if-changed=src/bpf");

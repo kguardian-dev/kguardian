@@ -105,6 +105,14 @@ spec:
             value: "{{ . }}"
           {{- end }}
           {{- end }}
+          {{- $runtimeMode := (.Values.controller.runtimeInventory | default dict).mode | default "off" | toString | lower }}
+          {{- if not (has $runtimeMode (list "off" "exec" "full")) }}
+          {{- fail (printf "controller.runtimeInventory.mode must be one of off, exec, full (got %q)" $runtimeMode) }}
+          {{- end }}
+          # Per-container exec / library inventory (values.yaml
+          # `controller.runtimeInventory`).
+          - name: RUNTIME_INVENTORY
+            value: {{ $runtimeMode | quote }}
           {{- $compute := .Values.compute | default dict }}
           {{- if $compute.enabled }}
           # Compute gauges + noisy-neighbour detection (values.yaml `compute`).
