@@ -93,8 +93,8 @@ every running workload container (`namespace`, `workloadKind`,
 `workloadName`, `container`, `digest`, `imageRef`, `repository`) with its
 image's `verdict`, `reason`, verified `signers` and verified
 `attestations`. `verdict` is `null` when the digest has no result yet (not
-checked, which is not the same as unsigned). `?namespace=`, `limit` 1-1000
-(default 500), and an opaque `after` cursor from `nextAfter`.
+checked, which is not the same as unsigned). `?namespace=`, `limit` 1-200
+(default 100), and an opaque `after` cursor from `nextAfter`.
 
 ### `GET /attestations/policy`
 
