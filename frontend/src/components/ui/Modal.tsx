@@ -19,6 +19,8 @@ interface ModalProps {
   className?: string;
   /** Suppress the default header row (caller draws its own inside children). */
   hideHeader?: boolean;
+  /** Accessible name when no visible title labels the dialog (e.g. with `hideHeader`). */
+  ariaLabel?: string;
   /** Override the content wrapper classes. Large modals that manage their own
    *  sticky header/toolbar + scroll region pass a flex-column here instead of
    *  the default single scroll body. */
@@ -59,6 +61,7 @@ export function Modal({
   children,
   className = '',
   hideHeader = false,
+  ariaLabel,
   contentClassName = 'flex-1 min-h-0 overflow-y-auto',
   disableBackdropClose = false,
   align = 'center',
@@ -170,7 +173,8 @@ export function Modal({
           ref={panelRef}
           role="dialog"
           aria-modal="true"
-          aria-labelledby={title ? labelId : undefined}
+          aria-labelledby={title && !hideHeader ? labelId : undefined}
+          aria-label={title && !hideHeader ? undefined : ariaLabel}
           tabIndex={-1}
           onClick={(e) => e.stopPropagation()}
           className={`pointer-events-auto ${sizeClass} ${heightClass} flex flex-col

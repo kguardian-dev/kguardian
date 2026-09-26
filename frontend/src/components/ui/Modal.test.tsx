@@ -132,3 +132,9 @@ test('an explicit width in className suppresses the size default', () => {
   expect(cls).toContain('max-w-[1200px]');
   expect(cls).not.toContain('max-w-lg');
 });
+
+test('a hidden-header modal takes its name from ariaLabel and never points at a title it did not render', () => {
+  render(<Modal isOpen onClose={vi.fn()} hideHeader title="Ignored" ariaLabel="Named">body</Modal>);
+  const d = screen.getByRole('dialog', { name: 'Named' });
+  expect(d.getAttribute('aria-labelledby')).toBeNull();
+});

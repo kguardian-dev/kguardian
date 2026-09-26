@@ -484,6 +484,7 @@ const AIAssistant: React.FC<AIAssistantProps> = ({ isOpen, onClose, onLayoutChan
         isOpen
         onClose={onClose}
         hideHeader
+        ariaLabel="AI Assistant"
         className="w-full max-w-3xl h-[600px]"
         contentClassName="flex-1 min-h-0 flex flex-col"
       >

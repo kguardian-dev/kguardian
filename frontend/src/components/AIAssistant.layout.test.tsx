@@ -72,3 +72,13 @@ describe('AIAssistant below 1024px', () => {
     expect(localStorage.getItem('kguardian.ai-assistant.view-mode')).toBe('side-panel');
   });
 });
+
+describe('AIAssistant modal has an accessible name', () => {
+  beforeEach(() => localStorage.clear());
+  afterEach(cleanup);
+  it('names the dialog "AI Assistant" even though its header is custom', () => {
+    localStorage.setItem('kguardian.ai-assistant.view-mode', 'modal');
+    render(<AIAssistant isOpen onClose={() => {}} namespace="default" podNames={[]} />);
+    expect(screen.getByRole('dialog', { name: 'AI Assistant' })).toBeTruthy();
+  });
+});
