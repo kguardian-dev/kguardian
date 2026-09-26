@@ -75,7 +75,7 @@
       "package-name": "supplychain",
       "changelog-path": "CHANGELOG.md",
       "extra-files": [
-        "supplychain/VERSION"
+        "VERSION"
       ],
       "include-component-in-tag": true
     }
