@@ -144,9 +144,15 @@ export bundle (`ImageTrustPolicy` in audit, Kyverno `Deny` in enforce).
   verified and signed by one of the authorities. policy-controller checks
   only attestations for an authority that lists them, so the requirement
   is a second `ClusterImagePolicy` next to the signature one.
-- Image globs follow each engine: Kyverno matches the image as the pod
-  spec writes it (`nginx:*`, `nginx@*`), policy-controller the normalised
-  name (`index.docker.io/library/nginx:**`).
+- Image globs follow each engine. Kyverno matches the image as the pod
+  spec writes it, so every spelling is listed, bare, with a tag and with a
+  digest: for Docker Hub `nginx`, `library/nginx`, `docker.io/nginx`,
+  `docker.io/library/nginx` and `index.docker.io/...`. policy-controller
+  matches the normalised name (`index.docker.io/library/nginx:**`).
+- The header lists every identity the policy trusts, with the images and
+  digests it was seen verifying, under "review every identity before
+  applying": they were observed on running images, not vetted. If a rogue
+  signer signed an image you run, it is in that list.
 - policy-controller only checks namespaces labelled
   `policy.sigstore.dev/include=true`.
 
