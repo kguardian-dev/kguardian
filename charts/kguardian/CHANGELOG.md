@@ -1,5 +1,49 @@
 # Changelog
 
+## [2.0.0](https://github.com/kguardian-dev/kguardian/compare/chart/v1.26.0...chart/v2.0.0) (2026-09-26)
+
+
+### ⚠ BREAKING CHANGES
+
+* **chart:** installs with broker.auth.enabled=true must act before upgrading. Either add read and ingest keys to the Secret named by broker.auth.existingSecret (for example with openssl rand -hex 32 for each), or set broker.auth.mode=shared to keep the old single token key. In shared mode the UI gets 401 unless frontend.brokerAuth.allowSharedToken=true is also set. Without one of these, the broker, controller, frontend and llm-bridge pods stay in CreateContainerConfigError because the read key is missing. Installs with auth disabled (the default) are unaffected.
+
+### Features
+
+* **broker:** in-use tiers for vulnerability findings ([93d71e8](https://github.com/kguardian-dev/kguardian/commit/93d71e8056479751660838b3fbc8cfffd765d0df))
+* **broker:** prune pod_traffic with batched retention ([#1653](https://github.com/kguardian-dev/kguardian/issues/1653)) ([8e7f372](https://github.com/kguardian-dev/kguardian/commit/8e7f372c51a4cc7c2fbed4a6cb797eec5ae9aa7c))
+* **chart:** add broker.imageInventory.retention settings ([a510774](https://github.com/kguardian-dev/kguardian/commit/a5107743b6cada60f833b4ed7524e896ed865b50))
+* **chart:** add broker.imageInventory.runningWindowSeconds ([aacd5dd](https://github.com/kguardian-dev/kguardian/commit/aacd5dd8cf7b71e322be527ac36ca938c353845f))
+* **chart:** add supplychain component, off by default ([e4cb9b8](https://github.com/kguardian-dev/kguardian/commit/e4cb9b82c336c3371e9df99335447a3c8413947a))
+* **chart:** broker.supplychain ingest limit and retention values ([176a4b9](https://github.com/kguardian-dev/kguardian/commit/176a4b98a46c3a372223455ed0a2cde96802b0b2))
+* **chart:** controller.runtimeInventory.mode and broker.runtimeInventory.retentionDays ([3acb005](https://github.com/kguardian-dev/kguardian/commit/3acb0056e6647ce6594cf4344faadc2ce0374078))
+* **chart:** Grype matcher sidecar behind supplychain.grype.enabled ([bc087c8](https://github.com/kguardian-dev/kguardian/commit/bc087c8fdf92ef41975f5bb936236fa29585212e))
+* **chart:** matcher ephemeral storage, 12h DB refresh, unverified-SBOM wording ([61f27c9](https://github.com/kguardian-dev/kguardian/commit/61f27c991441972d39ccad7cedbae6c5685f9c1e))
+* **chart:** mount scoped broker tokens per component ([7a9faa8](https://github.com/kguardian-dev/kguardian/commit/7a9faa81df6e154a8ff11a8e90c98f7211d2aa7c))
+* **chart:** mount the scoped supplychain broker token and enforce auth ([7579821](https://github.com/kguardian-dev/kguardian/commit/757982138801f44a283b398fbf8edc7b165546f6))
+* **charts:** evaluator.applicationSecurityProfiles flag, CRD printer column, README ([fb0a461](https://github.com/kguardian-dev/kguardian/commit/fb0a46135a4fb88996105718ac32b51147f2d4ee))
+* **chart:** supplychain registry lookup follows broker ingest ([9ab5a7c](https://github.com/kguardian-dev/kguardian/commit/9ab5a7c72363589a98fbb6e57d07efd45e013978))
+* **chart:** supplychain registry lookup toggle ([18faa5e](https://github.com/kguardian-dev/kguardian/commit/18faa5e596bc9ddb1c7934d278f862c09ecc01f6))
+* **chart:** supplychain registry SBOM source toggle ([e3dc9a7](https://github.com/kguardian-dev/kguardian/commit/e3dc9a73bc5557fff18638b89f2a36167c586f04))
+* **chart:** supplychain.signatureDiscovery values ([f8f2e9e](https://github.com/kguardian-dev/kguardian/commit/f8f2e9e5fded43880624e990e94e9987f11502f3))
+* **evaluator:** ApplicationSecurityProfile CRD with evaluator-written status ([8f7c3bd](https://github.com/kguardian-dev/kguardian/commit/8f7c3bd28a376c73ddfd35c43531fc80df72da5c))
+
+
+### Bug Fixes
+
+* **chart:** default broker.supplychain.maxDecompressedBytes to 8 MiB ([5b0249e](https://github.com/kguardian-dev/kguardian/commit/5b0249e7c394051ddfeb3377f88607ab9b316ab7))
+* **chart:** evaluator.applicationSecurityProfiles.staleAfter ([cff8eeb](https://github.com/kguardian-dev/kguardian/commit/cff8eebada4b94d51ef121b377c94101f582f818))
+* **chart:** let the controller resolve Jobs to their CronJob ([#1664](https://github.com/kguardian-dev/kguardian/issues/1664)) ([84906e0](https://github.com/kguardian-dev/kguardian/commit/84906e0c2aede0d3f0a9d988800db6228b561ce0))
+* **chart:** make the registry digest lookup opt-in ([f1a5d1f](https://github.com/kguardian-dev/kguardian/commit/f1a5d1ffc365a54988897d4e6a5db37aa28938ed))
+* **chart:** make the registry SBOM source opt-in ([0e801cc](https://github.com/kguardian-dev/kguardian/commit/0e801cc2ef5b830d776101080cdbec505b88278c))
+* **chart:** roll supplychain on signing key or trusted root changes ([aadc06f](https://github.com/kguardian-dev/kguardian/commit/aadc06fde4f56f48f07b847dc44f8bec1260433a))
+* **controller:** credit syscalls only to tasks in the pod's own cgroup ([a1ce650](https://github.com/kguardian-dev/kguardian/commit/a1ce65059a061de45ffd62f95deceba2ad928bf3))
+
+
+### Documentation
+
+* **chart:** say plainly that unknown exposure puts a KEV finding in P0 ([afd2ddc](https://github.com/kguardian-dev/kguardian/commit/afd2ddcca018162a4e6c287e7a8d2e20a2fc09dc))
+* **chart:** say which container states count as running ([b8a3267](https://github.com/kguardian-dev/kguardian/commit/b8a32673314ecd910091f53cb72a6187d2973111))
+
 ## [1.26.0](https://github.com/kguardian-dev/kguardian/compare/chart/v1.25.0...chart/v1.26.0) (2026-09-23)
 
 
