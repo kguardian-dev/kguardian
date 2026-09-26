@@ -1,27 +1,73 @@
 {
-  "namespace": "payments", "kind": "Deployment", "name": "checkout",
-  "from": { "revision": 2, "contentHash": "fnv1a64:1111111111111111", "createdAt": "2026-09-22T09:00:00Z" },
-  "to": { "revision": 3, "contentHash": "fnv1a64:6f1c2a9e0b7d4c31", "createdAt": "2026-09-25T18:40:12Z" },
   "changed": true,
   "dimensions": {
+    "images": {
+      "changed": false,
+      "containers": [],
+      "containersAdded": [],
+      "containersRemoved": []
+    },
+    "network": {
+      "added": [
+        {
+          "direction": "egress",
+          "peer": "external:198.51.100.20",
+          "port": 443,
+          "protocol": "TCP"
+        }
+      ],
+      "changed": true,
+      "removed": []
+    },
     "podSecurity": {
       "changed": true,
-      "level": { "from": "baseline", "to": "restricted" },
-      "pod": [ { "field": "securityContext.seccompProfileType", "from": null, "to": "RuntimeDefault" } ],
-      "containersAdded": [], "containersRemoved": [],
-      "containers": [ { "name": "app", "fields": [ { "field": "allowPrivilegeEscalation", "from": null, "to": false } ] } ]
+      "containers": [
+        {
+          "fields": [
+            {
+              "field": "securityContext.allowPrivilegeEscalation",
+              "from": null,
+              "to": false
+            },
+            {
+              "field": "securityContext.capabilitiesDrop",
+              "from": null,
+              "to": [
+                "ALL"
+              ]
+            }
+          ],
+          "name": "migrate"
+        }
+      ],
+      "containersAdded": [],
+      "containersRemoved": [],
+      "level": {
+        "from": "baseline",
+        "to": "restricted"
+      },
+      "pod": []
     },
-    "images": {
-      "changed": true,
-      "containersAdded": [], "containersRemoved": [],
-      "containers": [ { "name": "app", "added": ["sha256:9f2c0d1e"], "removed": ["sha256:0c3d"] } ]
-    },
-    "syscalls": { "changed": true, "added": ["io_uring_setup", "io_uring_enter"], "removed": [], "captureLevel": null, "cr": null },
-    "network": {
-      "changed": true,
-      "added": [ { "direction": "egress", "protocol": "TCP", "port": 443, "peer": "external:203.0.113.10" } ],
-      "removed": [],
-      "audited": null
+    "syscalls": {
+      "added": [],
+      "captureLevel": null,
+      "changed": false,
+      "cr": null,
+      "removed": []
     }
+  },
+  "from": {
+    "contentHash": "fnv1a64:5b1a787eefd2a711",
+    "createdAt": "2026-09-26T02:05:41.141561Z",
+    "revision": 2
+  },
+  "fromTrimmed": false,
+  "kind": "Deployment",
+  "name": "checkout",
+  "namespace": "payments",
+  "to": {
+    "contentHash": "fnv1a64:4c1d1714495b7cb8",
+    "createdAt": "2026-09-26T02:07:55.676169Z",
+    "revision": 4
   }
 }

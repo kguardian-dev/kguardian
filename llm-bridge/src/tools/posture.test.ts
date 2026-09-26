@@ -202,37 +202,65 @@ function assertNullsPreserved(got: unknown, broker: unknown, pathSoFar = "") {
 
 const PROFILE_PATH = "/workloads/payments/Deployment/checkout/profile";
 
-test("get_workload_security_profile: path, token and no fabrication on a full profile", async () => {
-  const body = fixture("profile_full.json");
-  routes[PROFILE_PATH] = { status: 200, body };
-  const r = await executeInProcessTool("get_workload_security_profile", { namespace: "payments", kind: "Deployment", name: "checkout" });
-  assert.equal(r.isError, false, r.text);
-  assert.equal(seen[0].path, PROFILE_PATH);
-  assert.equal(seen[0].auth, "Bearer read-token");
-  const got = JSON.parse(r.text);
-  assertSubsetOfBroker(got, body, "profile_full");
-  assertNullsPreserved(got, body);
-  assert.equal(got.posture.coverage, 0.41, "coverage passes through");
-  assert.equal(got.posture.grade, null);
+// Real broker output (contract v1.2 captures from the profile API PR):
+// ok, warn, risk, unknown and a stale-sidecar workload.
+const REAL_PROFILES = ["profile_ok", "profile_warn", "profile_risk", "profile_unknown", "profile_stale"];
+
+for (const name of REAL_PROFILES) {
+  test(`get_workload_security_profile: ${name} keeps every documented field, invents nothing, keeps nulls`, async () => {
+    const body = fixture(`${name}.json`) as Record<string, any>;
+    const { namespace, kind, name: wl } = body.workload;
+    const path = `/workloads/${namespace}/${kind}/${wl}/profile`;
+    routes[path] = { status: 200, body };
+    const r = await executeInProcessTool("get_workload_security_profile", { namespace, kind, name: wl });
+    assert.equal(r.isError, false, r.text);
+    assert.equal(seen[0].path, path);
+    assert.equal(seen[0].auth, "Bearer read-token");
+    const got = JSON.parse(r.text);
+    assertSubsetOfBroker(got, body, name);
+    assertNullsPreserved(got, body);
+    assert.deepEqual(got.posture, body.posture, "posture (status, coverage, unknownDimensions, reasons) passes through whole");
+    assert.deepEqual(got.readiness, body.readiness);
+    for (const [dim, v] of Object.entries(body.dimensions as Record<string, Record<string, unknown>>)) {
+      assert.deepEqual(Object.keys(got.dimensions[dim]).filter((k) => !k.endsWith("Omitted")).sort(), Object.keys(v).sort(), `${dim} lost a field`);
+    }
+    assert.equal(JSON.stringify(got).includes('"score"'), false, "no score field appears (contract v1.2)");
+    assert.match(got.note, /never safe/);
+    assert.match(got.note, /no numeric score/);
+  });
+}
+
+test("get_workload_security_profile: the restricted upper bound stays unknown with readiness ok:null", async () => {
+  routes[PROFILE_PATH] = { status: 200, body: fixture("profile_warn.json") };
+  const got = JSON.parse((await executeInProcessTool("get_workload_security_profile", { namespace: "payments", kind: "Deployment", name: "checkout" })).text);
+  assert.equal(got.dimensions.podSecurity.level, "restricted");
+  assert.equal(got.dimensions.podSecurity.levelConfidence, "upper_bound");
+  assert.equal(got.dimensions.podSecurity.status, "unknown");
+  assert.equal(got.readiness.find((x: { id: string }) => x.id === "podSecurityRestricted").ok, null);
+  assert.equal(got.dimensions.podSecurity.recommendation, null, "nothing patchable stays null, never an empty patch");
   assert.equal(got.dimensions.images.vulnerabilities, null, "not-configured vulnerabilities stay null");
-  assert.equal(got.dimensions.podSecurity.recommendation.recommendation, true);
+});
+
+test("get_workload_security_profile: a risk profile carries the broker's patch verbatim; stale containers pass through", async () => {
+  const risk = fixture("profile_risk.json") as Record<string, any>;
+  routes["/workloads/observability/DaemonSet/node-exporter/profile"] = { status: 200, body: risk };
+  const got = JSON.parse((await executeInProcessTool("get_workload_security_profile", { namespace: "observability", kind: "DaemonSet", name: "node-exporter" })).text);
+  assert.equal(got.posture.status, "risk");
+  assert.equal(got.dimensions.podSecurity.recommendation.yaml, risk.dimensions.podSecurity.recommendation.yaml);
   assert.match(got.dimensions.podSecurity.recommendation.yaml, /not applied/);
-  assert.match(got.note, /never safe/);
+  const stale = fixture("profile_stale.json") as Record<string, any>;
+  routes["/workloads/payments/Deployment/ledger/profile"] = { status: 200, body: stale };
+  const s = JSON.parse((await executeInProcessTool("get_workload_security_profile", { namespace: "payments", kind: "Deployment", name: "ledger" })).text);
+  assert.ok(stale.dimensions.podSecurity.staleContainers.length > 0);
+  assert.deepEqual(s.dimensions.podSecurity.staleContainers, stale.dimensions.podSecurity.staleContainers);
 });
 
 test("get_workload_security_profile: an all-unknown profile stays unknown (no zeros, no passes)", async () => {
-  const body = fixture("profile_unknown.json");
-  routes["/workloads/batch/CronJob/nightly-report/profile"] = { status: 200, body };
-  const r = await executeInProcessTool("get_workload_security_profile", { namespace: "batch", kind: "CronJob", name: "nightly-report" });
-  const got = JSON.parse(r.text);
-  assertSubsetOfBroker(got, body, "profile_unknown");
-  assertNullsPreserved(got, body);
-  assert.equal(got.posture.score, null);
+  routes["/workloads/observability/Deployment/otel-collector/profile"] = { status: 200, body: fixture("profile_unknown.json") };
+  const got = JSON.parse((await executeInProcessTool("get_workload_security_profile", { namespace: "observability", kind: "Deployment", name: "otel-collector" })).text);
   assert.equal(got.posture.status, "unknown");
-  for (const d of Object.values(got.dimensions) as { score: unknown; status: string }[]) {
-    assert.equal(d.score, null);
-    assert.equal(d.status, "unknown");
-  }
+  assert.equal(got.posture.coverage, 0);
+  for (const d of ["network", "syscalls", "podSecurity", "images"]) assert.equal(got.dimensions[d].status, "unknown", d);
   assert.equal(got.exposure.ingressPeers, null);
 });
 
@@ -261,7 +289,7 @@ test("get_workload_security_profile: missing args and broker failures are tool e
 });
 
 test("get_workload_security_profile: long lists are capped with counts, and the result fits the budget", async () => {
-  const body = fixture("profile_full.json") as Record<string, any>;
+  const body = fixture("profile_warn.json") as Record<string, any>;
   const peer = body.dimensions.network.peers[0];
   body.dimensions.network.peers = Array.from({ length: 200 }, () => peer);
   const finding = body.findings[0];
@@ -277,7 +305,7 @@ test("get_workload_security_profile: long lists are capped with counts, and the 
 });
 
 test("shrinkProfile: the budget is a hard guarantee even when no cut step is enough", () => {
-  const base = fixture("profile_full.json") as Record<string, any>;
+  const base = fixture("profile_warn.json") as Record<string, any>;
   // Oversized strings outside every list the cut steps remove.
   const hugeAttention = trimProfile({ ...base, attention: [{ ...base.attention[0], detail: "x".repeat(200_000) }] });
   assert.ok(JSON.stringify(hugeAttention).length <= MAX_RESPONSE_CHARS);
@@ -305,7 +333,7 @@ test("shrinkProfile: the budget is a hard guarantee even when no cut step is eno
 });
 
 test("every posture tool result tells the model its strings are untrusted data", async () => {
-  routes[PROFILE_PATH] = { status: 200, body: fixture("profile_full.json") };
+  routes[PROFILE_PATH] = { status: 200, body: fixture("profile_warn.json") };
   routes["/workloads"] = { status: 200, body: fixture("profiles_page.json") };
   routes[DIFF_PATH] = { status: 200, body: fixture("profile_diff.json") };
   routes["/images"] = { status: 200, body: fixture("images_page.json") };
@@ -319,7 +347,7 @@ test("every posture tool result tells the model its strings are untrusted data",
 });
 
 test("list_workload_profiles: posture maps to status, limit is bounded, no fabrication", async () => {
-  const body = fixture("profiles_page.json") as { items: unknown[] };
+  const body = fixture("profiles_page.json") as { items: any[] };
   routes["/workloads"] = { status: 200, body };
   const r = await executeInProcessTool("list_workload_profiles", { namespace: "payments", posture: "RISK", limit: 1000 });
   assert.equal(r.isError, false, r.text);
@@ -327,12 +355,19 @@ test("list_workload_profiles: posture maps to status, limit is bounded, no fabri
   assert.equal(seen[0].query.get("namespace"), "payments");
   assert.equal(seen[0].query.get("limit"), String(MAX_TOOL_LIMIT));
   const got = JSON.parse(r.text);
-  assert.equal(got.truncated, true, "nextAfter present means more rows");
+  assert.equal(got.truncated, false, "nextAfter null means the last page");
   assertSubsetOfBroker({ items: got.workloads }, { items: body.items }, "profiles_page");
   assertNullsPreserved(got.workloads, body.items);
-  const unknown = got.workloads.find((w: { name: string }) => w.name === "ledger-db");
-  assert.equal(unknown.posture.score, null);
-  assert.equal(unknown.dimensions.images.runningDigests, null);
+  const ledger = got.workloads.find((w: { name: string }) => w.name === "ledger");
+  assert.deepEqual(ledger.posture, body.items.find((i) => i.name === "ledger").posture);
+  assert.equal(ledger.dimensions.podSecurity.status, "unknown", "a restricted upper bound is unknown in the list too");
+  assert.equal(JSON.stringify(got).includes('"score"'), false);
+});
+
+test("list_workload_profiles: nextAfter marks truncation", async () => {
+  routes["/workloads"] = { status: 200, body: { ...(fixture("profiles_page.json") as object), nextAfter: "payments/Deployment/ledger" } };
+  const got = JSON.parse((await executeInProcessTool("list_workload_profiles", {})).text);
+  assert.equal(got.truncated, true);
 });
 
 test("list_workload_profiles: a bad posture value never reaches the broker", async () => {
@@ -347,10 +382,10 @@ const DIFF_PATH = "/workloads/payments/Deployment/checkout/profile/diff";
 test("diff_workload_profile: revisions pass through, no fabrication, nulls kept", async () => {
   const body = fixture("profile_diff.json");
   routes[DIFF_PATH] = { status: 200, body };
-  const r = await executeInProcessTool("diff_workload_profile", { namespace: "payments", kind: "Deployment", name: "checkout", from: 2, to: 3 });
+  const r = await executeInProcessTool("diff_workload_profile", { namespace: "payments", kind: "Deployment", name: "checkout", from: 2, to: 4 });
   assert.equal(r.isError, false, r.text);
   assert.equal(seen[0].query.get("from"), "2");
-  assert.equal(seen[0].query.get("to"), "3");
+  assert.equal(seen[0].query.get("to"), "4");
   const got = JSON.parse(r.text);
   assertSubsetOfBroker(got, body, "profile_diff");
   assertNullsPreserved(got, body);
@@ -370,19 +405,14 @@ test("diff_workload_profile: defaults omit from/to; bad revisions are rejected l
   assert.equal(seen.length, 0);
 });
 
-test("get_workload_security_profile: the broker's own sample (contract v1.1) keeps every dimension field and invents nothing", async () => {
-  const body = fixture("profile_broker_sample.json") as Record<string, any>;
-  routes[PROFILE_PATH] = { status: 200, body };
-  const r = await executeInProcessTool("get_workload_security_profile", { namespace: "payments", kind: "Deployment", name: "checkout" });
-  assert.equal(r.isError, false, r.text);
-  const got = JSON.parse(r.text);
-  assertSubsetOfBroker(got, body, "profile_broker_sample");
+test("diff_workload_profile: a trimmed predecessor comes back as fromTrimmed with from=null", async () => {
+  const body = fixture("profile_diff_trimmed.json");
+  routes[DIFF_PATH] = { status: 200, body };
+  const got = JSON.parse((await executeInProcessTool("diff_workload_profile", { namespace: "payments", kind: "Deployment", name: "checkout", to: 2 })).text);
+  assert.equal(got.fromTrimmed, true);
+  assert.equal(got.from, null);
+  assertSubsetOfBroker(got, body, "profile_diff_trimmed");
   assertNullsPreserved(got, body);
-  for (const [dim, v] of Object.entries(body.dimensions as Record<string, Record<string, unknown>>)) {
-    assert.deepEqual(Object.keys(got.dimensions[dim]).filter((k) => !k.endsWith("Omitted")).sort(), Object.keys(v).sort(), `${dim} lost a field`);
-  }
-  assert.deepEqual(got.dimensions.podSecurity.pod, body.dimensions.podSecurity.pod, "pod-level failing checks pass through");
-  assert.equal(got.dimensions.podSecurity.recommendation.yaml, body.dimensions.podSecurity.recommendation.yaml);
 });
 
 test("diff_workload_profile: revision 1 with from=null passes through as null", async () => {

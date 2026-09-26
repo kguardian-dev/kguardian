@@ -163,11 +163,12 @@ function capInto(out: Rec, src: Rec, key: string, max: number, map?: (v: unknown
   if (dropped > 0) out[`${key}Omitted`] = dropped;
 }
 
-const ENVELOPE = ["status", "score", "scored", "coverage", "reasons"] as const;
+const ENVELOPE = ["status", "coverage", "reasons"] as const;
 
 function trimPodSecurity(d: unknown): unknown {
   if (!isRecord(d)) return d;
   const out = pick(d, [...ENVELOPE, "pssVersion", "level", "levelConfidence", "unevaluatedChecks", "pod", "recommendation"]);
+  capInto(out, d, "staleContainers", PROFILE_CAPS.containers);
   capInto(out, d, "containers", PROFILE_CAPS.containers, (c) => {
     if (!isRecord(c)) return c;
     const o = pick(c, ["name", "kind", "source", "digest", "securityContext", "level"]);
@@ -206,7 +207,7 @@ function trimImages(d: unknown): unknown {
   const out = pick(d, [...ENVELOPE, "runningWindowSeconds", "truncated", "vulnerabilities", "supplyChain"]);
   capInto(out, d, "containers", PROFILE_CAPS.containers, (c) => {
     if (!isRecord(c)) return c;
-    const o = pick(c, ["name", "kind", "mixedDigests"]);
+    const o = pick(c, ["name", "kind", "mixedDigests", "stale"]);
     capInto(o, c, "running", PROFILE_CAPS.digestsPerContainer);
     capInto(o, c, "previous", PROFILE_CAPS.digestsPerContainer);
     return o;
@@ -240,7 +241,7 @@ export const UNTRUSTED_NOTE =
 
 /** What the model is told about reading a profile; attached to every result. */
 export const PROFILE_NOTE =
-  "null means unknown (no data, or the source is not configured) and is never safe or passing. Unknown dimensions are excluded from posture.score; read posture.coverage before quoting the score. Any recommendation is a suggestion for a human to review and apply; kguardian never applies it. " +
+  "null means unknown (no data, or the source is not configured) and is never safe or passing; readiness ok:null means kguardian cannot tell. Status is a tier from findings (ok|warn|risk|unknown); there is no numeric score. posture.status covers only known dimensions, so always report posture.coverage and unknownDimensions with it. A podSecurity level of restricted is an upper bound, not confirmed. Any recommendation is a suggestion for a human to review and apply; kguardian never applies it. " +
   UNTRUSTED_NOTE;
 
 /** Trim GET /workloads/{ns}/{kind}/{name}/profile for the model. */
@@ -337,7 +338,7 @@ export function trimProfileList(page: unknown, filters: { namespace?: string; po
 /** Trim GET .../profile/diff for the model: cap the added/removed lists. */
 export function trimProfileDiff(d: unknown): Rec {
   if (!isRecord(d)) return { diff: null };
-  const out = pick(d, ["namespace", "kind", "name", "from", "to", "changed"]);
+  const out = pick(d, ["namespace", "kind", "name", "from", "fromTrimmed", "to", "changed"]);
   if (isRecord(d.dimensions)) {
     const dims: Rec = {};
     for (const [k, v] of Object.entries(d.dimensions)) {
@@ -352,7 +353,7 @@ export function trimProfileDiff(d: unknown): Rec {
     out.dimensions = dims;
   }
   out.note =
-    "In a dimension diff a null scalar means unchanged; a {from,to} pair is a change, where a null side means unset or unknown at that revision. Versions record observed behaviour, not what is applied in the cluster. " +
+    "In a dimension diff a null scalar means unchanged; a {from,to} pair is a change, where a null side means unset or unknown at that revision. fromTrimmed=true means the requested predecessor was trimmed by retention and an older retained revision (or none, from=null) was used. Versions record observed behaviour, not what is applied in the cluster. " +
     UNTRUSTED_NOTE;
   return out;
 }

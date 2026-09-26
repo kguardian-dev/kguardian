@@ -52,7 +52,7 @@ const CALLS: Record<string, Record<string, unknown>> = {
 const postureDir = path.resolve(here, "../../../test/fixtures/posture");
 const postureFixture = (f: string): unknown => JSON.parse(fs.readFileSync(path.join(postureDir, f), "utf8"));
 const POSTURE_FIXTURES: Record<string, unknown> = {
-  "/workloads/payments/Deployment/checkout/profile": postureFixture("profile_full.json"),
+  "/workloads/payments/Deployment/checkout/profile": postureFixture("profile_warn.json"),
   "/workloads": postureFixture("profiles_page.json"),
   "/workloads/payments/Deployment/checkout/profile/diff": postureFixture("profile_diff.json"),
   "/images": postureFixture("images_page.json"),

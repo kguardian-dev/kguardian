@@ -1,18 +1,21 @@
 {
   "namespace": "payments", "kind": "Deployment", "name": "checkout",
   "from": null,
+  "fromTrimmed": false,
   "to": { "revision": 1, "contentHash": "fnv1a64:1111111111111111", "createdAt": "2026-09-20T09:00:00Z" },
   "changed": true,
   "dimensions": {
     "podSecurity": {
       "changed": true,
-      "level": { "from": null, "to": "baseline" },
+      "level": { "from": null,
+  "fromTrimmed": false, "to": "baseline" },
       "pod": [],
       "containersAdded": ["app"], "containersRemoved": [],
       "containers": []
     },
     "images": { "changed": true, "containersAdded": ["app"], "containersRemoved": [], "containers": [ { "name": "app", "added": ["sha256:0c3d"], "removed": [] } ] },
-    "syscalls": { "changed": true, "added": ["read", "write"], "removed": [], "captureLevel": { "from": null, "to": "full" }, "cr": null },
-    "network": { "changed": true, "added": [], "removed": [], "audited": { "from": null, "to": false } }
+    "syscalls": { "changed": true, "added": ["read", "write"], "removed": [], "captureLevel": { "from": null,
+  "fromTrimmed": false, "to": "full" }, "cr": null },
+    "network": { "changed": true, "added": [], "removed": [] }
   }
 }

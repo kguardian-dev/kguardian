@@ -1,0 +1,434 @@
+{
+  "workload": {
+    "clusterId": "primary",
+    "namespace": "payments",
+    "kind": "Deployment",
+    "name": "ledger",
+    "transient": false,
+    "pods": {
+      "live": 1,
+      "names": [
+        "ledger-5b7c9d8f6-q8wzn"
+      ],
+      "truncated": false
+    }
+  },
+  "generatedAt": "2026-09-26T02:08:14.530028086Z",
+  "contentHash": "fnv1a64:0c616b9c268b2efb",
+  "version": {
+    "revision": 1,
+    "contentHash": "fnv1a64:0c616b9c268b2efb",
+    "createdAt": "2026-09-26T02:04:33.864051Z"
+  },
+  "snapshotPending": false,
+  "posture": {
+    "status": "warn",
+    "coverage": 0.5,
+    "unknownDimensions": [
+      "network",
+      "podSecurity"
+    ],
+    "reasons": [
+      {
+        "dimension": "network",
+        "status": "unknown",
+        "message": "No audit policy covers this workload; applied NetworkPolicies are not visible to the broker"
+      },
+      {
+        "dimension": "syscalls",
+        "status": "warn",
+        "message": "SeccompProfile ledger is in audit mode"
+      },
+      {
+        "dimension": "podSecurity",
+        "status": "unknown",
+        "message": "Every evaluated check passes restricted, but 9 checks cannot be seen (e.g. hostPath), so restricted is not confirmed"
+      },
+      {
+        "dimension": "images",
+        "status": "warn",
+        "message": "Container ledger is in CrashLoopBackOff"
+      }
+    ]
+  },
+  "attention": [
+    {
+      "id": "images.crashLoop/ledger",
+      "dimension": "images",
+      "severity": "medium",
+      "tier": "P2",
+      "title": "Container ledger is in CrashLoopBackOff",
+      "detail": "The running digest keeps exiting.",
+      "container": "ledger"
+    },
+    {
+      "id": "syscalls.no_enforcing_profile",
+      "dimension": "syscalls",
+      "severity": "medium",
+      "tier": "P2",
+      "title": "SeccompProfile ledger is in audit mode",
+      "detail": "Its default action only logs; promote it to enforce once no denials appear.",
+      "container": null
+    }
+  ],
+  "findings": [
+    {
+      "id": "images.crashLoop/ledger",
+      "dimension": "images",
+      "severity": "medium",
+      "tier": "P2",
+      "title": "Container ledger is in CrashLoopBackOff",
+      "detail": "The running digest keeps exiting.",
+      "container": "ledger"
+    },
+    {
+      "id": "syscalls.no_enforcing_profile",
+      "dimension": "syscalls",
+      "severity": "medium",
+      "tier": "P2",
+      "title": "SeccompProfile ledger is in audit mode",
+      "detail": "Its default action only logs; promote it to enforce once no denials appear.",
+      "container": null
+    },
+    {
+      "id": "images.mixedDigests/ledger",
+      "dimension": "images",
+      "severity": "low",
+      "tier": null,
+      "title": "Container ledger runs 2 digests at once",
+      "detail": "A rollout in progress, or nodes that resolved the same tag to different images.",
+      "container": "ledger"
+    },
+    {
+      "id": "podSecurity.readOnlyRootFilesystem/ledger",
+      "dimension": "podSecurity",
+      "severity": "low",
+      "tier": null,
+      "title": "Container ledger root filesystem is writable",
+      "detail": "readOnlyRootFilesystem is not true (hardening; not required by PSS restricted).",
+      "container": "ledger"
+    }
+  ],
+  "controls": [
+    {
+      "control": "networkPolicy",
+      "state": "unknown",
+      "detail": "No audit policy covers this workload; applied NetworkPolicies are not visible to the broker",
+      "inSync": null
+    },
+    {
+      "control": "seccompProfile",
+      "state": "audit",
+      "detail": "SeccompProfile ledger (SCMP_ACT_LOG), 4 syscalls, distribution Pending",
+      "inSync": true
+    },
+    {
+      "control": "imageAdmission",
+      "state": null,
+      "detail": "Signature/admission checks are not configured",
+      "inSync": null
+    }
+  ],
+  "readiness": [
+    {
+      "id": "trafficObserved24h",
+      "ok": true,
+      "message": "Traffic observed for 5d 0h"
+    },
+    {
+      "id": "syscallCaptureComplete",
+      "ok": true,
+      "message": "Every contributing pod captured at level full (startup included)"
+    },
+    {
+      "id": "noWouldDeny24h",
+      "ok": null,
+      "message": "No audit policy covers this workload"
+    },
+    {
+      "id": "imageSigned",
+      "ok": null,
+      "message": "Signature verification is not configured"
+    },
+    {
+      "id": "podSecurityRestricted",
+      "ok": null,
+      "message": "Every evaluated check passes restricted; 9 checks cannot be seen, so restricted is not confirmed"
+    }
+  ],
+  "exposure": {
+    "ingressPeers": 1,
+    "ingressExternal": 0,
+    "egressPeers": 0,
+    "egressExternal": 0
+  },
+  "dimensions": {
+    "network": {
+      "status": "unknown",
+      "coverage": {
+        "level": "full",
+        "fraction": null,
+        "observedSince": "2026-09-21T02:04:20.433265Z",
+        "note": "Flows from the workload's pod(s) (1 live)"
+      },
+      "reasons": [
+        {
+          "code": "policy_state_unknown",
+          "message": "No audit policy covers this workload; applied NetworkPolicies are not visible to the broker"
+        }
+      ],
+      "summary": {
+        "egress": {
+          "peers": 0,
+          "external": 0,
+          "ports": []
+        },
+        "ingress": {
+          "peers": 1,
+          "external": 0,
+          "ports": [
+            "TCP/5432"
+          ]
+        }
+      },
+      "peers": [
+        {
+          "direction": "ingress",
+          "protocol": "TCP",
+          "port": 5432,
+          "peer": {
+            "kind": "pod",
+            "namespace": "payments",
+            "workloadKind": "Deployment",
+            "workloadName": "checkout",
+            "name": "checkout-7d9f8b6c5-9hmtz",
+            "ip": "10.42.1.12"
+          },
+          "flows": 1,
+          "firstSeen": "2026-09-21T02:04:20.433265Z",
+          "lastSeen": "2026-09-21T02:04:20.433265Z"
+        }
+      ],
+      "truncated": false,
+      "policy": {
+        "audit": null,
+        "enforced": null
+      }
+    },
+    "syscalls": {
+      "status": "warn",
+      "coverage": {
+        "level": "full",
+        "fraction": null,
+        "observedSince": null,
+        "note": "capture level full"
+      },
+      "reasons": [
+        {
+          "code": "cr_audit",
+          "message": "SeccompProfile ledger only logs (SCMP_ACT_LOG)"
+        }
+      ],
+      "observed": {
+        "syscallCount": 4,
+        "hash": "0f1e2d3c4b5a6978",
+        "architectures": [
+          "SCMP_ARCH_X86_64"
+        ],
+        "updatedAt": "2026-09-26T02:04:20.427864Z"
+      },
+      "capture": {
+        "level": "full",
+        "complete": true,
+        "incompletePods": 0
+      },
+      "cr": {
+        "name": "ledger",
+        "defaultAction": "SCMP_ACT_LOG",
+        "mode": "audit",
+        "syscallCount": 4,
+        "inSync": true,
+        "missing": [],
+        "extra": [],
+        "distribution": {
+          "ready": 0,
+          "total": 1,
+          "state": "Pending"
+        }
+      },
+      "denials": {
+        "total": 0,
+        "syscalls": [],
+        "lastSeen": null
+      }
+    },
+    "podSecurity": {
+      "status": "unknown",
+      "coverage": {
+        "level": "partial",
+        "fraction": 0.5,
+        "observedSince": "2026-09-20T02:04:20.423047Z",
+        "note": "9 of 18 PSS checks evaluated; volumes, ports, probes, AppArmor, SELinux, procMount, sysctls and hostProcess are not ingested"
+      },
+      "reasons": [
+        {
+          "code": "pss_unverified",
+          "message": "Every evaluated check passes restricted, but 9 checks cannot be seen (e.g. hostPath), so restricted is not confirmed"
+        },
+        {
+          "code": "stale_containers_excluded",
+          "message": "1 container(s) no longer in the current spec are listed in staleContainers and not evaluated"
+        }
+      ],
+      "pssVersion": "kubernetes/website@2c1aa11c (Kubernetes v1.37 docs)",
+      "level": "restricted",
+      "levelConfidence": "upper_bound",
+      "unevaluatedChecks": [
+        "hostProcess",
+        "hostPathVolumes",
+        "hostPorts",
+        "hostProbesLifecycle",
+        "appArmor",
+        "seLinux",
+        "procMount",
+        "sysctls",
+        "volumeTypes"
+      ],
+      "pod": {
+        "known": true,
+        "serviceAccountName": "ledger",
+        "automountServiceAccountToken": false,
+        "hostNetwork": null,
+        "hostPID": null,
+        "hostIPC": null,
+        "hostUsers": null,
+        "securityContext": {
+          "runAsNonRoot": null,
+          "runAsUser": null,
+          "runAsGroup": null,
+          "fsGroup": null,
+          "seccompProfileType": "RuntimeDefault"
+        },
+        "failing": []
+      },
+      "containers": [
+        {
+          "name": "ledger",
+          "kind": "regular",
+          "source": "running",
+          "digest": "sha256:4a1b77c04a1b77c04a1b77c04a1b77c04a1b77c04a1b77c04a1b77c04a1b77c0",
+          "securityContext": {
+            "privileged": null,
+            "allowPrivilegeEscalation": false,
+            "runAsNonRoot": true,
+            "runAsUser": null,
+            "runAsGroup": null,
+            "readOnlyRootFilesystem": null,
+            "capabilitiesAdd": null,
+            "capabilitiesDrop": [
+              "ALL"
+            ],
+            "seccompProfileType": null
+          },
+          "level": "restricted",
+          "failing": []
+        }
+      ],
+      "recommendation": null,
+      "staleContainers": [
+        {
+          "name": "legacy-proxy",
+          "kind": "regular",
+          "digest": "sha256:6c3d99e26c3d99e26c3d99e26c3d99e26c3d99e26c3d99e26c3d99e26c3d99e2",
+          "lastSeen": "2026-09-24T02:04:20.420873Z"
+        }
+      ]
+    },
+    "images": {
+      "status": "warn",
+      "coverage": {
+        "level": "full",
+        "fraction": null,
+        "observedSince": "2026-09-06T02:04:20.420873Z",
+        "note": "running window 900 s"
+      },
+      "reasons": [
+        {
+          "code": "vulnerabilities_not_configured",
+          "message": "No vulnerability source is configured; images are inventoried but not assessed for vulnerabilities"
+        }
+      ],
+      "runningWindowSeconds": 900,
+      "containers": [
+        {
+          "name": "ledger",
+          "kind": "regular",
+          "mixedDigests": true,
+          "stale": false,
+          "running": [
+            {
+              "digest": "sha256:4a1b77c04a1b77c04a1b77c04a1b77c04a1b77c04a1b77c04a1b77c04a1b77c0",
+              "imageRef": "ghcr.io/example/ledger:2.3.0",
+              "state": "running",
+              "stateReason": null,
+              "ranAsInit": false,
+              "lastPodName": "ledger-5b7c9d8f6-q8wzn",
+              "firstSeen": "2026-09-20T02:04:20.423047Z",
+              "lastSeen": "2026-09-26T02:04:20.418264Z"
+            },
+            {
+              "digest": "sha256:5b2c88d15b2c88d15b2c88d15b2c88d15b2c88d15b2c88d15b2c88d15b2c88d1",
+              "imageRef": "ghcr.io/example/ledger:2.3.1",
+              "state": "waiting",
+              "stateReason": "CrashLoopBackOff",
+              "ranAsInit": false,
+              "lastPodName": "ledger-5b7c9d8f6-q8wzn",
+              "firstSeen": "2026-09-20T02:04:20.423047Z",
+              "lastSeen": "2026-09-26T02:04:20.418264Z"
+            }
+          ],
+          "previous": []
+        },
+        {
+          "name": "legacy-proxy",
+          "kind": "regular",
+          "mixedDigests": false,
+          "stale": true,
+          "running": [],
+          "previous": [
+            {
+              "digest": "sha256:6c3d99e26c3d99e26c3d99e26c3d99e26c3d99e26c3d99e26c3d99e26c3d99e2",
+              "imageRef": "docker.io/envoyproxy/envoy:v1.29.0",
+              "state": "running",
+              "stateReason": null,
+              "ranAsInit": false,
+              "lastPodName": "ledger-5b7c9d8f6-old01",
+              "firstSeen": "2026-09-06T02:04:20.420873Z",
+              "lastSeen": "2026-09-24T02:04:20.420873Z"
+            }
+          ]
+        }
+      ],
+      "truncated": false,
+      "vulnerabilities": null,
+      "supplyChain": null
+    },
+    "compute": {
+      "status": "unknown",
+      "coverage": {
+        "level": "none",
+        "fraction": null,
+        "observedSince": null,
+        "note": "no compute samples"
+      },
+      "reasons": [
+        {
+          "code": "no_compute_data",
+          "message": "No compute samples for this workload's live pods (collection off or no live pods)"
+        }
+      ],
+      "containers": [],
+      "truncated": false
+    }
+  }
+}

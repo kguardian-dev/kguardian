@@ -2,42 +2,96 @@
   "items": [
     {
       "clusterId": "primary",
-      "namespace": "payments",
-      "kind": "Deployment",
-      "name": "checkout",
-      "revision": 3,
-      "contentHash": "fnv1a64:6f1c2a9e0b7d4c31",
-      "computedAt": "2026-09-26T10:05:00Z",
-      "lastChangedAt": "2026-09-25T18:40:12Z",
-      "posture": { "status": "warn", "score": 71, "coverage": 0.41, "grade": null, "unknownDimensions": ["network", "images"] },
+      "computedAt": "2026-09-26T02:07:55.676169Z",
+      "contentHash": "fnv1a64:4c1d1714495b7cb8",
       "dimensions": {
-        "network": { "status": "unknown", "score": null },
-        "syscalls": { "status": "warn", "score": 60 },
-        "podSecurity": { "status": "ok", "score": 80, "level": "restricted", "levelConfidence": "upper_bound" },
-        "images": { "status": "ok", "score": null, "runningDigests": 1, "mixedDigests": false },
-        "compute": { "status": "ok", "score": null }
+        "compute": {
+          "status": "ok"
+        },
+        "images": {
+          "mixedDigests": false,
+          "runningDigests": 1,
+          "status": "ok"
+        },
+        "network": {
+          "status": "unknown"
+        },
+        "podSecurity": {
+          "level": "restricted",
+          "levelConfidence": "upper_bound",
+          "status": "unknown"
+        },
+        "syscalls": {
+          "status": "warn"
+        }
       },
-      "findingCounts": { "critical": 0, "high": 0, "medium": 1, "low": 2, "info": 0 }
+      "findingCounts": {
+        "critical": 0,
+        "high": 0,
+        "info": 0,
+        "low": 4,
+        "medium": 1
+      },
+      "kind": "Deployment",
+      "lastChangedAt": "2026-09-26T02:07:55.676169Z",
+      "name": "checkout",
+      "namespace": "payments",
+      "posture": {
+        "coverage": 0.5,
+        "status": "warn",
+        "unknownDimensions": [
+          "network",
+          "podSecurity"
+        ]
+      },
+      "revision": 4
     },
     {
       "clusterId": "primary",
-      "namespace": "payments",
-      "kind": "StatefulSet",
-      "name": "ledger-db",
-      "revision": 1,
-      "contentHash": "fnv1a64:0000000000000002",
-      "computedAt": "2026-09-26T10:05:00Z",
-      "lastChangedAt": "2026-09-26T10:05:00Z",
-      "posture": { "status": "unknown", "score": null, "coverage": 0, "grade": null, "unknownDimensions": ["network", "syscalls", "podSecurity", "images"] },
+      "computedAt": "2026-09-26T02:07:55.683875Z",
+      "contentHash": "fnv1a64:0c616b9c268b2efb",
       "dimensions": {
-        "network": { "status": "unknown", "score": null },
-        "syscalls": { "status": "unknown", "score": null },
-        "podSecurity": { "status": "unknown", "score": null, "level": null, "levelConfidence": null },
-        "images": { "status": "unknown", "score": null, "runningDigests": null, "mixedDigests": null },
-        "compute": { "status": "unknown", "score": null }
+        "compute": {
+          "status": "unknown"
+        },
+        "images": {
+          "mixedDigests": true,
+          "runningDigests": 2,
+          "status": "warn"
+        },
+        "network": {
+          "status": "unknown"
+        },
+        "podSecurity": {
+          "level": "restricted",
+          "levelConfidence": "upper_bound",
+          "status": "unknown"
+        },
+        "syscalls": {
+          "status": "warn"
+        }
       },
-      "findingCounts": { "critical": 0, "high": 0, "medium": 0, "low": 0, "info": 0 }
+      "findingCounts": {
+        "critical": 0,
+        "high": 0,
+        "info": 0,
+        "low": 2,
+        "medium": 2
+      },
+      "kind": "Deployment",
+      "lastChangedAt": "2026-09-26T02:04:33.864051Z",
+      "name": "ledger",
+      "namespace": "payments",
+      "posture": {
+        "coverage": 0.5,
+        "status": "warn",
+        "unknownDimensions": [
+          "network",
+          "podSecurity"
+        ]
+      },
+      "revision": 1
     }
   ],
-  "nextAfter": "payments/StatefulSet/ledger-db"
+  "nextAfter": null
 }
