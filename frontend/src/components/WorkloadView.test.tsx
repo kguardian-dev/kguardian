@@ -422,3 +422,38 @@ test('the captures cover warn, risk and unknown (v1.3 has no posture ok)', () =>
     'warn', 'risk', 'unknown', 'unknown', 'warn', 'warn',
   ]);
 });
+
+test('Overview: a drift finding is labelled Drift, and a drift check not evaluated says so (never "no drift")', async () => {
+  // The checkout capture with a v1.6 drift block added: one unshipped-file
+  // finding, and the check not evaluated for the sidecar.
+  const drifted: WorkloadProfile = {
+    ...checkoutProfile,
+    attention: [
+      {
+        id: 'drift.unshippedExecutable/app',
+        dimension: 'drift',
+        severity: 'high',
+        tier: null,
+        title: 'Container app ran files its image did not ship (memfd)',
+        detail: '1 file(s) executed or loaded from a memfd',
+        container: 'app',
+      },
+      ...checkoutProfile.attention,
+    ],
+    drift: {
+      evaluated: ['tagMoved'],
+      notEvaluated: [{ type: 'unshippedExecutable', container: 'side', reason: 'no_runtime_data' }],
+      items: [{ type: 'unshippedExecutable', findingId: 'drift.unshippedExecutable/app', severity: 'high', container: 'app' }],
+    },
+  };
+  const { api } = replayApi([answer('GET /workloads/payments/Deployment/checkout/profile', drifted)]);
+  renderPage(api, CHECKOUT);
+  const attention = await screen.findByRole('region', { name: 'Needs attention' });
+  const first = within(attention).getAllByRole('listitem')[0];
+  expect(first.textContent).toContain('ran files its image did not ship');
+  expect(first.textContent).toContain('Drift');
+  const note = within(attention).getByRole('list', { name: 'Drift checks not evaluated' });
+  expect(note.textContent).toContain('unshippedExecutable not evaluated for container side');
+  expect(note.textContent).toContain('no runtime capture heartbeat for this container');
+  expect(note.textContent).toContain('does not mean no drift');
+});

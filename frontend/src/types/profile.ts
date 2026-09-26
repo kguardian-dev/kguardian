@@ -13,6 +13,8 @@ export type PostureStatus = 'ok' | 'warn' | 'risk' | 'unknown';
 export type FindingSeverity = 'critical' | 'high' | 'medium' | 'low' | 'info';
 export type FindingTier = 'P0' | 'P1' | 'P2';
 export type DimensionName = 'network' | 'syscalls' | 'podSecurity' | 'images' | 'compute';
+/** A finding's dimension: a core one, or `drift` (contract section 2.8), which never sets posture. */
+export type FindingDimension = DimensionName | 'drift';
 export type PssLevel = 'privileged' | 'baseline' | 'restricted';
 export type LevelConfidence = 'confirmed' | 'upper_bound';
 
@@ -66,7 +68,7 @@ export interface WorkloadListPage {
 
 export interface Finding {
   id: string;
-  dimension: DimensionName;
+  dimension: FindingDimension;
   severity: FindingSeverity;
   tier: FindingTier | null;
   title: string;
@@ -310,6 +312,22 @@ export interface WorkloadProfile {
     images: ImagesDimension;
     compute: ComputeDimension;
   };
+  /** Absent from a broker without drift (contract v1.4+; notEvaluated v1.6). */
+  drift?: ProfileDrift;
+}
+
+/** A drift check that could not run for a container (null = the workload), and why. */
+export interface DriftNotEvaluated {
+  type: string;
+  container: string | null;
+  reason: string;
+}
+
+export interface ProfileDrift {
+  /** Checks that ran for the whole workload. One not listed was not evaluated. */
+  evaluated: string[];
+  notEvaluated?: DriftNotEvaluated[];
+  items: { type: string; findingId: string; severity: FindingSeverity; container: string | null }[];
 }
 
 export interface VersionListItem extends VersionRef {

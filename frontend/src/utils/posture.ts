@@ -46,6 +46,26 @@ export const DIMENSION_LABEL: Record<DimensionName, string> = {
   compute: 'Compute',
 };
 
+/** Label of a finding's dimension, including drift (not a core dimension). */
+export function findingDimensionLabel(d: string): string {
+  if (d === 'drift') return 'Drift';
+  return (DIMENSION_LABEL as Record<string, string>)[d] ?? d;
+}
+
+/** Human text for why a drift check was not evaluated (contract v1.6). */
+export function driftNotEvaluatedText(reason: string): string {
+  switch (reason) {
+    case 'no_inventory':
+      return 'no runtime inventory for this workload';
+    case 'no_runtime_data':
+      return 'no runtime capture heartbeat for this container';
+    case 'truncated':
+      return 'too many unshipped files to read in full';
+    default:
+      return `runtime capture gap (${reason})`;
+  }
+}
+
 /** Finding severity → the severity.ts scale (info is drawn as low). */
 export function findingSeverity(s: FindingSeverity): Severity {
   return s === 'info' ? 'low' : s;
