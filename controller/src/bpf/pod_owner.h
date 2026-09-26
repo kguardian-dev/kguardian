@@ -66,14 +66,18 @@ static __always_inline struct kernfs_node *kn_parent(struct kernfs_node *kn)
 //  - It keeps the 192-byte name off the stack (the combined stack of the
 //    caller and this global function is capped at 512 bytes).
 //
-// The map is TASK storage, not per-CPU: the runtime inventory's library
-// probe (fentry) runs preemptible, so another task on the same CPU could
-// run the parser mid-parse and clobber a per-CPU slot, and the wrong
-// answer would then be cached for the cgroup. A task's own storage is
-// never touched by another task; a nested use by the same task is
-// refused by the helper (NULL), which the caller treats as "unknown"
-// and does not cache. The entry is deleted after each parse, so it is
-// only held for the duration of one.
+// Which map, per object (each object has its own copy; none is shared):
+//  - Default, per-CPU (the syscall object): its classic tracepoint runs
+//    with preemption disabled, so nothing else runs on the CPU mid-parse,
+//    and the lookup cannot fail. This is #1685's proven design.
+//  - KG_OWNER_TASK_STORAGE (the runtime inventory object): its library
+//    probe (fentry) runs preemptible, so another task on the same CPU
+//    could run the parser mid-parse and clobber a per-CPU slot, and the
+//    wrong answer would be cached for the cgroup. Task storage is never
+//    touched by another task; a use the helper refuses (nested, busy,
+//    allocation failure) returns KG_OWNER_UNKNOWN, which is never cached
+//    and which the runtime probe counts as a lost event. The entry is
+//    deleted after each parse.
 struct kg_parse_state
 {
     char n[KG_CG_NAME_BUF];
@@ -83,6 +87,7 @@ struct kg_parse_state
     struct kg_uid u;
 };
 
+#ifdef KG_OWNER_TASK_STORAGE
 struct
 {
     __uint(type, KG_MAP_TYPE_TASK_STORAGE);
@@ -90,8 +95,17 @@ struct
     __type(key, int);
     __type(value, struct kg_parse_state);
 } kg_parse_state SEC(".maps");
+#else
+struct
+{
+    __uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
+    __uint(max_entries, 1);
+    __type(key, u32);
+    __type(value, struct kg_parse_state);
+} kg_parse_state SEC(".maps");
+#endif
 
-// The parse could not run (no task storage): not an answer, never cached.
+// The parse could not run: not an answer, never cached.
 #define KG_OWNER_UNKNOWN (1u << 30)
 
 struct kg_parse_ctx
@@ -120,9 +134,14 @@ static long kg_uid_cb(__u64 k, void *ctx)
 // KG_OWNER_UNKNOWN when the parse could not run.
 __noinline __u32 kg_name_generation(__u64 kn_name)
 {
+#ifdef KG_OWNER_TASK_STORAGE
     struct task_struct *task = bpf_get_current_task_btf();
     struct kg_parse_state *p = bpf_task_storage_get(&kg_parse_state, task, 0,
                                                     KG_LOCAL_STORAGE_GET_F_CREATE);
+#else
+    __u32 zero = 0;
+    struct kg_parse_state *p = bpf_map_lookup_elem(&kg_parse_state, &zero);
+#endif
     if (!p)
         return KG_OWNER_UNKNOWN;
     __u32 gen = 0;
@@ -140,7 +159,9 @@ __noinline __u32 kg_name_generation(__u64 kn_name)
     bpf_loop(KG_CG_UID_MAX, kg_uid_cb, &c, 0);
     gen = kg_uid_finish(p->n, p->s, &p->u);
 out:
+#ifdef KG_OWNER_TASK_STORAGE
     bpf_task_storage_delete(&kg_parse_state, task);
+#endif
     return gen;
 }
 

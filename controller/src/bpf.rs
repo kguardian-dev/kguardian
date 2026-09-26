@@ -1799,6 +1799,117 @@ mod tests {
         );
     }
 
+    /// A sighting whose container cannot be worked out (an "unknown"
+    /// parse) must be counted as lost and must not be marked seen, so the
+    /// file is reported on its next use. The failure is forced with the
+    /// probe's test hook. Needs root and cgroup v2.
+    #[test]
+    #[ignore = "needs root, cgroup v2 and a BTF-enabled kernel; run by the ebpf-kernels CI job"]
+    fn a_lost_container_lookup_is_counted_and_the_file_reported_again() {
+        use crate::runtime_inventory::{RuntimeEventData, KIND_EXEC};
+        use std::os::unix::fs::MetadataExt;
+        use std::os::unix::process::CommandExt;
+        use std::sync::{Arc, Mutex};
+
+        const UID: &str = "5d2c9a1e-7b4d-4e0a-9f1c-0123456789ab";
+        const CID: &str = "3c1e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c4b5a69788796a5b4c3d2e1f0";
+        let pod_dir = format!("/sys/fs/cgroup/kubepods/besteffort/pod{UID}");
+        let ctr_dir = format!("{pod_dir}/{CID}");
+        std::fs::create_dir_all(&ctr_dir).expect("create a kubepods-shaped cgroup");
+        let cgid = std::fs::metadata(&ctr_dir).unwrap().ino();
+
+        let mut storage = MaybeUninit::uninit();
+        let (mut sk, _links) = load_runtime_inventory(&mut storage, true).expect("load");
+        let events: Arc<Mutex<Vec<RuntimeEventData>>> = Arc::default();
+        let sink = Arc::clone(&events);
+        let mut rb = RingBufferBuilder::new();
+        rb.add(&sk.maps.runtime_events, move |data: &[u8]| {
+            let ev: RuntimeEventData =
+                unsafe { std::ptr::read_unaligned(data.as_ptr() as *const RuntimeEventData) };
+            sink.lock().unwrap().push(ev);
+            0
+        })
+        .unwrap();
+        let rb = rb.build().unwrap();
+        let run_true = || {
+            let procs = format!("{ctr_dir}/cgroup.procs");
+            let status = unsafe {
+                std::process::Command::new("/bin/true")
+                    .pre_exec(move || {
+                        std::fs::write(&procs, std::process::id().to_string())?;
+                        Ok(())
+                    })
+                    .status()
+            }
+            .expect("spawn");
+            assert!(status.success());
+            for _ in 0..10 {
+                rb.poll(std::time::Duration::from_millis(100)).unwrap();
+            }
+        };
+        let drops =
+            |sk: &crate::runtime_inventory::runtime_inventory_skel::RuntimeInventorySkel| -> u64 {
+                sk.maps
+                    .runtime_drops
+                    .lookup_percpu(&0u32.to_ne_bytes(), MapFlags::ANY)
+                    .ok()
+                    .flatten()
+                    .map(|v| {
+                        v.iter()
+                            .map(|b| u64::from_ne_bytes(b[..8].try_into().unwrap()))
+                            .sum()
+                    })
+                    .unwrap_or(0)
+            };
+        let ours = |events: &Arc<Mutex<Vec<RuntimeEventData>>>| -> usize {
+            events
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|e| e.cgroup_id == cgid && e.kind == KIND_EXEC)
+                .count()
+        };
+        let seen_for_cgroup =
+            |sk: &crate::runtime_inventory::runtime_inventory_skel::RuntimeInventorySkel| -> usize {
+                sk.maps
+                    .runtime_seen
+                    .keys()
+                    .filter(|k| u64::from_ne_bytes(k[..8].try_into().unwrap()) == cgid)
+                    .count()
+            };
+
+        sk.maps
+            .bss_data
+            .as_deref_mut()
+            .expect("bss")
+            .kg_test_container_unknown = true;
+        let before = drops(&sk);
+        run_true();
+        let lost = drops(&sk) - before;
+        eprintln!(
+            "forced unknown: events {}, drops +{lost}, seen keys {}",
+            ours(&events),
+            seen_for_cgroup(&sk)
+        );
+        assert_eq!(ours(&events), 0, "nothing sent without a container");
+        assert!(lost > 0, "the lost sighting is counted");
+        assert_eq!(seen_for_cgroup(&sk), 0, "and not marked seen");
+
+        sk.maps
+            .bss_data
+            .as_deref_mut()
+            .expect("bss")
+            .kg_test_container_unknown = false;
+        run_true();
+        eprintln!("hook off: events {}", ours(&events));
+        assert!(
+            ours(&events) >= 1,
+            "the same file is reported on its next use"
+        );
+        let _ = std::fs::remove_dir(&ctr_dir);
+        let _ = std::fs::remove_dir(&pod_dir);
+    }
+
     fn reset_state() {
         EBPF_SHUTDOWN.store(false, Ordering::Relaxed);
         NETWORK_SEND_FAILED.store(false, Ordering::Relaxed);

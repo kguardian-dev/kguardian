@@ -22,6 +22,8 @@
 #include <bpf/bpf_core_read.h>
 #include <bpf/bpf_tracing.h>
 #include "pod_cgroup.h"
+// Preemptible fentry program: parse state must be task-local (pod_owner.h).
+#define KG_OWNER_TASK_STORAGE 1
 #include "pod_owner.h"
 
 #define KG_RT_EXEC 1
@@ -246,26 +248,40 @@ static __always_inline __u32 overlay_upper(struct inode *inode)
 }
 
 // Fill ev->container with the kernfs name of the cgroup below the pod's.
-static __always_inline void container_cgroup_name(struct runtime_event *ev)
+// Test hook (VM tests only; never set in production): make the container
+// lookup fail as an "unknown" parse would, to exercise the lost-event path.
+volatile bool kg_test_container_unknown = false;
+
+// Fill ev->container with the kernfs name of the cgroup below the pod's.
+// False when it could not be worked out (a parse that could not run, or
+// no container cgroup under the pod): the caller must treat the event as
+// lost, not send it without a container.
+static __always_inline bool container_cgroup_name(struct runtime_event *ev)
 {
     struct task_struct *task = (struct task_struct *)bpf_get_current_task();
     struct kernfs_node *kn = BPF_CORE_READ(task, cgroups, dfl_cgrp, kn);
     struct kernfs_node *below = 0;
     ev->container[0] = 0;
+    if (kg_test_container_unknown)
+        return false;
     for (int lvl = 0; lvl < KG_CG_LEVELS; lvl++)
     {
         if (!kn)
-            return;
-        if (kg_name_generation((__u64)BPF_CORE_READ(kn, name)) & KG_CG_POD)
+            return false;
+        __u32 g = kg_name_generation((__u64)BPF_CORE_READ(kn, name));
+        if (g == KG_OWNER_UNKNOWN)
+            return false;
+        if (g & KG_CG_POD)
         {
-            if (below)
-                bpf_probe_read_kernel_str(ev->container, sizeof(ev->container),
-                                          BPF_CORE_READ(below, name));
-            return;
+            if (!below)
+                return false;
+            return bpf_probe_read_kernel_str(ev->container, sizeof(ev->container),
+                                             BPF_CORE_READ(below, name)) > 1;
         }
         below = kn;
         kn = kn_parent(kn);
     }
+    return false;
 }
 
 static __always_inline int report_file(struct file *file, __u32 kind)
@@ -319,7 +335,16 @@ static __always_inline int report_file(struct file *file, __u32 kind)
     ev->fs_magic = fs_magic;
     ev->nlink = nlink;
     ev->upper = upper;
-    container_cgroup_name(ev);
+    if (!container_cgroup_name(ev))
+    {
+        // Whose container it was is unknown: the sighting is lost. Forget
+        // it so the file is reported again on its next use, and count it
+        // so coverage is not claimed for this window.
+        bpf_map_delete_elem(&runtime_seen, &key);
+        count_drop();
+        bpf_task_storage_delete(&runtime_scratch, task);
+        return 0;
+    }
 
     struct vfsmount *vfsmnt = BPF_CORE_READ(file, f_path.mnt);
     struct kg_path_ctx c = {

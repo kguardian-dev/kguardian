@@ -569,6 +569,10 @@ pub struct Store {
     backfilled_at: HashMap<ContainerKey, NaiveDateTime>,
     /// Kernel drop count at the last heartbeat.
     drops_seen: u64,
+    /// Events that reached userspace but could not be attributed to a
+    /// container, since the last heartbeat. Like kernel drops, whose they
+    /// were is unknown: every container on the node may have lost one.
+    unattributed: u64,
     pub stats: Stats,
 }
 
@@ -781,6 +785,11 @@ impl Store {
         (posts, marks)
     }
 
+    /// An event arrived that names no container (see `unattributed`).
+    pub fn note_unattributed(&mut self) {
+        self.unattributed += 1;
+    }
+
     /// The broker accepted a POST but dropped `dropped` of its entries
     /// (it cannot say which): every container in it may have lost one.
     pub fn note_ingest_dropped(&mut self, marks: &[SentMark], dropped: u64) {
@@ -844,7 +853,8 @@ impl Store {
         node: &str,
         wall: NaiveDateTime,
     ) -> Vec<CoveragePost> {
-        let kernel_delta = kernel_drops.saturating_sub(self.drops_seen);
+        let kernel_delta =
+            kernel_drops.saturating_sub(self.drops_seen) + std::mem::take(&mut self.unattributed);
         self.drops_seen = kernel_drops;
         if kernel_delta > 0 {
             // Whose events they were is unknown: every container on the
@@ -1205,6 +1215,10 @@ pub async fn run(mut events: Receiver<RuntimeEventData>, mode: Mode) -> Result<(
                     continue;
                 }
                 let (Some(kind), Some(cid)) = (ev.kind_str(), ev.container_id()) else {
+                    // Cannot be attributed to a container: a lost sighting
+                    // (the probe no longer sends these; an old or odd event
+                    // still must not pass silently).
+                    store.note_unattributed();
                     continue;
                 };
                 if kind == "lib" && mode != Mode::Full {
@@ -1762,6 +1776,22 @@ mod tests {
         apply_backfill(&mut s, scan, Instant::now(), wall());
         assert!(!s.coverage_due(&pods, probe, Mode::Full, 0, "n1", at(1))[0].incomplete);
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn an_event_without_a_container_is_a_drop_for_every_container_on_the_node() {
+        let mut s = Store::default();
+        let pods = [(7, pod_started(1))];
+        let probe = Some((at(0), true));
+        s.coverage_due(&pods, probe, Mode::Full, 0, "n1", at(2));
+        s.note_unattributed();
+        let b = &s.coverage_due(&pods, probe, Mode::Full, 0, "n1", at(3))[0];
+        assert_eq!(b.events_dropped, 1);
+        assert_eq!(
+            s.coverage_due(&pods, probe, Mode::Full, 0, "n1", at(4))[0].events_dropped,
+            0,
+            "reported once"
+        );
     }
 
     #[test]
