@@ -17,8 +17,20 @@ export function SeverityBadge({ severity }: { severity: VulnSeverity }) {
   return <span className={`${pill} ${SEVERITY_BADGE_CLASS[s]}`}>{severity.charAt(0)}{severity.slice(1).toLowerCase()}</span>;
 }
 
-/** The Broker's tier; null (a Broker without tiers) is a dashed "Tier ?", never a guessed tier. */
-export function TierBadge({ tier, title }: { tier: RiskTierName | null; title?: string }) {
+/**
+ * The Broker's tier; null (no tier yet) is a dashed "Tier ?", never a
+ * guessed tier. `atLeast`: other rows are unknown, so the real answer may be
+ * higher; it reads "≥P2" (a P0 cannot be exceeded, so it stays "P0").
+ * `pending`: the read for this row is still in flight ("…").
+ */
+export function TierBadge({ tier, title, atLeast = false, pending = false }: { tier: RiskTierName | null; title?: string; atLeast?: boolean; pending?: boolean }) {
+  if (pending) {
+    return (
+      <span data-tier="pending" title="Reading this image's finding" className="shrink-0 rounded-md border border-dashed border-hubble-border-strong px-1.5 py-px text-[11px] font-mono text-tertiary">
+        …
+      </span>
+    );
+  }
   if (tier === null) {
     return (
       <span data-tier="unknown" title={TIER_UNKNOWN_TITLE} className="shrink-0 rounded-md border border-dashed border-hubble-border-strong px-1.5 py-px text-[11px] font-mono font-semibold text-tertiary whitespace-nowrap">
@@ -28,7 +40,8 @@ export function TierBadge({ tier, title }: { tier: RiskTierName | null; title?: 
   }
   const cls = tier === 'Background' ? 'bg-hubble-border/40 text-secondary border-hubble-border' : TIER_BADGE_CLASS[tier];
   return (
-    <span data-tier={tier} title={title} className={`shrink-0 rounded-md border px-1.5 py-px text-[11px] font-mono font-semibold ${cls}`}>
+    <span data-tier={tier} data-at-least={atLeast && tier !== 'P0' ? 'true' : undefined} title={atLeast && tier !== 'P0' ? `${title ? `${title}. ` : ''}At least ${tier}: some workloads have no tier yet.` : title} className={`shrink-0 rounded-md border px-1.5 py-px text-[11px] font-mono font-semibold ${cls}`}>
+      {atLeast && tier !== 'P0' ? '≥' : ''}
       {tier === 'Background' ? 'Bkg' : tier}
     </span>
   );

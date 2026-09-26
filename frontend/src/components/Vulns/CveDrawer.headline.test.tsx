@@ -5,7 +5,7 @@ import { CveDrawer } from './CveDrawer';
 import { VulnApi } from '../../services/vulnApi';
 import { ProfileApi } from '../../services/profileApi';
 import { tierFixture } from '../../fixtures/vulns';
-import type { Exposure, ImageVulnsPage } from '../../types/vulns';
+import type { CveSummary, CvePage, Exposure, ImageVulnsPage } from '../../types/vulns';
 
 // The headline is the worst case over EVERY workload row, and says nothing
 // until every image read has settled. Image reads here resolve only when the
@@ -41,8 +41,10 @@ const exposure = tierFixture<Exposure>('exposure-CVE-2099-0001').body;
 const page = (name: string) => tierFixture<ImageVulnsPage>(`image-${name}-vulnerabilities`).body;
 const digestOf = (repo: string) => exposure.images.find((i) => i.repository?.endsWith(repo))!.digest;
 
-const renderDrawer = (api: VulnApi, e: Exposure = exposure) =>
-  render(<CveDrawer id={e.id} onClose={() => {}} onOpenWorkload={() => {}} onShowOnMap={() => {}} onAskAI={() => {}} api={api} profileApi={noProfiles} />);
+const renderDrawer = (api: VulnApi, e: Exposure = exposure, summary?: CveSummary) =>
+  render(<CveDrawer id={e.id} summary={summary} onClose={() => {}} onOpenWorkload={() => {}} onShowOnMap={() => {}} onAskAI={() => {}} api={api} profileApi={noProfiles} />);
+const rowTier = (name: string) =>
+  screen.getAllByTestId('cve-workload').find((r) => r.textContent?.includes(name))!.querySelector('[data-tier]')!.getAttribute('data-tier');
 
 const headlineTier = () => screen.getByRole('dialog').querySelector('[data-tier]:not([data-testid=cve-workload] [data-tier])')?.getAttribute('data-tier');
 const headlineLabels = () =>
@@ -56,6 +58,10 @@ describe('CVE drawer headline', () => {
     await answer(digestOf('ledger'), page('ledger'));
     expect(screen.getByTestId('headline-pending')).toBeTruthy();
     expect(headlineTier()).toBeUndefined();
+    // Rows whose read is still in flight say "…" too, not "unknown".
+    expect(rowTier('payments/ledger')).toBe('P1');
+    expect(rowTier('payments/checkout')).toBe('pending');
+    expect(rowTier('payments/reports')).toBe('pending');
     await answer(digestOf('reports'), page('reports'));
     expect(screen.getByTestId('headline-pending')).toBeTruthy();
     await answer(digestOf('checkout'), page('checkout'));
@@ -82,6 +88,8 @@ describe('CVE drawer headline', () => {
     await answer(digestOf('checkout'), noTier);
     expect(headlineTier()).toBe('P2');
     expect(headlineLabels()).toContain('1 unknown');
+    // With an unknown row the known P2 is a floor, not the answer.
+    expect(screen.getByRole('dialog').querySelector('[data-at-least]')!.textContent).toBe('≥P2');
   });
 
   test('a failed read: "read failed" in the headline, and its row is unknown', async () => {
@@ -94,4 +102,23 @@ describe('CVE drawer headline', () => {
     expect(labels).toContain('read failed');
     expect(labels).toContain('1 unknown');
   });
+});
+
+test("the Broker's CVE-level tier is folded in: a P0 summary beats a P1 row, with the unknowns and the failed read still shown", async () => {
+  const two: Exposure = {
+    ...exposure,
+    workloads: exposure.workloads,
+    images: exposure.images,
+  };
+  const summary = { ...tierFixture<CvePage>('vulnerabilities').body.items.find((c) => c.id === exposure.id)!, tier: 'P0' };
+  const { api, answer } = controlled(two);
+  renderDrawer(api, two, summary);
+  const noTier = { ...page('checkout'), items: page('checkout').items.map((f) => (f.id === exposure.id ? { ...f, tier: null, tierFactors: [] } : f)) };
+  await answer(digestOf('ledger'), page('ledger')); // P1
+  await answer(digestOf('checkout'), noTier); // no tier
+  await answer(digestOf('reports'), 'fail'); // read failed
+  expect(headlineTier()).toBe('P0');
+  const labels = headlineLabels();
+  expect(labels).toContain('2 unknown');
+  expect(labels).toContain('read failed');
 });

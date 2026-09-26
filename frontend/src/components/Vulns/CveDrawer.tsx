@@ -1,6 +1,6 @@
 import { useMemo } from 'react';
 import { Copy, ExternalLink, Map as MapIcon, SearchX, Sparkles } from 'lucide-react';
-import { useCveDetail, usePssByWorkload } from '../../hooks/useVulns';
+import { CVE_IMAGE_READS, useCveDetail, usePssByWorkload } from '../../hooks/useVulns';
 import { profileApi as defaultProfileApi, type ProfileApi } from '../../services/profileApi';
 import { workloadKey } from '../../utils/workloads';
 import { vulnErrorKind, type VulnApi } from '../../services/vulnApi';
@@ -59,6 +59,9 @@ export function CveDrawer({ id, summary, onClose, onOpenWorkload, onShowOnMap, o
     [e, findings, pss],
   );
   const backgroundRow = rows.find((r) => r.tier === 'Background');
+  // A row whose image read is still in flight says "…", like the headline.
+  const readPending = (digest: string) =>
+    pending > 0 && !findings.has(digest) && !failed.has(digest) && (e?.images.slice(0, CVE_IMAGE_READS).some((i) => i.digest === digest) ?? false);
   // Worst case over every row; pending until every read has settled.
   const head = cveHeadline(rows, { pending, failed: failed.size, summaryTier: summary?.tier });
   const overall = head.pending ? null : head.tier;
@@ -82,7 +85,7 @@ export function CveDrawer({ id, summary, onClose, onOpenWorkload, onShowOnMap, o
               <span data-testid="headline-pending" title="Reading each affected image's finding" className="rounded-md border border-dashed border-hubble-border-strong px-1.5 py-px text-[11px] font-mono text-tertiary">…</span>
             ) : (
               <>
-                <TierBadge tier={overall} title="The most urgent tier over every affected workload (the Broker's tiers)" />
+                <TierBadge tier={overall} atLeast={head.unknownRows > 0} title="The most urgent tier over every affected workload (the Broker's tiers)" />
                 <FactorChips factors={head.factors} only={['inuse', 'exposure', 'kev', 'epss', 'cvss', 'fix']} />
                 {head.unknownRows > 0 && (
                   <FactorChips factors={[{ key: 'tier-unknown', tone: 'unknown', label: `${head.unknownRows} unknown`, title: `${head.unknownRows} affected workload${head.unknownRows === 1 ? ' has' : 's have'} no tier yet. Unknown, not low.` }]} />
@@ -135,7 +138,7 @@ export function CveDrawer({ id, summary, onClose, onOpenWorkload, onShowOnMap, o
                 {rows.map(({ w, tier, factors }) => {
                   return (
                     <tr key={`${w.namespace}/${w.kind}/${w.name}/${w.container}/${w.imageDigest}`} data-testid="cve-workload">
-                      <td className="px-3 py-2 align-top"><TierBadge tier={tier} title="The Broker's tier for this CVE in this workload's image (worst over every container running it)" /></td>
+                      <td className="px-3 py-2 align-top"><TierBadge tier={tier} pending={readPending(w.imageDigest)} title="The Broker's tier for this CVE in this workload's image (worst over every container running it)" /></td>
                       <td className="px-3 py-2 align-top sm:min-w-36">
                         <button type="button" onClick={() => onOpenWorkload(w.namespace, w.kind, w.name)} className="text-left text-primary hover:underline">
                           {w.namespace}/{w.name}
