@@ -669,7 +669,7 @@ pub async fn metrics(
     // after 100 ms.
     let denial_series = denials.get_ref().series();
 
-    let body = render_metrics_text(
+    let mut body = render_metrics_text(
         u8::from(schema_ready),
         u8::from(db_reachable),
         u8::from(audit.get_ref().enabled()),
@@ -688,6 +688,8 @@ pub async fn metrics(
         profiles_cache.get_ref().hits(),
         profiles_cache.get_ref().misses(),
     );
+    // Supply-chain ingest counters (process atomics, no query).
+    body.push_str(&api::supplychain::render_metrics());
 
     HttpResponse::Ok()
         .content_type("text/plain; version=0.0.4; charset=utf-8")

@@ -2068,9 +2068,10 @@ mod workload_profile_retention_tests {
 //
 // One loop, three jobs, in this order each pass:
 //
-// 1. Relink every stored payload to the inventory
-//    (supplychain::relink), so a digest the inventory learns after the
-//    scan arrived is joined within one interval.
+// 1. Relink every stored payload to the inventory (supplychain::relink),
+//    so a digest the inventory learns after the scan arrived is joined
+//    within one interval, then rebuild the per-CVE summary that
+//    GET /vulnerabilities reads (vuln_cve_summary).
 // 2. Expire staged SBOM sets that stopped receiving pages
 //    (`SUPPLYCHAIN_SBOM_PAGE_TTL_SECS`, default 3600).
 // 3. Delete payloads nothing runs: no linked inventory digest has a
@@ -2182,6 +2183,19 @@ pub(crate) async fn run_supplychain_pass(pool: &DbPool, days: u32, grace_hours: 
     }
     if changed > 0 {
         info!(links_changed = changed, "supply-chain links refreshed");
+    }
+    // 1b. Rebuild the per-CVE summary GET /vulnerabilities reads, from the
+    //     links just refreshed.
+    let p = pool.clone();
+    match tokio::task::spawn_blocking(move || -> Result<i64, RetentionError> {
+        let mut conn = p.get().map_err(RetentionError::Pool)?;
+        crate::supplychain_read::refresh_cve_summary(&mut conn).map_err(RetentionError::Diesel)
+    })
+    .await
+    {
+        Ok(Ok(n)) => debug!(cves = n, "supply-chain CVE summary rebuilt"),
+        Ok(Err(e)) => warn!(error = %e, "supply-chain CVE summary rebuild failed"),
+        Err(e) => warn!(error = %e, "supply-chain CVE summary task panicked"),
     }
     // 2. Staged pages.
     let ttl = supplychain_page_ttl_secs();

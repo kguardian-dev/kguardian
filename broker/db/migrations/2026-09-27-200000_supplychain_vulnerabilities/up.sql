@@ -47,8 +47,11 @@ CREATE TABLE IF NOT EXISTS vuln_sources (
     sbom_format        VARCHAR   NULL,
     sbom_spec_version  VARCHAR   NULL,
     item_count         INTEGER   NOT NULL DEFAULT 0,
-    -- Matcher findings (source grype): which SBOM source was matched.
-    sbom_source        VARCHAR   NULL,
+    -- Matcher findings (source grype): which SBOM source(s) were matched.
+    sbom_sources       TEXT[]    NOT NULL DEFAULT '{}',
+    -- unverified | attached-unbound | verified. A registry SBOM that says
+    -- nothing is stored as unverified.
+    sbom_trust         VARCHAR   NULL,
     -- Registry-attached SBOMs: where it was found and whether a signature
     -- was verified (stored as sent; false = not checked, never "signed").
     attestation        JSONB     NULL,
@@ -148,3 +151,34 @@ CREATE TABLE IF NOT EXISTS supplychain_image_links (
     PRIMARY KEY (digest, source, image_digest)
 );
 CREATE INDEX IF NOT EXISTS idx_supplychain_links_image ON supplychain_image_links (image_digest);
+
+-- GET /vulnerabilities reads this, not the findings: one row per CVE
+-- cluster-wide (scope_namespace = '') and per (namespace, CVE), rebuilt by
+-- the retention pass. vuln_cve_summary_state says when.
+CREATE TABLE IF NOT EXISTS vuln_cve_summary (
+    scope_namespace   VARCHAR   NOT NULL,
+    vuln_id           VARCHAR   NOT NULL,
+    severity_rank     SMALLINT  NOT NULL,
+    max_score         REAL      NULL,
+    fixable           BOOLEAN   NOT NULL,
+    kev               BOOLEAN   NULL,
+    max_epss          REAL      NULL,
+    packages          TEXT[]    NOT NULL DEFAULT '{}',
+    -- Sources reporting it (findings are deduplicated across sources on
+    -- (id, package, installed version); this says who contributed).
+    sources           TEXT[]    NOT NULL DEFAULT '{}',
+    images            BIGINT    NOT NULL,
+    workloads         BIGINT    NOT NULL,
+    running_workloads BIGINT    NOT NULL,
+    namespaces        BIGINT    NOT NULL,
+    weakest_rank      SMALLINT  NOT NULL,
+    PRIMARY KEY (scope_namespace, vuln_id)
+);
+CREATE INDEX IF NOT EXISTS idx_vuln_cve_summary_order
+    ON vuln_cve_summary (scope_namespace, severity_rank DESC, vuln_id);
+
+CREATE TABLE IF NOT EXISTS vuln_cve_summary_state (
+    id           SMALLINT  PRIMARY KEY CHECK (id = 1),
+    refreshed_at TIMESTAMP NOT NULL,
+    cves         BIGINT    NOT NULL
+);

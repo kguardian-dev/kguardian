@@ -159,12 +159,36 @@ fn vulnerabilities_contract_violations_are_refused() {
     let mut v = base();
     v["source"] = json!("Trivy Operator!");
     assert!(normalise_vulnerabilities(&d(1), parse_vulns(v), now()).is_err());
-    // A far-future scan would block every later one.
-    let v = vulns_json(&d(1), "2027-01-01T00:00:00Z", &[]);
-    assert!(matches!(
-        normalise_vulnerabilities(&d(1), parse_vulns(v), now()),
-        Err(Reject::Invalid(m)) if m.contains("future")
-    ));
+    // Only the three known sources: a slug alone is not enough.
+    for (src, ok) in [
+        ("trivy-operator", true),
+        ("grype", true),
+        ("registry", true),
+        ("trivy-operator2", false),
+        ("made-up", false),
+    ] {
+        let mut v = base();
+        v["source"] = json!(src);
+        assert_eq!(
+            normalise_vulnerabilities(&d(1), parse_vulns(v), now()).is_ok(),
+            ok,
+            "{src}"
+        );
+    }
+    // A future scan would block every later one, or pre-date a payload to
+    // beat the next real scan: at most 60 s of skew.
+    for (at, ok) in [
+        ("2027-01-01T00:00:00Z", false),
+        ("2026-09-27T12:02:00Z", false),
+        ("2026-09-27T12:00:30Z", true),
+    ] {
+        let v = vulns_json(&d(1), at, &[]);
+        let r = normalise_vulnerabilities(&d(1), parse_vulns(v), now());
+        assert_eq!(r.is_ok(), ok, "{at}");
+        if !ok {
+            assert!(matches!(r, Err(Reject::Invalid(m)) if m.contains("future")));
+        }
+    }
     let mut v = base();
     v["vulnerabilities"][0]["id"] = json!("  ");
     assert!(normalise_vulnerabilities(&d(1), parse_vulns(v), now()).is_err());
@@ -174,14 +198,66 @@ fn vulnerabilities_contract_violations_are_refused() {
 }
 
 #[test]
-fn too_many_findings_is_413() {
+fn lists_over_their_cap_are_refused_while_parsing() {
     let mut v = vulns_json(&d(1), "2026-09-20T08:00:00Z", &[]);
     let one = json!({"id": "CVE-1", "package": {"name": "p", "version": "1"}, "severity": "LOW"});
-    v["vulnerabilities"] = json!(vec![one; MAX_VULNERABILITIES + 1]);
+    v["vulnerabilities"] = json!(vec![one.clone(); MAX_VULNERABILITIES + 1]);
+    let body = serde_json::to_vec(&v).unwrap();
     assert!(matches!(
-        normalise_vulnerabilities(&d(1), parse_vulns(v), now()),
-        Err(Reject::TooLarge(_))
+        prepare(Kind::Vulnerabilities, &d(1), &body, false, 64 << 20, now()),
+        Err(PrepareError::TooMany(_))
     ));
+    // Exactly at the cap is accepted.
+    v["vulnerabilities"] = json!(vec![one; MAX_VULNERABILITIES]);
+    let body = serde_json::to_vec(&v).unwrap();
+    assert!(prepare(Kind::Vulnerabilities, &d(1), &body, false, 64 << 20, now()).is_ok());
+
+    // The reviewer's case: a tiny body of tiny components.
+    let mut sb = sbom_json(&d(1), "2026-09-20T08:00:00Z", &[], None);
+    sb["components"] = json!(vec![json!({"name": "a"}); MAX_COMPONENTS_PER_REQUEST + 1]);
+    let body = gzip(&serde_json::to_vec(&sb).unwrap());
+    assert!(matches!(
+        prepare(Kind::Sbom, &d(1), &body, true, 8 << 20, now()),
+        Err(PrepareError::TooMany(_))
+    ));
+}
+
+#[test]
+fn nested_lists_keep_their_first_items_and_null_reads_as_empty() {
+    let mut v = vulns_json(&d(1), "2026-09-20T08:00:00Z", &[("CVE-1", "LOW", None)]);
+    v["vulnerabilities"][0]["file_paths"] =
+        json!((0..10_000).map(|i| format!("/p/{i}")).collect::<Vec<_>>());
+    v["vulnerabilities"][0]["cvss"] = json!((0..100)
+        .map(|i| (format!("v{i}"), json!({"v3_score": 1.0})))
+        .collect::<serde_json::Map<_, _>>());
+    v["image"]["platform_manifests"] = json!((0..500)
+        .map(|i| (format!("linux/a{i}"), json!(d(i))))
+        .collect::<serde_json::Map<_, _>>());
+    v["observed_in"] = json!(vec![
+        json!({"namespace": "a", "kind": "Pod", "name": "b", "container": "c"});
+        1000
+    ]);
+    let w: WireImageVulnerabilities =
+        serde_json::from_slice(&serde_json::to_vec(&v).unwrap()).unwrap();
+    assert_eq!(w.vulnerabilities[0].file_paths.len(), MAX_FILE_PATHS);
+    assert_eq!(
+        w.vulnerabilities[0].cvss.as_ref().unwrap().len(),
+        MAX_CVSS_VENDORS
+    );
+    assert_eq!(
+        w.image.platform_manifests.as_ref().unwrap().len(),
+        MAX_PLATFORM_MANIFESTS
+    );
+    assert_eq!(w.observed_in.len(), MAX_OBSERVED_IN);
+    // Go marshals a nil slice as null.
+    let mut v = vulns_json(&d(1), "2026-09-20T08:00:00Z", &[]);
+    v["vulnerabilities"] = serde_json::Value::Null;
+    v["observed_in"] = serde_json::Value::Null;
+    v["image"]["platform_manifests"] = serde_json::Value::Null;
+    let w: WireImageVulnerabilities =
+        serde_json::from_slice(&serde_json::to_vec(&v).unwrap()).unwrap();
+    assert!(w.vulnerabilities.is_empty() && w.observed_in.is_empty());
+    assert!(w.image.platform_manifests.is_none());
 }
 
 #[test]
@@ -237,7 +313,7 @@ fn decompressed_ceiling_parses_and_clamps() {
     assert_eq!(parse_max_decompressed(Some("1")), MAX_COMPRESSED_BYTES);
     assert_eq!(
         parse_max_decompressed(Some("999999999999")),
-        128 * 1024 * 1024
+        32 * 1024 * 1024
     );
     assert_eq!(parse_max_decompressed(Some(" 2097152 ")), 2 * 1024 * 1024);
 }
@@ -407,8 +483,9 @@ fn live_conn() -> PgConnection {
         .expect("apply the shipped migrations");
     conn.batch_execute(&format!(
         "TRUNCATE vuln_sources, image_vulnerabilities, image_sbom_components, image_sbom_pages, \
-            supplychain_image_links, images, workload_containers; \
-         DELETE FROM pod_traffic WHERE pod_namespace = '{NS}'; \
+            supplychain_image_links, images, workload_containers, vuln_cve_summary, \
+            vuln_cve_summary_state; \
+         DELETE FROM pod_traffic WHERE pod_namespace IN ('{NS}', 'sc-other'); \
          DELETE FROM pod_details WHERE pod_namespace = '{NS}';"
     ))
     .expect("reset");
@@ -538,6 +615,14 @@ fn live_database_vulnerabilities_are_idempotent_and_never_overwritten_by_older_s
             "SELECT count(*) AS n FROM image_vulnerabilities WHERE vuln_id = 'CVE-9'"
         ),
         0
+    );
+    // Different content with the SAME scan time: ignored too. An empty
+    // payload in particular cannot wipe the findings.
+    let wipe = vulns_json(&d(1), "2026-09-20T08:00:00Z", &[]);
+    assert!(matches!(store_v(&mut conn, wipe), Outcome::Stale { .. }));
+    assert_eq!(
+        count(&mut conn, "SELECT count(*) AS n FROM image_vulnerabilities"),
+        2
     );
     // A newer scan replaces the set.
     let newest = vulns_json(&d(1), "2026-09-21T08:00:00Z", &[("CVE-3", "MEDIUM", None)]);
@@ -754,6 +839,51 @@ fn live_database_joins_by_image_id_then_platform_manifest_then_workload_tag() {
         ]
     );
 
+    // Tag guesses are suppressed per IMAGE. d(16) runs in the inventory;
+    // a grype payload for some other digest tag-matches its workload
+    // first, then Trivy's exact report for d(16) arrives: the exact link
+    // retires the tag link, and relinking never brings it back.
+    seed_inventory(
+        &mut conn,
+        &d(16),
+        "ghcr.io/example/svc",
+        "3",
+        "Deployment",
+        "svc",
+        "svc",
+        0,
+    );
+    let mut guess = vulns_json(&d(50), "2026-09-20T08:00:00Z", &[("CVE-G", "LOW", None)]);
+    guess["source"] = json!("grype");
+    guess["image"]["repository"] = json!("example/svc");
+    guess["image"]["tag"] = json!("3");
+    guess["observed_in"] =
+        json!([{"namespace": NS, "kind": "ReplicaSet", "name": "svc-6f7d9", "container": "svc"}]);
+    store_v(&mut conn, guess.clone());
+    assert!(links(&mut conn).contains(&(d(50), d(16), "workload_tag".to_string())));
+    let mut exact = vulns_json(&d(16), "2026-09-20T08:00:00Z", &[("CVE-E", "LOW", None)]);
+    exact["observed_in"] = json!([]);
+    store_v(&mut conn, exact);
+    let l = links(&mut conn);
+    assert!(l.contains(&(d(16), d(16), "image_id".to_string())));
+    assert!(!l.iter().any(|x| x.0 == d(50)), "tag link retired: {l:?}");
+    relink_batch(&mut conn, None, 100).unwrap();
+    assert!(!links(&mut conn).iter().any(|x| x.0 == d(50)));
+    // Reads by d(16) see only the exact report.
+    let page = crate::supplychain_read::image_vulnerabilities(
+        &mut conn,
+        &d(16),
+        None,
+        None,
+        None,
+        None,
+        10,
+    )
+    .unwrap();
+    assert_eq!(page.reports.len(), 1);
+    assert_eq!(page.reports[0].join, "image_id");
+    exec(&mut conn, &format!("DELETE FROM supplychain_image_links WHERE image_digest = '{}'; DELETE FROM vuln_sources WHERE digest IN ('{}', '{}'); DELETE FROM image_vulnerabilities WHERE digest IN ('{}', '{}')", d(16), d(16), d(50), d(16), d(50)));
+
     // A digest the inventory learns after the scan is linked by the
     // periodic pass.
     store_v(
@@ -899,7 +1029,13 @@ fn live_database_reads_filter_page_and_group() {
     );
     assert!(fixable.items.iter().all(|f| f.fixable));
 
+    // Nothing summarised yet: empty, and says so.
+    let none = list_cves(&mut conn, None, None, None, false, None, 10).unwrap();
+    assert!(none.items.is_empty() && none.computed_at.is_none());
+    crate::supplychain_read::refresh_cve_summary(&mut conn).unwrap();
     let all = list_cves(&mut conn, None, None, None, false, None, 10).unwrap();
+    assert!(all.computed_at.is_some());
+    assert!(all.stale_seconds.unwrap() < 60);
     let ids: Vec<&str> = all.items.iter().map(|c| c.summary.id.as_str()).collect();
     assert_eq!(ids, ["CVE-1", "CVE-2", "CVE-4", "CVE-3"]);
     let c1 = &all.items[0].summary;
@@ -971,36 +1107,18 @@ fn live_database_reads_filter_page_and_group() {
 #[ignore = "requires a live postgres (set KG_TEST_DATABASE_URL)"]
 fn live_database_exposure_reports_images_workloads_and_observed_ingress() {
     let mut conn = live_conn();
-    seed_inventory(
-        &mut conn,
-        &d(1),
-        "ghcr.io/example/api",
-        "1",
-        "Deployment",
-        "api",
-        "api",
-        0,
-    );
-    seed_inventory(
-        &mut conn,
-        &d(1),
-        "ghcr.io/example/api",
-        "1",
-        "Deployment",
-        "quiet",
-        "api",
-        0,
-    );
-    seed_inventory(
-        &mut conn,
-        &d(1),
-        "ghcr.io/example/api",
-        "1",
-        "Deployment",
-        "nopods",
-        "api",
-        0,
-    );
+    for w in ["api", "viaNode", "internal", "idle", "nopods"] {
+        seed_inventory(
+            &mut conn,
+            &d(1),
+            "ghcr.io/example/api",
+            "1",
+            "Deployment",
+            w,
+            "api",
+            0,
+        );
+    }
     let mut v = vulns_json(
         &d(1),
         "2026-09-20T08:00:00Z",
@@ -1014,15 +1132,19 @@ fn live_database_exposure_reports_images_workloads_and_observed_ingress() {
             "INSERT INTO pod_details (pod_name, pod_ip, pod_namespace, time_stamp, node_name, is_dead, \
                  workload_kind, workload_name) VALUES \
                ('sc-api-1', '10.9.0.1', '{NS}', timezone('UTC', NOW()), 'n1', false, 'Deployment', 'api'), \
-               ('sc-quiet-1', '10.9.0.2', '{NS}', timezone('UTC', NOW()), 'n1', false, 'Deployment', 'quiet'); \
+               ('sc-node-1', '10.9.0.2', '{NS}', timezone('UTC', NOW()), 'n1', false, 'Deployment', 'viaNode'), \
+               ('sc-shared-0', '10.9.0.3', '{NS}', timezone('UTC', NOW()), 'n1', false, 'Deployment', 'internal'), \
+               ('sc-idle-1', '10.9.0.4', '{NS}', timezone('UTC', NOW()), 'n1', false, 'Deployment', 'idle'); \
              INSERT INTO pod_traffic (uuid, pod_name, pod_namespace, pod_ip, traffic_type, \
                  traffic_in_out_ip, time_stamp, peer_kind, peer_namespace, peer_name) VALUES \
                ('sc-t1', 'sc-api-1', '{NS}', '10.9.0.1', 'INGRESS', '10.9.9.9', timezone('UTC', NOW()), 'pod', 'other', 'client'), \
                ('sc-t2', 'sc-api-1', '{NS}', '10.9.0.1', 'INGRESS', '8.8.8.8', timezone('UTC', NOW()), NULL, NULL, NULL), \
                ('sc-t3', 'sc-api-1', '{NS}', '10.9.0.1', 'EGRESS', '1.1.1.1', timezone('UTC', NOW()), NULL, NULL, NULL), \
-               ('sc-t4', 'sc-quiet-1', '{NS}', '10.9.0.2', 'INGRESS', '10.9.0.9', timezone('UTC', NOW()), 'pod', '{NS}', 'same-ns'), \
-               ('sc-t5', 'sc-quiet-1', '{NS}', '10.9.0.2', 'INGRESS', '192.168.1.10', timezone('UTC', NOW()), 'node', NULL, 'n1'), \
-               ('sc-t6', 'sc-quiet-1', '{NS}', '10.9.0.2', 'INGRESS', '9.9.9.9', timezone('UTC', NOW()) - INTERVAL '30 days', NULL, NULL, NULL);"
+               ('sc-t4', 'sc-node-1', '{NS}', '10.9.0.2', 'INGRESS', '192.168.1.10', timezone('UTC', NOW()), 'node', NULL, 'n1'), \
+               ('sc-t5', 'sc-shared-0', '{NS}', '10.9.0.3', 'INGRESS', '10.9.0.9', timezone('UTC', NOW()), 'pod', '{NS}', 'same-ns'), \
+               ('sc-t6', 'sc-shared-0', 'sc-other', '10.8.0.3', 'INGRESS', '8.8.4.4', timezone('UTC', NOW()), NULL, NULL, NULL), \
+               ('sc-t7', 'sc-shared-0', 'sc-other', '10.8.0.3', 'INGRESS', '10.8.1.1', timezone('UTC', NOW()), 'pod', 'elsewhere', 'x'), \
+               ('sc-t8', 'sc-idle-1', '{NS}', '10.9.0.4', 'INGRESS', '9.9.9.9', timezone('UTC', NOW()) - INTERVAL '30 days', NULL, NULL, NULL);"
         ),
     );
     let e = crate::supplychain_read::vulnerability_exposure(&mut conn, "CVE-X", 168)
@@ -1032,19 +1154,38 @@ fn live_database_exposure_reports_images_workloads_and_observed_ingress() {
     assert!(e.fixable);
     assert_eq!(e.images.len(), 1);
     assert_eq!(e.images[0].join, "image_id");
-    assert_eq!(e.workloads.len(), 3);
+    assert_eq!(e.workloads.len(), 5);
     let by = |n: &str| e.workloads.iter().find(|w| w.name == n).unwrap();
     let api = &by("api").network;
-    assert_eq!(api.pods_observed, 1);
+    assert_eq!((api.pods_observed, api.flows_observed), (1, 3));
     assert_eq!(api.ingress_from_other_namespaces, 1);
     assert_eq!(api.ingress_from_unattributed_peers, 1);
     assert_eq!(api.ingress_from_public_ips, 1);
     assert_eq!(api.exposed, Some(true));
-    let quiet = &by("quiet").network;
-    // Same-namespace and node (probe) ingress, plus an internet peer
-    // outside the window: none of it is exposure.
-    assert_eq!(quiet.ingress_from_nodes, 1);
-    assert_eq!(quiet.exposed, Some(false));
+    assert_eq!(
+        api.exposed_via,
+        vec!["other_namespace", "unattributed", "public_ip"]
+    );
+    // Node ingress (NodePort / LB with Cluster policy SNATs to a node IP)
+    // is possible exposure, not "internal".
+    let node = &by("viaNode").network;
+    assert_eq!(node.exposed, Some(true));
+    assert_eq!(node.exposed_via, vec!["node"]);
+    // Same-namespace ingress only: observed, and not exposed. The pod of
+    // the same NAME in another namespace (public and cross-namespace
+    // ingress) must not leak in.
+    let internal = &by("internal").network;
+    assert_eq!(
+        internal.flows_observed, 1,
+        "other namespace's rows leaked in"
+    );
+    assert_eq!(internal.exposed, Some(false));
+    assert_eq!(internal.ingress_from_public_ips, 0);
+    assert_eq!(internal.ingress_from_other_namespaces, 0);
+    // Pods, but no flows in the window: unknown, not safe.
+    let idle = &by("idle").network;
+    assert_eq!((idle.pods_observed, idle.flows_observed), (1, 0));
+    assert_eq!(idle.exposed, None);
     assert_eq!(by("nopods").network.exposed, None, "no pods = unknown");
     assert!(by("api").running);
     assert_eq!(by("api").in_use_state, "unknown");
@@ -1057,13 +1198,60 @@ fn live_database_exposure_reports_images_workloads_and_observed_ingress() {
             ns.exposed_workloads,
             ns.unknown_exposure_workloads
         ),
-        (3, 3, 1, 1)
+        (5, 5, 2, 2)
     );
     assert!(
         crate::supplychain_read::vulnerability_exposure(&mut conn, "CVE-NOPE", 168)
             .unwrap()
             .is_none()
     );
+}
+
+#[test]
+#[ignore = "requires a live postgres (set KG_TEST_DATABASE_URL)"]
+fn live_database_staging_has_a_global_ceiling() {
+    let mut conn = live_conn();
+    let before = staged_sets_refused();
+    let at = "2026-09-20T08:00:00Z";
+    for i in 0..MAX_STAGED_SETS as u32 {
+        let r = store_s(
+            &mut conn,
+            sbom_json(&d(1000 + i), at, &["a"], Some(("s", 0, 2))),
+        )
+        .unwrap();
+        assert!(matches!(r, Outcome::Staged { .. }), "{i}: {r:?}");
+    }
+    // One more new set: refused, counted.
+    let err = store_s(
+        &mut conn,
+        sbom_json(&d(2000), at, &["a"], Some(("s", 0, 2))),
+    )
+    .unwrap_err();
+    assert!(err.downcast_ref::<StagingFull>().is_some(), "{err}");
+    assert_eq!(staged_sets_refused(), before + 1);
+    assert!(render_metrics().contains("kguardian_supplychain_staged_sets_refused_total"));
+    // A set already staging still completes, which frees a slot.
+    assert_eq!(
+        store_s(
+            &mut conn,
+            sbom_json(&d(1000), at, &["b"], Some(("s", 1, 2)))
+        )
+        .unwrap(),
+        Outcome::Stored { items: 2 }
+    );
+    assert!(matches!(
+        store_s(
+            &mut conn,
+            sbom_json(&d(2000), at, &["a"], Some(("s", 0, 2)))
+        )
+        .unwrap(),
+        Outcome::Staged { .. }
+    ));
+    // An unpaged SBOM never stages.
+    assert!(matches!(
+        store_s(&mut conn, sbom_json(&d(3000), at, &["a"], None)).unwrap(),
+        Outcome::Stored { .. }
+    ));
 }
 
 #[test]
@@ -1278,24 +1466,38 @@ fn grype_signals_are_bounded_and_absent_stays_unknown() {
         &[("CVE-1", "HIGH", None), ("CVE-2", "LOW", None)],
     );
     v["source"] = json!("grype");
-    v["sbom_source"] = json!("registry");
+    v["sbom_source"] = json!(["registry", "trivy-operator", "made-up"]);
+    v["sbom_trust"] = json!("attached-unbound");
     v["db_updated_at"] = json!("2026-09-19T00:00:00Z");
     v["vulnerabilities"][0]["kev"] = json!(true);
     v["vulnerabilities"][0]["kev_date_added"] = json!("2024-03-29T00:00:00Z");
     v["vulnerabilities"][0]["epss"] = json!(0.97);
     v["vulnerabilities"][0]["epss_percentile"] = json!(1.5);
     let p = normalise_vulnerabilities(&d(1), parse_vulns(v), now()).unwrap();
-    assert_eq!(p.header.sbom_source.as_deref(), Some("registry"));
+    assert_eq!(p.header.sbom_sources, ["registry", "trivy-operator"]);
+    assert_eq!(p.header.sbom_trust.as_deref(), Some("attached-unbound"));
     assert!(p.header.db_updated_at.is_some());
     assert_eq!(p.rows[0].kev, Some(true));
     assert_eq!(p.rows[0].epss, Some(0.97));
     assert_eq!(p.rows[0].epss_percentile, None, "out of range is unknown");
     assert_eq!((p.rows[1].kev, p.rows[1].epss), (None, None));
+    // The older string form still reads.
+    let mut v = vulns_json(&d(1), "2026-09-20T08:00:00Z", &[]);
+    v["source"] = json!("grype");
+    v["sbom_source"] = json!("registry");
+    v["sbom_trust"] = json!("totally-trusted");
+    let p = normalise_vulnerabilities(&d(1), parse_vulns(v), now()).unwrap();
+    assert_eq!(p.header.sbom_sources, ["registry"]);
+    assert_eq!(
+        p.header.sbom_trust.as_deref(),
+        Some("unverified"),
+        "unknown trust is unverified"
+    );
 }
 
 #[test]
 #[ignore = "requires a live postgres (set KG_TEST_DATABASE_URL)"]
-fn live_database_sources_sit_side_by_side_and_registry_sboms_win() {
+fn live_database_sources_are_deduplicated_and_registry_sboms_never_replace_trivys() {
     let mut conn = live_conn();
     seed_inventory(
         &mut conn,
@@ -1348,19 +1550,49 @@ fn live_database_sources_sit_side_by_side_and_registry_sboms_win() {
     .unwrap();
     assert_eq!(page.reports.len(), 2);
     let g = page.reports.iter().find(|r| r.source == "grype").unwrap();
-    assert_eq!(g.sbom_source.as_deref(), Some("registry"));
-    let kev = page
-        .items
+    assert_eq!(g.sbom_sources, ["registry"]);
+    // CVE-1 is reported by both sources for the same package and version:
+    // ONE finding listing both, with the strongest signals of the two.
+    assert_eq!(
+        page.items.len(),
+        2,
+        "{:?}",
+        page.items.iter().map(|f| &f.id).collect::<Vec<_>>()
+    );
+    let c1 = page.items.iter().find(|f| f.id == "CVE-1").unwrap();
+    assert_eq!(c1.sources, ["grype", "trivy-operator"]);
+    assert_eq!(c1.report_digests, [d(1)]);
+    assert_eq!((c1.kev, c1.epss), (Some(true), Some(0.5)));
+    assert!(c1.fixable, "a fix from any source counts");
+    let c2 = page.items.iter().find(|f| f.id == "CVE-2").unwrap();
+    assert_eq!(c2.sources, ["grype"]);
+    assert_eq!(c2.kev, None, "grype did not flag it: unknown, not false");
+    // Same CVE in a DIFFERENT installed version is a separate finding.
+    let mut trivy2 = vulns_json(&d(1), "2026-09-22T08:00:00Z", &[("CVE-1", "HIGH", None)]);
+    trivy2["observed_in"] = json!([]);
+    trivy2["vulnerabilities"][0]["package"]["version"] = json!("0.9.0");
+    store_v(&mut conn, trivy2);
+    let page = crate::supplychain_read::image_vulnerabilities(
+        &mut conn,
+        &d(1),
+        None,
+        None,
+        None,
+        None,
+        10,
+    )
+    .unwrap();
+    let ones: Vec<_> = page.items.iter().filter(|f| f.id == "CVE-1").collect();
+    assert_eq!(ones.len(), 2);
+    assert!(ones
         .iter()
-        .find(|f| f.source == "grype" && f.id == "CVE-1")
-        .unwrap();
-    assert_eq!((kev.kev, kev.epss), (Some(true), Some(0.5)));
-    let trivy_row = page
-        .items
+        .any(|f| f.installed_version == "0.9.0" && f.sources == ["trivy-operator"]));
+    assert!(ones
         .iter()
-        .find(|f| f.source == "trivy-operator")
-        .unwrap();
-    assert_eq!(trivy_row.kev, None, "Trivy never says: unknown");
+        .any(|f| f.installed_version == "1.0.0" && f.sources == ["grype"]));
+    let mut trivy3 = vulns_json(&d(1), "2026-09-23T08:00:00Z", &[("CVE-1", "HIGH", None)]);
+    trivy3["observed_in"] = json!([]);
+    store_v(&mut conn, trivy3);
     let only = crate::supplychain_read::image_vulnerabilities(
         &mut conn,
         &d(1),
@@ -1372,6 +1604,7 @@ fn live_database_sources_sit_side_by_side_and_registry_sboms_win() {
     )
     .unwrap();
     assert_eq!(only.items.len(), 1);
+    crate::supplychain_read::refresh_cve_summary(&mut conn).unwrap();
     let cves =
         crate::supplychain_read::list_cves(&mut conn, None, None, None, false, None, 10).unwrap();
     let c1 = cves.items.iter().find(|c| c.summary.id == "CVE-1").unwrap();
@@ -1380,11 +1613,24 @@ fn live_database_sources_sit_side_by_side_and_registry_sboms_win() {
         (Some(true), Some(0.5))
     );
     assert!(c1.summary.fixable);
+    // Two sources, one image, one workload: counted once.
+    assert_eq!(c1.summary.sources, ["grype", "trivy-operator"]);
+    assert_eq!((c1.summary.images, c1.summary.workloads), (1, 1));
+    let e = crate::supplychain_read::vulnerability_exposure(&mut conn, "CVE-1", 168)
+        .unwrap()
+        .unwrap();
+    assert_eq!(e.images.len(), 1, "one entry per image, not per source");
+    assert_eq!(e.images[0].sources, ["grype", "trivy-operator"]);
+    let pkgs = e.images[0].packages.as_array().unwrap();
+    assert_eq!(pkgs.len(), 1, "{pkgs:?}");
+    assert_eq!(pkgs[0]["sources"], json!(["grype", "trivy-operator"]));
+    assert_eq!(e.workloads.len(), 1);
     let c2 = cves.items.iter().find(|c| c.summary.id == "CVE-2").unwrap();
     assert_eq!(c2.summary.kev, None);
 
-    // Two SBOMs for one digest: the registry one is served whatever the
-    // scan times, and its attestation is stored as sent (unverified).
+    // Two SBOMs for one digest: both kept, side by side. The registry one
+    // is unverified evidence and never displaces Trivy's, whatever the
+    // scan times; it is served only when asked for.
     store_s(
         &mut conn,
         sbom_json(&d(1), "2026-09-22T08:00:00Z", &["trivy-pkg"], None),
@@ -1398,13 +1644,39 @@ fn live_database_sources_sit_side_by_side_and_registry_sboms_win() {
         "predicate_type": "https://cyclonedx.org/bom", "verified": false});
     store_s(&mut conn, reg).unwrap();
     let p = crate::supplychain_read::image_sbom(&mut conn, &d(1), None, 0, 10).unwrap();
-    let report = p.report.unwrap();
+    assert_eq!(
+        p.reports
+            .iter()
+            .map(|r| r.source.as_str())
+            .collect::<Vec<_>>(),
+        ["trivy-operator", "registry"]
+    );
+    assert_eq!(p.report.as_ref().unwrap().source, "trivy-operator");
+    assert_eq!(p.items[0].name, "trivy-pkg");
+    let r = crate::supplychain_read::image_sbom(&mut conn, &d(1), Some("registry"), 0, 10).unwrap();
+    let report = r.report.unwrap();
     assert_eq!(report.source, "registry");
+    assert_eq!(
+        report.sbom_trust.as_deref(),
+        Some("unverified"),
+        "registry SBOM defaults to unverified"
+    );
     let att = report.attestation.as_ref().unwrap();
     assert_eq!(att["verified"], json!(false));
     assert_eq!(att["artifact_digest"], json!(d(77)));
-    assert_eq!(p.items[0].name, "registry-pkg");
-    let t = crate::supplychain_read::image_sbom(&mut conn, &d(1), Some("trivy-operator"), 0, 10)
-        .unwrap();
-    assert_eq!(t.items[0].name, "trivy-pkg");
+    assert_eq!(r.items[0].name, "registry-pkg");
+    let doc = crate::supplychain_read::cyclonedx_document(&d(1), &report, &r.items);
+    assert!(doc["metadata"]["properties"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|p| p["name"] == "kguardian:sbomTrust" && p["value"] == "unverified"));
+    // Trivy's SBOM for the image is untouched by the registry one.
+    assert_eq!(
+        component_names(&mut conn, &d(1))
+            .iter()
+            .filter(|n| *n == "trivy-pkg")
+            .count(),
+        1
+    );
 }

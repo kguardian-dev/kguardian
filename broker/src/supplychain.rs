@@ -12,15 +12,29 @@
 //! unauthenticated broker would otherwise let any pod post a forged
 //! "clean" scan. The read side is `supplychain_read.rs`.
 //!
+//! # Trust
+//!
+//! Whoever holds the supplychain token is trusted to write findings: the
+//! broker cannot tell a real scan from a made-up one. What it does
+//! enforce limits the damage a bad or stolen token can do: a closed set of
+//! sources, `scanned_at` at most 60 s ahead, replacement only by a
+//! strictly newer scan (so an empty payload cannot wipe a newer or equal
+//! scan), capped item counts, and a global ceiling on staged SBOM pages.
+//!
 //! # Bodies
 //!
 //! The component sends gzip JSON of at most 1 MiB compressed
-//! ([`MAX_COMPRESSED_BYTES`]). The handler reads the raw payload itself
-//! (no app-wide JSON/Payload limit applies to it), refuses more than that
-//! many compressed bytes, then inflates into a buffer that stops at
-//! [`max_decompressed_bytes`]: a decompression bomb costs at most that
-//! much memory and gets 413. Only two ingests run at once
-//! ([`INGEST_CONCURRENCY`]), so the ceiling bounds memory in aggregate too.
+//! ([`MAX_COMPRESSED_BYTES`]). The handler reads the raw payload itself,
+//! under a 30 s deadline and before it is queued for the ingest worker,
+//! refuses more
+//! than that many compressed bytes, then inflates into a buffer that stops
+//! at [`max_decompressed_bytes`] (default 8 MiB): a decompression bomb
+//! costs at most that much and gets 413. Parsing caps every list while it
+//! reads ([`MAX_VULNERABILITIES`], [`MAX_COMPONENTS_PER_REQUEST`], and
+//! small caps on nested lists), so a body of tiny items cannot become
+//! millions of structs. One worker thread does every inflate, parse and
+//! write, one at a time ([`INGEST_CONCURRENCY`]), behind a queue of
+//! [`INGEST_QUEUE`] bodies (503 when full).
 //!
 //! # Storage and replacement
 //!
@@ -28,8 +42,9 @@
 //! replaces what is stored for `(digest, source)` of its kind, inside one
 //! transaction serialised by an advisory lock on that key:
 //!
-//! - an older `scanned_at` than the stored one is ignored (`stale`), so a
-//!   delayed retry of an old scan never overwrites a newer one;
+//! - different content replaces what is stored only from a strictly newer
+//!   `scanned_at`; anything else is ignored (`stale`), so a delayed retry
+//!   of an old scan never overwrites a newer one;
 //! - identical content (same findings hash, or the same SBOM `set_id`) is
 //!   a no-op (`unchanged`) apart from refreshing the header;
 //! - paged SBOMs are staged in `image_sbom_pages` and swapped in only when
@@ -54,11 +69,10 @@ use diesel::pg::PgConnection;
 use diesel::prelude::*;
 use diesel::r2d2::{self, ConnectionManager};
 use diesel::sql_query;
-use diesel::sql_types::{BigInt, Bool, Jsonb, Nullable, Text, Timestamp};
+use diesel::sql_types::{BigInt, Bool, Nullable, Text, Timestamp};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::io::Read;
-use tokio::sync::Semaphore;
 use tracing::{debug, info, warn};
 
 type DbPool = r2d2::Pool<ConnectionManager<PgConnection>>;
@@ -67,19 +81,44 @@ pub(crate) type DbError = Box<dyn std::error::Error + Send + Sync>;
 /// Largest request body accepted, compressed. Matches the component's
 /// `broker.MaxRequestBytes`.
 pub const MAX_COMPRESSED_BYTES: usize = 1024 * 1024;
-/// Default ceiling for the inflated body.
-pub const DEFAULT_MAX_DECOMPRESSED_BYTES: usize = 32 * 1024 * 1024;
+/// Default ceiling for the inflated body. The producer pages SBOMs at
+/// 2 000 components and 1 MiB compressed, and a vulnerability set comes
+/// from one etcd object, so real payloads inflate to well under this.
+pub const DEFAULT_MAX_DECOMPRESSED_BYTES: usize = 8 * 1024 * 1024;
 const MIN_DECOMPRESSED_BYTES: usize = MAX_COMPRESSED_BYTES;
-const MAX_DECOMPRESSED_CEILING: usize = 128 * 1024 * 1024;
+const MAX_DECOMPRESSED_CEILING: usize = 32 * 1024 * 1024;
 /// Supply-chain ingests allowed to hold a body at once.
-pub const INGEST_CONCURRENCY: usize = 2;
+/// One: the measured worst case per ingest is ~62 MiB of heap
+/// (tests/supplychain_memory.rs), and ingests are rare and short, so a
+/// queue costs nothing while a second concurrent worst case would double
+/// the peak. Enforced by the single worker thread ([`ingest_worker`]).
+pub const INGEST_CONCURRENCY: usize = 1;
 
 /// The only schema version this broker reads.
 pub const SCHEMA_VERSION: i64 = 1;
 
-pub const MAX_VULNERABILITIES: usize = 50_000;
-pub const MAX_SBOM_COMPONENTS: usize = 100_000;
+/// Findings in one vulnerabilities payload. Enforced WHILE parsing (the
+/// list stops at this many and the request gets 413), so a body of tiny
+/// items cannot turn 8 MiB of JSON into millions of structs.
+pub const MAX_VULNERABILITIES: usize = 20_000;
+/// Components in one SBOM request (a page, or a whole small SBOM). The
+/// producer's pages hold at most 2 000. Enforced while parsing.
+pub const MAX_COMPONENTS_PER_REQUEST: usize = 10_000;
+/// Components in one assembled SBOM (all pages of a set).
+pub const MAX_SBOM_COMPONENTS: usize = 50_000;
 pub const MAX_SBOM_PAGES: i64 = 128;
+/// Incomplete SBOM page sets staged at once, across all digests and
+/// sources, and the stored bytes they may hold. A new set beyond either
+/// is refused with 429 (and counted), so a token holder cannot fill the
+/// database with half-sent sets for fabricated digests.
+pub const MAX_STAGED_SETS: i64 = 64;
+pub const MAX_STAGED_BYTES: i64 = 256 * 1024 * 1024;
+/// A request body must arrive within this long, or it gets 408. The body
+/// is read BEFORE it is queued for the ingest worker, so a slow sender only ever
+/// holds its own connection.
+pub const BODY_READ_TIMEOUT_SECS: u64 = 30;
+/// The only sources accepted (supplychain README).
+pub const SOURCES: [&str; 3] = ["trivy-operator", "grype", "registry"];
 const MAX_OBSERVED_IN: usize = 64;
 const MAX_PLATFORM_MANIFESTS: usize = 64;
 /// File paths kept per finding / component, and their length.
@@ -87,9 +126,10 @@ pub const MAX_FILE_PATHS: usize = 16;
 const MAX_PATH_LEN: usize = 1024;
 const MAX_LICENSES: usize = 8;
 const MAX_CVSS_VENDORS: usize = 8;
-/// A scan dated further ahead than this is refused: a far-future
-/// `scanned_at` would otherwise block every later scan as "older".
-const MAX_CLOCK_SKEW_SECS: i64 = 600;
+/// A scan dated further ahead than this is refused: a future `scanned_at`
+/// would otherwise block every later scan as "older", or let a payload be
+/// pre-dated to win against the next real scan.
+const MAX_CLOCK_SKEW_SECS: i64 = 60;
 
 const LEN_ID: usize = 128;
 const LEN_NAME: usize = 256;
@@ -121,7 +161,271 @@ pub fn max_decompressed_bytes() -> usize {
     })
 }
 
-static INGEST_SLOTS: Semaphore = Semaphore::const_new(INGEST_CONCURRENCY);
+/// Bodies read and waiting for the ingest worker. Beyond this the
+/// request gets 503 + Retry-After instead of queueing in memory.
+pub const INGEST_QUEUE: usize = 8;
+
+/// One queued ingest: a body already read off the wire, and where to send
+/// the result.
+struct Job {
+    kind: Kind,
+    digest: String,
+    raw: actix_web::web::Bytes,
+    gzip: bool,
+    pool: Option<web::Data<DbPool>>,
+    reply: tokio::sync::oneshot::Sender<Result<Outcome, IngestError>>,
+}
+
+/// The single ingest worker: one long-lived OS thread does every inflate,
+/// parse and write, one at a time ([`INGEST_CONCURRENCY`] is 1). Keeping
+/// them on one thread keeps their allocations in one malloc arena, so the
+/// broker's resident peak is one worst-case ingest, not one per blocking
+/// thread that happened to run one (measured: 420 MB RSS after three
+/// sequential worst-case ingests on web::block threads).
+fn ingest_worker() -> &'static std::sync::mpsc::SyncSender<Job> {
+    static TX: std::sync::OnceLock<std::sync::mpsc::SyncSender<Job>> = std::sync::OnceLock::new();
+    TX.get_or_init(|| {
+        let (tx, rx) = std::sync::mpsc::sync_channel::<Job>(INGEST_QUEUE);
+        std::thread::Builder::new()
+            .name("supplychain-ingest".into())
+            .spawn(move || {
+                for job in rx {
+                    let Job {
+                        kind,
+                        digest,
+                        raw,
+                        gzip,
+                        pool,
+                        reply,
+                    } = job;
+                    let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        let prepared = prepare(
+                            kind,
+                            &digest,
+                            &raw,
+                            gzip,
+                            max_decompressed_bytes(),
+                            Utc::now(),
+                        )
+                        .map_err(IngestError::Prepare)?;
+                        drop(raw);
+                        let pool =
+                            pool.ok_or_else(|| IngestError::Db("no database pool".into()))?;
+                        let mut conn = pool.get().map_err(|e| IngestError::Db(Box::new(e)))?;
+                        store(&mut conn, prepared).map_err(IngestError::Db)
+                    }))
+                    .unwrap_or_else(|_| Err(IngestError::Db("ingest worker panicked".into())));
+                    let _ = reply.send(r);
+                }
+            })
+            .expect("spawn the supply-chain ingest worker");
+        tx
+    })
+}
+
+/// New SBOM page sets refused because the global staging ceiling was
+/// reached (`kguardian_supplychain_staged_sets_refused_total`).
+pub static STAGED_SETS_REFUSED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+pub fn staged_sets_refused() -> u64 {
+    STAGED_SETS_REFUSED.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Prometheus text for the supply-chain ingest counters, appended to
+/// `/metrics`.
+pub fn render_metrics() -> String {
+    format!(
+        "# HELP kguardian_supplychain_staged_sets_refused_total New SBOM page sets refused with 429 because the staging ceiling was reached\n\
+         # TYPE kguardian_supplychain_staged_sets_refused_total counter\n\
+         kguardian_supplychain_staged_sets_refused_total {}\n",
+        staged_sets_refused()
+    )
+}
+
+// ---------------------------------------------------------------------
+// Bounded deserialisation. Every list and map in the payload is read
+// through one of these, so the number of structs built is capped while
+// parsing, not after: the top-level lists stop with an error carrying
+// TOO_MANY_ITEMS (413), nested ones keep the first N and skip the rest
+// without building them. JSON `null` reads as empty (Go marshals a nil
+// slice as null).
+// ---------------------------------------------------------------------
+
+/// Marker in the parse error for a list over its cap; the handler maps
+/// it to 413.
+pub const TOO_MANY_ITEMS: &str = "too many items";
+
+struct BoundedSeq<T> {
+    max: usize,
+    strict: bool,
+    _t: std::marker::PhantomData<T>,
+}
+
+impl<'de, T: Deserialize<'de>> serde::de::Visitor<'de> for BoundedSeq<T> {
+    type Value = Vec<T>;
+
+    fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        write!(f, "a list of at most {} items", self.max)
+    }
+
+    fn visit_unit<E>(self) -> Result<Vec<T>, E> {
+        Ok(Vec::new())
+    }
+
+    fn visit_none<E>(self) -> Result<Vec<T>, E> {
+        Ok(Vec::new())
+    }
+
+    fn visit_some<D: serde::Deserializer<'de>>(self, d: D) -> Result<Vec<T>, D::Error> {
+        d.deserialize_seq(self)
+    }
+
+    fn visit_seq<A: serde::de::SeqAccess<'de>>(self, mut seq: A) -> Result<Vec<T>, A::Error> {
+        let mut out = Vec::with_capacity(seq.size_hint().unwrap_or(0).min(self.max).min(1024));
+        loop {
+            if out.len() >= self.max {
+                if seq.next_element::<serde::de::IgnoredAny>()?.is_some() {
+                    if self.strict {
+                        return Err(serde::de::Error::custom(format!(
+                            "{TOO_MANY_ITEMS}: more than {} in one list",
+                            self.max
+                        )));
+                    }
+                    while seq.next_element::<serde::de::IgnoredAny>()?.is_some() {}
+                }
+                return Ok(out);
+            }
+            match seq.next_element::<T>()? {
+                Some(x) => out.push(x),
+                None => return Ok(out),
+            }
+        }
+    }
+}
+
+fn bounded_vec<'de, D, T>(d: D, max: usize, strict: bool) -> Result<Vec<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    d.deserialize_option(BoundedSeq {
+        max,
+        strict,
+        _t: std::marker::PhantomData,
+    })
+}
+
+struct BoundedMap<V> {
+    max: usize,
+    _v: std::marker::PhantomData<V>,
+}
+
+impl<'de, V: Deserialize<'de>> serde::de::Visitor<'de> for BoundedMap<V> {
+    type Value = Option<BTreeMap<String, V>>;
+
+    fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        write!(f, "an object of at most {} entries", self.max)
+    }
+
+    fn visit_unit<E>(self) -> Result<Self::Value, E> {
+        Ok(None)
+    }
+
+    fn visit_none<E>(self) -> Result<Self::Value, E> {
+        Ok(None)
+    }
+
+    fn visit_some<D: serde::Deserializer<'de>>(self, d: D) -> Result<Self::Value, D::Error> {
+        d.deserialize_map(self)
+    }
+
+    fn visit_map<A: serde::de::MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
+        let mut out = BTreeMap::new();
+        loop {
+            if out.len() >= self.max {
+                while map
+                    .next_entry::<serde::de::IgnoredAny, serde::de::IgnoredAny>()?
+                    .is_some()
+                {}
+                return Ok(Some(out));
+            }
+            match map.next_entry::<String, V>()? {
+                Some((k, v)) => {
+                    out.insert(k, v);
+                }
+                None => return Ok(Some(out)),
+            }
+        }
+    }
+}
+
+fn bounded_map<'de, D, V>(d: D, max: usize) -> Result<Option<BTreeMap<String, V>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    V: Deserialize<'de>,
+{
+    d.deserialize_option(BoundedMap {
+        max,
+        _v: std::marker::PhantomData,
+    })
+}
+
+fn de_vulnerabilities<'de, D: serde::Deserializer<'de>>(
+    d: D,
+) -> Result<Vec<WireVulnerability>, D::Error> {
+    bounded_vec(d, MAX_VULNERABILITIES, true)
+}
+
+fn de_components<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<WireComponent>, D::Error> {
+    bounded_vec(d, MAX_COMPONENTS_PER_REQUEST, true)
+}
+
+fn de_observed_in<'de, D: serde::Deserializer<'de>>(
+    d: D,
+) -> Result<Vec<WireWorkloadRef>, D::Error> {
+    bounded_vec(d, MAX_OBSERVED_IN, false)
+}
+
+fn de_paths<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<String>, D::Error> {
+    bounded_vec(d, MAX_FILE_PATHS, false)
+}
+
+fn de_licenses<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<String>, D::Error> {
+    bounded_vec(d, MAX_LICENSES, false)
+}
+
+/// `"registry"` or `["registry", "trivy-operator"]`: the producer sends a
+/// list, older payloads a string.
+fn de_string_or_list<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<String>, D::Error> {
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum One {
+        S(String),
+        L(#[serde(deserialize_with = "de_short_list")] Vec<String>),
+        N(()),
+    }
+    Ok(match Option::<One>::deserialize(d)? {
+        None | Some(One::N(())) => Vec::new(),
+        Some(One::S(s)) => vec![s],
+        Some(One::L(l)) => l,
+    })
+}
+
+fn de_short_list<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<String>, D::Error> {
+    bounded_vec(d, 8, false)
+}
+
+fn de_manifests<'de, D: serde::Deserializer<'de>>(
+    d: D,
+) -> Result<Option<BTreeMap<String, String>>, D::Error> {
+    bounded_map(d, MAX_PLATFORM_MANIFESTS)
+}
+
+fn de_cvss<'de, D: serde::Deserializer<'de>>(
+    d: D,
+) -> Result<Option<BTreeMap<String, WireCvss>>, D::Error> {
+    bounded_map(d, MAX_CVSS_VENDORS)
+}
 
 // ---------------------------------------------------------------------
 // Wire format (supplychain/pkg/types). Unknown fields are ignored so a
@@ -141,7 +445,7 @@ pub struct WireImage {
     pub tag: Option<String>,
     #[serde(default)]
     pub digest_kind: Option<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "de_manifests")]
     pub platform_manifests: Option<BTreeMap<String, String>>,
 }
 
@@ -217,7 +521,7 @@ pub struct WireVulnerability {
     pub severity: String,
     #[serde(default)]
     pub score: Option<f64>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "de_cvss")]
     pub cvss: Option<BTreeMap<String, WireCvss>>,
     #[serde(default)]
     pub title: Option<String>,
@@ -231,7 +535,7 @@ pub struct WireVulnerability {
     pub published_at: Option<DateTime<Utc>>,
     #[serde(default)]
     pub last_modified_at: Option<DateTime<Utc>>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "de_paths")]
     pub file_paths: Vec<String>,
     /// In CISA KEV (Grype only; absent = unknown, not "not exploited").
     #[serde(default)]
@@ -256,13 +560,20 @@ pub struct WireImageVulnerabilities {
     pub db_updated_at: Option<DateTime<Utc>>,
     #[serde(default)]
     pub os: WireOs,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "de_observed_in")]
     pub observed_in: Vec<WireWorkloadRef>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "de_vulnerabilities")]
     pub vulnerabilities: Vec<WireVulnerability>,
-    /// For a matcher's findings: the SBOM source that was matched.
-    #[serde(default)]
-    pub sbom_source: Option<String>,
+    /// For a matcher's findings: the SBOM source(s) that were matched.
+    #[serde(
+        default,
+        alias = "sbom_sources",
+        deserialize_with = "de_string_or_list"
+    )]
+    pub sbom_source: Vec<String>,
+    /// Trust of the SBOM the findings were matched from.
+    #[serde(default, alias = "sbomTrust")]
+    pub sbom_trust: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -281,11 +592,11 @@ pub struct WireComponent {
     pub src_name: Option<String>,
     #[serde(default)]
     pub src_version: Option<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "de_licenses")]
     pub licenses: Vec<String>,
     #[serde(default)]
     pub layer_digest: Option<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "de_paths")]
     pub file_paths: Vec<String>,
 }
 
@@ -308,16 +619,19 @@ pub struct WireImageSbom {
     pub format: Option<String>,
     #[serde(default)]
     pub spec_version: Option<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "de_observed_in")]
     pub observed_in: Vec<WireWorkloadRef>,
     #[serde(default)]
     pub page: Option<WirePage>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "de_components")]
     pub components: Vec<WireComponent>,
     /// Where a registry-attached SBOM was found. `verified` says whether a
     /// signature was checked; the broker stores it as sent.
     #[serde(default)]
     pub attestation: Option<WireAttestation>,
+    /// `unverified` | `attached-unbound` | `verified`.
+    #[serde(default, alias = "sbomTrust")]
+    pub sbom_trust: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize, Serialize, Clone, PartialEq)]
@@ -367,7 +681,8 @@ pub struct Header {
     pub sbom_format: Option<String>,
     pub sbom_spec_version: Option<String>,
     pub item_count: i32,
-    pub sbom_source: Option<String>,
+    pub sbom_sources: Vec<String>,
+    pub sbom_trust: Option<String>,
     pub attestation: Option<WireAttestation>,
 }
 
@@ -492,6 +807,20 @@ fn clean_list(v: &[String], max_items: usize, max_len: usize) -> Vec<String> {
     out
 }
 
+/// SBOM trust levels (supplychain README). Anything else, and a
+/// registry SBOM that says nothing, reads as `unverified`: trust is never
+/// assumed.
+pub const TRUST_LEVELS: [&str; 3] = ["unverified", "attached-unbound", "verified"];
+
+fn normalise_trust(t: Option<&str>, registry: bool) -> Option<String> {
+    match t.map(str::trim).filter(|t| !t.is_empty()) {
+        Some(t) if TRUST_LEVELS.contains(&t) => Some(t.to_string()),
+        Some(_) => Some("unverified".to_string()),
+        None if registry => Some("unverified".to_string()),
+        None => None,
+    }
+}
+
 /// A probability: finite and within [0, 1], else unknown.
 fn unit_interval(x: Option<f64>) -> Option<f64> {
     x.filter(|v| v.is_finite() && (0.0..=1.0).contains(v))
@@ -501,13 +830,11 @@ fn naive(t: DateTime<Utc>) -> NaiveDateTime {
     t.naive_utc()
 }
 
-/// `source` becomes part of the key and of every label in the UI: keep it
-/// to a short slug.
+/// `source` is part of the key and of every label in the UI, and the
+/// sources are a closed set: an allowlist keeps a token holder from
+/// minting unbounded (digest, source) keys.
 fn valid_source(s: &str) -> bool {
-    !s.is_empty()
-        && s.len() <= LEN_SHORT
-        && s.bytes()
-            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-' || b == b'.')
+    SOURCES.contains(&s)
 }
 
 fn valid_set_id(s: &str) -> bool {
@@ -584,7 +911,7 @@ fn validate_common(
     }
     if !valid_source(source) {
         return Err(Reject::Invalid(
-            "source must be 1-64 characters of [a-z0-9.-]".into(),
+            "source must be one of trivy-operator, grype, registry".into(),
         ));
     }
     if (scanned_at - now).num_seconds() > MAX_CLOCK_SKEW_SECS {
@@ -670,7 +997,8 @@ fn build_header(
         sbom_format: None,
         sbom_spec_version: None,
         item_count: 0,
-        sbom_source: None,
+        sbom_sources: Vec::new(),
+        sbom_trust: None,
         attestation: None,
     }
 }
@@ -712,7 +1040,15 @@ pub fn normalise_vulnerabilities(
     header.os_family = clean(p.os.family.as_deref(), LEN_SHORT);
     header.os_name = clean(p.os.name.as_deref(), LEN_SHORT);
     header.os_eosl = p.os.eosl.unwrap_or(false);
-    header.sbom_source = clean(p.sbom_source.as_deref(), LEN_SHORT);
+    header.sbom_sources = p
+        .sbom_source
+        .iter()
+        .filter(|s| SOURCES.contains(&s.trim()))
+        .map(|s| s.trim().to_string())
+        .collect();
+    header.sbom_sources.sort();
+    header.sbom_sources.dedup();
+    header.sbom_trust = normalise_trust(p.sbom_trust.as_deref(), false);
 
     let mut rows = Vec::with_capacity(p.vulnerabilities.len());
     for (i, v) in p.vulnerabilities.into_iter().enumerate() {
@@ -818,6 +1154,7 @@ pub fn normalise_sbom(
     let mut header = build_header(&c, KIND_SBOM, &p.image, &p.scanner, &p.observed_in);
     header.sbom_format = clean(p.format.as_deref(), LEN_SHORT);
     header.sbom_spec_version = clean(p.spec_version.as_deref(), LEN_SHORT);
+    header.sbom_trust = normalise_trust(p.sbom_trust.as_deref(), c.source == "registry");
     header.attestation = p.attestation.as_ref().map(|a| WireAttestation {
         mechanism: clean(a.mechanism.as_deref(), LEN_SHORT),
         artifact_digest: a
@@ -917,41 +1254,6 @@ pub fn inflate_bounded(compressed: &[u8], ceiling: usize) -> Result<Vec<u8>, Bod
     Ok(out)
 }
 
-async fn read_body(
-    req: &HttpRequest,
-    payload: web::Payload,
-    ceiling: usize,
-) -> Result<Vec<u8>, BodyError> {
-    let encoding = content_encoding(req)?;
-    if let Some(len) = req
-        .headers()
-        .get(header::CONTENT_LENGTH)
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.trim().parse::<u64>().ok())
-    {
-        if len > MAX_COMPRESSED_BYTES as u64 {
-            return Err(BodyError::TooLarge(format!(
-                "body of {len} bytes exceeds the {MAX_COMPRESSED_BYTES}-byte limit"
-            )));
-        }
-    }
-    let raw = match payload.to_bytes_limited(MAX_COMPRESSED_BYTES).await {
-        Ok(Ok(b)) => b,
-        Ok(Err(e)) => return Err(BodyError::Corrupt(format!("reading body: {e}"))),
-        Err(_) => {
-            return Err(BodyError::TooLarge(format!(
-                "body exceeds the {MAX_COMPRESSED_BYTES}-byte limit"
-            )))
-        }
-    };
-    match encoding {
-        None => Ok(raw.to_vec()),
-        Some(_) => web::block(move || inflate_bounded(&raw, ceiling))
-            .await
-            .map_err(|e| BodyError::Corrupt(format!("inflate task failed: {e}")))?,
-    }
-}
-
 /// Supply-chain ingest runs only with scoped broker auth: a token with the
 /// `supplychain` scope must be configured. With auth off, anyone who can
 /// reach the broker could post a forged scan result.
@@ -1023,14 +1325,14 @@ const HEADER_UPSERT_SQL: &str = "\
 INSERT INTO vuln_sources (digest, source, kind, digest_kind, platform_manifests, manifest_digests, \
     image_ref, registry, repository, norm_repository, tag, scanner_name, scanner_vendor, \
     scanner_version, scanned_at, db_updated_at, os_family, os_name, os_eosl, observed_in, \
-    content_hash, sbom_format, sbom_spec_version, item_count, sbom_source, attestation, \
-    received_at) \
+    content_hash, sbom_format, sbom_spec_version, item_count, sbom_sources, sbom_trust, \
+    attestation, received_at) \
 SELECT r.digest, r.source, r.kind, r.digest_kind, r.platform_manifests, r.manifest_digests, \
     r.image_ref, r.registry, r.repository, r.norm_repository, r.tag, r.scanner_name, \
     r.scanner_vendor, r.scanner_version, r.scanned_at, r.db_updated_at, r.os_family, r.os_name, \
     r.os_eosl, r.observed_in, r.content_hash, r.sbom_format, r.sbom_spec_version, r.item_count, \
-    r.sbom_source, r.attestation, timezone('UTC', NOW()) \
-FROM jsonb_populate_record(NULL::vuln_sources, $1) r \
+    r.sbom_sources, r.sbom_trust, r.attestation, timezone('UTC', NOW()) \
+FROM jsonb_populate_record(NULL::vuln_sources, $1::jsonb) r \
 ON CONFLICT (digest, source, kind) DO UPDATE SET \
     digest_kind = EXCLUDED.digest_kind, platform_manifests = EXCLUDED.platform_manifests, \
     manifest_digests = EXCLUDED.manifest_digests, image_ref = EXCLUDED.image_ref, \
@@ -1042,12 +1344,13 @@ ON CONFLICT (digest, source, kind) DO UPDATE SET \
     os_name = EXCLUDED.os_name, os_eosl = EXCLUDED.os_eosl, observed_in = EXCLUDED.observed_in, \
     content_hash = EXCLUDED.content_hash, sbom_format = EXCLUDED.sbom_format, \
     sbom_spec_version = EXCLUDED.sbom_spec_version, item_count = EXCLUDED.item_count, \
-    sbom_source = EXCLUDED.sbom_source, attestation = EXCLUDED.attestation, \
+    sbom_sources = EXCLUDED.sbom_sources, sbom_trust = EXCLUDED.sbom_trust, \
+    attestation = EXCLUDED.attestation, \
     received_at = EXCLUDED.received_at";
 
 fn upsert_header(conn: &mut PgConnection, h: &Header) -> Result<(), DbError> {
     sql_query(HEADER_UPSERT_SQL)
-        .bind::<Jsonb, _>(serde_json::to_value(h)?)
+        .bind::<Text, _>(serde_json::to_string(h)?)
         .execute(conn)?;
     Ok(())
 }
@@ -1061,7 +1364,7 @@ SELECT $1, $2, r.vuln_id, r.pkg_name, r.pkg_type, r.pkg_purl, r.installed_versio
     r.fixed_version, r.severity, r.severity_rank, r.score, COALESCE(r.cvss, '{}'::jsonb), \
     r.title, r.primary_url, r.target, r.class, r.published_at, r.last_modified_at, \
     COALESCE(r.file_paths, '{}'), r.kev, r.kev_date_added, r.epss, r.epss_percentile, $3 \
-FROM jsonb_to_recordset($4) AS r(ord bigint, vuln_id text, pkg_name text, pkg_type text, \
+FROM jsonb_to_recordset($4::jsonb) AS r(ord bigint, vuln_id text, pkg_name text, pkg_type text, \
     pkg_purl text, installed_version text, fixed_version text, severity text, \
     severity_rank smallint, score real, cvss jsonb, title text, primary_url text, target text, \
     class text, published_at timestamp, last_modified_at timestamp, file_paths text[], \
@@ -1079,7 +1382,7 @@ fn components_insert_sql() -> String {
             src_name, src_version, licenses, layer_digest, file_paths) \
          SELECT $1, $2, r.name, r.version, r.purl, r.type, r.class, r.src_name, r.src_version, \
             COALESCE(r.licenses, '{{}}'), r.layer_digest, COALESCE(r.file_paths, '{{}}') \
-         FROM jsonb_to_recordset($3) AS r{COMPONENT_RECORD} ORDER BY r.ord"
+         FROM jsonb_to_recordset($3::jsonb) AS r{COMPONENT_RECORD} ORDER BY r.ord"
     )
 }
 
@@ -1111,20 +1414,29 @@ pub fn store_vulnerabilities(
     mut p: VulnPayload,
 ) -> Result<Outcome, DbError> {
     let rows_json = serde_json::to_string(&p.rows)?;
+    p.rows = Vec::new();
     conn.transaction::<_, DbError, _>(|conn| {
         lock_key(conn, &p.header)?;
         p.header.content_hash = md5_of(conn, &rows_json)?;
         let existing = stored_header(conn, &p.header)?;
         if let Some(e) = &existing {
-            if p.header.scanned_at < e.scanned_at {
+            if e.content_hash == p.header.content_hash {
+                // Same findings: refresh the header (digest kind, platform
+                // manifests, observed_in) and nothing else.
+                if p.header.scanned_at >= e.scanned_at {
+                    upsert_header(conn, &p.header)?;
+                    relink(conn, &p.header.digest, &p.header.source)?;
+                }
+                return Ok(Outcome::Unchanged);
+            }
+            // Different findings replace stored ones only from a strictly
+            // newer scan. With scanned_at capped at now + 60 s, a payload
+            // cannot be pre-dated to beat the next real scan, and an
+            // empty set cannot wipe findings unless it is a newer scan.
+            if p.header.scanned_at <= e.scanned_at {
                 return Ok(Outcome::Stale {
                     stored_scanned_at: e.scanned_at,
                 });
-            }
-            if e.content_hash == p.header.content_hash {
-                upsert_header(conn, &p.header)?;
-                relink(conn, &p.header.digest, &p.header.source)?;
-                return Ok(Outcome::Unchanged);
             }
         }
         sql_query("DELETE FROM image_vulnerabilities WHERE digest = $1 AND source = $2")
@@ -1135,7 +1447,7 @@ pub fn store_vulnerabilities(
             .bind::<Text, _>(&p.header.digest)
             .bind::<Text, _>(&p.header.source)
             .bind::<Timestamp, _>(p.header.scanned_at)
-            .bind::<Jsonb, _>(serde_json::from_str::<serde_json::Value>(&rows_json)?)
+            .bind::<Text, _>(&rows_json)
             .execute(conn)?;
         upsert_header(conn, &p.header)?;
         relink(conn, &p.header.digest, &p.header.source)?;
@@ -1146,7 +1458,7 @@ pub fn store_vulnerabilities(
 fn replace_components_from_json(
     conn: &mut PgConnection,
     h: &Header,
-    rows: serde_json::Value,
+    rows: &str,
 ) -> Result<i64, DbError> {
     sql_query("DELETE FROM image_sbom_components WHERE digest = $1 AND source = $2")
         .bind::<Text, _>(&h.digest)
@@ -1155,7 +1467,7 @@ fn replace_components_from_json(
     let n = sql_query(components_insert_sql())
         .bind::<Text, _>(&h.digest)
         .bind::<Text, _>(&h.source)
-        .bind::<Jsonb, _>(rows)
+        .bind::<Text, _>(rows)
         .execute(conn)?;
     Ok(n as i64)
 }
@@ -1191,6 +1503,26 @@ struct NewestStaged {
 }
 
 #[derive(QueryableByName)]
+struct Staging {
+    #[diesel(sql_type = BigInt)]
+    sets: i64,
+    #[diesel(sql_type = BigInt)]
+    bytes: i64,
+}
+
+/// The global staging ceiling ([`MAX_STAGED_SETS`], [`MAX_STAGED_BYTES`])
+/// refused a new page set. Surfaces as 429.
+#[derive(Debug)]
+pub struct StagingFull(pub String);
+
+impl std::fmt::Display for StagingFull {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+impl std::error::Error for StagingFull {}
+
+#[derive(QueryableByName)]
 struct SetShape {
     #[diesel(sql_type = BigInt)]
     pages: i64,
@@ -1205,6 +1537,7 @@ struct SetShape {
 /// Store an SBOM or one page of it; see the module docs.
 pub fn store_sbom(conn: &mut PgConnection, mut p: SbomPayload) -> Result<Outcome, DbError> {
     let rows_json = serde_json::to_string(&p.rows)?;
+    p.rows = Vec::new();
     conn.transaction::<_, DbError, _>(|conn| {
         lock_key(conn, &p.header)?;
         p.header.content_hash = match &p.page {
@@ -1213,15 +1546,17 @@ pub fn store_sbom(conn: &mut PgConnection, mut p: SbomPayload) -> Result<Outcome
         };
         let existing = stored_header(conn, &p.header)?;
         if let Some(e) = &existing {
-            if p.header.scanned_at < e.scanned_at {
-                return Ok(Outcome::Stale {
-                    stored_scanned_at: e.scanned_at,
-                });
-            }
             if e.content_hash == p.header.content_hash {
                 // A complete copy of this very set is already live: a
                 // re-sent page (or whole SBOM) changes nothing.
                 return Ok(Outcome::Unchanged);
+            }
+            // Different content replaces only from a strictly newer scan
+            // (see store_vulnerabilities).
+            if p.header.scanned_at <= e.scanned_at {
+                return Ok(Outcome::Stale {
+                    stored_scanned_at: e.scanned_at,
+                });
             }
         }
         // A newer set is being assembled: this one is already outdated.
@@ -1234,7 +1569,9 @@ pub fn store_sbom(conn: &mut PgConnection, mut p: SbomPayload) -> Result<Outcome
         .bind::<Text, _>(&p.header.content_hash)
         .get_result(conn)?;
         if let Some(n) = newest.newest {
-            if n > p.header.scanned_at {
+            // Ties go to the set already staging, so two sets with one
+            // scan time cannot evict each other page by page.
+            if n >= p.header.scanned_at {
                 return Ok(Outcome::Stale {
                     stored_scanned_at: n,
                 });
@@ -1242,8 +1579,7 @@ pub fn store_sbom(conn: &mut PgConnection, mut p: SbomPayload) -> Result<Outcome
         }
 
         let Some(page) = p.page.clone() else {
-            let n =
-                replace_components_from_json(conn, &p.header, serde_json::from_str(&rows_json)?)?;
+            let n = replace_components_from_json(conn, &p.header, &rows_json)?;
             p.header.item_count = n as i32;
             upsert_header(conn, &p.header)?;
             drop_superseded_pages(conn, &p.header, None)?;
@@ -1252,12 +1588,28 @@ pub fn store_sbom(conn: &mut PgConnection, mut p: SbomPayload) -> Result<Outcome
         };
 
         drop_superseded_pages(conn, &p.header, Some(&page.set_id))?;
+        if page.total > 1 && !set_is_staged(conn, &p.header, &page.set_id)? {
+            // A new set: check the global ceiling first.
+            let st: Staging = sql_query(
+                "SELECT count(DISTINCT (digest, source, set_id)) AS sets, \
+                     COALESCE(sum(pg_column_size(components)), 0)::bigint AS bytes \
+                 FROM image_sbom_pages",
+            )
+            .get_result(conn)?;
+            if st.sets >= MAX_STAGED_SETS || st.bytes >= MAX_STAGED_BYTES {
+                STAGED_SETS_REFUSED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                return Err(Box::new(StagingFull(format!(
+                    "{} SBOM page sets ({} bytes) are already being assembled; retry later",
+                    st.sets, st.bytes
+                ))));
+            }
+        }
         // Re-sending a page refreshes its timestamp so a slow set being
         // retried does not expire under the retry.
         let ins: Inserted = sql_query(
             "INSERT INTO image_sbom_pages (digest, source, set_id, page_index, total, \
                  scanned_at, components) \
-             VALUES ($1, $2, $3, $4, $5, $6, $7) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb) \
              ON CONFLICT (digest, source, set_id, page_index) \
              DO UPDATE SET received_at = timezone('UTC', NOW()) \
              RETURNING (xmax = 0) AS inserted",
@@ -1268,7 +1620,7 @@ pub fn store_sbom(conn: &mut PgConnection, mut p: SbomPayload) -> Result<Outcome
         .bind::<diesel::sql_types::Integer, _>(page.index as i32)
         .bind::<diesel::sql_types::Integer, _>(page.total as i32)
         .bind::<Timestamp, _>(p.header.scanned_at)
-        .bind::<Jsonb, _>(serde_json::from_str::<serde_json::Value>(&rows_json)?)
+        .bind::<Text, _>(&rows_json)
         .get_result(conn)?;
         let shape: SetShape = sql_query(
             "SELECT count(*) AS pages, count(DISTINCT total) AS totals, \
@@ -1334,6 +1686,23 @@ pub fn store_sbom(conn: &mut PgConnection, mut p: SbomPayload) -> Result<Outcome
     })
 }
 
+fn set_is_staged(conn: &mut PgConnection, h: &Header, set_id: &str) -> QueryResult<bool> {
+    #[derive(QueryableByName)]
+    struct E {
+        #[diesel(sql_type = Bool)]
+        e: bool,
+    }
+    sql_query(
+        "SELECT EXISTS (SELECT 1 FROM image_sbom_pages \
+             WHERE digest = $1 AND source = $2 AND set_id = $3) AS e",
+    )
+    .bind::<Text, _>(&h.digest)
+    .bind::<Text, _>(&h.source)
+    .bind::<Text, _>(set_id)
+    .get_result::<E>(conn)
+    .map(|r| r.e)
+}
+
 /// A paged set that cannot be assembled (pages disagree on `total`, or the
 /// set is over the component cap). Surfaces as 422.
 #[derive(Debug)]
@@ -1355,8 +1724,11 @@ pub const JOIN_PLATFORM_MANIFEST: &str = "platform_manifest";
 pub const JOIN_WORKLOAD_TAG: &str = "workload_tag";
 
 /// The links a payload `(digest, source)` should have, as a CTE named
-/// `wanted(image_digest, join_kind, join_rank)`. Rules in charter order;
-/// the tag rule is consulted only when neither digest rule matched.
+/// `wanted(image_digest, join_kind, join_rank)`. Rules in charter order.
+/// The tag rule is consulted only when neither digest rule matched this
+/// payload, and it never links an inventory digest that already has an
+/// exact (image_id / platform_manifest) link from ANY payload or source:
+/// a tag is a guess, and a digest match for the image always wins.
 ///
 /// The tag rule maps the source's workload to the inventory's: Trivy
 /// Operator names the ReplicaSet (`api-7c9d8f6b5`) or the Job
@@ -1381,6 +1753,8 @@ WITH hdr AS ( \
         AND wc.container_name = o->>'container' \
     JOIN images i ON i.digest = wc.image_digest \
     WHERE NOT EXISTS (SELECT 1 FROM exact) \
+      AND NOT EXISTS (SELECT 1 FROM supplychain_image_links x \
+          WHERE x.image_digest = wc.image_digest AND x.join_rank < 3) \
       AND h.tag IS NOT NULL AND h.norm_repository IS NOT NULL \
       AND i.repository = h.norm_repository AND h.tag = ANY(i.tags) \
       AND ((wc.workload_kind = o->>'kind' AND wc.workload_name = o->>'name') \
@@ -1416,7 +1790,17 @@ pub fn relink(conn: &mut PgConnection, digest: &str, source: &str) -> QueryResul
     .bind::<Text, _>(digest)
     .bind::<Text, _>(source)
     .execute(conn)?;
-    Ok(removed + added)
+    // This payload's exact links retire tag guesses (from any payload)
+    // on the same inventory digests.
+    let retired = sql_query(
+        "DELETE FROM supplychain_image_links t WHERE t.join_rank = 3 \
+         AND t.image_digest IN (SELECT image_digest FROM supplychain_image_links \
+             WHERE digest = $1 AND source = $2 AND join_rank < 3)",
+    )
+    .bind::<Text, _>(digest)
+    .bind::<Text, _>(source)
+    .execute(conn)?;
+    Ok(removed + added + retired)
 }
 
 #[derive(QueryableByName)]
@@ -1547,9 +1931,104 @@ pub fn expire_pages_batch(
 // Handlers
 // ---------------------------------------------------------------------
 
-enum Kind {
+/// Which payload a request carries.
+#[derive(Debug, Clone, Copy)]
+pub enum Kind {
     Vulnerabilities,
     Sbom,
+}
+
+/// A parsed, validated payload ready to store.
+#[derive(Debug)]
+pub enum Prepared {
+    Vulns(VulnPayload),
+    Sbom(SbomPayload),
+}
+
+/// Why [`prepare`] refused a body.
+#[derive(Debug)]
+pub enum PrepareError {
+    Body(BodyError),
+    /// Malformed JSON (400).
+    Json(String),
+    /// A list over its cap while parsing (413).
+    TooMany(String),
+    Reject(Reject),
+}
+
+impl PrepareError {
+    fn into_response(self) -> HttpResponse {
+        match self {
+            PrepareError::Body(b) => b.into_response(),
+            PrepareError::Json(m) => HttpResponse::BadRequest().body(format!("invalid JSON: {m}")),
+            PrepareError::TooMany(m) => HttpResponse::PayloadTooLarge().body(m),
+            PrepareError::Reject(r) => r.into_response(),
+        }
+    }
+}
+
+/// Inflate (when `gzip`), parse and validate one body. CPU-bound; run it
+/// off the async threads. Every list is capped while parsing, so peak
+/// memory is bounded by `ceiling` plus the capped item counts, whatever
+/// the body holds.
+pub fn prepare(
+    kind: Kind,
+    digest: &str,
+    raw: &[u8],
+    gzip: bool,
+    ceiling: usize,
+    now: DateTime<Utc>,
+) -> Result<Prepared, PrepareError> {
+    match kind {
+        Kind::Vulnerabilities => {
+            let w: WireImageVulnerabilities = parse_body(raw, gzip, ceiling)?;
+            normalise_vulnerabilities(digest, w, now)
+                .map(Prepared::Vulns)
+                .map_err(PrepareError::Reject)
+        }
+        Kind::Sbom => {
+            let w: WireImageSbom = parse_body(raw, gzip, ceiling)?;
+            normalise_sbom(digest, w, now)
+                .map(Prepared::Sbom)
+                .map_err(PrepareError::Reject)
+        }
+    }
+}
+
+/// Inflate and parse; the inflated buffer is freed before normalising.
+fn parse_body<T: serde::de::DeserializeOwned>(
+    raw: &[u8],
+    gzip: bool,
+    ceiling: usize,
+) -> Result<T, PrepareError> {
+    let inflated;
+    let bytes: &[u8] = if gzip {
+        inflated = inflate_bounded(raw, ceiling).map_err(PrepareError::Body)?;
+        &inflated
+    } else {
+        raw
+    };
+    serde_json::from_slice::<T>(bytes).map_err(|e| {
+        let m = e.to_string();
+        if m.contains(TOO_MANY_ITEMS) {
+            PrepareError::TooMany(m)
+        } else {
+            PrepareError::Json(m)
+        }
+    })
+}
+
+/// Store a prepared payload.
+pub fn store(conn: &mut PgConnection, p: Prepared) -> Result<Outcome, DbError> {
+    match p {
+        Prepared::Vulns(p) => store_vulnerabilities(conn, p),
+        Prepared::Sbom(p) => store_sbom(conn, p),
+    }
+}
+
+enum IngestError {
+    Prepare(PrepareError),
+    Db(DbError),
 }
 
 async fn ingest(
@@ -1566,45 +2045,62 @@ async fn ingest(
         return HttpResponse::BadRequest()
             .body("digest must be sha256:<64 hex> or sha512:<128 hex>");
     }
-    let Ok(_slot) = INGEST_SLOTS.acquire().await else {
-        return HttpResponse::ServiceUnavailable().finish();
+    let gzip = match content_encoding(&req) {
+        Ok(e) => e.is_some(),
+        Err(e) => return e.into_response(),
     };
-    let bytes = match read_body(&req, body, max_decompressed_bytes()).await {
-        Ok(b) => b,
-        Err(e) => {
-            warn!(%digest, error = ?e, "supply-chain ingest body refused");
-            return e.into_response();
+    if let Some(len) = req
+        .headers()
+        .get(header::CONTENT_LENGTH)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.trim().parse::<u64>().ok())
+    {
+        if len > MAX_COMPRESSED_BYTES as u64 {
+            return HttpResponse::PayloadTooLarge().body(format!(
+                "body of {len} bytes exceeds the {MAX_COMPRESSED_BYTES}-byte limit"
+            ));
         }
-    };
-    let now = Utc::now();
-    let parsed = match kind {
-        Kind::Vulnerabilities => serde_json::from_slice::<WireImageVulnerabilities>(&bytes)
-            .map_err(|e| e.to_string())
-            .map(|p| normalise_vulnerabilities(&digest, p, now).map(Parsed::Vulns)),
-        Kind::Sbom => serde_json::from_slice::<WireImageSbom>(&bytes)
-            .map_err(|e| e.to_string())
-            .map(|p| normalise_sbom(&digest, p, now).map(Parsed::Sbom)),
-    };
-    drop(bytes);
-    let parsed = match parsed {
-        Err(e) => return HttpResponse::BadRequest().body(format!("invalid JSON: {e}")),
-        Ok(Err(r)) => {
-            warn!(%digest, reason = ?r, "supply-chain payload refused");
-            return r.into_response();
+    }
+    // Read the (compressed, <= 1 MiB) body under a deadline BEFORE taking
+    // the ingest queue: a slow sender holds only its own connection.
+    let raw = match tokio::time::timeout(
+        std::time::Duration::from_secs(BODY_READ_TIMEOUT_SECS),
+        body.to_bytes_limited(MAX_COMPRESSED_BYTES),
+    )
+    .await
+    {
+        Err(_) => {
+            warn!(%digest, "supply-chain ingest body not received in time");
+            return HttpResponse::RequestTimeout().body(format!(
+                "body not received within {BODY_READ_TIMEOUT_SECS}s"
+            ));
         }
-        Ok(Ok(p)) => p,
-    };
-    let Some(pool) = req.app_data::<web::Data<DbPool>>().cloned() else {
-        return HttpResponse::InternalServerError().body("no database pool");
-    };
-    let result = web::block(move || -> Result<Outcome, DbError> {
-        let mut conn = pool.get()?;
-        match parsed {
-            Parsed::Vulns(p) => store_vulnerabilities(&mut conn, p),
-            Parsed::Sbom(p) => store_sbom(&mut conn, p),
+        Ok(Err(_)) => {
+            return HttpResponse::PayloadTooLarge().body(format!(
+                "body exceeds the {MAX_COMPRESSED_BYTES}-byte limit"
+            ))
         }
-    })
-    .await;
+        Ok(Ok(Err(e))) => return HttpResponse::BadRequest().body(format!("reading body: {e}")),
+        Ok(Ok(Ok(b))) => b,
+    };
+    // Hand the read body to the ingest worker; it alone inflates, parses
+    // and writes. A full queue is 503, never an unbounded backlog.
+    let (reply, result) = tokio::sync::oneshot::channel();
+    let job = Job {
+        kind,
+        digest: digest.clone(),
+        raw,
+        gzip,
+        pool: req.app_data::<web::Data<DbPool>>().cloned(),
+        reply,
+    };
+    if ingest_worker().try_send(job).is_err() {
+        warn!(%digest, "supply-chain ingest queue full");
+        return HttpResponse::ServiceUnavailable()
+            .insert_header(("Retry-After", "5"))
+            .body("supply-chain ingest queue is full; retry");
+    }
+    let result = result.await;
     match result {
         Ok(Ok(o)) => {
             match &o {
@@ -1620,10 +2116,20 @@ async fn ingest(
             };
             HttpResponse::build(status).json(o)
         }
-        Ok(Err(e)) => {
+        Ok(Err(IngestError::Prepare(e))) => {
+            warn!(%digest, error = ?e, "supply-chain payload refused");
+            e.into_response()
+        }
+        Ok(Err(IngestError::Db(e))) => {
             if let Some(c) = e.downcast_ref::<SetConflict>() {
                 warn!(%digest, error = %c, "supply-chain SBOM set refused");
                 return HttpResponse::UnprocessableEntity().body(c.0.clone());
+            }
+            if let Some(f) = e.downcast_ref::<StagingFull>() {
+                warn!(%digest, error = %f, "supply-chain SBOM set refused: staging full");
+                return HttpResponse::TooManyRequests()
+                    .insert_header(("Retry-After", "60"))
+                    .body(f.0.clone());
             }
             warn!(%digest, error = %e, "supply-chain ingest failed");
             HttpResponse::InternalServerError().body("storing the payload failed")
@@ -1633,11 +2139,6 @@ async fn ingest(
             HttpResponse::InternalServerError().finish()
         }
     }
-}
-
-enum Parsed {
-    Vulns(VulnPayload),
-    Sbom(SbomPayload),
 }
 
 pub async fn post_image_vulnerabilities(
