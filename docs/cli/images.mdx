@@ -120,11 +120,13 @@ In use: unknown. kguardian cannot yet tell which packages load; treat every find
 |------|---------|
 | `0` | No finding at or above the severity |
 | `1` | At least one finding at or above it. Findings whose severity no source knows (`UNKNOWN`) count. |
+| `2` | The check could not run: the broker is unreachable, the port-forward or token failed, the broker returned an error, or a flag was invalid. |
 | `3` | No vulnerability data for the image. Unknown is never a pass. |
 
-Other failures (broker unreachable, bad token) also exit `1`, with an error
-message rather than a `gate:` line. The gate runs its own query, so it sees
-every page, not only the one printed.
+Every result prints a `gate:` line on stderr, so a pipeline can tell
+"findings" (`1`) from "couldn't check" (`2`) from "no data" (`3`). Without
+`--fail-on`, errors exit `1` as for any other command. The gate runs its own
+query, so it sees every page, not only the one printed.
 
 ```bash
 kubectl kguardian images vulns "$DIGEST" --fail-on high -o json > vulns.json
