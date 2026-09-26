@@ -57,3 +57,29 @@ func TestNeutralizeControlCharacters(t *testing.T) {
 		}
 	}
 }
+
+// The verdict rule the broker enforces (check_verdict): tamper wins over a
+// key signature, a key signature over anything else.
+func TestVerdictClasses(t *testing.T) {
+	sig := func(e string) Signature { return Signature{Format: FormatCosignBundle, Error: e} }
+	for _, tc := range []struct {
+		errs    []string
+		verdict string
+	}{
+		{[]string{ReasonBadSignature, ReasonUntrustedKey}, VerdictInvalid},
+		{[]string{ReasonUntrustedKey, ReasonDigestMismatch}, VerdictInvalid},
+		{[]string{ReasonMalformed}, VerdictInvalid},
+		{[]string{ReasonUntrustedKey}, VerdictKeySigned},
+		{[]string{ReasonUntrustedKey, ReasonUnsupportedFormat}, VerdictKeySigned},
+		{[]string{ReasonUntrustedRoot}, VerdictUnknown},
+		{nil, VerdictUnsigned},
+	} {
+		c := &collector{}
+		for _, e := range tc.errs {
+			c.sigs = append(c.sigs, sig(e))
+		}
+		if v, _ := c.verdict(); v != tc.verdict {
+			t.Errorf("%v: verdict %s, want %s", tc.errs, v, tc.verdict)
+		}
+	}
+}
