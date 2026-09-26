@@ -155,6 +155,12 @@ const (
 	// splitting; pages that still compress above MaxRequestBytes are
 	// halved until they fit.
 	DefaultSBOMPageComponents = 2000
+	// Broker ingest parse caps (#1671): per request at most this many
+	// decompressed bytes, SBOM components and findings; over them the
+	// broker answers 413.
+	MaxInflatedBytes     = 8 << 20
+	MaxRequestComponents = 10000
+	MaxRequestFindings   = 20000
 	// maxErrorBody caps how much of an error response is kept.
 	maxErrorBody = 4 << 10
 )
@@ -165,9 +171,10 @@ type HTTPClient struct {
 	token   string
 	http    *http.Client
 
-	// MaxBytes and PageComponents default to MaxRequestBytes and
-	// DefaultSBOMPageComponents; tests lower them.
+	// MaxBytes, MaxInflated and PageComponents default to MaxRequestBytes,
+	// MaxInflatedBytes and DefaultSBOMPageComponents; tests lower them.
 	MaxBytes       int
+	MaxInflated    int
 	PageComponents int
 }
 
@@ -184,6 +191,7 @@ func NewHTTPClient(baseURL, token string) (*HTTPClient, error) {
 		token:          strings.TrimSpace(token),
 		http:           &http.Client{Timeout: 30 * time.Second},
 		MaxBytes:       MaxRequestBytes,
+		MaxInflated:    MaxInflatedBytes,
 		PageComponents: DefaultSBOMPageComponents,
 	}, nil
 }
@@ -192,12 +200,15 @@ func NewHTTPClient(baseURL, token string) (*HTTPClient, error) {
 // from one Kubernetes object (bounded by etcd's object size), so it is not
 // paged; one that still compresses above the limit is rejected locally.
 func (c *HTTPClient) SubmitVulnerabilities(ctx context.Context, p *types.ImageVulnerabilities) error {
-	body, err := gzipJSON(p)
+	if len(p.Vulnerabilities) > MaxRequestFindings {
+		return fmt.Errorf("vulnerabilities for %s: %d findings (broker limit %d): %w", p.Image.Digest, len(p.Vulnerabilities), MaxRequestFindings, ErrPayloadTooLarge)
+	}
+	body, raw, err := gzipJSON(p)
 	if err != nil {
 		return err
 	}
-	if len(body) > c.MaxBytes {
-		return fmt.Errorf("vulnerabilities for %s: %d bytes compressed: %w", p.Image.Digest, len(body), ErrPayloadTooLarge)
+	if len(body) > c.MaxBytes || raw > c.maxInflated() {
+		return fmt.Errorf("vulnerabilities for %s: %d bytes compressed, %d inflated: %w", p.Image.Digest, len(body), raw, ErrPayloadTooLarge)
 	}
 	return c.post(ctx, fmt.Sprintf(vulnerabilitiesPath, url.PathEscape(p.Image.Digest)), body)
 }
@@ -220,19 +231,32 @@ func (c *HTTPClient) SubmitSBOM(ctx context.Context, p *types.ImageSBOM) error {
 	return nil
 }
 
-// PageSBOM encodes p as one or more gzip bodies, each at most MaxBytes.
-// A single-body SBOM carries no Page field.
+func (c *HTTPClient) maxInflated() int {
+	if c.MaxInflated <= 0 {
+		return MaxInflatedBytes
+	}
+	return c.MaxInflated
+}
+
+// fits reports whether one encoded body is within every broker limit.
+func (c *HTTPClient) fits(gz []byte, raw, components int) bool {
+	return len(gz) <= c.MaxBytes && raw <= c.maxInflated() && components <= MaxRequestComponents
+}
+
+// PageSBOM encodes p as one or more gzip bodies, each within the broker's
+// limits (compressed and inflated size, component count). A single-body
+// SBOM carries no Page field.
 func (c *HTTPClient) PageSBOM(p *types.ImageSBOM) ([][]byte, error) {
-	whole, err := gzipJSON(p)
+	whole, raw, err := gzipJSON(p)
 	if err != nil {
 		return nil, err
 	}
-	if len(whole) <= c.MaxBytes {
+	if c.fits(whole, raw, len(p.Components)) {
 		return [][]byte{whole}, nil
 	}
 
 	// Chunk by component count, halving any chunk that is still too big.
-	size := c.PageComponents
+	size := min(c.PageComponents, MaxRequestComponents)
 	if size <= 0 {
 		size = DefaultSBOMPageComponents
 	}
@@ -242,7 +266,7 @@ func (c *HTTPClient) PageSBOM(p *types.ImageSBOM) ([][]byte, error) {
 		chunks = append(chunks, p.Components[i:end])
 	}
 	setID := sbomSetID(p)
-	encode := func(comps []types.Component, idx, total int) ([]byte, error) {
+	encode := func(comps []types.Component, idx, total int) ([]byte, int, error) {
 		page := *p
 		page.Components = comps
 		page.Page = &types.Page{SetID: setID, Index: idx, Total: total}
@@ -254,11 +278,11 @@ func (c *HTTPClient) PageSBOM(p *types.ImageSBOM) ([][]byte, error) {
 		for _, ch := range chunks {
 			// Encode with a worst-case index/total so the size check
 			// holds after the real values are filled in.
-			b, err := encode(ch, 1<<30, 1<<30)
+			b, raw, err := encode(ch, 1<<30, 1<<30)
 			if err != nil {
 				return nil, err
 			}
-			if len(b) <= c.MaxBytes {
+			if c.fits(b, raw, len(ch)) {
 				next = append(next, ch)
 				continue
 			}
@@ -276,7 +300,7 @@ func (c *HTTPClient) PageSBOM(p *types.ImageSBOM) ([][]byte, error) {
 	}
 	out := make([][]byte, 0, len(chunks))
 	for i, ch := range chunks {
-		b, err := encode(ch, i, len(chunks))
+		b, _, err := encode(ch, i, len(chunks))
 		if err != nil {
 			return nil, err
 		}
@@ -296,16 +320,21 @@ func sbomSetID(p *types.ImageSBOM) string {
 	return hex.EncodeToString(sum[:16])
 }
 
-func gzipJSON(v interface{}) ([]byte, error) {
+// gzipJSON returns v as gzip JSON and the uncompressed length.
+func gzipJSON(v interface{}) ([]byte, int, error) {
+	raw, err := json.Marshal(v)
+	if err != nil {
+		return nil, 0, fmt.Errorf("%w: %v", errEncoding, err)
+	}
 	var buf bytes.Buffer
 	zw := gzip.NewWriter(&buf)
-	if err := json.NewEncoder(zw).Encode(v); err != nil {
-		return nil, fmt.Errorf("%w: %v", errEncoding, err)
+	if _, err := zw.Write(raw); err != nil {
+		return nil, 0, fmt.Errorf("%w: %v", errEncoding, err)
 	}
 	if err := zw.Close(); err != nil {
-		return nil, fmt.Errorf("%w: %v", errEncoding, err)
+		return nil, 0, fmt.Errorf("%w: %v", errEncoding, err)
 	}
-	return buf.Bytes(), nil
+	return buf.Bytes(), len(raw), nil
 }
 
 func (c *HTTPClient) post(ctx context.Context, path string, gz []byte) error {

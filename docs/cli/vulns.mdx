@@ -6,10 +6,10 @@ icon: "bug"
 
 ## Synopsis
 
-Read-only views over the vulnerabilities scanners found in the images your
-workloads run. The data comes from the supplychain component (Trivy Operator
-reports, Grype matches, registry SBOMs); kguardian reports it and never
-scans, blocks or applies anything.
+Read-only views over the vulnerabilities found in the images your
+workloads run. Findings come from Trivy Operator reports and, when the opt-in
+supplychain matcher is enabled, from kguardian's own Grype matcher, which
+matches SBOMs. kguardian never blocks or applies anything.
 
 ```bash
 kubectl kguardian vulns list [flags]

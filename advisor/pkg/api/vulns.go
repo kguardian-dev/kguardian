@@ -12,8 +12,9 @@ import (
 )
 
 // Vulnerability and SBOM reads (broker supply-chain API): findings the
-// supplychain component ingested from Trivy Operator, Grype and registry
-// SBOMs, keyed by image digest. kguardian reports these; it never scans.
+// supplychain component ingested from Trivy Operator reports and, when the
+// opt-in matcher is enabled, kguardian's own Grype matches over SBOMs,
+// keyed by image digest.
 //
 // null means unknown throughout: an image with no report has no data (not
 // "no vulnerabilities"), kev/epss null means no source said, and inUse

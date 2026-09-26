@@ -79,9 +79,9 @@ fields this CLI version does not know about. Global flags (`--kubeconfig`,
 ## images vulns
 
 Calls `GET /images/{digest}/vulnerabilities`: the findings scanners
-reported for one image, deduplicated across sources (Trivy Operator,
-Grype), most severe first. kguardian reports what the sources found; it
-does not scan.
+reported for one image, deduplicated across sources, most severe first.
+Findings come from Trivy Operator reports and, when the opt-in supplychain
+matcher is enabled, from kguardian's own Grype matcher, which matches SBOMs.
 
 | Flag | Type | Description | Default |
 |------|------|-------------|---------|

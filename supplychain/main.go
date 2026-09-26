@@ -25,8 +25,10 @@ import (
 
 	"github.com/kguardian-dev/kguardian/supplychain/pkg/broker"
 	"github.com/kguardian-dev/kguardian/supplychain/pkg/dispatch"
+	"github.com/kguardian-dev/kguardian/supplychain/pkg/match"
 	"github.com/kguardian-dev/kguardian/supplychain/pkg/metrics"
 	"github.com/kguardian-dev/kguardian/supplychain/pkg/registry"
+	"github.com/kguardian-dev/kguardian/supplychain/pkg/regsource"
 	"github.com/kguardian-dev/kguardian/supplychain/pkg/server"
 	"github.com/kguardian-dev/kguardian/supplychain/pkg/trivy"
 	"github.com/sirupsen/logrus"
@@ -92,6 +94,9 @@ type config struct {
 	BrokerIngest         bool
 	RegistryLookup       bool
 	RegistryAllowPrivate bool
+	RegistrySBOM         bool
+	RegistrySBOMInterval time.Duration
+	GrypeMatcherURL      string
 	BrokerURL            string
 	BrokerToken          string
 }
@@ -108,6 +113,9 @@ func loadConfig(getenv func(string) string) (config, error) {
 		LogLevel:    env("LOG_LEVEL", "info"),
 		BrokerURL:   env("BROKER_URL", "http://kguardian-broker:9090"),
 		BrokerToken: strings.TrimSpace(getenv("BROKER_AUTH_TOKEN")),
+		// Set by the chart only when supplychain.grype.enabled: the
+		// matcher sidecar's loopback address.
+		GrypeMatcherURL: strings.TrimSpace(getenv("GRYPE_MATCHER_URL")),
 	}
 	var err error
 	if c.TrivyEnabled, err = strconv.ParseBool(env("TRIVY_OPERATOR_ENABLED", "true")); err != nil {
@@ -116,13 +124,21 @@ func loadConfig(getenv func(string) string) (config, error) {
 	if c.BrokerIngest, err = strconv.ParseBool(env("BROKER_INGEST_ENABLED", "false")); err != nil {
 		return c, fmt.Errorf("BROKER_INGEST_ENABLED: %w", err)
 	}
-	// The registry lookup only feeds payloads the broker receives, so by
-	// default it follows broker ingest: no lookups while ingest is off.
-	if c.RegistryLookup, err = strconv.ParseBool(env("REGISTRY_LOOKUP_ENABLED", strconv.FormatBool(c.BrokerIngest))); err != nil {
+	// The registry lookup is egress to image registries: opt-in only, never
+	// implied by broker ingest. While off, digest_kind stays "unknown".
+	if c.RegistryLookup, err = strconv.ParseBool(env("REGISTRY_LOOKUP_ENABLED", "false")); err != nil {
 		return c, fmt.Errorf("REGISTRY_LOOKUP_ENABLED: %w", err)
 	}
 	if c.RegistryAllowPrivate, err = strconv.ParseBool(env("REGISTRY_ALLOW_PRIVATE", "false")); err != nil {
 		return c, fmt.Errorf("REGISTRY_ALLOW_PRIVATE: %w", err)
+	}
+	// Registry SBOMs mean egress to image registries: opt-in only, never
+	// implied by broker ingest.
+	if c.RegistrySBOM, err = strconv.ParseBool(env("REGISTRY_SBOM_ENABLED", "false")); err != nil {
+		return c, fmt.Errorf("REGISTRY_SBOM_ENABLED: %w", err)
+	}
+	if c.RegistrySBOMInterval, err = time.ParseDuration(env("REGISTRY_SBOM_INTERVAL", "15m")); err != nil || c.RegistrySBOMInterval <= 0 {
+		return c, fmt.Errorf("REGISTRY_SBOM_INTERVAL must be a positive duration")
 	}
 	if c.TrivyResync, err = time.ParseDuration(env("TRIVY_RESYNC_PERIOD", "10m")); err != nil || c.TrivyResync <= 0 {
 		return c, fmt.Errorf("TRIVY_RESYNC_PERIOD must be a positive duration")
@@ -158,6 +174,8 @@ func serve() error {
 		"brokerIngest":         c.BrokerIngest,
 		"registryLookup":       c.RegistryLookup,
 		"registryAllowPrivate": c.RegistryAllowPrivate,
+		"registrySBOM":         c.RegistrySBOM,
+		"grypeMatcher":         c.GrypeMatcherURL != "",
 		"brokerAuth":           c.BrokerToken != "",
 	}).Info("kguardian-supplychain starting")
 
@@ -185,6 +203,21 @@ func serve() error {
 	var readiness []func() bool
 	var wg sync.WaitGroup
 	errCh := make(chan error, 2)
+	// Every source emits through sink; matching (when enabled) taps it.
+	var sink trivy.Sink = disp
+	if c.GrypeMatcherURL != "" {
+		hm, err := match.NewHTTPMatcher(c.GrypeMatcherURL)
+		if err != nil {
+			return err
+		}
+		coord := &match.Coordinator{Matcher: hm, Sink: disp, Log: log, Metrics: m}
+		sink = coord.Tee(disp)
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			coord.Run(ctx, time.Minute)
+		}()
+	}
 
 	if c.TrivyEnabled {
 		cfg, err := loadKubeConfig()
@@ -203,7 +236,7 @@ func serve() error {
 			Dynamic:       dyn,
 			Discovery:     disc,
 			Tracker:       trivy.NewTracker(nil), // broker inventory resolver lands with #1533 P1-3
-			Sink:          disp,
+			Sink:          sink,
 			Log:           log,
 			Metrics:       m,
 			ResyncPeriod:  c.TrivyResync,
@@ -217,7 +250,29 @@ func serve() error {
 				errCh <- fmt.Errorf("trivy-operator source: %w", err)
 			}
 		}()
-	} else {
+	}
+
+	if c.RegistrySBOM {
+		rc, err := broker.NewReadClient(c.BrokerURL, c.BrokerToken)
+		if err != nil {
+			return err
+		}
+		src := &regsource.Source{
+			Lister:   rc,
+			Fetcher:  registry.New(registry.Guard{AllowPrivate: c.RegistryAllowPrivate}),
+			Sink:     sink,
+			Log:      log,
+			Metrics:  m,
+			Interval: c.RegistrySBOMInterval,
+		}
+		readiness = append(readiness, src.Ready)
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			src.Run(ctx)
+		}()
+	}
+	if !c.TrivyEnabled && !c.RegistrySBOM {
 		log.Info("no vulnerability source enabled; serving health and metrics only")
 	}
 
