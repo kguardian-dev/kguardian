@@ -30,6 +30,10 @@ spec:
         - name: Workload
           type: string
           jsonPath: .spec.workloadRef.name
+        - name: Profile
+          type: string
+          description: ProfileAvailable condition reason
+          jsonPath: .status.conditions[?(@.type=="ProfileAvailable")].reason
         - name: Posture
           type: string
           description: ok only when every core dimension is known and ok
