@@ -333,6 +333,11 @@ Classes:
   behaviour (a seccomp filter installed without `no_new_privs`, ptrace
   access to other processes), so probed capabilities are kept in the
   recommendation and named, never dropped without a person confirming.
+  One exception: a probed-only `SYS_ADMIN` is left out (`probedOmitted`)
+  unless the container is privileged, because the recommendation keeps or
+  sets `allowPrivilegeEscalation: false`, which gives `no_new_privs` and
+  removes the seccomp case; the memory reserve is a heuristic, not
+  functionality.
 
 Not counted:
 
