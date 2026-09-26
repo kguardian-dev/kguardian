@@ -2,18 +2,23 @@
 
 Run a Broker built from the commit you want captures of, against an empty
 database, with scoped auth on (the supply-chain routes refuse writes
-without it) and a short supply-chain retention interval (it rebuilds the
-CVE summary and the report-to-inventory links):
+without it) and the shortest supply-chain retention interval. That loop
+rebuilds the CVE summary and the report-to-inventory links; its first pass
+runs 45 s after the Broker starts, then every interval, and the Broker
+enforces a 60 s floor on the interval. TELEMETRY_ENABLED=false keeps a
+scratch Broker from sending the anonymous version check-in:
 
     BROKER_TOKEN_READ=<r> BROKER_TOKEN_INGEST=<i> BROKER_TOKEN_SUPPLYCHAIN=<s> \\
-    SUPPLYCHAIN_RETENTION_INTERVAL_SECS=5 DATABASE_URL=... LISTEN_ADDR=127.0.0.1:<port> broker
+    TELEMETRY_ENABLED=false SUPPLYCHAIN_RETENTION_INTERVAL_SECS=60 DATABASE_URL=... LISTEN_ADDR=127.0.0.1:<port> broker
 
 then:
 
     python3 capture.py http://127.0.0.1:<port> <r> <i> <s> <broker git sha>
 
-It posts pods (with `containers[]`), traffic, vulnerability reports and
-SBOMs, waits for the summary rebuild, then writes one `{provenance,
+Set CAPTURE_INTERVAL_SECS if the Broker runs a longer interval (default
+60). It posts pods (with `containers[]`), traffic, vulnerability reports
+and SBOMs, waits for a rebuild and then one more (so every link and the
+exposure view are current; a few minutes in all), then writes one `{provenance,
 request, status, body}` JSON per read into this directory. Nothing here
 edits a response.
 
@@ -229,14 +234,31 @@ for key, trust in (('grafana', 'attached-unbound'), ('source-controller', 'verif
     post_sbom(key, 'registry', image(key), s['items'], 8, trust, att)
 
 # ── Wait for the summary rebuild and the link refresh ─────────────────
-for _ in range(60):
+INTERVAL = max(60, int(os.environ.get('CAPTURE_INTERVAL_SECS', '60')))
+
+
+def computed_at():
     st, text = call('GET', '/vulnerabilities', READ)
-    if st == 200 and json.loads(text).get('computedAt') and json.loads(text)['items']:
-        break
-    time.sleep(1)
-else:
-    raise SystemExit('the CVE summary never rebuilt; is SUPPLYCHAIN_RETENTION_INTERVAL_SECS short?')
-time.sleep(6)  # one more pass, so every link and the exposure view are current
+    if st != 200:
+        return None
+    body = json.loads(text)
+    return body.get('computedAt') if body.get('items') else None
+
+
+def wait_for(pred, secs, what):
+    deadline = time.monotonic() + secs
+    while time.monotonic() < deadline:
+        v = pred()
+        if v:
+            return v
+        time.sleep(2)
+    raise SystemExit(f'{what} within {secs} s; is SUPPLYCHAIN_RETENTION_INTERVAL_SECS {INTERVAL}?')
+
+
+# The first pass may have run before the seed finished, so wait for a
+# rebuild with findings, then for the pass after it.
+first = wait_for(computed_at, 45 + INTERVAL + 60, 'the CVE summary never rebuilt')
+wait_for(lambda: (c := computed_at()) and c != first, INTERVAL + 60, 'no second supply-chain pass')
 
 # ── Capture ────────────────────────────────────────────────────────────
 PROVENANCE = f'captured from broker {SHA} (frontend/src/fixtures/vuln-captures/capture.py), no edits'

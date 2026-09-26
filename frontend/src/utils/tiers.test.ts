@@ -76,6 +76,13 @@ test("a finding's chips are the Broker's factors with the facts' labels", () => 
   expect(findingFactors(kev).find((f) => f.key === 'inuse')!.title).toMatch(/no runtime capture/);
 });
 
+test('KEV / EPSS: null is "not reported" (unknown), false and absent are not', () => {
+  expect(factChips({ kev: null })[0]).toMatchObject({ key: 'kev', tone: 'unknown', label: 'KEV: not reported' });
+  expect(factChips({ kev: false })).toEqual([]);
+  expect(factChips({ epss: null })[0]).toMatchObject({ key: 'epss', tone: 'unknown', label: 'EPSS: not reported' });
+  expect(factChips({})).toEqual([]);
+});
+
 test('a Background finding reads "Not observed loaded" (not in any capture until the runtime inventory lands)', () => {
   const busybox = vulnCapture<ImageVulnsPage>('image-checkout-vulnerabilities').body.items.find((f) => f.id === 'CVE-2099-0004')!;
   // Test-local: the captured finding as a Broker with runtime data would send it.
