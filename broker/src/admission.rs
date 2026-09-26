@@ -164,6 +164,7 @@ pub fn plan(rows: &[RunningImage]) -> Plan {
     struct Acc {
         spec_names: BTreeSet<String>,
         digests: BTreeMap<String, Seen>,
+        malformed: bool,
     }
     let mut by_repo: BTreeMap<String, Acc> = BTreeMap::new();
     for r in rows {
@@ -175,8 +176,15 @@ pub fn plan(rows: &[RunningImage]) -> Plan {
         let acc = by_repo.entry(repo).or_insert_with(|| Acc {
             spec_names: BTreeSet::new(),
             digests: BTreeMap::new(),
+            malformed: false,
         });
-        acc.spec_names.insert(strip_ref(&r.image_ref).to_string());
+        if r.image_ref == crate::image_inventory::MALFORMED_REFERENCE {
+            // The pod's reference could not be read: no glob can be
+            // written for it, and it is never silently left out.
+            acc.malformed = true;
+        } else {
+            acc.spec_names.insert(strip_ref(&r.image_ref).to_string());
+        }
         let arr = |v: &Value| v.as_array().cloned().unwrap_or_default();
         acc.digests.insert(
             r.digest.clone(),
@@ -192,6 +200,13 @@ pub fn plan(rows: &[RunningImage]) -> Plan {
     let mut groups: BTreeMap<(Vec<Authority>, Vec<String>), Vec<Repo>> = BTreeMap::new();
     'repo: for (repo, acc) in by_repo {
         let mut auths = BTreeSet::new();
+        if acc.malformed {
+            out.uncovered.insert(
+                repo.clone(),
+                "a pod's image reference is malformed_reference (not a valid reference)".into(),
+            );
+            continue 'repo;
+        }
         let mut seen: Vec<(Authority, String)> = Vec::new();
         for (
             digest,
@@ -634,22 +649,10 @@ pub fn describe(a: &Authority) -> String {
     }
 }
 
-/// Text for inside one comment line.
-///
-/// TODO(#1678): once #1678 merges, call its shared
-/// `profile_export::comment_text` here (made pub(crate)) instead: one
-/// implementation for every generated comment. Until then this removes the
-/// same five YAML/Unicode line breaks, and other control characters.
+/// Text for inside one comment line: the shared export helper, so every
+/// generated comment is escaped one way.
 pub fn comment(s: &str) -> String {
-    s.chars()
-        .map(|c| {
-            if c.is_control() || c == '\u{2028}' || c == '\u{2029}' {
-                ' '
-            } else {
-                c
-            }
-        })
-        .collect()
+    crate::profile_export::comment_text(s)
 }
 
 /// Renders a plan to a multi-document YAML stream.

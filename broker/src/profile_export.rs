@@ -1208,16 +1208,33 @@ fn escape_unicode_breaks(s: &str) -> String {
     out
 }
 
-/// Text for inside a single comment line: no line break of any kind.
-fn comment_text(s: &str) -> String {
-    escape_unicode_breaks(s).replace(YAML_LINE_BREAKS, " ")
+/// Every other C0/C1 control (tab, ESC, DEL, NUL, ...) as a space: none of
+/// them belongs in a comment a human reads, and a terminal may act on some.
+/// Line breaks are left for the callers, which handle them.
+fn blank_controls(s: &str) -> String {
+    s.chars()
+        .map(|c| {
+            if c.is_control() && c != '\n' && c != '\r' {
+                ' '
+            } else {
+                c
+            }
+        })
+        .collect()
+}
+
+/// Text for inside a single comment line: no line break of any kind, and
+/// no other control character. Shared by every generated YAML comment
+/// (the export bundle and the image admission policies).
+pub(crate) fn comment_text(s: &str) -> String {
+    blank_controls(&escape_unicode_breaks(s)).replace(YAML_LINE_BREAKS, " ")
 }
 
 /// `text` as comment lines: every segment between any YAML line break
 /// starts with `#`, so nothing in it (a package name, a status note) can
 /// start a document or a key in the `kubectl apply` stream.
-fn push_commented(y: &mut String, text: &str) {
-    let t = escape_unicode_breaks(text).replace("\r\n", "\n");
+pub(crate) fn push_commented(y: &mut String, text: &str) {
+    let t = blank_controls(&escape_unicode_breaks(text)).replace("\r\n", "\n");
     let t = t.strip_suffix('\n').unwrap_or(&t);
     // NEL/LS/PS are escaped above; split on every break anyway.
     for seg in t.split(YAML_LINE_BREAKS) {
