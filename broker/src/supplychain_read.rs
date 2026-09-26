@@ -564,9 +564,12 @@ pub struct ImageVulnsPage {
 /// version is returned, ordered by the first source that gives it.
 /// KEV and EPSS are facts about a CVE, not about one source's row: Trivy
 /// reports kev null where Grype, for the same CVE, reports true. They come
-/// from `vuln_cve_facts` (one row per CVE, joined by primary key), merged
-/// with the finding's own values so a facts row not yet written can only
-/// add evidence (kg_kev_merge / GREATEST / LEAST). Findings, filters and
+/// from `vuln_cve_facts` (one row per CVE, LEFT JOINed by primary key),
+/// merged with the finding's own values: kev = kg_kev_merge(facts,
+/// finding) (true if either is true), EPSS = GREATEST. A CVE not in the
+/// facts table yet (between an ingest and the next rebuild) reads as its
+/// own per-finding values; a NULL facts value never overrides a finding's
+/// true, so the merge only pushes up. Findings, filters and
 /// tiers use the result. Same rule in refresh_cve_summary_sql.
 const IMAGE_VULNS_SQL: &str = "\
 WITH v AS ( \
@@ -1466,8 +1469,13 @@ fn refresh_cve_summary_sql() -> String {
 /// Rebuild the CVE summary in one transaction (readers see the old or the
 /// new table, never half). Returns the cluster-wide CVE count.
 /// Rebuild `vuln_cve_facts` from every stored finding in one grouped
-/// scan: drops CVEs whose rows were garbage-collected and lets a decayed
-/// EPSS fall (ingest only ever raises them).
+/// scan. The rebuild REPLACES the table (DELETE, then this INSERT, in the
+/// summary's transaction); it never merges into existing rows. That is
+/// what lets values come down: the ingest upsert only ever raises them
+/// (kev by OR, EPSS by GREATEST), so a KEV a source retracted or an EPSS
+/// that decayed is corrected here, within one retention interval. CVEs with
+/// no image_vulnerabilities row left (garbage-collected) are not
+/// re-inserted, so their facts go in the same pass.
 pub const REFRESH_CVE_FACTS_SQL: &str = "\
 INSERT INTO vuln_cve_facts (vuln_id, kev, kev_date_added, epss, epss_percentile, updated_at) \
 SELECT vuln_id, bool_or(kev), min(kev_date_added), max(epss), max(epss_percentile), \
@@ -1480,6 +1488,7 @@ HAVING bool_or(kev) IS NOT NULL OR max(epss) IS NOT NULL \
 pub fn refresh_cve_summary(conn: &mut PgConnection) -> QueryResult<i64> {
     conn.transaction(|conn| {
         // CVE-level KEV / EPSS first: the summary's tiers read them.
+        // Replace, never merge (REFRESH_CVE_FACTS_SQL).
         sql_query("DELETE FROM vuln_cve_facts").execute(conn)?;
         sql_query(REFRESH_CVE_FACTS_SQL).execute(conn)?;
         sql_query("DELETE FROM vuln_cve_summary").execute(conn)?;

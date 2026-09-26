@@ -2754,6 +2754,57 @@ fn live_database_cve_facts_upsert_rebuild_and_fallback() {
     );
     crate::supplychain_read::refresh_cve_summary(&mut conn).unwrap();
     assert_eq!(facts(&mut conn), Some((Some(false), Some(0.05))));
+    // Retracted: the only remaining source now says nothing about KEV or
+    // EPSS. Ingest cannot lower the row; the rebuild removes it.
+    store_v(
+        &mut conn,
+        payload(
+            &d(98),
+            "grype",
+            "2026-09-22T09:00:00Z",
+            json!(null),
+            json!(null),
+        ),
+    );
+    assert_eq!(
+        facts(&mut conn),
+        Some((Some(false), Some(0.05))),
+        "ingest never lowers"
+    );
+    crate::supplychain_read::refresh_cve_summary(&mut conn).unwrap();
+    assert_eq!(facts(&mut conn), None, "the rebuild replaces, not merges");
+    // Every row of the CVE gone (GC): its facts row goes in the same pass.
+    store_v(
+        &mut conn,
+        payload(
+            &d(98),
+            "grype",
+            "2026-09-23T09:00:00Z",
+            json!(true),
+            json!(0.3),
+        ),
+    );
+    assert_eq!(facts(&mut conn), Some((Some(true), Some(0.3))));
+    exec(
+        &mut conn,
+        "DELETE FROM image_vulnerabilities WHERE vuln_id = 'CVE-2026-0501'",
+    );
+    crate::supplychain_read::refresh_cve_summary(&mut conn).unwrap();
+    assert_eq!(
+        facts(&mut conn),
+        None,
+        "no rows left for the CVE, no facts row"
+    );
+    store_v(
+        &mut conn,
+        payload(
+            &d(98),
+            "grype",
+            "2026-09-24T09:00:00Z",
+            json!(false),
+            json!(0.05),
+        ),
+    );
     // No facts row at all: a read uses the finding's own values.
     exec(&mut conn, "DELETE FROM vuln_cve_facts");
     let p = crate::supplychain_read::image_vulnerabilities_filtered(

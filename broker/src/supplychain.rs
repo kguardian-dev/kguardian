@@ -1444,8 +1444,9 @@ fn md5_of(conn: &mut PgConnection, s: &str) -> QueryResult<String> {
 /// the stale / unchanged rules.
 /// Fold one payload's KEV / EPSS into `vuln_cve_facts` (migration
 /// 2026-09-28-200000): kev by kg_kev_merge, EPSS by GREATEST, the KEV date
-/// by LEAST. Only ever adds evidence; the retention pass rebuild lets it
-/// fall again.
+/// by LEAST. It can only RAISE values: a retracted KEV or a lower EPSS is
+/// not applied here but by the retention pass, whose rebuild replaces the
+/// table (supplychain_read::REFRESH_CVE_FACTS_SQL).
 pub(crate) const CVE_FACTS_UPSERT_SQL: &str = "\
 INSERT INTO vuln_cve_facts (vuln_id, kev, kev_date_added, epss, epss_percentile, updated_at) \
 SELECT vuln_id, bool_or(kev), min(kev_date_added), max(epss), max(epss_percentile), \
