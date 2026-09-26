@@ -117,3 +117,25 @@ func TestRegistryLookupFollowsIngest(t *testing.T) {
 		}
 	}
 }
+
+func TestRegistrySBOMFollowsIngest(t *testing.T) {
+	for _, c := range []struct {
+		env  map[string]string
+		want bool
+	}{
+		{map[string]string{}, false},
+		{map[string]string{"BROKER_INGEST_ENABLED": "true"}, true},
+		{map[string]string{"BROKER_INGEST_ENABLED": "true", "REGISTRY_SBOM_ENABLED": "false"}, false},
+	} {
+		got, err := loadConfig(envMap(c.env))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.RegistrySBOM != c.want || got.RegistrySBOMInterval != 15*time.Minute {
+			t.Errorf("%v: %+v", c.env, got)
+		}
+	}
+	if _, err := loadConfig(envMap(map[string]string{"REGISTRY_SBOM_INTERVAL": "0s"})); err == nil {
+		t.Error("zero interval accepted")
+	}
+}

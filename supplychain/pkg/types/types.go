@@ -19,6 +19,12 @@ const SchemaVersion = 1
 // presenting third-party data as kguardian's own verdict.
 const (
 	SourceTrivyOperator = "trivy-operator"
+	// SourceRegistry: an SBOM attached to the image in its registry
+	// (OCI referrer, cosign attachment/attestation, BuildKit attestation).
+	SourceRegistry = "registry"
+	// SourceGrype: vulnerabilities kguardian matched itself with Grype
+	// against an SBOM from one of the other sources.
+	SourceGrype = "grype"
 )
 
 // Scanner describes the tool that produced a report.
@@ -115,7 +121,15 @@ type Vulnerability struct {
 	// or a lockfile path inside the image).
 	Target string `json:"target,omitempty"`
 	// Class is "os-pkgs" or "lang-pkgs" when the scanner reports it.
-	Class          string     `json:"class,omitempty"`
+	Class string `json:"class,omitempty"`
+	// KnownExploited is true when the vulnerability is in CISA's Known
+	// Exploited Vulnerabilities catalogue (Grype DB; not set by Trivy).
+	KnownExploited bool       `json:"kev,omitempty"`
+	KEVDateAdded   *time.Time `json:"kev_date_added,omitempty"`
+	// EPSS is the FIRST.org exploit prediction score (0-1) and its
+	// percentile, when the source provides them (Grype DB).
+	EPSS           *float64   `json:"epss,omitempty"`
+	EPSSPercentile *float64   `json:"epss_percentile,omitempty"`
 	PublishedAt    *time.Time `json:"published_at,omitempty"`
 	LastModifiedAt *time.Time `json:"last_modified_at,omitempty"`
 	// FilePaths are the paths inside the image that belong to the
@@ -136,7 +150,10 @@ type ImageVulnerabilities struct {
 	// DBUpdatedAt is when the vulnerability database used for the scan was
 	// built. Nil when the source does not record it (Trivy Operator does
 	// not put the trivy-db timestamp in its reports).
-	DBUpdatedAt     *time.Time      `json:"db_updated_at,omitempty"`
+	DBUpdatedAt *time.Time `json:"db_updated_at,omitempty"`
+	// SBOMSource is, for source=grype, which SBOM was matched
+	// (registry or trivy-operator). Empty for scanners that read the image.
+	SBOMSource      string          `json:"sbom_source,omitempty"`
 	OS              OS              `json:"os"`
 	ObservedIn      []WorkloadRef   `json:"observed_in,omitempty"`
 	Vulnerabilities []Vulnerability `json:"vulnerabilities"`
@@ -172,6 +189,9 @@ type ImageSBOM struct {
 	Format      string        `json:"format"`
 	SpecVersion string        `json:"spec_version,omitempty"`
 	ObservedIn  []WorkloadRef `json:"observed_in,omitempty"`
+	// Attestation describes where a registry SBOM was found. Nil for
+	// other sources.
+	Attestation *Attestation `json:"attestation,omitempty"`
 	// Page is set when the SBOM is sent in several requests (see Page).
 	Page       *Page       `json:"page,omitempty"`
 	Components []Component `json:"components"`
@@ -186,4 +206,25 @@ type Page struct {
 	SetID string `json:"set_id"`
 	Index int    `json:"index"`
 	Total int    `json:"total"`
+}
+
+// Attestation mechanisms for registry SBOMs.
+const (
+	MechanismOCIReferrer         = "oci-referrer"
+	MechanismCosignAttestation   = "cosign-attestation"
+	MechanismCosignSBOM          = "cosign-sbom"
+	MechanismBuildKitAttestation = "buildkit-attestation"
+)
+
+// Attestation records how a registry SBOM was attached to its image.
+type Attestation struct {
+	Mechanism string `json:"mechanism"`
+	// ArtifactDigest is the manifest the SBOM was read from.
+	ArtifactDigest string `json:"artifact_digest,omitempty"`
+	MediaType      string `json:"media_type,omitempty"`
+	PredicateType  string `json:"predicate_type,omitempty"`
+	// Verified is always false in this version: the document was found
+	// attached to the image, but no signature was checked. Signature and
+	// identity verification is a separate step (#1533 P2).
+	Verified bool `json:"verified"`
 }

@@ -36,6 +36,15 @@ type Metrics struct {
 	// RegistryLookupsSkipped counts lookups refused by the address guard,
 	// by reason.
 	RegistryLookupsSkipped *prometheus.CounterVec
+	// RegistrySBOMLookups counts registry SBOM lookups per digest by
+	// result (found, none, error, skipped_<reason>, list_error).
+	RegistrySBOMLookups *prometheus.CounterVec
+	// Grype matching (vulnerability source B).
+	GrypeDBBuilt      prometheus.Gauge
+	GrypeMatchRuns    *prometheus.CounterVec
+	GrypeMatches      prometheus.Counter
+	GrypeMatchSeconds prometheus.Histogram
+	GrypeSBOMsHeld    prometheus.Gauge
 	// PendingEmissions is the size of the coalescing send queue.
 	PendingEmissions prometheus.Gauge
 }
@@ -78,6 +87,31 @@ func New() *Metrics {
 			Name: "kguardian_supplychain_registry_lookups_skipped_total",
 			Help: "Registry lookups refused by the address guard, by reason.",
 		}, []string{"reason"}),
+		RegistrySBOMLookups: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "kguardian_supplychain_registry_sbom_lookups_total",
+			Help: "Registry SBOM lookups per digest, by result.",
+		}, []string{"result"}),
+		GrypeDBBuilt: prometheus.NewGauge(prometheus.GaugeOpts{
+			Name: "kguardian_supplychain_grype_db_built_timestamp_seconds",
+			Help: "Build time of the loaded Grype database (Unix seconds); DB age is time() minus this.",
+		}),
+		GrypeMatchRuns: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "kguardian_supplychain_grype_match_runs_total",
+			Help: "SBOM match runs, by result (ok, error).",
+		}, []string{"result"}),
+		GrypeMatches: prometheus.NewCounter(prometheus.CounterOpts{
+			Name: "kguardian_supplychain_grype_matches_total",
+			Help: "Vulnerabilities returned by successful match runs.",
+		}),
+		GrypeMatchSeconds: prometheus.NewHistogram(prometheus.HistogramOpts{
+			Name:    "kguardian_supplychain_grype_match_duration_seconds",
+			Help:    "Time to match one SBOM.",
+			Buckets: prometheus.ExponentialBuckets(0.05, 2, 12),
+		}),
+		GrypeSBOMsHeld: prometheus.NewGauge(prometheus.GaugeOpts{
+			Name: "kguardian_supplychain_grype_sboms_held",
+			Help: "SBOMs held for (re-)matching, one per digest.",
+		}),
 		SourceHealthy: prometheus.NewGaugeVec(prometheus.GaugeOpts{
 			Name: "kguardian_supplychain_source_healthy",
 			Help: "0 while a source's list/watch is failing repeatedly, else 1.",
@@ -91,7 +125,8 @@ func New() *Metrics {
 		collectors.NewGoCollector(),
 		collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}),
 		m.ReportEvents, m.SourceAvailable, m.TrackedDigests,
-		m.UnresolvedReports, m.Emissions, m.Dropped, m.SourceHealthy, m.RegistryLookups, m.RegistryLookupsSkipped, m.PendingEmissions,
+		m.UnresolvedReports, m.Emissions, m.Dropped, m.SourceHealthy, m.RegistryLookups, m.RegistryLookupsSkipped, m.RegistrySBOMLookups,
+		m.GrypeDBBuilt, m.GrypeMatchRuns, m.GrypeMatches, m.GrypeMatchSeconds, m.GrypeSBOMsHeld, m.PendingEmissions,
 	)
 	return m
 }
