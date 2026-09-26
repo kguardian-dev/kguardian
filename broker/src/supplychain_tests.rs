@@ -2031,8 +2031,20 @@ fn live_database_only_the_dlopened_library_is_loaded() {
         "pkg:deb/debian/libbar1@4.5-2"
     );
 
+    // The export bundle's `vex` artifact is that draft, as JSON.
+    let d = crate::profile_export::vex_doc(&mut conn, &key, "audit").unwrap();
+    assert!(d.available, "{:?}", d.reason);
+    assert_eq!(d.file_name, "vex.openvex.json");
+    let parsed: serde_json::Value = serde_json::from_str(d.content.as_deref().unwrap()).unwrap();
+    assert_eq!(parsed, vex.doc);
+
     exec(
         &mut conn,
         "DROP FUNCTION kg_runtime_coverage(text, text, text, text, text, text, integer)",
     );
+    // Without coverage the artifact is unavailable, with the reason.
+    iu::refresh_coverage(&mut conn, &t).unwrap();
+    let d = crate::profile_export::vex_doc(&mut conn, &key, "audit").unwrap();
+    assert!(!d.available);
+    assert!(d.reason.unwrap().contains("installed-but-not-observed"));
 }

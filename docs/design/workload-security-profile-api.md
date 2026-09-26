@@ -1179,7 +1179,7 @@ Artifacts and where they come from (existing generators only):
 | `seccompprofile` | `SeccompProfile` with `SCMP_ACT_LOG` | `SCMP_ACT_ERRNO` | the `/seccomp/profiles/{..}/export` path |
 | `securitycontext` | strategic-merge **patch** + `pod-security.kubernetes.io/audit=restricted` label suggestion | same patch + `.../enforce=restricted` | the profile's `podSecurity.recommendation` |
 | `sbom` | not available (needs runtime SBOM data, P1-3/P1-5) | same | stub |
-| `vex` | not available (needs vulnerability data, P1-3/P1-5) | same | stub |
+| `vex` | OpenVEX 0.2.0 draft (`vex.openvex.json`): `not_affected` only for packages unseen in every container over a covered capture window, each statement marked as a draft for human review; commented out of the YAML apply stream; unavailable, with the reason, when no statement qualifies | same | `in_use_store::openvex_draft` (P1-5) |
 | `admission` | not available (needs the image trust policy, P2-3) | same | stub |
 
 - **Network policies for a workload:** the generator is per pod. It gets the newest flow rows of every
@@ -1232,7 +1232,7 @@ From `GET /workloads/payments/Deployment/checkout/export` -> 200 (capture `expor
 # kguardian never applies anything. Review every document, commit it, and apply it yourself.
 # not included: ciliumnetworkpolicy (withheld in audit mode: a CiliumNetworkPolicy has no per-policy audit mode and enforces as soon as it is applied. Use the networkpolicy artifact (an AuditNetworkPolicy, evaluated by kguardian without blocking) to audit, then export with mode=enforce.)
 # not included: sbom (not available: a CycloneDX runtime SBOM needs the runtime package data from P1-3/P1-5, which does not exist yet)
-# not included: vex (not available: an OpenVEX draft needs vulnerability data and runtime package evidence (P1-3/P1-5), which do not exist yet)
+# not included: vex (not available: no vulnerability findings for the images this workload runs)
 # not included: admission (not available: the image admission policy needs the image trust policy (P2-3), which has not landed)
 ---
 # kguardian export: networkpolicy (audit mode)

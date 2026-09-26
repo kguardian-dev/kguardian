@@ -13,7 +13,8 @@
 //! | `ciliumnetworkpolicy` | same, Cilium kind |
 //! | `seccompprofile` | [`crate::seccomp::bundle_export`] (the `/seccomp/profiles/{..}/export` path) |
 //! | `securitycontext` | the profile's PSS recommendation ([`crate::pod_security`]) |
-//! | `sbom`, `vex` | not available until runtime SBOM data exists (P1-3 / P1-5) |
+//! | `vex` | [`crate::in_use_store::openvex_draft`]: an OpenVEX 0.2.0 draft (JSON, not part of the apply stream) |
+//! | `sbom` | not available until a runtime SBOM exists |
 //! | `admission` | not available until the image trust policy exists (P2-3) |
 //!
 //! Report and generate only: kguardian never applies anything. Every
@@ -717,6 +718,50 @@ fn security_context_doc(key: &Key, p: &Profile, plan: &Plan) -> Document {
     }
 }
 
+/// Artifacts that are not Kubernetes objects: never in the `kubectl apply`
+/// stream of the YAML bundle, appended there as comments instead.
+const NOT_APPLIED: [&str; 2] = ["securitycontext", "vex"];
+
+/// The OpenVEX draft ([`crate::in_use_store::openvex_draft`]): `not_affected`
+/// statements only for packages unseen in every container of the workload
+/// over a covered window, each marked as a draft needing human review.
+pub(crate) fn vex_doc(
+    conn: &mut PgConnection,
+    key: &Key,
+    mode: &'static str,
+) -> Result<Document, DbError> {
+    use crate::in_use_store::{openvex_draft, VexOutcome};
+    let artifact = "vex";
+    let draft = match openvex_draft(conn, key)? {
+        VexOutcome::Draft(d) => d,
+        VexOutcome::Unavailable(why) => {
+            return Ok(unavailable(
+                artifact,
+                mode,
+                &format!("not available: {why}"),
+            ))
+        }
+    };
+    let content = serde_json::to_string_pretty(&draft.doc)?;
+    Ok(Document {
+        artifact,
+        file_name: format!("{artifact}.openvex.json"),
+        available: true,
+        refused: None,
+        reason: None,
+        api_version: None,
+        kind: None,
+        mode,
+        content_type: Some("application/json"),
+        content: Some(content + "\n"),
+        apply_with: Some(format!(
+            "not applied: a DRAFT with {} not_affected statement(s) that a human must review; \
+             then give it to your scanner, e.g. trivy image --vex {artifact}.openvex.json <image>",
+            draft.statements
+        )),
+    })
+}
+
 /// The whole bundle.
 #[derive(Debug, Clone, Serialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
@@ -770,11 +815,7 @@ pub fn build_documents(
                 mode,
                 "not available: a CycloneDX runtime SBOM needs the runtime package data from P1-3/P1-5, which does not exist yet",
             ),
-            "vex" => unavailable(
-                "vex",
-                mode,
-                "not available: an OpenVEX draft needs vulnerability data and runtime package evidence (P1-3/P1-5), which do not exist yet",
-            ),
+            "vex" => vex_doc(conn, key, mode)?,
             _ => unavailable(
                 "admission",
                 mode,
@@ -787,9 +828,10 @@ pub fn build_documents(
 }
 
 /// The multi-document YAML: a bundle header, then every available
-/// Kubernetes object as its own document. The securityContext PATCH is not
-/// an object, so it is appended as comments (the stream stays safe to
-/// `kubectl apply -f`); the manifest format carries it as its own file.
+/// Kubernetes object as its own document. The securityContext PATCH and the
+/// OpenVEX draft are not objects, so they are appended as comments (the
+/// stream stays safe to `kubectl apply -f`); the manifest format carries
+/// each as its own file.
 pub fn render_bundle_yaml(
     key: &Key,
     p: &Profile,
@@ -822,18 +864,24 @@ pub fn render_bundle_yaml(
     }
     for d in docs
         .iter()
-        .filter(|d| d.available && d.artifact != "securitycontext")
+        .filter(|d| d.available && !NOT_APPLIED.contains(&d.artifact))
     {
         y.push_str("---\n");
         y.push_str(d.content.as_deref().unwrap_or(""));
     }
-    if let Some(d) = docs
+    for d in docs
         .iter()
-        .find(|d| d.available && d.artifact == "securitycontext")
+        .filter(|d| d.available && NOT_APPLIED.contains(&d.artifact))
     {
-        y.push_str(
-            "\n# ---- securitycontext (strategic-merge patch; not part of the apply stream) ----\n",
-        );
+        y.push_str(&format!(
+            "\n# ---- {} ({}; not part of the apply stream) ----\n",
+            d.artifact,
+            if d.artifact == "vex" {
+                "OpenVEX draft for human review"
+            } else {
+                "strategic-merge patch"
+            }
+        ));
         for line in d.content.as_deref().unwrap_or("").lines() {
             if line.starts_with('#') {
                 y.push_str(line);
@@ -1151,6 +1199,40 @@ mod tests {
                 previous_digests: vec![],
             }],
             ..Default::default()
+        }
+    }
+
+    #[test]
+    fn a_vex_draft_is_commented_out_of_the_apply_stream() {
+        let p = wp::build(&key(), &sources(), Utc::now());
+        let pl = plan(&q(Some("vex"), None, None)).unwrap();
+        let docs = vec![Document {
+            artifact: "vex",
+            file_name: "vex.openvex.json".into(),
+            available: true,
+            refused: None,
+            reason: None,
+            api_version: None,
+            kind: None,
+            mode: "audit",
+            content_type: Some("application/json"),
+            content: Some("{\n  \"@context\": \"https://openvex.dev/ns/v0.2.0\"\n}\n".into()),
+            apply_with: None,
+        }];
+        let y = render_bundle_yaml(&key(), &p, &pl, &docs, false);
+        assert!(y.contains(
+            "# ---- vex (OpenVEX draft for human review; not part of the apply stream) ----"
+        ));
+        assert!(y
+            .lines()
+            .any(|l| l.starts_with('#')
+                && l.contains("\"@context\": \"https://openvex.dev/ns/v0.2.0\"")));
+        assert!(!y.contains("\n---\n"));
+        for line in y.lines().filter(|l| !l.trim().is_empty()) {
+            assert!(
+                line.starts_with('#'),
+                "non-comment line in the stream: {line}"
+            );
         }
     }
 
