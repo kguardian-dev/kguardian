@@ -995,7 +995,10 @@ From a live broker build (`live_evidence_drives_the_profile_and_its_patch`, `bod
             "capability": "SYS_ADMIN",
             "reason": "probed only (memory reserve / seccomp without no_new_privs); allowPrivilegeEscalation=false removes the need"
           }
-        ]
+        ],
+        "requires": {
+          "allowPrivilegeEscalation": false
+        }
       },
       "unusedAdded": [
         "NET_ADMIN"
@@ -1029,9 +1032,16 @@ From a live broker build (`live_evidence_drives_the_profile_and_its_patch`, `bod
   kernel asking whether the process is privileged (every root process's memory admin-reserve check asks
   for `SYS_ADMIN`; others gate real behaviour: a seccomp filter without `no_new_privs`, ptrace access to
   other processes). Each has `count`, `firstSeen`, `lastSeen`.
-- Not counted: container runtime setup (a task that has not exec'd since it was forked by a process
-  outside every pod cgroup, i.e. runc init; decided by provenance, so a process renaming itself `runc:[`
-  is still counted), and checks against a user namespace the container created.
+- Not counted: container runtime setup, decided by provenance, never by name (a process renaming itself
+  `runc:[` is still counted): a task whose real parent is outside every pod cgroup and that has either not
+  exec'd since that parent created it (a runtime forking without exec) or exec'd exactly once and runs
+  the same executable as that parent or has a parent named `runc*` (runc init, which runc execs from a
+  sealed copy of its own binary). The container's command is past that point; runc 1.1, which re-execs
+  itself once more, has its setup counted (extra checks, never hidden ones). Also not counted: checks the
+  kernel answers without the container's capability bits: a task that moved into a user namespace below
+  the container's own (it holds every capability there), and a check against a descendant namespace
+  owned by the task's euid (granted by ownership). A check against a descendant namespace owned by
+  another uid reads the container's bits and is counted.
 - `evidence`: `sufficient` only when `kg_capability_coverage` says every current digest was watched for
   the whole window: the runtime coverage (`kg_runtime_coverage`: probes, no lost events, no heartbeat gaps,
   no untracked live pods) **and**, for every instance in the window, the capability probe on the
@@ -1043,14 +1053,18 @@ From a live broker build (`live_evidence_drives_the_profile_and_its_patch`, `bod
 - `recommendation`: only with sufficient evidence: `drop: ["ALL"]`, `add`: every used and every probed
   capability, with one exception below (a used capability is never recommended for dropping),
   `probedKept`: the part of `add` there only because of probes, to be removed only after a person
-  confirms, and `probedOmitted`: probed-only capabilities left out, each `{capability, reason}`. `null`
-  otherwise.
+  confirms, `probedOmitted`: probed-only capabilities left out, each `{capability, reason}`, and
+  `requires`: `{"allowPrivilegeEscalation": false}` whenever `probedOmitted` is not empty (absent
+  otherwise). `add` is only enough with that setting: a consumer building its own patch from `add` must
+  apply `requires` too. `null` otherwise.
 - The exception: a **probed-only `SYS_ADMIN`** is left out (listed in `probedOmitted` with reason "probed
   only (memory reserve / seccomp without no_new_privs); allowPrivilegeEscalation=false removes the need")
-  unless the container is currently privileged. It comes almost entirely from the memory admin-reserve
+  unless the container is privileged in any running digest (a rollout can mix specs) or is an ephemeral
+  container (no patch touches those). It comes almost entirely from the memory admin-reserve
   check every root process makes; the one real gate among its non-audited callers is installing a seccomp
   filter without `no_new_privs`, and the recommendation keeps or sets `allowPrivilegeEscalation: false`,
-  which sets `no_new_privs`. A caveat says so. For a privileged container it stays in `add`. Every other
+  which sets `no_new_privs`; the recommendation's `requires` says so and a caveat too. For a privileged
+  or ephemeral container it stays in `add`. Every other
   probed capability (e.g. `SYS_PTRACE`) stays in `add`.
 - `unusedAdded`: capabilities the current `securityContext.capabilities.add` grants that were never used or
   probed (only with sufficient evidence).
@@ -1682,10 +1696,12 @@ From `GET /workloads/payments/Deployment/checkout/export?mode=enforce&format=zip
     as files by `format=zip-manifest`.
     At most 10 000 components per bundle.
   - New `documents[].image` (`null` except on `sbom`): which image, source and SBOM trust.
-- 2026-09-29 (**v1.6**, P2-7 capabilities; additive):
+- 2026-09-27 (**v1.6**, P2-7 capabilities; additive):
   - New top-level `capabilities` in the profile (section 2.9): observed capability use per container,
     evidence (`kg_capability_coverage`) and an evidence-based recommendation.
   - The podSecurity recommendation (and the export's `securitycontext` artifact) uses that evidence for
     `capabilities`: `drop: ["ALL"]` + `add` = the observed set; emitted also when PSS passes but the
     current set is wider than the observed one. New caveats name evidence-based and default containers.
   - New `GET /workloads/{ns}/{kind}/{name}/capabilities` (READ): the same `capabilities` block.
+  - A recommendation that leaves out a probed-only `SYS_ADMIN` (`probedOmitted`) carries
+    `requires: {"allowPrivilegeEscalation": false}`; a consumer building a patch from `add` must apply it.
