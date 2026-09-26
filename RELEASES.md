@@ -33,14 +33,18 @@ and this list in sync when adding a new component.
 
 Each component maintains its version in two places:
 
-1. **VERSION file** - Located at `<component>/VERSION` (e.g., `controller/VERSION`)
+1. **VERSION file** - Located at `<component>/VERSION` (e.g., `controller/VERSION`).
+   release-please rewrites it on each release through the
+   `x-release-please-version` marker on the version line, so keep that
+   marker when editing the file by hand. The `extra-files` entry is
+   `"VERSION"`: paths there are relative to the package directory.
 2. **Package manifest** - Component-specific file:
    - Controller: `controller/Cargo.toml`
    - Broker: `broker/Cargo.toml`
    - Frontend: `frontend/package.json`
    - Advisor: Set via ldflags during build
-   - Evaluator: `evaluator/go.mod` (Go module version not bumped; version
-     is sourced from the VERSION file at build time)
+   - Evaluator: `evaluator/go.mod` (Go module version not bumped; the
+     image tag comes from the `evaluator/vX.Y.Z` release tag)
    - LLM Bridge: `llm-bridge/package.json`
    - Chart: `charts/kguardian/Chart.yaml`
 
@@ -196,7 +200,7 @@ If release-please is unavailable or you need to bypass automation:
 
 ```bash
 # Manual version bump
-echo "1.2.3" > component/VERSION
+sed -i 's/^[0-9][^ ]*/1.2.3/' component/VERSION  # keep the x-release-please-version marker
 vim component/Cargo.toml  # Update version
 vim component/CHANGELOG.md  # Add entry manually
 
@@ -540,7 +544,7 @@ If you need to bypass release-please for any reason:
 
 ```bash
 # Manual version bump for broker
-echo "1.0.1" > broker/VERSION
+sed -i 's/^[0-9][^ ]*/1.0.1/' broker/VERSION  # keep the x-release-please-version marker
 vim broker/Cargo.toml  # version = "1.0.1"
 vim broker/CHANGELOG.md  # Add entry manually
 

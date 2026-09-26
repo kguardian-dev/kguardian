@@ -144,7 +144,7 @@ If you need to bypass automation:
 
 ```bash
 # Manual version bump
-echo "1.2.3" > component/VERSION
+sed -i 's/^[0-9][^ ]*/1.2.3/' component/VERSION  # keep the x-release-please-version marker
 vim component/package.json  # Update version
 vim component/CHANGELOG.md  # Add entry
 
