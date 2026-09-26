@@ -1,0 +1,193 @@
+---
+title: "profile"
+description: "Show a workload's security posture, compare profile revisions, and print a recommended securityContext patch"
+icon: "shield-halved"
+---
+
+## Synopsis
+
+Read-only views over the broker's workload security profiles. A profile is
+keyed by workload (`namespace/kind/name`), not by pod. It joins what
+kguardian observed: Pod Security Standards checks against the reported
+`securityContext`, network peers and audit verdicts, syscalls and any
+`SeccompProfile` CR, running image digests, and compute settings.
+
+```bash
+kubectl kguardian profile get <namespace>/<kind>/<name> [-o table|json|yaml]
+kubectl kguardian profile list [flags]
+kubectl kguardian profile diff <namespace>/<kind>/<name> [--from N] [--to N]
+kubectl kguardian profile export <namespace>/<kind>/<name> --format pss
+```
+
+`kind` is case-sensitive and is the owning workload's kind: `Deployment`,
+`StatefulSet`, `DaemonSet`, `CronJob`, `Job`, or `Pod` for a pod with no
+owner. A ReplicaSet's pods are profiled under their Deployment.
+
+<Warning>
+**unknown is not a pass.** When kguardian has no data for a dimension, or the
+source is not configured (vulnerability scanning, signatures), the value is
+unknown. The CLI prints `unknown`, never `0` or `ok`. The posture score is a
+weighted mean over the known dimensions only, so always read it with its
+coverage.
+</Warning>
+
+## profile get
+
+Calls `GET /workloads/{namespace}/{kind}/{name}/profile`, which the broker
+computes live.
+
+```
+Workload:   payments/Deployment/checkout
+Live pods:  2
+Posture:    warn  score 71  coverage 41%  grade -
+Unknown:    network, images (not counted in the score)
+Revision:   3 (2026-09-25T18:40:12Z)
+PSS level:  at most baseline (9 checks not visible to kguardian)
+
+DIMENSION    STATUS   SCORE       COVERAGE  REASON
+podSecurity  ok       80          partial   Evaluated checks pass restricted; unevaluated checks may lower the level
+network      unknown  unknown     partial   No audit policy covers this workload
+syscalls     warn     60          full      No SeccompProfile CR references this workload
+images       ok       not scored  full      No vulnerability source is configured; images are inventoried but not scored
+compute      warn     not scored  full      1 container has no memory limit
+
+Needs attention:
+SEVERITY  FINDING                        CONTAINER  TITLE
+medium    syscalls.no_enforcing_profile  -          No SeccompProfile CR enforces the observed syscall set
+
+Readiness:
+  trafficObserved24h  yes      Traffic observed for 6d 4h
+  noWouldDeny24h      unknown  No audit policy covers this workload
+```
+
+- **grade** is shown only when coverage is at least 80%.
+- **PSS level** "at most" means every check kguardian can evaluate passes,
+  but volumes, host ports, AppArmor, SELinux, procMount and sysctls are not
+  reported to kguardian and could still lower the level.
+- **not scored** means the dimension has data but no score in this release
+  (images without a vulnerability source; compute is informational).
+
+`-o json` and `-o yaml` print the broker's response unchanged, including
+every finding, per-container securityContext, network peer and the
+recommendation.
+
+## profile list
+
+Calls `GET /workloads`. Rows come from the broker's snapshot read model,
+refreshed every few minutes.
+
+| Flag | Type | Description | Default |
+|------|------|-------------|---------|
+| `-n, --namespace` | string | Only this namespace | all namespaces |
+| `--kind` | string | Only this workload kind (case-sensitive) | all |
+| `--status` | string | Only this posture status: `ok`, `warn`, `risk` or `unknown` | all |
+| `--limit` | int | Page size; the broker caps it at 500 | `100` |
+| `--after` | string | Cursor for the next page | first page |
+| `-o, --output` | string | `table`, `json` or `yaml` | `table` |
+
+```
+NAMESPACE  KIND         NAME       STATUS   SCORE    COVERAGE  GRADE  FINDINGS (C/H/M)  REV
+payments   Deployment   checkout   warn     71       41%       -      0/0/1             3
+payments   StatefulSet  ledger-db  unknown  unknown  0%        -      0/0/0             1
+```
+
+`--status unknown` lists the workloads kguardian cannot judge yet. When more
+pages exist, the `--after` cursor is printed on stderr.
+
+## profile diff
+
+Calls `GET /workloads/{namespace}/{kind}/{name}/profile/diff`. The broker
+stores a new revision whenever the observed, policy-relevant behaviour
+changes: securityContext, running digests, the syscall set, or network rules.
+A revision records what kguardian observed, not what is applied in the
+cluster.
+
+| Flag | Type | Description | Default |
+|------|------|-------------|---------|
+| `--from` | int | Older revision | the revision before `--to` |
+| `--to` | int | Newer revision | the latest |
+| `-o, --output` | string | `table`, `json` or `yaml` | `table` |
+
+```
+Workload: payments/Deployment/checkout
+From:     2 (2026-09-22T09:00:00Z)
+To:       3 (2026-09-25T18:40:12Z)
+
+podSecurity: changed
+  containers:
+    app
+      fields:
+        allowPrivilegeEscalation: unset -> false
+  level: baseline -> restricted
+  pod:
+    securityContext.seccompProfileType: unset -> RuntimeDefault
+
+network: changed
+  added:
+    + egress TCP/443 external:203.0.113.10
+
+syscalls: changed
+  added:
+    + io_uring_setup
+    + io_uring_enter
+
+images: changed
+  containers:
+    app
+      added:
+        + sha256:9f2c0d1e...
+      removed:
+        - sha256:0c3d...
+```
+
+`unset` means the field was not set at that revision. The latest revision
+number is shown by `profile get`.
+
+## profile export
+
+Prints a recommendation derived from the profile. kguardian never applies
+it.
+
+| Flag | Type | Description | Default |
+|------|------|-------------|---------|
+| `--format` | string | `pss`: the recommended `securityContext` as a strategic-merge patch | `pss` |
+
+The patch sets only the fields that fail an evaluated Pod Security Standards
+check, under the right path for the kind (`spec.template.spec` for a
+Deployment, `spec.jobTemplate.spec.template.spec` for a CronJob). stdout is
+the patch and nothing else; caveats go to stderr:
+
+```bash
+kubectl kguardian profile export payments/Deployment/checkout --format pss > checkout-pss.yaml
+```
+
+```yaml
+# kguardian recommendation, not applied. Review before use.
+# Target: Pod Security Standards restricted (kubernetes.io/docs/concepts/security/pod-security-standards)
+spec:
+  template:
+    spec:
+      initContainers:
+      - name: migrate
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop: ["ALL"]
+```
+
+Review it, then apply it yourself:
+
+```bash
+kubectl patch deployment checkout -n payments --patch-file checkout-pss.yaml
+```
+
+`runAsNonRoot: true` fails at container start when the image's `USER` is
+root, which kguardian cannot see; the caveats say so when it applies. If
+every evaluated check already passes, the command prints nothing on stdout
+and says so on stderr. If no container `securityContext` has been reported
+for the workload, it exits non-zero: there is nothing to base a
+recommendation on.
+
+Global flags (`--kubeconfig`, `--context`, `--broker-namespace`,
+`--broker-service`, `--broker-token-file`, `--debug`) are listed in the
+[CLI overview](/cli/overview).

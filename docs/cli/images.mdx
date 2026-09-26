@@ -1,0 +1,86 @@
+---
+title: "images"
+description: "List the image digests your workloads run, and which workloads run a given digest"
+icon: "box"
+---
+
+## Synopsis
+
+Read-only views over the broker's image inventory. The controller reports
+each container's image identity; the broker keys it by digest, not tag, so
+two nodes that resolved `nginx:latest` differently show as two images.
+
+```bash
+kubectl kguardian images list [flags]
+kubectl kguardian images get <digest> [flags]
+```
+
+The inventory records identity only. It carries no vulnerability, SBOM or
+signature data, so an image listed here is neither vetted nor flagged.
+
+## images list
+
+Calls `GET /images` and prints one page, ordered by digest.
+
+| Flag | Type | Description | Default |
+|------|------|-------------|---------|
+| `-n, --namespace` | string | Only images some workload in this namespace runs | all namespaces |
+| `--repository` | string | Only this normalised repository, e.g. `docker.io/library/nginx` | all |
+| `--limit` | int | Page size; the broker caps it at 500 | `100` |
+| `--after` | string | Cursor for the next page (a digest) | first page |
+| `-o, --output` | string | `table`, `json` or `yaml` | `table` |
+
+```
+DIGEST               REPOSITORY               TAGS         RUNNING  LAST SEEN
+sha256:0123456789ab  docker.io/library/nginx  1.27,latest  3        2026-09-26T09:00:00
+sha256:9f86d081884c  ghcr.io/acme/checkout    v4.2.0       0        2026-09-19T14:12:03
+```
+
+`RUNNING` is the number of workload containers running the digest now. `0`
+means it is no longer running; the row stays until retention prunes it.
+When more pages exist, the command prints the `--after` value for the next
+page on stderr, so a piped table stays clean.
+
+## images get
+
+Calls `GET /images/{digest}` and prints the image and every workload
+container that runs or ran it, running rows first.
+
+| Flag | Type | Description | Default |
+|------|------|-------------|---------|
+| `-o, --output` | string | `table`, `json` or `yaml` | `table` |
+
+```
+Digest:      sha256:0123...cdef
+Repository:  docker.io/library/nginx
+Tags:        1.27, latest
+Digest kind: repo
+First seen:  2026-09-20T10:00:00
+Last seen:   2026-09-26T09:00:00
+
+NAMESPACE  WORKLOAD             CONTAINER  RUNNING  STATE                       LAST SEEN
+shop       Deployment/checkout  app        true     running                     2026-09-26T09:00:00
+shop       Deployment/canary    app        false    waiting (ImagePullBackOff)  2026-09-25T22:40:11
+```
+
+A digest the broker has never seen exits non-zero with `image ... is not in
+the inventory`.
+
+`-o json` and `-o yaml` print the broker's response unchanged, including
+fields this CLI version does not know about. Global flags (`--kubeconfig`,
+`--context`, `--broker-namespace`, `--broker-service`,
+`--broker-token-file`, `--debug`) are listed in the
+[CLI overview](/cli/overview).
+
+## Examples
+
+```bash
+# What runs in one namespace
+kubectl kguardian images list -n payments
+
+# Every deployed digest of one repository
+kubectl kguardian images list --repository docker.io/library/nginx
+
+# Which workloads still run an old digest
+kubectl kguardian images get sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+```

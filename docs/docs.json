@@ -63,7 +63,9 @@
               "cli/overview",
               "cli/gen-networkpolicy",
               "cli/gen-seccomp",
-              "cli/compute-findings"
+              "cli/compute-findings",
+              "cli/profile",
+              "cli/images"
             ]
           },
           {

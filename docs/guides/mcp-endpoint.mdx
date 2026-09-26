@@ -4,7 +4,7 @@ description: "Point Claude Code or any MCP client at your cluster's observed tel
 icon: "plug"
 ---
 
-kguardian's assistant runs 12 tools against the Broker: pod traffic, syscalls, pod and service inventory, network-policy audit verdicts, and generation of least-privilege `NetworkPolicy` and seccomp profiles from that observed baseline. The web UI is one way to reach them.
+kguardian's assistant runs 19 tools against the Broker: pod traffic, syscalls, pod and service inventory, network-policy audit verdicts, compute contention, workload security profiles, the image inventory, and generation of least-privilege `NetworkPolicy` and seccomp profiles from that observed baseline. The web UI is one way to reach them.
 
 The other is to point your own MCP client at the cluster. Enable the endpoint, port-forward, add one server entry, and the agent you already work in can ask about real observed behaviour and turn it into policy YAML — without an API key of kguardian's own, and without leaving your terminal.
 
@@ -163,7 +163,7 @@ claude mcp list
 
 ## What you can ask for
 
-The 12 tools cover four areas. The value is not any single call — it is that an agent can chain them: find the pod, read its real traffic, check what a policy would have denied, then write the policy.
+The tools cover these areas (the compute tools are described in [Compute Gauges](/guides/compute-gauges)). The value is not any single call — it is that an agent can chain them: find the pod, read its real traffic, check what a policy would have denied, then write the policy.
 
 <AccordionGroup>
   <Accordion icon="chart-network" title="Observed network traffic">
@@ -195,12 +195,19 @@ The 12 tools cover four areas. The value is not any single call — it is that a
 
     *"Generate a Cilium policy for `checkout`, then tell me which existing verdicts it would newly deny."*
   </Accordion>
+  <Accordion icon="shield-halved" title="Workload security profiles and images">
+    `get_workload_security_profile` returns one workload's posture score and coverage, its top findings, controls, readiness checks, and per-dimension detail: Pod Security Standards level with the failing checks, network peers, syscalls and `SeccompProfile` sync, running image digests, and compute settings. When checks fail it includes a recommended `securityContext` patch. `list_workload_profiles` ranks many workloads (filter by namespace and posture: `ok`, `warn`, `risk`, `unknown`), and `diff_workload_profile` shows what changed between two stored revisions. `get_image_inventory` lists the image digests workloads run; it carries no vulnerability or signature data.
+
+    Tools are keyed by workload (`namespace`, `kind`, `name`), not pod. `null` or `unknown` means kguardian has no data, or the source is not configured. It is never a pass, and the score only covers known dimensions, so the tools return coverage alongside it. Lists are capped (25 rows by default, 100 at most) and every response is size-bounded, with a `truncated` flag when rows were cut.
+
+    *"Which workloads in `payments` are at risk, and what is the smallest securityContext change that gets `checkout` to restricted?"*
+  </Accordion>
 </AccordionGroup>
 
-Pod-specific tools take only `pod_name` — the Broker resolves it cluster-wide, so there is no namespace argument. Cluster-wide tools take an optional `namespace` filter.
+Pod-specific tools take only `pod_name` — the Broker resolves it cluster-wide, so there is no namespace argument. Cluster-wide tools take an optional `namespace` filter. Profile tools take the workload key: `namespace`, `kind` and `name`.
 
 <Note>
-Every tool is a read against the Broker, plus two that compute policy locally. Nothing here writes to your cluster: an agent can hand you a `NetworkPolicy`, but applying it is still `kubectl apply` and your review.
+Every tool is a read against the Broker, plus two that compute policy locally. Nothing here writes to your cluster: an agent can hand you a `NetworkPolicy` or a `securityContext` patch, but applying it is still `kubectl apply` and your review.
 </Note>
 
 ---

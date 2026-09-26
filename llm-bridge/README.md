@@ -2,7 +2,7 @@
 
 A microservice that connects the kguardian frontend to LLM providers (OpenAI, Anthropic, Gemini, GitHub Copilot) and gives the model access to cluster data. All 12 assistant tools, plus NetworkPolicy and seccomp profile generation, run in-process — there's no separate backend service for the model to call.
 
-The same 12 tools can optionally be served to *external* MCP clients (Claude Code, for one) over StreamableHTTP at `POST /mcp` on this service's existing port. That endpoint is off by default; see [MCP Endpoint](#mcp-endpoint) below and the [Connect an MCP client guide](https://docs.kguardian.dev/guides/mcp-endpoint) for the client-side setup.
+The same 19 tools can optionally be served to *external* MCP clients (Claude Code, for one) over StreamableHTTP at `POST /mcp` on this service's existing port. That endpoint is off by default; see [MCP Endpoint](#mcp-endpoint) below and the [Connect an MCP client guide](https://docs.kguardian.dev/guides/mcp-endpoint) for the client-side setup.
 
 ## Architecture
 
@@ -20,7 +20,7 @@ The same 12 tools can optionally be served to *external* MCP clients (Claude Cod
                       └─────────────┘      └─────────────┘
 ```
 
-The bridge exists so LLM API keys stay isolated from the Broker, the AI workload can scale independently, and the Broker stays focused on telemetry. It selects the first provider with a configured API key and exposes streaming chat over SSE. When the model calls a tool, the bridge executes it in-process (`src/tools/execute.ts`): the 10 read tools fetch and compact data straight from the Broker (`src/tools/backendClient.ts`, `src/tools/compaction.ts`), and the 2 generation tools (`generate_network_policy`, `generate_seccomp_profile`) build the policy/profile locally from the same observed-traffic and observed-syscall data, using the same algorithms as the advisor CLI (`src/tools/generators/`). See `src/tools/registry.ts` for the full tool list and descriptions.
+The bridge exists so LLM API keys stay isolated from the Broker, the AI workload can scale independently, and the Broker stays focused on telemetry. It selects the first provider with a configured API key and exposes streaming chat over SSE. When the model calls a tool, the bridge executes it in-process (`src/tools/execute.ts`): the 17 read tools fetch and compact data straight from the Broker (`src/tools/backendClient.ts`, `src/tools/compaction.ts`, and `src/tools/posture.ts` for the bounded profile and image tools), and the 2 generation tools (`generate_network_policy`, `generate_seccomp_profile`) build the policy/profile locally from the same observed-traffic and observed-syscall data, using the same algorithms as the advisor CLI (`src/tools/generators/`). See `src/tools/registry.ts` for the full tool list and descriptions.
 
 Its only upstream is the Broker (`BROKER_URL`) — there's no MCP transport hop and no advisor service call; tool execution and policy/seccomp generation both happen inside this process.
 
@@ -164,7 +164,7 @@ Upstream provider rate limits and overloads are surfaced with an actionable mess
 
 ## MCP Endpoint
 
-`POST /mcp` serves the same 12 tools to external MCP clients over StreamableHTTP, on this service's existing port — no second listener, Service, or Deployment. It is **off by default**: without `MCP_ENABLED` the route is never mounted and the path 404s exactly as if the build never had it.
+`POST /mcp` serves the same 19 tools to external MCP clients over StreamableHTTP, on this service's existing port — no second listener, Service, or Deployment. It is **off by default**: without `MCP_ENABLED` the route is never mounted and the path 404s exactly as if the build never had it.
 
 This is not the return of the retired standalone Go `mcp-server` (removed in PR #1197). It is the same in-process registry (`src/tools/registry.ts`) that the provider loops already use, re-served over HTTP — `tools/list` passes each tool's `parameters` through verbatim, so an external client and the LLM see byte-identical definitions.
 
