@@ -23,6 +23,9 @@ CREATE TABLE IF NOT EXISTS vuln_sources (
     -- alone, for the join (GIN, = ANY).
     platform_manifests JSONB     NOT NULL DEFAULT '{}'::jsonb,
     manifest_digests   TEXT[]    NOT NULL DEFAULT '{}',
+    -- A platform-manifest payload's index (BuildKit SBOMs); also in
+    -- manifest_digests so the index/manifest join finds it.
+    index_digest       VARCHAR   NULL,
     image_ref          VARCHAR   NULL,
     registry           VARCHAR   NULL,
     repository         VARCHAR   NULL,
@@ -49,8 +52,9 @@ CREATE TABLE IF NOT EXISTS vuln_sources (
     item_count         INTEGER   NOT NULL DEFAULT 0,
     -- Matcher findings (source grype): which SBOM source(s) were matched.
     sbom_sources       TEXT[]    NOT NULL DEFAULT '{}',
-    -- unverified | attached-unbound | verified. A registry SBOM that says
-    -- nothing is stored as unverified.
+    -- attached-unbound | unverified | scanned | verified (weakest first).
+    -- Unknown values, and a registry SBOM that states none, are stored as
+    -- attached-unbound. Only verified may be shown as signed.
     sbom_trust         VARCHAR   NULL,
     -- Registry-attached SBOMs: where it was found and whether a signature
     -- was verified (stored as sent; false = not checked, never "signed").

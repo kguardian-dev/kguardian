@@ -447,6 +447,10 @@ pub struct WireImage {
     pub digest_kind: Option<String>,
     #[serde(default, deserialize_with = "de_manifests")]
     pub platform_manifests: Option<BTreeMap<String, String>>,
+    /// For a platform-manifest payload (a BuildKit SBOM): the index it
+    /// belongs to. Joined like a platform manifest, the other way round.
+    #[serde(default)]
+    pub index_digest: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -662,7 +666,11 @@ pub struct Header {
     pub kind: String,
     pub digest_kind: String,
     pub platform_manifests: BTreeMap<String, String>,
+    /// Digests that join this payload to an inventory digest by the
+    /// index/manifest rule: its platform manifests, plus its index when
+    /// the payload is itself a platform manifest.
     pub manifest_digests: Vec<String>,
+    pub index_digest: Option<String>,
     pub image_ref: Option<String>,
     pub registry: Option<String>,
     pub repository: Option<String>,
@@ -807,16 +815,19 @@ fn clean_list(v: &[String], max_items: usize, max_len: usize) -> Vec<String> {
     out
 }
 
-/// SBOM trust levels (supplychain README). Anything else, and a
-/// registry SBOM that says nothing, reads as `unverified`: trust is never
-/// assumed.
-pub const TRUST_LEVELS: [&str; 3] = ["unverified", "attached-unbound", "verified"];
+/// SBOM trust levels (supplychain README "SBOM trust and the union"),
+/// weakest first. Only `verified` may ever be presented as signed.
+pub const TRUST_LEVELS: [&str; 4] = ["attached-unbound", "unverified", "scanned", "verified"];
+
+/// The weakest level: what an unknown value, or a registry SBOM that
+/// states none, reads as. Trust is never assumed.
+const WEAKEST_TRUST: &str = "attached-unbound";
 
 fn normalise_trust(t: Option<&str>, registry: bool) -> Option<String> {
     match t.map(str::trim).filter(|t| !t.is_empty()) {
         Some(t) if TRUST_LEVELS.contains(&t) => Some(t.to_string()),
-        Some(_) => Some("unverified".to_string()),
-        None if registry => Some("unverified".to_string()),
+        Some(_) => Some(WEAKEST_TRUST.to_string()),
+        None if registry => Some(WEAKEST_TRUST.to_string()),
         None => None,
     }
 }
@@ -970,6 +981,18 @@ fn build_header(
             obs.push(r);
         }
     }
+    let index_digest = image
+        .index_digest
+        .as_deref()
+        .map(str::trim)
+        .filter(|d| is_valid_digest(d) && *d != c.digest)
+        .map(str::to_string);
+    if let Some(ix) = &index_digest {
+        if !manifest_digests.contains(ix) {
+            manifest_digests.push(ix.clone());
+            manifest_digests.sort();
+        }
+    }
     let registry = clean(image.registry.as_deref(), LEN_NAME);
     let repository = clean(image.repository.as_deref(), LEN_REF);
     Header {
@@ -979,6 +1002,7 @@ fn build_header(
         digest_kind,
         platform_manifests,
         manifest_digests,
+        index_digest,
         image_ref: clean(image.image_ref.as_deref(), LEN_REF),
         norm_repository: normalise_repository(registry.as_deref(), repository.as_deref()),
         registry,
@@ -1323,11 +1347,13 @@ fn stored_header(conn: &mut PgConnection, h: &Header) -> QueryResult<Option<Stor
 
 const HEADER_UPSERT_SQL: &str = "\
 INSERT INTO vuln_sources (digest, source, kind, digest_kind, platform_manifests, manifest_digests, \
+    index_digest, \
     image_ref, registry, repository, norm_repository, tag, scanner_name, scanner_vendor, \
     scanner_version, scanned_at, db_updated_at, os_family, os_name, os_eosl, observed_in, \
     content_hash, sbom_format, sbom_spec_version, item_count, sbom_sources, sbom_trust, \
     attestation, received_at) \
 SELECT r.digest, r.source, r.kind, r.digest_kind, r.platform_manifests, r.manifest_digests, \
+    r.index_digest, \
     r.image_ref, r.registry, r.repository, r.norm_repository, r.tag, r.scanner_name, \
     r.scanner_vendor, r.scanner_version, r.scanned_at, r.db_updated_at, r.os_family, r.os_name, \
     r.os_eosl, r.observed_in, r.content_hash, r.sbom_format, r.sbom_spec_version, r.item_count, \
@@ -1335,7 +1361,8 @@ SELECT r.digest, r.source, r.kind, r.digest_kind, r.platform_manifests, r.manife
 FROM jsonb_populate_record(NULL::vuln_sources, $1::jsonb) r \
 ON CONFLICT (digest, source, kind) DO UPDATE SET \
     digest_kind = EXCLUDED.digest_kind, platform_manifests = EXCLUDED.platform_manifests, \
-    manifest_digests = EXCLUDED.manifest_digests, image_ref = EXCLUDED.image_ref, \
+    manifest_digests = EXCLUDED.manifest_digests, index_digest = EXCLUDED.index_digest, \
+    image_ref = EXCLUDED.image_ref, \
     registry = EXCLUDED.registry, repository = EXCLUDED.repository, \
     norm_repository = EXCLUDED.norm_repository, tag = EXCLUDED.tag, \
     scanner_name = EXCLUDED.scanner_name, scanner_vendor = EXCLUDED.scanner_vendor, \

@@ -884,6 +884,27 @@ fn live_database_joins_by_image_id_then_platform_manifest_then_workload_tag() {
     assert_eq!(page.reports[0].join, "image_id");
     exec(&mut conn, &format!("DELETE FROM supplychain_image_links WHERE image_digest = '{}'; DELETE FROM vuln_sources WHERE digest IN ('{}', '{}'); DELETE FROM image_vulnerabilities WHERE digest IN ('{}', '{}')", d(16), d(16), d(50), d(16), d(50)));
 
+    // index_digest: a BuildKit SBOM for a platform manifest names its
+    // index; the kubelet ran the index digest, so it joins by the
+    // index/manifest rule.
+    seed_inventory(
+        &mut conn,
+        &d(60),
+        "ghcr.io/example/bk",
+        "1",
+        "Deployment",
+        "bk",
+        "bk",
+        0,
+    );
+    let mut bk = vulns_json(&d(61), "2026-09-20T08:00:00Z", &[("CVE-BK", "LOW", None)]);
+    bk["image"]["digest_kind"] = json!("manifest");
+    bk["image"]["index_digest"] = json!(d(60));
+    bk["observed_in"] = json!([]);
+    store_v(&mut conn, bk);
+    assert!(links(&mut conn).contains(&(d(61), d(60), "platform_manifest".to_string())));
+    exec(&mut conn, &format!("DELETE FROM supplychain_image_links WHERE digest = '{}'; DELETE FROM vuln_sources WHERE digest = '{}'; DELETE FROM image_vulnerabilities WHERE digest = '{}'; DELETE FROM workload_containers WHERE image_digest = '{}'; DELETE FROM images WHERE digest = '{}'", d(61), d(61), d(61), d(60), d(60)));
+
     // A digest the inventory learns after the scan is linked by the
     // periodic pass.
     store_v(
@@ -1459,6 +1480,41 @@ async fn live_database_http_ingest_end_to_end() {
 }
 
 #[test]
+fn trust_levels_default_to_the_weakest() {
+    assert_eq!(
+        normalise_trust(Some("scanned"), false).as_deref(),
+        Some("scanned")
+    );
+    assert_eq!(
+        normalise_trust(Some("verified"), true).as_deref(),
+        Some("verified")
+    );
+    assert_eq!(
+        normalise_trust(Some("signed!"), false).as_deref(),
+        Some("attached-unbound")
+    );
+    assert_eq!(
+        normalise_trust(None, true).as_deref(),
+        Some("attached-unbound")
+    );
+    assert_eq!(normalise_trust(None, false), None);
+    let mut v = vulns_json(&d(1), "2026-09-20T08:00:00Z", &[]);
+    v["sbom_trust"] = json!("scanned");
+    let p = normalise_vulnerabilities(&d(1), parse_vulns(v), now()).unwrap();
+    assert_eq!(p.header.sbom_trust.as_deref(), Some("scanned"));
+    // index_digest joins through manifest_digests; a bad one is dropped.
+    let mut v = vulns_json(&d(1), "2026-09-20T08:00:00Z", &[]);
+    v["image"]["index_digest"] = json!(d(7));
+    let p = normalise_vulnerabilities(&d(1), parse_vulns(v), now()).unwrap();
+    assert_eq!(p.header.index_digest, Some(d(7)));
+    assert!(p.header.manifest_digests.contains(&d(7)));
+    let mut v = vulns_json(&d(1), "2026-09-20T08:00:00Z", &[]);
+    v["image"]["index_digest"] = json!("sha256:nope");
+    let p = normalise_vulnerabilities(&d(1), parse_vulns(v), now()).unwrap();
+    assert_eq!(p.header.index_digest, None);
+}
+
+#[test]
 fn grype_signals_are_bounded_and_absent_stays_unknown() {
     let mut v = vulns_json(
         &d(1),
@@ -1490,8 +1546,8 @@ fn grype_signals_are_bounded_and_absent_stays_unknown() {
     assert_eq!(p.header.sbom_sources, ["registry"]);
     assert_eq!(
         p.header.sbom_trust.as_deref(),
-        Some("unverified"),
-        "unknown trust is unverified"
+        Some("attached-unbound"),
+        "unknown trust is the weakest level"
     );
 }
 
@@ -1658,7 +1714,7 @@ fn live_database_sources_are_deduplicated_and_registry_sboms_never_replace_trivy
     assert_eq!(report.source, "registry");
     assert_eq!(
         report.sbom_trust.as_deref(),
-        Some("unverified"),
+        Some("attached-unbound"),
         "registry SBOM defaults to unverified"
     );
     let att = report.attestation.as_ref().unwrap();
@@ -1670,7 +1726,7 @@ fn live_database_sources_are_deduplicated_and_registry_sboms_never_replace_trivy
         .as_array()
         .unwrap()
         .iter()
-        .any(|p| p["name"] == "kguardian:sbomTrust" && p["value"] == "unverified"));
+        .any(|p| p["name"] == "kguardian:sbomTrust" && p["value"] == "attached-unbound"));
     // Trivy's SBOM for the image is untouched by the registry one.
     assert_eq!(
         component_names(&mut conn, &d(1))

@@ -192,9 +192,9 @@ pub struct Report {
     /// Matcher findings: the SBOM source(s) that were matched.
     #[diesel(sql_type = Array<Text>)]
     pub sbom_sources: Vec<String>,
-    /// SBOM trust: `unverified` | `attached-unbound` | `verified`. A
-    /// registry SBOM is additive evidence, never a replacement for a
-    /// scanner's, and is only as trustworthy as this says.
+    /// `attached-unbound` | `unverified` | `scanned` | `verified`, weakest
+    /// first. Only `verified` may be shown as signed. A registry SBOM is
+    /// additive evidence, never a replacement for a scanner's.
     #[diesel(sql_type = Nullable<Text>)]
     pub sbom_trust: Option<String>,
     /// Registry-attached SBOM: where it was found. `verified: false`
