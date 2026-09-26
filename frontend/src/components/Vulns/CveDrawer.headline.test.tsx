@@ -91,8 +91,12 @@ describe('CVE drawer headline', () => {
     expect(headlineLabels()).toContain('1 unknown');
     // With an unknown row the known P2 is a floor, not the answer.
     const floor = screen.getByRole('dialog').querySelector('[data-at-least]')!;
-    expect(floor.textContent).toBe('≥P2');
-    expect(floor.getAttribute('aria-label')).toBe('at least P2; 1 row unknown');
+    // Seen: "≥P2"; read out: "at least P2; 1 unknown" (the glyph is aria-hidden).
+    const seen = [...floor.childNodes].filter((n) => !(n instanceof HTMLElement && n.classList.contains('sr-only'))).map((n) => n.textContent).join('');
+    expect(seen).toBe('≥P2');
+    expect(floor.querySelector('[aria-hidden="true"]')!.textContent).toBe('≥');
+    expect(floor.textContent!.replace('≥', '')).toBe('at least P2; 1 unknown');
+    expect(floor.getAttribute('title')).toBe('at least P2; 1 row unknown');
   });
 
   test('a failed read: "read failed" in the headline, and its row is unknown', async () => {
