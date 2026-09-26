@@ -1033,11 +1033,15 @@ From a live broker build (`live_evidence_drives_the_profile_and_its_patch`, `bod
   for `SYS_ADMIN`; others gate real behaviour: a seccomp filter without `no_new_privs`, ptrace access to
   other processes). Each has `count`, `firstSeen`, `lastSeen`.
 - Not counted: container runtime setup, decided by provenance, never by name (a process renaming itself
-  `runc:[` is still counted): a task whose real parent is outside every pod cgroup and that has either not
-  exec'd since that parent created it (a runtime forking without exec) or exec'd exactly once and runs
-  the same executable as that parent or has a parent named `runc*` (runc init, which runc execs from a
-  sealed copy of its own binary). The container's command is past that point; runc 1.1, which re-execs
-  itself once more, has its setup counted (extra checks, never hidden ones). Also not counted: checks the
+  `runc:[` is still counted): a task whose real parent is outside every pod cgroup and that has either
+  not exec'd since that parent created it (a runtime forking without exec; except in the host pid
+  namespace under a parent that adopts orphans, a subreaper or a pid namespace init, which is where a
+  hostPID container's forked worker lands) or exec'd exactly once, from a sealed copy of its executable
+  (a memfd or unlinked file, or a file on a mount outside its mount namespace), and runs the same
+  executable as that parent or has a parent named `runc*` (runc init, which runc execs from a sealed copy
+  of its own binary). The container's command is exec'd from its rootfs, never a sealed copy, so another
+  runtime installed as `runc` does not hide it. runc 1.1 (one more re-exec), a foreground crun (a
+  subreaper) and a hostPID container's exec have their setup counted (extra checks, never hidden ones). Also not counted: checks the
   kernel answers without the container's capability bits: a task that moved into a user namespace below
   the container's own (it holds every capability there), and a check against a descendant namespace
   owned by the task's euid (granted by ownership). A check against a descendant namespace owned by
@@ -1054,9 +1058,9 @@ From a live broker build (`live_evidence_drives_the_profile_and_its_patch`, `bod
   capability, with one exception below (a used capability is never recommended for dropping),
   `probedKept`: the part of `add` there only because of probes, to be removed only after a person
   confirms, `probedOmitted`: probed-only capabilities left out, each `{capability, reason}`, and
-  `requires`: `{"allowPrivilegeEscalation": false}` whenever `probedOmitted` is not empty (absent
-  otherwise). `add` is only enough with that setting: a consumer building its own patch from `add` must
-  apply `requires` too. `null` otherwise.
+  `requires`: `{"allowPrivilegeEscalation": false}` whenever `probedOmitted` is not empty, absent
+  otherwise. `add` is only enough with that setting: a consumer building its own patch from `add` must
+  apply `requires` too. Without sufficient evidence `recommendation` is `null`.
 - The exception: a **probed-only `SYS_ADMIN`** is left out (listed in `probedOmitted` with reason "probed
   only (memory reserve / seccomp without no_new_privs); allowPrivilegeEscalation=false removes the need")
   unless the container is privileged in any running digest (a rollout can mix specs) or is an ephemeral
