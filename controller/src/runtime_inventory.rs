@@ -289,9 +289,36 @@ static PROBE: std::sync::OnceLock<(NaiveDateTime, bool)> = std::sync::OnceLock::
 /// Published by the eBPF poll loop.
 pub static KERNEL_DROPS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
+/// Whether the capability probe is attached.
+static PROBE_CAPS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+/// Which capability hook is attached (see `RUNTIME_CAP_SYMBOLS` in bpf.rs).
+static CAP_HOOK: std::sync::OnceLock<&'static str> = std::sync::OnceLock::new();
+
 /// Called by the eBPF loader once the probe is attached.
-pub fn probe_attached(libs: bool) {
+pub fn probe_attached(libs: bool, cap_hook: Option<&'static str>) {
     let _ = PROBE.set((Utc::now().naive_utc(), libs));
+    PROBE_CAPS.store(cap_hook.is_some(), std::sync::atomic::Ordering::Relaxed);
+    if let Some(h) = cap_hook {
+        let _ = CAP_HOOK.set(h);
+    }
+}
+
+/// Capability inventory switch (`RUNTIME_INVENTORY_CAPABILITIES`, chart
+/// `controller.runtimeInventory.capabilities`). Off unless set; only
+/// meaningful when [`Mode`] is not off.
+pub fn capabilities_from_env() -> bool {
+    std::env::var("RUNTIME_INVENTORY_CAPABILITIES")
+        .ok()
+        .is_some_and(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "true" | "1" | "on"))
+}
+
+/// What the eBPF loader needs for the runtime inventory probe.
+pub struct ProbeConfig {
+    pub files: tokio::sync::mpsc::Sender<RuntimeEventData>,
+    /// Load the library probe (mode full).
+    pub libs: bool,
+    /// Load the capability probe and send its data here.
+    pub caps: Option<tokio::sync::mpsc::Sender<crate::runtime_capabilities::CapMsg>>,
 }
 
 /// One container of a pod, as the pod status names it.
@@ -569,6 +596,11 @@ pub struct Store {
     backfilled_at: HashMap<ContainerKey, NaiveDateTime>,
     /// Kernel drop count at the last heartbeat.
     drops_seen: u64,
+    /// The capability probe is attached (reported with each heartbeat).
+    pub cap_probe: bool,
+    /// Which capability hook (`cap_capable`, or the `security_capable`
+    /// fallback, which misses some checks).
+    pub cap_hook: Option<&'static str>,
     /// Events that reached userspace but could not be attributed to a
     /// container, since the last heartbeat. Like kernel drops, whose they
     /// were is unknown: every container on the node may have lost one.
@@ -619,6 +651,11 @@ pub struct CoveragePost {
     /// The inventory of this container is known to be incomplete (the
     /// /proc backfill hit its maps cap): never covered while it runs.
     pub incomplete: bool,
+    /// The capability probe is attached: capability checks are counted.
+    pub cap_probe: bool,
+    /// Its hook: `cap_capable` (every check) or `security_capable` (the
+    /// fallback, which misses commoncap's direct checks).
+    pub cap_hook: Option<String>,
     /// The container is gone; its last heartbeat.
     pub ended: bool,
     pub heartbeat_at: NaiveDateTime,
@@ -938,6 +975,11 @@ impl Store {
                     events_dropped,
                     unsent,
                     incomplete: self.incomplete.contains(&key),
+                    cap_probe: self.cap_probe && exec_probe,
+                    cap_hook: self
+                        .cap_hook
+                        .filter(|_| self.cap_probe && exec_probe)
+                        .map(str::to_string),
                     ended: false,
                     heartbeat_at: wall,
                     heartbeat_secs: HEARTBEAT_EVERY.as_secs() as u32,
@@ -1189,12 +1231,23 @@ where
 
 /// Consume probe events, backfill, and post. Returns when the event
 /// channel closes (the eBPF loop is gone).
-pub async fn run(mut events: Receiver<RuntimeEventData>, mode: Mode) -> Result<(), crate::Error> {
-    info!(mode = mode.as_str(), "runtime inventory");
+pub async fn run(
+    mut events: Receiver<RuntimeEventData>,
+    caps_rx: Option<Receiver<crate::runtime_capabilities::CapMsg>>,
+    mode: Mode,
+) -> Result<(), crate::Error> {
+    use crate::runtime_capabilities::{CapMsg, CapStore};
+    info!(
+        mode = mode.as_str(),
+        capabilities = caps_rx.is_some(),
+        "runtime inventory"
+    );
     if mode == Mode::Off {
         return Ok(());
     }
     let mut store = Store::default();
+    let mut caps = CapStore::default();
+    let mut caps_rx = caps_rx;
     let mut post_tick = tokio::time::interval(POST_EVERY);
     post_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let mut last_backfill: Option<Instant> = None;
@@ -1229,6 +1282,27 @@ pub async fn run(mut events: Receiver<RuntimeEventData>, mode: Mode) -> Result<(
                 let sighting = Sighting { kind, path, complete, source: "ebpf", origin };
                 store.add((ev.generation, cid), sighting, Instant::now(), Utc::now().naive_utc());
             }
+            msg = async {
+                match caps_rx.as_mut() {
+                    Some(rx) => rx.recv().await,
+                    None => std::future::pending().await,
+                }
+            } => {
+                match msg {
+                    None => caps_rx = None,
+                    Some(CapMsg::Event(ev)) => {
+                        if let Lookup::Ignored = lookup(ev.generation) {
+                            continue;
+                        }
+                        let Some(cid) = ev.container_id() else {
+                            store.note_unattributed();
+                            continue;
+                        };
+                        caps.event(ev.cgroup_id, (ev.generation, cid), ev.cap, ev.flags, Utc::now().naive_utc());
+                    }
+                    Some(CapMsg::Counts(snapshot)) => caps.counts(&snapshot, Utc::now().naive_utc()),
+                }
+            }
             _ = post_tick.tick() => {
                 if last_backfill.is_none_or(|t| t.elapsed() >= BACKFILL_EVERY) {
                     last_backfill = Some(Instant::now());
@@ -1249,10 +1323,14 @@ pub async fn run(mut events: Receiver<RuntimeEventData>, mode: Mode) -> Result<(
                     }
                 }
                 post_due(&mut store, &resolve).await;
+                post_caps(&mut caps, &mut store, &resolve).await;
                 // Coverage heartbeat, after the backfill and the post so a
                 // backfilled container is reported the pass it was read.
                 if last_heartbeat.is_none_or(|t| t.elapsed() >= HEARTBEAT_EVERY) {
                     last_heartbeat = Some(Instant::now());
+                    store.cap_probe = caps_rx.is_some()
+                        && PROBE_CAPS.load(std::sync::atomic::Ordering::Relaxed);
+                    store.cap_hook = CAP_HOOK.get().copied();
                     let beats = store.coverage_due(
                         &registry_pods(),
                         PROBE.get().copied(),
@@ -1264,6 +1342,7 @@ pub async fn run(mut events: Receiver<RuntimeEventData>, mode: Mode) -> Result<(
                     post_coverage(beats).await;
                 }
                 store.prune(resolve);
+                caps.prune(resolve);
                 if last_stats.elapsed() >= STATS_EVERY {
                     last_stats = Instant::now();
                     let s = store.stats;
@@ -1283,6 +1362,50 @@ pub async fn run(mut events: Receiver<RuntimeEventData>, mode: Mode) -> Result<(
     }
     warn!("runtime inventory event channel closed");
     Ok(())
+}
+
+/// Post capability entries in chunks. A failed chunk keeps its uses for
+/// the next pass; entries the broker dropped are lost uses.
+async fn post_caps<F>(
+    caps: &mut crate::runtime_capabilities::CapStore,
+    store: &mut Store,
+    resolve: &F,
+) where
+    F: Fn(u32) -> Option<PodRuntime>,
+{
+    loop {
+        let (posts, marks) = caps.due(Instant::now(), MAX_POST_ENTRIES, resolve);
+        if posts.is_empty() {
+            return;
+        }
+        let n = posts.len();
+        match crate::client::api_post_call_json(serde_json::json!(posts), "runtime/capabilities")
+            .await
+        {
+            Ok(summary) => {
+                let dropped = summary.get("dropped").and_then(|d| d.as_u64()).unwrap_or(0);
+                if dropped > 0 {
+                    warn!(
+                        dropped,
+                        "broker dropped capability entries; reported as a coverage gap"
+                    );
+                    let keys: Vec<SentMark> = marks
+                        .iter()
+                        .map(|((k, _, _), _)| (k.clone(), ("cap", String::new())))
+                        .collect();
+                    store.note_ingest_dropped(&keys, dropped);
+                }
+                caps.mark_sent(&marks, Instant::now());
+                if n < MAX_POST_ENTRIES {
+                    return;
+                }
+            }
+            Err(e) => {
+                warn!(entries = n, error = %e, "capability POST failed; retrying next pass");
+                return;
+            }
+        }
+    }
 }
 
 /// Post heartbeats in chunks. A failed chunk is not retried: the next
@@ -1792,6 +1915,30 @@ mod tests {
             0,
             "reported once"
         );
+    }
+
+    #[test]
+    fn heartbeats_say_whether_capability_checks_are_counted() {
+        let pods = [(7, pod_started(1))];
+        let mut s = Store::default();
+        assert!(
+            !s.coverage_due(&pods, Some((at(0), true)), Mode::Full, 0, "n1", at(2))[0].cap_probe
+        );
+        s.cap_probe = true;
+        s.cap_hook = Some("cap_capable");
+        let b = &s.coverage_due(&pods, Some((at(0), true)), Mode::Full, 0, "n1", at(3))[0];
+        assert!(b.cap_probe);
+        assert_eq!(
+            b.cap_hook.as_deref(),
+            Some("cap_capable"),
+            "the hook travels with it"
+        );
+        // No exec probe at all: nothing is counted, whatever the flag says.
+        let mut s = Store {
+            cap_probe: true,
+            ..Default::default()
+        };
+        assert!(!s.coverage_due(&pods, None, Mode::Full, 0, "n1", at(2))[0].cap_probe);
     }
 
     #[test]

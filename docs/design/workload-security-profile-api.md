@@ -4,7 +4,7 @@ Part of #1533. Implemented in `broker/src/workload_profile.rs` (read model, post
 `broker/src/pod_security.rs` (Pod Security Standards analyser), PR #1669. Consumers: the frontend profile
 page (#1672), llm-bridge tools and the advisor `profile` commands (#1668).
 
-Status: **v1.5, stable**. Every change is appended to the CHANGELOG at the bottom, dated.
+Status: **v1.6, stable**. Every change is appended to the CHANGELOG at the bottom, dated.
 
 **Examples:** every example below is generated from raw responses of a v1.4 broker build against a
 seeded test database (neutral names only). Values are verbatim. The only edits are: lists longer than the stated
@@ -368,6 +368,9 @@ From `GET /workloads/payments/Deployment/refunds/profile` -> 200 (capture `profi
     such as hostPath, may still fail). It is never `true` in v1.
 - `exposure`: distinct peers from observed flows; all `null` when there are no flows.
 - `drift`: section 2.8. Drift findings (dimension `"drift"`) are also in `findings` / `attention`.
+- `capabilities`: section 2.9. Observed capability use and the evidence behind the `capabilities` part of
+  the podSecurity recommendation. Not part of the stored snapshot (counts move constantly); the
+  recommendation reaches versions through `dimensions.podSecurity.recommendation`.
 
 ### 2.1 Common dimension envelope
 
@@ -942,6 +945,125 @@ From `GET /workloads/payments/Deployment/checkout/profile` -> 200 (capture `prof
 - Metrics: `/metrics` exposes the gauge `kguardian_workload_drift{workload_namespace, workload_kind,
   workload, type}` = drift items of that type in the workload's latest snapshot, refreshed every 60 s from
   the read model (at most 5 000 series). A workload leaves the gauge when its read-model row is pruned.
+
+### 2.9 `capabilities` (P2-7; not a dimension, never sets posture)
+
+Which Linux capabilities each container actually used, from the controller's capability probe
+(`controller.runtimeInventory.capabilities`, off by default), and whether that is enough evidence to
+recommend `drop: [ALL]` plus only those.
+
+From a live broker build (`live_evidence_drives_the_profile_and_its_patch`, `body.capabilities`):
+
+```json
+{
+  "containers": [
+    {
+      "container": "app",
+      "denied": [
+        {
+          "capability": "SYS_ADMIN",
+          "count": 4,
+          "firstSeen": "2026-09-26T10:00:00",
+          "lastSeen": "2026-09-26T11:00:00"
+        }
+      ],
+      "digests": [
+        "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+      ],
+      "evidence": "sufficient",
+      "observedSince": "2026-09-18T13:28:45.825117",
+      "probed": [
+        {
+          "capability": "SYS_ADMIN",
+          "count": 25,
+          "firstSeen": "2026-09-26T10:00:00",
+          "lastSeen": "2026-09-26T11:00:00"
+        }
+      ],
+      "reason": null,
+      "recommendation": {
+        "add": [
+          "NET_BIND_SERVICE",
+          "SYS_TIME"
+        ],
+        "drop": [
+          "ALL"
+        ],
+        "probedKept": [],
+        "probedOmitted": [
+          {
+            "capability": "SYS_ADMIN",
+            "reason": "probed only (memory reserve / seccomp without no_new_privs); allowPrivilegeEscalation=false removes the need"
+          }
+        ]
+      },
+      "unusedAdded": [
+        "NET_ADMIN"
+      ],
+      "used": [
+        {
+          "capability": "NET_BIND_SERVICE",
+          "count": 5,
+          "firstSeen": "2026-09-26T10:00:00",
+          "lastSeen": "2026-09-26T11:00:00"
+        },
+        {
+          "capability": "SYS_TIME",
+          "count": 1,
+          "firstSeen": "2026-09-26T10:00:00",
+          "lastSeen": "2026-09-26T11:00:00"
+        }
+      ]
+    }
+  ],
+  "windowHours": 168
+}
+```
+
+- `windowHours`: the evidence window (`CAPABILITY_EVIDENCE_WINDOW_HOURS`, default 168, clamped to
+  24-2160). Long on purpose: a capability used weekly must have had a chance to show up.
+- One entry per current container. `digests`: its current digests, all of which the evidence must cover.
+- `used`: ordinary checks that succeeded (the container needed the capability), summed over every digest
+  the container ran, current or previous. `denied`: ordinary checks the container made without holding the
+  capability (granting it would change behaviour). `probed`: `CAP_OPT_NOAUDIT` checks that succeeded, the
+  kernel asking whether the process is privileged (every root process's memory admin-reserve check asks
+  for `SYS_ADMIN`; others gate real behaviour: a seccomp filter without `no_new_privs`, ptrace access to
+  other processes). Each has `count`, `firstSeen`, `lastSeen`.
+- Not counted: container runtime setup (a task that has not exec'd since it was forked by a process
+  outside every pod cgroup, i.e. runc init; decided by provenance, so a process renaming itself `runc:[`
+  is still counted), and checks against a user namespace the container created.
+- `evidence`: `sufficient` only when `kg_capability_coverage` says every current digest was watched for
+  the whole window: the runtime coverage (`kg_runtime_coverage`: probes, no lost events, no heartbeat gaps,
+  no untracked live pods) **and**, for every instance in the window, the capability probe on the
+  `cap_capable` hook, captured from the container's start with no gap since (capabilities have no `/proc`
+  backfill, so a container already running when the probe attached is never evidence until it restarts).
+  Otherwise `insufficient`, with `reason`: a `kg_runtime_coverage` reason, `capabilities_not_tracked`,
+  `capabilities_partial_hook`, `capabilities_not_seen_since_start`, `no_current_digest`, or
+  `rows_truncated`.
+- `recommendation`: only with sufficient evidence: `drop: ["ALL"]`, `add`: every used and every probed
+  capability, with one exception below (a used capability is never recommended for dropping),
+  `probedKept`: the part of `add` there only because of probes, to be removed only after a person
+  confirms, and `probedOmitted`: probed-only capabilities left out, each `{capability, reason}`. `null`
+  otherwise.
+- The exception: a **probed-only `SYS_ADMIN`** is left out (listed in `probedOmitted` with reason "probed
+  only (memory reserve / seccomp without no_new_privs); allowPrivilegeEscalation=false removes the need")
+  unless the container is currently privileged. It comes almost entirely from the memory admin-reserve
+  check every root process makes; the one real gate among its non-audited callers is installing a seccomp
+  filter without `no_new_privs`, and the recommendation keeps or sets `allowPrivilegeEscalation: false`,
+  which sets `no_new_privs`. A caveat says so. For a privileged container it stays in `add`. Every other
+  probed capability (e.g. `SYS_PTRACE`) stays in `add`.
+- `unusedAdded`: capabilities the current `securityContext.capabilities.add` grants that were never used or
+  probed (only with sufficient evidence).
+- Retention keeps capability rows for at least the window plus a day, so a capability used inside the
+  window is never pruned while the window counts as evidence.
+- The podSecurity recommendation (section 2.3, and the export's `securitycontext` artifact) uses this: with
+  sufficient evidence a container's patch is `drop: ["ALL"]` + `add: <used>` (`add: null` when none was
+  used), and it is emitted even when every PSS check passes if the current set is wider than the used
+  one. A used capability other than `NET_BIND_SERVICE` keeps the container below restricted; a caveat
+  says so, and another names capabilities kept only because of probes. Without evidence the patch keeps
+  the restricted default and a caveat says it is not observed evidence.
+- Not seen: capabilities checked by kernel paths that do not go through `cap_capable`/`security_capable`,
+  and capabilities a container would need only in a situation that did not occur in the window.
 
 ## 3. Versions
 
@@ -1560,3 +1682,10 @@ From `GET /workloads/payments/Deployment/checkout/export?mode=enforce&format=zip
     as files by `format=zip-manifest`.
     At most 10 000 components per bundle.
   - New `documents[].image` (`null` except on `sbom`): which image, source and SBOM trust.
+- 2026-09-29 (**v1.6**, P2-7 capabilities; additive):
+  - New top-level `capabilities` in the profile (section 2.9): observed capability use per container,
+    evidence (`kg_capability_coverage`) and an evidence-based recommendation.
+  - The podSecurity recommendation (and the export's `securitycontext` artifact) uses that evidence for
+    `capabilities`: `drop: ["ALL"]` + `add` = the observed set; emitted also when PSS passes but the
+    current set is wider than the observed one. New caveats name evidence-based and default containers.
+  - New `GET /workloads/{ns}/{kind}/{name}/capabilities` (READ): the same `capabilities` block.
