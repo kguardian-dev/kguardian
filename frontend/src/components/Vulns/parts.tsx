@@ -23,7 +23,7 @@ export function SeverityBadge({ severity }: { severity: VulnSeverity }) {
  * higher; it reads "≥P2" (a P0 cannot be exceeded, so it stays "P0").
  * `pending`: the read for this row is still in flight ("…").
  */
-export function TierBadge({ tier, title, atLeast = false, pending = false }: { tier: RiskTierName | null; title?: string; atLeast?: boolean; pending?: boolean }) {
+export function TierBadge({ tier, title, atLeast = false, unknownRows = 0, pending = false }: { tier: RiskTierName | null; title?: string; atLeast?: boolean; unknownRows?: number; pending?: boolean }) {
   if (pending) {
     return (
       <span data-tier="pending" title="Reading this image's finding" className="shrink-0 rounded-md border border-dashed border-hubble-border-strong px-1.5 py-px text-[11px] font-mono text-tertiary">
@@ -39,9 +39,17 @@ export function TierBadge({ tier, title, atLeast = false, pending = false }: { t
     );
   }
   const cls = tier === 'Background' ? 'bg-hubble-border/40 text-secondary border-hubble-border' : TIER_BADGE_CLASS[tier];
+  const floor = atLeast && tier !== 'P0';
+  const floorText = `at least ${tier}; ${unknownRows > 0 ? `${unknownRows} row${unknownRows === 1 ? '' : 's'}` : 'some rows'} unknown`;
   return (
-    <span data-tier={tier} data-at-least={atLeast && tier !== 'P0' ? 'true' : undefined} title={atLeast && tier !== 'P0' ? `${title ? `${title}. ` : ''}At least ${tier}: some workloads have no tier yet.` : title} className={`shrink-0 rounded-md border px-1.5 py-px text-[11px] font-mono font-semibold ${cls}`}>
-      {atLeast && tier !== 'P0' ? '≥' : ''}
+    <span
+      data-tier={tier}
+      data-at-least={floor ? 'true' : undefined}
+      title={floor ? floorText : title}
+      aria-label={floor ? floorText : undefined}
+      className={`shrink-0 rounded-md border px-1.5 py-px text-[11px] font-mono font-semibold ${cls}`}
+    >
+      {floor ? '≥' : ''}
       {tier === 'Background' ? 'Bkg' : tier}
     </span>
   );
