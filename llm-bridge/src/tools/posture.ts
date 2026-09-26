@@ -305,9 +305,13 @@ export function shrinkProfile(out: Rec, maxChars = MAX_RESPONSE_CHARS): Rec {
   };
   const steps: [string, () => void][] = [
     ["findings (attention keeps the top 5)", () => { delete out.findings; delete out.findingsOmitted; }],
-    ["drift.items detail", () => {
+    ["drift.items detail (counts kept)", () => {
+      // Drop the file lists and other bulk, never the counts: filesTotal
+      // and truncated say how much there was.
       if (isRecord(out.drift) && Array.isArray(out.drift.items)) {
-        out.drift.items = out.drift.items.map((i) => (isRecord(i) ? { ...i, detail: undefined } : i));
+        out.drift.items = out.drift.items.map((i) =>
+          isRecord(i) ? { ...i, detail: isRecord(i.detail) ? pick(i.detail, ["origins", "filesTotal", "truncated"]) : undefined } : i,
+        );
       }
     }],
     ["dimensions.network.peers", dropFrom("network", "peers")],

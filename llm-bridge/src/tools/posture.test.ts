@@ -476,3 +476,20 @@ test("trimProfile keeps drift: evaluated, notEvaluated and capped items, and say
   assert.equal("baselines" in got.drift, false);
   assert.match(got.note, /NOT evaluated, so no drift item for it never means no drift/);
 });
+
+test("shrinkProfile cuts drift file lists but keeps filesTotal, truncated and origins", () => {
+  const files = Array.from({ length: 5 }, (_, i) => ({ path: `/tmp/${"x".repeat(300)}${i}` }));
+  const out = shrinkProfile(
+    {
+      findings: [],
+      drift: {
+        evaluated: [],
+        items: [{ type: "unshippedExecutable", severity: "high", container: "app", detail: { origins: ["memfd"], files, filesTotal: 42, truncated: true } }],
+      },
+    },
+    600,
+  ) as any;
+  const d = out.drift.items[0].detail;
+  assert.deepEqual(d, { origins: ["memfd"], filesTotal: 42, truncated: true });
+  assert.ok(out.trimmed.includes("drift.items detail (counts kept)"));
+});
