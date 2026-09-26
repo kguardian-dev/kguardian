@@ -256,12 +256,12 @@ volatile bool kg_test_container_unknown = false;
 // False when it could not be worked out (a parse that could not run, or
 // no container cgroup under the pod): the caller must treat the event as
 // lost, not send it without a container.
-static __always_inline bool container_cgroup_name(struct runtime_event *ev)
+static __always_inline bool container_cgroup_name(char *out)
 {
     struct task_struct *task = (struct task_struct *)bpf_get_current_task();
     struct kernfs_node *kn = BPF_CORE_READ(task, cgroups, dfl_cgrp, kn);
     struct kernfs_node *below = 0;
-    ev->container[0] = 0;
+    out[0] = 0;
     if (kg_test_container_unknown)
         return false;
     for (int lvl = 0; lvl < KG_CG_LEVELS; lvl++)
@@ -275,7 +275,7 @@ static __always_inline bool container_cgroup_name(struct runtime_event *ev)
         {
             if (!below)
                 return false;
-            return bpf_probe_read_kernel_str(ev->container, sizeof(ev->container),
+            return bpf_probe_read_kernel_str(out, KG_CONTAINER_NAME,
                                              BPF_CORE_READ(below, name)) > 1;
         }
         below = kn;
@@ -335,7 +335,7 @@ static __always_inline int report_file(struct file *file, __u32 kind)
     ev->fs_magic = fs_magic;
     ev->nlink = nlink;
     ev->upper = upper;
-    if (!container_cgroup_name(ev))
+    if (!container_cgroup_name(ev->container))
     {
         // Whose container it was is unknown: the sighting is lost. Forget
         // it so the file is reported again on its next use, and count it
@@ -387,6 +387,147 @@ int BPF_PROG(trace_runtime_mmap, struct file *file, unsigned long prot, unsigned
     if (exe && exe == BPF_CORE_READ(file, f_inode))
         return 0;
     return report_file(file, KG_RT_LIB);
+}
+
+// ---- Capabilities (#1533 P2-7) -------------------------------------------
+//
+// Every capability check a container's task makes, and whether it was
+// granted, from the commoncap check cap_capable (fexit, for the verdict):
+// it sees every check security_capable does plus those commoncap makes
+// directly (capset's SETPCAP test, xattr and prctl checks), and its
+// verdict is the capability bits alone. security_capable is the fallback
+// where cap_capable cannot be traced (bpf.rs picks). Counted per
+// (container cgroup, capability, verdict) in the kernel; the first
+// sighting of each is also sent as an event (which carries the container
+// identity), later ones only bump the count userspace reads from the map.
+//
+// Not counted:
+//  - CAP_OPT_NOAUDIT checks (ns_capable_noaudit, has_capability_noaudit):
+//    the kernel asking "would this task be privileged?" without the task
+//    needing it (e.g. picking a code path). They are probes, not uses.
+//  - runc's own setup: runc init runs in the container's cgroup before
+//    the container starts and uses privileges the container itself never
+//    gets (mount, setuid, ...). Same comm test as the syscall probe.
+
+// include/linux/security.h
+#define KG_CAP_OPT_NOAUDIT (1u << 1)
+
+struct cap_seen_key
+{
+    __u64 cgroup_id;
+    __u32 cap;
+    __u32 granted;
+};
+
+struct cap_seen_val
+{
+    __u64 count;
+};
+
+struct
+{
+    __uint(type, BPF_MAP_TYPE_LRU_HASH);
+    __uint(max_entries, 16384);
+    __type(key, struct cap_seen_key);
+    __type(value, struct cap_seen_val);
+} cap_seen SEC(".maps");
+
+// Keep in sync with CapEventData in controller/src/runtime_inventory.rs.
+struct cap_event
+{
+    __u64 cgroup_id;
+    __u32 generation;
+    __u32 cap;
+    __u32 granted;
+    __u32 pid;
+    char container[KG_CONTAINER_NAME];
+};
+
+struct
+{
+    __uint(type, BPF_MAP_TYPE_RINGBUF);
+    __uint(max_entries, 64 * 1024);
+} cap_events SEC(".maps");
+
+static __always_inline bool is_runc_init(void)
+{
+    char comm[8] = {};
+    bpf_get_current_comm(comm, sizeof(comm));
+    return comm[0] == 'r' && comm[1] == 'u' && comm[2] == 'n' && comm[3] == 'c' &&
+           comm[4] == ':' && comm[5] == '[';
+}
+
+static __always_inline int report_capable(int cap, unsigned int opts, int ret)
+{
+    if (opts & KG_CAP_OPT_NOAUDIT)
+        return 0;
+    if (cap < 0 || cap > 63)
+        return 0;
+    __u32 owner = task_pod_generation();
+    if (owner == KG_OWNER_UNKNOWN)
+    {
+        count_drop();
+        return 0;
+    }
+    if (!(owner & KG_CG_POD))
+        return 0;
+    if (is_runc_init())
+        return 0;
+
+    struct cap_seen_key key = {
+        .cgroup_id = bpf_get_current_cgroup_id(),
+        .cap = (__u32)cap,
+        .granted = ret == 0,
+    };
+    struct cap_seen_val *seen = bpf_map_lookup_elem(&cap_seen, &key);
+    if (seen)
+    {
+        __sync_fetch_and_add(&seen->count, 1);
+        return 0;
+    }
+    struct cap_seen_val one = {.count = 1};
+    if (bpf_map_update_elem(&cap_seen, &key, &one, BPF_NOEXIST) != 0)
+    {
+        // Another task inserted it first: count this one there.
+        seen = bpf_map_lookup_elem(&cap_seen, &key);
+        if (seen)
+            __sync_fetch_and_add(&seen->count, 1);
+        return 0;
+    }
+
+    // First sighting: send who it was. On the stack, so preemption cannot
+    // mix it with another task's.
+    struct cap_event ev = {
+        .cgroup_id = key.cgroup_id,
+        .generation = owner & KG_CG_GEN_MASK,
+        .cap = key.cap,
+        .granted = key.granted,
+        .pid = bpf_get_current_pid_tgid() >> 32,
+    };
+    if (!container_cgroup_name(ev.container) ||
+        bpf_ringbuf_output(&cap_events, &ev, sizeof(ev), 0) != 0)
+    {
+        // Lost: forget it so the next check is reported, and count it.
+        bpf_map_delete_elem(&cap_seen, &key);
+        count_drop();
+    }
+    return 0;
+}
+
+// Fallback hook (see RUNTIME_CAP_SYMBOLS in bpf.rs).
+SEC("fexit/security_capable")
+int BPF_PROG(trace_runtime_capable, const struct cred *cred, struct user_namespace *ns,
+             int cap, unsigned int opts, int ret)
+{
+    return report_capable(cap, opts, ret);
+}
+
+// Preferred hook.
+SEC("fexit/cap_capable")
+int BPF_PROG(trace_runtime_cap_capable, const struct cred *cred, struct user_namespace *ns,
+             int cap, unsigned int opts, int ret)
+{
+    return report_capable(cap, opts, ret);
 }
 
 char LICENSE[] SEC("license") = "GPL";

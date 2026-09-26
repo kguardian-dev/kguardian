@@ -34,6 +34,8 @@ pub mod contention;
 pub mod early_capture;
 pub mod log;
 pub mod node_facts;
+/// Capability use per container (P2-7).
+pub mod runtime_capabilities;
 /// Per-container executables and executable mappings (P1-2).
 pub mod runtime_inventory;
 /// One task per subsystem, with explicit supervision over what each
