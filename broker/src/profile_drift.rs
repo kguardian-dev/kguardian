@@ -359,13 +359,21 @@ pub fn load_runtime(
 ) -> Result<RuntimeDriftInput, DbError> {
     use crate::runtime_inventory as ri;
     let has_inventory = ri::workload_has_inventory(conn, &key.namespace, &key.kind, &key.name)?;
-    let coverage = ri::workload_coverage(
-        conn,
-        &key.namespace,
-        &key.kind,
-        &key.name,
-        ri::DEFAULT_COVERAGE_WINDOW_HOURS,
-    )?;
+    // Without the runtime inventory's coverage function (a database the
+    // migration has not reached, or one a test left without it) nothing is
+    // covered: every container is not evaluated, and the profile still
+    // builds.
+    let coverage = if crate::in_use_store::coverage_available(conn)? {
+        ri::workload_coverage(
+            conn,
+            &key.namespace,
+            &key.kind,
+            &key.name,
+            ri::DEFAULT_COVERAGE_WINDOW_HOURS,
+        )?
+    } else {
+        Vec::new()
+    };
     let mut pairs: Vec<(String, String)> = current
         .iter()
         .filter(|(_, d)| !d.is_empty())
@@ -1234,6 +1242,39 @@ mod live_tests {
         conn.batch_execute(&format!(
             "DELETE FROM runtime_executables WHERE pod_namespace = '{NS}'; \
              DELETE FROM runtime_coverage WHERE pod_namespace = '{NS}'; \
+             DELETE FROM workload_containers WHERE pod_namespace = '{NS}';"
+        ))
+        .unwrap();
+    }
+
+    /// Without kg_runtime_coverage the profile still builds and the
+    /// unshipped check is not evaluated (no_runtime_data), never an error.
+    /// Inside a transaction that rolls back, so the function comes back.
+    #[test]
+    #[ignore = "requires a live postgres (set KG_TEST_DATABASE_URL)"]
+    fn live_database_drift_without_the_coverage_function_is_not_evaluated() {
+        let mut conn = live_conn();
+        crate::runtime_inventory::restore_coverage_function(&mut conn);
+        let ok = ri::prepare(&serde_json::to_vec(&json!([row("/usr/bin/web", "image")])).unwrap())
+            .unwrap();
+        ri::upsert_rows(&mut conn, &ok.rows).unwrap();
+        let r = conn.transaction::<(), diesel::result::Error, _>(|c| {
+            c.batch_execute(
+                "DROP FUNCTION kg_runtime_coverage(text, text, text, text, text, text, integer)",
+            )?;
+            let p = profile(c);
+            assert!(!p.drift.evaluated.contains(&"unshippedExecutable"));
+            assert!(p
+                .drift
+                .not_evaluated
+                .iter()
+                .any(|n| n.kind == "unshippedExecutable" && n.reason == "no_runtime_data"));
+            Err(diesel::result::Error::RollbackTransaction)
+        });
+        assert!(matches!(r, Err(diesel::result::Error::RollbackTransaction)));
+        assert!(crate::in_use_store::coverage_available(&mut conn).unwrap());
+        conn.batch_execute(&format!(
+            "DELETE FROM runtime_executables WHERE pod_namespace = '{NS}'; \
              DELETE FROM workload_containers WHERE pod_namespace = '{NS}';"
         ))
         .unwrap();
