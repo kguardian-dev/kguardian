@@ -451,3 +451,28 @@ test("diff_workload_profile: capped lists and 404 as found=false", async () => {
   assert.equal(nf.isError, false);
   assert.equal(JSON.parse(nf.text).found, false);
 });
+
+test("trimProfile keeps drift: evaluated, notEvaluated and capped items, and says not evaluated is not no drift", () => {
+  const files = Array.from({ length: 12 }, (_, i) => ({ path: `/tmp/f${i}`, kind: "exec", origin: "memfd" }));
+  const got = trimProfile({
+    workload: { namespace: "prod", kind: "Deployment", name: "web" },
+    posture: { status: "warn" },
+    drift: {
+      baselines: { export: null, securityContext: null },
+      evaluated: ["tagMoved"],
+      notEvaluated: [{ type: "unshippedExecutable", container: "side", reason: "no_runtime_data" }],
+      items: [{
+        type: "unshippedExecutable", findingId: "drift.unshippedExecutable/app", severity: "high", container: "app",
+        detail: { origins: ["memfd"], files, filesTotal: 12, truncated: false },
+      }],
+    },
+  }) as any;
+  assert.deepEqual(got.drift.evaluated, ["tagMoved"]);
+  assert.deepEqual(got.drift.notEvaluated, [{ type: "unshippedExecutable", container: "side", reason: "no_runtime_data" }]);
+  assert.equal(got.drift.items[0].severity, "high");
+  assert.equal(got.drift.items[0].detail.files.length, 5);
+  assert.equal(got.drift.items[0].detail.filesOmitted, 7);
+  assert.equal(got.drift.items[0].detail.filesTotal, 12);
+  assert.equal("baselines" in got.drift, false);
+  assert.match(got.note, /NOT evaluated, so no drift item for it never means no drift/);
+});
