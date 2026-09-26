@@ -103,7 +103,7 @@ export function ImagesView({ namespace, allNamespaces, tab: tabParam, cve, diges
         <div>
           <h2 className="text-base font-semibold text-primary">Images</h2>
           <p className="text-xs text-tertiary mt-0.5">
-            What the vulnerability sources report for the images running in {scopeLabel}, ranked by tier. kguardian reports what the sources found; it does not scan, and it never blocks a workload.
+            Vulnerabilities in the images running in {scopeLabel}, ranked by tier. Findings come from Trivy Operator reports and, when the opt-in Grype matcher is enabled, from kguardian matching SBOMs itself. kguardian never blocks a workload.
           </p>
         </div>
 
