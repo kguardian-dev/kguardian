@@ -686,6 +686,9 @@ pub fn ebpf_handle(
         let runtime = runtime_sender
             .as_ref()
             .and_then(|_| load_runtime_inventory(&mut runtime_storage, runtime_libs));
+        if let Some((_, links)) = runtime.as_ref() {
+            crate::runtime_inventory::probe_attached(links.len() > 1);
+        }
 
         // Load and attach the seccomp denial probe. `None` here means
         // SECCOMP_DENIAL_CAPTURE is off and nothing is loaded at all;
@@ -833,6 +836,7 @@ pub fn ebpf_handle(
         info!("Network policy drop ring buffer initialized");
 
         let mut consecutive_poll_errors: u32 = 0;
+        let mut last_drop_read = std::time::Instant::now();
 
         loop {
             // Honour the shutdown flag before polling so we exit promptly
@@ -874,6 +878,28 @@ pub fn ebpf_handle(
                 continue;
             }
             consecutive_poll_errors = 0;
+
+            // Runtime inventory: publish the kernel's drop count for the
+            // coverage heartbeat (a few times a minute is plenty).
+            if let Some((sk, _)) = runtime.as_ref() {
+                if last_drop_read.elapsed() >= std::time::Duration::from_secs(5) {
+                    last_drop_read = std::time::Instant::now();
+                    if let Ok(Some(per_cpu)) = sk
+                        .maps
+                        .runtime_drops
+                        .lookup_percpu(&0u32.to_ne_bytes(), MapFlags::ANY)
+                    {
+                        let total: u64 = per_cpu
+                            .iter()
+                            .filter_map(|v| {
+                                v.get(..8)
+                                    .map(|b| u64::from_ne_bytes(b.try_into().unwrap()))
+                            })
+                            .sum();
+                        crate::runtime_inventory::KERNEL_DROPS.store(total, Ordering::Relaxed);
+                    }
+                }
+            }
 
             // Drain the pod watcher's queues, don't sip from them.
             //

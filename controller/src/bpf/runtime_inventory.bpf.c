@@ -75,6 +75,17 @@ struct
     __uint(max_entries, 256 * 1024);
 } runtime_events SEC(".maps");
 
+// Events lost because the ring buffer was full. Any increase is a
+// coverage gap for every container on the node (a one-off exec that was
+// dropped is never seen again); userspace reports it with the heartbeat.
+struct
+{
+    __uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
+    __uint(max_entries, 1);
+    __type(key, u32);
+    __type(value, u64);
+} runtime_drops SEC(".maps");
+
 // Scratch for building one event (too big for the 512-byte stack).
 struct
 {
@@ -287,6 +298,9 @@ static __always_inline int report_file(struct file *file, __u32 kind)
     {
         // Forget the sighting so the next one is reported, not never.
         bpf_map_delete_elem(&runtime_seen, &key);
+        __u64 *drops = bpf_map_lookup_elem(&runtime_drops, &zero);
+        if (drops)
+            *drops += 1;
     }
     return 0;
 }

@@ -65,6 +65,12 @@ pub const MAX_POST_ENTRIES: usize = 2000;
 pub const REPOST: Duration = Duration::from_secs(60 * 60);
 pub const UNKNOWN_POD_TTL: Duration = Duration::from_secs(10 * 60);
 const POST_EVERY: Duration = Duration::from_secs(10);
+/// Coverage heartbeat cadence; sent with each heartbeat so the broker
+/// knows how late one may be before it is a gap.
+pub const HEARTBEAT_EVERY: Duration = Duration::from_secs(300);
+/// A container that started less than this after the probe attached is
+/// treated as already running (backfilled), not captured from its start.
+const START_MARGIN_SECS: i64 = 2;
 const BACKFILL_EVERY: Duration = Duration::from_secs(60);
 const STATS_EVERY: Duration = Duration::from_secs(300);
 
@@ -272,6 +278,35 @@ pub fn proc_path_origin(raw: &str) -> Option<(String, Origin)> {
 
 // ---- Who a (generation, container id) is ---------------------------------
 
+// ---- Probe state, shared with the eBPF loader --------------------------
+
+/// When the exec probe attached, and whether the library probe did too.
+/// Unset while no probe is loaded (feature off, or this kernel refused
+/// it): coverage is then reported as probes missing, never as covered.
+static PROBE: std::sync::OnceLock<(NaiveDateTime, bool)> = std::sync::OnceLock::new();
+
+/// Events the kernel could not queue (ring buffer full), cumulative.
+/// Published by the eBPF poll loop.
+pub static KERNEL_DROPS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Called by the eBPF loader once the probe is attached.
+pub fn probe_attached(libs: bool) {
+    let _ = PROBE.set((Utc::now().naive_utc(), libs));
+}
+
+/// One container of a pod, as the pod status names it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ContainerInfo {
+    pub name: String,
+    /// Image digest, or "".
+    pub digest: String,
+    /// When the container started (from its status), if known.
+    pub started_at: Option<NaiveDateTime>,
+    /// This id is the container's current, running one (not a
+    /// `lastState.terminated` id).
+    pub running: bool,
+}
+
 /// What the broker needs to key a container's entries.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PodRuntime {
@@ -280,8 +315,8 @@ pub struct PodRuntime {
     pub pod_name: String,
     pub workload_kind: String,
     pub workload_name: String,
-    /// container id -> (container name, image digest or "")
-    pub containers: HashMap<String, (String, String)>,
+    /// container id -> the container
+    pub containers: HashMap<String, ContainerInfo>,
 }
 
 /// Build from a pod and its resolved workload (None = the pod itself).
@@ -304,15 +339,46 @@ pub fn pod_runtime(pod: &Pod, workload: Option<(&str, &str)>) -> Option<PodRunti
             let digest = parse_image_id(&cs.image_id)
                 .map(|p| p.digest)
                 .unwrap_or_default();
-            let last = cs
-                .last_state
-                .as_ref()
-                .and_then(|s| s.terminated.as_ref())
-                .and_then(|t| t.container_id.as_deref());
-            for raw in [cs.container_id.as_deref(), last].into_iter().flatten() {
-                if let Some(id) = crate::container::parse_container_id(raw) {
-                    containers.insert(id, (cs.name.clone(), digest.clone()));
-                }
+            let secs = |t: &k8s_openapi::apimachinery::pkg::apis::meta::v1::Time| {
+                chrono::DateTime::from_timestamp(t.0.as_second(), 0).map(|d| d.naive_utc())
+            };
+            let state = cs.state.as_ref();
+            let running_since = state
+                .and_then(|s| s.running.as_ref())
+                .and_then(|r| r.started_at.as_ref())
+                .and_then(secs);
+            let current_started = running_since.or_else(|| {
+                state
+                    .and_then(|s| s.terminated.as_ref())
+                    .and_then(|t| t.started_at.as_ref())
+                    .and_then(secs)
+            });
+            let last = cs.last_state.as_ref().and_then(|s| s.terminated.as_ref());
+            let entries = [
+                (
+                    cs.container_id.as_deref(),
+                    current_started,
+                    running_since.is_some(),
+                ),
+                (
+                    last.and_then(|t| t.container_id.as_deref()),
+                    last.and_then(|t| t.started_at.as_ref()).and_then(secs),
+                    false,
+                ),
+            ];
+            for (raw, started_at, running) in entries {
+                let Some(id) = raw.and_then(crate::container::parse_container_id) else {
+                    continue;
+                };
+                containers.insert(
+                    id,
+                    ContainerInfo {
+                        name: cs.name.clone(),
+                        digest: digest.clone(),
+                        started_at,
+                        running,
+                    },
+                );
             }
         }
     }
@@ -392,6 +458,19 @@ pub fn retain_pods(live: &HashSet<String>) {
         reg.by_gen.retain(|_, p| live.contains(&p.uid));
         reg.ignored.retain(|_, uid| live.contains(uid));
     }
+}
+
+/// Every tracked pod once (a static pod is registered under two
+/// generations; either keys it).
+fn registry_pods() -> Vec<(u32, PodRuntime)> {
+    let Ok(reg) = REGISTRY.read() else {
+        return Vec::new();
+    };
+    let mut seen = HashSet::new();
+    let mut out: Vec<(u32, PodRuntime)> = reg.by_gen.iter().map(|(g, p)| (*g, p.clone())).collect();
+    out.sort_by_key(|(g, _)| *g);
+    out.retain(|(_, p)| seen.insert(p.uid.clone()));
+    out
 }
 
 enum Lookup {
@@ -477,7 +556,56 @@ pub struct Store {
     /// are ignored instead of being held for another TTL. Forgotten with
     /// the pod.
     discarded: HashSet<ContainerKey>,
+    /// Coverage per container (see [`Store::coverage_due`]).
+    coverage: HashMap<ContainerKey, Coverage>,
+    /// When each container was backfilled from /proc.
+    backfilled_at: HashMap<ContainerKey, NaiveDateTime>,
+    /// Kernel drop count at the last heartbeat.
+    drops_seen: u64,
     pub stats: Stats,
+}
+
+/// What coverage has been reported for one container.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Coverage {
+    start_mode: &'static str,
+    tracking_since: NaiveDateTime,
+    /// A gap to report with the next heartbeat.
+    gap: Option<&'static str>,
+    /// The last heartbeat sent, for the final `ended` one.
+    last: Option<CoveragePost>,
+}
+
+/// One entry of a `/runtime/coverage` POST: this container instance was
+/// watched, continuously since `tracking_since` unless `gap` says
+/// otherwise, as of `heartbeat_at`.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct CoveragePost {
+    pub pod_namespace: String,
+    pub pod_name: String,
+    pub workload_kind: String,
+    pub workload_name: String,
+    pub container_name: String,
+    pub image_digest: String,
+    pub container_id: String,
+    pub node_name: String,
+    /// `exec` | `full`.
+    pub mode: String,
+    /// The exec probe is attached.
+    pub exec_probe: bool,
+    /// The library probe is attached (mode full, and the kernel allowed it).
+    pub lib_probe: bool,
+    /// `start`: captured from the container's start. `backfill`: the
+    /// container was already running; capture begins at the /proc backfill.
+    pub start_mode: String,
+    pub tracking_since: NaiveDateTime,
+    /// Something was lost since the last heartbeat (`kernel_drops`,
+    /// `overflow`): coverage restarts at `heartbeat_at`.
+    pub gap: Option<String>,
+    /// The container is gone; its last heartbeat.
+    pub ended: bool,
+    pub heartbeat_at: NaiveDateTime,
+    pub heartbeat_secs: u32,
 }
 
 /// One observation of a file in a container.
@@ -495,6 +623,7 @@ impl Store {
         if self.discarded.contains(&key) {
             return;
         }
+        let key_for_gap = key.clone();
         let c = self.containers.entry(key).or_default();
         c.first_event.get_or_insert(now);
         let Sighting {
@@ -520,6 +649,9 @@ impl Store {
         }
         if c.entries.len() >= MAX_ENTRIES_PER_CONTAINER {
             self.stats.overflow += 1;
+            if let Some(cov) = self.coverage.get_mut(&key_for_gap) {
+                cov.gap.get_or_insert("overflow");
+            }
             return;
         }
         c.entries.insert(
@@ -539,7 +671,8 @@ impl Store {
         self.containers.get(key).is_none_or(|c| !c.backfilled)
     }
 
-    pub fn mark_backfilled(&mut self, key: ContainerKey) {
+    pub fn mark_backfilled(&mut self, key: ContainerKey, wall: NaiveDateTime) {
+        self.backfilled_at.entry(key.clone()).or_insert(wall);
         let c = self.containers.entry(key).or_default();
         if !c.backfilled {
             c.backfilled = true;
@@ -576,8 +709,13 @@ impl Store {
                 }
                 continue;
             };
-            let running = pod.containers.contains_key(&key.1);
-            let Some((container_name, digest)) = pod.containers.get(&key.1).cloned() else {
+            let running = pod.containers.get(&key.1).is_some_and(|c| c.running);
+            let Some(ContainerInfo {
+                name: container_name,
+                digest,
+                ..
+            }) = pod.containers.get(&key.1).cloned()
+            else {
                 // Container id not (yet) in the pod's status: hold until
                 // the status names it or the TTL runs out.
                 if c.first_event
@@ -650,10 +788,123 @@ impl Store {
             resolve(key.0).is_some() || c.entries.values().any(|e| e.sent_at.is_none())
         });
         self.discarded.retain(|key| resolve(key.0).is_some());
+        self.backfilled_at
+            .retain(|key, _| resolve(key.0).is_some_and(|p| p.containers.contains_key(&key.1)));
     }
 
     pub fn containers(&self) -> usize {
         self.containers.len()
+    }
+
+    /// Coverage heartbeats for every running container of every tracked
+    /// pod on this node, plus a final `ended` one for each container that
+    /// stopped since the last call. Pure: the probe state, the kernel drop
+    /// count and the pod registry are passed in.
+    ///
+    /// A container is `start` when it started after the probe attached
+    /// (plus a small margin): the kernel saw its first exec. Otherwise it
+    /// is reported only once the /proc backfill has run, as `backfill`
+    /// from that moment. With no probe, containers are reported with both
+    /// probes false so the broker can say why they are not covered.
+    pub fn coverage_due(
+        &mut self,
+        pods: &[(u32, PodRuntime)],
+        probe: Option<(NaiveDateTime, bool)>,
+        mode: Mode,
+        kernel_drops: u64,
+        node: &str,
+        wall: NaiveDateTime,
+    ) -> Vec<CoveragePost> {
+        let dropped = kernel_drops > self.drops_seen;
+        self.drops_seen = kernel_drops;
+        if dropped {
+            for cov in self.coverage.values_mut() {
+                cov.gap.get_or_insert("kernel_drops");
+            }
+        }
+        let mut out = Vec::new();
+        let mut live: HashSet<ContainerKey> = HashSet::new();
+        for (generation, pod) in pods {
+            for (cid, info) in &pod.containers {
+                if !info.running {
+                    continue;
+                }
+                let key: ContainerKey = (*generation, cid.clone());
+                live.insert(key.clone());
+                let (exec_probe, lib_probe) = match probe {
+                    Some((_, libs)) => (true, libs && mode == Mode::Full),
+                    None => (false, false),
+                };
+                if !self.coverage.contains_key(&key) {
+                    let start = match (probe, info.started_at) {
+                        (Some((attached, _)), Some(started))
+                            if started
+                                > attached + chrono::Duration::seconds(START_MARGIN_SECS) =>
+                        {
+                            Some(("start", started))
+                        }
+                        _ => self.backfilled_at.get(&key).map(|t| ("backfill", *t)),
+                    };
+                    let Some((start_mode, tracking_since)) = start.or_else(|| {
+                        // No probe: report the container anyway, so the
+                        // reason is "probes missing" rather than "no data".
+                        probe.is_none().then_some(("backfill", wall))
+                    }) else {
+                        continue;
+                    };
+                    self.coverage.insert(
+                        key.clone(),
+                        Coverage {
+                            start_mode,
+                            tracking_since,
+                            gap: None,
+                            last: None,
+                        },
+                    );
+                }
+                let cov = self.coverage.get_mut(&key).expect("inserted above");
+                let post = CoveragePost {
+                    pod_namespace: pod.namespace.clone(),
+                    pod_name: pod.pod_name.clone(),
+                    workload_kind: pod.workload_kind.clone(),
+                    workload_name: pod.workload_name.clone(),
+                    container_name: info.name.clone(),
+                    image_digest: info.digest.clone(),
+                    container_id: cid.clone(),
+                    node_name: node.to_string(),
+                    mode: mode.as_str().to_string(),
+                    exec_probe,
+                    lib_probe,
+                    start_mode: cov.start_mode.to_string(),
+                    tracking_since: cov.tracking_since,
+                    gap: cov.gap.take().map(str::to_string),
+                    ended: false,
+                    heartbeat_at: wall,
+                    heartbeat_secs: HEARTBEAT_EVERY.as_secs() as u32,
+                };
+                cov.last = Some(post.clone());
+                out.push(post);
+            }
+        }
+        // Containers reported before and not running now: one last beat.
+        let gone: Vec<ContainerKey> = self
+            .coverage
+            .keys()
+            .filter(|k| !live.contains(*k))
+            .cloned()
+            .collect();
+        for key in gone {
+            let cov = self.coverage.remove(&key).expect("listed above");
+            if let Some(last) = cov.last {
+                out.push(CoveragePost {
+                    gap: cov.gap.map(str::to_string),
+                    ended: true,
+                    heartbeat_at: wall,
+                    ..last
+                });
+            }
+        }
+        out
     }
 }
 
@@ -764,7 +1015,7 @@ where
     }
     let n = touched.len();
     for key in touched {
-        store.mark_backfilled(key);
+        store.mark_backfilled(key, wall);
     }
     n
 }
@@ -782,6 +1033,8 @@ pub async fn run(mut events: Receiver<RuntimeEventData>, mode: Mode) -> Result<(
     let mut post_tick = tokio::time::interval(POST_EVERY);
     post_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let mut last_backfill: Option<Instant> = None;
+    let mut last_heartbeat: Option<Instant> = None;
+    let node = std::env::var("CURRENT_NODE").unwrap_or_default();
     let mut last_stats = Instant::now();
     let resolve = |g: u32| match lookup(g) {
         Lookup::Known(p) => Some(p),
@@ -823,6 +1076,20 @@ pub async fn run(mut events: Receiver<RuntimeEventData>, mode: Mode) -> Result<(
                     }
                 }
                 post_due(&mut store, &resolve).await;
+                // Coverage heartbeat, after the backfill and the post so a
+                // backfilled container is reported the pass it was read.
+                if last_heartbeat.is_none_or(|t| t.elapsed() >= HEARTBEAT_EVERY) {
+                    last_heartbeat = Some(Instant::now());
+                    let beats = store.coverage_due(
+                        &registry_pods(),
+                        PROBE.get().copied(),
+                        mode,
+                        KERNEL_DROPS.load(std::sync::atomic::Ordering::Relaxed),
+                        &node,
+                        Utc::now().naive_utc(),
+                    );
+                    post_coverage(beats).await;
+                }
                 store.prune(resolve);
                 if last_stats.elapsed() >= STATS_EVERY {
                     last_stats = Instant::now();
@@ -843,6 +1110,18 @@ pub async fn run(mut events: Receiver<RuntimeEventData>, mode: Mode) -> Result<(
     }
     warn!("runtime inventory event channel closed");
     Ok(())
+}
+
+/// Post heartbeats in chunks. A failed chunk is not retried: the next
+/// heartbeat carries the same state, and the broker treats the missed
+/// one as a gap only if the next is also late.
+async fn post_coverage(beats: Vec<CoveragePost>) {
+    for chunk in beats.chunks(MAX_POST_ENTRIES) {
+        if let Err(e) = crate::api_post_call(serde_json::json!(chunk), "runtime/coverage").await {
+            warn!(entries = chunk.len(), error = %e, "runtime coverage heartbeat POST failed");
+            return;
+        }
+    }
 }
 
 async fn post_due<F>(store: &mut Store, resolve: &F)
@@ -984,7 +1263,12 @@ mod tests {
             workload_name: "web".into(),
             containers: HashMap::from([(
                 CID.to_string(),
-                ("nginx".to_string(), "sha256:ab".to_string()),
+                ContainerInfo {
+                    name: "nginx".to_string(),
+                    digest: "sha256:ab".to_string(),
+                    started_at: None,
+                    running: true,
+                },
             )]),
         }
     }
@@ -1118,6 +1402,122 @@ mod tests {
         s.prune(|_| None);
         s.add(sandbox, sg("exec", "/pause".into(), "ebpf"), t0, wall());
         assert_eq!(s.containers(), 1);
+    }
+
+    fn at(h: i64) -> NaiveDateTime {
+        chrono::DateTime::from_timestamp(1_800_000_000 + h * 3600, 0)
+            .unwrap()
+            .naive_utc()
+    }
+
+    fn pod_started(started_h: i64) -> PodRuntime {
+        let mut p = pod_rt();
+        p.containers.get_mut(CID).unwrap().started_at = Some(at(started_h));
+        p
+    }
+
+    #[test]
+    fn coverage_is_from_start_only_for_containers_started_after_the_probe() {
+        let mut s = Store::default();
+        let probe = Some((at(0), true));
+        // Started an hour after the probe attached: captured from start.
+        let beats = s.coverage_due(&[(7, pod_started(1))], probe, Mode::Full, 0, "n1", at(2));
+        assert_eq!(beats.len(), 1);
+        let b = &beats[0];
+        assert_eq!((b.start_mode.as_str(), b.tracking_since), ("start", at(1)));
+        assert!(b.exec_probe && b.lib_probe && !b.ended && b.gap.is_none());
+        assert_eq!((b.container_id.as_str(), b.node_name.as_str()), (CID, "n1"));
+        assert_eq!(b.heartbeat_secs, 300);
+
+        // Already running when the probe attached: nothing until the
+        // backfill has read it, then `backfill` from that moment.
+        let mut s = Store::default();
+        let old = [(7, pod_started(-5))];
+        assert!(s
+            .coverage_due(&old, probe, Mode::Full, 0, "n1", at(1))
+            .is_empty());
+        s.mark_backfilled((7, CID.to_string()), at(1));
+        let b = &s.coverage_due(&old, probe, Mode::Full, 0, "n1", at(2))[0];
+        assert_eq!(
+            (b.start_mode.as_str(), b.tracking_since),
+            ("backfill", at(1))
+        );
+        // The start of tracking never moves on later heartbeats.
+        let b = &s.coverage_due(&old, probe, Mode::Full, 0, "n1", at(3))[0];
+        assert_eq!(b.tracking_since, at(1));
+    }
+
+    #[test]
+    fn coverage_reports_missing_probes_and_exec_only_mode() {
+        let mut s = Store::default();
+        let b = &s.coverage_due(&[(7, pod_started(1))], None, Mode::Full, 0, "n1", at(2))[0];
+        assert!(
+            !b.exec_probe && !b.lib_probe,
+            "no probe loaded: said so, not silent"
+        );
+        let mut s = Store::default();
+        let b = &s.coverage_due(
+            &[(7, pod_started(1))],
+            Some((at(0), true)),
+            Mode::Exec,
+            0,
+            "n1",
+            at(2),
+        )[0];
+        assert!(
+            b.exec_probe && !b.lib_probe,
+            "exec mode never vouches for libraries"
+        );
+        let mut s = Store::default();
+        let b = &s.coverage_due(
+            &[(7, pod_started(1))],
+            Some((at(0), false)),
+            Mode::Full,
+            0,
+            "n1",
+            at(2),
+        )[0];
+        assert!(
+            !b.lib_probe,
+            "full mode on a kernel without the fentry probe"
+        );
+    }
+
+    #[test]
+    fn coverage_gaps_are_reported_once_and_ended_containers_get_a_last_beat() {
+        let mut s = Store::default();
+        let pods = [(7, pod_started(1))];
+        let probe = Some((at(0), true));
+        s.coverage_due(&pods, probe, Mode::Full, 3, "n1", at(2));
+        // Kernel drops since the last beat: a gap, once.
+        let b = &s.coverage_due(&pods, probe, Mode::Full, 5, "n1", at(3))[0];
+        assert_eq!(b.gap.as_deref(), Some("kernel_drops"));
+        assert!(s.coverage_due(&pods, probe, Mode::Full, 5, "n1", at(4))[0]
+            .gap
+            .is_none());
+        // Per-container overflow is a gap for that container.
+        let key = (7u32, CID.to_string());
+        for i in 0..=MAX_ENTRIES_PER_CONTAINER {
+            s.add(
+                key.clone(),
+                sg("lib", format!("/l/{i}"), "ebpf"),
+                Instant::now(),
+                wall(),
+            );
+        }
+        let b = &s.coverage_due(&pods, probe, Mode::Full, 5, "n1", at(5))[0];
+        assert_eq!(b.gap.as_deref(), Some("overflow"));
+        // Not running any more: one final beat, then nothing.
+        let mut stopped = pod_started(1);
+        stopped.containers.get_mut(CID).unwrap().running = false;
+        let beats = s.coverage_due(&[(7, stopped.clone())], probe, Mode::Full, 5, "n1", at(6));
+        assert_eq!(beats.len(), 1);
+        assert!(beats[0].ended);
+        assert_eq!(beats[0].heartbeat_at, at(6));
+        assert_eq!(beats[0].tracking_since, at(1));
+        assert!(s
+            .coverage_due(&[(7, stopped)], probe, Mode::Full, 5, "n1", at(7))
+            .is_empty());
     }
 
     #[test]
@@ -1274,8 +1674,9 @@ mod tests {
         let rt = pod_runtime(&pod, None).unwrap();
         assert_eq!(rt.workload_kind, "Pod");
         assert_eq!(rt.workload_name, "web-1");
-        let (name, digest) = &rt.containers[CID];
-        assert_eq!(name, "nginx");
-        assert!(digest.starts_with("sha256:0123"));
+        let c = &rt.containers[CID];
+        assert_eq!(c.name, "nginx");
+        assert!(c.digest.starts_with("sha256:0123"));
+        assert!(!c.running, "no running state in this status");
     }
 }
