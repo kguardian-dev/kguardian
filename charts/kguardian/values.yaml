@@ -797,9 +797,12 @@ broker:
       # -- EPSS probability (0-1) at or above which a finding counts as
       # likely exploited.
       epss: 0.1
-      # -- Treat a workload with no captured ingress as exposed. false
-      # ranks it as internal, which can move a finding from P0 to P1 on
-      # missing data.
+      # -- Treat a workload with no captured ingress as exposed. With the
+      # default (true), a KEV finding (or one at or above the EPSS
+      # threshold) in a package in use lands in P0 when kguardian has
+      # observed no ingress for the workload at all: missing data pushes the
+      # tier up, never down. false treats no observed ingress as internal,
+      # so that finding is P1.
       unknownExposureAsExposed: true
       # -- Hours of continuous exec/library capture a container needs
       # before a package in it can be called installed-but-not-observed

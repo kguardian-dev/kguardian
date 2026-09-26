@@ -74,8 +74,11 @@ Every finding and CVE row has a `tier`, most urgent first:
 | `Background` | Installed, never seen executed or loaded over a covered window (`inUseDetail.observedSince`, `windowHours`). |
 
 "In use" includes `unknown`. Exposure is the rule in
-[How network exposure is computed](#how-network-exposure-is-computed); a
-workload with no captured ingress counts as exposed by default. A CVE's
+[How network exposure is computed](#how-network-exposure-is-computed). A
+workload with no observed ingress at all counts as exposed by default, so a
+KEV finding (or one at or above the EPSS threshold) in a package in use
+there is P0, not P1: missing data pushes a tier up, never down. Set
+`unknownExposureAsExposed: false` to rank it P1 instead. A CVE's
 tier is its most urgent over every affected workload container.
 `tierFactors` lists what produced a finding's tier, for example
 `["in_use:loaded", "kev", "severity:high", "exposed"]`.
