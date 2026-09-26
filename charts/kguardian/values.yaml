@@ -1958,13 +1958,14 @@ supplychain:
     enabled: false
 
   registryLookup:
-    # -- (bool) Ask each image's registry, anonymously, whether the reported
+    # -- Ask each image's registry, anonymously, whether the reported
     # digest is a multi-arch index or a single manifest, and list an index's
     # platform manifests (digest_kind / platform_manifests in the payload).
     # Never uses pull secrets or any credential: private images stay
-    # "unknown". Unset (null) follows brokerIngest.enabled, so no lookups
-    # happen while ingest is off. Set false for air-gapped clusters.
-    enabled: null
+    # "unknown". Off by default and independent of brokerIngest.enabled;
+    # while off, every digest_kind is "unknown". Egress: HTTPS to the
+    # registries of your running images.
+    enabled: false
     # -- Allow lookups to RFC1918, CGNAT (100.64.0.0/10), ULA (fc00::/7)
     # addresses, .local names and single-label (in-cluster) names, e.g. a
     # homelab LAN registry. Loopback, link-local (including the cloud
