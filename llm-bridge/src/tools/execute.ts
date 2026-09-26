@@ -258,7 +258,7 @@ const handlers: Record<string, Handler> = {
       epss_min: epssMin === undefined ? undefined : String(epssMin),
       in_use: inUse, tier, limit,
     })}`);
-    return trimImageVulns(page, { severity, fixable, kev, epssMin, inUse, tier });
+    return trimImageVulns(page, { severity, fixable, kev, epssMin, inUse, tier }, limit);
   },
   list_vulnerabilities: async (a) => {
     const namespace = s(a.namespace).trim();

@@ -204,10 +204,52 @@ function echoFilters(out: Rec, f: VulnFilters): void {
   if (f.tier) out.tier = f.tier;
 }
 
-export function trimImageVulns(page: unknown, filters: VulnFilters): Rec {
+/**
+ * Re-apply the list filters the broker is asked to apply, strictly: a
+ * row whose field is missing or null never matches. A broker that predates
+ * a filter ignores the query parameter and returns unfiltered rows; this
+ * guard keeps them out of a result labelled as filtered. `ignored` names
+ * the filters that removed rows, i.e. the ones the broker did not apply.
+ */
+export function guardFilters(
+  rows: unknown[],
+  f: VulnFilters,
+  fields: { kev: string; epss: string },
+): { rows: unknown[]; ignored: string[] } {
+  const inUse = f.inUse ? new Set(f.inUse.split(",")) : undefined;
+  const tier = f.tier ? new Set(f.tier.split(",")) : undefined;
+  const checks: [string, (r: Rec) => boolean][] = [];
+  if (f.kev !== undefined) checks.push(["kev", (r) => r[fields.kev] === f.kev]);
+  if (f.epssMin !== undefined) {
+    const min = f.epssMin;
+    checks.push(["epss_min", (r) => typeof r[fields.epss] === "number" && (r[fields.epss] as number) >= min]);
+  }
+  if (inUse) checks.push(["in_use", (r) => typeof r.inUseState === "string" && inUse.has(r.inUseState)]);
+  if (tier) checks.push(["tier", (r) => typeof r.tier === "string" && tier.has(r.tier)]);
+  const ignored = new Set<string>();
+  const kept = rows.filter((row) => {
+    if (!isRecord(row)) return false;
+    let ok = true;
+    for (const [name, test] of checks) {
+      if (!test(row)) { ignored.add(name); ok = false; }
+    }
+    return ok;
+  });
+  return { rows: kept, ignored: checks.map((c) => c[0]).filter((n) => ignored.has(n)) };
+}
+
+function ignoredNote(ignored: string[], brokerRows: number, partial: boolean): string {
+  return `The broker did not apply ${ignored.join(", ")} (it predates ${ignored.length > 1 ? "those filters" : "that filter"}), so ${ignored.length > 1 ? "they were" : "it was"} applied here to the ${brokerRows} rows it returned; rows without the field (no tier or inUseState from an older broker) never match. ${partial ? "More rows exist than were checked, so this list may be missing matches." : "Every row in scope was checked."}`;
+}
+
+export function trimImageVulns(page: unknown, filters: VulnFilters, limit = Number.MAX_SAFE_INTEGER): Rec {
   if (!isRecord(page)) return { vulnerabilities: null, note: VULN_NOTE };
   const reports = Array.isArray(page.reports) ? page.reports.map(trimReport) : [];
-  const items = Array.isArray(page.items) ? page.items : [];
+  const brokerItems = Array.isArray(page.items) ? page.items : [];
+  const guard = guardFilters(brokerItems, filters, { kev: "kev", epss: "epss" });
+  const items = guard.rows;
+  const morePages = typeof page.nextAfter === "string";
+  const partial = guard.ignored.length > 0 && (morePages || brokerItems.length >= limit);
   const out: Rec = {
     digest: page.digest,
     reports,
@@ -219,13 +261,14 @@ export function trimImageVulns(page: unknown, filters: VulnFilters): Rec {
       capInto(o, f, "filePaths", VULN_CAPS.filePaths);
       return o;
     }),
-    truncated: typeof page.nextAfter === "string",
+    truncated: morePages || partial,
   };
   echoFilters(out, filters);
   if (filters.kev !== undefined) out.kev = filters.kev;
-  out.note = reports.length === 0
+  if (guard.ignored.length > 0) out.filtersAppliedLocally = guard.ignored;
+  out.note = (reports.length === 0
     ? `No source has reported on this image: its vulnerabilities are UNKNOWN, not zero. ${VULN_NOTE}`
-    : VULN_NOTE;
+    : VULN_NOTE) + (guard.ignored.length > 0 ? ` ${ignoredNote(guard.ignored, brokerItems.length, partial)}` : "");
   return hardFit(out, ["findings", "reports"], ["digest", "noVulnerabilityData", "count"]);
 }
 
@@ -245,22 +288,22 @@ export function trimCveList(
   brokerLimit = limit,
 ): Rec {
   if (!isRecord(page)) return { vulnerabilities: null, note: VULN_NOTE };
-  let items = Array.isArray(page.items) ? page.items : [];
-  const brokerRows = items.length;
+  const brokerItems = Array.isArray(page.items) ? page.items : [];
+  const brokerRows = brokerItems.length;
   const morePages = typeof page.nextAfter === "string";
-  // The broker filters on kev. The same strict filter is applied here as a
-  // guard for a broker that predates it (and ignores the parameter): kev
-  // must equal the requested value, so null (unknown) rows are excluded.
-  // If that guard removed rows, the broker did not filter, and it only saw
-  // one page: a full page (or a next-page cursor) makes the scan partial.
-  if (filters.kev !== undefined) items = items.filter((i) => isRecord(i) && i.kev === filters.kev);
-  const droppedLocally = brokerRows - items.length;
+  // The broker applies every filter. guardFilters re-applies them strictly
+  // for a broker that predates one (and ignores the parameter). If that
+  // removed rows, the broker did not filter, and it only saw one page: a
+  // full page (or a next-page cursor) makes the scan partial.
+  const guard = guardFilters(brokerItems, filters, { kev: "kev", epss: "maxEpss" });
+  const items = guard.rows;
   const kept = items.slice(0, limit);
-  const partialKevScan = filters.kev !== undefined && droppedLocally > 0 && (morePages || brokerRows >= brokerLimit);
+  const partial = guard.ignored.length > 0 && (morePages || brokerRows >= brokerLimit);
+  const partialKevScan = filters.kev !== undefined && partial;
   const out: Rec = {
     count: kept.length,
     vulnerabilities: kept.map((i) => pick(i, CVE_KEYS)),
-    truncated: morePages || items.length > kept.length || partialKevScan,
+    truncated: morePages || items.length > kept.length || partial,
     computedAt: page.computedAt ?? null,
     staleSeconds: page.staleSeconds ?? null,
   };
@@ -273,8 +316,9 @@ export function trimCveList(
       ? `partial scan: only the first ${brokerRows} CVEs by severity were checked for kev=${filters.kev}; more exist, so this list may be missing matches. Narrow by namespace or severity to check the rest. Rows whose kev is null (unknown, e.g. Trivy-only findings) are excluded.`
       : `every CVE the broker holds for this scope was checked; rows whose kev is null (unknown, e.g. Trivy-only findings) are excluded, so an empty list does not mean no KEV CVEs`;
   }
+  if (guard.ignored.length > 0) out.filtersAppliedLocally = guard.ignored;
   const stale = page.computedAt === null || page.computedAt === undefined;
-  out.note = `${stale ? "The CVE summary has not been built yet since the broker started, so an empty list is unknown, not clean. " : ""}Counts cover images in the inventory that have vulnerability data; images without any report are unknown and not counted. weakestJoin workload_tag means some matches are by tag only. ${VULN_NOTE}`;
+  out.note = `${stale ? "The CVE summary has not been built yet since the broker started, so an empty list is unknown, not clean. " : ""}Counts cover images in the inventory that have vulnerability data; images without any report are unknown and not counted. weakestJoin workload_tag means some matches are by tag only. ${VULN_NOTE}${guard.ignored.length > 0 ? ` ${ignoredNote(guard.ignored, brokerRows, partial)}` : ""}`;
   return hardFit(out, ["vulnerabilities"], ["count", "computedAt"]);
 }
 

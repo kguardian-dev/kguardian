@@ -250,6 +250,35 @@ const TIERED_CVE = {
   notObservedWorkloads: 0, exposedWorkloads: 0, inUse: true, inUseState: "loaded",
 };
 
+test("an old broker that ignores tier/in_use/epss_min: filtered here, and says so", async () => {
+  // The pre-tier capture: no tier or inUseState fields' values match, and
+  // the broker returned every finding despite the filters.
+  const c = serve("image-vulns-storefront");
+  const got = JSON.parse((await executeInProcessTool("get_image_vulnerabilities", {
+    digest: STOREFRONT, tier: "P0", in_use: "installed_not_observed", epss_min: 0.1,
+  })).text);
+  assert.ok(c.body.items.length > 0);
+  assert.equal(got.count, 0, "no unfiltered rows labelled as filtered");
+  assert.deepEqual(got.findings, []);
+  assert.deepEqual(got.filtersAppliedLocally, ["epss_min", "in_use", "tier"]);
+  assert.match(got.note, /The broker did not apply epss_min, in_use, tier/);
+  assert.equal(got.tier, "P0", "the filter is still echoed");
+
+  // Cluster list: a tierless summary row never matches tier=P0.
+  routes["/vulnerabilities"] = { status: 200, body: capture("vulns-list").body };
+  const list = JSON.parse((await executeInProcessTool("list_vulnerabilities", { tier: "P0" })).text);
+  assert.equal(list.count, 0);
+  assert.deepEqual(list.filtersAppliedLocally, ["tier"]);
+  assert.match(list.note, /did not apply tier/);
+
+  // A broker that applied the filters: nothing dropped, nothing said.
+  routes[`/images/${STOREFRONT}/vulnerabilities`] = { status: 200, body: { digest: STOREFRONT, reports: [{ source: "trivy-operator" }], items: [TIERED_FINDING], nextAfter: null } };
+  const ok = JSON.parse((await executeInProcessTool("get_image_vulnerabilities", { digest: STOREFRONT, tier: "P0", in_use: "loaded", epss_min: 0.1 })).text);
+  assert.equal(ok.count, 1);
+  assert.equal("filtersAppliedLocally" in ok, false);
+  assert.doesNotMatch(ok.note, /did not apply/);
+});
+
 test("tier and in-use filters reach the broker and tier fields pass through", async () => {
   routes[`/images/${STOREFRONT}/vulnerabilities`] = { status: 200, body: { digest: STOREFRONT, reports: [{ source: "trivy-operator" }], items: [TIERED_FINDING], nextAfter: null } };
   const img = JSON.parse((await executeInProcessTool("get_image_vulnerabilities", {
