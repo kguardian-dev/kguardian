@@ -32,6 +32,7 @@
               "concepts/peer-attribution",
               "concepts/audit-network-policy",
               "concepts/application-security-profile",
+              "concepts/image-trust-policy",
               "concepts/seccomp-profiles",
               "concepts/compute-contention",
               "concepts/policy-as-code"

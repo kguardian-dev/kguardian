@@ -86,7 +86,17 @@ issuer, san}` or `{kind: "key", keyName, keyFingerprint}`) and up to 16
 predicate types are cut to 256 bytes (never inside a character); the full
 values are in the single-digest read.
 
-Both reads are charged to the broker's read-memory budget and answer `503`
+### `GET /attestations/running`
+
+The evaluator's [ImageTrustPolicy](/concepts/image-trust-policy) feed:
+every running workload container (`namespace`, `workloadKind`,
+`workloadName`, `container`, `digest`, `imageRef`, `repository`) with its
+image's `verdict`, `reason`, verified `signers` and verified
+`attestations`. `verdict` is `null` when the digest has no result yet (not
+checked, which is not the same as unsigned). `?namespace=`, `limit` 1-1000
+(default 500), and an opaque `after` cursor from `nextAfter`.
+
+All reads are charged to the broker's read-memory budget and answer `503`
 with `Retry-After` rather than a partial result.
 
 ## Ingest (supplychain token)
