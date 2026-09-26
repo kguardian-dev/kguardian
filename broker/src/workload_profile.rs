@@ -1160,17 +1160,40 @@ fn build_images(s: &Sources, now: DateTime<Utc>) -> (ImagesDim, Vec<Finding>) {
             )],
         }
     } else {
+        // Contract v1.3: the images dimension is about what the running
+        // digests contain. With no vulnerability data for them its status
+        // is unknown, whatever the inventory says; the inventory facts
+        // (digests, mixed rollouts, crash loops) stay as details, reasons
+        // and findings. Once vulnerability data exists the status is
+        // derived from findings.
+        let current: Vec<&ImageContainerView> = containers.iter().filter(|c| !c.stale).collect();
+        let running: BTreeSet<&str> = current
+            .iter()
+            .flat_map(|c| c.running.iter().map(|d| d.digest.as_str()))
+            .collect();
+        let vulnerability_data = false;
         Envelope {
-            status: status_from_findings(&findings),
+            status: if vulnerability_data {
+                status_from_findings(&findings)
+            } else {
+                "unknown"
+            },
             coverage: Coverage {
-                level: "full",
+                level: "partial",
                 fraction: None,
                 observed_since: since.map(utc),
-                note: format!("running window {} s", s.running_window_seconds),
+                note: format!(
+                    "inventory only (running window {} s); no vulnerability data",
+                    s.running_window_seconds
+                ),
             },
             reasons: vec![reason(
                 "vulnerabilities_not_configured",
-                "No vulnerability source is configured; images are inventoried but not assessed for vulnerabilities",
+                format!(
+                    "{} running digest(s) across {} container(s); vulnerability data not configured",
+                    running.len(),
+                    current.len()
+                ),
             )],
         }
     };
@@ -1941,9 +1964,10 @@ pub struct Profile {
     pub dimension_hashes: BTreeMap<&'static str, String>,
 }
 
-/// Rollup over the core dimensions: worst known status; coverage = the
-/// fraction of core dimensions whose status is known; unknown dimensions
-/// are listed and never count as ok or risk.
+/// Rollup over the core dimensions: worst known status, except that it can
+/// only be `ok` when no core dimension is unknown (else `unknown`, partial
+/// data); coverage = the fraction of core dimensions whose status is known;
+/// unknown dimensions are always listed and never count as ok or risk.
 pub fn rollup(dims: &[(&'static str, &Envelope)]) -> (PostureHead, Vec<&'static str>) {
     let mut unknown = Vec::new();
     let mut worst = "unknown";
@@ -1963,6 +1987,12 @@ pub fn rollup(dims: &[(&'static str, &Envelope)]) -> (PostureHead, Vec<&'static 
         }
     }
     let coverage = ((known as f64 / CORE_DIMENSIONS.len() as f64) * 100.0).round() / 100.0;
+    // Contract v1.3: "ok" needs every core dimension known. With any
+    // unknown dimension the rollup is the worst known status only when
+    // that is warn/risk; otherwise it is unknown (partial data).
+    if !unknown.is_empty() && status_rank(worst) < status_rank("warn") {
+        worst = "unknown";
+    }
     (
         PostureHead {
             status: worst.to_string(),
@@ -2019,7 +2049,7 @@ pub fn build(key: &Key, s: &Sources, now: DateTime<Utc>) -> Profile {
             status: e.status,
             // podSecurity leads with its level reason (which containers
             // set it); the others with their most severe finding.
-            message: (*d == "podSecurity")
+            message: (*d == "podSecurity" || e.status == "unknown")
                 .then(|| e.reasons.first().map(|r| r.message.clone()))
                 .flatten()
                 .or_else(|| {
@@ -3530,23 +3560,30 @@ mod tests {
             ..Default::default()
         };
         let p = build(&key(), &s, now());
-        // images is known. podSecurity passes every evaluated check, but
-        // restricted is only an upper bound, so it is unknown, never ok.
+        // podSecurity passes every evaluated check, but restricted is only
+        // an upper bound, so it is unknown, never ok. images has an
+        // inventory but no vulnerability data: unknown too (v1.3).
         assert_eq!(p.dimensions.pod_security.env.status, "unknown");
         assert_eq!(
             p.dimensions.pod_security.env.reasons[0].code,
             "pss_unverified"
         );
-        assert_eq!(p.dimensions.images.env.status, "ok");
-        assert_eq!(p.posture.head.status, "ok");
-        assert_eq!(p.posture.head.coverage, 0.25);
+        assert_eq!(p.dimensions.images.env.status, "unknown");
+        assert_eq!(p.posture.head.status, "unknown");
+        assert_eq!(p.posture.head.coverage, 0.0);
         assert_eq!(
             p.posture.unknown_dimensions,
-            vec!["network", "syscalls", "podSecurity"]
+            vec!["network", "syscalls", "podSecurity", "images"]
         );
         let dims: Vec<&str> = p.posture.reasons.iter().map(|r| r.dimension).collect();
-        assert_eq!(dims, vec!["network", "syscalls", "podSecurity"]);
+        assert_eq!(dims, vec!["network", "syscalls", "podSecurity", "images"]);
         assert!(p.posture.reasons.iter().all(|r| r.status == "unknown"));
+        let images_reason = &p.posture.reasons[3].message;
+        assert!(
+            images_reason.contains("1 running digest(s)")
+                && images_reason.contains("vulnerability data not configured"),
+            "{images_reason}"
+        );
 
         // Worst known status wins; unknown never counts as ok or risk.
         let env = |status| Envelope {
@@ -3569,6 +3606,70 @@ mod tests {
         assert_eq!(head.status, "warn");
         assert_eq!(head.coverage, 0.75);
         assert_eq!(unknown, vec!["podSecurity"]);
+    }
+
+    /// Contract v1.3: the rollup is ok only when no core dimension is
+    /// unknown. With an unknown dimension, all-ok known dimensions give
+    /// unknown (partial data); warn/risk still surface.
+    #[test]
+    fn rollup_is_never_ok_with_an_unknown_dimension() {
+        let env = |status: &'static str| Envelope {
+            status,
+            coverage: Coverage {
+                level: "full",
+                fraction: None,
+                observed_since: None,
+                note: String::new(),
+            },
+            reasons: vec![],
+        };
+        let roll = |n: &'static str, sc: &'static str, ps: &'static str, im: &'static str| {
+            let (a, b, c, d) = (env(n), env(sc), env(ps), env(im));
+            rollup(&[
+                ("network", &a),
+                ("syscalls", &b),
+                ("podSecurity", &c),
+                ("images", &d),
+            ])
+        };
+        // Three ok, one unknown: partial data, not ok.
+        let (h, u) = roll("ok", "ok", "ok", "unknown");
+        assert_eq!((h.status.as_str(), h.coverage), ("unknown", 0.75));
+        assert_eq!(u, vec!["images"]);
+        // Every dimension known and ok: ok.
+        let (h, u) = roll("ok", "ok", "ok", "ok");
+        assert_eq!((h.status.as_str(), h.coverage), ("ok", 1.0));
+        assert!(u.is_empty());
+        // Warn / risk surface even with unknown dimensions.
+        assert_eq!(roll("warn", "ok", "unknown", "unknown").0.status, "warn");
+        assert_eq!(roll("ok", "risk", "unknown", "ok").0.status, "risk");
+        // Nothing known.
+        let (h, u) = roll("unknown", "unknown", "unknown", "unknown");
+        assert_eq!((h.status.as_str(), h.coverage), ("unknown", 0.0));
+        assert_eq!(u.len(), 4);
+    }
+
+    /// Contract v1.3: images is unknown without vulnerability data even when
+    /// the inventory is clean; inventory findings still appear as findings.
+    #[test]
+    fn images_unknown_without_vulnerability_data() {
+        let mut c = container("app", restricted());
+        c.digests[0].state = Some("waiting".into());
+        c.digests[0].state_reason = Some("CrashLoopBackOff".into());
+        let s = Sources {
+            containers: vec![container("sidecar", restricted()), c],
+            ..Default::default()
+        };
+        let p = build(&key(), &s, now());
+        let im = &p.dimensions.images;
+        assert_eq!(im.env.status, "unknown");
+        assert_eq!(im.env.reasons[0].code, "vulnerabilities_not_configured");
+        assert!(im.env.reasons[0]
+            .message
+            .starts_with("1 running digest(s) across 2 container(s)"));
+        assert!(im.vulnerabilities.is_none());
+        assert!(p.findings.iter().any(|f| f.id == "images.crashLoop/app"));
+        assert!(p.posture.unknown_dimensions.contains(&"images"));
     }
 
     #[test]

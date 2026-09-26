@@ -4,10 +4,12 @@ Part of #1533. Implemented in `broker/src/workload_profile.rs` (read model, post
 `broker/src/pod_security.rs` (Pod Security Standards analyser), PR #1669. Consumers: the frontend profile
 page (#1672), llm-bridge tools and the advisor `profile` commands (#1668).
 
-Status: **v1.2, stable**. Every change is appended to the CHANGELOG at the bottom, dated.
+Status: **v1.3, stable**. Every change is appended to the CHANGELOG at the bottom, dated.
 
-**Examples:** the snippets below are trimmed from raw responses of a v1.2
-broker build against a seeded database.
+**Examples:** every JSON example below is generated from raw responses of a v1.3 broker build against a
+seeded test database (neutral names only). Values are verbatim. The only edits are: lists longer than the stated
+limit are cut and end with a `"(N more in the capture)"` string, and a key listed in `_omitted` was left out
+(it is shown in its own section).
 
 ## 0. Conventions (apply to every response below)
 
@@ -58,27 +60,102 @@ runs ~60 s after broker start); `computedAt` says how fresh each row is. The det
 is always computed live. Captures: `list-page1-limit2`, `list-page2-after`, `list-namespace-payments`,
 `list-search-ledger`, `list-status-risk`.
 
+From `GET /workloads?limit=2` -> 200 (capture `list-page1-limit2.json`, `body`):
+
 ```json
 {
   "items": [
     {
       "clusterId": "primary",
-      "namespace": "flux-system",
-      "kind": "Deployment",
-      "name": "source-controller",
-      "revision": 1,
-      "contentHash": "fnv1a64:…",
-      "computedAt": "2026-09-26T02:05:41.1Z",
-      "lastChangedAt": "2026-09-26T02:04:41.1Z",
-      "posture": { "status": "ok", "coverage": 0.75, "unknownDimensions": ["podSecurity"] },
+      "computedAt": "2026-09-26T02:22:26.378256Z",
+      "contentHash": "fnv1a64:5ba183ed9b98a6fa",
       "dimensions": {
-        "network":     { "status": "ok" },
-        "syscalls":    { "status": "ok" },
-        "podSecurity": { "status": "unknown", "level": "restricted", "levelConfidence": "upper_bound" },
-        "images":      { "status": "ok", "runningDigests": 1, "mixedDigests": false },
-        "compute":     { "status": "ok" }
+        "compute": {
+          "status": "ok"
+        },
+        "images": {
+          "mixedDigests": false,
+          "runningDigests": 1,
+          "status": "unknown"
+        },
+        "network": {
+          "status": "ok"
+        },
+        "podSecurity": {
+          "level": "restricted",
+          "levelConfidence": "upper_bound",
+          "status": "unknown"
+        },
+        "syscalls": {
+          "status": "ok"
+        }
       },
-      "findingCounts": { "critical": 0, "high": 0, "medium": 0, "low": 0, "info": 0 }
+      "findingCounts": {
+        "critical": 0,
+        "high": 0,
+        "info": 0,
+        "low": 0,
+        "medium": 0
+      },
+      "kind": "Deployment",
+      "lastChangedAt": "2026-09-26T02:18:02.820047Z",
+      "name": "source-controller",
+      "namespace": "flux-system",
+      "posture": {
+        "coverage": 0.5,
+        "status": "unknown",
+        "unknownDimensions": [
+          "podSecurity",
+          "images"
+        ]
+      },
+      "revision": 1
+    },
+    {
+      "clusterId": "primary",
+      "computedAt": "2026-09-26T02:22:26.383445Z",
+      "contentHash": "fnv1a64:8bf410a491511788",
+      "dimensions": {
+        "compute": {
+          "status": "unknown"
+        },
+        "images": {
+          "mixedDigests": false,
+          "runningDigests": 1,
+          "status": "unknown"
+        },
+        "network": {
+          "status": "warn"
+        },
+        "podSecurity": {
+          "level": "privileged",
+          "levelConfidence": "confirmed",
+          "status": "risk"
+        },
+        "syscalls": {
+          "status": "unknown"
+        }
+      },
+      "findingCounts": {
+        "critical": 0,
+        "high": 2,
+        "info": 0,
+        "low": 0,
+        "medium": 4
+      },
+      "kind": "DaemonSet",
+      "lastChangedAt": "2026-09-26T02:18:02.826768Z",
+      "name": "node-exporter",
+      "namespace": "observability",
+      "posture": {
+        "coverage": 0.5,
+        "status": "risk",
+        "unknownDimensions": [
+          "syscalls",
+          "images"
+        ]
+      },
+      "revision": 1
     }
   ],
   "nextAfter": "observability/DaemonSet/node-exporter"
@@ -92,49 +169,164 @@ is always computed live. Captures: `list-page1-limit2`, `list-page2-after`, `lis
 ## 2. `GET /workloads/{namespace}/{kind}/{name}/profile` — full profile, computed live
 
 404 `workload_not_found` when the broker has none of: inventory rows, a syscall aggregate, pods in
-`pod_details`, a stored profile. Captures: `profile-ok-flux-system-source-controller`,
-`profile-warn-payments-checkout`, `profile-warn-payments-ledger-mixed-crashloop-stale`,
+`pod_details`, a stored profile. Captures: `profile-unknown-partial-flux-system-source-controller` (every
+known dimension ok, but not all known: `unknown`), `profile-warn-payments-refunds-init-fails-restricted`,
+`profile-warn-payments-checkout-after-fix`, `profile-warn-payments-ledger-mixed-crashloop-stale`,
 `profile-risk-observability-node-exporter-hostpid-wouldDeny`,
-`profile-unknown-observability-otel-collector-fresh`.
+`profile-unknown-observability-otel-collector-fresh` (nothing known). No workload can be posture `ok` in
+v1.3 until vulnerability data exists (section 2.2).
 
-Top level (from `profile-warn-payments-ledger-mixed-crashloop-stale`, trimmed):
+
+From `GET /workloads/payments/Deployment/refunds/profile` -> 200 (capture `profile-warn-payments-refunds-init-fails-restricted.json`, `body`):
 
 ```json
 {
-  "workload": { "clusterId": "primary", "namespace": "payments", "kind": "Deployment", "name": "ledger",
-                "transient": false, "pods": { "live": 1, "names": ["ledger-5b7c9d8f6-q8wzn"], "truncated": false } },
-  "generatedAt": "2026-09-26T02:08:10Z",
-  "contentHash": "fnv1a64:…",
-  "version": { "revision": 1, "contentHash": "fnv1a64:…", "createdAt": "2026-09-26T02:04:41Z" },
+  "workload": {
+    "clusterId": "primary",
+    "namespace": "payments",
+    "kind": "Deployment",
+    "name": "refunds",
+    "transient": false,
+    "pods": {
+      "live": 1,
+      "names": [
+        "refunds-6c8d9e7f5-r7t2v"
+      ],
+      "truncated": false
+    }
+  },
+  "generatedAt": "2026-09-26T02:22:32.589445928Z",
+  "contentHash": "fnv1a64:3948ec39cd68f413",
+  "version": {
+    "revision": 1,
+    "contentHash": "fnv1a64:3948ec39cd68f413",
+    "createdAt": "2026-09-26T02:22:26.368580Z"
+  },
   "snapshotPending": false,
   "posture": {
     "status": "warn",
-    "coverage": 0.5,
-    "unknownDimensions": ["network", "podSecurity"],
+    "coverage": 0.25,
+    "unknownDimensions": [
+      "network",
+      "syscalls",
+      "images"
+    ],
     "reasons": [
-      { "dimension": "network", "status": "unknown", "message": "No audit policy covers this workload; applied NetworkPolicies are not visible to the broker" },
-      { "dimension": "syscalls", "status": "warn", "message": "SeccompProfile ledger is in audit mode" },
-      { "dimension": "podSecurity", "status": "unknown", "message": "Every evaluated check passes restricted, but 9 checks cannot be seen (e.g. hostPath), so restricted is not confirmed" },
-      { "dimension": "images", "status": "warn", "message": "Container ledger is in CrashLoopBackOff" }
+      {
+        "dimension": "network",
+        "status": "unknown",
+        "message": "No flows observed for this workload's pods"
+      },
+      {
+        "dimension": "syscalls",
+        "status": "unknown",
+        "message": "No syscalls have been captured for this workload"
+      },
+      {
+        "dimension": "podSecurity",
+        "status": "warn",
+        "message": "At most baseline: migrate (init) fail(s) a restricted check; unevaluated checks may lower it further"
+      },
+      "(1 more in the capture)"
     ]
   },
-  "attention": [ { "id": "images.crashLoop/ledger", "dimension": "images", "severity": "medium", "tier": "P2",
-                   "title": "Container ledger is in CrashLoopBackOff", "detail": "The running digest keeps exiting.", "container": "ledger" } ],
-  "findings": [ "… every finding, same shape; attention = the first 5 of severity medium or worse" ],
+  "attention": [
+    {
+      "id": "podSecurity.allowPrivilegeEscalation/migrate",
+      "dimension": "podSecurity",
+      "severity": "medium",
+      "tier": "P2",
+      "title": "Container migrate allows privilege escalation",
+      "detail": "allowPrivilegeEscalation is not set to false, so setuid binaries can gain privileges.",
+      "container": "migrate"
+    },
+    {
+      "id": "podSecurity.capabilitiesNotDropped/migrate",
+      "dimension": "podSecurity",
+      "severity": "medium",
+      "tier": "P2",
+      "title": "Container migrate does not drop ALL capabilities",
+      "detail": "The runtime's default capability set stays granted.",
+      "container": "migrate"
+    }
+  ],
+  "findings": [
+    {
+      "id": "podSecurity.allowPrivilegeEscalation/migrate",
+      "dimension": "podSecurity",
+      "severity": "medium",
+      "tier": "P2",
+      "title": "Container migrate allows privilege escalation",
+      "detail": "allowPrivilegeEscalation is not set to false, so setuid binaries can gain privileges.",
+      "container": "migrate"
+    },
+    {
+      "id": "podSecurity.capabilitiesNotDropped/migrate",
+      "dimension": "podSecurity",
+      "severity": "medium",
+      "tier": "P2",
+      "title": "Container migrate does not drop ALL capabilities",
+      "detail": "The runtime's default capability set stays granted.",
+      "container": "migrate"
+    },
+    {
+      "id": "podSecurity.readOnlyRootFilesystem/app",
+      "dimension": "podSecurity",
+      "severity": "low",
+      "tier": null,
+      "title": "Container app root filesystem is writable",
+      "detail": "readOnlyRootFilesystem is not true (hardening; not required by PSS restricted).",
+      "container": "app"
+    },
+    "(1 more in the capture)"
+  ],
   "controls": [
-    { "control": "networkPolicy",  "state": "unknown", "detail": "…", "inSync": null },
-    { "control": "seccompProfile", "state": "audit",   "detail": "SeccompProfile ledger (SCMP_ACT_LOG), 4 syscalls, distribution …", "inSync": true },
-    { "control": "imageAdmission", "state": null,      "detail": "Signature/admission checks are not configured", "inSync": null }
+    {
+      "control": "networkPolicy",
+      "state": "unknown",
+      "detail": "No audit policy covers this workload; applied NetworkPolicies are not visible to the broker",
+      "inSync": null
+    },
+    {
+      "control": "seccompProfile",
+      "state": "none",
+      "detail": "No SeccompProfile CR references this workload",
+      "inSync": null
+    },
+    {
+      "control": "imageAdmission",
+      "state": null,
+      "detail": "Signature/admission checks are not configured",
+      "inSync": null
+    }
   ],
   "readiness": [
-    { "id": "trafficObserved24h",     "ok": true, "message": "Traffic observed for 5d 0h" },
-    { "id": "syscallCaptureComplete", "ok": true, "message": "Every contributing pod captured at level full (startup included)" },
-    { "id": "noWouldDeny24h",         "ok": null, "message": "No audit policy covers this workload" },
-    { "id": "imageSigned",            "ok": null, "message": "Signature verification is not configured" },
-    { "id": "podSecurityRestricted",  "ok": null, "message": "Every evaluated check passes restricted; 9 checks cannot be seen, so restricted is not confirmed" }
+    {
+      "id": "trafficObserved24h",
+      "ok": false,
+      "message": "No flows observed"
+    },
+    {
+      "id": "syscallCaptureComplete",
+      "ok": null,
+      "message": "No syscall capture for this workload"
+    },
+    {
+      "id": "noWouldDeny24h",
+      "ok": null,
+      "message": "No audit policy covers this workload"
+    },
+    "(2 more in the capture)"
   ],
-  "exposure": { "ingressPeers": 1, "ingressExternal": 0, "egressPeers": 0, "egressExternal": 0 },
-  "dimensions": { "network": {}, "syscalls": {}, "podSecurity": {}, "images": {}, "compute": {} }
+  "exposure": {
+    "ingressPeers": null,
+    "ingressExternal": null,
+    "egressPeers": null,
+    "egressExternal": null
+  },
+  "_omitted": [
+    "dimensions"
+  ]
 }
 ```
 
@@ -166,20 +358,27 @@ Top level (from `profile-warn-payments-ledger-mixed-crashloop-stale`, trimmed):
 ### 2.2 Posture rollup and status rules
 
 - Core dimensions: network, syscalls, podSecurity, images. `compute` is informational and excluded.
-- `posture.status` = worst **known** core status (`risk` > `warn` > `ok`); `unknown` only when every core
-  dimension is unknown. An unknown dimension never counts as ok or as risk.
+- `posture.status`:
+  - `ok` **only when every core dimension is known and ok**;
+  - with any unknown core dimension: the worst known status if that is `warn` or `risk`, otherwise
+    `unknown` ("partial data");
+  - `unknown` when every core dimension is unknown.
+  An unknown dimension never counts as ok or as risk.
 - `posture.coverage` = known core dimensions / 4, 2 decimals. `posture.unknownDimensions` = core
-  dimensions whose status is `unknown`.
+  dimensions whose status is `unknown`; always present, `[]` only when all four are known.
 - `posture.reasons[]`: one `{dimension, status, message}` per core dimension that is not `ok`, in the order
-  network, syscalls, podSecurity, images. podSecurity uses its level reason (naming the containers that
-  set the level); the others use their most severe finding of severity medium or worse, else their first
-  reason.
+  network, syscalls, podSecurity, images. podSecurity and every `unknown` dimension use their first
+  reason (podSecurity's names the containers that set the level); the others use their most severe
+  finding of severity medium or worse, else their first reason.
 - Dimension status from findings: any critical/high finding -> `risk`; else any medium -> `warn`; else
   `ok`; no data -> `unknown`. Then:
   - **podSecurity**: level `privileged` -> `risk`; level `baseline` -> at least `warn`; level `restricted`
     (only ever an upper bound in v1) -> **never `ok`**: `unknown` unless a finding makes it warn/risk.
   - **syscalls**: `capture.complete: false` -> at least `warn`.
   - **network**: `unknown` unless an audit policy covers the workload's pods in the last 24 h.
+  - **images**: `unknown` while there is no vulnerability data for the running digests (always, until
+    the P1-3 vulnerability source lands); then derived from findings. Inventory facts (digests, mixed
+    rollouts, crash loops, pull failures) stay in the dimension's details, its reason and its findings.
 
 ### 2.3 `podSecurity` — Pod Security Standards
 
@@ -225,43 +424,126 @@ Rules follow the upstream PSS check list exactly: kubernetes.io/docs/concepts/se
   - else any evaluated restricted check fails -> `"baseline"`, `"upper_bound"`;
   - else `"restricted"`, `"upper_bound"` (never confirmed in v1).
 
-Trimmed from `profile-risk-observability-node-exporter-hostpid-wouldDeny`:
+
+From `GET /workloads/observability/DaemonSet/node-exporter/profile` -> 200 (capture `profile-risk-observability-node-exporter-hostpid-wouldDeny.json`, `body.dimensions.podSecurity`):
 
 ```json
 {
   "status": "risk",
-  "coverage": { "level": "partial", "fraction": 0.5, "observedSince": "…", "note": "9 of 18 PSS checks evaluated; …" },
-  "reasons": [ { "code": "pss_fails_baseline", "message": "Privileged under PSS: pod spec fail(s) a baseline check" } ],
+  "coverage": {
+    "level": "partial",
+    "fraction": 0.5,
+    "observedSince": "2026-09-20T02:17:01.219542Z",
+    "note": "9 of 18 PSS checks evaluated; volumes, ports, probes, AppArmor, SELinux, procMount, sysctls and hostProcess are not ingested"
+  },
+  "reasons": [
+    {
+      "code": "pss_fails_baseline",
+      "message": "Privileged under PSS: pod spec fail(s) a baseline check"
+    }
+  ],
   "pssVersion": "kubernetes/website@2c1aa11c (Kubernetes v1.37 docs)",
   "level": "privileged",
   "levelConfidence": "confirmed",
-  "unevaluatedChecks": ["hostProcess","hostPathVolumes","hostPorts","hostProbesLifecycle","appArmor","seLinux","procMount","sysctls","volumeTypes"],
+  "unevaluatedChecks": [
+    "hostProcess",
+    "hostPathVolumes",
+    "hostPorts",
+    "hostProbesLifecycle",
+    "appArmor",
+    "seLinux",
+    "procMount",
+    "sysctls",
+    "volumeTypes"
+  ],
   "pod": {
     "known": true,
-    "serviceAccountName": "node-exporter", "automountServiceAccountToken": false,
-    "hostNetwork": true, "hostPID": true, "hostIPC": null, "hostUsers": null,
-    "securityContext": { "runAsNonRoot": null, "runAsUser": null, "runAsGroup": null, "fsGroup": null, "seccompProfileType": null },
+    "serviceAccountName": "node-exporter",
+    "automountServiceAccountToken": false,
+    "hostNetwork": true,
+    "hostPID": true,
+    "hostIPC": null,
+    "hostUsers": null,
+    "securityContext": {
+      "runAsNonRoot": null,
+      "runAsUser": null,
+      "runAsGroup": null,
+      "fsGroup": null,
+      "seccompProfileType": null
+    },
     "failing": [
-      { "check": "hostNamespaces", "level": "baseline", "field": "spec.hostNetwork", "value": true, "message": "hostNetwork must be unset or false" },
-      { "check": "hostNamespaces", "level": "baseline", "field": "spec.hostPID", "value": true, "message": "hostPID must be unset or false" }
+      {
+        "check": "hostNamespaces",
+        "level": "baseline",
+        "field": "spec.hostNetwork",
+        "value": true,
+        "message": "hostNetwork must be unset or false"
+      },
+      {
+        "check": "hostNamespaces",
+        "level": "baseline",
+        "field": "spec.hostPID",
+        "value": true,
+        "message": "hostPID must be unset or false"
+      }
     ]
   },
   "containers": [
-    { "name": "node-exporter", "kind": "regular", "source": "running", "digest": "sha256:7d4e…",
-      "securityContext": { "privileged": null, "allowPrivilegeEscalation": null, "runAsNonRoot": true, "runAsUser": 65534,
-                           "runAsGroup": null, "readOnlyRootFilesystem": true, "capabilitiesAdd": null,
-                           "capabilitiesDrop": null, "seccompProfileType": null },
+    {
+      "name": "node-exporter",
+      "kind": "regular",
+      "source": "running",
+      "digest": "sha256:7d4eaaf37d4eaaf37d4eaaf37d4eaaf37d4eaaf37d4eaaf37d4eaaf37d4eaaf3",
+      "securityContext": {
+        "privileged": null,
+        "allowPrivilegeEscalation": null,
+        "runAsNonRoot": true,
+        "runAsUser": 65534,
+        "runAsGroup": null,
+        "readOnlyRootFilesystem": true,
+        "capabilitiesAdd": null,
+        "capabilitiesDrop": null,
+        "seccompProfileType": null
+      },
       "level": "baseline",
-      "failing": [ { "check": "privilegeEscalation", "level": "restricted", "field": "spec.containers[node-exporter].securityContext.allowPrivilegeEscalation", "value": null, "message": "allowPrivilegeEscalation must be set to false" } ] }
+      "failing": [
+        {
+          "check": "privilegeEscalation",
+          "level": "restricted",
+          "field": "spec.containers[node-exporter].securityContext.allowPrivilegeEscalation",
+          "value": null,
+          "message": "allowPrivilegeEscalation must be set to false"
+        },
+        {
+          "check": "seccompRestricted",
+          "level": "restricted",
+          "field": "spec.containers[node-exporter].securityContext.seccompProfile.type",
+          "value": null,
+          "message": "seccompProfile.type must be RuntimeDefault or Localhost (on the container, or on the pod)"
+        },
+        {
+          "check": "capabilitiesRestricted",
+          "level": "restricted",
+          "field": "spec.containers[node-exporter].securityContext.capabilities.drop",
+          "value": null,
+          "message": "capabilities.drop must include ALL"
+        }
+      ]
+    }
   ],
-  "staleContainers": [],
   "recommendation": {
     "recommendation": true,
     "targetLevel": "restricted",
     "format": "strategic-merge-patch",
-    "yaml": "# kguardian recommendation, not applied. Review before use.\n# Target: …\nspec:\n  template:\n    spec:\n      hostNetwork: false\n      hostPID: false\n      …",
-    "caveats": [ "Checks kguardian cannot see …", "This looks like a node agent (DaemonSet or hostNetwork). …", "Turning off hostNetwork/hostPID/hostIPC breaks …", "drop: [\"ALL\"] also removes CHOWN, SETUID, …" ]
-  }
+    "yaml": "# kguardian recommendation, not applied. Review before use.\n# Target: Pod Security Standards restricted (kubernetes.io/docs/concepts/security/pod-security-standards)\nspec:\n  template:\n    spec:\n      hostNetwork: false\n      hostPID: false\n      securityContext:\n        seccompProfile:\n          type: RuntimeDefault\n      containers:\n      - name: node-exporter\n        securityContext:\n          allowPrivilegeEscalation: false\n          capabilities:\n            drop: [\"ALL\"]\n",
+    "caveats": [
+      "Checks kguardian cannot see (hostPath and other volume types, hostPort, probe hosts, AppArmor, SELinux, procMount, sysctls) may still fail restricted.",
+      "This looks like a node agent (DaemonSet or hostNetwork). CNI plugins, CSI drivers and node agents usually need privileges restricted forbids; a namespace-level PSS exemption is often the right answer instead of this patch.",
+      "Turning off hostNetwork/hostPID/hostIPC breaks components that need the node's namespaces (CNI, node exporters, service meshes' node proxies); hostNetwork: false also changes the pod's IP and port bindings.",
+      "drop: [\"ALL\"] also removes CHOWN, SETUID, SETGID, DAC_OVERRIDE and NET_BIND_SERVICE. Images that start as root and drop privileges, change file ownership at startup, or bind ports below 1024 may fail; add back NET_BIND_SERVICE only if the app needs it."
+    ]
+  },
+  "staleContainers": []
 }
 ```
 
@@ -290,28 +572,83 @@ Trimmed from `profile-risk-observability-node-exporter-hostpid-wouldDeny`:
 
 ### 2.4 `network`
 
-Trimmed from `profile-risk-observability-node-exporter-hostpid-wouldDeny`:
+
+From `GET /workloads/observability/DaemonSet/node-exporter/profile` -> 200 (capture `profile-risk-observability-node-exporter-hostpid-wouldDeny.json`, `body.dimensions.network`):
 
 ```json
 {
   "status": "warn",
-  "coverage": { "level": "full", "fraction": null, "observedSince": "…", "note": "Flows from the workload's pod(s) (1 live)" },
+  "coverage": {
+    "level": "full",
+    "fraction": null,
+    "observedSince": "2026-09-23T02:17:01.229165Z",
+    "note": "Flows from the workload's pod(s) (1 live)"
+  },
   "reasons": [],
   "summary": {
-    "egress":  { "peers": 1, "external": 1, "ports": ["TCP/443"] },
-    "ingress": { "peers": 1, "external": 0, "ports": ["TCP/9100"] }
+    "egress": {
+      "peers": 1,
+      "external": 1,
+      "ports": [
+        "TCP/443"
+      ]
+    },
+    "ingress": {
+      "peers": 1,
+      "external": 0,
+      "ports": [
+        "TCP/9100"
+      ]
+    }
   },
   "peers": [
-    { "direction": "ingress", "protocol": "TCP", "port": 9100,
-      "peer": { "kind": "pod", "namespace": "observability", "workloadKind": "StatefulSet", "workloadName": "prometheus", "name": "prometheus-0", "ip": "10.42.2.5" },
-      "flows": 1, "firstSeen": "…", "lastSeen": "…" },
-    { "direction": "egress", "protocol": "TCP", "port": 443,
-      "peer": { "kind": "external", "namespace": null, "workloadKind": null, "workloadName": null, "name": null, "ip": "198.51.100.7" },
-      "flows": 1, "firstSeen": "…", "lastSeen": "…" }
+    {
+      "direction": "ingress",
+      "protocol": "TCP",
+      "port": 9100,
+      "peer": {
+        "kind": "pod",
+        "namespace": "observability",
+        "workloadKind": "StatefulSet",
+        "workloadName": "prometheus",
+        "name": "prometheus-0",
+        "ip": "10.42.2.5"
+      },
+      "flows": 1,
+      "firstSeen": "2026-09-23T02:17:01.229165Z",
+      "lastSeen": "2026-09-23T02:17:01.229165Z"
+    },
+    {
+      "direction": "egress",
+      "protocol": "TCP",
+      "port": 443,
+      "peer": {
+        "kind": "external",
+        "namespace": null,
+        "workloadKind": null,
+        "workloadName": null,
+        "name": null,
+        "ip": "198.51.100.7"
+      },
+      "flows": 1,
+      "firstSeen": "2026-09-26T00:17:01.229165Z",
+      "lastSeen": "2026-09-26T00:17:01.229165Z"
+    }
   ],
   "truncated": false,
   "policy": {
-    "audit": { "policies": [ { "namespace": "observability", "name": "node-exporter" } ], "allow": 1, "wouldDeny": 1, "lastVerdictAt": "…", "windowHours": 24 },
+    "audit": {
+      "policies": [
+        {
+          "namespace": "observability",
+          "name": "node-exporter"
+        }
+      ],
+      "allow": 1,
+      "wouldDeny": 1,
+      "lastVerdictAt": "2026-09-26T01:17:01.231848Z",
+      "windowHours": 24
+    },
     "enforced": null
   }
 }
@@ -328,18 +665,52 @@ Trimmed from `profile-risk-observability-node-exporter-hostpid-wouldDeny`:
 
 ### 2.5 `syscalls`
 
-Trimmed from `profile-ok-flux-system-source-controller`:
+
+From `GET /workloads/flux-system/Deployment/source-controller/profile` -> 200 (capture `profile-unknown-partial-flux-system-source-controller.json`, `body.dimensions.syscalls`):
 
 ```json
 {
   "status": "ok",
-  "coverage": { "level": "full", "fraction": null, "observedSince": null, "note": "capture level full" },
-  "reasons": [],
-  "observed": { "syscallCount": 5, "hash": "5c1f0e2d3a4b5c6d", "architectures": ["SCMP_ARCH_X86_64"], "updatedAt": "…" },
-  "capture": { "level": "full", "complete": true, "incompletePods": 0 },
-  "cr": { "name": "source-controller", "defaultAction": "SCMP_ACT_ERRNO", "mode": "enforce", "syscallCount": 5,
-          "inSync": true, "missing": [], "extra": [], "distribution": { "ready": 0, "total": 1, "state": "Pending" } },
-  "denials": { "total": 0, "syscalls": [], "lastSeen": null }
+  "coverage": {
+    "level": "full",
+    "fraction": null,
+    "observedSince": null,
+    "note": "capture level full"
+  },
+  "reasons": [
+    {
+      "code": "denials_unknown",
+      "message": "Denial capture is not reporting for this workload's nodes, so an absence of denials cannot be confirmed"
+    }
+  ],
+  "observed": {
+    "syscallCount": 5,
+    "hash": "5c1f0e2d3a4b5c6d",
+    "architectures": [
+      "SCMP_ARCH_X86_64"
+    ],
+    "updatedAt": "2026-09-26T02:17:01.224138Z"
+  },
+  "capture": {
+    "level": "full",
+    "complete": true,
+    "incompletePods": 0
+  },
+  "cr": {
+    "name": "source-controller",
+    "defaultAction": "SCMP_ACT_ERRNO",
+    "mode": "enforce",
+    "syscallCount": 5,
+    "inSync": true,
+    "missing": [],
+    "extra": [],
+    "distribution": {
+      "ready": 0,
+      "total": 1,
+      "state": "Pending"
+    }
+  },
+  "denials": null
 }
 ```
 
@@ -354,22 +725,74 @@ Trimmed from `profile-ok-flux-system-source-controller`:
 
 ### 2.6 `images`
 
-Trimmed from `profile-warn-payments-ledger-mixed-crashloop-stale`:
+
+From `GET /workloads/payments/Deployment/ledger/profile` -> 200 (capture `profile-warn-payments-ledger-mixed-crashloop-stale.json`, `body.dimensions.images`):
 
 ```json
 {
-  "status": "warn",
-  "coverage": { "level": "full", "fraction": null, "observedSince": "…", "note": "running window 900 s" },
-  "reasons": [ { "code": "vulnerabilities_not_configured", "message": "No vulnerability source is configured; images are inventoried but not assessed for vulnerabilities" } ],
+  "status": "unknown",
+  "coverage": {
+    "level": "partial",
+    "fraction": null,
+    "observedSince": "2026-09-06T02:17:01.217147Z",
+    "note": "inventory only (running window 900 s); no vulnerability data"
+  },
+  "reasons": [
+    {
+      "code": "vulnerabilities_not_configured",
+      "message": "2 running digest(s) across 1 container(s); vulnerability data not configured"
+    }
+  ],
   "runningWindowSeconds": 900,
   "containers": [
-    { "name": "ledger", "kind": "regular", "mixedDigests": true, "stale": false,
+    {
+      "name": "ledger",
+      "kind": "regular",
+      "mixedDigests": true,
+      "stale": false,
       "running": [
-        { "digest": "sha256:4a1b…", "imageRef": "ghcr.io/example/ledger:2.3.0", "state": "running", "stateReason": null, "ranAsInit": false, "lastPodName": "ledger-5b7c9d8f6-q8wzn", "firstSeen": "…", "lastSeen": "…" },
-        { "digest": "sha256:5b2c…", "imageRef": "ghcr.io/example/ledger:2.3.1", "state": "waiting", "stateReason": "CrashLoopBackOff", "ranAsInit": false, "lastPodName": "ledger-5b7c9d8f6-q8wzn", "firstSeen": "…", "lastSeen": "…" }
+        {
+          "digest": "sha256:4a1b77c04a1b77c04a1b77c04a1b77c04a1b77c04a1b77c04a1b77c04a1b77c0",
+          "imageRef": "ghcr.io/example/ledger:2.3.0",
+          "state": "running",
+          "stateReason": null,
+          "ranAsInit": false,
+          "lastPodName": "ledger-5b7c9d8f6-q8wzn",
+          "firstSeen": "2026-09-20T02:17:01.219542Z",
+          "lastSeen": "2026-09-26T02:17:01.214278Z"
+        },
+        {
+          "digest": "sha256:5b2c88d15b2c88d15b2c88d15b2c88d15b2c88d15b2c88d15b2c88d15b2c88d1",
+          "imageRef": "ghcr.io/example/ledger:2.3.1",
+          "state": "waiting",
+          "stateReason": "CrashLoopBackOff",
+          "ranAsInit": false,
+          "lastPodName": "ledger-5b7c9d8f6-q8wzn",
+          "firstSeen": "2026-09-20T02:17:01.219542Z",
+          "lastSeen": "2026-09-26T02:17:01.214278Z"
+        }
       ],
-      "previous": [] },
-    { "name": "legacy-proxy", "kind": "regular", "mixedDigests": false, "stale": true, "running": [], "previous": [ { "digest": "sha256:6c3d…", "…": "…" } ] }
+      "previous": []
+    },
+    {
+      "name": "legacy-proxy",
+      "kind": "regular",
+      "mixedDigests": false,
+      "stale": true,
+      "running": [],
+      "previous": [
+        {
+          "digest": "sha256:6c3d99e26c3d99e26c3d99e26c3d99e26c3d99e26c3d99e26c3d99e26c3d99e2",
+          "imageRef": "docker.io/envoyproxy/envoy:v1.29.0",
+          "state": "running",
+          "stateReason": null,
+          "ranAsInit": false,
+          "lastPodName": "ledger-5b7c9d8f6-old01",
+          "firstSeen": "2026-09-06T02:17:01.217147Z",
+          "lastSeen": "2026-09-24T02:17:01.217147Z"
+        }
+      ]
+    }
   ],
   "truncated": false,
   "vulnerabilities": null,
@@ -377,9 +800,12 @@ Trimmed from `profile-warn-payments-ledger-mixed-crashloop-stale`:
 }
 ```
 
+- `status`: `unknown` in v1.3 whenever there is an inventory, because there is no vulnerability data
+  (reason `vulnerabilities_not_configured`, message "N running digest(s) across M container(s);
+  vulnerability data not configured"; `coverage.level: "partial"`). No inventory -> `unknown`, reason
+  `no_inventory`.
 - `stale: true`: not in the current spec (see 2.3); listed, never a finding.
 - `vulnerabilities` / `supplyChain`: always `null` = **not configured**.
-- No inventory -> `unknown`, reason `no_inventory`.
 - Findings: `images.mixedDigests/<c>` low, `images.crashLoop/<c>` medium, `images.pullBackOff/<c>` medium.
 
 ### 2.7 `compute` (informational, not in the rollup)
@@ -419,15 +845,67 @@ Query: `limit` (default 50, max 200), `before` (revision; returns revisions < be
 `workload_not_found` when the workload has no versions and is unknown; a known workload with none yet
 returns `items: []`. Captures: `versions-payments-checkout`, `versions-payments-checkout-page`.
 
+From `GET /workloads/payments/Deployment/checkout/profile/versions` -> 200 (capture `versions-payments-checkout.json`, `body`):
+
 ```json
 {
-  "namespace": "payments", "kind": "Deployment", "name": "checkout",
   "items": [
-    { "revision": 4, "contentHash": "fnv1a64:…", "createdAt": "…", "dimensionHashes": { "images": "…", "network": "…", "podSecurity": "…", "syscalls": "…" },
-      "changedDimensions": ["podSecurity"], "posture": { "status": "warn", "coverage": 0.75 } },
-    { "revision": 3, "…": "…", "changedDimensions": ["network"] },
-    { "revision": 2, "…": "…", "changedDimensions": null }
+    {
+      "changedDimensions": [
+        "podSecurity"
+      ],
+      "contentHash": "fnv1a64:4c1d1714495b7cb8",
+      "createdAt": "2026-09-26T02:21:21.027754Z",
+      "dimensionHashes": {
+        "images": "fnv1a64:de99962acfed6b4a",
+        "network": "fnv1a64:076a93e6e419f917",
+        "podSecurity": "fnv1a64:14765c2d405c573e",
+        "syscalls": "fnv1a64:c9b16fe56ade7d93"
+      },
+      "posture": {
+        "coverage": 0.25,
+        "status": "warn"
+      },
+      "revision": 4
+    },
+    {
+      "changedDimensions": [
+        "network"
+      ],
+      "contentHash": "fnv1a64:3369d0d1f33d02b4",
+      "createdAt": "2026-09-26T02:20:17.370827Z",
+      "dimensionHashes": {
+        "images": "fnv1a64:de99962acfed6b4a",
+        "network": "fnv1a64:076a93e6e419f917",
+        "podSecurity": "fnv1a64:897ac36794f36952",
+        "syscalls": "fnv1a64:c9b16fe56ade7d93"
+      },
+      "posture": {
+        "coverage": 0.5,
+        "status": "warn"
+      },
+      "revision": 3
+    },
+    {
+      "changedDimensions": null,
+      "contentHash": "fnv1a64:5b1a787eefd2a711",
+      "createdAt": "2026-09-26T02:19:10.101753Z",
+      "dimensionHashes": {
+        "images": "fnv1a64:de99962acfed6b4a",
+        "network": "fnv1a64:b9240aadb672a54c",
+        "podSecurity": "fnv1a64:897ac36794f36952",
+        "syscalls": "fnv1a64:c9b16fe56ade7d93"
+      },
+      "posture": {
+        "coverage": 0.5,
+        "status": "warn"
+      },
+      "revision": 2
+    }
   ],
+  "kind": "Deployment",
+  "name": "checkout",
+  "namespace": "payments",
   "nextBefore": null
 }
 ```
@@ -451,22 +929,80 @@ revision below `to`, or `from: null` (everything shows as added) when none is le
 `fromTrimmed: true`. Captures: `diff-payments-checkout-default`, `diff-payments-checkout-2-to-4`,
 `diff-payments-checkout-trimmed-predecessor`, `error-404-revision-not-found`, `error-400-bad-order`.
 
+From `GET /workloads/payments/Deployment/checkout/profile/diff?from=2&to=4` -> 200 (capture `diff-payments-checkout-2-to-4.json`, `body`):
+
 ```json
 {
-  "namespace": "payments", "kind": "Deployment", "name": "checkout",
-  "from": { "revision": 2, "contentHash": "fnv1a64:…", "createdAt": "…" },
-  "to":   { "revision": 4, "contentHash": "fnv1a64:…", "createdAt": "…" },
   "changed": true,
-  "fromTrimmed": false,
   "dimensions": {
-    "podSecurity": { "changed": true, "level": { "from": "baseline", "to": "restricted" }, "pod": [],
-                     "containersAdded": [], "containersRemoved": [],
-                     "containers": [ { "name": "migrate", "fields": [
-                       { "field": "securityContext.allowPrivilegeEscalation", "from": null, "to": false },
-                       { "field": "securityContext.capabilitiesDrop", "from": null, "to": ["ALL"] } ] } ] },
-    "images":   { "changed": false, "containersAdded": [], "containersRemoved": [], "containers": [] },
-    "syscalls": { "changed": false, "added": [], "removed": [], "captureLevel": null, "cr": null },
-    "network":  { "changed": true, "added": [ { "direction": "egress", "peer": "external:198.51.100.20", "port": 443, "protocol": "TCP" } ], "removed": [] }
+    "images": {
+      "changed": false,
+      "containers": [],
+      "containersAdded": [],
+      "containersRemoved": []
+    },
+    "network": {
+      "added": [
+        {
+          "direction": "egress",
+          "peer": "external:198.51.100.20",
+          "port": 443,
+          "protocol": "TCP"
+        }
+      ],
+      "changed": true,
+      "removed": []
+    },
+    "podSecurity": {
+      "changed": true,
+      "containers": [
+        {
+          "fields": [
+            {
+              "field": "securityContext.allowPrivilegeEscalation",
+              "from": null,
+              "to": false
+            },
+            {
+              "field": "securityContext.capabilitiesDrop",
+              "from": null,
+              "to": [
+                "ALL"
+              ]
+            }
+          ],
+          "name": "migrate"
+        }
+      ],
+      "containersAdded": [],
+      "containersRemoved": [],
+      "level": {
+        "from": "baseline",
+        "to": "restricted"
+      },
+      "pod": []
+    },
+    "syscalls": {
+      "added": [],
+      "captureLevel": null,
+      "changed": false,
+      "cr": null,
+      "removed": []
+    }
+  },
+  "from": {
+    "contentHash": "fnv1a64:5b1a787eefd2a711",
+    "createdAt": "2026-09-26T02:19:10.101753Z",
+    "revision": 2
+  },
+  "fromTrimmed": false,
+  "kind": "Deployment",
+  "name": "checkout",
+  "namespace": "payments",
+  "to": {
+    "contentHash": "fnv1a64:4c1d1714495b7cb8",
+    "createdAt": "2026-09-26T02:21:21.027754Z",
+    "revision": 4
   }
 }
 ```
@@ -534,3 +1070,21 @@ revision below `to`, or `from: null` (everything shows as added) when none is le
   - **List**: new `search` query parameter (case-insensitive substring of the workload name).
   - **Concurrency**: a writer that loses a race at a revision writes nothing; the latest pointer never
     moves backwards.
+- 2026-09-26 (**v1.3**, coordinator decision "unknown is never safe"; status values only, no shape change):
+  - **images status** is `unknown` while there is no vulnerability data for the running digests (was `ok`
+    or a findings-derived `warn`). Reason `vulnerabilities_not_configured` now reads "N running digest(s)
+    across M container(s); vulnerability data not configured"; `coverage.level` is `"partial"`. Inventory
+    findings (`images.crashLoop`, `images.pullBackOff`, `images.mixedDigests`) are still emitted and still
+    appear in `findings` / `attention`; they no longer set the images status.
+  - **posture.status** can be `ok` only when all four core dimensions are known and ok. With any unknown
+    core dimension it is the worst known status if that is `warn` / `risk`, otherwise `unknown`.
+    `unknownDimensions` is always present. Consequence today: no workload is posture `ok` (images is always
+    unknown), and a workload whose known dimensions are all ok reads `unknown`, not `ok`.
+  - `posture.reasons[]` for an `unknown` dimension now uses that dimension's own reason (so images says
+    "vulnerability data not configured" rather than naming an inventory finding).
+  - The `GET /workloads?status=` filter follows the new values.
+  - Examples in this document are regenerated from v1.3 captures (the v1.2 section 2.3 example listed
+    node-exporter failing only `privilegeEscalation`; the real response also fails `seccompRestricted`
+    and `capabilitiesRestricted`). Captures renamed: `profile-ok-flux-system-source-controller` ->
+    `profile-unknown-partial-flux-system-source-controller`, `profile-warn-payments-checkout` ->
+    `profile-warn-payments-checkout-after-fix`; new `profile-warn-payments-refunds-init-fails-restricted`.
