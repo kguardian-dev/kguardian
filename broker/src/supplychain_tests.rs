@@ -2952,3 +2952,70 @@ fn live_database_a_cve_ingested_mid_rebuild_waits_and_is_kept() {
         "both the rebuilt and the late CVE are there"
     );
 }
+
+/// The in-use code runs on a database without the runtime inventory's
+/// coverage function (a broker ahead of, or without, #1683's migration):
+/// in_use_store checks for it with to_regprocedure, and without it every
+/// container is unknown / no_runtime_data, nothing is claimed unused, and
+/// no VEX statement is made. No error. All inside a transaction that rolls
+/// back, so the real function is never missing outside this test.
+#[test]
+#[ignore = "requires a live postgres (set KG_TEST_DATABASE_URL)"]
+fn live_database_in_use_without_the_coverage_function_is_unknown() {
+    use crate::in_use_store::{self as iu, UseEvidence, VexOutcome};
+    use crate::supplychain_read::{image_vulnerabilities_filtered, ListFilters};
+    let mut conn = live_conn();
+    crate::runtime_inventory::restore_coverage_function(&mut conn);
+    let r = conn.transaction::<(), diesel::result::Error, _>(|c| {
+        exec(
+            c,
+            "TRUNCATE runtime_package_use, runtime_unowned_paths, runtime_in_use_coverage, \
+                workload_network_exposure;",
+        );
+        let img = d(81);
+        seed_inventory(c, &img, "ghcr.io/example/api", "2.4.1", "Deployment", "api", "app", 0);
+        let mut s = sbom_json(&img, "2026-09-20T08:00:00Z", &[], None);
+        s["components"] = json!([{"name": "libbar1", "version": "1", "type": "debian",
+            "purl": "pkg:deb/debian/libbar1@1", "file_paths": ["/usr/lib/x86_64-linux-gnu/libbar.so.1"]}]);
+        store_s(c, s).unwrap();
+        let mut v = vulns_json(&img, "2026-09-20T08:00:00Z", &[("CVE-2026-0701", "HIGH", None)]);
+        v["observed_in"] = json!([]);
+        v["vulnerabilities"][0]["package"] =
+            json!({"name": "libbar1", "version": "1", "type": "debian", "purl": "pkg:deb/debian/libbar1@1"});
+        v["vulnerabilities"][0]["class"] = json!("os-pkgs");
+        store_v(c, v);
+        relink_batch(c, None, 100).unwrap();
+
+        exec(
+            c,
+            "DROP FUNCTION kg_runtime_coverage(text, text, text, text, text, text, integer)",
+        );
+        assert!(!iu::coverage_available(c).unwrap(), "the guard must see it gone");
+        // The refresh goes through the missing-function branch without error.
+        let t = crate::in_use::TierSettings::default();
+        let n = iu::refresh_coverage(c, &t, &UseEvidence { complete: true, truncated: vec![] }).unwrap();
+        assert!(n >= 1);
+        assert_eq!(
+            count(c, "SELECT count(*) AS n FROM runtime_in_use_coverage WHERE covered"),
+            0
+        );
+        let p = image_vulnerabilities_filtered(c, &img, None, &ListFilters::default(), None, 10).unwrap();
+        let f = &p.items[0];
+        assert_eq!(f.in_use_state, "unknown");
+        assert_eq!(f.in_use_detail.reason, Some("no_runtime_data"));
+        assert_ne!(f.tier, "Background", "unknown is never tiered as unused");
+        let key = crate::workload_profile::Key {
+            namespace: NS.into(),
+            kind: "Deployment".into(),
+            name: "api".into(),
+        };
+        assert!(matches!(iu::openvex_draft(c, &key).unwrap(), VexOutcome::Unavailable(_)));
+        // Roll back: the DROP and the seeded rows go with it.
+        Err(diesel::result::Error::RollbackTransaction)
+    });
+    assert!(matches!(r, Err(diesel::result::Error::RollbackTransaction)));
+    assert!(
+        iu::coverage_available(&mut conn).unwrap(),
+        "the rollback restored kg_runtime_coverage"
+    );
+}
