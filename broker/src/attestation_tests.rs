@@ -903,3 +903,118 @@ fn key_pem_newlines_are_accepted() {
         json!("-----BEGIN PRIVATE KEY-----\nx\n-----END PRIVATE KEY-----");
     assert!(matches!(parse(&v, &d(8)), Err(Reject::Unprocessable(_))));
 }
+
+/// A signature sent as verified must name its signer. One that does not is
+/// stored as unverified (no_signer_identity), and a "verified" verdict
+/// resting only on such signatures is derived again: never verified.
+#[test]
+fn verified_without_a_signer_identity_is_not_verified() {
+    let shapes = [
+        json!({"format": "cosign-bundle", "source": "referrers", "verified": true}),
+        json!({"format": "cosign-bundle", "source": "referrers", "verified": true,
+               "signer_kind": "keyless", "issuer": "https://token.actions.githubusercontent.com"}),
+        json!({"format": "cosign-bundle", "source": "referrers", "verified": true,
+               "signer_kind": "keyless", "san": "x", "issuer": "  "}),
+        json!({"format": "cosign-legacy", "source": "sig-tag", "verified": true,
+               "signer_kind": "key", "key_name": "release"}),
+        // Whitespace-only identity fields are missing.
+        json!({"format": "cosign-bundle", "source": "referrers", "verified": true,
+               "signer_kind": "keyless", "issuer": "https://token.actions.githubusercontent.com", "san": "   "}),
+        json!({"format": "cosign-bundle", "source": "referrers", "verified": true,
+               "signer_kind": "keyless", "issuer": " ", "san": "https://github.com/example/api"}),
+        json!({"format": "cosign-legacy", "source": "sig-tag", "verified": true,
+               "signer_kind": "key", "key_name": "release", "key_fingerprint": "  "}),
+        json!({"format": "cosign-legacy", "source": "sig-tag", "verified": true,
+               "issuer": "  ", "san": " ", "key_fingerprint": " "}),
+    ];
+    for sig in shapes {
+        let mut b = body(&d(1), "verified");
+        b["signatures"] = json!([sig.clone()]);
+        b["attestations"] = json!([]);
+        let p = parse(&b, &d(1)).unwrap_or_else(|_| panic!("{sig}"));
+        assert_eq!(p.verdict, "unknown", "{sig}");
+        assert_eq!(p.reason.as_deref(), Some(NO_SIGNER_IDENTITY), "{sig}");
+        let s = &p.signatures[0];
+        assert!(!s.verified, "{sig}");
+        assert_eq!(s.error.as_deref(), Some(NO_SIGNER_IDENTITY));
+        assert!(s.issuer.is_none() && s.san.is_none() && s.key_name.is_none());
+    }
+
+    // An identified verified signature keeps the verdict; the anonymous
+    // one next to it is downgraded.
+    let mut b = body(&d(1), "verified");
+    b["signatures"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!({"format": "cosign-bundle", "source": "referrers", "verified": true}));
+    let p = parse(&b, &d(1)).unwrap();
+    assert_eq!(p.verdict, "verified");
+    assert!(p.signatures[0].verified);
+    assert_eq!(p.signatures[2].error.as_deref(), Some(NO_SIGNER_IDENTITY));
+
+    // Anonymous "verified" next to a tampered signature: invalid; next to
+    // an unchecked key signature: key_signed.
+    for (other, verdict, reason) in [
+        (
+            json!({"format": "cosign-legacy", "source": "sig-tag", "verified": false, "error": "bad_signature"}),
+            "invalid",
+            "bad_signature",
+        ),
+        (
+            json!({"format": "cosign-legacy", "source": "sig-tag", "verified": false, "error": "untrusted_key"}),
+            "key_signed",
+            "untrusted_key",
+        ),
+    ] {
+        let mut b = body(&d(1), "verified");
+        b["signatures"] =
+            json!([{"format": "cosign-bundle", "source": "referrers", "verified": true}, other]);
+        let p = parse(&b, &d(1)).unwrap();
+        assert_eq!(
+            (p.verdict.as_str(), p.reason.as_deref()),
+            (verdict, Some(reason))
+        );
+    }
+
+    // Tamper beats an unchecked key signature, in either order.
+    for sigs in [
+        json!([{"format": "cosign-bundle", "source": "referrers", "verified": true},
+               {"format": "cosign-legacy", "source": "sig-tag", "verified": false, "error": "untrusted_key"},
+               {"format": "cosign-legacy", "source": "sig-tag", "verified": false, "error": "digest_mismatch"}]),
+        json!([{"format": "cosign-legacy", "source": "sig-tag", "verified": false, "error": "bad_signature"},
+               {"format": "cosign-legacy", "source": "sig-tag", "verified": false, "error": "untrusted_key"},
+               {"format": "cosign-bundle", "source": "referrers", "verified": true}]),
+    ] {
+        let mut b = body(&d(1), "verified");
+        b["signatures"] = sigs.clone();
+        let p = parse(&b, &d(1)).unwrap();
+        assert_eq!(p.verdict, "invalid", "{sigs}");
+        assert!(
+            TAMPER_REASONS.contains(&p.reason.as_deref().unwrap()),
+            "{sigs}"
+        );
+    }
+
+    // A key signature with its fingerprint names a signer, with or without
+    // signer_kind.
+    for kind in [json!("key"), serde_json::Value::Null] {
+        let mut b = body(&d(1), "verified");
+        b["signatures"] = json!([{"format": "cosign-legacy", "source": "sig-tag", "verified": true,
+            "signer_kind": kind, "key_name": "release", "key_fingerprint": "ab".repeat(32)}]);
+        assert_eq!(parse(&b, &d(1)).unwrap().verdict, "verified");
+    }
+
+    // Attestations follow the same rule.
+    let mut b = body(&d(1), "verified");
+    b["attestations"] = json!([{"predicate_type": "https://slsa.dev/provenance/v1", "format": "bundle",
+        "source": "referrers", "verified": true, "provenance": {"builder_id": "claimed"}}]);
+    let p = parse(&b, &d(1)).unwrap();
+    assert_eq!(p.verdict, "verified");
+    let a = &p.attestations[0];
+    assert!(!a.verified);
+    assert_eq!(a.error.as_deref(), Some(NO_SIGNER_IDENTITY));
+    assert!(
+        a.provenance.is_none(),
+        "an unverified attestation's provenance is not a fact"
+    );
+}

@@ -20,6 +20,7 @@
     "malformed",
     "network",
     "no_repo_digest",
+    "no_signer_identity",
     "private_address",
     "rate_limited",
     "registry_auth",

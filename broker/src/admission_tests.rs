@@ -730,3 +730,54 @@ fn malformed_reference_is_not_covered() {
     .unwrap();
     assert!(y.contains("# not covered: malformed_reference"));
 }
+
+/// A stored "verified" row whose signers name no one (from before the
+/// ingest rule, or an older broker) is never an authority, and the header
+/// says why it is not covered.
+#[test]
+fn verified_without_a_signer_identity_is_not_covered() {
+    for (i, signers) in [
+        json!([]),
+        json!([{"signerKind": "keyless", "verified": true}]),
+        json!([keyless("", "")]),
+        json!([keyless(GH, "  ")]),
+        json!([{"signerKind": "key", "keyName": "k", "keyFingerprint": "", "keyPem": PEM, "verified": true}]),
+        json!([{"signerKind": "key", "keyName": "k", "keyFingerprint": "   ", "keyPem": PEM, "verified": true}]),
+        json!([keyless(" ", "https://github.com/example/anon")]),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let p = plan(&[row(
+            "shop",
+            "anon",
+            100 + i as u32,
+            "ghcr.io/example/anon:1",
+            Some("ghcr.io/example/anon"),
+            Some("verified"),
+            signers.clone(),
+            json!([]),
+        )]);
+        assert!(p.groups.is_empty() && p.evidence.is_empty(), "{signers}");
+        assert_eq!(
+            p.uncovered["ghcr.io/example/anon"],
+            "a running digest's verified signatures name no signer (no_signer_identity)",
+            "{signers}"
+        );
+    }
+    // A key with a fingerprint but no PEM keeps its own reason.
+    let p = plan(&[row(
+        "shop",
+        "keyonly",
+        200,
+        "ghcr.io/example/keyonly:1",
+        Some("ghcr.io/example/keyonly"),
+        Some("verified"),
+        json!([{"signerKind": "key", "keyName": "k", "keyFingerprint": FP, "verified": true}]),
+        json!([]),
+    )]);
+    assert_eq!(
+        p.uncovered["ghcr.io/example/keyonly"],
+        "signed only by a key whose public key kguardian was not given"
+    );
+}

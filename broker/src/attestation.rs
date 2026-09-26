@@ -79,7 +79,7 @@ const TOO_MANY: &str = "too many items";
 /// so the signature exists but was not checked.
 /// Reason codes accepted in `reason` and in a signature's or attestation's
 /// `error`: exactly supplychain's (test/fixtures/contracts).
-pub const REASONS: [&str; 18] = [
+pub const REASONS: [&str; 19] = [
     "bad_signature",
     "blocked_address",
     "blocked_realm",
@@ -88,6 +88,7 @@ pub const REASONS: [&str; 18] = [
     "malformed",
     "network",
     "no_repo_digest",
+    "no_signer_identity",
     "private_address",
     "rate_limited",
     "registry_auth",
@@ -99,6 +100,28 @@ pub const REASONS: [&str; 18] = [
     "untrusted_key",
     "untrusted_root",
 ];
+
+/// A signature or attestation sent as verified that names no signer
+/// (keyless without issuer AND SAN, key without a fingerprint): stored as
+/// unverified with this error, never as a verified signer.
+pub const NO_SIGNER_IDENTITY: &str = "no_signer_identity";
+
+/// A verified signer must be named: a keyless issuer AND SAN, or a key
+/// fingerprint. With no `signer_kind`, either form names one.
+fn names_a_signer(
+    kind: Option<&str>,
+    issuer: Option<&str>,
+    san: Option<&str>,
+    key_fingerprint: Option<&str>,
+) -> bool {
+    let set = |v: Option<&str>| v.is_some_and(|x| !x.trim().is_empty());
+    let keyless = set(issuer) && set(san);
+    match kind {
+        Some("key") => set(key_fingerprint),
+        Some(_) => keyless,
+        None => keyless || set(key_fingerprint),
+    }
+}
 
 /// What an unknown (well-formed) reason code is stored as.
 pub const UNRECOGNISED_REASON: &str = "unrecognised_reason";
@@ -598,6 +621,68 @@ pub fn parse_post(
         }
     }
     cap(&mut p.signed_digest, MAX_SHORT + 64);
+    // A verified signature or attestation must name its signer. One that
+    // does not is downgraded to unverified (error no_signer_identity)
+    // rather than refused, so the digest keeps a result instead of reading
+    // as never checked. Policies and every reader match on the identity,
+    // so an anonymous "verified" is never stored as one.
+    let mut downgraded = false;
+    let detail = "sent as verified without a signer identity (no issuer and SAN, no key fingerprint); not counted as verified";
+    for s in &mut p.signatures {
+        if s.verified
+            && !names_a_signer(
+                s.signer_kind.as_deref(),
+                s.issuer.as_deref(),
+                s.san.as_deref(),
+                s.key_fingerprint.as_deref(),
+            )
+        {
+            s.verified = false;
+            s.error = Some(NO_SIGNER_IDENTITY.into());
+            s.detail = Some(detail.into());
+            downgraded = true;
+        }
+    }
+    for a in &mut p.attestations {
+        if a.verified
+            && !names_a_signer(
+                a.signer_kind.as_deref(),
+                a.issuer.as_deref(),
+                a.san.as_deref(),
+                a.key_fingerprint.as_deref(),
+            )
+        {
+            a.verified = false;
+            a.error = Some(NO_SIGNER_IDENTITY.into());
+            a.detail = Some(detail.into());
+            downgraded = true;
+        }
+    }
+    if downgraded {
+        warn!(digest = %p.digest, "attestation: verified signature or attestation without a signer identity stored as unverified");
+    }
+    // If that left a "verified" verdict with no verified signature, derive
+    // it again as supplychain does: tamper, then an unchecked key
+    // signature, else unknown.
+    if downgraded && p.verdict == "verified" && !p.signatures.iter().any(|s| s.verified) {
+        let error_in = |codes: &[&str]| {
+            p.signatures
+                .iter()
+                .filter(|s| !s.verified)
+                .filter_map(|s| s.error.as_deref())
+                .find(|e| codes.contains(e))
+                .map(str::to_string)
+        };
+        let (verdict, reason) = if let Some(t) = error_in(&TAMPER_REASONS) {
+            ("invalid", t)
+        } else if let Some(k) = error_in(&["untrusted_key"]) {
+            ("key_signed", k)
+        } else {
+            ("unknown", NO_SIGNER_IDENTITY.to_string())
+        };
+        p.verdict = verdict.into();
+        p.reason = Some(reason);
+    }
     for s in &mut p.signatures {
         cap_str(&mut s.format, MAX_SHORT);
         cap_str(&mut s.source, MAX_SHORT);
