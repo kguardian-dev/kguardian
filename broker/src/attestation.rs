@@ -616,16 +616,28 @@ pub fn parse_post(
     Ok(p)
 }
 
-/// The verdict must agree with the signatures it was derived from (never
-/// with reason codes, which may be unknown to this broker).
+/// The verdict must agree with the signatures it was derived from.
 fn check_verdict(p: &AttestationPost) -> Result<(), Reject> {
+    // Each unverified signature's error, classified (supplychain's
+    // collector.verdict applies the same rule): tamper wins over a key
+    // signature, which wins over anything else. A code this broker does not
+    // know (unrecognised_reason) may be a new tamper code, so it can
+    // justify invalid, but never key_signed on its own.
     let verified = p.signatures.iter().any(|s| s.verified);
+    let has = |codes: &[&str]| {
+        p.signatures
+            .iter()
+            .any(|s| !s.verified && codes.contains(&s.error.as_deref().unwrap_or("")))
+    };
+    let tamper = has(&TAMPER_REASONS);
+    let unrecognised = has(&[UNRECOGNISED_REASON]);
+    let key = has(&["untrusted_key"]);
     let ok = match p.verdict.as_str() {
         "verified" => verified,
         "unsigned" => p.signatures.is_empty(),
-        "invalid" => !p.signatures.is_empty() && !verified,
-        "key_signed" => !p.signatures.is_empty() && !verified,
-        _ => !verified, // unknown
+        "invalid" => !verified && (tamper || unrecognised),
+        "key_signed" => !verified && key && !tamper,
+        _ => !verified && !tamper, // unknown
     };
     if ok {
         Ok(())
@@ -636,6 +648,10 @@ fn check_verdict(p: &AttestationPost) -> Result<(), Reject> {
         )))
     }
 }
+
+/// Errors that mean a signature was tampered with or does not belong to
+/// the image: any of them makes the result invalid.
+pub const TAMPER_REASONS: [&str; 3] = ["bad_signature", "digest_mismatch", "malformed"];
 
 /// Result of storing a post.
 #[derive(Debug, PartialEq, Eq)]

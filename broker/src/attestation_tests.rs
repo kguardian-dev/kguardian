@@ -106,9 +106,9 @@ fn verdict_must_match_the_signatures() {
         );
     }
     assert!(parse(&unverified_only("invalid"), &d(5)).is_ok());
-    // The reasons never decide it: key_signed with whatever error codes.
-    assert!(parse(&unverified_only("key_signed"), &d(5)).is_ok());
-    assert!(parse(&unverified_only("unknown"), &d(5)).is_ok());
+    // A tampered signature is invalid, never key_signed or unknown.
+    assert!(parse(&unverified_only("key_signed"), &d(5)).is_err());
+    assert!(parse(&unverified_only("unknown"), &d(5)).is_err());
     let mut none = body(&d(5), "unsigned");
     none["signatures"] = json!([]);
     assert!(parse(&none, &d(5)).is_ok());
@@ -214,7 +214,7 @@ fn caps_list_lengths() {
     assert!(matches!(parse(&v, &d(1)), Err(Reject::TooLarge(_))));
     let mut v = body(&d(1), "invalid");
     v["signatures"] = json!(vec![
-        json!({"format": "f", "verified": false});
+        json!({"format": "f", "verified": false, "error": "bad_signature"});
         MAX_SIGNATURES
     ]);
     assert!(parse(&v, &d(1)).is_ok());
@@ -284,9 +284,13 @@ fn post_at(digest: &str, verdict: &str, checked_at: &str) -> AttestationPost {
     match verdict {
         "unsigned" => v["signatures"] = json!([]),
         "key_signed" => v["signatures"] = json!([v["signatures"][1].clone()]),
-        "invalid" | "unknown" => {
+        "invalid" => {
             v["signatures"] =
                 json!([{"format": "cosign-legacy", "verified": false, "error": "bad_signature"}])
+        }
+        "unknown" => {
+            v["signatures"] =
+                json!([{"format": "cosign-legacy", "verified": false, "error": "untrusted_root"}])
         }
         _ => {}
     }
@@ -688,4 +692,53 @@ fn live_unknown_reason_is_stored() {
     let row = load_one(&mut conn, &dg).unwrap().unwrap();
     assert_eq!(row.verdict, "verified");
     assert_eq!(row.signatures[1]["error"], UNRECOGNISED_REASON);
+}
+
+/// Which verdict each combination of unverified signature errors allows
+/// (the poster cannot pick): tamper → invalid only; untrusted_key without
+/// tamper → key_signed or unknown; an unrecognised code → invalid or
+/// unknown, never key_signed on its own.
+#[test]
+fn verdict_follows_the_signature_classes() {
+    let sig = |err: &str| json!({"format": "cosign-bundle", "source": "referrers", "verified": false, "error": err});
+    let cases: Vec<(Vec<&str>, &[&str])> = vec![
+        (vec!["bad_signature"], &["invalid"]),
+        (vec!["digest_mismatch"], &["invalid"]),
+        (vec!["malformed"], &["invalid"]),
+        (vec!["bad_signature", "untrusted_key"], &["invalid"]),
+        (vec!["untrusted_key"], &["key_signed", "unknown"]),
+        (
+            vec!["untrusted_key", "unsupported_format"],
+            &["key_signed", "unknown"],
+        ),
+        (vec!["unsupported_format"], &["unknown"]),
+        (vec!["untrusted_root"], &["unknown"]),
+        (vec!["brand_new_code"], &["invalid", "unknown"]),
+        (
+            vec!["brand_new_code", "untrusted_key"],
+            &["invalid", "key_signed", "unknown"],
+        ),
+    ];
+    for (errs, allowed) in cases {
+        for verdict in ["verified", "key_signed", "unsigned", "invalid", "unknown"] {
+            let mut v = body(&d(12), verdict);
+            v["signatures"] = json!(errs.iter().map(|e| sig(e)).collect::<Vec<_>>());
+            let ok = parse(&v, &d(12)).is_ok();
+            assert_eq!(
+                ok,
+                allowed.contains(&verdict),
+                "{errs:?} as {verdict}: accepted={ok}"
+            );
+        }
+    }
+    // No signatures: unsigned or unknown (lookup failed), nothing else.
+    for verdict in ["verified", "key_signed", "unsigned", "invalid", "unknown"] {
+        let mut v = body(&d(12), verdict);
+        v["signatures"] = json!([]);
+        assert_eq!(
+            parse(&v, &d(12)).is_ok(),
+            ["unsigned", "unknown"].contains(&verdict),
+            "no signatures as {verdict}"
+        );
+    }
 }
