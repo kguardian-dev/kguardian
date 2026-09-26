@@ -165,6 +165,21 @@ func TestComputeStatus_MissingPostureStatusIsUnknown(t *testing.T) {
 	}
 }
 
+func TestComputeStatus_UnrecognisedStatusIsUnknown(t *testing.T) {
+	// A status value outside the CRD enum would make the API server reject
+	// the whole status apply; it must degrade to unknown, never ok.
+	p := profileFixture()
+	p.Posture.Status = "excellent"
+	p.Dimensions["network"] = Dim{Status: "partial"}
+	st, _ := computeStatus(context.Background(), &fakeBroker{profile: p}, aspFixture(nil), now)
+	if st.Posture.Status != "unknown" {
+		t.Errorf("posture.status = %q, want unknown", st.Posture.Status)
+	}
+	if st.Dimensions.Network.Status != "unknown" {
+		t.Errorf("dimensions.network.status = %q, want unknown", st.Dimensions.Network.Status)
+	}
+}
+
 func TestComputeStatus_MatchesAccepted(t *testing.T) {
 	p := profileFixture()
 	p.ContentHash = "fnv1a64:rev3"

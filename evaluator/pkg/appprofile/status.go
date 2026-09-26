@@ -282,12 +282,15 @@ func currentFrom(p *Profile) *v1alpha1.CurrentProfile {
 	return out
 }
 
-// orUnknown: a missing status is unknown, never ok.
+// orUnknown: a missing or unrecognised status is unknown, never ok. The
+// CRD enumerates ok|warn|risk|unknown, so passing through a value a newer
+// broker adds would make the API server reject the whole status apply.
 func orUnknown(s string) string {
-	if s == "" {
-		return "unknown"
+	switch s {
+	case "ok", "warn", "risk", "unknown":
+		return s
 	}
-	return s
+	return "unknown"
 }
 
 func parseTime(s string) *metav1.Time {
