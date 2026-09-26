@@ -181,9 +181,13 @@ function App() {
     const reading = lensState.loading && lensState.byWorkload.size === 0;
     const badges = reading
       ? new Map(rawPods.filter((p) => !p.isExternal).map((p) => [p.id, { lens, tone: 'unknown', text: '…', label: 'Reading…' } as const]))
-      : badgesByNode(lens, lensState.byWorkload, rawPods);
+      : badgesByNode(lens, lensState.byWorkload, rawPods, {
+          // The whole lens read failed: every card is unknown, not "no data".
+          readFailures: lensState.error != null ? Math.max(1, lensState.readFailures) : lensState.readFailures,
+          truncated: lensState.truncated,
+        });
     return rawPods.map((p) => (badges.has(p.id) ? { ...p, lensBadge: badges.get(p.id) } : p));
-  }, [rawPods, lens, view, lensState.byWorkload, lensState.loading]);
+  }, [rawPods, lens, view, lensState.byWorkload, lensState.loading, lensState.error, lensState.readFailures, lensState.truncated]);
   const refreshAll = useCallback(() => {
     refreshData();
     setRefreshTick((t) => t + 1);

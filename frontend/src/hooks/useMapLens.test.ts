@@ -34,6 +34,8 @@ describe('Vulnerabilities lens: the Broker ranks, the lens only counts', () => {
   test("checkout's KEV finding is the Broker's P0; ledger's is P1", () => {
     const checkout = vulnBadge(imgs.get('payments/Deployment/checkout'));
     expect(checkout.tone).toBe('p0');
+    // The count covers P0 and P1 together, so the text says so.
+    expect(checkout.text).toBe('P0/P1 · 3');
     expect(checkout.label).toContain('CVE-2099-0001');
     expect(vulnBadge(imgs.get('payments/Deployment/ledger')).tone).toBe('p1');
   });
@@ -68,6 +70,29 @@ describe('Vulnerabilities lens: the Broker ranks, the lens only counts', () => {
         expect(`${b.text} ${b.label}`.toLowerCase().replace('not clean', '')).not.toMatch(/safe|clean|secure/);
       }
     }
+  });
+});
+
+describe('a failed read is unknown, never "none"', () => {
+  const failed = (field: 'vulnFailed' | 'sbomFailed') =>
+    imagesByWorkload(facts(true).map((f) => (f.digest === imageDetail('source-controller').digest ? { ...f, [field]: true, vulnReports: null, sbomReports: null, hot: [] } : f)));
+
+  test('vulnerability read failed: "read failed", not "no data" or "no P0/P1"', () => {
+    const b = vulnBadge(failed('vulnFailed').get('flux-system/Deployment/source-controller'));
+    expect(b).toMatchObject({ tone: 'unknown', text: 'read failed' });
+  });
+
+  test('SBOM read failed (a 503): "read failed", not "no SBOM"', () => {
+    const b = supplyBadge(failed('sbomFailed').get('flux-system/Deployment/source-controller'));
+    expect(b).toMatchObject({ tone: 'unknown', text: 'read failed' });
+  });
+
+  test('a card with no badge of its own is "read failed" / "not read" when reads failed or were capped', () => {
+    const pod = { pod_name: 'x-1', pod_namespace: 'payments', workload_kind: 'Deployment', workload_name: 'x' } as PodInfo;
+    const nodes = [{ id: 'n', label: 'n', pod, pods: [pod], isExternal: false } as PodNodeData];
+    expect(badgesByNode('vulns', new Map(), nodes, { readFailures: 2, truncated: false }).get('n')!.text).toBe('read failed');
+    expect(badgesByNode('supply', new Map(), nodes, { readFailures: 0, truncated: true }).get('n')!.text).toBe('not read');
+    expect(badgesByNode('vulns', new Map(), nodes).get('n')!.text).toBe('no data');
   });
 });
 

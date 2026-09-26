@@ -29,6 +29,9 @@ export interface ImageFacts {
   /** true: findings carry `tier`; false: they do not (older Broker); null: nothing to tell by. */
   tiered?: boolean | null;
   hotTruncated?: boolean;
+  /** The vulnerability / SBOM read for this digest failed: unknown, never "none". */
+  vulnFailed?: boolean;
+  sbomFailed?: boolean;
 }
 
 /** What one namespace's image inventory says about each workload's running images. */
@@ -47,6 +50,9 @@ export interface WorkloadImages {
   untiered: number;
   /** A P0/P1 page was cut short. */
   hotTruncated: boolean;
+  /** Running images whose vulnerability / SBOM read failed. */
+  vulnFailed: number;
+  sbomFailed: number;
 }
 
 /** Fold per-digest facts into per-workload running-image coverage (key ns/kind/name). */
@@ -56,7 +62,7 @@ export function imagesByWorkload(images: ImageFacts[]): Map<string, WorkloadImag
     for (const w of img.workloads) {
       if (!w.running) continue;
       const key = workloadKey(w.namespace, w.workloadKind, w.workloadName);
-      const acc = out.get(key) ?? { digests: [], withVulnData: 0, withSbom: 0, withVerifiedSbom: 0, p0: [], p1: [], untiered: 0, hotTruncated: false };
+      const acc = out.get(key) ?? { digests: [], withVulnData: 0, withSbom: 0, withVerifiedSbom: 0, p0: [], p1: [], untiered: 0, hotTruncated: false, vulnFailed: 0, sbomFailed: 0 };
       if (acc.digests.includes(img.digest)) continue;
       acc.digests.push(img.digest);
       if (img.vulnReports && img.vulnReports.length > 0) acc.withVulnData += 1;
@@ -68,6 +74,8 @@ export function imagesByWorkload(images: ImageFacts[]): Map<string, WorkloadImag
         if (list && !list.includes(f.id)) list.push(f.id);
       }
       acc.hotTruncated ||= img.hotTruncated === true;
+      if (img.vulnFailed) acc.vulnFailed += 1;
+      if (img.sbomFailed) acc.sbomFailed += 1;
       out.set(key, acc);
     }
   }
@@ -90,14 +98,19 @@ export function vulnBadge(imgs: WorkloadImages | undefined): LensBadge {
   const missing = n - imgs.withVulnData;
   const partialNote = missing > 0 ? ` ${plural(missing, 'running image')} of ${n} ${missing === 1 ? 'has' : 'have'} no vulnerability data (unknown).` : '';
   const scope = ' Tiers are the Broker\'s, worst over every workload running the image.';
+  const failedNote = imgs.vulnFailed > 0 ? ` The vulnerability read failed for ${plural(imgs.vulnFailed, 'running image')}: unknown.` : '';
   const worst = imgs.p0.length ? 'P0' : imgs.p1.length ? 'P1' : null;
   if (worst) {
     const ids = [...imgs.p0, ...imgs.p1.filter((id) => !imgs.p0.includes(id))];
     const count = `${ids.length}${imgs.hotTruncated ? '+' : ''}`;
     return {
-      lens: 'vulns', tone: worst === 'P0' ? 'p0' : 'p1', text: `${worst} · ${count}`,
-      label: `${count} P0/P1 vulnerabilit${ids.length === 1 ? 'y' : 'ies'} on running images, worst ${worst}: ${ids.slice(0, 5).join(', ')}${ids.length > 5 ? ', …' : ''}.${partialNote}${scope}`,
+      // The count is P0 and P1 together; the colour is the worst of them.
+      lens: 'vulns', tone: worst === 'P0' ? 'p0' : 'p1', text: `P0/P1 · ${count}`,
+      label: `${count} P0/P1 vulnerabilit${ids.length === 1 ? 'y' : 'ies'} on running images, worst ${worst}: ${ids.slice(0, 5).join(', ')}${ids.length > 5 ? ', …' : ''}.${partialNote}${failedNote}${scope}`,
     };
+  }
+  if (imgs.vulnFailed > 0) {
+    return { lens: 'vulns', tone: 'unknown', text: 'read failed', label: `Unknown: the vulnerability read failed for ${plural(imgs.vulnFailed, 'running image')} of ${n}. Retry with Refresh.` };
   }
   if (imgs.untiered > 0) {
     return { lens: 'vulns', tone: 'unknown', text: 'tier ?', label: 'This Broker does not rank findings into tiers, so P0/P1 is unknown here.' };
@@ -118,16 +131,22 @@ export function supplyBadge(imgs: WorkloadImages | undefined): LensBadge {
     return { lens: 'supply', tone: 'unknown', text: 'no data', label: `No running image of this workload is in the image inventory.${sig}` };
   }
   const n = imgs.digests.length;
+  if (imgs.sbomFailed > 0 && imgs.withSbom + imgs.sbomFailed >= n && imgs.withVerifiedSbom < n) {
+    return { lens: 'supply', tone: 'unknown', text: 'read failed', label: `Unknown: the SBOM read failed for ${plural(imgs.sbomFailed, 'running image')} of ${n}. Retry with Refresh.${sig}` };
+  }
   if (imgs.withVerifiedSbom === n) {
     return { lens: 'supply', tone: 'good', text: 'SBOM verified', label: `Every running image has an SBOM from a verified attestation.${sig}` };
   }
   if (imgs.withSbom === n) {
     return { lens: 'supply', tone: 'neutral', text: 'SBOM', label: `Every running image has an SBOM; ${imgs.withVerifiedSbom === 0 ? 'none' : `${imgs.withVerifiedSbom} of ${n}`} verified.${sig}` };
   }
-  if (imgs.withSbom === 0) {
+  if (imgs.withSbom === 0 && imgs.sbomFailed === 0) {
     return { lens: 'supply', tone: 'unknown', text: 'no SBOM', label: `No SBOM from any source for its ${plural(n, 'running image')}.${sig}` };
   }
-  return { lens: 'supply', tone: 'unknown', text: `SBOM ${imgs.withSbom}/${n}`, label: `${imgs.withSbom} of ${n} running images have an SBOM.${sig}` };
+  return {
+    lens: 'supply', tone: 'unknown', text: `SBOM ${imgs.withSbom}/${n}`,
+    label: `${imgs.withSbom} of ${n} running images have an SBOM${imgs.sbomFailed ? `; the read failed for ${imgs.sbomFailed} (unknown)` : ''}.${sig}`,
+  };
 }
 
 /** Coverage lens badge: how much of the workload kguardian can see (the profile's posture coverage). */
@@ -146,14 +165,28 @@ export function coverageBadge(p: WorkloadListItem | undefined): LensBadge {
   };
 }
 
-/** Workload badges → map node ids (a node groups a workload's pods). Every in-cluster card gets one: no badge would read as clean. */
-export function badgesByNode(lens: Exclude<MapLens, 'traffic'>, byWorkload: Map<string, LensBadge>, nodes: PodNodeData[]): Map<string, LensBadge> {
+/** Why a card may have no badge of its own: nothing to say, a read failed, or the read was capped. */
+export interface LensGaps {
+  /** Some per-image reads failed, so an unmatched workload may be one of them. */
+  readFailures: number;
+  /** A page was capped, so an unmatched workload may simply not have been read. */
+  truncated: boolean;
+}
+
+/**
+ * Workload badges → map node ids (a node groups a workload's pods). Every
+ * in-cluster card gets one: no badge would read as clean. A card with no
+ * badge of its own is "no data" only when every read succeeded and nothing
+ * was capped; otherwise it is unknown because it was not read.
+ */
+export function badgesByNode(lens: Exclude<MapLens, 'traffic'>, byWorkload: Map<string, LensBadge>, nodes: PodNodeData[], gaps: LensGaps = { readFailures: 0, truncated: false }): Map<string, LensBadge> {
   const out = new Map<string, LensBadge>();
-  const fallback: Record<Exclude<MapLens, 'traffic'>, LensBadge> = {
-    vulns: vulnBadge(undefined),
-    supply: supplyBadge(undefined),
-    coverage: coverageBadge(undefined),
-  };
+  const fallback: LensBadge =
+    gaps.readFailures > 0
+      ? { lens, tone: 'unknown', text: 'read failed', label: `Unknown: ${plural(gaps.readFailures, 'read')} failed, and this workload may be behind one. Retry with Refresh.` }
+      : gaps.truncated
+        ? { lens, tone: 'unknown', text: 'not read', label: 'Unknown: the lens reads a capped page, and this workload was not in it.' }
+        : { vulns: vulnBadge(undefined), supply: supplyBadge(undefined), coverage: coverageBadge(undefined) }[lens];
   for (const n of nodes) {
     if (n.isExternal) continue;
     let badge: LensBadge | undefined;
@@ -162,33 +195,45 @@ export function badgesByNode(lens: Exclude<MapLens, 'traffic'>, byWorkload: Map<
       badge = w ? byWorkload.get(workloadKey(w.namespace, w.kind, w.name)) : undefined;
       if (badge) break;
     }
-    out.set(n.id, badge ?? fallback[lens]);
+    out.set(n.id, badge ?? fallback);
   }
   return out;
 }
 
-async function readImages(api: VulnApi, namespace: string, mode: 'vulns' | 'supply'): Promise<{ images: ImageFacts[]; truncated: boolean }> {
+async function readImages(api: VulnApi, namespace: string, mode: 'vulns' | 'supply'): Promise<{ images: ImageFacts[]; truncated: boolean; readFailures: number }> {
   const page = await api.listImages({ namespace, limit: LENS_IMAGE_CAP });
+  let readFailures = 0;
   const images = await withConcurrencyLimit(
     page.items.map((img) => async (): Promise<ImageFacts> => {
-      const [d, v, s] = await Promise.all([
-        api.getImage(img.digest).catch(() => null),
-        (mode === 'vulns' ? api.getImageVulns(img.digest, { tier: ['P0', 'P1'], limit: LENS_FINDINGS_CAP }) : api.getImageVulns(img.digest, { limit: 1 })).catch(() => null),
-        mode === 'supply' ? api.getImageSbom(img.digest, { limit: 1 }).then((p) => p.reports).catch(() => null) : Promise.resolve(null),
+      const [d, v, s] = await Promise.allSettled([
+        api.getImage(img.digest),
+        mode === 'vulns' ? api.getImageVulns(img.digest, { tier: ['P0', 'P1'], limit: LENS_FINDINGS_CAP }) : api.getImageVulns(img.digest, { limit: 1 }),
+        mode === 'supply' ? api.getImageSbom(img.digest, { limit: 1 }).then((p) => p.reports) : Promise.resolve(null),
       ]);
-      const facts: ImageFacts = { digest: img.digest, workloads: d?.workloads ?? [], vulnReports: v?.reports ?? null, sbomReports: s };
-      if (mode === 'vulns' && v) {
-        const tiered = v.items.length === 0 ? null : v.items.every((f) => f.tier !== undefined);
+      // A failed read is unknown, never "none": it is counted, and the
+      // workloads it would have covered say "read failed".
+      readFailures += [d, v, s].filter((r) => r.status === 'rejected').length;
+      const vv = v.status === 'fulfilled' ? v.value : null;
+      const facts: ImageFacts = {
+        digest: img.digest,
+        workloads: d.status === 'fulfilled' ? d.value.workloads : [],
+        vulnReports: vv?.reports ?? null,
+        sbomReports: s.status === 'fulfilled' ? s.value : null,
+        vulnFailed: v.status === 'rejected',
+        sbomFailed: s.status === 'rejected',
+      };
+      if (mode === 'vulns' && vv) {
+        const tiered = vv.items.length === 0 ? null : vv.items.every((f) => f.tier !== undefined);
         // An older Broker ignored the filter: its findings are not P0/P1 by anyone's ranking.
-        facts.hot = tiered ? v.items : [];
+        facts.hot = tiered ? vv.items : [];
         facts.tiered = tiered;
-        facts.hotTruncated = tiered === true && v.nextAfter !== null;
+        facts.hotTruncated = tiered === true && vv.nextAfter !== null;
       }
       return facts;
     }),
     LENS_CONCURRENCY,
   );
-  return { images, truncated: page.nextAfter !== null };
+  return { images, truncated: page.nextAfter !== null, readFailures };
 }
 
 export interface MapLensState {
@@ -197,6 +242,8 @@ export interface MapLensState {
   error: unknown;
   /** Something was capped: say so in the legend. */
   truncated: boolean;
+  /** Per-image reads that failed: those cards say "read failed". */
+  readFailures: number;
 }
 
 /**
@@ -212,33 +259,40 @@ export function useMapLens(
 ): MapLensState {
   const vulnApi = apis.vulnApi ?? defaultVulnApi;
   const profileApi = apis.profileApi ?? defaultProfileApi;
-  const [state, setState] = useState<MapLensState>({ byWorkload: new Map(), loading: false, error: null, truncated: false });
+  const [state, setState] = useState<MapLensState>({ byWorkload: new Map(), loading: false, error: null, truncated: false, readFailures: 0 });
   const seq = useRef(0);
 
   const load = useCallback(async () => {
     const id = ++seq.current;
     const current = () => id === seq.current;
     if (lens === 'traffic') {
-      setState({ byWorkload: new Map(), loading: false, error: null, truncated: false });
+      setState({ byWorkload: new Map(), loading: false, error: null, truncated: false, readFailures: 0 });
       return;
     }
     setState((s) => ({ ...s, byWorkload: s.byWorkload, loading: true, error: null }));
     try {
       const out = new Map<string, LensBadge>();
       let truncated = false;
+      let readFailures = 0;
       if (lens === 'coverage') {
         const page = await profileApi.listWorkloads({ namespace, limit: 500 });
         for (const p of page.items) out.set(workloadKey(p.namespace, p.kind, p.name), coverageBadge(p));
         truncated = page.nextAfter !== null;
       } else {
-        const { images, truncated: t } = await readImages(vulnApi, namespace, lens);
-        for (const [k, v] of imagesByWorkload(images)) out.set(k, lens === 'supply' ? supplyBadge(v) : vulnBadge(v));
+        const { images, truncated: t, readFailures: f } = await readImages(vulnApi, namespace, lens);
+        for (const [k, v] of imagesByWorkload(images)) {
+          const b = lens === 'supply' ? supplyBadge(v) : vulnBadge(v);
+          // A capped image page may have left some of this workload's images
+          // unread: "nothing urgent" is then not a finished assessment.
+          out.set(k, t && b.tone === 'neutral' ? { ...b, tone: 'unknown', label: `${b.label} Not every image was read (capped), so this is incomplete.` } : b);
+        }
         truncated = t || images.some((i) => i.hotTruncated);
+        readFailures = f;
       }
       if (!current()) return;
-      setState({ byWorkload: out, loading: false, error: null, truncated });
+      setState({ byWorkload: out, loading: false, error: null, truncated, readFailures });
     } catch (err) {
-      if (current()) setState({ byWorkload: new Map(), loading: false, error: err, truncated: false });
+      if (current()) setState({ byWorkload: new Map(), loading: false, error: err, truncated: false, readFailures: 0 });
     }
   }, [lens, namespace, vulnApi, profileApi]);
 

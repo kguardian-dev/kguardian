@@ -5,11 +5,12 @@ import { vulnErrorKind, vulnErrorMessage } from '../../services/vulnApi';
 
 const KEYS: Record<Exclude<MapLens, 'traffic'>, Array<{ cls: string; text: string; meaning: string }>> = {
   vulns: [
-    { cls: 'bg-tier-p0/15 text-tier-p0 border-tier-p0/30', text: 'P0', meaning: 'act now' },
-    { cls: 'bg-tier-p1/15 text-tier-p1 border-tier-p1/30', text: 'P1', meaning: 'schedule' },
+    { cls: 'bg-tier-p0/15 text-tier-p0 border-tier-p0/30', text: 'P0/P1 · n', meaning: 'worst is P0' },
+    { cls: 'bg-tier-p1/15 text-tier-p1 border-tier-p1/30', text: 'P0/P1 · n', meaning: 'worst is P1' },
     { cls: 'bg-hubble-border/30 text-secondary border-hubble-border', text: 'no P0/P1', meaning: 'reported, nothing urgent' },
     { cls: 'text-tertiary border-dashed border-hubble-border-strong', text: 'no data', meaning: 'unknown, not clean' },
     { cls: 'text-tertiary border-dashed border-hubble-border-strong', text: 'tier ?', meaning: 'Broker has no tiers' },
+    { cls: 'text-tertiary border-dashed border-hubble-border-strong', text: 'read failed', meaning: 'unknown' },
   ],
   supply: [
     { cls: 'bg-state-enforcing/15 text-state-enforcing border-state-enforcing/30', text: 'SBOM verified', meaning: 'signed attestation' },
@@ -50,6 +51,11 @@ export function LensLegend({ lens, state }: { lens: Exclude<MapLens, 'traffic'>;
       {state.error != null && (
         <p role="alert" className="text-severity-critical">
           {kind === 'auth' ? 'Broker token required: ' : ''}{vulnErrorMessage(state.error)} Cards show unknown.
+        </p>
+      )}
+      {state.readFailures > 0 && !state.loading && (
+        <p className="text-severity-medium" data-testid="lens-read-failures">
+          {state.readFailures} read{state.readFailures === 1 ? '' : 's'} failed: those cards say "read failed" (unknown). Refresh to retry.
         </p>
       )}
       {state.truncated && !state.loading && (
