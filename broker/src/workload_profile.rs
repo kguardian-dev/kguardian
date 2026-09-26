@@ -607,7 +607,11 @@ pub fn load_sources(conn: &mut PgConnection, key: &Key) -> Result<Sources, DbErr
         &crate::runtime_capabilities::current_pairs(&containers),
         crate::runtime_capabilities::evidence_window_hours(),
     )?;
-    let runtime = Some(crate::profile_drift::load_runtime(conn, key)?);
+    let runtime = Some(crate::profile_drift::load_runtime(
+        conn,
+        key,
+        &crate::runtime_capabilities::current_pairs(&containers),
+    )?);
 
     Ok(Sources {
         containers,
@@ -4306,15 +4310,14 @@ mod tests {
             has_inventory,
             unshipped: rows
                 .into_iter()
-                .map(
-                    |(c, d, entries)| crate::runtime_inventory::ContainerRuntime {
-                        container_name: c.into(),
-                        image_digest: d,
-                        entries,
-                    },
-                )
+                .map(|(c, d, entries)| crate::profile_drift::UnshippedPair {
+                    container: c.into(),
+                    digest: d,
+                    total: entries.len() as i64,
+                    entries,
+                })
                 .collect(),
-            unshipped_truncated: truncated,
+            pairs_truncated: truncated,
             coverage,
         })
     }
@@ -4388,7 +4391,7 @@ mod tests {
         assert!(p.drift.evaluated.contains(&"unshippedExecutable"));
         assert!(not_evaluated(&p).is_empty());
         assert!(p.drift.items.is_empty());
-        // Covered but the unshipped read was cut: cannot say "none".
+        // Covered but more current pairs than were read: cannot say "none".
         let p = build(
             &key(),
             &with_runtime(rt(
@@ -4399,10 +4402,64 @@ mod tests {
             )),
             now(),
         );
+        assert_eq!(not_evaluated(&p), [(None, "truncated".into())]);
+        assert!(!p.drift.evaluated.contains(&"unshippedExecutable"));
+    }
+
+    /// Every drift check that did not run is in notEvaluated with a
+    /// reason, so an empty items list is never read as "no drift".
+    #[test]
+    fn every_check_not_evaluated_says_why() {
+        let all = |p: &Profile| -> Vec<(&'static str, Option<String>, String)> {
+            p.drift
+                .not_evaluated
+                .iter()
+                .map(|n| (n.kind, n.container.clone(), n.reason.clone()))
+                .collect()
+        };
+        // Nothing known at all.
+        let p = build(&key(), &Sources::default(), now());
+        assert!(p.drift.evaluated.is_empty());
         assert_eq!(
-            not_evaluated(&p),
-            [(Some("app".into()), "truncated".into())]
+            all(&p),
+            [
+                ("unshippedExecutable", None, "no_inventory".to_string()),
+                ("tagMoved", None, "no_image_inventory".to_string()),
+                ("imageChangedSinceExport", None, "no_export".to_string()),
+                ("securityContextRegression", None, "no_baseline".to_string()),
+            ]
         );
+        // An image inventory but no running container: the runtime check
+        // says so instead of an empty list.
+        // (the only digest is a previous one: nothing runs now).
+        let mut c = container("app", restricted());
+        let d = c.digests.remove(0);
+        c.previous_digests.push(d);
+        let p = build(
+            &key(),
+            &Sources {
+                containers: vec![c],
+                runtime: rt(true, vec![], vec![], false),
+                ..Default::default()
+            },
+            now(),
+        );
+        assert!(p.drift.evaluated.contains(&"tagMoved"));
+        assert!(all(&p).contains(&(
+            "unshippedExecutable",
+            None,
+            "no_running_containers".to_string()
+        )));
+        // Every check is either evaluated or not evaluated, never neither.
+        for t in [
+            "tagMoved",
+            "imageChangedSinceExport",
+            "securityContextRegression",
+            "unshippedExecutable",
+        ] {
+            let ne = p.drift.not_evaluated.iter().any(|n| n.kind == t);
+            assert!(p.drift.evaluated.contains(&t) != ne, "{t}");
+        }
     }
 
     #[test]
