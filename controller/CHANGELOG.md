@@ -1,5 +1,33 @@
 # Changelog
 
+## [1.16.0](https://github.com/kguardian-dev/kguardian/compare/controller/v1.15.1...controller/v1.16.0) (2026-09-26)
+
+
+### Features
+
+* **controller:** per-container exec and library inventory ([5f74268](https://github.com/kguardian-dev/kguardian/commit/5f74268b855619b51768411100e45ea5169a459a))
+* **controller:** report container image identity and security context ([d187fcf](https://github.com/kguardian-dev/kguardian/commit/d187fcf282a987f05e3d28a5abc6c43c9b429159))
+* **controller:** report each container's state with its image identity ([7b722f3](https://github.com/kguardian-dev/kguardian/commit/7b722f3487aab298c3ccde6f189a20fb127159d1))
+* **controller:** runtime inventory coverage heartbeats ([e9ac4e8](https://github.com/kguardian-dev/kguardian/commit/e9ac4e874f1da2c15471b6c3404c59fd6c61fa96))
+
+
+### Bug Fixes
+
+* **controller:** a backfill cut short by the maps cap marks the container incomplete ([9bf43ef](https://github.com/kguardian-dev/kguardian/commit/9bf43ef89f43fbf96a48967892cbe67564a9bea7))
+* **controller:** capture pending containers before trusting a recycled netns ([2fc30e0](https://github.com/kguardian-dev/kguardian/commit/2fc30e03c41fc77fb0e6b55066698d0131287b24))
+* **controller:** count lost runtime events, re-report files changed in place, backfill off the event task ([289e716](https://github.com/kguardian-dev/kguardian/commit/289e716ba3e34256f458d73c527d6334b8edf95f))
+* **controller:** credit syscalls only to tasks in the pod's own cgroup ([a1ce650](https://github.com/kguardian-dev/kguardian/commit/a1ce65059a061de45ffd62f95deceba2ad928bf3))
+* **controller:** gate, runtime and sandbox exclusions, reliable retirement for startup capture ([0084897](https://github.com/kguardian-dev/kguardian/commit/0084897b56bc8ec34cc3c27c86f460e3de094007))
+* **controller:** keep cgroup parse and event scratch private to the task ([7481ecc](https://github.com/kguardian-dev/kguardian/commit/7481ecce31de40dad5094f01c0fde7661a0f4938))
+* **controller:** keep syscall capture if the startup-capture program fails to load ([babfa12](https://github.com/kguardian-dev/kguardian/commit/babfa12206907bb0558ca7973740fbadeeb447ae))
+* **controller:** keep the cgroup parser state off the BPF stack so the ownership gate works on 6.1 ([#1685](https://github.com/kguardian-dev/kguardian/issues/1685)) ([a50c78a](https://github.com/kguardian-dev/kguardian/commit/a50c78a25d3c300c49e6e31ac962932f4949224b))
+* **controller:** load the ownership gate on 6.15+ kernels and degrade instead of crashlooping ([16becb3](https://github.com/kguardian-dev/kguardian/commit/16becb32cbb427c6f7576b4c7a5b7cc2435b9ca3))
+* **controller:** lost container lookups are counted and re-reported; syscall gate keeps per-CPU parse state ([7fe1401](https://github.com/kguardian-dev/kguardian/commit/7fe14017991ba9916246c7a131c7e3ebd86051a7))
+* **controller:** per-incarnation syscall sets and netns unregistration of finished pods ([a948b37](https://github.com/kguardian-dev/kguardian/commit/a948b379a06b5983624dfdbb3853eb75f5a7ed26))
+* **controller:** re-post pods that are not Ready ([15df46a](https://github.com/kguardian-dev/kguardian/commit/15df46a00a2f66533206b6a20f20fa579fd1dd37))
+* **controller:** register containers at creation to capture startup syscalls ([1bc7443](https://github.com/kguardian-dev/kguardian/commit/1bc7443e8868ae45159c5b6e1fcc3b2e6445de42))
+* **controller:** send the broker token on every request ([251fcf2](https://github.com/kguardian-dev/kguardian/commit/251fcf2d228a3c3ac9867de6b251be4e104e4fe6))
+
 ## [1.15.1](https://github.com/kguardian-dev/kguardian/compare/controller/v1.15.0...controller/v1.15.1) (2026-09-23)
 
 
