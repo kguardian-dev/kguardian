@@ -6,12 +6,13 @@ icon: "bug"
 
 ## Overview
 
-The supplychain component reads Trivy Operator reports and posts one
-payload per image digest to the broker. The broker stores them keyed by
-digest (never per pod), joins them to the [image inventory](/architecture)
-and serves them to the UI, the assistant and the CLI.
+The supplychain component reads Trivy Operator reports (and, later, its own
+Grype matches and registry-attached SBOMs) and posts one payload per image
+digest to the broker. The broker stores them keyed by digest (never per
+pod), joins them to the [image inventory](/architecture) and serves them to
+the UI, the assistant and the CLI.
 
-kguardian reports what the source found. It does not scan, and it never
+kguardian reports what the sources found. It does not scan, and it never
 blocks a workload.
 
 All reads are paginated, capped and charged to the broker's read-memory
@@ -27,20 +28,42 @@ potentially reachable: unknown never means safe.
 
 ### Sources
 
-Every row says which `source` it came from. Sources sit side by side:
-each payload replaces only its own `(digest, source)`, and nothing is
-merged or deduplicated across sources.
+Each payload has a `source`, one of `trivy-operator`, `grype` or
+`registry`; anything else is refused. Sources are stored side by side:
+each payload replaces only its own `(digest, source)`.
 
-- `trivy-operator`: Trivy Operator's reports.
-- `grype`: kguardian's own matcher. Its findings add `kev`,
-  `kevDateAdded`, `epss` and `epssPercentile` from the Grype DB, and the
-  report names the SBOM it matched (`sbomSource`). Trivy never sets these,
-  so `null` means unknown, not "not exploited".
-- `registry`: an SBOM attached to the image in its registry. The report's
-  `attestation` says where it was found; `verified: false` means no
-  signature was checked, so it must not be shown as signed. When an image
-  has more than one SBOM, the registry one is served unless `?source=`
-  asks for another.
+- **Findings are deduplicated across sources** on (vulnerability id,
+  package name, installed version). Two sources reporting the same thing
+  make one finding with `sources: ["grype", "trivy-operator"]`, never two.
+  Severity, score and EPSS are the highest any source gives, `kev` is true
+  if any source says so, and a fix from any source makes it fixable.
+- `grype` findings add `kev`, `kevDateAdded`, `epss` and `epssPercentile`
+  from the Grype DB, and its report names the SBOM(s) it matched
+  (`sbomSources`). Trivy never sets these, so `null` means unknown, not
+  "not exploited".
+- **SBOMs are kept per source and never replace each other.** A `registry`
+  SBOM is one found attached to the image in its registry. It carries
+  `sbomTrust` (`unverified`, `attached-unbound` or `verified`; a registry
+  SBOM that says nothing is stored as `unverified`) and the `attestation`
+  it was found through. `verified: false` means no signature was checked:
+  never show it as signed. `GET /images/{digest}/sbom` lists every
+  source's SBOM and shows Trivy Operator's unless you ask for another.
+
+### Trust
+
+Whoever holds the supplychain token is trusted to write findings; the
+broker cannot tell a real scan from a made-up one. What it enforces limits
+the damage a bad or stolen token can do:
+
+- the closed set of sources above;
+- `scanned_at` at most 60 s in the future;
+- different content replaces stored content only from a **strictly newer**
+  `scanned_at`, so a payload cannot be pre-dated to win, and an empty
+  payload cannot wipe findings unless it is a newer scan;
+- item caps enforced while parsing, and a global ceiling on half-sent SBOM
+  page sets.
+
+Keep the token in the supplychain component only.
 
 ## How a report is matched to what runs
 
@@ -53,10 +76,11 @@ inventory digests with the first rule that matches, and records which one:
 |---|---|---|
 | `image_id` | The kubelet's imageID digest equals the payload digest. | Exact |
 | `platform_manifest` | The imageID digest is one of the payload's `platform_manifests` (index to manifest, from an anonymous registry lookup). | Exact |
-| `workload_tag` | Only when neither digest rule matched: same namespace, workload and container as a report's `observed_in`, and the same `repository:tag`. Trivy's ReplicaSet (`api-7c9d8f6b5`) or Job (`backup-29012345`) matches the inventory's Deployment (`api`) or CronJob (`backup`). | Tag only: the tag may have moved since the scan |
+| `workload_tag` | Only when neither digest rule matched the payload, and only for an inventory digest that has no exact link from **any** source: same namespace, workload and container as a report's `observed_in`, and the same `repository:tag`. Trivy's ReplicaSet (`api-7c9d8f6b5`) or Job (`backup-29012345`) matches the inventory's Deployment (`api`) or CronJob (`backup`). | Tag only: the tag may have moved since the scan |
 | `report_digest` | Reads only: you asked for the payload's own digest and nothing in the inventory links to it. | Exact, but not known to run here |
 
-Links are refreshed at ingest and by the retention pass
+An exact link retires any tag guess on the same image. Links are refreshed
+at ingest and by the retention pass
 (`broker.supplychain.retention.intervalSeconds`, default 300 s), so a pod
 that starts after its image was scanned is matched within one interval.
 
@@ -72,24 +96,28 @@ The payload schema is in `supplychain/README.md`. `{digest}` must equal
 
 - **Scoped auth only.** These routes need a token with the `supplychain`
   scope (`BROKER_TOKEN_SUPPLYCHAIN`). With broker auth off, or with only
-  the legacy shared token, they answer `403`: an unauthenticated broker
-  would accept a forged "clean" scan from any pod.
-- **Bodies.** `Content-Encoding: gzip` (or none). At most 1 MiB on the
-  wire. A gzip body is inflated into at most
-  `broker.supplychain.maxDecompressedBytes` (default 32 MiB) and refused
-  with `413` the moment it passes that, so a decompression bomb is never
-  expanded in full. Other encodings get `415`, broken gzip or JSON `400`,
-  a contract violation (unknown `schema_version`, digest mismatch,
-  `scanned_at` more than 10 minutes in the future) `422`.
-- **Replacement.** A payload replaces what is stored for
-  `(digest, source)` of its kind. An older `scanned_at` than the stored
-  one is ignored, so a delayed retry never overwrites a newer scan.
-  Identical content is a no-op.
+  the legacy shared token, they answer `403`.
+- **Bodies.** `Content-Encoding: gzip` (or none), at most 1 MiB on the
+  wire, received within 30 s (`408` otherwise). A gzip body is inflated
+  into at most `broker.supplychain.maxDecompressedBytes` (default 8 MiB)
+  and refused with `413` past it. Parsing stops each list at its cap:
+  20 000 findings or 10 000 components per request (`413`); nested lists
+  keep their first entries. A body is read before it waits for anything,
+  so a slow sender only holds its own connection.
+- **One at a time.** A single worker inflates, parses and writes, behind a
+  queue of 8 bodies; a full queue answers `503` with `Retry-After`. The
+  measured worst case is about 62 MiB of heap per ingest.
 - **Paged SBOMs.** Pages are staged by `(digest, source, set_id)` and
   swapped in together once all `total` pages are present, in any order;
   duplicates are harmless. A newer set drops an older incomplete one.
   Sets whose pages stop arriving are discarded after
-  `broker.supplychain.retention.sbomPageTtlSeconds`.
+  `broker.supplychain.retention.sbomPageTtlSeconds`. At most 64 sets
+  (256 MiB) are staged across the cluster; a new set beyond that answers
+  `429` and counts in `kguardian_supplychain_staged_sets_refused_total`.
+
+Other errors: broken gzip or JSON `400`; a contract violation (unknown
+`schema_version` or `source`, digest mismatch, `scanned_at` too far ahead,
+pages that disagree on `total`) `422`.
 
 The response is `200` (`202` for a staged page) with a status:
 
@@ -103,12 +131,13 @@ The response is `200` (`202` for a staged page) with a status:
 
 ## GET /images/\{digest\}/vulnerabilities
 
-Findings for one inventory digest, most severe first.
+Findings for one inventory digest, deduplicated across sources, most
+severe first.
 
 | Parameter | Default | Description |
 |---|---|---|
 | `severity` | all | Comma-separated: `CRITICAL,HIGH,MEDIUM,LOW,NONE,UNKNOWN`. Unknown names are a `400`. |
-| `fixable` | all | `true`: only findings with a fixed version. `false`: only without. |
+| `fixable` | all | `true`: only findings some source has a fix for. `false`: only without. |
 | `source` | all | Only this source's report. |
 | `limit` | 100 | Clamped to `[1, 500]`. |
 | `after` | | The previous page's `nextAfter`. |
@@ -120,7 +149,8 @@ Findings for one inventory digest, most severe first.
     {"source": "trivy-operator", "reportDigest": "sha256:9f86…", "join": "platform_manifest",
      "digestKind": "index", "scannedAt": "2026-09-20T08:00:00", "dbUpdatedAt": null,
      "scannerName": "Trivy", "scannerVersion": "0.58.1", "osFamily": "alpine",
-     "osName": "3.20.3", "osEosl": false, "itemCount": 12, "…": "…"}
+     "osName": "3.20.3", "osEosl": false, "itemCount": 12, "sbomSources": [],
+     "sbomTrust": null, "…": "…"}
   ],
   "items": [
     {"id": "CVE-2099-1002",
@@ -129,7 +159,7 @@ Findings for one inventory digest, most severe first.
      "severity": "MEDIUM", "score": 6.1, "cvss": {"nvd": {"v3_score": 6.1}},
      "title": "…", "primaryUrl": "https://…", "filePaths": ["app/node_modules/express/package.json"],
      "kev": null, "kevDateAdded": null, "epss": null, "epssPercentile": null,
-     "source": "trivy-operator", "reportDigest": "sha256:9f86…",
+     "sources": ["grype", "trivy-operator"], "reportDigests": ["sha256:9f86…"],
      "inUse": null, "inUseState": "unknown"}
   ],
   "nextAfter": "3.4812"
@@ -142,24 +172,30 @@ render them, never fetch or execute them.
 
 ## GET /images/\{digest\}/sbom
 
-SBOM components, paged by id. `source`, `limit` (default 100, max 500) and
-`after` (a component id) as above. `report` is `null` when there is no SBOM.
+SBOM components, paged by id (`limit` default 100, max 500; `after` is a
+component id). `reports` lists every source's SBOM with its `sbomTrust`;
+`report` is the one the items come from: `?source=`, else Trivy
+Operator's, else another scanner's, and a registry SBOM only when it is
+the only one. `report` is `null` when there is no SBOM.
 
 ## GET /images/\{digest\}/sbom/cyclonedx
 
-The same SBOM as one CycloneDX 1.5 JSON document (download). File paths
-are not included. SBOMs over 100 000 components answer `413`; page them
-instead.
+The same selection as one CycloneDX 1.5 JSON document (download), with
+the source, join and `sbomTrust` in `metadata.properties`. File paths are
+not included.
 
 ## GET /vulnerabilities
 
 Every CVE affecting a digest in the inventory, grouped by id, most severe
-first.
+first. It reads a summary the retention pass rebuilds each interval, so it
+costs the same however many findings there are; `computedAt` and
+`staleSeconds` say how fresh it is (`null` until the first rebuild).
 
 | Parameter | Default | Description |
 |---|---|---|
-| `severity`, `fixable` | all | As above. |
-| `namespace` | all | Only workloads in this namespace, and only CVEs that affect one. |
+| `severity` | all | The CVE's highest severity. |
+| `fixable` | all | Whether any source has a fix. |
+| `namespace` | all | Counts for this namespace, and only CVEs that affect one. |
 | `running` | `false` | `true`: only CVEs with at least one running workload. |
 | `limit`, `after` | 100 | As above. |
 
@@ -167,21 +203,26 @@ first.
 {
   "items": [
     {"id": "CVE-2099-1002", "severity": "CRITICAL", "maxScore": 9.8, "fixable": true,
-     "kev": null, "maxEpss": null, "packages": ["openssl"], "images": 3, "workloads": 5, "runningWorkloads": 4,
-     "namespaces": 2, "weakestJoin": "image_id", "inUse": null, "inUseState": "unknown"}
+     "kev": null, "maxEpss": null, "packages": ["openssl"],
+     "sources": ["grype", "trivy-operator"], "images": 3, "workloads": 5,
+     "runningWorkloads": 4, "namespaces": 2, "weakestJoin": "image_id",
+     "inUse": null, "inUseState": "unknown"}
   ],
-  "nextAfter": "5.CVE-2099-1002"
+  "nextAfter": "5.CVE-2099-1002",
+  "computedAt": "2026-09-27T12:00:00",
+  "staleSeconds": 42
 }
 ```
 
-`weakestJoin` is `workload_tag` when any match behind the counts is by tag
-only.
+Counts are distinct images and workloads, so sources agreeing never count
+twice. `weakestJoin` is `workload_tag` when any match behind the counts is
+by tag only.
 
 ## GET /vulnerabilities/\{id\}/exposure
 
 Which images, workloads and namespaces a CVE affects, running or not, and
 what traffic reached them. `window_hours` (default 168, max 720) sets how
-far back ingress counts. Up to 200 images and 200 workload containers are
+far back flows count. Up to 200 images and 200 workload containers are
 listed; `truncated` says when there are more. `404` when no inventory
 digest is affected.
 
@@ -189,15 +230,19 @@ digest is affected.
 {
   "id": "CVE-2099-1002", "severity": "HIGH", "fixable": true, "truncated": false,
   "images": [{"digest": "sha256:1f3a…", "repository": "ghcr.io/example/api", "tags": ["2.4.1"],
-              "source": "trivy-operator", "reportDigest": "sha256:9f86…", "join": "platform_manifest",
-              "severity": "HIGH", "packages": [{"name": "express", "installedVersion": "4.18.2",
-              "fixedVersion": "4.19.2", "severity": "HIGH"}]}],
+              "sources": ["grype", "trivy-operator"], "reportDigests": ["sha256:9f86…"],
+              "join": "platform_manifest", "severity": "HIGH",
+              "packages": [{"name": "express", "installedVersion": "4.18.2",
+                            "fixedVersion": "4.19.2", "severity": "HIGH",
+                            "sources": ["grype", "trivy-operator"]}]}],
   "workloads": [{"clusterId": "primary", "namespace": "shop", "kind": "Deployment", "name": "api",
                  "container": "api", "imageDigest": "sha256:1f3a…", "join": "platform_manifest",
                  "running": true, "lastSeen": "2026-09-27T11:58:00",
-                 "network": {"windowHours": 168, "podsObserved": 3, "ingressFromOtherNamespaces": 1,
-                             "ingressFromUnattributedPeers": 4, "ingressFromPublicIps": 2,
-                             "ingressFromNodes": 3, "exposed": true},
+                 "network": {"windowHours": 168, "podsObserved": 3, "flowsObserved": 412,
+                             "ingressFromOtherNamespaces": 1, "ingressFromUnattributedPeers": 4,
+                             "ingressFromPublicIps": 2, "ingressFromNodes": 3,
+                             "exposed": true,
+                             "exposedVia": ["other_namespace", "unattributed", "public_ip", "node"]},
                  "inUse": null, "inUseState": "unknown"}],
   "namespaces": [{"namespace": "shop", "workloads": 1, "runningWorkloads": 1,
                   "exposedWorkloads": 1, "unknownExposureWorkloads": 0}],
@@ -213,22 +258,29 @@ are generated from, with the peer identity the broker stamps at ingest
 
 1. Take up to 50 of the workload's pods the broker knows (live, or dead
    but not yet pruned), newest first.
-2. Take their rows with direction `INGRESS` inside the window.
-3. Count distinct peers:
+2. Take their rows inside the window, matched on pod name **and**
+   namespace. `flowsObserved` counts them (either direction).
+3. Of the `INGRESS` rows, count distinct peers:
    - `ingressFromOtherNamespaces`: a pod or service peer in another
-     namespace.
+     namespace;
    - `ingressFromUnattributedPeers`: a peer IP the broker never matched to
-     a pod, service or node. That is an external client, or an in-cluster
-     pod it could not identify.
+     a pod, service or node (an external client, or an in-cluster pod it
+     could not identify);
    - `ingressFromPublicIps`: those of the unattributed peers that are
      internet-routable (not RFC 1918, CGNAT, link-local, ULA, loopback or
-     documentation space).
-   - `ingressFromNodes`: node or host-network peers. Kubelet probes land
-     here, so they do not count towards `exposed`.
-4. `exposed` is `true` when either of the first two is non-zero, `false`
-   when neither is, and `null` when the broker knows no pods for the
-   workload.
+     documentation space);
+   - `ingressFromNodes`: node or host-network peers. A NodePort or
+     LoadBalancer Service with `externalTrafficPolicy: Cluster` rewrites
+     outside clients to a node IP, so this counts as possible exposure.
+     Kubelet probes arrive from node IPs too; the broker cannot tell them
+     apart.
+4. `exposed` is `true` when any of those is non-zero, and `exposedVia`
+   names which (`other_namespace`, `unattributed`, `public_ip`, `node`).
+   It is `false` when the pods had flows in the window and none of them
+   was such ingress. It is `null` (unknown) when the broker knows no pods
+   for the workload, or they had no flows in the window: nothing observed
+   is not the same as nothing reachable.
 
 `false` means no such ingress was seen in the window, not that none is
-possible: a Service of type LoadBalancer that nobody called this week
-reads `false`. The direction of a row is as the controller classified it.
+possible: a Service nobody called this week reads `false`. The direction
+of a row is as the controller classified it.
