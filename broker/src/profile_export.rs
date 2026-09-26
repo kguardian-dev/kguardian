@@ -811,6 +811,33 @@ pub(crate) fn probe_sbom_components(conn: &mut PgConnection, key: &Key) -> Resul
     Ok(n)
 }
 
+/// `0 components reported by <source> (<trust>)` for an empty SBOM: the
+/// source reported and listed nothing, which is not the same as a checked,
+/// clean image.
+fn empty_sbom_words(source: &str, trust: Option<&str>) -> String {
+    format!(
+        "0 components reported by {source} ({})",
+        trust.unwrap_or("unknown trust")
+    )
+}
+
+/// The `applyWith` of an SBOM document: where it came from, how far to
+/// trust it, and, when it lists nothing, that it is empty as reported.
+fn sbom_apply_with(source: &str, trust: Option<&str>, components: i32) -> String {
+    let empty = if components == 0 {
+        format!(
+            "; {}, not a checked clean image",
+            empty_sbom_words(source, trust)
+        )
+    } else {
+        String::new()
+    };
+    format!(
+        "not applied: an SBOM from {source} ({}){empty}, for review or your SBOM tooling",
+        trust_words(trust)
+    )
+}
+
 /// What the SBOM's trust level means, for the document's `applyWith`.
 fn trust_words(trust: Option<&str>) -> &'static str {
     match trust {
@@ -936,10 +963,10 @@ pub(crate) fn sbom_docs(
                     mode,
                     content_type: Some("application/vnd.cyclonedx+json"),
                     content: Some(serde_json::to_string_pretty(&doc)? + "\n"),
-                    apply_with: Some(format!(
-                        "not applied: an SBOM from {} ({}), for review or your SBOM tooling",
-                        r.source,
-                        trust_words(r.sbom_trust.as_deref())
+                    apply_with: Some(sbom_apply_with(
+                        &r.source,
+                        r.sbom_trust.as_deref(),
+                        r.item_count,
                     )),
                     image: Some(image),
                 }
@@ -1149,14 +1176,19 @@ pub fn render_bundle_yaml(
             "sbom" => {
                 // Which image, and where the SBOM came from.
                 let im = d.image.as_ref();
+                let source = im.and_then(|i| i.source.as_deref()).unwrap_or("?");
+                let trust = im.and_then(|i| i.sbom_trust.as_deref());
+                let empty = if im.and_then(|i| i.components) == Some(0) {
+                    format!("; {}", empty_sbom_words(source, trust))
+                } else {
+                    String::new()
+                };
                 format!(
-                    "CycloneDX SBOM {} for {} ({}), source {}, trust {}",
+                    "CycloneDX SBOM {} for {} ({}), source {source}, trust {}{empty}",
                     d.file_name,
                     im.map_or("?", |i| i.digest.as_str()),
                     im.map_or(String::new(), |i| i.containers.join(",")),
-                    im.and_then(|i| i.source.as_deref()).unwrap_or("?"),
-                    im.and_then(|i| i.sbom_trust.as_deref())
-                        .unwrap_or("unknown"),
+                    trust.unwrap_or("unknown"),
                 )
             }
             _ => "strategic-merge patch".to_string(),
@@ -1587,6 +1619,51 @@ mod tests {
         assert_eq!(sbom_charge_kib(&manifest), 2 * one);
         let none = plan(&q(Some("vex"), None, None)).unwrap();
         assert_eq!(sbom_charge_kib(&none), 0);
+    }
+
+    /// An SBOM listing nothing says so, with its source and trust, in both
+    /// the applyWith and the YAML header: it is not a checked clean image.
+    #[test]
+    fn an_empty_sbom_says_zero_components_reported_by_its_source() {
+        let a = sbom_apply_with("trivy-operator", Some("scanned"), 0);
+        assert!(
+            a.contains("0 components reported by trivy-operator (scanned)"),
+            "{a}"
+        );
+        assert!(a.contains("not a checked clean image"));
+        assert!(!sbom_apply_with("trivy-operator", Some("scanned"), 3).contains("0 components"));
+
+        let p = wp::build(&key(), &sources(), Utc::now());
+        let pl = plan(&q(Some("sbom"), None, None)).unwrap();
+        let doc = |components| Document {
+            artifact: "sbom",
+            file_name: "sbom-app-aaaaaaaaaaaa.cdx.json".into(),
+            available: true,
+            refused: None,
+            reason: None,
+            api_version: None,
+            kind: None,
+            mode: "audit",
+            content_type: Some("application/vnd.cyclonedx+json"),
+            content: Some("{}\n".into()),
+            apply_with: None,
+            image: Some(ExportImage {
+                containers: vec!["app".into()],
+                digest: format!("sha256:{}", "a".repeat(64)),
+                image_ref: "ghcr.io/example/checkout:1".into(),
+                source: Some("registry".into()),
+                sbom_trust: Some("unverified".into()),
+                scanned_at: None,
+                components: Some(components),
+            }),
+        };
+        let y = render_bundle_yaml(&key(), &p, &pl, &[doc(0)], false);
+        assert!(
+            y.contains("trust unverified; 0 components reported by registry (unverified); not part of the apply stream"),
+            "{y}"
+        );
+        let y = render_bundle_yaml(&key(), &p, &pl, &[doc(2)], false);
+        assert!(!y.contains("0 components reported"));
     }
 
     #[test]
