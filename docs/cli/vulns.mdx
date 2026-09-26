@@ -21,10 +21,34 @@ For one image's findings, or a CI gate, use
 
 <Warning>
 **Unknown is not safe.** Images no source has scanned are unknown and do not
-appear here, so an empty list is not "no vulnerabilities". kguardian cannot
-yet tell which packages a workload loads: "in use" is unknown, so treat every
-finding as potentially reachable.
+appear here, so an empty list is not "no vulnerabilities". An `IN USE` of
+`unknown` means no runtime evidence either way: treat the finding as
+potentially reachable. Tiers rank it as in use.
 </Warning>
+
+## In use and tiers
+
+`IN USE` comes from the exec and shared-library capture: which files each
+container ran, matched to the packages in the image's SBOM.
+
+| Value | Meaning |
+|-------|---------|
+| `executed`, `loaded` | A binary the package owns ran, or a library it owns was mapped (including by `dlopen()`). |
+| `unknown` | No evidence either way: no capture for the container, an interpreted-language package (npm, pip, jar), or no SBOM file list. |
+| `not-observed` | Capture covered the container for the whole window and nothing the package owns ran. Not proof it never will. |
+
+`TIER` ranks findings, most urgent first:
+
+| Tier | Rule |
+|------|------|
+| `P0` | In use, in CISA KEV or EPSS at or above 10%, and exposed. A workload with no observed ingress counts as exposed, so a KEV finding there is P0. |
+| `P1` | In use and critical or high, or the P0 factors without exposure. |
+| `P2` | In use and medium or low, or high with no fix and not exposed. |
+| `Background` | Installed and not observed. |
+
+`-` means the broker predates tiers. The EPSS threshold and exposure
+default are Helm values (`broker.supplychain.tiers`); see the
+[vulnerability API](/api-reference/endpoints/vulnerabilities#risk-tiers).
 
 ## vulns list
 
@@ -38,16 +62,22 @@ rebuilds every few minutes; when it was computed is printed on stderr.
 | `--severity` | string | Only these severities, comma-separated | all |
 | `--fixable` | bool | Only vulnerabilities with a fix (`--fixable=false`: only without) | all |
 | `--running` | bool | Only vulnerabilities with at least one running workload | off |
+| `--tier` | string | Only these tiers, comma-separated: `p0,p1,p2,background` | all |
+| `--in-use` | string | Only these in-use states: `executed,loaded,unknown,installed_not_observed` | all |
+| `--kev` | bool | Only KEV-listed (`--kev=false`: only those a source says are not; unknown is excluded either way) | all |
+| `--epss-min` | float | Only EPSS at or above this probability (0-1) | off |
 | `--limit`, `--after` | | Page size (max 500) and cursor | `100` |
 | `-o, --output` | string | `table`, `json` or `yaml` | `table` |
 
 ```
-SEVERITY  ID              SCORE  FIXABLE  KEV      IMAGES  WORKLOADS  RUNNING  NAMESPACES  JOIN               PACKAGES
-CRITICAL  CVE-2099-10001  9.8    yes      yes      1       2          2        2           platform_manifest  fastparse
-HIGH      CVE-2099-10003  7.5    no       unknown  2       3          3        2           platform_manifest  libexample
-MEDIUM    CVE-2099-10002  6.1    yes      unknown  1       2          2        2           platform_manifest  tinyrouter
-LOW       CVE-2099-20001  3.1    yes      unknown  1       1          1        1           image_id           yamlish
+TIER  SEVERITY  ID              SCORE  FIXABLE  KEV      IN USE   IMAGES  WORKLOADS  RUNNING  EXPOSED  NAMESPACES  JOIN               PACKAGES
+P0    HIGH      CVE-2099-30001  7.5    yes      yes      loaded   1       2          2        1        1           image_id           libfoo1
+P1    HIGH      CVE-2099-10003  7.5    no       unknown  unknown  2       3          3        1        2           platform_manifest  libexample
 ```
+
+A CVE's tier is its most urgent over every affected workload container in
+scope, and `IN USE` its strongest state. `EXPOSED` counts workloads with
+observed exposure.
 
 Counts are distinct images and workloads, so two sources reporting the same
 CVE never count twice. `KEV` `unknown` means no source said either way.
@@ -74,13 +104,13 @@ Images:
   sha256:000000000000  ghcr.io/example/ledger      1.9.4  libexample  1.2.3      -      image_id
 
 Workloads:
-  NAMESPACE  WORKLOAD                 CONTAINER  RUNNING  EXPOSED  VIA                                     INGRESS FLOWS
-  billing    Deployment/catalog-sync  sync       true     unknown  -                                       0
-  billing    Deployment/ledger        api        true     no       -                                       1
-  shop       Deployment/storefront    web        true     yes      other_namespace,unattributed,public_ip  2
+  NAMESPACE  WORKLOAD                 CONTAINER  RUNNING  IN USE   EXPOSED  VIA                                     INGRESS FLOWS
+  billing    Deployment/catalog-sync  sync       true     unknown  unknown  -                                       0
+  billing    Deployment/ledger        api        true     unknown  no       -                                       1
+  shop       Deployment/storefront    web        true     unknown  yes      other_namespace,unattributed,public_ip  2
 
 Exposure window: 168h of observed traffic. unknown = no ingress observed (egress alone does not count; inbound UDP is not captured), never "not exposed".
-In use: unknown. kguardian cannot yet tell whether the vulnerable package is loaded; do not treat it as unreachable.
+In use: unknown. IN USE is from observed exec and shared-library capture: unknown is potentially reachable, not-observed only means not seen in the window; never treat the package as unreachable.
 ```
 
 `EXPOSED` is observed traffic, not reachability analysis:
@@ -106,6 +136,9 @@ need a token with the `read` scope.
 ```bash
 # Critical and high, running somewhere in production
 kubectl kguardian vulns list -n production --severity critical,high --running
+
+# What to fix first across the cluster
+kubectl kguardian vulns list --tier p0
 
 # Where a CVE runs, over the last day of traffic
 kubectl kguardian vulns exposure CVE-2024-3094 --window-hours 24

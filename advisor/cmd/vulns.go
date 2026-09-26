@@ -81,6 +81,136 @@ func failOnSeverities(threshold string) (string, error) {
 	return strings.Join(append(append([]string{}, severityOrder[:i+1]...), "UNKNOWN"), ","), nil
 }
 
+// tierOrder ranks broker tiers, most urgent first.
+var tierOrder = []string{"P0", "P1", "P2", "Background"}
+
+// tierGatePrefix marks a --fail-on gate on tiers rather than severities.
+const tierGatePrefix = "tier:"
+
+// failOnGate is the gate filter for --fail-on: a severity threshold (see
+// failOnSeverities) or a tier (p0, p1, p2: that tier and every more urgent
+// one, as "tier:P0,P1"). Background is never a gate.
+func failOnGate(threshold string) (string, error) {
+	t := strings.TrimSpace(threshold)
+	for i, tier := range tierOrder[:3] {
+		if strings.EqualFold(t, tier) {
+			return tierGatePrefix + strings.Join(tierOrder[:i+1], ","), nil
+		}
+	}
+	g, err := failOnSeverities(t)
+	if err != nil {
+		return "", fmt.Errorf("invalid --fail-on %q: use critical, high, medium, low, p0, p1 or p2", threshold)
+	}
+	return g, nil
+}
+
+// parseTierList validates a comma-separated tier list (case-insensitive)
+// into the broker's spelling.
+func parseTierList(raw string) (string, error) {
+	return parseEnumList(raw, tierOrder, "--tier", "P0, P1, P2 or Background")
+}
+
+var inUseStates = []string{"executed", "loaded", "unknown", "installed_not_observed"}
+
+// parseInUseList validates a comma-separated in-use state list.
+func parseInUseList(raw string) (string, error) {
+	return parseEnumList(raw, inUseStates, "--in-use", strings.Join(inUseStates, ", "))
+}
+
+func parseEnumList(raw string, allowed []string, flag, want string) (string, error) {
+	var out []string
+	seen := map[string]bool{}
+	for _, p := range strings.Split(raw, ",") {
+		p = strings.TrimSpace(p)
+		if p == "" {
+			continue
+		}
+		match := ""
+		for _, a := range allowed {
+			if strings.EqualFold(a, p) {
+				match = a
+			}
+		}
+		if match == "" {
+			return "", fmt.Errorf("invalid %s %q: use %s", flag, p, want)
+		}
+		if !seen[match] {
+			seen[match] = true
+			out = append(out, match)
+		}
+	}
+	return strings.Join(out, ","), nil
+}
+
+// optEpss is --epss-min when given (a probability, 0-1).
+func optEpss(cmd *cobra.Command, name string, v float64) (*float64, error) {
+	if !cmd.Flags().Changed(name) {
+		return nil, nil
+	}
+	if v < 0 || v > 1 {
+		return nil, fmt.Errorf("--%s must be between 0 and 1 (e.g. 0.1 for 10%%)", name)
+	}
+	return &v, nil
+}
+
+// riskFilters holds the flags shared by `images vulns` and `vulns list`.
+type riskFilters struct {
+	kev     bool
+	epssMin float64
+	inUse   string
+	tier    string
+}
+
+func (f *riskFilters) register(cmd *cobra.Command, noun string) {
+	cmd.Flags().BoolVar(&f.kev, "kev", false, "Only "+noun+" a source lists in CISA KEV (--kev=false: only those a source says are not; unknown is excluded either way)")
+	cmd.Flags().Float64Var(&f.epssMin, "epss-min", 0, "Only "+noun+" with EPSS at or above this probability (0-1); unknown EPSS is excluded")
+	cmd.Flags().StringVar(&f.inUse, "in-use", "", "Only these in-use states, comma-separated (executed,loaded,unknown,installed_not_observed)")
+	cmd.Flags().StringVar(&f.tier, "tier", "", "Only these risk tiers, comma-separated (P0,P1,P2,Background)")
+}
+
+// resolve validates the flags into broker filter values.
+func (f *riskFilters) resolve(cmd *cobra.Command) (kev *bool, epss *float64, inUse, tier string, err error) {
+	kev = optBool(cmd, "kev", f.kev)
+	if epss, err = optEpss(cmd, "epss-min", f.epssMin); err != nil {
+		return
+	}
+	if inUse, err = parseInUseList(f.inUse); err != nil {
+		return
+	}
+	tier, err = parseTierList(f.tier)
+	return
+}
+
+// fmtInUse renders an in-use state; empty (a broker without in-use data)
+// and unknown both print "unknown".
+func fmtInUse(state string) string {
+	switch state {
+	case "executed", "loaded":
+		return state
+	case "installed_not_observed":
+		return "not-observed"
+	default:
+		return "unknown"
+	}
+}
+
+func orDashStr(s string) string {
+	if s == "" {
+		return "-"
+	}
+	return s
+}
+
+// inUseLegend explains IN USE and TIER under a table.
+const inUseLegend = `
+IN USE is from observed exec and shared-library capture: executed/loaded = a file the package owns ran;
+unknown = no evidence either way (treat as potentially reachable, never as unused); not-observed = not seen
+over a covered window, which is not proof the code can never run.
+TIER: P0 = in use + (KEV or high EPSS) + exposed (no observed ingress counts as exposed, so a KEV finding
+there is P0); P1 = in use + critical/high, or P0 factors without exposure; P2 = in use + medium/low, or
+high with no fix and not exposed; Background = installed, not observed. "-" = the broker has no tiers.
+`
+
 func parseDigestArg(raw string) (string, error) {
 	d := strings.ToLower(strings.TrimSpace(raw))
 	if !strings.HasPrefix(d, "sha256:") && !strings.HasPrefix(d, "sha512:") {
@@ -135,6 +265,7 @@ var (
 	imageVulnsAfter    string
 	imageVulnsFailOn   string
 	imageVulnsOutput   string
+	imageVulnsRisk     riskFilters
 )
 
 var imagesVulnsCmd = &cobra.Command{
@@ -145,21 +276,32 @@ sources (Trivy Operator, Grype), most severe first.
 
 "No vulnerability data" means no source has reported on the image. That is
 unknown, not clean. KEV "unknown" means no source said either way (Trivy never
-does). kguardian cannot yet tell which packages a workload loads, so treat
-every finding as potentially reachable.
+does).
 
-CI gate: --fail-on <severity> exits
-  0  no finding at or above the severity
-  1  at least one finding at or above it (findings of UNKNOWN severity count)
+IN USE comes from observed exec and shared-library capture: executed or
+loaded means a file the package owns ran in some workload container; unknown
+means no evidence either way and must be treated as potentially reachable;
+not-observed means capture covered the container for the whole window and
+nothing the package owns ran. TIER ranks findings: P0 (in use, KEV or high
+EPSS, and exposed; a workload with no observed ingress counts as exposed),
+P1, P2, Background. See the table legend.
+
+CI gate: --fail-on <severity> or --fail-on <tier> (p0, p1, p2) exits
+  0  no finding at or above the severity or tier
+  1  at least one finding at or above it (findings of UNKNOWN severity count;
+     tiers already rank unknown in-use as in use)
   2  the check could not run: broker unreachable, port-forward or token
-     failure, a broker error, or an invalid flag
+     failure, a broker error, an invalid flag, or --fail-on <tier> against a
+     broker that does not report tiers
   3  no vulnerability data for the image: unknown is never a pass
 Each result is printed as a "gate:" line on stderr.
 
 Examples:
   kubectl kguardian images vulns sha256:0123...
   kubectl kguardian images vulns sha256:0123... --severity critical,high --fixable
-  kubectl kguardian images vulns sha256:0123... --fail-on high -o json`,
+  kubectl kguardian images vulns sha256:0123... --tier p0,p1
+  kubectl kguardian images vulns sha256:0123... --fail-on high -o json
+  kubectl kguardian images vulns sha256:0123... --fail-on p0`,
 	Args: cobra.ExactArgs(1),
 	RunE: runImagesVulns,
 }
@@ -206,11 +348,15 @@ func imagesVulns(cmd *cobra.Command, args []string) error {
 	}
 	gate := ""
 	if imageVulnsFailOn != "" {
-		if gate, err = failOnSeverities(imageVulnsFailOn); err != nil {
+		if gate, err = failOnGate(imageVulnsFailOn); err != nil {
 			return err
 		}
 	}
 	src, err := parseSourceFlag(imageVulnsSource)
+	if err != nil {
+		return err
+	}
+	kev, epss, inUse, tier, err := imageVulnsRisk.resolve(cmd)
 	if err != nil {
 		return err
 	}
@@ -219,13 +365,14 @@ func imagesVulns(cmd *cobra.Command, args []string) error {
 		return err
 	}
 	defer closeFn()
-	opts := api.ImageVulnsOptions{Severity: sev, Fixable: optBool(cmd, "fixable", imageVulnsFixable), Source: src, Limit: imageVulnsLimit, After: imageVulnsAfter}
+	opts := api.ImageVulnsOptions{Severity: sev, Fixable: optBool(cmd, "fixable", imageVulnsFixable), Kev: kev, EpssMin: epss,
+		InUse: inUse, Tier: tier, Source: src, Limit: imageVulnsLimit, After: imageVulnsAfter}
 	return fetchAndRenderImageVulns(digest, opts, gate, strings.ToUpper(imageVulnsFailOn), output, os.Stdout, os.Stderr)
 }
 
 // fetchAndRenderImageVulns renders the page asked for, then, with a gate,
-// runs its own query (threshold severities, limit 1) so the gate sees
-// every page, not just the one shown.
+// runs its own query (threshold severities or tiers, limit 1) so the gate
+// sees every page, not just the one shown.
 func fetchAndRenderImageVulns(digest string, opts api.ImageVulnsOptions, gate, threshold, output string, w, errw io.Writer) error {
 	err := renderAndGate(digest, opts, gate, threshold, output, w, errw)
 	if gate != "" {
@@ -252,13 +399,27 @@ func renderAndGate(digest string, opts api.ImageVulnsOptions, gate, threshold, o
 	if len(page.Reports) == 0 {
 		return &gateError{code: exitGateUnknown, msg: fmt.Sprintf("gate: no vulnerability data for %s; unknown is not a pass (exit %d)", digest, exitGateUnknown)}
 	}
-	g, _, err := api.GetImageVulns(digest, api.ImageVulnsOptions{Severity: gate, Source: opts.Source, Limit: 1})
+	gq := api.ImageVulnsOptions{Severity: gate, Source: opts.Source, Limit: 1}
+	tierGate := strings.HasPrefix(gate, tierGatePrefix)
+	if tierGate {
+		gq = api.ImageVulnsOptions{Tier: strings.TrimPrefix(gate, tierGatePrefix), Source: opts.Source, Limit: 1}
+	}
+	g, _, err := api.GetImageVulns(digest, gq)
 	if err != nil {
 		return brokerReadErr("evaluating --fail-on", err)
 	}
 	if len(g.Items) > 0 {
 		f := g.Items[0]
-		return &gateError{code: exitGateFindings, msg: fmt.Sprintf("gate: %s has findings at or above %s (e.g. %s %s in %s) (exit %d)", digest, threshold, f.Severity, f.ID, f.Package.Name, exitGateFindings)}
+		if tierGate && f.Tier == "" {
+			// A broker without tiers ignores the filter and answers with
+			// any finding: that is not a result.
+			return &gateError{code: exitGateNoCheck, msg: fmt.Sprintf("gate: could not check (exit %d): the broker does not report risk tiers; upgrade it or gate on a severity", exitGateNoCheck)}
+		}
+		level := f.Severity
+		if tierGate {
+			level = f.Tier + " " + f.Severity
+		}
+		return &gateError{code: exitGateFindings, msg: fmt.Sprintf("gate: %s has findings at or above %s (e.g. %s %s in %s) (exit %d)", digest, threshold, level, f.ID, f.Package.Name, exitGateFindings)}
 	}
 	_, err = fmt.Fprintf(errw, "gate: no findings at or above %s\n", threshold)
 	return err
@@ -286,14 +447,14 @@ func renderImageVulnsTable(w, errw io.Writer, p *api.ImageVulnsPage) error {
 		out.WriteString("No findings match.\n")
 	} else {
 		tw = tabwriter.NewWriter(&out, 0, 8, 2, ' ', 0)
-		_, _ = fmt.Fprintln(tw, "SEVERITY\tID\tPACKAGE\tINSTALLED\tFIXED\tSCORE\tKEV\tSOURCES")
+		_, _ = fmt.Fprintln(tw, "TIER\tSEVERITY\tID\tPACKAGE\tINSTALLED\tFIXED\tSCORE\tKEV\tIN USE\tSOURCES")
 		for _, f := range p.Items {
 			fixed := fmtFixed(f.FixedVersions)
-			_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n", f.Severity, cell(f.ID), cell(f.Package.Name), cell(f.InstalledVersion),
-				cell(fixed), fmtFloat(f.Score), fmtKev(f.Kev), strings.Join(f.Sources, ","))
+			_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n", orDashStr(f.Tier), f.Severity, cell(f.ID), cell(f.Package.Name),
+				cell(f.InstalledVersion), cell(fixed), fmtFloat(f.Score), fmtKev(f.Kev), fmtInUse(f.InUseState), strings.Join(f.Sources, ","))
 		}
 		_ = tw.Flush()
-		out.WriteString("\nIn use: unknown. kguardian cannot yet tell which packages load; treat every finding as potentially reachable.\n")
+		out.WriteString(inUseLegend)
 	}
 	if _, err := w.Write(out.Bytes()); err != nil {
 		return err
@@ -455,9 +616,10 @@ workloads run.
              observed network exposure
 
 Only images a source has reported on are counted; images never scanned are
-unknown and absent. kguardian cannot yet tell which packages a workload
-loads ("in use" is unknown), so treat every finding as potentially
-reachable. kguardian reports; it never blocks or applies anything.`,
+unknown and absent. IN USE and TIER come from observed exec and
+shared-library capture and observed ingress (see 'images vulns --help'); an
+unknown in-use state is treated as potentially reachable and ranked as in
+use. kguardian reports; it never blocks or applies anything.`,
 }
 
 var (
@@ -467,6 +629,7 @@ var (
 	vulnsListLimit    int
 	vulnsListAfter    string
 	vulnsListOutput   string
+	vulnsListRisk     riskFilters
 	vulnsExposureWin  int
 	vulnsExposureOut  string
 )
@@ -475,8 +638,9 @@ var vulnsListCmd = &cobra.Command{
 	Use:   "list",
 	Short: "List vulnerabilities affecting inventory images",
 	Long: `List every vulnerability affecting an image in the inventory, grouped by id,
-most severe first, with how many images, workloads (running) and namespaces
-it affects. It reads a summary the broker rebuilds every few minutes; the
+most severe first, with its risk tier (the most urgent over every affected
+workload container), the strongest in-use state, and how many images,
+workloads (running) and namespaces it affects. It reads a summary the broker rebuilds every few minutes; the
 freshness is printed on stderr.
 
 KEV "unknown" means no source said either way. JOIN "workload_tag" means some
@@ -484,7 +648,8 @@ matches are by tag only (the tag may have moved since the scan).
 
 Examples:
   kubectl kguardian vulns list
-  kubectl kguardian vulns list -n payments --severity critical,high --running`,
+  kubectl kguardian vulns list -n payments --severity critical,high --running
+  kubectl kguardian vulns list --tier p0`,
 	Args: cobra.NoArgs,
 	RunE: runVulnsList,
 }
@@ -507,7 +672,9 @@ EXPOSED is observed traffic, not reachability analysis:
 FIXED lists every fixed version the sources give, in source order; none is
 picked because text order is not version order.
 
-IN USE is unknown for now: never read a finding as unreachable because of it.
+IN USE is per workload container, from observed exec and shared-library
+capture: unknown is potentially reachable, and not-observed only means not
+seen in the window. Never read a finding as unreachable because of it.
 
 Examples:
   kubectl kguardian vulns exposure CVE-2024-3094
@@ -523,7 +690,8 @@ func init() {
 	imagesVulnsCmd.Flags().StringVar(&imageVulnsSource, "source", "", "Only this source's report: trivy-operator, grype or registry")
 	imagesVulnsCmd.Flags().IntVar(&imageVulnsLimit, "limit", 100, "Page size (the broker caps it at 500)")
 	imagesVulnsCmd.Flags().StringVar(&imageVulnsAfter, "after", "", "Cursor printed by the previous page")
-	imagesVulnsCmd.Flags().StringVar(&imageVulnsFailOn, "fail-on", "", "CI gate (critical, high, medium, low): exit 1 on any finding at or above it, 2 if the check could not run, 3 if the image has no vulnerability data")
+	imagesVulnsCmd.Flags().StringVar(&imageVulnsFailOn, "fail-on", "", "CI gate (critical, high, medium, low, or a tier: p0, p1, p2): exit 1 on any finding at or above it, 2 if the check could not run, 3 if the image has no vulnerability data")
+	imageVulnsRisk.register(imagesVulnsCmd, "findings")
 	imagesVulnsCmd.Flags().StringVarP(&imageVulnsOutput, "output", "o", "table", "Output format: table, json or yaml")
 
 	imagesSbomCmd.Flags().StringVar(&imageSbomSource, "source", "", "Which SBOM: trivy-operator, grype or registry (default: the broker's choice)")
@@ -536,6 +704,7 @@ func init() {
 	vulnsListCmd.Flags().StringVar(&vulnsListSeverity, "severity", "", "Only these severities, comma-separated")
 	vulnsListCmd.Flags().BoolVar(&vulnsListFixable, "fixable", false, "Only vulnerabilities with a fix (--fixable=false: only without)")
 	vulnsListCmd.Flags().BoolVar(&vulnsListRunning, "running", false, "Only vulnerabilities with at least one running workload")
+	vulnsListRisk.register(vulnsListCmd, "vulnerabilities")
 	vulnsListCmd.Flags().IntVar(&vulnsListLimit, "limit", 100, "Page size (the broker caps it at 500)")
 	vulnsListCmd.Flags().StringVar(&vulnsListAfter, "after", "", "Cursor printed by the previous page")
 	vulnsListCmd.Flags().StringVarP(&vulnsListOutput, "output", "o", "table", "Output format: table, json or yaml")
@@ -552,13 +721,17 @@ func runVulnsList(cmd *cobra.Command, _ []string) error {
 	if err != nil {
 		return err
 	}
+	kev, epss, inUse, tier, err := vulnsListRisk.resolve(cmd)
+	if err != nil {
+		return err
+	}
 	closeFn, err := connectBroker(cmd)
 	if err != nil {
 		return err
 	}
 	defer closeFn()
 	opts := api.VulnsListOptions{Namespace: explicitNamespace(cmd), Severity: sev, Fixable: optBool(cmd, "fixable", vulnsListFixable),
-		Running: vulnsListRunning, Limit: vulnsListLimit, After: vulnsListAfter}
+		Kev: kev, EpssMin: epss, InUse: inUse, Tier: tier, Running: vulnsListRunning, Limit: vulnsListLimit, After: vulnsListAfter}
 	return fetchAndRenderVulns(opts, output, os.Stdout, os.Stderr)
 }
 
@@ -584,16 +757,18 @@ func fetchAndRenderVulns(opts api.VulnsListOptions, output string, w, errw io.Wr
 		out.WriteString("No vulnerabilities match among images with vulnerability data. Images no source has scanned are unknown and not listed.\n")
 	} else {
 		tw := tabwriter.NewWriter(&out, 0, 8, 2, ' ', 0)
-		_, _ = fmt.Fprintln(tw, "SEVERITY\tID\tSCORE\tFIXABLE\tKEV\tIMAGES\tWORKLOADS\tRUNNING\tNAMESPACES\tJOIN\tPACKAGES")
+		_, _ = fmt.Fprintln(tw, "TIER\tSEVERITY\tID\tSCORE\tFIXABLE\tKEV\tIN USE\tIMAGES\tWORKLOADS\tRUNNING\tEXPOSED\tNAMESPACES\tJOIN\tPACKAGES")
 		for _, v := range page.Items {
 			fix := "no"
 			if v.Fixable {
 				fix = "yes"
 			}
-			_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%d\t%d\t%d\t%d\t%s\t%s\n", v.Severity, cell(v.ID), fmtFloat(v.MaxScore), fix, fmtKev(v.Kev),
-				v.Images, v.Workloads, v.RunningWorkloads, v.Namespaces, v.WeakestJoin, cell(strings.Join(v.Packages, ",")))
+			_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%d\t%d\t%d\t%d\t%d\t%s\t%s\n", orDashStr(v.Tier), v.Severity, cell(v.ID), fmtFloat(v.MaxScore),
+				fix, fmtKev(v.Kev), fmtInUse(v.InUseState), v.Images, v.Workloads, v.RunningWorkloads, v.ExposedWorkloads, v.Namespaces, v.WeakestJoin,
+				cell(strings.Join(v.Packages, ",")))
 		}
 		_ = tw.Flush()
+		out.WriteString(inUseLegend)
 	}
 	if _, err := w.Write(out.Bytes()); err != nil {
 		return err
@@ -678,21 +853,21 @@ func fetchAndRenderExposure(id string, window int, output string, w io.Writer) e
 		out.WriteString("  none recorded\n")
 	} else {
 		tw = tabwriter.NewWriter(&out, 0, 8, 2, ' ', 0)
-		_, _ = fmt.Fprintln(tw, "  NAMESPACE\tWORKLOAD\tCONTAINER\tRUNNING\tEXPOSED\tVIA\tINGRESS FLOWS")
+		_, _ = fmt.Fprintln(tw, "  NAMESPACE\tWORKLOAD\tCONTAINER\tRUNNING\tIN USE\tEXPOSED\tVIA\tINGRESS FLOWS")
 		for _, wl := range e.Workloads {
 			via := "-"
 			if len(wl.Network.ExposedVia) > 0 {
 				via = strings.Join(wl.Network.ExposedVia, ",")
 			}
-			_, _ = fmt.Fprintf(tw, "  %s\t%s/%s\t%s\t%t\t%s\t%s\t%d\n", wl.Namespace, wl.Kind, wl.Name, wl.Container, wl.Running,
-				fmtExposed(wl.Network.Exposed), via, wl.Network.IngressFlowsObserved)
+			_, _ = fmt.Fprintf(tw, "  %s\t%s/%s\t%s\t%t\t%s\t%s\t%s\t%d\n", wl.Namespace, wl.Kind, wl.Name, wl.Container, wl.Running,
+				fmtInUse(wl.InUseState), fmtExposed(wl.Network.Exposed), via, wl.Network.IngressFlowsObserved)
 		}
 		_ = tw.Flush()
 		if len(e.Workloads) > 0 {
 			fmt.Fprintf(&out, "\nExposure window: %dh of observed traffic. unknown = no ingress observed (egress alone does not count; inbound UDP is not captured), never \"not exposed\".\n", e.Workloads[0].Network.WindowHours)
 		}
 	}
-	out.WriteString("In use: unknown. kguardian cannot yet tell whether the vulnerable package is loaded; do not treat it as unreachable.\n")
+	fmt.Fprintf(&out, "In use: %s. IN USE is from observed exec and shared-library capture: unknown is potentially reachable, not-observed only means not seen in the window; never treat the package as unreachable.\n", fmtInUse(e.InUseState))
 	if e.Truncated {
 		out.WriteString("More images or workloads are affected than the broker lists (200 each).\n")
 	}

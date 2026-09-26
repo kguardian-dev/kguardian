@@ -88,7 +88,11 @@ does not scan.
 | `--severity` | string | Only these severities, comma-separated: `critical,high,medium,low,none,unknown` | all |
 | `--fixable` | bool | Only findings some source has a fix for (`--fixable=false`: only without) | all |
 | `--source` | string | Only one source's report: `trivy-operator`, `grype` or `registry` | all |
-| `--fail-on` | string | CI gate, see below: `critical`, `high`, `medium` or `low` | off |
+| `--tier` | string | Only these tiers, comma-separated: `p0,p1,p2,background` | all |
+| `--in-use` | string | Only these in-use states: `executed,loaded,unknown,installed_not_observed` | all |
+| `--kev` | bool | Only KEV-listed (`--kev=false`: only those a source says are not) | all |
+| `--epss-min` | float | Only EPSS at or above this probability (0-1) | off |
+| `--fail-on` | string | CI gate, see below: `critical`, `high`, `medium`, `low`, or a tier `p0`, `p1`, `p2` | off |
 | `--limit`, `--after` | | Page size (max 500) and cursor | `100` |
 | `-o, --output` | string | `table`, `json` or `yaml` | `table` |
 
@@ -97,12 +101,17 @@ SOURCE          SCANNER       SCANNED              JOIN               SBOM TRUST
 grype           grype 0.87.0  2026-09-26T02:31:28  platform_manifest  unverified  1
 trivy-operator  Trivy 0.58.1  2026-09-26T02:31:28  platform_manifest  scanned     3
 
-SEVERITY  ID              PACKAGE     INSTALLED  FIXED            SCORE  KEV      SOURCES
-CRITICAL  CVE-2099-10001  fastparse   2.1.0      2.1.10 or 2.1.4  9.8    yes      grype,trivy-operator
-HIGH      CVE-2099-10003  libexample  1.2.3      -                7.5    unknown  trivy-operator
-MEDIUM    CVE-2099-10002  tinyrouter  4.18.2     4.19.2           6.1    unknown  trivy-operator
+TIER        SEVERITY  ID              PACKAGE     INSTALLED  FIXED   SCORE  KEV      IN USE        SOURCES
+P0          HIGH      CVE-2099-30001  libfoo1     1.2.3-1    1.2.4   7.5    yes      loaded        trivy-operator
+P1          HIGH      CVE-2099-10003  libexample  1.2.3      -       7.5    unknown  unknown       trivy-operator
+Background  MEDIUM    CVE-2099-10002  tinyrouter  4.18.2     4.19.2  6.1    unknown  not-observed  trivy-operator
 
-In use: unknown. kguardian cannot yet tell which packages load; treat every finding as potentially reachable.
+IN USE is from observed exec and shared-library capture: executed/loaded = a file the package owns ran;
+unknown = no evidence either way (treat as potentially reachable, never as unused); not-observed = not seen
+over a covered window, which is not proof the code can never run.
+TIER: P0 = in use + (KEV or high EPSS) + exposed (no observed ingress counts as exposed, so a KEV finding
+there is P0); P1 = in use + critical/high, or P0 factors without exposure; P2 = in use + medium/low, or
+high with no fix and not exposed; Background = installed, not observed. "-" = the broker has no tiers.
 ```
 
 - **No vulnerability data** means no source has reported on the image.
@@ -113,14 +122,17 @@ In use: unknown. kguardian cannot yet tell which packages load; treat every find
   KEV, so this is not "not exploited".
 - **JOIN** says how the report was matched to what runs: `image_id` and
   `platform_manifest` are exact, `workload_tag` is by tag only.
+- **IN USE** and **TIER** are explained in [vulns](/cli/vulns#in-use-and-tiers).
+  `unknown` is never "not used", and a KEV finding in a workload with no
+  observed ingress is P0.
 
 ### CI gate: `--fail-on`
 
 | Exit | Meaning |
 |------|---------|
-| `0` | No finding at or above the severity |
-| `1` | At least one finding at or above it. Findings whose severity no source knows (`UNKNOWN`) count. |
-| `2` | The check could not run: the broker is unreachable, the port-forward or token failed, the broker returned an error, or a flag was invalid. |
+| `0` | No finding at or above the severity or tier |
+| `1` | At least one finding at or above it. Findings whose severity no source knows (`UNKNOWN`) count; tiers already rank unknown in-use as in use. |
+| `2` | The check could not run: the broker is unreachable, the port-forward or token failed, the broker returned an error, a flag was invalid, or `--fail-on p0/p1/p2` ran against a broker that does not report tiers. |
 | `3` | No vulnerability data for the image. Unknown is never a pass. |
 
 Every result prints a `gate:` line on stderr, so a pipeline can tell
@@ -130,6 +142,7 @@ query, so it sees every page, not only the one printed.
 
 ```bash
 kubectl kguardian images vulns "$DIGEST" --fail-on high -o json > vulns.json
+kubectl kguardian images vulns "$DIGEST" --fail-on p0   # P0 = in use, KEV or high EPSS, exposed
 ```
 
 ## images sbom

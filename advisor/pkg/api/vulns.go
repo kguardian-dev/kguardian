@@ -16,8 +16,9 @@ import (
 // SBOMs, keyed by image digest. kguardian reports these; it never scans.
 //
 // null means unknown throughout: an image with no report has no data (not
-// "no vulnerabilities"), kev/epss null means no source said, and inUse is
-// null until kguardian can tell which packages a workload loads.
+// "no vulnerabilities"), kev/epss null means no source said, and inUse
+// null (inUseState "unknown") means no runtime evidence either way. Tier
+// and InUseState are empty from a broker that predates them.
 
 // VulnReport is one source's report on an image.
 type VulnReport struct {
@@ -56,16 +57,33 @@ type VulnFinding struct {
 	InstalledVersion string      `json:"installedVersion"`
 	// FixedVersions lists every distinct fixed version the sources give,
 	// in source order (not version order: "10.1" sorts before "9.2").
-	FixedVersions []string `json:"fixedVersions"`
-	Fixable       bool     `json:"fixable"`
-	Severity      string   `json:"severity"`
-	Score         *float64 `json:"score"`
-	Title         *string  `json:"title"`
-	Kev           *bool    `json:"kev"`
-	Epss          *float64 `json:"epss"`
-	Sources       []string `json:"sources"`
-	InUse         *bool    `json:"inUse"`
-	InUseState    string   `json:"inUseState"`
+	FixedVersions []string     `json:"fixedVersions"`
+	Fixable       bool         `json:"fixable"`
+	Severity      string       `json:"severity"`
+	Score         *float64     `json:"score"`
+	Title         *string      `json:"title"`
+	Kev           *bool        `json:"kev"`
+	Epss          *float64     `json:"epss"`
+	Sources       []string     `json:"sources"`
+	InUse         *bool        `json:"inUse"`
+	InUseState    string       `json:"inUseState"`
+	InUseDetail   *InUseDetail `json:"inUseDetail"`
+	// Tier is P0, P1, P2 or Background; TierFactors say what produced it.
+	Tier        string   `json:"tier"`
+	TierFactors []string `json:"tierFactors"`
+}
+
+// InUseDetail is the evidence behind a finding's in-use state.
+type InUseDetail struct {
+	State string `json:"state"`
+	// Reason is set for unknown: no_runtime_data, capture_gap,
+	// host_network, language_package, no_package_files.
+	Reason        *string `json:"reason"`
+	ObservedSince *string `json:"observedSince"`
+	WindowHours   int64   `json:"windowHours"`
+	Containers    int64   `json:"containers"`
+	// Coverage is file, static_binary or interpreted.
+	Coverage string `json:"coverage"`
 }
 
 // ImageVulnsPage is GET /images/{digest}/vulnerabilities.
@@ -81,6 +99,10 @@ type ImageVulnsPage struct {
 type ImageVulnsOptions struct {
 	Severity string
 	Fixable  *bool
+	Kev      *bool
+	EpssMin  *float64
+	InUse    string // comma-separated in-use states
+	Tier     string // comma-separated tiers
 	Source   string
 	Limit    int
 	After    string
@@ -102,6 +124,14 @@ type CveSummary struct {
 	Namespaces       int64    `json:"namespaces"`
 	WeakestJoin      string   `json:"weakestJoin"`
 	InUse            *bool    `json:"inUse"`
+	InUseState       string   `json:"inUseState"`
+	Tier             string   `json:"tier"`
+	// Workloads by in-use state of the affected packages, and exposed.
+	ExecutedWorkloads    int64 `json:"executedWorkloads"`
+	LoadedWorkloads      int64 `json:"loadedWorkloads"`
+	UnknownWorkloads     int64 `json:"unknownWorkloads"`
+	NotObservedWorkloads int64 `json:"notObservedWorkloads"`
+	ExposedWorkloads     int64 `json:"exposedWorkloads"`
 }
 
 // CvePage is GET /vulnerabilities. ComputedAt nil = the summary has not
@@ -118,6 +148,10 @@ type VulnsListOptions struct {
 	Namespace string
 	Severity  string
 	Fixable   *bool
+	Kev       *bool
+	EpssMin   *float64
+	InUse     string
+	Tier      string
 	Running   bool
 	Limit     int
 	After     string
@@ -169,6 +203,7 @@ type ExposedWorkload struct {
 	LastSeen    string          `json:"lastSeen"`
 	Network     NetworkExposure `json:"network"`
 	InUse       *bool           `json:"inUse"`
+	InUseState  string          `json:"inUseState"`
 }
 
 // NamespaceExposure summarises one namespace.
@@ -190,6 +225,7 @@ type Exposure struct {
 	Namespaces []NamespaceExposure `json:"namespaces"`
 	Truncated  bool                `json:"truncated"`
 	InUse      *bool               `json:"inUse"`
+	InUseState string              `json:"inUseState"`
 }
 
 // SbomComponent is one SBOM component.
@@ -256,6 +292,20 @@ func boolQuery(q url.Values, key string, v *bool) {
 	}
 }
 
+// riskQuery sets the kev / epss_min / in_use / tier filters.
+func riskQuery(q url.Values, kev *bool, epssMin *float64, inUse, tier string) {
+	boolQuery(q, "kev", kev)
+	if epssMin != nil {
+		q.Set("epss_min", strconv.FormatFloat(*epssMin, 'f', -1, 64))
+	}
+	if inUse != "" {
+		q.Set("in_use", inUse)
+	}
+	if tier != "" {
+		q.Set("tier", tier)
+	}
+}
+
 func withQuery(path string, q url.Values) string {
 	if enc := q.Encode(); enc != "" {
 		return path + "?" + enc
@@ -277,6 +327,7 @@ func getRealImageVulns(digest string, o ImageVulnsOptions) (*ImageVulnsPage, []b
 		q.Set("severity", o.Severity)
 	}
 	boolQuery(q, "fixable", o.Fixable)
+	riskQuery(q, o.Kev, o.EpssMin, o.InUse, o.Tier)
 	if o.Source != "" {
 		q.Set("source", o.Source)
 	}
@@ -302,6 +353,7 @@ func getRealVulns(o VulnsListOptions) (*CvePage, []byte, error) {
 		q.Set("severity", o.Severity)
 	}
 	boolQuery(q, "fixable", o.Fixable)
+	riskQuery(q, o.Kev, o.EpssMin, o.InUse, o.Tier)
 	if o.Running {
 		q.Set("running", "true")
 	}
