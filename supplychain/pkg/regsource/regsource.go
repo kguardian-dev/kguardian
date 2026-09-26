@@ -223,16 +223,18 @@ func registryBlocked(err error) (string, bool) {
 
 func toPayload(im broker.Image, f registry.FoundSBOM, now time.Time) *types.ImageSBOM {
 	reg, repo := splitRepository(im.Repository)
-	kind := im.DigestKind
+	// The inventory's digestKind says where a digest came from (repo,
+	// config, pinned), not what it points at, so it is never copied here.
+	// Only a subject found as one of the digest's platform manifests is
+	// known to be a manifest; everything else is unknown, never assumed
+	// single-arch.
+	kind := types.DigestKindUnknown
 	index := f.IndexDigest
 	if f.Subject != im.Digest {
 		kind = types.DigestKindManifest // a platform manifest of the index
 		if index == "" {
 			index = im.Digest
 		}
-	}
-	if kind == "" {
-		kind = types.DigestKindUnknown
 	}
 	tag := ""
 	if len(im.Tags) > 0 {

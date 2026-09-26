@@ -161,3 +161,17 @@ func TestHasOSPackages(t *testing.T) {
 		t.Error("language-only SBOM reported as having OS packages")
 	}
 }
+
+// The inventory's digestKind (repo, config, pinned) is provenance, not
+// index/manifest: an SBOM for the running digest itself is unknown, never
+// assumed single-arch.
+func TestToPayloadDigestKindUnknownUnlessPlatformManifest(t *testing.T) {
+	d := "sha256:" + rep("f")
+	for _, inv := range []string{"", "repo", "config", "pinned", "manifest", "index"} {
+		im := broker.Image{Digest: d, Repository: "docker.io/library/alpine", DigestKind: inv, RunningContainers: 1}
+		p := toPayload(im, registry.FoundSBOM{Subject: d, Doc: doc(), Trust: types.SBOMTrustAttachedUnbound}, time.Unix(0, 0))
+		if p.Image.DigestKind != types.DigestKindUnknown || p.Image.IndexDigest != "" || len(p.Image.PlatformManifests) != 0 {
+			t.Errorf("inventory kind %q: payload image %+v", inv, p.Image)
+		}
+	}
+}
