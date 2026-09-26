@@ -21,7 +21,11 @@ How discovery works and what each verdict means is in
 | `key_signed` | Signed with a public key kguardian was not given: the signature exists and was not checked. |
 | `unsigned` | No signature, and every lookup answered. |
 | `invalid` | Signatures exist and none verified (`reason`: `bad_signature`, `digest_mismatch`, `malformed`). |
-| `unknown` | Could not be checked (`reason`: `registry_auth` for a private image, `rate_limited`, `network`, `timeout`, `no_repo_digest`, `trust_root_unavailable`, ...). Not the same as unsigned. |
+| `unknown` | Could not be checked (`reason`: `registry_auth` for a private image, `rate_limited`, `network`, `timeout`, `no_repo_digest`, `trust_root_unavailable`, `untrusted_root`, ...). Not the same as unsigned. |
+
+`verified` means valid, not trusted: any Fulcio identity or configured key
+can produce a valid signature, and anyone who can push to the repository
+can attach one. Never show it without the signer.
 
 ## Reads (read token)
 
@@ -78,7 +82,8 @@ A keyset page of summaries, ordered by digest.
 Each item has `digest`, `repository`, `verdict`, `reason`, `signedVia`,
 `checkedAt`, up to 8 distinct verified `signers` (`{kind: "keyless",
 issuer, san}` or `{kind: "key", keyName, keyFingerprint}`) and up to 16
-`verifiedPredicates`.
+`verifiedPredicates`. In the summary, issuers, SANs and predicate types are
+cut to 256 characters; the full values are in the single-digest read.
 
 Both reads are charged to the broker's read-memory budget and answer `503`
 with `Retry-After` rather than a partial result.
@@ -95,7 +100,11 @@ POST /images/{digest}/attestation
   30 s. At most 32 signatures and 64 attestations (`413`); long strings
   are truncated.
 - `422` for an unknown `schema_version`, `verdict` or `signer_kind`, a body
-  digest that differs from the path, or `checked_at` more than 60 s ahead.
+  digest that differs from the path, `checked_at` more than 60 s ahead, a
+  verdict that does not match the signatures (`verified` with none
+  verified, `unsigned` with signatures, ...), or a verified signer's
+  identity or provenance longer than the limits: those are stored whole or
+  refused, never truncated, because trust policies match them.
 - The digest must be in the image inventory (`404` otherwise).
 - A result replaces the stored one only with a strictly newer
   `checked_at`. The same result again answers `200`; a different result
