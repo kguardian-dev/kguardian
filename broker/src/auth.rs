@@ -103,6 +103,7 @@ const fn rule(method: &'static str, pattern: &'static str, access: Access) -> Ro
 const OPEN: Access = Access::Open;
 const READ: Access = Access::Requires(Scope::Read);
 const INGEST: Access = Access::Requires(Scope::Ingest);
+const SUPPLYCHAIN: Access = Access::Requires(Scope::SupplyChain);
 
 /// Every broker route and the access it needs. Keep sorted by area.
 pub const ROUTES: &[RouteRule] = &[
@@ -186,6 +187,15 @@ pub const ROUTES: &[RouteRule] = &[
         "/workloads/{namespace}/{kind}/{name}/profile/diff",
         READ,
     ),
+    // Supply chain (#1533 P1-3). Writes need the supplychain token, which
+    // the ingest and read tokens don't carry.
+    rule("POST", "/images/{digest}/vulnerabilities", SUPPLYCHAIN),
+    rule("POST", "/images/{digest}/sbom", SUPPLYCHAIN),
+    rule("GET", "/images/{digest}/vulnerabilities", READ),
+    rule("GET", "/images/{digest}/sbom", READ),
+    rule("GET", "/images/{digest}/sbom/cyclonedx", READ),
+    rule("GET", "/vulnerabilities", READ),
+    rule("GET", "/vulnerabilities/{id}/exposure", READ),
 ];
 
 /// The declared access for `method` on the registered `pattern`, if any.
@@ -238,7 +248,7 @@ impl AuthConfig {
         Self::from_lookup(|k| std::env::var(k).ok())
     }
 
-    fn from_lookup(lookup: impl Fn(&str) -> Option<String>) -> Result<Self, String> {
+    pub(crate) fn from_lookup(lookup: impl Fn(&str) -> Option<String>) -> Result<Self, String> {
         let mut cfg = AuthConfig::default();
         for (var, scopes) in TOKEN_SOURCES {
             let Some(token) = lookup(var)
@@ -274,6 +284,12 @@ impl AuthConfig {
 
     pub fn enabled(&self) -> bool {
         !self.credentials.is_empty()
+    }
+
+    /// Whether some configured token carries `scope`. Supply-chain ingest
+    /// runs only when one carries `supplychain`, i.e. auth is scoped.
+    pub fn configures(&self, scope: Scope) -> bool {
+        self.credentials.iter().any(|c| c.scopes & scope.bit() != 0)
     }
 
     /// Env var names that configured a token (never the tokens).
@@ -858,6 +874,8 @@ mod tests {
             ("POST", "/seccomp/node%2Dstatus"),
             ("PUT", "/seccomp/%63rs/a/b"),
             ("DELETE", "/seccomp/%63rs/a/b"),
+            ("POST", "/images/x/%76ulnerabilities"),
+            ("POST", "/images/x/%73bom"),
         ];
         for (method, path) in cases {
             let read = status_of!(app, method, path, Some(READ_TOK));
@@ -936,6 +954,19 @@ mod tests {
         let app = app!(AuthConfig::default());
         for r in ROUTES {
             let s = status_of!(app, r.method, &concrete(r.pattern), None);
+            if r.access == SUPPLYCHAIN {
+                // The one deliberate exception: supply-chain ingest refuses
+                // to run without scoped auth (supplychain::ingest_allowed),
+                // so an open broker can't be fed forged scan results.
+                assert_eq!(
+                    s,
+                    StatusCode::FORBIDDEN,
+                    "{} {}: supply-chain ingest must refuse with auth disabled",
+                    r.method,
+                    r.pattern
+                );
+                continue;
+            }
             assert!(
                 s != StatusCode::UNAUTHORIZED && s != StatusCode::FORBIDDEN,
                 "{} {}: {s} with auth disabled",

@@ -16,6 +16,8 @@ pub mod routes;
 mod seccomp;
 mod seccomp_denial;
 mod seccomp_profiles_cache;
+pub mod supplychain;
+mod supplychain_read;
 mod telemetry;
 mod types;
 mod version_check;
@@ -65,6 +67,10 @@ pub use seccomp_denial::{
     DenialRow, SeccompDenialMetrics, SeccompDenialSeries,
 };
 pub use seccomp_profiles_cache::{SeccompProfilesCache, DEFAULT_PROFILES_CACHE_TTL_SECS};
+pub use supplychain_read::{
+    get_vulnerabilities, get_vulnerability_exposure, image_sbom_cyclonedx_resource,
+    image_sbom_resource, image_vulnerabilities_resource,
+};
 
 #[cfg(test)]
 pub(crate) mod test_support {

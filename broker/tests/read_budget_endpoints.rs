@@ -45,7 +45,7 @@ async fn exhausted_budget() -> (web::Data<ReadBudget>, api::ReadPermit) {
 }
 
 macro_rules! sheds_when_budget_exhausted {
-    ($name:ident, $service:path, $uri:expr) => {
+    ($name:ident, $service:expr, $uri:expr) => {
         #[actix_web::test]
         async fn $name() {
             let (budget, _hog) = exhausted_budget().await;
@@ -116,6 +116,26 @@ sheds_when_budget_exhausted!(
     workload_containers_sheds,
     api::get_workload_containers,
     "/workloads/prod/Deployment/web/containers"
+);
+sheds_when_budget_exhausted!(
+    image_vulnerabilities_sheds,
+    api::image_vulnerabilities_resource(),
+    "/images/sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef/vulnerabilities?limit=500"
+);
+sheds_when_budget_exhausted!(
+    image_sbom_sheds,
+    api::image_sbom_resource(),
+    "/images/sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef/sbom?limit=500"
+);
+sheds_when_budget_exhausted!(
+    vulnerabilities_sheds,
+    api::get_vulnerabilities,
+    "/vulnerabilities?limit=500"
+);
+sheds_when_budget_exhausted!(
+    vulnerability_exposure_sheds,
+    api::get_vulnerability_exposure,
+    "/vulnerabilities/CVE-2024-3094/exposure"
 );
 sheds_when_budget_exhausted!(svc_info_sheds, api::get_svc_details, "/svc/info");
 sheds_when_budget_exhausted!(
@@ -345,6 +365,42 @@ async fn image_reads_reject_bad_digests_before_the_budget() {
         "/images?after=sha256:ABC",
     ] {
         let resp = test::call_service(&app, test::TestRequest::get().uri(uri).to_request()).await;
+        assert_eq!(
+            resp.status(),
+            actix_web::http::StatusCode::BAD_REQUEST,
+            "{uri} must 400 even with the budget exhausted"
+        );
+    }
+    assert_eq!(budget.get_ref().shed_count(), 0);
+}
+
+/// Same property for the supply-chain reads.
+#[actix_web::test]
+async fn supplychain_reads_reject_bad_input_before_the_budget() {
+    let (budget, _hog) = exhausted_budget().await;
+    let app = test::init_service(
+        App::new()
+            .app_data(web::Data::new(unreachable_pool()))
+            .app_data(budget.clone())
+            .service(api::image_vulnerabilities_resource())
+            .service(api::image_sbom_resource())
+            .service(api::image_sbom_cyclonedx_resource())
+            .service(api::get_vulnerabilities)
+            .service(api::get_vulnerability_exposure),
+    )
+    .await;
+    let d = "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+    for uri in [
+        "/images/latest/vulnerabilities".to_string(),
+        "/images/sha256:short/sbom".to_string(),
+        "/images/nginx/sbom/cyclonedx".to_string(),
+        format!("/images/{d}/vulnerabilities?severity=severe"),
+        format!("/images/{d}/vulnerabilities?after=nope"),
+        "/vulnerabilities?severity=HIGH,bogus".to_string(),
+        "/vulnerabilities?after=9.CVE-1".to_string(),
+        "/vulnerabilities/CVE%201/exposure".to_string(),
+    ] {
+        let resp = test::call_service(&app, test::TestRequest::get().uri(&uri).to_request()).await;
         assert_eq!(
             resp.status(),
             actix_web::http::StatusCode::BAD_REQUEST,

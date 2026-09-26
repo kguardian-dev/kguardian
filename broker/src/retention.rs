@@ -201,6 +201,7 @@ pub fn spawn(pool: DbPool) {
     let traffic_pool = pool.clone();
     spawn_image_inventory(pool.clone());
     spawn_workload_profiles(pool.clone());
+    spawn_supplychain(pool.clone());
     actix_web::rt::spawn(async move {
         // First pass after a short warmup so the broker doesn't hammer
         // a cold pool the second it starts.
@@ -2058,6 +2059,251 @@ mod workload_profile_retention_tests {
              DELETE FROM workload_profile_latest WHERE pod_namespace = '{ns}';"
         ))
         .unwrap();
+    }
+}
+
+// ---------------------------------------------------------------------
+// Supply chain (#1533 P1-3)
+// ---------------------------------------------------------------------
+//
+// One loop, three jobs, in this order each pass:
+//
+// 1. Relink every stored payload to the inventory (supplychain::relink),
+//    so a digest the inventory learns after the scan arrived is joined
+//    within one interval, then rebuild the per-CVE summary that
+//    GET /vulnerabilities reads (vuln_cve_summary).
+// 2. Expire staged SBOM sets that stopped receiving pages
+//    (`SUPPLYCHAIN_SBOM_PAGE_TTL_SECS`, default 3600).
+// 3. Delete payloads nothing runs: no linked inventory digest has a
+//    workload container seen within `SUPPLYCHAIN_RETENTION_DAYS` (default
+//    30; 0 disables this step) or running now by the inventory's own
+//    predicate, and nothing received for the payload within
+//    `SUPPLYCHAIN_UNLINKED_GRACE_HOURS` (default 24) so a scan that lands
+//    before its pod's first inventory post is not deleted at once. A
+//    digest the inventory itself pruned has no workload rows, so its
+//    payloads follow it.
+//
+// - `SUPPLYCHAIN_RETENTION_INTERVAL_SECS` (default 300, floor 60)
+// - `SUPPLYCHAIN_RETENTION_BATCH_SIZE` payloads per transaction (default
+//   50, clamped to [1, 1000]); each payload is at most 50 000 findings
+//   plus 100 000 components, so this bounds rows per statement too.
+
+const DEFAULT_SUPPLYCHAIN_RETENTION_DAYS: u32 = 30;
+const DEFAULT_SUPPLYCHAIN_GRACE_HOURS: u32 = 24;
+const DEFAULT_SUPPLYCHAIN_INTERVAL_SECS: u64 = 300;
+const DEFAULT_SUPPLYCHAIN_PAGE_TTL_SECS: i64 = 3600;
+const DEFAULT_SUPPLYCHAIN_BATCH: i64 = 50;
+/// Batches per step per pass.
+const MAX_SUPPLYCHAIN_BATCHES: u32 = 200;
+
+fn env_parse<T: std::str::FromStr>(key: &str) -> Option<T> {
+    std::env::var(key).ok().and_then(|v| v.trim().parse().ok())
+}
+
+fn supplychain_retention_days() -> u32 {
+    env_parse("SUPPLYCHAIN_RETENTION_DAYS").unwrap_or(DEFAULT_SUPPLYCHAIN_RETENTION_DAYS)
+}
+
+fn supplychain_grace_hours() -> u32 {
+    env_parse("SUPPLYCHAIN_UNLINKED_GRACE_HOURS").unwrap_or(DEFAULT_SUPPLYCHAIN_GRACE_HOURS)
+}
+
+fn supplychain_interval() -> Duration {
+    Duration::from_secs(
+        env_parse::<u64>("SUPPLYCHAIN_RETENTION_INTERVAL_SECS")
+            .unwrap_or(DEFAULT_SUPPLYCHAIN_INTERVAL_SECS)
+            .max(60),
+    )
+}
+
+fn supplychain_page_ttl_secs() -> i64 {
+    env_parse::<i64>("SUPPLYCHAIN_SBOM_PAGE_TTL_SECS")
+        .unwrap_or(DEFAULT_SUPPLYCHAIN_PAGE_TTL_SECS)
+        .max(60)
+}
+
+fn supplychain_batch() -> i64 {
+    env_parse::<i64>("SUPPLYCHAIN_RETENTION_BATCH_SIZE")
+        .map(|n| n.clamp(1, 1000))
+        .unwrap_or(DEFAULT_SUPPLYCHAIN_BATCH)
+}
+
+fn spawn_supplychain(pool: DbPool) {
+    let days = supplychain_retention_days();
+    let grace = supplychain_grace_hours();
+    let interval = supplychain_interval();
+    info!(
+        days,
+        grace_hours = grace,
+        interval_secs = interval.as_secs(),
+        "supply-chain relink + retention loop scheduled (days=0 keeps payloads of images no longer running)"
+    );
+    actix_web::rt::spawn(async move {
+        tokio::time::sleep(Duration::from_secs(45)).await;
+        loop {
+            run_supplychain_pass(&pool, days, grace).await;
+            tokio::time::sleep(interval).await;
+        }
+    });
+}
+
+/// One relink + expiry + GC pass. Each step is its own set of bounded
+/// blocking calls; a failure is logged and the next step still runs.
+pub(crate) async fn run_supplychain_pass(pool: &DbPool, days: u32, grace_hours: u32) {
+    let batch = supplychain_batch();
+    // 1. Relink.
+    let mut cursor: Option<(String, String)> = None;
+    let mut changed = 0usize;
+    for _ in 0..MAX_SUPPLYCHAIN_BATCHES {
+        let pool = pool.clone();
+        let after = cursor.clone();
+        let r = tokio::task::spawn_blocking(move || -> Result<_, RetentionError> {
+            let mut conn = pool.get().map_err(RetentionError::Pool)?;
+            crate::supplychain::relink_batch(&mut conn, after.as_ref(), batch * 4)
+                .map_err(RetentionError::Diesel)
+        })
+        .await;
+        match r {
+            Ok(Ok((n, next))) => {
+                changed += n;
+                match next {
+                    Some(c) => cursor = Some(c),
+                    None => break,
+                }
+            }
+            Ok(Err(e)) => {
+                warn!(error = %e, "supply-chain relink failed");
+                break;
+            }
+            Err(e) => {
+                warn!(error = %e, "supply-chain relink task panicked");
+                break;
+            }
+        }
+    }
+    if changed > 0 {
+        info!(links_changed = changed, "supply-chain links refreshed");
+    }
+    // 1b. Rebuild the per-CVE summary GET /vulnerabilities reads, from the
+    //     links just refreshed.
+    let p = pool.clone();
+    match tokio::task::spawn_blocking(move || -> Result<i64, RetentionError> {
+        let mut conn = p.get().map_err(RetentionError::Pool)?;
+        crate::supplychain_read::refresh_cve_summary(&mut conn).map_err(RetentionError::Diesel)
+    })
+    .await
+    {
+        Ok(Ok(n)) => debug!(cves = n, "supply-chain CVE summary rebuilt"),
+        Ok(Err(e)) => warn!(error = %e, "supply-chain CVE summary rebuild failed"),
+        Err(e) => warn!(error = %e, "supply-chain CVE summary task panicked"),
+    }
+    // 2. Staged pages.
+    let ttl = supplychain_page_ttl_secs();
+    let expired = run_supplychain_steps(pool, move |conn| {
+        crate::supplychain::expire_pages_batch(conn, ttl, batch)
+    })
+    .await;
+    if expired > 0 {
+        info!(
+            pages = expired,
+            "supply-chain retention expired incomplete SBOM page sets"
+        );
+    }
+    // 3. Payloads of images nothing runs.
+    if days == 0 {
+        return;
+    }
+    let window = crate::image_inventory::running_window_secs();
+    let removed = run_supplychain_steps(pool, move |conn| {
+        crate::supplychain::gc_batch(conn, days, grace_hours, window, batch)
+    })
+    .await;
+    if removed > 0 {
+        info!(
+            payloads = removed,
+            "supply-chain retention removed payloads of images no longer running"
+        );
+    } else {
+        debug!("supply-chain retention: nothing to remove");
+    }
+}
+
+/// Repeat `step` until it reports 0 or the per-pass cap.
+async fn run_supplychain_steps<F>(pool: &DbPool, step: F) -> usize
+where
+    F: Fn(&mut PgConnection) -> QueryResult<usize> + Send + Sync + Clone + 'static,
+{
+    let mut total = 0usize;
+    for _ in 0..MAX_SUPPLYCHAIN_BATCHES {
+        let pool = pool.clone();
+        let step = step.clone();
+        let r = tokio::task::spawn_blocking(move || -> Result<usize, RetentionError> {
+            let mut conn = pool.get().map_err(RetentionError::Pool)?;
+            step(&mut conn).map_err(RetentionError::Diesel)
+        })
+        .await;
+        match r {
+            Ok(Ok(0)) => break,
+            Ok(Ok(n)) => total += n,
+            Ok(Err(e)) => {
+                warn!(error = %e, removed_before_failure = total, "supply-chain retention failed");
+                break;
+            }
+            Err(e) => {
+                warn!(error = %e, "supply-chain retention task panicked");
+                break;
+            }
+        }
+    }
+    total
+}
+
+#[cfg(test)]
+mod supplychain_retention_tests {
+    use super::*;
+
+    #[test]
+    fn env_defaults_overrides_and_clamps() {
+        let _guard = crate::test_support::env_lock();
+        let keys = [
+            "SUPPLYCHAIN_RETENTION_DAYS",
+            "SUPPLYCHAIN_UNLINKED_GRACE_HOURS",
+            "SUPPLYCHAIN_RETENTION_INTERVAL_SECS",
+            "SUPPLYCHAIN_SBOM_PAGE_TTL_SECS",
+            "SUPPLYCHAIN_RETENTION_BATCH_SIZE",
+        ];
+        for k in keys {
+            std::env::remove_var(k);
+        }
+        assert_eq!(supplychain_retention_days(), 30);
+        assert_eq!(supplychain_grace_hours(), 24);
+        assert_eq!(supplychain_interval(), Duration::from_secs(300));
+        assert_eq!(supplychain_page_ttl_secs(), 3600);
+        assert_eq!(supplychain_batch(), 50);
+        std::env::set_var("SUPPLYCHAIN_RETENTION_DAYS", " 0 ");
+        std::env::set_var("SUPPLYCHAIN_RETENTION_INTERVAL_SECS", "5");
+        std::env::set_var("SUPPLYCHAIN_SBOM_PAGE_TTL_SECS", "1");
+        std::env::set_var("SUPPLYCHAIN_RETENTION_BATCH_SIZE", "99999");
+        assert_eq!(supplychain_retention_days(), 0);
+        assert_eq!(supplychain_interval(), Duration::from_secs(60));
+        assert_eq!(supplychain_page_ttl_secs(), 60);
+        assert_eq!(supplychain_batch(), 1000);
+        std::env::set_var("SUPPLYCHAIN_RETENTION_BATCH_SIZE", "0");
+        assert_eq!(supplychain_batch(), 1);
+        for k in keys {
+            std::env::remove_var(k);
+        }
+    }
+
+    #[test]
+    fn gc_sql_is_bounded_and_uses_the_running_predicate() {
+        let sql = crate::supplychain::SUPPLYCHAIN_GC_KEYS_SQL;
+        assert!(sql.contains("LIMIT $4"), "{sql}");
+        assert!(sql.contains("make_interval(days => $2)"), "{sql}");
+        assert!(
+            sql.contains("wc.state_reason = 'CrashLoopBackOff'"),
+            "{sql}"
+        );
     }
 }
 

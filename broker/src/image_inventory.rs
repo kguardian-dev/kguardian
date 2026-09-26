@@ -141,6 +141,8 @@ macro_rules! running_sql {
         )
     };
 }
+// The supply-chain GC and reads use the same predicate.
+pub(crate) use running_sql;
 
 /// Containers accepted per pod. Matches the controller's own cap.
 pub const MAX_CONTAINERS_PER_POD: usize = 64;
