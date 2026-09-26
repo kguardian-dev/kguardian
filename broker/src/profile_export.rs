@@ -999,6 +999,49 @@ pub fn build_documents(
     Ok(docs)
 }
 
+/// Every character a YAML parser may treat as a line break. YAML 1.2 has
+/// only CR and LF, but YAML 1.1 (go-yaml, which kubectl's decoder uses)
+/// also breaks lines on NEL, LINE SEPARATOR and PARAGRAPH SEPARATOR, and
+/// serde_json emits those three raw inside strings.
+const YAML_LINE_BREAKS: [char; 5] = ['\n', '\r', '\u{85}', '\u{2028}', '\u{2029}'];
+
+/// NEL / LS / PS as JSON escape text (`\u0085`, `\u2028`, `\u2029`), so a
+/// commented JSON document stays valid JSON once the `#` is removed and
+/// no parser sees a line break there.
+fn escape_unicode_breaks(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '\u{85}' => out.push_str("\\u0085"),
+            '\u{2028}' => out.push_str("\\u2028"),
+            '\u{2029}' => out.push_str("\\u2029"),
+            c => out.push(c),
+        }
+    }
+    out
+}
+
+/// Text for inside a single comment line: no line break of any kind.
+fn comment_text(s: &str) -> String {
+    escape_unicode_breaks(s).replace(YAML_LINE_BREAKS, " ")
+}
+
+/// `text` as comment lines: every segment between any YAML line break
+/// starts with `#`, so nothing in it (a package name, a status note) can
+/// start a document or a key in the `kubectl apply` stream.
+fn push_commented(y: &mut String, text: &str) {
+    let t = escape_unicode_breaks(text).replace("\r\n", "\n");
+    let t = t.strip_suffix('\n').unwrap_or(&t);
+    // NEL/LS/PS are escaped above; split on every break anyway.
+    for seg in t.split(YAML_LINE_BREAKS) {
+        if !seg.starts_with('#') {
+            y.push_str("#   ");
+        }
+        y.push_str(seg);
+        y.push('\n');
+    }
+}
+
 /// The multi-document YAML: a bundle header, then every available
 /// Kubernetes object as its own document. The securityContext PATCH and the
 /// OpenVEX draft are not objects, so they are appended as comments (the
@@ -1031,7 +1074,7 @@ pub fn render_bundle_yaml(
         y.push_str(&format!(
             "# not included: {} ({})\n",
             d.artifact,
-            d.reason.as_deref().unwrap_or("not available")
+            comment_text(d.reason.as_deref().unwrap_or("not available"))
         ));
     }
     for d in docs
@@ -1063,18 +1106,11 @@ pub fn render_bundle_yaml(
             _ => "strategic-merge patch".to_string(),
         };
         y.push_str(&format!(
-            "\n# ---- {} ({what}; not part of the apply stream) ----\n",
-            d.artifact
+            "\n# ---- {} ({}; not part of the apply stream) ----\n",
+            d.artifact,
+            comment_text(&what)
         ));
-        for line in d.content.as_deref().unwrap_or("").lines() {
-            if line.starts_with('#') {
-                y.push_str(line);
-            } else {
-                y.push_str("#   ");
-                y.push_str(line);
-            }
-            y.push('\n');
-        }
+        push_commented(&mut y, d.content.as_deref().unwrap_or(""));
     }
     y
 }
@@ -1395,6 +1431,78 @@ mod tests {
             }],
             ..Default::default()
         }
+    }
+
+    /// No package name, status note or reason can break out of a comment:
+    /// every segment between any YAML line break (LF, CR, NEL, LS, PS)
+    /// starts with `#`, for SBOM, VEX and unavailable documents alike.
+    #[test]
+    fn no_line_break_escapes_a_comment() {
+        let p = wp::build(&key(), &sources(), Utc::now());
+        let pl = plan(&q(Some("sbom,vex"), None, None)).unwrap();
+        let mut docs = Vec::new();
+        for sep in YAML_LINE_BREAKS {
+            let evil = format!(
+                "evil{sep}---{sep}apiVersion: v1{sep}kind: Secret{sep}metadata:{sep}  name: injected{sep}  namespace: default{sep}"
+            );
+            // Raw in the content (worse than serde_json, which escapes CR/LF),
+            // and as serde_json really emits it.
+            let json = serde_json::to_string_pretty(&json!({"name": evil})).unwrap();
+            for (artifact, content) in
+                [("sbom", evil.clone()), ("vex", evil.clone()), ("vex", json)]
+            {
+                docs.push(Document {
+                    artifact,
+                    file_name: "x.json".into(),
+                    available: true,
+                    refused: None,
+                    reason: None,
+                    api_version: None,
+                    kind: None,
+                    mode: "audit",
+                    content_type: Some("application/json"),
+                    content: Some(content),
+                    apply_with: None,
+                    image: Some(ExportImage {
+                        containers: vec![evil.clone()],
+                        digest: evil.clone(),
+                        image_ref: evil.clone(),
+                        source: Some(evil.clone()),
+                        sbom_trust: Some(evil.clone()),
+                        scanned_at: None,
+                        components: None,
+                    }),
+                });
+            }
+            docs.push(unavailable("sbom", "audit", &evil));
+        }
+        let y = render_bundle_yaml(&key(), &p, &pl, &docs, false);
+        let mut segments = 0;
+        for seg in y.split(YAML_LINE_BREAKS).filter(|s| !s.trim().is_empty()) {
+            assert!(seg.starts_with('#'), "segment escapes the comment: {seg:?}");
+            segments += 1;
+        }
+        assert!(segments > 50);
+        assert!(!y.contains('\u{85}') && !y.contains('\u{2028}') && !y.contains('\u{2029}'));
+        assert!(
+            y.contains("\\u2028---\\u2028apiVersion"),
+            "kept as escape text"
+        );
+    }
+
+    /// A commented JSON document is still the same JSON once the comment
+    /// prefix is removed, LS/PS/NEL included (as escape text).
+    #[test]
+    fn a_commented_json_document_round_trips() {
+        let v = json!({"a": "x\u{2028}y\u{2029}z\u{85}w", "b": [1, 2]});
+        let mut y = String::new();
+        push_commented(&mut y, &(serde_json::to_string_pretty(&v).unwrap() + "\n"));
+        let back: String = y
+            .lines()
+            .map(|l| l.strip_prefix("#   ").unwrap_or(l))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert_eq!(serde_json::from_str::<serde_json::Value>(&back).unwrap(), v);
     }
 
     #[test]

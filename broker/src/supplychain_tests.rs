@@ -80,6 +80,14 @@ fn gzip(bytes: &[u8]) -> Vec<u8> {
 // ---------------------------------------------------------------------
 
 #[test]
+fn clean_drops_every_yaml_line_break() {
+    assert_eq!(
+        clean(Some("a\nb\rc\u{85}d\u{2028}e\u{2029}f"), 100).as_deref(),
+        Some("abcdef")
+    );
+}
+
+#[test]
 fn repositories_normalise_like_the_inventory() {
     let n = |r: Option<&str>, p: &str| normalise_repository(r, Some(p));
     assert_eq!(

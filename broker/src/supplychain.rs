@@ -783,10 +783,16 @@ pub fn severity_from_rank(rank: i16) -> &'static str {
     }
 }
 
-/// Trim, drop control characters, cap at `max` bytes on a char boundary;
-/// empty becomes `None`.
+/// Trim, drop control characters (NEL included) and the Unicode LINE /
+/// PARAGRAPH SEPARATORs (YAML 1.1 line breaks that serde_json passes
+/// through raw), cap at `max` bytes on a char boundary; empty becomes
+/// `None`.
 fn clean(s: Option<&str>, max: usize) -> Option<String> {
-    let s: String = s?.trim().chars().filter(|c| !c.is_control()).collect();
+    let s: String = s?
+        .trim()
+        .chars()
+        .filter(|c| !c.is_control() && *c != '\u{2028}' && *c != '\u{2029}')
+        .collect();
     if s.is_empty() {
         return None;
     }
