@@ -683,6 +683,16 @@ render "broker-netpol-no-asp" --set broker.networkPolicy.enabled=true \
     { echo "FAIL [broker-netpol-no-asp]: evaluator admitted without the feature"; fail=1; } || true
 }
 
+# 12f. staleAfter: unset leaves the default to the binary (3x resync);
+# set, it is passed through; malformed, the render fails.
+render "asp-stale-default" "${ASP_ON[@]}" && assert_absent "asp-stale-default" "ASP_STALE_AFTER"
+render "asp-stale-set" "${ASP_ON[@]}" --set evaluator.applicationSecurityProfiles.staleAfter=20m && {
+  assert_has "asp-stale-set" "name: ASP_STALE_AFTER"
+  assert_has "asp-stale-set" 'value: "20m"'
+}
+assert_render_fails "asp-stale-bad" "is not a Go duration" \
+  "${ASP_ON[@]}" --set evaluator.applicationSecurityProfiles.staleAfter=soon
+
 # 12e. Refuses to render without the evaluator that writes the status.
 assert_render_fails "asp-without-evaluator" "requires evaluator.enabled=true" \
   "${ASP_ON[@]}" --set evaluator.enabled=false

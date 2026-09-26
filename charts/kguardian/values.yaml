@@ -1832,6 +1832,13 @@ evaluator:
     # floor 30s). Spec edits are picked up immediately. Profiles are read one
     # at a time; the broker computes each one live.
     resyncInterval: 5m
+    # -- How long the last successfully read profile is still shown when the
+    # broker cannot be read (Go duration). Past it, posture and every
+    # dimension report `unknown`, with a reason naming the error and the
+    # last successful refresh. Empty = 3x resyncInterval; values below
+    # resyncInterval are raised to it. A broker that rejects the token
+    # (401/403) makes status unknown at once, regardless of this window.
+    staleAfter: ""
 
 supplychain:
   # -- Deploy the supply-chain component (#1533). It reads vulnerability and

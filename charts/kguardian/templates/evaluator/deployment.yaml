@@ -76,6 +76,13 @@ spec:
               value: "true"
             - name: ASP_RESYNC_INTERVAL
               value: {{ .Values.evaluator.applicationSecurityProfiles.resyncInterval | default "5m" | quote }}
+            {{- with .Values.evaluator.applicationSecurityProfiles.staleAfter }}
+            {{- if not (regexMatch "^([0-9]+(\\.[0-9]+)?(ns|us|ms|s|m|h))+$" (toString .)) }}
+            {{- fail (printf "evaluator.applicationSecurityProfiles.staleAfter=%q is not a Go duration (e.g. 15m, 1h)" (toString .)) }}
+            {{- end }}
+            - name: ASP_STALE_AFTER
+              value: {{ . | quote }}
+            {{- end }}
             - name: BROKER_URL
               value: "http://{{ .Values.broker.service.name }}.{{ include "kguardian.namespace" . }}.svc.cluster.local:{{ .Values.broker.service.port }}"
             {{- include "kguardian.brokerAuthClientEnv" (dict "root" $ "scope" "read") | nindent 12 }}
