@@ -54,6 +54,10 @@ type ImageRef struct {
 	Registry   string `json:"registry,omitempty"`
 	Repository string `json:"repository,omitempty"`
 	Tag        string `json:"tag,omitempty"`
+	// IndexDigest is the image index Digest is a platform manifest of,
+	// when the source knows it (BuildKit attestations of a multi-arch
+	// image). It lets a platform-keyed SBOM meet one keyed by the index.
+	IndexDigest string `json:"index_digest,omitempty"`
 	// DigestKind says what Digest points at: an image index (multi-arch
 	// list), a single-platform manifest, or unknown when the registry was
 	// not consulted or could not be reached anonymously.
@@ -151,9 +155,12 @@ type ImageVulnerabilities struct {
 	// built. Nil when the source does not record it (Trivy Operator does
 	// not put the trivy-db timestamp in its reports).
 	DBUpdatedAt *time.Time `json:"db_updated_at,omitempty"`
-	// SBOMSource is, for source=grype, which SBOM was matched
-	// (registry or trivy-operator). Empty for scanners that read the image.
-	SBOMSource      string          `json:"sbom_source,omitempty"`
+	// SBOMSources lists, for source=grype, every SBOM source whose
+	// components were matched (the union; see README). Omitted for
+	// trivy-operator, whose scanner read the image itself.
+	SBOMSources []string `json:"sbom_sources,omitempty"`
+	// SBOMTrust is the weakest trust among the inputs (see SBOMTrust*).
+	SBOMTrust       string          `json:"sbom_trust"`
 	OS              OS              `json:"os"`
 	ObservedIn      []WorkloadRef   `json:"observed_in,omitempty"`
 	Vulnerabilities []Vulnerability `json:"vulnerabilities"`
@@ -192,6 +199,8 @@ type ImageSBOM struct {
 	// Attestation describes where a registry SBOM was found. Nil for
 	// other sources.
 	Attestation *Attestation `json:"attestation,omitempty"`
+	// SBOMTrust says how far the document can be trusted (SBOMTrust*).
+	SBOMTrust string `json:"sbom_trust"`
 	// Page is set when the SBOM is sent in several requests (see Page).
 	Page       *Page       `json:"page,omitempty"`
 	Components []Component `json:"components"`
@@ -227,4 +236,36 @@ type Attestation struct {
 	// attached to the image, but no signature was checked. Signature and
 	// identity verification is a separate step (#1533 P2).
 	Verified bool `json:"verified"`
+}
+
+// SBOM trust levels, weakest first. Only "verified" means a signature was
+// checked, and nothing produces it until signature verification (#1533
+// P2-1) exists.
+const (
+	// SBOMTrustAttachedUnbound: a bare SPDX/CycloneDX document attached to
+	// the image (e.g. cosign attach sbom). Nothing in it says what image it
+	// describes.
+	SBOMTrustAttachedUnbound = "attached-unbound"
+	// SBOMTrustUnverified: an in-toto statement whose subject is the image
+	// or one of its platform manifests; its signature was not checked.
+	SBOMTrustUnverified = "unverified"
+	// SBOMTrustScanned: produced by a scanner reading the running image in
+	// the cluster (Trivy Operator).
+	SBOMTrustScanned = "scanned"
+	// SBOMTrustVerified: signature and signer identity checked (P2-1).
+	SBOMTrustVerified = "verified"
+)
+
+// TrustRank orders trust levels, weakest (0) first; unknown values rank
+// weakest.
+func TrustRank(t string) int {
+	switch t {
+	case SBOMTrustUnverified:
+		return 1
+	case SBOMTrustScanned:
+		return 2
+	case SBOMTrustVerified:
+		return 3
+	}
+	return 0
 }

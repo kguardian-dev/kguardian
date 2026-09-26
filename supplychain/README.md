@@ -173,9 +173,11 @@ it. The replacement starts with a clean backoff.
 
 ### Registry SBOM source
 
-Publishers increasingly attach SBOMs to their images. Where one exists,
-the supplychain component uses it (`source: "registry"`) in preference to
-Trivy's own scan of the image.
+Publishers increasingly attach SBOMs to their images, and the supplychain
+component reads them (`source: "registry"`). **Registry SBOMs are
+unverified**: no signature is checked, so anyone who can push to a
+repository can attach one. They only ever **add** to what Trivy found;
+they never replace or shrink it (see [SBOM trust and the union](#sbom-trust-and-the-union)).
 
 1. Every `REGISTRY_SBOM_INTERVAL` (15 min), it lists running digests from
    the broker's image inventory (`GET /images`, read scope, paged). Only
@@ -186,7 +188,8 @@ Trivy's own scan of the image.
 3. Lookups are anonymous and go through the [address guard](#digest-kind-registry-lookup).
    `allowPrivateRegistries` applies here too.
 
-For each digest it tries, in order, and keeps the first SBOM per subject:
+For each digest it tries, in order, and keeps the first acceptable SBOM per
+subject:
 
 | Order | Mechanism (`attestation.mechanism`) | Where |
 |---|---|---|
@@ -194,6 +197,20 @@ For each digest it tries, in order, and keeps the first SBOM per subject:
 | 2 | `cosign-attestation` | cosign's `sha256-<hex>.att` tag: DSSE-wrapped in-toto statements. |
 | 3 | `cosign-sbom` | cosign's `sha256-<hex>.sbom` tag: `cosign attach sbom` documents. |
 | 4 | `buildkit-attestation` | Inside an image index: BuildKit's `unknown/unknown` attestation manifests (`vnd.docker.reference.type: attestation-manifest`). |
+
+**Acceptance checks.** None of these checks a signature. Each document
+must still pass:
+
+| Document | Rule | If it fails |
+|---|---|---|
+| in-toto statement (bare, DSSE, sigstore bundle) | A `subject` sha256 must equal the running digest or one of its platform manifests (BuildKit). | Rejected: `rejected_subject_mismatch`, or `rejected_subject_missing` when there is no sha256 subject. |
+| Bare SPDX/CycloneDX (e.g. `cosign attach sbom`) | Nothing in it says what it describes. | Accepted as `sbom_trust: "attached-unbound"`: harmless, because it can only add. |
+| Any | At least one component. | Rejected: `rejected_empty` (counted as absent). |
+
+These outcomes are counted in `kguardian_supplychain_registry_sbom_lookups_total{result}`.
+An SBOM with no distro packages (only language packages) is counted as
+`found_source_only`. It is partial by nature, and the union below never
+lets it stand in for Trivy's scan.
 
 - **Documents read:** CycloneDX JSON and SPDX 2.x JSON, bare or inside an
   in-toto statement (predicate types `https://cyclonedx.org/bom*` and
@@ -206,21 +223,53 @@ For each digest it tries, in order, and keeps the first SBOM per subject:
   CycloneDX file dependencies or evidence, made image-root relative.
 
 A BuildKit attestation describes one **platform manifest**, not the index.
-The payload is keyed by that manifest digest (`digest_kind: "manifest"`).
-The broker's join contract (imageID, then index→manifest) connects it to
-running containers.
+The payload is keyed by that manifest digest (`digest_kind: "manifest"`)
+and carries `image.index_digest` for the index it belongs to.
 
-**Not verified.** `attestation.verified` is always `false`. The SBOM was
-found attached to the image, but no signature or signer identity was
-checked; that is a separate step (#1533 P2). Treat a registry SBOM as the
-publisher's claim, not as proof.
+### SBOM trust and the union
 
-### Source priority (contract for the broker)
+**Rule: an unverified document may only add information, never remove
+it.**
+
+`sbom_trust` on every payload says how far its SBOM input can be trusted,
+weakest first:
+
+| `sbom_trust` | Meaning |
+|---|---|
+| `attached-unbound` | A bare document attached to the image. Nothing binds it to the image. |
+| `unverified` | An in-toto statement whose subject is the image (or one of its platform manifests). The signature was not checked. |
+| `scanned` | Produced by a scanner that read the running image in the cluster (Trivy Operator). |
+| `verified` | Signature and signer identity checked. Nothing produces this yet (#1533 P2-1). |
+
+**Grype input is the union.** For each image the matcher gets every SBOM
+held for it: Trivy's SbomReport and any registry SBOM, merged.
+
+- Packages de-duplicate on (type, name, version) within the image; type
+  maps Trivy's distro names onto PURL types (`debian` → `deb`).
+- A merged package keeps the richer PURL (the one with an `upstream`
+  source-package qualifier), fills a missing source package, and unions
+  file paths and licences.
+- Exactly one operating-system component is kept: Trivy's when it has one,
+  which also wins a disagreement. The matcher takes the distro from it
+  before any PURL qualifier.
+- The union is capped at 50 000 components (the matcher's request limit);
+  truncation counts in `kguardian_supplychain_grype_components_clamped_total`.
+- A registry SBOM listing fewer packages than Trivy found therefore cannot
+  hide a finding. One listing more adds findings.
+
+**Join key.** A platform-manifest registry SBOM (BuildKit) whose
+`index_digest` has a Trivy SBOM is folded into that index's group and
+matched there. It is not matched on its own while Trivy's exists. A
+registry SBOM for an image Trivy has not scanned is matched alone, with its
+own trust level.
+
+### Source rules (contract for the broker)
 
 | Data | Rule |
 |---|---|
-| SBOM for a digest | `registry` > `trivy-operator` > none. The broker stores each source's SBOM separately, keyed `(digest, source)`, and serves the highest-priority one. The Grype matcher uses the same order. |
-| Vulnerabilities for a digest | Kept **side by side**, tagged by `source` (`trivy-operator`, `grype`). Each payload replaces only its own `(digest, source)` set; the broker does not merge or dedupe across sources at ingest. `grype` payloads say which SBOM they came from in `sbom_source`. |
+| SBOMs | Store each source's SBOM separately, keyed `(digest, source)`. Serve each source separately, and/or the union as above. **Never let a registry SBOM replace or hide Trivy's in the SBOM view**, and always show `sbom_trust` next to it. `verified` is the only value that may be presented as signed. |
+| Vulnerabilities | Keep sets **side by side**, tagged by `source` (`trivy-operator`, `grype`). Each payload replaces only its own `(digest, source)` set; do not merge or dedupe across sources at ingest. `grype` payloads list their inputs in `sbom_sources` and carry the weakest input trust in `sbom_trust`. |
+| Join | Kubelet imageID first, then index→`platform_manifests` / `index_digest`, then (workload, container, repository:tag). |
 
 ### Grype matcher
 
@@ -230,17 +279,18 @@ Grype matching runs in the **supplychain-matcher** sidecar
 the sidecar's loopback address. Embedding Grype here would take this binary
 from 29.7 MB and 124 Go modules to about 71 MB and 817.
 
-The coordinator (`pkg/match`) works the same whichever backend it drives:
+The coordinator (`pkg/match`):
 
-- It holds one SBOM per digest, preferring a registry SBOM over a Trivy
-  SbomReport, up to 2000.
-- It matches on one worker, with a time limit per SBOM.
-- When the sidecar reports a new database build, it re-matches every SBOM it
-  holds without fetching any SBOM again. It polls the sidecar's `/db` every
-  minute.
-- It emits `ImageVulnerabilities` with `source: "grype"`, `sbom_source`,
-  `db_updated_at`, and per-vulnerability `kev` / `epss` when the database
-  has them.
+- holds every source's SBOM per digest, up to 2000 digests, and matches
+  the union described above;
+- matches on one worker, with a time limit per match;
+- re-matches when any input changes (it fingerprints the union);
+- re-matches everything it holds when the sidecar reports a new database
+  build, without fetching any SBOM again. It polls the sidecar's `/db`
+  every minute;
+- emits `ImageVulnerabilities` with `source: "grype"`, `sbom_sources`,
+  `sbom_trust`, `db_updated_at`, and per-vulnerability `kev` / `epss` when
+  the database has them.
 
 ## Commands
 
@@ -293,12 +343,13 @@ auth and the read APIs.
 | `kguardian_supplychain_pending_emissions` | | Queue depth, including keys waiting out a backoff. |
 | `kguardian_supplychain_registry_lookups_total` | `result` | Uncached registry lookups: `index`, `manifest`, `unknown`, `skipped`. |
 | `kguardian_supplychain_registry_lookups_skipped_total` | `reason` | Lookups refused by the address guard. |
-| `kguardian_supplychain_registry_sbom_lookups_total` | `result` | Registry SBOM lookups per digest: `found`, `none`, `error`, `skipped_<reason>`, `list_error`. |
+| `kguardian_supplychain_registry_sbom_lookups_total` | `result` | Registry SBOM lookups per digest: `found`, `found_source_only`, `none`, `error`, `skipped_<reason>`, `rejected_empty`, `rejected_subject_mismatch`, `rejected_subject_missing`, `list_error`. |
+| `kguardian_supplychain_grype_components_clamped_total` | | Matches whose SBOM union exceeded 50 000 components and was truncated. |
 | `kguardian_supplychain_grype_db_built_timestamp_seconds` | | Build time of the loaded Grype DB; DB age is `time() - this`. |
 | `kguardian_supplychain_grype_match_runs_total` | `result` | Match runs (`ok`, `error`). |
 | `kguardian_supplychain_grype_matches_total` | | Vulnerabilities returned by match runs. |
 | `kguardian_supplychain_grype_match_duration_seconds` | | Time to match one SBOM. |
-| `kguardian_supplychain_grype_sboms_held` | | SBOMs held for re-matching. |
+| `kguardian_supplychain_grype_sboms_held` | | Digests whose SBOMs are held for re-matching. |
 
 Plus the standard Go runtime and process collectors.
 
@@ -359,7 +410,8 @@ broker holds for `(image.digest, source)`. Go definitions are in
 | `image.platform_manifests` | For an index: `"os/arch[/variant]"` → platform manifest digest. Omitted otherwise. |
 | `scanned_at` | When the source produced the report (`report.updateTimestamp`). |
 | `source` | `trivy-operator` or `grype`. |
-| `sbom_source` | For `grype`: which SBOM was matched (`registry` or `trivy-operator`). Omitted otherwise. |
+| `sbom_sources` | For `grype`: every SBOM source in the matched union (`registry`, `trivy-operator`). Omitted otherwise. |
+| `sbom_trust` | Weakest trust among the SBOM inputs (`attached-unbound` < `unverified` < `scanned` < `verified`); `scanned` for `trivy-operator`. See [SBOM trust and the union](#sbom-trust-and-the-union). |
 | `db_updated_at` | Build time of the vulnerability DB used. **Omitted for Trivy Operator**, which does not record it. Set for `grype`. |
 | `vulnerabilities[].kev`, `kev_date_added` | In CISA's Known Exploited Vulnerabilities catalogue, and since when. Grype DB only. Absent means unknown, not "not exploited". |
 | `vulnerabilities[].epss`, `epss_percentile` | FIRST.org EPSS probability and percentile (0-1). Grype DB only. |
@@ -405,6 +457,7 @@ serialises the same way.
 For `source: "registry"` the SBOM also carries:
 
 ```json
+"sbom_trust": "unverified",
 "attestation": {
   "mechanism": "buildkit-attestation",
   "artifact_digest": "sha256:6243...",
@@ -414,7 +467,9 @@ For `source: "registry"` the SBOM also carries:
 }
 ```
 
-with `scanner: {"name": "registry", "vendor": "<mechanism>"}`. `format`
+with `scanner: {"name": "registry", "vendor": "<mechanism>"}` and, for a
+BuildKit platform SBOM, `image.index_digest`. Every `ImageSBOM` carries
+`sbom_trust` (`scanned` for Trivy Operator). `format`
 is `CycloneDX` or `SPDX`.
 
 Components are the CycloneDX `components` with Trivy's `aquasecurity:trivy:*`

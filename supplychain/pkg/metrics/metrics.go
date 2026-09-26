@@ -45,6 +45,9 @@ type Metrics struct {
 	GrypeMatches      prometheus.Counter
 	GrypeMatchSeconds prometheus.Histogram
 	GrypeSBOMsHeld    prometheus.Gauge
+	// GrypeComponentsClamped counts matches whose SBOM union exceeded the
+	// component cap and was truncated.
+	GrypeComponentsClamped prometheus.Counter
 	// PendingEmissions is the size of the coalescing send queue.
 	PendingEmissions prometheus.Gauge
 }
@@ -110,7 +113,11 @@ func New() *Metrics {
 		}),
 		GrypeSBOMsHeld: prometheus.NewGauge(prometheus.GaugeOpts{
 			Name: "kguardian_supplychain_grype_sboms_held",
-			Help: "SBOMs held for (re-)matching, one per digest.",
+			Help: "Digests whose SBOMs are held for (re-)matching.",
+		}),
+		GrypeComponentsClamped: prometheus.NewCounter(prometheus.CounterOpts{
+			Name: "kguardian_supplychain_grype_components_clamped_total",
+			Help: "Matches whose de-duplicated SBOM union exceeded the component cap and was truncated.",
 		}),
 		SourceHealthy: prometheus.NewGaugeVec(prometheus.GaugeOpts{
 			Name: "kguardian_supplychain_source_healthy",
@@ -126,7 +133,7 @@ func New() *Metrics {
 		collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}),
 		m.ReportEvents, m.SourceAvailable, m.TrackedDigests,
 		m.UnresolvedReports, m.Emissions, m.Dropped, m.SourceHealthy, m.RegistryLookups, m.RegistryLookupsSkipped, m.RegistrySBOMLookups,
-		m.GrypeDBBuilt, m.GrypeMatchRuns, m.GrypeMatches, m.GrypeMatchSeconds, m.GrypeSBOMsHeld, m.PendingEmissions,
+		m.GrypeDBBuilt, m.GrypeMatchRuns, m.GrypeMatches, m.GrypeMatchSeconds, m.GrypeSBOMsHeld, m.GrypeComponentsClamped, m.PendingEmissions,
 	)
 	return m
 }

@@ -34,7 +34,7 @@ type Lister interface {
 
 // Fetcher finds SBOMs for one digest (registry.Inspector).
 type Fetcher interface {
-	FetchSBOMs(ctx context.Context, registry, repository, digest string) ([]registry.FoundSBOM, error)
+	FetchSBOMs(ctx context.Context, registry, repository, digest string) ([]registry.FoundSBOM, []string, error)
 }
 
 // Source polls the inventory and fetches registry SBOMs.
@@ -175,8 +175,11 @@ func (s *Source) markChecked(digest string) {
 }
 
 func (s *Source) lookup(ctx context.Context, im broker.Image) {
-	found, err := s.Fetcher.FetchSBOMs(ctx, "", im.Repository, im.Digest)
+	found, rejected, err := s.Fetcher.FetchSBOMs(ctx, "", im.Repository, im.Digest)
 	s.markChecked(im.Digest)
+	for _, r := range rejected {
+		s.count("rejected_" + r)
+	}
 	if err != nil {
 		if r, ok := registryBlocked(err); ok {
 			s.count("skipped_" + r)
@@ -193,6 +196,12 @@ func (s *Source) lookup(ctx context.Context, im broker.Image) {
 	}
 	s.count("found")
 	for _, f := range found {
+		if !hasOSPackages(f.Doc.Components) {
+			// Source-level only (e.g. a language lockfile SBOM): partial by
+			// nature. The matcher unions it with Trivy's, so it can add
+			// packages but never stand in for an OS scan.
+			s.count("found_source_only")
+		}
 		p := toPayload(im, f, s.now())
 		s.Sink.Enqueue(trivy.Emission{Kind: trivy.KindSBOM, Digest: p.Image.Digest, SBOM: p})
 	}
@@ -215,8 +224,12 @@ func registryBlocked(err error) (string, bool) {
 func toPayload(im broker.Image, f registry.FoundSBOM, now time.Time) *types.ImageSBOM {
 	reg, repo := splitRepository(im.Repository)
 	kind := im.DigestKind
+	index := f.IndexDigest
 	if f.Subject != im.Digest {
 		kind = types.DigestKindManifest // a platform manifest of the index
+		if index == "" {
+			index = im.Digest
+		}
 	}
 	if kind == "" {
 		kind = types.DigestKindUnknown
@@ -233,8 +246,9 @@ func toPayload(im broker.Image, f registry.FoundSBOM, now time.Time) *types.Imag
 	return &types.ImageSBOM{
 		SchemaVersion: types.SchemaVersion,
 		Image: types.ImageRef{
-			Digest: f.Subject, Ref: ref, Registry: reg, Repository: repo, Tag: tag, DigestKind: kind,
+			Digest: f.Subject, IndexDigest: index, Ref: ref, Registry: reg, Repository: repo, Tag: tag, DigestKind: kind,
 		},
+		SBOMTrust:   f.Trust,
 		Source:      types.SourceRegistry,
 		Scanner:     types.Scanner{Name: "registry", Vendor: att.Mechanism},
 		ScannedAt:   now.UTC(),
@@ -252,4 +266,20 @@ func splitRepository(r string) (string, string) {
 		return r[:i], r[i+1:]
 	}
 	return "", r
+}
+
+// hasOSPackages reports whether an SBOM lists any distro package (an
+// operating-system component, or an apk/deb/rpm/alpm PURL).
+func hasOSPackages(cs []types.Component) bool {
+	for _, c := range cs {
+		if c.Type == "operating-system" {
+			return true
+		}
+		for _, t := range []string{"pkg:apk/", "pkg:deb/", "pkg:rpm/", "pkg:alpm/"} {
+			if strings.HasPrefix(c.PURL, t) {
+				return true
+			}
+		}
+	}
+	return false
 }

@@ -1,11 +1,22 @@
 // Package match turns stored SBOMs into vulnerability payloads with a
-// Matcher (Grype), independent of which Matcher implementation is used.
+// Matcher (the Grype sidecar), independent of which Matcher is used.
 //
-// It keeps one SBOM per digest - the highest-priority source seen
-// (registry-attested > Trivy SbomReport) - bounded by MaxDigests, matches
-// each new or changed SBOM once, and re-matches everything it holds when
-// the Matcher reports a new vulnerability database, without fetching any
-// SBOM again.
+// Registry SBOMs are unverified: anyone who can push to an image's
+// repository can attach one. So an unverified document may only ADD to
+// what is matched, never remove from it. For each image the matcher's
+// input is the UNION of every SBOM held for it - Trivy's SbomReport (a
+// scan of the running image) and any registry SBOM - with duplicate
+// packages merged. A registry SBOM that lists fewer packages than Trivy
+// found can therefore never hide a finding.
+//
+// Join key. BuildKit registry SBOMs are keyed by a platform manifest
+// digest (with image.index_digest set), while Trivy usually reports the
+// index digest. A platform SBOM whose index has a Trivy SBOM is folded
+// into the index's group, so the two meet; it is not matched on its own
+// (an unverified document is never the only input while Trivy's exists).
+//
+// Everything held is re-matched when the Matcher reports a new database,
+// without fetching any SBOM again.
 package match
 
 import (
@@ -13,6 +24,9 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"slices"
+	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -39,22 +53,17 @@ type Matcher interface {
 	Scanner() types.Scanner
 }
 
-// Priority of SBOM sources for matching; higher wins.
-func priority(source string) int {
-	switch source {
-	case types.SourceRegistry:
-		return 2
-	case types.SourceTrivyOperator:
-		return 1
-	}
-	return 0
+// DefaultMaxComponents matches the sidecar's per-request limit.
+const DefaultMaxComponents = 50000
+
+type held struct {
+	sbom     *types.ImageSBOM
+	lastUsed time.Time
 }
 
-type entry struct {
-	sbom        *types.ImageSBOM
+type groupState struct {
 	fingerprint string
-	lastUsed    time.Time
-	matchedDB   time.Time // DBInfo.Built it was last matched against
+	matchedDB   time.Time
 }
 
 // Coordinator holds SBOMs and schedules matching on one worker.
@@ -63,27 +72,35 @@ type Coordinator struct {
 	Sink    trivy.Sink
 	Log     *logrus.Logger
 	Metrics *metrics.Metrics
-	// MaxDigests bounds the SBOMs held. Default 2000.
+	// MaxDigests bounds the digests whose SBOMs are held. Default 2000.
 	MaxDigests int
+	// MaxComponents caps one match's input after de-duplication.
+	// Default DefaultMaxComponents.
+	MaxComponents int
 	// MatchTimeout bounds one match. Default 2m.
 	MatchTimeout time.Duration
 
-	now     func() time.Time
-	mu      sync.Mutex
-	entries map[string]*entry
-	queue   map[string]struct{}
-	notify  chan struct{}
-	dbSeen  time.Time
+	now    func() time.Time
+	mu     sync.Mutex
+	sboms  map[string]map[string]*held // digest -> source -> SBOM
+	groups map[string]*groupState
+	queue  map[string]struct{}
+	notify chan struct{}
+	dbSeen time.Time
 }
 
 func (c *Coordinator) init() {
-	if c.entries == nil {
-		c.entries = map[string]*entry{}
+	if c.sboms == nil {
+		c.sboms = map[string]map[string]*held{}
+		c.groups = map[string]*groupState{}
 		c.queue = map[string]struct{}{}
 		c.notify = make(chan struct{}, 1)
 	}
 	if c.MaxDigests <= 0 {
 		c.MaxDigests = 2000
+	}
+	if c.MaxComponents <= 0 {
+		c.MaxComponents = DefaultMaxComponents
 	}
 	if c.MatchTimeout <= 0 {
 		c.MatchTimeout = 2 * time.Minute
@@ -93,9 +110,8 @@ func (c *Coordinator) init() {
 	}
 }
 
-// Offer records an SBOM. It replaces the held SBOM for the digest only if
-// its source has equal or higher priority, and queues a match when the
-// held SBOM's content changed. Never blocks.
+// Offer records an SBOM (replacing the previous one from the same source
+// for the same digest) and queues its group for matching. Never blocks.
 func (c *Coordinator) Offer(sbom *types.ImageSBOM) {
 	if sbom == nil || sbom.Image.Digest == "" || sbom.Page != nil {
 		return
@@ -103,21 +119,12 @@ func (c *Coordinator) Offer(sbom *types.ImageSBOM) {
 	c.mu.Lock()
 	c.init()
 	d := sbom.Image.Digest
-	fp := fingerprint(sbom)
-	cur, ok := c.entries[d]
-	switch {
-	case ok && priority(sbom.Source) < priority(cur.sbom.Source):
-		cur.lastUsed = c.now()
-		c.mu.Unlock()
-		return
-	case ok && cur.fingerprint == fp:
-		cur.lastUsed = c.now()
-		c.mu.Unlock()
-		return
+	if _, ok := c.sboms[d]; !ok {
+		c.evictLocked()
+		c.sboms[d] = map[string]*held{}
 	}
-	c.evictLocked(d)
-	c.entries[d] = &entry{sbom: sbom, fingerprint: fp, lastUsed: c.now()}
-	c.queue[d] = struct{}{}
+	c.sboms[d][sbom.Source] = &held{sbom: sbom, lastUsed: c.now()}
+	c.queue[c.groupKeyLocked(d)] = struct{}{}
 	c.gaugesLocked()
 	c.mu.Unlock()
 	c.wake()
@@ -142,22 +149,72 @@ func (t teeSink) Enqueue(e trivy.Emission) {
 	}
 }
 
-func (c *Coordinator) evictLocked(keep string) {
-	for len(c.entries) >= c.MaxDigests {
+// parentLocked returns the index a digest's SBOMs name, if any.
+func (c *Coordinator) parentLocked(d string) string {
+	for _, h := range c.sboms[d] {
+		if h.sbom.Image.IndexDigest != "" && h.sbom.Image.IndexDigest != d {
+			return h.sbom.Image.IndexDigest
+		}
+	}
+	return ""
+}
+
+// groupKeyLocked is the digest a digest's SBOMs are matched under: its
+// index when that index has a Trivy SBOM, else itself.
+func (c *Coordinator) groupKeyLocked(d string) string {
+	if p := c.parentLocked(d); p != "" {
+		if _, ok := c.sboms[p][types.SourceTrivyOperator]; ok {
+			return p
+		}
+	}
+	return d
+}
+
+// membersLocked returns the SBOMs matched under key: Trivy's first.
+func (c *Coordinator) membersLocked(key string) []*types.ImageSBOM {
+	var out []*types.ImageSBOM
+	add := func(d string) {
+		srcs := make([]string, 0, len(c.sboms[d]))
+		for s := range c.sboms[d] {
+			srcs = append(srcs, s)
+		}
+		sort.Slice(srcs, func(i, j int) bool {
+			return srcs[i] == types.SourceTrivyOperator || (srcs[j] != types.SourceTrivyOperator && srcs[i] < srcs[j])
+		})
+		for _, s := range srcs {
+			out = append(out, c.sboms[d][s].sbom)
+		}
+	}
+	add(key)
+	var children []string
+	for d := range c.sboms {
+		if d != key && c.groupKeyLocked(d) == key {
+			children = append(children, d)
+		}
+	}
+	sort.Strings(children)
+	for _, d := range children {
+		add(d)
+	}
+	return out
+}
+
+func (c *Coordinator) evictLocked() {
+	for len(c.sboms) >= c.MaxDigests {
 		var oldest string
 		var t time.Time
-		for d, e := range c.entries {
-			if d == keep {
-				continue
-			}
-			if oldest == "" || e.lastUsed.Before(t) {
-				oldest, t = d, e.lastUsed
+		for d, bySrc := range c.sboms {
+			for _, h := range bySrc {
+				if oldest == "" || h.lastUsed.Before(t) {
+					oldest, t = d, h.lastUsed
+				}
 			}
 		}
 		if oldest == "" {
 			return
 		}
-		delete(c.entries, oldest)
+		delete(c.sboms, oldest)
+		delete(c.groups, oldest)
 		delete(c.queue, oldest)
 	}
 }
@@ -169,14 +226,14 @@ func (c *Coordinator) wake() {
 	}
 }
 
-// Held returns the number of SBOMs held.
+// Held returns the number of digests with SBOMs held.
 func (c *Coordinator) Held() int {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	return len(c.entries)
+	return len(c.sboms)
 }
 
-// Run matches queued SBOMs until ctx is cancelled, polling the Matcher's
+// Run matches queued groups until ctx is cancelled, polling the Matcher's
 // database every dbPoll and re-queuing everything when it changes.
 func (c *Coordinator) Run(ctx context.Context, dbPoll time.Duration) {
 	c.mu.Lock()
@@ -199,7 +256,6 @@ func (c *Coordinator) Run(ctx context.Context, dbPoll time.Duration) {
 	}
 }
 
-// checkDB re-queues every held SBOM when the database changed.
 func (c *Coordinator) checkDB() {
 	db := c.Matcher.DB()
 	if c.Metrics != nil && !db.Built.IsZero() {
@@ -212,13 +268,11 @@ func (c *Coordinator) checkDB() {
 	}
 	first := c.dbSeen.IsZero()
 	c.dbSeen = db.Built
-	for d, e := range c.entries {
-		if !e.matchedDB.Equal(db.Built) {
-			c.queue[d] = struct{}{}
-		}
+	for d := range c.sboms {
+		c.queue[c.groupKeyLocked(d)] = struct{}{}
 	}
 	if !first && c.Log != nil {
-		c.Log.WithFields(logrus.Fields{"built": db.Built, "held": len(c.entries)}).
+		c.Log.WithFields(logrus.Fields{"built": db.Built, "held": len(c.sboms)}).
 			Info("vulnerability database updated; re-matching held SBOMs")
 	}
 }
@@ -230,30 +284,86 @@ func (c *Coordinator) drain(ctx context.Context) {
 			c.mu.Unlock()
 			return // no database yet: keep the queue for when one loads
 		}
-		var d string
+		var key string
 		for k := range c.queue {
-			d = k
+			key = k
 			break
 		}
-		if d == "" {
+		if key == "" {
 			c.mu.Unlock()
 			return
 		}
-		delete(c.queue, d)
-		e := c.entries[d]
-		c.mu.Unlock()
-		if e == nil {
-			continue
+		delete(c.queue, key)
+		if c.groupKeyLocked(key) != key {
+			c.mu.Unlock()
+			continue // folded into its index's group
 		}
-		c.matchOne(ctx, d, e)
+		in := c.unionLocked(key)
+		gs := c.groups[key]
+		if gs == nil {
+			gs = &groupState{}
+			c.groups[key] = gs
+		}
+		db := c.dbSeen
+		skip := in == nil || (gs.fingerprint == in.fingerprint && gs.matchedDB.Equal(db))
+		c.mu.Unlock()
+		if !skip {
+			c.matchOne(ctx, key, in, db)
+		}
 	}
 }
 
-func (c *Coordinator) matchOne(ctx context.Context, digest string, e *entry) {
-	db := c.Matcher.DB()
+// union is one group's matcher input.
+type union struct {
+	sbom        *types.ImageSBOM
+	sources     []string
+	trust       string
+	observedIn  []types.WorkloadRef
+	fingerprint string
+}
+
+func (c *Coordinator) unionLocked(key string) *union {
+	members := c.membersLocked(key)
+	if len(members) == 0 {
+		return nil
+	}
+	comps, clamped := mergeComponents(members, c.MaxComponents)
+	if clamped > 0 {
+		if c.Metrics != nil {
+			c.Metrics.GrypeComponentsClamped.Inc()
+		}
+		if c.Log != nil {
+			c.Log.WithFields(logrus.Fields{"digest": key, "dropped": clamped, "max": c.MaxComponents}).
+				Warn("SBOM union exceeds the component limit; matching a truncated set")
+		}
+	}
+	u := &union{trust: types.SBOMTrustVerified}
+	img := members[0].Image
+	for _, m := range members {
+		if !slices.Contains(u.sources, m.Source) {
+			u.sources = append(u.sources, m.Source)
+		}
+		if types.TrustRank(m.SBOMTrust) < types.TrustRank(u.trust) {
+			u.trust = m.SBOMTrust
+		}
+		if m.Source == types.SourceTrivyOperator {
+			img = m.Image
+			u.observedIn = m.ObservedIn
+		}
+	}
+	sort.Strings(u.sources)
+	img.Digest = key
+	u.sbom = &types.ImageSBOM{Image: img, Components: comps}
+	b, _ := json.Marshal(comps)
+	sum := sha256.Sum256(b)
+	u.fingerprint = hex.EncodeToString(sum[:])
+	return u
+}
+
+func (c *Coordinator) matchOne(ctx context.Context, key string, in *union, db time.Time) {
 	mctx, cancel := context.WithTimeout(ctx, c.MatchTimeout)
 	start := c.now()
-	vulns, err := c.Matcher.Match(mctx, e.sbom)
+	vulns, err := c.Matcher.Match(mctx, in.sbom)
 	cancel()
 	if c.Metrics != nil {
 		c.Metrics.GrypeMatchSeconds.Observe(c.now().Sub(start).Seconds())
@@ -261,29 +371,30 @@ func (c *Coordinator) matchOne(ctx context.Context, digest string, e *entry) {
 	if err != nil {
 		c.count("error")
 		if c.Log != nil {
-			c.Log.WithError(err).WithField("digest", digest).Warn("matching failed")
+			c.Log.WithError(err).WithField("digest", key).Warn("matching failed")
 		}
 		return
 	}
 	c.count("ok")
 	c.mu.Lock()
-	if cur := c.entries[digest]; cur == e {
-		e.matchedDB = db.Built
+	if gs := c.groups[key]; gs != nil {
+		gs.fingerprint, gs.matchedDB = in.fingerprint, db
 	}
 	c.mu.Unlock()
 	if vulns == nil {
 		vulns = []types.Vulnerability{}
 	}
-	built := db.Built
-	c.Sink.Enqueue(trivy.Emission{Kind: trivy.KindVulnerabilities, Digest: digest, Vulns: &types.ImageVulnerabilities{
+	built := db
+	c.Sink.Enqueue(trivy.Emission{Kind: trivy.KindVulnerabilities, Digest: key, Vulns: &types.ImageVulnerabilities{
 		SchemaVersion:   types.SchemaVersion,
-		Image:           e.sbom.Image,
+		Image:           in.sbom.Image,
 		Source:          types.SourceGrype,
-		SBOMSource:      e.sbom.Source,
+		SBOMSources:     in.sources,
+		SBOMTrust:       in.trust,
 		Scanner:         c.Matcher.Scanner(),
 		ScannedAt:       c.now().UTC(),
 		DBUpdatedAt:     &built,
-		ObservedIn:      e.sbom.ObservedIn,
+		ObservedIn:      in.observedIn,
 		Vulnerabilities: vulns,
 	}})
 	if c.Metrics != nil {
@@ -299,13 +410,105 @@ func (c *Coordinator) count(result string) {
 
 func (c *Coordinator) gaugesLocked() {
 	if c.Metrics != nil {
-		c.Metrics.GrypeSBOMsHeld.Set(float64(len(c.entries)))
+		c.Metrics.GrypeSBOMsHeld.Set(float64(len(c.sboms)))
 	}
 }
 
-// fingerprint covers what matching depends on: the components.
-func fingerprint(s *types.ImageSBOM) string {
-	b, _ := json.Marshal(s.Components)
-	sum := sha256.Sum256(b)
-	return hex.EncodeToString(sum[:])
+// --- union of components ---------------------------------------------
+
+// osTypes maps Trivy's distro-named package types onto PURL types, so a
+// Trivy "debian" package and a registry "deb" PURL de-duplicate.
+var osTypes = map[string]string{
+	"debian": "deb", "ubuntu": "deb", "distroless": "deb",
+	"alpine": "apk", "wolfi": "apk", "chainguard": "apk",
+	"redhat": "rpm", "centos": "rpm", "rocky": "rpm", "alma": "rpm", "amazon": "rpm",
+	"oracle": "rpm", "suse": "rpm", "opensuse": "rpm", "opensuse.leap": "rpm", "sles": "rpm",
+	"photon": "rpm", "fedora": "rpm", "cbl-mariner": "rpm", "azurelinux": "rpm",
+}
+
+func purlType(purl string) string {
+	rest, ok := strings.CutPrefix(purl, "pkg:")
+	if !ok {
+		return ""
+	}
+	if i := strings.IndexByte(rest, '/'); i > 0 {
+		return strings.ToLower(rest[:i])
+	}
+	return ""
+}
+
+func componentKey(c types.Component) string {
+	t := purlType(c.PURL)
+	if t == "" {
+		t = strings.ToLower(c.Type)
+		if m, ok := osTypes[t]; ok {
+			t = m
+		}
+	}
+	return t + "\x00" + c.Name + "\x00" + c.Version
+}
+
+// mergeComponents returns the de-duplicated union of the members'
+// components and how many were dropped by the cap.
+//   - Packages merge on (type, name, version). The merged entry keeps the
+//     richer PURL (one with an "upstream" source-package qualifier),
+//     fills a missing source package, and unions file paths and licences.
+//   - Exactly one operating-system component is kept: Trivy's when it has
+//     one (it read the running image), else the first registry one. The
+//     matcher takes the distro from it before any PURL qualifier.
+func mergeComponents(members []*types.ImageSBOM, max int) ([]types.Component, int) {
+	var osComp *types.Component
+	byKey := map[string]*types.Component{}
+	var order []string
+	for _, m := range members {
+		for _, c := range m.Components {
+			if c.Type == "operating-system" {
+				if osComp == nil {
+					cc := c
+					osComp = &cc
+				}
+				continue
+			}
+			k := componentKey(c)
+			cur, ok := byKey[k]
+			if !ok {
+				cc := c
+				cc.FilePaths = slices.Clone(c.FilePaths)
+				cc.Licenses = slices.Clone(c.Licenses)
+				byKey[k] = &cc
+				order = append(order, k)
+				continue
+			}
+			if cur.PURL == "" || (!strings.Contains(cur.PURL, "upstream=") && strings.Contains(c.PURL, "upstream=")) {
+				cur.PURL = c.PURL
+			}
+			if cur.SrcName == "" {
+				cur.SrcName, cur.SrcVersion = c.SrcName, c.SrcVersion
+			}
+			cur.FilePaths = unionStrings(cur.FilePaths, c.FilePaths)
+			cur.Licenses = unionStrings(cur.Licenses, c.Licenses)
+		}
+	}
+	sort.Strings(order)
+	out := make([]types.Component, 0, len(order)+1)
+	if osComp != nil {
+		out = append(out, *osComp)
+	}
+	for _, k := range order {
+		out = append(out, *byKey[k])
+	}
+	if max > 0 && len(out) > max {
+		return out[:max], len(out) - max
+	}
+	return out, 0
+}
+
+func unionStrings(a, b []string) []string {
+	for _, s := range b {
+		if !slices.Contains(a, s) {
+			a = append(a, s)
+		}
+	}
+	sort.Strings(a)
+	return a
 }

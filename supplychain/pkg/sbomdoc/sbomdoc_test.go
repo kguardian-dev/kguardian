@@ -47,6 +47,10 @@ func TestParseBuildKitSPDXStatement(t *testing.T) {
 	if d.Format != FormatSPDX || d.SpecVersion != "2.3" || d.PredicateType != PredicateSPDX {
 		t.Errorf("header: %+v", d)
 	}
+	// The statement's subject is the linux/amd64 platform manifest.
+	if !d.InToto || len(d.Subjects) != 1 || d.Subjects[0] != "sha256:c64c687cbea9300178b30c95835354e34c4e4febc4badfe27102879de0483b5e" {
+		t.Errorf("subjects: %v %v", d.InToto, d.Subjects)
+	}
 	// 18 SPDX packages: 17 apk packages plus the document's own "sbom"
 	// FILE-purpose package, which is not a component.
 	if len(d.Components) != 17 {

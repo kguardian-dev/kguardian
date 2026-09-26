@@ -44,8 +44,14 @@ type Doc struct {
 	Format        string
 	SpecVersion   string
 	PredicateType string // set when it came from an in-toto statement
-	Components    []types.Component
-	Truncated     bool
+	// InToto is true when the document was an in-toto statement's
+	// predicate; Subjects are that statement's subject digests
+	// ("sha256:<hex>"), which a caller must check against the image the
+	// document is attached to.
+	InToto     bool
+	Subjects   []string
+	Components []types.Component
+	Truncated  bool
 }
 
 // IsSBOMPredicate reports whether an in-toto predicate type is an SBOM.
@@ -69,6 +75,9 @@ func Parse(b []byte) (*Doc, error) {
 		Type          string          `json:"_type"`
 		PredicateType string          `json:"predicateType"`
 		Predicate     json.RawMessage `json:"predicate"`
+		Subject       []struct {
+			Digest map[string]string `json:"digest"`
+		} `json:"subject"`
 		// SBOMs
 		BOMFormat   string `json:"bomFormat"`
 		SPDXVersion string `json:"spdxVersion"`
@@ -90,6 +99,16 @@ func Parse(b []byte) (*Doc, error) {
 			return nil, err
 		}
 		d.PredicateType = probe.PredicateType
+		d.InToto = true
+		// BuildKit lists one subject per image name, all with the same
+		// digest; keep each digest once.
+		seen := map[string]bool{}
+		for _, sub := range probe.Subject {
+			if h := strings.ToLower(sub.Digest["sha256"]); h != "" && !seen[h] {
+				seen[h] = true
+				d.Subjects = append(d.Subjects, "sha256:"+h)
+			}
+		}
 		return d, nil
 	case probe.BOMFormat == "CycloneDX":
 		return parseCycloneDX(b)

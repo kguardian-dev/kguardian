@@ -43,13 +43,38 @@ const (
 	MaxArtifacts = 16
 )
 
+// Rejection reasons for documents that were found but not used.
+const (
+	RejectEmpty           = "empty"            // no components
+	RejectSubjectMissing  = "subject_missing"  // in-toto statement without a sha256 subject
+	RejectSubjectMismatch = "subject_mismatch" // subject is neither the image nor one of its platform manifests
+)
+
 // FoundSBOM is one SBOM located for an image.
 type FoundSBOM struct {
 	// Subject is the digest the SBOM describes: the digest asked about,
-	// or, for BuildKit attestations of an index, one platform manifest.
-	Subject     string
+	// or one platform manifest of it when the digest is an index.
+	Subject string
+	// IndexDigest is the index Subject belongs to, when Subject is a
+	// platform manifest of the digest asked about.
+	IndexDigest string
 	Doc         *sbomdoc.Doc
 	Attestation sctypes.Attestation
+	// Trust is SBOMTrustUnverified for an in-toto statement whose subject
+	// matched, SBOMTrustAttachedUnbound for a bare document.
+	Trust string
+}
+
+// fetch is one FetchSBOMs call's state.
+type fetch struct {
+	i    *Inspector
+	d    name.Digest
+	opts []remote.Option
+	// index is set when d is an image index; allowed holds d and its
+	// platform manifests: the only subjects a statement may name.
+	index    *v1.IndexManifest
+	allowed  map[string]bool
+	rejected []string
 }
 
 // FetchSBOMs finds SBOMs attached to repository@digest, anonymously and
@@ -59,53 +84,125 @@ type FoundSBOM struct {
 //  3. cosign attached SBOMs (tag sha256-<hex>.sbom),
 //  4. BuildKit attestation manifests inside an index.
 //
-// The first SBOM found for a subject wins. A refused destination returns
-// a *BlockedError; "nothing attached" is an empty result, not an error.
-func (i *Inspector) FetchSBOMs(ctx context.Context, registry, repository, digest string) ([]FoundSBOM, error) {
+// Nothing here verifies a signature, so every document is untrusted:
+//   - an in-toto statement must name, as a sha256 subject, the digest asked
+//     about or one of its platform manifests; otherwise it is rejected;
+//   - a bare SPDX/CycloneDX document cannot say what it describes and is
+//     accepted as "attached-unbound";
+//   - a document with no components is rejected.
+//
+// The first acceptable SBOM per subject wins. Rejection reasons are
+// returned alongside. A refused destination returns a *BlockedError;
+// "nothing attached" is an empty result, not an error.
+func (i *Inspector) FetchSBOMs(ctx context.Context, registry, repository, digest string) ([]FoundSBOM, []string, error) {
 	d, err := i.digestRef(registry, repository, digest)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	ctx, cancel := context.WithTimeout(ctx, 6*i.timeout())
 	defer cancel()
-	opts := i.remoteOpts(ctx)
+	f := &fetch{i: i, d: d, opts: i.remoteOpts(ctx), allowed: map[string]bool{digest: true}}
 
+	var errs []error
+	if err := f.loadIndex(); err != nil {
+		errs = append(errs, err)
+	}
 	var out []FoundSBOM
 	have := map[string]bool{}
-	add := func(f []FoundSBOM) {
-		for _, x := range f {
+	collect := func(found []FoundSBOM, err error) {
+		for _, x := range found {
 			if !have[x.Subject] {
 				have[x.Subject] = true
 				out = append(out, x)
 			}
 		}
-	}
-	var errs []error
-	collect := func(f []FoundSBOM, err error) {
-		add(f)
 		if err != nil {
 			errs = append(errs, err)
 		}
 	}
-	collect(i.fromReferrers(d, opts))
+	collect(f.fromReferrers())
 	if !have[digest] {
-		collect(i.fromCosignTag(d, "att", sctypes.MechanismCosignAttestation, opts))
+		collect(f.fromCosignTag("att", sctypes.MechanismCosignAttestation))
 	}
 	if !have[digest] {
-		collect(i.fromCosignTag(d, "sbom", sctypes.MechanismCosignSBOM, opts))
+		collect(f.fromCosignTag("sbom", sctypes.MechanismCosignSBOM))
 	}
-	collect(i.fromBuildKit(d, opts))
+	collect(f.fromBuildKit())
 
 	// A refusal anywhere is the answer: the destination is off limits.
 	for _, e := range errs {
 		if _, ok := blockedReason(e); ok {
-			return nil, e
+			return nil, nil, e
 		}
 	}
 	if len(out) == 0 && len(errs) > 0 {
-		return nil, errors.Join(errs...)
+		return nil, f.rejected, errors.Join(errs...)
 	}
-	return out, nil
+	return out, f.rejected, nil
+}
+
+func (f *fetch) loadIndex() error {
+	desc, err := remote.Get(f.d, f.opts...)
+	if err != nil {
+		if isNotFound(err) {
+			return nil
+		}
+		return err
+	}
+	if !desc.MediaType.IsIndex() {
+		return nil
+	}
+	idx, err := desc.ImageIndex()
+	if err != nil {
+		return err
+	}
+	im, err := idx.IndexManifest()
+	if err != nil {
+		return err
+	}
+	f.index = im
+	for _, m := range im.Manifests {
+		if m.Annotations[annRefType] == "" && m.MediaType.IsImage() {
+			f.allowed[m.Digest.String()] = true
+		}
+	}
+	return nil
+}
+
+// accept validates doc for the subject the carrier points at (want) and
+// returns the FoundSBOM, or records a rejection and returns false.
+func (f *fetch) accept(doc *sbomdoc.Doc, want string, att sctypes.Attestation) (FoundSBOM, bool) {
+	if len(doc.Components) == 0 {
+		f.rejected = append(f.rejected, RejectEmpty)
+		return FoundSBOM{}, false
+	}
+	found := FoundSBOM{Doc: doc, Attestation: att, Subject: want, Trust: sctypes.SBOMTrustAttachedUnbound}
+	if doc.InToto {
+		if len(doc.Subjects) == 0 {
+			f.rejected = append(f.rejected, RejectSubjectMissing)
+			return FoundSBOM{}, false
+		}
+		match := ""
+		for _, s := range doc.Subjects {
+			if s == want {
+				match = s
+				break
+			}
+			if match == "" && f.allowed[s] {
+				match = s
+			}
+		}
+		if match == "" {
+			f.rejected = append(f.rejected, RejectSubjectMismatch)
+			return FoundSBOM{}, false
+		}
+		found.Subject = match
+		found.Trust = sctypes.SBOMTrustUnverified
+	}
+	if found.Subject != f.d.DigestStr() {
+		found.IndexDigest = f.d.DigestStr()
+	}
+	return found, true
 }
 
 func (i *Inspector) digestRef(registry, repository, digest string) (name.Digest, error) {
@@ -140,8 +237,8 @@ func isNotFound(err error) bool {
 	return errors.As(err, &te) && te.StatusCode == http.StatusNotFound
 }
 
-func (i *Inspector) fromReferrers(d name.Digest, opts []remote.Option) ([]FoundSBOM, error) {
-	idx, err := remote.Referrers(d, opts...)
+func (f *fetch) fromReferrers() ([]FoundSBOM, error) {
+	idx, err := remote.Referrers(f.d, f.opts...)
 	if err != nil {
 		if isNotFound(err) {
 			return nil, nil
@@ -152,100 +249,85 @@ func (i *Inspector) fromReferrers(d name.Digest, opts []remote.Option) ([]FoundS
 	if err != nil {
 		return nil, err
 	}
-	var out []FoundSBOM
 	for n, desc := range im.Manifests {
 		if n >= MaxArtifacts {
 			break
 		}
-		at := desc.ArtifactType
-		if !isCarrier(at) {
+		if !isCarrier(desc.ArtifactType) {
 			continue
 		}
 		// Skip bundles that announce a non-SBOM predicate without fetching.
 		if pt := desc.Annotations[annBundlePredicateType]; pt != "" && !sbomdoc.IsSBOMPredicate(pt) {
 			continue
 		}
-		docs, err := i.sbomsInManifest(d.Context().Digest(desc.Digest.String()), opts)
+		docs, err := f.sbomsInManifest(f.d.Context().Digest(desc.Digest.String()))
 		if err != nil {
-			return out, err
+			return nil, err
 		}
 		for _, doc := range docs {
-			out = append(out, FoundSBOM{Subject: d.DigestStr(), Doc: doc.doc, Attestation: sctypes.Attestation{
-				Mechanism: sctypes.MechanismOCIReferrer, ArtifactDigest: desc.Digest.String(),
-				MediaType: doc.mediaType, PredicateType: doc.doc.PredicateType,
-			}})
-			return out, nil
+			att := sctypes.Attestation{Mechanism: sctypes.MechanismOCIReferrer, ArtifactDigest: desc.Digest.String(),
+				MediaType: doc.mediaType, PredicateType: doc.doc.PredicateType}
+			if found, ok := f.accept(doc.doc, f.d.DigestStr(), att); ok {
+				return []FoundSBOM{found}, nil
+			}
 		}
 	}
-	return out, nil
+	return nil, nil
 }
 
-func (i *Inspector) fromCosignTag(d name.Digest, suffix, mechanism string, opts []remote.Option) ([]FoundSBOM, error) {
-	tag := d.Context().Tag(strings.Replace(d.DigestStr(), ":", "-", 1) + "." + suffix)
-	desc, err := remote.Get(tag, opts...)
+func (f *fetch) fromCosignTag(suffix, mechanism string) ([]FoundSBOM, error) {
+	tag := f.d.Context().Tag(strings.Replace(f.d.DigestStr(), ":", "-", 1) + "." + suffix)
+	desc, err := remote.Get(tag, f.opts...)
 	if err != nil {
 		if isNotFound(err) {
 			return nil, nil
 		}
 		return nil, fmt.Errorf("cosign %s: %w", suffix, err)
 	}
-	docs, err := i.sbomsInManifest(d.Context().Digest(desc.Digest.String()), opts)
+	docs, err := f.sbomsInManifest(f.d.Context().Digest(desc.Digest.String()))
 	if err != nil {
 		return nil, err
 	}
 	for _, doc := range docs {
-		return []FoundSBOM{{Subject: d.DigestStr(), Doc: doc.doc, Attestation: sctypes.Attestation{
-			Mechanism: mechanism, ArtifactDigest: desc.Digest.String(),
-			MediaType: doc.mediaType, PredicateType: doc.doc.PredicateType,
-		}}}, nil
+		att := sctypes.Attestation{Mechanism: mechanism, ArtifactDigest: desc.Digest.String(),
+			MediaType: doc.mediaType, PredicateType: doc.doc.PredicateType}
+		if found, ok := f.accept(doc.doc, f.d.DigestStr(), att); ok {
+			return []FoundSBOM{found}, nil
+		}
 	}
 	return nil, nil
 }
 
 // fromBuildKit reads SBOM attestations BuildKit stores inside an image
 // index as unknown/unknown manifests pointing at a platform manifest.
-func (i *Inspector) fromBuildKit(d name.Digest, opts []remote.Option) ([]FoundSBOM, error) {
-	desc, err := remote.Get(d, opts...)
-	if err != nil {
-		if isNotFound(err) {
-			return nil, nil
-		}
-		return nil, err
-	}
-	if !desc.MediaType.IsIndex() {
+func (f *fetch) fromBuildKit() ([]FoundSBOM, error) {
+	if f.index == nil {
 		return nil, nil
-	}
-	idx, err := desc.ImageIndex()
-	if err != nil {
-		return nil, err
-	}
-	im, err := idx.IndexManifest()
-	if err != nil {
-		return nil, err
 	}
 	var out []FoundSBOM
 	seen := 0
-	for _, m := range im.Manifests {
+	for _, m := range f.index.Manifests {
 		if m.Annotations[annRefType] != "attestation-manifest" {
 			continue
 		}
 		if seen++; seen > MaxArtifacts {
 			break
 		}
-		subject := m.Annotations[annRefDigest]
-		if subject == "" {
+		platform := m.Annotations[annRefDigest]
+		if platform == "" || !f.allowed[platform] {
 			continue
 		}
-		docs, err := i.sbomsInManifest(d.Context().Digest(m.Digest.String()), opts)
+		docs, err := f.sbomsInManifest(f.d.Context().Digest(m.Digest.String()))
 		if err != nil {
 			return out, err
 		}
 		for _, doc := range docs {
-			out = append(out, FoundSBOM{Subject: subject, Doc: doc.doc, Attestation: sctypes.Attestation{
-				Mechanism: sctypes.MechanismBuildKitAttestation, ArtifactDigest: m.Digest.String(),
-				MediaType: doc.mediaType, PredicateType: doc.doc.PredicateType,
-			}})
-			break
+			att := sctypes.Attestation{Mechanism: sctypes.MechanismBuildKitAttestation, ArtifactDigest: m.Digest.String(),
+				MediaType: doc.mediaType, PredicateType: doc.doc.PredicateType}
+			if found, ok := f.accept(doc.doc, platform, att); ok {
+				out = append(out, found)
+				break
+			}
 		}
 	}
 	return out, nil
@@ -258,8 +340,8 @@ type parsedLayer struct {
 
 // sbomsInManifest parses every SBOM-bearing layer of one artifact
 // manifest, skipping layers that announce a non-SBOM predicate.
-func (i *Inspector) sbomsInManifest(ref name.Digest, opts []remote.Option) ([]parsedLayer, error) {
-	img, err := remote.Image(ref, opts...)
+func (f *fetch) sbomsInManifest(ref name.Digest) ([]parsedLayer, error) {
+	img, err := remote.Image(ref, f.opts...)
 	if err != nil {
 		return nil, fmt.Errorf("artifact %s: %w", ref.DigestStr(), err)
 	}

@@ -29,17 +29,18 @@ type fetcher struct {
 	mu    sync.Mutex
 	calls map[string]int
 	res   map[string][]registry.FoundSBOM
+	rej   map[string][]string
 	errs  map[string]error
 }
 
-func (f *fetcher) FetchSBOMs(_ context.Context, _, repo, digest string) ([]registry.FoundSBOM, error) {
+func (f *fetcher) FetchSBOMs(_ context.Context, _, repo, digest string) ([]registry.FoundSBOM, []string, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.calls == nil {
 		f.calls = map[string]int{}
 	}
 	f.calls[digest]++
-	return f.res[digest], f.errs[digest]
+	return f.res[digest], f.rej[digest], f.errs[digest]
 }
 
 type sink struct {
@@ -64,8 +65,9 @@ func TestPassEmitsAndRechecks(t *testing.T) {
 		{Digest: "sha256:" + rep("d"), Repository: "10.0.0.5:5000/lan", RunningContainers: 1},
 	}}
 	f := &fetcher{
-		res: map[string][]registry.FoundSBOM{idx: {{Subject: plat, Doc: doc(),
+		res: map[string][]registry.FoundSBOM{idx: {{Subject: plat, IndexDigest: idx, Doc: doc(), Trust: types.SBOMTrustUnverified,
 			Attestation: types.Attestation{Mechanism: types.MechanismBuildKitAttestation, ArtifactDigest: "sha256:" + rep("e")}}}},
+		rej:  map[string][]string{"sha256:" + rep("c"): {registry.RejectEmpty, registry.RejectSubjectMismatch}},
 		errs: map[string]error{"sha256:" + rep("d"): &registry.BlockedError{Reason: registry.ReasonPrivateAddress}},
 	}
 	s := &sink{}
@@ -81,10 +83,12 @@ func TestPassEmitsAndRechecks(t *testing.T) {
 	if s.es[0].Kind != trivy.KindSBOM || p.Source != types.SourceRegistry || p.Image.Digest != plat ||
 		p.Image.DigestKind != types.DigestKindManifest || p.Image.Registry != "docker.io" ||
 		p.Image.Repository != "library/alpine" || p.Image.Ref != "docker.io/library/alpine:3.20" ||
-		p.Attestation == nil || p.Attestation.Verified || p.Format != "SPDX" || len(p.Components) != 1 {
+		p.Attestation == nil || p.Attestation.Verified || p.Format != "SPDX" || len(p.Components) != 1 ||
+		p.Image.IndexDigest != idx || p.SBOMTrust != types.SBOMTrustUnverified {
 		t.Fatalf("payload: %+v", p)
 	}
-	for result, want := range map[string]float64{"found": 1, "none": 1, "skipped_private_address": 1} {
+	for result, want := range map[string]float64{"found": 1, "none": 1, "skipped_private_address": 1,
+		"rejected_empty": 1, "rejected_subject_mismatch": 1} {
 		if v := testutil.ToFloat64(m.RegistrySBOMLookups.WithLabelValues(result)); v != want {
 			t.Errorf("%s = %v", result, v)
 		}
@@ -147,4 +151,13 @@ func rep(c string) string {
 		out += c
 	}
 	return out
+}
+
+func TestHasOSPackages(t *testing.T) {
+	if !hasOSPackages([]types.Component{{PURL: "pkg:apk/alpine/musl@1"}}) || !hasOSPackages([]types.Component{{Type: "operating-system"}}) {
+		t.Error("OS packages not detected")
+	}
+	if hasOSPackages([]types.Component{{PURL: "pkg:npm/express@4"}, {PURL: "pkg:golang/x@1"}}) {
+		t.Error("language-only SBOM reported as having OS packages")
+	}
 }
