@@ -59,6 +59,12 @@ It won't carry on and treat every peer as unknown.
   <Card title="compute findings" icon="gauge-high" href="/cli/compute-findings">
     List throttled, contended and noisy-neighbour pods with the evidence behind each finding. Read-only.
   </Card>
+  <Card title="profile" icon="shield-halved" href="/cli/profile">
+    Show a workload's security posture, diff profile revisions, and print a recommended securityContext patch. Read-only.
+  </Card>
+  <Card title="images" icon="box" href="/cli/images">
+    List the image digests workloads run, and which workloads run a digest. Read-only.
+  </Card>
   <Card title="version" icon="tag">
     Print client version information. Also available as `-v` / `--version` on the root command.
   </Card>
@@ -78,4 +84,11 @@ kubectl kguardian gen netpol -A --type cilium
 
 # Which pods are starved for CPU, and by whom
 kubectl kguardian compute findings -n production
+
+# Posture of one workload, and the securityContext patch it needs
+kubectl kguardian profile get production/Deployment/api
+kubectl kguardian profile export production/Deployment/api --format pss
+
+# Which image digests run in a namespace
+kubectl kguardian images list -n production
 ```

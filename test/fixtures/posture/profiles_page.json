@@ -1,0 +1,146 @@
+{
+  "items": [
+    {
+      "clusterId": "primary",
+      "computedAt": "2026-09-26T02:22:26.398970Z",
+      "contentHash": "fnv1a64:4c1d1714495b7cb8",
+      "dimensions": {
+        "compute": {
+          "status": "ok"
+        },
+        "images": {
+          "mixedDigests": false,
+          "runningDigests": 1,
+          "status": "unknown"
+        },
+        "network": {
+          "status": "unknown"
+        },
+        "podSecurity": {
+          "level": "restricted",
+          "levelConfidence": "upper_bound",
+          "status": "unknown"
+        },
+        "syscalls": {
+          "status": "warn"
+        }
+      },
+      "findingCounts": {
+        "critical": 0,
+        "high": 0,
+        "info": 0,
+        "low": 4,
+        "medium": 1
+      },
+      "kind": "Deployment",
+      "lastChangedAt": "2026-09-26T02:21:21.027754Z",
+      "name": "checkout",
+      "namespace": "payments",
+      "posture": {
+        "coverage": 0.25,
+        "status": "warn",
+        "unknownDimensions": [
+          "network",
+          "podSecurity",
+          "images"
+        ]
+      },
+      "revision": 4
+    },
+    {
+      "clusterId": "primary",
+      "computedAt": "2026-09-26T02:22:26.404590Z",
+      "contentHash": "fnv1a64:0c616b9c268b2efb",
+      "dimensions": {
+        "compute": {
+          "status": "unknown"
+        },
+        "images": {
+          "mixedDigests": true,
+          "runningDigests": 2,
+          "status": "unknown"
+        },
+        "network": {
+          "status": "unknown"
+        },
+        "podSecurity": {
+          "level": "restricted",
+          "levelConfidence": "upper_bound",
+          "status": "unknown"
+        },
+        "syscalls": {
+          "status": "warn"
+        }
+      },
+      "findingCounts": {
+        "critical": 0,
+        "high": 0,
+        "info": 0,
+        "low": 2,
+        "medium": 2
+      },
+      "kind": "Deployment",
+      "lastChangedAt": "2026-09-26T02:18:02.852024Z",
+      "name": "ledger",
+      "namespace": "payments",
+      "posture": {
+        "coverage": 0.25,
+        "status": "warn",
+        "unknownDimensions": [
+          "network",
+          "podSecurity",
+          "images"
+        ]
+      },
+      "revision": 1
+    },
+    {
+      "clusterId": "primary",
+      "computedAt": "2026-09-26T02:22:26.368580Z",
+      "contentHash": "fnv1a64:3948ec39cd68f413",
+      "dimensions": {
+        "compute": {
+          "status": "unknown"
+        },
+        "images": {
+          "mixedDigests": false,
+          "runningDigests": 1,
+          "status": "unknown"
+        },
+        "network": {
+          "status": "unknown"
+        },
+        "podSecurity": {
+          "level": "baseline",
+          "levelConfidence": "upper_bound",
+          "status": "warn"
+        },
+        "syscalls": {
+          "status": "unknown"
+        }
+      },
+      "findingCounts": {
+        "critical": 0,
+        "high": 0,
+        "info": 0,
+        "low": 2,
+        "medium": 2
+      },
+      "kind": "Deployment",
+      "lastChangedAt": "2026-09-26T02:22:26.368580Z",
+      "name": "refunds",
+      "namespace": "payments",
+      "posture": {
+        "coverage": 0.25,
+        "status": "warn",
+        "unknownDimensions": [
+          "network",
+          "syscalls",
+          "images"
+        ]
+      },
+      "revision": 1
+    }
+  ],
+  "nextAfter": null
+}

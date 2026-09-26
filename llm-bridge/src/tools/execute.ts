@@ -1,11 +1,14 @@
 import { log } from "../logger.js";
 import { TOOL_DEFS } from "./registry.js";
-import { brokerGetJSON, auditVerdictsQuery, clusterPolicySupport } from "./backendClient.js";
+import { brokerGetJSON, auditVerdictsQuery, clusterPolicySupport, BrokerHTTPError } from "./backendClient.js";
 import {
   filterByNamespace, compactTrafficSummary, compactPodsSummary, filterAlivePods, compactSvc,
 } from "./compaction.js";
 import { seccompFromBrokerSyscalls } from "./generators/seccomp.js";
 import { computeQuery, selectPodFromLatest, summariseComputeHistory } from "./compute.js";
+import {
+  buildQuery, clampToolLimit, trimImagePage, trimProfile, trimProfileDiff, trimProfileList, workloadPath, POSTURE_VALUES,
+} from "./posture.js";
 import {
   generateNetworkPolicyWithComments, generateCiliumPolicyWithComments, policyToYAML, makePeerResolver,
   type PeerResolver, type PodInfo, type TrafficRow, type BrokerPodListEntry, type BrokerServiceRecord,
@@ -22,6 +25,15 @@ import {
 
 const s = (v: unknown): string => (typeof v === "string" ? v : "");
 const enc = encodeURIComponent;
+
+/** The (namespace, kind, name) workload key every profile tool needs. */
+function workloadArgs(a: Record<string, unknown>, tool: string): { namespace: string; kind: string; name: string } {
+  const namespace = s(a.namespace).trim();
+  const kind = s(a.kind).trim();
+  const name = s(a.name).trim();
+  if (!namespace || !kind || !name) throw new Error(`${tool} requires namespace, kind and name`);
+  return { namespace, kind, name };
+}
 
 // Resolve a traffic row's peer to a policy identity the way the advisor
 // does (networkpolicy.ts makePeerResolver, CONTRACT v4): the identity the
@@ -173,6 +185,62 @@ const handlers: Record<string, Handler> = {
     if (!node) throw new Error("get_node_contention requires node");
     const minutes = typeof a.minutes === "number" && a.minutes > 0 ? a.minutes : 5;
     return brokerGetJSON(`/compute/contention${computeQuery({ node, minutes })}`);
+  },
+  // --- workload security profile & image inventory (#1533) -----------------
+  // Every call is count-capped (clampToolLimit) before it reaches the broker
+  // and size-capped (fitToBudget) before it reaches the model.
+  get_workload_security_profile: async (a) => {
+    const w = workloadArgs(a, "get_workload_security_profile");
+    try {
+      return trimProfile(await brokerGetJSON(`${workloadPath(w.namespace, w.kind, w.name)}/profile`));
+    } catch (err) {
+      if (err instanceof BrokerHTTPError && err.status === 404) {
+        return {
+          found: false, ...w,
+          note: "kguardian has no data for this workload (no inventory, syscalls, live pods or stored profile). That is unknown, not safe. Check the kind and name are the workload's (e.g. the Deployment, not a pod), or that the controller runs on its nodes.",
+        };
+      }
+      throw err;
+    }
+  },
+  list_workload_profiles: async (a) => {
+    const namespace = s(a.namespace).trim();
+    const posture = s(a.posture).trim().toLowerCase();
+    if (posture && !(POSTURE_VALUES as readonly string[]).includes(posture)) {
+      throw new Error(`posture must be one of ${POSTURE_VALUES.join(", ")}`);
+    }
+    const limit = clampToolLimit(a.limit);
+    const page = await brokerGetJSON(`/workloads${buildQuery({ namespace, status: posture, limit })}`);
+    return trimProfileList(page, { namespace, posture });
+  },
+  diff_workload_profile: async (a) => {
+    const w = workloadArgs(a, "diff_workload_profile");
+    const rev = (v: unknown, field: string): number | undefined => {
+      if (v === undefined || v === null || v === "") return undefined;
+      if (typeof v !== "number" || !Number.isInteger(v) || v < 1) throw new Error(`${field} must be a revision number >= 1`);
+      return v;
+    };
+    const from = rev(a.from, "from");
+    const to = rev(a.to, "to");
+    if (from !== undefined && to !== undefined && from >= to) throw new Error("from must be older than to (from < to)");
+    try {
+      return trimProfileDiff(await brokerGetJSON(`${workloadPath(w.namespace, w.kind, w.name)}/profile/diff${buildQuery({ from, to })}`));
+    } catch (err) {
+      if (err instanceof BrokerHTTPError && err.status === 404) {
+        return {
+          found: false, ...w, from: from ?? null, to: to ?? null,
+          note: "No diff: the workload has no stored profile versions yet, or a requested revision does not exist. Call get_workload_security_profile to see the latest revision.",
+        };
+      }
+      throw err;
+    }
+  },
+  get_image_inventory: async (a) => {
+    const namespace = s(a.namespace).trim();
+    const repository = s(a.repository).trim();
+    const limit = clampToolLimit(a.limit);
+    const page = await brokerGetJSON(`/images${buildQuery({ namespace, repository, limit })}`);
+    return trimImagePage(page, { namespace, repository });
   },
 };
 

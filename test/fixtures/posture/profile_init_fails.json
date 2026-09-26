@@ -1,0 +1,410 @@
+{
+  "workload": {
+    "clusterId": "primary",
+    "namespace": "payments",
+    "kind": "Deployment",
+    "name": "refunds",
+    "transient": false,
+    "pods": {
+      "live": 1,
+      "names": [
+        "refunds-6c8d9e7f5-r7t2v"
+      ],
+      "truncated": false
+    }
+  },
+  "generatedAt": "2026-09-26T02:22:32.589445928Z",
+  "contentHash": "fnv1a64:3948ec39cd68f413",
+  "version": {
+    "revision": 1,
+    "contentHash": "fnv1a64:3948ec39cd68f413",
+    "createdAt": "2026-09-26T02:22:26.368580Z"
+  },
+  "snapshotPending": false,
+  "posture": {
+    "status": "warn",
+    "coverage": 0.25,
+    "unknownDimensions": [
+      "network",
+      "syscalls",
+      "images"
+    ],
+    "reasons": [
+      {
+        "dimension": "network",
+        "status": "unknown",
+        "message": "No flows observed for this workload's pods"
+      },
+      {
+        "dimension": "syscalls",
+        "status": "unknown",
+        "message": "No syscalls have been captured for this workload"
+      },
+      {
+        "dimension": "podSecurity",
+        "status": "warn",
+        "message": "At most baseline: migrate (init) fail(s) a restricted check; unevaluated checks may lower it further"
+      },
+      {
+        "dimension": "images",
+        "status": "unknown",
+        "message": "1 running digest(s) across 2 container(s); vulnerability data not configured"
+      }
+    ]
+  },
+  "attention": [
+    {
+      "id": "podSecurity.allowPrivilegeEscalation/migrate",
+      "dimension": "podSecurity",
+      "severity": "medium",
+      "tier": "P2",
+      "title": "Container migrate allows privilege escalation",
+      "detail": "allowPrivilegeEscalation is not set to false, so setuid binaries can gain privileges.",
+      "container": "migrate"
+    },
+    {
+      "id": "podSecurity.capabilitiesNotDropped/migrate",
+      "dimension": "podSecurity",
+      "severity": "medium",
+      "tier": "P2",
+      "title": "Container migrate does not drop ALL capabilities",
+      "detail": "The runtime's default capability set stays granted.",
+      "container": "migrate"
+    }
+  ],
+  "findings": [
+    {
+      "id": "podSecurity.allowPrivilegeEscalation/migrate",
+      "dimension": "podSecurity",
+      "severity": "medium",
+      "tier": "P2",
+      "title": "Container migrate allows privilege escalation",
+      "detail": "allowPrivilegeEscalation is not set to false, so setuid binaries can gain privileges.",
+      "container": "migrate"
+    },
+    {
+      "id": "podSecurity.capabilitiesNotDropped/migrate",
+      "dimension": "podSecurity",
+      "severity": "medium",
+      "tier": "P2",
+      "title": "Container migrate does not drop ALL capabilities",
+      "detail": "The runtime's default capability set stays granted.",
+      "container": "migrate"
+    },
+    {
+      "id": "podSecurity.readOnlyRootFilesystem/app",
+      "dimension": "podSecurity",
+      "severity": "low",
+      "tier": null,
+      "title": "Container app root filesystem is writable",
+      "detail": "readOnlyRootFilesystem is not true (hardening; not required by PSS restricted).",
+      "container": "app"
+    },
+    {
+      "id": "podSecurity.readOnlyRootFilesystem/migrate",
+      "dimension": "podSecurity",
+      "severity": "low",
+      "tier": null,
+      "title": "Container migrate root filesystem is writable",
+      "detail": "readOnlyRootFilesystem is not true (hardening; not required by PSS restricted).",
+      "container": "migrate"
+    }
+  ],
+  "controls": [
+    {
+      "control": "networkPolicy",
+      "state": "unknown",
+      "detail": "No audit policy covers this workload; applied NetworkPolicies are not visible to the broker",
+      "inSync": null
+    },
+    {
+      "control": "seccompProfile",
+      "state": "none",
+      "detail": "No SeccompProfile CR references this workload",
+      "inSync": null
+    },
+    {
+      "control": "imageAdmission",
+      "state": null,
+      "detail": "Signature/admission checks are not configured",
+      "inSync": null
+    }
+  ],
+  "readiness": [
+    {
+      "id": "trafficObserved24h",
+      "ok": false,
+      "message": "No flows observed"
+    },
+    {
+      "id": "syscallCaptureComplete",
+      "ok": null,
+      "message": "No syscall capture for this workload"
+    },
+    {
+      "id": "noWouldDeny24h",
+      "ok": null,
+      "message": "No audit policy covers this workload"
+    },
+    {
+      "id": "imageSigned",
+      "ok": null,
+      "message": "Signature verification is not configured"
+    },
+    {
+      "id": "podSecurityRestricted",
+      "ok": false,
+      "message": "At most baseline"
+    }
+  ],
+  "exposure": {
+    "ingressPeers": null,
+    "ingressExternal": null,
+    "egressPeers": null,
+    "egressExternal": null
+  },
+  "dimensions": {
+    "network": {
+      "status": "unknown",
+      "coverage": {
+        "level": "none",
+        "fraction": null,
+        "observedSince": null,
+        "note": "Flows from the workload's pod(s) (1 live)"
+      },
+      "reasons": [
+        {
+          "code": "no_flows",
+          "message": "No flows observed for this workload's pods"
+        }
+      ],
+      "summary": {
+        "egress": {
+          "peers": 0,
+          "external": 0,
+          "ports": []
+        },
+        "ingress": {
+          "peers": 0,
+          "external": 0,
+          "ports": []
+        }
+      },
+      "peers": [],
+      "truncated": false,
+      "policy": {
+        "audit": null,
+        "enforced": null
+      }
+    },
+    "syscalls": {
+      "status": "unknown",
+      "coverage": {
+        "level": "none",
+        "fraction": null,
+        "observedSince": null,
+        "note": "no syscall aggregate for this workload"
+      },
+      "reasons": [
+        {
+          "code": "no_observations",
+          "message": "No syscalls have been captured for this workload"
+        }
+      ],
+      "observed": null,
+      "capture": null,
+      "cr": null,
+      "denials": null
+    },
+    "podSecurity": {
+      "status": "warn",
+      "coverage": {
+        "level": "partial",
+        "fraction": 0.5,
+        "observedSince": "2026-09-23T02:21:39.091417Z",
+        "note": "9 of 18 PSS checks evaluated; volumes, ports, probes, AppArmor, SELinux, procMount, sysctls and hostProcess are not ingested"
+      },
+      "reasons": [
+        {
+          "code": "pss_fails_restricted",
+          "message": "At most baseline: migrate (init) fail(s) a restricted check; unevaluated checks may lower it further"
+        }
+      ],
+      "pssVersion": "kubernetes/website@2c1aa11c (Kubernetes v1.37 docs)",
+      "level": "baseline",
+      "levelConfidence": "upper_bound",
+      "unevaluatedChecks": [
+        "hostProcess",
+        "hostPathVolumes",
+        "hostPorts",
+        "hostProbesLifecycle",
+        "appArmor",
+        "seLinux",
+        "procMount",
+        "sysctls",
+        "volumeTypes"
+      ],
+      "pod": {
+        "known": true,
+        "serviceAccountName": "refunds",
+        "automountServiceAccountToken": false,
+        "hostNetwork": null,
+        "hostPID": null,
+        "hostIPC": null,
+        "hostUsers": null,
+        "securityContext": {
+          "runAsNonRoot": true,
+          "runAsUser": null,
+          "runAsGroup": null,
+          "fsGroup": null,
+          "seccompProfileType": "RuntimeDefault"
+        },
+        "failing": []
+      },
+      "containers": [
+        {
+          "name": "app",
+          "kind": "regular",
+          "source": "running",
+          "digest": "sha256:9f2c0d1e9f2c0d1e9f2c0d1e9f2c0d1e9f2c0d1e9f2c0d1e9f2c0d1e9f2c0d1e",
+          "securityContext": {
+            "privileged": null,
+            "allowPrivilegeEscalation": false,
+            "runAsNonRoot": null,
+            "runAsUser": 10001,
+            "runAsGroup": null,
+            "readOnlyRootFilesystem": null,
+            "capabilitiesAdd": null,
+            "capabilitiesDrop": [
+              "ALL"
+            ],
+            "seccompProfileType": null
+          },
+          "level": "restricted",
+          "failing": []
+        },
+        {
+          "name": "migrate",
+          "kind": "init",
+          "source": "last_known",
+          "digest": "sha256:9f2c0d1e9f2c0d1e9f2c0d1e9f2c0d1e9f2c0d1e9f2c0d1e9f2c0d1e9f2c0d1e",
+          "securityContext": {
+            "privileged": null,
+            "allowPrivilegeEscalation": null,
+            "runAsNonRoot": null,
+            "runAsUser": null,
+            "runAsGroup": null,
+            "readOnlyRootFilesystem": null,
+            "capabilitiesAdd": null,
+            "capabilitiesDrop": null,
+            "seccompProfileType": null
+          },
+          "level": "baseline",
+          "failing": [
+            {
+              "check": "privilegeEscalation",
+              "level": "restricted",
+              "field": "spec.initContainers[migrate].securityContext.allowPrivilegeEscalation",
+              "value": null,
+              "message": "allowPrivilegeEscalation must be set to false"
+            },
+            {
+              "check": "capabilitiesRestricted",
+              "level": "restricted",
+              "field": "spec.initContainers[migrate].securityContext.capabilities.drop",
+              "value": null,
+              "message": "capabilities.drop must include ALL"
+            }
+          ]
+        }
+      ],
+      "recommendation": {
+        "recommendation": true,
+        "targetLevel": "restricted",
+        "format": "strategic-merge-patch",
+        "yaml": "# kguardian recommendation, not applied. Review before use.\n# Target: Pod Security Standards restricted (kubernetes.io/docs/concepts/security/pod-security-standards)\nspec:\n  template:\n    spec:\n      initContainers:\n      - name: migrate\n        securityContext:\n          allowPrivilegeEscalation: false\n          capabilities:\n            drop: [\"ALL\"]\n",
+        "caveats": [
+          "Checks kguardian cannot see (hostPath and other volume types, hostPort, probe hosts, AppArmor, SELinux, procMount, sysctls) may still fail restricted.",
+          "drop: [\"ALL\"] also removes CHOWN, SETUID, SETGID, DAC_OVERRIDE and NET_BIND_SERVICE. Images that start as root and drop privileges, change file ownership at startup, or bind ports below 1024 may fail; add back NET_BIND_SERVICE only if the app needs it."
+        ]
+      },
+      "staleContainers": []
+    },
+    "images": {
+      "status": "unknown",
+      "coverage": {
+        "level": "partial",
+        "fraction": null,
+        "observedSince": "2026-09-23T02:21:39.091417Z",
+        "note": "inventory only (running window 900 s); no vulnerability data"
+      },
+      "reasons": [
+        {
+          "code": "vulnerabilities_not_configured",
+          "message": "1 running digest(s) across 2 container(s); vulnerability data not configured"
+        }
+      ],
+      "runningWindowSeconds": 900,
+      "containers": [
+        {
+          "name": "app",
+          "kind": "regular",
+          "mixedDigests": false,
+          "stale": false,
+          "running": [
+            {
+              "digest": "sha256:9f2c0d1e9f2c0d1e9f2c0d1e9f2c0d1e9f2c0d1e9f2c0d1e9f2c0d1e9f2c0d1e",
+              "imageRef": "ghcr.io/example/checkout:4.0.9",
+              "state": "running",
+              "stateReason": null,
+              "ranAsInit": false,
+              "lastPodName": "refunds-6c8d9e7f5-r7t2v",
+              "firstSeen": "2026-09-23T02:21:39.091417Z",
+              "lastSeen": "2026-09-26T02:21:39.091417Z"
+            }
+          ],
+          "previous": []
+        },
+        {
+          "name": "migrate",
+          "kind": "init",
+          "mixedDigests": false,
+          "stale": false,
+          "running": [],
+          "previous": [
+            {
+              "digest": "sha256:9f2c0d1e9f2c0d1e9f2c0d1e9f2c0d1e9f2c0d1e9f2c0d1e9f2c0d1e9f2c0d1e",
+              "imageRef": "ghcr.io/example/checkout:4.0.9",
+              "state": "terminated",
+              "stateReason": "Completed",
+              "ranAsInit": true,
+              "lastPodName": "refunds-6c8d9e7f5-r7t2v",
+              "firstSeen": "2026-09-23T02:21:39.091417Z",
+              "lastSeen": "2026-09-26T02:21:39.091417Z"
+            }
+          ]
+        }
+      ],
+      "truncated": false,
+      "vulnerabilities": null,
+      "supplyChain": null
+    },
+    "compute": {
+      "status": "unknown",
+      "coverage": {
+        "level": "none",
+        "fraction": null,
+        "observedSince": null,
+        "note": "no compute samples"
+      },
+      "reasons": [
+        {
+          "code": "no_compute_data",
+          "message": "No compute samples for this workload's live pods (collection off or no live pods)"
+        }
+      ],
+      "containers": [],
+      "truncated": false
+    }
+  }
+}

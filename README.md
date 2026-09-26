@@ -174,7 +174,7 @@ Running an OpenAI-compatible gateway (LiteLLM, vLLM, a proxy)? Add `ai.baseUrl` 
 
 ### 🔌 Connect your own MCP client
 
-The same 12 tools can be served over MCP at `POST /mcp` on the LLM Bridge, so Claude Code — or any MCP client — can read your cluster's observed telemetry and write policies from it. Off by default; enable with `ai.mcp.*`, port-forward, and add one server entry:
+The same 19 tools can be served over MCP at `POST /mcp` on the LLM Bridge, so Claude Code — or any MCP client — can read your cluster's observed telemetry and write policies from it. Off by default; enable with `ai.mcp.*`, port-forward, and add one server entry:
 
 ```bash
 kubectl -n kguardian port-forward svc/kguardian-llm-bridge 8080:8080

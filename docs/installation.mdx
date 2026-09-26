@@ -251,7 +251,7 @@ helm install kguardian oci://ghcr.io/kguardian-dev/charts/kguardian \
 
 ### AI Assistant
 
-The assistant is optional and off by default. It is one workload — the LLM Bridge — that runs the 12 tools and the policy/seccomp generation in-process against the Broker.
+The assistant is optional and off by default. It is one workload — the LLM Bridge — that runs the 19 tools and the policy/seccomp generation in-process against the Broker.
 
 Create a Secret holding your provider API key under the key `api-key`, then turn the assistant on with the provider name and the Secret:
 
@@ -321,7 +321,7 @@ Errors are diagnostic rather than silent. A malformed or scheme-less base URL fa
 
 ### Serve the MCP Endpoint
 
-The LLM Bridge can serve its 12 tools to external MCP clients at `POST /mcp` on its existing port, so Claude Code or another MCP client can query your cluster's observed telemetry and generate policies from it. It is off by default:
+The LLM Bridge can serve its 19 tools to external MCP clients at `POST /mcp` on its existing port, so Claude Code or another MCP client can query your cluster's observed telemetry and generate policies from it. It is off by default:
 
 ```yaml
 ai:

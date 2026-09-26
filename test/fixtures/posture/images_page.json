@@ -1,0 +1,24 @@
+{
+  "items": [
+    {
+      "digest": "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+      "repository": "docker.io/library/nginx",
+      "tags": ["1.27", "1.27.1", "latest"],
+      "digestKind": "repo",
+      "firstSeen": "2026-09-20T10:00:00",
+      "lastSeen": "2026-09-26T09:00:00",
+      "runningContainers": 3,
+      "futureField": "a field this build does not know"
+    },
+    {
+      "digest": "sha256:9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08",
+      "repository": null,
+      "tags": [],
+      "digestKind": "config",
+      "firstSeen": "2026-09-18T07:00:00",
+      "lastSeen": "2026-09-19T14:12:03",
+      "runningContainers": 0
+    }
+  ],
+  "nextAfter": null
+}
