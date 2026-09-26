@@ -13,9 +13,12 @@ const KEYS: Record<Exclude<MapLens, 'traffic'>, Array<{ cls: string; text: strin
     { cls: 'text-tertiary border-dashed border-hubble-border-strong', text: 'read failed', meaning: 'unknown' },
   ],
   supply: [
-    { cls: 'bg-state-enforcing/15 text-state-enforcing border-state-enforcing/30', text: 'SBOM verified', meaning: 'signed attestation' },
-    { cls: 'bg-hubble-border/30 text-secondary border-hubble-border', text: 'SBOM', meaning: 'present, unverified' },
-    { cls: 'text-tertiary border-dashed border-hubble-border-strong', text: 'no SBOM', meaning: 'unknown' },
+    { cls: 'bg-hubble-border/30 text-secondary border-hubble-border', text: 'signed', meaning: 'valid, not vetted' },
+    { cls: 'bg-severity-medium/15 text-severity-medium border-severity-medium/30', text: 'unsigned', meaning: 'no signature' },
+    { cls: 'bg-severity-critical/15 text-severity-critical border-severity-critical/30', text: 'sig invalid', meaning: 'none verified' },
+    { cls: 'text-tertiary border-dashed border-hubble-border-strong', text: 'key-signed', meaning: 'key not held' },
+    { cls: 'text-tertiary border-dashed border-hubble-border-strong', text: 'sig unknown', meaning: 'could not check' },
+    { cls: 'text-tertiary border-dashed border-hubble-border-strong', text: 'not checked', meaning: 'no result, not unsigned' },
   ],
   coverage: [
     { cls: 'bg-state-enforcing/15 text-state-enforcing border-state-enforcing/30', text: '% seen', meaning: 'posture ok' },
@@ -27,7 +30,7 @@ const KEYS: Record<Exclude<MapLens, 'traffic'>, Array<{ cls: string; text: strin
 
 const NOTE: Record<Exclude<MapLens, 'traffic'>, string> = {
   vulns: "The Broker's tiers. A shared image carries its worst workload's tier. Unknown in-use and exposure rank as in use and exposed.",
-  supply: 'Image signatures are not checked yet; nothing is shown as signed.',
+  supply: "Each card is its worst running image's signature verdict. Hover a card for the signer (valid, not trusted) and SBOM presence. Without signature results a card shows its SBOM state.",
   coverage: "Share of the workload profile's dimensions that have data.",
 };
 
@@ -39,7 +42,7 @@ export function LensLegend({ lens, state }: { lens: Exclude<MapLens, 'traffic'>;
       <div className="flex flex-wrap gap-x-3 gap-y-1">
         {KEYS[lens].map((k) => (
           <span key={`${k.text}-${k.meaning}`} className="inline-flex items-center gap-1">
-            <span className={`rounded border px-1 font-mono text-[10px] font-semibold leading-4 ${k.cls}`}>{k.text}</span>
+            <span className={`rounded border px-1 font-mono text-[10px] font-semibold leading-4 whitespace-nowrap ${k.cls}`}>{k.text}</span>
             {k.meaning}
           </span>
         ))}

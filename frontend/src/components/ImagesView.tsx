@@ -1,5 +1,5 @@
 import { useMemo, useState } from 'react';
-import { AlertTriangle, Bug, ChevronRight, FileWarning, Flame, Layers, Package, ShieldQuestion } from 'lucide-react';
+import { AlertTriangle, Bug, ChevronRight, Flame, Layers, Package, ShieldQuestion } from 'lucide-react';
 import { useCveList, useImageList, type ImageEnrichment } from '../hooks/useVulns';
 import { vulnErrorMessage, vulnApi, type VulnApi } from '../services/vulnApi';
 import type { ProfileApi } from '../services/profileApi';
@@ -15,6 +15,7 @@ import { SectionSkeleton } from './Profile/parts';
 import { FactorChips, JoinBadge, SeverityBadge, TierBadge, TrustBadge, VulnErrorState } from './Vulns/parts';
 import { CveDrawer } from './Vulns/CveDrawer';
 import { ImageDrawer } from './Vulns/ImageDrawer';
+import { SupplyChainTab } from './Vulns/SupplyChainTab';
 
 export type ImagesTab = 'vulns' | 'images' | 'supply';
 const TABS: readonly { id: ImagesTab; label: string }[] = [
@@ -56,8 +57,8 @@ const SEVERITY_FILTERS: Array<{ id: string; label: string; value: VulnSeverity[]
 /**
  * Images (`#/images`): the cluster-wide vulnerability and image inventory.
  * Vulnerabilities are grouped by CVE and tiered (UX section 3); Images are
- * per digest with who runs them and what reported on them; Supply chain is a
- * placeholder until signature checks exist. Cluster-wide by default: the
+ * per digest with who runs them and what reported on them; Supply chain is
+ * who signed each running digest (the supplychain component's verdicts). Cluster-wide by default: the
  * namespace selector filters, it does not scope.
  */
 export function ImagesView({ namespace, allNamespaces, tab: tabParam, cve, digest, onParamsChange, onOpenWorkload, onShowOnMap, onAskAI, refreshTick, api = vulnApi, profileApi }: ImagesViewProps) {
@@ -240,15 +241,7 @@ export function ImagesView({ namespace, allNamespaces, tab: tabParam, cve, diges
 
           {tab === 'images' && <ImagesTable namespace={ns} scopeLabel={scopeLabel} refreshTick={refreshTick} api={api} onOpen={(d) => onParamsChange({ digest: d, cve: undefined })} />}
 
-          {tab === 'supply' && (
-            <section className="rounded-surface border border-hubble-border bg-hubble-card">
-              <EmptyState
-                icon={FileWarning}
-                title="Supply-chain checks are not configured yet"
-                description="Signature and provenance verification are not in this release. Until they are, kguardian shows neither signed nor unsigned for any image: unchecked is not the same as unsigned. SBOM sources and their trust are on the Images tab."
-              />
-            </section>
-          )}
+          {tab === 'supply' && <SupplyChainTab namespace={ns} scopeLabel={scopeLabel} refreshTick={refreshTick} api={api} onOpenWorkload={onOpenWorkload} />}
         </div>
       </div>
 

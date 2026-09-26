@@ -1,0 +1,24 @@
+{
+  "body": {
+    "items": [
+      {
+        "attestations": [],
+        "checkedAt": null,
+        "container": "controller",
+        "digest": "sha256:d6dcbecd496c2f5aa1b3e8d8f2c0b0a4e1c9f7d6b5a4c3e2f1d0c9b8a7f6e5d4",
+        "imageRef": "registry.k8s.io/ingress-nginx/controller:v1.11.2",
+        "namespace": "ingress-nginx",
+        "reason": null,
+        "repository": "registry.k8s.io/ingress-nginx/controller",
+        "signers": [],
+        "verdict": null,
+        "workloadKind": "Deployment",
+        "workloadName": "ingress-nginx-controller"
+      }
+    ],
+    "nextAfter": null
+  },
+  "provenance": "captured from broker e7339ae0b (frontend/src/fixtures/attestation-captures/capture.py), no edits",
+  "request": "GET /attestations/running?namespace=ingress-nginx",
+  "status": 200
+}

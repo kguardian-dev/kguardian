@@ -7,6 +7,8 @@ import type { WorkloadListItem } from '../types/profile';
 import { withConcurrencyLimit } from '../utils/concurrency';
 import { STATUS_LABEL } from '../utils/posture';
 import { workloadKey, workloadOf } from '../utils/workloads';
+import { signatureBadgeText, signaturesByWorkload, SIGNATURE_TONE, workloadSignatureText, type WorkloadSignatures } from '../utils/signatures';
+import { readRunningSignatures } from './useSignatures';
 
 /** At most this many image digests are read per namespace (one page). */
 export const LENS_IMAGE_CAP = 100;
@@ -124,9 +126,8 @@ export function vulnBadge(imgs: WorkloadImages | undefined): LensBadge {
   return { lens: 'vulns', tone: 'neutral', text: 'no P0/P1', label: `Reported on; the Broker ranks no finding on its running images P0 or P1. Lower tiers may exist.${scope}` };
 }
 
-/** Supply chain lens badge: SBOM presence and trust. Signatures are not checked yet and never shown as signed. */
-export function supplyBadge(imgs: WorkloadImages | undefined): LensBadge {
-  const sig = ' Signatures: not checked.';
+/** The SBOM half of the Supply chain lens: presence and trust over a workload's running images. */
+export function sbomBadge(imgs: WorkloadImages | undefined, sig = ' Signatures: not checked.'): LensBadge {
   if (!imgs || imgs.digests.length === 0) {
     return { lens: 'supply', tone: 'unknown', text: 'no data', label: `No running image of this workload is in the image inventory.${sig}` };
   }
@@ -147,6 +148,20 @@ export function supplyBadge(imgs: WorkloadImages | undefined): LensBadge {
     lens: 'supply', tone: 'unknown', text: `SBOM ${imgs.withSbom}/${n}`,
     label: `${imgs.withSbom} of ${n} running images have an SBOM${imgs.sbomFailed ? `; the read failed for ${imgs.sbomFailed} (unknown)` : ''}.${sig}`,
   };
+}
+
+/**
+ * Supply chain lens badge. With signature results, the badge is the
+ * workload's worst running image's signature verdict (a verified one is
+ * neutral and names its signer, never "trusted"); the SBOM facts follow in
+ * the label. Without them (the read failed, or this workload has no row in
+ * the running feed) it is the SBOM badge, and the label says why signatures
+ * are unknown.
+ */
+export function supplyBadge(imgs: WorkloadImages | undefined, sig?: WorkloadSignatures, sigFailed = false): LensBadge {
+  if (!sig) return sbomBadge(imgs, sigFailed ? ' Signatures: the read failed, unknown.' : ' Signatures: not checked.');
+  const sbom = sbomBadge(imgs, '').label;
+  return { lens: 'supply', tone: SIGNATURE_TONE[sig.worst], text: signatureBadgeText(sig), label: `${workloadSignatureText(sig)} SBOM: ${sbom}` };
 }
 
 /** Coverage lens badge: how much of the workload kguardian can see (the profile's posture coverage). */
@@ -279,15 +294,26 @@ export function useMapLens(
         for (const p of page.items) out.set(workloadKey(p.namespace, p.kind, p.name), coverageBadge(p));
         truncated = page.nextAfter !== null;
       } else {
-        const { images, truncated: t, readFailures: f } = await readImages(vulnApi, namespace, lens);
-        for (const [k, v] of imagesByWorkload(images)) {
-          const b = lens === 'supply' ? supplyBadge(v) : vulnBadge(v);
+        // The Supply chain lens also reads the namespace's running signature
+        // feed (one bounded read); a failure leaves the SBOM badges and says so.
+        const [imgRead, sigRead] = await Promise.all([
+          readImages(vulnApi, namespace, lens),
+          lens === 'supply' ? readRunningSignatures(vulnApi, namespace).then((r) => ({ ok: true as const, ...r }), () => ({ ok: false as const })) : Promise.resolve(null),
+        ]);
+        const { images, truncated: t, readFailures: f } = imgRead;
+        const sigs = sigRead?.ok ? signaturesByWorkload(sigRead.items, workloadKey) : new Map<string, WorkloadSignatures>();
+        const byImages = imagesByWorkload(images);
+        // A workload with signature rows but no image row still gets a badge.
+        const keys = new Set([...byImages.keys(), ...sigs.keys()]);
+        for (const k of keys) {
+          const v = byImages.get(k);
+          const b = lens === 'supply' ? supplyBadge(v, sigs.get(k), sigRead?.ok === false) : vulnBadge(v);
           // A capped image page may have left some of this workload's images
           // unread: "nothing urgent" is then not a finished assessment.
           out.set(k, t && b.tone === 'neutral' ? { ...b, tone: 'unknown', label: `${b.label} Not every image was read (capped), so this is incomplete.` } : b);
         }
-        truncated = t || images.some((i) => i.hotTruncated);
-        readFailures = f;
+        truncated = t || images.some((i) => i.hotTruncated) || (sigRead?.ok === true && sigRead.truncated);
+        readFailures = f + (sigRead?.ok === false ? 1 : 0);
       }
       if (!current()) return;
       setState({ byWorkload: out, loading: false, error: null, truncated, readFailures });

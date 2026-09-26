@@ -2,6 +2,9 @@ import type { DimensionName, WorkloadProfile } from '../../types/profile';
 import { asStatus, DIMENSION_LABEL, pssLevelText } from '../../utils/posture';
 import type { ProfileTab } from '../../utils/profileView';
 import { StatusPill } from './parts';
+import type { WorkloadSignatureState } from '../../hooks/useSignatures';
+import { SIGNATURE_LABEL, signerShort, stateCounts, workloadSignatureText } from '../../utils/signatures';
+import { SignatureBadge } from '../Vulns/SignatureParts';
 
 const ORDER: DimensionName[] = ['network', 'syscalls', 'podSecurity', 'images', 'compute'];
 
@@ -40,7 +43,7 @@ function detailOf(p: WorkloadProfile, d: DimensionName): string | null {
  * v1.2). A dimension with no data shows "No data": listed, not hidden, and
  * never drawn as clean.
  */
-export function PostureStrip({ profile, onOpenTab }: { profile: WorkloadProfile; onOpenTab: (t: ProfileTab) => void }) {
+export function PostureStrip({ profile, onOpenTab, signatures }: { profile: WorkloadProfile; onOpenTab: (t: ProfileTab) => void; signatures?: WorkloadSignatureState }) {
   const p = profile.posture;
   const overall = asStatus(p.status);
   const coveragePct = Math.round(p.coverage * 100);
@@ -88,6 +91,11 @@ export function PostureStrip({ profile, onOpenTab }: { profile: WorkloadProfile;
             </li>
           );
         })}
+        {signatures && (
+          <li data-dimension="supplyChain">
+            <SupplyChainChip sig={signatures} onOpen={() => onOpenTab('images')} />
+          </li>
+        )}
       </ul>
       {p.reasons.length > 0 && (
         <ul aria-label="Why this posture" className="space-y-0.5 text-xs">
@@ -100,5 +108,45 @@ export function PostureStrip({ profile, onOpenTab }: { profile: WorkloadProfile;
         </ul>
       )}
     </div>
+  );
+}
+
+/**
+ * The workload's image signatures: its worst running image, from the
+ * supplychain component's verdicts. Informational, like compute: the
+ * Broker's posture rollup does not include it. Unknown and not checked are
+ * never good, and a verified image shows its signer, never "trusted".
+ */
+function SupplyChainChip({ sig, onOpen }: { sig: WorkloadSignatureState; onOpen: () => void }) {
+  const cls = 'inline-flex items-center gap-1.5 rounded-control border border-hubble-border bg-hubble-card px-2 py-1 text-xs hover:border-hubble-border-strong hover:bg-hubble-hover/40 transition-colors';
+  const s = sig.summary;
+  let body;
+  let title: string;
+  if (s) {
+    const n = s.digests.length;
+    const bad = s.byState[s.worst].length;
+    const detail = s.worst === 'verified' ? (s.signers.length === 1 ? signerShort(s.signers[0]) : `${s.signers.length} signers`) : n > 1 ? `${bad} of ${n} images` : null;
+    body = (
+      <>
+        <SignatureBadge state={s.worst} />
+        {detail && <span className="text-tertiary">{detail}</span>}
+      </>
+    );
+    title = `${workloadSignatureText(s)}${n > 1 ? ` (${stateCounts(s)})` : ''}`;
+  } else if (sig.loading) {
+    body = <span className="text-tertiary">…</span>;
+    title = 'Reading signature results';
+  } else if (sig.error != null) {
+    body = <StatusPill status="unknown">read failed</StatusPill>;
+    title = 'The signature read failed: unknown.';
+  } else {
+    body = <StatusPill status="unknown" />;
+    title = sig.truncated ? 'Not read (capped): unknown.' : 'No running image of this workload is in the inventory: unknown.';
+  }
+  return (
+    <button type="button" onClick={onOpen} title={`${title}\nInformational: not part of the rollup.`} aria-label={`Supply chain: ${s ? SIGNATURE_LABEL[s.worst] : 'no data'}`} className={cls}>
+      <span className="text-secondary">Supply chain</span>
+      {body}
+    </button>
   );
 }

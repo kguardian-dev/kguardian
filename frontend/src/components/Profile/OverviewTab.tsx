@@ -201,7 +201,7 @@ function ImageSummary({ profile, onOpenTab }: { profile: WorkloadProfile; onOpen
         )}
         <p className="text-tertiary">
           {img.vulnerabilities === null ? 'Vulnerability data not configured.' : 'Vulnerability data available on the Image & packages tab.'}{' '}
-          {img.supplyChain === null && 'Signature checks not configured.'}
+          Signatures are on the Image &amp; packages tab.
         </p>
       </div>
     </Panel>

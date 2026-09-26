@@ -43,7 +43,11 @@ export type CaptureSet = 'current' | '1671';
 
 const index = (raw: Record<string, Capture>) => new Map(Object.entries(raw).map(([path, c]) => [path.replace(/^.*\/(.+)\.json$/, '$1'), c]));
 const SETS: Record<CaptureSet, Map<string, Capture>> = {
-  current: index(import.meta.glob('./vuln-captures/*.json', { eager: true, import: 'default' }) as Record<string, Capture>),
+  current: index({
+    ...(import.meta.glob('./vuln-captures/*.json', { eager: true, import: 'default' }) as Record<string, Capture>),
+    // Signature results (#1533 P2-1) from the same world: ./attestation-captures/capture.py.
+    ...(import.meta.glob('./attestation-captures/*.json', { eager: true, import: 'default' }) as Record<string, Capture>),
+  }),
   '1671': index(import.meta.glob('./vuln-captures-1671/*.json', { eager: true, import: 'default' }) as Record<string, Capture>),
 };
 

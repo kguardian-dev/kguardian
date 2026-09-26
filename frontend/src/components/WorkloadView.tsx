@@ -2,6 +2,8 @@ import { useMemo, useState, type ReactNode } from 'react';
 import { ArrowLeft, CloudOff, SearchX, Share2 } from 'lucide-react';
 import type { PodNodeData } from '../types';
 import { useWorkloadProfile } from '../hooks/useWorkloadProfile';
+import { useWorkloadSignatures } from '../hooks/useSignatures';
+import { vulnApi as defaultVulnApi, type VulnApi } from '../services/vulnApi';
 import { seccompApi } from '../services/seccompApi';
 import { errorKind, errorMessage, type ProfileApi } from '../services/profileApi';
 import { workloadKey, workloadOf } from '../utils/workloads';
@@ -37,6 +39,8 @@ interface WorkloadViewProps {
   /** Increments on the header Refresh. */
   refreshTick?: number;
   api?: ProfileApi;
+  /** Signature results (the Broker's supply-chain reads). */
+  vulnApi?: VulnApi;
 }
 
 /**
@@ -47,8 +51,9 @@ interface WorkloadViewProps {
  * and error state; a dimension with no data says "No data", never "OK".
  * kguardian reports and generates here; it applies nothing.
  */
-export function WorkloadView({ ns, kind, name, tab: tabParam, from, to, onParamsChange, pods, onBack, onOpenInMap, refreshTick, api }: WorkloadViewProps) {
+export function WorkloadView({ ns, kind, name, tab: tabParam, from, to, onParamsChange, pods, onBack, onOpenInMap, refreshTick, api, vulnApi = defaultVulnApi }: WorkloadViewProps) {
   const { profile, loading, error, reload } = useWorkloadProfile(ns, kind, name, refreshTick, 30_000, api);
+  const signatures = useWorkloadSignatures(ns, kind, name, refreshTick, vulnApi);
   const tab = parseTab(tabParam);
   const [drawerOpen, setDrawerOpen] = useState(false);
   const key = workloadKey(ns, kind, name);
@@ -97,7 +102,7 @@ export function WorkloadView({ ns, kind, name, tab: tabParam, from, to, onParams
     const d = profile.dimensions;
     body = (
       <div className="space-y-4">
-        <PostureStrip profile={profile} onOpenTab={openTab} />
+        <PostureStrip profile={profile} onOpenTab={openTab} signatures={signatures} />
         {error != null && (
           <div role="status" className="rounded-control border border-severity-medium/30 bg-severity-medium/10 px-3 py-2 text-xs text-severity-medium">
             Showing the profile from {formatAgo(profile.generatedAt)}; the latest refresh failed: {errorMessage(error)}
@@ -108,7 +113,7 @@ export function WorkloadView({ ns, kind, name, tab: tabParam, from, to, onParams
           {tab === 'overview' && <OverviewTab profile={profile} onOpenTab={openTab} />}
           {tab === 'network' && <NetworkTab dim={d.network} />}
           {tab === 'syscalls' && <SyscallsTab dim={d.syscalls} onOpenSeccomp={d.syscalls.observed ? () => setDrawerOpen(true) : undefined} />}
-          {tab === 'images' && <ImagesTab dim={d.images} />}
+          {tab === 'images' && <ImagesTab dim={d.images} signatures={signatures} workload={{ ns, kind, name }} api={vulnApi} />}
           {tab === 'podSecurity' && <PodSecurityTab dim={d.podSecurity} />}
           {tab === 'versions' && (
             <VersionsTab
