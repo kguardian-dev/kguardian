@@ -106,6 +106,18 @@ describe('CVE drawer', () => {
     expect(within(checkout).getAllByText('Exposed: public IP, unattributed peer, other namespace').length).toBeGreaterThan(0);
   });
 
+  test('the drawer headline comes from the first-listed workload, not whichever image read landed first', async () => {
+    render(view({ cve: 'CVE-2099-0001', api: replayVulnApi([], { tiers: true }).api }));
+    await waitFor(() => expect(screen.getAllByTestId('cve-workload')[0].querySelector('[data-tier]')!.getAttribute('data-tier')).toBe('P0'));
+    const dialog = screen.getByRole('dialog');
+    const headlineChips = [...dialog.querySelectorAll('[data-factor]')].filter((c) => !c.closest('[data-testid=cve-workload]'));
+    const labels = headlineChips.map((c) => c.textContent);
+    // checkout (running, P0, exposed) leads; reports (not running) would say unknown.
+    expect(labels).toContain('Loaded');
+    expect(labels).toContain('Exposed');
+    expect(labels).not.toContain('Exposure unknown');
+  });
+
   test('on a Broker without tiers the drawer shows "Tier ?", not a computed tier', async () => {
     render(view({ cve: 'CVE-2099-0001' }));
     await waitFor(() => expect(screen.getAllByTestId('cve-workload').length).toBeGreaterThan(0));

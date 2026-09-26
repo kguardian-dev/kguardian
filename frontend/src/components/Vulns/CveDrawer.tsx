@@ -60,7 +60,10 @@ export function CveDrawer({ id, summary, onClose, onOpenWorkload, onShowOnMap, o
   );
   const overall = brokerTier(summary?.tier ?? f?.tier);
   const backgroundRow = rows.find((r) => r.tier === 'Background');
-  const headline = f ? findingFactors(f) : summary ? cveRowFactors(summary) : [];
+  // Headline chips from the workload listed first (running, then most urgent),
+  // so they do not depend on which image's read finished first.
+  const lead = (rows[0] && findings.get(rows[0].w.imageDigest)) || f;
+  const headline = lead ? findingFactors(lead) : summary ? cveRowFactors(summary) : [];
   const link = safeHttpUrl(f?.primaryUrl);
 
   let body;

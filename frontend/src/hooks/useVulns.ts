@@ -133,7 +133,10 @@ export function useCveDetail(id: string | null, api: VulnApi = vulnApi) {
 
   let finding: Finding | null = null;
   for (const f of findings.values()) {
-    if (f && (!finding || tierRank(brokerTier(f.tier)) > tierRank(brokerTier(finding.tier)))) finding = f;
+    // For a headline, a known tier beats an unknown one (unlike list sorting,
+    // where unknown floats up so it is never buried).
+    const rank = (x: Finding) => (brokerTier(x.tier) === null ? -1 : tierRank(brokerTier(x.tier)));
+    if (f && (!finding || rank(f) > rank(finding))) finding = f;
   }
   return { exposure, findings, finding, loading, error, reload: load };
 }
