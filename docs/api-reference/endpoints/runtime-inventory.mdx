@@ -184,3 +184,64 @@ rewrites its row when `last_seen` moved by five minutes or more, or when
 the report adds something (an earlier `first_seen`, an eBPF sighting of a
 backfilled path, a complete path, a more suspicious `origin`), so a
 steady-state batch writes nothing.
+
+## Coverage
+
+An inventory row proves a file ran. It cannot prove that a file did not
+run, because a node with the feature off writes nothing. For that, each
+controller heartbeats every container it tracks every 5 minutes, whether
+or not anything new ran, and the broker answers "was this watched
+continuously?" with the SQL function
+
+```sql
+kg_runtime_coverage(cluster text, namespace text, kind text, name text,
+                    container text, image_digest text, window_hours integer)
+  RETURNS TABLE (covered boolean, observed_since timestamp, reason text)
+```
+
+`observed_since` is naive UTC, like every broker timestamp. `covered` is
+true only when all of these hold for the workload container and image:
+
+- at least one instance heartbeated within the window;
+- every such instance had both the exec and the library probe (`exec`
+  mode cannot vouch for a library never being loaded);
+- every such instance is still heartbeating on time (within
+  3 × interval + 60 s), or ended cleanly;
+- every such instance was either captured from its start with no gap
+  since, or covered without a gap since before the window began. A
+  container already running when the probe attached counts from its
+  `/proc` backfill;
+- no live pod of the workload runs the container without a fresh
+  heartbeat, for example on a node with the feature off;
+- coverage began at least `window_hours` ago.
+
+Otherwise `covered` is false and `reason` is `no_runtime_data` (no
+instance at all), `probes_missing`, or `capture_gap` (too recent, a late
+or missing heartbeat, lost events, or an untracked pod). A gap restarts
+the run at the heartbeat that ended it. Gaps are events the kernel could
+not queue, a container over its 4096-path cap, a probe or mode change, or
+a heartbeat more than 3 × interval + 60 s after the previous one.
+
+## POST /runtime/coverage
+
+Controller heartbeats; requires the `ingest` scope. At most 5000 per post
+(`413` above that), 4 MiB body. Invalid entries are dropped and counted.
+A heartbeat older than the stored one is ignored, and a container's row
+is frozen once a heartbeat with `ended: true` arrives.
+
+```json
+[
+  {
+    "pod_namespace": "prod", "pod_name": "web-7d9f-abcde",
+    "workload_kind": "Deployment", "workload_name": "web",
+    "container_name": "app", "image_digest": "sha256:0123…cdef",
+    "container_id": "5e1e2d3c…", "node_name": "node-1",
+    "mode": "full", "exec_probe": true, "lib_probe": true,
+    "start_mode": "start", "tracking_since": "2026-09-26T10:00:00",
+    "gap": null, "ended": false,
+    "heartbeat_at": "2026-09-27T08:15:00", "heartbeat_secs": 300
+  }
+]
+```
+
+Rows not heartbeated for `RUNTIME_INVENTORY_RETENTION_DAYS` are pruned.
