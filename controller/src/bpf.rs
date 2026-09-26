@@ -3093,6 +3093,217 @@ mod tests {
         drop(rb);
     }
 
+    /// The syscall probe's runtime pre-filter, on the RUNNING kernel: a
+    /// container process that names itself "runc:[2:INIT]", a hostPID
+    /// container's orphaned worker, and a command exec'd by a non-runc
+    /// runtime installed as "runc" still have their pre-filter-list
+    /// syscalls (sethostname) recorded, and a real runtime's setup
+    /// (runc/crun, also crun installed as runc; create/start and exec,
+    /// which set the hostname and join namespaces) does not. Each case runs in its own pod (generation), so the per-(netns,
+    /// generation, syscall) dedup cannot hide one case behind another.
+    /// Needs root, cgroup v2 and KG_RUNC / KG_CRUN.
+    #[test]
+    #[ignore = "needs root, cgroup v2, a BTF-enabled kernel and KG_RUNC/KG_CRUN; run by the ebpf-kernels CI job"]
+    fn syscall_prefilter_skips_runtime_setup_by_provenance() {
+        use std::os::unix::process::CommandExt;
+        use std::sync::Arc;
+
+        let mut rt = RealRuntimes::new();
+        let mut storage = MaybeUninit::uninit();
+        let variant = SyscallLoadVariant {
+            ownership_gate: true,
+            startup_capture: false,
+            inject_failure: false,
+        };
+        let sk = open_and_load_syscall(&mut storage, variant).expect("load the gated object");
+        let _link = sk.progs.trace_execve.attach().expect("attach sys_enter");
+        populate_runtime_prefilter(&sk.maps.runtime_prefilter);
+        let sethostname = libc::SYS_sethostname as u32;
+        assert!(
+            sk.maps
+                .runtime_prefilter
+                .lookup(&sethostname.to_ne_bytes(), MapFlags::ANY)
+                .unwrap()
+                .is_some_and(|v| v[0] == 1),
+            "sethostname is on the runtime pre-filter list"
+        );
+        let events: Arc<Mutex<Vec<SyscallEventData>>> = Arc::default();
+        let sink = Arc::clone(&events);
+        let mut rb = RingBufferBuilder::new();
+        rb.add(&sk.maps.syscall_events, move |data: &[u8]| {
+            let ev: SyscallEventData =
+                unsafe { std::ptr::read_unaligned(data.as_ptr() as *const SyscallEventData) };
+            sink.lock().unwrap().push(ev);
+            0
+        })
+        .unwrap();
+        let rb = rb.build().unwrap();
+        let netns = std::fs::metadata("/proc/self/ns/net").unwrap().ino();
+        // Register this netns under pod `i`'s generation (as the pod watcher
+        // would) and return the pod's cgroup path and generation.
+        let register = |i: usize| {
+            let uid = format!("{i:08x}-5c1e-4f1b-a02d-1234567890ab");
+            let gen = crate::models::pod_flags::generation_for_uid(Some(&uid));
+            sk.maps
+                .inode_num
+                .update(
+                    &netns.to_ne_bytes(),
+                    &crate::models::pod_flags::pack(CaptureLevel::Full, gen).to_ne_bytes(),
+                    MapFlags::ANY,
+                )
+                .expect("register the netns");
+            (format!("/kubepods/besteffort/pod{uid}"), gen)
+        };
+        let cid = |i: usize| format!("{i:02x}{}", "b".repeat(62));
+        let captured = |cg: u64, gen: u32| {
+            events
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|e| e.cgroup_id == cg && e.generation == gen && e.sysnbr == sethostname)
+        };
+        let poll = || {
+            for _ in 0..10 {
+                rb.poll(std::time::Duration::from_millis(100)).unwrap();
+            }
+        };
+        use std::os::unix::fs::MetadataExt;
+
+        // A container process renamed "runc:[2:INIT]": exec'd (a copy of this
+        // binary, like an image's entrypoint) by the host into its cgroup.
+        let (pod, gen) = register(0);
+        let cg = rt.cgroup(&pod, &cid(0));
+        let workload_bin = rt.base.join("kg-sys-workload");
+        std::fs::copy(std::env::current_exe().unwrap(), &workload_bin).unwrap();
+        let procs = format!("/sys/fs/cgroup{pod}/{}/cgroup.procs", cid(0));
+        let status = unsafe {
+            std::process::Command::new(&workload_bin)
+                .args(&HELPER_ARGS[1..])
+                .env("KG_CAP_HELPER", "work")
+                .pre_exec(move || {
+                    std::fs::write(&procs, std::process::id().to_string())?;
+                    Ok(())
+                })
+                .stdout(std::process::Stdio::null())
+                .status()
+                .expect("spawn")
+        };
+        assert!(status.success());
+        poll();
+        assert!(
+            captured(cg, gen),
+            "a container process named runc:[2:INIT] has its sethostname recorded"
+        );
+        eprintln!("asserted: renamed container process's sethostname captured");
+
+        // A hostPID container's worker: forked, never exec'd, outlives its
+        // parent and is reparented outside the pod.
+        let (pod, gen) = register(1);
+        let cg = rt.cgroup(&pod, &cid(1));
+        let done = rt.base.join("kg-sys-orphan-done");
+        let procs = format!("/sys/fs/cgroup{pod}/{}/cgroup.procs", cid(1));
+        let status = unsafe {
+            std::process::Command::new(&workload_bin)
+                .args(&HELPER_ARGS[1..])
+                .env("KG_CAP_HELPER", "orphan")
+                .env("KG_CAP_DONE", &done)
+                .pre_exec(move || {
+                    std::fs::write(&procs, std::process::id().to_string())?;
+                    Ok(())
+                })
+                .stdout(std::process::Stdio::null())
+                .status()
+                .expect("spawn")
+        };
+        assert!(status.success());
+        for _ in 0..500 {
+            if done.exists() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(done.exists(), "the orphaned worker ran");
+        poll();
+        assert!(
+            captured(cg, gen),
+            "a hostPID container's orphaned worker has its sethostname recorded"
+        );
+        eprintln!("asserted: hostPID orphaned worker's sethostname captured");
+
+        // A non-runc runtime installed as "runc" execs the container's
+        // command from its file (one exec, parent named runc, not sealed).
+        let (pod, gen) = register(2);
+        let cg = rt.cgroup(&pod, &cid(2));
+        let status = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(&HELPER_ARGS[1..])
+            .env("KG_CAP_HELPER", "runcnamed")
+            .env("KG_CAP_WORKLOAD", &workload_bin)
+            .env(
+                "KG_CAP_CGROUP",
+                format!("/sys/fs/cgroup{pod}/{}/cgroup.procs", cid(2)),
+            )
+            .stdout(std::process::Stdio::null())
+            .status()
+            .expect("spawn");
+        assert!(status.success());
+        poll();
+        assert!(
+            captured(cg, gen),
+            "a command exec'd by a runtime merely named runc has its sethostname recorded"
+        );
+        eprintln!("asserted: command of a runtime named runc: sethostname captured");
+
+        let names: Vec<&'static str> = rt.runtimes.iter().map(|r| r.0).collect();
+        for (i, name) in names.into_iter().enumerate() {
+            // run: setup sets the hostname; the command ("bind") does not.
+            let (pod, gen) = register(10 + 2 * i);
+            let c = cid(10 + 2 * i);
+            let cg = rt.cgroup(&pod, &c);
+            let b = rt.bundle(&format!("{name}-sys-run"), &pod, &c, "bind");
+            rt.run_container(name, &format!("kg-{name}-sys-run"), &b);
+            poll();
+            assert!(
+                !captured(cg, gen),
+                "{name}: its setup's sethostname is not the container's"
+            );
+            assert!(
+                events
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .any(|e| e.cgroup_id == cg && e.generation == gen),
+                "{name}: the container's own syscalls are captured (the case is live)"
+            );
+            eprintln!("asserted: {name} run: setup sethostname excluded, container captured");
+            // exec: its setup joins the namespaces (setns, on the list); the
+            // exec'd process then calls sethostname itself ("work").
+            let (pod, gen) = register(11 + 2 * i);
+            let c = cid(11 + 2 * i);
+            let cg = rt.cgroup(&pod, &c);
+            let b = rt.bundle(&format!("{name}-sys-held"), &pod, &c, "hold");
+            rt.exec_in_held(name, &format!("kg-{name}-sys-held"), &b, "work");
+            poll();
+            let setns = libc::SYS_setns as u32;
+            let evs = events.lock().unwrap();
+            let ours: Vec<u32> = evs
+                .iter()
+                .filter(|e| e.cgroup_id == cg && e.generation == gen)
+                .map(|e| e.sysnbr)
+                .collect();
+            drop(evs);
+            assert!(
+                ours.contains(&sethostname),
+                "{name}: the exec'd process, named runc:[2:INIT], has its sethostname recorded"
+            );
+            assert!(
+                !ours.contains(&setns),
+                "{name}: exec's setup (setns) is not the container's"
+            );
+            eprintln!("asserted: {name} exec: setup setns excluded, exec'd sethostname captured");
+        }
+        let _ = std::fs::remove_file(&workload_bin);
+    }
+
     fn reset_state() {
         EBPF_SHUTDOWN.store(false, Ordering::Relaxed);
         NETWORK_SEND_FAILED.store(false, Ordering::Relaxed);
