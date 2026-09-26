@@ -948,7 +948,8 @@ From `GET /workloads/payments/Deployment/checkout/profile` -> 200 (capture `prof
     podSecurity content), `no_container_data`;
   - `unshippedExecutable`: `no_inventory` (the controller reports no runtime inventory for the workload:
     mode off, excluded or opted out), `no_running_containers`, `no_runtime_data` (no coverage heartbeat
-    for the container's running digest), `truncated` (more than 32 current (container, digest) pairs:
+    for the container's running digest), `coverage_unavailable` (the database has no
+    `kg_runtime_coverage`, so coverage cannot be read at all), `truncated` (more than 32 current (container, digest) pairs:
     the rest were not read), or the coverage function's own reason (`capture_gap`, `events_dropped`,
     `events_pending`, `libraries_not_tracked`, `incomplete_paths`, `probes_missing`, ...).
   A file seen running from an unshipped origin is an item whatever the coverage; coverage only decides

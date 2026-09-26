@@ -4319,6 +4319,7 @@ mod tests {
                 .collect(),
             pairs_truncated: truncated,
             coverage,
+            coverage_unavailable: false,
         })
     }
 
@@ -4404,6 +4405,15 @@ mod tests {
         );
         assert_eq!(not_evaluated(&p), [(None, "truncated".into())]);
         assert!(!p.drift.evaluated.contains(&"unshippedExecutable"));
+        // The coverage function itself is missing: its own reason, not
+        // "no heartbeat".
+        let mut input = rt(true, vec![], vec![], false).unwrap();
+        input.coverage_unavailable = true;
+        let p = build(&key(), &with_runtime(Some(input)), now());
+        assert_eq!(
+            not_evaluated(&p),
+            [(Some("app".into()), "coverage_unavailable".into())]
+        );
     }
 
     /// Every drift check that did not run is in notEvaluated with a

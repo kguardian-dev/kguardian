@@ -295,6 +295,9 @@ pub struct RuntimeDriftInput {
     pub pairs_truncated: bool,
     /// Per (container, digest) coverage over the default window.
     pub coverage: Vec<crate::runtime_inventory::CoverageView>,
+    /// The runtime inventory's coverage function is missing from the
+    /// database: coverage is unknowable (`coverage_unavailable`).
+    pub coverage_unavailable: bool,
 }
 
 /// Unshipped files of the given current (container, digest) pairs: per
@@ -361,9 +364,10 @@ pub fn load_runtime(
     let has_inventory = ri::workload_has_inventory(conn, &key.namespace, &key.kind, &key.name)?;
     // Without the runtime inventory's coverage function (a database the
     // migration has not reached, or one a test left without it) nothing is
-    // covered: every container is not evaluated, and the profile still
-    // builds.
-    let coverage = if crate::in_use_store::coverage_available(conn)? {
+    // covered: every container is not evaluated (coverage_unavailable),
+    // and the profile still builds.
+    let coverage_unavailable = !crate::in_use_store::coverage_available(conn)?;
+    let coverage = if !coverage_unavailable {
         ri::workload_coverage(
             conn,
             &key.namespace,
@@ -423,6 +427,7 @@ pub fn load_runtime(
         unshipped,
         pairs_truncated,
         coverage,
+        coverage_unavailable,
     })
 }
 
@@ -526,6 +531,8 @@ fn unshipped_check(
         // Can "nothing unshipped" be claimed for this container?
         let reason = if !rt.has_inventory {
             Some("no_inventory".to_string())
+        } else if rt.coverage_unavailable {
+            Some("coverage_unavailable".to_string())
         } else {
             digests.iter().find_map(|d| {
                 match rt
@@ -1248,7 +1255,8 @@ mod live_tests {
     }
 
     /// Without kg_runtime_coverage the profile still builds and the
-    /// unshipped check is not evaluated (no_runtime_data), never an error.
+    /// unshipped check is not evaluated (coverage_unavailable), never an
+    /// error.
     /// Inside a transaction that rolls back, so the function comes back.
     #[test]
     #[ignore = "requires a live postgres (set KG_TEST_DATABASE_URL)"]
@@ -1268,7 +1276,7 @@ mod live_tests {
                 .drift
                 .not_evaluated
                 .iter()
-                .any(|n| n.kind == "unshippedExecutable" && n.reason == "no_runtime_data"));
+                .any(|n| n.kind == "unshippedExecutable" && n.reason == "coverage_unavailable"));
             Err(diesel::result::Error::RollbackTransaction)
         });
         assert!(matches!(r, Err(diesel::result::Error::RollbackTransaction)));
