@@ -298,3 +298,36 @@ func TestTrackerHoldsOnePayloadPerDigest(t *testing.T) {
 		t.Errorf("after deletes: %+v", st)
 	}
 }
+
+// interleavingResolver runs a callback during resolution (outside the
+// tracker lock), reproducing an SBOM arriving between a tag-only vuln
+// report's resolve() and its store.
+type interleavingResolver struct{ during func() }
+
+func (r *interleavingResolver) ResolveDigest(context.Context, types.WorkloadRef, string) (string, error) {
+	if r.during != nil {
+		f := r.during
+		r.during = nil
+		f()
+	}
+	return "", nil
+}
+
+// Regression: the tag-only report must still resolve when its SBOM lands
+// in that window (seen as a CI flake before the in-lock re-check).
+func TestTrackerTagOnlyRaceWithSBOM(t *testing.T) {
+	res := &interleavingResolver{}
+	tr := NewTracker(res)
+	var sbomEmissions []Emission
+	res.during = func() { sbomEmissions = tr.UpsertSbomReport(ctx, loadSBOM(t, "sbomreport-docs.yaml")) }
+	es := tr.UpsertVulnerabilityReport(ctx, loadVuln(t, "vulnerabilityreport-apiserver-tagonly.yaml"))
+	if len(sbomEmissions) != 1 || sbomEmissions[0].Kind != KindSBOM {
+		t.Fatalf("sbom emissions: %v", kinds(sbomEmissions))
+	}
+	if len(es) != 1 || es[0].Kind != KindVulnerabilities || es[0].Digest != apiserverDigest {
+		t.Fatalf("vuln report left unresolved: %+v (stats %+v)", es, tr.Stats())
+	}
+	if es[0].Vulns.Image.Digest != apiserverDigest {
+		t.Errorf("payload digest %q", es[0].Vulns.Image.Digest)
+	}
+}

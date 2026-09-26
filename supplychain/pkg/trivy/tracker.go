@@ -132,6 +132,14 @@ func (t *Tracker) UpsertVulnerabilityReport(ctx context.Context, r *Vulnerabilit
 
 	t.mu.Lock()
 	defer t.mu.Unlock()
+	if digest == "" {
+		// Re-check under the lock: a report for the same container may have
+		// been recorded between resolve() and here, and it would have missed
+		// this one (not yet stored) when it looked for tag-only reports.
+		if digest = t.correlateLocked(w, ref); digest != "" {
+			payload.Image.Digest = digest
+		}
+	}
 	t.detachLocked(KindVulnerabilities, key, digest)
 	e := &objEntry{workload: w, ref: ref, digest: digest}
 	t.vulnObjs[key] = e
@@ -169,6 +177,14 @@ func (t *Tracker) UpsertSbomReport(ctx context.Context, r *SbomReport) []Emissio
 
 	t.mu.Lock()
 	defer t.mu.Unlock()
+	if digest == "" {
+		// Re-check under the lock: a report for the same container may have
+		// been recorded between resolve() and here, and it would have missed
+		// this one (not yet stored) when it looked for tag-only reports.
+		if digest = t.correlateLocked(w, ref); digest != "" {
+			payload.Image.Digest = digest
+		}
+	}
 	t.detachLocked(KindSBOM, key, digest)
 	e := &objEntry{workload: w, ref: ref, digest: digest}
 	t.sbomObjs[key] = e
