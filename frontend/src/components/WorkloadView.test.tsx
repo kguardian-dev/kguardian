@@ -483,3 +483,22 @@ test('Overview: no findings but drift checks not evaluated is not "Nothing flagg
   expect(note.textContent).toContain('never been exported');
   expect(note.textContent).toContain('no container is running');
 });
+
+test('Overview: an older broker (evaluated, no notEvaluated) still shows the drift checks it skipped', async () => {
+  const older = {
+    ...checkoutProfile,
+    posture: { ...checkoutProfile.posture, unknownDimensions: [] },
+    attention: [],
+    findings: [],
+    drift: { evaluated: ['tagMoved'], items: [] },
+  } as unknown as WorkloadProfile;
+  const { api } = replayApi([answer('GET /workloads/payments/Deployment/checkout/profile', older)]);
+  renderPage(api, CHECKOUT);
+  const attention = await screen.findByRole('region', { name: 'Needs attention' });
+  expect(attention.textContent).not.toContain('Nothing flagged in any dimension');
+  expect(attention.textContent).toContain('2 drift checks were not evaluated');
+  const note = within(attention).getByRole('list', { name: 'Drift checks not evaluated' });
+  expect(note.textContent).toContain('imageChangedSinceExport not evaluated');
+  expect(note.textContent).toContain('securityContextRegression not evaluated');
+  expect(note.textContent).toContain('does not say why');
+});

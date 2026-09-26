@@ -2,7 +2,7 @@ import { useState } from 'react';
 import { ChevronRight, ClipboardCheck, Package, Radar, ShieldCheck, SlidersHorizontal, Lock } from 'lucide-react';
 import type { Control, DimensionName, Finding, WorkloadProfile } from '../../types/profile';
 import { SEVERITY_BADGE_CLASS, TIER_BADGE_CLASS } from '../../utils/severity';
-import { DIMENSION_LABEL, driftNotEvaluatedText, findingDimensionLabel, findingSeverity } from '../../utils/posture';
+import { DIMENSION_LABEL, driftGapsOf, driftNotEvaluatedText, findingDimensionLabel, findingSeverity } from '../../utils/posture';
 import { Button } from '../ui/Button';
 import { EmptyState } from '../ui/EmptyState';
 import { CantTell, CheckMark, Panel } from './parts';
@@ -43,8 +43,9 @@ function NeedsAttention({ profile, onOpenTab }: { profile: WorkloadProfile; onOp
   // Core dimensions with status unknown (contract v1.2).
   const unknown = profile.posture.unknownDimensions;
   // Drift checks the broker could not run (contract v1.7): no item for
-  // them is not "no drift".
-  const driftGaps = profile.drift?.notEvaluated ?? [];
+  // them is not "no drift". A v1.4-v1.6 broker sends `evaluated` without
+  // `notEvaluated`: the checks it had and did not evaluate are gaps too.
+  const driftGaps = driftGapsOf(profile.drift);
   return (
     <Panel
       icon={Radar}
