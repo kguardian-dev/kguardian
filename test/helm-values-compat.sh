@@ -461,6 +461,10 @@ done
 # D3: kguardian does not read imagePullSecrets).
 # ---------------------------------------------------------------------------
 
+# supplychain requires scoped broker auth (guarded in the chart), so every
+# enabled render below carries it.
+SC_ON=(--set supplychain.enabled=true --set broker.auth.enabled=true --set broker.auth.existingSecret=kg)
+
 # 10a. Defaults render nothing of it.
 render "supplychain-default-off" && {
   assert_absent  "supplychain-default-off" "kguardian-supplychain"
@@ -469,11 +473,14 @@ render "supplychain-default-off" && {
 }
 
 # 10b. Enabled: one more Deployment, hardened, broker ingest still off.
-render "supplychain-enabled" --set supplychain.enabled=true && {
+render "supplychain-enabled" "${SC_ON[@]}" && {
   assert_deploys "supplychain-enabled" 5
   assert_has     "supplychain-enabled" "name: kguardian-supplychain"
   assert_has     "supplychain-enabled" 'args: \["serve"\]'
   assert_has     "supplychain-enabled" "readOnlyRootFilesystem: true"
+  # Its token is the supplychain-scoped key, never read/ingest/admin.
+  workload Deployment kguardian-supplychain | grep -A4 'name: BROKER_AUTH_TOKEN' | grep -q 'key: supplychain' || \
+    { echo "FAIL [supplychain-enabled]: supplychain must mount the supplychain-scoped broker token"; fail=1; }
   grep -A1 'name: BROKER_INGEST_ENABLED' <<<"$OUT" | grep -q 'value: "false"' || \
     { echo "FAIL [supplychain-enabled]: BROKER_INGEST_ENABLED must default to false"; fail=1; }
   grep -A1 'name: TRIVY_OPERATOR_ENABLED' <<<"$OUT" | grep -q 'value: "true"' || \
@@ -486,17 +493,17 @@ render "supplychain-enabled" --set supplychain.enabled=true && {
 }
 
 # 10b-ii. registryLookup follows brokerIngest unless set explicitly.
-render "supplychain-lookup-follows-ingest" --set supplychain.enabled=true \
+render "supplychain-lookup-follows-ingest" "${SC_ON[@]}" \
   --set supplychain.brokerIngest.enabled=true && {
   grep -A1 'name: REGISTRY_LOOKUP_ENABLED' <<<"$OUT" | grep -q 'value: "true"' || \
     { echo "FAIL [supplychain-lookup-follows-ingest]: lookup must turn on with ingest"; fail=1; }
 }
-render "supplychain-lookup-explicit-off" --set supplychain.enabled=true \
+render "supplychain-lookup-explicit-off" "${SC_ON[@]}" \
   --set supplychain.brokerIngest.enabled=true --set supplychain.registryLookup.enabled=false && {
   grep -A1 'name: REGISTRY_LOOKUP_ENABLED' <<<"$OUT" | grep -q 'value: "false"' || \
     { echo "FAIL [supplychain-lookup-explicit-off]: explicit false must win"; fail=1; }
 }
-render "supplychain-lookup-private" --set supplychain.enabled=true \
+render "supplychain-lookup-private" "${SC_ON[@]}" \
   --set supplychain.registryLookup.allowPrivateRegistries=true && {
   grep -A1 'name: REGISTRY_ALLOW_PRIVATE' <<<"$OUT" | grep -q 'value: "true"' || \
     { echo "FAIL [supplychain-lookup-private]: allowPrivateRegistries must propagate"; fail=1; }
@@ -504,7 +511,7 @@ render "supplychain-lookup-private" --set supplychain.enabled=true \
 
 # 10c. The ClusterRole is exactly get/list/watch on the two report resources.
 # Rendered alone so nothing else in the chart can satisfy or mask the checks.
-if role="$(helm template compat "$CHART" --set supplychain.enabled=true \
+if role="$(helm template compat "$CHART" "${SC_ON[@]}" \
     --show-only templates/supplychain/clusterrole.yaml 2>/dev/null)"; then
   rules="$(awk '/^kind: ClusterRole$/{f=1} /^---/{f=0} f' <<<"$role" | sed -n '/^rules:/,$p')"
   grep -q 'apiGroups: \["aquasecurity.github.io"\]' <<<"$rules" || \
@@ -522,7 +529,7 @@ else
 fi
 
 # 10d. Source off: no ClusterRole, and no API token mounted.
-render "supplychain-no-trivy" --set supplychain.enabled=true \
+render "supplychain-no-trivy" "${SC_ON[@]}" \
   --set supplychain.sources.trivyOperator.enabled=false && {
   assert_absent  "supplychain-no-trivy" "aquasecurity.github.io"
   assert_has     "supplychain-no-trivy" "automountServiceAccountToken: false"
@@ -531,7 +538,7 @@ render "supplychain-no-trivy" --set supplychain.enabled=true \
 
 # 10e. With the broker NetworkPolicy on, supplychain is an admitted peer;
 # without supplychain, it is not.
-render "supplychain-broker-netpol" --set supplychain.enabled=true \
+render "supplychain-broker-netpol" "${SC_ON[@]}" \
   --set broker.networkPolicy.enabled=true --set 'broker.networkPolicy.allowedNodeCIDRs={10.0.0.0/16}' && {
   grep -B1 -A2 'podSelector:' <<<"$OUT" | grep -q 'app.kubernetes.io/name: kguardian-supplychain' || \
     { echo "FAIL [supplychain-broker-netpol]: broker policy must admit supplychain"; fail=1; }
@@ -542,7 +549,7 @@ render "broker-netpol-no-supplychain" --set broker.networkPolicy.enabled=true \
 }
 
 # 10f. Its own NetworkPolicy: closed ingress unless scrapers are listed.
-render "supplychain-netpol" --set supplychain.enabled=true \
+render "supplychain-netpol" "${SC_ON[@]}" \
   --set supplychain.networkPolicy.enabled=true && {
   assert_has "supplychain-netpol" "ingress: \[\]"
 }

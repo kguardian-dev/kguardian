@@ -413,7 +413,7 @@ The following table lists the configurable parameters of the kguardian chart and
 | supplychain.affinity | object | `{}` | Affinity rules for supplychain pod assignment |
 | supplychain.brokerIngest.enabled | bool | `false` | Send payloads to the broker. Leave false until the broker's supply-chain ingest endpoints are released; until then payloads are logged only. |
 | supplychain.container.port | int | `8083` | HTTP port for /healthz, /readyz and /metrics |
-| supplychain.enabled | bool | `false` | Deploy the supply-chain component (#1533). It reads vulnerability and SBOM data about the images your workloads run and reports it; it never blocks or changes a workload. Off by default. Today its only source is Trivy Operator (install Trivy Operator separately). Payloads are logged, not sent, until broker ingest ships (see brokerIngest.enabled). |
+| supplychain.enabled | bool | `false` | Deploy the supply-chain component (#1533). It reads vulnerability and SBOM data about the images your workloads run and reports it; it never blocks or changes a workload. Off by default. Today its only source is Trivy Operator (install Trivy Operator separately). Payloads are logged, not sent, until broker ingest ships (see brokerIngest.enabled). Requires broker.auth.enabled=true in scoped mode with a supplychain key; the chart refuses to render otherwise. |
 | supplychain.env | list | `[]` | Additional environment variables for the supplychain container |
 | supplychain.image.pullPolicy | string | `"IfNotPresent"` | Supplychain image pull policy |
 | supplychain.image.repository | string | `"ghcr.io/kguardian-dev/kguardian/supplychain"` | Supplychain container image repository |

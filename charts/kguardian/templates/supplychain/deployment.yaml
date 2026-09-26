@@ -1,4 +1,5 @@
 {{- if .Values.supplychain.enabled }}
+{{- include "kguardian.supplychainAuthGuard" . }}
 {{- /*
   One replica by design: the component turns report churn into
   per-digest payloads and de-duplicates them in memory. A second replica
@@ -75,16 +76,8 @@ spec:
               value: {{ $lookup | quote }}
             - name: REGISTRY_ALLOW_PRIVATE
               value: {{ .Values.supplychain.registryLookup.allowPrivateRegistries | quote }}
-            {{- /*
-              TODO(1533): once broker auth scopes land (feat/1533-broker-auth-scopes),
-              add the scoped token and the render guard here:
-                {{- include "kguardian.brokerAuthClientEnv" (dict "root" $ "scope" "supplychain") | nindent 12 }}
-              and, at the top of this file,
-                {{- include "kguardian.supplychainAuthGuard" . }}
-              (refuses supplychain.enabled=true with broker.auth.enabled=false).
-              The binary already reads BROKER_AUTH_TOKEN and sends it as a
-              bearer token.
-            */}}
+            {{- /* Scoped token: this component can only reach the supplychain routes. */}}
+            {{- include "kguardian.brokerAuthClientEnv" (dict "root" $ "scope" "supplychain") | nindent 12 }}
             {{- with .Values.supplychain.env }}
             {{- toYaml . | nindent 12 }}
             {{- end }}

@@ -1785,6 +1785,8 @@ supplychain:
   # blocks or changes a workload. Off by default. Today its only source is
   # Trivy Operator (install Trivy Operator separately). Payloads are logged,
   # not sent, until broker ingest ships (see brokerIngest.enabled).
+  # Requires broker.auth.enabled=true in scoped mode with a supplychain key;
+  # the chart refuses to render otherwise.
   enabled: false
 
   image:
