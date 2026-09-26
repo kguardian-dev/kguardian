@@ -445,7 +445,21 @@ pub struct CapRecommendation {
     /// never dropped without a person confirming the workload does not
     /// need it.
     pub probed_kept: Vec<String>,
+    /// Probed-only capabilities deliberately left out of `add`, with why.
+    pub probed_omitted: Vec<OmittedCap>,
 }
+
+/// A probed-only capability the recommendation leaves out.
+#[derive(Debug, Clone, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct OmittedCap {
+    pub capability: String,
+    pub reason: &'static str,
+}
+
+/// Why a probed-only SYS_ADMIN is left out (see [`build_view`]).
+pub const SYS_ADMIN_PROBE_OMITTED: &str = "probed only (memory reserve / seccomp without \
+    no_new_privs); allowPrivilegeEscalation=false removes the need";
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
@@ -483,6 +497,15 @@ pub struct ContainerCaps {
 pub struct CapabilitiesView {
     pub window_hours: i32,
     pub containers: Vec<ContainerCaps>,
+}
+
+/// The container's current securityContext says privileged: true.
+fn currently_privileged(c: &ContainerImages) -> bool {
+    c.digests
+        .first()
+        .and_then(|d| d.security_context.get("privileged"))
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
 }
 
 /// The container's current added capabilities (newest current digest).
@@ -547,11 +570,34 @@ pub fn build_view(containers: &[ContainerImages], ev: &CapEvidence) -> Capabilit
         let sufficient = reason.is_none();
         let observed_since = cov.iter().filter_map(|k| k.observed_since).max();
         let used_names: BTreeSet<String> = used.keys().cloned().collect();
-        let probed_only: Vec<String> = probed
+        let mut probed_only: Vec<String> = probed
             .keys()
             .filter(|p| !used_names.contains(*p))
             .cloned()
             .collect();
+        // A probed-only SYS_ADMIN comes almost entirely from the memory
+        // admin-reserve check every root process makes; the one real gate
+        // among its non-audited callers is installing a seccomp filter
+        // without no_new_privs. The recommendation sets
+        // allowPrivilegeEscalation: false (it is a restricted requirement,
+        // patched in whenever it is not already set), which sets
+        // no_new_privs, so SYS_ADMIN is left out, and said so. Not for a
+        // privileged container: the patch cannot be assumed to make it
+        // unprivileged, so it is kept.
+        let mut probed_omitted = Vec::new();
+        if !currently_privileged(c) {
+            probed_only.retain(|p| {
+                if p == "SYS_ADMIN" {
+                    probed_omitted.push(OmittedCap {
+                        capability: p.clone(),
+                        reason: SYS_ADMIN_PROBE_OMITTED,
+                    });
+                    false
+                } else {
+                    true
+                }
+            });
+        }
         let keep: BTreeSet<String> = used_names
             .iter()
             .chain(probed_only.iter())
@@ -567,6 +613,7 @@ pub fn build_view(containers: &[ContainerImages], ev: &CapEvidence) -> Capabilit
                     drop: vec!["ALL".into()],
                     add: keep.iter().cloned().collect(),
                     probed_kept: probed_only.clone(),
+                    probed_omitted,
                 }),
                 unused,
             )
@@ -803,6 +850,7 @@ mod tests {
                 drop: vec!["ALL".into()],
                 add: vec!["NET_BIND_SERVICE".into(), "SYS_TIME".into()],
                 probed_kept: vec![],
+                probed_omitted: vec![],
             })
         );
         assert_eq!(c.unused_added, vec!["NET_ADMIN"]);
@@ -838,16 +886,18 @@ mod tests {
         let v = build_view(&[container(&["SYS_ADMIN"], &[D])], &ev);
         let c = &v.containers[0];
         let r = c.recommendation.as_ref().unwrap();
-        assert_eq!(r.add, vec!["CHOWN", "NET_BIND_SERVICE", "SYS_ADMIN"]);
+        // SYS_ADMIN only probed: left out, with the reason (the patch sets
+        // allowPrivilegeEscalation: false, i.e. no_new_privs).
+        assert_eq!(r.add, vec!["CHOWN", "NET_BIND_SERVICE"]);
+        assert!(r.probed_kept.is_empty());
         assert_eq!(
-            r.probed_kept,
-            vec!["SYS_ADMIN"],
-            "kept only because of a probe"
+            r.probed_omitted,
+            vec![OmittedCap {
+                capability: "SYS_ADMIN".into(),
+                reason: SYS_ADMIN_PROBE_OMITTED
+            }]
         );
-        assert!(
-            c.unused_added.is_empty(),
-            "a probed capability is not reported as unused"
-        );
+        assert_eq!(c.unused_added, vec!["SYS_ADMIN"], "added today, not needed");
         assert_eq!(
             c.probed
                 .iter()
@@ -856,6 +906,35 @@ mod tests {
             vec!["CHOWN", "SYS_ADMIN"]
         );
         assert!(c.denied.iter().all(|d| d.capability != "SYS_PTRACE"));
+    }
+
+    #[test]
+    fn probed_capabilities_other_than_sys_admin_and_privileged_containers_keep_them() {
+        let ev = CapEvidence {
+            rows: vec![
+                row(D, "NET_BIND_SERVICE", true, 5),
+                probed_row(D, "SYS_ADMIN", true, 25),
+                probed_row(D, "SYS_PTRACE", true, 2),
+            ],
+            coverage: vec![cov(D, true, None)],
+            window_hours: 168,
+            ..Default::default()
+        };
+        // Not privileged: SYS_ADMIN omitted, SYS_PTRACE kept.
+        let v = build_view(&[container(&[], &[D])], &ev);
+        let r = v.containers[0].recommendation.clone().unwrap();
+        assert_eq!(r.add, vec!["NET_BIND_SERVICE", "SYS_PTRACE"]);
+        assert_eq!(r.probed_kept, vec!["SYS_PTRACE"]);
+        assert_eq!(r.probed_omitted.len(), 1);
+        // Privileged: the patch cannot be assumed to set no_new_privs, so
+        // SYS_ADMIN stays.
+        let mut priv_c = container(&[], &[D]);
+        priv_c.digests[0].security_context = json!({"privileged": true});
+        let v = build_view(&[priv_c], &ev);
+        let r = v.containers[0].recommendation.clone().unwrap();
+        assert_eq!(r.add, vec!["NET_BIND_SERVICE", "SYS_ADMIN", "SYS_PTRACE"]);
+        assert_eq!(r.probed_kept, vec!["SYS_ADMIN", "SYS_PTRACE"]);
+        assert!(r.probed_omitted.is_empty());
     }
 
     #[test]
@@ -1036,13 +1115,14 @@ mod tests {
         assert_eq!(c.denied[0].capability, "SYS_ADMIN");
         assert_eq!(
             c.recommendation.as_ref().unwrap().add,
-            vec!["NET_BIND_SERVICE", "SYS_ADMIN", "SYS_TIME"],
-            "probed SYS_ADMIN is kept"
+            vec!["NET_BIND_SERVICE", "SYS_TIME"],
+            "a probed-only SYS_ADMIN is left out: allowPrivilegeEscalation is false"
         );
         assert_eq!(
-            c.recommendation.as_ref().unwrap().probed_kept,
-            vec!["SYS_ADMIN"]
+            c.recommendation.as_ref().unwrap().probed_omitted[0].capability,
+            "SYS_ADMIN"
         );
+        assert!(c.recommendation.as_ref().unwrap().probed_kept.is_empty());
         assert_eq!(c.unused_added, vec!["NET_ADMIN"]);
         let rec = p
             .dimensions
@@ -1055,7 +1135,7 @@ mod tests {
         assert!(rec.yaml.contains("drop: [\"ALL\"]"));
         assert!(rec
             .yaml
-            .contains("add: [\"NET_BIND_SERVICE\", \"SYS_ADMIN\", \"SYS_TIME\"]"));
+            .contains("add: [\"NET_BIND_SERVICE\", \"SYS_TIME\"]"));
         assert!(
             !rec.yaml.contains("NET_ADMIN\", \""),
             "the unused capability goes"
@@ -1064,7 +1144,7 @@ mod tests {
         assert!(rec
             .caveats
             .iter()
-            .any(|c| c.contains("keeps SYS_ADMIN only because of non-audited kernel checks")));
+            .any(|c| c.contains("leaves out SYS_ADMIN")));
         // The export bundle's securitycontext artifact carries the same patch.
         let plan = crate::profile_export::plan(&crate::profile_export::ExportQuery {
             artifacts: Some("securitycontext".into()),
@@ -1077,9 +1157,7 @@ mod tests {
         let docs = crate::profile_export::build_documents(&mut conn, &key, &p, &plan).unwrap();
         let bundle = crate::profile_export::render_bundle_yaml(&key, &p, &plan, &docs, false);
         assert!(
-            bundle.contains(
-                "add: [\"NET_BIND_SERVICE\", \"SYS_ADMIN\", \"SYS_TIME\"]  # observed in use"
-            ),
+            bundle.contains("add: [\"NET_BIND_SERVICE\", \"SYS_TIME\"]  # observed in use"),
             "{bundle}"
         );
         let v = serde_json::to_value(&p).unwrap();
