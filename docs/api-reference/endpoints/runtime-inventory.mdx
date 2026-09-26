@@ -52,13 +52,23 @@ backfill.
 | `writableLayer` | In the container's writable (overlayfs upper) layer: written or modified after the container started |
 | `memfd` | An anonymous memory file (`memfd_create`), never on disk |
 | `deleted` | Unlinked while running |
-| `unknown` | Not determined: a `/proc` backfill (which cannot see layers), or overlayfs without its type in kernel BTF |
+| `unknown` | Not determined: a `/proc` backfill (which cannot see layers; the broker stores every backfill row as `unknown` unless its path shows `deleted` or `memfd`), or overlayfs without its type in kernel BTF |
 
 When sightings of one path disagree, the most suspicious wins (in the
 order `unknown` < `image` < `otherFs` < `deleted` < `writableLayer` <
 `memfd`) and is never downgraded: one replica running the file from its
 writable layer is the finding, whatever the others did. `deleted`,
 `writableLayer` and `memfd` together are the "unshipped" origins.
+
+A file changed in place while the container runs (an image binary
+overwritten, which copies it up into the writable layer, or a file
+unlinked and then executed through an open descriptor) is reported again
+with its new origin: the probe's dedup key includes the file's state.
+
+Not observed: a mapping made executable later with `mprotect(PROT_EXEC)`
+(JIT compilers, some custom loaders), and code an interpreter reads as
+data (scripts, `.pyc`, jars). Only `execve` and executable `mmap` are
+seen.
 
 Rows not seen for `RUNTIME_INVENTORY_RETENTION_DAYS` (chart:
 `broker.runtimeInventory.retentionDays`, default 30) are pruned.
@@ -74,6 +84,7 @@ empty `containers` list when nothing has been reported for the workload.
 | `kind` | `exec` or `lib`; anything else is `400` | both |
 | `origin` | One origin, or `unshipped` for `deleted`, `writableLayer` and `memfd`; anything else is `400` | all |
 | `limit` | Rows (paths) returned, capped at 5000 | `1000` |
+| `window_hours` | Coverage window, clamped to 1-720 | `24` |
 
 ```json
 {
@@ -97,9 +108,29 @@ empty `containers` list when nothing has been reported for the workload.
       ]
     }
   ],
-  "truncated": false
+  "truncated": false,
+  "coverage": [
+    {
+      "containerName": "app",
+      "imageDigest": "sha256:0123…cdef",
+      "instances": 3,
+      "lastHeartbeat": "2026-09-27T08:15:00",
+      "mode": "full",
+      "librariesTracked": true,
+      "covered": true,
+      "observedSince": "2026-09-25T10:00:00",
+      "reason": null,
+      "windowHours": 24
+    }
+  ]
 }
 ```
+
+`coverage` lists every (container, digest) of the workload with a
+controller heartbeat in the window, with the answer of
+`kg_runtime_coverage` (see [Coverage](#coverage)). An empty `coverage`
+means no controller is watching the workload, so an empty inventory says
+nothing about what runs.
 
 One `containers` item per (container, digest): a workload mid-rollout
 lists the same container once per image. `imageDigest` is `""` when the
@@ -118,6 +149,8 @@ the image, aggregated across all workloads that run it.
 | --- | --- | --- |
 | `kind` | `exec` or `lib` | both |
 | `limit` | Rows returned, capped at 5000 | `1000` |
+| `after` | Resume after this `<kind>:<path>`: the previous page's `nextCursor` | start |
+| `window_hours` | Coverage window, clamped to 1-720 | `24` |
 
 ```json
 {
@@ -133,9 +166,22 @@ the image, aggregated across all workloads that run it.
       "workloads": 3
     }
   ],
-  "truncated": false
+  "truncated": false,
+  "nextCursor": null,
+  "coverage": {
+    "workloads": 3,
+    "instances": 7,
+    "lastHeartbeat": "2026-09-27T08:15:00",
+    "librariesTracked": true,
+    "instancesWithDrops": 0,
+    "windowHours": 24
+  }
 }
 ```
+
+When `truncated` is true, `nextCursor` is the `after` value for the next
+page. `coverage` counts the heartbeating containers running the image in
+the window; all zero means nobody is watching.
 
 `workloads` counts distinct workloads that ran the path. `firstSeen` and
 `lastSeen` span every workload, and `origin` is the most suspicious one
@@ -200,11 +246,20 @@ kg_runtime_coverage(cluster text, namespace text, kind text, name text,
 ```
 
 `observed_since` is naive UTC, like every broker timestamp. `covered` is
-true only when all of these hold for the workload container and image:
+a negative claim ("this never ran") that can end up in a VEX statement,
+so every doubt answers false. It is true only when all of these hold for
+the workload container and image:
 
 - at least one instance heartbeated within the window;
-- every such instance had both the exec and the library probe (`exec`
-  mode cannot vouch for a library never being loaded);
+- every such instance had the exec probe, and the library probe in mode
+  `full` (`exec` mode cannot vouch for a library never being loaded);
+- no instance lost events in the window: the kernel could not queue them,
+  the container hit its 4096-path cap, the broker dropped entries at
+  ingest, or sightings arrived before the pod was known;
+- no instance still had entries waiting to reach the broker at its last
+  heartbeat;
+- no path of the container and image is incomplete (a truncated path
+  cannot be matched to the package that owns it);
 - every such instance is still heartbeating on time (within
   3 × interval + 60 s), or ended cleanly;
 - every such instance was either captured from its start with no gap
@@ -215,12 +270,15 @@ true only when all of these hold for the workload container and image:
   heartbeat, for example on a node with the feature off;
 - coverage began at least `window_hours` ago.
 
-Otherwise `covered` is false and `reason` is `no_runtime_data` (no
-instance at all), `probes_missing`, or `capture_gap` (too recent, a late
-or missing heartbeat, lost events, or an untracked pod). A gap restarts
-the run at the heartbeat that ended it. Gaps are events the kernel could
-not queue, a container over its 4096-path cap, a probe or mode change, or
-a heartbeat more than 3 × interval + 60 s after the previous one.
+Otherwise `covered` is false, and `reason` is the first failing check in
+this order: `no_runtime_data`, `probes_missing`, `libraries_not_tracked`,
+`events_dropped`, `events_pending`, `incomplete_paths`, `capture_gap`.
+A late heartbeat or a probe or mode change restarts the gap-free run at
+the heartbeat that ended it. A lost event keeps every window containing
+it uncovered.
+
+A full dedup map in the kernel loses nothing: it evicts its oldest entry,
+and that file is reported again on its next use.
 
 ## POST /runtime/coverage
 
@@ -238,7 +296,7 @@ is frozen once a heartbeat with `ended: true` arrives.
     "container_id": "5e1e2d3c…", "node_name": "node-1",
     "mode": "full", "exec_probe": true, "lib_probe": true,
     "start_mode": "start", "tracking_since": "2026-09-26T10:00:00",
-    "gap": null, "ended": false,
+    "events_dropped": 0, "unsent": 0, "ended": false,
     "heartbeat_at": "2026-09-27T08:15:00", "heartbeat_secs": 300
   }
 ]
