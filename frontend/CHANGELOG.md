@@ -1,5 +1,45 @@
 # Changelog
 
+## [1.20.0](https://github.com/kguardian-dev/kguardian/compare/frontend/v1.19.0...frontend/v1.20.0) (2026-09-26)
+
+
+### Features
+
+* **frontend:** broker read token on an allowlisted /api proxy ([ce2f5f9](https://github.com/kguardian-dev/kguardian/commit/ce2f5f9937e45163b39e35041760b1fbfa7af0d8))
+* **frontend:** Images view, CVE triage drawer and map lenses ([6c753e2](https://github.com/kguardian-dev/kguardian/commit/6c753e2fc6bdc1f4229d59399c1ee9d318efb890))
+* **frontend:** render the Broker's risk tiers instead of computing them ([3f382d4](https://github.com/kguardian-dev/kguardian/commit/3f382d4bad1e67a57f05fa43bb4d884f42418d79))
+* **frontend:** runtime security foundations - Risks, Workloads coverage and severity palette ([#1654](https://github.com/kguardian-dev/kguardian/issues/1654)) ([264f873](https://github.com/kguardian-dev/kguardian/commit/264f8734623c7a619744b10287f3e11f5ef339e6))
+* **frontend:** workload security profile page ([#1672](https://github.com/kguardian-dev/kguardian/issues/1672)) ([829eea3](https://github.com/kguardian-dev/kguardian/commit/829eea379170d8cc20a2f0196815309872885408))
+
+
+### Bug Fixes
+
+* **frontend:** call the no-lens option None so the map has one Traffic control ([5e0fdcd](https://github.com/kguardian-dev/kguardian/commit/5e0fdcda0f69f8043fb58b0361c1649576bbfc11))
+* **frontend:** CVE drawer headline is the worst case over every workload ([cc5df19](https://github.com/kguardian-dev/kguardian/commit/cc5df1982b645e93dc8b291af4d8d092bcc09909))
+* **frontend:** drop the raw digest kind and use one No SBOM treatment ([1203cb3](https://github.com/kguardian-dev/kguardian/commit/1203cb38d3341f14ef36f234d282b772a79429d6))
+* **frontend:** Esc from the page body closes only the topmost dialog ([#1688](https://github.com/kguardian-dev/kguardian/issues/1688)) ([f682560](https://github.com/kguardian-dev/kguardian/commit/f682560d9d3559ce06f2c8fe97a75a51c941496d))
+* **frontend:** give the AI assistant dialog an accessible name ([7554926](https://github.com/kguardian-dev/kguardian/commit/75549262a3fae8a5cf9b865901de2af742a358f0))
+* **frontend:** keep focus on the rail toggle when the rail changes shape ([fb8d12c](https://github.com/kguardian-dev/kguardian/commit/fb8d12c4ee07303d3f55114a4e1131bda681552e))
+* **frontend:** keep the page title readable when the rail or AI panel narrows the header ([8e7119d](https://github.com/kguardian-dev/kguardian/commit/8e7119df9974c55a08d26e3c18104368d9b5458b))
+* **frontend:** keep the phone layout usable (rail overlay, map toolbar) ([#1684](https://github.com/kguardian-dev/kguardian/issues/1684)) ([2325251](https://github.com/kguardian-dev/kguardian/commit/232525134140266f752bcdbbb78049e4df18edff))
+* **frontend:** map lens is a select below xl so it never covers the summary ([9ffe3d5](https://github.com/kguardian-dev/kguardian/commit/9ffe3d54332d4f4b2cda87cf12c869763cdfc1cc))
+* **frontend:** map lens shows a failed or capped read as unknown, never as none ([b0aeab5](https://github.com/kguardian-dev/kguardian/commit/b0aeab5f8ebd483a1f7c0104f087e5d34c4210b6))
+* **frontend:** mark a headline tier as a floor when rows are unknown, show in-flight rows as pending ([831fe86](https://github.com/kguardian-dev/kguardian/commit/831fe8609324158074a5e8347c7b08efabc6eb5c))
+* **frontend:** name the command palette, audit verdicts and policy editor dialogs ([4a05d1c](https://github.com/kguardian-dev/kguardian/commit/4a05d1cddb28e13b09a9f487912d8985b22dd23d))
+* **frontend:** quieter unknown counts on tiles, keep package versions on one line ([0324b9d](https://github.com/kguardian-dev/kguardian/commit/0324b9dc15e4cdb4b9fa93abffe374ad7af5f35c))
+* **frontend:** read the floor tier badge as 'at least', spell out a Background floor ([5bba482](https://github.com/kguardian-dev/kguardian/commit/5bba4826f06bc464e4e95ff9ba7c7e54121cacec))
+* **frontend:** say where findings come from: Trivy Operator and the opt-in Grype matcher ([6a52c3a](https://github.com/kguardian-dev/kguardian/commit/6a52c3a75d36a151f8a8e1bcfc82890fb8ec69d2))
+* **frontend:** settle each image read on its own so one failure does not blank the row ([b6cf191](https://github.com/kguardian-dev/kguardian/commit/b6cf19183304394e90936d34138c7c53fa01a78c))
+* **frontend:** show KEV and EPSS as not reported, and count unknowns on the tiles ([b41df8e](https://github.com/kguardian-dev/kguardian/commit/b41df8e79fdb969c4b5f228f912c0ba6e579b50c))
+* **frontend:** size the map toolbar to the map, not the window ([663101d](https://github.com/kguardian-dev/kguardian/commit/663101d5cbaf2366529959326177cecc96c484ef))
+* **frontend:** stack image and CVE columns on phones, honest unread tiles ([fcba3d5](https://github.com/kguardian-dev/kguardian/commit/fcba3d56d77281682ec8bb1c61a55ed9a8c0a41d))
+* **frontend:** stack the image findings table on phones ([8b11f72](https://github.com/kguardian-dev/kguardian/commit/8b11f727e927a3bd19ec68f98f8d49e0c44facb9))
+* **frontend:** stacked dialogs keep Tab inside and return focus to their opener ([#1693](https://github.com/kguardian-dev/kguardian/issues/1693)) ([9b7021c](https://github.com/kguardian-dev/kguardian/commit/9b7021ca175924bcc671e5f1b34f002b08c0e92e))
+* **frontend:** take the CVE drawer headline from the first-listed workload ([d6dd4be](https://github.com/kguardian-dev/kguardian/commit/d6dd4be63a4f48436b7d206afb229e8eeb43f7aa))
+* **frontend:** time out supply-chain reads after 15s with a retryable error ([b4b4d31](https://github.com/kguardian-dev/kguardian/commit/b4b4d31ea4faba101fb398b0f5a3d17a7d4d6381))
+* **frontend:** time out workload profile reads after 15s instead of hanging ([7ef8dd7](https://github.com/kguardian-dev/kguardian/commit/7ef8dd7fab34ff1a17c416be2981f5b9396697d2))
+* **frontend:** visible Background caveat, null tier read as not computed, current Ask AI in-use wording ([92e9546](https://github.com/kguardian-dev/kguardian/commit/92e9546e20dddb8f0b129cfc0c03dddf52fa95b1))
+
 ## [1.19.0](https://github.com/kguardian-dev/kguardian/compare/frontend/v1.18.0...frontend/v1.19.0) (2026-09-16)
 
 
