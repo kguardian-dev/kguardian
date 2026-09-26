@@ -82,7 +82,7 @@ export function ImagesView({ namespace, allNamespaces, tab: tabParam, cve, diges
   const counts = useMemo(() => {
     const by: Record<string, number> = { P0: 0, P1: 0, P2: 0, Background: 0 };
     for (const r of rows) if (r.tier) by[r.tier] += 1;
-    return { P0: by.P0, P1: by.P1, running: cves.items.filter((c) => c.runningWorkloads > 0).length, kev: cves.items.filter((c) => c.kev === true).length, loaded: cves.items.filter((c) => c.inUse === true).length, tagOnly: cves.items.filter((c) => c.weakestJoin === 'workload_tag').length };
+    return { P0: by.P0, P1: by.P1, running: cves.items.filter((c) => c.runningWorkloads > 0).length, kev: cves.items.filter((c) => c.kev === true).length, kevUnknown: cves.items.filter((c) => c.kev === null).length, loaded: cves.items.filter((c) => c.inUse === true).length, loadedUnknown: cves.items.filter((c) => c.inUse === null).length, tagOnly: cves.items.filter((c) => c.weakestJoin === 'workload_tag').length };
   }, [rows, cves.items]);
 
   const openCve = (id: string, from?: CveSummary) => {
@@ -96,6 +96,11 @@ export function ImagesView({ namespace, allNamespaces, tab: tabParam, cve, diges
   // Loaded-package data (P1-5) is null everywhere until it ships.
   const loadedKnown = cves.items.some((c) => c.inUse !== null);
   const tierTile = (n: number) => (tiersKnown || cves.items.length === 0 ? n : 'unknown');
+  // A count of known values says how many it could not count.
+  const tileSuffix = (unknown: number) => {
+    const parts = [loadedAll || unread ? '' : '+', unknown > 0 && !unread ? ` · ${unknown} unknown` : ''].join('');
+    return parts || undefined;
+  };
 
   return (
     <div className="h-full overflow-y-auto">
@@ -111,9 +116,9 @@ export function ImagesView({ namespace, allNamespaces, tab: tabParam, cve, diges
           <StatTile label="P0 act now" value={cves.loading ? '…' : unread ? '—' : tierTile(counts.P0)} icon={Flame} tone={tiersKnown && counts.P0 > 0 ? 'text-tier-p0' : 'text-secondary'} suffix={loadedAll || unread || !tiersKnown ? undefined : '+'} title={tiersKnown ? "The Broker's P0: in use (unknown counts), KEV or EPSS over its threshold, and exposed (unknown counts)." : TIER_UNKNOWN_TITLE} />
           <StatTile label="P1 schedule" value={cves.loading ? '…' : unread ? '—' : tierTile(counts.P1)} icon={AlertTriangle} tone={tiersKnown && counts.P1 > 0 ? 'text-tier-p1' : 'text-secondary'} suffix={loadedAll || unread || !tiersKnown ? undefined : '+'} title={tiersKnown ? undefined : TIER_UNKNOWN_TITLE} />
           <StatTile label="CVEs on running workloads" value={cves.loading ? '…' : unread ? '—' : counts.running} icon={Layers} suffix={loadedAll || unread ? undefined : '+'} />
-          <StatTile label="In CISA KEV" value={cves.loading ? '…' : unread ? '—' : counts.kev} icon={Bug} tone={counts.kev > 0 ? 'text-severity-critical' : 'text-secondary'} suffix={loadedAll || unread ? undefined : '+'} />
+          <StatTile label="In CISA KEV" value={cves.loading ? '…' : unread ? '—' : counts.kev} icon={Bug} tone={counts.kev > 0 ? 'text-severity-critical' : 'text-secondary'} suffix={cves.loading ? undefined : tileSuffix(counts.kevUnknown)} title={counts.kevUnknown > 0 ? `${counts.kevUnknown} CVE${counts.kevUnknown === 1 ? '' : 's'}: no source said whether it is in KEV (unknown, not "no").` : undefined} />
           {loadedKnown ? (
-            <StatTile label="Executed or loaded" value={cves.loading ? '…' : unread ? '—' : counts.loaded} icon={ShieldQuestion} suffix={loadedAll || unread ? undefined : '+'} title="CVEs whose package a workload was observed executing or loading." />
+            <StatTile label="Executed or loaded" value={cves.loading ? '…' : unread ? '—' : counts.loaded} icon={ShieldQuestion} suffix={cves.loading ? undefined : tileSuffix(counts.loadedUnknown)} title="CVEs whose package a workload was observed executing or loading. Unknown: no runtime evidence either way." />
           ) : (
             <StatTile label="Executed or loaded" value={unread ? '—' : 'unknown'} icon={ShieldQuestion} tone="text-tertiary" title={IN_USE_UNKNOWN_TITLE} />
           )}

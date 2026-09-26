@@ -76,3 +76,10 @@ test("a finding's chips are the Broker's factors with the facts' labels", () => 
   expect(bg.tier).toBe('Background');
   expect(findingFactors(bg).find((f) => f.key === 'inuse')!.label).toBe('Not observed loaded');
 });
+
+test('KEV / EPSS: null is "not reported" (unknown), false and absent are not', () => {
+  expect(factChips({ kev: null })[0]).toMatchObject({ key: 'kev', tone: 'unknown', label: 'KEV: not reported' });
+  expect(factChips({ kev: false })).toEqual([]);
+  expect(factChips({ epss: null })[0]).toMatchObject({ key: 'epss', tone: 'unknown', label: 'EPSS: not reported' });
+  expect(factChips({})).toEqual([]);
+});

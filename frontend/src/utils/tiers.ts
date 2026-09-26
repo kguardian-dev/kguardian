@@ -104,7 +104,10 @@ export interface Facts {
 export function factChips(f: Facts): Factor[] {
   const out: Factor[] = [];
   if (f.kev === true) out.push({ key: 'kev', tone: 'risk', label: 'KEV', title: 'Listed in CISA Known Exploited Vulnerabilities' });
-  if (f.epss != null) {
+  // null is "the source did not say", which is not "not in KEV".
+  else if (f.kev === null) out.push({ key: 'kev', tone: 'unknown', label: 'KEV: not reported', title: 'No source said whether this is in CISA KEV. Unknown, not "no".' });
+  if (f.epss === null) out.push({ key: 'epss', tone: 'unknown', label: 'EPSS: not reported', title: 'No source gave an EPSS score. Unknown, not low.' });
+  else if (f.epss !== undefined) {
     const pct = f.epss * 100;
     out.push({ key: 'epss', tone: 'neutral', label: `EPSS ${pct >= 1 ? pct.toFixed(0) : pct.toFixed(1)}%`, title: 'EPSS: estimated probability of exploitation in the next 30 days' });
   }
