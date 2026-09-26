@@ -34,6 +34,18 @@ const getAuditVerdicts = vi.fn(async (opts: { verdict?: string; namespace?: stri
 );
 vi.mock('../services/api', () => ({ default: { getAuditVerdicts: (o: never) => getAuditVerdicts(o) } }));
 
+// GET /workloads posture summaries (contract fixtures, keyed like the rows).
+import { checkoutProfile, grafanaProfile, listItemOf, unknownProfile } from '../fixtures/profile';
+import type { WorkloadListItem } from '../types/profile';
+const apiItem = { ...listItemOf(checkoutProfile), name: 'api' };
+const postureState: { byKey: Map<string, WorkloadListItem>; loading: boolean; error: unknown; truncated: boolean } = {
+  byKey: new Map([apiItem, listItemOf(grafanaProfile), listItemOf(unknownProfile)].map((i) => [`${i.namespace}/${i.kind}/${i.name}`, i])),
+  loading: false,
+  error: null,
+  truncated: false,
+};
+vi.mock('../hooks/useWorkloadProfile', () => ({ useWorkloadPostures: () => postureState }));
+
 import { WorkloadsView } from './WorkloadsView';
 import { StatePill } from './Seccomp';
 
@@ -166,4 +178,44 @@ test('verdicts are fetched per kind (so Allow noise cannot push out would-denies
   renderView();
   await waitFor(() => expect(getAuditVerdicts).toHaveBeenCalledTimes(2));
   expect(getAuditVerdicts).toHaveBeenCalledWith({ limit: 500, verdict: 'WouldDeny' });
+});
+
+test('posture column: one status per workload; a workload with no data reads "No data", never OK', () => {
+  renderView();
+  const [flux, grafana, api] = rows();
+  const pill = (row: HTMLElement) => row.querySelector('td:nth-child(2) [data-status]') as HTMLElement;
+  expect(pill(api).dataset.status).toBe('warn');
+  expect(pill(api).textContent).toContain('71');
+  // Warn with unscored dimensions says how many the score leaves out.
+  expect(within(api).getByText('2 not scored')).not.toBeNull();
+  expect(pill(grafana).dataset.status).toBe('ok');
+  expect(pill(flux).dataset.status).toBe('unknown');
+  expect(pill(flux).textContent).toBe('No data');
+  expect(pill(flux).className).not.toContain('state-enforcing');
+});
+
+test('posture column: a workload the snapshotter has not reached yet is "not computed yet"', () => {
+  const saved = postureState.byKey;
+  postureState.byKey = new Map([...saved].filter(([k]) => !k.startsWith('observability/')));
+  try {
+    renderView();
+    expect(within(rows()[1]).getByText('not computed yet')).not.toBeNull();
+  } finally {
+    postureState.byKey = saved;
+  }
+});
+
+test('posture column: a Broker that cannot serve postures leaves the table working and says why', () => {
+  const saved = postureState.byKey;
+  postureState.byKey = new Map();
+  postureState.error = new Error('This Broker does not serve workload profiles.');
+  try {
+    renderView();
+    expect(rows()).toHaveLength(3);
+    expect(screen.getByText(/Posture unavailable: This Broker does not serve workload profiles/)).not.toBeNull();
+    expect(screen.queryByText('not computed yet')).toBeNull();
+  } finally {
+    postureState.byKey = saved;
+    postureState.error = null;
+  }
 });

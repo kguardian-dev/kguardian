@@ -1,48 +1,61 @@
-import { useMemo, useState } from 'react';
-import { ArrowLeft, Lock, Share2, Network, SearchX } from 'lucide-react';
-import type { PodInfo, PodNodeData, ServiceInfo } from '../types';
-import { useWorkloadCoverage } from '../hooks/useWorkloadCoverage';
+import { useMemo, useState, type ReactNode } from 'react';
+import { ArrowLeft, CloudOff, SearchX, Share2 } from 'lucide-react';
+import type { PodNodeData } from '../types';
+import { useWorkloadProfile } from '../hooks/useWorkloadProfile';
+import { useSeccompProfiles } from '../hooks/useSeccompProfiles';
+import { errorKind, errorMessage, type ProfileApi } from '../services/profileApi';
 import { workloadKey, workloadOf } from '../utils/workloads';
+import { formatAgo, formatTimestamp } from '../utils/posture';
 import { Button } from './ui/Button';
 import { EmptyState } from './ui/EmptyState';
-import { Skeleton } from './ui/Skeleton';
-import { CaptureBadge, PartialCaptureWarning, StatePill } from './Seccomp';
+import { Tabs } from './ui/Tabs';
+import { PROFILE_TABS, parseRevision, parseTab, tabPanelProps, type ProfileTab } from '../utils/profileView';
 import { SeccompProfileDrawer } from './Seccomp/SeccompProfileDrawer';
-import { DriftCell, NetworkPill } from './Workloads/cells';
-import DataTable from './DataTable';
+import { PostureStrip } from './Profile/PostureStrip';
+import { OverviewTab } from './Profile/OverviewTab';
+import { NetworkTab } from './Profile/NetworkTab';
+import { SyscallsTab } from './Profile/SyscallsTab';
+import { ImagesTab } from './Profile/ImagesTab';
+import { PodSecurityTab } from './Profile/PodSecurityTab';
+import { VersionsTab } from './Profile/VersionsTab';
+import { SectionError, SectionSkeleton } from './Profile/parts';
 
 interface WorkloadViewProps {
   ns: string;
   kind: string;
   name: string;
-  /** This namespace's map nodes (usePodData) — the traffic source. */
+  /** URL params this page owns: `tab`, and `from`/`to` on the Versions tab. */
+  tab?: string;
+  from?: string;
+  to?: string;
+  /** Replace this page's own URL params (no history entry). */
+  onParamsChange: (patch: Record<string, string | undefined>) => void;
+  /** This namespace's map nodes, for "Open in map". */
   pods: PodNodeData[];
-  allPods: PodInfo[];
-  services: ServiceInfo[];
   onBack: () => void;
   onOpenInMap: (podId: string) => void;
-  /** Increments on the header Refresh; reloads profiles and verdicts. */
+  /** Increments on the header Refresh. */
   refreshTick?: number;
-  /** The cluster-wide pod list has not arrived yet. Until it has, a missing
-   *  row means "not loaded", not "no such workload". */
-  podsLoading?: boolean;
+  api?: ProfileApi;
 }
 
 /**
- * Placeholder workload page (`#/workload?ns=&kind=&name=`): the facts
- * kguardian already records for one workload, gathered on one shareable URL —
- * control posture, the seccomp profile (with the existing drawer for export),
- * and observed traffic. The full workload security profile replaces this.
+ * Workload Security Profile (`#/workload?ns=&kind=&name=&tab=`): the
+ * Broker's profile read model for one workload — posture per dimension,
+ * what needs attention, controls, readiness, exposure, and a tab per
+ * dimension plus version history. Every section has its own loading, empty
+ * and error state; a dimension with no data says "No data", never "OK".
+ * kguardian reports and generates here; it applies nothing.
  */
-export function WorkloadView({ ns, kind, name, pods, allPods, services, onBack, onOpenInMap, refreshTick, podsLoading = false }: WorkloadViewProps) {
-  const { rows, loading: profilesLoading, seccompApi } = useWorkloadCoverage(allPods, refreshTick, ns);
-  const loading = profilesLoading || podsLoading;
+export function WorkloadView({ ns, kind, name, tab: tabParam, from, to, onParamsChange, pods, onBack, onOpenInMap, refreshTick, api }: WorkloadViewProps) {
+  const { profile, loading, error, reload } = useWorkloadProfile(ns, kind, name, refreshTick, 30_000, api);
+  const tab = parseTab(tabParam);
+  const seccomp = useSeccompProfiles(0);
   const [drawerOpen, setDrawerOpen] = useState(false);
   const key = workloadKey(ns, kind, name);
-  const row = rows.find((r) => r.key === key) ?? null;
+  const seccompSummary = seccomp.profiles.find((p) => workloadKey(p.namespace, p.kind, p.name) === key) ?? null;
 
-  // The map node carrying this workload's traffic: the identity group whose
-  // pods belong to this workload.
+  // The map node carrying this workload's traffic, for "Open in map".
   const node = useMemo(
     () =>
       pods.find(
@@ -56,21 +69,60 @@ export function WorkloadView({ ns, kind, name, pods, allPods, services, onBack, 
     [pods, key],
   );
 
-  if (!row) {
-    return (
-      <div className="h-full overflow-y-auto">
-        <div className="mx-auto max-w-5xl px-6 py-6">
-          <BackLink onBack={onBack} />
-          {loading ? (
-            <div className="space-y-2 mt-6">
-              <Skeleton className="h-8 w-1/3" />
-              <Skeleton className="h-24 w-full" />
-            </div>
-          ) : (
-            <EmptyState
-              icon={SearchX}
-              title={`No workload ${ns}/${name}`}
-              description={`kguardian has no live pods or seccomp profile for ${kind} ${ns}/${name}. It may have been deleted, or the link may be from another cluster.`}
+  const openTab = (t: ProfileTab) => onParamsChange({ tab: t === 'overview' ? undefined : t, from: undefined, to: undefined });
+
+  const kindOf = errorKind(error);
+  let body: ReactNode;
+  if (!profile && loading) {
+    body = (
+      <div className="rounded-surface border border-hubble-border bg-hubble-card">
+        <SectionSkeleton rows={4} />
+      </div>
+    );
+  } else if (!profile && kindOf === 'workload_not_found') {
+    body = (
+      <EmptyState
+        icon={SearchX}
+        title={`No workload ${ns}/${name}`}
+        description={`The Broker has no inventory, syscalls, live pods or stored profile for ${kind} ${ns}/${name}. It may have been deleted, or the link may be from another cluster.`}
+      />
+    );
+  } else if (!profile && kindOf === 'unsupported') {
+    body = <EmptyState icon={CloudOff} title="Profiles not available" description={errorMessage(error)} />;
+  } else if (!profile) {
+    body = (
+      <div className="rounded-surface border border-hubble-border bg-hubble-card overflow-hidden">
+        <SectionError message={`Could not load this workload's profile: ${errorMessage(error)}`} onRetry={() => void reload()} />
+      </div>
+    );
+  } else {
+    const d = profile.dimensions;
+    body = (
+      <div className="space-y-4">
+        <PostureStrip profile={profile} onOpenTab={openTab} />
+        {error != null && (
+          <div role="status" className="rounded-control border border-severity-medium/30 bg-severity-medium/10 px-3 py-2 text-xs text-severity-medium">
+            Showing the profile from {formatAgo(profile.generatedAt)}; the latest refresh failed: {errorMessage(error)}
+          </div>
+        )}
+        <Tabs tabs={PROFILE_TABS} active={tab} onChange={openTab} label="Profile sections" idPrefix="profile" />
+        <div {...tabPanelProps('profile', tab)} className="focus-visible:outline-none">
+          {tab === 'overview' && <OverviewTab profile={profile} onOpenTab={openTab} />}
+          {tab === 'network' && <NetworkTab dim={d.network} />}
+          {tab === 'syscalls' && <SyscallsTab dim={d.syscalls} onOpenSeccomp={seccompSummary ? () => setDrawerOpen(true) : undefined} />}
+          {tab === 'images' && <ImagesTab dim={d.images} />}
+          {tab === 'podSecurity' && <PodSecurityTab dim={d.podSecurity} />}
+          {tab === 'versions' && (
+            <VersionsTab
+              ns={ns}
+              kind={kind}
+              name={name}
+              refreshTick={refreshTick}
+              snapshotPending={profile.snapshotPending}
+              from={parseRevision(from)}
+              to={parseRevision(to)}
+              onSelect={(f, t) => onParamsChange({ tab: 'versions', from: f === undefined ? undefined : String(f), to: t === undefined ? undefined : String(t) })}
+              api={api}
             />
           )}
         </div>
@@ -78,16 +130,27 @@ export function WorkloadView({ ns, kind, name, pods, allPods, services, onBack, 
     );
   }
 
+  const live = profile?.workload.pods.live;
   return (
     <div className="h-full overflow-y-auto">
-      <div className="mx-auto max-w-5xl px-6 py-6 space-y-6">
+      <div className="mx-auto max-w-6xl px-4 sm:px-6 py-6 space-y-4">
         <div>
-          <BackLink onBack={onBack} />
-          <div className="mt-3 flex flex-wrap items-start justify-between gap-4">
+          <button onClick={onBack} className="inline-flex items-center gap-1 text-xs text-secondary hover:text-primary transition-colors">
+            <ArrowLeft className="w-3.5 h-3.5" aria-hidden /> Workloads
+          </button>
+          <div className="mt-3 flex flex-wrap items-start justify-between gap-3">
             <div className="min-w-0">
-              <h2 className="text-base font-semibold text-primary truncate">{name}</h2>
-              <p className="text-xs text-tertiary font-mono mt-0.5">
-                {kind} · {ns} · {row.pods.length} live pod{row.pods.length === 1 ? '' : 's'}
+              <h2 className="text-base font-semibold text-primary [overflow-wrap:anywhere]">{name}</h2>
+              <p className="text-xs text-tertiary font-mono mt-0.5 [overflow-wrap:anywhere]">
+                {kind} · {ns}
+                {live !== undefined && ` · ${live} live pod${live === 1 ? '' : 's'}`}
+                {profile?.version && (
+                  <span title={`Stored ${formatTimestamp(profile.version.createdAt)} · ${profile.version.contentHash}`}> · v{profile.version.revision}</span>
+                )}
+                {profile && !profile.version && <span title="The Broker stores the first version on its next snapshot"> · not versioned yet</span>}
+                {profile?.version && profile.snapshotPending && (
+                  <span title="The live profile differs from the newest stored version; the Broker stores it on its next snapshot"> · newer changes not yet versioned</span>
+                )}
               </p>
             </div>
             {node && (
@@ -97,117 +160,13 @@ export function WorkloadView({ ns, kind, name, pods, allPods, services, onBack, 
             )}
           </div>
         </div>
-
-        {/* Posture: one row per control, the lifecycle vocabulary the full profile page will extend. */}
-        <section className="rounded-surface border border-hubble-border bg-hubble-card overflow-hidden" aria-label="Controls">
-          <header className="px-4 py-3 border-b border-hubble-border">
-            <h3 className="text-sm font-semibold text-primary">Controls</h3>
-          </header>
-          <div className="overflow-x-auto">
-          <table className="w-full text-sm [&_td]:whitespace-nowrap">
-            <thead className="text-[11px] uppercase tracking-wide text-tertiary">
-              <tr className="border-b border-hubble-border">
-                <th className="text-left font-medium px-4 py-2">Control</th>
-                <th className="text-left font-medium px-3 py-2">State</th>
-                <th className="text-left font-medium px-3 py-2">Drift</th>
-                <th className="text-left font-medium px-3 py-2">Capture</th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-hubble-border">
-              <tr>
-                <td className="px-4 py-2.5 text-primary">Network policy</td>
-                <td className="px-3 py-2.5"><NetworkPill network={row.network} /></td>
-                <td className="px-3 py-2.5 text-tertiary">—</td>
-                <td className="px-3 py-2.5 text-tertiary">—</td>
-              </tr>
-              <tr>
-                <td className="px-4 py-2.5 text-primary">SeccompProfile</td>
-                <td className="px-3 py-2.5">
-                  {row.profile ? <StatePill state={row.seccomp} /> : <span className="text-xs text-tertiary">no profile</span>}
-                </td>
-                <td className="px-3 py-2.5 text-xs"><DriftCell drift={row.drift} /></td>
-                <td className="px-3 py-2.5"><CaptureBadge capture={row.capture} /></td>
-              </tr>
-            </tbody>
-          </table>
-          </div>
-        </section>
-
-        <section className="rounded-surface border border-hubble-border bg-hubble-card overflow-hidden" aria-label="Seccomp">
-          <header className="flex items-center justify-between gap-3 px-4 py-3 border-b border-hubble-border">
-            <div className="flex items-center gap-2">
-              <Lock className="w-4 h-4 text-hubble-accent" />
-              <h3 className="text-sm font-semibold text-primary">Seccomp</h3>
-            </div>
-            {row.profile && (
-              <Button variant="secondary" size="sm" onClick={() => setDrawerOpen(true)}>
-                Open profile
-              </Button>
-            )}
-          </header>
-          {row.profile ? (
-            <div className="px-4 py-3 space-y-3 text-sm">
-              <PartialCaptureWarning capture={row.capture} />
-              <p className="text-secondary">
-                <span className="font-mono">{row.profile.syscallCount}</span> syscalls observed
-                {row.profile.cr ? (
-                  <>
-                    {' '}· CR <span className="font-mono">{row.profile.cr.name}</span> on{' '}
-                    <span className="font-mono">
-                      {row.profile.cr.distribution.ready}/{row.profile.cr.distribution.total}
-                    </span>{' '}
-                    nodes
-                  </>
-                ) : (
-                  ' · no SeccompProfile CR deployed'
-                )}
-              </p>
-            </div>
-          ) : (
-            <EmptyState
-              icon={Lock}
-              title="No seccomp profile yet"
-              description="A profile appears once the controller has reported syscalls for this workload and it has an owning controller (Deployment, StatefulSet, DaemonSet, CronJob)."
-              compact
-            />
-          )}
-        </section>
-
-        <section className="rounded-surface border border-hubble-border bg-hubble-card overflow-hidden" aria-label="Traffic">
-          <header className="flex items-center gap-2 px-4 py-3 border-b border-hubble-border">
-            <Network className="w-4 h-4 text-hubble-accent" />
-            <h3 className="text-sm font-semibold text-primary">Observed traffic and syscalls</h3>
-          </header>
-          {node ? (
-            <DataTable selectedPod={node} allPodsLookup={allPods} services={services} />
-          ) : (
-            <EmptyState
-              icon={Network}
-              title="No live traffic"
-              description="No live pod of this workload is in the loaded namespace, so there is no traffic to show."
-              compact
-            />
-          )}
-        </section>
+        {body}
       </div>
 
-      {drawerOpen && row.profile && (
-        <SeccompProfileDrawer
-          api={seccompApi}
-          workload={{ ns, kind, name }}
-          summary={row.profile}
-          onClose={() => setDrawerOpen(false)}
-        />
+      {drawerOpen && seccompSummary && (
+        <SeccompProfileDrawer api={seccomp.api} workload={{ ns, kind, name }} summary={seccompSummary} onClose={() => setDrawerOpen(false)} />
       )}
     </div>
-  );
-}
-
-function BackLink({ onBack }: { onBack: () => void }) {
-  return (
-    <button onClick={onBack} className="inline-flex items-center gap-1 text-xs text-secondary hover:text-primary transition-colors">
-      <ArrowLeft className="w-3.5 h-3.5" /> Workloads
-    </button>
   );
 }
 

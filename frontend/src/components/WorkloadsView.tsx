@@ -8,6 +8,9 @@ import { Skeleton } from './ui/Skeleton';
 import { StatStrip, StatTile, type StatTileProps } from './ui/StatTile';
 import { CaptureBadge, StatePill } from './Seccomp';
 import { DriftCell, NetworkPill } from './Workloads/cells';
+import { PostureCell } from './Workloads/PostureCell';
+import { useWorkloadPostures } from '../hooks/useWorkloadProfile';
+import { errorMessage } from '../services/profileApi';
 
 export type WorkloadControl = 'seccomp';
 
@@ -53,6 +56,7 @@ const CONTROLS: Array<{ id: WorkloadControl | undefined; label: string }> = [
  */
 export function WorkloadsView({ allPods, namespace, allNamespaces, control, onControlChange, onOpenWorkload, refreshTick }: WorkloadsViewProps) {
   const { rows: allRows, loading, error, profiles } = useWorkloadCoverage(allPods, refreshTick, allNamespaces ? undefined : namespace);
+  const postures = useWorkloadPostures(allNamespaces ? undefined : namespace, refreshTick);
   const [query, setQuery] = useState('');
   const seccompMode = control === 'seccomp';
 
@@ -191,6 +195,7 @@ export function WorkloadsView({ allPods, namespace, allNamespaces, control, onCo
                   ) : (
                     <tr className="border-b border-hubble-border">
                       <th className="text-left font-medium px-4 py-2">Workload</th>
+                      <th className="text-left font-medium px-3 py-2" title="Worst status across the profile's dimensions with data, from the Broker's profile read model">Posture</th>
                       <th className="text-right font-medium px-3 py-2">Pods</th>
                       <th className="text-left font-medium px-3 py-2 whitespace-nowrap">Network policy</th>
                       <th className="text-left font-medium px-3 py-2">Seccomp</th>
@@ -249,6 +254,9 @@ export function WorkloadsView({ allPods, namespace, allNamespaces, control, onCo
                         </>
                       ) : (
                         <>
+                          <td className="px-3 py-2.5">
+                            <PostureCell item={postures.byKey.get(r.key)} loading={postures.loading} unavailable={postures.error != null} />
+                          </td>
                           <td className="px-3 py-2.5 text-right font-mono text-xs tabular-nums text-secondary">{r.pods.length}</td>
                           <td className="px-3 py-2.5"><NetworkPill network={r.network} /></td>
                           <td className="px-3 py-2.5">
@@ -271,6 +279,14 @@ export function WorkloadsView({ allPods, namespace, allNamespaces, control, onCo
                 </tbody>
               </table>
             </div>
+          )}
+          {!seccompMode && postures.error != null && rows.length > 0 && (
+            <p className="px-4 py-2 text-[11px] text-tertiary border-t border-hubble-border">
+              Posture unavailable: {errorMessage(postures.error)}
+            </p>
+          )}
+          {!seccompMode && postures.truncated && (
+            <p className="px-4 py-2 text-[11px] text-tertiary border-t border-hubble-border">Posture loaded for the first 5,000 workloads only.</p>
           )}
         </section>
       </div>

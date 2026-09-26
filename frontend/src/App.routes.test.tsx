@@ -15,10 +15,11 @@ vi.mock('./components/WorkloadsView', () => ({
   ),
 }));
 vi.mock('./components/WorkloadView', () => ({
-  default: (p: { ns: string; kind: string; name: string; onBack: () => void }) => (
+  default: (p: { ns: string; kind: string; name: string; tab?: string; to?: string; onBack: () => void; onParamsChange: (x: Record<string, string | undefined>) => void }) => (
     <div>
-      <div data-testid="workload">{`${p.ns}/${p.kind}/${p.name}`}</div>
+      <div data-testid="workload" data-tab={p.tab ?? ''} data-to={p.to ?? ''}>{`${p.ns}/${p.kind}/${p.name}`}</div>
       <button onClick={p.onBack}>back</button>
+      <button onClick={() => p.onParamsChange({ tab: 'versions', to: '2' })}>versions</button>
     </div>
   ),
 }));
@@ -156,4 +157,26 @@ test('Back from a workload page restores the list scope and control it came from
   await waitFor(() => expect(window.location.hash.startsWith('#/workloads')).toBe(true));
   expect(Object.fromEntries(hashParams())).toEqual({ ns: 'payments', scope: 'ns', control: 'seccomp' });
   await waitFor(() => expect(screen.getByTestId('workloads').dataset.all).toBe('false'));
+});
+
+test('profile tabs live in the URL, replace the history entry, and Back drops them', async () => {
+  renderAt('#/workloads?ns=payments&scope=ns');
+  await waitFor(() => expect(screen.getByTestId('workloads')).not.toBeNull());
+  window.location.hash = '#/workload?ns=payments&kind=Deployment&name=checkout&scope=ns';
+  await waitFor(() => expect(screen.getByTestId('workload').dataset.tab).toBe(''));
+  const depth = window.history.length;
+  fireEvent.click(screen.getByText('versions'));
+  await waitFor(() => expect(screen.getByTestId('workload').dataset.tab).toBe('versions'));
+  expect(screen.getByTestId('workload').dataset.to).toBe('2');
+  // Replaced, not pushed: browser Back from a tab returns to the list.
+  expect(window.history.length).toBe(depth);
+  expect(Object.fromEntries(hashParams())).toEqual({ ns: 'payments', kind: 'Deployment', name: 'checkout', scope: 'ns', tab: 'versions', to: '2' });
+  fireEvent.click(screen.getByText('back'));
+  await waitFor(() => expect(window.location.hash.startsWith('#/workloads')).toBe(true));
+  expect(Object.fromEntries(hashParams())).toEqual({ ns: 'payments', scope: 'ns' });
+});
+
+test('a deep link straight to a profile tab opens that tab', async () => {
+  renderAt('#/workload?ns=payments&kind=Deployment&name=checkout&tab=podSecurity');
+  await waitFor(() => expect(screen.getByTestId('workload').dataset.tab).toBe('podSecurity'));
 });

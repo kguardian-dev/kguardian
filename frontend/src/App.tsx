@@ -484,15 +484,18 @@ function App() {
           <Suspense fallback={null}>
             <WorkloadView
               refreshTick={refreshTick}
-              podsLoading={loading && allPodsLookup.length === 0}
               // The URL's ns, not the resolved one: a profile-only workload
               // (scaled to zero) can live in a namespace with no live pods.
               ns={loc.params.ns ?? effectiveNamespace}
               kind={loc.params.kind ?? ''}
               name={loc.params.name ?? ''}
+              tab={loc.params.tab}
+              from={loc.params.from}
+              to={loc.params.to}
+              // Tabs and the diff selection replace the entry, so Back
+              // (browser or the page's own link) returns to the list.
+              onParamsChange={(patch) => navigate('workload', { ...loc.params, ...patch }, { replace: true })}
               pods={pods}
-              allPods={allPodsLookup}
-              services={services}
               onBack={() => navigate('workloads', workloadsBackParams(loc.params))}
               onOpenInMap={(podId) => navigate('map', { ns: loc.params.ns, pod: podId })}
             />
