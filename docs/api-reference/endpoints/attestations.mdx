@@ -100,7 +100,9 @@ POST /images/{digest}/attestation
   30 s. At most 32 signatures and 64 attestations (`413`); long strings
   are truncated.
 - `422` for an unknown `schema_version`, `verdict` or `signer_kind`, a body
-  digest that differs from the path, `checked_at` more than 60 s ahead, a
+  digest that differs from the path, a control character or U+2028/U+2029
+  in any string (the message names the field), `checked_at` more than 60 s
+  ahead, a
   verdict that does not match the signatures (`verified` with none
   verified, `unsigned` with signatures, ...), or a verified signer's
   identity or provenance longer than the limits: those are stored whole or
