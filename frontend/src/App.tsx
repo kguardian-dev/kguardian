@@ -262,19 +262,28 @@ function App() {
   // into it, Tab stays in it, and every way of closing it (Esc, backdrop, a
   // nav pick, the collapse button) returns focus to the expand button.
   const railDialogRef = useRef<HTMLDivElement>(null);
-  const railExpandRef = useRef<HTMLButtonElement>(null);
+  const railToggleRef = useRef<HTMLButtonElement>(null);
+  // Set by a desktop collapse/expand: the button the user pressed unmounts
+  // (the other toggle takes its place), so focus moves to the new one.
+  const refocusRailToggle = useRef(false);
   const closeRailOverlay = useCallback(() => setRailOverlay(false), []);
   const toggleRail = useCallback(() => {
     if (narrow) {
       setRailOverlay((o) => !o);
       return;
     }
+    refocusRailToggle.current = true;
     setRailCollapsed((c) => {
       localStorage.setItem('kg-rail-collapsed', c ? '0' : '1');
       return !c;
     });
   }, [narrow]);
-  useDialogFocus({ open: railOverlay, dialogRef: railDialogRef, returnFocusRef: railExpandRef, onClose: closeRailOverlay, initialFocus: 'nav button' });
+  useEffect(() => {
+    if (!refocusRailToggle.current) return;
+    refocusRailToggle.current = false;
+    railToggleRef.current?.focus();
+  }, [railCollapsed]);
+  useDialogFocus({ open: railOverlay, dialogRef: railDialogRef, returnFocusRef: railToggleRef, onClose: closeRailOverlay, initialFocus: 'nav button' });
   // Leaving the narrow layout drops the overlay, so it cannot pop back
   // open on the next resize to a phone width.
   useEffect(() => {
@@ -518,7 +527,7 @@ function App() {
             collapsed={railShowsCollapsed}
             onToggleCollapse={toggleRail}
             onNavigate={narrow ? closeRailOverlay : undefined}
-            expandButtonRef={railExpandRef}
+            toggleButtonRef={railToggleRef}
           />
         );
         if (!narrow) return rail;

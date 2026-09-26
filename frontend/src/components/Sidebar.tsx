@@ -25,8 +25,8 @@ interface SidebarProps {
   onToggleCollapse?: () => void;
   /** Called after a nav item runs (the narrow-screen overlay closes on it). */
   onNavigate?: () => void;
-  /** The expand button (shown while collapsed): focus returns here when the narrow-screen overlay closes. */
-  expandButtonRef?: Ref<HTMLButtonElement>;
+  /** Whichever toggle is shown (expand or collapse): focus returns here after the rail changes shape. */
+  toggleButtonRef?: Ref<HTMLButtonElement>;
 }
 
 /**
@@ -51,7 +51,7 @@ function groupItems(items: NavItem[]): Array<[string, NavItem[]]> {
   return order.map((group) => [group, map.get(group)!]);
 }
 
-export function Sidebar({ items, footer, topSlot, version, collapsed = false, onToggleCollapse, onNavigate, expandButtonRef }: SidebarProps) {
+export function Sidebar({ items, footer, topSlot, version, collapsed = false, onToggleCollapse, onNavigate, toggleButtonRef }: SidebarProps) {
   return (
     <aside
       className={`${collapsed ? 'w-14' : 'w-56'} h-full shrink-0 flex flex-col bg-hubble-dark border-r border-hubble-border transition-[width] duration-200 ease-out`}
@@ -67,6 +67,7 @@ export function Sidebar({ items, footer, topSlot, version, collapsed = false, on
         )}
         {!collapsed && onToggleCollapse && (
           <button
+            ref={toggleButtonRef}
             onClick={onToggleCollapse}
             title="Collapse sidebar"
             aria-label="Collapse sidebar"
@@ -124,7 +125,7 @@ export function Sidebar({ items, footer, topSlot, version, collapsed = false, on
           <div className="flex flex-col items-center gap-1.5">
             {onToggleCollapse && (
               <button
-                ref={expandButtonRef}
+                ref={toggleButtonRef}
                 onClick={onToggleCollapse}
                 title="Expand sidebar"
                 aria-label="Expand sidebar"

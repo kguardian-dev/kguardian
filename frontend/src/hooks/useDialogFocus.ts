@@ -5,9 +5,10 @@ const FOCUSABLE = 'button, [href], input, select, textarea, [tabindex]:not([tabi
 /**
  * Keyboard behaviour of a modal overlay: on open, focus the first match of
  * `initialFocus` (or the first focusable) inside `dialogRef`; Tab and
- * Shift+Tab stay inside; Esc calls `onClose`. When it closes and
- * `shouldRestore()` says so, focus returns to `returnFocusRef` (read after
- * the close renders, so an element that remounted is found).
+ * Shift+Tab stay inside; Esc inside the dialog calls `onClose`. Whenever it
+ * closes, however it closes (Esc, backdrop, navigation, a layout change),
+ * focus returns to `returnFocusRef`, read after the close renders so an
+ * element that remounted in the meantime is found.
  */
 export function useDialogFocus(opts: {
   open: boolean;
@@ -32,13 +33,24 @@ export function useDialogFocus(opts: {
     }
   }, [open, dialogRef, returnFocusRef, initialFocus]);
 
+  // Esc belongs to the dialog: focus is trapped inside it, so the event
+  // reaches it, and other Esc handlers on the page are left alone.
+  useEffect(() => {
+    const d = dialogRef.current;
+    if (!open || !d) return;
+    const onEsc = (e: KeyboardEvent) => {
+      if (e.key !== 'Escape') return;
+      e.stopPropagation();
+      onClose();
+    };
+    d.addEventListener('keydown', onEsc);
+    return () => d.removeEventListener('keydown', onEsc);
+  }, [open, dialogRef, onClose]);
+
+  // Tab is caught on the window so focus that did get out is pulled back in.
   useEffect(() => {
     if (!open) return;
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') {
-        onClose();
-        return;
-      }
       const d = dialogRef.current;
       if (e.key !== 'Tab' || !d) return;
       const focusables = [...d.querySelectorAll<HTMLElement>(FOCUSABLE)].filter((el) => !el.hasAttribute('disabled'));
