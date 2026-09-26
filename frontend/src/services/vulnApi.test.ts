@@ -64,3 +64,14 @@ describe('VulnApi paths pass the /api proxy', () => {
     expect(await (async () => { await api.getExposure('../x'); return urls.at(-1); })()).toContain('..%2Fx');
   });
 });
+
+describe('VulnApi timeout', () => {
+  test('a read that never answers becomes a retryable "did not answer" error, not an endless skeleton', async () => {
+    const hang = ((_: RequestInfo | URL, init?: RequestInit) =>
+      new Promise<Response>((_resolve, reject) => init?.signal?.addEventListener('abort', () => reject(init.signal!.reason)))) as typeof fetch;
+    const api = new VulnApi({ fetchImpl: hang, timeoutMs: 20 });
+    const err = await api.getExposure('CVE-2099-0001').catch((e) => e as VulnApiError);
+    expect(err.kind).toBe('timeout');
+    expect(err.message).toMatch(/did not answer/);
+  });
+});
