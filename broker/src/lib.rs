@@ -1,4 +1,5 @@
 mod add;
+pub mod admission;
 mod attestation;
 mod audit;
 pub mod auth;
@@ -33,6 +34,7 @@ pub use add::{
     add_node_facts, add_pod_details, add_pods_batch, add_pods_syscalls, add_svc_details,
     mark_pod_dead,
 };
+pub use admission::get_attestation_policy;
 pub use attestation::{
     attestation_resource, get_attestations, get_running_attestations,
     render_metrics as attestation_metrics, spawn_retention as spawn_attestation_retention,
