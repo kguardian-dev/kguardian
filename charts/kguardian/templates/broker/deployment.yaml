@@ -190,6 +190,31 @@ spec:
             - name: SECCOMP_PROFILES_CACHE_TTL_SECS
               value: {{ $seccomp.profilesCacheTtlSeconds | quote }}
             {{- end }}
+            {{/*
+              Image inventory retention (values.yaml
+              `broker.imageInventory.retention`). Same hasKey reasoning as
+              AUDIT_VERDICTS_RETENTION_DAYS: 0 is the documented "disable"
+              value and `with` would drop it. The dict defaults keep an old
+              values file without the block rendering.
+            */}}
+            {{- $inventory := .Values.broker.imageInventory | default dict }}
+            {{- $inventoryRetention := $inventory.retention | default dict }}
+            {{- if hasKey $inventory "runningWindowSeconds" }}
+            - name: IMAGE_INVENTORY_RUNNING_WINDOW_SECS
+              value: {{ $inventory.runningWindowSeconds | quote }}
+            {{- end }}
+            {{- if hasKey $inventoryRetention "days" }}
+            - name: IMAGE_INVENTORY_RETENTION_DAYS
+              value: {{ $inventoryRetention.days | quote }}
+            {{- end }}
+            {{- if hasKey $inventoryRetention "intervalSeconds" }}
+            - name: IMAGE_INVENTORY_RETENTION_INTERVAL_SECS
+              value: {{ $inventoryRetention.intervalSeconds | quote }}
+            {{- end }}
+            {{- if hasKey $inventoryRetention "batchSize" }}
+            - name: IMAGE_INVENTORY_RETENTION_BATCH_SIZE
+              value: {{ $inventoryRetention.batchSize | quote }}
+            {{- end }}
             {{- if hasKey .Values.broker.audit "inflightPermits" }}
             - name: AUDIT_INFLIGHT_PERMITS
               value: {{ .Values.broker.audit.inflightPermits | quote }}

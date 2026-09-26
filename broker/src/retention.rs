@@ -199,6 +199,7 @@ pub fn spawn(pool: DbPool) {
     let compute_pool = pool.clone();
     let denial_pool = pool.clone();
     let traffic_pool = pool.clone();
+    spawn_image_inventory(pool.clone());
     actix_web::rt::spawn(async move {
         // First pass after a short warmup so the broker doesn't hammer
         // a cold pool the second it starts.
@@ -1716,6 +1717,367 @@ fn retention_batch_size() -> i64 {
         .and_then(|v| v.trim().parse::<i64>().ok())
         .map(|n| n.clamp(MIN_BATCH_SIZE, MAX_BATCH_SIZE))
         .unwrap_or(DEFAULT_BATCH_SIZE)
+}
+
+// ---------------------------------------------------------------------
+// Image inventory (#1533)
+// ---------------------------------------------------------------------
+//
+// `workload_containers` rows are keyed per digest and refreshed (at most
+// every image_inventory::REFRESH_SECS) by every /pod/spec post of a live
+// pod running that digest, so a row not refreshed for the window is a
+// digest no running pod has reported: a finished rollout's old image, a
+// deleted workload, a renamed container. It is pruned even while its
+// workload keeps running other digests. `images` rows are
+// pruned once they are both stale and referenced by no
+// `workload_containers` row — in that order, so one pass can retire a
+// deleted workload's container rows and then the digests they held.
+//
+// - `IMAGE_INVENTORY_RETENTION_DAYS` (default 30; 0 disables)
+// - `IMAGE_INVENTORY_RETENTION_INTERVAL_SECS` (default 3600, floor 60)
+// - `IMAGE_INVENTORY_RETENTION_BATCH_SIZE` (default 5 000, clamped to
+//   [100, 100 000])
+
+const DEFAULT_IMAGE_INVENTORY_RETENTION_DAYS: u32 = 30;
+const DEFAULT_IMAGE_INVENTORY_INTERVAL_SECS: u64 = 3600;
+
+fn image_inventory_retention_days() -> u32 {
+    std::env::var("IMAGE_INVENTORY_RETENTION_DAYS")
+        .ok()
+        .and_then(|v| v.trim().parse().ok())
+        .unwrap_or(DEFAULT_IMAGE_INVENTORY_RETENTION_DAYS)
+}
+
+fn image_inventory_retention_interval() -> Duration {
+    let secs = std::env::var("IMAGE_INVENTORY_RETENTION_INTERVAL_SECS")
+        .ok()
+        .and_then(|v| v.trim().parse().ok())
+        .unwrap_or(DEFAULT_IMAGE_INVENTORY_INTERVAL_SECS);
+    Duration::from_secs(secs.max(60))
+}
+
+fn image_inventory_batch_size() -> i64 {
+    std::env::var("IMAGE_INVENTORY_RETENTION_BATCH_SIZE")
+        .ok()
+        .and_then(|v| v.trim().parse::<i64>().ok())
+        .map(|n| n.clamp(MIN_BATCH_SIZE, MAX_BATCH_SIZE))
+        .unwrap_or(DEFAULT_BATCH_SIZE)
+}
+
+/// Batched prune of (workload, container, digest) rows no running pod has
+/// refreshed within the window. Deletes by primary key; oldest first.
+/// `ref_seen_at` (a pod stuck pulling the same ref) keeps the most recent
+/// digest for that ref too, so a long ImagePullBackOff does not erase the
+/// last known image of the workload.
+pub(crate) const WORKLOAD_CONTAINERS_PRUNE_SQL: &str = "WITH expired AS (\
+         SELECT cluster_id, pod_namespace, workload_kind, workload_name, container_name, \
+                image_digest \
+         FROM workload_containers \
+         WHERE last_seen < timezone('UTC', NOW()) - $1::interval \
+           AND (ref_seen_at IS NULL OR ref_seen_at < timezone('UTC', NOW()) - $1::interval) \
+         ORDER BY last_seen \
+         LIMIT $2 \
+     ) \
+     DELETE FROM workload_containers wc USING expired e \
+     WHERE wc.cluster_id = e.cluster_id AND wc.pod_namespace = e.pod_namespace \
+       AND wc.workload_kind = e.workload_kind AND wc.workload_name = e.workload_name \
+       AND wc.container_name = e.container_name AND wc.image_digest = e.image_digest";
+
+/// Batched prune of images last seen before the window that no container
+/// row still references. A digest still referenced is kept however old
+/// its `last_seen` — the reference is the evidence it runs.
+pub(crate) const IMAGES_PRUNE_SQL: &str = "WITH expired AS (\
+         SELECT i.digest FROM images i \
+         WHERE i.last_seen < timezone('UTC', NOW()) - $1::interval \
+           AND NOT EXISTS (SELECT 1 FROM workload_containers wc WHERE wc.image_digest = i.digest) \
+         ORDER BY i.last_seen \
+         LIMIT $2 \
+     ) \
+     DELETE FROM images WHERE digest IN (SELECT digest FROM expired)";
+
+fn spawn_image_inventory(pool: DbPool) {
+    let days = image_inventory_retention_days();
+    let interval = image_inventory_retention_interval();
+    info!(
+        days,
+        interval_secs = interval.as_secs(),
+        "image inventory retention loop scheduled (days=0 means pruning off)"
+    );
+    if days == 0 {
+        return;
+    }
+    actix_web::rt::spawn(async move {
+        // Staggered after the other loops' 60/90/120 s warmups.
+        tokio::time::sleep(Duration::from_secs(150)).await;
+        loop {
+            run_image_inventory_pass(&pool, days).await;
+            tokio::time::sleep(interval).await;
+        }
+    });
+}
+
+async fn run_image_inventory_pass(pool: &DbPool, days: u32) {
+    let batch = image_inventory_batch_size();
+    run_batched_prune(
+        pool,
+        "workload_containers",
+        WORKLOAD_CONTAINERS_PRUNE_SQL,
+        days,
+        batch,
+    )
+    .await;
+    run_batched_prune(pool, "images", IMAGES_PRUNE_SQL, days, batch).await;
+}
+
+/// One statement's prune, as bounded batches — same discipline and caps
+/// as [`run_pass`].
+async fn run_batched_prune(
+    pool: &DbPool,
+    table: &'static str,
+    sql: &'static str,
+    days: u32,
+    batch_size: i64,
+) {
+    let mut total: usize = 0;
+    for batch_idx in 0..MAX_BATCHES_PER_PASS {
+        let pool = pool.clone();
+        let result = tokio::task::spawn_blocking(move || -> Result<usize, RetentionError> {
+            let mut conn = pool.get().map_err(RetentionError::Pool)?;
+            prune_batch(&mut conn, sql, days, batch_size)
+        })
+        .await;
+        match result {
+            Ok(Ok(0)) => {
+                if total == 0 {
+                    debug!(table, "image inventory retention: 0 rows pruned");
+                } else {
+                    info!(
+                        table,
+                        rows = total,
+                        batches = batch_idx,
+                        "image inventory retention pruned rows"
+                    );
+                }
+                return;
+            }
+            Ok(Ok(n)) => total += n,
+            Ok(Err(e)) => {
+                warn!(table, error = %e, pruned_before_failure = total, "image inventory retention failed");
+                return;
+            }
+            Err(e) => {
+                warn!(table, error = %e, pruned_before_failure = total, "image inventory retention task panicked");
+                return;
+            }
+        }
+    }
+    info!(
+        table,
+        rows = total,
+        cap = MAX_BATCHES_PER_PASS,
+        "image inventory retention hit per-pass batch cap; the rest is pruned next interval"
+    );
+}
+
+fn prune_batch(
+    conn: &mut PgConnection,
+    sql: &str,
+    days: u32,
+    batch_size: i64,
+) -> Result<usize, RetentionError> {
+    sql_query(sql)
+        .bind::<diesel::sql_types::Text, _>(format!("{days} days"))
+        .bind::<diesel::sql_types::BigInt, _>(batch_size)
+        .execute(conn)
+        .map_err(RetentionError::Diesel)
+}
+
+#[cfg(test)]
+mod image_inventory_retention_tests {
+    use super::*;
+    use diesel::connection::SimpleConnection;
+
+    #[test]
+    fn env_defaults_overrides_and_clamps() {
+        let _guard = crate::test_support::env_lock();
+        for k in [
+            "IMAGE_INVENTORY_RETENTION_DAYS",
+            "IMAGE_INVENTORY_RETENTION_INTERVAL_SECS",
+            "IMAGE_INVENTORY_RETENTION_BATCH_SIZE",
+        ] {
+            std::env::remove_var(k);
+        }
+        assert_eq!(image_inventory_retention_days(), 30);
+        assert_eq!(
+            image_inventory_retention_interval(),
+            Duration::from_secs(3600)
+        );
+        assert_eq!(image_inventory_batch_size(), DEFAULT_BATCH_SIZE);
+        std::env::set_var("IMAGE_INVENTORY_RETENTION_DAYS", " 7 ");
+        std::env::set_var("IMAGE_INVENTORY_RETENTION_INTERVAL_SECS", "5");
+        std::env::set_var("IMAGE_INVENTORY_RETENTION_BATCH_SIZE", "5");
+        assert_eq!(image_inventory_retention_days(), 7);
+        assert_eq!(
+            image_inventory_retention_interval(),
+            Duration::from_secs(60)
+        );
+        assert_eq!(image_inventory_batch_size(), MIN_BATCH_SIZE);
+        std::env::set_var("IMAGE_INVENTORY_RETENTION_BATCH_SIZE", "99999999");
+        assert_eq!(image_inventory_batch_size(), MAX_BATCH_SIZE);
+        std::env::set_var("IMAGE_INVENTORY_RETENTION_DAYS", "nope");
+        assert_eq!(image_inventory_retention_days(), 30);
+        for k in [
+            "IMAGE_INVENTORY_RETENTION_DAYS",
+            "IMAGE_INVENTORY_RETENTION_INTERVAL_SECS",
+            "IMAGE_INVENTORY_RETENTION_BATCH_SIZE",
+        ] {
+            std::env::remove_var(k);
+        }
+    }
+
+    #[test]
+    fn prune_sql_is_bounded() {
+        for sql in [WORKLOAD_CONTAINERS_PRUNE_SQL, IMAGES_PRUNE_SQL] {
+            assert!(sql.contains("LIMIT $2"), "{sql}");
+            assert!(sql.contains("$1::interval"), "{sql}");
+        }
+        assert!(IMAGES_PRUNE_SQL.contains("NOT EXISTS"));
+    }
+
+    const TEST_MIGRATIONS: diesel_migrations::EmbeddedMigrations =
+        diesel_migrations::embed_migrations!("./db/migrations");
+
+    fn live_conn() -> PgConnection {
+        use diesel_migrations::MigrationHarness;
+        let Ok(url) = std::env::var("KG_TEST_DATABASE_URL") else {
+            panic!("set KG_TEST_DATABASE_URL to run this test");
+        };
+        let mut conn = PgConnection::establish(&url).expect("connect");
+        conn.run_pending_migrations(TEST_MIGRATIONS)
+            .expect("apply the shipped migrations");
+        conn.batch_execute("TRUNCATE images, workload_containers")
+            .expect("reset the inventory tables");
+        conn
+    }
+
+    fn seed(conn: &mut PgConnection, workload: &str, digest: &str, age_days: i64) {
+        conn.batch_execute(&format!(
+            "INSERT INTO images (digest, digest_kind, first_seen, last_seen) VALUES \
+               ('{digest}', 'repo', timezone('UTC', NOW()) - INTERVAL '{age_days} days', \
+                timezone('UTC', NOW()) - INTERVAL '{age_days} days') ON CONFLICT DO NOTHING; \
+             INSERT INTO workload_containers (pod_namespace, workload_kind, workload_name, \
+               container_name, container_kind, image_ref, image_digest, last_seen) VALUES \
+               ('prod', 'Deployment', '{workload}', 'app', 'regular', 'r:1', '{digest}', \
+                timezone('UTC', NOW()) - INTERVAL '{age_days} days');"
+        ))
+        .expect("seed");
+    }
+
+    fn remaining_rows(conn: &mut PgConnection) -> Vec<(String, String)> {
+        #[derive(QueryableByName)]
+        struct R {
+            #[diesel(sql_type = diesel::sql_types::Text)]
+            w: String,
+            #[diesel(sql_type = diesel::sql_types::Text)]
+            d: String,
+        }
+        sql_query(
+            "SELECT workload_name AS w, image_digest AS d FROM workload_containers \
+             ORDER BY workload_name, image_digest",
+        )
+        .load::<R>(conn)
+        .expect("rows")
+        .into_iter()
+        .map(|r| (r.w, r.d))
+        .collect()
+    }
+
+    fn count(conn: &mut PgConnection, table: &str) -> i64 {
+        #[derive(QueryableByName)]
+        struct C {
+            #[diesel(sql_type = diesel::sql_types::BigInt)]
+            n: i64,
+        }
+        sql_query(format!("SELECT count(*) AS n FROM {table}"))
+            .get_result::<C>(conn)
+            .expect("count")
+            .n
+    }
+
+    #[test]
+    #[ignore = "requires a live postgres (set KG_TEST_DATABASE_URL)"]
+    fn live_database_prunes_stale_containers_then_unreferenced_images() {
+        let mut conn = live_conn();
+        let d = |i: u8| format!("sha256:{:064x}", i);
+        seed(&mut conn, "live", &d(1), 0);
+        seed(&mut conn, "gone-a", &d(2), 40);
+        seed(&mut conn, "gone-b", &d(3), 45);
+        // The live workload's container also has a digest it stopped
+        // running 40 days ago (an old rollout): that row is pruned while
+        // the workload's current digest row stays.
+        seed(&mut conn, "live", &d(5), 40);
+        // A workload whose only pod is stuck pulling the same ref: its last
+        // known digest is 40 days old but was ref-seen just now, so it stays.
+        seed(&mut conn, "pulling", &d(6), 40);
+        conn.batch_execute(
+            "UPDATE workload_containers SET ref_seen_at = timezone('UTC', NOW()) \
+             WHERE workload_name = 'pulling'",
+        )
+        .unwrap();
+        // An old image still referenced by a live container is kept.
+        conn.batch_execute(&format!(
+            "INSERT INTO images (digest, digest_kind, last_seen) VALUES \
+               ('{}', 'repo', timezone('UTC', NOW()) - INTERVAL '90 days'); \
+             INSERT INTO workload_containers (pod_namespace, workload_kind, workload_name, \
+               container_name, container_kind, image_ref, image_digest) VALUES \
+               ('prod', 'Deployment', 'live', 'sidecar', 'regular', 's:1', '{}');",
+            d(4),
+            d(4)
+        ))
+        .unwrap();
+
+        // Before containers are pruned, every image is still referenced.
+        assert_eq!(
+            prune_batch(&mut conn, IMAGES_PRUNE_SQL, 30, 100).unwrap(),
+            0
+        );
+        // Batch of one takes the OLDEST stale container first.
+        assert_eq!(
+            prune_batch(&mut conn, WORKLOAD_CONTAINERS_PRUNE_SQL, 30, 1).unwrap(),
+            1
+        );
+        assert_eq!(count(&mut conn, "workload_containers"), 5);
+        assert!(!remaining_rows(&mut conn).contains(&("gone-b".into(), d(3))));
+        assert_eq!(
+            prune_batch(&mut conn, WORKLOAD_CONTAINERS_PRUNE_SQL, 30, 100).unwrap(),
+            2
+        );
+        assert_eq!(
+            remaining_rows(&mut conn),
+            vec![
+                ("live".to_string(), d(1)),
+                ("live".to_string(), d(4)),
+                ("pulling".to_string(), d(6))
+            ]
+        );
+        // Now the three unreferenced stale images go (including the
+        // digest the live workload no longer runs); the fresh one and the
+        // old-but-referenced one stay.
+        assert_eq!(
+            prune_batch(&mut conn, IMAGES_PRUNE_SQL, 30, 100).unwrap(),
+            3
+        );
+        assert_eq!(count(&mut conn, "images"), 3);
+        // Idempotent on a clean table.
+        assert_eq!(
+            prune_batch(&mut conn, WORKLOAD_CONTAINERS_PRUNE_SQL, 30, 100).unwrap(),
+            0
+        );
+        assert_eq!(
+            prune_batch(&mut conn, IMAGES_PRUNE_SQL, 30, 100).unwrap(),
+            0
+        );
+    }
 }
 
 #[cfg(test)]

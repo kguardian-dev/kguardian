@@ -725,6 +725,36 @@ broker:
   # verdict insert" warns or when /metrics shows pool-acquire stalls.
   dbPoolMaxSize: 32
 
+  imageInventory:
+    # -- How long, in seconds, an image digest keeps counting as running
+    # after a pod last reported it. The controller re-posts every live pod
+    # (ready or not) every 60 s and the broker refreshes a row at most
+    # every 300 s, so the default of 900 leaves room for a missed resync
+    # or a controller restart. Independently of this window, a digest also
+    # counts as running while the pod that last reported it is live and
+    # not marked dead. Either way the container must be running (or
+    # crash-looping) in its latest report: completed init containers and
+    # digests that never started are listed but not counted. Lower it to see finished rollouts drop out sooner;
+    # clamped to [360, 604800].
+    runningWindowSeconds: 900
+    # -- Retention for the image inventory: `images` (one row per image
+    # digest) and `workload_containers` (one row per workload, container
+    # and digest, with its securityContext). Running pods refresh their
+    # rows continuously, so only digests no running pod has reported for
+    # `days` are pruned (a finished rollout's old image, a deleted
+    # workload), followed by images nothing references any more. The
+    # tables are sized by what runs, not by time.
+    retention:
+      # -- Prune inventory rows no running pod has refreshed for this many
+      # days. Set to 0 to disable pruning (rows of deleted workloads are
+      # then kept forever).
+      days: 30
+      # -- How often the cleanup pass runs, in seconds. Minimum 60.
+      intervalSeconds: 3600
+      # -- Rows deleted per batched DELETE. Same [100, 100000] clamp as
+      # `broker.audit.retention.batchSize`, for the same reason.
+      batchSize: 5000
+
   # -- Per-statement timeout (ms) applied to every broker DB connection as a
   # backstop: the broker runs as a single replica, so one slow or accidentally
   # unbounded query would otherwise tie up a connection/worker indefinitely and

@@ -301,6 +301,8 @@ mod tests {
             workload_name: None,
             capture_level: None,
             host_network: false,
+            containers: None,
+            pod_security: None,
         }
     }
 
