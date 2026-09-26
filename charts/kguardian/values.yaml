@@ -208,6 +208,14 @@ controller:
     # `/proc`. Excluded namespaces and pods annotated
     # `kguardian.dev/runtime-inventory: "off"` are not recorded.
     mode: "off"
+    # -- Also count the capability checks each container makes (fexit on
+    # `cap_capable`, or `security_capable` where that cannot be traced), per
+    # capability and verdict, deduplicated in the kernel. Feeds the
+    # workload profile's capabilities block and the evidence-based
+    # `capabilities` part of the securityContext recommendation. Requires
+    # `mode` exec or full. Off by default until its overhead is measured:
+    # capability checks are frequent on busy nodes.
+    capabilities: false
 
 # -- Syscall capture tier for the controller's eBPF probe. Sets
 # `SYSCALL_CAPTURE_LEVEL` / `SYSCALL_CUSTOM_LIST` on the controller DaemonSet.
