@@ -1953,6 +1953,15 @@ pub(crate) const RUNTIME_EXECUTABLES_PRUNE_SQL: &str = "WITH expired AS (\
 
 /// Coverage heartbeats not refreshed within the window: containers long
 /// gone. Same window as the inventory rows they vouch for.
+/// Days of capability rows kept: never fewer than the evidence window plus
+/// a day. A shorter retention would prune a capability used inside the
+/// window while the evidence still counts as covering it, and the
+/// recommendation would drop it.
+pub(crate) fn capability_retention_days(days: u32, window_hours: i32) -> u32 {
+    let window_days = (window_hours.max(0) as u32).div_ceil(24) + 1;
+    days.max(window_days)
+}
+
 /// Capability rows no controller has reported within the window: the
 /// container is gone. Pruned by last_reported (a running container's rows
 /// are re-reported hourly), never by last use.
@@ -2015,7 +2024,10 @@ fn spawn_runtime_inventory(pool: DbPool) {
                 &pool,
                 "runtime_capabilities",
                 RUNTIME_CAPABILITIES_PRUNE_SQL,
-                days,
+                capability_retention_days(
+                    days,
+                    crate::runtime_capabilities::evidence_window_hours(),
+                ),
                 image_inventory_batch_size(),
             )
             .await;
