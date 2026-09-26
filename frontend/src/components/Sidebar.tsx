@@ -1,4 +1,4 @@
-import type { ReactNode } from 'react';
+import type { ReactNode, Ref } from 'react';
 import type { LucideIcon } from 'lucide-react';
 import { PanelLeftClose, PanelLeftOpen } from 'lucide-react';
 import { BrandMark } from './BrandMark';
@@ -23,6 +23,10 @@ interface SidebarProps {
   version: string;
   collapsed?: boolean;
   onToggleCollapse?: () => void;
+  /** Called after a nav item runs (the narrow-screen overlay closes on it). */
+  onNavigate?: () => void;
+  /** The expand button (shown while collapsed): focus returns here when the narrow-screen overlay closes. */
+  expandButtonRef?: Ref<HTMLButtonElement>;
 }
 
 /**
@@ -47,10 +51,10 @@ function groupItems(items: NavItem[]): Array<[string, NavItem[]]> {
   return order.map((group) => [group, map.get(group)!]);
 }
 
-export function Sidebar({ items, footer, topSlot, version, collapsed = false, onToggleCollapse }: SidebarProps) {
+export function Sidebar({ items, footer, topSlot, version, collapsed = false, onToggleCollapse, onNavigate, expandButtonRef }: SidebarProps) {
   return (
     <aside
-      className={`${collapsed ? 'w-14' : 'w-56'} shrink-0 flex flex-col bg-hubble-dark border-r border-hubble-border transition-[width] duration-200 ease-out`}
+      className={`${collapsed ? 'w-14' : 'w-56'} h-full shrink-0 flex flex-col bg-hubble-dark border-r border-hubble-border transition-[width] duration-200 ease-out`}
     >
       {/* Brand + collapse toggle */}
       <div className={`h-14 flex items-center border-b border-hubble-border ${collapsed ? 'justify-center px-0' : 'gap-2.5 px-4'}`}>
@@ -66,6 +70,7 @@ export function Sidebar({ items, footer, topSlot, version, collapsed = false, on
             onClick={onToggleCollapse}
             title="Collapse sidebar"
             aria-label="Collapse sidebar"
+            aria-expanded={!collapsed}
             className="grid place-items-center w-7 h-7 rounded-control text-tertiary hover:text-primary hover:bg-hubble-hover transition-colors shrink-0"
           >
             <PanelLeftClose size={16} />
@@ -90,7 +95,10 @@ export function Sidebar({ items, footer, topSlot, version, collapsed = false, on
               return (
                 <button
                   key={item.id}
-                  onClick={item.onClick}
+                  onClick={() => {
+                    item.onClick();
+                    onNavigate?.();
+                  }}
                   title={item.hint ?? item.label}
                   aria-current={item.active ? 'page' : undefined}
                   className={`w-full flex items-center h-9 rounded-control text-sm transition-colors ${
@@ -116,9 +124,11 @@ export function Sidebar({ items, footer, topSlot, version, collapsed = false, on
           <div className="flex flex-col items-center gap-1.5">
             {onToggleCollapse && (
               <button
+                ref={expandButtonRef}
                 onClick={onToggleCollapse}
                 title="Expand sidebar"
                 aria-label="Expand sidebar"
+                aria-expanded={!collapsed}
                 className="grid place-items-center w-9 h-9 rounded-control text-tertiary hover:text-primary hover:bg-hubble-hover transition-colors"
               >
                 <PanelLeftOpen size={16} />

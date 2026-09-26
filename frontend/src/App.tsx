@@ -6,6 +6,8 @@ import { RisksRoute } from './components/RisksView';
 import { ScopeChip } from './components/ScopeChip';
 import { CommandPalette, type Command } from './components/CommandPalette';
 import { useHashLocation } from './hooks/useHashLocation';
+import { NARROW_QUERY, useMediaQuery } from './hooks/useMediaQuery';
+import { useDialogFocus } from './hooks/useDialogFocus';
 import NamespaceSelector from './components/NamespaceSelector';
 import DataTable from './components/DataTable';
 import { Sidebar, type NavItem } from './components/Sidebar';
@@ -135,12 +137,10 @@ function App() {
   });
   const [tableHeight, setTableHeight] = useState<number>(UI_DIMENSIONS.TABLE_DEFAULT_HEIGHT);
   const [isResizing, setIsResizing] = useState(false);
-  // Remembered choice wins; with none, start collapsed on a narrow viewport
-  // (the 224px rail would otherwise leave a phone ~160px of content).
-  const [railCollapsed, setRailCollapsed] = useState<boolean>(() => {
-    const stored = localStorage.getItem('kg-rail-collapsed');
-    return stored !== null ? stored === '1' : window.innerWidth < 768;
-  });
+  // The desktop rail preference: expanded unless the user collapsed it.
+  // Narrow screens never read it (they always show the icon column, see
+  // `narrow` below), so a phone-first visit cannot leave desktop collapsed.
+  const [railCollapsed, setRailCollapsed] = useState<boolean>(() => localStorage.getItem('kg-rail-collapsed') === '1');
 
   const { namespaces } = useNamespaces();
   // If the current selection isn't a namespace that actually has monitored pods
@@ -219,12 +219,37 @@ function App() {
     }
   }, [redirect, loc.params, namespaces.length, effectiveNamespace, view, navigate]);
 
+  // Narrow screens (below md, live on resize / rotation): the rail is a
+  // 56px icon column, and expanding it opens an overlay over the content
+  // rather than a 224px column beside it. The overlay is not a preference:
+  // it closes on navigation, backdrop or Esc, and never touches the stored
+  // desktop choice.
+  const narrow = useMediaQuery(NARROW_QUERY);
+  const [railOverlay, setRailOverlay] = useState(false);
+  const railShowsCollapsed = narrow ? !railOverlay : railCollapsed;
+  // The open overlay is a modal dialog (hooks/useDialogFocus): focus moves
+  // into it, Tab stays in it, and every way of closing it (Esc, backdrop, a
+  // nav pick, the collapse button) returns focus to the expand button.
+  const railDialogRef = useRef<HTMLDivElement>(null);
+  const railExpandRef = useRef<HTMLButtonElement>(null);
+  const closeRailOverlay = useCallback(() => setRailOverlay(false), []);
   const toggleRail = useCallback(() => {
+    if (narrow) {
+      setRailOverlay((o) => !o);
+      return;
+    }
     setRailCollapsed((c) => {
       localStorage.setItem('kg-rail-collapsed', c ? '0' : '1');
       return !c;
     });
-  }, []);
+  }, [narrow]);
+  useDialogFocus({ open: railOverlay, dialogRef: railDialogRef, returnFocusRef: railExpandRef, onClose: closeRailOverlay, initialFocus: 'nav button' });
+  // Leaving the narrow layout drops the overlay, so it cannot pop back
+  // open on the next resize to a phone width.
+  useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- reset UI state when the layout mode changes
+    if (!narrow) setRailOverlay(false);
+  }, [narrow]);
 
   // Calculate the right padding for content when AI panel is docked (in pixels)
   const contentPaddingRightPx = aiSidePanel.isSidePanel
@@ -429,14 +454,37 @@ function App() {
 
   return (
     <div className="flex h-screen bg-hubble-darker">
-      <Sidebar
-        items={navItems}
-        version={__APP_VERSION__}
-        topSlot={<ClusterSwitcher collapsed={railCollapsed} />}
-        footer={<AccountMenu collapsed={railCollapsed} onOpenSettings={() => setSettingsOpen(true)} />}
-        collapsed={railCollapsed}
-        onToggleCollapse={toggleRail}
-      />
+      {(() => {
+        const rail = (
+          <Sidebar
+            items={navItems}
+            version={__APP_VERSION__}
+            topSlot={<ClusterSwitcher collapsed={railShowsCollapsed} />}
+            footer={<AccountMenu collapsed={railShowsCollapsed} onOpenSettings={() => setSettingsOpen(true)} />}
+            collapsed={railShowsCollapsed}
+            onToggleCollapse={toggleRail}
+            onNavigate={narrow ? closeRailOverlay : undefined}
+            expandButtonRef={railExpandRef}
+          />
+        );
+        if (!narrow) return rail;
+        // Narrow: a fixed 56px column keeps the content still; the open
+        // rail floats over it.
+        return (
+          <div className="relative w-14 shrink-0" data-testid="rail-slot">
+            {railOverlay && (
+              <button type="button" aria-label="Close sidebar" className="fixed inset-0 z-40 bg-black/40 cursor-default" onClick={closeRailOverlay} />
+            )}
+            {railOverlay ? (
+              <div ref={railDialogRef} role="dialog" aria-modal="true" aria-label="Navigation" className="fixed inset-y-0 left-0 z-50 shadow-2xl">
+                {rail}
+              </div>
+            ) : (
+              <div className="h-full">{rail}</div>
+            )}
+          </div>
+        );
+      })()}
 
       <div
         className="flex-1 flex flex-col min-w-0 transition-all duration-300"
