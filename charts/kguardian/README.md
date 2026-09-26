@@ -448,6 +448,8 @@ The following table lists the configurable parameters of the kguardian chart and
 | supplychain.serviceAccount.annotations | object | `{}` | Annotations to add to the service account |
 | supplychain.serviceAccount.create | bool | `true` | Specifies whether a service account should be created |
 | supplychain.serviceAccount.name | string | `""` | The name of the service account to use (defaults to "supplychain") |
+| supplychain.sources.registry.enabled | bool | `nil` | Fetch SBOMs that publishers attach to running images in their registry: OCI referrers (cosign v3 bundles, in-toto), cosign .att/.sbom tags and BuildKit attestations. Anonymous only (never pull secrets), through the same address guard as registryLookup (allowPrivateRegistries applies). Running digests come from the broker's image inventory. Unset (null) follows brokerIngest.enabled. Egress: HTTPS to the registries of your running images. |
+| supplychain.sources.registry.interval | string | `"15m"` | How often to list running images. Each digest is looked up at most once a day whatever the interval. |
 | supplychain.sources.trivyOperator.enabled | bool | `true` | Read Trivy Operator VulnerabilityReports and SbomReports. Adds a ClusterRole with get/list/watch on those two resources in aquasecurity.github.io and nothing else (never Secrets). If Trivy Operator is not installed the source idles and re-checks every recheckPeriod. |
 | supplychain.sources.trivyOperator.recheckPeriod | string | `"5m"` | How often to re-check for the Trivy Operator CRDs while absent |
 | supplychain.sources.trivyOperator.resyncPeriod | string | `"10m"` | Informer resync period. Also how often reports that name their image only by tag retry digest resolution. |

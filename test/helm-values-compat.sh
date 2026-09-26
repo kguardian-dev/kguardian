@@ -490,6 +490,8 @@ render "supplychain-enabled" "${SC_ON[@]}" && {
     { echo "FAIL [supplychain-enabled]: REGISTRY_LOOKUP_ENABLED must follow brokerIngest (false)"; fail=1; }
   grep -A1 'name: REGISTRY_ALLOW_PRIVATE' <<<"$OUT" | grep -q 'value: "false"' || \
     { echo "FAIL [supplychain-enabled]: REGISTRY_ALLOW_PRIVATE must default to false"; fail=1; }
+  grep -A1 'name: REGISTRY_SBOM_ENABLED' <<<"$OUT" | grep -q 'value: "false"' || \
+    { echo "FAIL [supplychain-enabled]: REGISTRY_SBOM_ENABLED must follow brokerIngest (false)"; fail=1; }
 }
 
 # 11b-ii. registryLookup follows brokerIngest unless set explicitly.
@@ -497,6 +499,11 @@ render "supplychain-lookup-follows-ingest" "${SC_ON[@]}" \
   --set supplychain.brokerIngest.enabled=true && {
   grep -A1 'name: REGISTRY_LOOKUP_ENABLED' <<<"$OUT" | grep -q 'value: "true"' || \
     { echo "FAIL [supplychain-lookup-follows-ingest]: lookup must turn on with ingest"; fail=1; }
+}
+render "supplychain-registry-sbom-follows-ingest" "${SC_ON[@]}" \
+  --set supplychain.brokerIngest.enabled=true && {
+  grep -A1 'name: REGISTRY_SBOM_ENABLED' <<<"$OUT" | grep -q 'value: "true"' || \
+    { echo "FAIL [supplychain-registry-sbom-follows-ingest]: registry SBOM source must turn on with ingest"; fail=1; }
 }
 render "supplychain-lookup-explicit-off" "${SC_ON[@]}" \
   --set supplychain.brokerIngest.enabled=true --set supplychain.registryLookup.enabled=false && {

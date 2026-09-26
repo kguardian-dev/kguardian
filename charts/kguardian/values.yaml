@@ -1860,6 +1860,18 @@ supplychain:
       resyncPeriod: 10m
       # -- How often to re-check for the Trivy Operator CRDs while absent
       recheckPeriod: 5m
+    registry:
+      # -- (bool) Fetch SBOMs that publishers attach to running images in
+      # their registry: OCI referrers (cosign v3 bundles, in-toto), cosign
+      # .att/.sbom tags and BuildKit attestations. Anonymous only (never
+      # pull secrets), through the same address guard as registryLookup
+      # (allowPrivateRegistries applies). Running digests come from the
+      # broker's image inventory. Unset (null) follows brokerIngest.enabled.
+      # Egress: HTTPS to the registries of your running images.
+      enabled: null
+      # -- How often to list running images. Each digest is looked up at
+      # most once a day whatever the interval.
+      interval: 15m
 
   brokerIngest:
     # -- Send payloads to the broker. Leave false until the broker's
