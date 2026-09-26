@@ -7,7 +7,7 @@ toolchain go1.27.1
 require (
 	github.com/anchore/clio v0.1.1
 	github.com/anchore/grype v0.119.0
-	github.com/klauspost/compress v1.20.0
+	github.com/klauspost/compress v1.20.1
 	github.com/sirupsen/logrus v1.10.2
 	github.com/wagoodman/go-progress v0.0.0-20260303201901-10176f79b2c0
 )
