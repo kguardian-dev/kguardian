@@ -83,6 +83,18 @@ test('KEV / EPSS: null is "not reported" (unknown), false and absent are not', (
   expect(factChips({})).toEqual([]);
 });
 
+test('captured: a finding no source reported on shows KEV and EPSS as "not reported", a KEV "no" shows nothing', () => {
+  const items = vulnCapture<ImageVulnsPage>('image-checkout-vulnerabilities').body.items;
+  const zlib = items.find((f) => f.id === 'CVE-2099-0003')!;
+  expect([zlib.kev, zlib.epss]).toEqual([null, null]);
+  const labels = findingFactors(zlib).map((f) => f.label);
+  expect(labels).toContain('KEV: not reported');
+  expect(labels).toContain('EPSS: not reported');
+  const express = items.find((f) => f.id === 'CVE-2099-0002')!;
+  expect(express.kev).toBe(false);
+  expect(findingFactors(express).some((f) => f.key === 'kev')).toBe(false);
+});
+
 test('a Background finding reads "Not observed loaded" (not in any capture until the runtime inventory lands)', () => {
   const busybox = vulnCapture<ImageVulnsPage>('image-checkout-vulnerabilities').body.items.find((f) => f.id === 'CVE-2099-0004')!;
   // Test-local: the captured finding as a Broker with runtime data would send it.
