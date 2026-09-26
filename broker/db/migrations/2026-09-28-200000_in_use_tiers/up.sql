@@ -178,7 +178,12 @@ LANGUAGE sql IMMUTABLE AS $$
 $$;
 
 -- CVE summary: in-use and tier columns, per scope as before.
-ALTER TABLE vuln_cve_summary ADD COLUMN IF NOT EXISTS tier SMALLINT NOT NULL DEFAULT 2;
+-- tier is NULL ("not computed yet") on rows summarised before this
+-- migration, until the next retention pass rebuilds them with the
+-- configured thresholds. A default tier would rank a KEV critical as P2
+-- until then, and a thresholded UPDATE here would hard-code thresholds
+-- the deployment may have changed.
+ALTER TABLE vuln_cve_summary ADD COLUMN IF NOT EXISTS tier SMALLINT NULL;
 ALTER TABLE vuln_cve_summary ADD COLUMN IF NOT EXISTS in_use VARCHAR NOT NULL DEFAULT 'unknown';
 ALTER TABLE vuln_cve_summary ADD COLUMN IF NOT EXISTS executed_workloads BIGINT NOT NULL DEFAULT 0;
 ALTER TABLE vuln_cve_summary ADD COLUMN IF NOT EXISTS loaded_workloads BIGINT NOT NULL DEFAULT 0;

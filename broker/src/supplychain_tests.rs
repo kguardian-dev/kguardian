@@ -2017,6 +2017,32 @@ fn live_database_only_the_dlopened_library_is_loaded() {
     assert_eq!(p1.items.len(), 1);
     assert_eq!(p1.items[0].summary.id, "CVE-2026-0001");
     assert_eq!(p1.items[0].summary.loaded_workloads, 1);
+    // A row summarised before the tier migration: tier null ("not
+    // computed yet"), never Background, and no tier filter matches it.
+    exec(
+        &mut conn,
+        "UPDATE vuln_cve_summary SET tier = NULL WHERE vuln_id = 'CVE-2026-0001'",
+    );
+    let all =
+        list_cves_filtered(&mut conn, &ListFilters::default(), None, false, None, 10).unwrap();
+    let row = all
+        .items
+        .iter()
+        .find(|c| c.summary.id == "CVE-2026-0001")
+        .unwrap();
+    assert_eq!(row.summary.tier, None);
+    for t in 0..=3 {
+        let f = ListFilters {
+            tiers: Some(vec![t]),
+            ..Default::default()
+        };
+        let p = list_cves_filtered(&mut conn, &f, None, false, None, 10).unwrap();
+        assert!(
+            p.items.iter().all(|c| c.summary.id != "CVE-2026-0001"),
+            "tier {t}"
+        );
+    }
+    crate::supplychain_read::refresh_cve_summary(&mut conn).unwrap();
 
     // The exposure view carries the same per-workload state.
     let e = crate::supplychain_read::vulnerability_exposure(&mut conn, "CVE-2026-0001", 168)

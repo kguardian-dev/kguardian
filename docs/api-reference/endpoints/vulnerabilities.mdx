@@ -82,7 +82,9 @@ KEV finding (or one at or above the EPSS threshold) in a package in use
 there is P0, not P1: missing data pushes a tier up, never down. Set
 `unknownExposureAsExposed: false` to rank it P1 instead. A CVE's
 tier is its most urgent over every affected workload container.
-`tierFactors` lists what produced a finding's tier, for example
+A CVE row's `tier` is `null` until the retention pass after an upgrade has
+computed it ("not computed yet", never a low tier); a `tier` filter does not
+match those rows. `tierFactors` lists what produced a finding's tier, for example
 `["in_use:loaded", "kev", "severity:high", "exposed"]`.
 
 The thresholds are Helm values under `broker.supplychain.tiers`:

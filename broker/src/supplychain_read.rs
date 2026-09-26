@@ -1256,9 +1256,11 @@ pub struct CveSummary {
     #[diesel(sql_type = Text)]
     pub weakest_join: String,
     /// P0 | P1 | P2 | Background: the most urgent tier over every
-    /// affected workload container in scope.
-    #[diesel(sql_type = Text)]
-    pub tier: String,
+    /// affected workload container in scope. `null` = not computed yet
+    /// (a row from before the first retention pass after upgrade), never
+    /// a low tier.
+    #[diesel(sql_type = Nullable<Text>)]
+    pub tier: Option<String>,
     /// Strongest in-use state over the affected workloads in scope.
     #[serde(skip)]
     #[diesel(sql_type = Text)]
@@ -1455,7 +1457,7 @@ SELECT vuln_id AS id, \
     running_workloads, namespaces, \
     CASE weakest_rank WHEN 1 THEN 'image_id' WHEN 2 THEN 'platform_manifest' \
         ELSE 'workload_tag' END AS weakest_join, \
-    CASE tier WHEN 0 THEN 'P0' WHEN 1 THEN 'P1' WHEN 2 THEN 'P2' ELSE 'Background' END AS tier, \
+    CASE tier WHEN 0 THEN 'P0' WHEN 1 THEN 'P1' WHEN 2 THEN 'P2' WHEN 3 THEN 'Background' END AS tier, \
     in_use AS in_use_raw, executed_workloads, loaded_workloads, \
     unknown_workloads, not_observed_workloads, exposed_workloads \
 FROM vuln_cve_summary \
