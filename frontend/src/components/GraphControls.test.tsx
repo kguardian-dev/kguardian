@@ -107,7 +107,9 @@ test('lens control: four lenses, the active one pressed, a pick reports the lens
   render(<GraphControls {...props({ lens: 'vulns', onLensChange })} />);
   const group = screen.getByRole('group', { name: 'Map lens' });
   const buttons = [...group.querySelectorAll('button')];
-  expect(buttons.map((b) => b.textContent)).toEqual(['Traffic', 'Vulnerabilities', 'Supply chain', 'Coverage']);
+  expect(buttons.map((b) => b.textContent)).toEqual(['None', 'Vulnerabilities', 'Supply chain', 'Coverage']);
+  // Only the edges toggle is called Traffic.
+  expect(screen.getAllByRole('button').filter((b) => b.textContent === 'Traffic')).toHaveLength(1);
   expect(buttons.map((b) => b.getAttribute('aria-pressed'))).toEqual(['false', 'true', 'false', 'false']);
   fireEvent.click(buttons[3]);
   expect(onLensChange).toHaveBeenCalledWith('coverage');

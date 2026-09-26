@@ -33,7 +33,8 @@ export interface GraphControlsProps {
 // screen-reader-only and each toggle keeps its icon, hue and title.
 const LABEL = 'sr-only lg:not-sr-only';
 const LENSES: Array<{ id: MapLens; label: string; title: string }> = [
-  { id: 'traffic', label: 'Traffic', title: 'Cards show traffic, syscalls and compute' },
+  // "None", not "Traffic": the edges toggle next to it is already called Traffic.
+  { id: 'traffic', label: 'None', title: 'No lens: cards show their name, traffic and compute only' },
   { id: 'vulns', label: 'Vulnerabilities', title: 'Each card: its worst P0/P1 vulnerability on a running image, or that its images have no vulnerability data' },
   { id: 'supply', label: 'Supply chain', title: 'Each card: whether its running images have an SBOM and how it is trusted. Signatures are not checked yet' },
   { id: 'coverage', label: 'Coverage', title: "Each card: how much of the workload's profile has data" },
