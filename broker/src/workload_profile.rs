@@ -904,6 +904,18 @@ fn build_pod_security(
                 .and_then(|x| x.recommendation.as_ref())
                 .map(|r| r.probed_kept.clone())
                 .unwrap_or_default(),
+            probed_omitted: caps
+                .containers
+                .iter()
+                .find(|x| x.container == c.container_name)
+                .and_then(|x| x.recommendation.as_ref())
+                .map(|r| {
+                    r.probed_omitted
+                        .iter()
+                        .map(|o| o.capability.clone())
+                        .collect()
+                })
+                .unwrap_or_default(),
         });
     }
     let pod = pod.and_then(|(_, p)| p);

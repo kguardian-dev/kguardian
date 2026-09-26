@@ -202,6 +202,9 @@ pub struct ContainerInput {
     /// The part of `observed_capabilities` seen only in non-audited
     /// (CAP_OPT_NOAUDIT) checks: kept, and named in a caveat.
     pub probed_capabilities: Vec<String>,
+    /// Probed-only capabilities left out of `observed_capabilities`
+    /// (SYS_ADMIN, once allowPrivilegeEscalation: false is in place).
+    pub probed_omitted: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -878,6 +881,13 @@ pub fn recommend(
             "Capabilities for {} come from observed use: every capability check the container made while kguardian watched it continuously for the evidence window. A capability used less often than that window (a yearly rotation, a rare admin path) would be missing; widen the window (CAPABILITY_EVIDENCE_WINDOW_HOURS) for such workloads.",
             observed.iter().map(|c| c.name.as_str()).collect::<Vec<_>>().join(", ")
         ));
+        for c in observed.iter().filter(|c| !c.probed_omitted.is_empty()) {
+            caveats.push(format!(
+                "Container {} leaves out {}: seen only in non-audited checks (the memory admin-reserve check every root process makes, or a seccomp filter installed without no_new_privs), and allowPrivilegeEscalation: false, which this patch keeps or sets, gives no_new_privs.",
+                c.name,
+                c.probed_omitted.join(", ")
+            ));
+        }
         for c in observed
             .iter()
             .filter(|c| !c.probed_capabilities.is_empty())
@@ -1118,6 +1128,7 @@ mod tests {
             security: sc,
             observed_capabilities: None,
             probed_capabilities: Vec::new(),
+            probed_omitted: Vec::new(),
         }
     }
 
@@ -1347,6 +1358,18 @@ mod tests {
         let pod = PodSecurity::default();
         let per = vec![check_container(&c.kind, &c.name, &c.security, &pod, true)];
         recommend("Deployment", &pod, true, &[c], &[], &per)
+    }
+
+    #[test]
+    fn an_omitted_probed_sys_admin_is_explained_and_the_patch_sets_no_new_privs() {
+        let mut c = observed(&[], false, Some(&["NET_BIND_SERVICE"]));
+        c.security.allow_privilege_escalation = None;
+        c.probed_omitted = vec!["SYS_ADMIN".into()];
+        let r = patch(c).unwrap();
+        assert!(r.yaml.contains("allowPrivilegeEscalation: false"));
+        assert!(r.yaml.contains("add: [\"NET_BIND_SERVICE\"]"));
+        assert!(!r.yaml.contains("SYS_ADMIN\""));
+        assert!(r.caveats.iter().any(|x| x.contains("leaves out SYS_ADMIN")));
     }
 
     #[test]
