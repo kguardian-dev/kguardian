@@ -8,10 +8,28 @@ import { StatusPill } from '../Profile/parts';
  * the column, and a workload the snapshotter has not reached yet — none of
  * which may read as OK.
  */
-export function PostureCell({ item, loading, unavailable }: { item: WorkloadListItem | undefined; loading: boolean; unavailable: boolean }) {
+export function PostureCell({
+  item,
+  loading,
+  unavailable,
+  morePages = false,
+}: {
+  item: WorkloadListItem | undefined;
+  loading: boolean;
+  unavailable: boolean;
+  /** More `GET /workloads` pages exist that have not been fetched. */
+  morePages?: boolean;
+}) {
   if (!item) {
     if (loading) return <span className="text-xs text-tertiary">…</span>;
     if (unavailable) return <span className="text-xs text-tertiary" title="The Broker did not return profile postures">—</span>;
+    if (morePages) {
+      return (
+        <span className="text-xs text-tertiary" title="Not in the posture pages loaded so far: use Load more postures below the table">
+          not loaded
+        </span>
+      );
+    }
     return (
       <span className="text-xs text-tertiary" title="The Broker has not computed a profile for this workload yet (it snapshots every few minutes)">
         not computed yet

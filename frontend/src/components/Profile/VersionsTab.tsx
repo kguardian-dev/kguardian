@@ -130,11 +130,18 @@ export function VersionsTab({ ns, kind, name, refreshTick, snapshotPending, from
             <p className="text-xs text-tertiary">Nothing to compare yet.</p>
           ) : diff.loading && !diff.diff ? (
             <SectionSkeleton />
+          ) : diff.error && errorKind(diff.error) === 'revision_not_found' ? (
+            // Not a failure: the Broker keeps the newest versions only.
+            <div role="status" className="flex flex-wrap items-center justify-between gap-2 text-xs text-secondary" data-testid="diff-trimmed">
+              <span>Earlier versions were trimmed by retention, so this comparison is no longer available.</span>
+              {(from !== undefined || to !== undefined) && (
+                <Button variant="secondary" size="sm" onClick={() => onSelect(undefined, undefined)}>
+                  Compare the latest versions
+                </Button>
+              )}
+            </div>
           ) : diff.error ? (
-            <SectionError
-              message={errorKind(diff.error) === 'revision_not_found' ? 'That revision no longer exists (retention keeps the newest versions only).' : errorMessage(diff.error)}
-              onRetry={() => void diff.reload()}
-            />
+            <SectionError message={errorMessage(diff.error)} onRetry={() => void diff.reload()} />
           ) : diff.diff ? (
             <DiffViewer diff={diff.diff} />
           ) : null}

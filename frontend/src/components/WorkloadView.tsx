@@ -2,7 +2,7 @@ import { useMemo, useState, type ReactNode } from 'react';
 import { ArrowLeft, CloudOff, SearchX, Share2 } from 'lucide-react';
 import type { PodNodeData } from '../types';
 import { useWorkloadProfile } from '../hooks/useWorkloadProfile';
-import { useSeccompProfiles } from '../hooks/useSeccompProfiles';
+import { seccompApi } from '../services/seccompApi';
 import { errorKind, errorMessage, type ProfileApi } from '../services/profileApi';
 import { workloadKey, workloadOf } from '../utils/workloads';
 import { formatAgo, formatTimestamp } from '../utils/posture';
@@ -50,10 +50,8 @@ interface WorkloadViewProps {
 export function WorkloadView({ ns, kind, name, tab: tabParam, from, to, onParamsChange, pods, onBack, onOpenInMap, refreshTick, api }: WorkloadViewProps) {
   const { profile, loading, error, reload } = useWorkloadProfile(ns, kind, name, refreshTick, 30_000, api);
   const tab = parseTab(tabParam);
-  const seccomp = useSeccompProfiles(0);
   const [drawerOpen, setDrawerOpen] = useState(false);
   const key = workloadKey(ns, kind, name);
-  const seccompSummary = seccomp.profiles.find((p) => workloadKey(p.namespace, p.kind, p.name) === key) ?? null;
 
   // The map node carrying this workload's traffic, for "Open in map".
   const node = useMemo(
@@ -109,7 +107,7 @@ export function WorkloadView({ ns, kind, name, tab: tabParam, from, to, onParams
         <div {...tabPanelProps('profile', tab)} className="focus-visible:outline-none">
           {tab === 'overview' && <OverviewTab profile={profile} onOpenTab={openTab} />}
           {tab === 'network' && <NetworkTab dim={d.network} />}
-          {tab === 'syscalls' && <SyscallsTab dim={d.syscalls} onOpenSeccomp={seccompSummary ? () => setDrawerOpen(true) : undefined} />}
+          {tab === 'syscalls' && <SyscallsTab dim={d.syscalls} onOpenSeccomp={d.syscalls.observed ? () => setDrawerOpen(true) : undefined} />}
           {tab === 'images' && <ImagesTab dim={d.images} />}
           {tab === 'podSecurity' && <PodSecurityTab dim={d.podSecurity} />}
           {tab === 'versions' && (
@@ -163,8 +161,10 @@ export function WorkloadView({ ns, kind, name, tab: tabParam, from, to, onParams
         {body}
       </div>
 
-      {drawerOpen && seccompSummary && (
-        <SeccompProfileDrawer api={seccomp.api} workload={{ ns, kind, name }} summary={seccompSummary} onClose={() => setDrawerOpen(false)} />
+      {/* The drawer loads this one workload's seccomp detail itself
+          (GET /seccomp/profiles/{ns}/{kind}/{name}); no cluster-wide list. */}
+      {drawerOpen && (
+        <SeccompProfileDrawer api={seccompApi} workload={{ ns, kind, name }} summary={null} onClose={() => setDrawerOpen(false)} />
       )}
     </div>
   );

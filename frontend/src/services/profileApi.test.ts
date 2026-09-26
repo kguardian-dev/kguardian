@@ -47,18 +47,12 @@ test('paths and queries: segments encoded, unset params omitted', async () => {
   ]);
 });
 
-test('listAllWorkloads follows nextAfter to the end, and stops at the page cap', async () => {
-  const first = { items: workloadsPage.items.slice(0, 2), nextAfter: 'observability/Deployment/grafana' };
-  const second = { items: workloadsPage.items.slice(2), nextAfter: null };
-  const { client, calls } = api((u) => respond(200, u.includes('after=') ? second : first));
-  const all = await client.listAllWorkloads({ namespace: 'payments' });
-  expect(all.items).toHaveLength(workloadsPage.items.length);
-  expect(all.truncated).toBe(false);
-  expect(calls[0]).toBe('/api/workloads?limit=500&namespace=payments');
-  expect(calls[1]).toContain('after=observability%2FDeployment%2Fgrafana');
-
-  const endless = api(() => respond(200, first));
-  const capped = await endless.client.listAllWorkloads({}, 3);
-  expect(capped.truncated).toBe(true);
-  expect(endless.calls).toHaveLength(3);
+test('listWorkloads sends paging and filters as query params, and nothing unset', async () => {
+  const { client, calls } = api(() => respond(200, workloadsPage));
+  await client.listWorkloads({ limit: 100, namespace: 'payments', status: 'risk', after: 'payments/Deployment/api' });
+  await client.listWorkloads({ limit: 100 });
+  expect(calls).toEqual([
+    '/api/workloads?limit=100&namespace=payments&status=risk&after=payments%2FDeployment%2Fapi',
+    '/api/workloads?limit=100',
+  ]);
 });

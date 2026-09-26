@@ -105,22 +105,6 @@ export class ProfileApi {
     return this.json<WorkloadListPage>('/workloads', { ...query });
   }
 
-  /**
-   * Every page of `GET /workloads`, up to `maxPages` (a safety stop; at the
-   * max page size that is 5 000 workloads). `truncated` says the stop hit.
-   */
-  async listAllWorkloads(query: Omit<ListWorkloadsQuery, 'after'> = {}, maxPages = 10): Promise<{ items: WorkloadListPage['items']; truncated: boolean }> {
-    const items: WorkloadListPage['items'] = [];
-    let after: string | undefined;
-    for (let i = 0; i < maxPages; i++) {
-      const page = await this.listWorkloads({ limit: 500, ...query, after });
-      items.push(...page.items);
-      if (!page.nextAfter) return { items, truncated: false };
-      after = page.nextAfter;
-    }
-    return { items, truncated: true };
-  }
-
   /** `GET /workloads/{ns}/{kind}/{name}/profile` — computed live. */
   getProfile(ns: string, kind: string, name: string): Promise<WorkloadProfile> {
     return this.json<WorkloadProfile>(`${this.workloadPath(ns, kind, name)}/profile`);

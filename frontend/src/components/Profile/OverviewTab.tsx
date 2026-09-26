@@ -1,7 +1,9 @@
+import { useState } from 'react';
 import { ChevronRight, ClipboardCheck, Package, Radar, ShieldCheck, SlidersHorizontal, Lock } from 'lucide-react';
 import type { Control, DimensionName, Finding, WorkloadProfile } from '../../types/profile';
 import { SEVERITY_BADGE_CLASS, TIER_BADGE_CLASS } from '../../utils/severity';
 import { DIMENSION_LABEL, findingSeverity } from '../../utils/posture';
+import { Button } from '../ui/Button';
 import { EmptyState } from '../ui/EmptyState';
 import { CheckMark, Panel } from './parts';
 import type { ProfileTab } from '../../utils/profileView';
@@ -13,6 +15,8 @@ const TAB_OF: Record<DimensionName, ProfileTab> = {
   images: 'images',
   compute: 'overview',
 };
+
+const FINDING_RANK: Record<Finding['severity'], number> = { critical: 4, high: 3, medium: 2, low: 1, info: 0 };
 
 /** The Overview shows at most this many findings (the broker ranks them). */
 export const ATTENTION_MAX = 5;
@@ -29,12 +33,29 @@ function FindingBadge({ f }: { f: Finding }) {
 }
 
 function NeedsAttention({ profile, onOpenTab }: { profile: WorkloadProfile; onOpenTab: (t: ProfileTab) => void }) {
-  const list = profile.attention.slice(0, ATTENTION_MAX);
+  // Top 5 by default; every finding stays reachable through "Show all".
+  const [showAll, setShowAll] = useState(false);
+  const total = profile.findings.length;
+  // The contract does not order findings[]; sort worst first (stable).
+  const list = showAll
+    ? [...profile.findings].sort((a, b) => FINDING_RANK[b.severity] - FINDING_RANK[a.severity])
+    : profile.attention.slice(0, ATTENTION_MAX);
   // Dimensions with no data at all (status unknown) — not the same as the
   // rollup's unknownDimensions, which also lists known-but-unscored ones.
   const unknown = (['network', 'syscalls', 'podSecurity', 'images'] as const).filter((d) => profile.dimensions[d].status === 'unknown');
   return (
-    <Panel icon={Radar} title="Needs attention" hint={`Top ${ATTENTION_MAX} by severity · ${profile.findings.length} finding${profile.findings.length === 1 ? '' : 's'} in total`}>
+    <Panel
+      icon={Radar}
+      title="Needs attention"
+      hint={showAll ? `All ${total} findings, by severity` : `Top ${ATTENTION_MAX} by severity · ${total} finding${total === 1 ? '' : 's'} in total`}
+      action={
+        total > Math.min(ATTENTION_MAX, profile.attention.length) ? (
+          <Button variant="ghost" size="sm" aria-expanded={showAll} onClick={() => setShowAll((v) => !v)}>
+            {showAll ? `Show top ${ATTENTION_MAX}` : `Show all ${total}`}
+          </Button>
+        ) : undefined
+      }
+    >
       {list.length === 0 ? (
         <EmptyState
           icon={ShieldCheck}
@@ -47,7 +68,7 @@ function NeedsAttention({ profile, onOpenTab }: { profile: WorkloadProfile; onOp
           }
         />
       ) : (
-        <ul className="divide-y divide-hubble-border">
+        <ul className="divide-y divide-hubble-border" aria-label={showAll ? 'All findings' : 'Top findings'}>
           {list.map((f) => {
             const tab = TAB_OF[f.dimension] ?? 'overview';
             return (

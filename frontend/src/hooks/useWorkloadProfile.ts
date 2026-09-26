@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { profileApi, type ProfileApi } from '../services/profileApi';
-import type { ProfileDiff, VersionList, WorkloadListItem, WorkloadProfile } from '../types/profile';
+import type { PostureStatus, ProfileDiff, VersionList, WorkloadListItem, WorkloadProfile } from '../types/profile';
 
 /**
  * Keeps a request's result tied to the key it was made for: a response for
@@ -141,37 +141,79 @@ export function useProfileDiff(ns: string, kind: string, name: string, from: num
   return { diff, loading, error, reload: load };
 }
 
+/** Rows per `GET /workloads` page the Workloads table asks for. */
+export const POSTURE_PAGE_SIZE = 100;
+
 /**
- * `GET /workloads` posture summaries, keyed `ns/kind/name`, for the
- * Workloads table's posture column. `error` set means the column is
- * unavailable (older Broker, read budget) — the rest of the table works.
+ * `GET /workloads` posture summaries for the Workloads table's posture
+ * column, one server page at a time (same `(namespace, kind, name)` order
+ * the table uses): the first page on load / scope change / refresh, more
+ * only when the user asks (`loadMore`). `namespace` and `status` are
+ * server-side filters. `error` set means the column is unavailable (older
+ * Broker, read budget); the rest of the table works.
  */
-export function useWorkloadPostures(namespace: string | undefined, refreshTick = 0, api: ProfileApi = profileApi) {
+export function useWorkloadPostures(
+  namespace: string | undefined,
+  status: PostureStatus | undefined,
+  refreshTick = 0,
+  api: ProfileApi = profileApi,
+  pageSize = POSTURE_PAGE_SIZE,
+  enabled = true,
+) {
   const [byKey, setByKey] = useState<Map<string, WorkloadListItem>>(new Map());
+  const [nextAfter, setNextAfter] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
+  const [loadingMore, setLoadingMore] = useState(false);
   const [error, setError] = useState<unknown>(null);
-  const [truncated, setTruncated] = useState(false);
   const begin = useLatest();
 
+  const page = useCallback(
+    (after: string | undefined) => api.listWorkloads({ limit: pageSize, ...(namespace ? { namespace } : {}), ...(status ? { status } : {}), after }),
+    [api, namespace, status, pageSize],
+  );
+
   const load = useCallback(async () => {
+    if (!enabled) return;
     const current = begin();
+    setLoading(true);
     try {
-      const { items, truncated: t } = await api.listAllWorkloads(namespace ? { namespace } : {});
+      const p = await page(undefined);
       if (!current()) return;
-      setByKey(new Map(items.map((i) => [`${i.namespace}/${i.kind}/${i.name}`, i])));
-      setTruncated(t);
+      setByKey(new Map(p.items.map((i) => [`${i.namespace}/${i.kind}/${i.name}`, i])));
+      setNextAfter(p.nextAfter);
       setError(null);
     } catch (err) {
       if (current()) setError(err);
     } finally {
       if (current()) setLoading(false);
     }
-  }, [api, namespace, begin]);
+  }, [page, begin, enabled]);
 
   useEffect(() => {
-    // eslint-disable-next-line react-hooks/set-state-in-effect -- fetch on mount / scope change / refresh
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- fetch on mount / scope or filter change / refresh
     void load();
   }, [load, refreshTick]);
 
-  return { byKey, loading, error, truncated };
+  const loadMore = useCallback(async () => {
+    if (!nextAfter) return;
+    const current = begin();
+    setLoadingMore(true);
+    try {
+      const p = await page(nextAfter);
+      if (!current()) return;
+      setByKey((prev) => {
+        const next = new Map(prev);
+        for (const i of p.items) next.set(`${i.namespace}/${i.kind}/${i.name}`, i);
+        return next;
+      });
+      setNextAfter(p.nextAfter);
+      setError(null);
+    } catch (err) {
+      if (current()) setError(err);
+    } finally {
+      if (current()) setLoadingMore(false);
+    }
+  }, [nextAfter, page, begin]);
+
+  return { byKey, loading, loadingMore, error, hasMore: nextAfter !== null, loadMore };
 }

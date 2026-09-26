@@ -7,8 +7,12 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
-vi.mock('../hooks/useSeccompProfiles', () => ({
-  useSeccompProfiles: () => ({ api: {}, profiles: [], loading: false, error: null, refresh: async () => {} }),
+// The seccomp drawer is the existing component; here it only needs to show
+// which workload it was opened for (it loads that one workload's detail).
+vi.mock('./Seccomp/SeccompProfileDrawer', () => ({
+  SeccompProfileDrawer: (p: { workload: { ns: string; kind: string; name: string }; summary: unknown }) => (
+    <div data-testid="seccomp-drawer" data-summary={String(p.summary)}>{`${p.workload.ns}/${p.workload.kind}/${p.workload.name}`}</div>
+  ),
 }));
 
 import { WorkloadView } from './WorkloadView';
@@ -118,7 +122,7 @@ test('Overview: needs attention is capped at 5, controls and readiness keep null
   const { api } = serving(many);
   renderPage(api, { name: 'ledger' });
   const attention = await screen.findByRole('region', { name: 'Needs attention' });
-  expect(within(attention).getAllByRole('button')).toHaveLength(5);
+  expect(within(attention).getAllByRole('listitem')).toHaveLength(5);
   const controls = screen.getByRole('region', { name: 'Controls' });
   expect(within(controls).getByText('Not configured')).not.toBeNull();
   expect(within(controls).getByText('drifted')).not.toBeNull();
@@ -297,4 +301,53 @@ test.each(['overview', 'network', 'syscalls', 'images', 'podSecurity'])('the rea
   expect(screen.queryByRole('alert')).toBeNull();
   expect(errors).not.toHaveBeenCalled();
   errors.mockRestore();
+});
+
+test('Overview: findings beyond the top 5 are reachable with Show all, sorted worst first', async () => {
+  const p = structuredClone(ledgerProfile);
+  expect(p.findings.length).toBe(6);
+  const { api } = serving(p);
+  renderPage(api, { name: 'ledger' });
+  const attention = await screen.findByRole('region', { name: 'Needs attention' });
+  expect(within(attention).getAllByRole('listitem')).toHaveLength(5);
+  const toggle = within(attention).getByRole('button', { name: 'Show all 6' });
+  expect(toggle.getAttribute('aria-expanded')).toBe('false');
+  fireEvent.click(toggle);
+  const all = within(attention).getByRole('list', { name: 'All findings' });
+  const items = within(all).getAllByRole('listitem');
+  expect(items).toHaveLength(6);
+  expect(items[5].textContent).toContain('Container app runs two digests');
+  fireEvent.click(within(attention).getByRole('button', { name: 'Show top 5' }));
+  expect(within(attention).getAllByRole('listitem')).toHaveLength(5);
+});
+
+test('Syscalls: the seccomp drawer opens for this workload without fetching the cluster-wide list', async () => {
+  const { api } = serving(ledgerProfile);
+  const fetchSpy = vi.fn(() => Promise.reject(new Error('unexpected')));
+  vi.stubGlobal('fetch', fetchSpy);
+  renderPage(api, { name: 'ledger', tab: 'syscalls' });
+  fireEvent.click(await screen.findByRole('button', { name: 'Open seccomp profile' }));
+  expect(screen.getByTestId('seccomp-drawer').textContent).toBe('payments/Deployment/ledger');
+  expect(fetchSpy.mock.calls.map((c) => String((c as unknown[])[0]))).not.toContain('/api/seccomp/profiles');
+});
+
+test('Syscalls: no seccomp button when nothing has been observed', async () => {
+  const { api } = serving(unknownProfile);
+  renderPage(api, { ns: 'flux-system', name: 'source-controller', tab: 'syscalls' });
+  await screen.findByText('No syscalls reported yet');
+  expect(screen.queryByRole('button', { name: 'Open seccomp profile' })).toBeNull();
+});
+
+test('Versions: a diff against a trimmed revision says so and offers the latest comparison', async () => {
+  const { api } = fakeApi((url) => {
+    if (url.pathname.endsWith('/profile/versions')) return { status: 200, body: checkoutVersions };
+    if (url.pathname.endsWith('/profile/diff')) return { status: 404, body: { error: 'revision_not_found', message: 'revision 1 not found' } };
+    return { status: 200, body: checkoutProfile };
+  });
+  const { onParamsChange } = renderPage(api, { tab: 'versions', from: '1', to: '3' });
+  const notice = await screen.findByTestId('diff-trimmed');
+  expect(notice.textContent).toContain('Earlier versions were trimmed by retention');
+  expect(screen.queryByRole('alert')).toBeNull();
+  fireEvent.click(within(notice).getByRole('button', { name: 'Compare the latest versions' }));
+  expect(onParamsChange).toHaveBeenLastCalledWith({ tab: 'versions', from: undefined, to: undefined });
 });

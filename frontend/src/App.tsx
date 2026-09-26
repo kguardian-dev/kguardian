@@ -91,7 +91,31 @@ function App() {
     () => navigate(view, { ...loc.params, scope: undefined }),
     [navigate, view, loc.params],
   );
-  const openWorkload = useCallback((params: Record<string, string>) => navigate('workload', params), [navigate]);
+  // True while the workload page sits directly on top of the Workloads list
+  // entry it was opened from (a push from that list). Back then pops that
+  // entry — the list comes back with its scroll, filters and scope — instead
+  // of pushing a second copy of it. The page's own tab/diff changes replace
+  // the entry, so the list stays the previous one. A deep link has no list
+  // below it, so Back navigates there.
+  const listBelow = useRef(false);
+  useEffect(() => {
+    if (view !== 'workload') listBelow.current = false;
+  }, [view]);
+  const openWorkload = useCallback(
+    (params: Record<string, string>) => {
+      listBelow.current = view === 'workloads';
+      navigate('workload', params);
+    },
+    [navigate, view],
+  );
+  const backToWorkloads = useCallback(() => {
+    if (listBelow.current) {
+      listBelow.current = false;
+      window.history.back();
+      return;
+    }
+    navigate('workloads', workloadsBackParams(loc.params));
+  }, [navigate, loc.params]);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [isAIAssistantOpen, setIsAIAssistantOpen] = useState(false);
@@ -496,7 +520,7 @@ function App() {
               // (browser or the page's own link) returns to the list.
               onParamsChange={(patch) => navigate('workload', { ...loc.params, ...patch }, { replace: true })}
               pods={pods}
-              onBack={() => navigate('workloads', workloadsBackParams(loc.params))}
+              onBack={backToWorkloads}
               onOpenInMap={(podId) => navigate('map', { ns: loc.params.ns, pod: podId })}
             />
           </Suspense>

@@ -38,13 +38,22 @@ vi.mock('../services/api', () => ({ default: { getAuditVerdicts: (o: never) => g
 import { checkoutProfile, grafanaProfile, listItemOf, unknownProfile } from '../fixtures/profile';
 import type { WorkloadListItem } from '../types/profile';
 const apiItem = { ...listItemOf(checkoutProfile), name: 'api' };
-const postureState: { byKey: Map<string, WorkloadListItem>; loading: boolean; error: unknown; truncated: boolean } = {
+const loadMore = vi.fn(async () => {});
+const postureState: { byKey: Map<string, WorkloadListItem>; loading: boolean; loadingMore: boolean; error: unknown; hasMore: boolean; loadMore: () => Promise<void> } = {
   byKey: new Map([apiItem, listItemOf(grafanaProfile), listItemOf(unknownProfile)].map((i) => [`${i.namespace}/${i.kind}/${i.name}`, i])),
   loading: false,
+  loadingMore: false,
   error: null,
-  truncated: false,
+  hasMore: false,
+  loadMore,
 };
-vi.mock('../hooks/useWorkloadProfile', () => ({ useWorkloadPostures: () => postureState }));
+const postureArgs: unknown[][] = [];
+vi.mock('../hooks/useWorkloadProfile', () => ({
+  useWorkloadPostures: (...args: unknown[]) => {
+    postureArgs.push(args);
+    return postureState;
+  },
+}));
 
 import { WorkloadsView } from './WorkloadsView';
 import { StatePill } from './Seccomp';
@@ -217,5 +226,47 @@ test('posture column: a Broker that cannot serve postures leaves the table worki
   } finally {
     postureState.byKey = saved;
     postureState.error = null;
+  }
+});
+
+test('posture column: pages not yet fetched say "not loaded" and offer Load more', () => {
+  const saved = postureState.byKey;
+  postureState.byKey = new Map([...saved].filter(([k]) => k.startsWith('flux-system/')));
+  postureState.hasMore = true;
+  loadMore.mockClear();
+  try {
+    renderView();
+    expect(within(rows()[1]).getByText('not loaded')).not.toBeNull();
+    expect(screen.queryByText('not computed yet')).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: 'Load more postures' }));
+    expect(loadMore).toHaveBeenCalledTimes(1);
+  } finally {
+    postureState.byKey = saved;
+    postureState.hasMore = false;
+  }
+});
+
+test('postures are requested with the narrowed namespace and the posture filter; seccomp mode requests none', () => {
+  postureArgs.length = 0;
+  renderView({ allNamespaces: false, namespace: 'payments' });
+  expect(postureArgs.at(-1)!.slice(0, 2)).toEqual(['payments', undefined]);
+  fireEvent.change(screen.getByLabelText('Posture'), { target: { value: 'risk' } });
+  expect(postureArgs.at(-1)!.slice(0, 2)).toEqual(['payments', 'risk']);
+  cleanup();
+  postureArgs.length = 0;
+  renderView({ control: 'seccomp' });
+  // enabled = false (6th argument) in seccomp mode.
+  expect(postureArgs.at(-1)![5]).toBe(false);
+});
+
+test('a posture filter keeps only the rows the Broker returned for it', () => {
+  const saved = postureState.byKey;
+  postureState.byKey = new Map([...saved].filter(([k]) => k.startsWith('observability/')));
+  try {
+    renderView();
+    fireEvent.change(screen.getByLabelText('Posture'), { target: { value: 'ok' } });
+    expect(rows().map((r) => r.querySelector('a')!.textContent)).toEqual(['grafana']);
+  } finally {
+    postureState.byKey = saved;
   }
 });

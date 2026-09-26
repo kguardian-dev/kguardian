@@ -10,8 +10,10 @@ import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/re
 vi.mock('./components/NetworkGraph', () => ({ default: () => <div data-testid="map" /> }));
 vi.mock('./components/DataTable', () => ({ default: () => <div /> }));
 vi.mock('./components/WorkloadsView', () => ({
-  default: (p: { control?: string; allNamespaces: boolean; refreshTick?: number }) => (
-    <div data-testid="workloads" data-control={p.control ?? ''} data-all={String(p.allNamespaces)} data-tick={String(p.refreshTick ?? 0)} />
+  default: (p: { control?: string; allNamespaces: boolean; refreshTick?: number; onOpenWorkload: (x: Record<string, string>) => void }) => (
+    <div data-testid="workloads" data-control={p.control ?? ''} data-all={String(p.allNamespaces)} data-tick={String(p.refreshTick ?? 0)}>
+      <button onClick={() => p.onOpenWorkload({ ns: 'payments', kind: 'Deployment', name: 'checkout', scope: 'ns' })}>open checkout</button>
+    </div>
   ),
 }));
 vi.mock('./components/WorkloadView', () => ({
@@ -179,4 +181,31 @@ test('profile tabs live in the URL, replace the history entry, and Back drops th
 test('a deep link straight to a profile tab opens that tab', async () => {
   renderAt('#/workload?ns=payments&kind=Deployment&name=checkout&tab=podSecurity');
   await waitFor(() => expect(screen.getByTestId('workload').dataset.tab).toBe('podSecurity'));
+});
+
+test('Back from a workload opened from the list pops the list entry instead of pushing a new one', async () => {
+  renderAt('#/workloads?ns=payments&scope=ns');
+  await waitFor(() => expect(screen.getByTestId('workloads')).not.toBeNull());
+  fireEvent.click(screen.getByText('open checkout'));
+  await waitFor(() => expect(screen.getByTestId('workload').textContent).toBe('payments/Deployment/checkout'));
+  // A tab change replaces the entry, so the list is still the one below.
+  fireEvent.click(screen.getByText('versions'));
+  await waitFor(() => expect(screen.getByTestId('workload').dataset.tab).toBe('versions'));
+  const back = vi.spyOn(window.history, 'back');
+  const depth = window.history.length;
+  fireEvent.click(screen.getByText('back'));
+  expect(back).toHaveBeenCalledTimes(1);
+  await waitFor(() => expect(window.location.hash).toBe('#/workloads?ns=payments&scope=ns'));
+  expect(window.history.length).toBe(depth);
+  back.mockRestore();
+});
+
+test('Back from a deep-linked workload (no list below it) navigates to the list', async () => {
+  renderAt('#/workload?ns=payments&kind=Deployment&name=checkout&scope=ns&tab=versions');
+  await waitFor(() => expect(screen.getByTestId('workload')).not.toBeNull());
+  const back = vi.spyOn(window.history, 'back');
+  fireEvent.click(screen.getByText('back'));
+  expect(back).not.toHaveBeenCalled();
+  await waitFor(() => expect(window.location.hash).toBe('#/workloads?ns=payments&scope=ns'));
+  back.mockRestore();
 });
