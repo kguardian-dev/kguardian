@@ -25,16 +25,27 @@ const view = (over: Partial<Parameters<typeof ImagesView>[0]> = {}) => (
 const failing = (status: number) => new VulnApi({ fetchImpl: (async () => new Response('', { status })) as typeof fetch });
 
 describe('ImagesView: Vulnerabilities tab', () => {
-  test('one row per captured CVE; the KEV row is P0 with its reason chips', async () => {
-    render(view());
+  test("tiers are the Broker's: one row per CVE, the KEV row P0, with its chips", async () => {
+    render(view({ api: replayVulnApi([], { tiers: true }).api }));
     const rows = await screen.findAllByTestId('cve-row');
     expect(rows).toHaveLength(cvePage.items.length);
+    const tierOf = (id: string) => rows.find((r) => within(r).queryByText(id))!.querySelector('[data-tier]')!.getAttribute('data-tier');
+    expect(tierOf('CVE-2099-0001')).toBe('P0');
+    expect(tierOf('CVE-2099-0005')).toBe('P2'); // high, no fix, not exposed: the Broker's rule, not ours
+    expect(tierOf('CVE-2099-0004')).toBe('Background');
     const kev = rows.find((r) => within(r).queryByText('CVE-2099-0001'))!;
-    expect(kev.querySelector('[data-tier]')!.getAttribute('data-tier')).toBe('P0');
     // Chips render twice (stacked under the id on phones, own column from sm up).
     const chips = [...kev.querySelectorAll('td:nth-child(3) [data-factor]')].map((c) => c.getAttribute('data-factor'));
-    expect(chips).toEqual(['inuse', 'kev', 'epss', 'cvss', 'fix']);
-    expect(within(kev).getAllByText('Loaded: unknown').length).toBeGreaterThan(0);
+    expect(chips).toEqual(['inuse', 'exposure', 'kev', 'epss', 'cvss', 'fix']);
+    expect(screen.getByLabelText('Tier', { exact: false })).toBeTruthy();
+  });
+
+  test('a Broker without tiers: every row "Tier ?", tier tiles unknown, no tier filter; never a computed tier', async () => {
+    render(view());
+    const rows = await screen.findAllByTestId('cve-row');
+    for (const r of rows) expect(r.querySelector('[data-tier]')!.getAttribute('data-tier')).toBe('unknown');
+    expect(screen.getAllByText('unknown').length).toBeGreaterThanOrEqual(2);
+    expect(screen.queryByLabelText('Tier', { exact: false })).toBeNull();
   });
 
   test('401 is an auth-required state, not an empty list', async () => {
@@ -65,18 +76,25 @@ describe('ImagesView: Images tab', () => {
 });
 
 describe('CVE drawer', () => {
-  test('each workload is tiered with its own exposure and shows every chip, privilege from its profile', async () => {
+  test("each workload row: its image's Broker tier, its own exposure and in-use, privilege from its profile", async () => {
     const { api: profileApi } = replayApi([answer('GET /workloads?namespace=payments&limit=500', listNamespacePayments.body)]);
-    render(view({ cve: 'CVE-2099-0001', profileApi }));
+    render(view({ cve: 'CVE-2099-0001', profileApi, api: replayVulnApi([], { tiers: true }).api }));
     await waitFor(() => expect(screen.getAllByTestId('cve-workload').length).toBeGreaterThan(0));
-    const rows = screen.getAllByTestId('cve-workload');
-    const checkout = rows.find((r) => within(r).queryByText('payments/checkout'))!;
-    const ledger = rows.find((r) => within(r).queryByText('payments/ledger'))!;
-    expect(checkout.querySelector('[data-tier]')!.getAttribute('data-tier')).toBe('P0');
-    expect(ledger.querySelector('[data-tier]')!.getAttribute('data-tier')).toBe('P1');
+    const row = (name: string) => screen.getAllByTestId('cve-workload').find((r) => within(r).queryByText(name))!;
+    await waitFor(() => expect(row('payments/checkout').querySelector('[data-tier]')!.getAttribute('data-tier')).toBe('P0'));
+    expect(row('payments/ledger').querySelector('[data-tier]')!.getAttribute('data-tier')).toBe('P1');
+    expect(row('payments/reports').querySelector('[data-tier]')!.getAttribute('data-tier')).toBe('P1');
+    const checkout = row('payments/checkout');
     await waitFor(() => expect(within(checkout).getAllByText('Not privileged').length).toBeGreaterThan(0));
     const chips = [...checkout.querySelectorAll('td:last-child [data-factor]')].map((c) => c.getAttribute('data-factor'));
     expect(chips).toEqual(['inuse', 'exposure', 'kev', 'epss', 'cvss', 'fix', 'privileged']);
+    expect(within(checkout).getAllByText('Exposed: public IP, unattributed peer, other namespace').length).toBeGreaterThan(0);
+  });
+
+  test('on a Broker without tiers the drawer shows "Tier ?", not a computed tier', async () => {
+    render(view({ cve: 'CVE-2099-0001' }));
+    await waitFor(() => expect(screen.getAllByTestId('cve-workload').length).toBeGreaterThan(0));
+    for (const r of screen.getAllByTestId('cve-workload')) expect(r.querySelector('[data-tier]')!.getAttribute('data-tier')).toBe('unknown');
   });
 
   test('a CVE that affects nothing in the inventory says so', async () => {

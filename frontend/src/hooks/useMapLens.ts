@@ -2,46 +2,33 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { vulnApi as defaultVulnApi, type VulnApi } from '../services/vulnApi';
 import { profileApi as defaultProfileApi, type ProfileApi } from '../services/profileApi';
 import type { LensBadge, MapLens, PodNodeData } from '../types';
-import type { CveSummary, Exposure, ImageUser, Report } from '../types/vulns';
+import type { Finding, ImageUser, Report } from '../types/vulns';
 import type { WorkloadListItem } from '../types/profile';
 import { withConcurrencyLimit } from '../utils/concurrency';
 import { STATUS_LABEL } from '../utils/posture';
-import { EPSS_P0_THRESHOLD, TIER_RANK } from '../utils/tiers';
-import { workloadTier } from '../utils/vulnView';
 import { workloadKey, workloadOf } from '../utils/workloads';
 
-/** At most this many CVEs' exposures are read to draw the Vulnerabilities lens. */
-export const LENS_CVE_CAP = 30;
 /** At most this many image digests are read per namespace (one page). */
 export const LENS_IMAGE_CAP = 100;
+/** P0/P1 findings read per image (one page). */
+export const LENS_FINDINGS_CAP = 100;
 export const LENS_CONCURRENCY = 3;
 
-/** CVEs that can tier P0 or P1: the only ones the Vulnerabilities lens reads exposure for. */
-export function lensCandidate(c: CveSummary): boolean {
-  return c.severity === 'CRITICAL' || c.severity === 'HIGH' || c.kev === true || (c.maxEpss ?? 0) >= EPSS_P0_THRESHOLD;
-}
-
-export interface HotCves {
-  tier: 'P0' | 'P1';
-  ids: string[];
-}
-
-/** Per-workload P0/P1 CVEs on running images, from the CVEs' exposures (key ns/kind/name). */
-export function hotCvesByWorkload(exposures: Array<{ summary: CveSummary; exposure: Exposure }>): Map<string, HotCves> {
-  const out = new Map<string, HotCves>();
-  for (const { summary, exposure } of exposures) {
-    for (const w of exposure.workloads) {
-      if (!w.running) continue;
-      const t = workloadTier(w, exposure, null, summary);
-      if (t.tier !== 'P0' && t.tier !== 'P1') continue;
-      const key = workloadKey(w.namespace, w.kind, w.name);
-      const g = out.get(key) ?? { tier: t.tier, ids: [] };
-      if (!g.ids.includes(exposure.id)) g.ids.push(exposure.id);
-      if (TIER_RANK[t.tier] > TIER_RANK[g.tier]) g.tier = t.tier;
-      out.set(key, g);
-    }
-  }
-  return out;
+/**
+ * What one image read says. For the Vulnerabilities lens, `hot` is the
+ * image's P0/P1 findings as the Broker tiers them (`tier=P0,P1`), and
+ * `tiered` whether the Broker ranks tiers at all: an older Broker ignores
+ * the filter and sends findings without `tier`.
+ */
+export interface ImageFacts {
+  digest: string;
+  workloads: ImageUser[];
+  vulnReports: Report[] | null;
+  sbomReports: Report[] | null;
+  hot?: Finding[] | null;
+  /** true: findings carry `tier`; false: they do not (older Broker); null: nothing to tell by. */
+  tiered?: boolean | null;
+  hotTruncated?: boolean;
 }
 
 /** What one namespace's image inventory says about each workload's running images. */
@@ -53,13 +40,13 @@ export interface WorkloadImages {
   /** Digests with an SBOM from any source / a verified one. */
   withSbom: number;
   withVerifiedSbom: number;
-}
-
-export interface ImageFacts {
-  digest: string;
-  workloads: ImageUser[];
-  vulnReports: Report[] | null;
-  sbomReports: Report[] | null;
+  /** P0 / P1 CVE ids over the running images (the Broker's tiers). */
+  p0: string[];
+  p1: string[];
+  /** Running images whose findings carry no tier (older Broker). */
+  untiered: number;
+  /** A P0/P1 page was cut short. */
+  hotTruncated: boolean;
 }
 
 /** Fold per-digest facts into per-workload running-image coverage (key ns/kind/name). */
@@ -69,12 +56,18 @@ export function imagesByWorkload(images: ImageFacts[]): Map<string, WorkloadImag
     for (const w of img.workloads) {
       if (!w.running) continue;
       const key = workloadKey(w.namespace, w.workloadKind, w.workloadName);
-      const acc = out.get(key) ?? { digests: [], withVulnData: 0, withSbom: 0, withVerifiedSbom: 0 };
+      const acc = out.get(key) ?? { digests: [], withVulnData: 0, withSbom: 0, withVerifiedSbom: 0, p0: [], p1: [], untiered: 0, hotTruncated: false };
       if (acc.digests.includes(img.digest)) continue;
       acc.digests.push(img.digest);
       if (img.vulnReports && img.vulnReports.length > 0) acc.withVulnData += 1;
       if (img.sbomReports && img.sbomReports.length > 0) acc.withSbom += 1;
       if (img.sbomReports?.some((r) => r.sbomTrust === 'verified')) acc.withVerifiedSbom += 1;
+      if (img.tiered === false) acc.untiered += 1;
+      for (const f of img.hot ?? []) {
+        const list = f.tier === 'P0' ? acc.p0 : f.tier === 'P1' ? acc.p1 : null;
+        if (list && !list.includes(f.id)) list.push(f.id);
+      }
+      acc.hotTruncated ||= img.hotTruncated === true;
       out.set(key, acc);
     }
   }
@@ -83,31 +76,39 @@ export function imagesByWorkload(images: ImageFacts[]): Map<string, WorkloadImag
 
 const plural = (n: number, one: string, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
 
-/** Vulnerabilities lens badge. Never "clean": the best a card gets is "no P0/P1 found". */
-export function vulnBadge(hot: HotCves | undefined, imgs: WorkloadImages | undefined, assessedAll: boolean): LensBadge {
-  const partial = imgs && imgs.withVulnData < imgs.digests.length;
-  const partialNote = partial ? ` ${plural(imgs.digests.length - imgs.withVulnData, 'running image')} of ${imgs.digests.length} ${imgs.digests.length - imgs.withVulnData === 1 ? 'has' : 'have'} no vulnerability data (unknown).` : '';
-  if (hot) {
-    return {
-      lens: 'vulns', tone: hot.tier === 'P0' ? 'p0' : 'p1', text: `${hot.tier} · ${hot.ids.length}`,
-      label: `${plural(hot.ids.length, 'P0/P1 vulnerability', 'P0/P1 vulnerabilities')} on running images, worst ${hot.tier}: ${hot.ids.slice(0, 5).join(', ')}${hot.ids.length > 5 ? ', …' : ''}.${partialNote}`,
-    };
-  }
+/**
+ * Vulnerabilities lens badge from the Broker's tiers. Never "clean": the
+ * best a card gets is "no P0/P1". A finding's tier is the worst over every
+ * container running its image, so a shared image carries its worst user's
+ * tier to every workload running it.
+ */
+export function vulnBadge(imgs: WorkloadImages | undefined): LensBadge {
   if (!imgs || imgs.digests.length === 0) {
     return { lens: 'vulns', tone: 'unknown', text: 'no data', label: 'No running image of this workload is in the image inventory: vulnerabilities unknown.' };
+  }
+  const n = imgs.digests.length;
+  const missing = n - imgs.withVulnData;
+  const partialNote = missing > 0 ? ` ${plural(missing, 'running image')} of ${n} ${missing === 1 ? 'has' : 'have'} no vulnerability data (unknown).` : '';
+  const scope = ' Tiers are the Broker\'s, worst over every workload running the image.';
+  const worst = imgs.p0.length ? 'P0' : imgs.p1.length ? 'P1' : null;
+  if (worst) {
+    const ids = [...imgs.p0, ...imgs.p1.filter((id) => !imgs.p0.includes(id))];
+    const count = `${ids.length}${imgs.hotTruncated ? '+' : ''}`;
+    return {
+      lens: 'vulns', tone: worst === 'P0' ? 'p0' : 'p1', text: `${worst} · ${count}`,
+      label: `${count} P0/P1 vulnerabilit${ids.length === 1 ? 'y' : 'ies'} on running images, worst ${worst}: ${ids.slice(0, 5).join(', ')}${ids.length > 5 ? ', …' : ''}.${partialNote}${scope}`,
+    };
+  }
+  if (imgs.untiered > 0) {
+    return { lens: 'vulns', tone: 'unknown', text: 'tier ?', label: 'This Broker does not rank findings into tiers, so P0/P1 is unknown here.' };
   }
   if (imgs.withVulnData === 0) {
     return { lens: 'vulns', tone: 'unknown', text: 'no data', label: 'No source has reported on the images this workload runs: vulnerabilities unknown, not clean.' };
   }
-  if (partial) {
-    return { lens: 'vulns', tone: 'unknown', text: 'partial', label: `No P0/P1 found in the reported images.${partialNote}` };
+  if (missing > 0) {
+    return { lens: 'vulns', tone: 'unknown', text: 'partial', label: `No P0/P1 in the reported images.${partialNote}` };
   }
-  return {
-    lens: 'vulns', tone: 'neutral', text: 'no P0/P1',
-    label: assessedAll
-      ? 'Reported on; no P0/P1 vulnerability found on its running images. Lower tiers may exist.'
-      : `Reported on; no P0/P1 among the first ${LENS_CVE_CAP} high-risk CVEs assessed. More were not assessed.`,
-  };
+  return { lens: 'vulns', tone: 'neutral', text: 'no P0/P1', label: `Reported on; the Broker ranks no finding on its running images P0 or P1. Lower tiers may exist.${scope}` };
 }
 
 /** Supply chain lens badge: SBOM presence and trust. Signatures are not checked yet and never shown as signed. */
@@ -149,7 +150,7 @@ export function coverageBadge(p: WorkloadListItem | undefined): LensBadge {
 export function badgesByNode(lens: Exclude<MapLens, 'traffic'>, byWorkload: Map<string, LensBadge>, nodes: PodNodeData[]): Map<string, LensBadge> {
   const out = new Map<string, LensBadge>();
   const fallback: Record<Exclude<MapLens, 'traffic'>, LensBadge> = {
-    vulns: vulnBadge(undefined, undefined, true),
+    vulns: vulnBadge(undefined),
     supply: supplyBadge(undefined),
     coverage: coverageBadge(undefined),
   };
@@ -166,16 +167,24 @@ export function badgesByNode(lens: Exclude<MapLens, 'traffic'>, byWorkload: Map<
   return out;
 }
 
-async function readImages(api: VulnApi, namespace: string, withSbom: boolean): Promise<{ images: ImageFacts[]; truncated: boolean }> {
+async function readImages(api: VulnApi, namespace: string, mode: 'vulns' | 'supply'): Promise<{ images: ImageFacts[]; truncated: boolean }> {
   const page = await api.listImages({ namespace, limit: LENS_IMAGE_CAP });
   const images = await withConcurrencyLimit(
     page.items.map((img) => async (): Promise<ImageFacts> => {
       const [d, v, s] = await Promise.all([
         api.getImage(img.digest).catch(() => null),
-        api.getImageVulns(img.digest, { limit: 1 }).then((p) => p.reports).catch(() => null),
-        withSbom ? api.getImageSbom(img.digest, { limit: 1 }).then((p) => p.reports).catch(() => null) : Promise.resolve(null),
+        (mode === 'vulns' ? api.getImageVulns(img.digest, { tier: ['P0', 'P1'], limit: LENS_FINDINGS_CAP }) : api.getImageVulns(img.digest, { limit: 1 })).catch(() => null),
+        mode === 'supply' ? api.getImageSbom(img.digest, { limit: 1 }).then((p) => p.reports).catch(() => null) : Promise.resolve(null),
       ]);
-      return { digest: img.digest, workloads: d?.workloads ?? [], vulnReports: v, sbomReports: s };
+      const facts: ImageFacts = { digest: img.digest, workloads: d?.workloads ?? [], vulnReports: v?.reports ?? null, sbomReports: s };
+      if (mode === 'vulns' && v) {
+        const tiered = v.items.length === 0 ? null : v.items.every((f) => f.tier !== undefined);
+        // An older Broker ignored the filter: its findings are not P0/P1 by anyone's ranking.
+        facts.hot = tiered ? v.items : [];
+        facts.tiered = tiered;
+        facts.hotTruncated = tiered === true && v.nextAfter !== null;
+      }
+      return facts;
     }),
     LENS_CONCURRENCY,
   );
@@ -192,7 +201,7 @@ export interface MapLensState {
 
 /**
  * Badges for one namespace's workloads under the chosen lens. Reads only
- * while a non-traffic lens is on; bounded (one image page, LENS_CVE_CAP
+ * while a non-traffic lens is on; bounded (one image page, LENS_FINDINGS_CAP
  * exposures, LENS_CONCURRENCY reads in flight).
  */
 export function useMapLens(
@@ -221,32 +230,10 @@ export function useMapLens(
         const page = await profileApi.listWorkloads({ namespace, limit: 500 });
         for (const p of page.items) out.set(workloadKey(p.namespace, p.kind, p.name), coverageBadge(p));
         truncated = page.nextAfter !== null;
-      } else if (lens === 'supply') {
-        const { images, truncated: t } = await readImages(vulnApi, namespace, true);
-        for (const [k, v] of imagesByWorkload(images)) out.set(k, supplyBadge(v));
-        truncated = t;
       } else {
-        const [{ images, truncated: t }, cves] = await Promise.all([
-          readImages(vulnApi, namespace, false),
-          vulnApi.listCves({ namespace, running: true, limit: 200 }),
-        ]);
-        const candidates = cves.items.filter(lensCandidate);
-        const picked = candidates.slice(0, LENS_CVE_CAP);
-        const exposures = (
-          await withConcurrencyLimit(
-            picked.map((summary) => async () => {
-              // A CVE whose images left the inventory since the summary: skip it, don't fail the lens.
-              const exposure = await vulnApi.getExposure(summary.id).catch(() => null);
-              return exposure ? { summary, exposure } : null;
-            }),
-            LENS_CONCURRENCY,
-          )
-        ).filter((x): x is { summary: CveSummary; exposure: Exposure } => x !== null);
-        const assessedAll = candidates.length === picked.length && cves.nextAfter === null && exposures.length === picked.length;
-        const hot = hotCvesByWorkload(exposures);
-        const imgs = imagesByWorkload(images);
-        for (const k of new Set([...hot.keys(), ...imgs.keys()])) out.set(k, vulnBadge(hot.get(k), imgs.get(k), assessedAll));
-        truncated = t || !assessedAll;
+        const { images, truncated: t } = await readImages(vulnApi, namespace, lens);
+        for (const [k, v] of imagesByWorkload(images)) out.set(k, lens === 'supply' ? supplyBadge(v) : vulnBadge(v));
+        truncated = t || images.some((i) => i.hotTruncated);
       }
       if (!current()) return;
       setState({ byWorkload: out, loading: false, error: null, truncated });

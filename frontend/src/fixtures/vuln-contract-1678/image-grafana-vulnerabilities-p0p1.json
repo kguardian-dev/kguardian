@@ -1,0 +1,88 @@
+{
+  "body": {
+    "digest": "sha256:1eb73105a1fe5826de974a647f3d2e72905e16803a8ca2b9c891bf3545bc242c",
+    "items": [
+      {
+        "class": null,
+        "cvss": {
+          "nvd": {
+            "v3_score": 7.5
+          }
+        },
+        "epss": null,
+        "epssPercentile": null,
+        "filePaths": [
+          "usr/share/grafana/bin/grafana"
+        ],
+        "fixable": true,
+        "fixedVersions": [
+          "v0.33.0"
+        ],
+        "id": "CVE-2099-0006",
+        "inUse": true,
+        "inUseDetail": {
+          "containers": 1,
+          "coverage": "static_binary",
+          "observedSince": "2026-09-25T03:00:00",
+          "reason": null,
+          "state": "executed",
+          "windowHours": 24
+        },
+        "inUseState": "executed",
+        "installedVersion": "v0.26.0",
+        "kev": null,
+        "kevDateAdded": null,
+        "lastModifiedAt": null,
+        "package": {
+          "name": "golang.org/x/net",
+          "purl": "pkg:golang/golang.org/x/net@v0.26.0",
+          "type": "gomod"
+        },
+        "primaryUrl": "https://avd.aquasec.com/nvd/cve-2099-0006",
+        "publishedAt": "2099-01-02T03:04:05",
+        "reportDigests": [
+          "sha256:1eb73105a1fe5826de974a647f3d2e72905e16803a8ca2b9c891bf3545bc242c"
+        ],
+        "score": 7.5,
+        "severity": "HIGH",
+        "sources": [
+          "trivy-operator"
+        ],
+        "target": null,
+        "tier": "P1",
+        "tierFactors": [
+          "in_use:executed",
+          "severity:high",
+          "exposed"
+        ],
+        "title": "golang.org/x/net: HTTP/2 CONTINUATION flood"
+      }
+    ],
+    "nextAfter": null,
+    "reports": [
+      {
+        "attestation": null,
+        "dbUpdatedAt": null,
+        "digestKind": "manifest",
+        "imageRef": "docker.io/grafana/grafana:11.2.0",
+        "itemCount": 2,
+        "join": "image_id",
+        "osEosl": false,
+        "osFamily": "alpine",
+        "osName": "3.20.3",
+        "receivedAt": "2026-09-26T02:58:50.838008",
+        "reportDigest": "sha256:1eb73105a1fe5826de974a647f3d2e72905e16803a8ca2b9c891bf3545bc242c",
+        "sbomFormat": null,
+        "sbomSources": [],
+        "sbomTrust": null,
+        "scannedAt": "2026-09-24T20:58:50",
+        "scannerName": "Trivy",
+        "scannerVersion": "0.58.1",
+        "source": "trivy-operator"
+      }
+    ]
+  },
+  "provenance": "contract-derived, not captured: the #1671 capture of the same request with the fields #1678 (feat/1533-in-use-tiers @ 1cc299a3) adds, set by hand per its docs/api-reference/endpoints/vulnerabilities.mdx and broker/src/in_use.rs tier() with default settings (EPSS 0.1, unknown exposure counts as exposed). Replace with real captures once #1678 merges.",
+  "request": "GET /images/sha256:1eb73105a1fe5826de974a647f3d2e72905e16803a8ca2b9c891bf3545bc242c/vulnerabilities?tier=P0,P1",
+  "status": 200
+}

@@ -1,7 +1,7 @@
 import type { Finding, Report } from '../../types/vulns';
 import { formatAgo, formatTimestamp, shortDigest } from '../../utils/posture';
-import { computeTier, IN_USE_UNKNOWN_TITLE, LIST_FACTORS } from '../../utils/tiers';
-import { asUtc, sourceLabel } from '../../utils/vulnView';
+import { brokerTier, IN_USE_UNKNOWN_TITLE, LIST_FACTORS } from '../../utils/tiers';
+import { asUtc, findingFactors, sourceLabel } from '../../utils/vulnView';
 import { Button } from '../ui/Button';
 import { FactorChips, JoinBadge, SeverityBadge, TierBadge, TrustBadge } from './parts';
 
@@ -35,16 +35,16 @@ interface FindingsTableProps {
 }
 
 /**
- * One image's findings, deduplicated across sources, most severe first.
- * Tiers here have no exposure (that is per workload, in the CVE drawer), so
- * exposure degrades upward. Privilege is per workload too.
+ * One image's findings, deduplicated across sources, most severe first,
+ * with the Broker's tier and tier factors (worst over every workload
+ * container running the image).
  */
 export function FindingsTable({ items, onOpenCve, hasMore, loadingMore, onLoadMore }: FindingsTableProps) {
   return (
     <div>
       <p className="px-1 pb-2 text-[11px] text-tertiary" title={IN_USE_UNKNOWN_TITLE}>
-        {items.every((f) => f.inUse === null) ? 'Loaded: unknown for every finding, so each is tiered as if loaded. ' : ''}
-        Exposure and privilege are per workload: open a CVE to see which workloads run it.
+        {items.every((f) => f.tier === undefined) ? 'This Broker does not rank tiers yet: tier unknown for every finding. ' : ''}
+        A finding's tier is its worst over every workload running this image; open a CVE for each workload's exposure and privilege.
       </p>
       <div className="overflow-x-auto rounded-control border border-hubble-border">
         <table className="w-full text-sm">
@@ -59,10 +59,10 @@ export function FindingsTable({ items, onOpenCve, hasMore, loadingMore, onLoadMo
           </thead>
           <tbody className="divide-y divide-hubble-border">
             {items.map((f) => {
-              const t = computeTier({ severity: f.severity, kev: f.kev, epss: f.epss, fixable: f.fixable, fixedVersions: f.fixedVersions, inUse: f.inUse, score: f.score });
+              const tier = brokerTier(f.tier);
               return (
                 <tr key={`${f.id}|${f.package.name}|${f.installedVersion}`} data-testid="finding-row">
-                  <td className="px-3 py-2 align-top"><TierBadge tier={t.tier} title={t.reason} /></td>
+                  <td className="px-3 py-2 align-top"><TierBadge tier={tier} title={f.tierFactors?.length ? `Broker tier from: ${f.tierFactors.join(', ')}` : undefined} /></td>
                   <td className="px-3 py-2 align-top min-w-44">
                     <button type="button" onClick={() => onOpenCve(f.id)} className="font-mono text-xs text-primary hover:underline">{f.id}</button>
                     <div className="mt-0.5"><SeverityBadge severity={f.severity} /></div>
@@ -71,7 +71,7 @@ export function FindingsTable({ items, onOpenCve, hasMore, loadingMore, onLoadMo
                     <div className="font-mono text-primary [overflow-wrap:anywhere]">{f.package.name}</div>
                     <div className="text-tertiary font-mono">{f.installedVersion}</div>
                   </td>
-                  <td className="px-3 py-2 align-top"><FactorChips factors={t.factors} only={LIST_FACTORS} /></td>
+                  <td className="px-3 py-2 align-top"><FactorChips factors={findingFactors(f)} only={LIST_FACTORS} /></td>
                   <td className="px-3 py-2 align-top text-[11px] text-tertiary whitespace-nowrap">{f.sources.map(sourceLabel).join(', ')}</td>
                 </tr>
               );

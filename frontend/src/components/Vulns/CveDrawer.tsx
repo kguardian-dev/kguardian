@@ -7,8 +7,8 @@ import { vulnErrorKind, type VulnApi } from '../../services/vulnApi';
 import type { CveSummary } from '../../types/vulns';
 import { copyText } from '../../utils/clipboard';
 import { shortDigest } from '../../utils/posture';
-import { computeTier, IN_USE_UNKNOWN_TITLE, TIER_RANK, WORKLOAD_FACTORS, worstTier } from '../../utils/tiers';
-import { cveAiPrompt, safeHttpUrl, workloadTier } from '../../utils/vulnView';
+import { brokerTier, IN_USE_UNKNOWN_TITLE, tierRank, WORKLOAD_FACTORS } from '../../utils/tiers';
+import { cveAiPrompt, cveRowFactors, findingFactors, safeHttpUrl, workloadFactors } from '../../utils/vulnView';
 import { Button } from '../ui/Button';
 import { EmptyState } from '../ui/EmptyState';
 import { Modal } from '../ui/Modal';
@@ -30,28 +30,36 @@ interface CveDrawerProps {
 
 /**
  * CVE triage drawer (`#/images?cve=` / `#/cve?id=`): is it running, where,
- * is it exposed, is there a fix. Impact runs images → workloads → running,
- * each workload tiered with its own observed exposure. Unknown stays
+ * is it exposed, is there a fix. Impact runs images → workloads → running.
+ * Tiers are the Broker's (#1678); each workload row adds its own in-use
+ * state, observed exposure and PSS level. Unknown stays
  * unknown throughout; kguardian applies nothing.
  */
 export function CveDrawer({ id, summary, onClose, onOpenWorkload, onShowOnMap, onAskAI, api, profileApi = defaultProfileApi }: CveDrawerProps) {
-  const { exposure: e, finding: f, loading, error, reload } = useCveDetail(id, api);
+  const { exposure: e, findings, finding: f, loading, error, reload } = useCveDetail(id, api);
   const namespaces = useMemo(() => (e ? e.workloads.map((w) => w.namespace) : []), [e]);
   const pss = usePssByWorkload(namespaces, profileApi);
 
+  // Every tier here is the Broker's: the CVE's (list row, or its most
+  // urgent image finding) and, per workload, its image's finding.
   const rows = useMemo(
     () =>
       e
         ? e.workloads
-            .map((w) => ({ w, t: workloadTier(w, e, f, summary, pss ? (pss.get(workloadKey(w.namespace, w.kind, w.name)) ?? null) : undefined) }))
-            .sort((a, b) => Number(b.w.running) - Number(a.w.running) || TIER_RANK[b.t.tier] - TIER_RANK[a.t.tier])
+            .map((w) => {
+              const imageFinding = findings.get(w.imageDigest) ?? null;
+              return {
+                w,
+                tier: brokerTier(imageFinding?.tier),
+                factors: workloadFactors(w, e, imageFinding, pss ? (pss.get(workloadKey(w.namespace, w.kind, w.name)) ?? null) : undefined),
+              };
+            })
+            .sort((a, b) => Number(b.w.running) - Number(a.w.running) || tierRank(b.tier) - tierRank(a.tier))
         : [],
-    [e, f, summary, pss],
+    [e, findings, pss],
   );
-  const overall = rows.length ? worstTier(rows.map((r) => r.t.tier)) : null;
-  const headline = e
-    ? computeTier({ severity: e.severity, kev: f?.kev ?? summary?.kev ?? null, epss: f?.epss ?? summary?.maxEpss ?? null, fixable: e.fixable, fixedVersions: f?.fixedVersions, inUse: e.inUse, score: f?.score ?? summary?.maxScore })
-    : null;
+  const overall = brokerTier(summary?.tier ?? f?.tier);
+  const headline = f ? findingFactors(f) : summary ? cveRowFactors(summary) : [];
   const link = safeHttpUrl(f?.primaryUrl);
 
   let body;
@@ -59,7 +67,7 @@ export function CveDrawer({ id, summary, onClose, onOpenWorkload, onShowOnMap, o
   else if (error && vulnErrorKind(error) === 'not_found') {
     body = <EmptyState icon={SearchX} title={`${id} affects nothing in the inventory`} description="No image the Broker knows about carries this vulnerability. It may have been fixed, or the images that had it are gone." />;
   } else if (error) body = <VulnErrorState error={error} onRetry={() => void reload()} />;
-  else if (e && headline) {
+  else if (e) {
     const running = e.workloads.filter((w) => w.running);
     const exposed = e.workloads.filter((w) => w.network?.exposed === true);
     const unknownExp = e.workloads.filter((w) => w.network?.exposed == null);
@@ -68,8 +76,8 @@ export function CveDrawer({ id, summary, onClose, onOpenWorkload, onShowOnMap, o
         <div className="space-y-2">
           <div className="flex flex-wrap items-center gap-2">
             <SeverityBadge severity={e.severity} />
-            {overall && <TierBadge tier={overall} title="Worst tier across the affected workloads" />}
-            <FactorChips factors={headline.factors} only={['kev', 'epss', 'cvss', 'fix', 'inuse']} />
+            <TierBadge tier={overall} title="The Broker's tier for this CVE: its most urgent over every affected workload container" />
+            <FactorChips factors={headline} only={['inuse', 'exposure', 'kev', 'epss', 'cvss', 'fix']} />
           </div>
           {f?.title && <p className="text-sm text-primary">{f.title}</p>}
           {f && <p className="text-xs text-tertiary">Package <span className="font-mono text-secondary">{f.package.name}</span> {f.installedVersion}{f.kevDateAdded && <> · in KEV since {f.kevDateAdded.slice(0, 10)}</>}</p>}
@@ -90,7 +98,7 @@ export function CveDrawer({ id, summary, onClose, onOpenWorkload, onShowOnMap, o
             {unknownExp.length > 0 && <span className="text-tertiary"> · exposure unknown for {unknownExp.length}</span>}
           </p>
           <p className="mt-1 text-[11px] text-tertiary" title={IN_USE_UNKNOWN_TITLE}>
-            {e.inUse === null ? 'Loaded-package data is not available yet: every workload is tiered as if it loads the package. ' : ''}
+            {e.inUse === null ? 'No runtime evidence that any affected workload loads the package: unknown is ranked as if loaded. ' : ''}
             Exposure is observed traffic, not reachability.
           </p>
           {e.truncated && <p className="mt-1 text-[11px] text-severity-medium">More images or workloads are affected than the Broker lists (first 200 each).</p>}
@@ -109,10 +117,10 @@ export function CveDrawer({ id, summary, onClose, onOpenWorkload, onShowOnMap, o
                 </tr>
               </thead>
               <tbody className="divide-y divide-hubble-border">
-                {rows.map(({ w, t }) => {
+                {rows.map(({ w, tier, factors }) => {
                   return (
                     <tr key={`${w.namespace}/${w.kind}/${w.name}/${w.container}/${w.imageDigest}`} data-testid="cve-workload">
-                      <td className="px-3 py-2 align-top"><TierBadge tier={t.tier} title={t.reason} /></td>
+                      <td className="px-3 py-2 align-top"><TierBadge tier={tier} title="The Broker's tier for this CVE in this workload's image (worst over every container running it)" /></td>
                       <td className="px-3 py-2 align-top sm:min-w-36">
                         <button type="button" onClick={() => onOpenWorkload(w.namespace, w.kind, w.name)} className="text-left text-primary hover:underline">
                           {w.namespace}/{w.name}
@@ -121,11 +129,11 @@ export function CveDrawer({ id, summary, onClose, onOpenWorkload, onShowOnMap, o
                         <div className="mt-1"><JoinBadge join={w.join} /></div>
                         <div className="mt-1.5 space-y-1 sm:hidden text-xs">
                           <div className={w.running ? 'text-primary' : 'text-tertiary'}>{w.running ? 'running' : 'not running'}</div>
-                          <FactorChips factors={t.factors} only={WORKLOAD_FACTORS} wrap />
+                          <FactorChips factors={factors} only={WORKLOAD_FACTORS} wrap />
                         </div>
                       </td>
                       <td className="hidden sm:table-cell px-3 py-2 align-top text-xs whitespace-nowrap">{w.running ? <span className="text-primary">running</span> : <span className="text-tertiary">not running</span>}</td>
-                      <td className="hidden sm:table-cell px-3 py-2 text-xs"><FactorChips factors={t.factors} only={WORKLOAD_FACTORS} wrap /></td>
+                      <td className="hidden sm:table-cell px-3 py-2 text-xs"><FactorChips factors={factors} only={WORKLOAD_FACTORS} wrap /></td>
                     </tr>
                   );
                 })}
@@ -192,10 +200,10 @@ export function CveDrawer({ id, summary, onClose, onOpenWorkload, onShowOnMap, o
       footer={
         e ? (
           <>
-            <Button variant="ghost" size="sm" leftIcon={Copy} onClick={() => void copyText(cveAiPrompt(e, f))}>
+            <Button variant="ghost" size="sm" leftIcon={Copy} onClick={() => void copyText(cveAiPrompt(e, f, overall))}>
               Copy summary
             </Button>
-            <Button variant="primary" size="sm" leftIcon={Sparkles} onClick={() => onAskAI(cveAiPrompt(e, f))}>
+            <Button variant="primary" size="sm" leftIcon={Sparkles} onClick={() => onAskAI(cveAiPrompt(e, f, overall))}>
               Ask AI
             </Button>
           </>

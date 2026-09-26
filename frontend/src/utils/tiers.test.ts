@@ -1,91 +1,78 @@
 import { expect, test } from 'vitest';
-import { computeTier, worstTier, type TierInput } from './tiers';
+import { brokerFactors, brokerTier, factChips, inUseFactor, mergeFactors, privilegedFactor, tierRank } from './tiers';
+import { tierFixture, TIER_CONTRACT_FIXTURES } from '../fixtures/vulns';
+import type { ImageVulnsPage } from '../types/vulns';
+import { findingFactors } from './vulnView';
+import * as tiers from './tiers';
 
-const base: TierInput = { severity: 'LOW', kev: null, epss: null, fixable: true, inUse: null };
-
-test('P0: KEV and exposed, in use unknown (degrades upward)', () => {
-  const r = computeTier({ ...base, severity: 'CRITICAL', kev: true, exposed: true, exposedVia: ['public_ip'] });
-  expect(r.tier).toBe('P0');
-  expect(r.factors.map((f) => f.label)).toContain('Loaded: unknown');
-  expect(r.factors.map((f) => f.label)).toContain('Exposed: public IP');
+test('the UI has no tier computation of its own', () => {
+  expect(Object.keys(tiers)).not.toContain('computeTier');
+  expect(Object.keys(tiers)).not.toContain('EPSS_P0_THRESHOLD');
 });
 
-test('P0 also when exposure is unknown or not assessed: only a definite false lowers it', () => {
-  expect(computeTier({ ...base, kev: true, exposed: null }).tier).toBe('P0');
-  expect(computeTier({ ...base, kev: true }).tier).toBe('P0');
-  expect(computeTier({ ...base, epss: 0.34 }).tier).toBe('P0');
-  expect(computeTier({ ...base, kev: true, exposed: false }).tier).toBe('P1');
+test('brokerTier: only the four tiers; anything else (an older Broker sends none) is unknown', () => {
+  expect(brokerTier('P0')).toBe('P0');
+  expect(brokerTier('Background')).toBe('Background');
+  expect(brokerTier(undefined)).toBeNull();
+  expect(brokerTier('P9')).toBeNull();
+  // Unknown is never ranked below a known tier.
+  expect(tierRank(null)).toBeGreaterThan(tierRank('P0'));
 });
 
-test('EPSS below the threshold is not a P0 factor', () => {
-  expect(computeTier({ ...base, severity: 'MEDIUM', epss: 0.09 }).tier).toBe('P2');
+test("every #1678 factor maps to a chip; an unrecognised one is shown as sent", () => {
+  const f = brokerFactors(['in_use:loaded', 'kev', 'epss>=0.1', 'severity:critical', 'exposed', 'no_fix', 'something_new']);
+  expect(f.map((x) => [x.key, x.label])).toEqual([
+    ['inuse', 'Loaded'],
+    ['kev', 'KEV'],
+    ['epss', 'EPSS ≥ 10%'],
+    ['severity', 'critical'],
+    ['exposure', 'Exposed'],
+    ['fix', 'No fix yet'],
+    ['something_new', 'something_new'],
+  ]);
+  expect(brokerFactors(['internal'])[0].label).toBe('No outside ingress seen');
+  expect(brokerFactors(['exposure:unknown'])[0].tone).toBe('unknown');
 });
 
-test('P1: critical or high', () => {
-  expect(computeTier({ ...base, severity: 'CRITICAL' }).tier).toBe('P1');
-  expect(computeTier({ ...base, severity: 'HIGH' }).tier).toBe('P1');
-  // High with no fix is still P1 unless no outside ingress was seen.
-  expect(computeTier({ ...base, severity: 'HIGH', fixable: false }).tier).toBe('P1');
-  expect(computeTier({ ...base, severity: 'HIGH', fixable: false, exposed: null }).tier).toBe('P1');
+test('in-use states: unknown and not-observed never read as safe', () => {
+  expect(inUseFactor('executed').tone).toBe('risk');
+  expect(inUseFactor('unknown', { state: 'unknown', reason: 'language_package', observedSince: null, windowHours: 24, containers: 1, coverage: 'interpreted' }).title).toMatch(/interpreted-language/);
+  expect(inUseFactor(undefined).label).toBe('Loaded: unknown');
+  const bg = inUseFactor('installed_not_observed');
+  expect(bg.tone).toBe('neutral');
+  expect(bg.title).toMatch(/Not proof/);
 });
 
-test('P2: medium/low, unknown severity, or high with no fix and no outside ingress seen', () => {
-  expect(computeTier({ ...base, severity: 'MEDIUM' }).tier).toBe('P2');
-  expect(computeTier({ ...base, severity: 'LOW' }).tier).toBe('P2');
-  expect(computeTier({ ...base, severity: 'UNKNOWN' }).tier).toBe('P2');
-  expect(computeTier({ ...base, severity: 'HIGH', fixable: false, exposed: false }).tier).toBe('P2');
+test('facts carry no threshold judgement: EPSS is only a risk when the Broker says so', () => {
+  expect(factChips({ epss: 0.34 })[0].tone).toBe('neutral');
+  const merged = mergeFactors(brokerFactors(['epss>=0.1']), factChips({ epss: 0.34 }));
+  expect(merged).toHaveLength(1);
+  expect(merged[0]).toMatchObject({ key: 'epss', label: 'EPSS 34%', tone: 'risk' });
 });
 
-test('Background only from a definite inUse=false; unknown never reaches it', () => {
-  expect(computeTier({ ...base, severity: 'CRITICAL', inUse: false }).tier).toBe('Background');
-  for (const severity of ['CRITICAL', 'HIGH', 'MEDIUM', 'LOW', 'NONE', 'UNKNOWN'] as const) {
-    expect(computeTier({ ...base, severity, inUse: null }).tier).not.toBe('Background');
-  }
+test('several fixed versions are all shown, none picked', () => {
+  expect(factChips({ fixable: true, fixedVersions: ['4.20.0', '4.19.2'] })[0].label).toBe('Fix: 4.20.0 / 4.19.2');
+  expect(factChips({ fixable: false })[0].label).toBe('No fix yet');
 });
 
-test('nothing is ever called safe', () => {
-  for (const severity of ['CRITICAL', 'HIGH', 'MEDIUM', 'LOW', 'NONE', 'UNKNOWN'] as const) {
-    for (const exposed of [true, false, null, undefined]) {
-      const r = computeTier({ ...base, severity, exposed });
-      // The verdict text (tier reason and chip labels) never claims safety.
-      const verdict = `${r.reason} ${r.factors.map((f) => f.label).join(' ')}`.toLowerCase();
-      expect(verdict).not.toMatch(/safe|not exploitable|unreachable|clean/);
-    }
-  }
+test('privileged is context from the profile: unknown without one, absent when not assessed', () => {
+  expect(privilegedFactor(undefined)).toBeNull();
+  expect(privilegedFactor(null)!.label).toBe('Privileged: unknown');
+  expect(privilegedFactor({ level: 'privileged', confidence: 'upper_bound' })!.label).toBe('Privileged (at most)');
+  expect(privilegedFactor({ level: 'restricted', confidence: 'confirmed' })!.label).toBe('Not privileged');
 });
 
-test('fix chips: several fixed versions are all shown, none picked', () => {
-  const r = computeTier({ ...base, severity: 'HIGH', fixedVersions: ['4.20.0', '4.19.2'] });
-  expect(r.factors.find((f) => f.key === 'fix')!.label).toBe('Fix: 4.20.0 / 4.19.2');
-  expect(computeTier({ ...base, fixable: false }).factors.find((f) => f.key === 'fix')!.label).toBe('No fix yet');
+test('contract fixtures are marked as derived, not captured', () => {
+  expect(TIER_CONTRACT_FIXTURES.length).toBeGreaterThan(0);
+  for (const c of TIER_CONTRACT_FIXTURES) expect(c.provenance).toMatch(/^contract-derived, not captured/);
 });
 
-test('exposure chips distinguish true / false / unknown', () => {
-  const lbl = (exposed: boolean | null) => computeTier({ ...base, exposed, exposedVia: ['node'] }).factors.find((f) => f.key === 'exposure')!.label;
-  expect(lbl(true)).toBe('Exposed: node');
-  expect(lbl(false)).toBe('No outside ingress seen (7d)');
-  expect(lbl(null)).toBe('Exposure unknown');
-  expect(computeTier(base).factors.find((f) => f.key === 'exposure')).toBeUndefined();
-});
-
-test('worstTier', () => {
-  expect(worstTier(['P2', 'P0', 'P1'])).toBe('P0');
-  expect(worstTier([])).toBeNull();
-});
-
-test('privileged chip: PSS level, unknown when no profile, absent when not assessed', () => {
-  const chip = (privileged: TierInput['privileged']) => computeTier({ ...base, privileged }).factors.find((f) => f.key === 'privileged');
-  expect(chip(undefined)).toBeUndefined();
-  expect(chip(null)!.label).toBe('Privileged: unknown');
-  expect(chip({ level: null, confidence: null })!.tone).toBe('unknown');
-  expect(chip({ level: 'privileged', confidence: 'confirmed' })!.label).toBe('Privileged');
-  expect(chip({ level: 'privileged', confidence: 'upper_bound' })!.label).toBe('Privileged (at most)');
-  expect(chip({ level: 'restricted', confidence: 'confirmed' })!.label).toBe('Not privileged');
-  // A chip only: it does not move the tier.
-  expect(computeTier({ ...base, severity: 'MEDIUM', privileged: { level: 'privileged', confidence: 'confirmed' } }).tier).toBe('P2');
-});
-
-test('chip order in a workload row: Loaded, Exposed, KEV, EPSS, CVSS, Fix, Privileged are all present', () => {
-  const r = computeTier({ ...base, severity: 'CRITICAL', kev: true, epss: 0.2, score: 9.8, exposed: true, exposedVia: ['public_ip'], privileged: null });
-  expect(r.factors.map((f) => f.key).sort()).toEqual(['cvss', 'epss', 'exposure', 'fix', 'inuse', 'kev', 'privileged']);
+test("a finding's chips are the Broker's factors with the facts' labels", () => {
+  const checkout = tierFixture<ImageVulnsPage>('image-checkout-vulnerabilities').body;
+  const kev = checkout.items.find((f) => f.id === 'CVE-2099-0001')!;
+  expect(kev.tier).toBe('P0');
+  expect(findingFactors(kev).map((f) => f.label).sort()).toEqual(['CVSS 9.8', 'EPSS 34%', 'Exposed', 'Fix: 3.3.2-r0', 'KEV', 'Loaded']);
+  const bg = checkout.items.find((f) => f.id === 'CVE-2099-0004')!;
+  expect(bg.tier).toBe('Background');
+  expect(findingFactors(bg).find((f) => f.key === 'inuse')!.label).toBe('Not observed loaded');
 });

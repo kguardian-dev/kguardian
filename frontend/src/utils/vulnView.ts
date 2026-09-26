@@ -1,6 +1,6 @@
 import type { CveSummary, ExposedWorkload, Exposure, Finding, JoinKind, VulnSeverity } from '../types/vulns';
 import type { Severity } from './severity';
-import { computeTier, type TierInput, type TierResult } from './tiers';
+import { brokerFactors, exposureFactor, factChips, inUseFactor, mergeFactors, privilegedFactor, type Factor } from './tiers';
 
 /** View helpers for the supply-chain UI (kept out of component files). */
 
@@ -67,45 +67,61 @@ export function safeHttpUrl(u: string | null | undefined): string | null {
   }
 }
 
-/** The tier of one affected workload: the CVE's factors + that workload's own observed exposure. */
-export function workloadTier(w: ExposedWorkload, e: Exposure, f: Finding | null, s?: CveSummary, privileged?: TierInput['privileged']): TierResult {
-  return computeTier({
-    severity: e.severity,
-    kev: f?.kev ?? s?.kev ?? null,
-    epss: f?.epss ?? s?.maxEpss ?? null,
-    score: f?.score ?? s?.maxScore ?? null,
-    fixable: e.fixable,
-    fixedVersions: fixedVersionsFor(e, w.imageDigest),
-    privileged,
-    exposed: w.network ? w.network.exposed : null,
-    exposedVia: w.network?.exposedVia,
-    windowHours: w.network?.windowHours,
-    inUse: w.inUse,
-  });
-}
-
 /** Fixed versions of the CVE's packages in one image (all sources, none picked). */
 export function fixedVersionsFor(e: Exposure, digest: string): string[] {
   const img = e.images.find((i) => i.digest === digest);
   return [...new Set((img?.packages ?? []).flatMap((p) => p.fixedVersions))];
 }
 
-/** The tier of a CVE list row: no exposure in the list, so exposure is "not assessed" (degrades upward). */
-export function summaryTier(c: CveSummary): TierResult {
-  return computeTier({ severity: c.severity, kev: c.kev, epss: c.maxEpss, fixable: c.fixable, inUse: c.inUse, score: c.maxScore });
+/** A CVE list row: the Broker's in-use state and exposure counts, plus facts. No tier factors on this read. */
+export function cveRowFactors(c: CveSummary): Factor[] {
+  const exposure: Factor[] =
+    c.exposedWorkloads != null && c.exposedWorkloads > 0
+      ? [{ key: 'exposure', tone: 'risk', label: `Exposed: ${c.exposedWorkloads} workload${c.exposedWorkloads === 1 ? '' : 's'}`, title: 'Affected workloads with observed ingress from outside their namespace' }]
+      : [];
+  return mergeFactors([], [inUseFactor(c.inUseState), ...exposure, ...factChips({ kev: c.kev, epss: c.maxEpss, score: c.maxScore, fixable: c.fixable })]);
+}
+
+/** One finding: the Broker's tier factors, with facts for the specific labels. */
+export function findingFactors(f: Finding): Factor[] {
+  const broker = brokerFactors(f.tierFactors, f.inUseDetail).filter((x) => x.key !== 'severity');
+  const facts = factChips(f);
+  if (!f.tierFactors) facts.unshift(inUseFactor(f.inUseState, f.inUseDetail));
+  return mergeFactors(broker, facts);
+}
+
+/**
+ * One affected workload in the CVE drawer. The tier and its factors are
+ * the Broker's for this CVE in the workload's image (worst over every
+ * container running it); in-use, exposure and privilege are this
+ * workload's own.
+ */
+export function workloadFactors(w: ExposedWorkload, e: Exposure, imageFinding: Finding | null, privileged: Parameters<typeof privilegedFactor>[0]): Factor[] {
+  const broker = brokerFactors(imageFinding?.tierFactors, imageFinding?.inUseDetail).filter((x) => x.key !== 'severity');
+  const facts = factChips({
+    kev: imageFinding?.kev,
+    epss: imageFinding?.epss,
+    score: imageFinding?.score,
+    fixable: e.fixable,
+    fixedVersions: fixedVersionsFor(e, w.imageDigest),
+  });
+  const own = [inUseFactor(w.inUseState), exposureFactor(w.network ? w.network.exposed : null, w.network?.exposedVia, w.network?.windowHours), privilegedFactor(privileged)].filter(
+    (x): x is Factor => x !== null,
+  );
+  return mergeFactors(broker, facts, own);
 }
 
 /**
  * The context block "Ask AI" hands the assistant for one CVE: the facts the
  * drawer shows, stated with the same honesty (unknown stays unknown).
  */
-export function cveAiPrompt(e: Exposure, f: Finding | null): string {
+export function cveAiPrompt(e: Exposure, f: Finding | null, tier: string | null = null): string {
   const running = e.workloads.filter((w) => w.running);
   const exposed = e.workloads.filter((w) => w.network?.exposed === true);
   const unknown = e.workloads.filter((w) => w.network?.exposed == null);
   const fixes = [...new Set(e.images.flatMap((i) => i.packages.flatMap((p) => p.fixedVersions)))];
   return [
-    `Context: ${e.id} (${e.severity.toLowerCase()}${f?.kev ? ', in CISA KEV' : ''}${f?.epss != null ? `, EPSS ${(f.epss * 100).toFixed(1)}%` : ''}).`,
+    `Context: ${e.id} (${e.severity.toLowerCase()}${f?.kev ? ', in CISA KEV' : ''}${f?.epss != null ? `, EPSS ${(f.epss * 100).toFixed(1)}%` : ''}; kguardian tier ${tier ?? 'unknown'}${f?.tierFactors?.length ? ` from ${f.tierFactors.join(', ')}` : ''}).`,
     `Affects ${e.images.length} image(s) and ${e.workloads.length} workload container(s), ${running.length} running.`,
     `Observed outside ingress: ${exposed.map((w) => `${w.namespace}/${w.name}`).join(', ') || 'none seen'}; exposure unknown for ${unknown.length}.`,
     `Fix: ${e.fixable ? fixes.join(' / ') || 'available' : 'no fix yet'}.`,

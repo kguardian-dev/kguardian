@@ -5,7 +5,7 @@ import { SectionError } from '../Profile/parts';
 import type { JoinKind, SbomTrust, VulnSeverity } from '../../types/vulns';
 import { SEVERITY_BADGE_CLASS, TIER_BADGE_CLASS } from '../../utils/severity';
 import { JOIN_LABEL, toSeverity } from '../../utils/vulnView';
-import type { Factor, RiskTierName } from '../../utils/tiers';
+import { TIER_UNKNOWN_TITLE, type Factor, type RiskTierName } from '../../utils/tiers';
 
 const pill = 'inline-flex items-center gap-1 shrink-0 rounded-full border px-2 py-0.5 text-[11px] font-medium whitespace-nowrap';
 
@@ -17,7 +17,15 @@ export function SeverityBadge({ severity }: { severity: VulnSeverity }) {
   return <span className={`${pill} ${SEVERITY_BADGE_CLASS[s]}`}>{severity.charAt(0)}{severity.slice(1).toLowerCase()}</span>;
 }
 
-export function TierBadge({ tier, title }: { tier: RiskTierName; title?: string }) {
+/** The Broker's tier; null (a Broker without tiers) is a dashed "Tier ?", never a guessed tier. */
+export function TierBadge({ tier, title }: { tier: RiskTierName | null; title?: string }) {
+  if (tier === null) {
+    return (
+      <span data-tier="unknown" title={TIER_UNKNOWN_TITLE} className="shrink-0 rounded-md border border-dashed border-hubble-border-strong px-1.5 py-px text-[11px] font-mono font-semibold text-tertiary whitespace-nowrap">
+        Tier ?
+      </span>
+    );
+  }
   const cls = tier === 'Background' ? 'bg-hubble-border/40 text-secondary border-hubble-border' : TIER_BADGE_CLASS[tier];
   return (
     <span data-tier={tier} title={title} className={`shrink-0 rounded-md border px-1.5 py-px text-[11px] font-mono font-semibold ${cls}`}>

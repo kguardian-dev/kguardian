@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { vulnApi, type CveListQuery, type VulnApi } from '../services/vulnApi';
 import type { CveSummary, Exposure, Finding, ImageDetail, ImageSummary, Report } from '../types/vulns';
 import { withConcurrencyLimit } from '../utils/concurrency';
+import { brokerTier, tierRank } from '../utils/tiers';
 import { profileApi, type ProfileApi } from '../services/profileApi';
 import type { LevelConfidence, PssLevel } from '../types/profile';
 import { workloadKey } from '../utils/workloads';
@@ -77,15 +78,19 @@ export function useCveList(q: Omit<CveListQuery, 'after' | 'limit'>, refreshTick
   return { items, computedAt, staleSeconds, loading, loadingMore, error, hasMore: nextAfter !== null, loadMore, reload: load };
 }
 
+/** Images per CVE whose findings the drawer reads (tier, factors, KEV/EPSS). */
+export const CVE_IMAGE_READS = 10;
+
 /**
  * One CVE for the triage drawer: its exposure (images → workloads →
- * running, with observed network exposure), plus the CVE's own finding from
- * the first affected image (KEV, EPSS, title, link, fixed versions), which
- * the exposure read does not carry.
+ * running, with observed network exposure), plus the CVE's finding in each
+ * affected image (first CVE_IMAGE_READS): the Broker's tier and tier
+ * factors, KEV, EPSS, title and link, which the exposure read does not
+ * carry. `finding` is the most urgent one.
  */
 export function useCveDetail(id: string | null, api: VulnApi = vulnApi) {
   const [exposure, setExposure] = useState<Exposure | null>(null);
-  const [finding, setFinding] = useState<Finding | null>(null);
+  const [findings, setFindings] = useState<Map<string, Finding | null>>(new Map());
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<unknown>(null);
   const begin = useLatest();
@@ -95,22 +100,25 @@ export function useCveDetail(id: string | null, api: VulnApi = vulnApi) {
     const current = begin();
     setLoading(true);
     setExposure(null);
-    setFinding(null);
+    setFindings(new Map());
     try {
       const e = await api.getExposure(id);
       if (!current()) return;
       setExposure(e);
       setError(null);
-      const first = e.images[0];
-      if (first) {
-        // Best effort: the drawer still works without it.
-        try {
-          const v = await api.getImageVulns(first.digest, { limit: 500 });
-          if (current()) setFinding(v.items.find((f) => f.id === id) ?? null);
-        } catch {
-          /* leave finding null: KEV / EPSS read as unknown */
-        }
-      }
+      const reads = await withConcurrencyLimit(
+        e.images.slice(0, CVE_IMAGE_READS).map((img) => async () => {
+          try {
+            const v = await api.getImageVulns(img.digest, { limit: 500 });
+            return [img.digest, v.items.find((f) => f.id === id) ?? null] as const;
+          } catch {
+            // Best effort: that image's tier and KEV / EPSS read as unknown.
+            return [img.digest, null] as const;
+          }
+        }),
+        3,
+      );
+      if (current()) setFindings(new Map(reads));
     } catch (err) {
       if (current()) setError(err);
     } finally {
@@ -123,7 +131,11 @@ export function useCveDetail(id: string | null, api: VulnApi = vulnApi) {
     void load();
   }, [load]);
 
-  return { exposure, finding, loading, error, reload: load };
+  let finding: Finding | null = null;
+  for (const f of findings.values()) {
+    if (f && (!finding || tierRank(brokerTier(f.tier)) > tierRank(brokerTier(finding.tier)))) finding = f;
+  }
+  return { exposure, findings, finding, loading, error, reload: load };
 }
 
 export const IMAGE_PAGE_SIZE = 25;

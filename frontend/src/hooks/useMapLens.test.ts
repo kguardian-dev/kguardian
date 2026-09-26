@@ -1,67 +1,78 @@
 import { describe, expect, test } from 'vitest';
-import { cvePage, exposureOf, imageDetail, imageSbom, imageVulns } from '../fixtures/vulns';
+import { imageDetail, imageSbom, imageVulns, tierFixture } from '../fixtures/vulns';
 import { listNamespacePayments } from '../fixtures/profile';
 import type { PodInfo, PodNodeData } from '../types';
-import {
-  badgesByNode,
-  coverageBadge,
-  hotCvesByWorkload,
-  imagesByWorkload,
-  lensCandidate,
-  supplyBadge,
-  vulnBadge,
-  type ImageFacts,
-} from './useMapLens';
+import type { ImageVulnsPage } from '../types/vulns';
+import { badgesByNode, coverageBadge, imagesByWorkload, supplyBadge, vulnBadge, type ImageFacts } from './useMapLens';
 
-// Every input here is a raw Broker capture (fixtures/vuln-captures,
-// fixtures/captures); nothing is hand-written except the map nodes.
+// Inputs are Broker responses: #1671 captures (fixtures/vuln-captures) and,
+// for tiers, the #1678 contract-derived fixtures (fixtures/vuln-contract-1678).
+// Only the map nodes are written here.
 
 const IMAGES = ['checkout', 'grafana', 'ledger', 'node-exporter', 'prometheus', 'reports', 'source-controller'];
-const facts: ImageFacts[] = IMAGES.map((n) => ({
-  digest: imageDetail(n).digest,
-  workloads: imageDetail(n).workloads,
-  vulnReports: imageVulns(n).reports,
-  sbomReports: imageSbom(n).reports,
-}));
-const exposures = cvePage.items.filter(lensCandidate).map((summary) => ({ summary, exposure: exposureOf(summary.id) }));
-const hot = hotCvesByWorkload(exposures);
-const imgs = imagesByWorkload(facts);
 
-describe('Vulnerabilities lens', () => {
-  test('the KEV CVE with public ingress makes checkout P0; ledger (no outside ingress) stays P1', () => {
-    expect(hot.get('payments/Deployment/checkout')?.tier).toBe('P0');
-    expect(hot.get('payments/Deployment/checkout')?.ids).toContain('CVE-2099-0001');
-    expect(hot.get('payments/Deployment/ledger')?.tier).toBe('P1');
+/** What the lens reads per image: `tier=P0,P1` findings on a Broker with tiers. */
+function facts(tiered: boolean): ImageFacts[] {
+  return IMAGES.map((n) => {
+    const v = tiered ? tierFixture<ImageVulnsPage>(`image-${n}-vulnerabilities-p0p1`).body : imageVulns(n);
+    const hasTier = v.items.length === 0 ? null : v.items.every((f) => f.tier !== undefined);
+    return {
+      digest: imageDetail(n).digest,
+      workloads: imageDetail(n).workloads,
+      vulnReports: v.reports,
+      sbomReports: imageSbom(n).reports,
+      hot: hasTier ? v.items : [],
+      tiered: hasTier,
+      hotTruncated: false,
+    };
+  });
+}
+
+describe('Vulnerabilities lens: the Broker ranks, the lens only counts', () => {
+  const imgs = imagesByWorkload(facts(true));
+
+  test("checkout's KEV finding is the Broker's P0; ledger's is P1", () => {
+    const checkout = vulnBadge(imgs.get('payments/Deployment/checkout'));
+    expect(checkout.tone).toBe('p0');
+    expect(checkout.label).toContain('CVE-2099-0001');
+    expect(vulnBadge(imgs.get('payments/Deployment/ledger')).tone).toBe('p1');
   });
 
-  test('a workload that is not running gets no tier from its images', () => {
-    expect(hot.has('payments/CronJob/reports')).toBe(false);
+  test('a workload that is not running gets no badge from its images', () => {
+    expect(imgs.has('payments/CronJob/reports')).toBe(false);
   });
 
   test('no vulnerability report is unknown, never clean', () => {
-    const b = vulnBadge(hot.get('observability/DaemonSet/node-exporter'), imgs.get('observability/DaemonSet/node-exporter'), true);
+    const b = vulnBadge(imgs.get('observability/DaemonSet/node-exporter'));
     expect(b.tone).toBe('unknown');
     expect(b.text).toBe('no data');
   });
 
-  test('scanned with zero findings reads "no P0/P1", neutral, and says lower tiers may exist', () => {
-    const b = vulnBadge(hot.get('flux-system/Deployment/source-controller'), imgs.get('flux-system/Deployment/source-controller'), true);
-    expect(b.tone).toBe('neutral');
-    expect(b.text).toBe('no P0/P1');
-    const capped = vulnBadge(undefined, imgs.get('flux-system/Deployment/source-controller'), false);
-    expect(capped.label).toMatch(/not assessed/);
+  test('scanned, nothing the Broker ranks P0/P1: neutral "no P0/P1", lower tiers may exist', () => {
+    const b = vulnBadge(imgs.get('flux-system/Deployment/source-controller'));
+    expect(b).toMatchObject({ tone: 'neutral', text: 'no P0/P1' });
+    expect(b.label).toMatch(/Lower tiers may exist/);
   });
 
-  test('no vulnerabilities-lens badge is ever drawn in the good tone or claims safety', () => {
-    for (const k of new Set([...hot.keys(), ...imgs.keys()])) {
-      const b = vulnBadge(hot.get(k), imgs.get(k), true);
-      expect(b.tone).not.toBe('good');
-      expect(`${b.text} ${b.label}`.toLowerCase().replace('not clean', '')).not.toMatch(/safe|clean|secure/);
+  test('an older Broker (findings without tier) is "tier ?", never a UI-computed tier', () => {
+    const old = imagesByWorkload(facts(false));
+    // checkout has critical + KEV findings, but no Broker tier: not P0.
+    expect(vulnBadge(old.get('payments/Deployment/checkout'))).toMatchObject({ tone: 'unknown', text: 'tier ?' });
+  });
+
+  test('no badge is ever drawn in the good tone or claims safety', () => {
+    for (const tiered of [true, false]) {
+      for (const v of imagesByWorkload(facts(tiered)).values()) {
+        const b = vulnBadge(v);
+        expect(b.tone).not.toBe('good');
+        expect(`${b.text} ${b.label}`.toLowerCase().replace('not clean', '')).not.toMatch(/safe|clean|secure/);
+      }
     }
   });
 });
 
 describe('Supply chain lens', () => {
+  const imgs = imagesByWorkload(facts(true));
   test('verified SBOM is the only good state; attached-unbound is neutral; none is unknown', () => {
     expect(supplyBadge(imgs.get('flux-system/Deployment/source-controller')).tone).toBe('good');
     expect(supplyBadge(imgs.get('observability/Deployment/grafana')).tone).toBe('neutral');
@@ -76,8 +87,7 @@ describe('Supply chain lens', () => {
 describe('Coverage lens', () => {
   test('from the workload profile list; no profile is unknown', () => {
     const checkout = listNamespacePayments.body.items.find((w) => w.name === 'checkout')!;
-    const b = coverageBadge(checkout);
-    expect(b.text).toBe(`${Math.round(checkout.posture.coverage * 100)}% seen`);
+    expect(coverageBadge(checkout).text).toBe(`${Math.round(checkout.posture.coverage * 100)}% seen`);
     expect(coverageBadge(undefined).tone).toBe('unknown');
   });
 });
@@ -87,7 +97,8 @@ describe('badgesByNode', () => {
   const node = (id: string, p: PodInfo, isExternal = false): PodNodeData => ({ id, label: id, pod: p, pods: [p], isExternal } as PodNodeData);
 
   test('matches by workload; an in-cluster card with no data gets the lens unknown badge; externals get none', () => {
-    const byWorkload = new Map([['payments/Deployment/checkout', vulnBadge(hot.get('payments/Deployment/checkout'), imgs.get('payments/Deployment/checkout'), true)]]);
+    const imgs = imagesByWorkload(facts(true));
+    const byWorkload = new Map([['payments/Deployment/checkout', vulnBadge(imgs.get('payments/Deployment/checkout'))]]);
     const out = badgesByNode('vulns', byWorkload, [
       node('a', pod('payments', 'Deployment', 'checkout')),
       node('b', pod('payments', 'Deployment', 'unknown-app')),

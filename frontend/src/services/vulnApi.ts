@@ -40,13 +40,30 @@ export const vulnErrorMessage = (e: unknown): string => (e instanceof Error ? e.
  */
 export const seg = (s: string) => encodeURIComponent(s).replace(/%3A/gi, ':').replace(/%40/g, '@');
 
-export interface CveListQuery {
+/** #1678 filters; an older Broker ignores them, so callers check `tier` is present before trusting a filtered page. */
+export interface TierFilters {
+  tier?: string[];
+  kev?: boolean;
+  epssMin?: number;
+  inUse?: string[];
+}
+
+export interface CveListQuery extends TierFilters {
   severity?: VulnSeverity[];
   fixable?: boolean;
   namespace?: string;
   running?: boolean;
   limit?: number;
   after?: string;
+}
+
+function tierParams(q: TierFilters): Record<string, string | number | boolean | undefined> {
+  return {
+    tier: q.tier?.length ? q.tier.join(',') : undefined,
+    kev: q.kev,
+    epss_min: q.epssMin,
+    in_use: q.inUse?.length ? q.inUse.join(',') : undefined,
+  };
 }
 
 export class VulnApi {
@@ -101,6 +118,7 @@ export class VulnApi {
         fixable: q.fixable,
         namespace: q.namespace,
         running: q.running,
+        ...tierParams(q),
         limit: q.limit,
         after: q.after,
       },
@@ -124,8 +142,9 @@ export class VulnApi {
   }
 
   /** `GET /images/{digest}/vulnerabilities`: deduplicated findings + the reports behind them. */
-  getImageVulns(digest: string, q: { limit?: number; after?: string; source?: string } = {}): Promise<ImageVulnsPage> {
-    return this.json<ImageVulnsPage>(`/images/${seg(digest)}/vulnerabilities`, q);
+  getImageVulns(digest: string, q: { limit?: number; after?: string; source?: string } & TierFilters = {}): Promise<ImageVulnsPage> {
+    const { tier, kev, epssMin, inUse, ...rest } = q;
+    return this.json<ImageVulnsPage>(`/images/${seg(digest)}/vulnerabilities`, { ...rest, ...tierParams({ tier, kev, epssMin, inUse }) });
   }
 
   /** `GET /images/{digest}/sbom`: every source's SBOM (reports) and one's components. */

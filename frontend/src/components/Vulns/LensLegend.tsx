@@ -1,6 +1,6 @@
 import { Loader2 } from 'lucide-react';
 import type { MapLens } from '../../types';
-import { LENS_CVE_CAP, LENS_IMAGE_CAP, type MapLensState } from '../../hooks/useMapLens';
+import { LENS_FINDINGS_CAP, LENS_IMAGE_CAP, type MapLensState } from '../../hooks/useMapLens';
 import { vulnErrorKind, vulnErrorMessage } from '../../services/vulnApi';
 
 const KEYS: Record<Exclude<MapLens, 'traffic'>, Array<{ cls: string; text: string; meaning: string }>> = {
@@ -9,6 +9,7 @@ const KEYS: Record<Exclude<MapLens, 'traffic'>, Array<{ cls: string; text: strin
     { cls: 'bg-tier-p1/15 text-tier-p1 border-tier-p1/30', text: 'P1', meaning: 'schedule' },
     { cls: 'bg-hubble-border/30 text-secondary border-hubble-border', text: 'no P0/P1', meaning: 'reported, nothing urgent' },
     { cls: 'text-tertiary border-dashed border-hubble-border-strong', text: 'no data', meaning: 'unknown, not clean' },
+    { cls: 'text-tertiary border-dashed border-hubble-border-strong', text: 'tier ?', meaning: 'Broker has no tiers' },
   ],
   supply: [
     { cls: 'bg-state-enforcing/15 text-state-enforcing border-state-enforcing/30', text: 'SBOM verified', meaning: 'signed attestation' },
@@ -24,7 +25,7 @@ const KEYS: Record<Exclude<MapLens, 'traffic'>, Array<{ cls: string; text: strin
 };
 
 const NOTE: Record<Exclude<MapLens, 'traffic'>, string> = {
-  vulns: 'Loaded-package data is not available yet: tiered as if loaded. Exposure is observed ingress.',
+  vulns: "The Broker's tiers. A shared image carries its worst workload's tier. Unknown in-use and exposure rank as in use and exposed.",
   supply: 'Image signatures are not checked yet; nothing is shown as signed.',
   coverage: "Share of the workload profile's dimensions that have data.",
 };
@@ -53,7 +54,7 @@ export function LensLegend({ lens, state }: { lens: Exclude<MapLens, 'traffic'>;
       )}
       {state.truncated && !state.loading && (
         <p className="text-severity-medium">
-          Capped: {lens === 'vulns' ? `the first ${LENS_IMAGE_CAP} images and ${LENS_CVE_CAP} high-risk CVEs` : lens === 'supply' ? `the first ${LENS_IMAGE_CAP} images` : 'the first 500 workloads'} were read; badges cover only what was read.
+          Capped: {lens === 'vulns' ? `the first ${LENS_IMAGE_CAP} images and ${LENS_FINDINGS_CAP} P0/P1 findings per image` : lens === 'supply' ? `the first ${LENS_IMAGE_CAP} images` : 'the first 500 workloads'} were read; badges cover only what was read.
         </p>
       )}
     </div>

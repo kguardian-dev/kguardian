@@ -15,9 +15,8 @@ const renderNode = (lensBadge?: LensBadge) =>
   render(
     <ReactFlowProvider>
       <PodNode
-        id="n"
         data={{ id: 'payments-checkout', label: 'checkout', pod, pods: [pod], traffic: [], isExpanded: false, isExternal: false, onToggle: () => {}, onFocus: () => {}, lensBadge } as never}
-        selected={false} type="podNode" xPos={0} yPos={0} zIndex={0} isConnectable={false} dragging={false}
+        selected={false}
       />
     </ReactFlowProvider>,
   );

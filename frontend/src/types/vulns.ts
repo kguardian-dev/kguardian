@@ -18,7 +18,23 @@ export type VulnSource = 'trivy-operator' | 'grype' | 'registry';
 export type JoinKind = 'image_id' | 'platform_manifest' | 'workload_tag' | 'report_digest';
 /** Weakest first. Only `verified` may be shown as signed. */
 export type SbomTrust = 'attached-unbound' | 'unverified' | 'scanned' | 'verified';
-export type InUseState = 'unknown' | string;
+/** `executed` | `loaded` | `unknown` | `installed_not_observed` (#1678); `unknown` before it. */
+export type InUseState = 'executed' | 'loaded' | 'unknown' | 'installed_not_observed' | string;
+
+/**
+ * Fields added by the in-use tiers release (#1678). All optional: an older
+ * Broker omits them, and the UI then shows the tier as unknown.
+ */
+export interface InUseDetail {
+  state: InUseState;
+  /** Why the state is unknown (language_package, no_runtime_data, capture_gap, host_network, no_package_files). */
+  reason: string | null;
+  observedSince: string | null;
+  windowHours: number;
+  containers: number;
+  /** `file` | `static_binary` | `interpreted`. */
+  coverage: string;
+}
 
 // ── GET /vulnerabilities ────────────────────────────────────────────────
 export interface CveSummary {
@@ -37,6 +53,13 @@ export interface CveSummary {
   weakestJoin: JoinKind;
   inUse: boolean | null;
   inUseState: InUseState;
+  /** #1678: the most urgent tier over every affected workload container in scope. */
+  tier?: string;
+  executedWorkloads?: number;
+  loadedWorkloads?: number;
+  unknownWorkloads?: number;
+  notObservedWorkloads?: number;
+  exposedWorkloads?: number;
 }
 
 export interface CvePage {
@@ -172,6 +195,11 @@ export interface Finding {
   reportDigests: string[];
   inUse: boolean | null;
   inUseState: InUseState;
+  /** #1678. Worst over every workload container running the image. */
+  tier?: string;
+  /** #1678: what produced `tier`, e.g. ["in_use:loaded", "kev", "severity:high", "exposed"]. */
+  tierFactors?: string[];
+  inUseDetail?: InUseDetail;
 }
 
 export interface ImageVulnsPage {

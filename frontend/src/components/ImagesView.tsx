@@ -5,8 +5,8 @@ import { vulnErrorMessage, vulnApi, type VulnApi } from '../services/vulnApi';
 import type { ProfileApi } from '../services/profileApi';
 import type { CveSummary, ImageSummary, VulnSeverity } from '../types/vulns';
 import { shortDigest } from '../utils/posture';
-import { IN_USE_UNKNOWN_TITLE, LIST_FACTORS, TIER_RANK } from '../utils/tiers';
-import { sourceLabel, summaryTier } from '../utils/vulnView';
+import { brokerTier, IN_USE_UNKNOWN_TITLE, LIST_FACTORS, TIER_UNKNOWN_TITLE, tierRank } from '../utils/tiers';
+import { cveRowFactors, sourceLabel } from '../utils/vulnView';
 import { Button } from './ui/Button';
 import { EmptyState } from './ui/EmptyState';
 import { StatStrip, StatTile } from './ui/StatTile';
@@ -40,6 +40,13 @@ interface ImagesViewProps {
   profileApi?: ProfileApi;
 }
 
+const TIER_FILTERS: Array<{ id: string; label: string; value: string[] | undefined }> = [
+  { id: 'all', label: 'All tiers', value: undefined },
+  { id: 'p0', label: 'P0', value: ['P0'] },
+  { id: 'p01', label: 'P0 + P1', value: ['P0', 'P1'] },
+  { id: 'bg', label: 'Background', value: ['Background'] },
+];
+
 const SEVERITY_FILTERS: Array<{ id: string; label: string; value: VulnSeverity[] | undefined }> = [
   { id: 'all', label: 'All severities', value: undefined },
   { id: 'ch', label: 'Critical + high', value: ['CRITICAL', 'HIGH'] },
@@ -59,17 +66,22 @@ export function ImagesView({ namespace, allNamespaces, tab: tabParam, cve, diges
   const [sevId, setSevId] = useState('all');
   const [fixable, setFixable] = useState(false);
   const [running, setRunning] = useState(false);
+  const [tierId, setTierId] = useState('all');
   const severity = SEVERITY_FILTERS.find((f) => f.id === sevId)?.value;
-  const cves = useCveList({ namespace: ns, severity, fixable: fixable || undefined, running: running || undefined }, refreshTick, api);
+  const tierFilter = TIER_FILTERS.find((f) => f.id === tierId)?.value;
+  const cves = useCveList({ namespace: ns, severity, fixable: fixable || undefined, running: running || undefined, tier: tierFilter }, refreshTick, api);
   const [openedFrom, setOpenedFrom] = useState<CveSummary | undefined>(undefined);
 
+  // Tiers are the Broker's (#1678). A Broker without them sends no `tier`:
+  // the rows say "Tier ?" and the tier tiles say unknown.
+  const tiersKnown = cves.items.some((c) => c.tier !== undefined);
   const rows = useMemo(
-    () => cves.items.map((c) => ({ c, t: summaryTier(c) })).sort((a, b) => TIER_RANK[b.t.tier] - TIER_RANK[a.t.tier]),
+    () => cves.items.map((c) => ({ c, tier: brokerTier(c.tier), factors: cveRowFactors(c) })).sort((a, b) => tierRank(b.tier) - tierRank(a.tier)),
     [cves.items],
   );
   const counts = useMemo(() => {
     const by: Record<string, number> = { P0: 0, P1: 0, P2: 0, Background: 0 };
-    for (const r of rows) by[r.t.tier] += 1;
+    for (const r of rows) if (r.tier) by[r.tier] += 1;
     return { P0: by.P0, P1: by.P1, running: cves.items.filter((c) => c.runningWorkloads > 0).length, kev: cves.items.filter((c) => c.kev === true).length, loaded: cves.items.filter((c) => c.inUse === true).length, tagOnly: cves.items.filter((c) => c.weakestJoin === 'workload_tag').length };
   }, [rows, cves.items]);
 
@@ -83,6 +95,7 @@ export function ImagesView({ namespace, allNamespaces, tab: tabParam, cve, diges
   const unread = cves.error != null && cves.items.length === 0;
   // Loaded-package data (P1-5) is null everywhere until it ships.
   const loadedKnown = cves.items.some((c) => c.inUse !== null);
+  const tierTile = (n: number) => (tiersKnown || cves.items.length === 0 ? n : 'unknown');
 
   return (
     <div className="h-full overflow-y-auto">
@@ -95,8 +108,8 @@ export function ImagesView({ namespace, allNamespaces, tab: tabParam, cve, diges
         </div>
 
         <StatStrip count={5} label="Vulnerability posture">
-          <StatTile label="P0 act now" value={cves.loading ? '…' : unread ? '—' : counts.P0} icon={Flame} tone={counts.P0 > 0 ? 'text-tier-p0' : 'text-secondary'} suffix={loadedAll || unread ? undefined : '+'} title="KEV or EPSS >= 10%, exposure not ruled out. In-use data is not available yet, so every CVE is tiered as if loaded." />
-          <StatTile label="P1 schedule" value={cves.loading ? '…' : unread ? '—' : counts.P1} icon={AlertTriangle} tone={counts.P1 > 0 ? 'text-tier-p1' : 'text-secondary'} suffix={loadedAll || unread ? undefined : '+'} />
+          <StatTile label="P0 act now" value={cves.loading ? '…' : unread ? '—' : tierTile(counts.P0)} icon={Flame} tone={tiersKnown && counts.P0 > 0 ? 'text-tier-p0' : 'text-secondary'} suffix={loadedAll || unread || !tiersKnown ? undefined : '+'} title={tiersKnown ? "The Broker's P0: in use (unknown counts), KEV or EPSS over its threshold, and exposed (unknown counts)." : TIER_UNKNOWN_TITLE} />
+          <StatTile label="P1 schedule" value={cves.loading ? '…' : unread ? '—' : tierTile(counts.P1)} icon={AlertTriangle} tone={tiersKnown && counts.P1 > 0 ? 'text-tier-p1' : 'text-secondary'} suffix={loadedAll || unread || !tiersKnown ? undefined : '+'} title={tiersKnown ? undefined : TIER_UNKNOWN_TITLE} />
           <StatTile label="CVEs on running workloads" value={cves.loading ? '…' : unread ? '—' : counts.running} icon={Layers} suffix={loadedAll || unread ? undefined : '+'} />
           <StatTile label="In CISA KEV" value={cves.loading ? '…' : unread ? '—' : counts.kev} icon={Bug} tone={counts.kev > 0 ? 'text-severity-critical' : 'text-secondary'} suffix={loadedAll || unread ? undefined : '+'} />
           {loadedKnown ? (
@@ -119,6 +132,14 @@ export function ImagesView({ namespace, allNamespaces, tab: tabParam, cve, diges
                       {SEVERITY_FILTERS.map((f) => <option key={f.id} value={f.id}>{f.label}</option>)}
                     </select>
                   </label>
+                  {(tiersKnown || tierId !== 'all') && (
+                    <label className="flex items-center gap-1.5 text-tertiary">
+                      Tier
+                      <select value={tierId} onChange={(e) => setTierId(e.target.value)} className="h-8 rounded-control border border-hubble-border bg-hubble-darker px-2 text-xs text-primary">
+                        {TIER_FILTERS.map((f) => <option key={f.id} value={f.id}>{f.label}</option>)}
+                      </select>
+                    </label>
+                  )}
                   <label className="flex items-center gap-1.5 text-secondary">
                     <input type="checkbox" checked={fixable} onChange={(e) => setFixable(e.target.checked)} /> Fix available
                   </label>
@@ -139,7 +160,7 @@ export function ImagesView({ namespace, allNamespaces, tab: tabParam, cve, diges
                   <EmptyState
                     icon={Bug}
                     compact
-                    title={`No CVEs reported for ${scopeLabel}${sevId !== 'all' || fixable || running ? ' with these filters' : ''}`}
+                    title={`No CVEs reported for ${scopeLabel}${sevId !== 'all' || tierId !== 'all' || fixable || running ? ' with these filters' : ''}`}
                     description="Only images a source has reported on are counted. Images with no vulnerability data are listed on the Images tab as unknown, not clean."
                   />
                 )
@@ -160,18 +181,18 @@ export function ImagesView({ namespace, allNamespaces, tab: tabParam, cve, diges
                         </tr>
                       </thead>
                       <tbody className="divide-y divide-hubble-border">
-                        {rows.map(({ c, t }) => (
+                        {rows.map(({ c, tier, factors }) => (
                           <tr key={c.id} data-testid="cve-row" onClick={() => openCve(c.id, c)} className="cursor-pointer hover:bg-hubble-hover/40 transition-colors">
-                            <td className="pl-4 pr-1 sm:pr-3 py-2.5 align-top"><TierBadge tier={t.tier} title={t.reason} /></td>
+                            <td className="pl-4 pr-1 sm:pr-3 py-2.5 align-top"><TierBadge tier={tier} title="The Broker's tier: the most urgent over every affected workload container in scope" /></td>
                             <td className="px-3 py-2.5 align-top sm:min-w-40">
                               <button type="button" onClick={(e) => { e.stopPropagation(); openCve(c.id, c); }} className="font-mono text-xs text-primary hover:underline">{c.id}</button>
                               <div className="mt-0.5 flex flex-wrap items-center gap-1.5">
                                 <SeverityBadge severity={c.severity} />
                                 <span className="text-[11px] text-tertiary font-mono [overflow-wrap:anywhere]">{c.packages.join(', ')}</span>
                               </div>
-                              <div className="mt-1.5 sm:hidden"><FactorChips factors={t.factors} only={LIST_FACTORS} /></div>
+                              <div className="mt-1.5 sm:hidden"><FactorChips factors={factors} only={LIST_FACTORS} /></div>
                             </td>
-                            <td className="hidden sm:table-cell px-3 py-2.5 align-top"><FactorChips factors={t.factors} only={LIST_FACTORS} /></td>
+                            <td className="hidden sm:table-cell px-3 py-2.5 align-top"><FactorChips factors={factors} only={LIST_FACTORS} /></td>
                             <td className="hidden md:table-cell px-3 py-2.5 align-top text-right font-mono text-xs tabular-nums text-secondary">{c.images}</td>
                             <td className="px-3 py-2.5 align-top text-right font-mono text-xs tabular-nums whitespace-nowrap">
                               <span className={c.runningWorkloads > 0 ? 'text-primary' : 'text-tertiary'}>{c.runningWorkloads}</span>
@@ -189,8 +210,9 @@ export function ImagesView({ namespace, allNamespaces, tab: tabParam, cve, diges
                   </div>
                   <footer className="flex flex-wrap items-center justify-between gap-2 px-4 py-2 border-t border-hubble-border text-[11px] text-tertiary">
                     <span title={IN_USE_UNKNOWN_TITLE}>
-                      {loadedKnown ? '' : 'Loaded: unknown for every CVE, so each is tiered as if loaded. '}
-                      Exposure and privilege are per workload: the CVE drawer tiers each workload with its own.
+                      {tiersKnown ? '' : 'This Broker does not rank tiers yet (tier unknown). '}
+                      {loadedKnown ? '' : 'No runtime evidence of loading yet: unknown is ranked as if loaded. '}
+                      Privilege and per-workload exposure are in the CVE drawer.
                     </span>
                     {cves.hasMore && (
                       <Button variant="secondary" size="sm" onClick={() => void cves.loadMore()} disabled={cves.loadingMore}>

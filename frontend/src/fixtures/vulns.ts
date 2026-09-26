@@ -41,6 +41,23 @@ export function vulnCapture<T>(name: string): Capture<T> {
 
 export const VULN_CAPTURES: Capture[] = [...byName.values()];
 
+/**
+ * #1678 (in-use tiers) shapes: CONTRACT-DERIVED, NOT CAPTURED. Each is the
+ * #1671 capture of the same request with tier, tierFactors, inUseDetail and
+ * the CVE tier counts added per #1678's documented rule
+ * (./vuln-contract-1678/derive.py; every file says so in `provenance`).
+ * Swap for real captures once #1678 merges.
+ */
+const tierRaw = import.meta.glob('./vuln-contract-1678/*.json', { eager: true, import: 'default' }) as Record<string, Capture & { provenance: string }>;
+const tierByName = new Map(Object.entries(tierRaw).map(([path, c]) => [path.replace(/^.*\/(.+)\.json$/, '$1'), c]));
+export const TIER_CONTRACT_FIXTURES: Array<Capture & { provenance: string }> = [...tierByName.values()];
+
+export function tierFixture<T>(name: string): Capture<T> {
+  const c = tierByName.get(name);
+  if (!c) throw new Error(`no #1678 contract fixture named ${name}`);
+  return c as unknown as Capture<T>;
+}
+
 export const cvePage = vulnCapture<CvePage>('vulnerabilities').body;
 export const imagesPage = vulnCapture<ImagePage>('images').body;
 export const exposureOf = (id: string) => vulnCapture<Exposure>(`exposure-${id}`).body;
@@ -55,11 +72,12 @@ export const digestOf = (name: string) => imageDetail(name).digest;
  * A VulnApi whose fetch replays the captures by request line (URL-decoded;
  * `extra` first; a request with `limit=` falls back to the capture without
  * it). Unmatched requests are an empty 404, which is what a Broker without
- * the route sends.
+ * the route sends. `tiers: true` answers with the #1678 contract-derived
+ * shapes first (a Broker with in-use tiers); without it, a Broker before them.
  */
-export function replayVulnApi(extra: Capture[] = []) {
+export function replayVulnApi(extra: Capture[] = [], opts: { tiers?: boolean } = {}) {
   const calls: string[] = [];
-  const all = [...extra, ...VULN_CAPTURES];
+  const all = [...extra, ...(opts.tiers ? TIER_CONTRACT_FIXTURES : []), ...VULN_CAPTURES];
   const norm = (r: string) => decodeURIComponent(r.replace(/\+/g, ' '));
   const fetchImpl = (async (input: RequestInfo | URL) => {
     const url = new URL(String(input), 'http://x');
