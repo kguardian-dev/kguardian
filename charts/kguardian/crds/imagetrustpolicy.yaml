@@ -33,6 +33,9 @@ spec:
         - name: Unknown
           type: integer
           jsonPath: .status.evaluation.unknown
+        - name: Last-Evaluated
+          type: date
+          jsonPath: .status.evaluation.lastEvaluated
         - name: Age
           type: date
           jsonPath: .metadata.creationTimestamp
@@ -119,10 +122,14 @@ spec:
               properties:
                 observedGeneration: { type: integer, format: int64 }
                 error: { type: string }
+                message:
+                  type: string
+                  description: Why containers are Unknown because the broker could not be read, with the last successful read.
                 evaluation:
                   type: object
                   properties:
                     lastChanged: { type: string, format: date-time }
+                    lastEvaluated: { type: string, format: date-time }
                     containers: { type: integer, format: int64 }
                     trusted: { type: integer, format: int64 }
                     wouldDeny: { type: integer, format: int64 }

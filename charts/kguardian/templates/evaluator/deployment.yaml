@@ -71,10 +71,7 @@ spec:
               value: {{ .Values.evaluator.logLevel | quote }}
             {{- /* ImageTrustPolicy evaluation: unset follows signature discovery. */}}
             {{- $it := .Values.evaluator.imageTrust | default dict }}
-            {{- $itOn := and .Values.supplychain.enabled (.Values.supplychain.signatureDiscovery | default dict).enabled }}
-            {{- if not (kindIs "invalid" $it.enabled) }}
-            {{- $itOn = $it.enabled }}
-            {{- end }}
+            {{- $itOn := include "kguardian.imageTrustEnabled" . }}
             {{- if .Values.evaluator.applicationSecurityProfiles.enabled }}
             # ApplicationSecurityProfile status: reads workload profiles from
             # the broker with the READ-scope token only.
