@@ -779,7 +779,7 @@ pub fn ebpf_handle(
             load_runtime_inventory(&mut runtime_storage, runtime_libs, caps_sender.is_some())
         });
         if let Some((_, _, attached)) = runtime.as_ref() {
-            crate::runtime_inventory::probe_attached(attached.libs, attached.caps);
+            crate::runtime_inventory::probe_attached(attached.libs, attached.cap_hook);
         }
         let caps_sender = caps_sender.filter(|_| runtime.as_ref().is_some_and(|r| r.2.caps));
 
@@ -1008,9 +1008,9 @@ pub fn ebpf_handle(
                             let v = sk.maps.cap_seen.lookup(&k, MapFlags::ANY).ok().flatten()?;
                             let cg = u64::from_ne_bytes(k.get(..8)?.try_into().ok()?);
                             let cap = u32::from_ne_bytes(k.get(8..12)?.try_into().ok()?);
-                            let granted = u32::from_ne_bytes(k.get(12..16)?.try_into().ok()?) != 0;
+                            let flags = u32::from_ne_bytes(k.get(12..16)?.try_into().ok()?);
                             let count = u64::from_ne_bytes(v.get(..8)?.try_into().ok()?);
-                            Some(((cg, cap, granted), count))
+                            Some(((cg, cap, flags), count))
                         })
                         .collect();
                     let _ = tx.try_send(crate::runtime_capabilities::CapMsg::Counts(snapshot));
@@ -2048,27 +2048,112 @@ mod tests {
         let _ = std::fs::remove_dir(&pod_dir);
     }
 
+    /// Helper for the capability test: the "container" workload, run as
+    /// an exec'd process (the test binary re-executed into this test with
+    /// KG_CAP_HELPER=1). Does nothing otherwise.
+    #[test]
+    #[ignore = "helper, run by capability_checks_are_counted_per_container_and_setup_is_not"]
+    fn cap_helper_child() {
+        if std::env::var("KG_CAP_HELPER").is_err() {
+            return;
+        }
+        unsafe {
+            if std::env::var("KG_CAP_RENAME").is_ok() {
+                // A container process posing as runc: must still be counted.
+                libc::prctl(libc::PR_SET_NAME, c"runc:[1:CHILD]".as_ptr());
+            }
+            // A seccomp filter without no_new_privs: the kernel's
+            // CAP_OPT_NOAUDIT SYS_ADMIN check (granted: still root here).
+            let allow = [libc::sock_filter {
+                code: 0x06,
+                jt: 0,
+                jf: 0,
+                k: 0x7fff_0000,
+            }];
+            let prog = libc::sock_fprog {
+                len: 1,
+                filter: allow.as_ptr() as *mut _,
+            };
+            libc::prctl(libc::PR_SET_SECCOMP, 2, &prog as *const libc::sock_fprog);
+            #[repr(C)]
+            struct Hdr {
+                version: u32,
+                pid: i32,
+            }
+            #[repr(C)]
+            struct Data {
+                effective: u32,
+                permitted: u32,
+                inheritable: u32,
+            }
+            let hdr = Hdr {
+                version: 0x2008_0522,
+                pid: 0,
+            };
+            let bind_only = 1u32 << 10;
+            let data = [
+                Data {
+                    effective: bind_only,
+                    permitted: bind_only,
+                    inheritable: 0,
+                },
+                Data {
+                    effective: 0,
+                    permitted: 0,
+                    inheritable: 0,
+                },
+            ];
+            assert_eq!(
+                libc::syscall(libc::SYS_capset, &hdr, data.as_ptr()),
+                0,
+                "capset"
+            );
+            for _ in 0..2 {
+                let fd = libc::socket(libc::AF_INET, libc::SOCK_STREAM, 0);
+                let addr = libc::sockaddr_in {
+                    sin_family: libc::AF_INET as u16,
+                    sin_port: 80u16.to_be(),
+                    sin_addr: libc::in_addr { s_addr: 0 },
+                    sin_zero: [0; 8],
+                };
+                libc::bind(
+                    fd,
+                    &addr as *const libc::sockaddr_in as *const libc::sockaddr,
+                    std::mem::size_of::<libc::sockaddr_in>() as u32,
+                );
+                libc::close(fd);
+            }
+            libc::sethostname(c"kg".as_ptr(), 2);
+        }
+    }
+
     /// End to end on the RUNNING kernel: capability checks by a
-    /// container's tasks are counted per (container, capability, verdict),
-    /// and runc's own setup is not. Needs root and cgroup v2.
+    /// container's own processes are counted per (container, capability,
+    /// verdict, probed), including by one that renames itself "runc:[...]";
+    /// checks by runtime setup (a host-forked task that has not exec'd yet)
+    /// are not. Needs root and cgroup v2.
     #[test]
     #[ignore = "needs root, cgroup v2 and a BTF-enabled kernel; run by the ebpf-kernels CI job"]
-    fn capability_checks_are_counted_per_container_and_runc_is_not() {
-        use crate::runtime_capabilities::CapEventData;
+    fn capability_checks_are_counted_per_container_and_setup_is_not() {
+        use crate::runtime_capabilities::{CapEventData, FLAG_GRANTED, FLAG_PROBED};
         use std::os::unix::fs::MetadataExt;
         use std::os::unix::process::CommandExt;
         use std::sync::{Arc, Mutex};
 
         const UID: &str = "6a2c9a1e-7b4d-4e0a-9f1c-0123456789ab";
         const CID: &str = "4c1e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c4b5a69788796a5b4c3d2e1f0";
-        const RUNC: &str = "4d1e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c4b5a69788796a5b4c3d2e1f0";
+        const RENAMED: &str = "4e1e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c4b5a69788796a5b4c3d2e1f0";
+        const SETUP: &str = "4d1e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c4b5a69788796a5b4c3d2e1f0";
         let pod_dir = format!("/sys/fs/cgroup/kubepods/besteffort/pod{UID}");
-        let ctr_dir = format!("{pod_dir}/{CID}");
-        let runc_dir = format!("{pod_dir}/{RUNC}");
-        std::fs::create_dir_all(&ctr_dir).unwrap();
-        std::fs::create_dir_all(&runc_dir).unwrap();
-        let cgid = std::fs::metadata(&ctr_dir).unwrap().ino();
-        let runc_cgid = std::fs::metadata(&runc_dir).unwrap().ino();
+        let dirs: Vec<String> = [CID, RENAMED, SETUP]
+            .iter()
+            .map(|c| format!("{pod_dir}/{c}"))
+            .collect();
+        for d in &dirs {
+            std::fs::create_dir_all(d).unwrap();
+        }
+        let ino = |d: &str| std::fs::metadata(d).unwrap().ino();
+        let (cg_app, cg_renamed, cg_setup) = (ino(&dirs[0]), ino(&dirs[1]), ino(&dirs[2]));
 
         let mut storage = MaybeUninit::uninit();
         let (sk, _links, attached) =
@@ -2090,72 +2175,48 @@ mod tests {
         .unwrap();
         let rb = rb.build().unwrap();
 
-        // In the container: keep only NET_BIND_SERVICE, bind :80 twice
-        // (granted), sethostname (CAP_SYS_ADMIN, denied).
-        let child = |dir: String, runc: bool| {
+        let me = std::env::current_exe().unwrap();
+        // The container's own code: the helper, exec'd inside the cgroup.
+        let workload = |dir: &str, rename: bool| {
             let procs = format!("{dir}/cgroup.procs");
-            unsafe {
-                std::process::Command::new("/bin/true")
-                    .pre_exec(move || {
-                        std::fs::write(&procs, std::process::id().to_string())?;
-                        if runc {
-                            libc::prctl(libc::PR_SET_NAME, c"runc:[2:INIT]".as_ptr());
-                        }
-                        #[repr(C)]
-                        struct Hdr {
-                            version: u32,
-                            pid: i32,
-                        }
-                        #[repr(C)]
-                        struct Data {
-                            effective: u32,
-                            permitted: u32,
-                            inheritable: u32,
-                        }
-                        let hdr = Hdr {
-                            version: 0x2008_0522,
-                            pid: 0,
-                        };
-                        let bind_only = 1u32 << 10;
-                        let data = [
-                            Data {
-                                effective: bind_only,
-                                permitted: bind_only,
-                                inheritable: 0,
-                            },
-                            Data {
-                                effective: 0,
-                                permitted: 0,
-                                inheritable: 0,
-                            },
-                        ];
-                        if libc::syscall(libc::SYS_capset, &hdr, data.as_ptr()) != 0 {
-                            return Err(std::io::Error::last_os_error());
-                        }
-                        for _ in 0..2 {
-                            let fd = libc::socket(libc::AF_INET, libc::SOCK_STREAM, 0);
-                            let addr = libc::sockaddr_in {
-                                sin_family: libc::AF_INET as u16,
-                                sin_port: 80u16.to_be(),
-                                sin_addr: libc::in_addr { s_addr: 0 },
-                                sin_zero: [0; 8],
-                            };
-                            libc::bind(
-                                fd,
-                                &addr as *const libc::sockaddr_in as *const libc::sockaddr,
-                                std::mem::size_of::<libc::sockaddr_in>() as u32,
-                            );
-                            libc::close(fd);
-                        }
-                        libc::sethostname(c"kg".as_ptr(), 2);
-                        Ok(())
-                    })
-                    .status()
-                    .expect("spawn")
+            let mut cmd = std::process::Command::new(&me);
+            cmd.args([
+                "--ignored",
+                "--exact",
+                "bpf::tests::cap_helper_child",
+                "--test-threads=1",
+            ])
+            .env("KG_CAP_HELPER", "1");
+            if rename {
+                cmd.env("KG_CAP_RENAME", "1");
             }
+            let status = unsafe {
+                cmd.pre_exec(move || {
+                    std::fs::write(&procs, std::process::id().to_string())?;
+                    Ok(())
+                })
+                .stdout(std::process::Stdio::null())
+                .status()
+                .expect("spawn")
+            };
+            assert!(status.success(), "helper in {dir}");
         };
-        assert!(child(ctr_dir.clone(), false).success());
-        assert!(child(runc_dir.clone(), true).success());
+        workload(&dirs[0], false);
+        workload(&dirs[1], true);
+        // Runtime setup: forked by this (host) process, uses a capability
+        // before exec, inside the container's cgroup.
+        let procs = format!("{}/cgroup.procs", dirs[2]);
+        let status = unsafe {
+            std::process::Command::new("/bin/true")
+                .pre_exec(move || {
+                    std::fs::write(&procs, std::process::id().to_string())?;
+                    libc::sethostname(c"kg-setup".as_ptr(), 8);
+                    Ok(())
+                })
+                .status()
+                .expect("spawn")
+        };
+        assert!(status.success());
         for _ in 0..10 {
             rb.poll(std::time::Duration::from_millis(100)).unwrap();
         }
@@ -2172,49 +2233,56 @@ mod tests {
                 u64::from_ne_bytes(v[..8].try_into().unwrap()),
             );
         }
-        let ours: Vec<_> = counts.iter().filter(|(k, _)| k.0 == cgid).collect();
-        eprintln!("container: {ours:?}");
-        eprintln!(
-            "runc cgroup: {:?}",
+        let of = |cg: u64| {
             counts
                 .iter()
-                .filter(|(k, _)| k.0 == runc_cgid)
+                .filter(|(k, _)| k.0 == cg)
+                .map(|(k, v)| ((k.1, k.2), *v))
                 .collect::<Vec<_>>()
-        );
-        let bind = counts.get(&(cgid, 10, 1)).copied().unwrap_or(0);
-        let admin_denied = counts.get(&(cgid, 21, 0)).copied().unwrap_or(0);
-        assert!(bind >= 2, "NET_BIND_SERVICE granted twice: {bind}");
+        };
+        eprintln!("container: {:?}", of(cg_app));
+        eprintln!("renamed:   {:?}", of(cg_renamed));
+        eprintln!("setup:     {:?}", of(cg_setup));
+        for cg in [cg_app, cg_renamed] {
+            let n = |cap: u32, flags: u32| counts.get(&(cg, cap, flags)).copied().unwrap_or(0);
+            assert!(
+                n(10, FLAG_GRANTED) >= 2,
+                "NET_BIND_SERVICE used twice (cgroup {cg})"
+            );
+            assert!(
+                n(21, 0) >= 1,
+                "SYS_ADMIN asked for and denied (sethostname)"
+            );
+            assert!(
+                n(21, FLAG_GRANTED | FLAG_PROBED) >= 1,
+                "the seccomp filter's non-audited SYS_ADMIN check is recorded as probed"
+            );
+            assert_eq!(
+                n(21, FLAG_GRANTED),
+                0,
+                "SYS_ADMIN was never used as an ordinary check"
+            );
+        }
         assert!(
-            admin_denied >= 1,
-            "SYS_ADMIN checked and denied: {admin_denied}"
-        );
-        assert!(
-            !counts.contains_key(&(cgid, 21, 1)),
-            "SYS_ADMIN was never granted to the container"
-        );
-        assert!(
-            !counts.keys().any(|k| k.0 == runc_cgid),
-            "runc's own checks are not the container's"
+            !counts.contains_key(&(cg_setup, 21, FLAG_GRANTED)),
+            "runtime setup (host-forked, not exec'd) is not the container's use"
         );
         let evs = events.lock().unwrap();
-        let first: Vec<_> = evs.iter().filter(|e| e.cgroup_id == cgid).collect();
+        let first: Vec<_> = evs.iter().filter(|e| e.cgroup_id == cg_app).collect();
         assert!(first
             .iter()
             .all(|e| e.container_id().as_deref() == Some(CID)));
-        assert!(
-            first.iter().any(|e| e.cap == 10 && e.granted == 1),
-            "a first-sighting event names the container"
-        );
         assert_eq!(
             first
                 .iter()
-                .filter(|e| e.cap == 10 && e.granted == 1)
+                .filter(|e| e.cap == 10 && e.flags == FLAG_GRANTED)
                 .count(),
             1,
-            "one event per (container, capability, verdict); the rest are counts"
+            "one event per (container, capability, flags); the rest are counts"
         );
-        let _ = std::fs::remove_dir(&ctr_dir);
-        let _ = std::fs::remove_dir(&runc_dir);
+        for d in &dirs {
+            let _ = std::fs::remove_dir(d);
+        }
         let _ = std::fs::remove_dir(&pod_dir);
     }
 

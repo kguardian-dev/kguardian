@@ -175,15 +175,15 @@ out:
 // worked out.
 // Cached per cgroup: after the first syscall from a cgroup this is one
 // hash lookup.
-static __always_inline __u32 task_pod_generation(void)
+static __always_inline __u32 task_pod_generation_of(struct task_struct *task)
 {
-    __u64 cgid = bpf_get_current_cgroup_id();
+    struct kernfs_node *kn = BPF_CORE_READ(task, cgroups, dfl_cgrp, kn);
+    // The cgroup id bpf_get_current_cgroup_id() returns for the task.
+    __u64 cgid = BPF_CORE_READ(kn, id);
     __u32 *cached = bpf_map_lookup_elem(&cgroup_pod_gen, &cgid);
     if (cached)
         return *cached;
 
-    struct task_struct *task = (struct task_struct *)bpf_get_current_task();
-    struct kernfs_node *kn = BPF_CORE_READ(task, cgroups, dfl_cgrp, kn);
     __u32 gen = 0;
     for (int lvl = 0; lvl < KG_CG_LEVELS; lvl++)
     {
@@ -200,6 +200,11 @@ static __always_inline __u32 task_pod_generation(void)
     }
     bpf_map_update_elem(&cgroup_pod_gen, &cgid, &gen, BPF_ANY);
     return gen;
+}
+
+static __always_inline __u32 task_pod_generation(void)
+{
+    return task_pod_generation_of((struct task_struct *)bpf_get_current_task());
 }
 
 #endif

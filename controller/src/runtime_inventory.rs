@@ -291,11 +291,16 @@ pub static KERNEL_DROPS: std::sync::atomic::AtomicU64 = std::sync::atomic::Atomi
 
 /// Whether the capability probe is attached.
 static PROBE_CAPS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+/// Which capability hook is attached (see `RUNTIME_CAP_SYMBOLS` in bpf.rs).
+static CAP_HOOK: std::sync::OnceLock<&'static str> = std::sync::OnceLock::new();
 
 /// Called by the eBPF loader once the probe is attached.
-pub fn probe_attached(libs: bool, caps: bool) {
+pub fn probe_attached(libs: bool, cap_hook: Option<&'static str>) {
     let _ = PROBE.set((Utc::now().naive_utc(), libs));
-    PROBE_CAPS.store(caps, std::sync::atomic::Ordering::Relaxed);
+    PROBE_CAPS.store(cap_hook.is_some(), std::sync::atomic::Ordering::Relaxed);
+    if let Some(h) = cap_hook {
+        let _ = CAP_HOOK.set(h);
+    }
 }
 
 /// Capability inventory switch (`RUNTIME_INVENTORY_CAPABILITIES`, chart
@@ -593,6 +598,9 @@ pub struct Store {
     drops_seen: u64,
     /// The capability probe is attached (reported with each heartbeat).
     pub cap_probe: bool,
+    /// Which capability hook (`cap_capable`, or the `security_capable`
+    /// fallback, which misses some checks).
+    pub cap_hook: Option<&'static str>,
     /// Events that reached userspace but could not be attributed to a
     /// container, since the last heartbeat. Like kernel drops, whose they
     /// were is unknown: every container on the node may have lost one.
@@ -645,6 +653,9 @@ pub struct CoveragePost {
     pub incomplete: bool,
     /// The capability probe is attached: capability checks are counted.
     pub cap_probe: bool,
+    /// Its hook: `cap_capable` (every check) or `security_capable` (the
+    /// fallback, which misses commoncap's direct checks).
+    pub cap_hook: Option<String>,
     /// The container is gone; its last heartbeat.
     pub ended: bool,
     pub heartbeat_at: NaiveDateTime,
@@ -965,6 +976,10 @@ impl Store {
                     unsent,
                     incomplete: self.incomplete.contains(&key),
                     cap_probe: self.cap_probe && exec_probe,
+                    cap_hook: self
+                        .cap_hook
+                        .filter(|_| self.cap_probe && exec_probe)
+                        .map(str::to_string),
                     ended: false,
                     heartbeat_at: wall,
                     heartbeat_secs: HEARTBEAT_EVERY.as_secs() as u32,
@@ -1283,7 +1298,7 @@ pub async fn run(
                             store.note_unattributed();
                             continue;
                         };
-                        caps.event(ev.cgroup_id, (ev.generation, cid), ev.cap, ev.granted != 0, Utc::now().naive_utc());
+                        caps.event(ev.cgroup_id, (ev.generation, cid), ev.cap, ev.flags, Utc::now().naive_utc());
                     }
                     Some(CapMsg::Counts(snapshot)) => caps.counts(&snapshot, Utc::now().naive_utc()),
                 }
@@ -1315,6 +1330,7 @@ pub async fn run(
                     last_heartbeat = Some(Instant::now());
                     store.cap_probe = caps_rx.is_some()
                         && PROBE_CAPS.load(std::sync::atomic::Ordering::Relaxed);
+                    store.cap_hook = CAP_HOOK.get().copied();
                     let beats = store.coverage_due(
                         &registry_pods(),
                         PROBE.get().copied(),
@@ -1909,8 +1925,13 @@ mod tests {
             !s.coverage_due(&pods, Some((at(0), true)), Mode::Full, 0, "n1", at(2))[0].cap_probe
         );
         s.cap_probe = true;
-        assert!(
-            s.coverage_due(&pods, Some((at(0), true)), Mode::Full, 0, "n1", at(3))[0].cap_probe
+        s.cap_hook = Some("cap_capable");
+        let b = &s.coverage_due(&pods, Some((at(0), true)), Mode::Full, 0, "n1", at(3))[0];
+        assert!(b.cap_probe);
+        assert_eq!(
+            b.cap_hook.as_deref(),
+            Some("cap_capable"),
+            "the hook travels with it"
         );
         // No exec probe at all: nothing is counted, whatever the flag says.
         let mut s = Store {
