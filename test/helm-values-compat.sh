@@ -625,6 +625,78 @@ render "supplychain-no-api" "${SC_ON[@]}" --set supplychain.sources.trivyOperato
   assert_absent "supplychain-no-api" "kube-api-access"
 }
 
+# 12. ApplicationSecurityProfile (#1533 P2-6): off by default — no CRD, no
+# RBAC, no broker env on the evaluator.
+render "asp-default-off" && {
+  assert_absent "asp-default-off" "applicationsecurityprofiles"
+  assert_absent "asp-default-off" "ASP_ENABLED"
+}
+
+# 12a. On: CRD kept on uninstall, env wired, READ-scope token (never ingest).
+ASP_ON=(--set evaluator.applicationSecurityProfiles.enabled=true)
+render "asp-on" "${ASP_ON[@]}" && {
+  assert_has    "asp-on" "name: applicationsecurityprofiles.kguardian.dev"
+  assert_has    "asp-on" "helm.sh/resource-policy: keep"
+  assert_has    "asp-on" "name: ASP_ENABLED"
+  assert_has    "asp-on" "name: ASP_RESYNC_INTERVAL"
+  assert_deploys "asp-on" 4
+}
+if ev="$(helm template compat "$CHART" "${ASP_ON[@]}" --set broker.auth.enabled=true \
+    --set broker.auth.existingSecret=kg-auth --show-only templates/evaluator/deployment.yaml 2>/dev/null)"; then
+  grep -A4 'name: BROKER_AUTH_TOKEN' <<<"$ev" | grep -q 'key: read' || \
+    { echo "FAIL [asp-auth]: evaluator must present the read-scope token"; fail=1; }
+  grep -A4 'name: BROKER_AUTH_TOKEN' <<<"$ev" | grep -q 'key: ingest' && \
+    { echo "FAIL [asp-auth]: evaluator must never hold the ingest token"; fail=1; } || true
+else
+  echo "FAIL [asp-auth]: evaluator deployment did not render"; fail=1
+fi
+
+# 12b. RBAC: list/watch on the resource, patch on status only. No create,
+# delete, update or wildcard.
+if role="$(helm template compat "$CHART" "${ASP_ON[@]}" \
+    --show-only templates/evaluator/clusterrole.yaml 2>/dev/null)"; then
+  grep -A1 'resources: \[applicationsecurityprofiles\]' <<<"$role" | grep -q 'verbs: \[list, watch\]' || \
+    { echo "FAIL [asp-rbac]: applicationsecurityprofiles must be exactly list, watch"; fail=1; }
+  grep -A1 'resources: \[applicationsecurityprofiles/status\]' <<<"$role" | grep -q 'verbs: \[patch\]' || \
+    { echo "FAIL [asp-rbac]: applicationsecurityprofiles/status must be exactly patch"; fail=1; }
+  grep -qE 'verbs: \[.*(create|delete|\*).*\]' <<<"$(grep -A1 applicationsecurityprofiles <<<"$role")" && \
+    { echo "FAIL [asp-rbac]: no create/delete/wildcard on applicationsecurityprofiles"; fail=1; } || true
+else
+  echo "FAIL [asp-rbac]: evaluator clusterrole did not render"; fail=1
+fi
+
+# 12c. installCRD=false leaves the CRD to the operator.
+render "asp-no-crd" "${ASP_ON[@]}" --set evaluator.applicationSecurityProfiles.installCRD=false && {
+  assert_absent "asp-no-crd" "name: applicationsecurityprofiles.kguardian.dev"
+  assert_has    "asp-no-crd" "name: ASP_ENABLED"
+}
+
+# 12d. Broker NetworkPolicy admits the evaluator only when the feature is on.
+render "asp-broker-netpol" "${ASP_ON[@]}" --set broker.networkPolicy.enabled=true \
+  --set 'broker.networkPolicy.allowedNodeCIDRs={10.0.0.0/16}' && {
+  awk '/^kind: NetworkPolicy$/{f=1} /^---/{f=0} f' <<<"$OUT" | grep -q 'app.kubernetes.io/name: kguardian-evaluator' || \
+    { echo "FAIL [asp-broker-netpol]: broker policy must admit the evaluator"; fail=1; }
+}
+render "broker-netpol-no-asp" --set broker.networkPolicy.enabled=true \
+  --set 'broker.networkPolicy.allowedNodeCIDRs={10.0.0.0/16}' && {
+  awk '/^kind: NetworkPolicy$/{f=1} /^---/{f=0} f' <<<"$OUT" | grep -q 'app.kubernetes.io/name: kguardian-evaluator' && \
+    { echo "FAIL [broker-netpol-no-asp]: evaluator admitted without the feature"; fail=1; } || true
+}
+
+# 12f. staleAfter: unset leaves the default to the binary (3x resync);
+# set, it is passed through; malformed, the render fails.
+render "asp-stale-default" "${ASP_ON[@]}" && assert_absent "asp-stale-default" "ASP_STALE_AFTER"
+render "asp-stale-set" "${ASP_ON[@]}" --set evaluator.applicationSecurityProfiles.staleAfter=20m && {
+  assert_has "asp-stale-set" "name: ASP_STALE_AFTER"
+  assert_has "asp-stale-set" 'value: "20m"'
+}
+assert_render_fails "asp-stale-bad" "is not a Go duration" \
+  "${ASP_ON[@]}" --set evaluator.applicationSecurityProfiles.staleAfter=soon
+
+# 12e. Refuses to render without the evaluator that writes the status.
+assert_render_fails "asp-without-evaluator" "requires evaluator.enabled=true" \
+  "${ASP_ON[@]}" --set evaluator.enabled=false
+
 if [ "$fail" -ne 0 ]; then
   echo "G4 values-compatibility check FAILED"
   exit 1

@@ -5,6 +5,8 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/sirupsen/logrus"
 )
 
 // signalContext returns a Context cancelled on SIGINT/SIGTERM. The
@@ -45,3 +47,34 @@ func TestSignalContext_ManualCancelDrainsContext(t *testing.T) {
 // rely on the cancel() drain test above to exercise the ctx lifecycle
 // and trust that signal.Notify is correctly wired.
 var _ = syscall.SIGTERM // keep the syscall import for future use
+
+func TestEnvDuration_DefaultParseAndFloor(t *testing.T) {
+	t.Setenv("ASP_TEST_DUR", "")
+	if d, err := envDuration("ASP_TEST_DUR", 5*time.Minute, 30*time.Second); err != nil || d != 5*time.Minute {
+		t.Errorf("unset: %v %v", d, err)
+	}
+	t.Setenv("ASP_TEST_DUR", " 2m ")
+	if d, _ := envDuration("ASP_TEST_DUR", 5*time.Minute, 30*time.Second); d != 2*time.Minute {
+		t.Errorf("2m: %v", d)
+	}
+	t.Setenv("ASP_TEST_DUR", "1s")
+	if d, _ := envDuration("ASP_TEST_DUR", 5*time.Minute, 30*time.Second); d != 30*time.Second {
+		t.Errorf("below floor must clamp: %v", d)
+	}
+	t.Setenv("ASP_TEST_DUR", "300")
+	if _, err := envDuration("ASP_TEST_DUR", 5*time.Minute, 30*time.Second); err == nil {
+		t.Error("a bare number is not a duration")
+	}
+}
+
+func TestStartAppProfiles_OffByDefaultAndNeedsBrokerURL(t *testing.T) {
+	t.Setenv("ASP_ENABLED", "")
+	if err := startAppProfiles(context.Background(), nil, logrus.New()); err != nil {
+		t.Errorf("disabled must be a no-op: %v", err)
+	}
+	t.Setenv("ASP_ENABLED", "true")
+	t.Setenv("BROKER_URL", "")
+	if err := startAppProfiles(context.Background(), nil, logrus.New()); err == nil {
+		t.Error("enabled without BROKER_URL must fail loudly")
+	}
+}

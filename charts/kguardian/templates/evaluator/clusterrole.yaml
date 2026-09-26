@@ -29,6 +29,18 @@ rules:
   - apiGroups: [kguardian.dev]
     resources: [auditnetworkpolicies/status, auditclusternetworkpolicies/status]
     verbs: [get, update, patch]
+  {{- if .Values.evaluator.applicationSecurityProfiles.enabled }}
+  # ApplicationSecurityProfile (#1533): read the resources users create
+  # and write their status with server-side apply (a PATCH on the status
+  # subresource). No create/delete/update, and no spec writes: creating a
+  # profile and accepting a revision stay with the user.
+  - apiGroups: [kguardian.dev]
+    resources: [applicationsecurityprofiles]
+    verbs: [list, watch]
+  - apiGroups: [kguardian.dev]
+    resources: [applicationsecurityprofiles/status]
+    verbs: [patch]
+  {{- end }}
   # Emit Kubernetes Events on the AuditNetworkPolicy when a flow would
   # be denied (post-MVP — RBAC pre-granted so it's ready when the
   # event-emission code lands).

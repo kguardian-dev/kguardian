@@ -11,7 +11,9 @@ import (
 	"os/signal"
 	"strings"
 	"syscall"
+	"time"
 
+	"github.com/kguardian-dev/kguardian/evaluator/pkg/appprofile"
 	"github.com/kguardian-dev/kguardian/evaluator/pkg/server"
 	"github.com/kguardian-dev/kguardian/evaluator/pkg/status"
 	"github.com/kguardian-dev/kguardian/evaluator/pkg/store"
@@ -77,12 +79,77 @@ func run() error {
 	agg := status.New(dynClient, log)
 	go agg.Run(ctx)
 
+	if err := startAppProfiles(ctx, dynClient, log); err != nil {
+		return err
+	}
+
 	srv := server.New(addr, st, agg, log)
 	srv.SetReady() // caches are synced before we get here
 	if err := srv.Start(ctx); err != nil {
 		return fmt.Errorf("server: %w", err)
 	}
 	return nil
+}
+
+// startAppProfiles runs the ApplicationSecurityProfile status controller
+// when ASP_ENABLED=true (set by the chart's
+// evaluator.applicationSecurityProfiles.enabled). Off by default: the CRD
+// is only installed when the flag is on, and an informer on a missing CRD
+// would just log list errors forever.
+func startAppProfiles(ctx context.Context, dyn dynamic.Interface, log *logrus.Logger) error {
+	if !envBool("ASP_ENABLED") {
+		return nil
+	}
+	brokerURL := strings.TrimSpace(os.Getenv("BROKER_URL"))
+	if brokerURL == "" {
+		return fmt.Errorf("ASP_ENABLED=true requires BROKER_URL")
+	}
+	resync, err := envDuration("ASP_RESYNC_INTERVAL", 5*time.Minute, 30*time.Second)
+	if err != nil {
+		return err
+	}
+	// BROKER_AUTH_TOKEN is the broker's READ-scope token (empty when broker
+	// auth is off). The profile routes are all GET, READ scope.
+	client, err := appprofile.NewBrokerClient(brokerURL, os.Getenv("BROKER_AUTH_TOKEN"), 30*time.Second)
+	if err != nil {
+		return err
+	}
+	// ASP_STALE_AFTER: how long the last profile is still shown while the
+	// broker cannot be read. Unset = 3x resync; clamped up to resync.
+	staleAfter, err := envDuration("ASP_STALE_AFTER", 0, 0)
+	if err != nil {
+		return err
+	}
+	staleAfter = appprofile.StaleAfter(staleAfter, resync)
+	ctrl := appprofile.New(dyn, client, resync, staleAfter, log)
+	go ctrl.Run(ctx)
+	log.WithField("resync", resync.String()).WithField("staleAfter", staleAfter.String()).WithField("broker", brokerURL).
+		Info("applicationsecurityprofile status reporting enabled")
+	return nil
+}
+
+func envBool(name string) bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv(name))) {
+	case "1", "true", "yes", "on":
+		return true
+	}
+	return false
+}
+
+// envDuration parses a Go duration ("5m"), clamped up to floor.
+func envDuration(name string, def, floor time.Duration) (time.Duration, error) {
+	v := strings.TrimSpace(os.Getenv(name))
+	if v == "" {
+		return def, nil
+	}
+	d, err := time.ParseDuration(v)
+	if err != nil {
+		return 0, fmt.Errorf("%s=%q is not a duration (e.g. 5m): %w", name, v, err)
+	}
+	if d < floor {
+		d = floor
+	}
+	return d, nil
 }
 
 // loadKubeConfig prefers in-cluster config and falls back to the local

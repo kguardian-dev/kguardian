@@ -69,6 +69,24 @@ spec:
               value: ":{{ .Values.evaluator.container.port }}"
             - name: LOG_LEVEL
               value: {{ .Values.evaluator.logLevel | quote }}
+            {{- if .Values.evaluator.applicationSecurityProfiles.enabled }}
+            # ApplicationSecurityProfile status: reads workload profiles from
+            # the broker with the READ-scope token only.
+            - name: ASP_ENABLED
+              value: "true"
+            - name: ASP_RESYNC_INTERVAL
+              value: {{ .Values.evaluator.applicationSecurityProfiles.resyncInterval | default "5m" | quote }}
+            {{- with .Values.evaluator.applicationSecurityProfiles.staleAfter }}
+            {{- if not (regexMatch "^([0-9]+(\\.[0-9]+)?(ns|us|ms|s|m|h))+$" (toString .)) }}
+            {{- fail (printf "evaluator.applicationSecurityProfiles.staleAfter=%q is not a Go duration (e.g. 15m, 1h)" (toString .)) }}
+            {{- end }}
+            - name: ASP_STALE_AFTER
+              value: {{ . | quote }}
+            {{- end }}
+            - name: BROKER_URL
+              value: "http://{{ .Values.broker.service.name }}.{{ include "kguardian.namespace" . }}.svc.cluster.local:{{ .Values.broker.service.port }}"
+            {{- include "kguardian.brokerAuthClientEnv" (dict "root" $ "scope" "read") | nindent 12 }}
+            {{- end }}
             {{- with .Values.evaluator.env }}
             {{- toYaml . | nindent 12 }}
             {{- end }}

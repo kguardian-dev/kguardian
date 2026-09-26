@@ -24,6 +24,8 @@ func TestAddToScheme_RegistersAllFourTypes(t *testing.T) {
 		"AuditNetworkPolicyList",
 		"AuditClusterNetworkPolicy",
 		"AuditClusterNetworkPolicyList",
+		"ApplicationSecurityProfile",
+		"ApplicationSecurityProfileList",
 	} {
 		gvk := SchemeGroupVersion.WithKind(kind)
 		if _, err := scheme.New(gvk); err != nil {

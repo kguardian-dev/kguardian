@@ -849,6 +849,41 @@ jobs:
           npm ci
           npm test
 
+  # Evaluator (Go): vet and test. Path-filtered like every component here;
+  # the concurrency group cancels a superseded run for the same PR (only
+  # when the newer run also runs this job). GOTOOLCHAIN=local makes a
+  # go.mod that outruns the installed Go fail loudly instead of downloading
+  # a toolchain; go-version-file keeps setup-go in step with go.mod.
+  test-evaluator:
+    runs-on: ubuntu-latest
+    needs: detect-changes
+    if: needs.detect-changes.outputs.evaluator == 'true'
+    permissions:
+      contents: read
+    concurrency:
+      group: pr-build-${{ github.event.pull_request.number }}-test-evaluator
+      cancel-in-progress: true
+    env:
+      GOTOOLCHAIN: local
+    defaults:
+      run:
+        working-directory: evaluator
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Setup Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+        with:
+          go-version-file: evaluator/go.mod
+          cache-dependency-path: evaluator/go.sum
+
+      - name: go vet
+        run: go vet ./...
+
+      - name: go test
+        run: go test -race -count=1 ./...
+
   # Build Evaluator
   build-evaluator:
     needs: detect-changes
