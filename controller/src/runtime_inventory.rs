@@ -560,6 +560,9 @@ pub struct Store {
     discarded: HashMap<ContainerKey, u64>,
     /// Events lost per container and not yet reported in a heartbeat.
     drops: HashMap<ContainerKey, u64>,
+    /// Containers whose inventory is known incomplete for as long as they
+    /// run (the backfill could not read all their mappings).
+    incomplete: HashSet<ContainerKey>,
     /// Coverage per container (see [`Store::coverage_due`]).
     coverage: HashMap<ContainerKey, Coverage>,
     /// When each container was backfilled from /proc.
@@ -609,6 +612,9 @@ pub struct CoveragePost {
     pub events_dropped: u64,
     /// Entries seen but not yet accepted by the broker.
     pub unsent: u64,
+    /// The inventory of this container is known to be incomplete (the
+    /// /proc backfill hit its maps cap): never covered while it runs.
+    pub incomplete: bool,
     /// The container is gone; its last heartbeat.
     pub ended: bool,
     pub heartbeat_at: NaiveDateTime,
@@ -810,6 +816,7 @@ impl Store {
         });
         self.discarded.retain(|key, _| resolve(key.0).is_some());
         self.drops.retain(|key, _| resolve(key.0).is_some());
+        self.incomplete.retain(|key| resolve(key.0).is_some());
         self.backfilled_at
             .retain(|key, _| resolve(key.0).is_some_and(|p| p.containers.contains_key(&key.1)));
     }
@@ -920,6 +927,7 @@ impl Store {
                     tracking_since: cov.tracking_since,
                     events_dropped,
                     unsent,
+                    incomplete: self.incomplete.contains(&key),
                     ended: false,
                     heartbeat_at: wall,
                     heartbeat_secs: HEARTBEAT_EVERY.as_secs() as u32,
@@ -1003,19 +1011,40 @@ pub fn exec_mappings(maps: &str, exe: Option<&str>) -> Vec<(String, Origin)> {
 /// this has its first 4 MiB of them backfilled.
 const MAX_MAPS_BYTES: u64 = 4 << 20;
 
-fn read_capped(path: &Path, cap: u64) -> Option<String> {
+/// Read at most `cap` bytes; `.1` is true when the file was longer (the
+/// read was cut short).
+fn read_capped(path: &Path, cap: u64) -> Option<(String, bool)> {
     use std::io::Read;
-    let mut s = String::new();
+    let mut buf = Vec::new();
     std::fs::File::open(path)
         .ok()?
-        .take(cap)
-        .read_to_string(&mut s)
+        .take(cap + 1)
+        .read_to_end(&mut buf)
         .ok()?;
-    Some(s)
+    let truncated = buf.len() as u64 > cap;
+    buf.truncate(cap as usize);
+    // A cut in the middle of a UTF-8 sequence, or of a line: only whole
+    // lines up to the cut are used.
+    let mut text = String::from_utf8_lossy(&buf).into_owned();
+    if truncated {
+        let end = text.rfind('\n').map_or(0, |i| i + 1);
+        text.truncate(end);
+    }
+    Some((text, truncated))
 }
 
-/// What one /proc pass found: sightings per container not yet backfilled.
-pub type BackfillScan = Vec<(ContainerKey, Vec<Sighting>)>;
+/// What one /proc pass found for one container not yet backfilled.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct BackfillFound {
+    pub sightings: Vec<Sighting>,
+    /// A process's maps were longer than [`MAX_MAPS_BYTES`]: executable
+    /// mappings past the cut were not read, so the container's inventory
+    /// is known to be incomplete for as long as it runs.
+    pub truncated: bool,
+}
+
+/// What one /proc pass found, per container.
+pub type BackfillScan = Vec<(ContainerKey, BackfillFound)>;
 
 /// One pass over `proc_root`: for every container not in `done` whose pod
 /// is tracked, the executable and executable mappings of each of its
@@ -1034,7 +1063,7 @@ where
     let Ok(dir) = std::fs::read_dir(proc_root) else {
         return Vec::new();
     };
-    let mut found: HashMap<ContainerKey, Vec<Sighting>> = HashMap::new();
+    let mut found: HashMap<ContainerKey, BackfillFound> = HashMap::new();
     for ent in dir.flatten() {
         let name = ent.file_name();
         let Some(pid) = name
@@ -1044,7 +1073,7 @@ where
             continue;
         };
         let base = proc_root.join(pid);
-        let Some(cg) = read_capped(&base.join("cgroup"), 64 << 10) else {
+        let Some((cg, _)) = read_capped(&base.join("cgroup"), 64 << 10) else {
             continue;
         };
         let Some((uid, cid)) = process_container(&cg) else {
@@ -1066,17 +1095,22 @@ where
             .flatten();
         // Same process throughout? A pid reused by another container's
         // process in between would credit its files to this one.
-        if read_capped(&base.join("cgroup"), 64 << 10).as_deref() != Some(cg.as_str()) {
+        if read_capped(&base.join("cgroup"), 64 << 10)
+            .map(|(c, _)| c)
+            .as_deref()
+            != Some(cg.as_str())
+        {
             continue;
         }
         let out = found.entry(key).or_default();
         if let Some((path, origin)) = exe.clone() {
-            out.push(backfilled("exec", path, origin));
+            out.sightings.push(backfilled("exec", path, origin));
         }
-        if let Some(maps) = maps {
+        if let Some((maps, truncated)) = maps {
+            out.truncated |= truncated;
             let exe_path = exe.as_ref().map(|(p, _)| p.as_str());
             for (lib, origin) in exec_mappings(&maps, exe_path) {
-                out.push(backfilled("lib", lib, origin));
+                out.sightings.push(backfilled("lib", lib, origin));
             }
         }
     }
@@ -1092,11 +1126,19 @@ pub fn apply_backfill(
     wall: NaiveDateTime,
 ) -> usize {
     let mut n = 0;
-    for (key, sightings) in scan {
+    for (key, found) in scan {
         if !store.needs_backfill(&key) {
             continue;
         }
-        for s in sightings {
+        if found.truncated {
+            warn!(
+                container = %key.1,
+                max_bytes = MAX_MAPS_BYTES,
+                "runtime inventory: /proc maps over the cap; this container's coverage is incomplete"
+            );
+            store.incomplete.insert(key.clone());
+        }
+        for s in found.sightings {
             store.add(key.clone(), s, now, wall);
         }
         store.mark_backfilled(key, wall);
@@ -1671,6 +1713,55 @@ mod tests {
         assert_eq!(b.events_dropped, 2, "both discarded sightings");
         s.add(key, sg("exec", "/after".into(), "ebpf"), t0, wall());
         assert_eq!(s.containers(), 1, "capture resumes");
+    }
+
+    #[test]
+    fn a_truncated_maps_read_marks_the_container_incomplete_in_every_heartbeat() {
+        let root = std::env::temp_dir().join(format!("kg-rt-trunc-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let pid = root.join("4343");
+        std::fs::create_dir_all(&pid).unwrap();
+        std::fs::write(
+            pid.join("cgroup"),
+            format!("0::/../kubepods/burstable/pod{UID}/{CID}\n"),
+        )
+        .unwrap();
+        // More executable mappings than the cap holds.
+        let line =
+            "7f00000000-7f00001000 r-xp 00000000 00:2a 456 /usr/lib/x86_64-linux-gnu/libfoo.so.1\n";
+        let maps = line.repeat(MAX_MAPS_BYTES as usize / line.len() + 10);
+        std::fs::write(pid.join("maps"), &maps).unwrap();
+        std::os::unix::fs::symlink("/usr/bin/app", pid.join("exe")).unwrap();
+
+        let gen = pod_flags::generation_for_uid(Some(UID));
+        let mut s = Store::default();
+        let scan = scan_proc(&root, &HashSet::new(), Mode::Full, |g| g == gen);
+        assert_eq!(scan.len(), 1);
+        assert!(scan[0].1.truncated, "the cut is detected");
+        assert!(
+            scan[0]
+                .1
+                .sightings
+                .iter()
+                .any(|x| x.path.ends_with("libfoo.so.1")),
+            "whole lines before the cut are still used"
+        );
+        apply_backfill(&mut s, scan, Instant::now(), wall());
+        let pods = [(gen, pod_started(-5))];
+        let probe = Some((at(0), true));
+        for h in 1..4 {
+            let b = &s.coverage_due(&pods, probe, Mode::Full, 0, "n1", at(h))[0];
+            assert!(b.incomplete, "heartbeat {h} carries it");
+        }
+
+        // Under the cap: complete.
+        std::fs::write(pid.join("maps"), line).unwrap();
+        let mut s = Store::default();
+        let scan = scan_proc(&root, &HashSet::new(), Mode::Full, |g| g == gen);
+        assert!(!scan[0].1.truncated);
+        apply_backfill(&mut s, scan, Instant::now(), wall());
+        assert!(!s.coverage_due(&pods, probe, Mode::Full, 0, "n1", at(1))[0].incomplete);
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
