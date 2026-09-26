@@ -7,11 +7,12 @@ icon: "bug"
 ## Overview
 
 The supplychain component reads Trivy Operator reports and, when its opt-in
-Grype matcher is enabled, matches SBOMs (Trivy's, plus any registry-attached
-SBOM) itself; it posts one payload per image digest and source to the
-broker. The broker stores them keyed by digest (never per
-pod), joins them to the [image inventory](/architecture) and serves them to
-the UI, the assistant and the CLI.
+Grype matcher is enabled, matches SBOMs itself: Trivy's, plus any
+registry-attached SBOM when the opt-in `supplychain.sources.registry` source
+is on. It posts one payload per image digest and source to the broker. The
+broker stores them keyed by digest (never per pod), joins them to the
+[image inventory](/architecture) and serves them to the UI, the assistant
+and the CLI.
 
 Findings come from Trivy Operator reports and, when the matcher is enabled,
 from kguardian's own Grype matcher. kguardian never blocks a workload.
