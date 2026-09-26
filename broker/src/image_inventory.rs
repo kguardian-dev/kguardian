@@ -54,6 +54,7 @@ use diesel::sql_query;
 use diesel::sql_types::{Array, BigInt, Bool, Double, Jsonb, Nullable, Text, Timestamp};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::atomic::{AtomicU64, Ordering};
 use tracing::{debug, warn};
 
 type DbPool = r2d2::Pool<ConnectionManager<PgConnection>>;
@@ -302,6 +303,76 @@ fn bounded(s: Option<String>, max: usize) -> Option<String> {
         .filter(|s| !s.is_empty() && s.len() <= max)
 }
 
+/// [`bounded`] for an image reference, repository or tag: also refused
+/// when it holds a control character or a Unicode line/paragraph separator
+/// (U+2028/U+2029). No valid reference has one, and these values are
+/// written into generated YAML, where a line break would start a new line.
+fn bounded_ref(s: Option<String>, max: usize) -> Option<String> {
+    bounded(s, max).filter(|v| {
+        !v.chars()
+            .any(|c| c.is_control() || c == '\u{2028}' || c == '\u{2029}')
+    })
+}
+
+/// What a container's image reference is stored as when the controller
+/// reported one that is not a valid reference (a control character or line
+/// separator, or too long). The container is kept, so it is never missing
+/// from the inventory, profiles or generated policies; everything
+/// downstream treats it as an image that cannot be judged.
+pub const MALFORMED_REFERENCE: &str = "malformed_reference";
+
+static MALFORMED_IMAGE_REF: AtomicU64 = AtomicU64::new(0);
+static MALFORMED_REPOSITORY: AtomicU64 = AtomicU64::new(0);
+static MALFORMED_TAG: AtomicU64 = AtomicU64::new(0);
+
+/// Validates an image field that was reported. `Ok(None)`: absent;
+/// `Err(())`: reported but malformed (logged and counted; the raw value is
+/// only ever logged escaped and cut short).
+fn checked_ref(
+    s: Option<String>,
+    max: usize,
+    field: &'static str,
+    pod: &str,
+    container: &str,
+) -> Result<Option<String>, ()> {
+    let reported = s.as_deref().is_some_and(|v| !v.trim().is_empty());
+    match bounded_ref(s.clone(), max) {
+        Some(v) => Ok(Some(v)),
+        None if !reported => Ok(None),
+        None => {
+            let counter = match field {
+                "image_ref" => &MALFORMED_IMAGE_REF,
+                "repository" => &MALFORMED_REPOSITORY,
+                _ => &MALFORMED_TAG,
+            };
+            counter.fetch_add(1, Ordering::Relaxed);
+            let preview: String = s.unwrap_or_default().chars().take(64).collect();
+            warn!(pod, container, field, value = ?preview,
+                "malformed image reference from the controller (control character, line separator or too long); kept as malformed_reference");
+            Err(())
+        }
+    }
+}
+
+/// Prometheus text for malformed image references seen at ingest.
+pub fn render_malformed_metrics() -> String {
+    let mut out = String::from(
+        "# HELP kguardian_image_inventory_malformed_total Image references reported by the controller that were not valid (control character, line separator or too long), by field\n\
+         # TYPE kguardian_image_inventory_malformed_total counter\n",
+    );
+    for (field, c) in [
+        ("image_ref", &MALFORMED_IMAGE_REF),
+        ("repository", &MALFORMED_REPOSITORY),
+        ("tag", &MALFORMED_TAG),
+    ] {
+        out.push_str(&format!(
+            "kguardian_image_inventory_malformed_total{{field=\"{field}\"}} {}\n",
+            c.load(Ordering::Relaxed)
+        ));
+    }
+    out
+}
+
 fn bounded_list(v: Option<Vec<String>>) -> Option<Vec<String>> {
     let mut out: Vec<String> = v?
         .into_iter()
@@ -444,8 +515,19 @@ pub fn inventory_from_post(
             warn!(pod = %pod.pod_name, container = %name, kind = %c.kind, "unknown container kind; skipped");
             continue;
         }
-        let Some(image_ref) = bounded(c.image, MAX_IMAGE_REF_LEN) else {
-            continue;
+        // A malformed reference keeps the container (as
+        // malformed_reference): an image that cannot be read is an image
+        // that cannot be judged, never a container that is not there.
+        let image_ref = match checked_ref(
+            c.image,
+            MAX_IMAGE_REF_LEN,
+            "image_ref",
+            &pod.pod_name,
+            &name,
+        ) {
+            Ok(Some(r)) => r,
+            Ok(None) => continue,
+            Err(()) => MALFORMED_REFERENCE.to_string(),
         };
         if !seen_names.insert(name.clone()) {
             continue;
@@ -462,8 +544,19 @@ pub fn inventory_from_post(
             .filter(|d| is_valid_digest(d));
         let digest = match (digest, digest_kind) {
             (Some(d), Some(k)) => {
-                let repository = bounded(c.repository, MAX_REPOSITORY_LEN);
-                let tag = bounded(c.tag, MAX_TAG_LEN);
+                // A malformed repository or tag is dropped, counted and
+                // logged. Not stored as a marker: supplychain and the
+                // registry SBOM source look repositories up in registries.
+                let repository = checked_ref(
+                    c.repository,
+                    MAX_REPOSITORY_LEN,
+                    "repository",
+                    &pod.pod_name,
+                    &name,
+                )
+                .unwrap_or(None);
+                let tag =
+                    checked_ref(c.tag, MAX_TAG_LEN, "tag", &pod.pod_name, &name).unwrap_or(None);
                 let entry = images.entry(d.clone()).or_insert_with(|| ImageRow {
                     digest: d.clone(),
                     repository: None,
@@ -1230,6 +1323,51 @@ mod tests {
         ])
     }
 
+    /// Line breaks (the five YAML/Unicode ones) and other control
+    /// characters never enter an image reference, repository or tag: these
+    /// are written into generated policy YAML.
+    #[test]
+    fn image_fields_with_line_breaks_are_refused() {
+        let p = pod(Some("prod"), Some("Deployment"), Some("web"));
+        let before = MALFORMED_IMAGE_REF.load(Ordering::Relaxed);
+        for sep in ["\n", "\r", "\u{0085}", "\u{2028}", "\u{2029}", "\t"] {
+            let inj = format!("evil{sep}---{sep}apiVersion: v1{sep}kind: Secret");
+            let list = json!([
+                {"name": "a", "kind": "regular", "image": inj.clone(), "digest": D, "digest_kind": "repo"},
+                {"name": "b", "kind": "regular", "image": "nginx:1.27", "digest": D2, "digest_kind": "repo",
+                 "repository": inj.clone(), "tag": inj.clone()}
+            ]);
+            let inv = inventory_from_post(&p, Some(&list), None);
+            // The container with the bad reference is kept, marked; never
+            // missing.
+            assert_eq!(inv.containers.len(), 2, "{sep:?}: container dropped");
+            let a = inv
+                .containers
+                .iter()
+                .find(|c| c.container_name == "a")
+                .unwrap();
+            assert_eq!(a.image_ref, MALFORMED_REFERENCE, "{sep:?}");
+            assert_eq!(a.image_digest.as_deref(), Some(D));
+            // A bad repository or tag is not stored (never looked up).
+            let img = inv.images.iter().find(|i| i.digest == D2).unwrap();
+            assert!(
+                img.repository.is_none() && img.tags.is_empty(),
+                "{sep:?}: {img:?}"
+            );
+        }
+        assert!(MALFORMED_IMAGE_REF.load(Ordering::Relaxed) >= before + 6);
+        let m = render_malformed_metrics();
+        assert!(m.contains("kguardian_image_inventory_malformed_total{field=\"image_ref\"}"));
+        assert!(m.contains("kguardian_image_inventory_malformed_total{field=\"repository\"}"));
+        // A reference that is only too long is malformed too; one that is
+        // absent is not a container image at all.
+        let long = json!([{"name": "c", "kind": "regular", "image": "r/".repeat(MAX_IMAGE_REF_LEN), "digest": D, "digest_kind": "repo"},
+                          {"name": "d", "kind": "regular", "image": "   ", "digest": D2, "digest_kind": "repo"}]);
+        let inv = inventory_from_post(&p, Some(&long), None);
+        assert_eq!(inv.containers.len(), 1);
+        assert_eq!(inv.containers[0].image_ref, MALFORMED_REFERENCE);
+    }
+
     #[test]
     fn older_controller_without_the_field_writes_nothing() {
         let p = pod(Some("prod"), Some("Deployment"), Some("web"));
@@ -1556,6 +1694,31 @@ mod tests {
             .count()
             .get_result(conn)
             .expect("count")
+    }
+
+    /// A container whose reference was malformed is stored and listed
+    /// with its workload (as malformed_reference), never missing.
+    #[test]
+    #[ignore = "requires a live postgres (set KG_TEST_DATABASE_URL)"]
+    fn live_database_keeps_malformed_reference_containers() {
+        let mut conn = live_conn();
+        let p = pod(Some("prod"), Some("Deployment"), Some("web"));
+        let list = json!([{"name": "app", "kind": "regular", "image": "evil\n---\nkind: Secret",
+            "digest": D, "digest_kind": "repo", "state": "running"}]);
+        let inv = inventory_from_post(&p, Some(&list), None);
+        assert!(upsert_inventory(&mut conn, &inv).unwrap() > 0);
+        let group = workload_containers(&mut conn, "prod", "Deployment", "web").unwrap();
+        let app = group
+            .containers
+            .iter()
+            .find(|c| c.container_name == "app")
+            .expect("container missing");
+        assert_eq!(app.digests[0].digest, D);
+        let raw = serde_json::to_string(&group).unwrap();
+        assert!(
+            raw.contains(MALFORMED_REFERENCE) && !raw.contains("kind: Secret"),
+            "{raw}"
+        );
     }
 
     #[test]

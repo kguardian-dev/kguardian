@@ -117,6 +117,54 @@ on its own port (`?namespace=`, `?verdict=`). It requires the same broker
 READ-scope token as the broker's read API (`Authorization: Bearer ...`);
 with broker auth off it is open, like the broker.
 
+## Generating policies
+
+kguardian can write the policy for you from the signers it verified on
+running images, for three engines:
+
+| Format | Document | Audit mode |
+|---|---|---|
+| `kyverno` | `ImageValidatingPolicy` (`policies.kyverno.io/v1beta1`) | `validationActions: [Audit]`, `mutateDigest` and `verifyDigest` off so no pod is changed |
+| `policy-controller` | `ClusterImagePolicy` (`policy.sigstore.dev/v1beta1`) | `mode: warn` (policy-controller admits and warns; it has no audit-only mode) |
+| `kguardian` | `ImageTrustPolicy` / `ClusterImageTrustPolicy` | always report only |
+
+Get them with `kubectl kguardian images admission-policy`, from
+`GET /attestations/policy`, or as the `admission` artifact of a workload's
+export bundle (`ImageTrustPolicy` in audit, Kyverno `Deny` in enforce).
+
+- A repository is covered only when **every** running digest of it
+  verified. Unsigned, invalid, unchecked, unknown, and key-signed images
+  whose key kguardian does not hold are listed in the header as not
+  covered, never given a guessed signer.
+- The authorities are the signers seen. A GitHub Actions subject pinned to
+  a tag (`.../release.yaml@refs/tags/v1.2.3`) is widened to any tag of the
+  same workflow, or the next release would fail; other subjects stay
+  exact. Regular expressions are anchored.
+- SLSA provenance is required when every digest of the repository has it,
+  verified and signed by one of the authorities. policy-controller checks
+  only attestations for an authority that lists them, so the requirement
+  is a second `ClusterImagePolicy` next to the signature one.
+- Image globs follow each engine. Kyverno matches the image as the pod
+  spec writes it, so every spelling is listed, bare, with a tag and with a
+  digest: for Docker Hub `nginx`, `library/nginx`, `docker.io/nginx`,
+  `docker.io/library/nginx` and `index.docker.io/...`. policy-controller
+  matches the normalised name (`index.docker.io/library/nginx:**`).
+- The header lists every identity the policy trusts, with the images and
+  digests it was seen verifying, under "review every identity before
+  applying": they were observed on running images, not vetted. If a rogue
+  signer signed an image you run, it is in that list.
+- A pod whose image reference was malformed when reported (a control
+  character, line separator or over-long value) is kept in the inventory as
+  `malformed_reference` and listed as not covered, never dropped. The broker
+  counts these in `kguardian_image_inventory_malformed_total{field}`.
+- policy-controller only checks namespaces labelled
+  `policy.sigstore.dev/include=true`.
+
+The generated policies were checked with Kyverno CLI 1.19.1 against
+`registry.k8s.io/pause:3.10` (keyless: passes; with another identity, fails)
+and with policy-controller's `policy-tester` 0.15.1 against the same image
+and a cosign key-signed image (both verify; another identity or key fails).
+
 ## How it works
 
 Every `evaluator.imageTrust.interval` (5 minutes) the evaluator lists the

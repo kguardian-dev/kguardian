@@ -72,6 +72,7 @@ pub const SCHEMA_VERSION: i64 = 1;
 const MAX_URI: usize = 1024; // issuer, SAN, builder, source repo
 const MAX_SHORT: usize = 128; // reasons, formats, refs
 const MAX_DETAIL: usize = 256;
+const MAX_KEY_PEM: usize = 4096;
 const TOO_MANY: &str = "too many items";
 
 /// `key_signed`: signed with a public key the component does not hold,
@@ -211,6 +212,9 @@ pub struct Signature {
     pub key_name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub key_fingerprint: Option<String>,
+    /// The configured public key (PEM) that verified it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key_pem: Option<String>,
     /// The key hint a key-signed bundle carries, verified or not.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub key_hint: Option<String>,
@@ -253,6 +257,9 @@ pub struct Attestation {
     pub key_name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub key_fingerprint: Option<String>,
+    /// The configured public key (PEM) that verified it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key_pem: Option<String>,
     /// The key hint a key-signed bundle carries, verified or not.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub key_hint: Option<String>,
@@ -343,15 +350,27 @@ fn too_long(v: &Option<String>, max: usize, what: &str) -> Result<(), Reject> {
     }
 }
 
-fn cap_signer(
-    kind: &mut Option<String>,
-    issuer: &mut Option<String>,
-    san: &mut Option<String>,
-    key_name: &mut Option<String>,
-    key_fingerprint: &mut Option<String>,
-    key_hint: &mut Option<String>,
-    verified: bool,
-) -> Result<(), Reject> {
+/// The signer fields of a [`Signature`] or an [`Attestation`].
+struct SignerFields<'a> {
+    kind: &'a mut Option<String>,
+    issuer: &'a mut Option<String>,
+    san: &'a mut Option<String>,
+    key_name: &'a mut Option<String>,
+    key_fingerprint: &'a mut Option<String>,
+    key_pem: &'a mut Option<String>,
+    key_hint: &'a mut Option<String>,
+}
+
+fn cap_signer(f: SignerFields<'_>, verified: bool) -> Result<(), Reject> {
+    let SignerFields {
+        kind,
+        issuer,
+        san,
+        key_name,
+        key_fingerprint,
+        key_pem,
+        key_hint,
+    } = f;
     // A verified identity is matched by trust policies, so it is stored
     // whole or refused: a truncated SAN could match a policy the real one
     // does not.
@@ -360,6 +379,18 @@ fn cap_signer(
         too_long(san, MAX_URI, "san")?;
         too_long(key_name, MAX_SHORT, "key_name")?;
         too_long(key_fingerprint, 64, "key_fingerprint")?;
+    }
+    if let Some(pem) = key_pem.as_deref() {
+        let pem = pem.trim();
+        if !pem.is_empty()
+            && (pem.len() > MAX_KEY_PEM
+                || !pem.starts_with("-----BEGIN PUBLIC KEY-----")
+                || !pem.ends_with("-----END PUBLIC KEY-----"))
+        {
+            return Err(Reject::Unprocessable(
+                "key_pem must be a PEM public key of at most 4096 bytes".into(),
+            ));
+        }
     }
     if let Some(k) = kind.as_deref() {
         if !k.is_empty() && !SIGNER_KINDS.contains(&k) {
@@ -374,12 +405,16 @@ fn cap_signer(
     cap(key_name, MAX_SHORT);
     cap(key_fingerprint, 64);
     cap(key_hint, MAX_SHORT);
+    if key_pem.as_deref().is_some_and(|p| p.trim().is_empty()) {
+        *key_pem = None;
+    }
     if !verified {
         *kind = None;
         *issuer = None;
         *san = None;
         *key_name = None;
         *key_fingerprint = None;
+        *key_pem = None;
     }
     Ok(())
 }
@@ -570,12 +605,15 @@ pub fn parse_post(
         cap(&mut s.detail, MAX_DETAIL);
         cap(&mut s.subject, MAX_SHORT + 64);
         cap_signer(
-            &mut s.signer_kind,
-            &mut s.issuer,
-            &mut s.san,
-            &mut s.key_name,
-            &mut s.key_fingerprint,
-            &mut s.key_hint,
+            SignerFields {
+                kind: &mut s.signer_kind,
+                issuer: &mut s.issuer,
+                san: &mut s.san,
+                key_name: &mut s.key_name,
+                key_fingerprint: &mut s.key_fingerprint,
+                key_pem: &mut s.key_pem,
+                key_hint: &mut s.key_hint,
+            },
             s.verified,
         )?;
     }
@@ -588,12 +626,15 @@ pub fn parse_post(
         cap(&mut a.subject, MAX_SHORT + 64);
         cap(&mut a.payload_sha256, 64);
         cap_signer(
-            &mut a.signer_kind,
-            &mut a.issuer,
-            &mut a.san,
-            &mut a.key_name,
-            &mut a.key_fingerprint,
-            &mut a.key_hint,
+            SignerFields {
+                kind: &mut a.signer_kind,
+                issuer: &mut a.issuer,
+                san: &mut a.san,
+                key_name: &mut a.key_name,
+                key_fingerprint: &mut a.key_fingerprint,
+                key_pem: &mut a.key_pem,
+                key_hint: &mut a.key_hint,
+            },
             a.verified,
         )?;
         if let (true, Some(pr)) = (a.verified, &a.provenance) {
@@ -1114,7 +1155,7 @@ pub const RUNNING_MAX_LIMIT: i64 = 200;
 /// image. `verdict` is `None` when the digest has not been checked (no
 /// result yet, or signature discovery is off): not checked, never
 /// "unsigned".
-#[derive(Debug, QueryableByName, Serialize)]
+#[derive(Debug, Clone, QueryableByName, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RunningImage {
     #[diesel(sql_type = Text)]
@@ -1177,6 +1218,8 @@ const RUNNING_SQL: &str = concat!(
      WHERE ",
     crate::image_inventory::running_sql!("$1"),
     " AND ($2::text IS NULL OR wc.pod_namespace = $2) \
+     AND ($10::text IS NULL OR wc.workload_kind = $10) \
+     AND ($11::text IS NULL OR wc.workload_name = $11) \
      AND ($3::text IS NULL OR (wc.cluster_id, wc.pod_namespace, wc.workload_kind, wc.workload_name, \
           wc.container_name, wc.image_digest) > ($3, $4, $5, $6, $7, $8)) \
      ORDER BY wc.cluster_id, wc.pod_namespace, wc.workload_kind, wc.workload_name, wc.container_name, wc.image_digest \
@@ -1210,7 +1253,7 @@ fn encode_cursor(r: &RunningImage) -> String {
     hex_encode(v.to_string().as_bytes())
 }
 
-fn decode_cursor(s: &str) -> Option<[String; 6]> {
+pub(crate) fn decode_cursor(s: &str) -> Option<[String; 6]> {
     let raw = hex_decode(s)?;
     let v: Vec<String> = serde_json::from_slice(&raw).ok()?;
     v.try_into().ok()
@@ -1219,6 +1262,18 @@ fn decode_cursor(s: &str) -> Option<[String; 6]> {
 pub fn running(
     conn: &mut PgConnection,
     namespace: Option<&str>,
+    after: Option<&[String; 6]>,
+    limit: i64,
+) -> Result<RunningPage, DbError> {
+    running_filtered(conn, namespace, None, after, limit)
+}
+
+/// [`running`], optionally for one workload (`kind`, `name`) of
+/// `namespace`.
+pub fn running_filtered(
+    conn: &mut PgConnection,
+    namespace: Option<&str>,
+    workload: Option<(&str, &str)>,
     after: Option<&[String; 6]>,
     limit: i64,
 ) -> Result<RunningPage, DbError> {
@@ -1233,6 +1288,8 @@ pub fn running(
         .bind::<Nullable<Text>, _>(a(4))
         .bind::<Nullable<Text>, _>(a(5))
         .bind::<BigInt, _>(limit + 1)
+        .bind::<Nullable<Text>, _>(workload.map(|w| w.0))
+        .bind::<Nullable<Text>, _>(workload.map(|w| w.1))
         .load(conn)?;
     let next_after = if items.len() as i64 > limit {
         items.truncate(limit as usize);

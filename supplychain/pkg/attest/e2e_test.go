@@ -23,11 +23,16 @@ func TestBrokerE2E(t *testing.T) {
 		t.Fatal(err)
 	}
 	reg := newFixtureRegistry(t, false)
-	targets := map[string]Target{
-		"keyless":  reg.load(loadRecording(t, "pause-3.10"), ""),
-		"key":      reg.load(loadRecording(t, "key-legacy"), ""),
-		"unsigned": reg.load(loadRecording(t, "kguardian-controller-v1.15.1"), ""),
-		"tampered": reg.load(tamperKeylessSig(t), "tampered/pause"),
+	// Ordered: "tampered" shares the pause digest, so it goes first and
+	// the genuine keyless result is the one left stored.
+	targets := []struct {
+		name string
+		tg   Target
+	}{
+		{"tampered", reg.load(tamperKeylessSig(t), "tampered/pause")},
+		{"keyless", reg.load(loadRecording(t, "pause-3.10"), "")},
+		{"key", reg.load(loadRecording(t, "key-legacy"), "")},
+		{"unsigned", reg.load(loadRecording(t, "kguardian-controller-v1.15.1"), "")},
 	}
 	ctx := context.Background()
 	inv, err := bc.RunningImages(ctx)
@@ -37,7 +42,8 @@ func TestBrokerE2E(t *testing.T) {
 	t.Logf("broker inventory: %d running digests", len(inv))
 	v := newKeyVerifier(t, fixtureKey(t))
 	want := map[string]string{"keyless": VerdictVerified, "key": VerdictVerified, "unsigned": VerdictUnsigned, "tampered": VerdictInvalid}
-	for name, tg := range targets {
+	for _, x := range targets {
+		name, tg := x.name, x.tg
 		r := v.Verify(ctx, tg)
 		if r.Verdict != want[name] {
 			t.Fatalf("%s: verdict %s", name, r.Verdict)

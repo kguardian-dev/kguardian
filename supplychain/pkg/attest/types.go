@@ -177,6 +177,9 @@ type Signer struct {
 	// (hex) of its DER SubjectPublicKeyInfo.
 	KeyName        string `json:"key_name,omitempty"`
 	KeyFingerprint string `json:"key_fingerprint,omitempty"`
+	// KeyPEM is the configured public key (never a private key), so a
+	// policy naming this signer can be generated.
+	KeyPEM string `json:"key_pem,omitempty"`
 	// KeyHint is the key hint a key-signed bundle carries, verified or
 	// not (cosign sets it to the base64 sha256 of the public key).
 	KeyHint        string     `json:"key_hint,omitempty"`

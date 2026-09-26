@@ -31,6 +31,11 @@ import (
 // is no current evaluation.
 func TestStatusAgainstARealAPIServer(t *testing.T) {
 	if os.Getenv("KUBEBUILDER_ASSETS") == "" {
+		// In CI a missing API server is a broken job, not a reason to
+		// pass: a skipped test there reads as green (#1690).
+		if os.Getenv("CI") == "true" || os.Getenv("GITHUB_ACTIONS") == "true" {
+			t.Fatal("KUBEBUILDER_ASSETS is not set in CI: the envtest install step did not run or failed")
+		}
 		t.Skip("set KUBEBUILDER_ASSETS (setup-envtest) to run against a real API server")
 	}
 	env := &envtest.Environment{

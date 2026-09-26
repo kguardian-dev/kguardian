@@ -15,7 +15,7 @@
 //! | `securitycontext` | the profile's PSS recommendation ([`crate::pod_security`]) |
 //! | `vex` | [`crate::in_use_store::openvex_draft`]: an OpenVEX 0.2.0 draft (JSON, not part of the apply stream) |
 //! | `sbom` | the stored SBOM of each container image ([`crate::supplychain_read::cyclonedx_for`], the `/images/{digest}/sbom/cyclonedx` document): one CycloneDX JSON document per digest, labelled with its source and trust |
-//! | `admission` | not available until the image trust policy exists (P2-3) |
+//! | `admission` | [`crate::admission`]: an `ImageTrustPolicy` (audit) or a Kyverno `ImageValidatingPolicy` with `Deny` (enforce) from the signers kguardian verified on the workload's images |
 //!
 //! Report and generate only: kguardian never applies anything. Every
 //! document carries provenance annotations and a header saying so.
@@ -703,6 +703,111 @@ fn seccomp_doc(
     })
 }
 
+/// Image admission policy for the workload's running images (#1533 P2-3).
+/// Audit: a namespaced kguardian `ImageTrustPolicy` (the evaluator reports
+/// would-deny containers). Enforce: a Kyverno `ImageValidatingPolicy` with
+/// `Deny`, refused while an image is not covered (not every running digest
+/// verified) unless `acknowledgePartial`.
+fn admission_doc(
+    conn: &mut PgConnection,
+    key: &Key,
+    p: &Profile,
+    plan: &Plan,
+) -> Result<Document, DbError> {
+    let mode = if plan.enforce { "enforce" } else { "audit" };
+    let artifact = "admission";
+    let Some(rows) =
+        crate::admission::load_rows(conn, Some(&key.namespace), Some((&key.kind, &key.name)))?
+    else {
+        return Ok(unavailable(
+            artifact,
+            mode,
+            "the workload runs more containers than one generation reads",
+        ));
+    };
+    if rows.is_empty() {
+        return Ok(unavailable(
+            artifact,
+            mode,
+            "no running container is known for this workload",
+        ));
+    }
+    let ap = crate::admission::plan(&rows);
+    if plan.enforce && !ap.uncovered.is_empty() && !plan.acknowledge_partial {
+        let list: Vec<String> = ap
+            .uncovered
+            .iter()
+            .map(|(r, w)| crate::admission::comment(&format!("{r} ({w})")))
+            .collect();
+        return Ok(refused(
+            artifact,
+            format!(
+                "an enforcing admission policy would not cover every image this workload runs: {}",
+                list.join("; ")
+            ),
+        ));
+    }
+    if ap.groups.is_empty() {
+        return Ok(unavailable(
+            artifact,
+            mode,
+            &format!(
+                "no image of this workload has every running digest signed by a verified signer ({})",
+                ap.uncovered
+                    .iter()
+                    .map(|(r, w)| crate::admission::comment(&format!("{r}: {w}")))
+                    .collect::<Vec<_>>()
+                    .join("; ")
+            ),
+        ));
+    }
+    let format = if plan.enforce { "kyverno" } else { "kguardian" };
+    let prefix = object_name(&key.name);
+    let o = crate::admission::Options {
+        format,
+        enforce: plan.enforce,
+        name_prefix: &prefix,
+        namespace: Some(&key.namespace),
+    };
+    let scope = format!("{}/{}/{}", key.namespace, key.kind, key.name);
+    let mut header = doc_header(artifact, mode);
+    header.push_str(&crate::admission::header(&ap, &o, &scope));
+    let mut body = String::new();
+    let prov = provenance(key, p, mode);
+    // The bundle puts "---" before this content; separate only the
+    // documents after the first.
+    for (i, mut d) in crate::admission::documents(&ap, &o).into_iter().enumerate() {
+        if let Some(a) = d["metadata"]["annotations"].as_object_mut() {
+            for (k, v) in &prov {
+                a.insert(k.clone(), Value::String(v.clone()));
+            }
+        }
+        if i > 0 {
+            body.push_str("---\n");
+        }
+        body.push_str(&serde_norway::to_string(&d)?);
+    }
+    let (api_version, kind) = if plan.enforce {
+        ("policies.kyverno.io/v1beta1", "ImageValidatingPolicy")
+    } else {
+        ("kguardian.dev/v1alpha1", "ImageTrustPolicy")
+    };
+    Ok(Document {
+        artifact,
+        file_name: format!("{artifact}.yaml"),
+        available: true,
+        refused: None,
+        reason: None,
+        api_version: Some(api_version.to_string()),
+        kind: Some(kind.to_string()),
+        mode,
+        content_type: Some("application/yaml"),
+        content: Some(header + &body),
+        apply_with: Some(format!("kubectl apply -f {artifact}.yaml")),
+        image: None,
+    })
+}
+
 fn security_context_doc(key: &Key, p: &Profile, plan: &Plan) -> Document {
     let mode = if plan.enforce { "enforce" } else { "audit" };
     let artifact = "securitycontext";
@@ -1074,11 +1179,7 @@ pub fn build_documents(
                 continue;
             }
             "vex" => vex_doc(conn, key, mode)?,
-            _ => unavailable(
-                "admission",
-                mode,
-                "not available: the image admission policy needs the image trust policy (P2-3), which has not landed",
-            ),
+            _ => admission_doc(conn, key, p, plan)?,
         };
         docs.push(d);
     }
@@ -1107,16 +1208,33 @@ fn escape_unicode_breaks(s: &str) -> String {
     out
 }
 
-/// Text for inside a single comment line: no line break of any kind.
-fn comment_text(s: &str) -> String {
-    escape_unicode_breaks(s).replace(YAML_LINE_BREAKS, " ")
+/// Every other C0/C1 control (tab, ESC, DEL, NUL, ...) as a space: none of
+/// them belongs in a comment a human reads, and a terminal may act on some.
+/// Line breaks are left for the callers, which handle them.
+fn blank_controls(s: &str) -> String {
+    s.chars()
+        .map(|c| {
+            if c.is_control() && c != '\n' && c != '\r' {
+                ' '
+            } else {
+                c
+            }
+        })
+        .collect()
+}
+
+/// Text for inside a single comment line: no line break of any kind, and
+/// no other control character. Shared by every generated YAML comment
+/// (the export bundle and the image admission policies).
+pub(crate) fn comment_text(s: &str) -> String {
+    blank_controls(&escape_unicode_breaks(s)).replace(YAML_LINE_BREAKS, " ")
 }
 
 /// `text` as comment lines: every segment between any YAML line break
 /// starts with `#`, so nothing in it (a package name, a status note) can
 /// start a document or a key in the `kubectl apply` stream.
-fn push_commented(y: &mut String, text: &str) {
-    let t = escape_unicode_breaks(text).replace("\r\n", "\n");
+pub(crate) fn push_commented(y: &mut String, text: &str) {
+    let t = blank_controls(&escape_unicode_breaks(text)).replace("\r\n", "\n");
     let t = t.strip_suffix('\n').unwrap_or(&t);
     // NEL/LS/PS are escaped above; split on every break anyway.
     for seg in t.split(YAML_LINE_BREAKS) {
@@ -1811,7 +1929,7 @@ mod tests {
                 "not available: runtime SBOM data does not exist yet",
             ),
             unavailable("vex", "audit", "not available: no vulnerability data"),
-            unavailable("admission", "audit", "not available: P2-3"),
+            unavailable("admission", "audit", "not available: no running container"),
         ];
         assert!(
             docs[0].available,
@@ -1825,7 +1943,7 @@ mod tests {
         let y = render_bundle_yaml(&key(), &p, &pl, &docs, false);
         assert!(y.contains("kguardian never applies anything"));
         assert!(y.contains("# not included: sbom (not available"));
-        assert!(y.contains("# not included: admission (not available: P2-3)"));
+        assert!(y.contains("# not included: admission (not available: no running container)"));
         // No `---` document at all: the patch is commented out, stubs are
         // header lines only.
         assert!(!y.contains("\n---\n") && !y.starts_with("---"));
