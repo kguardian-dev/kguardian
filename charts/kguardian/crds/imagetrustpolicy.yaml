@@ -24,6 +24,12 @@ spec:
       subresources:
         status: {}
       additionalPrinterColumns:
+        # State first: "never-read" means the counts beside it are
+        # meaningless zeros, "broker-unavailable"/"broker-unauthorized" that
+        # every container is Unknown.
+        - name: State
+          type: string
+          jsonPath: .status.evaluation.state
         - name: Containers
           type: integer
           jsonPath: .status.evaluation.containers
@@ -125,9 +131,27 @@ spec:
                 message:
                   type: string
                   description: Why containers are Unknown because the broker could not be read, with the last successful read.
+                conditions:
+                  type: array
+                  description: BrokerRead (True once running containers were read; False with NeverRead, BrokerUnavailable or BrokerUnauthorized).
+                  x-kubernetes-list-type: map
+                  x-kubernetes-list-map-keys: [type]
+                  items:
+                    type: object
+                    required: [type, status, lastTransitionTime, reason, message]
+                    properties:
+                      type: { type: string, maxLength: 316 }
+                      status: { type: string, enum: ["True", "False", "Unknown"] }
+                      observedGeneration: { type: integer, format: int64, minimum: 0 }
+                      lastTransitionTime: { type: string, format: date-time }
+                      reason: { type: string, maxLength: 1024, minLength: 1 }
+                      message: { type: string, maxLength: 32768 }
                 evaluation:
                   type: object
                   properties:
+                    state:
+                      type: string
+                      enum: [evaluated, never-read, broker-unavailable, broker-unauthorized]
                     lastChanged: { type: string, format: date-time }
                     lastEvaluated: { type: string, format: date-time }
                     containers: { type: integer, format: int64 }
