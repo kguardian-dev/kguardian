@@ -194,6 +194,21 @@ controller:
   # dropped every pod-to-node flow.
   ignoreDaemonSet: true
 
+  runtimeInventory:
+    # -- Record which binaries each container executes and which files it
+    # maps executable (shared libraries), per container and image digest,
+    # for the "in use" signal on vulnerabilities and for drift (a binary
+    # run from the container's writable layer or from memory). `off`
+    # (default) loads nothing. `exec` loads the `sched_process_exec` probe
+    # only. `full` adds an fentry probe on `security_mmap_file` for
+    # libraries (falls back to exec-only on a kernel that cannot attach
+    # it). Both dedupe in the kernel: each (container, file) is reported
+    # once. Opt-in until its per-node overhead is measured. Containers
+    # already running when the probe attaches are backfilled once from
+    # `/proc`. Excluded namespaces and pods annotated
+    # `kguardian.dev/runtime-inventory: "off"` are not recorded.
+    mode: "off"
+
 # -- Syscall capture tier for the controller's eBPF probe. Sets
 # `SYSCALL_CAPTURE_LEVEL` / `SYSCALL_CUSTOM_LIST` on the controller DaemonSet.
 syscalls:
@@ -808,6 +823,15 @@ broker:
       # before a package in it can be called installed-but-not-observed
       # (clamped to [1, 720]).
       inUseMinWindowHours: 24
+
+  runtimeInventory:
+    # -- Prune runtime inventory rows (the executables and shared libraries
+    # each workload container was seen running) not seen for this many
+    # days: a binary an old image ran, a deleted workload, a one-off exec.
+    # A path that keeps running is refreshed and never pruned. Set to 0 to
+    # disable pruning. The pass runs hourly and deletes
+    # `imageInventory.retention.batchSize` rows per statement.
+    retentionDays: 30
 
   # -- Per-statement timeout (ms) applied to every broker DB connection as a
   # backstop: the broker runs as a single replica, so one slow or accidentally
