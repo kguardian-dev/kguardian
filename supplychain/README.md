@@ -224,20 +224,23 @@ publisher's claim, not as proof.
 
 ### Grype matcher
 
-**Pending a packaging decision.** Embedding Grype v0.119.0 adds about
-41 MB and about 700 modules to this binary. Grype is therefore not wired in
-yet. The backend-independent parts are done (`pkg/match`):
+Grype matching runs in the **supplychain-matcher** sidecar
+([`../supplychain-matcher`](../supplychain-matcher/README.md)), enabled with
+`supplychain.grype.enabled=true`. The chart then sets `GRYPE_MATCHER_URL` to
+the sidecar's loopback address. Embedding Grype here would take this binary
+from 29.7 MB and 124 Go modules to about 71 MB and 817.
 
-- one SBOM per digest by the priority above, bounded (2000 digests);
-- matching on one worker, with a timeout per SBOM;
-- re-matching everything held when the database's build time changes,
-  without fetching any SBOM again;
-- emitting `ImageVulnerabilities` with `source: "grype"`, `sbom_source`,
+The coordinator (`pkg/match`) works the same whichever backend it drives:
+
+- It holds one SBOM per digest, preferring a registry SBOM over a Trivy
+  SbomReport, up to 2000.
+- It matches on one worker, with a time limit per SBOM.
+- When the sidecar reports a new database build, it re-matches every SBOM it
+  holds without fetching any SBOM again. It polls the sidecar's `/db` every
+  minute.
+- It emits `ImageVulnerabilities` with `source: "grype"`, `sbom_source`,
   `db_updated_at`, and per-vulnerability `kev` / `epss` when the database
   has them.
-
-The Grype DB listing is `https://grype.anchore.io/databases/v6/latest.json`.
-On 2026-09-25 it pointed at a 181 MB `.tar.zst` archive (schema v6.1.9).
 
 ## Commands
 
@@ -260,6 +263,7 @@ On 2026-09-25 it pointed at a 181 MB `.tar.zst` archive (schema v6.1.9).
 | `REGISTRY_ALLOW_PRIVATE` | `false` | Let lookups reach RFC1918/CGNAT/ULA addresses, `.local` and single-label names. Loopback, link-local, unspecified and multicast are always refused. |
 | `REGISTRY_SBOM_ENABLED` | value of `BROKER_INGEST_ENABLED` | Fetch registry-attached SBOMs for running digests. Needs `BROKER_URL` and a token with the read scope (the supplychain token has it). |
 | `REGISTRY_SBOM_INTERVAL` | `15m` | How often to list running images. |
+| `GRYPE_MATCHER_URL` | *(unset)* | Loopback URL of the matcher sidecar; set by the chart when `supplychain.grype.enabled`. Unset = no Grype matching. |
 | `BROKER_INGEST_ENABLED` | `false` | Send payloads to the broker instead of logging them. |
 | `BROKER_URL` | `http://kguardian-broker:9090` | Broker base URL. |
 | `BROKER_AUTH_TOKEN` | *(unset)* | Scoped broker token, sent as a bearer token. |

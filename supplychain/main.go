@@ -25,6 +25,7 @@ import (
 
 	"github.com/kguardian-dev/kguardian/supplychain/pkg/broker"
 	"github.com/kguardian-dev/kguardian/supplychain/pkg/dispatch"
+	"github.com/kguardian-dev/kguardian/supplychain/pkg/match"
 	"github.com/kguardian-dev/kguardian/supplychain/pkg/metrics"
 	"github.com/kguardian-dev/kguardian/supplychain/pkg/registry"
 	"github.com/kguardian-dev/kguardian/supplychain/pkg/regsource"
@@ -95,6 +96,7 @@ type config struct {
 	RegistryAllowPrivate bool
 	RegistrySBOM         bool
 	RegistrySBOMInterval time.Duration
+	GrypeMatcherURL      string
 	BrokerURL            string
 	BrokerToken          string
 }
@@ -111,6 +113,9 @@ func loadConfig(getenv func(string) string) (config, error) {
 		LogLevel:    env("LOG_LEVEL", "info"),
 		BrokerURL:   env("BROKER_URL", "http://kguardian-broker:9090"),
 		BrokerToken: strings.TrimSpace(getenv("BROKER_AUTH_TOKEN")),
+		// Set by the chart only when supplychain.grype.enabled: the
+		// matcher sidecar's loopback address.
+		GrypeMatcherURL: strings.TrimSpace(getenv("GRYPE_MATCHER_URL")),
 	}
 	var err error
 	if c.TrivyEnabled, err = strconv.ParseBool(env("TRIVY_OPERATOR_ENABLED", "true")); err != nil {
@@ -170,6 +175,7 @@ func serve() error {
 		"registryLookup":       c.RegistryLookup,
 		"registryAllowPrivate": c.RegistryAllowPrivate,
 		"registrySBOM":         c.RegistrySBOM,
+		"grypeMatcher":         c.GrypeMatcherURL != "",
 		"brokerAuth":           c.BrokerToken != "",
 	}).Info("kguardian-supplychain starting")
 
@@ -199,6 +205,19 @@ func serve() error {
 	errCh := make(chan error, 2)
 	// Every source emits through sink; matching (when enabled) taps it.
 	var sink trivy.Sink = disp
+	if c.GrypeMatcherURL != "" {
+		hm, err := match.NewHTTPMatcher(c.GrypeMatcherURL)
+		if err != nil {
+			return err
+		}
+		coord := &match.Coordinator{Matcher: hm, Sink: disp, Log: log, Metrics: m}
+		sink = coord.Tee(disp)
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			coord.Run(ctx, time.Minute)
+		}()
+	}
 
 	if c.TrivyEnabled {
 		cfg, err := loadKubeConfig()
