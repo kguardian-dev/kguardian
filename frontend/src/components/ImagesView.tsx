@@ -369,7 +369,9 @@ function VulnDataCell({ e }: { e: ImageEnrichment | undefined }) {
 function SbomCell({ e }: { e: ImageEnrichment | undefined }) {
   if (e === undefined) return <span className="text-tertiary">…</span>;
   if (e.sbomError) return <UnknownPill error={e.sbomError} />;
-  if (e.sbomReports && e.sbomReports.length === 0) return <span className="text-[11px] text-tertiary">No SBOM</span>;
+  if (e.sbomReports && e.sbomReports.length === 0) {
+    return <span className="rounded-full border border-dashed border-hubble-border-strong px-2 py-0.5 text-[11px] text-tertiary" title="No source has an SBOM for this digest: its contents are unknown">No SBOM</span>;
+  }
   return (
     <div className="flex flex-col gap-1">
       {e.sbomReports?.map((r) => (
@@ -388,7 +390,11 @@ function ImageRow({ img, e, onOpen }: { img: ImageSummary; e: ImageEnrichment | 
         <button type="button" onClick={(ev) => { ev.stopPropagation(); onOpen(); }} className="text-left font-mono text-xs text-primary hover:underline [overflow-wrap:anywhere]">
           {img.repository ?? 'unknown repository'}{img.tags.length ? `:${img.tags.join(', ')}` : ''}
         </button>
-        <div className="text-[11px] text-tertiary font-mono" title={img.digest}>{shortDigest(img.digest)} · {img.digestKind}</div>
+        <div className="text-[11px] text-tertiary font-mono" title={img.digest}>
+          {shortDigest(img.digest)}
+          {/* Only the kind that changes what the digest means is worth showing. */}
+          {img.digestKind === 'config' && <span title="The kubelet reported only the image config ID, not a registry digest: registry SBOMs and signatures cannot be looked up by it."> · config ID</span>}
+        </div>
         {/* Phones: the other columns stack here. */}
         <div className="sm:hidden mt-2 space-y-1.5 text-xs">
           <WorkloadsCell e={e} />
