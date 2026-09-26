@@ -248,16 +248,24 @@ held for it: Trivy's SbomReport and any registry SBOM, merged.
 
 - Packages de-duplicate on (type, name, version) within the image; type
   maps Trivy's distro names onto PURL types (`debian` → `deb`).
-- A merged package keeps the richer PURL (the one with an `upstream`
-  source-package qualifier), fills a missing source package, and unions
-  file paths and licences.
+- **Trivy's entries are authoritative.** On a collision a registry entry
+  may only add file paths and licences, and fill a PURL Trivy left empty.
+  It never changes Trivy's PURL (distro, arch, upstream), source package
+  or version. The matcher also treats `src_name` as authoritative over any
+  `upstream` qualifier in a PURL.
 - Exactly one operating-system component is kept: Trivy's when it has one,
-  which also wins a disagreement. The matcher takes the distro from it
+  whatever a registry SBOM says. The matcher takes the distro from it
   before any PURL qualifier.
-- The union is capped at 50 000 components (the matcher's request limit);
-  truncation counts in `kguardian_supplychain_grype_components_clamped_total`.
-- A registry SBOM listing fewer packages than Trivy found therefore cannot
-  hide a finding. One listing more adds findings.
+- **The 50 000-component cap** (the matcher's request limit) never evicts a
+  Trivy component. Registry SBOMs fill only the capacity left over, split
+  evenly between them, so a registry SBOM full of junk cannot crowd out
+  Trivy's packages or another SBOM's. What does not fit counts in
+  `kguardian_supplychain_grype_components_clamped_total`.
+- So a registry SBOM can neither hide a finding (it can remove or change
+  none of Trivy's packages) nor redirect one. It can only add packages, and
+  those can only add findings. A property test merges 500 random hostile
+  registry SBOMs with a fixed Trivy SBOM and checks that Trivy's findings
+  always survive.
 
 **Join key.** A platform-manifest registry SBOM (BuildKit) whose
 `index_digest` has a Trivy SBOM is folded into that index's group and

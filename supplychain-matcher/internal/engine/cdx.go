@@ -92,13 +92,15 @@ func purlQualifiers(purl string) url.Values {
 // withUpstream adds the purl-spec "upstream" qualifier syft uses for a
 // binary package's source package, when the component names one and the
 // PURL does not already.
+//
+// src_name is authoritative when set (supplychain sends Trivy's scan data
+// there and never lets an unverified SBOM change it): an upstream
+// qualifier already in the PURL is replaced by it, not preferred over it.
 func withUpstream(c wire.Component) string {
 	if c.PURL == "" || c.SrcName == "" {
 		return c.PURL
 	}
-	if purlQualifiers(c.PURL).Has("upstream") {
-		return c.PURL
-	}
+	c.PURL = stripUpstream(c.PURL)
 	up := c.SrcName
 	if c.SrcVersion != "" && c.SrcVersion != c.Version {
 		up += "@" + c.SrcVersion

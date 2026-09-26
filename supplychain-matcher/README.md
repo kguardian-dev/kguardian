@@ -45,7 +45,9 @@ still used for everything after the download.
   `https://grype.anchore.io/databases`). An internal mirror with the same
   layout works for air-gapped clusters.
 - **Transport:** plain HTTP(S) only. https is required unless the operator
-  configured an `http://` URL.
+  configured an `http://` URL. Proxy environment variables are ignored:
+  behind a proxy the address guard would only see the proxy. Air-gapped
+  clusters point `GRYPE_DB_URL` at a reachable mirror instead.
 - **Address guard:** every connection and every redirect hop refuses
   loopback, link-local (including cloud metadata `169.254.169.254` and
   `fe80::/10`), unspecified and multicast addresses. The check runs after
@@ -54,7 +56,8 @@ still used for everything after the download.
 - **Archive:** the path in the listing may not leave the listing's host or
   directory. The sha256 is checked before anything is unpacked. Unpacking
   accepts only regular files at the archive root (no symlinks,
-  subdirectories or `..`), with size limits.
+  subdirectories or `..`), at most 16 files, 16 GiB per file and 20 GiB in
+  total.
 - **Integrity, not authenticity.** The sha256 comes from the same listing
   as the archive URL, so it proves the archive is the one the listing
   named, not who published it. Anchore publishes no signature. **TLS to

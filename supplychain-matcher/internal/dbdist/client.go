@@ -32,7 +32,11 @@ const (
 	MaxArchiveBytes = 2 << 30
 	// MaxFileBytes caps one unpacked file (2.36 GB measured).
 	MaxFileBytes = 16 << 30
-	maxRedirects = 5
+	// MaxTotalBytes and MaxFiles cap the whole unpacked archive (one
+	// 2.36 GB file measured).
+	MaxTotalBytes = 20 << 30
+	MaxFiles      = 16
+	maxRedirects  = 5
 )
 
 // Client is a grype distribution.Client that downloads over plain HTTP(S).
@@ -66,7 +70,10 @@ func newClient(baseURL string, timeout time.Duration, g guard) (*Client, error) 
 	allowHTTP := u.Scheme == "http"
 	dialer := &net.Dialer{Timeout: 30 * time.Second, KeepAlive: 30 * time.Second, Control: g.control}
 	tr := &http.Transport{
-		Proxy:                 http.ProxyFromEnvironment,
+		// Proxy environment variables are ignored, as for registry
+		// lookups: behind a proxy the dial guard would only see the proxy's
+		// address. Air-gapped clusters point GRYPE_DB_URL at a mirror.
+		Proxy:                 nil,
 		DialContext:           dialer.DialContext,
 		ForceAttemptHTTP2:     true,
 		TLSHandshakeTimeout:   30 * time.Second,
@@ -257,6 +264,7 @@ func extract(archivePath, name, dir string) error {
 	}
 	tr := tar.NewReader(r)
 	files := 0
+	var total int64
 	for {
 		hdr, err := tr.Next()
 		if errors.Is(err, io.EOF) {
@@ -275,6 +283,10 @@ func extract(archivePath, name, dir string) error {
 			return fmt.Errorf("DB archive: refused entry %q: only files at the archive root", hdr.Name)
 		case hdr.Size > MaxFileBytes:
 			return fmt.Errorf("DB archive: entry %q is %d bytes, over the %d limit", hdr.Name, hdr.Size, int64(MaxFileBytes))
+		case files >= MaxFiles:
+			return fmt.Errorf("DB archive: more than %d files", MaxFiles)
+		case total+hdr.Size > MaxTotalBytes:
+			return fmt.Errorf("DB archive: unpacked size exceeds %d bytes", int64(MaxTotalBytes))
 		}
 		// Belt and braces on top of the root-only rule above: write only to
 		// the base name, and only inside dir.
@@ -297,6 +309,7 @@ func extract(archivePath, name, dir string) error {
 			return fmt.Errorf("DB archive: entry %q exceeds the size limit", hdr.Name)
 		}
 		files++
+		total += n
 	}
 	if files == 0 {
 		return errors.New("DB archive: no files")

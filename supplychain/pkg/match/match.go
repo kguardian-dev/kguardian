@@ -448,59 +448,134 @@ func componentKey(c types.Component) string {
 	return t + "\x00" + c.Name + "\x00" + c.Version
 }
 
-// mergeComponents returns the de-duplicated union of the members'
-// components and how many were dropped by the cap.
-//   - Packages merge on (type, name, version). The merged entry keeps the
-//     richer PURL (one with an "upstream" source-package qualifier),
-//     fills a missing source package, and unions file paths and licences.
-//   - Exactly one operating-system component is kept: Trivy's when it has
-//     one (it read the running image), else the first registry one. The
-//     matcher takes the distro from it before any PURL qualifier.
+// mergeComponents returns the union of the members' components and how
+// many were dropped by the cap. Trivy's scan is authoritative; registry
+// SBOMs are unverified and may only add:
+//
+//   - Every Trivy component is kept exactly as Trivy reported it. On a
+//     collision (same type, name and version) a registry entry may only add
+//     file paths and licences, and fill a PURL Trivy left empty; it never
+//     changes Trivy's PURL (distro, arch, upstream), source package or
+//     version.
+//   - The operating-system component is Trivy's when it has one; a
+//     registry one is used only when Trivy has none.
+//   - The cap never evicts a Trivy component (unless Trivy alone exceeds
+//     it). Registry components fill only the capacity left over, split
+//     evenly between registry SBOMs, so one SBOM full of junk cannot crowd
+//     out another; what does not fit is counted as dropped.
+//   - Between registry SBOMs the first to name a package wins, on the same
+//     add-only terms.
 func mergeComponents(members []*types.ImageSBOM, max int) ([]types.Component, int) {
-	var osComp *types.Component
-	byKey := map[string]*types.Component{}
-	var order []string
+	if max <= 0 {
+		max = int(^uint(0) >> 1)
+	}
+	var trivySBOMs, others []*types.ImageSBOM
 	for _, m := range members {
+		if m.Source == types.SourceTrivyOperator {
+			trivySBOMs = append(trivySBOMs, m)
+		} else {
+			others = append(others, m)
+		}
+	}
+	byKey := map[string]*types.Component{}
+	var osComp *types.Component
+	addOnly := func(cur *types.Component, c types.Component) {
+		if cur.PURL == "" {
+			cur.PURL = c.PURL
+		}
+		cur.FilePaths = unionStrings(cur.FilePaths, c.FilePaths)
+		cur.Licenses = unionStrings(cur.Licenses, c.Licenses)
+	}
+	clone := func(c types.Component) *types.Component {
+		cc := c
+		cc.FilePaths = slices.Clone(c.FilePaths)
+		cc.Licenses = slices.Clone(c.Licenses)
+		return &cc
+	}
+
+	// Trivy first: authoritative, never evicted.
+	var base []string
+	for _, m := range trivySBOMs {
 		for _, c := range m.Components {
 			if c.Type == "operating-system" {
 				if osComp == nil {
-					cc := c
-					osComp = &cc
+					osComp = clone(c)
 				}
 				continue
 			}
 			k := componentKey(c)
-			cur, ok := byKey[k]
-			if !ok {
-				cc := c
-				cc.FilePaths = slices.Clone(c.FilePaths)
-				cc.Licenses = slices.Clone(c.Licenses)
-				byKey[k] = &cc
-				order = append(order, k)
+			if cur, ok := byKey[k]; ok {
+				addOnly(cur, c)
 				continue
 			}
-			if cur.PURL == "" || (!strings.Contains(cur.PURL, "upstream=") && strings.Contains(c.PURL, "upstream=")) {
-				cur.PURL = c.PURL
-			}
-			if cur.SrcName == "" {
-				cur.SrcName, cur.SrcVersion = c.SrcName, c.SrcVersion
-			}
-			cur.FilePaths = unionStrings(cur.FilePaths, c.FilePaths)
-			cur.Licenses = unionStrings(cur.Licenses, c.Licenses)
+			byKey[k] = clone(c)
+			base = append(base, k)
 		}
 	}
-	sort.Strings(order)
-	out := make([]types.Component, 0, len(order)+1)
+	sort.Strings(base)
+	dropped := 0
+	room := max - len(base)
+	if osComp != nil {
+		room--
+	}
+	if room < 0 {
+		// Trivy alone exceeds the cap (not seen in practice).
+		dropped += -room
+		base = base[:len(base)+room]
+		room = 0
+	}
+
+	// Registry SBOMs: add-only, within an even share of what is left.
+	var added []string
+	for i, m := range others {
+		share := room / (len(others) - i)
+		var fresh []string
+		for _, c := range m.Components {
+			if c.Type == "operating-system" {
+				if osComp == nil {
+					osComp = clone(c)
+					if room > 0 {
+						room--
+						share = min(share, room)
+					} else {
+						dropped++
+						osComp = nil
+					}
+				}
+				continue
+			}
+			k := componentKey(c)
+			if cur, ok := byKey[k]; ok {
+				addOnly(cur, c)
+				continue
+			}
+			byKey[k] = clone(c)
+			fresh = append(fresh, k)
+		}
+		sort.Strings(fresh)
+		if len(fresh) > share {
+			for _, k := range fresh[share:] {
+				delete(byKey, k)
+			}
+			dropped += len(fresh) - share
+			fresh = fresh[:share]
+		}
+		room -= len(fresh)
+		added = append(added, fresh...)
+	}
+	sort.Strings(added)
+
+	out := make([]types.Component, 0, len(base)+len(added)+1)
 	if osComp != nil {
 		out = append(out, *osComp)
 	}
-	for _, k := range order {
+	for _, k := range base {
 		out = append(out, *byKey[k])
 	}
-	if max > 0 && len(out) > max {
-		return out[:max], len(out) - max
+	for _, k := range added {
+		out = append(out, *byKey[k])
 	}
-	return out, 0
+	return out, dropped
 }
 
 func unionStrings(a, b []string) []string {

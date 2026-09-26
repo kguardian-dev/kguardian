@@ -2,8 +2,11 @@ package match
 
 import (
 	"context"
+	"fmt"
 	"io"
+	"math/rand"
 	"reflect"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -210,7 +213,8 @@ func TestJoinPlatformSBOMIntoIndex(t *testing.T) {
 	for _, comp := range in {
 		names = append(names, comp.Name)
 	}
-	if !reflect.DeepEqual(names, []string{"musl", "openssl"}) {
+	// Trivy's components first, then what the registry SBOM added.
+	if !reflect.DeepEqual(names, []string{"openssl", "musl"}) {
 		t.Fatalf("index group input: %v", names)
 	}
 	v := s.last()
@@ -227,20 +231,22 @@ func TestJoinPlatformSBOMIntoIndex(t *testing.T) {
 	}
 }
 
-// The same package from both sources with different PURLs is one
-// component; the richer PURL (with upstream) and Trivy's OS win.
-func TestMergeComponents(t *testing.T) {
+// The same package from both sources is one component, and Trivy's
+// identity wins: a registry entry cannot replace Trivy's PURL, source
+// package or distro, only add file paths and licences.
+func TestMergeTrivyIsAuthoritative(t *testing.T) {
 	tr := &types.ImageSBOM{Source: types.SourceTrivyOperator, Components: []types.Component{
 		{Name: "debian", Version: "12.7", Type: "operating-system"},
 		{Name: "libc6", Version: "2.36-9+deb12u10", Type: "debian", PURL: "pkg:deb/debian/libc6@2.36-9%2Bdeb12u10?arch=amd64",
-			SrcName: "glibc", FilePaths: []string{"lib/x86_64-linux-gnu/libc.so.6"}},
+			SrcName: "glibc", SrcVersion: "2.36-9+deb12u10", FilePaths: []string{"lib/x86_64-linux-gnu/libc.so.6"}},
 	}}
 	reg := &types.ImageSBOM{Source: types.SourceRegistry, Components: []types.Component{
-		{Name: "debian", Version: "13", Type: "operating-system"}, // disagrees: Trivy wins
-		{Name: "libc6", Version: "2.36-9+deb12u10", PURL: "pkg:deb/debian/libc6@2.36-9%2Bdeb12u10?arch=amd64&distro=debian-12&upstream=glibc",
-			FilePaths: []string{"usr/lib/x86_64-linux-gnu/libc.so.6"}},
+		{Name: "debian", Version: "99", Type: "operating-system"},
+		{Name: "libc6", Version: "2.36-9+deb12u10", SrcName: "nothing-here",
+			PURL:      "pkg:deb/debian/libc6@2.36-9%2Bdeb12u10?arch=amd64&distro=debian-99&upstream=nothing-here",
+			FilePaths: []string{"usr/lib/x86_64-linux-gnu/libc.so.6"}, Licenses: []string{"LGPL-2.1"}},
 	}}
-	out, clamped := mergeComponents([]*types.ImageSBOM{tr, reg}, 0)
+	out, clamped := mergeComponents([]*types.ImageSBOM{reg, tr}, 0) // order must not matter
 	if clamped != 0 || len(out) != 2 {
 		t.Fatalf("%d components (clamped %d): %+v", len(out), clamped, out)
 	}
@@ -248,9 +254,110 @@ func TestMergeComponents(t *testing.T) {
 		t.Errorf("os: %+v", out[0])
 	}
 	l := out[1]
-	if l.PURL != "pkg:deb/debian/libc6@2.36-9%2Bdeb12u10?arch=amd64&distro=debian-12&upstream=glibc" || l.SrcName != "glibc" || len(l.FilePaths) != 2 {
-		t.Errorf("libc6: %+v", l)
+	if l.PURL != "pkg:deb/debian/libc6@2.36-9%2Bdeb12u10?arch=amd64" || l.SrcName != "glibc" || l.SrcVersion != "2.36-9+deb12u10" {
+		t.Errorf("registry took over libc6's identity: %+v", l)
 	}
+	if len(l.FilePaths) != 2 || len(l.Licenses) != 1 {
+		t.Errorf("registry file paths/licences not added: %+v", l)
+	}
+}
+
+// Registry junk that sorts first must not evict Trivy's components under
+// the cap, and registry SBOMs share the leftover capacity.
+func TestCapNeverEvictsTrivy(t *testing.T) {
+	tr := &types.ImageSBOM{Source: types.SourceTrivyOperator, Components: []types.Component{
+		{Name: "openssl", Version: "3.0.11", PURL: "pkg:deb/debian/openssl@3.0.11"},
+		{Name: "zlib1g", Version: "1.2.13", PURL: "pkg:deb/debian/zlib1g@1.2.13"},
+	}}
+	junk := &types.ImageSBOM{Source: types.SourceRegistry}
+	for i := 0; i < 100; i++ {
+		junk.Components = append(junk.Components, types.Component{Name: fmt.Sprintf("a%03d", i), Version: "1", PURL: fmt.Sprintf("pkg:apk/x/a%03d@1", i)})
+	}
+	other := &types.ImageSBOM{Source: types.SourceRegistry, Components: []types.Component{
+		{Name: "express", Version: "4", PURL: "pkg:npm/express@4"}, {Name: "lodash", Version: "4", PURL: "pkg:npm/lodash@4"},
+	}}
+	out, dropped := mergeComponents([]*types.ImageSBOM{junk, tr, other}, 6)
+	names := map[string]bool{}
+	for _, c := range out {
+		names[c.Name] = true
+	}
+	if len(out) != 6 || !names["openssl"] || !names["zlib1g"] {
+		t.Fatalf("trivy evicted or cap exceeded: %d %v", len(out), names)
+	}
+	if !names["express"] || !names["lodash"] {
+		t.Errorf("junk SBOM crowded out the other registry SBOM: %v", names)
+	}
+	if dropped != 98 {
+		t.Errorf("dropped %d, want 98", dropped)
+	}
+}
+
+// Property: whatever registry SBOMs are merged in, every Trivy component
+// survives unchanged (so Trivy-only findings are a subset of the union's
+// findings for any matcher that is per-package).
+func TestUnionPropertyTrivyPreserved(t *testing.T) {
+	tr := &types.ImageSBOM{Source: types.SourceTrivyOperator, Components: []types.Component{
+		{Name: "debian", Version: "12.7", Type: "operating-system"},
+		{Name: "libc6", Version: "2.36", Type: "debian", PURL: "pkg:deb/debian/libc6@2.36?arch=amd64", SrcName: "glibc", SrcVersion: "2.36"},
+		{Name: "openssl", Version: "3.0.11", Type: "debian", PURL: "pkg:deb/debian/openssl@3.0.11?arch=amd64"},
+		{Name: "express", Version: "4.18.2", Type: "node-pkg", PURL: "pkg:npm/express@4.18.2"},
+	}}
+	trivyOnly := findings(t, mustMerge([]*types.ImageSBOM{tr}, DefaultMaxComponents))
+	rng := rand.New(rand.NewSource(1533))
+	names := []string{"libc6", "openssl", "express", "zlib1g", "aaa", "musl"}
+	versions := []string{"2.36", "3.0.11", "4.18.2", "1", "0"}
+	for round := 0; round < 500; round++ {
+		members := []*types.ImageSBOM{}
+		nReg := 1 + rng.Intn(3)
+		for r := 0; r < nReg; r++ {
+			reg := &types.ImageSBOM{Source: types.SourceRegistry}
+			for n := rng.Intn(40); n > 0; n-- {
+				name, ver := names[rng.Intn(len(names))], versions[rng.Intn(len(versions))]
+				c := types.Component{Name: name, Version: ver,
+					PURL:    fmt.Sprintf("pkg:deb/debian/%s@%s?distro=debian-%d&upstream=%s", name, ver, rng.Intn(99), names[rng.Intn(len(names))]),
+					SrcName: names[rng.Intn(len(names))], FilePaths: []string{fmt.Sprintf("f%d", rng.Intn(9))}}
+				if rng.Intn(10) == 0 {
+					c = types.Component{Name: "debian", Version: fmt.Sprint(rng.Intn(99)), Type: "operating-system"}
+				}
+				reg.Components = append(reg.Components, c)
+			}
+			members = append(members, reg)
+		}
+		members = append(members, tr)
+		rng.Shuffle(len(members), func(i, j int) { members[i], members[j] = members[j], members[i] })
+		max := 5 + rng.Intn(30)
+		union := findings(t, mustMerge(members, max))
+		for f := range trivyOnly {
+			if !union[f] {
+				t.Fatalf("round %d (cap %d): Trivy finding %q lost in the union", round, max, f)
+			}
+		}
+	}
+}
+
+func mustMerge(members []*types.ImageSBOM, max int) []types.Component {
+	out, _ := mergeComponents(members, max)
+	return out
+}
+
+// findings stands in for a per-package matcher: one finding per package
+// identity as matched (name, version, PURL, source package) under the
+// chosen distro.
+func findings(t *testing.T, cs []types.Component) map[string]bool {
+	t.Helper()
+	distro := ""
+	for _, c := range cs {
+		if c.Type == "operating-system" {
+			distro = c.Name + " " + c.Version
+		}
+	}
+	out := map[string]bool{}
+	for _, c := range cs {
+		if c.Type != "operating-system" {
+			out[strings.Join([]string{distro, c.Name, c.Version, c.PURL, c.SrcName, c.SrcVersion}, "|")] = true
+		}
+	}
+	return out
 }
 
 func TestClampIsCountedAndBounded(t *testing.T) {

@@ -87,7 +87,12 @@ func TestWithUpstream(t *testing.T) {
 		{wire.Component{Name: "tzdata", Version: "2021a-0+deb10u1", SrcName: "tzdata", SrcVersion: "2021a", PURL: "pkg:deb/debian/tzdata@2021a-0+deb10u1"},
 			"pkg:deb/debian/tzdata@2021a-0+deb10u1?upstream=tzdata%402021a"},
 		{wire.Component{Name: "base-files", SrcName: "base-files", PURL: "pkg:deb/debian/base-files@1"}, "pkg:deb/debian/base-files@1"},
-		{wire.Component{Name: "x", SrcName: "y", PURL: "pkg:deb/debian/x@1?upstream=z"}, "pkg:deb/debian/x@1?upstream=z"},
+		// src_name wins over an upstream already in the PURL.
+		{wire.Component{Name: "x", SrcName: "y", PURL: "pkg:deb/debian/x@1?upstream=z"}, "pkg:deb/debian/x@1?upstream=y"},
+		{wire.Component{Name: "libc6", Version: "2.36", SrcName: "glibc", PURL: "pkg:deb/debian/libc6@2.36?arch=amd64&upstream=nothing-here&distro=debian-99"},
+			"pkg:deb/debian/libc6@2.36?arch=amd64&distro=debian-99&upstream=glibc"},
+		// No src_name: an existing upstream is kept.
+		{wire.Component{Name: "x", PURL: "pkg:deb/debian/x@1?upstream=z"}, "pkg:deb/debian/x@1?upstream=z"},
 	} {
 		if got := withUpstream(c.in); got != c.want {
 			t.Errorf("got %s want %s", got, c.want)
@@ -256,6 +261,12 @@ func TestMatchRealDB(t *testing.T) {
 	noUpstream.SrcName, noUpstream.SrcVersion = "", ""
 	if full == 0 || count(os12, noUpstream) != 0 || count(libc6) != 0 {
 		t.Errorf("want matches only with both distro and upstream (full=%d)", full)
+	}
+	// A hostile upstream in the PURL cannot override src_name.
+	hijacked := libc6
+	hijacked.PURL = "pkg:deb/debian/libc6@2.36-9%2Bdeb12u10?arch=amd64&upstream=nothing-here"
+	if got := count(os12, hijacked); got != full {
+		t.Errorf("PURL upstream overrode src_name: %d matches, want %d", got, full)
 	}
 	// The alpine 3.20 SBOM (distro only in PURL qualifiers) must match
 	// without error; this release has no open distro advisories.

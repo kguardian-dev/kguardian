@@ -145,6 +145,13 @@ func TestExtractRefusesUnsafeEntries(t *testing.T) {
 		"symlink":   tarZst(t, entry{name: "vulnerability.db", typ: tar.TypeSymlink}),
 		"hidden":    tarZst(t, entry{name: ".ssh", body: "x"}),
 		"empty":     tarZst(t),
+		"too many files": func() []byte {
+			var es []entry
+			for i := 0; i <= MaxFiles; i++ {
+				es = append(es, entry{name: fmt.Sprintf("f%02d", i), body: "x"})
+			}
+			return tarZst(t, es...)
+		}(),
 	} {
 		srv := server(t, a, sum(a), time.Now())
 		c := testClient(t, srv.URL+"/databases")
