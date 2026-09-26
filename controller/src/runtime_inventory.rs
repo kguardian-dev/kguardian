@@ -551,11 +551,15 @@ pub struct Stats {
 #[derive(Debug, Default)]
 pub struct Store {
     containers: HashMap<ContainerKey, ContainerEntries>,
-    /// Containers dropped as never attributable (the pod sandbox, a pod
-    /// never tracked): later sightings, including the next backfill pass,
-    /// are ignored instead of being held for another TTL. Forgotten with
-    /// the pod.
-    discarded: HashSet<ContainerKey>,
+    /// Containers dropped as not attributable (the pod sandbox, a pod
+    /// never tracked), with the number of sightings thrown away: later
+    /// sightings, including the next backfill pass, are ignored instead of
+    /// being held for another TTL. If the container turns out to be a
+    /// tracked one after all, the count is reported as events dropped and
+    /// capture resumes. Forgotten with the pod.
+    discarded: HashMap<ContainerKey, u64>,
+    /// Events lost per container and not yet reported in a heartbeat.
+    drops: HashMap<ContainerKey, u64>,
     /// Coverage per container (see [`Store::coverage_due`]).
     coverage: HashMap<ContainerKey, Coverage>,
     /// When each container was backfilled from /proc.
@@ -570,15 +574,13 @@ pub struct Store {
 struct Coverage {
     start_mode: &'static str,
     tracking_since: NaiveDateTime,
-    /// A gap to report with the next heartbeat.
-    gap: Option<&'static str>,
     /// The last heartbeat sent, for the final `ended` one.
     last: Option<CoveragePost>,
 }
 
 /// One entry of a `/runtime/coverage` POST: this container instance was
-/// watched, continuously since `tracking_since` unless `gap` says
-/// otherwise, as of `heartbeat_at`.
+/// watched since `tracking_since`, as of `heartbeat_at`, and lost
+/// `events_dropped` sightings since the previous heartbeat.
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct CoveragePost {
     pub pod_namespace: String,
@@ -599,9 +601,14 @@ pub struct CoveragePost {
     /// container was already running; capture begins at the /proc backfill.
     pub start_mode: String,
     pub tracking_since: NaiveDateTime,
-    /// Something was lost since the last heartbeat (`kernel_drops`,
-    /// `overflow`): coverage restarts at `heartbeat_at`.
-    pub gap: Option<String>,
+    /// Sightings that may have been lost since the previous heartbeat:
+    /// events the kernel could not queue (counted for every container on
+    /// the node, since the kernel cannot say whose they were), paths over
+    /// the per-container cap, entries the broker dropped at ingest, and
+    /// sightings thrown away while the pod was not yet known.
+    pub events_dropped: u64,
+    /// Entries seen but not yet accepted by the broker.
+    pub unsent: u64,
     /// The container is gone; its last heartbeat.
     pub ended: bool,
     pub heartbeat_at: NaiveDateTime,
@@ -620,7 +627,8 @@ pub struct Sighting {
 
 impl Store {
     pub fn add(&mut self, key: ContainerKey, s: Sighting, now: Instant, wall: NaiveDateTime) {
-        if self.discarded.contains(&key) {
+        if let Some(n) = self.discarded.get_mut(&key) {
+            *n += 1;
             return;
         }
         let key_for_gap = key.clone();
@@ -649,9 +657,7 @@ impl Store {
         }
         if c.entries.len() >= MAX_ENTRIES_PER_CONTAINER {
             self.stats.overflow += 1;
-            if let Some(cov) = self.coverage.get_mut(&key_for_gap) {
-                cov.gap.get_or_insert("overflow");
-            }
+            *self.drops.entry(key_for_gap).or_default() += 1;
             return;
         }
         c.entries.insert(
@@ -760,10 +766,25 @@ impl Store {
             }
         }
         for key in drop {
-            self.containers.remove(&key);
-            self.discarded.insert(key);
+            let n = self
+                .containers
+                .remove(&key)
+                .map_or(0, |c| c.entries.len() as u64);
+            self.discarded.insert(key, n);
         }
         (posts, marks)
+    }
+
+    /// The broker accepted a POST but dropped `dropped` of its entries
+    /// (it cannot say which): every container in it may have lost one.
+    pub fn note_ingest_dropped(&mut self, marks: &[SentMark], dropped: u64) {
+        if dropped == 0 {
+            return;
+        }
+        let keys: HashSet<&ContainerKey> = marks.iter().map(|(k, _)| k).collect();
+        for k in keys {
+            *self.drops.entry(k.clone()).or_default() += dropped;
+        }
     }
 
     pub fn mark_sent(&mut self, marks: &[SentMark], now: Instant) {
@@ -787,7 +808,8 @@ impl Store {
         self.containers.retain(|key, c| {
             resolve(key.0).is_some() || c.entries.values().any(|e| e.sent_at.is_none())
         });
-        self.discarded.retain(|key| resolve(key.0).is_some());
+        self.discarded.retain(|key, _| resolve(key.0).is_some());
+        self.drops.retain(|key, _| resolve(key.0).is_some());
         self.backfilled_at
             .retain(|key, _| resolve(key.0).is_some_and(|p| p.containers.contains_key(&key.1)));
     }
@@ -815,11 +837,22 @@ impl Store {
         node: &str,
         wall: NaiveDateTime,
     ) -> Vec<CoveragePost> {
-        let dropped = kernel_drops > self.drops_seen;
+        let kernel_delta = kernel_drops.saturating_sub(self.drops_seen);
         self.drops_seen = kernel_drops;
-        if dropped {
-            for cov in self.coverage.values_mut() {
-                cov.gap.get_or_insert("kernel_drops");
+        if kernel_delta > 0 {
+            // Whose events they were is unknown: every container on the
+            // node, reported or not yet, may have lost one.
+            for (generation, pod) in pods {
+                for (cid, info) in &pod.containers {
+                    if info.running {
+                        *self.drops.entry((*generation, cid.clone())).or_default() += kernel_delta;
+                    }
+                }
+            }
+            // Including containers that stopped since the last beat.
+            for key in self.coverage.keys() {
+                let n = self.drops.entry(key.clone()).or_default();
+                *n = (*n).max(kernel_delta);
             }
         }
         let mut out = Vec::new();
@@ -831,6 +864,11 @@ impl Store {
                 }
                 let key: ContainerKey = (*generation, cid.clone());
                 live.insert(key.clone());
+                // Thrown away while unattributable, but it is a tracked
+                // container: those were lost, and capture resumes.
+                if let Some(n) = self.discarded.remove(&key) {
+                    *self.drops.entry(key.clone()).or_default() += n.max(1);
+                }
                 let (exec_probe, lib_probe) = match probe {
                     Some((_, libs)) => (true, libs && mode == Mode::Full),
                     None => (false, false),
@@ -857,11 +895,14 @@ impl Store {
                         Coverage {
                             start_mode,
                             tracking_since,
-                            gap: None,
                             last: None,
                         },
                     );
                 }
+                let events_dropped = self.drops.remove(&key).unwrap_or(0);
+                let unsent = self.containers.get(&key).map_or(0, |c| {
+                    c.entries.values().filter(|e| e.sent_at.is_none()).count() as u64
+                });
                 let cov = self.coverage.get_mut(&key).expect("inserted above");
                 let post = CoveragePost {
                     pod_namespace: pod.namespace.clone(),
@@ -877,7 +918,8 @@ impl Store {
                     lib_probe,
                     start_mode: cov.start_mode.to_string(),
                     tracking_since: cov.tracking_since,
-                    gap: cov.gap.take().map(str::to_string),
+                    events_dropped,
+                    unsent,
                     ended: false,
                     heartbeat_at: wall,
                     heartbeat_secs: HEARTBEAT_EVERY.as_secs() as u32,
@@ -897,7 +939,8 @@ impl Store {
             let cov = self.coverage.remove(&key).expect("listed above");
             if let Some(last) = cov.last {
                 out.push(CoveragePost {
-                    gap: cov.gap.map(str::to_string),
+                    events_dropped: self.drops.remove(&key).unwrap_or(0),
+                    unsent: 0,
                     ended: true,
                     heartbeat_at: wall,
                     ..last
@@ -956,9 +999,125 @@ pub fn exec_mappings(maps: &str, exe: Option<&str>) -> Vec<(String, Origin)> {
     out
 }
 
-/// One pass over `proc_root`: record, for every container not yet
-/// backfilled whose pod is tracked, the executable and executable
-/// mappings of each of its processes. Returns the containers backfilled.
+/// Largest `/proc/<pid>/maps` read; a process with more mappings than
+/// this has its first 4 MiB of them backfilled.
+const MAX_MAPS_BYTES: u64 = 4 << 20;
+
+fn read_capped(path: &Path, cap: u64) -> Option<String> {
+    use std::io::Read;
+    let mut s = String::new();
+    std::fs::File::open(path)
+        .ok()?
+        .take(cap)
+        .read_to_string(&mut s)
+        .ok()?;
+    Some(s)
+}
+
+/// What one /proc pass found: sightings per container not yet backfilled.
+pub type BackfillScan = Vec<(ContainerKey, Vec<Sighting>)>;
+
+/// One pass over `proc_root`: for every container not in `done` whose pod
+/// is tracked, the executable and executable mappings of each of its
+/// processes. Blocking file I/O and no `Store`, so it runs off the async
+/// task (see [`run`]). A process whose cgroup changed while it was read
+/// (it exited and the pid was reused) is skipped.
+pub fn scan_proc<F>(
+    proc_root: &Path,
+    done: &HashSet<ContainerKey>,
+    mode: Mode,
+    tracked: F,
+) -> BackfillScan
+where
+    F: Fn(u32) -> bool,
+{
+    let Ok(dir) = std::fs::read_dir(proc_root) else {
+        return Vec::new();
+    };
+    let mut found: HashMap<ContainerKey, Vec<Sighting>> = HashMap::new();
+    for ent in dir.flatten() {
+        let name = ent.file_name();
+        let Some(pid) = name
+            .to_str()
+            .filter(|s| s.bytes().all(|b| b.is_ascii_digit()))
+        else {
+            continue;
+        };
+        let base = proc_root.join(pid);
+        let Some(cg) = read_capped(&base.join("cgroup"), 64 << 10) else {
+            continue;
+        };
+        let Some((uid, cid)) = process_container(&cg) else {
+            continue;
+        };
+        let generation = pod_flags::generation_for_uid(Some(&uid));
+        if !tracked(generation) {
+            continue;
+        }
+        let key = (generation, cid);
+        if done.contains(&key) {
+            continue;
+        }
+        let exe = std::fs::read_link(base.join("exe"))
+            .ok()
+            .and_then(|p| proc_path_origin(&p.to_string_lossy()));
+        let maps = (mode == Mode::Full)
+            .then(|| read_capped(&base.join("maps"), MAX_MAPS_BYTES))
+            .flatten();
+        // Same process throughout? A pid reused by another container's
+        // process in between would credit its files to this one.
+        if read_capped(&base.join("cgroup"), 64 << 10).as_deref() != Some(cg.as_str()) {
+            continue;
+        }
+        let out = found.entry(key).or_default();
+        if let Some((path, origin)) = exe.clone() {
+            out.push(backfilled("exec", path, origin));
+        }
+        if let Some(maps) = maps {
+            let exe_path = exe.as_ref().map(|(p, _)| p.as_str());
+            for (lib, origin) in exec_mappings(&maps, exe_path) {
+                out.push(backfilled("lib", lib, origin));
+            }
+        }
+    }
+    found.into_iter().collect()
+}
+
+/// Record a scan: every container in it is marked backfilled. Returns the
+/// containers backfilled.
+pub fn apply_backfill(
+    store: &mut Store,
+    scan: BackfillScan,
+    now: Instant,
+    wall: NaiveDateTime,
+) -> usize {
+    let mut n = 0;
+    for (key, sightings) in scan {
+        if !store.needs_backfill(&key) {
+            continue;
+        }
+        for s in sightings {
+            store.add(key.clone(), s, now, wall);
+        }
+        store.mark_backfilled(key, wall);
+        n += 1;
+    }
+    n
+}
+
+/// Containers already backfilled (the scan skips them).
+impl Store {
+    pub fn backfilled_keys(&self) -> HashSet<ContainerKey> {
+        self.containers
+            .iter()
+            .filter(|(_, c)| c.backfilled)
+            .map(|(k, _)| k.clone())
+            .chain(self.discarded.keys().cloned())
+            .collect()
+    }
+}
+
+/// [`scan_proc`] then [`apply_backfill`], in one call (tests).
 pub fn backfill<F>(
     proc_root: &Path,
     store: &mut Store,
@@ -970,54 +1129,8 @@ pub fn backfill<F>(
 where
     F: Fn(u32) -> bool,
 {
-    let Ok(dir) = std::fs::read_dir(proc_root) else {
-        return 0;
-    };
-    let mut touched: HashSet<ContainerKey> = HashSet::new();
-    for ent in dir.flatten() {
-        let name = ent.file_name();
-        let Some(pid) = name
-            .to_str()
-            .filter(|s| s.bytes().all(|b| b.is_ascii_digit()))
-        else {
-            continue;
-        };
-        let base = proc_root.join(pid);
-        let Ok(cg) = std::fs::read_to_string(base.join("cgroup")) else {
-            continue;
-        };
-        let Some((uid, cid)) = process_container(&cg) else {
-            continue;
-        };
-        let generation = pod_flags::generation_for_uid(Some(&uid));
-        if !tracked(generation) {
-            continue;
-        }
-        let key = (generation, cid);
-        if !store.needs_backfill(&key) && !touched.contains(&key) {
-            continue;
-        }
-        let exe = std::fs::read_link(base.join("exe"))
-            .ok()
-            .and_then(|p| proc_path_origin(&p.to_string_lossy()));
-        if let Some((path, origin)) = exe.clone() {
-            store.add(key.clone(), backfilled("exec", path, origin), now, wall);
-        }
-        if mode == Mode::Full {
-            if let Ok(maps) = std::fs::read_to_string(base.join("maps")) {
-                let exe_path = exe.as_ref().map(|(p, _)| p.as_str());
-                for (lib, origin) in exec_mappings(&maps, exe_path) {
-                    store.add(key.clone(), backfilled("lib", lib, origin), now, wall);
-                }
-            }
-        }
-        touched.insert(key);
-    }
-    let n = touched.len();
-    for key in touched {
-        store.mark_backfilled(key, wall);
-    }
-    n
+    let scan = scan_proc(proc_root, &store.backfilled_keys(), mode, tracked);
+    apply_backfill(store, scan, now, wall)
 }
 
 // ---- The subsystem ---------------------------------------------------------
@@ -1063,14 +1176,18 @@ pub async fn run(mut events: Receiver<RuntimeEventData>, mode: Mode) -> Result<(
             _ = post_tick.tick() => {
                 if last_backfill.is_none_or(|t| t.elapsed() >= BACKFILL_EVERY) {
                     last_backfill = Some(Instant::now());
-                    let n = backfill(
-                        Path::new("/proc"),
-                        &mut store,
-                        mode,
-                        |g| resolve(g).is_some(),
-                        Instant::now(),
-                        Utc::now().naive_utc(),
-                    );
+                    // Blocking /proc reads off this task: the event
+                    // channel keeps draining, so the eBPF poll loop (shared
+                    // with the network and syscall probes) never waits on it.
+                    let done = store.backfilled_keys();
+                    let scan = tokio::task::spawn_blocking(move || {
+                        scan_proc(Path::new("/proc"), &done, mode, |g| {
+                            matches!(lookup(g), Lookup::Known(_))
+                        })
+                    })
+                    .await
+                    .unwrap_or_default();
+                    let n = apply_backfill(&mut store, scan, Instant::now(), Utc::now().naive_utc());
                     if n > 0 {
                         debug!(containers = n, "runtime inventory: backfilled from /proc");
                     }
@@ -1139,8 +1256,18 @@ where
             return;
         }
         let n = posts.len();
-        match crate::api_post_call(serde_json::json!(posts), "runtime/executables").await {
-            Ok(()) => {
+        match crate::client::api_post_call_json(serde_json::json!(posts), "runtime/executables")
+            .await
+        {
+            Ok(summary) => {
+                let dropped = summary.get("dropped").and_then(|d| d.as_u64()).unwrap_or(0);
+                if dropped > 0 {
+                    warn!(
+                        dropped,
+                        "broker dropped runtime inventory entries; reported as a coverage gap"
+                    );
+                }
+                store.note_ingest_dropped(&marks, dropped);
                 store.mark_sent(&marks, Instant::now());
                 store.stats.posted += n as u64;
                 if n < MAX_POST_ENTRIES {
@@ -1425,7 +1552,8 @@ mod tests {
         assert_eq!(beats.len(), 1);
         let b = &beats[0];
         assert_eq!((b.start_mode.as_str(), b.tracking_since), ("start", at(1)));
-        assert!(b.exec_probe && b.lib_probe && !b.ended && b.gap.is_none());
+        assert!(b.exec_probe && b.lib_probe && !b.ended);
+        assert_eq!((b.events_dropped, b.unsent), (0, 0));
         assert_eq!((b.container_id.as_str(), b.node_name.as_str()), (CID, "n1"));
         assert_eq!(b.heartbeat_secs, 300);
 
@@ -1484,19 +1612,23 @@ mod tests {
     }
 
     #[test]
-    fn coverage_gaps_are_reported_once_and_ended_containers_get_a_last_beat() {
+    fn coverage_counts_every_kind_of_lost_event_once() {
         let mut s = Store::default();
         let pods = [(7, pod_started(1))];
         let probe = Some((at(0), true));
-        s.coverage_due(&pods, probe, Mode::Full, 3, "n1", at(2));
-        // Kernel drops since the last beat: a gap, once.
-        let b = &s.coverage_due(&pods, probe, Mode::Full, 5, "n1", at(3))[0];
-        assert_eq!(b.gap.as_deref(), Some("kernel_drops"));
-        assert!(s.coverage_due(&pods, probe, Mode::Full, 5, "n1", at(4))[0]
-            .gap
-            .is_none());
-        // Per-container overflow is a gap for that container.
         let key = (7u32, CID.to_string());
+        let beat = |s: &mut Store, drops: u64, h: i64| {
+            s.coverage_due(&pods, probe, Mode::Full, drops, "n1", at(h))[0].clone()
+        };
+        assert_eq!(
+            beat(&mut s, 3, 2).events_dropped,
+            3,
+            "drops before the first beat count"
+        );
+        // Kernel drops since the last beat: reported once.
+        assert_eq!(beat(&mut s, 5, 3).events_dropped, 2);
+        assert_eq!(beat(&mut s, 5, 4).events_dropped, 0);
+        // Per-container overflow.
         for i in 0..=MAX_ENTRIES_PER_CONTAINER {
             s.add(
                 key.clone(),
@@ -1505,18 +1637,62 @@ mod tests {
                 wall(),
             );
         }
-        let b = &s.coverage_due(&pods, probe, Mode::Full, 5, "n1", at(5))[0];
-        assert_eq!(b.gap.as_deref(), Some("overflow"));
-        // Not running any more: one final beat, then nothing.
+        let b = beat(&mut s, 5, 5);
+        assert_eq!(b.events_dropped, 1);
+        assert_eq!(
+            b.unsent, MAX_ENTRIES_PER_CONTAINER as u64,
+            "entries not yet posted"
+        );
+        // Entries the broker dropped at ingest.
+        let (_, marks) = s.due(Instant::now(), wall(), 10, |_| Some(pod_rt()));
+        s.note_ingest_dropped(&marks, 2);
+        assert_eq!(beat(&mut s, 5, 6).events_dropped, 2);
+    }
+
+    #[test]
+    fn sightings_discarded_before_the_pod_was_known_count_as_lost_and_capture_resumes() {
+        let t0 = Instant::now();
+        let mut s = Store::default();
+        let key = (7u32, CID.to_string());
+        s.add(key.clone(), sg("exec", "/app".into(), "ebpf"), t0, wall());
+        // The pod stayed unknown past the TTL: discarded.
+        s.due(t0 + UNKNOWN_POD_TTL, wall(), 10, |_| None);
+        s.add(key.clone(), sg("exec", "/later".into(), "ebpf"), t0, wall());
+        assert_eq!(s.containers(), 0);
+        // Then the watcher learns it is a tracked, running container.
+        let b = &s.coverage_due(
+            &[(7, pod_started(1))],
+            Some((at(0), true)),
+            Mode::Full,
+            0,
+            "n1",
+            at(2),
+        )[0];
+        assert_eq!(b.events_dropped, 2, "both discarded sightings");
+        s.add(key, sg("exec", "/after".into(), "ebpf"), t0, wall());
+        assert_eq!(s.containers(), 1, "capture resumes");
+    }
+
+    #[test]
+    fn a_stopped_container_gets_one_last_beat() {
+        let mut s = Store::default();
+        let probe = Some((at(0), true));
+        s.coverage_due(&[(7, pod_started(1))], probe, Mode::Full, 0, "n1", at(2));
         let mut stopped = pod_started(1);
         stopped.containers.get_mut(CID).unwrap().running = false;
-        let beats = s.coverage_due(&[(7, stopped.clone())], probe, Mode::Full, 5, "n1", at(6));
+        let beats = s.coverage_due(&[(7, stopped.clone())], probe, Mode::Full, 4, "n1", at(3));
         assert_eq!(beats.len(), 1);
         assert!(beats[0].ended);
-        assert_eq!(beats[0].heartbeat_at, at(6));
-        assert_eq!(beats[0].tracking_since, at(1));
+        assert_eq!(
+            beats[0].events_dropped, 4,
+            "drops before it stopped are still reported"
+        );
+        assert_eq!(
+            (beats[0].heartbeat_at, beats[0].tracking_since),
+            (at(3), at(1))
+        );
         assert!(s
-            .coverage_due(&[(7, stopped)], probe, Mode::Full, 5, "n1", at(7))
+            .coverage_due(&[(7, stopped)], probe, Mode::Full, 4, "n1", at(4))
             .is_empty());
     }
 

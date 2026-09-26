@@ -1438,7 +1438,19 @@ mod tests {
             )
             && std::fs::copy("/bin/true", ov.join("merged/written-later")).is_ok();
         if overlay {
-            for bin in ["merged/from-image", "merged/written-later"] {
+            // Last: the image's own binary overwritten in place (a copy-up
+            // keeps the overlay inode) and run again.
+            for bin in [
+                "merged/from-image",
+                "merged/written-later",
+                "overwrite:merged/from-image",
+                "merged/from-image",
+            ] {
+                if let Some(target) = bin.strip_prefix("overwrite:") {
+                    let image = std::fs::read("/bin/true").unwrap();
+                    std::fs::write(ov.join(target), image).expect("overwrite through the overlay");
+                    continue;
+                }
                 let procs = format!("{ctr_dir}/cgroup.procs");
                 let status = unsafe {
                     std::process::Command::new(ov.join(bin))
@@ -1547,11 +1559,15 @@ mod tests {
                         crate::runtime_inventory::Origin::Image
                     ),
                     (
+                        "/mnt/kg-ov/merged/from-image".to_string(),
+                        crate::runtime_inventory::Origin::WritableLayer
+                    ),
+                    (
                         "/mnt/kg-ov/merged/written-later".to_string(),
                         crate::runtime_inventory::Origin::WritableLayer
                     ),
                 ],
-                "overlay lower vs upper layer"
+                "overlay lower vs upper layer, and an in-place overwrite re-reported"
             );
             unsafe {
                 libc::umount2(c"/mnt/kg-ov/merged".as_ptr(), libc::MNT_DETACH);

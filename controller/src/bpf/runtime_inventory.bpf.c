@@ -101,11 +101,22 @@ struct runtime_seen_key
     __u64 ino;
     __u32 dev;
     __u32 kind;
+    // The file's state, so a change re-reports it: KG_UPPER_* in the low
+    // bits and KG_STATE_UNLINKED. An overlay copy-up (a file of the image
+    // overwritten in place) or an exec of an unlinked file keeps the
+    // inode but must not stay reported as the image's.
+    __u32 state;
+    __u32 _pad;
 };
+
+#define KG_STATE_UNLINKED (1u << 2)
 
 // Report-once dedup. Kernfs cgroup ids are never reused, so no generation
 // is needed in the key; a container restart gets a new cgroup and is
 // reported afresh.
+// When the LRU is full it evicts the oldest entry; that file is reported
+// again on its next use, so a full map costs duplicates, never a lost
+// sighting.
 struct
 {
     __uint(type, BPF_MAP_TYPE_LRU_HASH);
@@ -253,11 +264,19 @@ static __always_inline int report_file(struct file *file, __u32 kind)
         return 0;
     __u32 gen = owner & KG_CG_GEN_MASK;
 
+    struct inode *inode = BPF_CORE_READ(file, f_inode);
+    __u32 fs_magic = (__u32)BPF_CORE_READ(inode, i_sb, s_magic);
+    __u32 nlink = BPF_CORE_READ(inode, i_nlink);
+    __u32 upper = KG_UPPER_UNKNOWN;
+    if (fs_magic == KG_OVERLAYFS_MAGIC)
+        upper = overlay_upper(inode);
+
     struct runtime_seen_key key = {
         .cgroup_id = bpf_get_current_cgroup_id(),
-        .ino = BPF_CORE_READ(file, f_inode, i_ino),
-        .dev = BPF_CORE_READ(file, f_inode, i_sb, s_dev),
+        .ino = BPF_CORE_READ(inode, i_ino),
+        .dev = BPF_CORE_READ(inode, i_sb, s_dev),
         .kind = kind,
+        .state = upper | (nlink == 0 ? KG_STATE_UNLINKED : 0),
     };
     __u8 one = 1;
     if (bpf_map_update_elem(&runtime_seen, &key, &one, BPF_NOEXIST) != 0)
@@ -268,6 +287,9 @@ static __always_inline int report_file(struct file *file, __u32 kind)
     if (!ev)
     {
         bpf_map_delete_elem(&runtime_seen, &key);
+        __u64 *lost = bpf_map_lookup_elem(&runtime_drops, &zero);
+        if (lost)
+            *lost += 1;
         return 0;
     }
     ev->cgroup_id = key.cgroup_id;
@@ -276,12 +298,9 @@ static __always_inline int report_file(struct file *file, __u32 kind)
     ev->generation = gen;
     ev->kind = kind;
     ev->pid = bpf_get_current_pid_tgid() >> 32;
-    struct inode *inode = BPF_CORE_READ(file, f_inode);
-    ev->fs_magic = (__u32)BPF_CORE_READ(inode, i_sb, s_magic);
-    ev->nlink = BPF_CORE_READ(inode, i_nlink);
-    ev->upper = KG_UPPER_UNKNOWN;
-    if (ev->fs_magic == KG_OVERLAYFS_MAGIC)
-        ev->upper = overlay_upper(inode);
+    ev->fs_magic = fs_magic;
+    ev->nlink = nlink;
+    ev->upper = upper;
     container_cgroup_name(ev);
 
     struct vfsmount *vfsmnt = BPF_CORE_READ(file, f_path.mnt);
