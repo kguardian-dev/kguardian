@@ -418,3 +418,26 @@ func TestImagesVulns_ProcessExitCodes(t *testing.T) {
 		t.Errorf("port-forward failure without a gate: exit %d, want 1", code)
 	}
 }
+
+func TestParseDigestArg(t *testing.T) {
+	good := "sha256:" + strings.Repeat("ab", 32)
+	if d, err := parseDigestArg("  " + strings.ToUpper(good) + " "); err != nil || d != good {
+		t.Fatalf("parseDigestArg(upper, padded) = %q, %v; want %q", d, err, good)
+	}
+	for _, bad := range []string{
+		"",
+		"sha256:",
+		"sha256:abc",
+		"sha256:" + strings.Repeat("a", 63),
+		"sha256:" + strings.Repeat("a", 65),
+		"sha256:" + strings.Repeat("g", 64),
+		"sha256:" + strings.Repeat("a", 62) + "/x",
+		"sha512:" + strings.Repeat("a", 128),
+		strings.Repeat("a", 64),
+		"nginx:1.27",
+	} {
+		if _, err := parseDigestArg(bad); err == nil {
+			t.Errorf("parseDigestArg(%q) accepted an invalid digest", bad)
+		}
+	}
+}

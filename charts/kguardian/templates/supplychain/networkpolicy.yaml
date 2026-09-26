@@ -8,7 +8,8 @@
 # probes come from the node, which Cilium and Calico admit by default; on a
 # CNI that does not, add the node network to allowMetricsFrom.
 #
-# Ingress-only, like the broker's policy: egress (API server, broker, DNS)
+# Ingress-only, like the broker's policy: egress (API server, broker, DNS,
+# and, when registryLookup or sources.registry is on, HTTPS to image registries)
 # is left unrestricted so the policy can never break the component's own
 # outbound traffic. Requires a NetworkPolicy-enforcing CNI.
 apiVersion: networking.k8s.io/v1

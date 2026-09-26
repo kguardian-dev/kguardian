@@ -218,3 +218,38 @@ func TestLoggingClientNeverFails(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+// The broker also caps inflated bytes (8 MiB) and components (10 000) per
+// request; well-compressing SBOMs must still be paged under those.
+func TestSBOMPagingRespectsInflatedAndComponentCaps(t *testing.T) {
+	c, _ := NewHTTPClient("http://127.0.0.1:1", "")
+	comps := make([]types.Component, 25000)
+	for i := range comps {
+		comps[i] = types.Component{Name: "pkg", Version: fmt.Sprint(i), PURL: "pkg:npm/pkg@" + fmt.Sprint(i)}
+	}
+	pages, err := c.PageSBOM(&types.ImageSBOM{Image: types.ImageRef{Digest: testDigest}, Components: comps})
+	if err != nil {
+		t.Fatal(err)
+	}
+	total := 0
+	for _, pg := range pages {
+		raw := mustGunzip(t, pg)
+		var s types.ImageSBOM
+		if err := json.Unmarshal(raw, &s); err != nil {
+			t.Fatal(err)
+		}
+		if len(s.Components) > MaxRequestComponents || len(raw) > MaxInflatedBytes || len(pg) > MaxRequestBytes {
+			t.Errorf("page over a broker limit: %d components, %d inflated, %d compressed", len(s.Components), len(raw), len(pg))
+		}
+		total += len(s.Components)
+	}
+	if total != 25000 || len(pages) < 3 {
+		t.Errorf("%d pages, %d components", len(pages), total)
+	}
+	// Too many findings is refused locally.
+	many := make([]types.Vulnerability, MaxRequestFindings+1)
+	err = c.SubmitVulnerabilities(context.Background(), &types.ImageVulnerabilities{Vulnerabilities: many})
+	if !errors.Is(err, ErrPayloadTooLarge) {
+		t.Errorf("findings cap: %v", err)
+	}
+}

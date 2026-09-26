@@ -6,14 +6,16 @@ icon: "bug"
 
 ## Overview
 
-The supplychain component reads Trivy Operator reports (and, later, its own
-Grype matches and registry-attached SBOMs) and posts one payload per image
-digest to the broker. The broker stores them keyed by digest (never per
-pod), joins them to the [image inventory](/architecture) and serves them to
-the UI, the assistant and the CLI.
+The supplychain component reads Trivy Operator reports and, when its opt-in
+Grype matcher is enabled, matches SBOMs itself: Trivy's, plus any
+registry-attached SBOM when the opt-in `supplychain.sources.registry` source
+is on. It posts one payload per image digest and source to the broker. The
+broker stores them keyed by digest (never per pod), joins them to the
+[image inventory](/architecture) and serves them to the UI, the assistant
+and the CLI.
 
-kguardian reports what the sources found. It does not scan, and it never
-blocks a workload.
+Findings come from Trivy Operator reports and, when the matcher is enabled,
+from kguardian's own Grype matcher. kguardian never blocks a workload.
 
 All reads are paginated, capped and charged to the broker's read-memory
 budget; they answer `503` with `Retry-After` rather than a partial result.
@@ -89,7 +91,7 @@ inventory digests with the first rule that matches, and records which one:
 | `join` | Rule | Confidence |
 |---|---|---|
 | `image_id` | The kubelet's imageID digest equals the payload digest. | Exact |
-| `platform_manifest` | The imageID digest is one of the payload's `platform_manifests` (index to manifest, from an anonymous registry lookup). | Exact |
+| `platform_manifest` | The imageID digest is one of the payload's `platform_manifests` (index to manifest, from the anonymous registry lookup, which is off unless `supplychain.registryLookup.enabled` is set; while off, `digestKind` is `unknown` and this rule never matches). | Exact |
 | `workload_tag` | Only when neither digest rule matched the payload, and only for an inventory digest that has no exact link from **any** source: same namespace, workload and container as a report's `observed_in`, and the same `repository:tag`. Trivy's ReplicaSet (`api-7c9d8f6b5`) or Job (`backup-29012345`) matches the inventory's Deployment (`api`) or CronJob (`backup`). | Tag only: the tag may have moved since the scan |
 | `report_digest` | Reads only: you asked for the payload's own digest and nothing in the inventory links to it. | Exact, but not known to run here |
 

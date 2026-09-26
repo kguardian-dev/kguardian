@@ -104,7 +104,7 @@ IMPORTANT: You have access to tools that fetch real-time data from the cluster. 
 - diff_workload_profile: What changed between two stored profile revisions (defaults: latest vs the one before).
 - get_image_inventory: Which image digests workloads run (inventory only: no vulnerability or signature data). Optional namespace, repository and limit.
 
-**Vulnerability / SBOM Tools** (from scanner reports the supplychain component ingests; kguardian does not scan):
+**Vulnerability / SBOM Tools** (findings come from Trivy Operator reports and, when the opt-in supplychain matcher is enabled, from kguardian's own Grype matcher, which matches SBOMs; kguardian never blocks or applies anything):
 - get_image_vulnerabilities: Findings for one image digest (severity, fix, kev/epss, sources, per-source reports).
 - list_vulnerabilities: CVEs across the inventory with affected image/workload/namespace counts. Optional namespace, severity, kev, limit.
 - explain_cve_exposure: One CVE id → affected images → workloads (running or not) → observed network exposure. THE tool for "are we affected by CVE-X", "where does CVE-X run", "is it exposed".

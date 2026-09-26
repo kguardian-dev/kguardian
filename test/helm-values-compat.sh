@@ -485,18 +485,33 @@ render "supplychain-enabled" "${SC_ON[@]}" && {
     { echo "FAIL [supplychain-enabled]: BROKER_INGEST_ENABLED must default to false"; fail=1; }
   grep -A1 'name: TRIVY_OPERATOR_ENABLED' <<<"$OUT" | grep -q 'value: "true"' || \
     { echo "FAIL [supplychain-enabled]: TRIVY_OPERATOR_ENABLED must default to true"; fail=1; }
-  # Registry lookups follow broker ingest, which is off by default.
+  # Registry lookups are opt-in.
   grep -A1 'name: REGISTRY_LOOKUP_ENABLED' <<<"$OUT" | grep -q 'value: "false"' || \
-    { echo "FAIL [supplychain-enabled]: REGISTRY_LOOKUP_ENABLED must follow brokerIngest (false)"; fail=1; }
+    { echo "FAIL [supplychain-enabled]: REGISTRY_LOOKUP_ENABLED must default to false"; fail=1; }
   grep -A1 'name: REGISTRY_ALLOW_PRIVATE' <<<"$OUT" | grep -q 'value: "false"' || \
     { echo "FAIL [supplychain-enabled]: REGISTRY_ALLOW_PRIVATE must default to false"; fail=1; }
+  grep -A1 'name: REGISTRY_SBOM_ENABLED' <<<"$OUT" | grep -q 'value: "false"' || \
+    { echo "FAIL [supplychain-enabled]: REGISTRY_SBOM_ENABLED must default to false"; fail=1; }
 }
 
-# 11b-ii. registryLookup follows brokerIngest unless set explicitly.
-render "supplychain-lookup-follows-ingest" "${SC_ON[@]}" \
+# 11b-ii. Every registry egress path is opt-in: broker ingest alone turns
+# on neither the digest-kind lookup nor the registry SBOM source.
+render "supplychain-ingest-only-no-registry-egress" "${SC_ON[@]}" \
   --set supplychain.brokerIngest.enabled=true && {
+  grep -A1 'name: REGISTRY_LOOKUP_ENABLED' <<<"$OUT" | grep -q 'value: "false"' || \
+    { echo "FAIL [supplychain-ingest-only-no-registry-egress]: registry lookup must stay off with ingest"; fail=1; }
+  grep -A1 'name: REGISTRY_SBOM_ENABLED' <<<"$OUT" | grep -q 'value: "false"' || \
+    { echo "FAIL [supplychain-ingest-only-no-registry-egress]: registry SBOM source must stay off with ingest"; fail=1; }
+}
+render "supplychain-lookup-explicit-on" "${SC_ON[@]}" \
+  --set supplychain.brokerIngest.enabled=true --set supplychain.registryLookup.enabled=true && {
   grep -A1 'name: REGISTRY_LOOKUP_ENABLED' <<<"$OUT" | grep -q 'value: "true"' || \
-    { echo "FAIL [supplychain-lookup-follows-ingest]: lookup must turn on with ingest"; fail=1; }
+    { echo "FAIL [supplychain-lookup-explicit-on]: explicit true must turn the lookup on"; fail=1; }
+}
+render "supplychain-registry-sbom-explicit-on" "${SC_ON[@]}" \
+  --set supplychain.brokerIngest.enabled=true --set supplychain.sources.registry.enabled=true && {
+  grep -A1 'name: REGISTRY_SBOM_ENABLED' <<<"$OUT" | grep -q 'value: "true"' || \
+    { echo "FAIL [supplychain-registry-sbom-explicit-on]: explicit true must turn the source on"; fail=1; }
 }
 render "supplychain-lookup-explicit-off" "${SC_ON[@]}" \
   --set supplychain.brokerIngest.enabled=true --set supplychain.registryLookup.enabled=false && {
@@ -552,6 +567,62 @@ render "broker-netpol-no-supplychain" --set broker.networkPolicy.enabled=true \
 render "supplychain-netpol" "${SC_ON[@]}" \
   --set supplychain.networkPolicy.enabled=true && {
   assert_has "supplychain-netpol" "ingress: \[\]"
+}
+
+# 11g. Grype matcher sidecar (#1533 option B): off by default; when on, a
+# second container that listens on loopback only, gets no API token (the
+# pod never auto-mounts one; only the supplychain container gets a
+# projected token) and owns the DB volume.
+render "supplychain-grype-off" "${SC_ON[@]}" && {
+  assert_absent "supplychain-grype-off" "grype-matcher"
+  assert_absent "supplychain-grype-off" "GRYPE_MATCHER_URL"
+  assert_absent "supplychain-grype-off" "kguardian-supplychain-grype-db"
+}
+if dep="$(helm template compat "$CHART" "${SC_ON[@]}" --set supplychain.grype.enabled=true \
+    --show-only templates/supplychain/deployment.yaml 2>/dev/null)"; then
+  grep -q 'automountServiceAccountToken: false' <<<"$dep" || \
+    { echo "FAIL [supplychain-grype]: pod must not auto-mount a token"; fail=1; }
+  # The matcher container block: from its name to the volumes list.
+  matcher="$(awk '/- name: grype-matcher/{f=1} /^      volumes:/{f=0} f' <<<"$dep")"
+  [ -n "$matcher" ] || { echo "FAIL [supplychain-grype]: no matcher container"; fail=1; }
+  grep -q 'value: "127.0.0.1:8090"' <<<"$matcher" || \
+    { echo "FAIL [supplychain-grype]: matcher must listen on loopback"; fail=1; }
+  if grep -qE 'serviceaccount|BROKER_AUTH_TOKEN|secretKeyRef' <<<"$matcher"; then
+    echo "FAIL [supplychain-grype]: matcher must get no Kubernetes or broker token"; fail=1
+  fi
+  grep -q 'mountPath: /var/lib/grype' <<<"$matcher" || \
+    { echo "FAIL [supplychain-grype]: matcher must mount the DB volume"; fail=1; }
+  grep -q 'value: "http://127.0.0.1:8090"' <<<"$dep" || \
+    { echo "FAIL [supplychain-grype]: supplychain must point GRYPE_MATCHER_URL at the sidecar"; fail=1; }
+  grep -A2 -- '- name: grype-db' <<<"$dep" | grep -q 'sizeLimit: 8Gi' || \
+    { echo "FAIL [supplychain-grype]: default DB volume must be an 8Gi emptyDir"; fail=1; }
+  grep -q 'ephemeral-storage: 7Gi' <<<"$matcher" && grep -q 'ephemeral-storage: 9Gi' <<<"$matcher" || \
+    { echo "FAIL [supplychain-grype]: emptyDir mode must request 7Gi / limit 9Gi ephemeral storage"; fail=1; }
+  grep -A1 'name: GRYPE_DB_UPDATE_INTERVAL' <<<"$matcher" | grep -q 'value: "12h"' || \
+    { echo "FAIL [supplychain-grype]: DB update interval must default to 12h"; fail=1; }
+  # The supplychain container still reaches the API (Trivy Operator on).
+  sc="$(awk '/- name: supplychain$/{f=1} /- name: grype-matcher/{f=0} f' <<<"$dep")"
+  grep -q 'mountPath: /var/run/secrets/kubernetes.io/serviceaccount' <<<"$sc" || \
+    { echo "FAIL [supplychain-grype]: supplychain container lost its projected token"; fail=1; }
+else
+  echo "FAIL [supplychain-grype]: deployment did not render"; fail=1
+fi
+render "supplychain-grype-pvc" "${SC_ON[@]}" --set supplychain.grype.enabled=true \
+  --set supplychain.grype.persistence.enabled=true && {
+  assert_has "supplychain-grype-pvc" "name: kguardian-supplychain-grype-db"
+  assert_has "supplychain-grype-pvc" "type: Recreate"
+  assert_has "supplychain-grype-pvc" "claimName: kguardian-supplychain-grype-db"
+  assert_absent "supplychain-grype-pvc" "ephemeral-storage"
+}
+render "supplychain-grype-existing-claim" "${SC_ON[@]}" --set supplychain.grype.enabled=true \
+  --set supplychain.grype.persistence.enabled=true --set supplychain.grype.persistence.existingClaim=my-db && {
+  assert_has    "supplychain-grype-existing-claim" "claimName: my-db"
+  assert_absent "supplychain-grype-existing-claim" "name: kguardian-supplychain-grype-db"
+}
+# Trivy source off: no projected token anywhere in the pod.
+render "supplychain-no-api" "${SC_ON[@]}" --set supplychain.sources.trivyOperator.enabled=false \
+  --set supplychain.grype.enabled=true && {
+  assert_absent "supplychain-no-api" "kube-api-access"
 }
 
 if [ "$fail" -ne 0 ]; then

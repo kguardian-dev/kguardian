@@ -14,10 +14,10 @@ import (
 	"github.com/spf13/cobra"
 )
 
-// Vulnerability and SBOM views over the broker's supply-chain reads. The
-// data comes from scanners the supplychain component reads (Trivy
-// Operator, Grype, registry SBOMs); kguardian reports it and never scans,
-// blocks or applies anything. `images vulns --fail-on` is the one place a
+// Vulnerability and SBOM views over the broker's supply-chain reads.
+// Findings come from Trivy Operator reports and, when the opt-in
+// supplychain matcher is enabled, from kguardian's own Grype matcher, which
+// matches SBOMs. kguardian never blocks or applies anything. `images vulns --fail-on` is the one place a
 // result changes the exit code, for CI gates.
 
 // gateError carries a CI gate result: a distinct exit code and a message,
@@ -83,8 +83,9 @@ func failOnSeverities(threshold string) (string, error) {
 
 func parseDigestArg(raw string) (string, error) {
 	d := strings.ToLower(strings.TrimSpace(raw))
-	if !strings.HasPrefix(d, "sha256:") && !strings.HasPrefix(d, "sha512:") {
-		return "", fmt.Errorf("digest must look like sha256:<hex>, got %q (find it with 'kguardian images list')", raw)
+	hex, ok := strings.CutPrefix(d, "sha256:")
+	if !ok || len(hex) != 64 || strings.Trim(hex, "0123456789abcdef") != "" {
+		return "", fmt.Errorf("digest must be sha256: followed by 64 hex characters, got %q (find it with 'kguardian images list')", raw)
 	}
 	return d, nil
 }
@@ -139,9 +140,11 @@ var (
 
 var imagesVulnsCmd = &cobra.Command{
 	Use:   "vulns <digest>",
-	Short: "List the vulnerabilities scanners found in an image",
+	Short: "List the vulnerabilities found in an image",
 	Long: `List the vulnerability findings for one image digest, deduplicated across
-sources (Trivy Operator, Grype), most severe first.
+sources, most severe first. Findings come from Trivy Operator reports and,
+when the opt-in supplychain matcher is enabled, from kguardian's own Grype
+matcher, which matches SBOMs.
 
 "No vulnerability data" means no source has reported on the image. That is
 unknown, not clean. KEV "unknown" means no source said either way (Trivy never
@@ -447,14 +450,16 @@ var vulnsCmd = &cobra.Command{
 	Use:     "vulns",
 	Aliases: []string{"vulnerabilities"},
 	Short:   "List vulnerabilities across the cluster and where one CVE runs",
-	Long: `Read-only views over the vulnerabilities scanners found in the images your
-workloads run.
+	Long: `Read-only views over the vulnerabilities found in the images your
+workloads run. Findings come from Trivy Operator reports and, when the
+opt-in supplychain matcher is enabled, from kguardian's own Grype matcher,
+which matches SBOMs.
 
   list       every vulnerability affecting an inventory image, grouped by id
   exposure   one id: affected images, the workloads running them, and their
              observed network exposure
 
-Only images a source has reported on are counted; images never scanned are
+Only images with vulnerability data are counted; images without any are
 unknown and absent. kguardian cannot yet tell which packages a workload
 loads ("in use" is unknown), so treat every finding as potentially
 reachable. kguardian reports; it never blocks or applies anything.`,
