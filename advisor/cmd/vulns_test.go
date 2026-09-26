@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -328,5 +329,92 @@ func TestVulnsExposure_NotFoundIsNotProofOfAbsence(t *testing.T) {
 	err := fetchAndRenderExposure("CVE-2099-99999", 0, "table", &out)
 	if err == nil || !strings.Contains(err.Error(), "not proof the cluster is unaffected") {
 		t.Errorf("got %v", err)
+	}
+}
+
+func TestImagesVulns_GateCouldNotCheckIsExit2(t *testing.T) {
+	gate, _ := failOnSeverities("high")
+	var out, errOut bytes.Buffer
+
+	// Broker refuses the token: exit 2 with the token hint, not 1.
+	startFakeBroker(t, vulnRoutes(t, "image-vulns-noauth"))
+	err := fetchAndRenderImageVulns(ledgerDigest, api.ImageVulnsOptions{}, gate, "HIGH", "table", &out, &errOut)
+	if gateCode(t, err) != exitGateNoCheck {
+		t.Fatalf("401 with a gate: want exit %d, got %v", exitGateNoCheck, err)
+	}
+	mustContain(t, err.Error(), "gate: could not check (exit 2)", "read scope")
+
+	// Broker unreachable: exit 2.
+	origURL := api.BrokerBaseURL
+	api.BrokerBaseURL = "http://127.0.0.1:1"
+	err = fetchAndRenderImageVulns(ledgerDigest, api.ImageVulnsOptions{}, gate, "HIGH", "table", &out, &errOut)
+	api.BrokerBaseURL = origURL
+	if gateCode(t, err) != exitGateNoCheck {
+		t.Fatalf("unreachable broker with a gate: want exit %d, got %v", exitGateNoCheck, err)
+	}
+
+	// The display page works but the gate's own query fails: still 2.
+	p, body := vulnRoute(t, "image-vulns-storefront")
+	startFakeBroker(t, map[string]string{p: body})
+	orig := api.GetImageVulnsFunc
+	api.GetImageVulnsFunc = func(d string, o api.ImageVulnsOptions) (*api.ImageVulnsPage, []byte, error) {
+		if o.Limit == 1 {
+			return nil, nil, fmt.Errorf("GetImageVulns: broker returned HTTP 503: shed")
+		}
+		return orig(d, o)
+	}
+	t.Cleanup(func() { api.GetImageVulnsFunc = orig })
+	err = fetchAndRenderImageVulns(storefrontDigest, api.ImageVulnsOptions{}, gate, "HIGH", "table", &out, &errOut)
+	if gateCode(t, err) != exitGateNoCheck {
+		t.Fatalf("gate query failure: want exit %d, got %v", exitGateNoCheck, err)
+	}
+
+	// Without a gate, an error stays an ordinary error.
+	api.GetImageVulnsFunc = orig
+	api.BrokerBaseURL = "http://127.0.0.1:1"
+	err = fetchAndRenderImageVulns(ledgerDigest, api.ImageVulnsOptions{}, "", "", "table", &out, &errOut)
+	api.BrokerBaseURL = origURL
+	var ge *gateError
+	if err == nil || errors.As(err, &ge) {
+		t.Errorf("no gate: want a plain error, got %v", err)
+	}
+}
+
+// The process exit codes, through Execute: re-run this test binary as the
+// CLI. A kubeconfig pointing at a closed port makes the broker port-forward
+// fail (exit 2 with --fail-on), and a bad --fail-on value is exit 2 too;
+// neither touches a real cluster.
+func TestImagesVulns_ProcessExitCodes(t *testing.T) {
+	if os.Getenv("KG_EXEC_CLI") == "1" {
+		os.Args = append([]string{"kguardian"}, strings.Fields(os.Getenv("KG_ARGS"))...)
+		Execute()
+		os.Exit(0)
+	}
+	kubeconfig := filepath.Join(t.TempDir(), "config")
+	cfg := "apiVersion: v1\nkind: Config\nclusters:\n- name: none\n  cluster:\n    server: https://127.0.0.1:1\ncontexts:\n- name: none\n  context:\n    cluster: none\n    user: none\n    namespace: default\nusers:\n- name: none\n  user:\n    token: x\ncurrent-context: none\n"
+	if err := os.WriteFile(kubeconfig, []byte(cfg), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	run := func(args string) (int, string) {
+		c := exec.Command(os.Args[0], "-test.run=^TestImagesVulns_ProcessExitCodes$")
+		c.Env = append(os.Environ(), "KG_EXEC_CLI=1", "KG_ARGS="+args, "KUBECONFIG="+kubeconfig)
+		out, err := c.CombinedOutput()
+		var ee *exec.ExitError
+		if errors.As(err, &ee) {
+			return ee.ExitCode(), string(out)
+		}
+		if err != nil {
+			t.Fatalf("running CLI: %v", err)
+		}
+		return 0, string(out)
+	}
+	if code, out := run("images vulns " + storefrontDigest + " --fail-on high"); code != exitGateNoCheck || !strings.Contains(out, "gate: could not check") {
+		t.Errorf("port-forward failure with --fail-on: exit %d, want %d\n%s", code, exitGateNoCheck, out)
+	}
+	if code, out := run("images vulns " + storefrontDigest + " --fail-on urgent"); code != exitGateNoCheck || !strings.Contains(out, "invalid --fail-on") {
+		t.Errorf("bad --fail-on: exit %d, want %d\n%s", code, exitGateNoCheck, out)
+	}
+	if code, _ := run("images vulns " + storefrontDigest); code != 1 {
+		t.Errorf("port-forward failure without a gate: exit %d, want 1", code)
 	}
 }

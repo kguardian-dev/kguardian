@@ -32,6 +32,7 @@ func (e *gateError) Error() string { return e.msg }
 // Gate exit codes for `images vulns --fail-on`.
 const (
 	exitGateFindings = 1 // at least one finding at or above the threshold
+	exitGateNoCheck  = 2 // the check could not run: broker, transport, auth or usage error
 	exitGateUnknown  = 3 // no vulnerability data for the image (unknown)
 )
 
@@ -150,8 +151,10 @@ every finding as potentially reachable.
 CI gate: --fail-on <severity> exits
   0  no finding at or above the severity
   1  at least one finding at or above it (findings of UNKNOWN severity count)
+  2  the check could not run: broker unreachable, port-forward or token
+     failure, a broker error, or an invalid flag
   3  no vulnerability data for the image: unknown is never a pass
-Other errors (broker unreachable, bad token) exit 1 with an error message.
+Each result is printed as a "gate:" line on stderr.
 
 Examples:
   kubectl kguardian images vulns sha256:0123...
@@ -162,6 +165,33 @@ Examples:
 }
 
 func runImagesVulns(cmd *cobra.Command, args []string) error {
+	err := imagesVulns(cmd, args)
+	if strings.TrimSpace(imageVulnsFailOn) != "" {
+		// With a gate, every outcome is a gate result: CI must be able to
+		// tell "findings" (1) from "could not check" (2) from "no data" (3).
+		err = asGateResult(err)
+	}
+	var ge *gateError
+	if errors.As(err, &ge) {
+		cmd.SilenceUsage, cmd.SilenceErrors = true, true
+	}
+	return err
+}
+
+// asGateResult keeps a gate result as is and turns any other error into
+// exit code 2 ("could not check").
+func asGateResult(err error) error {
+	if err == nil {
+		return nil
+	}
+	var ge *gateError
+	if errors.As(err, &ge) {
+		return err
+	}
+	return &gateError{code: exitGateNoCheck, msg: fmt.Sprintf("gate: could not check (exit %d): %v", exitGateNoCheck, err)}
+}
+
+func imagesVulns(cmd *cobra.Command, args []string) error {
 	output, err := parseOutput(imageVulnsOutput, "table", "json", "yaml")
 	if err != nil {
 		return err
@@ -190,18 +220,21 @@ func runImagesVulns(cmd *cobra.Command, args []string) error {
 	}
 	defer closeFn()
 	opts := api.ImageVulnsOptions{Severity: sev, Fixable: optBool(cmd, "fixable", imageVulnsFixable), Source: src, Limit: imageVulnsLimit, After: imageVulnsAfter}
-	err = fetchAndRenderImageVulns(digest, opts, gate, strings.ToUpper(imageVulnsFailOn), output, os.Stdout, os.Stderr)
-	var ge *gateError
-	if errors.As(err, &ge) {
-		cmd.SilenceUsage, cmd.SilenceErrors = true, true
-	}
-	return err
+	return fetchAndRenderImageVulns(digest, opts, gate, strings.ToUpper(imageVulnsFailOn), output, os.Stdout, os.Stderr)
 }
 
 // fetchAndRenderImageVulns renders the page asked for, then, with a gate,
 // runs its own query (threshold severities, limit 1) so the gate sees
 // every page, not just the one shown.
 func fetchAndRenderImageVulns(digest string, opts api.ImageVulnsOptions, gate, threshold, output string, w, errw io.Writer) error {
+	err := renderAndGate(digest, opts, gate, threshold, output, w, errw)
+	if gate != "" {
+		return asGateResult(err)
+	}
+	return err
+}
+
+func renderAndGate(digest string, opts api.ImageVulnsOptions, gate, threshold, output string, w, errw io.Writer) error {
 	page, raw, err := api.GetImageVulns(digest, opts)
 	if err != nil {
 		return brokerReadErr(fmt.Sprintf("fetching vulnerabilities for %s", digest), err)
@@ -490,7 +523,7 @@ func init() {
 	imagesVulnsCmd.Flags().StringVar(&imageVulnsSource, "source", "", "Only this source's report: trivy-operator, grype or registry")
 	imagesVulnsCmd.Flags().IntVar(&imageVulnsLimit, "limit", 100, "Page size (the broker caps it at 500)")
 	imagesVulnsCmd.Flags().StringVar(&imageVulnsAfter, "after", "", "Cursor printed by the previous page")
-	imagesVulnsCmd.Flags().StringVar(&imageVulnsFailOn, "fail-on", "", "CI gate: exit 1 on any finding at or above this severity (critical, high, medium, low); exit 3 when the image has no vulnerability data")
+	imagesVulnsCmd.Flags().StringVar(&imageVulnsFailOn, "fail-on", "", "CI gate (critical, high, medium, low): exit 1 on any finding at or above it, 2 if the check could not run, 3 if the image has no vulnerability data")
 	imagesVulnsCmd.Flags().StringVarP(&imageVulnsOutput, "output", "o", "table", "Output format: table, json or yaml")
 
 	imagesSbomCmd.Flags().StringVar(&imageSbomSource, "source", "", "Which SBOM: trivy-operator, grype or registry (default: the broker's choice)")
