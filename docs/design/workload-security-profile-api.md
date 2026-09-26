@@ -1,10 +1,13 @@
 # Workload Security Profile — broker API contract
 
 Part of #1533. Implemented in `broker/src/workload_profile.rs` (read model, posture, versions, diff) and
-`broker/src/pod_security.rs` (Pod Security Standards analyser). Consumers: the frontend profile page,
-llm-bridge tools and the advisor `profile` commands.
-Status: **v1, stable**. Changes are appended to the CHANGELOG at the bottom, dated. Nothing above the
-CHANGELOG is edited silently.
+`broker/src/pod_security.rs` (Pod Security Standards analyser), PR #1669. Consumers: the frontend profile
+page (#1672), llm-bridge tools and the advisor `profile` commands (#1668).
+
+Status: **v1.2, stable**. Every change is appended to the CHANGELOG at the bottom, dated.
+
+**Examples:** the snippets below are trimmed from raw responses of a v1.2
+broker build against a seeded database.
 
 ## 0. Conventions (apply to every response below)
 
@@ -13,212 +16,180 @@ CHANGELOG is edited silently.
     data has arrived yet). Never render `null` as 0, "none", "ok" or "false".
   - `[]` = **known to be empty** (we looked and there is nothing).
   - `false` = known false.
-- Timestamps are RFC 3339 UTC with `Z` (`"2026-09-26T10:04:00Z"`).
+- **No numeric scores.** Posture is a tier (`status`) plus `coverage` and the `reasons` that produced it.
+- Timestamps are RFC 3339 UTC with `Z`.
 - JSON keys are camelCase.
 - Workload key = `(namespace, kind, name)`, exactly the key `workload_syscalls`, `workload_containers` and
   the SeccompProfile `workloadRef` use (controller owner resolution: ReplicaSet->Deployment,
-  Job->CronJob; a pod with no owner is `kind = "Pod"`, `name = <pod name>`). `kind` is case-sensitive
-  (`Deployment`, `StatefulSet`, `DaemonSet`, `CronJob`, `Job`, `ReplicaSet`, `Pod`, ...).
+  Job->CronJob; a pod with no owner is `kind = "Pod"`, `name = <pod name>`). `kind` is case-sensitive.
   `clusterId` is always `"primary"` until multi-cluster ingest lands.
 - Status enum everywhere: `"ok" | "warn" | "risk" | "unknown"`.
 - Severity enum: `"critical" | "high" | "medium" | "low" | "info"`. Tier (UX priority) is derived:
   critical -> `"P0"`, high -> `"P1"`, medium -> `"P2"`, low/info -> `null`.
-- All routes are `GET`, READ scope (`BROKER_TOKEN_READ` or any token carrying read). Errors below.
-- Report and generate only: nothing here applies anything to the cluster.
+- All routes are `GET`, READ scope. Report and generate only: nothing here applies anything.
 
 ### Error codes (all endpoints)
 
 | HTTP | When | Body |
 |---|---|---|
-| 400 | Malformed path/query (empty segment, segment > 253 chars, bad `limit`/`after`/`from`/`to`/`status`) | `{"error":"bad_request","message":"..."}` |
-| 401 / 403 | Missing/invalid token / token lacks read scope (auth middleware, only when broker auth is on) | plain text (existing middleware) |
-| 404 | Workload unknown to the broker (no inventory, no syscall aggregate, no live pod and no stored profile), or a requested revision does not exist | `{"error":"workload_not_found" \| "revision_not_found","message":"..."}` |
-| 503 | Read budget shed (existing `read_budget` behaviour), carries `Retry-After` | plain text (existing) |
+| 400 | Malformed path/query (empty segment, segment > 253 chars, bad `after`/`from`/`to`/`status`, `from >= to`) | `{"error":"bad_request","message":"..."}` |
+| 401 / 403 | Missing/invalid token / token lacks read scope (auth middleware, only when broker auth is on) | plain text |
+| 404 | Workload unknown to the broker, or a requested revision does not exist | `{"error":"workload_not_found" \| "revision_not_found","message":"..."}` |
+| 503 | Read budget shed, carries `Retry-After` | plain text |
 | 500 | Database error | plain text |
 
-There is **no 501 / feature-off state**: the profile read model is always on (it only joins data the
-broker already has). Sources that are not configured (vulnerability scanning, signatures) appear as
-`null` with a `notConfigured` reason inside the payload, never as an HTTP error.
+A 404 **with** a JSON `error` code comes only from these profile routes. An older broker without the
+routes answers the framework's default 404 with an empty, non-JSON body. There is **no 501 /
+feature-off state**. Sources that are not configured appear as `null` with a reason, never as an HTTP
+error.
 
 ## 1. `GET /workloads` — paginated list with posture summary
 
-Query: `namespace` (exact, optional), `kind` (exact, optional), `status` (`ok|warn|risk|unknown`,
-filters on `posture.status`, optional), `limit` (default 100, max 500; out of range is clamped),
-`after` (the previous page's `nextAfter`, opaque string).
+Query (all optional): `namespace` (exact), `kind` (exact), `status` (`ok|warn|risk|unknown`, filters on
+`posture.status`), `search` (case-insensitive substring of the workload name, max 253 chars), `limit`
+(default 100, max 500, clamped), `after` (the previous page's `nextAfter`, opaque).
 
 Order: `(namespace, kind, name)` ascending. `nextAfter` is `null` on the last page.
 
 Source: the `workload_profile_latest` read model, refreshed by a background snapshotter (every
-`PROFILE_SNAPSHOT_INTERVAL_SECS`, default 300 s, `PROFILE_SNAPSHOT_BATCH` workloads per tick, default 200,
-least recently computed first). A workload appears after its first snapshot (first tick runs ~60 s after
-broker start); `computedAt` says how fresh each row is. The detail endpoint (section 2) is always computed
-live.
+`PROFILE_SNAPSHOT_INTERVAL_SECS`, default 300 s, floor 60; `PROFILE_SNAPSHOT_BATCH` workloads per tick,
+default 200, least recently computed first). A workload appears after its first snapshot (the first tick
+runs ~60 s after broker start); `computedAt` says how fresh each row is. The detail endpoint (section 2)
+is always computed live. Captures: `list-page1-limit2`, `list-page2-after`, `list-namespace-payments`,
+`list-search-ledger`, `list-status-risk`.
 
 ```json
 {
   "items": [
     {
       "clusterId": "primary",
-      "namespace": "payments",
+      "namespace": "flux-system",
       "kind": "Deployment",
-      "name": "checkout",
-      "revision": 3,
-      "contentHash": "fnv1a64:6f1c2a9e0b7d4c31",
-      "computedAt": "2026-09-26T10:05:00Z",
-      "lastChangedAt": "2026-09-25T18:40:12Z",
-      "posture": {
-        "status": "warn",
-        "score": 71,
-        "coverage": 0.47,
-        "grade": null,
-        "unknownDimensions": ["network", "images"]
-      },
+      "name": "source-controller",
+      "revision": 1,
+      "contentHash": "fnv1a64:…",
+      "computedAt": "2026-09-26T02:05:41.1Z",
+      "lastChangedAt": "2026-09-26T02:04:41.1Z",
+      "posture": { "status": "ok", "coverage": 0.75, "unknownDimensions": ["podSecurity"] },
       "dimensions": {
-        "network":     { "status": "unknown", "score": null },
-        "syscalls":    { "status": "warn",    "score": 60 },
-        "podSecurity": { "status": "ok",      "score": 80, "level": "restricted", "levelConfidence": "upper_bound" },
-        "images":      { "status": "ok",      "score": null, "runningDigests": 1, "mixedDigests": false },
-        "compute":     { "status": "ok",      "score": null }
+        "network":     { "status": "ok" },
+        "syscalls":    { "status": "ok" },
+        "podSecurity": { "status": "unknown", "level": "restricted", "levelConfidence": "upper_bound" },
+        "images":      { "status": "ok", "runningDigests": 1, "mixedDigests": false },
+        "compute":     { "status": "ok" }
       },
-      "findingCounts": { "critical": 0, "high": 0, "medium": 1, "low": 2, "info": 0 }
+      "findingCounts": { "critical": 0, "high": 0, "medium": 0, "low": 0, "info": 0 }
     }
   ],
-  "nextAfter": "payments/Deployment/checkout"
+  "nextAfter": "observability/DaemonSet/node-exporter"
 }
 ```
 
-Semantics:
-- `revision`/`contentHash`: the latest stored version (section 3). `revision` starts at 1.
-- `posture.score`: 0-100 or `null` when no dimension is scored. `posture.coverage`: 0.0-1.0 = the
-  fraction of scoring weight whose dimension is known (section 2.2). `grade`: `"A".."F"` only when
-  `coverage >= 0.8`, else `null`.
-- `dimensions.*.score` may be `null` while `status` is known: e.g. `images` has an inventory (status known)
-  but no vulnerability source, so it is not scored. `compute` is never scored in v1 (informational).
-- `podSecurity.level`: `"privileged" | "baseline" | "restricted" | null` (null = no container
-  securityContext has been reported for this workload). See 2.3 for `levelConfidence`.
+- `revision` / `contentHash`: the latest stored version (section 3).
+- `posture`: see 2.2. `dimensions.images.runningDigests` / `mixedDigests` are `null` when there is no
+  inventory. `podSecurity.level` / `levelConfidence` are `null` when no current container is known.
 
 ## 2. `GET /workloads/{namespace}/{kind}/{name}/profile` — full profile, computed live
 
-404 `workload_not_found` when none of: inventory rows, syscall aggregate, live pods in `pod_details`,
-stored profile exist for the key.
+404 `workload_not_found` when the broker has none of: inventory rows, a syscall aggregate, pods in
+`pod_details`, a stored profile. Captures: `profile-ok-flux-system-source-controller`,
+`profile-warn-payments-checkout`, `profile-warn-payments-ledger-mixed-crashloop-stale`,
+`profile-risk-observability-node-exporter-hostpid-wouldDeny`,
+`profile-unknown-observability-otel-collector-fresh`.
+
+Top level (from `profile-warn-payments-ledger-mixed-crashloop-stale`, trimmed):
 
 ```json
 {
-  "workload": {
-    "clusterId": "primary",
-    "namespace": "payments",
-    "kind": "Deployment",
-    "name": "checkout",
-    "transient": false,
-    "pods": { "live": 2, "names": ["checkout-7d9f8b6c5-2xkqp", "checkout-7d9f8b6c5-9hmtz"], "truncated": false }
-  },
-  "generatedAt": "2026-09-26T10:07:31Z",
-  "contentHash": "fnv1a64:6f1c2a9e0b7d4c31",
-  "version": { "revision": 3, "contentHash": "fnv1a64:6f1c2a9e0b7d4c31", "createdAt": "2026-09-25T18:40:12Z" },
+  "workload": { "clusterId": "primary", "namespace": "payments", "kind": "Deployment", "name": "ledger",
+                "transient": false, "pods": { "live": 1, "names": ["ledger-5b7c9d8f6-q8wzn"], "truncated": false } },
+  "generatedAt": "2026-09-26T02:08:10Z",
+  "contentHash": "fnv1a64:…",
+  "version": { "revision": 1, "contentHash": "fnv1a64:…", "createdAt": "2026-09-26T02:04:41Z" },
   "snapshotPending": false,
-
   "posture": {
     "status": "warn",
-    "score": 71,
-    "coverage": 0.47,
-    "grade": null,
-    "weights": { "network": 20, "syscalls": 15, "podSecurity": 20, "images": 30 },
-    "unknownDimensions": ["network", "images"],
-    "deductions": [
-      { "dimension": "syscalls", "findingId": "syscalls.no_enforcing_profile", "points": 40 },
-      { "dimension": "podSecurity", "findingId": "podSecurity.readOnlyRootFilesystem/app", "points": 5 }
+    "coverage": 0.5,
+    "unknownDimensions": ["network", "podSecurity"],
+    "reasons": [
+      { "dimension": "network", "status": "unknown", "message": "No audit policy covers this workload; applied NetworkPolicies are not visible to the broker" },
+      { "dimension": "syscalls", "status": "warn", "message": "SeccompProfile ledger is in audit mode" },
+      { "dimension": "podSecurity", "status": "unknown", "message": "Every evaluated check passes restricted, but 9 checks cannot be seen (e.g. hostPath), so restricted is not confirmed" },
+      { "dimension": "images", "status": "warn", "message": "Container ledger is in CrashLoopBackOff" }
     ]
   },
-
-  "attention": [
-    { "id": "syscalls.no_enforcing_profile", "dimension": "syscalls", "severity": "medium", "tier": "P2",
-      "title": "No SeccompProfile CR enforces the observed syscall set",
-      "detail": "Pods run with RuntimeDefault only. Export the observed profile (61 syscalls) and apply it in audit mode first.",
-      "container": null }
-  ],
-
-  "findings": [ "... every finding, same shape as attention[]; attention = top 5 by severity" ],
-
+  "attention": [ { "id": "images.crashLoop/ledger", "dimension": "images", "severity": "medium", "tier": "P2",
+                   "title": "Container ledger is in CrashLoopBackOff", "detail": "The running digest keeps exiting.", "container": "ledger" } ],
+  "findings": [ "… every finding, same shape; attention = the first 5 of severity medium or worse" ],
   "controls": [
-    { "control": "networkPolicy",   "state": "unknown",  "detail": "No audit policy covers this workload; applied NetworkPolicies are not visible to the broker", "inSync": null },
-    { "control": "seccompProfile",  "state": "none",     "detail": "No SeccompProfile CR references this workload", "inSync": null },
-    { "control": "imageAdmission",  "state": null,       "detail": "Signature/admission checks are not configured", "inSync": null }
+    { "control": "networkPolicy",  "state": "unknown", "detail": "…", "inSync": null },
+    { "control": "seccompProfile", "state": "audit",   "detail": "SeccompProfile ledger (SCMP_ACT_LOG), 4 syscalls, distribution …", "inSync": true },
+    { "control": "imageAdmission", "state": null,      "detail": "Signature/admission checks are not configured", "inSync": null }
   ],
-
   "readiness": [
-    { "id": "trafficObserved24h",   "ok": true,  "message": "Traffic observed for 6d 4h" },
-    { "id": "syscallCaptureComplete","ok": true, "message": "Every pod captured at level full (startup included)" },
-    { "id": "noWouldDeny24h",       "ok": null,  "message": "No audit policy covers this workload" },
-    { "id": "imageSigned",          "ok": null,  "message": "Signature verification is not configured" },
-    { "id": "podSecurityRestricted","ok": true,  "message": "Evaluated checks pass restricted; 9 checks could not be evaluated" }
+    { "id": "trafficObserved24h",     "ok": true, "message": "Traffic observed for 5d 0h" },
+    { "id": "syscallCaptureComplete", "ok": true, "message": "Every contributing pod captured at level full (startup included)" },
+    { "id": "noWouldDeny24h",         "ok": null, "message": "No audit policy covers this workload" },
+    { "id": "imageSigned",            "ok": null, "message": "Signature verification is not configured" },
+    { "id": "podSecurityRestricted",  "ok": null, "message": "Every evaluated check passes restricted; 9 checks cannot be seen, so restricted is not confirmed" }
   ],
-
-  "exposure": { "ingressPeers": 3, "ingressExternal": 0, "egressPeers": 4, "egressExternal": 1 },
-
-  "dimensions": {
-    "network":     { "...": "2.4" },
-    "syscalls":    { "...": "2.5" },
-    "podSecurity": { "...": "2.3" },
-    "images":      { "...": "2.6" },
-    "compute":     { "...": "2.7" }
-  }
+  "exposure": { "ingressPeers": 1, "ingressExternal": 0, "egressPeers": 0, "egressExternal": 0 },
+  "dimensions": { "network": {}, "syscalls": {}, "podSecurity": {}, "images": {}, "compute": {} }
 }
 ```
 
-- `contentHash` is the hash of the live profile's policy-relevant snapshot (section 3). `version` is the
-  latest **stored** version (`null` if the snapshotter has not stored one yet). `snapshotPending: true`
-  means live differs from the latest stored version; the snapshotter will store it on its next visit.
+- `contentHash`: hash of the live profile's policy-relevant snapshot (section 3). `version`: the latest
+  **stored** version (`null` until the snapshotter stores one). `snapshotPending: true` = live differs
+  from the stored version (always `true` when `version` is `null`).
 - `controls[].state`: networkPolicy `"audit" | "unknown"`; seccompProfile `"enforcing" | "audit" | "none"`;
-  imageAdmission always `null` in v1. `inSync`: `true|false|null`.
+  imageAdmission always `null`. `inSync`: `true | false | null`.
 - `readiness[].ok`: `true | false | null` (null = cannot tell).
-- `exposure` counts come from observed flows (distinct peers); all `null` when the network dimension has
-  no flows.
+  - `podSecurityRestricted` is `false` when the level is `baseline` or `privileged`. It is **`null`** when
+    the level is `restricted`, because that is only an upper bound in v1 (checks kguardian cannot see,
+    such as hostPath, may still fail). It is never `true` in v1.
+- `exposure`: distinct peers from observed flows; all `null` when there are no flows.
 
 ### 2.1 Common dimension envelope
-
-Every entry in `dimensions` has at least:
 
 ```json
 {
   "status": "ok|warn|risk|unknown",
-  "score": 80,
-  "scored": true,
-  "coverage": { "level": "full|partial|none", "fraction": 0.5, "observedSince": "2026-09-20T06:00:00Z", "note": "..." },
+  "coverage": { "level": "full|partial|none", "fraction": 0.5, "observedSince": "2026-09-20T06:00:00Z", "note": "…" },
   "reasons": [ { "code": "machine_code", "message": "human sentence" } ]
 }
 ```
 
-- `score`: 0-100 = `100 - sum(points of this dimension's findings)`, floored at 0, **or `null`** when the
-  dimension is not scored (`scored: false`). A dimension with `status: "unknown"` is never scored.
-- `coverage.fraction`: dimension-specific (checks evaluated / checks defined for podSecurity; pods with
-  full capture / pods for syscalls; `null` when not meaningful). `observedSince`: earliest evidence
-  timestamp, `null` if unknown.
-- `reasons`: why the status is what it is, incl. why something is unknown. Codes are stable.
+- `status`: a tier from fixed rules (2.2), never from a number.
+- `coverage.fraction`: evaluated / defined PSS checks for podSecurity; `null` elsewhere.
+- `reasons`: why the status is what it is, including why something is unknown. Codes are stable.
 
-### 2.2 Posture rollup
+### 2.2 Posture rollup and status rules
 
-- Weights (v1, constants): network 20, syscalls 15, podSecurity 20, images 30. compute has weight 0.
-- `score` = weighted mean of **scored** dimensions only (rounded). `coverage` = sum of weights of scored
-  dimensions / 85. Unknown or unscored dimensions are **excluded**, never counted as 0 or 100, and are
-  listed in `unknownDimensions`.
-- `grade`: A >= 90, B >= 80, C >= 70, D >= 60, else F — only when `coverage >= 0.8`, else `null`.
-- `status`: worst of the known dimension statuses (`risk` > `warn` > `ok`); `unknown` only if every
-  dimension is unknown.
-- Scored dimension status from score: >= 80 ok, 50-79 warn, < 50 risk. Unscored dimension status from its
-  findings: any high/critical -> risk, any medium -> warn, else ok; no data -> unknown.
-- Every point deducted appears in `deductions[]` with the finding id.
+- Core dimensions: network, syscalls, podSecurity, images. `compute` is informational and excluded.
+- `posture.status` = worst **known** core status (`risk` > `warn` > `ok`); `unknown` only when every core
+  dimension is unknown. An unknown dimension never counts as ok or as risk.
+- `posture.coverage` = known core dimensions / 4, 2 decimals. `posture.unknownDimensions` = core
+  dimensions whose status is `unknown`.
+- `posture.reasons[]`: one `{dimension, status, message}` per core dimension that is not `ok`, in the order
+  network, syscalls, podSecurity, images. podSecurity uses its level reason (naming the containers that
+  set the level); the others use their most severe finding of severity medium or worse, else their first
+  reason.
+- Dimension status from findings: any critical/high finding -> `risk`; else any medium -> `warn`; else
+  `ok`; no data -> `unknown`. Then:
+  - **podSecurity**: level `privileged` -> `risk`; level `baseline` -> at least `warn`; level `restricted`
+    (only ever an upper bound in v1) -> **never `ok`**: `unknown` unless a finding makes it warn/risk.
+  - **syscalls**: `capture.complete: false` -> at least `warn`.
+  - **network**: `unknown` unless an audit policy covers the workload's pods in the last 24 h.
 
-### 2.3 `podSecurity` (P0-4) — Pod Security Standards
+### 2.3 `podSecurity` — Pod Security Standards
 
 Rules follow the upstream PSS check list exactly: kubernetes.io/docs/concepts/security/pod-security-standards
 (kubernetes/website `main` @ `2c1aa11c`, 2026-08-02, docs for Kubernetes v1.37).
 
-Check ids (stable) and whether v1 can evaluate them from the image inventory:
-
 | id | level | evaluated? | rule (upstream) |
 |---|---|---|---|
 | `hostProcess` | baseline | no (field not ingested) | windowsOptions.hostProcess undefined/false |
-| `hostNamespaces` | baseline | yes | hostNetwork, hostPID, hostIPC undefined/false |
+| `hostNamespaces` | baseline | yes, **if** the pod-level block was reported | hostNetwork, hostPID, hostIPC undefined/false |
 | `privileged` | baseline | yes | securityContext.privileged undefined/false |
 | `capabilitiesBaseline` | baseline | yes | capabilities.add only AUDIT_WRITE, CHOWN, DAC_OVERRIDE, FOWNER, FSETID, KILL, MKNOD, NET_BIND_SERVICE, SETFCAP, SETGID, SETPCAP, SETUID, SYS_CHROOT |
 | `hostPathVolumes` | baseline | **no** (volumes not ingested) | volumes[*].hostPath undefined |
@@ -231,207 +202,174 @@ Check ids (stable) and whether v1 can evaluate them from the image inventory:
 | `sysctls` | baseline | no | sysctls in the safe set |
 | `volumeTypes` | restricted | no | only configMap, csi, downwardAPI, emptyDir, ephemeral, persistentVolumeClaim, projected, secret |
 | `privilegeEscalation` | restricted | yes | allowPrivilegeEscalation == false (explicitly) |
-| `runAsNonRoot` | restricted | yes | container or pod runAsNonRoot == true |
-| `runAsUser` | restricted | yes | runAsUser (container, else pod) non-zero or undefined |
-| `seccompRestricted` | restricted | yes | effective (container, else pod) seccompProfile.type is RuntimeDefault or Localhost |
+| `runAsNonRoot` | restricted | yes (see below) | container or pod runAsNonRoot == true |
+| `runAsUser` | restricted | yes | runAsUser non-zero or undefined (container and pod) |
+| `seccompRestricted` | restricted | yes (see below) | effective (container, else pod) seccompProfile.type is RuntimeDefault or Localhost |
 | `capabilitiesRestricted` | restricted | yes | capabilities.drop includes ALL; add only NET_BIND_SERVICE |
 
-hostPath is **not** available (volumes are not ingested) and is reported as unevaluated, never as pass.
-Linux is assumed (kguardian's controller runs on Linux/containerd). The user-namespace relaxation of
-runAsNonRoot/runAsUser (alpha feature gate) is not applied.
+- hostPath is **not** available and is reported as unevaluated, never as a pass. Linux is assumed. The
+  user-namespace relaxation of runAsNonRoot/runAsUser (alpha feature gate) is not applied.
+- **Missing pod-level block** (`pod.known: false`: empty or malformed in the inventory, e.g. an older
+  controller): `hostNamespaces` is added to `unevaluatedChecks`, no pod-level check or finding is
+  produced, and a container that leaves `runAsNonRoot` / `seccompProfile` to the pod is not failed on
+  them (`runAsNonRoot` / `seccompRestricted` are then added to `unevaluatedChecks` too). Reason
+  `pod_fields_unknown`.
+- **Which containers count:** every **current** container of every kind (regular, init, ephemeral). A row is
+  current when a pod of the workload still reports it (refreshed within the inventory's running window, or
+  its last reporting pod is still live). Each container is evaluated from its newest running row
+  (`source: "running"`), else its newest current row (`source: "last_known"`, e.g. a completed init
+  container). A container with no current row (renamed or removed from the spec) is **stale**: it is
+  listed in `staleContainers` and does not affect the level, findings, patch or snapshot.
+- **Level** = the minimum over the pod-level checks and every current container:
+  - any evaluated baseline check fails -> `"privileged"`, `levelConfidence: "confirmed"`;
+  - else any evaluated restricted check fails -> `"baseline"`, `"upper_bound"`;
+  - else `"restricted"`, `"upper_bound"` (never confirmed in v1).
 
-Level computation (`level`, `levelConfidence`):
-- Any evaluated **baseline** check fails -> `"privileged"`, confidence `"confirmed"`.
-- Else any evaluated **restricted** check fails -> `"baseline"`, confidence `"upper_bound"` (unevaluated
-  baseline checks could still fail).
-- Else -> `"restricted"`, confidence `"upper_bound"`.
-- `"confirmed"` is only possible for `privileged` in v1 because 9 checks are unevaluable. The UI should
-  show `upper_bound` as "at most baseline" / "restricted (unverified: hostPath, ...)".
-- Workload level = lowest level across containers (all kinds: init, regular, ephemeral — PSS covers all).
+Trimmed from `profile-risk-observability-node-exporter-hostpid-wouldDeny`:
 
 ```json
 {
-  "status": "ok",
-  "score": 80,
-  "scored": true,
-  "coverage": { "level": "partial", "fraction": 0.5, "observedSince": "2026-09-19T08:12:00Z",
-                "note": "9 of 18 PSS checks evaluated; volumes, ports, probes, AppArmor, SELinux, procMount, sysctls and hostProcess are not ingested" },
-  "reasons": [ { "code": "pss_upper_bound", "message": "Evaluated checks pass restricted; unevaluated checks may lower the level" } ],
+  "status": "risk",
+  "coverage": { "level": "partial", "fraction": 0.5, "observedSince": "…", "note": "9 of 18 PSS checks evaluated; …" },
+  "reasons": [ { "code": "pss_fails_baseline", "message": "Privileged under PSS: pod spec fail(s) a baseline check" } ],
   "pssVersion": "kubernetes/website@2c1aa11c (Kubernetes v1.37 docs)",
-  "level": "restricted",
-  "levelConfidence": "upper_bound",
+  "level": "privileged",
+  "levelConfidence": "confirmed",
   "unevaluatedChecks": ["hostProcess","hostPathVolumes","hostPorts","hostProbesLifecycle","appArmor","seLinux","procMount","sysctls","volumeTypes"],
   "pod": {
-    "serviceAccountName": "checkout",
-    "automountServiceAccountToken": null,
-    "hostNetwork": false,
-    "hostPID": null,
-    "hostIPC": null,
-    "hostUsers": null,
-    "securityContext": { "runAsNonRoot": true, "runAsUser": null, "runAsGroup": null, "fsGroup": 2000, "seccompProfileType": "RuntimeDefault" }
+    "known": true,
+    "serviceAccountName": "node-exporter", "automountServiceAccountToken": false,
+    "hostNetwork": true, "hostPID": true, "hostIPC": null, "hostUsers": null,
+    "securityContext": { "runAsNonRoot": null, "runAsUser": null, "runAsGroup": null, "fsGroup": null, "seccompProfileType": null },
+    "failing": [
+      { "check": "hostNamespaces", "level": "baseline", "field": "spec.hostNetwork", "value": true, "message": "hostNetwork must be unset or false" },
+      { "check": "hostNamespaces", "level": "baseline", "field": "spec.hostPID", "value": true, "message": "hostPID must be unset or false" }
+    ]
   },
   "containers": [
-    {
-      "name": "app",
-      "kind": "regular",
-      "source": "running",
-      "digest": "sha256:9f2c0d1e...",
-      "securityContext": {
-        "privileged": null, "allowPrivilegeEscalation": false, "runAsNonRoot": null, "runAsUser": 10001,
-        "runAsGroup": null, "readOnlyRootFilesystem": null, "capabilitiesAdd": null,
-        "capabilitiesDrop": ["ALL"], "seccompProfileType": null
-      },
-      "level": "restricted",
-      "failing": []
-    },
-    {
-      "name": "migrate",
-      "kind": "init",
-      "source": "last_known",
-      "digest": "sha256:41ab77c0...",
-      "securityContext": { "privileged": null, "allowPrivilegeEscalation": null, "runAsNonRoot": null, "runAsUser": null,
-        "runAsGroup": null, "readOnlyRootFilesystem": null, "capabilitiesAdd": null, "capabilitiesDrop": null, "seccompProfileType": null },
+    { "name": "node-exporter", "kind": "regular", "source": "running", "digest": "sha256:7d4e…",
+      "securityContext": { "privileged": null, "allowPrivilegeEscalation": null, "runAsNonRoot": true, "runAsUser": 65534,
+                           "runAsGroup": null, "readOnlyRootFilesystem": true, "capabilitiesAdd": null,
+                           "capabilitiesDrop": null, "seccompProfileType": null },
       "level": "baseline",
-      "failing": [
-        { "check": "privilegeEscalation", "level": "restricted",
-          "field": "spec.initContainers[migrate].securityContext.allowPrivilegeEscalation", "value": null,
-          "message": "allowPrivilegeEscalation must be set to false" },
-        { "check": "capabilitiesRestricted", "level": "restricted",
-          "field": "spec.initContainers[migrate].securityContext.capabilities.drop", "value": null,
-          "message": "capabilities.drop must include ALL" }
-      ]
-    }
+      "failing": [ { "check": "privilegeEscalation", "level": "restricted", "field": "spec.containers[node-exporter].securityContext.allowPrivilegeEscalation", "value": null, "message": "allowPrivilegeEscalation must be set to false" } ] }
   ],
+  "staleContainers": [],
   "recommendation": {
     "recommendation": true,
     "targetLevel": "restricted",
     "format": "strategic-merge-patch",
-    "yaml": "# kguardian recommendation, not applied. Review before use.\n# Target: Pod Security Standards restricted (kubernetes.io/docs/concepts/security/pod-security-standards)\nspec:\n  template:\n    spec:\n      initContainers:\n      - name: migrate\n        securityContext:\n          allowPrivilegeEscalation: false\n          capabilities:\n            drop: [\"ALL\"]\n",
-    "caveats": [
-      "Checks kguardian cannot see (hostPath and other volume types, hostPort, AppArmor, SELinux, procMount, sysctls) may still fail restricted.",
-      "runAsNonRoot: true fails at container start if the image's USER is root; set runAsUser to a UID the image supports."
-    ]
+    "yaml": "# kguardian recommendation, not applied. Review before use.\n# Target: …\nspec:\n  template:\n    spec:\n      hostNetwork: false\n      hostPID: false\n      …",
+    "caveats": [ "Checks kguardian cannot see …", "This looks like a node agent (DaemonSet or hostNetwork). …", "Turning off hostNetwork/hostPID/hostIPC breaks …", "drop: [\"ALL\"] also removes CHOWN, SETUID, …" ]
   }
 }
 ```
 
-- `containers[].source`: `"running"` = newest running digest row; `"last_known"` = no running row, newest
-  row kept by the inventory. `digest` is the digest that row was reported with.
+- `pod.known`: see above. When `false` every other `pod` field is `null` and `pod.failing` is `[]`.
+- `staleContainers[]`: `{name, kind, digest, lastSeen}` (see "Which containers count").
 - `securityContext` values are exactly what the controller reported: `null` = not set in the spec.
-- `pod` = pod-level fields from the newest container row. `automountServiceAccountToken: null` means not set
-  on the pod; the ServiceAccount's own setting is **not** visible, so the token is assumed mounted
-  (finding `podSecurity.automountToken`).
-- `failing[].value`: the reported value (`null` = unset).
-- `recommendation`: `null` when every evaluated check already passes restricted. Otherwise a minimal
-  strategic-merge patch containing only the fields that fail evaluated restricted/baseline checks, under
-  the kind's template path (`spec.template.spec` for Deployment/StatefulSet/DaemonSet/ReplicaSet/Job,
-  `spec.jobTemplate.spec.template.spec` for CronJob, `spec` for a bare Pod). Ephemeral containers are
-  never patched (listed in caveats). It is always marked `recommendation: true`.
-
-podSecurity findings (id = `podSecurity.<code>` or `podSecurity.<code>/<container>`, points in brackets):
-`privileged` high [40], `hostNetwork` / `hostPID` / `hostIPC` high [30 each], `capabilitiesAdded`
-high when outside the baseline set [30] else low [5] (NET_BIND_SERVICE alone: no finding),
-`allowPrivilegeEscalation` medium [10], `runAsRoot` high when runAsUser == 0 [30], `mayRunAsRoot` medium
-when neither runAsNonRoot true nor a non-zero runAsUser (image USER decides) [10], `seccompUnconfined` high
-[30], `seccompUnset` medium [10], `capabilitiesNotDropped` medium [10], `readOnlyRootFilesystem` low [5],
-`automountToken` low [5]. A finding repeated across containers deducts once per container, capped at the
-dimension floor 0.
+- `automountServiceAccountToken: null` = not set on the pod; the ServiceAccount's own setting is not
+  visible, so the token is assumed mounted (finding `podSecurity.automountToken`).
+- `recommendation`: a minimal strategic-merge patch with only the fields that fail evaluated checks, under
+  the kind's template path (`spec.template.spec`; `spec.jobTemplate.spec.template.spec` for CronJob;
+  `spec` for a bare Pod). Always `recommendation: true`. It is **`null`** when nothing evaluated fails,
+  **and** when nothing failing is patchable (for example only an ephemeral container fails; reason
+  `ephemeral_unpatchable`). It never contains an empty template, stale or ephemeral containers, or
+  `readOnlyRootFilesystem`. `caveats[]` always include the unevaluated-checks warning, plus, when they
+  apply: the runAsNonRoot/USER warning; a node-agent warning (DaemonSet or hostNetwork workload);
+  `privileged: false`; hostNetwork/hostPID/hostIPC `false`; and `drop: ["ALL"]` (CHOWN, SETUID, SETGID,
+  DAC_OVERRIDE, NET_BIND_SERVICE); plus the names of failing ephemeral containers.
+- Reason codes: `pss_fails_baseline`, `pss_fails_restricted`, `pss_unverified`, `pod_fields_unknown`,
+  `ephemeral_unpatchable`, `stale_containers_excluded`, `no_inventory`, `only_stale_containers`.
+- Findings (id `podSecurity.<code>` or `podSecurity.<code>/<container>`): `privileged` high,
+  `hostNetwork` / `hostPID` / `hostIPC` high, `capabilitiesAdded` high outside the baseline set else low
+  (NET_BIND_SERVICE alone: none), `allowPrivilegeEscalation` medium, `runAsRoot` high (runAsUser 0),
+  `mayRunAsRoot` medium, `seccompUnconfined` high, `seccompUnset` medium, `capabilitiesNotDropped`
+  medium, `readOnlyRootFilesystem` low, `automountToken` low. No pod-level finding when `pod.known` is
+  false.
 
 ### 2.4 `network`
 
+Trimmed from `profile-risk-observability-node-exporter-hostpid-wouldDeny`:
+
 ```json
 {
-  "status": "unknown",
-  "score": null,
-  "scored": false,
-  "coverage": { "level": "partial", "fraction": null, "observedSince": "2026-09-20T06:02:11Z",
-                "note": "Flows from 2 live pods; 214 flow rows summarised" },
-  "reasons": [ { "code": "policy_state_unknown", "message": "No audit policy covers this workload; applied NetworkPolicies are not visible to the broker" } ],
+  "status": "warn",
+  "coverage": { "level": "full", "fraction": null, "observedSince": "…", "note": "Flows from the workload's pod(s) (1 live)" },
+  "reasons": [],
   "summary": {
-    "ingress": { "peers": 3, "external": 0, "ports": ["TCP/8080"] },
-    "egress":  { "peers": 4, "external": 1, "ports": ["TCP/443", "TCP/5432", "UDP/53"] }
+    "egress":  { "peers": 1, "external": 1, "ports": ["TCP/443"] },
+    "ingress": { "peers": 1, "external": 0, "ports": ["TCP/9100"] }
   },
   "peers": [
-    { "direction": "ingress", "protocol": "TCP", "port": 8080,
-      "peer": { "kind": "pod", "namespace": "ingress-nginx", "workloadKind": "Deployment", "workloadName": "ingress-nginx-controller", "name": "ingress-nginx-controller-5c8d7f9b4-q2w8r", "ip": "10.42.1.17" },
-      "flows": 12, "firstSeen": "2026-09-20T06:02:11Z", "lastSeen": "2026-09-26T09:58:40Z" },
+    { "direction": "ingress", "protocol": "TCP", "port": 9100,
+      "peer": { "kind": "pod", "namespace": "observability", "workloadKind": "StatefulSet", "workloadName": "prometheus", "name": "prometheus-0", "ip": "10.42.2.5" },
+      "flows": 1, "firstSeen": "…", "lastSeen": "…" },
     { "direction": "egress", "protocol": "TCP", "port": 443,
-      "peer": { "kind": "external", "namespace": null, "workloadKind": null, "workloadName": null, "name": null, "ip": "203.0.113.10" },
-      "flows": 3, "firstSeen": "2026-09-21T11:00:00Z", "lastSeen": "2026-09-26T08:00:00Z" }
+      "peer": { "kind": "external", "namespace": null, "workloadKind": null, "workloadName": null, "name": null, "ip": "198.51.100.7" },
+      "flows": 1, "firstSeen": "…", "lastSeen": "…" }
   ],
   "truncated": false,
   "policy": {
-    "audit": null,
+    "audit": { "policies": [ { "namespace": "observability", "name": "node-exporter" } ], "allow": 1, "wouldDeny": 1, "lastVerdictAt": "…", "windowHours": 24 },
     "enforced": null
   }
 }
 ```
 
-- `peer.kind`: `"pod" | "service" | "node" | "external" | "unresolved"`. `external` = the IP is not
-  in-cluster; `unresolved` = in-cluster identity not resolved (legacy rows / spec never arrived). Identity
-  fields are `null` when not applicable.
-- `peers[]` is at most 200 rows, ordered by (direction, protocol, port, peer); `truncated: true` if more
-  exist (or if the flow scan hit its 50 000-row cap). `port` is the pod's own port for ingress and the
-  peer's port for egress; `null` if unparseable.
-- `policy.audit`: `null` when no AuditNetworkPolicy verdicts mention the workload's pods in the last 24 h.
-  Otherwise `{ "policies": [{"namespace","name"}], "allow": n, "wouldDeny": n, "lastVerdictAt": ts, "windowHours": 24 }`.
-- `policy.enforced`: always `null` in v1 (the broker does not mirror applied NetworkPolicy/CNP objects).
-- Scored only when `policy.audit` is non-null: `wouldDeny > 0` -> finding `network.wouldDeny` high [30].
-  With no audit policy the dimension is `unknown` (flows are still summarised).
-- No flows at all -> `status: "unknown"`, `peers: []`, `summary` counts 0, reason `no_flows`.
+- `peer.kind`: `"pod" | "service" | "node" | "external" | "unresolved"` (`external` = a public IP;
+  `unresolved` = a private IP with no resolved identity).
+- `peers[]`: at most 200 groups from the newest 50 000 flow rows; `truncated: true` if either bound hit.
+  `port` = the pod's own port for ingress, the peer's port for egress; `null` if unparseable.
+- `policy.audit`: `null` when no AuditNetworkPolicy verdict mentions the workload's pods in the last 24 h.
+  `policy.enforced`: always `null` (applied NetworkPolicies are not mirrored).
+- Status: `unknown` with no audit policy (reason `policy_state_unknown`) or no flows (`no_flows`);
+  otherwise `warn` when `wouldDeny > 0` (finding `network.wouldDeny`, medium), else `ok`.
 
 ### 2.5 `syscalls`
 
-```json
-{
-  "status": "warn",
-  "score": 60,
-  "scored": true,
-  "coverage": { "level": "full", "fraction": 1.0, "observedSince": null, "note": "capture level full on 2 pods" },
-  "reasons": [ { "code": "no_cr", "message": "No SeccompProfile CR references this workload" } ],
-  "observed": { "syscallCount": 61, "hash": "a1b2c3d4e5f60718", "architectures": ["x86_64"], "updatedAt": "2026-09-26T09:40:00Z" },
-  "capture": { "level": "full", "complete": true, "incompletePods": 0 },
-  "cr": null,
-  "denials": { "total": 0, "syscalls": [], "lastSeen": null }
-}
-```
-
-- `observed`: `null` when the workload has no syscall aggregate (then `status: "unknown"`, `score: null`).
-- `capture.level`: `full|high|medium|low|custom|unknown` (lowest across contributing pods).
-  `complete: false` -> reason `capture_incomplete`, status at least `warn`, `coverage.level: "partial"`.
-- `cr`: `null` = no SeccompProfile CR references the workload. Otherwise
-  `{ "name", "defaultAction", "mode": "enforce"|"audit", "syscallCount", "inSync": bool, "missing": [..], "extra": [..], "distribution": {"ready","total","state"} }`.
-  `mode` is `audit` when defaultAction is `SCMP_ACT_LOG` (or ALLOW), else `enforce`. `missing` = observed but
-  not allowed by the CR (would be blocked when enforced).
-- `denials`: `null` = the broker cannot tell "nothing denied" from "nothing capturing" (same rule as
-  `GET /seccomp/profiles`). Otherwise totals over the denial retention window.
-- Findings: `syscalls.no_enforcing_profile` medium [40] (no CR, or CR in audit mode: [20] instead),
-  `syscalls.drift` medium [20] (CR not in sync), `syscalls.denials` high [30] (denials.total > 0).
-
-### 2.6 `images`
+Trimmed from `profile-ok-flux-system-source-controller`:
 
 ```json
 {
   "status": "ok",
-  "score": null,
-  "scored": false,
-  "coverage": { "level": "full", "fraction": null, "observedSince": "2026-09-19T08:12:00Z", "note": "running window 900 s" },
-  "reasons": [ { "code": "vulnerabilities_not_configured", "message": "No vulnerability source is configured; images are inventoried but not scored" } ],
+  "coverage": { "level": "full", "fraction": null, "observedSince": null, "note": "capture level full" },
+  "reasons": [],
+  "observed": { "syscallCount": 5, "hash": "5c1f0e2d3a4b5c6d", "architectures": ["SCMP_ARCH_X86_64"], "updatedAt": "…" },
+  "capture": { "level": "full", "complete": true, "incompletePods": 0 },
+  "cr": { "name": "source-controller", "defaultAction": "SCMP_ACT_ERRNO", "mode": "enforce", "syscallCount": 5,
+          "inSync": true, "missing": [], "extra": [], "distribution": { "ready": 0, "total": 1, "state": "Pending" } },
+  "denials": { "total": 0, "syscalls": [], "lastSeen": null }
+}
+```
+
+- `observed`: `null` when there is no syscall aggregate (status `unknown`, reason `no_observations`).
+- `capture.level`: `full|high|medium|low|custom|unknown`; `complete: false` -> reason `capture_incomplete`,
+  status at least `warn`.
+- `cr`: `null` = no SeccompProfile CR references the workload. `mode`: `audit` for `SCMP_ACT_LOG` /
+  `SCMP_ACT_ALLOW`, else `enforce`. `missing` = observed but not allowed (blocked when enforced).
+- `denials`: `null` = cannot tell "nothing denied" from "nothing capturing" (reason `denials_unknown`).
+- Findings: `syscalls.no_enforcing_profile` medium (no CR, or a CR in audit mode), `syscalls.drift`
+  medium, `syscalls.denials` high.
+
+### 2.6 `images`
+
+Trimmed from `profile-warn-payments-ledger-mixed-crashloop-stale`:
+
+```json
+{
+  "status": "warn",
+  "coverage": { "level": "full", "fraction": null, "observedSince": "…", "note": "running window 900 s" },
+  "reasons": [ { "code": "vulnerabilities_not_configured", "message": "No vulnerability source is configured; images are inventoried but not assessed for vulnerabilities" } ],
   "runningWindowSeconds": 900,
   "containers": [
-    {
-      "name": "app",
-      "kind": "regular",
-      "mixedDigests": false,
+    { "name": "ledger", "kind": "regular", "mixedDigests": true, "stale": false,
       "running": [
-        { "digest": "sha256:9f2c0d1e...", "imageRef": "ghcr.io/example/checkout:4.0.9", "state": "running", "stateReason": null,
-          "ranAsInit": false, "lastPodName": "checkout-7d9f8b6c5-2xkqp", "firstSeen": "2026-09-19T08:12:00Z", "lastSeen": "2026-09-26T10:05:00Z" }
+        { "digest": "sha256:4a1b…", "imageRef": "ghcr.io/example/ledger:2.3.0", "state": "running", "stateReason": null, "ranAsInit": false, "lastPodName": "ledger-5b7c9d8f6-q8wzn", "firstSeen": "…", "lastSeen": "…" },
+        { "digest": "sha256:5b2c…", "imageRef": "ghcr.io/example/ledger:2.3.1", "state": "waiting", "stateReason": "CrashLoopBackOff", "ranAsInit": false, "lastPodName": "ledger-5b7c9d8f6-q8wzn", "firstSeen": "…", "lastSeen": "…" }
       ],
-      "previous": [
-        { "digest": "sha256:0c3d...", "imageRef": "ghcr.io/example/checkout:4.0.8", "state": "terminated", "stateReason": "Completed",
-          "ranAsInit": false, "lastPodName": null, "firstSeen": "2026-09-10T07:00:00Z", "lastSeen": "2026-09-19T08:20:00Z" }
-      ]
-    }
+      "previous": [] },
+    { "name": "legacy-proxy", "kind": "regular", "mixedDigests": false, "stale": true, "running": [], "previous": [ { "digest": "sha256:6c3d…", "…": "…" } ] }
   ],
   "truncated": false,
   "vulnerabilities": null,
@@ -439,127 +377,102 @@ dimension floor 0.
 }
 ```
 
-- Mirrors `GET /workloads/{ns}/{kind}/{name}/containers` without the securityContext blobs. `state`:
-  `running|waiting|terminated|null` (null = older controller); `waiting` + `stateReason` covers
-  `CrashLoopBackOff`, `ImagePullBackOff`, `ContainerCreating`. `ranAsInit`: completed init container.
-- `vulnerabilities`: always `null` in this PR = **not configured**, reason `vulnerabilities_not_configured`.
-  When the scanner lands it becomes an object; the null contract does not change meaning.
-- `supplyChain`: `null` = not configured (signatures/provenance, later wave).
-- No inventory rows -> `status: "unknown"`, `containers: []`, reason `no_inventory`.
-- Findings (unscored, status only): `images.mixedDigests/<c>` low, `images.crashLoop/<c>` medium,
-  `images.pullBackOff/<c>` medium, `images.configDigestOnly/<c>` info (digest not registry-resolvable).
+- `stale: true`: not in the current spec (see 2.3); listed, never a finding.
+- `vulnerabilities` / `supplyChain`: always `null` = **not configured**.
+- No inventory -> `unknown`, reason `no_inventory`.
+- Findings: `images.mixedDigests/<c>` low, `images.crashLoop/<c>` medium, `images.pullBackOff/<c>` medium.
 
-### 2.7 `compute` (informational, never scored)
+### 2.7 `compute` (informational, not in the rollup)
 
-```json
-{
-  "status": "warn",
-  "score": null,
-  "scored": false,
-  "coverage": { "level": "full", "fraction": null, "observedSince": "2026-09-26T10:04:00Z", "note": "2 containers reporting" },
-  "reasons": [ { "code": "missing_limits", "message": "1 container has no memory limit" } ],
-  "containers": [
-    { "pod": "checkout-7d9f8b6c5-2xkqp", "container": "app", "cpuRequestMillis": 100, "cpuLimitMillis": null,
-      "memRequestBytes": 134217728, "memLimitBytes": null, "cpuUsageMillis": 12.5, "memWorkingSetBytes": 98566144,
-      "oomKills": 0, "throttledRatio": 0.0, "updatedAt": "2026-09-26T10:04:00Z" }
-  ],
-  "truncated": false
-}
-```
-
-- From `pod_compute_latest` for the workload's live pods (max 50 rows). No rows -> `unknown`, reason
-  `no_compute_data` (compute collection off or no live pods).
-- Findings: `compute.missingMemoryLimit/<c>` low, `compute.oomKilled/<c>` medium.
+`{ status, coverage, reasons, containers: [ { pod, container, cpuRequestMillis, cpuLimitMillis,
+memRequestBytes, memLimitBytes, cpuUsageMillis, memWorkingSetBytes, oomKills, throttledRatio, updatedAt } ],
+truncated }` from `pod_compute_latest` for the live pods (max 50). `oomKills` = in the latest sample
+interval. No rows -> `unknown`, reason `no_compute_data`. Findings: `compute.missingMemoryLimit/<c>` low,
+`compute.oomKilled/<c>` medium.
 
 ## 3. Versions
 
 A version is an **immutable, content-hashed snapshot of the policy-relevant parts** of the profile:
 
-- `podSecurity`: pod fields, each container's securityContext and kind, PSS level.
-- `images`: container -> sorted running digests.
+- `podSecurity`: `level`, the pod block (without `failing`), each **current** container's kind and
+  securityContext.
+- `images`: each current container -> sorted running digests.
 - `syscalls`: sorted observed syscall names, capture level, CR `{name, defaultAction, hash}` or null.
-- `network`: sorted set of rules `{direction, protocol, port, peer}` where `peer` is
-  `pod:<ns>/<workloadKind>/<workloadName>` (or `pod:<ns>/<name>` without a workload), `service:<ns>/<name>`,
-  `node`, `external:<ip>`, `unresolved:<ip>`; plus `audited: bool`.
-- NOT included: timestamps, counts, compute, scores (they change without the policy changing).
+- `network`: `{ "rules": [ {direction, protocol, port, peer} ] }`: the **distinct rule set over all retained
+  flows** of the workload's pods (deduplicated in SQL, at most 2 000 rules), not the newest-N peer table.
+  `peer` is `pod:<ns>/<workloadKind>/<workloadName>` (or `pod:<ns>/<name>` without a workload),
+  `service:<ns>/<name>`, `node`, `external:<ip>`, `unresolved:<ip>`.
+- NOT included: timestamps, counts, flow truncation, the 24 h audit state, compute, posture, stale
+  containers. None of them change the hash.
 
-`contentHash` = FNV-1a 64 over the canonical JSON of the snapshot, prefixed `fnv1a64:`;
-`dimensionHashes` = the same per dimension. A new version is written by the snapshotter only when
-`contentHash` differs from the latest stored one. `revision` increases by 1 per workload.
-Retention: the newest `PROFILE_VERSIONS_MAX_PER_WORKLOAD` (default 50) per workload are kept; beyond that
-the oldest go. The global retention loop also deletes versions older than
-`PROFILE_VERSIONS_RETENTION_DAYS` (default 90; 0 disables) **except the newest version of each workload**,
-and `workload_profile_latest` rows not recomputed within that window (workload gone).
+`contentHash` = FNV-1a 64 over the canonical JSON, prefixed `fnv1a64:`; `dimensionHashes` = the same per
+dimension. A new version is written only when `contentHash` differs from the latest stored one.
+`revision` increases by 1 per workload. Retention: the newest `PROFILE_VERSIONS_MAX_PER_WORKLOAD`
+(default 50) per workload; `PROFILE_VERSIONS_RETENTION_DAYS` (default 90; 0 disables) prunes older
+versions except each live workload's newest, and read-model rows not recomputed in that window.
+Concurrent writers: if another writer stored a different profile at the same revision first, nothing is
+written and the latest pointer is left alone; the latest pointer never moves to a lower revision.
 
 ### 3.1 `GET /workloads/{namespace}/{kind}/{name}/profile/versions`
 
-Query: `limit` (default 50, max 200), `before` (revision; returns revisions < before). Newest first.
-404 `workload_not_found` when the workload has no stored versions and is unknown. A known workload with
-no stored versions yet returns `items: []`.
+Query: `limit` (default 50, max 200), `before` (revision; returns revisions < before). Newest first. 404
+`workload_not_found` when the workload has no versions and is unknown; a known workload with none yet
+returns `items: []`. Captures: `versions-payments-checkout`, `versions-payments-checkout-page`.
 
 ```json
 {
   "namespace": "payments", "kind": "Deployment", "name": "checkout",
   "items": [
-    { "revision": 3, "contentHash": "fnv1a64:6f1c2a9e0b7d4c31", "createdAt": "2026-09-25T18:40:12Z",
-      "dimensionHashes": { "network": "fnv1a64:...", "syscalls": "fnv1a64:...", "podSecurity": "fnv1a64:...", "images": "fnv1a64:..." },
-      "changedDimensions": ["images"],
-      "posture": { "status": "warn", "score": 71, "coverage": 0.47, "grade": null } }
+    { "revision": 4, "contentHash": "fnv1a64:…", "createdAt": "…", "dimensionHashes": { "images": "…", "network": "…", "podSecurity": "…", "syscalls": "…" },
+      "changedDimensions": ["podSecurity"], "posture": { "status": "warn", "coverage": 0.75 } },
+    { "revision": 3, "…": "…", "changedDimensions": ["network"] },
+    { "revision": 2, "…": "…", "changedDimensions": null }
   ],
-  "nextBefore": 3
+  "nextBefore": null
 }
 ```
 
-`changedDimensions`: dimensions whose hash differs from the previous revision (`[]`... never for rev > 1;
-all four for revision 1). `nextBefore` is `null` on the last page.
+- `changedDimensions`: dimensions whose hash differs from the previous revision; all four for revision 1;
+  `null` when the previous revision was trimmed (unknown, not guessed).
+- `posture`: `{status, coverage}` at that revision (rows stored before v1.2 may also carry
+  `score` / `grade`; ignore them).
 
 ### 3.2 `GET /workloads/{namespace}/{kind}/{name}/profile/versions/{revision}`
 
-The stored snapshot: `{ "namespace","kind","name","revision","contentHash","createdAt","dimensionHashes","posture","snapshot": { "podSecurity": {...}, "images": {...}, "syscalls": {...}, "network": {...} } }`.
-404 `revision_not_found`.
+`{ namespace, kind, name, revision, contentHash, createdAt, dimensionHashes, posture, snapshot }` with the
+snapshot shape of section 3. 404 `revision_not_found`. Capture: `version-payments-checkout-rev2`.
 
 ### 3.3 `GET /workloads/{namespace}/{kind}/{name}/profile/diff?from=&to=`
 
-`to`: revision, default = latest. `from`: revision, default = `to - 1` (if revision 1 is `to` and `from`
-is omitted, `from` is `null` and everything shows as added). `from` must be < `to` (400 otherwise).
+`to`: revision, default latest. `from`: revision, default = the previous one. `from >= to` -> 400. An
+explicit missing `from`/`to` -> 404 `revision_not_found`; no versions -> 404 `workload_not_found`.
+**Trimmed predecessor:** with `from` omitted, when `to - 1` was trimmed the diff uses the newest retained
+revision below `to`, or `from: null` (everything shows as added) when none is left, and sets
+`fromTrimmed: true`. Captures: `diff-payments-checkout-default`, `diff-payments-checkout-2-to-4`,
+`diff-payments-checkout-trimmed-predecessor`, `error-404-revision-not-found`, `error-400-bad-order`.
 
 ```json
 {
   "namespace": "payments", "kind": "Deployment", "name": "checkout",
-  "from": { "revision": 2, "contentHash": "fnv1a64:...", "createdAt": "2026-09-22T09:00:00Z" },
-  "to":   { "revision": 3, "contentHash": "fnv1a64:...", "createdAt": "2026-09-25T18:40:12Z" },
+  "from": { "revision": 2, "contentHash": "fnv1a64:…", "createdAt": "…" },
+  "to":   { "revision": 4, "contentHash": "fnv1a64:…", "createdAt": "…" },
   "changed": true,
+  "fromTrimmed": false,
   "dimensions": {
-    "podSecurity": {
-      "changed": true,
-      "level": { "from": "baseline", "to": "restricted" },
-      "pod": [ { "field": "securityContext.seccompProfileType", "from": null, "to": "RuntimeDefault" } ],
-      "containersAdded": [], "containersRemoved": [],
-      "containers": [ { "name": "app", "fields": [ { "field": "allowPrivilegeEscalation", "from": null, "to": false } ] } ]
-    },
-    "images": {
-      "changed": true,
-      "containersAdded": [], "containersRemoved": [],
-      "containers": [ { "name": "app", "added": ["sha256:9f2c..."], "removed": ["sha256:0c3d..."] } ]
-    },
-    "syscalls": {
-      "changed": false, "added": [], "removed": [],
-      "captureLevel": null,
-      "cr": null
-    },
-    "network": {
-      "changed": false, "added": [], "removed": [], "audited": null
-    }
+    "podSecurity": { "changed": true, "level": { "from": "baseline", "to": "restricted" }, "pod": [],
+                     "containersAdded": [], "containersRemoved": [],
+                     "containers": [ { "name": "migrate", "fields": [
+                       { "field": "securityContext.allowPrivilegeEscalation", "from": null, "to": false },
+                       { "field": "securityContext.capabilitiesDrop", "from": null, "to": ["ALL"] } ] } ] },
+    "images":   { "changed": false, "containersAdded": [], "containersRemoved": [], "containers": [] },
+    "syscalls": { "changed": false, "added": [], "removed": [], "captureLevel": null, "cr": null },
+    "network":  { "changed": true, "added": [ { "direction": "egress", "peer": "external:198.51.100.20", "port": 443, "protocol": "TCP" } ], "removed": [] }
   }
 }
 ```
 
-- A scalar change is `{ "from": x, "to": y }`; an unchanged scalar is `null` (e.g. `level: null`,
-  `captureLevel: null`, `cr: null`, `audited: null` = unchanged).
-- `syscalls.cr` when changed: `{ "from": {name, defaultAction, hash} | null, "to": ... }`.
-- `network.added/removed[]`: rule objects `{ "direction", "protocol", "port", "peer" }` (peer string as in
-  section 3).
-- 404 `revision_not_found` if either revision is missing; 404 `workload_not_found` if no versions exist.
+- A changed scalar is `{ "from": x, "to": y }`; an unchanged scalar is `null`.
+- `syscalls.cr` when changed: `{ "from": {name, defaultAction, hash} | null, "to": … }`.
 
 ## 4. Storage (for reviewers; not an API)
 
@@ -567,30 +480,57 @@ is omitted, `from` is `null` and everything shows as added). `from` must be < `t
   revision int, content_hash, dimension_hashes jsonb, snapshot jsonb, posture jsonb, created_at)`,
   unique `(cluster_id, pod_namespace, workload_kind, workload_name, revision)`.
 - `workload_profile_latest(cluster_id, pod_namespace, workload_kind, workload_name PK, revision,
-  content_hash, summary jsonb, computed_at, last_changed_at)` — backs `GET /workloads`.
+  content_hash, posture_status, summary jsonb, computed_at, last_changed_at)`, backing `GET /workloads`.
 - Migration `2026-09-27-100000_workload_profiles`.
 
 ## CHANGELOG
 
 - 2026-09-26: v1 published.
-- 2026-09-26 (v1.1, implementation landed; all changes additive or clarifying, no field renamed or removed):
-  - `dimensions.podSecurity.pod.failing[]` added: pod-level failing checks (hostNetwork/hostPID/hostIPC,
-    pod runAsNonRoot=false, pod runAsUser=0, pod seccomp Unconfined), same shape as `containers[].failing[]`.
-    The workload `level` accounts for them.
-  - `posture.unknownDimensions` lists every weighted dimension that is **not scored**, whether its status is
-    `unknown` or known but unscored (e.g. `images` with inventory but no vulnerability source).
-  - `dimensions.syscalls.coverage.fraction` is `null` in v1 (not pods-with-full-capture / pods). Use
-    `capture.complete` / `capture.incompletePods`.
-  - `dimensions.syscalls.observed.architectures` are the tokens `GET /seccomp/profiles` returns
-    (`SCMP_ARCH_X86_64`), not `x86_64`.
-  - `capture.level` can be `"unknown"` (no contributing pod reported a tier); then `complete: false`.
-  - The `images.configDigestOnly/<c>` finding is not emitted in v1 (digest kind is not joined).
-  - `compute.containers[].oomKills` = OOM kills in the latest sample interval (a delta, not lifetime).
-  - List item: `dimensions.images.runningDigests` / `mixedDigests` are `null` when there is no inventory;
-    any `dimensions.*.score` may be `null`.
-  - `snapshotPending` is `true` whenever `version` is `null`.
-  - Versions list: `changedDimensions` is `null` for the oldest retained revision when its predecessor was
-    trimmed (unknown, not guessed). All four for revision 1.
-  - Diff: `from` is `null` when diffing revision 1 with no `from`; `audited`/`captureLevel` show
-    `{from: null, to: ...}` in that case.
-  - Repo copy: `docs/design/workload-security-profile-api.md` (same content).
+- 2026-09-26 (v1.1, implementation landed; additive or clarifying):
+  - `dimensions.podSecurity.pod.failing[]` added (pod-level failing checks).
+  - `posture.unknownDimensions` also listed unscored dimensions (superseded by v1.2).
+  - `syscalls.coverage.fraction` is `null`; `observed.architectures` are `SCMP_ARCH_*` tokens;
+    `capture.level` may be `"unknown"`.
+  - `images.configDigestOnly/<c>` finding not emitted; `compute.containers[].oomKills` is per interval.
+  - List `images.runningDigests` / `mixedDigests` `null` without inventory; `snapshotPending` is `true`
+    when `version` is `null`; versions `changedDimensions` `null` when the predecessor was trimmed; diff
+    `from` is `null` for revision 1.
+- 2026-09-26 (**v1.2**, from review of #1669 and #1672; **breaking** for score fields and some statuses):
+  - **Numeric scores removed** everywhere: `posture.score`, `posture.grade`, `posture.weights`,
+    `posture.deductions`, `dimensions.*.score`, `dimensions.*.scored`, the list's `posture.score` /
+    `grade` / `dimensions.*.score`, and `score` / `grade` in version entries. There is no internal score.
+  - **Added `posture.reasons[]`** `{dimension, status, message}` (one per core dimension that is not ok).
+  - **Rollup** (2.2): `coverage` = known core dimensions / 4 (was the scored weight fraction);
+    `unknownDimensions` = core dimensions with status `unknown` only; `compute` left out of the rollup.
+  - **Status rules** (2.2): status comes from findings (critical/high -> risk, medium -> warn) plus
+    floors. A privileged container, or hostNetwork alone, is now **risk** (was warn via score 50 / 70).
+    `network.wouldDeny` is medium (warn).
+  - **podSecurity never `ok` on an upper bound**: level `restricted` (always an upper bound in v1) gives
+    status `unknown` unless a finding makes it warn/risk; reason `pss_unverified` replaces
+    `pss_upper_bound`. Reason codes `pss_fails_baseline` / `pss_fails_restricted` name the containers (with
+    kind) or `pod spec` that set the level.
+  - **`readiness.podSecurityRestricted.ok` is `null`** (not `true`) when the level is restricted, since
+    restricted is only an upper bound.
+  - **Level** was already the minimum over all containers (init and ephemeral included). The v1/v1.1
+    example in 2.3 was internally inconsistent (`level: restricted` next to a `baseline` init container);
+    every example is now copied from real broker output and the raw captures are in
+    `team/profile-captures/`.
+  - **Stale containers** (renamed or removed from the spec) no longer count: new
+    `dimensions.podSecurity.staleContainers[]` `{name, kind, digest, lastSeen}`, new
+    `dimensions.images.containers[].stale`, reason `stale_containers_excluded`; they are excluded from the
+    level, findings, patch and snapshot. `containers[].source` `last_known` now means "current, not
+    running" (e.g. a completed init container).
+  - **Missing pod-level block**: new `pod.known`; when `false`, `hostNamespaces` (and inherited
+    `runAsNonRoot` / `seccompRestricted`) are unevaluated, not passed; reason `pod_fields_unknown`.
+  - **Recommendation**: `null` when nothing failing is patchable (e.g. only an ephemeral container fails;
+    reason `ephemeral_unpatchable`); never an empty template. New caveats for node agents / DaemonSets /
+    hostNetwork, `privileged: false`, host namespaces `false`, and `drop: ["ALL"]`.
+  - **Versions/network snapshot**: the network part is the distinct rule set over all retained flows
+    (bounded by 2 000 distinct rules), with no truncation flag and no audit state; `network.audited` is
+    removed from the snapshot and from the diff. The hash no longer changes with flow volume, dead pods or
+    the 24 h audit window.
+  - **Diff**: new `fromTrimmed`. A default diff whose predecessor was trimmed falls back to the newest
+    retained revision below `to` (or `from: null`) instead of returning 404.
+  - **List**: new `search` query parameter (case-insensitive substring of the workload name).
+  - **Concurrency**: a writer that loses a race at a revision writes nothing; the latest pointer never
+    moves backwards.

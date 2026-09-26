@@ -165,6 +165,10 @@ pub struct PodSecurityContextView {
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PodView {
+    /// False when the pod-level block was missing or malformed in the
+    /// inventory (older controller): every field below is then null and
+    /// the checks that need it are listed in `unevaluatedChecks`.
+    pub known: bool,
     pub service_account_name: Option<String>,
     pub automount_service_account_token: Option<bool>,
     pub host_network: Option<bool>,
@@ -185,7 +189,8 @@ pub struct ContainerInput {
     pub name: String,
     /// `init | regular | ephemeral`.
     pub kind: String,
-    /// `running | last_known`.
+    /// `running | last_known` (a current container not running now, e.g.
+    /// a completed init container).
     pub source: &'static str,
     pub digest: String,
     pub security: ContainerSecurity,
@@ -203,8 +208,7 @@ pub struct ContainerResult {
     pub failing: Vec<FailingCheck>,
 }
 
-/// A posture finding. `points` is the score deduction (see the contract,
-/// section 2.3); `container` is null for pod-level findings.
+/// A posture finding; `container` is null for pod-level findings.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Finding {
@@ -213,8 +217,6 @@ pub struct Finding {
     pub title: String,
     pub detail: String,
     pub container: Option<String>,
-    #[serde(skip)]
-    pub points: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -324,11 +326,16 @@ pub fn check_pod(pod: &PodSecurity) -> Vec<FailingCheck> {
 
 /// Container-level checks, with the pod-level fields a container
 /// inherits (runAsNonRoot, seccompProfile) applied per upstream.
+///
+/// `pod_known = false` (no usable pod-level block): a check that the
+/// container leaves to the pod (runAsNonRoot, seccompProfile) cannot be
+/// decided and is skipped, never failed or passed.
 pub fn check_container(
     kind: &str,
     name: &str,
     c: &ContainerSecurity,
     pod: &PodSecurity,
+    pod_known: bool,
 ) -> Vec<FailingCheck> {
     let psc = pod.security_context.clone().unwrap_or_default();
     let p = |leaf: &str| field_path(kind, name, leaf);
@@ -389,10 +396,11 @@ pub fn check_container(
     // Restricted: Running as Non-root. The container may leave it unset
     // only when the pod sets it true; an explicit false always fails.
     let non_root_ok = match c.run_as_non_root {
-        Some(v) => v,
-        None => psc.run_as_non_root == Some(true),
+        Some(v) => Some(v),
+        None if pod_known => Some(psc.run_as_non_root == Some(true)),
+        None => None,
     };
-    if !non_root_ok {
+    if non_root_ok == Some(false) {
         out.push(fail(
             "runAsNonRoot",
             Level::Restricted,
@@ -418,7 +426,8 @@ pub fn check_container(
         .seccomp_profile_type
         .as_deref()
         .or(psc.seccomp_profile_type.as_deref());
-    if !effective.is_some_and(|t| SECCOMP_OK.contains(&t)) {
+    let decidable = pod_known || c.seccomp_profile_type.is_some();
+    if decidable && !effective.is_some_and(|t| SECCOMP_OK.contains(&t)) {
         out.push(fail(
             "seccompRestricted",
             Level::Restricted,
@@ -468,7 +477,6 @@ pub fn level_of(failing: &[FailingCheck]) -> Level {
 fn finding(
     id: String,
     severity: &'static str,
-    points: u32,
     container: Option<&str>,
     title: String,
     detail: String,
@@ -479,25 +487,30 @@ fn finding(
         title,
         detail,
         container: container.map(str::to_string),
-        points,
     }
 }
 
 /// Posture findings (a superset of PSS failures: also readOnlyRootFilesystem
 /// and service-account token automount, which PSS does not cover).
-pub fn findings(pod: &PodSecurity, containers: &[ContainerInput]) -> Vec<Finding> {
+pub fn findings(pod: &PodSecurity, pod_known: bool, containers: &[ContainerInput]) -> Vec<Finding> {
     let mut out = Vec::new();
     let psc = pod.security_context.clone().unwrap_or_default();
-    for (code, v) in [
-        ("hostNetwork", pod.host_network),
-        ("hostPID", pod.host_pid),
-        ("hostIPC", pod.host_ipc),
-    ] {
+    // With no usable pod-level block, pod-level findings are unknown, not
+    // "unset", so none are emitted.
+    let pod_fields: [(&str, Option<bool>); 3] = if pod_known {
+        [
+            ("hostNetwork", pod.host_network),
+            ("hostPID", pod.host_pid),
+            ("hostIPC", pod.host_ipc),
+        ]
+    } else {
+        [("hostNetwork", None), ("hostPID", None), ("hostIPC", None)]
+    };
+    for (code, v) in pod_fields {
         if v == Some(true) {
             out.push(finding(
                 format!("podSecurity.{code}"),
                 "high",
-                30,
                 None,
                 format!(
                     "Pod shares the node's {} namespace ({code}: true)",
@@ -511,17 +524,15 @@ pub fn findings(pod: &PodSecurity, containers: &[ContainerInput]) -> Vec<Finding
         out.push(finding(
             "podSecurity.seccompUnconfined".into(),
             "high",
-            30,
             None,
             "Pod seccomp profile is Unconfined".into(),
             "spec.securityContext.seccompProfile.type: Unconfined disables syscall filtering for every container that does not override it.".into(),
         ));
     }
-    if pod.automount_service_account_token != Some(false) {
+    if pod_known && pod.automount_service_account_token != Some(false) {
         out.push(finding(
             "podSecurity.automountToken".into(),
             "low",
-            5,
             None,
             "Service account token is mounted".into(),
             "automountServiceAccountToken is not false on the pod. The ServiceAccount's own setting is not visible to kguardian, so the token is assumed mounted; set it false if the app does not call the Kubernetes API.".into(),
@@ -534,7 +545,6 @@ pub fn findings(pod: &PodSecurity, containers: &[ContainerInput]) -> Vec<Finding
             out.push(finding(
                 format!("podSecurity.privileged/{n}"),
                 "high",
-                40,
                 Some(n),
                 format!("Container {n} is privileged"),
                 "privileged: true gives the container every capability and access to host devices."
@@ -556,7 +566,6 @@ pub fn findings(pod: &PodSecurity, containers: &[ContainerInput]) -> Vec<Finding
             out.push(finding(
                 format!("podSecurity.capabilitiesAdded/{n}"),
                 "high",
-                30,
                 Some(n),
                 format!("Container {n} adds capabilities: {}", beyond.join(", ")),
                 "These capabilities are outside the baseline set.".into(),
@@ -565,7 +574,6 @@ pub fn findings(pod: &PodSecurity, containers: &[ContainerInput]) -> Vec<Finding
             out.push(finding(
                 format!("podSecurity.capabilitiesAdded/{n}"),
                 "low",
-                5,
                 Some(n),
                 format!("Container {n} adds capabilities: {}", within.join(", ")),
                 "Allowed by baseline but not by restricted.".into(),
@@ -575,7 +583,6 @@ pub fn findings(pod: &PodSecurity, containers: &[ContainerInput]) -> Vec<Finding
             out.push(finding(
                 format!("podSecurity.allowPrivilegeEscalation/{n}"),
                 "medium",
-                10,
                 Some(n),
                 format!("Container {n} allows privilege escalation"),
                 "allowPrivilegeEscalation is not set to false, so setuid binaries can gain privileges.".into(),
@@ -587,16 +594,17 @@ pub fn findings(pod: &PodSecurity, containers: &[ContainerInput]) -> Vec<Finding
             out.push(finding(
                 format!("podSecurity.runAsRoot/{n}"),
                 "high",
-                30,
                 Some(n),
                 format!("Container {n} runs as root (runAsUser: 0)"),
                 "runAsUser is 0.".into(),
             ));
-        } else if non_root != Some(true) && uid.is_none() {
+        } else if non_root != Some(true)
+            && uid.is_none()
+            && (pod_known || s.run_as_non_root.is_some())
+        {
             out.push(finding(
                 format!("podSecurity.mayRunAsRoot/{n}"),
                 "medium",
-                10,
                 Some(n),
                 format!("Container {n} may run as root"),
                 "Neither runAsNonRoot: true nor a non-zero runAsUser is set, so the image's USER decides.".into(),
@@ -610,16 +618,14 @@ pub fn findings(pod: &PodSecurity, containers: &[ContainerInput]) -> Vec<Finding
             out.push(finding(
                 format!("podSecurity.seccompUnconfined/{n}"),
                 "high",
-                30,
                 Some(n),
                 format!("Container {n} seccomp profile is Unconfined"),
                 "Syscall filtering is disabled for this container.".into(),
             ));
-        } else if eff_seccomp.is_none() {
+        } else if eff_seccomp.is_none() && pod_known {
             out.push(finding(
                 format!("podSecurity.seccompUnset/{n}"),
                 "medium",
-                10,
                 Some(n),
                 format!("Container {n} has no seccomp profile set"),
                 "Without seccompProfile the container runtime's default applies only if the kubelet enables it; restricted requires RuntimeDefault or Localhost.".into(),
@@ -633,7 +639,6 @@ pub fn findings(pod: &PodSecurity, containers: &[ContainerInput]) -> Vec<Finding
             out.push(finding(
                 format!("podSecurity.capabilitiesNotDropped/{n}"),
                 "medium",
-                10,
                 Some(n),
                 format!("Container {n} does not drop ALL capabilities"),
                 "The runtime's default capability set stays granted.".into(),
@@ -643,7 +648,6 @@ pub fn findings(pod: &PodSecurity, containers: &[ContainerInput]) -> Vec<Finding
             out.push(finding(
                 format!("podSecurity.readOnlyRootFilesystem/{n}"),
                 "low",
-                5,
                 Some(n),
                 format!("Container {n} root filesystem is writable"),
                 "readOnlyRootFilesystem is not true (hardening; not required by PSS restricted)."
@@ -677,6 +681,7 @@ fn template_indent(kind: &str) -> (Vec<&'static str>, usize) {
 pub fn recommend(
     workload_kind: &str,
     pod: &PodSecurity,
+    pod_known: bool,
     containers: &[ContainerInput],
     pod_failing: &[FailingCheck],
     per_container: &[Vec<FailingCheck>],
@@ -694,6 +699,7 @@ pub fn recommend(
         "# Target: Pod Security Standards restricted (kubernetes.io/docs/concepts/security/pod-security-standards)".into(),
     ];
     lines.extend(head.iter().map(|s| s.to_string()));
+    let header_len = lines.len();
     let d = depth;
 
     // Pod-level fields.
@@ -740,7 +746,10 @@ pub fn recommend(
         pod_lines.push(format!("{}securityContext:", ind(d)));
         pod_lines.extend(psc_lines);
     }
-    lines.extend(pod_lines);
+    // No pod-level lines from a pod block kguardian could not read.
+    if pod_known {
+        lines.extend(pod_lines);
+    }
 
     // Containers, grouped by list.
     for (list, kind) in [("initContainers", "init"), ("containers", "regular")] {
@@ -802,11 +811,33 @@ pub fn recommend(
         }
     }
 
+    // Nothing patchable (e.g. only an ephemeral container fails): no patch
+    // at all. A bare "spec: template: spec:" would be a null template,
+    // which strategic merge reads as a deletion.
+    if lines.len() == header_len {
+        return None;
+    }
+    let body = lines[header_len..].join("\n");
     let mut caveats = vec![
         "Checks kguardian cannot see (hostPath and other volume types, hostPort, probe hosts, AppArmor, SELinux, procMount, sysctls) may still fail restricted.".to_string(),
     ];
-    if lines.iter().any(|l| l.contains("runAsNonRoot: true")) {
+    if body.contains("runAsNonRoot: true") {
         caveats.push("runAsNonRoot: true fails at container start if the image's USER is root; set runAsUser to a UID the image supports.".into());
+    }
+    if workload_kind == "DaemonSet" || pod.host_network == Some(true) {
+        caveats.push("This looks like a node agent (DaemonSet or hostNetwork). CNI plugins, CSI drivers and node agents usually need privileges restricted forbids; a namespace-level PSS exemption is often the right answer instead of this patch.".into());
+    }
+    if body.contains("privileged: false") {
+        caveats.push("privileged: false removes host device and kernel access; workloads that manage the node (CNI, CSI, device plugins, eBPF agents) will break.".into());
+    }
+    if ["hostNetwork: false", "hostPID: false", "hostIPC: false"]
+        .iter()
+        .any(|x| body.contains(x))
+    {
+        caveats.push("Turning off hostNetwork/hostPID/hostIPC breaks components that need the node's namespaces (CNI, node exporters, service meshes' node proxies); hostNetwork: false also changes the pod's IP and port bindings.".into());
+    }
+    if body.contains("drop: [\"ALL\"]") {
+        caveats.push("drop: [\"ALL\"] also removes CHOWN, SETUID, SETGID, DAC_OVERRIDE and NET_BIND_SERVICE. Images that start as root and drop privileges, change file ownership at startup, or bind ports below 1024 may fail; add back NET_BIND_SERVICE only if the app needs it.".into());
     }
     let eph: BTreeSet<&str> = containers
         .iter()
@@ -831,12 +862,24 @@ pub fn recommend(
     })
 }
 
-/// Analyse one workload.
-pub fn analyse(workload_kind: &str, pod: &PodSecurity, containers: &[ContainerInput]) -> Analysis {
-    let pod_failing = check_pod(pod);
+/// Analyse one workload. `pod = None` means the pod-level block was
+/// missing or malformed: pod-level checks become unevaluated.
+pub fn analyse(
+    workload_kind: &str,
+    pod: Option<&PodSecurity>,
+    containers: &[ContainerInput],
+) -> Analysis {
+    let pod_known = pod.is_some();
+    let empty = PodSecurity::default();
+    let pod = pod.unwrap_or(&empty);
+    let pod_failing = if pod_known {
+        check_pod(pod)
+    } else {
+        Vec::new()
+    };
     let per: Vec<Vec<FailingCheck>> = containers
         .iter()
-        .map(|c| check_container(&c.kind, &c.name, &c.security, pod))
+        .map(|c| check_container(&c.kind, &c.name, &c.security, pod, pod_known))
         .collect();
     let results: Vec<ContainerResult> = containers
         .iter()
@@ -871,18 +914,42 @@ pub fn analyse(workload_kind: &str, pod: &PodSecurity, containers: &[ContainerIn
             "upper_bound"
         }
     });
+    let mut unevaluated: Vec<&'static str> = UNEVALUATED.to_vec();
+    if !pod_known && !containers.is_empty() {
+        unevaluated.push("hostNamespaces");
+        if containers
+            .iter()
+            .any(|c| c.security.run_as_non_root.is_none())
+        {
+            unevaluated.push("runAsNonRoot");
+        }
+        if containers
+            .iter()
+            .any(|c| c.security.seccomp_profile_type.is_none())
+        {
+            unevaluated.push("seccompRestricted");
+        }
+    }
     let psc = pod.security_context.clone().unwrap_or_default();
     let recommendation = if containers.is_empty() {
         None
     } else {
-        recommend(workload_kind, pod, containers, &pod_failing, &per)
+        recommend(
+            workload_kind,
+            pod,
+            pod_known,
+            containers,
+            &pod_failing,
+            &per,
+        )
     };
     Analysis {
         pss_version: PSS_VERSION,
         level,
         level_confidence,
-        unevaluated_checks: UNEVALUATED.to_vec(),
+        unevaluated_checks: unevaluated,
         pod: PodView {
+            known: pod_known,
             service_account_name: pod.service_account_name.clone(),
             automount_service_account_token: pod.automount_service_account_token,
             host_network: pod.host_network,
@@ -903,7 +970,7 @@ pub fn analyse(workload_kind: &str, pod: &PodSecurity, containers: &[ContainerIn
         findings: if containers.is_empty() {
             Vec::new()
         } else {
-            findings(pod, containers)
+            findings(pod, pod_known, containers)
         },
     }
 }
@@ -934,6 +1001,7 @@ mod tests {
             "app",
             &sc,
             &PodSecurity::default(),
+            true,
         ))
     }
 
@@ -1049,7 +1117,7 @@ mod tests {
                 }),
                 ..Default::default()
             };
-            let mut all = check_container("regular", "app", &sc, &pod);
+            let mut all = check_container("regular", "app", &sc, &pod, true);
             all.extend(check_pod(&pod));
             assert_eq!(
                 ids(&all).contains(&"seccompBaseline"),
@@ -1093,7 +1161,7 @@ mod tests {
                 }),
                 ..Default::default()
             };
-            let got = ids(&check_container("regular", "app", &sc, &pod));
+            let got = ids(&check_container("regular", "app", &sc, &pod, true));
             assert_eq!(got.contains(&"runAsNonRoot"), fails, "{c:?} {p:?}");
         }
         // Pod-level explicit false is itself a failing pod field.
@@ -1149,7 +1217,7 @@ mod tests {
                 }),
                 ..Default::default()
             };
-            let got = ids(&check_container("regular", "app", &sc, &pod));
+            let got = ids(&check_container("regular", "app", &sc, &pod, true));
             assert_eq!(got.contains(&"seccompRestricted"), fails, "{c:?} {p:?}");
         }
     }
@@ -1188,7 +1256,7 @@ mod tests {
         let pod = PodSecurity::default();
         let a = analyse(
             "Deployment",
-            &pod,
+            Some(&pod),
             &[input("app", "regular", restricted_sc())],
         );
         assert_eq!(a.level, Some(Level::Restricted));
@@ -1197,7 +1265,7 @@ mod tests {
 
         let a = analyse(
             "Deployment",
-            &pod,
+            Some(&pod),
             &[input("app", "regular", ContainerSecurity::default())],
         );
         assert_eq!(a.level, Some(Level::Baseline));
@@ -1205,7 +1273,7 @@ mod tests {
 
         let a = analyse(
             "Deployment",
-            &pod,
+            Some(&pod),
             &[
                 input("app", "regular", restricted_sc()),
                 input(
@@ -1230,12 +1298,12 @@ mod tests {
         };
         let a = analyse(
             "Deployment",
-            &host,
+            Some(&host),
             &[input("app", "regular", restricted_sc())],
         );
         assert_eq!(a.level, Some(Level::Privileged));
 
-        let a = analyse("Deployment", &pod, &[]);
+        let a = analyse("Deployment", Some(&pod), &[]);
         assert_eq!(a.level, None);
         assert_eq!(a.level_confidence, None);
         assert!(a.findings.is_empty());
@@ -1256,7 +1324,7 @@ mod tests {
             capabilities_add: Some(vec!["SYS_ADMIN".into()]),
             ..Default::default()
         };
-        let f = findings(&pod, &[input("app", "regular", sc)]);
+        let f = findings(&pod, true, &[input("app", "regular", sc)]);
         let got: BTreeSet<&str> = f.iter().map(|x| x.id.as_str()).collect();
         for want in [
             "podSecurity.hostPID",
@@ -1277,13 +1345,13 @@ mod tests {
             automount_service_account_token: Some(false),
             ..Default::default()
         };
-        assert!(findings(&clean, &[input("app", "regular", restricted_sc())]).is_empty());
+        assert!(findings(&clean, true, &[input("app", "regular", restricted_sc())]).is_empty());
 
         let maybe = ContainerSecurity {
             run_as_non_root: None,
             ..restricted_sc()
         };
-        let f = findings(&clean, &[input("app", "regular", maybe)]);
+        let f = findings(&clean, true, &[input("app", "regular", maybe)]);
         assert_eq!(f.len(), 1);
         assert_eq!(f[0].id, "podSecurity.mayRunAsRoot/app");
     }
@@ -1297,7 +1365,7 @@ mod tests {
             input("app", "regular", restricted_sc()),
             input("migrate", "init", ContainerSecurity::default()),
         ];
-        let a = analyse("Deployment", &pod, &cs);
+        let a = analyse("Deployment", Some(&pod), &cs);
         let r = a.recommendation.expect("init container fails restricted");
         assert!(r.recommendation);
         assert_eq!(r.target_level, "restricted");
@@ -1320,9 +1388,12 @@ mod tests {
             ..Default::default()
         };
         let cs = [input("app", "regular", restricted_sc())];
-        let cron = analyse("CronJob", &pod, &cs).recommendation.unwrap().yaml;
+        let cron = analyse("CronJob", Some(&pod), &cs)
+            .recommendation
+            .unwrap()
+            .yaml;
         assert!(cron.contains("spec:\n  jobTemplate:\n    spec:\n      template:\n        spec:\n          hostNetwork: false\n"));
-        let bare = analyse("Pod", &pod, &cs).recommendation.unwrap().yaml;
+        let bare = analyse("Pod", Some(&pod), &cs).recommendation.unwrap().yaml;
         assert!(bare.contains("\nspec:\n  hostNetwork: false\n"));
     }
 
@@ -1340,9 +1411,45 @@ mod tests {
             input("app", "regular", restricted_sc()),
             input("debugger", "ephemeral", ContainerSecurity::default()),
         ];
-        let r = analyse("Deployment", &pod, &cs).recommendation.unwrap();
+        // Only the ephemeral container fails: nothing patchable, so no
+        // patch at all (never a bare, null pod template).
+        assert!(analyse("Deployment", Some(&pod), &cs)
+            .recommendation
+            .is_none());
+
+        // With a patchable failure too, the ephemeral one is named in the
+        // caveats and never patched.
+        let cs = [
+            input("app", "regular", ContainerSecurity::default()),
+            input("debugger", "ephemeral", ContainerSecurity::default()),
+        ];
+        let r = analyse("Deployment", Some(&pod), &cs)
+            .recommendation
+            .unwrap();
         assert!(!r.yaml.contains("debugger"));
         assert!(r.caveats.iter().any(|c| c.contains("debugger")));
+    }
+
+    #[test]
+    fn recommendation_caveats_for_risky_patch_lines() {
+        let pod = PodSecurity {
+            host_network: Some(true),
+            ..Default::default()
+        };
+        let sc = ContainerSecurity {
+            privileged: Some(true),
+            ..Default::default()
+        };
+        let r = analyse("DaemonSet", Some(&pod), &[input("agent", "regular", sc)])
+            .recommendation
+            .unwrap();
+        let all = r.caveats.join("\n");
+        assert!(all.contains("node agent"));
+        assert!(all.contains("privileged: false"));
+        assert!(all.contains("hostNetwork"));
+        assert!(all.contains("NET_BIND_SERVICE"));
+        // readOnlyRootFilesystem stays out of the patch.
+        assert!(!r.yaml.contains("readOnlyRootFilesystem"));
     }
 
     #[test]
@@ -1354,7 +1461,7 @@ mod tests {
         };
         let r = analyse(
             "StatefulSet",
-            &PodSecurity::default(),
+            Some(&PodSecurity::default()),
             &[input("db", "regular", sc)],
         )
         .recommendation

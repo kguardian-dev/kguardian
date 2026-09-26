@@ -25,10 +25,12 @@
 //!
 //! # Posture
 //!
-//! Each dimension scores `100 - sum(points of its findings)` or is
-//! unscored (`null`). The rollup is the weighted mean over SCORED
-//! dimensions only, with `coverage` = the weight fraction that is scored.
-//! Unknown is never counted as 0 or 100.
+//! No numeric score. Each dimension has a tier status (`ok|warn|risk|
+//! unknown`) derived by fixed rules from its findings (and, for
+//! podSecurity, its PSS level), with the reasons that produced it. The
+//! rollup status is the worst KNOWN core-dimension status, `coverage` is
+//! the fraction of core dimensions whose status is known, and an unknown
+//! dimension never counts as ok or as risk.
 //!
 //! # Versions
 //!
@@ -109,13 +111,8 @@ pub const SNAPSHOT_COST_BYTES: u64 = 128 * 1_024;
 /// One aggregated peer row.
 pub const PEER_ROW_COST_BYTES: u64 = 1_024;
 
-/// Scoring weights (contract section 2.2).
-pub const WEIGHTS: [(&str, u32); 4] = [
-    ("network", 20),
-    ("syscalls", 15),
-    ("podSecurity", 20),
-    ("images", 30),
-];
+/// Dimensions the posture rollup covers (compute is informational).
+pub const CORE_DIMENSIONS: [&str; 4] = ["network", "syscalls", "podSecurity", "images"];
 
 fn env_num(key: &str) -> Option<i64> {
     std::env::var(key).ok().and_then(|v| v.trim().parse().ok())
@@ -272,6 +269,77 @@ ORDER BY dir DESC, proto, port, peer_kind NULLS LAST, peer_namespace NULLS LAST,
          peer_workload_kind NULLS LAST, peer_workload_name NULLS LAST, grp_name NULLS LAST, grp_ip NULLS LAST \
 LIMIT $4";
 
+/// Distinct network rules a workload has shown, deduped over ALL retained
+/// flows of its pods (not the newest-N scan the peer table uses), so the
+/// versioned snapshot changes only when the rule set does. Bounded by the
+/// number of distinct rules ([`NETWORK_RULES_MAX`]), not raw flows.
+#[derive(Debug, Clone, QueryableByName, PartialEq, Eq, PartialOrd, Ord)]
+pub struct NetRuleRow {
+    #[diesel(sql_type = Text)]
+    pub dir: String,
+    #[diesel(sql_type = Text)]
+    pub proto: String,
+    #[diesel(sql_type = Nullable<Text>)]
+    pub port: Option<String>,
+    #[diesel(sql_type = Nullable<Text>)]
+    pub peer_kind: Option<String>,
+    #[diesel(sql_type = Nullable<Text>)]
+    pub peer_namespace: Option<String>,
+    #[diesel(sql_type = Nullable<Text>)]
+    pub peer_workload_kind: Option<String>,
+    #[diesel(sql_type = Nullable<Text>)]
+    pub peer_workload_name: Option<String>,
+    #[diesel(sql_type = Nullable<Text>)]
+    pub peer_name: Option<String>,
+    #[diesel(sql_type = Nullable<Text>)]
+    pub ip: Option<String>,
+}
+
+impl From<&NetRow> for NetRuleRow {
+    fn from(r: &NetRow) -> Self {
+        NetRuleRow {
+            dir: r.dir.clone(),
+            proto: r.proto.clone(),
+            port: r.port.clone(),
+            peer_kind: r.peer_kind.clone(),
+            peer_namespace: r.peer_namespace.clone(),
+            peer_workload_kind: r.peer_workload_kind.clone(),
+            peer_workload_name: r.peer_workload_name.clone(),
+            peer_name: r
+                .peer_workload_name
+                .is_none()
+                .then(|| r.peer_name.clone())
+                .flatten(),
+            ip: r.peer_kind.is_none().then(|| r.ip.clone()).flatten(),
+        }
+    }
+}
+
+/// Most distinct rules snapshotted per workload.
+pub const NETWORK_RULES_MAX: i64 = 2_000;
+
+/// Joined through `pod_details`, so every retained flow of every pod of the
+/// workload counts, whatever the pod list's LIMIT and however many pods
+/// have died. The peer is reduced to its identity: workload for a pod with
+/// one, name for a pod without / a service, nothing for a node, IP only
+/// for an identity-less peer.
+const NETWORK_RULES_SQL: &str = "\
+SELECT DISTINCT upper(trim(coalesce(t.traffic_type, ''))) AS dir, \
+       upper(trim(coalesce(t.ip_protocol, 'TCP'))) AS proto, \
+       CASE WHEN upper(trim(coalesce(t.traffic_type, ''))) = 'INGRESS' THEN t.pod_port \
+            ELSE t.traffic_in_out_port END AS port, \
+       t.peer_kind, t.peer_namespace, t.peer_workload_kind, t.peer_workload_name, \
+       CASE WHEN t.peer_workload_name IS NULL AND t.peer_kind IS NOT NULL AND t.peer_kind <> 'node' \
+            THEN t.peer_name END AS peer_name, \
+       CASE WHEN t.peer_kind IS NULL THEN t.traffic_in_out_ip END AS ip \
+FROM pod_traffic t JOIN pod_details pd ON pd.pod_name = t.pod_name \
+WHERE t.pod_namespace = $1 AND pd.pod_namespace = $1 \
+  AND ((pd.workload_kind = $2 AND pd.workload_name = $3) \
+       OR ($2 = 'Pod' AND pd.pod_name = $3 AND pd.workload_kind IS NULL)) \
+  AND upper(trim(coalesce(t.traffic_type, ''))) IN ('INGRESS', 'EGRESS') \
+ORDER BY 1, 2, 3, 4 NULLS LAST, 5 NULLS LAST, 6 NULLS LAST, 7 NULLS LAST, 8 NULLS LAST, 9 NULLS LAST \
+LIMIT $4";
+
 #[derive(Debug, Clone, QueryableByName, PartialEq)]
 pub struct AuditRow {
     #[diesel(sql_type = Text)]
@@ -415,6 +483,8 @@ pub struct Sources {
     pub any_pods: bool,
     pub network: Vec<NetRow>,
     pub network_truncated: bool,
+    /// Distinct rule set for the snapshot (see [`NetRuleRow`]).
+    pub network_rules: Vec<NetRuleRow>,
     /// `None` = no verdict in the window mentions the pods.
     pub audit: Vec<AuditRow>,
     pub compute: Vec<ComputeRow>,
@@ -479,6 +549,14 @@ pub fn load_sources(conn: &mut PgConnection, key: &Key) -> Result<Sources, DbErr
         (rows, truncated)
     };
 
+    let mut network_rules: Vec<NetRuleRow> = sql_query(NETWORK_RULES_SQL)
+        .bind::<Text, _>(&key.namespace)
+        .bind::<Text, _>(&key.kind)
+        .bind::<Text, _>(&key.name)
+        .bind::<BigInt, _>(NETWORK_RULES_MAX)
+        .load(conn)?;
+    network_rules.dedup();
+
     let audit: Vec<AuditRow> = if all_pods.is_empty() {
         Vec::new()
     } else {
@@ -520,6 +598,7 @@ pub fn load_sources(conn: &mut PgConnection, key: &Key) -> Result<Sources, DbErr
         live_pods,
         network,
         network_truncated,
+        network_rules,
         audit,
         compute,
         compute_truncated,
@@ -540,6 +619,7 @@ pub fn profile_charge_kib() -> u32 {
     .saturating_add(crate::seccomp_denial::denial_index_for_charge_kib())
     .saturating_add(cost_kib(NETWORK_PEERS_MAX + 1, PEER_ROW_COST_BYTES))
     .saturating_add(cost_kib(PODS_MAX, 256))
+    .saturating_add(cost_kib(NETWORK_RULES_MAX, 512))
     .saturating_add(cost_kib(COMPUTE_ROWS_MAX + 1, 1_024))
     .saturating_add(cost_kib(AUDIT_POLICIES_MAX, 512))
     .saturating_add(cost_kib(2, SNAPSHOT_COST_BYTES))
@@ -581,8 +661,6 @@ pub struct Finding {
     pub title: String,
     pub detail: String,
     pub container: Option<String>,
-    #[serde(skip)]
-    pub points: u32,
 }
 
 fn tier(severity: &str) -> Option<&'static str> {
@@ -608,7 +686,6 @@ fn mk_finding(
     dimension: &'static str,
     id: String,
     severity: &'static str,
-    points: u32,
     container: Option<String>,
     title: String,
     detail: String,
@@ -621,29 +698,16 @@ fn mk_finding(
         title,
         detail,
         container,
-        points,
     }
 }
 
-/// Status / score / coverage / reasons shared by every dimension.
+/// Status / coverage / reasons shared by every dimension.
 #[derive(Debug, Clone, Serialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct Envelope {
     pub status: &'static str,
-    pub score: Option<u32>,
-    pub scored: bool,
     pub coverage: Coverage,
     pub reasons: Vec<Reason>,
-}
-
-fn status_from_score(score: u32) -> &'static str {
-    if score >= 80 {
-        "ok"
-    } else if score >= 50 {
-        "warn"
-    } else {
-        "risk"
-    }
 }
 
 fn status_from_findings(f: &[Finding]) -> &'static str {
@@ -656,10 +720,6 @@ fn status_from_findings(f: &[Finding]) -> &'static str {
     }
 }
 
-fn score_of(f: &[Finding]) -> u32 {
-    100u32.saturating_sub(f.iter().map(|x| x.points).sum())
-}
-
 fn status_rank(s: &str) -> u8 {
     match s {
         "risk" => 3,
@@ -669,7 +729,57 @@ fn status_rank(s: &str) -> u8 {
     }
 }
 
+/// The worse of two known statuses.
+fn worse(a: &'static str, b: &'static str) -> &'static str {
+    if status_rank(b) > status_rank(a) {
+        b
+    } else {
+        a
+    }
+}
+
+/// podSecurity status (contract v1.2, section 2.2), fixed rules, no score:
+///
+/// - level `privileged` (a baseline check fails, in any container
+///   including init and ephemeral, or at pod level) -> `risk`;
+/// - any high/critical finding -> `risk`, any medium -> `warn`;
+/// - level `baseline` (a restricted check fails) -> at least `warn`;
+/// - level `restricted` only as an upper bound (checks kguardian cannot
+///   see may still fail) -> never `ok`: `unknown` unless a finding makes
+///   it warn/risk. `ok` needs a confirmed restricted level, which v1
+///   cannot produce.
+pub fn pod_security_status(
+    level: Level,
+    confidence: Option<&str>,
+    findings: &[Finding],
+) -> &'static str {
+    let from_findings = status_from_findings(findings);
+    match level {
+        Level::Privileged => "risk",
+        Level::Baseline => worse("warn", from_findings),
+        Level::Restricted if confidence == Some("confirmed") => from_findings,
+        Level::Restricted => {
+            if from_findings == "ok" {
+                "unknown"
+            } else {
+                from_findings
+            }
+        }
+    }
+}
+
 // ---- podSecurity --------------------------------------------------------
+
+/// A container the inventory still holds but no current pod reports: it
+/// was renamed or removed from the spec. Shown, never evaluated.
+#[derive(Debug, Clone, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct StaleContainer {
+    pub name: String,
+    pub kind: String,
+    pub digest: String,
+    pub last_seen: DateTime<Utc>,
+}
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
@@ -678,29 +788,77 @@ pub struct PodSecurityDim {
     pub env: Envelope,
     #[serde(flatten)]
     pub analysis: Analysis,
+    /// Containers no longer in the current spec; excluded from the level,
+    /// the findings and the patch.
+    pub stale_containers: Vec<StaleContainer>,
 }
 
-/// The newest running row per container, else the newest row kept.
-fn current_row(c: &ContainerImages) -> Option<(&ContainerDigest, &'static str)> {
-    c.digests
-        .first()
-        .map(|d| (d, "running"))
-        .or_else(|| c.previous_digests.first().map(|d| (d, "last_known")))
+/// A row is CURRENT when a pod of the workload still reports it: refreshed
+/// within the running window, or its last reporting pod is still live.
+/// The inventory's running predicate minus the container-state term, so a
+/// completed init container is current, while a container that was renamed
+/// or removed from the spec (its pods gone, no refresh) is not.
+fn is_current(d: &ContainerDigest, s: &Sources, now: DateTime<Utc>) -> bool {
+    utc(d.last_seen) >= now - chrono::Duration::seconds(s.running_window_seconds)
+        || d.last_pod_name
+            .as_ref()
+            .is_some_and(|p| s.live_pods.contains(p))
 }
 
-fn build_pod_security(key: &Key, s: &Sources) -> (PodSecurityDim, Vec<Finding>) {
+/// The row a container is evaluated from: its newest running row, else its
+/// newest current row (`last_known`), else `None` (stale).
+fn current_row<'a>(
+    c: &'a ContainerImages,
+    s: &Sources,
+    now: DateTime<Utc>,
+) -> Option<(&'a ContainerDigest, &'static str)> {
+    c.digests.first().map(|d| (d, "running")).or_else(|| {
+        c.previous_digests
+            .iter()
+            .find(|d| is_current(d, s, now))
+            .map(|d| (d, "last_known"))
+    })
+}
+
+/// A container is stale when none of its rows is current.
+fn is_stale(c: &ContainerImages, s: &Sources, now: DateTime<Utc>) -> bool {
+    current_row(c, s, now).is_none()
+}
+
+/// The pod-level block, or `None` when it is empty or malformed (older
+/// controller): pod-level checks are then unevaluated, not "unset".
+fn parse_pod_security(v: &Value) -> Option<PodSecurity> {
+    match v {
+        Value::Object(m) if !m.is_empty() => serde_json::from_value(v.clone()).ok(),
+        _ => None,
+    }
+}
+
+fn build_pod_security(
+    key: &Key,
+    s: &Sources,
+    now: DateTime<Utc>,
+) -> (PodSecurityDim, Vec<Finding>) {
     let mut inputs = Vec::new();
-    let mut pod: Option<(NaiveDateTime, PodSecurity)> = None;
+    let mut stale = Vec::new();
+    let mut pod: Option<(NaiveDateTime, Option<PodSecurity>)> = None;
     let mut since: Option<NaiveDateTime> = None;
     for c in &s.containers {
-        let Some((row, source)) = current_row(c) else {
+        let Some((row, source)) = current_row(c, s, now) else {
+            if let Some(d) = c.previous_digests.first() {
+                stale.push(StaleContainer {
+                    name: c.container_name.clone(),
+                    kind: c.container_kind.clone(),
+                    digest: d.digest.clone(),
+                    last_seen: utc(d.last_seen),
+                });
+            }
             continue;
         };
         let sec: ContainerSecurity =
             serde_json::from_value(row.security_context.clone()).unwrap_or_default();
-        let ps: PodSecurity = serde_json::from_value(row.pod_security.clone()).unwrap_or_default();
         if pod.as_ref().is_none_or(|(t, _)| row.last_seen > *t) {
-            pod = Some((row.last_seen, ps));
+            pod = Some((row.last_seen, parse_pod_security(&row.pod_security)));
         }
         since = Some(since.map_or(row.first_seen, |x: NaiveDateTime| x.min(row.first_seen)));
         inputs.push(pod_security::ContainerInput {
@@ -711,9 +869,9 @@ fn build_pod_security(key: &Key, s: &Sources) -> (PodSecurityDim, Vec<Finding>) 
             security: sec,
         });
     }
-    let pod = pod.map(|(_, p)| p).unwrap_or_default();
-    let analysis = pod_security::analyse(&key.kind, &pod, &inputs);
-    let evaluated = pod_security::ALL_CHECKS.len() - pod_security::UNEVALUATED.len();
+    let pod = pod.and_then(|(_, p)| p);
+    let analysis = pod_security::analyse(&key.kind, pod.as_ref(), &inputs);
+    let evaluated = pod_security::ALL_CHECKS.len() - analysis.unevaluated_checks.len();
     let findings: Vec<Finding> = analysis
         .findings
         .iter()
@@ -722,7 +880,6 @@ fn build_pod_security(key: &Key, s: &Sources) -> (PodSecurityDim, Vec<Finding>) 
                 "podSecurity",
                 f.id.clone(),
                 f.severity,
-                f.points,
                 f.container.clone(),
                 f.title.clone(),
                 f.detail.clone(),
@@ -732,43 +889,108 @@ fn build_pod_security(key: &Key, s: &Sources) -> (PodSecurityDim, Vec<Finding>) 
     let env = if inputs.is_empty() {
         Envelope {
             status: "unknown",
-            score: None,
-            scored: false,
             coverage: Coverage {
                 level: "none",
                 fraction: None,
                 observed_since: None,
-                note: "no container securityContext reported for this workload".into(),
+                note: "no current container securityContext reported for this workload".into(),
             },
-            reasons: vec![reason(
-                "no_inventory",
-                "The controller has not reported this workload's containers (image inventory)",
-            )],
+            reasons: vec![if stale.is_empty() {
+                reason(
+                    "no_inventory",
+                    "The controller has not reported this workload's containers (image inventory)",
+                )
+            } else {
+                reason(
+                    "only_stale_containers",
+                    "Only containers no longer in the current spec are known",
+                )
+            }],
         }
     } else {
-        let score = score_of(&findings);
+        let level = analysis.level.unwrap_or(Level::Restricted);
         let mut reasons = Vec::new();
-        match (analysis.level, analysis.level_confidence) {
-            (Some(Level::Privileged), _) => reasons.push(reason(
-                "pss_privileged",
-                "At least one baseline check fails, so the workload is privileged under PSS",
-            )),
-            (Some(l), Some("upper_bound")) => reasons.push(reason(
-                "pss_upper_bound",
+        // Name the containers that set the level (init and ephemeral
+        // included), so the reason is never a bare verdict.
+        let failing_at = |lv: Level| -> String {
+            let mut names: Vec<String> = analysis
+                .containers
+                .iter()
+                .filter(|c| c.level == lv)
+                .map(|c| format!("{} ({})", c.name, c.kind))
+                .collect();
+            if analysis
+                .pod
+                .failing
+                .iter()
+                .any(|f| lv == pod_security::level_of(std::slice::from_ref(f)))
+            {
+                names.insert(0, "pod spec".into());
+            }
+            names.join(", ")
+        };
+        match analysis.level {
+            Some(Level::Privileged) => reasons.push(reason(
+                "pss_fails_baseline",
                 format!(
-                    "Evaluated checks pass {}; unevaluated checks may lower the level",
-                    l.as_str()
+                    "Privileged under PSS: {} fail(s) a baseline check",
+                    failing_at(Level::Privileged)
                 ),
             )),
-            _ => {}
+            Some(Level::Baseline) => reasons.push(reason(
+                "pss_fails_restricted",
+                format!(
+                    "At most baseline: {} fail(s) a restricted check; unevaluated checks may lower it further",
+                    failing_at(Level::Baseline)
+                ),
+            )),
+            Some(Level::Restricted) => reasons.push(reason(
+                "pss_unverified",
+                format!(
+                    "Every evaluated check passes restricted, but {} checks cannot be seen (e.g. hostPath), so restricted is not confirmed",
+                    analysis.unevaluated_checks.len()
+                ),
+            )),
+            None => {}
+        }
+        if !analysis.pod.known {
+            reasons.push(reason(
+                "pod_fields_unknown",
+                "The pod-level block (host namespaces, pod securityContext) was not reported; those checks are unevaluated",
+            ));
+        }
+        let eph: Vec<&str> = analysis
+            .containers
+            .iter()
+            .filter(|c| c.kind == "ephemeral" && !c.failing.is_empty())
+            .map(|c| c.name.as_str())
+            .collect();
+        if !eph.is_empty() {
+            reasons.push(reason(
+                "ephemeral_unpatchable",
+                format!(
+                    "Ephemeral container(s) {} fail checks and cannot be patched",
+                    eph.join(", ")
+                ),
+            ));
+        }
+        if !stale.is_empty() {
+            reasons.push(reason(
+                "stale_containers_excluded",
+                format!(
+                    "{} container(s) no longer in the current spec are listed in staleContainers and not evaluated",
+                    stale.len()
+                ),
+            ));
         }
         Envelope {
-            status: status_from_score(score),
-            score: Some(score),
-            scored: true,
+            status: pod_security_status(level, analysis.level_confidence, &findings),
             coverage: Coverage {
                 level: "partial",
-                fraction: Some(evaluated as f64 / pod_security::ALL_CHECKS.len() as f64),
+                fraction: Some(
+                    ((evaluated as f64 / pod_security::ALL_CHECKS.len() as f64) * 100.0).round()
+                        / 100.0,
+                ),
                 observed_since: since.map(utc),
                 note: format!(
                     "{evaluated} of {} PSS checks evaluated; volumes, ports, probes, AppArmor, SELinux, procMount, sysctls and hostProcess are not ingested",
@@ -778,7 +1000,14 @@ fn build_pod_security(key: &Key, s: &Sources) -> (PodSecurityDim, Vec<Finding>) 
             reasons,
         }
     };
-    (PodSecurityDim { env, analysis }, findings)
+    (
+        PodSecurityDim {
+            env,
+            analysis,
+            stale_containers: stale,
+        },
+        findings,
+    )
 }
 
 // ---- images -------------------------------------------------------------
@@ -817,6 +1046,9 @@ pub struct ImageContainerView {
     pub name: String,
     pub kind: String,
     pub mixed_digests: bool,
+    /// No current pod reports this container any more (renamed or removed
+    /// from the spec); kept until inventory retention prunes it.
+    pub stale: bool,
     pub running: Vec<DigestView>,
     pub previous: Vec<DigestView>,
 }
@@ -835,7 +1067,7 @@ pub struct ImagesDim {
     pub supply_chain: Option<Value>,
 }
 
-fn build_images(s: &Sources) -> (ImagesDim, Vec<Finding>) {
+fn build_images(s: &Sources, now: DateTime<Utc>) -> (ImagesDim, Vec<Finding>) {
     let mut findings = Vec::new();
     let mut since: Option<NaiveDateTime> = None;
     let containers: Vec<ImageContainerView> = s
@@ -846,12 +1078,23 @@ fn build_images(s: &Sources) -> (ImagesDim, Vec<Finding>) {
                 since = Some(since.map_or(d.first_seen, |x: NaiveDateTime| x.min(d.first_seen)));
             }
             let n = &c.container_name;
+            let stale = is_stale(c, s, now);
+            if stale {
+                // Not in the current spec: listed, never a finding.
+                return ImageContainerView {
+                    name: c.container_name.clone(),
+                    kind: c.container_kind.clone(),
+                    mixed_digests: c.mixed_digests,
+                    stale,
+                    running: c.digests.iter().map(DigestView::from).collect(),
+                    previous: c.previous_digests.iter().map(DigestView::from).collect(),
+                };
+            }
             if c.mixed_digests {
                 findings.push(mk_finding(
                     "images",
                     format!("images.mixedDigests/{n}"),
                     "low",
-                    0,
                     Some(n.clone()),
                     format!("Container {n} runs {} digests at once", c.digests.len()),
                     "A rollout in progress, or nodes that resolved the same tag to different images.".into(),
@@ -865,7 +1108,6 @@ fn build_images(s: &Sources) -> (ImagesDim, Vec<Finding>) {
                     "images",
                     format!("images.crashLoop/{n}"),
                     "medium",
-                    0,
                     Some(n.clone()),
                     format!("Container {n} is in CrashLoopBackOff"),
                     "The running digest keeps exiting.".into(),
@@ -888,7 +1130,6 @@ fn build_images(s: &Sources) -> (ImagesDim, Vec<Finding>) {
                     "images",
                     format!("images.pullBackOff/{n}"),
                     "medium",
-                    0,
                     Some(n.clone()),
                     format!("Container {n} cannot pull its image"),
                     "The newest reported state is ImagePullBackOff / ErrImagePull.".into(),
@@ -898,6 +1139,7 @@ fn build_images(s: &Sources) -> (ImagesDim, Vec<Finding>) {
                 name: c.container_name.clone(),
                 kind: c.container_kind.clone(),
                 mixed_digests: c.mixed_digests,
+                stale,
                 running: c.digests.iter().map(DigestView::from).collect(),
                 previous: c.previous_digests.iter().map(DigestView::from).collect(),
             }
@@ -906,8 +1148,6 @@ fn build_images(s: &Sources) -> (ImagesDim, Vec<Finding>) {
     let env = if containers.is_empty() {
         Envelope {
             status: "unknown",
-            score: None,
-            scored: false,
             coverage: Coverage {
                 level: "none",
                 fraction: None,
@@ -922,8 +1162,6 @@ fn build_images(s: &Sources) -> (ImagesDim, Vec<Finding>) {
     } else {
         Envelope {
             status: status_from_findings(&findings),
-            score: None,
-            scored: false,
             coverage: Coverage {
                 level: "full",
                 fraction: None,
@@ -932,7 +1170,7 @@ fn build_images(s: &Sources) -> (ImagesDim, Vec<Finding>) {
             },
             reasons: vec![reason(
                 "vulnerabilities_not_configured",
-                "No vulnerability source is configured; images are inventoried but not scored",
+                "No vulnerability source is configured; images are inventoried but not assessed for vulnerabilities",
             )],
         }
     };
@@ -1014,8 +1252,6 @@ fn build_syscalls(s: &Sources) -> (SyscallsDim, Vec<Finding>) {
             SyscallsDim {
                 env: Envelope {
                     status: "unknown",
-                    score: None,
-                    scored: false,
                     coverage: Coverage {
                         level: "none",
                         fraction: None,
@@ -1057,7 +1293,6 @@ fn build_syscalls(s: &Sources) -> (SyscallsDim, Vec<Finding>) {
                 "syscalls",
                 "syscalls.no_enforcing_profile".into(),
                 "medium",
-                40,
                 None,
                 "No SeccompProfile CR enforces the observed syscall set".into(),
                 format!(
@@ -1075,7 +1310,6 @@ fn build_syscalls(s: &Sources) -> (SyscallsDim, Vec<Finding>) {
                 "syscalls",
                 "syscalls.no_enforcing_profile".into(),
                 "medium",
-                20,
                 None,
                 format!("SeccompProfile {} is in audit mode", c.name),
                 "Its default action only logs; promote it to enforce once no denials appear."
@@ -1094,7 +1328,6 @@ fn build_syscalls(s: &Sources) -> (SyscallsDim, Vec<Finding>) {
                 "syscalls",
                 "syscalls.drift".into(),
                 "medium",
-                20,
                 None,
                 format!(
                     "SeccompProfile {} has drifted from observed behaviour",
@@ -1114,7 +1347,6 @@ fn build_syscalls(s: &Sources) -> (SyscallsDim, Vec<Finding>) {
                 "syscalls",
                 "syscalls.denials".into(),
                 "high",
-                30,
                 None,
                 format!("{} seccomp denial(s) recorded", d.total),
                 format!("Denied: {}", d.syscalls.join(", ")),
@@ -1126,8 +1358,7 @@ fn build_syscalls(s: &Sources) -> (SyscallsDim, Vec<Finding>) {
             "Denial capture is not reporting for this workload's nodes, so an absence of denials cannot be confirmed",
         ));
     }
-    let score = score_of(&findings);
-    let mut status = status_from_score(score);
+    let mut status = status_from_findings(&findings);
     if !sum.capture.complete {
         reasons.push(reason(
             "capture_incomplete",
@@ -1149,8 +1380,6 @@ fn build_syscalls(s: &Sources) -> (SyscallsDim, Vec<Finding>) {
         SyscallsDim {
             env: Envelope {
                 status,
-                score: Some(score),
-                scored: true,
                 coverage: Coverage {
                     level: if sum.capture.complete {
                         "full"
@@ -1232,6 +1461,24 @@ pub struct PeerView {
 }
 
 impl PeerView {
+    fn from_rule(r: &NetRuleRow) -> PeerView {
+        let kind = match r.peer_kind.as_deref() {
+            Some("pod") => "pod",
+            Some("service") => "service",
+            Some("node") => "node",
+            Some(_) => "unresolved",
+            None => classify_unknown_ip(r.ip.as_deref()),
+        };
+        PeerView {
+            kind,
+            namespace: r.peer_namespace.clone(),
+            workload_kind: r.peer_workload_kind.clone(),
+            workload_name: r.peer_workload_name.clone(),
+            name: r.peer_name.clone(),
+            ip: r.ip.clone(),
+        }
+    }
+
     fn from_row(r: &NetRow) -> PeerView {
         let kind = match r.peer_kind.as_deref() {
             Some("pod") => "pod",
@@ -1382,19 +1629,18 @@ fn build_network(s: &Sources) -> (NetworkDim, Vec<Finding>) {
     let since = s.network.iter().map(|r| r.first_seen).min();
     let mut findings = Vec::new();
     let mut reasons = Vec::new();
-    let (status, score, scored) = if peers.is_empty() {
+    let status = if peers.is_empty() {
         reasons.push(reason(
             "no_flows",
             "No flows observed for this workload's pods",
         ));
-        ("unknown", None, false)
+        "unknown"
     } else if let Some(a) = &audit {
         if a.would_deny > 0 {
             findings.push(mk_finding(
                 "network",
                 "network.wouldDeny".into(),
-                "high",
-                30,
+                "medium",
                 None,
                 format!(
                     "{} flow(s) would be denied by the audit policy in the last {} h",
@@ -1408,14 +1654,13 @@ fn build_network(s: &Sources) -> (NetworkDim, Vec<Finding>) {
                 format!("Audit policy saw no would-deny in the last {AUDIT_WINDOW_HOURS} h"),
             ));
         }
-        let sc = score_of(&findings);
-        (status_from_score(sc), Some(sc), true)
+        status_from_findings(&findings)
     } else {
         reasons.push(reason(
             "policy_state_unknown",
             "No audit policy covers this workload; applied NetworkPolicies are not visible to the broker",
         ));
-        ("unknown", None, false)
+        "unknown"
     };
     if s.network_truncated {
         reasons.push(reason(
@@ -1430,8 +1675,6 @@ fn build_network(s: &Sources) -> (NetworkDim, Vec<Finding>) {
         NetworkDim {
             env: Envelope {
                 status,
-                score,
-                scored,
                 coverage: Coverage {
                     level: if peers.is_empty() {
                         "none"
@@ -1500,7 +1743,6 @@ fn build_compute(s: &Sources) -> (ComputeDim, Vec<Finding>) {
                     "compute",
                     format!("compute.missingMemoryLimit/{}", r.container),
                     "low",
-                    0,
                     Some(r.container.clone()),
                     format!("Container {} has no memory limit", r.container),
                     format!("Pod {}", r.pod_name),
@@ -1511,7 +1753,6 @@ fn build_compute(s: &Sources) -> (ComputeDim, Vec<Finding>) {
                     "compute",
                     format!("compute.oomKilled/{}", r.container),
                     "medium",
-                    0,
                     Some(r.container.clone()),
                     format!("Container {} was OOM-killed", r.container),
                     format!("Pod {}, in the latest sample interval", r.pod_name),
@@ -1542,8 +1783,6 @@ fn build_compute(s: &Sources) -> (ComputeDim, Vec<Finding>) {
     let env = if containers.is_empty() {
         Envelope {
             status: "unknown",
-            score: None,
-            scored: false,
             coverage: Coverage {
                 level: "none",
                 fraction: None,
@@ -1569,8 +1808,6 @@ fn build_compute(s: &Sources) -> (ComputeDim, Vec<Finding>) {
         }
         Envelope {
             status: status_from_findings(&findings),
-            score: None,
-            scored: false,
             coverage: Coverage {
                 level: "full",
                 fraction: None,
@@ -1594,21 +1831,21 @@ fn build_compute(s: &Sources) -> (ComputeDim, Vec<Finding>) {
 // Profile
 // ---------------------------------------------------------------------
 
-#[derive(Debug, Clone, Serialize, PartialEq)]
-#[serde(rename_all = "camelCase")]
-pub struct Deduction {
-    pub dimension: &'static str,
-    pub finding_id: String,
-    pub points: u32,
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct PostureHead {
     pub status: String,
-    pub score: Option<u32>,
     pub coverage: f64,
-    pub grade: Option<String>,
+}
+
+/// Why the rollup is what it is: one entry per core dimension that is not
+/// ok (warn / risk / unknown), in dimension order.
+#[derive(Debug, Clone, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct PostureReason {
+    pub dimension: &'static str,
+    pub status: &'static str,
+    pub message: String,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
@@ -1616,9 +1853,8 @@ pub struct PostureHead {
 pub struct Posture {
     #[serde(flatten)]
     pub head: PostureHead,
-    pub weights: BTreeMap<&'static str, u32>,
     pub unknown_dimensions: Vec<&'static str>,
-    pub deductions: Vec<Deduction>,
+    pub reasons: Vec<PostureReason>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
@@ -1705,49 +1941,32 @@ pub struct Profile {
     pub dimension_hashes: BTreeMap<&'static str, String>,
 }
 
-fn grade(score: u32) -> &'static str {
-    match score {
-        90.. => "A",
-        80..=89 => "B",
-        70..=79 => "C",
-        60..=69 => "D",
-        _ => "F",
-    }
-}
-
-/// Weighted mean over scored dimensions; coverage = scored weight / total.
+/// Rollup over the core dimensions: worst known status; coverage = the
+/// fraction of core dimensions whose status is known; unknown dimensions
+/// are listed and never count as ok or risk.
 pub fn rollup(dims: &[(&'static str, &Envelope)]) -> (PostureHead, Vec<&'static str>) {
-    let total: u32 = WEIGHTS.iter().map(|(_, w)| w).sum();
-    let mut num = 0f64;
-    let mut den = 0u32;
     let mut unknown = Vec::new();
-    for (name, w) in WEIGHTS {
-        let env = dims.iter().find(|(n, _)| *n == name).map(|(_, e)| *e);
-        match env.and_then(|e| e.score.filter(|_| e.scored)) {
-            Some(s) => {
-                num += (s * w) as f64;
-                den += w;
+    let mut worst = "unknown";
+    let mut known = 0usize;
+    for name in CORE_DIMENSIONS {
+        let status = dims
+            .iter()
+            .find(|(n, _)| *n == name)
+            .map_or("unknown", |(_, e)| e.status);
+        if status == "unknown" {
+            unknown.push(name);
+        } else {
+            known += 1;
+            if status_rank(status) > status_rank(worst) {
+                worst = status;
             }
-            None => unknown.push(name),
         }
     }
-    let score = (den > 0).then(|| (num / den as f64).round() as u32);
-    let coverage = ((den as f64 / total as f64) * 100.0).round() / 100.0;
-    let worst = dims
-        .iter()
-        .map(|(_, e)| e.status)
-        .max_by_key(|s| status_rank(s))
-        .filter(|s| status_rank(s) > 0)
-        .unwrap_or("unknown");
-    let grade = score
-        .filter(|_| den as f64 / total as f64 >= 0.8)
-        .map(|s| grade(s).to_string());
+    let coverage = ((known as f64 / CORE_DIMENSIONS.len() as f64) * 100.0).round() / 100.0;
     (
         PostureHead {
             status: worst.to_string(),
-            score,
             coverage,
-            grade,
         },
         unknown,
     )
@@ -1765,19 +1984,19 @@ fn fmt_age(secs: i64) -> String {
 
 /// Build the whole profile from its sources. Pure.
 pub fn build(key: &Key, s: &Sources, now: DateTime<Utc>) -> Profile {
-    let (pod_security, f_ps) = build_pod_security(key, s);
-    let (images, f_im) = build_images(s);
+    let (pod_security, f_ps) = build_pod_security(key, s, now);
+    let (images, f_im) = build_images(s, now);
     let (syscalls, f_sc) = build_syscalls(s);
     let (network, f_net) = build_network(s);
     let (compute, f_co) = build_compute(s);
 
-    let (head, unknown) = rollup(&[
+    let core: [(&'static str, &Envelope); 4] = [
         ("network", &network.env),
         ("syscalls", &syscalls.env),
         ("podSecurity", &pod_security.env),
         ("images", &images.env),
-        ("compute", &compute.env),
-    ]);
+    ];
+    let (head, unknown) = rollup(&core);
     let mut findings: Vec<Finding> = f_net
         .into_iter()
         .chain(f_sc)
@@ -1788,25 +2007,29 @@ pub fn build(key: &Key, s: &Sources, now: DateTime<Utc>) -> Profile {
     findings.sort_by(|a, b| {
         severity_rank(a.severity)
             .cmp(&severity_rank(b.severity))
-            .then_with(|| b.points.cmp(&a.points))
             .then_with(|| a.id.cmp(&b.id))
     });
-    let scored: BTreeSet<&str> = [
-        ("network", network.env.scored),
-        ("syscalls", syscalls.env.scored),
-        ("podSecurity", pod_security.env.scored),
-    ]
-    .into_iter()
-    .filter(|(_, s)| *s)
-    .map(|(n, _)| n)
-    .collect();
-    let deductions: Vec<Deduction> = findings
+    // One reason per core dimension that is not ok: its most severe
+    // finding, else its first stated reason.
+    let posture_reasons: Vec<PostureReason> = core
         .iter()
-        .filter(|f| f.points > 0 && scored.contains(f.dimension))
-        .map(|f| Deduction {
-            dimension: f.dimension,
-            finding_id: f.id.clone(),
-            points: f.points,
+        .filter(|(_, e)| e.status != "ok")
+        .map(|(d, e)| PostureReason {
+            dimension: d,
+            status: e.status,
+            // podSecurity leads with its level reason (which containers
+            // set it); the others with their most severe finding.
+            message: (*d == "podSecurity")
+                .then(|| e.reasons.first().map(|r| r.message.clone()))
+                .flatten()
+                .or_else(|| {
+                    findings
+                        .iter()
+                        .find(|f| f.dimension == *d && severity_rank(f.severity) <= 2)
+                        .map(|f| f.title.clone())
+                })
+                .or_else(|| e.reasons.first().map(|r| r.message.clone()))
+                .unwrap_or_default(),
         })
         .collect();
     let attention: Vec<Finding> = findings
@@ -1912,17 +2135,20 @@ pub fn build(key: &Key, s: &Sources, now: DateTime<Utc>) -> Profile {
             message: "Signature verification is not configured".into(),
         },
         match pod_security.analysis.level {
+            // A restricted level that is only an upper bound cannot say
+            // yes: checks kguardian cannot see (hostPath...) may fail.
+            Some(Level::Restricted) => Readiness {
+                id: "podSecurityRestricted",
+                ok: (pod_security.analysis.level_confidence == Some("confirmed")).then_some(true),
+                message: format!(
+                    "Every evaluated check passes restricted; {} checks cannot be seen, so restricted is not confirmed",
+                    pod_security.analysis.unevaluated_checks.len()
+                ),
+            },
             Some(l) => Readiness {
                 id: "podSecurityRestricted",
-                ok: Some(l == Level::Restricted),
-                message: if l == Level::Restricted {
-                    format!(
-                        "Evaluated checks pass restricted; {} checks could not be evaluated",
-                        pod_security::UNEVALUATED.len()
-                    )
-                } else {
-                    format!("At most {}", l.as_str())
-                },
+                ok: Some(false),
+                message: format!("At most {}", l.as_str()),
             },
             None => Readiness {
                 id: "podSecurityRestricted",
@@ -1985,9 +2211,8 @@ pub fn build(key: &Key, s: &Sources, now: DateTime<Utc>) -> Profile {
         snapshot_pending,
         posture: Posture {
             head,
-            weights: WEIGHTS.into_iter().collect(),
             unknown_dimensions: unknown,
-            deductions,
+            reasons: posture_reasons,
         },
         attention,
         findings,
@@ -2070,7 +2295,7 @@ fn snapshot_of(d: &Dimensions, s: &Sources) -> (Value, BTreeMap<&'static str, St
     });
 
     let mut images = serde_json::Map::new();
-    for c in &d.images.containers {
+    for c in d.images.containers.iter().filter(|c| !c.stale) {
         let digests: BTreeSet<&str> = c.running.iter().map(|x| x.digest.as_str()).collect();
         images.insert(c.name.clone(), json!(digests));
     }
@@ -2087,16 +2312,17 @@ fn snapshot_of(d: &Dimensions, s: &Sources) -> (Value, BTreeMap<&'static str, St
         None => json!({ "syscalls": Value::Null, "captureLevel": Value::Null, "cr": Value::Null }),
     };
 
-    let rules: BTreeSet<(String, String, Option<u32>, String)> = d
-        .network
-        .peers
+    // The policy-relevant rule set only: no counts, no truncation flag,
+    // no audit-window state, nothing that moves without the rules moving.
+    let rules: BTreeSet<(String, String, Option<u32>, String)> = s
+        .network_rules
         .iter()
-        .map(|p| {
+        .map(|r| {
             (
-                p.direction.to_string(),
-                p.protocol.clone(),
-                p.port,
-                p.peer.identity(),
+                direction(&r.dir).to_string(),
+                r.proto.clone(),
+                r.port.as_deref().and_then(|p| p.trim().parse().ok()),
+                PeerView::from_rule(r).identity(),
             )
         })
         .collect();
@@ -2104,8 +2330,6 @@ fn snapshot_of(d: &Dimensions, s: &Sources) -> (Value, BTreeMap<&'static str, St
         "rules": rules.into_iter().map(|(dir, proto, port, peer)| json!({
             "direction": dir, "protocol": proto, "port": port, "peer": peer
         })).collect::<Vec<_>>(),
-        "audited": d.network.policy.audit.is_some(),
-        "truncated": d.network.truncated,
     });
 
     let snap = json!({
@@ -2274,7 +2498,6 @@ pub fn diff(from: &Value, to: &Value) -> Value {
         "changed": xa != xb,
         "added": rb.iter().filter(|(k, _)| !ra.contains_key(*k)).map(|(_, v)| v).collect::<Vec<_>>(),
         "removed": ra.iter().filter(|(k, _)| !rb.contains_key(*k)).map(|(_, v)| v).collect::<Vec<_>>(),
-        "audited": scalar_change(&get(&xa, "audited"), &get(&xb, "audited")),
     });
 
     json!({
@@ -2311,27 +2534,23 @@ fn list_summary(p: &Profile) -> Value {
     json!({
         "posture": {
             "status": p.posture.head.status,
-            "score": p.posture.head.score,
             "coverage": p.posture.head.coverage,
-            "grade": p.posture.head.grade,
             "unknownDimensions": p.posture.unknown_dimensions,
         },
         "dimensions": {
-            "network": { "status": d.network.env.status, "score": d.network.env.score },
-            "syscalls": { "status": d.syscalls.env.status, "score": d.syscalls.env.score },
+            "network": { "status": d.network.env.status },
+            "syscalls": { "status": d.syscalls.env.status },
             "podSecurity": {
                 "status": d.pod_security.env.status,
-                "score": d.pod_security.env.score,
                 "level": d.pod_security.analysis.level,
                 "levelConfidence": d.pod_security.analysis.level_confidence,
             },
             "images": {
                 "status": d.images.env.status,
-                "score": d.images.env.score,
                 "runningDigests": if d.images.containers.is_empty() { Value::Null } else { json!(running.len()) },
                 "mixedDigests": if d.images.containers.is_empty() { Value::Null } else { json!(d.images.containers.iter().any(|c| c.mixed_digests)) },
             },
-            "compute": { "status": d.compute.env.status, "score": d.compute.env.score },
+            "compute": { "status": d.compute.env.status },
         },
         "findingCounts": counts,
     })
@@ -2342,6 +2561,10 @@ fn list_summary(p: &Profile) -> Value {
 pub enum SnapshotOutcome {
     Unchanged(i32),
     NewVersion(i32),
+    /// Another writer stored a DIFFERENT profile at the revision this one
+    /// would have taken (two brokers racing). Nothing is written; the next
+    /// visit recomputes on top of the winner.
+    LostRace(i32),
 }
 
 /// Store `p` for `key`: a new version only when the hash changed, trim
@@ -2360,6 +2583,21 @@ pub fn store_snapshot(
             .bind::<Text, _>(&key.name)
             .get_result(conn)
             .optional()?;
+        store_with_head(conn, key, p, cap, head)
+    })
+}
+
+/// The write half of [`store_snapshot`], given the head this writer read.
+/// Split out so a test can hand it a head that another writer has already
+/// moved past (the race the ON CONFLICT guard exists for).
+fn store_with_head(
+    conn: &mut PgConnection,
+    key: &Key,
+    p: &Profile,
+    cap: i64,
+    head: Option<StoredVersionHead>,
+) -> Result<SnapshotOutcome, DbError> {
+    {
         let changed = head
             .as_ref()
             .is_none_or(|h| h.content_hash != p.content_hash);
@@ -2369,7 +2607,7 @@ pub fn store_snapshot(
                 let h = &head;
                 let rev = h.as_ref().map_or(1, |h| h.revision + 1);
                 let posture = serde_json::to_value(&p.posture.head)?;
-                sql_query(
+                let inserted = sql_query(
                     "INSERT INTO workload_profile_versions \
                      (cluster_id, pod_namespace, workload_kind, workload_name, revision, \
                       content_hash, dimension_hashes, snapshot, posture) \
@@ -2386,6 +2624,30 @@ pub fn store_snapshot(
                 .bind::<Jsonb, _>(&p.snapshot)
                 .bind::<Jsonb, _>(posture)
                 .execute(conn)?;
+                if inserted == 0 {
+                    // The revision exists already. Only an identical row
+                    // lets this writer carry on and point latest at it.
+                    #[derive(QueryableByName)]
+                    struct H {
+                        #[diesel(sql_type = Text)]
+                        content_hash: String,
+                    }
+                    let existing: Option<H> = sql_query(
+                        "SELECT content_hash FROM workload_profile_versions \
+                         WHERE cluster_id = $1 AND pod_namespace = $2 AND workload_kind = $3 \
+                           AND workload_name = $4 AND revision = $5",
+                    )
+                    .bind::<Text, _>(DEFAULT_CLUSTER_ID)
+                    .bind::<Text, _>(&key.namespace)
+                    .bind::<Text, _>(&key.kind)
+                    .bind::<Text, _>(&key.name)
+                    .bind::<Integer, _>(rev)
+                    .get_result(conn)
+                    .optional()?;
+                    if existing.is_none_or(|e| e.content_hash != p.content_hash) {
+                        return Ok(SnapshotOutcome::LostRace(rev));
+                    }
+                }
                 sql_query(
                     "DELETE FROM workload_profile_versions \
                      WHERE cluster_id = $1 AND pod_namespace = $2 AND workload_kind = $3 \
@@ -2411,7 +2673,8 @@ pub fn store_snapshot(
                computed_at = EXCLUDED.computed_at, \
                last_changed_at = CASE WHEN workload_profile_latest.content_hash = EXCLUDED.content_hash \
                                       THEN workload_profile_latest.last_changed_at \
-                                      ELSE EXCLUDED.last_changed_at END",
+                                      ELSE EXCLUDED.last_changed_at END \
+             WHERE workload_profile_latest.revision <= EXCLUDED.revision",
         )
         .bind::<Text, _>(DEFAULT_CLUSTER_ID)
         .bind::<Text, _>(&key.namespace)
@@ -2427,7 +2690,7 @@ pub fn store_snapshot(
         } else {
             SnapshotOutcome::Unchanged(revision)
         })
-    })
+    }
 }
 
 #[derive(Debug, Clone, QueryableByName)]
@@ -2546,6 +2809,8 @@ pub struct ListQuery {
     pub namespace: Option<String>,
     pub kind: Option<String>,
     pub status: Option<String>,
+    /// Case-insensitive substring of the workload name.
+    pub search: Option<String>,
     pub limit: Option<i64>,
     pub after: Option<String>,
 }
@@ -2581,6 +2846,7 @@ WHERE cluster_id = $1 \
   AND ($3::text IS NULL OR workload_kind = $3) \
   AND ($4::text IS NULL OR posture_status = $4) \
   AND ($5::text IS NULL OR (pod_namespace, workload_kind, workload_name) > ($5, $6, $7)) \
+  AND ($9::text IS NULL OR strpos(lower(workload_name), lower($9)) > 0) \
 ORDER BY pod_namespace, workload_kind, workload_name \
 LIMIT $8";
 
@@ -2600,6 +2866,7 @@ pub fn list_workloads(
     namespace: Option<&str>,
     kind: Option<&str>,
     status: Option<&str>,
+    search: Option<&str>,
     after: Option<&(String, String, String)>,
     limit: i64,
 ) -> Result<Value, DbError> {
@@ -2612,6 +2879,7 @@ pub fn list_workloads(
         .bind::<Nullable<Text>, _>(after.map(|a| a.1.as_str()))
         .bind::<Nullable<Text>, _>(after.map(|a| a.2.as_str()))
         .bind::<BigInt, _>(limit + 1)
+        .bind::<Nullable<Text>, _>(search)
         .load(conn)?;
     let more = rows.len() as i64 > limit;
     rows.truncate(limit as usize);
@@ -2684,6 +2952,7 @@ pub async fn get_workloads(
     };
     let namespace = empty_to_none(q.namespace);
     let kind = empty_to_none(q.kind);
+    let search = empty_to_none(q.search).filter(|x| x.len() <= MAX_SEGMENT);
     let _permit = match budget
         .acquire(cost_kib(limit + 1, LIST_ROW_COST_BYTES))
         .await
@@ -2698,6 +2967,7 @@ pub async fn get_workloads(
             namespace.as_deref(),
             kind.as_deref(),
             status.as_deref(),
+            search.as_deref(),
             after.as_ref(),
             limit,
         )
@@ -2918,6 +3188,28 @@ fn load_snapshot(
     .optional()?)
 }
 
+/// The newest stored revision below `rev`.
+fn load_snapshot_before(
+    conn: &mut PgConnection,
+    key: &Key,
+    rev: i32,
+) -> Result<Option<SnapshotRow>, DbError> {
+    Ok(sql_query(
+        "SELECT revision, content_hash, created_at, dimension_hashes, posture, snapshot \
+         FROM workload_profile_versions \
+         WHERE cluster_id = $1 AND pod_namespace = $2 AND workload_kind = $3 AND workload_name = $4 \
+           AND revision < $5 \
+         ORDER BY revision DESC LIMIT 1",
+    )
+    .bind::<Text, _>(DEFAULT_CLUSTER_ID)
+    .bind::<Text, _>(&key.namespace)
+    .bind::<Text, _>(&key.kind)
+    .bind::<Text, _>(&key.name)
+    .bind::<Integer, _>(rev)
+    .get_result(conn)
+    .optional()?)
+}
+
 fn revision_not_found() -> HttpResponse {
     error(
         StatusCode::NOT_FOUND,
@@ -3009,20 +3301,25 @@ pub fn diff_versions(
             },
         );
     };
-    let from_rev = match from {
-        Some(f) => Some(f),
-        None if to_row.revision > 1 => Some(to_row.revision - 1),
-        None => None,
-    };
-    if from_rev.is_some_and(|f| f >= to_row.revision) {
+    if from.is_some_and(|f| f >= to_row.revision) {
         return Ok(DiffResult::BadOrder);
     }
-    let from_row = match from_rev {
+    // An explicit `from` must exist. The default is the previous revision;
+    // when retention trimmed it, fall back to the newest retained revision
+    // below `to` (or to nothing) and say so with `fromTrimmed`.
+    let (from_row, from_trimmed) = match from {
         Some(f) => match load_snapshot(conn, key, Some(f))? {
-            Some(r) => Some(r),
+            Some(r) => (Some(r), false),
             None => return Ok(DiffResult::RevisionMissing),
         },
-        None => None,
+        None if to_row.revision == 1 => (None, false),
+        None => match load_snapshot_before(conn, key, to_row.revision)? {
+            Some(r) => {
+                let trimmed = r.revision != to_row.revision - 1;
+                (Some(r), trimmed)
+            }
+            None => (None, true),
+        },
     };
     let from_snap = from_row
         .as_ref()
@@ -3047,6 +3344,7 @@ pub fn diff_versions(
         "from": from_row.as_ref().map(r),
         "to": r(&to_row),
         "changed": from_row.as_ref().is_none_or(|f| f.content_hash != to_row.content_hash),
+        "fromTrimmed": from_trimmed,
         "dimensions": dims,
     })))
 }
@@ -3180,21 +3478,25 @@ mod tests {
         }
     }
 
+    /// Tests set `network`; the snapshot reads the distinct rule set.
+    fn with_rules(mut s: Sources) -> Sources {
+        s.network_rules = s.network.iter().map(NetRuleRow::from).collect();
+        s
+    }
+
     fn now() -> DateTime<Utc> {
         utc(ts(1)) + chrono::Duration::days(3)
     }
 
     #[test]
-    fn empty_sources_are_all_unknown_and_never_scored() {
+    fn empty_sources_are_all_unknown_and_never_count_as_ok() {
         let s = Sources {
             any_pods: true,
             ..Default::default()
         };
         let p = build(&key(), &s, now());
         assert_eq!(p.posture.head.status, "unknown");
-        assert_eq!(p.posture.head.score, None);
         assert_eq!(p.posture.head.coverage, 0.0);
-        assert_eq!(p.posture.head.grade, None);
         assert_eq!(
             p.posture.unknown_dimensions,
             vec!["network", "syscalls", "podSecurity", "images"]
@@ -3211,6 +3513,14 @@ mod tests {
         assert!(v["dimensions"]["podSecurity"]["recommendation"].is_null());
         assert!(v["version"].is_null());
         assert_eq!(v["snapshotPending"], json!(true));
+        // No numeric score anywhere in the response (contract v1.2).
+        assert!(v["posture"].get("score").is_none());
+        assert!(v["posture"].get("grade").is_none());
+        for d in ["network", "syscalls", "podSecurity", "images", "compute"] {
+            assert!(v["dimensions"][d].get("score").is_none(), "{d}");
+            assert!(v["dimensions"][d].get("scored").is_none(), "{d}");
+        }
+        assert_eq!(v["posture"]["reasons"].as_array().unwrap().len(), 4);
     }
 
     #[test]
@@ -3220,24 +3530,27 @@ mod tests {
             ..Default::default()
         };
         let p = build(&key(), &s, now());
-        // Only podSecurity is scored (images: inventory only, not scored).
-        assert_eq!(p.dimensions.pod_security.env.score, Some(100));
-        assert_eq!(p.posture.head.score, Some(100));
+        // images is known. podSecurity passes every evaluated check, but
+        // restricted is only an upper bound, so it is unknown, never ok.
+        assert_eq!(p.dimensions.pod_security.env.status, "unknown");
         assert_eq!(
-            p.posture.head.coverage,
-            (20.0f64 / 85.0 * 100.0).round() / 100.0
+            p.dimensions.pod_security.env.reasons[0].code,
+            "pss_unverified"
         );
-        assert_eq!(p.posture.head.grade, None, "grade only at coverage >= 0.8");
-        assert!(p.posture.unknown_dimensions.contains(&"network"));
-        assert!(p.posture.unknown_dimensions.contains(&"images"));
         assert_eq!(p.dimensions.images.env.status, "ok");
-        assert!(!p.dimensions.images.env.scored);
+        assert_eq!(p.posture.head.status, "ok");
+        assert_eq!(p.posture.head.coverage, 0.25);
+        assert_eq!(
+            p.posture.unknown_dimensions,
+            vec!["network", "syscalls", "podSecurity"]
+        );
+        let dims: Vec<&str> = p.posture.reasons.iter().map(|r| r.dimension).collect();
+        assert_eq!(dims, vec!["network", "syscalls", "podSecurity"]);
+        assert!(p.posture.reasons.iter().all(|r| r.status == "unknown"));
 
-        // Full coverage gives a grade.
-        let env = |score| Envelope {
-            status: "ok",
-            score: Some(score),
-            scored: true,
+        // Worst known status wins; unknown never counts as ok or risk.
+        let env = |status| Envelope {
+            status,
             coverage: Coverage {
                 level: "full",
                 fraction: None,
@@ -3246,22 +3559,20 @@ mod tests {
             },
             reasons: vec![],
         };
-        let (a, b, c, d) = (env(100), env(50), env(80), env(90));
+        let (a, b, c, d) = (env("ok"), env("warn"), env("unknown"), env("ok"));
         let (head, unknown) = rollup(&[
             ("network", &a),
             ("syscalls", &b),
             ("podSecurity", &c),
             ("images", &d),
         ]);
-        // (100*20 + 50*15 + 80*20 + 90*30) / 85 = 7050 / 85 = 82.94
-        assert_eq!(head.score, Some(83));
-        assert_eq!(head.coverage, 1.0);
-        assert_eq!(head.grade.as_deref(), Some("B"));
-        assert!(unknown.is_empty());
+        assert_eq!(head.status, "warn");
+        assert_eq!(head.coverage, 0.75);
+        assert_eq!(unknown, vec!["podSecurity"]);
     }
 
     #[test]
-    fn pod_security_dimension_scores_findings_and_links_deductions() {
+    fn pod_security_findings_drive_status_and_attention() {
         let s = Sources {
             containers: vec![container("app", json!({"privileged": true}))],
             ..Default::default()
@@ -3270,14 +3581,12 @@ mod tests {
         let ps = &p.dimensions.pod_security;
         assert_eq!(ps.analysis.level, Some(Level::Privileged));
         assert_eq!(ps.env.status, "risk");
-        let total: u32 = p
+        assert_eq!(p.posture.head.status, "risk");
+        assert!(p
             .posture
-            .deductions
+            .reasons
             .iter()
-            .filter(|d| d.dimension == "podSecurity")
-            .map(|d| d.points)
-            .sum();
-        assert_eq!(ps.env.score, Some(100u32.saturating_sub(total)));
+            .any(|r| r.dimension == "podSecurity" && r.status == "risk"));
         assert!(p
             .attention
             .iter()
@@ -3285,8 +3594,279 @@ mod tests {
         assert!(ps.analysis.recommendation.is_some());
     }
 
+    /// Review of #1669: a clean app container plus an init container that
+    /// fails restricted checks must roll the workload down to baseline and
+    /// the dimension to warn, never "ok / restricted".
     #[test]
-    fn network_is_unknown_without_audit_and_scored_with_it() {
+    fn failing_init_container_lowers_the_workload_level_and_status() {
+        let mut init = container("migrate", json!({}));
+        init.container_kind = "init".into();
+        // A completed init container is not running: it is evaluated from
+        // its last known row.
+        init.previous_digests = std::mem::take(&mut init.digests);
+        init.previous_digests[0].state = Some("terminated".into());
+        init.previous_digests[0].ran_as_init = true;
+        let s = Sources {
+            containers: vec![container("app", restricted()), init],
+            live_pods: vec!["checkout-1".into()],
+            ..Default::default()
+        };
+        let p = build(&key(), &s, now());
+        let ps = &p.dimensions.pod_security;
+        assert!(ps.stale_containers.is_empty());
+        let app = &ps.analysis.containers[0];
+        let mig = &ps.analysis.containers[1];
+        assert_eq!((app.name.as_str(), app.level), ("app", Level::Restricted));
+        assert_eq!((mig.name.as_str(), mig.level), ("migrate", Level::Baseline));
+        assert_eq!(mig.source, "last_known");
+        let failing: Vec<&str> = mig.failing.iter().map(|f| f.check).collect();
+        assert!(failing.contains(&"privilegeEscalation"));
+        assert!(failing.contains(&"capabilitiesRestricted"));
+        assert_eq!(ps.analysis.level, Some(Level::Baseline));
+        assert_eq!(ps.analysis.level_confidence, Some("upper_bound"));
+        assert_eq!(ps.env.status, "warn");
+        assert_eq!(ps.env.reasons[0].code, "pss_fails_restricted");
+        assert!(ps.env.reasons[0].message.contains("migrate (init)"));
+        assert!(!ps.env.reasons[0].message.contains("app"));
+        assert_ne!(p.posture.head.status, "ok");
+        assert!(p
+            .posture
+            .reasons
+            .iter()
+            .any(|r| r.dimension == "podSecurity" && r.message.contains("migrate (init)")));
+        assert_eq!(p.readiness[4].ok, Some(false));
+        let v = serde_json::to_value(&p).unwrap();
+        assert_eq!(v["dimensions"]["podSecurity"]["level"], json!("baseline"));
+        let y = ps.analysis.recommendation.as_ref().unwrap().yaml.clone();
+        assert!(y.contains("initContainers:\n      - name: migrate"));
+        assert!(!y.contains("name: app"));
+    }
+
+    /// Ephemeral containers count toward the level too (PSS covers them).
+    #[test]
+    fn failing_ephemeral_container_lowers_the_workload_level() {
+        let mut dbg = container("debugger", json!({"privileged": true}));
+        dbg.container_kind = "ephemeral".into();
+        let s = Sources {
+            containers: vec![container("app", restricted()), dbg],
+            ..Default::default()
+        };
+        let p = build(&key(), &s, now());
+        let ps = &p.dimensions.pod_security;
+        assert_eq!(ps.analysis.level, Some(Level::Privileged));
+        assert_eq!(ps.env.status, "risk");
+    }
+
+    /// Status is a tier rule (contract v1.2): privileged -> risk,
+    /// baseline -> at least warn, restricted only as an upper bound ->
+    /// never ok.
+    #[test]
+    fn pod_security_status_rules() {
+        let f = |sev| {
+            mk_finding(
+                "podSecurity",
+                "x".into(),
+                sev,
+                None,
+                String::new(),
+                String::new(),
+            )
+        };
+        let ub = Some("upper_bound");
+        assert_eq!(pod_security_status(Level::Restricted, ub, &[]), "unknown");
+        assert_eq!(
+            pod_security_status(Level::Restricted, ub, &[f("low")]),
+            "unknown"
+        );
+        assert_eq!(
+            pod_security_status(Level::Restricted, Some("confirmed"), &[]),
+            "ok"
+        );
+        assert_eq!(pod_security_status(Level::Baseline, ub, &[]), "warn");
+        assert_eq!(
+            pod_security_status(Level::Baseline, ub, &[f("high")]),
+            "risk"
+        );
+        assert_eq!(
+            pod_security_status(Level::Privileged, Some("confirmed"), &[]),
+            "risk"
+        );
+    }
+
+    /// Review item 2: a privileged container, or hostNetwork alone, is risk
+    /// (it used to score 50 / 70 and read warn).
+    #[test]
+    fn privileged_container_or_host_network_alone_is_risk() {
+        let s = Sources {
+            containers: vec![container("app", json!({"privileged": true}))],
+            ..Default::default()
+        };
+        assert_eq!(
+            build(&key(), &s, now()).dimensions.pod_security.env.status,
+            "risk"
+        );
+
+        let mut c = container("agent", restricted());
+        c.digests[0].pod_security = json!({"serviceAccountName": "agent", "hostNetwork": true, "automountServiceAccountToken": false});
+        let s = Sources {
+            containers: vec![c],
+            ..Default::default()
+        };
+        let p = build(&key(), &s, now());
+        assert_eq!(
+            p.dimensions.pod_security.analysis.level,
+            Some(Level::Privileged)
+        );
+        assert_eq!(p.dimensions.pod_security.env.status, "risk");
+        assert_eq!(p.posture.head.status, "risk");
+    }
+
+    /// Review item 3: a restricted upper bound never reads as ready.
+    #[test]
+    fn restricted_upper_bound_readiness_is_unknown() {
+        let s = Sources {
+            containers: vec![container("app", restricted())],
+            ..Default::default()
+        };
+        let p = build(&key(), &s, now());
+        assert_eq!(
+            p.dimensions.pod_security.analysis.level,
+            Some(Level::Restricted)
+        );
+        let r = &p.readiness[4];
+        assert_eq!(r.id, "podSecurityRestricted");
+        assert_eq!(r.ok, None);
+        assert!(r.message.contains("not confirmed"));
+        assert_ne!(p.dimensions.pod_security.env.status, "ok");
+    }
+
+    /// Review item 1: only an ephemeral container fails -> no patch at all
+    /// (a bare template would be a strategic-merge deletion), plus a reason.
+    #[test]
+    fn ephemeral_only_failure_yields_no_patch() {
+        let mut dbg = container("debugger", json!({}));
+        dbg.container_kind = "ephemeral".into();
+        let mut app = container("app", restricted());
+        app.digests[0].pod_security = json!({
+            "serviceAccountName": "app",
+            "automountServiceAccountToken": false,
+            "securityContext": {"runAsNonRoot": true, "seccompProfileType": "RuntimeDefault"}
+        });
+        dbg.digests[0].pod_security = app.digests[0].pod_security.clone();
+        let s = Sources {
+            containers: vec![app, dbg],
+            ..Default::default()
+        };
+        let p = build(&key(), &s, now());
+        let ps = &p.dimensions.pod_security;
+        assert_eq!(ps.analysis.level, Some(Level::Baseline));
+        assert!(ps.analysis.recommendation.is_none());
+        assert!(ps
+            .env
+            .reasons
+            .iter()
+            .any(|r| r.code == "ephemeral_unpatchable" && r.message.contains("debugger")));
+    }
+
+    /// Review item 5: a container no longer in the spec (renamed/removed:
+    /// no running row, not refreshed, its pod gone) neither lowers the level
+    /// nor enters the patch; it is listed as stale.
+    #[test]
+    fn stale_container_is_listed_not_evaluated() {
+        let mut old = container("old-sidecar", json!({"privileged": true}));
+        old.previous_digests = std::mem::take(&mut old.digests);
+        old.previous_digests[0].last_pod_name = Some("checkout-gone".into());
+        let mut app = container("app", restricted());
+        app.digests[0].pod_security = json!({
+            "serviceAccountName": "app",
+            "automountServiceAccountToken": false,
+            "securityContext": {"runAsNonRoot": true, "seccompProfileType": "RuntimeDefault"}
+        });
+        let s = Sources {
+            containers: vec![app, old],
+            live_pods: vec!["checkout-1".into()],
+            ..Default::default()
+        };
+        let p = build(&key(), &s, now());
+        let ps = &p.dimensions.pod_security;
+        assert_eq!(ps.analysis.containers.len(), 1);
+        assert_eq!(ps.analysis.level, Some(Level::Restricted));
+        assert_eq!(ps.stale_containers.len(), 1);
+        assert_eq!(ps.stale_containers[0].name, "old-sidecar");
+        assert!(ps.analysis.recommendation.is_none());
+        assert!(!p.findings.iter().any(|f| f.id.contains("old-sidecar")));
+        let im = &p.dimensions.images.containers;
+        assert!(im.iter().any(|c| c.name == "old-sidecar" && c.stale));
+        assert!(p.snapshot["images"]["containers"]
+            .get("old-sidecar")
+            .is_none());
+
+        // Freshly refreshed, it is current again even with its pod gone.
+        let mut fresh = s.clone();
+        fresh.containers[1].previous_digests[0].last_seen = now().naive_utc();
+        let p = build(&key(), &fresh, now());
+        assert_eq!(
+            p.dimensions.pod_security.analysis.level,
+            Some(Level::Privileged)
+        );
+    }
+
+    /// Review item 7: an empty or malformed pod-level block makes the host
+    /// namespace checks unevaluated, never a pass.
+    #[test]
+    fn missing_pod_block_leaves_host_namespaces_unevaluated() {
+        for bad in [json!({}), json!({"hostNetwork": "yes"}), json!(null)] {
+            let mut c = container("app", restricted());
+            c.digests[0].pod_security = bad.clone();
+            let s = Sources {
+                containers: vec![c],
+                ..Default::default()
+            };
+            let p = build(&key(), &s, now());
+            let ps = &p.dimensions.pod_security;
+            assert!(!ps.analysis.pod.known, "{bad}");
+            assert!(
+                ps.analysis.unevaluated_checks.contains(&"hostNamespaces"),
+                "{bad}"
+            );
+            assert!(ps.analysis.pod.host_network.is_none());
+            assert!(ps
+                .env
+                .reasons
+                .iter()
+                .any(|r| r.code == "pod_fields_unknown"));
+            // No pod-level finding is invented from missing data.
+            assert!(!p
+                .findings
+                .iter()
+                .any(|f| f.id == "podSecurity.automountToken"));
+            assert_ne!(ps.env.status, "ok");
+        }
+        // A container that leaves runAsNonRoot / seccomp to the pod cannot be
+        // failed on them when the pod block is unknown.
+        let mut c = container(
+            "app",
+            json!({"allowPrivilegeEscalation": false, "capabilitiesDrop": ["ALL"]}),
+        );
+        c.digests[0].pod_security = json!({});
+        let s = Sources {
+            containers: vec![c],
+            ..Default::default()
+        };
+        let p = build(&key(), &s, now());
+        let ps = &p.dimensions.pod_security;
+        assert!(ps.analysis.containers[0].failing.is_empty());
+        assert!(ps.analysis.unevaluated_checks.contains(&"runAsNonRoot"));
+        assert!(ps
+            .analysis
+            .unevaluated_checks
+            .contains(&"seccompRestricted"));
+        assert_eq!(ps.analysis.level, Some(Level::Restricted));
+        assert_eq!(ps.analysis.level_confidence, Some("upper_bound"));
+    }
+
+    #[test]
+    fn network_is_unknown_without_audit_and_known_with_it() {
         let mut s = Sources {
             any_pods: true,
             live_pods: vec!["checkout-1".into()],
@@ -3306,7 +3886,6 @@ mod tests {
         let p = build(&key(), &s, now());
         let n = &p.dimensions.network;
         assert_eq!(n.env.status, "unknown");
-        assert_eq!(n.env.score, None);
         assert_eq!(n.peers[1].peer.kind, "external");
         assert_eq!(n.peers[2].peer.kind, "unresolved");
         assert_eq!(p.exposure.egress_external, Some(1));
@@ -3322,7 +3901,6 @@ mod tests {
         }];
         let p = build(&key(), &s, now());
         let n = &p.dimensions.network;
-        assert_eq!(n.env.score, Some(70));
         assert_eq!(n.env.status, "warn");
         assert_eq!(p.controls[0].state, Some("audit"));
         assert_eq!(p.controls[0].in_sync, Some(false));
@@ -3373,8 +3951,7 @@ mod tests {
         let p = build(&key(), &s, now());
         let sc = &p.dimensions.syscalls;
         assert_eq!(sc.cr.as_ref().unwrap().mode, "enforce");
-        assert_eq!(sc.env.score, Some(80));
-        assert_eq!(sc.env.status, "warn", "incomplete capture caps at warn");
+        assert_eq!(sc.env.status, "warn", "drift, and incomplete capture");
         assert_eq!(sc.env.coverage.level, "partial");
         assert_eq!(p.controls[1].state, Some("enforcing"));
         assert_eq!(
@@ -3391,16 +3968,29 @@ mod tests {
             any_pods: true,
             ..Default::default()
         };
-        let a = build(&key(), &s, now());
+        let a = build(&key(), &with_rules(s.clone()), now());
         s.network[0].flows = 999;
         s.network[0].last_seen = ts(9);
         s.containers[0].digests[0].last_seen = ts(9);
-        let b = build(&key(), &s, now() + chrono::Duration::hours(1));
+        // Truncation and the audit window do not move the hash either.
+        s.network_truncated = true;
+        s.audit = vec![AuditRow {
+            policy_namespace: "payments".into(),
+            policy_name: "checkout".into(),
+            allow: 1,
+            would_deny: 0,
+            last: ts(4),
+        }];
+        let b = build(
+            &key(),
+            &with_rules(s.clone()),
+            now() + chrono::Duration::hours(1),
+        );
         assert_eq!(a.content_hash, b.content_hash);
         assert!(a.content_hash.starts_with("fnv1a64:"));
 
         s.containers[0].digests[0].digest = digest('b');
-        let c = build(&key(), &s, now());
+        let c = build(&key(), &with_rules(s.clone()), now());
         assert_ne!(a.content_hash, c.content_hash);
         assert_eq!(a.dimension_hashes["network"], c.dimension_hashes["network"]);
         assert_ne!(a.dimension_hashes["images"], c.dimension_hashes["images"]);
@@ -3425,7 +4015,7 @@ mod tests {
             any_pods: true,
             ..Default::default()
         };
-        let a = build(&key(), &s, now()).snapshot;
+        let a = build(&key(), &with_rules(s.clone()), now()).snapshot;
         s.containers[0].digests[0].digest = digest('b');
         s.containers[0].digests[0].security_context = restricted();
         s.network.push(net(
@@ -3435,7 +4025,7 @@ mod tests {
             Some("prometheus"),
             "10.0.0.5",
         ));
-        let b = build(&key(), &s, now()).snapshot;
+        let b = build(&key(), &with_rules(s.clone()), now()).snapshot;
         let d = diff(&a, &b);
         assert_eq!(
             d["podSecurity"]["level"],
@@ -3598,7 +4188,7 @@ mod live_tests {
             p.dimensions.pod_security.analysis.level,
             Some(Level::Privileged)
         );
-        assert_eq!(p.dimensions.network.env.score, Some(70));
+        assert_eq!(p.dimensions.network.env.status, "warn");
         assert_eq!(p.dimensions.network.peers[0].peer.kind, "external");
         assert_eq!(p.dimensions.images.containers[0].running.len(), 1);
         assert!(p.dimensions.syscalls.observed.is_none());
@@ -3615,7 +4205,7 @@ mod live_tests {
         let sc = &p.dimensions.syscalls;
         assert_eq!(sc.observed.as_ref().unwrap().syscall_count, 3);
         assert!(sc.cr.is_none());
-        assert!(sc.env.scored);
+        assert_eq!(sc.env.status, "warn");
         assert_eq!(
             p.snapshot["syscalls"]["syscalls"],
             json!(["exit", "read", "write"])
@@ -3624,10 +4214,10 @@ mod live_tests {
         // The snapshotter tick picks the workload up and fills the read model.
         let (done, _) = snapshot_tick(&mut conn, 100_000, 50).unwrap();
         assert!(done >= 1);
-        let l = list_workloads(&mut conn, Some(ns), None, None, None, 10).unwrap();
+        let l = list_workloads(&mut conn, Some(ns), None, None, None, None, 10).unwrap();
         assert_eq!(l["items"][0]["name"], json!("checkout"));
         assert_eq!(l["items"][0]["posture"]["status"], json!("risk"));
-        let l = list_workloads(&mut conn, Some(ns), None, Some("ok"), None, 10).unwrap();
+        let l = list_workloads(&mut conn, Some(ns), None, Some("ok"), None, None, 10).unwrap();
         assert_eq!(l["items"], json!([]));
 
         // Unknown workload: nothing at all.
@@ -3736,7 +4326,7 @@ mod live_tests {
         ));
 
         // List endpoint reads the latest row.
-        let l = list_workloads(&mut conn, Some(ns), None, None, None, 10).unwrap();
+        let l = list_workloads(&mut conn, Some(ns), None, None, None, None, 10).unwrap();
         assert_eq!(l["items"].as_array().unwrap().len(), 1);
         assert_eq!(l["items"][0]["revision"], json!(4));
         assert_eq!(
@@ -3744,6 +4334,60 @@ mod live_tests {
             json!("restricted")
         );
         assert!(l["nextAfter"].is_null());
+
+        // Default diff whose predecessor was trimmed (cap 3 dropped rev 1):
+        // falls back instead of 404ing, and says so.
+        let DiffResult::Ok(d) = diff_versions(&mut conn, &k, None, Some(2)).unwrap() else {
+            panic!("trimmed-predecessor diff must not fail")
+        };
+        assert!(d["from"].is_null());
+        assert_eq!(d["fromTrimmed"], json!(true));
+        let DiffResult::Ok(d) = diff_versions(&mut conn, &k, None, Some(3)).unwrap() else {
+            panic!("diff failed")
+        };
+        assert_eq!(d["fromTrimmed"], json!(false));
+
+        // Race: this writer read head = rev 4, but another writer stored a
+        // DIFFERENT profile as rev 5 in between. Nothing is written and the
+        // latest pointer is left alone.
+        conn.batch_execute(&format!(
+            "INSERT INTO workload_profile_versions (pod_namespace, workload_kind, workload_name, revision, \
+               content_hash, dimension_hashes, snapshot, posture) \
+             VALUES ('{ns}', 'Deployment', 'checkout', 5, 'fnv1a64:theirs', '{{}}', '{{}}', '{{}}');"
+        ))
+        .unwrap();
+        let stale_head = StoredVersionHead {
+            revision: 4,
+            content_hash: "fnv1a64:ours-before".into(),
+            created_at: Utc::now().naive_utc(),
+        };
+        let s = load_sources(&mut conn, &k).unwrap();
+        let p = build(&k, &s, Utc::now());
+        assert_eq!(
+            store_with_head(&mut conn, &k, &p, 50, Some(stale_head.clone())).unwrap(),
+            SnapshotOutcome::LostRace(5)
+        );
+        let l = list_workloads(&mut conn, Some(ns), None, None, None, None, 10).unwrap();
+        assert_eq!(l["items"][0]["revision"], json!(4));
+        // An identical row at that revision is not a conflict.
+        conn.batch_execute(&format!(
+            "UPDATE workload_profile_versions SET content_hash = '{}' \
+             WHERE pod_namespace = '{ns}' AND revision = 5;",
+            p.content_hash
+        ))
+        .unwrap();
+        assert_eq!(
+            store_with_head(&mut conn, &k, &p, 50, Some(stale_head)).unwrap(),
+            SnapshotOutcome::NewVersion(5)
+        );
+        // The latest pointer never moves backwards.
+        conn.batch_execute(&format!(
+            "UPDATE workload_profile_latest SET revision = 99 WHERE pod_namespace = '{ns}';"
+        ))
+        .unwrap();
+        store_snapshot(&mut conn, &k, &p, 50).unwrap();
+        let l = list_workloads(&mut conn, Some(ns), None, None, None, None, 10).unwrap();
+        assert_eq!(l["items"][0]["revision"], json!(99));
 
         // Unknown workload.
         let unknown = Key {
