@@ -1,6 +1,6 @@
 import { useState, useCallback, useEffect, useMemo, useRef, Suspense } from 'react';
 import { lazyRetry } from './utils/lazyRetry';
-import { Bot, RefreshCw, Share2, ShieldAlert, FileCode, Boxes, Search, Lock, Layers, TriangleAlert } from 'lucide-react';
+import { Bot, RefreshCw, Share2, ShieldAlert, FileCode, Boxes, Search, Lock, Layers, TriangleAlert, Package, Bug } from 'lucide-react';
 import NetworkGraph from './components/NetworkGraph';
 import { RisksRoute } from './components/RisksView';
 import { ScopeChip } from './components/ScopeChip';
@@ -21,7 +21,11 @@ import { recommendedPolicyType } from './utils/cniPolicySupport';
 import type { PolicyType } from './hooks/policyEditor';
 import { useCluster } from './contexts/ClusterContext';
 import { paramsForSelection } from './utils/mapSelection';
-import { CLUSTER_SCOPED_VIEWS, isAllNamespaces, resolveRoute, workloadsBackParams, type View } from './utils/routes';
+import { CLUSTER_SCOPED_VIEWS, isAllNamespaces, resolveRoute, workloadParams, workloadsBackParams, type View } from './utils/routes';
+import { jumpTarget } from './utils/vulnView';
+import { badgesByNode, useMapLens } from './hooks/useMapLens';
+import { LensLegend } from './components/Vulns/LensLegend';
+
 
 // Heavy surfaces — lazy so they stay out of the initial bundle and only load
 // when first opened (the NetworkPolicyEditor alone is ~2k lines).
@@ -32,14 +36,17 @@ const PolicyBuilderModal = lazyRetry(() =>
 );
 const WorkloadsView = lazyRetry(() => import('./components/WorkloadsView'));
 const WorkloadView = lazyRetry(() => import('./components/WorkloadView'));
+const ImagesView = lazyRetry(() => import('./components/ImagesView'));
 import { Button } from './components/ui/Button';
 import { EmptyState } from './components/ui/EmptyState';
 import { GraphSkeleton } from './components/ui/Skeleton';
 import { Server } from 'lucide-react';
 import { usePodData } from './hooks/usePodData';
 import { useNamespaces } from './hooks/useNamespaces';
-import type { PodNodeData } from './types';
+import type { MapLens, PodNodeData } from './types';
 import { UI_DIMENSIONS } from './constants/ui';
+
+const MAP_LENSES: readonly MapLens[] = ['traffic', 'vulns', 'supply', 'coverage'];
 
 function App() {
   const { settings, updateSettings, toggleSetting } = useSettings();
@@ -74,8 +81,8 @@ function App() {
   // and are dropped when leaving it.
   const setView = useCallback(
     (v: View, extra: Record<string, string | undefined> = {}) =>
-      navigate(v, { ns: loc.params.ns, pod: v === 'map' ? loc.params.pod : undefined, focus: v === 'map' ? loc.params.focus : undefined, ...extra }),
-    [navigate, loc.params.ns, loc.params.pod, loc.params.focus],
+      navigate(v, { ns: loc.params.ns, pod: v === 'map' ? loc.params.pod : undefined, focus: v === 'map' ? loc.params.focus : undefined, lens: v === 'map' ? loc.params.lens : undefined, ...extra }),
+    [navigate, loc.params.ns, loc.params.pod, loc.params.focus, loc.params.lens],
   );
   const setNamespace = useCallback(
     (ns: string) => {
@@ -85,9 +92,9 @@ function App() {
       // single-workload page has nothing to show in another namespace, so it
       // falls back to the Workloads list narrowed to the new one.
       if (view === 'workload') navigate('workloads', { ns, scope: 'ns' });
-      else navigate(view, { ns, scope: CLUSTER_SCOPED_VIEWS.has(view) ? 'ns' : undefined, control: loc.params.control });
+      else navigate(view, { ns, scope: CLUSTER_SCOPED_VIEWS.has(view) ? 'ns' : undefined, control: loc.params.control, lens: view === 'map' ? loc.params.lens : undefined, tab: view === 'images' ? loc.params.tab : undefined });
     },
-    [navigate, view, activeCluster.id, loc.params.control],
+    [navigate, view, activeCluster.id, loc.params.control, loc.params.lens, loc.params.tab],
   );
   const showAllNamespaces = useCallback(
     () => navigate(view, { ...loc.params, scope: undefined }),
@@ -121,6 +128,13 @@ function App() {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [isAIAssistantOpen, setIsAIAssistantOpen] = useState(false);
+  // "Ask AI" from a view (the CVE drawer): the context lands in the input,
+  // visible and editable, never sent on the user's behalf.
+  const [aiPrefill, setAiPrefill] = useState<{ text: string; nonce: number } | undefined>(undefined);
+  const askAI = useCallback((text: string) => {
+    setAiPrefill({ text, nonce: Date.now() });
+    setIsAIAssistantOpen(true);
+  }, []);
   const [isAuditPanelOpen, setIsAuditPanelOpen] = useState(false);
   const [isPolicyBuilderOpen, setIsPolicyBuilderOpen] = useState(false);
   const [policyBuilderInitialPod, setPolicyBuilderInitialPod] = useState<PodNodeData | null>(null);
@@ -153,10 +167,27 @@ function App() {
   // hook because the hook needs it: selection is what opens a card, and an
   // open card is the only thing that reads stored compute history.
   const selectedPodId = loc.params.pod ?? null;
-  const { pods, compute, allPodsLookup, services, loading, error, refreshData } = usePodData(effectiveNamespace, selectedPodId);
+  const { pods: rawPods, compute, allPodsLookup, services, loading, error, refreshData } = usePodData(effectiveNamespace, selectedPodId);
   // The header Refresh is the one refresh control. Views with their own
   // broker data (seccomp profiles, audit verdicts) reload when this ticks.
   const [refreshTick, setRefreshTick] = useState(0);
+  // Map lens (URL `lens=`): Traffic unless a known lens is named. The lens
+  // reads only on the map; its badges ride on the cards' data.
+  const lens: MapLens = (MAP_LENSES as readonly string[]).includes(loc.params.lens ?? '') ? (loc.params.lens as MapLens) : 'traffic';
+  const lensState = useMapLens(effectiveNamespace, view === 'map' ? lens : 'traffic', refreshTick);
+  const pods = useMemo(() => {
+    if (lens === 'traffic' || view !== 'map') return rawPods;
+    // First read still in flight: say so on the cards rather than "no data".
+    const reading = lensState.loading && lensState.byWorkload.size === 0;
+    const badges = reading
+      ? new Map(rawPods.filter((p) => !p.isExternal).map((p) => [p.id, { lens, tone: 'unknown', text: '…', label: 'Reading…' } as const]))
+      : badgesByNode(lens, lensState.byWorkload, rawPods, {
+          // The whole lens read failed: every card is unknown, not "no data".
+          readFailures: lensState.error != null ? Math.max(1, lensState.readFailures) : lensState.readFailures,
+          truncated: lensState.truncated,
+        });
+    return rawPods.map((p) => (badges.has(p.id) ? { ...p, lensBadge: badges.get(p.id) } : p));
+  }, [rawPods, lens, view, lensState.byWorkload, lensState.loading, lensState.error, lensState.readFailures, lensState.truncated]);
   const refreshAll = useCallback(() => {
     refreshData();
     setRefreshTick((t) => t + 1);
@@ -231,19 +262,28 @@ function App() {
   // into it, Tab stays in it, and every way of closing it (Esc, backdrop, a
   // nav pick, the collapse button) returns focus to the expand button.
   const railDialogRef = useRef<HTMLDivElement>(null);
-  const railExpandRef = useRef<HTMLButtonElement>(null);
+  const railToggleRef = useRef<HTMLButtonElement>(null);
+  // Set by a desktop collapse/expand: the button the user pressed unmounts
+  // (the other toggle takes its place), so focus moves to the new one.
+  const refocusRailToggle = useRef(false);
   const closeRailOverlay = useCallback(() => setRailOverlay(false), []);
   const toggleRail = useCallback(() => {
     if (narrow) {
       setRailOverlay((o) => !o);
       return;
     }
+    refocusRailToggle.current = true;
     setRailCollapsed((c) => {
       localStorage.setItem('kg-rail-collapsed', c ? '0' : '1');
       return !c;
     });
   }, [narrow]);
-  useDialogFocus({ open: railOverlay, dialogRef: railDialogRef, returnFocusRef: railExpandRef, onClose: closeRailOverlay, initialFocus: 'nav button' });
+  useEffect(() => {
+    if (!refocusRailToggle.current) return;
+    refocusRailToggle.current = false;
+    railToggleRef.current?.focus();
+  }, [railCollapsed]);
+  useDialogFocus({ open: railOverlay, dialogRef: railDialogRef, returnFocusRef: railToggleRef, onClose: closeRailOverlay, initialFocus: 'nav button' });
   // Leaving the narrow layout drops the overlay, so it cannot pop back
   // open on the next resize to a phone width.
   useEffect(() => {
@@ -382,6 +422,7 @@ function App() {
       { id: 'view-map', group: 'Views', label: 'Network Map', icon: Share2, keywords: 'graph traffic', run: () => setView('map') },
       { id: 'view-risks', group: 'Views', label: 'Risks', icon: TriangleAlert, keywords: 'findings signals triage posture', run: () => setView('risks') },
       { id: 'view-workloads', group: 'Views', label: 'Workloads', icon: Layers, keywords: 'coverage controls network seccomp', run: () => setView('workloads') },
+      { id: 'view-images', group: 'Views', label: 'Images', icon: Package, keywords: 'vulnerabilities cve sbom digest supply chain', run: () => setView('images') },
       { id: 'view-seccomp', group: 'Views', label: 'Seccomp Profiles', icon: Lock, keywords: 'syscall publish enforce capture workloads', run: () => setView('workloads', { control: 'seccomp' }) },
       { id: 'tool-policy', group: 'Tools', label: 'Policy Builder', icon: FileCode, keywords: 'networkpolicy seccomp cilium generate', run: openPolicyBuilder },
       { id: 'tool-audit', group: 'Tools', label: 'Audit Verdicts', icon: ShieldAlert, keywords: 'would deny', run: () => setIsAuditPanelOpen(true) },
@@ -405,6 +446,23 @@ function App() {
     return list;
   }, [namespaces, pods, setView, openPolicyBuilder, setNamespace, handleFindingSelect]);
 
+  // ⌘K jumps from what was typed: a CVE id opens its drawer, a full digest
+  // its image.
+  const jumpCommands = useCallback(
+    (query: string): Command[] => {
+      const t = jumpTarget(query);
+      if (!t) return [];
+      if (t.kind === 'cve') {
+        return [{ id: `cve-${t.id}`, group: 'Jump to', label: `Open ${t.id}`, hint: 'CVE triage', icon: Bug, run: () => navigate('images', { ns: loc.params.ns, cve: t.id }) }];
+      }
+      if (t.kind === 'digest') {
+        return [{ id: `img-${t.digest}`, group: 'Jump to', label: 'Open image', hint: `${t.digest.slice(0, 19)}…`, icon: Package, run: () => navigate('images', { ns: loc.params.ns, tab: 'images', digest: t.digest }) }];
+      }
+      return [{ id: 'img-partial', group: 'Jump to', label: 'Paste the full digest to open an image', hint: 'images are keyed by full digest', icon: Package, run: () => navigate('images', { ns: loc.params.ns, tab: 'images' }) }];
+    },
+    [navigate, loc.params.ns],
+  );
+
   const navItems: NavItem[] = [
     {
       id: 'risks', label: 'Risks', icon: TriangleAlert, group: 'Views',
@@ -420,6 +478,11 @@ function App() {
       id: 'workloads', label: 'Workloads', icon: Layers, group: 'Views',
       hint: 'Control coverage per workload: network policy, seccomp, capture',
       active: view === 'workloads' || view === 'workload', onClick: () => setView('workloads'),
+    },
+    {
+      id: 'images', label: 'Images', icon: Package, group: 'Views',
+      hint: 'Vulnerabilities by CVE, images by digest, SBOM sources',
+      active: view === 'images', onClick: () => setView('images'),
     },
     {
       id: 'policy', label: 'Policy Builder', icon: FileCode, group: 'Tools',
@@ -443,7 +506,7 @@ function App() {
     [],
   );
 
-  const SECTION_TITLE: Record<View, string> = { map: 'Network Map', risks: 'Risks', workloads: 'Workloads', workload: 'Workload' };
+  const SECTION_TITLE: Record<View, string> = { map: 'Network Map', risks: 'Risks', workloads: 'Workloads', workload: 'Workload', images: 'Images' };
   const sectionTitle = view === 'workload' && loc.params.name ? loc.params.name : SECTION_TITLE[view];
   const sectionSubtitle =
     view === 'map'
@@ -464,7 +527,7 @@ function App() {
             collapsed={railShowsCollapsed}
             onToggleCollapse={toggleRail}
             onNavigate={narrow ? closeRailOverlay : undefined}
-            expandButtonRef={railExpandRef}
+            toggleButtonRef={railToggleRef}
           />
         );
         if (!narrow) return rail;
@@ -487,17 +550,19 @@ function App() {
       })()}
 
       <div
-        className="flex-1 flex flex-col min-w-0 transition-all duration-300"
+        className="@container/content flex-1 flex flex-col min-w-0 transition-all duration-300"
         style={{ paddingRight: `${contentPaddingRightPx}px` }}
       >
         {/* Top bar */}
-        {/* Narrow widths: the search box, selector label, Refresh label and
-            scope chip step down so the header never forces a page scroll. */}
+        {/* The header follows the width of this column, not the window: the
+            rail and a docked AI panel both narrow it. Under 896px the search
+            box and the selector / Refresh labels go compact; under 672px the
+            scope chip hides, so the section title keeps its room. */}
         <header className="h-14 shrink-0 flex items-center justify-between gap-2 sm:gap-4 px-3 sm:px-5 border-b border-hubble-border bg-hubble-dark">
           <div className="min-w-0">
             <div className="flex items-center gap-2 min-w-0">
               <h1 className="text-sm font-semibold text-primary truncate">{sectionTitle}</h1>
-              <div className="hidden sm:block">
+              <div className="hidden @2xl/content:block shrink-0">
                 <ScopeChip
                   namespace={effectiveNamespace}
                   allNamespaces={allNamespaces}
@@ -512,7 +577,7 @@ function App() {
             <button
               onClick={() => setPaletteOpen(true)}
               title="Search & commands"
-              className="hidden lg:flex items-center gap-2 h-8 pl-2.5 pr-1.5 rounded-control border border-hubble-border bg-hubble-card text-tertiary hover:text-secondary hover:border-hubble-border-strong transition-colors"
+              className="hidden @4xl/content:flex items-center gap-2 h-8 pl-2.5 pr-1.5 rounded-control border border-hubble-border bg-hubble-card text-tertiary hover:text-secondary hover:border-hubble-border-strong transition-colors"
             >
               <Search className="w-3.5 h-3.5" />
               <span className="text-xs">Search</span>
@@ -533,7 +598,7 @@ function App() {
               aria-label="Refresh"
               title="Refresh"
             >
-              <span className="hidden lg:inline">Refresh</span>
+              <span className="hidden @4xl/content:inline">Refresh</span>
             </Button>
           </div>
         </header>
@@ -570,6 +635,25 @@ function App() {
               pods={pods}
               onBack={backToWorkloads}
               onOpenInMap={(podId) => navigate('map', { ns: loc.params.ns, pod: podId })}
+            />
+          </Suspense>
+        ) : view === 'images' ? (
+          <Suspense fallback={null}>
+            <ImagesView
+              refreshTick={refreshTick}
+              namespace={effectiveNamespace}
+              allNamespaces={allNamespaces}
+              tab={loc.params.tab}
+              cve={loc.params.cve}
+              digest={loc.params.digest}
+              // Opening a drawer is a history entry (Back closes it); tab
+              // switches and closing replace the entry.
+              onParamsChange={(patch) =>
+                navigate('images', { ...loc.params, ...patch }, { replace: !(patch.cve || patch.digest) })
+              }
+              onOpenWorkload={(ns, kind, name) => navigate('workload', workloadParams(ns, kind, name))}
+              onShowOnMap={(ns) => navigate('map', { ns, lens: 'vulns' })}
+              onAskAI={askAI}
             />
           </Suspense>
         ) : view === 'risks' ? (
@@ -635,6 +719,9 @@ function App() {
                 computeFindings={compute.findings}
                 layoutDirection={settings.layoutDirection}
                 onToggleLayoutDirection={() => updateSettings({ layoutDirection: settings.layoutDirection === 'LR' ? 'TB' : 'LR' })}
+                lens={lens}
+                onLensChange={(l) => navigate('map', { ...loc.params, lens: l === 'traffic' ? undefined : l }, { replace: true })}
+                lensLegend={lens !== 'traffic' ? <LensLegend lens={lens} state={lensState} /> : undefined}
               />
             </div>
 
@@ -696,6 +783,7 @@ function App() {
             onLayoutChange={handleAILayoutChange}
             namespace={effectiveNamespace}
             podNames={pods.map(p => p.label)}
+            prefill={aiPrefill}
           />
         </Suspense>
       )}
@@ -719,7 +807,7 @@ function App() {
 
       <SettingsPanel isOpen={settingsOpen} onClose={() => setSettingsOpen(false)} namespaces={namespaces} />
 
-      {paletteOpen && <CommandPalette onClose={() => setPaletteOpen(false)} commands={commands} />}
+      {paletteOpen && <CommandPalette onClose={() => setPaletteOpen(false)} commands={commands} dynamic={jumpCommands} />}
     </div>
   );
 }

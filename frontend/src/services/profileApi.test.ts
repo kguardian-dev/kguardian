@@ -77,3 +77,12 @@ test('paths and queries: segments encoded, unset params omitted', async () => {
     '/api/workloads?limit=100&namespace=payments&status=risk&search=led&after=payments%2FDeployment%2Fapi',
   ]);
 });
+
+test('a read that never answers becomes a retryable timeout, not an endless skeleton', async () => {
+  const hang = ((_: RequestInfo | URL, init?: RequestInit) =>
+    new Promise<Response>((_resolve, reject) => init?.signal?.addEventListener('abort', () => reject(init.signal!.reason)))) as typeof fetch;
+  const api = new ProfileApi({ fetchImpl: hang, timeoutMs: 20 });
+  const err = await api.listWorkloads().catch((e) => e as ProfileApiError);
+  expect(err.kind).toBe('timeout');
+  expect(err.message).toMatch(/did not answer/);
+});

@@ -1,0 +1,130 @@
+{
+  "body": {
+    "digest": "sha256:f48949f11f15c0e2b8fa2132d1ab201cf50e80dea612783e5c3ac78c6b378235",
+    "items": [
+      {
+        "class": null,
+        "cvss": {
+          "nvd": {
+            "v3_score": 7.5
+          }
+        },
+        "epss": 0.012,
+        "epssPercentile": 0.62,
+        "filePaths": [],
+        "fixable": true,
+        "fixedVersions": [
+          "7.5.4"
+        ],
+        "id": "CVE-2099-0007",
+        "inUse": null,
+        "inUseState": "unknown",
+        "installedVersion": "7.5.2",
+        "kev": false,
+        "kevDateAdded": null,
+        "lastModifiedAt": null,
+        "package": {
+          "name": "semver",
+          "purl": "pkg:npm/semver@7.5.2",
+          "type": "npm"
+        },
+        "primaryUrl": "https://avd.aquasec.com/nvd/cve-2099-0007",
+        "publishedAt": "2099-01-02T03:04:05",
+        "reportDigests": [
+          "sha256:17ebfb68fefc63fba2251c8d2ff2d194fa031f8d2b59e63e710a23768136d4ca"
+        ],
+        "score": 7.5,
+        "severity": "HIGH",
+        "sources": [
+          "grype"
+        ],
+        "target": null,
+        "title": "semver: regular expression denial of service"
+      },
+      {
+        "class": null,
+        "cvss": {
+          "nvd": {
+            "v3_score": 5.3
+          }
+        },
+        "epss": null,
+        "epssPercentile": null,
+        "filePaths": [],
+        "fixable": false,
+        "fixedVersions": [],
+        "id": "CVE-2099-0003",
+        "inUse": null,
+        "inUseState": "unknown",
+        "installedVersion": "1.3.1-r0",
+        "kev": null,
+        "kevDateAdded": null,
+        "lastModifiedAt": null,
+        "package": {
+          "name": "zlib",
+          "purl": "pkg:apk/zlib@1.3.1-r0",
+          "type": "apk"
+        },
+        "primaryUrl": "https://avd.aquasec.com/nvd/cve-2099-0003",
+        "publishedAt": "2099-01-02T03:04:05",
+        "reportDigests": [
+          "sha256:17ebfb68fefc63fba2251c8d2ff2d194fa031f8d2b59e63e710a23768136d4ca"
+        ],
+        "score": 5.3,
+        "severity": "MEDIUM",
+        "sources": [
+          "trivy-operator"
+        ],
+        "target": null,
+        "title": "zlib: out-of-bounds read in inflate"
+      }
+    ],
+    "nextAfter": "3.3",
+    "reports": [
+      {
+        "attestation": null,
+        "dbUpdatedAt": "2026-09-25T06:58:50",
+        "digestKind": "index",
+        "imageRef": "ghcr.io/example/checkout:4.2.0",
+        "itemCount": 3,
+        "join": "platform_manifest",
+        "osEosl": false,
+        "osFamily": "alpine",
+        "osName": "3.20.3",
+        "receivedAt": "2026-09-26T02:58:50.792144",
+        "reportDigest": "sha256:17ebfb68fefc63fba2251c8d2ff2d194fa031f8d2b59e63e710a23768136d4ca",
+        "sbomFormat": null,
+        "sbomSources": [
+          "trivy-operator"
+        ],
+        "sbomTrust": "scanned",
+        "scannedAt": "2026-09-26T00:58:50",
+        "scannerName": "grype",
+        "scannerVersion": "0.86.1",
+        "source": "grype"
+      },
+      {
+        "attestation": null,
+        "dbUpdatedAt": null,
+        "digestKind": "index",
+        "imageRef": "ghcr.io/example/checkout:4.2.0",
+        "itemCount": 4,
+        "join": "platform_manifest",
+        "osEosl": false,
+        "osFamily": "alpine",
+        "osName": "3.20.3",
+        "receivedAt": "2026-09-26T02:58:50.771964",
+        "reportDigest": "sha256:17ebfb68fefc63fba2251c8d2ff2d194fa031f8d2b59e63e710a23768136d4ca",
+        "sbomFormat": null,
+        "sbomSources": [],
+        "sbomTrust": null,
+        "scannedAt": "2026-09-25T20:58:50",
+        "scannerName": "Trivy",
+        "scannerVersion": "0.58.1",
+        "source": "trivy-operator"
+      }
+    ]
+  },
+  "request": "GET /images/sha256:f48949f11f15c0e2b8fa2132d1ab201cf50e80dea612783e5c3ac78c6b378235/vulnerabilities?limit=2&after=4.2",
+  "status": 200
+}

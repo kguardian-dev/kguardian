@@ -101,3 +101,19 @@ test('the Contention hue is distinct from the other three toggles', () => {
   expect(CONTENTION_ACTIVE).toContain('hubble-error');
   for (const other of [TRAFFIC_ACTIVE, EXTERNAL_ACTIVE, DAEMONSET_ACTIVE]) expect(other).not.toContain('hubble-error');
 });
+
+test('lens control: four lenses, the active one pressed, a pick reports the lens', () => {
+  const onLensChange = vi.fn();
+  render(<GraphControls {...props({ lens: 'vulns', onLensChange })} />);
+  const group = screen.getByRole('group', { name: 'Map lens' });
+  const buttons = [...group.querySelectorAll('button')];
+  expect(buttons.map((b) => b.textContent)).toEqual(['None', 'Vulnerabilities', 'Supply chain', 'Coverage']);
+  // Only the edges toggle is called Traffic.
+  expect(screen.getAllByRole('button').filter((b) => b.textContent === 'Traffic')).toHaveLength(1);
+  expect(buttons.map((b) => b.getAttribute('aria-pressed'))).toEqual(['false', 'true', 'false', 'false']);
+  fireEvent.click(buttons[3]);
+  expect(onLensChange).toHaveBeenCalledWith('coverage');
+  // Narrow screens get the same choice as a select.
+  fireEvent.change(screen.getByRole('combobox', { name: 'Map lens' }), { target: { value: 'supply' } });
+  expect(onLensChange).toHaveBeenLastCalledWith('supply');
+});

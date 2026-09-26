@@ -1,0 +1,110 @@
+{
+  "body": {
+    "digest": "sha256:1eb73105a1fe5826de974a647f3d2e72905e16803a8ca2b9c891bf3545bc242c",
+    "items": [
+      {
+        "class": null,
+        "cvss": {
+          "nvd": {
+            "v3_score": 7.5
+          }
+        },
+        "epss": null,
+        "epssPercentile": null,
+        "filePaths": [
+          "usr/share/grafana/bin/grafana"
+        ],
+        "fixable": true,
+        "fixedVersions": [
+          "v0.33.0"
+        ],
+        "id": "CVE-2099-0006",
+        "inUse": null,
+        "inUseState": "unknown",
+        "installedVersion": "v0.26.0",
+        "kev": null,
+        "kevDateAdded": null,
+        "lastModifiedAt": null,
+        "package": {
+          "name": "golang.org/x/net",
+          "purl": "pkg:golang/golang.org/x/net@v0.26.0",
+          "type": "gomod"
+        },
+        "primaryUrl": "https://avd.aquasec.com/nvd/cve-2099-0006",
+        "publishedAt": "2099-01-02T03:04:05",
+        "reportDigests": [
+          "sha256:1eb73105a1fe5826de974a647f3d2e72905e16803a8ca2b9c891bf3545bc242c"
+        ],
+        "score": 7.5,
+        "severity": "HIGH",
+        "sources": [
+          "trivy-operator"
+        ],
+        "target": null,
+        "title": "golang.org/x/net: HTTP/2 CONTINUATION flood"
+      },
+      {
+        "class": null,
+        "cvss": {
+          "nvd": {
+            "v3_score": 5.3
+          }
+        },
+        "epss": null,
+        "epssPercentile": null,
+        "filePaths": [],
+        "fixable": false,
+        "fixedVersions": [],
+        "id": "CVE-2099-0003",
+        "inUse": null,
+        "inUseState": "unknown",
+        "installedVersion": "1.3.1-r0",
+        "kev": null,
+        "kevDateAdded": null,
+        "lastModifiedAt": null,
+        "package": {
+          "name": "zlib",
+          "purl": "pkg:apk/zlib@1.3.1-r0",
+          "type": "apk"
+        },
+        "primaryUrl": "https://avd.aquasec.com/nvd/cve-2099-0003",
+        "publishedAt": "2099-01-02T03:04:05",
+        "reportDigests": [
+          "sha256:1eb73105a1fe5826de974a647f3d2e72905e16803a8ca2b9c891bf3545bc242c"
+        ],
+        "score": 5.3,
+        "severity": "MEDIUM",
+        "sources": [
+          "trivy-operator"
+        ],
+        "target": null,
+        "title": "zlib: out-of-bounds read in inflate"
+      }
+    ],
+    "nextAfter": null,
+    "reports": [
+      {
+        "attestation": null,
+        "dbUpdatedAt": null,
+        "digestKind": "manifest",
+        "imageRef": "docker.io/grafana/grafana:11.2.0",
+        "itemCount": 2,
+        "join": "image_id",
+        "osEosl": false,
+        "osFamily": "alpine",
+        "osName": "3.20.3",
+        "receivedAt": "2026-09-26T02:58:50.838008",
+        "reportDigest": "sha256:1eb73105a1fe5826de974a647f3d2e72905e16803a8ca2b9c891bf3545bc242c",
+        "sbomFormat": null,
+        "sbomSources": [],
+        "sbomTrust": null,
+        "scannedAt": "2026-09-24T20:58:50",
+        "scannerName": "Trivy",
+        "scannerVersion": "0.58.1",
+        "source": "trivy-operator"
+      }
+    ]
+  },
+  "request": "GET /images/sha256:1eb73105a1fe5826de974a647f3d2e72905e16803a8ca2b9c891bf3545bc242c/vulnerabilities",
+  "status": 200
+}

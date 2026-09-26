@@ -128,6 +128,25 @@ export interface PodNodeData {
    *  Absent when the pod's node reports no compute rows — the card then
    *  renders exactly as it did before the feature. */
   compute?: PodComputeData;
+  /** Map lens badge (hooks/useMapLens): absent when the lens is Traffic —
+   *  the card then renders exactly as it did before lenses. */
+  lensBadge?: LensBadge;
+}
+
+/** Map lens (URL `lens=`): what the cards carry besides their name. */
+export type MapLens = 'traffic' | 'vulns' | 'supply' | 'coverage';
+
+/**
+ * One card's badge under a non-traffic lens. `unknown` is its own tone and
+ * is never drawn like a good state: missing data is not clean.
+ */
+export interface LensBadge {
+  lens: Exclude<MapLens, 'traffic'>;
+  tone: 'p0' | 'p1' | 'risk' | 'warn' | 'good' | 'neutral' | 'unknown';
+  /** Short text on the card. */
+  text: string;
+  /** Full sentence: tooltip and accessible name. */
+  label: string;
 }
 
 // Matches broker's SvcDetail type

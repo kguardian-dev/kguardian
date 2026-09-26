@@ -35,7 +35,7 @@ import { EDGE_COLOR_DAEMONSET, edgeStrokeColor, isDaemonSetPeer, partitionDaemon
 import { GraphControls } from './GraphControls';
 import { buildPeerIndex, resolvePeer, type PeerResolution } from '../utils/peerResolution';
 import { buildExternalNodes, remoteNodeForRow } from '../utils/externalPeers';
-import type { PodNodeData, PodInfo, ServiceInfo, NetworkTraffic } from '../types';
+import type { MapLens, PodNodeData, PodInfo, ServiceInfo, NetworkTraffic } from '../types';
 import { UI_TIMING } from '../constants/ui';
 
 const elk = new ELK();
@@ -70,6 +70,11 @@ interface NetworkGraphProps {
    *  focused view is shareable; the graph reports every change back. */
   focusedNodeId: string | null;
   onFocusChange: (id: string | null) => void;
+  /** Map lens (URL `lens=`); the cards' badges arrive on `pods` (PodNodeData.lensBadge). */
+  lens?: MapLens;
+  onLensChange?: (lens: MapLens) => void;
+  /** Legend under the toolbar while a non-traffic lens is on. */
+  lensLegend?: React.ReactNode;
 }
 
 // Define nodeTypes / edgeTypes outside component to prevent recreation
@@ -102,6 +107,9 @@ const NetworkGraphInner: React.FC<NetworkGraphProps> = ({
   onBuildPolicy,
   focusedNodeId,
   onFocusChange,
+  lens,
+  onLensChange,
+  lensLegend,
 }) => {
   const { fitView, setCenter, getViewport } = useReactFlow();
   const paneRef = useRef<HTMLDivElement>(null);
@@ -763,8 +771,33 @@ const NetworkGraphInner: React.FC<NetworkGraphProps> = ({
     return { podCount: pods.length, totalFlows, totalDrops };
   }, [pods]);
 
+  // Nodes / flows / drops. Where it sits depends on the MAP width, not the
+  // viewport (the rail and a docked AI panel both narrow the map): beside the
+  // toolbar when there is room, stacked under it otherwise.
+  const summaryBadge = (
+    <div className="flex items-center gap-3 px-3 py-2 rounded-surface bg-hubble-card/90 border border-hubble-border backdrop-blur-sm text-xs">
+      <div className="flex items-center gap-1.5 text-secondary" title="Total workload identities in the current namespace">
+        <Server className="w-3.5 h-3.5 text-hubble-accent" />
+        <span className="font-medium font-mono tabular-nums">{summaryStats.podCount}</span>
+      </div>
+      <div className="w-px h-4 bg-hubble-border" />
+      <div className="flex items-center gap-1.5 text-secondary" title="Total observed network flows (ingress + egress) across all pods">
+        <Activity className="w-3.5 h-3.5 text-hubble-accent" />
+        <span className="font-medium font-mono tabular-nums">{summaryStats.totalFlows.toLocaleString()}</span>
+      </div>
+      <div className="w-px h-4 bg-hubble-border" />
+      <div
+        className={`flex items-center gap-1.5 ${summaryStats.totalDrops > 0 ? 'text-hubble-error' : 'text-secondary'}`}
+        title={`Packets denied by network policy${summaryStats.totalDrops > 0 ? ' — review your policies for misconfigurations' : ''}`}
+      >
+        <ShieldAlert className={`w-3.5 h-3.5 ${summaryStats.totalDrops > 0 ? 'text-hubble-error' : 'text-secondary'}`} />
+        <span className="font-medium font-mono tabular-nums">{summaryStats.totalDrops}</span>
+      </div>
+    </div>
+  );
+
   return (
-    <div ref={paneRef} className="w-full h-full">
+    <div ref={paneRef} className="@container w-full h-full">
       <ReactFlow
         nodes={nodes}
         edges={edges}
@@ -801,27 +834,9 @@ const NetworkGraphInner: React.FC<NetworkGraphProps> = ({
         )}
 
         {/* Security Summary Panel */}
-        {/* Phones: below the toolbar row (top-right), which would otherwise cover it. */}
-        <Panel position="top-left">
-          <div className="mt-11 sm:mt-0 flex items-center gap-3 px-3 py-2 rounded-surface bg-hubble-card/90 border border-hubble-border backdrop-blur-sm text-xs">
-            <div className="flex items-center gap-1.5 text-secondary" title="Total workload identities in the current namespace">
-              <Server className="w-3.5 h-3.5 text-hubble-accent" />
-              <span className="font-medium font-mono tabular-nums">{summaryStats.podCount}</span>
-            </div>
-            <div className="w-px h-4 bg-hubble-border" />
-            <div className="flex items-center gap-1.5 text-secondary" title="Total observed network flows (ingress + egress) across all pods">
-              <Activity className="w-3.5 h-3.5 text-hubble-accent" />
-              <span className="font-medium font-mono tabular-nums">{summaryStats.totalFlows.toLocaleString()}</span>
-            </div>
-            <div className="w-px h-4 bg-hubble-border" />
-            <div
-              className={`flex items-center gap-1.5 ${summaryStats.totalDrops > 0 ? 'text-hubble-error' : 'text-secondary'}`}
-              title={`Packets denied by network policy${summaryStats.totalDrops > 0 ? ' — review your policies for misconfigurations' : ''}`}
-            >
-              <ShieldAlert className={`w-3.5 h-3.5 ${summaryStats.totalDrops > 0 ? 'text-hubble-error' : 'text-secondary'}`} />
-              <span className="font-medium font-mono tabular-nums">{summaryStats.totalDrops}</span>
-            </div>
-          </div>
+        {/* Summary, top-left, only when the map is wide enough for it beside the toolbar. */}
+        <Panel position="top-left" className="hidden @xl:block">
+          {summaryBadge}
         </Panel>
 
         {/* Edge legend — decode the trust-state colors */}
@@ -857,7 +872,12 @@ const NetworkGraphInner: React.FC<NetworkGraphProps> = ({
             contentionCount={contentionCount}
             layoutDirection={layoutDirection}
             onToggleLayoutDirection={onToggleLayoutDirection}
+            lens={lens}
+            onLensChange={onLensChange}
           />
+          {/* Narrow map: the summary stacks under the toolbar, so no number of toolbar rows can cover it. */}
+          <div className="mt-2 flex justify-end @xl:hidden">{summaryBadge}</div>
+          {lensLegend && <div className="mt-2 flex justify-end">{lensLegend}</div>}
         </Panel>
       </ReactFlow>
     </div>

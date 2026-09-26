@@ -18,10 +18,16 @@ export interface Command {
 interface CommandPaletteProps {
   onClose: () => void;
   commands: Command[];
+  /**
+   * Commands built from what was typed (a CVE id, an image digest). Listed
+   * first, in the "Jump to" group, and never filtered by the fuzzy match:
+   * the query is their input, not a search over them.
+   */
+  dynamic?: (query: string) => Command[];
 }
 
 // Fixed group order so results read predictably regardless of input order.
-const GROUP_ORDER = ['Views', 'Tools', 'Namespaces', 'Workloads'];
+const GROUP_ORDER = ['Jump to', 'Views', 'Tools', 'Namespaces', 'Workloads'];
 
 /** Subsequence match (fuzzy) — "qbt" matches "qbittorrent". */
 function fuzzy(haystack: string, needle: string): boolean {
@@ -40,16 +46,17 @@ function fuzzy(haystack: string, needle: string): boolean {
  * that otherwise means hunting the rail or the graph into two keystrokes, and
  * keeps every destination discoverable without adding chrome.
  */
-export function CommandPalette({ onClose, commands }: CommandPaletteProps) {
+export function CommandPalette({ onClose, commands, dynamic }: CommandPaletteProps) {
   const [query, setQuery] = useState('');
   const [active, setActive] = useState(0);
 
   const results = useMemo(() => {
     const q = query.trim().toLowerCase();
-    const matched = commands.filter((c) => {
+    const jumps = (dynamic?.(query.trim()) ?? []).map((c) => ({ ...c, group: 'Jump to' }));
+    const matched = [...jumps, ...commands.filter((c) => {
       const hay = `${c.label} ${c.hint ?? ''} ${c.keywords ?? ''} ${c.group}`.toLowerCase();
       return q ? hay.includes(q) || fuzzy(c.label.toLowerCase(), q) : true;
-    });
+    })];
     // Cap workloads/namespaces so a huge cluster doesn't flood the list.
     const capped: Command[] = [];
     const perGroup: Record<string, number> = {};
@@ -62,7 +69,7 @@ export function CommandPalette({ onClose, commands }: CommandPaletteProps) {
     // Any groups not in GROUP_ORDER, appended.
     for (const c of matched.filter((m) => !GROUP_ORDER.includes(m.group))) capped.push(c);
     return capped;
-  }, [commands, query]);
+  }, [commands, query, dynamic]);
 
   const activeIdx = Math.min(active, Math.max(0, results.length - 1));
 
@@ -92,7 +99,7 @@ export function CommandPalette({ onClose, commands }: CommandPaletteProps) {
   );
 
   return (
-    <Modal isOpen onClose={onClose} hideHeader size="lg" align="top" contentClassName="flex flex-col">
+    <Modal isOpen onClose={onClose} hideHeader ariaLabel="Search and commands" size="lg" align="top" contentClassName="flex flex-col">
       <div className="flex items-center gap-2 h-12 px-4 border-b border-hubble-border shrink-0">
         <Search className="w-4 h-4 text-tertiary shrink-0" />
         <input

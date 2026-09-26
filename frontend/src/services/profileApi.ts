@@ -1,4 +1,5 @@
 import apiClient from './api';
+import { isTimeout, READ_TIMEOUT_MS, timeoutMessage, timeoutSignal } from './readTimeout';
 import type { PostureStatus, ProfileDiff, VersionList, WorkloadListPage, WorkloadProfile } from '../types/profile';
 
 /**
@@ -14,9 +15,10 @@ import type { PostureStatus, ProfileDiff, VersionList, WorkloadListPage, Workloa
  *    predates the profile endpoints (the route itself does not exist);
  *  - `busy`: 503, the read budget shed the request; retry later;
  *  - `bad_request`: 400;
+ *  - `timeout`: no answer within READ_TIMEOUT_MS (retryable);
  *  - `error`: anything else (network, 500, auth).
  */
-export type ProfileErrorKind = 'workload_not_found' | 'revision_not_found' | 'unsupported' | 'busy' | 'bad_request' | 'error';
+export type ProfileErrorKind = 'workload_not_found' | 'revision_not_found' | 'unsupported' | 'busy' | 'bad_request' | 'timeout' | 'error';
 
 export class ProfileApiError extends Error {
   readonly status: number;
@@ -72,8 +74,11 @@ export interface ListWorkloadsQuery {
 export class ProfileApi {
   private readonly fetchImpl: typeof fetch;
 
-  constructor(opts: { fetchImpl?: typeof fetch } = {}) {
+  private readonly timeoutMs: number;
+
+  constructor(opts: { fetchImpl?: typeof fetch; timeoutMs?: number } = {}) {
     this.fetchImpl = opts.fetchImpl ?? ((...args) => fetch(...args));
+    this.timeoutMs = opts.timeoutMs ?? READ_TIMEOUT_MS;
   }
 
   private get base(): string {
@@ -85,15 +90,18 @@ export class ProfileApi {
     for (const [k, v] of Object.entries(query)) if (v !== undefined && v !== '') sp.set(k, String(v));
     const q = sp.toString();
     let res: Response;
+    let text: string;
     try {
       res = await this.fetchImpl(`${this.base}${path}${q ? `?${q}` : ''}`, {
         headers: { Accept: 'application/json' },
         credentials: 'same-origin',
+        signal: timeoutSignal(this.timeoutMs),
       });
+      text = await res.text();
     } catch (err) {
+      if (isTimeout(err)) throw new ProfileApiError(0, 'timeout', timeoutMessage(this.timeoutMs));
       throw new ProfileApiError(0, 'error', `Could not reach the Broker: ${errorMessage(err)}`);
     }
-    const text = await res.text();
     if (!res.ok) throw classify(res.status, text);
     return JSON.parse(text) as T;
   }

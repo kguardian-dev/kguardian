@@ -55,7 +55,7 @@ test('Tab and Shift+Tab stay inside the dialog', () => {
 test('Esc closes and returns focus to the opener, even though it remounted', () => {
   render(<Harness />);
   fireEvent.click(screen.getByText('Expand sidebar'));
-  fireEvent.keyDown(window, { key: 'Escape' });
+  fireEvent.keyDown(document.activeElement!, { key: 'Escape' });
   expect(screen.queryByRole('dialog')).toBeNull();
   expect(active()).toBe('Expand sidebar');
 });
@@ -65,4 +65,38 @@ test('closing by picking a nav item also returns focus to the opener', () => {
   fireEvent.click(screen.getByText('Expand sidebar'));
   fireEvent.click(screen.getByText('Workloads'));
   expect(active()).toBe('Expand sidebar');
+});
+
+test('Esc belongs to the dialog: an Esc elsewhere on the page does not close it', () => {
+  render(<Harness />);
+  fireEvent.click(screen.getByText('Expand sidebar'));
+  fireEvent.keyDown(window, { key: 'Escape' });
+  expect(screen.getByRole('dialog')).toBeTruthy();
+});
+
+function ExternalClose() {
+  const [open, setOpen] = useState(true);
+  const dialogRef = useRef<HTMLDivElement>(null);
+  const toggleRef = useRef<HTMLButtonElement>(null);
+  useDialogFocus({ open, dialogRef, returnFocusRef: toggleRef, onClose: () => setOpen(false) });
+  return (
+    <div>
+      {/* Stands in for a resize to desktop: something outside the dialog closes it. */}
+      <button ref={toggleRef} onClick={() => {}}>Collapse sidebar</button>
+      <button data-testid="layout" onMouseDown={() => setOpen(false)}>layout change</button>
+      {open && (
+        <div ref={dialogRef} role="dialog">
+          <button>Risks</button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+test('closed from outside (a layout change): focus goes to the toggle, not the body', () => {
+  render(<ExternalClose />);
+  expect(active()).toBe('Risks');
+  fireEvent.mouseDown(screen.getByTestId('layout'));
+  expect(screen.queryByRole('dialog')).toBeNull();
+  expect(active()).toBe('Collapse sidebar');
 });
