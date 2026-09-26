@@ -1,0 +1,142 @@
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: imagetrustpolicies.kguardian.dev
+  labels:
+    app.kubernetes.io/name: kguardian
+    app.kubernetes.io/component: evaluator
+spec:
+  group: kguardian.dev
+  scope: Namespaced
+  names:
+    kind: ImageTrustPolicy
+    listKind: ImageTrustPolicyList
+    plural: imagetrustpolicies
+    singular: imagetrustpolicy
+    shortNames:
+      - itp
+    categories:
+      - kguardian
+  versions:
+    - name: v1alpha1
+      served: true
+      storage: true
+      subresources:
+        status: {}
+      additionalPrinterColumns:
+        - name: Containers
+          type: integer
+          jsonPath: .status.evaluation.containers
+        - name: Would-Deny
+          type: integer
+          jsonPath: .status.evaluation.wouldDeny
+        - name: Unknown
+          type: integer
+          jsonPath: .status.evaluation.unknown
+        - name: Age
+          type: date
+          jsonPath: .metadata.creationTimestamp
+      schema:
+        openAPIV3Schema:
+          description: |
+            Who must have signed the images this namespace's workloads run.
+            Report only: the kguardian evaluator compares every running
+            container's image with the signatures kguardian verified and
+            records in status what would be denied. Nothing is admitted or
+            blocked and there is no webhook. Generate the enforcing Kyverno
+            or policy-controller policy with kguardian when ready.
+          type: object
+          required: [spec]
+          properties:
+            apiVersion: { type: string }
+            kind: { type: string }
+            metadata: { type: object }
+            spec:
+              type: object
+              required: [authorities]
+              properties:
+                images:
+                  type: array
+                  description: |
+                    Glob patterns over the image repository
+                    (docker.io/library/nginx, ghcr.io/org/app). "*" matches
+                    within one path segment, "**" across segments. Empty
+                    matches every image.
+                  maxItems: 64
+                  items: { type: string, maxLength: 512 }
+                authorities:
+                  type: array
+                  description: |
+                    An image is trusted when a signature from any one of
+                    these verified. Exactly one of keyless and key each.
+                  minItems: 1
+                  maxItems: 32
+                  items:
+                    type: object
+                    properties:
+                      name: { type: string, maxLength: 128 }
+                      keyless:
+                        type: object
+                        description: |
+                          Fulcio certificate identity. issuer (or
+                          issuerRegExp) and subject (or subjectRegExp) are
+                          both required; regular expressions must match the
+                          whole value.
+                        properties:
+                          issuer: { type: string, maxLength: 1024 }
+                          issuerRegExp: { type: string, maxLength: 1024 }
+                          subject: { type: string, maxLength: 1024 }
+                          subjectRegExp: { type: string, maxLength: 1024 }
+                      key:
+                        type: object
+                        description: |
+                          A public key (PEM) or the sha256 (hex) of its DER
+                          SubjectPublicKeyInfo. The supplychain component must
+                          hold the same key to verify such signatures
+                          (supplychain.signatureDiscovery.publicKeys).
+                        properties:
+                          publicKey: { type: string, maxLength: 16384 }
+                          fingerprint: { type: string, pattern: "^[0-9a-fA-F]{64}$" }
+                    oneOf:
+                      - required: [keyless]
+                      - required: [key]
+                attestations:
+                  type: array
+                  description: |
+                    Attestations that must also be attached, verified, and
+                    signed by one of the authorities.
+                  maxItems: 16
+                  items:
+                    type: object
+                    required: [predicateType]
+                    properties:
+                      predicateType: { type: string, maxLength: 512 }
+                      builderIdRegExp: { type: string, maxLength: 1024 }
+                      sourceRepoRegExp: { type: string, maxLength: 1024 }
+            status:
+              type: object
+              description: Written by the kguardian evaluator.
+              properties:
+                observedGeneration: { type: integer, format: int64 }
+                error: { type: string }
+                evaluation:
+                  type: object
+                  properties:
+                    lastChanged: { type: string, format: date-time }
+                    containers: { type: integer, format: int64 }
+                    trusted: { type: integer, format: int64 }
+                    wouldDeny: { type: integer, format: int64 }
+                    unknown: { type: integer, format: int64 }
+                    truncated: { type: boolean }
+                    findings:
+                      type: array
+                      items:
+                        type: object
+                        properties:
+                          namespace: { type: string }
+                          workload: { type: string }
+                          container: { type: string }
+                          repository: { type: string }
+                          digest: { type: string }
+                          verdict: { type: string }
+                          reason: { type: string }

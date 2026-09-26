@@ -41,6 +41,14 @@ rules:
     resources: [applicationsecurityprofiles/status]
     verbs: [patch]
   {{- end }}
+  # ImageTrustPolicy evaluation (#1533 P2-2): read the policies, write
+  # only their status.
+  - apiGroups: [kguardian.dev]
+    resources: [imagetrustpolicies, clusterimagetrustpolicies]
+    verbs: [get, list, watch]
+  - apiGroups: [kguardian.dev]
+    resources: [imagetrustpolicies/status, clusterimagetrustpolicies/status]
+    verbs: [get, update, patch]
   # Emit Kubernetes Events on the AuditNetworkPolicy when a flow would
   # be denied (post-MVP — RBAC pre-granted so it's ready when the
   # event-emission code lands).
