@@ -14,6 +14,7 @@ import (
 	v1alpha1 "github.com/kguardian-dev/kguardian/evaluator/pkg/v1alpha1"
 	"github.com/sirupsen/logrus"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -151,6 +152,10 @@ func TestRunnerStatus(t *testing.T) {
 	}
 	st := ap.byKey["shop/signed"]
 	ev := st.Evaluation
+	if c := meta.FindStatusCondition(st.Conditions, v1alpha1.ConditionBrokerRead); ev.State != v1alpha1.StateEvaluated ||
+		c == nil || c.Status != metav1.ConditionTrue || c.Reason != v1alpha1.ReasonRead {
+		t.Fatalf("state %q, condition %+v", ev.State, c)
+	}
 	if st.ObservedGeneration != 3 || ev.Containers != 5 || ev.Trusted != 2 || ev.WouldDeny != 2 || ev.Unknown != 1 ||
 		ev.LastChanged == nil || ev.LastEvaluated == nil || !ev.LastEvaluated.Time.Equal(ck.t) || st.Message != "" {
 		t.Fatalf("status = %+v", st)
@@ -233,6 +238,10 @@ func TestRunnerBrokerOutage(t *testing.T) {
 	ck.t = ck.t.Add(5 * time.Minute)
 	_ = r.Pass(context.Background())
 	st := ap.byKey["shop/signed"]
+	if c := meta.FindStatusCondition(st.Conditions, v1alpha1.ConditionBrokerRead); st.Evaluation.State != v1alpha1.StateBrokerUnavailable ||
+		c == nil || c.Status != metav1.ConditionFalse || c.Reason != v1alpha1.ReasonBrokerUnavailable {
+		t.Fatalf("state %q, condition %+v", st.Evaluation.State, c)
+	}
 	if st.Evaluation.Unknown != 5 || st.Evaluation.Trusted != 0 || st.Evaluation.WouldDeny != 0 ||
 		!strings.Contains(st.Message, "connection refused") || !strings.Contains(st.Message, good.Format(time.RFC3339)) ||
 		!st.Evaluation.LastEvaluated.Time.Equal(good) || st.Evaluation.Findings[0].Reason != ReasonBrokerUnavailable {
@@ -245,7 +254,8 @@ func TestRunnerBrokerOutage(t *testing.T) {
 	if err := r.Pass(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	if st := ap.byKey["shop/signed"]; st.Evaluation.Trusted != 2 || st.Message != "" {
+	if st := ap.byKey["shop/signed"]; st.Evaluation.Trusted != 2 || st.Message != "" || st.Evaluation.State != v1alpha1.StateEvaluated ||
+		meta.FindStatusCondition(st.Conditions, v1alpha1.ConditionBrokerRead).Status != metav1.ConditionTrue {
 		t.Fatalf("recovered = %+v", st)
 	}
 
@@ -255,6 +265,10 @@ func TestRunnerBrokerOutage(t *testing.T) {
 		ck.t = ck.t.Add(time.Minute)
 		_ = r.Pass(context.Background())
 		st := ap.byKey["shop/signed"]
+		if c := meta.FindStatusCondition(st.Conditions, v1alpha1.ConditionBrokerRead); st.Evaluation.State != v1alpha1.StateBrokerUnauthorized ||
+			c == nil || c.Reason != v1alpha1.ReasonBrokerUnauthorized {
+			t.Fatalf("%d: state %q, condition %+v", code, st.Evaluation.State, c)
+		}
 		if st.Evaluation.Unknown != 5 || st.Evaluation.Findings[0].Reason != ReasonBrokerUnauthorized || !strings.Contains(st.Message, "READ-scope token") {
 			t.Fatalf("%d = %+v", code, st)
 		}
@@ -272,6 +286,15 @@ func TestRunnerNeverRead(t *testing.T) {
 	st := ap.byKey["shop/signed"]
 	if st.Evaluation.Containers != 0 || st.Evaluation.LastEvaluated != nil || !strings.Contains(st.Message, "last successful read: never") {
 		t.Fatalf("status = %+v", st)
+	}
+	// The zero counts must not read as "nothing to deny": the state and
+	// the condition say the broker was never read.
+	if st.Evaluation.State != v1alpha1.StateNeverRead {
+		t.Fatalf("state = %q", st.Evaluation.State)
+	}
+	c := meta.FindStatusCondition(st.Conditions, v1alpha1.ConditionBrokerRead)
+	if c == nil || c.Status != metav1.ConditionFalse || c.Reason != v1alpha1.ReasonNeverRead || !strings.Contains(c.Message, "never") {
+		t.Fatalf("condition = %+v", c)
 	}
 }
 

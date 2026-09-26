@@ -18,6 +18,7 @@ import (
 	v1alpha1 "github.com/kguardian-dev/kguardian/evaluator/pkg/v1alpha1"
 	"github.com/sirupsen/logrus"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/labels"
@@ -281,6 +282,23 @@ func (r *Runner) selectsNamespace(p policyRef, ns string) (selected, unknown boo
 func (r *Runner) evaluate(p policyRef, fs feedState) (v1alpha1.ImageTrustPolicyStatus, []Result) {
 	cs := fs.containers
 	st := v1alpha1.ImageTrustPolicyStatus{ObservedGeneration: p.gen, Message: fs.message}
+	st.Conditions = append([]metav1.Condition(nil), p.status.Conditions...)
+	cond := metav1.Condition{Type: v1alpha1.ConditionBrokerRead, ObservedGeneration: p.gen,
+		Status: metav1.ConditionTrue, Reason: v1alpha1.ReasonRead, Message: "running containers read from the broker"}
+	st.Evaluation.State = v1alpha1.StateEvaluated
+	switch {
+	case fs.unknownReason != "" && fs.at.IsZero():
+		st.Evaluation.State = v1alpha1.StateNeverRead
+		cond.Status, cond.Reason, cond.Message = metav1.ConditionFalse, v1alpha1.ReasonNeverRead, fs.message
+	case fs.unknownReason == ReasonBrokerUnauthorized:
+		st.Evaluation.State = v1alpha1.StateBrokerUnauthorized
+		cond.Status, cond.Reason, cond.Message = metav1.ConditionFalse, v1alpha1.ReasonBrokerUnauthorized, fs.message
+	case fs.unknownReason != "":
+		st.Evaluation.State = v1alpha1.StateBrokerUnavailable
+		cond.Status, cond.Reason, cond.Message = metav1.ConditionFalse, v1alpha1.ReasonBrokerUnavailable, fs.message
+	}
+	cond.LastTransitionTime = metav1.NewTime(r.clock().UTC().Truncate(time.Second))
+	meta.SetStatusCondition(&st.Conditions, cond)
 	if !fs.at.IsZero() {
 		t := metav1.NewTime(fs.at.UTC().Truncate(time.Second))
 		st.Evaluation.LastEvaluated = &t
@@ -347,8 +365,10 @@ func (r *Runner) evaluate(p policyRef, fs feedState) (v1alpha1.ImageTrustPolicyS
 	return st, res
 }
 
-// writeStatus patches status only when it changed (lastChanged aside), so
-// replicas and quiet passes write nothing.
+// writeStatus applies the status when anything in it changed. The
+// verdicts rarely change, but lastEvaluated moves on every successful
+// read, so a healthy policy is written once per interval (lastChanged
+// keeps the time the verdicts last changed).
 func (r *Runner) writeStatus(ctx context.Context, p policyRef, st v1alpha1.ImageTrustPolicyStatus) error {
 	// lastChanged moves only when the verdicts change.
 	old := p.status
@@ -356,7 +376,8 @@ func (r *Runner) writeStatus(ctx context.Context, p policyRef, st v1alpha1.Image
 	oldEval.LastChanged, newEval.LastChanged = nil, nil
 	oldEval.LastEvaluated, newEval.LastEvaluated = nil, nil
 	same := old.ObservedGeneration == st.ObservedGeneration && old.Error == st.Error &&
-		old.Message == st.Message && reflect.DeepEqual(oldEval, newEval)
+		old.Message == st.Message && reflect.DeepEqual(oldEval, newEval) &&
+		sameConditions(old.Conditions, st.Conditions)
 	if same && sameTime(old.Evaluation.LastEvaluated, st.Evaluation.LastEvaluated) {
 		return nil
 	}
@@ -387,6 +408,20 @@ func (r *Runner) writeStatus(ctx context.Context, p policyRef, st v1alpha1.Image
 			Info("image trust: containers would be denied")
 	}
 	return err
+}
+
+// sameConditions ignores transition times (kept by SetStatusCondition).
+func sameConditions(a, b []metav1.Condition) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		x, y := a[i], b[i]
+		if x.Type != y.Type || x.Status != y.Status || x.Reason != y.Reason || x.Message != y.Message || x.ObservedGeneration != y.ObservedGeneration {
+			return false
+		}
+	}
+	return true
 }
 
 // sameTime compares instants: a stored metav1.Time decodes in local time.

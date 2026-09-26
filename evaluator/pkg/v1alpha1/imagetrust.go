@@ -81,11 +81,36 @@ type ImageTrustPolicyStatus struct {
 	// Message explains why containers are Unknown because the broker
 	// could not be read (with the last successful read), else empty.
 	Message string `json:"message,omitempty"`
+	// Conditions: BrokerRead (True once the running containers were read;
+	// False with reason NeverRead, BrokerUnavailable or
+	// BrokerUnauthorized).
+	Conditions []metav1.Condition `json:"conditions,omitempty"`
 }
 
+// Evaluation states (ImageTrustEvaluation.State).
+const (
+	StateEvaluated          = "evaluated"
+	StateNeverRead          = "never-read"
+	StateBrokerUnavailable  = "broker-unavailable"
+	StateBrokerUnauthorized = "broker-unauthorized"
+)
+
+// BrokerRead condition.
+const (
+	ConditionBrokerRead = "BrokerRead"
+	ReasonRead          = "Read"
+	ReasonNeverRead     = "NeverRead"
+	// Unavailable / unauthorized reuse ReasonBrokerUnavailable and
+	// ReasonBrokerUnauthorized (ApplicationSecurityProfile's).
+)
+
 // ImageTrustEvaluation summarises the running containers the policy
-// selects. Written only when it changes.
+// selects.
 type ImageTrustEvaluation struct {
+	// State: evaluated, or why the counts cannot be trusted: never-read
+	// (the broker has never been read: the zeros mean nothing),
+	// broker-unavailable or broker-unauthorized (every container Unknown).
+	State string `json:"state,omitempty"`
 	// LastChanged is when these numbers last changed.
 	LastChanged *metav1.Time `json:"lastChanged,omitempty"`
 	// LastEvaluated is when the running containers were last read from
@@ -242,5 +267,6 @@ func (in ImageTrustPolicyStatus) deepCopy() ImageTrustPolicyStatus {
 		out.Evaluation.LastEvaluated = &t
 	}
 	out.Evaluation.Findings = append([]ImageTrustFinding(nil), in.Evaluation.Findings...)
+	out.Conditions = append([]metav1.Condition(nil), in.Conditions...)
 	return out
 }
