@@ -408,6 +408,84 @@ struct
     __type(value, u8);
 } hostnet_gens SEC(".maps");
 
+// Ownership gate switch. Userspace clears it (before load) when the
+// object with the gate enabled does not load on this kernel: with it
+// false the verifier sees the whole walk below as dead code, so a CO-RE
+// relocation that cannot be resolved here (poisoned by libbpf) is never
+// reached, and the registered path falls back to crediting by netns
+// alone, as before the gate existed. See bpf.rs (syscall load variants).
+const volatile bool kg_ownership_gate = true;
+
+// kernfs_node.parent became the RCU-protected __parent in Linux 6.15
+// (include/linux/kernfs.h). Both spellings, chosen at load time; the
+// branch for the absent one is dead code the verifier never reaches.
+struct kernfs_node___pre615
+{
+    struct kernfs_node *parent;
+} __attribute__((preserve_access_index));
+
+struct kernfs_node___615
+{
+    struct kernfs_node *__parent;
+} __attribute__((preserve_access_index));
+
+static __always_inline struct kernfs_node *kn_parent(struct kernfs_node *kn)
+{
+    if (bpf_core_field_exists(struct kernfs_node___615, __parent))
+        return BPF_CORE_READ((struct kernfs_node___615 *)kn, __parent);
+    return BPF_CORE_READ((struct kernfs_node___pre615 *)kn, parent);
+}
+
+// The name parser runs as a GLOBAL function: the verifier checks a global
+// function once, on its own, instead of re-walking its loops for every
+// state the caller can be in. Inlined into the 4-level walk, the parser's
+// data-dependent loops pushed trace_execve past the verifier's 1M
+// instruction budget (E2BIG) on every kernel tried.
+struct kg_cg_name
+{
+    char s[KG_CG_NAME_BUF];
+};
+
+struct kg_scan_ctx
+{
+    const char *n;
+    int at;
+    char prev;
+};
+
+static long kg_scan_cb(__u64 i, void *ctx)
+{
+    struct kg_scan_ctx *c = ctx;
+    return kg_scan_step(c->n, (__u32)i, &c->at, &c->prev);
+}
+
+struct kg_uid_ctx
+{
+    const char *n;
+    __u32 s;
+    struct kg_uid u;
+};
+
+static long kg_uid_cb(__u64 k, void *ctx)
+{
+    struct kg_uid_ctx *c = ctx;
+    return kg_uid_step(c->n, c->s, (__u32)k, &c->u);
+}
+
+__noinline __u32 kg_name_generation(struct kg_cg_name *name)
+{
+    if (!name)
+        return 0;
+    struct kg_scan_ctx scan = {.n = name->s, .at = -1, .prev = 0};
+    bpf_loop(KG_CG_NAME_SCAN, kg_scan_cb, &scan, 0);
+    if (scan.at < 0 || scan.at >= KG_CG_NAME_SCAN)
+        return 0;
+    struct kg_uid_ctx uid = {.n = name->s, .s = (__u32)scan.at};
+    kg_uid_init(&uid.u);
+    bpf_loop(KG_CG_UID_MAX, kg_uid_cb, &uid, 0);
+    return kg_uid_finish(name->s, uid.s, &uid.u);
+}
+
 // Pod-level cgroup at most this many levels above the task's: the
 // container's own cgroup is one below it, and a container managing its own
 // sub-cgroups adds a level or two.
@@ -425,19 +503,19 @@ static __always_inline __u32 task_pod_generation(void)
 
     struct task_struct *task = (struct task_struct *)bpf_get_current_task();
     struct kernfs_node *kn = BPF_CORE_READ(task, cgroups, dfl_cgrp, kn);
-    char name[KG_CG_NAME_BUF];
+    struct kg_cg_name name;
     __u32 gen = 0;
     for (int lvl = 0; lvl < KG_CG_LEVELS; lvl++)
     {
         if (!kn)
             break;
         const char *kn_name = BPF_CORE_READ(kn, name);
-        if (bpf_probe_read_kernel_str(name, sizeof(name), kn_name) < 0)
+        if (bpf_probe_read_kernel_str(name.s, sizeof(name.s), kn_name) < 0)
             break;
-        gen = kg_pod_gen_from_name(name);
+        gen = kg_name_generation(&name);
         if (gen)
             break;
-        kn = BPF_CORE_READ(kn, parent);
+        kn = kn_parent(kn);
     }
     bpf_map_update_elem(&cgroup_pod_gen, &cgid, &gen, BPF_ANY);
     return gen;
@@ -451,6 +529,8 @@ static __always_inline __u32 task_pod_generation(void)
 //   - any other pod (a stale entry on a recycled inode): 0
 static __always_inline __u32 credit_generation(__u32 netns_gen)
 {
+    if (!kg_ownership_gate)
+        return netns_gen;
     __u32 owner = task_pod_generation();
     if (!(owner & KG_CG_POD))
         return 0;

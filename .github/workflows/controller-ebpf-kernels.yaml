@@ -1,0 +1,135 @@
+---
+# yaml-language-server: $schema=https://json.schemastore.org/github-workflow.json
+name: Controller eBPF kernel matrix
+
+# Loads every controller eBPF object on several real kernels, inside VMs,
+# and fails if any of them does not load in its FULL configuration.
+#
+# Why: a CO-RE relocation that resolves on the kernels we build and test
+# on can fail on another. kernfs_node.parent became __parent in 6.15, and
+# the controller crashlooped on every cluster-00 node (6.18) with a
+# BPF_PROG_LOAD -EINVAL that no unit test could see. Only the kernel's own
+# loader and verifier answer "does this object load here", so this job
+# asks them: 6.1 (below the supported floor), 6.6, 6.12 and 6.18 LTS.
+#
+# Kernel images are Cilium's little-vm-helper builds (BTF enabled), pinned
+# by digest below; bump them by hand (quay.io/lvh-images/kernel-images,
+# tags <ver>-main). Path-filtered to the eBPF sources and the loader so it
+# only costs CI minutes when those change.
+#
+# Run the same check locally (no KVM needed, TCG works):
+#   cargo test --all-features --lib --no-run
+#   vmtest -k <vmlinuz> "<test binary> --ignored --exact \
+#     bpf::tests::every_probe_object_loads_on_this_kernel --nocapture"
+
+on:
+  pull_request:
+    branches:
+      - main
+    paths:
+      - 'controller/src/bpf/**'
+      - 'controller/src/bpf.rs'
+      - 'controller/build.rs'
+      - 'controller/Cargo.lock'
+      - '.github/workflows/controller-ebpf-kernels.yaml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: controller-ebpf-kernels-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  load:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y --no-install-recommends \
+            build-essential \
+            clang \
+            libelf-dev \
+            libseccomp-dev \
+            libbpf-dev \
+            zlib1g-dev \
+            pkg-config \
+            protobuf-compiler
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
+        with:
+          toolchain: stable
+
+      - name: Cache Rust dependencies
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            controller/target/
+          key: ${{ runner.os }}-cargo-controller-test-${{ hashFiles('controller/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-controller-test-
+            ${{ runner.os }}-cargo-controller-
+
+      - name: Build the test binary
+        working-directory: controller
+        run: |
+          bin=$(cargo test --all-features --lib --no-run --message-format=json \
+            | jq -r 'select(.profile.test == true and .target.kind == ["lib"]) | .executable' \
+            | tail -1)
+          test -x "$bin"
+          cp "$bin" "$GITHUB_WORKSPACE/ebpf-load-test"
+
+      - name: Fetch kernels
+        env:
+          K61: quay.io/lvh-images/kernel-images@sha256:8775ad49b3bc9e5f30b134f081ddf305bbd761084116768866918fe421e548e0 # 6.1-main
+          K66: quay.io/lvh-images/kernel-images@sha256:b30a5bffdcdfd69e8cc1d147d13dc9d31ac993316e5e2f34db6c20e8b5a75db6 # 6.6-main
+          K612: quay.io/lvh-images/kernel-images@sha256:0011d62b6675c5b1b36da3805f989c8443cd80259a9bdd814c34f25320fc67a0 # 6.12-main
+          K618: quay.io/lvh-images/kernel-images@sha256:756c37658d791ed78ecc4ee8a327cf18291bfea14360ef11030082a34453afb7 # 6.18-main
+        run: |
+          mkdir -p kernels
+          for pair in "6.1:$K61" "6.6:$K66" "6.12:$K612" "6.18:$K618"; do
+            ver="${pair%%:*}"; image="${pair#*:}"
+            id=$(docker create "$image" /nonexistent)
+            docker cp "$id:/data/kernels/$ver/boot/." "kernels/$ver"
+            docker rm "$id" >/dev/null
+            cp kernels/$ver/vmlinuz-* "kernels/vmlinuz-$ver"
+          done
+          ls -la kernels
+
+      - name: Load on 6.1
+        uses: danobi/vmtest-action@c0fe6f82e21db9b9a8105f2a385e8a6e3fff2d23 # v0.9
+        with:
+          name: linux-6.1
+          kernel: kernels/vmlinuz-6.1
+          command: /bin/bash -c "${{ github.workspace }}/ebpf-load-test --ignored --exact bpf::tests::every_probe_object_loads_on_this_kernel --nocapture"
+
+      - name: Load on 6.6
+        uses: danobi/vmtest-action@c0fe6f82e21db9b9a8105f2a385e8a6e3fff2d23 # v0.9
+        with:
+          name: linux-6.6
+          kernel: kernels/vmlinuz-6.6
+          command: /bin/bash -c "${{ github.workspace }}/ebpf-load-test --ignored --exact bpf::tests::every_probe_object_loads_on_this_kernel --nocapture"
+
+      - name: Load on 6.12
+        uses: danobi/vmtest-action@c0fe6f82e21db9b9a8105f2a385e8a6e3fff2d23 # v0.9
+        with:
+          name: linux-6.12
+          kernel: kernels/vmlinuz-6.12
+          command: /bin/bash -c "${{ github.workspace }}/ebpf-load-test --ignored --exact bpf::tests::every_probe_object_loads_on_this_kernel --nocapture"
+
+      - name: Load on 6.18
+        uses: danobi/vmtest-action@c0fe6f82e21db9b9a8105f2a385e8a6e3fff2d23 # v0.9
+        with:
+          name: linux-6.18
+          kernel: kernels/vmlinuz-6.18
+          command: /bin/bash -c "${{ github.workspace }}/ebpf-load-test --ignored --exact bpf::tests::every_probe_object_loads_on_this_kernel --nocapture"

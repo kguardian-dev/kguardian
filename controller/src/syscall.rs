@@ -327,6 +327,7 @@ pub async fn handle_syscall_events(
                     let s = pending.stats;
                     if s.cgroups_seen > 0 {
                         info!(
+                            ownership_gate = crate::bpf::ownership_gate_active(),
                             cgroups_seen = s.cgroups_seen,
                             cgroups_attributed = s.cgroups_attributed,
                             cgroups_expired = s.cgroups_expired,

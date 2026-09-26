@@ -147,6 +147,84 @@ fn populate_tier_maps(maps: &crate::syscall::sycallprobe::SyscallMaps<'_>, tiers
     }
 }
 
+/// Whether the syscall probe's cgroup ownership gate loaded (see
+/// `credit_generation` in syscall.bpf.c). Reported in the startup-capture
+/// summary log.
+static OWNERSHIP_GATE: AtomicBool = AtomicBool::new(false);
+
+pub fn ownership_gate_active() -> bool {
+    OWNERSHIP_GATE.load(Ordering::Relaxed)
+}
+
+/// One way of loading the syscall object.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SyscallLoadVariant {
+    /// `kg_ownership_gate` in the object's rodata.
+    pub ownership_gate: bool,
+    /// Load `trace_cgroup_mkdir` (startup capture).
+    pub startup_capture: bool,
+    /// Fail this attempt on purpose (`KGUARDIAN_INJECT_LOAD_FAILURE`),
+    /// to exercise the fallback on a real node.
+    pub inject_failure: bool,
+}
+
+/// The configurations to try, most capable first. The last one is the
+/// behaviour before either optional feature existed.
+///
+/// `SYSCALL_OWNERSHIP_GATE=off` starts without the gate.
+/// `KGUARDIAN_INJECT_LOAD_FAILURE=ownership` fails every gated attempt,
+/// `=all` every attempt (so the controller exits, as a real total failure
+/// would).
+pub fn syscall_load_variants(
+    ownership_env: Option<&str>,
+    inject: Option<&str>,
+) -> Vec<SyscallLoadVariant> {
+    let gate_allowed = !ownership_env.is_some_and(|v| {
+        matches!(
+            v.trim().to_ascii_lowercase().as_str(),
+            "off" | "false" | "0" | "no" | "disabled"
+        )
+    });
+    let inject = inject.map(|v| v.trim().to_ascii_lowercase());
+    [(true, true), (false, true), (false, false)]
+        .into_iter()
+        .filter(|(gate, _)| gate_allowed || !gate)
+        .map(|(ownership_gate, startup_capture)| SyscallLoadVariant {
+            ownership_gate,
+            startup_capture,
+            inject_failure: match inject.as_deref() {
+                Some("ownership") => ownership_gate,
+                Some("all") => true,
+                _ => false,
+            },
+        })
+        .collect()
+}
+
+/// Open and load the syscall object in `variant`'s configuration.
+fn open_and_load_syscall(
+    storage: &mut MaybeUninit<OpenObject>,
+    variant: SyscallLoadVariant,
+) -> std::result::Result<crate::syscall::sycallprobe::SyscallSkel<'_>, String> {
+    let mut open = SyscallSkelBuilder::default()
+        .open(storage)
+        .map_err(|e| format!("open: {e}"))?;
+    match open.maps.rodata_data.as_deref_mut() {
+        Some(rodata) => rodata.kg_ownership_gate = variant.ownership_gate,
+        // No rodata means the flag is gone from the object: only the
+        // gate-less configuration is honest then.
+        None if variant.ownership_gate => return Err("object has no kg_ownership_gate".into()),
+        None => {}
+    }
+    if !variant.startup_capture {
+        open.progs.trace_cgroup_mkdir.set_autoload(false);
+    }
+    if variant.inject_failure {
+        return Err("load failure injected by KGUARDIAN_INJECT_LOAD_FAILURE".into());
+    }
+    open.load().map_err(|e| format!("load: {e}"))
+}
+
 /// Delete `key` from `map` only while its value is still `expected`.
 /// True when something was deleted.
 fn compare_and_delete(map: &libbpf_rs::Map, key: &[u8], expected: &[u8]) -> bool {
@@ -437,37 +515,59 @@ pub fn ebpf_handle(
             .map_err(|e| Error::Custom(format!("Failed to attach netpolicy drop eBPF: {}", e)))?;
         info!("Network policy drop eBPF program loaded and attached");
 
-        // Load and attach syscall probe
+        // Load the syscall probe, degrading rather than dying.
         //
-        // The startup-capture program (tp_btf/cgroup_mkdir) lives in the
-        // same object because it shares pending_cgroups with the syscall
-        // probe. It is optional, the syscall probe is not: if the object
-        // fails to load (a verifier or BTF problem on some kernel), load
-        // it again without that program rather than lose syscall capture
-        // altogether.
-        let mut open_object = MaybeUninit::uninit();
-        let mut fallback_object = MaybeUninit::uninit();
-        let syscall_probe_skel = SyscallSkelBuilder::default()
-            .open(&mut open_object)
-            .map_err(|e| Error::Custom(format!("Failed to open syscall eBPF: {}", e)))?;
-        let (syscall_sk, cgroup_mkdir_loaded) = match syscall_probe_skel.load() {
-            Ok(sk) => (sk, true),
-            Err(e) => {
-                warn!(
-                    error = %e,
-                    "syscall eBPF object failed to load with startup capture; retrying \
-                     without tp_btf/cgroup_mkdir"
-                );
-                let mut fallback = SyscallSkelBuilder::default()
-                    .open(&mut fallback_object)
-                    .map_err(|e| Error::Custom(format!("Failed to open syscall eBPF: {}", e)))?;
-                fallback.progs.trace_cgroup_mkdir.set_autoload(false);
-                let sk = fallback
-                    .load()
-                    .map_err(|e| Error::Custom(format!("Failed to load syscall eBPF: {}", e)))?;
-                (sk, false)
+        // Two optional features ride in this object with the required
+        // syscall tracepoint: startup capture (tp_btf/cgroup_mkdir) and
+        // the cgroup ownership gate on the registered path. Either can be
+        // refused by a kernel the object was not tested on — round 3 on
+        // cluster-00 (6.18) refused a CO-RE relocation in the ownership
+        // walk and the controller crashlooped on every node. The variants
+        // are tried in order, each dropping more, down to the pre-gate
+        // behaviour; only the last one failing is fatal.
+        let variants = syscall_load_variants(
+            std::env::var("SYSCALL_OWNERSHIP_GATE").ok().as_deref(),
+            std::env::var("KGUARDIAN_INJECT_LOAD_FAILURE")
+                .ok()
+                .as_deref(),
+        );
+        let mut storages: [MaybeUninit<OpenObject>; 3] = [const { MaybeUninit::uninit() }; 3];
+        let mut loaded = None;
+        let mut last_error = String::new();
+        for (variant, storage) in variants.iter().zip(storages.iter_mut()) {
+            match open_and_load_syscall(storage, *variant) {
+                Ok(sk) => {
+                    loaded = Some((sk, *variant));
+                    break;
+                }
+                Err(e) => {
+                    warn!(
+                        ownership_gate = variant.ownership_gate,
+                        startup_capture = variant.startup_capture,
+                        error = %e,
+                        "syscall eBPF object failed to load in this configuration; \
+                         retrying with less"
+                    );
+                    last_error = e;
+                }
             }
+        }
+        let Some((syscall_sk, variant)) = loaded else {
+            return Err(Error::Custom(format!(
+                "Failed to load syscall eBPF in any configuration: {last_error}"
+            )));
         };
+        OWNERSHIP_GATE.store(variant.ownership_gate, Ordering::Relaxed);
+        if !variant.ownership_gate {
+            warn!(
+                ownership_gate = false,
+                "syscall ownership gate is OFF: syscalls are credited to a pod by network \
+                 namespace alone, so host processes working inside a pod's namespace \
+                 (containerd, CNI plugins) are counted in its seccomp profile, as before \
+                 this gate existed"
+            );
+        }
+        let cgroup_mkdir_loaded = variant.startup_capture;
 
         // Populate the tier allowlists BEFORE attaching so the very first
         // events are already filtered by tier.
@@ -957,6 +1057,132 @@ mod tests {
         let dump = "ffffffff81000000 T __pfx_udpv6_sendmsg\n\
                     ffffffff81000010 T udpv6_sendmsg_prelude\n";
         assert_eq!(symbol_location(dump, "udpv6_sendmsg"), None);
+    }
+
+    // ---- syscall object load variants (round 3 crashloop) ------------------
+
+    fn v(gate: bool, startup: bool, inject: bool) -> SyscallLoadVariant {
+        SyscallLoadVariant {
+            ownership_gate: gate,
+            startup_capture: startup,
+            inject_failure: inject,
+        }
+    }
+
+    #[test]
+    fn load_variants_degrade_down_to_the_pre_gate_behaviour() {
+        assert_eq!(
+            syscall_load_variants(None, None),
+            vec![
+                v(true, true, false),
+                v(false, true, false),
+                v(false, false, false)
+            ]
+        );
+        // The last resort never carries either optional feature.
+        let last = *syscall_load_variants(None, None).last().unwrap();
+        assert!(!last.ownership_gate && !last.startup_capture);
+    }
+
+    #[test]
+    fn the_ownership_gate_can_be_switched_off() {
+        for off in ["off", "false", "0", "OFF", " disabled "] {
+            assert!(
+                syscall_load_variants(Some(off), None)
+                    .iter()
+                    .all(|v| !v.ownership_gate),
+                "{off:?}"
+            );
+        }
+        assert_eq!(syscall_load_variants(Some("on"), None).len(), 3);
+    }
+
+    /// The fallback the live crash needed: a gated object that fails to
+    /// load must leave a gate-less one to try, and injection lets that be
+    /// proven on a real node (KGUARDIAN_INJECT_LOAD_FAILURE=ownership).
+    #[test]
+    fn an_injected_gate_failure_falls_back_to_the_gateless_object() {
+        let variants = syscall_load_variants(None, Some("ownership"));
+        let first_ok = variants.iter().find(|v| !v.inject_failure).unwrap();
+        assert!(!first_ok.ownership_gate);
+        assert!(
+            first_ok.startup_capture,
+            "startup capture survives a gate failure"
+        );
+        assert!(syscall_load_variants(None, Some("all"))
+            .iter()
+            .all(|v| v.inject_failure));
+    }
+
+    /// Loads every probe object on the RUNNING kernel, the way the
+    /// controller does, and requires the full configuration to load
+    /// without falling back. Needs root and a BTF kernel, so it is ignored
+    /// by default; the ebpf-kernels CI job runs it inside VMs booted on
+    /// several kernels (.github/workflows/controller-ebpf-kernels.yaml).
+    #[test]
+    #[ignore = "needs root and a BTF-enabled kernel; run by the ebpf-kernels CI job"]
+    fn every_probe_object_loads_on_this_kernel() {
+        use crate::network::netpolicy_drop::NetpolicyDropSkelBuilder;
+        use crate::network::network_probe::NetworkProbeSkelBuilder;
+
+        // Syscall object: every variant must load on its own. The gate-less
+        // ones are the fallback guarantee (checked first, so a broken
+        // gated build still proves the fallback would have saved the
+        // node); the full one failing is exactly the regression to catch.
+        let mut failures = Vec::new();
+        let mut variants = syscall_load_variants(None, None);
+        variants.reverse();
+        for variant in variants {
+            let mut storage = MaybeUninit::uninit();
+            let outcome = open_and_load_syscall(&mut storage, variant).map(drop);
+            match outcome {
+                Ok(()) => eprintln!("syscall object loads: {variant:?}"),
+                Err(e) => {
+                    eprintln!("syscall object FAILS: {variant:?}: {e}");
+                    failures.push((variant, e));
+                }
+            }
+        }
+        assert!(
+            failures.iter().all(|(v, _)| v.ownership_gate),
+            "a fallback (gate-less) configuration does not load: {failures:?}"
+        );
+        assert!(failures.is_empty(), "{failures:?}");
+
+        let udpv6 = kernel_can_fentry("udpv6_sendmsg");
+        let mut storage = MaybeUninit::uninit();
+        let mut open = NetworkProbeSkelBuilder::default()
+            .open(&mut storage)
+            .expect("open network probe");
+        if !udpv6 {
+            open.progs.trace_udpv6_send.set_autoload(false);
+        }
+        open.load().expect("load network probe");
+
+        let mut storage = MaybeUninit::uninit();
+        let mut open = NetpolicyDropSkelBuilder::default()
+            .open(&mut storage)
+            .expect("open netpolicy probe");
+        if !udpv6 {
+            open.progs.trace_udpv6_send.set_autoload(false);
+        }
+        open.load().expect("load netpolicy probe");
+
+        if kernel_can_kprobe(AUDIT_SECCOMP_SYMBOL) {
+            let mut storage = MaybeUninit::uninit();
+            SeccompDenialSkelBuilder::default()
+                .open(&mut storage)
+                .expect("open seccomp denial probe")
+                .load()
+                .expect("load seccomp denial probe");
+        }
+
+        let mut storage = MaybeUninit::uninit();
+        crate::contention::sched_contention_skel::SchedContentionSkelBuilder::default()
+            .open(&mut storage)
+            .expect("open sched contention probe")
+            .load()
+            .expect("load sched contention probe");
     }
 
     fn reset_state() {
