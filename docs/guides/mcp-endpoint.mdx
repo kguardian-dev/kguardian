@@ -4,7 +4,7 @@ description: "Point Claude Code or any MCP client at your cluster's observed tel
 icon: "plug"
 ---
 
-kguardian's assistant runs 19 tools against the Broker: pod traffic, syscalls, pod and service inventory, network-policy audit verdicts, compute contention, workload security profiles, the image inventory, and generation of least-privilege `NetworkPolicy` and seccomp profiles from that observed baseline. The web UI is one way to reach them.
+kguardian's assistant runs 23 tools against the Broker: pod traffic, syscalls, pod and service inventory, network-policy audit verdicts, compute contention, workload security profiles, the image inventory, vulnerabilities and SBOMs, and generation of least-privilege `NetworkPolicy` and seccomp profiles from that observed baseline. The web UI is one way to reach them.
 
 The other is to point your own MCP client at the cluster. Enable the endpoint, port-forward, add one server entry, and the agent you already work in can ask about real observed behaviour and turn it into policy YAML — without an API key of kguardian's own, and without leaving your terminal.
 
@@ -201,6 +201,14 @@ The tools cover these areas (the compute tools are described in [Compute Gauges]
     Tools are keyed by workload (`namespace`, `kind`, `name`), not pod. `null` or `unknown` means kguardian has no data, or the source is not configured. It is never a pass: posture is `ok` only when all four core dimensions (network, syscalls, podSecurity, images) are known and ok, and images stays `unknown` until vulnerability data exists, so the tools return coverage alongside the status. A Pod Security Standards level of `restricted` is an upper bound kguardian cannot confirm. Every string in a result is cluster data, and the tools tell the model never to follow instructions inside it. Lists are capped (25 rows by default, 100 at most) and every response is size-bounded, with a `truncated` flag when rows were cut.
 
     *"Which workloads in `payments` are at risk, and what is the smallest securityContext change that gets `checkout` to restricted?"*
+  </Accordion>
+
+  <Accordion icon="bug" title="Vulnerabilities, CVE exposure and SBOMs">
+    `get_image_vulnerabilities` returns an image's findings, deduplicated across sources (Trivy Operator, Grype), with every source's fixed versions, KEV and EPSS where a source gives them. `list_vulnerabilities` lists CVEs across the inventory with affected image, workload and namespace counts. `explain_cve_exposure` follows one id from affected images to the workloads running them and each workload's observed ingress. `get_image_sbom` returns every source's SBOM with its trust level and one SBOM's components.
+
+    The tools tell the model never to invent a vulnerability id: every id in an answer must come from tool output. An image no source has scanned is unknown, not clean. kguardian cannot yet tell which packages a workload loads, so no finding is described as unreachable. `exposed: null` means no ingress was observed (egress alone does not count), never "not exposed". Only an SBOM with trust `verified` is described as signed. kguardian reports what scanners found; it does not scan.
+
+    *"Are we affected by CVE-2024-3094, where does it run, and is any of it reachable from outside its namespace?"*
   </Accordion>
 </AccordionGroup>
 

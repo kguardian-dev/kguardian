@@ -1,6 +1,6 @@
 ---
 title: "images"
-description: "List the image digests your workloads run, and which workloads run a given digest"
+description: "List the image digests your workloads run, their vulnerabilities and SBOMs"
 icon: "box"
 ---
 
@@ -13,10 +13,14 @@ two nodes that resolved `nginx:latest` differently show as two images.
 ```bash
 kubectl kguardian images list [flags]
 kubectl kguardian images get <digest> [flags]
+kubectl kguardian images vulns <digest> [flags]
+kubectl kguardian images sbom <digest> [flags]
 ```
 
-The inventory records identity only. It carries no vulnerability, SBOM or
-signature data, so an image listed here is neither vetted nor flagged.
+`list` and `get` show identity only; an image listed there is neither vetted
+nor flagged. `vulns` and `sbom` show what scanners reported for the image,
+from the supplychain component. See [vulns](/cli/vulns) for vulnerabilities
+across the cluster.
 
 ## images list
 
@@ -71,6 +75,104 @@ fields this CLI version does not know about. Global flags (`--kubeconfig`,
 `--context`, `--broker-namespace`, `--broker-service`,
 `--broker-token-file`, `--debug`) are listed in the
 [CLI overview](/cli/overview).
+
+## images vulns
+
+Calls `GET /images/{digest}/vulnerabilities`: the findings scanners
+reported for one image, deduplicated across sources (Trivy Operator,
+Grype), most severe first. kguardian reports what the sources found; it
+does not scan.
+
+| Flag | Type | Description | Default |
+|------|------|-------------|---------|
+| `--severity` | string | Only these severities, comma-separated: `critical,high,medium,low,none,unknown` | all |
+| `--fixable` | bool | Only findings some source has a fix for (`--fixable=false`: only without) | all |
+| `--source` | string | Only one source's report: `trivy-operator`, `grype` or `registry` | all |
+| `--fail-on` | string | CI gate, see below: `critical`, `high`, `medium` or `low` | off |
+| `--limit`, `--after` | | Page size (max 500) and cursor | `100` |
+| `-o, --output` | string | `table`, `json` or `yaml` | `table` |
+
+```
+SOURCE          SCANNER       SCANNED              JOIN               SBOM TRUST  FINDINGS
+grype           grype 0.87.0  2026-09-26T02:31:28  platform_manifest  unverified  1
+trivy-operator  Trivy 0.58.1  2026-09-26T02:31:28  platform_manifest  scanned     3
+
+SEVERITY  ID              PACKAGE     INSTALLED  FIXED            SCORE  KEV      SOURCES
+CRITICAL  CVE-2099-10001  fastparse   2.1.0      2.1.10 or 2.1.4  9.8    yes      grype,trivy-operator
+HIGH      CVE-2099-10003  libexample  1.2.3      -                7.5    unknown  trivy-operator
+MEDIUM    CVE-2099-10002  tinyrouter  4.18.2     4.19.2           6.1    unknown  trivy-operator
+
+In use: unknown. kguardian cannot yet tell which packages load; treat every finding as potentially reachable.
+```
+
+- **No vulnerability data** means no source has reported on the image.
+  That is unknown, not clean.
+- **FIXED** lists every fixed version the sources give, in source order.
+  None is picked, because text order is not version order.
+- **KEV** `unknown` means no source said either way. Trivy never reports
+  KEV, so this is not "not exploited".
+- **JOIN** says how the report was matched to what runs: `image_id` and
+  `platform_manifest` are exact, `workload_tag` is by tag only.
+
+### CI gate: `--fail-on`
+
+| Exit | Meaning |
+|------|---------|
+| `0` | No finding at or above the severity |
+| `1` | At least one finding at or above it. Findings whose severity no source knows (`UNKNOWN`) count. |
+| `3` | No vulnerability data for the image. Unknown is never a pass. |
+
+Other failures (broker unreachable, bad token) also exit `1`, with an error
+message rather than a `gate:` line. The gate runs its own query, so it sees
+every page, not only the one printed.
+
+```bash
+kubectl kguardian images vulns "$DIGEST" --fail-on high -o json > vulns.json
+```
+
+## images sbom
+
+Calls `GET /images/{digest}/sbom`. Every source's SBOM is kept side by side
+and listed with its trust level, weakest first:
+
+| Trust | Meaning |
+|-------|---------|
+| `attached-unbound` | A bare document attached to the image in its registry |
+| `unverified` | An in-toto statement naming the image; signature not checked |
+| `scanned` | Trivy Operator's in-cluster scan |
+| `verified` | Signature verified. The only level shown as signed. |
+
+The components shown come from one SBOM: `--source` if given, else Trivy
+Operator's, else another scanner's, and a registry SBOM only when it is the
+only one.
+
+| Flag | Type | Description | Default |
+|------|------|-------------|---------|
+| `--source` | string | `trivy-operator`, `grype` or `registry` | the broker's choice |
+| `--limit`, `--after` | | Components per page (max 500) and cursor | `100` |
+| `-o, --output` | string | `table`, `json`, `yaml` or `cyclonedx` | `table` |
+
+```
+SOURCE          FORMAT     TRUST       SIGNED  COMPONENTS  SCANNED
+trivy-operator  CycloneDX  scanned     no      3           2026-09-26T02:31:28
+registry        SPDX       unverified  no      2           2026-09-26T02:31:28
+
+Components from trivy-operator (trust scanned):
+NAME        VERSION  TYPE  LICENSES  PURL
+fastparse   2.1.0    npm   MIT       pkg:npm/fastparse@2.1.0
+tinyrouter  4.18.2   npm   MIT       pkg:npm/tinyrouter@4.18.2
+colorize    1.4.0    npm   MIT       pkg:npm/colorize@1.4.0
+```
+
+`-o cyclonedx` writes the broker's CycloneDX 1.5 JSON export of that SBOM
+(`GET /images/{digest}/sbom/cyclonedx`) to stdout, with the source, join and
+trust in `metadata.properties`:
+
+```bash
+kubectl kguardian images sbom "$DIGEST" -o cyclonedx > sbom.cdx.json
+```
+
+A listed component says nothing about whether it is loaded at runtime.
 
 ## Examples
 
