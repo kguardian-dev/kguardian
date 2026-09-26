@@ -1812,6 +1812,33 @@ RETURNS TABLE (covered boolean, observed_since timestamp, reason text) LANGUAGE 
     SELECT true, timezone('UTC', NOW()) - INTERVAL '48 hours', NULL::text \
 $$";
 
+/// [`COVERAGE_STUB`] installed for the life of the guard. On drop (a
+/// panic included) the real `kg_runtime_coverage` is re-created from the
+/// runtime inventory migration, on a fresh connection, so a later test or
+/// a second `--ignored` run on the same database sees the real function.
+struct CoverageStub;
+
+impl CoverageStub {
+    fn install(conn: &mut PgConnection) -> CoverageStub {
+        // The real function names its parameters, which CREATE OR REPLACE
+        // cannot change: replace it by dropping it first.
+        exec(
+            conn,
+            "DROP FUNCTION IF EXISTS kg_runtime_coverage(text, text, text, text, text, text, integer)",
+        );
+        exec(conn, COVERAGE_STUB);
+        CoverageStub
+    }
+}
+
+impl Drop for CoverageStub {
+    fn drop(&mut self) {
+        let url = std::env::var("KG_TEST_DATABASE_URL").expect("KG_TEST_DATABASE_URL");
+        let mut c = PgConnection::establish(&url).expect("connect to restore kg_runtime_coverage");
+        crate::runtime_inventory::restore_coverage_function(&mut c);
+    }
+}
+
 /// Acceptance fixture: an image whose SBOM has two shared libraries, each
 /// with a CVE; the process dlopen()s only one of them. Exactly one package
 /// is marked loaded; the other is unknown without capture coverage and
@@ -1827,10 +1854,12 @@ fn live_database_only_the_dlopened_library_is_loaded() {
     exec(&mut conn, RUNTIME_EXECUTABLES_CONTRACT);
     exec(
         &mut conn,
-        "DROP FUNCTION IF EXISTS kg_runtime_coverage(text, text, text, text, text, text, integer); \
-         TRUNCATE runtime_executables, runtime_package_use, runtime_unowned_paths, \
+        "TRUNCATE runtime_executables, runtime_package_use, runtime_unowned_paths, \
             runtime_in_use_coverage, workload_network_exposure;",
     );
+    // The real coverage function (no heartbeats here, so nothing is
+    // covered): a previous run or test may have left the stub behind.
+    crate::runtime_inventory::restore_coverage_function(&mut conn);
     let img = d(77);
     seed_inventory(
         &mut conn,
@@ -1965,7 +1994,7 @@ fn live_database_only_the_dlopened_library_is_loaded() {
     ));
 
     // With coverage: the unseen library is installed-not-observed.
-    exec(&mut conn, COVERAGE_STUB);
+    let stub = CoverageStub::install(&mut conn);
     iu::refresh_coverage(&mut conn, &t, &whole).unwrap();
     let mut got = state_of(&mut conn, &all);
     got.sort();
@@ -2077,10 +2106,8 @@ fn live_database_only_the_dlopened_library_is_loaded() {
     let parsed: serde_json::Value = serde_json::from_str(vd.content.as_deref().unwrap()).unwrap();
     assert_eq!(parsed, vex.doc);
 
-    exec(
-        &mut conn,
-        "DROP FUNCTION kg_runtime_coverage(text, text, text, text, text, text, integer)",
-    );
+    // Back to the real function: nothing is covered.
+    drop(stub);
     // The export bundle's `sbom` artifact: the stored SBOM of the one
     // container image, labelled with its source.
     let src = crate::workload_profile::load_sources(&mut conn, &key).unwrap();
@@ -2148,7 +2175,7 @@ fn live_database_truncated_or_unfinished_use_is_never_covered() {
         "TRUNCATE runtime_executables, runtime_package_use, runtime_unowned_paths, \
             runtime_in_use_coverage, workload_network_exposure;",
     );
-    exec(&mut conn, COVERAGE_STUB);
+    let _stub = CoverageStub::install(&mut conn);
     let img = d(79);
     seed_inventory(
         &mut conn,
@@ -2270,11 +2297,6 @@ fn live_database_truncated_or_unfinished_use_is_never_covered() {
     )
     .unwrap();
     assert_eq!(bar_state(&mut conn).0, "loaded");
-
-    exec(
-        &mut conn,
-        "DROP FUNCTION kg_runtime_coverage(text, text, text, text, text, text, integer)",
-    );
 }
 
 /// Two installed versions of one package on one image, in two containers.
@@ -2291,7 +2313,7 @@ fn live_database_vex_cap_never_splits_a_version_group() {
         "TRUNCATE runtime_package_use, runtime_unowned_paths, runtime_in_use_coverage, \
             workload_network_exposure;",
     );
-    exec(&mut conn, COVERAGE_STUB);
+    let _stub = CoverageStub::install(&mut conn);
     let img = d(80);
     for c in ["app", "side"] {
         seed_inventory(
@@ -2366,10 +2388,6 @@ fn live_database_vex_cap_never_splits_a_version_group() {
             "cap {cap}: a statement from part of a group: {out:?}"
         );
     }
-    exec(
-        &mut conn,
-        "DROP FUNCTION kg_runtime_coverage(text, text, text, text, text, text, integer)",
-    );
 }
 
 /// A re-ingest between the SBOM header read and the component read leaves
