@@ -1,6 +1,6 @@
 ---
 title: "images"
-description: "List the image digests your workloads run, their vulnerabilities and SBOMs"
+description: "List the image digests your workloads run, their vulnerabilities, SBOMs and signers"
 icon: "box"
 ---
 
@@ -15,13 +15,16 @@ kubectl kguardian images list [flags]
 kubectl kguardian images get <digest> [flags]
 kubectl kguardian images vulns <digest> [flags]
 kubectl kguardian images sbom <digest> [flags]
+kubectl kguardian images signers <digest> [flags]
+kubectl kguardian images trust [flags]
 kubectl kguardian images admission-policy [flags]
 ```
 
 `list` and `get` show identity only; an image listed there is neither vetted
 nor flagged. `vulns` and `sbom` show what scanners reported for the image,
-from the supplychain component. See [vulns](/cli/vulns) for vulnerabilities
-across the cluster.
+from the supplychain component. `signers` shows who signed a digest and
+`trust` which ImageTrustPolicies would deny what. See [vulns](/cli/vulns) for
+vulnerabilities across the cluster.
 
 ## images list
 
@@ -189,6 +192,212 @@ kubectl kguardian images sbom "$DIGEST" -o cyclonedx > sbom.cdx.json
 ```
 
 A listed component says nothing about whether it is loaded at runtime.
+
+## images signers
+
+Calls `GET /images/{digest}/attestation`: who signed one image digest, as
+kguardian's signature discovery found it (needs
+`supplychain.signatureDiscovery.enabled`).
+
+| Flag | Type | Description | Default |
+|------|------|-------------|---------|
+| `--fail-on` | string | CI gate: `invalid`, `unsigned` or `unverified` (see below) | off |
+| `-o, --output` | string | `table`, `json` or `yaml` (the broker's answer, unchanged) | `table` |
+
+| Verdict | Meaning |
+|---------|---------|
+| `verified` | A signature verified for the signer shown: a keyless identity (certificate SAN via OIDC issuer) or a configured key (name and sha256 of the key). |
+| `key_signed` | Signed with a public key kguardian was not given. The signature was **not** checked, so its signer is not known. |
+| `unsigned` | No signature, and every lookup answered. |
+| `invalid` | Signatures exist and none verified. |
+| `unknown` | Could not be checked (`REASON` says why: `registry_auth` for a private image, `rate_limited`, `timeout`, ...). Not unsigned. |
+
+<Warning>
+**Verified is not trusted.** Anyone with a Fulcio identity or a key can
+sign, and anyone who can push to the repository can attach a signature.
+Whether the signer is one you accept is what an
+[ImageTrustPolicy](/concepts/image-trust-policy) decides: see
+[`images trust`](#images-trust).
+</Warning>
+
+An unverified signature shows its error and never a signer: an identity it
+claims is not a fact. Signatures and attestations that verified are listed
+first.
+
+The output below was captured from a local broker. The signature results
+are real sigstore-go verifications of kguardian's signing test fixtures, so
+repositories name a local test registry; the workloads were seeded, and the
+`payments` and `recs` digests are synthetic.
+
+```
+$ kubectl kguardian images signers sha256:41e17ed83c594a64a9396b6ab96dd26d5ddc290dacf4c177464712ff21ad534f
+DIGEST      sha256:41e17ed83c594a64a9396b6ab96dd26d5ddc290dacf4c177464712ff21ad534f
+REPOSITORY  127.0.0.1:45637/chainguard/static
+VERDICT     verified (a signature verified for the signer(s) below; valid, not trusted: see 'images trust')
+REASON      -
+TRUST ROOT  custom:6494e21ea73f
+SIGNED VIA  self
+CHECKED     2026-09-26T22:24:27.806086
+
+SIGNATURES
+VERIFIED  KIND     SIGNER                                                                                                                                      FORMAT         SOURCE   ERROR
+yes       keyless  https://github.com/chainguard-images/images/.github/workflows/release.yaml@refs/heads/main via https://token.actions.githubusercontent.com  cosign-legacy  sig-tag  -
+
+ATTESTATIONS
+VERIFIED  PREDICATE                             SIGNER                                                                                                                                      PROVENANCE                                                         ERROR
+yes       https://slsa.dev/provenance/v1        https://github.com/chainguard-images/images/.github/workflows/release.yaml@refs/heads/main via https://token.actions.githubusercontent.com  builder https://github.com/chainguard-dev/terraform-provider-apko  -
+yes       https://apko.dev/image-configuration  https://github.com/chainguard-images/images/.github/workflows/release.yaml@refs/heads/main via https://token.actions.githubusercontent.com  -                                                                  -
+yes       https://spdx.dev/Document             https://github.com/chainguard-images/images/.github/workflows/release.yaml@refs/heads/main via https://token.actions.githubusercontent.com  -                                                                  -
+```
+
+A digest with no result has not been checked:
+
+```
+$ kubectl kguardian images signers sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd
+No signature result for sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd: it has not been checked (signature discovery off, the image is not running, or it has not been reached yet). This is unknown, not unsigned.
+```
+
+### CI gate: `images signers --fail-on`
+
+Exit code by verdict and level:
+
+| Verdict | `--fail-on invalid` | `--fail-on unsigned` | `--fail-on unverified` |
+|---------|:---:|:---:|:---:|
+| `verified` | 0 | 0 | 0 |
+| `key_signed` | 3 | 3 | 1 |
+| `unsigned` | 0 | 1 | 1 |
+| `invalid` | 1 | 1 | 1 |
+| `unknown`, or no result | 3 | 3 | 3 |
+
+| Exit | Meaning |
+|------|---------|
+| `0` | The verdict passes the level |
+| `1` | The verdict fails it |
+| `2` | The check could not run: the broker is unreachable, the port-forward or token failed, the broker returned an error, or a flag was invalid |
+| `3` | The signature could not be verified: the digest has no result, its verdict is `unknown` (or one this CLI does not know), or it is `key_signed` (a key kguardian was not given) below `unverified`. Never a pass. |
+
+A pass only says a valid signature exists. To gate on who signed, use
+`images trust --fail-on would-deny` with a policy.
+
+```
+$ kubectl kguardian images signers sha256:f6ab986a3a713f127b0f03c6f5319756883249bbf58cebbee9911d80eb7fa1f8 --fail-on unsigned
+DIGEST      sha256:f6ab986a3a713f127b0f03c6f5319756883249bbf58cebbee9911d80eb7fa1f8
+REPOSITORY  127.0.0.1:45637/kguardian-dev/kguardian/controller
+VERDICT     unsigned (no signature found, and every lookup answered)
+REASON      -
+TRUST ROOT  custom:6494e21ea73f
+SIGNED VIA  -
+CHECKED     2026-09-26T22:24:27.853582
+
+No signatures or attestations were found.
+gate: sha256:f6ab986a3a713f127b0f03c6f5319756883249bbf58cebbee9911d80eb7fa1f8 is unsigned, which fails --fail-on unsigned (exit 1)
+$ echo $?
+1
+```
+
+```
+$ kubectl kguardian images signers sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa --fail-on unsigned
+DIGEST      sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+REPOSITORY  127.0.0.1:42667/private/payments
+VERDICT     unknown (could not be checked; not the same as unsigned)
+REASON      registry_auth
+TRUST ROOT  custom:6494e21ea73f
+SIGNED VIA  -
+CHECKED     2026-09-26T22:24:27.868974
+
+No signatures or attestations were found.
+gate: sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa could not be checked (verdict unknown, registry_auth); unknown is not a pass (exit 3)
+$ echo $?
+3
+```
+
+## images trust
+
+Calls `GET /image-trust`: the evaluator's
+[ImageTrustPolicy](/concepts/image-trust-policy) and ClusterImageTrustPolicy
+results, served by the broker. For every policy and running container it
+selects: `Trusted`, `WouldDeny` or `Unknown` with the reason, `WouldDeny`
+first. Report-only: `WouldDeny` means an admission controller enforcing the
+policy would reject the image. kguardian never blocks anything.
+
+| Flag | Type | Description | Default |
+|------|------|-------------|---------|
+| `-n, --namespace` | string | Only this namespace | all namespaces |
+| `--kind`, `--name` | string | Only this workload, e.g. `--kind Deployment --name checkout` | all workloads |
+| `--verdict` | string | `Trusted`, `WouldDeny` or `Unknown` | all |
+| `--limit` | int | Results to print (max 2000). The counts always cover every result. | `200` |
+| `--fail-on` | string | CI gate: `would-deny` | off |
+| `-o, --output` | string | `table`, `json` or `yaml` | `table` |
+
+| Reason | Meaning |
+|--------|---------|
+| `unsigned`, `invalid` | The image has no signature, or its signatures did not verify |
+| `untrusted-signer` | Signed, but not by an identity or key the policy trusts |
+| `key-not-verified` | Key-signed with a key kguardian was not given, and the policy trusts a key: give the supplychain component the key |
+| `attestation-missing` | A required attestation is missing or not signed by a trusted signer |
+| `not-checked` | No signature result yet (`Unknown`) |
+| `namespace-unknown` | The namespace's labels could not be read (`Unknown`) |
+| `broker-unavailable`, `broker-unauthorized` | The evaluator could not read signature results (`Unknown`) |
+
+`Unknown` can also carry a discovery reason such as `registry_auth`.
+
+```
+$ kubectl kguardian images trust -n shop
+VERDICT    REASON            NAMESPACE  WORKLOAD               CONTAINER  POLICY                      IMAGE
+WouldDeny  unsigned          shop       Deployment/cart        app        shop/release-signers        ghcr.io/kguardian-dev/kguardian/controller
+WouldDeny  untrusted-signer  shop       Deployment/checkout    app        cluster/require-provenance  127.0.0.1:5557/fixture/key-legacy
+WouldDeny  untrusted-signer  shop       Deployment/search      app        cluster/require-provenance  127.0.0.1:5557/fixture/key-bundle
+WouldDeny  key-not-verified  shop       Deployment/search      app        shop/release-signers        127.0.0.1:5557/fixture/key-bundle
+WouldDeny  invalid           shop       StatefulSet/ledger     app        shop/release-signers        registry.k8s.io/pause
+Unknown    registry_auth     shop       Deployment/payments    app        shop/release-signers        registry.example.com/private/payments
+Unknown    not-checked       shop       Deployment/recs        app        shop/release-signers        registry.example.com/shop/recs
+Trusted    -                 shop       Deployment/checkout    app        shop/release-signers        127.0.0.1:5557/fixture/key-legacy
+Trusted    -                 shop       Deployment/storefront  app        cluster/require-provenance  cgr.dev/chainguard/static
+Trusted    -                 shop       Deployment/storefront  app        shop/release-signers        cgr.dev/chainguard/static
+Evaluated 2026-09-27T08:32:32.338751644+10:00: 5 would deny, 2 unknown, 3 trusted (10 results, 2 policies).
+```
+
+The summary line goes to stderr. One workload, and a cut list:
+
+```
+$ kubectl kguardian images trust -n shop --kind Deployment --name search
+VERDICT    REASON            NAMESPACE  WORKLOAD           CONTAINER  POLICY                      IMAGE
+WouldDeny  untrusted-signer  shop       Deployment/search  app        cluster/require-provenance  127.0.0.1:5557/fixture/key-bundle
+WouldDeny  key-not-verified  shop       Deployment/search  app        shop/release-signers        127.0.0.1:5557/fixture/key-bundle
+Evaluated 2026-09-27T08:32:32.338751644+10:00: 2 would deny, 0 unknown, 0 trusted (2 results, 2 policies).
+```
+
+```
+$ kubectl kguardian images trust -n shop --verdict WouldDeny --limit 2
+VERDICT    REASON            NAMESPACE  WORKLOAD             CONTAINER  POLICY                      IMAGE
+WouldDeny  unsigned          shop       Deployment/cart      app        shop/release-signers        ghcr.io/kguardian-dev/kguardian/controller
+WouldDeny  untrusted-signer  shop       Deployment/checkout  app        cluster/require-provenance  127.0.0.1:5557/fixture/key-legacy
+Evaluated 2026-09-27T08:32:32.338751644+10:00: 5 would deny, 0 unknown, 0 trusted (5 results, 2 policies).
+Showing 2 of 5 results; raise --limit or narrow with -n, --kind/--name or --verdict.
+```
+
+### CI gate: `--fail-on would-deny`
+
+| Exit | Meaning |
+|------|---------|
+| `0` | Every selected container is `Trusted` |
+| `1` | At least one `WouldDeny` |
+| `2` | The check could not run: the broker is unreachable, the port-forward or token failed, a flag was invalid, or the broker has no image trust results (no evaluator, image trust evaluation off, the evaluator refused the token or could not be reached) |
+| `3` | Unknown: at least one `Unknown` result and no `WouldDeny`, the evaluator has not finished a pass, or no policy selects the workloads |
+
+The gate reads the counts, which cover every result, so `--limit` does not
+hide a `WouldDeny`. `--verdict` cannot be combined with `--fail-on`.
+
+```
+$ kubectl kguardian images trust -n shop --fail-on would-deny
+...
+gate: 5 container result(s) would be denied (exit 1)
+
+$ kubectl kguardian images trust --fail-on would-deny     # evaluator down
+Image trust results are not available: the evaluator could not be reached: error sending request for url (http://127.0.0.1:56311/image-trust)
+Whether anything would be denied is unknown.
+gate: could not check (exit 2): the evaluator could not be reached: error sending request for url (http://127.0.0.1:56311/image-trust)
+```
 
 ## images admission-policy
 
