@@ -1,5 +1,28 @@
 # Changelog
 
+## [1.11.0](https://github.com/kguardian-dev/kguardian/compare/advisor/v1.10.0...advisor/v1.11.0) (2026-09-26)
+
+
+### Features
+
+* **advisor:** add images vulns/sbom and vulns list/exposure commands ([e20a974](https://github.com/kguardian-dev/kguardian/commit/e20a974db94fb2de2c816ca51f9ae5161e7e854e))
+* **advisor:** add profile and images commands ([df21a49](https://github.com/kguardian-dev/kguardian/commit/df21a4964045e4f47338242f136f3611921ed94c))
+* **advisor:** adopt profile contract v1.2 (no scores) ([acb5c9a](https://github.com/kguardian-dev/kguardian/commit/acb5c9ab06d75e712a8fe248362caf132c635431))
+* **advisor:** adopt profile contract v1.3 status rules ([9009d6f](https://github.com/kguardian-dev/kguardian/commit/9009d6fdd4245b2130286852f4baec5d68e563cf))
+* **advisor:** broker token for the CLI and errors on 401/403 ([199fee1](https://github.com/kguardian-dev/kguardian/commit/199fee1707c40a2b2a7ac2df627b8f806fbe7666))
+
+
+### Bug Fixes
+
+* **advisor:** a '-' tier means not computed yet, never low risk ([560bafc](https://github.com/kguardian-dev/kguardian/commit/560bafc07d02cd765709737038ea5fa6127c9ea6))
+* **advisor:** add a token hint to auth errors and print unknown diff levels as unknown ([989fbbb](https://github.com/kguardian-dev/kguardian/commit/989fbbb8f1ce1650a2b40ec5aed9439eb7c34bd2))
+* **advisor:** drop 'scanners found' from the vulns help ([97e86b8](https://github.com/kguardian-dev/kguardian/commit/97e86b886db9dede00439b98ef11455498e73a8c))
+* **advisor:** exit 2 when images vulns --fail-on could not check ([e22980f](https://github.com/kguardian-dev/kguardian/commit/e22980ff464c42622fc5788fd607532831bb827a))
+* **advisor:** label unknownDimensions as not scored ([6918d2d](https://github.com/kguardian-dev/kguardian/commit/6918d2db70b078100e574e26d7efe11290a9ea86))
+* **advisor:** name the vulnerability sources and require a full sha256 digest ([49a562a](https://github.com/kguardian-dev/kguardian/commit/49a562a74b6067bd7b718cf3fa08da48ba5091f4))
+* **advisor:** show risk tiers and in-use state for vulnerabilities ([359c772](https://github.com/kguardian-dev/kguardian/commit/359c77219f5da2c370eaa7e0b2b4c80f7245fa43))
+* **deps:** update kubernetes monorepo to v0.37.1 ([#1640](https://github.com/kguardian-dev/kguardian/issues/1640)) ([2ec380b](https://github.com/kguardian-dev/kguardian/commit/2ec380b9d5517e74275cc87c207c779812b28c4b))
+
 ## [1.10.0](https://github.com/kguardian-dev/kguardian/compare/advisor/v1.9.0...advisor/v1.10.0) (2026-09-11)
 
 
