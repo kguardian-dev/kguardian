@@ -171,6 +171,74 @@ the others:
 A payload replaced by a newer one for the same key is never retried over
 it. The replacement starts with a clean backoff.
 
+### Registry SBOM source
+
+Publishers increasingly attach SBOMs to their images. Where one exists,
+the supplychain component uses it (`source: "registry"`) in preference to
+Trivy's own scan of the image.
+
+1. Every `REGISTRY_SBOM_INTERVAL` (15 min), it lists running digests from
+   the broker's image inventory (`GET /images`, read scope, paged). Only
+   rows with `runningContainers > 0` are used.
+2. It looks each digest up at most once a day, found or not, so steady
+   state is one inventory listing per interval and no registry traffic.
+   Lookups run on 2 workers.
+3. Lookups are anonymous and go through the [address guard](#digest-kind-registry-lookup).
+   `allowPrivateRegistries` applies here too.
+
+For each digest it tries, in order, and keeps the first SBOM per subject:
+
+| Order | Mechanism (`attestation.mechanism`) | Where |
+|---|---|---|
+| 1 | `oci-referrer` | OCI referrers API (or the referrers tag fallback): sigstore bundles (cosign v3), in-toto statements, DSSE envelopes, bare SPDX/CycloneDX artifacts. |
+| 2 | `cosign-attestation` | cosign's `sha256-<hex>.att` tag: DSSE-wrapped in-toto statements. |
+| 3 | `cosign-sbom` | cosign's `sha256-<hex>.sbom` tag: `cosign attach sbom` documents. |
+| 4 | `buildkit-attestation` | Inside an image index: BuildKit's `unknown/unknown` attestation manifests (`vnd.docker.reference.type: attestation-manifest`). |
+
+- **Documents read:** CycloneDX JSON and SPDX 2.x JSON, bare or inside an
+  in-toto statement (predicate types `https://cyclonedx.org/bom*` and
+  `https://spdx.dev/Document*`).
+- **Skipped:** other predicates (e.g. SLSA provenance), XML, and SPDX
+  tag-value.
+- **Limits:** at most 16 artifacts per digest, 32 MiB per layer, 50 000
+  components per document.
+- **File paths:** these come from SPDX `CONTAINS` relationships and
+  CycloneDX file dependencies or evidence, made image-root relative.
+
+A BuildKit attestation describes one **platform manifest**, not the index.
+The payload is keyed by that manifest digest (`digest_kind: "manifest"`).
+The broker's join contract (imageID, then index→manifest) connects it to
+running containers.
+
+**Not verified.** `attestation.verified` is always `false`. The SBOM was
+found attached to the image, but no signature or signer identity was
+checked; that is a separate step (#1533 P2). Treat a registry SBOM as the
+publisher's claim, not as proof.
+
+### Source priority (contract for the broker)
+
+| Data | Rule |
+|---|---|
+| SBOM for a digest | `registry` > `trivy-operator` > none. The broker stores each source's SBOM separately, keyed `(digest, source)`, and serves the highest-priority one. The Grype matcher uses the same order. |
+| Vulnerabilities for a digest | Kept **side by side**, tagged by `source` (`trivy-operator`, `grype`). Each payload replaces only its own `(digest, source)` set; the broker does not merge or dedupe across sources at ingest. `grype` payloads say which SBOM they came from in `sbom_source`. |
+
+### Grype matcher
+
+**Pending a packaging decision.** Embedding Grype v0.119.0 adds about
+41 MB and about 700 modules to this binary. Grype is therefore not wired in
+yet. The backend-independent parts are done (`pkg/match`):
+
+- one SBOM per digest by the priority above, bounded (2000 digests);
+- matching on one worker, with a timeout per SBOM;
+- re-matching everything held when the database's build time changes,
+  without fetching any SBOM again;
+- emitting `ImageVulnerabilities` with `source: "grype"`, `sbom_source`,
+  `db_updated_at`, and per-vulnerability `kev` / `epss` when the database
+  has them.
+
+The Grype DB listing is `https://grype.anchore.io/databases/v6/latest.json`.
+On 2026-09-25 it pointed at a 181 MB `.tar.zst` archive (schema v6.1.9).
+
 ## Commands
 
 | Command | Purpose |
@@ -190,6 +258,8 @@ it. The replacement starts with a clean backoff.
 | `TRIVY_RECHECK_PERIOD` | `5m` | How often discovery re-runs to pick up installed or removed CRDs. |
 | `REGISTRY_LOOKUP_ENABLED` | value of `BROKER_INGEST_ENABLED` | Anonymous registry lookup for `digest_kind` / `platform_manifests`. |
 | `REGISTRY_ALLOW_PRIVATE` | `false` | Let lookups reach RFC1918/CGNAT/ULA addresses, `.local` and single-label names. Loopback, link-local, unspecified and multicast are always refused. |
+| `REGISTRY_SBOM_ENABLED` | value of `BROKER_INGEST_ENABLED` | Fetch registry-attached SBOMs for running digests. Needs `BROKER_URL` and a token with the read scope (the supplychain token has it). |
+| `REGISTRY_SBOM_INTERVAL` | `15m` | How often to list running images. |
 | `BROKER_INGEST_ENABLED` | `false` | Send payloads to the broker instead of logging them. |
 | `BROKER_URL` | `http://kguardian-broker:9090` | Broker base URL. |
 | `BROKER_AUTH_TOKEN` | *(unset)* | Scoped broker token, sent as a bearer token. |
@@ -219,6 +289,12 @@ auth and the read APIs.
 | `kguardian_supplychain_pending_emissions` | | Queue depth, including keys waiting out a backoff. |
 | `kguardian_supplychain_registry_lookups_total` | `result` | Uncached registry lookups: `index`, `manifest`, `unknown`, `skipped`. |
 | `kguardian_supplychain_registry_lookups_skipped_total` | `reason` | Lookups refused by the address guard. |
+| `kguardian_supplychain_registry_sbom_lookups_total` | `result` | Registry SBOM lookups per digest: `found`, `none`, `error`, `skipped_<reason>`, `list_error`. |
+| `kguardian_supplychain_grype_db_built_timestamp_seconds` | | Build time of the loaded Grype DB; DB age is `time() - this`. |
+| `kguardian_supplychain_grype_match_runs_total` | `result` | Match runs (`ok`, `error`). |
+| `kguardian_supplychain_grype_matches_total` | | Vulnerabilities returned by match runs. |
+| `kguardian_supplychain_grype_match_duration_seconds` | | Time to match one SBOM. |
+| `kguardian_supplychain_grype_sboms_held` | | SBOMs held for re-matching. |
 
 Plus the standard Go runtime and process collectors.
 
@@ -278,7 +354,11 @@ broker holds for `(image.digest, source)`. Go definitions are in
 | `image.digest_kind` | `index`, `manifest` or `unknown`. See [Digest kind](#digest-kind-registry-lookup). |
 | `image.platform_manifests` | For an index: `"os/arch[/variant]"` → platform manifest digest. Omitted otherwise. |
 | `scanned_at` | When the source produced the report (`report.updateTimestamp`). |
-| `db_updated_at` | Build time of the vulnerability DB used. **Omitted for Trivy Operator**, which does not record it. The Grype matcher will set it. |
+| `source` | `trivy-operator` or `grype`. |
+| `sbom_source` | For `grype`: which SBOM was matched (`registry` or `trivy-operator`). Omitted otherwise. |
+| `db_updated_at` | Build time of the vulnerability DB used. **Omitted for Trivy Operator**, which does not record it. Set for `grype`. |
+| `vulnerabilities[].kev`, `kev_date_added` | In CISA's Known Exploited Vulnerabilities catalogue, and since when. Grype DB only. Absent means unknown, not "not exploited". |
+| `vulnerabilities[].epss`, `epss_percentile` | FIRST.org EPSS probability and percentile (0-1). Grype DB only. |
 | `observed_in` | The report(s) this payload was built from at send time. Provenance only. The authoritative workload-to-image mapping is the broker's inventory. |
 | `vulnerabilities[].severity` | One of `CRITICAL`, `HIGH`, `MEDIUM`, `LOW`, `NONE`, `UNKNOWN`. Anything else is mapped to `UNKNOWN`. |
 | `vulnerabilities[].score` | The scanner's headline score. `cvss` holds the per-vendor detail (`v2_*`, `v3_*`, `v40_*`). |
@@ -317,6 +397,21 @@ serialises the same way.
   ]
 }
 ```
+
+For `source: "registry"` the SBOM also carries:
+
+```json
+"attestation": {
+  "mechanism": "buildkit-attestation",
+  "artifact_digest": "sha256:6243...",
+  "media_type": "application/vnd.in-toto+json",
+  "predicate_type": "https://spdx.dev/Document",
+  "verified": false
+}
+```
+
+with `scanner: {"name": "registry", "vendor": "<mechanism>"}`. `format`
+is `CycloneDX` or `SPDX`.
 
 Components are the CycloneDX `components` with Trivy's `aquasecurity:trivy:*`
 properties lifted into fields. The dependency graph is not carried in v1.
