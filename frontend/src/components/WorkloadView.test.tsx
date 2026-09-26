@@ -457,3 +457,29 @@ test('Overview: a drift finding is labelled Drift, and a drift check not evaluat
   expect(note.textContent).toContain('no runtime capture heartbeat for this container');
   expect(note.textContent).toContain('does not mean no drift');
 });
+
+test('Overview: no findings but drift checks not evaluated is not "Nothing flagged in any dimension"', async () => {
+  const quiet: WorkloadProfile = {
+    ...checkoutProfile,
+    posture: { ...checkoutProfile.posture, unknownDimensions: [] },
+    attention: [],
+    findings: [],
+    drift: {
+      evaluated: ['tagMoved'],
+      notEvaluated: [
+        { type: 'imageChangedSinceExport', container: null, reason: 'no_export' },
+        { type: 'unshippedExecutable', container: null, reason: 'no_running_containers' },
+      ],
+      items: [],
+    },
+  };
+  const { api } = replayApi([answer('GET /workloads/payments/Deployment/checkout/profile', quiet)]);
+  renderPage(api, CHECKOUT);
+  const attention = await screen.findByRole('region', { name: 'Needs attention' });
+  expect(attention.textContent).not.toContain('Nothing flagged in any dimension');
+  expect(attention.textContent).toContain('2 drift checks were not evaluated');
+  expect(attention.textContent).toContain('not a clean bill of health');
+  const note = within(attention).getByRole('list', { name: 'Drift checks not evaluated' });
+  expect(note.textContent).toContain('never been exported');
+  expect(note.textContent).toContain('no container is running');
+});

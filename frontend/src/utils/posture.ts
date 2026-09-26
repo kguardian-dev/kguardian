@@ -52,7 +52,7 @@ export function findingDimensionLabel(d: string): string {
   return (DIMENSION_LABEL as Record<string, string>)[d] ?? d;
 }
 
-/** Human text for why a drift check was not evaluated (contract v1.7). */
+/** Human text for why a drift check was not evaluated (contract v1.7). An unknown reason is a capture gap. */
 export function driftNotEvaluatedText(reason: string): string {
   switch (reason) {
     case 'no_inventory':
@@ -60,7 +60,17 @@ export function driftNotEvaluatedText(reason: string): string {
     case 'no_runtime_data':
       return 'no runtime capture heartbeat for this container';
     case 'truncated':
-      return 'too many unshipped files to read in full';
+      return 'more running containers than one read covers';
+    case 'no_running_containers':
+      return 'no container is running';
+    case 'no_image_inventory':
+      return 'no image inventory for this workload';
+    case 'no_export':
+      return 'the workload has never been exported (no baseline to compare with)';
+    case 'no_baseline':
+      return 'no earlier securityContext to compare with';
+    case 'no_container_data':
+      return 'no container securityContext reported';
     default:
       return `runtime capture gap (${reason})`;
   }

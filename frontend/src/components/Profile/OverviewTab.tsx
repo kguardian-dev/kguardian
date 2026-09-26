@@ -42,6 +42,9 @@ function NeedsAttention({ profile, onOpenTab }: { profile: WorkloadProfile; onOp
     : profile.attention.slice(0, ATTENTION_MAX);
   // Core dimensions with status unknown (contract v1.2).
   const unknown = profile.posture.unknownDimensions;
+  // Drift checks the broker could not run (contract v1.7): no item for
+  // them is not "no drift".
+  const driftGaps = profile.drift?.notEvaluated ?? [];
   return (
     <Panel
       icon={Radar}
@@ -63,7 +66,9 @@ function NeedsAttention({ profile, onOpenTab }: { profile: WorkloadProfile; onOp
           description={
             unknown.length > 0
               ? `Nothing flagged in the dimensions with data. ${unknown.length} dimension${unknown.length === 1 ? ' has' : 's have'} no data yet (${unknown.map((d) => DIMENSION_LABEL[d] ?? d).join(', ')}), so this is not a clean bill of health.`
-              : 'Nothing flagged in any dimension.'
+              : driftGaps.length > 0
+                ? `Nothing flagged, but ${new Set(driftGaps.map((g) => g.type)).size} drift check${new Set(driftGaps.map((g) => g.type)).size === 1 ? ' was' : 's were'} not evaluated (listed below), so this is not a clean bill of health.`
+                : 'Nothing flagged in any dimension.'
           }
         />
       ) : (
@@ -96,9 +101,9 @@ function NeedsAttention({ profile, onOpenTab }: { profile: WorkloadProfile; onOp
           })}
         </ul>
       )}
-      {(profile.drift?.notEvaluated?.length ?? 0) > 0 && (
+      {driftGaps.length > 0 && (
         <ul className="px-4 py-2 border-t border-hubble-border text-[11px] text-tertiary" aria-label="Drift checks not evaluated">
-          {profile.drift!.notEvaluated!.map((n) => (
+          {driftGaps.map((n) => (
             <li key={`${n.type}/${n.container ?? ''}`}>
               Drift check <span className="font-mono">{n.type}</span> not evaluated
               {n.container ? <> for container <span className="font-mono">{n.container}</span></> : null}:{' '}
