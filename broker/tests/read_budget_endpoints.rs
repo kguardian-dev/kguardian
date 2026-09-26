@@ -144,6 +144,11 @@ sheds_when_budget_exhausted!(
     "/workloads/prod/Deployment/web/runtime?origin=unshipped"
 );
 sheds_when_budget_exhausted!(
+    workload_capabilities_sheds,
+    api::get_workload_capabilities,
+    "/workloads/prod/Deployment/web/capabilities"
+);
+sheds_when_budget_exhausted!(
     image_runtime_sheds,
     api::get_image_runtime,
     "/images/sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef/runtime?kind=lib"

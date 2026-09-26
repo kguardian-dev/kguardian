@@ -1320,6 +1320,10 @@ pub struct CoverageEntry {
     /// /proc backfill could not read all its mappings). Sticky.
     #[serde(default)]
     pub incomplete: bool,
+    /// The capability probe is attached (absent from an older controller:
+    /// false).
+    #[serde(default)]
+    pub cap_probe: bool,
     #[serde(default)]
     pub ended: bool,
     pub heartbeat_at: NaiveDateTime,
@@ -1374,31 +1378,32 @@ pub(crate) const COVERAGE_UPSERT_SQL: &str = "\
 INSERT INTO runtime_coverage AS r (cluster_id, container_id, pod_namespace, workload_kind, \
     workload_name, container_name, image_digest, pod_name, node_name, mode, exec_probe, \
     lib_probe, start_mode, tracking_since, covered_since, last_heartbeat, heartbeat_secs, \
-    events_dropped, last_drop_at, unsent, incomplete, ended) \
+    events_dropped, last_drop_at, unsent, incomplete, ended, cap_probe) \
 SELECT $1, t.cid, t.ns, t.wk, t.wn, t.cn, t.dg, t.pn, t.nn, t.md, t.ep, t.lp, t.sm, \
     LEAST(t.ts, t.hb, timezone('UTC', NOW())), \
     CASE WHEN t.ep THEN LEAST(t.ts, t.hb, timezone('UTC', NOW())) \
          ELSE LEAST(t.hb, timezone('UTC', NOW())) END, \
     LEAST(t.hb, timezone('UTC', NOW())), t.hs, t.dr, \
-    CASE WHEN t.dr > 0 THEN LEAST(t.hb, timezone('UTC', NOW())) END, t.us, t.inc, t.ended \
+    CASE WHEN t.dr > 0 THEN LEAST(t.hb, timezone('UTC', NOW())) END, t.us, t.inc, t.ended, t.cp \
 FROM unnest($2::text[], $3::text[], $4::text[], $5::text[], $6::text[], $7::text[], $8::text[], \
     $9::text[], $10::text[], $11::bool[], $12::bool[], $13::text[], $14::timestamp[], \
-    $15::bigint[], $16::timestamp[], $17::int[], $18::bool[], $19::bigint[], $20::bool[]) \
-    AS t(cid, ns, wk, wn, cn, dg, pn, nn, md, ep, lp, sm, ts, dr, hb, hs, ended, us, inc) \
+    $15::bigint[], $16::timestamp[], $17::int[], $18::bool[], $19::bigint[], $20::bool[], $21::bool[]) \
+    AS t(cid, ns, wk, wn, cn, dg, pn, nn, md, ep, lp, sm, ts, dr, hb, hs, ended, us, inc, cp) \
 ON CONFLICT (cluster_id, container_id) DO UPDATE SET \
     covered_since = CASE WHEN EXCLUDED.mode <> r.mode OR EXCLUDED.exec_probe <> r.exec_probe \
-            OR EXCLUDED.lib_probe <> r.lib_probe \
+            OR EXCLUDED.lib_probe <> r.lib_probe OR EXCLUDED.cap_probe <> r.cap_probe \
             OR EXCLUDED.last_heartbeat - r.last_heartbeat \
                 > make_interval(secs => 3 * r.heartbeat_secs + 60) \
         THEN EXCLUDED.last_heartbeat ELSE r.covered_since END, \
     gaps = r.gaps + CASE WHEN EXCLUDED.mode <> r.mode OR EXCLUDED.exec_probe <> r.exec_probe \
-            OR EXCLUDED.lib_probe <> r.lib_probe \
+            OR EXCLUDED.lib_probe <> r.lib_probe OR EXCLUDED.cap_probe <> r.cap_probe \
             OR EXCLUDED.last_heartbeat - r.last_heartbeat \
                 > make_interval(secs => 3 * r.heartbeat_secs + 60) THEN 1 ELSE 0 END, \
     last_gap = CASE WHEN EXCLUDED.last_heartbeat - r.last_heartbeat \
             > make_interval(secs => 3 * r.heartbeat_secs + 60) THEN 'late_heartbeat' \
         WHEN EXCLUDED.mode <> r.mode OR EXCLUDED.exec_probe <> r.exec_probe \
-            OR EXCLUDED.lib_probe <> r.lib_probe THEN 'probe_change' \
+            OR EXCLUDED.lib_probe <> r.lib_probe OR EXCLUDED.cap_probe <> r.cap_probe \
+            THEN 'probe_change' \
         ELSE r.last_gap END, \
     events_dropped = r.events_dropped + EXCLUDED.events_dropped, \
     last_drop_at = CASE WHEN EXCLUDED.events_dropped > 0 THEN EXCLUDED.last_heartbeat \
@@ -1407,6 +1412,7 @@ ON CONFLICT (cluster_id, container_id) DO UPDATE SET \
     incomplete = r.incomplete OR EXCLUDED.incomplete, \
     pod_name = EXCLUDED.pod_name, node_name = EXCLUDED.node_name, mode = EXCLUDED.mode, \
     exec_probe = EXCLUDED.exec_probe, lib_probe = EXCLUDED.lib_probe, \
+    cap_probe = EXCLUDED.cap_probe, \
     last_heartbeat = EXCLUDED.last_heartbeat, heartbeat_secs = EXCLUDED.heartbeat_secs, \
     ended = r.ended OR EXCLUDED.ended \
 WHERE EXCLUDED.last_heartbeat >= r.last_heartbeat AND NOT r.ended";
@@ -1475,6 +1481,7 @@ pub fn upsert_coverage(conn: &mut PgConnection, rows: &[CoverageEntry]) -> Resul
                     .collect::<Vec<_>>(),
             )
             .bind::<Array<Bool>, _>(rows.iter().map(|r| r.incomplete).collect::<Vec<_>>())
+            .bind::<Array<Bool>, _>(rows.iter().map(|r| r.cap_probe).collect::<Vec<_>>())
             .execute(conn)
     })?;
     Ok(written)
@@ -2375,6 +2382,7 @@ mod tests {
             events_dropped: 0,
             unsent: 0,
             incomplete: false,
+            cap_probe: false,
             ended: false,
             heartbeat_at: now - chrono::Duration::hours(beat_h),
             heartbeat_secs: 300,

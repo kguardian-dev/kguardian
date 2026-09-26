@@ -258,6 +258,7 @@ fn failing_of(kind: &str, ps: &Value) -> Option<(Option<Level>, FailingSet)> {
                 .to_string(),
             source: "running",
             digest: String::new(),
+            observed_capabilities: None,
             security: c
                 .get("securityContext")
                 .cloned()
