@@ -18,9 +18,11 @@ import { SIGNING_CAPS, parseTrustVerdict, trimImageTrust, trimSigners } from "./
 // test fixtures (chainguard-static keyless with SLSA provenance, a
 // key-signed image with and without its key, the unsigned kguardian
 // controller, a tampered pause signature, a registry answering 401), so
-// repositories name the fixture registry's local host. The /image-trust
-// captures come from the real evaluator binary against an envtest
-// kube-apiserver holding two demo policies.
+// repositories name the fixture registry's local host. The workload rows
+// were seeded with SQL and the payments/recs digests are synthetic. The
+// /image-trust captures come from the real evaluator binary against an
+// envtest kube-apiserver holding two demo policies. See
+// test/fixtures/signing/README.md.
 //
 // The rules under test:
 //   - "verified" is never presented as trusted, and a signer is shown only
@@ -262,4 +264,31 @@ test("explain_image_trust: a huge answer is cut to the budget and flagged", () =
   const got = trimImageTrust({ ...capture("image-trust-all").body, total: 5000, results }, {});
   assert.ok(JSON.stringify(got).length <= MAX_RESPONSE_CHARS);
   assert.equal(got.truncated, true);
+});
+
+test("explain_image_trust: the broker's answer with the evaluator down is UNKNOWN", async () => {
+  serve("image-trust-evaluator-down");
+  const got = await run("explain_image_trust", { namespace: "shop" });
+  assert.equal(got.available, false);
+  assert.match(got.reason, /the evaluator could not be reached/);
+  assert.equal(got.results, undefined);
+  assert.match(got.note, /UNKNOWN, never an all-clear/);
+});
+
+test("explain_image_trust: an unrecognised verdict is Unknown, never Trusted", () => {
+  const base = capture("image-trust-all").body;
+  const results = [
+    { ...base.results[0], verdict: "Maybe", reason: undefined, workload: "Deployment/b" },
+    { ...base.results[8], verdict: "Trusted" },
+  ];
+  // An older broker counted only the three known verdicts.
+  const got = trimImageTrust({ ...base, total: 2, wouldDeny: 0, unknown: 0, trusted: 1, results }, {}) as any;
+  assert.equal(got.unknown, 1);
+  assert.equal(got.unrecognisedVerdicts, 1);
+  assert.match(got.results[0].verdictMeaning, /never as Trusted/);
+  assert.equal(got.results[1].verdictMeaning, undefined);
+  // A consistent answer has no extra fields.
+  const ok = trimImageTrust(base, {}) as any;
+  assert.equal(ok.unrecognisedVerdicts, undefined);
+  assert.equal(ok.unknown, base.unknown);
 });

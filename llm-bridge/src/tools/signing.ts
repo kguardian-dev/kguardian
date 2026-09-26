@@ -49,7 +49,7 @@ const REASON_MEANING: Record<string, string> = {
   registry_auth: "the registry needs credentials kguardian does not have (a private image)",
   trust_root_unavailable: "the Sigstore trust root could not be loaded",
   untrusted_root: "the certificate chains to a root that is not in the configured trust root",
-  untrusted_key: "a key signature did not verify against any configured key",
+  untrusted_key: "a key signature did not verify against any configured key (or no keys are configured)",
   bad_signature: "a signature did not verify: the content or signature was altered",
   digest_mismatch: "a signature was made for a different digest",
   no_repo_digest: "the image has no registry digest to look signatures up by",
@@ -177,6 +177,15 @@ export function trimImageTrust(page: unknown, filters: TrustFilters): Rec {
     filters: f,
     ...pick(page, ["evaluatedAt", "total", "wouldDeny", "unknown", "trusted"]),
   };
+  // A verdict the broker does not count (an older broker, a newer
+  // evaluator) is in total and in no count: surface it as Unknown, never
+  // let the counts read as all-Trusted.
+  const num = (v: unknown) => (typeof v === "number" && Number.isFinite(v) ? v : 0);
+  const gap = num(page.total) - num(page.wouldDeny) - num(page.unknown) - num(page.trusted);
+  if (gap > 0) {
+    out.unknown = num(page.unknown) + gap;
+    out.unrecognisedVerdicts = gap;
+  }
   const pol = capList(Array.isArray(page.policies) ? page.policies : [], SIGNING_CAPS.policies);
   out.policies = pol.items;
   if (pol.dropped > 0) out.policiesOmitted = pol.dropped;
@@ -185,6 +194,9 @@ export function trimImageTrust(page: unknown, filters: TrustFilters): Rec {
     const o = pick(r, ["verdict", "reason", "policy", "namespace", "workload", "container", "image", "digest"]);
     const why = typeof r.reason === "string" ? TRUST_REASON_MEANING[r.reason] : undefined;
     if (why) o.reasonMeaning = why;
+    if (!(TRUST_VERDICTS as readonly unknown[]).includes(r.verdict)) {
+      o.verdictMeaning = "a verdict this tool does not know: treat it as Unknown, never as Trusted";
+    }
     return o;
   });
   const shown = results.length;
