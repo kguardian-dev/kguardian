@@ -215,6 +215,37 @@ spec:
             - name: IMAGE_INVENTORY_RETENTION_BATCH_SIZE
               value: {{ $inventoryRetention.batchSize | quote }}
             {{- end }}
+            {{/*
+              Supply-chain ingest limits and retention (values.yaml
+              `broker.supplychain`). hasKey for the same reason as above:
+              0 is the documented "keep" value for days.
+            */}}
+            {{- $supplychain := .Values.broker.supplychain | default dict }}
+            {{- $scRetention := $supplychain.retention | default dict }}
+            {{- if hasKey $supplychain "maxDecompressedBytes" }}
+            - name: SUPPLYCHAIN_MAX_DECOMPRESSED_BYTES
+              value: {{ $supplychain.maxDecompressedBytes | int64 | quote }}
+            {{- end }}
+            {{- if hasKey $scRetention "days" }}
+            - name: SUPPLYCHAIN_RETENTION_DAYS
+              value: {{ $scRetention.days | quote }}
+            {{- end }}
+            {{- if hasKey $scRetention "unlinkedGraceHours" }}
+            - name: SUPPLYCHAIN_UNLINKED_GRACE_HOURS
+              value: {{ $scRetention.unlinkedGraceHours | quote }}
+            {{- end }}
+            {{- if hasKey $scRetention "intervalSeconds" }}
+            - name: SUPPLYCHAIN_RETENTION_INTERVAL_SECS
+              value: {{ $scRetention.intervalSeconds | quote }}
+            {{- end }}
+            {{- if hasKey $scRetention "batchSize" }}
+            - name: SUPPLYCHAIN_RETENTION_BATCH_SIZE
+              value: {{ $scRetention.batchSize | quote }}
+            {{- end }}
+            {{- if hasKey $scRetention "sbomPageTtlSeconds" }}
+            - name: SUPPLYCHAIN_SBOM_PAGE_TTL_SECS
+              value: {{ $scRetention.sbomPageTtlSeconds | quote }}
+            {{- end }}
             {{- if hasKey .Values.broker.audit "inflightPermits" }}
             - name: AUDIT_INFLIGHT_PERMITS
               value: {{ .Values.broker.audit.inflightPermits | quote }}

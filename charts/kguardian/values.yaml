@@ -755,6 +755,37 @@ broker:
       # `broker.audit.retention.batchSize`, for the same reason.
       batchSize: 5000
 
+  supplychain:
+    # -- Largest supply-chain payload (vulnerabilities or SBOM page) the
+    # broker will inflate, in bytes. The supplychain component sends gzip
+    # bodies of at most 1 MiB; a body that inflates past this is refused
+    # with 413 before it is parsed, so a decompression bomb costs at most
+    # this much memory (two ingests run at once). Clamped to
+    # [1048576, 134217728]. Ingest also needs scoped broker auth: without a
+    # `supplychain` token configured the ingest routes answer 403.
+    maxDecompressedBytes: 33554432
+    # -- Retention for vulnerability and SBOM data. Rows are keyed by image
+    # digest, never by pod, and a payload is kept while an image it applies
+    # to runs.
+    retention:
+      # -- Delete a payload once no inventory digest it applies to has had
+      # a workload container seen for this many days (and none is running
+      # now). 0 keeps payloads of images that stopped running.
+      days: 30
+      # -- A payload no inventory digest matches (the scan arrived before
+      # the pod's first report, or the image never ran here) is kept this
+      # long after it was last received.
+      unlinkedGraceHours: 24
+      # -- How often the pass runs, in seconds (minimum 60). Each pass also
+      # re-joins every payload to the inventory, so this is the longest a
+      # new digest waits before its scan shows up against it.
+      intervalSeconds: 300
+      # -- Payloads deleted per transaction, clamped to [1, 1000].
+      batchSize: 50
+      # -- A paged SBOM whose pages stop arriving is discarded this many
+      # seconds after its last page (minimum 60).
+      sbomPageTtlSeconds: 3600
+
   # -- Per-statement timeout (ms) applied to every broker DB connection as a
   # backstop: the broker runs as a single replica, so one slow or accidentally
   # unbounded query would otherwise tie up a connection/worker indefinitely and
