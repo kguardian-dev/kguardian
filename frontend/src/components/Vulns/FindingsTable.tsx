@@ -52,27 +52,34 @@ export function FindingsTable({ items, onOpenCve, hasMore, loadingMore, onLoadMo
             <tr className="border-b border-hubble-border">
               <th scope="col" className="text-left font-medium px-3 py-2">Tier</th>
               <th scope="col" className="text-left font-medium px-3 py-2">Vulnerability</th>
-              <th scope="col" className="text-left font-medium px-3 py-2">Package</th>
-              <th scope="col" className="text-left font-medium px-3 py-2">Factors</th>
-              <th scope="col" className="text-left font-medium px-3 py-2">Sources</th>
+              <th scope="col" className="hidden sm:table-cell text-left font-medium px-3 py-2">Package</th>
+              <th scope="col" className="hidden sm:table-cell text-left font-medium px-3 py-2">Factors</th>
+              <th scope="col" className="hidden sm:table-cell text-left font-medium px-3 py-2">Sources</th>
             </tr>
           </thead>
           <tbody className="divide-y divide-hubble-border">
             {items.map((f) => {
               const tier = brokerTier(f.tier);
+              const factors = findingFactors(f);
               return (
                 <tr key={`${f.id}|${f.package.name}|${f.installedVersion}`} data-testid="finding-row">
                   <td className="px-3 py-2 align-top"><TierBadge tier={tier} title={f.tierFactors?.length ? `Broker tier from: ${f.tierFactors.join(', ')}` : undefined} /></td>
-                  <td className="px-3 py-2 align-top min-w-44">
+                  <td className="px-3 py-2 align-top sm:min-w-44">
                     <button type="button" onClick={() => onOpenCve(f.id)} className="font-mono text-xs text-primary hover:underline">{f.id}</button>
                     <div className="mt-0.5"><SeverityBadge severity={f.severity} /></div>
+                    {/* Phones: the other columns stack here. */}
+                    <div className="sm:hidden mt-1.5 space-y-1.5 text-xs">
+                      <div className="font-mono [overflow-wrap:anywhere]"><span className="text-primary">{f.package.name}</span> <span className="text-tertiary">{f.installedVersion}</span></div>
+                      <FactorChips factors={factors} only={LIST_FACTORS} wrap />
+                      <div className="text-[11px] text-tertiary">{f.sources.map(sourceLabel).join(', ')}</div>
+                    </div>
                   </td>
-                  <td className="px-3 py-2 align-top text-xs">
+                  <td className="hidden sm:table-cell px-3 py-2 align-top text-xs">
                     <div className="font-mono text-primary [overflow-wrap:anywhere]">{f.package.name}</div>
                     <div className="text-tertiary font-mono">{f.installedVersion}</div>
                   </td>
-                  <td className="px-3 py-2 align-top"><FactorChips factors={findingFactors(f)} only={LIST_FACTORS} /></td>
-                  <td className="px-3 py-2 align-top text-[11px] text-tertiary whitespace-nowrap">{f.sources.map(sourceLabel).join(', ')}</td>
+                  <td className="hidden sm:table-cell px-3 py-2 align-top"><FactorChips factors={factors} only={LIST_FACTORS} /></td>
+                  <td className="hidden sm:table-cell px-3 py-2 align-top text-[11px] text-tertiary whitespace-nowrap">{f.sources.map(sourceLabel).join(', ')}</td>
                 </tr>
               );
             })}
