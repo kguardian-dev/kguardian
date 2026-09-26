@@ -1,5 +1,59 @@
 # Changelog
 
+## [1.19.0](https://github.com/kguardian-dev/kguardian/compare/broker/v1.18.2...broker/v1.19.0) (2026-09-26)
+
+
+### Features
+
+* **broker:** count a digest as running while its pod is live, with a configurable window ([3e0998c](https://github.com/kguardian-dev/kguardian/commit/3e0998cb3cf32fd8748c706fdd556ffc8ad528cf))
+* **broker:** in-use tiers for vulnerability findings ([93d71e8](https://github.com/kguardian-dev/kguardian/commit/93d71e8056479751660838b3fbc8cfffd765d0df))
+* **broker:** ingest and serve supply-chain vulnerabilities and SBOMs ([0b97948](https://github.com/kguardian-dev/kguardian/commit/0b979489a3eb953b7f941a7a368821a0ac2c2fd2))
+* **broker:** key workload containers per digest so mixed-image workloads are visible ([207656e](https://github.com/kguardian-dev/kguardian/commit/207656ea2d65424b8aaf24dbf4eb295da822f598))
+* **broker:** OpenVEX draft in the workload export bundle ([1cc299a](https://github.com/kguardian-dev/kguardian/commit/1cc299a376c51bfe067b97afaebf41ab53046d97))
+* **broker:** per-image CycloneDX SBOMs in the workload export bundle ([7ae54f9](https://github.com/kguardian-dev/kguardian/commit/7ae54f98d945324154d1b097e37340e37b69d1ec))
+* **broker:** pod security standards analyser for workload profiles ([637c743](https://github.com/kguardian-dev/kguardian/commit/637c7438df211b0f8065c5fabf054b897bdd64cd))
+* **broker:** profile posture is never ok while a dimension is unknown ([7b6263d](https://github.com/kguardian-dev/kguardian/commit/7b6263d4d89a2151022732312dab32dc526c9489))
+* **broker:** profile posture without scores, stale-aware PSS, stable versions ([53511bb](https://github.com/kguardian-dev/kguardian/commit/53511bbc7a2a595112e2f9af347a9a4e6b135c60))
+* **broker:** prune pod_traffic with batched retention ([#1653](https://github.com/kguardian-dev/kguardian/issues/1653)) ([8e7f372](https://github.com/kguardian-dev/kguardian/commit/8e7f372c51a4cc7c2fbed4a6cb797eec5ae9aa7c))
+* **broker:** runtime coverage ingest and kg_runtime_coverage ([627783a](https://github.com/kguardian-dev/kguardian/commit/627783ad98a90579d0010f5fb085708322599d82))
+* **broker:** runtime executable inventory ingest, reads and retention ([7a2e640](https://github.com/kguardian-dev/kguardian/commit/7a2e6406240e3dafc298f5ccd140a1fe1e6b8760))
+* **broker:** scoped bearer tokens, authorised per route after routing ([5d6fa99](https://github.com/kguardian-dev/kguardian/commit/5d6fa998aefcc9bdce17e49c1ee9396db61f7acb))
+* **broker:** store and serve image signature results ([c4eaea6](https://github.com/kguardian-dev/kguardian/commit/c4eaea60cfa0e4ce92a0c7558ac36cae5a3e2a1b))
+* **broker:** store image inventory keyed by digest ([ae3e5c8](https://github.com/kguardian-dev/kguardian/commit/ae3e5c824bf20c0e706d9878e905c36db2ef5b9e))
+* **broker:** workload export bundle, network policy generator, profile drift ([#1675](https://github.com/kguardian-dev/kguardian/issues/1675)) ([c4ed5d5](https://github.com/kguardian-dev/kguardian/commit/c4ed5d50b653f637c8a39b568b4b68796076a339))
+* **broker:** workload security profile read model, versions and diff ([4b9965e](https://github.com/kguardian-dev/kguardian/commit/4b9965e682ad492cd7a2676aac083c4ac7041ee4))
+* **controller:** runtime inventory coverage heartbeats ([e9ac4e8](https://github.com/kguardian-dev/kguardian/commit/e9ac4e874f1da2c15471b6c3404c59fd6c61fa96))
+
+
+### Bug Fixes
+
+* **broker:** a CVE tier not computed yet is null, not P2 ([730126c](https://github.com/kguardian-dev/kguardian/commit/730126cdf8a48ea3ec482077b3d1458f2b16daf2))
+* **broker:** an empty export SBOM says 0 components reported by its source ([fd2eb62](https://github.com/kguardian-dev/kguardian/commit/fd2eb62d3dbf2ed87d88f23cc025cd7af4743d3d))
+* **broker:** bound supply-chain ingest memory and harden its semantics ([2e0edf2](https://github.com/kguardian-dev/kguardian/commit/2e0edf21baa51543877f5260698515169539debc))
+* **broker:** bound the export SBOM load by rows read, not the header count ([9d626df](https://github.com/kguardian-dev/kguardian/commit/9d626df70922ab82d5c7ef089f9998db040a3dad))
+* **broker:** byte-bounded summaries, bidi controls refused, reason whitelist ([774758c](https://github.com/kguardian-dev/kguardian/commit/774758c8fbc9b4ca15c56672dc1d2a18f55ad0d7))
+* **broker:** carry export-bundle SBOMs as comments in the YAML stream ([2cbff4a](https://github.com/kguardian-dev/kguardian/commit/2cbff4a293cdab234b69cc8b081bdf88db682430))
+* **broker:** coverage fails on lost or pending events, untracked libraries and incomplete paths ([0f34d06](https://github.com/kguardian-dev/kguardian/commit/0f34d06384a8864dd4b7f6241e47e34ee633252b))
+* **broker:** document and test that the CVE facts rebuild replaces rows ([951ca61](https://github.com/kguardian-dev/kguardian/commit/951ca61a89d75b340092499371516d2c1eb69168))
+* **broker:** exposure needs observed ingress; keep every fixed version ([9f7a25d](https://github.com/kguardian-dev/kguardian/commit/9f7a25d238b7e22907278bc9060b5c2b209585fb))
+* **broker:** follow the supplychain trust and index_digest contract ([668d750](https://github.com/kguardian-dev/kguardian/commit/668d750a283b10d7250c9f7bff66e20d4d58658b))
+* **broker:** honest read charges, whole-or-refused identities, verdict consistency ([07c65e5](https://github.com/kguardian-dev/kguardian/commit/07c65e5f8735c1e1e87698f32fe333d1245a5f79))
+* **broker:** incomplete heartbeats are never covered; cap coverage batches while parsing ([b2b0f81](https://github.com/kguardian-dev/kguardian/commit/b2b0f818863b042e1df88d829a0033f42a5e6dde))
+* **broker:** keep CVE-level KEV and EPSS in one row per CVE ([881b19b](https://github.com/kguardian-dev/kguardian/commit/881b19b663b96af1adf5b068350687a638beb227))
+* **broker:** never treat a container as covered from partial use evidence ([a1d17e8](https://github.com/kguardian-dev/kguardian/commit/a1d17e8c87ad3ed8732c7a99b458f1bbe67d873f))
+* **broker:** no line break can escape a comment in the export YAML ([951698d](https://github.com/kguardian-dev/kguardian/commit/951698dba8930288d4a96c5c03d759aeea6f325b))
+* **broker:** only count digests whose container is actually running ([7ce08f8](https://github.com/kguardian-dev/kguardian/commit/7ce08f8e030872fc4debda95fe35d5e390605194))
+* **broker:** put image inventory reads behind per-route authorisation ([1741726](https://github.com/kguardian-dev/kguardian/commit/1741726e396ffc177a9405569304ea560923817e))
+* **broker:** rebuild CVE facts in their own short, table-locked transaction ([cc17844](https://github.com/kguardian-dev/kguardian/commit/cc17844245240444da8a1295000725762be68ad6))
+* **broker:** refuse control characters in attestation posts; verdict contract ([08007b4](https://github.com/kguardian-dev/kguardian/commit/08007b44676ae0bfff1fa99a144eed1db8024a8b))
+* **broker:** release a pod's old digests when it reports a container with no digest ([26cf6b1](https://github.com/kguardian-dev/kguardian/commit/26cf6b1896ebf98893febf28c2c60ddeb5017c18))
+* **broker:** resolve KEV and EPSS per CVE across sources before tiering ([0c25f28](https://github.com/kguardian-dev/kguardian/commit/0c25f28871f8feda787d5fcf1c29cd0e3a710237))
+* **broker:** test that an unfinished in-use pass never counts as complete ([a99e3b5](https://github.com/kguardian-dev/kguardian/commit/a99e3b5be72ed604f39f69ad197e881b16cd1b36))
+* **broker:** the verdict follows the signature error classes ([da62a02](https://github.com/kguardian-dev/kguardian/commit/da62a022ae25da68d2f5def3233a1d8a3420354f))
+* **broker:** tolerate reason codes from a newer supplychain ([1dbf3a1](https://github.com/kguardian-dev/kguardian/commit/1dbf3a19fa41497e3762ed4129f6f4492ea5cec1))
+* **broker:** VEX cap keeps version groups whole; SBOM charge from real sizes ([00c2bb5](https://github.com/kguardian-dev/kguardian/commit/00c2bb5f5b6d89a99bd679524dd98bd19ef2177c))
+* **broker:** workload runtime reads use the primary key prefix; live tests restore the coverage function ([9c587f9](https://github.com/kguardian-dev/kguardian/commit/9c587f901cb1bf8d65cad39dace2bff09af5ee4c))
+
 ## [1.18.2](https://github.com/kguardian-dev/kguardian/compare/broker/v1.18.1...broker/v1.18.2) (2026-09-23)
 
 
