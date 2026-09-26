@@ -4,7 +4,7 @@ Part of #1533. Implemented in `broker/src/workload_profile.rs` (read model, post
 `broker/src/pod_security.rs` (Pod Security Standards analyser), PR #1669. Consumers: the frontend profile
 page (#1672), llm-bridge tools and the advisor `profile` commands (#1668).
 
-Status: **v1.6, stable**. Every change is appended to the CHANGELOG at the bottom, dated.
+Status: **v1.7, stable**. Every change is appended to the CHANGELOG at the bottom, dated.
 
 **Examples:** every example below is generated from raw responses of a v1.4 broker build against a
 seeded test database (neutral names only). Values are verbatim. The only edits are: lists longer than the stated
@@ -849,13 +849,14 @@ interval. No rows -> `unknown`, reason `no_compute_data`. Findings: `compute.mis
 
 ### 2.8 `drift` (P2-5; not a core dimension, never sets posture)
 
-Three checks, each a finding with `dimension: "drift"` and an entry in `drift.items`:
+Four checks, each a finding with `dimension: "drift"` and an entry in `drift.items`:
 
 | `type` | when | severity |
 |---|---|---|
 | `tagMoved` | a current container's image **tag** (a reference without `@digest`) has resolved to more than one digest in the inventory (re-pushed tag, or nodes resolved it differently) | medium |
 | `imageChangedSinceExport` | a current container runs a digest the last export's snapshot did not have, or the container is new since that export. Needs an export record (a `POST .../export`, section 4) | medium |
 | `securityContextRegression` | a PSS check that passed in the baseline fails now, for a container that existed in the baseline or at pod level. Baseline = the last export when there is one, else the newest stored version whose podSecurity content differs from the live one | high if a baseline check newly fails, else medium |
+| `unshippedExecutable` (v1.7) | a current container, on a digest it runs now, executed or loaded a file its image did not ship as it ran: from the container's writable layer, from a memfd, or deleted while running (the runtime inventory's `unshipped` origins). Needs the runtime inventory; see `notEvaluated` | high for `writableLayer` or `memfd`, medium for `deleted` only |
 
 From `GET /workloads/payments/Deployment/checkout/profile` -> 200 (capture `profile-drift-payments-checkout-after-export.json`, `body.drift`):
 
@@ -934,13 +935,26 @@ From `GET /workloads/payments/Deployment/checkout/profile` -> 200 (capture `prof
 - `baselines.export`: the last export `{revision, contentHash, mode, artifacts, exportedAt}`, `null` when the
   workload was never exported. `baselines.securityContext`: `{source: "export"|"previousVersion", revision,
   since}`, `null` when there is no baseline.
-- `evaluated`: the checks that could run. A check that is not listed was **not evaluated** (no inventory,
-  no export, no baseline); its absence from `items` means nothing.
+- `evaluated`: the checks that could run for the whole workload. A check that is not listed was **not
+  evaluated** (no inventory, no export, no baseline, no runtime coverage); its absence from `items` means
+  nothing. `unshippedExecutable` is listed only when every current running container's capture covered it
+  over the coverage window (`kg_runtime_coverage`) and the unshipped read was not cut.
+- `notEvaluated` (v1.7): `[{type, container, reason}]`, per container, the checks that could not run and
+  why; `container` is `null` for the whole workload. For `unshippedExecutable` the reason is
+  `no_inventory` (the controller reports no runtime inventory for the workload: mode off, excluded or
+  opted out), `no_runtime_data` (no coverage heartbeat for the container's running digest),
+  `truncated` (more unshipped rows than the read returns), or the coverage function's own reason
+  (`capture_gap`, lost events, incomplete backfill, ...). A file seen running from an unshipped origin is
+  an item whatever the coverage; coverage only decides whether "none seen" may be said.
 - `items[]`: `{type, findingId, severity, container, detail}`. `detail` by type:
   - `tagMoved`: `{imageRef, digests[], since}`;
   - `imageChangedSinceExport`: `{containerInExport, exportedDigests[], newDigests[]}`;
   - `securityContextRegression`: `{newlyFailing[] (check ids), levelFrom, levelTo}`; `container` is `null`
-    for a pod-level regression.
+    for a pod-level regression;
+  - `unshippedExecutable`: `{origins[], files[] (newest first, at most 20: {path, kind, origin, digest,
+    pathComplete, firstSeen, lastSeen}), filesTotal, truncated}`. Rows of a digest the container no
+    longer runs are not current drift and are not listed. `pathComplete: false` means the kernel path walk
+    was cut and `path` is a suffix.
 - A new container is not a securityContext regression. An improvement is never reported.
 - Metrics: `/metrics` exposes the gauge `kguardian_workload_drift{workload_namespace, workload_kind,
   workload, type}` = drift items of that type in the workload's latest snapshot, refreshed every 60 s from
@@ -1689,3 +1703,11 @@ From `GET /workloads/payments/Deployment/checkout/export?mode=enforce&format=zip
     `capabilities`: `drop: ["ALL"]` + `add` = the observed set; emitted also when PSS passes but the
     current set is wider than the observed one. New caveats name evidence-based and default containers.
   - New `GET /workloads/{ns}/{kind}/{name}/capabilities` (READ): the same `capabilities` block.
+- 2026-09-26 (**v1.7**, P2-5 runtime drift; additive, on top of v1.6):
+  - New drift type `unshippedExecutable` (section 2.8): files a current container ran that its image did
+    not ship (writable layer, memfd, deleted), from the runtime inventory (#1683). Finding id
+    `drift.unshippedExecutable/<container>`, dimension `drift`; like every drift finding it never sets
+    posture.
+  - New `drift.notEvaluated[]` `{type, container, reason}`: why a check could not run for a container.
+    No runtime inventory or no capture coverage is "not evaluated", never "no drift".
+  - `/metrics` `kguardian_workload_drift` gains the `type="unshippedExecutable"` series.
