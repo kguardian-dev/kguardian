@@ -1,0 +1,186 @@
+---
+title: "Runtime Inventory Endpoints"
+description: "Which executables and shared libraries each workload container actually runs"
+icon: "file-code"
+---
+
+## Overview
+
+The controller watches `execve` and shared-library mappings per container
+and reports the distinct set of files it sees, keyed by workload,
+container and image digest. A path is stored once per (workload,
+container, digest), not per event, so the inventory grows with what a
+workload runs rather than how often it runs it. Processes that were
+already running when the controller started are backfilled from `/proc`
+and marked `source: "backfill"`; a later runtime sighting upgrades them
+to `ebpf`.
+
+Joined with an image's SBOM on digest and path, this separates packages
+an image ships from packages it actually loads. Each path also records
+where the file lived when it ran (`origin`), which is what drift detection
+uses to flag binaries the image did not ship.
+
+## Enabling it
+
+Off by default until its per-node overhead is measured. Set the chart
+value `controller.runtimeInventory.mode`:
+
+| Mode | What is captured |
+| --- | --- |
+| `off` (default) | Nothing; no probe is loaded |
+| `exec` | Executed files (`tp_btf/sched_process_exec`) |
+| `full` | Executed files plus files mapped executable, i.e. shared libraries and the dynamic loader (`fentry/security_mmap_file`). Falls back to `exec` on a kernel that cannot attach the fentry probe |
+
+Each (container, file) is reported once: the probe deduplicates in the
+kernel, so after warm-up a container costs one hash lookup per exec or
+executable mapping. Containers already running when the probe attached are
+backfilled once from `/proc`. Namespaces in
+`controller.excludedNamespaces` and pods annotated
+`kguardian.dev/runtime-inventory: "off"` are not recorded.
+
+An empty inventory means nothing was observed, not that nothing ran: the
+feature may be off on that node, the pod may be excluded, or the process
+may have run before the controller started and exited before the
+backfill.
+
+## Origin
+
+| `origin` | Meaning |
+| --- | --- |
+| `image` | In an image layer (overlayfs lower layer, never modified) |
+| `otherFs` | Not on overlayfs: a volume (emptyDir, configMap, hostPath, PVC), or a root filesystem from a non-overlay snapshotter |
+| `writableLayer` | In the container's writable (overlayfs upper) layer: written or modified after the container started |
+| `memfd` | An anonymous memory file (`memfd_create`), never on disk |
+| `deleted` | Unlinked while running |
+| `unknown` | Not determined: a `/proc` backfill (which cannot see layers), or overlayfs without its type in kernel BTF |
+
+When sightings of one path disagree, the most suspicious wins (in the
+order `unknown` < `image` < `otherFs` < `deleted` < `writableLayer` <
+`memfd`) and is never downgraded: one replica running the file from its
+writable layer is the finding, whatever the others did. `deleted`,
+`writableLayer` and `memfd` together are the "unshipped" origins.
+
+Rows not seen for `RUNTIME_INVENTORY_RETENTION_DAYS` (chart:
+`broker.runtimeInventory.retentionDays`, default 30) are pruned.
+
+## GET /workloads/\{namespace\}/\{kind\}/\{name\}/runtime
+
+Requires the `read` scope when broker auth is on. Returns `200` with an
+empty `containers` list when nothing has been reported for the workload.
+
+| Query | Description | Default |
+| --- | --- | --- |
+| `container` | Only this container | all |
+| `kind` | `exec` or `lib`; anything else is `400` | both |
+| `origin` | One origin, or `unshipped` for `deleted`, `writableLayer` and `memfd`; anything else is `400` | all |
+| `limit` | Rows (paths) returned, capped at 5000 | `1000` |
+
+```json
+{
+  "namespace": "prod",
+  "kind": "Deployment",
+  "name": "web",
+  "containers": [
+    {
+      "containerName": "app",
+      "imageDigest": "sha256:0123…cdef",
+      "entries": [
+        {
+          "path": "/usr/sbin/nginx",
+          "kind": "exec",
+          "source": "ebpf",
+          "origin": "image",
+          "pathComplete": true,
+          "firstSeen": "2026-09-26T10:00:00",
+          "lastSeen": "2026-09-27T08:15:00"
+        }
+      ]
+    }
+  ],
+  "truncated": false
+}
+```
+
+One `containers` item per (container, digest): a workload mid-rollout
+lists the same container once per image. `imageDigest` is `""` when the
+controller could not resolve the digest. Entries are ordered by `kind`,
+then `path`. `pathComplete: false` means the kernel-side path walk was cut
+short and `path` is a suffix. `truncated` is `true` when more rows exist
+than `limit`.
+
+## GET /images/\{digest\}/runtime
+
+Requires the `read` scope. The digest must be `sha256:<64 hex>` or
+`sha512:<128 hex>` (`400` otherwise). Returns every path seen running from
+the image, aggregated across all workloads that run it.
+
+| Query | Description | Default |
+| --- | --- | --- |
+| `kind` | `exec` or `lib` | both |
+| `limit` | Rows returned, capped at 5000 | `1000` |
+
+```json
+{
+  "digest": "sha256:0123…cdef",
+  "entries": [
+    {
+      "path": "/lib/x86_64-linux-gnu/libc.so.6",
+      "kind": "lib",
+      "pathComplete": true,
+      "origin": "image",
+      "firstSeen": "2026-09-20T10:00:00",
+      "lastSeen": "2026-09-27T08:15:00",
+      "workloads": 3
+    }
+  ],
+  "truncated": false
+}
+```
+
+`workloads` counts distinct workloads that ran the path. `firstSeen` and
+`lastSeen` span every workload, and `origin` is the most suspicious one
+seen in any of them.
+
+## POST /runtime/executables
+
+Controller ingest; requires the `ingest` scope. The body is a JSON array
+of at most 5000 entries (larger batches are refused with `413` and nothing
+is written; the body limit is 8 MiB).
+
+```json
+[
+  {
+    "pod_namespace": "prod",
+    "pod_name": "web-7d9f-abcde",
+    "workload_kind": "Deployment",
+    "workload_name": "web",
+    "container_name": "app",
+    "image_digest": "sha256:0123…cdef",
+    "kind": "exec",
+    "path": "/usr/sbin/nginx",
+    "path_complete": true,
+    "source": "ebpf",
+    "origin": "image",
+    "first_seen": "2026-09-26T10:00:00",
+    "last_seen": "2026-09-26T10:05:00"
+  }
+]
+```
+
+Entries are validated one by one: an entry with an unknown `kind` or
+`source`, an empty or over-4096-byte path, an invalid digest, or a missing
+namespace, container or workload is dropped and counted, and the rest of
+the batch is stored. An entry with no workload is keyed to its pod
+(`kind: "Pod"`). `origin` is optional: absent, or a value this broker
+does not know, is stored as `unknown`. Timestamps are UTC; a `last_seen` in the future is
+clamped to the broker's database clock.
+
+```json
+{ "accepted": 1, "dropped": 0, "written": 1 }
+```
+
+`written` counts rows inserted or changed. Re-reporting a known path only
+rewrites its row when `last_seen` moved by five minutes or more, or when
+the report adds something (an earlier `first_seen`, an eBPF sighting of a
+backfilled path, a complete path, a more suspicious `origin`), so a
+steady-state batch writes nothing.
