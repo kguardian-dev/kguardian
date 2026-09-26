@@ -2436,3 +2436,131 @@ fn live_database_sbom_export_load_is_bounded_by_the_charge_not_the_header() {
     let docs = crate::profile_export::sbom_docs(&mut conn, &prof, "audit", 6).unwrap();
     assert_eq!(loaded(&docs), 6);
 }
+
+/// KEV and EPSS are CVE-level: Trivy reports kev null, Grype reports kev
+/// true for the same CVE (here on a finding Grype spells with a different
+/// installed version, so the rows do not merge). The Trivy finding must
+/// still rank P0 when in use and exposed, show kev true, and say so in its
+/// factors; the CVE summary likewise.
+#[test]
+#[ignore = "requires a live postgres (set KG_TEST_DATABASE_URL)"]
+fn live_database_kev_and_epss_are_resolved_per_cve_across_sources() {
+    use crate::supplychain_read::{
+        image_vulnerabilities_filtered, list_cves_filtered, ListFilters,
+    };
+    let mut conn = live_conn();
+    exec(
+        &mut conn,
+        "TRUNCATE runtime_package_use, runtime_unowned_paths, runtime_in_use_coverage, \
+            workload_network_exposure;",
+    );
+    let img = d(95);
+    seed_inventory(
+        &mut conn,
+        &img,
+        "ghcr.io/example/api",
+        "2.4.1",
+        "Deployment",
+        "api",
+        "app",
+        0,
+    );
+    let finding = |v: &mut serde_json::Value, ver: &str| {
+        v["observed_in"] = json!([]);
+        v["vulnerabilities"][0]["package"] = json!({"name": "libz", "version": ver, "type": "debian", "purl": format!("pkg:deb/debian/libz@{ver}")});
+        v["vulnerabilities"][0]["class"] = json!("os-pkgs");
+    };
+    let mut trivy = vulns_json(
+        &img,
+        "2026-09-20T08:00:00Z",
+        &[("CVE-2026-0301", "HIGH", Some("2"))],
+    );
+    finding(&mut trivy, "1.0.0");
+    store_v(&mut conn, trivy);
+    let mut grype = vulns_json(
+        &img,
+        "2026-09-21T08:00:00Z",
+        &[("CVE-2026-0301", "HIGH", Some("2"))],
+    );
+    grype["source"] = json!("grype");
+    grype["sbom_source"] = json!("registry");
+    finding(&mut grype, "1.0.0-r0");
+    grype["vulnerabilities"][0]["kev"] = json!(true);
+    grype["vulnerabilities"][0]["epss"] = json!(0.4);
+    store_v(&mut conn, grype);
+    relink_batch(&mut conn, None, 100).unwrap();
+    // In use (loaded) and exposed by observed ingress.
+    exec(
+        &mut conn,
+        &format!(
+            "INSERT INTO runtime_package_use (cluster_id, pod_namespace, workload_kind, workload_name, \
+                container_name, image_digest, pkg_name, pkg_version, state, path_match, sample_path, \
+                first_seen, last_seen) VALUES ('primary', '{NS}', 'Deployment', 'api', 'app', '{img}', \
+                'libz', '1.0.0', 'loaded', 'exact', '/usr/lib/libz.so.1', \
+                timezone('UTC', NOW()), timezone('UTC', NOW())); \
+             INSERT INTO workload_network_exposure (cluster_id, pod_namespace, workload_kind, \
+                workload_name, window_hours, pods, ingress_flows, exposed, exposed_via, computed_at) \
+             VALUES ('primary', '{NS}', 'Deployment', 'api', 168, 1, 10, true, '{{public_ip}}', \
+                timezone('UTC', NOW()))"
+        ),
+    );
+    // The Trivy report alone: its row says kev null, but the CVE is in KEV.
+    let p = image_vulnerabilities_filtered(
+        &mut conn,
+        &img,
+        Some("trivy-operator"),
+        &ListFilters::default(),
+        None,
+        10,
+    )
+    .unwrap();
+    assert_eq!(p.items.len(), 1);
+    let f = &p.items[0];
+    assert_eq!((f.kev, f.epss), (Some(true), Some(0.4)));
+    assert_eq!(f.tier, "P0", "{:?}", f.tier_factors);
+    assert!(
+        f.tier_factors.iter().any(|x| x == "kev"),
+        "{:?}",
+        f.tier_factors
+    );
+    assert!(
+        f.tier_factors.iter().any(|x| x == "exposed"),
+        "{:?}",
+        f.tier_factors
+    );
+    // Both findings, and the kev filter, agree.
+    let all =
+        image_vulnerabilities_filtered(&mut conn, &img, None, &ListFilters::default(), None, 10)
+            .unwrap();
+    assert_eq!(all.items.len(), 2);
+    assert!(all
+        .items
+        .iter()
+        .all(|f| f.kev == Some(true) && f.tier == "P0"));
+    let kev = ListFilters {
+        kev: Some(true),
+        ..Default::default()
+    };
+    assert_eq!(
+        image_vulnerabilities_filtered(&mut conn, &img, Some("trivy-operator"), &kev, None, 10)
+            .unwrap()
+            .items
+            .len(),
+        1
+    );
+    // The CVE summary: P0, kev true.
+    crate::supplychain_read::refresh_cve_summary(&mut conn).unwrap();
+    let p0 = ListFilters {
+        tiers: Some(vec![0]),
+        ..Default::default()
+    };
+    let l = list_cves_filtered(&mut conn, &p0, None, false, None, 10).unwrap();
+    assert_eq!(
+        l.items
+            .iter()
+            .map(|c| c.summary.id.as_str())
+            .collect::<Vec<_>>(),
+        ["CVE-2026-0301"]
+    );
+    assert_eq!(l.items[0].summary.kev, Some(true));
+}

@@ -562,12 +562,18 @@ pub struct ImageVulnsPage {
 /// source makes it fixable. Fixed versions are NOT reduced to one: text
 /// order is not version order ("10.1" < "9.2"), so every distinct fixed
 /// version is returned, ordered by the first source that gives it.
+/// KEV and EPSS are facts about a CVE, not about one source's row: Trivy
+/// reports kev null where Grype, for the same CVE, reports true. So `cvl`
+/// resolves them per CVE over every stored source row (kev true if any
+/// source says true, false if some says false and none true, null if none
+/// reports it; EPSS the highest reported), and findings, filters and tiers
+/// use those. Same rule in refresh_cve_summary_sql.
 const IMAGE_VULNS_SQL: &str = "\
 WITH v AS ( \
     SELECT v.* FROM image_vulnerabilities v \
     JOIN unnest($1::text[], $2::text[]) AS k(digest, source) \
         ON v.digest = k.digest AND v.source = k.source \
-), g AS ( \
+), g0 AS ( \
     SELECT min(id) AS rep, vuln_id, pkg_name, installed_version, \
         max(severity_rank) AS severity_rank, max(score) AS score, \
         COALESCE((SELECT array_agg(f.fv ORDER BY f.first_source, f.fv) FROM ( \
@@ -583,6 +589,16 @@ WITH v AS ( \
         array_agg(DISTINCT digest ORDER BY digest) AS report_digests, \
         bool_or(kg_pkg_observable(pkg_type, class)) AS obs \
     FROM v GROUP BY vuln_id, pkg_name, installed_version \
+), cvl AS ( \
+    SELECT x.vuln_id, bool_or(x.kev) AS kev, min(x.kev_date_added) AS kev_date_added, \
+        max(x.epss) AS epss, max(x.epss_percentile) AS epss_percentile \
+    FROM image_vulnerabilities x WHERE x.vuln_id IN (SELECT vuln_id FROM g0) \
+    GROUP BY x.vuln_id \
+), g AS ( \
+    SELECT g0.rep, g0.vuln_id, g0.pkg_name, g0.installed_version, g0.severity_rank, g0.score, \
+        g0.fixed_versions, cvl.kev, cvl.kev_date_added, cvl.epss, cvl.epss_percentile, \
+        g0.sources, g0.report_digests, g0.obs \
+    FROM g0 JOIN cvl ON cvl.vuln_id = g0.vuln_id \
 ), c AS ( \
     SELECT wc.cluster_id, wc.pod_namespace, wc.workload_kind, wc.workload_name, \
         wc.container_name, wc.image_digest \
@@ -1357,13 +1373,23 @@ const FOR_VULN: &str = "l.image_digest IN (SELECT l2.image_digest FROM supplycha
 fn refresh_cve_summary_sql() -> String {
     format!(
         "WITH {eff}, \
-         hp AS ( \
+         hp0 AS ( \
             SELECT v.vuln_id, e.image_digest, v.pkg_name, max(v.severity_rank) AS sr, \
                 max(v.score) AS sc, bool_or(v.fixed_version IS NOT NULL) AS fx, \
                 bool_or(v.kev) AS kev, max(v.epss) AS ep, max(e.join_rank) AS jr, \
                 bool_or(kg_pkg_observable(v.pkg_type, v.class)) AS obs \
             FROM eff e JOIN image_vulnerabilities v ON v.digest = e.digest AND v.source = e.source \
             GROUP BY v.vuln_id, e.image_digest, v.pkg_name \
+         ), \
+         cvl AS ( \
+            SELECT x.vuln_id, bool_or(x.kev) AS kev, max(x.epss) AS ep \
+            FROM image_vulnerabilities x WHERE x.vuln_id IN (SELECT vuln_id FROM hp0) \
+            GROUP BY x.vuln_id \
+         ), \
+         hp AS ( \
+            SELECT hp0.vuln_id, hp0.image_digest, hp0.pkg_name, hp0.sr, hp0.sc, hp0.fx, \
+                cvl.kev, cvl.ep, hp0.jr, hp0.obs \
+            FROM hp0 JOIN cvl ON cvl.vuln_id = hp0.vuln_id \
          ), \
          pk AS ( \
             SELECT v.vuln_id, (array_agg(DISTINCT v.pkg_name ORDER BY v.pkg_name))[1:5] AS packages, \
