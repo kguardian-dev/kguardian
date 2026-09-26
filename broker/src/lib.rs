@@ -47,6 +47,7 @@ pub use compute_api::{
 };
 pub use compute_types::*;
 pub use error::*;
+pub use image_inventory::render_malformed_metrics as image_inventory_malformed_metrics;
 pub use image_inventory::{get_image, get_images, get_workload_containers};
 pub use peer::spawn as spawn_peer_late_resolve;
 pub use profile_drift::{spawn_metrics_refresh as spawn_drift_metrics, DriftMetrics};
