@@ -140,7 +140,7 @@ var (
 
 var imagesVulnsCmd = &cobra.Command{
 	Use:   "vulns <digest>",
-	Short: "List the vulnerabilities scanners found in an image",
+	Short: "List the vulnerabilities found in an image",
 	Long: `List the vulnerability findings for one image digest, deduplicated across
 sources, most severe first. Findings come from Trivy Operator reports and,
 when the opt-in supplychain matcher is enabled, from kguardian's own Grype
@@ -459,7 +459,7 @@ which matches SBOMs.
   exposure   one id: affected images, the workloads running them, and their
              observed network exposure
 
-Only images a source has reported on are counted; images never scanned are
+Only images with vulnerability data are counted; images without any are
 unknown and absent. kguardian cannot yet tell which packages a workload
 loads ("in use" is unknown), so treat every finding as potentially
 reachable. kguardian reports; it never blocks or applies anything.`,
