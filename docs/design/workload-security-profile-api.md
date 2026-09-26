@@ -1181,7 +1181,7 @@ Artifacts and where they come from (existing generators only):
 | `securitycontext` | strategic-merge **patch** + `pod-security.kubernetes.io/audit=restricted` label suggestion | same patch + `.../enforce=restricted` | the profile's `podSecurity.recommendation` |
 | `sbom` | the stored SBOM of each container image as CycloneDX 1.5 JSON (`sbom-<container>-<digest12>.cdx.json`), one document per digest, with `image` saying which source and trust it came from; unavailable per image, with the reason, when no source has an SBOM or it does not fit the bundle cap | same | `supplychain_read::cyclonedx_for`, the `/images/{digest}/sbom/cyclonedx` document (#1671) |
 | `vex` | OpenVEX 0.2.0 draft (`vex.openvex.json`): `not_affected` only for packages unseen in every container over a covered capture window, each statement marked as a draft for human review; commented out of the YAML apply stream; unavailable, with the reason, when no statement qualifies | same | `in_use_store::openvex_draft` (P1-5) |
-| `admission` | not available (needs the image trust policy, P2-3) | same | stub |
+| `admission` | kguardian `ImageTrustPolicy` (report only) for the workload's images, from their verified signers | Kyverno `ImageValidatingPolicy` with `Deny`; refused while an image is not covered unless `acknowledgePartial` | `crate::admission` |
 
 - **SBOM per image (v1.5):** the images are each current container's running digests (or its newest
   digest when none runs; stale containers are left out), one document per digest, shared by every container

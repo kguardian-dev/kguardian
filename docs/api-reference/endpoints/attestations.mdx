@@ -96,6 +96,21 @@ image's `verdict`, `reason`, verified `signers` and verified
 checked, which is not the same as unsigned). `?namespace=`, `limit` 1-1000
 (default 500), and an opaque `after` cursor from `nextAfter`.
 
+### `GET /attestations/policy`
+
+An admission policy generated from the verified signers of running images,
+as YAML. See [ImageTrustPolicy](/concepts/image-trust-policy#generating-policies).
+
+| Query | |
+|---|---|
+| `format` | `kyverno` (default), `policy-controller`, `kguardian` |
+| `mode` | `audit` (default) or `enforce` (not for `kguardian`) |
+| `namespace` | Only images that workloads in this namespace run; a namespaced `ImageTrustPolicy` for `kguardian` |
+| `acknowledgePartial` | With `mode=enforce`, generate although some running images are not covered (otherwise `409`) |
+
+At most 5000 running containers are read; beyond that the answer is `422`
+and asks for `namespace`.
+
 All reads are charged to the broker's read-memory budget and answer `503`
 with `Retry-After` rather than a partial result.
 
