@@ -84,14 +84,28 @@ first):
 | | `attestation-missing` | Signed, but a required attestation is absent, unverified, or signed by someone else. |
 | `Unknown` | `not-checked` | kguardian has no signature result for the image yet. |
 | | `registry_auth`, `rate_limited`, ... | Discovery could not check it (a private image, for example). |
+| | `namespace-unknown` | A cluster policy with a `namespaceSelector`, and a namespace the evaluator's cache does not know yet. |
+| | `broker-unavailable` | The broker could not be read for longer than 3x the interval; `status.message` has the error and the last successful read. |
+| | `broker-unauthorized` | The broker rejected the evaluator's token (401/403); reported at once. |
 
 Unknown is never counted as trusted. An enforcing policy would most likely
 deny these images, so treat them as findings to resolve.
 
 `status.error` is set when the spec cannot be evaluated (a bad regular
-expression or key). Status is written only when it changes. The evaluator
-also serves the per-container results at `GET /image-trust` on its own
-port (`?namespace=`, `?verdict=`).
+expression or key). `evaluation.lastEvaluated` is when the running
+containers were last read from the broker; `lastChanged` is when the
+verdicts last changed. Status is written with server-side apply, so a
+finding or error that no longer holds is removed, not left behind.
+
+If the broker cannot be read, the last verdicts stay for up to 3x the
+interval; after that every container is reported `Unknown`
+(`broker-unavailable`), never as its last verdict. A rejected token makes
+them `Unknown` at once.
+
+The evaluator also serves the per-container results at `GET /image-trust`
+on its own port (`?namespace=`, `?verdict=`). It requires the same broker
+READ-scope token as the broker's read API (`Authorization: Bearer ...`);
+with broker auth off it is open, like the broker.
 
 ## How it works
 
