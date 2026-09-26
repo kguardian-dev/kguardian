@@ -53,6 +53,7 @@ const REASON_MEANING: Record<string, string> = {
   bad_signature: "a signature did not verify: the content or signature was altered",
   digest_mismatch: "a signature was made for a different digest",
   no_repo_digest: "the image has no registry digest to look signatures up by",
+  no_signer_identity: "a signature was marked verified but names no signer (no issuer and SAN, no key fingerprint), so it is not counted as signed: unknown",
 };
 
 // --- argument validation -----------------------------------------------------
@@ -71,7 +72,18 @@ export function parseTrustVerdict(raw: unknown): string {
 // --- GET /images/{digest}/attestation ---------------------------------------
 
 export const SIGNERS_NOTE =
-  `verdict: verified (a signature verified), key_signed (signed with a key kguardian was not given: NOT checked), unsigned, invalid (signatures exist, none verified), unknown (could not be checked). "verified" means valid for the listed signer, NOT trusted: only an ImageTrustPolicy (explain_image_trust) says whether a signer is acceptable. unknown, unrecognised_reason, a missing result and key_signed are never a pass. Signers are shown only for signatures that verified; an unverified signature's claimed identity is never a fact. kguardian reports only; it never admits or blocks an image. ${UNTRUSTED_NOTE}`;
+  `verdict: verified (a signature verified), key_signed (signed with a key kguardian was not given: NOT checked), unsigned, invalid (signatures exist, none verified), unknown (could not be checked). "verified" means valid for the listed signer, NOT trusted: only an ImageTrustPolicy (explain_image_trust) says whether a signer is acceptable. unknown, unrecognised_reason, a missing result and key_signed are never a pass. Signers are shown only for signatures that verified; an unverified signature's claimed identity is never a fact. A result marked verified whose signatures name no signer is reported as unknown (reason no_signer_identity, brokerVerdict verified): never signed. kguardian reports only; it never admits or blocks an image. ${UNTRUSTED_NOTE}`;
+
+export const NO_SIGNER_IDENTITY = "no_signer_identity";
+
+/** A signer is named by a keyless issuer AND SAN, or a key fingerprint. */
+export function namesSigner(s: Rec): boolean {
+  const set = (v: unknown) => typeof v === "string" && v.trim() !== "";
+  const keyless = set(s.issuer) && set(s.san);
+  if (s.signerKind === "key") return set(s.keyFingerprint);
+  if (s.signerKind === undefined || s.signerKind === null || s.signerKind === "") return keyless || set(s.keyFingerprint);
+  return keyless;
+}
 
 function signer(s: Rec): Rec {
   return s.signerKind === "key"
@@ -92,12 +104,24 @@ export function notChecked(digest: string): Rec {
 
 export function trimSigners(a: unknown): Rec {
   if (!isRecord(a)) return { found: false, verdict: "unknown", note: SIGNERS_NOTE };
-  const verdict = typeof a.verdict === "string" ? a.verdict : "unknown";
+  let verdict = typeof a.verdict === "string" ? a.verdict : "unknown";
   const out: Rec = {
     found: true,
     ...pick(a, ["digest", "repository", "verdict", "reason", "trustRoot", "signedVia", "signedDigest", "checkedAt"]),
   };
-  const sigs = (Array.isArray(a.signatures) ? a.signatures : []).filter(isRecord);
+  // A signature or attestation marked verified that names no signer (an
+  // older broker stored it) is shown as unverified: a claimed "verified"
+  // without an identity is not a fact.
+  const anonymise = (x: Rec): Rec =>
+    x.verified === true && !namesSigner(x) ? { ...x, verified: false, error: NO_SIGNER_IDENTITY, detail: undefined } : x;
+  const sigs = (Array.isArray(a.signatures) ? a.signatures : []).filter(isRecord).map(anonymise);
+  if (verdict === "verified" && !sigs.some((x) => x.verified === true)) {
+    // Verified with no named signer: unknown, never signed.
+    verdict = "unknown";
+    out.verdict = "unknown";
+    out.reason = NO_SIGNER_IDENTITY;
+    out.brokerVerdict = "verified";
+  }
   // Verified first; the rest keep the broker's order.
   const ordered = [...sigs.filter((s) => s.verified === true), ...sigs.filter((s) => s.verified !== true)];
   const { items, dropped } = capList(ordered, SIGNING_CAPS.signatures);
@@ -116,7 +140,7 @@ export function trimSigners(a: unknown): Rec {
       const k = JSON.stringify(s);
       return seen.has(k) ? false : (seen.add(k), true);
     });
-  const atts = (Array.isArray(a.attestations) ? a.attestations : []).filter(isRecord);
+  const atts = (Array.isArray(a.attestations) ? a.attestations : []).filter(isRecord).map(anonymise);
   const att = capList(
     [...atts.filter((x) => x.verified === true), ...atts.filter((x) => x.verified !== true)],
     SIGNING_CAPS.attestations,
@@ -128,7 +152,7 @@ export function trimSigners(a: unknown): Rec {
   );
   if (att.dropped > 0) out.attestationsOmitted = att.dropped;
   out.verdictMeaning = VERDICT_MEANING[verdict] ?? "an unrecognised verdict: treat as unknown, never as a pass.";
-  const reason = typeof a.reason === "string" ? a.reason : "";
+  const reason = typeof out.reason === "string" ? out.reason : "";
   if (reason && REASON_MEANING[reason]) out.reasonMeaning = REASON_MEANING[reason];
   out.truncated = dropped > 0 || att.dropped > 0;
   out.note = SIGNERS_NOTE;
@@ -147,6 +171,7 @@ export const TRUST_REASON_MEANING: Record<string, string> = {
   "namespace-unknown": "the evaluator could not read the namespace's labels, so it cannot tell whether the policy applies",
   "broker-unavailable": "the evaluator could not read signature results from the broker",
   "broker-unauthorized": "the broker refused the evaluator's token",
+  no_signer_identity: "the signature result says verified but names no signer, so no authority can match it: unknown",
 };
 
 export const TRUST_NOTE =
