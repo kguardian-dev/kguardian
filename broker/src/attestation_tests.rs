@@ -412,47 +412,66 @@ fn live_gc_follows_inventory_and_age() {
 #[test]
 #[ignore = "requires a live postgres (set KG_TEST_DATABASE_URL)"]
 fn live_summary_cost_covers_the_largest_row() {
-    let mut conn = live_conn();
-    let dg = d(90);
-    add_image(&mut conn, &dg);
-    let long = |c: char, n: usize| c.to_string().repeat(n);
-    let sigs: Vec<_> = (0..MAX_SIGNATURES)
-        .map(|i| json!({"format": "cosign-bundle", "source": "referrers", "verified": true,
-            "signer_kind": if i % 2 == 0 { "keyless" } else { "key" },
-            "issuer": format!("{i:02}{}", long('i', MAX_URI - 2)), "san": format!("{i:02}{}", long('s', MAX_URI - 2)),
-            "key_name": format!("{i:02}{}", long('k', MAX_SHORT - 2)), "key_fingerprint": format!("{i:064x}")}))
-        .collect();
-    let atts: Vec<_> = (0..MAX_ATTESTATIONS)
-        .map(|i| {
-            json!({"predicate_type": format!("{i:02}{}", long('p', MAX_URI - 2)), "verified": true,
-            "signer_kind": "keyless", "issuer": "i", "san": "s"})
-        })
-        .collect();
-    let v = json!({"schema_version": 1, "digest": dg, "repository": long('r', MAX_URI),
-        "checked_at": "2026-09-01T00:00:00Z", "verdict": "verified", "reason": long('a', MAX_SHORT),
-        "signed_via": "self", "signatures": sigs, "attestations": atts});
-    let body = serde_json::to_vec(&v).unwrap();
-    assert!(
-        body.len() <= MAX_BODY_BYTES,
-        "fixture over the body cap: {}",
-        body.len()
-    );
-    let p = parse_post(&dg, &body, Utc::now()).unwrap();
-    assert_eq!(store(&mut conn, &p).unwrap(), Outcome::Stored);
-    let page = list(&mut conn, None, None, None, 10).unwrap();
-    let row = serde_json::to_vec(&page.items[0]).unwrap().len() as u64;
-    assert!(
-        row <= ATTESTATION_SUMMARY_COST_BYTES,
-        "largest summary row is {row} bytes, charged {ATTESTATION_SUMMARY_COST_BYTES}"
-    );
-    let one = serde_json::to_vec(&load_one(&mut conn, &dg).unwrap().unwrap())
-        .unwrap()
-        .len() as u64;
-    assert!(
-        one <= ATTESTATION_ROW_COST_BYTES,
-        "largest row is {one} bytes"
-    );
-    eprintln!("largest summary row {row} bytes; largest stored row {one} bytes");
+    // ASCII, 2-byte UTF-8, 4-byte UTF-8 (emoji) and a character JSON
+    // escapes (a quote serialises to 2 bytes): the served summary row
+    // stays within the charge in every case (strings are cut by bytes).
+    let chars = [
+        'i',
+        char::from_u32(0xE9).unwrap(),
+        char::from_u32(0x1F600).unwrap(),
+        '"',
+    ];
+    for (n, c) in chars.into_iter().enumerate() {
+        let mut conn = live_conn();
+        let dg = d(90 + n as u32);
+        add_image(&mut conn, &dg);
+        // Longest strings the caps allow for this character (bytes).
+        let fill = |prefix: String, max: usize| {
+            let room = (max - prefix.len()) / c.len_utf8();
+            prefix + &c.to_string().repeat(room)
+        };
+        let mut pred_len = MAX_URI;
+        let body = loop {
+            let sigs: Vec<_> = (0..MAX_SIGNATURES)
+                .map(|i| json!({"format": "cosign-bundle", "source": "referrers", "verified": true,
+                    "signer_kind": if i % 2 == 0 { "keyless" } else { "key" },
+                    "issuer": fill(format!("{i:02}"), MAX_URI), "san": fill(format!("{i:02}"), MAX_URI),
+                    "key_name": fill(format!("{i:02}"), MAX_SHORT), "key_fingerprint": format!("{i:064x}")}))
+                .collect();
+            let atts: Vec<_> = (0..MAX_ATTESTATIONS)
+                .map(|i| {
+                    json!({"predicate_type": fill(format!("{i:02}"), pred_len), "verified": true,
+                    "signer_kind": "keyless", "issuer": "i", "san": "s"})
+                })
+                .collect();
+            let v = json!({"schema_version": 1, "digest": dg, "repository": fill(String::new(), MAX_URI),
+                "checked_at": "2026-09-01T00:00:00Z", "verdict": "verified", "reason": "trust_root_unavailable",
+                "signed_via": "self", "signatures": sigs, "attestations": atts});
+            let body = serde_json::to_vec(&v).unwrap();
+            // Escaped characters inflate the body: shrink the least
+            // interesting part (predicates) until it is a valid post.
+            if body.len() <= MAX_BODY_BYTES {
+                break body;
+            }
+            pred_len -= 64;
+        };
+        let p = parse_post(&dg, &body, Utc::now()).unwrap();
+        assert_eq!(store(&mut conn, &p).unwrap(), Outcome::Stored);
+        let page = list(&mut conn, None, None, None, 10).unwrap();
+        let row = serde_json::to_vec(&page.items[0]).unwrap().len() as u64;
+        assert!(
+            row <= ATTESTATION_SUMMARY_COST_BYTES,
+            "{c:?}: largest summary row is {row} bytes, charged {ATTESTATION_SUMMARY_COST_BYTES}"
+        );
+        let one = serde_json::to_vec(&load_one(&mut conn, &dg).unwrap().unwrap())
+            .unwrap()
+            .len() as u64;
+        assert!(
+            one <= ATTESTATION_ROW_COST_BYTES,
+            "{c:?}: largest row is {one} bytes"
+        );
+        eprintln!("{c:?}: largest summary row {row} bytes; largest stored row {one} bytes");
+    }
 }
 
 /// VERDICTS and SIGNER_KINDS equal the shared contract file, which
@@ -482,6 +501,11 @@ fn verdict_contract_matches_supplychain() {
         ours(&SIGNER_KINDS),
         set("signer_kinds"),
         "broker SIGNER_KINDS drifted from the contract"
+    );
+    assert_eq!(
+        ours(&REASONS),
+        set("reasons"),
+        "broker REASONS drifted from the contract"
     );
 }
 
@@ -537,4 +561,72 @@ fn verified_signature_survives_the_caps() {
     assert_eq!(p.signatures.len(), MAX_SIGNATURES);
     assert!(p.signatures[0].verified);
     assert!(p.attestations[0].verified);
+}
+
+/// Bidi and invisible format controls are refused like control characters
+/// (identities are what operators review), and so is an unknown reason.
+#[test]
+fn bidi_controls_and_unknown_reasons_are_refused() {
+    for cp in [
+        0x200Eu32, 0x200F, 0x202A, 0x202B, 0x202C, 0x202D, 0x202E, 0x2066, 0x2067, 0x2068, 0x2069,
+        0xFEFF,
+    ] {
+        let c = char::from_u32(cp).unwrap();
+        for (path, field) in [
+            ("/signatures/0/san", "signatures[0].san"),
+            (
+                "/attestations/0/predicate_type",
+                "attestations[0].predicate_type",
+            ),
+            ("/repository", "repository"),
+        ] {
+            let mut v = body(&d(9), "verified");
+            *v.pointer_mut(path).unwrap() = json!(format!("gh{c}evil"));
+            match parse(&v, &d(9)) {
+                Err(Reject::Unprocessable(m)) => {
+                    assert!(m.starts_with(field), "U+{cp:04X} {field}: {m}")
+                }
+                other => panic!("U+{cp:04X} {field}: {other:?}"),
+            }
+        }
+    }
+    let mut v = body(&d(9), "verified");
+    v["signatures"][1]["error"] = json!("made_up");
+    match parse(&v, &d(9)) {
+        Err(Reject::Unprocessable(m)) => assert!(m.starts_with("signatures[1].error"), "{m}"),
+        other => panic!("{other:?}"),
+    }
+    let mut v = body(&d(9), "unknown");
+    v["signatures"] = json!([]);
+    v["reason"] = json!("registry_auth");
+    assert!(parse(&v, &d(9)).is_ok());
+    v["reason"] = json!("made_up");
+    assert!(matches!(parse(&v, &d(9)), Err(Reject::Unprocessable(_))));
+}
+
+/// Byte truncation never splits a UTF-8 sequence and never exceeds the
+/// limit.
+#[test]
+fn truncate_bytes_stays_on_char_boundaries() {
+    let sample: String = [
+        'a',
+        char::from_u32(0xE9).unwrap(),
+        char::from_u32(0x4E2D).unwrap(),
+        char::from_u32(0x1F600).unwrap(),
+    ]
+    .iter()
+    .cycle()
+    .take(40)
+    .collect();
+    for max in 0..=sample.len() + 2 {
+        let mut s = sample.clone();
+        truncate_bytes(&mut s, max);
+        assert!(s.len() <= max, "max {max}: {} bytes", s.len());
+        assert!(sample.starts_with(&s));
+        // As long as possible: one more character would not fit.
+        if let Some(next) = sample[s.len()..].chars().next() {
+            assert!(s.len() + next.len_utf8() > max, "max {max}: cut too short");
+        }
+        assert!(std::str::from_utf8(s.as_bytes()).is_ok());
+    }
 }

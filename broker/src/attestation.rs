@@ -74,6 +74,29 @@ const TOO_MANY: &str = "too many items";
 
 /// `key_signed`: signed with a public key the component does not hold,
 /// so the signature exists but was not checked.
+/// Reason codes accepted in `reason` and in a signature's or attestation's
+/// `error`: exactly supplychain's (test/fixtures/contracts).
+pub const REASONS: [&str; 18] = [
+    "bad_signature",
+    "blocked_address",
+    "blocked_realm",
+    "digest_mismatch",
+    "local_hostname",
+    "malformed",
+    "network",
+    "no_repo_digest",
+    "private_address",
+    "rate_limited",
+    "registry_auth",
+    "registry_error",
+    "timeout",
+    "too_large",
+    "trust_root_unavailable",
+    "unsupported_format",
+    "untrusted_key",
+    "untrusted_root",
+];
+
 pub const VERDICTS: [&str; 5] = ["verified", "key_signed", "unsigned", "invalid", "unknown"];
 
 // ---------------------------------------------------------------------
@@ -327,6 +350,20 @@ fn cap_signer(
 
 pub const SIGNER_KINDS: [&str; 2] = ["keyless", "key"];
 
+/// Refused in every ingested string: control characters, the Unicode
+/// line/paragraph separators, and the bidirectional/invisible format
+/// controls that make an identity display as something else (U+200E/F,
+/// U+202A-E, U+2066-9, U+FEFF). supplychain neutralises the same set.
+pub fn refused_char(c: char) -> bool {
+    c.is_control()
+        || matches!(
+            c,
+            '\u{2028}' | '\u{2029}' | '\u{200E}' | '\u{200F}' | '\u{FEFF}'
+        )
+        || ('\u{202A}'..='\u{202E}').contains(&c)
+        || ('\u{2066}'..='\u{2069}').contains(&c)
+}
+
 /// A control character or a Unicode line/paragraph separator (U+2028,
 /// U+2029) in any string is refused: these values end up in generated YAML
 /// and comments, where one would start a new line, and a truncated or
@@ -335,8 +372,7 @@ pub const SIGNER_KINDS: [&str; 2] = ["keyless", "key"];
 /// means a broken or hostile client.
 fn check_text(p: &AttestationPost) -> Result<(), Reject> {
     fn bad(s: &str) -> bool {
-        s.chars()
-            .any(|c| c.is_control() || c == '\u{2028}' || c == '\u{2029}')
+        s.chars().any(refused_char)
     }
     fn opt(v: &Option<String>) -> &str {
         v.as_deref().unwrap_or("")
@@ -398,7 +434,7 @@ fn check_text(p: &AttestationPost) -> Result<(), Reject> {
     }
     match fields.into_iter().find(|(_, v)| bad(v)) {
         Some((name, _)) => Err(Reject::Unprocessable(format!(
-            "{name} contains a control character or line separator"
+            "{name} contains a control, line-separator or bidi/format character"
         ))),
         None => Ok(()),
     }
@@ -445,6 +481,21 @@ pub fn parse_post(
         return Err(Reject::Unprocessable(
             "repository is empty or too long".into(),
         ));
+    }
+    let known = |field: String, v: &Option<String>| -> Result<(), Reject> {
+        match v.as_deref() {
+            Some(r) if !r.is_empty() && !REASONS.contains(&r) => Err(Reject::Unprocessable(
+                format!("{field}: {r:?} is not a known reason code"),
+            )),
+            _ => Ok(()),
+        }
+    };
+    known("reason".into(), &p.reason)?;
+    for (i, s) in p.signatures.iter().enumerate() {
+        known(format!("signatures[{i}].error"), &s.error)?;
+    }
+    for (i, a) in p.attestations.iter().enumerate() {
+        known(format!("attestations[{i}].error"), &a.error)?;
     }
     for tok in [&p.reason, &p.trust_root, &p.signed_via]
         .into_iter()
@@ -747,8 +798,8 @@ pub fn attestation_resource() -> impl actix_web::dev::HttpServiceFactory {
 /// (camelCase keys, escaping), so twice the body cap.
 pub const ATTESTATION_ROW_COST_BYTES: u64 = 2 * MAX_BODY_BYTES as u64;
 /// Per summary row on `GET /attestations`.
-/// Measured against the largest possible summary row (the summary
-/// projection caps each identity string at 256 characters);
+/// Measured against the largest possible summary row (each identity
+/// string and the repository cut to [`SUMMARY_TEXT_BYTES`]);
 /// `live_summary_cost_covers_the_largest_row` checks it.
 pub const ATTESTATION_SUMMARY_COST_BYTES: u64 = 24 * 1024;
 pub const ATTESTATIONS_DEFAULT_LIMIT: i64 = 100;
@@ -896,7 +947,39 @@ pub fn list(
     } else {
         None
     };
+    for i in &mut items {
+        truncate_bytes(&mut i.repository, SUMMARY_TEXT_BYTES);
+        truncate_json_strings(&mut i.signers, SUMMARY_TEXT_BYTES);
+        truncate_json_strings(&mut i.verified_predicates, SUMMARY_TEXT_BYTES);
+    }
     Ok(SummaryPage { items, next_after })
+}
+
+/// Bytes of a repository, issuer, SAN or predicate type shown in a
+/// summary. The SQL cuts at 256 characters (which bounds what is fetched);
+/// this cuts at 256 bytes, on a character boundary, which bounds what is
+/// served whatever the script.
+pub const SUMMARY_TEXT_BYTES: usize = 256;
+
+/// Truncates to at most `max` bytes without splitting a UTF-8 sequence.
+pub fn truncate_bytes(s: &mut String, max: usize) {
+    if s.len() <= max {
+        return;
+    }
+    let mut end = max;
+    while !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    s.truncate(end);
+}
+
+fn truncate_json_strings(v: &mut serde_json::Value, max: usize) {
+    match v {
+        serde_json::Value::String(s) => truncate_bytes(s, max),
+        serde_json::Value::Array(a) => a.iter_mut().for_each(|x| truncate_json_strings(x, max)),
+        serde_json::Value::Object(o) => o.values_mut().for_each(|x| truncate_json_strings(x, max)),
+        _ => {}
+    }
 }
 
 fn non_empty(s: Option<String>) -> Option<String> {

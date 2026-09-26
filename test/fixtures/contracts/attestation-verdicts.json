@@ -1,5 +1,34 @@
 {
-  "_comment": "Contract between supplychain (supplychain/pkg/attest) and the broker (broker/src/attestation.rs) for POST /images/{digest}/attestation. Both sides test their sets against this file; changing one side without the other fails CI.",
-  "verdicts": ["verified", "key_signed", "unsigned", "invalid", "unknown"],
-  "signer_kinds": ["keyless", "key"]
+  "_comment": "Contract between supplychain (supplychain/pkg/attest, and the registry guard's reasons) and the broker (broker/src/attestation.rs) for POST /images/{digest}/attestation: verdicts, signer kinds, and the reason codes allowed in reason and signatures/attestations[].error. Both sides test their sets against this file; changing one side without the other fails CI.",
+  "verdicts": [
+    "verified",
+    "key_signed",
+    "unsigned",
+    "invalid",
+    "unknown"
+  ],
+  "signer_kinds": [
+    "keyless",
+    "key"
+  ],
+  "reasons": [
+    "bad_signature",
+    "blocked_address",
+    "blocked_realm",
+    "digest_mismatch",
+    "local_hostname",
+    "malformed",
+    "network",
+    "no_repo_digest",
+    "private_address",
+    "rate_limited",
+    "registry_auth",
+    "registry_error",
+    "timeout",
+    "too_large",
+    "trust_root_unavailable",
+    "unsupported_format",
+    "untrusted_key",
+    "untrusted_root"
+  ]
 }
