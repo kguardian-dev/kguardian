@@ -118,14 +118,15 @@ func TestRegistryLookupFollowsIngest(t *testing.T) {
 	}
 }
 
-func TestRegistrySBOMFollowsIngest(t *testing.T) {
+func TestRegistrySBOMIsOptIn(t *testing.T) {
 	for _, c := range []struct {
 		env  map[string]string
 		want bool
 	}{
 		{map[string]string{}, false},
-		{map[string]string{"BROKER_INGEST_ENABLED": "true"}, true},
-		{map[string]string{"BROKER_INGEST_ENABLED": "true", "REGISTRY_SBOM_ENABLED": "false"}, false},
+		{map[string]string{"BROKER_INGEST_ENABLED": "true"}, false},
+		{map[string]string{"BROKER_INGEST_ENABLED": "true", "REGISTRY_SBOM_ENABLED": "true"}, true},
+		{map[string]string{"REGISTRY_SBOM_ENABLED": "false"}, false},
 	} {
 		got, err := loadConfig(envMap(c.env))
 		if err != nil {

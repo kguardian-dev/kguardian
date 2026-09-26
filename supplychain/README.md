@@ -181,6 +181,10 @@ unverified**: no signature is checked, so anyone who can push to a
 repository can attach one. They only ever **add** to what Trivy found;
 they never replace or shrink it (see [SBOM trust and the union](#sbom-trust-and-the-union)).
 
+The source is **off by default** and does not follow broker ingest: set
+`supplychain.sources.registry.enabled=true` (`REGISTRY_SBOM_ENABLED=true`)
+to turn it on. It is egress to the registries of your running images.
+
 1. Every `REGISTRY_SBOM_INTERVAL` (15 min), it lists running digests from
    the broker's image inventory (`GET /images`, read scope, paged). Only
    rows with `runningContainers > 0` are used.
@@ -321,7 +325,7 @@ The coordinator (`pkg/match`):
 | `TRIVY_RECHECK_PERIOD` | `5m` | How often discovery re-runs to pick up installed or removed CRDs. |
 | `REGISTRY_LOOKUP_ENABLED` | value of `BROKER_INGEST_ENABLED` | Anonymous registry lookup for `digest_kind` / `platform_manifests`. |
 | `REGISTRY_ALLOW_PRIVATE` | `false` | Let lookups reach RFC1918/CGNAT/ULA addresses, `.local` and single-label names. Loopback, link-local, unspecified and multicast are always refused. |
-| `REGISTRY_SBOM_ENABLED` | value of `BROKER_INGEST_ENABLED` | Fetch registry-attached SBOMs for running digests. Needs `BROKER_URL` and a token with the read scope (the supplychain token has it). |
+| `REGISTRY_SBOM_ENABLED` | `false` | Fetch registry-attached SBOMs for running digests (opt-in; egress to image registries). Needs `BROKER_URL` and a token with the read scope (the supplychain token has it). |
 | `REGISTRY_SBOM_INTERVAL` | `15m` | How often to list running images. |
 | `GRYPE_MATCHER_URL` | *(unset)* | Loopback URL of the matcher sidecar; set by the chart when `supplychain.grype.enabled`. Unset = no Grype matching. |
 | `BROKER_INGEST_ENABLED` | `false` | Send payloads to the broker instead of logging them. |

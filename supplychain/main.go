@@ -132,9 +132,9 @@ func loadConfig(getenv func(string) string) (config, error) {
 	if c.RegistryAllowPrivate, err = strconv.ParseBool(env("REGISTRY_ALLOW_PRIVATE", "false")); err != nil {
 		return c, fmt.Errorf("REGISTRY_ALLOW_PRIVATE: %w", err)
 	}
-	// Registry SBOMs are fetched for the broker, so the source follows
-	// broker ingest unless set explicitly.
-	if c.RegistrySBOM, err = strconv.ParseBool(env("REGISTRY_SBOM_ENABLED", strconv.FormatBool(c.BrokerIngest))); err != nil {
+	// Registry SBOMs mean egress to image registries: opt-in only, never
+	// implied by broker ingest.
+	if c.RegistrySBOM, err = strconv.ParseBool(env("REGISTRY_SBOM_ENABLED", "false")); err != nil {
 		return c, fmt.Errorf("REGISTRY_SBOM_ENABLED: %w", err)
 	}
 	if c.RegistrySBOMInterval, err = time.ParseDuration(env("REGISTRY_SBOM_INTERVAL", "15m")); err != nil || c.RegistrySBOMInterval <= 0 {
