@@ -83,13 +83,9 @@ spec:
               value: {{ $lookup | quote }}
             - name: REGISTRY_ALLOW_PRIVATE
               value: {{ .Values.supplychain.registryLookup.allowPrivateRegistries | quote }}
-            {{- /* Unset (null) follows brokerIngest.enabled, like registryLookup. */}}
-            {{- $regSBOM := .Values.supplychain.brokerIngest.enabled }}
-            {{- if not (kindIs "invalid" .Values.supplychain.sources.registry.enabled) }}
-            {{- $regSBOM = .Values.supplychain.sources.registry.enabled }}
-            {{- end }}
+            {{- /* Opt-in only: never follows brokerIngest.enabled. */}}
             - name: REGISTRY_SBOM_ENABLED
-              value: {{ $regSBOM | quote }}
+              value: {{ .Values.supplychain.sources.registry.enabled | default false | quote }}
             - name: REGISTRY_SBOM_INTERVAL
               value: {{ .Values.supplychain.sources.registry.interval | quote }}
             {{- /* Scoped token: this component can only reach the supplychain routes. */}}

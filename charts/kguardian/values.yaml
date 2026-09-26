@@ -1814,9 +1814,11 @@ evaluator:
 supplychain:
   # -- Deploy the supply-chain component (#1533). It reads vulnerability and
   # SBOM data about the images your workloads run and reports it; it never
-  # blocks or changes a workload. Off by default. Today its only source is
-  # Trivy Operator (install Trivy Operator separately). Payloads are logged,
-  # not sent, until broker ingest ships (see brokerIngest.enabled).
+  # blocks or changes a workload. Off by default. Its default source is
+  # Trivy Operator (install Trivy Operator separately); registry SBOMs
+  # (sources.registry) and the Grype matcher (grype) are opt-in. Payloads
+  # are sent to the broker only when brokerIngest.enabled is true;
+  # otherwise they are logged.
   # Requires broker.auth.enabled=true in scoped mode with a supplychain key;
   # the chart refuses to render otherwise.
   enabled: false
@@ -1861,19 +1863,20 @@ supplychain:
       # -- How often to re-check for the Trivy Operator CRDs while absent
       recheckPeriod: 5m
     registry:
-      # -- (bool) Fetch SBOMs that publishers attach to running images in
+      # -- Fetch SBOMs that publishers attach to running images in
       # their registry: OCI referrers (cosign v3 bundles, in-toto), cosign
       # .att/.sbom tags and BuildKit attestations. Anonymous only (never
       # pull secrets), through the same address guard as registryLookup
       # (allowPrivateRegistries applies). Running digests come from the
-      # broker's image inventory. Unset (null) follows brokerIngest.enabled.
+      # broker's image inventory. Off by default and independent of
+      # brokerIngest.enabled: turn it on explicitly.
       # Registry SBOMs are UNVERIFIED: no signature is checked, so anyone
       # who can push to a repository can attach one. They are therefore
       # only ever ADDED to what Trivy found (a union), never used to replace
       # or shrink it; empty SBOMs and in-toto statements whose subject is
       # not the running image are rejected.
       # Egress: HTTPS to the registries of your running images.
-      enabled: null
+      enabled: false
       # -- How often to list running images. Each digest is looked up at
       # most once a day whatever the interval.
       interval: 15m
@@ -2007,7 +2010,9 @@ supplychain:
 
   # -- Resource requests and limits. Memory grows with the number and size
   # of Trivy reports in the cluster (the reports are cached); raise the
-  # limit on large clusters.
+  # limit on large clusters. With grype.enabled this container also holds
+  # up to 2000 images' SBOMs for matching; that footprint has not been
+  # measured yet, so watch its memory when you turn Grype on.
   resources:
     limits:
       memory: 256Mi
