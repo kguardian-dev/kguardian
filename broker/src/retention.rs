@@ -200,6 +200,7 @@ pub fn spawn(pool: DbPool) {
     let denial_pool = pool.clone();
     let traffic_pool = pool.clone();
     spawn_image_inventory(pool.clone());
+    spawn_runtime_inventory(pool.clone());
     spawn_workload_profiles(pool.clone());
     spawn_supplychain(pool.clone());
     actix_web::rt::spawn(async move {
@@ -1895,6 +1896,80 @@ fn prune_batch(
 }
 
 // ---------------------------------------------------------------------
+// Runtime inventory (#1533 P1-2)
+// ---------------------------------------------------------------------
+//
+// `runtime_executables` rows are refreshed (at most every
+// image_inventory::REFRESH_SECS) whenever the controller sees the path
+// run again, so a row not seen for the window is a binary or library the
+// workload no longer runs: an old digest after a rollout, a deleted
+// workload, a one-off exec. Deleted by primary key, oldest first.
+//
+// - `RUNTIME_INVENTORY_RETENTION_DAYS` (default 30; 0 disables)
+// - `RUNTIME_INVENTORY_RETENTION_INTERVAL_SECS` (default 3600, floor 60)
+// - batch size shared with IMAGE_INVENTORY_RETENTION_BATCH_SIZE
+
+const DEFAULT_RUNTIME_INVENTORY_RETENTION_DAYS: u32 = 30;
+
+fn runtime_inventory_retention_days() -> u32 {
+    std::env::var("RUNTIME_INVENTORY_RETENTION_DAYS")
+        .ok()
+        .and_then(|v| v.trim().parse().ok())
+        .unwrap_or(DEFAULT_RUNTIME_INVENTORY_RETENTION_DAYS)
+}
+
+fn runtime_inventory_retention_interval() -> Duration {
+    let secs = std::env::var("RUNTIME_INVENTORY_RETENTION_INTERVAL_SECS")
+        .ok()
+        .and_then(|v| v.trim().parse().ok())
+        .unwrap_or(DEFAULT_IMAGE_INVENTORY_INTERVAL_SECS);
+    Duration::from_secs(secs.max(60))
+}
+
+pub(crate) const RUNTIME_EXECUTABLES_PRUNE_SQL: &str = "WITH expired AS (\
+         SELECT cluster_id, pod_namespace, workload_kind, workload_name, container_name, \
+                image_digest, kind, path \
+         FROM runtime_executables \
+         WHERE last_seen < timezone('UTC', NOW()) - $1::interval \
+         ORDER BY last_seen \
+         LIMIT $2 \
+     ) \
+     DELETE FROM runtime_executables r USING expired e \
+     WHERE r.cluster_id = e.cluster_id AND r.pod_namespace = e.pod_namespace \
+       AND r.workload_kind = e.workload_kind AND r.workload_name = e.workload_name \
+       AND r.container_name = e.container_name AND r.image_digest = e.image_digest \
+       AND r.kind = e.kind AND r.path = e.path";
+
+fn spawn_runtime_inventory(pool: DbPool) {
+    let days = runtime_inventory_retention_days();
+    let interval = runtime_inventory_retention_interval();
+    info!(
+        days,
+        interval_secs = interval.as_secs(),
+        "runtime inventory retention loop scheduled (days=0 means pruning off)"
+    );
+    if days == 0 {
+        return;
+    }
+    actix_web::rt::spawn(async move {
+        // Staggered between the image inventory (150 s) and profile
+        // (180 s) warmups.
+        tokio::time::sleep(Duration::from_secs(165)).await;
+        loop {
+            run_batched_prune(
+                &pool,
+                "runtime_executables",
+                RUNTIME_EXECUTABLES_PRUNE_SQL,
+                days,
+                image_inventory_batch_size(),
+            )
+            .await;
+            tokio::time::sleep(interval).await;
+        }
+    });
+}
+
+// ---------------------------------------------------------------------
 // Workload security profiles (#1533)
 // ---------------------------------------------------------------------
 //
@@ -2506,6 +2581,107 @@ mod supplychain_retention_tests {
             sql.contains("wc.state_reason = 'CrashLoopBackOff'"),
             "{sql}"
         );
+    }
+}
+
+#[cfg(test)]
+mod runtime_inventory_retention_tests {
+    use super::*;
+    use diesel::connection::SimpleConnection;
+
+    #[test]
+    fn env_defaults_overrides_and_floor() {
+        let _guard = crate::test_support::env_lock();
+        for k in [
+            "RUNTIME_INVENTORY_RETENTION_DAYS",
+            "RUNTIME_INVENTORY_RETENTION_INTERVAL_SECS",
+        ] {
+            std::env::remove_var(k);
+        }
+        assert_eq!(runtime_inventory_retention_days(), 30);
+        assert_eq!(
+            runtime_inventory_retention_interval(),
+            Duration::from_secs(3600)
+        );
+        std::env::set_var("RUNTIME_INVENTORY_RETENTION_DAYS", " 7 ");
+        std::env::set_var("RUNTIME_INVENTORY_RETENTION_INTERVAL_SECS", "5");
+        assert_eq!(runtime_inventory_retention_days(), 7);
+        assert_eq!(
+            runtime_inventory_retention_interval(),
+            Duration::from_secs(60)
+        );
+        std::env::set_var("RUNTIME_INVENTORY_RETENTION_DAYS", "0");
+        assert_eq!(runtime_inventory_retention_days(), 0);
+        std::env::set_var("RUNTIME_INVENTORY_RETENTION_DAYS", "nope");
+        assert_eq!(runtime_inventory_retention_days(), 30);
+        for k in [
+            "RUNTIME_INVENTORY_RETENTION_DAYS",
+            "RUNTIME_INVENTORY_RETENTION_INTERVAL_SECS",
+        ] {
+            std::env::remove_var(k);
+        }
+    }
+
+    #[test]
+    fn prune_sql_is_bounded_and_deletes_by_full_key() {
+        let sql = RUNTIME_EXECUTABLES_PRUNE_SQL;
+        assert!(sql.contains("LIMIT $2") && sql.contains("$1::interval"));
+        for col in ["image_digest", "r.kind = e.kind", "r.path = e.path"] {
+            assert!(sql.contains(col), "{col}");
+        }
+    }
+
+    const TEST_MIGRATIONS: diesel_migrations::EmbeddedMigrations =
+        diesel_migrations::embed_migrations!("./db/migrations");
+
+    #[test]
+    #[ignore = "requires a live postgres (set KG_TEST_DATABASE_URL)"]
+    fn live_database_prunes_only_stale_rows_oldest_first() {
+        use diesel_migrations::MigrationHarness;
+        let url = std::env::var("KG_TEST_DATABASE_URL").expect("set KG_TEST_DATABASE_URL");
+        let mut conn = PgConnection::establish(&url).expect("connect");
+        conn.run_pending_migrations(TEST_MIGRATIONS)
+            .expect("migrate");
+        conn.batch_execute(
+            "TRUNCATE runtime_executables; \
+             INSERT INTO runtime_executables (pod_namespace, workload_kind, workload_name, \
+               container_name, image_digest, kind, path, source, first_seen, last_seen) VALUES \
+             ('prod', 'Deployment', 'web', 'app', '', 'exec', '/fresh', 'ebpf', \
+               timezone('UTC', NOW()), timezone('UTC', NOW())), \
+             ('prod', 'Deployment', 'web', 'app', '', 'exec', '/old', 'ebpf', \
+               timezone('UTC', NOW()) - INTERVAL '40 days', timezone('UTC', NOW()) - INTERVAL '40 days'), \
+             ('prod', 'Deployment', 'web', 'app', '', 'lib', '/older', 'ebpf', \
+               timezone('UTC', NOW()) - INTERVAL '50 days', timezone('UTC', NOW()) - INTERVAL '50 days');",
+        )
+        .unwrap();
+        assert_eq!(
+            prune_batch(&mut conn, RUNTIME_EXECUTABLES_PRUNE_SQL, 30, 1).unwrap(),
+            1
+        );
+        #[derive(QueryableByName)]
+        struct R {
+            #[diesel(sql_type = diesel::sql_types::Text)]
+            path: String,
+        }
+        let left = |conn: &mut PgConnection| -> Vec<String> {
+            sql_query("SELECT path FROM runtime_executables ORDER BY path")
+                .load::<R>(conn)
+                .unwrap()
+                .into_iter()
+                .map(|r| r.path)
+                .collect()
+        };
+        assert_eq!(left(&mut conn), vec!["/fresh", "/old"]);
+        assert_eq!(
+            prune_batch(&mut conn, RUNTIME_EXECUTABLES_PRUNE_SQL, 30, 100).unwrap(),
+            1
+        );
+        assert_eq!(left(&mut conn), vec!["/fresh"]);
+        assert_eq!(
+            prune_batch(&mut conn, RUNTIME_EXECUTABLES_PRUNE_SQL, 30, 100).unwrap(),
+            0
+        );
+        conn.batch_execute("TRUNCATE runtime_executables").unwrap();
     }
 }
 

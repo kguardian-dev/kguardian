@@ -519,6 +519,28 @@ diesel::table! {
     }
 }
 
+diesel::table! {
+    // Executables and shared libraries seen running, one row per
+    // (workload, container, digest, kind, path) (#1533 P1-2). See the
+    // migration and src/runtime_inventory.rs.
+    runtime_executables (cluster_id, pod_namespace, workload_kind, workload_name, container_name, image_digest, kind, path) {
+        cluster_id -> Varchar,
+        pod_namespace -> Varchar,
+        workload_kind -> Varchar,
+        workload_name -> Varchar,
+        container_name -> Varchar,
+        image_digest -> Varchar,
+        kind -> Varchar,
+        path -> Varchar,
+        path_complete -> Bool,
+        source -> Varchar,
+        origin -> Varchar,
+        last_pod_name -> Nullable<Varchar>,
+        first_seen -> Timestamp,
+        last_seen -> Timestamp,
+    }
+}
+
 diesel::allow_tables_to_appear_in_same_query!(
     pod_details,
     pod_traffic,

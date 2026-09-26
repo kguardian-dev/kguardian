@@ -139,6 +139,16 @@ sheds_when_budget_exhausted!(
 );
 sheds_when_budget_exhausted!(svc_info_sheds, api::get_svc_details, "/svc/info");
 sheds_when_budget_exhausted!(
+    workload_runtime_sheds,
+    api::get_workload_runtime,
+    "/workloads/prod/Deployment/web/runtime?origin=unshipped"
+);
+sheds_when_budget_exhausted!(
+    image_runtime_sheds,
+    api::get_image_runtime,
+    "/images/sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef/runtime?kind=lib"
+);
+sheds_when_budget_exhausted!(
     pods_by_node_sheds,
     api::get_pods_by_node,
     "/pod/list/node-1"
