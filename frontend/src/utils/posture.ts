@@ -1,4 +1,4 @@
-import type { DimensionName, FindingSeverity, PostureStatus, PssLevel, LevelConfidence } from '../types/profile';
+import type { DimensionName, FindingSeverity, PostureStatus, PssLevel, LevelConfidence, ProfileDrift, DriftNotEvaluated } from '../types/profile';
 import type { Severity } from './severity';
 
 /**
@@ -45,6 +45,38 @@ export const DIMENSION_LABEL: Record<DimensionName, string> = {
   images: 'Images',
   compute: 'Compute',
 };
+
+/** Label of a finding's dimension, including drift (not a core dimension). */
+export function findingDimensionLabel(d: string): string {
+  if (d === 'drift') return 'Drift';
+  return (DIMENSION_LABEL as Record<string, string>)[d] ?? d;
+}
+
+/** Human text for why a drift check was not evaluated (contract v1.7). An unknown reason is a capture gap. */
+export function driftNotEvaluatedText(reason: string): string {
+  switch (reason) {
+    case 'no_inventory':
+      return 'no runtime inventory for this workload';
+    case 'no_runtime_data':
+      return 'no runtime capture heartbeat for this container';
+    case 'truncated':
+      return 'more running containers than one read covers';
+    case 'no_running_containers':
+      return 'no container is running';
+    case 'no_image_inventory':
+      return 'no image inventory for this workload';
+    case 'no_export':
+      return 'the workload has never been exported (no baseline to compare with)';
+    case 'no_baseline':
+      return 'no earlier securityContext to compare with';
+    case 'no_container_data':
+      return 'no container securityContext reported';
+    case 'not_reported':
+      return 'not evaluated (this broker does not say why)';
+    default:
+      return `runtime capture gap (${reason})`;
+  }
+}
 
 /** Finding severity → the severity.ts scale (info is drawn as low). */
 export function findingSeverity(s: FindingSeverity): Severity {
@@ -103,3 +135,18 @@ export function fieldValue(v: unknown): string {
   if (typeof v === 'object') return JSON.stringify(v);
   return String(v);
 }
+
+/** The drift checks every broker since contract v1.4 runs. */
+const DRIFT_CHECKS_V14 = ['tagMoved', 'imageChangedSinceExport', 'securityContextRegression'] as const;
+
+/**
+ * Drift checks not evaluated. A v1.7+ broker lists them (notEvaluated); a
+ * v1.4-v1.6 broker only sends `evaluated`, so the v1.4 checks it did not
+ * evaluate are gaps too (reason `not_reported`).
+ */
+export function driftGapsOf(drift: ProfileDrift | undefined): DriftNotEvaluated[] {
+  if (!drift) return [];
+  if (drift.notEvaluated) return drift.notEvaluated;
+  return DRIFT_CHECKS_V14.filter((t) => !drift.evaluated.includes(t)).map((type) => ({ type, container: null, reason: 'not_reported' }));
+}
+

@@ -385,11 +385,58 @@ func renderProfileTable(dst io.Writer, ref workloadRef, p *api.Profile) error {
 			return err
 		}
 	}
+	if p.Drift != nil {
+		_, _ = fmt.Fprint(w, renderDrift(p.Drift))
+	}
 	if ps := p.PodSecurity(); ps != nil && ps.Recommendation != nil {
 		_, _ = fmt.Fprintf(w, "\nA securityContext recommendation is available: kubectl kguardian profile export %s --format pss\n", ref)
 	}
 	_, err := dst.Write(out.Bytes())
 	return err
+}
+
+// renderDrift summarises the drift block: item count by type, the checks
+// evaluated for the whole workload, and what was not evaluated and why.
+// Drift findings themselves are listed with the other findings.
+func renderDrift(d *api.ProfileDrift) string {
+	var b strings.Builder
+	counts := map[string]int{}
+	var types []string
+	for _, i := range d.Items {
+		if counts[i.Type] == 0 {
+			types = append(types, i.Type)
+		}
+		counts[i.Type]++
+	}
+	b.WriteString("\nDrift:      ")
+	if len(d.Items) == 0 {
+		b.WriteString("no items")
+	} else {
+		parts := make([]string, 0, len(types))
+		for _, t := range types {
+			parts = append(parts, fmt.Sprintf("%d %s", counts[t], t))
+		}
+		b.WriteString(strings.Join(parts, ", "))
+	}
+	notTypes := map[string]bool{}
+	for _, n := range d.NotEvaluated {
+		notTypes[n.Type] = true
+	}
+	checks := len(d.Evaluated) + len(notTypes)
+	fmt.Fprintf(&b, "; %d of %d checks evaluated (never sets posture)\n", len(d.Evaluated), checks)
+	evaluated := "none"
+	if len(d.Evaluated) > 0 {
+		evaluated = strings.Join(d.Evaluated, ", ")
+	}
+	fmt.Fprintf(&b, "  evaluated:     %s\n", evaluated)
+	for _, n := range d.NotEvaluated {
+		who := "workload"
+		if n.Container != nil {
+			who = "container " + *n.Container
+		}
+		fmt.Fprintf(&b, "  not evaluated: %s for %s (%s): no item here is not \"no drift\"\n", n.Type, who, n.Reason)
+	}
+	return b.String()
 }
 
 // fetchAndRenderProfiles is the testable core of `profile list`.

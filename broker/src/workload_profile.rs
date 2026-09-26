@@ -496,6 +496,9 @@ pub struct Sources {
     pub recent_versions: Vec<crate::profile_drift::RecentVersion>,
     /// Capability use and its coverage (contract 2.9).
     pub capabilities: crate::runtime_capabilities::CapEvidence,
+    /// Runtime inventory input of the `unshippedExecutable` drift check;
+    /// `None` = not loaded (the check is then not evaluated).
+    pub runtime: Option<crate::profile_drift::RuntimeDriftInput>,
 }
 
 impl Sources {
@@ -604,6 +607,11 @@ pub fn load_sources(conn: &mut PgConnection, key: &Key) -> Result<Sources, DbErr
         &crate::runtime_capabilities::current_pairs(&containers),
         crate::runtime_capabilities::evidence_window_hours(),
     )?;
+    let runtime = Some(crate::profile_drift::load_runtime(
+        conn,
+        key,
+        &crate::runtime_capabilities::current_pairs(&containers),
+    )?);
 
     Ok(Sources {
         containers,
@@ -622,6 +630,7 @@ pub fn load_sources(conn: &mut PgConnection, key: &Key) -> Result<Sources, DbErr
         last_export,
         recent_versions,
         capabilities,
+        runtime,
     })
 }
 
@@ -639,6 +648,7 @@ pub fn profile_charge_kib() -> u32 {
     .saturating_add(cost_kib(NETWORK_PEERS_MAX + 1, PEER_ROW_COST_BYTES))
     .saturating_add(cost_kib(PODS_MAX, 256))
     .saturating_add(cost_kib(NETWORK_RULES_MAX, 512))
+    .saturating_add(crate::profile_drift::runtime_charge_kib())
     .saturating_add(cost_kib(COMPUTE_ROWS_MAX + 1, 1_024))
     .saturating_add(cost_kib(AUDIT_POLICIES_MAX, 512))
     .saturating_add(cost_kib(2, SNAPSHOT_COST_BYTES))
@@ -4244,6 +4254,293 @@ mod tests {
 
     fn drift_types(p: &Profile) -> Vec<&'static str> {
         p.drift.items.iter().map(|i| i.kind).collect()
+    }
+
+    // ---- drift: unshippedExecutable (runtime inventory, #1683) ----------
+
+    fn rt_entry(path: &str, origin: &str) -> crate::runtime_inventory::RuntimeEntry {
+        crate::runtime_inventory::RuntimeEntry {
+            path: path.into(),
+            kind: "exec".into(),
+            source: "ebpf".into(),
+            origin: origin.into(),
+            path_complete: true,
+            first_seen: now().naive_utc(),
+            last_seen: now().naive_utc(),
+        }
+    }
+
+    fn cov(
+        c: &str,
+        d: &str,
+        covered: Option<bool>,
+        reason: Option<&str>,
+    ) -> crate::runtime_inventory::CoverageView {
+        crate::runtime_inventory::CoverageView {
+            container_name: c.into(),
+            image_digest: d.into(),
+            instances: 1,
+            last_heartbeat: now().naive_utc(),
+            mode: "full".into(),
+            libraries_tracked: true,
+            covered,
+            observed_since: None,
+            reason: reason.map(String::from),
+            window_hours: 24,
+        }
+    }
+
+    /// Sources with container `app` running digest 'a' and the given
+    /// runtime input.
+    fn with_runtime(rt: Option<crate::profile_drift::RuntimeDriftInput>) -> Sources {
+        Sources {
+            containers: vec![container("app", restricted())],
+            runtime: rt,
+            ..Default::default()
+        }
+    }
+
+    fn rt(
+        has_inventory: bool,
+        rows: Vec<(&str, String, Vec<crate::runtime_inventory::RuntimeEntry>)>,
+        coverage: Vec<crate::runtime_inventory::CoverageView>,
+        truncated: bool,
+    ) -> Option<crate::profile_drift::RuntimeDriftInput> {
+        Some(crate::profile_drift::RuntimeDriftInput {
+            has_inventory,
+            unshipped: rows
+                .into_iter()
+                .map(|(c, d, entries)| crate::profile_drift::UnshippedPair {
+                    container: c.into(),
+                    digest: d,
+                    total: entries.len() as i64,
+                    entries,
+                })
+                .collect(),
+            pairs_truncated: truncated,
+            coverage,
+        })
+    }
+
+    fn not_evaluated(p: &Profile) -> Vec<(Option<String>, String)> {
+        p.drift
+            .not_evaluated
+            .iter()
+            .filter(|n| n.kind == "unshippedExecutable")
+            .map(|n| (n.container.clone(), n.reason.clone()))
+            .collect()
+    }
+
+    #[test]
+    fn unshipped_is_not_evaluated_without_inventory_or_coverage() {
+        // Not loaded at all.
+        let p = build(&key(), &with_runtime(None), now());
+        assert!(!p.drift.evaluated.contains(&"unshippedExecutable"));
+        assert_eq!(not_evaluated(&p), [(None, "no_inventory".to_string())]);
+        // Loaded, no inventory for the workload.
+        let p = build(
+            &key(),
+            &with_runtime(rt(false, vec![], vec![], false)),
+            now(),
+        );
+        assert!(!p.drift.evaluated.contains(&"unshippedExecutable"));
+        assert_eq!(
+            not_evaluated(&p),
+            [(Some("app".into()), "no_inventory".into())]
+        );
+        // Inventory, but no coverage row for the running digest.
+        let p = build(
+            &key(),
+            &with_runtime(rt(true, vec![], vec![], false)),
+            now(),
+        );
+        assert_eq!(
+            not_evaluated(&p),
+            [(Some("app".into()), "no_runtime_data".into())]
+        );
+        // Covered = false with the coverage function's reason.
+        let p = build(
+            &key(),
+            &with_runtime(rt(
+                true,
+                vec![],
+                vec![cov("app", &digest('a'), Some(false), Some("lost_events"))],
+                false,
+            )),
+            now(),
+        );
+        assert_eq!(
+            not_evaluated(&p),
+            [(Some("app".into()), "lost_events".into())]
+        );
+        assert!(
+            p.drift.items.is_empty(),
+            "not evaluated is not drift either way"
+        );
+        // Covered, nothing unshipped: evaluated, no item.
+        let p = build(
+            &key(),
+            &with_runtime(rt(
+                true,
+                vec![],
+                vec![cov("app", &digest('a'), Some(true), None)],
+                false,
+            )),
+            now(),
+        );
+        assert!(p.drift.evaluated.contains(&"unshippedExecutable"));
+        assert!(not_evaluated(&p).is_empty());
+        assert!(p.drift.items.is_empty());
+        // Covered but more current pairs than were read: cannot say "none".
+        let p = build(
+            &key(),
+            &with_runtime(rt(
+                true,
+                vec![],
+                vec![cov("app", &digest('a'), Some(true), None)],
+                true,
+            )),
+            now(),
+        );
+        assert_eq!(not_evaluated(&p), [(None, "truncated".into())]);
+        assert!(!p.drift.evaluated.contains(&"unshippedExecutable"));
+    }
+
+    /// Every drift check that did not run is in notEvaluated with a
+    /// reason, so an empty items list is never read as "no drift".
+    #[test]
+    fn every_check_not_evaluated_says_why() {
+        let all = |p: &Profile| -> Vec<(&'static str, Option<String>, String)> {
+            p.drift
+                .not_evaluated
+                .iter()
+                .map(|n| (n.kind, n.container.clone(), n.reason.clone()))
+                .collect()
+        };
+        // Nothing known at all.
+        let p = build(&key(), &Sources::default(), now());
+        assert!(p.drift.evaluated.is_empty());
+        assert_eq!(
+            all(&p),
+            [
+                ("unshippedExecutable", None, "no_inventory".to_string()),
+                ("tagMoved", None, "no_image_inventory".to_string()),
+                ("imageChangedSinceExport", None, "no_export".to_string()),
+                ("securityContextRegression", None, "no_baseline".to_string()),
+            ]
+        );
+        // An image inventory but no running container: the runtime check
+        // says so instead of an empty list.
+        // (the only digest is a previous one: nothing runs now).
+        let mut c = container("app", restricted());
+        let d = c.digests.remove(0);
+        c.previous_digests.push(d);
+        let p = build(
+            &key(),
+            &Sources {
+                containers: vec![c],
+                runtime: rt(true, vec![], vec![], false),
+                ..Default::default()
+            },
+            now(),
+        );
+        assert!(p.drift.evaluated.contains(&"tagMoved"));
+        assert!(all(&p).contains(&(
+            "unshippedExecutable",
+            None,
+            "no_running_containers".to_string()
+        )));
+        // Every check is either evaluated or not evaluated, never neither.
+        for t in [
+            "tagMoved",
+            "imageChangedSinceExport",
+            "securityContextRegression",
+            "unshippedExecutable",
+        ] {
+            let ne = p.drift.not_evaluated.iter().any(|n| n.kind == t);
+            assert!(p.drift.evaluated.contains(&t) != ne, "{t}");
+        }
+    }
+
+    #[test]
+    fn an_unshipped_file_is_drift_whatever_the_coverage() {
+        let rows = |origin: &str| {
+            vec![(
+                "app",
+                digest('a'),
+                vec![rt_entry("/tmp/x", origin), rt_entry("/usr/bin/ok", origin)],
+            )]
+        };
+        // Not covered, a memfd exec: reported (high), and the check is
+        // still listed as not evaluated for the rest.
+        let p = build(
+            &key(),
+            &with_runtime(rt(true, rows("memfd"), vec![], false)),
+            now(),
+        );
+        assert_eq!(drift_types(&p), ["unshippedExecutable"]);
+        let i = &p.drift.items[0];
+        assert_eq!((i.severity, i.container.as_deref()), ("high", Some("app")));
+        assert_eq!(i.detail["origins"], json!(["memfd"]));
+        assert_eq!(i.detail["filesTotal"], json!(2));
+        assert_eq!(
+            not_evaluated(&p),
+            [(Some("app".into()), "no_runtime_data".into())]
+        );
+        assert!(p
+            .findings
+            .iter()
+            .any(|f| f.id == "drift.unshippedExecutable/app"
+                && f.dimension == "drift"
+                && f.severity == "high"));
+        // Writable layer: high. Deleted only: medium.
+        let covered = vec![cov("app", &digest('a'), Some(true), None)];
+        let p = build(
+            &key(),
+            &with_runtime(rt(true, rows("writableLayer"), covered.clone(), false)),
+            now(),
+        );
+        assert_eq!(p.drift.items[0].severity, "high");
+        assert!(p.drift.evaluated.contains(&"unshippedExecutable"));
+        let p = build(
+            &key(),
+            &with_runtime(rt(true, rows("deleted"), covered.clone(), false)),
+            now(),
+        );
+        assert_eq!(p.drift.items[0].severity, "medium");
+        // Rows of a digest the container no longer runs are not current drift.
+        let old = vec![("app", digest('z'), vec![rt_entry("/tmp/x", "memfd")])];
+        let p = build(&key(), &with_runtime(rt(true, old, covered, false)), now());
+        assert!(p.drift.items.is_empty());
+    }
+
+    #[test]
+    fn unshipped_drift_never_sets_posture() {
+        let covered = vec![cov("app", &digest('a'), Some(true), None)];
+        let clean = build(
+            &key(),
+            &with_runtime(rt(true, vec![], covered.clone(), false)),
+            now(),
+        );
+        let drifted = build(
+            &key(),
+            &with_runtime(rt(
+                true,
+                vec![("app", digest('a'), vec![rt_entry("/tmp/x", "memfd")])],
+                covered,
+                false,
+            )),
+            now(),
+        );
+        assert_eq!(drifted.drift.items.len(), 1);
+        assert_eq!(
+            serde_json::to_value(&clean.posture).unwrap(),
+            serde_json::to_value(&drifted.posture).unwrap()
+        );
+        assert_eq!(
+            clean.content_hash, drifted.content_hash,
+            "drift is not in the snapshot"
+        );
     }
 
     #[test]
