@@ -2412,7 +2412,7 @@ mod tests {
         } else {
             std::env::temp_dir()
         };
-        let workload_bin = scratch.join(format!("kg-cap-workload-{}", std::process::id()));
+        let workload_bin = scratch.join(unique_name("kg-cap-workload"));
         std::fs::copy(&me, &workload_bin).expect("copy the test binary");
         let workload = |dir: &str, rename: bool| {
             let procs = format!("{dir}/cgroup.procs");
@@ -2566,7 +2566,7 @@ mod tests {
         // does, in the host pid namespace (hostPID): the worker, never
         // exec'd, is reparented outside the pod and uses a capability.
         // Counted.
-        let done = std::env::temp_dir().join(format!("kg-orphan-{}", std::process::id()));
+        let done = std::env::temp_dir().join(unique_name("kg-orphan"));
         let _ = std::fs::remove_file(&done);
         run_in(
             &dirs[8],
@@ -2716,6 +2716,16 @@ mod tests {
         let _ = std::fs::remove_dir(&pod_dir);
     }
 
+    /// `prefix-<pid>-<nanos>`: unique even across VMs that share the host's
+    /// /tmp (vmtest mounts the host filesystem) and reuse the same pids.
+    fn unique_name(prefix: &str) -> String {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or_default();
+        format!("{prefix}-{}-{nanos}", std::process::id())
+    }
+
     /// Real container runtimes for the VM tests: KG_RUNC / KG_CRUN name the
     /// static release binaries (checksum-verified by the caller). A tmpfs
     /// holds the rootfs (this test binary and its libraries), the bundles
@@ -2745,7 +2755,7 @@ mod tests {
                 .filter_map(|(n, var)| std::env::var(var).ok().map(|p| (n, PathBuf::from(p))))
                 .collect();
             assert!(!wanted.is_empty(), "set KG_RUNC and/or KG_CRUN");
-            let base = PathBuf::from(format!("/tmp/kg-rt-{}", std::process::id()));
+            let base = PathBuf::from("/tmp").join(unique_name("kg-rt"));
             std::fs::create_dir_all(&base).unwrap();
             let c = std::ffi::CString::new(base.to_str().unwrap()).unwrap();
             assert_eq!(
@@ -2857,12 +2867,27 @@ mod tests {
         fn command(&self, name: &str, args: &[&str]) -> std::process::Command {
             let bin = &self.runtimes.iter().find(|r| r.0 == name).unwrap().1;
             let mut cmd = std::process::Command::new(bin);
+            // The runtime's output, and a detached container's (it inherits
+            // the runtime's stdio), go to a log shown when an assertion fails.
+            let log = || {
+                std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(self.base.join(format!("{name}.log")))
+                    .expect("runtime log")
+            };
             cmd.arg("--root")
                 .arg(self.base.join(format!("state-{name}")))
                 .args(args)
                 .stdin(std::process::Stdio::null())
-                .stdout(std::process::Stdio::null());
+                .stdout(log())
+                .stderr(log());
             cmd
+        }
+
+        /// What runtime `name` and its containers wrote.
+        fn log(&self, name: &str) -> String {
+            std::fs::read_to_string(self.base.join(format!("{name}.log"))).unwrap_or_default()
         }
 
         /// Run runtime `name` with `args` (after its --root); must succeed.
@@ -3027,7 +3052,8 @@ mod tests {
             );
             assert!(
                 n(*cg_work, 21, 0) >= 1 && n(*cg_work, 10, FLAG_GRANTED) >= 1,
-                "{name}: the container's command, named runc:[2:INIT], is counted"
+                "{name}: the container's command, named runc:[2:INIT], is counted\n{}",
+                rt.log(name)
             );
             eprintln!("asserted: {name} run: setup excluded, renamed command counted");
             assert_eq!(
@@ -3037,7 +3063,8 @@ mod tests {
             );
             assert!(
                 n(*cg_held, 10, FLAG_GRANTED) >= 1,
-                "{name}: a process started by exec is counted"
+                "{name}: a process started by exec is counted\n{}",
+                rt.log(name)
             );
             eprintln!("asserted: {name} exec: setup excluded, exec'd process counted");
             let used = |cg: u64| -> Vec<u32> {
