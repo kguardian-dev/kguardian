@@ -1,0 +1,128 @@
+{{- if .Values.supplychain.enabled }}
+{{- include "kguardian.supplychainAuthGuard" . }}
+{{- /*
+  One replica by design: the component turns report churn into
+  per-digest payloads and de-duplicates them in memory. A second replica
+  would not add capacity, only a second copy of every send.
+*/ -}}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Values.supplychain.service.name }}
+  namespace: {{ include "kguardian.namespace" . }}
+  labels:
+    {{- include "kguardian.labels" . | nindent 4 }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ .Values.supplychain.service.name }}
+  template:
+    metadata:
+      {{- with .Values.supplychain.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      labels:
+        {{- include "kguardian.labels" . | nindent 8 }}
+        app.kubernetes.io/name: {{ .Values.supplychain.service.name }}
+    spec:
+      # The token is only needed to list/watch Trivy Operator reports.
+      automountServiceAccountToken: {{ .Values.supplychain.sources.trivyOperator.enabled }}
+      {{- with .Values.supplychain.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      serviceAccountName: {{ default "supplychain" .Values.supplychain.serviceAccount.name }}
+      securityContext:
+        {{- toYaml .Values.supplychain.podSecurityContext | nindent 8 }}
+      containers:
+        - name: supplychain
+          securityContext:
+            {{- toYaml .Values.supplychain.securityContext | nindent 12 }}
+          {{- if .Values.supplychain.image.sha }}
+          image: "{{ .Values.supplychain.image.repository }}@{{ .Values.supplychain.image.sha }}"
+          {{- else }}
+          image: "{{ .Values.supplychain.image.repository }}:{{ include "kguardian.imageTag" .Values.supplychain.image.tag }}"
+          {{- end }}
+          imagePullPolicy: {{ .Values.supplychain.image.pullPolicy }}
+          args: ["serve"]
+          ports:
+            - name: http
+              containerPort: {{ .Values.supplychain.container.port }}
+              protocol: TCP
+          env:
+            - name: LISTEN_ADDR
+              value: ":{{ .Values.supplychain.container.port }}"
+            - name: LOG_LEVEL
+              value: {{ .Values.supplychain.logLevel | quote }}
+            - name: TRIVY_OPERATOR_ENABLED
+              value: {{ .Values.supplychain.sources.trivyOperator.enabled | quote }}
+            - name: TRIVY_RESYNC_PERIOD
+              value: {{ .Values.supplychain.sources.trivyOperator.resyncPeriod | quote }}
+            - name: TRIVY_RECHECK_PERIOD
+              value: {{ .Values.supplychain.sources.trivyOperator.recheckPeriod | quote }}
+            - name: BROKER_URL
+              value: "http://{{ .Values.broker.service.name }}.{{ include "kguardian.namespace" . }}.svc.cluster.local:{{ .Values.broker.service.port }}"
+            - name: BROKER_INGEST_ENABLED
+              value: {{ .Values.supplychain.brokerIngest.enabled | quote }}
+            {{- /* Unset (null) follows brokerIngest.enabled: no lookups while ingest is off. */}}
+            {{- $lookup := .Values.supplychain.brokerIngest.enabled }}
+            {{- if not (kindIs "invalid" .Values.supplychain.registryLookup.enabled) }}
+            {{- $lookup = .Values.supplychain.registryLookup.enabled }}
+            {{- end }}
+            - name: REGISTRY_LOOKUP_ENABLED
+              value: {{ $lookup | quote }}
+            - name: REGISTRY_ALLOW_PRIVATE
+              value: {{ .Values.supplychain.registryLookup.allowPrivateRegistries | quote }}
+            {{- /* Scoped token: this component can only reach the supplychain routes. */}}
+            {{- include "kguardian.brokerAuthClientEnv" (dict "root" $ "scope" "supplychain") | nindent 12 }}
+            {{- with .Values.supplychain.env }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 15
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          {{- with .Values.supplychain.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        # Read-only root filesystem; client-go and the Go runtime get a
+        # small scratch dir.
+        - name: tmp
+          emptyDir:
+            sizeLimit: 16Mi
+      {{- with .Values.supplychain.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.supplychain.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.supplychain.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.supplychain.topologySpreadConstraints }}
+      topologySpreadConstraints:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with include "kguardian.priorityClassName" (dict "component" .Values.supplychain "global" .Values.global) }}
+      priorityClassName: {{ . | quote }}
+      {{- end }}
+{{- end }}

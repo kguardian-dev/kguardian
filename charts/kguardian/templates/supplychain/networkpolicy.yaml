@@ -1,0 +1,37 @@
+{{- if and .Values.supplychain.enabled .Values.supplychain.networkPolicy.enabled }}
+---
+# Ingress NetworkPolicy for the supplychain component.
+#
+# Nothing calls supplychain: it pushes findings to the broker and serves
+# only /healthz, /readyz and /metrics. So ingress is closed except to the
+# scrapers listed in supplychain.networkPolicy.allowMetricsFrom. Kubelet
+# probes come from the node, which Cilium and Calico admit by default; on a
+# CNI that does not, add the node network to allowMetricsFrom.
+#
+# Ingress-only, like the broker's policy: egress (API server, broker, DNS)
+# is left unrestricted so the policy can never break the component's own
+# outbound traffic. Requires a NetworkPolicy-enforcing CNI.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ .Values.supplychain.service.name }}
+  namespace: {{ include "kguardian.namespace" . }}
+  labels:
+    {{- include "kguardian.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: {{ .Values.supplychain.service.name }}
+  policyTypes:
+    - Ingress
+  {{- with .Values.supplychain.networkPolicy.allowMetricsFrom }}
+  ingress:
+    - from:
+        {{- toYaml . | nindent 8 }}
+      ports:
+        - port: http
+          protocol: TCP
+  {{- else }}
+  ingress: []
+  {{- end }}
+{{- end }}

@@ -1,0 +1,82 @@
+---
+# yaml-language-server: $schema=https://json.schemastore.org/github-workflow.json
+name: Build and Push Supplychain Docker Images
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "supplychain/v*"
+
+jobs:
+  build_and_push:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write # push the image, its signature and attestations
+      id-token: write # Sigstore keyless signing (cosign + actions/attest)
+      attestations: write # store provenance/SBOM attestations in GitHub
+      artifact-metadata: write # storage record for the attested image
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      # No QEMU: the Dockerfile cross-compiles on the build platform
+      # (static Go, CGO off) and the runtime stage has no RUN steps, so
+      # both platforms build natively on the amd64 runner.
+      - name: Set up Docker Buildx
+        id: buildx
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4
+        with:
+          install: true
+          version: latest
+
+      - name: Login to GHCR
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract tag name
+        id: extract_tag
+        env:
+          GITHUB_REF_NAME_ENV: ${{ github.ref_name }}
+        run: |
+          # Tag format is "supplychain/vX.Y.Z" — strip the "supplychain/"
+          # prefix. Validate the result so a malformed tag fails loudly
+          # instead of being interpolated into the docker tag below.
+          VERSION="${GITHUB_REF_NAME_ENV#supplychain/}"
+          if ! [[ "$VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([.-][A-Za-z0-9.-]+)?$ ]]; then
+            echo "::error::Refusing to build for malformed tag: $GITHUB_REF_NAME_ENV"
+            exit 1
+          fi
+          echo "TAG_NAME=${VERSION}" >> "$GITHUB_OUTPUT"
+
+      - name: Build and Push
+        id: build
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7
+        with:
+          context: supplychain/
+          file: supplychain/Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          build-args: |
+            VERSION=${{ steps.extract_tag.outputs.TAG_NAME }}
+          tags: |
+            ghcr.io/kguardian-dev/kguardian/supplychain:${{ steps.extract_tag.outputs.TAG_NAME }}
+            ghcr.io/kguardian-dev/kguardian/supplychain:latest
+          cache-from: type=gha,scope=supplychain
+          cache-to: type=gha,mode=max,scope=supplychain
+          # Provenance comes from actions/attest in the sign step below (signed,
+          # pushed as a referrer). Buildx's own attestation manifests are
+          # unsigned and would add unknown/unknown entries to the index.
+          provenance: false
+
+      # Composite action added by #1651 (feat/1533-sign-images); every image
+      # release workflow calls it right after push.
+      - name: Sign and attest image
+        uses: ./.github/actions/sign-image
+        with:
+          image: ghcr.io/kguardian-dev/kguardian/supplychain
+          digest: ${{ steps.build.outputs.digest }}

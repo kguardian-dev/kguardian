@@ -1,0 +1,22 @@
+{{- if .Values.supplychain.enabled }}
+---
+# Exposes /metrics (and the probes) for scraping. The component serves no
+# data API; findings go to the broker.
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .Values.supplychain.service.name }}
+  namespace: {{ include "kguardian.namespace" . }}
+  labels:
+    {{- include "kguardian.labels" . | nindent 4 }}
+    app.kubernetes.io/name: {{ .Values.supplychain.service.name }}
+spec:
+  type: ClusterIP
+  ports:
+    - port: {{ .Values.supplychain.service.port }}
+      targetPort: http
+      protocol: TCP
+      name: http
+  selector:
+    app.kubernetes.io/name: {{ .Values.supplychain.service.name }}
+{{- end }}

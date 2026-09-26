@@ -40,6 +40,7 @@ The certificate subject is the release workflow file at the release tag:
 | Frontend | `ghcr.io/kguardian-dev/kguardian/frontend` | `https://github.com/kguardian-dev/kguardian/.github/workflows/frontend-release.yaml@refs/tags/frontend/vX.Y.Z` |
 | LLM bridge | `ghcr.io/kguardian-dev/kguardian/llm-bridge` | `https://github.com/kguardian-dev/kguardian/.github/workflows/llm-bridge-release.yaml@refs/tags/llm-bridge/vX.Y.Z` |
 | Evaluator | `ghcr.io/kguardian-dev/kguardian/evaluator` | `https://github.com/kguardian-dev/kguardian/.github/workflows/evaluator-release.yaml@refs/tags/evaluator/vX.Y.Z` |
+| Supplychain | `ghcr.io/kguardian-dev/kguardian/supplychain` | `https://github.com/kguardian-dev/kguardian/.github/workflows/supplychain-release.yaml@refs/tags/supplychain/vX.Y.Z` |
 | Helm chart | `ghcr.io/kguardian-dev/charts/kguardian` | `https://github.com/kguardian-dev/kguardian/.github/workflows/charts-release.yaml@refs/tags/chart/vX.Y.Z` |
 
 The OIDC issuer is always `https://token.actions.githubusercontent.com`.
@@ -48,7 +49,7 @@ One regular expression that accepts any kguardian image release, and nothing
 built from a branch, a pull request, or another repository:
 
 ```text
-^https://github\.com/kguardian-dev/kguardian/\.github/workflows/(controller|broker|frontend|llm-bridge|evaluator)-release\.yaml@refs/tags/(controller|broker|frontend|llm-bridge|evaluator)/v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$
+^https://github\.com/kguardian-dev/kguardian/\.github/workflows/(controller|broker|frontend|llm-bridge|evaluator|supplychain)-release\.yaml@refs/tags/(controller|broker|frontend|llm-bridge|evaluator|supplychain)/v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$
 ```
 
 For a single component, prefer the narrower form, for example the controller:

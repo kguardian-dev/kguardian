@@ -1,0 +1,26 @@
+{{- if and .Values.supplychain.enabled .Values.supplychain.metrics.serviceMonitor.enabled }}
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: {{ .Values.supplychain.service.name }}
+  {{- with .Values.supplychain.metrics.serviceMonitor.namespace }}
+  namespace: {{ . | quote }}
+  {{- end }}
+  labels:
+    {{- include "kguardian.labels" . | nindent 4 }}
+    {{- with .Values.supplychain.metrics.serviceMonitor.labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ .Values.supplychain.service.name }}
+  namespaceSelector:
+    matchNames:
+      - {{ include "kguardian.namespace" . | trim }}
+  endpoints:
+    - port: http
+      path: /metrics
+      interval: {{ .Values.supplychain.metrics.serviceMonitor.interval }}
+      scrapeTimeout: {{ .Values.supplychain.metrics.serviceMonitor.scrapeTimeout }}
+{{- end }}
