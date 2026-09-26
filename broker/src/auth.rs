@@ -196,6 +196,9 @@ pub const ROUTES: &[RouteRule] = &[
     rule("GET", "/images/{digest}/sbom/cyclonedx", READ),
     rule("GET", "/vulnerabilities", READ),
     rule("GET", "/vulnerabilities/{id}/exposure", READ),
+    // Export bundle (#1533 P2-4). READ: it generates documents and records
+    // the export as a drift baseline; it never applies anything.
+    rule("GET", "/workloads/{namespace}/{kind}/{name}/export", READ),
 ];
 
 /// The declared access for `method` on the registered `pattern`, if any.

@@ -1996,7 +1996,34 @@ async fn run_workload_profiles_pass(pool: &DbPool, days: u32) {
         batch,
     )
     .await;
+    run_batched_prune(
+        pool,
+        "workload_profile_exports",
+        PROFILE_EXPORTS_PRUNE_SQL,
+        days,
+        batch,
+    )
+    .await;
 }
+
+/// Export records older than the window, unless it is the newest export
+/// of a workload still in the read model (the live drift baseline). The
+/// per-workload count cap is enforced at write time
+/// (profile_drift::record_export).
+pub(crate) const PROFILE_EXPORTS_PRUNE_SQL: &str = "WITH expired AS (\
+         SELECT x.id FROM workload_profile_exports x \
+         WHERE x.exported_at < timezone('UTC', NOW()) - $1::interval \
+           AND (EXISTS (SELECT 1 FROM workload_profile_exports n \
+                        WHERE n.cluster_id = x.cluster_id AND n.pod_namespace = x.pod_namespace \
+                          AND n.workload_kind = x.workload_kind AND n.workload_name = x.workload_name \
+                          AND (n.exported_at, n.id) > (x.exported_at, x.id)) \
+                OR NOT EXISTS (SELECT 1 FROM workload_profile_latest l \
+                        WHERE l.cluster_id = x.cluster_id AND l.pod_namespace = x.pod_namespace \
+                          AND l.workload_kind = x.workload_kind AND l.workload_name = x.workload_name)) \
+         ORDER BY x.exported_at \
+         LIMIT $2 \
+     ) \
+     DELETE FROM workload_profile_exports WHERE id IN (SELECT id FROM expired)";
 
 #[cfg(test)]
 mod workload_profile_retention_tests {
@@ -2056,6 +2083,48 @@ mod workload_profile_retention_tests {
         assert_eq!(got, vec![("fresh".to_string(), 1), ("live".to_string(), 3)]);
         conn.batch_execute(&format!(
             "DELETE FROM workload_profile_versions WHERE pod_namespace = '{ns}'; \
+             DELETE FROM workload_profile_latest WHERE pod_namespace = '{ns}';"
+        ))
+        .unwrap();
+    }
+
+    #[test]
+    #[ignore = "requires a live postgres (set KG_TEST_DATABASE_URL)"]
+    fn live_database_prunes_old_exports_but_keeps_each_live_workloads_newest() {
+        use diesel_migrations::MigrationHarness;
+        let url = std::env::var("KG_TEST_DATABASE_URL").expect("set KG_TEST_DATABASE_URL");
+        let mut conn = PgConnection::establish(&url).expect("connect");
+        conn.run_pending_migrations(TEST_MIGRATIONS)
+            .expect("migrate");
+        let ns = "kgtest-export-retention";
+        conn.batch_execute(&format!(
+            "DELETE FROM workload_profile_exports WHERE pod_namespace = '{ns}'; \
+             DELETE FROM workload_profile_latest WHERE pod_namespace = '{ns}'; \
+             INSERT INTO workload_profile_latest (pod_namespace, workload_kind, workload_name, revision, content_hash, posture_status, summary) \
+               VALUES ('{ns}', 'Deployment', 'live', 1, 'h', 'ok', '{{}}'); \
+             INSERT INTO workload_profile_exports (pod_namespace, workload_kind, workload_name, content_hash, mode, baseline, exported_at) VALUES \
+               ('{ns}', 'Deployment', 'live', 'old', 'audit', '{{}}', timezone('UTC', NOW()) - INTERVAL '120 days'), \
+               ('{ns}', 'Deployment', 'live', 'newest', 'audit', '{{}}', timezone('UTC', NOW()) - INTERVAL '100 days'), \
+               ('{ns}', 'Deployment', 'gone', 'gone', 'audit', '{{}}', timezone('UTC', NOW()) - INTERVAL '100 days'), \
+               ('{ns}', 'Deployment', 'fresh', 'fresh', 'audit', '{{}}', timezone('UTC', NOW()));"
+        ))
+        .unwrap();
+        while prune_batch(&mut conn, PROFILE_EXPORTS_PRUNE_SQL, 90, 1000).unwrap() > 0 {}
+        #[derive(QueryableByName)]
+        struct R {
+            #[diesel(sql_type = diesel::sql_types::Text)]
+            content_hash: String,
+        }
+        let rows: Vec<R> = diesel::sql_query(format!(
+            "SELECT content_hash FROM workload_profile_exports WHERE pod_namespace = '{ns}' ORDER BY content_hash"
+        ))
+        .load(&mut conn)
+        .unwrap();
+        let got: Vec<String> = rows.into_iter().map(|r| r.content_hash).collect();
+        // live keeps only its newest; gone (no read-model row) ages out.
+        assert_eq!(got, vec!["fresh".to_string(), "newest".to_string()]);
+        conn.batch_execute(&format!(
+            "DELETE FROM workload_profile_exports WHERE pod_namespace = '{ns}'; \
              DELETE FROM workload_profile_latest WHERE pod_namespace = '{ns}';"
         ))
         .unwrap();
