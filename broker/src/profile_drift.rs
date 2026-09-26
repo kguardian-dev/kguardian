@@ -1153,11 +1153,16 @@ mod live_tests {
     #[test]
     #[ignore = "requires a live postgres (set KG_TEST_DATABASE_URL)"]
     fn live_database_old_digest_rows_never_hide_a_current_unshipped_exec() {
-        const OLD: &str = "sha256:0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e";
+        // Sorts BEFORE the current digest (sha256:0d...), so a read over
+        // every digest ordered by (container, digest, ...) and cut at a row
+        // limit fills up with the old digest's rows first.
+        const OLD: &str = "sha256:0000000000000000000000000000000000000000000000000000000000000000";
+        assert!(OLD < D);
         let mut conn = live_conn();
         ri::upsert_coverage(&mut conn, &[heartbeat()]).unwrap();
-        // Old digest: 600 unshipped rows (sorted before the current digest's
-        // paths, and newer, so any "all rows, LIMIT n" read would fill up).
+        // Old digest: 600 unshipped rows, more than the old 500-row read
+        // held, sorting first by digest and newer by last_seen, so neither
+        // ordering of an all-digests read would reach the current row.
         let old: Vec<_> = (0..600)
             .map(|i| row_on(OLD, &format!("/aaa/old{i:04}"), "writableLayer"))
             .collect();
