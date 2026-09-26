@@ -4,9 +4,9 @@ Part of #1533. Implemented in `broker/src/workload_profile.rs` (read model, post
 `broker/src/pod_security.rs` (Pod Security Standards analyser), PR #1669. Consumers: the frontend profile
 page (#1672), llm-bridge tools and the advisor `profile` commands (#1668).
 
-Status: **v1.3, stable**. Every change is appended to the CHANGELOG at the bottom, dated.
+Status: **v1.4, stable**. Every change is appended to the CHANGELOG at the bottom, dated.
 
-**Examples:** every JSON example below is generated from raw responses of a v1.3 broker build against a
+**Examples:** every example below is generated from raw responses of a v1.4 broker build against a
 seeded test database (neutral names only). Values are verbatim. The only edits are: lists longer than the stated
 limit are cut and end with a `"(N more in the capture)"` string, and a key listed in `_omitted` was left out
 (it is shown in its own section).
@@ -67,11 +67,11 @@ From `GET /workloads?limit=2` -> 200 (capture `list-page1-limit2.json`, `body`):
   "items": [
     {
       "clusterId": "primary",
-      "computedAt": "2026-09-26T02:22:26.378256Z",
+      "computedAt": "2026-09-26T03:05:49.483524Z",
       "contentHash": "fnv1a64:5ba183ed9b98a6fa",
       "dimensions": {
         "compute": {
-          "status": "ok"
+          "status": "unknown"
         },
         "images": {
           "mixedDigests": false,
@@ -90,6 +90,10 @@ From `GET /workloads?limit=2` -> 200 (capture `list-page1-limit2.json`, `body`):
           "status": "ok"
         }
       },
+      "drift": {
+        "byType": {},
+        "count": 0
+      },
       "findingCounts": {
         "critical": 0,
         "high": 0,
@@ -98,7 +102,7 @@ From `GET /workloads?limit=2` -> 200 (capture `list-page1-limit2.json`, `body`):
         "medium": 0
       },
       "kind": "Deployment",
-      "lastChangedAt": "2026-09-26T02:18:02.820047Z",
+      "lastChangedAt": "2026-09-26T03:05:49.483524Z",
       "name": "source-controller",
       "namespace": "flux-system",
       "posture": {
@@ -109,60 +113,68 @@ From `GET /workloads?limit=2` -> 200 (capture `list-page1-limit2.json`, `body`):
           "images"
         ]
       },
-      "revision": 1
+      "revision": 3
     },
     {
       "clusterId": "primary",
-      "computedAt": "2026-09-26T02:22:26.383445Z",
-      "contentHash": "fnv1a64:8bf410a491511788",
+      "computedAt": "2026-09-26T03:05:49.470604Z",
+      "contentHash": "fnv1a64:edc8ee3dbec5d0e4",
       "dimensions": {
         "compute": {
           "status": "unknown"
         },
         "images": {
-          "mixedDigests": false,
-          "runningDigests": 1,
+          "mixedDigests": null,
+          "runningDigests": null,
           "status": "unknown"
         },
         "network": {
-          "status": "warn"
+          "status": "unknown"
         },
         "podSecurity": {
-          "level": "privileged",
-          "levelConfidence": "confirmed",
-          "status": "risk"
+          "level": null,
+          "levelConfidence": null,
+          "status": "unknown"
         },
         "syscalls": {
           "status": "unknown"
         }
       },
+      "drift": {
+        "byType": {},
+        "count": 0
+      },
       "findingCounts": {
         "critical": 0,
-        "high": 2,
+        "high": 0,
         "info": 0,
         "low": 0,
-        "medium": 4
+        "medium": 0
       },
-      "kind": "DaemonSet",
-      "lastChangedAt": "2026-09-26T02:18:02.826768Z",
-      "name": "node-exporter",
-      "namespace": "observability",
+      "kind": "Deployment",
+      "lastChangedAt": "2026-09-26T03:04:42.210577Z",
+      "name": "ingress-nginx-controller",
+      "namespace": "ingress-nginx",
       "posture": {
-        "coverage": 0.5,
-        "status": "risk",
+        "coverage": 0.0,
+        "status": "unknown",
         "unknownDimensions": [
+          "network",
           "syscalls",
+          "podSecurity",
           "images"
         ]
       },
       "revision": 1
     }
   ],
-  "nextAfter": "observability/DaemonSet/node-exporter"
+  "nextAfter": "ingress-nginx/Deployment/ingress-nginx-controller"
 }
 ```
 
 - `revision` / `contentHash`: the latest stored version (section 3).
+- `drift`: `{ "count": n, "byType": { "<type>": n } }` from the latest snapshot (section 2.8); `byType`
+  is `{}` when there is no drift.
 - `posture`: see 2.2. `dimensions.images.runningDigests` / `mixedDigests` are `null` when there is no
   inventory. `podSecurity.level` / `levelConfidence` are `null` when no current container is known.
 
@@ -171,7 +183,7 @@ From `GET /workloads?limit=2` -> 200 (capture `list-page1-limit2.json`, `body`):
 404 `workload_not_found` when the broker has none of: inventory rows, a syscall aggregate, pods in
 `pod_details`, a stored profile. Captures: `profile-unknown-partial-flux-system-source-controller` (every
 known dimension ok, but not all known: `unknown`), `profile-warn-payments-refunds-init-fails-restricted`,
-`profile-warn-payments-checkout-after-fix`, `profile-warn-payments-ledger-mixed-crashloop-stale`,
+`profile-warn-payments-ledger-mixed-crashloop-stale`,
 `profile-risk-observability-node-exporter-hostpid-wouldDeny`,
 `profile-unknown-observability-otel-collector-fresh` (nothing known). No workload can be posture `ok` in
 v1.3 until vulnerability data exists (section 2.2).
@@ -195,12 +207,12 @@ From `GET /workloads/payments/Deployment/refunds/profile` -> 200 (capture `profi
       "truncated": false
     }
   },
-  "generatedAt": "2026-09-26T02:22:32.589445928Z",
+  "generatedAt": "2026-09-26T03:06:02.401338275Z",
   "contentHash": "fnv1a64:3948ec39cd68f413",
   "version": {
-    "revision": 1,
+    "revision": 3,
     "contentHash": "fnv1a64:3948ec39cd68f413",
-    "createdAt": "2026-09-26T02:22:26.368580Z"
+    "createdAt": "2026-09-26T03:05:49.476840Z"
   },
   "snapshotPending": false,
   "posture": {
@@ -324,6 +336,20 @@ From `GET /workloads/payments/Deployment/refunds/profile` -> 200 (capture `profi
     "egressPeers": null,
     "egressExternal": null
   },
+  "drift": {
+    "baselines": {
+      "export": null,
+      "securityContext": {
+        "source": "previousVersion",
+        "revision": 2,
+        "since": "2026-09-26T03:04:42.217070Z"
+      }
+    },
+    "evaluated": [
+      "tagMoved"
+    ],
+    "items": []
+  },
   "_omitted": [
     "dimensions"
   ]
@@ -340,6 +366,7 @@ From `GET /workloads/payments/Deployment/refunds/profile` -> 200 (capture `profi
     the level is `restricted`, because that is only an upper bound in v1 (checks kguardian cannot see,
     such as hostPath, may still fail). It is never `true` in v1.
 - `exposure`: distinct peers from observed flows; all `null` when there are no flows.
+- `drift`: section 2.8. Drift findings (dimension `"drift"`) are also in `findings` / `attention`.
 
 ### 2.1 Common dimension envelope
 
@@ -759,7 +786,7 @@ From `GET /workloads/payments/Deployment/ledger/profile` -> 200 (capture `profil
           "ranAsInit": false,
           "lastPodName": "ledger-5b7c9d8f6-q8wzn",
           "firstSeen": "2026-09-20T02:17:01.219542Z",
-          "lastSeen": "2026-09-26T02:17:01.214278Z"
+          "lastSeen": "2026-09-26T03:05:37.122592Z"
         },
         {
           "digest": "sha256:5b2c88d15b2c88d15b2c88d15b2c88d15b2c88d15b2c88d15b2c88d15b2c88d1",
@@ -769,7 +796,7 @@ From `GET /workloads/payments/Deployment/ledger/profile` -> 200 (capture `profil
           "ranAsInit": false,
           "lastPodName": "ledger-5b7c9d8f6-q8wzn",
           "firstSeen": "2026-09-20T02:17:01.219542Z",
-          "lastSeen": "2026-09-26T02:17:01.214278Z"
+          "lastSeen": "2026-09-26T03:05:37.122592Z"
         }
       ],
       "previous": []
@@ -816,6 +843,105 @@ truncated }` from `pod_compute_latest` for the live pods (max 50). `oomKills` = 
 interval. No rows -> `unknown`, reason `no_compute_data`. Findings: `compute.missingMemoryLimit/<c>` low,
 `compute.oomKilled/<c>` medium.
 
+### 2.8 `drift` (P2-5; not a core dimension, never sets posture)
+
+Three checks, each a finding with `dimension: "drift"` and an entry in `drift.items`:
+
+| `type` | when | severity |
+|---|---|---|
+| `tagMoved` | a current container's image **tag** (a reference without `@digest`) has resolved to more than one digest in the inventory (re-pushed tag, or nodes resolved it differently) | medium |
+| `imageChangedSinceExport` | a current container runs a digest the last export's snapshot did not have, or the container is new since that export. Needs an export record (a `POST .../export`, section 4) | medium |
+| `securityContextRegression` | a PSS check that passed in the baseline fails now, for a container that existed in the baseline or at pod level. Baseline = the last export when there is one, else the newest stored version whose podSecurity content differs from the live one | high if a baseline check newly fails, else medium |
+
+From `GET /workloads/payments/Deployment/checkout/profile` -> 200 (capture `profile-drift-payments-checkout-after-export.json`, `body.drift`):
+
+```json
+{
+  "baselines": {
+    "export": {
+      "revision": 4,
+      "contentHash": "fnv1a64:3369d0d1f33d02b4",
+      "mode": "audit",
+      "artifacts": [
+        "networkpolicy",
+        "seccompprofile",
+        "securitycontext"
+      ],
+      "exportedAt": "2026-09-26T03:03:52.663640Z"
+    },
+    "securityContext": {
+      "source": "export",
+      "revision": 4,
+      "since": "2026-09-26T03:03:52.663640Z"
+    }
+  },
+  "evaluated": [
+    "tagMoved",
+    "imageChangedSinceExport",
+    "securityContextRegression"
+  ],
+  "items": [
+    {
+      "type": "tagMoved",
+      "findingId": "drift.tagMoved/app",
+      "severity": "medium",
+      "container": "app",
+      "detail": {
+        "digests": [
+          "sha256:ab12cd34ab12cd34ab12cd34ab12cd34ab12cd34ab12cd34ab12cd34ab12cd34",
+          "sha256:cd56ef78cd56ef78cd56ef78cd56ef78cd56ef78cd56ef78cd56ef78cd56ef78"
+        ],
+        "imageRef": "ghcr.io/example/checkout:4.1.0",
+        "since": "2026-09-26T03:04:03.273543Z"
+      }
+    },
+    {
+      "type": "imageChangedSinceExport",
+      "findingId": "drift.imageChangedSinceExport/app",
+      "severity": "medium",
+      "container": "app",
+      "detail": {
+        "containerInExport": true,
+        "exportedDigests": [
+          "sha256:ab12cd34ab12cd34ab12cd34ab12cd34ab12cd34ab12cd34ab12cd34ab12cd34"
+        ],
+        "newDigests": [
+          "sha256:cd56ef78cd56ef78cd56ef78cd56ef78cd56ef78cd56ef78cd56ef78cd56ef78"
+        ]
+      }
+    },
+    {
+      "type": "securityContextRegression",
+      "findingId": "drift.securityContextRegression/app",
+      "severity": "high",
+      "container": "app",
+      "detail": {
+        "levelFrom": "baseline",
+        "levelTo": "privileged",
+        "newlyFailing": [
+          "privileged"
+        ]
+      }
+    }
+  ]
+}
+```
+
+- `baselines.export`: the last export `{revision, contentHash, mode, artifacts, exportedAt}`, `null` when the
+  workload was never exported. `baselines.securityContext`: `{source: "export"|"previousVersion", revision,
+  since}`, `null` when there is no baseline.
+- `evaluated`: the checks that could run. A check that is not listed was **not evaluated** (no inventory,
+  no export, no baseline); its absence from `items` means nothing.
+- `items[]`: `{type, findingId, severity, container, detail}`. `detail` by type:
+  - `tagMoved`: `{imageRef, digests[], since}`;
+  - `imageChangedSinceExport`: `{containerInExport, exportedDigests[], newDigests[]}`;
+  - `securityContextRegression`: `{newlyFailing[] (check ids), levelFrom, levelTo}`; `container` is `null`
+    for a pod-level regression.
+- A new container is not a securityContext regression. An improvement is never reported.
+- Metrics: `/metrics` exposes the gauge `kguardian_workload_drift{workload_namespace, workload_kind,
+  workload, type}` = drift items of that type in the workload's latest snapshot, refreshed every 60 s from
+  the read model (at most 5 000 series). A workload leaves the gauge when its read-model row is pruned.
+
 ## 3. Versions
 
 A version is an **immutable, content-hashed snapshot of the policy-relevant parts** of the profile:
@@ -852,8 +978,44 @@ From `GET /workloads/payments/Deployment/checkout/profile/versions` -> 200 (capt
   "items": [
     {
       "changedDimensions": [
-        "podSecurity"
+        "podSecurity",
+        "images"
       ],
+      "contentHash": "fnv1a64:44c9939f6034479f",
+      "createdAt": "2026-09-26T03:05:49.507372Z",
+      "dimensionHashes": {
+        "images": "fnv1a64:36a8abee01f3a6ca",
+        "network": "fnv1a64:076a93e6e419f917",
+        "podSecurity": "fnv1a64:a06c1a54bf60dcff",
+        "syscalls": "fnv1a64:c9b16fe56ade7d93"
+      },
+      "posture": {
+        "coverage": 0.5,
+        "status": "risk"
+      },
+      "revision": 6
+    },
+    {
+      "changedDimensions": [
+        "podSecurity",
+        "images"
+      ],
+      "contentHash": "fnv1a64:17b3716f1d04b24d",
+      "createdAt": "2026-09-26T03:04:42.249342Z",
+      "dimensionHashes": {
+        "images": "fnv1a64:b9f6d7ae2a24fa93",
+        "network": "fnv1a64:076a93e6e419f917",
+        "podSecurity": "fnv1a64:486973277f0aab10",
+        "syscalls": "fnv1a64:c9b16fe56ade7d93"
+      },
+      "posture": {
+        "coverage": 0.5,
+        "status": "risk"
+      },
+      "revision": 5
+    },
+    {
+      "changedDimensions": null,
       "contentHash": "fnv1a64:4c1d1714495b7cb8",
       "createdAt": "2026-09-26T02:21:21.027754Z",
       "dimensionHashes": {
@@ -867,40 +1029,6 @@ From `GET /workloads/payments/Deployment/checkout/profile/versions` -> 200 (capt
         "status": "warn"
       },
       "revision": 4
-    },
-    {
-      "changedDimensions": [
-        "network"
-      ],
-      "contentHash": "fnv1a64:3369d0d1f33d02b4",
-      "createdAt": "2026-09-26T02:20:17.370827Z",
-      "dimensionHashes": {
-        "images": "fnv1a64:de99962acfed6b4a",
-        "network": "fnv1a64:076a93e6e419f917",
-        "podSecurity": "fnv1a64:897ac36794f36952",
-        "syscalls": "fnv1a64:c9b16fe56ade7d93"
-      },
-      "posture": {
-        "coverage": 0.5,
-        "status": "warn"
-      },
-      "revision": 3
-    },
-    {
-      "changedDimensions": null,
-      "contentHash": "fnv1a64:5b1a787eefd2a711",
-      "createdAt": "2026-09-26T02:19:10.101753Z",
-      "dimensionHashes": {
-        "images": "fnv1a64:de99962acfed6b4a",
-        "network": "fnv1a64:b9240aadb672a54c",
-        "podSecurity": "fnv1a64:897ac36794f36952",
-        "syscalls": "fnv1a64:c9b16fe56ade7d93"
-      },
-      "posture": {
-        "coverage": 0.5,
-        "status": "warn"
-      },
-      "revision": 2
     }
   ],
   "kind": "Deployment",
@@ -918,7 +1046,7 @@ From `GET /workloads/payments/Deployment/checkout/profile/versions` -> 200 (capt
 ### 3.2 `GET /workloads/{namespace}/{kind}/{name}/profile/versions/{revision}`
 
 `{ namespace, kind, name, revision, contentHash, createdAt, dimensionHashes, posture, snapshot }` with the
-snapshot shape of section 3. 404 `revision_not_found`. Capture: `version-payments-checkout-rev2`.
+snapshot shape of section 3. 404 `revision_not_found`. Capture: `version-payments-checkout-rev4`.
 
 ### 3.3 `GET /workloads/{namespace}/{kind}/{name}/profile/diff?from=&to=`
 
@@ -926,31 +1054,34 @@ snapshot shape of section 3. 404 `revision_not_found`. Capture: `version-payment
 explicit missing `from`/`to` -> 404 `revision_not_found`; no versions -> 404 `workload_not_found`.
 **Trimmed predecessor:** with `from` omitted, when `to - 1` was trimmed the diff uses the newest retained
 revision below `to`, or `from: null` (everything shows as added) when none is left, and sets
-`fromTrimmed: true`. Captures: `diff-payments-checkout-default`, `diff-payments-checkout-2-to-4`,
+`fromTrimmed: true`. Captures: `diff-payments-checkout-default`, `diff-payments-checkout-4-to-6`,
 `diff-payments-checkout-trimmed-predecessor`, `error-404-revision-not-found`, `error-400-bad-order`.
 
-From `GET /workloads/payments/Deployment/checkout/profile/diff?from=2&to=4` -> 200 (capture `diff-payments-checkout-2-to-4.json`, `body`):
+From `GET /workloads/payments/Deployment/checkout/profile/diff?from=4&to=6` -> 200 (capture `diff-payments-checkout-4-to-6.json`, `body`):
 
 ```json
 {
   "changed": true,
   "dimensions": {
     "images": {
-      "changed": false,
-      "containers": [],
+      "changed": true,
+      "containers": [
+        {
+          "added": [
+            "sha256:cd56ef78cd56ef78cd56ef78cd56ef78cd56ef78cd56ef78cd56ef78cd56ef78"
+          ],
+          "name": "app",
+          "removed": [
+            "sha256:ab12cd34ab12cd34ab12cd34ab12cd34ab12cd34ab12cd34ab12cd34ab12cd34"
+          ]
+        }
+      ],
       "containersAdded": [],
       "containersRemoved": []
     },
     "network": {
-      "added": [
-        {
-          "direction": "egress",
-          "peer": "external:198.51.100.20",
-          "port": 443,
-          "protocol": "TCP"
-        }
-      ],
-      "changed": true,
+      "added": [],
+      "changed": false,
       "removed": []
     },
     "podSecurity": {
@@ -959,16 +1090,26 @@ From `GET /workloads/payments/Deployment/checkout/profile/diff?from=2&to=4` -> 2
         {
           "fields": [
             {
-              "field": "securityContext.allowPrivilegeEscalation",
+              "field": "securityContext.privileged",
               "from": null,
-              "to": false
+              "to": true
+            }
+          ],
+          "name": "app"
+        },
+        {
+          "fields": [
+            {
+              "field": "securityContext.allowPrivilegeEscalation",
+              "from": false,
+              "to": null
             },
             {
               "field": "securityContext.capabilitiesDrop",
-              "from": null,
-              "to": [
+              "from": [
                 "ALL"
-              ]
+              ],
+              "to": null
             }
           ],
           "name": "migrate"
@@ -977,8 +1118,8 @@ From `GET /workloads/payments/Deployment/checkout/profile/diff?from=2&to=4` -> 2
       "containersAdded": [],
       "containersRemoved": [],
       "level": {
-        "from": "baseline",
-        "to": "restricted"
+        "from": "restricted",
+        "to": "privileged"
       },
       "pod": []
     },
@@ -991,18 +1132,18 @@ From `GET /workloads/payments/Deployment/checkout/profile/diff?from=2&to=4` -> 2
     }
   },
   "from": {
-    "contentHash": "fnv1a64:5b1a787eefd2a711",
-    "createdAt": "2026-09-26T02:19:10.101753Z",
-    "revision": 2
+    "contentHash": "fnv1a64:4c1d1714495b7cb8",
+    "createdAt": "2026-09-26T02:21:21.027754Z",
+    "revision": 4
   },
   "fromTrimmed": false,
   "kind": "Deployment",
   "name": "checkout",
   "namespace": "payments",
   "to": {
-    "contentHash": "fnv1a64:4c1d1714495b7cb8",
-    "createdAt": "2026-09-26T02:21:21.027754Z",
-    "revision": 4
+    "contentHash": "fnv1a64:44c9939f6034479f",
+    "createdAt": "2026-09-26T03:05:49.507372Z",
+    "revision": 6
   }
 }
 ```
@@ -1010,14 +1151,301 @@ From `GET /workloads/payments/Deployment/checkout/profile/diff?from=2&to=4` -> 2
 - A changed scalar is `{ "from": x, "to": y }`; an unchanged scalar is `null`.
 - `syscalls.cr` when changed: `{ "from": {name, defaultAction, hash} | null, "to": … }`.
 
-## 4. Storage (for reviewers; not an API)
+## 4. `GET|POST /workloads/{namespace}/{kind}/{name}/export` — export bundle (P2-4)
+
+Query (all optional):
+
+| param | values | default |
+|---|---|---|
+| `artifacts` | comma list of `networkpolicy`, `ciliumnetworkpolicy`, `seccompprofile`, `securitycontext`, `sbom`, `vex`, `admission` | all |
+| `mode` | `audit` \| `enforce` | `audit` |
+| `format` | `yaml` (multi-document YAML) \| `zip-manifest` (JSON manifest of files) | `yaml` |
+| `acknowledgePartial` | `true` to take enforce-mode artifacts built from partial evidence | `false` |
+`GET` (READ scope) is side-effect free: it generates the bundle and writes nothing. `POST` on the same
+path with the same query (**admin** scope) returns the same bundle and also records it as the workload's
+drift baseline (see Recording below). Recording says "this is what the operator accepted", so a read token
+must not be able to do it. `GET ...?record=<truthy>` is a 400 pointing at POST; `record` is ignored on POST.
+
+Report and generate only: **kguardian never applies anything**, and every document says so.
+The response carries `X-Kguardian-Export-Mode` and `X-Kguardian-Export-Recorded` (`true` only for a POST
+that stored a record).
+
+Artifacts and where they come from (existing generators only):
+
+| artifact | audit mode | enforce mode | generator |
+|---|---|---|---|
+| `networkpolicy` | `AuditNetworkPolicy` (`kguardian.dev/v1alpha1`, same spec; the evaluator reports would-deny without dropping) | `NetworkPolicy` | the advisor reference generator, ported to the broker and held to the shared goldens (`test/fixtures/generators/networkpolicy`) |
+| `ciliumnetworkpolicy` | **withheld** (a CNP has no per-policy audit mode) | `CiliumNetworkPolicy` | same |
+| `seccompprofile` | `SeccompProfile` with `SCMP_ACT_LOG` | `SCMP_ACT_ERRNO` | the `/seccomp/profiles/{..}/export` path |
+| `securitycontext` | strategic-merge **patch** + `pod-security.kubernetes.io/audit=restricted` label suggestion | same patch + `.../enforce=restricted` | the profile's `podSecurity.recommendation` |
+| `sbom` | not available (needs runtime SBOM data, P1-3/P1-5) | same | stub |
+| `vex` | not available (needs vulnerability data, P1-3/P1-5) | same | stub |
+| `admission` | not available (needs the image trust policy, P2-3) | same | stub |
+
+- **Network policies for a workload:** the generator is per pod. It gets the newest flow rows of every
+  pod of the workload (at most 20 000) and, as its target, the newest live pod with the workload's
+  selector labels (so it selects every replica, not one ReplicaSet's `pod-template-hash`). Its object name
+  is `<workload>-kguardian`.
+- **Enforce refusals** (as the standalone seccomp export): `seccompprofile` when the capture is not full;
+  `networkpolicy` / `ciliumnetworkpolicy` when no flows were seen, the flow summary is truncated, or
+  traffic has been observed for under 24 h. Any refusal answers **409** unless `acknowledgePartial=true`:
+
+From `GET /workloads/payments/Deployment/checkout/export?mode=enforce` -> 409 (capture `export-409-enforce-refused.json`, `body`):
+
+```json
+{
+  "error": "export_refused",
+  "message": "enforce mode was refused for artifacts whose evidence is partial; export in audit mode, drop those artifacts, or pass acknowledgePartial=true",
+  "refusals": [
+    {
+      "artifact": "seccompprofile",
+      "reason": "refusing to export an enforcing profile (SCMP_ACT_ERRNO) from a partial capture: medium on 1 pod(s): checkout-7d9f8b6c5-2xkqp (medium).\nOnly the full tier observes every syscall, so this profile would block syscalls the workload makes. Raise the tier to full (the kguardian.dev/syscall-capture pod annotation, or SYSCALL_CAPTURE_LEVEL cluster-wide), let the profile re-accrue, then export again.\nOr export with defaultAction=SCMP_ACT_LOG for an audit-only profile now, or pass acknowledgePartial=true to take this one as it is."
+    }
+  ]
+}
+```
+
+- **Provenance:** every Kubernetes document carries these annotations: `kguardian.dev/generated-by`,
+  `generated-at`, `source-workload` (`ns/Kind/name`), `profile-revision` (or `unversioned`),
+  `profile-hash`, `export-mode`, and `applied-by-kguardian: "false"`. Each document is preceded by a
+  `# kguardian export: <artifact> (<mode> mode)` / `# kguardian never applies this document` header.
+- **Recording (POST only):** a successful export with at least one included artifact is stored
+  (`workload_profile_exports`: newest 20 per workload, aged out by `PROFILE_VERSIONS_RETENTION_DAYS`
+  except each live workload's newest). It is the `imageChangedSinceExport` / securityContext baseline
+  (section 2.8).
+- **Errors:** 400 `bad_request` (unknown artifact, mode or format; `record` on GET), 401/403 without the
+  required scope when auth is on, 404 `workload_not_found`, 409
+  `export_refused` as above, 503 read budget.
+
+### 4.1 `format=yaml`
+
+A bundle header (workload, mode, profile revision, "kguardian never applies anything", one
+`# not included: <artifact> (<reason>)` line per unavailable artifact), then one `---` document per
+included Kubernetes object. The securityContext patch is **not** an object, so it is appended as comments
+after the last document; the stream stays safe to pass to `kubectl apply -f`.
+
+From `GET /workloads/payments/Deployment/checkout/export` -> 200 (capture `export-yaml-audit-payments-checkout.json`, body verbatim):
+
+```yaml
+# kguardian export bundle for payments/Deployment/checkout
+# mode: audit; profile revision 6 (fnv1a64:44c9939f6034479f); generated 2026-09-26T03:06:02.481263599+00:00 by kguardian-broker/1.18.2
+# kguardian never applies anything. Review every document, commit it, and apply it yourself.
+# not included: ciliumnetworkpolicy (withheld in audit mode: a CiliumNetworkPolicy has no per-policy audit mode and enforces as soon as it is applied. Use the networkpolicy artifact (an AuditNetworkPolicy, evaluated by kguardian without blocking) to audit, then export with mode=enforce.)
+# not included: sbom (not available: a CycloneDX runtime SBOM needs the runtime package data from P1-3/P1-5, which does not exist yet)
+# not included: vex (not available: an OpenVEX draft needs vulnerability data and runtime package evidence (P1-3/P1-5), which do not exist yet)
+# not included: admission (not available: the image admission policy needs the image trust policy (P2-3), which has not landed)
+---
+# kguardian export: networkpolicy (audit mode)
+# kguardian never applies this document. Review it, commit it, and apply it yourself.
+# AuditNetworkPolicy: same spec as a NetworkPolicy; the kguardian evaluator reports would-deny flows without dropping anything. Promote with `kubectl kguardian audit promote`.
+apiVersion: kguardian.dev/v1alpha1
+kind: AuditNetworkPolicy
+metadata:
+  annotations:
+    kguardian.dev/applied-by-kguardian: 'false'
+    kguardian.dev/export-mode: audit
+    kguardian.dev/generated-at: 2026-09-26T03:06:02.481263599+00:00
+    kguardian.dev/generated-by: kguardian-broker/1.18.2
+    kguardian.dev/profile-hash: fnv1a64:44c9939f6034479f
+    kguardian.dev/profile-revision: '6'
+    kguardian.dev/source-workload: payments/Deployment/checkout
+  labels:
+    app.kubernetes.io/component: standard-policy
+    app.kubernetes.io/name: checkout
+    app.kubernetes.io/part-of: kguardian
+  name: checkout-kguardian
+  namespace: payments
+spec:
+  egress:
+  - ports:
+    - port: 5432
+      protocol: TCP
+    to:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: payments
+      podSelector:
+        matchLabels:
+          app: ledger
+          pod-template-hash: 7d9f8b6c5
+  - ports:
+    - port: 443
+      protocol: TCP
+    to:
+    - ipBlock:
+        cidr: 198.51.100.20/32
+  - ports:
+    - port: 443
+      protocol: TCP
+    to:
+    - ipBlock:
+        cidr: 203.0.113.10/32
+  ingress:
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: ingress-nginx
+      podSelector:
+        matchLabels:
+          app.kubernetes.io/name: ingress-nginx
+    ports:
+    - port: 8080
+      protocol: TCP
+  podSelector:
+    matchLabels:
+      app: checkout
+  policyTypes:
+  - Ingress
+  - Egress
+---
+# kguardian export: seccompprofile (audit mode)
+# kguardian never applies this document. Review it, commit it, and apply it yourself.
+# kguardian SeccompProfile export
+# workload: payments Deployment/checkout
+# observed syscalls: 4 (x86_64)
+# capture: medium — INCOMPLETE (1 of 1 contributing pod(s) below full)
+# WARNING: partial capture (medium on 1 pod(s): checkout-7d9f8b6c5-2xkqp (medium)) — this profile will block
+# WARNING: syscalls the workload makes. Raise the tier to "full" (kguardian.dev/syscall-capture
+# WARNING: annotation or SYSCALL_CAPTURE_LEVEL) and re-export before enforcing.
+apiVersion: kguardian.dev/v1alpha1
+kind: SeccompProfile
+metadata:
+  name: deployment-checkout
+  namespace: payments
+  annotations:
+    kguardian.dev/applied-by-kguardian: "false"
+    kguardian.dev/capture-complete: "false"
+    kguardian.dev/capture-level: medium
+    kguardian.dev/capture-warning: "partial capture (medium on 1 pod(s): checkout-7d9f8b6c5-2xkqp (medium)) — this profile omits syscalls the workload makes; raise the tier to full and re-export before enforcing"
+    kguardian.dev/export-mode: audit
+    kguardian.dev/generated-at: "2026-09-26T03:06:02.481263599+00:00"
+    kguardian.dev/generated-by: kguardian-broker/1.18.2
+    kguardian.dev/profile-hash: "fnv1a64:44c9939f6034479f"
+    kguardian.dev/profile-revision: "6"
+    kguardian.dev/source-workload: payments/Deployment/checkout
+spec:
+  defaultAction: SCMP_ACT_LOG
+  architectures:
+    - SCMP_ARCH_X86_64
+  syscalls:
+    - names:
+        - accept4
+        - exit_group
+        - read
+        - write
+      action: SCMP_ACT_ALLOW
+  workloadRef:
+    kind: Deployment
+    name: checkout
+
+# ---- securitycontext (strategic-merge patch; not part of the apply stream) ----
+# kguardian export: securitycontext (audit mode)
+# kguardian never applies this document. Review it, commit it, and apply it yourself.
+# Strategic-merge PATCH for Deployment/checkout, not a standalone object. Apply with:
+#   kubectl patch deployment checkout -n payments --type strategic --patch-file securitycontext.patch.yaml
+# Then check the namespace against the target level without blocking first:
+#   kubectl label namespace payments pod-security.kubernetes.io/audit=restricted
+# CAVEAT: Checks kguardian cannot see (hostPath and other volume types, hostPort, probe hosts, AppArmor, SELinux, procMount, sysctls) may still fail restricted.
+# CAVEAT: privileged: false removes host device and kernel access; workloads that manage the node (CNI, CSI, device plugins, eBPF agents) will break.
+# CAVEAT: drop: ["ALL"] also removes CHOWN, SETUID, SETGID, DAC_OVERRIDE and NET_BIND_SERVICE. Images that start as root and drop privileges, change file ownership at startup, or bind ports below 1024 may fail; add back NET_BIND_SERVICE only if the app needs it.
+# kguardian recommendation, not applied. Review before use.
+# Target: Pod Security Standards restricted (kubernetes.io/docs/concepts/security/pod-security-standards)
+#   spec:
+#     template:
+#       spec:
+#         initContainers:
+#         - name: migrate
+#           securityContext:
+#             allowPrivilegeEscalation: false
+#             capabilities:
+#               drop: ["ALL"]
+#         containers:
+#         - name: app
+#           securityContext:
+#             privileged: false
+```
+
+### 4.2 `format=zip-manifest`
+
+A JSON manifest whose `documents[]` are the files a client zips:
+
+From `GET /workloads/payments/Deployment/checkout/export?mode=enforce&format=zip-manifest&acknowledgePartial=true` -> 200 (capture `export-manifest-enforce-payments-checkout.json`, `body`):
+
+```json
+{
+  "workload": {
+    "clusterId": "primary",
+    "kind": "Deployment",
+    "name": "checkout",
+    "namespace": "payments"
+  },
+  "mode": "enforce",
+  "generatedAt": "2026-09-26T03:06:02.625396528+00:00",
+  "profile": {
+    "contentHash": "fnv1a64:44c9939f6034479f",
+    "revision": 6
+  },
+  "recorded": false,
+  "documents": [
+    {
+      "artifact": "networkpolicy",
+      "fileName": "networkpolicy.yaml",
+      "available": true,
+      "refused": null,
+      "reason": null,
+      "apiVersion": "networking.k8s.io/v1",
+      "kind": "NetworkPolicy",
+      "mode": "enforce",
+      "contentType": "application/yaml",
+      "content": "# kguardian export: networkpolicy (enforce mode)\n# kguardian never applies this document. Review it, commit it, and apply it yourself.\napiVersion: networking.k8s.io/v1\nkind: NetworkPolicy\nmetadata:\n  annotations:\n    kguardian.dev/applied-by-kguardian: 'false'\n    kguardian.dev/export-mode: enforce\n    kguardian.dev/generated-at: 2026-09-26T03:06:02.625396528+00:00\n    kguardian.dev/generated-by: kguardian-broker/1.18.2\n    kguardian.dev/profile-hash: fnv1a64:44c9939f6034479f\n    kguardian.dev/profile-revision: '6'\n    kguardian.dev/source-workload: payments/Deployment/checkout\n  labels:\n    app.kubernetes.io/component: standard-policy\n    app.kubernetes.io/name: checkout\n    app.kubernetes.io/part-of: kguardian\n  name: checkout-kguardian\n  namespace: payments\nspec:\n  egress:\n  - ports:\n    - port: 5432\n      protocol: TCP\n    to:\n    - namespaceSelector:\n        matchLabels:\n          kubernetes.io/metadata.name: payments\n      podSelector:\n        matchLabels:\n          app: ledger\n          pod-template-hash: 7d9f8b6c5\n  - ports:\n    - port: 443\n      protocol: TCP\n    to:\n    - ipBlock:\n        cidr: 198.51.100.20/32\n  - ports:\n    - port: 443\n      protocol: TCP\n    to:\n    - ipBlock:\n        cidr: 203.0.113.10/32\n  ingress:\n  - from:\n    - namespaceSelector:\n        matchLabels:\n          kubernetes.io/metadata.name: ingress-nginx\n      podSelector:\n        matchLabels:\n          app.kubernetes.io/name: ingress-nginx\n    ports:\n    - port: 8080\n      protocol: TCP\n  podSelector:\n    matchLabels:\n      app: checkout\n  policyTypes:\n  - Ingress\n  - Egress\n",
+      "applyWith": "kubectl apply -f networkpolicy.yaml"
+    },
+    {
+      "artifact": "ciliumnetworkpolicy",
+      "fileName": "ciliumnetworkpolicy.yaml",
+      "available": true,
+      "refused": null,
+      "reason": null,
+      "apiVersion": "cilium.io/v2",
+      "kind": "CiliumNetworkPolicy",
+      "mode": "enforce",
+      "contentType": "application/yaml",
+      "content": "# kguardian export: ciliumnetworkpolicy (enforce mode)\n# kguardian never applies this document. Review it, commit it, and apply it yourself.\napiVersion: cilium.io/v2\nkind: CiliumNetworkPolicy\nmetadata:\n  annotations:\n    kguardian.dev/applied-by-kguardian: 'false'\n    kguardian.dev/export-mode: enforce\n    kguardian.dev/generated-at: 2026-09-26T03:06:02.625396528+00:00\n    kguardian.dev/generated-by: kguardian-broker/1.18.2\n    kguardian.dev/profile-hash: fnv1a64:44c9939f6034479f\n    kguardian.dev/profile-revision: '6'\n    kguardian.dev/source-workload: payments/Deployment/checkout\n  labels:\n    app.kubernetes.io/component: cilium-policy\n    app.kubernetes.io/name: checkout\n    app.kubernetes.io/part-of: kguardian\n  name: checkout-kguardian\n  namespace: payments\nspec:\n  description: Cilium network policy for pod checkout-7d9f8b6c5-2xkqp generated by kguardian\n  egress:\n  - toEndpoints:\n    - matchLabels:\n        k8s:app: ledger\n        k8s:pod-template-hash: 7d9f8b6c5\n    toPorts:\n    - ports:\n      - port: '5432'\n        protocol: TCP\n  - toCIDR:\n    - 198.51.100.20/32\n    toPorts:\n    - ports:\n      - port: '443'\n        protocol: TCP\n  - toCIDR:\n    - 203.0.113.10/32\n    toPorts:\n    - ports:\n      - port: '443'\n        protocol: TCP\n  endpointSelector:\n    matchLabels:\n      k8s:app: checkout\n  ingress:\n  - fromEndpoints:\n    - matchLabels:\n        k8s:app.kubernetes.io/name: ingress-nginx\n        k8s:io.kubernetes.pod.namespace: ingress-nginx\n    toPorts:\n    - ports:\n      - port: '8080'\n        protocol: TCP\nstatus: {}\n",
+      "applyWith": "kubectl apply -f ciliumnetworkpolicy.yaml"
+    },
+    {
+      "artifact": "seccompprofile",
+      "fileName": "seccompprofile.yaml",
+      "available": true,
+      "refused": null,
+      "reason": null,
+      "apiVersion": "kguardian.dev/v1alpha1",
+      "kind": "SeccompProfile",
+      "mode": "enforce",
+      "contentType": "application/yaml",
+      "content": "# kguardian export: seccompprofile (enforce mode)\n# kguardian never applies this document. Review it, commit it, and apply it yourself.\n# kguardian SeccompProfile export\n# workload: payments Deployment/checkout\n# observed syscalls: 4 (x86_64)\n# capture: medium \u2014 INCOMPLETE (1 of 1 contributing pod(s) below full)\n# WARNING: partial capture (medium on 1 pod(s): checkout-7d9f8b6c5-2xkqp (medium)) \u2014 this profile will block\n# WARNING: syscalls the workload makes. Raise the tier to \"full\" (kguardian.dev/syscall-capture\n# WARNING: annotation or SYSCALL_CAPTURE_LEVEL) and re-export before enforcing.\napiVersion: kguardian.dev/v1alpha1\nkind: SeccompProfile\nmetadata:\n  name: deployment-checkout\n  namespace: payments\n  annotations:\n    kguardian.dev/applied-by-kguardian: \"false\"\n    kguardian.dev/capture-complete: \"false\"\n    kguardian.dev/capture-level: medium\n    kguardian.dev/capture-warning: \"partial capture (medium on 1 pod(s): checkout-7d9f8b6c5-2xkqp (medium)) \u2014 this profile omits syscalls the workload makes; raise the tier to full and re-export before enforcing\"\n    kguardian.dev/export-mode: enforce\n    kguardian.dev/generated-at: \"2026-09-26T03:06:02.625396528+00:00\"\n    kguardian.dev/generated-by: kguardian-broker/1.18.2\n    kguardian.dev/profile-hash: \"fnv1a64:44c9939f6034479f\"\n    kguardian.dev/profile-revision: \"6\"\n    kguardian.dev/source-workload: payments/Deployment/checkout\nspec:\n  defaultAction: SCMP_ACT_ERRNO\n  architectures:\n    - SCMP_ARCH_X86_64\n  syscalls:\n    - names:\n        - accept4\n        - exit_group\n        - read\n        - write\n      action: SCMP_ACT_ALLOW\n  workloadRef:\n    kind: Deployment\n    name: checkout\n",
+      "applyWith": "kubectl apply -f seccompprofile.yaml"
+    },
+    "(4 more in the capture)"
+  ]
+}
+```
+
+- `documents[]`: `{artifact, fileName, available, refused, reason, apiVersion, kind, mode, contentType,
+  content, applyWith}`, one per requested artifact in bundle order. `available: false` means `content`
+  is `null` and `reason` says why. `refused` is only set on a 409. `fileName` is
+  `securitycontext.patch.yaml` for the patch, otherwise `<artifact>.yaml`.
+
+## 5. Storage (for reviewers; not an API)
 
 - `workload_profile_versions(id bigserial PK, cluster_id, pod_namespace, workload_kind, workload_name,
   revision int, content_hash, dimension_hashes jsonb, snapshot jsonb, posture jsonb, created_at)`,
   unique `(cluster_id, pod_namespace, workload_kind, workload_name, revision)`.
 - `workload_profile_latest(cluster_id, pod_namespace, workload_kind, workload_name PK, revision,
   content_hash, posture_status, summary jsonb, computed_at, last_changed_at)`, backing `GET /workloads`.
-- Migration `2026-09-27-100000_workload_profiles`.
+- `workload_profile_exports(id, cluster_id, pod_namespace, workload_kind, workload_name, revision, content_hash,
+  mode, artifacts text[], baseline jsonb, exported_at)` (section 4).
+- Migrations `2026-09-27-100000_workload_profiles`, `2026-09-27-300000_workload_profile_exports`.
 
 ## CHANGELOG
 
@@ -1088,3 +1516,14 @@ From `GET /workloads/payments/Deployment/checkout/profile/diff?from=2&to=4` -> 2
     and `capabilitiesRestricted`). Captures renamed: `profile-ok-flux-system-source-controller` ->
     `profile-unknown-partial-flux-system-source-controller`, `profile-warn-payments-checkout` ->
     `profile-warn-payments-checkout-after-fix`; new `profile-warn-payments-refunds-init-fails-restricted`.
+- 2026-09-27 (**v1.4**, P2-4 export + P2-5 drift; additive only, no existing field or status changes):
+  - New `GET /workloads/{ns}/{kind}/{name}/export` (section 4, READ, side-effect free): `artifacts`,
+    `mode=audit|enforce`, `format=yaml|zip-manifest`, `acknowledgePartial`; 409 `export_refused` for
+    enforce-mode artifacts built from partial evidence.
+  - New `POST` on the same path (admin scope): the same bundle, also recorded as the drift baseline.
+    Recording is not reachable with a read token.
+  - New top-level `drift` in the profile (section 2.8) with `baselines`, `evaluated` and `items`; drift
+    findings (dimension `"drift"`: `drift.tagMoved/<c>`, `drift.imageChangedSinceExport/<c>`,
+    `drift.securityContextRegression/<c|pod>`) join `findings` / `attention`. Drift never sets posture.
+  - List items gain `drift: {count, byType}`.
+  - `/metrics` gains `kguardian_workload_drift{workload_namespace, workload_kind, workload, type}`.

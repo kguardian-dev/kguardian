@@ -501,6 +501,24 @@ diesel::table! {
     }
 }
 
+diesel::table! {
+    // Export bundles handed out (#1533 P2-4): the "last exported profile"
+    // drift baseline. Bounded per workload and by age (retention.rs).
+    workload_profile_exports (id) {
+        id -> Int8,
+        cluster_id -> Varchar,
+        pod_namespace -> Varchar,
+        workload_kind -> Varchar,
+        workload_name -> Varchar,
+        revision -> Nullable<Int4>,
+        content_hash -> Varchar,
+        mode -> Varchar,
+        artifacts -> Array<Text>,
+        baseline -> Jsonb,
+        exported_at -> Timestamp,
+    }
+}
+
 diesel::allow_tables_to_appear_in_same_query!(
     pod_details,
     pod_traffic,

@@ -104,6 +104,7 @@ const OPEN: Access = Access::Open;
 const READ: Access = Access::Requires(Scope::Read);
 const INGEST: Access = Access::Requires(Scope::Ingest);
 const SUPPLYCHAIN: Access = Access::Requires(Scope::SupplyChain);
+const ADMIN: Access = Access::Requires(Scope::Admin);
 
 /// Every broker route and the access it needs. Keep sorted by area.
 pub const ROUTES: &[RouteRule] = &[
@@ -196,6 +197,12 @@ pub const ROUTES: &[RouteRule] = &[
     rule("GET", "/images/{digest}/sbom/cyclonedx", READ),
     rule("GET", "/vulnerabilities", READ),
     rule("GET", "/vulnerabilities/{id}/exposure", READ),
+    // Export bundle (#1533 P2-4). GET only generates documents, so READ.
+    // POST returns the same bundle and records it as the workload's drift
+    // baseline: a write that says "this is what the operator accepted", so
+    // it takes the operator (admin) token, never the read one.
+    rule("GET", "/workloads/{namespace}/{kind}/{name}/export", READ),
+    rule("POST", "/workloads/{namespace}/{kind}/{name}/export", ADMIN),
 ];
 
 /// The declared access for `method` on the registered `pattern`, if any.

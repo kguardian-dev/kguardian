@@ -159,7 +159,7 @@ fn valid_segment(s: &str) -> bool {
 }
 
 impl Key {
-    fn parse(ns: String, kind: String, name: String) -> Option<Key> {
+    pub(crate) fn parse(ns: String, kind: String, name: String) -> Option<Key> {
         [&ns, &kind, &name]
             .iter()
             .all(|s| valid_segment(s))
@@ -171,7 +171,7 @@ impl Key {
     }
 }
 
-fn bad_key() -> HttpResponse {
+pub(crate) fn bad_key() -> HttpResponse {
     error(
         StatusCode::BAD_REQUEST,
         "bad_request",
@@ -179,11 +179,11 @@ fn bad_key() -> HttpResponse {
     )
 }
 
-fn error(status: StatusCode, code: &str, message: &str) -> HttpResponse {
+pub(crate) fn error(status: StatusCode, code: &str, message: &str) -> HttpResponse {
     HttpResponse::build(status).json(json!({ "error": code, "message": message }))
 }
 
-fn not_found_workload() -> HttpResponse {
+pub(crate) fn not_found_workload() -> HttpResponse {
     error(
         StatusCode::NOT_FOUND,
         "workload_not_found",
@@ -191,7 +191,7 @@ fn not_found_workload() -> HttpResponse {
     )
 }
 
-fn utc(t: NaiveDateTime) -> DateTime<Utc> {
+pub(crate) fn utc(t: NaiveDateTime) -> DateTime<Utc> {
     t.and_utc()
 }
 
@@ -490,10 +490,14 @@ pub struct Sources {
     pub compute: Vec<ComputeRow>,
     pub compute_truncated: bool,
     pub stored: Option<StoredVersionHead>,
+    /// Drift baselines (see `profile_drift.rs`): the latest export record
+    /// and the newest stored versions, newest first.
+    pub last_export: Option<crate::profile_drift::ExportBaseline>,
+    pub recent_versions: Vec<crate::profile_drift::RecentVersion>,
 }
 
 impl Sources {
-    fn is_empty(&self) -> bool {
+    pub(crate) fn is_empty(&self) -> bool {
         self.containers.is_empty()
             && self.seccomp.is_none()
             && !self.any_pods
@@ -589,6 +593,8 @@ pub fn load_sources(conn: &mut PgConnection, key: &Key) -> Result<Sources, DbErr
         .get_result(conn)
         .optional()?;
 
+    let (last_export, recent_versions) = crate::profile_drift::load_baselines(conn, key)?;
+
     Ok(Sources {
         containers,
         containers_truncated: truncated,
@@ -603,6 +609,8 @@ pub fn load_sources(conn: &mut PgConnection, key: &Key) -> Result<Sources, DbErr
         compute,
         compute_truncated,
         stored,
+        last_export,
+        recent_versions,
     })
 }
 
@@ -682,7 +690,7 @@ fn severity_rank(s: &str) -> u8 {
     }
 }
 
-fn mk_finding(
+pub(crate) fn mk_finding(
     dimension: &'static str,
     id: String,
     severity: &'static str,
@@ -1957,6 +1965,8 @@ pub struct Profile {
     pub controls: Vec<Control>,
     pub readiness: Vec<Readiness>,
     pub exposure: Exposure,
+    /// Drift against the last export / previous version (contract 2.8).
+    pub drift: crate::profile_drift::DriftView,
     pub dimensions: Dimensions,
     #[serde(skip)]
     pub snapshot: Value,
@@ -2062,13 +2072,6 @@ pub fn build(key: &Key, s: &Sources, now: DateTime<Utc>) -> Profile {
                 .unwrap_or_default(),
         })
         .collect();
-    let attention: Vec<Finding> = findings
-        .iter()
-        .filter(|f| severity_rank(f.severity) <= 2)
-        .take(ATTENTION_MAX)
-        .cloned()
-        .collect();
-
     let audit = network.policy.audit.as_ref();
     let controls = vec![
         Control {
@@ -2213,6 +2216,28 @@ pub fn build(key: &Key, s: &Sources, now: DateTime<Utc>) -> Profile {
         compute,
     };
     let (snapshot, dimension_hashes, content_hash) = snapshot_of(&dims, s);
+    // Drift (P2-5) compares the live snapshot with a baseline, so it runs
+    // after the snapshot; its findings join the list before attention is
+    // picked. Drift is not a core dimension and never sets posture.
+    let (drift, drift_findings) = crate::profile_drift::detect(
+        &key.kind,
+        &dims.images.containers,
+        &snapshot,
+        &dimension_hashes,
+        s,
+    );
+    findings.extend(drift_findings);
+    findings.sort_by(|a, b| {
+        severity_rank(a.severity)
+            .cmp(&severity_rank(b.severity))
+            .then_with(|| a.id.cmp(&b.id))
+    });
+    let attention: Vec<Finding> = findings
+        .iter()
+        .filter(|f| severity_rank(f.severity) <= 2)
+        .take(ATTENTION_MAX)
+        .cloned()
+        .collect();
     let version = s.stored.as_ref().map(|v| VersionRef {
         revision: v.revision,
         content_hash: v.content_hash.clone(),
@@ -2249,6 +2274,7 @@ pub fn build(key: &Key, s: &Sources, now: DateTime<Utc>) -> Profile {
         controls,
         readiness,
         exposure,
+        drift,
         dimensions: dims,
         snapshot,
         dimension_hashes,
@@ -2583,6 +2609,13 @@ fn list_summary(p: &Profile) -> Value {
             "compute": { "status": d.compute.env.status },
         },
         "findingCounts": counts,
+        "drift": {
+            "count": p.drift.items.len(),
+            "byType": p.drift.items.iter().fold(BTreeMap::<&str, usize>::new(), |mut m, i| {
+                *m.entry(i.kind).or_default() += 1;
+                m
+            }),
+        },
     })
 }
 
@@ -4158,6 +4191,251 @@ mod tests {
         let d0 = diff(&Value::Null, &b);
         assert_eq!(d0["images"]["containersAdded"], json!(["app"]));
         assert_eq!(d0["network"]["added"].as_array().unwrap().len(), 2);
+    }
+
+    // ---- drift (P2-5) ----------------------------------------------------
+
+    fn drift_types(p: &Profile) -> Vec<&'static str> {
+        p.drift.items.iter().map(|i| i.kind).collect()
+    }
+
+    #[test]
+    fn tag_moved_is_drift_but_a_retag_is_not() {
+        let mut c = container("app", restricted());
+        let mut old = cd(&digest('b'), restricted(), json!({}));
+        old.state = Some("terminated".into());
+        c.previous_digests.push(old.clone());
+        let s = Sources {
+            containers: vec![c.clone()],
+            ..Default::default()
+        };
+        let p = build(&key(), &s, now());
+        assert_eq!(drift_types(&p), vec!["tagMoved"]);
+        let item = &p.drift.items[0];
+        assert_eq!(item.container.as_deref(), Some("app"));
+        assert_eq!(item.detail["imageRef"], json!("ghcr.io/example/checkout:1"));
+        assert_eq!(item.detail["digests"], json!([digest('a'), digest('b')]));
+        assert!(p.findings.iter().any(|f| f.id == "drift.tagMoved/app"
+            && f.dimension == "drift"
+            && f.severity == "medium"));
+        assert!(p.drift.evaluated.contains(&"tagMoved"));
+
+        // A new tag (a normal rollout) is not a moved tag.
+        c.previous_digests[0].image_ref = "ghcr.io/example/checkout:0".into();
+        let p = build(
+            &key(),
+            &Sources {
+                containers: vec![c.clone()],
+                ..Default::default()
+            },
+            now(),
+        );
+        assert!(p.drift.items.is_empty());
+
+        // A digest reference cannot move.
+        c.previous_digests[0].image_ref = format!("ghcr.io/example/checkout@{}", digest('b'));
+        c.digests[0].image_ref = format!("ghcr.io/example/checkout@{}", digest('a'));
+        let p = build(
+            &key(),
+            &Sources {
+                containers: vec![c],
+                ..Default::default()
+            },
+            now(),
+        );
+        assert!(p.drift.items.is_empty());
+    }
+
+    fn export_of(p: &Profile, revision: Option<i32>) -> crate::profile_drift::ExportBaseline {
+        crate::profile_drift::ExportBaseline {
+            id: 1,
+            revision,
+            content_hash: p.content_hash.clone(),
+            mode: "audit".into(),
+            artifacts: vec!["networkpolicy".into()],
+            baseline: json!({
+                "images": p.snapshot["images"].clone(),
+                "podSecurity": p.snapshot["podSecurity"].clone(),
+            }),
+            exported_at: ts(2),
+        }
+    }
+
+    #[test]
+    fn image_drift_needs_an_export_and_names_new_digests() {
+        let base = Sources {
+            containers: vec![container("app", restricted())],
+            ..Default::default()
+        };
+        let exported = build(&key(), &base, now());
+        // Without an export the check does not run and nothing is claimed.
+        assert!(!exported
+            .drift
+            .evaluated
+            .contains(&"imageChangedSinceExport"));
+        assert!(exported.drift.baselines.export.is_none());
+
+        let mut s = base.clone();
+        s.last_export = Some(export_of(&exported, Some(3)));
+        // Same image as exported: evaluated, no drift.
+        let p = build(&key(), &s, now());
+        assert!(p.drift.evaluated.contains(&"imageChangedSinceExport"));
+        assert!(p.drift.items.is_empty());
+        assert_eq!(p.drift.baselines.export.as_ref().unwrap().revision, Some(3));
+
+        // A new digest and a new container after the export.
+        s.containers[0].digests[0].digest = digest('c');
+        s.containers[0].digests[0].image_ref = "ghcr.io/example/checkout:2".into();
+        s.containers.push(container("sidecar", restricted()));
+        let p = build(&key(), &s, now());
+        let items: Vec<(&str, Option<&str>)> = p
+            .drift
+            .items
+            .iter()
+            .map(|i| (i.kind, i.container.as_deref()))
+            .collect();
+        assert_eq!(
+            items,
+            vec![
+                ("imageChangedSinceExport", Some("app")),
+                ("imageChangedSinceExport", Some("sidecar")),
+            ]
+        );
+        assert_eq!(p.drift.items[0].detail["newDigests"], json!([digest('c')]));
+        assert_eq!(p.drift.items[1].detail["containerInExport"], json!(false));
+    }
+
+    #[test]
+    fn security_context_regression_against_the_previous_version() {
+        let before = build(
+            &key(),
+            &Sources {
+                containers: vec![container("app", restricted())],
+                ..Default::default()
+            },
+            now(),
+        );
+        let mut s = Sources {
+            containers: vec![container(
+                "app",
+                json!({"privileged": true, "allowPrivilegeEscalation": false, "runAsNonRoot": true,
+                       "capabilitiesDrop": ["ALL"], "seccompProfileType": "RuntimeDefault"}),
+            )],
+            ..Default::default()
+        };
+        // No baseline yet: not evaluated.
+        let p = build(&key(), &s, now());
+        assert!(!p.drift.evaluated.contains(&"securityContextRegression"));
+
+        s.recent_versions = vec![crate::profile_drift::RecentVersion {
+            revision: 4,
+            created_at: ts(1),
+            pod_security_hash: before.dimension_hashes.get("podSecurity").cloned(),
+            pod_security: before.snapshot["podSecurity"].clone(),
+        }];
+        let p = build(&key(), &s, now());
+        let reg: Vec<&crate::profile_drift::DriftItem> = p
+            .drift
+            .items
+            .iter()
+            .filter(|i| i.kind == "securityContextRegression")
+            .collect();
+        assert_eq!(reg.len(), 1);
+        assert_eq!(reg[0].severity, "high", "a baseline check newly fails");
+        assert_eq!(reg[0].detail["newlyFailing"], json!(["privileged"]));
+        assert_eq!(reg[0].detail["levelFrom"], json!("restricted"));
+        assert_eq!(reg[0].detail["levelTo"], json!("privileged"));
+        let b = p.drift.baselines.security_context.as_ref().unwrap();
+        assert_eq!((b.source, b.revision), ("previousVersion", Some(4)));
+        assert!(p
+            .attention
+            .iter()
+            .any(|f| f.id == "drift.securityContextRegression/app"));
+
+        // The version whose podSecurity equals the live one is skipped, so a
+        // later unrelated version does not hide the regression.
+        let live_hash = p.dimension_hashes.get("podSecurity").cloned();
+        s.recent_versions.insert(
+            0,
+            crate::profile_drift::RecentVersion {
+                revision: 5,
+                created_at: ts(3),
+                pod_security_hash: live_hash,
+                pod_security: p.snapshot["podSecurity"].clone(),
+            },
+        );
+        let p = build(&key(), &s, now());
+        assert_eq!(
+            p.drift
+                .baselines
+                .security_context
+                .as_ref()
+                .unwrap()
+                .revision,
+            Some(4)
+        );
+        assert!(drift_types(&p).contains(&"securityContextRegression"));
+
+        // An improvement is not a regression.
+        let mut better = s.clone();
+        better.containers = vec![container("app", restricted())];
+        better.recent_versions = vec![crate::profile_drift::RecentVersion {
+            revision: 6,
+            created_at: ts(4),
+            pod_security_hash: Some("fnv1a64:other".into()),
+            pod_security: p.snapshot["podSecurity"].clone(),
+        }];
+        let p = build(&key(), &better, now());
+        assert!(p.drift.evaluated.contains(&"securityContextRegression"));
+        assert!(!drift_types(&p).contains(&"securityContextRegression"));
+    }
+
+    #[test]
+    fn the_export_is_the_security_context_baseline_when_present() {
+        let accepted = build(
+            &key(),
+            &Sources {
+                containers: vec![container("app", restricted())],
+                ..Default::default()
+            },
+            now(),
+        );
+        let mut s = Sources {
+            containers: vec![container("app", json!({}))],
+            ..Default::default()
+        };
+        s.last_export = Some(export_of(&accepted, None));
+        // A previous version that already had the weak context would hide
+        // the regression; the export wins.
+        s.recent_versions = vec![crate::profile_drift::RecentVersion {
+            revision: 9,
+            created_at: ts(3),
+            pod_security_hash: Some("fnv1a64:x".into()),
+            pod_security: json!({"containers": {"app": {"kind": "regular", "securityContext": {}}}, "pod": null, "level": "baseline"}),
+        }];
+        let p = build(&key(), &s, now());
+        let b = p.drift.baselines.security_context.as_ref().unwrap();
+        assert_eq!(b.source, "export");
+        let reg = p
+            .drift
+            .items
+            .iter()
+            .find(|i| i.kind == "securityContextRegression")
+            .expect("regressed against the export");
+        assert_eq!(reg.severity, "medium", "only restricted checks newly fail");
+        let failing: Vec<&str> = reg.detail["newlyFailing"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(Value::as_str)
+            .collect();
+        assert!(failing.contains(&"privilegeEscalation"));
+        // Drift never sets posture on its own, and the list summary counts it.
+        let summary = list_summary(&p);
+        assert_eq!(
+            summary["drift"]["byType"]["securityContextRegression"],
+            json!(1)
+        );
     }
 
     #[test]

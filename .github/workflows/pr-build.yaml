@@ -49,6 +49,10 @@ jobs:
               - 'controller/**'
             broker:
               - 'broker/**'
+              # The broker's NetworkPolicy generator (broker/src/netpol) is
+              # held to the shared goldens, like the advisor, frontend and
+              # llm-bridge copies: a golden change must re-run its tests.
+              - 'test/fixtures/generators/networkpolicy/**'
             frontend:
               - 'frontend/**'
               - 'test/fixtures/generators/**'
