@@ -478,8 +478,28 @@ render "supplychain-enabled" --set supplychain.enabled=true && {
     { echo "FAIL [supplychain-enabled]: BROKER_INGEST_ENABLED must default to false"; fail=1; }
   grep -A1 'name: TRIVY_OPERATOR_ENABLED' <<<"$OUT" | grep -q 'value: "true"' || \
     { echo "FAIL [supplychain-enabled]: TRIVY_OPERATOR_ENABLED must default to true"; fail=1; }
+  # Registry lookups follow broker ingest, which is off by default.
+  grep -A1 'name: REGISTRY_LOOKUP_ENABLED' <<<"$OUT" | grep -q 'value: "false"' || \
+    { echo "FAIL [supplychain-enabled]: REGISTRY_LOOKUP_ENABLED must follow brokerIngest (false)"; fail=1; }
+  grep -A1 'name: REGISTRY_ALLOW_PRIVATE' <<<"$OUT" | grep -q 'value: "false"' || \
+    { echo "FAIL [supplychain-enabled]: REGISTRY_ALLOW_PRIVATE must default to false"; fail=1; }
+}
+
+# 10b-ii. registryLookup follows brokerIngest unless set explicitly.
+render "supplychain-lookup-follows-ingest" --set supplychain.enabled=true \
+  --set supplychain.brokerIngest.enabled=true && {
   grep -A1 'name: REGISTRY_LOOKUP_ENABLED' <<<"$OUT" | grep -q 'value: "true"' || \
-    { echo "FAIL [supplychain-enabled]: REGISTRY_LOOKUP_ENABLED must render"; fail=1; }
+    { echo "FAIL [supplychain-lookup-follows-ingest]: lookup must turn on with ingest"; fail=1; }
+}
+render "supplychain-lookup-explicit-off" --set supplychain.enabled=true \
+  --set supplychain.brokerIngest.enabled=true --set supplychain.registryLookup.enabled=false && {
+  grep -A1 'name: REGISTRY_LOOKUP_ENABLED' <<<"$OUT" | grep -q 'value: "false"' || \
+    { echo "FAIL [supplychain-lookup-explicit-off]: explicit false must win"; fail=1; }
+}
+render "supplychain-lookup-private" --set supplychain.enabled=true \
+  --set supplychain.registryLookup.allowPrivateRegistries=true && {
+  grep -A1 'name: REGISTRY_ALLOW_PRIVATE' <<<"$OUT" | grep -q 'value: "true"' || \
+    { echo "FAIL [supplychain-lookup-private]: allowPrivateRegistries must propagate"; fail=1; }
 }
 
 # 10c. The ClusterRole is exactly get/list/watch on the two report resources.

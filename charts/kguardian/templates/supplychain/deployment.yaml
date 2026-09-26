@@ -66,8 +66,15 @@ spec:
               value: "http://{{ .Values.broker.service.name }}.{{ include "kguardian.namespace" . }}.svc.cluster.local:{{ .Values.broker.service.port }}"
             - name: BROKER_INGEST_ENABLED
               value: {{ .Values.supplychain.brokerIngest.enabled | quote }}
+            {{- /* Unset (null) follows brokerIngest.enabled: no lookups while ingest is off. */}}
+            {{- $lookup := .Values.supplychain.brokerIngest.enabled }}
+            {{- if not (kindIs "invalid" .Values.supplychain.registryLookup.enabled) }}
+            {{- $lookup = .Values.supplychain.registryLookup.enabled }}
+            {{- end }}
             - name: REGISTRY_LOOKUP_ENABLED
-              value: {{ .Values.supplychain.registryLookup.enabled | quote }}
+              value: {{ $lookup | quote }}
+            - name: REGISTRY_ALLOW_PRIVATE
+              value: {{ .Values.supplychain.registryLookup.allowPrivateRegistries | quote }}
             {{- /*
               TODO(1533): once broker auth scopes land (feat/1533-broker-auth-scopes),
               add the scoped token and the render guard here:
