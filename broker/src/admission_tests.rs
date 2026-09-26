@@ -673,3 +673,60 @@ fn comments_cannot_inject_documents() {
         }
     }
 }
+
+/// The shared comment helper (#1678's comment_text, used by the export
+/// bundle and these policies) leaves no control character of any kind in a
+/// comment: C0 (tab, ESC, NUL), DEL, C1 (CSI), and the YAML line breaks.
+#[test]
+fn shared_comment_text_blanks_every_control() {
+    for cp in [
+        0x00u32, 0x09, 0x0A, 0x0D, 0x1B, 0x7F, 0x85, 0x9B, 0x2028, 0x2029,
+    ] {
+        let c = char::from_u32(cp).unwrap();
+        let out = comment(&format!("a{c}b"));
+        assert!(
+            !out.chars()
+                .any(|x| x.is_control() || x == '\u{2028}' || x == '\u{2029}'),
+            "U+{cp:04X}: {out:?}"
+        );
+        assert!(
+            out.starts_with('a') && out.ends_with('b'),
+            "U+{cp:04X}: {out:?}"
+        );
+    }
+    let mut y = String::new();
+    crate::profile_export::push_commented(&mut y, "one\u{1b}[31m\ttwo\nthree");
+    assert_eq!(y, "#   one [31m two\n#   three\n");
+}
+
+/// A container whose image reference was malformed at ingest is in the
+/// plan as not covered, with the reason, and gets no glob.
+#[test]
+fn malformed_reference_is_not_covered() {
+    let mut rows = fixtures()[..1].to_vec();
+    let mut bad = rows[0].clone();
+    bad.container = "sidecar".into();
+    bad.image_ref = crate::image_inventory::MALFORMED_REFERENCE.into();
+    rows.push(bad);
+    let p = plan(&rows);
+    assert!(p.groups.is_empty(), "{:?}", p.groups);
+    assert!(p.uncovered["registry.k8s.io/pause"].contains("malformed_reference"));
+    // No repository either: listed under the marker itself.
+    let mut only = fixtures()[..1].to_vec();
+    only[0].repository = None;
+    only[0].image_ref = crate::image_inventory::MALFORMED_REFERENCE.into();
+    let p = plan(&only);
+    assert!(p.uncovered.contains_key("malformed_reference"));
+    let y = render(
+        &p,
+        &Options {
+            format: "kyverno",
+            enforce: false,
+            name_prefix: "k",
+            namespace: None,
+        },
+        "x",
+    )
+    .unwrap();
+    assert!(y.contains("# not covered: malformed_reference"));
+}
