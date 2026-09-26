@@ -299,10 +299,77 @@ is frozen once a heartbeat with `ended: true` arrives.
     "container_id": "5e1e2d3c…", "node_name": "node-1",
     "mode": "full", "exec_probe": true, "lib_probe": true,
     "start_mode": "start", "tracking_since": "2026-09-26T10:00:00",
-    "events_dropped": 0, "unsent": 0, "incomplete": false, "ended": false,
+    "events_dropped": 0, "unsent": 0, "incomplete": false, "cap_probe": true,
+    "ended": false,
     "heartbeat_at": "2026-09-27T08:15:00", "heartbeat_secs": 300
   }
 ]
 ```
 
 Rows not heartbeated for `RUNTIME_INVENTORY_RETENTION_DAYS` are pruned.
+
+## Capabilities
+
+With `controller.runtimeInventory.capabilities: true` (and `mode` exec or
+full), the controller also counts every capability check a container
+makes, per capability and verdict, from an fexit program on `cap_capable`
+(or `security_capable` where `cap_capable` cannot be traced; override
+with `RUNTIME_INVENTORY_CAP_HOOK`). Counting happens in the kernel, one
+map entry per (container, capability, verdict); the first check of each
+also sends an event naming the container. Heartbeats carry `cap_probe`, so
+the broker knows which windows had the probe on.
+
+Not counted: `CAP_OPT_NOAUDIT` checks (the kernel asking whether a task
+would be privileged without the task needing it) and runc's own container
+setup (tasks named `runc:[`).
+
+The evidence feeds the workload profile's `capabilities` block and the
+`capabilities` part of its securityContext recommendation (see the
+profile contract, section 2.9). A recommendation is made only when
+`kg_capability_coverage` covers every current digest of the container for
+the evidence window (`CAPABILITY_EVIDENCE_WINDOW_HOURS`, default 168):
+
+```sql
+kg_capability_coverage(cluster text, namespace text, kind text, name text,
+                       container text, image_digest text, window_hours integer)
+  RETURNS TABLE (covered boolean, observed_since timestamp, reason text)
+```
+
+It is `kg_runtime_coverage` plus the capability probe on every instance
+in the window; its extra reason is `capabilities_not_tracked`. A
+capability that was used is never recommended for dropping.
+
+### GET /workloads/\{namespace\}/\{kind\}/\{name\}/capabilities
+
+Requires the `read` scope; charged to the read budget. Returns the
+profile's `capabilities` block: per current container, the capabilities
+used (granted) and denied with counts and times, the evidence verdict and
+reason, the recommendation (`drop: ["ALL"]`, `add`: the used set) when the
+evidence is sufficient, and `unusedAdded`: capabilities the container
+adds today that it never used.
+
+### POST /runtime/capabilities
+
+Controller ingest; requires the `ingest` scope. At most 5000 entries,
+counted while parsing (`413` above that), 4 MiB body. `count` is the
+number of checks since the controller's previous post of that entry;
+counts add up across replicas. Running containers are re-reported hourly
+with `count: 0`, which keeps them from retention: rows are pruned when no
+controller has reported them for `RUNTIME_INVENTORY_RETENTION_DAYS`, never
+because a capability was last used long ago.
+
+```json
+[
+  {
+    "pod_namespace": "prod", "pod_name": "web-7d9f-abcde",
+    "workload_kind": "Deployment", "workload_name": "web",
+    "container_name": "app", "image_digest": "sha256:0123…cdef",
+    "capability": "NET_BIND_SERVICE", "granted": true, "count": 3,
+    "first_seen": "2026-09-26T10:00:00", "last_seen": "2026-09-26T10:05:00"
+  }
+]
+```
+
+`capability` is the Kubernetes spelling without `CAP_` (upper case, digits
+and `_`, up to 32 characters). Invalid entries are dropped and counted in
+the response.
