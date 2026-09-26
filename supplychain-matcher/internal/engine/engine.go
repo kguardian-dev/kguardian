@@ -1,11 +1,16 @@
 // Package engine owns the Grype vulnerability database and matching.
 //
-// Database lifecycle (grype v6 distribution/installation, pinned in go.mod):
-//   - the listing (LatestURL/v6/latest.json) names an archive and its
-//     sha256; go-getter verifies that checksum on download, and the curator
-//     re-validates the unpacked database's checksum (import.json) on load.
-//     Anchore does not publish a signature for the listing or archive, so
-//     authenticity rests on TLS to the configured URL;
+// Database lifecycle (grype v6 installation curator, pinned in go.mod, with
+// kguardian's own download client in internal/dbdist instead of grype's
+// go-getter based one):
+//   - the listing (URL/v6/latest.json) names an archive and its sha256; the
+//     archive is downloaded over https only (http only when configured),
+//     every connection and redirect is address-guarded, the sha256 is
+//     checked before unpacking, and the curator re-validates the unpacked
+//     database's checksum (import.json) on every load. The sha256 comes
+//     from the same listing, so it proves integrity, not authenticity:
+//     Anchore publishes no signature, and TLS to the configured URL is the
+//     trust anchor;
 //   - an update is downloaded next to the current database and swapped in,
 //     so the volume must hold two databases at once during a refresh;
 //   - a new database is loaded into a fresh provider and swapped under a
@@ -22,11 +27,12 @@ import (
 
 	"github.com/anchore/clio"
 	"github.com/anchore/grype/grype"
-	v6dist "github.com/anchore/grype/grype/db/v6/distribution"
+	v6 "github.com/anchore/grype/grype/db/v6"
 	v6inst "github.com/anchore/grype/grype/db/v6/installation"
 	"github.com/anchore/grype/grype/matcher"
 	"github.com/anchore/grype/grype/pkg"
 	"github.com/anchore/grype/grype/vulnerability"
+	"github.com/kguardian-dev/kguardian/supplychain-matcher/internal/dbdist"
 	"github.com/kguardian-dev/kguardian/supplychain-matcher/internal/wire"
 	"github.com/sirupsen/logrus"
 )
@@ -44,8 +50,8 @@ type Config struct {
 	// AutoUpdate enables downloading and refreshing. When false, only a
 	// database already present in DBDir is used (air-gapped preload).
 	AutoUpdate bool
-	// UpdateInterval between refresh attempts. Grype itself also rate
-	// limits update checks to once per 2h.
+	// UpdateInterval between refresh attempts (default 12h). Grype itself
+	// also rate limits update checks to once per 2h.
 	UpdateInterval time.Duration
 	// MaxAge refuses a database older than this (0 disables the check).
 	MaxAge time.Duration
@@ -79,12 +85,17 @@ func New(cfg Config, log *logrus.Logger) *Engine {
 	return e
 }
 
+// grypeLoad is grype.LoadVulnerabilityDB with dbdist.Client in place of
+// grype's go-getter download client.
 func (e *Engine) grypeLoad(update bool) (vulnerability.Provider, *vulnerability.ProviderStatus, error) {
 	id := clio.Identification{Name: "kguardian-supplychain-matcher", Version: GrypeVersion}
-	dist := v6dist.DefaultConfig()
-	dist.ID = id
-	if e.cfg.URL != "" {
-		dist.LatestURL = e.cfg.URL
+	url := e.cfg.URL
+	if url == "" {
+		url = "https://grype.anchore.io/databases"
+	}
+	client, err := dbdist.New(url, 0)
+	if err != nil {
+		return nil, nil, err
 	}
 	inst := v6inst.DefaultConfig(id)
 	inst.DBRootDir = e.cfg.DBDir
@@ -92,7 +103,24 @@ func (e *Engine) grypeLoad(update bool) (vulnerability.Provider, *vulnerability.
 	if e.cfg.MaxAge > 0 {
 		inst.MaxAllowedBuiltAge = e.cfg.MaxAge
 	}
-	return grype.LoadVulnerabilityDB(dist, inst, update)
+	cur, err := v6inst.NewCurator(inst, client)
+	if err != nil {
+		return nil, nil, fmt.Errorf("DB curator: %w", err)
+	}
+	if update {
+		if _, err := cur.Update(); err != nil {
+			e.log.WithError(err).Warn("vulnerability database update failed; using the installed one if any")
+		}
+	}
+	st := cur.Status()
+	if st.Error != nil {
+		return nil, nil, st.Error
+	}
+	rdr, err := cur.Reader()
+	if err != nil {
+		return nil, nil, fmt.Errorf("DB reader: %w", err)
+	}
+	return v6.NewVulnerabilityProvider(rdr), &st, nil
 }
 
 // Run loads the database (downloading it if allowed and absent) and
@@ -100,7 +128,7 @@ func (e *Engine) grypeLoad(update bool) (vulnerability.Provider, *vulnerability.
 func (e *Engine) Run(ctx context.Context) {
 	interval := e.cfg.UpdateInterval
 	if interval <= 0 {
-		interval = 6 * time.Hour
+		interval = 12 * time.Hour
 	}
 	backoff := time.Minute
 	for {

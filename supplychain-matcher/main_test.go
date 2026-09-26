@@ -17,7 +17,7 @@ func TestLoadConfig(t *testing.T) {
 		t.Fatal(err)
 	}
 	if c.Listen != "127.0.0.1:8090" || c.Engine.DBDir != "/var/lib/grype" || c.Engine.URL != "https://grype.anchore.io/databases" ||
-		!c.Engine.AutoUpdate || c.Engine.UpdateInterval != 6*time.Hour || c.Engine.MaxAge != 120*time.Hour {
+		!c.Engine.AutoUpdate || c.Engine.UpdateInterval != 12*time.Hour || c.Engine.MaxAge != 120*time.Hour {
 		t.Errorf("defaults %+v", c)
 	}
 	c, err = loadConfig(envMap(map[string]string{"GRYPE_DB_URL": "https://mirror.internal/grype", "GRYPE_DB_AUTO_UPDATE": "false", "GRYPE_DB_MAX_AGE": "0"}))

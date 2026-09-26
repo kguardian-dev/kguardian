@@ -94,7 +94,7 @@ func loadConfig(getenv func(string) string) (config, error) {
 	if c.Engine.AutoUpdate, err = strconv.ParseBool(env(getenv, "GRYPE_DB_AUTO_UPDATE", "true")); err != nil {
 		return c, fmt.Errorf("GRYPE_DB_AUTO_UPDATE: %w", err)
 	}
-	if c.Engine.UpdateInterval, err = time.ParseDuration(env(getenv, "GRYPE_DB_UPDATE_INTERVAL", "6h")); err != nil || c.Engine.UpdateInterval <= 0 {
+	if c.Engine.UpdateInterval, err = time.ParseDuration(env(getenv, "GRYPE_DB_UPDATE_INTERVAL", "12h")); err != nil || c.Engine.UpdateInterval <= 0 {
 		return c, fmt.Errorf("GRYPE_DB_UPDATE_INTERVAL must be a positive duration")
 	}
 	if c.Engine.MaxAge, err = time.ParseDuration(env(getenv, "GRYPE_DB_MAX_AGE", "120h")); err != nil || c.Engine.MaxAge < 0 {
