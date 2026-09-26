@@ -47,13 +47,63 @@ type Guard struct {
 	allowLoopbackForTest bool
 }
 
-var cgnat = netip.MustParsePrefix("100.64.0.0/10")
+var (
+	cgnat = netip.MustParsePrefix("100.64.0.0/10")
+
+	// Always refused IPv4 ranges not covered by the netip predicates.
+	alwaysBlocked = []netip.Prefix{
+		netip.MustParsePrefix("0.0.0.0/8"),     // "this network"
+		netip.MustParsePrefix("198.18.0.0/15"), // benchmarking
+		netip.MustParsePrefix("240.0.0.0/4"),   // reserved, incl. 255.255.255.255
+	}
+
+	// IPv6 ranges that embed an IPv4 address a gateway may forward to.
+	nat64      = netip.MustParsePrefix("64:ff9b::/96")   // RFC 6052 well-known prefix
+	nat64Local = netip.MustParsePrefix("64:ff9b:1::/48") // RFC 8215 local-use
+	sixToFour  = netip.MustParsePrefix("2002::/16")      // 6to4: IPv4 in bits 16-47
+	v4Compat   = netip.MustParsePrefix("::/96")          // deprecated IPv4-compatible ::a.b.c.d
+)
+
+// embeddedIPv4 returns the IPv4 address carried inside a NAT64, 6to4 or
+// IPv4-compatible IPv6 address.
+func embeddedIPv4(ip netip.Addr) (netip.Addr, bool) {
+	if !ip.Is6() {
+		return netip.Addr{}, false
+	}
+	b := ip.As16()
+	switch {
+	case nat64.Contains(ip), nat64Local.Contains(ip), v4Compat.Contains(ip):
+		// The IPv4 address is the last 32 bits (for 64:ff9b:1::/48 this is
+		// the /96 embedding, the form NAT64 gateways use).
+		return netip.AddrFrom4([4]byte{b[12], b[13], b[14], b[15]}), true
+	case sixToFour.Contains(ip):
+		return netip.AddrFrom4([4]byte{b[2], b[3], b[4], b[5]}), true
+	}
+	return netip.Addr{}, false
+}
 
 // CheckIP classifies one resolved address. It returns nil when allowed.
+// An IPv6 address embedding an IPv4 one (NAT64, 6to4, IPv4-compatible) is
+// classified by that IPv4 address as well, so 64:ff9b::a9fe:a9fe is
+// refused as 169.254.169.254.
 func (g Guard) CheckIP(ip netip.Addr) error {
 	ip = ip.Unmap()
 	if g.allowLoopbackForTest && ip.IsLoopback() {
 		return nil
+	}
+	if v4, ok := embeddedIPv4(ip); ok {
+		if err := g.CheckIP(v4); err != nil {
+			var be *BlockedError
+			if errors.As(err, &be) {
+				return &BlockedError{Reason: be.Reason, Target: ip.String() + " (embeds " + v4.String() + ")"}
+			}
+			return err
+		}
+	}
+	for _, p := range alwaysBlocked {
+		if p.Contains(ip) {
+			return &BlockedError{Reason: ReasonBlockedAddress, Target: ip.String()}
+		}
 	}
 	switch {
 	case !ip.IsValid(),

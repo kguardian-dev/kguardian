@@ -186,3 +186,73 @@ func TestInspectSkipsRefusedRegistry(t *testing.T) {
 		t.Errorf("skipped enrich changed the image: %+v", img)
 	}
 }
+
+// Embedded IPv4 (NAT64, 6to4, IPv4-compatible) is classified by the IPv4
+// address it carries, and the extra IPv4 ranges are always refused.
+func TestGuardEmbeddedAndReservedRanges(t *testing.T) {
+	cases := []struct {
+		ip          string
+		strict, lan string // expected reason ("" = allowed) without / with AllowPrivate
+	}{
+		// NAT64 well-known prefix 64:ff9b::/96.
+		{"64:ff9b::a9fe:a9fe", ReasonBlockedAddress, ReasonBlockedAddress}, // 169.254.169.254
+		{"64:ff9b::7f00:1", ReasonBlockedAddress, ReasonBlockedAddress},    // 127.0.0.1
+		{"64:ff9b::a00:5", ReasonPrivateAddress, ""},                       // 10.0.0.5
+		{"64:ff9b::808:808", "", ""},                                       // 8.8.8.8
+		// NAT64 local-use 64:ff9b:1::/48.
+		{"64:ff9b:1::a9fe:a9fe", ReasonBlockedAddress, ReasonBlockedAddress},
+		{"64:ff9b:1::c0a8:101", ReasonPrivateAddress, ""}, // 192.168.1.1
+		// 6to4 2002::/16, IPv4 in bits 16-47.
+		{"2002:a9fe:a9fe::1", ReasonBlockedAddress, ReasonBlockedAddress},
+		{"2002:7f00:1::", ReasonBlockedAddress, ReasonBlockedAddress},
+		{"2002:ac10:0101::1", ReasonPrivateAddress, ""}, // 172.16.1.1
+		{"2002:808:808::1", "", ""},
+		// IPv4-compatible ::a.b.c.d.
+		{"::169.254.169.254", ReasonBlockedAddress, ReasonBlockedAddress},
+		{"::127.0.0.1", ReasonBlockedAddress, ReasonBlockedAddress},
+		{"::10.1.2.3", ReasonPrivateAddress, ""},
+		// Newly always-refused IPv4 ranges.
+		{"0.0.0.1", ReasonBlockedAddress, ReasonBlockedAddress},
+		{"0.255.255.255", ReasonBlockedAddress, ReasonBlockedAddress},
+		{"198.18.0.1", ReasonBlockedAddress, ReasonBlockedAddress},
+		{"198.19.255.254", ReasonBlockedAddress, ReasonBlockedAddress},
+		{"240.0.0.1", ReasonBlockedAddress, ReasonBlockedAddress},
+		{"255.255.255.255", ReasonBlockedAddress, ReasonBlockedAddress},
+		{"64:ff9b::c612:1", ReasonBlockedAddress, ReasonBlockedAddress}, // 198.18.0.1 via NAT64
+		{"64:ff9b::f000:1", ReasonBlockedAddress, ReasonBlockedAddress}, // 240.0.0.1 via NAT64
+		// Neighbours of the new ranges stay allowed.
+		{"198.17.255.255", "", ""},
+		{"198.20.0.1", "", ""},
+		{"239.255.255.255", ReasonBlockedAddress, ReasonBlockedAddress}, // multicast, already refused
+		{"1.0.0.1", "", ""},
+	}
+	for _, c := range cases {
+		for _, g := range []Guard{{}, {AllowPrivate: true}} {
+			want := c.strict
+			if g.AllowPrivate {
+				want = c.lan
+			}
+			err := g.CheckIP(netip.MustParseAddr(c.ip))
+			got := ""
+			if err != nil {
+				var be *BlockedError
+				if !errors.As(err, &be) {
+					t.Fatalf("%s: unexpected error type %v", c.ip, err)
+				}
+				got = be.Reason
+			}
+			if got != want {
+				t.Errorf("%s (allowPrivate=%v): got %q, want %q (%v)", c.ip, g.AllowPrivate, got, want, err)
+			}
+		}
+	}
+	// The error names both addresses.
+	err := Guard{}.CheckIP(netip.MustParseAddr("64:ff9b::a9fe:a9fe"))
+	if err == nil || !strings.Contains(err.Error(), "169.254.169.254") {
+		t.Errorf("error should name the embedded address: %v", err)
+	}
+	// Literal host names go through the same path.
+	if reason, _ := blockedReason(Guard{AllowPrivate: true}.CheckHost("[64:ff9b::a9fe:a9fe]")); reason != ReasonBlockedAddress {
+		t.Errorf("bracketed NAT64 literal host: %q", reason)
+	}
+}

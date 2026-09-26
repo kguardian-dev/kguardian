@@ -107,7 +107,8 @@ guard: the registry, the token realm it advertises, and every redirect.
 
 | Destination | Handling |
 |---|---|
-| Loopback, link-local (`169.254.0.0/16` incl. cloud metadata, `fe80::/10`), unspecified, multicast, `localhost` | Always refused. |
+| Loopback, link-local (`169.254.0.0/16` incl. cloud metadata, `fe80::/10`), unspecified, multicast, `0.0.0.0/8`, `198.18.0.0/15` (benchmarking), `240.0.0.0/4` (reserved, incl. broadcast), `localhost` | Always refused. |
+| NAT64 (`64:ff9b::/96`, `64:ff9b:1::/48`), 6to4 (`2002::/16`), IPv4-compatible (`::a.b.c.d`) | Classified by the IPv4 address they embed, so `64:ff9b::a9fe:a9fe` is refused as `169.254.169.254`. |
 | RFC1918, CGNAT `100.64.0.0/10`, ULA `fc00::/7`, `*.local`, single-label names | Refused unless `supplychain.registryLookup.allowPrivateRegistries=true` (`REGISTRY_ALLOW_PRIVATE`), e.g. for a homelab LAN registry. |
 
 - The host name is checked on every request.
