@@ -241,7 +241,7 @@ export const UNTRUSTED_NOTE =
 
 /** What the model is told about reading a profile; attached to every result. */
 export const PROFILE_NOTE =
-  "null means unknown (no data, or the source is not configured) and is never safe or passing; readiness ok:null means kguardian cannot tell. Status is a tier from findings (ok|warn|risk|unknown); there is no numeric score. posture.status covers only known dimensions, so always report posture.coverage and unknownDimensions with it. A podSecurity level of restricted is an upper bound, not confirmed. Any recommendation is a suggestion for a human to review and apply; kguardian never applies it. " +
+  "null means unknown (no data, or the source is not configured) and is never safe or passing; readiness ok:null means kguardian cannot tell. Status is a tier from findings (ok|warn|risk|unknown); there is no numeric score. posture.status is ok only when all four core dimensions are known and ok; with any unknown dimension it is the worst known warn/risk, else unknown. Always report posture.coverage and unknownDimensions with it. images is unknown until vulnerability data exists; its digests, crash loops and pull failures are inventory facts, not a verdict. A podSecurity level of restricted is an upper bound, not confirmed. Any recommendation is a suggestion for a human to review and apply; kguardian never applies it. " +
   UNTRUSTED_NOTE;
 
 /** Trim GET /workloads/{ns}/{kind}/{name}/profile for the model. */

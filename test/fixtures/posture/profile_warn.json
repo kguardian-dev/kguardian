@@ -14,20 +14,21 @@
       "truncated": false
     }
   },
-  "generatedAt": "2026-09-26T02:08:14.461854146Z",
+  "generatedAt": "2026-09-26T02:22:31.682767636Z",
   "contentHash": "fnv1a64:4c1d1714495b7cb8",
   "version": {
     "revision": 4,
     "contentHash": "fnv1a64:4c1d1714495b7cb8",
-    "createdAt": "2026-09-26T02:07:55.676169Z"
+    "createdAt": "2026-09-26T02:21:21.027754Z"
   },
   "snapshotPending": false,
   "posture": {
     "status": "warn",
-    "coverage": 0.5,
+    "coverage": 0.25,
     "unknownDimensions": [
       "network",
-      "podSecurity"
+      "podSecurity",
+      "images"
     ],
     "reasons": [
       {
@@ -44,6 +45,11 @@
         "dimension": "podSecurity",
         "status": "unknown",
         "message": "Every evaluated check passes restricted, but 9 checks cannot be seen (e.g. hostPath), so restricted is not confirmed"
+      },
+      {
+        "dimension": "images",
+        "status": "unknown",
+        "message": "1 running digest(s) across 2 container(s); vulnerability data not configured"
       }
     ]
   },
@@ -164,7 +170,7 @@
       "coverage": {
         "level": "full",
         "fraction": null,
-        "observedSince": "2026-09-20T02:04:20.433265Z",
+        "observedSince": "2026-09-20T02:17:01.229165Z",
         "note": "Flows from the workload's pod(s) (2 live)"
       },
       "reasons": [
@@ -204,8 +210,8 @@
             "ip": "10.42.1.17"
           },
           "flows": 1,
-          "firstSeen": "2026-09-20T02:04:20.433265Z",
-          "lastSeen": "2026-09-20T02:04:20.433265Z"
+          "firstSeen": "2026-09-20T02:17:01.229165Z",
+          "lastSeen": "2026-09-20T02:17:01.229165Z"
         },
         {
           "direction": "egress",
@@ -220,8 +226,8 @@
             "ip": "198.51.100.20"
           },
           "flows": 1,
-          "firstSeen": "2026-09-26T02:05:51.671065Z",
-          "lastSeen": "2026-09-26T02:05:51.671065Z"
+          "firstSeen": "2026-09-26T02:19:11.295906Z",
+          "lastSeen": "2026-09-26T02:19:11.295906Z"
         },
         {
           "direction": "egress",
@@ -236,8 +242,8 @@
             "ip": "203.0.113.10"
           },
           "flows": 1,
-          "firstSeen": "2026-09-21T02:04:20.433265Z",
-          "lastSeen": "2026-09-21T02:04:20.433265Z"
+          "firstSeen": "2026-09-21T02:17:01.229165Z",
+          "lastSeen": "2026-09-21T02:17:01.229165Z"
         },
         {
           "direction": "egress",
@@ -252,8 +258,8 @@
             "ip": "10.42.1.31"
           },
           "flows": 1,
-          "firstSeen": "2026-09-21T02:04:20.433265Z",
-          "lastSeen": "2026-09-21T02:04:20.433265Z"
+          "firstSeen": "2026-09-21T02:17:01.229165Z",
+          "lastSeen": "2026-09-21T02:17:01.229165Z"
         }
       ],
       "truncated": false,
@@ -276,6 +282,10 @@
           "message": "No SeccompProfile CR references this workload"
         },
         {
+          "code": "denials_unknown",
+          "message": "Denial capture is not reporting for this workload's nodes, so an absence of denials cannot be confirmed"
+        },
+        {
           "code": "capture_incomplete",
           "message": "Capture level medium on 1 pod(s); the observed set may be missing syscalls"
         }
@@ -286,7 +296,7 @@
         "architectures": [
           "SCMP_ARCH_X86_64"
         ],
-        "updatedAt": "2026-09-26T02:04:20.427864Z"
+        "updatedAt": "2026-09-26T02:17:01.224138Z"
       },
       "capture": {
         "level": "medium",
@@ -294,18 +304,14 @@
         "incompletePods": 1
       },
       "cr": null,
-      "denials": {
-        "total": 0,
-        "syscalls": [],
-        "lastSeen": null
-      }
+      "denials": null
     },
     "podSecurity": {
       "status": "unknown",
       "coverage": {
         "level": "partial",
         "fraction": 0.5,
-        "observedSince": "2026-09-20T02:04:20.423047Z",
+        "observedSince": "2026-09-20T02:17:01.219542Z",
         "note": "9 of 18 PSS checks evaluated; volumes, ports, probes, AppArmor, SELinux, procMount, sysctls and hostProcess are not ingested"
       },
       "reasons": [
@@ -393,17 +399,17 @@
       "staleContainers": []
     },
     "images": {
-      "status": "ok",
+      "status": "unknown",
       "coverage": {
-        "level": "full",
+        "level": "partial",
         "fraction": null,
-        "observedSince": "2026-09-20T02:04:20.423047Z",
-        "note": "running window 900 s"
+        "observedSince": "2026-09-20T02:17:01.219542Z",
+        "note": "inventory only (running window 900 s); no vulnerability data"
       },
       "reasons": [
         {
           "code": "vulnerabilities_not_configured",
-          "message": "No vulnerability source is configured; images are inventoried but not assessed for vulnerabilities"
+          "message": "1 running digest(s) across 2 container(s); vulnerability data not configured"
         }
       ],
       "runningWindowSeconds": 900,
@@ -421,8 +427,8 @@
               "stateReason": null,
               "ranAsInit": false,
               "lastPodName": "checkout-7d9f8b6c5-2xkqp",
-              "firstSeen": "2026-09-20T02:04:20.423047Z",
-              "lastSeen": "2026-09-26T02:04:20.418264Z"
+              "firstSeen": "2026-09-20T02:17:01.219542Z",
+              "lastSeen": "2026-09-26T02:17:01.214278Z"
             }
           ],
           "previous": []
@@ -441,8 +447,8 @@
               "stateReason": "Completed",
               "ranAsInit": true,
               "lastPodName": "checkout-7d9f8b6c5-2xkqp",
-              "firstSeen": "2026-09-20T02:04:20.423047Z",
-              "lastSeen": "2026-09-26T02:04:20.418264Z"
+              "firstSeen": "2026-09-20T02:17:01.219542Z",
+              "lastSeen": "2026-09-26T02:17:01.214278Z"
             }
           ]
         }
@@ -456,7 +462,7 @@
       "coverage": {
         "level": "full",
         "fraction": null,
-        "observedSince": "2026-09-26T02:04:20.439121Z",
+        "observedSince": "2026-09-26T02:17:01.234427Z",
         "note": "1 container(s) reporting"
       },
       "reasons": [
@@ -477,7 +483,7 @@
           "memWorkingSetBytes": 98566144,
           "oomKills": 0,
           "throttledRatio": 0.02,
-          "updatedAt": "2026-09-26T02:04:20.439121Z"
+          "updatedAt": "2026-09-26T02:17:01.234427Z"
         }
       ],
       "truncated": false

@@ -13,20 +13,21 @@
       "truncated": false
     }
   },
-  "generatedAt": "2026-09-26T02:08:14.530028086Z",
+  "generatedAt": "2026-09-26T02:22:31.757736030Z",
   "contentHash": "fnv1a64:0c616b9c268b2efb",
   "version": {
     "revision": 1,
     "contentHash": "fnv1a64:0c616b9c268b2efb",
-    "createdAt": "2026-09-26T02:04:33.864051Z"
+    "createdAt": "2026-09-26T02:18:02.852024Z"
   },
   "snapshotPending": false,
   "posture": {
     "status": "warn",
-    "coverage": 0.5,
+    "coverage": 0.25,
     "unknownDimensions": [
       "network",
-      "podSecurity"
+      "podSecurity",
+      "images"
     ],
     "reasons": [
       {
@@ -46,8 +47,8 @@
       },
       {
         "dimension": "images",
-        "status": "warn",
-        "message": "Container ledger is in CrashLoopBackOff"
+        "status": "unknown",
+        "message": "2 running digest(s) across 1 container(s); vulnerability data not configured"
       }
     ]
   },
@@ -168,7 +169,7 @@
       "coverage": {
         "level": "full",
         "fraction": null,
-        "observedSince": "2026-09-21T02:04:20.433265Z",
+        "observedSince": "2026-09-21T02:17:01.229165Z",
         "note": "Flows from the workload's pod(s) (1 live)"
       },
       "reasons": [
@@ -205,8 +206,8 @@
             "ip": "10.42.1.12"
           },
           "flows": 1,
-          "firstSeen": "2026-09-21T02:04:20.433265Z",
-          "lastSeen": "2026-09-21T02:04:20.433265Z"
+          "firstSeen": "2026-09-21T02:17:01.229165Z",
+          "lastSeen": "2026-09-21T02:17:01.229165Z"
         }
       ],
       "truncated": false,
@@ -227,6 +228,10 @@
         {
           "code": "cr_audit",
           "message": "SeccompProfile ledger only logs (SCMP_ACT_LOG)"
+        },
+        {
+          "code": "denials_unknown",
+          "message": "Denial capture is not reporting for this workload's nodes, so an absence of denials cannot be confirmed"
         }
       ],
       "observed": {
@@ -235,7 +240,7 @@
         "architectures": [
           "SCMP_ARCH_X86_64"
         ],
-        "updatedAt": "2026-09-26T02:04:20.427864Z"
+        "updatedAt": "2026-09-26T02:17:01.224138Z"
       },
       "capture": {
         "level": "full",
@@ -256,18 +261,14 @@
           "state": "Pending"
         }
       },
-      "denials": {
-        "total": 0,
-        "syscalls": [],
-        "lastSeen": null
-      }
+      "denials": null
     },
     "podSecurity": {
       "status": "unknown",
       "coverage": {
         "level": "partial",
         "fraction": 0.5,
-        "observedSince": "2026-09-20T02:04:20.423047Z",
+        "observedSince": "2026-09-20T02:17:01.219542Z",
         "note": "9 of 18 PSS checks evaluated; volumes, ports, probes, AppArmor, SELinux, procMount, sysctls and hostProcess are not ingested"
       },
       "reasons": [
@@ -340,22 +341,22 @@
           "name": "legacy-proxy",
           "kind": "regular",
           "digest": "sha256:6c3d99e26c3d99e26c3d99e26c3d99e26c3d99e26c3d99e26c3d99e26c3d99e2",
-          "lastSeen": "2026-09-24T02:04:20.420873Z"
+          "lastSeen": "2026-09-24T02:17:01.217147Z"
         }
       ]
     },
     "images": {
-      "status": "warn",
+      "status": "unknown",
       "coverage": {
-        "level": "full",
+        "level": "partial",
         "fraction": null,
-        "observedSince": "2026-09-06T02:04:20.420873Z",
-        "note": "running window 900 s"
+        "observedSince": "2026-09-06T02:17:01.217147Z",
+        "note": "inventory only (running window 900 s); no vulnerability data"
       },
       "reasons": [
         {
           "code": "vulnerabilities_not_configured",
-          "message": "No vulnerability source is configured; images are inventoried but not assessed for vulnerabilities"
+          "message": "2 running digest(s) across 1 container(s); vulnerability data not configured"
         }
       ],
       "runningWindowSeconds": 900,
@@ -373,8 +374,8 @@
               "stateReason": null,
               "ranAsInit": false,
               "lastPodName": "ledger-5b7c9d8f6-q8wzn",
-              "firstSeen": "2026-09-20T02:04:20.423047Z",
-              "lastSeen": "2026-09-26T02:04:20.418264Z"
+              "firstSeen": "2026-09-20T02:17:01.219542Z",
+              "lastSeen": "2026-09-26T02:17:01.214278Z"
             },
             {
               "digest": "sha256:5b2c88d15b2c88d15b2c88d15b2c88d15b2c88d15b2c88d15b2c88d15b2c88d1",
@@ -383,8 +384,8 @@
               "stateReason": "CrashLoopBackOff",
               "ranAsInit": false,
               "lastPodName": "ledger-5b7c9d8f6-q8wzn",
-              "firstSeen": "2026-09-20T02:04:20.423047Z",
-              "lastSeen": "2026-09-26T02:04:20.418264Z"
+              "firstSeen": "2026-09-20T02:17:01.219542Z",
+              "lastSeen": "2026-09-26T02:17:01.214278Z"
             }
           ],
           "previous": []
@@ -403,8 +404,8 @@
               "stateReason": null,
               "ranAsInit": false,
               "lastPodName": "ledger-5b7c9d8f6-old01",
-              "firstSeen": "2026-09-06T02:04:20.420873Z",
-              "lastSeen": "2026-09-24T02:04:20.420873Z"
+              "firstSeen": "2026-09-06T02:17:01.217147Z",
+              "lastSeen": "2026-09-24T02:17:01.217147Z"
             }
           ]
         }

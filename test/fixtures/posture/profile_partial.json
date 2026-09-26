@@ -13,25 +13,31 @@
       "truncated": false
     }
   },
-  "generatedAt": "2026-09-26T02:08:14.392864131Z",
+  "generatedAt": "2026-09-26T02:22:31.618006102Z",
   "contentHash": "fnv1a64:5ba183ed9b98a6fa",
   "version": {
     "revision": 1,
     "contentHash": "fnv1a64:5ba183ed9b98a6fa",
-    "createdAt": "2026-09-26T02:04:33.831153Z"
+    "createdAt": "2026-09-26T02:18:02.820047Z"
   },
   "snapshotPending": false,
   "posture": {
-    "status": "ok",
-    "coverage": 0.75,
+    "status": "unknown",
+    "coverage": 0.5,
     "unknownDimensions": [
-      "podSecurity"
+      "podSecurity",
+      "images"
     ],
     "reasons": [
       {
         "dimension": "podSecurity",
         "status": "unknown",
         "message": "Every evaluated check passes restricted, but 9 checks cannot be seen (e.g. hostPath), so restricted is not confirmed"
+      },
+      {
+        "dimension": "images",
+        "status": "unknown",
+        "message": "1 running digest(s) across 1 container(s); vulnerability data not configured"
       }
     ]
   },
@@ -96,7 +102,7 @@
       "coverage": {
         "level": "full",
         "fraction": null,
-        "observedSince": "2026-09-20T02:04:20.433265Z",
+        "observedSince": "2026-09-20T02:17:01.229165Z",
         "note": "Flows from the workload's pod(s) (1 live)"
       },
       "reasons": [
@@ -135,8 +141,8 @@
             "ip": "10.42.2.5"
           },
           "flows": 1,
-          "firstSeen": "2026-09-20T02:04:20.433265Z",
-          "lastSeen": "2026-09-20T02:04:20.433265Z"
+          "firstSeen": "2026-09-20T02:17:01.229165Z",
+          "lastSeen": "2026-09-20T02:17:01.229165Z"
         },
         {
           "direction": "egress",
@@ -151,8 +157,8 @@
             "ip": "10.43.0.10"
           },
           "flows": 1,
-          "firstSeen": "2026-09-20T02:04:20.433265Z",
-          "lastSeen": "2026-09-20T02:04:20.433265Z"
+          "firstSeen": "2026-09-20T02:17:01.229165Z",
+          "lastSeen": "2026-09-20T02:17:01.229165Z"
         }
       ],
       "truncated": false,
@@ -166,7 +172,7 @@
           ],
           "allow": 1,
           "wouldDeny": 0,
-          "lastVerdictAt": "2026-09-26T01:04:20.436282Z",
+          "lastVerdictAt": "2026-09-26T01:17:01.231848Z",
           "windowHours": 24
         },
         "enforced": null
@@ -180,14 +186,19 @@
         "observedSince": null,
         "note": "capture level full"
       },
-      "reasons": [],
+      "reasons": [
+        {
+          "code": "denials_unknown",
+          "message": "Denial capture is not reporting for this workload's nodes, so an absence of denials cannot be confirmed"
+        }
+      ],
       "observed": {
         "syscallCount": 5,
         "hash": "5c1f0e2d3a4b5c6d",
         "architectures": [
           "SCMP_ARCH_X86_64"
         ],
-        "updatedAt": "2026-09-26T02:04:20.427864Z"
+        "updatedAt": "2026-09-26T02:17:01.224138Z"
       },
       "capture": {
         "level": "full",
@@ -208,18 +219,14 @@
           "state": "Pending"
         }
       },
-      "denials": {
-        "total": 0,
-        "syscalls": [],
-        "lastSeen": null
-      }
+      "denials": null
     },
     "podSecurity": {
       "status": "unknown",
       "coverage": {
         "level": "partial",
         "fraction": 0.5,
-        "observedSince": "2026-09-20T02:04:20.423047Z",
+        "observedSince": "2026-09-20T02:17:01.219542Z",
         "note": "9 of 18 PSS checks evaluated; volumes, ports, probes, AppArmor, SELinux, procMount, sysctls and hostProcess are not ingested"
       },
       "reasons": [
@@ -286,17 +293,17 @@
       "staleContainers": []
     },
     "images": {
-      "status": "ok",
+      "status": "unknown",
       "coverage": {
-        "level": "full",
+        "level": "partial",
         "fraction": null,
-        "observedSince": "2026-09-20T02:04:20.423047Z",
-        "note": "running window 900 s"
+        "observedSince": "2026-09-20T02:17:01.219542Z",
+        "note": "inventory only (running window 900 s); no vulnerability data"
       },
       "reasons": [
         {
           "code": "vulnerabilities_not_configured",
-          "message": "No vulnerability source is configured; images are inventoried but not assessed for vulnerabilities"
+          "message": "1 running digest(s) across 1 container(s); vulnerability data not configured"
         }
       ],
       "runningWindowSeconds": 900,
@@ -314,8 +321,8 @@
               "stateReason": null,
               "ranAsInit": false,
               "lastPodName": "source-controller-6d9f7c8b5-k2lqz",
-              "firstSeen": "2026-09-20T02:04:20.423047Z",
-              "lastSeen": "2026-09-26T02:04:20.418264Z"
+              "firstSeen": "2026-09-20T02:17:01.219542Z",
+              "lastSeen": "2026-09-26T02:17:01.214278Z"
             }
           ],
           "previous": []
@@ -330,7 +337,7 @@
       "coverage": {
         "level": "full",
         "fraction": null,
-        "observedSince": "2026-09-26T02:04:20.439121Z",
+        "observedSince": "2026-09-26T02:17:01.234427Z",
         "note": "1 container(s) reporting"
       },
       "reasons": [],
@@ -346,7 +353,7 @@
           "memWorkingSetBytes": 67108864,
           "oomKills": 0,
           "throttledRatio": 0.0,
-          "updatedAt": "2026-09-26T02:04:20.439121Z"
+          "updatedAt": "2026-09-26T02:17:01.234427Z"
         }
       ],
       "truncated": false

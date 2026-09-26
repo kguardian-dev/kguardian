@@ -13,19 +13,20 @@
       "truncated": false
     }
   },
-  "generatedAt": "2026-09-26T02:08:14.594545579Z",
+  "generatedAt": "2026-09-26T02:22:31.817902679Z",
   "contentHash": "fnv1a64:8bf410a491511788",
   "version": {
     "revision": 1,
     "contentHash": "fnv1a64:8bf410a491511788",
-    "createdAt": "2026-09-26T02:04:33.838691Z"
+    "createdAt": "2026-09-26T02:18:02.826768Z"
   },
   "snapshotPending": false,
   "posture": {
     "status": "risk",
-    "coverage": 0.75,
+    "coverage": 0.5,
     "unknownDimensions": [
-      "syscalls"
+      "syscalls",
+      "images"
     ],
     "reasons": [
       {
@@ -42,6 +43,11 @@
         "dimension": "podSecurity",
         "status": "risk",
         "message": "Privileged under PSS: pod spec fail(s) a baseline check"
+      },
+      {
+        "dimension": "images",
+        "status": "unknown",
+        "message": "1 running digest(s) across 1 container(s); vulnerability data not configured"
       }
     ]
   },
@@ -207,7 +213,7 @@
       "coverage": {
         "level": "full",
         "fraction": null,
-        "observedSince": "2026-09-23T02:04:20.433265Z",
+        "observedSince": "2026-09-23T02:17:01.229165Z",
         "note": "Flows from the workload's pod(s) (1 live)"
       },
       "reasons": [],
@@ -241,8 +247,8 @@
             "ip": "10.42.2.5"
           },
           "flows": 1,
-          "firstSeen": "2026-09-23T02:04:20.433265Z",
-          "lastSeen": "2026-09-23T02:04:20.433265Z"
+          "firstSeen": "2026-09-23T02:17:01.229165Z",
+          "lastSeen": "2026-09-23T02:17:01.229165Z"
         },
         {
           "direction": "egress",
@@ -257,8 +263,8 @@
             "ip": "198.51.100.7"
           },
           "flows": 1,
-          "firstSeen": "2026-09-26T00:04:20.433265Z",
-          "lastSeen": "2026-09-26T00:04:20.433265Z"
+          "firstSeen": "2026-09-26T00:17:01.229165Z",
+          "lastSeen": "2026-09-26T00:17:01.229165Z"
         }
       ],
       "truncated": false,
@@ -272,7 +278,7 @@
           ],
           "allow": 1,
           "wouldDeny": 1,
-          "lastVerdictAt": "2026-09-26T01:04:20.436282Z",
+          "lastVerdictAt": "2026-09-26T01:17:01.231848Z",
           "windowHours": 24
         },
         "enforced": null
@@ -302,7 +308,7 @@
       "coverage": {
         "level": "partial",
         "fraction": 0.5,
-        "observedSince": "2026-09-20T02:04:20.423047Z",
+        "observedSince": "2026-09-20T02:17:01.219542Z",
         "note": "9 of 18 PSS checks evaluated; volumes, ports, probes, AppArmor, SELinux, procMount, sysctls and hostProcess are not ingested"
       },
       "reasons": [
@@ -415,17 +421,17 @@
       "staleContainers": []
     },
     "images": {
-      "status": "ok",
+      "status": "unknown",
       "coverage": {
-        "level": "full",
+        "level": "partial",
         "fraction": null,
-        "observedSince": "2026-09-20T02:04:20.423047Z",
-        "note": "running window 900 s"
+        "observedSince": "2026-09-20T02:17:01.219542Z",
+        "note": "inventory only (running window 900 s); no vulnerability data"
       },
       "reasons": [
         {
           "code": "vulnerabilities_not_configured",
-          "message": "No vulnerability source is configured; images are inventoried but not assessed for vulnerabilities"
+          "message": "1 running digest(s) across 1 container(s); vulnerability data not configured"
         }
       ],
       "runningWindowSeconds": 900,
@@ -443,8 +449,8 @@
               "stateReason": null,
               "ranAsInit": false,
               "lastPodName": "node-exporter-x7k2p",
-              "firstSeen": "2026-09-20T02:04:20.423047Z",
-              "lastSeen": "2026-09-26T02:04:20.418264Z"
+              "firstSeen": "2026-09-20T02:17:01.219542Z",
+              "lastSeen": "2026-09-26T02:17:01.214278Z"
             }
           ],
           "previous": []

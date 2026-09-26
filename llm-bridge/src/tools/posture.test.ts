@@ -203,8 +203,9 @@ function assertNullsPreserved(got: unknown, broker: unknown, pathSoFar = "") {
 const PROFILE_PATH = "/workloads/payments/Deployment/checkout/profile";
 
 // Real broker output (contract v1.2 captures from the profile API PR):
-// ok, warn, risk, unknown and a stale-sidecar workload.
-const REAL_PROFILES = ["profile_ok", "profile_warn", "profile_risk", "profile_unknown", "profile_stale"];
+// partial (known dimensions ok, posture unknown), warn, init-container
+// failing restricted, risk, unknown and a stale-sidecar workload.
+const REAL_PROFILES = ["profile_partial", "profile_warn", "profile_init_fails", "profile_risk", "profile_unknown", "profile_stale"];
 
 for (const name of REAL_PROFILES) {
   test(`get_workload_security_profile: ${name} keeps every documented field, invents nothing, keeps nulls`, async () => {
@@ -229,6 +230,18 @@ for (const name of REAL_PROFILES) {
     assert.match(got.note, /no numeric score/);
   });
 }
+
+test("get_workload_security_profile: contract v1.3 - known-ok dimensions with unknowns leave posture unknown; images unknown without vulnerability data", async () => {
+  const body = fixture("profile_partial.json") as Record<string, any>;
+  routes["/workloads/flux-system/Deployment/source-controller/profile"] = { status: 200, body };
+  const got = JSON.parse((await executeInProcessTool("get_workload_security_profile", { namespace: "flux-system", kind: "Deployment", name: "source-controller" })).text);
+  assert.equal(got.dimensions.network.status, "ok");
+  assert.equal(got.dimensions.syscalls.status, "ok");
+  assert.equal(got.posture.status, "unknown", "posture is never ok while a core dimension is unknown");
+  assert.equal(got.dimensions.images.status, "unknown");
+  assert.match(got.dimensions.images.reasons[0].message, /vulnerability data not configured/);
+  assert.match(got.note, /ok only when all four core dimensions are known and ok/);
+});
 
 test("get_workload_security_profile: the restricted upper bound stays unknown with readiness ok:null", async () => {
   routes[PROFILE_PATH] = { status: 200, body: fixture("profile_warn.json") };
