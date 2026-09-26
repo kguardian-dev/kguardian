@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   ShieldAlert,
   ShieldCheck,
@@ -9,17 +9,23 @@ import {
   ChevronRight,
   Cpu,
   ExternalLink,
+  Lock,
 } from 'lucide-react';
 import type { PodNodeData, AuditVerdict } from '../types';
 import type { ComputeFinding, ComputeFindingKind, ComputeFindingsMeta } from '../types/compute';
 import { findingAction, type FindingKind } from '../utils/findingPolicyType';
 import { COMPUTE_KIND_LABEL, blameShareLabel, culpritUsageLabel, formatMillicores } from '../utils/compute';
 import api from '../services/api';
+import { useSeccompProfiles } from '../hooks/useSeccompProfiles';
+import type { WorkloadProfileSummary } from '../types/seccompWorkload';
+import { crStatus } from '../utils/seccompCapture';
+import { SEVERITY_BADGE_CLASS, SEVERITY_RANK, SEVERITY_TEXT_CLASS, type Severity as SharedSeverity } from '../utils/severity';
 import { Button } from './ui/Button';
 import { EmptyState } from './ui/EmptyState';
 import { Skeleton } from './ui/Skeleton';
+import { StatStrip, StatTile, type StatTileProps } from './ui/StatTile';
 
-interface FindingsViewProps {
+interface RisksViewProps {
   pods: PodNodeData[];
   namespace: string;
   onSelectPod: (pod: PodNodeData) => void;
@@ -34,9 +40,16 @@ interface FindingsViewProps {
   computeMeta?: ComputeFindingsMeta;
   /** "View workload" for a `resources` finding: jump to the pod on the map. */
   onViewWorkload?: (namespace: string, podName: string) => void;
+  /** Seccomp profile rows (cluster-wide); feeds the posture strip's
+   *  "Seccomp enforcing" tile. Omitted → the tile is not shown. */
+  seccompProfiles?: WorkloadProfileSummary[];
+  /** Posture tile click-through into the Workloads coverage view. */
+  onOpenWorkloads?: (control?: 'seccomp') => void;
 }
 
-type Severity = 'critical' | 'high' | 'medium';
+/** Sensitive-syscall and compute findings use the upper three steps of the
+ *  shared scale (utils/severity); nothing here is ranked `low`. */
+type Severity = Extract<SharedSeverity, 'critical' | 'high' | 'medium'>;
 
 /**
  * Syscalls that are meaningful runtime-security signals — container-escape,
@@ -74,13 +87,7 @@ const DANGEROUS_SYSCALLS: Record<string, Severity> = {
   mknod: 'medium',
 };
 
-const SEVERITY_RANK: Record<Severity, number> = { critical: 3, high: 2, medium: 1 };
-
-const SEVERITY_CLASS: Record<Severity, string> = {
-  critical: 'bg-hubble-error/15 text-hubble-error border-hubble-error/30',
-  high: 'bg-hubble-warning/15 text-hubble-warning border-hubble-warning/30',
-  medium: 'bg-hubble-accent/15 text-hubble-accent border-hubble-accent/30',
-};
+const SEVERITY_CLASS = SEVERITY_BADGE_CLASS;
 
 // A workload reaching this many distinct destinations on egress is a fan-out
 // worth surfacing (data exfil / peer-to-peer / crypto). Not an alarm — a signal.
@@ -113,7 +120,7 @@ function podLabel(pod: PodNodeData): string {
  * would-deny summary pulled from the audit evaluator. No invented scores: each
  * section is a concrete, explainable signal that links back into the map.
  */
-export function FindingsView({
+export function RisksView({
   pods,
   namespace,
   onSelectPod,
@@ -123,7 +130,9 @@ export function FindingsView({
   computeEnabled = false,
   computeMeta,
   onViewWorkload,
-}: FindingsViewProps) {
+  seccompProfiles,
+  onOpenWorkloads,
+}: RisksViewProps) {
   const workloads = useMemo(() => pods.filter((p) => !p.isExternal), [pods]);
 
   // Compute findings (design D7) come from the broker, already ranked by
@@ -162,7 +171,9 @@ export function FindingsView({
         (pod.syscalls ?? []).forEach((record) => {
           record.syscalls.split(',').forEach((raw) => {
             const name = raw.trim();
-            const severity = DANGEROUS_SYSCALLS[name];
+            // Own keys only: a syscall string is external data, and
+            // "constructor" must not resolve to Object.prototype's.
+            const severity = Object.hasOwn(DANGEROUS_SYSCALLS, name) ? DANGEROUS_SYSCALLS[name] : undefined;
             if (severity) seen.set(name, severity);
           });
         });
@@ -232,10 +243,19 @@ export function FindingsView({
   const totalDrops = dropFindings.reduce((sum, f) => sum + f.drops, 0);
   const findingCount = dropFindings.length + syscallFindings.length + fanoutFindings.length + computeFindings.length;
 
-  const stats = [
+  // Posture: how many of this namespace's profiled workloads have an
+  // enforcing SeccompProfile CR. Counted from the broker's profile list, so a
+  // workload with no syscalls reported yet is not in the denominator.
+  const seccompPosture = useMemo(() => {
+    if (!seccompProfiles) return null;
+    const inNs = seccompProfiles.filter((p) => p.namespace === namespace);
+    return { enforcing: inNs.filter((p) => crStatus(p) === 'enforcing').length, total: inNs.length };
+  }, [seccompProfiles, namespace]);
+
+  const stats: StatTileProps[] = [
     { label: 'Workloads', value: workloads.length, icon: ShieldCheck, tone: 'text-hubble-accent' },
     { label: 'Blocked connections', value: totalDrops, icon: ShieldAlert, tone: totalDrops > 0 ? 'text-hubble-error' : 'text-secondary' },
-    { label: 'Sensitive syscalls', value: syscallFindings.length, icon: Terminal, tone: syscallFindings.length > 0 ? 'text-hubble-warning' : 'text-secondary' },
+    { label: 'Sensitive syscalls', value: syscallFindings.length, icon: Terminal, tone: syscallFindings.length > 0 ? SEVERITY_TEXT_CLASS[syscallFindings[0].worst] : 'text-secondary' },
     { label: 'Egress fan-out', value: fanoutFindings.length, icon: Radar, tone: fanoutFindings.length > 0 ? 'text-hubble-warning' : 'text-secondary' },
     ...(computeEnabled
       ? [{
@@ -244,7 +264,18 @@ export function FindingsView({
           label: computeMeta?.historyDisabled ? 'Compute (history off)' : 'Compute',
           value: computeFindings.length,
           icon: Cpu,
-          tone: computeWorst === 'critical' ? 'text-hubble-error' : computeFindings.length > 0 ? 'text-hubble-warning' : 'text-secondary',
+          tone: computeWorst ? SEVERITY_TEXT_CLASS[computeWorst] : 'text-secondary',
+        }]
+      : []),
+    ...(seccompPosture
+      ? [{
+          label: 'Seccomp enforcing',
+          value: seccompPosture.enforcing,
+          suffix: `/${seccompPosture.total}`,
+          icon: Lock,
+          tone: seccompPosture.total > 0 && seccompPosture.enforcing === seccompPosture.total ? 'text-state-enforcing' : 'text-secondary',
+          title: `Workloads in ${namespace} whose SeccompProfile CR blocks unlisted syscalls, out of those with a profile`,
+          onClick: onOpenWorkloads ? () => onOpenWorkloads('seccomp') : undefined,
         }]
       : []),
   ];
@@ -254,28 +285,17 @@ export function FindingsView({
       <div className="mx-auto max-w-5xl px-6 py-6 space-y-6">
         {/* Header */}
         <div>
-          <h2 className="text-base font-semibold text-primary">Findings</h2>
+          <h2 className="text-base font-semibold text-primary">Risks</h2>
           <p className="text-xs text-tertiary mt-0.5">
             Prioritized runtime-security signals for namespace{' '}
             <span className="text-secondary font-mono">{namespace}</span>. Each links back into the map.
           </p>
         </div>
 
-        {/* Stat row */}
-        <div className={`grid grid-cols-2 sm:grid-cols-4 gap-3 ${stats.length === 5 ? 'lg:grid-cols-5' : ''}`}>
-          {stats.map((s) => {
-            const Icon = s.icon;
-            return (
-              <div key={s.label} className="rounded-surface border border-hubble-border bg-hubble-card px-4 py-3">
-                <div className="flex items-center gap-2 text-tertiary text-[11px] uppercase tracking-wide">
-                  <Icon className={`w-3.5 h-3.5 ${s.tone}`} />
-                  {s.label}
-                </div>
-                <div className={`mt-1 text-2xl font-semibold font-mono tabular-nums ${s.tone}`}>{s.value}</div>
-              </div>
-            );
-          })}
-        </div>
+        {/* Posture strip */}
+        <StatStrip count={stats.length} label="Posture">
+          {stats.map((s) => <StatTile key={s.label} {...s} />)}
+        </StatStrip>
 
         {findingCount === 0 && !auditLoading && topWouldDeny.length === 0 ? (
           <div className="rounded-surface border border-hubble-border bg-hubble-card">
@@ -372,7 +392,7 @@ export function FindingsView({
             {computeFindings.length > 0 && (
               <Section
                 icon={Cpu}
-                tone={computeWorst === 'critical' ? 'text-hubble-error' : 'text-hubble-warning'}
+                tone={computeWorst ? SEVERITY_TEXT_CLASS[computeWorst] : 'text-secondary'}
                 title="Compute contention"
                 hint="Pods starved of CPU or memory, and the pod on the same node starving them. Fix is the workload's resources, not a policy"
                 action={
@@ -490,6 +510,24 @@ export function FindingsView({
       </div>
     </div>
   );
+}
+
+/**
+ * Risks as routed: RisksView plus the seccomp profile list its posture strip
+ * reads. Kept out of RisksView so the view stays a pure props-in component.
+ * A failed profile fetch hides the tile rather than showing a false 0/0.
+ */
+export function RisksRoute({ refreshTick = 0, ...props }: Omit<RisksViewProps, 'seccompProfiles'> & { refreshTick?: number }) {
+  const { profiles, error, loading, refresh } = useSeccompProfiles();
+  // Reload the posture tile's data on the header Refresh (skip the mount).
+  const seenTick = useRef(refreshTick);
+  useEffect(() => {
+    if (seenTick.current === refreshTick) return;
+    seenTick.current = refreshTick;
+    void refresh();
+  }, [refreshTick, refresh]);
+  const available = !loading && !(error && profiles.length === 0);
+  return <RisksView {...props} seccompProfiles={available ? profiles : undefined} />;
 }
 
 function Section({

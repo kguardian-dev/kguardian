@@ -1,10 +1,40 @@
 package api
 
 import (
+	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 )
+
+// TestBrokerGet_AuthRejectionIsAnError pins the fix for the silent-demotion
+// bug: getRealPodSpec reads any non-200 as "no such pod" and returns nil, nil,
+// so a 401 from a broker with auth enabled used to turn every peer into an
+// unknown IP. A 401/403 must surface as an error from every caller instead.
+func TestBrokerGet_AuthRejectionIsAnError(t *testing.T) {
+	for _, status := range []int{http.StatusUnauthorized, http.StatusForbidden} {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(status)
+		}))
+
+		origURL, origTok := BrokerBaseURL, BrokerAuthToken
+		BrokerBaseURL = srv.URL
+		BrokerAuthToken = ""
+
+		detail, err := getRealPodSpec("10.0.0.1")
+		var authErr *BrokerAuthError
+		if !errors.As(err, &authErr) || authErr.Status != status {
+			t.Errorf("status %d: want *BrokerAuthError, got detail=%v err=%v", status, detail, err)
+		}
+		if err != nil && !strings.Contains(err.Error(), "KGUARDIAN_BROKER_TOKEN") {
+			t.Errorf("status %d: error must tell the operator how to fix it: %v", status, err)
+		}
+
+		BrokerBaseURL, BrokerAuthToken = origURL, origTok
+		srv.Close()
+	}
+}
 
 // TestBrokerGet_EscapesPathAndForwardsAuth verifies the two hardening fixes on
 // the broker client used by `advisor serve`:

@@ -364,11 +364,26 @@ async fn process_pod(
     if should_process_pod(&pod.metadata.namespace, excluded_namespaces) {
         crate::early_capture::note_known_pod(pod);
     }
-    if let Some(con_ids) = pod_unready(pod) {
-        // Computed once here so the broker payload and the eBPF
-        // registration can never disagree about a pod's tier.
-        let capture_level = effective_capture_level(pod, cluster_capture_level);
-        let pod_ip = update_pods_details(pod, node_name, client, capture_level).await;
+    // Computed once here so the broker payload and the eBPF
+    // registration can never disagree about a pod's tier.
+    let capture_level = effective_capture_level(pod, cluster_capture_level);
+    // Every live, non-terminal pod is posted, READY OR NOT. The readiness
+    // gate below used to wrap this post too, which meant a pod that never
+    // became Ready (CrashLoopBackOff, a failing readiness probe) was never
+    // re-posted: its row, and its image inventory, went stale while the
+    // pod was very much running — exactly the workloads security triage
+    // needs to see. That gate dates from the first commit, where it
+    // guarded the container-ID unwraps the netns registration needs; the
+    // post only sat under it because it came first in the same block.
+    // Nothing downstream relied on it: a pod that turns unready AFTER
+    // being posted has always kept its row. See `post_plan`.
+    let plan = post_plan(pod);
+    let pod_ip = if plan.post_details {
+        update_pods_details(pod, node_name, client, capture_level).await
+    } else {
+        Ok(None)
+    };
+    if let Some(con_ids) = plan.register_container_ids {
         if let Ok(Some(pod_ip)) = pod_ip {
             match ignore_map_action(pod, &pod_ip, ignore_daemonset_traffic, excluded_namespaces) {
                 IgnoreMapAction::Ignore(ips) => {
@@ -586,6 +601,28 @@ pub fn parse_lenient_bool(s: &str, default: bool) -> bool {
     }
 }
 
+/// What `process_pod` does for a live (non-terminal) pod.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct PostPlan {
+    /// Post `/pod/spec` (pod details + image inventory). Always true for
+    /// a pod that reaches `post_plan`: readiness does not gate it.
+    pub post_details: bool,
+    /// Container IDs to register the pod's netns / cgroups from; `None`
+    /// while the pod is not Ready or its containers have no IDs yet.
+    /// Registration stays readiness-gated: it inspects containers by ID
+    /// through containerd, and that is what the gate was written for.
+    pub register_container_ids: Option<Vec<String>>,
+}
+
+/// Split the two decisions the readiness gate used to make together.
+/// Callers have already dropped terminal / deleting pods.
+pub(crate) fn post_plan(pod: &Pod) -> PostPlan {
+    PostPlan {
+        post_details: true,
+        register_container_ids: pod_unready(pod),
+    }
+}
+
 fn pod_unready(p: &Pod) -> Option<Vec<String>> {
     let status = p.status.as_ref()?;
     if let Some(conds) = &status.conditions {
@@ -698,6 +735,11 @@ async fn update_pods_details(
             workload_name,
             capture_level: Some(capture_level.as_str().to_string()),
             host_network: is_host_network(pod),
+            // Typed image identity + securityContext subset. The
+            // broker's compaction drops spec/status from pod_obj, so
+            // this is the only path by which image digests survive.
+            containers: Some(crate::image_inventory::pod_containers(pod)),
+            pod_security: Some(crate::image_inventory::pod_security(pod)),
         };
 
         if let Err(e) = api_post_call(json!(z), "pod/spec").await {
@@ -2578,6 +2620,63 @@ mod tests {
         assert_eq!(
             pod_unready(&pod_with_status(st)),
             Some(vec!["ok-1".to_string(), "ok-2".to_string()])
+        );
+    }
+
+    #[test]
+    fn crashlooping_pod_is_posted_but_not_registered() {
+        // CrashLoopBackOff: Ready=False, the pod holds its IP, and its
+        // container has an ID and an imageID from a previous run. It must
+        // still be re-posted (so its image inventory stays running), but
+        // netns registration stays readiness-gated as before.
+        let p = Pod {
+            metadata: kube::api::ObjectMeta {
+                name: Some("web-1".into()),
+                namespace: Some("prod".into()),
+                ..Default::default()
+            },
+            status: Some(PodStatus {
+                phase: Some("Running".into()),
+                pod_ip: Some("10.0.0.5".into()),
+                conditions: Some(vec![PodCondition {
+                    type_: "Ready".into(),
+                    status: "False".into(),
+                    reason: Some("ContainersNotReady".into()),
+                    // The kubelet always sets this message; pod_unready
+                    // only treats a Ready=False condition WITH a message
+                    // as unready.
+                    message: Some("containers with unready status: [app]".into()),
+                    ..Default::default()
+                }]),
+                container_statuses: Some(vec![ContainerStatus {
+                    name: "app".into(),
+                    container_id: Some("containerd://abc".into()),
+                    image_id: "docker.io/library/nginx@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".into(),
+                    ..Default::default()
+                }]),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        assert!(crate::pod_reconciler::pod_holds_an_ip(&p));
+        assert_eq!(
+            post_plan(&p),
+            PostPlan {
+                post_details: true,
+                register_container_ids: None,
+            }
+        );
+
+        // Once Ready, both happen.
+        let mut ready = p.clone();
+        ready.status.as_mut().unwrap().conditions = Some(vec![PodCondition {
+            type_: "Ready".into(),
+            status: "True".into(),
+            ..Default::default()
+        }]);
+        assert_eq!(
+            post_plan(&ready).register_container_ids,
+            Some(vec!["containerd://abc".to_string()])
         );
     }
 

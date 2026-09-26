@@ -36,6 +36,15 @@ test('parses query params after the view', () => {
   expect(loc.params).toEqual({ ns: 'prod', pod: 'web-1' });
 });
 
+test('a __proto__ query key is an own param, not a prototype assignment', () => {
+  setHash('#/map?__proto__=x&constructor=y&ns=prod');
+  const { params } = renderHook(() => useHashLocation()).result.current.loc;
+  expect(Object.getPrototypeOf(params)).toBe(Object.prototype);
+  expect(Object.hasOwn(params, '__proto__')).toBe(true);
+  expect(params.constructor).toBe('y');
+  expect(params.ns).toBe('prod');
+});
+
 test('decodes percent-encoded param values', () => {
   // Namespaces and pod names reach the hash through encodeURIComponent; a
   // value that survives the round trip as literal %2F would not match any pod.

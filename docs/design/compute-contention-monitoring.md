@@ -102,7 +102,7 @@ at `ebac67a04`):
 - **The graph is not live.** `usePodData` fetches on namespace change and on
   the refresh button. The only poll is `useSeccompProfiles.ts:42`.
 - Findings are computed client-side from already-fetched data
-  (`FindingsView.tsx`); `FindingKind` in `utils/findingPolicyType.ts:5` maps
+  (`RisksView.tsx`, formerly `FindingsView.tsx`); `FindingKind` in `utils/findingPolicyType.ts:5` maps
   every kind to a policy type.
 
 ### Chart / llm-bridge
@@ -442,7 +442,7 @@ refresh; nothing else in `usePodData` changes. Node rendering:
   pod: per container rows with requests / limits / usage / throttle / PSI /
   p99 and the blame list.
 
-The Findings view gains the five kinds with the existing `FindingRow`, and a
+The Risks view (formerly Findings) gains the five kinds with the existing `FindingRow`, and a
 node-level filter.
 
 ### D9 — Gauges ship on by default; the scheduler probe ships off until measured

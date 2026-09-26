@@ -49,6 +49,13 @@ spec:
           env:
             - name: VITE_API_URL
               value: "http://{{ .Values.broker.service.name }}.{{ include "kguardian.namespace" . }}.svc.cluster.local:{{ .Values.broker.container.port }}"
+            # Read token for the /api proxy. The frontend server adds the
+            # header to each proxied request; the browser never sees it.
+            # In shared mode the only token also grants ingest, so the
+            # frontend gets it only when explicitly allowed.
+            {{- if or (eq (include "kguardian.brokerAuthMode" $) "scoped") .Values.frontend.brokerAuth.allowSharedToken }}
+            {{- include "kguardian.brokerAuthClientEnv" (dict "root" $ "scope" "read") | nindent 12 }}
+            {{- end }}
             {{- if include "kguardian.llmBridgeEnabled" . }}
             - name: VITE_LLM_BRIDGE_URL
               value: "http://{{ .Values.llmBridge.service.name }}.{{ include "kguardian.namespace" . }}.svc.cluster.local:{{ .Values.llmBridge.service.port }}"

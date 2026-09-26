@@ -1,5 +1,84 @@
 # Upgrading the kguardian Helm chart
 
+## `pod_traffic` is now pruned for departed pods
+
+Until now nothing ever deleted a `pod_traffic` row. The broker now prunes
+rows older than `broker.traffic.retention.days` (default 14) whose pod no
+longer exists: marked dead, gone from `pod_details`, or an earlier pod
+that held the same name (a recreated StatefulSet pod). Rows of running
+pods are kept however old, because a running pod reports each flow only
+once and would never re-record a pruned one.
+
+Two things still bound a running pod:
+
+- **Superseded rows.** A running pod's row older than `days` is deleted
+  when a newer row of the same pod has the same direction, protocol,
+  port, decision and in-cluster peer (same peer workload, or the same
+  pod/Service name when it has no owner). The newer row keeps the rule.
+  This is what stops a pod called by a CronJob from gaining a row per
+  run. Only `pod` and `service` peers qualify: a `node` peer is rendered
+  as an `ipBlock` for its own IP, and a row with no stored peer identity
+  has nothing to match on.
+- **An opt-in per-pod cap**, `broker.traffic.retention.maxRowsPerPod`
+  (default `0`, off). Over it, the pod's oldest rows with no peer
+  identity (external clients, scanners, unresolved or pre-#1447 rows) are
+  deleted regardless of age, and the broker logs a warning naming the
+  pod. Rows naming an in-cluster peer are never deleted by the cap.
+
+The upgrade adds a partial index, `idx_pod_traffic_supersede`, built at
+broker startup. As with earlier `pod_traffic` index migrations, ingest
+waits for the build; on a table of a few million rows that takes seconds.
+
+**After upgrading the broker:**
+
+1. The first passes work through the backlog, oldest first, 5 000 rows
+   examined per statement and at most 200 statements per hourly pass. A
+   pass that stops at that cap hands its position to the next one, so a
+   large backlog drains over a few hours rather than in one burst. Watch
+   for `pod_traffic retention pruned` in the broker log.
+2. Deleted rows free space inside Postgres for reuse; the files on disk do
+   not shrink. Run `VACUUM FULL pod_traffic` in a maintenance window if
+   you need the disk back.
+3. If you generate policies for CronJobs that run less often than every
+   seven days, raise `broker.traffic.retention.days` to at least twice
+   their period, or set it to `0` to keep the old unbounded behaviour.
+
+## Broker auth now uses scoped tokens, and it works end to end
+
+Before this release, `broker.auth.enabled=true` couldn't be used. The
+controller's pod reconciler and node-facts reporter sent no token, so
+pods were never marked dead and node facts were never stored. The
+frontend's `/api` proxy also sent none, so the UI got `401` on every
+call, and the CLI had no way to supply a token. The one shared token
+could also do everything, so any component holding it could write rows.
+
+Tokens are now scoped (`read`, `ingest`, `supplychain`, `admin`), every
+route declares the scope it requires, and each component mounts only
+its own key from one Secret. Nothing changes if auth is off (the default).
+
+**If you had `broker.auth.enabled=true`:** the default is now
+`broker.auth.mode: scoped`, which reads the Secret keys `read` and
+`ingest` (plus `supplychain` and `admin` if present). Pick one:
+
+1. Scoped, recommended. Add the keys:
+   ```bash
+   kubectl -n <ns> patch secret <existingSecret> --type merge -p \
+     "{\"stringData\":{\"read\":\"$(openssl rand -hex 32)\",\"ingest\":\"$(openssl rand -hex 32)\"}}"
+   ```
+2. Keep the old single token: set `broker.auth.mode: shared`. That token
+   grants `read` + `ingest`, so the frontend no longer gets it unless
+   you also set `frontend.brokerAuth.allowSharedToken: true`. Without
+   that, the UI gets `401`.
+
+With auth on, anyone who can reach the frontend Service can read the
+broker's data through it. Put SSO in front of it or restrict it with a
+NetworkPolicy.
+
+Without one of these, the pods stay in `CreateContainerConfigError`
+because the `read` key is missing. That's deliberate: a missing scope
+never falls back to "open". The CLI now reads its token from
+`KGUARDIAN_BROKER_TOKEN` or `--broker-token-file`.
+
 ## Peer identity is now fixed when a flow is ingested
 
 `pod_traffic` rows used to store only the peer's IP. The Network Map, the

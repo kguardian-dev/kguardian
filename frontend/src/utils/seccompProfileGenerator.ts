@@ -122,7 +122,7 @@ export function profileToJSON(profile: SeccompProfile): string {
  * (security-profiles-operator.x-k8s.io/v1beta1). This is NOT the raw seccomp
  * JSON the kubelet loads from disk (see profileToJSON) — it needs the SPO
  * installed to reconcile into a node file. kguardian's own distribution path
- * (publish from the Seccomp Profiles view) needs no operator.
+ * (publish from the Workloads view, Seccomp columns) needs no operator.
  */
 export function profileToYAML(profile: SeccompProfile, resourceName: string, namespace: string): string {
   const yaml: string[] = [];

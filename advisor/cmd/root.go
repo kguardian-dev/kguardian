@@ -2,9 +2,12 @@ package cmd
 
 import (
 	"context"
+	"fmt"
 	"os"
+	"strings"
 	"time"
 
+	"github.com/kguardian-dev/kguardian/advisor/pkg/api"
 	"github.com/kguardian-dev/kguardian/advisor/pkg/k8s"
 	"github.com/rs/zerolog"
 	log "github.com/rs/zerolog/log"
@@ -17,7 +20,33 @@ var (
 	debug           bool // To store the value of the --debug flag
 	brokerNamespace string
 	brokerService   string
+	brokerTokenFile string
 )
+
+// resolveBrokerToken returns the bearer token the CLI presents to the broker:
+// the contents of --broker-token-file when given, else $KGUARDIAN_BROKER_TOKEN,
+// else $BROKER_AUTH_TOKEN, else "" (no header, for a broker without auth).
+// There is deliberately no flag taking the token itself: argv is visible to
+// every user on the machine through ps.
+func resolveBrokerToken(file string, getenv func(string) string, readFile func(string) ([]byte, error)) (string, error) {
+	if file != "" {
+		b, err := readFile(file)
+		if err != nil {
+			return "", fmt.Errorf("--broker-token-file: %w", err)
+		}
+		tok := strings.TrimSpace(string(b))
+		if tok == "" {
+			return "", fmt.Errorf("--broker-token-file %s is empty", file)
+		}
+		return tok, nil
+	}
+	for _, key := range []string{"KGUARDIAN_BROKER_TOKEN", "BROKER_AUTH_TOKEN"} {
+		if tok := strings.TrimSpace(getenv(key)); tok != "" {
+			return tok, nil
+		}
+	}
+	return "", nil
+}
 
 func init() {
 	// Set up logging to console with consistent full timestamp format
@@ -40,6 +69,7 @@ func init() {
 	// Add broker override flags
 	rootCmd.PersistentFlags().StringVar(&brokerNamespace, "broker-namespace", "", "Namespace where the kguardian broker is installed (default \"kguardian\")")
 	rootCmd.PersistentFlags().StringVar(&brokerService, "broker-service", "", "Name of the kguardian broker service (default \"broker\")")
+	rootCmd.PersistentFlags().StringVar(&brokerTokenFile, "broker-token-file", "", "File holding the broker read token, for a broker with auth enabled (default: $KGUARDIAN_BROKER_TOKEN, then $BROKER_AUTH_TOKEN)")
 
 	// Add version flag to rootCmd
 	rootCmd.Flags().BoolP("version", "v", false, "print version information and exit")
@@ -55,6 +85,12 @@ func init() {
 		if debug {
 			zerolog.SetGlobalLevel(zerolog.DebugLevel)
 		}
+
+		token, err := resolveBrokerToken(brokerTokenFile, os.Getenv, os.ReadFile)
+		if err != nil {
+			log.Fatal().Err(err).Msg("Error reading the broker token")
+		}
+		api.BrokerAuthToken = token
 
 		// Initialize Kubernetes config and logging
 		config, err := k8s.NewConfig(kubeConfigFlags)

@@ -2,7 +2,7 @@ import type { PolicyType } from '../hooks/policyEditor/usePolicyExport';
 import { recommendedPolicyType } from './cniPolicySupport';
 import type { ComputeFindingKind } from '../types/compute';
 
-/** The kinds of finding the Findings view surfaces per workload. */
+/** The kinds of finding the Risks view surfaces per workload. */
 export type FindingKind =
   | 'denied-traffic'
   | 'sensitive-syscalls'

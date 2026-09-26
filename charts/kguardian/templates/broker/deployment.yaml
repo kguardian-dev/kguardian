@@ -1,3 +1,5 @@
+{{- /* Refuses to render supply-chain components against an open broker. */ -}}
+{{- include "kguardian.supplychainAuthGuard" . }}
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -94,7 +96,7 @@ spec:
             - name: LISTEN_ADDR
               value: "0.0.0.0:{{ .Values.broker.container.port }}"
             {{- end }}
-            {{- include "kguardian.brokerAuthEnv" . | nindent 12 }}
+            {{- include "kguardian.brokerAuthServerEnv" . | nindent 12 }}
             {{- if .Values.evaluator.enabled }}
             - name: EVALUATOR_URL
               value: "http://{{ .Values.evaluator.service.name }}.{{ include "kguardian.namespace" . | trim }}.svc.cluster.local:{{ .Values.evaluator.service.port }}"
@@ -120,6 +122,30 @@ spec:
             {{- if hasKey .Values.broker.audit.retention "batchSize" }}
             - name: AUDIT_VERDICTS_RETENTION_BATCH_SIZE
               value: {{ .Values.broker.audit.retention.batchSize | quote }}
+            {{- end }}
+            {{/*
+              pod_traffic retention (values.yaml `broker.traffic.retention`).
+              Same hasKey reasoning as AUDIT_VERDICTS_RETENTION_DAYS above:
+              0 is the documented "disable retention" value. The dict
+              defaults keep an old values file without the block rendering.
+            */}}
+            {{- $traffic := .Values.broker.traffic | default dict }}
+            {{- $trafficRetention := $traffic.retention | default dict }}
+            {{- if hasKey $trafficRetention "days" }}
+            - name: POD_TRAFFIC_RETENTION_DAYS
+              value: {{ $trafficRetention.days | quote }}
+            {{- end }}
+            {{- if hasKey $trafficRetention "intervalSeconds" }}
+            - name: POD_TRAFFIC_RETENTION_INTERVAL_SECS
+              value: {{ $trafficRetention.intervalSeconds | quote }}
+            {{- end }}
+            {{- if hasKey $trafficRetention "batchSize" }}
+            - name: POD_TRAFFIC_RETENTION_BATCH_SIZE
+              value: {{ $trafficRetention.batchSize | quote }}
+            {{- end }}
+            {{- if hasKey $trafficRetention "maxRowsPerPod" }}
+            - name: POD_TRAFFIC_MAX_ROWS_PER_POD
+              value: {{ $trafficRetention.maxRowsPerPod | quote }}
             {{- end }}
             {{/*
               seccomp_denials retention (values.yaml `broker.seccomp.denials.retention`).
@@ -163,6 +189,31 @@ spec:
             {{- if hasKey $seccomp "profilesCacheTtlSeconds" }}
             - name: SECCOMP_PROFILES_CACHE_TTL_SECS
               value: {{ $seccomp.profilesCacheTtlSeconds | quote }}
+            {{- end }}
+            {{/*
+              Image inventory retention (values.yaml
+              `broker.imageInventory.retention`). Same hasKey reasoning as
+              AUDIT_VERDICTS_RETENTION_DAYS: 0 is the documented "disable"
+              value and `with` would drop it. The dict defaults keep an old
+              values file without the block rendering.
+            */}}
+            {{- $inventory := .Values.broker.imageInventory | default dict }}
+            {{- $inventoryRetention := $inventory.retention | default dict }}
+            {{- if hasKey $inventory "runningWindowSeconds" }}
+            - name: IMAGE_INVENTORY_RUNNING_WINDOW_SECS
+              value: {{ $inventory.runningWindowSeconds | quote }}
+            {{- end }}
+            {{- if hasKey $inventoryRetention "days" }}
+            - name: IMAGE_INVENTORY_RETENTION_DAYS
+              value: {{ $inventoryRetention.days | quote }}
+            {{- end }}
+            {{- if hasKey $inventoryRetention "intervalSeconds" }}
+            - name: IMAGE_INVENTORY_RETENTION_INTERVAL_SECS
+              value: {{ $inventoryRetention.intervalSeconds | quote }}
+            {{- end }}
+            {{- if hasKey $inventoryRetention "batchSize" }}
+            - name: IMAGE_INVENTORY_RETENTION_BATCH_SIZE
+              value: {{ $inventoryRetention.batchSize | quote }}
             {{- end }}
             {{- if hasKey .Values.broker.audit "inflightPermits" }}
             - name: AUDIT_INFLIGHT_PERMITS

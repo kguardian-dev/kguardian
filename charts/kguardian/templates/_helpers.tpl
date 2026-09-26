@@ -134,21 +134,130 @@ external case so the in-cluster URL stays identical to prior releases.
 {{- end -}}
 
 {{/*
-Optional BROKER_AUTH_TOKEN env entry. Emits nothing unless
-broker.auth.enabled. The token lives in a Secret the operator provides
-(broker.auth.existingSecret) — we deliberately do not generate one in the
-template so it stays stable across upgrades. Include with the right
-nindent per consumer (broker/mcp env are indented 12, controller 10).
-Usage: {{- include "kguardian.brokerAuthEnv" . | nindent 12 }}
+Broker auth mode, validated. "scoped" (default): one Secret with a key per
+scope (broker.auth.keys.*), each client mounts only the key it needs.
+"shared": the pre-scopes single token (broker.auth.secretKey) that every
+component presents and that grants read + ingest.
 */}}
-{{- define "kguardian.brokerAuthEnv" -}}
+{{- define "kguardian.brokerAuthMode" -}}
+{{- $mode := .Values.broker.auth.mode | default "scoped" -}}
+{{- if not (has $mode (list "scoped" "shared")) -}}
+{{- fail (printf "broker.auth.mode must be \"scoped\" or \"shared\", got %q" $mode) -}}
+{{- end -}}
+{{- $mode -}}
+{{- end -}}
+
+{{- define "kguardian.brokerAuthSecret" -}}
+{{- required "broker.auth.existingSecret is required when broker.auth.enabled=true. Create one with a key per scope:\n  kubectl -n <ns> create secret generic kguardian-broker-auth --from-literal=read=\"$(openssl rand -hex 32)\" --from-literal=ingest=\"$(openssl rand -hex 32)\"\nand set broker.auth.existingSecret=kguardian-broker-auth." .Values.broker.auth.existingSecret -}}
+{{- end -}}
+
+{{/*
+True when some component that WRITES supply-chain data (vulnerability
+reports, attestations) is enabled. Keyed on .Values.supplychain.enabled,
+which may not exist yet; a missing block reads as false.
+*/}}
+{{- define "kguardian.supplychainEnabled" -}}
+{{- $sc := .Values.supplychain | default dict -}}
+{{- if and (kindIs "map" $sc) $sc.enabled -}}true{{- end -}}
+{{- end -}}
+
+{{/*
+Guard: supply-chain components must never run against an open broker. A
+vulnerability inventory is a target list, and an unauthenticated broker
+would let any pod post a forged "clean" scan result. Fails at template time.
+*/}}
+{{- define "kguardian.supplychainAuthGuard" -}}
+{{- if and (include "kguardian.supplychainEnabled" .) (not .Values.broker.auth.enabled) -}}
+{{- fail "supplychain.enabled=true requires broker.auth.enabled=true: the supply-chain endpoints expose every known vulnerability in the cluster and accept scan results, so they are never served without authentication. Create the token Secret (keys read, ingest, supplychain) and set broker.auth.enabled=true and broker.auth.existingSecret. See docs: Broker authentication." -}}
+{{- end -}}
+{{- if and (include "kguardian.supplychainEnabled" .) (eq (include "kguardian.brokerAuthMode" .) "shared") -}}
+{{- fail "supplychain.enabled=true requires broker.auth.mode=scoped: in shared mode every component holds the same token, so any of them could post supply-chain results. Add a supplychain key to the auth Secret and use scoped mode." -}}
+{{- end -}}
+{{- end -}}
+
+{{/*
+Broker-side token env. Emits nothing unless broker.auth.enabled.
+scoped: BROKER_TOKEN_<SCOPE> per key. read and ingest are required keys
+(the pod will not start without them, which is the point: a typo must not
+silently leave a scope open). supplychain is required only when a
+supply-chain component is enabled; admin is always optional.
+shared: BROKER_AUTH_TOKEN from broker.auth.secretKey.
+Usage: {{- include "kguardian.brokerAuthServerEnv" . | nindent 12 }}
+*/}}
+{{- define "kguardian.brokerAuthServerEnv" -}}
 {{- if .Values.broker.auth.enabled -}}
+{{- $secret := include "kguardian.brokerAuthSecret" . -}}
+{{- if eq (include "kguardian.brokerAuthMode" .) "shared" -}}
 - name: BROKER_AUTH_TOKEN
   valueFrom:
     secretKeyRef:
-      name: {{ required "broker.auth.existingSecret is required when broker.auth.enabled=true" .Values.broker.auth.existingSecret }}
+      name: {{ $secret }}
       key: {{ .Values.broker.auth.secretKey }}
+{{- else -}}
+{{- $keys := .Values.broker.auth.keys -}}
+{{- $scEnabled := include "kguardian.supplychainEnabled" . -}}
+- name: BROKER_TOKEN_READ
+  valueFrom:
+    secretKeyRef:
+      name: {{ $secret }}
+      key: {{ $keys.read }}
+- name: BROKER_TOKEN_INGEST
+  valueFrom:
+    secretKeyRef:
+      name: {{ $secret }}
+      key: {{ $keys.ingest }}
+- name: BROKER_TOKEN_SUPPLYCHAIN
+  valueFrom:
+    secretKeyRef:
+      name: {{ $secret }}
+      key: {{ $keys.supplychain }}
+      {{- if not $scEnabled }}
+      optional: true
+      {{- end }}
+- name: BROKER_TOKEN_ADMIN
+  valueFrom:
+    secretKeyRef:
+      name: {{ $secret }}
+      key: {{ $keys.admin }}
+      optional: true
 {{- end -}}
+{{- end -}}
+{{- end -}}
+
+{{/*
+Client-side token env: BROKER_AUTH_TOKEN holding the one token this
+component presents. Emits nothing unless broker.auth.enabled.
+scope is one of read | ingest | supplychain.
+  controller  → ingest (also grants read: /pod/list, seccomp profiles)
+  frontend    → read   (injected server-side by the /api proxy)
+  llm-bridge  → read
+  supplychain → supplychain
+Usage: {{- include "kguardian.brokerAuthClientEnv" (dict "root" $ "scope" "read") | nindent 12 }}
+*/}}
+{{- define "kguardian.brokerAuthClientEnv" -}}
+{{- $root := .root -}}
+{{- if $root.Values.broker.auth.enabled -}}
+{{- if not (has .scope (list "read" "ingest" "supplychain")) -}}
+{{- fail (printf "kguardian.brokerAuthClientEnv: unknown scope %q" .scope) -}}
+{{- end -}}
+{{- $key := $root.Values.broker.auth.secretKey -}}
+{{- if eq (include "kguardian.brokerAuthMode" $root) "scoped" -}}
+{{- $key = index $root.Values.broker.auth.keys .scope -}}
+{{- end -}}
+- name: BROKER_AUTH_TOKEN
+  valueFrom:
+    secretKeyRef:
+      name: {{ include "kguardian.brokerAuthSecret" $root }}
+      key: {{ $key }}
+{{- end -}}
+{{- end -}}
+
+{{/*
+Deprecated alias kept so an out-of-tree template that still includes it
+renders; it now emits the least-privilege (read) client token.
+*/}}
+{{- define "kguardian.brokerAuthEnv" -}}
+{{- include "kguardian.brokerAuthClientEnv" (dict "root" . "scope" "read") -}}
 {{- end -}}
 
 {{/*

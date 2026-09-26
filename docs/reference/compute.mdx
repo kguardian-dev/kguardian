@@ -80,8 +80,8 @@ runs every 600 s), so a node that left the cluster drops out of
 
 All read endpoints return JSON and are metered by the broker's read budget.
 The two `POST`s are for the controller. When `broker.auth.enabled` is set,
-every broker endpoint — these included — requires the bearer token; the
-auth middleware is global, not per route.
+the `GET`s need a token with the `read` scope and the `POST`s need
+`ingest` (see [Authentication](/api-reference/introduction#authentication)).
 
 | Endpoint | Returns |
 |---|---|

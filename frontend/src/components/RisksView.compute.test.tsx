@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, expect, test, vi } from 'vitest';
 import { cleanup, fireEvent, render, screen } from '@testing-library/react';
-import { FindingsView } from './FindingsView';
+import { RisksView } from './RisksView';
 import api from '../services/api';
 import type { ComputeFinding } from '../types/compute';
 
@@ -25,8 +25,8 @@ const finding = (pod: string, nodeName: string): ComputeFinding => ({
   first_seen: 't', last_seen: 't', message: `${pod} is throttled`,
 });
 
-const view = (over: Partial<Parameters<typeof FindingsView>[0]> = {}) => (
-  <FindingsView
+const view = (over: Partial<Parameters<typeof RisksView>[0]> = {}) => (
+  <RisksView
     pods={[]}
     namespace="payments"
     onSelectPod={() => {}}

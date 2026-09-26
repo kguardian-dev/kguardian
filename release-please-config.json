@@ -10,7 +10,7 @@
       "package-name": "controller",
       "changelog-path": "CHANGELOG.md",
       "extra-files": [
-        "controller/VERSION"
+        "VERSION"
       ],
       "include-component-in-tag": true
     },
@@ -20,7 +20,7 @@
       "package-name": "broker",
       "changelog-path": "CHANGELOG.md",
       "extra-files": [
-        "broker/VERSION"
+        "VERSION"
       ],
       "include-component-in-tag": true
     },
@@ -30,7 +30,7 @@
       "package-name": "frontend",
       "changelog-path": "CHANGELOG.md",
       "extra-files": [
-        "frontend/VERSION"
+        "VERSION"
       ],
       "include-component-in-tag": true
     },
@@ -41,7 +41,7 @@
       "package-name": "advisor",
       "changelog-path": "CHANGELOG.md",
       "extra-files": [
-        "advisor/VERSION"
+        "VERSION"
       ],
       "include-component-in-tag": true
     },
@@ -65,7 +65,7 @@
       "package-name": "evaluator",
       "changelog-path": "CHANGELOG.md",
       "extra-files": [
-        "evaluator/VERSION"
+        "VERSION"
       ],
       "include-component-in-tag": true
     }

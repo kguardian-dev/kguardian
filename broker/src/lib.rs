@@ -1,14 +1,17 @@
 mod add;
 mod audit;
+pub mod auth;
 mod compute;
 mod compute_api;
 mod compute_types;
 mod error;
 mod get;
+mod image_inventory;
 mod ip;
 mod peer;
 mod read_budget;
 mod retention;
+pub mod routes;
 mod seccomp;
 mod seccomp_denial;
 mod seccomp_profiles_cache;
@@ -27,6 +30,7 @@ pub use compute_api::{
 };
 pub use compute_types::*;
 pub use error::*;
+pub use image_inventory::{get_image, get_images, get_workload_containers};
 pub use peer::spawn as spawn_peer_late_resolve;
 pub use read_budget::*;
 pub use retention::spawn as spawn_retention;

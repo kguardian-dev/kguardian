@@ -106,10 +106,90 @@ render "external-db" \
   assert_has     "external-db" "kguardian-broker"
 }
 
-# 5. Broker bearer-token auth must render given the required existingSecret.
-render "broker-auth" \
-  --set broker.auth.enabled=true --set broker.auth.existingSecret=kg-broker-token && {
-  assert_has "broker-auth" "kguardian-broker"
+# 5. Broker auth. Default (off): no token env anywhere, so a default install
+# is byte-for-byte what it was.
+render "broker-auth-off" && {
+  assert_absent "broker-auth-off" "BROKER_AUTH_TOKEN"
+  assert_absent "broker-auth-off" "BROKER_TOKEN_"
+}
+
+# workload <kind> <name> — the one rendered document of that kind and name.
+workload() {
+  awk -v k="kind: $1" -v n="  name: $2" 'BEGIN { RS = "\n---\n" }
+    index($0, k "\n") && index($0, "\n" n "\n") { print }' <<<"$OUT"
+}
+# assert_client_key <label> <kind> <name> <key> — the workload's
+# BROKER_AUTH_TOKEN comes from Secret key <key>.
+assert_client_key() {
+  local got
+  got="$(workload "$2" "$3" | { grep -A4 'name: BROKER_AUTH_TOKEN' || true; } | sed -n 's/^ *key: //p')"
+  [ "$got" = "$4" ] || { echo "FAIL [$1]: $2/$3 BROKER_AUTH_TOKEN key: want '$4', got '$got'"; fail=1; }
+}
+
+# 5a. Scoped auth (the default mode): each client mounts only its scope's key,
+# the broker gets one env per scope, and the optional scopes stay optional.
+render "broker-auth-scoped" \
+  --set broker.auth.enabled=true --set broker.auth.existingSecret=kg-broker-token \
+  --set llmBridge.enabled=true && {
+  assert_client_key "broker-auth-scoped" DaemonSet  kguardian-controller ingest
+  assert_client_key "broker-auth-scoped" Deployment kguardian-frontend   read
+  assert_client_key "broker-auth-scoped" Deployment kguardian-llm-bridge read
+  # Captured, not piped into grep -q: under pipefail an early-exiting grep
+  # SIGPIPEs awk and fails the pipeline at random.
+  broker_doc="$(workload Deployment kguardian-broker)"
+  for v in READ INGEST SUPPLYCHAIN ADMIN; do
+    grep -q "name: BROKER_TOKEN_$v" <<<"$broker_doc" || \
+      { echo "FAIL [broker-auth-scoped]: broker lacks BROKER_TOKEN_$v"; fail=1; }
+  done
+  grep -q 'name: BROKER_AUTH_TOKEN' <<<"$broker_doc" && \
+    { echo "FAIL [broker-auth-scoped]: broker must not get the legacy shared token"; fail=1; }
+  # read/ingest are required keys; supplychain/admin optional while unused.
+  [ "$(grep -c 'optional: true' <<<"$broker_doc")" = "2" ] || \
+    { echo "FAIL [broker-auth-scoped]: expected exactly 2 optional token keys"; fail=1; }
+}
+
+# 5b. Legacy shared mode: the same values file an operator used before
+# scopes (existingSecret + secretKey) still renders, with every component on
+# the one key.
+render "broker-auth-shared" \
+  --set broker.auth.enabled=true --set broker.auth.existingSecret=kg-broker-token \
+  --set broker.auth.mode=shared --set broker.auth.secretKey=token && {
+  assert_client_key "broker-auth-shared" DaemonSet  kguardian-controller token
+  assert_client_key "broker-auth-shared" Deployment kguardian-broker     token
+  assert_absent     "broker-auth-shared" "BROKER_TOKEN_"
+  # The shared token can write, so the frontend doesn't get it by default.
+  assert_client_key "broker-auth-shared" Deployment kguardian-frontend   ""
+}
+render "broker-auth-shared-frontend-optin" \
+  --set broker.auth.enabled=true --set broker.auth.existingSecret=kg-broker-token \
+  --set broker.auth.mode=shared --set frontend.brokerAuth.allowSharedToken=true && {
+  assert_client_key "broker-auth-shared-frontend-optin" Deployment kguardian-frontend token
+}
+
+# 5c. Custom key names are honoured.
+render "broker-auth-custom-keys" \
+  --set broker.auth.enabled=true --set broker.auth.existingSecret=kg \
+  --set broker.auth.keys.read=ui-token --set broker.auth.keys.ingest=node-token && {
+  assert_client_key "broker-auth-custom-keys" Deployment kguardian-frontend   ui-token
+  assert_client_key "broker-auth-custom-keys" DaemonSet  kguardian-controller node-token
+}
+
+# 5d. Guards.
+assert_render_fails "broker-auth-no-secret" "broker.auth.existingSecret is required" \
+  --set broker.auth.enabled=true
+assert_render_fails "broker-auth-bad-mode" "broker.auth.mode must be" \
+  --set broker.auth.enabled=true --set broker.auth.existingSecret=kg --set broker.auth.mode=open
+# Supply-chain data never ships from an open broker, nor with a shared token.
+assert_render_fails "supplychain-needs-auth" "supplychain.enabled=true requires broker.auth.enabled=true" \
+  --set supplychain.enabled=true
+assert_render_fails "supplychain-needs-scoped" "requires broker.auth.mode=scoped" \
+  --set supplychain.enabled=true --set broker.auth.enabled=true \
+  --set broker.auth.existingSecret=kg --set broker.auth.mode=shared
+render "supplychain-with-auth" \
+  --set supplychain.enabled=true --set broker.auth.enabled=true --set broker.auth.existingSecret=kg && {
+  # With a supply-chain component on, its key becomes required.
+  [ "$(workload Deployment kguardian-broker | grep -c 'optional: true')" = "1" ] || \
+    { echo "FAIL [supplychain-with-auth]: the supplychain key must be required"; fail=1; }
 }
 
 # ---------------------------------------------------------------------------
@@ -352,6 +432,28 @@ render "gitops-no-apipath" \
   assert_absent "gitops-no-apipath" "path: /api"
   assert_has    "gitops-no-apipath" "path: /"
 }
+
+# 10. Controller ClusterRole. Pods spawned by a CronJob are keyed on the
+# CronJob, which needs a get on the owning Job; without it the controller logs
+# "jobs.batch is forbidden" and keys every run on its throwaway Job name. The
+# grant is get only, and the role never gains secrets (charter D3), with or
+# without seccomp distribution.
+for dist in false true; do
+  label="clusterrole-distribute-$dist"
+  if ! OUT="$(helm template compat "$CHART" -s templates/clusterrole.yaml \
+      --set seccomp.distribute=$dist 2>/dev/null)"; then
+    echo "FAIL [$label]: ClusterRole did not render"; fail=1; continue
+  fi
+  # The batch rule: from its apiGroups line up to the next rule.
+  jobs_rule="$(awk '/^- apiGroups:/{inrule=/"batch"/} inrule' <<<"$OUT")"
+  grep -q 'resources: \["jobs"\]' <<<"$jobs_rule" || \
+    { echo "FAIL [$label]: expected a batch/jobs rule"; fail=1; }
+  verbs="$(grep -E '^ +- [a-z*]+$' <<<"$jobs_rule" | tr -d ' -' | tr '\n' ' ')"
+  [ "$verbs" = "get " ] || \
+    { echo "FAIL [$label]: batch/jobs must be get only, got: $verbs"; fail=1; }
+  assert_absent "$label" "cronjobs"
+  assert_absent "$label" "secrets"
+done
 
 if [ "$fail" -ne 0 ]; then
   echo "G4 values-compatibility check FAILED"

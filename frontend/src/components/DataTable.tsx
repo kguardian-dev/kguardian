@@ -1006,7 +1006,7 @@ const DataTable: React.FC<DataTableProps> = ({ selectedPod, allPodsLookup, servi
             <EmptyState
               icon={Activity}
               title="No syscalls recorded"
-              description="Syscall capture has not reported for this workload yet. Start a capture from the Seccomp Profiles view to collect them."
+              description="Syscall capture has not reported for this workload yet. Start a capture from the Workloads view (Seccomp) to collect them."
               compact
             />
           </div>

@@ -7,6 +7,8 @@ pub mod seccomp_distributor;
 pub mod syscall;
 
 pub mod error;
+/// Image identity + securityContext subset reported on `/pod/spec`.
+pub mod image_inventory;
 pub mod pod_reconciler;
 pub mod pod_watcher;
 pub mod service_watcher;

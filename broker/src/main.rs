@@ -4,22 +4,14 @@ use actix_cors::Cors;
 use actix_web::middleware::from_fn;
 use actix_web::{get, web, App, HttpResponse, HttpServer};
 use api::{
-    add_node_facts, add_pod_details, add_pods_batch, add_pods_syscalls, add_svc_details,
-    compute_ingest_scope, delete_seccomp_cr, establish_connection, export_seccomp_profile,
-    export_seccomp_profile_post, get_audit_verdicts, get_cluster_environment,
-    get_compute_contention, get_compute_findings, get_compute_history, get_compute_latest,
-    get_compute_nodes, get_pod_by_ip, get_pod_by_name, get_pod_details, get_pod_syscall_name,
-    get_pod_traffic, get_pod_traffic_name, get_pods_by_node, get_seccomp_profile,
-    get_seccomp_profile_file, get_svc_by_ip, get_svc_details, get_version, list_seccomp_profiles,
-    mark_pod_dead, post_seccomp_node_status, put_seccomp_cr, seccomp_denials_resource,
-    set_statement_timeout, spawn_peer_late_resolve, spawn_retention, spawn_seccomp_denial_metrics,
-    spawn_version_check, AuditClient, ReadBudget, SeccompDenialMetrics, SeccompDenialSeries,
-    SeccompProfilesCache, StatementTimeoutCustomizer, VersionCheckState,
+    establish_connection, set_statement_timeout, spawn_peer_late_resolve, spawn_retention,
+    spawn_seccomp_denial_metrics, spawn_version_check, AuditClient, ReadBudget,
+    SeccompDenialMetrics, SeccompDenialSeries, SeccompProfilesCache, StatementTimeoutCustomizer,
+    VersionCheckState,
 };
 
 use diesel::r2d2;
 use telemetry::init_logging;
-mod auth;
 mod telemetry;
 
 /// Test-only helpers shared across this binary's modules.
@@ -42,9 +34,8 @@ pub(crate) mod test_support {
     /// flaky conn::returns_connection_manager_when_url_set failure);
     /// this binary had the same latent race between `tests::with_env`
     /// (LISTEN_ADDR, DB_POOL_MAX_SIZE, DB_MIGRATION_MAX_RETRIES,
-    /// DB_STATEMENT_TIMEOUT_MS) and
-    /// `auth::tests::from_env_treats_blank_as_disabled`
-    /// (BROKER_AUTH_TOKEN), which surfaced as
+    /// DB_STATEMENT_TIMEOUT_MS) and the auth env test (BROKER_AUTH_TOKEN,
+    /// since moved to the lib as `auth::tests`), which surfaced as
     /// `listen_addr_honors_override` intermittently reading a value
     /// another test had just restored. Every env-mutating test helper
     /// in this binary must hold this lock.
@@ -309,13 +300,19 @@ async fn main() -> Result<(), std::io::Error> {
     // capture or growing memory unbounded.
     let audit_client = AuditClient::from_env().start(pool.clone());
 
-    // Optional bearer-token auth on the broker API. Off unless
-    // BROKER_AUTH_TOKEN is set, so existing deployments are unaffected.
-    let auth_config = auth::AuthConfig::from_env();
+    // Scoped bearer-token auth on the broker API (api::auth). Off unless a
+    // token is configured, so existing deployments are unaffected. A bad
+    // configuration (the same token under two scopes) refuses to start
+    // rather than silently widening a scope.
+    let auth_config = api::auth::AuthConfig::from_env()
+        .unwrap_or_else(|e| panic!("invalid broker auth configuration: {e}"));
     if auth_config.enabled() {
-        info!("broker API auth ENABLED — requiring bearer token (except /health, /metrics)");
+        info!(
+            tokens = ?auth_config.sources(),
+            "broker API auth ENABLED: scoped bearer tokens required (except /health, /metrics)"
+        );
     } else {
-        info!("broker API auth disabled (set BROKER_AUTH_TOKEN to require a bearer token)");
+        info!("broker API auth disabled (set BROKER_TOKEN_READ / BROKER_TOKEN_INGEST to require scoped bearer tokens)");
     }
     if audit_client.enabled() {
         info!(url = %audit_client.base_url(), "audit evaluator integration enabled");
@@ -378,8 +375,8 @@ async fn main() -> Result<(), std::io::Error> {
 
         App::new()
             // Auth is inner, CORS outer: CORS handles preflight first,
-            // then the bearer check runs on the real request.
-            .wrap(from_fn(auth::require_bearer))
+            // then the scope check runs on the real request.
+            .wrap(from_fn(api::auth::authenticate))
             .wrap(cors)
             .app_data(web::Data::new(pool.clone()))
             .app_data(web::Data::new(audit_client.clone()))
@@ -388,43 +385,8 @@ async fn main() -> Result<(), std::io::Error> {
             .app_data(read_budget.clone())
             .app_data(profiles_cache.clone())
             .app_data(denial_metrics.clone())
-            .service(add_pods_batch)
-            .service(add_pod_details)
-            .service(add_pods_syscalls)
-            .service(get_pod_traffic)
-            .service(get_pod_details)
-            .service(add_svc_details)
-            .service(get_pod_by_ip)
-            .service(get_pod_by_name)
-            .service(get_svc_details)
-            .service(get_svc_by_ip)
-            .service(get_pod_traffic_name)
-            .service(get_pod_syscall_name)
-            .service(list_seccomp_profiles)
-            .service(get_seccomp_profile)
-            .service(get_seccomp_profile_file)
-            .service(export_seccomp_profile)
-            .service(export_seccomp_profile_post)
-            .service(post_seccomp_node_status)
-            // GET + POST /seccomp/denials on one resource, carrying their
-            // own JSON body limit (api::DENIAL_JSON_LIMIT_BYTES).
-            .service(seccomp_denials_resource())
-            .service(put_seccomp_cr)
-            .service(delete_seccomp_cr)
-            .service(get_pods_by_node)
-            .service(get_audit_verdicts)
-            .service(mark_pod_dead)
-            .service(add_node_facts)
-            // /pod/compute/{batch,history/batch} with their own 16 MiB
-            // JsonConfig (compute_api::COMPUTE_JSON_LIMIT_BYTES).
-            .service(compute_ingest_scope())
-            .service(get_compute_latest)
-            .service(get_compute_history)
-            .service(get_compute_contention)
-            .service(get_compute_findings)
-            .service(get_compute_nodes)
-            .service(get_version)
-            .service(get_cluster_environment)
+            // Every data route; each has its scope declared in api::auth::ROUTES.
+            .configure(api::routes::configure)
             .service(health_check)
             .service(metrics)
     })
@@ -439,7 +401,10 @@ async fn main() -> Result<(), std::io::Error> {
 // every real query 500s with "relation does not exist" — silent for
 // hours. With it, the kubelet sees a failing liveness probe, restarts
 // the pod, and the startup-migration retry repopulates the schema.
-#[get("/health")]
+#[get(
+    "/health",
+    wrap = "::actix_web::middleware::from_fn(api::auth::authorize)"
+)]
 pub async fn health_check(
     pool: web::Data<r2d2::Pool<r2d2::ConnectionManager<diesel::PgConnection>>>,
 ) -> HttpResponse {
@@ -642,7 +607,10 @@ pub(crate) fn render_metrics_text(
 ///   - audit semaphore saturation (the cap from #c05b7835 — operators
 ///     need to see when it's pegged to know they should bump
 ///     AUDIT_INFLIGHT_PERMITS)
-#[get("/metrics")]
+#[get(
+    "/metrics",
+    wrap = "::actix_web::middleware::from_fn(api::auth::authorize)"
+)]
 pub async fn metrics(
     pool: web::Data<r2d2::Pool<r2d2::ConnectionManager<diesel::PgConnection>>>,
     audit: web::Data<api::AuditClient>,

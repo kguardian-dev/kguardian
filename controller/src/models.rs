@@ -345,6 +345,20 @@ pub struct PodDetail {
     /// rejects — the same whole-list failure `pod_ips` guards against.
     #[serde(default, deserialize_with = "null_tolerant")]
     pub host_network: bool,
+    /// Per-container image identity and securityContext subset
+    /// (`image_inventory::pod_containers`). Feeds the broker's
+    /// `images` / `workload_containers` inventory. It is NOT a
+    /// `pod_details` column (the broker splits it off before the
+    /// upsert), so it sits after `host_network` without shifting any
+    /// positional field. `None` is omitted from the wire; a broker too
+    /// old to know the field ignores it, and `/pod/list` responses
+    /// (which never carry it) deserialise to `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub containers: Option<Vec<crate::image_inventory::ContainerInventory>>,
+    /// Pod-level posture fields (service account, host namespaces, pod
+    /// securityContext subset). Same wire rules as `containers`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pod_security: Option<crate::image_inventory::PodSecurity>,
 }
 
 #[derive(Debug, Default, Serialize)]
@@ -489,15 +503,21 @@ mod tests {
             workload_name: None,
             capture_level: Some("full".into()),
             host_network,
+            containers: None,
+            pod_security: None,
         }
     }
 
     #[test]
     fn host_network_is_serialised_as_a_boolean_and_is_the_last_key() {
         // Wire contract with the broker: key name, plain boolean (never
-        // null from this side), and LAST in positional order — the
-        // broker's diesel Insertable is positional, so a field added
-        // anywhere else silently shifts every later column.
+        // null from this side), and LAST among the pod_details
+        // column-backed keys — the broker's diesel Insertable is
+        // positional, so a column field added anywhere else silently
+        // shifts every later column. `containers` / `pod_security` are
+        // not columns (the broker splits them off before the upsert)
+        // and are omitted when `None`, which is what this fixture sends;
+        // `inventory_fields_follow_host_network` covers them.
         for hn in [true, false] {
             let v = serde_json::to_value(pod_detail(hn)).unwrap();
             assert_eq!(v["host_network"], serde_json::Value::Bool(hn));
@@ -507,6 +527,40 @@ mod tests {
                 "host_network must be the last key: {s}"
             );
         }
+    }
+
+    #[test]
+    fn inventory_fields_follow_host_network_and_round_trip() {
+        use crate::image_inventory::{ContainerInventory, ContainerKind, PodSecurity};
+        let mut d = pod_detail(false);
+        d.containers = Some(vec![ContainerInventory {
+            name: "app".into(),
+            kind: ContainerKind::Regular,
+            image: "nginx:1.27".into(),
+            image_id: None,
+            digest: None,
+            digest_kind: None,
+            repository: Some("docker.io/library/nginx".into()),
+            tag: Some("1.27".into()),
+            security_context: Default::default(),
+            state: None,
+            state_reason: None,
+        }]);
+        d.pod_security = Some(PodSecurity {
+            service_account_name: Some("web".into()),
+            ..Default::default()
+        });
+        let s = serde_json::to_string(&d).unwrap();
+        let hn = s.find(r#""host_network""#).unwrap();
+        assert!(hn < s.find(r#""containers""#).unwrap(), "{s}");
+        assert!(hn < s.find(r#""pod_security""#).unwrap(), "{s}");
+        let back: PodDetail = serde_json::from_str(&s).unwrap();
+        assert_eq!(back.containers, d.containers);
+        assert_eq!(back.pod_security, d.pod_security);
+        // /pod/list rows never carry these.
+        let d: PodDetail = serde_json::from_str(&pod_detail_json("")).unwrap();
+        assert_eq!(d.containers, None);
+        assert_eq!(d.pod_security, None);
     }
 
     #[test]
