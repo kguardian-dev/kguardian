@@ -57,7 +57,10 @@ type ApplicationSecurityProfileStatus struct {
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
 
 	// LastSyncedAt is when the evaluator last read the profile from the
-	// broker successfully. Posture and dimensions are as of this time.
+	// broker successfully. Posture and dimensions are as of this time
+	// while they are shown; once a failed refresh is older than the
+	// staleness window (ASP_STALE_AFTER), or at once when the broker
+	// rejects the token, they are reported as unknown instead.
 	LastSyncedAt *metav1.Time `json:"lastSyncedAt,omitempty"`
 
 	// Posture is the broker's rollup, copied verbatim. No scores.

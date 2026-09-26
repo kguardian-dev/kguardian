@@ -34,24 +34,31 @@ const FieldManager = "kguardian-evaluator"
 // One worker: profile reads are computed live by the broker, so they are
 // serialised rather than fanned out, and a resync spreads over time.
 type Controller struct {
-	log      *logrus.Logger
-	dyn      dynamic.Interface
-	broker   Broker
-	informer cache.SharedIndexInformer
-	queue    workqueue.TypedRateLimitingInterface[string]
-	now      func() time.Time
+	log    *logrus.Logger
+	dyn    dynamic.Interface
+	broker Broker
+	// staleAfter bounds how long last-known data is shown when the broker
+	// cannot be read (see computeStatus).
+	staleAfter time.Duration
+	informer   cache.SharedIndexInformer
+	queue      workqueue.TypedRateLimitingInterface[string]
+	now        func() time.Time
 }
 
 // New builds a controller. resync is how often every profile is re-read
 // even when nothing about the resource changed (the workload's profile
 // changes on the broker side, which raises no Kubernetes event).
-func New(dyn dynamic.Interface, broker Broker, resync time.Duration, log *logrus.Logger) *Controller {
+// staleAfter is how long the last successfully read profile may still be
+// shown while the broker cannot be read; see StaleAfter for the default
+// and floor.
+func New(dyn dynamic.Interface, broker Broker, resync, staleAfter time.Duration, log *logrus.Logger) *Controller {
 	factory := dynamicinformer.NewDynamicSharedInformerFactory(dyn, resync)
 	c := &Controller{
-		log:      log,
-		dyn:      dyn,
-		broker:   broker,
-		informer: factory.ForResource(GVR).Informer(),
+		log:        log,
+		dyn:        dyn,
+		broker:     broker,
+		staleAfter: StaleAfter(staleAfter, resync),
+		informer:   factory.ForResource(GVR).Informer(),
 		queue: workqueue.NewTypedRateLimitingQueueWithConfig(
 			workqueue.NewTypedItemExponentialFailureRateLimiter[string](5*time.Second, 5*time.Minute),
 			workqueue.TypedRateLimitingQueueConfig[string]{Name: "applicationsecurityprofiles"},
@@ -74,6 +81,19 @@ func New(dyn dynamic.Interface, broker Broker, resync time.Duration, log *logrus
 		},
 	})
 	return c
+}
+
+// StaleAfter resolves the staleness window: 3x resync when unset (0), and
+// never shorter than one resync interval, since a single failed read right
+// after a resync would otherwise flip a healthy profile to unknown.
+func StaleAfter(configured, resync time.Duration) time.Duration {
+	if configured <= 0 {
+		return 3 * resync
+	}
+	if configured < resync {
+		return resync
+	}
+	return configured
 }
 
 // shouldEnqueueUpdate: a spec edit (generation change) or a periodic
@@ -160,7 +180,7 @@ func (c *Controller) reconcile(ctx context.Context, key string) error {
 	if winner := c.ownerOf(asp); winner != "" {
 		status = duplicateStatus(asp, winner)
 	} else {
-		status, brokerErr = computeStatus(ctx, c.broker, asp, c.now())
+		status, brokerErr = computeStatus(ctx, c.broker, asp, c.now(), c.staleAfter)
 	}
 	if err := c.apply(ctx, asp, status); err != nil {
 		if apierrors.IsNotFound(err) {

@@ -46,6 +46,9 @@ func ptr[T any](v T) *T { return &v }
 
 var now = time.Date(2026, 9, 26, 12, 0, 0, 0, time.UTC)
 
+// testStaleAfter is the staleness window used by computeStatus tests.
+const testStaleAfter = 15 * time.Minute
+
 // profileFixture follows the contract's refunds example (v1.3): warn with
 // three unknown core dimensions, so posture must not read ok.
 func profileFixture() *Profile {
@@ -97,7 +100,7 @@ func cond(t *testing.T, s v1alpha1.ApplicationSecurityProfileStatus, typ string)
 
 func TestComputeStatus_CopiesPostureWithoutUpgradingUnknown(t *testing.T) {
 	b := &fakeBroker{profile: profileFixture()}
-	st, err := computeStatus(context.Background(), b, aspFixture(nil), now)
+	st, err := computeStatus(context.Background(), b, aspFixture(nil), now, testStaleAfter)
 	if err != nil {
 		t.Fatalf("unexpected err: %v", err)
 	}
@@ -156,7 +159,7 @@ func TestComputeStatus_MissingPostureStatusIsUnknown(t *testing.T) {
 	p.Posture.Status = ""
 	p.Posture.Coverage = nil
 	p.Posture.UnknownDimensions = nil
-	st, _ := computeStatus(context.Background(), &fakeBroker{profile: p}, aspFixture(nil), now)
+	st, _ := computeStatus(context.Background(), &fakeBroker{profile: p}, aspFixture(nil), now, testStaleAfter)
 	if st.Posture.Status != "unknown" || st.Posture.Coverage != "unknown" {
 		t.Errorf("posture = %+v", st.Posture)
 	}
@@ -171,7 +174,7 @@ func TestComputeStatus_UnrecognisedStatusIsUnknown(t *testing.T) {
 	p := profileFixture()
 	p.Posture.Status = "excellent"
 	p.Dimensions["network"] = Dim{Status: "partial"}
-	st, _ := computeStatus(context.Background(), &fakeBroker{profile: p}, aspFixture(nil), now)
+	st, _ := computeStatus(context.Background(), &fakeBroker{profile: p}, aspFixture(nil), now, testStaleAfter)
 	if st.Posture.Status != "unknown" {
 		t.Errorf("posture.status = %q, want unknown", st.Posture.Status)
 	}
@@ -187,7 +190,7 @@ func TestComputeStatus_MatchesAccepted(t *testing.T) {
 		3: {Revision: 3, ContentHash: "fnv1a64:rev3", CreatedAt: "2026-09-26T02:22:26Z"},
 	}}
 	b.versions[3].Posture.Status = "warn"
-	st, err := computeStatus(context.Background(), b, aspFixture(ptr[int64](3)), now)
+	st, err := computeStatus(context.Background(), b, aspFixture(ptr[int64](3)), now, testStaleAfter)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -212,7 +215,7 @@ func TestComputeStatus_ChangedWithDimensionBreakdown(t *testing.T) {
 			"network": "n2", "syscalls": "s1", "podSecurity": "p2", "images": "i1"}},
 	}}
 	b.versions[1].Posture.Status = "unknown"
-	st, err := computeStatus(context.Background(), b, aspFixture(ptr[int64](1)), now)
+	st, err := computeStatus(context.Background(), b, aspFixture(ptr[int64](1)), now, testStaleAfter)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -240,7 +243,7 @@ func TestComputeStatus_ChangedButSnapshotPendingHasNoBreakdown(t *testing.T) {
 	b := &fakeBroker{profile: p, versions: map[int64]*Version{
 		3: {Revision: 3, ContentHash: "fnv1a64:rev3"},
 	}}
-	st, _ := computeStatus(context.Background(), b, aspFixture(ptr[int64](3)), now)
+	st, _ := computeStatus(context.Background(), b, aspFixture(ptr[int64](3)), now, testStaleAfter)
 	if st.Deviation.State != v1alpha1.DeviationChanged {
 		t.Fatalf("state = %s", st.Deviation.State)
 	}
@@ -254,7 +257,7 @@ func TestComputeStatus_ChangedButSnapshotPendingHasNoBreakdown(t *testing.T) {
 
 func TestComputeStatus_AcceptedRevisionPruned(t *testing.T) {
 	b := &fakeBroker{profile: profileFixture(), versions: map[int64]*Version{}}
-	st, err := computeStatus(context.Background(), b, aspFixture(ptr[int64](7)), now)
+	st, err := computeStatus(context.Background(), b, aspFixture(ptr[int64](7)), now, testStaleAfter)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -274,7 +277,7 @@ func TestComputeStatus_WorkloadNotFoundClearsData(t *testing.T) {
 	asp := aspFixture(ptr[int64](1))
 	asp.Status.Posture = &v1alpha1.ProfilePosture{Status: "warn"}
 	b := &fakeBroker{profileErr: &BrokerError{StatusCode: 404, Code: "workload_not_found"}}
-	st, err := computeStatus(context.Background(), b, asp, now)
+	st, err := computeStatus(context.Background(), b, asp, now, testStaleAfter)
 	if err != nil {
 		t.Fatalf("not-found is not transient: %v", err)
 	}
@@ -295,7 +298,7 @@ func TestComputeStatus_BrokerDownKeepsLastDataAndRetries(t *testing.T) {
 	asp.Status.LastSyncedAt = &last
 	asp.Status.Posture = &v1alpha1.ProfilePosture{Status: "risk", Coverage: "0.50", UnknownDimensions: []string{}}
 	b := &fakeBroker{profileErr: errors.New("dial tcp: connection refused")}
-	st, err := computeStatus(context.Background(), b, asp, now)
+	st, err := computeStatus(context.Background(), b, asp, now, testStaleAfter)
 	var te errTransient
 	if !errors.As(err, &te) {
 		t.Fatalf("network failure must be retried, got %v", err)
@@ -314,7 +317,7 @@ func TestComputeStatus_BrokerDownKeepsLastDataAndRetries(t *testing.T) {
 
 func TestComputeStatus_UnauthorizedNotRetriedEarly(t *testing.T) {
 	b := &fakeBroker{profileErr: &BrokerError{StatusCode: 401, Message: "unauthorized"}}
-	st, err := computeStatus(context.Background(), b, aspFixture(nil), now)
+	st, err := computeStatus(context.Background(), b, aspFixture(nil), now, testStaleAfter)
 	if err != nil {
 		t.Fatalf("auth failures wait for resync, got %v", err)
 	}
@@ -325,7 +328,7 @@ func TestComputeStatus_UnauthorizedNotRetriedEarly(t *testing.T) {
 
 func TestComputeStatus_OldBrokerWithoutRoutes(t *testing.T) {
 	b := &fakeBroker{profileErr: &BrokerError{StatusCode: 404}}
-	st, _ := computeStatus(context.Background(), b, aspFixture(nil), now)
+	st, _ := computeStatus(context.Background(), b, aspFixture(nil), now, testStaleAfter)
 	c := cond(t, st, v1alpha1.ConditionProfileAvailable)
 	if c.Reason != v1alpha1.ReasonBrokerError || !strings.Contains(c.Message, "upgrade the broker") {
 		t.Errorf("ProfileAvailable = %+v", c)
@@ -339,7 +342,7 @@ func TestComputeStatus_KeepsTransitionTimeWhenUnchanged(t *testing.T) {
 		Type: v1alpha1.ConditionProfileAvailable, Status: metav1.ConditionTrue,
 		Reason: v1alpha1.ReasonProfileRetrieved, LastTransitionTime: old,
 	}}
-	st, _ := computeStatus(context.Background(), &fakeBroker{profile: profileFixture()}, asp, now)
+	st, _ := computeStatus(context.Background(), &fakeBroker{profile: profileFixture()}, asp, now, testStaleAfter)
 	if c := cond(t, st, v1alpha1.ConditionProfileAvailable); !c.LastTransitionTime.Equal(&old) {
 		t.Errorf("lastTransitionTime moved: %v", c.LastTransitionTime)
 	}
@@ -353,5 +356,153 @@ func TestChangedDimensions_OrderAndOneSided(t *testing.T) {
 	want := []string{"network", "alpha", "zeta"}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("got %v want %v", got, want)
+	}
+}
+
+// staleFixture is a resource last read successfully `age` before now,
+// with an ok posture on it.
+func staleFixture(age time.Duration) *v1alpha1.ApplicationSecurityProfile {
+	asp := aspFixture(nil)
+	last := metav1.NewTime(now.Add(-age))
+	asp.Status.LastSyncedAt = &last
+	asp.Status.Posture = &v1alpha1.ProfilePosture{Status: "ok", Coverage: "1.00", UnknownDimensions: []string{}}
+	asp.Status.Dimensions = &v1alpha1.ProfileDimensions{
+		Network: v1alpha1.DimensionStatus{Status: "ok"}, Syscalls: v1alpha1.DimensionStatus{Status: "ok"},
+		PodSecurity: v1alpha1.DimensionStatus{Status: "ok"}, Images: v1alpha1.DimensionStatus{Status: "ok"},
+		Compute: v1alpha1.DimensionStatus{Status: "ok"},
+	}
+	return asp
+}
+
+func assertAllUnknown(t *testing.T, st v1alpha1.ApplicationSecurityProfileStatus) {
+	t.Helper()
+	if st.Posture == nil || st.Posture.Status != "unknown" || st.Posture.Coverage != "unknown" {
+		t.Fatalf("posture = %+v, want unknown", st.Posture)
+	}
+	if len(st.Posture.UnknownDimensions) != 4 {
+		t.Errorf("unknownDimensions = %v, want all four core dimensions", st.Posture.UnknownDimensions)
+	}
+	d := st.Dimensions
+	for name, s := range map[string]string{"network": d.Network.Status, "syscalls": d.Syscalls.Status,
+		"podSecurity": d.PodSecurity.Status, "images": d.Images.Status, "compute": d.Compute.Status} {
+		if s != "unknown" {
+			t.Errorf("dimensions.%s.status = %q, want unknown", name, s)
+		}
+	}
+	if st.Deviation == nil || st.Deviation.State != v1alpha1.DeviationUnknown {
+		t.Errorf("deviation = %+v, want Unknown", st.Deviation)
+	}
+	if c := cond(t, st, v1alpha1.ConditionProfileAvailable); c.Status != metav1.ConditionFalse {
+		t.Errorf("ProfileAvailable = %+v, want False", c)
+	}
+}
+
+// (1) A transient failure inside the window keeps the last posture.
+func TestStaleness_TransientInsideWindowKeepsPosture(t *testing.T) {
+	asp := staleFixture(testStaleAfter - time.Second)
+	b := &fakeBroker{profileErr: errors.New("dial tcp: connection refused")}
+	st, err := computeStatus(context.Background(), b, asp, now, testStaleAfter)
+	var te errTransient
+	if !errors.As(err, &te) {
+		t.Fatalf("want transient retry, got %v", err)
+	}
+	if st.Posture == nil || st.Posture.Status != "ok" || st.Dimensions.Network.Status != "ok" {
+		t.Errorf("last posture not kept inside the window: %+v", st.Posture)
+	}
+	if c := cond(t, st, v1alpha1.ConditionProfileAvailable); c.Status != metav1.ConditionFalse || c.Reason != v1alpha1.ReasonBrokerUnavailable {
+		t.Errorf("ProfileAvailable = %+v", c)
+	}
+}
+
+// (2) Past the window it is unknown, and the reason names the error and
+// the last successful refresh.
+func TestStaleness_PastWindowGoesUnknown(t *testing.T) {
+	asp := staleFixture(testStaleAfter + time.Second)
+	b := &fakeBroker{profileErr: errors.New("dial tcp: connection refused")}
+	st, err := computeStatus(context.Background(), b, asp, now, testStaleAfter)
+	var te errTransient
+	if !errors.As(err, &te) {
+		t.Fatalf("still worth retrying, got %v", err)
+	}
+	assertAllUnknown(t, st)
+	lastStr := asp.Status.LastSyncedAt.UTC().Format(time.RFC3339)
+	c := cond(t, st, v1alpha1.ConditionProfileAvailable)
+	for _, want := range []string{"connection refused", lastStr} {
+		if !strings.Contains(c.Message, want) {
+			t.Errorf("condition message %q lacks %q", c.Message, want)
+		}
+		if !strings.Contains(st.Dimensions.Network.Message, want) || !strings.Contains(st.Posture.Reasons[0].Message, want) {
+			t.Errorf("dimension/posture reason lacks %q", want)
+		}
+	}
+	if st.LastSyncedAt == nil || !st.LastSyncedAt.Equal(asp.Status.LastSyncedAt) {
+		t.Errorf("lastSyncedAt must stay the last successful read, got %v", st.LastSyncedAt)
+	}
+	if st.FindingCounts != nil || st.Current != nil || st.Accepted != nil {
+		t.Errorf("stale counts/revisions kept: %+v", st)
+	}
+}
+
+// Never read successfully: unknown straight away, reason says "never".
+func TestStaleness_NeverSyncedIsUnknown(t *testing.T) {
+	b := &fakeBroker{profileErr: errors.New("dial tcp: connection refused")}
+	st, _ := computeStatus(context.Background(), b, aspFixture(nil), now, testStaleAfter)
+	assertAllUnknown(t, st)
+	if c := cond(t, st, v1alpha1.ConditionProfileAvailable); !strings.Contains(c.Message, "last successful refresh: never") {
+		t.Errorf("message = %q", c.Message)
+	}
+}
+
+// (3) An auth rejection is unknown at once, even with fresh data.
+func TestStaleness_AuthRejectedGoesUnknownImmediately(t *testing.T) {
+	for _, code := range []int{401, 403} {
+		asp := staleFixture(time.Second)
+		b := &fakeBroker{profileErr: &BrokerError{StatusCode: code, Message: "denied"}}
+		st, err := computeStatus(context.Background(), b, asp, now, testStaleAfter)
+		if err != nil {
+			t.Fatalf("%d: auth failures are not retried early, got %v", code, err)
+		}
+		assertAllUnknown(t, st)
+		c := cond(t, st, v1alpha1.ConditionProfileAvailable)
+		if c.Reason != v1alpha1.ReasonBrokerUnauthorized || !strings.Contains(c.Message, strconv.Itoa(code)) ||
+			!strings.Contains(c.Message, asp.Status.LastSyncedAt.UTC().Format(time.RFC3339)) {
+			t.Errorf("%d: ProfileAvailable = %+v", code, c)
+		}
+	}
+}
+
+// (4) Recovery restores the posture and ProfileAvailable=True.
+func TestStaleness_RecoveryRestoresPosture(t *testing.T) {
+	asp := staleFixture(testStaleAfter + time.Minute)
+	down := &fakeBroker{profileErr: errors.New("dial tcp: connection refused")}
+	st, _ := computeStatus(context.Background(), down, asp, now, testStaleAfter)
+	assertAllUnknown(t, st)
+
+	asp.Status = st
+	later := now.Add(time.Minute)
+	st, err := computeStatus(context.Background(), &fakeBroker{profile: profileFixture()}, asp, later, testStaleAfter)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.Posture.Status != "warn" || st.Dimensions.PodSecurity.Status != "warn" {
+		t.Errorf("posture not restored: %+v / %+v", st.Posture, st.Dimensions)
+	}
+	if !st.LastSyncedAt.Time.Equal(later) {
+		t.Errorf("lastSyncedAt = %v, want %v", st.LastSyncedAt, later)
+	}
+	if c := cond(t, st, v1alpha1.ConditionProfileAvailable); c.Status != metav1.ConditionTrue || c.Reason != v1alpha1.ReasonProfileRetrieved {
+		t.Errorf("ProfileAvailable = %+v", c)
+	}
+}
+
+func TestStaleAfter_DefaultAndFloor(t *testing.T) {
+	for _, tc := range []struct{ configured, resync, want time.Duration }{
+		{0, 5 * time.Minute, 15 * time.Minute},
+		{time.Minute, 5 * time.Minute, 5 * time.Minute},
+		{time.Hour, 5 * time.Minute, time.Hour},
+	} {
+		if got := StaleAfter(tc.configured, tc.resync); got != tc.want {
+			t.Errorf("StaleAfter(%v, %v) = %v, want %v", tc.configured, tc.resync, got, tc.want)
+		}
 	}
 }

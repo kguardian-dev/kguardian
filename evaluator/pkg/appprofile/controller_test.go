@@ -47,7 +47,7 @@ func newTestController(t *testing.T, b Broker, objs ...runtime.Object) (*Control
 	})
 	log := logrus.New()
 	log.SetOutput(io.Discard)
-	c := New(dyn, b, time.Hour, log)
+	c := New(dyn, b, time.Hour, 0, log)
 	c.now = func() time.Time { return now }
 	return c, patches, dyn
 }
@@ -212,7 +212,7 @@ func TestShouldEnqueueUpdate_IgnoresOwnStatusWrites(t *testing.T) {
 
 func TestStatusApplyObject_RoundTripsThroughTypedStatus(t *testing.T) {
 	asp := aspFixture(nil)
-	st, _ := computeStatus(context.Background(), &fakeBroker{profile: profileFixture()}, asp, now)
+	st, _ := computeStatus(context.Background(), &fakeBroker{profile: profileFixture()}, asp, now, testStaleAfter)
 	u, err := statusApplyObject(asp, st)
 	if err != nil {
 		t.Fatal(err)

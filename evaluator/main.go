@@ -114,9 +114,16 @@ func startAppProfiles(ctx context.Context, dyn dynamic.Interface, log *logrus.Lo
 	if err != nil {
 		return err
 	}
-	ctrl := appprofile.New(dyn, client, resync, log)
+	// ASP_STALE_AFTER: how long the last profile is still shown while the
+	// broker cannot be read. Unset = 3x resync; clamped up to resync.
+	staleAfter, err := envDuration("ASP_STALE_AFTER", 0, 0)
+	if err != nil {
+		return err
+	}
+	staleAfter = appprofile.StaleAfter(staleAfter, resync)
+	ctrl := appprofile.New(dyn, client, resync, staleAfter, log)
 	go ctrl.Run(ctx)
-	log.WithField("resync", resync.String()).WithField("broker", brokerURL).
+	log.WithField("resync", resync.String()).WithField("staleAfter", staleAfter.String()).WithField("broker", brokerURL).
 		Info("applicationsecurityprofile status reporting enabled")
 	return nil
 }
