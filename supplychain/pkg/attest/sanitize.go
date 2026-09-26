@@ -45,7 +45,7 @@ func clean(s string) string {
 	}, s)
 }
 
-const detailBadChars = "signer-supplied fields contain control characters; not shown"
+const detailBadChars = "signer-supplied fields contain control, line-separator or bidi/format characters; not shown"
 
 // neutralize runs before the verdict: a signature or attestation whose
 // signer-supplied fields hold such characters is reported malformed and
