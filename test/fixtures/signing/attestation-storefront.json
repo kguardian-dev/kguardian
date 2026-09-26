@@ -1,0 +1,69 @@
+{
+  "request": "GET /images/sha256:41e17ed83c594a64a9396b6ab96dd26d5ddc290dacf4c177464712ff21ad534f/attestation",
+  "status": 200,
+  "body": {
+    "digest": "sha256:41e17ed83c594a64a9396b6ab96dd26d5ddc290dacf4c177464712ff21ad534f",
+    "repository": "127.0.0.1:45637/chainguard/static",
+    "verdict": "verified",
+    "reason": null,
+    "trustRoot": "custom:6494e21ea73f",
+    "signedVia": "self",
+    "signedDigest": "sha256:41e17ed83c594a64a9396b6ab96dd26d5ddc290dacf4c177464712ff21ad534f",
+    "signatures": [
+      {
+        "format": "cosign-legacy",
+        "integratedTime": "2026-09-26T00:36:20Z",
+        "issuer": "https://token.actions.githubusercontent.com",
+        "san": "https://github.com/chainguard-images/images/.github/workflows/release.yaml@refs/heads/main",
+        "signerKind": "keyless",
+        "source": "sig-tag",
+        "tlogIndex": 2963677395,
+        "verified": true
+      }
+    ],
+    "attestations": [
+      {
+        "format": "cosign-legacy-att",
+        "integratedTime": "2026-09-24T10:02:16Z",
+        "issuer": "https://token.actions.githubusercontent.com",
+        "payloadSha256": "11ca646514b366012dbd3fb7dc50233f7465d0b38605235c1d2af7e6536b7b92",
+        "predicateType": "https://slsa.dev/provenance/v1",
+        "provenance": {
+          "buildType": "https://apko.dev/slsa-build-type@v1",
+          "builderId": "https://github.com/chainguard-dev/terraform-provider-apko"
+        },
+        "san": "https://github.com/chainguard-images/images/.github/workflows/release.yaml@refs/heads/main",
+        "signerKind": "keyless",
+        "source": "att-tag",
+        "tlogIndex": 2936094725,
+        "verified": true
+      },
+      {
+        "format": "cosign-legacy-att",
+        "integratedTime": "2026-09-24T10:02:16Z",
+        "issuer": "https://token.actions.githubusercontent.com",
+        "payloadSha256": "ff753c619586cb163d00e346a20cae1fee65bcd395170b19cbec602583c9ad8a",
+        "predicateType": "https://apko.dev/image-configuration",
+        "san": "https://github.com/chainguard-images/images/.github/workflows/release.yaml@refs/heads/main",
+        "signerKind": "keyless",
+        "source": "att-tag",
+        "tlogIndex": 2936094657,
+        "verified": true
+      },
+      {
+        "format": "cosign-legacy-att",
+        "integratedTime": "2026-09-24T10:02:16Z",
+        "issuer": "https://token.actions.githubusercontent.com",
+        "payloadSha256": "8761e3536e980c9bf4d79314e7bdec3d0650faf139f279996378d987413521ed",
+        "predicateType": "https://spdx.dev/Document",
+        "san": "https://github.com/chainguard-images/images/.github/workflows/release.yaml@refs/heads/main",
+        "signerKind": "keyless",
+        "source": "att-tag",
+        "tlogIndex": 2936094594,
+        "verified": true
+      }
+    ],
+    "checkedAt": "2026-09-26T22:24:27.806086",
+    "receivedAt": "2026-09-26T22:24:27.833873"
+  }
+}

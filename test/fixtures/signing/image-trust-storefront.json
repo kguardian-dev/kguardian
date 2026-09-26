@@ -1,0 +1,37 @@
+{
+  "request": "GET /image-trust?namespace=shop&workload_kind=Deployment&workload_name=storefront",
+  "status": 200,
+  "body": {
+    "available": true,
+    "evaluatedAt": "2026-09-27T08:28:39.026536084+10:00",
+    "total": 2,
+    "wouldDeny": 0,
+    "unknown": 0,
+    "trusted": 2,
+    "policies": [
+      "cluster/require-provenance",
+      "shop/release-signers"
+    ],
+    "results": [
+      {
+        "policy": "cluster/require-provenance",
+        "namespace": "shop",
+        "workload": "Deployment/storefront",
+        "container": "app",
+        "digest": "sha256:41e17ed83c594a64a9396b6ab96dd26d5ddc290dacf4c177464712ff21ad534f",
+        "image": "cgr.dev/chainguard/static",
+        "verdict": "Trusted"
+      },
+      {
+        "policy": "shop/release-signers",
+        "namespace": "shop",
+        "workload": "Deployment/storefront",
+        "container": "app",
+        "digest": "sha256:41e17ed83c594a64a9396b6ab96dd26d5ddc290dacf4c177464712ff21ad534f",
+        "image": "cgr.dev/chainguard/static",
+        "verdict": "Trusted"
+      }
+    ],
+    "truncated": false
+  }
+}

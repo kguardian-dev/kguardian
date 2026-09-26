@@ -1,0 +1,116 @@
+{
+  "request": "GET /image-trust",
+  "status": 200,
+  "body": {
+    "available": true,
+    "evaluatedAt": "2026-09-27T08:28:39.026536084+10:00",
+    "total": 10,
+    "wouldDeny": 5,
+    "unknown": 2,
+    "trusted": 3,
+    "policies": [
+      "cluster/require-provenance",
+      "shop/release-signers"
+    ],
+    "results": [
+      {
+        "policy": "shop/release-signers",
+        "namespace": "shop",
+        "workload": "Deployment/cart",
+        "container": "app",
+        "digest": "sha256:f6ab986a3a713f127b0f03c6f5319756883249bbf58cebbee9911d80eb7fa1f8",
+        "image": "ghcr.io/kguardian-dev/kguardian/controller",
+        "verdict": "WouldDeny",
+        "reason": "unsigned"
+      },
+      {
+        "policy": "cluster/require-provenance",
+        "namespace": "shop",
+        "workload": "Deployment/checkout",
+        "container": "app",
+        "digest": "sha256:94be8ca1be31f007a2a31fd67a3830ee9dbde9cc971a699f35d419b5f51b242b",
+        "image": "127.0.0.1:5557/fixture/key-legacy",
+        "verdict": "WouldDeny",
+        "reason": "untrusted-signer"
+      },
+      {
+        "policy": "cluster/require-provenance",
+        "namespace": "shop",
+        "workload": "Deployment/search",
+        "container": "app",
+        "digest": "sha256:3de3b7e5f8062f772ceab50833cbd54cb09688ca0e7a0f70bd79895ab54cd95d",
+        "image": "127.0.0.1:5557/fixture/key-bundle",
+        "verdict": "WouldDeny",
+        "reason": "untrusted-signer"
+      },
+      {
+        "policy": "shop/release-signers",
+        "namespace": "shop",
+        "workload": "Deployment/search",
+        "container": "app",
+        "digest": "sha256:3de3b7e5f8062f772ceab50833cbd54cb09688ca0e7a0f70bd79895ab54cd95d",
+        "image": "127.0.0.1:5557/fixture/key-bundle",
+        "verdict": "WouldDeny",
+        "reason": "key-not-verified"
+      },
+      {
+        "policy": "shop/release-signers",
+        "namespace": "shop",
+        "workload": "StatefulSet/ledger",
+        "container": "app",
+        "digest": "sha256:ee6521f290b2168b6e0935a181d4cff9be1ac3f505666ef0e3c98fae8199917a",
+        "image": "registry.k8s.io/pause",
+        "verdict": "WouldDeny",
+        "reason": "invalid"
+      },
+      {
+        "policy": "shop/release-signers",
+        "namespace": "shop",
+        "workload": "Deployment/payments",
+        "container": "app",
+        "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "image": "registry.example.com/private/payments",
+        "verdict": "Unknown",
+        "reason": "registry_auth"
+      },
+      {
+        "policy": "shop/release-signers",
+        "namespace": "shop",
+        "workload": "Deployment/recs",
+        "container": "app",
+        "digest": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        "image": "registry.example.com/shop/recs",
+        "verdict": "Unknown",
+        "reason": "not-checked"
+      },
+      {
+        "policy": "shop/release-signers",
+        "namespace": "shop",
+        "workload": "Deployment/checkout",
+        "container": "app",
+        "digest": "sha256:94be8ca1be31f007a2a31fd67a3830ee9dbde9cc971a699f35d419b5f51b242b",
+        "image": "127.0.0.1:5557/fixture/key-legacy",
+        "verdict": "Trusted"
+      },
+      {
+        "policy": "cluster/require-provenance",
+        "namespace": "shop",
+        "workload": "Deployment/storefront",
+        "container": "app",
+        "digest": "sha256:41e17ed83c594a64a9396b6ab96dd26d5ddc290dacf4c177464712ff21ad534f",
+        "image": "cgr.dev/chainguard/static",
+        "verdict": "Trusted"
+      },
+      {
+        "policy": "shop/release-signers",
+        "namespace": "shop",
+        "workload": "Deployment/storefront",
+        "container": "app",
+        "digest": "sha256:41e17ed83c594a64a9396b6ab96dd26d5ddc290dacf4c177464712ff21ad534f",
+        "image": "cgr.dev/chainguard/static",
+        "verdict": "Trusted"
+      }
+    ],
+    "truncated": false
+  }
+}

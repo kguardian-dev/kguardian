@@ -48,6 +48,8 @@ const CALLS: Record<string, Record<string, unknown>> = {
   list_vulnerabilities: {},
   explain_cve_exposure: { id: "CVE-2099-10003" },
   get_image_sbom: { digest: "sha256:00000000000000000000000000000000000000000000000000000000000000a2" },
+  get_image_signers: { digest: "sha256:41e17ed83c594a64a9396b6ab96dd26d5ddc290dacf4c177464712ff21ad534f" },
+  explain_image_trust: {},
 };
 
 // The #1533 profile and image tools also post-date the mcp-server. They are
@@ -69,9 +71,16 @@ POSTURE_FIXTURES["/images/sha256:00000000000000000000000000000000000000000000000
 POSTURE_FIXTURES["/vulnerabilities"] = vulnCapture("vulns-list.json");
 POSTURE_FIXTURES["/vulnerabilities/CVE-2099-10003/exposure"] = vulnCapture("exposure-shared.json");
 POSTURE_FIXTURES["/images/sha256:00000000000000000000000000000000000000000000000000000000000000a2/sbom"] = vulnCapture("sbom-storefront.json");
+// Signature tools (#1533 P2): real broker captures in test/fixtures/signing;
+// their rules are signing.test.ts's job.
+const signingDir = path.resolve(here, "../../../test/fixtures/signing");
+const signingCapture = (f: string): unknown => (JSON.parse(fs.readFileSync(path.join(signingDir, f), "utf8")) as { body: unknown }).body;
+POSTURE_FIXTURES["/images/sha256:41e17ed83c594a64a9396b6ab96dd26d5ddc290dacf4c177464712ff21ad534f/attestation"] = signingCapture("attestation-storefront.json");
+POSTURE_FIXTURES["/image-trust"] = signingCapture("image-trust-all.json");
 const POSTURE_TOOLS = new Set([
   "get_workload_security_profile", "list_workload_profiles", "diff_workload_profile", "get_image_inventory",
   "get_image_vulnerabilities", "list_vulnerabilities", "explain_cve_exposure", "get_image_sbom",
+  "get_image_signers", "explain_image_trust",
 ]);
 
 // The compute tools post-date the retired mcp-server, so the shared contract

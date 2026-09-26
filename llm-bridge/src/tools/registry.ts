@@ -277,6 +277,35 @@ export const TOOL_DEFS: ToolDef[] = [
       required: ["digest"],
     },
   },
+  // --- image signatures and ImageTrustPolicy (#1533 P2) -------------------
+  // Every description says "verified" is not "trusted" and that unknown or
+  // unavailable is never a pass.
+  {
+    name: "get_image_signers",
+    description:
+      "Get who signed one image digest, from kguardian's signature discovery (cosign signatures and Sigstore attestations, verified by the supplychain component): verdict (verified, key_signed, unsigned, invalid, unknown) with reason and reasonMeaning, trustRoot, signedVia (self, or index when the signature is on the multi-arch index), checkedAt, signers (distinct verified identities: keyless issuer + san, or a configured key's keyName + keyFingerprint), signatures and attestations (verified first; an unverified one shows its error, never a signer: a claimed identity is not a fact) and verdictMeaning. 'verified' means the signature is valid for the listed signer, NOT that the signer is trusted: never call an image trusted or safe from this tool; use explain_image_trust for what a policy accepts. key_signed means signed with a key kguardian was not given and NOT checked. unknown (including reason unrecognised_reason) and found=false (never checked) are UNKNOWN, never signed, unsigned or a pass. Report-only: kguardian never admits or blocks an image. Requires digest (sha256:...; get it from get_image_inventory or get_workload_security_profile). truncated=true means signatures or attestations were cut. Use for 'who signed image X', 'is this digest signed', 'does it have SLSA provenance'.",
+    parameters: {
+      type: "object",
+      properties: { digest: str("Image digest, sha256:<64 hex>") },
+      required: ["digest"],
+    },
+  },
+  {
+    name: "explain_image_trust",
+    description:
+      "Explain which ImageTrustPolicies (namespaced ImageTrustPolicy and ClusterImageTrustPolicy CRs) would deny which running workload containers and why, from the evaluator's last pass: per (policy, container) verdict Trusted, WouldDeny or Unknown with reason (unsigned, invalid, untrusted-signer, key-not-verified, attestation-missing, not-checked, namespace-unknown, broker-unavailable, broker-unauthorized, or a discovery reason such as registry_auth) and reasonMeaning, plus counts (total, wouldDeny, unknown, trusted) over every match and the policies involved; WouldDeny first. Report-only: WouldDeny means an admission controller enforcing the policy would reject it; kguardian never blocks anything. available=false (with reason: no evaluator, image trust off, token refused, unreachable) or evaluatedAt=null means UNKNOWN, never an all-clear; Unknown results are never a pass; Trusted means a policy's authority signed it, not that the image is safe. Filters optional: namespace, workload_kind and workload_name (e.g. Deployment + checkout), verdict (Trusted, WouldDeny, Unknown), limit (default 25, max 100). truncated=true means more results exist than were returned; narrow the filters. Use for 'would anything be denied if we enforced image signing', 'why would X be denied', 'which policies apply to X'. Follow up with get_image_signers for a digest's signers.",
+    parameters: {
+      type: "object",
+      properties: {
+        namespace: str("Optional namespace"),
+        workload_kind: str("Optional workload kind, e.g. Deployment (with workload_name for one workload)"),
+        workload_name: str("Optional workload name (not a pod name)"),
+        verdict: str("Optional verdict: Trusted, WouldDeny or Unknown"),
+        limit: { type: "integer", description: "Max results to return (default 25, max 100)." },
+      },
+      required: [],
+    },
+  },
 ];
 
 /** Build the system-prompt tool guide from the registry — one source of truth. */
