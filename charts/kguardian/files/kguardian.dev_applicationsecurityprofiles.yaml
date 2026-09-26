@@ -1,0 +1,214 @@
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: applicationsecurityprofiles.kguardian.dev
+  labels:
+    app.kubernetes.io/name: kguardian
+    app.kubernetes.io/component: evaluator
+spec:
+  group: kguardian.dev
+  scope: Namespaced
+  names:
+    kind: ApplicationSecurityProfile
+    listKind: ApplicationSecurityProfileList
+    plural: applicationsecurityprofiles
+    singular: applicationsecurityprofile
+    shortNames:
+      - asp
+    categories:
+      - kguardian
+  versions:
+    - name: v1alpha1
+      served: true
+      storage: true
+      subresources:
+        status: {}
+      additionalPrinterColumns:
+        - name: Kind
+          type: string
+          jsonPath: .spec.workloadRef.kind
+        - name: Workload
+          type: string
+          jsonPath: .spec.workloadRef.name
+        - name: Posture
+          type: string
+          description: ok only when every core dimension is known and ok
+          jsonPath: .status.posture.status
+        - name: Coverage
+          type: string
+          description: Known core dimensions / 4
+          jsonPath: .status.posture.coverage
+        - name: Accepted
+          type: integer
+          jsonPath: .spec.acceptedRevision
+        - name: Current
+          type: integer
+          jsonPath: .status.current.revision
+        - name: Deviation
+          type: string
+          jsonPath: .status.deviation.state
+        - name: Age
+          type: date
+          jsonPath: .metadata.creationTimestamp
+      schema:
+        openAPIV3Schema:
+          description: |
+            ApplicationSecurityProfile surfaces kguardian's security profile
+            for one workload in this namespace. Report-only: the
+            kguardian-evaluator writes status (posture, per-dimension status,
+            deviation from the accepted revision) and never changes the
+            workload or enforces anything. Create one per workload and set
+            spec.acceptedRevision to the profile revision you reviewed.
+          type: object
+          required: [spec]
+          properties:
+            apiVersion: { type: string }
+            kind: { type: string }
+            metadata: { type: object }
+            spec:
+              type: object
+              required: [workloadRef]
+              properties:
+                workloadRef:
+                  description: |
+                    The workload in this namespace, keyed exactly as the
+                    broker keys it: kind is the top-level owner
+                    (ReplicaSet -> Deployment, Job -> CronJob; a pod with no
+                    owner is kind Pod). Case-sensitive. Immutable.
+                  type: object
+                  required: [kind, name]
+                  x-kubernetes-validations:
+                    - rule: self == oldSelf
+                      message: workloadRef is immutable; create a new ApplicationSecurityProfile instead
+                  properties:
+                    kind:
+                      type: string
+                      minLength: 1
+                      maxLength: 63
+                      pattern: '^[A-Z][A-Za-z0-9]*$'
+                    name:
+                      type: string
+                      minLength: 1
+                      maxLength: 253
+                acceptedRevision:
+                  description: |
+                    The broker profile revision you reviewed and accepted as
+                    the baseline. status.deviation compares the live profile
+                    with it. Leave unset until you have reviewed one.
+                  type: integer
+                  format: int64
+                  minimum: 1
+            status:
+              type: object
+              properties:
+                observedGeneration:
+                  type: integer
+                  format: int64
+                conditions:
+                  description: ProfileAvailable and Deviated.
+                  type: array
+                  x-kubernetes-list-type: map
+                  x-kubernetes-list-map-keys: [type]
+                  items:
+                    type: object
+                    required: [type, status, lastTransitionTime, reason, message]
+                    properties:
+                      type: { type: string, maxLength: 316 }
+                      status:
+                        type: string
+                        enum: ["True", "False", "Unknown"]
+                      observedGeneration: { type: integer, format: int64, minimum: 0 }
+                      lastTransitionTime: { type: string, format: date-time }
+                      reason: { type: string, maxLength: 1024, minLength: 1 }
+                      message: { type: string, maxLength: 32768 }
+                lastSyncedAt:
+                  description: When the profile was last read from the broker.
+                  type: string
+                  format: date-time
+                posture:
+                  description: |
+                    The broker's posture rollup. status is ok only when every
+                    core dimension (network, syscalls, podSecurity, images) is
+                    known and ok; an unknown dimension never counts as ok.
+                  type: object
+                  required: [status, coverage, unknownDimensions]
+                  properties:
+                    status:
+                      type: string
+                      enum: [ok, warn, risk, unknown]
+                    coverage:
+                      description: Known core dimensions / 4, two decimals.
+                      type: string
+                    unknownDimensions:
+                      type: array
+                      items: { type: string }
+                    reasons:
+                      type: array
+                      items:
+                        type: object
+                        properties:
+                          dimension: { type: string }
+                          status: { type: string }
+                          message: { type: string }
+                dimensions:
+                  description: Per-dimension status and first reason. compute is informational.
+                  type: object
+                  properties:
+                    network: &dimension
+                      type: object
+                      required: [status]
+                      properties:
+                        status:
+                          type: string
+                          enum: [ok, warn, risk, unknown]
+                        reason: { type: string }
+                        message: { type: string }
+                    syscalls: *dimension
+                    podSecurity: *dimension
+                    images: *dimension
+                    compute: *dimension
+                findingCounts:
+                  type: object
+                  properties:
+                    critical: { type: integer, format: int64 }
+                    high: { type: integer, format: int64 }
+                    medium: { type: integer, format: int64 }
+                    low: { type: integer, format: int64 }
+                    info: { type: integer, format: int64 }
+                current:
+                  description: The live profile and the latest stored version.
+                  type: object
+                  properties:
+                    liveContentHash: { type: string }
+                    snapshotPending:
+                      description: The live profile differs from the latest stored version.
+                      type: boolean
+                    revision: { type: integer, format: int64 }
+                    contentHash: { type: string }
+                    createdAt: { type: string, format: date-time }
+                accepted:
+                  description: The stored version named by spec.acceptedRevision.
+                  type: object
+                  properties:
+                    revision: { type: integer, format: int64 }
+                    contentHash: { type: string }
+                    createdAt: { type: string, format: date-time }
+                    postureStatus: { type: string }
+                deviation:
+                  description: The live profile compared with the accepted revision.
+                  type: object
+                  required: [state]
+                  properties:
+                    state:
+                      type: string
+                      enum: [None, Changed, Unknown]
+                    changedDimensions:
+                      description: |
+                        Dimensions whose content differs from the accepted
+                        revision. Absent while the change is not yet stored
+                        as a version (the breakdown is then unknown).
+                      type: array
+                      items: { type: string }
+                    postureFrom: { type: string }
+                    postureTo: { type: string }
+                    message: { type: string }

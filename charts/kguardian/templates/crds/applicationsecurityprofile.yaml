@@ -1,0 +1,24 @@
+{{- /*
+ApplicationSecurityProfile CRD (#1533), rendered only when
+evaluator.applicationSecurityProfiles.enabled and .installCRD are both true.
+It lives in files/ rather than crds/ because crds/ is always installed and
+this feature is off by default; rendering it as a release resource also lets
+`helm upgrade` pick up schema changes. `helm.sh/resource-policy: keep` stops
+`helm uninstall` from deleting the CRD and every profile with it.
+*/ -}}
+{{- $asp := .Values.evaluator.applicationSecurityProfiles | default dict }}
+{{- if and $asp.enabled (not .Values.evaluator.enabled) }}
+{{- fail "evaluator.applicationSecurityProfiles.enabled=true requires evaluator.enabled=true: the evaluator is what writes ApplicationSecurityProfile status." }}
+{{- end }}
+{{- if and $asp.enabled $asp.installCRD }}
+{{- $raw := .Files.Get "files/kguardian.dev_applicationsecurityprofiles.yaml" }}
+{{- if not $raw }}
+{{- fail "evaluator.applicationSecurityProfiles.installCRD is true but files/kguardian.dev_applicationsecurityprofiles.yaml is missing from the chart" }}
+{{- end }}
+{{- $crd := $raw | fromYaml }}
+{{- $meta := $crd.metadata }}
+{{- $_ := set $meta "annotations" (merge (dict "helm.sh/resource-policy" "keep") (default (dict) $meta.annotations)) }}
+{{- $_ := set $meta "labels" (merge (default (dict) $meta.labels) (include "kguardian.labels" . | fromYaml)) }}
+---
+{{ toYaml $crd }}
+{{- end }}
