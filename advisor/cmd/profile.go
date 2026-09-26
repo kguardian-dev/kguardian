@@ -322,7 +322,7 @@ func renderProfileTable(dst io.Writer, ref workloadRef, p *api.Profile) error {
 	fmt.Fprintf(&b, "Posture:    %s  score %s  coverage %s  grade %s\n",
 		p.Posture.Status, fmtScore(p.Posture.Score), fmtFraction(p.Posture.Coverage), grade)
 	if len(p.Posture.UnknownDimensions) > 0 {
-		fmt.Fprintf(&b, "Unknown:    %s (not counted in the score)\n", strings.Join(p.Posture.UnknownDimensions, ", "))
+		fmt.Fprintf(&b, "Not scored: %s (unknown or unscored; excluded from the score)\n", strings.Join(p.Posture.UnknownDimensions, ", "))
 	}
 	if p.Version != nil {
 		fmt.Fprintf(&b, "Revision:   %d (%s)", p.Version.Revision, p.Version.CreatedAt)

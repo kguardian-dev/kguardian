@@ -55,7 +55,7 @@ func TestProfileGet_Table(t *testing.T) {
 	s := out.String()
 	for _, want := range []string{
 		"Posture:    warn  score 71  coverage 41%  grade -",
-		"Unknown:    network, images (not counted in the score)",
+		"Not scored: network, images (unknown or unscored; excluded from the score)",
 		"Revision:   3",
 		"PSS level:  at most baseline (9 checks not visible to kguardian)",
 		"DIMENSION", "podSecurity", "not scored",
@@ -257,5 +257,43 @@ func TestProfileExport_NothingToRecommendAndUnknown(t *testing.T) {
 	err := exportPSSPatch(workloadRef{"batch", "CronJob", "nightly-report"}, &out, &errOut)
 	if err == nil || !strings.Contains(err.Error(), "unknown, not compliant") {
 		t.Errorf("unknown podSecurity must be an error, got %v", err)
+	}
+}
+
+// The broker's own sample response (profile API PR, contract v1.1) must
+// decode and render, including pod-level failing checks.
+func TestProfileGet_BrokerSampleRenders(t *testing.T) {
+	startFakeBroker(t, map[string]string{checkoutProfilePath: postureFixture(t, "profile_broker_sample.json")})
+	var out bytes.Buffer
+	if err := fetchAndRenderProfile(checkoutRef, "table", &out); err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	s := out.String()
+	for _, want := range []string{"Posture:    warn  score 63  coverage 41%", "podSecurity", "syscalls", "Needs attention:"} {
+		if !strings.Contains(s, want) {
+			t.Errorf("missing %q in:\n%s", want, s)
+		}
+	}
+	var patch, errOut bytes.Buffer
+	if err := exportPSSPatch(checkoutRef, &patch, &errOut); err != nil {
+		t.Fatalf("export: %v", err)
+	}
+	if !strings.Contains(patch.String(), "securityContext") {
+		t.Errorf("sample export has no patch:\n%s", patch.String())
+	}
+}
+
+// Diffing revision 1 with no --from: the broker sends from=null.
+func TestProfileDiff_Revision1FromNull(t *testing.T) {
+	startFakeBroker(t, map[string]string{checkoutProfilePath + "/diff": postureFixture(t, "profile_diff_rev1.json")})
+	var out bytes.Buffer
+	if err := fetchAndRenderProfileDiff(checkoutRef, 0, 1, "table", &out); err != nil {
+		t.Fatalf("diff: %v", err)
+	}
+	s := out.String()
+	for _, want := range []string{"From:     (none)", "To:       1", "level: unset -> baseline", "captureLevel: unset -> full", "audited: unset -> false", "+ read"} {
+		if !strings.Contains(s, want) {
+			t.Errorf("missing %q in:\n%s", want, s)
+		}
 	}
 }
