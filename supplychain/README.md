@@ -146,8 +146,10 @@ With `BROKER_INGEST_ENABLED=true`, the `HTTPClient`:
   `Content-Type: application/json`) with
   `Authorization: Bearer $BROKER_AUTH_TOKEN`, the broker's scoped key for
   the `supplychain` scope.
-- Keeps every request body at or under **1 MiB compressed**
-  (`broker.MaxRequestBytes`). P1-3 sets the broker's ingest limit to match.
+- Keeps every request within the broker's ingest limits: **1 MiB
+  compressed** (`broker.MaxRequestBytes`), 8 MiB inflated, at most 10 000
+  SBOM components and 20 000 findings. Over those limits the broker answers
+  413, so the client checks them before sending.
   - Vulnerability sets are sent whole. They come from one Kubernetes object,
     which etcd already bounds. One that still compresses above the limit is
     rejected locally as `too_large` and never sent.

@@ -276,7 +276,13 @@ func extract(archivePath, name, dir string) error {
 		case hdr.Size > MaxFileBytes:
 			return fmt.Errorf("DB archive: entry %q is %d bytes, over the %d limit", hdr.Name, hdr.Size, int64(MaxFileBytes))
 		}
-		out, err := os.OpenFile(filepath.Join(dir, clean), os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+		// Belt and braces on top of the root-only rule above: write only to
+		// the base name, and only inside dir.
+		target := filepath.Join(dir, filepath.Base(clean))
+		if !strings.HasPrefix(target, filepath.Clean(dir)+string(os.PathSeparator)) {
+			return fmt.Errorf("DB archive: refused entry %q: escapes the download directory", hdr.Name)
+		}
+		out, err := os.OpenFile(target, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
 		if err != nil {
 			return err
 		}
