@@ -302,6 +302,17 @@ fn bounded(s: Option<String>, max: usize) -> Option<String> {
         .filter(|s| !s.is_empty() && s.len() <= max)
 }
 
+/// [`bounded`] for an image reference, repository or tag: also refused
+/// when it holds a control character or a Unicode line/paragraph separator
+/// (U+2028/U+2029). No valid reference has one, and these values are
+/// written into generated YAML, where a line break would start a new line.
+fn bounded_ref(s: Option<String>, max: usize) -> Option<String> {
+    bounded(s, max).filter(|v| {
+        !v.chars()
+            .any(|c| c.is_control() || c == '\u{2028}' || c == '\u{2029}')
+    })
+}
+
 fn bounded_list(v: Option<Vec<String>>) -> Option<Vec<String>> {
     let mut out: Vec<String> = v?
         .into_iter()
@@ -444,7 +455,7 @@ pub fn inventory_from_post(
             warn!(pod = %pod.pod_name, container = %name, kind = %c.kind, "unknown container kind; skipped");
             continue;
         }
-        let Some(image_ref) = bounded(c.image, MAX_IMAGE_REF_LEN) else {
+        let Some(image_ref) = bounded_ref(c.image, MAX_IMAGE_REF_LEN) else {
             continue;
         };
         if !seen_names.insert(name.clone()) {
@@ -462,8 +473,8 @@ pub fn inventory_from_post(
             .filter(|d| is_valid_digest(d));
         let digest = match (digest, digest_kind) {
             (Some(d), Some(k)) => {
-                let repository = bounded(c.repository, MAX_REPOSITORY_LEN);
-                let tag = bounded(c.tag, MAX_TAG_LEN);
+                let repository = bounded_ref(c.repository, MAX_REPOSITORY_LEN);
+                let tag = bounded_ref(c.tag, MAX_TAG_LEN);
                 let entry = images.entry(d.clone()).or_insert_with(|| ImageRow {
                     digest: d.clone(),
                     repository: None,
@@ -1228,6 +1239,30 @@ mod tests {
              "digest": D, "digest_kind": "pinned", "tag": "stable"},
             {"name": "debug", "kind": "ephemeral", "image": "busybox"}
         ])
+    }
+
+    /// Line breaks (the five YAML/Unicode ones) and other control
+    /// characters never enter an image reference, repository or tag: these
+    /// are written into generated policy YAML.
+    #[test]
+    fn image_fields_with_line_breaks_are_refused() {
+        let p = pod(Some("prod"), Some("Deployment"), Some("web"));
+        for sep in ["\n", "\r", "\u{0085}", "\u{2028}", "\u{2029}", "\t"] {
+            let inj = format!("evil{sep}---{sep}apiVersion: v1{sep}kind: Secret");
+            let list = json!([
+                {"name": "a", "kind": "regular", "image": inj.clone(), "digest": D, "digest_kind": "repo"},
+                {"name": "b", "kind": "regular", "image": "nginx:1.27", "digest": D2, "digest_kind": "repo",
+                 "repository": inj.clone(), "tag": inj.clone()}
+            ]);
+            let inv = inventory_from_post(&p, Some(&list), None);
+            assert_eq!(inv.containers.len(), 1, "{sep:?}: bad image_ref kept");
+            assert_eq!(inv.containers[0].image_ref, "nginx:1.27");
+            let img = inv.images.iter().find(|i| i.digest == D2).unwrap();
+            assert!(
+                img.repository.is_none() && img.tags.is_empty(),
+                "{sep:?}: {img:?}"
+            );
+        }
     }
 
     #[test]
