@@ -76,18 +76,21 @@ export function GraphControls({
 }: GraphControlsProps) {
   return (
     <div className="flex flex-wrap justify-end gap-2">
+      {/* The labelled button group needs about 330px on top of the toggles:
+          below xl (with the 224px rail) it would cover the summary panel
+          top-left, so the lens is a select there. Measured at 640-1440. */}
       {lens && onLensChange && (
         <select
           aria-label="Map lens"
           value={lens}
           onChange={(e) => onLensChange(e.target.value as MapLens)}
-          className="sm:hidden h-8 rounded-control border border-hubble-border bg-hubble-card px-2 text-xs text-primary"
+          className="xl:hidden h-8 rounded-control border border-hubble-border bg-hubble-card px-2 text-xs text-primary"
         >
           {LENSES.map((l) => <option key={l.id} value={l.id}>{l.label}</option>)}
         </select>
       )}
       {lens && onLensChange && (
-        <div role="group" aria-label="Map lens" className="hidden sm:inline-flex h-8 rounded-control border border-hubble-border bg-hubble-card overflow-hidden">
+        <div role="group" aria-label="Map lens" className="hidden xl:inline-flex h-8 rounded-control border border-hubble-border bg-hubble-card overflow-hidden">
           {LENSES.map((l) => (
             <button
               key={l.id}
