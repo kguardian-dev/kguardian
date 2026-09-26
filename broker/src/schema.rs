@@ -564,7 +564,9 @@ diesel::table! {
         heartbeat_secs -> Int4,
         gaps -> Int4,
         last_gap -> Nullable<Varchar>,
-        last_gap_at -> Nullable<Timestamp>,
+        events_dropped -> Int8,
+        last_drop_at -> Nullable<Timestamp>,
+        unsent -> Int8,
         ended -> Bool,
     }
 }

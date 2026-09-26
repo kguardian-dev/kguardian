@@ -519,6 +519,13 @@ pub fn row_from_entry(e: RawEntry) -> Option<RuntimeRow> {
         .map(|o| o.trim().to_string())
         .filter(|o| ORIGINS.contains(&o.as_str()))
         .unwrap_or_else(|| "unknown".to_string());
+    // A /proc backfill cannot see layers: only what the path itself says
+    // (deleted, memfd) is believable from it.
+    let origin = if source == "backfill" && !["deleted", "memfd"].contains(&origin.as_str()) {
+        "unknown".to_string()
+    } else {
+        origin
+    };
     // chrono's serde format for NaiveDateTime, which the controller posts.
     let ts = |s: Field<String>| s.required()?.trim().parse::<NaiveDateTime>().ok();
     let (first, last) = (ts(e.first_seen)?, ts(e.last_seen)?);
@@ -776,6 +783,8 @@ pub struct WorkloadRuntimeQuery {
     pub origin: Option<String>,
     /// Rows; default 1000, max 5000.
     pub limit: Option<i64>,
+    /// Coverage window in hours; default 24, clamped to [1, 720].
+    pub window_hours: Option<i32>,
 }
 
 #[derive(Debug, Clone, QueryableByName)]
@@ -835,6 +844,86 @@ pub struct WorkloadRuntime {
     pub containers: Vec<ContainerRuntime>,
     /// More rows than the page limit.
     pub truncated: bool,
+    /// Capture coverage per (container, digest) heartbeating within the
+    /// window. Empty means no controller is watching this workload: an
+    /// empty inventory then says nothing about what runs.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub coverage: Option<Vec<CoverageView>>,
+}
+
+/// Coverage of one (container, digest) of a workload.
+#[derive(Debug, Clone, QueryableByName, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct CoverageView {
+    #[diesel(sql_type = Text)]
+    pub container_name: String,
+    #[diesel(sql_type = Text)]
+    pub image_digest: String,
+    /// Container instances heartbeating in the window.
+    #[diesel(sql_type = BigInt)]
+    pub instances: i64,
+    #[diesel(sql_type = Timestamp)]
+    pub last_heartbeat: NaiveDateTime,
+    /// Mode of the newest heartbeat: `exec` or `full`.
+    #[diesel(sql_type = Text)]
+    pub mode: String,
+    /// Libraries tracked on every instance (mode full, fentry attached).
+    #[diesel(sql_type = Bool)]
+    pub libraries_tracked: bool,
+    /// `kg_runtime_coverage` for the window.
+    #[diesel(sql_type = Nullable<Bool>)]
+    pub covered: Option<bool>,
+    #[diesel(sql_type = Nullable<Timestamp>)]
+    pub observed_since: Option<NaiveDateTime>,
+    #[diesel(sql_type = Nullable<Text>)]
+    pub reason: Option<String>,
+    #[diesel(sql_type = diesel::sql_types::Integer)]
+    pub window_hours: i32,
+}
+
+/// Coverage groups returned at most.
+pub const MAX_COVERAGE_GROUPS: i64 = 200;
+/// Default coverage window of the reads.
+pub const DEFAULT_COVERAGE_WINDOW_HOURS: i32 = 24;
+
+pub(crate) fn clamp_window(raw: Option<i32>) -> i32 {
+    raw.unwrap_or(DEFAULT_COVERAGE_WINDOW_HOURS).clamp(1, 720)
+}
+
+const WORKLOAD_COVERAGE_SQL: &str = "\
+SELECT g.container_name, g.image_digest, g.instances, g.last_heartbeat, g.mode, \
+    g.libraries_tracked, k.covered, k.observed_since, k.reason, $5::integer AS window_hours \
+FROM ( \
+    SELECT container_name, image_digest, count(*) AS instances, \
+        max(last_heartbeat) AS last_heartbeat, \
+        (array_agg(mode ORDER BY last_heartbeat DESC))[1] AS mode, \
+        bool_and(lib_probe AND mode = 'full') AS libraries_tracked \
+    FROM runtime_coverage \
+    WHERE cluster_id = $1 AND pod_namespace = $2 AND workload_kind = $3 AND workload_name = $4 \
+      AND last_heartbeat >= timezone('UTC', NOW()) - make_interval(hours => $5) \
+    GROUP BY container_name, image_digest \
+    ORDER BY container_name, image_digest \
+    LIMIT $6) g \
+LEFT JOIN LATERAL kg_runtime_coverage($1, $2, $3, $4, g.container_name, g.image_digest, $5) k \
+    ON true";
+
+/// Coverage of every (container, digest) of a workload heartbeating in
+/// the window.
+pub fn workload_coverage(
+    conn: &mut PgConnection,
+    ns: &str,
+    kind: &str,
+    name: &str,
+    window_hours: i32,
+) -> Result<Vec<CoverageView>, DbError> {
+    Ok(sql_query(WORKLOAD_COVERAGE_SQL)
+        .bind::<Text, _>(DEFAULT_CLUSTER_ID)
+        .bind::<Text, _>(ns)
+        .bind::<Text, _>(kind)
+        .bind::<Text, _>(name)
+        .bind::<diesel::sql_types::Integer, _>(window_hours)
+        .bind::<BigInt, _>(MAX_COVERAGE_GROUPS)
+        .load(conn)?)
 }
 
 const WORKLOAD_RUNTIME_SQL: &str = "\
@@ -915,6 +1004,7 @@ pub fn workload_runtime(
         name: name.to_string(),
         containers: group_workload_rows(rows),
         truncated,
+        coverage: None,
     })
 }
 
@@ -952,10 +1042,17 @@ pub async fn get_workload_runtime(
         .container
         .map(|c| c.trim().to_string())
         .filter(|c| !c.is_empty());
+    if container.as_ref().is_some_and(|c| c.len() > MAX_NAME_LEN) {
+        return Ok(HttpResponse::BadRequest().body("container is at most 253 bytes"));
+    }
+    let window = clamp_window(q.window_hours);
     let limit = clamp_runtime_limit(q.limit);
     // +1: the look-ahead row that decides `truncated`.
     let _permit = match budget
-        .acquire(cost_kib(limit + 1, RUNTIME_ROW_COST_BYTES))
+        .acquire(cost_kib(
+            limit + 1 + MAX_COVERAGE_GROUPS,
+            RUNTIME_ROW_COST_BYTES,
+        ))
         .await
     {
         Ok(p) => p,
@@ -963,7 +1060,7 @@ pub async fn get_workload_runtime(
     };
     let out = web::block(move || {
         let mut conn = pool.get()?;
-        workload_runtime(
+        let mut out = workload_runtime(
             &mut conn,
             &ns,
             &kind,
@@ -974,7 +1071,9 @@ pub async fn get_workload_runtime(
                 origins,
             },
             limit,
-        )
+        )?;
+        out.coverage = Some(workload_coverage(&mut conn, &ns, &kind, &name, window)?);
+        Ok::<_, DbError>(out)
     })
     .await?
     .map_err(actix_web::error::ErrorInternalServerError)?;
@@ -987,6 +1086,11 @@ pub struct ImageRuntimeQuery {
     pub kind: Option<String>,
     /// Rows; default 1000, max 5000.
     pub limit: Option<i64>,
+    /// Resume after this `<kind>:<path>` (the previous page's
+    /// `nextCursor`).
+    pub after: Option<String>,
+    /// Coverage window in hours; default 24, clamped to [1, 720].
+    pub window_hours: Option<i32>,
 }
 
 /// One path seen running from an image, aggregated across every workload
@@ -1020,6 +1124,66 @@ pub struct ImageRuntime {
     /// Ordered by kind, then path.
     pub entries: Vec<ImageRuntimeEntry>,
     pub truncated: bool,
+    /// `?after=` for the next page when truncated.
+    pub next_cursor: Option<String>,
+    /// Who is watching containers of this image.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub coverage: Option<ImageCoverage>,
+}
+
+/// Heartbeats for containers running an image, in the window. All zero
+/// means no controller watches any of them: no entries then says nothing
+/// about what runs.
+#[derive(Debug, Clone, QueryableByName, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ImageCoverage {
+    #[diesel(sql_type = BigInt)]
+    pub workloads: i64,
+    #[diesel(sql_type = BigInt)]
+    pub instances: i64,
+    #[diesel(sql_type = Nullable<Timestamp>)]
+    pub last_heartbeat: Option<NaiveDateTime>,
+    /// Libraries tracked on every instance.
+    #[diesel(sql_type = Bool)]
+    pub libraries_tracked: bool,
+    /// Instances that lost events in the window.
+    #[diesel(sql_type = BigInt)]
+    pub instances_with_drops: i64,
+    #[diesel(sql_type = diesel::sql_types::Integer)]
+    pub window_hours: i32,
+}
+
+pub fn image_coverage(
+    conn: &mut PgConnection,
+    digest: &str,
+    window_hours: i32,
+) -> Result<ImageCoverage, DbError> {
+    Ok(sql_query(
+        "SELECT count(DISTINCT (pod_namespace, workload_kind, workload_name)) AS workloads, \
+             count(*) AS instances, max(last_heartbeat) AS last_heartbeat, \
+             COALESCE(bool_and(lib_probe AND mode = 'full'), false) AS libraries_tracked, \
+             count(*) FILTER (WHERE last_drop_at >= timezone('UTC', NOW()) \
+                 - make_interval(hours => $2)) AS instances_with_drops, \
+             $2::integer AS window_hours \
+         FROM runtime_coverage \
+         WHERE image_digest = $1 \
+           AND last_heartbeat >= timezone('UTC', NOW()) - make_interval(hours => $2)",
+    )
+    .bind::<Text, _>(digest)
+    .bind::<diesel::sql_types::Integer, _>(window_hours)
+    .get_result(conn)?)
+}
+
+/// `?after=<kind>:<path>`; `Err` = 400.
+pub(crate) fn parse_cursor(raw: Option<&str>) -> Result<Option<(String, String)>, ()> {
+    let Some(raw) = raw.filter(|s| !s.is_empty()) else {
+        return Ok(None);
+    };
+    let (kind, path) = raw.split_once(':').ok_or(())?;
+    if !KINDS.contains(&kind) || path.is_empty() || path.len() > MAX_PATH_LEN {
+        return Err(());
+    }
+    Ok(Some((kind.to_string(), path.to_string())))
 }
 
 /// Served by `idx_runtime_executables_digest` (digest, kind, path), whose
@@ -1034,6 +1198,7 @@ SELECT kind, path, bool_or(path_complete) AS path_complete, \
     count(DISTINCT (cluster_id, pod_namespace, workload_kind, workload_name)) AS workloads \
 FROM runtime_executables \
 WHERE image_digest = $1 AND ($2::text IS NULL OR kind = $2) \
+  AND ($4::text IS NULL OR (kind, path) > ($4::text, $5::text)) \
 GROUP BY kind, path \
 ORDER BY kind, path \
 LIMIT $3";
@@ -1042,19 +1207,27 @@ pub fn image_runtime(
     conn: &mut PgConnection,
     digest: &str,
     entry_kind: Option<&str>,
+    after: Option<(&str, &str)>,
     limit: i64,
 ) -> Result<ImageRuntime, DbError> {
     let mut entries: Vec<ImageRuntimeEntry> = sql_query(IMAGE_RUNTIME_SQL.as_str())
         .bind::<Text, _>(digest)
         .bind::<Nullable<Text>, _>(entry_kind)
         .bind::<BigInt, _>(limit + 1)
+        .bind::<Nullable<Text>, _>(after.map(|a| a.0))
+        .bind::<Nullable<Text>, _>(after.map(|a| a.1))
         .load(conn)?;
     let truncated = entries.len() as i64 > limit;
     entries.truncate(limit as usize);
+    let next_cursor = truncated
+        .then(|| entries.last().map(|e| format!("{}:{}", e.kind, e.path)))
+        .flatten();
     Ok(ImageRuntime {
         digest: digest.to_string(),
         entries,
         truncated,
+        next_cursor,
+        coverage: None,
     })
 }
 
@@ -1080,9 +1253,16 @@ pub async fn get_image_runtime(
     let Ok(entry_kind) = parse_kind_filter(q.kind.as_deref()) else {
         return Ok(HttpResponse::BadRequest().body("kind must be exec or lib"));
     };
+    let Ok(after) = parse_cursor(q.after.as_deref()) else {
+        return Ok(HttpResponse::BadRequest().body("after must be <exec|lib>:<path>"));
+    };
+    let window = clamp_window(q.window_hours);
     let limit = clamp_runtime_limit(q.limit);
     let _permit = match budget
-        .acquire(cost_kib(limit + 1, RUNTIME_ROW_COST_BYTES))
+        .acquire(cost_kib(
+            limit + 1 + MAX_COVERAGE_GROUPS,
+            RUNTIME_ROW_COST_BYTES,
+        ))
         .await
     {
         Ok(p) => p,
@@ -1090,7 +1270,10 @@ pub async fn get_image_runtime(
     };
     let out = web::block(move || {
         let mut conn = pool.get()?;
-        image_runtime(&mut conn, &digest, entry_kind.as_deref(), limit)
+        let after = after.as_ref().map(|(k, p)| (k.as_str(), p.as_str()));
+        let mut out = image_runtime(&mut conn, &digest, entry_kind.as_deref(), after, limit)?;
+        out.coverage = Some(image_coverage(&mut conn, &digest, window)?);
+        Ok::<_, DbError>(out)
     })
     .await?
     .map_err(actix_web::error::ErrorInternalServerError)?;
@@ -1106,7 +1289,6 @@ pub const MAX_COVERAGE_ENTRIES: usize = 5_000;
 /// Body limit for the coverage route. A heartbeat is ~600 bytes, so a
 /// full batch is ~3 MB.
 pub const COVERAGE_BODY_LIMIT_BYTES: usize = 4 << 20;
-const GAP_REASONS: [&str; 2] = ["kernel_drops", "overflow"];
 
 /// One posted heartbeat (controller `runtime_inventory::CoveragePost`).
 /// Strings are bounded by the body limit; every one is length-checked
@@ -1127,8 +1309,12 @@ pub struct CoverageEntry {
     pub lib_probe: bool,
     pub start_mode: String,
     pub tracking_since: NaiveDateTime,
+    /// Sightings that may have been lost since the previous heartbeat.
     #[serde(default)]
-    pub gap: Option<String>,
+    pub events_dropped: u64,
+    /// Entries seen but not yet accepted by the broker.
+    #[serde(default)]
+    pub unsent: u64,
     #[serde(default)]
     pub ended: bool,
     pub heartbeat_at: NaiveDateTime,
@@ -1168,58 +1354,51 @@ pub fn valid_coverage(e: CoverageEntry) -> Option<CoverageEntry> {
     {
         return None;
     }
-    // An unknown gap reason is still a gap.
-    let gap = e.gap.map(|g| {
-        if GAP_REASONS.contains(&g.as_str()) {
-            g
-        } else {
-            "other".to_string()
-        }
-    });
-    Some(CoverageEntry { gap, ..e })
+    Some(e)
 }
 
 /// Upsert heartbeats. The run of gap-free coverage (`covered_since`)
-/// restarts at this heartbeat when the controller reports a gap, when a
-/// probe or the mode changed, or when the previous heartbeat is older
-/// than 3 x heartbeat_secs + 60 s (the controller, the node or the
-/// broker was away: nobody can say what ran meanwhile). A heartbeat
-/// older than the stored one is ignored. Times are clamped to the
-/// database clock.
+/// restarts at this heartbeat when a probe or the mode changed, or when
+/// the previous heartbeat is older than 3 x heartbeat_secs + 60 s (the
+/// controller, the node or the broker was away: nobody can say what ran
+/// meanwhile). Lost events are recorded separately (`last_drop_at`), so a
+/// window containing one is never covered. A heartbeat older than the
+/// stored one is ignored, and an ended row is frozen. Times are clamped
+/// to the database clock.
 pub(crate) const COVERAGE_UPSERT_SQL: &str = "\
 INSERT INTO runtime_coverage AS r (cluster_id, container_id, pod_namespace, workload_kind, \
     workload_name, container_name, image_digest, pod_name, node_name, mode, exec_probe, \
-    lib_probe, start_mode, tracking_since, covered_since, last_heartbeat, heartbeat_secs, gaps, \
-    last_gap, last_gap_at, ended) \
+    lib_probe, start_mode, tracking_since, covered_since, last_heartbeat, heartbeat_secs, \
+    events_dropped, last_drop_at, unsent, ended) \
 SELECT $1, t.cid, t.ns, t.wk, t.wn, t.cn, t.dg, t.pn, t.nn, t.md, t.ep, t.lp, t.sm, \
     LEAST(t.ts, t.hb, timezone('UTC', NOW())), \
-    CASE WHEN t.gap IS NULL AND t.ep AND t.lp THEN LEAST(t.ts, t.hb, timezone('UTC', NOW())) \
+    CASE WHEN t.ep THEN LEAST(t.ts, t.hb, timezone('UTC', NOW())) \
          ELSE LEAST(t.hb, timezone('UTC', NOW())) END, \
-    LEAST(t.hb, timezone('UTC', NOW())), t.hs, \
-    CASE WHEN t.gap IS NULL THEN 0 ELSE 1 END, t.gap, \
-    CASE WHEN t.gap IS NULL THEN NULL ELSE LEAST(t.hb, timezone('UTC', NOW())) END, t.ended \
+    LEAST(t.hb, timezone('UTC', NOW())), t.hs, t.dr, \
+    CASE WHEN t.dr > 0 THEN LEAST(t.hb, timezone('UTC', NOW())) END, t.us, t.ended \
 FROM unnest($2::text[], $3::text[], $4::text[], $5::text[], $6::text[], $7::text[], $8::text[], \
     $9::text[], $10::text[], $11::bool[], $12::bool[], $13::text[], $14::timestamp[], \
-    $15::text[], $16::timestamp[], $17::int[], $18::bool[]) \
-    AS t(cid, ns, wk, wn, cn, dg, pn, nn, md, ep, lp, sm, ts, gap, hb, hs, ended) \
+    $15::bigint[], $16::timestamp[], $17::int[], $18::bool[], $19::bigint[]) \
+    AS t(cid, ns, wk, wn, cn, dg, pn, nn, md, ep, lp, sm, ts, dr, hb, hs, ended, us) \
 ON CONFLICT (cluster_id, container_id) DO UPDATE SET \
-    covered_since = CASE WHEN EXCLUDED.last_gap IS NOT NULL \
-            OR EXCLUDED.mode <> r.mode OR EXCLUDED.exec_probe <> r.exec_probe \
+    covered_since = CASE WHEN EXCLUDED.mode <> r.mode OR EXCLUDED.exec_probe <> r.exec_probe \
             OR EXCLUDED.lib_probe <> r.lib_probe \
             OR EXCLUDED.last_heartbeat - r.last_heartbeat \
                 > make_interval(secs => 3 * r.heartbeat_secs + 60) \
         THEN EXCLUDED.last_heartbeat ELSE r.covered_since END, \
-    gaps = r.gaps + CASE WHEN EXCLUDED.last_gap IS NOT NULL \
+    gaps = r.gaps + CASE WHEN EXCLUDED.mode <> r.mode OR EXCLUDED.exec_probe <> r.exec_probe \
+            OR EXCLUDED.lib_probe <> r.lib_probe \
             OR EXCLUDED.last_heartbeat - r.last_heartbeat \
                 > make_interval(secs => 3 * r.heartbeat_secs + 60) THEN 1 ELSE 0 END, \
-    last_gap = CASE WHEN EXCLUDED.last_gap IS NOT NULL THEN EXCLUDED.last_gap \
-        WHEN EXCLUDED.last_heartbeat - r.last_heartbeat \
+    last_gap = CASE WHEN EXCLUDED.last_heartbeat - r.last_heartbeat \
             > make_interval(secs => 3 * r.heartbeat_secs + 60) THEN 'late_heartbeat' \
+        WHEN EXCLUDED.mode <> r.mode OR EXCLUDED.exec_probe <> r.exec_probe \
+            OR EXCLUDED.lib_probe <> r.lib_probe THEN 'probe_change' \
         ELSE r.last_gap END, \
-    last_gap_at = CASE WHEN EXCLUDED.last_gap IS NOT NULL \
-            OR EXCLUDED.last_heartbeat - r.last_heartbeat \
-                > make_interval(secs => 3 * r.heartbeat_secs + 60) \
-        THEN EXCLUDED.last_heartbeat ELSE r.last_gap_at END, \
+    events_dropped = r.events_dropped + EXCLUDED.events_dropped, \
+    last_drop_at = CASE WHEN EXCLUDED.events_dropped > 0 THEN EXCLUDED.last_heartbeat \
+        ELSE r.last_drop_at END, \
+    unsent = EXCLUDED.unsent, \
     pod_name = EXCLUDED.pod_name, node_name = EXCLUDED.node_name, mode = EXCLUDED.mode, \
     exec_probe = EXCLUDED.exec_probe, lib_probe = EXCLUDED.lib_probe, \
     last_heartbeat = EXCLUDED.last_heartbeat, heartbeat_secs = EXCLUDED.heartbeat_secs, \
@@ -1232,16 +1411,19 @@ pub fn upsert_coverage(conn: &mut PgConnection, rows: &[CoverageEntry]) -> Resul
         return Ok(0);
     }
     // One INSERT ... ON CONFLICT may not touch a row twice: keep the
-    // newest heartbeat per container id (merging a gap into it).
+    // newest heartbeat per container id, summing the drops of all.
     let mut by_id: std::collections::BTreeMap<&str, CoverageEntry> = Default::default();
     for r in rows {
         match by_id.get_mut(r.container_id.as_str()) {
             Some(prev) if prev.heartbeat_at > r.heartbeat_at => {
-                prev.gap = prev.gap.take().or_else(|| r.gap.clone());
+                prev.events_dropped = prev.events_dropped.saturating_add(r.events_dropped);
             }
             Some(prev) => {
-                let gap = r.gap.clone().or_else(|| prev.gap.take());
-                *prev = CoverageEntry { gap, ..r.clone() };
+                let events_dropped = prev.events_dropped.saturating_add(r.events_dropped);
+                *prev = CoverageEntry {
+                    events_dropped,
+                    ..r.clone()
+                };
             }
             None => {
                 by_id.insert(&r.container_id, r.clone());
@@ -1266,8 +1448,10 @@ pub fn upsert_coverage(conn: &mut PgConnection, rows: &[CoverageEntry]) -> Resul
             .bind::<Array<Bool>, _>(rows.iter().map(|r| r.lib_probe).collect::<Vec<_>>())
             .bind::<Array<Text>, _>(col(|r| &r.start_mode))
             .bind::<Array<Timestamp>, _>(rows.iter().map(|r| r.tracking_since).collect::<Vec<_>>())
-            .bind::<Array<Nullable<Text>>, _>(
-                rows.iter().map(|r| r.gap.as_deref()).collect::<Vec<_>>(),
+            .bind::<Array<BigInt>, _>(
+                rows.iter()
+                    .map(|r| r.events_dropped.min(i64::MAX as u64) as i64)
+                    .collect::<Vec<_>>(),
             )
             .bind::<Array<Timestamp>, _>(rows.iter().map(|r| r.heartbeat_at).collect::<Vec<_>>())
             .bind::<Array<diesel::sql_types::Integer>, _>(
@@ -1276,6 +1460,11 @@ pub fn upsert_coverage(conn: &mut PgConnection, rows: &[CoverageEntry]) -> Resul
                     .collect::<Vec<_>>(),
             )
             .bind::<Array<Bool>, _>(rows.iter().map(|r| r.ended).collect::<Vec<_>>())
+            .bind::<Array<BigInt>, _>(
+                rows.iter()
+                    .map(|r| r.unsent.min(i64::MAX as u64) as i64)
+                    .collect::<Vec<_>>(),
+            )
             .execute(conn)
     })?;
     Ok(written)
@@ -1578,6 +1767,39 @@ mod tests {
             with(entry("/a"), "origin", json!("otherFs")),
         ]);
         assert_eq!(b.rows[0].origin, "writableLayer");
+    }
+
+    #[test]
+    fn a_backfill_only_vouches_for_what_its_path_shows() {
+        let b = |origin: &str| {
+            batch_from_post(vec![with(
+                with(entry("/a"), "source", json!("backfill")),
+                "origin",
+                json!(origin),
+            )])
+            .rows[0]
+                .origin
+                .clone()
+        };
+        assert_eq!(b("image"), "unknown");
+        assert_eq!(b("writableLayer"), "unknown");
+        assert_eq!(b("memfd"), "memfd");
+        assert_eq!(b("deleted"), "deleted");
+    }
+
+    #[test]
+    fn cursors_and_windows_parse() {
+        assert_eq!(parse_cursor(None), Ok(None));
+        assert_eq!(
+            parse_cursor(Some("lib:/usr/lib/a:b.so")),
+            Ok(Some(("lib".into(), "/usr/lib/a:b.so".into())))
+        );
+        assert!(parse_cursor(Some("mmap:/x")).is_err());
+        assert!(parse_cursor(Some("exec:")).is_err());
+        assert!(parse_cursor(Some("nocolon")).is_err());
+        assert_eq!(clamp_window(None), 24);
+        assert_eq!(clamp_window(Some(0)), 1);
+        assert_eq!(clamp_window(Some(100_000)), 720);
     }
 
     #[test]
@@ -1893,7 +2115,7 @@ mod tests {
         );
         assert!(workload_has_inventory(&mut conn, "prod", "Deployment", "web").unwrap());
         assert!(!workload_has_inventory(&mut conn, "prod", "Deployment", "nope").unwrap());
-        let img = image_runtime(&mut conn, D, Some("exec"), 100).unwrap();
+        let img = image_runtime(&mut conn, D, Some("exec"), None, 100).unwrap();
         assert_eq!(
             img.entries
                 .iter()
@@ -1907,6 +2129,7 @@ mod tests {
     #[test]
     #[ignore = "requires a live postgres (set KG_TEST_DATABASE_URL)"]
     fn live_database_reads_are_bounded_filtered_and_aggregated() {
+        use diesel::connection::SimpleConnection;
         let mut conn = live_conn();
         let mut batch = Vec::new();
         for w in ["web", "api"] {
@@ -1972,7 +2195,7 @@ mod tests {
         assert_eq!(page.containers[0].entries.len(), 10);
         assert_eq!(page.containers[0].entries[0].path, "/lib/gen00000.so");
 
-        let img = image_runtime(&mut conn, D, Some("exec"), 100).unwrap();
+        let img = image_runtime(&mut conn, D, Some("exec"), None, 100).unwrap();
         let by: BTreeMap<_, _> = img
             .entries
             .iter()
@@ -1982,9 +2205,60 @@ mod tests {
         assert_eq!(by["/usr/bin/only-web"], 1);
         assert_eq!(by["/usr/bin/sidecar"], 1);
         assert!(img.entries.iter().all(|e| e.kind == "exec"));
-        let libs = image_runtime(&mut conn, D, Some("lib"), 5).unwrap();
+        let libs = image_runtime(&mut conn, D, Some("lib"), None, 5).unwrap();
         assert!(libs.truncated);
-        assert!(image_runtime(&mut conn, D2, None, 100)
+        // Keyset paging: the next page starts right after the cursor and
+        // together the pages are the whole set, in order.
+        let mut seen: Vec<String> = libs.entries.iter().map(|e| e.path.clone()).collect();
+        let mut cursor = libs.next_cursor.clone();
+        while let Some(c) = cursor {
+            let (k, p) = parse_cursor(Some(&c)).unwrap().unwrap();
+            let page = image_runtime(&mut conn, D, Some("lib"), Some((&k, &p)), 500).unwrap();
+            seen.extend(page.entries.iter().map(|e| e.path.clone()));
+            cursor = page.next_cursor;
+        }
+        let all = image_runtime(&mut conn, D, Some("lib"), None, 5000).unwrap();
+        assert!(!all.truncated && all.next_cursor.is_none());
+        assert_eq!(
+            seen,
+            all.entries
+                .iter()
+                .map(|e| e.path.clone())
+                .collect::<Vec<_>>()
+        );
+
+        // Coverage beside the inventory: nothing watching yet...
+        let none = image_coverage(&mut conn, D, 24).unwrap();
+        assert_eq!((none.instances, none.workloads), (0, 0));
+        assert!(
+            workload_coverage(&mut conn, "prod", "Deployment", "web", 24)
+                .unwrap()
+                .is_empty()
+        );
+        // ...then one heartbeating instance of web/app.
+        let mut hb = beat("rd1", "web-1", "web", "start", 30, 0);
+        hb.pod_namespace = "prod".into();
+        upsert_coverage(&mut conn, &[hb]).unwrap();
+        let wc = workload_coverage(&mut conn, "prod", "Deployment", "web", 24).unwrap();
+        assert_eq!(wc.len(), 1);
+        assert_eq!(
+            (
+                wc[0].container_name.as_str(),
+                wc[0].instances,
+                wc[0].mode.as_str()
+            ),
+            ("app", 1, "full")
+        );
+        assert!(wc[0].libraries_tracked);
+        assert_eq!(wc[0].covered, Some(true));
+        let ic = image_coverage(&mut conn, D, 24).unwrap();
+        assert_eq!(
+            (ic.instances, ic.workloads, ic.instances_with_drops),
+            (1, 1, 0)
+        );
+        conn.batch_execute("DELETE FROM runtime_coverage WHERE container_id = 'rd1'")
+            .unwrap();
+        assert!(image_runtime(&mut conn, D2, None, None, 100)
             .unwrap()
             .entries
             .is_empty());
@@ -2015,7 +2289,8 @@ mod tests {
             lib_probe: true,
             start_mode: start_mode.into(),
             tracking_since: now - chrono::Duration::hours(tracking_h),
-            gap: None,
+            events_dropped: 0,
+            unsent: 0,
             ended: false,
             heartbeat_at: now - chrono::Duration::hours(beat_h),
             heartbeat_secs: 300,
@@ -2054,16 +2329,6 @@ mod tests {
         ] {
             assert!(valid_coverage(bad.clone()).is_none(), "{bad:?}");
         }
-        let odd = valid_coverage(CoverageEntry {
-            gap: Some("cosmic_ray".into()),
-            ..ok
-        })
-        .unwrap();
-        assert_eq!(
-            odd.gap.as_deref(),
-            Some("other"),
-            "an unknown gap is still a gap"
-        );
     }
 
     #[test]
@@ -2073,6 +2338,7 @@ mod tests {
         let mut conn = live_conn();
         conn.batch_execute(
             "DELETE FROM runtime_coverage WHERE pod_namespace = 'covns'; \
+             DELETE FROM runtime_executables WHERE pod_namespace = 'covns'; \
              DELETE FROM pod_details WHERE pod_namespace = 'covns';",
         )
         .unwrap();
@@ -2164,7 +2430,8 @@ mod tests {
                 .unwrap();
         assert_eq!((g.gaps, g.last_gap.as_deref()), (1, Some("late_heartbeat")));
 
-        // Heartbeats on time keep coverage; a reported gap restarts it.
+        // On-time heartbeats keep coverage; a drop makes the window
+        // uncovered until it is older than the window.
         let mut b = beat("c5", "p5", "drops", "start", 30, 0);
         b.heartbeat_at -= chrono::Duration::minutes(10);
         put(&mut conn, vec![b.clone()]);
@@ -2176,26 +2443,86 @@ mod tests {
             "on-time beats keep it"
         );
         b.heartbeat_at += chrono::Duration::minutes(5);
-        b.gap = Some("kernel_drops".into());
+        b.events_dropped = 3;
         put(&mut conn, vec![b.clone()]);
         assert_eq!(
             cov(&mut conn, "drops").reason.as_deref(),
-            Some("capture_gap")
+            Some("events_dropped")
+        );
+        b.events_dropped = 0;
+        b.heartbeat_at += chrono::Duration::seconds(1);
+        put(&mut conn, vec![b.clone()]);
+        assert_eq!(
+            cov(&mut conn, "drops").reason.as_deref(),
+            Some("events_dropped"),
+            "a later clean beat does not clear a drop inside the window"
+        );
+        conn.batch_execute(
+            "UPDATE runtime_coverage SET last_drop_at = last_drop_at - INTERVAL '25 hours' \
+             WHERE container_id = 'c5'",
+        )
+        .unwrap();
+        assert_eq!(
+            cov(&mut conn, "drops").covered,
+            Some(true),
+            "the drop left the window"
         );
         // An out-of-order (older) heartbeat is ignored.
         let mut old = b.clone();
         old.heartbeat_at -= chrono::Duration::hours(1);
-        old.gap = None;
+        old.events_dropped = 9;
         assert_eq!(put(&mut conn, vec![old]), 0);
 
-        // Exec-only capture cannot vouch for libraries.
-        let mut x = beat("c6", "p6", "execonly", "start", 30, 0);
+        // No exec probe; exec-only mode; full mode without the library probe.
+        let mut x = beat("c6", "p6", "noprobe", "start", 30, 0);
+        x.exec_probe = false;
+        x.lib_probe = false;
+        put(&mut conn, vec![x]);
+        assert_eq!(
+            cov(&mut conn, "noprobe").reason.as_deref(),
+            Some("probes_missing")
+        );
+        let mut x = beat("c6b", "p6b", "execonly", "start", 30, 0);
         x.mode = "exec".into();
         x.lib_probe = false;
         put(&mut conn, vec![x]);
         assert_eq!(
             cov(&mut conn, "execonly").reason.as_deref(),
-            Some("probes_missing")
+            Some("libraries_not_tracked")
+        );
+        let mut x = beat("c6c", "p6c", "nofentry", "start", 30, 0);
+        x.lib_probe = false;
+        put(&mut conn, vec![x]);
+        assert_eq!(
+            cov(&mut conn, "nofentry").reason.as_deref(),
+            Some("libraries_not_tracked")
+        );
+
+        // Entries not yet at the broker: the inventory is incomplete.
+        let mut x = beat("c6d", "p6d", "pending", "start", 30, 0);
+        x.unsent = 4;
+        put(&mut conn, vec![x]);
+        assert_eq!(
+            cov(&mut conn, "pending").reason.as_deref(),
+            Some("events_pending")
+        );
+
+        // An incomplete path cannot be matched to its package.
+        put(
+            &mut conn,
+            vec![beat("c6e", "p6e", "truncated", "start", 30, 0)],
+        );
+        assert_eq!(cov(&mut conn, "truncated").covered, Some(true));
+        let mut e = with(
+            now_entry("/deep/suffix", "truncated", "lib", "ebpf"),
+            "path_complete",
+            json!(false),
+        );
+        e["pod_namespace"] = json!("covns");
+        upsert_rows(&mut conn, &batch_from_post(vec![e]).rows).unwrap();
+        assert_eq!(
+            cov(&mut conn, "truncated").reason.as_deref(),
+            Some("incomplete_paths")
         );
 
         // Stopped heartbeating without ending: the controller is gone.
@@ -2287,6 +2614,7 @@ mod tests {
 
         conn.batch_execute(
             "DELETE FROM runtime_coverage WHERE pod_namespace = 'covns'; \
+             DELETE FROM runtime_executables WHERE pod_namespace = 'covns'; \
              DELETE FROM pod_details WHERE pod_namespace = 'covns';",
         )
         .unwrap();

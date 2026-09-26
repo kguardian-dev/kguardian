@@ -63,9 +63,15 @@ CREATE INDEX IF NOT EXISTS idx_runtime_executables_last_seen
 -- so its first exec was seen; 'backfill' = it was already running, and
 -- capture begins at the /proc backfill (tracking_since). covered_since is
 -- the start of the current gap-free run: tracking_since until a gap (a
--- reported kernel drop or overflow, a probe or mode change, or a
--- heartbeat later than 3 x heartbeat_secs + 60 s) moves it to the
--- heartbeat that ended the gap.
+-- probe or mode change, or a heartbeat later than 3 x heartbeat_secs +
+-- 60 s) moves it to the heartbeat that ended the gap.
+--
+-- events_dropped / last_drop_at: sightings that may have been lost (the
+-- kernel could not queue them, the container hit its path cap, the
+-- broker dropped them at ingest, or they arrived before the pod was
+-- known). A window containing a drop is never covered. unsent: entries
+-- the controller had seen but the broker had not yet accepted, as of the
+-- last heartbeat.
 CREATE TABLE IF NOT EXISTS runtime_coverage (
     cluster_id     VARCHAR   NOT NULL DEFAULT 'primary',
     container_id   VARCHAR   NOT NULL,
@@ -86,7 +92,9 @@ CREATE TABLE IF NOT EXISTS runtime_coverage (
     heartbeat_secs INTEGER   NOT NULL CHECK (heartbeat_secs > 0),
     gaps           INTEGER   NOT NULL DEFAULT 0,
     last_gap       VARCHAR   NULL,
-    last_gap_at    TIMESTAMP NULL,
+    events_dropped BIGINT    NOT NULL DEFAULT 0,
+    last_drop_at   TIMESTAMP NULL,
+    unsent         BIGINT    NOT NULL DEFAULT 0,
     ended          BOOLEAN   NOT NULL DEFAULT false,
     PRIMARY KEY (cluster_id, container_id)
 );
@@ -99,20 +107,27 @@ CREATE INDEX IF NOT EXISTS idx_runtime_coverage_last_heartbeat
     ON runtime_coverage (last_heartbeat);
 
 -- Whether a workload container running `image` was watched continuously
--- for the last `window_hours`, for "installed but never observed" (P1-5).
---
--- Covered when all of these hold:
+-- for the last `window_hours`, so that a package nobody ran can be
+-- reported as installed but not observed (P1-5). covered=true is a
+-- negative claim ("this never ran") that ends up in a VEX statement, so
+-- every doubt answers false. Covered when all of these hold:
 --   * at least one instance heartbeated within the window;
---   * every such instance had the exec AND library probes loaded (exec
---     mode cannot vouch for a library never being loaded);
+--   * every such instance had the exec probe AND the library probe in
+--     mode full (exec mode cannot vouch for a library never being loaded);
+--   * no instance lost events in the window (last_drop_at);
+--   * no instance had entries still waiting to reach the broker at its
+--     last heartbeat;
 --   * every such instance is still heartbeating on time, or ended cleanly;
 --   * every such instance was covered for its whole life (captured from
 --     its start, no gap since) or continuously since before the window;
 --   * no live pod of the workload runs the container without a fresh
 --     heartbeat (a node with the feature off, an opted-out pod);
+--   * no path of the container and image is incomplete (a truncated path
+--     cannot be matched to the package that owns it);
 --   * coverage began at least window_hours ago (observed_since).
--- Otherwise not covered, with the reason in P1-5's vocabulary:
---   no_runtime_data (no instance), probes_missing, capture_gap.
+-- Otherwise covered=false with the first failing reason, in this order:
+--   no_runtime_data, probes_missing, libraries_not_tracked,
+--   events_dropped, events_pending, incomplete_paths, capture_gap.
 -- Timestamps are naive UTC, like every broker table.
 CREATE OR REPLACE FUNCTION kg_runtime_coverage(
     p_cluster text, p_ns text, p_kind text, p_name text, p_container text, p_image text,
@@ -124,7 +139,9 @@ WITH w AS (
            timezone('UTC', now()) - make_interval(hours => GREATEST(p_window_hours, 0)) AS start_
 ),
 inst AS (
-    SELECT c.exec_probe, c.lib_probe, c.tracking_since, c.covered_since,
+    SELECT c.exec_probe, (c.lib_probe AND c.mode = 'full') AS libs, c.tracking_since,
+           c.covered_since, (c.last_drop_at IS NOT NULL AND c.last_drop_at >= w.start_) AS dropped,
+           (c.unsent > 0 AND NOT c.ended) AS pending,
            (c.ended OR c.last_heartbeat
                >= w.now_ - make_interval(secs => 3 * c.heartbeat_secs + 60)) AS on_time,
            (c.start_mode = 'start' AND c.covered_since = c.tracking_since) AS whole_life
@@ -135,12 +152,22 @@ inst AS (
 ),
 agg AS (
     SELECT count(*) AS n,
-           COALESCE(bool_or(NOT exec_probe OR NOT lib_probe), false) AS probes_missing,
+           COALESCE(bool_or(NOT exec_probe), false) AS no_exec,
+           COALESCE(bool_or(NOT libs), false) AS no_libs,
+           COALESCE(bool_or(dropped), false) AS dropped,
+           COALESCE(bool_or(pending), false) AS pending,
            COALESCE(bool_or(NOT on_time), false) AS late_beat,
            COALESCE(bool_or(NOT whole_life AND covered_since > (SELECT start_ FROM w)), false)
                AS gap_in_window,
            min(CASE WHEN whole_life THEN tracking_since ELSE covered_since END) AS since
     FROM inst
+),
+incomplete AS (
+    SELECT EXISTS (
+        SELECT 1 FROM runtime_executables e
+        WHERE e.cluster_id = p_cluster AND e.pod_namespace = p_ns AND e.workload_kind = p_kind
+          AND e.workload_name = p_name AND e.container_name = p_container
+          AND e.image_digest = p_image AND NOT e.path_complete) AS any_
 ),
 untracked AS (
     SELECT count(*) AS n
@@ -157,16 +184,21 @@ untracked AS (
           WHERE c.cluster_id = p_cluster AND c.pod_namespace = p_ns
             AND c.pod_name = p.pod_name AND c.container_name = p_container AND NOT c.ended
             AND c.last_heartbeat >= w.now_ - make_interval(secs => 3 * c.heartbeat_secs + 60))
+),
+verdict AS (
+    SELECT a.since,
+        CASE
+            WHEN a.n = 0 THEN 'no_runtime_data'
+            WHEN a.no_exec THEN 'probes_missing'
+            WHEN a.no_libs THEN 'libraries_not_tracked'
+            WHEN a.dropped THEN 'events_dropped'
+            WHEN a.pending THEN 'events_pending'
+            WHEN i.any_ THEN 'incomplete_paths'
+            WHEN a.late_beat OR a.gap_in_window OR u.n > 0 OR a.since > w.start_
+                THEN 'capture_gap'
+        END AS reason
+    FROM agg a, incomplete i, untracked u, w
 )
-SELECT
-    (a.n > 0 AND NOT a.probes_missing AND NOT a.late_beat AND NOT a.gap_in_window
-        AND u.n = 0 AND a.since <= w.start_) AS covered,
-    a.since AS observed_since,
-    CASE
-        WHEN a.n = 0 THEN 'no_runtime_data'
-        WHEN a.probes_missing THEN 'probes_missing'
-        WHEN a.late_beat OR a.gap_in_window OR u.n > 0 OR a.since > w.start_ THEN 'capture_gap'
-        ELSE NULL
-    END AS reason
-FROM agg a, untracked u, w
+SELECT (v.reason IS NULL) AS covered, v.since AS observed_since, v.reason
+FROM verdict v
 $fn$;
