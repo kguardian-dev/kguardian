@@ -30,6 +30,14 @@ rules:
   - get
   - list
   - watch
+# A pod owned by a Job is keyed on the Job's CronJob when it has one, so
+# every scheduled run shares one workload profile. The controller reads
+# the Job's ownerReferences with a single get; it never lists or watches
+# Jobs and never reads the CronJob itself.
+- apiGroups: ["batch"]
+  resources: ["jobs"]
+  verbs:
+    - get
 {{- if .Values.seccomp.distribute }}
 # Seccomp distribution: the controller watches SeccompProfile CRs
 # cluster-wide, writes each to its node, and reports per-node state via
