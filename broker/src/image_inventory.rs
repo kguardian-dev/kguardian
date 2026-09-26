@@ -809,7 +809,10 @@ pub fn list_images(
     Ok(ImagePage { items, next_after })
 }
 
-#[get("/images")]
+#[get(
+    "/images",
+    wrap = "::actix_web::middleware::from_fn(crate::auth::authorize)"
+)]
 pub async fn get_images(
     pool: web::Data<DbPool>,
     budget: web::Data<ReadBudget>,
@@ -947,7 +950,10 @@ pub fn image_detail(conn: &mut PgConnection, d: &str) -> Result<Option<ImageDeta
     }))
 }
 
-#[get("/images/{digest}")]
+#[get(
+    "/images/{digest}",
+    wrap = "::actix_web::middleware::from_fn(crate::auth::authorize)"
+)]
 pub async fn get_image(
     pool: web::Data<DbPool>,
     budget: web::Data<ReadBudget>,
@@ -1148,7 +1154,10 @@ pub fn workload_containers(
     })
 }
 
-#[get("/workloads/{namespace}/{kind}/{name}/containers")]
+#[get(
+    "/workloads/{namespace}/{kind}/{name}/containers",
+    wrap = "::actix_web::middleware::from_fn(crate::auth::authorize)"
+)]
 pub async fn get_workload_containers(
     pool: web::Data<DbPool>,
     budget: web::Data<ReadBudget>,
@@ -1590,7 +1599,10 @@ mod tests {
         );
         let pending = json!([{"name": "app", "kind": "regular", "image": "nginx:mainline"}]);
         let inv3 = inventory_from_post(&p, Some(&pending), None);
-        assert_eq!(upsert_inventory(&mut conn, &inv3).unwrap(), 1);
+        // 2 = the pod's name released from its digest row (a digest-less
+        // report means it runs nothing there right now) + ref_seen_at on
+        // the most recent digest row for the ref.
+        assert_eq!(upsert_inventory(&mut conn, &inv3).unwrap(), 2);
         assert_eq!(row_count(&mut conn), 3);
         let app = app_group(&mut conn);
         assert_eq!(app.digests.len(), 1);
