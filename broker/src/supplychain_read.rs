@@ -1469,8 +1469,9 @@ fn refresh_cve_summary_sql() -> String {
 /// Rebuild the CVE summary in one transaction (readers see the old or the
 /// new table, never half). Returns the cluster-wide CVE count.
 /// Rebuild `vuln_cve_facts` from every stored finding in one grouped
-/// scan. The rebuild REPLACES the table (DELETE, then this INSERT, in the
-/// summary's transaction); it never merges into existing rows. That is
+/// scan. The rebuild REPLACES the table (DELETE, then this INSERT, in
+/// [`refresh_cve_facts`]'s own transaction); it never merges into
+/// existing rows. That is
 /// what lets values come down: the ingest upsert only ever raises them
 /// (kev by OR, EPSS by GREATEST), so a KEV a source retracted or an EPSS
 /// that decayed is corrected here, within one retention interval. CVEs with
@@ -1485,12 +1486,43 @@ GROUP BY vuln_id \
 HAVING bool_or(kev) IS NOT NULL OR max(epss) IS NOT NULL \
     OR min(kev_date_added) IS NOT NULL OR max(epss_percentile) IS NOT NULL";
 
-pub fn refresh_cve_summary(conn: &mut PgConnection) -> QueryResult<i64> {
+/// Rebuild `vuln_cve_facts` in its own short transaction (see
+/// [`REFRESH_CVE_FACTS_SQL`]). It starts with a SHARE ROW EXCLUSIVE lock on
+/// the table, taken before any row lock, so concurrent ingest upserts wait
+/// for this rebuild only (not for the CVE summary, which commits
+/// separately) and cannot interleave with the DELETE + INSERT: no
+/// duplicate-key abort for a CVE committed mid-rebuild, and no lock cycle
+/// with an ingest updating several CVEs. Readers see the old table or the
+/// new one, never an empty one.
+pub fn refresh_cve_facts(conn: &mut PgConnection) -> QueryResult<usize> {
+    refresh_cve_facts_with(conn, || {})
+}
+
+/// [`refresh_cve_facts`] with a hook run between the DELETE and the
+/// INSERT, holding the lock (tests drive concurrent ingest from it).
+pub(crate) fn refresh_cve_facts_with(
+    conn: &mut PgConnection,
+    between: impl FnOnce(),
+) -> QueryResult<usize> {
     conn.transaction(|conn| {
-        // CVE-level KEV / EPSS first: the summary's tiers read them.
-        // Replace, never merge (REFRESH_CVE_FACTS_SQL).
+        sql_query("LOCK TABLE vuln_cve_facts IN SHARE ROW EXCLUSIVE MODE").execute(conn)?;
         sql_query("DELETE FROM vuln_cve_facts").execute(conn)?;
-        sql_query(REFRESH_CVE_FACTS_SQL).execute(conn)?;
+        between();
+        sql_query(REFRESH_CVE_FACTS_SQL).execute(conn)
+    })
+}
+
+/// The CVE-level facts (committed on their own, first), then the summary.
+pub fn refresh_cve_summary(conn: &mut PgConnection) -> QueryResult<i64> {
+    refresh_cve_facts(conn)?;
+    refresh_cve_summary_only(conn)
+}
+
+/// The per-CVE summary alone, from the facts as they are. Reads
+/// `vuln_cve_facts` and never writes it, so it holds no lock an ingest
+/// upsert waits on, however long it runs.
+pub(crate) fn refresh_cve_summary_only(conn: &mut PgConnection) -> QueryResult<i64> {
+    conn.transaction(|conn| {
         sql_query("DELETE FROM vuln_cve_summary").execute(conn)?;
         let t = crate::in_use::TierSettings::from_env();
         sql_query(refresh_cve_summary_sql())

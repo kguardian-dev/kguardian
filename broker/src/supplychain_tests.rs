@@ -2818,3 +2818,119 @@ fn live_database_cve_facts_upsert_rebuild_and_fallback() {
     .unwrap();
     assert_eq!((p.items[0].kev, p.items[0].epss), (Some(false), Some(0.05)));
 }
+
+/// A second connection to the test database (never live_conn(), which
+/// resets tables), with a lock timeout so a blocked statement fails
+/// instead of hanging the test.
+fn second_conn(lock_timeout: &str) -> PgConnection {
+    use diesel::connection::SimpleConnection;
+    let url = std::env::var("KG_TEST_DATABASE_URL").unwrap();
+    let mut c = PgConnection::establish(&url).expect("connect");
+    c.batch_execute(&format!("SET lock_timeout = '{lock_timeout}'"))
+        .unwrap();
+    c
+}
+
+/// A Grype payload for `img` with one finding of `id`, KEV and EPSS set.
+fn kev_payload(img: &str, id: &str, at: &str, epss: f64) -> VulnPayload {
+    let mut v = vulns_json(img, at, &[(id, "HIGH", None)]);
+    v["source"] = json!("grype");
+    v["sbom_source"] = json!("registry");
+    v["observed_in"] = json!([]);
+    v["vulnerabilities"][0]["kev"] = json!(true);
+    v["vulnerabilities"][0]["epss"] = json!(epss);
+    normalise_vulnerabilities(img, parse_vulns(v), Utc::now()).unwrap()
+}
+
+/// The CVE summary never holds a lock an ingest waits on: with the
+/// summary's transaction still open, an ingest that updates an existing
+/// CVE's facts and one that adds a new CVE both finish at once (a 3 s lock
+/// timeout would fail them), instead of waiting for the whole pass.
+#[test]
+#[ignore = "requires a live postgres (set KG_TEST_DATABASE_URL)"]
+fn live_database_ingest_never_waits_for_the_cve_summary() {
+    let mut conn = live_conn();
+    store_vulnerabilities(
+        &mut conn,
+        kev_payload(&d(120), "CVE-2026-0601", "2026-09-20T08:00:00Z", 0.2),
+    )
+    .unwrap();
+    crate::supplychain_read::refresh_cve_facts(&mut conn).unwrap();
+    conn.transaction::<_, diesel::result::Error, _>(|c| {
+        crate::supplychain_read::refresh_cve_summary_only(c)?;
+        // The summary's transaction is still open here.
+        let h = std::thread::spawn(|| {
+            let mut b = second_conn("3s");
+            let t = std::time::Instant::now();
+            store_vulnerabilities(
+                &mut b,
+                kev_payload(&d(120), "CVE-2026-0601", "2026-09-21T08:00:00Z", 0.9),
+            )
+            .map_err(|e| format!("existing CVE: {e}"))?;
+            store_vulnerabilities(
+                &mut b,
+                kev_payload(&d(121), "CVE-2026-0602", "2026-09-21T08:00:00Z", 0.5),
+            )
+            .map_err(|e| format!("new CVE: {e}"))?;
+            Ok::<_, String>(t.elapsed())
+        });
+        let took = h
+            .join()
+            .unwrap()
+            .expect("ingest must not block on the summary");
+        assert!(
+            took < std::time::Duration::from_secs(2),
+            "ingest waited {took:?}"
+        );
+        Ok(())
+    })
+    .unwrap();
+    assert_eq!(
+        count(&mut conn, "SELECT count(*) AS n FROM vuln_cve_facts WHERE kev AND (vuln_id = 'CVE-2026-0602' OR (vuln_id = 'CVE-2026-0601' AND epss > 0.8))"),
+        2
+    );
+}
+
+/// A new CVE ingested while the facts rebuild is between its DELETE and
+/// INSERT neither aborts the rebuild (duplicate key) nor is lost: the
+/// ingest waits on the table lock (it has not committed after 700 ms),
+/// then lands after the rebuild commits.
+#[test]
+#[ignore = "requires a live postgres (set KG_TEST_DATABASE_URL)"]
+fn live_database_a_cve_ingested_mid_rebuild_waits_and_is_kept() {
+    let mut conn = live_conn();
+    store_vulnerabilities(
+        &mut conn,
+        kev_payload(&d(122), "CVE-2026-0603", "2026-09-20T08:00:00Z", 0.1),
+    )
+    .unwrap();
+    let (tx, rx) = std::sync::mpsc::channel::<Result<(), String>>();
+    let mut handle = None;
+    crate::supplychain_read::refresh_cve_facts_with(&mut conn, || {
+        handle = Some(std::thread::spawn(move || {
+            let mut b = second_conn("20s");
+            let r = store_vulnerabilities(
+                &mut b,
+                kev_payload(&d(123), "CVE-2026-0604", "2026-09-21T08:00:00Z", 0.95),
+            )
+            .map(|_| ())
+            .map_err(|e| e.to_string());
+            tx.send(r).unwrap();
+        }));
+        std::thread::sleep(std::time::Duration::from_millis(700));
+        assert!(
+            rx.try_recv().is_err(),
+            "the ingest committed during the rebuild"
+        );
+    })
+    .expect("the rebuild must not abort");
+    handle.unwrap().join().unwrap();
+    rx.recv()
+        .unwrap()
+        .expect("the ingest must succeed after the rebuild");
+    assert_eq!(
+        count(&mut conn, "SELECT count(*) AS n FROM vuln_cve_facts WHERE vuln_id IN ('CVE-2026-0603', 'CVE-2026-0604') AND kev"),
+        2,
+        "both the rebuilt and the late CVE are there"
+    );
+}
