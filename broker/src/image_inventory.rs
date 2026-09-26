@@ -587,6 +587,19 @@ UPDATE workload_containers SET last_pod_name = NULL \
 WHERE cluster_id = $1 AND pod_namespace = $2 AND workload_kind = $3 AND workload_name = $4 \
   AND container_name = $5 AND image_digest <> $6 AND last_pod_name = $7";
 
+/// The digest-less twin of [`CONTAINER_RELEASE_SQL`]: a pod that reports
+/// a container with NO digest (recreated under the same name and stuck
+/// pulling, or an in-place image patch that fails to pull) runs nothing
+/// there, so its name comes off every digest row of that container.
+/// Otherwise a StatefulSet pod `web-0` stuck in `ImagePullBackOff` would
+/// keep its previous digest reading as running through the live-pod
+/// backstop for as long as it stayed stuck. Matches nothing in the
+/// steady state.
+pub(crate) const CONTAINER_RELEASE_ALL_SQL: &str = "\
+UPDATE workload_containers SET last_pod_name = NULL \
+WHERE cluster_id = $1 AND pod_namespace = $2 AND workload_kind = $3 AND workload_name = $4 \
+  AND container_name = $5 AND last_pod_name = $6";
+
 /// A container reported with an image ref but no digest yet — the pod is
 /// (re)starting or stuck pulling (`ContainerCreating`, `ImagePullBackOff`).
 /// It never creates a row (no digest is known to run) and it never makes
@@ -626,6 +639,16 @@ pub fn upsert_inventory(conn: &mut PgConnection, inv: &Inventory) -> Result<usiz
                 .execute(conn)?;
         }
         for c in &inv.containers {
+            if c.image_digest.is_none() {
+                n += sql_query(CONTAINER_RELEASE_ALL_SQL)
+                    .bind::<Text, _>(&c.cluster_id)
+                    .bind::<Text, _>(&c.namespace)
+                    .bind::<Text, _>(&c.workload_kind)
+                    .bind::<Text, _>(&c.workload_name)
+                    .bind::<Text, _>(&c.container_name)
+                    .bind::<Text, _>(&c.last_pod_name)
+                    .execute(conn)?;
+            }
             if let Some(digest) = c.image_digest.as_deref() {
                 n += sql_query(CONTAINER_RELEASE_SQL)
                     .bind::<Text, _>(&c.cluster_id)
@@ -1801,6 +1824,86 @@ mod tests {
                 .unwrap();
         assert_eq!(kept.len(), 1);
         assert_eq!(kept[0].image_digest, digests[2]);
+        conn.batch_execute(reset).unwrap();
+    }
+
+    #[test]
+    #[ignore = "requires a live postgres (set KG_TEST_DATABASE_URL)"]
+    fn live_database_same_name_pod_stuck_pulling_releases_its_old_digest() {
+        use diesel::connection::SimpleConnection;
+        let mut conn = live_conn();
+        let reset = "DELETE FROM pod_details WHERE pod_name LIKE 'inv-test-%'";
+        conn.batch_execute(reset).unwrap();
+        // StatefulSet pod web-0, live throughout (same name before and after).
+        conn.batch_execute(
+            "INSERT INTO pod_details (pod_name, pod_ip, pod_namespace, time_stamp, node_name, is_dead) \
+             VALUES ('inv-test-web-0', '10.9.9.7', 'prod', timezone('UTC', NOW()), 'n', false)",
+        )
+        .unwrap();
+        let d = |i: u8| format!("sha256:{:064x}", i);
+        // web-0 runs D1 in `app` (StatefulSet recreate case), D2 in `side`
+        // (in-place patch case) and D3 under a mutable tag in `tagged`.
+        post_state(
+            &mut conn,
+            "inv-test-web-0",
+            json!([
+                {"name": "app", "kind": "regular", "image": "app:1", "digest": d(1),
+                 "digest_kind": "repo", "state": "running"},
+                {"name": "side", "kind": "regular", "image": "side:1", "digest": d(2),
+                 "digest_kind": "repo", "state": "running"},
+                {"name": "tagged", "kind": "regular", "image": "t:latest", "digest": d(3),
+                 "digest_kind": "repo", "state": "running"}
+            ]),
+        );
+        conn.batch_execute(&format!(
+            "UPDATE workload_containers SET last_seen = timezone('UTC', NOW()) \
+               - INTERVAL '{} seconds'",
+            running_window_secs() + 60
+        ))
+        .unwrap();
+        // Past the window, the live pod still holds all three running.
+        for i in 1..=3 {
+            assert_eq!(running_count_of(&mut conn, &d(i)), 1);
+        }
+
+        // Same name, no digests any more:
+        // - app: web-0 recreated on a new ref, stuck in ImagePullBackOff;
+        // - side: an in-place image patch to a ref that fails to pull;
+        // - tagged: recreated on the SAME mutable ref, stuck pulling.
+        post_state(
+            &mut conn,
+            "inv-test-web-0",
+            json!([
+                {"name": "app", "kind": "regular", "image": "app:2",
+                 "state": "waiting", "state_reason": "ImagePullBackOff"},
+                {"name": "side", "kind": "regular", "image": "side:broken",
+                 "state": "waiting", "state_reason": "ErrImagePull"},
+                {"name": "tagged", "kind": "regular", "image": "t:latest",
+                 "state": "waiting", "state_reason": "ImagePullBackOff"}
+            ]),
+        );
+        for i in 1..=3 {
+            assert_eq!(
+                running_count_of(&mut conn, &d(i)),
+                0,
+                "digest {i} must stop reading as running"
+            );
+        }
+        let wc = workload_containers(&mut conn, "prod", "Deployment", "web").unwrap();
+        for c in &wc.containers {
+            assert!(c.digests.is_empty(), "{}", c.container_name);
+            assert!(c.previous_digests.iter().all(|d| d.last_pod_name.is_none()));
+        }
+        // A repeat of the stuck report writes nothing.
+        assert_eq!(
+            post_state(
+                &mut conn,
+                "inv-test-web-0",
+                json!([{"name": "app", "kind": "regular", "image": "app:2",
+                    "state": "waiting", "state_reason": "ImagePullBackOff"}]),
+            ),
+            0
+        );
         conn.batch_execute(reset).unwrap();
     }
 
