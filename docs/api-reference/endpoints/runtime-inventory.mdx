@@ -259,7 +259,10 @@ the workload container and image:
 - no instance still had entries waiting to reach the broker at its last
   heartbeat;
 - no path of the container and image is incomplete (a truncated path
-  cannot be matched to the package that owns it);
+  cannot be matched to the package that owns it), and no instance reported
+  its inventory incomplete: the `/proc` backfill reads at most 4 MiB of a
+  process's `maps`, and a container cut short there stays uncovered for
+  as long as it runs;
 - every such instance is still heartbeating on time (within
   3 × interval + 60 s), or ended cleanly;
 - every such instance was either captured from its start with no gap
@@ -282,8 +285,8 @@ and that file is reported again on its next use.
 
 ## POST /runtime/coverage
 
-Controller heartbeats; requires the `ingest` scope. At most 5000 per post
-(`413` above that), 4 MiB body. Invalid entries are dropped and counted.
+Controller heartbeats; requires the `ingest` scope. At most 5000 per post,
+counted while parsing (`413` above that), 4 MiB body. Invalid entries are dropped and counted.
 A heartbeat older than the stored one is ignored, and a container's row
 is frozen once a heartbeat with `ended: true` arrives.
 
@@ -296,7 +299,7 @@ is frozen once a heartbeat with `ended: true` arrives.
     "container_id": "5e1e2d3c…", "node_name": "node-1",
     "mode": "full", "exec_probe": true, "lib_probe": true,
     "start_mode": "start", "tracking_since": "2026-09-26T10:00:00",
-    "events_dropped": 0, "unsent": 0, "ended": false,
+    "events_dropped": 0, "unsent": 0, "incomplete": false, "ended": false,
     "heartbeat_at": "2026-09-27T08:15:00", "heartbeat_secs": 300
   }
 ]
