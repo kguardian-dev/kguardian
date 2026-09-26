@@ -465,14 +465,14 @@ done
 # enabled render below carries it.
 SC_ON=(--set supplychain.enabled=true --set broker.auth.enabled=true --set broker.auth.existingSecret=kg)
 
-# 10a. Defaults render nothing of it.
+# 11a. Defaults render nothing of it.
 render "supplychain-default-off" && {
   assert_absent  "supplychain-default-off" "kguardian-supplychain"
   assert_absent  "supplychain-default-off" "aquasecurity.github.io"
   assert_deploys "supplychain-default-off" 4
 }
 
-# 10b. Enabled: one more Deployment, hardened, broker ingest still off.
+# 11b. Enabled: one more Deployment, hardened, broker ingest still off.
 render "supplychain-enabled" "${SC_ON[@]}" && {
   assert_deploys "supplychain-enabled" 5
   assert_has     "supplychain-enabled" "name: kguardian-supplychain"
@@ -492,7 +492,7 @@ render "supplychain-enabled" "${SC_ON[@]}" && {
     { echo "FAIL [supplychain-enabled]: REGISTRY_ALLOW_PRIVATE must default to false"; fail=1; }
 }
 
-# 10b-ii. registryLookup follows brokerIngest unless set explicitly.
+# 11b-ii. registryLookup follows brokerIngest unless set explicitly.
 render "supplychain-lookup-follows-ingest" "${SC_ON[@]}" \
   --set supplychain.brokerIngest.enabled=true && {
   grep -A1 'name: REGISTRY_LOOKUP_ENABLED' <<<"$OUT" | grep -q 'value: "true"' || \
@@ -509,7 +509,7 @@ render "supplychain-lookup-private" "${SC_ON[@]}" \
     { echo "FAIL [supplychain-lookup-private]: allowPrivateRegistries must propagate"; fail=1; }
 }
 
-# 10c. The ClusterRole is exactly get/list/watch on the two report resources.
+# 11c. The ClusterRole is exactly get/list/watch on the two report resources.
 # Rendered alone so nothing else in the chart can satisfy or mask the checks.
 if role="$(helm template compat "$CHART" "${SC_ON[@]}" \
     --show-only templates/supplychain/clusterrole.yaml 2>/dev/null)"; then
@@ -528,7 +528,7 @@ else
   echo "FAIL [supplychain-rbac]: clusterrole did not render"; fail=1
 fi
 
-# 10d. Source off: no ClusterRole, and no API token mounted.
+# 11d. Source off: no ClusterRole, and no API token mounted.
 render "supplychain-no-trivy" "${SC_ON[@]}" \
   --set supplychain.sources.trivyOperator.enabled=false && {
   assert_absent  "supplychain-no-trivy" "aquasecurity.github.io"
@@ -536,7 +536,7 @@ render "supplychain-no-trivy" "${SC_ON[@]}" \
   assert_deploys "supplychain-no-trivy" 5
 }
 
-# 10e. With the broker NetworkPolicy on, supplychain is an admitted peer;
+# 11e. With the broker NetworkPolicy on, supplychain is an admitted peer;
 # without supplychain, it is not.
 render "supplychain-broker-netpol" "${SC_ON[@]}" \
   --set broker.networkPolicy.enabled=true --set 'broker.networkPolicy.allowedNodeCIDRs={10.0.0.0/16}' && {
@@ -548,7 +548,7 @@ render "broker-netpol-no-supplychain" --set broker.networkPolicy.enabled=true \
   assert_absent "broker-netpol-no-supplychain" "kguardian-supplychain"
 }
 
-# 10f. Its own NetworkPolicy: closed ingress unless scrapers are listed.
+# 11f. Its own NetworkPolicy: closed ingress unless scrapers are listed.
 render "supplychain-netpol" "${SC_ON[@]}" \
   --set supplychain.networkPolicy.enabled=true && {
   assert_has "supplychain-netpol" "ingress: \[\]"
