@@ -46,7 +46,7 @@ container ran, matched to the packages in the image's SBOM.
 | `P2` | In use and medium or low, or high with no fix and not exposed. |
 | `Background` | Installed and not observed. |
 
-`-` means the broker predates tiers. The EPSS threshold and exposure
+`-` means the tier is not computed yet (the first pass after an upgrade, or a broker without tiers); it never means low risk. The EPSS threshold and exposure
 default are Helm values (`broker.supplychain.tiers`); see the
 [vulnerability API](/api-reference/endpoints/vulnerabilities#risk-tiers).
 

@@ -208,7 +208,7 @@ unknown = no evidence either way (treat as potentially reachable, never as unuse
 over a covered window, which is not proof the code can never run.
 TIER: P0 = in use + (KEV or high EPSS) + exposed (no observed ingress counts as exposed, so a KEV finding
 there is P0); P1 = in use + critical/high, or P0 factors without exposure; P2 = in use + medium/low, or
-high with no fix and not exposed; Background = installed, not observed. "-" = the broker has no tiers.
+high with no fix and not exposed; Background = installed, not observed. "-" = not computed yet (never low risk).
 `
 
 func parseDigestArg(raw string) (string, error) {
