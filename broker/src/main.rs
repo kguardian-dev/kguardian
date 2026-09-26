@@ -326,6 +326,11 @@ async fn main() -> Result<(), std::io::Error> {
     // chart. Disable by setting AUDIT_VERDICTS_RETENTION_DAYS=0.
     spawn_retention(pool.clone());
 
+    // Image attestation results not re-checked within
+    // IMAGE_ATTESTATION_RETENTION_DAYS (attestation.rs). Results for
+    // digests that left the inventory are deleted by the same pass.
+    api::spawn_attestation_retention(pool.clone());
+
     // Re-resolves the peer identity of recently ingested traffic rows
     // whose peer pod's spec had not arrived yet (peer.rs). Disable with
     // PEER_LATE_RESOLVE_WINDOW_SECS=0.
@@ -698,6 +703,7 @@ pub async fn metrics(
     );
     // Supply-chain ingest counters (process atomics, no query).
     body.push_str(&api::supplychain::render_metrics());
+    body.push_str(&api::attestation_metrics());
     // In-memory, refreshed on its own timer (profile_drift.rs).
     body.push_str(&drift.get_ref().render());
 

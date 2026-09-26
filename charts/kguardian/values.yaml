@@ -801,6 +801,12 @@ broker:
       # -- A paged SBOM whose pages stop arriving is discarded this many
       # seconds after its last page (minimum 60).
       sbomPageTtlSeconds: 3600
+      # -- Image signature results (supplychain.signatureDiscovery) not
+      # re-checked for this many days are deleted: the component re-checks
+      # every running digest at least daily, so an older result means it
+      # stopped and the verdict is stale. 0 keeps them. Results for digests
+      # that left the image inventory are deleted either way.
+      attestationDays: 7
     # -- Risk tiers for vulnerability findings (P0, P1, P2, Background).
     # P0: package in use AND (CISA KEV or EPSS >= epss) AND exposed by
     # observed ingress. P1: in use and critical/high, or the P0 factors
@@ -2048,6 +2054,37 @@ supplychain:
     # addresses are always refused, checked after DNS resolution and on
     # every redirect and token-realm request.
     allowPrivateRegistries: false
+
+  signatureDiscovery:
+    # -- (bool) Find out who signed every running image digest: cosign
+    # signatures (keyless and key) and Sigstore attestations (SLSA
+    # provenance, SBOMs), verified with sigstore-go. Reports only, never
+    # blocks a workload. Off by default: when on, the component contacts
+    # each image's registry anonymously (never with pull secrets, so a
+    # private image reads as "unknown", never "unsigned") and, unless
+    # trustedRoot is set, the Sigstore TUF CDN (tuf-repo-cdn.sigstore.dev).
+    # Needs brokerIngest.enabled=true.
+    enabled: false
+    # -- How often every running digest is checked. Results are cached per
+    # digest for 24h (1h for "unknown"), so a pass mostly re-posts nothing.
+    interval: 10m
+    # -- Digests verified concurrently (1-16).
+    workers: 2
+    # -- Registry requests per second, all registries together.
+    registryRps: 5
+    # -- Public keys for images signed with a cosign key pair, as a map of
+    # key name to PEM public key (helm's set-file flag works well here). A
+    # signature one of these verifies is "verified" and attributed to the
+    # key; a key signature none of them verifies is "key_signed" (exists,
+    # not checked). Public keys only.
+    publicKeys: {}
+    # -- trusted_root.json (Sigstore protobuf-specs TrustedRoot) for a
+    # private Sigstore or an air-gapped cluster. Empty uses the public-good
+    # instance over TUF.
+    trustedRoot: ""
+    # -- Drop the certificate-transparency (SCT) requirement, for a private
+    # Fulcio without a CT log.
+    skipSCT: false
 
   # -- List of image pull secrets for private registries
   imagePullSecrets: []

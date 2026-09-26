@@ -1,0 +1,129 @@
+---
+title: "Signature Endpoints"
+description: "Who signed each running image digest: cosign signatures and Sigstore attestations"
+icon: "signature"
+---
+
+## Overview
+
+With `supplychain.signatureDiscovery.enabled`, the supplychain component
+checks every running image digest for cosign signatures and Sigstore
+attestations, verifies them with sigstore-go and posts one result per
+digest. The broker stores the latest result for each digest and serves it.
+It never verifies anything itself, and nothing here blocks a workload.
+
+How discovery works and what each verdict means is in
+`supplychain/README.md` ("Signature discovery"). In short:
+
+| `verdict` | |
+|---|---|
+| `verified` | A signature verified. The signer is a keyless identity (OIDC issuer + certificate SAN) or a configured public key. |
+| `key_signed` | Signed with a public key kguardian was not given: the signature exists and was not checked. |
+| `unsigned` | No signature, and every lookup answered. |
+| `invalid` | Signatures exist and none verified (`reason`: `bad_signature`, `digest_mismatch`, `malformed`). |
+| `unknown` | Could not be checked (`reason`: `registry_auth` for a private image, `rate_limited`, `network`, `timeout`, `no_repo_digest`, `trust_root_unavailable`, `untrusted_root`, ...). Not the same as unsigned. |
+
+`verified` means valid, not trusted: any Fulcio identity or configured key
+can produce a valid signature, and anyone who can push to the repository
+can attach one. Never show it without the signer.
+
+## Reads (read token)
+
+### `GET /images/{digest}/attestation`
+
+The stored result for one digest, or `404`.
+
+```json
+{
+  "digest": "sha256:ee6521f2...",
+  "repository": "registry.k8s.io/pause",
+  "verdict": "verified",
+  "reason": null,
+  "trustRoot": "public-good",
+  "signedVia": "self",
+  "signedDigest": "sha256:ee6521f2...",
+  "signatures": [
+    {"format": "cosign-legacy", "source": "sig-tag", "verified": true,
+     "signerKind": "keyless",
+     "issuer": "https://accounts.google.com",
+     "san": "krel-trust@k8s-releng-prod.iam.gserviceaccount.com",
+     "integratedTime": "2024-05-23T21:35:29Z", "tlogIndex": 96410323}
+  ],
+  "attestations": [],
+  "checkedAt": "2026-09-27T10:00:00",
+  "receivedAt": "2026-09-27T10:00:01"
+}
+```
+
+- `signedVia` is `index` when the signature was found on the multi-arch
+  index that lists the digest rather than on the digest itself;
+  `signedDigest` is then the index.
+- A key signature has `signerKind: "key"`, `keyName` and `keyFingerprint`
+  (sha256 of the DER public key) instead of `issuer` and `san`. A
+  key-signed bundle also carries `keyHint`, verified or not.
+- An unverified signature or attestation has `error` and `detail` and no
+  identity: a claimed signer is never shown as a fact. Unverified
+  attestations carry no `provenance` either.
+- Each attestation has `predicateType`, `payloadSha256` (sha256 of the
+  in-toto statement) and, for SLSA provenance, `provenance.builderId`,
+  `sourceRepo`, `sourceCommit`, `sourceRef`.
+
+### `GET /attestations`
+
+A keyset page of summaries, ordered by digest.
+
+| Query | |
+|---|---|
+| `verdict` | One of the verdicts above. |
+| `repository` | Exact repository, e.g. `ghcr.io/org/app`. |
+| `limit` | 1-500, default 100. |
+| `after` | The previous page's `nextAfter`. |
+
+Each item has `digest`, `repository`, `verdict`, `reason`, `signedVia`,
+`checkedAt`, up to 8 distinct verified `signers` (`{kind: "keyless",
+issuer, san}` or `{kind: "key", keyName, keyFingerprint}`) and up to 16
+`verifiedPredicates`. In the summary, the repository, issuers, SANs and
+predicate types are cut to 256 bytes (never inside a character); the full
+values are in the single-digest read.
+
+Both reads are charged to the broker's read-memory budget and answer `503`
+with `Retry-After` rather than a partial result.
+
+## Ingest (supplychain token)
+
+```
+POST /images/{digest}/attestation
+```
+
+- **Scoped auth only**, like the vulnerability ingest: a token with the
+  `supplychain` scope, `403` otherwise (also with broker auth off).
+- Plain JSON (no `Content-Encoding`), at most 256 KiB, received within
+  30 s. At most 32 signatures and 64 attestations (`413`); long strings
+  are truncated.
+- `422` for an unknown `schema_version`, `verdict` or `signer_kind`, a body
+  digest that differs from the path, a control character, U+2028/U+2029
+  or a bidi/format control (U+200E/F, U+202A-E, U+2066-9, U+FEFF) in any
+  string, or a malformed reason code (the message names the field),
+  `checked_at` more than 60 s ahead, a
+  verdict that does not match the signatures (`verified` with none
+  verified, `unsigned` with signatures, ...), or a verified signer's
+  identity or provenance longer than the limits: those are stored whole or
+  refused, never truncated, because trust policies match them.
+- A well-formed reason code this broker does not know (a newer
+  supplychain) is stored as `unrecognised_reason`, logged once per code and
+  counted in `kguardian_attestation_unrecognised_reason_total`; it never
+  changes the verdict. Unknown verdicts and signer kinds are still `422`.
+- The digest must be in the image inventory (`404` otherwise).
+- A result replaces the stored one only with a strictly newer
+  `checked_at`. The same result again answers `200`; a different result
+  with an equal or older `checked_at` answers `409`. New results answer
+  `201`.
+
+## Retention
+
+An hourly pass deletes results whose digest has left the image inventory
+(no workload has run it for the `broker.imageInventory` retention window),
+and results not re-checked for
+`broker.supplychain.retention.attestationDays` (default 7; 0 keeps them):
+the component re-checks every running digest at least daily, so an older
+result means it stopped.

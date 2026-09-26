@@ -3,8 +3,8 @@
 //
 //	serve     the central Deployment. Reads vulnerability and SBOM sources
 //	          (today: Trivy Operator reports), normalises them per image
-//	          digest and hands them to the broker. Later: the Grype matcher
-//	          and the attestation verifier.
+//	          digest and hands them to the broker. Optionally discovers
+//	          who signed each running image digest (ATTESTATION_ENABLED).
 //	node-sbom the optional per-node SBOM sidecar. Not implemented yet.
 //
 // Configuration is by environment variable; see supplychain/README.md.
@@ -161,6 +161,10 @@ func serve() error {
 	if err != nil {
 		return err
 	}
+	ac, err := loadAttestConfig(os.Getenv)
+	if err != nil {
+		return err
+	}
 	log := logrus.New()
 	log.SetFormatter(&logrus.JSONFormatter{})
 	if lvl, err := logrus.ParseLevel(c.LogLevel); err == nil {
@@ -177,6 +181,7 @@ func serve() error {
 		"registrySBOM":         c.RegistrySBOM,
 		"grypeMatcher":         c.GrypeMatcherURL != "",
 		"brokerAuth":           c.BrokerToken != "",
+		"signatureDiscovery":   ac.Enabled,
 	}).Info("kguardian-supplychain starting")
 
 	client, err := newBrokerClient(c, log)
@@ -216,6 +221,20 @@ func serve() error {
 		go func() {
 			defer wg.Done()
 			coord.Run(ctx, time.Minute)
+		}()
+	}
+
+	if ac.Enabled {
+		ar, err := newAttestRunner(ac, c, registry.Guard{AllowPrivate: c.RegistryAllowPrivate}, m.Registry, log)
+		if err != nil {
+			return fmt.Errorf("signature discovery: %w", err)
+		}
+		// Never part of readiness: a slow registry must not take the
+		// component out of service.
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			ar.Run(ctx)
 		}()
 	}
 

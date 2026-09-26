@@ -25,7 +25,17 @@ spec:
       app.kubernetes.io/name: {{ .Values.supplychain.service.name }}
   template:
     metadata:
-      {{- with .Values.supplychain.podAnnotations }}
+      {{- $sdA := .Values.supplychain.signatureDiscovery | default dict }}
+      {{- /* Keys are read at startup: a changed key or trusted root rolls the pod. */}}
+      {{- $roll := dict }}
+      {{- if and $sdA.enabled $sdA.publicKeys }}
+      {{- $_ := set $roll "checksum/signing-keys" (toYaml $sdA.publicKeys | sha256sum) }}
+      {{- end }}
+      {{- if and $sdA.enabled $sdA.trustedRoot }}
+      {{- $_ := set $roll "checksum/sigstore-root" ($sdA.trustedRoot | sha256sum) }}
+      {{- end }}
+      {{- $ann := merge $roll (.Values.supplychain.podAnnotations | default dict) }}
+      {{- with $ann }}
       annotations:
         {{- toYaml . | nindent 8 }}
       {{- end }}
@@ -84,6 +94,30 @@ spec:
               value: {{ .Values.supplychain.sources.registry.enabled | default false | quote }}
             - name: REGISTRY_SBOM_INTERVAL
               value: {{ .Values.supplychain.sources.registry.interval | quote }}
+            {{- $sd := .Values.supplychain.signatureDiscovery | default dict }}
+            {{- if $sd.enabled }}
+            {{- if not .Values.supplychain.brokerIngest.enabled }}
+            {{- fail "supplychain.signatureDiscovery.enabled=true needs supplychain.brokerIngest.enabled=true: the running digests come from the broker and results go back to it" }}
+            {{- end }}
+            - name: ATTESTATION_ENABLED
+              value: "true"
+            - name: ATTESTATION_INTERVAL
+              value: {{ $sd.interval | default "10m" | quote }}
+            - name: ATTESTATION_WORKERS
+              value: {{ $sd.workers | default 2 | quote }}
+            - name: ATTESTATION_REGISTRY_RPS
+              value: {{ $sd.registryRps | default 5 | quote }}
+            - name: ATTESTATION_SKIP_SCT
+              value: {{ $sd.skipSCT | default false | quote }}
+            {{- if $sd.publicKeys }}
+            - name: ATTESTATION_KEYS_DIR
+              value: /etc/kguardian/signing-keys
+            {{- end }}
+            {{- if $sd.trustedRoot }}
+            - name: ATTESTATION_TRUSTED_ROOT_FILE
+              value: /etc/kguardian/sigstore/trusted_root.json
+            {{- end }}
+            {{- end }}
             {{- /* Scoped token: this component can only reach the supplychain routes. */}}
             {{- include "kguardian.brokerAuthClientEnv" (dict "root" $ "scope" "supplychain") | nindent 12 }}
             {{- if .Values.supplychain.grype.enabled }}
@@ -115,6 +149,16 @@ spec:
             {{- if .Values.supplychain.sources.trivyOperator.enabled }}
             - name: kube-api-access
               mountPath: /var/run/secrets/kubernetes.io/serviceaccount
+              readOnly: true
+            {{- end }}
+            {{- if and $sd.enabled $sd.publicKeys }}
+            - name: signing-keys
+              mountPath: /etc/kguardian/signing-keys
+              readOnly: true
+            {{- end }}
+            {{- if and $sd.enabled $sd.trustedRoot }}
+            - name: sigstore-root
+              mountPath: /etc/kguardian/sigstore
               readOnly: true
             {{- end }}
         {{- if .Values.supplychain.grype.enabled }}
@@ -218,6 +262,16 @@ spec:
         - name: grype-tmp
           emptyDir:
             sizeLimit: 64Mi
+        {{- end }}
+        {{- if and $sd.enabled $sd.publicKeys }}
+        - name: signing-keys
+          configMap:
+            name: {{ .Values.supplychain.service.name }}-signing-keys
+        {{- end }}
+        {{- if and $sd.enabled $sd.trustedRoot }}
+        - name: sigstore-root
+          configMap:
+            name: {{ .Values.supplychain.service.name }}-sigstore-root
         {{- end }}
       {{- with .Values.supplychain.nodeSelector }}
       nodeSelector:

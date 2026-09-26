@@ -9,17 +9,18 @@ use actix_web::web;
 
 use crate::{
     add_node_facts, add_pod_details, add_pods_batch, add_pods_syscalls, add_svc_details,
-    compute_ingest_scope, delete_seccomp_cr, export_seccomp_profile, export_seccomp_profile_post,
-    get_audit_verdicts, get_cluster_environment, get_compute_contention, get_compute_findings,
-    get_compute_history, get_compute_latest, get_compute_nodes, get_image, get_image_runtime,
-    get_images, get_pod_by_ip, get_pod_by_name, get_pod_details, get_pod_syscall_name,
-    get_pod_traffic, get_pod_traffic_name, get_pods_by_node, get_seccomp_profile,
-    get_seccomp_profile_file, get_svc_by_ip, get_svc_details, get_version, get_vulnerabilities,
-    get_vulnerability_exposure, get_workload_containers, get_workload_export, get_workload_profile,
-    get_workload_profile_diff, get_workload_profile_version, get_workload_profile_versions,
-    get_workload_runtime, get_workloads, image_sbom_cyclonedx_resource, image_sbom_resource,
-    image_vulnerabilities_resource, list_seccomp_profiles, mark_pod_dead, post_seccomp_node_status,
-    post_workload_export, put_seccomp_cr, runtime_coverage_resource, runtime_executables_resource,
+    attestation_resource, compute_ingest_scope, delete_seccomp_cr, export_seccomp_profile,
+    export_seccomp_profile_post, get_attestations, get_audit_verdicts, get_cluster_environment,
+    get_compute_contention, get_compute_findings, get_compute_history, get_compute_latest,
+    get_compute_nodes, get_image, get_image_runtime, get_images, get_pod_by_ip, get_pod_by_name,
+    get_pod_details, get_pod_syscall_name, get_pod_traffic, get_pod_traffic_name, get_pods_by_node,
+    get_seccomp_profile, get_seccomp_profile_file, get_svc_by_ip, get_svc_details, get_version,
+    get_vulnerabilities, get_vulnerability_exposure, get_workload_containers, get_workload_export,
+    get_workload_profile, get_workload_profile_diff, get_workload_profile_version,
+    get_workload_profile_versions, get_workload_runtime, get_workloads,
+    image_sbom_cyclonedx_resource, image_sbom_resource, image_vulnerabilities_resource,
+    list_seccomp_profiles, mark_pod_dead, post_seccomp_node_status, post_workload_export,
+    put_seccomp_cr, runtime_coverage_resource, runtime_executables_resource,
     seccomp_denials_resource,
 };
 
@@ -81,6 +82,9 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
         // Supply chain (#1533 P1-3). GET + POST share a resource per path;
         // the POSTs read and cap their own gzip bodies (supplychain.rs).
         .service(image_vulnerabilities_resource())
+        // Image signatures and attestations (#1533 P2-1).
+        .service(attestation_resource())
+        .service(get_attestations)
         .service(image_sbom_resource())
         .service(image_sbom_cyclonedx_resource())
         .service(get_vulnerabilities)
