@@ -21,6 +21,10 @@ func addKnownTypes(scheme *runtime.Scheme) error {
 		&AuditClusterNetworkPolicyList{},
 		&ApplicationSecurityProfile{},
 		&ApplicationSecurityProfileList{},
+		&ImageTrustPolicy{},
+		&ImageTrustPolicyList{},
+		&ClusterImageTrustPolicy{},
+		&ClusterImageTrustPolicyList{},
 	)
 	metav1.AddToGroupVersion(scheme, schema.GroupVersion{Group: GroupName, Version: Version})
 	return nil
