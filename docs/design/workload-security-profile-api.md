@@ -963,23 +963,35 @@ From a live broker build (`live_evidence_drives_the_profile_and_its_patch`, `bod
         {
           "capability": "SYS_ADMIN",
           "count": 4,
-          "firstSeen": "2026-09-26T09:25:52.776254",
-          "lastSeen": "2026-09-26T09:25:52.776254"
+          "firstSeen": "2026-09-26T10:00:00",
+          "lastSeen": "2026-09-26T10:21:32.318161"
         }
       ],
       "digests": [
         "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
       ],
       "evidence": "sufficient",
-      "observedSince": "2026-09-18T01:25:52.764518",
+      "observedSince": "2026-09-18T02:21:31.802901",
+      "probed": [
+        {
+          "capability": "SYS_ADMIN",
+          "count": 25,
+          "firstSeen": "2026-09-26T10:00:00",
+          "lastSeen": "2026-09-26T10:21:32.442889"
+        }
+      ],
       "reason": null,
       "recommendation": {
         "add": [
           "NET_BIND_SERVICE",
+          "SYS_ADMIN",
           "SYS_TIME"
         ],
         "drop": [
           "ALL"
+        ],
+        "probedKept": [
+          "SYS_ADMIN"
         ]
       },
       "unusedAdded": [
@@ -989,14 +1001,14 @@ From a live broker build (`live_evidence_drives_the_profile_and_its_patch`, `bod
         {
           "capability": "NET_BIND_SERVICE",
           "count": 5,
-          "firstSeen": "2026-09-26T09:25:52.768965",
-          "lastSeen": "2026-09-26T09:25:52.771602"
+          "firstSeen": "2026-09-26T10:00:00",
+          "lastSeen": "2026-09-26T10:21:32.103009"
         },
         {
           "capability": "SYS_TIME",
           "count": 1,
-          "firstSeen": "2026-09-26T09:25:52.773930",
-          "lastSeen": "2026-09-26T09:25:52.773930"
+          "firstSeen": "2026-09-26T10:00:00",
+          "lastSeen": "2026-09-26T10:21:32.219932"
         }
       ]
     }
@@ -1008,29 +1020,36 @@ From a live broker build (`live_evidence_drives_the_profile_and_its_patch`, `bod
 - `windowHours`: the evidence window (`CAPABILITY_EVIDENCE_WINDOW_HOURS`, default 168, clamped to
   24-2160). Long on purpose: a capability used weekly must have had a chance to show up.
 - One entry per current container. `digests`: its current digests, all of which the evidence must cover.
-- `used`: checks that succeeded (the container needed the capability), summed over every digest the
-  container ran, current or previous. `denied`: checks the container made without holding the capability
-  (it asked, it did not have it; granting it would change behaviour). Each has `count`, `firstSeen`,
-  `lastSeen`.
-- Not counted: `CAP_OPT_NOAUDIT` checks (the kernel asking whether a task would be privileged, for example
-  to pick a code path, without the task needing it), and runc's own container setup, which runs in the
-  container's cgroup with privileges the container never gets.
-- `evidence`: `sufficient` only when `kg_capability_coverage` says every current digest was watched
-  continuously for the whole window: the runtime coverage (`kg_runtime_coverage`, docs/api-reference/endpoints/runtime-inventory.mdx; probes
-  loaded from the container's start or since a backfill, no lost events, no heartbeat gaps, no untracked
-  live pods) **and** the capability probe on for every instance throughout. Otherwise `insufficient`,
-  with `reason`: a `kg_runtime_coverage` reason, `capabilities_not_tracked`, `no_current_digest`, or
+- `used`: ordinary checks that succeeded (the container needed the capability), summed over every digest
+  the container ran, current or previous. `denied`: ordinary checks the container made without holding the
+  capability (granting it would change behaviour). `probed`: `CAP_OPT_NOAUDIT` checks that succeeded, the
+  kernel asking whether the process is privileged (every root process's memory admin-reserve check asks
+  for `SYS_ADMIN`; others gate real behaviour: a seccomp filter without `no_new_privs`, ptrace access to
+  other processes). Each has `count`, `firstSeen`, `lastSeen`.
+- Not counted: container runtime setup (a task that has not exec'd since it was forked by a process
+  outside every pod cgroup, i.e. runc init; decided by provenance, so a process renaming itself `runc:[`
+  is still counted), and checks against a user namespace the container created.
+- `evidence`: `sufficient` only when `kg_capability_coverage` says every current digest was watched for
+  the whole window: the runtime coverage (`kg_runtime_coverage`: probes, no lost events, no heartbeat gaps,
+  no untracked live pods) **and**, for every instance in the window, the capability probe on the
+  `cap_capable` hook, captured from the container's start with no gap since (capabilities have no `/proc`
+  backfill, so a container already running when the probe attached is never evidence until it restarts).
+  Otherwise `insufficient`, with `reason`: a `kg_runtime_coverage` reason, `capabilities_not_tracked`,
+  `capabilities_partial_hook`, `capabilities_not_seen_since_start`, `no_current_digest`, or
   `rows_truncated`.
-- `recommendation`: only with sufficient evidence: `drop: ["ALL"]`, `add`: every used capability (never
-  fewer: a used capability is never recommended for dropping). `null` otherwise.
-- `unusedAdded`: capabilities the current `securityContext.capabilities.add` grants that were never used
-  (only with sufficient evidence).
+- `recommendation`: only with sufficient evidence: `drop: ["ALL"]`, `add`: every used and every probed
+  capability (a used or probed capability is never recommended for dropping), `probedKept`: the part of
+  `add` there only because of probes, to be removed only after a person confirms. `null` otherwise.
+- `unusedAdded`: capabilities the current `securityContext.capabilities.add` grants that were never used or
+  probed (only with sufficient evidence).
+- Retention keeps capability rows for at least the window plus a day, so a capability used inside the
+  window is never pruned while the window counts as evidence.
 - The podSecurity recommendation (section 2.3, and the export's `securitycontext` artifact) uses this: with
   sufficient evidence a container's patch is `drop: ["ALL"]` + `add: <used>` (`add: null` when none was
   used), and it is emitted even when every PSS check passes if the current set is wider than the used
   one. A used capability other than `NET_BIND_SERVICE` keeps the container below restricted; a caveat
-  says so. Without evidence the patch keeps the restricted default and a caveat says it is not observed
-  evidence.
+  says so, and another names capabilities kept only because of probes. Without evidence the patch keeps
+  the restricted default and a caveat says it is not observed evidence.
 - Not seen: capabilities checked by kernel paths that do not go through `cap_capable`/`security_capable`,
   and capabilities a container would need only in a situation that did not occur in the window.
 
