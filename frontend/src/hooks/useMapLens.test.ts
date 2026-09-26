@@ -1,9 +1,15 @@
+// @vitest-environment jsdom
 import { describe, expect, test } from 'vitest';
-import { imageDetail, imageSbom, imageVulns, vulnCapture } from '../fixtures/vulns';
+import { renderHook, waitFor } from '@testing-library/react';
+import { imageDetail, imageSbom, imageVulns, replayVulnApi, vulnCapture } from '../fixtures/vulns';
+import type { RunningSignaturePage } from '../types/attestations';
+import { signaturesByWorkload } from '../utils/signatures';
+import { workloadKey } from '../utils/workloads';
 import { listNamespacePayments } from '../fixtures/profile';
 import type { PodInfo, PodNodeData } from '../types';
 import type { ImageVulnsPage } from '../types/vulns';
-import { badgesByNode, coverageBadge, imagesByWorkload, supplyBadge, vulnBadge, type ImageFacts } from './useMapLens';
+import { badgesByNode, coverageBadge, imagesByWorkload, sbomBadge, supplyBadge, useMapLens, vulnBadge, type ImageFacts } from './useMapLens';
+import { VulnApiError } from '../services/vulnApi';
 
 // Inputs are Broker responses: captures from a Broker at main
 // (fixtures/vuln-captures) and, for an older Broker, from #1671
@@ -83,9 +89,10 @@ describe('a failed read is unknown, never "none"', () => {
     expect(b).toMatchObject({ tone: 'unknown', text: 'read failed' });
   });
 
-  test('SBOM read failed (a 503): "read failed", not "no SBOM"', () => {
-    const b = supplyBadge(failed('sbomFailed').get('flux-system/Deployment/source-controller'));
+  test('SBOM read failed (a 503): the SBOM part says "read failed", not "no SBOM"', () => {
+    const b = sbomBadge(failed('sbomFailed').get('flux-system/Deployment/source-controller'));
     expect(b).toMatchObject({ tone: 'unknown', text: 'read failed' });
+    expect(supplyBadge(failed('sbomFailed').get('flux-system/Deployment/source-controller')).label).toMatch(/SBOM: Unknown: the SBOM read failed/);
   });
 
   test('a card with no badge of its own is "read failed" / "not read" when reads failed or were capped', () => {
@@ -99,14 +106,81 @@ describe('a failed read is unknown, never "none"', () => {
 
 describe('Supply chain lens', () => {
   const imgs = imagesByWorkload(facts(true));
-  test('verified SBOM is the only good state; attached-unbound is neutral; none is unknown', () => {
-    expect(supplyBadge(imgs.get('flux-system/Deployment/source-controller')).tone).toBe('good');
-    expect(supplyBadge(imgs.get('observability/Deployment/grafana')).tone).toBe('neutral');
-    expect(supplyBadge(undefined).tone).toBe('unknown');
+  test('SBOM part: verified SBOM is its only good state; attached-unbound is neutral; none is unknown', () => {
+    expect(sbomBadge(imgs.get('flux-system/Deployment/source-controller')).tone).toBe('good');
+    expect(sbomBadge(imgs.get('observability/Deployment/grafana')).tone).toBe('neutral');
+    expect(sbomBadge(undefined).tone).toBe('unknown');
   });
 
-  test('every badge says signatures are not checked', () => {
-    for (const v of imgs.values()) expect(supplyBadge(v).label).toMatch(/Signatures: not checked/);
+  test('no signature row: "not checked", unknown, never the SBOM state in its place (not even a verified SBOM)', () => {
+    for (const v of imgs.values()) expect(supplyBadge(v)).toMatchObject({ tone: 'unknown', text: 'not checked' });
+    expect(supplyBadge(imgs.get('flux-system/Deployment/source-controller')).label).toMatch(/not checked, not unsigned.*SBOM: Every running image has an SBOM from a verified attestation/);
+    expect(supplyBadge(undefined)).toMatchObject({ tone: 'unknown', text: 'not checked' });
+  });
+
+  test('the signature read failed: "read failed" on every card; a Broker without the route: "not checked"', () => {
+    for (const v of imgs.values()) expect(supplyBadge(v, undefined, 'failed')).toMatchObject({ tone: 'unknown', text: 'read failed' });
+    expect(supplyBadge(imgs.get('flux-system/Deployment/source-controller'), undefined, 'failed').label).toMatch(/^Signatures: the read failed, unknown\..*SBOM: /);
+    expect(supplyBadge(imgs.get('flux-system/Deployment/source-controller'), undefined, 'unsupported')).toMatchObject({ tone: 'unknown', text: 'not checked' });
+    expect(supplyBadge(imgs.get('flux-system/Deployment/source-controller'), undefined, 'unsupported').label).toMatch(/does not serve signature results/);
+  });
+
+  test('with signature results the badge is the worst verdict; verified is neutral and names its signer', () => {
+    const sigs = signaturesByWorkload(vulnCapture<RunningSignaturePage>('attestations-running').body.items, workloadKey);
+    const badge = (k: string) => supplyBadge(imgs.get(k), sigs.get(k));
+    expect(badge('payments/Deployment/checkout')).toMatchObject({ tone: 'neutral', text: 'signed' });
+    expect(badge('payments/Deployment/checkout').label).toMatch(/not vetted.*SBOM: /);
+    expect(badge('payments/Deployment/ledger')).toMatchObject({ tone: 'neutral', text: 'signed' });
+    // The signer is in the label (tooltip and accessible name), in full.
+    expect(badge('payments/Deployment/ledger').label).toMatch(/Signed by key payments-release \(sha256:d4d97426189e…\)/);
+    expect(badge('payments/Deployment/checkout').label).toMatch(/Signed by https:\/\/github\.com\/example-org\/checkout\/.*release\.yaml@refs\/tags\/v4\.2\.0 via https:\/\/token\.actions\.githubusercontent\.com/);
+    expect(badge('payments/CronJob/reports')).toMatchObject({ tone: 'warn', text: 'unsigned' });
+    expect(badge('observability/StatefulSet/prometheus')).toMatchObject({ tone: 'risk', text: 'sig invalid' });
+    expect(badge('observability/Deployment/grafana')).toMatchObject({ tone: 'unknown', text: 'key-signed' });
+    expect(badge('observability/DaemonSet/node-exporter')).toMatchObject({ tone: 'unknown', text: 'sig unknown' });
+    expect(badge('ingress-nginx/Deployment/ingress-nginx-controller')).toMatchObject({ tone: 'unknown', text: 'not checked' });
+    for (const k of sigs.keys()) expect(badge(k).tone).not.toBe('good');
+  });
+});
+
+describe('Supply chain lens, read through the replayed Broker', () => {
+  test('payments: signature badges per workload from one running-feed read', async () => {
+    const { api, calls } = replayVulnApi();
+    const { result } = renderHook(() => useMapLens('payments', 'supply', 0, { vulnApi: api }));
+    await waitFor(() => expect(result.current.loading).toBe(false));
+    const b = result.current.byWorkload;
+    expect(b.get('payments/Deployment/checkout')).toMatchObject({ tone: 'neutral', text: 'signed' });
+    expect(b.get('payments/CronJob/reports')).toMatchObject({ tone: 'warn', text: 'unsigned' });
+    expect(calls.filter((c) => c.startsWith('GET /attestations/running'))).toEqual(['GET /attestations/running?limit=200&namespace=payments']);
+    expect(result.current.readFailures).toBe(0);
+  });
+
+  test('the signature read fails: every card says "read failed" (unknown), and the failure is counted', async () => {
+    const { api } = replayVulnApi();
+    const orig = api.listRunningSignatures.bind(api);
+    api.listRunningSignatures = async () => {
+      throw new Error('boom');
+    };
+    const { result } = renderHook(() => useMapLens('payments', 'supply', 0, { vulnApi: api }));
+    await waitFor(() => expect(result.current.loading).toBe(false));
+    expect(result.current.byWorkload.size).toBeGreaterThan(0);
+    for (const badge of result.current.byWorkload.values()) {
+      expect(badge).toMatchObject({ tone: 'unknown', text: 'read failed' });
+      expect(badge.label).toMatch(/Signatures: the read failed, unknown/);
+    }
+    expect(result.current.readFailures).toBe(1);
+    api.listRunningSignatures = orig;
+  });
+
+  test('a Broker without the signature route (404): "not checked" with why, not a read failure', async () => {
+    const { api } = replayVulnApi();
+    api.listRunningSignatures = async () => {
+      throw new VulnApiError(404, 'unsupported', 'no route');
+    };
+    const { result } = renderHook(() => useMapLens('payments', 'supply', 0, { vulnApi: api }));
+    await waitFor(() => expect(result.current.loading).toBe(false));
+    for (const badge of result.current.byWorkload.values()) expect(badge).toMatchObject({ tone: 'unknown', text: 'not checked' });
+    expect(result.current.readFailures).toBe(0);
   });
 });
 

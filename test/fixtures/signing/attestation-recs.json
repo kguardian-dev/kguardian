@@ -1,0 +1,5 @@
+{
+  "request": "GET /images/sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd/attestation",
+  "status": 404,
+  "body": "No data found"
+}

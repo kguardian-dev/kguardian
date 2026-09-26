@@ -14,6 +14,7 @@ import {
   parseBool, parseDigest, parseEpssMin, parseInUse, parseSeverity, parseSource, parseTier, parseVulnId,
   trimCveList, trimExposure, trimImageVulns, trimSbomPage,
 } from "./vulns.js";
+import { notChecked, parseTrustVerdict, trimImageTrust, trimSigners } from "./signing.js";
 import {
   generateNetworkPolicyWithComments, generateCiliumPolicyWithComments, policyToYAML, makePeerResolver,
   type PeerResolver, type PodInfo, type TrafficRow, type BrokerPodListEntry, type BrokerServiceRecord,
@@ -299,6 +300,27 @@ const handlers: Record<string, Handler> = {
     const source = parseSource(a.source);
     const limit = clampToolLimit(a.limit);
     return trimSbomPage(await brokerGetJSON(`/images/${digest}/sbom${buildQuery({ source, limit })}`));
+  },
+  // --- image signatures and ImageTrustPolicy (#1533 P2) ------------------
+  get_image_signers: async (a) => {
+    const digest = parseDigest(a.digest);
+    try {
+      return trimSigners(await brokerGetJSON(`/images/${digest}/attestation`));
+    } catch (err) {
+      if (err instanceof BrokerHTTPError && err.status === 404) return notChecked(digest);
+      throw err;
+    }
+  },
+  explain_image_trust: async (a) => {
+    const namespace = s(a.namespace).trim();
+    const workloadKind = s(a.workload_kind).trim();
+    const workloadName = s(a.workload_name).trim();
+    const verdict = parseTrustVerdict(a.verdict);
+    const limit = clampToolLimit(a.limit);
+    const page = await brokerGetJSON(`/image-trust${buildQuery({
+      namespace, workload_kind: workloadKind, workload_name: workloadName, verdict, limit,
+    })}`);
+    return trimImageTrust(page, { namespace, workloadKind, workloadName, verdict });
   },
   get_image_inventory: async (a) => {
     const namespace = s(a.namespace).trim();

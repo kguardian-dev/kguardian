@@ -41,6 +41,19 @@ export KGUARDIAN_BROKER_TOKEN="$(kubectl -n kguardian get secret kguardian-broke
 Without it, the CLI stops with `broker requires authentication (HTTP 401)`.
 It won't carry on and treat every peer as unknown.
 
+The broker read commands (`profile`, `images` and `vulns`) normally
+open a port-forward to the broker. To use a broker you already reach
+another way (an Ingress, your own port-forward), set its URL and no
+port-forward is opened:
+
+```bash
+export KGUARDIAN_BROKER_URL=http://127.0.0.1:9090
+```
+
+The token is sent to that URL. Over plain `http://` to anything but
+loopback it travels unencrypted, and the CLI warns; use `https://` or a
+port-forward.
+
 ## Commands
 
 <CardGroup cols={2}>

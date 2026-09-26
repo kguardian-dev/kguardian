@@ -1,0 +1,16 @@
+{
+  "request": "GET /image-trust",
+  "status": 200,
+  "body": {
+    "available": false,
+    "reason": "the evaluator could not be reached: error sending request for url (http://127.0.0.1:56311/image-trust)",
+    "evaluatedAt": null,
+    "total": 0,
+    "wouldDeny": 0,
+    "unknown": 0,
+    "trusted": 0,
+    "policies": [],
+    "results": [],
+    "truncated": false
+  }
+}

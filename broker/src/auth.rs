@@ -220,6 +220,8 @@ pub const ROUTES: &[RouteRule] = &[
     rule("GET", "/attestations", READ),
     rule("GET", "/attestations/running", READ),
     rule("GET", "/attestations/policy", READ),
+    // ImageTrustPolicy results, from the evaluator (#1533).
+    rule("GET", "/image-trust", READ),
 ];
 
 /// The declared access for `method` on the registered `pattern`, if any.

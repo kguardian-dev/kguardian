@@ -23,11 +23,15 @@ var imagesCmd = &cobra.Command{
 workload container has run, keyed by digest rather than tag, and which
 workloads run it now.
 
-  list   one page of the inventory (filter by namespace or repository)
-  get    one digest and the workload containers that run or ran it
+  list               one page of the inventory (filter by namespace or repository)
+  get                one digest and the workload containers that run or ran it
+  vulns, sbom        what scanners reported for one digest
+  signers            who signed one digest (signature discovery)
+  trust              which ImageTrustPolicies would deny which workloads
+  admission-policy   an admission policy generated from verified signers
 
-The inventory records identity only. It carries no vulnerability, SBOM or
-signature data, so an image listed here is neither vetted nor flagged.`,
+list and get record identity only: an image listed there is neither vetted
+nor flagged.`,
 }
 
 var (

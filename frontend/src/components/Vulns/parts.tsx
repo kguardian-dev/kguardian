@@ -127,13 +127,13 @@ export function TrustBadge({ trust }: { trust: SbomTrust | null }) {
  * A failed supply-chain read, by kind: auth required (401/403), a Broker
  * without the endpoints, or a retryable error. Never an empty "clean" state.
  */
-export function VulnErrorState({ error, onRetry }: { error: unknown; onRetry?: () => void }) {
+export function VulnErrorState({ error, onRetry, unsupportedTitle = 'Vulnerability data not available' }: { error: unknown; onRetry?: () => void; unsupportedTitle?: string }) {
   const kind = vulnErrorKind(error);
   if (kind === 'auth') {
     return <EmptyState icon={KeyRound} compact title="Broker token required" description={vulnErrorMessage(error)} />;
   }
   if (kind === 'unsupported') {
-    return <EmptyState icon={Bug} compact title="Vulnerability data not available" description={vulnErrorMessage(error)} />;
+    return <EmptyState icon={Bug} compact title={unsupportedTitle} description={vulnErrorMessage(error)} />;
   }
   return <SectionError message={vulnErrorMessage(error)} onRetry={onRetry} />;
 }
