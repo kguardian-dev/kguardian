@@ -389,10 +389,10 @@ func TestRenderDrift_NotEvaluatedIsNotNoDrift(t *testing.T) {
 		t.Fatal(err)
 	}
 	s := renderDrift(&d)
-	mustContain(t, s, "1 unshippedExecutable", "never sets posture", "evaluated:     tagMoved",
+	mustContain(t, s, "1 unshippedExecutable", "1 of 2 checks evaluated", "never sets posture", "evaluated:     tagMoved",
 		"not evaluated: unshippedExecutable for container app (no_runtime_data)",
 		"not evaluated: unshippedExecutable for workload (no_inventory)", `is not "no drift"`)
-	if s := renderDrift(&api.ProfileDrift{}); !strings.Contains(s, "no items") || !strings.Contains(s, "evaluated:     none") {
+	if s := renderDrift(&api.ProfileDrift{}); !strings.Contains(s, "no items; 0 of 0 checks evaluated") || !strings.Contains(s, "evaluated:     none") {
 		t.Errorf("empty drift: %q", s)
 	}
 }

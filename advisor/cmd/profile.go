@@ -418,7 +418,12 @@ func renderDrift(d *api.ProfileDrift) string {
 		}
 		b.WriteString(strings.Join(parts, ", "))
 	}
-	b.WriteString(" (never sets posture)\n")
+	notTypes := map[string]bool{}
+	for _, n := range d.NotEvaluated {
+		notTypes[n.Type] = true
+	}
+	checks := len(d.Evaluated) + len(notTypes)
+	fmt.Fprintf(&b, "; %d of %d checks evaluated (never sets posture)\n", len(d.Evaluated), checks)
 	evaluated := "none"
 	if len(d.Evaluated) > 0 {
 		evaluated = strings.Join(d.Evaluated, ", ")
