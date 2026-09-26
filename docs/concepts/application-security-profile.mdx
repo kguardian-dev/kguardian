@@ -74,7 +74,7 @@ Status follows the [profile contract](https://github.com/kguardian-dev/kguardian
 | `accepted` | The version named by `spec.acceptedRevision`. |
 | `deviation.state` | `None` (live profile matches the accepted revision), `Changed`, or `Unknown` (no accepted revision, or the broker no longer has it). |
 | `deviation.changedDimensions` | Dimensions whose content changed since the accepted revision. Absent while the change is still `snapshotPending`, because the per-dimension breakdown exists only for stored versions. |
-| `lastSyncedAt` | When the profile was last read. If the broker is unreachable the previous data stays, `ProfileAvailable` turns `False`, and its message says how old the data is. |
+| `lastSyncedAt` | When the profile was last read successfully. If a refresh fails, `ProfileAvailable` turns `False` and the previous data stays only while it is younger than the staleness window (`evaluator.applicationSecurityProfiles.staleAfter`, default 3× `resyncInterval`); the message says how old it is. Past the window, or at once when the broker rejects the evaluator's token, posture and every dimension become `unknown`, with a reason naming the error and this time. The next successful read restores them. |
 
 Conditions:
 
