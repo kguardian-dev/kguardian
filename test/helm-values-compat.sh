@@ -502,6 +502,20 @@ render "supplychain-ingest-only-no-registry-egress" "${SC_ON[@]}" \
     { echo "FAIL [supplychain-ingest-only-no-registry-egress]: registry lookup must stay off with ingest"; fail=1; }
   grep -A1 'name: REGISTRY_SBOM_ENABLED' <<<"$OUT" | grep -q 'value: "false"' || \
     { echo "FAIL [supplychain-ingest-only-no-registry-egress]: registry SBOM source must stay off with ingest"; fail=1; }
+  # Signature discovery (registry + Sigstore TUF egress) is off unless asked.
+  if grep -A1 'name: ATTESTATION_ENABLED' <<<"$OUT" | grep -q 'value: "true"'; then
+    echo "FAIL [supplychain-ingest-only-no-registry-egress]: signature discovery must stay off with ingest"; fail=1
+  fi
+}
+render "supplychain-signature-discovery-on" "${SC_ON[@]}" \
+  --set supplychain.brokerIngest.enabled=true --set supplychain.signatureDiscovery.enabled=true \
+  --set-string 'supplychain.signatureDiscovery.publicKeys.release=-----BEGIN PUBLIC KEY-----\nMFkw\n-----END PUBLIC KEY-----' && {
+  grep -A1 'name: ATTESTATION_ENABLED' <<<"$OUT" | grep -q 'value: "true"' || \
+    { echo "FAIL [supplychain-signature-discovery-on]: explicit true must turn discovery on"; fail=1; }
+  grep -q 'checksum/signing-keys:' <<<"$OUT" || \
+    { echo "FAIL [supplychain-signature-discovery-on]: a signing-keys checksum must roll the pod on key changes"; fail=1; }
+  grep -q 'name: kguardian-supplychain-signing-keys' <<<"$OUT" || \
+    { echo "FAIL [supplychain-signature-discovery-on]: the signing-keys ConfigMap must render"; fail=1; }
 }
 render "supplychain-lookup-explicit-on" "${SC_ON[@]}" \
   --set supplychain.brokerIngest.enabled=true --set supplychain.registryLookup.enabled=true && {

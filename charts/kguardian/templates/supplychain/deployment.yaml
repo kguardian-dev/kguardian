@@ -25,7 +25,17 @@ spec:
       app.kubernetes.io/name: {{ .Values.supplychain.service.name }}
   template:
     metadata:
-      {{- with .Values.supplychain.podAnnotations }}
+      {{- $sdA := .Values.supplychain.signatureDiscovery | default dict }}
+      {{- /* Keys are read at startup: a changed key or trusted root rolls the pod. */}}
+      {{- $roll := dict }}
+      {{- if and $sdA.enabled $sdA.publicKeys }}
+      {{- $_ := set $roll "checksum/signing-keys" (toYaml $sdA.publicKeys | sha256sum) }}
+      {{- end }}
+      {{- if and $sdA.enabled $sdA.trustedRoot }}
+      {{- $_ := set $roll "checksum/sigstore-root" ($sdA.trustedRoot | sha256sum) }}
+      {{- end }}
+      {{- $ann := merge $roll (.Values.supplychain.podAnnotations | default dict) }}
+      {{- with $ann }}
       annotations:
         {{- toYaml . | nindent 8 }}
       {{- end }}
