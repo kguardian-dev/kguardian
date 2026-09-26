@@ -60,8 +60,10 @@ For a single component, prefer the narrower form, for example the controller:
 ```
 
 The same identity and issuer go into admission policies (Kyverno
-`verifyImages`, Sigstore policy-controller `ClusterImagePolicy`) if you want
-the cluster to enforce them.
+`ImageValidatingPolicy`, Sigstore policy-controller `ClusterImagePolicy`) if
+you want the cluster to enforce them. With signature discovery on,
+`kubectl kguardian images admission-policy` generates them from what it
+verified on your running images.
 
 ## Verify a signature with cosign
 

@@ -15,6 +15,7 @@ kubectl kguardian images list [flags]
 kubectl kguardian images get <digest> [flags]
 kubectl kguardian images vulns <digest> [flags]
 kubectl kguardian images sbom <digest> [flags]
+kubectl kguardian images admission-policy [flags]
 ```
 
 `list` and `get` show identity only; an image listed there is neither vetted
@@ -188,6 +189,32 @@ kubectl kguardian images sbom "$DIGEST" -o cyclonedx > sbom.cdx.json
 ```
 
 A listed component says nothing about whether it is loaded at runtime.
+
+## images admission-policy
+
+Calls `GET /attestations/policy` and writes an image signature admission
+policy generated from the signers kguardian verified on running images
+(needs `supplychain.signatureDiscovery.enabled`).
+
+| Flag | Type | Description | Default |
+|------|------|-------------|---------|
+| `--format` | string | `kyverno` (ImageValidatingPolicy), `policy-controller` (ClusterImagePolicy) or `kguardian` (ImageTrustPolicy) | `kyverno` |
+| `--mode` | string | `audit` or `enforce` | `audit` |
+| `-n, --namespace` | string | Only images that workloads in this namespace run | all namespaces |
+| `--acknowledge-partial` | bool | With `--mode enforce`: generate although some running images are not covered | `false` |
+| `-f, --file` | string | Write to a file instead of stdout | stdout |
+
+Audit is Kyverno `validationActions: [Audit]` with digest mutation off, or
+policy-controller `mode: warn` (it has no audit-only mode). A repository is
+covered only when every running digest of it verified; the rest are listed
+in the header as not covered. See
+[ImageTrustPolicy](/concepts/image-trust-policy#generating-policies) for what
+is generated.
+
+```bash
+kubectl kguardian images admission-policy -n payments > kyverno-images.yaml
+kubectl kguardian images admission-policy --format policy-controller -f cip.yaml
+```
 
 ## Examples
 
