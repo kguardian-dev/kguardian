@@ -315,13 +315,39 @@ full), the controller also counts every capability check a container
 makes, per capability and verdict, from an fexit program on `cap_capable`
 (or `security_capable` where `cap_capable` cannot be traced; override
 with `RUNTIME_INVENTORY_CAP_HOOK`). Counting happens in the kernel, one
-map entry per (container, capability, verdict); the first check of each
-also sends an event naming the container. Heartbeats carry `cap_probe`, so
-the broker knows which windows had the probe on.
+map entry per (container, capability, verdict, probed); the first check of
+each also sends an event naming the container. Heartbeats carry
+`cap_probe` and `cap_hook`, so the broker knows which windows had the
+probe on and on which hook. The `security_capable` fallback misses the
+checks commoncap makes directly (for example capset's `SETPCAP` test), so
+a window on it is never full capability evidence.
 
-Not counted: `CAP_OPT_NOAUDIT` checks (the kernel asking whether a task
-would be privileged without the task needing it) and runc's own container
-setup (tasks named `runc:[`).
+Classes:
+
+- **used**: an ordinary check that succeeded.
+- **denied**: an ordinary check that failed (the container asked without
+  holding the capability).
+- **probed**: a `CAP_OPT_NOAUDIT` check that succeeded. Mostly the kernel
+  asking whether a process is privileged: every root process's memory
+  admin-reserve check asks for `SYS_ADMIN` this way. Some gate real
+  behaviour (a seccomp filter installed without `no_new_privs`, ptrace
+  access to other processes), so probed capabilities are kept in the
+  recommendation and named, never dropped without a person confirming.
+
+Not counted:
+
+- **Container runtime setup**: a task that has not exec'd since it was
+  forked by a process outside every pod cgroup (runc init before it execs
+  the container's command). Decided by provenance, not by name: a
+  container process that renames itself `runc:[...]` is still counted. If
+  the parent's owner cannot be worked out, the check is counted. With
+  `hostPID`, an orphaned container process reparented to the host's init
+  before it execs would also pass as setup.
+- **Checks against a user namespace the container created**: capabilities
+  there come from creating the namespace, not from
+  `securityContext.capabilities`.
+- Capabilities used by a container before the probe attached: see the
+  evidence rules below.
 
 The evidence feeds the workload profile's `capabilities` block and the
 `capabilities` part of its securityContext recommendation (see the
@@ -335,18 +361,32 @@ kg_capability_coverage(cluster text, namespace text, kind text, name text,
   RETURNS TABLE (covered boolean, observed_since timestamp, reason text)
 ```
 
-It is `kg_runtime_coverage` plus the capability probe on every instance
-in the window; its extra reason is `capabilities_not_tracked`. A
-capability that was used is never recommended for dropping.
+It is stricter than `kg_runtime_coverage`, which it builds on:
+
+- every instance in the window had the capability probe on
+  (`capabilities_not_tracked` otherwise), on the `cap_capable` hook
+  (`capabilities_partial_hook` otherwise);
+- every instance in the window was captured from its start with no gap
+  since (`capabilities_not_seen_since_start` otherwise). Capabilities have
+  no `/proc` backfill: a container already running when the probe attached
+  (a new install, a controller restart) may have used a capability at
+  startup that was never seen, so it becomes evidence only once it
+  restarts under the probe.
+
+A capability that was used or probed is never recommended for dropping.
+Capability rows are kept for at least the evidence window plus a day,
+whatever `RUNTIME_INVENTORY_RETENTION_DAYS` says, so a capability used
+inside the window is never pruned while the window still counts.
 
 ### GET /workloads/\{namespace\}/\{kind\}/\{name\}/capabilities
 
 Requires the `read` scope; charged to the read budget. Returns the
 profile's `capabilities` block: per current container, the capabilities
 used (granted) and denied with counts and times, the evidence verdict and
-reason, the recommendation (`drop: ["ALL"]`, `add`: the used set) when the
-evidence is sufficient, and `unusedAdded`: capabilities the container
-adds today that it never used.
+reason, the probed capabilities, the recommendation (`drop: ["ALL"]`,
+`add`: the used and probed set, `probedKept`: the part kept only because
+of probes) when the evidence is sufficient, and `unusedAdded`:
+capabilities the container adds today that it never used or probed.
 
 ### POST /runtime/capabilities
 
@@ -364,7 +404,7 @@ because a capability was last used long ago.
     "pod_namespace": "prod", "pod_name": "web-7d9f-abcde",
     "workload_kind": "Deployment", "workload_name": "web",
     "container_name": "app", "image_digest": "sha256:0123…cdef",
-    "capability": "NET_BIND_SERVICE", "granted": true, "count": 3,
+    "capability": "NET_BIND_SERVICE", "granted": true, "probed": false, "count": 3,
     "first_seen": "2026-09-26T10:00:00", "last_seen": "2026-09-26T10:05:00"
   }
 ]
