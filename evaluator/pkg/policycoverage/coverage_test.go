@@ -159,7 +159,6 @@ func TestAnyGoverningPolicyIsEnough(t *testing.T) {
 	}
 }
 
-
 func TestClassifyKeepsIgnoranceDistinct(t *testing.T) {
 	// "read the policies and found none" and "could not read the
 	// policies" are different answers. Collapsing the second into the
