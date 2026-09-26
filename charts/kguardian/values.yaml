@@ -759,11 +759,12 @@ broker:
     # -- Largest supply-chain payload (vulnerabilities or SBOM page) the
     # broker will inflate, in bytes. The supplychain component sends gzip
     # bodies of at most 1 MiB; a body that inflates past this is refused
-    # with 413 before it is parsed, so a decompression bomb costs at most
-    # this much memory (two ingests run at once). Clamped to
-    # [1048576, 134217728]. Ingest also needs scoped broker auth: without a
-    # `supplychain` token configured the ingest routes answer 403.
-    maxDecompressedBytes: 33554432
+    # with 413, and parsing also stops each list at its item cap, so one
+    # ingest peaks at about 62 MiB of heap at the default (one ingest runs
+    # at a time). Clamped to [1048576, 33554432]. Ingest also needs scoped
+    # broker auth: without a `supplychain` token configured the ingest
+    # routes answer 403.
+    maxDecompressedBytes: 8388608
     # -- Retention for vulnerability and SBOM data. Rows are keyed by image
     # digest, never by pod, and a payload is kept while an image it applies
     # to runs.
