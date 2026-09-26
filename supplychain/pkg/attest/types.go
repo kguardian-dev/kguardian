@@ -81,6 +81,11 @@ const (
 	// ReasonUntrustedKey: signed with a key rather than a Fulcio
 	// certificate, and no configured key verifies it.
 	ReasonUntrustedKey = "untrusted_key"
+	// ReasonUntrustedRoot: the signature names a transparency log or
+	// timestamp authority the trusted root does not hold (a private or
+	// staging Sigstore). It cannot be checked, which is unknown, not
+	// invalid. Never read as verified.
+	ReasonUntrustedRoot = "untrusted_root"
 )
 
 // Signature formats and sources.

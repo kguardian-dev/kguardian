@@ -61,6 +61,30 @@ func reasonOf(err error) string {
 	return ReasonBadSignature
 }
 
+// sigstoreErr classifies a sigstore-go failure for bundle b. When none of
+// b's transparency-log entries names a log the trusted root holds (a
+// private or staging Sigstore), sigstore-go only says "not enough verified
+// log entries", which a forged entry for a known log also produces; so the
+// log IDs are checked here. Unknown log: untrusted_root (unknown). Known
+// log, or no entry at all: bad_signature (invalid). An attacker choosing
+// the log ID can at most turn "invalid" into "unknown", never "verified".
+func (v *verifier) sigstoreErr(b *bundle.Bundle, err error) *verifyError {
+	if v.tm != nil && b != nil && b.VerificationMaterial != nil {
+		entries := b.VerificationMaterial.GetTlogEntries()
+		known := false
+		logs := v.tm.RekorLogs()
+		for _, e := range entries {
+			if _, ok := logs[hex.EncodeToString(e.GetLogId().GetKeyId())]; ok {
+				known = true
+			}
+		}
+		if len(entries) > 0 && !known {
+			return &verifyError{reason: ReasonUntrustedRoot, err: err}
+		}
+	}
+	return &verifyError{reason: ReasonBadSignature, err: err}
+}
+
 func detail(err error) string {
 	s := err.Error()
 	if len(s) > maxDetail {
@@ -78,6 +102,7 @@ func detail(err error) string {
 // --insecure-ignore-tlog".
 type verifier struct {
 	v    *verify.Verifier
+	tm   root.TrustedMaterial
 	keys []trustedKey
 }
 
@@ -90,7 +115,7 @@ func newVerifier(tm root.TrustedMaterial, requireSCT bool, keys []trustedKey) (*
 	if err != nil {
 		return nil, err
 	}
-	return &verifier{v: v, keys: keys}, nil
+	return &verifier{v: v, tm: tm, keys: keys}, nil
 }
 
 // anyIdentity accepts any issuer and SAN. Discovery records who signed;
@@ -213,7 +238,7 @@ func (v *verifier) verifyDSSEBundle(b *bundle.Bundle, digest string) (*dsseCheck
 	}
 	res, err := v.v.Verify(b, verify.NewPolicy(verify.WithArtifactDigest(alg, raw), verify.WithCertificateIdentity(anyIdentity)))
 	if err != nil {
-		return out, &verifyError{reason: ReasonBadSignature, err: err}
+		return out, v.sigstoreErr(b, err)
 	}
 	out.signer = signerFrom(res)
 	out.signer.TlogIndex = tlogIndex(b)
@@ -345,7 +370,7 @@ func (v *verifier) verifyLegacySig(payload []byte, ann map[string]string, digest
 	}
 	res, err := v.v.Verify(b, verify.NewPolicy(verify.WithArtifact(bytes.NewReader(payload)), verify.WithCertificateIdentity(anyIdentity)))
 	if err != nil {
-		return Signer{}, &verifyError{reason: ReasonBadSignature, err: err}
+		return Signer{}, v.sigstoreErr(b, err)
 	}
 	s := signerFrom(res)
 	s.TlogIndex = tlogIndex(b)

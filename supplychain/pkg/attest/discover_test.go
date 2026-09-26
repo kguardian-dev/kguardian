@@ -113,9 +113,20 @@ func TestLegacyAttestationsAndSBOMTrust(t *testing.T) {
 	if !ok || !sbom.Verified || len(sbom.PayloadSHA256) != 64 || sbom.SAN == "" {
 		t.Fatalf("sbom = %+v", sbom)
 	}
-	info, ok := v.SBOMTrust(tg.Digest)
+	chainguard := func(s Signer) bool {
+		return s.Issuer == issuerGitHub && strings.HasPrefix(s.SAN, "https://github.com/chainguard-images/")
+	}
+	info, ok := v.SBOMTrust(tg.Digest, chainguard)
 	if !ok || !info.Verified || info.PredicateType != PredicateSPDX || info.PayloadSHA256 != sbom.PayloadSHA256 {
-		t.Fatalf("SBOMTrust = %+v %v", info, ok)
+		t.Fatalf("SBOMTrust = %+v %v (signer %+v)", info, ok, sbom.Signer)
+	}
+	// Signed by someone the caller does not trust, or no identity check
+	// at all: not verified.
+	if _, ok := v.SBOMTrust(tg.Digest, func(Signer) bool { return false }); ok {
+		t.Fatal("untrusted signer promoted")
+	}
+	if _, ok := v.SBOMTrust(tg.Digest, nil); ok {
+		t.Fatal("nil identity check promoted")
 	}
 }
 
@@ -383,3 +394,92 @@ func TestCache(t *testing.T) {
 type roundTripFunc func(*http.Request) (*http.Response, error)
 
 func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
+// Identity regexps match the whole value: near misses of a trusted SAN or
+// issuer are untrusted.
+func TestIdentityRegexpsAreAnchored(t *testing.T) {
+	ids, err := compileIdentities([]Identity{{IssuerRegExp: `https://accounts\.google\.com`, SubjectRegExp: `krel-trust@k8s-releng-prod\.iam\.gserviceaccount\.com`}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	good := Signer{Kind: SignerKeyless, Issuer: issuerGoogle, SAN: sanK8sRelease}
+	if !ids[0].matches(good) {
+		t.Fatal("exact identity rejected")
+	}
+	for _, s := range []Signer{
+		{Kind: SignerKeyless, Issuer: issuerGoogle, SAN: sanK8sRelease + ".evil"},
+		{Kind: SignerKeyless, Issuer: issuerGoogle, SAN: "evil-" + sanK8sRelease},
+		{Kind: SignerKeyless, Issuer: "https://evil.example/" + issuerGoogle, SAN: sanK8sRelease},
+		{Kind: SignerKeyless, Issuer: issuerGoogle + "?x", SAN: sanK8sRelease},
+	} {
+		if ids[0].matches(s) {
+			t.Errorf("near miss matched: %+v", s)
+		}
+	}
+	gh, err := compileIdentities([]Identity{{Issuer: issuerGitHub, SubjectRegExp: `https://github\.com/org/.+`}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gh[0].matches(Signer{Issuer: issuerGitHub, SAN: "https://github.com/evil-org/x/.github/workflows/y.yaml@refs/heads/main?https://github.com/org/"}) {
+		t.Error("SAN containing the trusted prefix matched")
+	}
+	if _, err := compileIdentities([]Identity{{Issuer: "a", IssuerRegExp: "a", Subject: "s"}}); err == nil {
+		t.Error("exact and regexp together accepted")
+	}
+}
+
+// A signature whose transparency-log entry names a log the trusted root
+// does not hold (a private or staging Sigstore) is unknown, not invalid.
+func TestUnknownLogIsUnknownNotInvalid(t *testing.T) {
+	reg := newFixtureRegistry(t, false)
+	rec := loadRecording(t, "pause-3.10")
+	for i, m := range rec.Manifests {
+		if !strings.HasSuffix(m.Ref, ".sig") {
+			continue
+		}
+		var doc map[string]any
+		if err := json.Unmarshal(m.Body, &doc); err != nil {
+			t.Fatal(err)
+		}
+		ann := doc["layers"].([]any)[0].(map[string]any)["annotations"].(map[string]any)
+		var set map[string]any
+		if err := json.Unmarshal([]byte(ann[annBundle].(string)), &set); err != nil {
+			t.Fatal(err)
+		}
+		set["Payload"].(map[string]any)["logID"] = strings.Repeat("ab", 32)
+		b, _ := json.Marshal(set)
+		ann[annBundle] = string(b)
+		rec.Manifests[i].Body, _ = json.Marshal(doc)
+	}
+	r := newFixtureVerifier(t).Verify(context.Background(), reg.load(rec, ""))
+	wantVerdict(t, r, VerdictUnknown, ReasonUntrustedRoot)
+}
+
+// A forged inclusion promise for a log the root does hold produces the same
+// sigstore-go error as an unknown log; it must stay invalid.
+func TestForgedSETForKnownLogIsInvalid(t *testing.T) {
+	reg := newFixtureRegistry(t, false)
+	rec := loadRecording(t, "pause-3.10")
+	for i, m := range rec.Manifests {
+		if !strings.HasSuffix(m.Ref, ".sig") {
+			continue
+		}
+		var doc map[string]any
+		if err := json.Unmarshal(m.Body, &doc); err != nil {
+			t.Fatal(err)
+		}
+		ann := doc["layers"].([]any)[0].(map[string]any)["annotations"].(map[string]any)
+		var set map[string]any
+		if err := json.Unmarshal([]byte(ann[annBundle].(string)), &set); err != nil {
+			t.Fatal(err)
+		}
+		sig, _ := base64.StdEncoding.DecodeString(set["SignedEntryTimestamp"].(string))
+		sig[len(sig)-1] ^= 0x01
+		set["SignedEntryTimestamp"] = base64.StdEncoding.EncodeToString(sig)
+		b, _ := json.Marshal(set)
+		ann[annBundle] = string(b)
+		rec.Manifests[i].Body, _ = json.Marshal(doc)
+	}
+	r := newFixtureVerifier(t).Verify(context.Background(), reg.load(rec, ""))
+	wantVerdict(t, r, VerdictInvalid, ReasonBadSignature)
+}

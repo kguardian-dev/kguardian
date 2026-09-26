@@ -329,7 +329,12 @@ called.
 | `key_signed` | Signed with a public key that is not configured, so the signature exists but was not checked. Configure the key to get `verified` or `invalid`. |
 | `unsigned` | Every lookup answered and there is no signature. |
 | `invalid` | Signatures exist and none verified: a bad signature, a signature for another digest, or a malformed one. |
-| `unknown` | Something could not be checked (`reason`: `registry_auth` for a private image, `rate_limited`, `network`, `no_repo_digest`, ...). Never read as unsigned. |
+| `unknown` | Something could not be checked (`reason`: `registry_auth` for a private image, `rate_limited`, `network`, `no_repo_digest`, `untrusted_root` for a signature logged in a Sigstore instance the trusted root does not hold, ...). Never read as unsigned. |
+
+`verified` says a signature is valid, not that it is from someone you
+trust: anyone who can push to the repository can attach a valid keyless
+signature from their own identity. Always read it with the signer, and use
+an ImageTrustPolicy (or your admission policy) to say which signers count.
 
 Attestations (SLSA provenance, SPDX/CycloneDX SBOMs, anything else) are
 listed with their predicate type, signer and, for provenance, the builder

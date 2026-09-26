@@ -31,7 +31,8 @@ type Target struct {
 }
 
 // Identity is a trusted signer: the OIDC issuer and the certificate SAN,
-// each matched exactly or by a Go regular expression.
+// each matched exactly or by a Go regular expression that must match the
+// whole value.
 type Identity struct {
 	Issuer        string
 	IssuerRegExp  string
@@ -49,13 +50,18 @@ func compileIdentities(ids []Identity) ([]compiledIdentity, error) {
 	for _, id := range ids {
 		c := compiledIdentity{issuer: id.Issuer, subject: id.Subject}
 		var err error
+		if id.Issuer != "" && id.IssuerRegExp != "" || id.Subject != "" && id.SubjectRegExp != "" {
+			return nil, fmt.Errorf("identity: set the issuer (subject) exactly or as a regexp, not both")
+		}
+		// Regular expressions must match the whole value: unanchored, a
+		// trusted SAN would also match any SAN that merely contains it.
 		if id.IssuerRegExp != "" {
-			if c.issuerRE, err = regexp.Compile(id.IssuerRegExp); err != nil {
+			if c.issuerRE, err = regexp.Compile("^(?:" + id.IssuerRegExp + ")$"); err != nil {
 				return nil, fmt.Errorf("issuer regexp %q: %w", id.IssuerRegExp, err)
 			}
 		}
 		if id.SubjectRegExp != "" {
-			if c.subjectRE, err = regexp.Compile(id.SubjectRegExp); err != nil {
+			if c.subjectRE, err = regexp.Compile("^(?:" + id.SubjectRegExp + ")$"); err != nil {
 				return nil, fmt.Errorf("subject regexp %q: %w", id.SubjectRegExp, err)
 			}
 		}
