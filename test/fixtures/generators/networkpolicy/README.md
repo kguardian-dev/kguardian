@@ -2,13 +2,23 @@
 
 Language-neutral goldens for the NetworkPolicy / CiliumNetworkPolicy generators.
 The advisor Go generators are the reference; each `*.golden.yaml` is their exact
-output for one scenario, and the other two implementations must reproduce it:
+output for one scenario, and every other implementation must reproduce it. All of
+them read THIS directory (there are no copies):
 
 - advisor Go — `advisor/pkg/network` (`fixture_golden_test.go`; regenerate deliberately
   with `UPDATE_GOLDEN=1 go test ./pkg/network -run FixtureGolden`)
+- broker Rust — `broker/src/netpol` (`tests.rs`, `cargo test --lib netpol`). This is the
+  canonical server-side generator: the workload export bundle
+  (`GET /workloads/{ns}/{kind}/{name}/export`) renders NetworkPolicy /
+  CiliumNetworkPolicy through it. The plan is to retire the other copies behind that
+  API.
 - llm-bridge TS — `llm-bridge/src/tools/generators/networkpolicy.ts`
   (`networkpolicy.fixture.test.ts`)
 - frontend TS — `frontend/src/utils/` (fixture tests alongside)
+
+Golden parity alone does not catch a semantic error every implementation shares (the
+Cilium cross-namespace bug below slipped through that way), so each implementation
+should also assert Kubernetes / Cilium semantics directly; the broker's `tests.rs` does.
 
 ## How to compare
 

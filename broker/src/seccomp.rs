@@ -2236,6 +2236,68 @@ async fn export_impl(
     })
 }
 
+/// A SeccompProfile CR rendered for the workload export bundle
+/// (`profile_export.rs`). Built by exactly the same path as
+/// `GET /seccomp/profiles/{..}/export` ([`export_document`],
+/// [`partial_export_refusal`], [`render_yaml`]), so the bundle can never
+/// drift from the standalone export.
+pub(crate) struct BundleSeccomp {
+    /// The rendered YAML document (with its comment header), or `None`
+    /// when the export was refused.
+    pub yaml: Option<String>,
+    /// Why the export was refused (partial capture + enforcing action).
+    pub refused: Option<String>,
+}
+
+/// `None` when the workload has no observed syscall aggregate.
+/// `enforce = false` renders the audit action (`SCMP_ACT_LOG`); `true`
+/// renders `SCMP_ACT_ERRNO` and is refused on a partial capture unless
+/// `acknowledge_partial`, exactly as the standalone export refuses it.
+/// `extra_annotations` (bundle provenance) are merged into
+/// `metadata.annotations`; the capture annotations win on a clash.
+pub(crate) fn bundle_export(
+    conn: &mut PgConnection,
+    ns: &str,
+    kind: &str,
+    name: &str,
+    enforce: bool,
+    acknowledge_partial: bool,
+    extra_annotations: &BTreeMap<String, String>,
+) -> Result<Option<BundleSeccomp>, DbError> {
+    let Some(obs) = one_observed(conn, ns, kind, name)? else {
+        return Ok(None);
+    };
+    let plan = ExportPlan {
+        name: None,
+        default_action: if enforce {
+            "SCMP_ACT_ERRNO".to_string()
+        } else {
+            DEFAULT_SECCOMP_ACTION.to_string()
+        },
+        json: false,
+        add: BTreeSet::new(),
+        remove: BTreeSet::new(),
+        acknowledge_partial,
+    };
+    if let Some(msg) = partial_export_refusal(&obs.capture, &plan) {
+        return Ok(Some(BundleSeccomp {
+            yaml: None,
+            refused: Some(msg),
+        }));
+    }
+    let (mut doc, header) = export_document(&obs, obs.require_names()?, &plan);
+    for (k, v) in extra_annotations {
+        doc.metadata
+            .annotations
+            .entry(k.clone())
+            .or_insert_with(|| v.clone());
+    }
+    Ok(Some(BundleSeccomp {
+        yaml: Some(render_yaml(&doc, &header)),
+        refused: None,
+    }))
+}
+
 /// Stamp the capture verdict on the response itself.
 ///
 /// The document carries the same facts in `metadata.annotations`, but a

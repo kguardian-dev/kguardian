@@ -4,10 +4,11 @@ use actix_cors::Cors;
 use actix_web::middleware::from_fn;
 use actix_web::{get, web, App, HttpResponse, HttpServer};
 use api::{
-    establish_connection, set_statement_timeout, spawn_peer_late_resolve, spawn_retention,
-    spawn_seccomp_denial_metrics, spawn_version_check, spawn_workload_profile_snapshotter,
-    AuditClient, ReadBudget, SeccompDenialMetrics, SeccompDenialSeries, SeccompProfilesCache,
-    StatementTimeoutCustomizer, VersionCheckState,
+    establish_connection, set_statement_timeout, spawn_drift_metrics, spawn_peer_late_resolve,
+    spawn_retention, spawn_seccomp_denial_metrics, spawn_version_check,
+    spawn_workload_profile_snapshotter, AuditClient, DriftMetrics, ReadBudget,
+    SeccompDenialMetrics, SeccompDenialSeries, SeccompProfilesCache, StatementTimeoutCustomizer,
+    VersionCheckState,
 };
 
 use diesel::r2d2;
@@ -356,6 +357,11 @@ async fn main() -> Result<(), std::io::Error> {
     let denial_metrics = web::Data::new(SeccompDenialMetrics::default());
     spawn_seccomp_denial_metrics(pool.clone(), denial_metrics.clone());
 
+    // Workload profile drift gauge (#1533 P2-5), rebuilt from the profile
+    // read model on its own timer so /metrics never queries for it.
+    let drift_metrics = web::Data::new(DriftMetrics::default());
+    spawn_drift_metrics(pool.clone(), drift_metrics.clone());
+
     // Aggregate memory bound for whole-result-set reads. Constructed before
     // the server so its resolved budget (and any coherence clamp) is logged
     // at startup next to the pool size it has to coexist with — the two
@@ -390,6 +396,7 @@ async fn main() -> Result<(), std::io::Error> {
             .app_data(read_budget.clone())
             .app_data(profiles_cache.clone())
             .app_data(denial_metrics.clone())
+            .app_data(drift_metrics.clone())
             // Every data route; each has its scope declared in api::auth::ROUTES.
             .configure(api::routes::configure)
             .service(health_check)
@@ -622,6 +629,7 @@ pub async fn metrics(
     read_budget: web::Data<ReadBudget>,
     denials: web::Data<SeccompDenialMetrics>,
     profiles_cache: web::Data<SeccompProfilesCache>,
+    drift: web::Data<DriftMetrics>,
 ) -> HttpResponse {
     let pool_inner = pool.get_ref().clone();
     let schema_state = tokio::task::spawn_blocking(
@@ -690,6 +698,8 @@ pub async fn metrics(
     );
     // Supply-chain ingest counters (process atomics, no query).
     body.push_str(&api::supplychain::render_metrics());
+    // In-memory, refreshed on its own timer (profile_drift.rs).
+    body.push_str(&drift.get_ref().render());
 
     HttpResponse::Ok()
         .content_type("text/plain; version=0.0.4; charset=utf-8")
