@@ -2,7 +2,6 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { vulnApi, type CveListQuery, type VulnApi } from '../services/vulnApi';
 import type { CveSummary, Exposure, Finding, ImageDetail, ImageSummary, Report } from '../types/vulns';
 import { withConcurrencyLimit } from '../utils/concurrency';
-import { brokerTier, tierRank } from '../utils/tiers';
 import { profileApi, type ProfileApi } from '../services/profileApi';
 import type { LevelConfidence, PssLevel } from '../types/profile';
 import { workloadKey } from '../utils/workloads';
@@ -86,11 +85,18 @@ export const CVE_IMAGE_READS = 10;
  * running, with observed network exposure), plus the CVE's finding in each
  * affected image (first CVE_IMAGE_READS): the Broker's tier and tier
  * factors, KEV, EPSS, title and link, which the exposure read does not
- * carry. `finding` is the most urgent one.
+ * carry. Findings arrive per image as each read settles:
+ *  - `findings`: digest → the finding, or null (read, CVE not in it);
+ *  - `failed`: digests whose read failed;
+ *  - `pending`: reads still in flight.
+ * `finding` is only for descriptive text (title, link); risk comes from
+ * every row (utils/vulnView cveHeadline).
  */
 export function useCveDetail(id: string | null, api: VulnApi = vulnApi) {
   const [exposure, setExposure] = useState<Exposure | null>(null);
   const [findings, setFindings] = useState<Map<string, Finding | null>>(new Map());
+  const [failed, setFailed] = useState<Set<string>>(new Set());
+  const [pending, setPending] = useState(0);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<unknown>(null);
   const begin = useLatest();
@@ -101,24 +107,29 @@ export function useCveDetail(id: string | null, api: VulnApi = vulnApi) {
     setLoading(true);
     setExposure(null);
     setFindings(new Map());
+    setFailed(new Set());
+    setPending(0);
     try {
       const e = await api.getExposure(id);
       if (!current()) return;
+      const toRead = e.images.slice(0, CVE_IMAGE_READS);
       setExposure(e);
+      setPending(toRead.length);
       setError(null);
-      const reads = await withConcurrencyLimit(
-        e.images.slice(0, CVE_IMAGE_READS).map((img) => async () => {
+      await withConcurrencyLimit(
+        toRead.map((img) => async () => {
           try {
             const v = await api.getImageVulns(img.digest, { limit: 500 });
-            return [img.digest, v.items.find((f) => f.id === id) ?? null] as const;
+            if (current()) setFindings((prev) => new Map(prev).set(img.digest, v.items.find((f) => f.id === id) ?? null));
           } catch {
-            // Best effort: that image's tier and KEV / EPSS read as unknown.
-            return [img.digest, null] as const;
+            // That image's tier and KEV / EPSS are unknown; the headline says the read failed.
+            if (current()) setFailed((prev) => new Set(prev).add(img.digest));
+          } finally {
+            if (current()) setPending((n) => n - 1);
           }
         }),
         3,
       );
-      if (current()) setFindings(new Map(reads));
     } catch (err) {
       if (current()) setError(err);
     } finally {
@@ -131,14 +142,16 @@ export function useCveDetail(id: string | null, api: VulnApi = vulnApi) {
     void load();
   }, [load]);
 
+  // Descriptive text only (title, advisory link): the first image's finding.
   let finding: Finding | null = null;
-  for (const f of findings.values()) {
-    // For a headline, a known tier beats an unknown one (unlike list sorting,
-    // where unknown floats up so it is never buried).
-    const rank = (x: Finding) => (brokerTier(x.tier) === null ? -1 : tierRank(brokerTier(x.tier)));
-    if (f && (!finding || rank(f) > rank(finding))) finding = f;
+  for (const img of exposure?.images ?? []) {
+    const f = findings.get(img.digest);
+    if (f) {
+      finding = f;
+      break;
+    }
   }
-  return { exposure, findings, finding, loading, error, reload: load };
+  return { exposure, findings, failed, pending, finding, loading, error, reload: load };
 }
 
 export const IMAGE_PAGE_SIZE = 25;

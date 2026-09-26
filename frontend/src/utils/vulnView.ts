@@ -1,6 +1,6 @@
 import type { CveSummary, ExposedWorkload, Exposure, Finding, JoinKind, VulnSeverity } from '../types/vulns';
 import type { Severity } from './severity';
-import { brokerFactors, exposureFactor, factChips, inUseFactor, mergeFactors, privilegedFactor, type Factor } from './tiers';
+import { brokerFactors, brokerTier, exposureFactor, factChips, inUseFactor, mergeFactors, privilegedFactor, TIER_RANK, type Factor, type RiskTierName } from './tiers';
 
 /** View helpers for the supply-chain UI (kept out of component files). */
 
@@ -131,4 +131,45 @@ export function cveAiPrompt(e: Exposure, f: Finding | null, tier: string | null 
     '',
     `Question: which of these workloads should I fix first, and how do I contain ${e.id} until then?`,
   ].join('\n');
+}
+
+/** Worse first: a headline chip keeps the worst state any row has for that factor. */
+const TONE_RANK: Record<Factor['tone'], number> = { risk: 4, unknown: 3, warn: 2, neutral: 1, good: 0 };
+const HEADLINE_KEYS = ['inuse', 'exposure', 'kev', 'epss', 'cvss', 'fix'];
+
+export interface CveHeadline {
+  /** Reads still in flight: the headline shows pending, not a partial answer. */
+  pending: boolean;
+  /** The highest known tier over every row (and the Broker's CVE-row tier); null if none is known. */
+  tier: RiskTierName | null;
+  /** Per factor, the worst state any row has. Never better than a row. */
+  factors: Factor[];
+  /** Rows with no tier (not computed, not read, or not found in the image). */
+  unknownRows: number;
+  /** Image reads that failed. */
+  failedReads: number;
+}
+
+/**
+ * The CVE drawer headline: the worst case over ALL the CVE's workload
+ * rows. An unknown row is counted and shown, never hidden behind a lower
+ * known tier, and nothing is shown until every read has settled.
+ */
+export function cveHeadline(
+  rows: ReadonlyArray<{ tier: RiskTierName | null; factors: Factor[] }>,
+  opts: { pending: number; failed: number; summaryTier?: string | null },
+): CveHeadline {
+  let tier: RiskTierName | null = brokerTier(opts.summaryTier);
+  let unknownRows = 0;
+  const worst = new Map<string, Factor>();
+  for (const r of rows) {
+    if (r.tier === null) unknownRows += 1;
+    else if (tier === null || TIER_RANK[r.tier] > TIER_RANK[tier]) tier = r.tier;
+    for (const f of r.factors) {
+      if (!HEADLINE_KEYS.includes(f.key)) continue;
+      const cur = worst.get(f.key);
+      if (!cur || TONE_RANK[f.tone] > TONE_RANK[cur.tone]) worst.set(f.key, f);
+    }
+  }
+  return { pending: opts.pending > 0, tier, factors: [...worst.values()], unknownRows, failedReads: opts.failed };
 }

@@ -8,7 +8,7 @@ import type { CveSummary } from '../../types/vulns';
 import { copyText } from '../../utils/clipboard';
 import { shortDigest } from '../../utils/posture';
 import { backgroundCaveat, brokerTier, IN_USE_UNKNOWN_TITLE, tierRank, WORKLOAD_FACTORS } from '../../utils/tiers';
-import { cveAiPrompt, cveRowFactors, findingFactors, safeHttpUrl, workloadFactors } from '../../utils/vulnView';
+import { cveAiPrompt, cveHeadline, safeHttpUrl, workloadFactors } from '../../utils/vulnView';
 import { Button } from '../ui/Button';
 import { EmptyState } from '../ui/EmptyState';
 import { Modal } from '../ui/Modal';
@@ -36,7 +36,7 @@ interface CveDrawerProps {
  * unknown throughout; kguardian applies nothing.
  */
 export function CveDrawer({ id, summary, onClose, onOpenWorkload, onShowOnMap, onAskAI, api, profileApi = defaultProfileApi }: CveDrawerProps) {
-  const { exposure: e, findings, finding: f, loading, error, reload } = useCveDetail(id, api);
+  const { exposure: e, findings, failed, pending, finding: f, loading, error, reload } = useCveDetail(id, api);
   const namespaces = useMemo(() => (e ? e.workloads.map((w) => w.namespace) : []), [e]);
   const pss = usePssByWorkload(namespaces, profileApi);
 
@@ -58,12 +58,10 @@ export function CveDrawer({ id, summary, onClose, onOpenWorkload, onShowOnMap, o
         : [],
     [e, findings, pss],
   );
-  const overall = brokerTier(summary?.tier ?? f?.tier);
   const backgroundRow = rows.find((r) => r.tier === 'Background');
-  // Headline chips from the workload listed first (running, then most urgent),
-  // so they do not depend on which image's read finished first.
-  const lead = (rows[0] && findings.get(rows[0].w.imageDigest)) || f;
-  const headline = lead ? findingFactors(lead) : summary ? cveRowFactors(summary) : [];
+  // Worst case over every row; pending until every read has settled.
+  const head = cveHeadline(rows, { pending, failed: failed.size, summaryTier: summary?.tier });
+  const overall = head.pending ? null : head.tier;
   const link = safeHttpUrl(f?.primaryUrl);
 
   let body;
@@ -80,8 +78,20 @@ export function CveDrawer({ id, summary, onClose, onOpenWorkload, onShowOnMap, o
         <div className="space-y-2">
           <div className="flex flex-wrap items-center gap-2">
             <SeverityBadge severity={e.severity} />
-            <TierBadge tier={overall} title="The Broker's tier for this CVE: its most urgent over every affected workload container" />
-            <FactorChips factors={headline} only={['inuse', 'exposure', 'kev', 'epss', 'cvss', 'fix']} />
+            {head.pending ? (
+              <span data-testid="headline-pending" title="Reading each affected image's finding" className="rounded-md border border-dashed border-hubble-border-strong px-1.5 py-px text-[11px] font-mono text-tertiary">…</span>
+            ) : (
+              <>
+                <TierBadge tier={overall} title="The most urgent tier over every affected workload (the Broker's tiers)" />
+                <FactorChips factors={head.factors} only={['inuse', 'exposure', 'kev', 'epss', 'cvss', 'fix']} />
+                {head.unknownRows > 0 && (
+                  <FactorChips factors={[{ key: 'tier-unknown', tone: 'unknown', label: `${head.unknownRows} unknown`, title: `${head.unknownRows} affected workload${head.unknownRows === 1 ? ' has' : 's have'} no tier yet. Unknown, not low.` }]} />
+                )}
+                {head.failedReads > 0 && (
+                  <FactorChips factors={[{ key: 'read-failed', tone: 'unknown', label: 'read failed', title: `The finding read failed for ${head.failedReads} image${head.failedReads === 1 ? '' : 's'}: their tier is unknown. Retry with Refresh.` }]} />
+                )}
+              </>
+            )}
           </div>
           {f?.title && <p className="text-sm text-primary">{f.title}</p>}
           {f && <p className="text-xs text-tertiary">Package <span className="font-mono text-secondary">{f.package.name}</span> {f.installedVersion}{f.kevDateAdded && <> · in KEV since {f.kevDateAdded.slice(0, 10)}</>}</p>}
