@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, cleanup } from '@testing-library/react';
 import AIAssistant from './AIAssistant';
 import { DEFAULT_VIEW_MODE, readStoredViewMode } from '../utils/assistantViewMode';
@@ -22,9 +22,15 @@ describe('readStoredViewMode', () => {
 
 describe('AIAssistant opens docked', () => {
   beforeEach(() => {
-    cleanup();
     localStorage.clear();
   });
+  // Unmount after every test, not only before the next one. The modal
+  // flips to its entered state on a requestAnimationFrame; left mounted
+  // after the last test, that update renders outside act() and React's
+  // scheduler can run the commit after vitest has torn down jsdom,
+  // failing the run with "window is not defined". Unmounting runs the
+  // Modal's effect cleanup, which cancels the pending frames.
+  afterEach(cleanup);
 
   it('reports the side-panel layout to the app on open and renders the docked chrome', () => {
     const onLayoutChange = vi.fn();
