@@ -1,0 +1,89 @@
+---
+title: "ApplicationSecurityProfile"
+description: "A workload's security profile as a Kubernetes resource, with drift from the version you accepted"
+icon: "id-card"
+---
+
+`ApplicationSecurityProfile` puts kguardian's per-workload security profile into the Kubernetes API. You create one per workload and name the profile revision you reviewed. The `kguardian-evaluator` reads the profile from the broker and writes status: overall posture, each dimension's status, and whether the workload has changed since the revision you accepted.
+
+It is report-only. kguardian never creates, edits or deletes these resources, never changes the workload, and enforces nothing. Accepting a revision is always your edit.
+
+## Enable it
+
+Off by default. It needs the evaluator (on by default):
+
+```yaml
+evaluator:
+  applicationSecurityProfiles:
+    enabled: true
+    # installCRD: true      # set false if you manage CRDs yourself
+    # resyncInterval: 5m    # how often each profile is re-read (floor 30s)
+```
+
+What this adds:
+
+- the `applicationsecurityprofiles.kguardian.dev` CRD, kept on `helm uninstall` like the SeccompProfile CRD;
+- evaluator RBAC: `list`/`watch` on `applicationsecurityprofiles` and `patch` on `applicationsecurityprofiles/status`. Nothing else: no create, delete, update, or spec writes;
+- `BROKER_URL` on the evaluator and, when `broker.auth.enabled=true`, the **read**-scope token. The evaluator never holds the ingest token;
+- when `broker.networkPolicy.enabled=true`, the evaluator is admitted to the broker.
+
+## Use it
+
+```yaml
+apiVersion: kguardian.dev/v1alpha1
+kind: ApplicationSecurityProfile
+metadata:
+  name: checkout
+  namespace: payments
+spec:
+  workloadRef:
+    kind: Deployment   # the top-level owner: ReplicaSet -> Deployment, Job -> CronJob, bare pod -> Pod
+    name: checkout
+  # acceptedRevision: 4  # add once you've reviewed a revision
+```
+
+`workloadRef` uses the broker's workload key. `kind` is case-sensitive and the field is immutable: to point at another workload, create another resource. Only one resource per workload is reported. If two name the same workload, the older one wins and the other gets `ProfileAvailable=False` with reason `DuplicateWorkloadRef`.
+
+```text
+$ kubectl get asp -n payments
+NAME       KIND         WORKLOAD   PROFILE            POSTURE   COVERAGE   ACCEPTED   CURRENT   DEVIATION   AGE
+checkout   Deployment   checkout   ProfileRetrieved   warn      0.25       2          4         Changed     3m
+```
+
+To accept the current profile, review it (the frontend profile page, or `kubectl kguardian profile get payments/Deployment/checkout` and `profile diff`), then set `spec.acceptedRevision` to `status.current.revision`:
+
+```bash
+kubectl -n payments patch asp checkout --type merge \
+  -p "{\"spec\":{\"acceptedRevision\":$(kubectl -n payments get asp checkout -o jsonpath='{.status.current.revision}')}}"
+```
+
+Spec edits are picked up immediately. Everything else is re-read every `resyncInterval`, because profile changes happen on the broker side and raise no Kubernetes event.
+
+## Status
+
+Status follows the [profile contract](https://github.com/kguardian-dev/kguardian/blob/main/docs/design/workload-security-profile-api.md) (v1.3). Unknown is never shown as safe.
+
+| Field | Meaning |
+|---|---|
+| `posture.status` | `ok`, `warn`, `risk` or `unknown`. `ok` only when all four core dimensions (network, syscalls, podSecurity, images) are known and ok. With any unknown dimension it is the worst known status if that is warn/risk, otherwise `unknown`. There are no scores. |
+| `posture.coverage` | Known core dimensions / 4. |
+| `posture.unknownDimensions`, `posture.reasons` | Which dimensions are unknown, and one reason per dimension that is not ok. |
+| `dimensions.<name>` | Status plus the first reason code and message for network, syscalls, podSecurity, images, and compute (informational, not in the rollup). |
+| `findingCounts` | Findings by severity. |
+| `current` | `liveContentHash` of the profile computed now; `revision`/`contentHash` of the latest stored version; `snapshotPending: true` when the live profile has not been stored as a version yet. |
+| `accepted` | The version named by `spec.acceptedRevision`. |
+| `deviation.state` | `None` (live profile matches the accepted revision), `Changed`, or `Unknown` (no accepted revision, or the broker no longer has it). |
+| `deviation.changedDimensions` | Dimensions whose content changed since the accepted revision. Absent while the change is still `snapshotPending`, because the per-dimension breakdown exists only for stored versions. |
+| `lastSyncedAt` | When the profile was last read. If the broker is unreachable the previous data stays, `ProfileAvailable` turns `False`, and its message says how old the data is. |
+
+Conditions:
+
+- `ProfileAvailable`: `True`/`ProfileRetrieved`, or `False` with `WorkloadNotFound` (check kind and name, or the workload has not been observed yet), `BrokerUnavailable`, `BrokerUnauthorized`, `BrokerError` (for example a broker too old to serve the profile routes), `DuplicateWorkloadRef`.
+- `Deviated`: `True`/`ProfileChanged`, `False`/`MatchesAccepted`, or `Unknown` with `NoAcceptedRevision`, `AcceptedRevisionNotFound` or `ProfileUnavailable`.
+
+Revisions come from the broker's version history, which keeps the newest `PROFILE_VERSIONS_MAX_PER_WORKLOAD` (default 50) per workload for `PROFILE_VERSIONS_RETENTION_DAYS` (default 90). An accepted revision that has been pruned reports `AcceptedRevisionNotFound`; accept a current one.
+
+## Limits
+
+- The evaluator runs a single replica and reads profiles one at a time. The broker computes each profile live, so a large number of resources with a short `resyncInterval` adds broker load.
+- Status reflects the broker's view: a dimension the broker cannot see stays `unknown` here too.

@@ -31,6 +31,7 @@
               "concepts/network-policies",
               "concepts/peer-attribution",
               "concepts/audit-network-policy",
+              "concepts/application-security-profile",
               "concepts/seccomp-profiles",
               "concepts/compute-contention",
               "concepts/policy-as-code"
