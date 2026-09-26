@@ -14,8 +14,10 @@ use crate::{
     get_compute_history, get_compute_latest, get_compute_nodes, get_image, get_images,
     get_pod_by_ip, get_pod_by_name, get_pod_details, get_pod_syscall_name, get_pod_traffic,
     get_pod_traffic_name, get_pods_by_node, get_seccomp_profile, get_seccomp_profile_file,
-    get_svc_by_ip, get_svc_details, get_version, get_workload_containers, list_seccomp_profiles,
-    mark_pod_dead, post_seccomp_node_status, put_seccomp_cr, seccomp_denials_resource,
+    get_svc_by_ip, get_svc_details, get_version, get_workload_containers, get_workload_profile,
+    get_workload_profile_diff, get_workload_profile_version, get_workload_profile_versions,
+    get_workloads, list_seccomp_profiles, mark_pod_dead, post_seccomp_node_status, put_seccomp_cr,
+    seccomp_denials_resource,
 };
 
 pub fn configure(cfg: &mut web::ServiceConfig) {
@@ -59,6 +61,12 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
         .service(get_images)
         .service(get_image)
         .service(get_workload_containers)
+        // Workload security profile (#1533 P0-5): list, detail, versions, diff.
+        .service(get_workloads)
+        .service(get_workload_profile)
+        .service(get_workload_profile_versions)
+        .service(get_workload_profile_version)
+        .service(get_workload_profile_diff)
         .service(get_version)
         .service(get_cluster_environment);
 }

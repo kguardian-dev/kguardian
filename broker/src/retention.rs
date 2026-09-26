@@ -200,6 +200,7 @@ pub fn spawn(pool: DbPool) {
     let denial_pool = pool.clone();
     let traffic_pool = pool.clone();
     spawn_image_inventory(pool.clone());
+    spawn_workload_profiles(pool.clone());
     actix_web::rt::spawn(async move {
         // First pass after a short warmup so the broker doesn't hammer
         // a cold pool the second it starts.
@@ -1849,24 +1850,24 @@ async fn run_batched_prune(
         match result {
             Ok(Ok(0)) => {
                 if total == 0 {
-                    debug!(table, "image inventory retention: 0 rows pruned");
+                    debug!(table, "retention: 0 rows pruned");
                 } else {
                     info!(
                         table,
                         rows = total,
                         batches = batch_idx,
-                        "image inventory retention pruned rows"
+                        "retention pruned rows"
                     );
                 }
                 return;
             }
             Ok(Ok(n)) => total += n,
             Ok(Err(e)) => {
-                warn!(table, error = %e, pruned_before_failure = total, "image inventory retention failed");
+                warn!(table, error = %e, pruned_before_failure = total, "retention failed");
                 return;
             }
             Err(e) => {
-                warn!(table, error = %e, pruned_before_failure = total, "image inventory retention task panicked");
+                warn!(table, error = %e, pruned_before_failure = total, "retention task panicked");
                 return;
             }
         }
@@ -1875,7 +1876,7 @@ async fn run_batched_prune(
         table,
         rows = total,
         cap = MAX_BATCHES_PER_PASS,
-        "image inventory retention hit per-pass batch cap; the rest is pruned next interval"
+        "retention hit per-pass batch cap; the rest is pruned next interval"
     );
 }
 
@@ -1890,6 +1891,174 @@ fn prune_batch(
         .bind::<diesel::sql_types::BigInt, _>(batch_size)
         .execute(conn)
         .map_err(RetentionError::Diesel)
+}
+
+// ---------------------------------------------------------------------
+// Workload security profiles (#1533)
+// ---------------------------------------------------------------------
+//
+// `workload_profile_latest` is refreshed by the snapshotter on every visit
+// of a workload that still has source data, so a row not recomputed
+// within the window belongs to a workload that is gone. Versions older
+// than the window are pruned too, except each live workload's newest
+// (the anchor a diff points at); a gone workload's versions all age out.
+// The per-workload count cap (PROFILE_VERSIONS_MAX_PER_WORKLOAD) is
+// enforced by the snapshotter at write time, not here.
+//
+// - `PROFILE_VERSIONS_RETENTION_DAYS` (default 90; 0 disables)
+// - `PROFILE_VERSIONS_RETENTION_INTERVAL_SECS` (default 3600, floor 60)
+// - batch size shared with IMAGE_INVENTORY_RETENTION_BATCH_SIZE
+
+const DEFAULT_PROFILE_VERSIONS_RETENTION_DAYS: u32 = 90;
+
+fn profile_versions_retention_days() -> u32 {
+    std::env::var("PROFILE_VERSIONS_RETENTION_DAYS")
+        .ok()
+        .and_then(|v| v.trim().parse().ok())
+        .unwrap_or(DEFAULT_PROFILE_VERSIONS_RETENTION_DAYS)
+}
+
+fn profile_versions_retention_interval() -> Duration {
+    let secs = std::env::var("PROFILE_VERSIONS_RETENTION_INTERVAL_SECS")
+        .ok()
+        .and_then(|v| v.trim().parse().ok())
+        .unwrap_or(DEFAULT_INTERVAL_SECS);
+    Duration::from_secs(secs.max(60))
+}
+
+/// Read-model rows of workloads not recomputed within the window.
+pub(crate) const PROFILE_LATEST_PRUNE_SQL: &str = "WITH expired AS (\
+         SELECT cluster_id, pod_namespace, workload_kind, workload_name \
+         FROM workload_profile_latest \
+         WHERE computed_at < timezone('UTC', NOW()) - $1::interval \
+         ORDER BY computed_at \
+         LIMIT $2 \
+     ) \
+     DELETE FROM workload_profile_latest l USING expired e \
+     WHERE l.cluster_id = e.cluster_id AND l.pod_namespace = e.pod_namespace \
+       AND l.workload_kind = e.workload_kind AND l.workload_name = e.workload_name";
+
+/// Versions older than the window, unless it is the newest version of a
+/// workload that is still in the read model.
+pub(crate) const PROFILE_VERSIONS_PRUNE_SQL: &str = "WITH expired AS (\
+         SELECT v.id FROM workload_profile_versions v \
+         WHERE v.created_at < timezone('UTC', NOW()) - $1::interval \
+           AND (EXISTS (SELECT 1 FROM workload_profile_versions n \
+                        WHERE n.cluster_id = v.cluster_id AND n.pod_namespace = v.pod_namespace \
+                          AND n.workload_kind = v.workload_kind AND n.workload_name = v.workload_name \
+                          AND n.revision > v.revision) \
+                OR NOT EXISTS (SELECT 1 FROM workload_profile_latest l \
+                        WHERE l.cluster_id = v.cluster_id AND l.pod_namespace = v.pod_namespace \
+                          AND l.workload_kind = v.workload_kind AND l.workload_name = v.workload_name)) \
+         ORDER BY v.created_at \
+         LIMIT $2 \
+     ) \
+     DELETE FROM workload_profile_versions WHERE id IN (SELECT id FROM expired)";
+
+fn spawn_workload_profiles(pool: DbPool) {
+    let days = profile_versions_retention_days();
+    let interval = profile_versions_retention_interval();
+    info!(
+        days,
+        interval_secs = interval.as_secs(),
+        "workload profile retention loop scheduled (days=0 means pruning off)"
+    );
+    if days == 0 {
+        return;
+    }
+    actix_web::rt::spawn(async move {
+        tokio::time::sleep(Duration::from_secs(180)).await;
+        loop {
+            run_workload_profiles_pass(&pool, days).await;
+            tokio::time::sleep(interval).await;
+        }
+    });
+}
+
+async fn run_workload_profiles_pass(pool: &DbPool, days: u32) {
+    let batch = image_inventory_batch_size();
+    // Read model first, so a gone workload's newest version is eligible
+    // in the same pass.
+    run_batched_prune(
+        pool,
+        "workload_profile_latest",
+        PROFILE_LATEST_PRUNE_SQL,
+        days,
+        batch,
+    )
+    .await;
+    run_batched_prune(
+        pool,
+        "workload_profile_versions",
+        PROFILE_VERSIONS_PRUNE_SQL,
+        days,
+        batch,
+    )
+    .await;
+}
+
+#[cfg(test)]
+mod workload_profile_retention_tests {
+    use super::*;
+    use diesel::connection::SimpleConnection;
+
+    const TEST_MIGRATIONS: diesel_migrations::EmbeddedMigrations =
+        diesel_migrations::embed_migrations!("./db/migrations");
+
+    #[test]
+    #[ignore = "requires a live postgres (set KG_TEST_DATABASE_URL)"]
+    fn live_database_prunes_old_versions_but_keeps_each_live_workloads_newest() {
+        use diesel_migrations::MigrationHarness;
+        let url = std::env::var("KG_TEST_DATABASE_URL").expect("set KG_TEST_DATABASE_URL");
+        let mut conn = PgConnection::establish(&url).expect("connect");
+        conn.run_pending_migrations(TEST_MIGRATIONS)
+            .expect("migrate");
+        let ns = "kgtest-profile-retention";
+        conn.batch_execute(&format!(
+            "DELETE FROM workload_profile_versions WHERE pod_namespace = '{ns}'; \
+             DELETE FROM workload_profile_latest WHERE pod_namespace = '{ns}'; \
+             INSERT INTO workload_profile_latest (pod_namespace, workload_kind, workload_name, revision, content_hash, posture_status, summary) \
+               VALUES ('{ns}', 'Deployment', 'live', 3, 'h3', 'ok', '{{}}'), \
+                      ('{ns}', 'Deployment', 'gone', 1, 'g1', 'ok', '{{}}'); \
+             UPDATE workload_profile_latest SET computed_at = timezone('UTC', NOW()) - INTERVAL '100 days' \
+               WHERE pod_namespace = '{ns}' AND workload_name = 'gone'; \
+             INSERT INTO workload_profile_versions (pod_namespace, workload_kind, workload_name, revision, content_hash, dimension_hashes, snapshot, posture, created_at) VALUES \
+               ('{ns}', 'Deployment', 'live', 1, 'h1', '{{}}', '{{}}', '{{}}', timezone('UTC', NOW()) - INTERVAL '120 days'), \
+               ('{ns}', 'Deployment', 'live', 2, 'h2', '{{}}', '{{}}', '{{}}', timezone('UTC', NOW()) - INTERVAL '110 days'), \
+               ('{ns}', 'Deployment', 'live', 3, 'h3', '{{}}', '{{}}', '{{}}', timezone('UTC', NOW()) - INTERVAL '100 days'), \
+               ('{ns}', 'Deployment', 'gone', 1, 'g1', '{{}}', '{{}}', '{{}}', timezone('UTC', NOW()) - INTERVAL '100 days'), \
+               ('{ns}', 'Deployment', 'fresh', 1, 'f1', '{{}}', '{{}}', '{{}}', timezone('UTC', NOW()));"
+        ))
+        .unwrap();
+        while prune_batch(&mut conn, PROFILE_LATEST_PRUNE_SQL, 90, 1000).unwrap() > 0 {}
+        while prune_batch(&mut conn, PROFILE_VERSIONS_PRUNE_SQL, 90, 1000).unwrap() > 0 {}
+
+        #[derive(QueryableByName)]
+        struct R {
+            #[diesel(sql_type = diesel::sql_types::Text)]
+            workload_name: String,
+            #[diesel(sql_type = diesel::sql_types::Integer)]
+            revision: i32,
+        }
+        let rows: Vec<R> = diesel::sql_query(format!(
+            "SELECT workload_name, revision FROM workload_profile_versions \
+             WHERE pod_namespace = '{ns}' ORDER BY workload_name, revision"
+        ))
+        .load(&mut conn)
+        .unwrap();
+        let got: Vec<(String, i32)> = rows
+            .into_iter()
+            .map(|r| (r.workload_name, r.revision))
+            .collect();
+        // live: only the newest survives; gone: its read-model row was
+        // pruned, so its last version ages out too; fresh: in the window.
+        assert_eq!(got, vec![("fresh".to_string(), 1), ("live".to_string(), 3)]);
+        conn.batch_execute(&format!(
+            "DELETE FROM workload_profile_versions WHERE pod_namespace = '{ns}'; \
+             DELETE FROM workload_profile_latest WHERE pod_namespace = '{ns}';"
+        ))
+        .unwrap();
+    }
 }
 
 #[cfg(test)]

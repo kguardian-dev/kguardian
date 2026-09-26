@@ -5,9 +5,9 @@ use actix_web::middleware::from_fn;
 use actix_web::{get, web, App, HttpResponse, HttpServer};
 use api::{
     establish_connection, set_statement_timeout, spawn_peer_late_resolve, spawn_retention,
-    spawn_seccomp_denial_metrics, spawn_version_check, AuditClient, ReadBudget,
-    SeccompDenialMetrics, SeccompDenialSeries, SeccompProfilesCache, StatementTimeoutCustomizer,
-    VersionCheckState,
+    spawn_seccomp_denial_metrics, spawn_version_check, spawn_workload_profile_snapshotter,
+    AuditClient, ReadBudget, SeccompDenialMetrics, SeccompDenialSeries, SeccompProfilesCache,
+    StatementTimeoutCustomizer, VersionCheckState,
 };
 
 use diesel::r2d2;
@@ -329,6 +329,11 @@ async fn main() -> Result<(), std::io::Error> {
     // whose peer pod's spec had not arrived yet (peer.rs). Disable with
     // PEER_LATE_RESOLVE_WINDOW_SECS=0.
     spawn_peer_late_resolve(pool.clone());
+
+    // Workload security profile snapshotter (#1533): refreshes the
+    // GET /workloads read model and writes a profile version only when a
+    // workload's content hash changes (workload_profile.rs).
+    spawn_workload_profile_snapshotter(pool.clone());
 
     // Daily anonymous version check-in + shared state for GET /version.
     // Disabled entirely (no task, no requests) with TELEMETRY_ENABLED=false.

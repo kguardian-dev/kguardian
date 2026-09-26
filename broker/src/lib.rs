@@ -9,6 +9,7 @@ mod get;
 mod image_inventory;
 mod ip;
 mod peer;
+mod pod_security;
 mod read_budget;
 mod retention;
 pub mod routes;
@@ -18,6 +19,7 @@ mod seccomp_profiles_cache;
 mod telemetry;
 mod types;
 mod version_check;
+mod workload_profile;
 pub use add::{
     add_node_facts, add_pod_details, add_pods_batch, add_pods_syscalls, add_svc_details,
     mark_pod_dead,
@@ -38,6 +40,10 @@ pub use telemetry::*;
 pub use types::*;
 pub use version_check::{
     get_cluster_environment, get_version, spawn as spawn_version_check, VersionCheckState,
+};
+pub use workload_profile::{
+    get_workload_profile, get_workload_profile_diff, get_workload_profile_version,
+    get_workload_profile_versions, get_workloads, spawn as spawn_workload_profile_snapshotter,
 };
 mod conn;
 pub use conn::*;
