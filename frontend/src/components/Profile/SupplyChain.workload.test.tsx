@@ -3,7 +3,8 @@ import { afterEach, expect, test } from 'vitest';
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { WorkloadView } from '../WorkloadView';
 import { replayApi } from '../../fixtures/replay';
-import { replayVulnApi } from '../../fixtures/vulns';
+import { replayVulnApi, vulnCapture } from '../../fixtures/vulns';
+import type { RunningSignaturePage } from '../../types/attestations';
 import { VulnApi } from '../../services/vulnApi';
 
 afterEach(cleanup);
@@ -68,4 +69,21 @@ test('Image & packages: each running digest with its signer, and the workload ad
   const header = await screen.findByRole('region', { name: 'Policy header: review before applying' });
   expect(within(header).getByText(/^REVIEW EVERY IDENTITY BEFORE APPLYING/)).toBeTruthy();
   expect(vulnApi.calls).toContain('GET /workloads/payments/Deployment/checkout/export?artifacts=admission&mode=audit&format=zip-manifest');
+});
+
+test('posture chip: "verified" with no signer is unknown, never "Signature verified" or "0 signers"', async () => {
+  const feed = vulnCapture<RunningSignaturePage>('attestations-running-namespace-payments');
+  const items = feed.body.items.map((i) => (i.workloadName === 'checkout' ? { ...i, signers: [] } : i));
+  page({ ns: 'payments', kind: 'Deployment', name: 'checkout' }, replayVulnApi([{ ...feed, body: { ...feed.body, items } }]).api);
+  const c = await chip();
+  expect(within(c).getByText('Unknown')).toBeTruthy();
+  expect(c.textContent).not.toMatch(/Signature verified|0 signers/);
+});
+
+test('posture chip: its accessible name carries the signer', async () => {
+  page({ ns: 'payments', kind: 'Deployment', name: 'checkout' });
+  const c = await chip();
+  expect(within(c).getByRole('button').getAttribute('aria-label')).toBe(
+    'Supply chain: Signature verified, signed by https://github.com/example-org/checkout/.github/workflows/release.yaml@refs/tags/v4.2.0 via https://token.actions.githubusercontent.com',
+  );
 });

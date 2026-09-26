@@ -110,3 +110,16 @@ test('the captured policy header splits from its YAML and keeps the review warni
   expect(body.startsWith('apiVersion: kguardian.dev/v1alpha1')).toBe(true);
   expect(body).not.toMatch(/^#/m);
 });
+
+test('"verified" with no verified signer is unknown, for the digest and the workload: never signed without its signer', () => {
+  const stripped = running.body.items.map((i) => (i.workloadName === 'checkout' ? { ...i, signers: [] } : i));
+  const d = signaturesByDigest(stripped).find((x) => x.repository === 'ghcr.io/example/checkout')!;
+  expect(d).toMatchObject({ state: 'unknown', noSigner: true, signers: [] });
+  const w = signaturesByWorkload(stripped, workloadKey).get(workloadKey('payments', 'Deployment', 'checkout'))!;
+  expect(w.worst).toBe('unknown');
+  expect(signatureBadgeText(w)).toBe('sig unknown');
+  expect(workloadSignatureText(w)).not.toMatch(/has a verified signature/);
+  // An unverified check does not count as a signer either.
+  const claimed = running.body.items.map((i) => (i.workloadName === 'checkout' ? { ...i, signers: i.signers.map((c) => ({ ...c, verified: false })) } : i));
+  expect(signaturesByDigest(claimed).find((x) => x.repository === 'ghcr.io/example/checkout')!.state).toBe('unknown');
+});

@@ -129,8 +129,11 @@ export function DigestRow({ r, onOpenWorkload }: { r: DigestSignature; onOpenWor
       </div>
       <div className="mt-2 space-y-1">
         {r.state === 'verified' && <SignerList signers={r.signers} />}
-        {r.state === 'verified' && r.signers.length === 0 && <p className="text-[11px] text-severity-medium">Verified, but the Broker sent no signer identity: treat as unknown.</p>}
-        {r.state !== 'verified' && <p className="text-[11px] text-secondary">{why ? `${SIGNATURE_LABEL[r.state]}: ${why}.` : SIGNATURE_MEANING[r.state]}</p>}
+        {r.noSigner ? (
+          <p className="text-[11px] text-severity-medium">Reported verified, but no verified signer identity came with it: unknown, not signed.</p>
+        ) : (
+          r.state !== 'verified' && <p className="text-[11px] text-secondary">{why ? `${SIGNATURE_LABEL[r.state]}: ${why}.` : SIGNATURE_MEANING[r.state]}</p>
+        )}
         {r.predicates.length > 0 && (
           <p className="text-[11px] text-secondary">
             Verified attestations: {r.predicates.map(shortPredicate).join(', ')}

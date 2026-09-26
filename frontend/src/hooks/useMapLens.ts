@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { vulnApi as defaultVulnApi, type VulnApi } from '../services/vulnApi';
+import { vulnApi as defaultVulnApi, vulnErrorKind, type VulnApi } from '../services/vulnApi';
 import { profileApi as defaultProfileApi, type ProfileApi } from '../services/profileApi';
 import type { LensBadge, MapLens, PodNodeData } from '../types';
 import type { Finding, ImageUser, Report } from '../types/vulns';
@@ -150,18 +150,22 @@ export function sbomBadge(imgs: WorkloadImages | undefined, sig = ' Signatures: 
   };
 }
 
+/** How the namespace's signature read went: `unsupported` is a Broker without the route. */
+export type SignatureRead = 'ok' | 'failed' | 'unsupported';
+
 /**
- * Supply chain lens badge. With signature results, the badge is the
- * workload's worst running image's signature verdict (a verified one is
- * neutral and names its signer, never "trusted"); the SBOM facts follow in
- * the label. Without them (the read failed, or this workload has no row in
- * the running feed) it is the SBOM badge, and the label says why signatures
- * are unknown.
+ * Supply chain lens badge: the workload's worst running image's signature
+ * verdict (a verified one is neutral and names its signer in the label,
+ * never "trusted"). A failed read is "read failed", a workload with no
+ * signature row is "not checked": both unknown, never the SBOM state in its
+ * place. The SBOM facts are always in the label.
  */
-export function supplyBadge(imgs: WorkloadImages | undefined, sig?: WorkloadSignatures, sigFailed = false): LensBadge {
-  if (!sig) return sbomBadge(imgs, sigFailed ? ' Signatures: the read failed, unknown.' : ' Signatures: not checked.');
-  const sbom = sbomBadge(imgs, '').label;
-  return { lens: 'supply', tone: SIGNATURE_TONE[sig.worst], text: signatureBadgeText(sig), label: `${workloadSignatureText(sig)} SBOM: ${sbom}` };
+export function supplyBadge(imgs: WorkloadImages | undefined, sig?: WorkloadSignatures, read: SignatureRead = 'ok'): LensBadge {
+  const sbom = ` SBOM: ${sbomBadge(imgs, '').label}`;
+  if (read === 'failed') return { lens: 'supply', tone: 'unknown', text: 'read failed', label: `Signatures: the read failed, unknown. Retry with Refresh.${sbom}` };
+  if (read === 'unsupported') return { lens: 'supply', tone: 'unknown', text: 'not checked', label: `Signatures: this Broker does not serve signature results, unknown.${sbom}` };
+  if (!sig) return { lens: 'supply', tone: 'unknown', text: 'not checked', label: `Signatures: no result for this workload's running images (not checked, not unsigned).${sbom}` };
+  return { lens: 'supply', tone: SIGNATURE_TONE[sig.worst], text: signatureBadgeText(sig), label: `${workloadSignatureText(sig)}${sbom}` };
 }
 
 /** Coverage lens badge: how much of the workload kguardian can see (the profile's posture coverage). */
@@ -298,7 +302,12 @@ export function useMapLens(
         // feed (one bounded read); a failure leaves the SBOM badges and says so.
         const [imgRead, sigRead] = await Promise.all([
           readImages(vulnApi, namespace, lens),
-          lens === 'supply' ? readRunningSignatures(vulnApi, namespace).then((r) => ({ ok: true as const, ...r }), () => ({ ok: false as const })) : Promise.resolve(null),
+          lens === 'supply'
+            ? readRunningSignatures(vulnApi, namespace).then(
+                (r) => ({ ok: true as const, ...r }),
+                (err: unknown) => ({ ok: false as const, unsupported: vulnErrorKind(err) === 'unsupported' }),
+              )
+            : Promise.resolve(null),
         ]);
         const { images, truncated: t, readFailures: f } = imgRead;
         const sigs = sigRead?.ok ? signaturesByWorkload(sigRead.items, workloadKey) : new Map<string, WorkloadSignatures>();
@@ -307,13 +316,13 @@ export function useMapLens(
         const keys = new Set([...byImages.keys(), ...sigs.keys()]);
         for (const k of keys) {
           const v = byImages.get(k);
-          const b = lens === 'supply' ? supplyBadge(v, sigs.get(k), sigRead?.ok === false) : vulnBadge(v);
+          const b = lens === 'supply' ? supplyBadge(v, sigs.get(k), sigRead?.ok === false ? (sigRead.unsupported ? 'unsupported' : 'failed') : 'ok') : vulnBadge(v);
           // A capped image page may have left some of this workload's images
           // unread: "nothing urgent" is then not a finished assessment.
           out.set(k, t && b.tone === 'neutral' ? { ...b, tone: 'unknown', label: `${b.label} Not every image was read (capped), so this is incomplete.` } : b);
         }
         truncated = t || images.some((i) => i.hotTruncated) || (sigRead?.ok === true && sigRead.truncated);
-        readFailures = f + (sigRead?.ok === false ? 1 : 0);
+        readFailures = f + (sigRead?.ok === false && !sigRead.unsupported ? 1 : 0);
       }
       if (!current()) return;
       setState({ byWorkload: out, loading: false, error: null, truncated, readFailures });

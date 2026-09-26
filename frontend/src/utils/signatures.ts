@@ -100,6 +100,18 @@ export function signerOf(c: SignatureCheck): Signer | null {
   return { kind: 'keyless', issuer: c.issuer, san: c.san };
 }
 
+/**
+ * A running container's state. "Verified" with no verified signer to show
+ * is unknown: a verdict is never shown as signed without its signer.
+ */
+export function runningState(it: RunningImageSignature): SignatureState {
+  const st = asSignatureState(it.verdict);
+  return st === 'verified' && !it.signers.some((c) => signerOf(c) !== null) ? 'unknown' : st;
+}
+
+/** The Broker said verified but sent no verified signer (shown as unknown, with why). */
+export const verifiedWithoutSigner = (it: RunningImageSignature) => asSignatureState(it.verdict) === 'verified' && runningState(it) === 'unknown';
+
 const shortFp = (fp?: string) => (fp ? `sha256:${fp.slice(0, 12)}…` : 'unknown fingerprint');
 
 /** Who signed, in full: the identity a policy would trust. */
@@ -146,7 +158,7 @@ export function signaturesByWorkload(items: RunningImageSignature[], keyOf: (ns:
     const acc = out.get(key) ?? { byState: emptyStates(), digests: [], signers: [], worst: 'verified' as SignatureState };
     if (!acc.digests.includes(it.digest)) {
       acc.digests.push(it.digest);
-      const st = asSignatureState(it.verdict);
+      const st = runningState(it);
       acc.byState[st].push(it.digest);
       if (signatureRank(st) < signatureRank(acc.worst)) acc.worst = st;
       if (st === 'verified') acc.signers = uniqueSigners([...acc.signers, ...it.signers.map(signerOf).filter((s): s is Signer => s !== null)]);
@@ -185,6 +197,8 @@ export function signatureBadgeText(w: WorkloadSignatures): string {
 /** One running image digest and what is known about who signed it. */
 export interface DigestSignature {
   digest: string;
+  /** The Broker said verified but sent no verified signer: shown as unknown. */
+  noSigner: boolean;
   imageRef: string;
   repository: string | null;
   state: SignatureState;
@@ -209,7 +223,8 @@ export function signaturesByDigest(items: RunningImageSignature[]): DigestSignat
         digest: it.digest,
         imageRef: it.imageRef,
         repository: it.repository,
-        state: asSignatureState(it.verdict),
+        state: runningState(it),
+        noSigner: verifiedWithoutSigner(it),
         reason: it.reason,
         checkedAt: it.checkedAt,
         signers: uniqueSigners(it.signers.map(signerOf).filter((s): s is Signer => s !== null)),

@@ -3,7 +3,7 @@ import { asStatus, DIMENSION_LABEL, pssLevelText } from '../../utils/posture';
 import type { ProfileTab } from '../../utils/profileView';
 import { StatusPill } from './parts';
 import type { WorkloadSignatureState } from '../../hooks/useSignatures';
-import { SIGNATURE_LABEL, signerShort, stateCounts, workloadSignatureText } from '../../utils/signatures';
+import { SIGNATURE_LABEL, signerShort, signerText, stateCounts, workloadSignatureText } from '../../utils/signatures';
 import { SignatureBadge } from '../Vulns/SignatureParts';
 
 const ORDER: DimensionName[] = ['network', 'syscalls', 'podSecurity', 'images', 'compute'];
@@ -125,7 +125,16 @@ function SupplyChainChip({ sig, onOpen }: { sig: WorkloadSignatureState; onOpen:
   if (s) {
     const n = s.digests.length;
     const bad = s.byState[s.worst].length;
-    const detail = s.worst === 'verified' ? (s.signers.length === 1 ? signerShort(s.signers[0]) : `${s.signers.length} signers`) : n > 1 ? `${bad} of ${n} images` : null;
+    const detail =
+      s.worst === 'verified'
+        ? s.signers.length === 1
+          ? signerShort(s.signers[0])
+          : s.signers.length > 1
+            ? `${s.signers.length} signers`
+            : null
+        : n > 1
+          ? `${bad} of ${n} images`
+          : null;
     body = (
       <>
         <SignatureBadge state={s.worst} />
@@ -144,7 +153,7 @@ function SupplyChainChip({ sig, onOpen }: { sig: WorkloadSignatureState; onOpen:
     title = sig.truncated ? 'Not read (capped): unknown.' : 'No running image of this workload is in the inventory: unknown.';
   }
   return (
-    <button type="button" onClick={onOpen} title={`${title}\nInformational: not part of the rollup.`} aria-label={`Supply chain: ${s ? SIGNATURE_LABEL[s.worst] : 'no data'}`} className={cls}>
+    <button type="button" onClick={onOpen} title={`${title}\nInformational: not part of the rollup.`} aria-label={`Supply chain: ${s ? `${SIGNATURE_LABEL[s.worst]}${s.worst === 'verified' && s.signers.length ? `, signed by ${s.signers.map(signerText).join('; ')}` : ''}` : 'no data'}`} className={cls}>
       <span className="text-secondary">Supply chain</span>
       {body}
     </button>

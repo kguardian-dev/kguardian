@@ -12,7 +12,8 @@ afterEach(cleanup);
 const noop = () => {};
 const supplyTab = (api = replayVulnApi().api, over: Partial<Parameters<typeof ImagesView>[0]> = {}) =>
   render(<ImagesView namespace="payments" allNamespaces tab="supply" onParamsChange={noop} onOpenWorkload={noop} onShowOnMap={noop} onAskAI={noop} api={api} {...over} />);
-const rowOf = async (repo: string) => (await screen.findAllByTestId('signature-row')).find((r) => within(r).queryByText(new RegExp(`^${repo.replace(/[.]/g, '\\.')}`)))!;
+/** The row whose image reference starts with `repo` (plain string match, no regex). */
+const rowOf = async (repo: string) => (await screen.findAllByTestId('signature-row')).find((r) => r.querySelector('.font-mono')!.textContent!.startsWith(`${repo}:`))!;
 
 describe('Images → Supply chain (captured from a real Broker)', () => {
   test('one row per running digest, each with its verdict; the unchecked digest is "Not checked", not unsigned', async () => {
@@ -90,6 +91,19 @@ describe('Images → Supply chain (captured from a real Broker)', () => {
     expect(within(reports).getByText('No signature, and every lookup answered.')).toBeTruthy();
   });
 
+  test('a "verified" row with no signer is unknown in the row and the tiles, never counted as verified', async () => {
+    const feed = vulnCapture<RunningSignaturePage>('attestations-running');
+    const items = feed.body.items.map((i) => (i.workloadName === 'checkout' ? { ...i, signers: [] } : i));
+    supplyTab(replayVulnApi([{ ...feed, body: { ...feed.body, items } }]).api);
+    const checkout = await rowOf('ghcr.io/example/checkout');
+    expect(checkout.getAttribute('data-state')).toBe('unknown');
+    expect(within(checkout).getByText(/Reported verified, but no verified signer identity came with it: unknown, not signed\./)).toBeTruthy();
+    const tiles = screen.getByRole('group', { name: 'Signature posture' });
+    const value = (label: string) => within(tiles).getByText(label).closest('div,button')!.parentElement!.textContent!;
+    expect(value('Verified signature')).toContain('1');
+    expect(value('Unknown or not checked')).toContain('5');
+  });
+
   test('ImageTrustPolicy results are not shown, and the page says where to read them', async () => {
     supplyTab();
     await screen.findAllByTestId('signature-row');
@@ -158,6 +172,20 @@ describe('Export admission policy', () => {
     expect(await screen.findByText(/No policy was generated: no image of this workload has every running digest signed by a verified signer \(ghcr\.io\/example\/reports: a running digest is unsigned\)/)).toBeTruthy();
     expect(screen.queryByLabelText('Policy YAML')).toBeNull();
     expect((screen.getByRole('button', { name: 'Download YAML' }) as HTMLButtonElement).disabled).toBe(true);
+  });
+
+  test('copy puts the whole document on the clipboard, header included', async () => {
+    const { api } = replayVulnApi();
+    const writeText = vi.fn(async () => {});
+    Object.defineProperty(navigator, 'clipboard', { value: { writeText }, configurable: true });
+    render(<AdmissionPolicyModal api={api} scope={{ kind: 'cluster' }} onClose={noop} />);
+    await screen.findByLabelText('Policy YAML');
+    fireEvent.click(screen.getByRole('button', { name: 'Copy YAML' }));
+    await waitFor(() => expect(writeText).toHaveBeenCalledTimes(1));
+    const copied = (writeText.mock.calls[0] as unknown as [string])[0];
+    expect(copied).toBe(vulnCapture<string>('policy-kguardian-audit').body);
+    expect(copied).toMatch(/^# kguardian image admission policy/);
+    expect(copied).toContain('# REVIEW EVERY IDENTITY BEFORE APPLYING');
   });
 
   test('download saves the whole document, header included', async () => {

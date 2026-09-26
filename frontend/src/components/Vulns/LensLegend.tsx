@@ -19,6 +19,7 @@ const KEYS: Record<Exclude<MapLens, 'traffic'>, Array<{ cls: string; text: strin
     { cls: 'text-tertiary border-dashed border-hubble-border-strong', text: 'key-signed', meaning: 'key not held' },
     { cls: 'text-tertiary border-dashed border-hubble-border-strong', text: 'sig unknown', meaning: 'could not check' },
     { cls: 'text-tertiary border-dashed border-hubble-border-strong', text: 'not checked', meaning: 'no result, not unsigned' },
+    { cls: 'text-tertiary border-dashed border-hubble-border-strong', text: 'read failed', meaning: 'unknown' },
   ],
   coverage: [
     { cls: 'bg-state-enforcing/15 text-state-enforcing border-state-enforcing/30', text: '% seen', meaning: 'posture ok' },
