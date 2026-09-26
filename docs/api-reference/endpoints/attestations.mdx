@@ -109,7 +109,9 @@ as YAML. See [ImageTrustPolicy](/concepts/image-trust-policy#generating-policies
 | `acknowledgePartial` | With `mode=enforce`, generate although some running images are not covered (otherwise `409`) |
 
 At most 5000 running containers are read; beyond that the answer is `422`
-and asks for `namespace`.
+and asks for `namespace`. A generation is charged at its worst case, which
+takes the whole read budget: other reads wait (up to
+`broker.readAcquireWaitMs`) or get `503` while it runs.
 
 All reads are charged to the broker's read-memory budget and answer `503`
 with `Retry-After` rather than a partial result.

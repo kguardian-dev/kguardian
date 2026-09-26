@@ -659,6 +659,11 @@ pub async fn get_attestation_policy(
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty());
     let ack = truthy(q.acknowledge_partial.as_deref());
+    // Charged at the worst case (every row as large as one stored result),
+    // which is more than any budget: the budget clamps it to the whole, so
+    // a generation runs alone and other reads wait or shed meanwhile.
+    // Generation is an occasional operator action; real rows are far
+    // smaller, but the charge is not allowed to under-count.
     let _permit = match budget
         .acquire(crate::read_budget::cost_kib(
             MAX_POLICY_ROWS,
