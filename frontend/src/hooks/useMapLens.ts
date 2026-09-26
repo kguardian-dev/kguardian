@@ -113,7 +113,7 @@ export function vulnBadge(imgs: WorkloadImages | undefined): LensBadge {
     return { lens: 'vulns', tone: 'unknown', text: 'read failed', label: `Unknown: the vulnerability read failed for ${plural(imgs.vulnFailed, 'running image')} of ${n}. Retry with Refresh.` };
   }
   if (imgs.untiered > 0) {
-    return { lens: 'vulns', tone: 'unknown', text: 'tier ?', label: 'This Broker does not rank findings into tiers, so P0/P1 is unknown here.' };
+    return { lens: 'vulns', tone: 'unknown', text: 'tier ?', label: 'No tier yet: not computed, or this Broker predates tiers. P0/P1 unknown here, not low.' };
   }
   if (imgs.withVulnData === 0) {
     return { lens: 'vulns', tone: 'unknown', text: 'no data', label: 'No source has reported on the images this workload runs: vulnerabilities unknown, not clean.' };
@@ -223,7 +223,7 @@ async function readImages(api: VulnApi, namespace: string, mode: 'vulns' | 'supp
         sbomFailed: s.status === 'rejected',
       };
       if (mode === 'vulns' && vv) {
-        const tiered = vv.items.length === 0 ? null : vv.items.every((f) => f.tier !== undefined);
+        const tiered = vv.items.length === 0 ? null : vv.items.every((f) => f.tier != null);
         // An older Broker ignored the filter: its findings are not P0/P1 by anyone's ranking.
         facts.hot = tiered ? vv.items : [];
         facts.tiered = tiered;

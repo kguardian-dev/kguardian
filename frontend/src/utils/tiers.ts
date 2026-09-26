@@ -25,7 +25,17 @@ export const TIER_RANK: Record<RiskTierName, number> = { P0: 3, P1: 2, P2: 1, Ba
 /** Sort key, most urgent first; an unknown tier is never ranked below a known one. */
 export const tierRank = (t: RiskTierName | null) => (t === null ? 4 : TIER_RANK[t]);
 
-export const TIER_UNKNOWN_TITLE = 'This Broker does not rank findings into tiers (it predates in-use tiers). Unknown, not low.';
+export const TIER_UNKNOWN_TITLE = 'No tier yet: not computed, or this Broker predates tiers. Unknown, not low.';
+
+/**
+ * The visible caveat for a Background row (the tooltip alone is not seen on
+ * touch screens): installed, not seen running over a covered window, which
+ * is not proof the code is unreachable.
+ */
+export function backgroundCaveat(windowHours: number | null | undefined): string {
+  const days = windowHours ? Math.max(1, Math.round(windowHours / 24)) : null;
+  return `Background: installed, not seen running over the covered window${days ? ` (${days}d)` : ''}. Not proof it is unreachable.`;
+}
 
 export type FactorTone = 'risk' | 'warn' | 'neutral' | 'unknown' | 'good';
 

@@ -5,7 +5,7 @@ import { vulnErrorMessage, vulnApi, type VulnApi } from '../services/vulnApi';
 import type { ProfileApi } from '../services/profileApi';
 import type { CveSummary, ImageSummary, VulnSeverity } from '../types/vulns';
 import { shortDigest } from '../utils/posture';
-import { brokerTier, IN_USE_UNKNOWN_TITLE, LIST_FACTORS, TIER_UNKNOWN_TITLE, tierRank } from '../utils/tiers';
+import { backgroundCaveat, brokerTier, IN_USE_UNKNOWN_TITLE, LIST_FACTORS, TIER_UNKNOWN_TITLE, tierRank } from '../utils/tiers';
 import { cveRowFactors, sourceLabel } from '../utils/vulnView';
 import { Button } from './ui/Button';
 import { EmptyState } from './ui/EmptyState';
@@ -74,7 +74,7 @@ export function ImagesView({ namespace, allNamespaces, tab: tabParam, cve, diges
 
   // Tiers are the Broker's (#1678). A Broker without them sends no `tier`:
   // the rows say "Tier ?" and the tier tiles say unknown.
-  const tiersKnown = cves.items.some((c) => c.tier !== undefined);
+  const tiersKnown = cves.items.some((c) => c.tier != null);
   const rows = useMemo(
     () => cves.items.map((c) => ({ c, tier: brokerTier(c.tier), factors: cveRowFactors(c) })).sort((a, b) => tierRank(b.tier) - tierRank(a.tier)),
     [cves.items],
@@ -93,7 +93,7 @@ export function ImagesView({ namespace, allNamespaces, tab: tabParam, cve, diges
   const loadedAll = !cves.hasMore;
   // Nothing could be read: the tiles say so instead of counting zero.
   const unread = cves.error != null && cves.items.length === 0;
-  // Loaded-package data (P1-5) is null everywhere until it ships.
+  // Loaded-package state is null (unknown) on every row until a Broker has runtime evidence.
   const loadedKnown = cves.items.some((c) => c.inUse !== null);
   const tierTile = (n: number) => (tiersKnown || cves.items.length === 0 ? n : 'unknown');
   // A count of known values says how many it could not count.
@@ -221,8 +221,9 @@ export function ImagesView({ namespace, allNamespaces, tab: tabParam, cve, diges
                   </div>
                   <footer className="flex flex-wrap items-center justify-between gap-2 px-4 py-2 border-t border-hubble-border text-[11px] text-tertiary">
                     <span title={IN_USE_UNKNOWN_TITLE}>
+                      {rows.some((r) => r.tier === 'Background') && <span className="block text-secondary" data-testid="background-caveat">{backgroundCaveat(null)}</span>}
                       {!tiersKnown
-                        ? 'This Broker does not rank tiers or report loaded packages yet: both unknown. '
+                        ? 'No tiers yet (not computed, or this Broker predates them) and no loaded-package data: both unknown. '
                         : loadedKnown ? '' : 'No runtime evidence of loading yet: unknown is ranked as if loaded. '}
                       Privilege and per-workload exposure are in the CVE drawer.
                     </span>

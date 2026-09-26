@@ -125,7 +125,9 @@ export function cveAiPrompt(e: Exposure, f: Finding | null, tier: string | null 
     `Affects ${e.images.length} image(s) and ${e.workloads.length} workload container(s), ${running.length} running.`,
     `Observed outside ingress: ${exposed.map((w) => `${w.namespace}/${w.name}`).join(', ') || 'none seen'}; exposure unknown for ${unknown.length}.`,
     `Fix: ${e.fixable ? fixes.join(' / ') || 'available' : 'no fix yet'}.`,
-    e.inUse === null ? 'Loaded-package data is not available yet, so treat every affected workload as if it loads the package.' : `Observed loaded: ${e.inUse ? 'yes' : 'no'} (${e.inUseState}).`,
+    e.inUse === null
+      ? `In use: unknown (treated as in use)${f?.inUseDetail?.reason ? `, reason: ${f.inUseDetail.reason}` : ''}.`
+      : `In use: ${e.inUseState}${e.inUse ? '' : ' (installed, not seen running over the covered window; not proof it is unreachable)'}.`,
     '',
     `Question: which of these workloads should I fix first, and how do I contain ${e.id} until then?`,
   ].join('\n');

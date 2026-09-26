@@ -7,7 +7,7 @@ import { vulnErrorKind, type VulnApi } from '../../services/vulnApi';
 import type { CveSummary } from '../../types/vulns';
 import { copyText } from '../../utils/clipboard';
 import { shortDigest } from '../../utils/posture';
-import { brokerTier, IN_USE_UNKNOWN_TITLE, tierRank, WORKLOAD_FACTORS } from '../../utils/tiers';
+import { backgroundCaveat, brokerTier, IN_USE_UNKNOWN_TITLE, tierRank, WORKLOAD_FACTORS } from '../../utils/tiers';
 import { cveAiPrompt, cveRowFactors, findingFactors, safeHttpUrl, workloadFactors } from '../../utils/vulnView';
 import { Button } from '../ui/Button';
 import { EmptyState } from '../ui/EmptyState';
@@ -59,6 +59,7 @@ export function CveDrawer({ id, summary, onClose, onOpenWorkload, onShowOnMap, o
     [e, findings, pss],
   );
   const overall = brokerTier(summary?.tier ?? f?.tier);
+  const backgroundRow = rows.find((r) => r.tier === 'Background');
   const headline = f ? findingFactors(f) : summary ? cveRowFactors(summary) : [];
   const link = safeHttpUrl(f?.primaryUrl);
 
@@ -101,6 +102,7 @@ export function CveDrawer({ id, summary, onClose, onOpenWorkload, onShowOnMap, o
             {e.inUse === null ? 'No runtime evidence that any affected workload loads the package: unknown is ranked as if loaded. ' : ''}
             Exposure is observed traffic, not reachability.
           </p>
+          {backgroundRow && <p className="mt-1 text-[11px] text-secondary" data-testid="background-caveat">{backgroundCaveat(findings.get(backgroundRow.w.imageDigest)?.inUseDetail?.windowHours)}</p>}
           {e.truncated && <p className="mt-1 text-[11px] text-severity-medium">More images or workloads are affected than the Broker lists (first 200 each).</p>}
         </section>
 

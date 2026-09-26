@@ -1,6 +1,6 @@
 import type { Finding, Report } from '../../types/vulns';
 import { formatAgo, formatTimestamp, shortDigest } from '../../utils/posture';
-import { brokerTier, IN_USE_UNKNOWN_TITLE, LIST_FACTORS } from '../../utils/tiers';
+import { backgroundCaveat, brokerTier, IN_USE_UNKNOWN_TITLE, LIST_FACTORS } from '../../utils/tiers';
 import { asUtc, findingFactors, sourceLabel } from '../../utils/vulnView';
 import { Button } from '../ui/Button';
 import { FactorChips, JoinBadge, SeverityBadge, TierBadge, TrustBadge } from './parts';
@@ -40,12 +40,14 @@ interface FindingsTableProps {
  * container running the image).
  */
 export function FindingsTable({ items, onOpenCve, hasMore, loadingMore, onLoadMore }: FindingsTableProps) {
+  const background = items.find((f) => f.tier === 'Background');
   return (
     <div>
       <p className="px-1 pb-2 text-[11px] text-tertiary" title={IN_USE_UNKNOWN_TITLE}>
-        {items.every((f) => f.tier === undefined) ? 'This Broker does not rank tiers yet: tier unknown for every finding. ' : ''}
+        {items.every((f) => f.tier == null) ? 'No tier yet for any finding: not computed, or this Broker predates tiers. ' : ''}
         A finding's tier is its worst over every workload running this image; open a CVE for each workload's exposure and privilege.
       </p>
+      {background && <p className="px-1 pb-2 text-[11px] text-secondary" data-testid="background-caveat">{backgroundCaveat(background.inUseDetail?.windowHours)}</p>}
       <div className="overflow-x-auto rounded-control border border-hubble-border">
         <table className="w-full text-sm">
           <thead className="text-[11px] uppercase tracking-wide text-tertiary">

@@ -122,3 +122,21 @@ test('a failed read never shows zero counts', async () => {
   expect(screen.getAllByText('—').length).toBeGreaterThanOrEqual(4);
   expect(screen.queryByText('Summary not computed yet')).toBeNull();
 });
+
+describe('Background and null tiers', () => {
+  test('a Background row carries a visible caveat, not only a tooltip', async () => {
+    render(view({ api: replayVulnApi([], { tiers: true }).api }));
+    await screen.findAllByTestId('cve-row');
+    expect(screen.getByTestId('background-caveat').textContent).toMatch(/Not proof it is unreachable/);
+  });
+
+  test('tier: null (not computed yet) is "Tier ?", never a guessed tier', async () => {
+    const withNull = { ...cvePage, items: cvePage.items.map((c, i) => ({ ...c, tier: i === 0 ? null : 'P2' })) };
+    const { api } = replayVulnApi([answer('GET /vulnerabilities?limit=50', withNull)]);
+    render(view({ api }));
+    const rows = await screen.findAllByTestId('cve-row');
+    const first = rows.find((r) => within(r).queryByText('CVE-2099-0001'))!;
+    expect(first.querySelector('[data-tier]')!.getAttribute('data-tier')).toBe('unknown');
+    expect(first.querySelector('[data-tier]')!.getAttribute('title')).toMatch(/not computed/);
+  });
+});

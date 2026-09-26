@@ -54,7 +54,7 @@ export interface CveSummary {
   inUse: boolean | null;
   inUseState: InUseState;
   /** #1678: the most urgent tier over every affected workload container in scope. */
-  tier?: string;
+  tier?: string | null;
   executedWorkloads?: number;
   loadedWorkloads?: number;
   unknownWorkloads?: number;
@@ -196,7 +196,7 @@ export interface Finding {
   inUse: boolean | null;
   inUseState: InUseState;
   /** #1678. Worst over every workload container running the image. */
-  tier?: string;
+  tier?: string | null;
   /** #1678: what produced `tier`, e.g. ["in_use:loaded", "kev", "severity:high", "exposed"]. */
   tierFactors?: string[];
   inUseDetail?: InUseDetail;
