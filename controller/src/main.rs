@@ -20,7 +20,7 @@ use kguardian::seccomp_distributor::run as run_seccomp_distributor;
 use kguardian::service_watcher::watch_service;
 use kguardian::supervisor::{report, shut_down, Draining, Subsystem, Supervisor};
 use kguardian::syscall::{
-    handle_syscall_events, send_syscall_cache_periodically, SyscallEventData,
+    handle_syscall_events, send_syscall_cache_periodically, StartupCapture, SyscallEventData,
 };
 use kguardian::{
     error::Error, models::ContainerMap, network::NetworkEventData,
@@ -189,6 +189,16 @@ async fn main() -> Result<(), Error> {
     let (network_event_sender, network_event_receiver) = mpsc::channel::<NetworkEventData>(1000);
     let (syscall_event_sender, syscall_event_receiver) = mpsc::channel::<SyscallEventData>(1000);
     let (netpolicy_drop_sender, netpolicy_drop_receiver) = mpsc::channel::<PolicyDropEvent>(1000);
+    // Startup capture (early_capture): cgroup creations from the kernel,
+    // and the cgroup ids userspace is done with going back to it.
+    let (cgroup_event_sender, cgroup_event_receiver) = mpsc::channel::<(u64, String)>(1000);
+    let (forget_pending_sender, forget_pending_receiver) = mpsc::channel::<u64>(4096);
+    let startup_capture = StartupCapture {
+        cgroup_events: cgroup_event_receiver,
+        forget: forget_pending_sender,
+        tiers: resolved_tiers.clone(),
+        config: kguardian::early_capture::StartupCaptureConfig::from_env(),
+    };
 
     // The denial probe is loaded by the eBPF loader alongside the other
     // three — it needs the pod registration stream, which only that loop
@@ -216,6 +226,8 @@ async fn main() -> Result<(), Error> {
         ignore_daemonset_traffic,
         resolved_tiers,
         seccomp_denial_maps_sender,
+        cgroup_event_sender,
+        forget_pending_receiver,
     );
 
     let seccomp_denial_map = Arc::clone(&container_map);
@@ -278,7 +290,7 @@ async fn main() -> Result<(), Error> {
     );
     supervisor.spawn(
         Subsystem::SyscallEvents,
-        handle_syscall_events(syscall_event_receiver, syscall_map),
+        handle_syscall_events(syscall_event_receiver, syscall_map, startup_capture),
     );
     supervisor.spawn(
         Subsystem::NetpolicyDropEvents,

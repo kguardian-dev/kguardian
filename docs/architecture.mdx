@@ -107,7 +107,7 @@ graph TB
 
 <Steps>
   <Step title="1. eBPF Monitoring" icon="radar">
-    The **Controller** attaches eBPF programs to kernel hooks on each node — fentry probes on `tcp_v4_connect`, `tcp_set_state`, `udp_sendmsg`, and `tcp_retransmit_skb`, a kprobe/kretprobe pair on `inet_csk_accept`, and the `raw_syscalls/sys_enter` tracepoint. When pods make network connections or execute syscalls, eBPF programs capture:
+    The **Controller** attaches eBPF programs to kernel hooks on each node — fentry probes on `tcp_v4_connect`, `tcp_set_state`, `udp_sendmsg`, and `tcp_retransmit_skb`, a kprobe/kretprobe pair on `inet_csk_accept`, the `raw_syscalls/sys_enter` tracepoint, and `tp_btf/cgroup_mkdir` (so a container is captured from cgroup creation, before its pod is registered). When pods make network connections or execute syscalls, eBPF programs capture:
 
     - Source/destination IPs and ports
     - Protocol (TCP/UDP)
@@ -189,7 +189,7 @@ graph TB
   <Accordion icon="linux" title="eBPF Programs">
     - Written in C, compiled with `clang -target bpf`
     - Use `libbpf-cargo` to generate Rust skeleton bindings (`.skel.rs`)
-    - Attach fentry probes to `tcp_v4_connect`, `tcp_set_state`, `udp_sendmsg`, and `tcp_retransmit_skb`; a kprobe/kretprobe pair to `inet_csk_accept`; and the `raw_syscalls/sys_enter` tracepoint
+    - Attach fentry probes to `tcp_v4_connect`, `tcp_set_state`, `udp_sendmsg`, and `tcp_retransmit_skb`; a kprobe/kretprobe pair to `inet_csk_accept`; the `raw_syscalls/sys_enter` tracepoint; and `tp_btf/cgroup_mkdir` for startup syscall capture
     - Use BPF maps for kernel ↔ userspace communication
   </Accordion>
 

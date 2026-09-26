@@ -703,7 +703,7 @@ fn pair_value_from_bytes(b: &[u8]) -> Option<PairCounters> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     fn hist_with(entries: &[(usize, u64)]) -> [u64; RUNQ_HIST_BUCKETS] {
@@ -893,7 +893,7 @@ mod tests {
 
     /// Minimal ELF64-LE walk: returns (atomic insns, atomic insns with
     /// BPF_FETCH) over all SHF_EXECINSTR sections.
-    fn scan_bpf_atomics(elf: &[u8]) -> (usize, usize) {
+    pub(crate) fn scan_bpf_atomics(elf: &[u8]) -> (usize, usize) {
         let u16_at = |o: usize| u16::from_le_bytes(elf[o..o + 2].try_into().unwrap());
         let u64_at = |o: usize| u64::from_le_bytes(elf[o..o + 8].try_into().unwrap());
         assert_eq!(&elf[..4], b"\x7fELF", "not an ELF object");

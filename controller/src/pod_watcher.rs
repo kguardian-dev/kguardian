@@ -254,6 +254,30 @@ async fn resync_pods(
                     }
                 }
                 debug!("Pod resync pass processed {} on-node pods", processed);
+                // Deletions are decoded away by the watch; retire pods
+                // that left the node from startup capture's registry too.
+                {
+                    let live: std::collections::HashSet<String> = list
+                        .items
+                        .iter()
+                        .filter_map(|p| p.metadata.uid.clone())
+                        .collect();
+                    crate::early_capture::retain_known_pods(&live, listed_at);
+                    crate::early_capture::retain_host_network_pods(&live, listed_at);
+                    // Pods deleted between resyncs never reach the terminal
+                    // branch (the watch decodes deletions away): retire
+                    // their netns registrations here. Only entries older
+                    // than this LIST — a pod registered after it was taken
+                    // is newer than its evidence.
+                    for unreg in retire_pod(&container_map, |p| {
+                        !live.contains(&p.info.config.metadata.uid)
+                            && p.registered_at.is_some_and(|at| at < listed_at)
+                    }) {
+                        if let Err(e) = tx.send(unreg).await {
+                            error!("resync: failed to send pod unregistration: {:?}", e);
+                        }
+                    }
+                }
                 // The streaming watch decodes deletions away
                 // (`applied_objects`), so a pod that vanished between
                 // resyncs is retired here: the compute registry must
@@ -311,7 +335,35 @@ async fn process_pod(
         if let (Some(ctx), Some(uid)) = (compute, pod.metadata.uid.as_deref()) {
             ctx.map.remove_pod(uid);
         }
+        // Startup capture keeps a finished pod known (with its final
+        // container ids): a short-lived Job's startup syscalls are often
+        // still buffered when it completes, and they are still its own.
+        // Forgetting it here made every container of a finished Job look
+        // unclaimed (counted as a sandbox and discarded). The resync LIST
+        // retires it once the pod object is actually deleted.
+        if should_process_pod(&pod.metadata.namespace, excluded_namespaces) {
+            crate::early_capture::note_known_pod(pod);
+        }
+        // Once no container runs, retire its netns registration (P1-1b):
+        // the kernel reuses the inode number for the next pod on the
+        // node, and a stale entry credits that pod's traffic and
+        // syscalls to this one. Not at deletionTimestamp alone — the
+        // graceful shutdown is still the pod's own behaviour.
+        if pod_is_finished(pod) {
+            if let Some(uid) = pod.metadata.uid.as_deref() {
+                return retire_pod(&container_map, |p| p.info.config.metadata.uid == uid)
+                    .into_iter()
+                    .next();
+            }
+        }
         return None;
+    }
+    // Startup capture needs to know the pod long before it is Ready (and
+    // registered): a known pod's pending cgroups wait longer, and its
+    // container ids tell app containers from the sandbox. Only pods in
+    // tracked namespaces — an excluded pod's cgroups should expire.
+    if should_process_pod(&pod.metadata.namespace, excluded_namespaces) {
+        crate::early_capture::note_known_pod(pod);
     }
     // Computed once here so the broker payload and the eBPF
     // registration can never disagree about a pod's tier.
@@ -843,7 +895,17 @@ async fn register_netns(
     let flags = pod_registration_flags(pod, capture_level);
     let identity = pod_identity_metadata(pod);
     for con_id in con_ids {
-        let pod_inspect = netns_registration(pod, pod_ip, identity.clone());
+        let pod_inspect = PodInspect {
+            capture_flags: flags,
+            created_unix: pod
+                .metadata
+                .creation_timestamp
+                .as_ref()
+                .map(|t| t.0.as_second())
+                .unwrap_or_default(),
+            registered_at: Some(Instant::now()),
+            ..netns_registration(pod, pod_ip, identity.clone())
+        };
         // debug not info — these two log lines fire inside the
         // per-container loop, per pod-event. Same per-event rate as
         // the upstream pod-watcher info logs already dropped to debug.
@@ -860,10 +922,16 @@ async fn register_netns(
                 // Takes a write lock on this key's shard. It is only safe to
                 // block here because no reader holds a guard across an await
                 // any more — see ContainerMap and lookup_pod in models.rs.
-                container_map.insert(inode_num, Arc::new(pod_inspect));
+                let pod_inspect = Arc::new(pod_inspect);
+                let host_network = pod_inspect.host_network;
+                if host_network {
+                    crate::early_capture::note_host_network_pod(Arc::clone(&pod_inspect));
+                }
+                container_map.insert(inode_num, pod_inspect);
                 return Some(PodRegistration {
-                    netns_inode: inode_num,
-                    flags,
+                    alias_gen: static_pod_alias_generation(pod),
+                    host_network,
+                    ..PodRegistration::register(inode_num, flags)
                 });
             }
         }
@@ -920,6 +988,81 @@ pub fn container_resources(pod: &Pod, container_name: &str) -> ResourceSpec {
         .and_then(|s| s.containers.iter().find(|c| c.name == container_name))
         .and_then(|c| c.resources.as_ref());
     resource_spec_from(from_spec)
+}
+
+/// A static pod's cgroup path carries its config hash, not the mirror
+/// pod's UID. Returns the generation of that hash (which the probe maps to
+/// the registered generation), or 0 for any other pod.
+pub(crate) fn static_pod_alias_generation(pod: &Pod) -> u32 {
+    pod.metadata
+        .annotations
+        .as_ref()
+        .and_then(|a| a.get("kubernetes.io/config.mirror"))
+        .filter(|h| !h.is_empty() && Some(h.as_str()) != pod.metadata.uid.as_deref())
+        .map(|h| pod_flags::generation_for_uid(Some(h)))
+        .unwrap_or(0)
+}
+
+/// True once none of the pod's containers can still run: a terminal
+/// phase, or a deletion whose containers have all stopped.
+pub(crate) fn pod_is_finished(pod: &Pod) -> bool {
+    let status = pod.status.as_ref();
+    if matches!(
+        status.and_then(|s| s.phase.as_deref()),
+        Some("Succeeded") | Some("Failed")
+    ) {
+        return true;
+    }
+    if pod.metadata.deletion_timestamp.is_none() {
+        return false;
+    }
+    let running = status
+        .and_then(|s| s.container_statuses.as_ref())
+        .into_iter()
+        .flatten()
+        .any(|c| c.state.as_ref().is_some_and(|st| st.running.is_some()));
+    !running
+}
+
+/// Unregister the netns of the pods `dead` selects: returns the kernel
+/// unregistrations (compare-and-delete on the flags each was registered
+/// with) and marks their `ContainerMap` entries `unregistered` so each is
+/// sent once.
+///
+/// The entries themselves stay. Everything that reads the map by inode
+/// is gated on the kernel map first, so once the kernel entry is gone a
+/// stale entry is only reachable again after a new pod registers the same
+/// inode — which replaces it. Keeping it means a finished Job still
+/// resolves by UID for its buffered startup syscalls, and its last
+/// seccomp denials still drain against the right identity.
+///
+/// hostNetwork entries are skipped: their key is the node's netns, which
+/// other live hostNetwork pods share, and deleting it would blind them
+/// until their next registration.
+pub(crate) fn retire_pod(
+    container_map: &ContainerMap,
+    dead: impl Fn(&PodInspect) -> bool,
+) -> Vec<PodRegistration> {
+    let victims: Vec<(u64, Arc<PodInspect>)> = container_map
+        .iter()
+        .filter(|e| !e.value().host_network && !e.value().unregistered && dead(e.value()))
+        .map(|e| (*e.key(), Arc::clone(e.value())))
+        .collect();
+    let mut out = Vec::new();
+    for (inode, pod) in victims {
+        // Only if the entry is still this pod: a newer pod may have been
+        // registered on the recycled inode since the snapshot.
+        if let dashmap::mapref::entry::Entry::Occupied(mut slot) = container_map.entry(inode) {
+            if slot.get().info.config.metadata.uid == pod.info.config.metadata.uid {
+                slot.insert(Arc::new(PodInspect {
+                    unregistered: true,
+                    ..(*pod).clone()
+                }));
+                out.push(PodRegistration::unregister(inode, pod.capture_flags));
+            }
+        }
+    }
+    out
 }
 
 /// Retire every pod registered before `listed_at` whose uid is not in
@@ -1881,6 +2024,115 @@ mod tests {
         // No UID (a hand-built test pod) still yields a tracked, tiered value.
         let f = pod_registration_flags(&Pod::default(), Full);
         assert_eq!(f, pod_flags::POD_TRACKED);
+    }
+
+    // ---- P1-1b: retiring finished pods' netns registrations -------------
+
+    fn entry(uid: &str, flags: u32, host_network: bool) -> Arc<PodInspect> {
+        Arc::new(PodInspect {
+            info: Info {
+                config: Config {
+                    metadata: Metadata {
+                        name: format!("pod-{uid}"),
+                        namespace: "ns".into(),
+                        uid: uid.into(),
+                    },
+                },
+            },
+            capture_flags: flags,
+            host_network,
+            registered_at: Some(Instant::now()),
+            ..Default::default()
+        })
+    }
+
+    fn models_lookup(map: &ContainerMap, inode: u64) -> Arc<PodInspect> {
+        crate::models::lookup_pod(map, inode).expect("entry")
+    }
+
+    #[test]
+    fn retiring_a_pod_unregisters_only_it_with_its_flags() {
+        let map: ContainerMap = Arc::new(dashmap::DashMap::new());
+        map.insert(10, entry("dead", 0x31, false));
+        map.insert(11, entry("live", 0x51, false));
+        let out = retire_pod(&map, |p| p.info.config.metadata.uid == "dead");
+        assert_eq!(out, vec![PodRegistration::unregister(10, 0x31)]);
+        // Kept (resolvable by UID), marked, and unregistered only once.
+        assert!(models_lookup(&map, 10).unregistered);
+        assert!(!models_lookup(&map, 11).unregistered);
+        assert!(retire_pod(&map, |p| p.info.config.metadata.uid == "dead").is_empty());
+
+        // A newer pod registered on the recycled inode is not touched.
+        map.insert(10, entry("newer", 0x71, false));
+        assert!(retire_pod(&map, |p| p.info.config.metadata.uid == "dead").is_empty());
+        assert!(!models_lookup(&map, 10).unregistered);
+    }
+
+    /// A hostNetwork pod's key is the node's netns, shared by every live
+    /// hostNetwork pod: retiring one must not blind the rest.
+    #[test]
+    fn retiring_never_touches_a_host_network_entry() {
+        let map: ContainerMap = Arc::new(dashmap::DashMap::new());
+        map.insert(1, entry("hostnet-dead", 0x11, true));
+        assert!(retire_pod(&map, |_| true).is_empty());
+        assert!(map.contains_key(&1));
+    }
+
+    /// The kernel side is compare-and-delete on these flags; a newer pod
+    /// registered on the recycled inode carries different flags (its
+    /// generation is derived from its own UID) and survives.
+    #[test]
+    fn a_newer_pod_on_the_recycled_inode_has_different_flags() {
+        let mut old = Pod::default();
+        old.metadata.uid = Some("11111111-0000-4000-8000-000000000001".into());
+        let mut new = Pod::default();
+        new.metadata.uid = Some("11111111-0000-4000-8000-000000000002".into());
+        assert_ne!(
+            pod_registration_flags(&old, CaptureLevel::Full),
+            pod_registration_flags(&new, CaptureLevel::Full)
+        );
+    }
+
+    #[test]
+    fn a_pod_is_finished_only_when_no_container_can_run() {
+        use k8s_openapi::api::core::v1::{
+            ContainerState, ContainerStateRunning, ContainerStateTerminated,
+        };
+        use k8s_openapi::apimachinery::pkg::apis::meta::v1::Time;
+        let status = |phase: &str, running: bool| PodStatus {
+            phase: Some(phase.into()),
+            container_statuses: Some(vec![ContainerStatus {
+                state: Some(if running {
+                    ContainerState {
+                        running: Some(ContainerStateRunning::default()),
+                        ..Default::default()
+                    }
+                } else {
+                    ContainerState {
+                        terminated: Some(ContainerStateTerminated::default()),
+                        ..Default::default()
+                    }
+                }),
+                ..Default::default()
+            }]),
+            ..Default::default()
+        };
+        let pod = |phase: &str, running: bool, deleting: bool| {
+            let mut p = Pod {
+                status: Some(status(phase, running)),
+                ..Default::default()
+            };
+            if deleting {
+                p.metadata.deletion_timestamp = Some(Time(Default::default()));
+            }
+            p
+        };
+        assert!(pod_is_finished(&pod("Succeeded", false, false)));
+        assert!(pod_is_finished(&pod("Failed", false, false)));
+        assert!(!pod_is_finished(&pod("Running", true, false)));
+        // Graceful shutdown in progress: still the pod's own behaviour.
+        assert!(!pod_is_finished(&pod("Running", true, true)));
+        assert!(pod_is_finished(&pod("Running", false, true)));
     }
 
     /// The `ContainerMap` entry has to carry the pod's Kubernetes

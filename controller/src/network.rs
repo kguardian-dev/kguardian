@@ -1059,20 +1059,33 @@ mod tests {
     /// had a test.
     #[test]
     fn syscall_probe_unmarks_when_the_reserve_fails() {
+        // Every syscall emitter: the registered path (seen_syscalls) and
+        // the startup-capture pending path (pending_seen). The cgroup
+        // mkdir emitter reserves on a different ring buffer and has no
+        // dedup entry to undo, so it is not matched here.
         let src = include_str!("bpf/syscall.bpf.c");
-        let i = src
-            .find("bpf_ringbuf_reserve(")
-            .expect("no bpf_ringbuf_reserve in syscall.bpf.c - did the file move?");
-        let window = &src[i..];
-        let end = window
-            .find("bpf_ringbuf_submit(")
-            .unwrap_or(window.len().min(1200));
-        assert!(
-            window[..end].contains("bpf_map_delete_elem"),
-            "the syscall probe does not delete its dedup entry when the \
-             ring-buffer reserve fails, so a syscall would be recorded as \
-             reported while userspace never received it - a hole in the \
-             generated seccomp profile caused by a busy moment."
+        let sites: Vec<usize> = src
+            .match_indices("bpf_ringbuf_reserve(&syscall_events")
+            .map(|(i, _)| i)
+            .collect();
+        assert_eq!(
+            sites.len(),
+            2,
+            "expected two syscall_events emitters (registered + pending) in \
+             syscall.bpf.c; if one was added or removed, update this test"
         );
+        for i in sites {
+            let window = &src[i..];
+            let end = window
+                .find("bpf_ringbuf_submit(")
+                .unwrap_or(window.len().min(1200));
+            assert!(
+                window[..end].contains("bpf_map_delete_elem"),
+                "a syscall emitter does not delete its dedup entry when the \
+                 ring-buffer reserve fails, so a syscall would be recorded as \
+                 reported while userspace never received it - a hole in the \
+                 generated seccomp profile caused by a busy moment."
+            );
+        }
     }
 }

@@ -1,5 +1,34 @@
 # Upgrading the kguardian Helm chart
 
+## Seccomp profiles learned before this release should be relearned
+
+Until this release, the controller credited a syscall to a pod whenever it was
+made inside the pod's network namespace, whoever made it. Host processes do
+that routinely. containerd pins a new pod's namespace with a bind `mount` and
+unmounts it at teardown. CNI plugins enter it on pod setup and teardown. On
+one cluster, 83% of recorded pods had `mount` and `umount2` in their set
+because of this, so nearly every generated profile allowed them.
+
+The controller now credits a syscall only when the calling process is in one
+of the pod's own cgroups. It also records a container's startup syscalls from
+the moment its cgroup is created, and it drops the container runtime's own
+setup syscalls (`mount`, `pivot_root`, `sethostname`, `keyctl`, `unshare`,
+`setns`, ...), which run before the container's filter is installed.
+
+**After upgrading the controller:**
+
+1. Treat every profile learned before the upgrade as including host-side
+   syscalls such as `mount` and `umount2`. Existing `pod_syscalls` rows and
+   workload aggregates are not rewritten; the old syscalls stay in them until
+   the pod is recreated.
+2. Relearn: roll each workload you intend to enforce (`kubectl rollout
+   restart`), let it run through its usual traffic, and export the profile
+   again. The new pods' rows replace the old ones. A same-name recreate, such
+   as a StatefulSet pod, starts a fresh set.
+3. Check an exported profile no longer lists `mount` or `umount2` unless the
+   workload really mounts. `kguardian.dev/syscall-capture` tiers are
+   unchanged.
+
 ## `pod_traffic` is now pruned for departed pods
 
 Until now nothing ever deleted a `pod_traffic` row. The broker now prunes

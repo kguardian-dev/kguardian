@@ -45,6 +45,57 @@ monitoring clusters that never intend to enforce; `full` is the default
 because syscalls are de-duplicated per pod inside BPF, so its cost is close to
 `low`.
 
+### Startup coverage
+
+A container makes some of its syscalls only while it starts: the runtime's
+setup and the application's first few hundred milliseconds. The controller
+captures these from the moment the container's cgroup is created, before the
+pod is registered, and adds them to the pod's set once the pod watcher has
+registered it (at the pod's tier). A profile recorded from a fresh pod is
+therefore startup-complete.
+
+Two things are left out on purpose. The container runtime's rootfs, hostname,
+keyring and namespace setup (`mount`, `pivot_root`, `sethostname`, `keyctl`,
+`unshare`, …) runs before the runtime installs the container's seccomp filter,
+so it never needs to be allowed. What the runtime does *after* installing the
+filter (`capset`, `setresuid`, `execve`, …) is kept, because an enforced
+profile has to allow it. The pod sandbox (pause) container has its own seccomp
+profile, and its syscalls are not merged into the pod's set.
+
+A pod is registered once it is Ready. A container waits up to
+`STARTUP_CAPTURE_KNOWN_POD_TTL_SECONDS` (default 3600) for its pod to become
+Ready. It waits up to `STARTUP_CAPTURE_PENDING_TTL_SECONDS` (default 600) if
+the pod watcher does not know the pod.
+
+A controller with startup capture logs `Startup syscall capture attached` at
+start. On older controllers, or where that line is replaced by a warning,
+trigger at least one container restart under `SCMP_ACT_LOG` before enforcing
+a profile recorded from fresh pods.
+
+### Whose syscalls count
+
+A syscall is credited to a pod only when the calling process is in one of that
+pod's cgroups. Host processes that enter a pod's network namespace are
+excluded, as are the syscalls they make there. These include containerd
+pinning and unmounting the namespace (`mount`, `umount2`), CNI plugins on pod
+setup and teardown, and anything else that `setns()`es in. Before this change
+they were credited to the pod, so most profiles allowed `mount` and `umount2`.
+See the upgrade note in the chart's `UPGRADING.md`.
+
+hostNetwork pods share the node's network namespace and are told apart the
+same way, by cgroup, so each gets its own set. Static pods are matched through
+their config hash.
+
+A pod deleted and recreated under the same name starts a fresh set; nothing
+recorded for the previous pod carries over.
+
+Known limitations:
+
+- The pod sandbox (pause) container's steady-state syscalls are still part of
+  the pod's set; only its startup is excluded.
+- Startup capture does not cover static pods: their cgroup carries the config
+  hash, and the pending path matches the cgroup's UID to a registered pod.
+
 ### From observation to a node
 
 kguardian never applies a profile itself. It exports a `SeccompProfile`

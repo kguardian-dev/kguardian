@@ -74,6 +74,36 @@ pub struct PodRegistration {
     pub netns_inode: u64,
     /// `pod_flags` bitfield stored as the map value.
     pub flags: u32,
+    /// Remove instead of insert: the pod is finished or gone. The eBPF
+    /// loop deletes the key from every probe's `inode_num` only while it
+    /// still holds exactly `flags` (compare-and-delete), so a newer pod
+    /// already registered on a recycled inode is never unregistered.
+    pub unregister: bool,
+    /// Static pods: the generation of the config hash their cgroup path
+    /// carries, which the probe maps to `flags`' generation. 0 otherwise.
+    pub alias_gen: u32,
+    /// The pod runs in the node's netns; the probe credits its tasks by
+    /// generation rather than by the netns entry.
+    pub host_network: bool,
+}
+
+impl PodRegistration {
+    pub fn register(netns_inode: u64, flags: u32) -> Self {
+        Self {
+            netns_inode,
+            flags,
+            unregister: false,
+            alias_gen: 0,
+            host_network: false,
+        }
+    }
+
+    pub fn unregister(netns_inode: u64, flags: u32) -> Self {
+        Self {
+            unregister: true,
+            ..Self::register(netns_inode, flags)
+        }
+    }
 }
 
 /// Shared map from network-namespace inode to the pod occupying it.
@@ -154,6 +184,26 @@ pub struct PodInspect {
     /// to the cgroup id, which is per container whatever the pod's
     /// network namespace is.
     pub host_network: bool,
+    /// The `pod_flags` value this pod was registered with (the same value
+    /// written into the eBPF `inode_num` map). Startup capture
+    /// (`early_capture`) reads the capture tier out of it, because the
+    /// kernel captures a not-yet-registered container at full tier and
+    /// the pod's own tier can only be applied once the pod is known.
+    #[serde(default)]
+    pub capture_flags: u32,
+    /// `metadata.creationTimestamp` (unix seconds). Orders two pods that
+    /// share a name, so a recreated pod never inherits its predecessor's
+    /// syscall set (`syscall::SyscallSets`).
+    #[serde(default)]
+    pub created_unix: i64,
+    /// When the pod watcher put this entry in the map. Lets the resync
+    /// prune retire only entries older than the LIST it judges them by.
+    #[serde(skip)]
+    pub registered_at: Option<std::time::Instant>,
+    /// Set once the pod finished and its netns was unregistered from the
+    /// kernel maps (`pod_watcher::retire_pod`).
+    #[serde(skip)]
+    pub unregistered: bool,
 }
 
 #[derive(Debug, Default, Deserialize, Clone)]
