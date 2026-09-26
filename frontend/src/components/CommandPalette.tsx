@@ -99,7 +99,7 @@ export function CommandPalette({ onClose, commands, dynamic }: CommandPalettePro
   );
 
   return (
-    <Modal isOpen onClose={onClose} hideHeader size="lg" align="top" contentClassName="flex flex-col">
+    <Modal isOpen onClose={onClose} hideHeader ariaLabel="Search and commands" size="lg" align="top" contentClassName="flex flex-col">
       <div className="flex items-center gap-2 h-12 px-4 border-b border-hubble-border shrink-0">
         <Search className="w-4 h-4 text-tertiary shrink-0" />
         <input

@@ -219,6 +219,7 @@ const NetworkPolicyEditor: React.FC<NetworkPolicyEditorProps> = ({ isOpen, onClo
       isOpen
       onClose={onClose}
       hideHeader
+      ariaLabel="Policy editor"
       className="w-full max-w-7xl h-[90vh]"
       contentClassName="flex-1 min-h-0 flex flex-col"
     >
