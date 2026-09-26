@@ -1967,7 +1967,7 @@ pub(crate) fn capability_retention_days(days: u32, window_hours: i32) -> u32 {
 /// are re-reported hourly), never by last use.
 pub(crate) const RUNTIME_CAPABILITIES_PRUNE_SQL: &str = "WITH expired AS (\
          SELECT cluster_id, pod_namespace, workload_kind, workload_name, container_name, \
-                image_digest, capability, granted \
+                image_digest, capability, granted, probed \
          FROM runtime_capabilities \
          WHERE last_reported < timezone('UTC', NOW()) - $1::interval \
          ORDER BY last_reported \
@@ -1977,7 +1977,8 @@ pub(crate) const RUNTIME_CAPABILITIES_PRUNE_SQL: &str = "WITH expired AS (\
      WHERE r.cluster_id = e.cluster_id AND r.pod_namespace = e.pod_namespace \
        AND r.workload_kind = e.workload_kind AND r.workload_name = e.workload_name \
        AND r.container_name = e.container_name AND r.image_digest = e.image_digest \
-       AND r.capability = e.capability AND r.granted = e.granted";
+       AND r.capability = e.capability AND r.granted = e.granted \
+       AND r.probed = e.probed";
 
 pub(crate) const RUNTIME_COVERAGE_PRUNE_SQL: &str = "WITH expired AS (\
          SELECT cluster_id, container_id FROM runtime_coverage \
@@ -1987,6 +1988,24 @@ pub(crate) const RUNTIME_COVERAGE_PRUNE_SQL: &str = "WITH expired AS (\
      ) \
      DELETE FROM runtime_coverage r USING expired e \
      WHERE r.cluster_id = e.cluster_id AND r.container_id = e.container_id";
+
+/// Each runtime inventory table with its prune statement and retention in
+/// days. Capabilities keep at least the evidence window (see
+/// [`capability_retention_days`]); the rest keep `days`.
+pub(crate) fn runtime_inventory_prunes(
+    days: u32,
+    window_hours: i32,
+) -> [(&'static str, &'static str, u32); 3] {
+    [
+        ("runtime_executables", RUNTIME_EXECUTABLES_PRUNE_SQL, days),
+        ("runtime_coverage", RUNTIME_COVERAGE_PRUNE_SQL, days),
+        (
+            "runtime_capabilities",
+            RUNTIME_CAPABILITIES_PRUNE_SQL,
+            capability_retention_days(days, window_hours),
+        ),
+    ]
+}
 
 fn spawn_runtime_inventory(pool: DbPool) {
     let days = runtime_inventory_retention_days();
@@ -2004,33 +2023,10 @@ fn spawn_runtime_inventory(pool: DbPool) {
         // (180 s) warmups.
         tokio::time::sleep(Duration::from_secs(165)).await;
         loop {
-            run_batched_prune(
-                &pool,
-                "runtime_executables",
-                RUNTIME_EXECUTABLES_PRUNE_SQL,
-                days,
-                image_inventory_batch_size(),
-            )
-            .await;
-            run_batched_prune(
-                &pool,
-                "runtime_coverage",
-                RUNTIME_COVERAGE_PRUNE_SQL,
-                days,
-                image_inventory_batch_size(),
-            )
-            .await;
-            run_batched_prune(
-                &pool,
-                "runtime_capabilities",
-                RUNTIME_CAPABILITIES_PRUNE_SQL,
-                capability_retention_days(
-                    days,
-                    crate::runtime_capabilities::evidence_window_hours(),
-                ),
-                image_inventory_batch_size(),
-            )
-            .await;
+            let window = crate::runtime_capabilities::evidence_window_hours();
+            for (table, sql, days) in runtime_inventory_prunes(days, window) {
+                run_batched_prune(&pool, table, sql, days, image_inventory_batch_size()).await;
+            }
             tokio::time::sleep(interval).await;
         }
     });

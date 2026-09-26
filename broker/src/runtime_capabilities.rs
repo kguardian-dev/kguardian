@@ -447,6 +447,20 @@ pub struct CapRecommendation {
     pub probed_kept: Vec<String>,
     /// Probed-only capabilities deliberately left out of `add`, with why.
     pub probed_omitted: Vec<OmittedCap>,
+    /// What else the container's securityContext must say for `add` to be
+    /// enough: present whenever `probed_omitted` is not empty. A consumer
+    /// building its own patch from `add` must apply this too.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub requires: Option<CapRequires>,
+}
+
+/// securityContext settings a capability recommendation depends on.
+#[derive(Debug, Clone, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct CapRequires {
+    /// Always false when present: no_new_privs removes the seccomp-filter
+    /// SYS_ADMIN gate that the omitted probe stands for.
+    pub allow_privilege_escalation: bool,
 }
 
 /// A probed-only capability the recommendation leaves out.
@@ -499,13 +513,15 @@ pub struct CapabilitiesView {
     pub containers: Vec<ContainerCaps>,
 }
 
-/// The container's current securityContext says privileged: true.
+/// Any running digest's securityContext says privileged: true (a rollout
+/// can mix an unprivileged spec with a privileged one).
 fn currently_privileged(c: &ContainerImages) -> bool {
-    c.digests
-        .first()
-        .and_then(|d| d.security_context.get("privileged"))
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false)
+    c.digests.iter().any(|d| {
+        d.security_context
+            .get("privileged")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false)
+    })
 }
 
 /// The container's current added capabilities (newest current digest).
@@ -581,11 +597,13 @@ pub fn build_view(containers: &[ContainerImages], ev: &CapEvidence) -> Capabilit
         // without no_new_privs. The recommendation sets
         // allowPrivilegeEscalation: false (it is a restricted requirement,
         // patched in whenever it is not already set), which sets
-        // no_new_privs, so SYS_ADMIN is left out, and said so. Not for a
-        // privileged container: the patch cannot be assumed to make it
-        // unprivileged, so it is kept.
+        // no_new_privs, so SYS_ADMIN is left out, and said so, and the
+        // recommendation itself carries `requires: allowPrivilegeEscalation:
+        // false`. Not for a privileged container (the patch cannot be
+        // assumed to make it unprivileged) nor an ephemeral one (no patch
+        // touches it): kept.
         let mut probed_omitted = Vec::new();
-        if !currently_privileged(c) {
+        if !currently_privileged(c) && c.container_kind != "ephemeral" {
             probed_only.retain(|p| {
                 if p == "SYS_ADMIN" {
                     probed_omitted.push(OmittedCap {
@@ -613,6 +631,9 @@ pub fn build_view(containers: &[ContainerImages], ev: &CapEvidence) -> Capabilit
                     drop: vec!["ALL".into()],
                     add: keep.iter().cloned().collect(),
                     probed_kept: probed_only.clone(),
+                    requires: (!probed_omitted.is_empty()).then_some(CapRequires {
+                        allow_privilege_escalation: false,
+                    }),
                     probed_omitted,
                 }),
                 unused,
@@ -851,6 +872,7 @@ mod tests {
                 add: vec!["NET_BIND_SERVICE".into(), "SYS_TIME".into()],
                 probed_kept: vec![],
                 probed_omitted: vec![],
+                requires: None,
             })
         );
         assert_eq!(c.unused_added, vec!["NET_ADMIN"]);
@@ -897,6 +919,17 @@ mod tests {
                 reason: SYS_ADMIN_PROBE_OMITTED
             }]
         );
+        assert_eq!(
+            r.requires,
+            Some(CapRequires {
+                allow_privilege_escalation: false
+            }),
+            "the omission holds only with no_new_privs: the recommendation says so itself"
+        );
+        assert_eq!(
+            serde_json::to_value(r).unwrap()["requires"],
+            json!({"allowPrivilegeEscalation": false})
+        );
         assert_eq!(c.unused_added, vec!["SYS_ADMIN"], "added today, not needed");
         assert_eq!(
             c.probed
@@ -935,6 +968,30 @@ mod tests {
         assert_eq!(r.add, vec!["NET_BIND_SERVICE", "SYS_ADMIN", "SYS_PTRACE"]);
         assert_eq!(r.probed_kept, vec!["SYS_ADMIN", "SYS_PTRACE"]);
         assert!(r.probed_omitted.is_empty());
+        assert_eq!(r.requires, None);
+        assert!(serde_json::to_value(&r).unwrap().get("requires").is_none());
+        // A rollout mixing an unprivileged spec (newest) with a privileged
+        // one: privileged still runs, so SYS_ADMIN stays.
+        let mut mixed = container(&[], &[D, D2]);
+        mixed.digests[1].security_context = json!({"privileged": true});
+        let v = build_view(
+            &[mixed],
+            &CapEvidence {
+                coverage: vec![cov(D, true, None), cov(D2, true, None)],
+                ..ev.clone()
+            },
+        );
+        let r = v.containers[0].recommendation.clone().unwrap();
+        assert!(r.add.contains(&"SYS_ADMIN".to_string()), "{r:?}");
+        assert!(r.probed_omitted.is_empty() && r.requires.is_none());
+        // An ephemeral container: no patch touches it, so nothing sets
+        // allowPrivilegeEscalation there; SYS_ADMIN stays.
+        let mut eph = container(&[], &[D]);
+        eph.container_kind = "ephemeral".into();
+        let v = build_view(&[eph], &ev);
+        let r = v.containers[0].recommendation.clone().unwrap();
+        assert!(r.add.contains(&"SYS_ADMIN".to_string()), "{r:?}");
+        assert!(r.probed_omitted.is_empty() && r.requires.is_none());
     }
 
     #[test]
@@ -952,6 +1009,20 @@ mod tests {
             capability_retention_days(1, 25),
             3,
             "25 h rounds up to 2 days, plus one"
+        );
+    }
+
+    #[test]
+    fn the_retention_loop_prunes_capabilities_with_the_clamped_days() {
+        let plan = crate::retention::runtime_inventory_prunes(30, 2160);
+        let days = |t: &str| plan.iter().find(|p| p.0 == t).unwrap().2;
+        assert_eq!(days("runtime_capabilities"), 91);
+        assert_eq!(days("runtime_executables"), 30);
+        assert_eq!(days("runtime_coverage"), 30);
+        let sql = |t: &str| plan.iter().find(|p| p.0 == t).unwrap().1;
+        assert_eq!(
+            sql("runtime_capabilities"),
+            crate::retention::RUNTIME_CAPABILITIES_PRUNE_SQL
         );
     }
 
@@ -1039,6 +1110,7 @@ mod tests {
             incomplete: false,
             cap_probe,
             cap_hook: cap_probe.then(|| "cap_capable".to_string()),
+            probe_attached_at: Some(now - chrono::Duration::hours(tracking_h + 1)),
             ended: false,
             heartbeat_at: now,
             heartbeat_secs: 300,
@@ -1069,7 +1141,7 @@ mod tests {
                container_name, image_digest, container_kind, image_ref, security_context, \
                pod_security, last_pod_name, state) VALUES \
              ('capns', 'Deployment', 'capweb', 'app', '{D}', 'regular', 'img:1', \
-               '{{\"capabilitiesAdd\": [\"NET_ADMIN\", \"NET_BIND_SERVICE\"], \"allowPrivilegeEscalation\": false}}', \
+               '{{\"capabilitiesAdd\": [\"NET_ADMIN\", \"NET_BIND_SERVICE\"]}}', \
                '{{}}', 'w-1', 'running');"
         ))
         .unwrap();
@@ -1116,7 +1188,13 @@ mod tests {
         assert_eq!(
             c.recommendation.as_ref().unwrap().add,
             vec!["NET_BIND_SERVICE", "SYS_TIME"],
-            "a probed-only SYS_ADMIN is left out: allowPrivilegeEscalation is false"
+            "a probed-only SYS_ADMIN is left out: the patch sets allowPrivilegeEscalation: false"
+        );
+        assert_eq!(
+            c.recommendation.as_ref().unwrap().requires,
+            Some(CapRequires {
+                allow_privilege_escalation: false
+            })
         );
         assert_eq!(
             c.recommendation.as_ref().unwrap().probed_omitted[0].capability,
@@ -1133,6 +1211,11 @@ mod tests {
             .unwrap();
         eprintln!("{}", rec.yaml);
         assert!(rec.yaml.contains("drop: [\"ALL\"]"));
+        assert!(
+            rec.yaml.contains("allowPrivilegeEscalation: false"),
+            "the spec leaves it unset: the patch that omits SYS_ADMIN must set it\n{}",
+            rec.yaml
+        );
         assert!(rec
             .yaml
             .contains("add: [\"NET_BIND_SERVICE\", \"SYS_TIME\"]"));
@@ -1160,12 +1243,20 @@ mod tests {
             bundle.contains("add: [\"NET_BIND_SERVICE\", \"SYS_TIME\"]  # observed in use"),
             "{bundle}"
         );
+        assert!(
+            bundle.contains("allowPrivilegeEscalation: false"),
+            "the exported patch carries it too\n{bundle}"
+        );
         let v = serde_json::to_value(&p).unwrap();
         eprintln!(
             "CAPABILITIES_JSON {}",
             serde_json::to_string_pretty(&v["capabilities"]).unwrap()
         );
         assert_eq!(v["capabilities"]["windowHours"], json!(168));
+        assert_eq!(
+            v["capabilities"]["containers"][0]["recommendation"]["requires"],
+            json!({"allowPrivilegeEscalation": false})
+        );
         assert_eq!(
             v["capabilities"]["containers"][0]["evidence"],
             json!("sufficient")
@@ -1226,7 +1317,46 @@ mod tests {
             ),
             1
         );
+
+        // Two classes of one capability: an expired probe must not take the
+        // current audited use with it (probed is part of the key).
+        conn.batch_execute(
+            "INSERT INTO runtime_capabilities (cluster_id, pod_namespace, workload_kind, \
+               workload_name, container_name, image_digest, capability, granted, probed, count, \
+               first_seen, last_seen, last_reported) VALUES \
+             ('primary', 'capns', 'Deployment', 'capweb', 'app', 'sha256:prune', 'SYS_PTRACE', \
+               true, true, 1, NOW() - INTERVAL '100 days', NOW() - INTERVAL '100 days', \
+               NOW() - INTERVAL '100 days'), \
+             ('primary', 'capns', 'Deployment', 'capweb', 'app', 'sha256:prune', 'SYS_PTRACE', \
+               true, false, 1, NOW(), NOW(), NOW())",
+        )
+        .unwrap();
+        assert_eq!(
+            crate::retention::prune_batch_for_tests(
+                &mut conn,
+                crate::retention::RUNTIME_CAPABILITIES_PRUNE_SQL,
+                30,
+                100
+            ),
+            1
+        );
+        let left: Vec<(bool,)> = sql_query(
+            "SELECT probed FROM runtime_capabilities \
+             WHERE image_digest = 'sha256:prune' AND capability = 'SYS_PTRACE'",
+        )
+        .load::<ProbedRow>(&mut conn)
+        .unwrap()
+        .into_iter()
+        .map(|r| (r.probed,))
+        .collect();
+        assert_eq!(left, vec![(false,)], "the current audited use survives");
         conn.batch_execute(clean).unwrap();
+    }
+
+    #[derive(QueryableByName)]
+    struct ProbedRow {
+        #[diesel(sql_type = diesel::sql_types::Bool)]
+        probed: bool,
     }
 
     #[test]
@@ -1285,6 +1415,56 @@ mod tests {
             (ask_fb.covered, ask_fb.reason.as_deref()),
             (Some(false), Some("capabilities_partial_hook"))
         );
+
+        // M4: a controller restart shorter than the heartbeat tolerance. The
+        // probes re-attached after the previous heartbeat, so checks made
+        // while they were detached were missed: no longer whole-life.
+        let ask_rs = |conn: &mut PgConnection| -> CapCoverageRow {
+            sql_query(
+                "SELECT 'rs'::text AS container_name, $1::text AS image_digest, k.covered, \
+                   k.observed_since, k.reason \
+                 FROM kg_capability_coverage('primary', 'capns', 'Deployment', 'capweb', 'rs', $1, 168) k",
+            )
+            .bind::<Text, _>(D)
+            .get_result(conn)
+            .unwrap()
+        };
+        let mut rs = beat("k7", true, 200);
+        rs.container_name = "rs".into();
+        rs.heartbeat_at -= chrono::Duration::minutes(10);
+        crate::runtime_inventory::upsert_coverage(&mut conn, &[rs.clone()]).unwrap();
+        rs.heartbeat_at += chrono::Duration::minutes(5);
+        crate::runtime_inventory::upsert_coverage(&mut conn, &[rs.clone()]).unwrap();
+        assert_eq!(
+            ask_rs(&mut conn).covered,
+            Some(true),
+            "same controller, on-time beats: still whole-life"
+        );
+        rs.probe_attached_at = Some(rs.heartbeat_at + chrono::Duration::minutes(2));
+        rs.heartbeat_at += chrono::Duration::minutes(4);
+        crate::runtime_inventory::upsert_coverage(&mut conn, &[rs]).unwrap();
+        let a = ask_rs(&mut conn);
+        assert_eq!(
+            (a.covered, a.reason.as_deref()),
+            (Some(false), Some("capture_gap")),
+            "a restart 6 minutes long (under the 16 minute tolerance) is a gap: for the \
+             executables too, and so for capabilities"
+        );
+        let gap: (i32, Option<String>) = {
+            #[derive(QueryableByName)]
+            struct G {
+                #[diesel(sql_type = Integer)]
+                gaps: i32,
+                #[diesel(sql_type = Nullable<Text>)]
+                last_gap: Option<String>,
+            }
+            let g: G =
+                sql_query("SELECT gaps, last_gap FROM runtime_coverage WHERE container_id = 'k7'")
+                    .get_result(&mut conn)
+                    .unwrap();
+            (g.gaps, g.last_gap)
+        };
+        assert_eq!(gap, (1, Some("probe_restart".to_string())));
 
         // The probe went off: a probe change restarts the run, so the window
         // is no longer covered, and the probe is off now.
