@@ -1442,6 +1442,25 @@ fn md5_of(conn: &mut PgConnection, s: &str) -> QueryResult<String> {
 
 /// Replace the findings for `(digest, source)`; see the module docs for
 /// the stale / unchanged rules.
+/// Fold one payload's KEV / EPSS into `vuln_cve_facts` (migration
+/// 2026-09-28-200000): kev by kg_kev_merge, EPSS by GREATEST, the KEV date
+/// by LEAST. Only ever adds evidence; the retention pass rebuild lets it
+/// fall again.
+pub(crate) const CVE_FACTS_UPSERT_SQL: &str = "\
+INSERT INTO vuln_cve_facts (vuln_id, kev, kev_date_added, epss, epss_percentile, updated_at) \
+SELECT vuln_id, bool_or(kev), min(kev_date_added), max(epss), max(epss_percentile), \
+    timezone('UTC', NOW()) \
+FROM image_vulnerabilities WHERE digest = $1 AND source = $2 \
+GROUP BY vuln_id \
+HAVING bool_or(kev) IS NOT NULL OR max(epss) IS NOT NULL \
+    OR min(kev_date_added) IS NOT NULL OR max(epss_percentile) IS NOT NULL \
+ON CONFLICT (vuln_id) DO UPDATE SET \
+    kev = kg_kev_merge(vuln_cve_facts.kev, EXCLUDED.kev), \
+    kev_date_added = LEAST(vuln_cve_facts.kev_date_added, EXCLUDED.kev_date_added), \
+    epss = GREATEST(vuln_cve_facts.epss, EXCLUDED.epss), \
+    epss_percentile = GREATEST(vuln_cve_facts.epss_percentile, EXCLUDED.epss_percentile), \
+    updated_at = EXCLUDED.updated_at";
+
 pub fn store_vulnerabilities(
     conn: &mut PgConnection,
     mut p: VulnPayload,
@@ -1484,6 +1503,11 @@ pub fn store_vulnerabilities(
             .execute(conn)?;
         upsert_header(conn, &p.header)?;
         relink(conn, &p.header.digest, &p.header.source)?;
+        // A KEV / EPSS fact is visible at once, not after the next pass.
+        sql_query(CVE_FACTS_UPSERT_SQL)
+            .bind::<Text, _>(&p.header.digest)
+            .bind::<Text, _>(&p.header.source)
+            .execute(conn)?;
         Ok(Outcome::Stored { items: n as i64 })
     })
 }

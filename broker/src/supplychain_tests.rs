@@ -492,7 +492,7 @@ fn live_conn() -> PgConnection {
     conn.batch_execute(&format!(
         "TRUNCATE vuln_sources, image_vulnerabilities, image_sbom_components, image_sbom_pages, \
             supplychain_image_links, images, workload_containers, vuln_cve_summary, \
-            vuln_cve_summary_state; \
+            vuln_cve_summary_state, vuln_cve_facts; \
          DELETE FROM pod_traffic WHERE pod_namespace IN ('{NS}', 'sc-other'); \
          DELETE FROM pod_details WHERE pod_namespace = '{NS}';"
     ))
@@ -2563,4 +2563,207 @@ fn live_database_kev_and_epss_are_resolved_per_cve_across_sources() {
         ["CVE-2026-0301"]
     );
     assert_eq!(l.items[0].summary.kev, Some(true));
+}
+
+/// The CVE summary for one namespace uses the CVE-level KEV even when the
+/// only source saying KEV reports on an image in ANOTHER namespace. Trivy
+/// (kev null) on the image in NS, Grype (kev true) on an image in
+/// sc-other: NS's summary row is P0 (in use + exposed), not P1.
+#[test]
+#[ignore = "requires a live postgres (set KG_TEST_DATABASE_URL)"]
+fn live_database_namespace_summary_uses_kev_reported_elsewhere() {
+    use crate::supplychain_read::{list_cves_filtered, ListFilters};
+    let mut conn = live_conn();
+    exec(
+        &mut conn,
+        "TRUNCATE runtime_package_use, runtime_unowned_paths, runtime_in_use_coverage, \
+            workload_network_exposure;",
+    );
+    let (here, there) = (d(96), d(97));
+    seed_inventory(
+        &mut conn,
+        &here,
+        "ghcr.io/example/api",
+        "2.4.1",
+        "Deployment",
+        "api",
+        "app",
+        0,
+    );
+    exec(
+        &mut conn,
+        &format!(
+            "INSERT INTO images (digest, repository, tags, digest_kind) \
+               VALUES ('{there}', 'ghcr.io/example/web', ARRAY['1'], 'repo') ON CONFLICT DO NOTHING; \
+             INSERT INTO workload_containers (pod_namespace, workload_kind, workload_name, \
+               container_name, container_kind, image_ref, image_digest, state, last_seen) \
+             VALUES ('sc-other', 'Deployment', 'web', 'web', 'regular', 'ghcr.io/example/web:1', \
+               '{there}', 'running', timezone('UTC', NOW()))"
+        ),
+    );
+    let mut trivy = vulns_json(
+        &here,
+        "2026-09-20T08:00:00Z",
+        &[("CVE-2026-0401", "MEDIUM", Some("2"))],
+    );
+    trivy["observed_in"] = json!([]);
+    trivy["vulnerabilities"][0]["package"] =
+        json!({"name": "libq", "version": "1", "type": "debian", "purl": "pkg:deb/debian/libq@1"});
+    trivy["vulnerabilities"][0]["class"] = json!("os-pkgs");
+    store_v(&mut conn, trivy);
+    let mut grype = vulns_json(
+        &there,
+        "2026-09-21T08:00:00Z",
+        &[("CVE-2026-0401", "MEDIUM", Some("2"))],
+    );
+    grype["source"] = json!("grype");
+    grype["sbom_source"] = json!("registry");
+    grype["observed_in"] = json!([]);
+    grype["vulnerabilities"][0]["kev"] = json!(true);
+    store_v(&mut conn, grype);
+    relink_batch(&mut conn, None, 100).unwrap();
+    exec(
+        &mut conn,
+        &format!(
+            "INSERT INTO runtime_package_use (cluster_id, pod_namespace, workload_kind, workload_name, \
+                container_name, image_digest, pkg_name, pkg_version, state, path_match, sample_path, \
+                first_seen, last_seen) VALUES ('primary', '{NS}', 'Deployment', 'api', 'app', '{here}', \
+                'libq', '1', 'loaded', 'exact', '/usr/lib/libq.so.1', \
+                timezone('UTC', NOW()), timezone('UTC', NOW())); \
+             INSERT INTO workload_network_exposure (cluster_id, pod_namespace, workload_kind, \
+                workload_name, window_hours, pods, ingress_flows, exposed, exposed_via, computed_at) \
+             VALUES ('primary', '{NS}', 'Deployment', 'api', 168, 1, 10, true, '{{public_ip}}', \
+                timezone('UTC', NOW()))"
+        ),
+    );
+    crate::supplychain_read::refresh_cve_summary(&mut conn).unwrap();
+    let all = ListFilters::default();
+    let page = list_cves_filtered(&mut conn, &all, Some(NS), false, None, 10).unwrap();
+    assert_eq!(page.items.len(), 1);
+    let row = &page.items[0].summary;
+    assert_eq!(row.id, "CVE-2026-0401");
+    assert_eq!(
+        row.kev,
+        Some(true),
+        "the namespace's own rows say null; the CVE is in KEV"
+    );
+    assert_eq!(
+        row.tier.as_deref(),
+        Some("P0"),
+        "medium + in use + KEV + exposed"
+    );
+    // The per-image read agrees, from the image whose only report is Trivy's.
+    let f = crate::supplychain_read::image_vulnerabilities_filtered(
+        &mut conn, &here, None, &all, None, 10,
+    )
+    .unwrap();
+    assert_eq!((f.items[0].kev, f.items[0].tier), (Some(true), "P0"));
+}
+
+/// vuln_cve_facts: ingest folds facts in (never lowering them), the
+/// retention rebuild recomputes them from what is stored, and a read
+/// without a facts row falls back to the finding's own values.
+#[test]
+#[ignore = "requires a live postgres (set KG_TEST_DATABASE_URL)"]
+fn live_database_cve_facts_upsert_rebuild_and_fallback() {
+    let mut conn = live_conn();
+    let facts = |conn: &mut PgConnection| -> Option<(Option<bool>, Option<f32>)> {
+        #[derive(QueryableByName)]
+        struct F {
+            #[diesel(sql_type = diesel::sql_types::Nullable<diesel::sql_types::Bool>)]
+            kev: Option<bool>,
+            #[diesel(sql_type = diesel::sql_types::Nullable<diesel::sql_types::Float>)]
+            epss: Option<f32>,
+        }
+        sql_query("SELECT kev, epss FROM vuln_cve_facts WHERE vuln_id = 'CVE-2026-0501'")
+            .get_result::<F>(conn)
+            .optional()
+            .unwrap()
+            .map(|f| (f.kev, f.epss))
+    };
+    let payload =
+        |img: &str, source: &str, at: &str, kev: serde_json::Value, epss: serde_json::Value| {
+            let mut v = vulns_json(img, at, &[("CVE-2026-0501", "LOW", None)]);
+            v["source"] = json!(source);
+            if source == "grype" {
+                v["sbom_source"] = json!("registry");
+            }
+            v["observed_in"] = json!([]);
+            v["vulnerabilities"][0]["kev"] = kev;
+            v["vulnerabilities"][0]["epss"] = epss;
+            v
+        };
+    // Trivy alone: no fact, no row.
+    store_v(
+        &mut conn,
+        payload(
+            &d(98),
+            "trivy-operator",
+            "2026-09-20T08:00:00Z",
+            json!(null),
+            json!(null),
+        ),
+    );
+    assert_eq!(facts(&mut conn), None);
+    // Grype says not KEV, EPSS 0.2.
+    store_v(
+        &mut conn,
+        payload(
+            &d(98),
+            "grype",
+            "2026-09-20T09:00:00Z",
+            json!(false),
+            json!(0.2),
+        ),
+    );
+    assert_eq!(facts(&mut conn), Some((Some(false), Some(0.2))));
+    // Another image's Grype says KEV, EPSS 0.1: kev true, EPSS stays 0.2.
+    store_v(
+        &mut conn,
+        payload(
+            &d(99),
+            "grype",
+            "2026-09-20T09:00:00Z",
+            json!(true),
+            json!(0.1),
+        ),
+    );
+    assert_eq!(facts(&mut conn), Some((Some(true), Some(0.2))));
+    // A newer scan of the first image drops its EPSS; ingest never lowers.
+    store_v(
+        &mut conn,
+        payload(
+            &d(98),
+            "grype",
+            "2026-09-21T09:00:00Z",
+            json!(false),
+            json!(0.05),
+        ),
+    );
+    assert_eq!(facts(&mut conn), Some((Some(true), Some(0.2))));
+    // The rebuild recomputes from what is stored: EPSS falls to 0.1.
+    crate::supplychain_read::refresh_cve_summary(&mut conn).unwrap();
+    assert_eq!(facts(&mut conn), Some((Some(true), Some(0.1))));
+    // The KEV rows go (GC): the rebuild keeps the remaining "false".
+    exec(
+        &mut conn,
+        &format!(
+            "DELETE FROM image_vulnerabilities WHERE digest = '{}'",
+            d(99)
+        ),
+    );
+    crate::supplychain_read::refresh_cve_summary(&mut conn).unwrap();
+    assert_eq!(facts(&mut conn), Some((Some(false), Some(0.05))));
+    // No facts row at all: a read uses the finding's own values.
+    exec(&mut conn, "DELETE FROM vuln_cve_facts");
+    let p = crate::supplychain_read::image_vulnerabilities_filtered(
+        &mut conn,
+        &d(98),
+        Some("grype"),
+        &crate::supplychain_read::ListFilters::default(),
+        None,
+        10,
+    )
+    .unwrap();
+    assert_eq!((p.items[0].kev, p.items[0].epss), (Some(false), Some(0.05)));
 }

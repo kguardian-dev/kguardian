@@ -1,3 +1,5 @@
+DROP TABLE IF EXISTS vuln_cve_facts;
+DROP FUNCTION IF EXISTS kg_kev_merge(boolean, boolean);
 DROP INDEX IF EXISTS idx_vuln_cve_summary_tier;
 ALTER TABLE vuln_cve_summary DROP COLUMN IF EXISTS exposed_workloads;
 ALTER TABLE vuln_cve_summary DROP COLUMN IF EXISTS not_observed_workloads;

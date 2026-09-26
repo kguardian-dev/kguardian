@@ -121,7 +121,10 @@ each payload replaces only its own `(digest, source)`.
   and `null` only when no source reports it; EPSS is the highest reported.
   So a Trivy finding (Trivy never reports KEV) shows `kev: true` when Grype
   lists the same CVE in KEV, even if the two name the package version
-  differently, and its tier and `tierFactors` use that.
+  differently, and its tier and `tierFactors` use that. The broker keeps these
+  per-CVE facts in one row per CVE, updated at ingest and rebuilt each
+  retention pass (so a lower EPSS takes effect, and CVEs whose findings
+  were removed drop out, within one interval).
   `fixedVersions` lists every distinct fixed version the sources give,
   ordered by source; the broker does not pick one, because text order is
   not version order (`"10.1"` sorts before `"9.2"`).

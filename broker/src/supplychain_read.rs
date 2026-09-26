@@ -563,11 +563,11 @@ pub struct ImageVulnsPage {
 /// order is not version order ("10.1" < "9.2"), so every distinct fixed
 /// version is returned, ordered by the first source that gives it.
 /// KEV and EPSS are facts about a CVE, not about one source's row: Trivy
-/// reports kev null where Grype, for the same CVE, reports true. So `cvl`
-/// resolves them per CVE over every stored source row (kev true if any
-/// source says true, false if some says false and none true, null if none
-/// reports it; EPSS the highest reported), and findings, filters and tiers
-/// use those. Same rule in refresh_cve_summary_sql.
+/// reports kev null where Grype, for the same CVE, reports true. They come
+/// from `vuln_cve_facts` (one row per CVE, joined by primary key), merged
+/// with the finding's own values so a facts row not yet written can only
+/// add evidence (kg_kev_merge / GREATEST / LEAST). Findings, filters and
+/// tiers use the result. Same rule in refresh_cve_summary_sql.
 const IMAGE_VULNS_SQL: &str = "\
 WITH v AS ( \
     SELECT v.* FROM image_vulnerabilities v \
@@ -589,16 +589,13 @@ WITH v AS ( \
         array_agg(DISTINCT digest ORDER BY digest) AS report_digests, \
         bool_or(kg_pkg_observable(pkg_type, class)) AS obs \
     FROM v GROUP BY vuln_id, pkg_name, installed_version \
-), cvl AS ( \
-    SELECT x.vuln_id, bool_or(x.kev) AS kev, min(x.kev_date_added) AS kev_date_added, \
-        max(x.epss) AS epss, max(x.epss_percentile) AS epss_percentile \
-    FROM image_vulnerabilities x WHERE x.vuln_id IN (SELECT vuln_id FROM g0) \
-    GROUP BY x.vuln_id \
 ), g AS ( \
     SELECT g0.rep, g0.vuln_id, g0.pkg_name, g0.installed_version, g0.severity_rank, g0.score, \
-        g0.fixed_versions, cvl.kev, cvl.kev_date_added, cvl.epss, cvl.epss_percentile, \
+        g0.fixed_versions, kg_kev_merge(f.kev, g0.kev) AS kev, \
+        LEAST(f.kev_date_added, g0.kev_date_added) AS kev_date_added, \
+        GREATEST(f.epss, g0.epss) AS epss, GREATEST(f.epss_percentile, g0.epss_percentile) AS epss_percentile, \
         g0.sources, g0.report_digests, g0.obs \
-    FROM g0 JOIN cvl ON cvl.vuln_id = g0.vuln_id \
+    FROM g0 LEFT JOIN vuln_cve_facts f ON f.vuln_id = g0.vuln_id \
 ), c AS ( \
     SELECT wc.cluster_id, wc.pod_namespace, wc.workload_kind, wc.workload_name, \
         wc.container_name, wc.image_digest \
@@ -1381,15 +1378,11 @@ fn refresh_cve_summary_sql() -> String {
             FROM eff e JOIN image_vulnerabilities v ON v.digest = e.digest AND v.source = e.source \
             GROUP BY v.vuln_id, e.image_digest, v.pkg_name \
          ), \
-         cvl AS ( \
-            SELECT x.vuln_id, bool_or(x.kev) AS kev, max(x.epss) AS ep \
-            FROM image_vulnerabilities x WHERE x.vuln_id IN (SELECT vuln_id FROM hp0) \
-            GROUP BY x.vuln_id \
-         ), \
          hp AS ( \
             SELECT hp0.vuln_id, hp0.image_digest, hp0.pkg_name, hp0.sr, hp0.sc, hp0.fx, \
-                cvl.kev, cvl.ep, hp0.jr, hp0.obs \
-            FROM hp0 JOIN cvl ON cvl.vuln_id = hp0.vuln_id \
+                kg_kev_merge(f.kev, hp0.kev) AS kev, GREATEST(f.epss, hp0.ep) AS ep, \
+                hp0.jr, hp0.obs \
+            FROM hp0 LEFT JOIN vuln_cve_facts f ON f.vuln_id = hp0.vuln_id \
          ), \
          pk AS ( \
             SELECT v.vuln_id, (array_agg(DISTINCT v.pkg_name ORDER BY v.pkg_name))[1:5] AS packages, \
@@ -1472,8 +1465,23 @@ fn refresh_cve_summary_sql() -> String {
 
 /// Rebuild the CVE summary in one transaction (readers see the old or the
 /// new table, never half). Returns the cluster-wide CVE count.
+/// Rebuild `vuln_cve_facts` from every stored finding in one grouped
+/// scan: drops CVEs whose rows were garbage-collected and lets a decayed
+/// EPSS fall (ingest only ever raises them).
+pub const REFRESH_CVE_FACTS_SQL: &str = "\
+INSERT INTO vuln_cve_facts (vuln_id, kev, kev_date_added, epss, epss_percentile, updated_at) \
+SELECT vuln_id, bool_or(kev), min(kev_date_added), max(epss), max(epss_percentile), \
+    timezone('UTC', NOW()) \
+FROM image_vulnerabilities \
+GROUP BY vuln_id \
+HAVING bool_or(kev) IS NOT NULL OR max(epss) IS NOT NULL \
+    OR min(kev_date_added) IS NOT NULL OR max(epss_percentile) IS NOT NULL";
+
 pub fn refresh_cve_summary(conn: &mut PgConnection) -> QueryResult<i64> {
     conn.transaction(|conn| {
+        // CVE-level KEV / EPSS first: the summary's tiers read them.
+        sql_query("DELETE FROM vuln_cve_facts").execute(conn)?;
+        sql_query(REFRESH_CVE_FACTS_SQL).execute(conn)?;
         sql_query("DELETE FROM vuln_cve_summary").execute(conn)?;
         let t = crate::in_use::TierSettings::from_env();
         sql_query(refresh_cve_summary_sql())

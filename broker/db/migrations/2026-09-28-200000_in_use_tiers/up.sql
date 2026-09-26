@@ -192,3 +192,40 @@ ALTER TABLE vuln_cve_summary ADD COLUMN IF NOT EXISTS not_observed_workloads BIG
 ALTER TABLE vuln_cve_summary ADD COLUMN IF NOT EXISTS exposed_workloads BIGINT NOT NULL DEFAULT 0;
 CREATE INDEX IF NOT EXISTS idx_vuln_cve_summary_tier
     ON vuln_cve_summary (scope_namespace, tier, severity_rank DESC, vuln_id);
+
+-- KEV and EPSS are facts about a CVE, not about one source's row (Trivy
+-- never reports KEV; Grype does, for the same CVE, possibly under a
+-- differently spelled package version). Resolved once per CVE here, so
+-- reads join by primary key instead of aggregating every stored row of
+-- each CVE. Sparse: only CVEs some source reports a fact for.
+--   kev             true if any source says true; false if one says false
+--                   and none true; NULL (no row) when none reports it
+--   epss(_percentile) the highest reported; kev_date_added the earliest
+-- Upserted at ingest (so a new KEV is not stale until the next pass) and
+-- rebuilt from image_vulnerabilities by the retention pass before the CVE
+-- summary (which drops CVEs whose rows were garbage-collected and lets a
+-- decayed EPSS fall).
+CREATE OR REPLACE FUNCTION kg_kev_merge(a boolean, b boolean) RETURNS boolean
+LANGUAGE sql IMMUTABLE AS $$
+    SELECT CASE WHEN a IS TRUE OR b IS TRUE THEN true
+                WHEN a IS NULL AND b IS NULL THEN NULL
+                ELSE false END
+$$;
+
+CREATE TABLE IF NOT EXISTS vuln_cve_facts (
+    vuln_id          VARCHAR   PRIMARY KEY,
+    kev              BOOLEAN   NULL,
+    kev_date_added   TIMESTAMP NULL,
+    epss             REAL      NULL,
+    epss_percentile  REAL      NULL,
+    updated_at       TIMESTAMP NOT NULL
+);
+
+INSERT INTO vuln_cve_facts (vuln_id, kev, kev_date_added, epss, epss_percentile, updated_at)
+SELECT vuln_id, bool_or(kev), min(kev_date_added), max(epss), max(epss_percentile),
+    timezone('UTC', NOW())
+FROM image_vulnerabilities
+GROUP BY vuln_id
+HAVING bool_or(kev) IS NOT NULL OR max(epss) IS NOT NULL
+    OR min(kev_date_added) IS NOT NULL OR max(epss_percentile) IS NOT NULL
+ON CONFLICT (vuln_id) DO NOTHING;
