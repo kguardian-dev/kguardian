@@ -964,34 +964,37 @@ From a live broker build (`live_evidence_drives_the_profile_and_its_patch`, `bod
           "capability": "SYS_ADMIN",
           "count": 4,
           "firstSeen": "2026-09-26T10:00:00",
-          "lastSeen": "2026-09-26T10:21:32.318161"
+          "lastSeen": "2026-09-26T11:00:00"
         }
       ],
       "digests": [
         "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
       ],
       "evidence": "sufficient",
-      "observedSince": "2026-09-18T02:21:31.802901",
+      "observedSince": "2026-09-18T13:28:45.825117",
       "probed": [
         {
           "capability": "SYS_ADMIN",
           "count": 25,
           "firstSeen": "2026-09-26T10:00:00",
-          "lastSeen": "2026-09-26T10:21:32.442889"
+          "lastSeen": "2026-09-26T11:00:00"
         }
       ],
       "reason": null,
       "recommendation": {
         "add": [
           "NET_BIND_SERVICE",
-          "SYS_ADMIN",
           "SYS_TIME"
         ],
         "drop": [
           "ALL"
         ],
-        "probedKept": [
-          "SYS_ADMIN"
+        "probedKept": [],
+        "probedOmitted": [
+          {
+            "capability": "SYS_ADMIN",
+            "reason": "probed only (memory reserve / seccomp without no_new_privs); allowPrivilegeEscalation=false removes the need"
+          }
         ]
       },
       "unusedAdded": [
@@ -1002,13 +1005,13 @@ From a live broker build (`live_evidence_drives_the_profile_and_its_patch`, `bod
           "capability": "NET_BIND_SERVICE",
           "count": 5,
           "firstSeen": "2026-09-26T10:00:00",
-          "lastSeen": "2026-09-26T10:21:32.103009"
+          "lastSeen": "2026-09-26T11:00:00"
         },
         {
           "capability": "SYS_TIME",
           "count": 1,
           "firstSeen": "2026-09-26T10:00:00",
-          "lastSeen": "2026-09-26T10:21:32.219932"
+          "lastSeen": "2026-09-26T11:00:00"
         }
       ]
     }
@@ -1038,8 +1041,17 @@ From a live broker build (`live_evidence_drives_the_profile_and_its_patch`, `bod
   `capabilities_partial_hook`, `capabilities_not_seen_since_start`, `no_current_digest`, or
   `rows_truncated`.
 - `recommendation`: only with sufficient evidence: `drop: ["ALL"]`, `add`: every used and every probed
-  capability (a used or probed capability is never recommended for dropping), `probedKept`: the part of
-  `add` there only because of probes, to be removed only after a person confirms. `null` otherwise.
+  capability, with one exception below (a used capability is never recommended for dropping),
+  `probedKept`: the part of `add` there only because of probes, to be removed only after a person
+  confirms, and `probedOmitted`: probed-only capabilities left out, each `{capability, reason}`. `null`
+  otherwise.
+- The exception: a **probed-only `SYS_ADMIN`** is left out (listed in `probedOmitted` with reason "probed
+  only (memory reserve / seccomp without no_new_privs); allowPrivilegeEscalation=false removes the need")
+  unless the container is currently privileged. It comes almost entirely from the memory admin-reserve
+  check every root process makes; the one real gate among its non-audited callers is installing a seccomp
+  filter without `no_new_privs`, and the recommendation keeps or sets `allowPrivilegeEscalation: false`,
+  which sets `no_new_privs`. A caveat says so. For a privileged container it stays in `add`. Every other
+  probed capability (e.g. `SYS_PTRACE`) stays in `add`.
 - `unusedAdded`: capabilities the current `securityContext.capabilities.add` grants that were never used or
   probed (only with sufficient evidence).
 - Retention keeps capability rows for at least the window plus a day, so a capability used inside the
