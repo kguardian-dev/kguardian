@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -156,7 +157,7 @@ func TestRunnerStatus(t *testing.T) {
 		c == nil || c.Status != metav1.ConditionTrue || c.Reason != v1alpha1.ReasonRead {
 		t.Fatalf("state %q, condition %+v", ev.State, c)
 	}
-	if st.ObservedGeneration != 3 || ev.Containers != 5 || ev.Trusted != 2 || ev.WouldDeny != 2 || ev.Unknown != 1 ||
+	if st.ObservedGeneration != 3 || Count(ev.Containers) != 5 || Count(ev.Trusted) != 2 || Count(ev.WouldDeny) != 2 || Count(ev.Unknown) != 1 ||
 		ev.LastChanged == nil || ev.LastEvaluated == nil || !ev.LastEvaluated.Time.Equal(ck.t) || st.Message != "" {
 		t.Fatalf("status = %+v", st)
 	}
@@ -164,7 +165,7 @@ func TestRunnerStatus(t *testing.T) {
 		ev.Findings[2].Verdict != v1alpha1.ImageUnknown || ev.Findings[0].Workload != "Deployment/c" {
 		t.Fatalf("findings = %+v", ev.Findings)
 	}
-	if cl := ap.byKey["/prod"]; cl.Evaluation.Containers != 5 { // shop is env=prod, tools is not
+	if cl := ap.byKey["/prod"]; Count(cl.Evaluation.Containers) != 5 { // shop is env=prod, tools is not
 		t.Fatalf("cluster status = %+v", cl)
 	}
 	if b := ap.byKey["shop/broken"]; !strings.Contains(b.Error, "subjectRegExp") {
@@ -195,7 +196,7 @@ func TestRunnerStatus(t *testing.T) {
 		t.Fatal(err)
 	}
 	got := ap.byKey["shop/signed"]
-	if got.Evaluation.Trusted != 5 || got.Evaluation.WouldDeny != 0 || len(got.Evaluation.Findings) != 0 || got.Evaluation.Truncated {
+	if Count(got.Evaluation.Trusted) != 5 || Count(got.Evaluation.WouldDeny) != 0 || len(got.Evaluation.Findings) != 0 || got.Evaluation.Truncated {
 		t.Fatalf("after signing = %+v", got)
 	}
 	if !got.Evaluation.LastChanged.Time.Equal(ck.t) {
@@ -230,7 +231,7 @@ func TestRunnerBrokerOutage(t *testing.T) {
 			t.Fatal("outage not reported")
 		}
 	}
-	if ap.count != before || ap.byKey["shop/signed"].Evaluation.Trusted != 2 {
+	if ap.count != before || Count(ap.byKey["shop/signed"].Evaluation.Trusted) != 2 {
 		t.Fatalf("in-window pass changed status: %+v", ap.byKey["shop/signed"])
 	}
 
@@ -242,7 +243,7 @@ func TestRunnerBrokerOutage(t *testing.T) {
 		c == nil || c.Status != metav1.ConditionFalse || c.Reason != v1alpha1.ReasonBrokerUnavailable {
 		t.Fatalf("state %q, condition %+v", st.Evaluation.State, c)
 	}
-	if st.Evaluation.Unknown != 5 || st.Evaluation.Trusted != 0 || st.Evaluation.WouldDeny != 0 ||
+	if noCounts(st) != "" || len(st.Evaluation.Findings) != 5 ||
 		!strings.Contains(st.Message, "connection refused") || !strings.Contains(st.Message, good.Format(time.RFC3339)) ||
 		!st.Evaluation.LastEvaluated.Time.Equal(good) || st.Evaluation.Findings[0].Reason != ReasonBrokerUnavailable {
 		t.Fatalf("past window = %+v", st)
@@ -254,7 +255,7 @@ func TestRunnerBrokerOutage(t *testing.T) {
 	if err := r.Pass(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	if st := ap.byKey["shop/signed"]; st.Evaluation.Trusted != 2 || st.Message != "" || st.Evaluation.State != v1alpha1.StateEvaluated ||
+	if st := ap.byKey["shop/signed"]; Count(st.Evaluation.Trusted) != 2 || st.Message != "" || st.Evaluation.State != v1alpha1.StateEvaluated ||
 		meta.FindStatusCondition(st.Conditions, v1alpha1.ConditionBrokerRead).Status != metav1.ConditionTrue {
 		t.Fatalf("recovered = %+v", st)
 	}
@@ -269,7 +270,7 @@ func TestRunnerBrokerOutage(t *testing.T) {
 			c == nil || c.Reason != v1alpha1.ReasonBrokerUnauthorized {
 			t.Fatalf("%d: state %q, condition %+v", code, st.Evaluation.State, c)
 		}
-		if st.Evaluation.Unknown != 5 || st.Evaluation.Findings[0].Reason != ReasonBrokerUnauthorized || !strings.Contains(st.Message, "READ-scope token") {
+		if noCounts(st) != "" || len(st.Evaluation.Findings) != 5 || st.Evaluation.Findings[0].Reason != ReasonBrokerUnauthorized || !strings.Contains(st.Message, "READ-scope token") {
 			t.Fatalf("%d = %+v", code, st)
 		}
 		feed.err = nil
@@ -284,7 +285,7 @@ func TestRunnerNeverRead(t *testing.T) {
 	r, ap, _ := setup(t, feed, toUnstructured(t, nsPolicy(), "ImageTrustPolicy"))
 	_ = r.Pass(context.Background())
 	st := ap.byKey["shop/signed"]
-	if st.Evaluation.Containers != 0 || st.Evaluation.LastEvaluated != nil || !strings.Contains(st.Message, "last successful read: never") {
+	if noCounts(st) != "" || st.Evaluation.LastEvaluated != nil || !strings.Contains(st.Message, "last successful read: never") {
 		t.Fatalf("status = %+v", st)
 	}
 	// The zero counts must not read as "nothing to deny": the state and
@@ -309,7 +310,7 @@ func TestRunnerUnknownNamespace(t *testing.T) {
 		t.Fatal(err)
 	}
 	st := ap.byKey["/prod"]
-	if st.Evaluation.Containers != 2 || st.Evaluation.Trusted != 1 || st.Evaluation.Unknown != 1 ||
+	if Count(st.Evaluation.Containers) != 2 || Count(st.Evaluation.Trusted) != 1 || Count(st.Evaluation.Unknown) != 1 ||
 		st.Evaluation.Findings[0].Namespace != "ghost" || st.Evaluation.Findings[0].Reason != ReasonNamespaceUnknown {
 		t.Fatalf("status = %+v", st)
 	}
@@ -378,4 +379,13 @@ func TestBrokerFeedPagesAndAuth(t *testing.T) {
 	if !IsAuthError(err) {
 		t.Fatalf("403 not an auth error: %v", err)
 	}
+}
+
+// noCounts is "" when every count is absent (no current evaluation).
+func noCounts(st v1alpha1.ImageTrustPolicyStatus) string {
+	e := st.Evaluation
+	if e.Containers != nil || e.Trusted != nil || e.WouldDeny != nil || e.Unknown != nil {
+		return fmt.Sprintf("counts present: %v %v %v %v", e.Containers, e.Trusted, e.WouldDeny, e.Unknown)
+	}
+	return ""
 }

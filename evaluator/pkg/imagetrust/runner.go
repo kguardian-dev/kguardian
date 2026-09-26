@@ -320,6 +320,7 @@ func (r *Runner) evaluate(p policyRef, fs feedState) (v1alpha1.ImageTrustPolicyS
 	}
 	var res []Result
 	ev := &st.Evaluation
+	var containers, trusted, wouldDeny, unknown int64
 	for _, c := range cs {
 		selected, nsUnknown := r.selectsNamespace(p, c.Namespace)
 		if !selected || !pol.Selects(c) {
@@ -332,14 +333,14 @@ func (r *Runner) evaluate(p policyRef, fs feedState) (v1alpha1.ImageTrustPolicyS
 		case nsUnknown:
 			verdict, reason = v1alpha1.ImageUnknown, ReasonNamespaceUnknown
 		}
-		ev.Containers++
+		containers++
 		switch verdict {
 		case v1alpha1.ImageTrusted:
-			ev.Trusted++
+			trusted++
 		case v1alpha1.ImageWouldDeny:
-			ev.WouldDeny++
+			wouldDeny++
 		default:
-			ev.Unknown++
+			unknown++
 		}
 		workload := c.WorkloadKind + "/" + c.WorkloadName
 		res = append(res, Result{Policy: p.key(), Namespace: c.Namespace, Workload: workload, Container: c.Container,
@@ -362,7 +363,20 @@ func (r *Runner) evaluate(p policyRef, fs feedState) (v1alpha1.ImageTrustPolicyS
 	if len(ev.Findings) > MaxFindings {
 		ev.Findings, ev.Truncated = ev.Findings[:MaxFindings], true
 	}
+	// Counts only describe a current evaluation; otherwise they are left
+	// out (server-side apply removes the old ones).
+	if ev.State == v1alpha1.StateEvaluated {
+		ev.Containers, ev.Trusted, ev.WouldDeny, ev.Unknown = &containers, &trusted, &wouldDeny, &unknown
+	}
 	return st, res
+}
+
+// Count returns a count, 0 when absent.
+func Count(v *int64) int64 {
+	if v == nil {
+		return 0
+	}
+	return *v
 }
 
 // writeStatus applies the status when anything in it changed. The
@@ -403,8 +417,8 @@ func (r *Runner) writeStatus(ctx context.Context, p policyRef, st v1alpha1.Image
 	if apierrors.IsNotFound(err) {
 		return nil // deleted meanwhile
 	}
-	if err == nil && st.Evaluation.WouldDeny > 0 && !same {
-		r.Log.WithFields(logrus.Fields{"policy": p.key(), "wouldDeny": st.Evaluation.WouldDeny, "unknown": st.Evaluation.Unknown}).
+	if err == nil && Count(st.Evaluation.WouldDeny) > 0 && !same {
+		r.Log.WithFields(logrus.Fields{"policy": p.key(), "wouldDeny": Count(st.Evaluation.WouldDeny), "unknown": Count(st.Evaluation.Unknown)}).
 			Info("image trust: containers would be denied")
 	}
 	return err

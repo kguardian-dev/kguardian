@@ -119,10 +119,14 @@ type ImageTrustEvaluation struct {
 	// Containers evaluated, and how many were trusted, would be denied,
 	// or could not be judged (signatures not checked or not checkable:
 	// never counted as trusted).
-	Containers int64 `json:"containers"`
-	Trusted    int64 `json:"trusted"`
-	WouldDeny  int64 `json:"wouldDeny"`
-	Unknown    int64 `json:"unknown"`
+	//
+	// Absent (not zero) whenever there is no current evaluation: before the
+	// broker was first read, and while it is unreadable past the staleness
+	// window. `kubectl get` then shows blank cells, never a reassuring 0.
+	Containers *int64 `json:"containers,omitempty"`
+	Trusted    *int64 `json:"trusted,omitempty"`
+	WouldDeny  *int64 `json:"wouldDeny,omitempty"`
+	Unknown    *int64 `json:"unknown,omitempty"`
 	// Findings lists would-deny and unknown containers, bounded.
 	Findings []ImageTrustFinding `json:"findings,omitempty"`
 	// Truncated is true when there were more findings than listed.
@@ -261,6 +265,12 @@ func (in ImageTrustPolicyStatus) deepCopy() ImageTrustPolicyStatus {
 	if in.Evaluation.LastChanged != nil {
 		t := *in.Evaluation.LastChanged
 		out.Evaluation.LastChanged = &t
+	}
+	for _, f := range []**int64{&out.Evaluation.Containers, &out.Evaluation.Trusted, &out.Evaluation.WouldDeny, &out.Evaluation.Unknown} {
+		if *f != nil {
+			v := **f
+			*f = &v
+		}
 	}
 	if in.Evaluation.LastEvaluated != nil {
 		t := *in.Evaluation.LastEvaluated
