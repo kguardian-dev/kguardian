@@ -424,7 +424,7 @@ test('the captures cover warn, risk and unknown (v1.3 has no posture ok)', () =>
 });
 
 test('Overview: a drift finding is labelled Drift, and a drift check not evaluated says so (never "no drift")', async () => {
-  // The checkout capture with a v1.6 drift block added: one unshipped-file
+  // The checkout capture with a v1.7 drift block added: one unshipped-file
   // finding, and the check not evaluated for the sidecar.
   const drifted: WorkloadProfile = {
     ...checkoutProfile,

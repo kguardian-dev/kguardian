@@ -255,7 +255,7 @@ pub struct DriftView {
     /// `unshippedExecutable` only when every current container's capture
     /// covered it.
     pub evaluated: Vec<&'static str>,
-    /// Per container, the checks that could not run and why (v1.6).
+    /// Per container, the checks that could not run and why (v1.7).
     pub not_evaluated: Vec<NotEvaluated>,
     pub items: Vec<DriftItem>,
 }

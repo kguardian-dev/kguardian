@@ -312,7 +312,7 @@ export interface WorkloadProfile {
     images: ImagesDimension;
     compute: ComputeDimension;
   };
-  /** Absent from a broker without drift (contract v1.4+; notEvaluated v1.6). */
+  /** Absent from a broker without drift (contract v1.4+; notEvaluated v1.7). */
   drift?: ProfileDrift;
 }
 
