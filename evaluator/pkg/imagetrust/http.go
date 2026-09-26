@@ -1,15 +1,32 @@
 package imagetrust
 
 import (
+	"crypto/subtle"
 	"encoding/json"
 	"net/http"
+	"strings"
 	"time"
 )
 
 // Handler serves GET /image-trust: the last pass's per-container results,
 // optionally filtered by ?namespace= and ?verdict=.
-func (r *Runner) Handler() http.Handler {
+//
+// It exposes what the broker's read API exposes, so it takes the same
+// credential: when token (the broker READ-scope token the evaluator holds)
+// is set, the request must carry it as a bearer token (401 otherwise).
+// With broker auth off there is no token, and the broker serves the same
+// data openly.
+func (r *Runner) Handler(token string) http.Handler {
+	token = strings.TrimSpace(token)
 	return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		if token != "" {
+			got, ok := strings.CutPrefix(req.Header.Get("Authorization"), "Bearer ")
+			if !ok || subtle.ConstantTimeCompare([]byte(strings.TrimSpace(got)), []byte(token)) != 1 {
+				w.Header().Set("WWW-Authenticate", "Bearer")
+				http.Error(w, "unauthorized: send the broker READ-scope token", http.StatusUnauthorized)
+				return
+			}
+		}
 		if req.Method != http.MethodGet {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return

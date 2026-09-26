@@ -14,14 +14,15 @@ import (
 	"sync"
 	"time"
 
+	"github.com/kguardian-dev/kguardian/evaluator/pkg/appprofile"
 	v1alpha1 "github.com/kguardian-dev/kguardian/evaluator/pkg/v1alpha1"
 	"github.com/sirupsen/logrus"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
-	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/dynamic"
 )
 
@@ -55,6 +56,21 @@ type Runner struct {
 	absent   map[schema.GroupVersionResource]bool // CRD not installed (logged once)
 	last     []Result
 	lastPass time.Time
+	// The last successful broker read, reused (all Unknown) once the
+	// broker has been unreadable for longer than the staleness window.
+	lastGood   []Container
+	lastGoodAt time.Time
+}
+
+// FieldManager owns .status of the image trust policies (server-side
+// apply: fields this manager no longer sends are removed).
+const FieldManager = "kguardian-evaluator-imagetrust"
+
+func (r *Runner) interval() time.Duration {
+	if r.Interval <= 0 {
+		return 5 * time.Minute
+	}
+	return r.Interval
 }
 
 // Result is one (policy, container) evaluation, for GET /image-trust.
@@ -78,10 +94,7 @@ func (r *Runner) Results() ([]Result, time.Time) {
 
 // Run passes until ctx ends.
 func (r *Runner) Run(ctx context.Context) {
-	iv := r.Interval
-	if iv <= 0 {
-		iv = 5 * time.Minute
-	}
+	iv := r.interval()
 	for {
 		if err := r.Pass(ctx); err != nil && ctx.Err() == nil {
 			r.Log.WithError(err).Warn("image trust: pass failed; retrying next interval")
@@ -112,7 +125,22 @@ func (p policyRef) key() string {
 	return p.namespace + "/" + p.name
 }
 
+// feedState is what a pass evaluates against.
+type feedState struct {
+	containers []Container
+	at         time.Time // last successful read; zero = never
+	// unknownReason/message are set when the broker could not be read:
+	// every selected container is Unknown for that reason.
+	unknownReason, message string
+}
+
 // Pass evaluates every policy once.
+//
+// A failed broker read keeps the last statuses for up to the staleness
+// window (3x the interval, as for ApplicationSecurityProfile); past it,
+// or at once when the broker rejects the token, every container known
+// from the last good read is reported Unknown with the error and the time
+// of that read, never as its last verdict.
 func (r *Runner) Pass(ctx context.Context) error {
 	pols, err := r.policies(ctx)
 	if err != nil {
@@ -122,19 +150,45 @@ func (r *Runner) Pass(ctx context.Context) error {
 		r.store(nil)
 		return nil
 	}
-	containers, err := r.Feed.Running(ctx)
-	if err != nil {
-		return fmt.Errorf("reading running images from the broker: %w", err)
+	now := r.clock()
+	fs := feedState{}
+	containers, ferr := r.Feed.Running(ctx)
+	r.mu.Lock()
+	if ferr == nil {
+		r.lastGood, r.lastGoodAt = containers, now
+	}
+	fs.containers, fs.at = r.lastGood, r.lastGoodAt
+	r.mu.Unlock()
+	if ferr != nil {
+		auth := IsAuthError(ferr)
+		window := appprofile.StaleAfter(0, r.interval())
+		if !auth && !fs.at.IsZero() && now.Sub(fs.at) <= window {
+			return fmt.Errorf("reading running images from the broker (keeping the last results for up to %s): %w", window, ferr)
+		}
+		when := "never"
+		if !fs.at.IsZero() {
+			when = fs.at.UTC().Format(time.RFC3339)
+		}
+		fs.unknownReason = ReasonBrokerUnavailable
+		fs.message = fmt.Sprintf("cannot read running images from the broker (%v); last successful read: %s; unknown because nothing was read within %s", ferr, when, window)
+		if auth {
+			fs.unknownReason = ReasonBrokerUnauthorized
+			fs.message = fmt.Sprintf("the broker rejected the evaluator's token (%v); it needs the READ-scope token; last successful read: %s", ferr, when)
+		}
+		r.Log.WithError(ferr).Warn("image trust: broker unreadable; reporting containers as unknown")
 	}
 	var all []Result
 	for _, p := range pols {
-		st, res := r.evaluate(p, containers)
+		st, res := r.evaluate(p, fs)
 		all = append(all, res...)
 		if err := r.writeStatus(ctx, p, st); err != nil {
 			r.Log.WithError(err).WithField("policy", p.key()).Warn("image trust: status update failed")
 		}
 	}
 	r.store(all)
+	if ferr != nil {
+		return fmt.Errorf("reading running images from the broker: %w", ferr)
+	}
 	return nil
 }
 
@@ -198,30 +252,39 @@ func (r *Runner) policies(ctx context.Context) ([]policyRef, error) {
 	return out, nil
 }
 
-func (r *Runner) selectsNamespace(p policyRef, ns string) bool {
+// selectsNamespace reports whether p applies to namespace ns, and whether
+// that cannot be told (a cluster policy with a selector, and a namespace
+// the cache does not know): such containers count as Unknown, never
+// silently skipped.
+func (r *Runner) selectsNamespace(p policyRef, ns string) (selected, unknown bool) {
 	if p.gvr == PolicyGVR {
-		return p.namespace == ns
+		return p.namespace == ns, false
 	}
 	if p.nsSel == nil {
-		return true
+		return true, false
 	}
 	sel, err := metav1.LabelSelectorAsSelector(p.nsSel)
 	if err != nil {
-		return false
+		return false, false
 	}
 	if sel.Empty() {
-		return true
+		return true, false
 	}
 	lbls := r.Namespaces(ns)
 	if lbls == nil {
-		return false // namespace not known to the cache: cannot judge
+		return true, true
 	}
-	return sel.Matches(labels.Set(lbls))
+	return sel.Matches(labels.Set(lbls)), false
 }
 
 // evaluate returns the new status for p and its per-container results.
-func (r *Runner) evaluate(p policyRef, cs []Container) (v1alpha1.ImageTrustPolicyStatus, []Result) {
-	st := v1alpha1.ImageTrustPolicyStatus{ObservedGeneration: p.gen}
+func (r *Runner) evaluate(p policyRef, fs feedState) (v1alpha1.ImageTrustPolicyStatus, []Result) {
+	cs := fs.containers
+	st := v1alpha1.ImageTrustPolicyStatus{ObservedGeneration: p.gen, Message: fs.message}
+	if !fs.at.IsZero() {
+		t := metav1.NewTime(fs.at.UTC().Truncate(time.Second))
+		st.Evaluation.LastEvaluated = &t
+	}
 	if p.decodeErr != "" {
 		st.Error = p.decodeErr
 		return st, nil
@@ -240,10 +303,17 @@ func (r *Runner) evaluate(p policyRef, cs []Container) (v1alpha1.ImageTrustPolic
 	var res []Result
 	ev := &st.Evaluation
 	for _, c := range cs {
-		if !r.selectsNamespace(p, c.Namespace) || !pol.Selects(c) {
+		selected, nsUnknown := r.selectsNamespace(p, c.Namespace)
+		if !selected || !pol.Selects(c) {
 			continue
 		}
 		verdict, reason := pol.Evaluate(c)
+		switch {
+		case fs.unknownReason != "":
+			verdict, reason = v1alpha1.ImageUnknown, fs.unknownReason
+		case nsUnknown:
+			verdict, reason = v1alpha1.ImageUnknown, ReasonNamespaceUnknown
+		}
 		ev.Containers++
 		switch verdict {
 		case v1alpha1.ImageTrusted:
@@ -280,15 +350,23 @@ func (r *Runner) evaluate(p policyRef, cs []Container) (v1alpha1.ImageTrustPolic
 // writeStatus patches status only when it changed (lastChanged aside), so
 // replicas and quiet passes write nothing.
 func (r *Runner) writeStatus(ctx context.Context, p policyRef, st v1alpha1.ImageTrustPolicyStatus) error {
+	// lastChanged moves only when the verdicts change.
 	old := p.status
 	oldEval, newEval := old.Evaluation, st.Evaluation
 	oldEval.LastChanged, newEval.LastChanged = nil, nil
-	if old.ObservedGeneration == st.ObservedGeneration && old.Error == st.Error && reflect.DeepEqual(oldEval, newEval) {
+	oldEval.LastEvaluated, newEval.LastEvaluated = nil, nil
+	same := old.ObservedGeneration == st.ObservedGeneration && old.Error == st.Error &&
+		old.Message == st.Message && reflect.DeepEqual(oldEval, newEval)
+	if same && sameTime(old.Evaluation.LastEvaluated, st.Evaluation.LastEvaluated) {
 		return nil
 	}
-	t := metav1.NewTime(r.clock().UTC().Truncate(time.Second))
-	st.Evaluation.LastChanged = &t
-	body, err := json.Marshal(map[string]any{"status": st})
+	if same && old.Evaluation.LastChanged != nil {
+		st.Evaluation.LastChanged = old.Evaluation.LastChanged
+	} else {
+		t := metav1.NewTime(r.clock().UTC().Truncate(time.Second))
+		st.Evaluation.LastChanged = &t
+	}
+	u, err := statusApplyObject(p, st)
 	if err != nil {
 		return err
 	}
@@ -297,15 +375,50 @@ func (r *Runner) writeStatus(ctx context.Context, p policyRef, st v1alpha1.Image
 	if p.namespace != "" {
 		ri = res.Namespace(p.namespace)
 	}
-	_, err = ri.Patch(ctx, p.name, types.MergePatchType, body, metav1.PatchOptions{}, "status")
+	// Server-side apply of the whole status: a field this manager no
+	// longer sends (an old error, findings that went away) is removed,
+	// which a merge patch of omitempty fields would leave behind.
+	_, err = ri.ApplyStatus(ctx, p.name, u, metav1.ApplyOptions{FieldManager: FieldManager, Force: true})
 	if apierrors.IsNotFound(err) {
 		return nil // deleted meanwhile
 	}
-	if err == nil && st.Evaluation.WouldDeny > 0 {
+	if err == nil && st.Evaluation.WouldDeny > 0 && !same {
 		r.Log.WithFields(logrus.Fields{"policy": p.key(), "wouldDeny": st.Evaluation.WouldDeny, "unknown": st.Evaluation.Unknown}).
 			Info("image trust: containers would be denied")
 	}
 	return err
+}
+
+// sameTime compares instants: a stored metav1.Time decodes in local time.
+func sameTime(a, b *metav1.Time) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+	return a.Time.Equal(b.Time)
+}
+
+func statusApplyObject(p policyRef, st v1alpha1.ImageTrustPolicyStatus) (*unstructured.Unstructured, error) {
+	raw, err := json.Marshal(st)
+	if err != nil {
+		return nil, err
+	}
+	var m map[string]any
+	if err := json.Unmarshal(raw, &m); err != nil {
+		return nil, err
+	}
+	kind := "ImageTrustPolicy"
+	meta := map[string]any{"name": p.name}
+	if p.gvr == ClusterGVR {
+		kind = "ClusterImageTrustPolicy"
+	} else {
+		meta["namespace"] = p.namespace
+	}
+	return &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": v1alpha1.SchemeGroupVersion.String(),
+		"kind":       kind,
+		"metadata":   meta,
+		"status":     m,
+	}}, nil
 }
 
 // --- Broker feed ---
@@ -319,6 +432,29 @@ type BrokerFeed struct {
 	// containers). Pages are small because the broker charges each row
 	// at its worst case against its read budget.
 	MaxPages int
+	// MaxPageBytes bounds one page (default maxFeedPageBytes).
+	MaxPageBytes int
+}
+
+// maxFeedPageBytes bounds one page: 200 rows at the broker's worst-case
+// row (one stored result, 512 KiB) is 100 MiB; more is refused, never
+// decoded truncated.
+const maxFeedPageBytes = 200 * 512 << 10
+
+// FeedError is a non-200 broker answer.
+type FeedError struct {
+	StatusCode int
+	Message    string
+}
+
+func (e *FeedError) Error() string {
+	return fmt.Sprintf("GET /attestations/running: %d %s", e.StatusCode, e.Message)
+}
+
+// IsAuthError: the broker rejected the token (401/403). Not transient.
+func IsAuthError(err error) bool {
+	var fe *FeedError
+	return errors.As(err, &fe) && (fe.StatusCode == http.StatusUnauthorized || fe.StatusCode == http.StatusForbidden)
 }
 
 // ErrTruncated: more running containers than MaxPages covers.
@@ -357,7 +493,11 @@ func (b *BrokerFeed) Running(ctx context.Context) ([]Container, error) {
 		if err != nil {
 			return nil, err
 		}
-		body, err := io.ReadAll(io.LimitReader(resp.Body, 64<<20))
+		limit := b.MaxPageBytes
+		if limit <= 0 {
+			limit = maxFeedPageBytes
+		}
+		body, err := io.ReadAll(io.LimitReader(resp.Body, int64(limit)+1))
 		_ = resp.Body.Close()
 		if err != nil {
 			return nil, err
@@ -367,7 +507,10 @@ func (b *BrokerFeed) Running(ctx context.Context) ([]Container, error) {
 			if len(msg) > 200 {
 				msg = msg[:200]
 			}
-			return nil, fmt.Errorf("GET /attestations/running: %d %s", resp.StatusCode, msg)
+			return nil, &FeedError{StatusCode: resp.StatusCode, Message: msg}
+		}
+		if len(body) > limit {
+			return nil, fmt.Errorf("GET /attestations/running: page larger than %d bytes; refusing a truncated read", limit)
 		}
 		var p runningPage
 		if err := json.Unmarshal(body, &p); err != nil {

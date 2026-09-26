@@ -60,6 +60,9 @@ const (
 	ReasonKeyNotVerified     = "key-not-verified"
 	ReasonAttestationMissing = "attestation-missing"
 	ReasonNotChecked         = "not-checked"
+	ReasonNamespaceUnknown   = "namespace-unknown"
+	ReasonBrokerUnavailable  = "broker-unavailable"
+	ReasonBrokerUnauthorized = "broker-unauthorized"
 )
 
 // Discovery verdicts (supplychain attest.Verdict*).

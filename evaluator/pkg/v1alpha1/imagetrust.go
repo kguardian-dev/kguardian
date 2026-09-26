@@ -78,6 +78,9 @@ type ImageTrustPolicyStatus struct {
 	Evaluation         ImageTrustEvaluation `json:"evaluation,omitempty"`
 	// Error is set when the spec cannot be evaluated (bad regexp or key).
 	Error string `json:"error,omitempty"`
+	// Message explains why containers are Unknown because the broker
+	// could not be read (with the last successful read), else empty.
+	Message string `json:"message,omitempty"`
 }
 
 // ImageTrustEvaluation summarises the running containers the policy
@@ -85,6 +88,9 @@ type ImageTrustPolicyStatus struct {
 type ImageTrustEvaluation struct {
 	// LastChanged is when these numbers last changed.
 	LastChanged *metav1.Time `json:"lastChanged,omitempty"`
+	// LastEvaluated is when the running containers were last read from
+	// the broker successfully; the verdicts describe that moment.
+	LastEvaluated *metav1.Time `json:"lastEvaluated,omitempty"`
 	// Containers evaluated, and how many were trusted, would be denied,
 	// or could not be judged (signatures not checked or not checkable:
 	// never counted as trusted).
@@ -109,8 +115,9 @@ type ImageTrustFinding struct {
 	// Verdict: WouldDeny or Unknown.
 	Verdict string `json:"verdict"`
 	// Reason: unsigned, invalid, untrusted-signer, key-not-verified,
-	// attestation-missing, not-checked, or the discovery reason for an
-	// unknown (registry_auth, rate_limited, ...).
+	// attestation-missing, not-checked, namespace-unknown,
+	// broker-unavailable, broker-unauthorized, or the discovery reason for
+	// an unknown (registry_auth, rate_limited, ...).
 	Reason string `json:"reason"`
 }
 
@@ -229,6 +236,10 @@ func (in ImageTrustPolicyStatus) deepCopy() ImageTrustPolicyStatus {
 	if in.Evaluation.LastChanged != nil {
 		t := *in.Evaluation.LastChanged
 		out.Evaluation.LastChanged = &t
+	}
+	if in.Evaluation.LastEvaluated != nil {
+		t := *in.Evaluation.LastEvaluated
+		out.Evaluation.LastEvaluated = &t
 	}
 	out.Evaluation.Findings = append([]ImageTrustFinding(nil), in.Evaluation.Findings...)
 	return out

@@ -101,7 +101,7 @@ func run() error {
 			Log:        log,
 			Interval:   itc.Interval,
 		}
-		srv.Handle("/image-trust", itr.Handler())
+		srv.Handle("/image-trust", itr.Handler(itc.BrokerToken))
 		go itr.Run(ctx)
 		log.WithFields(logrus.Fields{"interval": itc.Interval.String(), "broker": itc.BrokerURL}).Info("image trust policy evaluation enabled")
 	}
