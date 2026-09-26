@@ -1,0 +1,84 @@
+{
+  "body": {
+    "digest": "sha256:2f802f6162499e19393cf17fb615e5037cfafd5bd421ed7d36208d0c24ac56e7",
+    "items": [
+      {
+        "class": null,
+        "cvss": {},
+        "epss": null,
+        "epssPercentile": null,
+        "filePaths": [
+          "bin/prometheus"
+        ],
+        "fixable": true,
+        "fixedVersions": [
+          "v0.33.0"
+        ],
+        "id": "CVE-2099-0006",
+        "inUse": null,
+        "inUseDetail": {
+          "containers": 1,
+          "coverage": "file",
+          "observedSince": null,
+          "reason": "no_runtime_data",
+          "state": "unknown",
+          "windowHours": 24
+        },
+        "inUseState": "unknown",
+        "installedVersion": "v0.26.0",
+        "kev": null,
+        "kevDateAdded": null,
+        "lastModifiedAt": null,
+        "package": {
+          "name": "golang.org/x/net",
+          "purl": "pkg:golang/golang.org/x/net@v0.26.0",
+          "type": "gomod"
+        },
+        "primaryUrl": "https://avd.aquasec.com/nvd/cve-2099-0006",
+        "publishedAt": null,
+        "reportDigests": [
+          "sha256:e01dcbccb64f2d4d69fc6ad2bf19dd3a0e9e32bd1d84f8a2b1b7c6c4f3d0e1a2"
+        ],
+        "score": 7.5,
+        "severity": "HIGH",
+        "sources": [
+          "trivy-operator"
+        ],
+        "target": null,
+        "tier": "P1",
+        "tierFactors": [
+          "in_use:unknown",
+          "severity:high",
+          "exposed"
+        ],
+        "title": "golang.org/x/net: HTTP/2 CONTINUATION flood"
+      }
+    ],
+    "nextAfter": null,
+    "reports": [
+      {
+        "attestation": null,
+        "dbUpdatedAt": null,
+        "digestKind": "unknown",
+        "imageRef": "quay.io/prometheus/prometheus:v2.54.1",
+        "itemCount": 1,
+        "join": "workload_tag",
+        "osEosl": false,
+        "osFamily": "alpine",
+        "osName": "3.20.3",
+        "receivedAt": "2026-09-26T09:31:43.663650",
+        "reportDigest": "sha256:e01dcbccb64f2d4d69fc6ad2bf19dd3a0e9e32bd1d84f8a2b1b7c6c4f3d0e1a2",
+        "sbomFormat": null,
+        "sbomSources": [],
+        "sbomTrust": "scanned",
+        "scannedAt": "2026-09-25T03:31:41",
+        "scannerName": "Trivy",
+        "scannerVersion": "0.58.1",
+        "source": "trivy-operator"
+      }
+    ]
+  },
+  "provenance": "captured from broker eef83afdd (frontend/src/fixtures/vuln-captures/capture.py), no edits",
+  "request": "GET /images/sha256:2f802f6162499e19393cf17fb615e5037cfafd5bd421ed7d36208d0c24ac56e7/vulnerabilities?tier=P0,P1",
+  "status": 200
+}

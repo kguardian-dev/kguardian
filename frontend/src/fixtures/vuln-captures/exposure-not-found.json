@@ -1,5 +1,6 @@
 {
   "body": "No affected image in the inventory",
+  "provenance": "captured from broker eef83afdd (frontend/src/fixtures/vuln-captures/capture.py), no edits",
   "request": "GET /vulnerabilities/CVE-2099-9999/exposure",
   "status": 404
 }

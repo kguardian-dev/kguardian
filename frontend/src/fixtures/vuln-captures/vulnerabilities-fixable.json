@@ -1,17 +1,21 @@
 {
   "body": {
-    "computedAt": "2026-09-26T02:59:38.884460",
+    "computedAt": "2026-09-26T09:32:16.354023",
     "items": [
       {
+        "executedWorkloads": 0,
+        "exposedWorkloads": 1,
         "fixable": true,
         "id": "CVE-2099-0001",
         "images": 3,
         "inUse": null,
         "inUseState": "unknown",
         "kev": true,
+        "loadedWorkloads": 0,
         "maxEpss": 0.34,
         "maxScore": 9.8,
         "namespaces": 1,
+        "notObservedWorkloads": 0,
         "packages": [
           "openssl"
         ],
@@ -21,19 +25,25 @@
           "grype",
           "trivy-operator"
         ],
+        "tier": "P0",
+        "unknownWorkloads": 3,
         "weakestJoin": "platform_manifest",
         "workloads": 3
       },
       {
+        "executedWorkloads": 0,
+        "exposedWorkloads": 1,
         "fixable": true,
         "id": "CVE-2099-0002",
         "images": 1,
         "inUse": null,
         "inUseState": "unknown",
         "kev": false,
+        "loadedWorkloads": 0,
         "maxEpss": 0.004,
         "maxScore": 7.5,
         "namespaces": 1,
+        "notObservedWorkloads": 0,
         "packages": [
           "express"
         ],
@@ -43,19 +53,25 @@
           "grype",
           "trivy-operator"
         ],
+        "tier": "P1",
+        "unknownWorkloads": 1,
         "weakestJoin": "platform_manifest",
         "workloads": 1
       },
       {
+        "executedWorkloads": 0,
+        "exposedWorkloads": 2,
         "fixable": true,
         "id": "CVE-2099-0006",
         "images": 2,
         "inUse": null,
         "inUseState": "unknown",
         "kev": null,
+        "loadedWorkloads": 0,
         "maxEpss": null,
         "maxScore": 7.5,
         "namespaces": 1,
+        "notObservedWorkloads": 0,
         "packages": [
           "golang.org/x/net"
         ],
@@ -64,19 +80,25 @@
         "sources": [
           "trivy-operator"
         ],
+        "tier": "P1",
+        "unknownWorkloads": 2,
         "weakestJoin": "workload_tag",
         "workloads": 2
       },
       {
+        "executedWorkloads": 0,
+        "exposedWorkloads": 1,
         "fixable": true,
         "id": "CVE-2099-0007",
         "images": 1,
         "inUse": null,
         "inUseState": "unknown",
         "kev": false,
+        "loadedWorkloads": 0,
         "maxEpss": 0.012,
         "maxScore": 7.5,
         "namespaces": 1,
+        "notObservedWorkloads": 0,
         "packages": [
           "semver"
         ],
@@ -85,19 +107,25 @@
         "sources": [
           "grype"
         ],
+        "tier": "P1",
+        "unknownWorkloads": 1,
         "weakestJoin": "platform_manifest",
         "workloads": 1
       },
       {
+        "executedWorkloads": 0,
+        "exposedWorkloads": 1,
         "fixable": true,
         "id": "CVE-2099-0004",
         "images": 1,
         "inUse": null,
         "inUseState": "unknown",
         "kev": null,
+        "loadedWorkloads": 0,
         "maxEpss": null,
         "maxScore": 3.1,
         "namespaces": 1,
+        "notObservedWorkloads": 0,
         "packages": [
           "busybox"
         ],
@@ -106,13 +134,16 @@
         "sources": [
           "trivy-operator"
         ],
+        "tier": "P2",
+        "unknownWorkloads": 1,
         "weakestJoin": "platform_manifest",
         "workloads": 1
       }
     ],
     "nextAfter": null,
-    "staleSeconds": 1
+    "staleSeconds": 10
   },
+  "provenance": "captured from broker eef83afdd (frontend/src/fixtures/vuln-captures/capture.py), no edits",
   "request": "GET /vulnerabilities?fixable=true",
   "status": 200
 }

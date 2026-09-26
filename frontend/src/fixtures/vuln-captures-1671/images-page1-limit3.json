@@ -1,0 +1,42 @@
+{
+  "body": {
+    "items": [
+      {
+        "digest": "sha256:1eb73105a1fe5826de974a647f3d2e72905e16803a8ca2b9c891bf3545bc242c",
+        "digestKind": "repo",
+        "firstSeen": "2026-09-26T02:58:50.660437",
+        "lastSeen": "2026-09-26T02:58:50.660437",
+        "repository": "docker.io/grafana/grafana",
+        "runningContainers": 1,
+        "tags": [
+          "11.2.0"
+        ]
+      },
+      {
+        "digest": "sha256:2f802f6162499e19393cf17fb615e5037cfafd5bd421ed7d36208d0c24ac56e7",
+        "digestKind": "repo",
+        "firstSeen": "2026-09-26T02:58:50.678",
+        "lastSeen": "2026-09-26T02:58:50.678",
+        "repository": "quay.io/prometheus/prometheus",
+        "runningContainers": 1,
+        "tags": [
+          "v2.54.1"
+        ]
+      },
+      {
+        "digest": "sha256:4832e654a05c1e66ce1982c0300effaca0c7b1a90be575e0f52bd465a12dc18a",
+        "digestKind": "repo",
+        "firstSeen": "2026-09-26T02:58:50.720589",
+        "lastSeen": "2026-09-26T02:58:50.720589",
+        "repository": "ghcr.io/fluxcd/source-controller",
+        "runningContainers": 1,
+        "tags": [
+          "v1.6.2"
+        ]
+      }
+    ],
+    "nextAfter": "sha256:4832e654a05c1e66ce1982c0300effaca0c7b1a90be575e0f52bd465a12dc18a"
+  },
+  "request": "GET /images?limit=3",
+  "status": 200
+}

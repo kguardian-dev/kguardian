@@ -1,0 +1,5 @@
+{
+  "body": "digest must be sha256:<64 hex> or sha512:<128 hex>",
+  "request": "GET /images/latest/vulnerabilities",
+  "status": 400
+}

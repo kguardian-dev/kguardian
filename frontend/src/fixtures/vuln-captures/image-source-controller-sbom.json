@@ -35,12 +35,12 @@
       "osEosl": false,
       "osFamily": null,
       "osName": null,
-      "receivedAt": "2026-09-26T02:58:50.915590",
+      "receivedAt": "2026-09-26T09:31:43.725393",
       "reportDigest": "sha256:4832e654a05c1e66ce1982c0300effaca0c7b1a90be575e0f52bd465a12dc18a",
       "sbomFormat": "CycloneDX",
       "sbomSources": [],
       "sbomTrust": "verified",
-      "scannedAt": "2026-09-25T20:58:50",
+      "scannedAt": "2026-09-26T01:31:41",
       "scannerName": "registry",
       "scannerVersion": null,
       "source": "registry"
@@ -62,18 +62,19 @@
         "osEosl": false,
         "osFamily": null,
         "osName": null,
-        "receivedAt": "2026-09-26T02:58:50.915590",
+        "receivedAt": "2026-09-26T09:31:43.725393",
         "reportDigest": "sha256:4832e654a05c1e66ce1982c0300effaca0c7b1a90be575e0f52bd465a12dc18a",
         "sbomFormat": "CycloneDX",
         "sbomSources": [],
         "sbomTrust": "verified",
-        "scannedAt": "2026-09-25T20:58:50",
+        "scannedAt": "2026-09-26T01:31:41",
         "scannerName": "registry",
         "scannerVersion": null,
         "source": "registry"
       }
     ]
   },
+  "provenance": "captured from broker eef83afdd (frontend/src/fixtures/vuln-captures/capture.py), no edits",
   "request": "GET /images/sha256:4832e654a05c1e66ce1982c0300effaca0c7b1a90be575e0f52bd465a12dc18a/sbom",
   "status": 200
 }

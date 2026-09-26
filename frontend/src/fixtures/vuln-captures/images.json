@@ -4,8 +4,8 @@
       {
         "digest": "sha256:1eb73105a1fe5826de974a647f3d2e72905e16803a8ca2b9c891bf3545bc242c",
         "digestKind": "repo",
-        "firstSeen": "2026-09-26T02:58:50.660437",
-        "lastSeen": "2026-09-26T02:58:50.660437",
+        "firstSeen": "2026-09-26T09:31:43.251544",
+        "lastSeen": "2026-09-26T09:31:43.251544",
         "repository": "docker.io/grafana/grafana",
         "runningContainers": 1,
         "tags": [
@@ -15,8 +15,8 @@
       {
         "digest": "sha256:2f802f6162499e19393cf17fb615e5037cfafd5bd421ed7d36208d0c24ac56e7",
         "digestKind": "repo",
-        "firstSeen": "2026-09-26T02:58:50.678",
-        "lastSeen": "2026-09-26T02:58:50.678",
+        "firstSeen": "2026-09-26T09:31:43.287927",
+        "lastSeen": "2026-09-26T09:31:43.287927",
         "repository": "quay.io/prometheus/prometheus",
         "runningContainers": 1,
         "tags": [
@@ -26,8 +26,8 @@
       {
         "digest": "sha256:4832e654a05c1e66ce1982c0300effaca0c7b1a90be575e0f52bd465a12dc18a",
         "digestKind": "repo",
-        "firstSeen": "2026-09-26T02:58:50.720589",
-        "lastSeen": "2026-09-26T02:58:50.720589",
+        "firstSeen": "2026-09-26T09:31:43.339875",
+        "lastSeen": "2026-09-26T09:31:43.339875",
         "repository": "ghcr.io/fluxcd/source-controller",
         "runningContainers": 1,
         "tags": [
@@ -37,8 +37,8 @@
       {
         "digest": "sha256:7533b1c0c510e06c0385bf2c3d0424c3e7942093c40d9051bf853e610d656dfa",
         "digestKind": "repo",
-        "firstSeen": "2026-09-26T02:58:50.647044",
-        "lastSeen": "2026-09-26T02:58:50.647044",
+        "firstSeen": "2026-09-26T09:31:43.218696",
+        "lastSeen": "2026-09-26T09:31:43.218696",
         "repository": "ghcr.io/example/reports",
         "runningContainers": 0,
         "tags": [
@@ -46,10 +46,10 @@
         ]
       },
       {
-        "digest": "sha256:d6dcbecd496c66b8501077ef92d0b3eaca6d032976e6d1b173cf1bcae0a2cce6",
+        "digest": "sha256:d6dcbecd496c2f5aa1b3e8d8f2c0b0a4e1c9f7d6b5a4c3e2f1d0c9b8a7f6e5d4",
         "digestKind": "repo",
-        "firstSeen": "2026-09-26T02:58:50.736102",
-        "lastSeen": "2026-09-26T02:58:50.736102",
+        "firstSeen": "2026-09-26T09:31:43.360941",
+        "lastSeen": "2026-09-26T09:31:43.360941",
         "repository": "registry.k8s.io/ingress-nginx/controller",
         "runningContainers": 1,
         "tags": [
@@ -59,8 +59,8 @@
       {
         "digest": "sha256:f48949f11f15c0e2b8fa2132d1ab201cf50e80dea612783e5c3ac78c6b378235",
         "digestKind": "repo",
-        "firstSeen": "2026-09-26T02:58:50.593472",
-        "lastSeen": "2026-09-26T02:58:50.593472",
+        "firstSeen": "2026-09-26T09:31:42.685537",
+        "lastSeen": "2026-09-26T09:31:42.685537",
         "repository": "ghcr.io/example/checkout",
         "runningContainers": 1,
         "tags": [
@@ -70,8 +70,8 @@
       {
         "digest": "sha256:f50806e18227349c4b827b7d70cbf67a9ca3087226a89bc3aa6826b13fd1d7fa",
         "digestKind": "repo",
-        "firstSeen": "2026-09-26T02:58:50.698063",
-        "lastSeen": "2026-09-26T02:58:50.698063",
+        "firstSeen": "2026-09-26T09:31:43.311751",
+        "lastSeen": "2026-09-26T09:31:43.311751",
         "repository": "quay.io/prometheus/node-exporter",
         "runningContainers": 1,
         "tags": [
@@ -81,8 +81,8 @@
       {
         "digest": "sha256:f57d4908af0027fb38feb4e8d5a8d5e2c1511ccf52c596837d2314611f1640fe",
         "digestKind": "repo",
-        "firstSeen": "2026-09-26T02:58:50.631900",
-        "lastSeen": "2026-09-26T02:58:50.631900",
+        "firstSeen": "2026-09-26T09:31:43.186364",
+        "lastSeen": "2026-09-26T09:31:43.186364",
         "repository": "ghcr.io/example/ledger",
         "runningContainers": 1,
         "tags": [
@@ -92,6 +92,7 @@
     ],
     "nextAfter": null
   },
+  "provenance": "captured from broker eef83afdd (frontend/src/fixtures/vuln-captures/capture.py), no edits",
   "request": "GET /images",
   "status": 200
 }

@@ -1,10 +1,11 @@
 {
   "body": {
-    "computedAt": "2026-09-26T02:59:38.884460",
+    "computedAt": "2026-09-26T09:32:16.354023",
     "items": [],
     "nextAfter": null,
-    "staleSeconds": 1
+    "staleSeconds": 10
   },
+  "provenance": "captured from broker eef83afdd (frontend/src/fixtures/vuln-captures/capture.py), no edits",
   "request": "GET /vulnerabilities?namespace=flux-system",
   "status": 200
 }

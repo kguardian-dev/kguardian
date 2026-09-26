@@ -89,12 +89,12 @@
       "osEosl": false,
       "osFamily": null,
       "osName": null,
-      "receivedAt": "2026-09-26T02:58:50.890584",
+      "receivedAt": "2026-09-26T09:31:43.687573",
       "reportDigest": "sha256:17ebfb68fefc63fba2251c8d2ff2d194fa031f8d2b59e63e710a23768136d4ca",
       "sbomFormat": "CycloneDX",
       "sbomSources": [],
-      "sbomTrust": null,
-      "scannedAt": "2026-09-25T20:58:50",
+      "sbomTrust": "scanned",
+      "scannedAt": "2026-09-26T03:31:41",
       "scannerName": "Trivy",
       "scannerVersion": "0.58.1",
       "source": "trivy-operator"
@@ -110,18 +110,19 @@
         "osEosl": false,
         "osFamily": null,
         "osName": null,
-        "receivedAt": "2026-09-26T02:58:50.890584",
+        "receivedAt": "2026-09-26T09:31:43.687573",
         "reportDigest": "sha256:17ebfb68fefc63fba2251c8d2ff2d194fa031f8d2b59e63e710a23768136d4ca",
         "sbomFormat": "CycloneDX",
         "sbomSources": [],
-        "sbomTrust": null,
-        "scannedAt": "2026-09-25T20:58:50",
+        "sbomTrust": "scanned",
+        "scannedAt": "2026-09-26T03:31:41",
         "scannerName": "Trivy",
         "scannerVersion": "0.58.1",
         "source": "trivy-operator"
       }
     ]
   },
+  "provenance": "captured from broker eef83afdd (frontend/src/fixtures/vuln-captures/capture.py), no edits",
   "request": "GET /images/sha256:f48949f11f15c0e2b8fa2132d1ab201cf50e80dea612783e5c3ac78c6b378235/sbom",
   "status": 200
 }
