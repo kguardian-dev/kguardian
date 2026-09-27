@@ -107,7 +107,8 @@ pub const REASONS: [&str; 19] = [
 pub const NO_SIGNER_IDENTITY: &str = "no_signer_identity";
 
 /// A verified signer must be named: a keyless issuer AND SAN, or a key
-/// fingerprint. With no `signer_kind`, either form names one.
+/// fingerprint on a signer whose `signer_kind` is `key` (the evaluator's
+/// rule: without the kind, only issuer + SAN count).
 fn names_a_signer(
     kind: Option<&str>,
     issuer: Option<&str>,
@@ -115,11 +116,9 @@ fn names_a_signer(
     key_fingerprint: Option<&str>,
 ) -> bool {
     let set = |v: Option<&str>| v.is_some_and(|x| !x.trim().is_empty());
-    let keyless = set(issuer) && set(san);
     match kind {
         Some("key") => set(key_fingerprint),
-        Some(_) => keyless,
-        None => keyless || set(key_fingerprint),
+        _ => set(issuer) && set(san),
     }
 }
 
